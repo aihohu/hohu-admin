@@ -82,3 +82,16 @@ addopts = "-v -s --strict-markers"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+tag_format = "$version"
+version_scheme = "pep440"
+version_provider = "pep621"
+update_changelog_on_bump = true
+
+# 启用 "0.x" 版本行为：即使有 feat 提交，也不自动触发主版本（MAJOR）升级。
+# 在项目处于初始开发阶段（v0.y.z）时，通常不希望 feat 导致 v1.0.0 发布，
+# 因此设置 major_version_zero = true 可让 feat 仅提升 MINOR 版本（如 0.2.0 → 0.3.0）。
+# 符合语义化版本规范（SemVer）对 0.x 阶段的建议：API 尚不稳定，不承诺兼容性。
+major_version_zero = true
