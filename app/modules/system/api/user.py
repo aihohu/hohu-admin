@@ -29,7 +29,7 @@ async def get_user_list(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ):
-    # 1. 构建查询条件
+    # 构建查询条件
     filters = []
     if query.user_name:
         filters.append(User.user_name.contains(query.user_name))
@@ -44,11 +44,11 @@ async def get_user_list(
     if query.status:
         filters.append(User.status == query.status)
 
-    # 2. 查询总数
+    # 查询总数
     count_stmt = select(func.count()).select_from(User).where(and_(*filters))
     total = (await db.execute(count_stmt)).scalar() or 0
 
-    # 3. 分页查询数据
+    # 分页查询数据
     # 使用 selectinload 预加载角色信息
     stmt = (
         select(User)
@@ -61,7 +61,7 @@ async def get_user_list(
     result = await db.execute(stmt)
     users = result.scalars().all()
 
-    # 4. 转换为 Schema 对象 (处理角色简化)
+    # 转换为 Schema 对象 (处理角色简化)
     user_list = []
     for u in users:
         item = UserItemOut.model_validate(u)

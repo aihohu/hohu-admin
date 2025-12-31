@@ -1,5 +1,3 @@
-from datetime import timedelta
-
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
@@ -12,6 +10,7 @@ from app.core.config import settings
 from app.core.security import create_access_token, verify_password
 from app.db.session import get_db
 from app.modules.auth.schemas.auth import LoginCredentials, RouteMeta, UserRoute
+from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 
@@ -32,10 +31,7 @@ class AuthService:
             raise HTTPException(status_code=400, detail="不支持的登录方式")
 
         # 统一签发 Token
-        access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-        token = create_access_token(
-            subject=str(user.user_id), expires_delta=access_token_expires
-        )
+        token = create_access_token(subject=str(user.user_id))
         result = {
             "token": token,
             "refreshToken": "...",  # 如果需要可在此扩展
@@ -111,7 +107,7 @@ async def get_current_user(
     return user
 
 
-def build_menu_tree(menus: list, parent_id: int = None) -> list[UserRoute]:
+def build_menu_tree(menus: list[Menu], parent_id: int = None) -> list[UserRoute]:
     """
     递归构建符合 SoybeanAdmin 格式的路由树
     """
@@ -122,20 +118,24 @@ def build_menu_tree(menus: list, parent_id: int = None) -> list[UserRoute]:
 
     for menu in current_level_menus:
         route = UserRoute(
-            name=menu.name,
-            path=menu.path,
-            component=menu.component or "basic",  # 如果是目录，通常设为 basic 或 layout
+            name=menu.route_name,
+            path=menu.route_path,
+            component=menu.component or "basic",
             meta=RouteMeta(
-                title=menu.title,
+                title=menu.menu_name,
+                i18n_key=menu.i18n_key,
+                keep_alive=menu.keep_alive,
+                constant=menu.constant,
                 icon=menu.icon,
                 order=menu.order or 0,
-                requiresAuth=True,
-                hideInMenu=not menu.is_visible,
-                keepAlive=menu.is_keep_alive,
+                href=menu.href,
+                hide_in_menu=menu.hide_in_menu,
+                active_menu=menu.active_menu,
+                multi_tab=menu.multi_tab,
             ),
         )
         # 递归查找子节点
-        children = build_menu_tree(menus, menu.id)
+        children = build_menu_tree(menus, menu.menu_id)
         if children:
             route.children = children
 

@@ -22,21 +22,27 @@ class LoginCredentials(BaseModel):
 
 class RouteMeta(BaseModel):
     title: str
+    i18n_key: str | None = Field(None, alias="i18nKey")
+    keep_alive: bool | None = None
+    constant: bool | None = None
     icon: str | None = None
-    localIcon: str | None = None
     order: int = 0
-    requiresAuth: bool = True
-    keepAlive: bool = False
-    hideInMenu: bool = False
-    activeMenu: str | None = None
-    multiTab: bool = False
+    href: str | None = None
+    hide_in_menu: bool | None = None
+    active_menu: str | None = None
+    multi_tab: bool | None = None
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class UserRoute(BaseModel):
     name: str
     path: str
     component: str
-    props: bool | None = None
+    # props: bool | None = None
     meta: RouteMeta
     children: list["UserRoute"] | None = None
 

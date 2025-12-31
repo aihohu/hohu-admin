@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user
 from app.core.base_response import PageResult, ResponseModel
 from app.db.session import get_db
+from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.schemas.role import (
@@ -83,6 +84,21 @@ async def get_all_roles(
     return ResponseModel.success(data=roles)
 
 
+@router.get(
+    "/menus/{role_id}",
+    response_model=ResponseModel[list[str]],
+    summary="获取角色菜单列表",
+)
+async def get_menus(
+    role_id: int,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    role = await db.get(Role, role_id)
+    menu_ids = [str(menu.menu_id) for menu in role.menus] if role else []
+    return ResponseModel.success(data=menu_ids)
+
+
 @router.post("/add", summary="创建新角色")
 async def add_role(
     role_in: RoleCreate,
@@ -120,6 +136,29 @@ async def update_role(
     update_data = role_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(role, field, value)
+
+    role.update_by = current_user.user_name
+    await db.commit()
+    return ResponseModel.success(msg="角色更新成功")
+
+
+@router.put("/menu/{role_id}", summary="编辑角色菜单权限信息")
+async def update_role_menu(
+    role_id: int,
+    ids: list[int] = Body(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    根据 ID 更新角色 菜单权限，并自动更新修改人
+    """
+    role = await db.get(Role, role_id)
+    if not role:
+        raise HTTPException(status_code=404, detail="角色不存在")
+
+    if ids:
+        menu_result = await db.execute(select(Menu).where(Menu.menu_id.in_(ids)))
+        role.menus = menu_result.scalars().all()
 
     role.update_by = current_user.user_name
     await db.commit()
