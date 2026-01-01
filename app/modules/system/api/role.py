@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
 from app.core.base_response import PageResult, ResponseModel
+from app.db.base import role_menus
 from app.db.session import get_db
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
@@ -94,8 +95,25 @@ async def get_menus(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ):
-    role = await db.get(Role, role_id)
-    menu_ids = [str(menu.menu_id) for menu in role.menus] if role else []
+    # 子查询：找出该角色拥有的菜单中，作为 parent_id 出现过的 ID
+    subquery = (
+        select(Menu.parent_id)
+        .join(role_menus, Menu.menu_id == role_menus.c.menu_id)
+        .where(role_menus.c.role_id == role_id)
+        .scalar_subquery()  # 转换为标量子查询
+    )
+
+    # 主查询
+    stmt = (
+        select(Menu.menu_id)
+        .outerjoin(role_menus, Menu.menu_id == role_menus.c.menu_id)
+        .where(and_(role_menus.c.role_id == role_id, Menu.menu_id.not_in(subquery)))
+        .order_by(Menu.parent_id, Menu.order)
+    )
+
+    result = await db.execute(stmt)
+    menu_ids = [str(menu_id) for menu_id in result.scalars().all()]
+
     return ResponseModel.success(data=menu_ids)
 
 

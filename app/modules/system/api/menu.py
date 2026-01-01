@@ -49,7 +49,7 @@ async def get_menu_tree(db: AsyncSession = Depends(get_db)):
     summary="获取菜单树形列表(前端option结构)",
 )
 async def get_menu_tree_option(db: AsyncSession = Depends(get_db)):
-    stmt = select(Menu).order_by(Menu.order.asc())
+    stmt = select(Menu).where(Menu.status == "1").order_by(Menu.order.asc())
     result = await db.execute(stmt)
     menus = result.scalars().all()
 
