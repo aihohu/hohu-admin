@@ -65,7 +65,7 @@ async def get_user_list(
     user_list = []
     for u in users:
         item = UserItemOut.model_validate(u)
-        item.roles = [r.role_name for r in u.roles]
+        item.roles = [r.role_code for r in u.roles]
         user_list.append(item)
 
     # 5. 返回分页包装结果
