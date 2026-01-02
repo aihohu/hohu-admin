@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.params import Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,6 +9,7 @@ from app.core.security import get_password_hash
 from app.db.session import get_db
 from app.modules.auth.schemas.auth import LoginCredentials
 from app.modules.auth.service import auth_service, build_menu_tree, get_current_user
+from app.modules.system.models.menu import Menu
 from app.modules.system.models.user import User
 from app.modules.system.schemas.user import UserCreate, UserOut
 
@@ -116,3 +118,14 @@ async def get_constant_routes():
     - **注意**: 这些路由是系统固定的，如需动态路由请访问其他接口
     """
     return ResponseModel.success(data=CONSTANT_ROUTES)
+
+
+@router.get("/isRouteExist", summary="检查路由名称是否存在")
+async def is_route_exist(
+    route_name: str = Query(..., description="前端路由名称"),
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = select(Menu).where(Menu.route_name == route_name)
+    result = await db.execute(stmt)
+    exists = result.scalars().first() is not None
+    return ResponseModel.success(data=exists)

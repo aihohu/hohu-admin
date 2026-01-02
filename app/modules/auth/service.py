@@ -109,7 +109,7 @@ async def get_current_user(
 
 def build_menu_tree(menus: list[Menu], parent_id: int = None) -> list[UserRoute]:
     """
-    递归构建符合 SoybeanAdmin 格式的路由树
+    递归构建路由树
     """
     tree = []
     # 过滤出当前层级的子菜单，并按 order 排序
