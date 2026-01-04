@@ -1,10 +1,10 @@
 from snowflake import SnowflakeGenerator
 
-# 在实际生产中，worker_id 可以从环境变量或容器的主机名哈希中获取
-# 这里默认设为 1
+# In actual production, worker_id can be obtained from environment variables or the container's hostname hash.
+# Here, it's set to 1 by default.
 generator = SnowflakeGenerator(instance=1)
 
 
 def next_id() -> int:
-    """生成下一个雪花 ID"""
+    """Generate the next snowflake ID"""
     return next(generator)
