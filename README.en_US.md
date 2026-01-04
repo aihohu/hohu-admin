@@ -5,8 +5,8 @@
 </div>
 
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
-[![github stars](https://img.shields.io/github/stars/aihohu/pancake-admin)](https://github.com/aihohu/pancake-admin)
-[![github forks](https://img.shields.io/github/forks/aihohu/pancake-admin)](https://github.com/aihohu/pancake-admin)
+[![github stars](https://img.shields.io/github/stars/aihohu/hohu-admin)](https://github.com/aihohu/hohu-admin)
+[![github forks](https://img.shields.io/github/forks/aihohu/hohu-admin)](https://github.com/aihohu/hohu-admin)
 ---
 
 **Pancake** is a modern, high-performance, modular backend admin template built with **Python** and **FastAPI**. It uses **SQLAlchemy 2.0 (async)** as its core ORM and is designed specifically for modern frontend-backend decoupled architectures. Out of the box, it provides a complete production-grade backend foundation—including user authentication, role-based access control (RBAC), distributed ID generation, database migrations, logging, monitoring, and integrated API documentation.
@@ -36,7 +36,7 @@ In an era where AI applications are rapidly going to market, **Pancake** empower
 ## 📁 Project Structure
 
 ```text
-pancake-admin/
+hohu-admin/
 ├── app/
 │   ├── core/              # Core config (Security, JWT, Redis, Settings)
 │   ├── db/                # DB connection & base model

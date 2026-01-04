@@ -29,12 +29,23 @@
 
 ## 🛠️ 技术栈
 
-* **框架**: FastAPI (Python 3.12+)
-* **数据库**: PostgreSQL 16+
-* **ORM**: SQLAlchemy 2.0 (Asyncio)
-* **缓存**: Redis
-* **迁移**: Alembic
-* **安全**: PyJWT, Passlib (Bcrypt)
+- 后端
+  - FastAPI
+  - SQLAlchemy 2.0
+  - PostgreSQL
+  - Redis
+  - Alembic
+
+- 前端
+  - Vue3
+  - Vite
+  - Naive UI
+  - TypeScript
+  - UnoCSS
+
+- 移动端
+  - Vue3
+  - UniAPP
 
 ## 📁 目录结构
 

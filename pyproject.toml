@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "pancake-admin"
+name = "hohu-admin"
 version = "0.1.0"
 description = "A front-end and back-end separated permission management system based on FastAPI, JWT, Vue 3, and Naive UI."
 readme = "README.md"
@@ -19,6 +19,7 @@ dependencies = [
     "bcrypt>=5.0.0",
     "fastapi[standard]>=0.127.1",
     "httpx>=0.28.1",
+    "openai>=2.14.0",
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "python-jose[cryptography]>=3.5.0",
