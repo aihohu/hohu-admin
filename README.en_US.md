@@ -172,14 +172,6 @@ Because Snowflake IDs are used, all primary keys (e.g., `user_id`) are **automat
 
 ---
 
-Hello! I'm your **Coding Assistant**.
-
-This is a great idea! Documenting these “gotchas” and conventions in your `README.md` or `docs/conventions.md` is crucial for team collaboration.
-
-Below is a ready-to-use guide specifically about **Pydantic field aliasing and camelCase conversion**. Feel free to copy it directly into your project.
-
----
-
 ## 📝 Development Conventions
 
 ### Field Naming & Frontend-Backend Integration
