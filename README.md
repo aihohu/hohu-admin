@@ -76,11 +76,41 @@ hohu-admin/
 
 ## 🚀 快速开始
 
-### 1. 环境准备
+
+### 使用HoHu CLI (推荐)
+**[HoHu CLI](https://github.com/aihohu/hohu-cli)** 是为 `hohu-admin` 生态量身打造的现代化命令行工具。它集成了项目脚手架生成、自动化环境初始化和多语言切换等功能，旨在提升HoHu Admin开发者的生产力。
+
+1. 安装CLI 
+	使用 `uv` (推荐) 或 `pip` 进行全局安装：
+	```bash
+	# 使用 uv
+	uv tool install hohu
+	
+	# 或使用 pip
+	pip install hohu
+	```
+2. 创建新项目
+	```bash
+	hohu admin create my-project
+	```
+3. 初始化环境
+	```bash
+	hohu admin init
+	```
+4. 运行项目
+	```
+	hohu admin dev
+	```
+
+
+
+### 手动配置项目
+
+#### 1. 环境准备
 
 确保已安装 uv, Python 3.10+, PostgreSQL, Redis。
 
-### 2. 安装依赖
+#### 2. 安装依赖
 
 安装所有依赖项：
 
@@ -94,7 +124,7 @@ uv sync
 source .venv/bin/activate
 ```
 
-### 3. 配置环境变量
+#### 3. 配置环境变量
 
 拷贝 `.env.example` 并更名为 `.env`，配置你的数据库和 Redis 连接：
 
@@ -104,7 +134,7 @@ REDIS_URL=redis://localhost:6379/0
 SECRET_KEY=your-super-secret-key
 ```
 
-### 4. 数据库迁移与初始化
+#### 4. 数据库迁移与初始化
 
 ```bash
 # 执行迁移
@@ -114,7 +144,7 @@ alembic upgrade head
 python scripts/seed_data.py
 ```
 
-### 5. 启动服务
+#### 5. 启动服务
 
 ```bash
 fastapi dev app/main.py

@@ -11,6 +11,7 @@ alembic/versions/*
 .env
 .env.prod
 .DS_Store
+DEV_README.md
 
 __pycache__/
 *.py[oc]
