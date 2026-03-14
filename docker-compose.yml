@@ -1,0 +1,11 @@
+services:
+  admin:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://user:password@db:5432/myapp
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
