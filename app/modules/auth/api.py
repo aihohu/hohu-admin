@@ -35,7 +35,7 @@ async def register(user_in: UserCreate, db: AsyncSession = Depends(get_db)):
     )
 
     db.add(new_user)
-    await db.commit()
+    await db.flush()  # 刷新以获取自增ID
     await db.refresh(new_user)
     return new_user
 
