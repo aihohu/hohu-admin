@@ -1,10 +1,16 @@
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends
 from sqlalchemy import and_, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import STATUS_ENABLED, SUPER_ADMIN_ROLE_CODE
 from app.core.auth import get_current_user
 from app.core.base_response import PageResult, ResponseModel
+from app.core.exceptions import (
+    CannotDeleteAdminException,
+    DuplicateRoleException,
+    InvalidParameterException,
+    RoleNotFoundException,
+)
 from app.db.base import role_menus
 from app.db.session import get_db
 from app.modules.system.models.menu import Menu
@@ -123,7 +129,7 @@ async def add_role(
     # 检查编码唯一性
     check = await db.execute(select(Role).where(Role.role_code == role_in.role_code))
     if check.scalars().first():
-        raise HTTPException(status_code=400, detail="角色编码已存在")
+        raise DuplicateRoleException(role_in.role_code)
 
     new_role = Role(**role_in.model_dump(), create_by=current_user.user_name)
     db.add(new_role)
@@ -143,7 +149,7 @@ async def update_role(
     """
     role = await db.get(Role, role_id)
     if not role:
-        raise HTTPException(status_code=404, detail="角色不存在")
+        raise RoleNotFoundException()
 
     update_data = role_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
@@ -166,7 +172,7 @@ async def update_role_menu(
     """
     role = await db.get(Role, role_id)
     if not role:
-        raise HTTPException(status_code=404, detail="角色不存在")
+        raise RoleNotFoundException()
 
     if ids:
         menu_result = await db.execute(select(Menu).where(Menu.menu_id.in_(ids)))
@@ -184,7 +190,7 @@ async def delete_role(role_id: int, db: AsyncSession = Depends(get_db)):
     """
     role = await db.get(Role, role_id)
     if not role:
-        raise HTTPException(status_code=404, detail="角色不存在")
+        raise RoleNotFoundException()
 
     await db.delete(role)
     await db.commit()
@@ -197,15 +203,16 @@ async def batch_delete_roles(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ):
+    """批量删除角色"""
+    if not ids:
+        raise InvalidParameterException("未选择要删除的角色")
     # 过滤掉 超级管理员 权限，防止误删
     check_stmt = select(Role.role_id).where(
         and_(Role.role_id.in_(ids), Role.role_code == SUPER_ADMIN_ROLE_CODE)
     )
     admin_result = await db.execute(check_stmt)
     if admin_result.scalars().first():
-        raise HTTPException(
-            status_code=400, detail="所选列表中包含系统管理员角色，禁止批量删除"
-        )
+        raise CannotDeleteAdminException("系统管理员角色")
 
     stmt = delete(Role).where(Role.role_id.in_(ids))
     result = await db.execute(stmt)
@@ -221,5 +228,5 @@ async def get_role_detail(role_id: int, db: AsyncSession = Depends(get_db)):
     """
     role = await db.get(Role, role_id)
     if not role:
-        raise HTTPException(status_code=404, detail="角色不存在")
+        raise RoleNotFoundException()
     return ResponseModel.success(data=role)

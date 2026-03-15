@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from fastapi.params import Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.constants import MENU_TYPE_DIRECTORY, MENU_TYPE_MENU, STATUS_ENABLED
 from app.constants.static_routes import CONSTANT_ROUTES
 from app.core.base_response import ResponseModel
+from app.core.exceptions import DuplicateUserException
 from app.core.security import get_password_hash
 from app.db.session import get_db
 from app.modules.auth.schemas.auth import LoginCredentials
@@ -25,7 +26,7 @@ async def register(user_in: UserCreate, db: AsyncSession = Depends(get_db)):
     # 检查用户名是否已存在
     result = await db.execute(select(User).where(User.user_name == user_in.user_name))
     if result.scalars().first():
-        raise HTTPException(status_code=400, detail="该用户名已被注册")
+        raise DuplicateUserException(user_in.user_name)
 
     # 创建用户实例
     new_user = User(

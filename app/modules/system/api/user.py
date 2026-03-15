@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends
 from sqlalchemy import and_, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -6,6 +6,13 @@ from sqlalchemy.orm import selectinload
 from app.constants import ADMIN_USERNAME
 from app.core.auth import get_current_user
 from app.core.base_response import PageResult, ResponseModel
+from app.core.exceptions import (
+    CannotDeleteAdminException,
+    CannotDeleteSelfException,
+    DuplicateUserException,
+    InvalidParameterException,
+    UserNotFoundException,
+)
 from app.core.security import get_password_hash
 from app.db.session import get_db
 from app.modules.system.models.role import Role
@@ -75,7 +82,7 @@ async def add_user(user_in: UserCreate, db: AsyncSession = Depends(get_db)):
     # 检查唯一性
     result = await db.execute(select(User).where(User.user_name == user_in.user_name))
     if result.scalars().first():
-        raise HTTPException(status_code=400, detail="用户名已存在")
+        raise DuplicateUserException(user_in.user_name)
 
     # 准备用户数据
     obj_data = user_in.model_dump(exclude={"roles", "password"})
@@ -103,7 +110,7 @@ async def update_user(
     result = await db.execute(stmt)
     user = result.scalars().first()
     if not user:
-        raise HTTPException(status_code=404, detail="用户不存在")
+        raise UserNotFoundException()
 
     # 更新基础字段, 排出roles 和 password
     update_data = user_in.model_dump(exclude={"roles", "password"}, exclude_unset=True)
@@ -125,9 +132,9 @@ async def update_user(
 async def delete_user(user_id: int, db: AsyncSession = Depends(get_db)):
     user = await db.get(User, user_id)
     if not user:
-        raise HTTPException(status_code=404, detail="用户不存在")
+        raise UserNotFoundException()
     if user.user_name == ADMIN_USERNAME:
-        raise HTTPException(status_code=400, detail="初始管理员不能删除")
+        raise CannotDeleteAdminException()
 
     await db.delete(user)
     await db.commit()
@@ -144,7 +151,7 @@ async def batch_delete_users(
     批量删除用户，自动跳过超级管理员
     """
     if not ids:
-        return ResponseModel.error(message="未选择要删除的用户")
+        raise InvalidParameterException("未选择要删除的用户")
 
     # 过滤掉 admin 账号，防止误删
     # 先查询这些 ID 中是否包含 admin
@@ -153,13 +160,11 @@ async def batch_delete_users(
     )
     admin_result = await db.execute(check_stmt)
     if admin_result.scalars().first():
-        raise HTTPException(
-            status_code=400, detail="所选列表中包含系统管理员，禁止批量删除"
-        )
+        raise CannotDeleteAdminException("系统管理员")
 
     # 检查是否包含当前用户自己 (防止误删当前登录账号)
     if current_user.user_id in ids:
-        raise HTTPException(status_code=400, detail="不能删除当前登录的账号")
+        raise CannotDeleteSelfException()
 
     # 执行批量删除
     # 使用 sqlalchemy 的 delete 语句更高效

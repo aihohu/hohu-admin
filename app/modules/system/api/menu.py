@@ -1,10 +1,15 @@
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends
 from sqlalchemy import and_, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import MENU_TYPE_BUTTON, MENU_TYPE_MENU, STATUS_ENABLED
 from app.core.auth import get_current_user
 from app.core.base_response import PageResult, ResponseModel
+from app.core.exceptions import (
+    BusinessRuleException,
+    InvalidParameterException,
+    MenuNotFoundException,
+)
 from app.db.session import get_db
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.user import User
@@ -210,7 +215,7 @@ async def update_menu(
 ):
     menu = await db.get(Menu, menu_id)
     if not menu:
-        raise HTTPException(status_code=404, detail="菜单不存在")
+        raise MenuNotFoundException()
 
     update_data = menu_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
@@ -257,11 +262,11 @@ async def delete_menu(menu_id: int, db: AsyncSession = Depends(get_db)):
     child_stmt = select(Menu).where(Menu.parent_id == menu_id)
     child = (await db.execute(child_stmt)).first()
     if child:
-        raise HTTPException(status_code=400, detail="请先删除子菜单")
+        raise BusinessRuleException("请先删除子菜单")
 
     menu = await db.get(Menu, menu_id)
     if not menu:
-        raise HTTPException(status_code=404, detail="菜单不存在")
+        raise MenuNotFoundException()
 
     await db.delete(menu)
     await db.commit()
@@ -278,7 +283,7 @@ async def batch_delete_menus(
     ids: list[int] = Body(...), db: AsyncSession = Depends(get_db)
 ):
     if not ids:
-        return ResponseModel.error(msg="请选择要删除的菜单")
+        raise InvalidParameterException("请选择要删除的菜单")
 
     # 批量检查子菜单逻辑 (简单处理：如果选中的菜单中有任何一个包含不在选中列表里的子菜单，则禁止)
     check_stmt = select(Menu).where(
@@ -286,9 +291,7 @@ async def batch_delete_menus(
     )
     has_child = (await db.execute(check_stmt)).first()
     if has_child:
-        raise HTTPException(
-            status_code=400, detail="选中的菜单中包含未选中的子菜单，请先处理"
-        )
+        raise BusinessRuleException("选中的菜单中包含未选中的子菜单，请先处理")
 
     stmt = delete(Menu).where(Menu.menu_id.in_(ids))
     result = await db.execute(stmt)

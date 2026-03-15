@@ -1,5 +1,6 @@
 from fastapi import Depends, HTTPException, status
 
+from app.core.exceptions import AuthorizationException
 from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
 
@@ -23,7 +24,7 @@ def check_permissions(required_perm: str):
             "admin" not in [r.role_code for r in current_user.roles]
             and required_perm not in user_perms
         ):
-            raise HTTPException(status_code=403, detail=f"缺少权限: {required_perm}")
+            raise AuthorizationException(f"缺少权限: {required_perm}")
         return True
 
     return permission_dependency
@@ -42,10 +43,7 @@ def require_permissions(perm_code: str = None, super_admin_only: bool = False):
             return current_user
 
         if super_admin_only and not current_user.is_admin:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="权限不足，仅限超级管理员访问",
-            )
+            raise AuthorizationException("权限不足，仅限超级管理员访问")
 
         # 2. 判断是否拥有具体的权限标识 (需要查询关联的 roles -> menus)
         # 这里假设 User 模型已经预加载了 roles.menus
@@ -57,10 +55,7 @@ def require_permissions(perm_code: str = None, super_admin_only: bool = False):
                         user_perms.add(menu.permission)
 
         if perm_code and perm_code not in user_perms:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"缺少必要权限: {perm_code}",
-            )
+            raise AuthorizationException(f"缺少必要权限: {perm_code}")
 
         return current_user
 
