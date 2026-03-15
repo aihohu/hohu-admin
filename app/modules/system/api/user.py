@@ -1,21 +1,9 @@
-from fastapi import APIRouter, Body, Depends
-from sqlalchemy import and_, delete, select
+from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
-from app.constants import ADMIN_USERNAME
 from app.core.auth import get_current_user
 from app.core.base_response import PageResult, ResponseModel
-from app.core.exceptions import (
-    CannotDeleteAdminException,
-    CannotDeleteSelfException,
-    DuplicateUserException,
-    InvalidParameterException,
-    UserNotFoundException,
-)
-from app.core.security import get_password_hash
 from app.db.session import get_db
-from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.schemas.user import (
     UserCreate,
@@ -23,7 +11,7 @@ from app.modules.system.schemas.user import (
     UserQuery,
     UserUpdate,
 )
-from app.utils.pagination import build_filters, paginate
+from app.modules.system.service.user_service import user_service
 
 router = APIRouter()
 
@@ -38,26 +26,9 @@ async def get_user_list(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ):
-    # 构建查询条件
-    field_mapping = {
-        "user_name": ("user_name", "contains"),
-        "nickname": ("nickname", "contains"),
-        "user_gender": ("user_gender", "contains"),
-        "user_phone": ("user_phone", "contains"),
-        "user_email": ("user_email", "contains"),
-        "status": ("status", "=="),
-    }
-    filters = build_filters(User, field_mapping, **query.model_dump())
-
-    # 使用通用分页查询
-    page_data = await paginate(
-        db=db,
-        model=User,
-        query_params=query,
-        filters=filters,
-        order_by=User.create_time.desc(),
-        eager_loads=[selectinload(User.roles)],
-    )
+    """获取用户分页列表"""
+    # 调用 Service 层获取分页数据
+    page_data = await user_service.get_user_list(db, query)
 
     # 转换为 Schema 对象 (处理角色简化)
     user_list = []
@@ -79,99 +50,42 @@ async def get_user_list(
 
 @router.post("/add", summary="创建用户")
 async def add_user(user_in: UserCreate, db: AsyncSession = Depends(get_db)):
-    # 检查唯一性
-    result = await db.execute(select(User).where(User.user_name == user_in.user_name))
-    if result.scalars().first():
-        raise DuplicateUserException(user_in.user_name)
-
-    # 准备用户数据
-    obj_data = user_in.model_dump(exclude={"roles", "password"})
-    new_user = User(**obj_data)
-    new_user.hashed_password = get_password_hash(user_in.password)
-
-    # 分配角色
-    if user_in.roles:
-        role_result = await db.execute(
-            select(Role).where(Role.role_code.in_(user_in.roles))
-        )
-        new_user.roles = role_result.scalars().all()
-
-    db.add(new_user)
+    """创建新用户"""
+    await user_service.create_user(db, user_in)
     await db.commit()
     return ResponseModel.success(msg="创建成功")
 
 
 @router.put("/{user_id}", summary="修改用户")
 async def update_user(
-    user_id: int, user_in: UserUpdate, db: AsyncSession = Depends(get_db)
+    user_id: int,
+    user_in: UserUpdate,
+    db: AsyncSession = Depends(get_db),
 ):
-    # 查询用户（带角色预加载）
-    stmt = select(User).where(User.user_id == user_id).options(selectinload(User.roles))
-    result = await db.execute(stmt)
-    user = result.scalars().first()
-    if not user:
-        raise UserNotFoundException()
-
-    # 更新基础字段, 排出roles 和 password
-    update_data = user_in.model_dump(exclude={"roles", "password"}, exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(user, field, value)
-
-    # 更新角色关联
-    if user_in.roles is not None:
-        role_result = await db.execute(
-            select(Role).where(Role.role_code.in_(user_in.roles))
-        )
-        user.roles = role_result.scalars().all()
-
+    """更新用户信息"""
+    await user_service.update_user(db, user_id, user_in)
     await db.commit()
     return ResponseModel.success(msg="更新成功")
 
 
 @router.delete("/{user_id}", summary="删除用户")
-async def delete_user(user_id: int, db: AsyncSession = Depends(get_db)):
-    user = await db.get(User, user_id)
-    if not user:
-        raise UserNotFoundException()
-    if user.user_name == ADMIN_USERNAME:
-        raise CannotDeleteAdminException()
-
-    await db.delete(user)
+async def delete_user(
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """删除用户"""
+    await user_service.delete_user(db, user_id)
     await db.commit()
     return ResponseModel.success(msg="删除成功")
 
 
 @router.post("/batch-delete", summary="批量删除用户")
 async def batch_delete_users(
-    ids: list[int] = Body(...),
+    ids: list[int],
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    批量删除用户，自动跳过超级管理员
-    """
-    if not ids:
-        raise InvalidParameterException("未选择要删除的用户")
-
-    # 过滤掉 admin 账号，防止误删
-    # 先查询这些 ID 中是否包含 admin
-    check_stmt = select(User.user_id).where(
-        and_(User.user_id.in_(ids), User.user_name == ADMIN_USERNAME)
-    )
-    admin_result = await db.execute(check_stmt)
-    if admin_result.scalars().first():
-        raise CannotDeleteAdminException("系统管理员")
-
-    # 检查是否包含当前用户自己 (防止误删当前登录账号)
-    if current_user.user_id in ids:
-        raise CannotDeleteSelfException()
-
-    # 执行批量删除
-    # 使用 sqlalchemy 的 delete 语句更高效
-    stmt = delete(User).where(User.user_id.in_(ids))
-    result = await db.execute(stmt)
-
-    # 提交事务
+    """批量删除用户"""
+    deleted_count = await user_service.batch_delete_users(db, ids, current_user.user_id)
     await db.commit()
-
-    return ResponseModel.success(msg=f"成功删除 {result.rowcount} 个用户")
+    return ResponseModel.success(msg=f"成功删除 {deleted_count} 个用户")
