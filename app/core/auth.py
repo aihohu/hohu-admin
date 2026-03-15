@@ -1,4 +1,4 @@
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends
 
 from app.core.exceptions import AuthorizationException
 from app.modules.auth.service import get_current_user
