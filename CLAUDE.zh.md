@@ -134,8 +134,8 @@ app/modules/
 **2. RBAC（基于角色的访问控制）:**
 - 三层模型：用户 → 角色 → 菜单
 - 菜单具有 `permission` 字段（如 "sys:user:list"）
-- 使用 `check_permissions("sys:user:list")` 或 `require_permissions()` 装饰器
-- 超级管理员绕过所有权限检查
+- 使用 `require_permissions(perm_code="sys:user:list")` 或 `require_permissions(super_admin_only=True)` 装饰器
+- 超级管理员（user_name="admin" 或 role_code="R_SUPER"）绕过所有权限检查
 
 **3. 数据库会话管理:**
 - 通过 `get_db()` 依赖提供异步会话

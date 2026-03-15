@@ -134,8 +134,8 @@ app/modules/
 **2. RBAC (Role-Based Access Control):**
 - Three-tier model: User → Role → Menu
 - Menus have `permission` field (e.g., "sys:user:list")
-- Use `check_permissions("sys:user:list")` or `require_permissions()` decorators
-- Super admin users bypass all permission checks
+- Use `require_permissions(perm_code="sys:user:list")` or `require_permissions(super_admin_only=True)` decorators
+- Super admin users (user_name="admin" or role_code="R_SUPER") bypass all permission checks
 
 **3. Database Session Management:**
 - Async sessions via `get_db()` dependency
