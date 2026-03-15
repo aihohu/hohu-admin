@@ -264,10 +264,23 @@ async def delete(
 
 **9. Schema 模式:**
 ```python
-# 请求 schema
+# 带验证的请求 schema
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+
 class UserCreate(BaseModel):
-    user_name: str
+    user_name: str = Field(..., min_length=4, max_length=50, description="账号")
+    user_email: EmailStr = Field(..., description="邮箱")  # 自动邮箱格式验证
+    user_phone: str = Field(..., pattern=r"^1[3-9]\d{9}$", description="手机号")  # 手机号正则验证
+    password: str = Field(..., min_length=6, max_length=20, description="密码")
     roles: list[str] = []  # 角色代码，不是 ID
+
+    @field_validator("user_name")
+    @classmethod
+    def validate_user_name(cls, v: str) -> str:
+        if not v.isalnum():
+            raise ValueError("用户名只能包含字母和数字")
+        return v
+
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 # 带有 ID 序列化的响应 schema

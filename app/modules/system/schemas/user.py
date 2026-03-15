@@ -1,52 +1,138 @@
 from datetime import datetime
+from re import match
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    field_serializer,
+    field_validator,
+)
 from pydantic.alias_generators import to_camel
 
 from app.utils.mask_util import MaskUtil
 
 
 class UserBase(BaseModel):
+    """用户基础字段"""
+
     user_name: str = Field(..., min_length=4, max_length=50, description="账号")
     nickname: str | None = Field(None, max_length=50, description="昵称")
-    user_email: str = Field(..., description="邮箱")
+    user_email: EmailStr = Field(..., description="邮箱")
     user_phone: str = Field(..., description="手机号")
     user_gender: str = Field(..., description="用户性别")
     status: str = Field(..., description="状态")
     roles: list[str] = []  # 创建时分配的角色 ID 列表
 
+    @field_validator("user_name")
+    @classmethod
+    def validate_user_name(cls, v: str) -> str:
+        """验证用户名格式"""
+        if not v.isalnum():
+            raise ValueError("用户名只能包含字母和数字")
+        return v
+
+    @field_validator("user_phone")
+    @classmethod
+    def validate_user_phone(cls, v: str) -> str:
+        """验证手机号格式"""
+        if not match(r"^1[3-9]\d{9}$", v):
+            raise ValueError("手机号格式不正确")
+        return v
+
+    @field_validator("user_gender")
+    @classmethod
+    def validate_user_gender(cls, v: str) -> str:
+        """验证用户性别"""
+        if v not in ["0", "1", "2"]:
+            raise ValueError("用户性别必须是 0(未知)、1(男) 或 2(女)")
+        return v
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: str) -> str:
+        """验证状态值"""
+        if v not in ["1", "2"]:
+            raise ValueError("状态必须是 1(启用) 或 2(禁用)")
+        return v
+
+    @field_validator("roles")
+    @classmethod
+    def validate_roles(cls, v: list[str]) -> list[str]:
+        """验证角色列表"""
+        if v is None or len(v) == 0:
+            raise ValueError("必须至少分配一个角色")
+        return v
+
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
 class UserCreate(UserBase):
-    password: str | None = Field(..., min_length=6, description="明文密码")
+    """用户创建请求"""
+
+    password: str = Field(..., min_length=6, max_length=20, description="明文密码")
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, v: str) -> str:
+        """验证密码强度"""
+        if not any(char.isdigit() for char in v):
+            raise ValueError("密码必须包含数字")
+        if not any(char.isupper() for char in v):
+            raise ValueError("密码必须包含大写字母")
+        if not any(char.islower() for char in v):
+            raise ValueError("密码必须包含小写字母")
+        return v
 
 
 class UserUpdate(UserBase):
-    password: str | None = Field(..., description="明文密码")
+    """用户更新请求"""
+
+    password: str | None = Field(
+        None, min_length=6, max_length=20, description="明文密码"
+    )
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, v: str | None) -> str | None:
+        """验证密码强度（可选字段）"""
+        if v is None:
+            return v
+        if not any(char.isdigit() for char in v):
+            raise ValueError("密码必须包含数字")
+        if not any(char.isupper() for char in v):
+            raise ValueError("密码必须包含大写字母")
+        if not any(char.islower() for char in v):
+            raise ValueError("密码必须包含小写字母")
+        return v
 
 
 class UserLogin(BaseModel):
-    user_name: str = Field(..., description="账号")
-    password: str = Field(..., description="密码")
+    """用户登录请求"""
+
+    user_name: str = Field(..., min_length=4, description="账号")
+    password: str = Field(..., min_length=1, description="密码")
 
 
 class UserQuery(BaseModel):
     """用户查询参数"""
 
-    current: int = 1
-    size: int = 10
-    user_name: str | None = None
-    nickname: str | None = None
-    user_phone: str | None = None
-    user_email: str | None = None
-    user_gender: str | None = None
-    status: str | None = None
+    current: int = Field(1, ge=1, description="当前页码")
+    size: int = Field(10, ge=1, le=100, description="每页数量")
+    user_name: str | None = Field(None, description="用户名（支持模糊查询）")
+    nickname: str | None = Field(None, description="昵称（支持模糊查询）")
+    user_phone: str | None = Field(None, description="手机号（支持模糊查询）")
+    user_email: str | None = Field(None, description="邮箱（支持模糊查询）")
+    user_gender: str | None = Field(None, description="用户性别")
+    status: str | None = Field(None, description="状态")
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
 class UserOut(BaseModel):
+    """用户输出（单条）"""
+
     user_id: int
     user_name: str
     nickname: str
@@ -62,7 +148,7 @@ class UserOut(BaseModel):
 
 
 class UserItemOut(BaseModel):
-    """列表显示的用户对象"""
+    """用户列表显示对象"""
 
     user_id: int
     user_name: str
@@ -92,14 +178,11 @@ class UserItemOut(BaseModel):
     def serialize_email(self, v: str) -> str:
         return MaskUtil.email(v)
 
-    @field_serializer("create_time")
-    def serialize_create_time(self, dt: datetime) -> str:
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
-
     @field_validator("roles", mode="before")
     @classmethod
     def transform_roles(cls, v):
+        """验证并转换角色列表"""
         # 如果传入的是 SQLAlchemy 的 Role 对象列表，则提取名称
-        if v and not isinstance(v[0], str):
-            return [r.role_name for r in v]
+        if v and len(v) > 0 and not isinstance(v[0], str):
+            return [r.role_code for r in v]
         return v

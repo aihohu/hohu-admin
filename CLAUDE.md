@@ -264,10 +264,23 @@ async def delete(
 
 **9. Schema Patterns:**
 ```python
-# Request schema
+# Request schema with validation
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+
 class UserCreate(BaseModel):
-    user_name: str
+    user_name: str = Field(..., min_length=4, max_length=50, description="账号")
+    user_email: EmailStr = Field(..., description="邮箱")  # Auto email format validation
+    user_phone: str = Field(..., pattern=r"^1[3-9]\d{9}$", description="手机号")  # Phone regex
+    password: str = Field(..., min_length=6, max_length=20, description="密码")
     roles: list[str] = []  # Role codes, not IDs
+
+    @field_validator("user_name")
+    @classmethod
+    def validate_user_name(cls, v: str) -> str:
+        if not v.isalnum():
+            raise ValueError("Username can only contain letters and numbers")
+        return v
+
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 # Response schema with ID serialization
