@@ -27,12 +27,14 @@ class Role(Base):
     role_desc: Mapped[str] = mapped_column(
         String(255), nullable=True, comment="角色描述"
     )
-    status: Mapped[str] = mapped_column(String(2), nullable=False, comment="状态：1-启用，2-禁用")
+    status: Mapped[str] = mapped_column(
+        String(2), nullable=False, comment="状态：1-启用，2-禁用"
+    )
     create_by: Mapped[str] = mapped_column(String(32), nullable=True, comment="创建人")
     create_time: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), comment="创建时间"
     )
-    update_by = mapped_column(String(64), nullable=True, comment="更新人")
+    update_by: Mapped[str] = mapped_column(String(64), nullable=True, comment="更新人")
     update_time: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间"
     )

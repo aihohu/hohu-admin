@@ -174,6 +174,14 @@ fastapi dev app/main.py
 
 
 
+## 📚 开发文档
+
+详细的开发指南和最佳实践，请查看相关文档：
+
+- **[TODO.md](./TODO.md)** - 项目待办事项清单，包含代码审查发现的所有优化点
+- **[docs/pagination-guide.md](./docs/pagination-guide.md)** - 详细的分页查询使用说明，包括基础查询和复杂查询的完整示例
+- **复杂 SQL 处理** - JOIN、子查询、聚合查询等各种场景的解决方案
+
 ## 📝 项目开发规范
 
 ### 字段命名与前后端对接
@@ -239,6 +247,213 @@ class MenuSchema(BaseModel):
 
 
 ## 🛠️ 二次开发指导
+
+### 通用分页工具
+
+HoHu Admin 提供了统一的分页查询工具 `app/utils/pagination.py`，帮助开发者快速实现标准化的分页接口。
+
+#### 功能特点
+
+- ✅ **消除重复代码**：统一的分页逻辑，避免每个接口重复编写
+- ✅ **灵活的过滤条件**：支持多种查询操作（模糊匹配、精确匹配、范围查询等）
+- ✅ **预加载支持**：自动处理关联数据的 N+1 查询问题
+- ✅ **类型安全**：完整的类型提示，提高代码可维护性
+
+#### 基础用法
+
+##### 1. 使用 `paginate()` 函数
+
+```python
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.base_response import ResponseModel
+from app.db.session import get_db
+from app.modules.system.models.user import User
+from app.modules.system.schemas.user import UserQuery, UserItemOut
+from app.utils.pagination import paginate
+
+router = APIRouter()
+
+@router.get("/list", response_model=ResponseModel[PageResult[UserItemOut]])
+async def get_user_list(
+    query: UserQuery = Depends(),
+    db: AsyncSession = Depends(get_db),
+):
+    # 使用通用分页查询
+    page_data = await paginate(
+        db=db,
+        model=User,
+        query_params=query,
+        order_by=User.create_time.desc(),  # 可选：排序条件
+    )
+
+    return ResponseModel.success(data=page_data)
+```
+
+##### 2. 使用 `build_filters()` 构建查询条件
+
+```python
+from app.utils.pagination import build_filters
+
+# 定义字段映射
+field_mapping = {
+    "user_name": ("user_name", "contains"),   # 模糊匹配
+    "status": ("status", "=="),               # 精确匹配
+    "role_id": ("role_id", "in_"),          # 在列表中
+}
+
+# 构建过滤条件
+filters = build_filters(
+    User,
+    field_mapping,
+    **query.model_dump()  # 展开查询参数
+)
+```
+
+#### 高级用法
+
+##### 1. 预加载关联数据
+
+```python
+from sqlalchemy.orm import selectinload
+
+# 分页时预加载角色信息，避免 N+1 查询
+page_data = await paginate(
+    db=db,
+    model=User,
+    query_params=query,
+    filters=filters,
+    order_by=User.create_time.desc(),
+    eager_loads=[selectinload(User.roles)],  # 预加载关联
+)
+```
+
+##### 2. 自定义过滤逻辑
+
+```python
+from app.utils.pagination import build_filters
+
+# 使用可调用对象实现自定义过滤
+def custom_name_filter(model, value):
+    if not value:
+        return None
+    return model.user_name.ilike(f"%{value}%")
+
+field_mapping = {
+    "user_name": custom_name_filter,  # 自定义函数
+    "status": ("status", "=="),
+}
+
+filters = build_filters(User, field_mapping, **query.model_dump())
+```
+
+#### 完整示例
+
+```python
+from fastapi import APIRouter, Depends
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.core.auth import get_current_user
+from app.core.base_response import PageResult, ResponseModel
+from app.db.session import get_db
+from app.modules.system.models.user import User
+from app.modules.system.schemas.user import (
+    UserCreate,
+    UserItemOut,
+    UserQuery,
+    UserUpdate,
+)
+from app.utils.pagination import build_filters, paginate
+
+router = APIRouter()
+
+@router.get("/list", response_model=ResponseModel[PageResult[UserItemOut]])
+async def get_user_list(
+    query: UserQuery = Depends(),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # 1. 构建查询条件
+    field_mapping = {
+        "user_name": ("user_name", "contains"),
+        "nickname": ("nickname", "contains"),
+        "user_gender": ("user_gender", "contains"),
+        "user_phone": ("user_phone", "contains"),
+        "user_email": ("user_email", "contains"),
+        "status": ("status", "=="),
+    }
+    filters = build_filters(User, field_mapping, **query.model_dump())
+
+    # 2. 使用通用分页查询
+    page_data = await paginate(
+        db=db,
+        model=User,
+        query_params=query,
+        filters=filters,
+        order_by=User.create_time.desc(),
+        eager_loads=[selectinload(User.roles)],
+    )
+
+    # 3. 转换数据格式（如需要）
+    user_list = []
+    for u in page_data.records:
+        item = UserItemOut.model_validate(u)
+        item.roles = [r.role_code for r in u.roles]
+        user_list.append(item)
+
+    # 4. 返回结果
+    return ResponseModel.success(
+        data=PageResult(
+            records=user_list,
+            total=page_data.total,
+            current=page_data.current,
+            size=page_data.size,
+        )
+    )
+```
+
+#### 参数说明
+
+##### `paginate()` 函数
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `db` | `AsyncSession` | 是 | 数据库会话 |
+| `model` | `Any` | 是 | SQLAlchemy 模型类 |
+| `query_params` | `QueryParams` | 是 | 查询参数（包含 `current`, `size`） |
+| `filters` | `list[Any] \| None` | 否 | 查询条件列表 |
+| `order_by` | `Any \| None` | 否 | 排序条件（如 `Model.field.desc()`） |
+| `eager_loads` | `list[Any] \| None` | 否 | 预加载的关联关系列表 |
+
+##### `build_filters()` 函数
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `model` | `Any` | SQLAlchemy 模型类 |
+| `field_mapping` | `dict[str, str \| tuple \| Callable]` | 字段映射字典 |
+| `**kwargs` | - | 查询参数键值对 |
+
+##### 字段映射格式
+
+| 格式 | 说明 | 示例 |
+|------|------|------|
+| `("field_name", "contains")` | 模糊匹配 | `("user_name", "contains")` |
+| `("field_name", "==")` | 精确匹配 | `("status", "==")` |
+| `("field_name", "in_")` | 在列表中 | `("role_id", "in_")` |
+| `("field_name", ">=")` | 大于等于 | `("create_time", ">=")` |
+| `("field_name", "<=")` | 小于等于 | `("create_time", "<=")` |
+| `"field_name"` | 简单字段名，默认精确匹配 | `"user_name"` |
+| `Callable` | 自定义过滤函数 | `lambda m, v: m.field.ilike(v)` |
+
+#### 注意事项
+
+1. **SQLAlchemy 表达式对象**：`order_by` 参数不能直接用于布尔判断，内部已使用 `is not None` 进行检查
+2. **空值过滤**：`build_filters()` 会自动跳过 `None` 和空字符串的参数
+3. **分页参数**：查询 Schema 需要继承或包含 `current` 和 `size` 字段
+4. **类型转换**：如需对返回数据进行特殊处理，建议在获取 `page_data.records` 后手动转换
 
 ### 如何增加新模块？
 

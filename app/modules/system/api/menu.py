@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Body, Depends, HTTPException
-from sqlalchemy import and_, delete, func, select
+from sqlalchemy import and_, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
@@ -16,6 +16,7 @@ from app.modules.system.schemas.menu import (
     MenuTreeOut,
     MenuUpdate,
 )
+from app.utils.pagination import paginate
 
 router = APIRouter()
 
@@ -131,24 +132,14 @@ async def get_menu_tree_list(db: AsyncSession = Depends(get_db)):
     summary="获取菜单分页列表",
 )
 async def list_menus(query: MenuQuery = Depends(), db: AsyncSession = Depends(get_db)):
-    count_stmt = select(func.count()).select_from(Menu)
-    total = (await db.execute(count_stmt)).scalar() or 0
-
-    stmt = (
-        select(Menu)
-        .offset((query.current - 1) * query.size)
-        .limit(query.size)
-        .order_by(Menu.order.asc())
+    # 使用通用分页查询
+    page_data = await paginate(
+        db=db,
+        model=Menu,
+        query_params=query,
+        order_by=Menu.order.asc(),
     )
-    result = await db.execute(stmt)
-    return ResponseModel.success(
-        data=PageResult(
-            records=result.scalars().all(),
-            total=total,
-            current=query.current,
-            size=query.size,
-        )
-    )
+    return ResponseModel.success(data=page_data)
 
 
 @router.get(

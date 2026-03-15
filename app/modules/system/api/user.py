@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Body, Depends, HTTPException
-from sqlalchemy import and_, delete, func, select
+from sqlalchemy import and_, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -15,6 +15,7 @@ from app.modules.system.schemas.user import (
     UserQuery,
     UserUpdate,
 )
+from app.utils.pagination import build_filters, paginate
 
 router = APIRouter()
 
@@ -30,49 +31,42 @@ async def get_user_list(
     _current_user: User = Depends(get_current_user),
 ):
     # 构建查询条件
-    filters = []
-    if query.user_name:
-        filters.append(User.user_name.contains(query.user_name))
-    if query.nickname:
-        filters.append(User.nickname.contains(query.nickname))
-    if query.user_gender:
-        filters.append(User.user_gender.contains(query.user_gender))
-    if query.user_phone:
-        filters.append(User.user_phone.contains(query.user_phone))
-    if query.user_email:
-        filters.append(User.user_email.contains(query.user_email))
-    if query.status:
-        filters.append(User.status == query.status)
+    field_mapping = {
+        "user_name": ("user_name", "contains"),
+        "nickname": ("nickname", "contains"),
+        "user_gender": ("user_gender", "contains"),
+        "user_phone": ("user_phone", "contains"),
+        "user_email": ("user_email", "contains"),
+        "status": ("status", "=="),
+    }
+    filters = build_filters(User, field_mapping, **query.model_dump())
 
-    # 查询总数
-    count_stmt = select(func.count()).select_from(User).where(and_(*filters))
-    total = (await db.execute(count_stmt)).scalar() or 0
-
-    # 分页查询数据
-    # 使用 selectinload 预加载角色信息
-    stmt = (
-        select(User)
-        .where(and_(*filters))
-        .offset((query.current - 1) * query.size)
-        .limit(query.size)
-        .options(selectinload(User.roles))
-        .order_by(User.create_time.desc())
+    # 使用通用分页查询
+    page_data = await paginate(
+        db=db,
+        model=User,
+        query_params=query,
+        filters=filters,
+        order_by=User.create_time.desc(),
+        eager_loads=[selectinload(User.roles)],
     )
-    result = await db.execute(stmt)
-    users = result.scalars().all()
 
     # 转换为 Schema 对象 (处理角色简化)
     user_list = []
-    for u in users:
+    for u in page_data.records:
         item = UserItemOut.model_validate(u)
         item.roles = [r.role_code for r in u.roles]
         user_list.append(item)
 
-    # 5. 返回分页包装结果
-    page_data = PageResult(
-        records=user_list, total=total, current=query.current, size=query.size
+    # 返回分页包装结果
+    return ResponseModel.success(
+        data=PageResult(
+            records=user_list,
+            total=page_data.total,
+            current=page_data.current,
+            size=page_data.size,
+        )
     )
-    return ResponseModel.success(data=page_data)
 
 
 @router.post("/add", summary="创建用户")

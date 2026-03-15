@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Body, Depends, HTTPException
-from sqlalchemy import and_, delete, func, select
+from sqlalchemy import and_, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
@@ -16,6 +16,7 @@ from app.modules.system.schemas.role import (
     RoleSimpleOut,
     RoleUpdate,
 )
+from app.utils.pagination import build_filters, paginate
 
 router = APIRouter()
 
@@ -33,36 +34,24 @@ async def list_roles(
     """
     支持根据角色名称、角色编码、状态进行模糊分页查询
     """
-    filters = []
-    if query.role_name:
-        filters.append(Role.role_name.contains(query.role_name))
-    if query.role_code:
-        filters.append(Role.role_code.contains(query.role_code))
-    if query.status:
-        filters.append(Role.status == query.status)
+    # 构建查询条件
+    field_mapping = {
+        "role_name": ("role_name", "contains"),
+        "role_code": ("role_code", "contains"),
+        "status": ("status", "=="),
+    }
+    filters = build_filters(Role, field_mapping, **query.model_dump())
 
-    # 计算总数
-    count_stmt = select(func.count()).select_from(Role).where(and_(*filters))
-    total = (await db.execute(count_stmt)).scalar() or 0
-
-    # 分页数据
-    stmt = (
-        select(Role)
-        .where(and_(*filters))
-        .offset((query.current - 1) * query.size)
-        .limit(query.size)
-        .order_by(Role.create_time.desc())
+    # 使用通用分页查询
+    page_data = await paginate(
+        db=db,
+        model=Role,
+        query_params=query,
+        filters=filters,
+        order_by=Role.create_time.desc(),
     )
-    result = await db.execute(stmt)
 
-    return ResponseModel.success(
-        data=PageResult(
-            records=result.scalars().all(),
-            total=total,
-            current=query.current,
-            size=query.size,
-        )
-    )
+    return ResponseModel.success(data=page_data)
 
 
 @router.get(
