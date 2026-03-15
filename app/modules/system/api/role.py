@@ -2,6 +2,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy import and_, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants import STATUS_ENABLED, SUPER_ADMIN_ROLE_CODE
 from app.core.auth import get_current_user
 from app.core.base_response import PageResult, ResponseModel
 from app.db.base import role_menus
@@ -67,7 +68,11 @@ async def get_all_roles(
     # 仅限拥有 'sys:role:all' 权限或管理员访问。
     """
     # 只查询状态为 "1" (启用) 的角色，按创建时间排序
-    stmt = select(Role).where(Role.status == "1").order_by(Role.create_time.asc())
+    stmt = (
+        select(Role)
+        .where(Role.status == STATUS_ENABLED)
+        .order_by(Role.create_time.asc())
+    )
     result = await db.execute(stmt)
     roles = result.scalars().all()
 
@@ -194,7 +199,7 @@ async def batch_delete_roles(
 ):
     # 过滤掉 超级管理员 权限，防止误删
     check_stmt = select(Role.role_id).where(
-        and_(Role.role_id.in_(ids), Role.role_code == "R_SUPER")
+        and_(Role.role_id.in_(ids), Role.role_code == SUPER_ADMIN_ROLE_CODE)
     )
     admin_result = await db.execute(check_stmt)
     if admin_result.scalars().first():

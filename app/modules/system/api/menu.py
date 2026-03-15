@@ -2,6 +2,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy import and_, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants import MENU_TYPE_BUTTON, MENU_TYPE_MENU, STATUS_ENABLED
 from app.core.auth import get_current_user
 from app.core.base_response import PageResult, ResponseModel
 from app.db.session import get_db
@@ -106,7 +107,7 @@ async def get_menu_tree_list(db: AsyncSession = Depends(get_db)):
 
         if p_id in menu_map:
             # 如果当前节点是按钮 (menu_type == 'F')
-            if m.menu_type == "F":
+            if m.menu_type == MENU_TYPE_BUTTON:
                 # 将按钮信息放入父节点的 buttons 中
                 button_data = {
                     "desc": m.menu_name,
@@ -118,7 +119,7 @@ async def get_menu_tree_list(db: AsyncSession = Depends(get_db)):
                 menu_map[p_id]["children"].append(m_dict)
         else:
             # 没有父节点且不是按钮的作为根节点（通常 F 类不会是根节点）
-            if m.menu_type != "F":
+            if m.menu_type != MENU_TYPE_BUTTON:
                 tree.append(m_dict)
 
     page_data = PageResult(records=tree, total=len(tree), current=1, size=len(tree))
@@ -151,7 +152,7 @@ async def get_all_menu(
     db: AsyncSession = Depends(get_db), _current_user: User = Depends(get_current_user)
 ):
     # 只查询状态为 "1" (启用) 的菜单，按创建时间排序
-    stmt = select(Menu).where(Menu.status == "1").order_by(Menu.order.asc())
+    stmt = select(Menu).where(Menu.status == STATUS_ENABLED).order_by(Menu.order.asc())
     result = await db.execute(stmt)
     menus = result.scalars().all()
 
@@ -169,7 +170,7 @@ async def get_all_pages(
     # 只查询状态为 "1" (启用) 的菜单，按创建时间排序
     stmt = (
         select(Menu.route_name)
-        .where(Menu.status == "1", Menu.menu_type == "C")
+        .where(Menu.status == STATUS_ENABLED, Menu.menu_type == MENU_TYPE_MENU)
         .order_by(Menu.order.asc())
     )
     result = await db.execute(stmt)
@@ -219,7 +220,7 @@ async def update_menu(
     if menu_in.buttons is not None:
         # 删除该菜单下所有现有按钮（只删 button 类型）
         delete_stmt = delete(Menu).where(
-            Menu.parent_id == menu_id, Menu.menu_type == "F"
+            Menu.parent_id == menu_id, Menu.menu_type == MENU_TYPE_BUTTON
         )
         await db.execute(delete_stmt)
 
@@ -229,12 +230,12 @@ async def update_menu(
             button_menu = Menu(
                 menu_name=btn.desc,
                 permission=btn.code,
-                menu_type="F",
+                menu_type=MENU_TYPE_BUTTON,
                 parent_id=menu_id,
                 create_by=current_user.user_name,
                 update_by=current_user.user_name,
                 order=0,
-                status="1",
+                status=STATUS_ENABLED,
             )
             new_buttons.append(button_menu)
 

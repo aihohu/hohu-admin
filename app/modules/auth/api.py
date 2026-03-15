@@ -3,6 +3,7 @@ from fastapi.params import Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants import MENU_TYPE_DIRECTORY, MENU_TYPE_MENU, STATUS_ENABLED
 from app.constants.static_routes import CONSTANT_ROUTES
 from app.core.base_response import ResponseModel
 from app.core.security import get_password_hash
@@ -88,7 +89,10 @@ async def get_user_routes(current_user: User = Depends(get_current_user)):
     for role in current_user.roles:
         for menu in role.menus:
             # 过滤掉按钮级权限，只保留菜单和目录
-            if menu.menu_type in ["M", "C"] and menu.status == "1":
+            if (
+                menu.menu_type in [MENU_TYPE_DIRECTORY, MENU_TYPE_MENU]
+                and menu.status == STATUS_ENABLED
+            ):
                 all_menus_dict[menu.menu_id] = menu
 
     # 构建树形结构

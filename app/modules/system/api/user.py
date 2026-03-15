@@ -3,6 +3,7 @@ from sqlalchemy import and_, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.constants import ADMIN_USERNAME
 from app.core.auth import get_current_user
 from app.core.base_response import PageResult, ResponseModel
 from app.core.security import get_password_hash
@@ -125,7 +126,7 @@ async def delete_user(user_id: int, db: AsyncSession = Depends(get_db)):
     user = await db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
-    if user.user_name == "admin":
+    if user.user_name == ADMIN_USERNAME:
         raise HTTPException(status_code=400, detail="初始管理员不能删除")
 
     await db.delete(user)
@@ -148,7 +149,7 @@ async def batch_delete_users(
     # 过滤掉 admin 账号，防止误删
     # 先查询这些 ID 中是否包含 admin
     check_stmt = select(User.user_id).where(
-        and_(User.user_id.in_(ids), User.user_name == "admin")
+        and_(User.user_id.in_(ids), User.user_name == ADMIN_USERNAME)
     )
     admin_result = await db.execute(check_stmt)
     if admin_result.scalars().first():
