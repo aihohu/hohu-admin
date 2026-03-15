@@ -145,6 +145,8 @@ app/modules/
 
 **4. ID Generation:**
 - All primary keys use Snowflake IDs via `next_id()` from `app.core.id_generator`
+- Worker ID is configurable via `WORKER_ID` environment variable (default: 1)
+- Each instance must have a unique worker_id (1-1023) when deploying multiple instances
 - IDs automatically serialized as strings in responses to prevent JavaScript BigInt precision loss
 
 **5. Response Format:**

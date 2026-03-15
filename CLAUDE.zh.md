@@ -145,6 +145,8 @@ app/modules/
 
 **4. ID 生成:**
 - 所有主键使用 Snowflake ID，通过 `app.core.id_generator` 的 `next_id()` 生成
+- Worker ID 通过 `WORKER_ID` 环境变量可配置（默认值：1）
+- 多实例部署时每个实例必须有唯一的 worker_id（1-1023）
 - 响应中 ID 自动序列化为字符串，防止 JavaScript BigInt 精度丢失
 
 **5. 响应格式:**
