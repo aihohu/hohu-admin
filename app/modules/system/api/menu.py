@@ -27,9 +27,28 @@ router = APIRouter()
     "/tree",
     response_model=ResponseModel[list[MenuTreeOut]],
     summary="获取菜单树形列表",
+    description="获取所有菜单的树形结构，用于前端菜单管理页面",
+    responses={
+        200: {"description": "获取成功，返回菜单树形结构"},
+        401: {"description": "未登录或令牌已过期"},
+        403: {"description": "权限不足"},
+    },
 )
 async def get_menu_tree(db: AsyncSession = Depends(get_db)):
-    """获取菜单树形列表（用于前端菜单管理页面）"""
+    """
+    获取菜单树形列表
+
+    Args:
+        db: 异步数据库会话
+
+    Returns:
+        ResponseModel: 包含菜单树形结构的数据
+
+    Note:
+        - 包含所有类型的菜单（目录、菜单、按钮）
+        - 自动构建树形结构供前端使用
+        - 用于菜单管理页面的展示和编辑
+    """
     stmt = select(Menu).order_by(Menu.order.asc())
     result = await db.execute(stmt)
     menus = result.scalars().all()
@@ -181,13 +200,40 @@ async def get_all_pages(
 @router.post(
     "/add",
     summary="新增菜单",
+    description="创建新的菜单，支持目录、菜单和按钮三种类型",
+    responses={
+        200: {"description": "创建成功"},
+        400: {"description": "参数验证失败"},
+        401: {"description": "未登录或令牌已过期"},
+        403: {"description": "权限不足"},
+    },
 )
 async def add_menu(
     menu_in: MenuCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """新增菜单"""
+    """
+    新增菜单
+
+    Args:
+        menu_in: 菜单创建信息，包含菜单名称、类型、路由等所有配置
+        db: 异步数据库会话
+        current_user: 当前登录用户对象
+
+    Returns:
+        ResponseModel: 创建成功的消息
+
+    Request Body Fields:
+        - parent_id: 父菜单ID（可选，0表示根菜单）
+        - menu_name: 菜单名称（必填，最大50字符）
+        - menu_type: 菜单类型（必填，M-目录，C-菜单，F-按钮）
+        - route_name: 路由名称（可选）
+        - route_path: 路由路径（可选）
+        - order: 排序值（必填，默认0）
+        - status: 菜单状态（必填，1-启用，2-禁用）
+        - buttons: 按钮列表（可选，最多20个）
+    """
     new_menu = await menu_service.create_menu(db, menu_in)
     new_menu.create_by = current_user.user_name
     await db.commit()
@@ -197,6 +243,14 @@ async def add_menu(
 @router.put(
     "/{menu_id}",
     summary="修改菜单",
+    description="更新指定菜单的信息",
+    responses={
+        200: {"description": "更新成功"},
+        400: {"description": "参数验证失败"},
+        401: {"description": "未登录或令牌已过期"},
+        403: {"description": "权限不足"},
+        404: {"description": "菜单不存在"},
+    },
 )
 async def update_menu(
     menu_id: int,
@@ -204,7 +258,29 @@ async def update_menu(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """修改菜单"""
+    """
+    修改菜单
+
+    Args:
+        menu_id: 菜单ID（路径参数）
+        menu_in: 菜单更新信息，所有字段都是可选的
+        db: 异步数据库会话
+        current_user: 当前登录用户对象
+
+    Returns:
+        ResponseModel: 更新成功的消息
+
+    Path Parameters:
+        - menu_id: 要更新的菜单ID
+
+    Request Body Fields (Optional):
+        - menu_name: 菜单名称
+        - menu_type: 菜单类型
+        - route_name: 路由名称
+        - order: 排序值
+        - status: 菜单状态
+        - buttons: 按钮列表
+    """
     menu = await menu_service.update_menu(db, menu_id, menu_in)
     menu.update_by = current_user.user_name
     await db.commit()
@@ -214,12 +290,36 @@ async def update_menu(
 @router.delete(
     "/{menu_id}",
     summary="删除单个菜单",
+    description="删除指定的单个菜单",
+    responses={
+        200: {"description": "删除成功"},
+        401: {"description": "未登录或令牌已过期"},
+        403: {"description": "权限不足"},
+        404: {"description": "菜单不存在"},
+    },
 )
 async def delete_menu(
     menu_id: int,
     db: AsyncSession = Depends(get_db),
 ):
-    """删除单个菜单"""
+    """
+    删除单个菜单
+
+    Args:
+        menu_id: 菜单ID（路径参数）
+        db: 异步数据库会话
+
+    Returns:
+        ResponseModel: 删除成功的消息
+
+    Path Parameters:
+        - menu_id: 要删除的菜单ID
+
+    Note:
+        - 此操作不可逆，请谨慎操作
+        - 如果删除的是目录，其子菜单也会被删除
+        - 菜单删除后，关联的角色关系也会被清除
+    """
     await menu_service.delete_menu(db, menu_id)
     await db.commit()
     return ResponseModel.success(msg="菜单删除成功")
@@ -228,12 +328,35 @@ async def delete_menu(
 @router.post(
     "/batch-delete",
     summary="批量删除菜单",
+    description="批量删除多个菜单，支持传入菜单ID列表",
+    responses={
+        200: {"description": "删除成功"},
+        401: {"description": "未登录或令牌已过期"},
+        403: {"description": "权限不足"},
+    },
 )
 async def batch_delete_menus(
     ids: list[int] = Body(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """批量删除菜单"""
+    """
+    批量删除菜单
+
+    Args:
+        ids: 菜单ID列表
+        db: 异步数据库会话
+
+    Returns:
+        ResponseModel: 删除成功的消息，包含实际删除的菜单数量
+
+    Request Body:
+        - ids: 菜单ID数组（如：[123456, 123457, 123458]）
+
+    Note:
+        - 此操作不可逆，请谨慎操作
+        - 如果删除的菜单是目录，其子菜单也会被删除
+        - 菜单删除后，关联的角色关系也会被清除
+    """
     deleted_count = await menu_service.batch_delete_menus(db, ids)
     await db.commit()
     return ResponseModel.success(msg=f"成功删除 {deleted_count} 个菜单")
