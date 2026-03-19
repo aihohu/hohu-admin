@@ -11,6 +11,7 @@ from pydantic import (
 )
 from pydantic.alias_generators import to_camel
 
+from app.core.config import settings
 from app.utils.mask_util import MaskUtil
 
 
@@ -177,6 +178,11 @@ class UserItemOut(BaseModel):
     @field_serializer("user_email")
     def serialize_email(self, v: str) -> str:
         return MaskUtil.email(v)
+
+    @field_serializer("create_time")
+    def serialize_create_time(self, dt: datetime) -> str:
+        """格式化创建时间"""
+        return dt.strftime(settings.DATETIME_FORMAT)
 
     @field_validator("roles", mode="before")
     @classmethod

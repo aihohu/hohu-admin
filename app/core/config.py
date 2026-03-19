@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     # 多实例部署时必须为每个实例设置不同的值
     WORKER_ID: int = 1
 
+    # 日期时间格式化配置
+    # 用于 API 响应中的 datetime 字段格式化
+    # 可通过环境变量 DATETIME_FORMAT 自定义
+    DATETIME_FORMAT: str = "%Y-%m-%d %H:%M:%S"
+
     @property
     def REDIS_URL(self) -> str:
         """根据配置生成 Redis 连接字符串"""

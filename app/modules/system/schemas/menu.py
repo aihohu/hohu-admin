@@ -12,6 +12,7 @@ from app.constants import (
     STATUS_DISABLED,
     STATUS_ENABLED,
 )
+from app.core.config import settings
 
 
 class ButtonCreate(BaseModel):
@@ -187,6 +188,11 @@ class MenuOut(MenuBase):
     def serialize_parent_id(self, v: int, _info):
         return str(v) if v is not None else None
 
+    @field_serializer("create_time")
+    def serialize_create_time(self, dt: datetime) -> str:
+        """格式化创建时间"""
+        return dt.strftime(settings.DATETIME_FORMAT)
+
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 
@@ -200,6 +206,11 @@ class MenuSimpleOut(BaseModel):
     @field_serializer("menu_id")
     def serialize_id(self, v: int, _info):
         return str(v)
+
+    @field_serializer("create_time")
+    def serialize_create_time(self, dt: datetime) -> str:
+        """格式化创建时间"""
+        return dt.strftime(settings.DATETIME_FORMAT)
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
@@ -217,6 +228,11 @@ class MenuTreeOut(MenuOut):
     @field_serializer("parent_id")
     def serialize_parent_id(self, v: int, _info):
         return str(v) if v is not None else None
+
+    @field_serializer("create_time")
+    def serialize_create_time(self, dt: datetime) -> str:
+        """格式化创建时间"""
+        return dt.strftime(settings.DATETIME_FORMAT)
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 

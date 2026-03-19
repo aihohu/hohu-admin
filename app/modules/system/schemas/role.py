@@ -7,6 +7,7 @@ from app.constants import (
     STATUS_DISABLED,
     STATUS_ENABLED,
 )
+from app.core.config import settings
 
 
 class RoleBase(BaseModel):
@@ -91,6 +92,11 @@ class RoleOut(RoleBase):
     @field_serializer("role_id")
     def serialize_id(self, role_id: int, _info):
         return str(role_id)
+
+    @field_serializer("create_time")
+    def serialize_create_time(self, dt: datetime) -> str:
+        """格式化创建时间"""
+        return dt.strftime(settings.DATETIME_FORMAT)
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
