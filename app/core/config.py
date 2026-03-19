@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     # 可通过环境变量 DATETIME_FORMAT 自定义
     DATETIME_FORMAT: str = "%Y-%m-%d %H:%M:%S"
 
+    # 频率限制配置
+    # 登录接口：每分钟最多登录尝试次数
+    RATE_LIMIT_LOGIN: str = "5/minute"
+    # 注册接口：每分钟最多注册尝试次数
+    RATE_LIMIT_REGISTER: str = "3/minute"
+    # 普通 API 接口：每分钟最多请求数
+    RATE_LIMIT_API: str = "100/minute"
+
     @property
     def REDIS_URL(self) -> str:
         """根据配置生成 Redis 连接字符串"""

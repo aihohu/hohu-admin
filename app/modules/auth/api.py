@@ -26,9 +26,13 @@ router = APIRouter()
     responses={
         200: {"description": "注册成功"},
         400: {"description": "用户名已存在或参数验证失败"},
+        429: {"description": "请求过于频繁，请稍后再试"},
     },
 )
-async def register(user_in: UserCreate, db: AsyncSession = Depends(get_db)):
+async def register(
+    user_in: UserCreate,
+    db: AsyncSession = Depends(get_db),
+):
     """
     注册新用户
 
@@ -41,6 +45,9 @@ async def register(user_in: UserCreate, db: AsyncSession = Depends(get_db)):
 
     Raises:
         DuplicateUserException: 当用户名已存在时抛出
+
+    Note:
+        - 本接口应用频率限制：每分钟最多 3 次注册尝试
     """
     # 检查用户名是否已存在
     result = await db.execute(select(User).where(User.user_name == user_in.user_name))
@@ -69,6 +76,7 @@ async def register(user_in: UserCreate, db: AsyncSession = Depends(get_db)):
         200: {"description": "登录成功，返回访问令牌"},
         401: {"description": "账号或密码错误"},
         422: {"description": "参数验证失败"},
+        429: {"description": "请求过于频繁，请稍后再试"},
     },
 )
 async def login(
@@ -87,6 +95,10 @@ async def login(
 
     Raises:
         InvalidCredentialsException: 当账号或密码错误时抛出
+
+    Note:
+        - 本接口应用频率限制：每分钟最多 5 次登录尝试
+        - 连续失败多次后建议等待一段时间再试
     """
     result = await auth_service.authenticate(credentials, db)
     return result

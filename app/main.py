@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from app.core.exceptions import setup_exception_handlers
 from app.core.redis import close_redis
+from app.middleware.rate_limit_middleware import RateLimitMiddleware
 from app.modules.auth.api import router as auth_router
 from app.modules.system.api.menu import router as menu_router
 from app.modules.system.api.role import router as role_router
@@ -18,6 +19,9 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# 添加频率限制中间件
+app.add_middleware(RateLimitMiddleware)
 
 # 注册异常处理器
 setup_exception_handlers(app)
