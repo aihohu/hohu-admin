@@ -98,7 +98,9 @@ class RoleOut(RoleBase):
         """格式化创建时间"""
         return dt.strftime(settings.DATETIME_FORMAT)
 
-    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+    model_config = ConfigDict(
+        from_attributes=True, populate_by_name=True, alias_generator=to_camel
+    )
 
 
 class RoleQuery(BaseModel):
@@ -133,4 +135,6 @@ class RoleSimpleOut(BaseModel):
     def serialize_id(self, role_id: int, _info):
         return str(role_id)
 
-    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+    model_config = ConfigDict(
+        from_attributes=True, populate_by_name=True, alias_generator=to_camel
+    )
