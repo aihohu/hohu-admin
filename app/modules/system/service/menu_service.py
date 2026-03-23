@@ -84,8 +84,31 @@ class MenuService:
         Returns:
             创建的菜单对象
         """
-        new_menu = Menu(**menu_in.model_dump())
+        # 排除 buttons 和 query 字段，这些不是 Menu 模型的字段
+        menu_data = menu_in.model_dump(exclude={"buttons", "query"})
+        new_menu = Menu(**menu_data)
         db.add(new_menu)
+
+        # 如果有按钮，需要保存到 flush 后获取 menu_id
+        await db.flush()
+
+        # 批量添加按钮
+        if menu_in.buttons:
+            new_buttons = []
+            for btn in menu_in.buttons:
+                button_menu = Menu(
+                    menu_name=btn.desc,
+                    permission=btn.code,
+                    menu_type=MENU_TYPE_BUTTON,
+                    parent_id=new_menu.menu_id,
+                    order=0,
+                    status=STATUS_ENABLED,
+                )
+                new_buttons.append(button_menu)
+
+            if new_buttons:
+                db.add_all(new_buttons)
+
         return new_menu
 
     async def update_menu(

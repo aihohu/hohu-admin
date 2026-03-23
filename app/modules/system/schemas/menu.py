@@ -116,55 +116,11 @@ class MenuCreate(MenuBase):
     query: list = Field(default_factory=list, description="查询参数")
 
 
-class MenuUpdate(BaseModel):
+class MenuUpdate(MenuBase):
     """菜单更新请求"""
 
-    menu_name: str | None = Field(
-        None, min_length=1, max_length=50, description="菜单名称"
-    )
-    menu_type: str | None = Field(None, description="菜单类型")
-    route_name: str | None = Field(
-        None,
-        min_length=1,
-        max_length=100,
-        description="路由名称",
-    )
-    order: int | None = Field(None, ge=0, description="排序")
-    status: str | None = Field(None, description="状态：1-启用，2-禁用")
     buttons: list[ButtonCreate] | None = Field(None, description="按钮列表")
     query: list | None = Field(None, description="查询参数")
-
-    @field_validator("menu_type")
-    @classmethod
-    def validate_menu_type(cls, v: str | None) -> str | None:
-        """验证菜单类型（可选字段）"""
-        if v is not None and v not in [
-            MENU_TYPE_DIRECTORY,
-            MENU_TYPE_MENU,
-            MENU_TYPE_BUTTON,
-        ]:
-            raise ValueError("菜单类型必须是 M(目录)、C(菜单) 或 F(按钮)")
-        return v
-
-    @field_validator("status")
-    @classmethod
-    def validate_status(cls, v: str | None) -> str | None:
-        """验证状态值（可选字段）"""
-        if v is not None and v not in [STATUS_ENABLED, STATUS_DISABLED]:
-            raise ValueError("状态必须是 1(启用) 或 2(禁用)")
-        return v
-
-    @field_validator("buttons")
-    @classmethod
-    def validate_buttons(
-        cls, v: list[ButtonCreate] | None
-    ) -> list[ButtonCreate] | None:
-        """验证按钮列表（可选字段）"""
-        if v is not None and len(v) > 20:
-            raise ValueError("按钮数量不能超过20个")
-        return v
-
-    # 不继承 MenuBase，避免在可选字段上进行验证
 
 
 class MenuQuery(BaseModel):
