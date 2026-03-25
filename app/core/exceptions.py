@@ -31,7 +31,7 @@ class NotFoundException(BusinessException):
     def __init__(self, resource_type: str = "资源"):
         super().__init__(
             code=404,
-            message=f"{resource_type}不存在",
+            msg=f"{resource_type}不存在",
             data={"resource_type": resource_type},
         )
 
@@ -62,7 +62,7 @@ class DuplicateException(BusinessException):
 
     def __init__(self, field: str, value: str):
         super().__init__(
-            code=400, message=f"{field}已存在", data={"field": field, "value": value}
+            code=400, msg=f"{field}已存在", data={"field": field, "value": value}
         )
 
 
@@ -85,7 +85,7 @@ class ValidationException(BusinessException):
 
     def __init__(self, message: str, field: str = None):
         super().__init__(
-            code=400, message=message, data={"field": field} if field else None
+            code=400, msg=message, data={"field": field} if field else None
         )
 
 
@@ -93,63 +93,98 @@ class AuthenticationException(BusinessException):
     """认证失败异常"""
 
     def __init__(self, message: str = "账号或密码错误"):
-        super().__init__(code=401, message=message)
+        super().__init__(code=401, msg=message)
 
 
 class AuthorizationException(BusinessException):
     """授权失败异常"""
 
     def __init__(self, message: str = "权限不足"):
-        super().__init__(code=403, message=message)
+        super().__init__(code=403, msg=message)
 
 
 class AccountDisabledException(AuthorizationException):
     """账号已被禁用异常"""
 
     def __init__(self):
-        super().__init__(message="账号已被禁用")
+        super().__init__(msg="账号已被禁用")
 
 
 class BusinessRuleException(BusinessException):
     """业务规则异常"""
 
     def __init__(self, message: str):
-        super().__init__(code=400, message=message)
+        super().__init__(code=400, msg=message)
 
 
 class CannotDeleteAdminException(BusinessRuleException):
     """不能删除管理员异常"""
 
     def __init__(self, admin_type: str = "系统管理员"):
-        super().__init__(message=f"不能删除{admin_type}")
+        super().__init__(msg=f"不能删除{admin_type}")
 
 
 class CannotDeleteSelfException(BusinessRuleException):
     """不能删除当前登录账号异常"""
 
     def __init__(self):
-        super().__init__(message="不能删除当前登录的账号")
+        super().__init__(msg="不能删除当前登录的账号")
 
 
 class HasChildrenException(BusinessRuleException):
     """存在子节点异常"""
 
     def __init__(self, resource_type: str = "菜单"):
-        super().__init__(message=f"请先删除{resource_type}的子节点")
+        super().__init__(msg=f"请先删除{resource_type}的子节点")
 
 
 class InvalidParameterException(BusinessRuleException):
     """无效参数异常"""
 
     def __init__(self, message: str = "参数错误"):
-        super().__init__(message=message)
+        super().__init__(msg=message)
 
 
 class UnsupportedLoginMethodException(BusinessRuleException):
     """不支持的登录方式异常"""
 
     def __init__(self):
-        super().__init__(message="不支持的登录方式")
+        super().__init__(msg="不支持的登录方式")
+
+
+class DictTypeNotFoundException(NotFoundException):
+    """字典类型不存在异常"""
+
+    def __init__(self):
+        super().__init__(resource_type="字典类型")
+
+
+class DictDataNotFoundException(NotFoundException):
+    """字典数据不存在异常"""
+
+    def __init__(self):
+        super().__init__(resource_type="字典数据")
+
+
+class DuplicateDictTypeException(DuplicateException):
+    """字典类型已存在异常"""
+
+    def __init__(self, dict_type: str = ""):
+        super().__init__(field="字典类型", value=dict_type)
+
+
+class InvalidDictTypeException(BusinessRuleException):
+    """无效的字典类型异常"""
+
+    def __init__(self, dict_type: str = ""):
+        super().__init__(msg=f"字典类型 {dict_type} 不存在")
+
+
+class HasDictDataException(BusinessRuleException):
+    """字典类型下有数据异常"""
+
+    def __init__(self):
+        super().__init__(msg="该字典类型下存在数据，请先删除数据")
 
 
 # ============ 全局异常处理器 ============
@@ -184,7 +219,7 @@ def setup_exception_handlers(app: FastAPI):
         # logger.exception("Unhandled exception occurred")
         return JSONResponse(
             status_code=500,
-            content=ResponseModel.error(message="服务器内部错误").model_dump(),
+            content=ResponseModel.error(msg="服务器内部错误").model_dump(),
         )
 
     # 3. 捕获 Pydantic 参数校验错误 (422 错误)
@@ -198,5 +233,5 @@ def setup_exception_handlers(app: FastAPI):
         msg = f"参数错误: {errors[0]['loc'][-1]} {errors[0]['msg']}"
         return JSONResponse(
             status_code=422,
-            content=ResponseModel(code=422, message=msg).model_dump(),
+            content=ResponseModel(code=422, msg=msg).model_dump(),
         )
