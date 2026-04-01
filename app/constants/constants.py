@@ -29,3 +29,8 @@ DEFAULT_REFRESH_TOKEN_EXPIRE_DAYS = 7
 # Redis 常量
 REDIS_BLACKLIST_PREFIX = "blacklist:"
 REDIS_BLACKLIST_TTL = 7 * 24 * 3600  # 7天
+
+# 部门常量
+DEPT_MAX_LEVEL = 5  # 部门最大层级
+IS_PRIMARY_YES = "Y"  # 主部门标识
+IS_PRIMARY_NO = "N"  # 非主部门标识

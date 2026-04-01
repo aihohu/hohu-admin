@@ -49,7 +49,7 @@ class UserService:
             query_params=query,
             filters=filters,
             order_by=User.create_time.desc(),
-            eager_loads=[selectinload(User.roles)],
+            eager_loads=[selectinload(User.roles), selectinload(User.depts)],
         )
 
         return page_data
@@ -76,7 +76,7 @@ class UserService:
             raise DuplicateUserException(user_in.user_name)
 
         # 准备用户数据
-        obj_data = user_in.model_dump(exclude={"roles", "password"})
+        obj_data = user_in.model_dump(exclude={"roles", "password", "dept_ids"})
         new_user = User(**obj_data)
         new_user.hashed_password = get_password_hash(user_in.password)
 
@@ -120,7 +120,7 @@ class UserService:
 
         # 更新基础字段，排除 roles 和 password
         update_data = user_in.model_dump(
-            exclude={"roles", "password"}, exclude_unset=True
+            exclude={"roles", "password", "dept_ids"}, exclude_unset=True
         )
         for field, value in update_data.items():
             setattr(user, field, value)

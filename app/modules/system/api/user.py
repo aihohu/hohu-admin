@@ -11,6 +11,7 @@ from app.modules.system.schemas.user import (
     UserQuery,
     UserUpdate,
 )
+from app.modules.system.service.dept_service import dept_service
 from app.modules.system.service.user_service import user_service
 
 router = APIRouter()
@@ -56,11 +57,15 @@ async def get_user_list(
     # 调用 Service 层获取分页数据
     page_data = await user_service.get_user_list(db, query)
 
-    # 转换为 Schema 对象 (处理角色简化)
+    # 转换为 Schema 对象 (处理角色和部门简化)
     user_list = []
     for u in page_data.records:
         item = UserItemOut.model_validate(u)
         item.roles = [r.role_code for r in u.roles]
+        # 部门信息解析
+        if u.depts:
+            item.dept_ids = [str(d.dept_id) for d in u.depts]
+            item.dept_names = ", ".join(d.dept_name for d in u.depts)
         user_list.append(item)
 
     # 返回分页包装结果
@@ -109,7 +114,15 @@ async def add_user(
         - password: 密码（必填，6-20字符，必须包含大小写字母和数字）
         - roles: 角色编码列表（必填，至少分配一个角色）
     """
-    await user_service.create_user(db, user_in)
+    new_user = await user_service.create_user(db, user_in)
+
+    # 处理部门关联
+    if user_in.dept_ids:
+        dept_list = [
+            {"dept_id": d.dept_id, "is_primary": d.is_primary} for d in user_in.dept_ids
+        ]
+        await dept_service.update_user_depts(db, new_user.user_id, dept_list)
+
     await db.commit()
     return ResponseModel.success(msg="创建成功")
 
@@ -157,6 +170,15 @@ async def update_user(
     """
     await user_service.update_user(db, user_id, user_in)
     await db.commit()
+
+    # 处理部门关联
+    if user_in.dept_ids is not None:
+        dept_list = [
+            {"dept_id": d.dept_id, "is_primary": d.is_primary} for d in user_in.dept_ids
+        ]
+        await dept_service.update_user_depts(db, user_id, dept_list)
+        await db.commit()
+
     return ResponseModel.success(msg="更新成功")
 
 

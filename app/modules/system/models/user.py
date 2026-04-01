@@ -5,9 +5,10 @@ from sqlalchemy import BigInteger, DateTime, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.id_generator import next_id
-from app.db.base import Base, user_roles
+from app.db.base import Base, user_depts, user_roles
 
 if TYPE_CHECKING:
+    from .dept import Dept
     from .role import Role
 
 
@@ -44,4 +45,8 @@ class User(Base):
 
     roles: Mapped[list["Role"]] = relationship(
         "Role", secondary=user_roles, back_populates="users", lazy="selectin"
+    )
+
+    depts: Mapped[list["Dept"]] = relationship(
+        "Dept", secondary=user_depts, back_populates="users", lazy="selectin"
     )

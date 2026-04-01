@@ -187,6 +187,48 @@ class HasDictDataException(BusinessRuleException):
         super().__init__(msg="该字典类型下存在数据，请先删除数据")
 
 
+class DeptNotFoundException(NotFoundException):
+    """部门不存在异常"""
+
+    def __init__(self):
+        super().__init__(resource_type="部门")
+
+
+class DuplicateDeptNameException(DuplicateException):
+    """同级部门名称重复异常"""
+
+    def __init__(self, dept_name: str = ""):
+        super().__init__(field="同级部门名称", value=dept_name)
+
+
+class HasUsersException(BusinessRuleException):
+    """部门下存在用户异常"""
+
+    def __init__(self):
+        super().__init__(msg="该部门下存在用户，请先转移用户")
+
+
+class DeptLevelExceededException(BusinessRuleException):
+    """部门层级超限异常"""
+
+    def __init__(self, max_level: int = 5):
+        super().__init__(msg=f"部门层级不能超过{max_level}层")
+
+
+class PrimaryDeptRequiredException(BusinessRuleException):
+    """必须指定主部门异常"""
+
+    def __init__(self):
+        super().__init__(msg="必须指定一个主部门")
+
+
+class MultiplePrimaryDeptException(BusinessRuleException):
+    """多个主部门异常"""
+
+    def __init__(self):
+        super().__init__(msg="只能指定一个主部门")
+
+
 # ============ 全局异常处理器 ============
 
 

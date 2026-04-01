@@ -60,9 +60,12 @@ class DeptService:
 
     async def create(self, db: AsyncSession, dept_in: DeptCreate) -> Dept:
         """创建部门"""
+        # parent_id 为 None 或 0 都视为顶级部门
+        parent_id = dept_in.parent_id if dept_in.parent_id else None
+
         parent = None
-        if dept_in.parent_id is not None:
-            parent = await db.get(Dept, dept_in.parent_id)
+        if parent_id is not None:
+            parent = await db.get(Dept, parent_id)
             if not parent:
                 raise DeptNotFoundException()
 
@@ -72,7 +75,7 @@ class DeptService:
                 raise DeptLevelExceededException(DEPT_MAX_LEVEL)
 
         # 校验同级名称唯一性
-        await self._check_duplicate_name(db, dept_in.parent_id, dept_in.dept_name)
+        await self._check_duplicate_name(db, parent_id, dept_in.dept_name)
 
         # 计算 ancestors
         if parent:
@@ -81,13 +84,13 @@ class DeptService:
             ancestors = "0"
 
         new_dept = Dept(
-            parent_id=dept_in.parent_id,
+            parent_id=parent_id,
             ancestors=ancestors,
             dept_name=dept_in.dept_name,
             order_num=dept_in.order_num,
             leader=dept_in.leader,
             phone=dept_in.phone,
-            email=dept_in.email,
+            email=dept_in.email if dept_in.email else None,
             status=dept_in.status,
         )
         db.add(new_dept)
@@ -98,9 +101,10 @@ class DeptService:
         dept = await self.get_by_id(db, dept_id)
         update_data = dept_in.model_dump(exclude_unset=True)
 
-        # 处理 parent_id 变更
+        # 处理 parent_id 变更（0 视为顶级）
         new_parent_id = update_data.get("parent_id")
-        if "parent_id" in update_data and new_parent_id != dept.parent_id:
+        normalized_new = new_parent_id if new_parent_id else None
+        if "parent_id" in update_data and normalized_new != dept.parent_id:
             # 不能将自己设为父级
             if new_parent_id == dept_id:
                 raise BusinessRuleException("不能将自己设为父级部门")

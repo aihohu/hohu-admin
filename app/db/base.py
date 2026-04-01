@@ -1,4 +1,4 @@
-from sqlalchemy import BigInteger, Column, ForeignKey, Table
+from sqlalchemy import BigInteger, Column, ForeignKey, String, Table
 from sqlalchemy.orm import DeclarativeBase
 
 
@@ -41,4 +41,24 @@ role_menus = Table(
         ForeignKey("sys_menu.menu_id", ondelete="CASCADE"),
         primary_key=True,
     ),
+)
+
+
+# 用户-部门 关联表
+user_depts = Table(
+    "sys_user_dept",
+    Base.metadata,
+    Column(
+        "user_id",
+        BigInteger,
+        ForeignKey("sys_user.user_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "dept_id",
+        BigInteger,
+        ForeignKey("sys_dept.dept_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("is_primary", String(2), nullable=False, default="N"),
 )

@@ -15,6 +15,15 @@ from app.core.config import settings
 from app.utils.mask_util import MaskUtil
 
 
+class UserDeptItem(BaseModel):
+    """用户部门关联项"""
+
+    dept_id: str = Field(..., description="部门ID")
+    is_primary: bool = Field(False, description="是否主部门")
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
 class UserBase(BaseModel):
     """用户基础字段"""
 
@@ -25,6 +34,7 @@ class UserBase(BaseModel):
     user_gender: str = Field(..., description="用户性别")
     status: str = Field(..., description="状态")
     roles: list[str] = []  # 创建时分配的角色 ID 列表
+    dept_ids: list[UserDeptItem] = []  # 部门关联列表
 
     @field_validator("user_name")
     @classmethod
@@ -161,6 +171,9 @@ class UserItemOut(BaseModel):
     create_time: datetime
     # 可以在此扩展角色信息
     roles: list[str] = []
+    dept_ids: list[str] = []
+    dept_names: str = ""
+    primary_dept: str | None = None
 
     model_config = ConfigDict(
         from_attributes=True, alias_generator=to_camel, populate_by_name=True

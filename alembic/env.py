@@ -14,6 +14,7 @@ from app.db.base import Base
 from app.modules.system.models.user import User
 from app.modules.system.models.role import Role
 from app.modules.system.models.menu import Menu
+from app.modules.system.models.dept import Dept
 
 load_dotenv()
 config = context.config
