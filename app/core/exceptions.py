@@ -31,7 +31,7 @@ class NotFoundException(BusinessException):
     def __init__(self, resource_type: str = "资源"):
         super().__init__(
             code=404,
-            msg=f"{resource_type}不存在",
+            message=f"{resource_type}不存在",
             data={"resource_type": resource_type},
         )
 
@@ -62,7 +62,7 @@ class DuplicateException(BusinessException):
 
     def __init__(self, field: str, value: str):
         super().__init__(
-            code=400, msg=f"{field}已存在", data={"field": field, "value": value}
+            code=400, message=f"{field}已存在", data={"field": field, "value": value}
         )
 
 
@@ -85,7 +85,7 @@ class ValidationException(BusinessException):
 
     def __init__(self, message: str, field: str = None):
         super().__init__(
-            code=400, msg=message, data={"field": field} if field else None
+            code=400, message=message, data={"field": field} if field else None
         )
 
 
@@ -93,63 +93,63 @@ class AuthenticationException(BusinessException):
     """认证失败异常"""
 
     def __init__(self, message: str = "账号或密码错误"):
-        super().__init__(code=401, msg=message)
+        super().__init__(code=401, message=message)
 
 
 class AuthorizationException(BusinessException):
     """授权失败异常"""
 
     def __init__(self, message: str = "权限不足"):
-        super().__init__(code=403, msg=message)
+        super().__init__(code=403, message=message)
 
 
 class AccountDisabledException(AuthorizationException):
     """账号已被禁用异常"""
 
     def __init__(self):
-        super().__init__(msg="账号已被禁用")
+        super().__init__(message="账号已被禁用")
 
 
 class BusinessRuleException(BusinessException):
     """业务规则异常"""
 
     def __init__(self, message: str):
-        super().__init__(code=400, msg=message)
+        super().__init__(code=400, message=message)
 
 
 class CannotDeleteAdminException(BusinessRuleException):
     """不能删除管理员异常"""
 
     def __init__(self, admin_type: str = "系统管理员"):
-        super().__init__(msg=f"不能删除{admin_type}")
+        super().__init__(message=f"不能删除{admin_type}")
 
 
 class CannotDeleteSelfException(BusinessRuleException):
     """不能删除当前登录账号异常"""
 
     def __init__(self):
-        super().__init__(msg="不能删除当前登录的账号")
+        super().__init__(message="不能删除当前登录的账号")
 
 
 class HasChildrenException(BusinessRuleException):
     """存在子节点异常"""
 
     def __init__(self, resource_type: str = "菜单"):
-        super().__init__(msg=f"请先删除{resource_type}的子节点")
+        super().__init__(message=f"请先删除{resource_type}的子节点")
 
 
 class InvalidParameterException(BusinessRuleException):
     """无效参数异常"""
 
     def __init__(self, message: str = "参数错误"):
-        super().__init__(msg=message)
+        super().__init__(message=message)
 
 
 class UnsupportedLoginMethodException(BusinessRuleException):
     """不支持的登录方式异常"""
 
     def __init__(self):
-        super().__init__(msg="不支持的登录方式")
+        super().__init__(message="不支持的登录方式")
 
 
 class DictTypeNotFoundException(NotFoundException):
@@ -177,14 +177,14 @@ class InvalidDictTypeException(BusinessRuleException):
     """无效的字典类型异常"""
 
     def __init__(self, dict_type: str = ""):
-        super().__init__(msg=f"字典类型 {dict_type} 不存在")
+        super().__init__(message=f"字典类型 {dict_type} 不存在")
 
 
 class HasDictDataException(BusinessRuleException):
     """字典类型下有数据异常"""
 
     def __init__(self):
-        super().__init__(msg="该字典类型下存在数据，请先删除数据")
+        super().__init__(message="该字典类型下存在数据，请先删除数据")
 
 
 class DeptNotFoundException(NotFoundException):
@@ -205,28 +205,28 @@ class HasUsersException(BusinessRuleException):
     """部门下存在用户异常"""
 
     def __init__(self):
-        super().__init__(msg="该部门下存在用户，请先转移用户")
+        super().__init__(message="该部门下存在用户，请先转移用户")
 
 
 class DeptLevelExceededException(BusinessRuleException):
     """部门层级超限异常"""
 
     def __init__(self, max_level: int = 5):
-        super().__init__(msg=f"部门层级不能超过{max_level}层")
+        super().__init__(message=f"部门层级不能超过{max_level}层")
 
 
 class PrimaryDeptRequiredException(BusinessRuleException):
     """必须指定主部门异常"""
 
     def __init__(self):
-        super().__init__(msg="必须指定一个主部门")
+        super().__init__(message="必须指定一个主部门")
 
 
 class MultiplePrimaryDeptException(BusinessRuleException):
     """多个主部门异常"""
 
     def __init__(self):
-        super().__init__(msg="只能指定一个主部门")
+        super().__init__(message="只能指定一个主部门")
 
 
 # ============ 全局异常处理器 ============
