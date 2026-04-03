@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Body, Depends
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
@@ -16,7 +16,7 @@ from app.modules.system.schemas.dept import (
     DeptUpdate,
 )
 from app.modules.system.service.dept_service import dept_service
-from app.utils.pagination import paginate
+from app.utils.pagination import build_filters, paginate
 
 router = APIRouter()
 
@@ -27,9 +27,23 @@ router = APIRouter()
     summary="获取部门树形结构",
     description="获取所有部门的树形结构，用于部门管理页面",
 )
-async def get_dept_tree(db: AsyncSession = Depends(get_db)):
-    """获取部门树形结构"""
+async def get_dept_tree(
+    query: DeptQuery = Depends(),
+    db: AsyncSession = Depends(get_db),
+):
+    """获取部门树形结构（支持筛选）"""
     stmt = select(Dept).order_by(Dept.order_num.asc())
+
+    # 构建筛选条件
+    field_mapping = {
+        "dept_name": ("dept_name", "contains"),
+        "status": ("status", "=="),
+        "leader": ("leader", "contains"),
+    }
+    filters = build_filters(Dept, field_mapping, **query.model_dump())
+    if filters:
+        stmt = stmt.where(and_(*filters))
+
     result = await db.execute(stmt)
     depts = result.scalars().all()
 
