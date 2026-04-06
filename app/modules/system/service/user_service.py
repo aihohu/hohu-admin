@@ -4,11 +4,10 @@ from sqlalchemy.orm import selectinload
 
 from app.constants import ADMIN_USERNAME
 from app.core.exceptions import (
-    CannotDeleteAdminException,
-    CannotDeleteSelfException,
-    DuplicateUserException,
+    BusinessRuleException,
+    DuplicateException,
     InvalidParameterException,
-    UserNotFoundException,
+    NotFoundException,
 )
 from app.core.security import get_password_hash
 from app.modules.system.models.role import Role
@@ -66,14 +65,14 @@ class UserService:
             创建的用户对象
 
         Raises:
-            DuplicateUserException: 用户名已存在
+            DuplicateException: 用户名已存在
         """
         # 检查唯一性
         result = await db.execute(
             select(User).where(User.user_name == user_in.user_name)
         )
         if result.scalars().first():
-            raise DuplicateUserException(user_in.user_name)
+            raise DuplicateException("用户名", user_in.user_name)
 
         # 准备用户数据
         obj_data = user_in.model_dump(exclude={"roles", "password", "dept_ids"})
@@ -105,7 +104,7 @@ class UserService:
             更新后的用户对象
 
         Raises:
-            UserNotFoundException: 用户不存在
+            NotFoundException: 用户不存在
         """
         # 查询用户（带角色预加载）
         stmt = (
@@ -116,7 +115,7 @@ class UserService:
         result = await db.execute(stmt)
         user = result.scalars().first()
         if not user:
-            raise UserNotFoundException()
+            raise NotFoundException("用户")
 
         # 更新基础字段，排除 roles 和 password
         update_data = user_in.model_dump(
@@ -143,14 +142,14 @@ class UserService:
             user_id: 用户ID
 
         Raises:
-            UserNotFoundException: 用户不存在
-            CannotDeleteAdminException: 尝试删除管理员账号
+            NotFoundException: 用户不存在
+            BusinessRuleException: 不能删除系统管理员
         """
         user = await db.get(User, user_id)
         if not user:
-            raise UserNotFoundException()
+            raise NotFoundException("用户")
         if user.user_name == ADMIN_USERNAME:
-            raise CannotDeleteAdminException()
+            raise BusinessRuleException("不能删除系统管理员")
 
         await db.delete(user)
 
@@ -170,8 +169,8 @@ class UserService:
 
         Raises:
             InvalidParameterException: 未选择要删除的用户
-            CannotDeleteAdminException: 尝试删除管理员账号
-            CannotDeleteSelfException: 尝试删除当前登录账号
+            BusinessRuleException: 不能删除系统管理员
+            BusinessRuleException: 不能删除当前登录的账号
         """
         if not ids:
             raise InvalidParameterException("未选择要删除的用户")
@@ -182,11 +181,11 @@ class UserService:
         )
         admin_result = await db.execute(check_stmt)
         if admin_result.scalars().first():
-            raise CannotDeleteAdminException("系统管理员")
+            raise BusinessRuleException("不能删除系统管理员")
 
         # 检查是否包含当前用户自己 (防止误删当前登录账号)
         if current_user_id in ids:
-            raise CannotDeleteSelfException()
+            raise BusinessRuleException("不能删除当前登录的账号")
 
         # 执行批量删除
         stmt = delete(User).where(User.user_id.in_(ids))

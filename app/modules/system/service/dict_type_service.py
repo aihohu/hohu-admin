@@ -3,9 +3,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import STATUS_ENABLED
 from app.core.exceptions import (
-    DictTypeNotFoundException,
-    DuplicateDictTypeException,
-    HasDictDataException,
+    BusinessRuleException,
+    DuplicateException,
+    NotFoundException,
 )
 from app.modules.system.models.dict_data import DictData
 from app.modules.system.models.dict_type import DictType
@@ -62,21 +62,21 @@ class DictTypeService:
             创建的字典类型对象
 
         Raises:
-            DuplicateDictTypeException: 字典类型已存在
+            DuplicateException: 字典类型已存在
         """
         # 检查编码唯一性
         check = await db.execute(
             select(DictType).where(DictType.dict_type == type_in.dict_type)
         )
         if check.scalars().first():
-            raise DuplicateDictTypeException(type_in.dict_type)
+            raise DuplicateException("字典类型", type_in.dict_type)
 
         # 检查名称唯一性
         check_name = await db.execute(
             select(DictType).where(DictType.dict_name == type_in.dict_name)
         )
         if check_name.scalars().first():
-            raise DuplicateDictTypeException(type_in.dict_name)
+            raise DuplicateException("字典类型", type_in.dict_name)
 
         new_type = DictType(**type_in.model_dump())
         db.add(new_type)
@@ -97,11 +97,11 @@ class DictTypeService:
             更新后的字典类型对象
 
         Raises:
-            DictTypeNotFoundException: 字典类型不存在
+            NotFoundException: 字典类型不存在
         """
         dict_type = await db.get(DictType, type_id)
         if not dict_type:
-            raise DictTypeNotFoundException()
+            raise NotFoundException("字典类型")
 
         update_data = type_in.model_dump(exclude_unset=True)
         for field, value in update_data.items():
@@ -118,12 +118,12 @@ class DictTypeService:
             type_id: 字典类型ID
 
         Raises:
-            DictTypeNotFoundException: 字典类型不存在
-            HasDictDataException: 字典类型下有数据
+            NotFoundException: 字典类型不存在
+            BusinessRuleException: 字典类型下有数据
         """
         dict_type = await db.get(DictType, type_id)
         if not dict_type:
-            raise DictTypeNotFoundException()
+            raise NotFoundException("字典类型")
 
         # 检查是否有关联的字典数据
         check_stmt = select(DictData).where(
@@ -131,7 +131,7 @@ class DictTypeService:
         )
         result = await db.execute(check_stmt)
         if result.scalars().first():
-            raise HasDictDataException()
+            raise BusinessRuleException("该字典类型下存在数据，请先删除数据")
 
         await db.delete(dict_type)
 
@@ -165,7 +165,7 @@ class DictTypeService:
             删除的数量
 
         Raises:
-            HasDictDataException: 有字典类型下存在数据
+            BusinessRuleException: 有字典类型下存在数据
         """
         # 检查是否有字典类型下存在数据
         dict_types = await db.execute(
@@ -179,7 +179,7 @@ class DictTypeService:
             )
             result = await db.execute(check_stmt)
             if result.scalars().first():
-                raise HasDictDataException()
+                raise BusinessRuleException("该字典类型下存在数据，请先删除数据")
 
         # 删除所有字典类型
         for dict_type in dict_type_list:

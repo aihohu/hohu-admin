@@ -4,14 +4,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.constants import DEPT_MAX_LEVEL, IS_PRIMARY_NO, IS_PRIMARY_YES
 from app.core.exceptions import (
     BusinessRuleException,
-    DeptLevelExceededException,
-    DeptNotFoundException,
-    DuplicateDeptNameException,
-    HasChildrenException,
-    HasUsersException,
+    DuplicateException,
     InvalidParameterException,
-    MultiplePrimaryDeptException,
-    PrimaryDeptRequiredException,
+    NotFoundException,
 )
 from app.db.base import user_depts
 from app.modules.system.models.dept import Dept
@@ -48,7 +43,7 @@ class DeptService:
         """根据 ID 获取部门"""
         dept = await db.get(Dept, dept_id)
         if not dept:
-            raise DeptNotFoundException()
+            raise NotFoundException("部门")
         return dept
 
     async def get_by_ids(self, db: AsyncSession, ids: list[int]) -> list[Dept]:
@@ -67,12 +62,12 @@ class DeptService:
         if parent_id is not None:
             parent = await db.get(Dept, parent_id)
             if not parent:
-                raise DeptNotFoundException()
+                raise NotFoundException("部门")
 
             # 校验层级深度
             level = self._get_dept_level(parent.ancestors) + 1
             if level > DEPT_MAX_LEVEL:
-                raise DeptLevelExceededException(DEPT_MAX_LEVEL)
+                raise BusinessRuleException(f"部门层级不能超过{DEPT_MAX_LEVEL}层")
 
         # 校验同级名称唯一性
         await self._check_duplicate_name(db, parent_id, dept_in.dept_name)
@@ -112,7 +107,7 @@ class DeptService:
             if new_parent_id is not None:
                 new_parent = await db.get(Dept, new_parent_id)
                 if not new_parent:
-                    raise DeptNotFoundException()
+                    raise NotFoundException("部门")
 
                 # 不能移动到自己的后代下
                 if new_parent.ancestors and str(dept_id) in new_parent.ancestors.split(
@@ -124,7 +119,7 @@ class DeptService:
                 child_depth = await self._get_max_child_depth(db, dept_id)
                 new_level = self._get_dept_level(new_parent.ancestors) + 1 + child_depth
                 if new_level > DEPT_MAX_LEVEL:
-                    raise DeptLevelExceededException(DEPT_MAX_LEVEL)
+                    raise BusinessRuleException(f"部门层级不能超过{DEPT_MAX_LEVEL}层")
 
                 # 更新后代 ancestors
                 old_prefix = dept.ancestors
@@ -166,13 +161,13 @@ class DeptService:
         child_stmt = select(Dept).where(Dept.parent_id == dept_id)
         child = (await db.execute(child_stmt)).first()
         if child:
-            raise HasChildrenException("部门")
+            raise BusinessRuleException("请先删除部门的子节点")
 
         # 检查关联用户
         user_stmt = select(user_depts).where(user_depts.c.dept_id == dept_id)
         user_assoc = (await db.execute(user_stmt)).first()
         if user_assoc:
-            raise HasUsersException()
+            raise BusinessRuleException("该部门下存在用户，请先转移用户")
 
         await db.delete(dept)
 
@@ -209,15 +204,15 @@ class DeptService:
         # 校验主部门
         primary_count = sum(1 for d in dept_list if d.get("is_primary"))
         if primary_count == 0:
-            raise PrimaryDeptRequiredException()
+            raise BusinessRuleException("必须指定一个主部门")
         if primary_count > 1:
-            raise MultiplePrimaryDeptException()
+            raise BusinessRuleException("只能指定一个主部门")
 
         # 校验部门都存在
         dept_ids = [int(d["dept_id"]) for d in dept_list]
         depts = await self.get_by_ids(db, dept_ids)
         if len(depts) != len(dept_ids):
-            raise DeptNotFoundException()
+            raise NotFoundException("部门")
 
         # 删除旧关联
         await db.execute(delete(user_depts).where(user_depts.c.user_id == user_id))
@@ -297,7 +292,7 @@ class DeptService:
 
         result = await db.execute(stmt)
         if result.scalars().first():
-            raise DuplicateDeptNameException(dept_name)
+            raise DuplicateException("同级部门名称", dept_name)
 
 
 # 创建单例

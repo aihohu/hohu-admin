@@ -5,7 +5,7 @@ from app.constants import MENU_TYPE_BUTTON, MENU_TYPE_MENU, STATUS_ENABLED
 from app.core.exceptions import (
     BusinessRuleException,
     InvalidParameterException,
-    MenuNotFoundException,
+    NotFoundException,
 )
 from app.modules.system.models.menu import Menu
 from app.modules.system.schemas.menu import MenuCreate, MenuQuery, MenuUpdate
@@ -126,11 +126,11 @@ class MenuService:
             更新后的菜单对象
 
         Raises:
-            MenuNotFoundException: 菜单不存在
+            NotFoundException: 菜单不存在
         """
         menu = await db.get(Menu, menu_id)
         if not menu:
-            raise MenuNotFoundException()
+            raise NotFoundException("菜单")
 
         update_data = menu_in.model_dump(exclude_unset=True)
         for field, value in update_data.items():
@@ -171,7 +171,7 @@ class MenuService:
             menu_id: 菜单ID
 
         Raises:
-            MenuNotFoundException: 菜单不存在
+            NotFoundException: 菜单不存在
             BusinessRuleException: 存在子菜单，不能删除
         """
         # 检查是否有子菜单
@@ -182,7 +182,7 @@ class MenuService:
 
         menu = await db.get(Menu, menu_id)
         if not menu:
-            raise MenuNotFoundException()
+            raise NotFoundException("菜单")
 
         await db.delete(menu)
 

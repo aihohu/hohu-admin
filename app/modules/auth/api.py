@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.constants import MENU_TYPE_DIRECTORY, MENU_TYPE_MENU, STATUS_ENABLED
 from app.constants.static_routes import CONSTANT_ROUTES
 from app.core.base_response import ResponseModel
-from app.core.exceptions import DuplicateUserException
+from app.core.exceptions import DuplicateException
 from app.core.security import get_password_hash
 from app.db.session import get_db
 from app.modules.auth.schemas.auth import LoginCredentials
@@ -44,7 +44,7 @@ async def register(
         UserOut: 注册成功的用户信息（包含生成的 user_id）
 
     Raises:
-        DuplicateUserException: 当用户名已存在时抛出
+        DuplicateException: 当用户名已存在时抛出
 
     Note:
         - 本接口应用频率限制：每分钟最多 3 次注册尝试
@@ -52,7 +52,7 @@ async def register(
     # 检查用户名是否已存在
     result = await db.execute(select(User).where(User.user_name == user_in.user_name))
     if result.scalars().first():
-        raise DuplicateUserException(user_in.user_name)
+        raise DuplicateException("用户名", user_in.user_name)
 
     # 创建用户实例
     new_user = User(

@@ -3,10 +3,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import STATUS_ENABLED, SUPER_ADMIN_ROLE_CODE
 from app.core.exceptions import (
-    CannotDeleteAdminException,
-    DuplicateRoleException,
+    BusinessRuleException,
+    DuplicateException,
     InvalidParameterException,
-    RoleNotFoundException,
+    NotFoundException,
 )
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
@@ -114,14 +114,14 @@ class RoleService:
             创建的角色对象
 
         Raises:
-            DuplicateRoleException: 角色编码已存在
+            DuplicateException: 角色编码已存在
         """
         # 检查编码唯一性
         check = await db.execute(
             select(Role).where(Role.role_code == role_in.role_code)
         )
         if check.scalars().first():
-            raise DuplicateRoleException(role_in.role_code)
+            raise DuplicateException("角色编码", role_in.role_code)
 
         new_role = Role(**role_in.model_dump())
         db.add(new_role)
@@ -142,11 +142,11 @@ class RoleService:
             更新后的角色对象
 
         Raises:
-            RoleNotFoundException: 角色不存在
+            NotFoundException: 角色不存在
         """
         role = await db.get(Role, role_id)
         if not role:
-            raise RoleNotFoundException()
+            raise NotFoundException("角色")
 
         update_data = role_in.model_dump(exclude_unset=True)
         for field, value in update_data.items():
@@ -169,11 +169,11 @@ class RoleService:
             更新后的角色对象
 
         Raises:
-            RoleNotFoundException: 角色不存在
+            NotFoundException: 角色不存在
         """
         role = await db.get(Role, role_id)
         if not role:
-            raise RoleNotFoundException()
+            raise NotFoundException("角色")
 
         if menu_ids:
             menu_result = await db.execute(
@@ -194,11 +194,11 @@ class RoleService:
             role_id: 角色ID
 
         Raises:
-            RoleNotFoundException: 角色不存在
+            NotFoundException: 角色不存在
         """
         role = await db.get(Role, role_id)
         if not role:
-            raise RoleNotFoundException()
+            raise NotFoundException("角色")
 
         await db.delete(role)
 
@@ -215,7 +215,7 @@ class RoleService:
 
         Raises:
             InvalidParameterException: 未选择要删除的角色
-            CannotDeleteAdminException: 尝试删除系统管理员角色
+            BusinessRuleException: 不能删除系统管理员角色
         """
         if not ids:
             raise InvalidParameterException("未选择要删除的角色")
@@ -229,7 +229,7 @@ class RoleService:
         )
         admin_result = await db.execute(check_stmt)
         if admin_result.scalars().first():
-            raise CannotDeleteAdminException("系统管理员角色")
+            raise BusinessRuleException("不能删除系统管理员角色")
 
         stmt = delete(Role).where(Role.role_id.in_(ids))
         result = await db.execute(stmt)
@@ -248,11 +248,11 @@ class RoleService:
             角色对象
 
         Raises:
-            RoleNotFoundException: 角色不存在
+            NotFoundException: 角色不存在
         """
         role = await db.get(Role, role_id)
         if not role:
-            raise RoleNotFoundException()
+            raise NotFoundException("角色")
         return role
 
 

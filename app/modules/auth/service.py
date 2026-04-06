@@ -8,9 +8,9 @@ from sqlalchemy.orm import selectinload
 from app.core.base_response import ResponseModel
 from app.core.config import settings
 from app.core.exceptions import (
-    AccountDisabledException,
     AuthenticationException,
-    UnsupportedLoginMethodException,
+    AuthorizationException,
+    BusinessRuleException,
 )
 from app.core.security import create_access_token, verify_password
 from app.db.session import get_db
@@ -33,7 +33,7 @@ class AuthService:
         # elif credentials.login_type == "google":
         #     user = await self._verify_google_login(credentials, db)
         else:
-            raise UnsupportedLoginMethodException()
+            raise BusinessRuleException("不支持的登录方式")
 
         # 统一签发 Token
         token = create_access_token(subject=str(user.user_id))
@@ -54,7 +54,7 @@ class AuthService:
             raise AuthenticationException()
 
         if not user.status or user.status == "2":
-            raise AccountDisabledException()
+            raise AuthorizationException("账号已被禁用")
 
         return user
 
@@ -105,7 +105,7 @@ async def get_current_user(
         raise credentials_exception
 
     if not user.status or user.status == "2":
-        raise AccountDisabledException()
+        raise AuthorizationException("账号已被禁用")
 
     return user
 

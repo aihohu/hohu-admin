@@ -8,9 +8,8 @@ from fastapi.responses import JSONResponse
 
 from app.core.base_response import ResponseModel
 
+
 # ============ 业务异常类定义 ============
-
-
 class BusinessException(Exception):
     """
     业务异常基类
@@ -36,56 +35,12 @@ class NotFoundException(BusinessException):
         )
 
 
-class UserNotFoundException(NotFoundException):
-    """用户不存在异常"""
-
-    def __init__(self):
-        super().__init__(resource_type="用户")
-
-
-class RoleNotFoundException(NotFoundException):
-    """角色不存在异常"""
-
-    def __init__(self):
-        super().__init__(resource_type="角色")
-
-
-class MenuNotFoundException(NotFoundException):
-    """菜单不存在异常"""
-
-    def __init__(self):
-        super().__init__(resource_type="菜单")
-
-
 class DuplicateException(BusinessException):
     """资源重复异常"""
 
     def __init__(self, field: str, value: str):
         super().__init__(
             code=400, message=f"{field}已存在", data={"field": field, "value": value}
-        )
-
-
-class DuplicateUserException(DuplicateException):
-    """用户名已存在异常"""
-
-    def __init__(self, username: str = ""):
-        super().__init__(field="用户名", value=username)
-
-
-class DuplicateRoleException(DuplicateException):
-    """角色编码已存在异常"""
-
-    def __init__(self, role_code: str = ""):
-        super().__init__(field="角色编码", value=role_code)
-
-
-class ValidationException(BusinessException):
-    """参数验证异常"""
-
-    def __init__(self, message: str, field: str = None):
-        super().__init__(
-            code=400, message=message, data={"field": field} if field else None
         )
 
 
@@ -103,13 +58,6 @@ class AuthorizationException(BusinessException):
         super().__init__(code=403, message=message)
 
 
-class AccountDisabledException(AuthorizationException):
-    """账号已被禁用异常"""
-
-    def __init__(self):
-        super().__init__(message="账号已被禁用")
-
-
 class BusinessRuleException(BusinessException):
     """业务规则异常"""
 
@@ -117,116 +65,11 @@ class BusinessRuleException(BusinessException):
         super().__init__(code=400, message=message)
 
 
-class CannotDeleteAdminException(BusinessRuleException):
-    """不能删除管理员异常"""
-
-    def __init__(self, admin_type: str = "系统管理员"):
-        super().__init__(message=f"不能删除{admin_type}")
-
-
-class CannotDeleteSelfException(BusinessRuleException):
-    """不能删除当前登录账号异常"""
-
-    def __init__(self):
-        super().__init__(message="不能删除当前登录的账号")
-
-
-class HasChildrenException(BusinessRuleException):
-    """存在子节点异常"""
-
-    def __init__(self, resource_type: str = "菜单"):
-        super().__init__(message=f"请先删除{resource_type}的子节点")
-
-
 class InvalidParameterException(BusinessRuleException):
     """无效参数异常"""
 
     def __init__(self, message: str = "参数错误"):
         super().__init__(message=message)
-
-
-class UnsupportedLoginMethodException(BusinessRuleException):
-    """不支持的登录方式异常"""
-
-    def __init__(self):
-        super().__init__(message="不支持的登录方式")
-
-
-class DictTypeNotFoundException(NotFoundException):
-    """字典类型不存在异常"""
-
-    def __init__(self):
-        super().__init__(resource_type="字典类型")
-
-
-class DictDataNotFoundException(NotFoundException):
-    """字典数据不存在异常"""
-
-    def __init__(self):
-        super().__init__(resource_type="字典数据")
-
-
-class DuplicateDictTypeException(DuplicateException):
-    """字典类型已存在异常"""
-
-    def __init__(self, dict_type: str = ""):
-        super().__init__(field="字典类型", value=dict_type)
-
-
-class InvalidDictTypeException(BusinessRuleException):
-    """无效的字典类型异常"""
-
-    def __init__(self, dict_type: str = ""):
-        super().__init__(message=f"字典类型 {dict_type} 不存在")
-
-
-class HasDictDataException(BusinessRuleException):
-    """字典类型下有数据异常"""
-
-    def __init__(self):
-        super().__init__(message="该字典类型下存在数据，请先删除数据")
-
-
-class DeptNotFoundException(NotFoundException):
-    """部门不存在异常"""
-
-    def __init__(self):
-        super().__init__(resource_type="部门")
-
-
-class DuplicateDeptNameException(DuplicateException):
-    """同级部门名称重复异常"""
-
-    def __init__(self, dept_name: str = ""):
-        super().__init__(field="同级部门名称", value=dept_name)
-
-
-class HasUsersException(BusinessRuleException):
-    """部门下存在用户异常"""
-
-    def __init__(self):
-        super().__init__(message="该部门下存在用户，请先转移用户")
-
-
-class DeptLevelExceededException(BusinessRuleException):
-    """部门层级超限异常"""
-
-    def __init__(self, max_level: int = 5):
-        super().__init__(message=f"部门层级不能超过{max_level}层")
-
-
-class PrimaryDeptRequiredException(BusinessRuleException):
-    """必须指定主部门异常"""
-
-    def __init__(self):
-        super().__init__(message="必须指定一个主部门")
-
-
-class MultiplePrimaryDeptException(BusinessRuleException):
-    """多个主部门异常"""
-
-    def __init__(self):
-        super().__init__(message="只能指定一个主部门")
 
 
 # ============ 全局异常处理器 ============
@@ -240,7 +83,7 @@ def setup_exception_handlers(app: FastAPI):
         app: FastAPI 应用实例
     """
 
-    # 1. 捕获业务异常
+    # 捕获业务异常
     @app.exception_handler(BusinessException)
     async def business_exception_handler(_request: Request, exc: BusinessException):
         """处理所有业务异常"""
@@ -251,7 +94,7 @@ def setup_exception_handlers(app: FastAPI):
             ).model_dump(),
         )
 
-    # 2. 捕获所有未知的系统异常
+    # 捕获所有未知的系统异常
     @app.exception_handler(Exception)
     async def all_exception_handler(_request: Request, _exc: Exception):
         """处理未捕获的系统异常"""
@@ -264,7 +107,7 @@ def setup_exception_handlers(app: FastAPI):
             content=ResponseModel.error(msg="服务器内部错误").model_dump(),
         )
 
-    # 3. 捕获 Pydantic 参数校验错误 (422 错误)
+    # 捕获 Pydantic 参数校验错误 (422 错误)
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(
         _request: Request, exc: RequestValidationError

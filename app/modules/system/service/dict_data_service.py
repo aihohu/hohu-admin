@@ -3,9 +3,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import STATUS_ENABLED
 from app.core.exceptions import (
-    DictDataNotFoundException,
-    InvalidDictTypeException,
+    BusinessRuleException,
     InvalidParameterException,
+    NotFoundException,
 )
 from app.modules.system.models.dict_data import DictData
 from app.modules.system.models.dict_type import DictType
@@ -63,13 +63,13 @@ class DictDataService:
             创建的字典数据对象
 
         Raises:
-            InvalidDictTypeException: 字典类型不存在
+            BusinessRuleException: 字典类型不存在
         """
         # 验证字典类型是否存在
         check_stmt = select(DictType).where(DictType.dict_type == data_in.dict_type)
         result = await db.execute(check_stmt)
         if not result.scalars().first():
-            raise InvalidDictTypeException(data_in.dict_type)
+            raise BusinessRuleException(f"字典类型 {data_in.dict_type} 不存在")
 
         new_data = DictData(**data_in.model_dump())
         db.add(new_data)
@@ -90,18 +90,18 @@ class DictDataService:
             更新后的字典数据对象
 
         Raises:
-            DictDataNotFoundException: 字典数据不存在
+            NotFoundException: 字典数据不存在
         """
         dict_data = await db.get(DictData, data_id)
         if not dict_data:
-            raise DictDataNotFoundException()
+            raise NotFoundException("字典数据")
 
         # 如果更新了 dict_type，需要验证新类型是否存在
         if data_in.dict_type is not None and data_in.dict_type != dict_data.dict_type:
             check_stmt = select(DictType).where(DictType.dict_type == data_in.dict_type)
             result = await db.execute(check_stmt)
             if not result.scalars().first():
-                raise InvalidDictTypeException(data_in.dict_type)
+                raise BusinessRuleException(f"字典类型 {data_in.dict_type} 不存在")
 
         update_data = data_in.model_dump(exclude_unset=True)
         for field, value in update_data.items():
@@ -118,11 +118,11 @@ class DictDataService:
             data_id: 字典数据ID
 
         Raises:
-            DictDataNotFoundException: 字典数据不存在
+            NotFoundException: 字典数据不存在
         """
         dict_data = await db.get(DictData, data_id)
         if not dict_data:
-            raise DictDataNotFoundException()
+            raise NotFoundException("字典数据")
 
         await db.delete(dict_data)
 
@@ -160,13 +160,13 @@ class DictDataService:
             字典数据列表
 
         Raises:
-            InvalidDictTypeException: 字典类型不存在
+            BusinessRuleException: 字典类型不存在
         """
         # 验证字典类型是否存在
         check_stmt = select(DictType).where(DictType.dict_type == dict_type)
         result = await db.execute(check_stmt)
         if not result.scalars().first():
-            raise InvalidDictTypeException(dict_type)
+            raise BusinessRuleException(f"字典类型 {dict_type} 不存在")
 
         # 查询启用的字典数据
         stmt = (
