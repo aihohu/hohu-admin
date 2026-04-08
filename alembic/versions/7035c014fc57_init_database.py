@@ -1,3 +1,5 @@
+# ruff: noqa: T201
+
 """init database
 
 Revision ID: 7035c014fc57
