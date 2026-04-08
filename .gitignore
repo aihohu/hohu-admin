@@ -7,7 +7,6 @@ htmlcov
 .cache
 .venv
 .conda
-alembic/versions/*
 .env
 .env.prod
 .DS_Store
