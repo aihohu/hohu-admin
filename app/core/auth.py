@@ -10,10 +10,9 @@ from app.modules.system.models.user import User
 
 def is_super_admin(user: User) -> bool:
     """判断用户是否为超级管理员"""
-    return (
-        user.user_name == ADMIN_USERNAME
-        or SUPER_ADMIN_ROLE_CODE in [r.role_code for r in user.roles]
-    )
+    return user.user_name == ADMIN_USERNAME or SUPER_ADMIN_ROLE_CODE in [
+        r.role_code for r in user.roles
+    ]
 
 
 def require_permissions(perm_code: str = None, super_admin_only: bool = False):
