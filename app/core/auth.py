@@ -49,10 +49,8 @@ def require_permissions(perm_code: str = None, super_admin_only: bool = False):
                     for menu in role.menus:
                         if menu.permission:
                             user_perms.add(menu.permission)
-
             if perm_code not in user_perms:
                 raise AuthorizationException(f"缺少必要权限: {perm_code}")
-
         return current_user
 
     return permission_dependency
