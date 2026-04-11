@@ -8,6 +8,14 @@ from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
 
 
+def is_super_admin(user: User) -> bool:
+    """判断用户是否为超级管理员"""
+    return (
+        user.user_name == ADMIN_USERNAME
+        or SUPER_ADMIN_ROLE_CODE in [r.role_code for r in user.roles]
+    )
+
+
 def require_permissions(perm_code: str = None, super_admin_only: bool = False):
     """
     权限校验装饰器
@@ -25,14 +33,8 @@ def require_permissions(perm_code: str = None, super_admin_only: bool = False):
     """
 
     async def permission_dependency(current_user: User = Depends(get_current_user)):
-        # 1. 检查是否是超级管理员
-        # 通过检查用户名或角色代码判断
-        is_super_admin = (
-            current_user.user_name == ADMIN_USERNAME
-            or SUPER_ADMIN_ROLE_CODE in [r.role_code for r in current_user.roles]
-        )
 
-        if is_super_admin:
+        if is_super_admin(current_user):
             return current_user
 
         # 2. 如果要求仅限超级管理员访问

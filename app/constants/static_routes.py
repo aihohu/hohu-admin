@@ -32,17 +32,17 @@ CONSTANT_ROUTES = [
             "hideInMenu": True,
         },
     },
-    {
-        "name": "home",
-        "path": "/home",
-        "component": "layout.base$view.home",
-        "meta": {
-            "title": "home",
-            "i18nKey": "route.home",
-            "icon": "mdi:monitor-dashboard",
-            "order": 1,
-        },
-    },
+    # {
+    #     "name": "home",
+    #     "path": "/home",
+    #     "component": "layout.base$view.home",
+    #     "meta": {
+    #         "title": "home",
+    #         "i18nKey": "route.home",
+    #         "icon": "mdi:monitor-dashboard",
+    #         "order": 1,
+    #     },
+    # },
     {
         "name": "iframe-page",
         "path": "/iframe-page/:url",

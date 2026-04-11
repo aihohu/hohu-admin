@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import MENU_TYPE_DIRECTORY, MENU_TYPE_MENU, STATUS_ENABLED
 from app.constants.static_routes import CONSTANT_ROUTES
+from app.core.auth import is_super_admin
 from app.core.base_response import ResponseModel
 from app.core.exceptions import DuplicateException
 from app.core.security import get_password_hash
@@ -168,7 +169,10 @@ async def get_user_info(current_user: User = Depends(get_current_user)):
         401: {"description": "未登录或令牌已过期"},
     },
 )
-async def get_user_routes(current_user: User = Depends(get_current_user)):
+async def get_user_routes(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """
     获取当前用户的动态路由树
 
@@ -182,20 +186,27 @@ async def get_user_routes(current_user: User = Depends(get_current_user)):
         - 仅返回菜单(M)和目录(D)类型的路由
         - 仅返回状态为启用的路由
         - 自动构建树形结构供前端路由使用
+        - 超级管理员直接查询所有启用菜单，无需通过角色关联
     """
-    # 汇总当前用户所有角色下的菜单 (去重)
-    all_menus_dict = {}
-    for role in current_user.roles:
-        for menu in role.menus:
-            # 过滤掉按钮级权限，只保留菜单和目录
-            if (
-                menu.menu_type in [MENU_TYPE_DIRECTORY, MENU_TYPE_MENU]
-                and menu.status == STATUS_ENABLED
-            ):
-                all_menus_dict[menu.menu_id] = menu
+    if is_super_admin(current_user):
+        result = await db.execute(
+            select(Menu).where(
+                Menu.menu_type.in_([MENU_TYPE_DIRECTORY, MENU_TYPE_MENU]),
+                Menu.status == STATUS_ENABLED,
+            )
+        )
+        menu_list = list(result.scalars().all())
+    else:
+        all_menus_dict = {}
+        for role in current_user.roles:
+            for menu in role.menus:
+                if (
+                    menu.menu_type in [MENU_TYPE_DIRECTORY, MENU_TYPE_MENU]
+                    and menu.status == STATUS_ENABLED
+                ):
+                    all_menus_dict[menu.menu_id] = menu
+        menu_list = list(all_menus_dict.values())
 
-    # 构建树形结构
-    menu_list = list(all_menus_dict.values())
     route_tree = build_menu_tree(menu_list, 0)
 
     return ResponseModel.success(
