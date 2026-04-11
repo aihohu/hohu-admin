@@ -141,7 +141,7 @@ SECRET_KEY=your-super-secret-key
 alembic upgrade head
 
 # 运行初始化脚本
-python scripts/seed_data.py
+python scripts/init_db.py
 ```
 
 #### 5. 启动服务

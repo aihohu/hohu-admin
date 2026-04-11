@@ -70,7 +70,7 @@ def init_project():
         else:
             print(f"❌ 种子脚本 {seed_script} 不存在，跳过。")
 
-    print("\n✅ 初始化完成！")
+    print("\n✅ HoHu Admin 初始化完成！")
 
 
 if __name__ == "__main__":

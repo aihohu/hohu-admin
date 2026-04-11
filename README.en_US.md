@@ -141,7 +141,7 @@ SECRET_KEY=your-super-secret-key
 alembic upgrade head
 
 # Seed initial data
-python scripts/seed_data.py
+python scripts/init_db.py
 ```
 
 #### 5. Start the Server
