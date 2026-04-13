@@ -2,6 +2,7 @@
 
 import asyncio
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -171,14 +172,42 @@ init_menus = [
     ),
 ]
 
+SEED_TABLES = [
+    "sys_user_role",
+    "sys_role_menu",
+    "sys_user",
+    "sys_role",
+    "sys_menu",
+]
+
+
+async def check_data_exists(db: AsyncSession) -> bool:
+    result = await db.execute(text("SELECT EXISTS(SELECT 1 FROM sys_user LIMIT 1)"))
+    return result.scalar()
+
+
+async def clear_seed_data(db: AsyncSession):
+    for table in SEED_TABLES:
+        await db.execute(text(f"TRUNCATE TABLE {table} CASCADE"))
+    await db.commit()
+    print("✅ 已清空所有种子数据。")
+
 
 async def init_db():
     engine = create_async_engine(settings.DATABASE_URL)
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    password = input("初始化密码 [默认: hohu123456]: ").strip() or "hohu123456"
-
     async with async_session() as db:
+        if await check_data_exists(db):
+            print("⚠️ 检测到数据库中已存在数据。")
+            choice = input("是否清空后重新初始化? (y/n): ").lower()
+            if choice != "y":
+                print("⏭️ 跳过数据初始化。")
+                return
+            await clear_seed_data(db)
+
+        password = input("初始化密码 [默认: hohu123456]: ").strip() or "hohu123456"
+
         # 创建初始菜单
         db.add_all(init_menus)
 

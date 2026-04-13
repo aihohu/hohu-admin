@@ -60,7 +60,20 @@ def init_project():
 
     # 2. 数据库迁移
     if input("是否执行数据库迁移 (Alembic)? (y/n): ").lower() == "y":
-        run_command([sys.executable, "-m", "alembic", "upgrade", "head"])
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "alembic", "upgrade", "head"], check=True
+            )
+        except subprocess.CalledProcessError:
+            print("⚠️ 数据库迁移失败（可能表已存在），尝试标记迁移版本...")
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "alembic", "stamp", "head"], check=True
+                )
+                print("✅ 已标记所有迁移为已应用。")
+            except subprocess.CalledProcessError:
+                print("❌ 标记迁移版本失败，请手动检查数据库。")
+                sys.exit(1)
 
     # 3. 初始化种子数据
     seed_script = "scripts/init_db.py"
