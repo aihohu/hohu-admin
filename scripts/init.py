@@ -60,7 +60,7 @@ def init_project():
 
     # 2. 数据库迁移
     if input("是否执行数据库迁移 (Alembic)? (y/n): ").lower() == "y":
-        run_command(["alembic", "upgrade", "head"])
+        run_command([sys.executable, "-m", "alembic", "upgrade", "head"])
 
     # 3. 初始化种子数据
     seed_script = "scripts/init_db.py"
