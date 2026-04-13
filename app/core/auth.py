@@ -2,7 +2,7 @@
 
 from fastapi import Depends
 
-from app.constants import ADMIN_USERNAME, SUPER_ADMIN_ROLE_CODE
+from app.constants import ADMIN_USERNAME, STATUS_ENABLED, SUPER_ADMIN_ROLE_CODE
 from app.core.exceptions import AuthorizationException
 from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
@@ -45,7 +45,7 @@ def require_permissions(perm_code: str = None, super_admin_only: bool = False):
             # 汇总当前用户所有权限（只考虑启用的角色）
             user_perms = set()
             for role in current_user.roles:
-                if role.status == "1":  # 只有启用的角色才计算权限
+                if role.status == STATUS_ENABLED:
                     for menu in role.menus:
                         if menu.permission:
                             user_perms.add(menu.permission)
