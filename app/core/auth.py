@@ -32,7 +32,6 @@ def require_permissions(perm_code: str = None, super_admin_only: bool = False):
     """
 
     async def permission_dependency(current_user: User = Depends(get_current_user)):
-
         if is_super_admin(current_user):
             return current_user
 
