@@ -36,11 +36,11 @@ def require_permissions(perm_code: str = None, super_admin_only: bool = False):
         if is_super_admin(current_user):
             return current_user
 
-        # 2. 如果要求仅限超级管理员访问
+        # 如果要求仅限超级管理员访问
         if super_admin_only:
             raise AuthorizationException("权限不足，仅限超级管理员访问")
 
-        # 3. 检查具体权限（如果提供了 perm_code）
+        # 检查具体权限（如果提供了 perm_code）
         if perm_code:
             # 汇总当前用户所有权限（只考虑启用的角色）
             user_perms = set()
