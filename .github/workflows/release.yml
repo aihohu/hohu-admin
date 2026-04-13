@@ -41,6 +41,7 @@ jobs:
   docker:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
+    environment: docker
     permissions:
       contents: read
       packages: write
