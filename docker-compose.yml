@@ -1,19 +1,26 @@
 services:
   admin:
-    build: 
+    build:
       context: .
       dockerfile: Dockerfile
-    container_name: hohu_admin
+    image: hohu-admin
+    container_name: hohu-admin
     ports:
       - "8000:8000"
     env_file:
       - .env
     environment:
       - ENV=prod
-      - UVICORN_WORKERS=4
+      - UVICORN_WORKERS=${UVICORN_WORKERS:-4}
     restart: unless-stopped
     logging:
       driver: "json-file"
       options:
         max-size: "50m"
         max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

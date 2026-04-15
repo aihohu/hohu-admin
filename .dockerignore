@@ -14,3 +14,9 @@ build/
 .idea/
 .vscode/
 .claude/
+scripts/
+docker-compose.yml
+Dockerfile
+release.yml
+.pytest_cache/
+.mypy_cache/
