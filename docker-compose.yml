@@ -1,10 +1,10 @@
 services:
-  admin:
+  hohu-admin-api:
     build:
       context: .
       dockerfile: Dockerfile
-    image: hohu-admin
-    container_name: hohu-admin
+    image: hohu-admin-api
+    container_name: hohu-admin-api
     ports:
       - "8000:8000"
     env_file:
