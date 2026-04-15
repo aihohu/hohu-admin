@@ -2,6 +2,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+import os
+
 from app.core.exceptions import setup_exception_handlers
 from app.core.redis import close_redis
 from app.middleware.rate_limit_middleware import RateLimitMiddleware
@@ -21,7 +23,10 @@ async def lifespan(_app: FastAPI):
     await close_redis()
 
 
-app = FastAPI(lifespan=lifespan)
+if os.getenv("ENV") == "prod":
+    app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+else:
+    app = FastAPI(lifespan=lifespan)
 
 # 添加频率限制中间件
 app.add_middleware(RateLimitMiddleware)
@@ -38,6 +43,7 @@ app.include_router(dict_type_router, prefix="/system/dict-type", tags=["字典�
 app.include_router(dict_data_router, prefix="/system/dict-data", tags=["字典数据管理"])
 
 
-@app.get("/")
-def read_root():
-    return {"Hello": "PancakeAdmin"}
+# 健康检查
+@app.get("/health", include_in_schema=False)
+async def health_check():
+    return {"status": "ok"}
