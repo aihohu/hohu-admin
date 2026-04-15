@@ -1,8 +1,7 @@
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-
-import os
 
 from app.core.exceptions import setup_exception_handlers
 from app.core.redis import close_redis
