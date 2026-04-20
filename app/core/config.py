@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     # 可通过环境变量 DATETIME_FORMAT 自定义
     DATETIME_FORMAT: str = "%Y-%m-%d %H:%M:%S"
 
+    # 文件上传配置
+    UPLOAD_DIR: str = "uploads"
+    UPLOAD_MAX_SIZE: int = 10 * 1024 * 1024  # 10MB
+    UPLOAD_ALLOWED_EXTENSIONS: str = (
+        ".jpg,.jpeg,.png,.gif,.webp,.pdf,.doc,.docx,.xls,.xlsx,.zip,.rar,.txt,.csv"
+    )
+
     # 频率限制配置
     # 登录接口：每分钟最多登录尝试次数
     RATE_LIMIT_LOGIN: str = "5/minute"

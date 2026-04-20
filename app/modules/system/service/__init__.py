@@ -2,6 +2,7 @@
 
 from app.modules.system.service.dict_data_service import dict_data_service
 from app.modules.system.service.dict_type_service import dict_type_service
+from app.modules.system.service.file_service import file_service
 from app.modules.system.service.menu_service import menu_service
 from app.modules.system.service.role_service import role_service
 from app.modules.system.service.user_service import user_service
@@ -12,4 +13,5 @@ __all__ = [
     "menu_service",
     "dict_type_service",
     "dict_data_service",
+    "file_service",
 ]

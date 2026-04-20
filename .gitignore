@@ -11,6 +11,7 @@ htmlcov
 .env.prod
 .DS_Store
 DEV_README.md
+uploads
 
 __pycache__/
 *.py[oc]
