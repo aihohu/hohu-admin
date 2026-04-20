@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends
 from fastapi.params import Query
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -103,6 +104,25 @@ async def login(
     """
     result = await auth_service.authenticate(credentials, db)
     return result
+
+
+@router.post(
+    "/token",
+    summary="Swagger Docs 登录",
+    description="OAuth2 兼容的登录端点，供 Swagger UI 的 Authorize 按钮使用",
+)
+async def login_for_docs(
+    form: OAuth2PasswordRequestForm = Depends(),
+    db: AsyncSession = Depends(get_db),
+):
+    """OAuth2 标准登录端点（表单数据），返回 access_token 供 Swagger 使用"""
+    credentials = LoginCredentials(
+        user_name=form.username,
+        password=form.password,
+    )
+    result = await auth_service.authenticate(credentials, db)
+    token = result.data["token"]
+    return {"access_token": token, "token_type": "bearer"}
 
 
 @router.get(

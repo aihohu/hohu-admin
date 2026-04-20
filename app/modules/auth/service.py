@@ -20,7 +20,7 @@ from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 
 # 定义 OAuth2 方案，指定获取 Token 的 URL
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
 
 
 class AuthService:
