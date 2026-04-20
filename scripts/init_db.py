@@ -170,6 +170,25 @@ init_menus = [
         multi_tab=False,
         menu_id=next_id(),
     ),
+    Menu(
+        parent_id=system_id,
+        menu_name="文件管理",
+        menu_type="C",
+        icon="carbon:cloud-upload",
+        icon_type="1",
+        component="view.system_file",
+        page="system_file",
+        route_name="system_file",
+        route_path="/system/file",
+        i18n_key="route.system_file",
+        order=7,
+        status="1",
+        hide_in_menu=False,
+        keep_alive=False,
+        constant=False,
+        multi_tab=False,
+        menu_id=next_id(),
+    ),
 ]
 
 SEED_TABLES = [

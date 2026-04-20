@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     REDIS_PASSWORD: str | None = None
     REDIS_DB: int = 0
 
+    # 服务器访问地址 (用于拼接文件 URL)
+    SERVER_URL: str = "http://127.0.0.1:8000"
+
     # Snowflake ID 配置
     # 每个实例应该有唯一的 worker_id（1-1023）
     # 多实例部署时必须为每个实例设置不同的值

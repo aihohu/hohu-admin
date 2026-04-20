@@ -30,6 +30,13 @@ class FileOut(BaseModel):
     def serialize_create_time(self, dt: datetime) -> str:
         return dt.strftime(settings.DATETIME_FORMAT)
 
+    @field_serializer("file_url")
+    def serialize_file_url(self, v: str, _info) -> str:
+        """拼接完整可访问 URL"""
+        if v.startswith("http"):
+            return v
+        return f"{settings.SERVER_URL}{v}"
+
     model_config = ConfigDict(
         from_attributes=True, populate_by_name=True, alias_generator=to_camel
     )
