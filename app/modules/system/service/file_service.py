@@ -116,8 +116,6 @@ class FileService:
             "file_ext": ("file_ext", "=="),
         }
         filters = build_filters(File, field_mapping, **query.model_dump())
-        # 只查询未删除的记录
-        filters.append(File.del_flag == "0")
 
         return await paginate(
             db=db,
@@ -129,7 +127,7 @@ class FileService:
 
     async def get_by_id(self, db: AsyncSession, file_id: int) -> File:
         """获取单个文件详情"""
-        stmt = select(File).where(File.file_id == file_id, File.del_flag == "0")
+        stmt = select(File).where(File.file_id == file_id)
         result = await db.execute(stmt)
         file_record = result.scalars().first()
         if not file_record:
@@ -137,21 +135,29 @@ class FileService:
         return file_record
 
     async def delete(self, db: AsyncSession, file_id: int) -> None:
-        """软删除文件"""
+        """删除文件（数据库记录 + 磁盘文件）"""
         file_record = await self.get_by_id(db, file_id)
-        file_record.del_flag = "1"
+        self._delete_disk_file(file_record.file_path)
+        await db.delete(file_record)
 
     async def batch_delete(self, db: AsyncSession, ids: list[int]) -> int:
-        """批量软删除文件"""
+        """批量删除文件"""
         count = 0
         for file_id in ids:
-            stmt = select(File).where(File.file_id == file_id, File.del_flag == "0")
+            stmt = select(File).where(File.file_id == file_id)
             result = await db.execute(stmt)
             file_record = result.scalars().first()
             if file_record:
-                file_record.del_flag = "1"
+                self._delete_disk_file(file_record.file_path)
+                await db.delete(file_record)
                 count += 1
         return count
+
+    def _delete_disk_file(self, file_path: str) -> None:
+        """删除磁盘文件，文件不存在时静默跳过"""
+        abs_path = Path(file_path)
+        if abs_path.exists():
+            abs_path.unlink()
 
 
 file_service = FileService()

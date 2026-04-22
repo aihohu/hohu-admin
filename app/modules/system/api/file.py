@@ -95,14 +95,14 @@ async def get_by_id(
 @router.delete(
     "/{file_id}",
     summary="删除文件",
-    description="软删除指定文件(不删除磁盘文件)",
+    description="删除指定文件及磁盘文件",
 )
 async def delete(
     file_id: int,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ):
-    """软删除文件"""
+    """删除文件"""
     await file_service.delete(db, file_id)
     await db.commit()
     return ResponseModel.success(msg="文件删除成功")
@@ -111,14 +111,14 @@ async def delete(
 @router.post(
     "/batch-delete",
     summary="批量删除文件",
-    description="批量软删除多个文件",
+    description="批量删除多个文件",
 )
 async def batch_delete(
     ids: list[int],
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ):
-    """批量软删除文件"""
+    """批量删除文件"""
     count = await file_service.batch_delete(db, ids)
     await db.commit()
     return ResponseModel.success(msg=f"成功删除 {count} 个文件")
