@@ -27,6 +27,7 @@ dependencies = [
     "ruff>=0.14.10",
     "snowflake-id>=1.0.2",
     "sqlalchemy[asyncio]>=2.0.45",
+    "apscheduler>=3.10,<4.0",
 ]
 
 
@@ -96,3 +97,8 @@ update_changelog_on_bump = true
 # 因此设置 major_version_zero = true 可让 feat 仅提升 MINOR 版本（如 0.2.0 → 0.3.0）。
 # 符合语义化版本规范（SemVer）对 0.x 阶段的建议：API 尚不稳定，不承诺兼容性。
 major_version_zero = true
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.0",
+]

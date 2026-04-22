@@ -7,8 +7,11 @@ from fastapi.staticfiles import StaticFiles
 from app.core.config import settings
 from app.core.exceptions import setup_exception_handlers
 from app.core.redis import close_redis
+from app.core.scheduler import scheduler_manager
 from app.middleware.rate_limit_middleware import RateLimitMiddleware
 from app.modules.auth.api import router as auth_router
+from app.modules.job.api.job import router as job_router
+from app.modules.job.api.job_log import router as job_log_router
 from app.modules.system.api.dept import router as dept_router
 from app.modules.system.api.dict_data import router as dict_data_router
 from app.modules.system.api.dict_type import router as dict_type_router
@@ -21,7 +24,17 @@ from app.modules.system.api.user import router as user_router
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """应用生命周期管理"""
+    # 启动调度器
+    from app.db.session import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        await scheduler_manager.load_jobs_from_db(db)
+    scheduler_manager.start()
+
     yield
+
+    # 关闭调度器和Redis
+    scheduler_manager.shutdown()
     await close_redis()
 
 
@@ -44,6 +57,8 @@ app.include_router(menu_router, prefix="/system/menu", tags=["菜单管理"])
 app.include_router(dict_type_router, prefix="/system/dict-type", tags=["字典类型管理"])
 app.include_router(dict_data_router, prefix="/system/dict-data", tags=["字典数据管理"])
 app.include_router(file_router, prefix="/system/file", tags=["文件管理"])
+app.include_router(job_router, prefix="/system/job", tags=["定时任务"])
+app.include_router(job_log_router, prefix="/system/job-log", tags=["任务日志"])
 
 # 确保上传目录存在
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
