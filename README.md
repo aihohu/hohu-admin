@@ -112,17 +112,18 @@ hohu-admin/
 
 #### 2. 安装依赖
 
+使用以下命令激活虚拟环境：
+
+```bash
+source .venv/bin/activate
+```
+
 安装所有依赖项：
 
 ```bash
 uv sync
 ```
 
-使用以下命令激活虚拟环境：
-
-```bash
-source .venv/bin/activate
-```
 
 #### 3. 配置环境变量
 
