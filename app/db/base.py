@@ -44,6 +44,25 @@ role_menus = Table(
 )
 
 
+# 角色-部门 关联表（数据权限：自定义数据范围时指定部门）
+role_depts = Table(
+    "sys_role_dept",
+    Base.metadata,
+    Column(
+        "role_id",
+        BigInteger,
+        ForeignKey("sys_role.role_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "dept_id",
+        BigInteger,
+        ForeignKey("sys_dept.dept_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+)
+
+
 # 用户-部门 关联表
 user_depts = Table(
     "sys_user_dept",

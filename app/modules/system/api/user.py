@@ -54,8 +54,8 @@ async def get_user_list(
         - user_gender: 用户性别（0-未知，1-男，2-女）
         - status: 用户状态（1-启用，2-禁用）
     """
-    # 调用 Service 层获取分页数据
-    page_data = await user_service.get_user_list(db, query)
+    # 调用 Service 层获取分页数据（含数据权限过滤）
+    page_data = await user_service.get_user_list(db, query, current_user=_current_user)
 
     # 转换为 Schema 对象 (处理角色和部门简化)
     user_list = []

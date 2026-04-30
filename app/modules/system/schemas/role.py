@@ -1,13 +1,33 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 from pydantic.alias_generators import to_camel
 
 from app.constants import (
+    DATA_SCOPE_ALL,
+    DATA_SCOPE_CUSTOM,
+    DATA_SCOPE_DEPT,
+    DATA_SCOPE_DEPT_AND_SUB,
+    DATA_SCOPE_SELF,
     STATUS_DISABLED,
     STATUS_ENABLED,
 )
 from app.core.config import settings
+
+VALID_DATA_SCOPES = [
+    DATA_SCOPE_ALL,
+    DATA_SCOPE_CUSTOM,
+    DATA_SCOPE_DEPT,
+    DATA_SCOPE_DEPT_AND_SUB,
+    DATA_SCOPE_SELF,
+]
 
 
 class RoleBase(BaseModel):
@@ -22,6 +42,10 @@ class RoleBase(BaseModel):
         description="角色编码",
     )
     role_desc: str | None = Field(None, max_length=200, description="角色描述")
+    data_scope: str = Field(
+        DATA_SCOPE_ALL,
+        description="数据权限范围：1-全部，2-自定义，3-本部门，4-本部门及以下，5-仅本人",
+    )
     status: str = Field(
         ...,
         description="状态：1-启用，2-禁用",
@@ -35,6 +59,13 @@ class RoleBase(BaseModel):
             raise ValueError("角色名称不能为空")
         return v.strip()
 
+    @field_validator("data_scope")
+    @classmethod
+    def validate_data_scope(cls, v: str) -> str:
+        if v not in VALID_DATA_SCOPES:
+            raise ValueError("数据权限范围必须是 1~5")
+        return v
+
     @field_validator("status")
     @classmethod
     def validate_status(cls, v: str) -> str:
@@ -47,7 +78,9 @@ class RoleBase(BaseModel):
 class RoleCreate(RoleBase):
     """角色创建请求"""
 
-    pass
+    dept_ids: list[int] | None = Field(
+        None, description="自定义数据权限时的部门ID列表（data_scope=2时生效）"
+    )
 
 
 class RoleUpdate(BaseModel):
@@ -64,6 +97,13 @@ class RoleUpdate(BaseModel):
         description="角色编码",
     )
     role_desc: str | None = Field(None, max_length=200, description="角色描述")
+    data_scope: str | None = Field(
+        None,
+        description="数据权限范围：1-全部，2-自定义，3-本部门，4-本部门及以下，5-仅本人",
+    )
+    dept_ids: list[int] | None = Field(
+        None, description="自定义数据权限时的部门ID列表（data_scope=2时生效）"
+    )
     status: str | None = Field(None, description="状态：1-启用，2-禁用")
 
     @field_validator("role_name")
@@ -73,6 +113,13 @@ class RoleUpdate(BaseModel):
         if v is not None and (not v or v.strip() == ""):
             raise ValueError("角色名称不能为空")
         return v.strip() if v is not None else None
+
+    @field_validator("data_scope")
+    @classmethod
+    def validate_data_scope(cls, v: str | None) -> str | None:
+        if v is not None and v not in VALID_DATA_SCOPES:
+            raise ValueError("数据权限范围必须是 1~5")
+        return v
 
     @field_validator("status")
     @classmethod
@@ -88,6 +135,23 @@ class RoleOut(RoleBase):
 
     role_id: int
     create_time: datetime
+    dept_ids: list[int] = Field(
+        default_factory=list, description="自定义数据权限关联的部门ID列表"
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def extract_dept_ids(cls, data: any) -> any:
+        """从 Role ORM 对象的 depts 关系提取 dept_ids"""
+        if hasattr(data, "depts"):
+            dept_ids = [d.dept_id for d in data.depts]
+            if isinstance(data, dict):
+                data["dept_ids"] = dept_ids
+            else:
+                object.__setattr__(
+                    data, "__dict__", {**data.__dict__, "dept_ids": dept_ids}
+                )
+        return data
 
     @field_serializer("role_id")
     def serialize_id(self, role_id: int, _info):
@@ -97,6 +161,10 @@ class RoleOut(RoleBase):
     def serialize_create_time(self, dt: datetime) -> str:
         """格式化创建时间"""
         return dt.strftime(settings.DATETIME_FORMAT)
+
+    @field_serializer("dept_ids")
+    def serialize_dept_ids(self, dept_ids: list[int]) -> list[str]:
+        return [str(did) for did in dept_ids]
 
     model_config = ConfigDict(
         from_attributes=True, populate_by_name=True, alias_generator=to_camel

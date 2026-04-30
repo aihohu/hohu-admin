@@ -13,24 +13,27 @@ from app.core.security import get_password_hash
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.schemas.user import UserCreate, UserQuery, UserUpdate
+from app.utils.data_scope import get_user_data_scope_filters
 from app.utils.pagination import build_filters, paginate
 
 
 class UserService:
     """用户业务逻辑服务"""
 
-    async def get_user_list(self, db: AsyncSession, query: UserQuery):
+    async def get_user_list(
+        self, db: AsyncSession, query: UserQuery, current_user: User | None = None
+    ):
         """
-        获取用户分页列表
+        获取用户分页列表（含数据权限过滤）
 
         Args:
             db: 数据库会话
             query: 查询参数
+            current_user: 当前登录用户（用于数据权限过滤）
 
         Returns:
             分页数据对象
         """
-        # 构建查询条件
         field_mapping = {
             "user_name": ("user_name", "contains"),
             "nickname": ("nickname", "contains"),
@@ -41,7 +44,11 @@ class UserService:
         }
         filters = build_filters(User, field_mapping, **query.model_dump())
 
-        # 使用通用分页查询
+        # 应用数据权限过滤
+        if current_user is not None:
+            scope_filters = await get_user_data_scope_filters(db, current_user)
+            filters.extend(scope_filters)
+
         page_data = await paginate(
             db=db,
             model=User,

@@ -34,3 +34,10 @@ REDIS_BLACKLIST_TTL = 7 * 24 * 3600  # 7天
 DEPT_MAX_LEVEL = 5  # 部门最大层级
 IS_PRIMARY_YES = "Y"  # 主部门标识
 IS_PRIMARY_NO = "N"  # 非主部门标识
+
+# 数据权限范围常量
+DATA_SCOPE_ALL = "1"  # 全部数据权限
+DATA_SCOPE_CUSTOM = "2"  # 自定义数据权限
+DATA_SCOPE_DEPT = "3"  # 本部门数据权限
+DATA_SCOPE_DEPT_AND_SUB = "4"  # 本部门及以下数据权限
+DATA_SCOPE_SELF = "5"  # 仅本人数据权限

@@ -1,13 +1,14 @@
 from sqlalchemy import and_, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants import STATUS_ENABLED, SUPER_ADMIN_ROLE_CODE
+from app.constants import DATA_SCOPE_CUSTOM, STATUS_ENABLED, SUPER_ADMIN_ROLE_CODE
 from app.core.exceptions import (
     BusinessRuleException,
     DuplicateException,
     InvalidParameterException,
     NotFoundException,
 )
+from app.modules.system.models.dept import Dept
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.schemas.role import RoleCreate, RoleQuery, RoleUpdate
@@ -18,17 +19,7 @@ class RoleService:
     """角色业务逻辑服务"""
 
     async def get_role_list(self, db: AsyncSession, query: RoleQuery):
-        """
-        获取角色分页列表
-
-        Args:
-            db: 数据库会话
-            query: 查询参数
-
-        Returns:
-            分页数据对象
-        """
-        # 构建查询条件
+        """获取角色分页列表"""
         field_mapping = {
             "role_name": ("role_name", "contains"),
             "role_code": ("role_code", "contains"),
@@ -36,7 +27,6 @@ class RoleService:
         }
         filters = build_filters(Role, field_mapping, **query.model_dump())
 
-        # 使用通用分页查询
         page_data = await paginate(
             db=db,
             model=Role,
@@ -48,15 +38,7 @@ class RoleService:
         return page_data
 
     async def get_all_roles(self, db: AsyncSession) -> list[Role]:
-        """
-        获取所有启用的角色列表（不分页）
-
-        Args:
-            db: 数据库会话
-
-        Returns:
-            角色列表
-        """
+        """获取所有启用的角色列表（不分页）"""
         stmt = (
             select(Role)
             .where(Role.status == STATUS_ENABLED)
@@ -66,19 +48,9 @@ class RoleService:
         return list(result.scalars().all())
 
     async def get_role_menus(self, db: AsyncSession, role_id: int) -> list[str]:
-        """
-        获取角色的菜单ID列表
-
-        Args:
-            db: 数据库会话
-            role_id: 角色ID
-
-        Returns:
-            菜单ID字符串列表
-        """
+        """获取角色的菜单ID列表"""
         from app.db.base import role_menus
 
-        # 子查询：找出该角色拥有的菜单中，作为 parent_id 出现过的 ID
         subquery = (
             select(Menu.parent_id)
             .join(role_menus, Menu.menu_id == role_menus.c.menu_id)
@@ -86,7 +58,6 @@ class RoleService:
             .scalar_subquery()
         )
 
-        # 主查询
         stmt = (
             select(Menu.menu_id)
             .outerjoin(role_menus, Menu.menu_id == role_menus.c.menu_id)
@@ -103,74 +74,56 @@ class RoleService:
         return [str(menu_id) for menu_id in result.scalars().all()]
 
     async def create_role(self, db: AsyncSession, role_in: RoleCreate) -> Role:
-        """
-        创建新角色
-
-        Args:
-            db: 数据库会话
-            role_in: 角色创建数据
-
-        Returns:
-            创建的角色对象
-
-        Raises:
-            DuplicateException: 角色编码已存在
-        """
-        # 检查编码唯一性
+        """创建新角色"""
         check = await db.execute(
             select(Role).where(Role.role_code == role_in.role_code)
         )
         if check.scalars().first():
             raise DuplicateException("角色编码", role_in.role_code)
 
-        new_role = Role(**role_in.model_dump())
+        dept_ids = role_in.dept_ids
+        role_data = role_in.model_dump(exclude={"dept_ids"})
+        new_role = Role(**role_data)
+
+        # 处理自定义数据权限的部门关联
+        if dept_ids and role_in.data_scope == DATA_SCOPE_CUSTOM:
+            dept_result = await db.execute(
+                select(Dept).where(Dept.dept_id.in_(dept_ids))
+            )
+            new_role.depts = list(dept_result.scalars().all())
+
         db.add(new_role)
         return new_role
 
     async def update_role(
         self, db: AsyncSession, role_id: int, role_in: RoleUpdate
     ) -> Role:
-        """
-        更新角色信息
-
-        Args:
-            db: 数据库会话
-            role_id: 角色ID
-            role_in: 角色更新数据
-
-        Returns:
-            更新后的角色对象
-
-        Raises:
-            NotFoundException: 角色不存在
-        """
+        """更新角色信息"""
         role = await db.get(Role, role_id)
         if not role:
             raise NotFoundException("角色")
 
-        update_data = role_in.model_dump(exclude_unset=True)
+        update_data = role_in.model_dump(exclude_unset=True, exclude={"dept_ids"})
         for field, value in update_data.items():
             setattr(role, field, value)
+
+        # 处理部门关联
+        if "dept_ids" in role_in.model_dump(exclude_unset=True):
+            dept_ids = role_in.dept_ids
+            if dept_ids and role.data_scope == DATA_SCOPE_CUSTOM:
+                dept_result = await db.execute(
+                    select(Dept).where(Dept.dept_id.in_(dept_ids))
+                )
+                role.depts = list(dept_result.scalars().all())
+            else:
+                role.depts = []
 
         return role
 
     async def update_role_menu(
         self, db: AsyncSession, role_id: int, menu_ids: list[int]
     ) -> Role:
-        """
-        更新角色的菜单权限
-
-        Args:
-            db: 数据库会话
-            role_id: 角色ID
-            menu_ids: 菜单ID列表
-
-        Returns:
-            更新后的角色对象
-
-        Raises:
-            NotFoundException: 角色不存在
-        """
+        """更新角色的菜单权限"""
         role = await db.get(Role, role_id)
         if not role:
             raise NotFoundException("角色")
@@ -186,16 +139,7 @@ class RoleService:
         return role
 
     async def delete_role(self, db: AsyncSession, role_id: int) -> None:
-        """
-        删除角色
-
-        Args:
-            db: 数据库会话
-            role_id: 角色ID
-
-        Raises:
-            NotFoundException: 角色不存在
-        """
+        """删除角色"""
         role = await db.get(Role, role_id)
         if not role:
             raise NotFoundException("角色")
@@ -203,24 +147,10 @@ class RoleService:
         await db.delete(role)
 
     async def batch_delete_roles(self, db: AsyncSession, ids: list[int]) -> int:
-        """
-        批量删除角色
-
-        Args:
-            db: 数据库会话
-            ids: 角色ID列表
-
-        Returns:
-            删除的角色数量
-
-        Raises:
-            InvalidParameterException: 未选择要删除的角色
-            BusinessRuleException: 不能删除系统管理员角色
-        """
+        """批量删除角色"""
         if not ids:
             raise InvalidParameterException("未选择要删除的角色")
 
-        # 过滤掉 超级管理员 权限，防止误删
         check_stmt = select(Role.role_id).where(
             and_(
                 Role.role_id.in_(ids),
@@ -237,19 +167,7 @@ class RoleService:
         return result.rowcount
 
     async def get_role_detail(self, db: AsyncSession, role_id: int) -> Role:
-        """
-        获取角色详情
-
-        Args:
-            db: 数据库会话
-            role_id: 角色ID
-
-        Returns:
-            角色对象
-
-        Raises:
-            NotFoundException: 角色不存在
-        """
+        """获取角色详情（包含 dept_ids）"""
         role = await db.get(Role, role_id)
         if not role:
             raise NotFoundException("角色")
