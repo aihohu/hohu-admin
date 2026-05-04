@@ -3,6 +3,7 @@ import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from sqlalchemy import select
 
 from app.constants import STATUS_ENABLED
 from app.modules.job.job_runner import execute_job, run_job_manual
@@ -121,8 +122,6 @@ class SchedulerManager:
 
     async def load_jobs_from_db(self, db) -> None:
         """从数据库加载所有启用的任务并注册到调度器。"""
-        from sqlalchemy import select
-
         stmt = select(SysJob).where(SysJob.status == STATUS_ENABLED)
         result = await db.execute(stmt)
         jobs = result.scalars().all()

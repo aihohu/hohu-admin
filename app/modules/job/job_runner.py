@@ -1,3 +1,4 @@
+import json
 import logging
 import traceback
 from datetime import datetime
@@ -97,8 +98,6 @@ async def _run_task(db: AsyncSessionLocal, job: SysJob, log: SysJobLog) -> None:
         args = job.job_args
         kwargs = {}
         if args:
-            import json
-
             kwargs = {"args": json.loads(args)}
 
         await func(**kwargs)

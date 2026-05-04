@@ -146,8 +146,6 @@ async def get_dept_list(
         "status": ("status", "=="),
         "leader": ("leader", "contains"),
     }
-    from app.utils.pagination import build_filters
-
     filters = build_filters(Dept, field_mapping, **query.model_dump())
     page_data = await paginate(
         db=db,

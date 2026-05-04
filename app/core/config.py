@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     # 普通 API 接口：每分钟最多请求数
     RATE_LIMIT_API: str = "100/minute"
 
+    # AI 配置
+    AI_DEFAULT_MODEL: str = "openai:gpt-4o"
+    AI_OPENAI_API_KEY: str = ""
+    AI_OPENAI_BASE_URL: str = ""
+    AI_ANTHROPIC_API_KEY: str = ""
+    AI_MAX_TOKENS: int = 4096
+    AI_TEMPERATURE: float = 0.7
+
     @property
     def REDIS_URL(self) -> str:
         """根据配置生成 Redis 连接字符串"""

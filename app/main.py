@@ -8,7 +8,11 @@ from app.core.config import settings
 from app.core.exceptions import setup_exception_handlers
 from app.core.redis import close_redis
 from app.core.scheduler import scheduler_manager
+from app.db.session import AsyncSessionLocal
 from app.middleware.rate_limit_middleware import RateLimitMiddleware
+from app.modules.ai.api.chat import router as ai_chat_router
+from app.modules.ai.api.conversation import router as ai_conversation_router
+from app.modules.ai.api.provider import router as ai_provider_router
 from app.modules.auth.api import router as auth_router
 from app.modules.job.api.job import router as job_router
 from app.modules.job.api.job_log import router as job_log_router
@@ -25,8 +29,6 @@ from app.modules.system.api.user import router as user_router
 async def lifespan(_app: FastAPI):
     """应用生命周期管理"""
     # 启动调度器
-    from app.db.session import AsyncSessionLocal
-
     async with AsyncSessionLocal() as db:
         await scheduler_manager.load_jobs_from_db(db)
     scheduler_manager.start()
@@ -59,6 +61,9 @@ app.include_router(dict_data_router, prefix="/system/dict-data", tags=["字典�
 app.include_router(file_router, prefix="/system/file", tags=["文件管理"])
 app.include_router(job_router, prefix="/system/job", tags=["定时任务"])
 app.include_router(job_log_router, prefix="/system/job-log", tags=["任务日志"])
+app.include_router(ai_chat_router, prefix="/ai/chat", tags=["AI对话"])
+app.include_router(ai_conversation_router, prefix="/ai/conversation", tags=["AI会话"])
+app.include_router(ai_provider_router, prefix="/ai/provider", tags=["AI提供商"])
 
 # 确保上传目录存在
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)

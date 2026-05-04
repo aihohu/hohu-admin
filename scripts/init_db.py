@@ -15,6 +15,7 @@ from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 
 system_id = next_id()
+ai_id = next_id()
 
 init_menus = [
     Menu(
@@ -227,6 +228,64 @@ init_menus = [
         multi_tab=False,
         menu_id=next_id(),
     ),
+    # ============ AI 模块 ============
+    Menu(
+        parent_id=0,
+        menu_name="AI 助手",
+        menu_type="M",
+        icon="carbon:chat-bot",
+        icon_type="1",
+        component="layout.base",
+        layout="base",
+        route_name="ai",
+        route_path="/ai",
+        i18n_key="route.ai",
+        order=1,
+        status="1",
+        hide_in_menu=False,
+        keep_alive=False,
+        constant=False,
+        multi_tab=False,
+        menu_id=ai_id,
+    ),
+    Menu(
+        parent_id=ai_id,
+        menu_name="AI 对话",
+        menu_type="C",
+        icon="carbon:chat",
+        icon_type="1",
+        component="view.ai_chat",
+        page="ai_chat",
+        route_name="ai_chat",
+        route_path="/ai/chat",
+        i18n_key="route.ai_chat",
+        order=1,
+        status="1",
+        hide_in_menu=False,
+        keep_alive=False,
+        constant=False,
+        multi_tab=False,
+        menu_id=next_id(),
+    ),
+    Menu(
+        parent_id=ai_id,
+        menu_name="模型管理",
+        menu_type="C",
+        icon="carbon:settings-adjust",
+        icon_type="1",
+        component="view.ai_provider",
+        page="ai_provider",
+        route_name="ai_provider",
+        route_path="/ai/provider",
+        i18n_key="route.ai_provider",
+        order=2,
+        status="1",
+        hide_in_menu=False,
+        keep_alive=False,
+        constant=False,
+        multi_tab=False,
+        menu_id=next_id(),
+    ),
 ]
 
 SEED_TABLES = [
@@ -257,13 +316,13 @@ async def init_db():
     async with async_session() as db:
         if await check_data_exists(db):
             print("⚠️ 检测到数据库中已存在数据。")
-            choice = input("是否清空后重新初始化? (y/n): ").lower()
+            choice = input("是否清空后重新初始化? (y/n): ").lower()  # noqa: ASYNC250
             if choice != "y":
                 print("⏭️ 跳过数据初始化。")
                 return
             await clear_seed_data(db)
 
-        password = input("初始化密码 [默认: hohu123456]: ").strip() or "hohu123456"
+        password = input("初始化密码 [默认: hohu123456]: ").strip() or "hohu123456"  # noqa: ASYNC250
 
         # 创建初始菜单
         db.add_all(init_menus)

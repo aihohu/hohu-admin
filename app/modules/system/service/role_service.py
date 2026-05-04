@@ -8,6 +8,7 @@ from app.core.exceptions import (
     InvalidParameterException,
     NotFoundException,
 )
+from app.db.base import role_menus
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
@@ -49,8 +50,6 @@ class RoleService:
 
     async def get_role_menus(self, db: AsyncSession, role_id: int) -> list[str]:
         """获取角色的菜单ID列表"""
-        from app.db.base import role_menus
-
         subquery = (
             select(Menu.parent_id)
             .join(role_menus, Menu.menu_id == role_menus.c.menu_id)
