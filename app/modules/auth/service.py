@@ -1,4 +1,4 @@
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from sqlalchemy import select
@@ -72,12 +72,6 @@ async def get_current_user(
     """
     JWT Token 验证依赖项
     """
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Token 无效或已过期",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-
     try:
         # 1. 解码 Token
         payload = jwt.decode(
@@ -85,12 +79,12 @@ async def get_current_user(
         )
         user_id_str: str = payload.get("sub")
         if user_id_str is None:
-            raise credentials_exception
+            raise AuthenticationException("Token 无效或已过期")
 
         # --- 核心修复点：将字符串转为整数 ---
         user_id = int(user_id_str)
     except JWTError:
-        raise credentials_exception
+        raise AuthenticationException("Token 无效或已过期")
 
     # 2. 查询用户并预加载角色和菜单 (RBAC 核心)
     # 使用 selectinload 解决异步环境下的关联查询
@@ -102,7 +96,7 @@ async def get_current_user(
     user = result.scalars().first()
 
     if user is None:
-        raise credentials_exception
+        raise AuthenticationException("Token 无效或已过期")
 
     if not user.status or user.status == "2":
         raise AuthorizationException("账号已被禁用")

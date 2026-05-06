@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -88,6 +88,15 @@ def setup_exception_handlers(app: FastAPI):
     Args:
         app: FastAPI 应用实例
     """
+
+    # 捕获 FastAPI 原生 HTTPException（如 OAuth2PasswordBearer 自动抛出的 401）
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(_request: Request, exc: HTTPException):
+        """将 FastAPI 默认的 HTTPException 统一为标准响应格式"""
+        content = ResponseModel(code=exc.status_code, msg=str(exc.detail)).model_dump()
+        if exc.status_code == 401:
+            content["errorCode"] = "UNAUTHORIZED"
+        return JSONResponse(status_code=exc.status_code, content=content)
 
     # 捕获业务异常
     @app.exception_handler(BusinessException)
