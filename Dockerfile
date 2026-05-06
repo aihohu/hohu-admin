@@ -36,6 +36,10 @@ COPY --from=builder --chown=appuser:appuser /app/alembic /app/alembic
 COPY --from=builder --chown=appuser:appuser /app/alembic.ini /app/alembic.ini
 COPY --from=builder --chown=appuser:appuser /app/scripts /app/scripts
 
+RUN mkdir -p /app/uploads && chown appuser:appuser /app/uploads
+
+VOLUME /app/uploads
+
 USER appuser
 
 EXPOSE 8000
