@@ -33,7 +33,9 @@ class AuthService:
         # elif credentials.login_type == "google":
         #     user = await self._verify_google_login(credentials, db)
         else:
-            raise BusinessRuleException("不支持的登录方式")
+            raise BusinessRuleException(
+                "不支持的登录方式", error_code="UNSUPPORTED_LOGIN_TYPE"
+            )
 
         # 统一签发 Token
         token = create_access_token(subject=str(user.user_id))
@@ -51,10 +53,10 @@ class AuthService:
 
         # 2. 验证密码
         if not user or not verify_password(cred.password, user.hashed_password):
-            raise AuthenticationException()
+            raise AuthenticationException(error_code="INVALID_CREDENTIALS")
 
         if not user.status or user.status == "2":
-            raise AuthorizationException("账号已被禁用")
+            raise AuthorizationException("账号已被禁用", error_code="ACCOUNT_DISABLED")
 
         return user
 
@@ -79,12 +81,14 @@ async def get_current_user(
         )
         user_id_str: str = payload.get("sub")
         if user_id_str is None:
-            raise AuthenticationException("Token 无效或已过期")
+            raise AuthenticationException(
+                "Token 无效或已过期", error_code="TOKEN_EXPIRED"
+            )
 
         # --- 核心修复点：将字符串转为整数 ---
         user_id = int(user_id_str)
     except JWTError:
-        raise AuthenticationException("Token 无效或已过期")
+        raise AuthenticationException("Token 无效或已过期", error_code="TOKEN_EXPIRED")
 
     # 2. 查询用户并预加载角色和菜单 (RBAC 核心)
     # 使用 selectinload 解决异步环境下的关联查询
@@ -96,10 +100,10 @@ async def get_current_user(
     user = result.scalars().first()
 
     if user is None:
-        raise AuthenticationException("Token 无效或已过期")
+        raise AuthenticationException("Token 无效或已过期", error_code="TOKEN_EXPIRED")
 
     if not user.status or user.status == "2":
-        raise AuthorizationException("账号已被禁用")
+        raise AuthorizationException("账号已被禁用", error_code="ACCOUNT_DISABLED")
 
     return user
 
