@@ -122,6 +122,8 @@ class UserUpdate(UserBase):
 class UserLogin(BaseModel):
     """用户登录请求"""
 
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
     user_name: str = Field(..., min_length=4, description="账号")
     password: str = Field(..., min_length=1, description="密码")
 

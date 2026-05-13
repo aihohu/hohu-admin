@@ -87,7 +87,7 @@ async def get_current_user(
 
         # --- 核心修复点：将字符串转为整数 ---
         user_id = int(user_id_str)
-    except JWTError:
+    except (JWTError, ValueError):
         raise AuthenticationException("Token 无效或已过期", error_code="TOKEN_EXPIRED")
 
     # 2. 查询用户并预加载角色和菜单 (RBAC 核心)

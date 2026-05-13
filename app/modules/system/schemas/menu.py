@@ -18,6 +18,8 @@ from app.core.config import settings
 class ButtonCreate(BaseModel):
     """按钮创建请求"""
 
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
     desc: str = Field(..., min_length=1, max_length=50, description="按钮描述")
     code: str = Field(..., min_length=1, max_length=100, description="权限代码")
 
@@ -125,6 +127,8 @@ class MenuUpdate(MenuBase):
 
 class MenuQuery(BaseModel):
     """菜单查询参数"""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     current: int = Field(1, ge=1, description="当前页码")
     size: int = Field(10, ge=1, le=100, description="每页数量")
