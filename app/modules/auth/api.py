@@ -157,10 +157,21 @@ async def get_user_info(current_user: User = Depends(get_current_user)):
             }
         }
     """
-    # 提取角色编码列表 (如: ['admin', 'user'])
+    # 提取角色编码列表 (如: ['R_ADMIN', 'R_USER'])
     roles = [role.role_code for role in current_user.roles]
 
-    # 提取按钮级权限标识 (如: ['sys:user:add', 'sys:user:edit'])
+    # 超级管理员直接返回通配符，前端对所有按钮权限放行
+    if is_super_admin(current_user):
+        return ResponseModel.success(
+            data={
+                "userId": str(current_user.user_id),
+                "userName": current_user.user_name,
+                "roles": roles,
+                "buttons": ["*"],
+            }
+        )
+
+    # 提取按钮级权限标识 (如: ['system:user:add', 'system:user:edit'])
     # 遍历用户持有的所有角色，再遍历角色拥有的菜单，提取 permission 字段
     permissions = set()
     for role in current_user.roles:

@@ -20,7 +20,7 @@ def require_permissions(perm_code: str = None, super_admin_only: bool = False):
     权限校验装饰器
 
     用法示例:
-        @router.get("/list", dependencies=[Depends(require_permissions("sys:user:list"))])
+        @router.get("/list", dependencies=[Depends(require_permissions("system:user:list"))])
         @router.get("/admin-only", dependencies=[Depends(require_permissions(super_admin_only=True))])
 
     Args:

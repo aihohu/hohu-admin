@@ -7,6 +7,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.core.base_response import ResponseModel
+from app.utils.validators import PWD_ERROR_CODE, PWD_ERROR_MSG
 
 
 # ============ 业务异常类定义 ============
@@ -128,10 +129,15 @@ def setup_exception_handlers(app: FastAPI):
         _request: Request, exc: RequestValidationError
     ):
         """处理参数验证错误"""
-        # 提取具体的错误字段和原因
         errors = exc.errors()
-        msg = f"参数错误: {errors[0]['loc'][-1]} {errors[0]['msg']}"
-        return JSONResponse(
-            status_code=422,
-            content=ResponseModel(code=422, msg=msg).model_dump(),
-        )
+        first_error = errors[0]
+        field_name = first_error["loc"][-1]
+        msg = f"参数错误: {field_name} {first_error['msg']}"
+
+        content = ResponseModel(code=422, msg=msg).model_dump()
+
+        # 密码格式错误附加 errorCode
+        if PWD_ERROR_MSG in first_error.get("msg", ""):
+            content["errorCode"] = PWD_ERROR_CODE
+
+        return JSONResponse(status_code=422, content=content)

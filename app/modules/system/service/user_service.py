@@ -9,10 +9,18 @@ from app.core.exceptions import (
     InvalidParameterException,
     NotFoundException,
 )
-from app.core.security import get_password_hash
+from app.core.security import get_password_hash, verify_password
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
-from app.modules.system.schemas.user import UserCreate, UserQuery, UserUpdate
+from app.modules.system.schemas.user import (
+    ChangePassword,
+    ProfileOut,
+    ResetPassword,
+    UpdateProfile,
+    UserCreate,
+    UserQuery,
+    UserUpdate,
+)
 from app.utils.data_scope import get_user_data_scope_filters
 from app.utils.pagination import build_filters, paginate
 
@@ -140,6 +148,25 @@ class UserService:
 
         return user
 
+    async def reset_password(
+        self, db: AsyncSession, user_id: int, reset_in: ResetPassword
+    ) -> None:
+        """
+        管理员重置用户密码
+
+        Args:
+            db: 数据库会话
+            user_id: 用户ID
+            reset_in: 重置密码数据
+
+        Raises:
+            NotFoundException: 用户不存在
+        """
+        user = await db.get(User, user_id)
+        if not user:
+            raise NotFoundException("用户")
+        user.hashed_password = get_password_hash(reset_in.new_password)
+
     async def delete_user(self, db: AsyncSession, user_id: int) -> None:
         """
         删除用户
@@ -199,6 +226,39 @@ class UserService:
         result = await db.execute(stmt)
 
         return result.rowcount
+
+    def get_profile(self, current_user: User) -> ProfileOut:
+        """获取当前用户个人信息"""
+        profile = ProfileOut(
+            user_id=current_user.user_id,
+            user_name=current_user.user_name,
+            nickname=current_user.nickname or "",
+            user_gender=current_user.user_gender or "0",
+            user_phone=current_user.user_phone or "",
+            user_email=current_user.user_email or "",
+            status=current_user.status,
+            roles=[r.role_name for r in current_user.roles],
+            create_time=(
+                current_user.create_time.strftime("%Y-%m-%d %H:%M:%S")
+                if current_user.create_time
+                else ""
+            ),
+        )
+        return profile
+
+    def update_profile(self, current_user: User, body: UpdateProfile) -> None:
+        """更新当前用户个人信息"""
+        update_data = body.model_dump(exclude_unset=True)
+        for field, value in update_data.items():
+            setattr(current_user, field, value)
+
+    def change_password(self, current_user: User, body: ChangePassword) -> None:
+        """修改当前用户密码"""
+        if not verify_password(body.old_password, current_user.hashed_password):
+            raise BusinessRuleException(
+                "当前密码不正确", error_code="INCORRECT_OLD_PASSWORD"
+            )
+        current_user.hashed_password = get_password_hash(body.new_password)
 
 
 # 创建单例

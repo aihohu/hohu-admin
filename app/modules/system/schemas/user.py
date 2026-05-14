@@ -1,5 +1,4 @@
 from datetime import datetime
-from re import match
 
 from pydantic import (
     BaseModel,
@@ -13,6 +12,14 @@ from pydantic.alias_generators import to_camel
 
 from app.core.config import settings
 from app.utils.mask_util import MaskUtil
+from app.utils.validators import (
+    empty_to_none,
+    validate_gender,
+    validate_password,
+    validate_phone,
+    validate_status,
+    validate_user_name,
+)
 
 
 class UserDeptItem(BaseModel):
@@ -38,52 +45,32 @@ class UserBase(BaseModel):
 
     @field_validator("user_name")
     @classmethod
-    def validate_user_name(cls, v: str) -> str:
-        """验证用户名格式"""
-        if not v.isalnum():
-            raise ValueError("用户名只能包含字母和数字")
-        return v
+    def _validate_user_name(cls, v: str) -> str:
+        return validate_user_name(v)
 
     @field_validator("user_phone", mode="before")
     @classmethod
-    def validate_user_phone(cls, v: str | None) -> str | None:
-        """验证手机号格式，空字符串转为 None"""
-        if not v:
-            return None
-        if not match(r"^1[3-9]\d{9}$", v):
-            raise ValueError("手机号格式不正确")
-        return v
+    def _validate_user_phone(cls, v: str | None) -> str | None:
+        return validate_phone(v)
 
     @field_validator("user_gender", mode="before")
     @classmethod
-    def validate_user_gender(cls, v: str | None) -> str | None:
-        """验证用户性别，空字符串转为 None"""
-        if not v:
-            return None
-        if v not in ["0", "1", "2"]:
-            raise ValueError("用户性别必须是 0(未知)、1(男) 或 2(女)")
-        return v
+    def _validate_user_gender(cls, v: str | None) -> str | None:
+        return validate_gender(v)
 
     @field_validator("user_email", mode="before")
     @classmethod
-    def validate_user_email(cls, v: str | None) -> str | None:
-        """验证邮箱格式，空字符串转为 None"""
-        if not v:
-            return None
-        return v
+    def _validate_user_email(cls, v: str | None) -> str | None:
+        return empty_to_none(v)
 
     @field_validator("status")
     @classmethod
-    def validate_status(cls, v: str) -> str:
-        """验证状态值"""
-        if v not in ["1", "2"]:
-            raise ValueError("状态必须是 1(启用) 或 2(禁用)")
-        return v
+    def _validate_status(cls, v: str) -> str:
+        return validate_status(v)
 
     @field_validator("roles")
     @classmethod
     def validate_roles(cls, v: list[str]) -> list[str]:
-        """验证角色列表"""
         if v is None or len(v) == 0:
             raise ValueError("必须至少分配一个角色")
         return v
@@ -98,15 +85,8 @@ class UserCreate(UserBase):
 
     @field_validator("password")
     @classmethod
-    def validate_password(cls, v: str) -> str:
-        """验证密码强度"""
-        if not any(char.isdigit() for char in v):
-            raise ValueError("密码必须包含数字")
-        if not any(char.isupper() for char in v):
-            raise ValueError("密码必须包含大写字母")
-        if not any(char.islower() for char in v):
-            raise ValueError("密码必须包含小写字母")
-        return v
+    def _validate_password(cls, v: str) -> str:
+        return validate_password(v)
 
 
 class UserUpdate(UserBase):
@@ -118,17 +98,85 @@ class UserUpdate(UserBase):
 
     @field_validator("password")
     @classmethod
-    def validate_password(cls, v: str | None) -> str | None:
-        """验证密码强度（可选字段）"""
+    def _validate_password(cls, v: str | None) -> str | None:
         if v is None:
             return v
-        if not any(char.isdigit() for char in v):
-            raise ValueError("密码必须包含数字")
-        if not any(char.isupper() for char in v):
-            raise ValueError("密码必须包含大写字母")
-        if not any(char.islower() for char in v):
-            raise ValueError("密码必须包含小写字母")
-        return v
+        return validate_password(v)
+
+
+class ResetPassword(BaseModel):
+    """管理员重置用户密码请求"""
+
+    new_password: str = Field(..., min_length=6, max_length=20, description="新密码")
+
+    @field_validator("new_password")
+    @classmethod
+    def _validate_password(cls, v: str) -> str:
+        return validate_password(v)
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
+class ChangePassword(BaseModel):
+    """用户修改自己的密码"""
+
+    old_password: str = Field(..., min_length=1, description="当前密码")
+    new_password: str = Field(..., min_length=6, max_length=20, description="新密码")
+
+    @field_validator("new_password")
+    @classmethod
+    def _validate_password(cls, v: str) -> str:
+        return validate_password(v)
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
+class UpdateProfile(BaseModel):
+    """用户更新个人信息"""
+
+    nickname: str | None = Field(None, max_length=50, description="昵称")
+    user_gender: str | None = Field(None, description="性别")
+    user_phone: str | None = Field(None, description="手机号")
+    user_email: EmailStr | None = Field(None, description="邮箱")
+
+    @field_validator("user_gender", mode="before")
+    @classmethod
+    def _validate_gender(cls, v: str | None) -> str | None:
+        return validate_gender(v)
+
+    @field_validator("user_phone", mode="before")
+    @classmethod
+    def _validate_phone(cls, v: str | None) -> str | None:
+        return validate_phone(v)
+
+    @field_validator("user_email", mode="before")
+    @classmethod
+    def _validate_email(cls, v: str | None) -> str | None:
+        return empty_to_none(v)
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
+class ProfileOut(BaseModel):
+    """个人信息输出"""
+
+    user_id: int
+    user_name: str
+    nickname: str = ""
+    user_gender: str = "0"
+    user_phone: str = ""
+    user_email: str = ""
+    status: str
+    roles: list[str] = []
+    create_time: str = ""
+
+    model_config = ConfigDict(
+        from_attributes=True, alias_generator=to_camel, populate_by_name=True
+    )
+
+    @field_serializer("user_id")
+    def serialize_id(self, user_id: int, _info):
+        return str(user_id)
 
 
 class UserLogin(BaseModel):
@@ -163,12 +211,10 @@ class UserOut(BaseModel):
     nickname: str
     status: str
 
-    # 核心：返回给前端时转为字符串
     @field_serializer("user_id")
     def serialize_id(self, user_id: int, _info):
         return str(user_id)
 
-    # 核心：允许 Pydantic 直接读取 SQLAlchemy 模型属性
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -183,7 +229,6 @@ class UserItemOut(BaseModel):
     user_gender: str | None = None
     status: str | None = None
     create_time: datetime
-    # 可以在此扩展角色信息
     roles: list[str] = []
     dept_ids: list[str] = []
     dept_names: str = ""
@@ -193,7 +238,6 @@ class UserItemOut(BaseModel):
         from_attributes=True, alias_generator=to_camel, populate_by_name=True
     )
 
-    # 核心：处理 Snowflake ID 精度丢失问题
     @field_serializer("user_id")
     def serialize_id(self, user_id: int, _info):
         return str(user_id)
@@ -208,14 +252,11 @@ class UserItemOut(BaseModel):
 
     @field_serializer("create_time")
     def serialize_create_time(self, dt: datetime) -> str:
-        """格式化创建时间"""
         return dt.strftime(settings.DATETIME_FORMAT)
 
     @field_validator("roles", mode="before")
     @classmethod
     def transform_roles(cls, v):
-        """验证并转换角色列表"""
-        # 如果传入的是 SQLAlchemy 的 Role 对象列表，则提取名称
         if v and len(v) > 0 and not isinstance(v[0], str):
             return [r.role_code for r in v]
         return v

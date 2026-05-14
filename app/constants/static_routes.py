@@ -57,6 +57,17 @@ CONSTANT_ROUTES = [
         },
     },
     {
+        "name": "profile",
+        "path": "/profile",
+        "component": "layout.base$view.profile",
+        "meta": {
+            "title": "profile",
+            "i18nKey": "route.profile",
+            "constant": True,
+            "hideInMenu": True,
+        },
+    },
+    {
         "name": "login",
         "path": "/login/:module(pwd-login|code-login|register|reset-pwd|bind-wechat)?",
         "component": "layout.blank$view.login",

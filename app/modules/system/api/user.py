@@ -1,11 +1,15 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.db.session import get_db
 from app.modules.system.models.user import User
 from app.modules.system.schemas.user import (
+    ChangePassword,
+    ProfileOut,
+    ResetPassword,
+    UpdateProfile,
     UserCreate,
     UserItemOut,
     UserQuery,
@@ -127,6 +131,43 @@ async def add_user(
     return ResponseModel.success(msg="创建成功")
 
 
+@router.get(
+    "/profile",
+    response_model=ResponseModel[ProfileOut],
+    summary="获取个人信息",
+    description="获取当前登录用户的详细信息",
+)
+async def get_profile(current_user: User = Depends(get_current_user)):
+    data = user_service.get_profile(current_user)
+    return ResponseModel.success(data=data)
+
+
+@router.put("/profile", summary="更新个人信息", description="用户更新自己的基本信息")
+async def update_profile(
+    body: UpdateProfile,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    user_service.update_profile(current_user, body)
+    await db.commit()
+    return ResponseModel.success(msg="更新成功")
+
+
+@router.put(
+    "/change-password",
+    summary="修改密码",
+    description="用户修改自己的密码，需要验证当前密码",
+)
+async def change_password(
+    body: ChangePassword,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    user_service.change_password(current_user, body)
+    await db.commit()
+    return ResponseModel.success(msg="密码修改成功")
+
+
 @router.put(
     "/{user_id}",
     summary="修改用户",
@@ -180,6 +221,39 @@ async def update_user(
         await db.commit()
 
     return ResponseModel.success(msg="更新成功")
+
+
+@router.put(
+    "/{user_id}/reset-password",
+    summary="重置用户密码",
+    description="管理员重置指定用户的密码，无需提供旧密码",
+    responses={
+        200: {"description": "重置成功"},
+        401: {"description": "未登录或令牌已过期"},
+        403: {"description": "权限不足"},
+        404: {"description": "用户不存在"},
+    },
+    dependencies=[Depends(require_permissions("system:user:reset-password"))],
+)
+async def reset_password(
+    user_id: int,
+    reset_in: ResetPassword,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    重置用户密码
+
+    Args:
+        user_id: 用户ID（路径参数）
+        reset_in: 新密码信息
+        db: 异步数据库会话
+
+    Returns:
+        ResponseModel: 重置成功的消息
+    """
+    await user_service.reset_password(db, user_id, reset_in)
+    await db.commit()
+    return ResponseModel.success(msg="密码重置成功")
 
 
 @router.delete(
