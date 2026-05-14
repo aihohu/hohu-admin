@@ -29,9 +29,9 @@ class UserBase(BaseModel):
 
     user_name: str = Field(..., min_length=4, max_length=50, description="账号")
     nickname: str | None = Field(None, max_length=50, description="昵称")
-    user_email: EmailStr = Field(..., description="邮箱")
-    user_phone: str = Field(..., description="手机号")
-    user_gender: str = Field(..., description="用户性别")
+    user_email: EmailStr | None = Field(None, description="邮箱")
+    user_phone: str | None = Field(None, description="手机号")
+    user_gender: str | None = Field(None, description="用户性别")
     status: str = Field(..., description="状态")
     roles: list[str] = []  # 创建时分配的角色 ID 列表
     dept_ids: list[UserDeptItem] = []  # 部门关联列表
@@ -44,20 +44,32 @@ class UserBase(BaseModel):
             raise ValueError("用户名只能包含字母和数字")
         return v
 
-    @field_validator("user_phone")
+    @field_validator("user_phone", mode="before")
     @classmethod
-    def validate_user_phone(cls, v: str) -> str:
-        """验证手机号格式"""
+    def validate_user_phone(cls, v: str | None) -> str | None:
+        """验证手机号格式，空字符串转为 None"""
+        if not v:
+            return None
         if not match(r"^1[3-9]\d{9}$", v):
             raise ValueError("手机号格式不正确")
         return v
 
-    @field_validator("user_gender")
+    @field_validator("user_gender", mode="before")
     @classmethod
-    def validate_user_gender(cls, v: str) -> str:
-        """验证用户性别"""
+    def validate_user_gender(cls, v: str | None) -> str | None:
+        """验证用户性别，空字符串转为 None"""
+        if not v:
+            return None
         if v not in ["0", "1", "2"]:
             raise ValueError("用户性别必须是 0(未知)、1(男) 或 2(女)")
+        return v
+
+    @field_validator("user_email", mode="before")
+    @classmethod
+    def validate_user_email(cls, v: str | None) -> str | None:
+        """验证邮箱格式，空字符串转为 None"""
+        if not v:
+            return None
         return v
 
     @field_validator("status")
