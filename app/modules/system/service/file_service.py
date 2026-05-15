@@ -44,7 +44,7 @@ class FileService:
         now = datetime.now()
         date_dir = f"{now.year}/{now.month:02d}/{now.day:02d}"
         relative_path = f"{settings.UPLOAD_DIR}/{date_dir}/{file_name}{ext}"
-        file_url = f"/{relative_path}"
+        file_url = f"/uploads/{date_dir}/{file_name}{ext}"
         abs_dir = (
             Path(settings.UPLOAD_DIR)
             / str(now.year)
