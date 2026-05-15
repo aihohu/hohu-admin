@@ -34,7 +34,9 @@ USER_NAME_ERROR_MSG = "用户名只能包含字母和数字"
 
 
 def validate_user_name(v: str) -> str:
-    """校验用户名，只允许字母和数字"""
+    """校验用户名，只允许字母和数字，2-16位"""
+    if len(v) < 2 or len(v) > 16:
+        raise ValueError("用户名长度必须为2-16位")
     if not v.isalnum():
         raise ValueError(USER_NAME_ERROR_MSG)
     return v

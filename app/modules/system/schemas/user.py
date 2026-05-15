@@ -34,8 +34,8 @@ class UserDeptItem(BaseModel):
 class UserBase(BaseModel):
     """用户基础字段"""
 
-    user_name: str = Field(..., min_length=4, max_length=50, description="账号")
-    nickname: str | None = Field(None, max_length=50, description="昵称")
+    user_name: str = Field(..., min_length=2, max_length=16, description="账号")
+    nickname: str | None = Field(None, min_length=2, max_length=16, description="昵称")
     user_email: EmailStr | None = Field(None, description="邮箱")
     user_phone: str | None = Field(None, description="手机号")
     user_gender: str | None = Field(None, description="用户性别")
@@ -134,7 +134,7 @@ class ChangePassword(BaseModel):
 class UpdateProfile(BaseModel):
     """用户更新个人信息"""
 
-    nickname: str | None = Field(None, max_length=50, description="昵称")
+    nickname: str | None = Field(None, min_length=2, max_length=16, description="昵称")
     user_avatar: str | None = Field(None, description="头像URL")
     user_gender: str | None = Field(None, description="性别")
     user_phone: str | None = Field(None, description="手机号")
@@ -186,7 +186,7 @@ class UserLogin(BaseModel):
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
-    user_name: str = Field(..., min_length=4, description="账号")
+    user_name: str = Field(..., min_length=2, max_length=16, description="账号")
     password: str = Field(..., min_length=1, description="密码")
 
 
