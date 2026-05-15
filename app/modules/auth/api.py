@@ -166,6 +166,7 @@ async def get_user_info(current_user: User = Depends(get_current_user)):
             data={
                 "userId": str(current_user.user_id),
                 "userName": current_user.user_name,
+                "userAvatar": current_user.user_avatar or "",
                 "roles": roles,
                 "buttons": ["*"],
             }
@@ -183,7 +184,7 @@ async def get_user_info(current_user: User = Depends(get_current_user)):
         data={
             "userId": str(current_user.user_id),
             "userName": current_user.user_name,
-            # "nickname": current_user.nickname,
+            "userAvatar": current_user.user_avatar or "",
             "roles": roles,
             "buttons": list(permissions),
         }

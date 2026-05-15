@@ -236,6 +236,7 @@ class UserService:
             user_gender=current_user.user_gender or "0",
             user_phone=current_user.user_phone or "",
             user_email=current_user.user_email or "",
+            user_avatar=current_user.user_avatar or "",
             status=current_user.status,
             roles=[r.role_name for r in current_user.roles],
             create_time=(

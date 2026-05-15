@@ -135,6 +135,7 @@ class UpdateProfile(BaseModel):
     """用户更新个人信息"""
 
     nickname: str | None = Field(None, max_length=50, description="昵称")
+    user_avatar: str | None = Field(None, description="头像URL")
     user_gender: str | None = Field(None, description="性别")
     user_phone: str | None = Field(None, description="手机号")
     user_email: EmailStr | None = Field(None, description="邮箱")
@@ -166,6 +167,7 @@ class ProfileOut(BaseModel):
     user_gender: str = "0"
     user_phone: str = ""
     user_email: str = ""
+    user_avatar: str = ""
     status: str
     roles: list[str] = []
     create_time: str = ""
