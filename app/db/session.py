@@ -9,7 +9,7 @@ from app.core.config import settings
 # echo=True 会在终端打印 SQL 语句，开发环境下很有用
 engine = create_async_engine(
     settings.DATABASE_URL,
-    echo=True,
+    echo=settings.DB_ECHO,
     pool_pre_ping=True,  # 自动检查连接是否存活
     pool_size=10,  # 连接池大小
     max_overflow=20,  # 超过池大小后允许的额外连接数

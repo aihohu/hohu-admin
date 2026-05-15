@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     # 文件上传配置
     UPLOAD_DIR: str = "uploads"
     UPLOAD_MAX_SIZE: int = 10 * 1024 * 1024  # 10MB
+    # 数据库配置
+    DB_ECHO: bool = False
+
     UPLOAD_ALLOWED_EXTENSIONS: str = (
         ".jpg,.jpeg,.png,.gif,.webp,.pdf,.doc,.docx,.xls,.xlsx,.zip,.rar,.txt,.csv"
     )
