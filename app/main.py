@@ -16,6 +16,7 @@ from app.modules.ai.api.provider import router as ai_provider_router
 from app.modules.auth.api import router as auth_router
 from app.modules.job.api.job import router as job_router
 from app.modules.job.api.job_log import router as job_log_router
+from app.modules.system.api.config import router as config_router
 from app.modules.system.api.dept import router as dept_router
 from app.modules.system.api.dict_data import router as dict_data_router
 from app.modules.system.api.dict_type import router as dict_type_router
@@ -53,6 +54,7 @@ setup_exception_handlers(app)
 
 app.include_router(auth_router, prefix="/auth", tags=["认证模块"])
 app.include_router(user_router, prefix="/system/user", tags=["用户管理"])
+app.include_router(config_router, prefix="/system/config", tags=["系统配置管理"])
 app.include_router(role_router, prefix="/system/role", tags=["角色管理"])
 app.include_router(dept_router, prefix="/system/dept", tags=["部门管理"])
 app.include_router(menu_router, prefix="/system/menu", tags=["菜单管理"])
