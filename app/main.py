@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+import app.tasks  # noqa: F401  # pyright: ignore[reportUnusedImport]
 from app.core.config import settings
 from app.core.exceptions import setup_exception_handlers
 from app.core.redis import close_redis
