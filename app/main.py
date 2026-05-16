@@ -10,6 +10,7 @@ from app.core.exceptions import setup_exception_handlers
 from app.core.redis import close_redis
 from app.core.scheduler import scheduler_manager
 from app.db.session import AsyncSessionLocal
+from app.middleware.audit_middleware import AuditLogMiddleware
 from app.middleware.rate_limit_middleware import RateLimitMiddleware
 from app.modules.ai.api.chat import router as ai_chat_router
 from app.modules.ai.api.conversation import router as ai_conversation_router
@@ -22,7 +23,9 @@ from app.modules.system.api.dept import router as dept_router
 from app.modules.system.api.dict_data import router as dict_data_router
 from app.modules.system.api.dict_type import router as dict_type_router
 from app.modules.system.api.file import router as file_router
+from app.modules.system.api.login_log import router as login_log_router
 from app.modules.system.api.menu import router as menu_router
+from app.modules.system.api.operation_log import router as operation_log_router
 from app.modules.system.api.role import router as role_router
 from app.modules.system.api.user import router as user_router
 
@@ -49,6 +52,7 @@ else:
 
 # 添加频率限制中间件
 app.add_middleware(RateLimitMiddleware)
+app.add_middleware(AuditLogMiddleware)
 
 # 注册异常处理器
 setup_exception_handlers(app)
@@ -64,6 +68,10 @@ app.include_router(dict_data_router, prefix="/system/dict-data", tags=["字典�
 app.include_router(file_router, prefix="/system/file", tags=["文件管理"])
 app.include_router(job_router, prefix="/system/job", tags=["定时任务"])
 app.include_router(job_log_router, prefix="/system/job-log", tags=["任务日志"])
+app.include_router(
+    operation_log_router, prefix="/system/operation-log", tags=["操作日志"]
+)
+app.include_router(login_log_router, prefix="/system/login-log", tags=["登录日志"])
 app.include_router(ai_chat_router, prefix="/ai/chat", tags=["AI对话"])
 app.include_router(ai_conversation_router, prefix="/ai/conversation", tags=["AI会话"])
 app.include_router(ai_provider_router, prefix="/ai/provider", tags=["AI提供商"])

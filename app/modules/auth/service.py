@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import Depends
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
@@ -13,18 +15,27 @@ from app.core.exceptions import (
     BusinessRuleException,
 )
 from app.core.security import create_access_token, verify_password
-from app.db.session import get_db
+from app.db.session import AsyncSessionLocal, get_db
 from app.modules.auth.schemas.auth import LoginCredentials, RouteMeta, UserRoute
+from app.modules.system.models.login_log import SysLoginLog
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
+
+logger = logging.getLogger(__name__)
 
 # 定义 OAuth2 方案，指定获取 Token 的 URL
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
 
 
 class AuthService:
-    async def authenticate(self, credentials: LoginCredentials, db: AsyncSession):
+    async def authenticate(
+        self,
+        credentials: LoginCredentials,
+        db: AsyncSession,
+        ip: str | None = None,
+        user_agent: str | None = None,
+    ):
         # 策略分发
         if credentials.login_type == "password":
             user = await self._verify_password_login(credentials, db)
@@ -38,13 +49,49 @@ class AuthService:
             )
 
         # 统一签发 Token
-        token = create_access_token(subject=str(user.user_id))
+        token = create_access_token(subject=str(user.user_id), username=user.user_name)
+
+        # 写入成功日志
+        await self._write_login_log(
+            user_id=user.user_id,
+            username=user.user_name,
+            ip=ip,
+            user_agent=user_agent,
+            status="1",
+            message="登录成功",
+        )
+
         result = {
             "token": token,
             "refreshToken": "...",  # 如果需要可在此扩展
             # "user": user,
         }
         return ResponseModel.success(data=result)
+
+    async def _write_login_log(
+        self,
+        user_id: int | None,
+        username: str,
+        ip: str | None,
+        user_agent: str | None,
+        status: str,
+        message: str,
+    ):
+        """写入登录日志（使用独立 session，不受主事务回滚影响）"""
+        try:
+            async with AsyncSessionLocal() as session:
+                log = SysLoginLog(
+                    user_id=user_id,
+                    username=username,
+                    ip=ip,
+                    user_agent=user_agent,
+                    status=status,
+                    message=message,
+                )
+                session.add(log)
+                await session.commit()
+        except Exception:
+            logger.exception("Failed to write login log")
 
     async def _verify_password_login(self, cred, db):
         # 1. 查找用户

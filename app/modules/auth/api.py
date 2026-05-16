@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.params import Query
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select
@@ -8,7 +8,11 @@ from app.constants import MENU_TYPE_DIRECTORY, MENU_TYPE_MENU, STATUS_ENABLED
 from app.constants.static_routes import CONSTANT_ROUTES
 from app.core.auth import is_super_admin
 from app.core.base_response import ResponseModel
-from app.core.exceptions import DuplicateException
+from app.core.exceptions import (
+    AuthenticationException,
+    AuthorizationException,
+    DuplicateException,
+)
 from app.core.security import get_password_hash
 from app.db.session import get_db
 from app.modules.auth.schemas.auth import LoginCredentials
@@ -82,6 +86,7 @@ async def register(
     },
 )
 async def login(
+    request: Request,
     credentials: LoginCredentials,
     db: AsyncSession = Depends(get_db),
 ):
@@ -89,6 +94,7 @@ async def login(
     用户登录
 
     Args:
+        request: HTTP 请求对象（用于获取 IP 和 User-Agent）
         credentials: 登录凭证，包含用户名和密码
         db: 异步数据库会话
 
@@ -102,8 +108,24 @@ async def login(
         - 本接口应用频率限制：每分钟最多 5 次登录尝试
         - 连续失败多次后建议等待一段时间再试
     """
-    result = await auth_service.authenticate(credentials, db)
-    return result
+    ip = request.client.host if request.client else None
+    user_agent = request.headers.get("User-Agent")
+    try:
+        result = await auth_service.authenticate(
+            credentials, db, ip=ip, user_agent=user_agent
+        )
+        return result
+    except (AuthenticationException, AuthorizationException):
+        # 写入失败日志
+        await auth_service._write_login_log(
+            user_id=None,
+            username=credentials.user_name,
+            ip=ip,
+            user_agent=user_agent,
+            status="2",
+            message="密码错误",
+        )
+        raise
 
 
 @router.post(

@@ -19,6 +19,8 @@ from app.modules.job.models.job import SysJob, SysJobLog
 from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
+from app.modules.system.models.operation_log import SysOperationLog  # noqa: F401
+from app.modules.system.models.login_log import SysLoginLog  # noqa: F401
 
 load_dotenv()
 config = context.config

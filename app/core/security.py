@@ -41,13 +41,15 @@ def get_password_hash(password: str) -> str:
     return hashed.decode("utf-8")
 
 
-def create_access_token(subject: str | Any) -> str:
+def create_access_token(subject: str | Any, username: str = "") -> str:
     """生成 JWT Access Token"""
 
     expire = datetime.now(UTC) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
     # 负载信息：sub 字段通常存放 user_id
     to_encode = {"exp": expire, "sub": str(subject)}
+    if username:
+        to_encode["username"] = username
     encoded_jwt = jwt.encode(
         to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM
     )
