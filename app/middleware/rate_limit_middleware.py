@@ -49,6 +49,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             # 不需要限制，直接放行
             return await call_next(request)
 
+        # SSE 流式端点跳过 BaseHTTPMiddleware，避免流式响应中断
+        if path == "/ai/chat":
+            return await call_next(request)
+
         # 检查频率限制
         now = datetime.now()
         if self._is_rate_limited(client_ip, path, now, rate_limit):

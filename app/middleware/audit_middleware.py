@@ -41,6 +41,7 @@ EXCLUDED_PATHS = (
     "/health",
     "/system/operation-log",
     "/system/login-log",
+    "/ai/chat",
 )
 
 
