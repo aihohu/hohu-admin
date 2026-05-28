@@ -1,5 +1,11 @@
+import asyncio
+import base64
+import ipaddress
 import json
+import logging
 from http import HTTPStatus
+from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response, StreamingResponse
@@ -9,6 +15,7 @@ from pydantic_ai.ui.vercel_ai import VercelAIAdapter
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_response import ResponseModel
+from app.core.config import settings
 from app.db.session import get_db
 from app.modules.ai.core.config import ChatDeps
 from app.modules.ai.schemas.chat import ChatRequest
@@ -16,6 +23,55 @@ from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.conversation_service import conversation_service
 from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
+
+logger = logging.getLogger(__name__)
+
+
+def _is_private_url(url: str) -> bool:
+    """判断 URL 是否指向内网地址（localhost / 私有 IP）"""
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if not host:
+        return False
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_private or ip.is_loopback
+    except ValueError:
+        return False
+
+
+def _convert_local_images_to_data_uri_sync(body: dict) -> dict:
+    """将 body 中内网图片 URL 替换为 base64 data URI（同步，在线程池中调用）"""
+    upload_dir = Path(settings.UPLOAD_DIR).resolve()
+    for msg in body.get("messages", []):
+        parts = msg.get("parts", [])
+        for part in parts:
+            if part.get("type") != "file":
+                continue
+            url = part.get("url", "")
+            if not _is_private_url(url):
+                continue
+            parsed = urlparse(url)
+            file_path = Path(parsed.path.lstrip("/")).resolve()
+            if not file_path.is_relative_to(upload_dir):
+                logger.warning("Image path outside upload dir: %s", file_path)
+                continue
+            if not file_path.exists():
+                logger.warning("Image file not found: %s", file_path)
+                continue
+            media_type = part.get("mediaType", "image/jpeg")
+            with open(file_path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+            part["url"] = f"data:{media_type};base64,{b64}"
+    return body
+
+
+async def _convert_local_images_to_data_uri(body: dict) -> dict:
+    """将同步图片转换放到线程池，避免阻塞事件循环"""
+    return await asyncio.to_thread(_convert_local_images_to_data_uri_sync, body)
+
 
 router = APIRouter()
 
@@ -30,6 +86,32 @@ async def chat(
     # 读取原始 body（只能读一次）
     raw_body = await request.body()
 
+    # 解析 JSON
+    body = json.loads(raw_body) if raw_body else {}
+    conversation_id = body.get("conversationId") or body.get("conversation_id")
+    if conversation_id is not None:
+        conversation_id = int(conversation_id)
+
+    # 提取用户消息文本和结构化 parts（在 base64 转换之前保存原始 parts）
+    user_message = ""
+    user_parts = None
+    messages = body.get("messages", [])
+    if messages:
+        last_msg = messages[-1]
+        if last_msg.get("role") == "user":
+            user_message = last_msg.get("content", "")
+            raw_parts = last_msg.get("parts", [])
+            if not user_message and raw_parts:
+                user_message = "".join(
+                    p.get("text", "") for p in raw_parts if p.get("type") == "text"
+                )
+            if raw_parts:
+                user_parts = raw_parts
+
+    # 将内网图片 URL 转为 base64 data URI（LLM 提供商无法访问内网）
+    body = await _convert_local_images_to_data_uri(body)
+    raw_body = json.dumps(body).encode()
+
     # 解析前端请求
     try:
         run_input = VercelAIAdapter.build_run_input(raw_body)
@@ -40,30 +122,10 @@ async def chat(
             status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
         )
 
-    # 从已读的 body 解析 JSON 获取会话信息
-    body = json.loads(raw_body) if raw_body else {}
-    conversation_id = body.get("conversationId") or body.get("conversation_id")
-    if conversation_id is not None:
-        conversation_id = int(conversation_id)
-
-    # 提取用户消息文本
-    user_message = ""
-    messages = body.get("messages", [])
-    if messages:
-        last_msg = messages[-1]
-        if last_msg.get("role") == "user":
-            # 兼容 content 和 parts 两种格式
-            user_message = last_msg.get("content", "")
-            if not user_message:
-                parts = last_msg.get("parts", [])
-                user_message = "".join(
-                    p.get("text", "") for p in parts if p.get("type") == "text"
-                )
-
     # 保存用户消息
-    if conversation_id and user_message:
+    if conversation_id and (user_message or user_parts):
         await chat_service.save_user_message(
-            db, conversation_id, _current_user.user_id, user_message
+            db, conversation_id, _current_user.user_id, user_message, parts=user_parts
         )
         await db.commit()
 

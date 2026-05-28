@@ -115,6 +115,8 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
         # 读取并缓存 request body
         request_params = None
         if request.method in ("POST", "PUT", "PATCH"):
+            content_type = request.headers.get("content-type", "")
+            is_json = "application/json" in content_type
             try:
                 body = await request.body()
                 if body:
@@ -124,12 +126,13 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
 
                     request._receive = receive
 
-                    parsed = json.loads(body)
-                    if isinstance(parsed, dict):
-                        parsed = _mask_sensitive(parsed)
-                    request_params = _truncate_params(
-                        json.dumps(parsed, ensure_ascii=False)
-                    )
+                    if is_json:
+                        parsed = json.loads(body)
+                        if isinstance(parsed, dict):
+                            parsed = _mask_sensitive(parsed)
+                        request_params = _truncate_params(
+                            json.dumps(parsed, ensure_ascii=False)
+                        )
             except json.JSONDecodeError:
                 request_params = None
             except Exception:

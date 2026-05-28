@@ -1,17 +1,22 @@
 from fastapi import APIRouter, Depends
 from pydantic_ai import Agent
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_response import PageResult, ResponseModel
 from app.core.security import decrypt_value
 from app.db.session import get_db
 from app.modules.ai.core.provider_registry import create_model
+from app.modules.ai.models.model import AiModel
+from app.modules.ai.models.provider import AiProvider
+from app.modules.ai.schemas.model import ModelCreate, ModelOut, ModelUpdate
 from app.modules.ai.schemas.provider import (
     ProviderCreate,
     ProviderOut,
     ProviderQuery,
     ProviderUpdate,
 )
+from app.modules.ai.service.model_service import model_service
 from app.modules.ai.service.provider_service import provider_service
 from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
@@ -21,37 +26,41 @@ router = APIRouter()
 
 @router.get("/models", summary="获取可用模型列表")
 async def get_available_models(
+    capability: str | None = None,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ):
-    """返回所有启用的提供商及其模型列表，供对话选择
+    """返回所有启用的模型列表，供对话选择
 
-    config 格式:
-    { "models": ["gpt-4o", "gpt-4o-mini"] }
-    兼容旧格式 config.default_model — 自动转为单元素列表
+    查询参数:
+    - capability: 可选，按能力过滤（text / vision / image-gen）
     """
-    providers = await provider_service.get_all_enabled(db)
-    result = []
-    for p in providers:
-        config = p.config or {}
-        models_list = config.get("models", [])
+    stmt = (
+        select(AiModel, AiProvider)
+        .join(AiProvider, AiModel.provider_id == AiProvider.provider_id)
+        .where(AiModel.is_enabled.is_(True), AiProvider.is_enabled.is_(True))
+        .order_by(AiModel.sort_order, AiModel.model_id)
+    )
+    result = await db.execute(stmt)
+    rows = result.all()
 
-        provider_models = []
-        for m in models_list:
-            model_code = m if isinstance(m, str) else m.get("model", "")
-            if not model_code:
-                continue
-            provider_models.append(
-                {
-                    "providerId": str(p.provider_id),
-                    "providerCode": p.provider_code,
-                    "providerName": p.name,
-                    "model": model_code,
-                    "modelId": f"{p.provider_code}:{model_code}",
-                }
-            )
-        result.extend(provider_models)
-    return ResponseModel.success(data=result)
+    models = []
+    for model, provider in rows:
+        caps = model.capabilities or []
+        if capability and capability not in caps:
+            continue
+        models.append(
+            {
+                "modelId": str(model.model_id),
+                "providerId": str(provider.provider_id),
+                "providerCode": provider.provider_code,
+                "providerName": provider.name,
+                "model": model.name,
+                "capabilities": caps,
+                "baseUrl": model.base_url or provider.base_url,
+            }
+        )
+    return ResponseModel.success(data=models)
 
 
 @router.get(
@@ -74,9 +83,9 @@ async def add_provider(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ):
-    await provider_service.create(db, data)
+    obj = await provider_service.create(db, data)
     await db.commit()
-    return ResponseModel.success(msg="添加成功")
+    return ResponseModel.success(data=ProviderOut.model_validate(obj), msg="添加成功")
 
 
 @router.put("/{provider_id}", summary="更新提供商")
@@ -102,6 +111,64 @@ async def delete_provider(
     return ResponseModel.success(msg="删除成功")
 
 
+# ── 模型管理（嵌套在提供商下） ──
+
+
+@router.get("/{provider_id}/models", summary="获取提供商下的模型列表")
+async def get_provider_models(
+    provider_id: int,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    await provider_service.get_by_id(db, provider_id)
+    models = await model_service.get_by_provider(db, provider_id)
+    return ResponseModel.success(data=[ModelOut.model_validate(m) for m in models])
+
+
+@router.post("/{provider_id}/models", summary="添加模型")
+async def add_model(
+    provider_id: int,
+    data: ModelCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    await provider_service.get_by_id(db, provider_id)
+    await model_service.create(db, provider_id, data, create_by=current_user.user_name)
+    await db.commit()
+    return ResponseModel.success(msg="添加成功")
+
+
+@router.put("/{provider_id}/models/{model_id}", summary="更新模型")
+async def update_model(
+    provider_id: int,
+    model_id: int,
+    data: ModelUpdate,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    model = await model_service.get_by_id(db, model_id)
+    if model.provider_id != provider_id:
+        return ResponseModel.error(msg="模型不属于该提供商", code=400)
+    await model_service.update(db, model_id, data)
+    await db.commit()
+    return ResponseModel.success(msg="更新成功")
+
+
+@router.delete("/{provider_id}/models/{model_id}", summary="删除模型")
+async def delete_model(
+    provider_id: int,
+    model_id: int,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    model = await model_service.get_by_id(db, model_id)
+    if model.provider_id != provider_id:
+        return ResponseModel.error(msg="模型不属于该提供商", code=400)
+    await model_service.delete(db, model_id)
+    await db.commit()
+    return ResponseModel.success(msg="删除成功")
+
+
 @router.post("/test-model", summary="测试模型连通性")
 async def test_model(
     data: dict,
@@ -118,7 +185,6 @@ async def test_model(
     if not model_name:
         return ResponseModel.error(msg="请输入模型名称", code=400)
 
-    # 如果有 providerId 且没传 apiKey，从数据库读取解密后的 key
     if provider_id and not api_key_raw:
         try:
             provider = await provider_service.get_by_id(db, int(provider_id))

@@ -15,6 +15,7 @@ class MessageOut(BaseModel):
     role: str
     message_type: str
     content: str | None
+    parts: list[dict] | None
     tokens_input: int | None
     tokens_output: int | None
     tool_calls: dict | None
@@ -39,6 +40,7 @@ class MessageCreate(BaseModel):
     conversation_id: int
     role: str = Field(..., description="角色：user / assistant / system / tool")
     content: str | None = Field(None, description="消息内容")
+    parts: list[dict] | None = Field(None, description="结构化消息内容")
     message_type: str = Field(
         "text", description="类型：text / tool_call / tool_result"
     )

@@ -22,11 +22,16 @@ class ChatService:
         return [MessageOut.model_validate(m) for m in messages]
 
     async def save_user_message(
-        self, db: AsyncSession, conversation_id: int, _user_id: int, content: str
+        self,
+        db: AsyncSession,
+        conversation_id: int,
+        _user_id: int,
+        content: str,
+        parts: list[dict] | None = None,
     ):
         """保存用户消息"""
         await conversation_service.save_message(
-            db, conversation_id, role="user", content=content
+            db, conversation_id, role="user", content=content, parts=parts
         )
 
     async def save_assistant_message(

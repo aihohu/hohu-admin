@@ -49,9 +49,10 @@ class ConversationService:
         obj = AiConversation(
             user_id=user_id,
             title=data.title or "新对话",
-            model_name=data.model_name or "openai:gpt-4o",
             system_prompt=data.system_prompt,
         )
+        if data.model_name:
+            obj.model_name = data.model_name
         db.add(obj)
         return obj
 
@@ -95,6 +96,7 @@ class ConversationService:
         message_type: str = "text",
         tokens_input: int | None = None,
         tokens_output: int | None = None,
+        parts: list[dict] | None = None,
     ) -> AiMessage:
         """保存一条消息"""
         msg = AiMessage(
@@ -104,6 +106,7 @@ class ConversationService:
             message_type=message_type,
             tokens_input=tokens_input,
             tokens_output=tokens_output,
+            parts=parts,
         )
         db.add(msg)
         return msg

@@ -24,13 +24,14 @@ class AiProvider(Base):
         String(500), nullable=False, comment="API Key（加密存储）"
     )
     base_url: Mapped[str] = mapped_column(
-        String(500), nullable=True, comment="API 地址（OpenAI 兼容协议留空用默认）"
+        String(500), nullable=True, comment="默认 API 地址"
     )
     is_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, comment="是否启用"
     )
-    config: Mapped[dict | None] = mapped_column(
-        JSON, nullable=True, comment="扩展配置（默认模型、温度、token 限额等）"
+    config: Mapped[dict | None] = mapped_column(JSON, nullable=True, comment="扩展配置")
+    create_by: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="创建者"
     )
     create_time: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), comment="创建时间"

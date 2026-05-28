@@ -51,6 +51,9 @@ class AiMessage(Base):
     tokens_output: Mapped[int | None] = mapped_column(
         Integer, nullable=True, comment="输出 token 数"
     )
+    parts: Mapped[list | None] = mapped_column(
+        JSON, nullable=True, comment="结构化消息内容（含图片、文件等）"
+    )
     tool_calls: Mapped[dict | None] = mapped_column(
         JSON, nullable=True, comment="工具调用记录（名称、参数、结果）"
     )

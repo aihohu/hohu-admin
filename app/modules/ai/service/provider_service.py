@@ -8,6 +8,7 @@ from app.core.exceptions import (
 )
 from app.core.security import decrypt_value, encrypt_value
 from app.modules.ai.core.provider_registry import create_model, get_default_model
+from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.schemas.provider import ProviderCreate, ProviderUpdate
 from app.utils.pagination import build_filters, paginate
@@ -41,7 +42,6 @@ class ProviderService:
         return obj
 
     async def create(self, db: AsyncSession, data: ProviderCreate) -> AiProvider:
-        # 检查 provider_code 唯一性
         existing = await db.execute(
             select(AiProvider).where(AiProvider.provider_code == data.provider_code)
         )
@@ -60,7 +60,6 @@ class ProviderService:
         obj = await self.get_by_id(db, provider_id)
         update_data = data.model_dump(exclude_unset=True)
 
-        # 如果更新 provider_code，检查唯一性
         if "provider_code" in update_data:
             existing = await db.execute(
                 select(AiProvider).where(
@@ -75,7 +74,6 @@ class ProviderService:
                     field="提供商标识", value=update_data["provider_code"]
                 )
 
-        # 如果提供了新的 api_key，加密后存储；否则跳过（保留原值）
         if "api_key" in update_data:
             if update_data["api_key"]:
                 update_data["api_key"] = encrypt_value(update_data["api_key"])
@@ -90,57 +88,57 @@ class ProviderService:
         obj = await self.get_by_id(db, provider_id)
         await db.delete(obj)
 
-    async def resolve_model(self, db: AsyncSession, model_name: str | None = None):
-        """解析可用的 AI 模型实例
-
-        优先级：
-        1. 如果 model_name 含 provider:model 前缀且找到匹配提供商，使用指定模型
-        2. 第一个启用的提供商的 config.default_model
-        3. .env 中的默认配置
-        4. 抛出异常
-        """
-        providers = await self.get_all_enabled(db)
-
-        if model_name and providers:
-            # 解析 model_name 中的 provider:model
-            parts = model_name.split(":", 1)
-            target_provider_code = parts[0] if len(parts) > 1 else None
-            actual_model_name = parts[1] if len(parts) > 1 else model_name
-
-            # 尝试匹配 provider_code 前缀
-            if target_provider_code:
-                for p in providers:
-                    if p.provider_code == target_provider_code:
-                        return create_model(
-                            p.provider_code,
-                            actual_model_name,
-                            decrypt_value(p.api_key),
-                            p.base_url,
-                        )
-
-            # 前缀未匹配到提供商，忽略 model_name，使用提供商默认模型
-
-        # 使用第一个启用提供商的默认模型
-        if providers:
-            p = providers[0]
-            actual_model = (p.config or {}).get("default_model")
-            if not actual_model:
-                raise BusinessRuleException(
-                    message="AI 模型未配置，请先在模型管理中添加配置",
-                    error_code="AI_MODEL_NOT_CONFIGURED",
-                )
-            return create_model(
-                p.provider_code, actual_model, decrypt_value(p.api_key), p.base_url
-            )
+    async def resolve_model(self, db: AsyncSession, model_id: str | None = None):
+        """根据 model_id (Snowflake) 解析 AI 模型实例，回退到第一个文本模型"""
+        model = await self._find_model(db, model_id)
+        if model:
+            return await self._build_model_instance(db, model)
 
         # 回退到 .env 默认配置
-        model = get_default_model()
-        if model:
-            return model
+        fallback = get_default_model()
+        if fallback:
+            return fallback
 
         raise BusinessRuleException(
             message="AI 模型未配置，请先在模型管理中添加配置",
             error_code="AI_MODEL_NOT_CONFIGURED",
+        )
+
+    async def _find_model(self, db: AsyncSession, model_id: str | None):
+        """按 model_id 查找，未指定则回退第一个文本模型"""
+        if model_id:
+            try:
+                model = await db.get(AiModel, int(model_id))
+                if model and model.is_enabled:
+                    provider = await db.get(AiProvider, model.provider_id)
+                    if provider and provider.is_enabled:
+                        return model
+            except (ValueError, TypeError):
+                pass
+
+        # 回退: 第一个启用的文本模型
+        stmt = (
+            select(AiModel)
+            .join(AiProvider, AiModel.provider_id == AiProvider.provider_id)
+            .where(
+                AiModel.is_enabled.is_(True),
+                AiProvider.is_enabled.is_(True),
+                AiModel.capabilities.contains(["text"]),
+            )
+            .order_by(AiModel.sort_order, AiModel.model_id)
+            .limit(1)
+        )
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def _build_model_instance(self, db: AsyncSession, model: AiModel):
+        """根据模型记录构建 Pydantic AI Model 实例"""
+        provider = await self.get_by_id(db, model.provider_id)
+        return create_model(
+            provider.provider_code,
+            model.name,
+            decrypt_value(provider.api_key),
+            model.base_url or provider.base_url,
         )
 
 
