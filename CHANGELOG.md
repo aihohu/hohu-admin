@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.2] (2026-05-28)
+
+### Features
+
+- **AI Model Management** — Separate `ai_model` table with capabilities (`text`, `vision`, `image-gen`, `video`, `audio`, `embedding`), per-model base URL, and sort order
+- **Model CRUD API** — Nested model endpoints under provider (`/{provider_id}/models`) for add/update/delete
+- **Image Vision Support** — Upload images in AI chat, auto-convert local images to base64 for LLM providers
+- **Structured Message Parts** — `ai_message.parts` JSON column for multi-modal message content
+
+### Bug Fixes
+
+- **Path Traversal Protection** — Restrict image file reads to upload directory only
+- **Async Image Conversion** — Move base64 encoding to thread pool to avoid blocking event loop
+- **Audit Middleware** — Skip JSON body parsing for multipart/form-data requests
+- **Conversation Model Default** — Fix NOT NULL violation when creating conversation without model selection
+
+### Improvements
+
+- **Model Resolution Refactor** — Extract `_find_model()` and `_build_model_instance()` to eliminate duplicate code, remove old `provider:model` format compatibility
+- **Model Fallback** — Fallback query filters by `text` capability to avoid routing to image-gen models
+- **Frontend Model Selector** — Model cards with capability tags, i18n labels, required validation on name and capabilities
+- **GIN Index** — `ai_model.capabilities` JSONB column with GIN index for efficient capability queries
+- **Data Migration** — Alembic migration moves `config.models` to `ai_model` rows, cleans up old config
+
 ## [v0.1.1] (2026-05-06)
 
 ### Features
