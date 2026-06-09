@@ -92,15 +92,13 @@ class UserCreate(UserBase):
 class UserUpdate(UserBase):
     """用户更新请求"""
 
-    password: str | None = Field(
-        None, min_length=6, max_length=20, description="明文密码"
-    )
+    password: str | None = Field(None, description="明文密码")
 
     @field_validator("password")
     @classmethod
     def _validate_password(cls, v: str | None) -> str | None:
-        if v is None:
-            return v
+        if not v:
+            return None
         return validate_password(v)
 
 

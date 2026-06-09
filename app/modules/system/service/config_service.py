@@ -45,6 +45,29 @@ class ConfigService:
         )
         return {c.config_key: c.config_value for c in result.scalars().all()}
 
+    @cacheable(key="config:key:{key}", ttl=300)
+    async def get_value(
+        self, db: AsyncSession, key: str, default: str | None = None
+    ) -> str | None:
+        """根据 key 获取配置值，支持默认值"""
+        result = await db.execute(
+            select(Config.config_value).where(
+                Config.config_key == key, Config.status == "1"
+            )
+        )
+        value = result.scalar_one_or_none()
+        return value if value is not None else default
+
+    @cacheable(key="config:group:{group}", ttl=300)
+    async def get_values_by_group(self, db: AsyncSession, group: str) -> dict[str, str]:
+        """根据分组获取配置，返回 {key: value} 字典"""
+        result = await db.execute(
+            select(Config)
+            .where(Config.config_group == group, Config.status == "1")
+            .order_by(Config.config_key.asc())
+        )
+        return {c.config_key: c.config_value for c in result.scalars().all()}
+
     async def create(self, db: AsyncSession, config_in: ConfigCreate) -> Config:
         """创建系统配置"""
         # 检查键唯一性
