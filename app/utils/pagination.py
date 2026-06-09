@@ -176,13 +176,35 @@ def build_filters(
             field = getattr(model, field_name)
             if operation == "contains":
                 filters.append(field.contains(value))
+            elif operation == "ilike":
+                filters.append(field.ilike(f"%{value}%"))
+            elif operation == "like":
+                filters.append(field.like(value))
+            elif operation == "startswith":
+                filters.append(field.startswith(value))
+            elif operation == "endswith":
+                filters.append(field.endswith(value))
             elif operation == "==":
                 filters.append(field == value)
-            elif operation == "in_":
-                filters.append(field.in_(value))
+            elif operation == "!=":
+                filters.append(field != value)
+            elif operation == ">":
+                filters.append(field > value)
+            elif operation == "<":
+                filters.append(field < value)
             elif operation == ">=":
                 filters.append(field >= value)
             elif operation == "<=":
                 filters.append(field <= value)
+            elif operation == "in_":
+                filters.append(field.in_(value))
+            elif operation == "not_in":
+                filters.append(~field.in_(value))
+            elif operation == "between":
+                filters.append(field.between(value[0], value[1]))
+            elif operation == "is_null":
+                filters.append(field.is_(None) if value else field.isnot(None))
+            elif operation == "is_not_null":
+                filters.append(field.isnot(None) if value else field.is_(None))
 
     return filters
