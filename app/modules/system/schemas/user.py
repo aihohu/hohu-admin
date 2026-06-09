@@ -199,6 +199,7 @@ class UserQuery(BaseModel):
     user_email: str | None = Field(None, description="邮箱（支持模糊查询）")
     user_gender: str | None = Field(None, description="用户性别")
     status: str | None = Field(None, description="状态")
+    role_code: str | None = Field(None, description="角色编码")
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -230,6 +231,7 @@ class UserItemOut(BaseModel):
     status: str | None = None
     create_time: datetime
     roles: list[str] = []
+    role_names: list[str] = []
     dept_ids: list[str] = []
     dept_names: str = ""
     primary_dept: str | None = None

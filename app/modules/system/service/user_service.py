@@ -49,6 +49,7 @@ class UserService:
             "user_phone": ("user_phone", "contains"),
             "user_email": ("user_email", "contains"),
             "status": ("status", "=="),
+            "role_code": lambda model, val: model.roles.any(Role.role_code == val),
         }
         filters = build_filters(User, field_mapping, **query.model_dump())
 

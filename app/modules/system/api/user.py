@@ -66,6 +66,7 @@ async def get_user_list(
     for u in page_data.records:
         item = UserItemOut.model_validate(u)
         item.roles = [r.role_code for r in u.roles]
+        item.role_names = [r.role_name for r in u.roles]
         # 部门信息解析
         if u.depts:
             item.dept_ids = [str(d.dept_id) for d in u.depts]
