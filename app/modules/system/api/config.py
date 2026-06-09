@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Depends
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
@@ -39,6 +42,38 @@ async def get_list(
     """获取系统配置分页列表"""
     page_data = await config_service.get_list(db, query)
     return ResponseModel.success(data=page_data)
+
+
+@router.get("/export", summary="导出系统配置")
+async def export_configs(
+    query: ConfigQuery = Depends(),
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    """导出系统配置为 Excel 文件"""
+    buf = await config_service.export_configs(db, query)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=config_export.xlsx"},
+    )
+
+
+@router.post("/import", summary="导入系统配置")
+async def import_configs(
+    file: Annotated[UploadFile, File(description="Excel 文件")],
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    """从 Excel 文件导入系统配置"""
+    file_bytes = await file.read()
+    result = await config_service.import_configs(db, file_bytes)
+    await db.commit()
+    await cache_delete(pattern="config:*")
+    return ResponseModel.success(
+        data=result,
+        msg=f"导入成功 {result['success']} 条，跳过 {result['skipped']} 条",
+    )
 
 
 @router.post("/add", summary="创建系统配置")
