@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.3] (2026-06-11)
+
+### Features
+
+- **Config Excel Export/Import** — Export system configs to Excel file and import from Excel, with button-level permission control
+- **Menu Sync Expansion** — Add operation log, login log and monitor menus to `sync_menus` utility
+- **User Role Display** — Show role names in user list and add role-based filter support
+- **Advanced Filter Operators** — Support `ilike`, `startswith`, `endswith`, `between`, `is_null` and other operators in query builder
+
+### Bug Fixes
+
+- **User Edit Password** — Allow empty password on user edit to avoid forced password reset
+- **Config Query Helpers** — Add query helper functions for config module
+
 ## [v0.1.2] (2026-05-28)
 
 ### Features
