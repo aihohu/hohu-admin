@@ -114,6 +114,16 @@ CONFIG_SEED_DATA = [
         "is_public": False,
         "remark": "是否开放用户自主注册，值为 true 或 false",
     },
+    {
+        "config_name": "强制用户主部门",
+        "config_key": "user_require_primary_dept",
+        "config_value": "false",
+        "config_type": "text",
+        "config_group": "feature",
+        "status": "1",
+        "is_public": False,
+        "remark": "是否强制用户必须分配主部门，值为 true 或 false。开启后创建/编辑用户时必须指定主部门，且部门用户管理中移除成员不可导致用户无部门",
+    },
 ]
 
 
