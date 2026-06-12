@@ -72,6 +72,27 @@ class ConfigService:
         value = result.scalar_one_or_none()
         return value if value is not None else default
 
+    async def get_bool(self, db: AsyncSession, key: str, default: bool = False) -> bool:
+        """读取布尔型配置。
+
+        识别的真值：true / 1 / yes / on（大小写不敏感）。
+        其他值（包括 None）按 default 处理。
+        """
+        value = await self.get_value(db, key)
+        if value is None:
+            return default
+        return value.strip().lower() in ("true", "1", "yes", "on")
+
+    async def get_int(self, db: AsyncSession, key: str, default: int = 0) -> int:
+        """读取整型配置。无法解析时返回 default。"""
+        value = await self.get_value(db, key)
+        if value is None:
+            return default
+        try:
+            return int(str(value).strip())
+        except (ValueError, TypeError):
+            return default
+
     @cacheable(key="config:group:{group}", ttl=300)
     async def get_values_by_group(self, db: AsyncSession, group: str) -> dict[str, str]:
         """根据分组获取配置，返回 {key: value} 字典"""

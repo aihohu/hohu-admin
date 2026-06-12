@@ -14,6 +14,8 @@ from app.modules.system.schemas.dept import (
     DeptTreeOptionOut,
     DeptTreeOut,
     DeptUpdate,
+    DeptUsersOut,
+    DeptUsersUpdate,
 )
 from app.modules.system.service.dept_service import dept_service
 from app.utils.pagination import build_filters, paginate
@@ -237,3 +239,38 @@ async def batch_delete_depts(
     deleted_count = await dept_service.batch_delete(db, ids)
     await db.commit()
     return ResponseModel.success(msg=f"成功删除 {deleted_count} 个部门")
+
+
+@router.get(
+    "/{dept_id}/users",
+    response_model=ResponseModel[DeptUsersOut],
+    summary="获取部门用户管理数据",
+    description="返回所有启用用户及是否在该部门的标记，用于部门-用户管理弹窗",
+)
+async def get_dept_users(
+    dept_id: int,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    """获取部门用户管理数据"""
+    data = await dept_service.get_dept_users(db, dept_id)
+    return ResponseModel.success(data=data)
+
+
+@router.put(
+    "/{dept_id}/users",
+    summary="批量更新部门用户",
+    description="传入最终成员用户ID列表，后端 diff 出新增/移除并批量更新",
+)
+async def update_dept_users(
+    dept_id: int,
+    body: DeptUsersUpdate,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    """批量更新部门用户关联"""
+    result = await dept_service.update_dept_users(db, dept_id, body.user_ids)
+    await db.commit()
+    return ResponseModel.success(
+        msg=f"新增 {result['added']} 人，移除 {result['removed']} 人"
+    )

@@ -1,8 +1,12 @@
 from fastapi import APIRouter, Depends
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants import IS_PRIMARY_YES
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
+from app.core.exceptions import BusinessRuleException
+from app.db.base import user_depts
 from app.db.session import get_db
 from app.modules.system.models.user import User
 from app.modules.system.schemas.user import (
@@ -11,10 +15,12 @@ from app.modules.system.schemas.user import (
     ResetPassword,
     UpdateProfile,
     UserCreate,
+    UserDeptItem,
     UserItemOut,
     UserQuery,
     UserUpdate,
 )
+from app.modules.system.service.config_service import config_service
 from app.modules.system.service.dept_service import dept_service
 from app.modules.system.service.user_service import user_service
 
@@ -61,6 +67,21 @@ async def get_user_list(
     # 调用 Service 层获取分页数据（含数据权限过滤）
     page_data = await user_service.get_user_list(db, query, current_user=_current_user)
 
+    # 批量查询当前页用户的部门关联（含 is_primary 标记）
+    user_ids = [u.user_id for u in page_data.records]
+    user_depts_map: dict[int, list[tuple[int, bool]]] = {}
+    if user_ids:
+        stmt = select(
+            user_depts.c.user_id,
+            user_depts.c.dept_id,
+            user_depts.c.is_primary,
+        ).where(user_depts.c.user_id.in_(user_ids))
+        result = await db.execute(stmt)
+        for uid, did, is_primary in result.all():
+            user_depts_map.setdefault(uid, []).append(
+                (did, is_primary == IS_PRIMARY_YES)
+            )
+
     # 转换为 Schema 对象 (处理角色和部门简化)
     user_list = []
     for u in page_data.records:
@@ -71,6 +92,15 @@ async def get_user_list(
         if u.depts:
             item.dept_ids = [str(d.dept_id) for d in u.depts]
             item.dept_names = ", ".join(d.dept_name for d in u.depts)
+        # 部门关联（含主部门标记）
+        dept_pairs = user_depts_map.get(u.user_id, [])
+        if dept_pairs:
+            item.user_depts = [
+                UserDeptItem(dept_id=str(did), is_primary=is_primary)
+                for did, is_primary in dept_pairs
+            ]
+            primary = next((str(did) for did, p in dept_pairs if p), None)
+            item.primary_dept = primary
         user_list.append(item)
 
     # 返回分页包装结果
@@ -119,6 +149,14 @@ async def add_user(
         - password: 密码（必填，6-20字符，必须包含大小写字母和数字）
         - roles: 角色编码列表（必填，至少分配一个角色）
     """
+    # 系统策略校验：是否强制用户必须有主部门
+    if await config_service.get_bool(db, "user_require_primary_dept"):
+        if not user_in.dept_ids or not any(d.is_primary for d in user_in.dept_ids):
+            raise BusinessRuleException(
+                "系统已开启「强制用户主部门」，必须为用户分配一个主部门",
+                error_code="USER_PRIMARY_DEPT_REQUIRED",
+            )
+
     new_user = await user_service.create_user(db, user_in)
 
     # 处理部门关联
@@ -213,8 +251,16 @@ async def update_user(
     await user_service.update_user(db, user_id, user_in)
     await db.commit()
 
-    # 处理部门关联
+    # 处理部门关联（dept_ids 为 None 表示不改部门）
     if user_in.dept_ids is not None:
+        # 系统策略校验：是否强制用户必须有主部门
+        if await config_service.get_bool(db, "user_require_primary_dept"):
+            if not any(d.is_primary for d in user_in.dept_ids):
+                raise BusinessRuleException(
+                    "系统已开启「强制用户主部门」，必须为用户分配一个主部门",
+                    error_code="USER_PRIMARY_DEPT_REQUIRED",
+                )
+
         dept_list = [
             {"dept_id": d.dept_id, "is_primary": d.is_primary} for d in user_in.dept_ids
         ]

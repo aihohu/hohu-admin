@@ -235,6 +235,7 @@ class UserItemOut(BaseModel):
     dept_ids: list[str] = []
     dept_names: str = ""
     primary_dept: str | None = None
+    user_depts: list[UserDeptItem] = []
 
     model_config = ConfigDict(
         from_attributes=True, alias_generator=to_camel, populate_by_name=True

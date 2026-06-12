@@ -160,3 +160,48 @@ class DeptTreeOptionOut(BaseModel):
     model_config = ConfigDict(
         from_attributes=True, alias_generator=to_camel, populate_by_name=True
     )
+
+
+class DeptUserItem(BaseModel):
+    """部门用户管理项：用户基础信息 + 是否在该部门 + 是否为该用户主部门"""
+
+    user_id: int
+    user_name: str
+    nickname: str | None = None
+    user_email: str | None = None
+    user_phone: str | None = None
+    status: str | None = None
+    is_member: bool = False
+    is_primary: bool = False
+
+    @field_serializer("user_id")
+    def serialize_id(self, v: int, _info):
+        return str(v)
+
+    model_config = ConfigDict(
+        from_attributes=True, alias_generator=to_camel, populate_by_name=True
+    )
+
+
+class DeptUsersOut(BaseModel):
+    """部门用户管理数据：所有候选用户 + 部门信息"""
+
+    dept_id: int
+    dept_name: str
+    users: list[DeptUserItem] = []
+
+    @field_serializer("dept_id")
+    def serialize_id(self, v: int, _info):
+        return str(v)
+
+    model_config = ConfigDict(
+        from_attributes=True, alias_generator=to_camel, populate_by_name=True
+    )
+
+
+class DeptUsersUpdate(BaseModel):
+    """更新部门用户关联请求：传入最终的部门成员用户ID列表"""
+
+    user_ids: list[int] = Field(..., description="最终的部门成员用户ID列表")
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
