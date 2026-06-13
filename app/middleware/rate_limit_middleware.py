@@ -11,6 +11,8 @@ from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
+from app.utils.ip_util import get_client_ip
+
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """
@@ -38,7 +40,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             Response: 处理后的响应对象
         """
         # 获取客户端 IP
-        client_ip = request.client.host if request.client else "unknown"
+        client_ip = get_client_ip(request) or "unknown"
 
         # 获取请求路径
         path = request.url.path

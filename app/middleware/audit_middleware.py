@@ -9,6 +9,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.core.config import settings
 from app.db.session import AsyncSessionLocal
 from app.modules.system.models.operation_log import SysOperationLog
+from app.utils.ip_util import get_client_ip
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +163,7 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
                     path=path,
                     request_params=request_params,
                     status_code=response.status_code,
-                    ip=request.client.host if request.client else None,
+                    ip=get_client_ip(request),
                     duration=duration,
                 )
                 session.add(log)

@@ -20,6 +20,7 @@ from app.modules.auth.service import auth_service, build_menu_tree, get_current_
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.user import User
 from app.modules.system.schemas.user import UserCreate, UserOut
+from app.utils.ip_util import get_client_ip
 
 router = APIRouter()
 
@@ -108,7 +109,7 @@ async def login(
         - 本接口应用频率限制：每分钟最多 5 次登录尝试
         - 连续失败多次后建议等待一段时间再试
     """
-    ip = request.client.host if request.client else None
+    ip = get_client_ip(request)
     user_agent = request.headers.get("User-Agent")
     try:
         result = await auth_service.authenticate(
