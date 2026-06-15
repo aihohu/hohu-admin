@@ -41,7 +41,7 @@ HoHu Admin is a modular backend management platform for decoupled frontend-backe
 - **File Management** — Upload, storage, and serving with extension/size validation
 - **Auto CamelCase** — `snake_case` backend ↔ `camelCase` frontend via Pydantic alias generation
 - **Unified Response** — All endpoints follow `{code, msg, data}` envelope with i18n-ready error codes
-- **Docker Ready** — Multi-stage Dockerfile + docker-compose with health checks
+- **Docker Ready** — Multi-stage Dockerfile with health checks; full-stack orchestration via `hohu deploy`
 
 ## Tech Stack
 
@@ -86,8 +86,7 @@ hohu-admin/
 ├── alembic/                 # Database migrations
 ├── scripts/                 # Seed & setup scripts
 ├── tests/                   # Pytest test suite
-├── Dockerfile               # Multi-stage production build
-└── docker-compose.yml       # One-command deployment
+└── Dockerfile               # Multi-stage production build
 ```
 
 ## Getting Started

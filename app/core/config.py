@@ -7,6 +7,12 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     ENV: Literal["dev", "test", "prod"] = "dev"
 
+    # 进程角色：
+    # - "all": 单进程同时承担 API 和调度器（开发模式默认）
+    # - "api": 仅承担 FastAPI，不启动调度器
+    # - "scheduler": 仅承担 APScheduler，由 `python -m app.scheduler_worker` 启动
+    APP_ROLE: Literal["api", "scheduler", "all"] = "all"
+
     DATABASE_URL: str
     SECRET_KEY: str
     ALGORITHM: str = "HS256"

@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
 from app.core.base_response import PageResult, ResponseModel
+from app.core.scheduler import notify_job_changed, notify_manual_trigger
 from app.db.session import get_db
 from app.modules.job.schemas.job import (
     JobCreate,
@@ -49,6 +50,7 @@ async def add(
 ):
     await job_service.create(db, data, _current_user.user_name)
     await db.commit()
+    await notify_job_changed()
     return ResponseModel.success(msg="创建成功")
 
 
@@ -60,6 +62,7 @@ async def update(
 ):
     await job_service.update(db, data, _current_user.user_name)
     await db.commit()
+    await notify_job_changed()
     return ResponseModel.success(msg="更新成功")
 
 
@@ -72,6 +75,7 @@ async def update_status(
 ):
     await job_service.update_status(db, jobId, status)
     await db.commit()
+    await notify_job_changed()
     return ResponseModel.success(msg="状态更新成功")
 
 
@@ -83,6 +87,7 @@ async def delete(
 ):
     await job_service.delete(db, jobId)
     await db.commit()
+    await notify_job_changed()
     return ResponseModel.success(msg="删除成功")
 
 
@@ -94,6 +99,7 @@ async def batch_delete(
 ):
     count = await job_service.batch_delete(db, ids)
     await db.commit()
+    await notify_job_changed()
     return ResponseModel.success(msg=f"已删除 {count} 个任务")
 
 
@@ -104,4 +110,5 @@ async def run_now(
     _current_user: User = Depends(get_current_user),
 ):
     await job_service.run_now(db, jobId)
+    await notify_manual_trigger(jobId)
     return ResponseModel.success(msg="已触发执行")

@@ -33,15 +33,18 @@ from app.modules.system.api.user import router as user_router
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """应用生命周期管理"""
-    # 启动调度器
-    async with AsyncSessionLocal() as db:
-        await scheduler_manager.load_jobs_from_db(db)
-    scheduler_manager.start()
+    # 仅在嵌入式（开发）模式下随 API 启停调度器。
+    # 生产模式下调度器由独立的 `app.scheduler_worker` 进程承担，
+    # 通过 Redis pub/sub 与本进程通信。
+    if settings.APP_ROLE == "all":
+        async with AsyncSessionLocal() as db:
+            await scheduler_manager.load_jobs_from_db(db)
+        await scheduler_manager.start_with_pubsub()
 
     yield
 
-    # 关闭调度器和Redis
-    scheduler_manager.shutdown()
+    if settings.APP_ROLE == "all":
+        scheduler_manager.shutdown()
     await close_redis()
 
 
