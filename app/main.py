@@ -38,7 +38,7 @@ async def lifespan(_app: FastAPI):
     # 通过 Redis pub/sub 与本进程通信。
     if settings.APP_ROLE == "all":
         async with AsyncSessionLocal() as db:
-            await scheduler_manager.load_jobs_from_db(db)
+            await scheduler_manager.reload_jobs(db)
         await scheduler_manager.start_with_pubsub()
 
     yield

@@ -195,17 +195,12 @@ class SchedulerManager:
             self._scheduler.remove_job(job_id_str)
             logger.info("已移除调度任务: job_id=%s", job_id)
 
-    async def load_jobs_from_db(self, db) -> None:
-        """从数据库加载所有启用的任务并注册到调度器。"""
-        stmt = select(SysJob).where(SysJob.status == STATUS_ENABLED)
-        result = await db.execute(stmt)
-        jobs = result.scalars().all()
-        for job in jobs:
-            self.add_job(job)
-        logger.info("从数据库加载了 %d 个调度任务", len(jobs))
-
     async def reload_jobs(self, db) -> None:
         """与 DB 当前状态对齐：移除已删除/停用的任务，新增或更新启用任务。
+
+        用于两种场景：
+        - 进程启动时的初次加载（此时 existing 为空，所有启用任务走"新增"路径）
+        - 运行时收到 pub/sub 事件后的重新对齐
 
         优化：对 trigger 字符串未变的已注册任务直接跳过，避免 APScheduler
         在 replace_existing 时重置 next_run_time（这会让无关字段编辑也扰动调度）。
@@ -227,11 +222,23 @@ class SchedulerManager:
                 self._scheduler.remove_job(job_id_str)
                 logger.info("已移除失效调度任务: job_id=%s", scheduled_job_id)
 
-        # 仅对新增或 trigger 变化的任务调用 add_job；其余保持原 next_run_time
+        # 仅对新增或 trigger 变化的任务调用 add_job；其余保持原 next_run_time。
+        # 单任务 build_trigger 失败（如 cron 表达式损坏）只跳过该任务，不影响其他。
         added = 0
         updated = 0
+        skipped = 0
         for job in enabled_jobs:
-            trigger = build_trigger(job)
+            try:
+                trigger = build_trigger(job)
+            except Exception:
+                skipped += 1
+                logger.error(
+                    "调度配置无效，跳过该任务: job_id=%s, job_key=%s",
+                    job.job_id,
+                    job.job_key,
+                    exc_info=True,
+                )
+                continue
             job_id_str = f"job_{job.job_id}"
             current = existing.get(job_id_str)
             if current is not None and str(current.trigger) == str(trigger):
@@ -253,10 +260,11 @@ class SchedulerManager:
                 )
 
         logger.info(
-            "调度任务已对齐 DB：启用 %d 个（新增 %d，更新 %d）",
+            "调度任务已对齐 DB：启用 %d 个（新增 %d，更新 %d，跳过无效 %d）",
             len(enabled_jobs),
             added,
             updated,
+            skipped,
         )
 
     def run_now(self, job_id: int) -> None:

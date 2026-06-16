@@ -30,7 +30,7 @@ logger = logging.getLogger("scheduler_worker")
 
 async def _run() -> None:
     async with AsyncSessionLocal() as db:
-        await scheduler_manager.load_jobs_from_db(db)
+        await scheduler_manager.reload_jobs(db)
     await scheduler_manager.start_with_pubsub()
     logger.info("Scheduler worker 已就绪")
 

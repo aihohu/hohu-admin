@@ -5,6 +5,7 @@ import traceback
 from datetime import datetime
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import STATUS_ENABLED
 from app.db.session import AsyncSessionLocal
@@ -84,11 +85,14 @@ async def _do_execute(job_id: int, *, skip_status_check: bool = False) -> None:
                 await db.rollback()
 
 
-async def _run_task(db: AsyncSessionLocal, job: SysJob, log: SysJobLog) -> None:
+async def _run_task(db: AsyncSession, job: SysJob, log: SysJobLog) -> None:
     """执行任务函数，支持单次超时和失败重试。
 
     超时：`job.timeout_seconds` 为非 None 时用 `asyncio.wait_for` 包裹。
     重试：`job.max_retries` > 0 时失败后重试，最多 max_retries 次。
+    重试间策略：
+    1. rollback 当前 session，丢弃失败尝试可能留下的脏数据 / 失活状态
+    2. 指数退避 sleep（1s, 2s, 4s, ..., 上限 30s），避免对外部服务形成重试风暴
     成功任一次即标 SUCCESS；所有重试均失败才标 FAILED，错误信息含最后一次异常。
     """
     func = get_task_function(job.job_key)
@@ -110,6 +114,7 @@ async def _run_task(db: AsyncSessionLocal, job: SysJob, log: SysJobLog) -> None:
     total_attempts = max_retries + 1
 
     last_error: str = ""
+    last_was_timeout = False
     for attempt in range(1, total_attempts + 1):
         try:
             if timeout:
@@ -122,23 +127,45 @@ async def _run_task(db: AsyncSessionLocal, job: SysJob, log: SysJobLog) -> None:
             log.duration = int((log.end_time - log.start_time).total_seconds() * 1000)
             await db.commit()
             return
+        except TimeoutError:
+            # 必须在 Exception 之前捕获；wait_for 超时单独标记
+            last_error = traceback.format_exc()
+            last_was_timeout = True
         except Exception:
             last_error = traceback.format_exc()
-            if attempt < total_attempts:
-                logger.warning(
-                    "任务第 %d/%d 次执行失败，将重试: job_id=%s",
-                    attempt,
-                    total_attempts,
-                    job.job_id,
-                )
-                continue
-            logger.error("任务 %d 次执行均失败: job_id=%s", total_attempts, job.job_id)
+            last_was_timeout = False
+
+        if attempt >= total_attempts:
+            logger.error(
+                "任务 %d 次执行均失败（最后失败类型：%s）: job_id=%s",
+                total_attempts,
+                "超时" if last_was_timeout else "异常",
+                job.job_id,
+            )
+            break
+
+        # 1. rollback：失败尝试可能让 session 进入失活状态或留下未提交脏数据，
+        #    不 rollback 会污染下一次 retry（"This Session's transaction has been rolled back"）
+        await db.rollback()
+        # 2. 指数退避：1s, 2s, 4s, 8s, 16s, ..., 上限 30s
+        delay = min(2 ** (attempt - 1), 30)
+        logger.warning(
+            "任务第 %d/%d 次执行失败（%s），%ss 后重试: job_id=%s",
+            attempt,
+            total_attempts,
+            "超时" if last_was_timeout else "异常",
+            delay,
+            job.job_id,
+        )
+        await asyncio.sleep(delay)
+        continue
 
     # 所有重试均失败
+    failure_type = "执行超时" if last_was_timeout else "执行异常"
     log.status = LOG_STATUS_FAILED
     log.error_msg = (
-        f"连续 {total_attempts} 次执行失败（超时={timeout or '不限'}），"
-        f"最后一次异常:\n{last_error}"
+        f"连续 {total_attempts} 次执行失败（最后失败类型：{failure_type}，"
+        f"超时配置={timeout or '不限'}s），最后一次异常:\n{last_error}"
     )
     log.attempt_count = total_attempts
     log.end_time = datetime.now()
