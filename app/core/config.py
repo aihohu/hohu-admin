@@ -1,17 +1,26 @@
 import os
 from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
     ENV: Literal["dev", "test", "prod"] = "dev"
 
-    # 进程角色：
-    # - "all": 单进程同时承担 API 和调度器（开发模式默认）
+    # 进程角色（不显式设置时按 ENV 推导）：
     # - "api": 仅承担 FastAPI，不启动调度器
-    # - "scheduler": 仅承担 APScheduler，由 `python -m app.scheduler_worker` 启动
-    APP_ROLE: Literal["api", "scheduler", "all"] = "all"
+    # - "scheduler": 仅承担 APScheduler（由 `python -m app.scheduler_worker` 启动）
+    # - "all": 单进程同时承担 API 和调度器（开发便利）
+    # 默认：ENV=dev → "all"（开发直接 fastapi dev 即可，调度器随之启动）
+    #       ENV=test/prod → "api"（生产 web 进程不跑调度器，避免多 worker 重复触发）
+    APP_ROLE: Literal["api", "scheduler", "all"] | None = None
+
+    @model_validator(mode="after")
+    def _resolve_app_role(self) -> "Settings":
+        if self.APP_ROLE is None:
+            self.APP_ROLE = "all" if self.ENV == "dev" else "api"
+        return self
 
     DATABASE_URL: str
     SECRET_KEY: str

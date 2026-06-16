@@ -131,6 +131,7 @@ class SchedulerManager:
         """
         backoff = 1.0
         while True:
+            pubsub = None
             try:
                 pubsub = redis_client.pubsub()
                 await pubsub.subscribe(CHANNEL_JOB_CHANGED, CHANNEL_MANUAL_TRIGGER)
@@ -163,6 +164,14 @@ class SchedulerManager:
                 logger.exception("调度器事件监听异常，%ss 后重连", backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30.0)
+            finally:
+                # 关键：每轮重连都必须释放上一份 pubsub 的订阅连接，
+                # 否则连接池（max_connections=20）会被耗尽
+                if pubsub is not None:
+                    try:
+                        await pubsub.aclose()
+                    except Exception:
+                        logger.warning("关闭 pubsub 连接失败", exc_info=True)
 
     def add_job(self, job: SysJob) -> None:
         """将一个 SysJob 添加到调度器。"""
@@ -196,25 +205,59 @@ class SchedulerManager:
         logger.info("从数据库加载了 %d 个调度任务", len(jobs))
 
     async def reload_jobs(self, db) -> None:
-        """与 DB 当前状态对齐：移除已删除/停用的任务，刷新启用任务。"""
+        """与 DB 当前状态对齐：移除已删除/停用的任务，新增或更新启用任务。
+
+        优化：对 trigger 字符串未变的已注册任务直接跳过，避免 APScheduler
+        在 replace_existing 时重置 next_run_time（这会让无关字段编辑也扰动调度）。
+        """
         stmt = select(SysJob).where(SysJob.status == STATUS_ENABLED)
         result = await db.execute(stmt)
         enabled_jobs = result.scalars().all()
         enabled_ids = {j.job_id for j in enabled_jobs}
 
+        # 快照当前调度器中的 job_* 任务，用于差异比对
+        existing: dict[str, object] = {
+            s.id: s for s in self._scheduler.get_jobs() if s.id.startswith("job_")
+        }
+
         # 移除已不存在或已停用的任务
-        for scheduled in list(self._scheduler.get_jobs()):
-            if not scheduled.id.startswith("job_"):
-                continue
-            scheduled_job_id = int(scheduled.id[4:])
+        for job_id_str in existing:
+            scheduled_job_id = int(job_id_str[4:])
             if scheduled_job_id not in enabled_ids:
-                self._scheduler.remove_job(scheduled.id)
+                self._scheduler.remove_job(job_id_str)
                 logger.info("已移除失效调度任务: job_id=%s", scheduled_job_id)
 
-        # 新增或更新启用任务（add_job 内部 replace_existing=True）
+        # 仅对新增或 trigger 变化的任务调用 add_job；其余保持原 next_run_time
+        added = 0
+        updated = 0
         for job in enabled_jobs:
-            self.add_job(job)
-        logger.info("调度任务已对齐 DB，当前启用 %d 个", len(enabled_jobs))
+            trigger = build_trigger(job)
+            job_id_str = f"job_{job.job_id}"
+            current = existing.get(job_id_str)
+            if current is not None and str(current.trigger) == str(trigger):
+                continue
+            self._scheduler.add_job(
+                execute_job,
+                trigger=trigger,
+                args=[job.job_id],
+                id=job_id_str,
+                replace_existing=True,
+            )
+            if current is not None:
+                updated += 1
+                logger.info("已更新调度任务: %s", job.job_key)
+            else:
+                added += 1
+                logger.info(
+                    "已注册调度任务: %s (type=%s)", job.job_key, job.trigger_type
+                )
+
+        logger.info(
+            "调度任务已对齐 DB：启用 %d 个（新增 %d，更新 %d）",
+            len(enabled_jobs),
+            added,
+            updated,
+        )
 
     def run_now(self, job_id: int) -> None:
         """立即执行一次指定任务（不等待调度）。"""

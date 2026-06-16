@@ -143,8 +143,10 @@ class JobService:
     async def run_now(self, db: AsyncSession, job_id: int) -> SysJob:
         """手动触发任务立即执行。
 
-        注意：该方法仅校验任务存在；实际触发动作由 API 层在 commit 之后
-        通过 `notify_manual_trigger` 发送给调度器进程。
+        刻意不做 status 校验：手动触发是调试/应急通道，停用的任务也应能触发。
+        调度器侧的 `run_job_manual` 同样使用 `skip_status_check=True` 与此对齐。
+        实际触发动作由 API 层在 commit 之后通过 `notify_manual_trigger`
+        发送给调度器进程。
         """
         return await self.get_by_id(db, job_id)
 
