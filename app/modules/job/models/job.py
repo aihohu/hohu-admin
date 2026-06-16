@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Integer, String, Text, func
+from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.id_generator import next_id
@@ -41,6 +41,15 @@ class SysJob(Base):
     )
     concurrent: Mapped[str] = mapped_column(
         String(2), default="2", comment="并发策略：1-允许，2-不允许"
+    )
+    timeout_seconds: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, comment="单次执行超时秒数（空表示不限）"
+    )
+    max_retries: Mapped[int] = mapped_column(
+        Integer, default=0, comment="失败重试次数（0 表示不重试）"
+    )
+    run_on_enable: Mapped[bool] = mapped_column(
+        Boolean, default=False, comment="启用时是否立即执行一次"
     )
     remark: Mapped[str | None] = mapped_column(
         String(256), nullable=True, comment="备注"
@@ -89,4 +98,7 @@ class SysJobLog(Base):
     )
     duration: Mapped[int | None] = mapped_column(
         Integer, nullable=True, comment="耗时（毫秒）"
+    )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, default=1, comment="本次触发实际执行次数（含重试）"
     )

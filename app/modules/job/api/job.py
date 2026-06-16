@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Body, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants import STATUS_ENABLED
 from app.core.auth import get_current_user
 from app.core.base_response import PageResult, ResponseModel
 from app.core.scheduler import notify_job_changed, notify_manual_trigger
@@ -48,9 +49,12 @@ async def add(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ):
-    await job_service.create(db, data, _current_user.user_name)
+    job = await job_service.create(db, data, _current_user.user_name)
     await db.commit()
     await notify_job_changed()
+    # 创建即启用且要求立即执行：额外发一条 manual_trigger
+    if data.status == STATUS_ENABLED and data.run_on_enable:
+        await notify_manual_trigger(job.job_id)
     return ResponseModel.success(msg="创建成功")
 
 
@@ -73,9 +77,12 @@ async def update_status(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ):
-    await job_service.update_status(db, jobId, status)
+    job = await job_service.update_status(db, jobId, status)
     await db.commit()
     await notify_job_changed()
+    # 启用动作 + run_on_enable：额外触发一次立即执行
+    if status == STATUS_ENABLED and job.run_on_enable:
+        await notify_manual_trigger(job.job_id)
     return ResponseModel.success(msg="状态更新成功")
 
 

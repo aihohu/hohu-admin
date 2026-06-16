@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import traceback
@@ -84,7 +85,12 @@ async def _do_execute(job_id: int, *, skip_status_check: bool = False) -> None:
 
 
 async def _run_task(db: AsyncSessionLocal, job: SysJob, log: SysJobLog) -> None:
-    """执行任务函数，成功标 SUCCESS，失败标 FAILED。"""
+    """执行任务函数，支持单次超时和失败重试。
+
+    超时：`job.timeout_seconds` 为非 None 时用 `asyncio.wait_for` 包裹。
+    重试：`job.max_retries` > 0 时失败后重试，最多 max_retries 次。
+    成功任一次即标 SUCCESS；所有重试均失败才标 FAILED，错误信息含最后一次异常。
+    """
     func = get_task_function(job.job_key)
     if func is None:
         log.status = LOG_STATUS_FAILED
@@ -94,21 +100,47 @@ async def _run_task(db: AsyncSessionLocal, job: SysJob, log: SysJobLog) -> None:
         await db.commit()
         return
 
-    try:
-        args = job.job_args
-        kwargs = {}
-        if args:
-            kwargs = {"args": json.loads(args)}
+    args = job.job_args
+    kwargs = {}
+    if args:
+        kwargs = {"args": json.loads(args)}
 
-        await func(**kwargs)
+    timeout = job.timeout_seconds
+    max_retries = max(0, job.max_retries or 0)
+    total_attempts = max_retries + 1
 
-        log.status = LOG_STATUS_SUCCESS
-        log.end_time = datetime.now()
-        log.duration = int((log.end_time - log.start_time).total_seconds() * 1000)
-        await db.commit()
-    except Exception:
-        log.status = LOG_STATUS_FAILED
-        log.error_msg = traceback.format_exc()
-        log.end_time = datetime.now()
-        log.duration = int((log.end_time - log.start_time).total_seconds() * 1000)
-        await db.commit()
+    last_error: str = ""
+    for attempt in range(1, total_attempts + 1):
+        try:
+            if timeout:
+                await asyncio.wait_for(func(**kwargs), timeout=timeout)
+            else:
+                await func(**kwargs)
+            log.status = LOG_STATUS_SUCCESS
+            log.attempt_count = attempt
+            log.end_time = datetime.now()
+            log.duration = int((log.end_time - log.start_time).total_seconds() * 1000)
+            await db.commit()
+            return
+        except Exception:
+            last_error = traceback.format_exc()
+            if attempt < total_attempts:
+                logger.warning(
+                    "任务第 %d/%d 次执行失败，将重试: job_id=%s",
+                    attempt,
+                    total_attempts,
+                    job.job_id,
+                )
+                continue
+            logger.error("任务 %d 次执行均失败: job_id=%s", total_attempts, job.job_id)
+
+    # 所有重试均失败
+    log.status = LOG_STATUS_FAILED
+    log.error_msg = (
+        f"连续 {total_attempts} 次执行失败（超时={timeout or '不限'}），"
+        f"最后一次异常:\n{last_error}"
+    )
+    log.attempt_count = total_attempts
+    log.end_time = datetime.now()
+    log.duration = int((log.end_time - log.start_time).total_seconds() * 1000)
+    await db.commit()

@@ -23,6 +23,13 @@ class JobCreate(BaseModel):
     job_args: str | None = Field(None, description="任务参数JSON")
     status: str = Field(STATUS_DISABLED, description="状态：1-启用，2-停用")
     concurrent: str = Field("2", description="并发策略：1-允许，2-不允许")
+    timeout_seconds: int | None = Field(
+        None, ge=1, description="单次执行超时秒数（空表示不限）"
+    )
+    max_retries: int = Field(0, ge=0, description="失败重试次数（0 表示不重试）")
+    run_on_enable: bool = Field(
+        False, description="启用时是否立即执行一次（不影响后续按计划触发）"
+    )
     remark: str | None = Field(None, max_length=256, description="备注")
 
     @field_validator("status")
@@ -58,6 +65,11 @@ class JobUpdate(BaseModel):
     job_args: str | None = Field(None, description="任务参数JSON")
     status: str | None = Field(None, description="状态")
     concurrent: str | None = Field(None, description="并发策略")
+    timeout_seconds: int | None = Field(
+        None, ge=1, description="单次执行超时秒数（空表示不限）"
+    )
+    max_retries: int | None = Field(None, ge=0, description="失败重试次数")
+    run_on_enable: bool | None = Field(None, description="启用时是否立即执行一次")
     remark: str | None = Field(None, max_length=256, description="备注")
 
     @field_validator("status")
@@ -109,11 +121,16 @@ class JobOut(BaseModel):
     job_args: str | None
     status: str
     concurrent: str
+    timeout_seconds: int | None
+    max_retries: int
+    run_on_enable: bool
     remark: str | None
     create_by: str | None
     create_time: datetime
     update_by: str | None
     update_time: datetime
+    # 运行时计算字段，不落库；停用任务为 None
+    next_run_time: datetime | None = None
 
     @field_serializer("job_id")
     def serialize_id(self, v: int, _info):
@@ -126,6 +143,10 @@ class JobOut(BaseModel):
     @field_serializer("update_time")
     def serialize_update_time(self, dt: datetime) -> str:
         return dt.strftime(settings.DATETIME_FORMAT)
+
+    @field_serializer("next_run_time")
+    def serialize_next_run_time(self, dt: datetime | None) -> str | None:
+        return dt.strftime(settings.DATETIME_FORMAT) if dt else None
 
     model_config = ConfigDict(
         from_attributes=True, populate_by_name=True, alias_generator=to_camel
@@ -158,6 +179,7 @@ class JobLogOut(BaseModel):
     start_time: datetime
     end_time: datetime | None
     duration: int | None
+    attempt_count: int
 
     @field_serializer("job_log_id")
     def serialize_log_id(self, v: int, _info):

@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -7,7 +9,7 @@ from app.core.exceptions import (
     DuplicateException,
     NotFoundException,
 )
-from app.core.scheduler import validate_trigger_config
+from app.core.scheduler import build_trigger, validate_trigger_config
 from app.modules.job.models.job import SysJob, SysJobLog
 from app.modules.job.schemas.job import JobCreate, JobQuery, JobUpdate
 from app.modules.job.task_registry import get_task_function
@@ -18,20 +20,41 @@ class JobService:
     """定时任务配置业务逻辑服务"""
 
     async def get_list(self, db: AsyncSession, query: JobQuery):
-        """获取定时任务分页列表。"""
+        """获取定时任务分页列表。
+
+        会为每个启用任务计算 next_run_time（运行时字段，不落库）。
+        停用任务或 trigger 配置异常的，next_run_time 为 None。
+        """
         field_mapping = {
             "job_name": ("job_name", "contains"),
             "job_key": ("job_key", "contains"),
             "status": ("status", "=="),
         }
         filters = build_filters(SysJob, field_mapping, **query.model_dump())
-        return await paginate(
+        page_data = await paginate(
             db=db,
             model=SysJob,
             query_params=query,
             filters=filters,
             order_by=SysJob.create_time.desc(),
         )
+        # 计算下次执行时间（仅在列表展示用，不影响调度）
+        now = datetime.now()
+        for job in page_data.records:
+            job.next_run_time = self._compute_next_run_time(job, now)
+        return page_data
+
+    @staticmethod
+    def _compute_next_run_time(job: SysJob, now: datetime):
+        """根据 trigger 配置独立计算下次执行时间，不依赖 scheduler 实例。"""
+        if job.status != STATUS_ENABLED:
+            return None
+        try:
+            trigger = build_trigger(job)
+            return trigger.get_next_fire_time(None, now)
+        except Exception:
+            # trigger 配置异常（如 cron 表达式错误），交给具体触发时报错
+            return None
 
     async def get_by_id(self, db: AsyncSession, job_id: int) -> SysJob:
         """根据 ID 获取任务，不存在则抛异常。"""
