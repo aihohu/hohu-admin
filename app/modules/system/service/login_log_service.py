@@ -38,7 +38,7 @@ class LoginLogService:
 
     async def clean(self, db: AsyncSession, days: int) -> int:
         """清理指定天数前的登录日志。"""
-        cutoff = datetime.now(UTC) - timedelta(days=days)
+        cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=days)
         stmt = delete(SysLoginLog).where(SysLoginLog.login_time < cutoff)
         result = await db.execute(stmt)
         return result.rowcount

@@ -41,7 +41,7 @@ class OperationLogService:
 
     async def clean(self, db: AsyncSession, days: int) -> int:
         """清理指定天数前的操作日志。"""
-        cutoff = datetime.now(UTC) - timedelta(days=days)
+        cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=days)
         stmt = delete(SysOperationLog).where(SysOperationLog.create_time < cutoff)
         result = await db.execute(stmt)
         return result.rowcount
