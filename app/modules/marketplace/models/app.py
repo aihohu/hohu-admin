@@ -28,6 +28,7 @@ class App(Base):
     __tablename__ = "mk_app"
     __table_args__ = (
         Index("ix_mk_app_status_category", "status", "category"),
+        Index("ix_mk_app_tenant_status", "tenant_id", "status"),
         CheckConstraint(
             "avg_rating >= 0 AND avg_rating <= 5",
             name="ck_mk_app_avg_rating_range",
@@ -64,7 +65,7 @@ class App(Base):
     )
     author_id: Mapped[int | None] = mapped_column(
         BigInteger,
-        ForeignKey("sys_user.user_id"),
+        ForeignKey("sys_user.user_id", ondelete="SET NULL"),
         nullable=True,
         comment="作者用户ID",
     )
@@ -80,7 +81,7 @@ class App(Base):
     )
     current_version_id: Mapped[int | None] = mapped_column(
         BigInteger,
-        ForeignKey("mk_app_version.id"),
+        ForeignKey("mk_app_version.id", ondelete="SET NULL"),
         nullable=True,
         comment="当前发布版本ID",
     )
@@ -146,7 +147,7 @@ class AppVersion(Base):
     )
     app_id: Mapped[int] = mapped_column(
         BigInteger,
-        ForeignKey("mk_app.id"),
+        ForeignKey("mk_app.id", ondelete="CASCADE"),
         nullable=False,
         comment="所属应用ID",
     )

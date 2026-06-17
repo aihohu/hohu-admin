@@ -28,13 +28,13 @@ class AppReview(Base):
     )
     app_id: Mapped[int] = mapped_column(
         BigInteger,
-        ForeignKey("mk_app.id"),
+        ForeignKey("mk_app.id", ondelete="CASCADE"),
         nullable=False,
         comment="所属应用ID",
     )
     version_id: Mapped[int] = mapped_column(
         BigInteger,
-        ForeignKey("mk_app_version.id"),
+        ForeignKey("mk_app_version.id", ondelete="CASCADE"),
         nullable=False,
         comment="被审核版本ID",
     )
@@ -62,7 +62,7 @@ class AppReview(Base):
     )
     human_reviewer_id: Mapped[int | None] = mapped_column(
         BigInteger,
-        ForeignKey("sys_user.user_id"),
+        ForeignKey("sys_user.user_id", ondelete="SET NULL"),
         nullable=True,
         comment="人工审核人ID",
     )

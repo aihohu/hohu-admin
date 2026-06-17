@@ -35,13 +35,13 @@ class AppRating(Base):
     )
     app_id: Mapped[int] = mapped_column(
         BigInteger,
-        ForeignKey("mk_app.id"),
+        ForeignKey("mk_app.id", ondelete="CASCADE"),
         nullable=False,
         comment="被评分应用ID",
     )
     user_id: Mapped[int] = mapped_column(
         BigInteger,
-        ForeignKey("sys_user.user_id"),
+        ForeignKey("sys_user.user_id", ondelete="CASCADE"),
         nullable=False,
         comment="评分用户ID",
     )

@@ -38,7 +38,7 @@ class AppPermission(Base):
     )
     app_id: Mapped[int] = mapped_column(
         BigInteger,
-        ForeignKey("mk_app.id"),
+        ForeignKey("mk_app.id", ondelete="CASCADE"),
         nullable=False,
         comment="所属应用ID",
     )

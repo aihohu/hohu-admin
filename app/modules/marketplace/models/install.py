@@ -42,7 +42,7 @@ class TenantApp(Base):
     )
     app_id: Mapped[int] = mapped_column(
         BigInteger,
-        ForeignKey("mk_app.id"),
+        ForeignKey("mk_app.id", ondelete="CASCADE"),
         nullable=False,
         comment="已安装应用ID",
     )
