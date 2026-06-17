@@ -5,6 +5,7 @@
 """
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_response import PageResult
@@ -52,7 +53,7 @@ class AppService(MarketplaceBaseService):
         license: str | None = None,
         status: str = "draft",
     ) -> App:
-        # slug 唯一性预检（DB UNIQUE 兜底）
+        # slug 唯一性预检（friendly fast-path；并发兜底靠 DB UNIQUE + IntegrityError 翻译）
         existing = await db.execute(self.scoped(App).where(App.slug == slug))
         if existing.scalar_one_or_none() is not None:
             raise AppDuplicateSlugException(slug)
@@ -71,7 +72,13 @@ class AppService(MarketplaceBaseService):
             status=status,
         )
         db.add(app)
-        await db.flush()  # 拿 id
+        try:
+            await db.flush()  # 拿 id；并发时可能触发 UNIQUE 冲突
+        except IntegrityError as e:
+            # 检查是否是 slug 唯一约束冲突（PG unique constraint name = mk_app_slug_key）
+            if "mk_app_slug_key" in str(e.orig) or "slug" in str(e.orig).lower():
+                raise AppDuplicateSlugException(slug) from e
+            raise  # 其他 IntegrityError 重新抛出
         return app
 
     async def list(self, db: AsyncSession, query: AppQuery) -> PageResult:

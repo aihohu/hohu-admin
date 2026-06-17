@@ -4,8 +4,8 @@ detail_hash + detail_canonical 在写入时计算，detail_canonical 用于
 未来 Hash 算法迁移时回填（参考 git SHA1→SHA256 迁移）。
 
 注意：AppPermission 表无 tenant_id 列（通过 app_id 关联 App 间接归属租户），
-因此本 service 不使用 MarketplaceBaseService.scoped。
-仍继承基类保持服务层次一致性，预留未来需要 tenant_id 时使用。
+因此本 service 不继承 MarketplaceBaseService（其 scoped() 假设 model 有 tenant_id）。
+权限查询通过 app_id 关联，自动跟随所属 App 的 tenant。
 """
 
 from sqlalchemy import select
@@ -13,12 +13,15 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.marketplace.models import AppPermission
-from app.modules.marketplace.service.base import MarketplaceBaseService
 from app.utils.permission_hash import compute_detail_hash
 
 
-class PermissionService(MarketplaceBaseService):
+class PermissionService:
     """应用权限声明 service（spec 14.5）
+
+    AppPermission 表通过 app_id FK 隐式继承 tenant（无独立 tenant_id 列），
+    因此不继承 MarketplaceBaseService（其 scoped() 假设 model 有 tenant_id）。
+    权限查询通过 app_id 关联，自动跟随所属 App 的 tenant。
 
     bulk_insert 使用 PG ON CONFLICT DO NOTHING 按 (app_id, type, detail_hash)
     唯一约束去重，保证应用升级时不会产生重复权限声明。

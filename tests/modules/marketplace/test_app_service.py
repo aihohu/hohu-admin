@@ -1,4 +1,5 @@
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.modules.marketplace.exceptions import (
     AppDuplicateSlugException,
@@ -60,6 +61,50 @@ class TestAppService:
                 db_session,
                 name="B",
                 slug="dup-slug",
+                type="lowcode",
+                category="business",
+            )
+
+    async def test_concurrent_duplicate_slug_raises_app_duplicate(
+        self, db_session, monkeypatch
+    ):
+        """模拟 DB UNIQUE 冲突：跳过预检直接走 flush，触发 IntegrityError 翻译"""
+        # 保存原始方法
+        original_execute = db_session.execute
+        call_count = [0]
+
+        async def patched_execute(stmt):
+            call_count[0] += 1
+            # 第一次调用是预检，返回 None（模拟并发通过了预检）
+            if call_count[0] == 1:
+
+                class MockResult:
+                    def scalar_one_or_none(self):
+                        return None
+
+                return MockResult()
+            # 后续调用走原始
+            return await original_execute(stmt)
+
+        monkeypatch.setattr(db_session, "execute", patched_execute)
+
+        # mock flush 抛 IntegrityError（模拟 DB UNIQUE 冲突）
+        async def patched_flush():
+            raise IntegrityError(
+                "simulated",
+                {},
+                Exception(
+                    'duplicate key value violates unique constraint "mk_app_slug_key"'
+                ),
+            )
+
+        monkeypatch.setattr(db_session, "flush", patched_flush)
+
+        with pytest.raises(AppDuplicateSlugException):
+            await app_service.create(
+                db_session,
+                name="X",
+                slug="concurrent-slug",
                 type="lowcode",
                 category="business",
             )
