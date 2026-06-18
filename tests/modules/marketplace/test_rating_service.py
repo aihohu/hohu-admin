@@ -1,4 +1,5 @@
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import DuplicateException, NotFoundException
 from app.core.id_generator import next_id
@@ -117,4 +118,49 @@ class TestRatingService:
         with pytest.raises(NotFoundException):
             await rating_service.update(
                 db_session, app_id=sample_app.id, user_id=999, rating=5
+            )
+
+    async def test_concurrent_duplicate_rating_raises_duplicate(
+        self, db_session, sample_app, monkeypatch
+    ):
+        """模拟 DB UNIQUE 冲突：预检返回 None，flush 抛 IntegrityError，
+        验证抛 DuplicateException（而非 500 IntegrityError）"""
+        user = await _create_user(db_session, "race-user")
+
+        # 让预检 scalar_one_or_none 返回 None（模拟并发场景下两请求都通过预检）
+        original_execute = db_session.execute
+        call_count = [0]
+
+        async def patched_execute(stmt):
+            call_count[0] += 1
+            # 第一次 execute 是预检 select(AppRating)
+            if call_count[0] == 1:
+
+                class MockResult:
+                    def scalar_one_or_none(self):
+                        return None
+
+                return MockResult()
+            return await original_execute(stmt)
+
+        monkeypatch.setattr(db_session, "execute", patched_execute)
+
+        # mock flush 抛 IntegrityError（模拟 DB UNIQUE 冲突）
+        async def patched_flush():
+            raise IntegrityError(
+                "simulated",
+                {},
+                Exception(
+                    "duplicate key value violates unique constraint "
+                    '"uq_mk_app_rating_app_user"'
+                ),
+            )
+
+        monkeypatch.setattr(db_session, "flush", patched_flush)
+
+        with pytest.raises(DuplicateException):
+            await rating_service.create(
+                db_session,
+                RatingCreate(app_id=str(sample_app.id), rating=5),
+                user_id=user.user_id,
             )

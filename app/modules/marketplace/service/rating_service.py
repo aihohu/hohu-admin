@@ -5,6 +5,7 @@ app.avg_rating / rating_count 是缓存字段，每次写入评分后同步更�
 """
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DuplicateException, NotFoundException
@@ -34,7 +35,7 @@ class RatingService:
             DuplicateException: 该用户已对当前应用评过分
         """
         app_id = int(req.app_id)
-        # 检查是否已评过
+        # 预检（friendly fast-path，并发兜底靠 DB UNIQUE）
         existing = await db.execute(
             select(AppRating).where(
                 AppRating.app_id == app_id,
@@ -55,7 +56,17 @@ class RatingService:
             comment=req.comment,
         )
         db.add(rating)
-        await db.flush()
+        try:
+            await db.flush()
+        except IntegrityError as e:
+            # 并发兜底：DB UNIQUE(uq_mk_app_rating_app_user) 冲突翻译为 DuplicateException
+            if "uq_mk_app_rating_app_user" in str(e.orig):
+                raise DuplicateException(
+                    field="user_id",
+                    value=str(user_id),
+                    error_code=AppErrorCode.RATING_DUPLICATE,
+                ) from e
+            raise
         await self._recompute_app_rating(db, app_id=app_id)
         return rating
 
