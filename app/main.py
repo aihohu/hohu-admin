@@ -18,6 +18,11 @@ from app.modules.ai.api.provider import router as ai_provider_router
 from app.modules.auth.api import router as auth_router
 from app.modules.job.api.job import router as job_router
 from app.modules.job.api.job_log import router as job_log_router
+from app.modules.marketplace.api.admin import router as marketplace_admin_router
+from app.modules.marketplace.api.developer import (
+    router as marketplace_developer_router,
+)
+from app.modules.marketplace.api.marketplace import router as marketplace_router
 from app.modules.system.api.config import router as config_router
 from app.modules.system.api.dept import router as dept_router
 from app.modules.system.api.dict_data import router as dict_data_router
@@ -78,6 +83,16 @@ app.include_router(login_log_router, prefix="/system/login-log", tags=["登录�
 app.include_router(ai_chat_router, prefix="/ai/chat", tags=["AI对话"])
 app.include_router(ai_conversation_router, prefix="/ai/conversation", tags=["AI会话"])
 app.include_router(ai_provider_router, prefix="/ai/provider", tags=["AI提供商"])
+# Marketplace（注册顺序：developer/admin 先注册，避免被 marketplace 抢匹配）
+app.include_router(
+    marketplace_developer_router,
+    prefix="/marketplace/developer",
+    tags=["开发者中心"],
+)
+app.include_router(
+    marketplace_admin_router, prefix="/marketplace/admin", tags=["市场管理"]
+)
+app.include_router(marketplace_router, prefix="/marketplace", tags=["应用市场"])
 
 # 确保上传目录存在
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
