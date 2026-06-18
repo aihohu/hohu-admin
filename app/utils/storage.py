@@ -6,6 +6,8 @@ spec 14.13：应用制品包上传后落到 UPLOAD_DIR，并通过 file_url 返�
 """
 
 import hashlib
+import io
+import zipfile
 from pathlib import Path
 
 from app.core.config import settings
@@ -28,6 +30,19 @@ async def save_file(content: bytes, *, relative_path: str) -> str:
     return f"/uploads/{relative_path}"
 
 
+async def read_file(relative_path: str) -> bytes:
+    """读取文件（spec 14.13）。
+
+    Args:
+        relative_path: 相对 UPLOAD_DIR 的路径
+
+    Returns:
+        文件二进制内容
+    """
+    full_path = Path(settings.UPLOAD_DIR) / relative_path
+    return full_path.read_bytes()
+
+
 def compute_sha256(content: bytes) -> str:
     """计算 SHA-256（spec 14.13 完整性校验）。
 
@@ -41,12 +56,18 @@ def compute_sha256(content: bytes) -> str:
 
 
 def is_valid_zip(content: bytes) -> bool:
-    """简单校验 zip 魔数（PK\\x03\\x04 普通文件 / PK\\x05\\x06 空归档）。
+    """校验 zip：必须是合法 zip 文件 + 至少含一个 entry。
 
     Args:
         content: 待校验的二进制内容
 
     Returns:
-        True 表示前 4 字节匹配 zip 局部头或结尾归档标记
+        True 表示既是合法 zip 文件，又至少包含一个 entry
     """
-    return content[:4] == b"PK\x03\x04" or content[:4] == b"PK\x05\x06"
+    if not zipfile.is_zipfile(io.BytesIO(content)):
+        return False
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            return len(zf.namelist()) > 0
+    except zipfile.BadZipFile:
+        return False

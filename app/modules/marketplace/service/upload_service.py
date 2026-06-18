@@ -7,8 +7,15 @@ Phase 1 用本地文件存储；Phase 2 切 S3/MinIO（接口不变，仅 save_f
 
 from typing import Any
 
-from app.modules.marketplace.exceptions import AppInvalidManifestException
+from app.core.exceptions import BusinessException
+from app.modules.marketplace.exceptions import (
+    AppErrorCode,
+    AppInvalidManifestException,
+)
 from app.utils.storage import compute_sha256, is_valid_zip, save_file
+
+# 文件大小限制（spec 13.2 第 1 层审核：≤200MB）
+MAX_PACKAGE_SIZE = 200 * 1024 * 1024  # 200 MB
 
 
 class UploadService:
@@ -34,11 +41,23 @@ class UploadService:
             {file_url, file_hash, file_size}
 
         Raises:
-            AppInvalidManifestException: 文件不是有效 zip
+            BusinessException: 文件大小超过限制（FILE_TOO_LARGE）
+            AppInvalidManifestException: 文件不是有效 zip（必须含至少一个 entry）
         """
         content = file_obj.read()
+
+        # 文件大小限制（DoS 防护）
+        if len(content) > MAX_PACKAGE_SIZE:
+            raise BusinessException(
+                code=413,
+                message=f"应用包大小超过限制（{MAX_PACKAGE_SIZE // 1024 // 1024}MB）",
+                error_code=AppErrorCode.FILE_TOO_LARGE,
+            )
+
         if not is_valid_zip(content):
-            raise AppInvalidManifestException("上传文件不是有效的 zip 格式")
+            raise AppInvalidManifestException(
+                "上传文件不是有效的 zip 格式（必须含至少一个 entry）"
+            )
 
         file_hash = compute_sha256(content)
         relative_path = f"marketplace/{slug}/{version}/{filename}"

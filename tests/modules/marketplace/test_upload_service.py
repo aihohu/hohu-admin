@@ -1,16 +1,19 @@
 import hashlib
 import io
 import zipfile
+from unittest.mock import patch
 
 import pytest
 
 from app.core.config import settings
-from app.modules.marketplace.exceptions import AppInvalidManifestException
+from app.core.exceptions import BusinessException
+from app.modules.marketplace.exceptions import AppErrorCode, AppInvalidManifestException
 from app.modules.marketplace.service.upload_service import upload_service
+from app.utils.storage import read_file
 
 
 def _make_zip(payload: str = "app") -> bytes:
-    """生成最小合法 zip 内容，绕过 zip 魔数校验"""
+    """生成最小合法 zip 内容（含一个 entry）"""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("app.json", payload)
@@ -104,15 +107,53 @@ class TestUploadService:
         assert result["file_url"].endswith("disk.zip")
 
     async def test_empty_archive_rejected(self, tmp_path, monkeypatch):
-        """空归档（仅 PK\\x05\\x06 结束标记）虽校验通过但 size=22 字节"""
+        """空归档（仅 PK\\x05\\x06 结束标记）虽然是合法 zip 但 namelist 为空，应拒绝"""
         monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path))
 
         # PK\\x05\\x06 + 8 字节零（最小空归档 22 字节）
         empty_archive = b"PK\x05\x06" + b"\x00" * 18
+        with pytest.raises(AppInvalidManifestException):
+            await upload_service.save(
+                file_obj=io.BytesIO(empty_archive),
+                filename="empty.zip",
+                slug="empty-app",
+                version="1.0.0",
+            )
+
+    async def test_read_file_round_trip(self, tmp_path, monkeypatch):
+        """上传后通过 read_file 读回，内容应一致"""
+        monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path))
+
+        content = _make_zip('{"name":"round-trip"}')
         result = await upload_service.save(
-            file_obj=io.BytesIO(empty_archive),
-            filename="empty.zip",
-            slug="empty-app",
+            file_obj=io.BytesIO(content),
+            filename="rt.zip",
+            slug="rt-app",
             version="1.0.0",
         )
-        assert result["file_size"] == 22
+
+        # file_url 形如 /uploads/marketplace/rt-app/1.0.0/rt.zip
+        relative_path = result["file_url"].removeprefix("/uploads/")
+        read_back = await read_file(relative_path)
+        assert read_back == content
+
+    async def test_large_file_rejected(self, tmp_path, monkeypatch):
+        """超过 MAX_PACKAGE_SIZE 的文件应被拒绝（DoS 防护）"""
+        monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path))
+
+        # mock 一个略大于 200MB 的内容（避免实际分配 200MB 内存）
+        oversized_content = _make_zip("x")  # 合法 zip，绕过格式校验进入大小校验
+        with patch(
+            "app.modules.marketplace.service.upload_service.MAX_PACKAGE_SIZE",
+            len(oversized_content) - 1,
+        ):
+            with pytest.raises(BusinessException) as exc_info:
+                await upload_service.save(
+                    file_obj=io.BytesIO(oversized_content),
+                    filename="large.zip",
+                    slug="large-app",
+                    version="1.0.0",
+                )
+
+        assert exc_info.value.code == 413
+        assert exc_info.value.error_code == AppErrorCode.FILE_TOO_LARGE
