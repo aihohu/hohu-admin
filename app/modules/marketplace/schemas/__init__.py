@@ -1,7 +1,7 @@
 from .app import AppDetailOut, AppOut, AppQuery, VersionOut
 from .install import InstallCreate, InstallOut, InstallQuery
 from .permission import PermissionOut
-from .rating import RatingCreate, RatingOut
+from .rating import RatingCreate, RatingOut, RatingUpdate
 
 __all__ = [
     "AppOut",
@@ -14,4 +14,5 @@ __all__ = [
     "PermissionOut",
     "RatingCreate",
     "RatingOut",
+    "RatingUpdate",
 ]

@@ -31,6 +31,13 @@ class RatingCreate(RatingBase):
         return v
 
 
+class RatingUpdate(RatingBase):
+    """修改评分请求（rating 必传，comment 可选）"""
+
+    rating: int = Field(..., ge=1, le=5)
+    comment: str | None = Field(None, max_length=500)
+
+
 class RatingOut(RatingBase):
     """评分输出"""
 

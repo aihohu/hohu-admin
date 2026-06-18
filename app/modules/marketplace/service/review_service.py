@@ -11,7 +11,7 @@ review 三阶段（spec 14.3）：
 Phase 1 跳过 AI：create_pending 时直接 ai_risk_level='skipped'。
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,7 +54,7 @@ class ReviewService(MarketplaceBaseService):
             app_id=app_id,
             version_id=version_id,
             rule_check_result=rule_check_result,
-            rule_check_at=datetime.utcnow(),
+            rule_check_at=datetime.now(UTC),
             human_status="pending",
             ai_risk_level="skipped",  # Phase 1 跳过 AI
             final_status="pending",
@@ -96,7 +96,7 @@ class ReviewService(MarketplaceBaseService):
         review.human_status = "approved" if approved else "rejected"
         review.human_reviewer_id = reviewer_id
         review.human_comment = comment
-        review.human_reviewed_at = datetime.utcnow()
+        review.human_reviewed_at = datetime.now(UTC)
         review.final_status = "approved" if approved else "rejected"
         await db.flush()
         return review
