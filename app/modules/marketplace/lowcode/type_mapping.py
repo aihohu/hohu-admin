@@ -90,3 +90,27 @@ def pg_type_to_sql(col: ColumnDef) -> str:
         s = col.scale or DEFAULT_NUMERIC_SCALE
         return f"NUMERIC({p},{s})"
     return col.pg_type.value
+
+
+def slug_to_table_prefix(slug: str) -> str:
+    """Convert app slug to safe table name prefix.
+
+    Replaces hyphens and dots (treated as operators in PG unquoted identifiers)
+    with underscores.
+
+    Example: 'zhangsan-crm' → 'zhangsan_crm'
+    """
+    return slug.replace("-", "_").replace(".", "_")
+
+
+def make_table_name(slug: str, model_key: str | None = None) -> str:
+    """Generate app_data_* table name from slug + optional model key.
+
+    Examples:
+        make_table_name('zhangsan-crm') → 'app_data_zhangsan_crm'
+        make_table_name('zhangsan-crm', 'customer') → 'app_data_zhangsan_crm_customer'
+    """
+    prefix = slug_to_table_prefix(slug)
+    if model_key:
+        return f"app_data_{prefix}_{model_key}"
+    return f"app_data_{prefix}"

@@ -11,6 +11,7 @@ from app.modules.marketplace.lowcode.schema_introspection import (
 from app.modules.marketplace.lowcode.type_mapping import (
     json_schema_to_pg_type,
     pg_type_to_sql,
+    slug_to_table_prefix,
 )
 
 
@@ -91,8 +92,12 @@ class MigrationRunner:
     async def get_table_names_for_app(
         self, db: AsyncSession, *, app_slug: str
     ) -> list[str]:
-        """列出某 app 的所有物理表（前缀 app_data_{slug}）"""
-        pattern = f"app_data_{app_slug}%"
+        """列出某 app 的所有物理表（前缀 app_data_{slug}）
+
+        slug 中的连字符/点已规范化为下划线（与 make_table_name 保持一致）。
+        """
+        prefix = slug_to_table_prefix(app_slug)
+        pattern = f"app_data_{prefix}%"
         stmt = text(
             """
             SELECT table_name FROM information_schema.tables

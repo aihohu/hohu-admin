@@ -231,3 +231,59 @@ class TestMultiModelInstall:
 
         assert await table_exists(db_session, "app_data_lowcode_multi_model_customer")
         assert await table_exists(db_session, "app_data_lowcode_multi_model_order")
+
+
+class TestHyphenatedSlugInstall:
+    async def test_install_with_hyphenated_slug_creates_table(self, db_session):
+        """Slug with hyphens (production format: author-name) should work.
+
+        Regression: 之前直接 `f"app_data_{slug}"` 会生成 `app_data_zhangsan-crm`，
+        PostgreSQL 把连字符当操作符解析，CREATE TABLE 直接语法错误。
+        """
+        app = App(
+            tenant_id=0,
+            name="CRM",
+            slug="zhangsan-crm",  # hyphenated!
+            type="lowcode",
+            category="business",
+            status="published",
+        )
+        db_session.add(app)
+        await db_session.flush()
+
+        version = AppVersion(
+            app_id=app.id,
+            version="1.0.0",
+            manifest={
+                "name": "CRM",
+                "slug": "zhangsan-crm",
+                "version": "1.0.0",
+                "type": "lowcode",
+                "category": "business",
+                "data_schema": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string", "default": ""}},
+                    "required": ["name"],
+                },
+            },
+            file_url="/uploads/x.zip",
+            file_hash="0" * 64,
+            file_size=1024,
+            review_status="approved",
+        )
+        db_session.add(version)
+        await db_session.flush()
+        app.current_version_id = version.id
+
+        # Clean up any residue (both sanitized and un-sanitized names just in case)
+        await db_session.execute(text("DROP TABLE IF EXISTS app_data_zhangsan_crm"))
+        await db_session.execute(text('DROP TABLE IF EXISTS "app_data_zhangsan-crm"'))
+
+        req = InstallCreate(app_slug="zhangsan-crm")
+        await install_service.install(db_session, req, user_id=1)
+        await db_session.flush()
+
+        # Table should be created with underscore (not hyphen)
+        assert await table_exists(db_session, "app_data_zhangsan_crm")
+        # Table with hyphen should NOT exist
+        assert not await table_exists(db_session, "app_data_zhangsan-crm")

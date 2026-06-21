@@ -9,6 +9,7 @@ from app.modules.auth.service import get_current_user
 from app.modules.marketplace.exceptions import AppNotFoundException
 from app.modules.marketplace.lowcode.data_api_service import DataApiService
 from app.modules.marketplace.lowcode.schema_introspection import table_exists
+from app.modules.marketplace.lowcode.type_mapping import make_table_name
 from app.modules.marketplace.models import AppVersion
 from app.modules.marketplace.service.app_service import app_service
 from app.modules.system.models.user import User
@@ -30,13 +31,13 @@ async def _resolve_table_and_schema(
     manifest = version.manifest or {}
 
     if model and model != "_":
-        table_name = f"app_data_{slug}_{model}"
+        table_name = make_table_name(slug, model)
         models_arr = manifest.get("models") or []
         for m in models_arr:
             if m.get("key") == model:
                 return table_name, m.get("data_schema")
         return table_name, None
-    table_name = f"app_data_{slug}"
+    table_name = make_table_name(slug)
     return table_name, manifest.get("data_schema")
 
 

@@ -19,6 +19,7 @@ from app.modules.marketplace.exceptions import (
     AppNotFoundException,
 )
 from app.modules.marketplace.lowcode.migration_runner import MigrationRunner
+from app.modules.marketplace.lowcode.type_mapping import make_table_name
 from app.modules.marketplace.models import App, TenantApp
 from app.modules.marketplace.schemas.install import InstallCreate, InstallQuery
 from app.modules.marketplace.service.app_service import app_service
@@ -140,7 +141,7 @@ class InstallService(MarketplaceBaseService):
                 data_schema = model.get("data_schema") or {}
                 if not self._has_user_fields(data_schema):
                     continue
-                table_name = f"app_data_{app.slug}_{model_key}"
+                table_name = make_table_name(app.slug, model_key)
                 await self.migration_runner.create_table(
                     db, table_name=table_name, data_schema=data_schema
                 )
@@ -149,7 +150,7 @@ class InstallService(MarketplaceBaseService):
         # 单表模式
         data_schema = manifest.get("data_schema")
         if self._has_user_fields(data_schema):
-            table_name = f"app_data_{app.slug}"
+            table_name = make_table_name(app.slug)
             await self.migration_runner.create_table(
                 db, table_name=table_name, data_schema=data_schema
             )
