@@ -20,6 +20,9 @@ from app.modules.job.api.job import router as job_router
 from app.modules.job.api.job_log import router as job_log_router
 from app.modules.marketplace.api.admin import router as marketplace_admin_router
 from app.modules.marketplace.api.app_data import router as app_data_router
+from app.modules.marketplace.api.contributes import (
+    router as contributes_router,
+)
 from app.modules.marketplace.api.developer import (
     router as marketplace_developer_router,
 )
@@ -96,6 +99,10 @@ app.include_router(
 app.include_router(marketplace_router, prefix="/marketplace", tags=["应用市场"])
 # 低代码动态数据 CRUD（app_data_* 表）
 app.include_router(app_data_router, prefix="/api/v1/app-data", tags=["应用数据"])
+# 前端初始化加载 contributes 缓存（menu + pages）
+app.include_router(
+    contributes_router, prefix="/api/v1/contributes", tags=["contributes"]
+)
 
 # 确保上传目录存在
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)

@@ -23,6 +23,9 @@ from app.modules.marketplace.models import App, TenantApp
 from app.modules.marketplace.schemas.install import InstallCreate, InstallQuery
 from app.modules.marketplace.service.app_service import app_service
 from app.modules.marketplace.service.base import MarketplaceBaseService
+from app.modules.marketplace.service.contributes_service import (
+    contributes_service,
+)
 from app.modules.marketplace.service.version_service import version_service
 from app.utils.pagination import paginate
 
@@ -82,6 +85,7 @@ class InstallService(MarketplaceBaseService):
             # 重装：UPDATE 同行（spec 6.4 决策）
             record = await self._do_reinstall(db, existing, version, req)
             await self._create_app_tables(db, app=app, version=version)
+            await contributes_service.invalidate(tenant_id=self.tenant_id)
             return record
 
         # 新装：INSERT — 并发兜底：catch UNIQUE 冲突退化为 UPDATE
@@ -107,8 +111,10 @@ class InstallService(MarketplaceBaseService):
                 raise AppInstallLockedException(app.id) from e
             record = await self._do_reinstall(db, existing, version, req)
             await self._create_app_tables(db, app=app, version=version)
+            await contributes_service.invalidate(tenant_id=self.tenant_id)
             return record
         await self._create_app_tables(db, app=app, version=version)
+        await contributes_service.invalidate(tenant_id=self.tenant_id)
         return record
 
     async def _create_app_tables(
@@ -214,12 +220,17 @@ class InstallService(MarketplaceBaseService):
         record.retained_table_names = table_names
         record.has_data = len(table_names) > 0
         await db.flush()
+        await contributes_service.invalidate(tenant_id=self.tenant_id)
 
     async def enable(self, db: AsyncSession, *, app_id: int) -> TenantApp:
-        return await self._update_status(db, app_id=app_id, status="enabled")
+        record = await self._update_status(db, app_id=app_id, status="enabled")
+        await contributes_service.invalidate(tenant_id=self.tenant_id)
+        return record
 
     async def disable(self, db: AsyncSession, *, app_id: int) -> TenantApp:
-        return await self._update_status(db, app_id=app_id, status="disabled")
+        record = await self._update_status(db, app_id=app_id, status="disabled")
+        await contributes_service.invalidate(tenant_id=self.tenant_id)
+        return record
 
     async def _update_status(
         self, db: AsyncSession, *, app_id: int, status: str
