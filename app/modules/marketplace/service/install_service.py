@@ -4,8 +4,8 @@
 UNIQUE(tenant_id, app_id) 通过「重装 UPDATE 同行」实现循环，避免反复 install/uninstall
 产生大量行。
 
-Phase 1 没有低代码表，retained_table_names 永远为空 list；Phase 2 接入低代码后，
-卸载时从 information_schema 查询应用建的表，回填 retained_table_names。
+Phase 2 接入低代码：install 时根据 manifest 建 app_data_* 表；
+uninstall 时 DROP 表并把表名回填 retained_table_names。
 """
 
 from typing import Any
@@ -18,7 +18,8 @@ from app.modules.marketplace.exceptions import (
     AppInstallLockedException,
     AppNotFoundException,
 )
-from app.modules.marketplace.models import TenantApp
+from app.modules.marketplace.lowcode.migration_runner import MigrationRunner
+from app.modules.marketplace.models import App, TenantApp
 from app.modules.marketplace.schemas.install import InstallCreate, InstallQuery
 from app.modules.marketplace.service.app_service import app_service
 from app.modules.marketplace.service.base import MarketplaceBaseService
@@ -28,6 +29,10 @@ from app.utils.pagination import paginate
 
 class InstallService(MarketplaceBaseService):
     """安装/卸载/重装 service（spec 14.4 + 6.4）"""
+
+    def __init__(self, tenant_id: int = 0):
+        super().__init__(tenant_id=tenant_id)
+        self.migration_runner = MigrationRunner()
 
     async def install(
         self,
@@ -75,7 +80,9 @@ class InstallService(MarketplaceBaseService):
 
         if existing is not None:
             # 重装：UPDATE 同行（spec 6.4 决策）
-            return await self._do_reinstall(db, existing, version, req)
+            record = await self._do_reinstall(db, existing, version, req)
+            await self._create_app_tables(db, app=app, version=version)
+            return record
 
         # 新装：INSERT — 并发兜底：catch UNIQUE 冲突退化为 UPDATE
         record = TenantApp(
@@ -98,8 +105,53 @@ class InstallService(MarketplaceBaseService):
             if existing is None:
                 # 极少见：rollback 后另一行也消失了（理论不该发生，防御性抛错）
                 raise AppInstallLockedException(app.id) from e
-            return await self._do_reinstall(db, existing, version, req)
+            record = await self._do_reinstall(db, existing, version, req)
+            await self._create_app_tables(db, app=app, version=version)
+            return record
+        await self._create_app_tables(db, app=app, version=version)
         return record
+
+    async def _create_app_tables(
+        self, db: AsyncSession, *, app: App, version: Any
+    ) -> None:
+        """根据 manifest 创建 app_data_* 表（spec 6.2）
+
+        - 有 models 数组：每个 model 独立建表 app_data_{slug}_{model_key}
+        - 无 models：单表 app_data_{slug}（用顶层 data_schema）
+        - manifest 无 data_schema：不建表（纯展示型应用）
+
+        CREATE TABLE IF NOT EXISTS 保证幂等（重装不会重建已有表）。
+        """
+        manifest = version.manifest or {}
+
+        models = manifest.get("models")
+        if models:
+            # 多表模式
+            for model in models:
+                model_key = model.get("key")
+                if not model_key:
+                    continue
+                data_schema = model.get("data_schema") or {}
+                if not self._has_user_fields(data_schema):
+                    continue
+                table_name = f"app_data_{app.slug}_{model_key}"
+                await self.migration_runner.create_table(
+                    db, table_name=table_name, data_schema=data_schema
+                )
+            return
+
+        # 单表模式
+        data_schema = manifest.get("data_schema")
+        if self._has_user_fields(data_schema):
+            table_name = f"app_data_{app.slug}"
+            await self.migration_runner.create_table(
+                db, table_name=table_name, data_schema=data_schema
+            )
+
+    @staticmethod
+    def _has_user_fields(data_schema: object) -> bool:
+        """data_schema 是否含 properties（用于决定是否建表）"""
+        return bool(isinstance(data_schema, dict) and data_schema.get("properties"))
 
     async def _do_reinstall(
         self,
@@ -129,10 +181,10 @@ class InstallService(MarketplaceBaseService):
         app_id: int,
         user_id: int,  # noqa: ARG002 - 预留审计字段
     ) -> None:
-        """卸载：status='uninstalled'，不删行。
+        """卸载：status='uninstalled'，DROP app_data_* 表并记录 retained_table_names。
 
-        Phase 1 没建 app_data_* 表，retained_table_names 为空 list。
-        Phase 2 接入低代码后会从 information_schema 查询应用建的表。
+        Phase 1 决策（spec 6.4）：默认硬 DROP，软删除留 Phase 2。
+        retained_table_names 记录曾存在的表名，供未来重装检测使用。
 
         Args:
             db: 数据库会话
@@ -147,11 +199,20 @@ class InstallService(MarketplaceBaseService):
         if record is None:
             raise AppNotFoundException(app_id=app_id)
 
+        # 查 app.slug 用于定位应用建的表
+        app = await db.get(App, app_id)
+        table_names: list[str] = []
+        if app is not None:
+            table_names = await self.migration_runner.get_table_names_for_app(
+                db, app_slug=app.slug
+            )
+            for tn in table_names:
+                await self.migration_runner.drop_table(db, table_name=tn)
+
         record.status = "uninstalled"
-        # Phase 1 没建 app_data_* 表，retained_table_names 为空 list
-        # Phase 2 接入低代码后会从 information_schema 查询应用建的表
-        record.retained_table_names: list[Any] = []
-        record.has_data = False
+        # 记录曾存在的表（即使为空也写空 list，便于重装时清空）
+        record.retained_table_names = table_names
+        record.has_data = len(table_names) > 0
         await db.flush()
 
     async def enable(self, db: AsyncSession, *, app_id: int) -> TenantApp:
