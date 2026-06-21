@@ -7,6 +7,8 @@ from app.core.auth import require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.db.session import get_db
 from app.modules.auth.service import get_current_user
+from app.modules.marketplace.exceptions import AppNotFoundException
+from app.modules.marketplace.models import AppVersion
 from app.modules.marketplace.schemas.app import AppDetailOut, AppOut, AppQuery
 from app.modules.marketplace.schemas.install import (
     InstallCreate,
@@ -88,6 +90,26 @@ async def get_app_detail(
     if app.tags_text:
         data.tags = app.tags_text.split()
     return ResponseModel.success(data=data)
+
+
+@router.get(
+    "/{slug}/manifest",
+    response_model=ResponseModel[dict],
+    summary="获取应用完整 manifest",
+)
+async def get_app_manifest(
+    slug: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),  # noqa: ARG001
+):
+    """前端 LowcodeRenderer 用：返回 current_version 的完整 manifest"""
+    app = await app_service.get_by_slug(db, slug=slug)
+    if app.current_version_id is None:
+        raise AppNotFoundException(slug=f"{slug} (no published version)")
+    version = await db.get(AppVersion, app.current_version_id)
+    if version is None:
+        raise AppNotFoundException(slug=slug)
+    return ResponseModel.success(data=version.manifest)
 
 
 @router.post(
