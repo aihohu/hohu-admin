@@ -29,7 +29,7 @@ async def upload_app(
     current_user: User = Depends(get_current_user),
 ):
     content = await file.read()
-    version = await developer_service.submit_version(
+    version, review_id = await developer_service.submit_version(
         db,
         manifest_json=manifest_json,
         file_content=content,
@@ -38,7 +38,9 @@ async def upload_app(
         username=current_user.user_name,
     )
     await db.commit()
-    return ResponseModel.success(data=VersionOut.model_validate(version))
+    version_out = VersionOut.model_validate(version).model_dump(by_alias=True)
+    version_out["reviewId"] = str(review_id)
+    return ResponseModel.success(data=version_out)
 
 
 @router.get(

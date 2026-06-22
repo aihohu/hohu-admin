@@ -31,7 +31,7 @@ class DeveloperService:
         filename: str,
         user_id: int,
         username: str,
-    ) -> AppVersion:
+    ) -> tuple[AppVersion, int]:
         """提交新版本：manifest 校验 → 上传 → app upsert → version create → permission sync → review create
 
         Raises:
@@ -102,7 +102,7 @@ class DeveloperService:
             )
 
         # 8. 创建 review 记录（pending）
-        await review_service.create_pending(
+        review = await review_service.create_pending(
             db,
             app_id=app.id,
             version_id=version.id,
@@ -112,7 +112,7 @@ class DeveloperService:
             },
         )
 
-        return version
+        return version, review.id
 
 
 developer_service = DeveloperService()
