@@ -91,3 +91,13 @@ class VersionOut(AppBase):
     @field_serializer("created_at")
     def serialize_datetime(self, v: datetime) -> str:
         return v.strftime(settings.DATETIME_FORMAT)
+
+
+class VersionUploadOut(VersionOut):
+    """上传响应（VersionOut + reviewId）"""
+
+    review_id: int = Field(alias="reviewId")
+
+    @field_serializer("review_id")
+    def serialize_review_id(self, v: int) -> str:
+        return str(v)

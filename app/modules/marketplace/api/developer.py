@@ -9,7 +9,7 @@ from app.core.base_response import ResponseModel
 from app.db.session import get_db
 from app.modules.auth.service import get_current_user
 from app.modules.marketplace.models import App
-from app.modules.marketplace.schemas.app import AppOut, VersionOut
+from app.modules.marketplace.schemas.app import AppOut, VersionOut, VersionUploadOut
 from app.modules.marketplace.service.developer_service import developer_service
 from app.modules.system.models.user import User
 
@@ -18,7 +18,7 @@ router = APIRouter()
 
 @router.post(
     "/upload",
-    response_model=ResponseModel[VersionOut],
+    response_model=ResponseModel[VersionUploadOut],
     summary="上传应用包（创建新版本）",
     dependencies=[Depends(require_permissions("marketplace:develop"))],
 )
@@ -38,9 +38,9 @@ async def upload_app(
         username=current_user.user_name,
     )
     await db.commit()
-    version_out = VersionOut.model_validate(version).model_dump(by_alias=True)
-    version_out["reviewId"] = str(review_id)
-    return ResponseModel.success(data=version_out)
+    data = VersionOut.model_validate(version).model_dump()
+    data["review_id"] = review_id
+    return ResponseModel.success(data=data)
 
 
 @router.get(
