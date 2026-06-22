@@ -35,7 +35,7 @@ async def upload_app(
         file_content=content,
         filename=file.filename or "upload.zip",
         user_id=current_user.user_id,
-        username=current_user.username,
+        username=current_user.user_name,
     )
     await db.commit()
     return ResponseModel.success(data=VersionOut.model_validate(version))
