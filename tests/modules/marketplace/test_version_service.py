@@ -217,6 +217,410 @@ class TestVersionServiceValidateManifest:
         with pytest.raises(AppInvalidManifestException):
             version_service.validate_manifest(manifest)
 
+    # ---------- permissions 形状校验（spec 14.5）----------
+
+    def test_validate_manifest_permissions_missing_detail_rejected(self):
+        """permissions 缺 detail 字段 → 拒绝（之前会触发 KeyError 500）"""
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "permissions": [
+                {"type": "api", "path": "/foo"}  # 缺 detail
+            ],
+        }
+        with pytest.raises(AppInvalidManifestException) as exc:
+            version_service.validate_manifest(manifest)
+        assert "detail" in str(exc.value)
+
+    def test_validate_manifest_permissions_missing_type_rejected(self):
+        """permissions 缺 type 字段 → 拒绝"""
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "permissions": [
+                {"detail": {"method": "GET"}}  # 缺 type
+            ],
+        }
+        with pytest.raises(AppInvalidManifestException) as exc:
+            version_service.validate_manifest(manifest)
+        assert "type" in str(exc.value)
+
+    def test_validate_manifest_permissions_detail_not_dict_rejected(self):
+        """detail 必须是 dict"""
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "permissions": [
+                {"type": "api", "detail": "GET /foo"}  # detail 是字符串
+            ],
+        }
+        with pytest.raises(AppInvalidManifestException):
+            version_service.validate_manifest(manifest)
+
+    def test_validate_manifest_permissions_not_list_rejected(self):
+        """permissions 必须是数组"""
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "permissions": {"type": "api", "detail": {}},  # dict 不是 list
+        }
+        with pytest.raises(AppInvalidManifestException) as exc:
+            version_service.validate_manifest(manifest)
+        assert "permissions" in str(exc.value).lower()
+
+    def test_validate_manifest_permissions_empty_type_rejected(self):
+        """type 不能是空字符串"""
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "permissions": [{"type": "", "detail": {"method": "GET"}}],
+        }
+        with pytest.raises(AppInvalidManifestException):
+            version_service.validate_manifest(manifest)
+
+    def test_validate_manifest_permissions_valid_shape_ok(self):
+        """合法形状的 permissions 应通过"""
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "permissions": [
+                {"type": "api", "detail": {"method": "GET", "path": "/api/v1/foo"}},
+                {"type": "menu", "detail": {"target": "inject:sidemenu"}},
+                {"type": "db_table", "detail": {"name": "app_data_foo"}},
+            ],
+        }
+        version_service.validate_manifest(manifest)  # 不抛即通过
+
+    def test_validate_manifest_permissions_empty_list_ok(self):
+        """空 permissions 数组应通过"""
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "permissions": [],
+        }
+        version_service.validate_manifest(manifest)
+
+    def test_validate_manifest_permissions_absent_ok(self):
+        """无 permissions 字段应通过（可选）"""
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+        }
+        version_service.validate_manifest(manifest)
+
+    def test_validate_manifest_permissions_non_dict_item_rejected(self):
+        """permissions 数组里的元素必须是 dict"""
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "permissions": ["api"],  # 字符串，不是 dict
+        }
+        with pytest.raises(AppInvalidManifestException):
+            version_service.validate_manifest(manifest)
+
+    # ---------- pages/models 模式一致性校验（spec 6.2 决策）----------
+
+    def test_validate_manifest_single_table_mode_ok(self):
+        """单表模式：顶层 data_schema，pages 无 model"""
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "data_schema": {
+                "type": "object",
+                "properties": {"name": {"type": "string", "default": ""}},
+                "required": ["name"],
+            },
+            "pages": [
+                {"key": "list", "title": "List", "page_type": "table"},
+                {"key": "form", "title": "Form", "page_type": "form"},
+            ],
+        }
+        version_service.validate_manifest(manifest)  # 不抛即通过
+
+    def test_validate_manifest_single_table_mode_explicit_underscore_ok(self):
+        """单表模式下 page.model='_' 显式声明也允许"""
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "data_schema": {
+                "type": "object",
+                "properties": {"x": {"type": "string", "default": ""}},
+                "required": ["x"],
+            },
+            "pages": [
+                {"key": "list", "title": "List", "page_type": "table", "model": "_"},
+            ],
+        }
+        version_service.validate_manifest(manifest)
+
+    def test_validate_manifest_multi_table_mode_ok(self):
+        """多表模式：models[] + pages 引用 model key"""
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "models": [
+                {
+                    "key": "contact",
+                    "data_schema": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string", "default": ""}},
+                        "required": ["name"],
+                    },
+                },
+                {
+                    "key": "company",
+                    "data_schema": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string", "default": ""}},
+                        "required": ["name"],
+                    },
+                },
+            ],
+            "pages": [
+                {
+                    "key": "list",
+                    "title": "Contacts",
+                    "page_type": "table",
+                    "model": "contact",
+                },
+                {
+                    "key": "form",
+                    "title": "Contact Form",
+                    "page_type": "form",
+                    "model": "contact",
+                },
+                {
+                    "key": "companies",
+                    "title": "Companies",
+                    "page_type": "table",
+                    "model": "company",
+                },
+            ],
+        }
+        version_service.validate_manifest(manifest)
+
+    def test_validate_manifest_mixed_data_schema_and_models_rejected(self):
+        """data_schema + models[] 同时存在 → 拒绝（模式混用）"""
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "data_schema": {
+                "type": "object",
+                "properties": {"x": {"type": "string", "default": ""}},
+                "required": ["x"],
+            },
+            "models": [
+                {
+                    "key": "contact",
+                    "data_schema": {
+                        "type": "object",
+                        "properties": {"y": {"type": "string", "default": ""}},
+                        "required": ["y"],
+                    },
+                },
+            ],
+        }
+        with pytest.raises(AppInvalidManifestException) as exc:
+            version_service.validate_manifest(manifest)
+        assert "data_schema" in str(exc.value)
+        assert "models" in str(exc.value)
+
+    def test_validate_manifest_single_table_with_page_model_rejected(self):
+        """关键回归：单表模式 + page.model → 拒绝（之前的 404 bug 根因）"""
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "data_schema": {
+                "type": "object",
+                "properties": {"name": {"type": "string", "default": ""}},
+                "required": ["name"],
+            },
+            "pages": [
+                {
+                    "key": "list",
+                    "title": "List",
+                    "page_type": "table",
+                    "model": "contact",
+                },
+            ],
+        }
+        with pytest.raises(AppInvalidManifestException) as exc:
+            version_service.validate_manifest(manifest)
+        msg = str(exc.value)
+        assert "pages[0].model" in msg
+        assert "models" in msg
+
+    def test_validate_manifest_multi_table_undeclared_model_rejected(self):
+        """多表模式下 page.model 必须在 models[] 中声明"""
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "models": [
+                {
+                    "key": "contact",
+                    "data_schema": {
+                        "type": "object",
+                        "properties": {"x": {"type": "string", "default": ""}},
+                        "required": ["x"],
+                    },
+                },
+            ],
+            "pages": [
+                {"key": "list", "title": "X", "page_type": "table", "model": "unknown"},
+            ],
+        }
+        with pytest.raises(AppInvalidManifestException) as exc:
+            version_service.validate_manifest(manifest)
+        assert "unknown" in str(exc.value)
+
+    def test_validate_manifest_multi_table_page_missing_model_rejected(self):
+        """多表模式下 page.model 必填"""
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "models": [
+                {
+                    "key": "contact",
+                    "data_schema": {
+                        "type": "object",
+                        "properties": {"x": {"type": "string", "default": ""}},
+                        "required": ["x"],
+                    },
+                },
+            ],
+            "pages": [
+                {"key": "list", "title": "X", "page_type": "table"},  # 缺 model
+            ],
+        }
+        with pytest.raises(AppInvalidManifestException) as exc:
+            version_service.validate_manifest(manifest)
+        assert "pages[0]" in str(exc.value)
+        assert "model" in str(exc.value)
+
+    def test_validate_manifest_models_duplicate_key_rejected(self):
+        """models[] 的 key 不能重复"""
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "models": [
+                {
+                    "key": "contact",
+                    "data_schema": {
+                        "type": "object",
+                        "properties": {"x": {"type": "string", "default": ""}},
+                        "required": ["x"],
+                    },
+                },
+                {
+                    "key": "contact",  # 重复
+                    "data_schema": {
+                        "type": "object",
+                        "properties": {"y": {"type": "string", "default": ""}},
+                        "required": ["y"],
+                    },
+                },
+            ],
+        }
+        with pytest.raises(AppInvalidManifestException) as exc:
+            version_service.validate_manifest(manifest)
+        assert "重复" in str(exc.value)
+
+    def test_validate_manifest_models_missing_key_rejected(self):
+        """models[] 每项必须有 key"""
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "models": [
+                {
+                    "data_schema": {
+                        "type": "object",
+                        "properties": {"x": {"type": "string", "default": ""}},
+                        "required": ["x"],
+                    },
+                },
+            ],
+        }
+        with pytest.raises(AppInvalidManifestException):
+            version_service.validate_manifest(manifest)
+
+    def test_validate_manifest_no_data_no_pages_ok(self):
+        """纯展示型应用：无 data_schema / models / pages → 通过"""
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "frontend",
+            "category": "tool",
+        }
+        version_service.validate_manifest(manifest)
+
+    def test_validate_manifest_pages_not_list_rejected(self):
+        """pages 不是数组 → 拒绝"""
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "pages": {"key": "list"},
+        }
+        with pytest.raises(AppInvalidManifestException):
+            version_service.validate_manifest(manifest)
+
     def test_validate_manifest_missing_required_field(self):
         manifest = {"name": "X", "slug": "valid-slug"}  # 缺 version/type/category
         with pytest.raises(AppInvalidManifestException) as exc:

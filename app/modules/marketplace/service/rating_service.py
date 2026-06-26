@@ -1,4 +1,9 @@
-"""应用市场 - 评分 service（spec 14.6）
+"""[CLOUD-ONLY] Rating 表 service
+
+公开评分聚合，部署在云市场 DB。
+详见 docs/MARKETPLACE-CLOUD-SPLIT.md
+
+原描述：应用市场 - 评分 service（spec 14.6）
 
 app.avg_rating / rating_count 是缓存字段，每次写入评分后同步更新（spec 14.6
 反范式字段维护）。一人一评：UNIQUE(app_id, user_id)，重复评分抛 DuplicateException。

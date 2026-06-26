@@ -1,4 +1,10 @@
-"""应用版本 service（spec 7.1 + 6.3 + 13.2）。
+"""[CLOUD-ONLY] AppVersion 表 + manifest 校验
+
+部署在云市场。manifest 校验函数本身是 SHARED（本地 dev upload 也用），
+但 AppVersion 表的 CRUD 是 CLOUD-ONLY。
+详见 docs/MARKETPLACE-CLOUD-SPLIT.md
+
+原描述：应用版本 service（spec 7.1 + 6.3 + 13.2）。
 
 职责：
 1. validate_manifest：纯函数校验 manifest（slug 正则、type/category 白名单、semver、
@@ -102,6 +108,17 @@ class VersionService:
         if isinstance(data_schema, dict):
             self._validate_data_schema_defaults(data_schema)
 
+        # permissions 形状校验：每项必须是 {type, detail}（spec 14.5）
+        permissions = manifest.get("permissions") or []
+        if permissions:
+            self._validate_permissions_shape(permissions)
+
+        # pages / models 模式一致性校验（spec 6.2 决策）：
+        # 单表模式（顶层 data_schema）与多表模式（models[]）不能混用，
+        # 且 page.model 必须与声明的模式匹配——否则 install 建表名
+        # 与 API 期望表名不一致，导致 404。
+        self._validate_pages_models_coherence(manifest)
+
     def _validate_data_schema_defaults(self, data_schema: dict) -> None:
         """spec 6.3：新增 required 字段必须有字面常量 default（防 PG 全表重写）。
 
@@ -138,6 +155,122 @@ class VersionService:
                     "（NOW()/uuid() 等），"
                     f"当前：'{default_val}'"
                 )
+
+    def _validate_permissions_shape(self, permissions: list) -> None:
+        """spec 14.5：permissions[] 每项必须是 {type, detail}。
+
+        Args:
+            permissions: manifest.permissions 数组
+
+        Raises:
+            AppInvalidManifestException: permissions 不是 list、或任一项形状不符
+        """
+        if not isinstance(permissions, list):
+            raise AppInvalidManifestException(
+                f"permissions 必须是数组，当前类型：{type(permissions).__name__}"
+            )
+
+        for i, p in enumerate(permissions):
+            if not isinstance(p, dict):
+                raise AppInvalidManifestException(
+                    f"permissions[{i}] 必须是对象，当前类型：{type(p).__name__}"
+                )
+            if "type" not in p or not isinstance(p["type"], str) or not p["type"]:
+                raise AppInvalidManifestException(
+                    f"permissions[{i}] 缺少有效的 type 字段（非空字符串）"
+                )
+            if "detail" not in p or not isinstance(p["detail"], dict):
+                raise AppInvalidManifestException(
+                    f"permissions[{i}] 缺少有效的 detail 字段（必须是对象）"
+                )
+
+    def _validate_pages_models_coherence(self, manifest: dict) -> None:
+        """spec 6.2 决策：单表模式与多表模式互斥，page.model 必须匹配模式。
+
+        单表模式：
+        - manifest 顶层 data_schema
+        - pages[].model 必须省略或为 "_"
+        - install 建表 app_data_<slug>
+        - API URL /app-data/<slug>/_
+
+        多表模式：
+        - manifest 顶层 models[]（每项 {key, data_schema}）
+        - pages[].model 必须匹配 models[].key 之一
+        - install 每个 model 建表 app_data_<slug>_<model_key>
+        - API URL /app-data/<slug>/<model_key>
+
+        Args:
+            manifest: 应用清单
+
+        Raises:
+            AppInvalidManifestException: 模式混用，或 page.model 与声明不符
+        """
+        data_schema = manifest.get("data_schema")
+        models = manifest.get("models") or []
+        pages = manifest.get("pages") or []
+
+        # 1. 互斥：data_schema 与 models 不能同时存在
+        if data_schema and models:
+            raise AppInvalidManifestException(
+                "data_schema 与 models 不能同时存在——"
+                "单表模式用顶层 data_schema，多表模式用 models[]"
+            )
+
+        # 2. 校验 models[] 形状（如果声明）
+        declared_keys: set[str] = set()
+        if models:
+            if not isinstance(models, list):
+                raise AppInvalidManifestException(
+                    f"models 必须是数组，当前类型：{type(models).__name__}"
+                )
+            for i, m in enumerate(models):
+                if not isinstance(m, dict):
+                    raise AppInvalidManifestException(
+                        f"models[{i}] 必须是对象，当前类型：{type(m).__name__}"
+                    )
+                key = m.get("key")
+                if not isinstance(key, str) or not key:
+                    raise AppInvalidManifestException(
+                        f"models[{i}] 缺少有效的 key 字段（非空字符串）"
+                    )
+                if key in declared_keys:
+                    raise AppInvalidManifestException(
+                        f"models[{i}].key='{key}' 重复声明"
+                    )
+                declared_keys.add(key)
+
+        # 3. 校验 pages[] 形状与 model 一致性
+        if pages:
+            if not isinstance(pages, list):
+                raise AppInvalidManifestException(
+                    f"pages 必须是数组，当前类型：{type(pages).__name__}"
+                )
+            for i, page in enumerate(pages):
+                if not isinstance(page, dict):
+                    raise AppInvalidManifestException(
+                        f"pages[{i}] 必须是对象，当前类型：{type(page).__name__}"
+                    )
+                page_model = page.get("model")
+                if models:
+                    # 多表模式：page.model 必填且必须匹配声明
+                    if not isinstance(page_model, str) or not page_model:
+                        raise AppInvalidManifestException(
+                            f"pages[{i}] 缺少 model 字段（多表模式下必填）"
+                        )
+                    if page_model != "_" and page_model not in declared_keys:
+                        raise AppInvalidManifestException(
+                            f"pages[{i}].model='{page_model}' 未在 models[] 中声明。"
+                            f" 已声明的 key: {sorted(declared_keys)}"
+                        )
+                else:
+                    # 单表模式：page.model 必须省略或为 "_"
+                    if page_model and page_model != "_":
+                        raise AppInvalidManifestException(
+                            f"pages[{i}].model='{page_model}'，"
+                            "但 manifest 未声明 models[]。"
+                            " 单表模式下 page.model 必须省略或为 '_'，"
+                            "若要多 model 请在顶层声明 models[] 数组。"
+                        )
 
     async def create(
         self,

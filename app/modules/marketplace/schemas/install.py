@@ -22,6 +22,8 @@ class InstallOut(InstallBase):
 
     id: int
     app_id: int
+    app_slug: str
+    app_name: str
     installed_version: str
     status: str
     config: dict[str, Any] | None = None
@@ -56,3 +58,4 @@ class InstallQuery(BaseModel):
     current: int = 1
     size: int = 10
     status: str | None = None
+    app_slug: str | None = None

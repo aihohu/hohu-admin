@@ -1,3 +1,10 @@
+"""[CLOUD-ONLY] 应用评分 mk_rating
+
+公开评分聚合，部署在云市场 DB。
+Phase 2 拆分时迁移到 app/modules/marketplace/models/cloud/rating.py
+详见 docs/MARKETPLACE-CLOUD-SPLIT.md
+"""
+
 from datetime import datetime
 
 from sqlalchemy import (

@@ -1,4 +1,10 @@
-"""开发者 service：编排应用上传的多个步骤（manifest 校验 + 文件保存 + 应用 upsert + 版本创建 + 权限同步 + 审核创建）"""
+"""[CLOUD-ONLY] 开发者上传编排 service
+
+部署在云市场。本地 HoHu 上传走 mk_local_app 表，不经此 service。
+详见 docs/MARKETPLACE-CLOUD-SPLIT.md
+
+原描述：开发者 service：编排应用上传的多个步骤（manifest 校验 + 文件保存 + 应用 upsert + 版本创建 + 权限同步 + 审核创建）
+"""
 
 import json
 from io import BytesIO

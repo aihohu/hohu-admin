@@ -1,4 +1,9 @@
-"""应用权限声明 service（spec 14.5）。
+"""[CLOUD-ONLY] AppPermission 表 service
+
+部署在云市场。
+详见 docs/MARKETPLACE-CLOUD-SPLIT.md
+
+原描述：应用权限声明 service（spec 14.5）。
 
 detail_hash + detail_canonical 在写入时计算，detail_canonical 用于
 未来 Hash 算法迁移时回填（参考 git SHA1→SHA256 迁移）。

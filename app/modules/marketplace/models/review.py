@@ -1,3 +1,10 @@
+"""[CLOUD-ONLY] 审核队列 mk_app_review
+
+部署在云市场 DB。本地 HoHu 不审核，直接信任云上 published 应用。
+Phase 2 拆分时迁移到 app/modules/marketplace/models/cloud/review.py
+详见 docs/MARKETPLACE-CLOUD-SPLIT.md
+"""
+
 from datetime import datetime
 from typing import Any
 

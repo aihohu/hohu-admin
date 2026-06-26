@@ -1,3 +1,10 @@
+"""[CLOUD-ONLY] 应用目录表 mk_app
+
+部署在云市场 DB，本地 HoHu 不创建此表。
+Phase 2 拆分时迁移到 app/modules/marketplace/models/cloud/app.py
+详见 docs/MARKETPLACE-CLOUD-SPLIT.md
+"""
+
 from datetime import datetime
 from decimal import Decimal
 from typing import Any

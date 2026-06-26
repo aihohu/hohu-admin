@@ -560,7 +560,7 @@ MENU_DEFINITIONS = [
     },
     # ============ 应用管理（目录）============
     {
-        "route_name": "app_management",
+        "route_name": "app-management",
         "parent_route": "0",
         "menu_name": "应用管理",
         "menu_type": "M",
@@ -569,7 +569,7 @@ MENU_DEFINITIONS = [
         "component": "layout.base",
         "layout": "base",
         "route_path": "/marketplace",
-        "i18n_key": "route.app_management",
+        "i18n_key": "route.app-management",
         "order": 52,
         "status": "1",
         "hide_in_menu": False,
@@ -579,7 +579,7 @@ MENU_DEFINITIONS = [
     },
     {
         "route_name": "marketplace_installed",
-        "parent_route": "app_management",
+        "parent_route": "app-management",
         "menu_name": "已安装应用",
         "menu_type": "C",
         "icon": "carbon:cloud-download",
@@ -599,7 +599,7 @@ MENU_DEFINITIONS = [
     },
     {
         "route_name": "marketplace_upload",
-        "parent_route": "app_management",
+        "parent_route": "app-management",
         "menu_name": "上传应用",
         "menu_type": "C",
         "icon": "carbon:upload",
@@ -609,6 +609,26 @@ MENU_DEFINITIONS = [
         "route_path": "/marketplace/upload",
         "i18n_key": "route.marketplace-upload",
         "order": 2,
+        "status": "1",
+        "hide_in_menu": False,
+        "keep_alive": False,
+        "constant": False,
+        "multi_tab": False,
+    },
+    {
+        # 应用审核（仅 marketplace:review 权限可见）
+        # Phase 2 拆分时迁移到 cloud-only 菜单（详见 docs/MARKETPLACE-CLOUD-SPLIT.md）
+        "route_name": "marketplace_review",
+        "parent_route": "app-management",
+        "menu_name": "应用审核",
+        "menu_type": "C",
+        "icon": "carbon:task-approved",
+        "icon_type": "1",
+        "component": "view.marketplace-review",
+        "page": "marketplace-review",
+        "route_path": "/marketplace/review",
+        "i18n_key": "route.marketplace-review",
+        "order": 3,
         "status": "1",
         "hide_in_menu": False,
         "keep_alive": False,

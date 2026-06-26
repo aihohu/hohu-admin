@@ -135,7 +135,9 @@ class TestInstallService:
         )
         assert enabled_page.total == 1
         assert len(enabled_page.records) == 1
-        assert enabled_page.records[0].status == "enabled"
+        # list_installed returns dicts (joined with App for app_slug/app_name)
+        assert enabled_page.records[0]["status"] == "enabled"
+        assert enabled_page.records[0]["app_slug"] == published_app.slug
 
     async def test_list_installed_respects_pagination(self, db_session, published_app):
         """分页：size=10 默认，超过则只返回 size 条"""

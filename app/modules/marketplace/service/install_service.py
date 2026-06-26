@@ -1,4 +1,11 @@
-"""应用市场 - 安装/卸载/重装 service（spec 14.4 + 决策 6.4）
+"""[LOCAL-ONLY] 安装/卸载/重装 service
+
+操作本地 mk_tenant_app 表 + 调 MigrationRunner 建 app_data_*。
+云市场不接触此 service。
+Phase 2 拆分时迁移到 app/modules/marketplace/service/local/install_service.py
+详见 docs/MARKETPLACE-CLOUD-SPLIT.md
+
+原描述：应用市场 - 安装/卸载/重装 service（spec 14.4 + 决策 6.4）
 
 状态机：installed → enabled → disabled → uninstalled → installed（循环）
 UNIQUE(tenant_id, app_id) 通过「重装 UPDATE 同行」实现循环，避免反复 install/uninstall
@@ -10,6 +17,7 @@ uninstall 时 DROP 表并把表名回填 retained_table_names。
 
 from typing import Any
 
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,7 +36,6 @@ from app.modules.marketplace.service.contributes_service import (
     contributes_service,
 )
 from app.modules.marketplace.service.version_service import version_service
-from app.utils.pagination import paginate
 
 
 class InstallService(MarketplaceBaseService):
@@ -242,22 +249,64 @@ class InstallService(MarketplaceBaseService):
             raise AppNotFoundException(app_id=app_id)
         record.status = status
         await db.flush()
+        # onupdate=func.now() fires server-side on updated_at; refresh to load
+        # the new value so Pydantic model_validate doesn't trigger lazy-load
+        # (which would raise MissingGreenlet in async context).
+        await db.refresh(record)
         return record
 
     async def list_installed(self, db: AsyncSession, query: InstallQuery) -> PageResult:
-        """分页查询已安装应用。
+        """分页查询已安装应用，联表 App 返回 app_slug / app_name。
 
-        注意：paginate 不会自动加 tenant_id 过滤，这里手动补上（与 AppService.list 一致）。
+        支持 status 和 app_slug 过滤。
         """
-        filters = [TenantApp.tenant_id == self.tenant_id]
+        stmt = (
+            select(TenantApp, App)
+            .join(App, App.id == TenantApp.app_id)
+            .where(TenantApp.tenant_id == self.tenant_id)
+        )
         if query.status:
-            filters.append(TenantApp.status == query.status)
-        return await paginate(
-            db,
-            TenantApp,
-            query,
-            filters=filters,
-            order_by=TenantApp.installed_at.desc(),
+            stmt = stmt.where(TenantApp.status == query.status)
+        if query.app_slug:
+            stmt = stmt.where(App.slug == query.app_slug)
+
+        # 总数
+        count_stmt = (
+            select(func.count())
+            .select_from(TenantApp)
+            .join(App, App.id == TenantApp.app_id)
+            .where(TenantApp.tenant_id == self.tenant_id)
+        )
+        if query.status:
+            count_stmt = count_stmt.where(TenantApp.status == query.status)
+        if query.app_slug:
+            count_stmt = count_stmt.where(App.slug == query.app_slug)
+        total = (await db.execute(count_stmt)).scalar_one()
+
+        # 分页
+        result = await db.execute(
+            stmt.order_by(TenantApp.installed_at.desc())
+            .offset((query.current - 1) * query.size)
+            .limit(query.size)
+        )
+        records = []
+        for tenant_app, app in result:
+            records.append(
+                {
+                    "id": tenant_app.id,
+                    "app_id": app.id,
+                    "app_slug": app.slug,
+                    "app_name": app.name,
+                    "installed_version": tenant_app.installed_version,
+                    "status": tenant_app.status,
+                    "config": tenant_app.config,
+                    "installed_at": tenant_app.installed_at,
+                    "updated_at": tenant_app.updated_at,
+                }
+            )
+
+        return PageResult(
+            records=records, total=total, current=query.current, size=query.size
         )
 
 

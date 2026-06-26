@@ -1,4 +1,11 @@
-"""开发者中心 API：上传应用包 / 我的应用列表"""
+"""[CLOUD-ONLY] 开发者上传 / 我的应用列表
+
+部署在云市场。本地 HoHu 不挂此 router——本地开发走 /marketplace/local/upload。
+Phase 2 拆分时迁移到 app/modules/marketplace/api/cloud/developer.py
+详见 docs/MARKETPLACE-CLOUD-SPLIT.md
+
+原描述：开发者中心 API：上传应用包 / 我的应用列表
+"""
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 from sqlalchemy import select

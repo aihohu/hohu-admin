@@ -1,4 +1,14 @@
-"""公开 API：浏览市场 / 应用详情 / 评分（所有登录用户可见）"""
+"""[SPLIT-ME] 混合 router：browse 部分 cloud-only，install/enable 部分 local-only
+
+Phase 2 物理拆分时按 endpoint 切到两个文件：
+- cloud/browse.py: GET /list, /search, /detail/{slug}, /{slug}/manifest
+- local/install.py: POST /install, /uninstall/{slug}, /enable/{slug}, /disable/{slug}, GET /installed
+- local/rating.py: POST /rating, PUT /rating/{app_id}, DELETE /rating/{app_id}
+
+详见 docs/MARKETPLACE-CLOUD-SPLIT.md
+
+原描述：公开 API：浏览市场 / 应用详情 / 评分（所有登录用户可见）
+"""
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession

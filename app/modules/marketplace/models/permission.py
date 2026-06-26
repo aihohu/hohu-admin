@@ -1,3 +1,10 @@
+"""[CLOUD-ONLY] 应用权限声明 mk_app_permission
+
+部署在云市场 DB（应用声明的资源，不是用户授权）。
+Phase 2 拆分时迁移到 app/modules/marketplace/models/cloud/permission.py
+详见 docs/MARKETPLACE-CLOUD-SPLIT.md
+"""
+
 from datetime import datetime
 from typing import Any
 

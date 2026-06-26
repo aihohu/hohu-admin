@@ -1,4 +1,11 @@
-"""聚合 contributes 到 Redis 缓存（spec 5.2）
+"""[LOCAL-ONLY] 聚合 contributes 到 Redis
+
+聚合本地已 enabled 应用的菜单/页面，前端启动时一次加载。
+云市场不接触此 service。
+Phase 2 拆分时迁移到 app/modules/marketplace/service/local/contributes_service.py
+详见 docs/MARKETPLACE-CLOUD-SPLIT.md
+
+原描述：聚合 contributes 到 Redis 缓存（spec 5.2）
 
 启用 / 禁用应用时，后端聚合所有活跃应用的 contributes（menu、pages、buttons）
 为一份扁平 JSON 缓存，按 tenant_id 分桶。前端初始化时一次性加载。

@@ -1,4 +1,9 @@
-"""应用主表 service（spec 14.1）。
+"""[CLOUD-ONLY] App 表 service
+
+操作云市场 mk_app 表。本地 HoHu 不创建此表，浏览时通过 cloud_sync 拉取。
+详见 docs/MARKETPLACE-CLOUD-SPLIT.md
+
+原描述：应用主表 service（spec 14.1）。
 
 提供 CRUD、分页列表、关键词搜索（Phase 1 ILIKE 降级，zhparser 不可用时使用）。
 所有查询都强制带 tenant_id 过滤（通过 MarketplaceBaseService.scoped）。
