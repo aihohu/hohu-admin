@@ -3,6 +3,8 @@
 > 状态：架构讨论阶段 | 创建日期：2026-06-16
 >
 > 本文档前身是 `PLUGIN-MARKETPLACE.md`（2026-05-29）。v2 把顶层抽象从「Plugin」统一改为「应用（App）」，并新增「应用协同（可视化编排）」作为市场的核心价值。
+>
+> **相关文档**：Phase 2 云市场/本地执行拆分架构见 [`MARKETPLACE-CLOUD-SPLIT.md`](./MARKETPLACE-CLOUD-SPLIT.md)（VS Code 式模型，按 `HOHU_MODE` 切换 catalog/execution 角色）。
 
 ## 0. 核心定位
 
@@ -455,6 +457,26 @@ DELETE /api/v1/app-data/{app_slug}/{model_key}/{id}           → 删除
 - **有 models**：每个 model 独立建表 `app_data_{slug}_{model_key}`
 - **无 models**：所有页面共享一张表 `app_data_{slug}`
 
+#### 模式一致性校验（强制规则，spec 决策 #70）
+
+为避免"install 建表名"与"API 期望表名"不一致导致 404，manifest 校验阶段（13.2）强制约束：
+
+| 模式 | manifest 字段 | page.model 要求 |
+|---|---|---|
+| **单表** | 顶层 `data_schema` | 必须省略，或显式 `"_"` |
+| **多表** | 顶层 `models[]`（每项含 `key` + `data_schema`）| 必填，且必须匹配某个 `models[].key` |
+
+校验规则：
+
+1. `data_schema` 与 `models[]` **互斥**——不能同时存在
+2. 单表模式 + `page.model="contact"` → **拒绝**（典型踩坑场景，会导致 install 建表 `app_data_<slug>` 但 API 找 `app_data_<slug>_contact` → 404）
+3. 多表模式 + `page.model` 未在 `models[].key` 声明 → **拒绝**
+4. 多表模式 + `page` 缺 `model` 字段 → **拒绝**
+5. `models[].key` 重复 → **拒绝**
+6. `models[].key` 非字符串/空 → **拒绝**
+
+详见 `app/modules/marketplace/service/version_service.py::_validate_pages_models_coherence`。
+
 每张表自动包含系统字段：`id`(Snowflake)、`created_at`、`updated_at`、`created_by`、`updated_by`。
 
 JSON Schema 到 PostgreSQL 类型映射：
@@ -802,6 +824,8 @@ Phase 1 支持 `belongs_to` 和 `has_many` 两种关联，满足多表应用的�
 - **软删除（默认）**：不重命名物理表，**也不删除 `tenant_app` 记录**，仅将 `status` 改为 `uninstalled`，并把卸载时仍存在的数据表名写入 `retained_table_names` 数组（如 `["app_data_zhangsan_crm_suite_customer", "app_data_zhangsan_crm_suite_order"]`）和 `has_data=true`。管理员可选硬删除（DROP TABLE，需二次确认，仍保留 `tenant_app` 行作为历史）
 - **重装同名应用**：因 `tenant_app` 行始终保留，重装走 **UPDATE 同一行**（status: `uninstalled` → `installed`），不 INSERT 新记录，绕开 `UNIQUE(tenant_id, app_id)` 约束。若该行有 `retained_table_names` 数组非空，提示管理员选择"恢复历史数据"或"全新安装"。选择恢复则复用已有数据表，并在安装过程中执行必要的 Schema 迁移
 - 相比重命名物理表（`ALTER TABLE`），此方案避免高并发下的锁表风险，且重装检测走数据库查询而非 `information_schema`，更可靠
+
+> ✅ **Plan 2 已完成（2026-06-26）**：`InstallService._create_app_tables` 单表/多表两条路径都已从 `create_table` 切到 `apply_upgrade`。新装时 `apply_upgrade` 内部 `introspect_table` 返回 None 退化为 `create_table`，行为不变；重装时走 introspect → `compare_schemas` → `ALTER TABLE ADD COLUMN` / `ALTER COLUMN TYPE`，v2 manifest 新增字段与 widening 都会真正落到物理表上。回归测试见 `tests/modules/marketplace/test_install_service_lowcode.py::TestReinstallSchemaEvolution`（覆盖 add column 保数据、varchar widening 两个场景）。
 
 #### 6.4.1 重装时的 Schema Comparator（强制流程）
 
@@ -2400,7 +2424,34 @@ ext:custom.{user_defined}     用户自定义来源
 基础检查：
 ├── 文件大小 <= 200MB（可配置；超过 30MB 走分块校验，详见 14.13）
 └── engines.hohu 版本范围有效
+
+结构校验（强制）：
+├── data_schema 与 models[] 互斥（spec 6.2 决策 #70）
+├── page.model 必须与模式匹配（单表省略 / 多表必填且在 models[].key 声明）
+├── models[].key 不能重复、不能为空
+├── required 字段必须有字面常量 default（spec 6.3 决策 #69）
+└── permissions[] 每项必须是 {type: 非空字符串, detail: 对象}
 ```
+
+#### permissions 形状校验（spec 决策 #71）
+
+```jsonc
+// ✅ 合法
+"permissions": [
+  {"type": "api",      "detail": {"method": "GET", "path": "/api/v1/foo"}},
+  {"type": "menu",     "detail": {"target": "inject:sidemenu"}},
+  {"type": "db_table", "detail": {"name": "app_data_foo"}}
+]
+
+// ❌ 拒绝：缺 detail（典型误用：写成 RBAC code/name/desc 形式）
+"permissions": [
+  {"code": "my-app:view", "name": "View", "description": "..."}
+]
+
+// ❌ 拒绝：缺 type / type 为空 / detail 非 dict
+```
+
+**坑历史**：早期未做此校验时，错形状 manifest 上传后会在 `permission_service.bulk_insert` 触发 `KeyError: 'detail'` 500 错误（误以为是 Redis bug）。现已前置到 manifest 校验阶段，返回 `400 APP_INVALID_MANIFEST`。
 
 ### 13.3 第 2 层：AI 审核（异步，秒级）
 
@@ -2438,6 +2489,25 @@ ext:custom.{user_defined}     用户自定义来源
 
 结果：通过 / 拒绝（附原因，开发者可修改后重新提交）
 ```
+
+#### 审核后台 UI（Phase 1 已实现）
+
+路径：`/marketplace/review`（菜单挂"应用管理"下，权限点 `marketplace:review`）
+
+**列表页**（参考角色管理布局）：
+- 折叠搜索面板：应用编码（slug）+ 状态（pending/approved/rejected/all）
+- NDataTable 列：应用名 + slug / 版本 / 状态 / AI 风险 / 提交时间 / 操作
+- 头部操作：刷新 / 列设置
+
+**详情抽屉**（点"详情"打开）：
+- `NDescriptions` 展示元数据（应用、版本、状态、AI 风险、提交时间）
+- `NCode` 高亮显示 manifest JSON（language="json"）
+- Changelog 区块（如声明）
+- 历史 `human_comment`（如曾被拒绝过）
+- 仅 `pending` 状态显示 通过 / 拒绝 按钮
+- 拒绝时展开 textarea 收集原因（必填可选，反馈给开发者）
+
+**data-testid 命名约定**：`review-search-{card,slug,status,reset,submit}` / `review-list-{card,table}` / `review-detail-{drawer,manifest,start-reject,confirm-reject,approve,reject-comment}` 等，便于 E2E 测试。
 
 ## 14. 数据模型
 
@@ -2588,9 +2658,28 @@ tenant_app
 ├── retained_table_names JSONB                            -- 卸载后仍保留的数据表名数组（如 ["app_data_zhangsan_crm_suite_customer"]），物理表名始终不变
 ├── has_data         BOOLEAN DEFAULT false              -- 卸载时是否有历史数据可恢复
 ├── installed_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
-├── updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+├── updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW() ON UPDATE NOW()
 └── UNIQUE(tenant_id, app_id)
 ```
+
+#### ⚠️ Async Session + `onupdate=func.now()` 坑（spec 决策 #72）
+
+`updated_at` 字段配 `onupdate=func.now()` 时，PG 在 UPDATE 时服务端自动刷新该字段。但 SQLAlchemy async session 不会自动把新值同步回 Python 对象——客户端的 `record.updated_at` 仍是旧值。
+
+后续若用 Pydantic `model_validate(record)` 序列化输出，Pydantic 会触发 **lazy-load**，async IO 在同步验证器里运行 → 抛 `MissingGreenlet: greenlet_spawn has not been called` → 全局异常 handler 返回 500。
+
+**症状**：第一次调用失败，立即重试成功（连接池状态机引起，常被误诊为 Redis 问题）。
+
+**修复**：所有改 `status` 等触发 `onupdate` 的操作后，**必须 `await db.refresh(record)`**：
+
+```python
+record.status = status
+await db.flush()
+await db.refresh(record)   # ← 加载新 updated_at，避免 lazy-load
+return record
+```
+
+`InstallService.enable / disable / _update_status`、`AdminService.approve_review / reject_review` 等都需遵守此规则。
 
 ### 14.5 应用权限声明（app_permission）
 
@@ -3301,6 +3390,13 @@ Phase 3：
     - **审核流状态**：`pending` / `approved` / `rejected` / `skipped` —— 适用 mk_app_version.review_status、mk_app_review.human_status、mk_app_review.ai_risk_level（skipped 表示该层审核未触发，如 patch 免审）
     - 异常状态可加 `error` 后缀（如 automation_rule 的 `error` 状态表示熔断），独立于上述类别
     新增表必须从上述 5 类中选一组，禁止混用 `active` 与 `enabled` 同义场景
+
+69. **Required 字段必须有字面常量 default** — manifest 校验阶段（13.2）强制：`required: true` 的字段必须同时声明 `default`，且 default 必须是字面常量（string/number/boolean），禁止 `NOW()`/`uuid()`/`{{...}}` 等动态表达式。理由：① PG `ALTER TABLE ADD COLUMN ... NOT NULL` 无 default 会因已有 NULL 行报错；② 动态 default 触发全表重写，长时间持锁。详见 6.3。
+70. **Pages/Models 模式一致性** — manifest 必须显式选择单表模式（顶层 `data_schema`）或多表模式（`models[]`），二者互斥。`pages[].model` 必须与模式匹配：单表模式必须省略或 `"_"`；多表模式必须填且匹配 `models[].key`。理由：防止 install 建表名（`app_data_<slug>`）与 API 期望（`app_data_<slug>_<model>`）不一致导致 404。详见 6.2。
+71. **Permissions 形状校验** — manifest `permissions[]` 每项必须是 `{type: 非空字符串, detail: 对象}`。理由：`permission_service.bulk_insert` 直接读 `p["detail"]`，错形状触发 `KeyError` 500（早期误诊为 Redis 问题）。已前置到 manifest 校验阶段，返回 `400 APP_INVALID_MANIFEST`。详见 13.2。
+72. **Async session + `onupdate=func.now()` 必须 refresh** — SQLAlchemy async session 中，任何修改触发 `onupdate=func.now()` 的字段（如 `updated_at`）后，必须 `await db.refresh(record)` 才能读到新值；否则后续 `Pydantic.model_validate(record)` 会触发 lazy-load，async IO 在同步验证器里运行 → `MissingGreenlet` 异常 → 500。症状：首次调用失败、立即重试成功（易误诊为 Redis/连接池问题）。所有改 `status` 等触发 `onupdate` 的 service 方法都需遵守。详见 14.4。
+73. **云市场 / 本地执行 拆分架构** — Phase 2 演进目标：catalog（mk_app/version/review/permission）部署在云市场 DB，execution（tenant_app/app_data_*）部署在本地 DB，**绝不共享表**。同一份代码按 `HOHU_MODE=cloud|local|hybrid` 启用不同 router 与 alembic 迁移。Phase 1 单体（hybrid）保留兼容。详见 `docs/MARKETPLACE-CLOUD-SPLIT.md`。
+74. **重装走 apply_upgrade 而非 create_table** — `InstallService._create_app_tables` 单表/多表两条路径都调 `MigrationRunner.apply_upgrade`，不再直接调 `create_table`。新装时 `apply_upgrade` 内部 introspect 返回 None 退化成 `create_table`，行为不变；重装时走 introspect + `compare_schemas` + `ALTER TABLE ADD COLUMN` / `ALTER COLUMN TYPE`，v2 manifest 新增字段与 widening 才能真正落库。**反例**：直接用 `CREATE TABLE IF NOT EXISTS`，表已存在时是 no-op，新字段被静默忽略，运行时 INSERT 缺字段报错。回归测试覆盖 add column 保数据 + varchar widening 两类场景（`tests/modules/marketplace/test_install_service_lowcode.py::TestReinstallSchemaEvolution`）。详见 6.4。
 
 ## 17. 参考系统借鉴
 

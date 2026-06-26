@@ -287,3 +287,233 @@ class TestHyphenatedSlugInstall:
         assert await table_exists(db_session, "app_data_zhangsan_crm")
         # Table with hyphen should NOT exist
         assert not await table_exists(db_session, "app_data_zhangsan-crm")
+
+
+class TestReinstallSchemaEvolution:
+    """v1→v2 重装时，apply_upgrade 应通过 ALTER TABLE 加新字段，
+    旧字段与已有数据保留。
+
+    回归：之前 _create_app_tables 调 create_table，CREATE TABLE IF NOT EXISTS
+    在表已存在时是 no-op，v2 manifest 新增字段会丢失。
+    """
+
+    async def test_reinstall_adds_new_column_preserves_data(self, db_session):
+        table_name = "app_data_lowcode_evo"
+        await db_session.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+
+        # --- v1: name + level ---
+        app = App(
+            tenant_id=0,
+            name="演进 CRM",
+            slug="lowcode_evo",
+            type="lowcode",
+            category="business",
+            status="published",
+        )
+        db_session.add(app)
+        await db_session.flush()
+
+        v1_manifest = {
+            "name": "演进 CRM",
+            "slug": "lowcode_evo",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "data_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "maxLength": 100, "default": ""},
+                    "level": {"type": "string", "default": "C"},
+                },
+                "required": ["name"],
+            },
+        }
+        v1 = AppVersion(
+            app_id=app.id,
+            version="1.0.0",
+            manifest=v1_manifest,
+            file_url="/uploads/v1.zip",
+            file_hash="0" * 64,
+            file_size=1024,
+            review_status="approved",
+        )
+        db_session.add(v1)
+        await db_session.flush()
+        app.current_version_id = v1.id
+        await db_session.flush()
+
+        # 安装 v1
+        await install_service.install(
+            db_session,
+            InstallCreate(app_slug="lowcode_evo", version="1.0.0"),
+            user_id=1,
+        )
+        await db_session.flush()
+
+        # 写入一条数据
+        await db_session.execute(
+            text(f"INSERT INTO {table_name} (name, level) VALUES ('Alice', 'A')")
+        )
+        await db_session.flush()
+
+        # --- v2: name + level + email(新) ---
+        v2_manifest = {
+            "name": "演进 CRM",
+            "slug": "lowcode_evo",
+            "version": "2.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "data_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "maxLength": 100, "default": ""},
+                    "level": {"type": "string", "default": "C"},
+                    "email": {"type": "string", "maxLength": 200, "default": ""},
+                },
+                "required": ["name"],
+            },
+        }
+        v2 = AppVersion(
+            app_id=app.id,
+            version="2.0.0",
+            manifest=v2_manifest,
+            file_url="/uploads/v2.zip",
+            file_hash="1" * 64,
+            file_size=2048,
+            review_status="approved",
+        )
+        db_session.add(v2)
+        await db_session.flush()
+        app.current_version_id = v2.id
+        await db_session.flush()
+
+        # 重装（显式指定 v2，避免 created_at DESC 排序歧义）
+        await install_service.install(
+            db_session,
+            InstallCreate(app_slug="lowcode_evo", version="2.0.0"),
+            user_id=1,
+        )
+        await db_session.flush()
+
+        # 校验：email 字段已通过 ALTER TABLE 加进来
+        result = await introspect_table(db_session, table_name)
+        assert result is not None
+        col_names = {c.column_name for c in result.columns}
+        assert "name" in col_names
+        assert "level" in col_names
+        assert "email" in col_names, "v2 新增的 email 字段未通过 ALTER TABLE 添加"
+
+        # 校验：原数据仍在
+        rows = (
+            await db_session.execute(
+                text(f"SELECT name, level, email FROM {table_name}")
+            )
+        ).all()
+        assert len(rows) == 1
+        assert rows[0][0] == "Alice"
+        assert rows[0][1] == "A"
+        # email 是新增字段，旧行的 email 应为 default ''
+        assert rows[0][2] == ""
+
+        # 清理
+        await db_session.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+
+    async def test_reinstall_widens_varchar_via_alter(self, db_session):
+        """v1 VARCHAR(50) → v2 VARCHAR(200)：widening 应 ALTER COLUMN TYPE"""
+        table_name = "app_data_lowcode_widen"
+        await db_session.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+
+        app = App(
+            tenant_id=0,
+            name="Widen CRM",
+            slug="lowcode_widen",
+            type="lowcode",
+            category="business",
+            status="published",
+        )
+        db_session.add(app)
+        await db_session.flush()
+
+        v1 = AppVersion(
+            app_id=app.id,
+            version="1.0.0",
+            manifest={
+                "name": "X",
+                "slug": "lowcode_widen",
+                "version": "1.0.0",
+                "type": "lowcode",
+                "category": "business",
+                "data_schema": {
+                    "type": "object",
+                    "properties": {
+                        "code": {"type": "string", "maxLength": 50, "default": ""}
+                    },
+                    "required": ["code"],
+                },
+            },
+            file_url="/uploads/v1.zip",
+            file_hash="0" * 64,
+            file_size=1024,
+            review_status="approved",
+        )
+        db_session.add(v1)
+        await db_session.flush()
+        app.current_version_id = v1.id
+        await db_session.flush()
+
+        await install_service.install(
+            db_session,
+            InstallCreate(app_slug="lowcode_widen", version="1.0.0"),
+            user_id=1,
+        )
+        await db_session.flush()
+
+        # 校验初版长度
+        result = await introspect_table(db_session, table_name)
+        assert result is not None
+        code_col = next(c for c in result.columns if c.column_name == "code")
+        assert code_col.character_maximum_length == 50
+
+        # v2: code VARCHAR(200)
+        v2 = AppVersion(
+            app_id=app.id,
+            version="2.0.0",
+            manifest={
+                "name": "X",
+                "slug": "lowcode_widen",
+                "version": "2.0.0",
+                "type": "lowcode",
+                "category": "business",
+                "data_schema": {
+                    "type": "object",
+                    "properties": {
+                        "code": {"type": "string", "maxLength": 200, "default": ""}
+                    },
+                    "required": ["code"],
+                },
+            },
+            file_url="/uploads/v2.zip",
+            file_hash="1" * 64,
+            file_size=2048,
+            review_status="approved",
+        )
+        db_session.add(v2)
+        await db_session.flush()
+        app.current_version_id = v2.id
+        await db_session.flush()
+
+        await install_service.install(
+            db_session,
+            InstallCreate(app_slug="lowcode_widen", version="2.0.0"),
+            user_id=1,
+        )
+        await db_session.flush()
+
+        # 校验：长度已 widening 到 200
+        result = await introspect_table(db_session, table_name)
+        assert result is not None
+        code_col = next(c for c in result.columns if c.column_name == "code")
+        assert code_col.character_maximum_length == 200
+
+        # 清理
+        await db_session.execute(text(f"DROP TABLE IF EXISTS {table_name}"))

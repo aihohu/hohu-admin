@@ -128,13 +128,17 @@ class InstallService(MarketplaceBaseService):
     async def _create_app_tables(
         self, db: AsyncSession, *, app: App, version: Any
     ) -> None:
-        """根据 manifest 创建 app_data_* 表（spec 6.2）
+        """根据 manifest 创建或升级 app_data_* 表（spec 6.2 + 6.4）
 
         - 有 models 数组：每个 model 独立建表 app_data_{slug}_{model_key}
         - 无 models：单表 app_data_{slug}（用顶层 data_schema）
         - manifest 无 data_schema：不建表（纯展示型应用）
 
-        CREATE TABLE IF NOT EXISTS 保证幂等（重装不会重建已有表）。
+        走 apply_upgrade 而非 create_table：
+        - 新装（表不存在）→ apply_upgrade 内部退化为 create_table
+        - 重装（表已存在）→ introspect + compare + ALTER TABLE
+          这样新版本 manifest 增加的字段会被 ADD COLUMN，widening 的
+          VARCHAR 会被 ALTER COLUMN TYPE，避免 v1→v2 升级时丢字段。
         """
         manifest = version.manifest or {}
 
@@ -149,8 +153,8 @@ class InstallService(MarketplaceBaseService):
                 if not self._has_user_fields(data_schema):
                     continue
                 table_name = make_table_name(app.slug, model_key)
-                await self.migration_runner.create_table(
-                    db, table_name=table_name, data_schema=data_schema
+                await self.migration_runner.apply_upgrade(
+                    db, table_name=table_name, new_data_schema=data_schema
                 )
             return
 
@@ -158,8 +162,8 @@ class InstallService(MarketplaceBaseService):
         data_schema = manifest.get("data_schema")
         if self._has_user_fields(data_schema):
             table_name = make_table_name(app.slug)
-            await self.migration_runner.create_table(
-                db, table_name=table_name, data_schema=data_schema
+            await self.migration_runner.apply_upgrade(
+                db, table_name=table_name, new_data_schema=data_schema
             )
 
     @staticmethod
