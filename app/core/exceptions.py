@@ -78,8 +78,8 @@ class BusinessRuleException(BusinessException):
 class InvalidParameterException(BusinessRuleException):
     """无效参数异常"""
 
-    def __init__(self, message: str = "参数错误"):
-        super().__init__(message=message)
+    def __init__(self, message: str = "参数错误", error_code: str = ""):
+        super().__init__(message=message, error_code=error_code)
 
 
 # ============ 全局异常处理器 ============

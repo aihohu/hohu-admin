@@ -538,6 +538,52 @@ CREATE INDEX ix_app_data_{slug}_{model}_tags_gin
 
 Phase 1 实现时应在文档/SDK 提示开发者：「array 字段记录数预期超过 1 万时慎用 contains 过滤」。
 
+#### Filter API URL 约定（决策 #75 #76）
+
+通用数据 API 的 `GET /api/v1/app-data/{slug}/{model}` 接受 Django 后缀风格的过滤参数：
+
+| 后缀 | SQL | 适用类型 |
+|---|---|---|
+| (无后缀) | `field = :value` | 任意 |
+| `__contains` | `field ILIKE '%' \|\| :value \|\| '%'` | text / varchar / character |
+| `__in` | `field IN (:v1, :v2, ...)`（CSV 拆分） | 任意 |
+| `__gte` | `field >= :value` | integer / bigint / numeric / decimal / real / date / timestamp |
+| `__lte` | `field <= :value` | 同上 |
+| `__has` | `cast(field as jsonb) ? :value`（JSONB array contains） | jsonb / json |
+
+排序：`?order_by=-created_at,name`（`-` 前缀表 DESC，多列逗号分隔）。
+
+```
+GET /api/v1/app-data/zhangsan-crm/customer
+    ?name__contains=张                  # ILIKE '%张%'
+    &status__in=active,pending          # IN ('active', 'pending')
+    &age__gte=18
+    &age__lte=65
+    &tags__has=vip                      # JSONB array contains 'vip'
+    &order_by=-created_at
+```
+
+**校验规则**（决策 #76）：
+
+- **列必须存在**：从 `information_schema.columns` 校验，未知列 → `400 APP_FILTER_UNKNOWN_FIELD`
+- **操作符类型匹配**：`__has` 仅 JSONB 列、`__contains` 仅文本列、`__gte`/`__lte` 仅数值/日期列；不匹配 → `400 APP_FILTER_OP_TYPE_MISMATCH`
+- **系统字段禁止过滤**：`id` / `tenant_id` / `created_at` / `updated_at` / `created_by` / `updated_by` → `400 APP_FILTER_SYSTEM_FIELD_FORBIDDEN`
+- **未知操作符**：→ `400 APP_FILTER_INVALID_OPERATOR`
+- **多条件组合**：默认 AND 连接（OR / 嵌套组合留 Phase 2）
+- **`tenant_id` 强制 scope**：所有 WHERE 自动带 `tenant_id = :tenant_id`（决策 #1）
+- **不强制 manifest 白名单**：`ui_schema.filterable` 是前端 UI 提示（决定渲染哪些过滤控件），不是 API 安全边界；API 仅以列类型为安全边界
+
+`ui_schema` 与 filter API 的关系：
+
+```jsonc
+// manifest 声明（仅影响前端渲染，不影响 API 校验）
+"ui_schema": {
+  "tags": { "widget": "NCheckboxGroup", "filterable": true, "filter_type": "contains" },
+  "age": { "widget": "NInputNumber", "filterable": true, "filter_type": "range" }
+}
+// 前端按 filter_type 渲染对应控件，提交时翻译成 ?tags__has= 或 ?age__gte=&age__lte=
+```
+
 ### 表关联（Phase 1 基础支持）
 
 Phase 1 支持 `belongs_to` 和 `has_many` 两种关联，满足多表应用的基本需求（如订单列表显示客户名称）。
@@ -3397,6 +3443,8 @@ Phase 3：
 72. **Async session + `onupdate=func.now()` 必须 refresh** — SQLAlchemy async session 中，任何修改触发 `onupdate=func.now()` 的字段（如 `updated_at`）后，必须 `await db.refresh(record)` 才能读到新值；否则后续 `Pydantic.model_validate(record)` 会触发 lazy-load，async IO 在同步验证器里运行 → `MissingGreenlet` 异常 → 500。症状：首次调用失败、立即重试成功（易误诊为 Redis/连接池问题）。所有改 `status` 等触发 `onupdate` 的 service 方法都需遵守。详见 14.4。
 73. **云市场 / 本地执行 拆分架构** — Phase 2 演进目标：catalog（mk_app/version/review/permission）部署在云市场 DB，execution（tenant_app/app_data_*）部署在本地 DB，**绝不共享表**。同一份代码按 `HOHU_MODE=cloud|local|hybrid` 启用不同 router 与 alembic 迁移。Phase 1 单体（hybrid）保留兼容。详见 `docs/MARKETPLACE-CLOUD-SPLIT.md`。
 74. **重装走 apply_upgrade 而非 create_table** — `InstallService._create_app_tables` 单表/多表两条路径都调 `MigrationRunner.apply_upgrade`，不再直接调 `create_table`。新装时 `apply_upgrade` 内部 introspect 返回 None 退化成 `create_table`，行为不变；重装时走 introspect + `compare_schemas` + `ALTER TABLE ADD COLUMN` / `ALTER COLUMN TYPE`，v2 manifest 新增字段与 widening 才能真正落库。**反例**：直接用 `CREATE TABLE IF NOT EXISTS`，表已存在时是 no-op，新字段被静默忽略，运行时 INSERT 缺字段报错。回归测试覆盖 add column 保数据 + varchar widening 两类场景（`tests/modules/marketplace/test_install_service_lowcode.py::TestReinstallSchemaEvolution`）。详见 6.4。
+75. **Filter API 用 Django 后缀语法** — `?field__op=value`，op ∈ `{contains, in, gte, lte, has}`。理由：开源生态熟悉度最高（Django REST Framework / FastAPI / Hasura / PostgREST 全用此约定），外来贡献者零学习成本；URL 自文档化，README 写一行 curl 就能 demo；前端 NaiveUI `n-data-table` 筛选参数转换最自然。**反例**：自定义三元组 `?filter=name:contains:abc` 让每个新用户都要查文档；JSON 参数 `?filters={...}` 需 URL 编码，curl 手测难复现。**回归**：前端 LowcodeRenderer 按 manifest `ui_schema.filter_type` 翻译后缀（`range` → `__gte` + `__lte`，`contains` → `__contains`），服务端按 `information_schema.columns` 校验列存在 + 类型匹配，未知 op / 未知列 / 类型不匹配均返回 `400 APP_FILTER_*`。详见 6.2「Filter API URL 约定」。
+76. **Filter 校验只查列类型不查 manifest 白名单** — `ui_schema.filterable` 仅作前端 UI 提示（控制渲染哪些过滤控件），不作 API 安全边界；API 仅以列存在性 + 类型匹配 + 系统字段黑名单 + tenant_id 强制 scope 为边界。理由：强制白名单要求改 manifest → 发新版 → 升级，开源 demo 阶段太重；`filterable: true` 语义本就是「该字段适合过滤」（提示性而非强制性）。**反例**：严格白名单让 demo 应用每次改筛选都要重新打包审核，挫败早期使用者。**回归**：列类型校验已足够防 SQL 注入和类型混乱；前端按 `filterable` 渲染但用户绕过 UI 直接 curl 任意列过滤也能成功（只要列存在且类型匹配），与「列存在性 + 类型匹配」边界一致。详见 6.2「Filter API URL 约定」。
 
 ## 17. 参考系统借鉴
 
