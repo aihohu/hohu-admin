@@ -1162,7 +1162,7 @@ Phase 2 再扩展：条件显隐、字段联动、跨表关联、**外部 API PO
       ]
     }
   ],
-  "menu": { "title": "客户管理", "icon": "PeopleOutline", "parent": null }
+  "menu": { "title": "客户管理", "icon": "mdi:account-group-outline", "parent": null }
 }
 // → 建一张表: app_data_zhangsan_customer_mgmt
 ```
@@ -1209,7 +1209,7 @@ Phase 2 再扩展：条件显隐、字段联动、跨表关联、**外部 API PO
     { "key": "product-list", "model": "product", "title": "商品列表", "page_type": "table",
       "ui_schema": {...}, "actions": [...] }
   ],
-  "menu": { "title": "CRM", "icon": "BriefcaseOutline", "parent": null }
+  "menu": { "title": "CRM", "icon": "mdi:briefcase-outline", "parent": null }
 }
 // → 建三张表: app_data_zhangsan_crm_suite_customer / _order / _product
 ```
@@ -1280,9 +1280,10 @@ Phase 2 再扩展：条件显隐、字段联动、跨表关联、**外部 API PO
   // ─── 菜单注册 ───
   "menu": {
     "title": "客户管理",
-    "icon": "PeopleOutline",            // 必须是 @vicons/ionicons5 的导出名（如 PeopleOutline、BarChartOutline、BriefcaseOutline）。其他 vicons 包（如 @vicons/material、@vicons/fa）暂不支持
-    "parent": null,                     // null = 顶级，或填父应用 slug
-    "order": 100
+    "icon": "mdi:account-group-outline",  // Iconify 名（prefix:name，如 mdi:、ic:、carbon:），与主系统路由 meta.icon 一致。完整图标库见 https://icones.js.org/
+    "parent": null,                       // null = 顶级，或填父应用 slug
+    "order": 100,
+    "page_key": "list"                    // 跳转目标 page key，必须匹配 pages[].key 之一；缺省时前端 fallback 到该 app 第一个 page
   },
 
   // ─── 应用协同声明（详见第 10 节） ───
@@ -3445,6 +3446,8 @@ Phase 3：
 74. **重装走 apply_upgrade 而非 create_table** — `InstallService._create_app_tables` 单表/多表两条路径都调 `MigrationRunner.apply_upgrade`，不再直接调 `create_table`。新装时 `apply_upgrade` 内部 introspect 返回 None 退化成 `create_table`，行为不变；重装时走 introspect + `compare_schemas` + `ALTER TABLE ADD COLUMN` / `ALTER COLUMN TYPE`，v2 manifest 新增字段与 widening 才能真正落库。**反例**：直接用 `CREATE TABLE IF NOT EXISTS`，表已存在时是 no-op，新字段被静默忽略，运行时 INSERT 缺字段报错。回归测试覆盖 add column 保数据 + varchar widening 两类场景（`tests/modules/marketplace/test_install_service_lowcode.py::TestReinstallSchemaEvolution`）。详见 6.4。
 75. **Filter API 用 Django 后缀语法** — `?field__op=value`，op ∈ `{contains, in, gte, lte, has}`。理由：开源生态熟悉度最高（Django REST Framework / FastAPI / Hasura / PostgREST 全用此约定），外来贡献者零学习成本；URL 自文档化，README 写一行 curl 就能 demo；前端 NaiveUI `n-data-table` 筛选参数转换最自然。**反例**：自定义三元组 `?filter=name:contains:abc` 让每个新用户都要查文档；JSON 参数 `?filters={...}` 需 URL 编码，curl 手测难复现。**回归**：前端 LowcodeRenderer 按 manifest `ui_schema.filter_type` 翻译后缀（`range` → `__gte` + `__lte`，`contains` → `__contains`），服务端按 `information_schema.columns` 校验列存在 + 类型匹配，未知 op / 未知列 / 类型不匹配均返回 `400 APP_FILTER_*`。详见 6.2「Filter API URL 约定」。
 76. **Filter 校验只查列类型不查 manifest 白名单** — `ui_schema.filterable` 仅作前端 UI 提示（控制渲染哪些过滤控件），不作 API 安全边界；API 仅以列存在性 + 类型匹配 + 系统字段黑名单 + tenant_id 强制 scope 为边界。理由：强制白名单要求改 manifest → 发新版 → 升级，开源 demo 阶段太重；`filterable: true` 语义本就是「该字段适合过滤」（提示性而非强制性）。**反例**：严格白名单让 demo 应用每次改筛选都要重新打包审核，挫败早期使用者。**回归**：列类型校验已足够防 SQL 注入和类型混乱；前端按 `filterable` 渲染但用户绕过 UI 直接 curl 任意列过滤也能成功（只要列存在且类型匹配），与「列存在性 + 类型匹配」边界一致。详见 6.2「Filter API URL 约定」。
+77. **Contributes icon 用 Iconify 名（prefix:name）** — `manifest.menu.icon` 必须是 Iconify 命名格式（如 `mdi:account-group-outline`、`ic:round-people`、`carbon:user-profile`），与主系统路由 `meta.icon` 一致。理由：项目 `SvgIcon` 组件按 Iconify 解析；100k+ 图标库（icones.js.org）覆盖所有场景；与系统菜单图标同体系，渲染管线统一。**反例**：早期 spec 文档写 `@vicons/ionicons5` PascalCase 导出名（如 `PeopleOutline`）—— SvgIcon 不识别，渲染为空白；且 PascalCase 与字符串引用方式不匹配（Vue 组件需 import 后渲染，不能按名 lookup）。**回归**：buildContributeMenus 把 icon 透传给 `SvgIconVNode({icon})`，无效名静默 fallback 到 `VITE_MENU_ICON`（默认 `mdi:menu`）。spec §7.2 + 决策 #77 已与实现对齐。详见 7.2「Manifest 结构」。
+78. **App 页面渲染于 BaseLayout 内，不在新标签页打开** — `/app/:slug/:pageKey` 是 BaseLayout 的子路由，contributes 菜单点击 = 原地 `router.push`，sidebar/header/breadcrumb 全部保持。理由：Phase 1 低代码应用是声明式 JSON，受主系统信任（无远程代码执行），与系统内置模块同等对待；新标签页隔离留给 Phase 2 远程 Vue 组件（需 Wujie/iframe 沙箱）。**反例**：早期 installed 列表用 `window.open(..., '_blank')` —— 破坏 SPA 体验，用户每次"打开"应用都丢失上下文（菜单选中态、面包屑、其他 tab）。**回归**：app-router.ts 把 `/app` 包成 BaseLayout 的 parent，children 是 `:slug/:pageKey`；`marketplace-installed/index.vue::onOpen` 改 `router.push`；`marketplace-detail/index.vue::openApp` 已是 `router.push`。
 
 ## 17. 参考系统借鉴
 
