@@ -397,6 +397,22 @@ class TestDataApiFilters:
         names = {r["name"] for r in result.records}
         assert names == {"charlie"}
 
+    async def test_gte_with_string_value(self, db_session, setup_filter_table):
+        """Query params arrive as strings; numeric gte/lte must CAST to avoid
+        PG type error on `integer >= text`."""
+        svc = DataApiService()
+        await _seed_filter_data(svc, db_session, setup_filter_table)
+        result = await svc.list(
+            db_session,
+            table_name=setup_filter_table,
+            current=1,
+            size=100,
+            filters={"age__gte": "30"},  # string, not int
+            tenant_id=0,
+        )
+        ages = {r["age"] for r in result.records}
+        assert ages == {30, 50, 66}
+
     async def test_unknown_field_rejected(self, db_session, setup_filter_table):
         svc = DataApiService()
         with pytest.raises(InvalidParameterException):

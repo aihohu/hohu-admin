@@ -95,6 +95,15 @@ def _validate_field_op(field: str, op: str, column_types: dict[str, str]) -> Non
         )
 
 
+def _cast_for_range_op(data_type: str) -> str:
+    """返回 gte/lte 应用的 PG 类型 cast（用于 SQL `CAST(:v AS <type>)`）；空字符串表示不 cast。"""
+    if data_type in _NUMERIC_TYPES:
+        return "NUMERIC"
+    if data_type in _DATE_TYPES:
+        return "TIMESTAMPTZ"
+    return ""
+
+
 class DataApiService:
     """通用动态数据 CRUD（所有 app_data_* 表共用）"""
 
@@ -161,7 +170,9 @@ class DataApiService:
             for key, value in filters.items():
                 field, op = _parse_filter_key(key)
                 _validate_field_op(field, op, column_types)
-                self._apply_filter(field, op, value, where_clauses, params)
+                self._apply_filter(
+                    field, op, value, where_clauses, params, column_types
+                )
 
         where_sql = " AND ".join(where_clauses)
 
@@ -189,9 +200,16 @@ class DataApiService:
         value: Any,
         where_clauses: list[str],
         params: dict[str, Any],
+        column_types: dict[str, str] | None = None,
     ) -> None:
-        """把单个 filter 追加到 where + params（参数化，禁 raw f-string 值）"""
+        """把单个 filter 追加到 where + params（参数化，禁 raw f-string 值）
+
+        gte/lte 在数值/日期列上用 CAST 强转，因为 query param 总是 string，
+        PG 严格类型检查会拒绝 `integer >= text`。
+        """
         param_key = f"filter_{field}_{op}"
+        col_type = (column_types or {}).get(field, "")
+        cast_sql = _cast_for_range_op(col_type)
 
         if op == "eq":
             where_clauses.append(f"{field} = :{param_key}")
@@ -213,10 +231,16 @@ class DataApiService:
                 params[pk] = item
             where_clauses.append(f"{field} IN ({', '.join(placeholders)})")
         elif op == "gte":
-            where_clauses.append(f"{field} >= :{param_key}")
+            placeholder = (
+                f"CAST(:{param_key} AS {cast_sql})" if cast_sql else f":{param_key}"
+            )
+            where_clauses.append(f"{field} >= {placeholder}")
             params[param_key] = value
         elif op == "lte":
-            where_clauses.append(f"{field} <= :{param_key}")
+            placeholder = (
+                f"CAST(:{param_key} AS {cast_sql})" if cast_sql else f":{param_key}"
+            )
+            where_clauses.append(f"{field} <= {placeholder}")
             params[param_key] = value
         elif op == "has":
             # JSONB array contains: column ? value (PG jsonb ? operator)

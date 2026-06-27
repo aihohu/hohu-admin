@@ -66,6 +66,10 @@ ignore = [
 fixable = ["ALL"]
 unfixable = []
 
+[tool.ruff.lint.per-file-ignores]
+# Scripts are CLI tools that use print() for user-facing output (init_db.py precedent)
+"scripts/*" = ["T201"]
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
