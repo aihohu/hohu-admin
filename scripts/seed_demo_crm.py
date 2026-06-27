@@ -62,7 +62,7 @@ MANIFEST = {
     },
     "menu": {
         "title": "客户管理 Demo",
-        "icon": "PeopleOutline",
+        "icon": "mdi:account-group-outline",
         "order": 100,
         "page_key": "list",
     },
