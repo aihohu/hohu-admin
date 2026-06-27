@@ -36,6 +36,7 @@ async def installed_app_with_menu(db_session):
                 "icon": "PeopleOutline",
                 "parent": None,
                 "order": 100,
+                "page_key": "list",
             },
             "pages": [
                 {"key": "list", "page_type": "table", "title": "列表"},
@@ -96,6 +97,30 @@ class TestContributesAggregator:
         assert menu["title"] == "测试 CRM"
         assert menu["icon"] == "PeopleOutline"
         assert menu["order"] == 100
+        assert menu["page_key"] == "list"
+
+    async def test_aggregate_menu_page_key_defaults_to_none_when_missing(
+        self,
+        db_session,
+        installed_app_with_menu,
+    ):
+        """manifest 未声明 menu.page_key 时字段为 None（前端 fallback 到 first page）"""
+        # 移除 page_key
+        version = await db_session.get(
+            AppVersion, installed_app_with_menu.current_version_id
+        )
+        manifest = dict(version.manifest)
+        manifest["menu"] = {
+            "title": "无 page_key",
+            "icon": None,
+            "parent": None,
+            "order": 100,
+        }
+        version.manifest = manifest
+        await db_session.flush()
+        result = await contributes_service.aggregate_for_tenant(db_session, tenant_id=0)
+        menu = next(m for m in result["menus"] if m["app_slug"] == "contributes_test")
+        assert menu["page_key"] is None
 
     async def test_cache_write_and_read(
         self,

@@ -54,6 +54,7 @@ class ContributesService:
                         "icon": menu.get("icon"),
                         "parent": menu.get("parent"),
                         "order": menu.get("order", 100),
+                        "page_key": menu.get("page_key"),
                     }
                 )
 
