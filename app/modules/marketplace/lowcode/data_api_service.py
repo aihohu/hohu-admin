@@ -266,12 +266,100 @@ class DataApiService:
         count_sql = text(f"SELECT COUNT(*) FROM {table_name} WHERE {where_sql}")
         total = (await db.execute(count_sql, params)).scalar() or 0
 
-        order_clause = self._build_order_clause(order_by, column_types)
+        # Parse order tokens. Detects <fk>_label tokens (belongs_to JOIN sort,
+        # decision #79) and builds LEFT JOIN clauses; falls back to direct
+        # column sort for real fields. _build_order_clause was the previous
+        # entry point but didn't have relations context, so the logic moved
+        # inline here.
+        relations = (
+            _collect_belongs_to(data_schema, models)
+            if slug and (data_schema or models)
+            else []
+        )
+        fk_to_rel = {r["foreign_key"]: r for r in relations}
+
+        sort_clauses: list[str] = []
+        join_clauses: list[str] = []
+        label_suffix = "_label"
+        always_allowed_system = {
+            "id",
+            "created_at",
+            "updated_at",
+            "created_by",
+            "updated_by",
+        }
+
+        if order_by:
+            for raw in order_by.split(","):
+                token = raw.strip()
+                if not token:
+                    continue
+                direction = "DESC" if token.startswith("-") else "ASC"
+                field = token.lstrip("-").strip()
+
+                if field.endswith(label_suffix):
+                    fk_field = field[: -len(label_suffix)]
+                    if fk_field in fk_to_rel:
+                        rel = fk_to_rel[fk_field]
+                        target_table = make_table_name(slug, rel["model"])
+                        if not await table_exists(db, target_table):
+                            raise InvalidParameterException(
+                                f"关联表不存在：{target_table}",
+                                error_code=AppErrorCode.FILTER_UNKNOWN_FIELD,
+                            )
+                        label_field = rel.get(
+                            "label_field"
+                        ) or await _first_string_field(db, target_table)
+                        if not label_field:
+                            raise InvalidParameterException(
+                                f"关联表 {target_table} 无字符串列，无法按 label 排序",
+                                error_code=AppErrorCode.FILTER_OP_TYPE_MISMATCH,
+                            )
+                        alias = f"sort_{fk_field}"
+                        join_clauses.append(
+                            f"LEFT JOIN {target_table} {alias} "
+                            f"ON {table_name}.{fk_field} = {alias}.id"
+                        )
+                        sort_clauses.append(
+                            f"{alias}.{label_field} {direction} NULLS LAST"
+                        )
+                        continue
+
+                if field == "tenant_id":
+                    raise InvalidParameterException(
+                        "系统字段 tenant_id 不允许排序",
+                        error_code=AppErrorCode.FILTER_SYSTEM_FIELD_FORBIDDEN,
+                    )
+                if field not in column_types and field not in always_allowed_system:
+                    raise InvalidParameterException(
+                        f"未知排序字段：{field}",
+                        error_code=AppErrorCode.FILTER_UNKNOWN_FIELD,
+                    )
+                sort_clauses.append(f"{field} {direction}")
+
+        if not sort_clauses:
+            sort_clauses = ["created_at DESC"]
+        order_clause = ", ".join(sort_clauses)
+        joins_sql = " ".join(join_clauses)
+
+        # When JOINs are present, qualify WHERE column refs with the main
+        # table name to avoid "column reference is ambiguous" (both tables
+        # share system columns like tenant_id, created_at, ...).
+        if joins_sql:
+            qualified_where = where_sql.replace(
+                "tenant_id = :tenant_id", f"{table_name}.tenant_id = :tenant_id"
+            )
+        else:
+            qualified_where = where_sql
 
         offset = (current - 1) * size
+        # SELECT table_name.* (not *) when JOINs present — avoid ambiguous
+        # column errors (e.g., both tables have `id`).
+        select_clause = f"{table_name}.*" if joins_sql else "*"
         list_sql = text(
-            f"SELECT * FROM {table_name} WHERE {where_sql} "
-            f"ORDER BY {order_clause} LIMIT :limit OFFSET :offset"
+            f"SELECT {select_clause} FROM {table_name} {joins_sql} "
+            f"WHERE {qualified_where} ORDER BY {order_clause} "
+            f"LIMIT :limit OFFSET :offset"
         )
         params["limit"] = size
         params["offset"] = offset
@@ -280,7 +368,7 @@ class DataApiService:
 
         # Auto-expand belongs_to relations (decision #79): pull related label
         # from target table, write back as <fk_field>_label on each record.
-        if slug and (data_schema or models):
+        if relations:
             await self._expand_belongs_to(
                 db,
                 records=records,
@@ -415,50 +503,6 @@ class DataApiService:
             # JSONB array contains: column ? value (PG jsonb ? operator)
             where_clauses.append(f"cast({field} as jsonb) ? cast(:{param_key} as text)")
             params[param_key] = str(value)
-
-    @staticmethod
-    def _build_order_clause(order_by: str | None, column_types: dict[str, str]) -> str:
-        """`-created_at,name` → 'created_at DESC, name ASC'
-
-        允许排序的系统字段：id / created_at / updated_at / created_by / updated_by。
-        禁止 tenant_id（在租户内无意义，且易误导）。
-        """
-        always_allowed_system = {
-            "id",
-            "created_at",
-            "updated_at",
-            "created_by",
-            "updated_by",
-        }
-        if not order_by:
-            return "created_at DESC"
-
-        parts: list[str] = []
-        for raw in order_by.split(","):
-            token = raw.strip()
-            if not token:
-                continue
-            direction = "ASC"
-            field = token
-            if token.startswith("-"):
-                direction = "DESC"
-                field = token[1:].strip()
-            # tenant_id 单独禁（其他系统字段允许排序）
-            if field == "tenant_id":
-                raise InvalidParameterException(
-                    "系统字段 tenant_id 不允许排序",
-                    error_code=AppErrorCode.FILTER_SYSTEM_FIELD_FORBIDDEN,
-                )
-            if field not in column_types and field not in always_allowed_system:
-                raise InvalidParameterException(
-                    f"未知排序字段：{field}",
-                    error_code=AppErrorCode.FILTER_UNKNOWN_FIELD,
-                )
-            parts.append(f"{field} {direction}")
-
-        if not parts:
-            return "created_at DESC"
-        return ", ".join(parts)
 
     async def get(
         self,

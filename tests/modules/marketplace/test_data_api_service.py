@@ -771,3 +771,68 @@ class TestDataApiBelongsTo:
         )
         # No _label field should exist on records
         assert all("customer_id_label" not in r for r in result.records)
+
+    async def test_belongs_to_label_sort_asc(self, db_session, setup_belongs_to_tables):
+        """order_by=customer_id_label → JOIN target, sort by name ASC."""
+        svc = DataApiService()
+        env = setup_belongs_to_tables
+        result = await svc.list(
+            db_session,
+            table_name=env["order_table"],
+            current=1,
+            size=100,
+            filters=None,
+            tenant_id=0,
+            slug="rel_test",
+            models=env["models"],
+            order_by="customer_id_label",
+        )
+        labels = [
+            r["customer_id_label"] for r in result.records if r["customer_id_label"]
+        ]
+        # Verify labels come back in non-descending order (JOIN-based sort worked)
+        assert labels == sorted(labels), f"Expected sorted, got {labels}"
+
+    async def test_belongs_to_label_sort_desc(
+        self, db_session, setup_belongs_to_tables
+    ):
+        """order_by=-customer_id_label → JOIN target, sort by name DESC."""
+        svc = DataApiService()
+        env = setup_belongs_to_tables
+        result = await svc.list(
+            db_session,
+            table_name=env["order_table"],
+            current=1,
+            size=100,
+            filters=None,
+            tenant_id=0,
+            slug="rel_test",
+            models=env["models"],
+            order_by="-customer_id_label",
+        )
+        labels = [
+            r["customer_id_label"] for r in result.records if r["customer_id_label"]
+        ]
+        assert labels == sorted(labels, reverse=True), (
+            f"Expected reverse sorted, got {labels}"
+        )
+
+    async def test_belongs_to_label_sort_combined_with_real_field(
+        self, db_session, setup_belongs_to_tables
+    ):
+        """order_by=customer_id_label,amount → multi-column sort works."""
+        svc = DataApiService()
+        env = setup_belongs_to_tables
+        result = await svc.list(
+            db_session,
+            table_name=env["order_table"],
+            current=1,
+            size=100,
+            filters=None,
+            tenant_id=0,
+            slug="rel_test",
+            models=env["models"],
+            order_by="customer_id_label,amount",
+        )
+        # No assertion on exact order — verify no exception + records returned
+        assert len(result.records) > 0
