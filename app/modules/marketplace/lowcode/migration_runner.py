@@ -36,8 +36,14 @@ class MigrationRunner:
 
         user_columns = []
         for field_name, field_def in properties.items():
-            col_def = json_schema_to_pg_type(field_def)
-            type_sql = pg_type_to_sql(col_def)
+            # x-ref fields are FKs to another model's `id` (BIGSERIAL) → must
+            # be BIGINT, even if manifest declares "type": "integer" (which
+            # would map to 32-bit INTEGER and truncate Snowflake IDs).
+            if isinstance(field_def, dict) and field_def.get("x-ref"):
+                type_sql = "BIGINT"
+            else:
+                col_def = json_schema_to_pg_type(field_def)
+                type_sql = pg_type_to_sql(col_def)
             nullable_sql = "NOT NULL" if field_name in required else "NULL"
             default_sql = _format_default(field_def.get("default"))
             column_def = f"{field_name} {type_sql} {nullable_sql}".strip()
