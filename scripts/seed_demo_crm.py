@@ -12,7 +12,7 @@ Creates:
   - 2 physical tables: app_data_demo_crm_customer + app_data_demo_crm_order
   - 5 sample customers + 5 sample orders (referencing customers)
   - Redis contributes cache refresh
-  - 1 contributes menu (customer list); order list reachable via /app/demo-crm/order_list
+  - 2 contributes menus (multi-menu support): 客户管理 Demo + 订单管理 Demo
 
 Idempotent: if demo-crm already exists, drops the tables and recreates
 the version + sample data.
@@ -93,16 +93,23 @@ MANIFEST = {
             },
         },
     ],
-    # Single menu (backend currently emits 1 menu/app — multi-menu is a
-    # follow-up). Point it at the customer list as the primary entry; the
-    # order list (which exercises belongs_to) is reachable via URL:
-    #   /app/demo-crm/order_list
-    "menu": {
-        "title": "客户管理 Demo",
-        "icon": "mdi:account-group-outline",
-        "order": 100,
-        "page_key": "customer_list",
-    },
+    # Multi-menu (plural `menus`): each app can expose N sidebar entries.
+    # Backend contributes_service supports both `menu` (singular, legacy)
+    # and `menus` (plural); plural takes precedence when both declared.
+    "menus": [
+        {
+            "title": "客户管理 Demo",
+            "icon": "mdi:account-group-outline",
+            "order": 100,
+            "page_key": "customer_list",
+        },
+        {
+            "title": "订单管理 Demo",
+            "icon": "mdi:cart-outline",
+            "order": 110,
+            "page_key": "order_list",
+        },
+    ],
     "pages": [
         {
             "key": "customer_list",
@@ -335,10 +342,8 @@ async def main() -> None:
     print()
     print("What to test:")
     print("  1. Open http://127.0.0.1:9527 and login")
-    print("  2. Sidebar shows '客户管理 Demo' menu")
-    print(
-        f"  3. Visit /app/{SLUG}/order_list (no sidebar entry yet — multi-menu is follow-up)"
-    )
+    print("  2. Sidebar shows TWO menus: '客户管理 Demo' + '订单管理 Demo'")
+    print(f"  3. Click '订单管理 Demo' → /app/{SLUG}/order_list")
     print("     → '客户' column shows customer NAME (not raw id) — belongs_to working")
     print("     → 腾讯科技 appears twice (2 orders share customer, batch dedup)")
     print("  4. Click '新增' on orders → '客户' field is a dropdown")
