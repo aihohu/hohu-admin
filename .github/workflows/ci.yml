@@ -36,7 +36,33 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        # pyproject.toml declares requires-python = ">=3.12"
+        python-version: ["3.12", "3.13", "3.14"]
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: pancake
+          POSTGRES_PASSWORD: mypassword
+          POSTGRES_DB: hohu_admin
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pancake -d hohu_admin"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ENV: test
     steps:
       - uses: actions/checkout@v6
 
@@ -52,7 +78,14 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras --dev
 
+      - name: Load test environment
+        # alembic env.py + app config read via load_dotenv(); .env.test has the
+        # service coordinates (pancake/mypassword@localhost:5432/hohu_admin) and
+        # no real secrets, so we copy it to .env for the CI run.
+        run: cp .env.test .env
+
+      - name: Run migrations
+        run: uv run alembic upgrade head
+
       - name: Run Tests
         run: uv run pytest
-        env:
-          ENV: test

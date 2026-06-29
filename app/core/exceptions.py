@@ -1,5 +1,6 @@
 """业务异常定义和全局异常处理器"""
 
+import logging
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
@@ -8,6 +9,8 @@ from fastapi.responses import JSONResponse
 
 from app.core.base_response import ResponseModel
 from app.utils.validators import PWD_ERROR_CODE, PWD_ERROR_MSG
+
+logger = logging.getLogger(__name__)
 
 
 # ============ 业务异常类定义 ============
@@ -75,8 +78,8 @@ class BusinessRuleException(BusinessException):
 class InvalidParameterException(BusinessRuleException):
     """无效参数异常"""
 
-    def __init__(self, message: str = "参数错误"):
-        super().__init__(message=message)
+    def __init__(self, message: str = "参数错误", error_code: str = ""):
+        super().__init__(message=message, error_code=error_code)
 
 
 # ============ 全局异常处理器 ============
@@ -112,12 +115,13 @@ def setup_exception_handlers(app: FastAPI):
 
     # 捕获所有未知的系统异常
     @app.exception_handler(Exception)
-    async def all_exception_handler(_request: Request, _exc: Exception):
+    async def all_exception_handler(request: Request, _exc: Exception):
         """处理未捕获的系统异常"""
-        # 生产环境中应该记录日志
-        # import logging
-        # logger = logging.getLogger(__name__)
-        # logger.exception("Unhandled exception occurred")
+        logger.exception(
+            "Unhandled exception on %s %s",
+            request.method,
+            request.url.path,
+        )
         return JSONResponse(
             status_code=500,
             content=ResponseModel.error(msg="服务器内部错误").model_dump(),
