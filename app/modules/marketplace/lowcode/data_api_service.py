@@ -14,7 +14,9 @@ from app.core.exceptions import InvalidParameterException, NotFoundException
 from app.modules.marketplace.exceptions import AppErrorCode
 from app.modules.marketplace.lowcode.schema_introspection import (
     introspect_table,
+    table_exists,
 )
+from app.modules.marketplace.lowcode.type_mapping import make_table_name
 
 # 系统字段（不允许用户修改或过滤）
 SYSTEM_FIELDS = {
@@ -104,6 +106,88 @@ def _cast_for_range_op(data_type: str) -> str:
     return ""
 
 
+def _collect_belongs_to(data_schema: dict | None, models: list | None) -> list[dict]:
+    """Parse `belongs_to` relations from manifest (spec §6.5 / decision #79).
+
+    Priority: explicit model.relations[] takes precedence over field-level x-ref.
+    Returns list of {model, foreign_key, label_field?} dicts.
+    """
+    out: list[dict] = []
+    seen_fk: set[str] = set()
+
+    # 1. Explicit relations[] (top-level data_schema OR each model in models[])
+    schemas_to_check: list[tuple[dict, list]] = []
+    if models:
+        for m in models:
+            if isinstance(m, dict):
+                schemas_to_check.append(
+                    (m.get("data_schema") or {}, m.get("relations") or [])
+                )
+    elif data_schema:
+        # Single-table mode: relations live at top-level (rare but spec allows)
+        schemas_to_check.append((data_schema, data_schema.get("relations") or []))
+
+    for _, rels in schemas_to_check:
+        for rel in rels:
+            if not isinstance(rel, dict) or rel.get("type") != "belongs_to":
+                continue
+            fk = rel.get("foreign_key")
+            target = rel.get("model")
+            if not fk or not target:
+                continue
+            if fk in seen_fk:
+                continue
+            seen_fk.add(fk)
+            out.append(
+                {
+                    "model": target,
+                    "foreign_key": fk,
+                    "label_field": rel.get("label_field"),
+                }
+            )
+
+    # 2. Field-level x-ref (fallback when no explicit relations declaration)
+    field_schemas: list[dict] = []
+    if models:
+        for m in models:
+            if isinstance(m, dict):
+                field_schemas.append(m.get("data_schema") or {})
+    elif data_schema:
+        field_schemas.append(data_schema)
+
+    for schema in field_schemas:
+        for fname, fdef in (schema.get("properties") or {}).items():
+            if not isinstance(fdef, dict):
+                continue
+            target = fdef.get("x-ref")
+            if not target or fname in seen_fk:
+                continue
+            seen_fk.add(fname)
+            out.append(
+                {
+                    "model": target,
+                    "foreign_key": fname,
+                    "label_field": fdef.get("x-ref-label"),
+                }
+            )
+
+    return out
+
+
+async def _first_string_field(db: AsyncSession, table_name: str) -> str | None:
+    """Return first text-typed column name on table, or None if no string cols.
+
+    Used as fallback when relation.label_field is missing (spec §6.5 line 613).
+    """
+    info = await introspect_table(db, table_name)
+    if info is None:
+        return None
+    for col in info.columns:
+        if col.data_type in _TEXT_TYPES:
+            return col.column_name
+    return None
+
+
 class DataApiService:
     """通用动态数据 CRUD（所有 app_data_* 表共用）"""
 
@@ -156,6 +240,9 @@ class DataApiService:
         filters: dict[str, Any] | None,
         tenant_id: int,
         order_by: str | None = None,
+        slug: str | None = None,
+        data_schema: dict | None = None,
+        models: list | None = None,
     ) -> PageResult:
         # 拿列类型 map（决策 #76：列存在性 + 类型匹配校验）
         table_info = await introspect_table(db, table_name)
@@ -191,7 +278,89 @@ class DataApiService:
         result = await db.execute(list_sql, params)
         records = [dict(row._mapping) for row in result.fetchall()]
 
+        # Auto-expand belongs_to relations (decision #79): pull related label
+        # from target table, write back as <fk_field>_label on each record.
+        if slug and (data_schema or models):
+            await self._expand_belongs_to(
+                db,
+                records=records,
+                slug=slug,
+                data_schema=data_schema,
+                models=models,
+            )
+
         return PageResult(records=records, total=total, current=current, size=size)
+
+    @staticmethod
+    async def _expand_belongs_to(
+        db: AsyncSession,
+        *,
+        records: list[dict],
+        slug: str,
+        data_schema: dict | None,
+        models: list | None,
+    ) -> None:
+        """Merge related label field onto each record (mutates in place).
+
+        Spec §6.5 + decision #79. Sources of relation declarations, in priority:
+        1. model.relations[] (explicit, takes precedence)
+        2. field-level `x-ref` + optional `x-ref-label`
+
+        Emits `record[<fk_field>_label]`. Skips silently if target table missing
+        or no FK values present.
+        """
+        if not records:
+            return
+
+        relations = _collect_belongs_to(data_schema, models)
+        if not relations:
+            return
+
+        for rel in relations:
+            fk_values = {
+                r[rel["foreign_key"]]
+                for r in records
+                if r.get(rel["foreign_key"]) is not None
+            }
+            if not fk_values:
+                continue
+
+            target_table = make_table_name(slug, rel["model"])
+            if not await table_exists(db, target_table):
+                continue
+
+            # Resolve label_field: explicit > first string column on target > '#<id>'
+            label_field = rel.get("label_field")
+            if not label_field:
+                label_field = await _first_string_field(db, target_table)
+
+            # Batch SELECT id, label_field FROM target WHERE id IN (...)
+            placeholders: list[str] = []
+            params: dict[str, Any] = {}
+            for i, v in enumerate(fk_values):
+                pk = f"fk_{i}"
+                placeholders.append(f":{pk}")
+                params[pk] = v
+            select_sql = text(
+                f"SELECT id, {label_field} FROM {target_table} "
+                f"WHERE id IN ({', '.join(placeholders)})"
+            )
+            rows = (await db.execute(select_sql, params)).fetchall()
+            label_map = {row.id: getattr(row, label_field) for row in rows}
+
+            for r in records:
+                fk = r.get(rel["foreign_key"])
+                if fk is None:
+                    r[f"{rel['foreign_key']}_label"] = ""
+                    continue
+                if fk in label_map:
+                    r[f"{rel['foreign_key']}_label"] = label_map[fk]
+                elif label_field:
+                    # FK exists but target row missing (e.g. deleted parent)
+                    r[f"{rel['foreign_key']}_label"] = ""
+                else:
+                    # label_field resolved to None (target has no string columns)
+                    r[f"{rel['foreign_key']}_label"] = f"#{fk}"
 
     @staticmethod
     def _apply_filter(

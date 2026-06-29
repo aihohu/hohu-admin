@@ -30,8 +30,12 @@ _RESERVED_QUERY_KEYS = {"current", "size", "order_by"}
 
 async def _resolve_table_and_schema(
     db: AsyncSession, *, slug: str, model: str
-) -> tuple[str, dict | None]:
-    """解析表名 + 该 model 的 data_schema"""
+) -> tuple[str, dict | None, dict]:
+    """解析表名 + 该 model 的 data_schema + 全量 manifest
+
+    Manifest returned so callers (e.g. list endpoint) can read sibling models
+    + relations for belongs_to expansion (decision #79).
+    """
     app_obj = await app_service.get_by_slug(db, slug=slug)
     if app_obj.current_version_id is None:
         raise AppNotFoundException(slug=f"{slug} (no published version)")
@@ -45,10 +49,10 @@ async def _resolve_table_and_schema(
         models_arr = manifest.get("models") or []
         for m in models_arr:
             if m.get("key") == model:
-                return table_name, m.get("data_schema")
-        return table_name, None
+                return table_name, m.get("data_schema"), manifest
+        return table_name, None, manifest
     table_name = make_table_name(slug)
-    return table_name, manifest.get("data_schema")
+    return table_name, manifest.get("data_schema"), manifest
 
 
 def _parse_filters(query_params) -> tuple[dict | None, str | None]:
@@ -75,7 +79,9 @@ async def create_record(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    table_name, schema = await _resolve_table_and_schema(db, slug=slug, model=model)
+    table_name, schema, _manifest = await _resolve_table_and_schema(
+        db, slug=slug, model=model
+    )
     if not await table_exists(db, table_name):
         raise AppNotFoundException(slug=f"table {table_name}")
     record = await _data_api.create(
@@ -104,7 +110,9 @@ async def list_records(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),  # noqa: ARG001
 ):
-    table_name, _ = await _resolve_table_and_schema(db, slug=slug, model=model)
+    table_name, data_schema, manifest = await _resolve_table_and_schema(
+        db, slug=slug, model=model
+    )
     if not await table_exists(db, table_name):
         raise AppNotFoundException(slug=f"table {table_name}")
     filters, order_by = _parse_filters(request.query_params)
@@ -116,6 +124,9 @@ async def list_records(
         filters=filters,
         tenant_id=0,
         order_by=order_by,
+        slug=slug,
+        data_schema=data_schema,
+        models=manifest.get("models"),
     )
     return ResponseModel.success(data=result)
 
@@ -132,7 +143,9 @@ async def get_record(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),  # noqa: ARG001
 ):
-    table_name, _ = await _resolve_table_and_schema(db, slug=slug, model=model)
+    table_name, _schema, _manifest = await _resolve_table_and_schema(
+        db, slug=slug, model=model
+    )
     record = await _data_api.get(
         db, table_name=table_name, record_id=record_id, tenant_id=0
     )
@@ -152,7 +165,9 @@ async def update_record(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    table_name, _ = await _resolve_table_and_schema(db, slug=slug, model=model)
+    table_name, _schema, _manifest = await _resolve_table_and_schema(
+        db, slug=slug, model=model
+    )
     record = await _data_api.update(
         db,
         table_name=table_name,
@@ -177,7 +192,9 @@ async def delete_record(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),  # noqa: ARG001
 ):
-    table_name, _ = await _resolve_table_and_schema(db, slug=slug, model=model)
+    table_name, _schema, _manifest = await _resolve_table_and_schema(
+        db, slug=slug, model=model
+    )
     await _data_api.delete(db, table_name=table_name, record_id=record_id, tenant_id=0)
     await db.commit()
     return ResponseModel.success()

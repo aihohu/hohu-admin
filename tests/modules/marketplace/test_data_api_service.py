@@ -4,6 +4,7 @@ from sqlalchemy import text
 from app.core.exceptions import InvalidParameterException, NotFoundException
 from app.modules.marketplace.lowcode.data_api_service import DataApiService
 from app.modules.marketplace.lowcode.migration_runner import MigrationRunner
+from app.modules.marketplace.lowcode.type_mapping import make_table_name
 
 
 @pytest.fixture
@@ -526,3 +527,247 @@ class TestDataApiOrderBy:
                 tenant_id=0,
                 order_by="unknown_field",
             )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# belongs_to relation expansion (spec §6.5 / decision #79)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+async def setup_belongs_to_tables(db_session):
+    """两张表：customer + order。order.customer_id 通过 x-ref 指向 customer。"""
+    runner = MigrationRunner()
+    customer_table = make_table_name("rel_test", "customer")
+    order_table = make_table_name("rel_test", "order")
+    await db_session.execute(text(f"DROP TABLE IF EXISTS {customer_table}"))
+    await db_session.execute(text(f"DROP TABLE IF EXISTS {order_table}"))
+
+    await runner.create_table(
+        db_session,
+        table_name=customer_table,
+        data_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "maxLength": 100},
+                "level": {"type": "string"},
+            },
+            "required": ["name"],
+        },
+    )
+    await runner.create_table(
+        db_session,
+        table_name=order_table,
+        data_schema={
+            "type": "object",
+            "properties": {
+                "customer_id": {
+                    "type": "integer",
+                    "title": "客户",
+                    "x-ref": "customer",
+                    "x-ref-label": "name",
+                },
+                "amount": {"type": "number"},
+            },
+            "required": ["amount"],
+        },
+    )
+    await db_session.flush()
+
+    svc = DataApiService()
+    cust1 = await svc.create(
+        db_session,
+        table_name=customer_table,
+        data={"name": "腾讯", "level": "A"},
+        tenant_id=0,
+        user_id=1,
+    )
+    cust2 = await svc.create(
+        db_session,
+        table_name=customer_table,
+        data={"name": "阿里", "level": "A"},
+        tenant_id=0,
+        user_id=1,
+    )
+    await db_session.flush()
+
+    # 3 orders: 2 share customer 1, 1 references customer 2, 1 references a missing id
+    for cid in [cust1["id"], cust1["id"], cust2["id"], 99999999]:
+        await svc.create(
+            db_session,
+            table_name=order_table,
+            data={"customer_id": cid, "amount": 100},
+            tenant_id=0,
+            user_id=1,
+        )
+    await db_session.flush()
+
+    models = [
+        {
+            "key": "customer",
+            "data_schema": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+            },
+        },
+        {
+            "key": "order",
+            "data_schema": {
+                "type": "object",
+                "properties": {
+                    "customer_id": {
+                        "type": "integer",
+                        "x-ref": "customer",
+                        "x-ref-label": "name",
+                    },
+                    "amount": {"type": "number"},
+                },
+            },
+        },
+    ]
+    try:
+        yield {
+            "customer_table": customer_table,
+            "order_table": order_table,
+            "models": models,
+        }
+    finally:
+        await db_session.execute(text(f"DROP TABLE IF EXISTS {order_table}"))
+        await db_session.execute(text(f"DROP TABLE IF EXISTS {customer_table}"))
+
+
+class TestDataApiBelongsTo:
+    """spec §6.5 + decision #79：list 时 auto-expand belongs_to 关联 label"""
+
+    async def test_belongs_to_label_attached(self, db_session, setup_belongs_to_tables):
+        svc = DataApiService()
+        env = setup_belongs_to_tables
+        result = await svc.list(
+            db_session,
+            table_name=env["order_table"],
+            current=1,
+            size=100,
+            filters=None,
+            tenant_id=0,
+            slug="rel_test",
+            models=env["models"],
+        )
+        labels = [r.get("customer_id_label") for r in result.records]
+        # 4 records: 腾讯, 腾讯, 阿里, (missing FK → empty)
+        assert labels.count("腾讯") == 2
+        assert labels.count("阿里") == 1
+        assert labels.count("") == 1
+
+    async def test_belongs_to_batch_dedup(
+        self, db_session, setup_belongs_to_tables, monkeypatch
+    ):
+        """5 个 order 共享 2 个客户 → target 表只查 1 次（N+1 防御）"""
+        svc = DataApiService()
+        env = setup_belongs_to_tables
+
+        call_count = {"n": 0}
+        original_execute = db_session.execute
+
+        async def counting_execute(*args, **kwargs):
+            sql = str(args[0]) if args else ""
+            if (
+                "customer_id IN" in sql
+                or ("WHERE id IN" in sql and env["customer_table"] in sql)
+                or (env["customer_table"] in sql and "SELECT id" in sql)
+            ):
+                call_count["n"] += 1
+            return await original_execute(*args, **kwargs)
+
+        monkeypatch.setattr(db_session, "execute", counting_execute)
+        await svc.list(
+            db_session,
+            table_name=env["order_table"],
+            current=1,
+            size=100,
+            filters=None,
+            tenant_id=0,
+            slug="rel_test",
+            models=env["models"],
+        )
+        # 1 relation → at most 1 batch SELECT against target table
+        assert call_count["n"] == 1
+
+    async def test_belongs_to_missing_fk_yields_empty_label(
+        self, db_session, setup_belongs_to_tables
+    ):
+        svc = DataApiService()
+        env = setup_belongs_to_tables
+        result = await svc.list(
+            db_session,
+            table_name=env["order_table"],
+            current=1,
+            size=100,
+            filters=None,
+            tenant_id=0,
+            slug="rel_test",
+            models=env["models"],
+        )
+        # 1 record references customer_id=99999999 (no match) → label is ""
+        missing = [r for r in result.records if r["customer_id"] == 99999999]
+        assert len(missing) == 1
+        assert missing[0]["customer_id_label"] == ""
+
+    async def test_belongs_to_relations_priority_over_xref(
+        self, db_session, setup_belongs_to_tables
+    ):
+        """relations[].label_field 优先于 field-level x-ref-label (spec §6.5 line 614)"""
+        svc = DataApiService()
+        env = setup_belongs_to_tables
+        # Override models: add explicit relations pointing at `level` instead of `name`
+        models_override = [
+            env["models"][0],  # customer unchanged
+            {
+                "key": "order",
+                "data_schema": env["models"][1][
+                    "data_schema"
+                ],  # still has x-ref-label=name
+                "relations": [
+                    {
+                        "type": "belongs_to",
+                        "model": "customer",
+                        "foreign_key": "customer_id",
+                        "label_field": "level",  # explicit, overrides x-ref-label
+                    }
+                ],
+            },
+        ]
+        result = await svc.list(
+            db_session,
+            table_name=env["order_table"],
+            current=1,
+            size=100,
+            filters=None,
+            tenant_id=0,
+            slug="rel_test",
+            models=models_override,
+        )
+        # All customers are level A, so label should be "A" (not "腾讯"/"阿里")
+        labels = [
+            r.get("customer_id_label")
+            for r in result.records
+            if r["customer_id"] != 99999999
+        ]
+        assert all(label == "A" for label in labels)
+
+    async def test_belongs_to_skipped_when_no_slug(
+        self, db_session, setup_belongs_to_tables
+    ):
+        """Backward compat: no slug passed → no expansion (existing callers safe)."""
+        svc = DataApiService()
+        env = setup_belongs_to_tables
+        result = await svc.list(
+            db_session,
+            table_name=env["order_table"],
+            current=1,
+            size=100,
+            filters=None,
+            tenant_id=0,
+            # slug, models intentionally omitted
+        )
+        # No _label field should exist on records
+        assert all("customer_id_label" not in r for r in result.records)
