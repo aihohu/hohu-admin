@@ -77,6 +77,12 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras --dev
 
+      - name: Load test environment
+        # alembic env.py + app config read via load_dotenv(); .env.test has the
+        # service coordinates (pancake/mypassword@localhost:5432/hohu_admin) and
+        # no real secrets, so we copy it to .env for the CI run.
+        run: cp .env.test .env
+
       - name: Run migrations
         run: uv run alembic upgrade head
 
