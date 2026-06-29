@@ -188,6 +188,36 @@ async def _first_string_field(db: AsyncSession, table_name: str) -> str | None:
     return None
 
 
+async def _column_types(db: AsyncSession, table_name: str) -> dict[str, str]:
+    """Return {column_name: pg_data_type} for a table; empty if table missing."""
+    info = await introspect_table(db, table_name)
+    if info is None:
+        return {}
+    return {c.column_name: c.data_type for c in info.columns}
+
+
+def _coerce_numeric_strings(data: dict, column_types: dict[str, str]) -> dict:
+    """Convert digit-string values to int for integer/bigint columns.
+
+    Frontend sends Snowflake IDs as strings (JS BigInt precision); asyncpg
+    rejects str→BIGINT auto-bind. Coerce here so FK fields round-trip cleanly.
+    Leaves string columns, JSONB, dates, etc. untouched.
+    """
+    out = dict(data)
+    for key, value in out.items():
+        if not isinstance(value, str):
+            continue
+        col_type = column_types.get(key)
+        if col_type not in _NUMERIC_TYPES:
+            continue
+        # Integer columns: only coerce pure-digit strings (with optional leading -)
+        stripped = value.strip()
+        if stripped and (stripped.lstrip("-").isdigit()):
+            out[key] = int(stripped)
+        # Else: leave as-is (PG will raise if it really can't bind)
+    return out
+
+
 class DataApiService:
     """通用动态数据 CRUD（所有 app_data_* 表共用）"""
 
@@ -217,8 +247,12 @@ class DataApiService:
             "created_at": now,
             "updated_at": now,
         }
-        # JSONB 列需 json.dumps（asyncpg 不直接绑 list/dict）
-        bound_data = {k: _serialize_for_bind(v) for k, v in full_data.items()}
+        # Coerce string IDs → int for numeric columns (Snowflake IDs arrive as
+        # strings from frontend to dodge JS BigInt precision loss; asyncpg
+        # rejects str→BIGINT auto-bind). Then JSONB-serialize dict/list.
+        column_types = await _column_types(db, table_name)
+        coerced = _coerce_numeric_strings(full_data, column_types)
+        bound_data = {k: _serialize_for_bind(v) for k, v in coerced.items()}
 
         columns = list(bound_data.keys())
         placeholders = [f":{c}" for c in columns]
@@ -539,8 +573,11 @@ class DataApiService:
         if not clean_data:
             raise InvalidParameterException("没有可更新的字段")
 
+        # Coerce numeric strings (e.g., Snowflake FK IDs from frontend) → int
+        column_types = await _column_types(db, table_name)
+        coerced = _coerce_numeric_strings(clean_data, column_types)
         # JSONB 列需 json.dumps
-        bound_data = {k: _serialize_for_bind(v) for k, v in clean_data.items()}
+        bound_data = {k: _serialize_for_bind(v) for k, v in coerced.items()}
 
         set_parts = [f"{k} = :{k}" for k in bound_data.keys()]
         set_sql = ", ".join(set_parts)
