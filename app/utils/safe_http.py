@@ -1,0 +1,119 @@
+"""低代码应用外部 HTTP 调用的 SSRF 防护层（spec §SSRF Phase 1）。
+
+所有低代码 api_call / x-external-ref 拉外部数据都必须走 SafeHttpClient，
+不允许应用代码直接 httpx.get。
+
+Phase 1 防护：协议白名单 + URL pattern 白名单 + IP 黑名单 + IPv4-mapped IPv6
+双栈校验 + follow_redirects=False + 1MB 响应上限 + 5s/10s 超时。
+Phase 2 升级点：DNS rebinding 防护（解析→校验→直连 IP + Host header）。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+from ipaddress import IPv6Address, ip_address, ip_network
+from urllib.parse import urlparse
+
+import httpx
+
+from app.core.exceptions import SSRFBlockedException
+
+MAX_RESPONSE_BYTES = 1024 * 1024  # 1MB
+DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
+ALLOWED_SCHEMES = frozenset({"http", "https"})
+
+# spec §6.5 line 968：含 0.0.0.0/8（伪代码遗漏，按文字描述补）
+BLOCKED_NETWORKS: tuple[ip_network, ...] = (
+    ip_network("0.0.0.0/8"),
+    ip_network("10.0.0.0/8"),
+    ip_network("127.0.0.0/8"),
+    ip_network("169.254.0.0/16"),  # 含云元数据 169.254.169.254
+    ip_network("172.16.0.0/12"),
+    ip_network("192.168.0.0/16"),
+    ip_network("100.64.0.0/10"),  # CGN
+    ip_network("::1/128"),
+    ip_network("fc00::/7"),  # ULA
+    ip_network("fe80::/10"),  # 链路本地
+)
+
+
+def _validate_ip(ip_str: str) -> None:
+    """单 IP 校验：IPv4-mapped IPv6 双栈检查后查黑名单。"""
+    addr = ip_address(ip_str)
+    # IPv4-mapped IPv6（::ffff:x.x.x.x）：取出内嵌 IPv4 再查（spec §SSRF Phase 1 第 3 条）
+    if isinstance(addr, IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    for net in BLOCKED_NETWORKS:
+        if addr in net:
+            raise SSRFBlockedException(f"目标 IP 在黑名单段：{addr} 落入 {net}")
+
+
+async def _async_getaddrinfo(hostname: str) -> list[tuple]:
+    """asyncio.getaddrinfo 薄包装，便于单测 monkeypatch。"""
+    return await asyncio.getaddrinfo(hostname, None)
+
+
+class SafeHttpClient:
+    """受限 HTTP 客户端，所有低代码外部请求的唯一出口。"""
+
+    def __init__(self, *, timeout: httpx.Timeout = DEFAULT_TIMEOUT) -> None:
+        self._timeout = timeout
+
+    async def get(
+        self,
+        url: str,
+        params: dict[str, str] | None = None,
+        *,
+        allowed_pattern: str | None = None,
+    ) -> httpx.Response:
+        """安全 GET。返回 httpx.Response（调用方自己读 .json() / .text()）。
+
+        Args:
+            url: 完整 URL，必须 http/https
+            params: query 参数（httpx 自动 URL-encode，禁止调用方手工拼）
+            allowed_pattern: URL pattern regex，必须匹配 url 才放行。
+                调用方应从 manifest permissions[type=external_api].detail.pattern 取。
+
+        Raises:
+            SSRFBlockedException: 协议 / pattern / IP 任一校验失败，或响应超 1MB
+        """
+        # 1. 协议白名单
+        parsed = urlparse(url)
+        if parsed.scheme not in ALLOWED_SCHEMES:
+            raise SSRFBlockedException(f"协议不被允许：{parsed.scheme}")
+        if not parsed.hostname:
+            raise SSRFBlockedException("URL 缺少 hostname")
+
+        # 2. URL pattern 白名单
+        if allowed_pattern is not None and not re.match(allowed_pattern, url):
+            raise SSRFBlockedException(f"URL 不匹配声明的 pattern：{allowed_pattern}")
+
+        # 3. DNS 解析 + IP 黑名单（单次解析，Phase 2 加 rebinding 防护）
+        infos = await _async_getaddrinfo(parsed.hostname)
+        for info in infos:
+            _validate_ip(info[4][0])
+
+        # 4. 实际请求：follow_redirects=False + stream 控大小
+        async with httpx.AsyncClient(
+            timeout=self._timeout,
+            follow_redirects=False,
+        ) as client:
+            async with client.stream("GET", url, params=params) as resp:
+                # 边读边累计，超 1MB 立刻抛（避免大响应先吃满内存）
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > MAX_RESPONSE_BYTES:
+                        raise SSRFBlockedException(
+                            f"响应体超过 {MAX_RESPONSE_BYTES} 字节上限"
+                        )
+                    chunks.append(chunk)
+                # 把读出来的 body 注回 response，调用方 .text() / .json() 可用
+                resp._content = b"".join(chunks)
+                return resp
+
+
+# 模块级单例，与项目其他 service 风格一致
+safe_http_client = SafeHttpClient()

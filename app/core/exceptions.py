@@ -82,6 +82,18 @@ class InvalidParameterException(BusinessRuleException):
         super().__init__(message=message, error_code=error_code)
 
 
+class SSRFBlockedException(BusinessRuleException):
+    """SSRF 防护拦截异常（spec §SSRF Phase 1）。
+
+    error_code: SSRF_BLOCKED — 前端可映射为「请求被安全策略拦截」
+    """
+
+    def __init__(
+        self, message: str = "请求被 SSRF 防护拦截", error_code: str = "SSRF_BLOCKED"
+    ):
+        super().__init__(message=message, error_code=error_code)
+
+
 # ============ 全局异常处理器 ============
 
 
