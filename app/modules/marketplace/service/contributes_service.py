@@ -44,8 +44,18 @@ class ContributesService:
         pages: list[dict] = []
         for app, version in result:
             manifest = version.manifest or {}
-            menu = manifest.get("menu")
-            if menu:
+
+            # Support both manifest.menu (singular, backward compat) and
+            # manifest.menus (plural array). Plural takes precedence when both
+            # declared (avoids ambiguity, matches relations[] convention).
+            raw_menus: list[dict] = []
+            menus_arr = manifest.get("menus")
+            if isinstance(menus_arr, list):
+                raw_menus = [m for m in menus_arr if isinstance(m, dict)]
+            elif manifest.get("menu"):
+                raw_menus = [manifest.get("menu")]
+
+            for menu in raw_menus:
                 menus.append(
                     {
                         "app_slug": app.slug,

@@ -122,6 +122,63 @@ class TestContributesAggregator:
         menu = next(m for m in result["menus"] if m["app_slug"] == "contributes_test")
         assert menu["page_key"] is None
 
+    async def test_aggregate_menus_plural_array(
+        self,
+        db_session,
+        installed_app_with_menu,
+    ):
+        """manifest.menus (plural) emits N menus per app (multi-menu support)."""
+        version = await db_session.get(
+            AppVersion, installed_app_with_menu.current_version_id
+        )
+        manifest = dict(version.manifest)
+        # Replace singular `menu` with plural `menus` containing 2 entries
+        manifest.pop("menu", None)
+        manifest["menus"] = [
+            {
+                "title": "客户管理",
+                "icon": "mdi:account-group-outline",
+                "order": 100,
+                "page_key": "list",
+            },
+            {
+                "title": "订单管理",
+                "icon": "mdi:cart-outline",
+                "order": 110,
+                "page_key": "order_list",
+            },
+        ]
+        version.manifest = manifest
+        await db_session.flush()
+
+        result = await contributes_service.aggregate_for_tenant(db_session, tenant_id=0)
+        app_menus = [m for m in result["menus"] if m["app_slug"] == "contributes_test"]
+        assert len(app_menus) == 2
+        titles = {m["title"] for m in app_menus}
+        assert titles == {"客户管理", "订单管理"}
+        page_keys = {m["page_key"] for m in app_menus}
+        assert page_keys == {"list", "order_list"}
+
+    async def test_aggregate_menus_plural_takes_precedence_over_singular(
+        self,
+        db_session,
+        installed_app_with_menu,
+    ):
+        """When both manifest.menu and manifest.menus declared, menus wins."""
+        version = await db_session.get(
+            AppVersion, installed_app_with_menu.current_version_id
+        )
+        manifest = dict(version.manifest)
+        manifest["menu"] = {"title": "应该被忽略", "page_key": "ignore"}
+        manifest["menus"] = [{"title": "应当胜出", "page_key": "winner"}]
+        version.manifest = manifest
+        await db_session.flush()
+
+        result = await contributes_service.aggregate_for_tenant(db_session, tenant_id=0)
+        app_menus = [m for m in result["menus"] if m["app_slug"] == "contributes_test"]
+        assert len(app_menus) == 1
+        assert app_menus[0]["title"] == "应当胜出"
+
     async def test_cache_write_and_read(
         self,
         db_session,
