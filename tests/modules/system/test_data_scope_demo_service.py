@@ -243,17 +243,19 @@ async def roles(db_session: AsyncSession) -> None:
 
 class TestListWithSuperAdmin:
     async def test_super_admin_sees_all(self, db_session: AsyncSession):
-        """现有的 admin 账号（user_name='admin'）应短路返回全部数据。
+        """is_super_admin 通过 user_name='admin' 短路返回全部数据。
 
-        复用生产库已有的 admin 账号触发 is_super_admin（user_name 命中），
-        不重复创建，避免唯一约束冲突。
+        构造内存 User（不 db.add 避免唯一约束），data_scope 内部
+        is_super_admin 只读 user_name 属性，不需要 user 在 DB 里。
+        这样测试在干净 CI 库（无 init_db.py 种子）也能跑。
         """
-        admin = (
-            (await db_session.execute(select(User).where(User.user_name == "admin")))
-            .scalars()
-            .first()
+        admin = User(
+            user_id=9999,
+            user_name="admin",  # 触发 is_super_admin 短路
+            nickname="admin",
+            hashed_password=DEMO_PASSWORD_HASH,
+            status=STATUS_ENABLED,
         )
-        assert admin is not None, "数据库需有 admin 账号（init_db.py 种子）"
 
         for i in range(5):
             await _add_demo(
