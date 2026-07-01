@@ -30,6 +30,10 @@ DEFAULT_REFRESH_TOKEN_EXPIRE_DAYS = 7
 REDIS_BLACKLIST_PREFIX = "blacklist:"
 REDIS_BLACKLIST_TTL = 7 * 24 * 3600  # 7天
 
+# 用户名缓存（审计中间件用 user_id 反查 username，避免每次写操作都查 DB）
+REDIS_USER_NAME_PREFIX = "user:name:"
+REDIS_USER_NAME_TTL = 5 * 60  # 5 分钟
+
 # 部门常量
 DEPT_MAX_LEVEL = 5  # 部门最大层级
 IS_PRIMARY_YES = "Y"  # 主部门标识

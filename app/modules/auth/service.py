@@ -1,4 +1,6 @@
+import hashlib
 import logging
+import time
 
 from fastapi import Depends
 from fastapi.security import OAuth2PasswordBearer
@@ -7,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.constants import REDIS_BLACKLIST_PREFIX, REDIS_BLACKLIST_TTL
 from app.core.base_response import ResponseModel
 from app.core.config import settings
 from app.core.exceptions import (
@@ -14,7 +17,8 @@ from app.core.exceptions import (
     AuthorizationException,
     BusinessRuleException,
 )
-from app.core.security import create_access_token, verify_password
+from app.core.redis import redis_client
+from app.core.security import create_access_token, create_refresh_token, verify_password
 from app.db.session import AsyncSessionLocal, get_db
 from app.modules.auth.schemas.auth import LoginCredentials, RouteMeta, UserRoute
 from app.modules.system.models.login_log import SysLoginLog
@@ -23,6 +27,35 @@ from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 
 logger = logging.getLogger(__name__)
+
+
+def _token_hash(token: str) -> str:
+    """Token 取 SHA256 作为 Redis key，避免原 token 入库。"""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+async def _is_blacklisted(token: str) -> bool:
+    """检查 token 是否在黑名单（已退出登录）。"""
+    result = await redis_client.get(f"{REDIS_BLACKLIST_PREFIX}{_token_hash(token)}")
+    return bool(result)
+
+
+async def _blacklist_token(token: str, expire_at: int | None = None) -> None:
+    """把 token 加入黑名单。expire_at 为 token 的 unix 时间戳过期时间。
+
+    用 token 自身的剩余有效期作为 TTL，过期后 Redis 自动清理。
+    """
+    ttl = (
+        max(1, (expire_at or 0) - int(time.time()))
+        if expire_at
+        else REDIS_BLACKLIST_TTL
+    )
+    await redis_client.set(
+        f"{REDIS_BLACKLIST_PREFIX}{_token_hash(token)}",
+        "1",
+        ex=ttl,
+    )
+
 
 # 定义 OAuth2 方案，指定获取 Token 的 URL
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
@@ -49,7 +82,8 @@ class AuthService:
             )
 
         # 统一签发 Token
-        token = create_access_token(subject=str(user.user_id), username=user.user_name)
+        token = create_access_token(subject=str(user.user_id))
+        refresh_token = create_refresh_token(subject=str(user.user_id))
 
         # 写入成功日志
         await self._write_login_log(
@@ -63,8 +97,7 @@ class AuthService:
 
         result = {
             "token": token,
-            "refreshToken": "...",  # 如果需要可在此扩展
-            # "user": user,
+            "refreshToken": refresh_token,
         }
         return ResponseModel.success(data=result)
 
@@ -115,17 +148,79 @@ class AuthService:
 auth_service = AuthService()
 
 
+async def logout(token: str, refresh_token: str | None = None) -> None:
+    """把 access token（和 refresh token，如果提供）加入黑名单，立即失效。
+
+    不需要数据库操作，黑名单走 Redis，TTL 跟 token 剩余有效期对齐，
+    过期后 Redis 自动清理（不堆积垃圾）。
+    """
+    for t in [token, refresh_token]:
+        if not t:
+            continue
+        try:
+            payload = jwt.decode(
+                t, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+            )
+            expire_at = int(payload.get("exp", 0))
+        except JWTError:
+            continue  # token 已无效，无需加入黑名单
+        await _blacklist_token(t, expire_at=expire_at)
+
+
+async def refresh_access_token(refresh_token: str) -> tuple[str, str]:
+    """用 refresh token 换取新的 access + refresh token 对。
+
+    Returns:
+        (new_access_token, new_refresh_token)
+    Raises:
+        AuthenticationException: refresh token 无效/过期/在黑名单中/类型错误
+    """
+    if await _is_blacklisted(refresh_token):
+        raise AuthenticationException(
+            "Token 已失效，请重新登录", error_code="TOKEN_EXPIRED"
+        )
+
+    try:
+        payload = jwt.decode(
+            refresh_token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
+        )
+        if payload.get("type") != "refresh":
+            raise AuthenticationException("Token 类型错误", error_code="TOKEN_EXPIRED")
+        user_id_str = payload.get("sub")
+        if not user_id_str:
+            raise AuthenticationException("Token 无效", error_code="TOKEN_EXPIRED")
+    except JWTError as e:
+        raise AuthenticationException(
+            "Token 无效或已过期", error_code="TOKEN_EXPIRED"
+        ) from e
+
+    # 签发新 token 对（rotation：旧 refresh token 加入黑名单）
+    await _blacklist_token(refresh_token, expire_at=int(payload.get("exp", 0)))
+    new_access = create_access_token(subject=user_id_str)
+    new_refresh = create_refresh_token(subject=user_id_str)
+    return new_access, new_refresh
+
+
 async def get_current_user(
     token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)
 ) -> User:
     """
     JWT Token 验证依赖项
     """
+    # 0. 黑名单校验（用户已退出登录后 token 立即失效）
+    if await _is_blacklisted(token):
+        raise AuthenticationException(
+            "Token 已失效，请重新登录", error_code="TOKEN_EXPIRED"
+        )
+
     try:
         # 1. 解码 Token
         payload = jwt.decode(
             token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
         )
+        # 拒绝 refresh token 被当作 access token 使用
+        if payload.get("type") == "refresh":
+            raise AuthenticationException("Token 类型错误", error_code="TOKEN_EXPIRED")
         user_id_str: str = payload.get("sub")
         if user_id_str is None:
             raise AuthenticationException(

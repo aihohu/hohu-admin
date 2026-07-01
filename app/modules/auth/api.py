@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Body, Depends, Request
 from fastapi.params import Query
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select
@@ -16,7 +16,13 @@ from app.core.exceptions import (
 from app.core.security import get_password_hash
 from app.db.session import get_db
 from app.modules.auth.schemas.auth import LoginCredentials
-from app.modules.auth.service import auth_service, build_menu_tree, get_current_user
+from app.modules.auth.service import (
+    auth_service,
+    build_menu_tree,
+    get_current_user,
+    refresh_access_token,
+)
+from app.modules.auth.service import logout as do_logout
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.user import User
 from app.modules.system.schemas.user import UserCreate, UserOut
@@ -127,6 +133,63 @@ async def login(
             message="密码错误",
         )
         raise
+
+
+@router.post(
+    "/logout",
+    summary="退出登录",
+    description="把当前 access/refresh token 加入黑名单，立即失效",
+    responses={
+        200: {"description": "退出成功"},
+        401: {"description": "未登录或令牌已过期"},
+    },
+)
+async def logout(
+    request: Request,
+    body: dict | None = Body(None, description="可选：{refreshToken: 'xxx'}"),
+    current_user: User = Depends(get_current_user),  # noqa: ARG001
+):
+    """
+    退出登录：把 access token（和 refresh token，如果 body 里提供）加入黑名单。
+    """
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    refresh_token = (body or {}).get("refreshToken")
+    if token:
+        await do_logout(token, refresh_token=refresh_token)
+    return ResponseModel.success(msg="退出成功")
+
+
+@router.post(
+    "/refreshToken",
+    summary="刷新 access token",
+    description="用 refresh token 换取新的 access + refresh token 对（rotation）",
+    responses={
+        200: {"description": "刷新成功"},
+        401: {"description": "refresh token 无效或已过期"},
+    },
+)
+async def refresh_token(
+    body: dict = Body(
+        ...,
+        openapi_examples={
+            "default": {
+                "summary": "Refresh access token",
+                "value": {"refreshToken": "xxx"},
+            }
+        },
+    ),
+):
+    """
+    Token rotation：旧 refresh token 立即失效，返回全新的 access + refresh 对。
+    """
+    refresh = body.get("refreshToken", "")
+    if not refresh:
+        raise AuthenticationException("缺少 refreshToken", error_code="TOKEN_EXPIRED")
+    new_access, new_refresh = await refresh_access_token(refresh)
+    return ResponseModel.success(
+        data={"token": new_access, "refreshToken": new_refresh}
+    )
 
 
 @router.post(

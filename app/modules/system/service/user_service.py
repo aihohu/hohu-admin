@@ -2,13 +2,14 @@ from sqlalchemy import and_, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.constants import ADMIN_USERNAME
+from app.constants import ADMIN_USERNAME, REDIS_USER_NAME_PREFIX
 from app.core.exceptions import (
     BusinessRuleException,
     DuplicateException,
     InvalidParameterException,
     NotFoundException,
 )
+from app.core.redis import redis_client
 from app.core.security import get_password_hash, verify_password
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
@@ -137,6 +138,9 @@ class UserService:
         update_data = user_in.model_dump(
             exclude={"roles", "password", "dept_ids"}, exclude_unset=True
         )
+        username_changed = (
+            "user_name" in update_data and update_data["user_name"] != user.user_name
+        )
         for field, value in update_data.items():
             setattr(user, field, value)
 
@@ -146,6 +150,10 @@ class UserService:
                 select(Role).where(Role.role_code.in_(user_in.roles))
             )
             user.roles = role_result.scalars().all()
+
+        # 改名后失效审计中间件的 username 缓存，避免 5 分钟内日志记旧名
+        if username_changed:
+            await redis_client.delete(f"{REDIS_USER_NAME_PREFIX}{user_id}")
 
         return user
 

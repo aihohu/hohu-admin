@@ -4,11 +4,15 @@ import logging
 import time
 
 from jose import JWTError, jwt
+from sqlalchemy import select
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from app.constants import REDIS_USER_NAME_PREFIX, REDIS_USER_NAME_TTL
 from app.core.config import settings
+from app.core.redis import redis_client
 from app.db.session import AsyncSessionLocal
 from app.modules.system.models.operation_log import SysOperationLog
+from app.modules.system.models.user import User
 from app.utils.ip_util import get_client_ip
 
 logger = logging.getLogger(__name__)
@@ -46,8 +50,8 @@ EXCLUDED_PATHS = (
 )
 
 
-def _get_user_info(request) -> tuple[int, str] | None:
-    """从请求头中解析 JWT 获取 user_id 和 username"""
+def _parse_user_id_from_token(request) -> int | None:
+    """从请求头解析 JWT 拿 user_id（username 不再放 token，独立反查）。"""
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         return None
@@ -56,11 +60,45 @@ def _get_user_info(request) -> tuple[int, str] | None:
         payload = jwt.decode(
             token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
         )
-        user_id = int(payload.get("sub"))
-        username = payload.get("username", "")
-        return user_id, username
+        if payload.get("type") == "refresh":
+            return None
+        return int(payload.get("sub"))
     except (JWTError, ValueError):
         return None
+
+
+async def _resolve_username(user_id: int) -> str | None:
+    """user_id → username 反查，先读 Redis 缓存，未命中读 DB 后回写。
+
+    改名时 user_service.update_user 主动失效缓存，保证审计日志记录的是当前用户名，
+    避免 token 里携带 username 在改名后产生陈旧日志的问题。
+    """
+    cache_key = f"{REDIS_USER_NAME_PREFIX}{user_id}"
+    cached = await redis_client.get(cache_key)
+    if cached:
+        return cached
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(User.user_name).where(User.user_id == user_id)
+        )
+        user_name = result.scalars().first()
+
+    if not user_name:
+        return None
+    await redis_client.set(cache_key, user_name, ex=REDIS_USER_NAME_TTL)
+    return user_name
+
+
+async def _get_user_info(request) -> tuple[int, str] | None:
+    """解析 token → user_id，再反查当前 username（缓存）。"""
+    user_id = _parse_user_id_from_token(request)
+    if user_id is None:
+        return None
+    username = await _resolve_username(user_id)
+    if not username:
+        return None
+    return user_id, username
 
 
 def _extract_module(path: str) -> str:
@@ -106,8 +144,8 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
         if any(path.startswith(prefix) for prefix in EXCLUDED_PATHS):
             return await call_next(request)
 
-        # 获取用户信息
-        user_info = _get_user_info(request)
+        # 获取用户信息（解析 token + 缓存反查 username）
+        user_info = await _get_user_info(request)
         if not user_info:
             return await call_next(request)
 
