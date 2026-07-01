@@ -15,6 +15,10 @@ from app.core.exceptions import (
 )
 from app.core.security import get_password_hash
 from app.db.session import get_db
+from app.modules.auth.permission_collect import (
+    collect_user_buttons,
+    collect_user_menus,
+)
 from app.modules.auth.schemas.auth import LoginCredentials
 from app.modules.auth.service import (
     auth_service,
@@ -258,13 +262,8 @@ async def get_user_info(current_user: User = Depends(get_current_user)):
             }
         )
 
-    # 提取按钮级权限标识 (如: ['system:user:add', 'system:user:edit'])
-    # 遍历用户持有的所有角色，再遍历角色拥有的菜单，提取 permission 字段
-    permissions = set()
-    for role in current_user.roles:
-        for menu in role.menus:
-            if menu.permission:  # 只有定义了权限标识的才加入
-                permissions.add(menu.permission)
+    # 提取按钮级权限标识（仅启用角色）
+    permissions = collect_user_buttons(current_user)
 
     return ResponseModel.success(
         data={
@@ -272,7 +271,7 @@ async def get_user_info(current_user: User = Depends(get_current_user)):
             "userName": current_user.user_name,
             "userAvatar": current_user.user_avatar or "",
             "roles": roles,
-            "buttons": list(permissions),
+            "buttons": permissions,
         }
     )
 
@@ -315,15 +314,7 @@ async def get_user_routes(
         )
         menu_list = list(result.scalars().all())
     else:
-        all_menus_dict = {}
-        for role in current_user.roles:
-            for menu in role.menus:
-                if (
-                    menu.menu_type in [MENU_TYPE_DIRECTORY, MENU_TYPE_MENU]
-                    and menu.status == STATUS_ENABLED
-                ):
-                    all_menus_dict[menu.menu_id] = menu
-        menu_list = list(all_menus_dict.values())
+        menu_list = collect_user_menus(current_user)
 
     route_tree = build_menu_tree(menu_list, 0)
 

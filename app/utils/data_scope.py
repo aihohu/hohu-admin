@@ -14,7 +14,7 @@
     page_data = await paginate(db=db, model=User, filters=filters, ...)
 """
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import (
@@ -23,16 +23,11 @@ from app.constants import (
     DATA_SCOPE_DEPT,
     DATA_SCOPE_DEPT_AND_SUB,
     DATA_SCOPE_SELF,
-    SUPER_ADMIN_ROLE_CODE,
 )
+from app.core.rbac import is_super_admin
 from app.db.base import role_depts, user_depts
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.user import User
-
-
-def is_super_admin(user: User) -> bool:
-    """判断用户是否为超级管理员（拥有全部数据权限）"""
-    return any(r.role_code == SUPER_ADMIN_ROLE_CODE for r in user.roles)
 
 
 def _get_best_scope(user: User) -> str:
@@ -170,12 +165,19 @@ async def _get_custom_dept_ids(db: AsyncSession, user: User) -> list[int]:
 
 
 async def _get_dept_and_sub_ids(db: AsyncSession, dept_ids: list[int]) -> list[int]:
-    """获取指定部门及其所有子部门 ID（利用 ancestors 字段）"""
+    """获取指定部门及其所有子部门 ID（利用 ancestors 字段）。
+
+    ancestors 字段是逗号分隔的父链（如 "0,12,123"）。用两端补逗号后 like
+    锚定，避免数字子串误匹配（dept_id=12 不应匹配 ancestors="0,123"）。
+    """
     if not dept_ids:
         return []
     all_ids = set(dept_ids)
     for did in dept_ids:
-        stmt = select(Dept.dept_id).where(Dept.ancestors.like(f"%{did}%"))
+        did_str = str(did)
+        stmt = select(Dept.dept_id).where(
+            func.concat(",", Dept.ancestors, ",").like(f"%,{did_str},%")
+        )
         result = await db.execute(stmt)
         all_ids.update(result.scalars().all())
     return list(all_ids)

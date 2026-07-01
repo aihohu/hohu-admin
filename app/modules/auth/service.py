@@ -57,6 +57,27 @@ async def _blacklist_token(token: str, expire_at: int | None = None) -> None:
     )
 
 
+async def _try_blacklist_token(token: str, expire_at: int | None = None) -> bool:
+    """原子「检查并拉黑」：用 SET NX 在单次 Redis 操作里完成。
+
+    返回 True 表示本次调用成功抢到锁（key 之前不存在）；
+    返回 False 表示 key 已存在（token 已被 logout 或并发请求先拉黑），
+    调用方应据此拒绝请求（防止 refresh token 重放）。
+    """
+    ttl = (
+        max(1, (expire_at or 0) - int(time.time()))
+        if expire_at
+        else REDIS_BLACKLIST_TTL
+    )
+    result = await redis_client.set(
+        f"{REDIS_BLACKLIST_PREFIX}{_token_hash(token)}",
+        "1",
+        ex=ttl,
+        nx=True,
+    )
+    return bool(result)
+
+
 # 定义 OAuth2 方案，指定获取 Token 的 URL
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
 
@@ -173,13 +194,9 @@ async def refresh_access_token(refresh_token: str) -> tuple[str, str]:
     Returns:
         (new_access_token, new_refresh_token)
     Raises:
-        AuthenticationException: refresh token 无效/过期/在黑名单中/类型错误
+        AuthenticationException: refresh token 无效/过期/在黑名单中/类型错误/用户已被删除
+        AuthorizationException: 用户已被禁用
     """
-    if await _is_blacklisted(refresh_token):
-        raise AuthenticationException(
-            "Token 已失效，请重新登录", error_code="TOKEN_EXPIRED"
-        )
-
     try:
         payload = jwt.decode(
             refresh_token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
@@ -194,8 +211,26 @@ async def refresh_access_token(refresh_token: str) -> tuple[str, str]:
             "Token 无效或已过期", error_code="TOKEN_EXPIRED"
         ) from e
 
-    # 签发新 token 对（rotation：旧 refresh token 加入黑名单）
-    await _blacklist_token(refresh_token, expire_at=int(payload.get("exp", 0)))
+    # 查 DB 校验用户存在且启用，防止禁用/删除用户用旧 refresh token 持续换新
+    user_id = int(user_id_str)
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(User).where(User.user_id == user_id))
+        user = result.scalars().first()
+
+    if user is None:
+        raise AuthenticationException("Token 无效或已过期", error_code="TOKEN_EXPIRED")
+    if not user.status or user.status == "2":
+        raise AuthorizationException("账号已被禁用", error_code="ACCOUNT_DISABLED")
+
+    # 原子「检查并拉黑」：用 SET NX 保证并发 refresh 同一 token 时只有一个
+    # 请求能成功。失败说明 token 已被 logout 拉黑或并发请求先到，按重放拒绝。
+    if not await _try_blacklist_token(
+        refresh_token, expire_at=int(payload.get("exp", 0))
+    ):
+        raise AuthenticationException(
+            "Token 已失效，请重新登录", error_code="TOKEN_EXPIRED"
+        )
+
     new_access = create_access_token(subject=user_id_str)
     new_refresh = create_refresh_token(subject=user_id_str)
     return new_access, new_refresh

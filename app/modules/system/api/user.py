@@ -251,12 +251,10 @@ async def update_user(
         - password: 密码（如果提供，会重新加密存储）
         - roles: 角色编码列表
     """
-    await user_service.update_user(db, user_id, user_in)
-    await db.commit()
-
     # 处理部门关联（dept_ids 为 None 表示不改部门）
+    # 先校验 dept_ids 再 update user：保证校验失败时 user 表不会被部分
+    # commit，整个事务保持原子性。
     if user_in.dept_ids is not None:
-        # 系统策略校验：是否强制用户必须有主部门
         if await config_service.get_bool(db, "user_require_primary_dept"):
             if not any(d.is_primary for d in user_in.dept_ids):
                 raise BusinessRuleException(
@@ -264,12 +262,15 @@ async def update_user(
                     error_code="USER_PRIMARY_DEPT_REQUIRED",
                 )
 
+    await user_service.update_user(db, user_id, user_in)
+
+    if user_in.dept_ids is not None:
         dept_list = [
             {"dept_id": d.dept_id, "is_primary": d.is_primary} for d in user_in.dept_ids
         ]
         await dept_service.update_user_depts(db, user_id, dept_list)
-        await db.commit()
 
+    await db.commit()
     return ResponseModel.success(msg="更新成功")
 
 

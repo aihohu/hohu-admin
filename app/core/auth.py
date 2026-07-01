@@ -4,19 +4,13 @@ import logging
 
 from fastapi import Depends
 
-from app.constants import ADMIN_USERNAME, STATUS_ENABLED, SUPER_ADMIN_ROLE_CODE
+from app.constants import STATUS_ENABLED
 from app.core.exceptions import AuthorizationException
+from app.core.rbac import is_super_admin
 from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
 
 logger = logging.getLogger(__name__)
-
-
-def is_super_admin(user: User) -> bool:
-    """判断用户是否为超级管理员"""
-    return user.user_name == ADMIN_USERNAME or SUPER_ADMIN_ROLE_CODE in [
-        r.role_code for r in user.roles
-    ]
 
 
 def require_permissions(perm_code: str = None, super_admin_only: bool = False):
