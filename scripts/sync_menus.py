@@ -1202,7 +1202,11 @@ async def sync_menus():
                 )
                 db.add(menu)
                 def_key = _get_def_key(d)
-                inserted[parent_route if is_button else d["route_name"]] = menu_id
+                # F-type 按钮不写 inserted：按钮不是任何菜单的父，
+                # 若写入会用按钮 ID 覆盖父菜单的 route_name 映射，
+                # 导致后续 sibling 按钮的 parent_id 错指到上一个按钮。
+                if not is_button:
+                    inserted[d["route_name"]] = menu_id
                 print(f"  + [{d['menu_type']}] {d['menu_name']} ({def_key})")
 
             remaining = next_round
