@@ -1,4 +1,5 @@
 from .config import Config
+from .data_scope_demo import DataScopeDemo
 from .dept import Dept
 from .dict_data import DictData
 from .dict_type import DictType
@@ -20,4 +21,5 @@ __all__ = [
     "Config",
     "SysOperationLog",
     "SysLoginLog",
+    "DataScopeDemo",
 ]

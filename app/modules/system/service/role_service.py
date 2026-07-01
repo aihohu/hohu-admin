@@ -86,16 +86,12 @@ class RoleService:
         if check.scalars().first():
             raise DuplicateException("角色编码", role_in.role_code)
 
-        dept_ids = role_in.dept_ids
         role_data = role_in.model_dump(exclude={"dept_ids"})
         new_role = Role(**role_data)
 
-        # 处理自定义数据权限的部门关联
-        if dept_ids and role_in.data_scope == DATA_SCOPE_CUSTOM:
-            dept_result = await db.execute(
-                select(Dept).where(Dept.dept_id.in_(dept_ids))
-            )
-            new_role.depts = list(dept_result.scalars().all())
+        # 仅 CUSTOM scope 下 dept_ids 才生效；其他 scope 下传 dept_ids 无意义
+        if role_in.data_scope == DATA_SCOPE_CUSTOM and role_in.dept_ids:
+            new_role.depts = await self._validate_depts_exist(db, role_in.dept_ids)
 
         db.add(new_role)
         return new_role
@@ -108,22 +104,42 @@ class RoleService:
         if not role:
             raise NotFoundException("角色")
 
+        old_scope_is_custom = role.data_scope == DATA_SCOPE_CUSTOM
+
         update_data = role_in.model_dump(exclude_unset=True, exclude={"dept_ids"})
         for field, value in update_data.items():
             setattr(role, field, value)
 
-        # 处理部门关联
-        if "dept_ids" in role_in.model_dump(exclude_unset=True):
+        new_scope_is_custom = role.data_scope == DATA_SCOPE_CUSTOM
+        raw_update = role_in.model_dump(exclude_unset=True)
+        dept_ids_provided = "dept_ids" in raw_update
+
+        if dept_ids_provided:
             dept_ids = role_in.dept_ids
-            if dept_ids and role.data_scope == DATA_SCOPE_CUSTOM:
-                dept_result = await db.execute(
-                    select(Dept).where(Dept.dept_id.in_(dept_ids))
-                )
-                role.depts = list(dept_result.scalars().all())
+            if new_scope_is_custom and dept_ids:
+                role.depts = await self._validate_depts_exist(db, dept_ids)
             else:
+                # 显式清空：scope 非 CUSTOM 或 dept_ids=[]
                 role.depts = []
+        elif old_scope_is_custom and not new_scope_is_custom:
+            # 离开 CUSTOM 但未传 dept_ids：清空残留，避免下次回 CUSTOM 时旧 depts 复活
+            role.depts = []
 
         return role
+
+    async def _validate_depts_exist(
+        self, db: AsyncSession, dept_ids: list[int]
+    ) -> list[Dept]:
+        """校验所有 dept_ids 都存在，否则抛 InvalidParameterException。"""
+        result = await db.execute(select(Dept).where(Dept.dept_id.in_(dept_ids)))
+        depts = list(result.scalars().all())
+        if len(depts) != len(dept_ids):
+            missing = sorted(set(dept_ids) - {d.dept_id for d in depts})
+            raise InvalidParameterException(
+                f"部门 ID 不存在: {','.join(str(d) for d in missing)}",
+                error_code="ROLE_DEPT_NOT_FOUND",
+            )
+        return depts
 
     async def update_role_menu(
         self, db: AsyncSession, role_id: int, menu_ids: list[int]

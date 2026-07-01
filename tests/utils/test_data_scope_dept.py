@@ -79,3 +79,36 @@ async def test_returns_real_children_and_skips_lookalikes(
     # 干扰项：ancestors 含 "base+1" 数字子串但不是真子
     assert base + 10 not in result
     assert base + 100 not in result
+
+
+async def test_multiple_input_depts_returns_all_subtrees(db_session: AsyncSession):
+    """多 dept_id 输入：每个 dept 的子树都应返回（保证批量查询不丢结果）。"""
+    base = 930000000
+    # 两棵独立子树，ancestors 是完整父链
+    db_session.add_all(
+        [
+            _make_dept(dept_id=base + 1, name="A1", ancestors="0"),
+            _make_dept(dept_id=base + 2, name="A2", ancestors=f"0,{base + 1}"),
+            _make_dept(dept_id=base + 10, name="B1", ancestors="0"),
+            _make_dept(dept_id=base + 20, name="B2", ancestors=f"0,{base + 10}"),
+            _make_dept(
+                dept_id=base + 30,
+                name="B3",
+                ancestors=f"0,{base + 10},{base + 20}",
+            ),
+            # B 子树最深：ancestors 必须含所有祖先
+            _make_dept(
+                dept_id=base + 100,
+                name="X",
+                ancestors=f"0,{base + 10},{base + 20},{base + 30}",
+            ),
+        ]
+    )
+    await db_session.flush()
+
+    result = set(await _get_dept_and_sub_ids(db_session, [base + 1, base + 10]))
+
+    # A 子树：base+1, base+2
+    # B 子树：base+10, base+20, base+30, base+100
+    expected = {base + 1, base + 2, base + 10, base + 20, base + 30, base + 100}
+    assert result == expected

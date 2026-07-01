@@ -14,7 +14,7 @@
     page_data = await paginate(db=db, model=User, filters=filters, ...)
 """
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import (
@@ -23,6 +23,7 @@ from app.constants import (
     DATA_SCOPE_DEPT,
     DATA_SCOPE_DEPT_AND_SUB,
     DATA_SCOPE_SELF,
+    STATUS_ENABLED,
 )
 from app.core.rbac import is_super_admin
 from app.db.base import role_depts, user_depts
@@ -155,11 +156,23 @@ async def get_user_data_scope_filters(
 
 
 async def _get_custom_dept_ids(db: AsyncSession, user: User) -> list[int]:
-    """获取用户角色通过 role_depts 关联的自定义部门 ID"""
-    role_ids = [r.role_id for r in user.roles if r.status == "1"]
+    """获取用户角色通过 role_depts 关联的自定义部门 ID。
+
+    过滤禁用部门（Dept.status != 1）—— admin 禁用部门 = 撤销 CUSTOM 授权。
+    注：user_depts（用户自己的部门归属）和 ancestors 子树不过滤禁用部门，
+    因为用户的组织归属不应被部门禁用剥夺（用户还在那个部门里管理）。
+    """
+    role_ids = [r.role_id for r in user.roles if r.status == STATUS_ENABLED]
     if not role_ids:
         return []
-    stmt = select(role_depts.c.dept_id).where(role_depts.c.role_id.in_(role_ids))
+    stmt = (
+        select(role_depts.c.dept_id)
+        .join(Dept, Dept.dept_id == role_depts.c.dept_id)
+        .where(
+            role_depts.c.role_id.in_(role_ids),
+            Dept.status == STATUS_ENABLED,
+        )
+    )
     result = await db.execute(stmt)
     return list(set(result.scalars().all()))
 
@@ -169,15 +182,15 @@ async def _get_dept_and_sub_ids(db: AsyncSession, dept_ids: list[int]) -> list[i
 
     ancestors 字段是逗号分隔的父链（如 "0,12,123"）。用两端补逗号后 like
     锚定，避免数字子串误匹配（dept_id=12 不应匹配 ancestors="0,123"）。
+
+    所有 dept_id 的 like 条件用 OR 合并成单次查询，避免 N+1。
     """
     if not dept_ids:
         return []
-    all_ids = set(dept_ids)
-    for did in dept_ids:
-        did_str = str(did)
-        stmt = select(Dept.dept_id).where(
-            func.concat(",", Dept.ancestors, ",").like(f"%,{did_str},%")
-        )
-        result = await db.execute(stmt)
-        all_ids.update(result.scalars().all())
-    return list(all_ids)
+    conditions = [
+        func.concat(",", Dept.ancestors, ",").like(f"%,{int(did)},%")
+        for did in dept_ids
+    ]
+    stmt = select(Dept.dept_id).where(or_(*conditions))
+    result = await db.execute(stmt)
+    return list({*dept_ids, *result.scalars().all()})

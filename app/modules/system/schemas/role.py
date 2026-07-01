@@ -146,15 +146,18 @@ class RoleOut(RoleBase):
     @model_validator(mode="before")
     @classmethod
     def extract_dept_ids(cls, data: any) -> any:
-        """从 Role ORM 对象的 depts 关系提取 dept_ids"""
+        """从 Role ORM 对象的 depts 关系提取 dept_ids。
+
+        返回 dict（拷贝 ORM 字段 + 注入 dept_ids），不改原 ORM 实例的
+        __dict__，避免污染 SQLAlchemy 实例状态。
+        """
+        if isinstance(data, dict):
+            return data
         if hasattr(data, "depts"):
-            dept_ids = [d.dept_id for d in data.depts]
-            if isinstance(data, dict):
-                data["dept_ids"] = dept_ids
-            else:
-                object.__setattr__(
-                    data, "__dict__", {**data.__dict__, "dept_ids": dept_ids}
-                )
+            # vars() 取 __dict__，过滤 _sa_instance_state 等 SQLAlchemy 内部字段
+            attrs = {k: v for k, v in vars(data).items() if not k.startswith("_")}
+            attrs["dept_ids"] = [d.dept_id for d in data.depts]
+            return attrs
         return data
 
     @field_serializer("role_id")
