@@ -5,6 +5,7 @@ from pydantic.alias_generators import to_camel
 
 from app.constants import STATUS_DISABLED, STATUS_ENABLED
 from app.core.config import settings
+from app.schemas.types import LocalNaiveDatetime
 
 
 class JobCreate(BaseModel):
@@ -161,8 +162,12 @@ class JobLogQuery(BaseModel):
     job_id: int | None = Field(None, description="任务ID")
     job_key: str | None = Field(None, description="任务标识（模糊查询）")
     status: str | None = Field(None, description="状态：1-成功，2-失败，3-执行中")
-    start_time: datetime | None = Field(None, description="开始时间（起）")
-    end_time: datetime | None = Field(None, description="开始时间（止）")
+    start_time: LocalNaiveDatetime | None = Field(
+        None, description="开始时间（起），接受 ms timestamp / ISO / datetime"
+    )
+    end_time: LocalNaiveDatetime | None = Field(
+        None, description="开始时间（止），接受 ms timestamp / ISO / datetime"
+    )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 

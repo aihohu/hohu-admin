@@ -1,9 +1,10 @@
-from datetime import UTC, datetime
+from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from pydantic.alias_generators import to_camel
 
 from app.core.config import settings
+from app.schemas.types import LocalNaiveDatetime
 
 
 class OperationLogQuery(BaseModel):
@@ -15,18 +16,14 @@ class OperationLogQuery(BaseModel):
     action: str | None = Field(None, description="操作类型")
     username: str | None = Field(None, description="操作人用户名")
     status_code: int | None = Field(None, description="响应状态码")
-    start_time: datetime | None = Field(None, description="操作时间（起）")
-    end_time: datetime | None = Field(None, description="操作时间（止）")
+    start_time: LocalNaiveDatetime | None = Field(
+        None, description="操作时间（起），接受 ms timestamp / ISO / datetime"
+    )
+    end_time: LocalNaiveDatetime | None = Field(
+        None, description="操作时间（止），接受 ms timestamp / ISO / datetime"
+    )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
-
-    @field_validator("start_time", "end_time", mode="after")
-    @classmethod
-    def _strip_tzinfo(cls, v: datetime | None) -> datetime | None:
-        # DB 列为 TIMESTAMP WITHOUT TIME ZONE，需归一化为 naive UTC
-        if v is not None and v.tzinfo is not None:
-            return v.astimezone(UTC).replace(tzinfo=None)
-        return v
 
 
 class OperationLogOut(BaseModel):

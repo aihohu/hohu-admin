@@ -144,3 +144,8 @@ BusinessException (base, has error_code for frontend i18n)
 9. **Async queries:** Always `await`; use `selectinload` for eager loading relationships
 10. **i18n_key field:** May need manual `Field(alias="i18nKey")` if auto-conversion is incorrect
 11. **Button permission code spelling:** Must match exactly across `sync_menus.py` seed, API `require_permissions(...)`, and frontend `v-permission="'...'"`. A typo in any layer silently breaks the gate. See [按钮级权限指南](./docs/button-permission-guide.md).
+12. **datetime 范围查询（NDatePicker）必须用 `LocalNaiveDatetime`** — 任何 Query schema 含 `start_time` / `end_time` / `create_time` 等时间范围字段，类型用 `from app.schemas.types import LocalNaiveDatetime`，**不要写 `datetime`**。原因：DB 列是 `TIMESTAMP WITHOUT TIME ZONE`（naive），前端 NDatePicker 发 unix ms timestamp，Pydantic 默认解析成 aware datetime 会触发 asyncpg `TypeError: can't subtract offset-naive and offset-aware datetimes` → HTTP 500。`LocalNaiveDatetime` 自动按服务器本地时区转 naive。前端 vue 里的 `<NDatePicker type="datetimerange">` 必须**直接发 `value[0]` / `value[1]`**（ms timestamp），**不要 `new Date(ts).toISOString()`**（会转 UTC 导致跨时区 8 小时偏差）。参考：`JobLogQuery` / `LoginLogQuery` / `OperationLogQuery`。
+
+## Project Structure Note
+
+跨模块复用的 Pydantic 类型放在 `app/schemas/types.py`（如 `LocalNaiveDatetime`）。不要在每个 module 的 schema 里手写 datetime 转换 validator。

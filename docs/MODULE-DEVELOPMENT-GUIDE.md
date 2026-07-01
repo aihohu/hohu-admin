@@ -369,6 +369,18 @@ class CustomerOut(BaseModel):
 3. **所有 BigInteger ID 必须用 `@field_serializer` 转为字符串**
 4. 查询 Schema 必须有 `current` 和 `size` 字段
 5. 更新 Schema 的字段全部可选，配合 `exclude_unset=True` 实现部分更新
+6. **datetime 范围查询字段必须用 `LocalNaiveDatetime`**（来自 `app.schemas.types`），不要直接用 `datetime`：
+   - DB 列是 `TIMESTAMP WITHOUT TIME ZONE`（naive），前端 NDatePicker 发 ms timestamp，Pydantic 默认解析成 aware datetime 会触发 asyncpg `TypeError: can't subtract offset-naive and offset-aware datetimes` → HTTP 500
+   - `LocalNaiveDatetime` 自动按服务器本地时区转 naive，兼容 ms timestamp / 数字字符串 / ISO 字符串 / datetime 输入
+   - 设计决策详见 [`specs/2026-07-01-local-naive-datetime.md`](./specs/2026-07-01-local-naive-datetime.md)
+
+   ```python
+   from app.schemas.types import LocalNaiveDatetime
+
+   class OrderQuery(BaseModel):
+       start_time: LocalNaiveDatetime | None = None
+       end_time: LocalNaiveDatetime | None = None
+   ```
 
 ### 3.3 Service（业务逻辑层）
 
