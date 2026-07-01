@@ -49,22 +49,28 @@ class RoleService:
         return list(result.scalars().all())
 
     async def get_role_menus(self, db: AsyncSession, role_id: int) -> list[str]:
-        """获取角色的菜单ID列表"""
-        subquery = (
-            select(Menu.parent_id)
-            .join(role_menus, Menu.menu_id == role_menus.c.menu_id)
-            .where(role_menus.c.role_id == role_id)
-            .scalar_subquery()
-        )
+        """返回角色拥有的「真叶子」菜单 ID（前端 NTree cascade 据此推导父子状态）。
+
+        设计权衡：
+        - 只返回叶子（menu 表中没有子的菜单），不返回父。
+        - 否则 NaiveUI NTree cascade 会反向级联「父 checked → 所有当前子
+          checked」，造成"全选"显示 bug。
+        - 用 NOT IN (所有非 NULL 的 parent_id 集合) 排除任何父，已处理
+          parent_id=NULL 的根菜单（旧实现的 NOT IN 因 subquery 含 NULL 会
+          让整个查询失效）。
+        - 已知限制：孤立父（role 拥有 M1，M1 在 menu 表中有子但子未被 role
+          拥有）会被排除，前端显示为未勾选。新代码不再产生孤立父（参见
+          menu_service.update_menu 按 permission 增量更新），存量孤立父
+          需管理员重新配置权限。
+        """
+        all_parents_sq = select(Menu.parent_id).where(Menu.parent_id.is_not(None))
 
         stmt = (
             select(Menu.menu_id)
-            .outerjoin(role_menus, Menu.menu_id == role_menus.c.menu_id)
+            .join(role_menus, Menu.menu_id == role_menus.c.menu_id)
             .where(
-                and_(
-                    role_menus.c.role_id == role_id,
-                    Menu.menu_id.not_in(subquery),
-                )
+                role_menus.c.role_id == role_id,
+                Menu.menu_id.not_in(all_parents_sq),
             )
             .order_by(Menu.parent_id, Menu.order)
         )

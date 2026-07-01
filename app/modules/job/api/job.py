@@ -4,7 +4,7 @@ from fastapi import APIRouter, Body, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import STATUS_ENABLED
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.core.scheduler import notify_job_changed, notify_manual_trigger
 from app.db.session import get_db
@@ -39,6 +39,7 @@ async def _safe_publish(coro, label: str) -> None:
     "/list",
     response_model=ResponseModel[PageResult[JobOut]],
     summary="获取定时任务列表",
+    dependencies=[Depends(require_permissions("system:job:list"))],
 )
 async def get_list(
     query: JobQuery = Depends(),
@@ -50,7 +51,10 @@ async def get_list(
 
 
 @router.get(
-    "/registered", response_model=ResponseModel[list], summary="获取已注册任务列表"
+    "/registered",
+    response_model=ResponseModel[list],
+    summary="获取已注册任务列表",
+    dependencies=[Depends(require_permissions("system:job:list"))],
 )
 async def get_registered(
     _current_user: User = Depends(get_current_user),
@@ -59,7 +63,11 @@ async def get_registered(
     return ResponseModel.success(data=tasks)
 
 
-@router.post("/add", summary="创建定时任务")
+@router.post(
+    "/add",
+    summary="创建定时任务",
+    dependencies=[Depends(require_permissions("system:job:add"))],
+)
 async def add(
     data: JobCreate,
     db: AsyncSession = Depends(get_db),
@@ -74,7 +82,11 @@ async def add(
     return ResponseModel.success(msg="创建成功")
 
 
-@router.put("/update", summary="更新定时任务")
+@router.put(
+    "/update",
+    summary="更新定时任务",
+    dependencies=[Depends(require_permissions("system:job:edit"))],
+)
 async def update(
     data: JobUpdate,
     db: AsyncSession = Depends(get_db),
@@ -86,7 +98,11 @@ async def update(
     return ResponseModel.success(msg="更新成功")
 
 
-@router.put("/status", summary="启用/停用定时任务")
+@router.put(
+    "/status",
+    summary="启用/停用定时任务",
+    dependencies=[Depends(require_permissions("system:job:edit"))],
+)
 async def update_status(
     jobId: int,
     status: str,
@@ -102,7 +118,11 @@ async def update_status(
     return ResponseModel.success(msg="状态更新成功")
 
 
-@router.delete("/{jobId}", summary="删除定时任务")
+@router.delete(
+    "/{jobId}",
+    summary="删除定时任务",
+    dependencies=[Depends(require_permissions("system:job:delete"))],
+)
 async def delete(
     jobId: int,
     db: AsyncSession = Depends(get_db),
@@ -114,7 +134,11 @@ async def delete(
     return ResponseModel.success(msg="删除成功")
 
 
-@router.post("/batch-delete", summary="批量删除定时任务")
+@router.post(
+    "/batch-delete",
+    summary="批量删除定时任务",
+    dependencies=[Depends(require_permissions("system:job:batch-delete"))],
+)
 async def batch_delete(
     ids: list[int] = Body(...),
     db: AsyncSession = Depends(get_db),
@@ -126,7 +150,11 @@ async def batch_delete(
     return ResponseModel.success(msg=f"已删除 {count} 个任务")
 
 
-@router.post("/run/{jobId}", summary="手动触发任务")
+@router.post(
+    "/run/{jobId}",
+    summary="手动触发任务",
+    dependencies=[Depends(require_permissions("system:job:run"))],
+)
 async def run_now(
     jobId: int,
     db: AsyncSession = Depends(get_db),

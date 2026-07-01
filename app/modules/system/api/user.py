@@ -37,6 +37,7 @@ router = APIRouter()
         401: {"description": "未登录或令牌已过期"},
         403: {"description": "权限不足"},
     },
+    dependencies=[Depends(require_permissions("system:user:list"))],
 )
 async def get_user_list(
     query: UserQuery = Depends(),
@@ -124,6 +125,7 @@ async def get_user_list(
         401: {"description": "未登录或令牌已过期"},
         403: {"description": "权限不足"},
     },
+    dependencies=[Depends(require_permissions("system:user:add"))],
 )
 async def add_user(
     user_in: UserCreate,
@@ -218,6 +220,7 @@ async def change_password(
         403: {"description": "权限不足"},
         404: {"description": "用户不存在"},
     },
+    dependencies=[Depends(require_permissions("system:user:edit"))],
 )
 async def update_user(
     user_id: int,
@@ -313,6 +316,7 @@ async def reset_password(
         403: {"description": "权限不足"},
         404: {"description": "用户不存在"},
     },
+    dependencies=[Depends(require_permissions("system:user:delete"))],
 )
 async def delete_user(
     user_id: int,
@@ -349,6 +353,7 @@ async def delete_user(
         401: {"description": "未登录或令牌已过期"},
         403: {"description": "权限不足"},
     },
+    dependencies=[Depends(require_permissions("system:user:batch-delete"))],
 )
 async def batch_delete_users(
     ids: list[int],

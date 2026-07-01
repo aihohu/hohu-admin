@@ -3,7 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import MENU_TYPE_BUTTON
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.db.session import get_db
 from app.modules.system.models.menu import Menu
@@ -33,6 +33,7 @@ router = APIRouter()
         401: {"description": "未登录或令牌已过期"},
         403: {"description": "权限不足"},
     },
+    dependencies=[Depends(require_permissions("system:menu:list"))],
 )
 async def get_menu_tree(db: AsyncSession = Depends(get_db)):
     """
@@ -106,6 +107,7 @@ async def get_menu_tree_option(db: AsyncSession = Depends(get_db)):
     "/tree-list",
     response_model=ResponseModel[PageResult[MenuTreeOut]],
     summary="获取菜单树形列表(带伪分页数据-适配前端)",
+    dependencies=[Depends(require_permissions("system:menu:list"))],
 )
 async def get_menu_tree_list(db: AsyncSession = Depends(get_db)):
     """获取菜单树形列表（带伪分页数据）"""
@@ -154,6 +156,7 @@ async def get_menu_tree_list(db: AsyncSession = Depends(get_db)):
     "/list",
     response_model=ResponseModel[PageResult[MenuOut]],
     summary="获取菜单分页列表",
+    dependencies=[Depends(require_permissions("system:menu:list"))],
 )
 async def list_menus(
     query: MenuQuery = Depends(),
@@ -207,6 +210,7 @@ async def get_all_pages(
         401: {"description": "未登录或令牌已过期"},
         403: {"description": "权限不足"},
     },
+    dependencies=[Depends(require_permissions("system:menu:add"))],
 )
 async def add_menu(
     menu_in: MenuCreate,
@@ -251,6 +255,7 @@ async def add_menu(
         403: {"description": "权限不足"},
         404: {"description": "菜单不存在"},
     },
+    dependencies=[Depends(require_permissions("system:menu:edit"))],
 )
 async def update_menu(
     menu_id: int,
@@ -297,6 +302,7 @@ async def update_menu(
         403: {"description": "权限不足"},
         404: {"description": "菜单不存在"},
     },
+    dependencies=[Depends(require_permissions("system:menu:delete"))],
 )
 async def delete_menu(
     menu_id: int,
@@ -334,6 +340,7 @@ async def delete_menu(
         401: {"description": "未登录或令牌已过期"},
         403: {"description": "权限不足"},
     },
+    dependencies=[Depends(require_permissions("system:menu:batch-delete"))],
 )
 async def batch_delete_menus(
     ids: list[int] = Body(...),

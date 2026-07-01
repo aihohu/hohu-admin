@@ -88,6 +88,7 @@ app/
 - **RBAC:** User → Role → Menu (three-tier)
 - **Permission check:** `require_permissions("sys:user:list")` or `require_permissions(super_admin_only=True)` in `app/core/auth.py`
 - **Super admin:** `user_name == "admin"` or `R_SUPER` in role codes → bypasses all checks
+- **Button-level permission:** see [按钮级权限指南](./docs/button-permission-guide.md) for naming convention, full data flow, and how to add new permission codes. **Every write/delete endpoint MUST declare `dependencies=[Depends(require_permissions("..."))]`** — frontend button hiding is UX-only, users can bypass UI to call APIs directly.
 
 ## Exception Hierarchy
 
@@ -142,3 +143,4 @@ BusinessException (base, has error_code for frontend i18n)
 8. **Role assignment:** Users receive roles by `role_code` (string), not `role_id`
 9. **Async queries:** Always `await`; use `selectinload` for eager loading relationships
 10. **i18n_key field:** May need manual `Field(alias="i18nKey")` if auto-conversion is incorrect
+11. **Button permission code spelling:** Must match exactly across `sync_menus.py` seed, API `require_permissions(...)`, and frontend `v-permission="'...'"`. A typo in any layer silently breaks the gate. See [按钮级权限指南](./docs/button-permission-guide.md).

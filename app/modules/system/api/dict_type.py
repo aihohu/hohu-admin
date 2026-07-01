@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.db.session import get_db
 from app.modules.system.models.user import User
@@ -27,6 +27,7 @@ router = APIRouter()
         401: {"description": "未登录或令牌已过期"},
         403: {"description": "权限不足"},
     },
+    dependencies=[Depends(require_permissions("system:dict-type:list"))],
 )
 async def get_list(
     query: DictTypeQuery = Depends(),
@@ -99,6 +100,7 @@ async def get_all(
         401: {"description": "未登录或令牌已过期"},
         403: {"description": "权限不足"},
     },
+    dependencies=[Depends(require_permissions("system:dict-type:add"))],
 )
 async def add(
     type_in: DictTypeCreate,
@@ -138,6 +140,7 @@ async def add(
         403: {"description": "权限不足"},
         404: {"description": "字典类型不存在"},
     },
+    dependencies=[Depends(require_permissions("system:dict-type:edit"))],
 )
 async def update(
     type_id: int,
@@ -177,11 +180,12 @@ async def update(
     description="删除指定的单个字典类型",
     responses={
         200: {"description": "删除成功"},
+        400: {"description": "字典类型下存在数据"},
         401: {"description": "未登录或令牌已过期"},
         403: {"description": "权限不足"},
         404: {"description": "字典类型不存在"},
-        400: {"description": "字典类型下存在数据"},
     },
+    dependencies=[Depends(require_permissions("system:dict-type:delete"))],
 )
 async def delete(
     type_id: int,
@@ -221,6 +225,7 @@ async def delete(
         401: {"description": "未登录或令牌已过期"},
         403: {"description": "权限不足"},
     },
+    dependencies=[Depends(require_permissions("system:dict-type:batch-delete"))],
 )
 async def batch_delete(
     ids: list[int],

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, File, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.core.cache import cache_delete
 from app.db.session import get_db
@@ -33,6 +33,7 @@ async def get_public_configs(
     "/list",
     response_model=ResponseModel[PageResult[ConfigOut]],
     summary="获取系统配置列表分页",
+    dependencies=[Depends(require_permissions("system:config:list"))],
 )
 async def get_list(
     query: ConfigQuery = Depends(),
@@ -44,7 +45,11 @@ async def get_list(
     return ResponseModel.success(data=page_data)
 
 
-@router.get("/export", summary="导出系统配置")
+@router.get(
+    "/export",
+    summary="导出系统配置",
+    dependencies=[Depends(require_permissions("system:config:export"))],
+)
 async def export_configs(
     query: ConfigQuery = Depends(),
     db: AsyncSession = Depends(get_db),
@@ -59,7 +64,11 @@ async def export_configs(
     )
 
 
-@router.post("/import", summary="导入系统配置")
+@router.post(
+    "/import",
+    summary="导入系统配置",
+    dependencies=[Depends(require_permissions("system:config:import"))],
+)
 async def import_configs(
     file: Annotated[UploadFile, File(description="Excel 文件")],
     db: AsyncSession = Depends(get_db),
@@ -76,7 +85,11 @@ async def import_configs(
     )
 
 
-@router.post("/add", summary="创建系统配置")
+@router.post(
+    "/add",
+    summary="创建系统配置",
+    dependencies=[Depends(require_permissions("system:config:add"))],
+)
 async def add(
     config_in: ConfigCreate,
     db: AsyncSession = Depends(get_db),
@@ -89,7 +102,11 @@ async def add(
     return ResponseModel.success(msg="系统配置创建成功")
 
 
-@router.put("/{config_id}", summary="编辑系统配置")
+@router.put(
+    "/{config_id}",
+    summary="编辑系统配置",
+    dependencies=[Depends(require_permissions("system:config:edit"))],
+)
 async def update(
     config_id: int,
     config_in: ConfigUpdate,
@@ -103,7 +120,11 @@ async def update(
     return ResponseModel.success(msg="系统配置更新成功")
 
 
-@router.delete("/{config_id}", summary="删除系统配置")
+@router.delete(
+    "/{config_id}",
+    summary="删除系统配置",
+    dependencies=[Depends(require_permissions("system:config:delete"))],
+)
 async def delete(
     config_id: int,
     db: AsyncSession = Depends(get_db),
@@ -116,7 +137,11 @@ async def delete(
     return ResponseModel.success(msg="系统配置删除成功")
 
 
-@router.post("/batch-delete", summary="批量删除系统配置")
+@router.post(
+    "/batch-delete",
+    summary="批量删除系统配置",
+    dependencies=[Depends(require_permissions("system:config:batch-delete"))],
+)
 async def batch_delete(
     ids: list[str],
     db: AsyncSession = Depends(get_db),

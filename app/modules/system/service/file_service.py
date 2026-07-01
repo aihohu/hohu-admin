@@ -1,13 +1,18 @@
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi import UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.exceptions import BusinessRuleException, NotFoundException
+from app.core.exceptions import (
+    AuthorizationException,
+    BusinessRuleException,
+    NotFoundException,
+)
 from app.core.id_generator import next_id
 from app.modules.system.models.file import File
 from app.modules.system.schemas.file import FileQuery
@@ -134,20 +139,45 @@ class FileService:
             raise NotFoundException("文件")
         return file_record
 
-    async def delete(self, db: AsyncSession, file_id: int) -> None:
-        """删除文件（数据库记录 + 磁盘文件）"""
+    async def delete(
+        self,
+        db: AsyncSession,
+        file_id: int,
+        current_user: Any = None,
+        is_admin: bool = False,
+    ) -> None:
+        """删除文件（数据库记录 + 磁盘文件）。
+
+        - is_admin=True（超管/有 system:file:delete 权限的管理员）：直接删
+        - 否则：仅当 current_user 是上传者才能删（file.create_by == user_name）
+        """
         file_record = await self.get_by_id(db, file_id)
+        if not is_admin and current_user is not None:
+            if file_record.create_by != current_user.user_name:
+                raise AuthorizationException(
+                    "权限不足",
+                    error_code="FILE_OWNERSHIP_REQUIRED",
+                )
         self._delete_disk_file(file_record.file_path)
         await db.delete(file_record)
 
-    async def batch_delete(self, db: AsyncSession, ids: list[int]) -> int:
-        """批量删除文件"""
+    async def batch_delete(
+        self,
+        db: AsyncSession,
+        ids: list[int],
+        current_user: Any = None,
+        is_admin: bool = False,
+    ) -> int:
+        """批量删除文件。ownership 规则同 delete；越权项跳过不阻塞其他文件。"""
         count = 0
         for file_id in ids:
             stmt = select(File).where(File.file_id == file_id)
             result = await db.execute(stmt)
             file_record = result.scalars().first()
             if file_record:
+                if not is_admin and current_user is not None:
+                    if file_record.create_by != current_user.user_name:
+                        continue
                 self._delete_disk_file(file_record.file_path)
                 await db.delete(file_record)
                 count += 1

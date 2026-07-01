@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.db.session import get_db
 from app.modules.system.models.user import User
@@ -26,6 +26,7 @@ router = APIRouter()
         401: {"description": "未登录或令牌已过期"},
         403: {"description": "权限不足"},
     },
+    dependencies=[Depends(require_permissions("system:dict-data:list"))],
 )
 async def get_list(
     query: DictDataQuery = Depends(),
@@ -104,6 +105,7 @@ async def get_by_type(
         401: {"description": "未登录或令牌已过期"},
         403: {"description": "权限不足"},
     },
+    dependencies=[Depends(require_permissions("system:dict-data:add"))],
 )
 async def add(
     data_in: DictDataCreate,
@@ -147,6 +149,7 @@ async def add(
         403: {"description": "权限不足"},
         404: {"description": "字典数据不存在"},
     },
+    dependencies=[Depends(require_permissions("system:dict-data:edit"))],
 )
 async def update(
     data_id: int,
@@ -194,6 +197,7 @@ async def update(
         403: {"description": "权限不足"},
         404: {"description": "字典数据不存在"},
     },
+    dependencies=[Depends(require_permissions("system:dict-data:delete"))],
 )
 async def delete(
     data_id: int,
@@ -231,6 +235,7 @@ async def delete(
         401: {"description": "未登录或令牌已过期"},
         403: {"description": "权限不足"},
     },
+    dependencies=[Depends(require_permissions("system:dict-data:batch-delete"))],
 )
 async def batch_delete(
     ids: list[int],

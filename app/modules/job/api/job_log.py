@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Body, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.db.session import get_db
 from app.modules.job.schemas.job import JobLogOut, JobLogQuery
@@ -15,6 +15,7 @@ router = APIRouter()
     "/list",
     response_model=ResponseModel[PageResult[JobLogOut]],
     summary="获取任务日志列表",
+    dependencies=[Depends(require_permissions("system:job-log:list"))],
 )
 async def get_list(
     query: JobLogQuery = Depends(),
@@ -25,7 +26,11 @@ async def get_list(
     return ResponseModel.success(data=page_data)
 
 
-@router.delete("/clean", summary="清理任务日志")
+@router.delete(
+    "/clean",
+    summary="清理任务日志",
+    dependencies=[Depends(require_permissions("system:job-log:clean"))],
+)
 async def clean(
     days: int = Query(30, ge=1, description="清理多少天前的日志"),
     db: AsyncSession = Depends(get_db),
@@ -36,7 +41,11 @@ async def clean(
     return ResponseModel.success(msg=f"已清理 {count} 条日志")
 
 
-@router.post("/batch-delete", summary="批量删除任务日志")
+@router.post(
+    "/batch-delete",
+    summary="批量删除任务日志",
+    dependencies=[Depends(require_permissions("system:job-log:batch-delete"))],
+)
 async def batch_delete(
     ids: list[int] = Body(...),
     db: AsyncSession = Depends(get_db),

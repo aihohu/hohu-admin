@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Body, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.db.session import get_db
 from app.modules.system.models.user import User
@@ -27,6 +27,7 @@ router = APIRouter()
         401: {"description": "未登录或令牌已过期"},
         403: {"description": "权限不足"},
     },
+    dependencies=[Depends(require_permissions("system:role:list"))],
 )
 async def list_roles(
     query: RoleQuery = Depends(),
@@ -93,6 +94,7 @@ async def get_all_roles(
     "/menus/{role_id}",
     response_model=ResponseModel[list[str]],
     summary="获取角色菜单列表",
+    dependencies=[Depends(require_permissions("system:role:menu-auth"))],
 )
 async def get_menus(
     role_id: int,
@@ -114,6 +116,7 @@ async def get_menus(
         401: {"description": "未登录或令牌已过期"},
         403: {"description": "权限不足"},
     },
+    dependencies=[Depends(require_permissions("system:role:add"))],
 )
 async def add_role(
     role_in: RoleCreate,
@@ -142,7 +145,11 @@ async def add_role(
     return ResponseModel.success(msg="角色创建成功")
 
 
-@router.put("/{role_id}", summary="编辑角色信息")
+@router.put(
+    "/{role_id}",
+    summary="编辑角色信息",
+    dependencies=[Depends(require_permissions("system:role:edit"))],
+)
 async def update_role(
     role_id: int,
     role_in: RoleUpdate,
@@ -155,7 +162,11 @@ async def update_role(
     return ResponseModel.success(msg="角色更新成功")
 
 
-@router.put("/menu/{role_id}", summary="编辑角色菜单权限信息")
+@router.put(
+    "/menu/{role_id}",
+    summary="编辑角色菜单权限信息",
+    dependencies=[Depends(require_permissions("system:role:menu-auth"))],
+)
 async def update_role_menu(
     role_id: int,
     ids: list[int] = Body(...),
@@ -178,6 +189,7 @@ async def update_role_menu(
         403: {"description": "权限不足"},
         404: {"description": "角色不存在"},
     },
+    dependencies=[Depends(require_permissions("system:role:delete"))],
 )
 async def delete_role(
     role_id: int,
@@ -202,7 +214,11 @@ async def delete_role(
     return ResponseModel.success(msg="角色删除成功")
 
 
-@router.post("/batch-delete", summary="批量删除用户")
+@router.post(
+    "/batch-delete",
+    summary="批量删除用户",
+    dependencies=[Depends(require_permissions("system:role:batch-delete"))],
+)
 async def batch_delete_roles(
     ids: list[int] = Body(...),
     db: AsyncSession = Depends(get_db),
@@ -214,7 +230,12 @@ async def batch_delete_roles(
     return ResponseModel.success(msg=f"成功删除 {deleted_count} 条数据")
 
 
-@router.get("/{role_id}", response_model=ResponseModel[RoleOut], summary="获取角色详情")
+@router.get(
+    "/{role_id}",
+    response_model=ResponseModel[RoleOut],
+    summary="获取角色详情",
+    dependencies=[Depends(require_permissions("system:role:list"))],
+)
 async def get_role_detail(
     role_id: int,
     db: AsyncSession = Depends(get_db),

@@ -136,29 +136,45 @@ class MenuService:
         for field, value in update_data.items():
             setattr(menu, field, value)
 
-        # 更新按钮权限
+        # 更新按钮权限：按 permission 业务键增量更新，避免删除-重建破坏 role_menus 关联
         if menu_in.buttons is not None:
-            # 删除该菜单下所有现有按钮（只删 button 类型）
-            delete_stmt = delete(Menu).where(
+            existing_stmt = select(Menu).where(
                 Menu.parent_id == menu_id, Menu.menu_type == MENU_TYPE_BUTTON
             )
-            await db.execute(delete_stmt)
+            existing_result = await db.execute(existing_stmt)
+            existing_by_code = {
+                b.permission: b for b in existing_result.scalars().all()
+            }
 
-            # 批量添加新按钮
-            new_buttons = []
-            for btn in menu_in.buttons:
-                button_menu = Menu(
-                    menu_name=btn.desc,
-                    permission=btn.code,
-                    menu_type=MENU_TYPE_BUTTON,
-                    parent_id=menu_id,
-                    order=0,
-                    status=STATUS_ENABLED,
+            incoming_codes = {btn.code for btn in menu_in.buttons}
+
+            # 删除：被移除的按钮（CASCADE 只清这些按钮的 role_menus，符合预期）
+            to_delete = set(existing_by_code) - incoming_codes
+            if to_delete:
+                await db.execute(
+                    delete(Menu).where(
+                        Menu.parent_id == menu_id,
+                        Menu.menu_type == MENU_TYPE_BUTTON,
+                        Menu.permission.in_(to_delete),
+                    )
                 )
-                new_buttons.append(button_menu)
 
-            if new_buttons:
-                db.add_all(new_buttons)
+            # 更新已有按钮 / 新增按钮
+            for btn in menu_in.buttons:
+                existing = existing_by_code.get(btn.code)
+                if existing is not None:
+                    existing.menu_name = btn.desc
+                else:
+                    db.add(
+                        Menu(
+                            menu_name=btn.desc,
+                            permission=btn.code,
+                            menu_type=MENU_TYPE_BUTTON,
+                            parent_id=menu_id,
+                            order=0,
+                            status=STATUS_ENABLED,
+                        )
+                    )
 
         return menu
 

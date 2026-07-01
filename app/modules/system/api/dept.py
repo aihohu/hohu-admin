@@ -2,7 +2,7 @@ from fastapi import APIRouter, Body, Depends
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import get_current_user
+from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.db.session import get_db
 from app.modules.system.models.dept import Dept
@@ -104,6 +104,7 @@ async def get_dept_tree_option(db: AsyncSession = Depends(get_db)):
     response_model=ResponseModel[PageResult[DeptTreeOut]],
     summary="获取部门树形列表(带伪分页)",
     description="获取部门树形结构，包装为 PageResult 适配前端",
+    dependencies=[Depends(require_permissions("system:dept:list"))],
 )
 async def get_dept_tree_list(db: AsyncSession = Depends(get_db)):
     """获取部门树形列表（带伪分页）"""
@@ -136,6 +137,7 @@ async def get_dept_tree_list(db: AsyncSession = Depends(get_db)):
     "/list",
     response_model=ResponseModel[PageResult[DeptOut]],
     summary="获取部门分页列表",
+    dependencies=[Depends(require_permissions("system:dept:list"))],
 )
 async def get_dept_list(
     query: DeptQuery = Depends(),
@@ -163,6 +165,7 @@ async def get_dept_list(
     "/{dept_id}",
     response_model=ResponseModel[DeptOut],
     summary="获取部门详情",
+    dependencies=[Depends(require_permissions("system:dept:list"))],
 )
 async def get_dept_detail(
     dept_id: int,
@@ -178,6 +181,7 @@ async def get_dept_detail(
     "/add",
     summary="创建部门",
     description="创建新的部门",
+    dependencies=[Depends(require_permissions("system:dept:add"))],
 )
 async def add_dept(
     dept_in: DeptCreate,
@@ -195,6 +199,7 @@ async def add_dept(
     "/{dept_id}",
     summary="更新部门",
     description="更新指定部门信息",
+    dependencies=[Depends(require_permissions("system:dept:edit"))],
 )
 async def update_dept(
     dept_id: int,
@@ -213,6 +218,7 @@ async def update_dept(
     "/{dept_id}",
     summary="删除部门",
     description="删除指定部门",
+    dependencies=[Depends(require_permissions("system:dept:delete"))],
 )
 async def delete_dept(
     dept_id: int,
@@ -229,6 +235,7 @@ async def delete_dept(
     "/batch-delete",
     summary="批量删除部门",
     description="批量删除多个部门",
+    dependencies=[Depends(require_permissions("system:dept:batch-delete"))],
 )
 async def batch_delete_depts(
     ids: list[int] = Body(...),
@@ -246,6 +253,7 @@ async def batch_delete_depts(
     response_model=ResponseModel[DeptUsersOut],
     summary="获取部门用户管理数据",
     description="返回所有启用用户及是否在该部门的标记，用于部门-用户管理弹窗",
+    dependencies=[Depends(require_permissions("system:dept:edit"))],
 )
 async def get_dept_users(
     dept_id: int,
@@ -261,6 +269,7 @@ async def get_dept_users(
     "/{dept_id}/users",
     summary="批量更新部门用户",
     description="传入最终成员用户ID列表，后端 diff 出新增/移除并批量更新",
+    dependencies=[Depends(require_permissions("system:dept:edit"))],
 )
 async def update_dept_users(
     dept_id: int,

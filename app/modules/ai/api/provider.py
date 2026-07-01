@@ -3,6 +3,7 @@ from pydantic_ai import Agent
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.core.security import decrypt_value
 from app.db.session import get_db
@@ -67,6 +68,7 @@ async def get_available_models(
     "/list",
     summary="获取提供商列表",
     response_model=ResponseModel[PageResult[ProviderOut]],
+    dependencies=[Depends(require_permissions("ai:provider:list"))],
 )
 async def get_provider_list(
     query: ProviderQuery = Depends(),
@@ -77,7 +79,11 @@ async def get_provider_list(
     return ResponseModel.success(data=page_data)
 
 
-@router.post("/add", summary="添加提供商")
+@router.post(
+    "/add",
+    summary="添加提供商",
+    dependencies=[Depends(require_permissions("ai:provider:add"))],
+)
 async def add_provider(
     data: ProviderCreate,
     db: AsyncSession = Depends(get_db),
@@ -88,7 +94,11 @@ async def add_provider(
     return ResponseModel.success(data=ProviderOut.model_validate(obj), msg="添加成功")
 
 
-@router.put("/{provider_id}", summary="更新提供商")
+@router.put(
+    "/{provider_id}",
+    summary="更新提供商",
+    dependencies=[Depends(require_permissions("ai:provider:edit"))],
+)
 async def update_provider(
     provider_id: int,
     data: ProviderUpdate,
@@ -100,7 +110,11 @@ async def update_provider(
     return ResponseModel.success(msg="更新成功")
 
 
-@router.delete("/{provider_id}", summary="删除提供商")
+@router.delete(
+    "/{provider_id}",
+    summary="删除提供商",
+    dependencies=[Depends(require_permissions("ai:provider:delete"))],
+)
 async def delete_provider(
     provider_id: int,
     db: AsyncSession = Depends(get_db),
@@ -114,7 +128,11 @@ async def delete_provider(
 # ── 模型管理（嵌套在提供商下） ──
 
 
-@router.get("/{provider_id}/models", summary="获取提供商下的模型列表")
+@router.get(
+    "/{provider_id}/models",
+    summary="获取提供商下的模型列表",
+    dependencies=[Depends(require_permissions("ai:provider:list"))],
+)
 async def get_provider_models(
     provider_id: int,
     db: AsyncSession = Depends(get_db),
@@ -125,7 +143,11 @@ async def get_provider_models(
     return ResponseModel.success(data=[ModelOut.model_validate(m) for m in models])
 
 
-@router.post("/{provider_id}/models", summary="添加模型")
+@router.post(
+    "/{provider_id}/models",
+    summary="添加模型",
+    dependencies=[Depends(require_permissions("ai:provider:add"))],
+)
 async def add_model(
     provider_id: int,
     data: ModelCreate,
@@ -138,7 +160,11 @@ async def add_model(
     return ResponseModel.success(msg="添加成功")
 
 
-@router.put("/{provider_id}/models/{model_id}", summary="更新模型")
+@router.put(
+    "/{provider_id}/models/{model_id}",
+    summary="更新模型",
+    dependencies=[Depends(require_permissions("ai:provider:edit"))],
+)
 async def update_model(
     provider_id: int,
     model_id: int,
@@ -154,7 +180,11 @@ async def update_model(
     return ResponseModel.success(msg="更新成功")
 
 
-@router.delete("/{provider_id}/models/{model_id}", summary="删除模型")
+@router.delete(
+    "/{provider_id}/models/{model_id}",
+    summary="删除模型",
+    dependencies=[Depends(require_permissions("ai:provider:delete"))],
+)
 async def delete_model(
     provider_id: int,
     model_id: int,
@@ -169,7 +199,11 @@ async def delete_model(
     return ResponseModel.success(msg="删除成功")
 
 
-@router.post("/test-model", summary="测试模型连通性")
+@router.post(
+    "/test-model",
+    summary="测试模型连通性",
+    dependencies=[Depends(require_permissions("ai:provider:test-model"))],
+)
 async def test_model(
     data: dict,
     db: AsyncSession = Depends(get_db),
