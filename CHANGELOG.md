@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.4] (2026-07-03)
+
+### Features
+
+- **Marketplace Phase 1 MVP** — App store with upload / install / uninstall / rating / review workflows. Tenant-scoped install with manifest validation, SHA-256 zip hash, reinstall UPDATE strategy with `retained_tables` protection, and ON CONFLICT dedup for permission detail
+- **Lowcode Engine** — JSON-Schema → PostgreSQL schema introspection, comparator (widening-safe / breaking-rejected), migration runner (CREATE / ALTER / DROP), and dynamic CRUD data API on auto-created `app_data_*` tables with Redis-backed contributes cache
+- **Lowcode belongs_to Relations** — Auto-expand foreign keys as `<fk>_label` on list (N+1-safe batch dedup), JOIN-based sort on label columns, digit-string Snowflake ID coercion for asyncpg BIGINT binding
+- **Multi-Menu Apps** — `manifest.menus` (plural) takes precedence over singular `menu`; demo CRM upgraded to customer + order multi-model
+- **Marketplace SSRF Protection** — `SafeHttpClient` with scheme/pattern/IP blocklist, IPv4-mapped IPv6 dual-stack check, redirect-disabled, 1MB body cap, 5s/10s timeout; `SSRFBlockedException` with errorCode
+- **Button-Level Permission (End-to-End)** — All system / ai / marketplace write endpoints gated by `require_permissions()`; ownership check on file delete; errorCodes `MISSING_PERMISSION` / `SUPER_ADMIN_ONLY` / `FILE_OWNERSHIP_REQUIRED` for frontend i18n
+- **Auth Refresh Token** — Refresh token endpoint + audit middleware username cache to reduce DB lookups per request
+- **Scheduler Hardening** — Dedicated scheduler process to avoid duplicate execution across uvicorn workers; per-job `timeout` / `retry` / `next_run_time` / `run_on_enable`; pubsub leak fix
+- **Data Scope Demo** — `sys_data_scope_demo` table with seed data (`seed_demo_data_scope.py`) and full RBAC filter chain for documentation / onboarding
+- **Department User Management** — Dept users endpoints + `user_require_primary_dept` config-driven validation
+- **`LocalNaiveDatetime` Type** — Cross-module Pydantic type for datetime range queries (NDatePicker unix-ms → naive UTC); fixes asyncpg aware/naive TypeError on `TIMESTAMP WITHOUT TIME ZONE` columns
+
+### Bug Fixes
+
+- **RBAC Consistency & Atomicity** — `menu_service.update_menu` switches to incremental button update by permission code (preserves role_menus associations, was delete-rebuild broke CASCADE); `role_service.get_role_menus` returns true leaves and excludes orphan parents (NTree cascade all-select bug)
+- **Menu F-Type Button** — `parent_id` chain bug in `sync_menus`
+- **Audit Timezone** — Normalize tz-aware datetimes to naive UTC for log queries and cleanup
+- **Reverse Proxy IP** — Read real client IP from `X-Forwarded-For` behind reverse proxy
+
+### Improvements
+
+- **Demo Seeds** — `seed_demo_crm.py` upgraded to multi-model (customer + order) demonstrating `belongs_to` relations
+- **Documentation** — `docs/button-permission-guide.md`, `docs/data-scope-guide.md`, `docs/MODULE-DEVELOPMENT-GUIDE.md`, `docs/specs/2026-07-01-*.md`
+- **Docker** — Pin `uv` to 0.11.26 to avoid repulling on every build
+- **Tests** — Add `tests/modules/marketplace/`, `tests/modules/system/test_data_scope_*`, `tests/modules/job/test_job_log_service.py`, `tests/schemas/test_types.py`
+
 ## [v0.1.3] (2026-06-11)
 
 ### Features
