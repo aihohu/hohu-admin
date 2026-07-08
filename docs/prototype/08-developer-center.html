@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>开发者中心 - Hohu</title>
+<style>
+:root {
+  --primary: #646cff; --primary-hover: #747bff; --primary-light: rgba(100,108,255,0.08);
+  --success: #52c41a; --warning: #faad14; --error: #f5222d; --info: #2080f0;
+  --bg-layout: rgb(247, 250, 252); --bg-container: rgb(255, 255, 255);
+  --text-base: rgb(31, 31, 31); --text-secondary: rgb(118, 118, 118);
+  --border: rgb(226, 226, 226); --radius: 6px; --radius-card: 8px;
+  --shadow-card: 0 1px 2px 0 rgba(0,0,0,0.05); --shadow-header: 0 1px 2px rgb(0, 21, 41, 0.08);
+  --shadow-sider: 2px 0 8px 0 rgb(29, 35, 41, 0.05);
+  --sider-width: 220px; --header-height: 56px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: var(--text-base); background: var(--bg-layout); }
+.layout { display: flex; min-height: 100vh; }
+.sider { width: var(--sider-width); background: var(--bg-container); box-shadow: var(--shadow-sider); position: fixed; top: 0; left: 0; bottom: 0; z-index: 10; display: flex; flex-direction: column; }
+.sider-logo { height: var(--header-height); display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid var(--border); }
+.sider-logo .icon { width: 32px; height: 32px; background: var(--primary); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: bold; font-size: 16px; }
+.sider-logo .title { font-size: 16px; font-weight: bold; color: var(--primary); margin-left: 8px; }
+.sider-menu { flex: 1; padding: 8px 0; overflow-y: auto; }
+.menu-group { margin-bottom: 4px; }
+.menu-group-title { padding: 8px 16px; font-size: 12px; color: var(--text-secondary); }
+.menu-item { display: flex; align-items: center; padding: 0 16px; height: 40px; cursor: pointer; font-size: 14px; color: var(--text-base); transition: all 0.2s; position: relative; }
+.menu-item:hover { background: var(--primary-light); color: var(--primary); }
+.menu-item.active { color: var(--primary); background: var(--primary-light); }
+.menu-item.active::before { content: ''; position: absolute; left: 0; top: 4px; bottom: 4px; width: 3px; background: var(--primary); border-radius: 0 2px 2px 0; }
+.menu-item .mi { width: 20px; margin-right: 10px; text-align: center; font-size: 16px; opacity: 0.7; }
+.menu-item.active .mi { opacity: 1; }
+.sider-footer { padding: 12px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary); text-align: center; }
+.main { margin-left: var(--sider-width); flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+.header { height: var(--header-height); background: var(--bg-container); box-shadow: var(--shadow-header); display: flex; align-items: center; padding: 0 16px; position: sticky; top: 0; z-index: 5; }
+.header-breadcrumb { font-size: 14px; color: var(--text-secondary); }
+.header-breadcrumb span { color: var(--text-base); }
+.header-right { margin-left: auto; display: flex; align-items: center; gap: 16px; }
+.header-avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--primary-light); display: flex; align-items: center; justify-content: center; font-size: 14px; color: var(--primary); font-weight: 500; }
+.content { flex: 1; padding: 16px; display: flex; flex-direction: column; gap: 16px; }
+
+/* Tabs */
+.tabs { display: flex; gap: 0; background: var(--bg-container); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
+.tab { padding: 14px 24px; font-size: 14px; color: var(--text-secondary); cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.2s; font-weight: 500; }
+.tab:hover { color: var(--primary); }
+.tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+
+/* Stats cards */
+.stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+.stat-card { background: var(--bg-container); border-radius: var(--radius-card); box-shadow: var(--shadow-card); padding: 20px; }
+.stat-card .label { font-size: 13px; color: var(--text-secondary); margin-bottom: 8px; }
+.stat-card .value { font-size: 28px; font-weight: 700; color: var(--text-base); }
+.stat-card .trend { font-size: 12px; color: var(--success); margin-top: 4px; }
+.stat-card .trend.down { color: var(--error); }
+
+/* Card */
+.card { background: var(--bg-container); border-radius: var(--radius-card); box-shadow: var(--shadow-card); flex: 1; display: flex; flex-direction: column; }
+.card-header { padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); }
+.card-title { font-size: 15px; font-weight: 600; }
+.card-actions { display: flex; gap: 8px; }
+
+/* Table */
+.table-wrap { overflow-x: auto; flex: 1; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+thead th { text-align: left; padding: 12px 16px; background: var(--bg-layout); color: var(--text-secondary); font-weight: 500; white-space: nowrap; border-bottom: 1px solid var(--border); }
+tbody td { padding: 12px 16px; border-bottom: 1px solid var(--bg-layout); }
+tbody tr:hover td { background: var(--primary-light); }
+
+/* Buttons */
+.btn { height: 34px; padding: 0 16px; border-radius: var(--radius); font-size: 13px; cursor: pointer; transition: all 0.2s; border: none; display: inline-flex; align-items: center; gap: 6px; }
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-hover); }
+.btn-outline { background: var(--bg-container); border: 1px solid var(--border); color: var(--text-base); }
+.btn-outline:hover { border-color: var(--primary); color: var(--primary); }
+.btn-success { background: var(--success); color: #fff; }
+.btn-warning { background: var(--warning); color: #fff; }
+.btn-link { background: none; border: none; color: var(--primary); padding: 0 6px; height: auto; font-size: 13px; cursor: pointer; }
+.btn-link:hover { text-decoration: underline; }
+.btn-link.danger { color: var(--error); }
+
+/* Status tags */
+.status-tag { display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 10px; font-size: 12px; }
+.status-published { background: rgba(82,196,26,0.08); color: var(--success); }
+.status-reviewing { background: rgba(100,108,255,0.08); color: var(--primary); }
+.status-rejected { background: rgba(245,34,45,0.08); color: var(--error); }
+.status-draft { background: var(--bg-layout); color: var(--text-secondary); }
+.status-tag::before { content: ''; width: 6px; height: 6px; border-radius: 50%; margin-right: 6px; }
+.status-published::before { background: var(--success); }
+.status-reviewing::before { background: var(--primary); }
+.status-rejected::before { background: var(--error); }
+.status-draft::before { background: var(--text-secondary); }
+
+/* Type tag */
+.type-tag { display: inline-flex; padding: 1px 8px; border-radius: 4px; font-size: 12px; background: rgba(100,108,255,0.08); color: var(--primary); }
+
+/* Chart placeholder */
+.chart-placeholder { height: 200px; background: var(--bg-layout); border-radius: var(--radius); display: flex; align-items: center; justify-content: center; color: var(--text-secondary); font-size: 14px; position: relative; overflow: hidden; }
+.chart-bars { display: flex; align-items: flex-end; gap: 12px; height: 160px; padding: 0 20px; }
+.chart-bar { width: 32px; border-radius: 4px 4px 0 0; background: var(--primary); opacity: 0.7; transition: opacity 0.2s; }
+.chart-bar:hover { opacity: 1; }
+.chart-bar-label { text-align: center; font-size: 11px; color: var(--text-secondary); margin-top: 6px; }
+
+/* Upload area */
+.upload-area { border: 2px dashed var(--border); border-radius: var(--radius); padding: 40px; text-align: center; cursor: pointer; transition: all 0.2s; background: var(--bg-layout); }
+.upload-area:hover { border-color: var(--primary); background: var(--primary-light); }
+.upload-icon { font-size: 40px; margin-bottom: 12px; }
+.upload-title { font-size: 15px; font-weight: 500; margin-bottom: 4px; }
+.upload-desc { font-size: 13px; color: var(--text-secondary); }
+
+/* Dialog overlay */
+.overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.3); z-index: 100; justify-content: center; align-items: center; }
+.overlay.show { display: flex; }
+.dialog { background: var(--bg-container); border-radius: var(--radius-card); box-shadow: 0 8px 32px rgba(0,0,0,0.12); width: 560px; max-height: 80vh; overflow-y: auto; }
+.dialog-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; background: var(--bg-container); z-index: 1; }
+.dialog-title { font-size: 16px; font-weight: 600; }
+.dialog-close { width: 32px; height: 32px; border: none; background: none; cursor: pointer; font-size: 18px; color: var(--text-secondary); border-radius: var(--radius); display: flex; align-items: center; justify-content: center; }
+.dialog-close:hover { background: var(--bg-layout); }
+.dialog-body { padding: 20px; }
+.dialog-footer { padding: 12px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Validation result */
+.validation-item { display: flex; align-items: flex-start; gap: 8px; padding: 8px 0; font-size: 13px; }
+.validation-pass { color: var(--success); }
+.validation-fail { color: var(--error); }
+.validation-warn { color: var(--warning); }
+.validation-item .vi-icon { flex-shrink: 0; font-size: 14px; margin-top: 1px; }
+
+/* Manifest preview */
+.manifest-preview { background: var(--bg-layout); border-radius: var(--radius); padding: 16px; font-family: monospace; font-size: 12px; line-height: 1.6; color: var(--text-secondary); max-height: 200px; overflow-y: auto; white-space: pre; }
+.manifest-preview .key { color: var(--primary); }
+.manifest-preview .string { color: var(--success); }
+.manifest-preview .number { color: var(--warning); }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sider">
+    <div class="sider-logo"><div class="icon">H</div><div class="title">Hohu Admin</div></div>
+    <nav class="sider-menu">
+      <div class="menu-group"><div class="menu-item"><span class="mi">🏠</span> 首页</div></div>
+      <div class="menu-group">
+        <div class="menu-group-title">系统管理</div>
+        <div class="menu-item"><span class="mi">👥</span> 用户管理</div>
+      </div>
+      <div class="menu-group">
+        <div class="menu-group-title">应用市场</div>
+        <div class="menu-item"><span class="mi">🛒</span> 浏览市场</div>
+        <div class="menu-item"><span class="mi">📦</span> 已安装</div>
+      </div>
+      <div class="menu-group">
+        <div class="menu-group-title">开发者中心</div>
+        <div class="menu-item active"><span class="mi">🔧</span> 我的插件</div>
+        <div class="menu-item"><span class="mi">📊</span> 数据统计</div>
+      </div>
+    </nav>
+    <div class="sider-footer">Hohu Admin v1.0.0</div>
+  </aside>
+
+  <div class="main">
+    <header class="header">
+      <div class="header-breadcrumb"><span>开发者中心</span></div>
+      <div class="header-right"><span style="font-size:14px;">张三（开发者）</span><div class="header-avatar">张</div></div>
+    </header>
+
+    <div class="content">
+      <!-- Stats -->
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="label">我的插件</div>
+          <div class="value">3</div>
+          <div class="trend">↗ 较上月 +1</div>
+        </div>
+        <div class="stat-card">
+          <div class="label">总下载量</div>
+          <div class="value">2,382</div>
+          <div class="trend">↗ 较上月 +23%</div>
+        </div>
+        <div class="stat-card">
+          <div class="label">平均评分</div>
+          <div class="value">4.6</div>
+          <div class="trend">→ 持平</div>
+        </div>
+        <div class="stat-card">
+          <div class="label">待审核</div>
+          <div class="value">1</div>
+          <div class="trend down" style="color:var(--warning);">需关注</div>
+        </div>
+      </div>
+
+      <!-- Download Chart -->
+      <div class="card" style="flex:none;">
+        <div class="card-header">
+          <div class="card-title">下载量趋势（近 30 天）</div>
+          <div class="card-actions">
+            <select style="height:30px;border:1px solid var(--border);border-radius:var(--radius);padding:0 8px;font-size:13px;background:var(--bg-container);">
+              <option>近 7 天</option>
+              <option selected>近 30 天</option>
+              <option>近 90 天</option>
+            </select>
+          </div>
+        </div>
+        <div style="padding:16px 20px;">
+          <div class="chart-bars" style="margin:0 auto;justify-content:center;">
+            <div><div class="chart-bar" style="height:40px;"></div><div class="chart-bar-label">5/1</div></div>
+            <div><div class="chart-bar" style="height:65px;"></div><div class="chart-bar-label">5/5</div></div>
+            <div><div class="chart-bar" style="height:55px;"></div><div class="chart-bar-label">5/10</div></div>
+            <div><div class="chart-bar" style="height:80px;"></div><div class="chart-bar-label">5/15</div></div>
+            <div><div class="chart-bar" style="height:100px;"></div><div class="chart-bar-label">5/20</div></div>
+            <div><div class="chart-bar" style="height:90px;"></div><div class="chart-bar-label">5/25</div></div>
+            <div><div class="chart-bar" style="height:120px;"></div><div class="chart-bar-label">5/28</div></div>
+            <div><div class="chart-bar" style="height:140px;background:var(--primary);opacity:1;"></div><div class="chart-bar-label" style="font-weight:600;">6/1</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- My Plugins Table -->
+      <div class="card" style="flex:1;">
+        <div class="card-header">
+          <div class="card-title">我的插件</div>
+          <div class="card-actions">
+            <button class="btn btn-primary" onclick="document.getElementById('upload-dialog').classList.add('show')">+ 发布新插件</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>插件名称</th>
+                <th>Slug</th>
+                <th>类型</th>
+                <th>当前版本</th>
+                <th>状态</th>
+                <th>下载量</th>
+                <th>评分</th>
+                <th>最后更新</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>CRM 客户管理套件</strong></td>
+                <td style="font-family:monospace;font-size:12px;color:var(--text-secondary);">zhangsan-crm-suite</td>
+                <td><span class="type-tag">低代码</span></td>
+                <td>v1.2.0</td>
+                <td><span class="status-tag status-published">已发布</span></td>
+                <td>1,234</td>
+                <td>⭐ 4.8</td>
+                <td>2026-05-28</td>
+                <td>
+                  <button class="btn-link">编辑</button>
+                  <button class="btn-link">版本</button>
+                  <button class="btn-link" onclick="document.getElementById('upload-dialog').classList.add('show')">发新版</button>
+                  <button class="btn-link danger">下架</button>
+                </td>
+              </tr>
+              <tr>
+                <td><strong>库存管理系统</strong></td>
+                <td style="font-family:monospace;font-size:12px;color:var(--text-secondary);">zhangsan-inventory</td>
+                <td><span class="type-tag">低代码</span></td>
+                <td>v2.0.0</td>
+                <td><span class="status-tag status-reviewing">审核中</span></td>
+                <td>—</td>
+                <td>—</td>
+                <td>2026-06-01</td>
+                <td>
+                  <button class="btn-link" onclick="location.href='09-review-management.html'">查看审核</button>
+                  <button class="btn-link">编辑</button>
+                </td>
+              </tr>
+              <tr>
+                <td><strong>简易备忘录</strong></td>
+                <td style="font-family:monospace;font-size:12px;color:var(--text-secondary);">zhangsan-memo</td>
+                <td><span class="type-tag">低代码</span></td>
+                <td>v1.0.0</td>
+                <td><span class="status-tag status-rejected">已驳回</span></td>
+                <td>—</td>
+                <td>—</td>
+                <td>2026-05-25</td>
+                <td>
+                  <button class="btn-link" style="color:var(--error);" onclick="location.href='09-review-management.html'">查看原因</button>
+                  <button class="btn-link">修改重提</button>
+                  <button class="btn-link danger">删除</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Upload Dialog -->
+<div class="overlay" id="upload-dialog" onclick="if(event.target===this)this.classList.remove('show')">
+  <div class="dialog">
+    <div class="dialog-header">
+      <div class="dialog-title">发布插件</div>
+      <button class="dialog-close" onclick="document.getElementById('upload-dialog').classList.remove('show')">✕</button>
+    </div>
+    <div class="dialog-body">
+      <!-- Step 1: Upload -->
+      <div class="upload-area" style="margin-bottom:20px;">
+        <div class="upload-icon">📦</div>
+        <div class="upload-title">点击或拖拽上传插件包</div>
+        <div class="upload-desc">支持 .zip 格式，文件大小不超过 50MB，需包含 plugin.json</div>
+      </div>
+
+      <!-- Step 2: Validation Result (simulated) -->
+      <div style="font-size:14px;font-weight:600;margin-bottom:12px;">校验结果</div>
+
+      <div class="validation-item validation-pass"><span class="vi-icon">✅</span> plugin.json 存在且为合法 JSON</div>
+      <div class="validation-item validation-pass"><span class="vi-icon">✅</span> 必填字段完整（name, slug, version, type）</div>
+      <div class="validation-item validation-pass"><span class="vi-icon">✅</span> slug 格式正确：zhangsan-inventory</div>
+      <div class="validation-item validation-pass"><span class="vi-icon">✅</span> 版本号 semver 格式合法：2.0.0</div>
+      <div class="validation-item validation-pass"><span class="vi-icon">✅</span> data_schema 合法（3 个字段）</div>
+      <div class="validation-item validation-pass"><span class="vi-icon">✅</span> 页面 model 引用正确</div>
+      <div class="validation-item validation-warn"><span class="vi-icon">⚠️</span> 未声明 config_schema，插件将不支持配置</div>
+
+      <!-- Step 3: Manifest Preview -->
+      <div style="font-size:14px;font-weight:600;margin:20px 0 12px;">Manifest 预览</div>
+      <div class="manifest-preview">{
+  <span class="key">"name"</span>: <span class="string">"库存管理系统"</span>,
+  <span class="key">"slug"</span>: <span class="string">"zhangsan-inventory"</span>,
+  <span class="key">"version"</span>: <span class="string">"2.0.0"</span>,
+  <span class="key">"type"</span>: <span class="string">"lowcode"</span>,
+  <span class="key">"author"</span>: <span class="string">"zhangsan"</span>,
+  <span class="key">"engines"</span>: { <span class="key">"hohu"</span>: <span class="string">">=1.0.0 &lt;2.0.0"</span> },
+  <span class="key">"data_schema"</span>: {
+    <span class="key">"type"</span>: <span class="string">"object"</span>,
+    <span class="key">"properties"</span>: {
+      <span class="key">"product_name"</span>: { <span class="key">"type"</span>: <span class="string">"string"</span>, <span class="key">"title"</span>: <span class="string">"商品名称"</span> },
+      <span class="key">"quantity"</span>: { <span class="key">"type"</span>: <span class="string">"integer"</span>, <span class="key">"title"</span>: <span class="string">"库存数量"</span> },
+      <span class="key">"unit_price"</span>: { <span class="key">"type"</span>: <span class="string">"number"</span>, <span class="key">"title"</span>: <span class="string">"单价"</span> }
+    }
+  },
+  <span class="key">"pages"</span>: [...],
+  <span class="key">"menu"</span>: { <span class="key">"title"</span>: <span class="string">"库存管理"</span>, <span class="key">"icon"</span>: <span class="string">"PackageOutline"</span> }
+}</div>
+    </div>
+    <div class="dialog-footer">
+      <button class="btn btn-outline" onclick="document.getElementById('upload-dialog').classList.remove('show')">取消</button>
+      <button class="btn btn-primary" onclick="alert('已提交审核'); document.getElementById('upload-dialog').classList.remove('show')">提交审核</button>
+    </div>
+  </div>
+</div>
+</body>
+</html>

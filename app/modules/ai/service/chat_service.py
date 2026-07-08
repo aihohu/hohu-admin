@@ -1,14 +1,29 @@
 """对话核心服务
 
 处理消息发送、历史加载、流式响应。
+
+spec §17.2 重写：从旧 ChatDeps(user_id, db) 迁移到完整新 ChatDeps
+（user / perms / db / data_scope / agent / trace_id）。
 """
 
+import uuid
+
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.ai.agents.chat_agent import create_chat_agent
+from app.modules.ai.core.context import ChatDeps
+from app.modules.ai.core.data_scope_loader import build_data_scope_context
+from app.modules.ai.models.agent import AiAgent
+from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.schemas.message import MessageOut
 from app.modules.ai.service.conversation_service import conversation_service
 from app.modules.ai.service.provider_service import provider_service
+from app.modules.auth.permission_collect import collect_user_buttons
+from app.modules.system.models.user import User
+
+# MVP 单 Agent code（spec §2.5）；v1.5 启用 ≥2 业务 Agent 时改为请求参数选择
+DEFAULT_AGENT_CODE = "user_mgmt"
 
 
 class ChatService:
@@ -52,10 +67,83 @@ class ChatService:
             tokens_output=tokens_output,
         )
 
-    async def create_agent(self, db: AsyncSession, model_name: str | None = None):
-        """创建配置好的 Agent"""
+    async def create_agent(
+        self,
+        db: AsyncSession,
+        model_name: str | None = None,
+        *,
+        user_perms: set[str] | None = None,
+    ):
+        """创建配置好的 Agent
+
+        spec §5.4: 按 user_perms 过滤 tool 可见性
+        """
         model = await provider_service.resolve_model(db, model_name)
-        return create_chat_agent(model)
+        return create_chat_agent(model, user_perms=user_perms)
+
+    async def build_chat_deps(
+        self,
+        db: AsyncSession,
+        user: User,
+        *,
+        agent_code: str = DEFAULT_AGENT_CODE,
+        trace_id: str | None = None,
+    ) -> ChatDeps:
+        """构造完整 ChatDeps（spec §4.6）
+
+        组装顺序：
+          1. perms ← collect_user_buttons(user)（启用角色下的按钮权限码）
+          2. data_scope ← build_data_scope_context(db, user)（§6.2 物化 accessible_*_ids + filters）
+          3. agent ← ai_agent 表查 code（MVP 单 Agent，code='user_mgmt'）
+          4. trace_id ← 默认生成 tr_<uuid4.hex[:16]>，可由调用方传入复用
+
+        注意：
+          - 超管 perms 不特殊处理（与 §6.4 L1/L2 不豁免一致）
+          - agent_code 必须在 ai_agent 表存在，否则抛 ValueError
+        """
+        perms = set(collect_user_buttons(user))
+        data_scope = await build_data_scope_context(db, user)
+
+        agent = await self._load_agent(db, agent_code)
+        if agent is None:
+            raise ValueError(
+                f"Agent code {agent_code!r} not found in ai_agent table; "
+                f"run scripts/seed_ai_agents.py to seed built-in agents"
+            )
+
+        return ChatDeps(
+            user=user,
+            perms=perms,
+            db=db,
+            data_scope=data_scope,
+            agent=agent,
+            trace_id=trace_id or f"tr_{uuid.uuid4().hex[:16]}",
+        )
+
+    async def _load_agent(self, db: AsyncSession, agent_code: str) -> AiAgent | None:
+        """从 ai_agent 表加载 Agent 行（按 code 唯一索引）"""
+        result = await db.execute(select(AiAgent).where(AiAgent.code == agent_code))
+        return result.scalars().first()
+
+    async def attach_trace_to_conversation(
+        self,
+        db: AsyncSession,
+        conversation_id: int | None,
+        agent_code: str,
+        trace_id: str,
+    ) -> None:
+        """spec §4.5: 把 trace_id + agent_code 写到 ai_conversation 行
+
+        用于审计反查（§9.3 AI Trace 视图按 trace_id 串联）。
+        conversation_id=None 时跳过（如新建会话首条消息）。
+        """
+        if conversation_id is None:
+            return
+        conv = await db.get(AiConversation, int(conversation_id))
+        if conv is None:
+            return
+        conv.trace_id = trace_id
+        conv.agent_code = agent_code
 
 
 chat_service = ChatService()

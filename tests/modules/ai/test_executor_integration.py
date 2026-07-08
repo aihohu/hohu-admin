@@ -1,0 +1,519 @@
+"""execute_tool 集成测试 — Phase 3.2 HITL + 流式协议 + 审计
+
+按 spec §3 / §6 / §8.2 验证：
+  - tool not found / perm denied 短路返回 ToolResult.failure
+  - autonomous 流：emit tool_call_started + tool_call_result + 写 ai_operation_log
+  - HITL 流（mock hitl_manager.hang）：emit confirmation_required + 接受 wake
+"""
+
+# ruff: noqa: ARG001, PLC0415
+
+from collections.abc import Awaitable, Callable
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+import redis.asyncio as aioredis
+from sqlalchemy import text
+
+from app.core import redis as redis_module
+from app.core.config import settings
+from app.modules.ai.agents.gateway.executor import execute_tool
+from app.modules.ai.agents.hitl.constants import ConfirmAction
+from app.modules.ai.agents.hitl.events import (
+    ConfirmationRequiredEvent,
+    ToolCallResultEvent,
+    ToolCallStartedEvent,
+)
+from app.modules.ai.agents.hitl.manager import hitl_manager
+from app.modules.ai.agents.tools.decorator import ai_tool
+from app.modules.ai.agents.tools.meta import AiToolMeta
+from app.modules.ai.core.context import ChatDeps, DataScopeContext
+
+
+@pytest.fixture(autouse=True)
+async def clean_env():
+    """每个测试前：重建 redis_client + 清 Redis + reset hitl_manager + 清本轮测试日志。
+
+    ai_operation_log 不能用 TRUNCATE（会清掉生产 AI 审计日志）。所有测试代码
+    通过 _build_deps 写入的行 trace_id 都是 'tr_test_001'，只 DELETE 这部分
+    精准清理，生产数据保持不动。
+    """
+    original_pool = redis_module.redis_pool
+    original_client = redis_module.redis_client
+
+    redis_module.redis_pool = aioredis.ConnectionPool.from_url(
+        settings.REDIS_URL,
+        encoding="utf-8",
+        decode_responses=True,
+        max_connections=20,
+    )
+    redis_module.redis_client = aioredis.Redis(connection_pool=redis_module.redis_pool)
+
+    from app.modules.ai.agents.gateway import executor as exec_mod
+
+    exec_mod.redis_client = redis_module.redis_client
+
+    for pattern in [
+        "ai:confirm:*",
+        "ai:write:*",
+        "ai:quota:*",
+        "ai:failures:*",
+        "ai:query_cache:*",
+    ]:
+        keys = await redis_module.redis_client.keys(pattern)
+        if keys:
+            await redis_module.redis_client.delete(*keys)
+
+    hitl_manager._reset_for_test()
+
+    from app.db.session import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        async with db.begin():
+            await db.execute(
+                text("DELETE FROM ai_operation_log WHERE trace_id = 'tr_test_001'")
+            )
+
+    yield
+
+    for pattern in [
+        "ai:confirm:*",
+        "ai:write:*",
+        "ai:quota:*",
+        "ai:failures:*",
+        "ai:query_cache:*",
+    ]:
+        keys = await redis_module.redis_client.keys(pattern)
+        if keys:
+            await redis_module.redis_client.delete(*keys)
+    hitl_manager._reset_for_test()
+
+    async with AsyncSessionLocal() as db:
+        async with db.begin():
+            await db.execute(
+                text("DELETE FROM ai_operation_log WHERE trace_id = 'tr_test_001'")
+            )
+
+    # 释放连接池避免跨测试 event loop 干扰
+    from app.db.session import engine
+
+    await engine.dispose()
+
+    redis_module.redis_pool = original_pool
+    redis_module.redis_client = original_client
+    exec_mod.redis_client = original_client
+
+
+# ============ 临时测试 tool（注册到 Registry） ============
+
+_TEST_TOOL_LOW = "testint.echo_low"  # autonomous
+_TEST_TOOL_HIGH = "testint.echo_high"  # HITL（risk=high + count=None）
+_TEST_TOOL_PERMED = "testint.perm_required"  # 用于 perm denied 测试
+_TEST_TOOL_READONLY = "testint.readonly_list"  # 写 query_cache
+
+_TOOLS_REGISTERED = False
+
+
+def _register_test_tools() -> None:
+    """注册临时测试 tool（首次调用注册，之后跳过）"""
+    global _TOOLS_REGISTERED
+    if _TOOLS_REGISTERED:
+        return
+    _TOOLS_REGISTERED = True
+
+    @ai_tool(
+        AiToolMeta(
+            name=_TEST_TOOL_LOW,
+            agent="shared",
+            summary="test low risk",
+            required_perms=(),
+            risk="low",
+        )
+    )
+    async def _echo_low(ctx, **kwargs: Any) -> dict[str, Any]:
+        return {"echo": kwargs}
+
+    @ai_tool(
+        AiToolMeta(
+            name=_TEST_TOOL_HIGH,
+            agent="shared",
+            summary="test high risk",
+            required_perms=(),
+            risk="high",
+        )
+    )
+    async def _echo_high(ctx, **kwargs: Any) -> dict[str, Any]:
+        return {"echo": kwargs}
+
+    @ai_tool(
+        AiToolMeta(
+            name=_TEST_TOOL_PERMED,
+            agent="shared",
+            summary="test perm required",
+            required_perms=("testint:fake_perm",),
+            risk="low",
+        )
+    )
+    async def _echo_permed(ctx, **kwargs: Any) -> dict[str, Any]:
+        return {"echo": kwargs}
+
+    @ai_tool(
+        AiToolMeta(
+            name=_TEST_TOOL_READONLY,
+            agent="shared",
+            summary="test readonly + query_cache",
+            required_perms=(),
+            risk="low",
+            readonly=True,
+            allowed_filters=("status", "user_gender"),
+            query_cache_module="system/user",
+        )
+    )
+    async def _readonly_list(ctx, **kwargs: Any) -> dict[str, Any]:
+        return {"count": 0}
+
+
+def _build_deps(
+    *,
+    perms: set[str] | None = None,
+    signal_event: Callable[[Any], Awaitable[None]] | None = None,
+) -> ChatDeps:
+    """构造测试 ChatDeps（mock user + 空 data_scope）"""
+    user = MagicMock()
+    user.user_id = 9001
+
+    data_scope = DataScopeContext(
+        accessible_dept_ids=None, accessible_user_ids=None, filters=[]
+    )
+    agent = MagicMock()
+    agent.code = "shared"
+
+    return ChatDeps(
+        user=user,
+        perms=perms if perms is not None else {"*"},
+        db=MagicMock(),
+        data_scope=data_scope,
+        agent=agent,
+        trace_id="tr_test_001",
+        conversation_id=100,
+        signal_event=signal_event,
+    )
+
+
+# ============ _infer_affected_rows helper ============
+
+
+class TestInferAffectedRows:
+    """spec §8.1: result 卡片「N 行」尾部的来源规则"""
+
+    def test_dry_run_count_takes_priority(self) -> None:
+        from app.modules.ai.agents.gateway.executor import _infer_affected_rows
+
+        # dry_run_count=3，result_data 也有 count=99 → 取 dry_run_count
+        assert _infer_affected_rows(dry_run_count=3, result_data={"count": 99}) == 3
+
+    def test_dict_with_count(self) -> None:
+        from app.modules.ai.agents.gateway.executor import _infer_affected_rows
+
+        assert _infer_affected_rows(dry_run_count=None, result_data={"count": 23}) == 23
+
+    def test_dict_with_affected_count(self) -> None:
+        from app.modules.ai.agents.gateway.executor import _infer_affected_rows
+
+        assert (
+            _infer_affected_rows(dry_run_count=None, result_data={"affected_count": 5})
+            == 5
+        )
+
+    def test_dict_with_groups_count(self) -> None:
+        """stats tool 返回 {groups_count: 2}"""
+        from app.modules.ai.agents.gateway.executor import _infer_affected_rows
+
+        assert (
+            _infer_affected_rows(dry_run_count=None, result_data={"groups_count": 2})
+            == 2
+        )
+
+    def test_list_length(self) -> None:
+        """result 是 list → 长度"""
+        from app.modules.ai.agents.gateway.executor import _infer_affected_rows
+
+        assert _infer_affected_rows(dry_run_count=None, result_data=[1, 2, 3, 4]) == 4
+
+    def test_dict_without_known_key_returns_none(self) -> None:
+        from app.modules.ai.agents.gateway.executor import _infer_affected_rows
+
+        assert (
+            _infer_affected_rows(
+                dry_run_count=None, result_data={"echo": {"msg": "hi"}}
+            )
+            is None
+        )
+
+    def test_scalar_returns_none(self) -> None:
+        from app.modules.ai.agents.gateway.executor import _infer_affected_rows
+
+        assert _infer_affected_rows(dry_run_count=None, result_data=42) is None
+
+    def test_none_result_returns_none(self) -> None:
+        """失败路径 result=None"""
+        from app.modules.ai.agents.gateway.executor import _infer_affected_rows
+
+        assert _infer_affected_rows(dry_run_count=None, result_data=None) is None
+
+    def test_bool_in_dict_ignored(self) -> None:
+        """dict 含布尔值的 count 不当作行数（避免 True/False 误判为 1/0）"""
+        from app.modules.ai.agents.gateway.executor import _infer_affected_rows
+
+        assert (
+            _infer_affected_rows(
+                dry_run_count=None, result_data={"count": True, "name": "x"}
+            )
+            is None
+        )
+
+
+# ============ tool not found / perm denied ============
+
+
+class TestShortCircuit:
+    async def test_tool_not_found(self) -> None:
+        deps = _build_deps()
+        result = await execute_tool("nonexistent.tool", {}, deps)
+        assert not result.ok
+        assert result.error_code == "AI_TOOL_NOT_FOUND"
+
+    async def test_perm_denied(self) -> None:
+        """required_perms 不在 user perms 中 → perm denied"""
+        _register_test_tools()
+        deps = _build_deps(perms=set())  # 空 perms
+        result = await execute_tool(_TEST_TOOL_PERMED, {"x": 1}, deps)
+        assert not result.ok
+        assert result.error_code == "AI_TOOL_PERM_DENIED"
+
+
+# ============ autonomous 流 ============
+
+
+class TestAutonomousFlow:
+    async def test_emits_started_and_result(self) -> None:
+        """spec §8.1: autonomous 流 emit tool_call_started + tool_call_result
+
+        spec §8.1（更新）: started 透传 risk；result 含 duration_ms + affected_rows
+        """
+        _register_test_tools()
+
+        events: list[Any] = []
+
+        async def collect(ev: Any) -> None:
+            events.append(ev)
+
+        deps = _build_deps(signal_event=collect)
+        result = await execute_tool(_TEST_TOOL_LOW, {"msg": "hi"}, deps)
+
+        assert result.ok
+        assert result.data == {"echo": {"msg": "hi"}}
+
+        assert len(events) == 2
+        assert isinstance(events[0], ToolCallStartedEvent)
+        assert events[0].tool == _TEST_TOOL_LOW
+        assert events[0].args == {"msg": "hi"}
+        assert events[0].risk == "low"
+        assert isinstance(events[1], ToolCallResultEvent)
+        assert events[1].ok is True
+        # duration_ms 是实测墙钟耗时，必定是 int 且 ≥ 0
+        assert isinstance(events[1].duration_ms, int)
+        assert events[1].duration_ms >= 0
+        # test tool 返回 {"echo": {...}}，无 affected_rows 信号 → None
+        assert events[1].affected_rows is None
+
+    async def test_writes_ai_operation_log(self) -> None:
+        """spec §9.1: 每次 tool 调用写一行 ai_operation_log（autonomous → success）"""
+        _register_test_tools()
+
+        deps = _build_deps()
+        result = await execute_tool(_TEST_TOOL_LOW, {}, deps)
+        assert result.ok
+
+        from app.db.session import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as db:
+            res = await db.execute(
+                text(
+                    "SELECT tool_name, status, execution_mode FROM ai_operation_log "
+                    "ORDER BY started_at DESC LIMIT 1"
+                )
+            )
+            row = res.first()
+            assert row is not None
+            assert row.tool_name == _TEST_TOOL_LOW
+            assert row.status == "success"
+            assert row.execution_mode == "autonomous"
+
+
+# ============ HITL 流（mock hitl_manager.hang 立即返回） ============
+
+
+class TestHitlFlow:
+    async def test_high_risk_triggers_hitl_approved(self, monkeypatch) -> None:
+        """high risk + count=None（无 dry_run_fn）→ HITL，mock hang 立即 APPROVED"""
+        _register_test_tools()
+
+        async def fake_hang(confirmation_id, *, timeout_sec=None):
+            return ConfirmAction.APPROVED
+
+        monkeypatch.setattr(hitl_manager, "hang", fake_hang)
+
+        events: list[Any] = []
+
+        async def collect(ev: Any) -> None:
+            events.append(ev)
+
+        deps = _build_deps(signal_event=collect)
+        result = await execute_tool(_TEST_TOOL_HIGH, {"x": 1}, deps)
+
+        assert result.ok
+        assert result.data == {"echo": {"x": 1}}
+
+        types = [type(e).__name__ for e in events]
+        assert "ToolCallStartedEvent" in types
+        assert "ConfirmationRequiredEvent" in types
+        assert "ToolCallResultEvent" in types
+
+        # confirmation_required 在 tool_call_result 之前
+        idx_confirm = types.index("ConfirmationRequiredEvent")
+        idx_result = types.index("ToolCallResultEvent")
+        assert idx_confirm < idx_result
+
+    async def test_hitl_rejected(self, monkeypatch) -> None:
+        """HITL reject → USER_REJECTED + log status=rejected"""
+        _register_test_tools()
+
+        async def fake_hang(confirmation_id, *, timeout_sec=None):
+            return ConfirmAction.REJECTED
+
+        monkeypatch.setattr(hitl_manager, "hang", fake_hang)
+
+        deps = _build_deps()
+        result = await execute_tool(_TEST_TOOL_HIGH, {}, deps)
+
+        assert not result.ok
+        assert result.error_code == "USER_REJECTED"
+
+        from app.db.session import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as db:
+            res = await db.execute(
+                text(
+                    "SELECT status FROM ai_operation_log "
+                    "ORDER BY started_at DESC LIMIT 1"
+                )
+            )
+            row = res.first()
+            assert row is not None
+            assert row.status == "rejected"
+
+    async def test_hitl_timeout(self, monkeypatch) -> None:
+        """HITL 超时 → AI_HITL_EXPIRED + log status=expired"""
+        _register_test_tools()
+
+        async def fake_hang(confirmation_id, *, timeout_sec=None):
+            raise TimeoutError("test timeout")
+
+        monkeypatch.setattr(hitl_manager, "hang", fake_hang)
+
+        deps = _build_deps()
+        result = await execute_tool(_TEST_TOOL_HIGH, {}, deps)
+
+        assert not result.ok
+        assert result.error_code == "AI_HITL_EXPIRED"
+
+        from app.db.session import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as db:
+            res = await db.execute(
+                text(
+                    "SELECT status FROM ai_operation_log "
+                    "ORDER BY started_at DESC LIMIT 1"
+                )
+            )
+            row = res.first()
+            assert row is not None
+            assert row.status == "expired"
+
+    async def test_confirmation_event_carries_payload(self, monkeypatch) -> None:
+        """confirmation_required 事件含 confirmation_id / expires_at / args"""
+        _register_test_tools()
+
+        async def fake_hang(confirmation_id, *, timeout_sec=None):
+            return ConfirmAction.REJECTED
+
+        monkeypatch.setattr(hitl_manager, "hang", fake_hang)
+
+        events: list[Any] = []
+
+        async def collect(ev: Any) -> None:
+            events.append(ev)
+
+        deps = _build_deps(signal_event=collect)
+        await execute_tool(_TEST_TOOL_HIGH, {"x": 1}, deps)
+
+        confirm_events = [e for e in events if isinstance(e, ConfirmationRequiredEvent)]
+        assert len(confirm_events) == 1
+        ev = confirm_events[0]
+        assert ev.tool == _TEST_TOOL_HIGH
+        assert ev.confirmation_id
+        assert ev.expires_at.endswith("Z")
+        assert ev.args == {"x": 1}
+
+
+# ============ query_cache 写入（spec §8.7） ============
+
+
+class TestQueryCacheWrite:
+    async def test_readonly_writes_query_cache(self) -> None:
+        """spec §8.7: readonly tool 成功后写 ai:query_cache:<trace_id>"""
+        _register_test_tools()
+
+        deps = _build_deps()
+        # args 含 filters dict
+        result = await execute_tool(
+            _TEST_TOOL_READONLY,
+            {"filters": {"status": "1", "user_gender": "2", "password": "leak"}},
+            deps,
+        )
+        assert result.ok
+
+        # 等待 fire-and-forget task 完成
+        import asyncio
+
+        await asyncio.sleep(0.1)
+
+        from app.modules.ai.agents.hitl.query_cache import get_query_cache
+
+        entry = await get_query_cache(redis_module.redis_client, deps.trace_id)
+        assert entry is not None
+        assert entry.tool_name == _TEST_TOOL_READONLY
+        assert entry.module == "system/user"
+        # filters 按 allowed_filters=("status","user_gender") 白名单过滤
+        assert entry.filters == {"status": "1", "user_gender": "2"}
+        # "password" 不在白名单，被剔除（防敏感字段进 cache）
+        assert "password" not in entry.filters
+        assert entry.user_id == 9001
+
+    async def test_non_readonly_skips_query_cache(self) -> None:
+        """readonly=False 不写 query_cache"""
+        _register_test_tools()
+
+        deps = _build_deps()
+        await execute_tool(_TEST_TOOL_LOW, {"x": 1}, deps)
+
+        import asyncio
+
+        await asyncio.sleep(0.1)
+
+        from app.modules.ai.agents.hitl.query_cache import get_query_cache
+
+        entry = await get_query_cache(redis_module.redis_client, deps.trace_id)
+        assert entry is None  # 没写

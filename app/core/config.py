@@ -73,6 +73,16 @@ class Settings(BaseSettings):
     AI_MAX_TOKENS: int = 4096
     AI_TEMPERATURE: float = 0.7
 
+    # AI HITL（spec §8.4）
+    # MVP 强制单 worker：进程内 dict[confirmation_id, asyncio.Event] 在多 worker 下静默失效。
+    # v1.5+ 改 redis_pubsub 模式后可放开 WEB_CONCURRENCY
+    AI_HITL_MODE: Literal["memory", "redis_pubsub"] = "memory"
+    WEB_CONCURRENCY: int = 1
+    # HITL 挂起 TTL（秒）：spec §8.3 默认 5min
+    AI_HITL_PENDING_TTL_SEC: int = 300
+    # Redis 中 args JSON 大小上限（字节）：spec §8.3 防恶意 user 撑爆 Redis
+    AI_HITL_ARGS_MAX_BYTES: int = 4096
+
     @property
     def REDIS_URL(self) -> str:
         """根据配置生成 Redis 连接字符串"""

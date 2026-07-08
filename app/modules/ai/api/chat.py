@@ -1,3 +1,12 @@
+"""AI 对话流式接口（Vercel AI SDK 兼容 + 自定义事件）
+
+spec §17.2 重写 + §8.1 流式协议：
+  - Vercel AI SDK 原生 text-delta（`0: "..."`）保留
+  - 自定义事件（tool_call_started / tool_call_result / confirmation_required / ai_error / done）
+    走 `data: {...}\n\n` 格式，由 ChatDeps.signal_event 注入
+  - ChatDeps.signal_event 是 asyncio.Queue.put 的封装
+"""
+
 import asyncio
 import base64
 import ipaddress
@@ -12,13 +21,17 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import ValidationError
 from pydantic_ai.ui import SSE_CONTENT_TYPE
 from pydantic_ai.ui.vercel_ai import VercelAIAdapter
+from pydantic_ai.usage import UsageLimits
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.base_response import ResponseModel
 from app.core.config import settings
 from app.db.session import get_db
-from app.modules.ai.core.config import ChatDeps
-from app.modules.ai.schemas.chat import ChatRequest
+from app.modules.ai.agents.hitl.events import (
+    AiStreamEvent,
+    DoneEvent,
+    event_to_sse_data,
+)
+from app.modules.ai.agents.safety.injection_detector import detect_injection
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.conversation_service import conversation_service
 from app.modules.auth.service import get_current_user
@@ -73,6 +86,36 @@ async def _convert_local_images_to_data_uri(body: dict) -> dict:
     return await asyncio.to_thread(_convert_local_images_to_data_uri_sync, body)
 
 
+def _format_sse_chunk(event: AiStreamEvent) -> str:
+    """把 AiStreamEvent 序列化为 SSE 帧：`data: {...}\n\n`"""
+    return f"data: {event_to_sse_data(event)}\n\n"
+
+
+def _collect_text_delta(sse_frame: str, collected: list[str]) -> None:
+    """从 SSE 帧提取 text-delta 累积到 collected（spec §8.1: Vercel UI Protocol v4）
+
+    后端 PydanticAI 1.89 的 `VercelAIAdapter.encode_stream` 输出 Vercel UI
+    Protocol v4：`data: {"type":"text-delta","delta":"..."}\n\n`。本函数从中提取
+    delta 字段累积，给 save_assistant_message 用。其它类型（start / text-start /
+    text-end / reasoning-* / tool-call / tool-result / finish / [DONE]）跳过。
+    """
+    if not (sse_frame.startswith("data: ") and sse_frame.endswith("\n\n")):
+        return
+    payload = sse_frame[6:-2]
+    if not payload.startswith("{"):
+        return  # [DONE] 或纯文本（理论不会出现）
+    try:
+        ev = json.loads(payload)
+    except (json.JSONDecodeError, ValueError):
+        return
+    if (
+        isinstance(ev, dict)
+        and ev.get("type") == "text-delta"
+        and isinstance(ev.get("delta"), str)
+    ):
+        collected.append(ev["delta"])
+
+
 router = APIRouter()
 
 
@@ -82,7 +125,12 @@ async def chat(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ):
-    """Vercel AI SDK 兼容的流式对话接口"""
+    """Vercel AI SDK 兼容的流式对话接口
+
+    spec §17.2 + §8.1：构造完整 ChatDeps（含 data_scope / perms / agent /
+    trace_id / conversation_id / signal_event），合并 Vercel 原生 text-delta
+    与自定义事件（tool_call_started / tool_call_result / confirmation_required）。
+    """
     # 读取原始 body（只能读一次）
     raw_body = await request.body()
 
@@ -92,7 +140,7 @@ async def chat(
     if conversation_id is not None:
         conversation_id = int(conversation_id)
 
-    # 提取用户消息文本和结构化 parts（在 base64 转换之前保存原始 parts）
+    # 提取用户消息文本和结构化 parts
     user_message = ""
     user_parts = None
     messages = body.get("messages", [])
@@ -146,74 +194,113 @@ async def chat(
     if conv and model_name and conv.model_name != model_name:
         conv.model_name = model_name
 
-    # 创建 Agent
-    agent = await chat_service.create_agent(db, model_name)
+    # 构造完整 ChatDeps（spec §4.6 + §17.2）
+    deps = await chat_service.build_chat_deps(db, _current_user)
+    deps.conversation_id = conversation_id
 
-    # 流式响应
+    # §11.1 prompt injection 检测（命中 → execute_tool 强制 HITL）
+    deps.injection_hit = detect_injection(user_message)
+    if deps.injection_hit:
+        logger.warning(
+            "prompt injection detected",
+            extra={
+                "user_id": _current_user.user_id,
+                "conversation_id": conversation_id,
+                "trace_id": deps.trace_id,
+            },
+        )
+
+    # 把 trace_id + agent_code 写到 ai_conversation（spec §4.5）
+    await chat_service.attach_trace_to_conversation(
+        db, conversation_id, deps.agent.code, deps.trace_id
+    )
+    await db.commit()
+
+    # 创建 Agent（按 user_perms 过滤 tool）
+    agent = await chat_service.create_agent(db, model_name, user_perms=deps.perms)
+
+    # 流式响应：自定义事件队列 + PydanticAI stream 并发合并（spec §8.1）
+    # spec §11: usage_limits 兜底防 agent 无限循环（tool_calls_limit=5 / request_limit=10）
     accept = request.headers.get("accept", SSE_CONTENT_TYPE)
     adapter = VercelAIAdapter(agent=agent, run_input=run_input, accept=accept)
     event_stream = adapter.run_stream(
-        deps=ChatDeps(user_id=_current_user.user_id, db=db)
+        deps=deps,
+        usage_limits=UsageLimits(
+            request_limit=10,  # 总 LLM 请求数上限（含初始 + 每个 tool 后续）
+            tool_calls_limit=5,  # 单轮 tool 调用上限（防 LLM 失控循环调相同 tool）
+        ),
     )
 
-    # 包装 SSE 流：收集 AI 回复文本，流结束后保存到数据库
+    # 注入 signal_event：execute_tool emit 事件 → push 到 queue
+    custom_event_queue: asyncio.Queue[AiStreamEvent] = asyncio.Queue()
+
+    async def _signal_event(event: AiStreamEvent) -> None:
+        await custom_event_queue.put(event)
+
+    deps.signal_event = _signal_event
+
     saved_conversation_id = conversation_id
     saved_db = db
 
     async def sse_with_save():
-        collected_text = ""
-        async for chunk in adapter.encode_stream(event_stream):
-            # 尝试从 SSE data 中提取 text-delta
-            if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
-                try:
-                    event = json.loads(chunk[6:])
-                    if event.get("type") == "text-delta" and event.get("delta"):
-                        collected_text += event["delta"]
-                except (json.JSONDecodeError, KeyError):
-                    pass
-            yield chunk
+        """合并 PydanticAI vercel stream + 自定义事件 queue → 单一 SSE 输出"""
+        collected: list[str] = []
 
-        # 流结束，保存 AI 响应
+        # 生产者：跑 PydanticAI stream，把 vercel chunk 转发到 unified_queue
+        unified_queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+        async def produce_pydantic():
+            try:
+                async for chunk in adapter.encode_stream(event_stream):
+                    # 提取 text-delta 收集（spec §8.1: Vercel UI Protocol v4
+                    # `data: {"type":"text-delta","delta":"..."}\n\n`）
+                    _collect_text_delta(chunk, collected)
+                    await unified_queue.put(chunk)
+                    # 转发完一个 vercel chunk 后，drain custom queue（避免漏发）
+                    while not custom_event_queue.empty():
+                        ev = custom_event_queue.get_nowait()
+                        await unified_queue.put(_format_sse_chunk(ev))
+            except Exception:
+                # PydanticAI VercelAIAdapter 内部已 catch 所有异常（含 UsageLimitExceeded）
+                # 转成 ErrorChunk(type='error') emit，本 except 只兜底未预期异常
+                logger.exception("PydanticAI stream error")
+                await unified_queue.put(None)
+            else:
+                # stream 结束前先 drain 残留 custom events
+                while not custom_event_queue.empty():
+                    ev = custom_event_queue.get_nowait()
+                    await unified_queue.put(_format_sse_chunk(ev))
+                await unified_queue.put(None)  # sentinel
+
+        pydantic_task = asyncio.create_task(produce_pydantic())
+
+        # 主循环：消费 unified_queue
+        try:
+            while True:
+                chunk = await unified_queue.get()
+                if chunk is None:  # sentinel: PydanticAI stream 结束
+                    break
+                yield chunk
+        finally:
+            if not pydantic_task.done():
+                pydantic_task.cancel()
+                try:
+                    await pydantic_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+        # 流结束 emit done（spec §8.1）
+        yield _format_sse_chunk(DoneEvent())
+
+        # 保存 AI 响应消息
+        collected_text = "".join(collected)
         if saved_conversation_id and collected_text:
-            await chat_service.save_assistant_message(
-                saved_db, saved_conversation_id, content=collected_text
-            )
-            await saved_db.commit()
+            try:
+                await chat_service.save_assistant_message(
+                    saved_db, saved_conversation_id, content=collected_text
+                )
+                await saved_db.commit()
+            except Exception:
+                logger.exception("save_assistant_message failed")
 
     return StreamingResponse(sse_with_save(), media_type=accept)
-
-
-@router.post("/sync", summary="非流式对话")
-async def chat_sync(
-    data: ChatRequest,
-    db: AsyncSession = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
-):
-    """非流式对话接口，返回完整响应"""
-    # 保存用户消息
-    await chat_service.save_user_message(
-        db, data.conversation_id, _current_user.user_id, data.message
-    )
-
-    # 获取会话绑定的模型
-    conv = await conversation_service.get_by_id(
-        db, data.conversation_id, _current_user.user_id
-    )
-
-    # 创建 Agent 并运行
-    agent = await chat_service.create_agent(db, conv.model_name)
-    result = await agent.run(
-        data.message, deps=ChatDeps(user_id=_current_user.user_id, db=db)
-    )
-
-    # 保存 AI 响应
-    await chat_service.save_assistant_message(
-        db,
-        data.conversation_id,
-        content=result.output,
-        tokens_input=result.usage().request_tokens if result.usage() else None,
-        tokens_output=result.usage().response_tokens if result.usage() else None,
-    )
-    await db.commit()
-
-    return ResponseModel.success(data={"content": result.output})

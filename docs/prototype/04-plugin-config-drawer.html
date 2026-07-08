@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>插件配置 - CRM 客户管理套件 - Hohu</title>
+<style>
+:root {
+  --primary: #646cff; --primary-hover: #747bff; --primary-light: rgba(100,108,255,0.08);
+  --success: #52c41a; --warning: #faad14; --error: #f5222d; --info: #2080f0;
+  --bg-layout: rgb(247, 250, 252); --bg-container: rgb(255, 255, 255);
+  --text-base: rgb(31, 31, 31); --text-secondary: rgb(118, 118, 118);
+  --border: rgb(226, 226, 226); --radius: 6px; --radius-card: 8px;
+  --shadow-card: 0 1px 2px 0 rgba(0,0,0,0.05); --shadow-header: 0 1px 2px rgb(0, 21, 41, 0.08);
+  --shadow-sider: 2px 0 8px 0 rgb(29, 35, 41, 0.05);
+  --sider-width: 220px; --header-height: 56px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: var(--text-base); background: var(--bg-layout); }
+.layout { display: flex; min-height: 100vh; }
+.sider { width: var(--sider-width); background: var(--bg-container); box-shadow: var(--shadow-sider); position: fixed; top: 0; left: 0; bottom: 0; z-index: 10; display: flex; flex-direction: column; }
+.sider-logo { height: var(--header-height); display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid var(--border); }
+.sider-logo .icon { width: 32px; height: 32px; background: var(--primary); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: bold; font-size: 16px; }
+.sider-logo .title { font-size: 16px; font-weight: bold; color: var(--primary); margin-left: 8px; }
+.sider-menu { flex: 1; padding: 8px 0; overflow-y: auto; }
+.menu-group { margin-bottom: 4px; }
+.menu-group-title { padding: 8px 16px; font-size: 12px; color: var(--text-secondary); }
+.menu-item { display: flex; align-items: center; padding: 0 16px; height: 40px; cursor: pointer; font-size: 14px; color: var(--text-base); transition: all 0.2s; position: relative; }
+.menu-item:hover { background: var(--primary-light); color: var(--primary); }
+.menu-item.active { color: var(--primary); background: var(--primary-light); }
+.menu-item.active::before { content: ''; position: absolute; left: 0; top: 4px; bottom: 4px; width: 3px; background: var(--primary); border-radius: 0 2px 2px 0; }
+.menu-item .mi { width: 20px; margin-right: 10px; text-align: center; font-size: 16px; opacity: 0.7; }
+.sider-footer { padding: 12px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary); text-align: center; }
+.main { margin-left: var(--sider-width); flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+.header { height: var(--header-height); background: var(--bg-container); box-shadow: var(--shadow-header); display: flex; align-items: center; padding: 0 16px; position: sticky; top: 0; z-index: 5; }
+.header-breadcrumb { font-size: 14px; color: var(--text-secondary); }
+.header-breadcrumb a { color: var(--text-secondary); text-decoration: none; }
+.header-breadcrumb a:hover { color: var(--primary); }
+.header-breadcrumb span { color: var(--text-base); }
+.header-right { margin-left: auto; display: flex; align-items: center; gap: 16px; }
+.header-avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--primary-light); display: flex; align-items: center; justify-content: center; font-size: 14px; color: var(--primary); font-weight: 500; }
+.content { flex: 1; padding: 16px; display: flex; flex-direction: column; gap: 16px; }
+
+/* Buttons */
+.btn { height: 34px; padding: 0 16px; border-radius: var(--radius); font-size: 14px; cursor: pointer; transition: all 0.2s; border: none; display: inline-flex; align-items: center; gap: 6px; }
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-hover); }
+.btn-outline { background: var(--bg-container); border: 1px solid var(--border); color: var(--text-base); }
+.btn-outline:hover { border-color: var(--primary); color: var(--primary); }
+
+/* Card */
+.card { background: var(--bg-container); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
+.card-header { padding: 16px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+.card-title { font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 10px; }
+.card-body { padding: 24px; }
+
+/* Plugin info bar */
+.plugin-info-bar { display: flex; align-items: center; gap: 14px; padding: 16px 20px; background: var(--bg-layout); border-radius: var(--radius); margin-bottom: 24px; }
+.plugin-info-icon { width: 44px; height: 44px; border-radius: 10px; background: linear-gradient(135deg, #667eea, #764ba2); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 22px; }
+.plugin-info-text { flex: 1; }
+.plugin-info-name { font-size: 15px; font-weight: 600; }
+.plugin-info-meta { font-size: 13px; color: var(--text-secondary); margin-top: 2px; }
+.plugin-info-status { display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 10px; font-size: 12px; background: rgba(82,196,26,0.08); color: var(--success); }
+.plugin-info-status::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--success); margin-right: 6px; }
+
+/* Section */
+.section-title { font-size: 14px; font-weight: 600; margin: 28px 0 16px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.section-title:first-of-type { margin-top: 0; }
+
+/* Form */
+.form-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0 32px; }
+.form-grid .full-width { grid-column: 1 / -1; }
+.form-item { margin-bottom: 20px; }
+.form-label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; color: var(--text-base); }
+.form-label .required { color: var(--error); margin-left: 2px; }
+.form-desc { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+.form-input, .form-select, .form-textarea { width: 100%; height: 34px; border: 1px solid var(--border); border-radius: var(--radius); padding: 0 12px; font-size: 14px; color: var(--text-base); outline: none; transition: border-color 0.2s, box-shadow 0.2s; background: var(--bg-container); }
+.form-textarea { height: 80px; padding: 8px 12px; resize: vertical; }
+.form-input:focus, .form-select:focus, .form-textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(100,108,255,0.15); }
+.form-input.error { border-color: var(--error); }
+.form-error { font-size: 12px; color: var(--error); margin-top: 4px; display: flex; align-items: center; gap: 4px; }
+.form-error::before { content: '⚠'; font-size: 12px; }
+
+/* Switch */
+.switch-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; }
+.switch { width: 44px; height: 22px; border-radius: 11px; background: var(--border); cursor: pointer; position: relative; transition: background 0.2s; flex-shrink: 0; }
+.switch.on { background: var(--primary); }
+.switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: transform 0.2s; box-shadow: 0 1px 3px rgba(0,0,0,0.15); }
+.switch.on::after { transform: translateX(22px); }
+
+/* Number input */
+.number-input-wrap { display: flex; align-items: center; gap: 0; }
+.number-input-wrap .form-input { text-align: center; border-radius: 0; width: 100px; }
+.number-btn { width: 34px; height: 34px; border: 1px solid var(--border); background: var(--bg-container); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 16px; color: var(--text-base); transition: all 0.2s; }
+.number-btn:hover { border-color: var(--primary); color: var(--primary); }
+.number-btn:first-child { border-radius: var(--radius) 0 0 var(--radius); }
+.number-btn:last-child { border-radius: 0 var(--radius) var(--radius) 0; }
+
+/* Permission list */
+.permission-item { display: flex; align-items: flex-start; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--bg-layout); }
+.permission-item:last-child { border-bottom: none; }
+.permission-check { margin-top: 2px; }
+.permission-info { flex: 1; }
+.permission-name { font-size: 13px; font-weight: 500; }
+.permission-desc { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+.checkbox { width: 16px; height: 16px; border: 1px solid var(--border); border-radius: 3px; cursor: pointer; accent-color: var(--primary); }
+
+/* Footer */
+.form-footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 20px; border-top: 1px solid var(--border); margin-top: 8px; }
+
+/* Tabs */
+.config-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); padding: 0 24px; }
+.config-tab { padding: 12px 20px; font-size: 14px; color: var(--text-secondary); cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.2s; }
+.config-tab:hover { color: var(--primary); }
+.config-tab.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 500; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sider">
+    <div class="sider-logo"><div class="icon">H</div><div class="title">Hohu Admin</div></div>
+    <nav class="sider-menu">
+      <div class="menu-group"><div class="menu-item"><span class="mi">🏠</span> 首页</div></div>
+      <div class="menu-group">
+        <div class="menu-group-title">应用市场</div>
+        <div class="menu-item"><span class="mi">🛒</span> 浏览市场</div>
+        <div class="menu-item active"><span class="mi">📦</span> 已安装</div>
+      </div>
+      <div class="menu-group">
+        <div class="menu-group-title">插件（已安装）</div>
+        <div class="menu-item"><span class="mi">💼</span> CRM 套件</div>
+      </div>
+    </nav>
+    <div class="sider-footer">Hohu Admin v1.0.0</div>
+  </aside>
+
+  <div class="main">
+    <header class="header">
+      <div class="header-breadcrumb"><a href="03-installed-plugins.html">已安装插件</a> / <span>CRM 客户管理套件 · 配置</span></div>
+      <div class="header-right"><span style="font-size:14px;">管理员</span><div class="header-avatar">A</div></div>
+    </header>
+
+    <div class="content">
+      <div class="card" style="flex:1;">
+        <div class="card-header">
+          <div class="card-title">插件配置</div>
+          <button class="btn btn-outline" onclick="location.href='03-installed-plugins.html'">返回已安装列表</button>
+        </div>
+
+        <!-- Tabs -->
+        <div class="config-tabs">
+          <div class="config-tab active" onclick="showConfigTab('config')">基本配置</div>
+          <div class="config-tab" onclick="showConfigTab('permissions')">权限审批</div>
+        </div>
+
+        <div class="card-body">
+          <div id="config-tab-content">
+          <!-- Plugin Info -->
+          <div class="plugin-info-bar">
+            <div class="plugin-info-icon">💼</div>
+            <div class="plugin-info-text">
+              <div class="plugin-info-name">CRM 客户管理套件</div>
+              <div class="plugin-info-meta">zhangsan-crm-suite · 低代码 · v1.2.0 · 安装于 2026-05-20</div>
+            </div>
+            <div class="plugin-info-status">已启用</div>
+          </div>
+
+          <!-- Config Section -->
+          <div class="section-title">基本配置</div>
+
+          <div class="form-grid">
+            <div class="form-item">
+              <label class="form-label">API 密钥 <span class="required">*</span></label>
+              <input class="form-input error" type="text" value="" placeholder="请输入 API 密钥">
+              <div class="form-error">API 密钥为必填项</div>
+            </div>
+
+            <div class="form-item">
+              <label class="form-label">同步间隔（秒）</label>
+              <div class="number-input-wrap">
+                <div class="number-btn" onclick="let i=this.nextElementSibling;i.value=Math.max(0,+i.value-60)">−</div>
+                <input class="form-input" type="number" value="300" style="text-align:center;border-radius:0;">
+                <div class="number-btn" onclick="let i=this.previousElementSibling;i.value=+i.value+60">+</div>
+              </div>
+              <div class="form-desc">数据同步的时间间隔，建议不少于 60 秒</div>
+            </div>
+
+            <div class="form-item">
+              <label class="form-label">默认客户等级</label>
+              <select class="form-select">
+                <option value="A">A级 - 重点客户</option>
+                <option value="B" selected>B级 - 普通客户</option>
+                <option value="C">C级 - 潜在客户</option>
+              </select>
+            </div>
+
+            <div class="form-item">
+              <label class="form-label">通知邮箱</label>
+              <input class="form-input" type="email" value="admin@example.com" placeholder="新客户创建时通知此邮箱">
+            </div>
+
+            <div class="form-item">
+              <div class="switch-row">
+                <div>
+                  <label class="form-label" style="margin-bottom:0;">启用自动归档</label>
+                  <div class="form-desc">超过 90 天未跟进的客户自动标记为归档状态</div>
+                </div>
+                <div class="switch on" onclick="this.classList.toggle('on')"></div>
+              </div>
+            </div>
+
+            <div class="form-item">
+              <div class="switch-row">
+                <div>
+                  <label class="form-label" style="margin-bottom:0;">订单超时提醒</label>
+                  <div class="form-desc">订单创建超过 24 小时未支付时发送提醒</div>
+                </div>
+                <div class="switch" onclick="this.classList.toggle('on')"></div>
+              </div>
+            </div>
+
+            <div class="form-item full-width">
+              <label class="form-label">备注说明</label>
+              <textarea class="form-textarea" placeholder="可选：填写插件使用备注">CRM 客户管理，主要用于销售团队</textarea>
+            </div>
+          </div>
+
+          <!-- Permissions Section -->
+          </div>
+
+          <div id="permissions-tab-content" style="display:none;">
+          <div class="section-title">权限审批</div>
+
+          <div class="permission-item">
+            <input type="checkbox" class="checkbox permission-check" checked>
+            <div class="permission-info">
+              <div class="permission-name">菜单注入</div>
+              <div class="permission-desc">注入侧边栏菜单项 "CRM 套件"</div>
+            </div>
+          </div>
+
+          <div class="permission-item">
+            <input type="checkbox" class="checkbox permission-check" checked>
+            <div class="permission-info">
+              <div class="permission-name">本插件数据访问</div>
+              <div class="permission-desc">读写插件专有数据表（客户、订单、商品）</div>
+            </div>
+          </div>
+
+          <div class="permission-item">
+            <input type="checkbox" class="checkbox permission-check">
+            <div class="permission-info">
+              <div class="permission-name">外部 API 调用</div>
+              <div class="permission-desc">GET https://api.weather.com/v1/* — 查询天气信息</div>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <div class="form-footer">
+            <button class="btn btn-outline" onclick="location.href='03-installed-plugins.html'">取消</button>
+            <button class="btn btn-primary" onclick="alert('配置已保存'); location.href='03-installed-plugins.html'">保存配置</button>
+          </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function showConfigTab(tab) {
+  document.getElementById('config-tab-content').style.display = tab === 'config' ? 'block' : 'none';
+  document.getElementById('permissions-tab-content').style.display = tab === 'permissions' ? 'block' : 'none';
+  document.querySelectorAll('.config-tab').forEach((t, i) => {
+    t.classList.toggle('active', (tab === 'config' && i === 0) || (tab === 'permissions' && i === 1));
+  });
+}
+</script>
+</body>
+</html>

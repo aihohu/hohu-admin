@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>应用市场 - Hohu</title>
+<style>
+:root {
+  --primary: #646cff;
+  --primary-hover: #747bff;
+  --primary-pressed: #535bf2;
+  --primary-light: rgba(100,108,255,0.08);
+  --success: #52c41a;
+  --warning: #faad14;
+  --error: #f5222d;
+  --info: #2080f0;
+  --bg-layout: rgb(247, 250, 252);
+  --bg-container: rgb(255, 255, 255);
+  --text-base: rgb(31, 31, 31);
+  --text-secondary: rgb(118, 118, 118);
+  --text-placeholder: rgb(192, 192, 192);
+  --border: rgb(226, 226, 226);
+  --radius: 6px;
+  --radius-card: 8px;
+  --shadow-card: 0 1px 2px 0 rgba(0,0,0,0.05);
+  --shadow-header: 0 1px 2px rgb(0, 21, 41, 0.08);
+  --shadow-sider: 2px 0 8px 0 rgb(29, 35, 41, 0.05);
+  --sider-width: 220px;
+  --header-height: 56px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: var(--text-base); background: var(--bg-layout); }
+
+/* Layout */
+.layout { display: flex; min-height: 100vh; }
+.sider { width: var(--sider-width); background: var(--bg-container); box-shadow: var(--shadow-sider); position: fixed; top: 0; left: 0; bottom: 0; z-index: 10; display: flex; flex-direction: column; }
+.sider-logo { height: var(--header-height); display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid var(--border); }
+.sider-logo .icon { width: 32px; height: 32px; background: var(--primary); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: bold; font-size: 16px; }
+.sider-logo .title { font-size: 16px; font-weight: bold; color: var(--primary); margin-left: 8px; }
+.sider-menu { flex: 1; padding: 8px 0; overflow-y: auto; }
+.menu-group { margin-bottom: 4px; }
+.menu-group-title { padding: 8px 16px; font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
+.menu-item { display: flex; align-items: center; padding: 0 16px; height: 40px; cursor: pointer; font-size: 14px; color: var(--text-base); transition: all 0.2s; border-radius: 0; position: relative; }
+.menu-item:hover { background: var(--primary-light); color: var(--primary); }
+.menu-item.active { color: var(--primary); background: var(--primary-light); }
+.menu-item.active::before { content: ''; position: absolute; left: 0; top: 4px; bottom: 4px; width: 3px; background: var(--primary); border-radius: 0 2px 2px 0; }
+.menu-item .mi { width: 20px; margin-right: 10px; text-align: center; font-size: 16px; opacity: 0.7; }
+.menu-item.active .mi { opacity: 1; }
+.menu-item.plugin-item .mi { color: var(--primary); }
+.sider-footer { padding: 12px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary); text-align: center; }
+
+.main { margin-left: var(--sider-width); flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+.header { height: var(--header-height); background: var(--bg-container); box-shadow: var(--shadow-header); display: flex; align-items: center; padding: 0 16px; position: sticky; top: 0; z-index: 5; }
+.header-breadcrumb { font-size: 14px; color: var(--text-secondary); }
+.header-breadcrumb span { color: var(--text-base); }
+.header-right { margin-left: auto; display: flex; align-items: center; gap: 16px; }
+.header-avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--primary-light); display: flex; align-items: center; justify-content: center; font-size: 14px; color: var(--primary); font-weight: 500; }
+
+.content { flex: 1; padding: 16px; }
+
+/* Page Header */
+.page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.page-title { font-size: 18px; font-weight: 600; }
+
+/* Search Bar */
+.search-card { background: var(--bg-container); border-radius: var(--radius-card); box-shadow: var(--shadow-card); padding: 16px; margin-bottom: 16px; }
+.search-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.search-input, .search-select { height: 34px; border: 1px solid var(--border); border-radius: var(--radius); padding: 0 12px; font-size: 14px; color: var(--text-base); outline: none; transition: border-color 0.2s; background: var(--bg-container); }
+.search-input:focus, .search-select:focus { border-color: var(--primary); }
+.search-input { width: 280px; }
+.search-select { width: 140px; }
+.search-btn { height: 34px; padding: 0 16px; border: none; border-radius: var(--radius); font-size: 14px; cursor: pointer; transition: all 0.2s; }
+.search-btn.primary { background: var(--primary); color: #fff; }
+.search-btn.primary:hover { background: var(--primary-hover); }
+.search-btn.default { background: var(--bg-container); border: 1px solid var(--border); color: var(--text-base); }
+.search-btn.default:hover { border-color: var(--primary); color: var(--primary); }
+
+/* Category Tabs */
+.category-tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.category-tab { padding: 6px 16px; border-radius: 20px; font-size: 13px; cursor: pointer; background: var(--bg-container); border: 1px solid var(--border); color: var(--text-base); transition: all 0.2s; }
+.category-tab:hover { border-color: var(--primary); color: var(--primary); }
+.category-tab.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+
+/* Plugin Grid */
+.plugin-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+.plugin-card { background: var(--bg-container); border-radius: var(--radius-card); box-shadow: var(--shadow-card); padding: 20px; cursor: pointer; transition: all 0.2s; border: 1px solid transparent; }
+.plugin-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-color: var(--primary); transform: translateY(-2px); }
+.plugin-card-header { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 12px; }
+.plugin-icon { width: 48px; height: 48px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 24px; flex-shrink: 0; }
+.plugin-icon.crm { background: linear-gradient(135deg, #667eea, #764ba2); color: #fff; }
+.plugin-icon.report { background: linear-gradient(135deg, #f093fb, #f5576c); color: #fff; }
+.plugin-icon.notice { background: linear-gradient(135deg, #4facfe, #00f2fe); color: #fff; }
+.plugin-icon.inventory { background: linear-gradient(135deg, #43e97b, #38f9d7); color: #fff; }
+.plugin-icon.attendance { background: linear-gradient(135deg, #fa709a, #fee140); color: #fff; }
+.plugin-icon.contract { background: linear-gradient(135deg, #a18cd1, #fbc2eb); color: #fff; }
+.plugin-icon.hrm { background: linear-gradient(135deg, #fccb90, #d57eeb); color: #fff; }
+.plugin-icon.finance { background: linear-gradient(135deg, #30cfd0, #330867); color: #fff; }
+.plugin-info { flex: 1; min-width: 0; }
+.plugin-name { font-size: 15px; font-weight: 600; margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plugin-author { font-size: 12px; color: var(--text-secondary); }
+.plugin-desc { font-size: 13px; color: var(--text-secondary); line-height: 1.5; margin-bottom: 12px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.plugin-meta { display: flex; align-items: center; justify-content: space-between; }
+.plugin-stats { display: flex; gap: 16px; font-size: 12px; color: var(--text-secondary); }
+.plugin-stats .stat { display: flex; align-items: center; gap: 4px; }
+.plugin-stats .star { color: var(--warning); }
+.plugin-action-btn { height: 30px; padding: 0 14px; border: 1px solid var(--primary); border-radius: var(--radius); background: transparent; color: var(--primary); font-size: 13px; cursor: pointer; transition: all 0.2s; }
+.plugin-action-btn:hover { background: var(--primary); color: #fff; }
+.plugin-action-btn.installed { border-color: var(--success); color: var(--success); }
+.plugin-action-btn.installed:hover { background: var(--success); color: #fff; }
+
+/* Tag */
+.tag { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+.tag.lowcode { background: rgba(100,108,255,0.08); color: var(--primary); }
+
+/* Pagination */
+.pagination { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 24px; }
+.page-btn { min-width: 32px; height: 32px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-container); display: flex; align-items: center; justify-content: center; font-size: 13px; cursor: pointer; transition: all 0.2s; padding: 0 8px; }
+.page-btn:hover { border-color: var(--primary); color: var(--primary); }
+.page-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+.page-btn.disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Empty state */
+.results-info { font-size: 13px; color: var(--text-secondary); margin-bottom: 12px; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <!-- Sidebar -->
+  <aside class="sider">
+    <div class="sider-logo">
+      <div class="icon">H</div>
+      <div class="title">Hohu Admin</div>
+    </div>
+    <nav class="sider-menu">
+      <div class="menu-group">
+        <div class="menu-item"><span class="mi">🏠</span> 首页</div>
+      </div>
+      <div class="menu-group">
+        <div class="menu-group-title">系统管理</div>
+        <div class="menu-item"><span class="mi">👥</span> 用户管理</div>
+        <div class="menu-item"><span class="mi">🛡️</span> 角色管理</div>
+        <div class="menu-item"><span class="mi">📋</span> 菜单管理</div>
+        <div class="menu-item"><span class="mi">📁</span> 部门管理</div>
+      </div>
+      <div class="menu-group">
+        <div class="menu-group-title">AI 助手</div>
+        <div class="menu-item"><span class="mi">💬</span> AI 对话</div>
+        <div class="menu-item"><span class="mi">⚙️</span> 模型配置</div>
+      </div>
+      <div class="menu-group">
+        <div class="menu-group-title">应用市场</div>
+        <div class="menu-item active"><span class="mi">🛒</span> 浏览市场</div>
+        <div class="menu-item"><span class="mi">📦</span> 已安装</div>
+      </div>
+      <div class="menu-group">
+        <div class="menu-group-title">插件（已安装）</div>
+        <div class="menu-item plugin-item"><span class="mi">💼</span> CRM 套件</div>
+        <div class="menu-item plugin-item"><span class="mi">📊</span> 数据报表</div>
+      </div>
+    </nav>
+    <div class="sider-footer">Hohu Admin v1.0.0</div>
+  </aside>
+
+  <!-- Main -->
+  <div class="main">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-breadcrumb">应用市场 / <span>浏览市场</span></div>
+      <div class="header-right">
+        <span style="font-size:14px;">管理员</span>
+        <div class="header-avatar">A</div>
+      </div>
+    </header>
+
+    <!-- Content -->
+    <div class="content">
+      <div class="page-header">
+        <h1 class="page-title">应用市场</h1>
+      </div>
+
+      <!-- Search -->
+      <div class="search-card">
+        <div class="search-row">
+          <input class="search-input" type="text" placeholder="搜索插件名称、描述、作者...">
+          <select class="search-select">
+            <option value="">全部分类</option>
+            <option>业务管理</option>
+            <option>数据分析</option>
+            <option>效率工具</option>
+            <option>人力资源</option>
+            <option>财务管理</option>
+          </select>
+          <select class="search-select">
+            <option value="">全部类型</option>
+            <option>低代码</option>
+          </select>
+          <button class="search-btn primary">搜索</button>
+          <button class="search-btn default">重置</button>
+        </div>
+      </div>
+
+      <!-- Category Tabs -->
+      <div class="category-tabs">
+        <div class="category-tab active">全部</div>
+        <div class="category-tab">业务管理</div>
+        <div class="category-tab">数据分析</div>
+        <div class="category-tab">效率工具</div>
+        <div class="category-tab">人力资源</div>
+        <div class="category-tab">财务管理</div>
+        <div class="category-tab">项目管理</div>
+      </div>
+
+      <div class="results-info">共找到 <strong>12</strong> 个插件</div>
+
+      <!-- Plugin Grid -->
+      <div class="plugin-grid">
+        <!-- Card 1 -->
+        <div class="plugin-card" onclick="location.href='02-plugin-detail.html'">
+          <div class="plugin-card-header">
+            <div class="plugin-icon crm">💼</div>
+            <div class="plugin-info">
+              <div class="plugin-name">CRM 客户管理套件</div>
+              <div class="plugin-author">zhangsan · <span class="tag lowcode">低代码</span></div>
+            </div>
+          </div>
+          <div class="plugin-desc">完整的客户关系管理解决方案，包含客户管理、订单跟踪、商品管理，支持多表关联和自定义表单。</div>
+          <div class="plugin-meta">
+            <div class="plugin-stats">
+              <div class="stat"><span class="star">★</span> 4.8</div>
+              <div class="stat">📥 1,234</div>
+            </div>
+            <button class="plugin-action-btn">安装</button>
+          </div>
+        </div>
+
+        <!-- Card 2 -->
+        <div class="plugin-card" onclick="location.href='02-plugin-detail.html'">
+          <div class="plugin-card-header">
+            <div class="plugin-icon report">📊</div>
+            <div class="plugin-info">
+              <div class="plugin-name">数据报表中心</div>
+              <div class="plugin-author">lisi · <span class="tag lowcode">低代码</span></div>
+            </div>
+          </div>
+          <div class="plugin-desc">灵活的数据报表生成工具，支持自定义数据源、图表展示和定时导出。</div>
+          <div class="plugin-meta">
+            <div class="plugin-stats">
+              <div class="stat"><span class="star">★</span> 4.5</div>
+              <div class="stat">📥 856</div>
+            </div>
+            <button class="plugin-action-btn">安装</button>
+          </div>
+        </div>
+
+        <!-- Card 3 -->
+        <div class="plugin-card" onclick="location.href='02-plugin-detail.html'">
+          <div class="plugin-card-header">
+            <div class="plugin-icon notice">🔔</div>
+            <div class="plugin-info">
+              <div class="plugin-name">智能通知中心</div>
+              <div class="plugin-author">wangwu · <span class="tag lowcode">低代码</span></div>
+            </div>
+          </div>
+          <div class="plugin-desc">多渠道消息通知管理，支持站内信、邮件、短信模板配置和发送记录追踪。</div>
+          <div class="plugin-meta">
+            <div class="plugin-stats">
+              <div class="stat"><span class="star">★</span> 4.3</div>
+              <div class="stat">📥 672</div>
+            </div>
+            <button class="plugin-action-btn installed">已安装</button>
+          </div>
+        </div>
+
+        <!-- Card 4 -->
+        <div class="plugin-card" onclick="location.href='02-plugin-detail.html'">
+          <div class="plugin-card-header">
+            <div class="plugin-icon inventory">📦</div>
+            <div class="plugin-info">
+              <div class="plugin-name">库存管理系统</div>
+              <div class="plugin-author">zhaoliu · <span class="tag lowcode">低代码</span></div>
+            </div>
+          </div>
+          <div class="plugin-desc">商品库存管理、入库出库记录、库存预警和盘点管理，适合中小型仓库。</div>
+          <div class="plugin-meta">
+            <div class="plugin-stats">
+              <div class="stat"><span class="star">★</span> 4.6</div>
+              <div class="stat">📥 543</div>
+            </div>
+            <button class="plugin-action-btn">安装</button>
+          </div>
+        </div>
+
+        <!-- Card 5 -->
+        <div class="plugin-card" onclick="location.href='02-plugin-detail.html'">
+          <div class="plugin-card-header">
+            <div class="plugin-icon attendance">⏰</div>
+            <div class="plugin-info">
+              <div class="plugin-name">考勤打卡管理</div>
+              <div class="plugin-author">hohu-official · <span class="tag lowcode">低代码</span></div>
+            </div>
+          </div>
+          <div class="plugin-desc">员工考勤打卡、请假审批、加班管理、月度考勤统计，支持多种排班模式。</div>
+          <div class="plugin-meta">
+            <div class="plugin-stats">
+              <div class="stat"><span class="star">★</span> 4.7</div>
+              <div class="stat">📥 2,108</div>
+            </div>
+            <button class="plugin-action-btn">安装</button>
+          </div>
+        </div>
+
+        <!-- Card 6 -->
+        <div class="plugin-card" onclick="location.href='02-plugin-detail.html'">
+          <div class="plugin-card-header">
+            <div class="plugin-icon contract">📝</div>
+            <div class="plugin-info">
+              <div class="plugin-name">合同管理助手</div>
+              <div class="plugin-author">chenqi · <span class="tag lowcode">低代码</span></div>
+            </div>
+          </div>
+          <div class="plugin-desc">合同全生命周期管理，从起草、审批、签署到归档，支持到期提醒和续签管理。</div>
+          <div class="plugin-meta">
+            <div class="plugin-stats">
+              <div class="stat"><span class="star">★</span> 4.2</div>
+              <div class="stat">📥 389</div>
+            </div>
+            <button class="plugin-action-btn">安装</button>
+          </div>
+        </div>
+
+        <!-- Card 7 -->
+        <div class="plugin-card" onclick="location.href='02-plugin-detail.html'">
+          <div class="plugin-card-header">
+            <div class="plugin-icon hrm">👤</div>
+            <div class="plugin-info">
+              <div class="plugin-name">人事档案管理</div>
+              <div class="plugin-author">sunba · <span class="tag lowcode">低代码</span></div>
+            </div>
+          </div>
+          <div class="plugin-desc">员工档案、入职离职、岗位变动、培训记录一体化管理，支持自定义字段扩展。</div>
+          <div class="plugin-meta">
+            <div class="plugin-stats">
+              <div class="stat"><span class="star">★</span> 4.4</div>
+              <div class="stat">📥 761</div>
+            </div>
+            <button class="plugin-action-btn">安装</button>
+          </div>
+        </div>
+
+        <!-- Card 8 -->
+        <div class="plugin-card" onclick="location.href='02-plugin-detail.html'">
+          <div class="plugin-card-header">
+            <div class="plugin-icon finance">💰</div>
+            <div class="plugin-info">
+              <div class="plugin-name">财务报销管理</div>
+              <div class="plugin-author">zhoujiu · <span class="tag lowcode">低代码</span></div>
+            </div>
+          </div>
+          <div class="plugin-desc">报销单据提交、审批流程、费用分类统计、预算管控，支持发票信息录入。</div>
+          <div class="plugin-meta">
+            <div class="plugin-stats">
+              <div class="stat"><span class="star">★</span> 4.1</div>
+              <div class="stat">📥 298</div>
+            </div>
+            <button class="plugin-action-btn">安装</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Pagination -->
+      <div class="pagination">
+        <div class="page-btn disabled">‹</div>
+        <div class="page-btn active">1</div>
+        <div class="page-btn">2</div>
+        <div class="page-btn">›</div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HITL 确认抽屉 - Hohu</title>
+<style>
+:root {
+  --primary: #4d6bfe; --primary-hover: #3b5ae0; --primary-light: rgba(77,107,254,0.08);
+  --success: #10b981; --success-light: rgba(16,185,129,0.08);
+  --warning: #f59e0b; --warning-light: rgba(245,158,11,0.10);
+  --warning-strong: #d97706;
+  --error: #ef4444; --error-light: rgba(239,68,68,0.08);
+  --neutral-strong: #6b7280; --neutral-light: rgba(107,114,128,0.10);
+  --bg-layout: #f5f7fb; --bg-container: #ffffff; --bg-embedded: #f4f4f5;
+  --bg-overlay: rgba(15, 23, 42, 0.5);
+  --text-base: #1f1f1f; --text-secondary: #6b7280; --text-tertiary: #9ca3af;
+  --border: #e5e7eb; --border-strong: #d1d5db;
+  --radius-sm: 6px; --radius-md: 8px; --radius-lg: 12px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  color: var(--text-base); background: var(--bg-layout); font-size: 14px; line-height: 1.5;
+}
+
+/* ============ Page header (intro) ============ */
+.intro { padding: 24px 32px 12px; max-width: 1200px; margin: 0 auto; }
+.intro h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+.intro p { color: var(--text-secondary); font-size: 13px; }
+.intro .legend { display: flex; gap: 16px; margin-top: 12px; flex-wrap: wrap; font-size: 12px; }
+.intro .legend span { display: inline-flex; align-items: center; gap: 4px; }
+.intro .legend .dot { width: 8px; height: 8px; border-radius: 50%; }
+
+/* ============ Scenario block ============ */
+.scenario { padding: 0 32px 32px; max-width: 1200px; margin: 0 auto; }
+.scenario-label { font-size: 12px; color: var(--text-tertiary); padding: 8px 12px; background: var(--bg-embedded); border-radius: 6px; margin-bottom: 16px; border-left: 3px solid var(--primary); display: flex; align-items: center; gap: 8px; }
+.scenario-label code { background: rgba(0,0,0,0.06); padding: 1px 6px; border-radius: 3px; font-size: 11px; font-family: 'Menlo', monospace; color: var(--text-secondary); }
+.scenario-label strong { color: var(--text-base); }
+
+/* ============ Mock background (faded chat behind drawer) ============ */
+.scene-stage { position: relative; height: 540px; background: var(--bg-layout); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
+.scene-stage::before {
+  content: '主聊天页（淡化展示，仅作位置参考）';
+  position: absolute; top: 12px; left: 16px; font-size: 11px; color: var(--text-tertiary);
+  background: rgba(255,255,255,0.7); padding: 2px 8px; border-radius: 4px;
+}
+.scene-stage .chat-bg {
+  position: absolute; inset: 28px 16px 16px;
+  background:
+    linear-gradient(135deg, transparent 0%, transparent 40%, rgba(77,107,254,0.04) 40%, rgba(77,107,254,0.04) 60%, transparent 60%) 0 0/40px 40px,
+    var(--bg-embedded);
+  border-radius: var(--radius-md);
+  opacity: 0.6;
+}
+.scene-stage .chat-bg::after {
+  content: '... 聊天消息区域 ...';
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  color: var(--text-tertiary); font-size: 13px;
+}
+
+/* ============ Drawer ============ */
+.drawer {
+  position: absolute;
+  top: 0; right: 0; bottom: 0;
+  width: 480px;
+  max-width: 90%;
+  background: var(--bg-container);
+  box-shadow: -8px 0 24px rgba(0,0,0,0.08);
+  display: flex;
+  flex-direction: column;
+  z-index: 2;
+  animation: slideIn 0.3s ease-out;
+}
+@keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
+
+.drawer-overlay {
+  position: absolute;
+  top: 0; left: 0; bottom: 0; right: 480px;
+  background: var(--bg-overlay);
+  z-index: 1;
+  border-radius: var(--radius-lg) 0 0 var(--radius-lg);
+}
+
+/* Drawer header */
+.drawer-header { padding: 18px 20px 14px; border-bottom: 1px solid var(--border); position: relative; }
+.drawer-header-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.drawer-close { position: absolute; top: 16px; right: 16px; width: 28px; height: 28px; border: none; background: transparent; cursor: pointer; color: var(--text-tertiary); border-radius: 4px; font-size: 16px; }
+.drawer-close:hover { background: var(--bg-embedded); color: var(--text-base); }
+.drawer-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
+.drawer-icon--warning { background: var(--warning-light); color: var(--warning-strong); }
+.drawer-icon--urgent { background: var(--error-light); color: var(--error); }
+.drawer-icon--success { background: var(--success-light); color: var(--success); }
+.drawer-icon--error { background: var(--error-light); color: var(--error); }
+.drawer-title-wrap { flex: 1; min-width: 0; }
+.drawer-eyebrow { font-size: 11px; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
+.drawer-title { font-size: 16px; font-weight: 600; font-family: 'Menlo', 'Consolas', monospace; word-break: break-all; }
+.drawer-subtitle { font-size: 13px; color: var(--text-secondary); margin-top: 2px; }
+
+.risk-tag { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+.risk-tag--high { background: var(--warning-light); color: var(--warning-strong); }
+.risk-tag--destructive { background: var(--error-light); color: var(--error); }
+.risk-tag--medium { background: var(--primary-light); color: var(--primary); }
+
+/* Countdown bar */
+.countdown-bar { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--warning-light); border-radius: var(--radius-sm); font-size: 12px; }
+.countdown-bar.urgent { background: var(--error-light); }
+.countdown-bar.expired { background: var(--neutral-light); }
+.countdown-bar .clock { font-size: 14px; }
+.countdown-bar .timer { font-family: 'Menlo', monospace; font-weight: 700; font-size: 14px; color: var(--warning-strong); }
+.countdown-bar.urgent .timer { color: var(--error); }
+.countdown-bar.expired .timer { color: var(--neutral-strong); }
+.countdown-bar .label { color: var(--text-secondary); }
+.countdown-bar.urgent .label { color: var(--error); font-weight: 500; }
+.countdown-progress { flex: 1; height: 4px; background: rgba(245,158,11,0.2); border-radius: 2px; overflow: hidden; margin: 0 8px; }
+.countdown-progress.urgent { background: rgba(239,68,68,0.2); }
+.countdown-progress .fill { height: 100%; background: var(--warning-strong); transition: width 0.3s; }
+.countdown-progress.urgent .fill { background: var(--error); }
+.countdown-progress.expired .fill { background: var(--neutral-strong); }
+
+/* Drawer body */
+.drawer-body { flex: 1; overflow-y: auto; padding: 16px 20px; }
+.section { margin-bottom: 18px; }
+.section:last-child { margin-bottom: 0; }
+.section-title { font-size: 11px; font-weight: 600; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+.section-title .badge { font-weight: 500; padding: 1px 6px; background: var(--bg-embedded); border-radius: 3px; text-transform: none; letter-spacing: 0; font-size: 10px; color: var(--text-secondary); }
+
+.llm-intent { padding: 10px 12px; background: var(--primary-light); border-left: 3px solid var(--primary); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; font-size: 13px; line-height: 1.6; color: var(--text-base); }
+.llm-intent .quote { color: var(--text-secondary); font-size: 11px; margin-bottom: 4px; }
+
+/* Param table */
+.param-table { width: 100%; font-size: 12px; border-collapse: collapse; background: var(--bg-embedded); border-radius: var(--radius-sm); overflow: hidden; }
+.param-table tr { border-bottom: 1px solid var(--border); }
+.param-table tr:last-child { border-bottom: none; }
+.param-table td { padding: 8px 12px; vertical-align: top; }
+.param-table td:first-child { width: 35%; color: var(--text-secondary); font-family: 'Menlo', monospace; font-size: 11px; }
+.param-table td:last-child { color: var(--text-base); word-break: break-all; }
+.param-table .masked { color: var(--text-tertiary); font-style: italic; font-family: monospace; font-size: 11px; }
+.param-table .id { font-family: 'Menlo', monospace; font-size: 11px; color: var(--text-secondary); }
+.param-table .diff { display: inline-flex; align-items: center; gap: 6px; }
+.param-table .diff .from { color: var(--text-tertiary); text-decoration: line-through; }
+.param-table .diff .arrow { color: var(--text-tertiary); }
+.param-table .diff .to { color: var(--success); font-weight: 500; }
+.param-table .added { background: var(--success-light); padding: 1px 4px; border-radius: 3px; color: var(--success); font-weight: 500; }
+
+/* Impact panel */
+.impact { padding: 12px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-container); }
+.impact-row { display: flex; gap: 8px; padding: 4px 0; font-size: 13px; align-items: flex-start; }
+.impact-row .ic { color: var(--warning-strong); margin-top: 2px; }
+.impact-row.warn .ic { color: var(--error); }
+.impact-row .k { color: var(--text-secondary); width: 110px; font-size: 12px; }
+.impact-row .v { color: var(--text-base); font-weight: 500; }
+.impact-row .v.warn { color: var(--error); }
+.impact-summary { display: flex; align-items: center; gap: 12px; padding: 10px 12px; background: var(--warning-light); border-radius: var(--radius-sm); font-size: 13px; margin-top: 8px; }
+.impact-summary.destructive { background: var(--error-light); }
+.impact-summary .count { font-size: 20px; font-weight: 700; font-family: 'Menlo', monospace; }
+.impact-summary.destructive .count { color: var(--error); }
+.impact-summary .count.warn { color: var(--warning-strong); }
+.impact-summary .desc { color: var(--text-secondary); font-size: 12px; }
+
+/* Warning box */
+.warn-box { padding: 10px 12px; background: var(--error-light); border-radius: var(--radius-sm); font-size: 12px; color: var(--text-base); display: flex; gap: 8px; }
+.warn-box .ic { color: var(--error); font-size: 14px; }
+.warn-box strong { color: var(--error); }
+
+/* Drawer footer */
+.drawer-footer { padding: 14px 20px; border-top: 1px solid var(--border); background: var(--bg-layout); display: flex; align-items: center; gap: 12px; }
+.drawer-footer .footer-hint { flex: 1; font-size: 11px; color: var(--text-tertiary); }
+.btn { height: 36px; padding: 0 18px; border-radius: var(--radius-sm); font-size: 13px; cursor: pointer; transition: all 0.15s; border: none; display: inline-flex; align-items: center; gap: 6px; font-weight: 500; }
+.btn-primary { background: var(--success); color: #fff; }
+.btn-primary:hover { background: #059669; }
+.btn-danger { background: var(--error); color: #fff; }
+.btn-danger:hover { background: #dc2626; }
+.btn-ghost { background: transparent; color: var(--text-secondary); border: 1px solid var(--border-strong); }
+.btn-ghost:hover { background: var(--bg-embedded); color: var(--text-base); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Post-confirm success state */
+.success-stamp { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: var(--success); color: #fff; border-radius: 12px; font-size: 12px; font-weight: 500; }
+
+/* Expired stamp */
+.expired-stamp { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: var(--neutral-strong); color: #fff; border-radius: 12px; font-size: 12px; font-weight: 500; }
+
+.nav-link { text-align: center; padding: 16px 0 32px; color: var(--text-tertiary); font-size: 12px; }
+.nav-link a { color: var(--primary); text-decoration: none; }
+</style>
+</head>
+<body>
+
+<div class="intro">
+  <h1>HITL 确认抽屉</h1>
+  <p>Phase 3 核心交互。LLM 调用 risk=high / destructive 的 tool 时，Gateway 在 SSE 流里 yield <code style="background: rgba(0,0,0,0.06); padding: 1px 6px; border-radius: 3px; font-family: monospace;">confirmation_required</code> 事件，前端弹出右侧抽屉等待用户决策。剩余 5 分钟 TTL，超时自动取消。</p>
+  <div class="legend">
+    <span><span class="dot" style="background: var(--warning-strong);"></span>等待确认（默认）</span>
+    <span><span class="dot" style="background: var(--error);"></span>紧急（&lt; 30s）/ destructive</span>
+    <span><span class="dot" style="background: var(--success);"></span>已确认</span>
+    <span><span class="dot" style="background: var(--neutral-strong);"></span>已取消/超时</span>
+  </div>
+</div>
+
+<!-- ============ 场景 1：high risk - 默认态 ============ -->
+<section class="scenario">
+  <div class="scenario-label">场景 1 · <strong>high risk 默认态</strong> · <code>user.update_dept</code> · 剩余 4:32 · 倒计时条琥珀色</div>
+
+  <div class="scene-stage">
+    <div class="chat-bg"></div>
+    <div class="drawer-overlay"></div>
+    <aside class="drawer">
+      <header class="drawer-header">
+        <button class="drawer-close">×</button>
+        <div class="drawer-header-row">
+          <div class="drawer-icon drawer-icon--warning">⚠</div>
+          <div class="drawer-title-wrap">
+            <div class="drawer-eyebrow">需要确认 · AI 工具调用</div>
+            <div class="drawer-title">user.update_dept</div>
+            <div class="drawer-subtitle">调整用户所属部门 · 写操作</div>
+          </div>
+        </div>
+        <span class="risk-tag risk-tag--high">⚡ High Risk</span>
+
+        <div class="countdown-bar" style="margin-top: 12px;">
+          <span class="clock">⏱</span>
+          <span class="timer">04:32</span>
+          <span class="label">剩余确认时间</span>
+          <div class="countdown-progress"><div class="fill" style="width: 90%;"></div></div>
+        </div>
+      </header>
+
+      <div class="drawer-body">
+        <div class="section">
+          <div class="section-title">AI 的意图</div>
+          <div class="llm-intent">
+            <div class="quote">用户说："把张三从开发部调到产品部"</div>
+            我打算调用 <code style="background: rgba(0,0,0,0.06); padding: 1px 4px; border-radius: 3px; font-family: monospace;">user.update_dept</code> 修改 1 个用户的部门归属，dry-run 已验证目标在你可见范围内。
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">参数 <span class="badge">只读 · 不可在此修改</span></div>
+          <table class="param-table">
+            <tr><td>user_id</td><td><span class="id">1234567890123456</span> <span style="color: var(--text-secondary);">· 张三</span></td></tr>
+            <tr><td>dept_id</td><td><span class="diff"><span class="from">开发部 (100)</span><span class="arrow">→</span><span class="to">产品部 (200)</span></span></td></tr>
+            <tr><td>effective_at</td><td>2026-07-02 14:32:43 (立即)</td></tr>
+          </table>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Dry-run 影响范围</div>
+          <div class="impact">
+            <div class="impact-row"><span class="ic">ℹ</span><span class="k">副作用</span><span class="v">关联的考勤归属 / 项目成员同步刷新</span></div>
+            <div class="impact-summary">
+              <span class="count warn">1</span>
+              <span class="desc">预计影响 1 个用户<br>会写入 <code style="background: rgba(0,0,0,0.06); padding: 0 4px; border-radius: 3px; font-family: monospace; font-size: 11px;">sys_operation_log</code>，可再次调用换回原部门</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">溯源</div>
+          <div style="font-size: 12px; color: var(--text-secondary); padding: 8px 10px; background: var(--bg-embedded); border-radius: 6px; font-family: 'Menlo', monospace;">
+            trace_id: <span style="color: var(--text-base);">tr_a1b2c3d4e5</span><br>
+            tool_call_id: <span style="color: var(--text-base);">tc_7f8e9d0c</span>
+          </div>
+        </div>
+      </div>
+
+      <footer class="drawer-footer">
+        <span class="footer-hint">确认后将立即执行。</span>
+        <button class="btn btn-ghost">取消（不执行）</button>
+        <button class="btn btn-primary">✓ 确认执行</button>
+      </footer>
+    </aside>
+  </div>
+</section>
+
+<!-- ============ 场景 2：destructive - 批量删除 ============ -->
+<section class="scenario">
+  <div class="scenario-label">场景 2 · <strong>destructive</strong> · <code>user.batch_delete</code> · 影响 47 行 · 顶部 + 影响范围红色警告</div>
+
+  <div class="scene-stage">
+    <div class="chat-bg"></div>
+    <div class="drawer-overlay"></div>
+    <aside class="drawer">
+      <header class="drawer-header">
+        <button class="drawer-close">×</button>
+        <div class="drawer-header-row">
+          <div class="drawer-icon drawer-icon--urgent">⛔</div>
+          <div class="drawer-title-wrap">
+            <div class="drawer-eyebrow" style="color: var(--error);">高危 · 不可逆操作</div>
+            <div class="drawer-title">user.batch_delete</div>
+            <div class="drawer-subtitle">批量删除用户 · destructive</div>
+          </div>
+        </div>
+        <span class="risk-tag risk-tag--destructive">⛔ Destructive</span>
+
+        <div class="countdown-bar urgent" style="margin-top: 12px;">
+          <span class="clock">⏱</span>
+          <span class="timer">02:14</span>
+          <span class="label">即将超时</span>
+          <div class="countdown-progress urgent"><div class="fill" style="width: 45%;"></div></div>
+        </div>
+      </header>
+
+      <div class="drawer-body">
+        <div class="section">
+          <div class="warn-box">
+            <span class="ic">⚠</span>
+            <div>
+              <strong>这是不可逆操作。</strong>
+              删除后用户记录会进入归档表 30 天，之后永久销毁。建议优先考虑"批量禁用"。
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">参数</div>
+          <table class="param-table">
+            <tr><td>user_ids</td><td>
+              <span class="id">1234567890123456</span> · 张三<br>
+              <span class="id">1234567890123457</span> · 李四<br>
+              <span class="id">1234567890123458</span> · 王五<br>
+              <span style="color: var(--text-tertiary); font-size: 11px;">…… 共 47 个 ID（点此展开）</span>
+            </td></tr>
+            <tr><td>reason</td><td>清理 2025 年度测试账号，已发公告</td></tr>
+          </table>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Dry-run 影响范围</div>
+          <div class="impact">
+            <div class="impact-row warn"><span class="ic">⚠</span><span class="k">行数</span><span class="v warn">47 个用户将被删除</span></div>
+            <div class="impact-row warn"><span class="ic">⚠</span><span class="k">关联数据</span><span class="v warn">12 条工单、3 个项目成员关系会一并清理</span></div>
+            <div class="impact-summary destructive">
+              <span class="count">47</span>
+              <span class="desc"><strong style="color: var(--error);">预计影响 47 个用户</strong><br>其中 3 个有未关闭工单</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <footer class="drawer-footer">
+        <span class="footer-hint" style="color: var(--error);">⚠ 不可逆，请二次确认。</span>
+        <button class="btn btn-ghost">取消</button>
+        <button class="btn btn-danger">⛔ 我已知晓，确认删除</button>
+      </footer>
+    </aside>
+  </div>
+</section>
+
+<!-- ============ 场景 3：紧急态 - 30 秒内 ============ -->
+<section class="scenario">
+  <div class="scenario-label">场景 3 · <strong>紧急态</strong> · 剩余 &lt; 30s · 倒计时条转红 · 按钮闪烁引导立即决策</div>
+
+  <div class="scene-stage">
+    <div class="chat-bg"></div>
+    <div class="drawer-overlay"></div>
+    <aside class="drawer">
+      <header class="drawer-header">
+        <button class="drawer-close">×</button>
+        <div class="drawer-header-row">
+          <div class="drawer-icon drawer-icon--urgent">⚠</div>
+          <div class="drawer-title-wrap">
+            <div class="drawer-eyebrow" style="color: var(--error);">即将超时</div>
+            <div class="drawer-title">role.bind_menus</div>
+            <div class="drawer-subtitle">给角色绑定菜单权限</div>
+          </div>
+        </div>
+        <span class="risk-tag risk-tag--destructive">⛔ Destructive</span>
+
+        <div class="countdown-bar urgent" style="margin-top: 12px;">
+          <span class="clock" style="animation: pulse 1s infinite;">⏱</span>
+          <span class="timer">00:18</span>
+          <span class="label" style="font-weight: 600;">立刻决策</span>
+          <div class="countdown-progress urgent"><div class="fill" style="width: 6%;"></div></div>
+        </div>
+      </header>
+
+      <div class="drawer-body">
+        <div class="section">
+          <div class="warn-box">
+            <span class="ic">⏰</span>
+            <div>超时后此 tool_call 会标记为 <code style="background: rgba(0,0,0,0.06); padding: 1px 4px; border-radius: 3px; font-family: monospace;">CONFIRMATION_EXPIRED_OR_NOT_FOUND</code>，需要重新发起对话。</div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">参数</div>
+          <table class="param-table">
+            <tr><td>role_code</td><td>dev_engineer</td></tr>
+            <tr><td>menu_ids</td><td><span class="added">+14 项</span> <span style="color: var(--text-tertiary); font-size: 11px;">（含 user:list / user:add / user:edit）</span></td></tr>
+          </table>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Dry-run 影响范围</div>
+          <div class="impact">
+            <div class="impact-row warn"><span class="ic">⚠</span><span class="k">影响</span><span class="v warn">12 个角色的用户菜单可见性发生变化</span></div>
+            <div class="impact-summary destructive">
+              <span class="count">14</span>
+              <span class="desc"><strong style="color: var(--error);">14 项权限将绑定到 12 个用户</strong></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <footer class="drawer-footer">
+        <button class="btn btn-ghost">取消</button>
+        <button class="btn btn-primary" style="background: var(--error); animation: pulse 1s infinite;">立即确认 (00:18)</button>
+      </footer>
+    </aside>
+  </div>
+</section>
+
+<!-- ============ 场景 4：已确认 ============ -->
+<section class="scenario">
+  <div class="scenario-label">场景 4 · <strong>已确认</strong> · 用户点确认后短暂展示 · 自动关闭后 SSE 流继续</div>
+
+  <div class="scene-stage">
+    <div class="chat-bg"></div>
+    <aside class="drawer">
+      <header class="drawer-header">
+        <div class="drawer-header-row">
+          <div class="drawer-icon drawer-icon--success">✓</div>
+          <div class="drawer-title-wrap">
+            <div class="drawer-eyebrow" style="color: var(--success);">已确认</div>
+            <div class="drawer-title">user.update_dept</div>
+            <div class="drawer-subtitle">操作已执行 · 即将关闭</div>
+          </div>
+        </div>
+        <div class="success-stamp">✓ 已执行 · 影响 1 行 · 156ms</div>
+      </header>
+
+      <div class="drawer-body" style="opacity: 0.6;">
+        <div class="section">
+          <div class="section-title">参数</div>
+          <table class="param-table">
+            <tr><td>user_id</td><td><span class="id">1234567890123456</span> · 张三</td></tr>
+            <tr><td>dept_id</td><td><span class="diff"><span class="from">开发部 (100)</span><span class="arrow">→</span><span class="to">产品部 (200)</span></span></td></tr>
+          </table>
+        </div>
+
+        <div class="section">
+          <div class="section-title">结果</div>
+          <div style="padding: 10px 12px; background: var(--success-light); border-radius: 6px; font-size: 13px;">
+            ✓ 已写入 <code style="background: rgba(0,0,0,0.06); padding: 1px 4px; border-radius: 3px; font-family: monospace; font-size: 11px;">sys_operation_log</code><br>
+            <span style="color: var(--text-secondary); font-size: 12px;">SSE 流继续输出后续消息……</span>
+          </div>
+        </div>
+      </div>
+
+      <footer class="drawer-footer" style="justify-content: center;">
+        <span style="font-size: 12px; color: var(--success);">✓ 操作完成，抽屉即将关闭</span>
+      </footer>
+    </aside>
+  </div>
+</section>
+
+<!-- ============ 场景 5：已超期 ============ -->
+<section class="scenario">
+  <div class="scenario-label">场景 5 · <strong>已超期</strong> · 5 分钟未决策 · 卡片转灰 · LLM 收到 <code>CONFIRMATION_EXPIRED_OR_NOT_FOUND</code></div>
+
+  <div class="scene-stage">
+    <div class="chat-bg"></div>
+    <aside class="drawer" style="background: var(--bg-embedded);">
+      <header class="drawer-header">
+        <div class="drawer-header-row">
+          <div class="drawer-icon" style="background: var(--neutral-light); color: var(--neutral-strong);">⌛</div>
+          <div class="drawer-title-wrap">
+            <div class="drawer-eyebrow" style="color: var(--neutral-strong);">已超时</div>
+            <div class="drawer-title" style="color: var(--text-secondary);">user.update_dept</div>
+            <div class="drawer-subtitle">5 分钟未确认，已自动取消</div>
+          </div>
+        </div>
+        <span class="expired-stamp">⌛ Expired</span>
+
+        <div class="countdown-bar expired" style="margin-top: 12px;">
+          <span class="clock">⏱</span>
+          <span class="timer">00:00</span>
+          <span class="label">已超时</span>
+        </div>
+      </header>
+
+      <div class="drawer-body" style="opacity: 0.7;">
+        <div class="section">
+          <div class="warn-box" style="background: var(--neutral-light); color: var(--text-base);">
+            <span class="ic" style="color: var(--neutral-strong);">⏰</span>
+            <div>为了安全，此 tool_call 已标记为过期，<strong style="color: var(--neutral-strong);">不会执行</strong>。如果你仍需调整，请重新发起请求。</div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">参数</div>
+          <table class="param-table">
+            <tr><td>user_id</td><td><span class="id">1234567890123456</span> · 张三</td></tr>
+            <tr><td>dept_id</td><td><span style="color: var(--text-tertiary);">开发部 → 产品部</span>（未执行）</td></tr>
+          </table>
+        </div>
+      </div>
+
+      <footer class="drawer-footer">
+        <button class="btn btn-ghost" style="flex: 1; justify-content: center;">关闭抽屉</button>
+      </footer>
+    </aside>
+  </div>
+</section>
+
+<!-- ============ 场景 6：用户拒绝 ============ -->
+<section class="scenario">
+  <div class="scenario-label">场景 6 · <strong>用户拒绝</strong> · 卡片转灰 · LLM 收到 <code>USER_REJECTED</code> 后切换引导模式</div>
+
+  <div class="scene-stage">
+    <div class="chat-bg"></div>
+    <aside class="drawer" style="background: var(--bg-embedded);">
+      <header class="drawer-header">
+        <div class="drawer-header-row">
+          <div class="drawer-icon" style="background: var(--neutral-light); color: var(--neutral-strong);">✕</div>
+          <div class="drawer-title-wrap">
+            <div class="drawer-eyebrow" style="color: var(--neutral-strong);">已取消</div>
+            <div class="drawer-title" style="color: var(--text-secondary);">user.update_dept</div>
+            <div class="drawer-subtitle">你拒绝了此操作 · 未执行</div>
+          </div>
+        </div>
+        <span class="expired-stamp">✕ Rejected</span>
+      </header>
+
+      <div class="drawer-body" style="opacity: 0.7;">
+        <div class="section">
+          <div class="warn-box" style="background: var(--neutral-light); color: var(--text-base);">
+            <span class="ic" style="color: var(--neutral-strong);">✕</span>
+            <div>AI 已收到取消信号，会询问你是否换个方式处理（如改为禁用、调整其他字段等）。</div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">参数</div>
+          <table class="param-table">
+            <tr><td>user_id</td><td><span class="id">1234567890123456</span> · 张三</td></tr>
+            <tr><td>dept_id</td><td><span style="color: var(--text-tertiary);">开发部 → 产品部</span>（未执行）</td></tr>
+          </table>
+        </div>
+      </div>
+
+      <footer class="drawer-footer">
+        <button class="btn btn-ghost" style="flex: 1; justify-content: center;">关闭</button>
+      </footer>
+    </aside>
+  </div>
+</section>
+
+<!-- ============ 场景 7：敏感字段（reset_password） ============ -->
+<section class="scenario">
+  <div class="scenario-label">场景 7 · <strong>敏感字段隐藏</strong> · <code>user.reset_password</code> · LLM schema 不含 password 参数 · 抽屉里 password 显示"系统生成"</div>
+
+  <div class="scene-stage">
+    <div class="chat-bg"></div>
+    <div class="drawer-overlay"></div>
+    <aside class="drawer">
+      <header class="drawer-header">
+        <button class="drawer-close">×</button>
+        <div class="drawer-header-row">
+          <div class="drawer-icon drawer-icon--warning">🔐</div>
+          <div class="drawer-title-wrap">
+            <div class="drawer-eyebrow">需要确认 · 含敏感操作</div>
+            <div class="drawer-title">user.reset_password</div>
+            <div class="drawer-subtitle">重置用户密码</div>
+          </div>
+        </div>
+        <span class="risk-tag risk-tag--high">⚡ High Risk</span>
+
+        <div class="countdown-bar" style="margin-top: 12px;">
+          <span class="clock">⏱</span>
+          <span class="timer">03:42</span>
+          <span class="label">剩余确认时间</span>
+          <div class="countdown-progress"><div class="fill" style="width: 75%;"></div></div>
+        </div>
+      </header>
+
+      <div class="drawer-body">
+        <div class="section">
+          <div class="section-title">参数 <span class="badge">password 不在签名中</span></div>
+          <table class="param-table">
+            <tr><td>user_id</td><td><span class="id">1234567890123456</span> · 张三</td></tr>
+            <tr><td>notify_channel</td><td>email</td></tr>
+            <tr><td>password</td><td><span class="masked">（系统生成 · 不展示）</span></td></tr>
+          </table>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Dry-run 影响范围</div>
+          <div class="impact">
+            <div class="impact-row warn"><span class="ic">⚠</span><span class="k">副作用</span><span class="v">旧密码立即失效 · 临时密码发至 zhang***@example.com</span></div>
+            <div class="impact-summary">
+              <span class="count warn">1</span>
+              <span class="desc">影响 1 个用户<br>密码本身不会回传 LLM 或写入前端日志</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <footer class="drawer-footer">
+        <span class="footer-hint">临时密码将通过邮件发送给用户。</span>
+        <button class="btn btn-ghost">取消</button>
+        <button class="btn btn-primary">✓ 确认重置</button>
+      </footer>
+    </aside>
+  </div>
+</section>
+
+<div class="nav-link">
+  ↑ 7 个场景覆盖 HITL 抽屉的完整生命周期<br>
+  <a href="12-ai-chat-tool-call.html">← 上一页：tool-call 渲染</a> &nbsp; | &nbsp;
+  <a href="14-ai-clarification.html">→ 下一页：AI 主动反问</a>
+</div>
+
+<style>
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+</style>
+
+</body>
+</html>

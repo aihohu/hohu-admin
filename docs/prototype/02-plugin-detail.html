@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CRM 客户管理套件 - 插件详情 - Hohu</title>
+<style>
+:root {
+  --primary: #646cff; --primary-hover: #747bff; --primary-light: rgba(100,108,255,0.08);
+  --success: #52c41a; --warning: #faad14; --error: #f5222d; --info: #2080f0;
+  --bg-layout: rgb(247, 250, 252); --bg-container: rgb(255, 255, 255);
+  --text-base: rgb(31, 31, 31); --text-secondary: rgb(118, 118, 118);
+  --border: rgb(226, 226, 226); --radius: 6px; --radius-card: 8px;
+  --shadow-card: 0 1px 2px 0 rgba(0,0,0,0.05); --shadow-header: 0 1px 2px rgb(0, 21, 41, 0.08);
+  --shadow-sider: 2px 0 8px 0 rgb(29, 35, 41, 0.05);
+  --sider-width: 220px; --header-height: 56px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: var(--text-base); background: var(--bg-layout); }
+.layout { display: flex; min-height: 100vh; }
+.sider { width: var(--sider-width); background: var(--bg-container); box-shadow: var(--shadow-sider); position: fixed; top: 0; left: 0; bottom: 0; z-index: 10; display: flex; flex-direction: column; }
+.sider-logo { height: var(--header-height); display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid var(--border); }
+.sider-logo .icon { width: 32px; height: 32px; background: var(--primary); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: bold; font-size: 16px; }
+.sider-logo .title { font-size: 16px; font-weight: bold; color: var(--primary); margin-left: 8px; }
+.sider-menu { flex: 1; padding: 8px 0; overflow-y: auto; }
+.menu-group { margin-bottom: 4px; }
+.menu-group-title { padding: 8px 16px; font-size: 12px; color: var(--text-secondary); }
+.menu-item { display: flex; align-items: center; padding: 0 16px; height: 40px; cursor: pointer; font-size: 14px; color: var(--text-base); transition: all 0.2s; position: relative; }
+.menu-item:hover { background: var(--primary-light); color: var(--primary); }
+.menu-item.active { color: var(--primary); background: var(--primary-light); }
+.menu-item.active::before { content: ''; position: absolute; left: 0; top: 4px; bottom: 4px; width: 3px; background: var(--primary); border-radius: 0 2px 2px 0; }
+.menu-item .mi { width: 20px; margin-right: 10px; text-align: center; font-size: 16px; opacity: 0.7; }
+.menu-item.active .mi { opacity: 1; }
+.sider-footer { padding: 12px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary); text-align: center; }
+.main { margin-left: var(--sider-width); flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+.header { height: var(--header-height); background: var(--bg-container); box-shadow: var(--shadow-header); display: flex; align-items: center; padding: 0 16px; position: sticky; top: 0; z-index: 5; }
+.header-breadcrumb { font-size: 14px; color: var(--text-secondary); }
+.header-breadcrumb a { color: var(--text-secondary); text-decoration: none; }
+.header-breadcrumb a:hover { color: var(--primary); }
+.header-breadcrumb span { color: var(--text-base); }
+.header-right { margin-left: auto; display: flex; align-items: center; gap: 16px; }
+.header-avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--primary-light); display: flex; align-items: center; justify-content: center; font-size: 14px; color: var(--primary); font-weight: 500; }
+.content { flex: 1; padding: 16px; }
+
+/* Plugin Detail */
+.detail-header { background: var(--bg-container); border-radius: var(--radius-card); box-shadow: var(--shadow-card); padding: 24px; margin-bottom: 16px; display: flex; gap: 24px; align-items: flex-start; }
+.detail-icon { width: 72px; height: 72px; border-radius: 16px; background: linear-gradient(135deg, #667eea, #764ba2); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 36px; flex-shrink: 0; }
+.detail-info { flex: 1; }
+.detail-title { font-size: 22px; font-weight: 700; margin-bottom: 4px; }
+.detail-author { font-size: 14px; color: var(--text-secondary); margin-bottom: 12px; }
+.detail-author a { color: var(--primary); text-decoration: none; }
+.detail-tags { display: flex; gap: 8px; margin-bottom: 16px; }
+.tag { display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 4px; font-size: 12px; }
+.tag.lowcode { background: rgba(100,108,255,0.08); color: var(--primary); }
+.tag.version { background: rgba(82,196,26,0.08); color: var(--success); }
+.tag.license { background: rgba(32,128,240,0.08); color: var(--info); }
+.detail-stats { display: flex; gap: 24px; }
+.stat-item { text-align: center; }
+.stat-value { font-size: 20px; font-weight: 600; color: var(--text-base); }
+.stat-label { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+.stars { color: var(--warning); font-size: 16px; letter-spacing: 2px; }
+.detail-actions { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; min-width: 120px; }
+.btn { height: 36px; padding: 0 20px; border-radius: var(--radius); font-size: 14px; cursor: pointer; transition: all 0.2s; border: none; display: inline-flex; align-items: center; gap: 6px; }
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-hover); }
+.btn-success { background: var(--success); color: #fff; }
+.btn-success:hover { opacity: 0.9; }
+.btn-warning { background: var(--warning); color: #fff; }
+.btn-outline { background: var(--bg-container); border: 1px solid var(--border); color: var(--text-base); }
+.btn-outline:hover { border-color: var(--primary); color: var(--primary); }
+.btn-sm { height: 30px; padding: 0 14px; font-size: 13px; }
+
+/* Content Grid */
+.detail-grid { display: grid; grid-template-columns: 1fr 320px; gap: 16px; }
+.card { background: var(--bg-container); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
+.card-header { padding: 16px 20px; border-bottom: 1px solid var(--border); font-size: 15px; font-weight: 600; }
+.card-body { padding: 20px; }
+
+/* Readme */
+.readme h2 { font-size: 16px; font-weight: 600; margin: 20px 0 8px; }
+.readme h2:first-child { margin-top: 0; }
+.readme p { font-size: 14px; line-height: 1.8; color: var(--text-secondary); margin-bottom: 12px; }
+.readme ul { padding-left: 20px; margin-bottom: 12px; }
+.readme li { font-size: 14px; line-height: 1.8; color: var(--text-secondary); }
+.readme code { background: var(--bg-layout); padding: 2px 6px; border-radius: 3px; font-size: 13px; color: var(--primary); }
+
+/* Screenshots */
+.screenshots { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 16px; }
+.screenshot { aspect-ratio: 16/10; background: var(--bg-layout); border-radius: var(--radius); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; color: var(--text-secondary); font-size: 13px; }
+
+/* Sidebar cards */
+.sidebar-card { background: var(--bg-container); border-radius: var(--radius-card); box-shadow: var(--shadow-card); margin-bottom: 16px; }
+.sidebar-card-header { padding: 14px 16px; border-bottom: 1px solid var(--border); font-size: 14px; font-weight: 600; }
+.sidebar-card-body { padding: 16px; }
+.info-row { display: flex; justify-content: space-between; padding: 8px 0; font-size: 13px; border-bottom: 1px solid var(--bg-layout); }
+.info-row:last-child { border-bottom: none; }
+.info-label { color: var(--text-secondary); }
+.info-value { color: var(--text-base); font-weight: 500; }
+
+/* Version Table */
+.version-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.version-table th { text-align: left; padding: 10px 12px; background: var(--bg-layout); color: var(--text-secondary); font-weight: 500; border-bottom: 1px solid var(--border); }
+.version-table td { padding: 10px 12px; border-bottom: 1px solid var(--bg-layout); }
+.version-table tr:hover td { background: var(--primary-light); }
+.badge { display: inline-flex; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
+.badge-current { background: rgba(82,196,26,0.08); color: var(--success); }
+.badge-old { background: var(--bg-layout); color: var(--text-secondary); }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sider">
+    <div class="sider-logo"><div class="icon">H</div><div class="title">Hohu Admin</div></div>
+    <nav class="sider-menu">
+      <div class="menu-group"><div class="menu-item"><span class="mi">🏠</span> 首页</div></div>
+      <div class="menu-group">
+        <div class="menu-group-title">系统管理</div>
+        <div class="menu-item"><span class="mi">👥</span> 用户管理</div>
+        <div class="menu-item"><span class="mi">🛡️</span> 角色管理</div>
+      </div>
+      <div class="menu-group">
+        <div class="menu-group-title">应用市场</div>
+        <div class="menu-item active"><span class="mi">🛒</span> 浏览市场</div>
+        <div class="menu-item"><span class="mi">📦</span> 已安装</div>
+      </div>
+      <div class="menu-group">
+        <div class="menu-group-title">插件（已安装）</div>
+        <div class="menu-item"><span class="mi">💼</span> CRM 套件</div>
+      </div>
+    </nav>
+    <div class="sider-footer">Hohu Admin v1.0.0</div>
+  </aside>
+
+  <div class="main">
+    <header class="header">
+      <div class="header-breadcrumb"><a href="01-marketplace-browse.html">应用市场</a> / <span>CRM 客户管理套件</span></div>
+      <div class="header-right"><span style="font-size:14px;">管理员</span><div class="header-avatar">A</div></div>
+    </header>
+
+    <div class="content">
+      <!-- Detail Header -->
+      <div class="detail-header">
+        <div class="detail-icon">💼</div>
+        <div class="detail-info">
+          <h1 class="detail-title">CRM 客户管理套件</h1>
+          <div class="detail-author">作者：<a href="#">zhangsan</a> · zhangsan-crm-suite</div>
+          <div class="detail-tags">
+            <span class="tag lowcode">低代码</span>
+            <span class="tag version">v1.2.0</span>
+            <span class="tag license">MIT</span>
+          </div>
+          <div class="detail-stats">
+            <div class="stat-item">
+              <div class="stat-value">4.8</div>
+              <div class="stars">★★★★★</div>
+              <div class="stat-label">评分 (128)</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-value">1,234</div>
+              <div class="stat-label">下载量</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-value">3</div>
+              <div class="stat-label">数据表</div>
+            </div>
+            <div class="stat-item">
+              <div class="stat-value">5</div>
+              <div class="stat-label">页面</div>
+            </div>
+          </div>
+        </div>
+        <div class="detail-actions">
+          <button class="btn btn-primary" onclick="location.href='10-install-approval.html'">安装插件</button>
+          <button class="btn btn-outline btn-sm">下载 ZIP</button>
+        </div>
+      </div>
+
+      <!-- Content Grid -->
+      <div class="detail-grid">
+        <!-- Left: Main content -->
+        <div>
+          <!-- Screenshots -->
+          <div class="card" style="margin-bottom:16px;">
+            <div class="card-header">截图预览</div>
+            <div class="card-body">
+              <div class="screenshots">
+                <div class="screenshot">客户列表页截图</div>
+                <div class="screenshot">客户表单页截图</div>
+                <div class="screenshot">订单列表页截图</div>
+                <div class="screenshot">商品列表页截图</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- README -->
+          <div class="card" style="margin-bottom:16px;">
+            <div class="card-header">功能介绍</div>
+            <div class="card-body readme">
+              <h2>概述</h2>
+              <p>CRM 客户管理套件是一个完整的客户关系管理解决方案，通过低代码配置实现零代码部署。包含客户信息管理、订单跟踪和商品管理三大模块。</p>
+
+              <h2>功能特性</h2>
+              <ul>
+                <li><strong>客户管理</strong> — 完整的客户信息录入、分类管理、等级划分（A/B/C 级）</li>
+                <li><strong>订单跟踪</strong> — 订单创建与状态流转（待支付 → 已支付 → 已完成），自动关联客户</li>
+                <li><strong>商品管理</strong> — 商品信息维护，支持多字段自定义</li>
+                <li><strong>多表关联</strong> — 订单自动关联客户名称，列表页直接展示</li>
+                <li><strong>数据校验</strong> — 基于 JSON Schema 的表单验证，必填、长度、格式校验</li>
+              </ul>
+
+              <h2>数据模型</h2>
+              <p>插件包含 3 个数据模型：</p>
+              <ul>
+                <li><code>customer</code> — 客户信息（名称、等级、联系方式、备注）</li>
+                <li><code>order</code> — 订单记录（客户关联、金额、状态）</li>
+                <li><code>product</code> — 商品信息（名称、价格、库存）</li>
+              </ul>
+
+              <h2>权限说明</h2>
+              <p>本插件声明了以下权限：</p>
+              <ul>
+                <li>菜单注入：注入侧边栏菜单项</li>
+              </ul>
+              <p>低代码插件不执行任意代码，安全性由平台保障。</p>
+            </div>
+          </div>
+
+          <!-- Version History -->
+          <div class="card">
+            <div class="card-header">版本历史</div>
+            <div class="card-body" style="padding:0;">
+              <table class="version-table">
+                <thead>
+                  <tr><th>版本</th><th>更新内容</th><th>发布时间</th><th>状态</th></tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><strong>v1.2.0</strong></td>
+                    <td>新增商品库存字段，优化订单状态流转</td>
+                    <td>2026-05-28</td>
+                    <td><span class="badge badge-current">当前版本</span></td>
+                  </tr>
+                  <tr>
+                    <td>v1.1.0</td>
+                    <td>添加客户等级分类（A/B/C），增加数据导出功能</td>
+                    <td>2026-05-15</td>
+                    <td><span class="badge badge-old">历史版本</span></td>
+                  </tr>
+                  <tr>
+                    <td>v1.0.0</td>
+                    <td>首次发布：客户管理、订单管理、商品管理</td>
+                    <td>2026-05-01</td>
+                    <td><span class="badge badge-old">历史版本</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: Sidebar -->
+        <div>
+          <div class="sidebar-card">
+            <div class="sidebar-card-header">插件信息</div>
+            <div class="sidebar-card-body">
+              <div class="info-row"><span class="info-label">类型</span><span class="info-value">低代码</span></div>
+              <div class="info-row"><span class="info-label">版本</span><span class="info-value">1.2.0</span></div>
+              <div class="info-row"><span class="info-label">大小</span><span class="info-value">12.3 KB</span></div>
+              <div class="info-row"><span class="info-label">兼容</span><span class="info-value">≥ 1.0.0</span></div>
+              <div class="info-row"><span class="info-label">协议</span><span class="info-value">MIT</span></div>
+              <div class="info-row"><span class="info-label">作者</span><span class="info-value">zhangsan</span></div>
+              <div class="info-row"><span class="info-label">主页</span><span class="info-value" style="color:var(--primary);">GitHub</span></div>
+            </div>
+          </div>
+
+          <div class="sidebar-card">
+            <div class="sidebar-card-header">包含页面</div>
+            <div class="sidebar-card-body">
+              <div class="info-row"><span class="info-label">客户列表</span><span class="info-value">表格</span></div>
+              <div class="info-row"><span class="info-label">客户表单</span><span class="info-value">表单</span></div>
+              <div class="info-row"><span class="info-label">订单列表</span><span class="info-value">表格</span></div>
+              <div class="info-row"><span class="info-label">商品列表</span><span class="info-value">表格</span></div>
+              <div class="info-row"><span class="info-label">商品表单</span><span class="info-value">表单</span></div>
+            </div>
+          </div>
+
+          <div class="sidebar-card">
+            <div class="sidebar-card-header">评分与评论</div>
+            <div class="sidebar-card-body">
+              <div style="text-align:center; margin-bottom:12px;">
+                <div style="font-size:32px; font-weight:700; color:var(--text-base);">4.8</div>
+                <div style="color:var(--warning); font-size:16px;">★★★★★</div>
+                <div style="font-size:12px; color:var(--text-secondary); margin-top:4px;">128 条评分</div>
+              </div>
+              <div style="border-top:1px solid var(--border); padding-top:12px;">
+                <div style="font-size:13px; margin-bottom:8px;"><strong>张经理</strong> <span style="color:var(--warning);">★★★★★</span></div>
+                <div style="font-size:13px; color:var(--text-secondary); line-height:1.6;">非常好用，满足我们公司基本的客户管理需求，低代码配置很方便。</div>
+              </div>
+              <div style="border-top:1px solid var(--border); padding-top:12px; margin-top:12px;">
+                <div style="font-size:13px; margin-bottom:8px;"><strong>李总</strong> <span style="color:var(--warning);">★★★★☆</span></div>
+                <div style="font-size:13px; color:var(--text-secondary); line-height:1.6;">功能完善，期待后续支持自定义报表。</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

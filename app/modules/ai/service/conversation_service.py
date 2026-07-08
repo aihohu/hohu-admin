@@ -2,6 +2,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundException
+from app.modules.ai.agents.gateway.redact import redact_secrets
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.schemas.conversation import ConversationCreate, ConversationUpdate
@@ -77,7 +78,10 @@ class ConversationService:
     async def get_messages(
         self, db: AsyncSession, conversation_id: int, user_id: int
     ) -> list[AiMessage]:
-        """获取会话的所有历史消息"""
+        """获取会话的所有历史消息
+
+        spec §7.4: 加载时再 scrub 一次，防早期版本（脱敏上线前）的脏数据
+        """
         await self.get_by_id(db, conversation_id, user_id)  # 验证权限
         stmt = (
             select(AiMessage)
@@ -85,7 +89,12 @@ class ConversationService:
             .order_by(AiMessage.create_time.asc())
         )
         result = await db.execute(stmt)
-        return list(result.scalars().all())
+        messages = list(result.scalars().all())
+        # 防 §7.4 越权回灌：历史消息加载时再 scrub
+        for msg in messages:
+            if msg.content:
+                msg.content = redact_secrets(msg.content)
+        return messages
 
     async def save_message(
         self,
@@ -98,7 +107,13 @@ class ConversationService:
         tokens_output: int | None = None,
         parts: list[dict] | None = None,
     ) -> AiMessage:
-        """保存一条消息"""
+        """保存一条消息
+
+        spec §7.4: 用户输入保存前先 redact_secrets，防 LLM 上下文回灌
+        """
+        if role == "user" and content:
+            content = redact_secrets(content)
+
         msg = AiMessage(
             conversation_id=conversation_id,
             role=role,

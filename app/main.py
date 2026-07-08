@@ -1,3 +1,4 @@
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -12,9 +13,15 @@ from app.core.scheduler import scheduler_manager
 from app.db.session import AsyncSessionLocal
 from app.middleware.audit_middleware import AuditLogMiddleware
 from app.middleware.rate_limit_middleware import RateLimitMiddleware
+from app.modules.ai.agents.hitl.manager import hitl_manager
+from app.modules.ai.agents.tools import load_builtin_tools
+from app.modules.ai.agents.tools.registry import ToolRegistry, ToolRegistryError
 from app.modules.ai.api.chat import router as ai_chat_router
+from app.modules.ai.api.confirm import router as ai_confirm_router
 from app.modules.ai.api.conversation import router as ai_conversation_router
+from app.modules.ai.api.operation_log import router as ai_operation_log_router
 from app.modules.ai.api.provider import router as ai_provider_router
+from app.modules.ai.api.query_cache import router as ai_query_cache_router
 from app.modules.auth.api import router as auth_router
 from app.modules.job.api.job import router as job_router
 from app.modules.job.api.job_log import router as job_log_router
@@ -43,6 +50,31 @@ from app.modules.system.api.user import router as user_router
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """应用生命周期管理"""
+    # spec §8.4 单 worker 约束：HITL 进程内 asyncio.Event 在多 worker 下静默失效。
+    # 部署文档（docs/AI-DEPLOYMENT.md，Phase 4 交付）必须同步约束 uvicorn --workers 1。
+    if settings.WEB_CONCURRENCY > 1 and settings.AI_HITL_MODE == "memory":
+        raise RuntimeError(
+            f"WEB_CONCURRENCY={settings.WEB_CONCURRENCY} 与 AI_HITL_MODE=memory 冲突："
+            "MVP HITL 用进程内 asyncio.Event，多 worker 下会静默失效。"
+            "请设 WEB_CONCURRENCY=1，或等 v1.5+ 切 AI_HITL_MODE=redis_pubsub。"
+        )
+
+    # spec §3 启动扫描：触发各业务模块 @ai_tool 装饰器注册到 ToolRegistry，
+    # 校验 agent_code / permission_code 在 DB 存在
+    load_builtin_tools()
+    try:
+        async with AsyncSessionLocal() as db:
+            await ToolRegistry.get().validate_on_startup(db)
+    except ToolRegistryError as e:
+        # 启动校验失败：tool 引用了不存在的 agent_code / permission_code
+        # 不阻断启动（业务方可能正在迭代），仅日志告警
+        logging.getLogger("app.ai").error("AI Tool Registry 启动校验失败: %s", e)
+
+    # spec §8.4 启动清扫：服务重启 = 所有挂起的 SSE 流已断，
+    # asyncio.Event 已丢，Redis 残留 pending 必须清扫避免 stale。
+    if settings.AI_HITL_MODE == "memory":
+        await hitl_manager.cleanup_pending_on_startup()
+
     # 仅在嵌入式（开发）模式下随 API 启停调度器。
     # 生产模式下调度器由独立的 `app.scheduler_worker` 进程承担，
     # 通过 Redis pub/sub 与本进程通信。
@@ -91,8 +123,15 @@ app.include_router(
 )
 app.include_router(login_log_router, prefix="/system/login-log", tags=["登录日志"])
 app.include_router(ai_chat_router, prefix="/ai/chat", tags=["AI对话"])
+app.include_router(ai_confirm_router, prefix="/ai/confirm", tags=["AI HITL 确认"])
 app.include_router(ai_conversation_router, prefix="/ai/conversation", tags=["AI会话"])
 app.include_router(ai_provider_router, prefix="/ai/provider", tags=["AI提供商"])
+app.include_router(
+    ai_operation_log_router, prefix="/ai/operation-log", tags=["AI 操作日志"]
+)
+app.include_router(
+    ai_query_cache_router, prefix="/ai/query-cache", tags=["AI chip 跳转回放"]
+)
 # Marketplace（注册顺序：developer/admin 先注册，避免被 marketplace 抢匹配）
 app.include_router(
     marketplace_developer_router,

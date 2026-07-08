@@ -23,9 +23,13 @@ def _reset_redis_client() -> None:
 
 @pytest.fixture
 async def db_session() -> AsyncSession:
+    """每个测试独立 session，结束后强制 rollback 外层事务（绝不落库）。"""
     _reset_redis_client()
-    async with AsyncSessionLocal() as session:
-        async with session.begin():
-            yield session
-            await session.rollback()
+    async with engine.connect() as conn:
+        outer = await conn.begin()
+        try:
+            async with AsyncSessionLocal(bind=conn) as session:
+                yield session
+        finally:
+            await outer.rollback()
     await engine.dispose()

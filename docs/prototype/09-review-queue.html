@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>审核队列 - Hohu</title>
+<style>
+:root {
+  --primary: #646cff; --primary-hover: #747bff; --primary-light: rgba(100,108,255,0.08);
+  --success: #52c41a; --warning: #faad14; --error: #f5222d; --info: #2080f0;
+  --bg-layout: rgb(247, 250, 252); --bg-container: rgb(255, 255, 255);
+  --text-base: rgb(31, 31, 31); --text-secondary: rgb(118, 118, 118);
+  --border: rgb(226, 226, 226); --radius: 6px; --radius-card: 8px;
+  --shadow-card: 0 1px 2px 0 rgba(0,0,0,0.05); --shadow-header: 0 1px 2px rgb(0, 21, 41, 0.08);
+  --shadow-sider: 2px 0 8px 0 rgb(29, 35, 41, 0.05);
+  --sider-width: 220px; --header-height: 56px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: var(--text-base); background: var(--bg-layout); }
+.layout { display: flex; min-height: 100vh; }
+.sider { width: var(--sider-width); background: var(--bg-container); box-shadow: var(--shadow-sider); position: fixed; top: 0; left: 0; bottom: 0; z-index: 10; display: flex; flex-direction: column; }
+.sider-logo { height: var(--header-height); display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid var(--border); }
+.sider-logo .icon { width: 32px; height: 32px; background: var(--primary); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: bold; font-size: 16px; }
+.sider-logo .title { font-size: 16px; font-weight: bold; color: var(--primary); margin-left: 8px; }
+.sider-menu { flex: 1; padding: 8px 0; overflow-y: auto; }
+.menu-group { margin-bottom: 4px; }
+.menu-group-title { padding: 8px 16px; font-size: 12px; color: var(--text-secondary); }
+.menu-item { display: flex; align-items: center; padding: 0 16px; height: 40px; cursor: pointer; font-size: 14px; color: var(--text-base); transition: all 0.2s; position: relative; }
+.menu-item:hover { background: var(--primary-light); color: var(--primary); }
+.menu-item.active { color: var(--primary); background: var(--primary-light); }
+.menu-item.active::before { content: ''; position: absolute; left: 0; top: 4px; bottom: 4px; width: 3px; background: var(--primary); border-radius: 0 2px 2px 0; }
+.menu-item .mi { width: 20px; margin-right: 10px; text-align: center; font-size: 16px; opacity: 0.7; }
+.menu-item.active .mi { opacity: 1; }
+.sider-footer { padding: 12px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary); text-align: center; }
+.main { margin-left: var(--sider-width); flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+.header { height: var(--header-height); background: var(--bg-container); box-shadow: var(--shadow-header); display: flex; align-items: center; padding: 0 16px; position: sticky; top: 0; z-index: 5; }
+.header-breadcrumb { font-size: 14px; color: var(--text-secondary); }
+.header-breadcrumb span { color: var(--text-base); }
+.header-right { margin-left: auto; display: flex; align-items: center; gap: 16px; }
+.header-avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--primary-light); display: flex; align-items: center; justify-content: center; font-size: 14px; color: var(--primary); font-weight: 500; }
+.content { flex: 1; padding: 16px; display: flex; flex-direction: column; gap: 16px; min-height: 500px; }
+
+/* Card */
+.card { background: var(--bg-container); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
+.card-header { padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); }
+.card-title { font-size: 15px; font-weight: 600; }
+.card-body { padding: 0; }
+
+/* Stats */
+.stats-row { display: flex; gap: 16px; }
+.stat-chip { display: flex; align-items: center; gap: 6px; padding: 10px 16px; background: var(--bg-container); border-radius: var(--radius-card); box-shadow: var(--shadow-card); font-size: 13px; }
+.stat-chip .num { font-size: 18px; font-weight: 700; }
+.stat-chip .label { color: var(--text-secondary); }
+.stat-chip.pending .num { color: var(--warning); }
+.stat-chip.approved .num { color: var(--success); }
+.stat-chip.rejected .num { color: var(--error); }
+
+/* Search */
+.search-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.search-input, .search-select { height: 34px; border: 1px solid var(--border); border-radius: var(--radius); padding: 0 12px; font-size: 14px; color: var(--text-base); outline: none; background: var(--bg-container); }
+.search-input:focus, .search-select:focus { border-color: var(--primary); }
+.search-input { width: 240px; }
+.search-select { width: 140px; }
+.search-btn { height: 34px; padding: 0 16px; border: none; border-radius: var(--radius); font-size: 14px; cursor: pointer; }
+.search-btn.primary { background: var(--primary); color: #fff; }
+.search-btn.primary:hover { background: var(--primary-hover); }
+.search-btn.default { background: var(--bg-container); border: 1px solid var(--border); color: var(--text-base); }
+
+/* Table */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+thead th { text-align: left; padding: 12px 16px; background: var(--bg-layout); color: var(--text-secondary); font-weight: 500; border-bottom: 1px solid var(--border); }
+tbody td { padding: 12px 16px; border-bottom: 1px solid var(--bg-layout); }
+tbody tr { cursor: pointer; }
+tbody tr:hover td { background: var(--primary-light); }
+
+/* Status */
+.status-tag { display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 10px; font-size: 12px; }
+.status-pending { background: rgba(250,173,20,0.1); color: var(--warning); }
+.status-approved { background: rgba(82,196,26,0.08); color: var(--success); }
+.status-rejected { background: rgba(245,34,45,0.08); color: var(--error); }
+.status-tag::before { content: ''; width: 6px; height: 6px; border-radius: 50%; margin-right: 6px; }
+.status-pending::before { background: var(--warning); }
+.status-approved::before { background: var(--success); }
+.status-rejected::before { background: var(--error); }
+
+/* Risk */
+.risk-low { color: var(--success); font-weight: 500; }
+.risk-medium { color: var(--warning); font-weight: 500; }
+.risk-high { color: var(--error); font-weight: 500; }
+.risk-pending { color: var(--text-secondary); }
+
+/* Type tag */
+.type-tag { display: inline-flex; padding: 1px 8px; border-radius: 4px; font-size: 12px; background: rgba(100,108,255,0.08); color: var(--primary); }
+
+/* Buttons */
+.btn { height: 34px; padding: 0 16px; border-radius: var(--radius); font-size: 13px; cursor: pointer; transition: all 0.2s; border: none; display: inline-flex; align-items: center; gap: 6px; }
+.btn-outline { background: var(--bg-container); border: 1px solid var(--border); color: var(--text-base); }
+.btn-outline:hover { border-color: var(--primary); color: var(--primary); }
+
+/* Pagination */
+.pagination { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; }
+.pagination-info { font-size: 13px; color: var(--text-secondary); }
+.pagination-btns { display: flex; gap: 6px; }
+.page-btn { min-width: 32px; height: 32px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-container); display: flex; align-items: center; justify-content: center; font-size: 13px; cursor: pointer; padding: 0 8px; }
+.page-btn:hover { border-color: var(--primary); color: var(--primary); }
+.page-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+
+/* Priority badge */
+.priority-badge { display: inline-flex; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+.priority-urgent { background: rgba(245,34,45,0.08); color: var(--error); }
+.priority-normal { background: var(--bg-layout); color: var(--text-secondary); }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sider">
+    <div class="sider-logo"><div class="icon">H</div><div class="title">Hohu Admin</div></div>
+    <nav class="sider-menu">
+      <div class="menu-group"><div class="menu-item"><span class="mi">🏠</span> 首页</div></div>
+      <div class="menu-group">
+        <div class="menu-group-title">系统管理</div>
+        <div class="menu-item"><span class="mi">👥</span> 用户管理</div>
+      </div>
+      <div class="menu-group">
+        <div class="menu-group-title">应用市场</div>
+        <div class="menu-item"><span class="mi">🛒</span> 浏览市场</div>
+        <div class="menu-item"><span class="mi">📦</span> 已安装</div>
+      </div>
+      <div class="menu-group">
+        <div class="menu-group-title">审核管理</div>
+        <div class="menu-item active"><span class="mi">✅</span> 审核队列</div>
+      </div>
+    </nav>
+    <div class="sider-footer">Hohu Admin v1.0.0</div>
+  </aside>
+
+  <div class="main">
+    <header class="header">
+      <div class="header-breadcrumb"><span>审核管理</span> / <span>审核队列</span></div>
+      <div class="header-right"><span style="font-size:14px;">审核员</span><div class="header-avatar">审</div></div>
+    </header>
+
+    <div class="content">
+      <!-- Stats -->
+      <div class="stats-row">
+        <div class="stat-chip pending"><div class="num">5</div><div class="label">待审核</div></div>
+        <div class="stat-chip approved"><div class="num">23</div><div class="label">已通过</div></div>
+        <div class="stat-chip rejected"><div class="num">4</div><div class="label">已驳回</div></div>
+      </div>
+
+      <!-- Search -->
+      <div class="card">
+        <div style="padding:16px 20px;">
+          <div class="search-row">
+            <input class="search-input" type="text" placeholder="插件名称、Slug、开发者">
+            <select class="search-select">
+              <option value="">全部状态</option>
+              <option>待审核</option>
+              <option>已通过</option>
+              <option>已驳回</option>
+            </select>
+            <select class="search-select">
+              <option value="">AI 风险</option>
+              <option>低</option>
+              <option>中</option>
+              <option>高</option>
+            </select>
+            <button class="search-btn primary">搜索</button>
+            <button class="search-btn default">重置</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Table -->
+      <div class="card" style="flex:1;display:flex;flex-direction:column;">
+        <div class="card-header">
+          <div class="card-title">审核队列</div>
+        </div>
+        <div class="card-body" style="flex:1;">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>插件名称</th>
+                  <th>Slug</th>
+                  <th>类型</th>
+                  <th>版本</th>
+                  <th>开发者</th>
+                  <th>AI 风险</th>
+                  <th>规则检查</th>
+                  <th>提交时间</th>
+                  <th>优先级</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr onclick="location.href='09-review-management.html'">
+                  <td><strong>库存管理系统</strong></td>
+                  <td style="font-family:monospace;font-size:12px;color:var(--text-secondary);">zhangsan-inventory</td>
+                  <td><span class="type-tag">低代码</span></td>
+                  <td>v2.0.0</td>
+                  <td>zhangsan</td>
+                  <td><span class="risk-low">低</span></td>
+                  <td><span style="color:var(--success);">✅ 通过</span></td>
+                  <td>2026-06-01 14:32</td>
+                  <td><span class="priority-badge priority-normal">普通</span></td>
+                </tr>
+                <tr onclick="location.href='09-review-management.html'">
+                  <td><strong>财务报表生成器</strong></td>
+                  <td style="font-family:monospace;font-size:12px;color:var(--text-secondary);">lisi-finance-report</td>
+                  <td><span class="type-tag">低代码</span></td>
+                  <td>v1.0.0</td>
+                  <td>lisi</td>
+                  <td><span class="risk-medium">中</span></td>
+                  <td><span style="color:var(--warning);">⚠️ 有警告</span></td>
+                  <td>2026-06-01 10:15</td>
+                  <td><span class="priority-badge priority-urgent">优先</span></td>
+                </tr>
+                <tr onclick="location.href='09-review-management.html'">
+                  <td><strong>员工满意度调查</strong></td>
+                  <td style="font-family:monospace;font-size:12px;color:var(--text-secondary);">wangwu-survey</td>
+                  <td><span class="type-tag">低代码</span></td>
+                  <td>v1.0.0</td>
+                  <td>wangwu</td>
+                  <td><span class="risk-low">低</span></td>
+                  <td><span style="color:var(--success);">✅ 通过</span></td>
+                  <td>2026-05-30 16:20</td>
+                  <td><span class="priority-badge priority-normal">普通</span></td>
+                </tr>
+                <tr onclick="location.href='09-review-management.html'">
+                  <td><strong>会议室预约</strong></td>
+                  <td style="font-family:monospace;font-size:12px;color:var(--text-secondary);">hohu-meeting-room</td>
+                  <td><span class="type-tag">低代码</span></td>
+                  <td>v1.0.0</td>
+                  <td>hohu-official</td>
+                  <td><span class="risk-low">低</span></td>
+                  <td><span style="color:var(--success);">✅ 通过</span></td>
+                  <td>2026-05-29 09:00</td>
+                  <td><span class="priority-badge priority-normal">普通</span></td>
+                </tr>
+                <tr onclick="location.href='09-review-management.html'">
+                  <td><strong>邮件营销助手</strong></td>
+                  <td style="font-family:monospace;font-size:12px;color:var(--text-secondary);">chenqi-email-mkt</td>
+                  <td><span class="type-tag">低代码</span></td>
+                  <td>v1.0.0</td>
+                  <td>chenqi</td>
+                  <td><span class="risk-pending">待检查</span></td>
+                  <td><span style="color:var(--text-secondary);">待检查</span></td>
+                  <td>2026-06-02 08:45</td>
+                  <td><span class="priority-badge priority-normal">普通</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="pagination">
+          <div class="pagination-info">共 5 条</div>
+          <div class="pagination-btns">
+            <div class="page-btn active">1</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

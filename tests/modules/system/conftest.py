@@ -28,10 +28,18 @@ def _reset_redis_client() -> None:
 
 @pytest.fixture
 async def db_session() -> AsyncSession:
-    """每个测试独立 session，结束回滚不污染其他测试。"""
+    """每个测试独立 session，结束后强制 rollback 外层事务（绝不落库）。
+
+    Outer-transaction 模式：session 绑定到手动管理的外层事务，session.commit()
+    只提交 savepoint，fixture 退出时强制 outer.rollback() 撤销一切。本 fixture
+    不做任何 DELETE / TRUNCATE。
+    """
     _reset_redis_client()
-    async with AsyncSessionLocal() as session:
-        async with session.begin():
-            yield session
-            await session.rollback()
+    async with engine.connect() as conn:
+        outer = await conn.begin()
+        try:
+            async with AsyncSessionLocal(bind=conn) as session:
+                yield session
+        finally:
+            await outer.rollback()
     await engine.dispose()
