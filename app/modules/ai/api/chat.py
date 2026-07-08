@@ -25,12 +25,15 @@ from pydantic_ai.usage import UsageLimits
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.redis import redis_client
 from app.db.session import get_db
 from app.modules.ai.agents.hitl.events import (
+    AiErrorEvent,
     AiStreamEvent,
     DoneEvent,
     event_to_sse_data,
 )
+from app.modules.ai.agents.safety.auto_disable import check_user_disabled
 from app.modules.ai.agents.safety.injection_detector import detect_injection
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.conversation_service import conversation_service
@@ -197,6 +200,28 @@ async def chat(
     # 构造完整 ChatDeps（spec §4.6 + §17.2）
     deps = await chat_service.build_chat_deps(db, _current_user)
     deps.conversation_id = conversation_id
+
+    # §11.4 用户级自动禁用短路：被禁用时 emit ai_error + done，流结束
+    if await check_user_disabled(redis_client, _current_user.user_id):
+        logger.warning(
+            "user auto-disabled blocked chat",
+            extra={
+                "user_id": _current_user.user_id,
+                "user_name": _current_user.user_name,
+                "conversation_id": conversation_id,
+            },
+        )
+
+        async def _disabled_stream():
+            yield _format_sse_chunk(
+                AiErrorEvent(
+                    error_code="AI_USER_AUTO_DISABLED",
+                    message="AI 功能已被自动禁用（24h），如非本人操作请联系管理员",
+                )
+            )
+            yield _format_sse_chunk(DoneEvent())
+
+        return StreamingResponse(_disabled_stream(), media_type=SSE_CONTENT_TYPE)
 
     # §11.1 prompt injection 检测（命中 → execute_tool 强制 HITL）
     deps.injection_hit = detect_injection(user_message)

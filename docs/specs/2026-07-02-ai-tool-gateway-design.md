@@ -1570,6 +1570,8 @@ Service 层 `JobService.update()` 加 schema 级白名单，即使 tool 漏洞�
   - **阈值配置化**：阈值走 `system_config.ai:auto_disable:perm_denied_per_hour`（默认 50），不再硬编码
   - **NAT 网络豁免**：`system_config.ai:ip_allowlist`（JSON 字符串数组）中的 IP 命中阈值时只告警不拉黑——企业办公网常全员走单一出口 IP，硬拉黑会误伤整个公司
 
+**✅ Phase 4 实现用户级（2026-07-08）**：`app/modules/ai/agents/safety/auto_disable.py`（`record_injection` Redis INCR + 阈值判定 + 超管豁免；`check_user_disabled` 入口短路检查）。Redis key 设计：`ai:injection:cnt:{user_id}:{hour_bucket}`（计数，TTL 2h）+ `ai:user_disabled:{user_id}`（禁用 flag，TTL 24h）。阈值硬编码 MVP（INJECTION_THRESHOLD_PER_HOUR=5，DISABLE_DURATION_SEC=24h）。executor 在 `deps.injection_hit=True` 时调 `record_injection(redis_client, deps.user)`；chat.py 入口在 `build_chat_deps` 后调 `check_user_disabled` 短路返回 `AiErrorEvent(AI_USER_AUTO_DISABLED)` + Done 流。`tests/modules/ai/test_auto_disable.py` 16 测试（计数 + TTL + 阈值 + 超管豁免 + 用户隔离 + hour_bucket 隔离，fakeredis 隔离）。**未含 v2+**：单 IP mass_permission_denied 自动拉黑（依赖 `system_config.ai:auto_disable:perm_denied_per_hour` + `ai:ip_allowlist` NAT 豁免）+ Prometheus 告警集成（`ai_super_admin_injection_alert`）。
+
 ### 11.5 开源 SECURITY.md 前置声明
 
 `docs/SECURITY.md` 加一节，明确：

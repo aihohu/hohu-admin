@@ -54,6 +54,7 @@ from app.modules.ai.agents.hitl.events import (
 )
 from app.modules.ai.agents.hitl.manager import hitl_manager
 from app.modules.ai.agents.hitl.risk import classify_execution_mode
+from app.modules.ai.agents.safety.auto_disable import record_injection
 from app.modules.ai.agents.tools.registry import RegisteredTool, ToolRegistry
 from app.modules.ai.core.context import ChatDeps, build_tool_context
 from app.modules.ai.service.operation_log_service import operation_log_service
@@ -225,6 +226,10 @@ async def execute_tool(
         ),
     )
     log_id = await _start_log(deps, registered, tool_call_id, args_hash, summary, mode)
+
+    # §11.4 用户级 injection 自动禁用（命中 ≥5/h 且非超管 → 禁用 24h）
+    if deps.injection_hit:
+        await record_injection(redis_client, deps.user)
 
     # 7. HITL 分支
     if mode == AiExecutionMode.HITL:

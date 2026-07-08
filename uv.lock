@@ -784,6 +784,19 @@ wheels = [
 ]
 
 [[package]]
+name = "fakeredis"
+version = "2.36.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "redis" },
+    { name = "sortedcontainers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0a/ed/86ed74d8829c3bc565025c1c9efaf8518c9165fbf8c9cc2c026c8ed21bd9/fakeredis-2.36.2.tar.gz", hash = "sha256:c37a0b307fae3f27ec7c19e59519e57b8c52782e00303df9075361b5ba441be6", size = 213336, upload-time = "2026-06-17T13:25:38.934Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fd/4d/e6e40f93031adbf654d34e542bd396e9f3bc1c6209b40c920d58c9e1317a/fakeredis-2.36.2-py3-none-any.whl", hash = "sha256:84cbb9c74ca8946c0d2499daadf3a5d0bfe3cfbac71e3398316d1a1eab3421c4", size = 141039, upload-time = "2026-06-17T13:25:36.638Z" },
+]
+
+[[package]]
 name = "fastapi"
 version = "0.135.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1343,6 +1356,9 @@ dependencies = [
 dev = [
     { name = "pre-commit" },
 ]
+test = [
+    { name = "fakeredis" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -1366,6 +1382,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [{ name = "pre-commit", specifier = ">=4.6.0" }]
+test = [{ name = "fakeredis", specifier = ">=2.36.0" }]
 
 [[package]]
 name = "httpcore"
@@ -3275,6 +3292,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/7a/d0/91bd3d2e54ea849e8c4e73681ef75c1c93f37a8c9f0627b1553522267e08/snowflake_id-1.0.2.tar.gz", hash = "sha256:4a4cd49508599aaa16488311f4b9121e9ac3bac57edff3e9f71b1d79086dbfe8", size = 4497, upload-time = "2024-04-17T13:36:05.552Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/41/a4/ee0bdba1d1e98db21166381559d0061d752bbf66af2dd1cbbe4c2afdc4fa/snowflake_id-1.0.2-py3-none-any.whl", hash = "sha256:c3142752ed334b9d4632739a704461d13e97aa6fa71b65d5329829b4b5cc058c", size = 4795, upload-time = "2024-04-17T13:36:03.898Z" },
+]
+
+[[package]]
+name = "sortedcontainers"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e8/c4/ba2f8066cceb6f23394729afe52f3bf7adec04bf9ed2c820b39e19299111/sortedcontainers-2.4.0.tar.gz", hash = "sha256:25caa5a06cc30b6b83d11423433f65d1f9d76c4c6a0c90e3379eaa43b9bfdb88", size = 30594, upload-time = "2021-05-16T22:03:42.897Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/32/46/9cb0e58b2deb7f82b84065f37f3bffeb12413f947f9388e4cac22c4621ce/sortedcontainers-2.4.0-py2.py3-none-any.whl", hash = "sha256:a163dcaede0f1c021485e957a39245190e74249897e2ae4b2aa38595db237ee0", size = 29575, upload-time = "2021-05-16T22:03:41.177Z" },
 ]
 
 [[package]]
