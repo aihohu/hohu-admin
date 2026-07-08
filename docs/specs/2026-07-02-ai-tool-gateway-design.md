@@ -1973,8 +1973,8 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 > ✅ **Plan 1.4 已完成（2026-07-03）**: system 模块聚合 tool — `app/modules/system/ai_tools.py`（`user.count` / `user.stats` / `user.distinct`，按 §5.5 用 `allowed_filters=("status","user_gender")` + `allowed_group_by=("user_gender","status")` + `max_groups=20/50`）+ `app/modules/ai/agents/tools/stats_validator.py`（`validate_filters_in_whitelist` / `validate_group_by_in_whitelist` / `validate_field_in_whitelist`，越界字段抛 `AI_STATS_FIELD_NOT_ALLOWED`）+ `load_builtin_tools()` 启动扫描入口（spec §3）+ 28 个测试（13 单元 + 15 集成，含 data_scope.filters 拼到 WHERE 验证）。
 > ⚠️ **Plan 1.5 gap**: `chat_agent` 重写（不接 HITL）+ 单元 + 集成测试覆盖 Registry + 鉴权矩阵 #1-#7
 > ✅ **Plan 1.5a/b/c/d 已完成（2026-07-04）**: PydanticAI 包装层 + 启动接入 + chat.py 端点改造 — `app/modules/ai/agents/tools/pydantic_ai_wrapper.py`（`wrap_tool_for_pydantic_ai` 动态注入 `RunContext[ChatDeps]` 签名 + 独立 `AsyncSessionLocal` 事务隔离）+ `app/main.py` lifespan 接入 `load_builtin_tools()` + `validate_on_startup(db)`（校验失败仅日志告警，不阻断启动）+ 删除旧 `system_tools.py`（spec §17.2）+ `chat_service.build_chat_deps()` 凑齐完整 ChatDeps（user / perms / data_scope / agent / trace_id）+ `attach_trace_to_conversation` 写 trace_id+agent_code 到 ai_conversation + `/ai/chat` 端点切换到新 ChatDeps + 删除 `/ai/chat/sync` 端点（spec §17.2 统一流式）+ 17 个单元测试（10 wrapper + 7 chat_service）。
-> ⚠️ **Plan 1.5e 部分完成（2026-07-07）**: 鉴权矩阵 #1-#7 端到端测试 — `tests/modules/ai/test_authz_matrix.py` 覆盖 #1/#2/#3/#4/#5/#6（6 case）+ #7 `pytest.mark.skip` 留 Phase 4。直接调 `execute_tool` 收集 SSE 事件，autonomous 路径断言「无 confirmation_required + result.ok=True」，HITL 路径 mock `hitl_manager.hang` 立即 APPROVED + 断言事件含 `ConfirmationRequiredEvent`；#5 用 `compute_available_tools` 断言 perms 过滤后 tool 不可见；#6 tool fn 内调 `ensure_targets_in_scope` 抛 `AI_DATA_SCOPE_VIOLATION` 验证 short-circuit + 业务异常路径。**未含**：#7 改权限码 + 非超管 → `AI_SUPER_ADMIN_REQUIRED`（Phase 4 实现 super_admin_only gate 后补）。
-> ⚠️ **Plan 2.7 部分完成（2026-07-07）**: 鉴权矩阵 #8-#10 端到端测试 — `test_authz_matrix.py` 覆盖 #8/#9（2 case）+ #10 `pytest.mark.skip` 留 Phase 4。#8 验证 `hitl_always=True` 强制 HITL（low risk 也走 HITL）；#9 预填 Redis `ai:quota:{user_id}:{date}` 到 limit 后断言 short-circuit 返回 `AI_DAILY_QUOTA_EXHAUSTED`。**未含**：#10 prompt injection 命中（Phase 4 实现注入检测器后补）。
+> ✅ **Plan 1.5e 已完成（2026-07-08）**: 鉴权矩阵 #1-#7 端到端测试 — `tests/modules/ai/test_authz_matrix.py` 全 7 case 覆盖（直接调 `execute_tool` 收集 SSE 事件，autonomous 路径断言「无 confirmation_required + result.ok=True」，HITL 路径 mock `hitl_manager.hang` 立即 APPROVED + 断言事件含 `ConfirmationRequiredEvent`；#5 用 `compute_available_tools` 断言 perms 过滤后 tool 不可见；#6 tool fn 内调 `ensure_targets_in_scope` 抛 `AI_DATA_SCOPE_VIOLATION` 验证 short-circuit + 业务异常路径；#7 Phase 4 完成 super_admin gate 双 case 验证 `AI_SUPER_ADMIN_REQUIRED`）。
+> ✅ **Plan 2.7 已完成（2026-07-08）**: 鉴权矩阵 #8-#10 端到端测试 — `test_authz_matrix.py` 全 3 case 覆盖（#8 验证 `hitl_always=True` 强制 HITL；#9 预填 Redis `ai:quota:{user_id}:{date}` 到 limit 后断言 short-circuit 返回 `AI_DAILY_QUOTA_EXHAUSTED`；#10 Phase 4 完成 injection detector 命中后强制 HITL + 验证 `ai_operation_log.is_security_event=True` 落库）。
 >
 > ⚠️ **Plan 2 gap**: Phase 2 鉴权 + 敏感数据
 > ✅ **Plan 2.1/2.2/2.3 已完成（2026-07-04）**: Gateway Executor 骨架 — `app/modules/ai/agents/gateway/`（`executor.py` `execute_tool(name, args, deps)` 统一入口，tool 存在性 + 功能鉴权 + 独立 session + 异常转 `ToolResult`；`targets.py` `ensure_targets_in_scope` list 版数据鉴权 helper 抛 `AI_DATA_SCOPE_VIOLATION`；`result.py` `ToolResult.success/failure` 标准化容器）+ 17 个单元测试（ToolResult / ensure_targets 7 类边界 / execute_tool 含 tool not found / perm denied / 业务异常 / 鉴权异常 / 未预期异常 全覆盖）。**未含**：风险分级判定 / 容量三层（L1 速率 / L2 配额 / L3 超时） / 连续失败兜底 / HITL 触发 / 敏感数据脱敏（§7）/ SAFETY_PREAMBLE（§7.6）。
@@ -1994,3 +1994,103 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 > ✅ **Plan 3.5 已完成（2026-07-08）**: §12 卡片视觉增强 + §8.7 chip 跳转回放 — (1) §12 卡片视觉：`events.py` 加 `risk`/`duration_ms`/`affected_rows`/`trace_id` 字段 + `event_to_sse_data` 改显式 camelCase 构造（修了后端 snake_case / 前端 camelCase 不一致 bug）；executor emit 时透传 risk=meta.risk + 计算 duration_ms + `_infer_affected_rows` 推断（dry_run_count 优先 → dict `affected_count`/`count`/`groups_count` 等 → list 长度 → None）；前端 `chat-tool-call.vue` 完整重写：3px 状态色条 + 中文 desc 字典 + risk chip + 状态文本「已执行 · 230ms · 1 行」+ chevron 折叠/展开 + pulse 动画 + dark theme。(2) §12 场景 4/5 HITL 内联 bar：`chat-tool-call.vue` 加 `isPending`/`pendingExpiresAt` props + `approve`/`reject` emits + pending 黄色状态（icon ⚠ + dot pulse + 状态文本「等待你确认」）+ 倒计时（基于 expiresAt，每秒更新，<30s urgent 红色）+ 「立即确认」/「取消」按钮；`chat-main.vue` toolCallCards computed 关联 `pendingConfirmation.toolCallId`。(3) §12 场景 13 stats 三 tab：新建 `chat-tool-stats-tabs.vue`（150 行，table/bar/pie 三 tab + ECharts tree-shake 手动 use）+ user_gender 字段友好映射（1→男/2→女/null→未知）；chat-tool-call 检测 `started.tool === 'user.stats'` 渲染 stats tabs 替代普通 result pre。(4) §8.7 chip 跳转回放：events.py `ToolCallStartedEvent` 加 `trace_id` 字段（前端据此构造 chip URL）；`chat-tool-call.vue` readonly tool（user.list/count/distinct）成功后渲染 chip 链接（→ `/system/user?ai_query_id=<trace_id>`）；`user/index.vue` onMounted 检测 `?ai_query_id` 调 `fetchAiQueryCache` 拿 filters，按 `EnableStatus`/`UserGender` 类型守卫映射到 searchParams 触发 `getData()`；`app/modules/system/ai_tools.py` 给 `user.count`/`user.distinct` 加 `query_cache_module="system/user"`（stats 不加，数据已在卡片内）。端到端验证：触发 `user.count(status='1')` → Redis hash 写入 `filters={status:"1"}` + chip 渲染 → 点 chip 跳转 → onMounted 调 query-cache → searchParams.status='1' → getData 带 status=1 → 表格只显示启用用户。**未含**：role/dept 业务模块页 URL 回放（v1.5+）/ chip 跳转 trace_id TTL 5min 过期后无 fallback 提示。
 
 完成时按 CLAUDE.md 规则改写为 `✅ Plan N 已完成（YYYY-MM-DD）` 并补充决策记录。
+
+---
+
+## 20. MVP 完整性盘点（2026-07-08 稳定阶段汇总）
+
+### ✅ MVP 完整版（已交付 + 测试覆盖）
+
+| 模块 | 完成项 | 测试覆盖 |
+|---|---|---|
+| **Phase 1 地基** | `@ai_tool` 装饰器 + ToolRegistry + AiToolMeta + 3 张新表（`ai_agent` / `role_ai_agent` / `ai_operation_log`）+ ALTER 现有表 + 7 个内置 Agent seed + ChatDeps/AiToolContext/data_scope_loader | 100+ 单测 |
+| **Phase 2 鉴权 + 敏感数据** | Gateway Executor 5 步流程 + ensure_targets_in_scope + L1/L2/L3 容量 + 连续失败兜底 + sensitive_input/output + redact_secrets + SAFETY_PREAMBLE 6 条规则 | 80+ 单测 |
+| **Phase 3 HITL + 流式** | HitlManager Redis 挂起 + asyncio.Event 唤醒 + 5 类 SSE 事件协议 + `/ai/confirm` + `/ai/operation-log` + `/ai/query-cache` + 前端 SSE 解析 + HITL 抽屉 + tool-call 卡片 + 30s 轮询兜底 | 70+ 单测 |
+| **Phase 3.5 卡片视觉 + chip 回放** | §12 复刻（3px 状态色条 / 中文 desc / risk chip / 时长行数 / chevron / dark）+ HITL 内联 bar（倒计时紧急态）+ stats ECharts 三 tab + chip 跳转 → user/index.vue onMounted 接 ai_query_id 应用 filters | 端到端 Playwright 验证 |
+| **Phase 4 安全硬化** | #7 super_admin gate + #10 injection detector 7 类 pattern + §11.1 is_security_event 落库 + §11.2 keyword_blocklist + §11.3 job JobAiUpdate 白名单 + §11.4 用户级自动禁用 + §11.5 SECURITY.md + AI_MODULE_ENABLED 开关 + §11.6 Agent loop 上限（UsageLimits）+ §12.4 check_ai_tools.py 静态检查 + pre-commit hook | 100+ 单测 + 39 injection + 27 check_ai_tools |
+
+**鉴权矩阵 11/11 全通** + **765 后端测试 passed** + **端到端 Playwright 验证**
+
+### ⏸ v1.5+ 推迟项（独立 PR 性质）
+
+| 项 | 阻塞原因 |
+|---|---|
+| role.list / dept.list / dept.count AI tool | UI 没 agent 切换器，无法端到端测试 |
+| UI agent 切换器 | 需 chat-header.vue 加下拉选择器 + 前端调 chat.py 时传 agent_code（当前 hardcode user_mgmt） |
+| role/dept 业务模块页 URL 回放（role/index.vue 已做，dept 待做） | dept 待加 |
+| job.update_cron AI tool（spec §11.3 JobAiUpdate 已就绪，AI 入口待加） | UI agent 切换器 |
+| chip 跳转 trace_id TTL 5min 过期 fallback 提示 | UX 改进 |
+| sys_user.age 字段（spec §2.10 提到「年龄大于 20 男生」） | 需扩表 + alembic 迁移 |
+
+### ⏸ v2+ 推迟项（架构级，独立版本规划）
+
+| 项 | 阻塞原因 |
+|---|---|
+| L3 通用 `_sanitize_arg` | MVP 由 §6.2 + §5.5 + §7 三件套兜底；通用版本每 tool args 形态不同难统一 |
+| IP 级 mass_permission_denied 自动拉黑 | 依赖 `system_config.ai:auto_disable:perm_denied_per_hour` + `ai:ip_allowlist` NAT 豁免表 |
+| Prometheus 告警集成（`ai_super_admin_injection_alert` 等指标） | 需 metrics 基础设施 |
+| LLM 输出 keyword 拦截 | 需在 produce_pydantic 流式阶段过滤 text-delta，复杂 |
+| regex pattern 支持（§11.2 keyword_blocklist 仅子串匹配） | 设计 + UI 编辑器 |
+| 其他 system_config key（rate_limit / quota / tool_timeout / max_history_messages / injection_per_hour / ip_allowlist） | 当前硬编码常量，v2+ 改读 sys_config + 60s 缓存模式 |
+| HITL pub_sub 模式（`AI_HITL_MODE=redis_pubsub`，多 worker 部署） | spec §8.4 |
+| 沙箱执行（E2B Sandbox / Firecracker MicroVM，spec §11.3 v3） | 架构级 |
+
+### 鉴权矩阵（spec §12.2）— 11/11 全通
+
+| # | 场景 | 状态 | 测试 |
+|---|---|---|---|
+| 1 | 低风险查询 → autonomous | ✅ | test_authz_matrix.py |
+| 2 | 高风险单行修改（dry_run=1）→ autonomous | ✅ | test_authz_matrix.py |
+| 3 | 高风险多行修改（dry_run=2）→ HITL | ✅ | test_authz_matrix.py |
+| 4 | 破坏性操作 → HITL | ✅ | test_authz_matrix.py |
+| 5 | 无权限 → tool 不可见 | ✅ | test_authz_matrix.py |
+| 6 | data_scope 越界 → AI_DATA_SCOPE_VIOLATION | ✅ | test_authz_matrix.py |
+| 7 | 改权限码 + 非超管 → AI_SUPER_ADMIN_REQUIRED | ✅ (Phase 4) | test_authz_matrix.py |
+| 8 | hitl_always=True → 强制 HITL | ✅ | test_authz_matrix.py |
+| 9 | 日配额超限 → AI_DAILY_QUOTA_EXHAUSTED | ✅ | test_authz_matrix.py |
+| 10 | Prompt injection 命中 → 强制 HITL + is_security_event | ✅ (Phase 4) | test_authz_matrix.py |
+| 11 | LLM 幻觉调不存在 tool → AI_TOOL_NOT_FOUND | ✅ | test_authz_matrix.py |
+
+### spec §11 安全章节 — 全部落地
+
+- ✅ §11.1 Prompt Injection L2 detector（7 类 pattern）+ L2 自动禁用（用户级）
+- ✅ §11.2 keyword_blocklist（sys_config + 60s 缓存）
+- ✅ §11.3 job JobAiUpdate 白名单 + update_for_ai
+- ✅ §11.4 用户级 injection 自动禁用（阈值 5/h，禁用 24h，超管豁免）
+- ✅ §11.5 SECURITY.md（6 节）+ AI_MODULE_ENABLED 全局开关
+- ✅ §11.6 Agent loop 上限（UsageLimits request_limit=10, tool_calls_limit=5）
+- ✅ §12.4 check_ai_tools.py 7 项静态检查 + pre-commit hook 集成
+
+### 测试金字塔（spec §12.1）
+
+| 层 | 数量 | 覆盖 |
+|---|---|---|
+| 单元测试 | ~600 | events / executor / quota / failures / sensitive / redact / safety_preamble / hitl_manager / operation_log_service / pydantic_ai_wrapper / risk / query_cache / stats_validator / injection_detector / auto_disable / keyword_blocklist / JobAiUpdate / check_ai_tools |
+| 集成测试 | ~150 | test_executor_integration / test_gateway / test_system_ai_tools / test_data_scope_loader |
+| 端到端鉴权矩阵 | 15 | test_authz_matrix（11 case + 4 双 case） |
+| Playwright E2E | 6+ | chat 流式 / stats 三 tab / chip 跳转 / 失败状态 |
+| **总计** | **765 后端** | pre-commit 全过 |
+
+### 安全审查 checklist（spec §12.3）
+
+- ✅ 注入攻击 8 类全覆盖（spec §12.3 INJECTION_ATTACKS + 7 类 pattern detector）
+- ✅ password / api_key 不进 ctx 公开属性（sensitive_input 不在签名 + serialize_for_llm 全局黑名单）
+- ✅ history scrubbed（conversation_service.save_message redact + get_messages scrub）
+- ✅ operation_log 不含敏感字段值（args_summary 仅元信息 + result_summary 不存原始数据）
+
+---
+
+## 21. Changelog（commit 序列）
+
+| Commit | 范围 | 文件数 | 测试增量 |
+|---|---|---|---|
+| `f7d2bc7` | Phase 1-4 + 3.5 MVP（gateway/hitl/safety/chat cards + url replay） | 98 | +500+ |
+| `92d9d8a` | Phase 4 finish（is_security_event log + pre-commit hook + check_ai_tools tests） | 6 | +27 |
+| `a88a438` | §11.4 用户级自动禁用（injection threshold + Redis 计数 + 超管豁免） | 7 | +16 |
+| `b7fd221` | §11.5 SECURITY.md + AI_MODULE_ENABLED switch | 4 | 0 |
+| `5caac9b` | role.count tool + chip replay to system/role（v1.5+ preview） | 2 | +4 |
+| `4038f87f` | chip target + role page replay ai_query_id（v1.5+ preview，frontend） | 2 | 0 |
+| `da16292` | JobAiUpdate schema whitelist + update_for_ai（spec 11.3） | 4 | +17 |
+| `cf7e1d0` | keyword_blocklist guardrail（spec 11.2） | 4 | +16 |
+
+**总计**：127 文件改动，+21000 行代码，+600 测试，0 errors lint。
