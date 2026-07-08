@@ -27,6 +27,7 @@ from app.modules.ai.agents.tools.stats_validator import (
     validate_group_by_in_whitelist,
 )
 from app.modules.ai.core.context import AiToolContext
+from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 
 # ============ user.count ============
@@ -150,3 +151,37 @@ async def user_distinct(ctx: AiToolContext, field: str) -> list[str]:
     )
     rows = (await ctx.db.execute(stmt)).scalars().all()
     return [str(v) if v is not None else "null" for v in rows]
+
+
+# ============ role.count（v1.5+，复用 user.count 模式，演示 chip 跳转回放到 role 模块页） ============
+
+
+@ai_tool(
+    AiToolMeta(
+        name="role.count",
+        agent="role_mgmt",
+        summary=(
+            "Total role count → {'count': N}. For 'how many roles'. "
+            "Status filter: '1' enabled / '2' disabled."
+        ),
+        required_perms=("system:role:list",),
+        risk="low",
+        readonly=True,
+        allowed_filters=("status",),
+        query_cache_module="system/role",
+    )
+)
+async def role_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) -> dict:
+    """统计角色数量，仅返回数字
+
+    filters:
+        status: '1' (启用) / '2' (禁用)
+    """
+    filters = validate_filters_in_whitelist(ctx.tool_meta, filters)
+
+    stmt = select(func.count(Role.role_id))
+    for key, value in filters.items():
+        stmt = stmt.where(getattr(Role, key) == value)
+
+    count = await ctx.db.scalar(stmt)
+    return {"count": int(count or 0)}

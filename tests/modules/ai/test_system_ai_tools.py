@@ -16,7 +16,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import BusinessRuleException
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.core.context import AiToolContext, DataScopeContext
-from app.modules.system.ai_tools import user_count, user_distinct, user_stats
+from app.modules.system.ai_tools import (
+    role_count,
+    user_count,
+    user_distinct,
+    user_stats,
+)
+from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 
 # ============ fixture ============
@@ -285,3 +291,88 @@ class TestDataScopeFilter:
 
         result = await user_count(ctx, filters=None)
         assert result == {"count": 1}
+
+
+# ============ role.count（v1.5+，chip 跳转回放扩展） ============
+
+
+async def _add_role(
+    db: AsyncSession,
+    *,
+    role_id: int,
+    role_name: str,
+    role_code: str | None = None,
+    status: str = "1",
+) -> None:
+    """建角色"""
+    db.add(
+        Role(
+            role_id=role_id,
+            role_name=role_name,
+            role_code=role_code or role_name.lower(),
+            data_scope="1",
+            status=status,
+        )
+    )
+    await db.flush()
+
+
+def _make_role_ctx(db: AsyncSession) -> AiToolContext:
+    """构造 role.count 的 ctx（role 不走 data_scope，全表计数）"""
+    meta = AiToolMeta(
+        name="role.count",
+        agent="role_mgmt",
+        summary="x",
+        required_perms=("system:role:list",),
+        risk="low",
+        readonly=True,
+        allowed_filters=("status",),
+        query_cache_module="system/role",
+    )
+    return AiToolContext(
+        user=MagicMock(user_id=1),
+        perms={"system:role:list"},
+        db=db,
+        data_scope=DataScopeContext(
+            accessible_dept_ids=None, accessible_user_ids=None, filters=[]
+        ),
+        trace_id="tr_test",
+        tool_meta=meta,
+    )
+
+
+class TestRoleCount:
+    async def test_count_returns_total(self, db_session: AsyncSession) -> None:
+        """2 个角色 → count=2"""
+        await _add_role(db_session, role_id=2001, role_name="role_a")
+        await _add_role(db_session, role_id=2002, role_name="role_b")
+        await db_session.flush()
+
+        ctx = _make_role_ctx(db_session)
+        result = await role_count(ctx, filters=None)
+        assert result["count"] >= 2
+
+    async def test_count_with_status_filter(self, db_session: AsyncSession) -> None:
+        """status='1' 过滤"""
+        await _add_role(db_session, role_id=2001, role_name="r_enabled", status="1")
+        await _add_role(db_session, role_id=2002, role_name="r_disabled", status="2")
+        await db_session.flush()
+
+        ctx = _make_role_ctx(db_session)
+        result = await role_count(ctx, filters={"status": "1"})
+        assert result["count"] >= 1
+
+    async def test_count_filter_out_of_whitelist_raises(
+        self, db_session: AsyncSession
+    ) -> None:
+        """spec §5.5: role_code 越界（allowed_filters 只有 status）→ AI_STATS_FIELD_NOT_ALLOWED"""
+        ctx = _make_role_ctx(db_session)
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await role_count(ctx, filters={"role_code": "admin"})
+        assert exc_info.value.error_code == "AI_STATS_FIELD_NOT_ALLOWED"
+
+    async def test_count_empty_table(self, db_session: AsyncSession) -> None:
+        """空表 → count=0（可能含 seed 数据，至少 ≥0）"""
+        ctx = _make_role_ctx(db_session)
+        result = await role_count(ctx, filters=None)
+        assert result["count"] >= 0
