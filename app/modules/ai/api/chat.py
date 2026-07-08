@@ -35,6 +35,10 @@ from app.modules.ai.agents.hitl.events import (
 )
 from app.modules.ai.agents.safety.auto_disable import check_user_disabled
 from app.modules.ai.agents.safety.injection_detector import detect_injection
+from app.modules.ai.agents.safety.keyword_blocklist import (
+    check_keywords,
+    load_blocklist,
+)
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.conversation_service import conversation_service
 from app.modules.auth.service import get_current_user
@@ -222,6 +226,31 @@ async def chat(
             yield _format_sse_chunk(DoneEvent())
 
         return StreamingResponse(_disabled_stream(), media_type=SSE_CONTENT_TYPE)
+
+    # §11.2 keyword_blocklist：用户输入命中项目自定义敏感词 → 整条消息拦截
+    blocklist = await load_blocklist(db)
+    if user_message:
+        hits = check_keywords(user_message, blocklist)
+        if hits:
+            logger.warning(
+                "keyword_blocklist blocked chat",
+                extra={
+                    "user_id": _current_user.user_id,
+                    "conversation_id": conversation_id,
+                    "hit_count": len(hits),
+                },
+            )
+
+            async def _blocked_stream():
+                yield _format_sse_chunk(
+                    AiErrorEvent(
+                        error_code="AI_KEYWORD_BLOCKED",
+                        message="消息含敏感词，已被管理员配置拦截，请修改后再试",
+                    )
+                )
+                yield _format_sse_chunk(DoneEvent())
+
+            return StreamingResponse(_blocked_stream(), media_type=SSE_CONTENT_TYPE)
 
     # §11.1 prompt injection 检测（命中 → execute_tool 强制 HITL）
     deps.injection_hit = detect_injection(user_message)

@@ -1550,6 +1550,10 @@ INJECTION_PATTERNS = [
 
 **v1.5 加** `forbidden_topics` / `forbidden_urls` / `enabled_tools` / `sensitive_output_blocklist`。
 
+**✅ Phase 4 实现 keyword_blocklist（2026-07-08）**：`app/modules/ai/agents/safety/keyword_blocklist.py`（`load_blocklist` 从 `sys_config.ai:guardrail:keyword_blocklist` 读 JSON 字符串数组 + 60s 进程内缓存 + `force_refresh` 显式失效 + `check_keywords` 大小写不敏感子串匹配 + 中英文双语）。chat.py 入口（save_user_message 前）跑 detector，命中 emit `AiErrorEvent(AI_KEYWORD_BLOCKED)` + Done 短路，**不进 LLM**。`tests/modules/ai/test_keyword_blocklist.py` 16 测试（check_keywords 子串/大小写/中英/多匹配 + load_blocklist 缓存/force_refresh/JSON 容错/非字符串过滤/小写转换）。**未含 v2+**：LLM 输出 keyword 拦截（需在 produce_pydantic 流式阶段过滤 text-delta，复杂）/ regex pattern 支持 / ConfigService.update 改 `ai:guardrail:*` 后自动 invalidate（MVP 靠 60s TTL 自然生效）。
+
+**其他 system_config key 留 v2+**：`ai:rate_limit:user_write_per_min` / `ai:quota:daily_per_user` / `ai:limit:tool_timeout_sec` / `ai:limit:max_history_messages` / `ai:auto_disable:injection_per_hour` / `ai:auto_disable:perm_denied_per_hour` / `ai:ip_allowlist`。当前对应阈值硬编码在 `quota.py` / `auto_disable.py` / `failures.py` 等模块（带 `INJECTION_THRESHOLD_PER_HOUR` / `DEFAULT_L2_DAILY_QUOTA` 等常量名），v2+ 改读 sys_config + 同样 60s 缓存模式即可。
+
 ### 11.3 `job` 模块硬约束
 
 | 允许 AI 操作 | 禁止 AI 操作 |
