@@ -1561,6 +1561,8 @@ INJECTION_PATTERNS = [
 
 Service 层 `JobService.update()` 加 schema 级白名单，即使 tool 漏洞也不接受 `code` 字段。v3 远期：沙箱执行（E2B Sandbox / Firecracker MicroVM）。
 
+**✅ Phase 4 实现（2026-07-08）**：`app/modules/job/schemas/job.py::JobAiUpdate` schema 白名单（允许字段：job_name / cron_expression / trigger_type / interval_value / interval_unit / job_args / status；禁止字段 job_key / run_on_enable / timeout_seconds / max_retries / concurrent / code / module_path / func_name — Pydantic 默认 extra='ignore' 自动丢弃）；`JobService.update_for_ai(db, data: JobAiUpdate)` 强制走白名单 schema，复用 `update()` 的 trigger 校验逻辑（cron/interval 合法性）。`tests/modules/job/test_job_ai_update.py` 17 测试（白名单字段接受 + 禁止字段丢弃 + camelCase 别名同效 + status validator + spec 表格逐项验证）。**未含**：AI tool `job.update_cron` 入口（agent=job_mgmt / perms=system:job:edit / risk=high / hitl_always=True / dry_run_supported）— 留 v1.5+ UI agent 切换器落地后接入；v3 远期沙箱执行。
+
 ### 11.4 自动禁用
 
 - 单用户 1 小时内 `injection_pattern_matched` ≥ 5 → 自动禁用该用户 AI 功能 24h（写入 Redis `ai:user_disabled:{user_id}`，TTL 24h）

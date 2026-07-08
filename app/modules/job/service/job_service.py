@@ -11,7 +11,7 @@ from app.core.exceptions import (
 )
 from app.core.scheduler import build_trigger, validate_trigger_config
 from app.modules.job.models.job import SysJob, SysJobLog
-from app.modules.job.schemas.job import JobCreate, JobQuery, JobUpdate
+from app.modules.job.schemas.job import JobAiUpdate, JobCreate, JobQuery, JobUpdate
 from app.modules.job.task_registry import get_task_function
 from app.utils.pagination import build_filters, paginate
 
@@ -142,6 +142,23 @@ class JobService:
         job = await self.get_by_id(db, job_id)
         job.status = status
         return job
+
+    async def update_for_ai(
+        self, db: AsyncSession, data: JobAiUpdate, current_user: str | None = None
+    ) -> SysJob:
+        """spec §11.3 AI 入口更新 — 强制走 JobAiUpdate schema 白名单
+
+        即使 AI tool 漏传 job_key / run_on_enable 等危险字段，Pydantic 在反序列化
+        阶段就丢弃（不报错，但字段不进 update_data）。安全边界由 schema 定义，
+        不依赖调用方纪律。
+
+        Args:
+            data: JobAiUpdate（白名单 schema，禁止字段已在 schema 层排除）
+            current_user: AI 用户标识，写入 update_by
+        """
+        # 把白名单字段映射回 JobUpdate（复用 update 的 trigger 校验逻辑）
+        job_update = JobUpdate(**data.model_dump(exclude_unset=True))
+        return await self.update(db, job_update, current_user=current_user)
 
     async def delete(self, db: AsyncSession, job_id: int) -> None:
         """删除任务（仅停用状态可删），同时删除关联日志。"""
