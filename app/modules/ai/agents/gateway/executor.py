@@ -347,6 +347,8 @@ async def _start_log(
                 risk_level=registered.meta.risk,
                 execution_mode=mode.value,
                 status=initial_status,
+                is_security_event=deps.injection_hit,
+                event_type="injection_pattern_matched" if deps.injection_hit else None,
             )
 
 

@@ -15,6 +15,13 @@ repos:
         pass_filenames: false
         always_run: true
 
+      - id: ai-tools-static-check
+        name: AI tools static compliance check
+        entry: uv run python scripts/check_ai_tools.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: pytest
         name: Pytest
         entry: uv run pytest

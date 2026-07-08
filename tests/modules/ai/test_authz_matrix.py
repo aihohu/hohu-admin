@@ -578,6 +578,22 @@ class TestCase10InjectionDetector:
         assert result_events[0].ok is True
         assert result.ok is True
 
+        # §11.1: injection_hit=True 时 ai_operation_log 落 is_security_event=True
+        from app.db.session import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as db:
+            res = await db.execute(
+                text(
+                    "SELECT is_security_event, event_type FROM ai_operation_log "
+                    "WHERE trace_id = 'tr_authz_test' "
+                    "ORDER BY started_at DESC LIMIT 1"
+                )
+            )
+            row = res.first()
+        assert row is not None, "ai_operation_log 行必须写入"
+        assert row.is_security_event is True
+        assert row.event_type == "injection_pattern_matched"
+
     async def test_no_injection_low_risk_autonomous(self) -> None:
         """对照：同 tool 同 args，injection_hit=False → autonomous（无 confirmation）"""
         _register_test_tools()

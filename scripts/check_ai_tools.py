@@ -28,6 +28,10 @@ import inspect
 import sys
 from pathlib import Path
 
+# Windows 默认 GBK 编码无法输出 emoji/中文，强制 utf-8（pre-commit hook 兼容）
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 # 项目根
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
