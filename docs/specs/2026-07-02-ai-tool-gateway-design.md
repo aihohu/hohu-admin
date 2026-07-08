@@ -1580,6 +1580,8 @@ Service 层 `JobService.update()` 加 schema 级白名单，即使 tool 漏洞�
 - 如何启用内置 Agent
 - 漏洞报告流程
 
+**✅ Phase 4 实现（2026-07-08）**：`docs/SECURITY.md` 6 节完整版（模块开关 / 安全特性清单 / Agent 启用步骤 / 漏洞报告流程 / 部署 checklist / 代码索引）；`AI_MODULE_ENABLED: bool = True` 加到 `app/core/config.py::settings`，`main.py` 在 `if settings.AI_MODULE_ENABLED` 内注册 6 个 AI router（False 时不注册，业务模块不受影响）；`keyword_blocklist` 配置因 §11.2 留 v2+，SECURITY.md 标注「未实现 / 临时方案」。
+
 ### 11.6 Agent loop 硬上限（防 LLM 失控循环）
 
 `/ai/chat` 端点调 `adapter.run_stream(..., usage_limits=UsageLimits(request_limit=10, tool_calls_limit=5))`，给 PydanticAI agent loop 加硬上限：

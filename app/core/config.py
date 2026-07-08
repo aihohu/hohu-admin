@@ -72,6 +72,8 @@ class Settings(BaseSettings):
     AI_ANTHROPIC_API_KEY: str = ""
     AI_MAX_TOKENS: int = 4096
     AI_TEMPERATURE: float = 0.7
+    # spec §11.5: 整个 AI 模块全局开关（False = 不注册 AI router，安全降级）
+    AI_MODULE_ENABLED: bool = True
 
     # AI HITL（spec §8.4）
     # MVP 强制单 worker：进程内 dict[confirmation_id, asyncio.Event] 在多 worker 下静默失效。

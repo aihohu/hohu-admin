@@ -122,16 +122,21 @@ app.include_router(
     operation_log_router, prefix="/system/operation-log", tags=["操作日志"]
 )
 app.include_router(login_log_router, prefix="/system/login-log", tags=["登录日志"])
-app.include_router(ai_chat_router, prefix="/ai/chat", tags=["AI对话"])
-app.include_router(ai_confirm_router, prefix="/ai/confirm", tags=["AI HITL 确认"])
-app.include_router(ai_conversation_router, prefix="/ai/conversation", tags=["AI会话"])
-app.include_router(ai_provider_router, prefix="/ai/provider", tags=["AI提供商"])
-app.include_router(
-    ai_operation_log_router, prefix="/ai/operation-log", tags=["AI 操作日志"]
-)
-app.include_router(
-    ai_query_cache_router, prefix="/ai/query-cache", tags=["AI chip 跳转回放"]
-)
+
+# spec §11.5: AI_MODULE_ENABLED=False 时整体不注册 AI router（安全降级开关）
+if settings.AI_MODULE_ENABLED:
+    app.include_router(ai_chat_router, prefix="/ai/chat", tags=["AI对话"])
+    app.include_router(ai_confirm_router, prefix="/ai/confirm", tags=["AI HITL 确认"])
+    app.include_router(
+        ai_conversation_router, prefix="/ai/conversation", tags=["AI会话"]
+    )
+    app.include_router(ai_provider_router, prefix="/ai/provider", tags=["AI提供商"])
+    app.include_router(
+        ai_operation_log_router, prefix="/ai/operation-log", tags=["AI 操作日志"]
+    )
+    app.include_router(
+        ai_query_cache_router, prefix="/ai/query-cache", tags=["AI chip 跳转回放"]
+    )
 # Marketplace（注册顺序：developer/admin 先注册，避免被 marketplace 抢匹配）
 app.include_router(
     marketplace_developer_router,
