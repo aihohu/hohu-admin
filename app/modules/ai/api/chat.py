@@ -202,7 +202,9 @@ async def chat(
         conv.model_name = model_name
 
     # 构造完整 ChatDeps（spec §4.6 + §17.2）
-    deps = await chat_service.build_chat_deps(db, _current_user)
+    # v1.5+: 前端传 agentCode 切换助手（默认 user_mgmt）
+    agent_code = body.get("agentCode") or body.get("agent_code")
+    deps = await chat_service.build_chat_deps(db, _current_user, agent_code=agent_code)
     deps.conversation_id = conversation_id
 
     # §11.4 用户级自动禁用短路：被禁用时 emit ai_error + done，流结束

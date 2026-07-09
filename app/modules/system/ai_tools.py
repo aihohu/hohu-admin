@@ -27,6 +27,7 @@ from app.modules.ai.agents.tools.stats_validator import (
     validate_group_by_in_whitelist,
 )
 from app.modules.ai.core.context import AiToolContext
+from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 
@@ -182,6 +183,37 @@ async def role_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) 
     stmt = select(func.count(Role.role_id))
     for key, value in filters.items():
         stmt = stmt.where(getattr(Role, key) == value)
+
+    count = await ctx.db.scalar(stmt)
+    return {"count": int(count or 0)}
+
+
+# ============ dept.count（v1.5+，演示 chip 跳转回放到 dept 模块页） ============
+
+
+@ai_tool(
+    AiToolMeta(
+        name="dept.count",
+        agent="dept_mgmt",
+        summary="Total department count → {'count': N}. For 'how many departments'.",
+        required_perms=("system:dept:list",),
+        risk="low",
+        readonly=True,
+        allowed_filters=("status",),
+        query_cache_module="system/dept",
+    )
+)
+async def dept_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) -> dict:
+    """统计部门数量，仅返回数字
+
+    filters:
+        status: '1' (启用) / '0' (禁用)
+    """
+    filters = validate_filters_in_whitelist(ctx.tool_meta, filters)
+
+    stmt = select(func.count(Dept.dept_id))
+    for key, value in filters.items():
+        stmt = stmt.where(getattr(Dept, key) == value)
 
     count = await ctx.db.scalar(stmt)
     return {"count": int(count or 0)}

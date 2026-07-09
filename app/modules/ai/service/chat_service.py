@@ -86,7 +86,7 @@ class ChatService:
         db: AsyncSession,
         user: User,
         *,
-        agent_code: str = DEFAULT_AGENT_CODE,
+        agent_code: str | None = None,
         trace_id: str | None = None,
     ) -> ChatDeps:
         """构造完整 ChatDeps（spec §4.6）
@@ -104,10 +104,12 @@ class ChatService:
         perms = set(collect_user_buttons(user))
         data_scope = await build_data_scope_context(db, user)
 
-        agent = await self._load_agent(db, agent_code)
+        # v1.5+: 前端传 agentCode 切换助手；未传则用默认（user_mgmt）
+        actual_agent_code = agent_code or DEFAULT_AGENT_CODE
+        agent = await self._load_agent(db, actual_agent_code)
         if agent is None:
             raise ValueError(
-                f"Agent code {agent_code!r} not found in ai_agent table; "
+                f"Agent code {actual_agent_code!r} not found in ai_agent table; "
                 f"run scripts/seed_ai_agents.py to seed built-in agents"
             )
 

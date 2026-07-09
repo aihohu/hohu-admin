@@ -16,6 +16,7 @@ from app.middleware.rate_limit_middleware import RateLimitMiddleware
 from app.modules.ai.agents.hitl.manager import hitl_manager
 from app.modules.ai.agents.tools import load_builtin_tools
 from app.modules.ai.agents.tools.registry import ToolRegistry, ToolRegistryError
+from app.modules.ai.api.agent import router as ai_agent_router
 from app.modules.ai.api.chat import router as ai_chat_router
 from app.modules.ai.api.confirm import router as ai_confirm_router
 from app.modules.ai.api.conversation import router as ai_conversation_router
@@ -125,6 +126,7 @@ app.include_router(login_log_router, prefix="/system/login-log", tags=["登录�
 
 # spec §11.5: AI_MODULE_ENABLED=False 时整体不注册 AI router（安全降级开关）
 if settings.AI_MODULE_ENABLED:
+    app.include_router(ai_agent_router, prefix="/ai/agents", tags=["AI Agent"])
     app.include_router(ai_chat_router, prefix="/ai/chat", tags=["AI对话"])
     app.include_router(ai_confirm_router, prefix="/ai/confirm", tags=["AI HITL 确认"])
     app.include_router(

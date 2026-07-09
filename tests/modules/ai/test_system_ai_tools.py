@@ -6,7 +6,7 @@ db_session fixture 用 SAVEPOINT 回滚模式，所有写入不真正落库。
 本测试只验证业务逻辑（count / stats / distinct），data_scope 过滤留 1.5 鉴权矩阵。
 """
 
-# ruff: noqa: ARG001  test 函数 ctx / kwargs 是与生产签名一致的占位
+# ruff: noqa: ARG001, PLC0415  test 函数 ctx / kwargs 是与生产签名一致的占位
 
 from unittest.mock import MagicMock
 
@@ -376,3 +376,88 @@ class TestRoleCount:
         ctx = _make_role_ctx(db_session)
         result = await role_count(ctx, filters=None)
         assert result["count"] >= 0
+
+
+# ============ dept.count（v1.5+，演示 chip 跳转回放到 dept 模块页） ============
+
+
+async def _add_dept(
+    db: AsyncSession,
+    *,
+    dept_id: int,
+    dept_name: str,
+    status: str = "1",
+) -> None:
+    """建部门"""
+    from app.modules.system.models.dept import Dept
+
+    db.add(
+        Dept(
+            dept_id=dept_id,
+            dept_name=dept_name,
+            order_num=0,
+            status=status,
+        )
+    )
+    await db.flush()
+
+
+def _make_dept_ctx(db: AsyncSession) -> AiToolContext:
+    """构造 dept.count 的 ctx（dept 不走 data_scope，全表计数）"""
+    from app.modules.system.ai_tools import dept_count  # noqa: F401 (确保 import)
+
+    meta = AiToolMeta(
+        name="dept.count",
+        agent="dept_mgmt",
+        summary="x",
+        required_perms=("system:dept:list",),
+        risk="low",
+        readonly=True,
+        allowed_filters=("status",),
+        query_cache_module="system/dept",
+    )
+    return AiToolContext(
+        user=MagicMock(user_id=1),
+        perms={"system:dept:list"},
+        db=db,
+        data_scope=DataScopeContext(
+            accessible_dept_ids=None, accessible_user_ids=None, filters=[]
+        ),
+        trace_id="tr_test",
+        tool_meta=meta,
+    )
+
+
+class TestDeptCount:
+    async def test_count_returns_total(self, db_session: AsyncSession) -> None:
+        from app.modules.system.ai_tools import dept_count
+
+        await _add_dept(db_session, dept_id=3001, dept_name="dept_a")
+        await _add_dept(db_session, dept_id=3002, dept_name="dept_b")
+        await db_session.flush()
+
+        ctx = _make_dept_ctx(db_session)
+        result = await dept_count(ctx, filters=None)
+        assert result["count"] >= 2
+
+    async def test_count_with_status_filter(self, db_session: AsyncSession) -> None:
+        from app.modules.system.ai_tools import dept_count
+
+        await _add_dept(db_session, dept_id=3001, dept_name="d_on", status="1")
+        await _add_dept(db_session, dept_id=3002, dept_name="d_off", status="0")
+        await db_session.flush()
+
+        ctx = _make_dept_ctx(db_session)
+        result = await dept_count(ctx, filters={"status": "1"})
+        assert result["count"] >= 1
+
+    async def test_count_filter_out_of_whitelist_raises(
+        self, db_session: AsyncSession
+    ) -> None:
+        """spec §5.5: dept_name 越界（allowed_filters 只有 status）→ AI_STATS_FIELD_NOT_ALLOWED"""
+        from app.modules.system.ai_tools import dept_count
+
+        ctx = _make_dept_ctx(db_session)
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await dept_count(ctx, filters={"dept_name": "evil"})
+        assert exc_info.value.error_code == "AI_STATS_FIELD_NOT_ALLOWED"

@@ -79,3 +79,6 @@ def load_builtin_tools() -> None:
 
     # Phase 1.4：system 模块的 user.count / user.stats / user.distinct
     import_module("app.modules.system.ai_tools")
+
+    # v1.5+：job 模块的 job.update_cron（spec §11.3 白名单 + JobAiUpdate schema）
+    import_module("app.modules.job.ai_tools")
