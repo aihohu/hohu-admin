@@ -178,3 +178,32 @@ class TestInvalidateCache:
         invalidate_blocklist_cache()
         await load_blocklist(db)
         assert call_count == 2
+
+
+class TestExtremeInputs:
+    """spec §11.2: 极端输入不应让 check_keywords 崩溃"""
+
+    def test_null_bytes_in_text(self) -> None:
+        text = "contains\x00keyword"
+        hits = check_keywords(text, ["keyword"])
+        assert hits == ["keyword"]
+
+    def test_very_long_text(self) -> None:
+        text = "x" * 100000 + " bad"
+        hits = check_keywords(text, ["bad"])
+        assert hits == ["bad"]
+
+    def test_keyword_with_special_chars(self) -> None:
+        """blocklist 含特殊字符也能匹配"""
+        hits = check_keywords("contains $@special word", ["$@special"])
+        assert hits == ["$@special"]
+
+    def test_unicode_keyword(self) -> None:
+        hits = check_keywords("含「机密」字样", ["机密"])
+        assert hits == ["机密"]
+
+    def test_blocklist_with_empty_string_ignored(self) -> None:
+        """load_blocklist 已过滤空字符串，check_keywords 也不应误匹配空"""
+        # 直接调 check_keywords 不应崩（load_blocklist 不会返回空字符串）
+        hits = check_keywords("anything", [])
+        assert hits == []

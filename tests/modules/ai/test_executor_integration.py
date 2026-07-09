@@ -517,3 +517,103 @@ class TestQueryCacheWrite:
 
         entry = await get_query_cache(redis_module.redis_client, deps.trace_id)
         assert entry is None  # 没写
+
+
+# ============ 边界：Redis down 时 executor 降级（spec §2.6） ============
+
+
+class TestRedisDownGracefulDegrade:
+    """spec §2.6: Redis 故障 → 所有写操作拒绝 + 告警
+
+    Redis 是 quota / failures / hitl_manager / query_cache 的核心依赖。
+    故障时应该优雅降级，不应让异常冒到用户层导致 500。
+    """
+
+    async def test_low_risk_tool_redis_down_internal_error(self) -> None:
+        """low risk 工具不依赖 quota Redis（is_write_tool=False 跳过 L1/L2），
+        但 dry_run / query_cache 仍可能用 Redis。low risk + 无 dry_run_fn 时
+        Redis down 不影响（Redis 调用仅 query_cache 异步写入，失败静默）。
+        """
+        _register_test_tools()
+        deps = _build_deps()
+        # mock redis_client.incr 抛异常（虽然 low risk 不会调 incr）
+        from app.modules.ai.agents.gateway import executor as exec_mod
+
+        original = exec_mod.redis_client
+
+        class FlakyRedis:
+            async def incr(self, *_a, **_kw):
+                raise ConnectionError("redis down")
+
+            def __getattr__(self, name):
+                # 其他方法走原 redis
+                return getattr(original, name)
+
+        exec_mod.redis_client = FlakyRedis()
+        try:
+            result = await execute_tool(_TEST_TOOL_LOW, {"msg": "hi"}, deps)
+            # low risk 不依赖 quota，应正常成功
+            assert result.ok is True
+        finally:
+            exec_mod.redis_client = original
+
+    async def test_high_risk_tool_redis_down_failure(self) -> None:
+        """high risk 写工具 Redis down → quota check 抛异常 → 应转 ToolResult.failure
+
+        spec §2.6: Redis 故障时写操作拒绝（保守降级，不静默放过）。
+        executor.py 已加 RedisError 兜底，转 AI_REDIS_DOWN。
+        """
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
+        _register_test_tools()
+        deps = _build_deps()
+        from app.modules.ai.agents.gateway import executor as exec_mod
+
+        original = exec_mod.redis_client
+
+        class FlakyRedis:
+            async def incr(self, *_a, **_kw):
+                raise RedisConnectionError("redis down")
+
+            async def get(self, *_a, **_kw):
+                raise RedisConnectionError("redis down")
+
+            def __getattr__(self, name):
+                return getattr(original, name)
+
+        exec_mod.redis_client = FlakyRedis()
+        try:
+            result = await execute_tool(_TEST_TOOL_HIGH, {"x": 1}, deps)
+            assert not result.ok, "Redis down 时 high risk 写工具应拒绝（不静默放过）"
+            assert result.error_code == "AI_REDIS_DOWN"
+        finally:
+            exec_mod.redis_client = original
+
+    async def test_low_risk_failures_check_redis_down_rejected(self) -> None:
+        """连续失败检查 Redis down → low risk 也应短路拒绝（保守降级）
+
+        即使是 low risk，check_repeated_failure 走 Redis，故障时拒绝。
+        spec §2.6: 安全检查失败时不放过任何 tool。
+        """
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
+        _register_test_tools()
+        deps = _build_deps()
+        from app.modules.ai.agents.gateway import executor as exec_mod
+
+        original = exec_mod.redis_client
+
+        class FlakyRedis:
+            async def get(self, *_a, **_kw):
+                raise RedisConnectionError("redis down")
+
+            def __getattr__(self, name):
+                return getattr(original, name)
+
+        exec_mod.redis_client = FlakyRedis()
+        try:
+            result = await execute_tool(_TEST_TOOL_LOW, {"msg": "hi"}, deps)
+            assert not result.ok, "Redis down 时连续失败检查失败应拒绝"
+            assert result.error_code == "AI_REDIS_DOWN"
+        finally:
+            exec_mod.redis_client = original

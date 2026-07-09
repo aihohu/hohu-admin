@@ -21,6 +21,8 @@ import logging
 import time
 from typing import Any
 
+from redis.exceptions import RedisError
+
 from app.core.exceptions import BusinessException
 from app.core.rbac import is_super_admin
 from app.core.redis import redis_client
@@ -186,6 +188,16 @@ async def execute_tool(
             await check_l2_daily_quota(redis_client, user_id)
         except BusinessException as e:
             return ToolResult.failure(error_code=e.error_code, error_msg=e.message)
+        except RedisError:
+            # spec §2.6: Redis 故障时写操作拒绝（保守降级，不静默放过）
+            logger.exception(
+                "Redis unavailable during quota check",
+                extra={"user_id": user_id, "tool": name},
+            )
+            return ToolResult.failure(
+                error_code="AI_REDIS_DOWN",
+                error_msg="AI 服务暂时不可用（容量校验失败），请稍后重试",
+            )
 
     # 4. 连续失败兜底（spec §6.5）
     args_hash = compute_args_hash(args)
@@ -195,6 +207,16 @@ async def execute_tool(
         return ToolResult.failure(
             error_code=e.error_code,
             error_msg=USER_FACING_MSG.get(e.error_code, e.message),
+        )
+    except RedisError:
+        # spec §2.6: 连续失败检查也走 Redis，故障时保守降级（拒绝）
+        logger.exception(
+            "Redis unavailable during failure check",
+            extra={"user_id": user_id, "tool": name},
+        )
+        return ToolResult.failure(
+            error_code="AI_REDIS_DOWN",
+            error_msg="AI 服务暂时不可用（安全检查失败），请稍后重试",
         )
 
     # 5. dry_run + risk classification（spec §5.3 + §11.1 injection_hit）
