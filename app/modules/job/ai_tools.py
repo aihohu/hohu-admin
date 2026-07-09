@@ -24,10 +24,7 @@ from app.modules.job.service.job_service import job_service
     AiToolMeta(
         name="job.update_cron",
         agent="job_mgmt",
-        summary=(
-            "Update job cron expression → {'ok': true}. HITL required. "
-            "Args: job_id (int), cron_expression (str, like '*/5 * * * *')."
-        ),
+        summary="Update job cron expression → {'ok': true}. HITL required.",
         required_perms=("system:job:edit",),
         risk="high",
         hitl_always=True,
