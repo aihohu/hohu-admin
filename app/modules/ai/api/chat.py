@@ -272,8 +272,10 @@ async def chat(
     )
     await db.commit()
 
-    # 创建 Agent（按 user_perms 过滤 tool）
-    agent = await chat_service.create_agent(db, model_name, user_perms=deps.perms)
+    # 创建 Agent（按 user_perms + agent_code 过滤 tool，spec §5.4）
+    agent = await chat_service.create_agent(
+        db, model_name, user_perms=deps.perms, agent_code=deps.agent.code
+    )
 
     # 流式响应：自定义事件队列 + PydanticAI stream 并发合并（spec §8.1）
     # spec §11: usage_limits 兜底防 agent 无限循环（tool_calls_limit=5 / request_limit=10）

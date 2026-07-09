@@ -18,7 +18,12 @@ from app.modules.ai.core.config import ChatDeps  # noqa: F401  向后兼容 re-e
 from app.modules.ai.core.context import ChatDeps as NewChatDeps
 
 
-def create_chat_agent(model: Any, *, user_perms: set[str] | None = None) -> Agent:
+def create_chat_agent(
+    model: Any,
+    *,
+    user_perms: set[str] | None = None,
+    agent_code: str = "user_mgmt",
+) -> Agent:
     """创建对话 Agent
 
     Args:
@@ -38,7 +43,8 @@ def create_chat_agent(model: Any, *, user_perms: set[str] | None = None) -> Agen
     # 1.5 完成后由 chat.py 显式传入从 user 加载的真实 perms
     effective_perms = user_perms if user_perms is not None else _all_registry_perms()
 
-    tools = build_pydantic_ai_tools(effective_perms, "user_mgmt")
+    # v1.5+: agent_code 决定可见 tool 集合（spec §5.4）
+    tools = build_pydantic_ai_tools(effective_perms, agent_code)
 
     def instructions(ctx) -> str:
         """动态 system prompt（每轮推理时重新构造）"""

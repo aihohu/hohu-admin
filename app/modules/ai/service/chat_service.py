@@ -73,13 +73,14 @@ class ChatService:
         model_name: str | None = None,
         *,
         user_perms: set[str] | None = None,
+        agent_code: str = "user_mgmt",
     ):
         """创建配置好的 Agent
 
-        spec §5.4: 按 user_perms 过滤 tool 可见性
+        spec §5.4: 按 user_perms + agent_code 过滤 tool 可见性
         """
         model = await provider_service.resolve_model(db, model_name)
-        return create_chat_agent(model, user_perms=user_perms)
+        return create_chat_agent(model, user_perms=user_perms, agent_code=agent_code)
 
     async def build_chat_deps(
         self,
