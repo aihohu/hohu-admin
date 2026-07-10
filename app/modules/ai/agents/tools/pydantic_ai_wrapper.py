@@ -112,9 +112,13 @@ def wrap_tool_for_pydantic_ai(registered: RegisteredTool) -> Tool:
     wrapper.__name__ = meta.name.replace(".", "_")
     wrapper.__doc__ = meta.summary
 
+    # OpenAI 兼容 API（DeepSeek / 严格模式）要求 tool name 匹配 ^[a-zA-Z0-9_-]+$
+    # 不允许点号；用下划线替换给 LLM 看，wrapper 内部仍用 meta.name 调 execute_tool
+    llm_tool_name = meta.name.replace(".", "_")
+
     return Tool(
         function=wrapper,
-        name=meta.name,
+        name=llm_tool_name,
         description=meta.summary,
     )
 

@@ -64,7 +64,7 @@ class TestWrapTool:
     def test_tool_name_and_description_from_meta(self) -> None:
         registered = _register_sample_tool(name="user.lookup")
         tool = wrap_tool_for_pydantic_ai(registered)
-        assert tool.name == "user.lookup"
+        assert tool.name == "user_lookup"
         assert tool.description == "sample user.lookup"
 
     def test_wrapper_signature_replaces_ctx_type(self) -> None:
@@ -141,7 +141,7 @@ class TestBuildPydanticAiTools:
             {"system:user:list", "system:role:list"}, "user_mgmt"
         )
         assert len(user_tools) == 1
-        assert user_tools[0].name == "user.lookup"
+        assert user_tools[0].name == "user_lookup"
 
     def test_filters_by_perms(self) -> None:
         """spec §5.4: required_perms ⊆ user.perms"""
@@ -151,7 +151,7 @@ class TestBuildPydanticAiTools:
         # 用户只有 add 权限
         tools = build_pydantic_ai_tools({"system:user:add"}, "user_mgmt")
         assert len(tools) == 1
-        assert tools[0].name == "user.create"
+        assert tools[0].name == "user_create"
 
     def test_full_perm_set_returns_all(self) -> None:
         """超管有全部权限 → 返回全部"""
