@@ -35,8 +35,38 @@ from app.core.exceptions import BusinessRuleException
 logger = logging.getLogger(__name__)
 
 # spec §6.5：连续失败 2 次后第 3 次切换引导模式
+# 运行时从 sys_config 读，60s 缓存；这里仅作为 fallback default
 FAILURE_THRESHOLD = 2  # >= 2 时拦截
 FAILURE_TTL_SEC = 600  # 10 min
+_CFG_THRESHOLD = "ai:failures:threshold"
+_CFG_TTL = "ai:failures:ttl_sec"
+
+
+async def _resolve_threshold() -> int:
+    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
+    from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
+        get_ai_config_int,
+    )
+
+    try:
+        async with AsyncSessionLocal() as db:
+            return await get_ai_config_int(db, _CFG_THRESHOLD, FAILURE_THRESHOLD)
+    except Exception:
+        return FAILURE_THRESHOLD
+
+
+async def _resolve_ttl() -> int:
+    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
+    from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
+        get_ai_config_int,
+    )
+
+    try:
+        async with AsyncSessionLocal() as db:
+            return await get_ai_config_int(db, _CFG_TTL, FAILURE_TTL_SEC)
+    except Exception:
+        return FAILURE_TTL_SEC
+
 
 # spec §6.5 Redis key 命名
 _KEY = "ai:failures:{user_id}:{tool_name}:{args_hash}"
@@ -80,7 +110,8 @@ async def check_repeated_failure(
     failures_str = await redis.get(key)
     failures = int(failures_str or 0)
 
-    if failures >= FAILURE_THRESHOLD:
+    threshold = await _resolve_threshold()
+    if failures >= threshold:
         logger.info(
             "repeated failure threshold hit",
             extra={
@@ -111,7 +142,8 @@ async def record_failure(
     failures = await redis.incr(key)
     if failures == 1:
         # 仅第一次失败设 TTL，后续失败沿用原 TTL 倒计时
-        await redis.expire(key, FAILURE_TTL_SEC)
+        ttl = await _resolve_ttl()
+        await redis.expire(key, ttl)
     logger.debug(
         "failure recorded",
         extra={

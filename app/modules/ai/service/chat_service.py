@@ -56,8 +56,16 @@ class ChatService:
         content: str,
         tokens_input: int | None = None,
         tokens_output: int | None = None,
+        tool_calls: list[dict] | None = None,
     ):
-        """保存 AI 响应消息"""
+        """保存 AI 响应消息
+
+        Args:
+            tool_calls: 本次 assistant 消息关联的 tool 调用事件（修订 BUG-FE-18）。
+                        格式 [{"tool": ..., "tool_call_id": ..., "args": ..., "ok": ..., ...}]
+                        存到 ai_message.tool_calls JSON 字段，前端 reload 会话时还原
+                        streamEvents 让用户重连后能看到 tool-call 卡片。
+        """
         await conversation_service.save_message(
             db,
             conversation_id,
@@ -65,6 +73,7 @@ class ChatService:
             content=content,
             tokens_input=tokens_input,
             tokens_output=tokens_output,
+            tool_calls=tool_calls,
         )
 
     async def create_agent(

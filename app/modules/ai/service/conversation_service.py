@@ -106,10 +106,12 @@ class ConversationService:
         tokens_input: int | None = None,
         tokens_output: int | None = None,
         parts: list[dict] | None = None,
+        tool_calls: list[dict] | None = None,
     ) -> AiMessage:
         """保存一条消息
 
         spec §7.4: 用户输入保存前先 redact_secrets，防 LLM 上下文回灌
+        修订 BUG-FE-18: assistant 消息含 tool_calls 时存 JSON，前端重连还原卡片
         """
         if role == "user" and content:
             content = redact_secrets(content)
@@ -122,6 +124,7 @@ class ConversationService:
             tokens_input=tokens_input,
             tokens_output=tokens_output,
             parts=parts,
+            tool_calls=tool_calls,
         )
         db.add(msg)
         return msg

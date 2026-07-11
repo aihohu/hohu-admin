@@ -20,6 +20,7 @@ from app.modules.ai.service.chat_service import chat_service
 class TestBuildChatDeps:
     """超管路径：data_scope=None / agent=从 DB 加载 / trace_id 自动生成"""
 
+    @pytest.mark.filterwarnings("ignore::RuntimeWarning")
     async def test_super_admin_returns_all_visible_data_scope(
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:

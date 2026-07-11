@@ -38,11 +38,57 @@ from app.modules.ai.agents.tools.meta import AiToolMeta
 logger = logging.getLogger(__name__)
 
 # ============ 默认阈值（spec §6.4 / §11.2） ============
-# v1.5+ 走 system_config 表运行时可配；MVP 硬编码常量
+# 运行时从 sys_config 读，60s 缓存；这里仅作为 fallback default
 DEFAULT_L1_RATE_PER_MIN = 20
 DEFAULT_L2_DAILY_QUOTA = 2000
 DEFAULT_L3_TIMEOUT_SEC = 10
 L1_WINDOW_SEC = 60  # 滑窗 60s
+
+# sys_config 对应的 key（修订：从硬编码改为运行时可配）
+_CFG_L1_RATE = "ai:rate_limit:user_write_per_min"
+_CFG_L2_QUOTA = "ai:quota:daily_per_user"
+_CFG_L3_TIMEOUT = "ai:limit:tool_timeout_sec"
+
+
+async def _resolve_l1_limit() -> int:
+    """从 sys_config 读 L1 速率上限（60s 缓存兜底，DB down 用 default）"""
+    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
+    from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
+        get_ai_config_int,
+    )
+
+    try:
+        async with AsyncSessionLocal() as db:
+            return await get_ai_config_int(db, _CFG_L1_RATE, DEFAULT_L1_RATE_PER_MIN)
+    except Exception:
+        return DEFAULT_L1_RATE_PER_MIN
+
+
+async def _resolve_l2_limit() -> int:
+    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
+    from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
+        get_ai_config_int,
+    )
+
+    try:
+        async with AsyncSessionLocal() as db:
+            return await get_ai_config_int(db, _CFG_L2_QUOTA, DEFAULT_L2_DAILY_QUOTA)
+    except Exception:
+        return DEFAULT_L2_DAILY_QUOTA
+
+
+async def _resolve_l3_timeout() -> int:
+    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
+    from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
+        get_ai_config_int,
+    )
+
+    try:
+        async with AsyncSessionLocal() as db:
+            return await get_ai_config_int(db, _CFG_L3_TIMEOUT, DEFAULT_L3_TIMEOUT_SEC)
+    except Exception:
+        return DEFAULT_L3_TIMEOUT_SEC
+
 
 # ============ Redis key 命名（spec §6.4） ============
 _KEY_L1 = "ai:write:{user_id}"  # Sorted Set：member=call_uid, score=ts
@@ -77,7 +123,7 @@ async def check_l1_rate_limit(
     redis: Redis,
     user_id: int,
     *,
-    limit: int = DEFAULT_L1_RATE_PER_MIN,
+    limit: int | None = None,
 ) -> tuple[int, str]:
     """L1 用户写速率：滑动 60s 窗口（默认 20/min）— 修订 S-7
 
@@ -96,6 +142,8 @@ async def check_l1_rate_limit(
 
     修订 S-11：超限时先 ZREM 自身再加回队列，再抛错。
     """
+    if limit is None:
+        limit = await _resolve_l1_limit()
     key = _KEY_L1.format(user_id=user_id)
     now = time.time()
     window_start = now - L1_WINDOW_SEC
@@ -123,7 +171,7 @@ async def check_l2_daily_quota(
     redis: Redis,
     user_id: int,
     *,
-    limit: int = DEFAULT_L2_DAILY_QUOTA,
+    limit: int | None = None,
 ) -> int:
     """L2 用户日配额：UTC 日（默认 2000/day）— 修订 S-8
 
@@ -140,6 +188,8 @@ async def check_l2_daily_quota(
 
     修订 S-11：超限时先 DECR 自身，再抛错。
     """
+    if limit is None:
+        limit = await _resolve_l2_limit()
     now = datetime.now(UTC)
     date_str = now.strftime("%Y%m%d")
     key = _KEY_L2.format(user_id=user_id, date=date_str)
@@ -204,12 +254,14 @@ def get_l3_timeout(
     return timedelta(seconds=timeout_sec)
 
 
-async def with_l3_timeout(coro, *, timeout_sec: int = DEFAULT_L3_TIMEOUT_SEC):
+async def with_l3_timeout(coro, *, timeout_sec: int | None = None):
     """L3 单 tool 超时包装
 
     spec §6.4 / §6.5：超时抛 BusinessRuleException(AI_TOOL_TIMEOUT)，
     Gateway Executor 捕获后转 ToolResult.failure
     """
+    if timeout_sec is None:
+        timeout_sec = await _resolve_l3_timeout()
     try:
         return await asyncio.wait_for(coro, timeout=timeout_sec)
     except TimeoutError as e:

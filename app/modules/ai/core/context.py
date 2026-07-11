@@ -83,6 +83,10 @@ class ChatDeps:
     execute_tool 据此调 classify_execution_mode(injection_hit=True) → 强制 HITL
     （降级而非拒绝，§11.1）。"""
 
+    client_ip: str | None = None
+    """§11.4 客户端 IP（从 FastAPI request.client.host 注入）。
+    用于鉴权拒绝时的 IP 级自动拉黑计数；None 表示单元测试 / 旧路径。"""
+
 
 @dataclass
 class AiToolContext:

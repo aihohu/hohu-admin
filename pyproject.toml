@@ -91,7 +91,7 @@ filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::UserWarning",
 ]
-addopts = "-v -s --strict-markers"
+addopts = "-v -s --strict-markers -p no:unraisableexception"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]

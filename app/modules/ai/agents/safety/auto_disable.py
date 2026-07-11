@@ -25,10 +25,42 @@ from app.modules.system.models.user import User
 
 logger = logging.getLogger(__name__)
 
-# 阈值（spec §11.4 原文，硬编码 MVP，v2+ 走 system_config）
+# 阈值（spec §11.4 原文）
+# 运行时从 sys_config 读，60s 缓存；这里仅作为 fallback default
 INJECTION_THRESHOLD_PER_HOUR = 5
 DISABLE_DURATION_SEC = 24 * 3600  # 24h
 INJECTION_COUNT_TTL_SEC = 2 * 3600  # 2h（计数器保留 2h 给窗口跨小时查询）
+
+_CFG_THRESHOLD = "ai:auto_disable:injection_per_hour"
+_CFG_DURATION = "ai:auto_disable:duration_sec"
+
+
+async def _resolve_threshold() -> int:
+    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
+    from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
+        get_ai_config_int,
+    )
+
+    try:
+        async with AsyncSessionLocal() as db:
+            return await get_ai_config_int(
+                db, _CFG_THRESHOLD, INJECTION_THRESHOLD_PER_HOUR
+            )
+    except Exception:
+        return INJECTION_THRESHOLD_PER_HOUR
+
+
+async def _resolve_duration() -> int:
+    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
+    from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
+        get_ai_config_int,
+    )
+
+    try:
+        async with AsyncSessionLocal() as db:
+            return await get_ai_config_int(db, _CFG_DURATION, DISABLE_DURATION_SEC)
+    except Exception:
+        return DISABLE_DURATION_SEC
 
 
 def _hour_bucket(now: datetime | None = None) -> str:
@@ -61,7 +93,7 @@ async def record_injection(redis: Redis, user: User) -> int:
     if current == 1:
         await redis.expire(count_key, INJECTION_COUNT_TTL_SEC)
 
-    if current >= INJECTION_THRESHOLD_PER_HOUR:
+    if current >= await _resolve_threshold():
         if is_super_admin(user):
             logger.warning(
                 "super_admin injection threshold hit (NOT disabling)",
@@ -75,7 +107,8 @@ async def record_injection(redis: Redis, user: User) -> int:
         else:
             disabled_key = _disabled_key(user.user_id)
             already_disabled = await redis.get(disabled_key)
-            await redis.set(disabled_key, "1", ex=DISABLE_DURATION_SEC)
+            duration = await _resolve_duration()
+            await redis.set(disabled_key, "1", ex=duration)
             if not already_disabled:
                 logger.warning(
                     "user auto-disabled for injection threshold",

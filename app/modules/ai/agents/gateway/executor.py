@@ -169,6 +169,8 @@ async def execute_tool(
             "perm denied via runtime check",
             extra={"user_id": user_id, "tool": name},
         )
+        # §11.4 IP 拉黑计数（异步 fire-and-forget，不阻断主流程）
+        await _record_perm_denied_for_ip(deps, name)
         return ToolResult.failure(
             error_code="AI_TOOL_PERM_DENIED",
             error_msg=USER_FACING_MSG["AI_TOOL_PERM_DENIED"],
@@ -696,6 +698,8 @@ async def _invoke_tool_fn(
                     "quota decr failed on AuthorizationException",
                     extra={"user_id": user_id, "tool": meta.name},
                 )
+        # §11.4 IP 拉黑计数（异步，不阻断主流程）
+        await _record_perm_denied_for_ip(deps, meta.name)
         # 授权失败不计入失败计数（spec §6.4 计数策略）
         logger.info(
             "tool authorization denied (data_scope / etc)",
@@ -773,3 +777,30 @@ def _safe_write_query_cache(
     except RuntimeError:
         # 无 event loop（单元测试同步调用场景），直接跳过
         pass
+
+
+# ============ §11.4 IP 拉黑计数（fire-and-forget） ============
+
+
+async def _record_perm_denied_for_ip(deps: ChatDeps, tool_name: str) -> None:
+    """鉴权拒绝时调 ip_blacklist.record_perm_denied（§11.4）
+
+    fire-and-forget：开独立 session + 失败吞异常，绝不影响主流程。
+    IP 来源：FastAPI request.client.host，由 chat.py 注入 deps（暂未注入则跳过）。
+    """
+    ip = getattr(deps, "client_ip", None)
+    if not ip:
+        return  # deps 未注入 client_ip（单元测试 / 旧路径），跳过
+    try:
+        from app.db.session import AsyncSessionLocal  # noqa: PLC0415
+        from app.modules.ai.agents.safety.ip_blacklist import (  # noqa: PLC0415
+            record_perm_denied,
+        )
+
+        async with AsyncSessionLocal() as db:
+            await record_perm_denied(redis_client, db, ip)
+    except Exception:
+        logger.exception(
+            "ip_blacklist record_perm_denied failed (ignored)",
+            extra={"tool": tool_name, "ip": ip},
+        )

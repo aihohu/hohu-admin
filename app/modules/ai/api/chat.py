@@ -40,6 +40,7 @@ from app.modules.ai.agents.safety.injection_detector import (
     is_injection_hit_conversation,
     record_injection_hit_conversation,
 )
+from app.modules.ai.agents.safety.ip_blacklist import is_ip_blacklisted
 from app.modules.ai.agents.safety.keyword_blocklist import (
     check_keywords,
     load_blocklist,
@@ -211,6 +212,27 @@ async def chat(
     agent_code = body.get("agentCode") or body.get("agent_code")
     deps = await chat_service.build_chat_deps(db, _current_user, agent_code=agent_code)
     deps.conversation_id = conversation_id
+    # §11.4: 注入 client_ip 给 executor（用于鉴权拒绝时的 IP 级拉黑计数）
+    deps.client_ip = request.client.host if request.client else None
+
+    # §11.4 IP 级拉黑短路：单 IP 1h 内 AI 鉴权拒绝 ≥ 50 → 拉黑 2h
+    if deps.client_ip:
+        if await is_ip_blacklisted(redis_client, deps.client_ip):
+            logger.warning(
+                "ip blacklisted blocked chat",
+                extra={"ip": deps.client_ip, "user_id": _current_user.user_id},
+            )
+
+            async def _ip_blocked_stream():
+                yield _format_sse_chunk(
+                    AiErrorEvent(
+                        error_code="AI_IP_BLOCKED",
+                        message="您的 IP 因异常 AI 调用被临时拉黑，请联系管理员",
+                    )
+                )
+                yield _format_sse_chunk(DoneEvent())
+
+            return StreamingResponse(_ip_blocked_stream(), media_type=SSE_CONTENT_TYPE)
 
     # §11.4 用户级自动禁用短路：被禁用时 emit ai_error + done，流结束
     if await check_user_disabled(redis_client, _current_user.user_id):
@@ -321,6 +343,41 @@ async def chat(
     async def sse_with_save():
         """合并 PydanticAI vercel stream + 自定义事件 queue → 单一 SSE 输出"""
         collected: list[str] = []
+        # 修订 BUG-FE-18: 收集 tool_call 事件，save_assistant_message 时存到
+        # ai_message.tool_calls JSON，前端重连会话时还原 streamEvents
+        collected_tool_calls: list[dict] = []
+        started_events: dict[str, dict] = {}  # tool_call_id → started event dict
+
+        def _record_tool_event(ev):
+            """拦截 ToolCallStarted/Result 事件，配对后存 collected_tool_calls"""
+            from app.modules.ai.agents.hitl.events import (  # noqa: PLC0415
+                ToolCallResultEvent,
+                ToolCallStartedEvent,
+            )
+
+            if isinstance(ev, ToolCallStartedEvent):
+                # 按 toolCallId 缓存 started；等 result 配对后入列
+                started_events[ev.tool_call_id] = {
+                    "tool": ev.tool,
+                    "tool_call_id": ev.tool_call_id,
+                    "summary": ev.summary,
+                    "args": ev.args,
+                    "risk": ev.risk,
+                    "trace_id": ev.trace_id,
+                }
+            elif isinstance(ev, ToolCallResultEvent):
+                started = started_events.pop(ev.tool_call_id, {})
+                collected_tool_calls.append(
+                    {
+                        **started,
+                        "ok": ev.ok,
+                        "result": ev.result,
+                        "affected_rows": ev.affected_rows,
+                        "error_code": ev.error_code,
+                        "error_msg": ev.error_msg,
+                        "duration_ms": ev.duration_ms,
+                    }
+                )
 
         # 生产者：跑 PydanticAI stream，把 vercel chunk 转发到 unified_queue
         unified_queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -335,6 +392,7 @@ async def chat(
                     # 转发完一个 vercel chunk 后，drain custom queue（避免漏发）
                     while not custom_event_queue.empty():
                         ev = custom_event_queue.get_nowait()
+                        _record_tool_event(ev)  # 修订 BUG-FE-18
                         await unified_queue.put(_format_sse_chunk(ev))
             except UsageLimitExceeded as e:
                 # spec §11.6: agent loop 超限（tool_calls_limit=5 / request_limit=10）
@@ -360,6 +418,7 @@ async def chat(
                 # stream 结束前先 drain 残留 custom events
                 while not custom_event_queue.empty():
                     ev = custom_event_queue.get_nowait()
+                    _record_tool_event(ev)  # 修订 BUG-FE-18
                     await unified_queue.put(_format_sse_chunk(ev))
                 await unified_queue.put(None)  # sentinel
 
@@ -388,7 +447,10 @@ async def chat(
         if saved_conversation_id and collected_text:
             try:
                 await chat_service.save_assistant_message(
-                    saved_db, saved_conversation_id, content=collected_text
+                    saved_db,
+                    saved_conversation_id,
+                    content=collected_text,
+                    tool_calls=collected_tool_calls if collected_tool_calls else None,
                 )
                 await saved_db.commit()
             except Exception:
