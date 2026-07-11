@@ -89,12 +89,27 @@ class OperationLogService:
         )
         db.add(log)
         await db.flush()
+        # 修订 S-3：autonomous 流业务立即开始，写 started_at = queued_at（即 flush 后 server_default 填的值）
+        # hitl_wait_ms = 0（无 HITL 等待）。HITL 流的 started_at 由 mark_running 填。
+        if status == AiOperationStatus.RUNNING:
+            log.started_at = log.queued_at
+            log.hitl_wait_ms = 0
         return log.log_id
 
     async def mark_running(self, db: AsyncSession, log_id: int) -> AiOperationLog:
-        """状态迁移：pending_confirmation → running（用户 approve 后）"""
+        """状态迁移：pending_confirmation → running（用户 approve 后）
+
+        修订 S-3：HITL 流真正进入"业务执行"状态，写 started_at + hitl_wait_ms。
+        hitl_wait_ms = started_at - queued_at（pending 等待时间）。
+        """
         log = await self._get(db, log_id)
         self._transition(log, AiOperationStatus.RUNNING)
+        now = datetime.now(UTC).replace(tzinfo=None)
+        # queued_at 由 server_default 填充；HITL 流 mark_running 时计算等待耗时
+        if log.queued_at is not None:
+            delta = (now - log.queued_at).total_seconds() * 1000
+            log.hitl_wait_ms = max(0, int(delta))
+        log.started_at = now
         return log
 
     async def mark_success(

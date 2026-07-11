@@ -75,11 +75,15 @@ class Settings(BaseSettings):
     # spec §11.5: 整个 AI 模块全局开关（False = 不注册 AI router，安全降级）
     AI_MODULE_ENABLED: bool = True
 
-    # AI HITL（spec §8.4）
+    # AI HITL（spec §8.4 + 修订 S-6）
     # MVP 强制单 worker：进程内 dict[confirmation_id, asyncio.Event] 在多 worker 下静默失效。
-    # v1.5+ 改 redis_pubsub 模式后可放开 WEB_CONCURRENCY
+    # v1.5+ 改 redis_pubsub 模式后可放开多 worker
     AI_HITL_MODE: Literal["memory", "redis_pubsub"] = "memory"
     WEB_CONCURRENCY: int = 1
+    # 修订 S-6: 启动时用 Redis SADD 实测活跃 worker 数（env var WEB_CONCURRENCY
+    # 不可信——uvicorn --workers 4 不经 gunicorn 时各 worker lifespan 独立检查
+    # 都通过）。测试环境可关闭此检查（AI_REQUIRE_SINGLE_WORKER=False）
+    AI_REQUIRE_SINGLE_WORKER: bool = True
     # HITL 挂起 TTL（秒）：spec §8.3 默认 5min
     AI_HITL_PENDING_TTL_SEC: int = 300
     # Redis 中 args JSON 大小上限（字节）：spec §8.3 防恶意 user 撑爆 Redis

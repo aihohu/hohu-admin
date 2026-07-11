@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import ValidationError
+from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.ui import SSE_CONTENT_TYPE
 from pydantic_ai.ui.vercel_ai import VercelAIAdapter
 from pydantic_ai.usage import UsageLimits
@@ -335,9 +336,24 @@ async def chat(
                     while not custom_event_queue.empty():
                         ev = custom_event_queue.get_nowait()
                         await unified_queue.put(_format_sse_chunk(ev))
+            except UsageLimitExceeded as e:
+                # spec §11.6: agent loop 超限（tool_calls_limit=5 / request_limit=10）
+                # 显式 emit AiErrorEvent(AI_USAGE_LIMIT_EXCEEDED)，前端弹 $message.error
+                logger.warning(
+                    "PydanticAI usage limit exceeded",
+                    extra={"trace_id": deps.trace_id, "error": str(e)},
+                )
+                await unified_queue.put(
+                    _format_sse_chunk(
+                        AiErrorEvent(
+                            error_code="AI_USAGE_LIMIT_EXCEEDED",
+                            message="AI 调用次数超限，请换种方式问或拆分任务",
+                        )
+                    )
+                )
+                await unified_queue.put(None)
             except Exception:
-                # PydanticAI VercelAIAdapter 内部已 catch 所有异常（含 UsageLimitExceeded）
-                # 转成 ErrorChunk(type='error') emit，本 except 只兜底未预期异常
+                # 其它未预期异常：log + sentinel，前端靠 SSE done 兜底
                 logger.exception("PydanticAI stream error")
                 await unified_queue.put(None)
             else:

@@ -51,14 +51,17 @@ from app.modules.system.api.user import router as user_router
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """应用生命周期管理"""
-    # spec §8.4 单 worker 约束：HITL 进程内 asyncio.Event 在多 worker 下静默失效。
-    # 部署文档（docs/AI-DEPLOYMENT.md，Phase 4 交付）必须同步约束 uvicorn --workers 1。
-    if settings.WEB_CONCURRENCY > 1 and settings.AI_HITL_MODE == "memory":
-        raise RuntimeError(
-            f"WEB_CONCURRENCY={settings.WEB_CONCURRENCY} 与 AI_HITL_MODE=memory 冲突："
-            "MVP HITL 用进程内 asyncio.Event，多 worker 下会静默失效。"
-            "请设 WEB_CONCURRENCY=1，或等 v1.5+ 切 AI_HITL_MODE=redis_pubsub。"
-        )
+    # spec §8.4 单 worker 约束 + 修订 S-6：env var 不可信（uvicorn --workers 4
+    # 不经过 gunicorn 时各 worker lifespan 独立运行，都通过 env var 检查），
+    # 必须用 Redis SADD 实测活跃 worker 数。
+    if settings.AI_HITL_MODE == "memory" and settings.AI_REQUIRE_SINGLE_WORKER:
+        worker_count = await _detect_actual_worker_count()
+        if worker_count > 1:
+            raise RuntimeError(
+                f"AI HITL memory mode requires single worker, detected {worker_count}. "
+                f"Set AI_HITL_MODE=redis_pubsub (v1.5+) or scale workers down to 1. "
+                f"See docs/AI-DEPLOYMENT.md."
+            )
 
     # spec §3 启动扫描：触发各业务模块 @ai_tool 装饰器注册到 ToolRegistry，
     # 校验 agent_code / permission_code 在 DB 存在
@@ -88,7 +91,65 @@ async def lifespan(_app: FastAPI):
 
     if settings.APP_ROLE == "all":
         scheduler_manager.shutdown()
+    # 修订 S-6：lifespan 结束时从 Redis active worker 集合移除自己，让下次启动
+    # 拿到准确计数（不依赖 30s EXPIRE 自然过期）
+    if settings.AI_HITL_MODE == "memory" and settings.AI_REQUIRE_SINGLE_WORKER:
+        await _unregister_active_worker()
     await close_redis()
+
+
+# ============ 修订 S-6: Redis-based worker count 实测 ============
+
+_WORKER_ACTIVE_KEY = "ai:workers:active"
+_WORKER_TTL_SEC = 30  # 30s 内未续期的 worker 视为挂掉
+
+
+def _worker_uid() -> str:
+    """本进程的稳定唯一标识（pid + 启动时随机 hex）"""
+    import os  # noqa: PLC0415
+    import uuid  # noqa: PLC0415
+
+    return f"{os.getpid()}:{uuid.uuid4().hex}"
+
+
+# 进程级 uid（lifespan 内不变，便于 unregister）
+_CURRENT_WORKER_UID: str | None = None
+
+
+async def _detect_actual_worker_count() -> int:
+    """修订 S-6: Redis SADD 实测活跃 worker 数。
+
+    各 worker 启动时：
+      1. SADD ai:workers:active <uid>
+      2. EXPIRE 30s（防止 worker 崩溃后 key 永远残留）
+      3. SCARD 查当前活跃数
+
+    Returns:
+        当前 Redis 集合中的活跃 worker 数
+    """
+    global _CURRENT_WORKER_UID
+    _CURRENT_WORKER_UID = _worker_uid()
+
+    from app.core.redis import redis_client  # noqa: PLC0415
+
+    await redis_client.sadd(_WORKER_ACTIVE_KEY, _CURRENT_WORKER_UID)
+    await redis_client.expire(_WORKER_ACTIVE_KEY, _WORKER_TTL_SEC)
+    return await redis_client.scard(_WORKER_ACTIVE_KEY)
+
+
+async def _unregister_active_worker() -> None:
+    """lifespan 结束时从 Redis 活跃 worker 集合移除自己"""
+    global _CURRENT_WORKER_UID
+    if _CURRENT_WORKER_UID is None:
+        return
+    try:
+        from app.core.redis import redis_client  # noqa: PLC0415
+
+        await redis_client.srem(_WORKER_ACTIVE_KEY, _CURRENT_WORKER_UID)
+    except Exception:
+        # Redis down 不阻断 shutdown
+        pass
+    _CURRENT_WORKER_UID = None
 
 
 if os.getenv("ENV") == "prod":

@@ -18,10 +18,13 @@
 | uv | ≥ 0.11 | ✅ |
 | LLM Provider | OpenAI / Anthropic / Doubao 等兼容 OpenAI API 的厂商 | ✅ |
 
-### 1.2 强制约束（spec §8.4）
+### 1.2 强制约束（spec §8.4 + 修订 S-6）
 
-- **单 worker**：`WEB_CONCURRENCY=1`。MVP 用进程内 `asyncio.Event` 实现 HITL 唤醒，多 worker 下会静默失效。`main.py` lifespan 启动时会 assert，违反则 `RuntimeError` 阻断启动。
-- v1.5+ 切 `AI_HITL_MODE=redis_pubsub` 后可放开多 worker。
+- **单 worker 进程**（不是单 pod）：`WEB_CONCURRENCY=1` + `uvicorn --workers 1` 或 gunicorn `--workers 1`。MVP 用进程内 `asyncio.Event` 实现 HITL 唤醒，多 worker 下会静默失效。
+- **修订 S-6 启动实测**：`AI_REQUIRE_SINGLE_WORKER=True`（默认）时，lifespan 用 Redis SADD 实测活跃 worker 数 > 1 则 `RuntimeError` 阻断启动。env var WEB_CONCURRENCY 不可信（uvicorn --workers 4 不经 gunicorn 时各 worker lifespan 独立运行，都通过 env var 检查）。
+- **禁止 Docker/k8s 多 pod 部署**：多 pod = 多独立 `_pending` dict，HITL wake 必失配。若必须高可用，等 v1.5+ `AI_HITL_MODE=redis_pubsub`。
+- **测试环境豁免**：单测 / 集成测试可设 `AI_REQUIRE_SINGLE_WORKER=False` 跳过此检查。
+- v1.5+ 切 `AI_HITL_MODE=redis_pubsub` 后可放开多 worker / 多 pod。
 
 ### 1.3 资源基线（参考）
 

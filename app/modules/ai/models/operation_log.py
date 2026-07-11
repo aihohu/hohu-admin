@@ -53,11 +53,29 @@ class AiOperationLog(Base):
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     confirmation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     approved_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    started_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), comment="单次 tool 调用开始时间"
+    # 时间语义（spec §4.4 时间戳约定，2026-07-10 修订 S-3）：
+    # - queued_at:    行级创建时间（pending_confirmation 入库时刻），含 HITL 等待之前
+    # - started_at:   业务执行起点（HITL approved 后 / autonomous 入库后真正开始执行）
+    # - finished_at:  业务执行终点（success / failed / rejected / expired）
+    # duration_ms = finished_at - started_at（不含 HITL 等待时间）
+    # hitl_wait_ms = started_at - queued_at（autonomous 流为 None）
+    queued_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        comment="行级创建时间（pending_confirmation 入库时刻）",
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+        comment="业务执行起点（HITL approve 后 / autonomous 入库后）",
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, comment="业务执行耗时，不含 HITL 等待"
+    )
+    hitl_wait_ms: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, comment="HITL 等待耗时（autonomous 流为 None）"
+    )
     ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(String(256), nullable=True)
 

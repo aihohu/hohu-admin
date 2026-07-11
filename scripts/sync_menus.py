@@ -1179,7 +1179,9 @@ MENU_DEFINITIONS = [
         "i18n_key": "route.ai_agent",
         "order": 3,
         "status": "1",
-        "hide_in_menu": False,
+        # v1.5+ 实现 src/views/ai/agent/index.vue 后改回 False；
+        # 当前前端组件未实现，避免菜单点击触发 "View component not found" 报错
+        "hide_in_menu": True,
         "keep_alive": False,
         "constant": False,
         "multi_tab": False,

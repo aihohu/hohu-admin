@@ -317,6 +317,9 @@ async def execute_tool(
             )
         # approved → mark_running 后继续执行
         await _finish_log_running(log_id)
+        # 修订 S-3：HITL 等待结束，重置 started_at 为业务执行起点
+        # duration_ms 只算业务耗时（不含 HITL 等待），hitl_wait_ms 在 mark_running 已写
+        started_at = time.monotonic()
 
     # 8. 业务执行（修订 S-11：传 l1_member 进去，业务函数内抛
     #    AuthorizationException 时 decr_quota 精确回滚 L1 zset 成员）
