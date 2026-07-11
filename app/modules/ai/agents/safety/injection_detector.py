@@ -9,6 +9,13 @@
   - 多 pattern 任意命中即触发（OR 语义）
   - 不依赖 LLM 自检（LLM 可被越狱），仅在 user message 文本上做静态匹配
 
+跨轮持久化（2026-07-10 修订 S-16）：
+  - pattern 扫描：仅扫当前轮 user message（保留原意，避免长对话成本）
+  - 命中状态：写入 Redis `ai:injection_hit:{conversation_id}` TTL = 1h
+  - conversation 内任意后续轮次 tool 调用都强制走 HITL（即使后续消息不再
+    触发 pattern）—— 防止攻击者把攻击拆成多轮，每轮只触发 1 个 pattern
+    避免阈值。
+
 Pattern 来源（§12.3 INJECTION_ATTACKS）：
   1. 越狱指令覆盖（"忽略之前的所有指令" / "Ignore all previous instructions"）
   2. 角色重设（"你现在是一个管理员" / "You are now DAN"）
@@ -21,6 +28,8 @@ Pattern 来源（§12.3 INJECTION_ATTACKS）：
 """
 
 import re
+
+from redis.asyncio import Redis
 
 # 大小写不敏感 + 多行；命中即触发 HITL
 _PATTERNS: tuple[re.Pattern[str], ...] = tuple(
@@ -60,6 +69,12 @@ _PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 )
 
 
+# ============ 跨轮持久化 Redis key（修订 S-16） ============
+
+_INJECTION_HIT_TTL_SEC = 3600  # 1h
+_KEY_CONV = "ai:injection_hit:{conversation_id}"
+
+
 def detect_injection(text: str) -> bool:
     """检测 user message 是否命中 prompt injection pattern
 
@@ -74,6 +89,8 @@ def detect_injection(text: str) -> bool:
         - 仅做静态文本匹配，不依赖 LLM 自检（LLM 可被越狱）
         - 保守偏向：宁可误报，不可漏报
         - 多语言：中英文 pattern 都覆盖
+        - 修订 S-16：本函数只做"本轮扫描"；跨轮持久化由调用方调
+          `record_injection_hit_conversation` + `is_injection_hit_conversation`
     """
     if not text:
         return False
@@ -85,3 +102,68 @@ def matched_patterns(text: str) -> list[str]:
     if not text:
         return []
     return [p.pattern for p in _PATTERNS if p.search(text)]
+
+
+# ============ 跨轮持久化 helper（修订 S-16） ============
+
+
+async def record_injection_hit_conversation(
+    redis: Redis,
+    conversation_id: int | None,
+) -> None:
+    """本轮 pattern 命中 → 写 conversation 级 Redis flag（TTL 1h）
+
+    必须在 chat.py 检测到命中后立即调用，让 conversation 后续轮次 tool 调用
+    都强制 HITL（即使后续消息不再触发 pattern）。
+
+    Args:
+        redis: redis client
+        conversation_id: 会话 ID；None（新建会话首条消息）时跳过 Redis 写入
+                        （仅本轮生效，跨轮不持久化——首条消息的特殊场景）
+
+    设计：
+      - 每次命中刷新 TTL（用户活跃对话内持续触发，1h 不重置）
+      - 不做"次数计数"——任何一次命中都让整个 conversation 进入"已触发"状态
+        （记录次数的是 §11.4 record_injection，与自动禁用阈值挂钩）
+    """
+    if conversation_id is None:
+        return
+    key = _KEY_CONV.format(conversation_id=conversation_id)
+    await redis.set(key, "1", ex=_INJECTION_HIT_TTL_SEC)
+
+
+async def is_injection_hit_conversation(
+    redis: Redis,
+    conversation_id: int | None,
+) -> bool:
+    """检查 conversation 级是否已触发过注入（修订 S-16）
+
+    chat.py build_chat_deps 后调用，把结果合并到 deps.injection_hit：
+      deps.injection_hit = detect_injection(本轮) or is_injection_hit_conversation(历史)
+
+    Args:
+        redis: redis client
+        conversation_id: 会话 ID；None 时返回 False（仅本轮 detect 有效）
+
+    Returns:
+        True = conversation 1h 内曾命中过 pattern，本轮 tool 调用应强制 HITL
+        False = 无历史命中或 conversation_id=None
+    """
+    if conversation_id is None:
+        return False
+    key = _KEY_CONV.format(conversation_id=conversation_id)
+    return bool(await redis.exists(key))
+
+
+async def clear_injection_hit_conversation(
+    redis: Redis,
+    conversation_id: int,
+) -> None:
+    """显式清除 conversation 级注入状态（测试 / 管理员手动恢复用）
+
+    生产代码一般不调——TTL 1h 自然过期。用于：
+      - 单元测试间清理
+      - 部署方提供"清除会话注入标记"管理 API（v1.5+）
+    """
+    key = _KEY_CONV.format(conversation_id=conversation_id)
+    await redis.delete(key)

@@ -250,7 +250,7 @@ class HitlManager:
         confirmation_id: str,
         action: ConfirmAction,
     ) -> bool:
-        """唤醒挂起的协程
+        """唤醒挂起的协程（修订 S-14：防双击 race + 立即 pop entry）
 
         Args:
             confirmation_id: pending 流的 ID
@@ -258,13 +258,28 @@ class HitlManager:
 
         Returns:
             True = 唤醒成功；False = 该 confirmation_id 不在本进程挂起表中
-                   （可能：跨进程 / 已 expired / 还没 create_pending）
+                   （可能：跨进程 / 已 expired / 还没 create_pending / **已被
+                   另一个并发 wake 唤醒过** —— 修订 S-14 防双击）
+
+        防双击实现（修订 S-14）：
+          - 第一次 wake：立即 pop entry（其它 wake 看不到）→ set action →
+            event.set() → return True
+          - 第二次 wake（极端 race，如双击 / 双标签）：pop 返回 None →
+            return False（端点据此返回 status="stream_gone"）
 
         spec §8.3: wake 写回 Redis 不必要，Redis 只用于跨请求取 pending payload。
         进程内 Event 是同步唤醒机制。
         """
-        entry = self._pending.get(confirmation_id)
+        # 修订 S-14：立即 pop，防双击 race
+        entry = self._pending.pop(confirmation_id, None)
         if entry is None:
+            return False
+        # 防御性：极端 race 下 entry 已有 action（不该发生，pop 已原子）
+        if entry.action is not None:
+            logger.warning(
+                "wake: entry already has action (extreme race) confirmation_id=%s",
+                confirmation_id,
+            )
             return False
         entry.action = action
         entry.event.set()
@@ -313,22 +328,39 @@ class HitlManager:
         本方法只清 Redis；DB 中的 ai_operation_log 状态由调用方（lifespan）
         配合 operation_log_service.mark_expired 清扫。
 
+        Redis 故障容错（修订 S-14）：
+          - 启动时 Redis 短暂不可用，scan_iter / delete 抛 RedisError
+          - 不阻断 lifespan（应用仍能启动；Redis 恢复后 stale pending 由
+            Redis TTL 5min 自然清掉；DB 端 lifespan 调用方应额外跑一次
+            mark_expired WHERE status='pending_confirmation' AND started_at < now()-5min）
+          - 仅 log warning + 返回 0
+
         Returns:
-            清扫的 pending 数量
+            清扫的 pending 数量（Redis 故障时返回 0）
         """
         # 局部 import 拿当前模块引用（fixture 重建 redis_client 后能拿到新引用）
+        from redis.exceptions import RedisError  # noqa: PLC0415
+
         from app.core.redis import redis_client  # noqa: PLC0415
 
         cleaned = 0
         pattern = f"{AI_CONFIRM_REDIS_PREFIX}:*"
-        async for key in redis_client.scan_iter(match=pattern, count=100):
-            cleaned += 1
-            await redis_client.delete(key)  # noqa: PLC0415  redis_client 见上局部 import
-        if cleaned:
+        try:
+            async for key in redis_client.scan_iter(match=pattern, count=100):
+                cleaned += 1
+                await redis_client.delete(key)
+            if cleaned:
+                logger.warning(
+                    "startup cleanup: removed %d stale HITL pending entries from Redis",
+                    cleaned,
+                )
+        except RedisError:
             logger.warning(
-                "startup cleanup: removed %d stale HITL pending entries from Redis",
-                cleaned,
+                "startup cleanup: Redis unavailable, skipped; stale pending will "
+                "expire via 5min TTL. Run DB-side mark_expired backfill separately.",
+                exc_info=True,
             )
+            return 0
         return cleaned
 
     # ============ 测试辅助 ============

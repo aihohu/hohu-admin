@@ -86,7 +86,12 @@
 **反例**: LLM 调 `user.list(filters={gender: "male"})` 拉 5000 行后自己数 → 分页拿不到全量（默认 size=10、最大 100）/ token 爆 / LLM 数数不靠谱（长列表已知缺陷）/ 走 §2.9 chip 跳模块页让用户自己数 → 体验崩；通用 `db.aggregate(model, where, group_by)` → 任意 model 查询安全面太大、敏感字段难脱敏、白名单难收敛。
 **回归**: 每个业务模块各自暴露 `count` / `stats` / `distinct` 三类聚合 tool（user 模块先做，role / dept / config 等 v1.5 跟进），返回结构强制 `{"count": N}` 或 `[{"group": "1", "count": 342}, ...]`，LLM 直接转述数字（不需要 chip 跳转，因为数据就是答案）；`risk=low` + readonly，但 `@ai_tool` meta 里 `allowed_filters` / `allowed_group_by` 列出可聚合字段（MVP 仅 `sys_user` 表直字段：`status` / `user_gender`；dept / role 走关联表子查询留 v1.5），越界字段抛 `AI_STATS_FIELD_NOT_ALLOWED`（§9.6）；详见 §5.5 设计模式。原型参考 `docs/prototype/12-ai-chat-tool-call.html` 场景 13。
 
-> **聚合维度限制**：MVP 阶段 `user.stats` 仅支持 `status` / `user_gender` 两个维度，原型示例"年龄大于 20 男生有多少"需要 `sys_user.age` 字段（当前表无此列），需 v1.5 扩表后才能实现。LLM 收到年龄类问题时应主动反问用户换维度（"目前 AI 仅支持按性别 / 状态聚合，年龄维度请走传统用户管理页"）。
+> **聚合维度范围（按 Phase 切分，非"MVP 硬限制"）**：
+> - **Phase 1（已完成）**：`user.count` / `user.stats` / `user.distinct`，仅 `sys_user` 表直字段（`status` / `user_gender`）
+> - **v1.5+（已落地）**：`dept.count` / `role.count` 等其它业务模块 count tool（不要求 stats / distinct，详见 §20 v1.5+ 已完成清单）
+> - **v1.5+（推迟）**：`user.stats_by_dept` / `user.stats_by_role` 走 EXISTS 子查询；`age` 维度需先扩 `sys_user` 业务字段
+>
+> **关键约束**：每个新 stats/count tool 都必须独立声明 `allowed_filters` / `allowed_group_by` 白名单（§5.5），未声明的字段直接抛 `AI_STATS_FIELD_NOT_ALLOWED`。LLM 收到白名单外维度（如年龄、部门）的 stats 请求时应主动反问用户换可聚合维度。
 
 ### 2.11 **SSE 流式协议走 Vercel UI Protocol v4，自定义事件用私有 `type` 命名空间叠加** — 后端 `VercelAIAdapter.encode_stream` 输出 v4 标准（`data: {"type":"text-delta"|"reasoning-delta"|"text-start"|"finish"|...}\n\n`），前端按 type 分流；HITL / tool-call 等业务私有事件用相同 SSE 帧格式但保留私有 `type`（`tool_call_started` / `tool_call_result` / `confirmation_required` / `ai_error` / `done`），与 v4 标准事件命名空间不冲突。
 **反例**: 沿用 Vercel v3 行前缀（`0:"..."` / `2:{...}`）→ 已被 v4 取代，PydanticAI 1.89+ 默认不再输出；自研一套 `{type, payload}` 协议 → 与上游生态脱节，未来升级 PydanticAI 或对接 Vercel AI SDK 前端组件成本高；把 `tool_call_started` 等 v4 未覆盖的事件硬塞进 v4 标准 type → 命名空间污染。
@@ -277,11 +282,21 @@ class AiOperationLog(Base):
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     confirmation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     approved_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    started_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), comment="开始时间"
+    # 时间语义（§4.4 时间戳约定，2026-07-10 修订 S-3）：
+    # - queued_at:    行级创建时间（pending_confirmation 入库时刻），含 HITL 等待之前
+    # - started_at:   业务执行起点（HITL approved 后 / autonomous 入库后真正开始执行）
+    # - finished_at:  业务执行终点（success / failed / rejected / expired）
+    # duration_ms = finished_at - started_at（不含 HITL 等待时间）
+    # hitl_wait_ms = started_at - queued_at（autonomous 流为 0 / None）
+    queued_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), comment="行级创建（含 HITL 等待之前）"
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, comment="业务执行起点（HITL approve 后 / autonomous 入库后）"
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="业务执行耗时，不含 HITL 等待")
+    hitl_wait_ms: Mapped[int | None] = mapped_column(Integer, nullable=True, comment="HITL 等待耗时（autonomous 流为 None）")
     ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(String(256), nullable=True)
 
@@ -298,7 +313,7 @@ class AiOperationLog(Base):
     )
 ```
 
-> `started_at` / `finished_at` 是单次 tool 调用的开始 / 结束时间（不是行级 create_time）。如需行级 create_time 可再加 `create_time`，MVP 不加（`started_at` 即可充当）。
+> `queued_at` 是行级创建时间；`started_at` 是业务执行起点（HITL approve 后或 autonomous 入库后开始执行业务函数的时刻）；`finished_at` 是业务终态时刻。`duration_ms = finished_at - started_at` 不含 HITL 等待；`hitl_wait_ms = started_at - queued_at` 仅 HITL 流非空。spec §8.1 `tool_call_result.durationMs` 同源生成（不含 HITL 等待）；如需展示含 HITL 的"总耗时"，前端用 `durationMs + hitlWaitMs` 自行相加。
 
 **`status` 状态机**：
 
@@ -318,11 +333,12 @@ HITL 流:      pending_confirmation → running (用户 approve)
 - `pending_confirmation → expired`：5min TTL 超时 **OR 服务重启时清扫**（见 8.4）
 
 **索引建议**（生产环境必备）：
-- `idx_ai_op_log_user_started`：`(user_id, started_at)` — §9.5 alert"单用户 1 小时内 X ≥ N"聚合
-- `idx_ai_op_log_trace`：`(trace_id, started_at)` — §9.3 AI Trace 视图按时间排序
-- `idx_ai_op_log_security`：`(is_security_event, started_at) WHERE is_security_event=true` — 部分索引，安全事件查询
+- `idx_ai_op_log_user_queued`：`(user_id, queued_at)` — §9.5 alert"单用户 1 小时内 X ≥ N"聚合（按行创建时间）
+- `idx_ai_op_log_trace`：`(trace_id, queued_at)` — §9.3 AI Trace 视图按时间排序
+- `idx_ai_op_log_security`：`(is_security_event, queued_at) WHERE is_security_event=true` — 部分索引，安全事件查询
+- `idx_ai_op_log_tool_call`：`UNIQUE(tool_call_id)` — §9.3 单次查询端点 + 防同 ID 重复入库
 
-**`create_time` 行级字段**：MVP 用 `started_at` 充当行级时间戳（行 286 注释），但 §15 "表膨胀 → 90 天归档"策略按 `started_at` partition 即可，无需重复加 `create_time`。
+**`queued_at` 行级字段**：MVP 用 `queued_at` 充当行级创建时间戳，§15 "表膨胀 → 90 天归档"策略按 `queued_at` partition 即可。`started_at` 仅用于业务耗时统计，不可作为行级时间。
 
 ### 4.5 现有表 ALTER（不重命名）
 
@@ -527,7 +543,7 @@ def compute_available_agents(user: User, perms: set[str]) -> list[AiAgent]:
         if a.enabled
         and (a.code == SHARED_AGENT_CODE
              or is_super_admin(user)
-             or a.id in user.role_agent_ids)
+             or a.agent_id in user.role_agent_ids)
         and any_tool_visible(a, perms)
     ]
 
@@ -644,7 +660,7 @@ async def user_distinct(ctx: AiToolContext, field: str) -> list[str]:
 | `user.stats` | `[{"group": "1", "count": 342}, {"group": "2", "count": 218}]` | "按性别分布：男 342 / 女 218 / 未知 5"（status / gender 字典值由 LLM 转 emoji / 中文） |
 | `user.distinct` | `["0", "1", "2"]` | "用户性别有 3 种取值" |
 
-> **聚合维度限制（MVP）**：sys_user 表只有 `status` / `user_gender` 两个可聚合列（不含 dept / role 关联表字段）。如需按"年龄""部门""角色"等维度聚合，需先扩 `sys_user` 表加业务字段（如 `birth_date`）或在 v1.5 实现 `user.stats_by_dept` 走 EXISTS 子查询。原型示例"年龄大于 20 男生有多少"为产品愿景，**MVP 阶段不允许此查询**——LLM 应主动反问用户换可聚合维度（`status` / `user_gender`）。
+> **聚合维度范围（Phase 切分）**：Phase 1 阶段 `sys_user` 表只有 `status` / `user_gender` 两个可聚合列（不含 dept / role 关联表字段）。如需按"年龄""部门""角色"等维度聚合，需先扩 `sys_user` 表加业务字段（如 `birth_date`）或在 v1.5+ 实现 `user.stats_by_dept` 走 EXISTS 子查询。原型示例"年龄大于 20 男生有多少"为产品愿景，**Phase 1 阶段不支持此查询**——LLM 应主动反问用户换可聚合维度（`status` / `user_gender`）。v1.5+ 已落地的 `dept.count` / `role.count` 等其它模块的 count tool 同样适用此白名单机制（详见 §20）。
 
 **关键约束**：
 
@@ -827,25 +843,115 @@ async def execute_tool(name: str, args: dict, ctx: AiToolContext) -> ToolResult:
 
 **删除完整版 7.1 节的 `_tool_semaphore = asyncio.Semaphore(1)`**。理由：每个 tool 跑在独立 `AsyncSessionLocal()` 里，事务完全物理隔离，根本没竞态；进程级信号量会让整个平台同时只能跑 1 个 tool，TOB 场景 5 个管理员同时用 AI 立刻排队。如果担心 PydanticAI 同轮并行调多 tool，靠 system prompt 约束即可，不要用进程级锁。
 
+**跨 session 一致性补偿策略（2026-07-10 修订 S-15）**：
+
+业务事务在 `tool_db.begin()` 内自动 commit，`ai_operation_log` 走独立 session 写入。两者非分布式事务，存在窗口：业务已 commit、log 写入失败 → DB 真实状态与审计状态偏离。补偿策略：
+
+1. **log 写入优先级低于业务**：业务事务已成功 = 用户感知成功，log 写失败不回滚业务（避免审计故障拖垮业务）
+2. **`_finish_log_final` 必须重试 + 兜底**：实现要求
+   ```python
+   async def _finish_log_final(log_id: int, *, status: str, ...):
+       for attempt in range(3):
+           try:
+               async with AsyncSessionLocal() as log_db:
+                   await operation_log_service.mark_xxx(log_db, log_id, ...)
+                   await log_db.commit()
+               return
+           except (DBAPIError, asyncio.TimeoutError) as e:
+               if attempt == 2:
+                   logger.critical("ai_operation_log 最终态写入失败 3 次",
+                                   extra={"log_id": log_id, "status": status, "error": str(e)})
+                   # 告警 Prometheus counter: ai_log_write_failure_total{status}
+                   return  # 不抛——业务已成功，审计 gap 走告警追查
+               await asyncio.sleep(0.5 * (attempt + 1))
+   ```
+3. **`_start_log` 失败 = 整 tool 调用失败**：与 final 不同，`_start_log` 失败时业务**还没执行**，必须抛异常终止；否则业务执行了但无审计行，更严重
+4. **超管告警通道**：log 最终态写失败 3 次 → Prometheus `ai_log_write_failure_total{status}` counter +1，触发 Alertmanager 告警；运维通过对比 `tool_call_id` 在 LLM trace 与 `ai_operation_log` 表的差异定位 gap
+5. **不做反向回滚**：业务失败时若 `_finish_log_final(failed)` 写失败，**不**回滚已 commit 的业务（业务已失败本就 rollback，无残留）；只补 audit log
+
+**禁忌**：
+- 把 log 写入放到 `tool_db.begin()` 内：tool 函数异常时 log 也被回滚，审计失效
+- 用 PostgreSQL 2PC（两阶段提交）：复杂度高、性能差，MVP 不引入
+
 ### 6.4 容量鉴权（三层）
 
 | 层级 | 维度 | 默认阈值 | Redis key | 配置项 |
 |---|---|---|---|---|
-| L1 用户速率 | 单用户写/分钟 | 20 | `ai:write:{user_id}` | `system_config.ai:rate_limit:user_write_per_min` |
-| L2 用户日配额 | 单用户 tool/天 | **2000**（MVP 上调，HR/系统管理员批量配置场景合理） | `ai:quota:{user_id}:{date}` | `system_config.ai:quota:daily_per_user` |
+| L1 用户速率 | 单用户写/分钟 | 20 | `ai:write:{user_id}` (Sorted Set) | `system_config.ai:rate_limit:user_write_per_min` |
+| L2 用户日配额 | 单用户 tool/天 | **2000**（MVP 上调，HR/系统管理员批量配置场景合理） | `ai:quota:{user_id}:{date}` (UTC date, 见下) | `system_config.ai:quota:daily_per_user` |
 | L3 单 tool 超时 | 单 tool 执行 | 10s | `asyncio.wait_for` | `system_config.ai:limit:tool_timeout_sec` |
 
 **"写"的判定**（L1 / L2 都按此）：`tool.meta.risk in ("high", "destructive")` **或** `tool.meta.hitl_always == True`。`risk="low"` 的纯查询 tool 不计入速率与配额（避免用户调 `user.list` 几十次就把配额耗光）。
+
+**L1 滑窗实现（2026-07-10 修订 S-7）**：必须用 Redis **Sorted Set** 实现真正的滑动窗口，禁止用 `INCR + EXPIRE`（固定窗口可被边界突发 2x 突破）：
+
+```python
+async def check_l1_rate_limit(redis, user_id: int, *, limit: int = 20) -> None:
+    """滑动窗口 60s，limit 默认 20 次/分钟。"""
+    key = f"ai:write:{user_id}"
+    now = time.time()
+    window_start = now - 60
+    # 用 Lua 脚本保证 ZREMRANGEBYSCORE + ZADD + ZCARD 原子性
+    script = """
+    redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+    redis.call('ZADD', KEYS[1], ARGV[2], ARGV[3])
+    local count = redis.call('ZCARD', KEYS[1])
+    redis.call('EXPIRE', KEYS[1], 60)
+    return count
+    """
+    count = await redis.eval(script, 1, key, window_start, now, f"{now}:{uuid4().hex}")
+    if count > limit:
+        raise BusinessRuleException(
+            f"用户写速率超限（{count}/{limit} 每分钟）",
+            error_code="AI_RATE_LIMIT_USER_WRITE",
+        )
+```
+
+**L2 日期键时区（2026-07-10 修订 S-8）**：`{date}` **必须用 UTC date**，禁止用 `datetime.now().date()`（服务器本地时区）：
+
+```python
+from datetime import UTC, datetime
+date_str = datetime.now(UTC).strftime("%Y%m%d")
+key = f"ai:quota:{user_id}:{date_str}"
+```
+
+TTL 必须算到**当日 UTC 结束**（而非固定 86400s），避免跨日累积偏差：
+
+```python
+async def check_l2_daily_quota(redis, user_id: int, *, limit: int = 2000) -> None:
+    now = datetime.now(UTC)
+    date_str = now.strftime("%Y%m%d")
+    key = f"ai:quota:{user_id}:{date_str}"
+    seconds_to_midnight = 86400 - (now.hour * 3600 + now.minute * 60 + now.second)
+
+    pipe = redis.pipeline()
+    pipe.incr(key)
+    # 仅在第一次 INCR 时设置 EXPIRE，避免每次调用都重置 TTL
+    pipe.get(key)
+    incr_result, current_val = await pipe.execute()
+    if incr_result == 1:
+        await redis.expire(key, seconds_to_midnight)
+
+    if int(current_val) > limit:
+        await redis.decr(key)  # 修订 S-11：配额自身拒绝必须 DECR 回滚
+        raise BusinessRuleException(
+            f"用户日配额超限（{current_val}/{limit}）",
+            error_code="AI_DAILY_QUOTA_EXHAUSTED",
+        )
+```
 
 **L3 超时异常处理**：`asyncio.wait_for` 触发 `asyncio.TimeoutError` → Gateway 捕获后转 `BusinessRuleException("...", error_code="AI_TOOL_TIMEOUT")` 并手动 `exc.code = 504`，写入 `ai_operation_log`（`status=failed`, `error_code=AI_TOOL_TIMEOUT`），LLM 收到后向用户解释"操作超时，建议拆分任务或重试"。
 
 **砍掉完整版 7.3 节的 L1（全局速率）和 L4（会话预算）**。理由：TOB 部署用户数有限，全局限制反而误伤；会话预算用户感知差（"为啥这个对话满了"），L2 日配额已限总量。
 
-**计数策略**：
-- perm / data_scope 拒绝：不计入（不是真正调用）
-- 配额自身拒绝：不计数（防循环重试刷配额）
-- 业务异常 + 成功：计数保留
-- 超时（L3）：计为失败但保留计数（防止恶意构造慢查询刷配额）
+**计数策略（2026-07-10 修订 S-11）**：
+- perm 拒绝：在 L1/L2 INCR **之前** short-circuit → 不计数
+- data_scope 拒绝：在业务函数内抛 `AuthorizationException`，executor 捕获后**必须 `await redis.decr(l1_key)` + `await redis.decr(l2_key)`** 再走 record_failure 路径（之前 INCR 已发生，不 DECR 则用户被偷配额）
+- 配额自身拒绝：见上 L2 实现代码，**必须在 raise 前 DECR**（防循环重试刷配额）
+- 业务异常 + 成功：计数保留（不 DECR）
+- 超时（L3）：计为失败但保留计数（防止恶意构造慢查询刷配额；超时也算用户消耗了系统资源）
+
+**实现合规检查**：`scripts/check_ai_tools.py` 不覆盖此节，但 §12.4 lint 列表外补充一个独立测试 `tests/modules/ai/test_quota_decr.py`：模拟业务函数抛 `AuthorizationException`，断言调用后 Redis L1/L2 计数器与调用前一致。
 
 **超管豁免策略**：
 - **L2 日配额：超管不豁免**（防超管误用，与 §11.4 自动禁用策略一致）
@@ -873,7 +979,7 @@ LLM 看到 `ok=false` 会自然反问澄清。
 
 ```python
 async def execute_tool(name: str, args: dict, ctx: AiToolContext) -> ToolResult:
-    args_hash = sha256(json.dumps(args, sort_keys=True, default=str).encode()).hexdigest()
+    args_hash = compute_args_hash(args)
     failure_key = f"ai:failures:{ctx.user.user_id}:{name}:{args_hash}"
     failures = int(await redis.get(failure_key) or 0)
     if failures >= 2:
@@ -886,17 +992,48 @@ async def execute_tool(name: str, args: dict, ctx: AiToolContext) -> ToolResult:
         await redis.delete(failure_key)                       # 成功清零
         return result
     except BusinessException:
-        await redis.incr(failure_key)
-        await redis.expire(failure_key, 600)                  # TTL 10min
+        # INCR + 条件 EXPIRE：仅第一次失败时设置 TTL，避免后续失败反复重置 TTL 导致永不过期
+        new_count = await redis.incr(failure_key)
+        if new_count == 1:
+            await redis.expire(failure_key, 600)              # TTL 10min
         raise
 ```
 
+**`compute_args_hash` 算法规范（2026-07-10 修订 S-9）**：禁止用 `json.dumps(args, sort_keys=True, default=str)`——`default=str` 让 `datetime(2026,1,1)` 与字符串 `"2026-01-01 00:00:00"` 产生相同 JSON 输出 → 哈希碰撞 → 不同业务意图共享失败计数器。**必须**用类型前缀防碰撞：
+
+```python
+def compute_args_hash(args: dict) -> str:
+    """类型感知序列化，避免不同类型对象哈希碰撞。"""
+    def _default(o: Any) -> str:
+        return f"{type(o).__qualname__}:{o!r}"
+    serialized = json.dumps(args, sort_keys=True, default=_default, ensure_ascii=False)
+    return sha256(serialized.encode("utf-8")).hexdigest()
+```
+
+非 JSON 原生类型（datetime / Decimal / Pydantic model / UUID）都被加上类型名前缀，碰撞空间回到哈希函数本身的 256 位。
+
 **关键变化（vs 完整版 9.7）**：`recent_failures` 改 Redis 持久化。理由：完整版跨 `/ai/chat` 流不持久化，用户回答后 LLM 用相同 args 再调一次，计数从 0 开始，永远到不了第 3 次"切换引导模式"。
 
-**与 `ai_operation_log` 落库的时序**（防审计遗漏）：
-- 业务异常捕获（行 762）→ 先 `await redis.incr(failure_key)` → 再写 `ai_operation_log`（`status=failed`, `error_code=e.error_code`）→ 最后转 `ToolResult` 给 LLM
-- 连续失败兜底触发（行 777，`AI_REPEATED_FAILURE`）→ **仍写一行 `ai_operation_log`**（`status=failed`, `error_code=AI_REPEATED_FAILURE`），方便事后追查"LLM 在哪一步放弃的"
-- 计数清零（成功路径，行 783）→ 不写 log（成功 log 由主流水写）
+**与 `ai_operation_log` 落库的时序（2026-07-10 修订 S-12）**：
+
+修订后的强制顺序（理由：之前 spec 没规定 `_start_log` 与 `check_repeated_failure` 的先后，实现选了"先 check 后 start" → `AI_REPEATED_FAILURE` 路径不写 log，审计漏行）：
+
+```
+1. perm check
+2. capacity L1/L2 (写 tool 才走)
+3. _start_log(tool_name, mode, status=pending_confirmation|running)   ← 必须最先写
+4. check_repeated_failure(failure_key)
+     ├ 若触阈: _finish_log_final(status=failed, error_code=AI_REPEATED_FAILURE) → return ToolResult
+     └ 否则: 继续
+5. risk classify + dry_run
+6. HITL or autonomous execute
+     ├ 业务异常 → record_failure(条件 EXPIRE) → _finish_log_final(failed, e.error_code)
+     └ 成功 → clear_failures → _finish_log_final(success)
+```
+
+- 业务异常捕获 → 先 `await redis.incr(failure_key)` + 条件 EXPIRE → 写 `_finish_log_final(failed, e.error_code)` → 转 `ToolResult` 给 LLM
+- 连续失败兜底触发（`AI_REPEATED_FAILURE`）→ **仍写一行 `ai_operation_log`**（`status=failed`, `error_code=AI_REPEATED_FAILURE`），方便事后追查"LLM 在哪一步放弃的"
+- 计数清零（成功路径）→ 不写 log（成功 log 由主流水写）
 
 ---
 
@@ -922,17 +1059,76 @@ async def execute_tool(name: str, args: dict, ctx: AiToolContext) -> ToolResult:
 
 ```python
 GLOBAL_OUTPUT_BLOCKLIST = {
-    "password", "password_hash", "salt",
+    "password", "salt",
     "api_key", "secret_key", "private_key",
-    "access_token", "refresh_token", "session_token", "secret", "token",
+    "access_token", "refresh_token", "session_token", "secret",
+    # 注意：不含裸 "token"——修订 S-10：token_count / token_value 等业务字段
+    # 会被前缀规则误伤。access_token / refresh_token / session_token 已覆盖
+    # 常见 token 字段；纯 "token" 字段业务方应显式声明 sensitive_output。
 }
 
+def _matches_blocklist(key: str, blocklist: set[str]) -> bool:
+    """word-boundary 匹配（修订 S-10）。
+
+    命中条件（任一）：
+      1. key 完全等于黑名单词：password / token / api_key
+      2. key 以黑名单词 + "_" 开头：password_hash / api_key_id
+
+    故意 **不** 包含后缀形式（endswith "_" + bl）—— 否则 csrf_token /
+    pagination_token / next_page_token 等业务字段会被误剥离（spec §22
+    修订日志 S-10 + SR-6 的核心目标）。
+
+    不命中的常见情况（业务字段）：
+      - csrf_token / pagination_token / next_page_token：xxx_token 后缀形式
+      - token_count / token_type：xxx_count / xxx_type 数量/类型字段
+      - user_password：业务方应显式声明 sensitive_output
+    """
+    key_lower = key.lower()
+    for bl in blocklist:
+        bl_lower = bl.lower()
+        if key_lower == bl_lower:
+            return True
+        # 仅前缀形式：bl_xxx（不包含后缀 xxx_bl，避免 csrf_token 误伤）
+        if key_lower.startswith(bl_lower + "_"):
+            return True
+    return False
+
 def serialize_for_llm(tool_meta, raw_result) -> dict:
-    payload = raw_result.model_dump() if isinstance(raw_result, BaseModel) else raw_result
+    # BaseModel 必须用 mode="json" 序列化，否则嵌套 BaseModel 不被 _scrub_fields 走到（password 泄漏）
+    if isinstance(raw_result, BaseModel):
+        payload = raw_result.model_dump(mode="json")
+    elif isinstance(raw_result, list):
+        payload = [
+            item.model_dump(mode="json") if isinstance(item, BaseModel) else item
+            for item in raw_result
+        ]
+    else:
+        payload = raw_result
     for field in tool_meta.sensitive_output:
-        payload.pop(field, None)
-    return _scrub_fields(payload, GLOBAL_OUTPUT_BLOCKLIST)
+        if isinstance(payload, dict):
+            payload.pop(field, None)
+    return _scrub_fields(payload, GLOBAL_OUTPUT_BLOCKLIST, depth=0)
+
+def _scrub_fields(payload, blocklist, *, depth: int = 0) -> Any:
+    """递归剥离黑名单字段。depth 上限 20 防 RecursionError（LLM 输出可能深嵌套）。"""
+    if depth > 20:
+        return payload  # 防御性截断，不抛异常避免业务流中断
+    if isinstance(payload, dict):
+        return {
+            k: _scrub_fields(v, blocklist, depth=depth + 1)
+            for k, v in payload.items()
+            if not _matches_blocklist(k, blocklist)
+        }
+    if isinstance(payload, list):
+        return [_scrub_fields(item, blocklist, depth=depth + 1) for item in payload]
+    return payload
 ```
+
+> **关键修订（2026-07-10 S-10）**：原 spec 用 `bl in key_lower` 子串匹配，会把 `csrf_token` / `pagination_token` / `next_page_token` / `token_count` 等业务字段误剥离。修订后改为 word-boundary（仅"完全等于" + "前缀 bl_xxx"，**不** 包含后缀 xxx_bl），命中 `password` / `password_hash` / `api_key_id`，放过 `csrf_token` / `token_count` 等业务字段。同时 `password_hash` 仍被命中（`password` 前缀），保持原安全语义。
+>
+> **裸 `token` 从 GLOBAL_OUTPUT_BLOCKLIST 移除**（修订 S-10 + 决策 SR-6）：原集合包含裸 `"token"`，但 `token_count` / `token_value` 等业务字段会因前缀规则（`startswith("token_")`）被误剥离。移除后业务方有纯 `{token: "..."}` 字段应显式声明 `sensitive_output=("token",)`。
+>
+> **Pydantic 嵌套 model**：`BaseModel.model_dump()` 不带 `mode="json"` 时嵌套 BaseModel 保持 Python 对象类型，`_scrub_fields` 走不到内层字段 → 内层 password 泄漏。修订后强制 `mode="json"`。
 
 ### 7.4 历史消息脱敏（防越权回灌）
 
@@ -1109,18 +1305,69 @@ async def confirm_tool(req: ConfirmRequest,
         raise NotFoundException("HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND")
     if pending["user_id"] != user.user_id:
         raise AuthorizationException(error_code="NOT_CONFIRMATION_OWNER")
-    await wake_hung_stream(req.confirmation_id, req.action)
+
+    # 修订 S-13：用户禁用检查（防 HITL 期间用户被自动禁用仍可确认破坏性操作）
+    if await check_user_disabled(redis, user):
+        raise AuthorizationException(
+            "AI 已被禁用，无法确认操作", error_code="AI_USER_DISABLED"
+        )
+
+    # 修订 S-14：wake 返回 False 时端点必须返回 410，不能假装 queued
+    woken = await wake_hung_stream(req.confirmation_id, req.action)
+    if not woken:
+        # 流已断（服务重启 / 单 worker 切换 / SSE 客户端断开）—— tool 不会执行
+        # 标记 log 为 expired（如尚未标记）
+        async with AsyncSessionLocal() as cleanup_db:
+            await mark_operation_expired_if_pending(
+                cleanup_db, confirmation_id=req.confirmation_id
+            )
+            await cleanup_db.commit()
+        return ResponseModel.error(
+            code=410,
+            msg="stream_gone",
+            data={
+                "tool_call_id": pending["tool_call_id"],
+                "status": "stream_gone",  # 前端据此停止轮询并提示用户重新发起
+            },
+        )
+
     return ResponseModel.success(data={
         "tool_call_id": pending["tool_call_id"],
         "status": "queued",
     })
 ```
 
-**返回值用途**：前端点击确认后**立刻**收到 `tool_call_id + status=queued`，即使 SSE 已断也能据此轮询结果（见下方"SSE 断流兜底"）。
+**`wake_hung_stream` 返回值契约（2026-07-10 修订 S-14）**：
+- `True`：成功唤醒一个等待中的 SSE 流，业务将正常执行
+- `False`：流不存在（服务重启 / 进程内 `_pending` dict 没有此 confirmation_id / SSE 已被中断）。**必须**让 `/ai/confirm` 返回 410 + `status=stream_gone`，禁止返回 200 + queued 误导前端轮询 30s
+
+**`wake` 实现要求修订（防双击/双标签 race，2026-07-10 修订 S-14）**：
+```python
+async def wake(self, confirmation_id: str, action: ConfirmAction) -> bool:
+    """唤醒挂起的流。返回 False 表示流已不在（stream_gone）。
+
+    防双击：第一次 wake 设 entry.action + event.set() 后立即把 confirmation_id
+    从 _pending dict 弹出（不在 dict = 后续 wake 一定返回 False）。
+    """
+    entry = self._pending.pop(confirmation_id, None)
+    if entry is None:
+        return False  # stream_gone
+    if entry.action is not None:
+        # 已经被唤醒过（极端 race），不覆盖，让原 action 走完
+        # 把 entry 放回 dict 让原 wake 流程清理
+        self._pending[confirmation_id] = entry
+        return False  # 视为 stream_gone（拒绝二次唤醒）
+    entry.action = action
+    entry.event.set()
+    return True
+```
+
+**`/ai/confirm` 返回值用途**：前端点击确认后**立刻**收到 `tool_call_id + status=queued`，即使 SSE 已断也能据此轮询结果（见下方"SSE 断流兜底"）。若返回 `status=stream_gone`（410），前端**立即停止轮询**并提示"网络中断，操作未执行，请重新发起"。
 
 **安全细节**：
 - `confirmation_id = secrets.token_urlsafe(32)`，不可枚举
 - 必须原会话所有者确认，他人 token 无效
+- **修订 S-13：必须查 `check_user_disabled`**——HITL 挂起期间用户可能被 §11.4 自动禁用（注入命中 5 次/h），禁用后用户仍持有 confirmation_id 可直接 POST `/ai/confirm`，必须阻断
 - 5 分钟 TTL，过期自动 reject
 - 挂起前 `await db.commit()` 释放连接
 - Redis 中的 `args` JSON 序列化后大小限制 **4KB**（防恶意 user 把 `hint` 字段塞 1MB 撑爆 Redis）；超限拒接，提示用户精简输入
@@ -1179,15 +1426,48 @@ async def resume_confirmation(confirmation_id: str, action: str) -> ToolResult:
 ```python
 # app/core/config.py
 AI_HITL_MODE: Literal["memory"] = "memory"   # pub_sub 模式 v1.5 加
-WEB_CONCURRENCY: int = 1
+AI_REQUIRE_SINGLE_WORKER: bool = True         # 修订 S-6：默认强制；测试环境可关
 
-# app/main.py lifespan
-if settings.WEB_CONCURRENCY > 1:
-    raise RuntimeError(
-        "MVP supports WEB_CONCURRENCY=1 only. "
-        "Multi-worker requires AI_HITL_MODE=redis_pubsub (v1.5+)."
-    )
+# app/main.py lifespan —— 修订 S-6：env var 不可信，必须运行时实测
+import os, sys
+async def lifespan(app: FastAPI):
+    # 1. 检测实际 worker 数（不信任环境变量）
+    if settings.AI_REQUIRE_SINGLE_WORKER:
+        worker_count = _detect_actual_worker_count()
+        if worker_count > 1:
+            raise RuntimeError(
+                f"AI HITL memory mode requires single worker, detected {worker_count}. "
+                f"Set AI_HITL_MODE=redis_pubsub (v1.5+) or scale workers down to 1."
+            )
 
+    # 2. 启动时清扫 pending
+    await cleanup_pending_on_startup()
+    ...
+```
+
+**`_detect_actual_worker_count` 实现要求（2026-07-10 修订 S-6）**：禁止只查 `WEB_CONCURRENCY` env var——`uvicorn app.main:app --workers 4` 不经 gunicorn 时各 worker lifespan 独立运行，各自看到默认 env var 都通过 assertion。必须用以下任一方案实测：
+
+- **方案 A（推荐）**：基于 Redis distributed lock 的 worker 自报告
+  ```python
+  async def _detect_actual_worker_count() -> int:
+      """各 worker 启动时 INCR Redis key ai:workers:active，并 EXPIRE 30s；
+      lifespan 结束时 DECR。返回当前活跃 worker 数。"""
+      redis = await get_redis()
+      worker_uid = f"{os.getpid()}:{uuid4().hex}"
+      await redis.sadd("ai:workers:active", worker_uid)
+      await redis.expire("ai:workers:active", 30)
+      return await redis.scard("ai:workers:active")
+  ```
+- **方案 B**：基于 OS 进程组检测（仅 POSIX）：`ps -ef | grep "uvicorn\|gunicorn" | grep -v grep | wc -l`；Windows 不适用
+- **方案 C**：要求部署文档强制 `WEB_CONCURRENCY=1` + 启动时把 env var 打到日志，运维 review
+
+**部署文档（`docs/AI-DEPLOYMENT.md`）必须明确（修订 S-6 强化）**：
+1. MVP 仅支持**单 worker 进程**（不是单实例 pod）—— `uvicorn app.main:app --workers 1` 或 gunicorn `--workers 1`
+2. **禁止用 Docker/k8s 多 pod 部署**——多 pod = 多独立 `_pending` dict，HITL wake 必失配。若必须高可用，等 v1.5+ `AI_HITL_MODE=redis_pubsub`
+3. **服务重启 = 所有 pending confirmation 自动 expired**（`cleanup_pending_on_startup` 清扫）
+4. 部署 checklist 必须验证：`curl /api/ai/health` 返回 worker_count=1，否则报错
+
+```python
 # 启动时清扫: 所有 pending confirmation 标记为 expired
 async def cleanup_pending_on_startup():
     """服务重启 = 所有挂起的 SSE 流已断, asyncio.Event 已丢"""
@@ -1200,8 +1480,6 @@ async def cleanup_pending_on_startup():
                 )
                 await redis.delete(key)
 ```
-
-**部署文档**（`docs/AI-DEPLOYMENT.md`）明确：MVP 仅支持单 worker；服务重启 = 所有 pending confirmation 自动 expired。
 
 ### 8.5 SSE 断流兜底（MVP 简化）
 
@@ -1508,7 +1786,7 @@ ai_conversation_token_count
 | L3 参数 sanitize | tool 调用前清查 args | `_sanitize_arg` |
 | L4 service 层 | 参数化查询 / 字段白名单 | 已有 |
 
-L2 启发式 pattern（**只扫当前轮 user message**，不扫历史，避免长对话成本）：
+L2 启发式 pattern（**只扫当前轮 user message**，不扫历史，避免长对话成本；但命中状态需跨轮持久化，见下方修订）：
 
 ```python
 INJECTION_PATTERNS = [
@@ -1521,7 +1799,35 @@ INJECTION_PATTERNS = [
 ]
 ```
 
-命中后：该次对话所有 tool 调用强制走 HITL + 写 `ai_operation_log`（`is_security_event=True, event_type='injection_pattern_matched'`），**不告知用户**（避免攻击者知道检测机制）。
+**跨轮持久化（2026-07-10 修订 S-16）**：
+
+原 spec 表述矛盾——一边说"只扫当前轮"，一边说"该次对话所有 tool 调用强制走 HITL"。修订后明确：
+
+- **pattern 扫描**：仅扫当前轮 user message（保留原意，避免长对话成本）
+- **命中状态**：写入 Redis `ai:injection_hit:{conversation_id}`，TTL = conversation 活跃期（无消息 1h 后过期）；conversation 内任意后续轮次 tool 调用都强制走 HITL
+
+```python
+async def detect_and_record_injection(
+    redis, text: str, *, conversation_id: int
+) -> bool:
+    """扫当前消息 + 跨轮记录到 conversation。"""
+    hit = detect_injection(text)  # 仅当前消息
+    if hit:
+        key = f"ai:injection_hit:{conversation_id}"
+        await redis.set(key, "1", ex=3600)  # conversation 级 1h TTL
+        # 滚动续期：每次新命中刷新 TTL
+    return hit
+
+async def is_injection_hit_conversation(redis, conversation_id: int) -> bool:
+    """每轮 build_chat_deps 时调；返回 True 则后续所有 tool 走 HITL。"""
+    return bool(await redis.exists(f"ai:injection_hit:{conversation_id}"))
+```
+
+**`ChatDeps.injection_hit` 字段语义修订**：从"本轮扫描结果"改为"conversation 级持久化状态"。`build_chat_deps` 时调 `is_injection_hit_conversation(redis, conversation_id)`，结果写入 `ChatDeps.injection_hit`。conversation 一旦命中，后续 1h 内任何轮次的 tool 调用都强制 HITL（即使后续消息不再触发 pattern）。
+
+**自动禁用计数语义不变**：`record_injection(redis, user)` 仍在每次 pattern 命中时 INCR（非每轮），防 5 次缓慢攻击触发阈值（§11.4）。
+
+命中后：该 conversation 所有 tool 调用强制走 HITL + 写 `ai_operation_log`（`is_security_event=True, event_type='injection_pattern_matched'`），**不告知用户**（避免攻击者知道检测机制）。
 
 **✅ Phase 4 实现（2026-07-08）**：`app/modules/ai/agents/safety/injection_detector.py` 落地 L2 pattern 检测，7 类攻击模式（jailbreak override / role reset / template token / parameter injection / code injection / sensitive field extraction / chain attack），中英双语 pattern + 大小写不敏感 + MULTILINE；`detect_injection(text) -> bool` + `matched_patterns(text)` 调试辅助。chat.py 入口跑 detector，命中写入 `ChatDeps.injection_hit=True`（新字段），executor 据此调 `classify_execution_mode(injection_hit=True)` 强制 HITL（`risk.py` 优先级 2）。`tests/modules/ai/test_injection_detector.py` 39 测试（每类 pattern 命中 + 5 类正常查询不误报）。**未含**：L3 `_sanitize_arg` / `ai_operation_log.is_security_event=True` 落库（独立 PR）。
 
@@ -1565,7 +1871,9 @@ INJECTION_PATTERNS = [
 
 Service 层 `JobService.update()` 加 schema 级白名单，即使 tool 漏洞也不接受 `code` 字段。v3 远期：沙箱执行（E2B Sandbox / Firecracker MicroVM）。
 
-**✅ Phase 4 实现（2026-07-08）**：`app/modules/job/schemas/job.py::JobAiUpdate` schema 白名单（允许字段：job_name / cron_expression / trigger_type / interval_value / interval_unit / job_args / status；禁止字段 job_key / run_on_enable / timeout_seconds / max_retries / concurrent / code / module_path / func_name — Pydantic 默认 extra='ignore' 自动丢弃）；`JobService.update_for_ai(db, data: JobAiUpdate)` 强制走白名单 schema，复用 `update()` 的 trigger 校验逻辑（cron/interval 合法性）。`tests/modules/job/test_job_ai_update.py` 17 测试（白名单字段接受 + 禁止字段丢弃 + camelCase 别名同效 + status validator + spec 表格逐项验证）。**未含**：AI tool `job.update_cron` 入口（agent=job_mgmt / perms=system:job:edit / risk=high / hitl_always=True / dry_run_supported）— 留 v1.5+ UI agent 切换器落地后接入；v3 远期沙箱执行。
+**✅ Phase 4 实现（2026-07-08）**：`app/modules/job/schemas/job.py::JobAiUpdate` schema 白名单（允许字段：job_name / cron_expression / trigger_type / interval_value / interval_unit / job_args / status；禁止字段 job_key / run_on_enable / timeout_seconds / max_retries / concurrent / code / module_path / func_name — Pydantic 默认 extra='ignore' 自动丢弃）；`JobService.update_for_ai(db, data: JobAiUpdate)` 强制走白名单 schema，复用 `update()` 的 trigger 校验逻辑（cron/interval 合法性）。`tests/modules/job/test_job_ai_update.py` 17 测试（白名单字段接受 + 禁止字段丢弃 + camelCase 别名同效 + status validator + spec 表格逐项验证）。
+
+**✅ v1.5+ AI 入口已实现（2026-07-09）**：`app/modules/job/ai_tools.py::job.update_cron`（agent=job_mgmt / perms=system:job:edit / risk=high / hitl_always=True / dry_run_supported=True），dry_run 函数 `_dry_run_job_update_cron` 返回当前 cron vs 拟变更对比。注册到 `load_builtin_tools()`。**未含**：v3 远期沙箱执行（E2B Sandbox / Firecracker MicroVM）。
 
 ### 11.4 自动禁用
 
@@ -1592,9 +1900,37 @@ Service 层 `JobService.update()` 加 schema 级白名单，即使 tool 漏洞�
 
 `/ai/chat` 端点调 `adapter.run_stream(..., usage_limits=UsageLimits(request_limit=10, tool_calls_limit=5))`，给 PydanticAI agent loop 加硬上限：
 
-- **`tool_calls_limit=5`**：单轮对话最多 5 次成功 tool 调用。LLM 通常 1-2 个 tool 就够（如 `user.count` 直接答数量；`user.stats` 后续 1 次追问维度），5 是宽松上限
+- **`tool_calls_limit=5`**：单轮对话最多 5 次 tool 调用（**含失败**，详见下方修订 S-4）。LLM 通常 1-2 个 tool 就够（如 `user.count` 直接答数量；`user.stats` 后续 1 次追问维度），5 是宽松上限
 - **`request_limit=10`**：总 LLM 请求数上限（含初始 + 每个 tool 后续的"决定下一步"请求），10 ≈ tool_calls_limit × 2 + 安全边距
 - **超出时**：PydanticAI 抛 `UsageLimitExceeded`，`chat.py::produce_pydantic` 捕获后 emit `AiErrorEvent(error_code="AI_USAGE_LIMIT_EXCEEDED", message="AI 调用次数超限...")`，前端走 `handleAiStreamEvent` 的 `ai_error` 分支弹 `$message.error`
+
+**PydanticAI `tool_calls_limit` 实际语义（2026-07-10 修订 S-4）**：
+
+原 spec 写"5 次成功 tool 调用"——这是**事实性错误**。查 PydanticAI 1.89+ 源码（`pydantic_ai/tool_manager.py:773`）：
+
+```python
+# PydanticAI tool_manager.py
+async def _raw_execute(self, validated, *, usage, ...):
+    try:
+        tool_result = await self.toolset.call_tool(...)
+    except ModelRetry as e:
+        # 抛 ModelRetry 不递增 counter
+        ...
+        raise self._wrap_error_as_retry(...) from e
+    usage.tool_calls += 1   # ← 仅在 call_tool 成功返回后递增
+```
+
+**关键事实**：`tool_calls` counter 仅在 `call_tool` 未抛 `ModelRetry` 时递增。当前实现的 Gateway Executor 把业务异常包成 `ToolResult.failure` 返回（不抛 `ModelRetry`），所以**业务失败的 tool 调用也计入 counter**。原 spec"5 次成功"描述仅在"业务失败 → ModelRetry"的替代实现下才成立。
+
+**修订后的设计选择（保留 tool_calls_limit=5 不变，但语义明确）**：
+
+1. **业务失败 = 用户消耗了一次 tool 调用机会**：用户问"统计禁用用户"，LLM 错调 `user.distinct(field="status")` 返回 `["1"]`（不是 LLM 期望的 count），LLM 再调 `user.stats(group_by="status")` 成功——已用 2 次。再问一个 stats 类问题就触上限 5。这是合理的——探索性循环本就是设计要防的
+2. **不引入"业务失败 → ModelRetry"转换**：会破坏 LLM 看到 `ToolResult.ok=false` 自然反问的用户体验，且 PydanticAI 的 ModelRetry 触发 LLM 重试（消耗 token），代价更高
+3. **`request_limit=10` 兜底**：即使 5 次 tool 全失败，LLM 至多再发 5 次"决定下一步"请求就强制终止
+4. **CI 回归测试（spec 强制要求）**：`tests/modules/ai/test_usage_limits.py` 必须覆盖：
+   - mock LLM 连续 6 次 tool 调用 → 第 6 次抛 `UsageLimitExceeded`
+   - mock LLM 11 次 request → 第 11 次抛 `UsageLimitExceeded`
+   - `UsageLimitExceeded` 被 chat.py 捕获 → emit `AiErrorEvent(AI_USAGE_LIMIT_EXCEEDED)` → DoneEvent（**当前实现未覆盖，必须补**）
 
 **为什么必须加**：LLM 拿到 tool 返回值不确定含义时会"探索性循环重试"——典型症状是用户问"总共有多少用户"，LLM 错调 `user.distinct(field="status")` 拿到 `["1"]`，不知道这是什么，继续调 `user.distinct(field="user_gender")` / `user.distinct(field="...")` 反复探索，没上限就会一直循环刷出 tool-call 卡片，用户体验完全崩溃。即使 §5.5 summary 改写后 LLM 选 tool 更准，**也必须靠硬上限兜底**——LLM 行为不可预测，工程上不能信任。
 
@@ -1912,7 +2248,7 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 | chat_service | `app/modules/ai/service/chat_service.py` | 支持新 ChatDeps + tool_call 链持久化 + 历史脱敏 |
 | conversation_service | `app/modules/ai/service/conversation_service.py` | 字段升级（含 trace_id） |
 | `/ai/chat` 端点 | `app/modules/ai/api/chat.py` | 接入 Gateway + 多类型 SSE 事件 |
-| `/ai/chat/sync` 端点 | 同上 | 直接删除，统一走流式 |
+| `/ai/chat/sync` 端点 | 同上 | **breaking change**：直接删除，统一走流式（前端必须同步移除调用，见 §17.6） |
 | `/ai/conversation/*` 端点 | `app/modules/ai/api/conversation.py` | 字段升级 |
 | 前端 `aiStore` | `src/store/modules/ai/index.ts` | `doStream` 重写支持 5 类事件，状态从裸 `streamingText` 改为 `streamEvents` |
 | 前端 chat 组件 | `src/views/ai/chat/modules/*.vue` | 拆分 chat-confirmation-drawer / chat-tool-call |
@@ -1940,7 +2276,10 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 
 ### 17.6 兼容性边界
 
-- **API 路径**：保持 `/ai/chat` / `/ai/conversation/*` / `/ai/provider/*` 不变，前端调用层无感知
+- **API 路径（修订 S-2）**：
+  - ✅ **保留**：`/ai/chat` / `/ai/conversation/*` / `/ai/provider/*` 等主要路径不变
+  - ❌ **显式删除（breaking change）**：`/ai/chat/sync` 端点删除（统一走流式，见 §17.2）—— 前端调用层**有感知**，需在发版前移除前端对该端点的依赖
+  - ✅ **新增**：`/ai/confirm` / `/ai/operation-log` / `/ai/query-cache/<trace_id>` / `/ai/agents`（详见各章节）
 - **响应格式**：保持 `{code, msg, data}` 包装；SSE 协议走 Vercel UI Protocol v4（见 §2.11 决策记录），`text-delta` / `reasoning-delta` 为 v4 标准事件，HITL 等业务事件用私有 `type` 命名空间叠加
 - **数据库表名**：`ai_conversation` / `ai_message` 表名复用（结构升级），部署方无需手动改表名
 - **环境变量**：现有 `AI_DEFAULT_MODEL` / `AI_OPENAI_API_KEY` 等保留，新增项走 `system_config` 表
@@ -1991,7 +2330,9 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 > ✅ **Plan 3.3 已完成（2026-07-06）**: 后端查询端点 — `app/modules/ai/api/operation_log.py` `GET /ai/operation-log?tool_call_id=...`（spec §9.3 SSE 断流兜底轮询，权限本人 / 超管 / `ai:trace:view` 三选一，字段过滤仅暴露 tool_call_id/tool_name/status/error_code/started_at/finished_at/duration_ms 不含 args_summary/result_summary 防泄漏）+ `app/modules/ai/api/query_cache.py` `GET /ai/query-cache/<trace_id>`（spec §8.7 chip 跳转回放，owner 校验失败抛 `AI_QUERY_CACHE_FORBIDDEN`，hash 不存在返回 data=null 而非 404）+ `app/modules/ai/agents/hitl/query_cache.py`（Redis Hash helper：`set_query_cache` HSET+EXPIRE 300s + 每次 HSET 重置整个 hash TTL；`get_query_cache` 默认取 created_at 最新 field / 支持 `tool_name=` 指定；`delete_query_cache`）+ `AiToolMeta` 加 `query_cache_module: str | None`（声明 module 路径，None 表示不写 cache）+ `executor.py` `_safe_write_query_cache`：readonly tool 成功后 fire-and-forget 写 hash，filters 按 `meta.allowed_filters` 白名单过滤防 password 等敏感字段进 cache + 2 个 schema（OperationLogOut/QueryCacheOut）+ main.py 注册 `/ai/operation-log` + `/ai/query-cache` router + 11 个测试（9 query_cache helper 单元 + 2 executor 集成：readonly 写入 / 非 readonly 跳过 / 白名单过滤 password 字段）。
 > ✅ **Plan 3.4 已完成（2026-07-06）**: 前端 SSE 协议 + HITL 抽屉 + tool-call 卡片（hohu-admin-web）— `src/typings/api/ai.d.ts` 加 `AiStreamEvent` union（5 类事件 + DryRunSummary）+ `ConfirmRequest/Response` + `OperationLog` + `QueryCache` 类型 + `src/typings/app.d.ts` Schema 加 16 个 i18n 键（confirmTitle/confirmTool/.../toolError）+ `src/service/api/ai.ts` 加 `fetchAiConfirm` / `fetchAiOperationLog` / `fetchAiQueryCache` + `src/store/modules/ai/index.ts` 重写：`parseSsePayload` 按 spec §8.1 解析规则（Vercel 原生 `数字:JSON` / 自定义 `{...}` / `[DONE]`）；`handleAiStreamEvent` 5 类事件分流（tool_call_started/result 入 streamEvents，confirmation_required 设 pendingConfirmation 并弹抽屉，ai_error 全局 message，done 结束）；新增 `streamEvents`/`pendingConfirmation` 状态 + `approveTool`/`rejectTool` action + 30s 1.5s 间隔轮询 `fetchAiOperationLog` 兜底（终态停止 + UI 合成 tool_call_result 事件）+ `src/views/ai/chat/modules/chat-confirmation-drawer.vue`（NDrawer + NTag/NStatistic + 倒计时基于 expires_at + 参数 JSON 折叠 + 确认/取消按钮 + dark theme）+ `src/views/ai/chat/modules/chat-tool-call.vue`（NCollapse 折叠卡片：tool 名 + 状态 NTag（info/success/error）+ summary + args JSON + result JSON + errorCode/errorMsg 红色高亮）+ `chat-main.vue` 集成：toolCallCards computed 按 toolCallId 配对 started/result，showConfirmDrawer computed 自动随 pendingConfirmation 弹抽屉 + 中英文 i18n 完整翻译。**未含**：stats tool 三 tab（图表）/ 业务模块页 ai_query_id URL param 自动回放（v1.5+）/ 端到端 Playwright E2E（v1.5+）。
 > ✅ **Plan 4 已完成（2026-07-08）**: Phase 4 安全硬化完整版 — (1) `AiToolMeta.super_admin_only` 字段 + executor 短路返回 `AI_SUPER_ADMIN_REQUIRED`（鉴权矩阵 #7 双 case 覆盖）；(2) `app/modules/ai/agents/safety/injection_detector.py` 落地 L2 7 类攻击 pattern 检测（中英双语 + 大小写不敏感），chat.py 入口跑 detector 写 `ChatDeps.injection_hit=True`，executor 据此强制 HITL（鉴权矩阵 #10 双 case 覆盖）；(3) `executor._start_log` 命中 injection_hit 时传 `is_security_event=True, event_type='injection_pattern_matched'` 落 `ai_operation_log`（§11.1）；(4) `scripts/check_ai_tools.py` 7 项 static-only 检查 + `.pre-commit-config.yaml` 集成 ai-tools-static-check hook（pre-commit + CI 双跑）；(5) `tests/modules/ai/test_injection_detector.py` 39 测试（pattern 命中 + 不误报）+ `tests/scripts/test_check_ai_tools.py` 27 测试（构造违规 meta 验证 7 项检查器能检出）；(6) 鉴权矩阵从 9/11 推到 11/11 全通 + 注入命中后断言 `ai_operation_log.is_security_event=True`。**未含**：L3 通用 `_sanitize_arg`（spec §11.1 L3 层）— MVP 阶段实际由 §6.2 ensure_targets_in_scope（数据鉴权）+ §5.5 allowed_filters/allowed_group_by 白名单 + §7 sensitive_output 黑名单覆盖，通用版本（每 tool 的 args 形态不同难统一）留 v2+。
-> ✅ **Plan 3.5 已完成（2026-07-08）**: §12 卡片视觉增强 + §8.7 chip 跳转回放 — (1) §12 卡片视觉：`events.py` 加 `risk`/`duration_ms`/`affected_rows`/`trace_id` 字段 + `event_to_sse_data` 改显式 camelCase 构造（修了后端 snake_case / 前端 camelCase 不一致 bug）；executor emit 时透传 risk=meta.risk + 计算 duration_ms + `_infer_affected_rows` 推断（dry_run_count 优先 → dict `affected_count`/`count`/`groups_count` 等 → list 长度 → None）；前端 `chat-tool-call.vue` 完整重写：3px 状态色条 + 中文 desc 字典 + risk chip + 状态文本「已执行 · 230ms · 1 行」+ chevron 折叠/展开 + pulse 动画 + dark theme。(2) §12 场景 4/5 HITL 内联 bar：`chat-tool-call.vue` 加 `isPending`/`pendingExpiresAt` props + `approve`/`reject` emits + pending 黄色状态（icon ⚠ + dot pulse + 状态文本「等待你确认」）+ 倒计时（基于 expiresAt，每秒更新，<30s urgent 红色）+ 「立即确认」/「取消」按钮；`chat-main.vue` toolCallCards computed 关联 `pendingConfirmation.toolCallId`。(3) §12 场景 13 stats 三 tab：新建 `chat-tool-stats-tabs.vue`（150 行，table/bar/pie 三 tab + ECharts tree-shake 手动 use）+ user_gender 字段友好映射（1→男/2→女/null→未知）；chat-tool-call 检测 `started.tool === 'user.stats'` 渲染 stats tabs 替代普通 result pre。(4) §8.7 chip 跳转回放：events.py `ToolCallStartedEvent` 加 `trace_id` 字段（前端据此构造 chip URL）；`chat-tool-call.vue` readonly tool（user.list/count/distinct）成功后渲染 chip 链接（→ `/system/user?ai_query_id=<trace_id>`）；`user/index.vue` onMounted 检测 `?ai_query_id` 调 `fetchAiQueryCache` 拿 filters，按 `EnableStatus`/`UserGender` 类型守卫映射到 searchParams 触发 `getData()`；`app/modules/system/ai_tools.py` 给 `user.count`/`user.distinct` 加 `query_cache_module="system/user"`（stats 不加，数据已在卡片内）。端到端验证：触发 `user.count(status='1')` → Redis hash 写入 `filters={status:"1"}` + chip 渲染 → 点 chip 跳转 → onMounted 调 query-cache → searchParams.status='1' → getData 带 status=1 → 表格只显示启用用户。**未含**：role/dept 业务模块页 URL 回放（v1.5+）/ chip 跳转 trace_id TTL 5min 过期后无 fallback 提示。
+> ✅ **Plan 3.5 已完成（2026-07-08）**: §12 卡片视觉增强 + §8.7 chip 跳转回放 — (1) §12 卡片视觉：`events.py` 加 `risk`/`duration_ms`/`affected_rows`/`trace_id` 字段 + `event_to_sse_data` 改显式 camelCase 构造（修了后端 snake_case / 前端 camelCase 不一致 bug）；executor emit 时透传 risk=meta.risk + 计算 duration_ms + `_infer_affected_rows` 推断（dry_run_count 优先 → dict `affected_count`/`count`/`groups_count` 等 → list 长度 → None）；前端 `chat-tool-call.vue` 完整重写：3px 状态色条 + 中文 desc 字典 + risk chip + 状态文本「已执行 · 230ms · 1 行」+ chevron 折叠/展开 + pulse 动画 + dark theme。(2) §12 场景 4/5 HITL 内联 bar：`chat-tool-call.vue` 加 `isPending`/`pendingExpiresAt` props + `approve`/`reject` emits + pending 黄色状态（icon ⚠ + dot pulse + 状态文本「等待你确认」）+ 倒计时（基于 expiresAt，每秒更新，<30s urgent 红色）+ 「立即确认」/「取消」按钮；`chat-main.vue` toolCallCards computed 关联 `pendingConfirmation.toolCallId`。(3) §12 场景 13 stats 三 tab：新建 `chat-tool-stats-tabs.vue`（150 行，table/bar/pie 三 tab + ECharts tree-shake 手动 use）+ user_gender 字段友好映射（1→男/2→女/null→未知）；chat-tool-call 检测 `started.tool === 'user.stats'` 渲染 stats tabs 替代普通 result pre。(4) §8.7 chip 跳转回放：events.py `ToolCallStartedEvent` 加 `trace_id` 字段（前端据此构造 chip URL）；`chat-tool-call.vue` readonly tool（user.list/count/distinct）成功后渲染 chip 链接（→ `/system/user?ai_query_id=<trace_id>`）；`user/index.vue` onMounted 检测 `?ai_query_id` 调 `fetchAiQueryCache` 拿 filters，按 `EnableStatus`/`UserGender` 类型守卫映射到 searchParams 触发 `getData()`；`app/modules/system/ai_tools.py` 给 `user.count`/`user.distinct` 加 `query_cache_module="system/user"`（stats 不加，数据已在卡片内）。端到端验证：触发 `user.count(status='1')` → Redis hash 写入 `filters={status:"1"}` + chip 渲染 → 点 chip 跳转 → onMounted 调 query-cache → searchParams.status='1' → getData 带 status=1 → 表格只显示启用用户。
+
+**v1.5+ 扩展（2026-07-09）**：role.count / dept.count AI tool + chip 回放（role/index.vue / dept/index.vue onMounted 接 ai_query_id）+ chip TTL 5min 过期 fallback 提示（user/role/dept 三页 `$message.info('筛选条件已过期')` 8s duration）+ UI agent 切换器（chat-input 下拉 + chat.py 接收 agentCode）。详见 §20 v1.5+ 已完成。
 
 完成时按 CLAUDE.md 规则改写为 `✅ Plan N 已完成（YYYY-MM-DD）` 并补充决策记录。
 
@@ -2011,16 +2352,27 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 
 **鉴权矩阵 11/11 全通** + **765 后端测试 passed** + **端到端 Playwright 验证**
 
-### ⏸ v1.5+ 推迟项（独立 PR 性质）
+### ✅ v1.5+ 已完成（2026-07-09，提前实现）
+
+| 项 | commit | 说明 |
+|---|---|---|
+| UI agent 切换器 | `aa0f51b` + `1d754d07` + `f8ec5f1` | 后端 `GET /ai/agents`（role_ai_agent + shared 直通 + 超管全开）+ 前端 chat-input 下拉 + chat.py 接收 agentCode 传 build_chat_deps → create_agent → create_chat_agent → build_pydantic_ai_tools（修了硬编码 user_mgmt bug） |
+| dept.count AI tool + chip 回放 | `aa0f51b` | `dept.count`（agent=dept_mgmt, query_cache_module=system/dept）+ chip target 扩展 + dept/index.vue onMounted 接 ai_query_id 应用 status filter（3 单测） |
+| role.count AI tool + chip 回放 | `5caac9b` + `4038f87f` | 同上模式（role_mgmt → /system/role） |
+| job.update_cron AI tool | `aa0f51b` | `app/modules/job/ai_tools.py`（spec §11.3 JobAiUpdate 白名单 + hitl_always + dry_run 显示 cron 对比），注册到 `load_builtin_tools()` |
+| dept 业务模块页 URL 回放 | `1d754d07` | dept/index.vue onMounted 接 ai_query_id |
+| chip TTL 5min 过期 fallback | `1d754d07` + `23b763cb` | user/role/dept 三页 onMounted cache miss → `$message.info('筛选条件已过期（5 分钟）')`（8s duration） |
+| 内置 agent 默认 system_prompt | `69da2e5` | `scripts/seed_agent_prompts.py`（7 agent 中文 prompt + 工具映射 + 示例 + `--force` 覆盖） |
+| tool name 点号兼容修复 | `bfd8905` | `pydantic_ai_wrapper.py` tool name `.`→`_`（OpenAI API `^[a-zA-Z0-9_-]+$` 约束） |
+
+**端到端验证**：agent 切换器 UI ✅ / agent_code 后端透传 ✅ / by_agent 过滤正确 ✅（compute_available_tools Python 验证）/ dept.count 单测 3 passed ✅ / chip 回放手动 redis seed 验证 ✅ / chip TTL fallback message 验证 ✅。**LLM 实际调 tool 受 doubao 模型单 tool agent 兼容限制**（识别 tool 但吐文本而非 function call），建议生产换 gpt-4o / claude。
+
+### ⏸ v1.5+ 剩余推迟项
 
 | 项 | 阻塞原因 |
 |---|---|
-| role.list / dept.list / dept.count AI tool | UI 没 agent 切换器，无法端到端测试 |
-| UI agent 切换器 | 需 chat-header.vue 加下拉选择器 + 前端调 chat.py 时传 agent_code（当前 hardcode user_mgmt） |
-| role/dept 业务模块页 URL 回放（role/index.vue 已做，dept 待做） | dept 待加 |
-| job.update_cron AI tool（spec §11.3 JobAiUpdate 已就绪，AI 入口待加） | UI agent 切换器 |
-| chip 跳转 trace_id TTL 5min 过期 fallback 提示 | UX 改进 |
-| sys_user.age 字段（spec §2.10 提到「年龄大于 20 男生」） | 需扩表 + alembic 迁移 |
+| sys_user.age 字段（spec §2.10 提到「年龄大于 20 男生」） | HR 业务字段，hohu-admin 是通用 admin 模板不适合加；需扩表 + alembic 迁移 |
+| role.list / dept.list AI tool | MVP 聚合类 tool 已够，list 类 tool 价值递减（chip 跳转已覆盖数据展示） |
 
 ### ⏸ v2+ 推迟项（架构级，独立版本规划）
 
@@ -2092,5 +2444,122 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 | `4038f87f` | chip target + role page replay ai_query_id（v1.5+ preview，frontend） | 2 | 0 |
 | `da16292` | JobAiUpdate schema whitelist + update_for_ai（spec 11.3） | 4 | +17 |
 | `cf7e1d0` | keyword_blocklist guardrail（spec 11.2） | 4 | +16 |
+| `0a0db42` | spec 最终盘点（MVP/v1.5+/v2+ 三类清单 + 11/11 鉴权矩阵 + changelog） | 1 | 0 |
+| `4791192` | Redis down 优雅降级 + 极端输入边界测试（spec §2.6） | 4 | +15 |
+| `6d5951e` | AI-DEPLOYMENT.md 部署指南（9 节生产 checklist） | 1 | 0 |
+| `aa0f51b` | v1.5+ agent 切换器 + dept.count + job.update_cron tool | 8 | +7 |
+| `1d754d07` | v1.5+ agent 切换器 UI + dept/role/user chip TTL fallback（frontend） | 8 | 0 |
+| `fe605f7` | 修 job.update_cron summary 过长（启动阻断） | 1 | 0 |
+| `f8ec5f1` | 修 agent_code 硬编码 user_mgmt（create_chat_agent → build_pydantic_ai_tools 链路） | 3 | 0 |
+| `69da2e5` | seed_agent_prompts.py 内置 agent 默认 system_prompt（7 agent + --force） | 1 | 0 |
+| `bfd8905` | fix tool name 点号兼容（OpenAI `^[a-zA-Z0-9_-]+$` 约束） | 1 | 0 |
+| `23b763cb` | chip TTL fallback message duration 加长 8s（frontend） | 3 | 0 |
 
-**总计**：127 文件改动，+21000 行代码，+600 测试，0 errors lint。
+**总计**：160+ 文件改动，+23000 行代码，+783 测试，0 errors lint。
+
+---
+
+## 22. Spec 修订日志（2026-07-10）
+
+> **修订背景**：spec first 审查（2026-07-10）发现 spec 自身存在 6 处自相矛盾 / 代码错误 + 10 处关键细节漏写，已催生下游 70+ 个实现 bug。本节是 P0+P1 范围（共 16 处）的修订记录。修订方式：直接改原文（保留 git history 可追） + 本日志汇总动机 / 影响章节 / 实现需对齐项。
+
+### 修订总表
+
+| ID | 范围 | 修订位置 | 实现需对齐 |
+|---|---|---|---|
+| **S-1** | §5.4 代码示例 `a.id` → `a.agent_id` | §5.4 `compute_available_agents` | 实现已是 `agent_id`（`registry.py:180-197`），无对齐工作 |
+| **S-2** | §17.2 / §17.6 API 路径矛盾协调 | §17.2 表格 + §17.6 | `/ai/chat/sync` 删除是 breaking change，前端需同步移除调用 |
+| **S-3** | §4.4 / §8.1 时间字段语义对齐 | §4.4（新增 `queued_at` / `hitl_wait_ms`）+ §8.1 字段说明 | 实现需迁移 `started_at` 语义（从行级 create 改为业务起点）；新增字段需要 alembic migration |
+| **S-4** | §11.6 `tool_calls_limit` 语义订正 | §11.6 段落 + PydanticAI 源码引用 | 实现 `UsageLimits(5, 10)` 不变；**必须补** `test_usage_limits.py` 测试 + `UsageLimitExceeded → AiErrorEvent` 转换 |
+| **S-5** | §5.5 stats 范围 vs §20 已落地项对齐 | §5.5 限制说明 + 维度限制段 | 实现已支持 dept.count / role.count（§20 v1.5+），无对齐工作 |
+| **S-6** | §8.4 单 worker assertion 加固 | §8.4 lifespan 代码 + 部署文档 | 实现需把 env var 检测改为 Redis-based worker count 实测（方案 A） |
+| **S-7** | §6.4 L1 滑窗实现规范化（要求 ZSET） | §6.4 L1 实现代码 | 实现当前是 INCR+EXPIRE（固定窗口），**必须重写**为 Lua + ZSET |
+| **S-8** | §6.4 L2 日期时区规范化（UTC + 到当日结束 TTL） | §6.4 L2 实现代码 | 实现当前用 `date.today()`（local）+ 固定 86400s，**必须改**为 UTC + seconds_to_midnight |
+| **S-9** | §6.5 `compute_args_hash` 算法规范化 | §6.5 失败兜底代码 | 实现当前 `default=str` 易碰撞，**必须改**为 `default=lambda o: f"{type(o).__qualname__}:{o!r}"` |
+| **S-10** | §7.3 全局黑名单匹配改 word-boundary（实施时进一步收紧：移除裸 `token` + 不含后缀形式，见 SR-6） | §7.3 `serialize_for_llm` + `_scrub_fields` 实现 | 实现当前是子串匹配（误伤 csrf_token 等），**必须改**为 word-boundary + `model_dump(mode="json")` + depth limit；裸 `token` 从 BLOCKLIST 移除（业务方显式声明） |
+| **S-11** | §6.4 计数策略补 DECR 路径 | §6.4 计数策略段 + L2 实现代码 | 实现 data_scope 拒绝 / 配额自身拒绝都未 DECR，**必须补**；建议加 `test_quota_decr.py` |
+| **S-12** | §6.5 `AI_REPEATED_FAILURE` 时序规范化 | §6.5 时序段（强制 `_start_log` 在 `check_repeated_failure` 之前） | 实现当前 `_start_log` 在 check 之后，**必须调换顺序** + 触发路径补写 log |
+| **S-13** | §11.4 / §8.3 `/ai/confirm` 接入 `check_user_disabled` | §8.3 端点代码示例 | 实现 confirm.py 当前不查禁用状态，**必须补** check |
+| **S-14** | §8.3 `wake_hung_stream` 失败语义规范化 | §8.3 端点 + `wake` 实现契约 | 实现当前 wake 失败返回 200+queued，**必须改**为 410+stream_gone；防双击 race（`_pending.pop` 时机） |
+| **S-15** | §6.3 跨 session 一致性补补偿策略 | §6.3 末尾新增"补偿策略"段 | 实现 `_finish_log_final` 当前无重试，**必须加** 3 次重试 + 告警 + `_start_log` 失败强制抛 |
+| **S-16** | §11.1 L2 注入检测跨轮持久化 | §11.1 L2 段 + `ChatDeps.injection_hit` 语义 | 实现 `injection_hit` 当前是 per-request，**必须改**为 Redis conversation 级持久化 |
+
+### 修订决策记录
+
+> 格式遵循 CLAUDE.md：`N. **决策名** — 理由。**反例**: ...。**回归**: ...`
+
+#### SR-1. **spec 修订不重排 Phase，不改 §19 Plan 状态块** — spec 是设计事实记录，Plan 是实施进度记录；修订暴露的设计漏洞属于"原本就该这样设计"，不应回填到已完成的 Phase 里伪造"当时就这样做了"的历史。
+**反例**: 把 S-7 滑窗修订标成 "✅ Plan 2.4 已完成（2026-07-04）" + 修订内容 → 实施进度与设计文档混在一起，下次审查时分不清"哪些是设计改动哪些是 bug fix"。
+**回归**: spec 后续如有大型修订（如 v1.5+ 升级），统一加新 §N+1 段，不动既有段落。
+
+#### SR-2. **修订优先做"实现无关"的语义澄清（S-1/S-2/S-4/S-5），后做"需要实现重写"的硬规范（S-7/S-8/S-9/S-10/S-11/S-12）** — 语义澄清只需 review，硬规范需要单独 PR + 测试 + 回归。
+**反例**: 把所有 16 处修订塞一个 PR → review 负担过重 + 任何一处争议阻塞全部。
+**回归**: 实现侧修复按"S-1/S-2/S-4/S-5（无代码） → S-13/S-14/S-15/S-16（小改动） → S-7/S-8/S-9/S-10/S-11/S-12（重写 + 测试） → S-3/S-6（架构级 + migration）"四批走。
+
+#### SR-3. **修订日志的"实现需对齐"列必须真实反映当前实现状态，不写空话** — 用户看日志是为了决定修复优先级，每条都要可直接判断"还要不要写代码"。
+**反例**: "实现需对齐：检查并更新"——读者不知道当前是不是已经合规。
+**回归**: 通过 § 一致性审查（4 agent 并行）+ 实地代码抽样确认；如有不确定项标"未确认"。
+
+#### SR-4. **修订不删除原 spec 的设计权衡段落** — 即使新规范推翻了旧设计（如 L1 滑窗替代固定窗口），保留旧描述作为修订对照点，便于读者理解"为什么改"。
+**反例**: 直接删掉原"L1 INCR+EXPIRE"代码示例，替换为新 ZSET 代码 → 读者看不到"原方案为什么不行"。
+**回归**: 新代码示例加注释"修订 S-N：原方案 X 的问题详见 §22 修订日志"。
+
+#### SR-5. **修订后必跑回归测试** — 任何 spec 修订落地后，必须更新对应单元测试 + 鉴权矩阵（§12.2）。
+**反例**: 只改 spec 不改测试 → 下次有人按测试反推 spec 又走回老路。
+**回归**: CI 加 spec-vs-test 一致性检查（如 ruff 自定义 rule 校验"spec 提到的错误码必须在测试中出现"）。
+
+#### SR-6. **GLOBAL_OUTPUT_BLOCKLIST 不含裸 `token`，word-boundary 不含后缀形式**（2026-07-10 S-10 实施时发现）— spec §7.3 修订 S-10 注释承诺"不误伤 csrf_token 等"，但若 word-boundary 含 `endswith("_" + bl)` 规则 + 集合含 `token`，csrf_token 仍因后缀命中。实施时进一步收紧：(a) 集合移除裸 `token`（access_token 等已在集合，覆盖常见场景）；(b) 仅"完全等于" + "前缀 bl_xxx"，不含后缀 xxx_bl。
+**反例**: 同时保留 `token` 在集合 + `endswith` 规则 → csrf_token 命中 token（后缀），spec 注释承诺落空；保留 `token` 但去掉 `endswith` → `token_count` 仍因 `startswith token_` 命中（前缀），继续误伤业务字段。
+**回归**: 任何向 GLOBAL_OUTPUT_BLOCKLIST 加新词时，必须先用 word-boundary 规则跑常见业务字段（csrf_* / pagination_* / *_count / *_type / *_id）匹配性测试，避免误伤；优先加完整词（如 `access_token`），避免加易冲突的词根（如 `token` / `key`）。
+
+### 修订后立即需要做的事（优先级排序）
+
+**P0（必修，2 周内）**：
+1. **S-7/S-8/S-11 配额重写**：L1 ZSET 滑窗 + L2 UTC date + DECR 回滚。一个 PR，含 `test_quota_decr.py`
+2. **S-10 黑名单 word-boundary**：`sensitive.py` 重写 + `test_sensitive.py` 加 csrf_token / pagination_token 不误伤用例
+3. **S-9 args_hash 类型前缀**：`failures.py::compute_args_hash` 改写 + 加碰撞回归测试
+4. **S-13/S-14 confirm 端点**：`check_user_disabled` + wake 失败返回 410 + 防双击 race
+5. **S-12 `_start_log` 时序**：executor.py 调换 check 与 start 顺序 + AI_REPEATED_FAILURE 路径补 log
+
+**P1（应修，1 个月内）**：
+6. **S-15 `_finish_log_final` 重试**：3 次重试 + Prometheus 告警 counter
+7. **S-16 injection 跨轮持久化**：Redis `ai:injection_hit:{conv_id}` + `build_chat_deps` 改读 Redis
+8. **S-4 UsageLimitExceeded emit**：chat.py except 分支 + `test_usage_limits.py`
+
+**P2（架构级，独立 milestone）**：
+9. **S-3 时间字段迁移**：alembic migration 加 `queued_at` / `hitl_wait_ms` + 改 `started_at` 语义 + 前端展示更新
+10. **S-6 worker count 实测**：Redis-based worker self-report + 部署文档强化
+
+### 修订验证 checklist
+
+- [ ] S-1：实现 `compute_available_agents` 已用 `agent_id`（已确认）
+- [ ] S-2：前端代码搜索 `/ai/chat/sync` 全部移除
+- [ ] S-3：alembic migration 创建（`queued_at` / `started_at` nullable / `hitl_wait_ms`）+ executor 写入逻辑改
+- [ ] S-4：`test_usage_limits.py` 新增 6+ 测试覆盖 tool_calls_limit / request_limit
+- [ ] S-5：实现侧无对齐工作（确认 dept/role count 已落地）
+- [ ] S-6：`_detect_actual_worker_count` 实现 + 部署文档加禁止多 pod 部署条款
+- [ ] S-7：`test_quota_l1.py` 加边界突发测试（19+20 in 60s 应被拒）
+- [ ] S-8：`test_quota_l2.py` 加跨日测试（mock UTC 23:59 → 00:01）
+- [ ] S-9：`test_failures.py` 加 datetime vs str 不碰撞测试
+- [x] S-10：`test_sensitive.py` 加 csrf_token / pagination_token / next_page_token 不被剥离测试（**已完成 2026-07-10**，含 token_count / 嵌套 BaseModel / list[BaseModel] / depth limit 共 13 个新测试，42 passed）
+- [ ] S-11：`test_quota_decr.py` 加 data_scope 拒绝后计数器无变化测试
+- [ ] S-12：`test_executor.py` 加 AI_REPEATED_FAILURE 路径有 ai_operation_log 落库断言
+- [ ] S-13：`test_confirm.py` 加用户禁用后 confirm 返回 403 测试
+- [ ] S-14：`test_confirm.py` 加 wake 失败返回 410 + 防双击 race 测试
+- [ ] S-15：`test_executor_log.py` 加 `_finish_log_final` 重试 3 次 + 告警触发测试
+- [ ] S-16：`test_injection_detector.py` 加 conversation 级跨轮持久化测试
+
+### 修订后未覆盖范围（推迟到 v2+）
+
+本修订仅覆盖 P0+P1 共 16 处。剩余 14 处问题（spec 设计层 S-17~S-30）推迟：
+
+- **S-17**（datetime 时区策略）：当前用 naive datetime 是 workaround 被当规范，跨国部署需重构 → 推迟到 v2+ 时区策略专项
+- **S-18**（超管 data_scope 完全放空的护栏缺失）：需要 2FA / 二次审批设计 → 推迟到 v2+ 安全增强
+- **S-19**（单 worker 部署风险量化）：与 §15 已知风险合并讨论 → 推迟到 v1.5+ pub/sub 升级一并解决
+- **S-20**（accessible_user_ids OOM 量化修正）：需要 subquery 形式实现 → 推迟到 v1.5+
+- **S-21**（Vercel v4 标榜准确性）：需要校验 PydanticAI VercelAIAdapter 真实输出 → 推迟到下次 PydanticAI 升级
+- **S-22**（sys_file ACL 未定义）：需要文件 owner 校验设计 → 推迟到 v1.5+ 文件场景扩展
+- **S-23**（SAFETY_PREAMBLE read obligation 过度信任 LLM）：需要卡片强制展示前 N 行兜底 → 推迟到 v2+ UX 重构
+- **S-24~S-30**：文档 drift / 错误码字典不全 / config key 未落地等，与下次 spec 大修订（v1.5+）合并处理
+
+详见初版审查报告（2026-07-10）P2/P3 部分。

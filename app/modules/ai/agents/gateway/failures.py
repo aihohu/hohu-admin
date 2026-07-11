@@ -10,8 +10,17 @@ Redis 跨 /ai/chat 流持久化失败计数：
   计数从 0 开始，永远到不了第 3 次"切换引导模式"。
   Redis 跨流持久化让 LLM 知道"这个操作连续失败 2 次了，引导用户走传统界面"。
 
-args_hash 算法（spec §6.5）：
-  sha256(json.dumps(args, sort_keys=True, default=str).encode()).hexdigest()
+args_hash 算法（spec §6.5，2026-07-10 修订 S-9）：
+  sha256(json.dumps(args, sort_keys=True, default=_type_aware).encode()).hexdigest()
+
+  default=lambda o: f"{type(o).__qualname__}:{o!r}" 给每个非 JSON 原生类型
+  加类型名前缀，防 datetime(2026,1,1) 与字符串 "2026-01-01 00:00:00"
+  产生相同 JSON 哈希碰撞（不同业务意图共享失败计数器）。
+
+修订记录：
+  - 2026-07-10 S-9：args_hash 改类型感知序列化
+  - 2026-07-10 S-12：record_failure 仅在 INCR 返回 1 时设 EXPIRE，
+    避免每次失败都重置 TTL 导致计数永不过期
 """
 
 import hashlib
@@ -33,12 +42,26 @@ FAILURE_TTL_SEC = 600  # 10 min
 _KEY = "ai:failures:{user_id}:{tool_name}:{args_hash}"
 
 
-def compute_args_hash(args: dict[str, Any]) -> str:
-    """计算 args 的 SHA256 hash（spec §6.5）
+def _type_aware_default(o: Any) -> str:
+    """json.dumps default：类型感知序列化（修订 S-9）
 
-    sort_keys=True 保证字典顺序无关，default=str 兼容不可序列化对象
+    给非 JSON 原生类型加类型名前缀，防不同类型对象哈希碰撞：
+      datetime(2026,1,1) → "datetime:datetime.datetime(2026, 1, 1, 0, 0)"
+      str("2026-01-01 00:00:00") → 原生 JSON 字符串，无前缀
+    两者 hash 不同，业务意图隔离。
     """
-    payload = json.dumps(args, sort_keys=True, default=str, ensure_ascii=False)
+    return f"{type(o).__qualname__}:{o!r}"
+
+
+def compute_args_hash(args: dict[str, Any]) -> str:
+    """计算 args 的 SHA256 hash（spec §6.5，修订 S-9）
+
+    sort_keys=True 保证字典顺序无关；default=_type_aware_default 给非 JSON
+    原生类型加类型名前缀，防 datetime 与 string 等碰撞。
+    """
+    payload = json.dumps(
+        args, sort_keys=True, default=_type_aware_default, ensure_ascii=False
+    )
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -79,10 +102,16 @@ async def record_failure(
     tool_name: str,
     args_hash: str,
 ) -> None:
-    """记录一次失败（INCR + EXPIRE）"""
+    """记录一次失败（INCR + 条件 EXPIRE，修订 S-12）
+
+    仅在 INCR 返回 1（第一次失败）时设 EXPIRE，避免每次失败都重置 TTL
+    导致缓慢累积的失败永不过期（用户被永久锁死该 (tool, args) 对）。
+    """
     key = _KEY.format(user_id=user_id, tool_name=tool_name, args_hash=args_hash)
     failures = await redis.incr(key)
-    await redis.expire(key, FAILURE_TTL_SEC)
+    if failures == 1:
+        # 仅第一次失败设 TTL，后续失败沿用原 TTL 倒计时
+        await redis.expire(key, FAILURE_TTL_SEC)
     logger.debug(
         "failure recorded",
         extra={

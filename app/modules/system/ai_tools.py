@@ -55,13 +55,17 @@ async def user_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) 
     filters:
         status: '1' (启用) / '0' (禁用)
         user_gender: '0' (未知) / '1' (男) / '2' (女)
+
+    注意：LLM 经常以 JSON int 传值（filters={"status": 1}），sys_user 字段是
+    varchar，asyncpg 严格类型检查会抛 ProgrammingError。这里强制 stringify。
     """
     filters = validate_filters_in_whitelist(ctx.tool_meta, filters)
 
     # ctx.data_scope.filters 已含 User 模型的 data_scope 过滤（§6.2 build_data_scope_context）
     stmt = select(func.count(User.user_id)).where(*ctx.data_scope.filters)
     for key, value in filters.items():
-        stmt = stmt.where(getattr(User, key) == value)
+        # sys_user 表的 allowed_filters 字段都是 varchar，强制 stringify 防类型错
+        stmt = stmt.where(getattr(User, key) == str(value))
 
     count = await ctx.db.scalar(stmt)
     return {"count": int(count or 0)}
@@ -111,7 +115,8 @@ async def user_stats(
         .limit(ctx.tool_meta.max_groups)
     )
     for key, value in filters.items():
-        stmt = stmt.where(getattr(User, key) == value)
+        # sys_user 表字段都是 varchar，强制 stringify 防类型错（与 user_count 同）
+        stmt = stmt.where(getattr(User, key) == str(value))
 
     rows = (await ctx.db.execute(stmt)).all()
     return [{"group": str(g) if g is not None else "null", "count": c} for g, c in rows]
@@ -182,7 +187,8 @@ async def role_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) 
 
     stmt = select(func.count(Role.role_id))
     for key, value in filters.items():
-        stmt = stmt.where(getattr(Role, key) == value)
+        # sys_role 表字段都是 varchar，强制 stringify 防类型错
+        stmt = stmt.where(getattr(Role, key) == str(value))
 
     count = await ctx.db.scalar(stmt)
     return {"count": int(count or 0)}
@@ -213,7 +219,8 @@ async def dept_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) 
 
     stmt = select(func.count(Dept.dept_id))
     for key, value in filters.items():
-        stmt = stmt.where(getattr(Dept, key) == value)
+        # sys_dept 表字段都是 varchar，强制 stringify 防类型错
+        stmt = stmt.where(getattr(Dept, key) == str(value))
 
     count = await ctx.db.scalar(stmt)
     return {"count": int(count or 0)}

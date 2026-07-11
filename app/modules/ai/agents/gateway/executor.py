@@ -17,13 +17,16 @@ Phase 3.2 完整流程（HITL + 流式协议 + 审计）：
 ChatDeps.signal_event 注入 SSE 事件回调，事件按 spec §8.1 流式协议 emit。
 """
 
+import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from redis.exceptions import RedisError
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import BusinessException
+from app.core.exceptions import AuthorizationException, BusinessException
 from app.core.rbac import is_super_admin
 from app.core.redis import redis_client
 from app.db.session import AsyncSessionLocal
@@ -36,6 +39,7 @@ from app.modules.ai.agents.gateway.failures import (
 from app.modules.ai.agents.gateway.quota import (
     check_l1_rate_limit,
     check_l2_daily_quota,
+    decr_quota,
     is_write_tool,
     with_l3_timeout,
 )
@@ -181,10 +185,13 @@ async def execute_tool(
             error_msg="此操作仅超级管理员可执行，请联系超管或走传统界面",
         )
 
-    # 3. 容量鉴权 L1/L2（仅写 tool，spec §6.4）
+    # 3. 容量鉴权 L1/L2（仅写 tool，spec §6.4 + 修订 S-11）
+    # check_l1_rate_limit 返回 (count, l1_member)，l1_member 用于业务函数内
+    # 抛 AuthorizationException 时精确回滚（修订 S-11）
+    l1_member: str | None = None
     if is_write_tool(meta):
         try:
-            await check_l1_rate_limit(redis_client, user_id)
+            _, l1_member = await check_l1_rate_limit(redis_client, user_id)
             await check_l2_daily_quota(redis_client, user_id)
         except BusinessException as e:
             return ToolResult.failure(error_code=e.error_code, error_msg=e.message)
@@ -199,35 +206,16 @@ async def execute_tool(
                 error_msg="AI 服务暂时不可用（容量校验失败），请稍后重试",
             )
 
-    # 4. 连续失败兜底（spec §6.5）
+    # 4. ai_operation_log 起始行（spec §6.5 修订 S-12：必须先写 log 再检查
+    #    repeated_failure，否则 AI_REPEATED_FAILURE 路径漏审计行）
+    # 修订 S-15：_start_log 失败 = 整 tool 调用失败（业务还没执行，不能漏审计行）
     args_hash = compute_args_hash(args)
-    try:
-        await check_repeated_failure(redis_client, user_id, name, args_hash)
-    except BusinessException as e:
-        return ToolResult.failure(
-            error_code=e.error_code,
-            error_msg=USER_FACING_MSG.get(e.error_code, e.message),
-        )
-    except RedisError:
-        # spec §2.6: 连续失败检查也走 Redis，故障时保守降级（拒绝）
-        logger.exception(
-            "Redis unavailable during failure check",
-            extra={"user_id": user_id, "tool": name},
-        )
-        return ToolResult.failure(
-            error_code="AI_REDIS_DOWN",
-            error_msg="AI 服务暂时不可用（安全检查失败），请稍后重试",
-        )
-
-    # 5. dry_run + risk classification（spec §5.3 + §11.1 injection_hit）
     dry_run_count, dry_run_summary = await _run_dry_run(registered, args, deps)
     mode = classify_execution_mode(
         meta,
         dry_run_count=dry_run_count,
         injection_hit=deps.injection_hit,
     )
-
-    # 6. tool_call_id + emit tool_call_started + 写 log（spec §8.1 / §9.1）
     tool_call_id = hitl_manager.generate_tool_call_id()
     summary = build_args_summary(
         meta.name,
@@ -235,6 +223,26 @@ async def execute_tool(
         execution_mode=mode.value,
         dry_run_count=dry_run_count,
     )
+    try:
+        log_id = await _start_log(
+            deps, registered, tool_call_id, args_hash, summary, mode
+        )
+    except LogWriteError as e:
+        # _start_log 重试 3 次仍失败 → 业务还没执行，必须终止避免漏审计行
+        # 不抛给 LLM，转 ToolResult.failure
+        logger.critical(
+            "execute_tool aborted: _start_log failed, business NOT executed",
+            extra={
+                "user_id": user_id,
+                "tool": name,
+                "tool_call_id": tool_call_id,
+                "error": str(e),
+            },
+        )
+        return ToolResult.failure(
+            error_code="AI_INTERNAL_ERROR",
+            error_msg="AI 服务暂时不可用（审计系统故障），请稍后重试",
+        )
     started_at = time.monotonic()
     await _emit(
         deps,
@@ -247,7 +255,44 @@ async def execute_tool(
             trace_id=deps.trace_id,
         ),
     )
-    log_id = await _start_log(deps, registered, tool_call_id, args_hash, summary, mode)
+
+    # 5. 连续失败兜底（spec §6.5）
+    try:
+        await check_repeated_failure(redis_client, user_id, name, args_hash)
+    except BusinessException as e:
+        # 修订 S-12：触发 AI_REPEATED_FAILURE 时 log 已在 step 4 写入，
+        # 这里写终态 failed + AI_REPEATED_FAILURE（满足 spec §6.5
+        # "连续失败兜底触发... 仍写一行 ai_operation_log"）
+        await _finish_log_final(
+            log_id,
+            ToolResult.failure(
+                error_code=e.error_code,
+                error_msg=USER_FACING_MSG.get(e.error_code, e.message),
+            ),
+            started_at,
+        )
+        return ToolResult.failure(
+            error_code=e.error_code,
+            error_msg=USER_FACING_MSG.get(e.error_code, e.message),
+        )
+    except RedisError:
+        # spec §2.6: 连续失败检查也走 Redis，故障时保守降级（拒绝）
+        logger.exception(
+            "Redis unavailable during failure check",
+            extra={"user_id": user_id, "tool": name},
+        )
+        await _finish_log_final(
+            log_id,
+            ToolResult.failure(
+                error_code="AI_REDIS_DOWN",
+                error_msg="AI 服务暂时不可用（安全检查失败），请稍后重试",
+            ),
+            started_at,
+        )
+        return ToolResult.failure(
+            error_code="AI_REDIS_DOWN",
+            error_msg="AI 服务暂时不可用（安全检查失败），请稍后重试",
+        )
 
     # §11.4 用户级 injection 自动禁用（命中 ≥5/h 且非超管 → 禁用 24h）
     if deps.injection_hit:
@@ -273,8 +318,11 @@ async def execute_tool(
         # approved → mark_running 后继续执行
         await _finish_log_running(log_id)
 
-    # 8. 业务执行
-    result = await _invoke_tool_fn(registered, args, deps, args_hash)
+    # 8. 业务执行（修订 S-11：传 l1_member 进去，业务函数内抛
+    #    AuthorizationException 时 decr_quota 精确回滚 L1 zset 成员）
+    result = await _invoke_tool_fn(
+        registered, args, deps, args_hash, l1_member=l1_member
+    )
 
     # 9. emit tool_call_result + 写 log 终态
     duration_ms = int((time.monotonic() - started_at) * 1000)
@@ -350,9 +398,14 @@ async def _start_log(
     args_summary: str,
     mode: AiExecutionMode,
 ) -> int:
-    """写 ai_operation_log 行（spec §9.1）
+    """写 ai_operation_log 行（spec §9.1，修订 S-15：失败必抛）
 
     initial status：autonomous → RUNNING；HITL → PENDING_CONFIRMATION
+
+    修订 S-15：与 `_finish_log_final` 不同，`_start_log` 失败时业务**还没执行**，
+    必须抛异常终止 execute_tool —— 否则业务执行了但无审计行，audit gap 比
+    业务失败更严重。`_with_log_retry` 在 3 次重试后仍失败时抛
+    `LogWriteError`，execute_tool 内部捕获并返回 ToolResult.failure。
     """
     initial_status = (
         AiOperationStatus.RUNNING
@@ -360,60 +413,162 @@ async def _start_log(
         else AiOperationStatus.PENDING_CONFIRMATION
     )
 
-    async with AsyncSessionLocal() as log_db:
-        async with log_db.begin():
-            return await operation_log_service.start_operation(
-                log_db,
-                trace_id=deps.trace_id,
-                conversation_id=deps.conversation_id or 0,
-                user_id=deps.user.user_id,
-                tool_name=registered.meta.name,
-                tool_call_id=tool_call_id,
-                args_hash=args_hash,
-                args_summary=args_summary,
-                risk_level=registered.meta.risk,
-                execution_mode=mode.value,
-                status=initial_status,
-                is_security_event=deps.injection_hit,
-                event_type="injection_pattern_matched" if deps.injection_hit else None,
-            )
+    async def _op(log_db: AsyncSession) -> int:
+        return await operation_log_service.start_operation(
+            log_db,
+            trace_id=deps.trace_id,
+            conversation_id=deps.conversation_id or 0,
+            user_id=deps.user.user_id,
+            tool_name=registered.meta.name,
+            tool_call_id=tool_call_id,
+            args_hash=args_hash,
+            args_summary=args_summary,
+            risk_level=registered.meta.risk,
+            execution_mode=mode.value,
+            status=initial_status,
+            is_security_event=deps.injection_hit,
+            event_type="injection_pattern_matched" if deps.injection_hit else None,
+        )
+
+    return await _with_log_retry("start_operation", log_id=None, op=_op)
 
 
 async def _finish_log_running(log_id: int) -> None:
-    async with AsyncSessionLocal() as log_db:
-        async with log_db.begin():
-            await operation_log_service.mark_running(log_db, log_id)
+    """HITL approved → status pending_confirmation → running（修订 S-15：3 次重试）"""
+
+    async def _op(log_db: AsyncSession) -> None:
+        await operation_log_service.mark_running(log_db, log_id)
+
+    await _with_log_retry("mark_running", log_id=log_id, op=_op, raise_on_failure=False)
 
 
 async def _finish_log_rejected(log_id: int, user_id: int) -> None:
-    async with AsyncSessionLocal() as log_db:
-        async with log_db.begin():
-            await operation_log_service.mark_rejected(
-                log_db, log_id, approved_by=user_id
-            )
+    """HITL rejected → status pending_confirmation → rejected（修订 S-15：3 次重试）"""
+
+    async def _op(log_db: AsyncSession) -> None:
+        await operation_log_service.mark_rejected(log_db, log_id, approved_by=user_id)
+
+    await _with_log_retry(
+        "mark_rejected", log_id=log_id, op=_op, raise_on_failure=False
+    )
 
 
 async def _finish_log_final(log_id: int, result: ToolResult, started_at: float) -> None:
-    """业务执行结束，写 log 终态（success / failed）"""
+    """业务执行结束，写 log 终态（success / failed）（修订 S-15：3 次重试 + 不抛）
+
+    修订 S-15 关键设计：
+      - 业务事务（tool_db.begin()）已先于本函数返回时 commit/rollback，本函数
+        写 log 失败**不**回滚业务（spec §6.3 "log 写入优先级低于业务"）
+      - 3 次重试（0.5s / 1s / 1.5s backoff）后仍失败 → logger.critical
+        （未来 Prometheus 接入时挂 `ai_log_write_failure_total{status}` counter）
+      - 不抛异常：业务已成功 = 用户感知成功，审计 gap 走告警追查
+    """
     duration_ms = int((time.monotonic() - started_at) * 1000)
-    async with AsyncSessionLocal() as log_db:
-        async with log_db.begin():
-            if result.ok:
-                summary = (
-                    f"ok, keys={sorted(result.data.keys())}"
-                    if isinstance(result.data, dict)
-                    else "ok"
+
+    async def _op(log_db: AsyncSession) -> None:
+        if result.ok:
+            summary = (
+                f"ok, keys={sorted(result.data.keys())}"
+                if isinstance(result.data, dict)
+                else "ok"
+            )
+            await operation_log_service.mark_success(
+                log_db, log_id, result_summary=summary, duration_ms=duration_ms
+            )
+        else:
+            await operation_log_service.mark_failed(
+                log_db,
+                log_id,
+                error_code=result.error_code or "AI_INTERNAL_ERROR",
+                duration_ms=duration_ms,
+            )
+
+    status_label = "success" if result.ok else "failed"
+    await _with_log_retry(
+        f"mark_{status_label}",
+        log_id=log_id,
+        op=_op,
+        raise_on_failure=False,
+    )
+
+
+# ============ log 写入重试 helper（修订 S-15） ============
+
+
+class LogWriteError(RuntimeError):
+    """log 写入 3 次重试后仍失败。_start_log 路径必须抛此异常让 execute_tool 终止。"""
+
+
+_LOG_RETRY_ATTEMPTS = 3
+_LOG_RETRY_DELAYS_SEC = (0.5, 1.0, 1.5)  # 第 N 次失败后 sleep 的秒数
+
+
+async def _with_log_retry(
+    operation: str,
+    *,
+    log_id: int | None,
+    op: Callable[[AsyncSession], Awaitable[Any]],
+    raise_on_failure: bool = True,
+) -> Any:
+    """log 写入重试 helper（修订 S-15）
+
+    Args:
+        operation: 操作名（start_operation / mark_success / mark_failed / 等），
+                   仅用于 log message
+        log_id: 已知的 log_id（start_operation 路径还没 log_id 传 None）
+        op: async 函数，接收 log_db session 执行业务
+        raise_on_failure: True = 3 次失败后抛 LogWriteError（_start_log 用）；
+                          False = 3 次失败后 logger.critical + 返回 None
+                          （_finish_log_* 用，避免业务已成功后被审计拖垮）
+
+    重试策略：
+      - attempt 1: 立即执行
+      - attempt 2: sleep 0.5s 后重试
+      - attempt 3: sleep 1.0s 后重试
+      - 仍失败: sleep 1.5s 不再重试，按 raise_on_failure 决定
+
+    捕获的异常：DBAPIError / OperationalError / TimeoutError。其它异常（如
+    ProgrammingError = SQL bug）直接抛，不浪费重试预算。
+    """
+    from sqlalchemy.exc import DBAPIError, OperationalError  # noqa: PLC0415
+
+    last_exc: Exception | None = None
+    for attempt in range(1, _LOG_RETRY_ATTEMPTS + 1):
+        try:
+            async with AsyncSessionLocal() as log_db:
+                async with log_db.begin():
+                    return await op(log_db)
+        except (DBAPIError, OperationalError, TimeoutError) as e:
+            last_exc = e
+            if attempt < _LOG_RETRY_ATTEMPTS:
+                delay = _LOG_RETRY_DELAYS_SEC[attempt - 1]
+                logger.warning(
+                    "ai_operation_log write failed, retrying",
+                    extra={
+                        "operation": operation,
+                        "log_id": log_id,
+                        "attempt": attempt,
+                        "delay_sec": delay,
+                        "error": str(e),
+                    },
                 )
-                await operation_log_service.mark_success(
-                    log_db, log_id, result_summary=summary, duration_ms=duration_ms
-                )
-            else:
-                await operation_log_service.mark_failed(
-                    log_db,
-                    log_id,
-                    error_code=result.error_code or "AI_INTERNAL_ERROR",
-                    duration_ms=duration_ms,
-                )
+                await asyncio.sleep(delay)
+
+    # 3 次都失败
+    logger.critical(
+        "ai_operation_log 最终态写入失败 3 次（audit gap，业务结果以 tool 返回值为准）",
+        extra={
+            "operation": operation,
+            "log_id": log_id,
+            "error": str(last_exc),
+            # Prometheus 接入后改为: counter ai_log_write_failure_total{operation}
+        },
+    )
+    if raise_on_failure:
+        raise LogWriteError(
+            f"{operation} failed after {_LOG_RETRY_ATTEMPTS} attempts"
+        ) from last_exc
+    return None
 
 
 # ============ HITL 挂起 / 唤醒（spec §8.3） ============
@@ -499,8 +654,16 @@ async def _invoke_tool_fn(
     args: dict[str, Any],
     deps: ChatDeps,
     args_hash: str,
+    *,
+    l1_member: str | None = None,
 ) -> ToolResult:
-    """独立 session 内调用业务函数（spec §6.3）"""
+    """独立 session 内调用业务函数（spec §6.3）
+
+    修订 S-11：业务函数内抛 AuthorizationException（典型场景：
+    `ensure_targets_in_scope` 命中 data_scope 越界）时，必须 decr_quota
+    回滚 L1/L2 计数器——否则用户被偷配额（spec §6.4 计数策略
+    "data_scope 拒绝不计入"）。
+    """
     meta = registered.meta
     tool_fn = registered.fn
     user_id = deps.user.user_id
@@ -519,6 +682,26 @@ async def _invoke_tool_fn(
                 if meta.readonly and meta.query_cache_module and deps.trace_id:
                     _safe_write_query_cache(meta, args, deps, user_id)
                 return ToolResult.success(data=safe_data)
+    except AuthorizationException as e:
+        # 修订 S-11：data_scope 越界等授权失败，回滚 L1/L2 已写计数
+        if is_write_tool(meta):
+            try:
+                await decr_quota(redis_client, user_id, l1_member=l1_member)
+            except RedisError:
+                # 回滚失败不阻断主流程（业务已失败，配额少 1 是次要问题）
+                logger.exception(
+                    "quota decr failed on AuthorizationException",
+                    extra={"user_id": user_id, "tool": meta.name},
+                )
+        # 授权失败不计入失败计数（spec §6.4 计数策略）
+        logger.info(
+            "tool authorization denied (data_scope / etc)",
+            extra={"user_id": user_id, "tool": meta.name, "error_code": e.error_code},
+        )
+        return ToolResult.failure(
+            error_code=e.error_code or "AI_DATA_SCOPE_VIOLATION",
+            error_msg=e.message if hasattr(e, "message") else str(e),
+        )
     except BusinessException as e:
         await record_failure(redis_client, user_id, meta.name, args_hash)
         logger.info(

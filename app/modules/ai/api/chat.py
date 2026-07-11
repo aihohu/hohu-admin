@@ -34,7 +34,11 @@ from app.modules.ai.agents.hitl.events import (
     event_to_sse_data,
 )
 from app.modules.ai.agents.safety.auto_disable import check_user_disabled
-from app.modules.ai.agents.safety.injection_detector import detect_injection
+from app.modules.ai.agents.safety.injection_detector import (
+    detect_injection,
+    is_injection_hit_conversation,
+    record_injection_hit_conversation,
+)
 from app.modules.ai.agents.safety.keyword_blocklist import (
     check_keywords,
     load_blocklist,
@@ -254,8 +258,19 @@ async def chat(
 
             return StreamingResponse(_blocked_stream(), media_type=SSE_CONTENT_TYPE)
 
-    # §11.1 prompt injection 检测（命中 → execute_tool 强制 HITL）
-    deps.injection_hit = detect_injection(user_message)
+    # §11.1 prompt injection 检测（修订 S-16：跨轮持久化到 conversation 级）
+    # 流程：
+    #   1. 本轮 detect_injection（仅扫当前 user message）
+    #   2. 命中 → 写 Redis ai:injection_hit:{conversation_id} TTL 1h
+    #   3. is_injection_hit_conversation 读历史 → deps.injection_hit = 本轮 OR 历史
+    # 这样攻击者拆分注入到多轮（每轮只触发 1 个 pattern）也会被 conversation
+    # 级 flag 兜住，后续轮次 tool 调用强制 HITL。
+    current_hit = detect_injection(user_message)
+    if current_hit and conversation_id is not None:
+        await record_injection_hit_conversation(redis_client, conversation_id)
+    history_hit = await is_injection_hit_conversation(redis_client, conversation_id)
+    deps.injection_hit = current_hit or history_hit
+
     if deps.injection_hit:
         logger.warning(
             "prompt injection detected",
@@ -263,6 +278,8 @@ async def chat(
                 "user_id": _current_user.user_id,
                 "conversation_id": conversation_id,
                 "trace_id": deps.trace_id,
+                "current_hit": current_hit,
+                "history_hit": history_hit,
             },
         )
 

@@ -24,7 +24,7 @@
 
 # ruff: noqa: ARG001, PLC0415
 
-from datetime import date
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -532,7 +532,8 @@ class TestCase9DailyQuotaExhausted:
         _register_test_tools()
 
         # 预填 Redis 配额到 limit（执行前 INCR 即超限）
-        today = date.today().isoformat()
+        # 修订 S-8：L2 date key 用 UTC compact 格式 YYYYMMDD（不再是 ISO YYYY-MM-DD）
+        today = datetime.now(UTC).strftime("%Y%m%d")
         key = _KEY_L2.format(user_id=9001, date=today)
         await redis_module.redis_client.set(key, DEFAULT_L2_DAILY_QUOTA)
 

@@ -136,6 +136,49 @@ class TestStateMachine:
         log = await db_session.get(AiOperationLog, log_id)
         assert log.status == "expired"
 
+    async def test_mark_expired_if_pending_migrates_when_pending(
+        self, db_session
+    ) -> None:
+        """修订 S-14 配套：pending_confirmation 状态下迁移到 expired"""
+        log_id = await _start(db_session)
+
+        result = await operation_log_service.mark_expired_if_pending(db_session, log_id)
+        assert result is not None
+        log = await db_session.get(AiOperationLog, log_id)
+        assert log.status == "expired"
+
+    async def test_mark_expired_if_pending_skips_when_running(self, db_session) -> None:
+        """修订 S-14 配套：running 状态（已被 wake + mark_running）下不迁移
+
+        场景：wake 失败（stream_gone）时 log 可能已被并发路径 mark_running，
+        mark_expired_if_pending 应跳过（返回 None），不抛 TERMINAL_STATE。
+        """
+        log_id = await _start(db_session)
+        await operation_log_service.mark_running(db_session, log_id)
+
+        result = await operation_log_service.mark_expired_if_pending(db_session, log_id)
+        assert result is None  # 没迁移
+        log = await db_session.get(AiOperationLog, log_id)
+        assert log.status == "running"  # 状态不变
+
+    async def test_mark_expired_if_pending_skips_when_terminal(
+        self, db_session
+    ) -> None:
+        """修订 S-14 配套：已终态（success / rejected 等）下不迁移"""
+        log_id = await _start(db_session)
+        await operation_log_service.mark_running(db_session, log_id)
+        await operation_log_service.mark_success(
+            db_session,
+            log_id,
+            result_summary="ok",
+            duration_ms=100,
+        )
+
+        result = await operation_log_service.mark_expired_if_pending(db_session, log_id)
+        assert result is None
+        log = await db_session.get(AiOperationLog, log_id)
+        assert log.status == "success"
+
 
 class TestTransitionGuard:
     async def test_terminal_cannot_transition(self, db_session) -> None:

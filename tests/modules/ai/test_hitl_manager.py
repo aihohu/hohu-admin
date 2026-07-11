@@ -247,6 +247,71 @@ class TestHangWake:
         ok = await hitl_manager.wake("nonexistent", ConfirmAction.APPROVED)
         assert ok is False
 
+    async def test_wake_double_tap_returns_false_on_second(self) -> None:
+        """修订 S-14：防双击 race — 第一次 wake 成功 pop，第二次找不到 entry 返回 False
+
+        场景：用户双击 / 双标签确认同一 confirmation_id。
+        修订前：第二次 wake 仍能 get entry（已设 action + event.set() 幂等），
+        但端点会返回 200+queued 误导前端。
+        修订后：第一次 wake 立即 pop entry，第二次 wake 找不到返回 False →
+        端点返回 status="stream_gone"。
+        """
+        cid = hitl_manager.generate_confirmation_id()
+        await hitl_manager.create_pending(
+            redis_module.redis_client,
+            confirmation_id=cid,
+            user_id=1,
+            conversation_id=1,
+            tool_call_id="tc_double",
+            trace_id="tr",
+            tool_name="x",
+            args={},
+        )
+
+        # 第一次 wake（无 hang 等待，但 pop 应成功）
+        ok1 = await hitl_manager.wake(cid, ConfirmAction.APPROVED)
+        assert ok1 is True
+
+        # 第二次 wake：entry 已被 pop，找不到 → False（防双击）
+        ok2 = await hitl_manager.wake(cid, ConfirmAction.APPROVED)
+        assert ok2 is False
+
+        # entry 已不在 _pending
+        assert not hitl_manager._has_pending(cid)
+
+    async def test_wake_does_not_block_hang(self) -> None:
+        """修订 S-14 配套：wake pop entry 后 hang 仍能通过自己持有的 entry 引用醒来
+
+        验证：wake 立即 pop 不会破坏 hang 的 event 机制（hang 在 wake 之前
+        已 get 了 entry 引用，event.set() 仍能让 hang 醒来）。
+        """
+        cid = hitl_manager.generate_confirmation_id()
+        await hitl_manager.create_pending(
+            redis_module.redis_client,
+            confirmation_id=cid,
+            user_id=1,
+            conversation_id=1,
+            tool_call_id="tc_wake_hang",
+            trace_id="tr",
+            tool_name="x",
+            args={},
+        )
+
+        async def wake_later():
+            await asyncio.sleep(0.05)
+            ok = await hitl_manager.wake(cid, ConfirmAction.APPROVED)
+            assert ok
+
+        async def hang():
+            return await hitl_manager.hang(cid, timeout_sec=2)
+
+        wake_task = asyncio.create_task(wake_later())
+        result = await hang()
+        await wake_task
+
+        # hang 通过自己持有的 entry 引用读到 wake 设的 action
+        assert result == ConfirmAction.APPROVED
+
     async def test_hang_unregistered_raises(self) -> None:
         """hang 一个未 create_pending 的 confirmation_id → 调用方错误"""
         with pytest.raises(BusinessRuleException) as exc_info:
@@ -337,3 +402,27 @@ class TestCleanupOnStartup:
         """无 pending 时返回 0"""
         cleaned = await hitl_manager.cleanup_pending_on_startup()
         assert cleaned == 0
+
+    async def test_cleanup_redis_unavailable_returns_zero(self) -> None:
+        """修订 S-14：Redis 故障时 cleanup 不抛异常，返回 0 + log warning
+
+        场景：服务启动时 Redis 短暂不可用（网络抖动 / Redis 重启）。
+        修订前：scan_iter 抛 RedisError 阻断 lifespan。
+        修订后：try/except + log warning + 返回 0；stale pending 由 Redis
+        5min TTL 自然清掉，DB 端走 mark_expired 兜底。
+        """
+        from redis.exceptions import RedisError
+
+        # mock scan_iter 为 async generator，第一次进入即抛 RedisError
+        async def _failing_scan(*args, **kwargs):
+            raise RedisError("connection refused")
+            yield  # noqa: unreachable  让 Python 识别为 async generator
+
+        original_scan = redis_module.redis_client.scan_iter
+        redis_module.redis_client.scan_iter = _failing_scan
+
+        try:
+            cleaned = await hitl_manager.cleanup_pending_on_startup()
+            assert cleaned == 0  # 不抛 + 返回 0
+        finally:
+            redis_module.redis_client.scan_iter = original_scan

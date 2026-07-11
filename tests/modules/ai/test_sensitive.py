@@ -5,6 +5,8 @@
 
 # ruff: noqa: ARG001
 
+from typing import Any
+
 from pydantic import BaseModel
 
 from app.modules.ai.agents.gateway.redact import (
@@ -39,7 +41,7 @@ class TestScrubFields:
     def test_case_insensitive(self) -> None:
         """Password / PASSWORD / password 都命中"""
         result = _scrub_fields(
-            {"Password": "x", "API_KEY": "y", "Token": "z", "name": "alice"},
+            {"Password": "x", "API_KEY": "y", "Access_Token": "z", "name": "alice"},
             GLOBAL_OUTPUT_BLOCKLIST,
         )
         assert result == {"name": "alice"}
@@ -53,7 +55,7 @@ class TestScrubFields:
 
     def test_list_of_dicts_recursive(self) -> None:
         result = _scrub_fields(
-            {"items": [{"name": "a", "token": "t1"}, {"name": "b", "secret": "s2"}]},
+            {"items": [{"name": "a", "secret": "s1"}, {"name": "b", "api_key": "k2"}]},
             GLOBAL_OUTPUT_BLOCKLIST,
         )
         assert result == {"items": [{"name": "a"}, {"name": "b"}]}
@@ -97,7 +99,7 @@ class TestSerializeForLlm:
         result = serialize_for_llm(
             sensitive_output=(),
             raw_result=[
-                {"name": "a", "token": "t1"},
+                {"name": "a", "secret": "s1"},
                 {"name": "b", "api_key": "k2"},
             ],
         )
@@ -127,6 +129,148 @@ class TestSerializeForLlm:
             raw_result={"name": "x", "private_key": "-----BEGIN RSA PRIVATE KEY-----"},
         )
         assert result == {"name": "x"}
+
+
+# ============ word-boundary 匹配（修订 S-10） ============
+
+
+class TestWordBoundaryMatching:
+    """修订 S-10：从子串匹配改为 word-boundary，避免业务字段被误剥离"""
+
+    def test_csrf_token_not_scrubbed(self) -> None:
+        """csrf_token 不应被剥离（旧子串实现会误伤 token）"""
+        result = _scrub_fields(
+            {"csrf_token": "abc", "name": "alice"}, GLOBAL_OUTPUT_BLOCKLIST
+        )
+        assert result == {"csrf_token": "abc", "name": "alice"}
+
+    def test_pagination_token_not_scrubbed(self) -> None:
+        result = _scrub_fields(
+            {"pagination_token": "abc", "name": "alice"}, GLOBAL_OUTPUT_BLOCKLIST
+        )
+        assert result == {"pagination_token": "abc", "name": "alice"}
+
+    def test_next_page_token_not_scrubbed(self) -> None:
+        result = _scrub_fields(
+            {"next_page_token": "abc", "name": "alice"}, GLOBAL_OUTPUT_BLOCKLIST
+        )
+        assert result == {"next_page_token": "abc", "name": "alice"}
+
+    def test_token_count_not_scrubbed(self) -> None:
+        """token_count 是数量字段，与敏感 token 无关"""
+        result = _scrub_fields(
+            {"token_count": 42, "name": "alice"}, GLOBAL_OUTPUT_BLOCKLIST
+        )
+        assert result == {"token_count": 42, "name": "alice"}
+
+    def test_user_password_not_scrubbed_suffix_form(self) -> None:
+        """xxx_bl 后缀形式不命中（避免 csrf_token / pagination_token 等误伤）
+
+        业务方使用 user_password 这种命名应显式声明 sensitive_output。
+        """
+        result = _scrub_fields(
+            {"user_password": "secret", "name": "alice"}, GLOBAL_OUTPUT_BLOCKLIST
+        )
+        assert result == {"user_password": "secret", "name": "alice"}
+
+    def test_user_password_scrubbed_when_declared(self) -> None:
+        """业务方显式声明 sensitive_output 后，xxx_bl 命中（完全等于规则）"""
+        result = _scrub_fields(
+            {"user_password": "secret", "name": "alice"},
+            GLOBAL_OUTPUT_BLOCKLIST | {"user_password"},
+        )
+        assert result == {"name": "alice"}
+
+    def test_password_value_scrubbed_prefix_form(self) -> None:
+        """bl_xxx 前缀形式仍命中"""
+        result = _scrub_fields(
+            {"password_value": "secret", "name": "alice"}, GLOBAL_OUTPUT_BLOCKLIST
+        )
+        assert result == {"name": "alice"}
+
+    def test_password_hash_still_scrubbed(self) -> None:
+        """password_hash 向后兼容：通过 password_ 前缀规则命中"""
+        result = _scrub_fields(
+            {"password_hash": "$2b$12$...", "name": "alice"}, GLOBAL_OUTPUT_BLOCKLIST
+        )
+        assert result == {"name": "alice"}
+
+    def test_middle_password_not_scrubbed(self) -> None:
+        """xxx_password_value 中间含 password：不命中（word-boundary 限制）
+
+        业务方使用这种命名应显式声明 sensitive_output。word-boundary 设计
+        目的是放过 csrf_token 这类常见业务字段，不覆盖所有命名变体。
+        """
+        result = _scrub_fields(
+            {"my_password_value": "secret", "name": "alice"},
+            GLOBAL_OUTPUT_BLOCKLIST,
+        )
+        assert result == {"my_password_value": "secret", "name": "alice"}
+
+
+# ============ 嵌套 BaseModel / list[BaseModel]（修订 S-10：mode="json"） ============
+
+
+class TestNestedBaseModel:
+    """修订 S-10：model_dump(mode="json") 保证嵌套 BaseModel 也被走完 scrub"""
+
+    def test_nested_basemodel_password_scrubbed(self) -> None:
+        """旧实现 model_dump() 返回 Python 对象，嵌套 BaseModel 不被 scrub"""
+
+        class Profile(BaseModel):
+            avatar: str
+            password: str  # 内层敏感字段
+
+        class UserOut(BaseModel):
+            name: str
+            profile: Profile  # 嵌套 BaseModel
+
+        user = UserOut(name="alice", profile=Profile(avatar="a.png", password="leak"))
+        result = serialize_for_llm(sensitive_output=(), raw_result=user)
+        # 嵌套 BaseModel 中的 password 必须被剥离
+        assert result == {"name": "alice", "profile": {"avatar": "a.png"}}
+
+    def test_list_of_basemodel_scrubbed(self) -> None:
+        """list[BaseModel] 中每项都要 scrub"""
+
+        class UserOut(BaseModel):
+            name: str
+            api_key: str | None = None
+
+        users = [
+            UserOut(name="a", api_key="k1"),
+            UserOut(name="b", api_key="k2"),
+        ]
+        result = serialize_for_llm(sensitive_output=(), raw_result=users)
+        assert result == [{"name": "a"}, {"name": "b"}]
+
+
+# ============ depth limit（修订 S-10 防御性） ============
+
+
+class TestDepthLimit:
+    """修订 S-10：递归深度 > 20 时防御性截断，防 RecursionError"""
+
+    def test_normal_depth_still_scrubs(self) -> None:
+        """5 层嵌套正常 scrub"""
+        payload = {"a": {"b": {"c": {"d": {"password": "leak"}}}}}
+        result = _scrub_fields(payload, GLOBAL_OUTPUT_BLOCKLIST)
+        assert result == {"a": {"b": {"c": {"d": {}}}}}
+
+    def test_deeply_nested_truncates_gracefully(self) -> None:
+        """25 层嵌套触发 depth limit，不抛 RecursionError"""
+
+        def _nest(depth: int) -> dict:
+            inner: dict[str, Any] = {"password": "leak"}
+            for _ in range(depth):
+                inner = {"next": inner}
+            return inner
+
+        payload = _nest(25)
+        # 不抛异常即通过；depth > 20 时返回原 payload（最坏情况是深层 password 漏过，
+        # 但 LLM 通常构造不出 20+ 层嵌套）
+        result = _scrub_fields(payload, GLOBAL_OUTPUT_BLOCKLIST)
+        assert isinstance(result, dict)
 
 
 # ============ redact_secrets ============

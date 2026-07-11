@@ -1,25 +1,34 @@
 """容量鉴权三层（spec §6.4）
 
-L1 用户写速率：Redis `ai:write:{user_id}` 滑动窗口（默认 20/min）
+L1 用户写速率：Redis `ai:write:{user_id}` Sorted Set 滑动窗口（默认 20/min）
 L2 用户日配额：Redis `ai:quota:{user_id}:{date}` UTC 日（默认 2000/day）
 L3 单 tool 超时：asyncio.wait_for（默认 10s）
 
 "写"判定：tool.meta.risk in ("high", "destructive") 或 hitl_always=True
 risk="low" 的纯查询不计入 L1/L2（避免 user.list 几次就耗光配额）
 
-计数策略（spec §6.4）：
-  - perm / data_scope 拒绝：不计入
-  - 配额自身拒绝：不计数（防循环重试刷配额）
-  - 业务异常 + 成功：计数保留
+计数策略（spec §6.4，2026-07-10 修订 S-11）：
+  - perm 拒绝：在 L1/L2 计数 **之前** short-circuit → 不计数
+  - data_scope 拒绝（业务函数内抛 AuthorizationException）：executor 捕获后
+    必须 decr_quota() 回滚 L1/L2（之前已 INCR/ZADD，不回滚 = 偷用户配额）
+  - 配额自身拒绝：check 函数在 raise 之前必须先回滚自身已写的计数
+  - 业务异常 + 成功：计数保留（不回滚）
   - 超时（L3）：计为失败但保留计数
 
 超管豁免（spec §6.4）：
   - L1/L2/L3 超管不豁免（防超管误用，与 §11.4 自动禁用一致）
+
+修订记录：
+  - 2026-07-10 S-7：L1 改 Sorted Set + Lua 脚本，原 INCR+EXPIRE 是固定窗口可被边界突发 2x 突破
+  - 2026-07-10 S-8：L2 日期键改 UTC，TTL 算到当日 UTC 结束（原 date.today() 本地时区）
+  - 2026-07-10 S-11：所有 raise 路径必须回滚已写计数（防用户被偷配额）
 """
 
 import asyncio
 import logging
-from datetime import date, timedelta
+import time
+import uuid
+from datetime import UTC, datetime, timedelta
 
 from redis.asyncio import Redis
 
@@ -33,10 +42,27 @@ logger = logging.getLogger(__name__)
 DEFAULT_L1_RATE_PER_MIN = 20
 DEFAULT_L2_DAILY_QUOTA = 2000
 DEFAULT_L3_TIMEOUT_SEC = 10
+L1_WINDOW_SEC = 60  # 滑窗 60s
 
 # ============ Redis key 命名（spec §6.4） ============
-_KEY_L1 = "ai:write:{user_id}"  # 滑动 60s 窗口
-_KEY_L2 = "ai:quota:{user_id}:{date}"  # UTC 日，TTL 到当日结束
+_KEY_L1 = "ai:write:{user_id}"  # Sorted Set：member=call_uid, score=ts
+_KEY_L2 = "ai:quota:{user_id}:{date}"  # UTC 日，TTL 到当日 UTC 结束
+
+
+# Lua 脚本：原子化滑窗（修订 S-7）
+# KEYS[1] = zset key
+# ARGV[1] = window_start_ts (now - 60)
+# ARGV[2] = now_ts
+# ARGV[3] = unique member (uuid 防覆盖)
+# ARGV[4] = window_sec (60)
+# 返回当前窗口内的成员数（ZCARD）
+_L1_LUA = """
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
+redis.call('ZADD', KEYS[1], ARGV[2], ARGV[3])
+local count = redis.call('ZCARD', KEYS[1])
+redis.call('EXPIRE', KEYS[1], ARGV[4])
+return count
+"""
 
 
 def is_write_tool(meta: AiToolMeta) -> bool:
@@ -52,29 +78,45 @@ async def check_l1_rate_limit(
     user_id: int,
     *,
     limit: int = DEFAULT_L1_RATE_PER_MIN,
-) -> None:
-    """L1 用户写速率：滑动 60s 窗口（默认 20/min）
+) -> tuple[int, str]:
+    """L1 用户写速率：滑动 60s 窗口（默认 20/min）— 修订 S-7
 
-    Redis INCR + EXPIRE 实现：
-      - 第一次 INCR 返回 1，设 EXPIRE 60s
-      - 后续 INCR，若超 limit 抛 AI_RATE_LIMIT_USER_WRITE
-      - 不主动删 key（让其自然过期，超管也不豁免，spec §6.4）
+    实现：Redis Sorted Set + Lua 脚本，原子化执行：
+      1. ZREMRANGEBYSCORE 清掉过期成员（窗口前）
+      2. ZADD 当前调用（score=now, member=uuid 防覆盖）
+      3. ZCARD 数窗口内成员
+      4. EXPIRE 60s
+
+    Returns:
+        (count, member) — member 供调用方在 raise AuthorizationException 时
+        通过 decr_quota(redis, user_id, l1_member=member) 精确回滚
+
+    Raises:
+        BusinessRuleException(AI_RATE_LIMIT_USER_WRITE) — 计数超 limit
+
+    修订 S-11：超限时先 ZREM 自身再加回队列，再抛错。
     """
     key = _KEY_L1.format(user_id=user_id)
-    current = await redis.incr(key)
-    if current == 1:
-        # 第一次写入，设 60s 窗口
-        await redis.expire(key, 60)
+    now = time.time()
+    window_start = now - L1_WINDOW_SEC
+    member = f"{now:.6f}:{uuid.uuid4().hex}"
 
-    if current > limit:
+    count = await redis.eval(_L1_LUA, 1, key, window_start, now, member, L1_WINDOW_SEC)
+    count_int = int(count)
+
+    if count_int > limit:
+        # 修订 S-11：配额自身拒绝时 ZREM 自身，防用户被偷配额
+        await redis.zrem(key, member)
         logger.info(
             "L1 rate limit exceeded",
-            extra={"user_id": user_id, "current": current, "limit": limit},
+            extra={"user_id": user_id, "current": count_int, "limit": limit},
         )
         raise BusinessRuleException(
-            f"用户写速率超限（{current}/{limit} per minute）",
+            f"用户写速率超限（{count_int}/{limit} per minute）",
             error_code="AI_RATE_LIMIT_USER_WRITE",
         )
+
+    return count_int, member
 
 
 async def check_l2_daily_quota(
@@ -82,30 +124,76 @@ async def check_l2_daily_quota(
     user_id: int,
     *,
     limit: int = DEFAULT_L2_DAILY_QUOTA,
-) -> None:
-    """L2 用户日配额：UTC 日（默认 2000/day）
+) -> int:
+    """L2 用户日配额：UTC 日（默认 2000/day）— 修订 S-8
 
-    Redis INCR + EXPIRE 到当日结束：
-      - 第一次 INCR 设 EXPIRE = 秒数到次日 00:00 UTC
-      - 超限抛 AI_DAILY_QUOTA_EXHAUSTED
+    实现：
+      - date key 用 UTC（原 date.today() 是本地时区，跨国部署翻转点不一致）
+      - TTL 算到当日 UTC 结束（原固定 86400s 跨日累积偏差）
+      - 仅 INCR 返回 1 时设 EXPIRE，避免每次调用都重置 TTL
+
+    Returns:
+        当前计数（供 executor 在 raise 时回滚用）
+
+    Raises:
+        BusinessRuleException(AI_DAILY_QUOTA_EXHAUSTED) — 计数超 limit
+
+    修订 S-11：超限时先 DECR 自身，再抛错。
     """
-    today = date.today()
-    key = _KEY_L2.format(user_id=user_id, date=today.isoformat())
-    current = await redis.incr(key)
-    if current == 1:
-        # 第一次写入，设 TTL 到当日结束（约 86400 秒）
-        # 简化：直接 24h TTL，跨日累积偏差 < 1 次写入，可接受
-        await redis.expire(key, 86400)
+    now = datetime.now(UTC)
+    date_str = now.strftime("%Y%m%d")
+    key = _KEY_L2.format(user_id=user_id, date=date_str)
 
-    if current > limit:
+    # pipeline 保证 INCR + 条件 EXPIRE 同连接顺序执行
+    pipe = redis.pipeline()
+    pipe.incr(key)
+    pipe.ttl(key)
+    incr_result, ttl = await pipe.execute()
+
+    if incr_result == 1 or ttl is None or ttl < 0:
+        # 第一次写入 OR 防御性（key 已过期但 INCR 又生效的极端 race）
+        seconds_to_midnight = 86400 - (now.hour * 3600 + now.minute * 60 + now.second)
+        await redis.expire(key, seconds_to_midnight)
+
+    if incr_result > limit:
+        # 修订 S-11：配额自身拒绝时 DECR 自身
+        await redis.decr(key)
         logger.info(
             "L2 daily quota exhausted",
-            extra={"user_id": user_id, "current": current, "limit": limit},
+            extra={"user_id": user_id, "current": incr_result, "limit": limit},
         )
         raise BusinessRuleException(
-            f"今日 AI 写操作配额已用尽（{current}/{limit}）",
+            f"今日 AI 写操作配额已用尽（{incr_result}/{limit}）",
             error_code="AI_DAILY_QUOTA_EXHAUSTED",
         )
+
+    return int(incr_result)
+
+
+async def decr_quota(
+    redis: Redis,
+    user_id: int,
+    *,
+    l1_member: str | None = None,
+) -> None:
+    """业务函数内 AuthorizationException 时回滚 L1/L2 计数（修订 S-11）
+
+    必须在 executor 捕获 AuthorizationException 路径调用，否则 data_scope
+    拒绝会偷掉用户的 L1/L2 配额。
+
+    Args:
+        l1_member: check_l1_rate_limit 返回的 member；传此值可精确删除本次调用
+                   的 zset 成员。若 None 则不回滚 L1（保守：宁可多算不漏算）
+    """
+    l1_key = _KEY_L1.format(user_id=user_id)
+    if l1_member is not None:
+        await redis.zrem(l1_key, l1_member)
+
+    # L2：DECR
+    now = datetime.now(UTC)
+    date_str = now.strftime("%Y%m%d")
+    l2_key = _KEY_L2.format(user_id=user_id, date=date_str)
+    await redis.decr(l2_key)
 
 
 def get_l3_timeout(

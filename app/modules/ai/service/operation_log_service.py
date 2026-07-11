@@ -150,8 +150,32 @@ class OperationLogService:
         """状态迁移：pending_confirmation → expired（终态）
 
         触发场景：5min TTL 超时 / 服务重启清扫（spec §8.4）
+
+        注意：此方法要求 log 当前状态必须是 pending_confirmation（其它状态
+        会抛 AI_OPERATION_LOG_TERMINAL_STATE）。若调用方不确定当前状态
+        （如 spec §8.3 修订 S-14 wake 失败时 log 可能已被 mark_running），
+        请用幂等版本 `mark_expired_if_pending`。
         """
         log = await self._get(db, log_id)
+        self._transition(log, AiOperationStatus.EXPIRED)
+        log.finished_at = datetime.now(UTC).replace(tzinfo=None)
+        return log
+
+    async def mark_expired_if_pending(
+        self, db: AsyncSession, log_id: int
+    ) -> AiOperationLog | None:
+        """幂等版本（修订 S-14 配套）：仅当 status=pending_confirmation 时迁移到 expired
+
+        场景：wake 失败（stream_gone）时 log 可能已被并发路径 mark_running 或
+        mark_approved + mark_running。仅 pending_confirmation 状态才需要标 expired。
+
+        Returns:
+            迁移后的 log（如果做了迁移）；None 表示当前状态非 pending_confirmation，
+            调用方无需操作。
+        """
+        log = await self._get(db, log_id)
+        if log.status != AiOperationStatus.PENDING_CONFIRMATION.value:
+            return None
         self._transition(log, AiOperationStatus.EXPIRED)
         log.finished_at = datetime.now(UTC).replace(tzinfo=None)
         return log

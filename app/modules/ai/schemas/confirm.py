@@ -18,9 +18,16 @@ class ConfirmRequest(BaseModel):
 
 
 class ConfirmResponse(BaseModel):
-    """/ai/confirm 响应 data 字段（spec §8.3）"""
+    """/ai/confirm 响应 data 字段（spec §8.3 + 修订 S-14）"""
 
     tool_call_id: str = Field(..., description="对应 ai_operation_log.tool_call_id")
-    status: Literal["queued"] = "queued"
+    status: Literal["queued", "stream_gone"] = Field(
+        default="queued",
+        description=(
+            "queued = 唤醒成功，业务将正常执行（前端启动 30s SSE 断流轮询兜底）；"
+            "stream_gone = 流已断（服务重启 / 单 worker 切换 / SSE 已中断），"
+            "tool 不会执行，前端应立即停止轮询并提示用户重新发起（修订 S-14）"
+        ),
+    )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
