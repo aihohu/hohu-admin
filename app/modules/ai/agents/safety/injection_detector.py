@@ -131,6 +131,11 @@ async def record_injection_hit_conversation(
     key = _KEY_CONV.format(conversation_id=conversation_id)
     await redis.set(key, "1", ex=_INJECTION_HIT_TTL_SEC)
 
+    # spec §6.3 / §11 metric：安全事件计数
+    from app.modules.ai.metrics import record_security_event  # noqa: PLC0415
+
+    record_security_event("injection")
+
 
 async def is_injection_hit_conversation(
     redis: Redis,

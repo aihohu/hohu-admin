@@ -159,6 +159,9 @@ async def check_l1_rate_limit(
             "L1 rate limit exceeded",
             extra={"user_id": user_id, "current": count_int, "limit": limit},
         )
+        from app.modules.ai.metrics import record_quota_rejected  # noqa: PLC0415
+
+        record_quota_rejected("l1_rate")
         raise BusinessRuleException(
             f"用户写速率超限（{count_int}/{limit} per minute）",
             error_code="AI_RATE_LIMIT_USER_WRITE",
@@ -212,6 +215,9 @@ async def check_l2_daily_quota(
             "L2 daily quota exhausted",
             extra={"user_id": user_id, "current": incr_result, "limit": limit},
         )
+        from app.modules.ai.metrics import record_quota_rejected  # noqa: PLC0415
+
+        record_quota_rejected("l2_daily")
         raise BusinessRuleException(
             f"今日 AI 写操作配额已用尽（{incr_result}/{limit}）",
             error_code="AI_DAILY_QUOTA_EXHAUSTED",

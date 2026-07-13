@@ -119,6 +119,12 @@ async def record_injection(redis: Redis, user: User) -> int:
                         "duration_sec": DISABLE_DURATION_SEC,
                     },
                 )
+                # spec §6.3 / §11.4 metric：用户首次禁用计数（不重复计 already_disabled）
+                from app.modules.ai.metrics import (  # noqa: PLC0415
+                    record_security_event,
+                )
+
+                record_security_event("auto_disable")
     return current
 
 

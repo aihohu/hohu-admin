@@ -1,0 +1,121 @@
+# Alertmanager 规则 — AI Tool Gateway（spec §6.3 v1.5+）
+#
+# 使用：复制到 Prometheus 的 rules/ 目录，prometheus.yml 引用：
+#   rule_files:
+#     - /etc/prometheus/rules/ai-tool-gateway.yml
+#
+# 告警级别：
+#   - critical：影响生产可用性（HITL 不可用、配额系统失灵）
+#   - warning：异常率升高（pubsub 丢失、安全事件高频）
+#
+# 标签 `severity` 用于 Alertmanager 路由到不同接收端（钉钉 / 邮件 / 电话）。
+
+groups:
+  - name: ai_tool_gateway_critical
+    interval: 30s
+    rules:
+      # HITL 5min TTL 超时率 > 10%（用户痛感强）
+      - alert: AIHitlTimeoutRateHigh
+        expr: |
+          (
+            sum(rate(ai_hitl_timeout_total[5m]))
+            /
+            clamp_min(sum(rate(ai_tool_calls_total{execution_mode="hitl"}[5m])), 0.001)
+          ) > 0.1
+        for: 10m
+        labels:
+          severity: critical
+          team: ai
+        annotations:
+          summary: "AI HITL 5min 超时率 > 10%"
+          description: |
+            HITL 确认流超时率升高，用户可能因等不到确认而放弃操作。
+            检查：用户是否清楚需要确认？前端抽屉是否正常弹出？
+            trace_id 样本：见 ai_operation_log WHERE status='expired'
+
+      # Redis 故障导致 HITL 不可用（pubsub 模式下尤其严重）
+      - alert: AIRedisDownAffectingAI
+        expr: rate(ai_tool_calls_total{status="redis_down"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+          team: ai
+        annotations:
+          summary: "AI 工具调用因 Redis 故障被拒"
+          description: |
+            Redis 不可用导致 AI 写工具全部拒绝（spec §2.6 保守降级）。
+            立即检查 Redis 进程 / 网络 / AUTH 配置。
+
+  - name: ai_tool_gateway_warning
+    interval: 30s
+    rules:
+      # 多 worker HITL pubsub 消息丢失率 > 1%（spec §8.4.1 SR-7 核心可观测性）
+      - alert: AIPubSubMessageLossRateHigh
+        expr: |
+          (
+            sum(rate(ai_hitl_pubsub_lost_total[5m]))
+            /
+            clamp_min(sum(rate(ai_hitl_wake_total{mode="redis_pubsub"}[5m])), 0.001)
+          ) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+          team: ai
+        annotations:
+          summary: "AI HITL pubsub 消息丢失率 > 1%"
+          description: |
+            redis_pubsub 模式下，wake PUBLISH 在 hang SUBSCRIBE 之前到达的比例升高。
+            虽然 wake_action 字段兜底防丢失，但说明 Redis 网络/订阅链路不稳定。
+            检查：Redis 延迟、网络抖动、订阅连接池大小。
+
+      # 配额拒绝率高（用户被偷配额感强）
+      - alert: AIQuotaRejectionsHigh
+        expr: sum(rate(ai_quota_rejected_total[5m])) by (level) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          team: ai
+        annotations:
+          summary: "AI 配额拒绝率高（level={{ $labels.level }}）"
+          description: |
+            5min 平均每秒 > 0.5 个配额拒绝。可能原因：
+            1. sys_config 阈值过低（用户实际需求 > 配额）
+            2. 业务函数 data_scope 检查过于严格
+            3. 用户被恶意攻击 / 自动化脚本
+
+      # 安全事件高频（注入/关键词/IP 拉黑）
+      - alert: AISecurityEventsHigh
+        expr: sum(rate(ai_security_events_total[5m])) by (event_type) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          team: ai
+        annotations:
+          summary: "AI 安全事件高频（event_type={{ $labels.event_type }}）"
+          description: |
+            5min 平均每秒 > 0.5 个安全事件。结合 ai_operation_log.is_security_event
+            定位具体 user / IP。常见原因：
+            - injection：注入攻击尝试（可能配合 record_injection 自动禁用）
+            - keyword：敏感词命中（检查 sys_config 关键词列表是否过严）
+            - auto_disable：用户首次禁用（可能配合上 injection 阈值告警）
+            - ip_blacklist：IP 大量鉴权失败被拉黑
+
+      # Tool 调用失败率高（业务异常 / 内部错误）
+      - alert: AIToolFailureRateHigh
+        expr: |
+          (
+            sum(rate(ai_tool_calls_total{status=~"failed|internal_error|repeated_failure"}[5m]))
+            /
+            clamp_min(sum(rate(ai_tool_calls_total[5m])), 0.001)
+          ) > 0.3
+        for: 10m
+        labels:
+          severity: warning
+          team: ai
+        annotations:
+          summary: "AI tool 调用失败率 > 30%"
+          description: |
+            10min 平均失败率 > 30%。可能原因：
+            1. LLM 模型不稳定（切换备用模型）
+            2. tool 业务函数 bug（看 ai_operation_log.error_msg）
+            3. 用户 data_scope 配置问题（看 AI_DATA_SCOPE_VIOLATION）

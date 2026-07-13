@@ -145,7 +145,27 @@ async def execute_tool(
     Returns:
         ToolResult.success / ToolResult.failure
         不抛业务异常给上游 LLM，SSE 流不被中断
+
+    spec §6.3 metric：每个 return 前用 _rec(status) 埋点
+    ai_tool_calls_total{tool, status, risk, execution_mode}。
     """
+    from app.modules.ai.metrics import record_tool_call  # noqa: PLC0415
+
+    start = time.monotonic()
+    # metric 用：闭包变量，每个 return 前更新；_rec 在 finally 风格不易做（多早期 return）
+    metric_status = "failed"
+    metric_risk = "unknown"
+    metric_mode = "unknown"
+
+    def _rec(status: str, *, risk: str | None = None, mode: str | None = None) -> None:
+        record_tool_call(
+            tool=name,
+            status=status,
+            risk=risk or metric_risk,
+            execution_mode=mode or metric_mode,
+            duration_sec=time.monotonic() - start,
+        )
+
     registry = ToolRegistry.get()
 
     # 1. tool 存在性
@@ -155,12 +175,14 @@ async def execute_tool(
             "tool not found",
             extra={"user_id": deps.user.user_id, "tool": name},
         )
+        _rec("not_found")
         return ToolResult.failure(
             error_code="AI_TOOL_NOT_FOUND",
             error_msg=USER_FACING_MSG["AI_TOOL_NOT_FOUND"],
         )
 
     meta = registered.meta
+    metric_risk = meta.risk
     user_id = deps.user.user_id
 
     # 2. 功能鉴权（spec §6.1）
@@ -171,6 +193,7 @@ async def execute_tool(
         )
         # §11.4 IP 拉黑计数（异步 fire-and-forget，不阻断主流程）
         await _record_perm_denied_for_ip(deps, name)
+        _rec("perm_denied")
         return ToolResult.failure(
             error_code="AI_TOOL_PERM_DENIED",
             error_msg=USER_FACING_MSG["AI_TOOL_PERM_DENIED"],
@@ -182,6 +205,7 @@ async def execute_tool(
             "super_admin_only gate denied",
             extra={"user_id": user_id, "tool": name, "user_name": deps.user.user_name},
         )
+        _rec("super_admin_required")
         return ToolResult.failure(
             error_code="AI_SUPER_ADMIN_REQUIRED",
             error_msg="此操作仅超级管理员可执行，请联系超管或走传统界面",
@@ -196,6 +220,7 @@ async def execute_tool(
             _, l1_member = await check_l1_rate_limit(redis_client, user_id)
             await check_l2_daily_quota(redis_client, user_id)
         except BusinessException as e:
+            _rec("quota_rejected")
             return ToolResult.failure(error_code=e.error_code, error_msg=e.message)
         except RedisError:
             # spec §2.6: Redis 故障时写操作拒绝（保守降级，不静默放过）
@@ -203,6 +228,7 @@ async def execute_tool(
                 "Redis unavailable during quota check",
                 extra={"user_id": user_id, "tool": name},
             )
+            _rec("redis_down")
             return ToolResult.failure(
                 error_code="AI_REDIS_DOWN",
                 error_msg="AI 服务暂时不可用（容量校验失败），请稍后重试",
@@ -218,6 +244,7 @@ async def execute_tool(
         dry_run_count=dry_run_count,
         injection_hit=deps.injection_hit,
     )
+    metric_mode = mode.value
     tool_call_id = hitl_manager.generate_tool_call_id()
     summary = build_args_summary(
         meta.name,
@@ -241,6 +268,7 @@ async def execute_tool(
                 "error": str(e),
             },
         )
+        _rec("internal_error")
         return ToolResult.failure(
             error_code="AI_INTERNAL_ERROR",
             error_msg="AI 服务暂时不可用（审计系统故障），请稍后重试",
@@ -273,6 +301,7 @@ async def execute_tool(
             ),
             started_at,
         )
+        _rec("repeated_failure")
         return ToolResult.failure(
             error_code=e.error_code,
             error_msg=USER_FACING_MSG.get(e.error_code, e.message),
@@ -291,6 +320,7 @@ async def execute_tool(
             ),
             started_at,
         )
+        _rec("redis_down")
         return ToolResult.failure(
             error_code="AI_REDIS_DOWN",
             error_msg="AI 服务暂时不可用（安全检查失败），请稍后重试",
@@ -307,12 +337,14 @@ async def execute_tool(
         )
         if action is None:
             # 5min TTL 超时 → mark_expired（_hang_for_confirmation 内已迁移）
+            _rec("hitl_expired")
             return ToolResult.failure(
                 error_code="AI_HITL_EXPIRED",
                 error_msg=USER_FACING_MSG["AI_HITL_EXPIRED"],
             )
         if action == ConfirmAction.REJECTED:
             await _finish_log_rejected(log_id, user_id)
+            _rec("user_rejected")
             return ToolResult.failure(
                 error_code="USER_REJECTED",
                 error_msg=USER_FACING_MSG["USER_REJECTED"],
@@ -349,6 +381,8 @@ async def execute_tool(
     )
     await _finish_log_final(log_id, result, started_at)
 
+    metric_status = "success" if result.ok else "failed"
+    _rec(metric_status)
     return result
 
 

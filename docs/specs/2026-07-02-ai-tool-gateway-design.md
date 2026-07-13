@@ -1665,19 +1665,26 @@ GET /ai/operation-log?tool_call_id=<tool_call_id>
 - 字段过滤：响应只暴露审计元信息（不含 `args_summary` 原文 / `result_summary` 详细内容，避免泄露）
 - 索引：`tool_call_id` 加唯一索引（每次 tool 调用独立 ID）
 
-### 9.4 Prometheus metric（5 个核心）
+### 9.4 Prometheus metric（✅ v1.5+ 已实现 2026-07-13，原 MVP 5 个 → 8 个）
+
+> **修订 v1.5+**：原 MVP 5 个核心 metric 提前到 v1.5+ 落地，并新增 3 个配套多 worker HITL / 安全 / 配额的 metric（共 8 个）。安全事件原来"走 `ai_operation_log.is_security_event` 表查询"改为同时入 Prometheus（`ai_security_events_total`）以便实时告警。
+
+实际实现的 8 个 metric（`app/modules/ai/metrics.py`）：
 
 ```
-ai_tool_call_total{tool, status}
-ai_tool_duration_ms{tool}
-ai_hitl_pending_count
-ai_permission_denied_total{tool, error_code}
-ai_conversation_token_count
+ai_tool_calls_total{tool, status, risk, execution_mode}     Counter
+ai_tool_call_duration_seconds{tool}                         Histogram（buckets 含 5min HITL 等待）
+ai_hitl_pending_count{mode}                                 Gauge（mode: memory / redis_pubsub）
+ai_hitl_wake_total{mode, result}                            Counter（result: success / not_found）
+ai_hitl_pubsub_lost_total                                   Counter（spec §8.4.1 多 worker 防丢失兜底）
+ai_hitl_timeout_total{mode}                                 Counter（5min TTL 超时）
+ai_quota_rejected_total{level}                              Counter（level: l1_rate / l2_daily）
+ai_security_events_total{event_type}                        Counter（injection / keyword / auto_disable / ip_blacklist）
 ```
 
-> 不用 `user_id` 作为 Prometheus label（千级用户爆 cardinality）。
+**砍掉的 metric**（vs 完整版 10.5）：`ai_daily_quota_used_bucket` / `ai_user_quota_top10` / `ai_summary_invocation_total`。安全事件原本走 `ai_operation_log.is_security_event` 表查询，v1.5+ 加 `ai_security_events_total` 入 Prometheus 实时告警。
 
-**砍掉的 metric**（vs 完整版 10.5）：`ai_hitl_expired_total` / `ai_daily_quota_used_bucket` / `ai_user_quota_top10` / `ai_summary_invocation_total` / `ai_security_event_total`。安全事件统计走 `ai_operation_log.is_security_event` 表查询，不入 Prometheus。
+> §22 SR-8 决策：metric label **不含 `user_id` / `confirmation_id` / `tool_call_id` 等高基数 label**（千级用户 / 万级调用爆 cardinality）。需要 user 维度走日志 + trace（OTel v2+ 加）。
 
 ### 9.5 Alert 规则（建议）
 
@@ -2549,6 +2556,10 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 #### SR-7. **多 worker HITL 用 Redis pub/sub + Redis `wake_action` 字段双写实现跨 worker 唤醒**（2026-07-13 v1.5+ 落地，spec §8.4.1）— `AI_HITL_MODE=redis_pubsub` 模式下，wake 走 Redis pub/sub 跨进程通知；为防 subscribe 前到达的 wake 消息丢失，wake 总是先 SET `pending.wake_action` 再 PUBLISH；hang 在 subscribe 完成后立即 GET 检查 `wake_action` 兜底。
 **反例**: (1) 纯 pub/sub → fire-and-forget，subscribe 前到达的 wake 消息丢失，worker A 持有的挂起流等满 5min 超时。(2) LIST + BRPOP → 消息持久化但 SSE 流被取消（客户端断开）时需异步 LREM 清理 LIST 残留，复杂度高。(3) 共享 background listener + 进程内 `dict[confirmation_id, Event]` 路由 → 需要 PSUBSCRIBE `ai:hitl:wake:*` + 启动时建 background task + lifespan 失败兜底，复杂度高三倍。
 **回归**: `test_pubsub_cross_worker_wake`（跨实例 wake）+ `test_wake_before_subscribe_no_loss`（race 防丢失）+ `test_pubsub_timeout_raises`（5min TTL 超时）覆盖；memory 模式 24 个现有测试零改动，向后兼容。
+
+#### SR-8. **Prometheus metric label 不含 `user_id` / `confirmation_id` / `tool_call_id` 等高基数字段**（2026-07-13 v1.5+ 落地，spec §6.3 / §9.4）— 8 个核心 metric 的 label 集合严格冻结为低基数：tool（数十）、status（十余）、risk（3 个）、execution_mode（2 个）、mode（2 个）、result（2 个）、level（2 个）、event_type（4 个）。需要 user / conversation 维度时走日志（`ai_operation_log`）+ trace（OTel v2+ 加），不进 Prometheus。
+**反例**: (1) 加 `user_id` label → 千级用户 × 10 个 label 组合 = 万级时间序列，Prometheus 内存吃不消。(2) 加 `confirmation_id` / `tool_call_id` label → 每次调用一个新值，cardinality 无上限。(3) 加 `trace_id` label → 同上。
+**回归**: `test_no_high_cardinality_labels` 测试遍历所有 metric 检查 labelnames 不含 `{user_id, confirmation_id, tool_call_id, trace_id, session_id}`；CI 后续加 spec-vs-test 一致性检查（spec 提到 metric 时必须列出 label 集合）。
 
 ### 修订后立即需要做的事（优先级排序）
 

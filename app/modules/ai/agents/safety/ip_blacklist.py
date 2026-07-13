@@ -137,6 +137,11 @@ async def record_perm_denied(
             "duration_sec": duration_sec,
         },
     )
+
+    # spec §6.3 / §11.4 metric：IP 拉黑事件计数
+    from app.modules.ai.metrics import record_security_event  # noqa: PLC0415
+
+    record_security_event("ip_blacklist")
     return True
 
 

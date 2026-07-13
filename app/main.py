@@ -3,7 +3,9 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 import app.tasks  # noqa: F401  # pyright: ignore[reportUnusedImport]
 from app.core.config import settings
@@ -226,3 +228,13 @@ app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads"
 @app.get("/health", include_in_schema=False)
 async def health_check():
     return {"status": "ok"}
+
+
+# spec §6.3 v1.5+: Prometheus 指标暴露
+# 不进 ResponseModel 包装；生产用 nginx/ingress 限制 /metrics 只允许内网 / Prometheus scrape IP。
+@app.get("/metrics", include_in_schema=False)
+async def metrics():
+    return PlainTextResponse(
+        generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
+    )

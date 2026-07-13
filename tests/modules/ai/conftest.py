@@ -72,4 +72,12 @@ async def db_session() -> AsyncSession:
             text("DELETE FROM ai_operation_log WHERE trace_id LIKE 'tr_test%'")
         )
         await cleanup_conn.commit()
-    await engine.dispose()
+    # dispose 容错：asyncpg _terminate_graceful_close 在 loop 关闭后试图创建
+    # cancel task 会抛 RuntimeError（loop closed）。这是 sqlalchemy + asyncpg
+    # + pytest-asyncio 的已知 teardown race（不影响测试结果本身）。
+    # pre-existing flake，try/except 兜底避免污染 pre-commit pytest hook。
+    try:
+        await engine.dispose()
+    except RuntimeError as e:
+        if "Event loop is closed" not in str(e):
+            raise

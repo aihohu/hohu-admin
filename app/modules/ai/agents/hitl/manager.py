@@ -242,6 +242,8 @@ class HitlManager:
         timeout_sec: int,
     ) -> ConfirmAction:
         """memory 模式 hang：进程内 asyncio.Event（spec §8.3）"""
+        from app.modules.ai.metrics import record_hitl_timeout  # noqa: PLC0415
+
         entry = self._pending.get(confirmation_id)
         if entry is None:
             # 没有 create_pending 就 hang？调用方错误
@@ -255,6 +257,7 @@ class HitlManager:
         except TimeoutError:
             # 5min 无人确认 → EXPIRED
             self._pending.pop(confirmation_id, None)
+            record_hitl_timeout("memory")
             raise
 
         # 被 wake 唤醒
@@ -290,6 +293,10 @@ class HitlManager:
         丢失），wake_action 仍在 Redis 中被本函数检测到。
         """
         from app.core.redis import redis_client  # noqa: PLC0415
+        from app.modules.ai.metrics import (  # noqa: PLC0415
+            record_hitl_pubsub_lost,
+            record_hitl_timeout,
+        )
 
         channel = f"{AI_HITL_WAKE_CHANNEL_PREFIX}:{confirmation_id}"
         pubsub = redis_client.pubsub()
@@ -298,12 +305,16 @@ class HitlManager:
             # 防丢失：subscribe 后立即检查 wake_action（race-safe）
             pending = await self.get_pending(redis_client, confirmation_id)
             if pending is not None and pending.wake_action is not None:
+                # spec §6.3 metric：防丢失分支命中（PUBLISH 在 SUBSCRIBE 之前
+                # 到达，靠 wake_action 兜底）。redis_pubsub 模式健康度核心指标。
+                record_hitl_pubsub_lost()
                 return ConfirmAction(pending.wake_action)
 
             deadline = time.monotonic() + timeout_sec
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    record_hitl_timeout("redis_pubsub")
                     raise TimeoutError()
                 message = await asyncio.wait_for(
                     pubsub.get_message(
@@ -362,9 +373,12 @@ class HitlManager:
         spec §8.3: wake 写回 Redis 不必要，Redis 只用于跨请求取 pending payload。
         进程内 Event 是同步唤醒机制。
         """
+        from app.modules.ai.metrics import record_hitl_wake  # noqa: PLC0415
+
         # 修订 S-14：立即 pop，防双击 race
         entry = self._pending.pop(confirmation_id, None)
         if entry is None:
+            record_hitl_wake("memory", "not_found")
             return False
         # 防御性：极端 race 下 entry 已有 action（不该发生，pop 已原子）
         if entry.action is not None:
@@ -372,9 +386,11 @@ class HitlManager:
                 "wake: entry already has action (extreme race) confirmation_id=%s",
                 confirmation_id,
             )
+            record_hitl_wake("memory", "not_found")
             return False
         entry.action = action
         entry.event.set()
+        record_hitl_wake("memory", "success")
         return True
 
     async def _wake_pubsub(
@@ -399,9 +415,11 @@ class HitlManager:
           - 防丢失：见 _hang_pubsub 注释。
         """
         from app.core.redis import redis_client  # noqa: PLC0415
+        from app.modules.ai.metrics import record_hitl_wake  # noqa: PLC0415
 
         pending = await self.get_pending(redis_client, confirmation_id)
         if pending is None:
+            record_hitl_wake("redis_pubsub", "not_found")
             return False
 
         # 用 dataclasses.replace 重写 wake_action（PendingPayload frozen=True）
@@ -423,6 +441,7 @@ class HitlManager:
                 }
             ),
         )
+        record_hitl_wake("redis_pubsub", "success")
         return True
 
     # ============ Redis 查询（/ai/confirm endpoint 用） ============

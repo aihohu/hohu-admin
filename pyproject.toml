@@ -30,6 +30,7 @@ dependencies = [
     "apscheduler>=3.10,<4.0",
     "pydantic-ai>=1.89.1",
     "openpyxl>=3.1.5",
+    "prometheus-client>=0.25.0",
 ]
 
 

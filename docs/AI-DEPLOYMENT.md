@@ -213,11 +213,88 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
 | `sys_login_log` | 登录日志（独立） |
 | `sys_operation_log` | HTTP 审计（`/ai/*` 排除，避免双重审计） |
 
-### 6.3 v2+ 接入 Prometheus（未实现）
+### 6.3 Prometheus 监控（✅ v1.5+ 已实现 2026-07-13，spec §6.3）
 
-- `ai_super_admin_injection_alert`：超管注入命中告警
-- `ai_tool_call_total{tool, ok}`：tool 调用计数
-- `ai_hitl_pending_count`：HITL 挂起数
+**8 个核心 metric**（详见 `app/modules/ai/metrics.py`）：
+
+| Metric | 类型 | 标签 | 用途 |
+|---|---|---|---|
+| `ai_tool_calls_total` | Counter | tool, status, risk, execution_mode | tool 调用计数 |
+| `ai_tool_call_duration_seconds` | Histogram | tool | P95 延迟 |
+| `ai_hitl_pending_count` | Gauge | mode | HITL 挂起数 |
+| `ai_hitl_wake_total` | Counter | mode, result | wake 成功/失败率 |
+| `ai_hitl_pubsub_lost_total` | Counter | (无) | **多 worker pubsub 防丢失命中** |
+| `ai_hitl_timeout_total` | Counter | mode | 5min TTL 超时 |
+| `ai_quota_rejected_total` | Counter | level | L1/L2 配额拒绝 |
+| `ai_security_events_total` | Counter | event_type | 注入/关键词/禁用/IP 拉黑 |
+
+**/metrics endpoint**：`GET /metrics` 暴露 Prometheus exposition format。不进 OpenAPI 文档。
+
+**网络隔离**：`/metrics` 不做鉴权（Prometheus 标准做法），生产用 nginx/ingress 限制只允许内网 / Prometheus scrape IP。
+
+---
+
+## 10. Prometheus + Alertmanager 接入
+
+### 10.1 Prometheus scrape 配置
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: hohu-admin
+    scrape_interval: 15s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["hohu-admin.internal:8000"]
+        labels:
+          service: hohu-admin
+          env: prod
+```
+
+### 10.2 Alertmanager 规则
+
+预置规则见 `docs/monitoring/alerts.yml`：
+
+```yaml
+# prometheus.yml
+rule_files:
+  - /etc/prometheus/rules/ai-tool-gateway.yml  # 复制自 docs/monitoring/alerts.yml
+```
+
+**核心告警**（详见 alerts.yml）：
+- `AIPubSubMessageLossRateHigh`：redis_pubsub 模式消息丢失率 > 1%
+- `AIHitlTimeoutRateHigh`：HITL 5min 超时率 > 10%
+- `AIQuotaRejectionsHigh`：配额拒绝每秒 > 0.5
+- `AISecurityEventsHigh`：安全事件每秒 > 0.5
+- `AIToolFailureRateHigh`：tool 调用失败率 > 30%
+- `AIRedisDownAffectingAI`：Redis 故障影响 AI 写操作
+
+### 10.3 Grafana dashboard 建议
+
+文档不预置 dashboard JSON（用户在自家 Grafana 自建更灵活）。常用 PromQL：
+
+```promql
+# AI tool 成功率（按 tool 分组）
+sum(rate(ai_tool_calls_total{status="success"}[5m])) by (tool)
+  / sum(rate(ai_tool_calls_total[5m])) by (tool)
+
+# HITL 平均确认时长（5min P95）
+histogram_quantile(0.95,
+  sum(rate(ai_tool_call_duration_seconds_bucket{execution_mode="hitl"}[5m])) by (le, tool)
+)
+
+# 多 worker 模式健康度（pubsub 丢失率）
+sum(rate(ai_hitl_pubsub_lost_total[5m]))
+  / sum(rate(ai_hitl_wake_total{mode="redis_pubsub"}[5m]))
+
+# 安全事件聚合视图（按 event_type 饼图）
+sum(rate(ai_security_events_total[5m])) by (event_type)
+```
+
+### 10.4 资源占用
+
+- Prometheus：单实例 < 100MB RAM（10 万样本/分钟够用）
+- 应用侧开销：< 1% CPU（prometheus_client 是 in-process，无网络开销）
 
 ---
 
@@ -356,5 +433,6 @@ systemctl restart hohu-admin
 
 ## Changelog
 
+- **2026-07-13（二）**：加 Prometheus 监控接入（spec §6.3 v1.5+）。§6.3 改为已实现；新增 §10 Prometheus + Alertmanager 接入（scrape 配置 + alerts.yml 引用 + Grafana PromQL 建议）。
 - **2026-07-13**：加 v1.5+ redis_pubsub 模式部署说明（spec §8.4.1 / SR-7 落地）。§1.2 拆分为模式 A（memory，MVP）/ 模式 B（redis_pubsub，可水平扩展）；§2 .env 示例更新；§4.1 启动检查说明 redis_pubsub 跳过 assertion；§9.2 标记 redis_pubsub 已完成。
 - **2026-07-09**：初版。覆盖 spec §8.4 / §11.5 / §2.6 全部部署相关内容。9 节：环境 / 配置 / 迁移 / 启动检查 / LLM / 监控 / 升级 / 故障 / 性能。

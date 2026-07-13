@@ -269,6 +269,10 @@ async def chat(
                     "hit_count": len(hits),
                 },
             )
+            # spec §6.3 / §11.2 metric：关键词命中事件计数
+            from app.modules.ai.metrics import record_security_event  # noqa: PLC0415
+
+            record_security_event("keyword")
 
             async def _blocked_stream():
                 yield _format_sse_chunk(
