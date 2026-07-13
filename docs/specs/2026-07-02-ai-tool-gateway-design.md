@@ -2111,6 +2111,7 @@ AI 已可用但只能 autonomous：
 | 特性 | 触发条件 | 实现要点 |
 |---|---|---|
 | ✅ 多 worker HITL（pub/sub） — **已完成 2026-07-13**（§8.4.1 / SR-7） | 单 worker 性能不足 | `AI_HITL_MODE=redis_pubsub` + Redis pub/sub + `pending.wake_action` 防丢失（**未用**本地挂起表，per-stream subscribe 替代） |
+| ⚠️ **Plan v1.5+ gap**：`hohu monitoring` CLI 集成（Prometheus + Grafana） | §6.3 v1.5+ Prometheus 接入已落地（commit `7ea6e8f`），但客户运维需手写 docker-compose | hohu-cli 加 `hohu monitoring` 命令组（参考 `hohu deploy` 模式）；模板 `hohu-cli/hohu/templates/monitoring/`；`init` 时自动从 `hohu-admin/docs/monitoring/alerts.yml` 复制规则；不起 Alertmanager（留 v1.6+） |
 | Per-agent 日配额 | 不同 Agent 需不同限额 | `ai_agent.daily_quota_per_user` 字段加回 + Redis key `ai:quota:{user_id}:{agent_id}:{date}` |
 | 多 Agent + Supervisor 路由 | 启用 ≥2 业务 Agent | `available_agents: list[AiAgent]` + `build_supervisor()` |
 | 跨会话 HITL 恢复 | 用户反馈"刷新页面后丢失确认" | `GET /ai/pending-confirmations` + 前端 30s 心跳 |
