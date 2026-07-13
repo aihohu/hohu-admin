@@ -86,6 +86,27 @@ class ConfirmationRequiredEvent:
 
 
 @dataclass(frozen=True)
+class ConfirmationResumedEvent:
+    """SSE 续传重连事件（spec §2.2 v1.5+）
+
+    schema 与 ConfirmationRequiredEvent 兼容（前端可统一渲染），仅多 resumedAt
+    字段用于"已重连"UI badge。前端收到此事件后：
+      - 用 confirmationId / toolCallId 反查 / 重建 HITL 抽屉
+      - 显示"已重连"chip（区别于首次 confirmation_required）
+    """
+
+    confirmation_id: str
+    tool: str
+    tool_call_id: str
+    summary: str
+    args: dict[str, Any]
+    expires_at: str
+    resumed_at: str
+    dry_run: DryRunSummary | None = None
+    type: Literal["confirmation_resumed"] = "confirmation_resumed"
+
+
+@dataclass(frozen=True)
 class AiErrorEvent:
     """流级错误事件（如 LLM API 故障 / 工具链严重错误）"""
 
@@ -105,6 +126,7 @@ AiStreamEvent = (
     ToolCallStartedEvent
     | ToolCallResultEvent
     | ConfirmationRequiredEvent
+    | ConfirmationResumedEvent
     | AiErrorEvent
     | DoneEvent
 )
@@ -154,6 +176,18 @@ def event_to_sse_data(event: AiStreamEvent) -> str:
             "summary": event.summary,
             "args": event.args,
             "expiresAt": event.expires_at,
+            "dryRun": _dry_run_to_dict(event.dry_run),
+        }
+    elif isinstance(event, ConfirmationResumedEvent):
+        payload = {
+            "type": event.type,
+            "confirmationId": event.confirmation_id,
+            "tool": event.tool,
+            "toolCallId": event.tool_call_id,
+            "summary": event.summary,
+            "args": event.args,
+            "expiresAt": event.expires_at,
+            "resumedAt": event.resumed_at,
             "dryRun": _dry_run_to_dict(event.dry_run),
         }
     elif isinstance(event, AiErrorEvent):

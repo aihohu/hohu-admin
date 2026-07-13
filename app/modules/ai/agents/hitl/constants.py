@@ -68,6 +68,14 @@ AI_OPERATION_LOG_DB_PREFIX = "ai_op"  # 仅用于日志/调试，不进 DB
 # 每 confirmation 独立 channel；wake 时 PUBLISH，hang 时 SUBSCRIBE
 AI_HITL_WAKE_CHANNEL_PREFIX = "ai:hitl:wake"
 
+# spec §2.3 v1.5+: SSE 续传 owner 锁
+# 完整 lock_key: f"{AI_HITL_OWNER_LOCK_PREFIX}:{confirmation_id}"
+# TTL 必须 ≥ AI_TOOL_TIMEOUT（spec §11，默认 30s），否则 execute_tool 慢时锁先
+# 过期 → 新 worker B 抢锁成功 → 双执行 race。设 60s 留余量（tool_timeout 30s + 抖动）。
+# 详见 spec §2.3 / §7.2 race 分析 / SR-10 反例 5。
+AI_HITL_OWNER_LOCK_PREFIX = "ai:hitl:owner"
+AI_HITL_OWNER_LOCK_TTL_SEC = 60
+
 
 @dataclass(frozen=True)
 class DryRunResult:

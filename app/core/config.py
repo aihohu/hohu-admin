@@ -88,6 +88,10 @@ class Settings(BaseSettings):
     AI_HITL_PENDING_TTL_SEC: int = 300
     # Redis 中 args JSON 大小上限（字节）：spec §8.3 防恶意 user 撑爆 Redis
     AI_HITL_ARGS_MAX_BYTES: int = 4096
+    # spec §2.4 v1.5+: SSE 续传功能开关（默认开）
+    # False 时 confirmation_required 不发 id: 字段，/ai/chat/resume 端点返回 410。
+    # 关闭场景：Redis 内存紧张 / 内网部署不需要移动端续传。
+    AI_SSE_RESUME_ENABLED: bool = True
 
     @property
     def REDIS_URL(self) -> str:
