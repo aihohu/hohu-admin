@@ -63,6 +63,11 @@ AI_CONFIRM_REDIS_PREFIX = "ai:confirm"
 # 与 ai_operation_log 表关联：DB 中 confirmation_id 也用此格式
 AI_OPERATION_LOG_DB_PREFIX = "ai_op"  # 仅用于日志/调试，不进 DB
 
+# spec §8.4.1 redis_pubsub 模式 channel 前缀（v1.5+）
+# 完整 channel: f"{AI_HITL_WAKE_CHANNEL_PREFIX}:{confirmation_id}"
+# 每 confirmation 独立 channel；wake 时 PUBLISH，hang 时 SUBSCRIBE
+AI_HITL_WAKE_CHANNEL_PREFIX = "ai:hitl:wake"
+
 
 @dataclass(frozen=True)
 class DryRunResult:

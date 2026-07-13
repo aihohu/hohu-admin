@@ -1481,6 +1481,40 @@ async def cleanup_pending_on_startup():
                 await redis.delete(key)
 ```
 
+### 8.4.1 redis_pubsub 模式（v1.5+，2026-07-13 落地）
+
+跨 worker 部署时设置 `AI_HITL_MODE=redis_pubsub`，wake 走 Redis pub/sub。本节由 §22 SR-7 决策落地。
+
+**Channel 命名**：`ai:hitl:wake:{confirmation_id}` — 每 confirmation 独立 channel（见 `app/modules/ai/agents/hitl/constants.py:AI_HITL_WAKE_CHANNEL_PREFIX`）。
+
+**wake 流程**（`HitlManager._wake_pubsub`）：
+1. GET Redis pending payload；不存在 → 返回 False（已 expired / 未 create_pending）
+2. `dataclasses.replace(pending, wake_action=action.value)` 重写 pending payload（frozen 兼容）
+3. SET Redis payload（保留 TTL）
+4. PUBLISH channel：`{"action": "approved|rejected", "confirmation_id": "...", "ts": ...}`
+
+**hang 流程**（`HitlManager._hang_pubsub`）：
+1. SUBSCRIBE channel
+2. GET Redis pending — 若 `wake_action` 已设 → 直接返回（**防丢失关键**）
+3. listen for message（带 timeout），收到 message → 返回 `ConfirmAction(data["action"])`
+4. finally: unsubscribe + aclose
+
+**防 race 关键**：subscribe 完成后立即 GET pending 检查 `wake_action`。wake 总是 SET `wake_action` 再 PUBLISH，所以即使 PUBLISH 在 SUBSCRIBE 之前到达（消息丢失），`wake_action` 仍在 Redis 中被 hang 检测到。
+
+**为什么不用其它方案**（详见 §22 SR-7）：
+- 纯 pub/sub → fire-and-forget，subscribe 前到达的 wake 消息丢失，挂起流 5min 超时
+- LIST + BRPOP → 消息持久化但 SSE 取消时需 LREM 清理 LIST 残留，复杂度高
+- 共享 background listener + 进程内 dict 路由 → 需 PSUBSCRIBE + lifespan 管理 background task，复杂度高三倍
+
+**worker 数约束**：redis_pubsub 模式不强制单 worker，可水平扩展。每 worker 的 `HitlManager` 实例独立，进程间零状态共享。
+
+**部署要求**：
+- `AI_HITL_MODE=redis_pubsub` + 任意 worker 数（k8s 多 pod OK）
+- Redis 连接池大小 ≥ `max_concurrent_hitl_streams + 10`（每个 hang 占一个 pubsub 连接）
+- Redis 故障 = HITL 不可用（同 memory 模式一致降级策略）
+
+**外部调用方零改动**：`executor.py:await hitl_manager.hang(...)` / `api/confirm.py:await hitl_manager.wake(...)` 签名不变；mode 分支在 `HitlManager` 内部。
+
 ### 8.5 SSE 断流兜底（MVP 简化）
 
 **不做 sequence_id / 心跳定时器**。MVP 策略：
@@ -2069,7 +2103,7 @@ AI 已可用但只能 autonomous：
 
 | 特性 | 触发条件 | 实现要点 |
 |---|---|---|
-| 多 worker HITL（pub/sub） | 单 worker 性能不足 | `AI_HITL_MODE=redis_pubsub` + Redis pub/sub + 本地挂起表 |
+| ✅ 多 worker HITL（pub/sub） — **已完成 2026-07-13**（§8.4.1 / SR-7） | 单 worker 性能不足 | `AI_HITL_MODE=redis_pubsub` + Redis pub/sub + `pending.wake_action` 防丢失（**未用**本地挂起表，per-stream subscribe 替代） |
 | Per-agent 日配额 | 不同 Agent 需不同限额 | `ai_agent.daily_quota_per_user` 字段加回 + Redis key `ai:quota:{user_id}:{agent_id}:{date}` |
 | 多 Agent + Supervisor 路由 | 启用 ≥2 业务 Agent | `available_agents: list[AiAgent]` + `build_supervisor()` |
 | 跨会话 HITL 恢复 | 用户反馈"刷新页面后丢失确认" | `GET /ai/pending-confirmations` + 前端 30s 心跳 |
@@ -2511,6 +2545,10 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 #### SR-6. **GLOBAL_OUTPUT_BLOCKLIST 不含裸 `token`，word-boundary 不含后缀形式**（2026-07-10 S-10 实施时发现）— spec §7.3 修订 S-10 注释承诺"不误伤 csrf_token 等"，但若 word-boundary 含 `endswith("_" + bl)` 规则 + 集合含 `token`，csrf_token 仍因后缀命中。实施时进一步收紧：(a) 集合移除裸 `token`（access_token 等已在集合，覆盖常见场景）；(b) 仅"完全等于" + "前缀 bl_xxx"，不含后缀 xxx_bl。
 **反例**: 同时保留 `token` 在集合 + `endswith` 规则 → csrf_token 命中 token（后缀），spec 注释承诺落空；保留 `token` 但去掉 `endswith` → `token_count` 仍因 `startswith token_` 命中（前缀），继续误伤业务字段。
 **回归**: 任何向 GLOBAL_OUTPUT_BLOCKLIST 加新词时，必须先用 word-boundary 规则跑常见业务字段（csrf_* / pagination_* / *_count / *_type / *_id）匹配性测试，避免误伤；优先加完整词（如 `access_token`），避免加易冲突的词根（如 `token` / `key`）。
+
+#### SR-7. **多 worker HITL 用 Redis pub/sub + Redis `wake_action` 字段双写实现跨 worker 唤醒**（2026-07-13 v1.5+ 落地，spec §8.4.1）— `AI_HITL_MODE=redis_pubsub` 模式下，wake 走 Redis pub/sub 跨进程通知；为防 subscribe 前到达的 wake 消息丢失，wake 总是先 SET `pending.wake_action` 再 PUBLISH；hang 在 subscribe 完成后立即 GET 检查 `wake_action` 兜底。
+**反例**: (1) 纯 pub/sub → fire-and-forget，subscribe 前到达的 wake 消息丢失，worker A 持有的挂起流等满 5min 超时。(2) LIST + BRPOP → 消息持久化但 SSE 流被取消（客户端断开）时需异步 LREM 清理 LIST 残留，复杂度高。(3) 共享 background listener + 进程内 `dict[confirmation_id, Event]` 路由 → 需要 PSUBSCRIBE `ai:hitl:wake:*` + 启动时建 background task + lifespan 失败兜底，复杂度高三倍。
+**回归**: `test_pubsub_cross_worker_wake`（跨实例 wake）+ `test_wake_before_subscribe_no_loss`（race 防丢失）+ `test_pubsub_timeout_raises`（5min TTL 超时）覆盖；memory 模式 24 个现有测试零改动，向后兼容。
 
 ### 修订后立即需要做的事（优先级排序）
 

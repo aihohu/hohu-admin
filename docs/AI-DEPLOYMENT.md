@@ -18,13 +18,23 @@
 | uv | ≥ 0.11 | ✅ |
 | LLM Provider | OpenAI / Anthropic / Doubao 等兼容 OpenAI API 的厂商 | ✅ |
 
-### 1.2 强制约束（spec §8.4 + 修订 S-6）
+### 1.2 强制约束（spec §8.4 + 修订 S-6 + §8.4.1 v1.5+）
 
-- **单 worker 进程**（不是单 pod）：`WEB_CONCURRENCY=1` + `uvicorn --workers 1` 或 gunicorn `--workers 1`。MVP 用进程内 `asyncio.Event` 实现 HITL 唤醒，多 worker 下会静默失效。
+**两种部署模式**：
+
+**模式 A — `AI_HITL_MODE=memory`（默认，MVP）**：
+- **单 worker 进程**（不是单 pod）：`WEB_CONCURRENCY=1` + `uvicorn --workers 1` 或 gunicorn `--workers 1`。进程内 `asyncio.Event` 实现 HITL 唤醒，多 worker 下会静默失效。
 - **修订 S-6 启动实测**：`AI_REQUIRE_SINGLE_WORKER=True`（默认）时，lifespan 用 Redis SADD 实测活跃 worker 数 > 1 则 `RuntimeError` 阻断启动。env var WEB_CONCURRENCY 不可信（uvicorn --workers 4 不经 gunicorn 时各 worker lifespan 独立运行，都通过 env var 检查）。
-- **禁止 Docker/k8s 多 pod 部署**：多 pod = 多独立 `_pending` dict，HITL wake 必失配。若必须高可用，等 v1.5+ `AI_HITL_MODE=redis_pubsub`。
+- **禁止 Docker/k8s 多 pod 部署**：多 pod = 多独立 `_pending` dict，HITL wake 必失配。
 - **测试环境豁免**：单测 / 集成测试可设 `AI_REQUIRE_SINGLE_WORKER=False` 跳过此检查。
-- v1.5+ 切 `AI_HITL_MODE=redis_pubsub` 后可放开多 worker / 多 pod。
+
+**模式 B — `AI_HITL_MODE=redis_pubsub`（v1.5+，2026-07-13 落地，spec §8.4.1 / SR-7）**：
+- **可水平扩展**：多 worker / 多 pod / k8s 部署均可。wake 走 Redis pub/sub 跨进程通知，进程间零状态共享。
+- **Redis 连接池大小要求**：`REDIS_POOL_SIZE ≥ max_concurrent_hitl_streams + 10`（每个 hang 占一个 pubsub 连接；同时挂起的流通常 < 用户数 × 平均并发率）。
+- **Redis 稳定性是硬约束**：pubsub 消息丢失 = 挂起流等满 5min TTL 超时（有 `pending.wake_action` 字段兜底，但仅防 subscribe 前的 race；订阅期间的 Redis 断连仍会丢消息）。
+- **启动检查放开**：lifespan 跳过单 worker assertion（`AI_REQUIRE_SINGLE_WORKER` 仅 memory 模式生效）。
+
+**模式切换零代码改动**：`executor.py` / `api/confirm.py` 等调用方完全不变，mode 分支在 `HitlManager` 内部。
 
 ### 1.3 资源基线（参考）
 
@@ -47,9 +57,11 @@
 # 整个 AI 模块全局开关。False = 不注册 6 个 AI router（紧急停用入口）
 AI_MODULE_ENABLED=true
 
-# ===== 单 worker 约束（spec §8.4）=====
-WEB_CONCURRENCY=1
-AI_HITL_MODE=memory            # v1.5+ 改 redis_pubsub 后可放开 WEB_CONCURRENCY
+# ===== HITL 模式（spec §8.4 / §8.4.1）=====
+# memory（默认，MVP）：进程内 asyncio.Event；强制 WEB_CONCURRENCY=1，禁止多 pod
+# redis_pubsub（v1.5+）：Redis pub/sub 跨 worker；可水平扩展，多 pod / 多 worker 均可
+WEB_CONCURRENCY=1              # memory 模式强制=1；redis_pubsub 模式可放开
+AI_HITL_MODE=memory            # 切到 redis_pubsub 时 WEB_CONCURRENCY 可放开
 
 # ===== HITL 配置 =====
 AI_HITL_PENDING_TTL_SEC=300    # 5 分钟，confirmation 过期时间
@@ -75,7 +87,9 @@ SECRET_KEY=<strong-random>      # JWT 签名，必须强随机
 ### 生产部署 checklist（spec §11.5 §6）
 
 - [ ] `AI_MODULE_ENABLED` 按需设置（建议生产首次部署设 `false`，运维熟悉后再开）
-- [ ] `WEB_CONCURRENCY=1`（强制）
+- [ ] HITL 模式选择：
+  - [ ] `AI_HITL_MODE=memory`：`WEB_CONCURRENCY=1`（强制）
+  - [ ] `AI_HITL_MODE=redis_pubsub`：可放开 `WEB_CONCURRENCY`；验证 Redis 连接池大小 ≥ `max_concurrent_hitl_streams + 10`
 - [ ] `SECRET_KEY` 强随机值（**不 reuse dev 默认**）
 - [ ] 数据库账号最小权限（不用 superuser）
 - [ ] Redis 启用 AUTH + 网络隔离
@@ -124,11 +138,14 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
 
 `app/main.py::lifespan` 启动时按顺序执行：
 
-1. **单 worker assertion**（spec §8.4）：
+1. **单 worker assertion**（spec §8.4，仅 memory 模式）：
    ```python
-   if settings.WEB_CONCURRENCY > 1 and settings.AI_HITL_MODE == "memory":
-       raise RuntimeError(...)  # 阻断启动
+   if settings.AI_HITL_MODE == "memory" and settings.AI_REQUIRE_SINGLE_WORKER:
+       worker_count = await _detect_actual_worker_count()
+       if worker_count > 1:
+           raise RuntimeError(...)  # 阻断启动
    ```
+   `redis_pubsub` 模式跳过此检查（spec §8.4.1 v1.5+）。
 
 2. **加载内置 tools**：`load_builtin_tools()` 触发各业务模块 `@ai_tool` 装饰器注册到 `ToolRegistry`
 
@@ -313,7 +330,7 @@ systemctl restart hohu-admin
 
 ### 9.2 v1.5+ 优化方向
 
-- 切 `AI_HITL_MODE=redis_pubsub`，放开多 worker
+- ✅ **切 `AI_HITL_MODE=redis_pubsub`，放开多 worker**（2026-07-13 落地，spec §8.4.1 / SR-7）
 - 增加 DB 连接池大小（`DATABASE_POOL_SIZE`）
 - LLM 响应流式 token 化（已实现），减少首字节延迟感知
 
@@ -339,4 +356,5 @@ systemctl restart hohu-admin
 
 ## Changelog
 
+- **2026-07-13**：加 v1.5+ redis_pubsub 模式部署说明（spec §8.4.1 / SR-7 落地）。§1.2 拆分为模式 A（memory，MVP）/ 模式 B（redis_pubsub，可水平扩展）；§2 .env 示例更新；§4.1 启动检查说明 redis_pubsub 跳过 assertion；§9.2 标记 redis_pubsub 已完成。
 - **2026-07-09**：初版。覆盖 spec §8.4 / §11.5 / §2.6 全部部署相关内容。9 节：环境 / 配置 / 迁移 / 启动检查 / LLM / 监控 / 升级 / 故障 / 性能。

@@ -1,26 +1,34 @@
-"""HITL Manager — Redis 挂起 + 进程内 asyncio.Event 唤醒（spec §8.3 / §8.4）
+"""HITL Manager — Redis 挂起 + 双模式唤醒（spec §8.3 / §8.4 / §8.4.1）
 
 机制：
   1. Gateway Executor（Phase 3.2 接入）判定 mode=HITL 后：
      - operation_log_service.start_operation(status=PENDING_CONFIRMATION)
-     - hitl_manager.create_pending(...) 写 Redis + 注册 _PendingEntry(event=Event())
+     - hitl_manager.create_pending(...) 写 Redis pending payload
      - emit confirmation_required SSE 事件
      - await hitl_manager.hang(confirmation_id)  # 阻塞直到 wake 或超时
   2. /ai/confirm endpoint 收到用户 approve/reject：
      - owner + conversation_id 校验
-     - hitl_manager.wake(confirmation_id, action)  # set event
+     - hitl_manager.wake(confirmation_id, action)
   3. hang 返回 action，Executor 据此 mark_running 或 mark_rejected
 
-为什么 asyncio.Event 而不是 Future：
-  spec §8.3 明确要求 Event。Future 也行（语义更紧凑），但 spec 是 spec。
+双模式（spec §8.4.1 v1.5+）：
+  - memory（默认，MVP）：进程内 asyncio.Event 唤醒；强制单 worker。
+    Redis pending payload 仍写（用于 owner 校验 + 重启清扫），但 wake 只走进程内 dict。
+  - redis_pubsub（v1.5+）：Redis pub/sub 跨 worker 唤醒；允许多 worker / k8s 多 pod。
+    wake 时 SET pending.wake_action + PUBLISH channel；hang 时 SUBSCRIBE channel +
+    防丢失检查 wake_action（subscribe 前到达的 wake 不丢）。
 
-为什么进程内 dict + Redis 双存：
+为什么进程内 dict + Redis 双存（memory 模式）：
   - asyncio.Event 是进程内对象，多 worker 下其它进程拿不到（spec §8.4 强制单 worker）
   - Redis 存 pending payload 是为了：
       a) 服务重启后能清扫（spec §8.4 cleanup_pending_on_startup）
-      b) /ai/confirm endpoint 跨请求取 pending 信息（虽然单 worker，但 SSE 流与 confirm
-         是不同 HTTP 请求）
-  - 进程内 Event 是为了"立即唤醒挂起的协程"，Redis 无法做到（pub/sub 是 v1.5+）
+      b) /ai/confirm endpoint 跨请求取 pending 信息
+
+为什么 pub/sub + wake_action 字段双写（redis_pubsub 模式，防丢失）：
+  - 纯 pub/sub fire-and-forget，subscribe 前到达的 wake 消息丢失
+  - wake 总是先 SET pending.wake_action 再 PUBLISH；hang subscribe 完成后
+    立即 GET pending 检查 wake_action，已设则直接返回（race-safe）
+  - 替代方案 LIST+BRPOP 在 SSE 取消时需 LREM 清理 LIST 残留，复杂度高
 
 Args 4KB 限制（spec §8.3）：
   防恶意 user 把 hint 字段塞 1MB 撑爆 Redis。校验在 create_pending 入口。
@@ -31,7 +39,7 @@ import json
 import logging
 import secrets
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -41,6 +49,7 @@ from app.core.config import settings
 from app.core.exceptions import BusinessRuleException
 from app.modules.ai.agents.hitl.constants import (
     AI_CONFIRM_REDIS_PREFIX,
+    AI_HITL_WAKE_CHANNEL_PREFIX,
     ConfirmAction,
 )
 
@@ -61,10 +70,14 @@ class _PendingEntry:
 
 @dataclass(frozen=True)
 class PendingPayload:
-    """Redis 中的 pending JSON 结构（spec §8.3）
+    """Redis 中的 pending JSON 结构（spec §8.3 + §8.4.1 v1.5+）
 
     ID 字段按 DB 列原值存（int / str），与 Snowflake 序列化策略无关。
     expires_at 是 ISO 8601 UTC 字符串。
+
+    wake_action（v1.5+ redis_pubsub 模式新增）：
+      None = 尚未被 wake；"approved"/"rejected" = 已被 wake。
+      hang 在 subscribe 完成后立即检查此字段，防 race 丢失。
     """
 
     user_id: int
@@ -75,6 +88,7 @@ class PendingPayload:
     args: dict[str, Any]
     dry_run_result: dict[str, Any] | None
     expires_at: str  # ISO 8601 UTC
+    wake_action: str | None = None
 
     def to_json_bytes(self) -> bytes:
         return json.dumps(self.__dict__, default=str).encode("utf-8")
@@ -167,8 +181,8 @@ class HitlManager:
             expires_at=expires_at_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
 
-        # 3. confirmation_id 不应重复（防御性）
-        if confirmation_id in self._pending:
+        # 3. confirmation_id 不应重复（防御性，仅 memory 模式检查进程内 dict）
+        if settings.AI_HITL_MODE == "memory" and confirmation_id in self._pending:
             logger.error(
                 "confirmation_id collision (extremely unlikely): %s",
                 confirmation_id,
@@ -183,8 +197,9 @@ class HitlManager:
         body = payload.to_json_bytes()
         await redis.set(key, body, ex=settings.AI_HITL_PENDING_TTL_SEC)
 
-        # 5. 注册进程内 Event
-        self._pending[confirmation_id] = _PendingEntry()
+        # 5. 注册进程内 Event（仅 memory 模式；redis_pubsub 模式 dict 不用）
+        if settings.AI_HITL_MODE == "memory":
+            self._pending[confirmation_id] = _PendingEntry()
 
         return payload
 
@@ -196,7 +211,7 @@ class HitlManager:
         *,
         timeout_sec: int | None = None,
     ) -> ConfirmAction:
-        """挂起当前协程直到 wake 或超时
+        """挂起当前协程直到 wake 或超时（spec §8.3，v1.5+ 双模式）
 
         Args:
             confirmation_id: 必须先 create_pending 注册过
@@ -205,14 +220,28 @@ class HitlManager:
         Returns:
             ConfirmAction.APPROVED | ConfirmAction.REJECTED
 
-        超时（5min TTL）抛 asyncio.TimeoutError，调用方负责：
+        超时抛 TimeoutError，调用方负责：
           - operation_log_service.mark_expired(log_id)
           - Redis key 已被 EXPIRE 自动清，无需手动 del
-          - 清理 self._pending 残留 entry
+          - 清理 self._pending 残留 entry（memory 模式）
+
+        mode 分支：
+          - memory：进程内 asyncio.Event
+          - redis_pubsub：Redis pub/sub + wake_action 防丢失
         """
         if timeout_sec is None:
             timeout_sec = settings.AI_HITL_PENDING_TTL_SEC
 
+        if settings.AI_HITL_MODE == "redis_pubsub":
+            return await self._hang_pubsub(confirmation_id, timeout_sec)
+        return await self._hang_memory(confirmation_id, timeout_sec)
+
+    async def _hang_memory(
+        self,
+        confirmation_id: str,
+        timeout_sec: int,
+    ) -> ConfirmAction:
+        """memory 模式 hang：进程内 asyncio.Event（spec §8.3）"""
         entry = self._pending.get(confirmation_id)
         if entry is None:
             # 没有 create_pending 就 hang？调用方错误
@@ -243,6 +272,57 @@ class HitlManager:
             )
         return action
 
+    async def _hang_pubsub(
+        self,
+        confirmation_id: str,
+        timeout_sec: int,
+    ) -> ConfirmAction:
+        """redis_pubsub 模式 hang：Redis pub/sub + wake_action 防丢失（§8.4.1 v1.5+）
+
+        流程：
+          1. SUBSCRIBE channel
+          2. GET Redis pending — 若 wake_action 已设 → 直接返回（race-safe）
+          3. listen for message（带 timeout）
+          4. finally: unsubscribe + aclose
+
+        防丢失关键：subscribe 完成后立即检查 wake_action。wake 总是 SET
+        wake_action 再 PUBLISH，所以即使 PUBLISH 在 subscribe 之前到达（消息
+        丢失），wake_action 仍在 Redis 中被本函数检测到。
+        """
+        from app.core.redis import redis_client  # noqa: PLC0415
+
+        channel = f"{AI_HITL_WAKE_CHANNEL_PREFIX}:{confirmation_id}"
+        pubsub = redis_client.pubsub()
+        await pubsub.subscribe(channel)
+        try:
+            # 防丢失：subscribe 后立即检查 wake_action（race-safe）
+            pending = await self.get_pending(redis_client, confirmation_id)
+            if pending is not None and pending.wake_action is not None:
+                return ConfirmAction(pending.wake_action)
+
+            deadline = time.monotonic() + timeout_sec
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError()
+                message = await asyncio.wait_for(
+                    pubsub.get_message(
+                        ignore_subscribe_messages=True,
+                        timeout=remaining,
+                    ),
+                    timeout=remaining,
+                )
+                if message is None:
+                    continue
+                if message.get("type") == "message":
+                    data = json.loads(message["data"])
+                    return ConfirmAction(data["action"])
+        finally:
+            try:
+                await pubsub.unsubscribe(channel)
+            finally:
+                await pubsub.aclose()
+
     # ============ 唤醒（/ai/confirm endpoint 调用） ============
 
     async def wake(
@@ -250,22 +330,34 @@ class HitlManager:
         confirmation_id: str,
         action: ConfirmAction,
     ) -> bool:
-        """唤醒挂起的协程（修订 S-14：防双击 race + 立即 pop entry）
+        """唤醒挂起的协程（spec §8.3 + §8.4.1 v1.5+ 双模式）
 
         Args:
             confirmation_id: pending 流的 ID
             action: APPROVED / REJECTED
 
         Returns:
-            True = 唤醒成功；False = 该 confirmation_id 不在本进程挂起表中
-                   （可能：跨进程 / 已 expired / 还没 create_pending / **已被
-                   另一个并发 wake 唤醒过** —— 修订 S-14 防双击）
+            True = 唤醒成功；False = 该 confirmation_id 不可达
+                   （可能：跨进程（memory 模式）/ 已 expired / 还没
+                   create_pending / 已被另一个并发 wake 唤醒过）
 
-        防双击实现（修订 S-14）：
-          - 第一次 wake：立即 pop entry（其它 wake 看不到）→ set action →
-            event.set() → return True
-          - 第二次 wake（极端 race，如双击 / 双标签）：pop 返回 None →
-            return False（端点据此返回 status="stream_gone"）
+        mode 分支：
+          - memory：进程内 dict pop + Event.set（修订 S-14 防双击）
+          - redis_pubsub：SET pending.wake_action + PUBLISH channel
+        """
+        if settings.AI_HITL_MODE == "redis_pubsub":
+            return await self._wake_pubsub(confirmation_id, action)
+        return await self._wake_memory(confirmation_id, action)
+
+    async def _wake_memory(
+        self,
+        confirmation_id: str,
+        action: ConfirmAction,
+    ) -> bool:
+        """memory 模式 wake：进程内 dict pop + Event.set（修订 S-14 防双击 race）
+
+        立即 pop entry（其它 wake 看不到）→ set action → event.set() → True。
+        第二次 wake（双击 / 双标签）：pop 返回 None → False。
 
         spec §8.3: wake 写回 Redis 不必要，Redis 只用于跨请求取 pending payload。
         进程内 Event 是同步唤醒机制。
@@ -283,6 +375,54 @@ class HitlManager:
             return False
         entry.action = action
         entry.event.set()
+        return True
+
+    async def _wake_pubsub(
+        self,
+        confirmation_id: str,
+        action: ConfirmAction,
+    ) -> bool:
+        """redis_pubsub 模式 wake：SET pending.wake_action + PUBLISH（§8.4.1 v1.5+）
+
+        流程：
+          1. GET Redis pending；不存在 → False（已 expired / 未 create_pending）
+          2. dataclasses.replace 重写 wake_action（frozen 兼容）
+          3. SET Redis payload（保留 TTL）
+          4. PUBLISH channel: {"action": "...", "confirmation_id": "...", "ts": ...}
+
+        防双击 / 防丢失：
+          - 第二次 wake 同 confirmation_id：step 1 检查到 wake_action 已设，
+            但仍覆盖 SET + PUBLISH（无害，hang 端只读一次）。考虑过在这里 short
+            -circuit 返回 False，但实际场景下：第二次 wake 通常意味着第一次没
+            成功送达（如 SSE 流已断 + 用户重试），保守返回 True 让 confirm.py
+            走"等 stream 自然处理"路径更安全。
+          - 防丢失：见 _hang_pubsub 注释。
+        """
+        from app.core.redis import redis_client  # noqa: PLC0415
+
+        pending = await self.get_pending(redis_client, confirmation_id)
+        if pending is None:
+            return False
+
+        # 用 dataclasses.replace 重写 wake_action（PendingPayload frozen=True）
+        updated = replace(pending, wake_action=action.value)
+        await redis_client.set(
+            self._redis_key(confirmation_id),
+            updated.to_json_bytes(),
+            ex=settings.AI_HITL_PENDING_TTL_SEC,
+        )
+
+        channel = f"{AI_HITL_WAKE_CHANNEL_PREFIX}:{confirmation_id}"
+        await redis_client.publish(
+            channel,
+            json.dumps(
+                {
+                    "action": action.value,
+                    "confirmation_id": confirmation_id,
+                    "ts": time.time(),
+                }
+            ),
+        )
         return True
 
     # ============ Redis 查询（/ai/confirm endpoint 用） ============

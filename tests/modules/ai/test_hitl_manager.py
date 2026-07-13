@@ -10,7 +10,7 @@
   - cleanup_pending_on_startup 清扫残留
 """
 
-# ruff: noqa: ARG001, PLC0415
+# ruff: noqa: ARG001, ARG002, PLC0415
 
 import asyncio
 import json
@@ -416,7 +416,7 @@ class TestCleanupOnStartup:
         # mock scan_iter 为 async generator，第一次进入即抛 RedisError
         async def _failing_scan(*args, **kwargs):
             raise RedisError("connection refused")
-            yield  # noqa: unreachable  让 Python 识别为 async generator
+            yield  # noqa  不可达，仅为让 Python 识别为 async generator
 
         original_scan = redis_module.redis_client.scan_iter
         redis_module.redis_client.scan_iter = _failing_scan
@@ -426,3 +426,139 @@ class TestCleanupOnStartup:
             assert cleaned == 0  # 不抛 + 返回 0
         finally:
             redis_module.redis_client.scan_iter = original_scan
+
+
+# ============ v1.5+ redis_pubsub 模式 ============
+
+
+@pytest.fixture
+async def pubsub_mode(monkeypatch):
+    """切到 redis_pubsub 模式（spec §8.4.1 v1.5+）
+
+    非 autouse：仅显式声明的测试用，确保现有 memory 模式测试不变。
+    """
+    monkeypatch.setattr(settings, "AI_HITL_MODE", "redis_pubsub")
+    yield
+
+
+class TestPubSubMode:
+    """redis_pubsub 模式：跨 worker 唤醒 + 防丢失（spec §8.4.1 v1.5+）"""
+
+    async def test_cross_worker_wake(self, pubsub_mode) -> None:
+        """模拟跨 worker：两个 HitlManager 实例共享同一 Redis
+
+        场景：worker A 持有 SSE 流（hang），wake 落到 worker B。
+        修订前（memory 模式）：worker B 找不到 entry → False → 5min 超时。
+        v1.5+（redis_pubsub 模式）：B PUBLISH channel → A 收到 → 唤醒 hang。
+        """
+        from app.modules.ai.agents.hitl.manager import HitlManager
+
+        manager_a = HitlManager()
+        manager_b = HitlManager()
+
+        cid = manager_a.generate_confirmation_id()
+        await manager_a.create_pending(
+            redis_module.redis_client,
+            confirmation_id=cid,
+            user_id=1,
+            conversation_id=1,
+            tool_call_id="tc_xw",
+            trace_id="tr",
+            tool_name="x",
+            args={"k": "v"},
+        )
+
+        async def hang() -> ConfirmAction:
+            return await manager_a.hang(cid, timeout_sec=3)
+
+        hang_task = asyncio.create_task(hang())
+        await asyncio.sleep(0.15)  # 等 subscribe 完成
+
+        # worker B wake（不同实例，模拟不同 worker）
+        woken = await manager_b.wake(cid, ConfirmAction.APPROVED)
+        assert woken is True
+
+        # worker A 的 hang 应被唤醒
+        result = await asyncio.wait_for(hang_task, timeout=2)
+        assert result == ConfirmAction.APPROVED
+
+    async def test_wake_before_subscribe_no_loss(self, pubsub_mode) -> None:
+        """防丢失：wake 在 hang subscribe 之前到达
+
+        场景：用户秒确认（前端预渲染了抽屉）。wake PUBLISH 在 hang subscribe
+        之前到达，PUBLISH 消息丢失。但 wake 已先 SET pending.wake_action，
+        hang subscribe 完成后 GET 检查 wake_action → 立即返回。
+        """
+        from app.modules.ai.agents.hitl.manager import HitlManager
+
+        manager_a = HitlManager()
+        manager_b = HitlManager()
+
+        cid = manager_a.generate_confirmation_id()
+        await manager_a.create_pending(
+            redis_module.redis_client,
+            confirmation_id=cid,
+            user_id=1,
+            conversation_id=1,
+            tool_call_id="tc_race",
+            trace_id="tr",
+            tool_name="x",
+            args={},
+        )
+
+        # B wake 在 A hang 之前
+        woken = await manager_b.wake(cid, ConfirmAction.REJECTED)
+        assert woken is True
+
+        # 验证 wake_action 已写入 Redis
+        pending = await manager_a.get_pending(redis_module.redis_client, cid)
+        assert pending is not None
+        assert pending.wake_action == "rejected"
+
+        # A 开始 hang — 应该立即拿到 wake_action，不等 PUBLISH
+        result = await asyncio.wait_for(manager_a.hang(cid, timeout_sec=3), timeout=2)
+        assert result == ConfirmAction.REJECTED
+
+    async def test_wake_not_found_returns_false(self, pubsub_mode) -> None:
+        """wake 不存在的 confirmation_id → False（已 expired / 未 create_pending）"""
+        from app.modules.ai.agents.hitl.manager import HitlManager
+
+        manager = HitlManager()
+        woken = await manager.wake("nonexistent", ConfirmAction.APPROVED)
+        assert woken is False
+
+    async def test_pubsub_timeout_raises(self, pubsub_mode) -> None:
+        """5min TTL 超时 → TimeoutError"""
+        from app.modules.ai.agents.hitl.manager import HitlManager
+
+        manager = HitlManager()
+        cid = manager.generate_confirmation_id()
+        await manager.create_pending(
+            redis_module.redis_client,
+            confirmation_id=cid,
+            user_id=1,
+            conversation_id=1,
+            tool_call_id="tc_to",
+            trace_id="tr",
+            tool_name="x",
+            args={},
+        )
+
+        with pytest.raises(asyncio.TimeoutError):
+            await manager.hang(cid, timeout_sec=0.5)
+
+    async def test_pending_payload_wake_action_default_none(self) -> None:
+        """PendingPayload 默认 wake_action=None，向后兼容旧 payload"""
+        from app.modules.ai.agents.hitl.manager import PendingPayload
+
+        payload = PendingPayload(
+            user_id=1,
+            conversation_id=1,
+            tool_call_id="tc",
+            trace_id="tr",
+            tool_name="x",
+            args={},
+            dry_run_result=None,
+            expires_at="2026-07-13T00:00:00Z",
+        )
+        assert payload.wake_action is None
