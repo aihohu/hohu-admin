@@ -36,4 +36,8 @@ async def db_session() -> AsyncSession:
                 yield session
         finally:
             await outer.rollback()
-    await engine.dispose()
+    try:
+        await engine.dispose()
+    except RuntimeError as e:
+        if "Event loop is closed" not in str(e):
+            raise

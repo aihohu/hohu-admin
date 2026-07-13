@@ -111,7 +111,11 @@ async def clean_env():
 
     from app.db.session import engine
 
-    await engine.dispose()
+    try:
+        await engine.dispose()
+    except RuntimeError as e:
+        if "Event loop is closed" not in str(e):
+            raise
 
     redis_module.redis_pool = original_pool
     redis_module.redis_client = original_client

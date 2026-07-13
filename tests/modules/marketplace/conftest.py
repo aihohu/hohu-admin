@@ -46,8 +46,14 @@ async def db_session() -> AsyncSession:
                 yield session
         finally:
             await outer.rollback()
-    # 关闭 session 后释放引擎底层连接，确保下一个测试拿到全新连接池
-    await engine.dispose()
+    # 关闭 session 后释放引擎底层连接，确保下一个测试拿到全新连接池。
+    # dispose 容错：asyncpg + pytest-asyncio function-scope loop 的已知 teardown
+    # race（详见 tests/modules/ai/conftest.py 同位置注释）。
+    try:
+        await engine.dispose()
+    except RuntimeError as e:
+        if "Event loop is closed" not in str(e):
+            raise
 
 
 @pytest.fixture
