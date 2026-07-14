@@ -100,8 +100,23 @@ async def _convert_local_images_to_data_uri(body: dict) -> dict:
 
 
 def _format_sse_chunk(event: AiStreamEvent) -> str:
-    """把 AiStreamEvent 序列化为 SSE 帧：`data: {...}\n\n`"""
-    return f"data: {event_to_sse_data(event)}\n\n"
+    """把 AiStreamEvent 序列化为 SSE 帧：`data: {...}\n\n`
+
+    spec §3.2 v1.5+: ConfirmationRequiredEvent 在 AI_SSE_RESUME_ENABLED=True 时
+    自动附带 `id: <confirmation_id>` 字段（SSE 协议标准），客户端断流重连时
+    浏览器/SDK 自动通过 Last-Event-ID 头携带此 id 到 /ai/chat/resume 端点。
+    """
+    data_line = f"data: {event_to_sse_data(event)}"
+    # spec §3.2: 仅 confirmation_required 事件需要 id: 字段（其它事件 sequence 无意义）
+    from app.modules.ai.agents.hitl.events import (  # noqa: PLC0415
+        ConfirmationRequiredEvent,
+    )
+
+    event_id: str | None = None
+    if settings.AI_SSE_RESUME_ENABLED and isinstance(event, ConfirmationRequiredEvent):
+        event_id = event.confirmation_id
+    id_line = f"\nid: {event_id}" if event_id else ""
+    return f"{data_line}{id_line}\n\n"
 
 
 def _collect_text_delta(sse_frame: str, collected: list[str]) -> None:

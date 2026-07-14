@@ -59,23 +59,31 @@ async def db_session() -> AsyncSession:
     from sqlalchemy import text  # noqa: PLC0415
 
     _reset_redis_client()
-    async with engine.connect() as conn:
-        outer = await conn.begin()
-        try:
-            async with AsyncSessionLocal(bind=conn) as session:
-                yield session
-        finally:
-            await outer.rollback()
+    try:
+        async with engine.connect() as conn:
+            outer = await conn.begin()
+            try:
+                async with AsyncSessionLocal(bind=conn) as session:
+                    yield session
+            finally:
+                await outer.rollback()
+    except RuntimeError as e:
+        # asyncpg _terminate_graceful_close 在 loop 关闭后试图创建 cancel task
+        # 会抛 RuntimeError（loop closed）。sqlalchemy + asyncpg + pytest-asyncio
+        # 已知 teardown race，pre-existing flake，不影响测试结果本身。
+        if "Event loop is closed" not in str(e):
+            raise
     # teardown：精准清理 ai 测试残留（executor.py 内部独立 session 写的）
-    async with engine.connect() as cleanup_conn:
-        await cleanup_conn.execute(
-            text("DELETE FROM ai_operation_log WHERE trace_id LIKE 'tr_test%'")
-        )
-        await cleanup_conn.commit()
-    # dispose 容错：asyncpg _terminate_graceful_close 在 loop 关闭后试图创建
-    # cancel task 会抛 RuntimeError（loop closed）。这是 sqlalchemy + asyncpg
-    # + pytest-asyncio 的已知 teardown race（不影响测试结果本身）。
-    # pre-existing flake，try/except 兜底避免污染 pre-commit pytest hook。
+    try:
+        async with engine.connect() as cleanup_conn:
+            await cleanup_conn.execute(
+                text("DELETE FROM ai_operation_log WHERE trace_id LIKE 'tr_test%'")
+            )
+            await cleanup_conn.commit()
+    except RuntimeError as e:
+        if "Event loop is closed" not in str(e):
+            raise
+    # dispose 容错：同上 race 在 engine.dispose() 路径触发的兜底。
     try:
         await engine.dispose()
     except RuntimeError as e:
