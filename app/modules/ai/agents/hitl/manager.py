@@ -466,6 +466,15 @@ class HitlManager:
         return PendingPayload(**data)
 
     @staticmethod
+    async def ttl(redis: Redis, confirmation_id: str) -> int:
+        """返回 pending 剩余 TTL（秒）— spec §2.6 v1.5+: 续传时剩余 < 60s 拒绝
+
+        /ai/chat/resume endpoint 用：剩余 < 60s → 422 AI_RESUME_TTL_TOO_SHORT。
+        Redis key 不存在时返回 -2（Redis 标准）。
+        """
+        return await redis.ttl(HitlManager._redis_key(confirmation_id))
+
+    @staticmethod
     async def delete_pending(
         redis: Redis,
         confirmation_id: str,

@@ -102,8 +102,19 @@ async def resume_chat(
     if pending is None:
         raise NotFoundException("HITL confirmation", error_code="AI_RESUME_NOT_FOUND")
     if pending.user_id != current_user.user_id:
+        logger.warning(
+            "resume owner mismatch: confirmation_id=%s pending_user=%d current_user=%d",
+            confirmation_id,
+            pending.user_id,
+            current_user.user_id,
+        )
         raise AuthorizationException(error_code="AI_RESUME_FORBIDDEN")
     if pending.wake_action is not None:
+        logger.info(
+            "resume already resolved: confirmation_id=%s wake_action=%s",
+            confirmation_id,
+            pending.wake_action,
+        )
         raise _set_exc_code(
             BusinessRuleException(
                 "HITL 已被处理（断流期间用户已确认/拒绝）",
@@ -112,7 +123,7 @@ async def resume_chat(
             410,
         )
 
-    ttl_sec = await redis_client.ttl(hitl_manager._redis_key(confirmation_id))
+    ttl_sec = await hitl_manager.ttl(redis_client, confirmation_id)
     if ttl_sec < 60:
         raise _set_exc_code(
             BusinessRuleException(
@@ -129,6 +140,11 @@ async def resume_chat(
         lock_key, worker_token, nx=True, ex=AI_HITL_OWNER_LOCK_TTL_SEC
     )
     if not lock_ok:
+        logger.info(
+            "resume lock contention: confirmation_id=%s worker_token=%s",
+            confirmation_id,
+            worker_token,
+        )
         raise _set_exc_code(
             BusinessRuleException(
                 "已有 worker 接管此 confirmation，请稍后重试",
