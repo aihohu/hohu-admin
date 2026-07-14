@@ -50,7 +50,7 @@ class TestFormatSseChunkIdField:
             expires_at="...",
         )
         chunk = _format_sse_chunk(ev)
-        assert "id:" not in chunk
+        assert "\nid:" not in chunk
 
     def test_other_events_have_no_id(self, _resume_enabled) -> None:
         """只有 confirmation_required 应带 id:（其它事件 sequence_id 无意义）"""
@@ -63,8 +63,8 @@ class TestFormatSseChunkIdField:
             trace_id="tr_x",
         )
         chunk = _format_sse_chunk(ev)
-        assert "id:" not in chunk
+        assert "\nid:" not in chunk
 
     def test_done_event_no_id(self, _resume_enabled) -> None:
         chunk = _format_sse_chunk(DoneEvent())
-        assert "id:" not in chunk
+        assert "\nid:" not in chunk

@@ -31,6 +31,7 @@ from app.db.session import get_db
 from app.modules.ai.agents.hitl.events import (
     AiErrorEvent,
     AiStreamEvent,
+    ConfirmationRequiredEvent,
     DoneEvent,
     event_to_sse_data,
 )
@@ -108,10 +109,6 @@ def _format_sse_chunk(event: AiStreamEvent) -> str:
     """
     data_line = f"data: {event_to_sse_data(event)}"
     # spec §3.2: 仅 confirmation_required 事件需要 id: 字段（其它事件 sequence 无意义）
-    from app.modules.ai.agents.hitl.events import (  # noqa: PLC0415
-        ConfirmationRequiredEvent,
-    )
-
     event_id: str | None = None
     if settings.AI_SSE_RESUME_ENABLED and isinstance(event, ConfirmationRequiredEvent):
         event_id = event.confirmation_id
