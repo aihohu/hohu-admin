@@ -1,6 +1,11 @@
 """SSE 流断流续传端点 — spec §3 v1.5+
 
-Task 3: 错误路径骨架；Task 4 在锁获取成功后替换为完整 SSE 实现。
+GET /ai/chat/resume
+  - 读 Last-Event-ID 头作为 confirmation_id（SSE 协议标准）
+  - 校验 owner / TTL / 模式
+  - 抢 Redis owner 锁防双执行（spec §2.3）
+  - emit confirmation_resumed → hang → execute_tool → emit tool_call_result + done
+  - finally 释放 owner 锁（Lua 脚本防误删）
 
 错误码（按出现顺序）：
   410 AI_RESUME_DISABLED         — 功能未启用 / memory 模式（强制 redis_pubsub）
@@ -10,17 +15,15 @@ Task 3: 错误路径骨架；Task 4 在锁获取成功后替换为完整 SSE 实
   410 AI_RESUME_ALREADY_RESOLVED — pending.wake_action 已设（断流期间已确认/拒绝）
   422 AI_RESUME_TTL_TOO_SHORT    — TTL < 60s（执行完来不及回写结果）
   409 AI_RESUME_IN_PROGRESS      — owner 锁被其它 worker 持有（双执行兜底）
-
-成功路径在 Task 4：
-  - 构造 ConfirmationResumedEvent
-  - emit resumed → hang → execute_tool → emit result/close
-  - finally 释放 owner 锁（Lua compare-and-delete）
 """
 
 import logging
 import secrets
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import StreamingResponse
+from pydantic_ai.ui import SSE_CONTENT_TYPE
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -30,12 +33,24 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.redis import redis_client
-from app.db.session import get_db
+from app.db.session import AsyncSessionLocal, get_db
+from app.modules.ai.agents.gateway.executor import resume_tool_execution
 from app.modules.ai.agents.hitl.constants import (
     AI_HITL_OWNER_LOCK_PREFIX,
     AI_HITL_OWNER_LOCK_TTL_SEC,
+    ConfirmAction,
+)
+from app.modules.ai.agents.hitl.events import (
+    AiErrorEvent,
+    ConfirmationResumedEvent,
+    DoneEvent,
+    DryRunSummary,
+    ToolCallResultEvent,
 )
 from app.modules.ai.agents.hitl.manager import hitl_manager
+from app.modules.ai.api.chat import _format_sse_chunk
+from app.modules.ai.service.chat_service import chat_service
+from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
 
@@ -43,9 +58,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Task 4 在此插入完整 SSE 流（execute_tool + emit resumed/result）。Task 3
-# 阶段抢到锁后立即释放并抛 AI_INTERNAL_ERROR 占位，所有 Task 3 测试在锁获取
-# 之前 / 之后立即断言错误码，不会落到此分支。
+# Lua 脚本：仅当 KEYS[1] 的值 == ARGV[1] 时 del（防 token 不匹配误删）
 _RELEASE_LOCK_LUA = (
     "if redis.call('get', KEYS[1]) == ARGV[1] then "
     "return redis.call('del', KEYS[1]) else return 0 end"
@@ -58,6 +71,30 @@ def _set_exc_code(exc: BusinessRuleException, code: int) -> BusinessRuleExceptio
     return exc
 
 
+def _build_resumed_event(confirmation_id: str, pending) -> ConfirmationResumedEvent:  # noqa: ANN001
+    """从 pending payload 构造 ConfirmationResumedEvent
+
+    pending 是 PendingPayload dataclass。注意 confirmation_id 参数从 caller 传入
+    （PendingPayload 不含 confirmation_id 字段，它是 Redis key 后缀）。
+    """
+    dry_run: DryRunSummary | None = None
+    if pending.dry_run_result:
+        dry_run = DryRunSummary(
+            summary=pending.dry_run_result.get("summary", ""),
+            affected_count=pending.dry_run_result.get("affected_count", 0),
+        )
+    return ConfirmationResumedEvent(
+        confirmation_id=confirmation_id,
+        tool=pending.tool_name,
+        tool_call_id=pending.tool_call_id,
+        summary=f"resume: tool={pending.tool_name}",
+        args=pending.args,
+        expires_at=pending.expires_at,
+        resumed_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        dry_run=dry_run,
+    )
+
+
 @router.get("", summary="SSE 流断流续传（HITL 期热接管）")
 async def resume_chat(
     request: Request,
@@ -66,7 +103,7 @@ async def resume_chat(
         alias="confirmation_id",
         description="调试后备（主推 Last-Event-ID 头）",
     ),
-    db: AsyncSession = Depends(get_db),  # noqa: ARG001 (Task 4: SSE body uses it)
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """spec §3 v1.5+: SSE 续传入口
@@ -153,7 +190,127 @@ async def resume_chat(
             409,
         )
 
-    # Task 4 在此插入：构造 SSE 流（emit resumed → hang → execute_tool → emit result）
-    # 当前 Task 3 仅占位：释放锁并抛错（不应被命中，因为 Task 3 测试在锁后即返回）
-    await redis_client.eval(_RELEASE_LOCK_LUA, 1, lock_key, worker_token)
-    raise BusinessRuleException("续传端点未完成实现", error_code="AI_INTERNAL_ERROR")
+    # 5. 查 log_id + 重建 ChatDeps（局部 import 防循环）
+    log = await operation_log_service.get_by_tool_call_id(
+        db, pending.tool_call_id, user_id=current_user.user_id
+    )
+    log_id = log.log_id if log else None
+
+    deps = await chat_service.build_chat_deps(db, current_user, agent_code=None)
+    deps.conversation_id = pending.conversation_id
+
+    # 6. 构造 SSE 流（在 finally 释放锁）
+    resumed_event = _build_resumed_event(confirmation_id, pending)
+
+    async def resume_stream():
+        try:
+            # 6.1 emit confirmation_resumed
+            yield _format_sse_chunk(resumed_event)
+
+            # 6.2 hang 等 wake
+            try:
+                action = await hitl_manager.hang(confirmation_id)
+            except TimeoutError:
+                yield _format_sse_chunk(
+                    AiErrorEvent(
+                        error_code="AI_HITL_TIMEOUT",
+                        message="HITL 确认超时（5min 无人确认），请重新发起",
+                    )
+                )
+                yield _format_sse_chunk(DoneEvent())
+                if log_id is not None:
+                    try:
+                        async with AsyncSessionLocal() as cleanup_db:
+                            async with cleanup_db.begin():
+                                await operation_log_service.mark_expired_if_pending(
+                                    cleanup_db, log_id
+                                )
+                    except Exception:
+                        logger.exception("resume: mark_expired_if_pending failed")
+                return
+            except Exception:
+                # hang 抛非 Timeout 异常（如 Redis down）→ emit error + done
+                logger.exception("resume: hang unexpected error")
+                yield _format_sse_chunk(
+                    AiErrorEvent(
+                        error_code="AI_INTERNAL_ERROR",
+                        message="续传异常，请重新发起",
+                    )
+                )
+                yield _format_sse_chunk(DoneEvent())
+                return
+
+            # 6.3 REJECTED → mark_rejected + emit failure result
+            if action == ConfirmAction.REJECTED:
+                if log_id is not None:
+                    try:
+                        async with AsyncSessionLocal() as rej_db:
+                            async with rej_db.begin():
+                                await operation_log_service.mark_rejected(
+                                    rej_db, log_id, approved_by=current_user.user_id
+                                )
+                    except Exception:
+                        logger.exception("resume: mark_rejected failed")
+                yield _format_sse_chunk(
+                    ToolCallResultEvent(
+                        tool=pending.tool_name,
+                        tool_call_id=pending.tool_call_id,
+                        ok=False,
+                        duration_ms=0,
+                        error_code="USER_REJECTED",
+                        error_msg="用户已取消此操作",
+                    )
+                )
+                yield _format_sse_chunk(DoneEvent())
+                return
+
+            # 6.4 APPROVED → execute_tool
+            if log_id is None:
+                yield _format_sse_chunk(
+                    AiErrorEvent(
+                        error_code="AI_INTERNAL_ERROR",
+                        message="续传找不到原 log，请重新发起",
+                    )
+                )
+                yield _format_sse_chunk(DoneEvent())
+                return
+
+            try:
+                result = await resume_tool_execution(pending, deps, log_id)
+            except Exception:
+                logger.exception("resume: resume_tool_execution failed")
+                yield _format_sse_chunk(
+                    AiErrorEvent(
+                        error_code="AI_INTERNAL_ERROR",
+                        message="续传 tool 执行失败，请重新发起",
+                    )
+                )
+                yield _format_sse_chunk(DoneEvent())
+                return
+
+            # 6.5 emit tool_call_result + done
+            yield _format_sse_chunk(
+                ToolCallResultEvent(
+                    tool=pending.tool_name,
+                    tool_call_id=pending.tool_call_id,
+                    ok=result.ok,
+                    duration_ms=0,
+                    result=result.data if result.ok else None,
+                    error_code=result.error_code if not result.ok else None,
+                    error_msg=result.error_msg if not result.ok else None,
+                )
+            )
+            yield _format_sse_chunk(DoneEvent())
+
+        finally:
+            # 释放 owner 锁（Lua 防误删）
+            try:
+                await redis_client.eval(_RELEASE_LOCK_LUA, 1, lock_key, worker_token)
+            except Exception:
+                logger.exception("resume: owner lock release failed")
+
+    return StreamingResponse(
+        resume_stream(),
+        media_type=SSE_CONTENT_TYPE,
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

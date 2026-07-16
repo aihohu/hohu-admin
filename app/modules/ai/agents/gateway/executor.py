@@ -58,7 +58,7 @@ from app.modules.ai.agents.hitl.events import (
     ToolCallResultEvent,
     ToolCallStartedEvent,
 )
-from app.modules.ai.agents.hitl.manager import hitl_manager
+from app.modules.ai.agents.hitl.manager import PendingPayload, hitl_manager
 from app.modules.ai.agents.hitl.risk import classify_execution_mode
 from app.modules.ai.agents.safety.auto_disable import record_injection
 from app.modules.ai.agents.tools.registry import RegisteredTool, ToolRegistry
@@ -838,3 +838,48 @@ async def _record_perm_denied_for_ip(deps: ChatDeps, tool_name: str) -> None:
             "ip_blacklist record_perm_denied failed (ignored)",
             extra={"tool": tool_name, "ip": ip},
         )
+
+
+# ============ SSE 续传：跳过 perm/quota/dry_run/log_start 的业务执行（spec §3 v1.5+） ============
+
+
+async def resume_tool_execution(
+    pending: PendingPayload,
+    deps: ChatDeps,
+    log_id: int,
+) -> ToolResult:
+    """续传端点专用：从 pending payload 重建执行上下文，跑业务函数
+
+    与 execute_tool 区别（spec §4.3）：
+      - 不重做 perm/quota/dry_run/log_start（首次 execute_tool 已做，避免双扣 quota / 双写 log）
+      - 不 emit tool_call_started（首次已发）
+      - 不 emit tool_call_result（resume 端点自己 emit，让 SSE 顺序连续）
+      - 写 log 终态（success/failed）
+
+    Args:
+        pending: Redis pending payload（含 tool_name / args / trace_id）
+        deps: 续传时重建的 ChatDeps（含 user / perms / agent）
+        log_id: 首次 execute_tool 写的 ai_operation_log.log_id
+
+    Returns:
+        ToolResult（success / failure），resume 端点据此 emit tool_call_result
+    """
+    registry = ToolRegistry.get()
+    registered = registry.find(pending.tool_name)
+    if registered is None:
+        logger.error(
+            "resume: tool not found",
+            extra={"tool": pending.tool_name, "tool_call_id": pending.tool_call_id},
+        )
+        return ToolResult.failure(
+            error_code="AI_TOOL_NOT_FOUND",
+            error_msg=USER_FACING_MSG["AI_TOOL_NOT_FOUND"],
+        )
+
+    args_hash = compute_args_hash(pending.args)
+    started_at = time.monotonic()
+    result = await _invoke_tool_fn(
+        registered, pending.args, deps, args_hash, l1_member=None
+    )
+    await _finish_log_final(log_id, result, started_at)
+    return result

@@ -269,3 +269,319 @@ class TestLastEventIdHeaderPriority:
                 )
         args = mock_get.await_args.args
         assert args[1] == "cid_from_query"
+
+
+# ============ 成功路径 ============
+
+
+class TestResumeSuccessPath:
+    """spec §3.1 + §4.3: 续传成功路径（emit resumed → hang → execute_tool → emit result）"""
+
+    @pytest.fixture
+    def _mock_deps_for_success(self, _resume_enabled, _redis_pubsub_mode):
+        """成功路径所需的所有 mock：pending + ttl + 锁 + hang APPROVED + execute_tool"""
+        from app.modules.ai.agents.gateway.result import ToolResult
+        from app.modules.ai.agents.hitl.constants import ConfirmAction
+
+        with (
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.get_pending",
+                AsyncMock(return_value=_make_pending()),
+            ),
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.ttl",
+                AsyncMock(return_value=240),
+            ),
+            patch(
+                "app.modules.ai.api.resume.redis_client.set",
+                AsyncMock(return_value=True),  # SETNX 成功
+            ),
+            patch(
+                "app.modules.ai.api.resume.redis_client.eval",
+                AsyncMock(return_value=1),  # Lua 返回 1（删成功）
+            ),
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.hang",
+                AsyncMock(return_value=ConfirmAction.APPROVED),
+            ),
+            patch(
+                "app.modules.ai.api.resume.resume_tool_execution",
+                AsyncMock(return_value=ToolResult.success(data={"affected_count": 1})),
+            ),
+            patch(
+                "app.modules.ai.api.resume.operation_log_service.get_by_tool_call_id",
+                AsyncMock(return_value=SimpleNamespace(log_id=42)),
+            ),
+            patch(
+                "app.modules.ai.api.resume.chat_service.build_chat_deps",
+                AsyncMock(return_value=MagicMock()),
+            ),
+        ):
+            yield
+
+    async def test_returns_streaming_response(self, _mock_deps_for_success) -> None:
+        from fastapi.responses import StreamingResponse
+
+        result = await resume_chat(
+            request=_make_request("cid"),
+            confirmation_id_query="cid",
+            db=MagicMock(),
+            current_user=_make_user(),
+        )
+        assert isinstance(result, StreamingResponse)
+        assert result.media_type == "text/event-stream"
+        # Drain the body_iterator so the async generator completes its finally block
+        # (releases owner lock via mock) — otherwise GC of an unstarted generator
+        # leaves dangling async state that breaks the next test's event loop.
+        async for _ in result.body_iterator:
+            pass
+
+    async def test_stream_emits_resumed_then_result_then_done(
+        self, _mock_deps_for_success
+    ) -> None:
+        result = await resume_chat(
+            request=_make_request("cid"),
+            confirmation_id_query="cid",
+            db=MagicMock(),
+            current_user=_make_user(),
+        )
+        chunks: list[str] = []
+        async for chunk in result.body_iterator:
+            chunks.append(chunk)
+        body = "".join(chunks)
+        assert (
+            '"type":"confirmation_resumed"' in body
+            or '"type": "confirmation_resumed"' in body
+        )
+        assert (
+            '"type":"tool_call_result"' in body or '"type": "tool_call_result"' in body
+        )
+        assert '"type":"done"' in body or '"type": "done"' in body
+        assert body.index("confirmation_resumed") < body.index("tool_call_result")
+
+    async def test_rejected_path_emits_failure_result(
+        self, _resume_enabled, _redis_pubsub_mode
+    ) -> None:
+        from app.modules.ai.agents.hitl.constants import ConfirmAction
+
+        # AsyncSessionLocal mock：REJECTED 分支开真实 DB session 做 mark_rejected
+        fake_db = AsyncMock()
+        fake_db.__aenter__ = AsyncMock(return_value=fake_db)
+        fake_db.__aexit__ = AsyncMock(return_value=None)
+        fake_db.begin = MagicMock(return_value=fake_db)
+        with (
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.get_pending",
+                AsyncMock(return_value=_make_pending()),
+            ),
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.ttl",
+                AsyncMock(return_value=240),
+            ),
+            patch(
+                "app.modules.ai.api.resume.redis_client.set",
+                AsyncMock(return_value=True),
+            ),
+            patch(
+                "app.modules.ai.api.resume.redis_client.eval",
+                AsyncMock(return_value=1),
+            ),
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.hang",
+                AsyncMock(return_value=ConfirmAction.REJECTED),
+            ),
+            patch(
+                "app.modules.ai.api.resume.operation_log_service.get_by_tool_call_id",
+                AsyncMock(return_value=SimpleNamespace(log_id=42)),
+            ),
+            patch(
+                "app.modules.ai.api.resume.chat_service.build_chat_deps",
+                AsyncMock(return_value=MagicMock()),
+            ),
+            patch(
+                "app.modules.ai.api.resume.operation_log_service.mark_rejected",
+                AsyncMock(),
+            ),
+            patch(
+                "app.modules.ai.api.resume.AsyncSessionLocal",
+                MagicMock(return_value=fake_db),
+            ),
+        ):
+            result = await resume_chat(
+                request=_make_request("cid"),
+                confirmation_id_query="cid",
+                db=MagicMock(),
+                current_user=_make_user(),
+            )
+            body = ""
+            async for chunk in result.body_iterator:
+                body += chunk
+        assert (
+            '"type":"confirmation_resumed"' in body
+            or '"type": "confirmation_resumed"' in body
+        )
+        assert "USER_REJECTED" in body
+        assert '"type":"done"' in body or '"type": "done"' in body
+
+
+class TestResumeTimeoutPath:
+    async def test_hang_timeout_emits_ai_error(
+        self, _resume_enabled, _redis_pubsub_mode
+    ) -> None:
+        # AsyncSessionLocal 必须也 mock：resume.py 在 TimeoutError 分支会开真实 DB
+        # session 做 mark_expired_if_pending，未 mock 会 checkout 真连接，下个测试
+        # 的 event loop 关闭时 asyncpg _terminate_graceful_close 抛 RuntimeError。
+        fake_db = AsyncMock()
+        fake_db.__aenter__ = AsyncMock(return_value=fake_db)
+        fake_db.__aexit__ = AsyncMock(return_value=None)
+        fake_db.begin = MagicMock(return_value=fake_db)
+        fake_db.__aenter__ = AsyncMock(return_value=fake_db)
+        with (
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.get_pending",
+                AsyncMock(return_value=_make_pending()),
+            ),
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.ttl",
+                AsyncMock(return_value=240),
+            ),
+            patch(
+                "app.modules.ai.api.resume.redis_client.set",
+                AsyncMock(return_value=True),
+            ),
+            patch(
+                "app.modules.ai.api.resume.redis_client.eval",
+                AsyncMock(return_value=1),
+            ),
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.hang",
+                AsyncMock(side_effect=TimeoutError()),
+            ),
+            patch(
+                "app.modules.ai.api.resume.operation_log_service.get_by_tool_call_id",
+                AsyncMock(return_value=SimpleNamespace(log_id=42)),
+            ),
+            patch(
+                "app.modules.ai.api.resume.chat_service.build_chat_deps",
+                AsyncMock(return_value=MagicMock()),
+            ),
+            patch(
+                "app.modules.ai.api.resume.operation_log_service.mark_expired_if_pending",
+                AsyncMock(),
+            ),
+            patch(
+                "app.modules.ai.api.resume.AsyncSessionLocal",
+                MagicMock(return_value=fake_db),
+            ),
+        ):
+            result = await resume_chat(
+                request=_make_request("cid"),
+                confirmation_id_query="cid",
+                db=MagicMock(),
+                current_user=_make_user(),
+            )
+            body = ""
+            async for chunk in result.body_iterator:
+                body += chunk
+        assert "AI_HITL_TIMEOUT" in body
+        assert '"type":"done"' in body or '"type": "done"' in body
+
+
+class TestOwnerLockRelease:
+    """spec §2.3: owner 锁在 finally 块释放（Lua 脚本 token 校验）"""
+
+    async def test_lock_released_after_success(
+        self, _resume_enabled, _redis_pubsub_mode
+    ) -> None:
+        from app.modules.ai.agents.gateway.result import ToolResult
+        from app.modules.ai.agents.hitl.constants import ConfirmAction
+
+        with (
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.get_pending",
+                AsyncMock(return_value=_make_pending()),
+            ),
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.ttl",
+                AsyncMock(return_value=240),
+            ),
+            patch(
+                "app.modules.ai.api.resume.redis_client.set",
+                AsyncMock(return_value=True),
+            ) as mock_set,
+            patch(
+                "app.modules.ai.api.resume.redis_client.eval",
+                AsyncMock(return_value=1),
+            ) as mock_eval,
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.hang",
+                AsyncMock(return_value=ConfirmAction.APPROVED),
+            ),
+            patch(
+                "app.modules.ai.api.resume.resume_tool_execution",
+                AsyncMock(return_value=ToolResult.success(data={})),
+            ),
+            patch(
+                "app.modules.ai.api.resume.operation_log_service.get_by_tool_call_id",
+                AsyncMock(return_value=SimpleNamespace(log_id=42)),
+            ),
+            patch(
+                "app.modules.ai.api.resume.chat_service.build_chat_deps",
+                AsyncMock(return_value=MagicMock()),
+            ),
+        ):
+            result = await resume_chat(
+                request=_make_request("cid"),
+                confirmation_id_query="cid",
+                db=MagicMock(),
+                current_user=_make_user(),
+            )
+            async for _ in result.body_iterator:
+                pass
+        mock_set.assert_awaited()  # SETNX called
+        mock_eval.assert_awaited()  # Lua release called
+
+    async def test_lock_released_on_hang_error(
+        self, _resume_enabled, _redis_pubsub_mode
+    ) -> None:
+        """hang 抛非 TimeoutError 异常时锁也要释放（finally 块）"""
+        with (
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.get_pending",
+                AsyncMock(return_value=_make_pending()),
+            ),
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.ttl",
+                AsyncMock(return_value=240),
+            ),
+            patch(
+                "app.modules.ai.api.resume.redis_client.set",
+                AsyncMock(return_value=True),
+            ),
+            patch(
+                "app.modules.ai.api.resume.redis_client.eval",
+                AsyncMock(return_value=1),
+            ) as mock_eval,
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.hang",
+                AsyncMock(side_effect=RuntimeError("redis gone")),
+            ),
+            patch(
+                "app.modules.ai.api.resume.operation_log_service.get_by_tool_call_id",
+                AsyncMock(return_value=SimpleNamespace(log_id=42)),
+            ),
+            patch(
+                "app.modules.ai.api.resume.chat_service.build_chat_deps",
+                AsyncMock(return_value=MagicMock()),
+            ),
+        ):
+            result = await resume_chat(
+                request=_make_request("cid"),
+                confirmation_id_query="cid",
+                db=MagicMock(),
+                current_user=_make_user(),
+            )
+            # body_iterator 内部的 try/except 会消化 RuntimeError 并 emit ai_error
+            async for _ in result.body_iterator:
+                pass
+        mock_eval.assert_awaited()
