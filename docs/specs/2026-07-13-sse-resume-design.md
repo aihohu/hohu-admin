@@ -1,6 +1,6 @@
 # SSE 断流续传（HITL 期热接管） — v1.5+
 
-**Status**: ⚠️ Plan v1.5+（待实现）
+**Status**: ✅ 已完成（2026-07-16 v1.5+，commits `8bef303`→`6c8692d` 后端 + `82af5c85`/`d6cf0698`/`d0bd074a` 前端）
 **Created**: 2026-07-13
 **Owner**: hohu core team
 **Depends on**: §8.4.1 多 worker HITL（已完成 2026-07-13）/ §8.3 `/ai/confirm` / §8.5 MVP 断流兜底

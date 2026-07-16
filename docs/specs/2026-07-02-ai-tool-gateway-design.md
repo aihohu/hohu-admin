@@ -1522,7 +1522,13 @@ async def cleanup_pending_on_startup():
 - `EventSource.onerror` 触发时，前端提示"网络中断，操作已取消，请重新发起"
 - 后端检测到流断（写 SSE 时 connection closed）→ 把对应 pending confirmation 标记为 `expired`
 
-v1.5 加 sequence_id + `Last-Event-ID` 头重连（标准 SSE 协议能力）。
+**v1.5+ 已实现（2026-07-16，commits `8bef303`→`6c8692d`）**：HITL 期 SSE 续传（热接管）。详见 [`2026-07-13-sse-resume-design.md`](./2026-07-13-sse-resume-design.md)（SR-9 / SR-10 / SR-11 / SR-12）。
+
+- `confirmation_required` SSE 事件附带 SSE 标准 `id: <confirmation_id>` 字段（仅当 `AI_SSE_RESUME_ENABLED=true`）
+- 新端点 `GET /ai/chat/resume` 读 `Last-Event-ID` 头接管原 confirmation（仅 `AI_HITL_MODE=redis_pubsub` 模式）
+- Redis SETNX owner 锁（`ai:hitl:owner:<conf_id>`，TTL 60s ≥ `AI_TOOL_TIMEOUT`）防 worker A cancel 慢导致 worker B 双执行
+- 新事件 `confirmation_resumed`（schema 兼容 `confirmation_required` + 新增 `resumedAt` 字段）
+- 续传仅在 HITL 期触发（断流后前端 `attemptResume` 自动重连，3 次重试上限）
 
 ### 8.6 AI 主动反问
 
@@ -2115,7 +2121,7 @@ AI 已可用但只能 autonomous：
 | Per-agent 日配额 | 不同 Agent 需不同限额 | `ai_agent.daily_quota_per_user` 字段加回 + Redis key `ai:quota:{user_id}:{agent_id}:{date}` |
 | 多 Agent + Supervisor 路由 | 启用 ≥2 业务 Agent | `available_agents: list[AiAgent]` + `build_supervisor()` |
 | 跨会话 HITL 恢复 | 用户反馈"刷新页面后丢失确认" | `GET /ai/pending-confirmations` + 前端 30s 心跳 |
-| SSE sequence_id 断点续传 | 网络抖动频繁 | 单调递增 sequence + `Last-Event-ID` 头重连 |
+| ✅ **SSE 续传（HITL 期热接管）— 已完成 2026-07-16**（spec [`2026-07-13-sse-resume-design.md`](./2026-07-13-sse-resume-design.md) / SR-9 / SR-10 / SR-11 / SR-12）| 网络抖动频繁 | SSE 标准 `id:` 字段 + `Last-Event-ID` 头 + Redis SETNX owner 锁（TTL 60s ≥ `AI_TOOL_TIMEOUT`） + `confirmation_resumed` 新事件 |
 | Conversation Manager 摘要 | 长对话超 token | `ai_conversation_summary` 表 + 小模型摘要 |
 | 风险偏好 `risk_appetite` | 不同 Agent 需不同阈值 | `AiAgent.risk_appetite` 字段 + 修正矩阵 |
 | 异步任务通道（`broadcast_to_user`） | 文件导出耗时 >30s | WebSocket / Redis pub/sub + arq 队列 |
@@ -2561,6 +2567,22 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 #### SR-8. **Prometheus metric label 不含 `user_id` / `confirmation_id` / `tool_call_id` 等高基数字段**（2026-07-13 v1.5+ 落地，spec §6.3 / §9.4）— 8 个核心 metric 的 label 集合严格冻结为低基数：tool（数十）、status（十余）、risk（3 个）、execution_mode（2 个）、mode（2 个）、result（2 个）、level（2 个）、event_type（4 个）。需要 user / conversation 维度时走日志（`ai_operation_log`）+ trace（OTel v2+ 加），不进 Prometheus。
 **反例**: (1) 加 `user_id` label → 千级用户 × 10 个 label 组合 = 万级时间序列，Prometheus 内存吃不消。(2) 加 `confirmation_id` / `tool_call_id` label → 每次调用一个新值，cardinality 无上限。(3) 加 `trace_id` label → 同上。
 **回归**: `test_no_high_cardinality_labels` 测试遍历所有 metric 检查 labelnames 不含 `{user_id, confirmation_id, tool_call_id, trace_id, session_id}`；CI 后续加 spec-vs-test 一致性检查（spec 提到 metric 时必须列出 label 集合）。
+
+#### SR-9. **SSE 续传用标准协议字段（`id:` + `Last-Event-ID` 头）而非私有 query param**（2026-07-16 v1.5+ 落地，spec [`2026-07-13-sse-resume-design.md`](./2026-07-13-sse-resume-design.md) §3）— `confirmation_required` SSE 事件附带 `id: <confirmation_id>` 字段（SSE 协议标准）；新端点 `GET /ai/chat/resume` 读 `Last-Event-ID` 请求头作为 confirmation_id；同时支持 `?confirmation_id=` query param 作为调试 / 非 EventSource 客户端的后备。
+**反例**: 私有 query param（`?confirmation_id=xxx`）— 需要看项目 spec 才懂，外部贡献者门槛高；非标准客户端（如 iOS SDK）要手工拼接 URL；浏览器原生 `EventSource` 类无法自动重连。
+**回归**: 端点同时支持 query param 作为调试后备（curl 一目了然），但 spec 主推 `Last-Event-ID` 头。前端 fetch 模式手工加 `Last-Event-ID` 头（`attemptResume` action）。`test_last_event_id_header_preferred` + `test_query_param_fallback` 覆盖优先级。
+
+#### SR-10. **SSE 续传并发安全默认到位（Redis SETNX owner 锁）**（2026-07-16 v1.5+ 落地，spec [`2026-07-13-sse-resume-design.md`](./2026-07-13-sse-resume-design.md) §4）— 新 worker 接管前抢 Redis 锁 `ai:hitl:owner:<confirmation_id>`，**TTL 60s（≥ `AI_TOOL_TIMEOUT` 30s + 余量）**，token 匹配（Lua 脚本防误删）。锁竞争失败 → 409 + `AI_RESUME_IN_PROGRESS`，前端 2s 后重试。
+**反例**: (1) 不加锁 → worker A cancel 慢时 worker B 双执行 tool，破坏性操作（如 `user.batch_delete`）可能删两次。(2) 进程内 `threading.Lock` → 多 worker 失效。(3) `wake` 端做 owner 校验 → 改动面太大，涉及 `/ai/confirm` 现有契约。(4) 留到 v1.6+ → 开源项目留已知并发风险等于邀请用户踩坑。(5) owner 锁 TTL < `AI_TOOL_TIMEOUT` → execute_tool 慢时锁先过期，B 抢锁双执行（设计漏洞，TTL 必须 ≥ tool 超时）。
+**回归**: 每次 resume 抢 60s TTL 锁；execute_tool 完成 / hang 抛错时释放（Lua 脚本 token 校验）；worker A cancel 一定会传播到 hang（asyncio 协作式），最多延迟 60s 不会双执行；部署文档 §10.5 明确「修改 `AI_TOOL_TIMEOUT` 时同步检查 `AI_HITL_OWNER_LOCK_TTL_SEC`」。`test_lock_released_after_success` + `test_lock_released_on_hang_error` 覆盖 finally 释放路径。
+
+#### SR-11. **续传仅覆盖 HITL 期，不缓存流式 text-delta**（2026-07-16 v1.5+ 落地，spec [`2026-07-13-sse-resume-design.md`](./2026-07-13-sse-resume-design.md) §1.3）— sequence_id 只在 `confirmation_required` 事件上分配（SSE `id:` 字段）；text-delta / reasoning-delta / tool_call_started 等中间事件不分配 sequence，不缓存到 Redis。
+**反例**: (1) 全 SSE 流事件缓存 → 高频 text-delta 写入 Redis 撑爆内存，去重 / 顺序逻辑复杂。(2) 缓存关键事件（tool_call_started 等） → 收益有限（这些事件跟着 confirmation_required 一起丢失），增加缓存复杂度。
+**回归**: HITL 期是最长等待窗口（5min），断流概率最高，续传收益最大；流式生成期断流用户重新发消息即可（LLM 重跑成本可接受）。spec §8 范围外明示 text-delta 续传留 v1.6+。
+
+#### SR-12. **新增 `confirmation_resumed` 事件而非重放 `confirmation_required`**（2026-07-16 v1.5+ 落地，spec [`2026-07-13-sse-resume-design.md`](./2026-07-13-sse-resume-design.md) §2.2）— 重连后服务端 emit `confirmation_resumed`（schema 兼容 `confirmation_required` + 新增 `resumedAt` 字段），前端区分首次 vs 重连，做差异化 UI（重连后抽屉显示"已重连"chip）。
+**反例**: 重放 `confirmation_required` → 滥用事件语义（事件名说"要求确认"，重连后再发让读 spec 的人困惑）；前端要做"是否已在 pending 状态"去重逻辑；外部贡献者读 spec 困惑。
+**回归**: 两事件 schema 兼容（共用字段），前端可统一渲染逻辑；仅 UI badge 差异。前端 `chat-confirmation-drawer.vue::isReconnected` 计算属性 + `reconnectedAt` 渲染 HH:MM。
 
 ### 修订后立即需要做的事（优先级排序）
 

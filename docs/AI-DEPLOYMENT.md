@@ -296,6 +296,25 @@ sum(rate(ai_security_events_total[5m])) by (event_type)
 - Prometheus：单实例 < 100MB RAM（10 万样本/分钟够用）
 - 应用侧开销：< 1% CPU（prometheus_client 是 in-process，无网络开销）
 
+### 10.5 SSE 续传依赖（spec §3 v1.5+，2026-07-16 落地）
+
+SSE 续传（HITL 期热接管）要求 **`AI_HITL_MODE=redis_pubsub`** + 多 worker 部署。
+
+- 内网部署 / 单 worker：保持 `memory` 模式，续传端点返 410（前端退化为 MVP 行为，提示"网络中断，请重新发起"）
+- 移动端 / 不稳定网络：必须 `redis_pubsub` 模式，否则断流即取消（用户重新发对话，LLM 重跑成本可接受）
+
+配置：
+```env
+AI_HITL_MODE=redis_pubsub       # 启用续传的硬约束
+AI_SSE_RESUME_ENABLED=true      # 续传功能开关（默认开）
+AI_HITL_OWNER_LOCK_TTL_SEC=60   # owner 锁 TTL（spec §2.3 SR-10 反例 5）
+```
+
+**修改 `AI_TOOL_TIMEOUT` 时务必同步检查 `AI_HITL_OWNER_LOCK_TTL_SEC`**：owner 锁 TTL 必须 ≥ `AI_TOOL_TIMEOUT`，否则 execute_tool 慢时锁先过期 → 新 worker B 抢锁双执行（spec §2.3 race 分析）。当前默认 `AI_TOOL_TIMEOUT=30s` + `AI_HITL_OWNER_LOCK_TTL_SEC=60s` 留 30s 余量。
+
+详见 spec [`2026-07-13-sse-resume-design.md`](./specs/2026-07-13-sse-resume-design.md) / SR-9 / SR-10 / SR-11 / SR-12。
+
+
 ---
 
 ## 7. 升级 / 回滚
