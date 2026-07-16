@@ -2122,6 +2122,7 @@ AI 已可用但只能 autonomous：
 | 多 Agent + Supervisor 路由 | 启用 ≥2 业务 Agent | `available_agents: list[AiAgent]` + `build_supervisor()` |
 | 跨会话 HITL 恢复 | 用户反馈"刷新页面后丢失确认" | `GET /ai/pending-confirmations` + 前端 30s 心跳 |
 | ✅ **SSE 续传（HITL 期热接管）— 已完成 2026-07-16**（spec [`2026-07-13-sse-resume-design.md`](./2026-07-13-sse-resume-design.md) / SR-9 / SR-10 / SR-11 / SR-12）| 网络抖动频繁 | SSE 标准 `id:` 字段 + `Last-Event-ID` 头 + Redis SETNX owner 锁（TTL 60s ≥ `AI_TOOL_TIMEOUT`） + `confirmation_resumed` 新事件 |
+| ⚠️ **Plan v1.6+ gap**：分层 tool result + view type registry（spec [`2026-07-16-tool-result-view-design.md`](./2026-07-16-tool-result-view-design.md) / SR-13）| TOB 开源协作：业务方加 tool 不应改前端代码；当前 `tool_call_result.result` 是 free-form dict，前端只能 JSON 打印或硬编码 by tool name | `ToolResult` 拆双层（LLM 层精简 dict + UI 层 `UIResult(view_type, view_data, audit)`）；`AiToolMeta.result_view` 启动校验；前端按 `view_type` 路由标准组件库（rows_affected / data_list / stats_chart / detail_card / redirect_chip / plain_json fallback）；UI 层数据不进 LLM prompt；i18n 走 `label_key` |
 | Conversation Manager 摘要 | 长对话超 token | `ai_conversation_summary` 表 + 小模型摘要 |
 | 风险偏好 `risk_appetite` | 不同 Agent 需不同阈值 | `AiAgent.risk_appetite` 字段 + 修正矩阵 |
 | 异步任务通道（`broadcast_to_user`） | 文件导出耗时 >30s | WebSocket / Redis pub/sub + arq 队列 |
@@ -2583,6 +2584,10 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 #### SR-12. **新增 `confirmation_resumed` 事件而非重放 `confirmation_required`**（2026-07-16 v1.5+ 落地，spec [`2026-07-13-sse-resume-design.md`](./2026-07-13-sse-resume-design.md) §2.2）— 重连后服务端 emit `confirmation_resumed`（schema 兼容 `confirmation_required` + 新增 `resumedAt` 字段），前端区分首次 vs 重连，做差异化 UI（重连后抽屉显示"已重连"chip）。
 **反例**: 重放 `confirmation_required` → 滥用事件语义（事件名说"要求确认"，重连后再发让读 spec 的人困惑）；前端要做"是否已在 pending 状态"去重逻辑；外部贡献者读 spec 困惑。
 **回归**: 两事件 schema 兼容（共用字段），前端可统一渲染逻辑；仅 UI badge 差异。前端 `chat-confirmation-drawer.vue::isReconnected` 计算属性 + `reconnectedAt` 渲染 HH:MM。
+
+#### SR-13. **v1.6+ 拆 `ToolResult` 双层（LLM 层精简 + UI 层 `UIResult`）+ 标准 view type registry**（2026-07-16 决策，v1.6+ 落地，spec [`2026-07-16-tool-result-view-design.md`](./2026-07-16-tool-result-view-design.md)）— 当前 `tool_call_result.result: Any` 是 free-form dict，前端 `chat-tool-call.vue` 只能 JSON 打印或 by tool name 硬编码渲染（`user.stats` 走 `ChatToolStatsTabs`、readonly tool 走 `CHIP_TARGETS` map）。v1.6+ 改造：tool 返回 `ToolResult.success(data={精简 dict 给 LLM}, ui=UIResult(view_type, view_data, audit))`；`AiToolMeta.result_view` 启动校验；前端按 `view_type` 路由标准组件库（`rows_affected` / `data_list` / `stats_chart` / `detail_card` / `redirect_chip` / `plain_json` fallback）；UI 层数据完全旁路 LLM prompt；i18n 走 `view_data.label_key`；审计字段（`affected_user_ids` 等）标准化写 `ai_operation_log.result_summary`。
+**反例**: (1) `result._view` hint → 污染 LLM prompt 上下文（除非后端 strip，增加复杂度）；business 方随便写无校验。(2) 仅 `AiToolMeta.result_view` 单层 → LLM 仍看完整 result（含审计细节，prompt 浪费 + 注入风险）。(3) 保持现状 → TOB 开源协作差（业务方每加 tool 要改前端代码渲染 result），不达企业级标准。(4) 业务方 plugin 注册自定义 view_type + Vue 组件 → 工程复杂度过高，留 v2+。
+**回归**: 渐进式迁移（未声明 `result_view` 的旧 tool fallback 到 `plain_json`，不破坏现有）；启动校验 `result_view` 在标准 registry；前端 `<component :is="viewComponent" :data="result.ui" />`；现有 `user.stats` / `user.count` 等 tool 迁移到对应 `stats_chart` / `redirect_chip` view_type。
 
 ### 修订后立即需要做的事（优先级排序）
 
