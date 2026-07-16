@@ -276,7 +276,7 @@ async def resume_chat(
                 return
 
             try:
-                result = await resume_tool_execution(pending, deps, log_id)
+                result, duration_ms = await resume_tool_execution(pending, deps, log_id)
             except Exception:
                 logger.exception("resume: resume_tool_execution failed")
                 yield _format_sse_chunk(
@@ -294,7 +294,7 @@ async def resume_chat(
                     tool=pending.tool_name,
                     tool_call_id=pending.tool_call_id,
                     ok=result.ok,
-                    duration_ms=0,
+                    duration_ms=duration_ms,
                     result=result.data if result.ok else None,
                     error_code=result.error_code if not result.ok else None,
                     error_msg=result.error_msg if not result.ok else None,

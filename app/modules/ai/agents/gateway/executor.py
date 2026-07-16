@@ -847,7 +847,7 @@ async def resume_tool_execution(
     pending: PendingPayload,
     deps: ChatDeps,
     log_id: int,
-) -> ToolResult:
+) -> tuple[ToolResult, int]:
     """续传端点专用：从 pending payload 重建执行上下文，跑业务函数
 
     与 execute_tool 区别（spec §4.3）：
@@ -862,7 +862,8 @@ async def resume_tool_execution(
         log_id: 首次 execute_tool 写的 ai_operation_log.log_id
 
     Returns:
-        ToolResult（success / failure），resume 端点据此 emit tool_call_result
+        (ToolResult, duration_ms) — resume 端点据此 emit tool_call_result，
+        duration_ms 是业务执行墙钟耗时（毫秒）。
     """
     registry = ToolRegistry.get()
     registered = registry.find(pending.tool_name)
@@ -871,9 +872,12 @@ async def resume_tool_execution(
             "resume: tool not found",
             extra={"tool": pending.tool_name, "tool_call_id": pending.tool_call_id},
         )
-        return ToolResult.failure(
-            error_code="AI_TOOL_NOT_FOUND",
-            error_msg=USER_FACING_MSG["AI_TOOL_NOT_FOUND"],
+        return (
+            ToolResult.failure(
+                error_code="AI_TOOL_NOT_FOUND",
+                error_msg=USER_FACING_MSG["AI_TOOL_NOT_FOUND"],
+            ),
+            0,
         )
 
     args_hash = compute_args_hash(pending.args)
@@ -881,5 +885,6 @@ async def resume_tool_execution(
     result = await _invoke_tool_fn(
         registered, pending.args, deps, args_hash, l1_member=None
     )
+    duration_ms = int((time.monotonic() - started_at) * 1000)
     await _finish_log_final(log_id, result, started_at)
-    return result
+    return result, duration_ms

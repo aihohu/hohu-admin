@@ -306,7 +306,9 @@ class TestResumeSuccessPath:
             ),
             patch(
                 "app.modules.ai.api.resume.resume_tool_execution",
-                AsyncMock(return_value=ToolResult.success(data={"affected_count": 1})),
+                AsyncMock(
+                    return_value=(ToolResult.success(data={"affected_count": 1}), 150)
+                ),
             ),
             patch(
                 "app.modules.ai.api.resume.operation_log_service.get_by_tool_call_id",
@@ -358,6 +360,7 @@ class TestResumeSuccessPath:
         )
         assert '"type":"done"' in body or '"type": "done"' in body
         assert body.index("confirmation_resumed") < body.index("tool_call_result")
+        assert '"durationMs":150' in body or '"durationMs": 150' in body
 
     async def test_rejected_path_emits_failure_result(
         self, _resume_enabled, _redis_pubsub_mode
@@ -519,7 +522,7 @@ class TestOwnerLockRelease:
             ),
             patch(
                 "app.modules.ai.api.resume.resume_tool_execution",
-                AsyncMock(return_value=ToolResult.success(data={})),
+                AsyncMock(return_value=(ToolResult.success(data={}), 100)),
             ),
             patch(
                 "app.modules.ai.api.resume.operation_log_service.get_by_tool_call_id",
