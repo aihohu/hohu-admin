@@ -231,13 +231,37 @@ def check_summary_length_limit(reg: RegisteredTool) -> list[Violation]:
 
 
 def check_dry_run_tool_must_implement_hook(reg: RegisteredTool) -> list[Violation]:
-    """spec §5.1: dry_run_supported=True 必须有 _dry_run_<tool>"""
-    if reg.meta.dry_run_supported and reg.dry_run_fn is None:
+    """spec §5.1: dry_run_supported=True 必须有 _dry_run_<tool>
+
+    dry_run_fn 在 validate_on_startup 时统一解析（commit 51d732f），装饰器执行
+    期 reg.dry_run_fn 还是 None。本检查直接 sys.modules 查找 _dry_run_<tool>
+    函数存在性（static check 时所有模块已加载完）。
+    """
+    if not reg.meta.dry_run_supported:
+        return []
+    # 已经被 validate_on_startup 解析过（运行时）→ 直接通过
+    if reg.dry_run_fn is not None:
+        return []
+    # 静态检查路径：从 fn.__module__ 查找 _dry_run_<tool> 函数
+    import sys  # noqa: PLC0415
+
+    module_name = reg.fn.__module__
+    module = sys.modules.get(module_name)
+    if module is None:
         return [
             Violation(
                 reg.meta.name,
                 "dry_run_tool_must_implement_hook",
-                "dry_run_supported=True 但未注册 dry_run_fn（装饰器反射查找 _dry_run_<tool> 失败）",
+                f"dry_run_supported=True 但模块 {module_name!r} 未加载（无法查找 _dry_run_<tool>）",
+            )
+        ]
+    fn_name = f"_dry_run_{reg.meta.name.replace('.', '_')}"
+    if not hasattr(module, fn_name):
+        return [
+            Violation(
+                reg.meta.name,
+                "dry_run_tool_must_implement_hook",
+                f"dry_run_supported=True 但同模块未定义 async def {fn_name}（命名约定：name='user.create' → _dry_run_user_create）",
             )
         ]
     return []

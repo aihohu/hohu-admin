@@ -19,6 +19,7 @@ from typing import Any
 
 from sqlalchemy import func, select
 
+from app.modules.ai.agents.gateway import ensure_targets_in_scope
 from app.modules.ai.agents.tools.decorator import ai_tool
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.agents.tools.stats_validator import (
@@ -224,3 +225,71 @@ async def dept_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) 
 
     count = await ctx.db.scalar(stmt)
     return {"count": int(count or 0)}
+
+
+# ============ user.batch_delete（destructive + HITL，spec §11.3 示例） ============
+
+
+@ai_tool(
+    AiToolMeta(
+        name="user.batch_delete",
+        agent="user_mgmt",
+        summary="Delete users by IDs → {'deleted': N}. Call directly on delete intent; HITL handles confirmation.",
+        required_perms=("system:user:delete",),
+        risk="destructive",
+        hitl_always=True,
+        dry_run_supported=True,
+    )
+)
+async def user_batch_delete(
+    ctx: AiToolContext, *, user_ids: list[int]
+) -> dict[str, Any]:
+    """Delete users by their user_id list.
+
+    Call this tool immediately when the user requests deletion — the HITL
+    (Human-In-The-Loop) confirmation drawer is shown to the user automatically
+    by the backend; you should NOT ask the user to confirm via chat text.
+
+    Args:
+        user_ids: list of user IDs to delete (Snowflake int64 IDs)
+    """
+    # spec §6.2 data_scope 强制：写 tool 含 *_ids 必须先验证 targets 可见
+    ensure_targets_in_scope(ctx, user_ids=user_ids)
+
+    from app.modules.system.service.user_service import user_service  # noqa: PLC0415
+
+    count = await user_service.batch_delete_users(
+        ctx.db, user_ids, current_user_id=ctx.user.user_id
+    )
+    return {"deleted": count, "user_ids": [str(i) for i in user_ids]}
+
+
+async def _dry_run_user_batch_delete(ctx: AiToolContext, *, user_ids: list[int]) -> Any:
+    """dry_run：返回拟删除用户数 + 校验 admin/自身保护"""
+    from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
+
+    if not user_ids:
+        return DryRunResult(ok=False, count=0, reason="未选择要删除的用户")
+
+    # spec §6.2: dry_run 也要校验 data_scope（防越权预估）
+    ensure_targets_in_scope(ctx, user_ids=user_ids)
+
+    existing_stmt = select(User.user_id, User.user_name).where(
+        User.user_id.in_(user_ids)
+    )
+    rows = (await ctx.db.execute(existing_stmt)).all()
+    found_ids = {r[0] for r in rows}
+    missing = [i for i in user_ids if i not in found_ids]
+    if missing:
+        return DryRunResult(
+            ok=False,
+            count=0,
+            reason=f"以下 user_id 不存在: {missing[:5]}{'...' if len(missing) > 5 else ''}",
+        )
+
+    names = [r[1] for r in rows]
+    return DryRunResult(
+        ok=True,
+        count=len(user_ids),
+        reason=f"将删除 {len(user_ids)} 个用户：{', '.join(names[:3])}{'...' if len(names) > 3 else ''}",
+    )
