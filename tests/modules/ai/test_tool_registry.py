@@ -301,7 +301,12 @@ class TestAiToolDecorator:
         assert "shared.ping" in ToolRegistry.get()
 
     def test_decorator_finds_dry_run_fn(self) -> None:
-        """spec §5.1: 同模块 _dry_run_<tool> 反射查找"""
+        """spec §5.1: dry_run_fn 在 _resolve_dry_run_fns 时查找（不是装饰器执行期）
+
+        业务方文件 _dry_run_<tool> 可能定义在 @ai_tool 之后，装饰器执行期
+        sys.modules[fn.__module__] 还找不到。延迟到 _resolve_dry_run_fns
+        （validate_on_startup 调）时所有模块已加载，查找可靠。
+        """
 
         # 在本测试模块内定义 _dry_run_<tool_dot_to_underscore>
         async def _dry_run_test_decor_dry_run(ctx: Any, **kw: Any) -> dict:
@@ -325,8 +330,13 @@ class TestAiToolDecorator:
             async def my_tool(ctx: Any) -> str:
                 return "ok"
 
-            found = ToolRegistry.get().find("test_decor.dry_run")
+            registry = ToolRegistry.get()
+            found = registry.find("test_decor.dry_run")
             assert found is not None
+            # 装饰器执行期不查找（dry_run_fn 为 None）
+            assert found.dry_run_fn is None
+            # _resolve_dry_run_fns 后查找成功
+            registry._resolve_dry_run_fns()
             assert found.dry_run_fn is _dry_run_test_decor_dry_run
         finally:
             globals().pop("_dry_run_test_decor_dry_run", None)

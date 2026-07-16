@@ -16,35 +16,15 @@
 
 dry_run 函数查找约定（spec §5.1）：
     name='user.create' → 同模块必须定义 async def _dry_run_user_create(ctx, ...)
-    装饰器执行期通过反射查找，找不到且 dry_run_supported=True → 启动时报错
+    装饰器执行期不查找（业务方文件顺序不可控），validate_on_startup 时统一查找
+    （在 ToolRegistry._resolve_dry_run_fns 内）。
 """
 
-import sys
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from .meta import SHARED_AGENT_CODE, AiToolMeta
 from .registry import ToolRegistry, ToolRegistryError
-
-
-def _find_dry_run_fn(
-    meta: AiToolMeta, fn: Callable[..., Awaitable[Any]]
-) -> Callable[..., Awaitable[Any]] | None:
-    """查找同模块的 _dry_run_<tool> 函数
-
-    Naming convention（spec §5.1）：
-        meta.name='user.create' → _dry_run_user_create
-
-    实现：直接用 fn.__module__ 拿业务方模块名（比 frame introspection 稳健，
-    不受装饰器嵌套层数影响），再 sys.modules + getattr。
-    返回 None 表示该模块没定义此函数。
-    """
-    module_name = fn.__module__
-    if not module_name or module_name not in sys.modules:
-        return None
-    module = sys.modules[module_name]
-    fn_name = f"_dry_run_{meta.name.replace('.', '_')}"
-    return getattr(module, fn_name, None)
 
 
 def ai_tool(
@@ -54,9 +34,8 @@ def ai_tool(
 
     工作流：
       1. 校验 meta 字段（必填非空 / summary 长度）
-      2. 反射查找 _dry_run_<tool>（如存在则附带注册）
-      3. 注册到 ToolRegistry（重名抛 ToolRegistryError）
-      4. 返回原函数（不包装，包装在 Phase 1.2b PydanticAI 适配层做）
+      2. 注册到 ToolRegistry（重名抛 ToolRegistryError）
+      3. 返回原函数（不包装，包装在 Phase 1.2b PydanticAI 适配层做）
 
     为什么不立即包装为 PydanticAI tool：
       - PydanticAI 包装需要 AiToolContext（Phase 1.3 后才定义）
@@ -91,16 +70,10 @@ def ai_tool(
         registry = ToolRegistry.get()
         registry.register(meta, fn)
 
-        # 反射查找 dry_run 函数，找到则回填（spec §5.1 命名约定）
-        dry_run_fn = _find_dry_run_fn(meta, fn)
-        if dry_run_fn is not None:
-            registry.set_dry_run_fn(meta.name, dry_run_fn)
-        elif meta.dry_run_supported:
-            # dry_run_supported=True 但找不到 _dry_run_<tool>
-            # 这里不立即抛错，让 validate_on_startup 统一报错（spec §12.4 lint 双重保险）
-            # 避免装饰器执行期抛错破坏 import 顺序
-            pass
-
+        # dry_run_fn 查找延迟到 validate_on_startup（spec §5.1）
+        # — 装饰器执行期业务方文件可能还没解析到 _dry_run_<tool>（函数定义在
+        # 装饰器之后），此时 sys.modules[fn.__module__] 上找不到。startup 时
+        # 所有模块已加载完毕，查找可靠。
         return fn
 
     return decorator
