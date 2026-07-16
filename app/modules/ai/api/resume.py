@@ -95,7 +95,7 @@ def _build_resumed_event(confirmation_id: str, pending) -> ConfirmationResumedEv
     )
 
 
-@router.get("", summary="SSE 流断流续传（HITL 期热接管）")
+@router.get("/resume", summary="SSE 流断流续传（HITL 期热接管）")
 async def resume_chat(
     request: Request,
     confirmation_id_query: str | None = Query(

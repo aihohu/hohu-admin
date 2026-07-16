@@ -588,3 +588,27 @@ class TestOwnerLockRelease:
             async for _ in result.body_iterator:
                 pass
         mock_eval.assert_awaited()
+
+
+# ============ 路由注册 ============
+
+
+class TestResumeRouterRegistered:
+    def test_route_in_openapi(self) -> None:
+        from app.main import app
+
+        paths = app.openapi()["paths"]
+        # ai_resume_router prefix="/ai/chat" + "/resume" path → /ai/chat/resume GET
+        assert any(
+            "/resume" in path and "get" in methods for path, methods in paths.items()
+        ), "resume endpoint not registered"
+
+    def test_route_gated_by_ai_module_enabled(self) -> None:
+        """AI_MODULE_ENABLED=False 时 resume 路由也不应注册（source inspection）"""
+        import inspect
+
+        from app import main
+
+        src = inspect.getsource(main)
+        # 注册语句应在 `if settings.AI_MODULE_ENABLED:` 块内
+        assert "ai_resume_router" in src

@@ -25,6 +25,7 @@ from app.modules.ai.api.conversation import router as ai_conversation_router
 from app.modules.ai.api.operation_log import router as ai_operation_log_router
 from app.modules.ai.api.provider import router as ai_provider_router
 from app.modules.ai.api.query_cache import router as ai_query_cache_router
+from app.modules.ai.api.resume import router as ai_resume_router
 from app.modules.auth.api import router as auth_router
 from app.modules.job.api.job import router as job_router
 from app.modules.job.api.job_log import router as job_log_router
@@ -191,6 +192,7 @@ app.include_router(login_log_router, prefix="/system/login-log", tags=["登录�
 if settings.AI_MODULE_ENABLED:
     app.include_router(ai_agent_router, prefix="/ai/agents", tags=["AI Agent"])
     app.include_router(ai_chat_router, prefix="/ai/chat", tags=["AI对话"])
+    app.include_router(ai_resume_router, prefix="/ai/chat", tags=["AI对话"])
     app.include_router(ai_confirm_router, prefix="/ai/confirm", tags=["AI HITL 确认"])
     app.include_router(
         ai_conversation_router, prefix="/ai/conversation", tags=["AI会话"]
