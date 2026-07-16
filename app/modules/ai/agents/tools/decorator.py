@@ -19,7 +19,6 @@ dry_run 函数查找约定（spec §5.1）：
     装饰器执行期通过反射查找，找不到且 dry_run_supported=True → 启动时报错
 """
 
-import inspect
 import sys
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -28,25 +27,19 @@ from .meta import SHARED_AGENT_CODE, AiToolMeta
 from .registry import ToolRegistry, ToolRegistryError
 
 
-def _find_dry_run_fn(meta: AiToolMeta) -> Callable[..., Awaitable[Any]] | None:
-    """反射查找同模块的 _dry_run_<tool> 函数
+def _find_dry_run_fn(
+    meta: AiToolMeta, fn: Callable[..., Awaitable[Any]]
+) -> Callable[..., Awaitable[Any]] | None:
+    """查找同模块的 _dry_run_<tool> 函数
 
     Naming convention（spec §5.1）：
         meta.name='user.create' → _dry_run_user_create
 
-    实现：通过 sys.modules[fn.__module__] 拿到模块对象，再 getattr。
+    实现：直接用 fn.__module__ 拿业务方模块名（比 frame introspection 稳健，
+    不受装饰器嵌套层数影响），再 sys.modules + getattr。
     返回 None 表示该模块没定义此函数。
     """
-    # 装饰器执行时调用栈：业务方文件 → @ai_tool → _find_dry_run_fn
-    # 通过 inspect 拿到调用方所在模块名
-    frame = inspect.currentframe()
-    if frame is None:
-        return None
-    # 上 2 层：_find_dry_run_fn → ai_tool → 业务方
-    caller_frame = frame.f_back.f_back if frame.f_back and frame.f_back.f_back else None
-    if caller_frame is None:
-        return None
-    module_name = caller_frame.f_globals.get("__name__")
+    module_name = fn.__module__
     if not module_name or module_name not in sys.modules:
         return None
     module = sys.modules[module_name]
@@ -99,7 +92,7 @@ def ai_tool(
         registry.register(meta, fn)
 
         # 反射查找 dry_run 函数，找到则回填（spec §5.1 命名约定）
-        dry_run_fn = _find_dry_run_fn(meta)
+        dry_run_fn = _find_dry_run_fn(meta, fn)
         if dry_run_fn is not None:
             registry.set_dry_run_fn(meta.name, dry_run_fn)
         elif meta.dry_run_supported:
