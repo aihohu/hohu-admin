@@ -1,0 +1,95 @@
+"""MessageOut schema 字段类型测试 — spec §BUG-FE-18
+
+tool_calls 在 chat.py::_record_tool_event 中以 list[dict] 形式收集
+（每个 tool 调用一个 dict），但旧 schema 写成 dict | None，导致 reload
+含 tool_calls 的会话时 Pydantic ValidationError。
+"""
+
+# ruff: noqa: ARG001, PLC0415
+
+from datetime import datetime
+
+from app.modules.ai.models.message import AiMessage
+from app.modules.ai.schemas.message import MessageOut
+
+
+def _make_msg(*, tool_calls: list | None) -> AiMessage:
+    return AiMessage(
+        message_id=1,
+        conversation_id=1,
+        parent_message_id=None,
+        role="assistant",
+        message_type="text",
+        content="ok",
+        parts=None,
+        tokens_input=None,
+        tokens_output=None,
+        tool_calls=tool_calls,
+        create_time=datetime(2026, 7, 17, 12, 0, 0),
+    )
+
+
+class TestMessageOutToolCallsList:
+    """tool_calls 必须是 list[dict]：每次 tool 调用一个 dict，按顺序追加"""
+
+    def test_none_tool_calls(self) -> None:
+        """纯文本消息无 tool_calls"""
+        msg = _make_msg(tool_calls=None)
+        out = MessageOut.model_validate(msg)
+        assert out.tool_calls is None
+
+    def test_empty_list(self) -> None:
+        """空 list 也合法（理论不会出现，但 schema 不应拒绝）"""
+        msg = _make_msg(tool_calls=[])
+        out = MessageOut.model_validate(msg)
+        assert out.tool_calls == []
+
+    def test_single_tool_call(self) -> None:
+        """单次 tool 调用"""
+        msg = _make_msg(
+            tool_calls=[
+                {
+                    "tool": "user.count",
+                    "tool_call_id": "tc_1",
+                    "args": {"status": "1"},
+                    "ok": True,
+                    "result": {"count": 5},
+                    "duration_ms": 100,
+                }
+            ]
+        )
+        out = MessageOut.model_validate(msg)
+        assert isinstance(out.tool_calls, list)
+        assert len(out.tool_calls) == 1
+        assert out.tool_calls[0]["tool"] == "user.count"
+
+    def test_multiple_tool_calls(self) -> None:
+        """多次 tool 调用按顺序存储（典型场景：LLM 连续调多个 tool）"""
+        msg = _make_msg(
+            tool_calls=[
+                {"tool": "user.count", "tool_call_id": "tc_1", "ok": True},
+                {"tool": "user.batch_delete", "tool_call_id": "tc_2", "ok": True},
+            ]
+        )
+        out = MessageOut.model_validate(msg)
+        assert len(out.tool_calls) == 2
+        assert out.tool_calls[0]["tool"] == "user.count"
+        assert out.tool_calls[1]["tool"] == "user.batch_delete"
+
+    def test_snowflake_id_in_args_is_string(self) -> None:
+        """修 BUG 后 args 中的 Snowflake ID 已 stringify，reload 时保持 str"""
+        msg = _make_msg(
+            tool_calls=[
+                {
+                    "tool": "user.batch_delete",
+                    "tool_call_id": "tc_1",
+                    "args": {"user_ids": ["7483433649145122816"]},
+                    "ok": True,
+                    "result": {"deleted": 1, "user_ids": ["7483433649145122816"]},
+                    "duration_ms": 13,
+                }
+            ]
+        )
+        out = MessageOut.model_validate(msg)
+        assert out.tool_calls[0]["args"]["user_ids"] == ["7483433649145122816"]
+        assert out.tool_calls[0]["result"]["user_ids"] == ["7483433649145122816"]
