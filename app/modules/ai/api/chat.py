@@ -396,7 +396,26 @@ async def chat(
                 )
 
         # 生产者：跑 PydanticAI stream，把 vercel chunk 转发到 unified_queue
+        # 修订 BUG: PydanticAI 调 tool fn 时 stream 协程在 tool fn 内 hang（HITL
+        # 等 wake 5min），原实现 drain custom_event_queue 绑定在 vercel chunk
+        # 之后，stream hang 时不 drain → confirmation_required 事件卡 queue 没到
+        # 前端。修法：独立 drain_task 异步消费 custom_event_queue，不依赖 vercel
+        # chunk 流转。
         unified_queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+        async def drain_custom_events() -> None:
+            """独立任务：消费 custom_event_queue（tool_call_started /
+            confirmation_required / tool_call_result 等自定义事件）
+
+            与 produce_pydantic 并行运行，事件到达立即转发到 unified_queue。
+            收到 None sentinel 退出。
+            """
+            while True:
+                ev = await custom_event_queue.get()
+                if ev is None:  # sentinel
+                    break
+                _record_tool_event(ev)
+                await unified_queue.put(_format_sse_chunk(ev))
 
         async def produce_pydantic():
             try:
@@ -405,11 +424,6 @@ async def chat(
                     # `data: {"type":"text-delta","delta":"..."}\n\n`）
                     _collect_text_delta(chunk, collected)
                     await unified_queue.put(chunk)
-                    # 转发完一个 vercel chunk 后，drain custom queue（避免漏发）
-                    while not custom_event_queue.empty():
-                        ev = custom_event_queue.get_nowait()
-                        _record_tool_event(ev)  # 修订 BUG-FE-18
-                        await unified_queue.put(_format_sse_chunk(ev))
             except UsageLimitExceeded as e:
                 # spec §11.6: agent loop 超限（tool_calls_limit=5 / request_limit=10）
                 # 显式 emit AiErrorEvent(AI_USAGE_LIMIT_EXCEEDED)，前端弹 $message.error
@@ -431,13 +445,9 @@ async def chat(
                 logger.exception("PydanticAI stream error")
                 await unified_queue.put(None)
             else:
-                # stream 结束前先 drain 残留 custom events
-                while not custom_event_queue.empty():
-                    ev = custom_event_queue.get_nowait()
-                    _record_tool_event(ev)  # 修订 BUG-FE-18
-                    await unified_queue.put(_format_sse_chunk(ev))
                 await unified_queue.put(None)  # sentinel
 
+        drain_task = asyncio.create_task(drain_custom_events())
         pydantic_task = asyncio.create_task(produce_pydantic())
 
         # 主循环：消费 unified_queue
@@ -454,6 +464,12 @@ async def chat(
                     await pydantic_task
                 except (asyncio.CancelledError, Exception):
                     pass
+            # 通知 drain_task 退出 + 等它处理完残留事件
+            await custom_event_queue.put(None)
+            try:
+                await drain_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
         # 流结束 emit done（spec §8.1）
         yield _format_sse_chunk(DoneEvent())
