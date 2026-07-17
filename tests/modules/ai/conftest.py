@@ -59,6 +59,15 @@ async def db_session() -> AsyncSession:
     from sqlalchemy import text  # noqa: PLC0415
 
     _reset_redis_client()
+    # 入口 dispose：上个测试 loop 关闭后，连接池里残留的 asyncpg connection
+    # 仍绑定到旧 loop，下个测试 setup 拿到这条连接会触发 RuntimeError:
+    # Event loop is closed（pytest-asyncio function-scoped loop 的已知 race）。
+    # 这里 dispose 清空池，强制下个 connect() 走新建 connection 路径。
+    try:
+        await engine.dispose()
+    except RuntimeError as e:
+        if "Event loop is closed" not in str(e):
+            raise
     try:
         async with engine.connect() as conn:
             outer = await conn.begin()
