@@ -18,7 +18,10 @@ class OperationLogOut(BaseModel):
         ..., description="running/pending_confirmation/success/failed/rejected/expired"
     )
     error_code: str | None = None
-    started_at: datetime
+    # started_at 在 pending_confirmation / expired / rejected 状态下可能为 NULL：
+    # 业务还没真正开始执行（HITL 等待 / 未 approve / 超时未操作）。与
+    # AiOperationLog.started_at: Mapped[datetime | None] 一致。
+    started_at: datetime | None = None
     finished_at: datetime | None = None
     duration_ms: int | None = None
 
