@@ -365,10 +365,16 @@ async def chat(
         started_events: dict[str, dict] = {}  # tool_call_id → started event dict
 
         def _record_tool_event(ev):
-            """拦截 ToolCallStarted/Result 事件，配对后存 collected_tool_calls"""
+            """拦截 ToolCallStarted/Result 事件，配对后存 collected_tool_calls
+
+            args / result 在写入前调 stringify_large_ints：Snowflake ID 是 int64，
+            超 JS Number.MAX_SAFE_INTEGER，DB JSON 列直接存 int 会让前端 reload
+            会话时还原 streamEvents 丢精度（CLAUDE.md 跨项目硬规则 #3）。
+            """
             from app.modules.ai.agents.hitl.events import (  # noqa: PLC0415
                 ToolCallResultEvent,
                 ToolCallStartedEvent,
+                stringify_large_ints,
             )
 
             if isinstance(ev, ToolCallStartedEvent):
@@ -377,7 +383,7 @@ async def chat(
                     "tool": ev.tool,
                     "tool_call_id": ev.tool_call_id,
                     "summary": ev.summary,
-                    "args": ev.args,
+                    "args": stringify_large_ints(ev.args),
                     "risk": ev.risk,
                     "trace_id": ev.trace_id,
                 }
@@ -387,7 +393,7 @@ async def chat(
                     {
                         **started,
                         "ok": ev.ok,
-                        "result": ev.result,
+                        "result": stringify_large_ints(ev.result),
                         "affected_rows": ev.affected_rows,
                         "error_code": ev.error_code,
                         "error_msg": ev.error_msg,

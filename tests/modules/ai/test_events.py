@@ -224,6 +224,91 @@ class TestEventDataclasses:
         assert data == {"type": "done"}
 
 
+class TestStringifyLargeInts:
+    """spec §8.1 + CLAUDE.md #3: Snowflake ID（int64）序列化为 JSON 必须转 str
+
+    JS Number.MAX_SAFE_INTEGER = 2^53 - 1 = 9007199254740991。
+    Snowflake ID 是 int64，普遍 > 2^53（如 7483433649145122816）。
+    若 JSON 序列化为 number，前端 JSON.parse 丢末尾精度（→ ...3000）。
+    """
+
+    def test_snowflake_id_in_args_stringified(self) -> None:
+        """confirmation_required.args.user_ids 大 int → str"""
+        event = ConfirmationRequiredEvent(
+            confirmation_id="conf_x",
+            tool="user.batch_delete",
+            tool_call_id="tc_bd",
+            summary="tool=user.batch_delete, risk=destructive, mode=hitl",
+            args={"user_ids": [7483433649145122816, 7483433587736317952]},
+            expires_at="2026-07-04T14:07:30Z",
+        )
+        data = json.loads(event_to_sse_data(event))
+        assert data["args"]["user_ids"] == [
+            "7483433649145122816",
+            "7483433587736317952",
+        ]
+
+    def test_small_int_in_args_kept_as_int(self) -> None:
+        """count / status 等小 int 保持 int 不变（避免无差别字符串化）"""
+        event = _started(args={"count": 5, "status": 1, "user_id": 42})
+        data = json.loads(event_to_sse_data(event))
+        assert data["args"] == {"count": 5, "status": 1, "user_id": 42}
+
+    def test_snowflake_id_in_result_stringified(self) -> None:
+        """tool_call_result.result.user_ids 大 int → str（写操作返回影响 ID 列表）"""
+        event = _result(
+            result={
+                "deleted": 2,
+                "user_ids": [7483433649145122816, 7483433587736317952],
+            },
+        )
+        data = json.loads(event_to_sse_data(event))
+        assert data["result"]["deleted"] == 2  # 小 int 保留
+        assert data["result"]["user_ids"] == [
+            "7483433649145122816",
+            "7483433587736317952",
+        ]
+
+    def test_nested_dict_snowflake_id_stringified(self) -> None:
+        """嵌套 dict 中的 *_id 大 int 也要转"""
+        event = _result(
+            result={
+                "affected": [{"user_id": 7483433649145122816}, {"user_id": 42}],
+            },
+        )
+        data = json.loads(event_to_sse_data(event))
+        assert data["result"]["affected"][0]["user_id"] == "7483433649145122816"
+        assert data["result"]["affected"][1]["user_id"] == 42
+
+    def test_bool_not_converted(self) -> None:
+        """Python bool 是 int 子类，但 True/False 不应字符串化"""
+        from app.modules.ai.agents.hitl.events import stringify_large_ints
+
+        assert stringify_large_ints(True) is True
+        assert stringify_large_ints(False) is False
+        assert stringify_large_ints({"flag": True, "n": 7483433649145122816}) == {
+            "flag": True,
+            "n": "7483433649145122816",
+        }
+
+    def test_negative_large_int_stringified(self) -> None:
+        """负数大 int 同样丢精度（理论不会出现，但 abs() 兜底）"""
+        from app.modules.ai.agents.hitl.events import stringify_large_ints
+
+        assert stringify_large_ints(-7483433649145122816) == "-7483433649145122816"
+
+    def test_exact_boundary_2_pow_53_stringified(self) -> None:
+        """2^53 本身也无法在 JS 精确表示（MAX_SAFE_INTEGER = 2^53 - 1）"""
+        from app.modules.ai.agents.hitl.events import (
+            JS_MAX_SAFE_INT,
+            stringify_large_ints,
+        )
+
+        assert JS_MAX_SAFE_INT == 1 << 53
+        assert stringify_large_ints(JS_MAX_SAFE_INT) == str(JS_MAX_SAFE_INT)
+        assert stringify_large_ints(JS_MAX_SAFE_INT - 1) == JS_MAX_SAFE_INT - 1
+
+
 class TestSseDataCompact:
     """spec §8.1: 自定义事件 JSON 序列化，None 字段剔除"""
 

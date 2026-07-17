@@ -215,6 +215,31 @@ def _dry_run_to_dict(s: DryRunSummary | None) -> dict[str, Any] | None:
     }
 
 
+JS_MAX_SAFE_INT = 1 << 53  # 9007199254740992 — JS Number.MAX_SAFE_INTEGER + 1
+
+
+def stringify_large_ints(v: Any) -> Any:
+    """递归把 abs(int) >= 2^53 的整数转成 str（防 JS Number 精度丢失）。
+
+    CLAUDE.md 跨项目硬规则 #3：Snowflake ID 是 int64，超过 JS
+    Number.MAX_SAFE_INTEGER (2^53-1)，JSON 序列化为 number 时前端
+    JSON.parse 会丢失末几位精度（如 7483433649145122816 → 7483433649145123000）。
+
+    小整数（count / affected_rows / status code 等）保持 int 不变。
+    bool 不是 int（Python 中 bool 是 int 子类，需显式排除）。
+
+    用于 SSE 事件 args / result 序列化 + DB ai_message.tool_calls JSON 列。
+    业务函数（dry_run_fn / tool_fn）仍接收原始 int args，不受影响。
+    """
+    if isinstance(v, dict):
+        return {k: stringify_large_ints(vv) for k, vv in v.items()}
+    if isinstance(v, list):
+        return [stringify_large_ints(x) for x in v]
+    if isinstance(v, int) and not isinstance(v, bool) and abs(v) >= JS_MAX_SAFE_INT:
+        return str(v)
+    return v
+
+
 def _compact_json(data: Any) -> str:
     """递归移除 None 字段后 JSON dumps（保留 False / 0 / 空字符串）"""
     return json.dumps(
@@ -229,4 +254,6 @@ def _compact_value(v: Any) -> Any:
         return {k: _compact_value(vv) for k, vv in v.items() if vv is not None}
     if isinstance(v, list):
         return [_compact_value(x) for x in v]
+    if isinstance(v, int) and not isinstance(v, bool) and abs(v) >= JS_MAX_SAFE_INT:
+        return str(v)
     return v
