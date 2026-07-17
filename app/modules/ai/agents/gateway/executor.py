@@ -412,6 +412,7 @@ async def _run_dry_run(
         return dr.count, DryRunSummary(
             summary=dr.reason or f"将影响 {dr.count} 行",
             affected_count=dr.count,
+            affected_examples=dr.examples,
         )
     except BusinessException as e:
         logger.info(

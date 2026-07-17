@@ -93,6 +93,7 @@ class DryRunResult:
     ok: bool
     count: int = 0
     reason: str | None = None
+    examples: list[str] | None = None
 
     def __post_init__(self) -> None:
         if not self.ok and self.count > 0:

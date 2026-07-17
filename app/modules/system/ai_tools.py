@@ -230,11 +230,50 @@ async def dept_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) 
 # ============ user.batch_delete（destructive + HITL，spec §11.3 示例） ============
 
 
+async def _resolve_users(
+    ctx: AiToolContext,
+    *,
+    user_ids: list[int] | None,
+    user_names: list[str] | None,
+    phones: list[str] | None,
+) -> list[User]:
+    """按 IDs / 用户名 / 手机号解析为 User 列表（spec §6.2 data_scope 强制）。
+
+    三个选择器至少提供一个；同时提供则取并集（任一匹配即纳入）。
+    始终应用 ctx.data_scope.filters，确保只返回 caller 可见范围内的用户。
+    user_name / phone 精确匹配（避免误删同名前缀用户）；多重匹配全部纳入，
+    dry_run 阶段 HITL 抽屉展示全部匹配项供用户决定。
+    """
+    from sqlalchemy import or_  # noqa: PLC0415
+
+    from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+
+    if not user_ids and not user_names and not phones:
+        raise BusinessRuleException(
+            "至少提供 user_ids / user_names / phones 中的一个",
+            error_code="AI_BATCH_DELETE_NO_TARGETS",
+        )
+
+    clauses = []
+    if user_ids:
+        clauses.append(User.user_id.in_(user_ids))
+    if user_names:
+        clauses.append(User.user_name.in_(user_names))
+    if phones:
+        clauses.append(User.phone.in_(phones))
+
+    stmt = select(User).where(*ctx.data_scope.filters, or_(*clauses))
+    return list((await ctx.db.execute(stmt)).scalars().all())
+
+
 @ai_tool(
     AiToolMeta(
         name="user.batch_delete",
         agent="user_mgmt",
-        summary="Delete users by IDs → {'deleted': N}. Call directly on delete intent; HITL handles confirmation.",
+        summary=(
+            "Delete users by IDs / names / phones → {'deleted': N}. "
+            "HITL confirms; ambiguous deletes all."
+        ),
         required_perms=("system:user:delete",),
         risk="destructive",
         hitl_always=True,
@@ -242,54 +281,101 @@ async def dept_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) 
     )
 )
 async def user_batch_delete(
-    ctx: AiToolContext, *, user_ids: list[int]
+    ctx: AiToolContext,
+    *,
+    user_ids: list[int] | None = None,
+    user_names: list[str] | None = None,
+    phones: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Delete users by their user_id list.
+    """Delete users by their identifiers.
 
     Call this tool immediately when the user requests deletion — the HITL
     (Human-In-The-Loop) confirmation drawer is shown to the user automatically
     by the backend; you should NOT ask the user to confirm via chat text.
 
+    At least one of user_ids / user_names / phones must be provided. Multiple
+    selectors are unioned. For natural-language requests like "删除张三",
+    pass user_names=["张三"]; the dry_run drawer lists all matches so the
+    user can verify before confirming.
+
     Args:
-        user_ids: list of user IDs to delete (Snowflake int64 IDs)
+        user_ids: Snowflake int64 IDs (when caller already knows them)
+        user_names: user_name exact matches (for "by name" requests)
+        phones: phone exact matches (for "by phone" requests)
     """
-    # spec §6.2 data_scope 强制：写 tool 含 *_ids 必须先验证 targets 可见
-    ensure_targets_in_scope(ctx, user_ids=user_ids)
+    users = await _resolve_users(
+        ctx, user_ids=user_ids, user_names=user_names, phones=phones
+    )
+    if not users:
+        from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+
+        raise BusinessRuleException(
+            "未找到匹配用户（字段值不匹配 / 不在可见范围 / 已删除）",
+            error_code="AI_BATCH_DELETE_NO_MATCH",
+        )
+
+    resolved_ids = [u.user_id for u in users]
+    # spec §6.2 data_scope 强制：写 tool 含 *_ids 必须先验证 targets 可见。
+    # _resolve_users 已应用 data_scope.filters，此处 defensive 二次校验。
+    ensure_targets_in_scope(ctx, user_ids=resolved_ids)
 
     from app.modules.system.service.user_service import user_service  # noqa: PLC0415
 
     count = await user_service.batch_delete_users(
-        ctx.db, user_ids, current_user_id=ctx.user.user_id
+        ctx.db, resolved_ids, current_user_id=ctx.user.user_id
     )
-    return {"deleted": count, "user_ids": [str(i) for i in user_ids]}
+    return {
+        "deleted": count,
+        "user_ids": [str(i) for i in resolved_ids],
+    }
 
 
-async def _dry_run_user_batch_delete(ctx: AiToolContext, *, user_ids: list[int]) -> Any:
-    """dry_run：返回拟删除用户数 + 校验 admin/自身保护"""
+async def _dry_run_user_batch_delete(
+    ctx: AiToolContext,
+    *,
+    user_ids: list[int] | None = None,
+    user_names: list[str] | None = None,
+    phones: list[str] | None = None,
+) -> Any:
+    """dry_run：解析 IDs/names/phones → 列出匹配用户供 HITL 抽屉确认"""
+    from app.core.exceptions import (  # noqa: PLC0415
+        AuthorizationException,
+        BusinessRuleException,
+    )
     from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
 
-    if not user_ids:
-        return DryRunResult(ok=False, count=0, reason="未选择要删除的用户")
+    try:
+        users = await _resolve_users(
+            ctx, user_ids=user_ids, user_names=user_names, phones=phones
+        )
+    except BusinessRuleException as e:
+        return DryRunResult(ok=False, count=0, reason=e.message)
 
-    # spec §6.2: dry_run 也要校验 data_scope（防越权预估）
-    ensure_targets_in_scope(ctx, user_ids=user_ids)
-
-    existing_stmt = select(User.user_id, User.user_name).where(
-        User.user_id.in_(user_ids)
-    )
-    rows = (await ctx.db.execute(existing_stmt)).all()
-    found_ids = {r[0] for r in rows}
-    missing = [i for i in user_ids if i not in found_ids]
-    if missing:
+    if not users:
         return DryRunResult(
             ok=False,
             count=0,
-            reason=f"以下 user_id 不存在: {missing[:5]}{'...' if len(missing) > 5 else ''}",
+            reason="未找到匹配用户（字段值不匹配 / 不在可见范围 / 已删除）",
         )
 
-    names = [r[1] for r in rows]
+    resolved_ids = [u.user_id for u in users]
+    try:
+        # spec §6.2: dry_run 也要校验 data_scope（防越权预估）
+        ensure_targets_in_scope(ctx, user_ids=resolved_ids)
+    except AuthorizationException as e:
+        return DryRunResult(ok=False, count=0, reason=e.message)
+
+    examples = [
+        f"{u.user_name}（ID: {u.user_id}, phone: {u.phone or '-'}）" for u in users[:10]
+    ]
+    summary = (
+        f"将删除 {len(users)} 个用户："
+        f"{', '.join(u.user_name for u in users[:3])}"
+        f"{'...' if len(users) > 3 else ''}"
+    )
     return DryRunResult(
         ok=True,
-        count=len(user_ids),
-        reason=f"将删除 {len(user_ids)} 个用户：{', '.join(names[:3])}{'...' if len(names) > 3 else ''}",
+        count=len(users),
+        reason=summary,
+        examples=examples,
     )
