@@ -256,37 +256,6 @@ class OperationLogService:
             )
         return log
 
-    async def list_pending_by_user(
-        self,
-        db: AsyncSession,
-        user_id: int,
-    ) -> list[tuple[AiOperationLog, str | None]]:
-        """按 user_id 拿 status=pending_confirmation 的行（spec §14 跨会话恢复用）
-
-        按 queued_at 降序（最新的在前，banner 优先呈现最近一次操作）。
-        LEFT JOIN ai_conversations 拿 title（前端 banner 显示「在对话 'X' 中」用）。
-        LEFT JOIN 而非 INNER：防御 conversation 被并发删除时 list 仍能返回。
-        caller 负责 Redis GET 校验每个 confirmation_id 还活着（防 DB 脏数据）。
-
-        Returns:
-            list[(AiOperationLog, conversation_title|None)]
-        """
-        from app.modules.ai.models.conversation import AiConversation  # noqa: PLC0415
-
-        stmt = (
-            select(AiOperationLog, AiConversation.title)
-            .outerjoin(
-                AiConversation,
-                AiConversation.conversation_id == AiOperationLog.conversation_id,
-            )
-            .where(
-                AiOperationLog.user_id == user_id,
-                AiOperationLog.status == AiOperationStatus.PENDING_CONFIRMATION.value,
-            )
-            .order_by(AiOperationLog.queued_at.desc())
-        )
-        return [(row[0], row[1]) for row in (await db.execute(stmt)).all()]
-
     async def _get(self, db: AsyncSession, log_id: int) -> AiOperationLog:
         result = await db.execute(
             select(AiOperationLog).where(AiOperationLog.log_id == log_id)
