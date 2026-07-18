@@ -48,12 +48,17 @@ async def _insert_log(
     tool_call_id: str = "tc_test_1",
     queued_at_offset_sec: int = 0,
     status: AiOperationStatus = AiOperationStatus.PENDING_CONFIRMATION,
+    conversation_id: int = 100,
 ) -> int:
-    """写一条 ai_operation_log（手动调 start_operation + queued_at 微调）"""
+    """写一条 ai_operation_log（手动调 start_operation + queued_at 微调）
+
+    不插 ai_conversation 行：service 用 LEFT JOIN，conversation 不存在时 title=None。
+    production 里 FK 强约束保证 conversation 存在；测试不依赖 conversation 内容。
+    """
     log_id = await operation_log_service.start_operation(
         db,
         trace_id="tr_test",
-        conversation_id=100,
+        conversation_id=conversation_id,
         user_id=user_id,
         tool_name="user.batch_delete",
         tool_call_id=tool_call_id,
@@ -93,7 +98,7 @@ class TestListPendingByUser:
         )
         rows = await operation_log_service.list_pending_by_user(db_session, 9001)
         assert len(rows) == 1
-        assert rows[0].confirmation_id == "c1"
+        assert rows[0][0].confirmation_id == "c1"
 
     async def test_excludes_non_pending_status(self, db_session) -> None:
         """status=success/failed/rejected/expired 的行不应返回"""
@@ -128,8 +133,8 @@ class TestListPendingByUser:
         )
         rows = await operation_log_service.list_pending_by_user(db_session, 9001)
         assert len(rows) == 2
-        assert rows[0].confirmation_id == "new"
-        assert rows[1].confirmation_id == "old"
+        assert rows[0][0].confirmation_id == "new"
+        assert rows[1][0].confirmation_id == "old"
 
 
 class TestParseExpiresAt:

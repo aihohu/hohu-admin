@@ -48,6 +48,9 @@ class PendingConfirmationOut(BaseModel):
     conversation_id: int = Field(
         ..., description="Snowflake，序列化为 str 防 JS BigInt 精度"
     )
+    conversation_title: str | None = Field(
+        None, description="原对话标题，banner 显示上下文用；None=对话被删除"
+    )
     trace_id: str
     args_summary: str
     risk_level: str

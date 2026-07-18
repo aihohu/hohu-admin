@@ -56,7 +56,7 @@ async def list_pending_confirmations(
         return ResponseModel.success(data=[])
 
     result: list[PendingConfirmationOut] = []
-    for row in rows:
+    for row, conversation_title in rows:
         if not row.confirmation_id:
             # 防御性：DB pending_confirmation 行理论上必有 confirmation_id
             # （start_operation 时 attach），但保险起见跳过
@@ -77,6 +77,7 @@ async def list_pending_confirmations(
                 tool_call_id=row.tool_call_id,
                 tool_name=row.tool_name,
                 conversation_id=row.conversation_id,
+                conversation_title=conversation_title,
                 trace_id=row.trace_id,
                 args_summary=row.args_summary,
                 risk_level=row.risk_level,
