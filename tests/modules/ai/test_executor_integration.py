@@ -346,7 +346,8 @@ class TestAutonomousFlow:
             res = await db.execute(
                 text(
                     "SELECT tool_name, status, execution_mode FROM ai_operation_log "
-                    "ORDER BY started_at DESC LIMIT 1"
+                    "WHERE trace_id = 'tr_test_001' "
+                    "ORDER BY log_id DESC LIMIT 1"
                 )
             )
             row = res.first()
@@ -411,7 +412,8 @@ class TestHitlFlow:
             res = await db.execute(
                 text(
                     "SELECT status FROM ai_operation_log "
-                    "ORDER BY started_at DESC LIMIT 1"
+                    "WHERE trace_id = 'tr_test_001' "
+                    "ORDER BY log_id DESC LIMIT 1"
                 )
             )
             row = res.first()
@@ -439,7 +441,8 @@ class TestHitlFlow:
             res = await db.execute(
                 text(
                     "SELECT status FROM ai_operation_log "
-                    "ORDER BY started_at DESC LIMIT 1"
+                    "WHERE trace_id = 'tr_test_001' "
+                    "ORDER BY log_id DESC LIMIT 1"
                 )
             )
             row = res.first()

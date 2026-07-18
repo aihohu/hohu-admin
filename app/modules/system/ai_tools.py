@@ -260,7 +260,7 @@ async def _resolve_users(
     if user_names:
         clauses.append(User.user_name.in_(user_names))
     if phones:
-        clauses.append(User.phone.in_(phones))
+        clauses.append(User.user_phone.in_(phones))
 
     stmt = select(User).where(*ctx.data_scope.filters, or_(*clauses))
     return list((await ctx.db.execute(stmt)).scalars().all())
@@ -366,7 +366,8 @@ async def _dry_run_user_batch_delete(
         return DryRunResult(ok=False, count=0, reason=e.message)
 
     examples = [
-        f"{u.user_name}（ID: {u.user_id}, phone: {u.phone or '-'}）" for u in users[:10]
+        f"{u.user_name}（ID: {u.user_id}, phone: {u.user_phone or '-'}）"
+        for u in users[:10]
     ]
     summary = (
         f"将删除 {len(users)} 个用户："
