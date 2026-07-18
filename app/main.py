@@ -23,6 +23,9 @@ from app.modules.ai.api.chat import router as ai_chat_router
 from app.modules.ai.api.confirm import router as ai_confirm_router
 from app.modules.ai.api.conversation import router as ai_conversation_router
 from app.modules.ai.api.operation_log import router as ai_operation_log_router
+from app.modules.ai.api.pending_confirmations import (
+    router as ai_pending_confirmations_router,
+)
 from app.modules.ai.api.provider import router as ai_provider_router
 from app.modules.ai.api.query_cache import router as ai_query_cache_router
 from app.modules.ai.api.resume import router as ai_resume_router
@@ -200,6 +203,11 @@ if settings.AI_MODULE_ENABLED:
     app.include_router(ai_provider_router, prefix="/ai/provider", tags=["AI提供商"])
     app.include_router(
         ai_operation_log_router, prefix="/ai/operation-log", tags=["AI 操作日志"]
+    )
+    app.include_router(
+        ai_pending_confirmations_router,
+        prefix="/ai/pending-confirmations",
+        tags=["AI HITL 跨会话恢复"],
     )
     app.include_router(
         ai_query_cache_router, prefix="/ai/query-cache", tags=["AI chip 跳转回放"]

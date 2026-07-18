@@ -256,6 +256,26 @@ class OperationLogService:
             )
         return log
 
+    async def list_pending_by_user(
+        self,
+        db: AsyncSession,
+        user_id: int,
+    ) -> list[AiOperationLog]:
+        """按 user_id 拿 status=pending_confirmation 的行（spec §14 跨会话恢复用）
+
+        按 queued_at 降序（最新的在前，banner 优先呈现最近一次操作）。
+        caller 负责 Redis GET 校验每个 confirmation_id 还活着（防 DB 脏数据）。
+        """
+        stmt = (
+            select(AiOperationLog)
+            .where(
+                AiOperationLog.user_id == user_id,
+                AiOperationLog.status == AiOperationStatus.PENDING_CONFIRMATION.value,
+            )
+            .order_by(AiOperationLog.queued_at.desc())
+        )
+        return list((await db.execute(stmt)).scalars().all())
+
     async def _get(self, db: AsyncSession, log_id: int) -> AiOperationLog:
         result = await db.execute(
             select(AiOperationLog).where(AiOperationLog.log_id == log_id)
