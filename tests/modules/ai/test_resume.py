@@ -76,17 +76,31 @@ class TestResumeDisabled:
         assert exc_info.value.error_code == "AI_RESUME_DISABLED"
         assert exc_info.value.code == 410
 
-    async def test_memory_mode_returns_410(self, _resume_enabled) -> None:
+    async def test_memory_mode_also_allowed(self, _resume_enabled) -> None:
+        """memory 模式不再硬 410——单 worker 本地开发可用 resume。
+
+        端点移除了 AI_HITL_MODE 硬校验：memory 模式下 _hang_memory + _wake_memory
+        跨请求同进程工作。多 worker 部署需 redis_pubsub 由 spec §8.4 / 部署文档约束。
+        """
+        from app.core.exceptions import NotFoundException
+
         with patch("app.modules.ai.api.resume.settings.AI_HITL_MODE", "memory"):
-            with pytest.raises(BusinessRuleException) as exc_info:
-                await resume_chat(
-                    request=_make_request("cid"),
-                    confirmation_id_query="cid",
-                    db=MagicMock(),
-                    current_user=_make_user(),
-                )
-        assert exc_info.value.error_code == "AI_RESUME_DISABLED"
-        assert exc_info.value.code == 410
+            # 端点不再因 memory 模式立即抛 410——会继续走 Redis 查 pending。
+            # 用 mock 让 get_pending 返 None，验证端点往下走到 AI_RESUME_NOT_FOUND
+            # 而不是 AI_RESUME_DISABLED。
+            with patch(
+                "app.modules.ai.api.resume.hitl_manager.get_pending",
+                return_value=None,
+            ):
+                with pytest.raises(NotFoundException) as exc_info:
+                    await resume_chat(
+                        request=_make_request("cid"),
+                        confirmation_id_query="cid",
+                        db=MagicMock(),
+                        current_user=_make_user(),
+                    )
+        # 走到 NOT_FOUND 而非 DISABLED，证明 memory 模式限制已放开
+        assert exc_info.value.error_code == "AI_RESUME_NOT_FOUND"
 
 
 # ============ 400 AI_RESUME_MISSING_ID ============

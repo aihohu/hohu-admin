@@ -2,13 +2,20 @@
 
 GET /ai/chat/resume
   - 读 Last-Event-ID 头作为 confirmation_id（SSE 协议标准）
-  - 校验 owner / TTL / 模式
+  - 校验 owner / TTL
   - 抢 Redis owner 锁防双执行（spec §2.3）
   - emit confirmation_resumed → hang → execute_tool → emit tool_call_result + done
   - finally 释放 owner 锁（Lua 脚本防误删）
 
+模式说明（不再硬校验）：
+  - memory 模式：单 worker 本地开发可用。_hang_memory + _wake_memory 跨请求
+    同进程工作，Event 在 confirm 端点被 set 后 hang 协程返回 action。
+  - redis_pubsub 模式：多 worker 生产部署必需（spec §8.4）。SR-7 跨 worker wake
+    走 pubsub + SETNX owner 锁兜底。多 worker 部署用 memory 会双执行 race，
+    由部署文档约束，不在端点强校验（避免本地开发被锁死）。
+
 错误码（按出现顺序）：
-  410 AI_RESUME_DISABLED         — 功能未启用 / memory 模式（强制 redis_pubsub）
+  410 AI_RESUME_DISABLED         — AI_SSE_RESUME_ENABLED=False
   400 AI_RESUME_MISSING_ID       — Last-Event-ID 头 + query param 均缺
   404 AI_RESUME_NOT_FOUND        — Redis 中无 pending（已过期 / 未发起 / 重启清扫）
   403 AI_RESUME_FORBIDDEN        — 当前 user 非 pending.owner
@@ -110,18 +117,13 @@ async def resume_chat(
 
     读 confirmation_id 顺序：Last-Event-ID 头 > ?confirmation_id= query param
     """
-    # 1. 功能开关 + 模式校验
+    # 1. 功能开关校验（mode 不强校验：memory 模式单 worker 下 resume 同样可用，
+    #    _hang_memory/_wake_memory 跨请求同进程工作；多 worker 部署需 redis_pubsub
+    #    由部署文档 spec §8.4 约束，端点不强制）
     if not settings.AI_SSE_RESUME_ENABLED:
         raise _set_exc_code(
             BusinessRuleException(
                 "SSE 续传功能未启用", error_code="AI_RESUME_DISABLED"
-            ),
-            410,
-        )
-    if settings.AI_HITL_MODE != "redis_pubsub":
-        raise _set_exc_code(
-            BusinessRuleException(
-                "续传要求 redis_pubsub 模式", error_code="AI_RESUME_DISABLED"
             ),
             410,
         )
