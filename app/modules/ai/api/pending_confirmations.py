@@ -65,6 +65,12 @@ async def list_pending_confirmations(
         if pending is None:
             # Redis 已 expire / 重启清扫，DB 脏数据 → 跳过
             continue
+        if pending.wake_action is not None:
+            # §14: 已被 confirm 过（approved/rejected）的 pending，即使 DB 状态
+            # 因 worker 死亡未迁移（memory 模式 race），也不再展示给用户——避免
+            # banner 永远卡死。Redis pending TTL 5min 后自然清理，DB 状态由
+            # mark_expired_if_pending 兜底迁移（confirm 端点 wake=False 路径）。
+            continue
         result.append(
             PendingConfirmationOut(
                 confirmation_id=row.confirmation_id,

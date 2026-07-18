@@ -30,8 +30,14 @@ from app.modules.ai.agents.hitl.manager import (
 
 
 @pytest.fixture(autouse=True)
-async def clean_redis_hitl():
-    """每个测试重建 redis_client（绑新 loop）+ 清 ai:confirm:* keys + reset manager"""
+async def clean_redis_hitl(monkeypatch):
+    """每个测试重建 redis_client（绑新 loop）+ 清 ai:confirm:* keys + reset manager
+
+    强制 memory 模式：本文件覆盖的是 memory 模式语义（_pending dict pop / Event.set /
+    双击 race）。生产 .env 切 redis_pubsub 后这些断言失效，故 monkeypatch 锁定 memory。
+    redis_pubsub 路径由 test_resume.py 覆盖（resume 端点集成测试）。
+    """
+    monkeypatch.setattr(settings, "AI_HITL_MODE", "memory")
     original_pool = redis_module.redis_pool
     original_client = redis_module.redis_client
 

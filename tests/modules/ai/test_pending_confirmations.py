@@ -202,3 +202,42 @@ class TestEndpointRedisFilter:
             assert dumped["conversationId"] == "100"
             assert isinstance(dumped["expiresAt"], str)
             assert isinstance(dumped["queuedAt"], str)
+
+    async def test_filters_out_wake_action_already_set(self, db_session) -> None:
+        """DB pending + Redis wake_action=rejected（已被 confirm 过）→ 跳过
+
+        场景：memory 模式下 worker 死亡，confirm(rejected) 写了 Redis wake_action
+        但 DB 状态未迁移（_transition 流程未跑完）。list 不应再展示这种半死不活的
+        行——避免 banner 永远卡死。
+        """
+
+        async def fake_get_pending(redis, confirmation_id):
+            if confirmation_id == "waked":
+                # 模拟 wake_action 已设（confirm 过）
+                payload = _make_payload()
+                object.__setattr__(payload, "wake_action", "rejected")
+                return payload
+            if confirmation_id == "fresh":
+                return _make_payload()
+            return None
+
+        await _insert_log(db_session, confirmation_id="waked", tool_call_id="tc_waked")
+        await _insert_log(db_session, confirmation_id="fresh", tool_call_id="tc_fresh")
+
+        with patch(
+            "app.modules.ai.api.pending_confirmations.hitl_manager.get_pending",
+            new=AsyncMock(side_effect=fake_get_pending),
+        ):
+            from types import SimpleNamespace
+
+            from app.modules.ai.api.pending_confirmations import (
+                list_pending_confirmations,
+            )
+
+            fake_user = SimpleNamespace(user_id=9001)
+            response = await list_pending_confirmations(
+                db=db_session, current_user=fake_user
+            )
+            # 只返 fresh，waked 被 wake_action 过滤掉
+            assert len(response.data) == 1
+            assert response.data[0].confirmation_id == "fresh"
