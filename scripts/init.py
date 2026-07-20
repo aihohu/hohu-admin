@@ -5,6 +5,11 @@ import secrets
 import subprocess
 import sys
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
 
 def run_command(args):
     cmd_str = " ".join(args)
@@ -36,7 +41,7 @@ def init_env_file():
         return
 
     # 复制 .env.example 为 .env
-    with open(".env.example") as f:
+    with open(".env.example", encoding="utf-8") as f:
         content = f.read()
 
     # 自动替换 SECRET_KEY 占位符
@@ -46,7 +51,7 @@ def init_env_file():
         f"SECRET_KEY={secret_key}",
     )
 
-    with open(".env", "w") as f:
+    with open(".env", "w", encoding="utf-8") as f:
         f.write(content)
 
     print("⚠️ 请检查 .env 中的数据库、Redis 等配置是否正确。\n")
