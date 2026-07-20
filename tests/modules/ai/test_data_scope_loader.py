@@ -70,7 +70,7 @@ class TestBuildDataScopeContextSuperAdmin:
 
         assert isinstance(ctx, DataScopeContext)
         assert ctx.accessible_dept_ids is None
-        assert ctx.accessible_user_ids is None
+        assert ctx.accessible_user_scope is None
         assert ctx.filters == []
 
     async def test_data_scope_all_returns_all_visible(
@@ -82,7 +82,7 @@ class TestBuildDataScopeContextSuperAdmin:
         ctx = await build_data_scope_context(MagicMock(), mock_normal_user)
 
         assert ctx.accessible_dept_ids is None
-        assert ctx.accessible_user_ids is None
+        assert ctx.accessible_user_scope is None
         assert ctx.filters == []
 
 
@@ -98,5 +98,5 @@ class TestBuildDataScopeContextStructure:
 
         assert isinstance(ctx, DataScopeContext)
         assert hasattr(ctx, "accessible_dept_ids")
-        assert hasattr(ctx, "accessible_user_ids")
+        assert hasattr(ctx, "accessible_user_scope")
         assert hasattr(ctx, "filters")

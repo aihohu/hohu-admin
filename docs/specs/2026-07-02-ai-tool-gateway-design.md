@@ -2133,7 +2133,7 @@ AI 已可用但只能 autonomous：
 | Guardrails 完整（topics/urls） | 业务有合规需求 | 扩展 system_config + prompt 注入 |
 | `args_summary` 白名单 | 审计需追查具体字段 | 白名单字段 + id hash 占位 |
 | E2B Sandbox 沙箱 | 需要 AI 生成 job.code | Firecracker MicroVM dry-run |
-| `accessible_user_ids` subquery 优化 | 用户数 >5000 | `set[int] \| Literal["subquery"]` + EXISTS 查询 |
+| ✅ **`accessible_user_ids` subquery 优化 — 已完成 2026-07-20**（spec §14 / SR-15） | 用户数 >5000 | `DataScopeContext.accessible_user_scope: Select[tuple[int]] \| None`（None=全部可见）；`build_data_scope_context` 用 `union(own, dept_users).subquery().select()` 构造子查询；`ensure_targets_in_scope` 改 async + SQL `SELECT count(*) FROM (<scope>) WHERE user_id IN (:targets)`，count < len(targets) 抛 `AI_DATA_SCOPE_VIOLATION`；dept_ids 保留 set（数量小无 OOM 风险） |
 | RAG 长期记忆 | 业务有跨会话记忆需求 | 向量库 + mem0 等价物 |
 | Agent marketplace | 开源社区共享 Agent 配置 | JSON 导入/导出 + 校验 |
 
@@ -2588,6 +2588,10 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 #### SR-13. **v1.6+ 拆 `ToolResult` 双层（LLM 层精简 + UI 层 `UIResult`）+ 标准 view type registry**（2026-07-16 决策，v1.6+ 落地，spec [`2026-07-16-tool-result-view-design.md`](./2026-07-16-tool-result-view-design.md)）— 当前 `tool_call_result.result: Any` 是 free-form dict，前端 `chat-tool-call.vue` 只能 JSON 打印或 by tool name 硬编码渲染（`user.stats` 走 `ChatToolStatsTabs`、readonly tool 走 `CHIP_TARGETS` map）。v1.6+ 改造：tool 返回 `ToolResult.success(data={精简 dict 给 LLM}, ui=UIResult(view_type, view_data, audit))`；`AiToolMeta.result_view` 启动校验；前端按 `view_type` 路由标准组件库（`rows_affected` / `data_list` / `stats_chart` / `detail_card` / `redirect_chip` / `plain_json` fallback）；UI 层数据完全旁路 LLM prompt；i18n 走 `view_data.label_key`；审计字段（`affected_user_ids` 等）标准化写 `ai_operation_log.result_summary`。
 **反例**: (1) `result._view` hint → 污染 LLM prompt 上下文（除非后端 strip，增加复杂度）；business 方随便写无校验。(2) 仅 `AiToolMeta.result_view` 单层 → LLM 仍看完整 result（含审计细节，prompt 浪费 + 注入风险）。(3) 保持现状 → TOB 开源协作差（业务方每加 tool 要改前端代码渲染 result），不达企业级标准。(4) 业务方 plugin 注册自定义 view_type + Vue 组件 → 工程复杂度过高，留 v2+。
 **回归**: 渐进式迁移（未声明 `result_view` 的旧 tool fallback 到 `plain_json`，不破坏现有）；启动校验 `result_view` 在标准 registry；前端 `<component :is="viewComponent" :data="result.ui" />`；现有 `user.stats` / `user.count` 等 tool 迁移到对应 `stats_chart` / `redirect_chip` view_type。
+
+#### SR-15. **`accessible_user_ids` 改 SQL Select 子查询（不物化 set），ensure_targets_in_scope 走 SQL count**（2026-07-20 v1.5+ 落地，spec §14）— 旧实现 `accessible_user_ids: set[int]` 在 `build_data_scope_context` 时物化所有可见 user_id，单部门 5000+ 用户场景 Python 进程内存 OOM 风险。v1.5+ 改为携带 SQL `Select[tuple[int]]` 子查询表达式（不执行），`ensure_targets_in_scope` 改 async，user_ids/create_bys 走 `SELECT count(*) FROM (<scope>) WHERE user_id IN (:targets)`，count < len(targets) 抛 `AI_DATA_SCOPE_VIOLATION`。dept_ids 仍物化 set（部门数量小，无 OOM 风险，保留同步 O(1) 检查）。
+**反例**: (1) 双形态 `set[int] | Literal["subquery"]` + 阈值切换——代码复杂、测试组合爆炸、开源贡献者维护成本高。(2) subquery 模式下跳过越界检查（信任 filters SQL 过滤）——LLM 拿不到 `AI_DATA_SCOPE_VIOLATION` 反问提示，UX 降级。(3) 始终走 set 物化——OOM 风险未解除。
+**回归**: 业务函数完全透明（已通过 `ctx.data_scope.filters` 走 SQL，不接触 set）；AI tool 调用上下文里多一次 10ms SQL count 可忽略；越界检查完整保留（错误码不变，LLM 反问路径不变）；测试改 mock `ctx.db.execute` 返 `scalar_one=visible_count` 模拟 SQL 结果。
 
 ### 修订后立即需要做的事（优先级排序）
 

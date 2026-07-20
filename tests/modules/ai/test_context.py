@@ -11,6 +11,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy import literal_column, select
 
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.core.context import (
@@ -34,7 +35,7 @@ def _make_meta(name: str = "user.lookup") -> AiToolMeta:
 def _make_data_scope() -> DataScopeContext:
     return DataScopeContext(
         accessible_dept_ids={100, 200},
-        accessible_user_ids={1000, 2000},
+        accessible_user_scope=select(literal_column("0").label("user_id")),
         filters=[],
     )
 
@@ -60,14 +61,14 @@ def _make_deps(
 class TestDataScopeContext:
     def test_default_filters_empty_list(self) -> None:
         """filters 默认空 list（不是 None），与 accessible_*.None 语义区分"""
-        scope = DataScopeContext(accessible_dept_ids=None, accessible_user_ids=None)
+        scope = DataScopeContext(accessible_dept_ids=None, accessible_user_scope=None)
         assert scope.filters == []
         assert scope.accessible_dept_ids is None
-        assert scope.accessible_user_ids is None
+        assert scope.accessible_user_scope is None
 
     def test_all_visible_means_none(self) -> None:
         """None 表示全部可见（超管 / DATA_SCOPE_ALL），不是无可见"""
-        scope = DataScopeContext(accessible_dept_ids=None, accessible_user_ids=None)
+        scope = DataScopeContext(accessible_dept_ids=None, accessible_user_scope=None)
         assert scope.accessible_dept_ids is None
 
 
@@ -79,7 +80,7 @@ class TestChatDeps:
         deps = _make_deps(trace_id="tr_xyz")
         assert deps.trace_id == "tr_xyz"
         assert deps.perms == {"system:user:list"}
-        assert deps.data_scope.accessible_user_ids == {1000, 2000}
+        assert deps.data_scope.accessible_user_scope is not None
 
     def test_no_default_trace_id(self) -> None:
         """trace_id 必填，无默认值（spec §4.6 防 "" 漏到 DB 索引）"""

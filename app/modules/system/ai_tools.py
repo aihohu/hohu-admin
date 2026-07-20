@@ -317,7 +317,7 @@ async def user_batch_delete(
     resolved_ids = [u.user_id for u in users]
     # spec §6.2 data_scope 强制：写 tool 含 *_ids 必须先验证 targets 可见。
     # _resolve_users 已应用 data_scope.filters，此处 defensive 二次校验。
-    ensure_targets_in_scope(ctx, user_ids=resolved_ids)
+    await ensure_targets_in_scope(ctx, user_ids=resolved_ids)
 
     from app.modules.system.service.user_service import user_service  # noqa: PLC0415
 
@@ -361,7 +361,7 @@ async def _dry_run_user_batch_delete(
     resolved_ids = [u.user_id for u in users]
     try:
         # spec §6.2: dry_run 也要校验 data_scope（防越权预估）
-        ensure_targets_in_scope(ctx, user_ids=resolved_ids)
+        await ensure_targets_in_scope(ctx, user_ids=resolved_ids)
     except AuthorizationException as e:
         return DryRunResult(ok=False, count=0, reason=e.message)
 

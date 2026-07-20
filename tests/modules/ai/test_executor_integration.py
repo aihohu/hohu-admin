@@ -188,7 +188,7 @@ def _build_deps(
     user.user_id = 9001
 
     data_scope = DataScopeContext(
-        accessible_dept_ids=None, accessible_user_ids=None, filters=[]
+        accessible_dept_ids=None, accessible_user_scope=None, filters=[]
     )
     agent = MagicMock()
     agent.code = "shared"

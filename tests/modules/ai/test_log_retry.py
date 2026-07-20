@@ -304,7 +304,7 @@ class TestStartLogFailureAbortsExecute:
                 perms={"p"},
                 db=None,
                 data_scope=DataScopeContext(
-                    accessible_dept_ids=None, accessible_user_ids=None
+                    accessible_dept_ids=None, accessible_user_scope=None
                 ),
                 agent=None,
                 trace_id="tr_test_log_fail",

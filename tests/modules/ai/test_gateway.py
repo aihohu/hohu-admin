@@ -3,14 +3,16 @@
 按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §6.1 / §6.2 / §6.5。
 
 execute_tool 测试用 db_session fixture（ai/conftest.py），不用 mock AsyncSessionLocal。
+ensure_targets_in_scope v1.5+ 走 SQL count 路径，user 维度 mock ctx.db.execute。
 """
 
 # ruff: noqa: ARG001, ARG005, PLC0415
 
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import (
@@ -63,12 +65,14 @@ class TestToolResult:
 
 def _make_ctx(
     *,
-    accessible_user_ids: set[int] | None = None,
+    accessible_user_scope: Select[tuple[int]] | None = None,
     accessible_dept_ids: set[int] | None = None,
+    visible_count: int = 0,
 ) -> AiToolContext:
+    """构造测试用 AiToolContext。visible_count 模拟 SQL count(*) 返回的可见目标数。"""
     data_scope = DataScopeContext(
         accessible_dept_ids=accessible_dept_ids,
-        accessible_user_ids=accessible_user_ids,
+        accessible_user_scope=accessible_user_scope,
         filters=[],
     )
     meta = AiToolMeta(
@@ -78,55 +82,80 @@ def _make_ctx(
         required_perms=("p",),
         risk="low",
     )
+    # mock db.execute → 返 mock result → scalar_one 返 visible_count
+    mock_result = MagicMock()
+    mock_result.scalar_one = MagicMock(return_value=visible_count)
+    mock_db = MagicMock()
+    mock_db.execute = AsyncMock(return_value=mock_result)
     return AiToolContext(
         user=MagicMock(user_id=1),
         perms={"p"},
-        db=MagicMock(),
+        db=mock_db,
         data_scope=data_scope,
         trace_id="tr_test",
         tool_meta=meta,
     )
 
 
+_DUMMY_SCOPE: Select[tuple[int]] = select(
+    __import__("sqlalchemy").literal_column("0").label("user_id")
+)
+
+
 class TestEnsureTargetsInScope:
-    def test_all_visible_skips_check(self) -> None:
-        ctx = _make_ctx(accessible_user_ids=None, accessible_dept_ids=None)
-        ensure_targets_in_scope(ctx, user_ids=[999999])
-        ensure_targets_in_scope(ctx, dept_ids=[888888])
+    async def test_all_visible_skips_check(self) -> None:
+        ctx = _make_ctx(accessible_user_scope=None, accessible_dept_ids=None)
+        await ensure_targets_in_scope(ctx, user_ids=[999999])
+        await ensure_targets_in_scope(ctx, dept_ids=[888888])
 
-    def test_empty_list_skips_check(self) -> None:
-        ctx = _make_ctx(accessible_user_ids={1, 2, 3})
-        ensure_targets_in_scope(ctx, user_ids=[])
+    async def test_empty_list_skips_check(self) -> None:
+        ctx = _make_ctx(accessible_user_scope=_DUMMY_SCOPE)
+        await ensure_targets_in_scope(ctx, user_ids=[])
 
-    def test_none_targets_skips_check(self) -> None:
-        ctx = _make_ctx(accessible_user_ids={1, 2, 3}, accessible_dept_ids={10})
-        ensure_targets_in_scope(ctx)
+    async def test_none_targets_skips_check(self) -> None:
+        ctx = _make_ctx(accessible_user_scope=_DUMMY_SCOPE, accessible_dept_ids={10})
+        await ensure_targets_in_scope(ctx)
 
-    def test_user_ids_in_scope_passes(self) -> None:
-        ctx = _make_ctx(accessible_user_ids={1, 2, 3})
-        ensure_targets_in_scope(ctx, user_ids=[1, 2])
+    async def test_user_ids_in_scope_passes(self) -> None:
+        # 2 个 target 全在 scope 内 → visible_count=2 → 通过
+        ctx = _make_ctx(accessible_user_scope=_DUMMY_SCOPE, visible_count=2)
+        await ensure_targets_in_scope(ctx, user_ids=[1, 2])
 
-    def test_user_ids_out_of_scope_raises(self) -> None:
-        ctx = _make_ctx(accessible_user_ids={1, 2, 3})
+    async def test_user_ids_out_of_scope_raises(self) -> None:
+        # 2 个 target 仅 1 个在 scope 内 → visible_count=1 < 2 → 抛异常
+        ctx = _make_ctx(accessible_user_scope=_DUMMY_SCOPE, visible_count=1)
         with pytest.raises(AuthorizationException) as exc_info:
-            ensure_targets_in_scope(ctx, user_ids=[1, 99])
+            await ensure_targets_in_scope(ctx, user_ids=[1, 99])
         assert exc_info.value.error_code == "AI_DATA_SCOPE_VIOLATION"
 
-    def test_dept_ids_out_of_scope_raises(self) -> None:
-        ctx = _make_ctx(accessible_user_ids={1, 2, 3}, accessible_dept_ids={10, 20})
+    async def test_dept_ids_out_of_scope_raises(self) -> None:
+        # dept_ids 仍走 set 内存检查（不走 SQL，不需要 visible_count）
+        ctx = _make_ctx(
+            accessible_user_scope=_DUMMY_SCOPE, accessible_dept_ids={10, 20}
+        )
         with pytest.raises(AuthorizationException) as exc_info:
-            ensure_targets_in_scope(ctx, dept_ids=[10, 99])
+            await ensure_targets_in_scope(ctx, dept_ids=[10, 99])
         assert exc_info.value.error_code == "AI_DATA_SCOPE_VIOLATION"
 
-    def test_create_bys_uses_user_ids_scope(self) -> None:
-        ctx = _make_ctx(accessible_user_ids={1, 2, 3}, accessible_dept_ids={10})
+    async def test_create_bys_uses_user_scope(self) -> None:
+        # create_bys 走 accessible_user_scope（spec §14），2 targets 1 visible 抛
+        ctx = _make_ctx(
+            accessible_user_scope=_DUMMY_SCOPE,
+            accessible_dept_ids={10},
+            visible_count=1,
+        )
         with pytest.raises(AuthorizationException):
-            ensure_targets_in_scope(ctx, create_bys=[1, 99])
+            await ensure_targets_in_scope(ctx, create_bys=[1, 99])
 
-    def test_multi_dim_targets_all_must_pass(self) -> None:
-        ctx = _make_ctx(accessible_user_ids={1, 2, 3}, accessible_dept_ids={10, 20})
+    async def test_multi_dim_targets_all_must_pass(self) -> None:
+        # user 在 scope，dept 越界 → 抛异常
+        ctx = _make_ctx(
+            accessible_user_scope=_DUMMY_SCOPE,
+            accessible_dept_ids={10, 20},
+            visible_count=1,
+        )
         with pytest.raises(AuthorizationException):
-            ensure_targets_in_scope(ctx, user_ids=[1], dept_ids=[99])
+            await ensure_targets_in_scope(ctx, user_ids=[1], dept_ids=[99])
 
 
 # ============ execute_tool ============

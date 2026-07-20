@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ColumnElement
+from sqlalchemy import ColumnElement, Select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.ai.agents.hitl.events import AiStreamEvent
@@ -29,11 +29,16 @@ if TYPE_CHECKING:
 
 @dataclass
 class DataScopeContext:
-    """用户数据权限物化视图（spec §6.2）
+    """用户数据权限视图（spec §6.2 / §14 v1.5+ subquery 优化）
 
-    accessible_dept_ids / accessible_user_ids：
+    accessible_dept_ids：
         None = 全部可见（超管 / data_scope=DATA_SCOPE_ALL），ensure_targets_in_scope 跳过检查
-        非 None = set[int] 显式集合，业务函数 O(1) 判断"目标 ⊆ 可见"
+        非 None = set[int] 显式集合（部门数量小，物化无 OOM 风险）
+
+    accessible_user_scope：
+        None = 全部可见（同上）
+        非 None = SQL Select 子查询，返可见 user_id 集合。ensure_targets_in_scope 走
+        SQL EXISTS 路径验证目标是否在可见范围内（避免物化大 set OOM，spec §14）。
 
     filters：
         SQLAlchemy ColumnElement 列表，给 stats tool 等聚合函数直接拼到 WHERE 子句用（§5.5）。
@@ -42,7 +47,7 @@ class DataScopeContext:
     """
 
     accessible_dept_ids: set[int] | None
-    accessible_user_ids: set[int] | None
+    accessible_user_scope: Select[tuple[int]] | None
     filters: list[ColumnElement[bool]] = field(default_factory=list)
 
 

@@ -30,7 +30,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import redis.asyncio as aioredis
-from sqlalchemy import text
+from sqlalchemy import Select, literal, select, text
 
 from app.core import redis as redis_module
 from app.core.config import settings
@@ -217,7 +217,7 @@ def _register_test_tools() -> None:
         )
     )
     async def _scope_fn(ctx, *, user_ids: list[int]) -> dict[str, Any]:
-        ensure_targets_in_scope(ctx, user_ids=user_ids)
+        await ensure_targets_in_scope(ctx, user_ids=user_ids)
         return {"affected_count": len(user_ids)}
 
     @ai_tool(
@@ -278,7 +278,7 @@ def _register_test_tools() -> None:
 def _build_deps(
     *,
     perms: set[str] | None = None,
-    accessible_user_ids: set[int] | None = None,
+    accessible_user_scope: Select[tuple[int]] | None = None,
     signal_event=None,
 ) -> ChatDeps:
     """构造测试 ChatDeps"""
@@ -287,7 +287,7 @@ def _build_deps(
 
     data_scope = DataScopeContext(
         accessible_dept_ids=None,
-        accessible_user_ids=accessible_user_ids,
+        accessible_user_scope=accessible_user_scope,
         filters=[],
     )
     agent = MagicMock()
@@ -445,8 +445,14 @@ class TestCase6DataScopeViolation:
 
     async def test_target_out_of_scope_raises(self) -> None:
         _register_test_tools()
-        # 用户只能看见 user_id=100, 200
-        deps = _build_deps(accessible_user_ids={100, 200})
+        # 用 literal 构造 scope：返 100, 200（不依赖 DB User 表数据）
+        scope = (
+            select(literal(100).label("user_id"))
+            .union_all(select(literal(200).label("user_id")))
+            .subquery()
+            .select()
+        )
+        deps = _build_deps(accessible_user_scope=scope)
 
         result, events = await _execute_and_collect(
             _T_SCOPE_VIOLATION, {"user_ids": [100, 999]}, deps
@@ -460,7 +466,13 @@ class TestCase6DataScopeViolation:
 
     async def test_target_in_scope_passes(self) -> None:
         _register_test_tools()
-        deps = _build_deps(accessible_user_ids={100, 200})
+        scope = (
+            select(literal(100).label("user_id"))
+            .union_all(select(literal(200).label("user_id")))
+            .subquery()
+            .select()
+        )
+        deps = _build_deps(accessible_user_scope=scope)
         result, events = await _execute_and_collect(
             _T_SCOPE_VIOLATION, {"user_ids": [100, 200]}, deps
         )

@@ -74,7 +74,7 @@ def _make_ctx(
             filters = []
         data_scope = DataScopeContext(
             accessible_dept_ids=None,
-            accessible_user_ids=None,
+            accessible_user_scope=None,
             filters=filters,
         )
     meta = AiToolMeta(
@@ -282,9 +282,11 @@ class TestDataScopeFilter:
         await _add_user(db_session, user_id=1003, user_name="u3")
         await db_session.flush()
 
+        from sqlalchemy import literal_column, select
+
         data_scope = DataScopeContext(
             accessible_dept_ids={100},  # 不重要，本测试只验证 filters
-            accessible_user_ids={1001},
+            accessible_user_scope=select(literal_column("0").label("user_id")),
             filters=[User.user_id == 1001],
         )
         ctx = _make_ctx(db_session, data_scope=data_scope)
@@ -334,7 +336,7 @@ def _make_role_ctx(db: AsyncSession) -> AiToolContext:
         perms={"system:role:list"},
         db=db,
         data_scope=DataScopeContext(
-            accessible_dept_ids=None, accessible_user_ids=None, filters=[]
+            accessible_dept_ids=None, accessible_user_scope=None, filters=[]
         ),
         trace_id="tr_test",
         tool_meta=meta,
@@ -421,7 +423,7 @@ def _make_dept_ctx(db: AsyncSession) -> AiToolContext:
         perms={"system:dept:list"},
         db=db,
         data_scope=DataScopeContext(
-            accessible_dept_ids=None, accessible_user_ids=None, filters=[]
+            accessible_dept_ids=None, accessible_user_scope=None, filters=[]
         ),
         trace_id="tr_test",
         tool_meta=meta,

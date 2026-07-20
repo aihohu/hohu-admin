@@ -13,6 +13,7 @@ stderr 是 AttributeError: 'User' object has no attribute 'phone'。
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy import Select
 
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.core.context import AiToolContext, DataScopeContext
@@ -20,7 +21,9 @@ from app.modules.system.ai_tools import _dry_run_user_batch_delete, _resolve_use
 from app.modules.system.models.user import User
 
 
-def _make_ctx(db, *, accessible_user_ids: set[int] | None = None) -> AiToolContext:
+def _make_ctx(
+    db, *, accessible_user_scope: Select[tuple[int]] | None = None
+) -> AiToolContext:
     """构造 super_admin 视角的 AiToolContext（filters 空，全可见）"""
     user = MagicMock()
     user.user_id = 1
@@ -31,7 +34,7 @@ def _make_ctx(db, *, accessible_user_ids: set[int] | None = None) -> AiToolConte
         db=db,
         data_scope=DataScopeContext(
             accessible_dept_ids=None,
-            accessible_user_ids=accessible_user_ids,
+            accessible_user_scope=accessible_user_scope,
             filters=[],
         ),
         trace_id="test-trace",

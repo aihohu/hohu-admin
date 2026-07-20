@@ -40,7 +40,7 @@ class TestBuildChatDeps:
         assert deps.db is db_session
         # 超管 data_scope 全部可见
         assert deps.data_scope.accessible_dept_ids is None
-        assert deps.data_scope.accessible_user_ids is None
+        assert deps.data_scope.accessible_user_scope is None
         assert deps.data_scope.filters == []
 
     async def test_trace_id_auto_generated_format(
