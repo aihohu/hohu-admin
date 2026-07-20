@@ -485,7 +485,7 @@ def ai_tool(meta: AiToolMeta):
 **dry_run 函数查找约定**（替代字符串引用）：`dry_run_supported=True` 的 tool，**同模块**必须定义 `async def _dry_run_<tool_dot_to_underscore>(ctx, **args) -> DryRunResult`。例：`name="user.create"` → 函数名 `_dry_run_user_create`。装饰器在注册时通过 `getattr(module, f"_dry_run_{meta.name.replace('.', '_')}")` 反射查找，找不到则启动失败。Lint 同规则检查（§12.4）。
 
 **MVP 删除的字段**：
-- `default_enabled`（完整版 12.1）：所有 tool 默认对有权限的用户可见，risk=destructive + hitl_always 已是足够防护。v1.5 加。
+- ~~`default_enabled`（完整版 12.1）：所有 tool 默认对有权限的用户可见，risk=destructive + hitl_always 已是足够防护。v1.5 加。~~ **v1.5+ 已加回（2026-07-20 SR-17，spec §5.4）**：默认 `True` 向后兼容，部署方可设 `False` + 在 `sys_config.ai:enabled_tools` 显式启用。
 - `async_execution`：异步通道砍到 v1.5。
 - `dry_run_fn: str`：删除。改用同模块命名约定（见上），避免字符串引用 + AST 扫描的双重维护。
 
@@ -552,11 +552,24 @@ def compute_available_agents(user: User, perms: set[str]) -> list[AiAgent]:
     ]
 
 def compute_available_tools(user, agent) -> list[RegisteredTool]:
-    """Tool 可见性: 权限码 ⊆ user.perms (与 Agent 可见性正交)"""
-    return [t for t in agent.tools if set(t.meta.required_perms) <= user.perms]
+    """Tool 可见性: 权限码 ⊆ user.perms + default_enabled 维度（v1.5+ SR-17）"""
+    enabled_extra = await get_ai_config_str_list(db, "ai:enabled_tools", default=[])
+    return [
+        t for t in agent.tools
+        if set(t.meta.required_perms) <= user.perms
+        and (t.meta.default_enabled or t.meta.name in enabled_extra)
+    ]
 ```
 
-**MVP 简化（vs 完整版 6.4）**：删除 Tool 级 `default_enabled` 维度，Tool 可见性只剩"权限码"一个维度。
+**v1.5+ SR-17（2026-07-20）**：恢复 Tool 级 `default_enabled` 维度（MVP 删除，v1.5+ 加回）。默认 `default_enabled=True`（向后兼容，老 tool 无显式声明视为默认启用）；部署方可设 `default_enabled=False` + 在 `sys_config.ai:enabled_tools`（JSON 数组）显式列出"按需启用"的 tool 名。典型场景：
+
+- `file.parse`（解析任意上传文件）：默认 `default_enabled=False`，部署方评估文件解析风险后显式加入 `ai:enabled_tools`
+- `provider.export`（导出含 api_key 掩码的 provider 列表）：同上
+- 业务方新增的高风险 tool：发布初期 `default_enabled=False` 灰度，验证后再改 `True`
+
+**反例**：(1) `default_enabled=False` + `ai:enabled_tools=["*"]` 通配——失去精细控制意义，应明确列 tool 名；(2) 用 `ai:disabled_tools`（黑名单反向逻辑）——黑名单漏配风险高（新 tool 默认进黑名单不一致），白名单显式列才安全；(3) 配置改了不刷新——`ConfigService.update` 必须 `invalidate_ai_config_cache()`，否则 60s TTL 期间老配置生效。
+
+**MVP 简化（vs 完整版 6.4）**：~~删除 Tool 级 `default_enabled` 维度，Tool 可见性只剩"权限码"一个维度。~~ **v1.5+ 已加回（SR-17）**。
 
 ### 5.5 聚合 tool 设计模式（统计 / 计数 / 分组）
 
@@ -2155,6 +2168,7 @@ AI 已可用但只能 autonomous：
 | ✅ 多 worker HITL（pub/sub） — **已完成 2026-07-13**（§8.4.1 / SR-7） | 单 worker 性能不足 | `AI_HITL_MODE=redis_pubsub` + Redis pub/sub + `pending.wake_action` 防丢失（**未用**本地挂起表，per-stream subscribe 替代） |
 | ⚠️ **Plan v1.5+ gap**：`hohu monitoring` CLI 集成（Prometheus + Grafana） | §6.3 v1.5+ Prometheus 接入已落地（commit `7ea6e8f`），但客户运维需手写 docker-compose | hohu-cli 加 `hohu monitoring` 命令组（参考 `hohu deploy` 模式）；模板 `hohu-cli/hohu/templates/monitoring/`；`init` 时自动从 `hohu-admin/docs/monitoring/alerts.yml` 复制规则；不起 Alertmanager（留 v1.6+） |
 | ✅ **Per-agent 日配额 — 已完成 2026-07-20**（spec §6.4 / SR-16） | 不同 Agent 需不同限额 | `ai_agent.daily_quota_per_user` 字段加回（nullable，None=仅走全局 L2）+ Redis key `ai:quota:{user_id}:{agent_code}:{date}`（叠加不替代全局 L2）；`check_l2_agent_quota` + `decr_quota` 同步回滚两层 |
+| ✅ **Tool 级 `default_enabled` — 已完成 2026-07-20**（spec §5.4 / SR-17） | 部署方需精细控制 | `AiToolMeta.default_enabled: bool = True`（向后兼容）+ `sys_config.ai:enabled_tools` JSON 数组白名单；`compute_available_tools` 加 `(meta.default_enabled or name in enabled_extra)` 过滤 |
 | 多 Agent + Supervisor 路由 | 启用 ≥2 业务 Agent | `available_agents: list[AiAgent]` + `build_supervisor()` |
 | 跨会话 HITL 恢复 | 用户反馈"刷新页面后丢失确认" | `GET /ai/pending-confirmations` + 前端 30s 心跳 |
 | ✅ **SSE 续传（HITL 期热接管）— 已完成 2026-07-16**（spec [`2026-07-13-sse-resume-design.md`](./2026-07-13-sse-resume-design.md) / SR-9 / SR-10 / SR-11 / SR-12）| 网络抖动频繁 | SSE 标准 `id:` 字段 + `Last-Event-ID` 头 + Redis SETNX owner 锁（TTL 60s ≥ `AI_TOOL_TIMEOUT`） + `confirmation_resumed` 新事件 |
@@ -2631,6 +2645,10 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 #### SR-16. **Per-agent 日配额叠加（不替代全局 L2）+ 回滚对称**（2026-07-20 v1.5+ 落地，spec §6.4 / §14）— 全局 L2（2000/天/用户）在多 agent 场景下被单一 agent 独占风险高（如 HR 全天用 `user_mgmt` 把配额耗光，导致 `job_mgmt` / `provider_mgmt` 无配额可用）。v1.5+ 在 `ai_agent` 表加 `daily_quota_per_user: int | None`（None=该 agent 仅走全局 L2，不限专属），quota.py 加 `check_l2_agent_quota` + per-agent Redis key `ai:quota:{user_id}:{agent_code}:{date}`。executor 调用顺序：先全局 L2，再 per-agent L2，任一失败抛 `AI_DAILY_QUOTA_EXHAUSTED`。`decr_quota()` 扩展为同步回滚两层 key（修订 S-11 对称原则）。
 **反例**: (1) per-agent 替代全局 L2——失去"用户每日总上限"防护，单 agent 配置失误（如 5000）会撑爆系统；正确做法是叠加。(2) `agent_code` 从 `tool.meta.agent` 取——`shared` agent 调 `file.parse` 时归属与运行时会话 agent 不一致，应从 `deps.agent.code` 取（实际会话上下文）。(3) per-agent 失败不回滚全局 L2——data_scope 拒绝时全局已 INCR 不回滚 = 偷用户配额；必须两层对称回滚（修订 S-11 扩展）。(4) 用 `agent_id`（Snowflake）作 key——Redis key 应可读，`agent_code` 字符串更适合运维排查。
 **回归**: 不影响现有 L1/L2/L3 行为（None 字段时完全跳过 per-agent 路径）；`decr_quota(redis, user_id, l1_member=...)` 签名扩展为 `decr_quota(redis, user_id, agent_code=None, l1_member=None)`，旧调用方传 None 兼容；executor 加测试覆盖"agent 无专属额度（跳过）"/"agent 有专属额度（叠加检查）"/"per-agent 超限（错误码同全局）"/"AuthorizationException 时两层都回滚"四个 case。
+
+#### SR-17. **Tool 级 `default_enabled` 恢复 + `ai:enabled_tools` 白名单（非黑名单）**（2026-07-20 v1.5+ 落地，spec §5.4 / §14）— MVP 删除了 `AiToolMeta.default_enabled` 字段（理由是 risk=destructive + hitl_always 已够），但实际部署场景存在"高风险 tool 默认不开放，部署方评估后显式启用"的需求（如 `file.parse` 解析任意上传文件、`provider.export` 导出含敏感字段）。v1.5+ 加回 `default_enabled: bool = True`（默认 True 向后兼容，老 tool 不声明视为默认启用），并加 `sys_config.ai:enabled_tools` JSON 数组白名单。`compute_available_tools` 过滤逻辑：`(meta.default_enabled or meta.name in enabled_extra) and perms_ok`。
+**反例**: (1) 用 `ai:disabled_tools` 黑名单——新 tool 默认进黑名单不一致，白名单显式列才安全（与 §11.2 keyword_blocklist 白名单同思路）。(2) `ai:enabled_tools=["*"]` 通配——失去精细控制意义，必须显式列 tool 名。(3) 配置改了不刷新——`ConfigService.update` 改 `ai:enabled_tools` 后必须 `invalidate_ai_config_cache(prefix="ai:")`，否则 60s TTL 期间老配置生效。(4) 改 AiToolMeta 默认值为 `False`——破坏所有现有 tool 行为（user.count / user.stats 等突然消失），必须默认 `True`。
+**回归**: AiToolMeta 加 `default_enabled: bool = True` 字段（dataclass 默认值，老 tool 不显式声明自动 True）；`compute_available_tools` 改 async（需读 sys_config）；新增 `get_ai_config_str_list` helper（JSON 数组解析，与 `get_ai_config_int` / `get_ai_config_str` 同缓存模式）；测试覆盖"default_enabled=True 通过"/"default_enabled=False + 未在 enabled_tools → 不可见"/"default_enabled=False + 在 enabled_tools → 可见"/"sys_config 不存在时 default 兜底"。
 
 ### 修订后立即需要做的事（优先级排序）
 

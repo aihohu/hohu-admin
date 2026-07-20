@@ -101,6 +101,8 @@ def _make_meta(
     name: str = "user.create",
     agent: str = "user_mgmt",
     perms: tuple[str, ...] = ("system:user:add",),
+    *,
+    default_enabled: bool = True,
 ) -> AiToolMeta:
     return AiToolMeta(
         name=name,
@@ -108,6 +110,7 @@ def _make_meta(
         summary=f"tool {name}",
         required_perms=perms,
         risk="low",
+        default_enabled=default_enabled,
     )
 
 
@@ -206,6 +209,99 @@ class TestComputeAvailableTools:
         result = compute_available_tools({"system:user:add"}, "user_mgmt")
         assert len(result) == 1
         assert result[0].meta.name == "u.x"
+
+
+# ============ v1.5+ SR-17: default_enabled + ai:enabled_tools 白名单 ============
+
+
+class TestComputeAvailableToolsDefaultEnabled:
+    """spec §5.4 SR-17: default_enabled=False 时需在 ai:enabled_tools 白名单才可见"""
+
+    def test_default_enabled_true_visible(self) -> None:
+        """default_enabled=True（默认）→ 可见（perms 满足时）"""
+        registry = ToolRegistry.get()
+        registry.register(_make_meta("u.default_on", default_enabled=True), _noop_fn)
+
+        result = compute_available_tools({"system:user:add"}, "user_mgmt")
+        names = [t.meta.name for t in result]
+        assert "u.default_on" in names
+
+    def test_default_enabled_false_hidden_without_extra(self) -> None:
+        """default_enabled=False + enabled_extra=None（兼容旧调用）→ 仍可见
+
+        None 表示不做 default_enabled 过滤（向后兼容旧测试 / 旧调用方）。
+        生产路径由 chat_service.create_agent 预解析 enabled_extra=[] 后传入，
+        那时 default_enabled=False 才真正生效。
+        """
+        registry = ToolRegistry.get()
+        registry.register(_make_meta("u.default_off", default_enabled=False), _noop_fn)
+
+        # enabled_extra=None → 不做过滤（向后兼容）
+        result = compute_available_tools({"system:user:add"}, "user_mgmt")
+        names = [t.meta.name for t in result]
+        assert "u.default_off" in names
+
+    def test_default_enabled_false_hidden_with_empty_extra(self) -> None:
+        """default_enabled=False + enabled_extra=[] → 不可见"""
+        registry = ToolRegistry.get()
+        registry.register(_make_meta("u.off_hidden", default_enabled=False), _noop_fn)
+
+        result = compute_available_tools(
+            {"system:user:add"}, "user_mgmt", enabled_extra=[]
+        )
+        names = [t.meta.name for t in result]
+        assert "u.off_hidden" not in names
+
+    def test_default_enabled_false_visible_when_in_extra(self) -> None:
+        """default_enabled=False + enabled_extra 含该 tool name → 可见"""
+        registry = ToolRegistry.get()
+        registry.register(
+            _make_meta("u.off_whitelisted", default_enabled=False), _noop_fn
+        )
+
+        result = compute_available_tools(
+            {"system:user:add"},
+            "user_mgmt",
+            enabled_extra=["u.off_whitelisted"],
+        )
+        names = [t.meta.name for t in result]
+        assert "u.off_whitelisted" in names
+
+    def test_default_enabled_false_extra_does_not_bypass_perms(self) -> None:
+        """default_enabled=False + 在 extra 中 + perms 不足 → 仍不可见
+
+        extra 白名单不能绕过 perm 检查（spec §5.4 双维度 AND 关系）。
+        """
+        registry = ToolRegistry.get()
+        registry.register(
+            _make_meta(
+                "u.off_strict_perm",
+                perms=("system:user:delete",),  # 用户没这个 perm
+                default_enabled=False,
+            ),
+            _noop_fn,
+        )
+
+        result = compute_available_tools(
+            {"system:user:add"},  # 用户只有 add，没 delete
+            "user_mgmt",
+            enabled_extra=["u.off_strict_perm"],
+        )
+        names = [t.meta.name for t in result]
+        assert "u.off_strict_perm" not in names
+
+    def test_mixed_default_enabled_only_off_filtered(self) -> None:
+        """混合场景：3 个 tool，2 个 default=True 1 个 default=False → 仅 False 被过滤"""
+        registry = ToolRegistry.get()
+        registry.register(_make_meta("u.on1", default_enabled=True), _noop_fn)
+        registry.register(_make_meta("u.on2", default_enabled=True), _noop_fn)
+        registry.register(_make_meta("u.off1", default_enabled=False), _noop_fn)
+
+        result = compute_available_tools(
+            {"system:user:add"}, "user_mgmt", enabled_extra=[]
+        )
+        names = sorted(t.meta.name for t in result)
+        assert names == ["u.on1", "u.on2"]
 
 
 # ============ @ai_tool 装饰器 ============

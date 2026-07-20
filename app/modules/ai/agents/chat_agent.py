@@ -23,6 +23,7 @@ def create_chat_agent(
     *,
     user_perms: set[str] | None = None,
     agent_code: str = "user_mgmt",
+    enabled_extra: list[str] | None = None,
 ) -> Agent:
     """创建对话 Agent
 
@@ -30,6 +31,8 @@ def create_chat_agent(
         model: Pydantic AI Model 实例
         user_perms: 用户权限码集合，用于按 Agent + perms 过滤 tool（spec §5.4）
                     None 表示用所有内置 tool（向后兼容旧 ChatDeps 调用方）
+        enabled_extra: v1.5+ SR-17 sys_config.ai:enabled_tools 解析结果，
+                       None=不做 default_enabled 过滤（向后兼容）
 
     Returns:
         配置好工具的 Agent 实例
@@ -44,7 +47,10 @@ def create_chat_agent(
     effective_perms = user_perms if user_perms is not None else _all_registry_perms()
 
     # v1.5+: agent_code 决定可见 tool 集合（spec §5.4）
-    tools = build_pydantic_ai_tools(effective_perms, agent_code)
+    # v1.5+ SR-17: enabled_extra 来自 sys_config.ai:enabled_tools，控制 default_enabled=False 的 tool
+    tools = build_pydantic_ai_tools(
+        effective_perms, agent_code, enabled_extra=enabled_extra
+    )
 
     def instructions(ctx) -> str:
         """动态 system prompt（每轮推理时重新构造）"""

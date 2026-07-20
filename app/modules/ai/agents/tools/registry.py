@@ -211,18 +211,33 @@ class ToolRegistry:
 def compute_available_tools(
     user_perms: set[str],
     agent_code: str,
+    *,
+    enabled_extra: list[str] | None = None,
 ) -> list[RegisteredTool]:
     """spec §5.4: 运行时按 Agent + 用户权限码过滤可见 tool
 
-    - Tool 可见性只看 required_perms ⊆ user_perms
+    - Tool 可见性看两个维度：
+      1. required_perms ⊆ user_perms（perm 维度）
+      2. v1.5+ SR-17: meta.default_enabled OR name in enabled_extra（部署方控制维度）
     - Agent 可见性在 compute_available_agents（spec §5.4）单独处理
     - 超管 user_perms={'*'} 时单独走 is_super_admin 路径（调用方负责）
+
+    Args:
+        enabled_extra: sys_config.ai:enabled_tools 解析后的 tool name 列表。
+            None（默认）= 不做 default_enabled 过滤（向后兼容旧调用方 / 测试 fixture），
+            实际生产路径由 chat_service.create_agent 预解析后传入。
 
     返回值不包含 sensitive_input 字段信息（LLM schema 看不到这些字段，§7.2）。
     """
     registry = ToolRegistry.get()
-    return [
-        t
-        for t in registry.by_agent(agent_code)
-        if set(t.meta.required_perms) <= user_perms
-    ]
+    extra_set = set(enabled_extra) if enabled_extra is not None else None
+    result: list[RegisteredTool] = []
+    for t in registry.by_agent(agent_code):
+        if not set(t.meta.required_perms) <= user_perms:
+            continue
+        if extra_set is not None:
+            # v1.5+ SR-17: default_enabled=False 且不在白名单 → 不可见
+            if not t.meta.default_enabled and t.meta.name not in extra_set:
+                continue
+        result.append(t)
+    return result

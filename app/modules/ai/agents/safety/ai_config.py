@@ -96,6 +96,48 @@ async def get_ai_config_str(
     return value
 
 
+async def get_ai_config_str_list(
+    db: AsyncSession,
+    key: str,
+    default: list[str],
+    *,
+    force_refresh: bool = False,
+) -> list[str]:
+    """读 JSON 数组配置（缓存 60s，spec §5.4 SR-17 ai:enabled_tools 用）
+
+    sys_config 存的是 JSON 字符串（如 '["file.parse", "provider.export"]'）。
+    解析失败 / 非 list / 元素非 str 时回退到 default（容错优先，不抛异常）。
+    """
+    cached = _cache.get(key)
+    if not force_refresh and cached is not None:
+        value, fetched_at = cached
+        if time.time() - fetched_at < _CACHE_TTL_SEC:
+            return value  # type: ignore[return-value]
+
+    import json  # noqa: PLC0415
+
+    raw = await config_service.get_value(db, key)
+    value = default
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
+                value = parsed
+            else:
+                logger.warning(
+                    "invalid JSON list for ai config, using default",
+                    extra={"key": key, "raw": raw},
+                )
+        except (json.JSONDecodeError, TypeError):
+            logger.warning(
+                "JSON parse failed for ai config, using default",
+                extra={"key": key, "raw": raw},
+            )
+
+    _cache[key] = (value, time.time())
+    return value
+
+
 def invalidate_ai_config_cache(prefix: str = "ai:") -> None:
     """清缓存（ConfigService.update 改 ai:* 后调）
 

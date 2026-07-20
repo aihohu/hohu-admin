@@ -94,6 +94,13 @@ class AiToolMeta:
     用于前端 chip 跳转回放筛选（如 "system/user"）。
     None = 不写 query_cache（非 readonly / 不需 chip 跳转的 tool）。"""
 
+    # ============ 可见性（v1.5+ SR-17） ============
+    default_enabled: bool = True
+    """True=默认启用（受 perms 过滤后可见），False=默认禁用，
+    仅当 tool.name 在 sys_config.ai:enabled_tools JSON 数组中时才启用。
+    典型场景：file.parse / provider.export 等高风险 tool 默认 False，
+    部署方评估后显式加入 ai:enabled_tools 启用。"""
+
 
 # ============ 常量 ============
 

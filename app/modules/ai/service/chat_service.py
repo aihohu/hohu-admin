@@ -87,9 +87,20 @@ class ChatService:
         """创建配置好的 Agent
 
         spec §5.4: 按 user_perms + agent_code 过滤 tool 可见性
+        v1.5+ SR-17: 读 sys_config.ai:enabled_tools 控制 default_enabled=False 的 tool
         """
+        from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
+            get_ai_config_str_list,
+        )
+
         model = await provider_service.resolve_model(db, model_name)
-        return create_chat_agent(model, user_perms=user_perms, agent_code=agent_code)
+        enabled_extra = await get_ai_config_str_list(db, "ai:enabled_tools", default=[])
+        return create_chat_agent(
+            model,
+            user_perms=user_perms,
+            agent_code=agent_code,
+            enabled_extra=enabled_extra,
+        )
 
     async def build_chat_deps(
         self,

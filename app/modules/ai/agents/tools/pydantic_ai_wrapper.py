@@ -126,15 +126,23 @@ def wrap_tool_for_pydantic_ai(registered: RegisteredTool) -> Tool:
 def build_pydantic_ai_tools(
     user_perms: set[str],
     agent_code: str,
+    *,
+    enabled_extra: list[str] | None = None,
 ) -> list[Tool]:
     """spec §5.4: 按 Agent + 用户 perms 过滤后，包装为 PydanticAI Tool 列表
 
     用法（chat_agent.py）:
         agent = Agent(model, deps_type=ChatDeps, tools=build_pydantic_ai_tools(perms, "user_mgmt"))
 
+    Args:
+        enabled_extra: v1.5+ SR-17 sys_config.ai:enabled_tools 解析结果，
+            由 chat_service.create_agent 预 await 后传入（保持本函数同步）。
+
     返回顺序：按 Registry 注册顺序（稳定，便于调试）
     """
-    registered_tools = compute_available_tools(user_perms, agent_code)
+    registered_tools = compute_available_tools(
+        user_perms, agent_code, enabled_extra=enabled_extra
+    )
     return [wrap_tool_for_pydantic_ai(t) for t in registered_tools]
 
 
