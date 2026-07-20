@@ -890,15 +890,25 @@ async def execute_tool(name: str, args: dict, ctx: AiToolContext) -> ToolResult:
 - 把 log 写入放到 `tool_db.begin()` 内：tool 函数异常时 log 也被回滚，审计失效
 - 用 PostgreSQL 2PC（两阶段提交）：复杂度高、性能差，MVP 不引入
 
-### 6.4 容量鉴权（三层）
+### 6.4 容量鉴权（三层 + v1.5+ 全局速率层）
 
 | 层级 | 维度 | 默认阈值 | Redis key | 配置项 |
 |---|---|---|---|---|
 | L1 用户速率 | 单用户写/分钟 | 20 | `ai:write:{user_id}` (Sorted Set) | `system_config.ai:rate_limit:user_write_per_min` |
+| L1 全局速率（v1.5+ SR-19） | 全系统写/分钟 | **0=不限**（部署方按机器容量配） | `ai:rate:global` (Sorted Set) | `system_config.ai:rate_limit:global_per_min` |
 | L2 用户日配额 | 单用户 tool/天 | **2000**（MVP 上调，HR/系统管理员批量配置场景合理） | `ai:quota:{user_id}:{date}` (UTC date, 见下) | `system_config.ai:quota:daily_per_user` |
+| L2 per-agent 日配额（v1.5+ SR-16） | 单用户 agent/天 | None=仅走全局 L2 | `ai:quota:{user_id}:{agent_code}:{date}` | `ai_agent.daily_quota_per_user` |
 | L3 单 tool 超时 | 单 tool 执行 | 10s | `asyncio.wait_for` | `system_config.ai:limit:tool_timeout_sec` |
 
 **"写"的判定**（L1 / L2 都按此）：`tool.meta.risk in ("high", "destructive")` **或** `tool.meta.hitl_always == True`。`risk="low"` 的纯查询 tool 不计入速率与配额（避免用户调 `user.list` 几十次就把配额耗光）。
+
+**L1 全局速率（v1.5+ SR-19，2026-07-20）**：在用户级 L1 之上**叠加**全局速率限制，防多 tenant / 多用户共同压垮系统。`sys_config.ai:rate_limit:global_per_min` 默认 0=不限（向后兼容，部署方按机器容量显式配置才生效）。Redis key `ai:rate:global` 用同样的 ZSET 滑窗 + Lua 脚本（与用户级 L1 复用 `_L1_LUA`）。executor 调用顺序：先 `check_l1_rate_limit`（用户级）→ 再 `check_l1_global_rate_limit`（全局）；任一超限抛 `AI_RATE_LIMIT_GLOBAL` / `AI_RATE_LIMIT_USER_WRITE`。AuthorizationException 回滚路径 `decr_quota(l1_global_member=...)` 同步 ZREM。
+
+**关键约束**：
+- **叠加不替代**：与 SR-16 同原则，全局 L1 不替代用户级 L1，两层都过才放行。
+- **默认 0=不限**：避免破坏 MVP 行为（单 tenant 部署无需配全局），生产部署方按 CPU/Redis 容量显式设值（如 500/min）。
+- **超管不豁免**：与 L1/L2 一致，防超管误用。
+- **错误码区分**：用户级超限 `AI_RATE_LIMIT_USER_WRITE`（"用户写速率超限"），全局超限 `AI_RATE_LIMIT_GLOBAL`（"系统繁忙，请稍后重试"），UX 文案区分。
 
 **L1 滑窗实现（2026-07-10 修订 S-7）**：必须用 Redis **Sorted Set** 实现真正的滑动窗口，禁止用 `INCR + EXPIRE`（固定窗口可被边界突发 2x 突破）：
 
@@ -2186,6 +2196,7 @@ AI 已可用但只能 autonomous：
 | ✅ **Per-agent 日配额 — 已完成 2026-07-20**（spec §6.4 / SR-16） | 不同 Agent 需不同限额 | `ai_agent.daily_quota_per_user` 字段加回（nullable，None=仅走全局 L2）+ Redis key `ai:quota:{user_id}:{agent_code}:{date}`（叠加不替代全局 L2）；`check_l2_agent_quota` + `decr_quota` 同步回滚两层 |
 | ✅ **Tool 级 `default_enabled` — 已完成 2026-07-20**（spec §5.4 / SR-17） | 部署方需精细控制 | `AiToolMeta.default_enabled: bool = True`（向后兼容）+ `sys_config.ai:enabled_tools` JSON 数组白名单；`compute_available_tools` 加 `(meta.default_enabled or name in enabled_extra)` 过滤 |
 | ✅ **`args_summary` 白名单 — 已完成 2026-07-20**（spec §9.2 / SR-18） | 审计需追查具体字段 | `AiToolMeta.args_summary_fields: tuple[str, ...] = ()`（默认空，向后兼容）+ `build_args_summary(args, summary_fields)` 仅提取声明字段；未声明字段不进 summary（`args_hash` 已存全量 SHA256，无冗余 hash 占位） |
+| ✅ **容量 L1 全局速率 — 已完成 2026-07-20**（spec §6.4 / SR-19） | 多 tenant 用户量大 | `sys_config.ai:rate_limit:global_per_min`（默认 0=不限，部署方显式配）+ Redis key `ai:rate:global` ZSET 滑窗（与用户级 L1 复用 `_L1_LUA`）；`check_l1_global_rate_limit` 叠加在用户级 L1 之上，错误码 `AI_RATE_LIMIT_GLOBAL`；decr_quota 同步回滚 |
 | 多 Agent + Supervisor 路由 | 启用 ≥2 业务 Agent | `available_agents: list[AiAgent]` + `build_supervisor()` |
 | 跨会话 HITL 恢复 | 用户反馈"刷新页面后丢失确认" | `GET /ai/pending-confirmations` + 前端 30s 心跳 |
 | ✅ **SSE 续传（HITL 期热接管）— 已完成 2026-07-16**（spec [`2026-07-13-sse-resume-design.md`](./2026-07-13-sse-resume-design.md) / SR-9 / SR-10 / SR-11 / SR-12）| 网络抖动频繁 | SSE 标准 `id:` 字段 + `Last-Event-ID` 头 + Redis SETNX owner 锁（TTL 60s ≥ `AI_TOOL_TIMEOUT`） + `confirmation_resumed` 新事件 |
@@ -2670,6 +2681,10 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 #### SR-18. **`args_summary` 可选白名单字段（业务方显式声明，未声明不进 summary）**（2026-07-20 v1.5+ 落地，spec §9.2 / §14）— MVP `build_args_summary` 仅记元信息（tool / risk / mode / dry_run_count），但实际运维场景常需直接从 `ai_operation_log.args_summary` 字段读到关键参数（如 `user.update_dept` 时看到 `user_id=42, new_dept_id=8`）以快速反查问题，否则要 join 业务表按 `args_hash` 比对。v1.5+ 在 `AiToolMeta` 加 `args_summary_fields: tuple[str, ...] = ()`（默认空 = MVP 行为），`build_args_summary` 扩展签名接受 `args` + `summary_fields`，仅提取声明字段原值追加到元信息后。未声明字段**不进 summary**（`args_hash` 字段已存全量 SHA256 用于反查，summary 重复存 hash 是冗余且不可读）。
 **反例**: (1) 强制每个 tool 声明 `args_summary_fields`——大多数 tool 默认行为已够，强制声明增加业务方负担。(2) 默认提取所有 args 字段——泄漏面失控（`password` / `api_key` 等可能进 summary 落库），必须显式声明。(3) 未声明字段用 hash 占位（`args_summary="..., user_id=42, other=__hash__abc123"`）——冗余：`args_hash` 字段已是全量 SHA256，summary 再存局部 hash 不可读且无新信息。(4) 业务方声明 `password` 等敏感字段——`scripts/check_ai_tools.py` 静态扫描 `args_summary_fields` 必须不在 `SENSITIVE_INPUT_BLOCKLIST` 内，违反阻断合并。
 **回归**: AiToolMeta 加 `args_summary_fields: tuple[str, ...] = ()` 字段（默认空，老 tool 不声明完全等价 MVP）；`build_args_summary` 扩展 `args=None` / `summary_fields=()` 可选参数，旧调用方不传等价 MVP 行为；executor.execute_tool 调 build_args_summary 时传 `args=args, summary_fields=meta.args_summary_fields`；测试覆盖"MVP 默认（args_summary_fields=()）→ summary 不含字段值"/"声明 fields → summary 追加字段值"/"声明但 args 中无该字段 → 不追加（不抛 KeyError）"/"check_ai_tools.py 静态校验 args_summary_fields 不含 SENSITIVE_INPUT_BLOCKLIST"。
+
+#### SR-19. **L1 全局速率叠加（默认 0=不限，部署方显式配）+ 错误码区分**（2026-07-20 v1.5+ 落地，spec §6.4 / §14）— MVP L1 只限单用户写速率（默认 20/min），但多 tenant / 多用户共同压垮系统的场景未防护（如 100 个用户同时各发 20/min = 2000/min 全局写操作，可能撑爆 DB 连接池 / Redis）。v1.5+ 加全局 L1 维度：`sys_config.ai:rate_limit:global_per_min`（int，默认 0=不限，部署方按机器容量显式配，如 500/min）+ Redis key `ai:rate:global` ZSET 滑窗（与用户级 L1 复用 `_L1_LUA` Lua 脚本）。executor 调用顺序：先用户级 L1 → 再全局 L1，任一超限抛对应错误码（`AI_RATE_LIMIT_USER_WRITE` / `AI_RATE_LIMIT_GLOBAL`）。`decr_quota(l1_global_member=...)` 同步 ZREM 回滚。
+**反例**: (1) 全局 L1 替代用户级 L1——失去单用户防护（恶意用户能消耗全系统配额），必须叠加。(2) 默认非零值（如 500/min）——破坏 MVP 行为，且不同部署容量差异大（4C8G vs 32C64G），必须由部署方显式配；默认 0=跳过检查。(3) 共用错误码 `AI_RATE_LIMIT_USER_WRITE`——UX 文案不分（用户级超限是"你太快"，全局超限是"系统繁忙"），LLM 无法区分是用户问题还是系统问题；必须分两个错误码。(4) 用 `ai:write:global` 命名（与用户级 `ai:write:{user_id}` 同前缀）——Redis SCAN 工具误归类，应用 `ai:rate:global` 不同前缀便于运维。
+**回归**: 不影响现有 L1/L2/L3 行为（global_limit=0 时完全跳过）；`decr_quota(redis, user_id, agent_code=..., l1_member=...)` 签名扩展加 `l1_global_member=None` 可选参数，旧调用方不传兼容；executor 加测试覆盖"全局未配（global_per_min=0）→ 跳过"/"全局配 5/min → 第 6 次抛 AI_RATE_LIMIT_GLOBAL"/"AuthorizationException 时同步 ZREM 全局 zset"四个 case。
 
 ### 修订后立即需要做的事（优先级排序）
 

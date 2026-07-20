@@ -44,8 +44,12 @@ DEFAULT_L2_DAILY_QUOTA = 2000
 DEFAULT_L3_TIMEOUT_SEC = 10
 L1_WINDOW_SEC = 60  # 滑窗 60s
 
+# v1.5+ SR-19: 全局 L1 默认 0=不限（部署方按机器容量显式配）
+DEFAULT_L1_GLOBAL_RATE_PER_MIN = 0
+
 # sys_config 对应的 key（修订：从硬编码改为运行时可配）
 _CFG_L1_RATE = "ai:rate_limit:user_write_per_min"
+_CFG_L1_GLOBAL_RATE = "ai:rate_limit:global_per_min"  # v1.5+ SR-19
 _CFG_L2_QUOTA = "ai:quota:daily_per_user"
 _CFG_L3_TIMEOUT = "ai:limit:tool_timeout_sec"
 
@@ -90,8 +94,25 @@ async def _resolve_l3_timeout() -> int:
         return DEFAULT_L3_TIMEOUT_SEC
 
 
+async def _resolve_l1_global_limit() -> int:
+    """v1.5+ SR-19: 从 sys_config 读全局 L1 速率上限（默认 0=不限）"""
+    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
+    from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
+        get_ai_config_int,
+    )
+
+    try:
+        async with AsyncSessionLocal() as db:
+            return await get_ai_config_int(
+                db, _CFG_L1_GLOBAL_RATE, DEFAULT_L1_GLOBAL_RATE_PER_MIN
+            )
+    except Exception:
+        return DEFAULT_L1_GLOBAL_RATE_PER_MIN
+
+
 # ============ Redis key 命名（spec §6.4） ============
 _KEY_L1 = "ai:write:{user_id}"  # Sorted Set：member=call_uid, score=ts
+_KEY_L1_GLOBAL = "ai:rate:global"  # v1.5+ SR-19 全局速率（不分 user_id）
 _KEY_L2 = "ai:quota:{user_id}:{date}"  # UTC 日，TTL 到当日 UTC 结束
 _KEY_L2_AGENT = "ai:quota:{user_id}:{agent_code}:{date}"  # v1.5+ SR-16 per-agent 维度
 
@@ -166,6 +187,55 @@ async def check_l1_rate_limit(
         raise BusinessRuleException(
             f"用户写速率超限（{count_int}/{limit} per minute）",
             error_code="AI_RATE_LIMIT_USER_WRITE",
+        )
+
+    return count_int, member
+
+
+async def check_l1_global_rate_limit(
+    redis: Redis,
+    *,
+    limit: int | None = None,
+) -> tuple[int, str] | None:
+    """L1 全局速率：全系统写/分钟（v1.5+ SR-19）
+
+    limit=0 / None（默认）→ 跳过检查（向后兼容，部署方未配时不防护）。
+    limit>0 时用与用户级 L1 相同的 ZSET + Lua 滑窗。
+
+    Returns:
+        (count, member) — member 供调用方在 raise AuthorizationException 时
+        通过 decr_quota(redis, user_id, l1_global_member=member) 精确回滚。
+        limit=0 时返回 None（跳过检查，调用方据此不传 l1_global_member）。
+
+    Raises:
+        BusinessRuleException(AI_RATE_LIMIT_GLOBAL) — 全局计数超 limit
+    """
+    if limit is None:
+        limit = await _resolve_l1_global_limit()
+    if limit <= 0:
+        return None  # 未配置全局限制
+
+    key = _KEY_L1_GLOBAL
+    now = time.time()
+    window_start = now - L1_WINDOW_SEC
+    member = f"{now:.6f}:{uuid.uuid4().hex}"
+
+    count = await redis.eval(_L1_LUA, 1, key, window_start, now, member, L1_WINDOW_SEC)
+    count_int = int(count)
+
+    if count_int > limit:
+        # 修订 S-11：超限时 ZREM 自身
+        await redis.zrem(key, member)
+        logger.info(
+            "L1 global rate limit exceeded",
+            extra={"current": count_int, "limit": limit},
+        )
+        from app.modules.ai.metrics import record_quota_rejected  # noqa: PLC0415
+
+        record_quota_rejected("l1_global_rate")
+        raise BusinessRuleException(
+            f"系统繁忙，全局写速率超限（{count_int}/{limit} per minute），请稍后重试",
+            error_code="AI_RATE_LIMIT_GLOBAL",
         )
 
     return count_int, member
@@ -291,6 +361,7 @@ async def decr_quota(
     *,
     agent_code: str | None = None,
     l1_member: str | None = None,
+    l1_global_member: str | None = None,
 ) -> None:
     """业务函数内 AuthorizationException 时回滚 L1/L2 计数（修订 S-11）
 
@@ -301,14 +372,23 @@ async def decr_quota(
     executor 仅在 agent.daily_quota_per_user 非 None 时传 agent_code
     （未配置专属额度的 agent 不写 per-agent key，无需回滚）。
 
+    v1.5+ SR-19 扩展：l1_global_member 非 None 时同步 ZREM 全局 L1 zset 成员。
+    executor 仅在 sys_config.ai:rate_limit:global_per_min > 0 时传
+    （未配置全局限制时不写 zset，无需回滚）。
+
     Args:
         agent_code: 当前会话 agent.code；None=不回滚 per-agent L2
         l1_member: check_l1_rate_limit 返回的 member；传此值可精确删除本次调用
-                   的 zset 成员。若 None 则不回滚 L1（保守：宁可多算不漏算）
+                   的 zset 成员。若 None 则不回滚用户级 L1。
+        l1_global_member: check_l1_global_rate_limit 返回的 member；None=不回滚全局 L1。
     """
     l1_key = _KEY_L1.format(user_id=user_id)
     if l1_member is not None:
         await redis.zrem(l1_key, l1_member)
+
+    # v1.5+ SR-19: 全局 L1 ZREM（仅当配置了全局限制 + 本次写入了 member）
+    if l1_global_member is not None:
+        await redis.zrem(_KEY_L1_GLOBAL, l1_global_member)
 
     # L2 全局：DECR
     now = datetime.now(UTC)

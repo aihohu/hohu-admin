@@ -24,6 +24,7 @@ import pytest
 from app.core import redis as redis_module
 from app.core.exceptions import AuthorizationException, BusinessRuleException
 from app.modules.ai.agents.gateway import (
+    check_l1_global_rate_limit,
     check_l1_rate_limit,
     check_l2_agent_quota,
     check_l2_daily_quota,
@@ -107,6 +108,7 @@ async def clean_redis_rate_keys():
         keys = await redis_module.redis_client.keys("ai:write:*")
         keys += await redis_module.redis_client.keys("ai:quota:*")
         keys += await redis_module.redis_client.keys("ai:failures:*")
+        keys += await redis_module.redis_client.keys("ai:rate:*")  # v1.5+ SR-19 全局 L1
         if keys:
             await redis_module.redis_client.delete(*keys)
 
@@ -192,6 +194,69 @@ class TestL1RateLimit:
         )
         # 老成员已清，只有刚加的 1 个新成员
         assert count == 1
+
+
+# ============ L1 全局速率（v1.5+ SR-19） ============
+
+
+class TestL1GlobalRateLimit:
+    """spec §6.4 SR-19：全局 L1 叠加用户级 L1"""
+
+    async def test_limit_zero_skips_check(self) -> None:
+        """limit=0（默认）→ 跳过，返回 None，不写 zset"""
+        result = await check_l1_global_rate_limit(redis_module.redis_client, limit=0)
+        assert result is None
+        exists = await redis_module.redis_client.exists("ai:rate:global")
+        assert exists == 0  # 未写 key
+
+    async def test_under_limit_passes(self) -> None:
+        """limit=5 → 连续 5 次通过"""
+        for _ in range(5):
+            r = await check_l1_global_rate_limit(redis_module.redis_client, limit=5)
+            assert r is not None
+
+    async def test_over_limit_raises(self) -> None:
+        """limit=2 → 第 3 次抛 AI_RATE_LIMIT_GLOBAL"""
+        for _ in range(2):
+            await check_l1_global_rate_limit(redis_module.redis_client, limit=2)
+
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await check_l1_global_rate_limit(redis_module.redis_client, limit=2)
+        assert exc_info.value.error_code == "AI_RATE_LIMIT_GLOBAL"
+
+    async def test_over_limit_rolls_back_self(self) -> None:
+        """SR-19 + 修订 S-11：超限时 ZREM 自身，zset 回到 limit"""
+        for _ in range(2):
+            await check_l1_global_rate_limit(redis_module.redis_client, limit=2)
+        with pytest.raises(BusinessRuleException):
+            await check_l1_global_rate_limit(redis_module.redis_client, limit=2)
+
+        count = await redis_module.redis_client.zcard("ai:rate:global")
+        assert count == 2  # 回到 limit
+
+    async def test_returns_member_for_rollback(self) -> None:
+        """返回 (count, member)，member 用于 decr_quota 精确回滚"""
+        r = await check_l1_global_rate_limit(redis_module.redis_client, limit=10)
+        assert r is not None
+        _, member = r
+        assert isinstance(member, str)
+        score = await redis_module.redis_client.zscore("ai:rate:global", member)
+        assert score is not None
+
+    async def test_shared_across_calls(self) -> None:
+        """全局 L1 不分 user_id，所有调用共享同一个 zset（与用户级 L1 独立 key）
+
+        模拟多用户连续调 check_l1_global_rate_limit，zset 累加。
+        """
+        # 模拟 3 次独立调用（不区分用户）
+        counts = []
+        for _ in range(3):
+            r = await check_l1_global_rate_limit(redis_module.redis_client, limit=10)
+            assert r is not None
+            counts.append(r[0])
+
+        # 计数应递增：1, 2, 3（zset 累加，无 user_id 维度）
+        assert counts == [1, 2, 3]
 
 
 class TestL2DailyQuota:
@@ -468,6 +533,39 @@ class TestDecrQuota:
             or 0
         )
         assert agent_count == 3  # 没 decr
+
+    async def test_decr_global_l1_with_member(self) -> None:
+        """v1.5+ SR-19：传 l1_global_member 时 ZREM 全局 zset 成员"""
+        # 先 INCR 全局 L1 3 次，拿到最后一次的 member
+        members = []
+        for _ in range(3):
+            r = await check_l1_global_rate_limit(redis_module.redis_client, limit=100)
+            assert r is not None
+            members.append(r[1])
+
+        # ZREM 最后一个 member
+        await decr_quota(
+            redis_module.redis_client,
+            99969,  # user_id 不影响全局 L1
+            l1_global_member=members[-1],
+        )
+
+        count = await redis_module.redis_client.zcard("ai:rate:global")
+        assert count == 2  # 3 - 1 = 2
+
+    async def test_decr_without_global_member_skips_global_l1(self) -> None:
+        """v1.5+ SR-19：l1_global_member=None 时不 ZREM 全局 zset"""
+        for _ in range(3):
+            await check_l1_global_rate_limit(redis_module.redis_client, limit=100)
+
+        await decr_quota(
+            redis_module.redis_client,
+            99968,
+            l1_global_member=None,
+        )
+
+        count = await redis_module.redis_client.zcard("ai:rate:global")
+        assert count == 3  # 没 ZREM
 
 
 # ============ 连续失败兜底（修订 S-12：INCR + 条件 EXPIRE） ============
