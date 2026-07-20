@@ -292,6 +292,7 @@ def _build_deps(
     )
     agent = MagicMock()
     agent.code = _AGENT_CODE
+    agent.daily_quota_per_user = None  # v1.5+ SR-16: 默认未配专属额度
 
     return ChatDeps(
         user=user,

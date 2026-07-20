@@ -38,6 +38,7 @@ from app.modules.ai.agents.gateway.failures import (
 )
 from app.modules.ai.agents.gateway.quota import (
     check_l1_rate_limit,
+    check_l2_agent_quota,
     check_l2_daily_quota,
     decr_quota,
     is_write_tool,
@@ -211,14 +212,33 @@ async def execute_tool(
             error_msg="此操作仅超级管理员可执行，请联系超管或走传统界面",
         )
 
-    # 3. 容量鉴权 L1/L2（仅写 tool，spec §6.4 + 修订 S-11）
+    # 3. 容量鉴权 L1/L2（仅写 tool，spec §6.4 + 修订 S-11 + SR-16 per-agent L2）
     # check_l1_rate_limit 返回 (count, l1_member)，l1_member 用于业务函数内
     # 抛 AuthorizationException 时精确回滚（修订 S-11）
+    # v1.5+ SR-16: 全局 L2 通过后再 check_l2_agent_quota（仅当 agent 配了专属额度），
+    #              agent_code 从 deps.agent.code 取（非 tool.meta.agent，避免 shared
+    #              agent 调 file.parse 时归属与运行时会话不一致）
     l1_member: str | None = None
+    agent_code_for_rollback: str | None = None
     if is_write_tool(meta):
         try:
             _, l1_member = await check_l1_rate_limit(redis_client, user_id)
             await check_l2_daily_quota(redis_client, user_id)
+            # v1.5+ SR-16 per-agent L2 叠加（仅当 deps.agent 非 None 且配了专属额度）
+            agent_quota_limit = (
+                getattr(deps.agent, "daily_quota_per_user", None)
+                if deps.agent is not None
+                else None
+            )
+            if agent_quota_limit is not None:
+                await check_l2_agent_quota(
+                    redis_client,
+                    user_id,
+                    deps.agent.code,
+                    limit=agent_quota_limit,
+                )
+                # 标记：AuthorizationException 时需要回滚 per-agent key
+                agent_code_for_rollback = deps.agent.code
         except BusinessException as e:
             _rec("quota_rejected")
             return ToolResult.failure(error_code=e.error_code, error_msg=e.message)
@@ -356,9 +376,15 @@ async def execute_tool(
         started_at = time.monotonic()
 
     # 8. 业务执行（修订 S-11：传 l1_member 进去，业务函数内抛
-    #    AuthorizationException 时 decr_quota 精确回滚 L1 zset 成员）
+    #    AuthorizationException 时 decr_quota 精确回滚 L1 zset 成员；
+    #    v1.5+ SR-16 传 agent_code_for_rollback 同步回滚 per-agent L2）
     result = await _invoke_tool_fn(
-        registered, args, deps, args_hash, l1_member=l1_member
+        registered,
+        args,
+        deps,
+        args_hash,
+        agent_code_for_rollback=agent_code_for_rollback,
+        l1_member=l1_member,
     )
 
     # 9. emit tool_call_result + 写 log 终态
@@ -695,6 +721,7 @@ async def _invoke_tool_fn(
     deps: ChatDeps,
     args_hash: str,
     *,
+    agent_code_for_rollback: str | None = None,
     l1_member: str | None = None,
 ) -> ToolResult:
     """独立 session 内调用业务函数（spec §6.3）
@@ -703,6 +730,9 @@ async def _invoke_tool_fn(
     `ensure_targets_in_scope` 命中 data_scope 越界）时，必须 decr_quota
     回滚 L1/L2 计数器——否则用户被偷配额（spec §6.4 计数策略
     "data_scope 拒绝不计入"）。
+
+    v1.5+ SR-16：agent_code_for_rollback 非 None 时同步回滚 per-agent L2 key
+    （仅当 agent.daily_quota_per_user 非 None，由 execute_tool 决定是否传）。
     """
     meta = registered.meta
     tool_fn = registered.fn
@@ -724,9 +754,16 @@ async def _invoke_tool_fn(
                 return ToolResult.success(data=safe_data)
     except AuthorizationException as e:
         # 修订 S-11：data_scope 越界等授权失败，回滚 L1/L2 已写计数
+        # v1.5+ SR-16：若 per-agent L2 已写（agent_code_for_rollback 非 None），
+        #              同步回滚 per-agent key（对称原则）
         if is_write_tool(meta):
             try:
-                await decr_quota(redis_client, user_id, l1_member=l1_member)
+                await decr_quota(
+                    redis_client,
+                    user_id,
+                    agent_code=agent_code_for_rollback,
+                    l1_member=l1_member,
+                )
             except RedisError:
                 # 回滚失败不阻断主流程（业务已失败，配额少 1 是次要问题）
                 logger.exception(

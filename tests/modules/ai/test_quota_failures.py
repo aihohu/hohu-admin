@@ -25,6 +25,7 @@ from app.core import redis as redis_module
 from app.core.exceptions import AuthorizationException, BusinessRuleException
 from app.modules.ai.agents.gateway import (
     check_l1_rate_limit,
+    check_l2_agent_quota,
     check_l2_daily_quota,
     check_repeated_failure,
     clear_failures,
@@ -257,6 +258,98 @@ class TestL2DailyQuota:
             assert 50 <= ttl <= 60
 
 
+# ============ L2 per-agent 维度（v1.5+ SR-16） ============
+
+
+class TestL2AgentQuota:
+    """spec §6.4 SR-16：per-agent L2 叠加全局 L2"""
+
+    async def test_limit_none_skips_check(self) -> None:
+        """agent 未配专属额度（limit=None）→ 跳过，不写 Redis key"""
+        user_id = 99981
+        result = await check_l2_agent_quota(
+            redis_module.redis_client, user_id, "user_mgmt", limit=None
+        )
+        assert result is None
+        date_str = datetime.now(UTC).strftime("%Y%m%d")
+        exists = await redis_module.redis_client.exists(
+            f"ai:quota:{user_id}:user_mgmt:{date_str}"
+        )
+        assert exists == 0  # 未写 key
+
+    async def test_under_quota_passes(self) -> None:
+        """limit=5 时连续 5 次通过"""
+        user_id = 99980
+        for _ in range(5):
+            await check_l2_agent_quota(
+                redis_module.redis_client, user_id, "user_mgmt", limit=5
+            )
+
+    async def test_over_quota_raises(self) -> None:
+        """limit=2 第 3 次抛 AI_DAILY_QUOTA_EXHAUSTED"""
+        user_id = 99979
+        for _ in range(2):
+            await check_l2_agent_quota(
+                redis_module.redis_client, user_id, "user_mgmt", limit=2
+            )
+
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await check_l2_agent_quota(
+                redis_module.redis_client, user_id, "user_mgmt", limit=2
+            )
+        assert exc_info.value.error_code == "AI_DAILY_QUOTA_EXHAUSTED"
+
+    async def test_over_quota_rolls_back_self(self) -> None:
+        """SR-16 + 修订 S-11：超限时 DECR 自身，计数回到 limit"""
+        user_id = 99978
+        for _ in range(2):
+            await check_l2_agent_quota(
+                redis_module.redis_client, user_id, "user_mgmt", limit=2
+            )
+        with pytest.raises(BusinessRuleException):
+            await check_l2_agent_quota(
+                redis_module.redis_client, user_id, "user_mgmt", limit=2
+            )
+
+        date_str = datetime.now(UTC).strftime("%Y%m%d")
+        count = int(
+            await redis_module.redis_client.get(
+                f"ai:quota:{user_id}:user_mgmt:{date_str}"
+            )
+            or 0
+        )
+        assert count == 2  # 回到 limit
+
+    async def test_independent_per_agent(self) -> None:
+        """不同 agent_code 互不影响（user_mgmt 用满不影响 job_mgmt）"""
+        user_id = 99977
+        # user_mgmt 用到 limit
+        await check_l2_agent_quota(
+            redis_module.redis_client, user_id, "user_mgmt", limit=1
+        )
+        # user_mgmt 已用满
+        with pytest.raises(BusinessRuleException):
+            await check_l2_agent_quota(
+                redis_module.redis_client, user_id, "user_mgmt", limit=1
+            )
+        # job_mgmt 应该还能用
+        result = await check_l2_agent_quota(
+            redis_module.redis_client, user_id, "job_mgmt", limit=5
+        )
+        assert result == 1
+
+    async def test_independent_per_user(self) -> None:
+        """不同 user_id 互不影响"""
+        await check_l2_agent_quota(
+            redis_module.redis_client, 99976, "user_mgmt", limit=1
+        )
+        # 另一用户不受影响
+        result = await check_l2_agent_quota(
+            redis_module.redis_client, 99975, "user_mgmt", limit=1
+        )
+        assert result == 1
+
+
 # ============ L3 单 tool 超时 ============
 
 
@@ -321,6 +414,60 @@ class TestDecrQuota:
 
         count_after = await redis_module.redis_client.zcard(f"ai:write:{user_id}")
         assert count_after == count_before  # 没动
+
+    async def test_decr_agent_quota_with_agent_code(self) -> None:
+        """v1.5+ SR-16：传 agent_code 时同步 DECR per-agent L2 key"""
+        user_id = 99971
+        # 先 INCR 3 次 per-agent
+        for _ in range(3):
+            await check_l2_agent_quota(
+                redis_module.redis_client, user_id, "user_mgmt", limit=100
+            )
+
+        # 也 INCR 全局 L2（decr_quota 会同时 decr 全局）
+        for _ in range(3):
+            await check_l2_daily_quota(redis_module.redis_client, user_id, limit=100)
+
+        await decr_quota(
+            redis_module.redis_client,
+            user_id,
+            agent_code="user_mgmt",
+            l1_member=None,
+        )
+
+        date_str = datetime.now(UTC).strftime("%Y%m%d")
+        agent_count = int(
+            await redis_module.redis_client.get(
+                f"ai:quota:{user_id}:user_mgmt:{date_str}"
+            )
+            or 0
+        )
+        global_count = int(
+            await redis_module.redis_client.get(f"ai:quota:{user_id}:{date_str}") or 0
+        )
+        assert agent_count == 2  # 3 - 1 = 2
+        assert global_count == 2  # 3 - 1 = 2
+
+    async def test_decr_without_agent_code_skips_per_agent(self) -> None:
+        """v1.5+ SR-16：agent_code=None 时不 decr per-agent key（与 executor 配对）"""
+        user_id = 99970
+        for _ in range(3):
+            await check_l2_agent_quota(
+                redis_module.redis_client, user_id, "user_mgmt", limit=100
+            )
+
+        await decr_quota(
+            redis_module.redis_client, user_id, agent_code=None, l1_member=None
+        )
+
+        date_str = datetime.now(UTC).strftime("%Y%m%d")
+        agent_count = int(
+            await redis_module.redis_client.get(
+                f"ai:quota:{user_id}:user_mgmt:{date_str}"
+            )
+            or 0
+        )
+        assert agent_count == 3  # 没 decr
 
 
 # ============ 连续失败兜底（修订 S-12：INCR + 条件 EXPIRE） ============

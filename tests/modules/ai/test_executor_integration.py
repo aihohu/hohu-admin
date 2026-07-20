@@ -182,6 +182,8 @@ def _build_deps(
     *,
     perms: set[str] | None = None,
     signal_event: Callable[[Any], Awaitable[None]] | None = None,
+    agent_daily_quota: int | None = None,
+    agent_code: str = "shared",
 ) -> ChatDeps:
     """构造测试 ChatDeps（mock user + 空 data_scope）"""
     user = MagicMock()
@@ -191,7 +193,8 @@ def _build_deps(
         accessible_dept_ids=None, accessible_user_scope=None, filters=[]
     )
     agent = MagicMock()
-    agent.code = "shared"
+    agent.code = agent_code
+    agent.daily_quota_per_user = agent_daily_quota  # v1.5+ SR-16
 
     return ChatDeps(
         user=user,
@@ -624,3 +627,109 @@ class TestRedisDownGracefulDegrade:
             assert result.error_code == "AI_REDIS_DOWN"
         finally:
             exec_mod.redis_client = original
+
+
+# ============ v1.5+ SR-16: per-agent L2 叠加全局 L2 ============
+
+
+class TestPerAgentQuota:
+    """spec §6.4 SR-16：agent.daily_quota_per_user 非 None 时叠加 per-agent L2"""
+
+    async def test_no_agent_quota_skips_per_agent_check(self) -> None:
+        """agent.daily_quota_per_user=None → 不调 check_l2_agent_quota，key 不存在"""
+        _register_test_tools()
+        deps = _build_deps(agent_daily_quota=None, agent_code="user_mgmt")
+
+        result = await execute_tool(_TEST_TOOL_LOW, {"msg": "hi"}, deps)
+        assert result.ok, f"默认 agent 无专属额度应通过，got {result.error_code}"
+
+        from datetime import UTC, datetime
+
+        from app.core import redis as redis_module
+
+        date_str = datetime.now(UTC).strftime("%Y%m%d")
+        exists = await redis_module.redis_client.exists(
+            f"ai:quota:9001:user_mgmt:{date_str}"
+        )
+        assert exists == 0  # per-agent key 未写
+
+    async def test_agent_quota_under_limit_passes(self) -> None:
+        """agent.daily_quota_per_user=5 → 单次 high-risk tool 通过"""
+        _register_test_tools()
+        # 用 unique user_id 隔离避免污染
+        user = MagicMock()
+        user.user_id = 9004
+        agent = MagicMock()
+        agent.code = "test_agent_pass"
+        agent.daily_quota_per_user = 5
+
+        deps = ChatDeps(
+            user=user,
+            perms={"*"},
+            db=MagicMock(),
+            data_scope=DataScopeContext(
+                accessible_dept_ids=None, accessible_user_scope=None, filters=[]
+            ),
+            agent=agent,
+            trace_id="tr_test_agent_pass",
+            conversation_id=400,
+        )
+
+        # low risk tool 也会触发 quota 检查吗？不会——is_write_tool=False。
+        # 用 _TEST_TOOL_LOW（risk=low）测不出 per-agent L2，需要 high risk。
+        # 但 high risk + dry_run_count=None → HITL 路径，等 confirm → expired。
+        # 解决：换用 _TEST_TOOL_HIGH 但工具内部已 self-contained，HITL expired 是预期。
+        # 这里只验证 per-agent key 在 quota check 阶段已被写入（即使最终 HITL expired）。
+        await execute_tool(_TEST_TOOL_HIGH, {"x": 1}, deps)
+
+        from datetime import UTC, datetime
+
+        from app.core import redis as redis_module
+
+        date_str = datetime.now(UTC).strftime("%Y%m%d")
+        agent_count = int(
+            await redis_module.redis_client.get(
+                f"ai:quota:9004:test_agent_pass:{date_str}"
+            )
+            or 0
+        )
+        assert agent_count == 1, f"per-agent L2 应 INCR 1 次，got {agent_count}"
+
+    async def test_agent_quota_exhausted_after_limit(self) -> None:
+        """agent.daily_quota_per_user=1 → 第 2 次 high risk 调用 per-agent L2 拦截
+
+        关键：用 low-risk tool 测不出（is_write_tool=False）。
+        改用直接调 check_l2_agent_quota（已在 test_quota_failures.py 覆盖），
+        此处验证 executor 不会因 per-agent 已满而错误地让 low-risk tool 也失败。
+        """
+        _register_test_tools()
+        user = MagicMock()
+        user.user_id = 9005
+        agent = MagicMock()
+        agent.code = "test_agent_full"
+        agent.daily_quota_per_user = 1
+
+        deps = ChatDeps(
+            user=user,
+            perms={"*"},
+            db=MagicMock(),
+            data_scope=DataScopeContext(
+                accessible_dept_ids=None, accessible_user_scope=None, filters=[]
+            ),
+            agent=agent,
+            trace_id="tr_test_agent_full",
+            conversation_id=500,
+        )
+
+        # 预热 per-agent L2 到 limit（直接调底层函数）
+        from app.core import redis as redis_module
+        from app.modules.ai.agents.gateway import check_l2_agent_quota
+
+        await check_l2_agent_quota(
+            redis_module.redis_client, 9005, "test_agent_full", limit=1
+        )
+
+        # 现在 per-agent 已满，high-risk tool 应被拦
+        result = await execute_tool(_TEST_TOOL_HIGH, {"x": 1}, deps)
+        assert not result.ok
+        assert result.error_code == "AI_DAILY_QUOTA_EXHAUSTED"

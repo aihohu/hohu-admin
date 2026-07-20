@@ -57,6 +57,12 @@ class AiAgent(Base):
         nullable=True,
         comment="格式 'provider:model'，会话创建时作默认值，None=用全局默认",
     )
+    daily_quota_per_user: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        default=None,
+        comment="v1.5+ per-agent 日配额上限，None=仅走全局 L2（spec §6.4 SR-16）",
+    )
     create_time: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), comment="创建时间"
     )

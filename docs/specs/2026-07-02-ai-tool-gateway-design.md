@@ -205,6 +205,10 @@ class AiAgent(Base):
     model_preference: Mapped[str | None] = mapped_column(
         String(128), nullable=True, comment="格式 'provider:model'，作会话创建默认值"
     )
+    daily_quota_per_user: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, default=None,
+        comment="v1.5+ per-agent 日配额，None=仅走全局 L2（spec §6.4 SR-16）",
+    )
     create_time: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), comment="创建时间"
     )
@@ -213,7 +217,7 @@ class AiAgent(Base):
     )
 ```
 
-> **`risk_appetite` 字段已删**（完整版三档偏好砍掉）。`default_tools_per_session` 字段也删（容量 L4 会话预算砍掉，见 6.4 节）。**`daily_quota_per_user` 字段也删**（MVP 只保留全局日配额 `system_config.ai:quota:daily_per_user`，per-agent 配额推到 v1.5+，见 §14）。
+> **`risk_appetite` 字段已删**（完整版三档偏好砍掉）。`default_tools_per_session` 字段也删（容量 L4 会话预算砍掉，见 6.4 节）。**`daily_quota_per_user` 字段 v1.5+ 已加回**（2026-07-20 SR-16，spec §6.4 per-agent L2 叠加全局 L2，nullable，None=仅走全局）。
 >
 > **`system_prompt` 大小限制 32KB**（应用层校验，非 DB 约束）—— 完整版 8KB 对复杂 Agent（如 `job_mgmt` 需描述 cron 语法 / 参数 schema / 安全约束）不够，提到 32KB。UI 层给软警告而非硬阻断。
 >
@@ -939,6 +943,38 @@ async def check_l2_daily_quota(redis, user_id: int, *, limit: int = 2000) -> Non
             error_code="AI_DAILY_QUOTA_EXHAUSTED",
         )
 ```
+
+**L2 Per-Agent 维度（v1.5+ 已落地 2026-07-20，SR-16）**：在全局 L2 之外**叠加** per-agent 维度限制，避免单 agent 独占全局配额（如 HR 把 2000/天 全用在 `user_mgmt`，导致 `job_mgmt` 等其他 agent 无配额可用）。
+
+```python
+# AiAgent 表加字段（None=该 agent 不限专属配额，仅走全局 L2）
+daily_quota_per_user: Mapped[int | None] = mapped_column(
+    Integer, nullable=True, default=None,
+    comment="per-agent 日配额上限，None=仅走全局 L2",
+)
+
+# Redis key：与全局 L2 同 date 键规则（UTC），加 agent_code 维度
+_KEY_L2_AGENT = "ai:quota:{user_id}:{agent_code}:{date}"
+
+async def check_l2_agent_quota(
+    redis: Redis, user_id: int, agent_code: str, *, limit: int | None
+) -> int | None:
+    """Per-agent L2 检查。limit=None 跳过（agent 未配专属额度）。
+
+    executor 调用顺序（修订 S-11 兼容）：
+      1. await check_l2_daily_quota(redis, user_id)         # 全局 L2
+      2. await check_l2_agent_quota(redis, user_id, agent_code,
+                                    limit=agent.daily_quota_per_user)
+      # 任一层 raise AI_DAILY_QUOTA_EXHAUSTED → executor 转 ToolResult.failure
+      # AuthorizationException 回滚：decr_quota() 同时 decr 两层 key
+    """
+```
+
+**关键约束**：
+- **叠加不替代**：per-agent L2 不替代全局 L2，两层都过才放行。防"配置了 per-agent 就绕全局"的误区。
+- **回滚对称（修订 S-11 扩展）**：`decr_quota()` 必须同时回滚全局 L2 和 per-agent L2（若 agent 有专属额度），否则 data_scope 拒绝时偷用户配额。
+- **超管不豁免**：与 L1/L2/L3 一致，防超管误用（与 §11.4 自动禁用一致）。
+- **agent_code 来源**：从 `deps.agent.code` 取（ChatDeps 已携带 AiAgent ORM 对象），不从 `tool.meta.agent` 取（tool 声明的归属 agent 可能与运行时会话 agent 不一致——如 `shared` agent 调 `file.parse`）。
 
 **L3 超时异常处理**：`asyncio.wait_for` 触发 `asyncio.TimeoutError` → Gateway 捕获后转 `BusinessRuleException("...", error_code="AI_TOOL_TIMEOUT")` 并手动 `exc.code = 504`，写入 `ai_operation_log`（`status=failed`, `error_code=AI_TOOL_TIMEOUT`），LLM 收到后向用户解释"操作超时，建议拆分任务或重试"。
 
@@ -2118,7 +2154,7 @@ AI 已可用但只能 autonomous：
 |---|---|---|
 | ✅ 多 worker HITL（pub/sub） — **已完成 2026-07-13**（§8.4.1 / SR-7） | 单 worker 性能不足 | `AI_HITL_MODE=redis_pubsub` + Redis pub/sub + `pending.wake_action` 防丢失（**未用**本地挂起表，per-stream subscribe 替代） |
 | ⚠️ **Plan v1.5+ gap**：`hohu monitoring` CLI 集成（Prometheus + Grafana） | §6.3 v1.5+ Prometheus 接入已落地（commit `7ea6e8f`），但客户运维需手写 docker-compose | hohu-cli 加 `hohu monitoring` 命令组（参考 `hohu deploy` 模式）；模板 `hohu-cli/hohu/templates/monitoring/`；`init` 时自动从 `hohu-admin/docs/monitoring/alerts.yml` 复制规则；不起 Alertmanager（留 v1.6+） |
-| Per-agent 日配额 | 不同 Agent 需不同限额 | `ai_agent.daily_quota_per_user` 字段加回 + Redis key `ai:quota:{user_id}:{agent_id}:{date}` |
+| ✅ **Per-agent 日配额 — 已完成 2026-07-20**（spec §6.4 / SR-16） | 不同 Agent 需不同限额 | `ai_agent.daily_quota_per_user` 字段加回（nullable，None=仅走全局 L2）+ Redis key `ai:quota:{user_id}:{agent_code}:{date}`（叠加不替代全局 L2）；`check_l2_agent_quota` + `decr_quota` 同步回滚两层 |
 | 多 Agent + Supervisor 路由 | 启用 ≥2 业务 Agent | `available_agents: list[AiAgent]` + `build_supervisor()` |
 | 跨会话 HITL 恢复 | 用户反馈"刷新页面后丢失确认" | `GET /ai/pending-confirmations` + 前端 30s 心跳 |
 | ✅ **SSE 续传（HITL 期热接管）— 已完成 2026-07-16**（spec [`2026-07-13-sse-resume-design.md`](./2026-07-13-sse-resume-design.md) / SR-9 / SR-10 / SR-11 / SR-12）| 网络抖动频繁 | SSE 标准 `id:` 字段 + `Last-Event-ID` 头 + Redis SETNX owner 锁（TTL 60s ≥ `AI_TOOL_TIMEOUT`） + `confirmation_resumed` 新事件 |
@@ -2591,6 +2627,10 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 #### SR-15. **`accessible_user_ids` 改 SQL Select 子查询（不物化 set），ensure_targets_in_scope 走 SQL count**（2026-07-20 v1.5+ 落地，spec §14）— 旧实现 `accessible_user_ids: set[int]` 在 `build_data_scope_context` 时物化所有可见 user_id，单部门 5000+ 用户场景 Python 进程内存 OOM 风险。v1.5+ 改为携带 SQL `Select[tuple[int]]` 子查询表达式（不执行），`ensure_targets_in_scope` 改 async，user_ids/create_bys 走 `SELECT count(*) FROM (<scope>) WHERE user_id IN (:targets)`，count < len(targets) 抛 `AI_DATA_SCOPE_VIOLATION`。dept_ids 仍物化 set（部门数量小，无 OOM 风险，保留同步 O(1) 检查）。
 **反例**: (1) 双形态 `set[int] | Literal["subquery"]` + 阈值切换——代码复杂、测试组合爆炸、开源贡献者维护成本高。(2) subquery 模式下跳过越界检查（信任 filters SQL 过滤）——LLM 拿不到 `AI_DATA_SCOPE_VIOLATION` 反问提示，UX 降级。(3) 始终走 set 物化——OOM 风险未解除。
 **回归**: 业务函数完全透明（已通过 `ctx.data_scope.filters` 走 SQL，不接触 set）；AI tool 调用上下文里多一次 10ms SQL count 可忽略；越界检查完整保留（错误码不变，LLM 反问路径不变）；测试改 mock `ctx.db.execute` 返 `scalar_one=visible_count` 模拟 SQL 结果。
+
+#### SR-16. **Per-agent 日配额叠加（不替代全局 L2）+ 回滚对称**（2026-07-20 v1.5+ 落地，spec §6.4 / §14）— 全局 L2（2000/天/用户）在多 agent 场景下被单一 agent 独占风险高（如 HR 全天用 `user_mgmt` 把配额耗光，导致 `job_mgmt` / `provider_mgmt` 无配额可用）。v1.5+ 在 `ai_agent` 表加 `daily_quota_per_user: int | None`（None=该 agent 仅走全局 L2，不限专属），quota.py 加 `check_l2_agent_quota` + per-agent Redis key `ai:quota:{user_id}:{agent_code}:{date}`。executor 调用顺序：先全局 L2，再 per-agent L2，任一失败抛 `AI_DAILY_QUOTA_EXHAUSTED`。`decr_quota()` 扩展为同步回滚两层 key（修订 S-11 对称原则）。
+**反例**: (1) per-agent 替代全局 L2——失去"用户每日总上限"防护，单 agent 配置失误（如 5000）会撑爆系统；正确做法是叠加。(2) `agent_code` 从 `tool.meta.agent` 取——`shared` agent 调 `file.parse` 时归属与运行时会话 agent 不一致，应从 `deps.agent.code` 取（实际会话上下文）。(3) per-agent 失败不回滚全局 L2——data_scope 拒绝时全局已 INCR 不回滚 = 偷用户配额；必须两层对称回滚（修订 S-11 扩展）。(4) 用 `agent_id`（Snowflake）作 key——Redis key 应可读，`agent_code` 字符串更适合运维排查。
+**回归**: 不影响现有 L1/L2/L3 行为（None 字段时完全跳过 per-agent 路径）；`decr_quota(redis, user_id, l1_member=...)` 签名扩展为 `decr_quota(redis, user_id, agent_code=None, l1_member=None)`，旧调用方传 None 兼容；executor 加测试覆盖"agent 无专属额度（跳过）"/"agent 有专属额度（叠加检查）"/"per-agent 超限（错误码同全局）"/"AuthorizationException 时两层都回滚"四个 case。
 
 ### 修订后立即需要做的事（优先级排序）
 

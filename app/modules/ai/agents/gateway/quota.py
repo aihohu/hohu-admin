@@ -93,6 +93,7 @@ async def _resolve_l3_timeout() -> int:
 # ============ Redis key 命名（spec §6.4） ============
 _KEY_L1 = "ai:write:{user_id}"  # Sorted Set：member=call_uid, score=ts
 _KEY_L2 = "ai:quota:{user_id}:{date}"  # UTC 日，TTL 到当日 UTC 结束
+_KEY_L2_AGENT = "ai:quota:{user_id}:{agent_code}:{date}"  # v1.5+ SR-16 per-agent 维度
 
 
 # Lua 脚本：原子化滑窗（修订 S-7）
@@ -226,10 +227,69 @@ async def check_l2_daily_quota(
     return int(incr_result)
 
 
+async def check_l2_agent_quota(
+    redis: Redis,
+    user_id: int,
+    agent_code: str,
+    *,
+    limit: int | None,
+) -> int | None:
+    """L2 per-agent 维度（v1.5+ SR-16）：单 agent 不能独占全局配额
+
+    叠加不替代全局 L2：executor 先 check_l2_daily_quota 再调本函数。
+    limit=None 时跳过（agent.daily_quota_per_user 未配置），直接返回 None。
+
+    Redis key 规则与全局 L2 一致（UTC date + TTL 到当日 UTC 结束），
+    仅多 agent_code 段。
+
+    Raises:
+        BusinessRuleException(AI_DAILY_QUOTA_EXHAUSTED) — per-agent 计数超 limit
+
+    修订 S-11 扩展：超限时 DECR 自身；decr_quota(agent_code=...) 同步回滚。
+    """
+    if limit is None:
+        return None
+
+    now = datetime.now(UTC)
+    date_str = now.strftime("%Y%m%d")
+    key = _KEY_L2_AGENT.format(user_id=user_id, agent_code=agent_code, date=date_str)
+
+    pipe = redis.pipeline()
+    pipe.incr(key)
+    pipe.ttl(key)
+    incr_result, ttl = await pipe.execute()
+
+    if incr_result == 1 or ttl is None or ttl < 0:
+        seconds_to_midnight = 86400 - (now.hour * 3600 + now.minute * 60 + now.second)
+        await redis.expire(key, seconds_to_midnight)
+
+    if incr_result > limit:
+        await redis.decr(key)
+        logger.info(
+            "L2 per-agent quota exhausted",
+            extra={
+                "user_id": user_id,
+                "agent_code": agent_code,
+                "current": incr_result,
+                "limit": limit,
+            },
+        )
+        from app.modules.ai.metrics import record_quota_rejected  # noqa: PLC0415
+
+        record_quota_rejected("l2_agent")
+        raise BusinessRuleException(
+            f"Agent {agent_code} 今日配额已用尽（{incr_result}/{limit}）",
+            error_code="AI_DAILY_QUOTA_EXHAUSTED",
+        )
+
+    return int(incr_result)
+
+
 async def decr_quota(
     redis: Redis,
     user_id: int,
     *,
+    agent_code: str | None = None,
     l1_member: str | None = None,
 ) -> None:
     """业务函数内 AuthorizationException 时回滚 L1/L2 计数（修订 S-11）
@@ -237,7 +297,12 @@ async def decr_quota(
     必须在 executor 捕获 AuthorizationException 路径调用，否则 data_scope
     拒绝会偷掉用户的 L1/L2 配额。
 
+    v1.5+ SR-16 扩展：agent_code 非 None 时同步回滚 per-agent L2 key。
+    executor 仅在 agent.daily_quota_per_user 非 None 时传 agent_code
+    （未配置专属额度的 agent 不写 per-agent key，无需回滚）。
+
     Args:
+        agent_code: 当前会话 agent.code；None=不回滚 per-agent L2
         l1_member: check_l1_rate_limit 返回的 member；传此值可精确删除本次调用
                    的 zset 成员。若 None 则不回滚 L1（保守：宁可多算不漏算）
     """
@@ -245,11 +310,18 @@ async def decr_quota(
     if l1_member is not None:
         await redis.zrem(l1_key, l1_member)
 
-    # L2：DECR
+    # L2 全局：DECR
     now = datetime.now(UTC)
     date_str = now.strftime("%Y%m%d")
     l2_key = _KEY_L2.format(user_id=user_id, date=date_str)
     await redis.decr(l2_key)
+
+    # L2 per-agent：仅当 agent_code 非 None 时回滚（与 executor 配对）
+    if agent_code is not None:
+        l2_agent_key = _KEY_L2_AGENT.format(
+            user_id=user_id, agent_code=agent_code, date=date_str
+        )
+        await redis.decr(l2_agent_key)
 
 
 def get_l3_timeout(
