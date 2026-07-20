@@ -89,9 +89,9 @@
 > **聚合维度范围（按 Phase 切分，非"MVP 硬限制"）**：
 > - **Phase 1（已完成）**：`user.count` / `user.stats` / `user.distinct`，仅 `sys_user` 表直字段（`status` / `user_gender`）
 > - **v1.5+（已落地）**：`dept.count` / `role.count` 等其它业务模块 count tool（不要求 stats / distinct，详见 §20 v1.5+ 已完成清单）
-> - **v1.5+（推迟）**：`user.stats_by_dept` / `user.stats_by_role` 走 EXISTS 子查询；`age` 维度需先扩 `sys_user` 业务字段
+> - **v1.5+（推迟）**：`user.stats_by_dept` / `user.stats_by_role` 走 EXISTS 子查询
 >
-> **关键约束**：每个新 stats/count tool 都必须独立声明 `allowed_filters` / `allowed_group_by` 白名单（§5.5），未声明的字段直接抛 `AI_STATS_FIELD_NOT_ALLOWED`。LLM 收到白名单外维度（如年龄、部门）的 stats 请求时应主动反问用户换可聚合维度。
+> **关键约束**：每个新 stats/count tool 都必须独立声明 `allowed_filters` / `allowed_group_by` 白名单（§5.5），未声明的字段直接抛 `AI_STATS_FIELD_NOT_ALLOWED`。LLM 收到白名单外维度（如部门）的 stats 请求时应主动反问用户换可聚合维度。
 
 ### 2.11 **SSE 流式协议走 Vercel UI Protocol v4，自定义事件用私有 `type` 命名空间叠加** — 后端 `VercelAIAdapter.encode_stream` 输出 v4 标准（`data: {"type":"text-delta"|"reasoning-delta"|"text-start"|"finish"|...}\n\n`），前端按 type 分流；HITL / tool-call 等业务私有事件用相同 SSE 帧格式但保留私有 `type`（`tool_call_started` / `tool_call_result` / `confirmation_required` / `ai_error` / `done`），与 v4 标准事件命名空间不冲突。
 **反例**: 沿用 Vercel v3 行前缀（`0:"..."` / `2:{...}`）→ 已被 v4 取代，PydanticAI 1.89+ 默认不再输出；自研一套 `{type, payload}` 协议 → 与上游生态脱节，未来升级 PydanticAI 或对接 Vercel AI SDK 前端组件成本高；把 `tool_call_started` 等 v4 未覆盖的事件硬塞进 v4 标准 type → 命名空间污染。
@@ -660,7 +660,7 @@ async def user_distinct(ctx: AiToolContext, field: str) -> list[str]:
 | `user.stats` | `[{"group": "1", "count": 342}, {"group": "2", "count": 218}]` | "按性别分布：男 342 / 女 218 / 未知 5"（status / gender 字典值由 LLM 转 emoji / 中文） |
 | `user.distinct` | `["0", "1", "2"]` | "用户性别有 3 种取值" |
 
-> **聚合维度范围（Phase 切分）**：Phase 1 阶段 `sys_user` 表只有 `status` / `user_gender` 两个可聚合列（不含 dept / role 关联表字段）。如需按"年龄""部门""角色"等维度聚合，需先扩 `sys_user` 表加业务字段（如 `birth_date`）或在 v1.5+ 实现 `user.stats_by_dept` 走 EXISTS 子查询。原型示例"年龄大于 20 男生有多少"为产品愿景，**Phase 1 阶段不支持此查询**——LLM 应主动反问用户换可聚合维度（`status` / `user_gender`）。v1.5+ 已落地的 `dept.count` / `role.count` 等其它模块的 count tool 同样适用此白名单机制（详见 §20）。
+> **聚合维度范围（Phase 切分）**：Phase 1 阶段 `sys_user` 表只有 `status` / `user_gender` 两个可聚合列（不含 dept / role 关联表字段）。如需按"部门""角色"等维度聚合，需在 v1.5+ 实现 `user.stats_by_dept` 走 EXISTS 子查询。LLM 收到白名单外维度的 stats 请求时应主动反问用户换可聚合维度（`status` / `user_gender`）。v1.5+ 已落地的 `dept.count` / `role.count` 等其它模块的 count tool 同样适用此白名单机制（详见 §20）。
 
 **关键约束**：
 
@@ -2420,7 +2420,6 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 
 | 项 | 阻塞原因 |
 |---|---|
-| sys_user.age 字段（spec §2.10 提到「年龄大于 20 男生」） | HR 业务字段，hohu-admin 是通用 admin 模板不适合加；需扩表 + alembic 迁移 |
 | role.list / dept.list AI tool | MVP 聚合类 tool 已够，list 类 tool 价值递减（chip 跳转已覆盖数据展示） |
 
 ### ⏸ v2+ 推迟项（架构级，独立版本规划）
