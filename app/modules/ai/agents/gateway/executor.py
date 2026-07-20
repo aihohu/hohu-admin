@@ -291,10 +291,17 @@ async def execute_tool(
     # 修订 S-15：_start_log 失败 = 整 tool 调用失败（业务还没执行，不能漏审计行）
     args_hash = compute_args_hash(args)
     dry_run_count, dry_run_summary = await _run_dry_run(registered, args, deps)
+    # v1.5+ SR-21: risk_appetite 从 deps.agent 读（与 SR-16/19 同模式）
+    agent_risk_appetite = (
+        getattr(deps.agent, "risk_appetite", "balanced")
+        if deps.agent is not None
+        else "balanced"
+    )
     mode = classify_execution_mode(
         meta,
         dry_run_count=dry_run_count,
         injection_hit=deps.injection_hit,
+        risk_appetite=agent_risk_appetite,
     )
     metric_mode = mode.value
     tool_call_id = hitl_manager.generate_tool_call_id()

@@ -1,10 +1,13 @@
 from datetime import datetime
+from typing import Literal
 
 from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.id_generator import next_id
 from app.db.base import Base
+
+RiskAppetite = Literal["conservative", "balanced", "aggressive"]
 
 
 class AiAgent(Base):
@@ -62,6 +65,15 @@ class AiAgent(Base):
         nullable=True,
         default=None,
         comment="v1.5+ per-agent 日配额上限，None=仅走全局 L2（spec §6.4 SR-16）",
+    )
+    risk_appetite: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="balanced",
+        comment="v1.5+ 风险偏好：conservative（high 永远 HITL）/ "
+        "balanced（默认，high + dry_run_count≤1 autonomous）/ "
+        "aggressive（high 永远 autonomous）。仅影响 high risk，"
+        "destructive / hitl_always / injection_hit 不受影响（spec §5.3 SR-21）",
     )
     create_time: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), comment="创建时间"

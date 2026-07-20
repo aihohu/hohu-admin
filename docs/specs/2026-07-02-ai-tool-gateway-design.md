@@ -217,7 +217,7 @@ class AiAgent(Base):
     )
 ```
 
-> **`risk_appetite` 字段已删**（完整版三档偏好砍掉）。`default_tools_per_session` 字段也删（容量 L4 会话预算砍掉，见 6.4 节）。**`daily_quota_per_user` 字段 v1.5+ 已加回**（2026-07-20 SR-16，spec §6.4 per-agent L2 叠加全局 L2，nullable，None=仅走全局）。
+> **`risk_appetite` 字段 v1.5+ 已加回**（2026-07-20 SR-21，spec §5.3 三档修正 `conservative` / `balanced`（默认） / `aggressive`，仅影响 high risk 的 dry_run_count 阈值；destructive / hitl_always / injection_hit 不受影响）。`default_tools_per_session` 字段也删（容量 L4 会话预算砍掉，见 6.4 节）。**`daily_quota_per_user` 字段 v1.5+ 已加回**（2026-07-20 SR-16，spec §6.4 per-agent L2 叠加全局 L2，nullable，None=仅走全局）。
 >
 > **`system_prompt` 大小限制 32KB**（应用层校验，非 DB 约束）—— 完整版 8KB 对复杂 Agent（如 `job_mgmt` 需描述 cron 语法 / 参数 schema / 安全约束）不够，提到 32KB。UI 层给软警告而非硬阻断。
 >
@@ -530,7 +530,25 @@ async def create_user(ctx: AiToolContext, username: str, email: str,
 | any | n/a | 目标是 menu/role 权限码 + 非超管 | 直接拒绝（`AI_SUPER_ADMIN_REQUIRED`） |
 | any | n/a | prompt injection pattern 命中 | 强制 HITL |
 
-**删除完整版 6.3 节 `risk_appetite` 三档修正**。MVP 统一 balanced 策略，简化测试矩阵。
+**v1.5+ SR-21（2026-07-20）`risk_appetite` 三档修正**：`AiAgent.risk_appetite: Literal["conservative", "balanced", "aggressive"]`（默认 `"balanced"`，向后兼容 MVP 矩阵）。`classify_execution_mode` 接受 `risk_appetite` 参数，对 `high` risk 行调整阈值：
+
+| risk | risk_appetite | dry_run_count | 最终模式 |
+|---|---|---|---|
+| high | conservative | any（含 0/1/>1/None） | HITL |
+| high | balanced（默认） | ≤ 1 / 0 | autonomous |
+| high | balanced | > 1 / None | HITL |
+| high | aggressive | any（含 None） | autonomous |
+
+**关键约束**：
+- **仅影响 high risk**：`destructive` 永远 HITL（安全底线，不受 appetite 影响）；`hitl_always=True` / `injection_hit=True` 同样不受影响。
+- **默认 balanced**：与 MVP 行为完全等价，老 agent 不显式声明 `risk_appetite` 时无任何行为变化。
+- **agent_code 来源**：从 `deps.agent.risk_appetite` 取（与 SR-16 per-agent quota 同模式），不从 tool.meta 取（tool 归属 agent 可能与运行时会话不一致）。
+- **典型场景**：
+  - `conservative`：财务 / 合规 agent（任何写操作都需 HITL，防误操作）
+  - `balanced`（默认）：HR / 系统管理 agent（单行修改 autonomous，多行 HITL）
+  - `aggressive`：开发 / 测试 agent（批量数据导入允许跳过 HITL，但仍受 quota / L4 限制）
+
+**删除完整版 6.3 节 `risk_appetite` 三档修正**。~~MVP 统一 balanced 策略，简化测试矩阵。~~ **v1.5+ 已加回（SR-21）**。
 
 `dry_run_count` 仅对 `dry_run_supported=True` 的 tool 计算。
 
@@ -2212,7 +2230,7 @@ AI 已可用但只能 autonomous：
 | ✅ **SSE 续传（HITL 期热接管）— 已完成 2026-07-16**（spec [`2026-07-13-sse-resume-design.md`](./2026-07-13-sse-resume-design.md) / SR-9 / SR-10 / SR-11 / SR-12）| 网络抖动频繁 | SSE 标准 `id:` 字段 + `Last-Event-ID` 头 + Redis SETNX owner 锁（TTL 60s ≥ `AI_TOOL_TIMEOUT`） + `confirmation_resumed` 新事件 |
 | ⚠️ **Plan v1.6+ gap**：分层 tool result + view type registry（spec [`2026-07-16-tool-result-view-design.md`](./2026-07-16-tool-result-view-design.md) / SR-13）| TOB 开源协作：业务方加 tool 不应改前端代码；当前 `tool_call_result.result` 是 free-form dict，前端只能 JSON 打印或硬编码 by tool name | `ToolResult` 拆双层（LLM 层精简 dict + UI 层 `UIResult(view_type, view_data, audit)`）；`AiToolMeta.result_view` 启动校验；前端按 `view_type` 路由标准组件库（rows_affected / data_list / stats_chart / detail_card / redirect_chip / plain_json fallback）；UI 层数据不进 LLM prompt；i18n 走 `label_key` |
 | Conversation Manager 摘要 | 长对话超 token | `ai_conversation_summary` 表 + 小模型摘要 |
-| 风险偏好 `risk_appetite` | 不同 Agent 需不同阈值 | `AiAgent.risk_appetite` 字段 + 修正矩阵 |
+| ✅ **风险偏好 `risk_appetite` — 已完成 2026-07-20**（spec §5.3 / SR-21） | 不同 Agent 需不同阈值 | `AiAgent.risk_appetite: Literal["conservative", "balanced", "aggressive"]`（默认 `"balanced"`，向后兼容）+ `classify_execution_mode(risk_appetite=...)` 仅调整 high risk 的 dry_run_count 阈值；destructive / hitl_always / injection_hit 不受影响 |
 | 异步任务通道（`broadcast_to_user`） | 文件导出耗时 >30s | WebSocket / Redis pub/sub + arq 队列 |
 | 多模态图片输入 | 业务场景需要 | OCR + 图片内容安全扫描 |
 | 容量 L1 全局速率 | 多 tenant 用户量大 | `ai:rate:global` Redis key |
@@ -2699,6 +2717,10 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 #### SR-20. **L4 会话预算（TTL 24h 滚动窗口，非 UTC 日；conversation_id=0 跳过）**（2026-07-20 v1.5+ 落地，spec §6.4 / §14）— MVP L2 用户日配额（2000/day）可被"拆对话绕过"——用户用满 2000 后新建一个 conversation 继续操作，表面看是新会话但仍消耗 LLM token / tool 调用资源。v1.5+ 加 L4 会话预算维度：`sys_config.ai:budget:conv_per_day`（int，默认 0=不限，部署方按 LLM 上下文压力显式配，如 200/conv/24h）+ Redis key `ai:budget:conv:{conversation_id}` INCR + TTL 24h。executor 在 L2 通过后串行调 `check_l4_conv_budget`，超限抛 `AI_CONV_BUDGET_EXHAUSTED`。
 **反例**: (1) TTL 算到 UTC midnight（与 L2 同步）——会话跨午夜启动时第一次调用就 expire（如 23:59 启动会话，00:01 第一次操作 key 已过期），与"24h 内同一会话操作上限"语义不符；必须 TTL=首次 INCR 后 24h（滚动窗口）。(2) conversation_id=0 时也计数——MVP cron job / 系统级 AI 调用没有 conversation 上下文（conversation_id=0 是占位），计数会污染共享 key；conversation_id=0 跳过。(3) 共用错误码 `AI_DAILY_QUOTA_EXHAUSTED`——LLM 无法区分"今天用太多"（建议明天再来）vs"这个对话太长"（建议开新对话）；必须分两个错误码。(4) TTL 固定 86400s 不算到首次 INCR 后——同 (1) 类似问题，首次 INCR 时 `expire(key, 86400)` 即可（Redis 自动从设置时刻起 24h 后过期）。
 **回归**: 不影响现有 L1/L2/L3 行为（conv_per_day=0 时完全跳过）；`decr_quota(redis, user_id, agent_code=..., l1_member=..., l1_global_member=...)` 签名扩展加 `l4_conv_key: str | None = None`（conversation_id 的 Redis key 字符串，None=不计 L4）；executor 加测试覆盖"conv_per_day=0 跳过"/"conv_per_day=5 第 6 次抛 AI_CONV_BUDGET_EXHAUSTED"/"conversation_id=0 跳过"/"AuthorizationException 时 DECR"四个 case。
+
+#### SR-21. **`risk_appetite` 三档修正（仅 high risk，destructive / hitl_always / injection_hit 不受影响）**（2026-07-20 v1.5+ 落地，spec §5.3 / §14）— MVP 统一 balanced 策略（high + dry_run_count≤1 → autonomous），但不同业务场景需不同阈值：财务 / 合规 agent 任何写操作都应 HITL（conservative），开发 / 测试 agent 批量导入允许跳过 HITL（aggressive）。v1.5+ 在 `ai_agent` 表加 `risk_appetite: Literal["conservative", "balanced", "aggressive"]`（默认 `"balanced"` 向后兼容），`classify_execution_mode` 接受 `risk_appetite` 参数仅调整 high risk 的 dry_run_count 阈值：conservative → high 永远 HITL；balanced → high + count≤1 autonomous（MVP 行为）；aggressive → high 永远 autonomous（即使 count=None）。
+**反例**: (1) appetite 影响 destructive——破坏性操作永远 HITL 是安全底线，不受 appetite 影响（conservative 也不能更严，aggressive 也不能更宽）；同理 `hitl_always=True` / `injection_hit=True` 也不受影响。(2) 默认 aggressive 破坏 MVP——所有老 agent 没声明 risk_appetite 时行为变化（high 风险不再走 HITL），必须默认 `"balanced"` 与 MVP 等价。(3) risk_appetite 放 tool.meta——同 SR-16 / SR-19 反例，tool 归属 agent 可能与运行时会话 agent 不一致；应放 AiAgent 表。(4) 字符串字面量未用 Literal 类型——任意字符串都能传，运行时静默错误；必须 Literal 限定 3 档 + DB 层 CHECK 约束。
+**回归**: AiAgent 加 `risk_appetite` 字段（默认 `"balanced"`，老 agent 不显式声明完全等价 MVP）；`classify_execution_mode(meta, dry_run_count=..., injection_hit=..., risk_appetite="balanced")` 加可选参数（默认 `"balanced"`，老调用方不传兼容）；executor 从 `deps.agent.risk_appetite` 读取传入；测试覆盖 conservative/balanced/aggressive 三档 × high/destructive/low 三种 risk × dry_run_count ∈ {None, 0, 1, 2} 共 27 个组合的关键 case。
 
 ### 修订后立即需要做的事（优先级排序）
 
