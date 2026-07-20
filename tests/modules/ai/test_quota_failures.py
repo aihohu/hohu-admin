@@ -28,6 +28,7 @@ from app.modules.ai.agents.gateway import (
     check_l1_rate_limit,
     check_l2_agent_quota,
     check_l2_daily_quota,
+    check_l4_conv_budget,
     check_repeated_failure,
     clear_failures,
     compute_args_hash,
@@ -109,6 +110,9 @@ async def clean_redis_rate_keys():
         keys += await redis_module.redis_client.keys("ai:quota:*")
         keys += await redis_module.redis_client.keys("ai:failures:*")
         keys += await redis_module.redis_client.keys("ai:rate:*")  # v1.5+ SR-19 全局 L1
+        keys += await redis_module.redis_client.keys(
+            "ai:budget:*"
+        )  # v1.5+ SR-20 会话预算
         if keys:
             await redis_module.redis_client.delete(*keys)
 
@@ -435,6 +439,85 @@ class TestL3Timeout:
         assert exc_info.value.error_code == "AI_TOOL_TIMEOUT"
 
 
+# ============ L4 会话预算（v1.5+ SR-20） ============
+
+
+class TestL4ConvBudget:
+    """spec §6.4 SR-20：防用户拆分对话绕过日配额"""
+
+    async def test_limit_zero_skips_check(self) -> None:
+        """limit=0（默认）→ 跳过，返回 None，不写 key"""
+        result = await check_l4_conv_budget(redis_module.redis_client, 12345, limit=0)
+        assert result is None
+        exists = await redis_module.redis_client.exists("ai:budget:conv:12345")
+        assert exists == 0
+
+    async def test_conversation_id_zero_skips_check(self) -> None:
+        """conversation_id=0（无 conversation 上下文）→ 跳过"""
+        result = await check_l4_conv_budget(redis_module.redis_client, 0, limit=100)
+        assert result is None
+        exists = await redis_module.redis_client.exists("ai:budget:conv:0")
+        assert exists == 0
+
+    async def test_under_limit_passes(self) -> None:
+        """limit=5 → 连续 5 次通过"""
+        for _ in range(5):
+            r = await check_l4_conv_budget(redis_module.redis_client, 12346, limit=5)
+            assert r is not None
+
+    async def test_over_limit_raises(self) -> None:
+        """limit=2 → 第 3 次抛 AI_CONV_BUDGET_EXHAUSTED"""
+        for _ in range(2):
+            await check_l4_conv_budget(redis_module.redis_client, 12347, limit=2)
+
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await check_l4_conv_budget(redis_module.redis_client, 12347, limit=2)
+        assert exc_info.value.error_code == "AI_CONV_BUDGET_EXHAUSTED"
+
+    async def test_over_limit_rolls_back_self(self) -> None:
+        """SR-20 + 修订 S-11：超限时 DECR 自身，key 计数回到 limit"""
+        for _ in range(2):
+            await check_l4_conv_budget(redis_module.redis_client, 12348, limit=2)
+        with pytest.raises(BusinessRuleException):
+            await check_l4_conv_budget(redis_module.redis_client, 12348, limit=2)
+
+        count = int(await redis_module.redis_client.get("ai:budget:conv:12348") or 0)
+        assert count == 2  # 回到 limit
+
+    async def test_first_call_sets_ttl_24h(self) -> None:
+        """SR-20: 首次 INCR 时 EXPIRE 24h（滚动窗口，非 UTC 日）"""
+        await check_l4_conv_budget(redis_module.redis_client, 12349, limit=100)
+        ttl = await redis_module.redis_client.ttl("ai:budget:conv:12349")
+        # 24h = 86400s，允许 ±60s 误差（测试执行耗时）
+        assert 86340 <= ttl <= 86400
+
+    async def test_ttl_not_reset_on_subsequent_calls(self) -> None:
+        """SR-20: 第二次 INCR 不重置 TTL（首次设置的 24h 不变）"""
+        await check_l4_conv_budget(redis_module.redis_client, 12350, limit=100)
+        ttl1 = await redis_module.redis_client.ttl("ai:budget:conv:12350")
+
+        # 等 1s 后再调，TTL 应该减少而非重置
+        import asyncio
+
+        await asyncio.sleep(1.0)
+        await check_l4_conv_budget(redis_module.redis_client, 12350, limit=100)
+        ttl2 = await redis_module.redis_client.ttl("ai:budget:conv:12350")
+
+        # TTL 应减少（接近 1s），而非重置到 86400
+        assert ttl2 < ttl1
+        assert ttl1 - ttl2 <= 2  # 减少约 1s（允许 ±1s 误差）
+
+    async def test_independent_per_conversation(self) -> None:
+        """不同 conversation_id 互不影响"""
+        await check_l4_conv_budget(redis_module.redis_client, 12351, limit=1)
+        # 12351 已满
+        with pytest.raises(BusinessRuleException):
+            await check_l4_conv_budget(redis_module.redis_client, 12351, limit=1)
+        # 12352 应该还能用
+        r = await check_l4_conv_budget(redis_module.redis_client, 12352, limit=5)
+        assert r is not None
+
+
 # ============ decr_quota（修订 S-11 回滚 helper） ============
 
 
@@ -566,6 +649,35 @@ class TestDecrQuota:
 
         count = await redis_module.redis_client.zcard("ai:rate:global")
         assert count == 3  # 没 ZREM
+
+    async def test_decr_l4_conv_with_key(self) -> None:
+        """v1.5+ SR-20：传 l4_conv_key 时 DECR 会话预算"""
+        # 先 INCR 3 次
+        for _ in range(3):
+            await check_l4_conv_budget(redis_module.redis_client, 77701, limit=100)
+
+        await decr_quota(
+            redis_module.redis_client,
+            99967,
+            l4_conv_key="ai:budget:conv:77701",
+        )
+
+        count = int(await redis_module.redis_client.get("ai:budget:conv:77701") or 0)
+        assert count == 2  # 3 - 1 = 2
+
+    async def test_decr_without_l4_conv_key_skips_l4(self) -> None:
+        """v1.5+ SR-20：l4_conv_key=None 时不 DECR 会话预算"""
+        for _ in range(3):
+            await check_l4_conv_budget(redis_module.redis_client, 77702, limit=100)
+
+        await decr_quota(
+            redis_module.redis_client,
+            99966,
+            l4_conv_key=None,
+        )
+
+        count = int(await redis_module.redis_client.get("ai:budget:conv:77702") or 0)
+        assert count == 3  # 没 DECR
 
 
 # ============ 连续失败兜底（修订 S-12：INCR + 条件 EXPIRE） ============

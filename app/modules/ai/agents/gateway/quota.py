@@ -47,11 +47,16 @@ L1_WINDOW_SEC = 60  # 滑窗 60s
 # v1.5+ SR-19: 全局 L1 默认 0=不限（部署方按机器容量显式配）
 DEFAULT_L1_GLOBAL_RATE_PER_MIN = 0
 
+# v1.5+ SR-20: L4 会话预算 默认 0=不限（部署方按 LLM 上下文压力配）
+DEFAULT_L4_CONV_BUDGET = 0
+L4_CONV_TTL_SEC = 86400  # 24h 滚动窗口
+
 # sys_config 对应的 key（修订：从硬编码改为运行时可配）
 _CFG_L1_RATE = "ai:rate_limit:user_write_per_min"
 _CFG_L1_GLOBAL_RATE = "ai:rate_limit:global_per_min"  # v1.5+ SR-19
 _CFG_L2_QUOTA = "ai:quota:daily_per_user"
 _CFG_L3_TIMEOUT = "ai:limit:tool_timeout_sec"
+_CFG_L4_CONV = "ai:budget:conv_per_day"  # v1.5+ SR-20
 
 
 async def _resolve_l1_limit() -> int:
@@ -110,11 +115,26 @@ async def _resolve_l1_global_limit() -> int:
         return DEFAULT_L1_GLOBAL_RATE_PER_MIN
 
 
+async def _resolve_l4_conv_budget() -> int:
+    """v1.5+ SR-20: 从 sys_config 读 L4 会话预算上限（默认 0=不限）"""
+    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
+    from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
+        get_ai_config_int,
+    )
+
+    try:
+        async with AsyncSessionLocal() as db:
+            return await get_ai_config_int(db, _CFG_L4_CONV, DEFAULT_L4_CONV_BUDGET)
+    except Exception:
+        return DEFAULT_L4_CONV_BUDGET
+
+
 # ============ Redis key 命名（spec §6.4） ============
 _KEY_L1 = "ai:write:{user_id}"  # Sorted Set：member=call_uid, score=ts
 _KEY_L1_GLOBAL = "ai:rate:global"  # v1.5+ SR-19 全局速率（不分 user_id）
 _KEY_L2 = "ai:quota:{user_id}:{date}"  # UTC 日，TTL 到当日 UTC 结束
 _KEY_L2_AGENT = "ai:quota:{user_id}:{agent_code}:{date}"  # v1.5+ SR-16 per-agent 维度
+_KEY_L4_CONV = "ai:budget:conv:{conversation_id}"  # v1.5+ SR-20 会话预算，TTL 24h 滚动
 
 
 # Lua 脚本：原子化滑窗（修订 S-7）
@@ -355,6 +375,71 @@ async def check_l2_agent_quota(
     return int(incr_result)
 
 
+async def check_l4_conv_budget(
+    redis: Redis,
+    conversation_id: int,
+    *,
+    limit: int | None = None,
+) -> tuple[int, str] | None:
+    """L4 会话预算：单 conversation 24h 内写操作上限（v1.5+ SR-20）
+
+    防用户拆分对话绕过 L2 日配额（2000/day 用完成后新建会话继续操作）。
+
+    Args:
+        conversation_id: 会话 ID。0 表示无 conversation 上下文（cron / 系统调用），
+                        跳过检查。
+        limit: 会话预算上限。None（默认）→ 从 sys_config 读，0=不限跳过。
+
+    Returns:
+        (count, conv_key) — conv_key 供调用方在 raise AuthorizationException 时
+        通过 decr_quota(redis, user_id, l4_conv_key=conv_key) 精确回滚。
+        conversation_id=0 或 limit=0 时返回 None（跳过检查）。
+
+    Raises:
+        BusinessRuleException(AI_CONV_BUDGET_EXHAUSTED) — 会话计数超 limit
+
+    TTL 设计（修订 SR-20）：首次 INCR 时 `expire(key, 86400)` 设 24h 滚动窗口，
+    非按 UTC 日翻转——会话可能跨午夜启动，按"首次操作后 24h"更符合会话语义。
+    """
+    if conversation_id == 0:
+        return None  # spec §6.4 SR-20: 无 conversation 上下文跳过
+    if limit is None:
+        limit = await _resolve_l4_conv_budget()
+    if limit <= 0:
+        return None  # 未配置会话预算
+
+    conv_key = _KEY_L4_CONV.format(conversation_id=conversation_id)
+    pipe = redis.pipeline()
+    pipe.incr(conv_key)
+    pipe.ttl(conv_key)
+    incr_result, ttl = await pipe.execute()
+
+    # 首次 INCR 或防御性 TTL 重设（与 L2 同模式）
+    if incr_result == 1 or ttl is None or ttl < 0:
+        await redis.expire(conv_key, L4_CONV_TTL_SEC)
+
+    if incr_result > limit:
+        # 修订 S-11：超限时 DECR 自身
+        await redis.decr(conv_key)
+        logger.info(
+            "L4 conv budget exhausted",
+            extra={
+                "conversation_id": conversation_id,
+                "current": incr_result,
+                "limit": limit,
+            },
+        )
+        from app.modules.ai.metrics import record_quota_rejected  # noqa: PLC0415
+
+        record_quota_rejected("l4_conv")
+        raise BusinessRuleException(
+            f"本会话操作过多（{incr_result}/{limit} per 24h），请新建会话或稍后再试",
+            error_code="AI_CONV_BUDGET_EXHAUSTED",
+        )
+
+    return int(incr_result), conv_key
+
+
 async def decr_quota(
     redis: Redis,
     user_id: int,
@@ -362,11 +447,12 @@ async def decr_quota(
     agent_code: str | None = None,
     l1_member: str | None = None,
     l1_global_member: str | None = None,
+    l4_conv_key: str | None = None,
 ) -> None:
-    """业务函数内 AuthorizationException 时回滚 L1/L2 计数（修订 S-11）
+    """业务函数内 AuthorizationException 时回滚 L1/L2/L4 计数（修订 S-11）
 
     必须在 executor 捕获 AuthorizationException 路径调用，否则 data_scope
-    拒绝会偷掉用户的 L1/L2 配额。
+    拒绝会偷掉用户的 L1/L2/L4 配额。
 
     v1.5+ SR-16 扩展：agent_code 非 None 时同步回滚 per-agent L2 key。
     executor 仅在 agent.daily_quota_per_user 非 None 时传 agent_code
@@ -376,11 +462,16 @@ async def decr_quota(
     executor 仅在 sys_config.ai:rate_limit:global_per_min > 0 时传
     （未配置全局限制时不写 zset，无需回滚）。
 
+    v1.5+ SR-20 扩展：l4_conv_key 非 None 时同步 DECR 会话预算 key。
+    executor 仅在 conversation_id != 0 且 sys_config.ai:budget:conv_per_day > 0 时传
+    （未配置会话预算时不写 key，无需回滚）。
+
     Args:
         agent_code: 当前会话 agent.code；None=不回滚 per-agent L2
         l1_member: check_l1_rate_limit 返回的 member；传此值可精确删除本次调用
                    的 zset 成员。若 None 则不回滚用户级 L1。
         l1_global_member: check_l1_global_rate_limit 返回的 member；None=不回滚全局 L1。
+        l4_conv_key: check_l4_conv_budget 返回的 conv_key；None=不回滚 L4 会话预算。
     """
     l1_key = _KEY_L1.format(user_id=user_id)
     if l1_member is not None:
@@ -402,6 +493,10 @@ async def decr_quota(
             user_id=user_id, agent_code=agent_code, date=date_str
         )
         await redis.decr(l2_agent_key)
+
+    # v1.5+ SR-20: L4 会话预算 DECR（仅当配置了会话预算 + 本次写入了 key）
+    if l4_conv_key is not None:
+        await redis.decr(l4_conv_key)
 
 
 def get_l3_timeout(

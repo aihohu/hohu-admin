@@ -41,6 +41,7 @@ from app.modules.ai.agents.gateway.quota import (
     check_l1_rate_limit,
     check_l2_agent_quota,
     check_l2_daily_quota,
+    check_l4_conv_budget,
     decr_quota,
     is_write_tool,
     with_l3_timeout,
@@ -230,15 +231,17 @@ async def execute_tool(
             error_msg="此操作仅超级管理员可执行，请联系超管或走传统界面",
         )
 
-    # 3. 容量鉴权 L1/L2（仅写 tool，spec §6.4 + 修订 S-11 + SR-16 per-agent L2 + SR-19 全局 L1）
+    # 3. 容量鉴权 L1/L2/L4（仅写 tool，spec §6.4 + 修订 S-11 + SR-16 per-agent L2 + SR-19 全局 L1 + SR-20 L4 会话预算）
     # check_l1_rate_limit 返回 (count, l1_member)，l1_member 用于业务函数内
     # 抛 AuthorizationException 时精确回滚（修订 S-11）
     # v1.5+ SR-16: 全局 L2 通过后再 check_l2_agent_quota（仅当 agent 配了专属额度），
     #              agent_code 从 deps.agent.code 取（非 tool.meta.agent，避免 shared
     #              agent 调 file.parse 时归属与运行时会话不一致）
     # v1.5+ SR-19: 用户级 L1 通过后再 check_l1_global_rate_limit（仅当部署方配了全局限制）
+    # v1.5+ SR-20: L2 全部通过后再 check_l4_conv_budget（仅当部署方配了会话预算 + conversation_id != 0）
     l1_member: str | None = None
     l1_global_member: str | None = None
+    l4_conv_key_for_rollback: str | None = None
     agent_code_for_rollback: str | None = None
     if is_write_tool(meta):
         try:
@@ -263,6 +266,11 @@ async def execute_tool(
                 )
                 # 标记：AuthorizationException 时需要回滚 per-agent key
                 agent_code_for_rollback = deps.agent.code
+            # v1.5+ SR-20: L4 会话预算（仅当 conversation_id != 0 + 部署方配了 conv_per_day > 0）
+            conv_id = deps.conversation_id or 0
+            l4_result = await check_l4_conv_budget(redis_client, conv_id)
+            if l4_result is not None:
+                _, l4_conv_key_for_rollback = l4_result
         except BusinessException as e:
             _rec("quota_rejected")
             return ToolResult.failure(error_code=e.error_code, error_msg=e.message)
@@ -404,7 +412,8 @@ async def execute_tool(
     # 8. 业务执行（修订 S-11：传 l1_member 进去，业务函数内抛
     #    AuthorizationException 时 decr_quota 精确回滚 L1 zset 成员；
     #    v1.5+ SR-16 传 agent_code_for_rollback 同步回滚 per-agent L2；
-    #    v1.5+ SR-19 传 l1_global_member 同步回滚全局 L1）
+    #    v1.5+ SR-19 传 l1_global_member 同步回滚全局 L1；
+    #    v1.5+ SR-20 传 l4_conv_key_for_rollback 同步回滚 L4 会话预算）
     result = await _invoke_tool_fn(
         registered,
         args,
@@ -413,6 +422,7 @@ async def execute_tool(
         agent_code_for_rollback=agent_code_for_rollback,
         l1_member=l1_member,
         l1_global_member=l1_global_member,
+        l4_conv_key_for_rollback=l4_conv_key_for_rollback,
     )
 
     # 9. emit tool_call_result + 写 log 终态
@@ -752,6 +762,7 @@ async def _invoke_tool_fn(
     agent_code_for_rollback: str | None = None,
     l1_member: str | None = None,
     l1_global_member: str | None = None,
+    l4_conv_key_for_rollback: str | None = None,
 ) -> ToolResult:
     """独立 session 内调用业务函数（spec §6.3）
 
@@ -764,6 +775,8 @@ async def _invoke_tool_fn(
     （仅当 agent.daily_quota_per_user 非 None，由 execute_tool 决定是否传）。
 
     v1.5+ SR-19：l1_global_member 非 None 时同步 ZREM 全局 L1 zset 成员。
+
+    v1.5+ SR-20：l4_conv_key_for_rollback 非 None 时同步 DECR 会话预算 key。
     """
     meta = registered.meta
     tool_fn = registered.fn
@@ -784,11 +797,13 @@ async def _invoke_tool_fn(
                     _safe_write_query_cache(meta, args, deps, user_id)
                 return ToolResult.success(data=safe_data)
     except AuthorizationException as e:
-        # 修订 S-11：data_scope 越界等授权失败，回滚 L1/L2 已写计数
+        # 修订 S-11：data_scope 越界等授权失败，回滚 L1/L2/L4 已写计数
         # v1.5+ SR-16：若 per-agent L2 已写（agent_code_for_rollback 非 None），
         #              同步回滚 per-agent key（对称原则）
         # v1.5+ SR-19：若全局 L1 已写（l1_global_member 非 None），
         #              同步 ZREM 全局 zset member（对称原则）
+        # v1.5+ SR-20：若 L4 会话预算已写（l4_conv_key_for_rollback 非 None），
+        #              同步 DECR 会话预算 key（对称原则）
         if is_write_tool(meta):
             try:
                 await decr_quota(
@@ -797,6 +812,7 @@ async def _invoke_tool_fn(
                     agent_code=agent_code_for_rollback,
                     l1_member=l1_member,
                     l1_global_member=l1_global_member,
+                    l4_conv_key=l4_conv_key_for_rollback,
                 )
             except RedisError:
                 # 回滚失败不阻断主流程（业务已失败，配额少 1 是次要问题）
