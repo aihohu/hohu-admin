@@ -284,6 +284,121 @@ class TestInferAffectedRows:
 # ============ tool not found / perm denied ============
 
 
+# ============ v1.5+ SR-18: build_args_summary 白名单字段 ============
+
+
+class TestBuildArgsSummary:
+    """spec §9.2 SR-18: args_summary 仅元信息（MVP 默认）+ 可选白名单字段"""
+
+    def test_mvp_default_no_fields(self) -> None:
+        """默认不传 args / summary_fields → 仅元信息（MVP 行为）"""
+        from app.modules.ai.agents.gateway.executor import build_args_summary
+
+        result = build_args_summary(
+            "user.update_dept",
+            risk_level="high",
+            execution_mode="hitl",
+            dry_run_count=1,
+        )
+        assert result == "tool=user.update_dept, risk=high, mode=hitl, dry_run_count=1"
+
+    def test_summary_fields_empty_tuple_no_extract(self) -> None:
+        """传 args 但 summary_fields=() → 不提取（与 MVP 等价）"""
+        from app.modules.ai.agents.gateway.executor import build_args_summary
+
+        result = build_args_summary(
+            "user.update_dept",
+            risk_level="high",
+            execution_mode="hitl",
+            dry_run_count=1,
+            args={"user_id": 42, "new_dept_id": 8, "password": "secret"},
+            summary_fields=(),
+        )
+        # 不提取任何字段，即使 args 中有
+        assert "user_id" not in result
+        assert "password" not in result
+        assert result == "tool=user.update_dept, risk=high, mode=hitl, dry_run_count=1"
+
+    def test_summary_fields_extract_only_declared(self) -> None:
+        """声明 ('user_id', 'new_dept_id') → 仅提取这两个字段"""
+        from app.modules.ai.agents.gateway.executor import build_args_summary
+
+        result = build_args_summary(
+            "user.update_dept",
+            risk_level="high",
+            execution_mode="hitl",
+            dry_run_count=1,
+            args={"user_id": 42, "new_dept_id": 8, "reason": "test"},
+            summary_fields=("user_id", "new_dept_id"),
+        )
+        assert "user_id=42" in result
+        assert "new_dept_id=8" in result
+        # 未声明的 reason 不应出现
+        assert "reason" not in result
+
+    def test_summary_fields_missing_in_args_skipped(self) -> None:
+        """声明字段在 args 中不存在 → 跳过（不抛 KeyError）"""
+        from app.modules.ai.agents.gateway.executor import build_args_summary
+
+        result = build_args_summary(
+            "user.update_dept",
+            risk_level="high",
+            execution_mode="hitl",
+            dry_run_count=None,
+            args={"user_id": 42},
+            summary_fields=("user_id", "new_dept_id"),  # new_dept_id 不在 args
+        )
+        assert "user_id=42" in result
+        assert "new_dept_id" not in result
+
+    def test_repr_wraps_string_values(self) -> None:
+        """str 值用 repr() 包裹（区分 str 与 int）"""
+        from app.modules.ai.agents.gateway.executor import build_args_summary
+
+        result = build_args_summary(
+            "role.update",
+            risk_level="high",
+            execution_mode="autonomous",
+            dry_run_count=1,
+            args={"role_code": "R_ADMIN", "user_count": 5},
+            summary_fields=("role_code", "user_count"),
+        )
+        # str 用引号，int 不用
+        assert "role_code='R_ADMIN'" in result
+        assert "user_count=5" in result
+
+    def test_dry_run_count_none_omitted(self) -> None:
+        """dry_run_count=None 时省略 dry_run_count 段"""
+        from app.modules.ai.agents.gateway.executor import build_args_summary
+
+        result = build_args_summary(
+            "user.lookup",
+            risk_level="low",
+            execution_mode="autonomous",
+            dry_run_count=None,
+        )
+        assert "dry_run_count" not in result
+        assert result == "tool=user.lookup, risk=low, mode=autonomous"
+
+    def test_args_none_with_summary_fields_no_extract(self) -> None:
+        """args=None + summary_fields 非空 → 不提取（无源数据）"""
+        from app.modules.ai.agents.gateway.executor import build_args_summary
+
+        result = build_args_summary(
+            "user.update_dept",
+            risk_level="high",
+            execution_mode="hitl",
+            dry_run_count=1,
+            args=None,
+            summary_fields=("user_id",),
+        )
+        assert "user_id" not in result
+        assert result == "tool=user.update_dept, risk=high, mode=hitl, dry_run_count=1"
+
+
+# ============ tool not found / perm denied ============
+
+
 class TestShortCircuit:
     async def test_tool_not_found(self) -> None:
         deps = _build_deps()

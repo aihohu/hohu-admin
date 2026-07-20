@@ -230,6 +230,31 @@ def check_summary_length_limit(reg: RegisteredTool) -> list[Violation]:
     return []
 
 
+def check_args_summary_fields_not_sensitive(reg: RegisteredTool) -> list[Violation]:
+    """spec §9.2 SR-18: args_summary_fields 白名单不得含敏感字段
+
+    防业务方误把 'password' / 'api_key' 等字段加入 args_summary_fields，
+    导致敏感值落库到 ai_operation_log.args_summary。
+    """
+    violations: list[Violation] = []
+    for field_name in reg.meta.args_summary_fields:
+        # word-boundary 检查（与 §7.3 sensitive.py GLOBAL_OUTPUT_BLOCKLIST 同逻辑）：
+        # 命中完全相等 / 前缀（password_hash → password）
+        if field_name in SENSITIVE_INPUT_BLOCKLIST or any(
+            field_name.startswith(bl + "_") or field_name == bl
+            for bl in SENSITIVE_INPUT_BLOCKLIST
+        ):
+            violations.append(
+                Violation(
+                    reg.meta.name,
+                    "args_summary_fields_not_sensitive",
+                    f"args_summary_fields 字段 '{field_name}' 命中 SENSITIVE_INPUT_BLOCKLIST，"
+                    f"敏感值会落库到 ai_operation_log.args_summary",
+                )
+            )
+    return violations
+
+
 def check_dry_run_tool_must_implement_hook(reg: RegisteredTool) -> list[Violation]:
     """spec §5.1: dry_run_supported=True 必须有 _dry_run_<tool>
 
@@ -305,6 +330,7 @@ def run_all_checks() -> list[Violation]:
         violations.extend(check_high_risk_requires_dry_run(reg))
         violations.extend(check_scope_param_requires_check(reg, fn_src))
         violations.extend(check_summary_length_limit(reg))
+        violations.extend(check_args_summary_fields_not_sensitive(reg))
         violations.extend(check_dry_run_tool_must_implement_hook(reg))
 
     return violations

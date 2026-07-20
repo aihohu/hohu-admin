@@ -88,11 +88,28 @@ def build_args_summary(
     risk_level: str,
     execution_mode: str,
     dry_run_count: int | None,
+    args: dict[str, Any] | None = None,
+    summary_fields: tuple[str, ...] = (),
 ) -> str:
-    """spec §9.2: 仅元信息，不含 args 字段值（白名单 = 泄漏面）"""
+    """spec §9.2: 仅元信息（MVP 默认）+ v1.5+ SR-18 可选白名单字段
+
+    Args:
+        args: 调用方传入的 args dict；None（默认）= 不提取字段（MVP 行为）
+        summary_fields: 业务方在 AiToolMeta.args_summary_fields 声明的白名单字段名；
+                       默认空 tuple = 不提取任何字段（MVP 行为，向后兼容）
+
+    返回格式：`tool=X, risk=Y, mode=Z, dry_run_count=N[, field1=val1, field2=val2]`
+    字段值用 repr() 包裹（区分 str / int / None），便于审计阅读。
+    """
     parts = [f"tool={tool_name}", f"risk={risk_level}", f"mode={execution_mode}"]
     if dry_run_count is not None:
         parts.append(f"dry_run_count={dry_run_count}")
+    # v1.5+ SR-18: 业务方显式声明 args_summary_fields 时，提取白名单字段原值追加
+    # 默认空 tuple → 不追加（MVP 行为）
+    if args is not None and summary_fields:
+        for field_name in summary_fields:
+            if field_name in args:
+                parts.append(f"{field_name}={args[field_name]!r}")
     return ", ".join(parts)
 
 
@@ -271,6 +288,8 @@ async def execute_tool(
         risk_level=meta.risk,
         execution_mode=mode.value,
         dry_run_count=dry_run_count,
+        args=args,
+        summary_fields=meta.args_summary_fields,
     )
     try:
         log_id = await _start_log(

@@ -101,6 +101,13 @@ class AiToolMeta:
     典型场景：file.parse / provider.export 等高风险 tool 默认 False，
     部署方评估后显式加入 ai:enabled_tools 启用。"""
 
+    # ============ 审计（v1.5+ SR-18） ============
+    args_summary_fields: tuple[str, ...] = field(default_factory=tuple)
+    """声明要写入 ai_operation_log.args_summary 的 args 字段名（白名单）。
+    默认空 tuple → summary 仅含元信息（MVP 行为，向后兼容）。
+    字段名必须不在 SENSITIVE_INPUT_BLOCKLIST 内（check_ai_tools.py 静态校验）。
+    典型场景：user.update_dept 声明 ('user_id', 'new_dept_id') 让审计直接看到关键参数。"""
+
 
 # ============ 常量 ============
 

@@ -1670,22 +1670,38 @@ system_prompt（§7.6）补一条："readonly tool 返回后，必须在消息�
 | HTTP | `sys_operation_log`（现有） | `AuditLogMiddleware` | 所有 REST 调用，`/ai/chat` + `/ai/confirm` 保持排除 |
 | AI | `ai_operation_log`（新增，含安全事件） | Gateway 内显式写入 | 每次 tool 调用 + injection 命中，按 `trace_id` 串联 |
 
-### 9.2 `args_summary` 严格脱敏（仅元信息）
+### 9.2 `args_summary` 严格脱敏（仅元信息 + v1.5+ 白名单字段）
 
-**简化 vs 完整版 10.2**：删除白名单算法（白名单本身是泄漏面 — "白名单有 reason" → 攻击者知道 tool 接 reason 参数）。summary 只记元信息：
+**MVP 简化（vs 完整版 10.2）**：删除强制白名单算法（白名单本身是泄漏面 — "白名单有 reason" → 攻击者知道 tool 接 reason 参数）。summary 默认只记元信息：
 
 ```python
 def build_args_summary(tool_name: str, *,
                        risk_level: str, execution_mode: str,
-                       dry_run_count: int | None) -> str:
-    """summary 只记元信息, 不写任何 args 字段值"""
+                       dry_run_count: int | None,
+                       args: dict | None = None,
+                       summary_fields: tuple[str, ...] = ()) -> str:
+    """summary 只记元信息; v1.5+ SR-18 可选白名单字段（业务方显式声明）"""
     parts = [f"tool={tool_name}", f"risk={risk_level}", f"mode={execution_mode}"]
     if dry_run_count is not None:
         parts.append(f"dry_run_count={dry_run_count}")
+    # v1.5+ SR-18: 业务方可显式声明 args_summary_fields，提取白名单字段原值
+    # 默认空 tuple → 不提取任何字段（MVP 行为，向后兼容）
+    if args is not None and summary_fields:
+        for field in summary_fields:
+            if field in args:
+                parts.append(f"{field}={args[field]!r}")
     return ", ".join(parts)
 ```
 
-**结果示例**：`tool=user.update_dept, risk=high, mode=hitl, dry_run_count=1`
+**结果示例（MVP 默认）**：`tool=user.update_dept, risk=high, mode=hitl, dry_run_count=1`
+
+**结果示例（v1.5+ SR-18 白名单）**：`tool=user.update_dept, risk=high, mode=hitl, dry_run_count=1, user_id=42, new_dept_id=8`
+
+**v1.5+ SR-18（2026-07-20）白名单字段设计**：
+
+`AiToolMeta` 加 `args_summary_fields: tuple[str, ...] = ()`（默认空，向后兼容）。业务方按需声明**对审计有反查价值**的字段（如 `user_id` / `new_dept_id` / `role_code`）。`build_args_summary` 仅提取声明字段的原值，未声明字段**不进 summary**（不是 hash 占位——`args_hash` 字段已单独存全量 SHA256 用于反查，summary 重复存 hash 是冗余）。
+
+**反例**：(1) 强制每个 tool 都声明 `args_summary_fields`——大多数 tool 默认行为已够，强制声明增加业务方负担；(2) 默认提取所有 args 字段——泄漏面失控（如 `password` / `api_key`），必须显式声明；(3) 未声明字段用 hash 占位（如 `args_summary="..., user_id=42, other=__hash__abc123"`）——`args_hash` 字段已是全量 SHA256，summary 再存局部 hash 冗余且不可读；(4) 业务方声明 `password` 等敏感字段——`scripts/check_ai_tools.py` Lint 静态扫描 `args_summary_fields` 必须不在 `SENSITIVE_INPUT_BLOCKLIST` 内，违反则阻断合并。
 
 **`args_hash`**：完整 args 的 SHA256（含所有字段原值），仅用于事后审计追查。
 
@@ -2169,6 +2185,7 @@ AI 已可用但只能 autonomous：
 | ⚠️ **Plan v1.5+ gap**：`hohu monitoring` CLI 集成（Prometheus + Grafana） | §6.3 v1.5+ Prometheus 接入已落地（commit `7ea6e8f`），但客户运维需手写 docker-compose | hohu-cli 加 `hohu monitoring` 命令组（参考 `hohu deploy` 模式）；模板 `hohu-cli/hohu/templates/monitoring/`；`init` 时自动从 `hohu-admin/docs/monitoring/alerts.yml` 复制规则；不起 Alertmanager（留 v1.6+） |
 | ✅ **Per-agent 日配额 — 已完成 2026-07-20**（spec §6.4 / SR-16） | 不同 Agent 需不同限额 | `ai_agent.daily_quota_per_user` 字段加回（nullable，None=仅走全局 L2）+ Redis key `ai:quota:{user_id}:{agent_code}:{date}`（叠加不替代全局 L2）；`check_l2_agent_quota` + `decr_quota` 同步回滚两层 |
 | ✅ **Tool 级 `default_enabled` — 已完成 2026-07-20**（spec §5.4 / SR-17） | 部署方需精细控制 | `AiToolMeta.default_enabled: bool = True`（向后兼容）+ `sys_config.ai:enabled_tools` JSON 数组白名单；`compute_available_tools` 加 `(meta.default_enabled or name in enabled_extra)` 过滤 |
+| ✅ **`args_summary` 白名单 — 已完成 2026-07-20**（spec §9.2 / SR-18） | 审计需追查具体字段 | `AiToolMeta.args_summary_fields: tuple[str, ...] = ()`（默认空，向后兼容）+ `build_args_summary(args, summary_fields)` 仅提取声明字段；未声明字段不进 summary（`args_hash` 已存全量 SHA256，无冗余 hash 占位） |
 | 多 Agent + Supervisor 路由 | 启用 ≥2 业务 Agent | `available_agents: list[AiAgent]` + `build_supervisor()` |
 | 跨会话 HITL 恢复 | 用户反馈"刷新页面后丢失确认" | `GET /ai/pending-confirmations` + 前端 30s 心跳 |
 | ✅ **SSE 续传（HITL 期热接管）— 已完成 2026-07-16**（spec [`2026-07-13-sse-resume-design.md`](./2026-07-13-sse-resume-design.md) / SR-9 / SR-10 / SR-11 / SR-12）| 网络抖动频繁 | SSE 标准 `id:` 字段 + `Last-Event-ID` 头 + Redis SETNX owner 锁（TTL 60s ≥ `AI_TOOL_TIMEOUT`） + `confirmation_resumed` 新事件 |
@@ -2649,6 +2666,10 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 #### SR-17. **Tool 级 `default_enabled` 恢复 + `ai:enabled_tools` 白名单（非黑名单）**（2026-07-20 v1.5+ 落地，spec §5.4 / §14）— MVP 删除了 `AiToolMeta.default_enabled` 字段（理由是 risk=destructive + hitl_always 已够），但实际部署场景存在"高风险 tool 默认不开放，部署方评估后显式启用"的需求（如 `file.parse` 解析任意上传文件、`provider.export` 导出含敏感字段）。v1.5+ 加回 `default_enabled: bool = True`（默认 True 向后兼容，老 tool 不声明视为默认启用），并加 `sys_config.ai:enabled_tools` JSON 数组白名单。`compute_available_tools` 过滤逻辑：`(meta.default_enabled or meta.name in enabled_extra) and perms_ok`。
 **反例**: (1) 用 `ai:disabled_tools` 黑名单——新 tool 默认进黑名单不一致，白名单显式列才安全（与 §11.2 keyword_blocklist 白名单同思路）。(2) `ai:enabled_tools=["*"]` 通配——失去精细控制意义，必须显式列 tool 名。(3) 配置改了不刷新——`ConfigService.update` 改 `ai:enabled_tools` 后必须 `invalidate_ai_config_cache(prefix="ai:")`，否则 60s TTL 期间老配置生效。(4) 改 AiToolMeta 默认值为 `False`——破坏所有现有 tool 行为（user.count / user.stats 等突然消失），必须默认 `True`。
 **回归**: AiToolMeta 加 `default_enabled: bool = True` 字段（dataclass 默认值，老 tool 不显式声明自动 True）；`compute_available_tools` 改 async（需读 sys_config）；新增 `get_ai_config_str_list` helper（JSON 数组解析，与 `get_ai_config_int` / `get_ai_config_str` 同缓存模式）；测试覆盖"default_enabled=True 通过"/"default_enabled=False + 未在 enabled_tools → 不可见"/"default_enabled=False + 在 enabled_tools → 可见"/"sys_config 不存在时 default 兜底"。
+
+#### SR-18. **`args_summary` 可选白名单字段（业务方显式声明，未声明不进 summary）**（2026-07-20 v1.5+ 落地，spec §9.2 / §14）— MVP `build_args_summary` 仅记元信息（tool / risk / mode / dry_run_count），但实际运维场景常需直接从 `ai_operation_log.args_summary` 字段读到关键参数（如 `user.update_dept` 时看到 `user_id=42, new_dept_id=8`）以快速反查问题，否则要 join 业务表按 `args_hash` 比对。v1.5+ 在 `AiToolMeta` 加 `args_summary_fields: tuple[str, ...] = ()`（默认空 = MVP 行为），`build_args_summary` 扩展签名接受 `args` + `summary_fields`，仅提取声明字段原值追加到元信息后。未声明字段**不进 summary**（`args_hash` 字段已存全量 SHA256 用于反查，summary 重复存 hash 是冗余且不可读）。
+**反例**: (1) 强制每个 tool 声明 `args_summary_fields`——大多数 tool 默认行为已够，强制声明增加业务方负担。(2) 默认提取所有 args 字段——泄漏面失控（`password` / `api_key` 等可能进 summary 落库），必须显式声明。(3) 未声明字段用 hash 占位（`args_summary="..., user_id=42, other=__hash__abc123"`）——冗余：`args_hash` 字段已是全量 SHA256，summary 再存局部 hash 不可读且无新信息。(4) 业务方声明 `password` 等敏感字段——`scripts/check_ai_tools.py` 静态扫描 `args_summary_fields` 必须不在 `SENSITIVE_INPUT_BLOCKLIST` 内，违反阻断合并。
+**回归**: AiToolMeta 加 `args_summary_fields: tuple[str, ...] = ()` 字段（默认空，老 tool 不声明完全等价 MVP）；`build_args_summary` 扩展 `args=None` / `summary_fields=()` 可选参数，旧调用方不传等价 MVP 行为；executor.execute_tool 调 build_args_summary 时传 `args=args, summary_fields=meta.args_summary_fields`；测试覆盖"MVP 默认（args_summary_fields=()）→ summary 不含字段值"/"声明 fields → summary 追加字段值"/"声明但 args 中无该字段 → 不追加（不抛 KeyError）"/"check_ai_tools.py 静态校验 args_summary_fields 不含 SENSITIVE_INPUT_BLOCKLIST"。
 
 ### 修订后立即需要做的事（优先级排序）
 

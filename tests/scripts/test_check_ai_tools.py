@@ -10,6 +10,7 @@ from app.modules.ai.agents.tools.meta import SENSITIVE_INPUT_BLOCKLIST, AiToolMe
 from app.modules.ai.agents.tools.registry import RegisteredTool
 from scripts.check_ai_tools import (
     SUMMARY_MAX_UNICODE_CHARS,
+    check_args_summary_fields_not_sensitive,
     check_blocklist_field_must_be_sensitive,
     check_destructive_requires_hitl,
     check_dry_run_tool_must_implement_hook,
@@ -29,6 +30,7 @@ def _make_reg(
     sensitive_input: tuple[str, ...] = (),
     summary: str = "test summary",
     dry_run_fn=None,
+    args_summary_fields: tuple[str, ...] = (),
 ) -> RegisteredTool:
     """构造 RegisteredTool，meta 字段可定制"""
     meta = AiToolMeta(
@@ -40,6 +42,7 @@ def _make_reg(
         hitl_always=hitl_always,
         dry_run_supported=dry_run_supported,
         sensitive_input=sensitive_input,
+        args_summary_fields=args_summary_fields,
     )
     return RegisteredTool(
         meta=meta, fn=lambda *_args, **_kw: None, dry_run_fn=dry_run_fn
@@ -214,7 +217,51 @@ class TestSummaryLengthLimit:
         assert len(violations) == 1
 
 
-class TestDryRunToolMustImplementHook:
+class TestArgsSummaryFieldsNotSensitive:
+    """spec §9.2 SR-18: args_summary_fields 不得含敏感字段名"""
+
+    def test_empty_fields_no_violation(self) -> None:
+        reg = _make_reg(args_summary_fields=())
+        assert check_args_summary_fields_not_sensitive(reg) == []
+
+    def test_safe_fields_no_violation(self) -> None:
+        reg = _make_reg(args_summary_fields=("user_id", "new_dept_id", "role_code"))
+        assert check_args_summary_fields_not_sensitive(reg) == []
+
+    def test_exact_password_violation(self) -> None:
+        reg = _make_reg(args_summary_fields=("user_id", "password"))
+        violations = check_args_summary_fields_not_sensitive(reg)
+        assert len(violations) == 1
+        assert violations[0].check == "args_summary_fields_not_sensitive"
+        assert "password" in violations[0].detail
+
+    def test_password_hash_prefix_violation(self) -> None:
+        """password_hash 是 password 前缀扩展，应被检出"""
+        reg = _make_reg(args_summary_fields=("user_id", "password_hash"))
+        violations = check_args_summary_fields_not_sensitive(reg)
+        assert len(violations) == 1
+
+    def test_api_key_violation(self) -> None:
+        reg = _make_reg(args_summary_fields=("api_key",))
+        violations = check_args_summary_fields_not_sensitive(reg)
+        assert len(violations) == 1
+
+    def test_multiple_sensitive_fields_multiple_violations(self) -> None:
+        reg = _make_reg(args_summary_fields=("password", "api_key", "token"))
+        violations = check_args_summary_fields_not_sensitive(reg)
+        assert len(violations) == 3
+
+    def test_non_sensitive_token_substring_no_violation(self) -> None:
+        """csrf_token 含 'token' 子串但不是 SENSITIVE_INPUT_BLOCKLIST 完全匹配，
+        word-boundary 检查应放过（与 §7.3 GLOBAL_OUTPUT_BLOCKLIST 同逻辑）。"""
+        reg = _make_reg(args_summary_fields=("csrf_token", "pagination_token"))
+        # 注意：csrf_token 不应被检出（'token' 是 SENSITIVE_INPUT_BLOCKLIST 里的项，
+        # 但 csrf_token 既不是完全相等 'token'，也不是 'token_xxx' 前缀模式，
+        # 而是后缀。按 word-boundary 应放过）
+        violations = check_args_summary_fields_not_sensitive(reg)
+        # 当前实现用 startswith(bl + "_") 检前缀，csrf_token 不命中
+        assert violations == []
+
     """spec §5.1: dry_run_supported=True 必须有 _dry_run_<tool>"""
 
     def test_supported_with_fn_no_violation(self) -> None:
