@@ -227,6 +227,135 @@ async def dept_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) 
     return {"count": int(count or 0)}
 
 
+# ============ role.list / dept.list（v1.5+ SR-22，LLM 需少量行而非仅 count） ============
+
+# 返回字段精简（id/name/code/status），phone/email/create_by 等不进 records（§7.3 兜底剥离）
+_LIST_MAX_LIMIT = 50  # 强制上限，防大客户 OOM + LLM token 爆炸（SR-22 反例 3）
+_LIST_DEFAULT_LIMIT = 20
+
+
+def _coerce_list_limit(limit: int | None) -> int:
+    """规范化 limit：None=默认 20；负数=默认；>50=截断到 50"""
+    if limit is None or limit <= 0:
+        return _LIST_DEFAULT_LIMIT
+    return min(limit, _LIST_MAX_LIMIT)
+
+
+@ai_tool(
+    AiToolMeta(
+        name="role.list",
+        agent="role_mgmt",
+        summary=(
+            "List roles → {total, limit, records:[{id,name,code,status}]}. "
+            "Use role.count for count-only."
+        ),
+        required_perms=("system:role:list",),
+        risk="low",
+        readonly=True,
+        allowed_filters=("status",),
+        query_cache_module="system/role",
+    )
+)
+async def role_list(
+    ctx: AiToolContext,
+    filters: dict[str, Any] | None = None,
+    limit: int | None = None,
+) -> dict:
+    """列出角色，返回前 N 条精简字段
+
+    filters:
+        status: '1' (启用) / '2' (禁用)
+    limit:
+        None / 0 / 负数 = 默认 20；正整数按 min(limit, 50) 截断
+    """
+    filters = validate_filters_in_whitelist(ctx.tool_meta, filters)
+    safe_limit = _coerce_list_limit(limit)
+
+    base = select(Role)
+    for key, value in filters.items():
+        base = base.where(getattr(Role, key) == str(value))
+
+    # total 反映真实总数（不受 limit 截断），供 LLM 判断是否需 chip 跳转
+    total = await ctx.db.scalar(select(func.count()).select_from(base.subquery()))
+
+    rows = (
+        (await ctx.db.execute(base.order_by(Role.role_id.asc()).limit(safe_limit)))
+        .scalars()
+        .all()
+    )
+
+    return {
+        "total": int(total or 0),
+        "limit": safe_limit,
+        "records": [
+            {
+                "id": str(r.role_id),
+                "name": r.role_name,
+                "code": r.role_code,
+                "status": r.status,
+            }
+            for r in rows
+        ],
+    }
+
+
+@ai_tool(
+    AiToolMeta(
+        name="dept.list",
+        agent="dept_mgmt",
+        summary=(
+            "List depts → {total, limit, records:[{id,name,parent_id,status}]}. "
+            "Use dept.count for count-only."
+        ),
+        required_perms=("system:dept:list",),
+        risk="low",
+        readonly=True,
+        allowed_filters=("status",),
+        query_cache_module="system/dept",
+    )
+)
+async def dept_list(
+    ctx: AiToolContext,
+    filters: dict[str, Any] | None = None,
+    limit: int | None = None,
+) -> dict:
+    """列出部门，返回前 N 条精简字段
+
+    filters:
+        status: '1' (启用) / '0' (禁用)
+    limit:
+        None / 0 / 负数 = 默认 20；正整数按 min(limit, 50) 截断
+    """
+    filters = validate_filters_in_whitelist(ctx.tool_meta, filters)
+    safe_limit = _coerce_list_limit(limit)
+
+    base = select(Dept)
+    for key, value in filters.items():
+        base = base.where(getattr(Dept, key) == str(value))
+
+    total = await ctx.db.scalar(select(func.count()).select_from(base.subquery()))
+
+    rows = (
+        (await ctx.db.execute(base.order_by(Dept.dept_id.asc()).limit(safe_limit)))
+        .scalars()
+        .all()
+    )
+
+    return {
+        "total": int(total or 0),
+        "limit": safe_limit,
+        "records": [
+            {
+                "id": str(d.dept_id),
+                "name": d.dept_name,
+                "parent_id": str(d.parent_id) if d.parent_id else None,
+                "status": d.status,
+            }
+            for d in rows
+        ],
+    }
+
+
 # ============ user.batch_delete（destructive + HITL，spec §11.3 示例） ============
 
 

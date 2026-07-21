@@ -463,3 +463,182 @@ class TestDeptCount:
         with pytest.raises(BusinessRuleException) as exc_info:
             await dept_count(ctx, filters={"dept_name": "evil"})
         assert exc_info.value.error_code == "AI_STATS_FIELD_NOT_ALLOWED"
+
+
+# ============ role.list / dept.list（v1.5+ SR-22） ============
+
+
+def _make_role_list_ctx(db: AsyncSession) -> AiToolContext:
+    """构造 role.list 的 ctx"""
+    from app.modules.system.ai_tools import role_list  # noqa: F401
+
+    meta = AiToolMeta(
+        name="role.list",
+        agent="role_mgmt",
+        summary="x",
+        required_perms=("system:role:list",),
+        risk="low",
+        readonly=True,
+        allowed_filters=("status",),
+        query_cache_module="system/role",
+    )
+    return AiToolContext(
+        user=MagicMock(user_id=1),
+        perms={"system:role:list"},
+        db=db,
+        data_scope=DataScopeContext(
+            accessible_dept_ids=None, accessible_user_scope=None
+        ),
+        trace_id="tr_role_list",
+        tool_meta=meta,
+    )
+
+
+def _make_dept_list_ctx(db: AsyncSession) -> AiToolContext:
+    """构造 dept.list 的 ctx"""
+    from app.modules.system.ai_tools import dept_list  # noqa: F401
+
+    meta = AiToolMeta(
+        name="dept.list",
+        agent="dept_mgmt",
+        summary="x",
+        required_perms=("system:dept:list",),
+        risk="low",
+        readonly=True,
+        allowed_filters=("status",),
+        query_cache_module="system/dept",
+    )
+    return AiToolContext(
+        user=MagicMock(user_id=1),
+        perms={"system:dept:list"},
+        db=db,
+        data_scope=DataScopeContext(
+            accessible_dept_ids=None, accessible_user_scope=None
+        ),
+        trace_id="tr_dept_list",
+        tool_meta=meta,
+    )
+
+
+class TestRoleList:
+    """spec §5.5 SR-22: role.list 返回精简字段 + limit 截断"""
+
+    async def test_returns_records_with_default_limit(self, db_session) -> None:
+        from app.modules.system.ai_tools import role_list
+
+        await _add_role(db_session, role_id=4001, role_name="r1", role_code="R_R1")
+        await _add_role(db_session, role_id=4002, role_name="r2", role_code="R_R2")
+        await db_session.flush()
+
+        ctx = _make_role_list_ctx(db_session)
+        result = await role_list(ctx, filters=None)
+        assert result["limit"] == 20  # 默认
+        assert result["total"] >= 2  # 含 _add_role 加的 + 其它测试残留
+        assert len(result["records"]) >= 2
+        # records 应含本次新建的 role
+        names = [r["name"] for r in result["records"]]
+        assert "r1" in names and "r2" in names
+        # 精简字段：含 id/name/code/status
+        rec0 = result["records"][0]
+        assert set(rec0.keys()) == {"id", "name", "code", "status"}
+        # id 字符串化（防 JS BigInt）
+        assert isinstance(rec0["id"], str)
+
+    async def test_status_filter_applied(self, db_session) -> None:
+        from app.modules.system.ai_tools import role_list
+
+        await _add_role(db_session, role_id=4011, role_name="on", status="1")
+        await _add_role(db_session, role_id=4012, role_name="off", status="2")
+        await db_session.flush()
+
+        ctx = _make_role_list_ctx(db_session)
+        result = await role_list(ctx, filters={"status": "2"})
+        names = [r["name"] for r in result["records"]]
+        assert "off" in names
+        assert "on" not in names  # status='1' 被过滤
+
+    async def test_limit_over_50_truncated(self, db_session) -> None:
+        """spec §5.5 SR-22 反例 3: limit > 50 强制截断到 50"""
+        from app.modules.system.ai_tools import role_list
+
+        ctx = _make_role_list_ctx(db_session)
+        result = await role_list(ctx, filters=None, limit=999)
+        assert result["limit"] == 50  # 截断
+
+    async def test_limit_none_or_zero_uses_default(self, db_session) -> None:
+        from app.modules.system.ai_tools import role_list
+
+        ctx = _make_role_list_ctx(db_session)
+        r1 = await role_list(ctx, filters=None, limit=None)
+        r2 = await role_list(ctx, filters=None, limit=0)
+        r3 = await role_list(ctx, filters=None, limit=-5)
+        assert r1["limit"] == 20
+        assert r2["limit"] == 20
+        assert r3["limit"] == 20  # 负数也走默认
+
+    async def test_total_reflects_real_count_not_limit(self, db_session) -> None:
+        """spec §5.5 SR-22 反例 4: total 不受 limit 截断"""
+        from app.modules.system.ai_tools import role_list
+
+        # 至少 3 个 role（含本次 + 残留）
+        await _add_role(db_session, role_id=4021, role_name="total_test_1")
+        await _add_role(db_session, role_id=4022, role_name="total_test_2")
+        await _add_role(db_session, role_id=4023, role_name="total_test_3")
+        await db_session.flush()
+
+        ctx = _make_role_list_ctx(db_session)
+        result = await role_list(ctx, filters=None, limit=1)
+        # total ≥ 3（真实总数），但 records 只有 1 条
+        assert result["total"] >= 3
+        assert len(result["records"]) == 1
+        assert result["limit"] == 1
+
+    async def test_filter_out_of_whitelist_raises(self, db_session) -> None:
+        from app.modules.system.ai_tools import role_list
+
+        ctx = _make_role_list_ctx(db_session)
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await role_list(ctx, filters={"role_name": "evil"})
+        assert exc_info.value.error_code == "AI_STATS_FIELD_NOT_ALLOWED"
+
+
+class TestDeptList:
+    """spec §5.5 SR-22: dept.list 返回精简字段"""
+
+    async def test_returns_records_with_default_limit(self, db_session) -> None:
+        from app.modules.system.ai_tools import dept_list
+
+        await _add_dept(db_session, dept_id=5001, dept_name="d1")
+        await _add_dept(db_session, dept_id=5002, dept_name="d2")
+        await db_session.flush()
+
+        ctx = _make_dept_list_ctx(db_session)
+        result = await dept_list(ctx, filters=None)
+        assert result["limit"] == 20
+        assert result["total"] >= 2
+        names = [r["name"] for r in result["records"]]
+        assert "d1" in names and "d2" in names
+        # 精简字段：含 id/name/parent_id/status（dept 无 code 字段）
+        rec0 = result["records"][0]
+        assert set(rec0.keys()) == {"id", "name", "parent_id", "status"}
+        assert isinstance(rec0["id"], str)
+
+    async def test_status_filter_applied(self, db_session) -> None:
+        from app.modules.system.ai_tools import dept_list
+
+        await _add_dept(db_session, dept_id=5011, dept_name="on", status="1")
+        await _add_dept(db_session, dept_id=5012, dept_name="off", status="0")
+        await db_session.flush()
+
+        ctx = _make_dept_list_ctx(db_session)
+        result = await dept_list(ctx, filters={"status": "0"})
+        names = [r["name"] for r in result["records"]]
+        assert "off" in names
+        assert "on" not in names
+
+    async def test_limit_truncated_to_50(self, db_session) -> None:
+        from app.modules.system.ai_tools import dept_list
+
+        ctx = _make_dept_list_ctx(db_session)
+        result = await dept_list(ctx, filters=None, limit=100)
+        assert result["limit"] == 50

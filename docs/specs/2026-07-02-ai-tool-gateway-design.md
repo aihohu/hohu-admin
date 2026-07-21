@@ -2526,7 +2526,7 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 
 | 项 | 阻塞原因 |
 |---|---|
-| role.list / dept.list AI tool | MVP 聚合类 tool 已够，list 类 tool 价值递减（chip 跳转已覆盖数据展示） |
+| ~~role.list / dept.list AI tool~~ | ~~MVP 聚合类 tool 已够，list 类 tool 价值递减（chip 跳转已覆盖数据展示）~~ **v1.5+ 已完成 2026-07-21**：补齐 LLM 需要少量行（如「列出当前启用的角色名」）的场景，count 无法替代；返回前 N 条（默认 20）+ data_scope 不应用（role/dept 是组织元数据，admin 可见即放行，与 §6.2 user 维度 data_scope 区分）；返回字段精简（id/name/code/status），敏感字段（phone/email）由 §7.3 GLOBAL_OUTPUT_BLOCKLIST 自动剥离。 |
 
 ### ⏸ v2+ 推迟项（架构级，独立版本规划）
 
@@ -2721,6 +2721,10 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 #### SR-21. **`risk_appetite` 三档修正（仅 high risk，destructive / hitl_always / injection_hit 不受影响）**（2026-07-20 v1.5+ 落地，spec §5.3 / §14）— MVP 统一 balanced 策略（high + dry_run_count≤1 → autonomous），但不同业务场景需不同阈值：财务 / 合规 agent 任何写操作都应 HITL（conservative），开发 / 测试 agent 批量导入允许跳过 HITL（aggressive）。v1.5+ 在 `ai_agent` 表加 `risk_appetite: Literal["conservative", "balanced", "aggressive"]`（默认 `"balanced"` 向后兼容），`classify_execution_mode` 接受 `risk_appetite` 参数仅调整 high risk 的 dry_run_count 阈值：conservative → high 永远 HITL；balanced → high + count≤1 autonomous（MVP 行为）；aggressive → high 永远 autonomous（即使 count=None）。
 **反例**: (1) appetite 影响 destructive——破坏性操作永远 HITL 是安全底线，不受 appetite 影响（conservative 也不能更严，aggressive 也不能更宽）；同理 `hitl_always=True` / `injection_hit=True` 也不受影响。(2) 默认 aggressive 破坏 MVP——所有老 agent 没声明 risk_appetite 时行为变化（high 风险不再走 HITL），必须默认 `"balanced"` 与 MVP 等价。(3) risk_appetite 放 tool.meta——同 SR-16 / SR-19 反例，tool 归属 agent 可能与运行时会话 agent 不一致；应放 AiAgent 表。(4) 字符串字面量未用 Literal 类型——任意字符串都能传，运行时静默错误；必须 Literal 限定 3 档 + DB 层 CHECK 约束。
 **回归**: AiAgent 加 `risk_appetite` 字段（默认 `"balanced"`，老 agent 不显式声明完全等价 MVP）；`classify_execution_mode(meta, dry_run_count=..., injection_hit=..., risk_appetite="balanced")` 加可选参数（默认 `"balanced"`，老调用方不传兼容）；executor 从 `deps.agent.risk_appetite` 读取传入；测试覆盖 conservative/balanced/aggressive 三档 × high/destructive/low 三种 risk × dry_run_count ∈ {None, 0, 1, 2} 共 27 个组合的关键 case。
+
+#### SR-22. **`role.list` / `dept.list` AI tool（精简字段 + 不应用 data_scope + 默认 20 条）**（2026-07-21 v1.5+ 落地，spec §5.5 / §14）— MVP 已有 `role.count` / `dept.count` 但缺 list 类 tool，LLM 遇到「列出当前启用的角色名」「显示所有顶级部门」这类需求时只能拉 page 后转述，体验差。v1.5+ 在 `system/ai_tools.py` 加 `role.list` / `dept.list`，`risk=low` readonly，返回前 N 条（默认 20，`limit` 可调到 50）+ `total` 真实总数（不受 limit 截断，供 LLM 判断是否需要 chip 跳转）。
+**反例**: (1) 应用 user 维度 data_scope——role/dept 是组织元数据（角色 / 部门结构），与 user 可见范围正交；admin 看到所有 role 是设计意图（required_perms 已守门），强制 data_scope 过滤会让角色管理 agent 拿不到全量角色列表，破坏 RBAC 配置场景。(2) 返回全部字段（含 create_by / phone / email）——LLM prompt 浪费 + 敏感字段泄漏风险，应精简到 id/name/code/status 4-5 个核心字段，phone/email 等留给 §7.3 GLOBAL_OUTPUT_BLOCKLIST 兜底剥离。(3) `limit=None` 允许拉全量——大客户 5000+ 部门场景 OOM + LLM token 爆炸，必须强制 `limit ≤ 50`，超限截断 + LLM 提示用 chip 跳转看完整列表。(4) 复用 paginate 工具返回 `{records, total, current, size}` 完整 PageResult——LLM 不需要分页元信息（它不会翻页），简化为 `{total, limit, records}` 三字段。
+**回归**: system/ai_tools.py 加 `role_list` / `dept_list` 函数 + `@ai_tool` 装饰器（agent="role_mgmt"/"dept_mgmt"，required_perms="system:role:list"/"system:dept:list"，risk="low"，readonly=True，allowed_filters=("status",)，query_cache_module="system/role"/"system/dept"）；返回 `{"total": N, "limit": L, "records": [{"id": str, "name": ..., "code"/"parent_id": ..., "status": "1"/"0"}]}`（id 字符串化防 JS BigInt）；测试覆盖"无 filters 返回前 20"/"status filter 应用"/"limit > 50 截断到 50"/"total 反映真实总数不受 limit 影响"。
 
 ### 修订后立即需要做的事（优先级排序）
 
