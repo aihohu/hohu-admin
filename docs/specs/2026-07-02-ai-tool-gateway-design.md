@@ -2272,6 +2272,8 @@ AI 已可用但只能 autonomous：
 
 ## 16. 文件上传/下载场景（MVP 同步）
 
+> **状态**：✅ **Excel/CSV 解析已完成 2026-07-21**（SR-24）；⚠️ **Plan v1.6+ gap**：PDF / Word 解析（依赖 pdfplumber / python-docx 未装，业务场景 < 10%）；⚠️ **Plan v1.6+ gap**：`provider.export` 同步导出 tool（spec §16.2 设计完整，待 provider_mgmt agent 落地后接入）；⚠️ **Plan v1.6+ gap**：异步通道（`broadcast_to_user`，导出 > 30s 走 arq 队列）。
+
 ### 16.1 上传链路
 
 ```
@@ -2537,7 +2539,8 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 | 容量 L4 会话预算（SR-20） | `9298a8c` | `sys_config.ai:budget:conv_per_day`（默认 0=不限）+ Redis key `ai:budget:conv:{conversation_id}` INCR + TTL 24h 滚动窗口；`conversation_id=0` 跳过；错误码 `AI_CONV_BUDGET_EXHAUSTED` |
 | 风险偏好 risk_appetite（SR-21） | `487941a` | `AiAgent.risk_appetite: Literal["conservative", "balanced", "aggressive"]`（默认 `"balanced"`）+ `classify_execution_mode(risk_appetite=...)` 仅调整 high risk 阈值；DB 层 CHECK 约束 |
 | role.list / dept.list AI tool（SR-22） | `2bd3e19` | `system/ai_tools.py` 加 `role_list` / `dept_list`（readonly，返回 `{total, limit, records}`）；limit 默认 20 截断 50；不应用 user 维度 data_scope（role/dept 是组织元数据） |
-| Guardrails forbidden_topics / forbidden_urls（SR-23） | （本 commit） | `forbidden_topics.py` 子串匹配 + 错误码 `AI_FORBIDDEN_TOPIC`；`forbidden_urls.py` regex 提取域名 + 后缀匹配 + 错误码 `AI_FORBIDDEN_URL`；chat.py 串行调三层 detector；`sensitive_output_blocklist` 留 v2+ |
+| Guardrails forbidden_topics / forbidden_urls（SR-23） | `cecddcc` | `forbidden_topics.py` 子串匹配 + 错误码 `AI_FORBIDDEN_TOPIC`；`forbidden_urls.py` regex 提取域名 + 后缀匹配 + 错误码 `AI_FORBIDDEN_URL`；chat.py 串行调三层 detector；`sensitive_output_blocklist` 留 v2+ |
+| 文件解析 Excel/CSV（SR-24） | （本 commit） | `file_parser.py`（ExcelParser 50MB / CsvParser 10MB）+ `file_tools.py` `@ai_tool file.parse`（agent=shared, default_enabled=False, readonly=True）；raw bytes 永不进 LLM，仅返回 `{rows, columns, preview[3], parser, file_size}`；同步 IO 用 `asyncio.to_thread` 包装；`check_ai_tools.py` 加 `accepts_file_mime_valid` + `SHARED_AGENT_CODE` 豁免 scope_param 检查；PDF/Word 留 v1.6+ |
 
 **测试覆盖**：v1.5+ 第二批共加 ~60 单元/集成测试，全量后端测试 996+ passed；端到端 Playwright 验证 batch_delete 链路（HITL 抽屉弹出 + 取消 + cs123 未删除）通过 5 个新 quota 改动不破坏现有逻辑。
 
@@ -2750,6 +2753,12 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 #### SR-23. **Guardrails 扩 forbidden_topics（子串）+ forbidden_urls（域名后缀匹配），sensitive_output_blocklist 留 v2+**（2026-07-21 v1.5+ 落地，spec §11.2 / §14）— MVP `keyword_blocklist` 仅支持精确敏感词子串匹配，业务有「禁止讨论某主题」/「禁止粘贴某域名」需求。v1.5+ 加 `forbidden_topics.py`（与 `keyword_blocklist` 同模式，CONFIG_KEY=`ai:guardrail:forbidden_topics`，子串匹配 + 错误码 `AI_FORBIDDEN_TOPIC` 区分主题级与词级）+ `forbidden_urls.py`（CONFIG_KEY=`ai:guardrail:forbidden_urls`，regex 提取 URL 后比对域名，支持精确 + 后缀匹配如 `evil.com` 命中 `sub.evil.com`，错误码 `AI_FORBIDDEN_URL`）。chat.py 入口串行调三层 detector（keyword → topics → urls），任一命中短路 emit AiErrorEvent + Done。
 **反例**: (1) forbidden_topics 复用 keyword_blocklist 的 CONFIG_KEY——语义不同（topics 是宽泛主题词如「政治」，blocklist 是精确敏感词如「公司代号」），错误码也不同（用户文案区分「涉及禁话题」vs「含敏感词」），必须独立 key。(2) forbidden_urls 用子串匹配整个 URL——用户输入 `evil.com.txt`（合法 .txt 域名）会被 `evil.com` 子串误伤，必须 regex 提取域名段后精确 / 后缀匹配（`sub.evil.com` 命中 `evil.com` 是设计意图，但 `evil.com.txt` 不命中）。(3) forbidden_urls 用 URL path 比对——path 经常变（如 `evil.com/article/123`），黑名单不可维护；只比对域名（注册级）。(4) sensitive_output_blocklist 一起做——LLM 输出拦截需在 produce_pydantic 流式阶段过滤 text-delta（与 keyword_blocklist LLM 输出拦截同 v2+ 推迟理由：流式过滤复杂 + PydanticAI 流式 chunk 边界处理）。
 **回归**: 加 `app/modules/ai/agents/safety/{forbidden_topics,forbidden_urls}.py`（同 keyword_blocklist 的 load_* + check_* + invalidate_*_cache 接口，60s 缓存 + force_refresh）；chat.py 在 `keyword_blocklist` 检测后串行调 topics → urls；ConfigService.update 改 `ai:guardrail:*` 后需 `invalidate_forbidden_topics_cache()` / `invalidate_forbidden_urls_cache()`（MVP 靠 60s TTL 自然生效）；测试覆盖 topics 子串/大小写 + urls 三种形态（http / www / 裸域名）+ 后缀匹配 + 误伤场景（`evil.com.txt` 不命中）。
+
+#### SR-24. **文件解析 MVP 优先 Excel + CSV（90% 覆盖），PDF/Word 留 v1.6+；raw bytes 永不进 LLM（仅返回摘要）；同步 IO 用 `asyncio.to_thread` 包装**（2026-07-21 v1.5+ 落地，spec §16）— §16 设计了 4 个解析器（Excel/CSV/PDF/Word），但实际业务场景 Excel + CSV 占 > 90%（用户批量导入 / 报表上传），PDF / Word 解析依赖 pdfplumber / python-docx 未装 + 业务收益低，留 v1.6+。Excel `load_workbook(read_only=True, data_only=True)` + CSV 标准库 + 多编码兜底（utf-8 → gbk → latin-1 replace）+ BOM 手动剥离（utf-8 decode 不剥 BOM，需 `text.startswith("﻿")` 检查）。同步 IO（openpyxl / csv reader）用 `asyncio.to_thread` 包装（参考 chat.py:108 图片转 DataURI 同模式），避免阻塞事件循环。
+**反例**: (1) `text/csv` MIME 走 utf-8-sig decoder 优先——utf-8-sig 对纯 gbk 文件会 UnicodeDecodeError，顺序敏感；正确做法是 utf-8 → gbk → latin-1 三层降级 + 单独剥 BOM。(2) Excel / CSV 的 MIME 集合允许重叠（如 csv 文件被识别为 application/vnd.ms-excel）——`_build_parsers` 启动检测重复 MIME 即 RuntimeError，防配置漂移；CSV 不接管 .xls MIME（上传时 file_service 已记 MIME，parser 信任即可）。(3) 把 raw bytes 直接返回给 LLM 让它"看着办"——大文件 token 爆炸 + LLM 无法稳定解析二进制；必须后端解析为 `{rows, columns, preview[3]}` 摘要，raw bytes 仅在 tool 内部消费。(4) preview 不限量 / cell 不 stringify——datetime / Decimal 等 PydanticAI 不支持的类型会破坏 schema 序列化；必须 cell 一律 stringify + preview 截断到 3 行（spec §16.1）。(5) `file.parse` agent 绑定到具体业务 agent（如 user_mgmt）——文件解析是通用能力，归属 `SHARED_AGENT_CODE` + `required_perms=()` 任何登录用户直通（spec §5.4）。
+**回归**: 加 `app/modules/ai/agents/tools/file_parser.py`（`FileParser` Protocol + `ExcelParser` 50MB / `CsvParser` 10MB + `parse_file(file_path, mime_type)` 入口）；加 `file_tools.py` `@ai_tool file.parse`（agent=shared, required_perms=(), risk=low, default_enabled=False（SR-17 部署方显式启用）, accepts_file=SUPPORTED_MIME_TYPES, readonly=True）；错误码 `AI_FILE_TOO_LARGE` / `AI_FILE_TYPE_UNSUPPORTED` / `AI_FILE_NOT_FOUND` / `AI_FILE_ID_INVALID` / `AI_FILE_EMPTY`；`scripts/check_ai_tools.py` 加 `check_accepts_file_mime_valid`（accepts_file MIME 必须在 PARSERS 覆盖范围）+ `check_scope_param_requires_check` 豁免 SHARED_AGENT_CODE（file_id 等非业务资源 id 不需 scope 检查）；测试覆盖 Excel cell stringify / preview 截断 / 大小超限 + CSV utf-8/gbk/BOM 编码兜底 + 端到端 file_parse 调用（真实文件 + DB）+ Registry 元数据校验。
+
+
 
 ### 修订后立即需要做的事（优先级排序）
 

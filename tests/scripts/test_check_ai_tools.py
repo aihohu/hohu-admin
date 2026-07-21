@@ -1,4 +1,4 @@
-"""scripts/check_ai_tools.py 7 项 static-only 检查的单测 — spec §12.4
+"""scripts/check_ai_tools.py 8 项 static-only 检查的单测 — spec §12.4
 
 构造违规 meta + 函数签名，验证 check_xxx 函数能正确检出。
 不依赖 Registry（直接构造 RegisteredTool dataclass）。
@@ -10,6 +10,7 @@ from app.modules.ai.agents.tools.meta import SENSITIVE_INPUT_BLOCKLIST, AiToolMe
 from app.modules.ai.agents.tools.registry import RegisteredTool
 from scripts.check_ai_tools import (
     SUMMARY_MAX_UNICODE_CHARS,
+    check_accepts_file_mime_valid,
     check_args_summary_fields_not_sensitive,
     check_blocklist_field_must_be_sensitive,
     check_destructive_requires_hitl,
@@ -24,24 +25,31 @@ from scripts.check_ai_tools import (
 def _make_reg(
     *,
     name: str = "test.tool",
+    agent: str = "user_mgmt",
     risk: str = "low",
     hitl_always: bool = False,
     dry_run_supported: bool = False,
     sensitive_input: tuple[str, ...] = (),
     summary: str = "test summary",
+    accepts_file: tuple[str, ...] = (),
     dry_run_fn=None,
     args_summary_fields: tuple[str, ...] = (),
 ) -> RegisteredTool:
-    """构造 RegisteredTool，meta 字段可定制"""
+    """构造 RegisteredTool，meta 字段可定制
+
+    agent 默认 'user_mgmt'（业务模块），需 scope check。SHARED_AGENT_CODE 在
+    specific 测试中显式传入（验证豁免规则）。
+    """
     meta = AiToolMeta(
         name=name,
-        agent="shared",
+        agent=agent,
         summary=summary,
         required_perms=(),
         risk=risk,
         hitl_always=hitl_always,
         dry_run_supported=dry_run_supported,
         sensitive_input=sensitive_input,
+        accepts_file=accepts_file,
         args_summary_fields=args_summary_fields,
     )
     return RegisteredTool(
@@ -192,6 +200,53 @@ async def _tool(ctx, user_id: int):
         reg = _make_reg()
         fn_src = "async def _tool(ctx): pass"
         assert check_scope_param_requires_check(reg, fn_src) == []
+
+    def test_shared_agent_exempt(self) -> None:
+        """spec §16 SR-24: SHARED_AGENT_CODE 豁免 scope check（file_id 非业务资源）"""
+        reg = _make_reg(agent="shared")
+        fn_src = "async def _tool(ctx, file_id: str): return {}"
+        assert check_scope_param_requires_check(reg, fn_src) == []
+
+
+class TestAcceptsFileMimeValid:
+    """spec §16 SR-24: accepts_file 中 MIME 必须在 parser 覆盖范围内"""
+
+    def test_no_accepts_file_no_violation(self) -> None:
+        reg = _make_reg(accepts_file=())
+        assert check_accepts_file_mime_valid(reg) == []
+
+    def test_valid_csv_mime_no_violation(self) -> None:
+        reg = _make_reg(accepts_file=("text/csv", "text/plain"))
+        assert check_accepts_file_mime_valid(reg) == []
+
+    def test_valid_xlsx_mime_no_violation(self) -> None:
+        reg = _make_reg(
+            accepts_file=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        )
+        assert check_accepts_file_mime_valid(reg) == []
+
+    def test_invalid_mime_violation(self) -> None:
+        reg = _make_reg(accepts_file=("application/vnd.msexcel",))  # typo
+        violations = check_accepts_file_mime_valid(reg)
+        assert len(violations) == 1
+        assert violations[0].check == "accepts_file_mime_valid"
+        assert "application/vnd.msexcel" in violations[0].detail
+
+    def test_partial_invalid_mime_violation(self) -> None:
+        """混合合法/非法 MIME，仅非法的报错（detail 的 invalid list 不含合法项）"""
+        reg = _make_reg(accepts_file=("text/csv", "image/png"))
+        violations = check_accepts_file_mime_valid(reg)
+        assert len(violations) == 1
+        assert "image/png" in violations[0].detail
+        # invalid list 应只含 image/png，不含 text/csv
+        # detail 形如 "...invalid ['image/png']，已知 parser 覆盖: [...'text/csv'...]"
+        # 取 invalid list 段（"含未支持的 MIME [" 到 "]，"之间）单独断言
+        detail = violations[0].detail
+        invalid_segment = detail.split("含未支持的 MIME ")[1].split("，")[0]
+        assert "image/png" in invalid_segment
+        assert "text/csv" not in invalid_segment
 
 
 class TestSummaryLengthLimit:

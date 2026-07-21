@@ -36,8 +36,12 @@ if hasattr(sys.stdout, "reconfigure"):
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from app.modules.ai.agents.tools.file_parser import (  # noqa: E402
+    SUPPORTED_MIME_TYPES,
+)
 from app.modules.ai.agents.tools.meta import (  # noqa: E402
     SENSITIVE_INPUT_BLOCKLIST,
+    SHARED_AGENT_CODE,
 )
 from app.modules.ai.agents.tools.registry import (  # noqa: E402
     RegisteredTool,
@@ -182,7 +186,13 @@ def check_high_risk_requires_dry_run(reg: RegisteredTool) -> list[Violation]:
 def check_scope_param_requires_check(
     reg: RegisteredTool, fn_src: str | None
 ) -> list[Violation]:
-    """spec §6.2: 签名含 *_id / *_ids 参数必须调 ensure_targets_in_scope"""
+    """spec §6.2: 签名含 *_id / *_ids 参数必须调 ensure_targets_in_scope
+
+    豁免：SHARED_AGENT_CODE（file.parse 等通用 tool 无 data_scope 概念，
+    file_id / log_id 等不属于业务资源 scope）。
+    """
+    if reg.meta.agent == SHARED_AGENT_CODE:
+        return []
     if fn_src is None:
         return []
     try:
@@ -255,6 +265,27 @@ def check_args_summary_fields_not_sensitive(reg: RegisteredTool) -> list[Violati
     return violations
 
 
+def check_accepts_file_mime_valid(reg: RegisteredTool) -> list[Violation]:
+    """spec §16 SR-24: accepts_file 中声明的 MIME 必须在 parser 覆盖范围内
+
+    防 typo（application/vnd.ms-excel 写错成 application/vnd.msexcel）+
+    防漂移（parser 改了 MIME 但 tool meta 忘同步）。
+    """
+    if not reg.meta.accepts_file:
+        return []
+    invalid = [mt for mt in reg.meta.accepts_file if mt not in SUPPORTED_MIME_TYPES]
+    if invalid:
+        return [
+            Violation(
+                reg.meta.name,
+                "accepts_file_mime_valid",
+                f"accepts_file 含未支持的 MIME {invalid}，"
+                f"已知 parser 覆盖: {sorted(SUPPORTED_MIME_TYPES)}",
+            )
+        ]
+    return []
+
+
 def check_dry_run_tool_must_implement_hook(reg: RegisteredTool) -> list[Violation]:
     """spec §5.1: dry_run_supported=True 必须有 _dry_run_<tool>
 
@@ -300,6 +331,7 @@ def load_all_tools() -> list[RegisteredTool]:
     # 扫描所有 ai_tools.py 文件
     candidates = [
         "app.modules.system.ai_tools",
+        "app.modules.ai.agents.tools.file_tools",
     ]
     for mod_name in candidates:
         try:
@@ -331,6 +363,7 @@ def run_all_checks() -> list[Violation]:
         violations.extend(check_scope_param_requires_check(reg, fn_src))
         violations.extend(check_summary_length_limit(reg))
         violations.extend(check_args_summary_fields_not_sensitive(reg))
+        violations.extend(check_accepts_file_mime_valid(reg))
         violations.extend(check_dry_run_tool_must_implement_hook(reg))
 
     return violations
@@ -342,7 +375,7 @@ def main() -> int:
     warnings = [v for v in violations if v.severity == "warning"]
 
     if not violations:
-        print(f"✅ All {len(ToolRegistry.get().all())} tools passed 7 static checks")
+        print(f"✅ All {len(ToolRegistry.get().all())} tools passed 8 static checks")
         return 0
 
     for v in violations:

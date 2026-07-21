@@ -82,3 +82,6 @@ def load_builtin_tools() -> None:
 
     # v1.5+：job 模块的 job.update_cron（spec §11.3 白名单 + JobAiUpdate schema）
     import_module("app.modules.job.ai_tools")
+
+    # v1.5+ SR-24：file.parse（Excel/CSV 解析，spec §16）
+    import_module("app.modules.ai.agents.tools.file_tools")
