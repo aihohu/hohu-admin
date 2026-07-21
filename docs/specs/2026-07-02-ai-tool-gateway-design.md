@@ -2520,6 +2520,20 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 | 内置 agent 默认 system_prompt | `69da2e5` | `scripts/seed_agent_prompts.py`（7 agent 中文 prompt + 工具映射 + 示例 + `--force` 覆盖） |
 | tool name 点号兼容修复 | `bfd8905` | `pydantic_ai_wrapper.py` tool name `.`→`_`（OpenAI API `^[a-zA-Z0-9_-]+$` 约束） |
 
+### ✅ v1.5+ 已完成（2026-07-20/21 第二批，SR-16~22）
+
+| 项 | commit | 说明 |
+|---|---|---|
+| Per-agent 日配额（SR-16） | `cbb91d1` | `ai_agent.daily_quota_per_user`（nullable，None=仅走全局）+ Redis key `ai:quota:{user_id}:{agent_code}:{date}`；`check_l2_agent_quota` + `decr_quota(agent_code=...)` 叠加不替代全局 L2 |
+| Tool 级 default_enabled（SR-17） | `24f3af8` | `AiToolMeta.default_enabled: bool = True`（向后兼容）+ `sys_config.ai:enabled_tools` JSON 数组白名单；`compute_available_tools(enabled_extra=...)` 过滤 |
+| args_summary 白名单（SR-18） | `3c99e3f` | `AiToolMeta.args_summary_fields: tuple[str, ...] = ()` + `build_args_summary(args, summary_fields)` 仅提取声明字段；`check_ai_tools.py` 加 `check_args_summary_fields_not_sensitive` 静态校验 |
+| 容量 L1 全局速率（SR-19） | `f26c46f` | `sys_config.ai:rate_limit:global_per_min`（默认 0=不限）+ Redis key `ai:rate:global` ZSET 滑窗（与用户级 L1 复用 `_L1_LUA`）；错误码 `AI_RATE_LIMIT_GLOBAL` |
+| 容量 L4 会话预算（SR-20） | `9298a8c` | `sys_config.ai:budget:conv_per_day`（默认 0=不限）+ Redis key `ai:budget:conv:{conversation_id}` INCR + TTL 24h 滚动窗口；`conversation_id=0` 跳过；错误码 `AI_CONV_BUDGET_EXHAUSTED` |
+| 风险偏好 risk_appetite（SR-21） | `487941a` | `AiAgent.risk_appetite: Literal["conservative", "balanced", "aggressive"]`（默认 `"balanced"`）+ `classify_execution_mode(risk_appetite=...)` 仅调整 high risk 阈值；DB 层 CHECK 约束 |
+| role.list / dept.list AI tool（SR-22） | `2bd3e19` | `system/ai_tools.py` 加 `role_list` / `dept_list`（readonly，返回 `{total, limit, records}`）；limit 默认 20 截断 50；不应用 user 维度 data_scope（role/dept 是组织元数据） |
+
+**测试覆盖**：v1.5+ 第二批共加 ~60 单元/集成测试，全量后端测试 996+ passed；端到端 Playwright 验证 batch_delete 链路（HITL 抽屉弹出 + 取消 + cs123 未删除）通过 5 个新 quota 改动不破坏现有逻辑。
+
 **端到端验证**：agent 切换器 UI ✅ / agent_code 后端透传 ✅ / by_agent 过滤正确 ✅（compute_available_tools Python 验证）/ dept.count 单测 3 passed ✅ / chip 回放手动 redis seed 验证 ✅ / chip TTL fallback message 验证 ✅。**LLM 实际调 tool 受 doubao 模型单 tool agent 兼容限制**（识别 tool 但吐文本而非 function call），建议生产换 gpt-4o / claude。
 
 ### ⏸ v1.5+ 剩余推迟项
