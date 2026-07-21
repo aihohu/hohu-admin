@@ -36,6 +36,14 @@ from app.modules.ai.agents.hitl.events import (
     event_to_sse_data,
 )
 from app.modules.ai.agents.safety.auto_disable import check_user_disabled
+from app.modules.ai.agents.safety.forbidden_topics import (
+    check_topics,
+    load_forbidden_topics,
+)
+from app.modules.ai.agents.safety.forbidden_urls import (
+    check_forbidden_urls,
+    load_forbidden_urls,
+)
 from app.modules.ai.agents.safety.injection_detector import (
     detect_injection,
     is_injection_hit_conversation,
@@ -291,6 +299,62 @@ async def chat(
                     AiErrorEvent(
                         error_code="AI_KEYWORD_BLOCKED",
                         message="消息含敏感词，已被管理员配置拦截，请修改后再试",
+                    )
+                )
+                yield _format_sse_chunk(DoneEvent())
+
+            return StreamingResponse(_blocked_stream(), media_type=SSE_CONTENT_TYPE)
+
+    # §11.2 v1.5+ SR-23 forbidden_topics：主题级黑名单（政治 / 宗教 / 竞品对比等）
+    topics = await load_forbidden_topics(db)
+    if user_message:
+        topic_hits = check_topics(user_message, topics)
+        if topic_hits:
+            logger.warning(
+                "forbidden_topics blocked chat",
+                extra={
+                    "user_id": _current_user.user_id,
+                    "conversation_id": conversation_id,
+                    "hit_count": len(topic_hits),
+                },
+            )
+            from app.modules.ai.metrics import record_security_event  # noqa: PLC0415
+
+            record_security_event("forbidden_topic")
+
+            async def _blocked_stream():
+                yield _format_sse_chunk(
+                    AiErrorEvent(
+                        error_code="AI_FORBIDDEN_TOPIC",
+                        message="消息涉及禁讨论主题，请修改后再试",
+                    )
+                )
+                yield _format_sse_chunk(DoneEvent())
+
+            return StreamingResponse(_blocked_stream(), media_type=SSE_CONTENT_TYPE)
+
+    # §11.2 v1.5+ SR-23 forbidden_urls：URL 域名黑名单（竞品 / 恶意网站）
+    url_blocklist = await load_forbidden_urls(db)
+    if user_message:
+        url_hits = check_forbidden_urls(user_message, url_blocklist)
+        if url_hits:
+            logger.warning(
+                "forbidden_urls blocked chat",
+                extra={
+                    "user_id": _current_user.user_id,
+                    "conversation_id": conversation_id,
+                    "hit_count": len(url_hits),
+                },
+            )
+            from app.modules.ai.metrics import record_security_event  # noqa: PLC0415
+
+            record_security_event("forbidden_url")
+
+            async def _blocked_stream():
+                yield _format_sse_chunk(
+                    AiErrorEvent(
+                        error_code="AI_FORBIDDEN_URL",
+                        message="消息含禁访问的链接，请删除后重试",
                     )
                 )
                 yield _format_sse_chunk(DoneEvent())
