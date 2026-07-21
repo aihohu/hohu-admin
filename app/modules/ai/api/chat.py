@@ -189,6 +189,25 @@ async def chat(
             if raw_parts:
                 user_parts = raw_parts
 
+    # v1.5+ SR-25: 前端可能注入了 file_id 到最后一条 user message 末尾（chat 上传文件场景）。
+    # display_content 是用户原始输入（不含注入），用于持久化 + UI 显示；
+    # messages 里的注入版仅给 LLM 看。display_parts 是 display_content + 图片 parts。
+    display_content = body.get("displayContent")
+    display_parts: list[dict] | None = None
+    if display_content is not None:
+        display_parts = []
+        if display_content:
+            display_parts.append({"type": "text", "text": display_content})
+        if user_parts:
+            display_parts.extend(
+                p
+                for p in user_parts
+                if p.get("type") == "file"
+                and str(p.get("mediaType", "")).startswith("image/")
+            )
+        if not display_parts:
+            display_parts = None
+
     # 将内网图片 URL 转为 base64 data URI（LLM 提供商无法访问内网）
     body = await _convert_local_images_to_data_uri(body)
     raw_body = json.dumps(body).encode()
@@ -205,8 +224,17 @@ async def chat(
 
     # 保存用户消息
     if conversation_id and (user_message or user_parts):
+        # v1.5+ SR-25: 持久化优先用 display 版（不含 file_id 注入文本）
+        persist_content = (
+            display_content if display_content is not None else user_message
+        )
+        persist_parts = display_parts if display_parts is not None else user_parts
         await chat_service.save_user_message(
-            db, conversation_id, _current_user.user_id, user_message, parts=user_parts
+            db,
+            conversation_id,
+            _current_user.user_id,
+            persist_content,
+            parts=persist_parts,
         )
         await db.commit()
 
