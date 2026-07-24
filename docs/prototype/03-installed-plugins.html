@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>已安装插件 - 应用市场 - Hohu</title>
+<style>
+:root {
+  --primary: #646cff; --primary-hover: #747bff; --primary-light: rgba(100,108,255,0.08);
+  --success: #52c41a; --warning: #faad14; --error: #f5222d; --info: #2080f0;
+  --bg-layout: rgb(247, 250, 252); --bg-container: rgb(255, 255, 255);
+  --text-base: rgb(31, 31, 31); --text-secondary: rgb(118, 118, 118);
+  --border: rgb(226, 226, 226); --radius: 6px; --radius-card: 8px;
+  --shadow-card: 0 1px 2px 0 rgba(0,0,0,0.05); --shadow-header: 0 1px 2px rgb(0, 21, 41, 0.08);
+  --shadow-sider: 2px 0 8px 0 rgb(29, 35, 41, 0.05);
+  --sider-width: 220px; --header-height: 56px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: var(--text-base); background: var(--bg-layout); }
+.layout { display: flex; min-height: 100vh; }
+.sider { width: var(--sider-width); background: var(--bg-container); box-shadow: var(--shadow-sider); position: fixed; top: 0; left: 0; bottom: 0; z-index: 10; display: flex; flex-direction: column; }
+.sider-logo { height: var(--header-height); display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid var(--border); }
+.sider-logo .icon { width: 32px; height: 32px; background: var(--primary); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: bold; font-size: 16px; }
+.sider-logo .title { font-size: 16px; font-weight: bold; color: var(--primary); margin-left: 8px; }
+.sider-menu { flex: 1; padding: 8px 0; overflow-y: auto; }
+.menu-group { margin-bottom: 4px; }
+.menu-group-title { padding: 8px 16px; font-size: 12px; color: var(--text-secondary); }
+.menu-item { display: flex; align-items: center; padding: 0 16px; height: 40px; cursor: pointer; font-size: 14px; color: var(--text-base); transition: all 0.2s; position: relative; }
+.menu-item:hover { background: var(--primary-light); color: var(--primary); }
+.menu-item.active { color: var(--primary); background: var(--primary-light); }
+.menu-item.active::before { content: ''; position: absolute; left: 0; top: 4px; bottom: 4px; width: 3px; background: var(--primary); border-radius: 0 2px 2px 0; }
+.menu-item .mi { width: 20px; margin-right: 10px; text-align: center; font-size: 16px; opacity: 0.7; }
+.menu-item.active .mi { opacity: 1; }
+.sider-footer { padding: 12px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary); text-align: center; }
+.main { margin-left: var(--sider-width); flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+.header { height: var(--header-height); background: var(--bg-container); box-shadow: var(--shadow-header); display: flex; align-items: center; padding: 0 16px; position: sticky; top: 0; z-index: 5; }
+.header-breadcrumb { font-size: 14px; color: var(--text-secondary); }
+.header-breadcrumb a { color: var(--text-secondary); text-decoration: none; }
+.header-breadcrumb a:hover { color: var(--primary); }
+.header-breadcrumb span { color: var(--text-base); }
+.header-right { margin-left: auto; display: flex; align-items: center; gap: 16px; }
+.header-avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--primary-light); display: flex; align-items: center; justify-content: center; font-size: 14px; color: var(--primary); font-weight: 500; }
+.content { flex: 1; padding: 16px; display: flex; flex-direction: column; gap: 16px; min-height: 500px; }
+
+/* Card */
+.card { background: var(--bg-container); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
+.card-header { padding: 12px 20px; display: flex; align-items: center; justify-content: space-between; }
+.card-title { font-size: 15px; font-weight: 600; }
+.card-actions { display: flex; gap: 8px; }
+.btn { height: 34px; padding: 0 16px; border-radius: var(--radius); font-size: 13px; cursor: pointer; transition: all 0.2s; border: none; display: inline-flex; align-items: center; gap: 6px; }
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-hover); }
+.btn-success { background: var(--success); color: #fff; }
+.btn-warning { background: var(--warning); color: #fff; }
+.btn-error { background: var(--error); color: #fff; }
+.btn-outline { background: var(--bg-container); border: 1px solid var(--border); color: var(--text-base); }
+.btn-outline:hover { border-color: var(--primary); color: var(--primary); }
+.btn-sm { height: 28px; padding: 0 10px; font-size: 12px; }
+.btn-link { background: none; border: none; color: var(--primary); padding: 0 6px; height: auto; font-size: 13px; cursor: pointer; }
+.btn-link:hover { text-decoration: underline; }
+.btn-link.danger { color: var(--error); }
+
+/* Search */
+.search-card { background: var(--bg-container); border-radius: var(--radius-card); box-shadow: var(--shadow-card); padding: 16px; }
+.search-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.search-input, .search-select { height: 34px; border: 1px solid var(--border); border-radius: var(--radius); padding: 0 12px; font-size: 14px; color: var(--text-base); outline: none; transition: border-color 0.2s; background: var(--bg-container); }
+.search-input:focus, .search-select:focus { border-color: var(--primary); }
+.search-input { width: 240px; }
+.search-select { width: 140px; }
+.search-btn { height: 34px; padding: 0 16px; border: none; border-radius: var(--radius); font-size: 14px; cursor: pointer; transition: all 0.2s; }
+.search-btn.primary { background: var(--primary); color: #fff; }
+.search-btn.primary:hover { background: var(--primary-hover); }
+.search-btn.default { background: var(--bg-container); border: 1px solid var(--border); color: var(--text-base); }
+.search-btn.default:hover { border-color: var(--primary); color: var(--primary); }
+
+/* Table */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+thead th { text-align: left; padding: 12px 16px; background: var(--bg-layout); color: var(--text-secondary); font-weight: 500; white-space: nowrap; border-bottom: 1px solid var(--border); }
+tbody td { padding: 12px 16px; border-bottom: 1px solid var(--bg-layout); }
+tbody tr:hover td { background: var(--primary-light); }
+.plugin-name-cell { display: flex; align-items: center; gap: 10px; }
+.plugin-mini-icon { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; color: #fff; }
+.plugin-mini-icon.crm { background: linear-gradient(135deg, #667eea, #764ba2); }
+.plugin-mini-icon.report { background: linear-gradient(135deg, #f093fb, #f5576c); }
+.plugin-mini-icon.notice { background: linear-gradient(135deg, #4facfe, #00f2fe); }
+.plugin-mini-icon.attendance { background: linear-gradient(135deg, #43e97b, #38f9d7); }
+.plugin-name-text { font-weight: 500; }
+.plugin-slug { font-size: 12px; color: var(--text-secondary); }
+.status-tag { display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 10px; font-size: 12px; }
+.status-enabled { background: rgba(82,196,26,0.08); color: var(--success); }
+.status-disabled { background: var(--bg-layout); color: var(--text-secondary); }
+.status-tag::before { content: ''; width: 6px; height: 6px; border-radius: 50%; margin-right: 6px; }
+.status-enabled::before { background: var(--success); }
+.status-disabled::before { background: var(--text-secondary); }
+.type-tag { display: inline-flex; padding: 1px 8px; border-radius: 4px; font-size: 12px; background: rgba(100,108,255,0.08); color: var(--primary); }
+.actions-cell { display: flex; gap: 4px; }
+
+/* Pagination */
+.pagination { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; }
+.pagination-info { font-size: 13px; color: var(--text-secondary); }
+.pagination-btns { display: flex; gap: 6px; }
+.page-btn { min-width: 32px; height: 32px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-container); display: flex; align-items: center; justify-content: center; font-size: 13px; cursor: pointer; padding: 0 8px; }
+.page-btn:hover { border-color: var(--primary); color: var(--primary); }
+.page-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+
+/* Checkbox */
+.checkbox { width: 16px; height: 16px; border: 1px solid var(--border); border-radius: 3px; cursor: pointer; appearance: none; -webkit-appearance: none; }
+.checkbox:checked { background: var(--primary); border-color: var(--primary); }
+
+/* Confirm dialog overlay */
+.overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.3); z-index: 100; justify-content: center; align-items: center; }
+.overlay.show { display: flex; }
+.dialog { background: var(--bg-container); border-radius: var(--radius-card); box-shadow: 0 8px 32px rgba(0,0,0,0.12); width: 420px; padding: 24px; }
+.dialog-title { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
+.dialog-body { font-size: 14px; color: var(--text-secondary); line-height: 1.6; margin-bottom: 20px; }
+.dialog-footer { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Update badge */
+.update-badge { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: rgba(250,173,20,0.1); color: var(--warning); margin-left: 6px; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sider">
+    <div class="sider-logo"><div class="icon">H</div><div class="title">Hohu Admin</div></div>
+    <nav class="sider-menu">
+      <div class="menu-group"><div class="menu-item"><span class="mi">🏠</span> 首页</div></div>
+      <div class="menu-group">
+        <div class="menu-group-title">系统管理</div>
+        <div class="menu-item"><span class="mi">👥</span> 用户管理</div>
+        <div class="menu-item"><span class="mi">🛡️</span> 角色管理</div>
+      </div>
+      <div class="menu-group">
+        <div class="menu-group-title">应用市场</div>
+        <div class="menu-item"><span class="mi">🛒</span> 浏览市场</div>
+        <div class="menu-item active"><span class="mi">📦</span> 已安装</div>
+      </div>
+      <div class="menu-group">
+        <div class="menu-group-title">插件（已安装）</div>
+        <div class="menu-item"><span class="mi">💼</span> CRM 套件</div>
+        <div class="menu-item"><span class="mi">📊</span> 数据报表</div>
+        <div class="menu-item"><span class="mi">🔔</span> 通知中心</div>
+      </div>
+    </nav>
+    <div class="sider-footer">Hohu Admin v1.0.0</div>
+  </aside>
+
+  <div class="main">
+    <header class="header">
+      <div class="header-breadcrumb"><a href="01-marketplace-browse.html">应用市场</a> / <span>已安装插件</span></div>
+      <div class="header-right"><span style="font-size:14px;">管理员</span><div class="header-avatar">A</div></div>
+    </header>
+
+    <div class="content">
+      <!-- Search -->
+      <div class="search-card">
+        <div class="search-row">
+          <input class="search-input" type="text" placeholder="搜索插件名称">
+          <select class="search-select">
+            <option value="">全部状态</option>
+            <option>已启用</option>
+            <option>已禁用</option>
+          </select>
+          <button class="search-btn primary">搜索</button>
+          <button class="search-btn default">重置</button>
+        </div>
+      </div>
+
+      <!-- Table -->
+      <div class="card" style="flex:1;">
+        <div class="card-header">
+          <div class="card-title">已安装插件 <span style="font-weight:400; font-size:13px; color:var(--text-secondary);">共 4 个</span></div>
+          <div class="card-actions">
+            <button class="btn btn-outline" onclick="alert('检查更新中...')">检查更新</button>
+            <button class="btn btn-outline" onclick="alert('请选择插件')">批量启用</button>
+            <button class="btn btn-outline" onclick="alert('请选择插件')">批量禁用</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:40px;"><input type="checkbox" class="checkbox"></th>
+                <th>插件名称</th>
+                <th>类型</th>
+                <th>版本</th>
+                <th>状态</th>
+                <th>安装时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><input type="checkbox" class="checkbox"></td>
+                <td>
+                  <div class="plugin-name-cell">
+                    <div class="plugin-mini-icon crm">💼</div>
+                    <div>
+                      <div class="plugin-name-text">CRM 客户管理套件</div>
+                      <div class="plugin-slug">zhangsan-crm-suite</div>
+                    </div>
+                  </div>
+                </td>
+                <td><span class="type-tag">低代码</span></td>
+                <td>v1.2.0 <span class="update-badge">可更新 v1.3.0</span></td>
+                <td><span class="status-tag status-enabled">已启用</span></td>
+                <td>2026-05-20</td>
+                <td>
+                  <div class="actions-cell">
+                    <button class="btn-link" onclick="location.href='05-lowcode-table.html'">进入</button>
+                    <button class="btn-link" onclick="location.href='04-plugin-config-drawer.html'">配置</button>
+                    <button class="btn-link" onclick="alert('已禁用')">禁用</button>
+                    <button class="btn-link" onclick="location.href='11-upgrade-reinstall.html'">更新</button>
+                    <button class="btn-link danger" onclick="document.getElementById('uninstall-dialog').classList.add('show')">卸载</button>
+                  </div>
+                </td>
+              </tr>
+              <tr>
+                <td><input type="checkbox" class="checkbox"></td>
+                <td>
+                  <div class="plugin-name-cell">
+                    <div class="plugin-mini-icon report">📊</div>
+                    <div>
+                      <div class="plugin-name-text">数据报表中心</div>
+                      <div class="plugin-slug">lisi-data-report</div>
+                    </div>
+                  </div>
+                </td>
+                <td><span class="type-tag">低代码</span></td>
+                <td>v2.0.1</td>
+                <td><span class="status-tag status-enabled">已启用</span></td>
+                <td>2026-05-18</td>
+                <td>
+                  <div class="actions-cell">
+                    <button class="btn-link">进入</button>
+                    <button class="btn-link" onclick="location.href='04-plugin-config-drawer.html'">配置</button>
+                    <button class="btn-link">禁用</button>
+                    <button class="btn-link danger">卸载</button>
+                  </div>
+                </td>
+              </tr>
+              <tr>
+                <td><input type="checkbox" class="checkbox"></td>
+                <td>
+                  <div class="plugin-name-cell">
+                    <div class="plugin-mini-icon notice">🔔</div>
+                    <div>
+                      <div class="plugin-name-text">智能通知中心</div>
+                      <div class="plugin-slug">wangwu-notice</div>
+                    </div>
+                  </div>
+                </td>
+                <td><span class="type-tag">低代码</span></td>
+                <td>v1.0.0</td>
+                <td><span class="status-tag status-disabled">已禁用</span></td>
+                <td>2026-05-15</td>
+                <td>
+                  <div class="actions-cell">
+                    <button class="btn-link" onclick="location.href='04-plugin-config-drawer.html'">配置</button>
+                    <button class="btn-link" onclick="alert('已启用')">启用</button>
+                    <button class="btn-link danger">卸载</button>
+                  </div>
+                </td>
+              </tr>
+              <tr>
+                <td><input type="checkbox" class="checkbox"></td>
+                <td>
+                  <div class="plugin-name-cell">
+                    <div class="plugin-mini-icon attendance">⏰</div>
+                    <div>
+                      <div class="plugin-name-text">考勤打卡管理</div>
+                      <div class="plugin-slug">hohu-attendance</div>
+                    </div>
+                  </div>
+                </td>
+                <td><span class="type-tag">低代码</span></td>
+                <td>v1.1.0</td>
+                <td><span class="status-tag status-enabled">已启用</span></td>
+                <td>2026-05-10</td>
+                <td>
+                  <div class="actions-cell">
+                    <button class="btn-link">进入</button>
+                    <button class="btn-link" onclick="location.href='04-plugin-config-drawer.html'">配置</button>
+                    <button class="btn-link">禁用</button>
+                    <button class="btn-link danger">卸载</button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pagination">
+          <div class="pagination-info">共 4 条</div>
+          <div class="pagination-btns">
+            <div class="page-btn active">1</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Uninstall Dialog -->
+<div class="overlay" id="uninstall-dialog" onclick="if(event.target===this)this.classList.remove('show')">
+  <div class="dialog">
+    <div class="dialog-title">确认卸载</div>
+    <div class="dialog-body">
+      确定要卸载 <strong>CRM 客户管理套件</strong> 吗？<br><br>
+      该插件当前有 <strong>128 条</strong>数据。卸载后数据表将保留归档，可随时重新安装恢复。<br><br>
+      <label><input type="checkbox" class="checkbox"> 同时删除数据表（不可恢复）</label>
+    </div>
+    <div class="dialog-footer">
+      <button class="btn btn-outline" onclick="document.getElementById('uninstall-dialog').classList.remove('show')">取消</button>
+      <button class="btn btn-error" onclick="alert('已卸载'); document.getElementById('uninstall-dialog').classList.remove('show')">确认卸载</button>
+    </div>
+  </div>
+</div>
+</body>
+</html>

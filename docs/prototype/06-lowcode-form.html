@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>编辑客户 - CRM 套件 - Hohu</title>
+<style>
+:root {
+  --primary: #646cff; --primary-hover: #747bff; --primary-light: rgba(100,108,255,0.08);
+  --success: #52c41a; --warning: #faad14; --error: #f5222d; --info: #2080f0;
+  --bg-layout: rgb(247, 250, 252); --bg-container: rgb(255, 255, 255);
+  --text-base: rgb(31, 31, 31); --text-secondary: rgb(118, 118, 118);
+  --border: rgb(226, 226, 226); --radius: 6px; --radius-card: 8px;
+  --shadow-card: 0 1px 2px 0 rgba(0,0,0,0.05); --shadow-header: 0 1px 2px rgb(0, 21, 41, 0.08);
+  --shadow-sider: 2px 0 8px 0 rgb(29, 35, 41, 0.05);
+  --sider-width: 220px; --header-height: 56px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: var(--text-base); background: var(--bg-layout); }
+.layout { display: flex; min-height: 100vh; }
+.sider { width: var(--sider-width); background: var(--bg-container); box-shadow: var(--shadow-sider); position: fixed; top: 0; left: 0; bottom: 0; z-index: 10; display: flex; flex-direction: column; }
+.sider-logo { height: var(--header-height); display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid var(--border); }
+.sider-logo .icon { width: 32px; height: 32px; background: var(--primary); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: bold; font-size: 16px; }
+.sider-logo .title { font-size: 16px; font-weight: bold; color: var(--primary); margin-left: 8px; }
+.sider-menu { flex: 1; padding: 8px 0; overflow-y: auto; }
+.menu-group { margin-bottom: 4px; }
+.menu-group-title { padding: 8px 16px; font-size: 12px; color: var(--text-secondary); }
+.menu-item { display: flex; align-items: center; padding: 0 16px; height: 40px; cursor: pointer; font-size: 14px; color: var(--text-base); transition: all 0.2s; position: relative; }
+.menu-item:hover { background: var(--primary-light); color: var(--primary); }
+.menu-item.active { color: var(--primary); background: var(--primary-light); }
+.menu-item.active::before { content: ''; position: absolute; left: 0; top: 4px; bottom: 4px; width: 3px; background: var(--primary); border-radius: 0 2px 2px 0; }
+.menu-item .mi { width: 20px; margin-right: 10px; text-align: center; font-size: 16px; opacity: 0.7; }
+.sider-footer { padding: 12px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary); text-align: center; }
+.main { margin-left: var(--sider-width); flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+.header { height: var(--header-height); background: var(--bg-container); box-shadow: var(--shadow-header); display: flex; align-items: center; padding: 0 16px; position: sticky; top: 0; z-index: 5; }
+.header-breadcrumb { font-size: 14px; color: var(--text-secondary); }
+.header-breadcrumb a { color: var(--text-secondary); text-decoration: none; }
+.header-breadcrumb a:hover { color: var(--primary); }
+.header-breadcrumb span { color: var(--text-base); }
+.plugin-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 4px; font-size: 11px; background: rgba(100,108,255,0.08); color: var(--primary); margin-left: 6px; vertical-align: middle; }
+.header-right { margin-left: auto; display: flex; align-items: center; gap: 16px; }
+.header-avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--primary-light); display: flex; align-items: center; justify-content: center; font-size: 14px; color: var(--primary); font-weight: 500; }
+.content { flex: 1; padding: 16px; display: flex; flex-direction: column; gap: 16px; }
+
+/* Card */
+.card { background: var(--bg-container); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
+.card-body { padding: 24px; }
+
+/* Schema info */
+.schema-info { display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: rgba(100,108,255,0.04); border-radius: var(--radius); font-size: 12px; color: var(--text-secondary); }
+.schema-info code { background: rgba(100,108,255,0.08); padding: 1px 6px; border-radius: 3px; color: var(--primary); font-size: 12px; }
+
+/* Form */
+.form-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0 24px; }
+.form-grid .full-width { grid-column: 1 / -1; }
+.form-item { margin-bottom: 20px; }
+.form-label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; color: var(--text-base); }
+.form-label .required { color: var(--error); margin-left: 2px; }
+.form-desc { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+.form-input, .form-select, .form-textarea { width: 100%; height: 34px; border: 1px solid var(--border); border-radius: var(--radius); padding: 0 12px; font-size: 14px; color: var(--text-base); outline: none; transition: border-color 0.2s, box-shadow 0.2s; background: var(--bg-container); }
+.form-textarea { height: 80px; padding: 8px 12px; resize: vertical; }
+.form-input:focus, .form-select:focus, .form-textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(100,108,255,0.15); }
+.form-input.error { border-color: var(--error); }
+.form-error { font-size: 12px; color: var(--error); margin-top: 4px; display: flex; align-items: center; gap: 4px; }
+
+/* Switch */
+.switch-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; }
+.switch { width: 44px; height: 22px; border-radius: 11px; background: var(--border); cursor: pointer; position: relative; transition: background 0.2s; flex-shrink: 0; }
+.switch.on { background: var(--primary); }
+.switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: transform 0.2s; box-shadow: 0 1px 3px rgba(0,0,0,0.15); }
+.switch.on::after { transform: translateX(22px); }
+
+/* Date Picker (simulated) */
+.date-input-wrap { position: relative; }
+.date-input-wrap .form-input { padding-right: 36px; }
+.date-icon { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font-size: 16px; color: var(--text-secondary); pointer-events: none; }
+
+/* Checkbox Group */
+.checkbox-group { display: flex; flex-wrap: wrap; gap: 16px; }
+.checkbox-item { display: flex; align-items: center; gap: 6px; font-size: 14px; cursor: pointer; }
+.checkbox-item input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--primary); }
+
+/* Section divider */
+.form-section { font-size: 14px; font-weight: 600; color: var(--text-base); padding-bottom: 8px; border-bottom: 1px solid var(--border); margin: 8px 0 16px; }
+
+/* Footer */
+.form-footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 16px; border-top: 1px solid var(--border); }
+.btn { height: 34px; padding: 0 20px; border-radius: var(--radius); font-size: 14px; cursor: pointer; transition: all 0.2s; border: none; display: inline-flex; align-items: center; gap: 6px; }
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-hover); }
+.btn-outline { background: var(--bg-container); border: 1px solid var(--border); color: var(--text-base); }
+.btn-outline:hover { border-color: var(--primary); color: var(--primary); }
+
+/* Ref field indicator */
+.ref-indicator { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--info); margin-left: 6px; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sider">
+    <div class="sider-logo"><div class="icon">H</div><div class="title">Hohu Admin</div></div>
+    <nav class="sider-menu">
+      <div class="menu-group"><div class="menu-item"><span class="mi">🏠</span> 首页</div></div>
+      <div class="menu-group">
+        <div class="menu-group-title">CRM 套件 <span class="plugin-badge" style="font-size:11px;background:rgba(100,108,255,0.08);color:var(--primary);padding:1px 6px;border-radius:3px;margin-left:4px;">插件</span></div>
+        <div class="menu-item"><span class="mi">📋</span> 客户列表</div>
+        <div class="menu-item active"><span class="mi">📝</span> 客户表单</div>
+        <div class="menu-item"><span class="mi">📊</span> 订单列表</div>
+        <div class="menu-item"><span class="mi">📦</span> 商品列表</div>
+      </div>
+    </nav>
+    <div class="sider-footer">Hohu Admin v1.0.0</div>
+  </aside>
+
+  <div class="main">
+    <header class="header">
+      <div class="header-breadcrumb">
+        <a href="05-lowcode-table.html">客户列表</a> / <span>编辑客户</span>
+        <span class="plugin-badge">低代码渲染</span>
+      </div>
+      <div class="header-right"><span style="font-size:14px;">管理员</span><div class="header-avatar">A</div></div>
+    </header>
+
+    <div class="content">
+      <div class="schema-info">
+        💡 本表单由插件 <code>zhangsan-crm-suite</code> 的 <code>customer</code> 模型自动渲染 · page_type: form · ui_schema grid 布局
+      </div>
+
+      <div class="card">
+        <div class="card-body">
+          <!-- Section 1: Basic Info -->
+          <div class="form-section">基本信息</div>
+          <div class="form-grid">
+            <div class="form-item">
+              <label class="form-label">客户名称 <span class="required">*</span></label>
+              <input class="form-input" type="text" value="腾讯科技" placeholder="请输入客户名称，最少 2 个字符">
+              <div class="form-desc">string · minLength: 2 · required</div>
+            </div>
+
+            <div class="form-item">
+              <label class="form-label">客户等级 <span class="required">*</span></label>
+              <select class="form-select">
+                <option value="">请选择等级</option>
+                <option value="A" selected>A级 - 重点客户</option>
+                <option value="B">B级 - 普通客户</option>
+                <option value="C">C级 - 潜在客户</option>
+              </select>
+              <div class="form-desc">string · enum: [A, B, C] · required · widget: NSelect</div>
+            </div>
+
+            <div class="form-item">
+              <label class="form-label">联系方式</label>
+              <input class="form-input" type="text" value="138-0001-2345" placeholder="请输入手机号">
+              <div class="form-desc">string · format: phone · widget: NInput(mask)</div>
+            </div>
+
+            <div class="form-item">
+              <label class="form-label">成立日期</label>
+              <div class="date-input-wrap">
+                <input class="form-input" type="date" value="2020-03-15">
+                <span class="date-icon">📅</span>
+              </div>
+              <div class="form-desc">string · format: date · widget: NDatePicker</div>
+            </div>
+
+            <div class="form-item full-width">
+              <label class="form-label">备注</label>
+              <textarea class="form-textarea" placeholder="请输入备注信息">战略合作伙伴，年度合同客户。主要负责对接人：张经理。</textarea>
+              <div class="form-desc">string · widget: NInput(type="textarea")</div>
+            </div>
+          </div>
+
+          <!-- Section 2: Extended (demonstrating more widget types) -->
+          <div class="form-section" style="margin-top:24px;">扩展信息（演示更多控件类型）</div>
+          <div class="form-grid">
+            <div class="form-item">
+              <label class="form-label">员工人数</label>
+              <div style="display:flex;align-items:center;gap:0;">
+                <div style="width:34px;height:34px;border:1px solid var(--border);border-radius:var(--radius) 0 0 var(--radius);background:var(--bg-container);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:16px;" onclick="let i=this.nextElementSibling;i.value=Math.max(0,+i.value-100)">−</div>
+                <input class="form-input" type="number" value="50000" style="text-align:center;border-radius:0;width:120px;">
+                <div style="width:34px;height:34px;border:1px solid var(--border);border-radius:0 var(--radius) var(--radius) 0;background:var(--bg-container);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:16px;" onclick="let i=this.previousElementSibling;i.value=+i.value+100">+</div>
+              </div>
+              <div class="form-desc">integer · widget: NInputNumber</div>
+            </div>
+
+            <div class="form-item">
+              <label class="form-label">年营业额（万元）</label>
+              <input class="form-input" type="text" value="1500.00" placeholder="请输入金额">
+              <div class="form-desc">number · widget: NInputNumber(precision=2)</div>
+            </div>
+
+            <div class="form-item">
+              <label class="form-label">VIP 客户</label>
+              <div class="switch-row">
+                <span style="font-size:13px;color:var(--text-secondary);">是否为 VIP 客户</span>
+                <div class="switch on" onclick="this.classList.toggle('on')"></div>
+              </div>
+              <div class="form-desc">boolean · widget: NSwitch</div>
+            </div>
+
+            <div class="form-item">
+              <label class="form-label">合作状态</label>
+              <select class="form-select">
+                <option>初步接触</option>
+                <option>商务谈判</option>
+                <option selected>合作中</option>
+                <option>已暂停</option>
+              </select>
+              <div class="form-desc">string · enum · widget: NSelect</div>
+            </div>
+
+            <div class="form-item full-width">
+              <label class="form-label">业务标签</label>
+              <div class="checkbox-group">
+                <label class="checkbox-item"><input type="checkbox" checked> 云计算</label>
+                <label class="checkbox-item"><input type="checkbox" checked> 人工智能</label>
+                <label class="checkbox-item"><input type="checkbox"> 物联网</label>
+                <label class="checkbox-item"><input type="checkbox" checked> 大数据</label>
+                <label class="checkbox-item"><input type="checkbox"> 区块链</label>
+                <label class="checkbox-item"><input type="checkbox"> 网络安全</label>
+              </div>
+              <div class="form-desc">array · widget: NCheckboxGroup · filterable: true</div>
+            </div>
+          </div>
+
+          <!-- Section 3: demonstrates x-ref (relation field) -->
+          <div class="form-section" style="margin-top:24px;">订单关联字段示例（x-ref）</div>
+          <div class="form-grid">
+            <div class="form-item">
+              <label class="form-label">关联客户 <span class="ref-indicator">🔗 x-ref → customer</span></label>
+              <select class="form-select">
+                <option value="">请选择客户</option>
+                <option value="1" selected>腾讯科技</option>
+                <option value="2">阿里巴巴</option>
+                <option value="3">字节跳动</option>
+                <option value="4">美团点评</option>
+                <option value="5">小米科技</option>
+              </select>
+              <div class="form-desc">string · x-ref: customer · x-ref-label: name · 异步加载关联数据</div>
+            </div>
+            <div class="form-item">
+              <label class="form-label">订单金额</label>
+              <input class="form-input" type="text" value="128000.00" placeholder="请输入金额">
+              <div class="form-desc">number · widget: NInputNumber</div>
+            </div>
+            <div class="form-item">
+              <label class="form-label">订单状态</label>
+              <select class="form-select">
+                <option value="pending">待支付</option>
+                <option value="paid" selected>已支付</option>
+                <option value="done">已完成</option>
+              </select>
+              <div class="form-desc">string · enum · widget: NSelect</div>
+            </div>
+          </div>
+
+          <!-- Actions -->
+          <div class="form-footer">
+            <button class="btn btn-outline" onclick="location.href='05-lowcode-table.html'">取消</button>
+            <button class="btn btn-primary" onclick="alert('保存成功！'); location.href='05-lowcode-table.html'">保存</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

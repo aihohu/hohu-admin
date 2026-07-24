@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>客户详情 - 腾讯科技 - CRM 套件 - Hohu</title>
+<style>
+:root {
+  --primary: #646cff; --primary-hover: #747bff; --primary-light: rgba(100,108,255,0.08);
+  --success: #52c41a; --warning: #faad14; --error: #f5222d; --info: #2080f0;
+  --bg-layout: rgb(247, 250, 252); --bg-container: rgb(255, 255, 255);
+  --text-base: rgb(31, 31, 31); --text-secondary: rgb(118, 118, 118);
+  --border: rgb(226, 226, 226); --radius: 6px; --radius-card: 8px;
+  --shadow-card: 0 1px 2px 0 rgba(0,0,0,0.05); --shadow-header: 0 1px 2px rgb(0, 21, 41, 0.08);
+  --shadow-sider: 2px 0 8px 0 rgb(29, 35, 41, 0.05);
+  --sider-width: 220px; --header-height: 56px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: var(--text-base); background: var(--bg-layout); }
+.layout { display: flex; min-height: 100vh; }
+.sider { width: var(--sider-width); background: var(--bg-container); box-shadow: var(--shadow-sider); position: fixed; top: 0; left: 0; bottom: 0; z-index: 10; display: flex; flex-direction: column; }
+.sider-logo { height: var(--header-height); display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid var(--border); }
+.sider-logo .icon { width: 32px; height: 32px; background: var(--primary); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: bold; font-size: 16px; }
+.sider-logo .title { font-size: 16px; font-weight: bold; color: var(--primary); margin-left: 8px; }
+.sider-menu { flex: 1; padding: 8px 0; overflow-y: auto; }
+.menu-group { margin-bottom: 4px; }
+.menu-group-title { padding: 8px 16px; font-size: 12px; color: var(--text-secondary); }
+.menu-item { display: flex; align-items: center; padding: 0 16px; height: 40px; cursor: pointer; font-size: 14px; color: var(--text-base); transition: all 0.2s; position: relative; }
+.menu-item:hover { background: var(--primary-light); color: var(--primary); }
+.menu-item.active { color: var(--primary); background: var(--primary-light); }
+.menu-item.active::before { content: ''; position: absolute; left: 0; top: 4px; bottom: 4px; width: 3px; background: var(--primary); border-radius: 0 2px 2px 0; }
+.menu-item .mi { width: 20px; margin-right: 10px; text-align: center; font-size: 16px; opacity: 0.7; }
+.sider-footer { padding: 12px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary); text-align: center; }
+.main { margin-left: var(--sider-width); flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+.header { height: var(--header-height); background: var(--bg-container); box-shadow: var(--shadow-header); display: flex; align-items: center; padding: 0 16px; position: sticky; top: 0; z-index: 5; }
+.header-breadcrumb { font-size: 14px; color: var(--text-secondary); }
+.header-breadcrumb a { color: var(--text-secondary); text-decoration: none; }
+.header-breadcrumb a:hover { color: var(--primary); }
+.header-breadcrumb span { color: var(--text-base); }
+.plugin-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 4px; font-size: 11px; background: rgba(100,108,255,0.08); color: var(--primary); margin-left: 6px; vertical-align: middle; }
+.header-right { margin-left: auto; display: flex; align-items: center; gap: 16px; }
+.header-avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--primary-light); display: flex; align-items: center; justify-content: center; font-size: 14px; color: var(--primary); font-weight: 500; }
+.content { flex: 1; padding: 16px; display: flex; flex-direction: column; gap: 16px; }
+
+/* Card */
+.card { background: var(--bg-container); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
+.card-header { padding: 12px 20px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); }
+.card-title { font-size: 15px; font-weight: 600; }
+.card-body { padding: 20px; }
+
+/* Schema info */
+.schema-info { display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: rgba(100,108,255,0.04); border-radius: var(--radius); font-size: 12px; color: var(--text-secondary); }
+.schema-info code { background: rgba(100,108,255,0.08); padding: 1px 6px; border-radius: 3px; color: var(--primary); font-size: 12px; }
+
+/* Buttons */
+.btn { height: 34px; padding: 0 16px; border-radius: var(--radius); font-size: 13px; cursor: pointer; transition: all 0.2s; border: none; display: inline-flex; align-items: center; gap: 6px; }
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-hover); }
+.btn-outline { background: var(--bg-container); border: 1px solid var(--border); color: var(--text-base); }
+.btn-outline:hover { border-color: var(--primary); color: var(--primary); }
+.btn-error { background: var(--error); color: #fff; }
+
+/* Descriptions (detail view) */
+.desc-table { width: 100%; border-collapse: collapse; }
+.desc-table tr { border-bottom: 1px solid var(--bg-layout); }
+.desc-table tr:last-child { border-bottom: none; }
+.desc-label { padding: 12px 16px; font-size: 13px; color: var(--text-secondary); width: 140px; vertical-align: top; background: var(--bg-layout); white-space: nowrap; }
+.desc-value { padding: 12px 16px; font-size: 13px; color: var(--text-base); }
+.level-tag { display: inline-flex; padding: 2px 10px; border-radius: 10px; font-size: 12px; }
+.level-A { background: rgba(250,173,20,0.1); color: var(--warning); }
+.id-value { font-family: monospace; font-size: 12px; color: var(--text-secondary); }
+.ref-link { color: var(--primary); cursor: pointer; text-decoration: none; }
+.ref-link:hover { text-decoration: underline; }
+
+/* Related data section */
+.related-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.related-title { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.related-count { font-size: 12px; color: var(--text-secondary); background: var(--bg-layout); padding: 1px 8px; border-radius: 10px; }
+.related-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.related-table th { text-align: left; padding: 10px 12px; background: var(--bg-layout); color: var(--text-secondary); font-weight: 500; border-bottom: 1px solid var(--border); }
+.related-table td { padding: 10px 12px; border-bottom: 1px solid var(--bg-layout); }
+.related-table tr:hover td { background: var(--primary-light); }
+.status-tag { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 10px; font-size: 12px; }
+.status-paid { background: rgba(82,196,26,0.08); color: var(--success); }
+.status-pending { background: rgba(250,173,20,0.1); color: var(--warning); }
+.status-done { background: var(--bg-layout); color: var(--text-secondary); }
+.amount { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* Detail footer */
+.detail-footer { display: flex; gap: 8px; padding-top: 16px; border-top: 1px solid var(--border); margin-top: 8px; }
+
+/* Tabs */
+.tabs { display: flex; gap: 0; margin-bottom: 0; }
+.tab { padding: 10px 20px; font-size: 14px; color: var(--text-secondary); cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.2s; }
+.tab:hover { color: var(--primary); }
+.tab.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 500; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sider">
+    <div class="sider-logo"><div class="icon">H</div><div class="title">Hohu Admin</div></div>
+    <nav class="sider-menu">
+      <div class="menu-group"><div class="menu-item"><span class="mi">🏠</span> 首页</div></div>
+      <div class="menu-group">
+        <div class="menu-group-title">CRM 套件 <span class="plugin-badge" style="font-size:11px;background:rgba(100,108,255,0.08);color:var(--primary);padding:1px 6px;border-radius:3px;margin-left:4px;">插件</span></div>
+        <div class="menu-item active"><span class="mi">📋</span> 客户列表</div>
+        <div class="menu-item"><span class="mi">📝</span> 客户表单</div>
+        <div class="menu-item"><span class="mi">📊</span> 订单列表</div>
+        <div class="menu-item"><span class="mi">📦</span> 商品列表</div>
+      </div>
+    </nav>
+    <div class="sider-footer">Hohu Admin v1.0.0</div>
+  </aside>
+
+  <div class="main">
+    <header class="header">
+      <div class="header-breadcrumb">
+        <a href="05-lowcode-table.html">客户列表</a> / <span>腾讯科技</span>
+        <span class="plugin-badge">低代码渲染</span>
+      </div>
+      <div class="header-right"><span style="font-size:14px;">管理员</span><div class="header-avatar">A</div></div>
+    </header>
+
+    <div class="content">
+      <div class="schema-info">
+        💡 本页面由插件 <code>zhangsan-crm-suite</code> 的 <code>customer</code> 模型自动渲染 · page_type: detail · 记录 ID: 1890123456
+      </div>
+
+      <!-- Detail Card -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">客户详情 — 腾讯科技</div>
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-outline" onclick="location.href='05-lowcode-table.html'">返回列表</button>
+            <button class="btn btn-primary" onclick="location.href='06-lowcode-form.html'">编辑</button>
+            <button class="btn btn-error" onclick="if(confirm('确认删除？'))alert('已删除')">删除</button>
+          </div>
+        </div>
+
+        <!-- Tabs -->
+        <div style="padding: 0 20px; border-bottom: 1px solid var(--border);">
+          <div class="tabs">
+            <div class="tab active" onclick="document.getElementById('basic-info').scrollIntoView({behavior:'smooth'})">基本信息</div>
+            <div class="tab" onclick="document.getElementById('related-orders').scrollIntoView({behavior:'smooth'})">关联订单</div>
+          </div>
+        </div>
+
+        <div class="card-body" id="basic-info">
+          <!-- Tab 1: Basic Info -->
+          <table class="desc-table">
+            <tr>
+              <td class="desc-label">ID</td>
+              <td class="desc-value"><span class="id-value">1890123456</span></td>
+            </tr>
+            <tr>
+              <td class="desc-label">客户名称</td>
+              <td class="desc-value"><strong>腾讯科技</strong></td>
+            </tr>
+            <tr>
+              <td class="desc-label">客户等级</td>
+              <td class="desc-value"><span class="level-tag level-A">A级</span></td>
+            </tr>
+            <tr>
+              <td class="desc-label">联系方式</td>
+              <td class="desc-value">138-0001-2345</td>
+            </tr>
+            <tr>
+              <td class="desc-label">成立日期</td>
+              <td class="desc-value">2020-03-15</td>
+            </tr>
+            <tr>
+              <td class="desc-label">备注</td>
+              <td class="desc-value">战略合作伙伴，年度合同客户。主要负责对接人：张经理。</td>
+            </tr>
+            <tr>
+              <td class="desc-label">创建时间</td>
+              <td class="desc-value">2026-05-20 14:30:25</td>
+            </tr>
+            <tr>
+              <td class="desc-label">更新时间</td>
+              <td class="desc-value">2026-05-28 09:15:42</td>
+            </tr>
+            <tr>
+              <td class="desc-label">创建人</td>
+              <td class="desc-value">管理员</td>
+            </tr>
+          </table>
+        </div>
+      </div>
+
+      <!-- Related Orders (has_many expansion) -->
+      <div class="card" id="related-orders">
+        <div class="card-header">
+          <div class="card-title">
+            关联订单
+            <span style="font-size:12px;font-weight:400;color:var(--text-secondary);margin-left:8px;">relation: has_many → order</span>
+          </div>
+          <button class="btn btn-primary" onclick="location.href='06-lowcode-form.html'">+ 新增订单</button>
+        </div>
+        <div class="card-body" style="padding:0;">
+          <table class="related-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>订单金额</th>
+                <th>订单状态</th>
+                <th>创建时间</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="id-value">1890987654</td>
+                <td class="amount">¥ 128,000.00</td>
+                <td><span class="status-tag status-paid">已支付</span></td>
+                <td>2026-05-25 10:20</td>
+                <td><a href="#" class="ref-link">详情</a></td>
+              </tr>
+              <tr>
+                <td class="id-value">1890987660</td>
+                <td class="amount">¥ 56,000.00</td>
+                <td><span class="status-tag status-pending">待支付</span></td>
+                <td>2026-05-30 14:45</td>
+                <td><a href="#" class="ref-link">详情</a></td>
+              </tr>
+              <tr>
+                <td class="id-value">1890987670</td>
+                <td class="amount">¥ 230,000.00</td>
+                <td><span class="status-tag status-done">已完成</span></td>
+                <td>2026-04-15 09:00</td>
+                <td><a href="#" class="ref-link">详情</a></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

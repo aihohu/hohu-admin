@@ -23,9 +23,19 @@ def _reset_redis_client() -> None:
 
 @pytest.fixture
 async def db_session() -> AsyncSession:
+    """每个测试独立 session，结束后强制 rollback 外层事务（绝不落库）。"""
     _reset_redis_client()
-    async with AsyncSessionLocal() as session:
-        async with session.begin():
-            yield session
-            await session.rollback()
-    await engine.dispose()
+    async with engine.connect() as conn:
+        outer = await conn.begin()
+        try:
+            async with AsyncSessionLocal(bind=conn) as session:
+                yield session
+        finally:
+            await outer.rollback()
+    # dispose 容错：asyncpg + pytest-asyncio function-scope loop 的已知 teardown
+    # race（详见 tests/modules/ai/conftest.py 同位置注释）。
+    try:
+        await engine.dispose()
+    except RuntimeError as e:
+        if "Event loop is closed" not in str(e):
+            raise

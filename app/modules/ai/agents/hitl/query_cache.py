@@ -1,0 +1,136 @@
+"""读操作查询缓存 — spec §2.9 / §8.7
+
+readonly tool 成功后，Gateway 把查询条件写入 Redis hash，5min TTL；
+前端 chip 跳转带 ai_query_id=<trace_id>，模块页反查本缓存回放筛选。
+
+Redis 结构：
+    key:    ai:query_cache:<trace_id>     (Hash)
+    field:  <tool_name>                    如 "user.list" / "user.stats"
+    value:  JSON {
+        "module": "system/user",          模块页路由前缀
+        "filters": {"status": "1"},       回放筛选条件（按 allowed_filters 白名单过滤后）
+        "tool_name": "user.list",
+        "user_id": 100,                   owner 校验用
+        "created_at": "2026-07-02T14:32:15Z"
+    }
+    ttl:    300s
+
+支持同 trace_id 多 tool 写入（每个 tool 占 hash 一个 field）。
+"""
+
+import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
+
+from redis.asyncio import Redis
+
+from app.core.config import settings
+
+AI_QUERY_CACHE_PREFIX = "ai:query_cache"
+AI_QUERY_CACHE_TTL_SEC = 300
+
+
+@dataclass(frozen=True)
+class QueryCacheEntry:
+    """Redis hash field value 的反序列化形式"""
+
+    module: str
+    filters: dict[str, Any]
+    tool_name: str
+    user_id: int
+    created_at: str  # ISO 8601 UTC
+
+    def to_json_bytes(self) -> bytes:
+        return json.dumps(self.__dict__, ensure_ascii=False, default=str).encode(
+            "utf-8"
+        )
+
+
+async def set_query_cache(
+    redis: Redis,
+    *,
+    trace_id: str,
+    tool_name: str,
+    module: str,
+    filters: dict[str, Any],
+    user_id: int,
+    ttl_sec: int = AI_QUERY_CACHE_TTL_SEC,
+) -> None:
+    """HSET ai:query_cache:<trace_id> <tool_name> <json> + EXPIRE <ttl>
+
+    spec §8.7: 每次写入重置整个 hash 的 TTL（同 trace_id 多 tool 场景）。
+    """
+    entry = QueryCacheEntry(
+        module=module,
+        filters=filters,
+        tool_name=tool_name,
+        user_id=user_id,
+        created_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    key = _key(trace_id)
+    await redis.hset(key, tool_name, entry.to_json_bytes())
+    await redis.expire(key, ttl_sec)
+
+
+async def get_query_cache(
+    redis: Redis,
+    trace_id: str,
+    *,
+    tool_name: str | None = None,
+) -> QueryCacheEntry | None:
+    """取最新写入（按 created_at 降序）或指定 tool_name 的 entry
+
+    spec §8.7:
+      - 默认行为：取 hash 中最新写入（created_at 降序）
+      - tool_name 给定：直接 HGET
+      - hash 不存在 / field 不存在：返回 None
+    """
+    key = _key(trace_id)
+
+    if tool_name is not None:
+        body = await redis.hget(key, tool_name)
+        if body is None:
+            return None
+        return _parse(body)
+
+    # 全 hash 取所有 field，按 created_at 降序选最新
+    all_entries = await redis.hgetall(key)
+    if not all_entries:
+        return None
+
+    parsed: list[QueryCacheEntry] = []
+    for raw in all_entries.values():
+        entry = _parse(raw)
+        if entry is not None:
+            parsed.append(entry)
+
+    if not parsed:
+        return None
+
+    parsed.sort(key=lambda e: e.created_at, reverse=True)
+    return parsed[0]
+
+
+async def delete_query_cache(redis: Redis, trace_id: str) -> None:
+    """显式删除（spec 没要求，调试用）"""
+    await redis.delete(_key(trace_id))
+
+
+def _key(trace_id: str) -> str:
+    return f"{AI_QUERY_CACHE_PREFIX}:{trace_id}"
+
+
+def _parse(raw: Any) -> QueryCacheEntry | None:
+    """Redis 返回的 bytes/str 解析为 QueryCacheEntry"""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return QueryCacheEntry(**data)
+
+
+# 测试 / 调试用：暴露 settings.TTL 给 lint
+_ = settings

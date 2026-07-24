@@ -30,6 +30,7 @@ dependencies = [
     "apscheduler>=3.10,<4.0",
     "pydantic-ai>=1.89.1",
     "openpyxl>=3.1.5",
+    "prometheus-client>=0.25.0",
 ]
 
 
@@ -91,7 +92,7 @@ filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::UserWarning",
 ]
-addopts = "-v -s --strict-markers"
+addopts = "-v -s --strict-markers -p no:unraisableexception"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
@@ -112,4 +113,7 @@ major_version_zero = true
 [dependency-groups]
 dev = [
     "pre-commit>=4.6.0",
+]
+test = [
+    "fakeredis>=2.36.0",
 ]

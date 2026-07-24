@@ -18,7 +18,7 @@ class MessageOut(BaseModel):
     parts: list[dict] | None
     tokens_input: int | None
     tokens_output: int | None
-    tool_calls: dict | None
+    tool_calls: list[dict] | None
     create_time: datetime
 
     @field_serializer("message_id", "conversation_id", "parent_message_id")
@@ -47,6 +47,8 @@ class MessageCreate(BaseModel):
     parent_message_id: int | None = Field(None, description="父消息ID")
     tokens_input: int | None = Field(None, description="输入 token 数")
     tokens_output: int | None = Field(None, description="输出 token 数")
-    tool_calls: dict | None = Field(None, description="工具调用记录")
+    tool_calls: list[dict] | None = Field(
+        None, description="工具调用记录（按 tool_call_id 顺序）"
+    )
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)

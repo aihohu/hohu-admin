@@ -28,22 +28,32 @@ def _reset_redis_client() -> None:
 
 @pytest.fixture
 async def db_session() -> AsyncSession:
-    """每个测试用独立 session，结束自动回滚（不污染其他测试）
+    """每个测试用独立 session，结束后强制 rollback 外层事务（绝不落库）。
 
-    用 SAVEPOINT 嵌套事务：测试代码内部可以正常 flush/commit 行为模拟，
-    退出 fixture 时回滚最外层事务，所有写入都不会真正落库。
+    实现要点（与 ai/conftest.py 一致）：
+    - 用 engine.connect() 拿独立 connection
+    - 手动 conn.begin() 开 outer transaction
+    - session 绑到这个 connection，session.commit() 只 commit savepoint
+    - finally 块强制 outer.rollback()，无论测试通过 / 抛异常都撤销
 
-    注意：fixture 结束时 dispose engine，避免 Windows ProactorEventLoop
-    重建时残留的 asyncpg 连接引发 'NoneType' send 错误（每测试一个新 loop）。
+    本 fixture 不做任何 DELETE / TRUNCATE。
     """
     _reset_redis_client()
-    async with AsyncSessionLocal() as session:
-        async with session.begin():
-            yield session
-            # 显式回滚，防止 begin 上下文在 yield 正常结束时自动 commit
-            await session.rollback()
-    # 关闭 session 后释放引擎底层连接，确保下一个测试拿到全新连接池
-    await engine.dispose()
+    async with engine.connect() as conn:
+        outer = await conn.begin()
+        try:
+            async with AsyncSessionLocal(bind=conn) as session:
+                yield session
+        finally:
+            await outer.rollback()
+    # 关闭 session 后释放引擎底层连接，确保下一个测试拿到全新连接池。
+    # dispose 容错：asyncpg + pytest-asyncio function-scope loop 的已知 teardown
+    # race（详见 tests/modules/ai/conftest.py 同位置注释）。
+    try:
+        await engine.dispose()
+    except RuntimeError as e:
+        if "Event loop is closed" not in str(e):
+            raise
 
 
 @pytest.fixture

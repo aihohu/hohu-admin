@@ -31,7 +31,7 @@ from app.modules.system.models.dept import Dept
 from app.modules.system.models.user import User
 
 
-def _get_best_scope(user: User) -> str:
+def get_best_scope(user: User) -> str:
     """从用户所有启用的角色中取最大权限范围"""
     priority = {
         DATA_SCOPE_ALL: 5,
@@ -47,6 +47,11 @@ def _get_best_scope(user: User) -> str:
         if priority.get(role.data_scope, 0) > priority.get(best, 0):
             best = role.data_scope
     return best
+
+
+# 向后兼容 alias（spec §17.1 Phase 1 配套重构）
+# 新代码请用公开名 get_best_scope，下划线版本将在 v1.5+ 移除
+_get_best_scope = get_best_scope
 
 
 async def get_data_scope_filters(
@@ -74,7 +79,7 @@ async def get_data_scope_filters(
     if is_super_admin(user):
         return []
 
-    scope = _get_best_scope(user)
+    scope = get_best_scope(user)
 
     if scope == DATA_SCOPE_ALL:
         return []
@@ -84,7 +89,7 @@ async def get_data_scope_filters(
     user_col = getattr(model, user_field)
 
     if scope == DATA_SCOPE_CUSTOM:
-        dept_ids = await _get_custom_dept_ids(db, user)
+        dept_ids = await get_custom_dept_ids(db, user)
         if dept_ids:
             return [dept_col.in_(dept_ids)]
         return [user_col == user.user_id]
@@ -95,7 +100,7 @@ async def get_data_scope_filters(
         return [user_col == user.user_id]
 
     if scope == DATA_SCOPE_DEPT_AND_SUB:
-        dept_ids = await _get_dept_and_sub_ids(db, user_dept_ids)
+        dept_ids = await get_dept_and_sub_ids(db, user_dept_ids)
         if dept_ids:
             return [dept_col.in_(dept_ids)]
         return [user_col == user.user_id]
@@ -123,7 +128,7 @@ async def get_user_data_scope_filters(
     if is_super_admin(current_user):
         return []
 
-    scope = _get_best_scope(current_user)
+    scope = get_best_scope(current_user)
 
     if scope == DATA_SCOPE_ALL:
         return []
@@ -131,7 +136,7 @@ async def get_user_data_scope_filters(
     current_dept_ids = [d.dept_id for d in current_user.depts]
 
     if scope == DATA_SCOPE_CUSTOM:
-        dept_ids = await _get_custom_dept_ids(db, current_user)
+        dept_ids = await get_custom_dept_ids(db, current_user)
         if not dept_ids:
             return [User.user_id == current_user.user_id]
     elif scope == DATA_SCOPE_DEPT:
@@ -139,7 +144,7 @@ async def get_user_data_scope_filters(
         if not dept_ids:
             return [User.user_id == current_user.user_id]
     elif scope == DATA_SCOPE_DEPT_AND_SUB:
-        dept_ids = await _get_dept_and_sub_ids(db, current_dept_ids)
+        dept_ids = await get_dept_and_sub_ids(db, current_dept_ids)
         if not dept_ids:
             return [User.user_id == current_user.user_id]
     else:
@@ -155,7 +160,7 @@ async def get_user_data_scope_filters(
     return [User.user_id.in_(subquery)]
 
 
-async def _get_custom_dept_ids(db: AsyncSession, user: User) -> list[int]:
+async def get_custom_dept_ids(db: AsyncSession, user: User) -> list[int]:
     """获取用户角色通过 role_depts 关联的自定义部门 ID。
 
     过滤禁用部门（Dept.status != 1）—— admin 禁用部门 = 撤销 CUSTOM 授权。
@@ -177,7 +182,7 @@ async def _get_custom_dept_ids(db: AsyncSession, user: User) -> list[int]:
     return list(set(result.scalars().all()))
 
 
-async def _get_dept_and_sub_ids(db: AsyncSession, dept_ids: list[int]) -> list[int]:
+async def get_dept_and_sub_ids(db: AsyncSession, dept_ids: list[int]) -> list[int]:
     """获取指定部门及其所有子部门 ID（利用 ancestors 字段）。
 
     ancestors 字段是逗号分隔的父链（如 "0,12,123"）。用两端补逗号后 like
@@ -194,3 +199,10 @@ async def _get_dept_and_sub_ids(db: AsyncSession, dept_ids: list[int]) -> list[i
     stmt = select(Dept.dept_id).where(or_(*conditions))
     result = await db.execute(stmt)
     return list({*dept_ids, *result.scalars().all()})
+
+
+# 向后兼容 alias（spec §17.1 Phase 1 配套重构）
+# 新代码请用公开名 get_custom_dept_ids / get_dept_and_sub_ids，
+# 下划线版本将在 v1.5+ 移除
+_get_custom_dept_ids = get_custom_dept_ids
+_get_dept_and_sub_ids = get_dept_and_sub_ids

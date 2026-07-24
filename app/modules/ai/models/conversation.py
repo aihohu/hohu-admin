@@ -43,6 +43,12 @@ class AiConversation(Base):
     status: Mapped[int] = mapped_column(
         SmallInteger, nullable=False, default=0, comment="状态：0=活跃, 1=归档"
     )
+    agent_code: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="绑定的 Agent code（§4.5 / §10）"
+    )
+    trace_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="会话级追踪ID，串联 ai_operation_log"
+    )
     create_time: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), comment="创建时间"
     )

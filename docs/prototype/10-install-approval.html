@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>安装插件 - 权限审批 - Hohu</title>
+<style>
+:root {
+  --primary: #646cff; --primary-hover: #747bff; --primary-light: rgba(100,108,255,0.08);
+  --success: #52c41a; --warning: #faad14; --error: #f5222d; --info: #2080f0;
+  --bg-layout: rgb(247, 250, 252); --bg-container: rgb(255, 255, 255);
+  --text-base: rgb(31, 31, 31); --text-secondary: rgb(118, 118, 118);
+  --border: rgb(226, 226, 226); --radius: 6px; --radius-card: 8px;
+  --shadow-card: 0 1px 2px 0 rgba(0,0,0,0.05); --shadow-header: 0 1px 2px rgb(0, 21, 41, 0.08);
+  --shadow-sider: 2px 0 8px 0 rgb(29, 35, 41, 0.05);
+  --sider-width: 220px; --header-height: 56px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; color: var(--text-base); background: var(--bg-layout); }
+.layout { display: flex; min-height: 100vh; }
+.sider { width: var(--sider-width); background: var(--bg-container); box-shadow: var(--shadow-sider); position: fixed; top: 0; left: 0; bottom: 0; z-index: 10; display: flex; flex-direction: column; }
+.sider-logo { height: var(--header-height); display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid var(--border); }
+.sider-logo .icon { width: 32px; height: 32px; background: var(--primary); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: bold; font-size: 16px; }
+.sider-logo .title { font-size: 16px; font-weight: bold; color: var(--primary); margin-left: 8px; }
+.sider-menu { flex: 1; padding: 8px 0; overflow-y: auto; }
+.menu-group { margin-bottom: 4px; }
+.menu-group-title { padding: 8px 16px; font-size: 12px; color: var(--text-secondary); }
+.menu-item { display: flex; align-items: center; padding: 0 16px; height: 40px; cursor: pointer; font-size: 14px; color: var(--text-base); transition: all 0.2s; position: relative; }
+.menu-item:hover { background: var(--primary-light); color: var(--primary); }
+.menu-item.active { color: var(--primary); background: var(--primary-light); }
+.menu-item.active::before { content: ''; position: absolute; left: 0; top: 4px; bottom: 4px; width: 3px; background: var(--primary); border-radius: 0 2px 2px 0; }
+.menu-item .mi { width: 20px; margin-right: 10px; text-align: center; font-size: 16px; opacity: 0.7; }
+.sider-footer { padding: 12px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-secondary); text-align: center; }
+.main { margin-left: var(--sider-width); flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+.header { height: var(--header-height); background: var(--bg-container); box-shadow: var(--shadow-header); display: flex; align-items: center; padding: 0 16px; position: sticky; top: 0; z-index: 5; }
+.header-breadcrumb { font-size: 14px; color: var(--text-secondary); }
+.header-breadcrumb a { color: var(--text-secondary); text-decoration: none; }
+.header-breadcrumb a:hover { color: var(--primary); }
+.header-breadcrumb span { color: var(--text-base); }
+.header-right { margin-left: auto; display: flex; align-items: center; gap: 16px; }
+.header-avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--primary-light); display: flex; align-items: center; justify-content: center; font-size: 14px; color: var(--primary); font-weight: 500; }
+.content { flex: 1; padding: 16px; position: relative; }
+
+/* Overlay */
+.overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 100; display: flex; justify-content: center; align-items: center; }
+
+/* Dialog */
+.dialog { background: var(--bg-container); border-radius: var(--radius-card); box-shadow: 0 12px 40px rgba(0,0,0,0.15); width: 520px; max-height: 85vh; display: flex; flex-direction: column; }
+.dialog-header { padding: 20px 24px 16px; border-bottom: 1px solid var(--border); }
+.dialog-title { font-size: 17px; font-weight: 600; display: flex; align-items: center; gap: 10px; }
+.dialog-subtitle { font-size: 13px; color: var(--text-secondary); margin-top: 4px; }
+.dialog-body { flex: 1; padding: 20px 24px; overflow-y: auto; }
+.dialog-footer { padding: 16px 24px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Plugin info */
+.plugin-bar { display: flex; align-items: center; gap: 12px; padding: 14px 16px; background: var(--bg-layout); border-radius: var(--radius); margin-bottom: 20px; }
+.plugin-bar-icon { width: 40px; height: 40px; border-radius: 10px; background: linear-gradient(135deg, #43e97b, #38f9d7); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 20px; }
+.plugin-bar-name { font-size: 15px; font-weight: 600; }
+.plugin-bar-meta { font-size: 12px; color: var(--text-secondary); }
+
+/* Section */
+.section-title { font-size: 13px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin: 20px 0 12px; }
+
+/* Permission items */
+.perm-item { display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 8px; transition: all 0.2s; }
+.perm-item:hover { border-color: var(--primary); }
+.perm-item.denied { opacity: 0.5; background: var(--bg-layout); }
+.perm-check { margin-top: 3px; accent-color: var(--primary); width: 16px; height: 16px; cursor: pointer; }
+.perm-info { flex: 1; }
+.perm-name { font-size: 14px; font-weight: 500; margin-bottom: 2px; }
+.perm-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.4; }
+.perm-type-tag { display: inline-flex; padding: 1px 6px; border-radius: 3px; font-size: 11px; background: rgba(100,108,255,0.08); color: var(--primary); margin-left: 6px; }
+.perm-denied-label { font-size: 11px; color: var(--error); font-weight: 500; margin-left: 8px; }
+
+/* Data tables preview */
+.tables-preview { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.table-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 4px; font-size: 12px; font-family: monospace; background: var(--bg-layout); border: 1px solid var(--border); }
+.table-chip .tbl-icon { color: var(--info); }
+
+/* Buttons */
+.btn { height: 34px; padding: 0 16px; border-radius: var(--radius); font-size: 14px; cursor: pointer; transition: all 0.2s; border: none; display: inline-flex; align-items: center; gap: 6px; }
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-hover); }
+.btn-primary:disabled { background: var(--border); color: var(--text-secondary); cursor: not-allowed; }
+.btn-outline { background: var(--bg-container); border: 1px solid var(--border); color: var(--text-base); }
+.btn-outline:hover { border-color: var(--primary); color: var(--primary); }
+
+/* Alert */
+.alert { display: flex; align-items: flex-start; gap: 8px; padding: 10px 14px; border-radius: var(--radius); font-size: 13px; line-height: 1.5; margin-top: 16px; }
+.alert-warning { background: rgba(250,173,20,0.08); border: 1px solid rgba(250,173,20,0.2); color: #8B6914; }
+.alert-icon { font-size: 16px; flex-shrink: 0; margin-top: 1px; }
+
+/* Approved counter */
+.approved-counter { font-size: 12px; color: var(--text-secondary); margin-top: 8px; }
+.approved-counter strong { color: var(--primary); }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sider">
+    <div class="sider-logo"><div class="icon">H</div><div class="title">Hohu Admin</div></div>
+    <nav class="sider-menu">
+      <div class="menu-group"><div class="menu-item"><span class="mi">🏠</span> 首页</div></div>
+      <div class="menu-group">
+        <div class="menu-group-title">应用市场</div>
+        <div class="menu-item active"><span class="mi">🛒</span> 浏览市场</div>
+        <div class="menu-item"><span class="mi">📦</span> 已安装</div>
+      </div>
+    </nav>
+    <div class="sider-footer">Hohu Admin v1.0.0</div>
+  </aside>
+
+  <div class="main">
+    <header class="header">
+      <div class="header-breadcrumb"><a href="01-marketplace-browse.html">应用市场</a> / <span>安装插件</span></div>
+      <div class="header-right"><span style="font-size:14px;">管理员</span><div class="header-avatar">A</div></div>
+    </header>
+
+    <div class="content" style="background:rgba(0,0,0,0.02);">
+      <!-- Background: dimmed marketplace page -->
+      <div style="opacity:0.3;pointer-events:none;">
+        <div style="background:var(--bg-container);border-radius:var(--radius-card);box-shadow:var(--shadow-card);padding:20px;">
+          <p style="color:var(--text-secondary);">市场浏览页背景内容...</p>
+        </div>
+      </div>
+
+      <!-- Install Permission Approval Dialog -->
+      <div class="overlay">
+        <div class="dialog">
+          <div class="dialog-header">
+            <div>
+              <div class="dialog-title">安装插件 — 权限审批</div>
+              <div class="dialog-subtitle">请审核插件声明的权限，可逐项拒绝不需要的权限</div>
+            </div>
+          </div>
+          <div class="dialog-body">
+            <!-- Plugin Info -->
+            <div class="plugin-bar">
+              <div class="plugin-bar-icon">📦</div>
+              <div>
+                <div class="plugin-bar-name">库存管理系统</div>
+                <div class="plugin-bar-meta">zhangsan-inventory · v2.0.0 · 低代码 · zhangsan</div>
+              </div>
+            </div>
+
+            <!-- Data Tables -->
+            <div class="section-title">将创建的数据表</div>
+            <div class="tables-preview">
+              <div class="table-chip"><span class="tbl-icon">🗃️</span> plugin_data_zhangsan-inventory</div>
+            </div>
+            <div style="font-size:12px;color:var(--text-secondary);margin-top:6px;">安装后将在数据库中创建 1 张物理表，包含系统字段（id、created_at 等）+ 3 个业务字段</div>
+
+            <!-- Permissions -->
+            <div class="section-title">权限声明</div>
+
+            <div class="perm-item">
+              <input type="checkbox" class="perm-check" checked id="p1">
+              <div class="perm-info">
+                <div class="perm-name">菜单注入 <span class="perm-type-tag">menu</span></div>
+                <div class="perm-desc">注入侧边栏菜单项"库存管理"，包含列表页和表单页</div>
+              </div>
+            </div>
+
+            <div class="perm-item">
+              <input type="checkbox" class="perm-check" checked id="p2">
+              <div class="perm-info">
+                <div class="perm-name">本插件数据读写 <span class="perm-type-tag">api</span></div>
+                <div class="perm-desc">通过 /api/v1/plugin-data/zhangsan-inventory/* 读写库存数据（创建、查询、更新、删除）</div>
+              </div>
+            </div>
+
+            <div class="perm-item">
+              <input type="checkbox" class="perm-check" checked id="p3">
+              <div class="perm-info">
+                <div class="perm-name">数据导出 <span class="perm-type-tag">api</span></div>
+                <div class="perm-desc">通过 /api/v1/plugin-data/zhangsan-inventory/export 导出数据（JSON/CSV）</div>
+              </div>
+            </div>
+
+            <div class="perm-item" id="p4-item">
+              <input type="checkbox" class="perm-check" id="p4" onchange="
+                const item = document.getElementById('p4-item');
+                const label = document.getElementById('p4-denied');
+                if(!this.checked) {
+                  item.classList.add('denied');
+                  label.style.display = 'inline';
+                } else {
+                  item.classList.remove('denied');
+                  label.style.display = 'none';
+                }
+                updateCounter();
+              ">
+              <div class="perm-info">
+                <div class="perm-name">
+                  外部 API 调用 <span class="perm-type-tag">external_api</span>
+                  <span class="perm-denied-label" id="p4-denied" style="display:none;">已拒绝</span>
+                </div>
+                <div class="perm-desc">GET https://api.weather.com/v1/* — 查询天气信息用于库存物流预测</div>
+              </div>
+            </div>
+
+            <div class="approved-counter">
+              已审批 <strong><span id="approved-count">4</span>/4</strong> 项权限
+              <span style="margin-left:8px;color:var(--text-secondary);">（取消勾选 = 拒绝该权限，插件相关功能将不可用）</span>
+            </div>
+
+            <!-- Alert -->
+            <div class="alert alert-warning">
+              <span class="alert-icon">⚠️</span>
+              <div>拒绝权限可能导致插件部分功能无法正常使用。低代码插件不执行任意代码，安全性由平台保障。</div>
+            </div>
+          </div>
+          <div class="dialog-footer">
+            <button class="btn btn-outline" onclick="location.href='01-marketplace-browse.html'">取消安装</button>
+            <button class="btn btn-primary" onclick="alert('安装成功！插件已添加到已安装列表'); location.href='03-installed-plugins.html'">确认安装</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function updateCounter() {
+  const checks = document.querySelectorAll('.perm-check');
+  let approved = 0;
+  checks.forEach(c => { if(c.checked) approved++; });
+  document.getElementById('approved-count').textContent = approved;
+}
+</script>
+</body>
+</html>

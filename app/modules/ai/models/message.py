@@ -54,8 +54,11 @@ class AiMessage(Base):
     parts: Mapped[list | None] = mapped_column(
         JSON, nullable=True, comment="结构化消息内容（含图片、文件等）"
     )
-    tool_calls: Mapped[dict | None] = mapped_column(
-        JSON, nullable=True, comment="工具调用记录（名称、参数、结果）"
+    tool_calls: Mapped[list | None] = mapped_column(
+        JSON, nullable=True, comment="工具调用记录列表（名称、参数、结果）"
+    )
+    trace_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="追踪ID，与 ai_operation_log 关联"
     )
     create_time: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), comment="创建时间"
