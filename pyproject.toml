@@ -113,7 +113,5 @@ major_version_zero = true
 [dependency-groups]
 dev = [
     "pre-commit>=4.6.0",
-]
-test = [
     "fakeredis>=2.36.0",
 ]

@@ -1355,10 +1355,8 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "pre-commit" },
-]
-test = [
     { name = "fakeredis" },
+    { name = "pre-commit" },
 ]
 
 [package.metadata]
@@ -1383,8 +1381,10 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pre-commit", specifier = ">=4.6.0" }]
-test = [{ name = "fakeredis", specifier = ">=2.36.0" }]
+dev = [
+    { name = "fakeredis", specifier = ">=2.36.0" },
+    { name = "pre-commit", specifier = ">=4.6.0" },
+]
 
 [[package]]
 name = "httpcore"
