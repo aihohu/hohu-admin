@@ -356,7 +356,7 @@ AI_MODULE_ENABLED=false
 systemctl restart hohu-admin
 ```
 
-业务模块完全不受影响。详见 `docs/SECURITY.md` §1。
+业务模块完全不受影响。详见 `docs/AI-SECURITY.md` §1。
 
 ---
 
@@ -442,7 +442,7 @@ systemctl restart hohu-admin
 ## 附录：相关文档
 
 - spec：`docs/specs/2026-07-02-ai-tool-gateway-design.md`（§1-21 完整设计）
-- 安全策略：`docs/SECURITY.md`（紧急停用 / 漏洞报告 / 部署 checklist）
+- 安全策略：`docs/AI-SECURITY.md`（紧急停用 / 漏洞报告 / 部署 checklist）
 - 原型：`docs/prototype/12-ai-chat-tool-call.html` / `13-ai-hitl-drawer.html` / `14-ai-clarification.html`
 - 静态检查：`scripts/check_ai_tools.py`（pre-commit + CI 双跑）
 - seed 脚本：`scripts/seed_ai_agents.py`（7 个内置 Agent）
