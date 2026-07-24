@@ -67,10 +67,12 @@ create_agent(agent_code) → 原有单 Agent 执行流（HITL / quota / audit �
 2. **后端路由**  
    - `AgentRouter` 从 `ai_agent` 表加载当前用户**有权限且已启用**的 Agent。
    - 先用 `routing_keywords` 做规则匹配：
-     - 唯一命中 → 返回该 `agent_code`。
+     - 唯一命中 → 直接返回该 `agent_code`。
      - 多命中 / 无命中 → 走 `LLMClassifier`。
-   - `LLMClassifier` 根据 Agent 的 `name`、`description`、`routing_keywords` 做选择；
-     - 若 top1 与 top2 置信度差距过小 → 返回 `clarification_required`。
+   - `LLMClassifier` 根据 Agent 的 `name`、`description`、`routing_keywords` 返回一个 `agent_code`。
+   - 若规则阶段已ambiguous，且 LLM 分类器也失败或返回无效值 → 返回 `clarification_required`。
+
+   > **延迟说明**：Supervisor 路由发生在 SSE 流开始之前，首字节会有额外延迟（规则阶段毫秒级，LLM 阶段取决于模型）。首期接受该延迟；后续如需优化可在 stream 开头 emit `routing` 事件提升感知。
 
 3. **执行**  
    用选中的 `agent_code` 走 `build_chat_deps` → `create_agent` → stream。最终 `agent_code` 写入 `ai_conversation.agent_code` 和 `ai_operation_log`。
@@ -101,24 +103,27 @@ def rule_route(agents: list[AiAgent], message: str) -> RouteResult:
 
 ### 5.2 LLM 阶段
 
+当规则阶段无法唯一命中时，调用 `LLMClassifier`。
+
 Prompt 模板（示例）：
 
 ```
 你是 HoHu AI 的 Agent 路由器。请根据用户问题，从以下 Agent 中选择最合适的一个。
-仅返回 JSON：{"agent_code": "...", "confidence": 0.95}
+仅返回 JSON：{"agent_code": "..."}
 
 可选 Agent：
 - shared（通用工具助手）: 文件解析、系统级统计等通用工具
-- user_mgmt（用户管理助手）: 用户/部门/角色查询与维护
+- user_mgmt（用户管理助手）: 用户/账号/登录相关查询与维护
 - role_mgmt（角色权限助手）: 角色 CRUD、菜单绑定
-- dept_mgmt（部门管理助手）: 部门树查询/维护
+- dept_mgmt（部门管理助手）: 部门树/组织架构查询与维护
 - job_mgmt（定时任务助手）: 定时任务查询/启停/改 cron
 
 用户问题：{message}
 ```
 
+- `LLMClassifier` 直接调用 `provider_service` 的 chat completion，**不经过 PydanticAI Agent**，避免触发 `tool_calls_limit` 和安全层。
 - 使用默认 LLM 模型（后续可加 `sys_config.ai:supervisor_model`）。
-- `confidence < 0.7` 或 top1 - top2 < 0.2 → 返回 `clarification_required`。
+- 返回结果必须能解析为有效 `agent_code`，否则视为失败。
 
 ### 5.3 失败降级
 
@@ -154,9 +159,27 @@ Prompt 模板（示例）：
 
 前端收到后弹出候选卡片，用户选择后发送下一条带 `agentCode` 的消息。
 
-### 6.3 可选新增 `GET /ai/agents`
+### 6.3 新增 `GET /ai/agents`
 
-返回当前用户**有权限且已启用**的 Agent 列表，供前端下拉框和 clarification 卡片使用。若前端 store 已具备该能力，可复用。
+返回当前用户**有权限且已启用**的 Agent 列表，供前端 Agent 下拉框和 clarification 卡片使用。
+
+响应示例：
+
+```json
+{
+  "code": 200,
+  "msg": "success",
+  "data": [
+    {"code": "shared", "name": "通用工具助手", "description": "..."},
+    {"code": "user_mgmt", "name": "用户管理助手", "description": "..."}
+  ]
+}
+```
+
+过滤逻辑：
+- `enabled = true`
+- 用户至少拥有该 Agent 下一个 tool 的 `required_perms`
+- `shared` Agent 特殊处理：无权限门槛，只要启用就可见（其 tool 仍按各自 `required_perms` 过滤）
 
 ----
 
@@ -173,6 +196,7 @@ class AiAgent(Base):
         JSONB,
         nullable=False,
         default=list,
+        server_default="[]",
         comment="Supervisor 规则路由关键词",
     )
 ```
@@ -180,13 +204,28 @@ class AiAgent(Base):
 - 已有数据迁移时填充空数组 `[]`。
 - 同步更新 `scripts/seed_ai_agents.py`，为每个内置 Agent 写入默认关键词。
 
-示例：
+示例（关键词避免跨 Agent 重叠，只保留强特征词）：
 
 ```python
 {
     "code": "job_mgmt",
     "name": "定时任务助手",
     "routing_keywords": ["定时任务", "cron", "调度", "job", "定时器"],
+}
+{
+    "code": "user_mgmt",
+    "name": "用户管理助手",
+    "routing_keywords": ["用户", "账号", "登录", "密码重置"],
+}
+{
+    "code": "dept_mgmt",
+    "name": "部门管理助手",
+    "routing_keywords": ["部门树", "组织架构", "部门层级"],
+}
+{
+    "code": "role_mgmt",
+    "name": "角色权限助手",
+    "routing_keywords": ["角色", "权限码", "菜单绑定"],
 }
 ```
 
