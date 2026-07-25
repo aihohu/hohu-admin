@@ -12,6 +12,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.ai.agents.chat_agent import create_chat_agent
+
+# spec §13 决策 15: 从 constants.py import 避免 service ↔ agents.supervisor 循环依赖.
+# 现有 `from app.modules.ai.service.chat_service import DEFAULT_AGENT_CODE` 调用方不破坏.
+from app.modules.ai.constants import DEFAULT_AGENT_CODE  # noqa: F401  re-export
 from app.modules.ai.core.context import ChatDeps
 from app.modules.ai.core.data_scope_loader import build_data_scope_context
 from app.modules.ai.models.agent import AiAgent
@@ -21,9 +25,6 @@ from app.modules.ai.service.conversation_service import conversation_service
 from app.modules.ai.service.provider_service import provider_service
 from app.modules.auth.permission_collect import collect_user_buttons
 from app.modules.system.models.user import User
-
-# MVP 单 Agent code（spec §2.5）；v1.5 启用 ≥2 业务 Agent 时改为请求参数选择
-DEFAULT_AGENT_CODE = "user_mgmt"
 
 
 class ChatService:
