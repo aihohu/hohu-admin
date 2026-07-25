@@ -60,6 +60,13 @@ def _reset_redis_client() -> None:
 
     quota_mod.redis_client = redis_module.redis_client
 
+    # Task 12+: audit_middleware.py 顶部 `from app.core.redis import redis_client` 也
+    # 绑死引用（_resolve_username 走 redis 缓存）。每个请求都过 middleware，loop
+    # 切换后若不刷新，会触发 "Event loop is closed" 让整个请求 500.
+    from app.middleware import audit_middleware as audit_mod  # noqa: PLC0415
+
+    audit_mod.redis_client = redis_module.redis_client
+
 
 @pytest.fixture
 async def db_session() -> AsyncSession:
@@ -196,3 +203,146 @@ def mock_visible_agents(monkeypatch):
     monkeypatch.setattr(agent_mod, "list_visible_agents", _fake_list)
     monkeypatch.setattr(vis_mod, "list_visible_agents", _fake_list)
     return candidates
+
+
+@pytest.fixture
+async def seed_test_message(auth_token) -> int:
+    """创建一条 assistant 消息（用 admin 用户），返回 message_id.
+
+    用例：routing-feedback 测试需要一条已存在的 ai_message 行.
+    独立 session 真实 commit；teardown 删除（避免污染其它测试）.
+    """
+    from sqlalchemy import delete, select
+
+    from app.core.id_generator import next_id
+    from app.db.session import AsyncSessionLocal
+    from app.modules.ai.models.agent import AiAgent
+    from app.modules.ai.models.conversation import AiConversation
+    from app.modules.ai.models.message import AiMessage
+    from app.modules.system.models.user import User
+
+    async with AsyncSessionLocal() as s:
+        user = (
+            await s.execute(select(User).where(User.user_name == "admin"))
+        ).scalar_one()
+        agent = (
+            await s.execute(select(AiAgent).where(AiAgent.code == "user_mgmt"))
+        ).scalar_one()
+
+        conv_id = next_id()
+        msg_id = next_id()
+        s.add(
+            AiConversation(
+                conversation_id=conv_id,
+                user_id=user.user_id,
+                title="test",
+                agent_code=agent.code,
+            )
+        )
+        s.add(
+            AiMessage(
+                message_id=msg_id,
+                conversation_id=conv_id,
+                role="assistant",
+                message_type="text",
+                content="test response",
+                agent_code=agent.code,
+            )
+        )
+        await s.commit()
+
+    yield msg_id
+
+    # teardown
+    async with AsyncSessionLocal() as s:
+        await s.execute(delete(AiMessage).where(AiMessage.message_id == msg_id))
+        await s.execute(
+            delete(AiConversation).where(AiConversation.conversation_id == conv_id)
+        )
+        await s.commit()
+
+    # 释放连接池：fixture 用独立 AsyncSessionLocal 真实 commit，
+    # pool 里的连接绑到当前 loop；下个测试 setup 前必须 dispose
+    # 避免 "Event loop is closed" race（参考 test_executor_integration.py:99-105）
+    try:
+        await engine.dispose()
+    except RuntimeError as e:
+        if "Event loop is closed" not in str(e):
+            raise
+
+
+@pytest.fixture
+async def seed_test_message_other_user(auth_token) -> int:
+    """创建一条属于另一个用户的 assistant 消息，返回 message_id.
+
+    用于 test_admin_can_feedback_other_users_message（spec §6.4: 超管可反馈他人消息）.
+    """
+    from sqlalchemy import delete, select
+
+    from app.core.id_generator import next_id
+    from app.db.session import AsyncSessionLocal
+    from app.modules.ai.models.agent import AiAgent
+    from app.modules.ai.models.conversation import AiConversation
+    from app.modules.ai.models.message import AiMessage
+    from app.modules.system.models.user import User
+
+    async with AsyncSessionLocal() as s:
+        other = (
+            (await s.execute(select(User).where(User.user_name != "admin").limit(1)))
+            .scalars()
+            .first()
+        )
+        if other is None:
+            # User 模型字段是 hashed_password（不是 password），用 get_password_hash 避免后续 verify 抛 bcrypt 异常
+            from app.core.security import get_password_hash  # noqa: PLC0415
+
+            other = User(
+                user_id=next_id(),
+                user_name=f"other_{next_id()}",
+                hashed_password=get_password_hash("x"),
+                status="1",
+            )
+            s.add(other)
+            await s.flush()
+
+        agent = (
+            await s.execute(select(AiAgent).where(AiAgent.code == "user_mgmt"))
+        ).scalar_one()
+
+        conv_id = next_id()
+        msg_id = next_id()
+        s.add(
+            AiConversation(
+                conversation_id=conv_id,
+                user_id=other.user_id,
+                title="other",
+                agent_code=agent.code,
+            )
+        )
+        s.add(
+            AiMessage(
+                message_id=msg_id,
+                conversation_id=conv_id,
+                role="assistant",
+                message_type="text",
+                content="other response",
+                agent_code=agent.code,
+            )
+        )
+        await s.commit()
+
+    yield msg_id
+
+    async with AsyncSessionLocal() as s:
+        await s.execute(delete(AiMessage).where(AiMessage.message_id == msg_id))
+        await s.execute(
+            delete(AiConversation).where(AiConversation.conversation_id == conv_id)
+        )
+        await s.commit()
+
+    # 释放连接池：同 seed_test_message
+    try:
+        await engine.dispose()
+    except RuntimeError as e:
+        if "Event loop is closed" not in str(e):
+            raise
