@@ -43,10 +43,16 @@ class ChatService:
         _user_id: int,
         content: str,
         parts: list[dict] | None = None,
+        agent_code: str | None = None,
     ):
-        """保存用户消息"""
+        """保存用户消息（spec §4.1 step 5: 透传 agent_code）."""
         await conversation_service.save_message(
-            db, conversation_id, role="user", content=content, parts=parts
+            db,
+            conversation_id,
+            role="user",
+            content=content,
+            parts=parts,
+            agent_code=agent_code,
         )
 
     async def save_assistant_message(
@@ -57,6 +63,7 @@ class ChatService:
         tokens_input: int | None = None,
         tokens_output: int | None = None,
         tool_calls: list[dict] | None = None,
+        agent_code: str | None = None,
     ):
         """保存 AI 响应消息
 
@@ -65,6 +72,7 @@ class ChatService:
                         格式 [{"tool": ..., "tool_call_id": ..., "args": ..., "ok": ..., ...}]
                         存到 ai_message.tool_calls JSON 字段，前端 reload 会话时还原
                         streamEvents 让用户重连后能看到 tool-call 卡片。
+            agent_code: spec §4.1 step 5 透传到 ai_message.agent_code
         """
         await conversation_service.save_message(
             db,
@@ -74,6 +82,7 @@ class ChatService:
             tokens_input=tokens_input,
             tokens_output=tokens_output,
             tool_calls=tool_calls,
+            agent_code=agent_code,
         )
 
     async def create_agent(

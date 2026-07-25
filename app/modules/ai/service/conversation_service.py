@@ -107,9 +107,12 @@ class ConversationService:
         tokens_output: int | None = None,
         parts: list[dict] | None = None,
         tool_calls: list[dict] | None = None,
+        agent_code: str | None = None,
     ) -> AiMessage:
         """保存一条消息
 
+        spec §4.1 step 5 / §7.1b: agent_code 透传到 ai_message.agent_code
+        （按消息粒度记录处理 Agent，让历史会话也能还原）.
         spec §7.4: 用户输入保存前先 redact_secrets，防 LLM 上下文回灌
         修订 BUG-FE-18: assistant 消息含 tool_calls 时存 JSON，前端重连还原卡片
         """
@@ -125,6 +128,7 @@ class ConversationService:
             tokens_output=tokens_output,
             parts=parts,
             tool_calls=tool_calls,
+            agent_code=agent_code,
         )
         db.add(msg)
         return msg

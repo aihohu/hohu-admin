@@ -222,6 +222,10 @@ async def chat(
             status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
         )
 
+    # v1.5+: 前端传 agentCode 切换助手（默认 user_mgmt）
+    # 提前解析：save_user_message（spec §4.1 step 5）和 build_chat_deps 都要用
+    agent_code = body.get("agentCode") or body.get("agent_code")
+
     # 保存用户消息
     if conversation_id and (user_message or user_parts):
         # v1.5+ SR-25: 持久化优先用 display 版（不含 file_id 注入文本）
@@ -235,6 +239,7 @@ async def chat(
             _current_user.user_id,
             persist_content,
             parts=persist_parts,
+            agent_code=agent_code,
         )
         await db.commit()
 
@@ -256,8 +261,6 @@ async def chat(
         conv.model_name = model_name
 
     # 构造完整 ChatDeps（spec §4.6 + §17.2）
-    # v1.5+: 前端传 agentCode 切换助手（默认 user_mgmt）
-    agent_code = body.get("agentCode") or body.get("agent_code")
     deps = await chat_service.build_chat_deps(db, _current_user, agent_code=agent_code)
     deps.conversation_id = conversation_id
     # §11.4: 注入 client_ip 给 executor（用于鉴权拒绝时的 IP 级拉黑计数）
@@ -581,6 +584,7 @@ async def chat(
                     saved_conversation_id,
                     content=collected_text,
                     tool_calls=collected_tool_calls if collected_tool_calls else None,
+                    agent_code=deps.agent.code if deps.agent else None,
                 )
                 await saved_db.commit()
             except Exception:

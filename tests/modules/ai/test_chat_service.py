@@ -124,3 +124,92 @@ class TestAttachTraceToConversation:
         await chat_service.attach_trace_to_conversation(
             db_session, 99999999, "user_mgmt", "tr_abc"
         )
+
+
+async def _add_user(db: AsyncSession, *, user_id: int, user_name: str) -> None:
+    """建用户（满足 ai_conversation.user_id 外键）"""
+    from app.modules.system.models.user import User  # noqa: PLC0415
+
+    db.add(
+        User(
+            user_id=user_id,
+            user_name=user_name,
+            nickname=user_name,
+            hashed_password="$2b$12$dummy",
+            status="1",
+        )
+    )
+    await db.flush()
+
+
+@pytest.mark.asyncio
+async def test_save_user_message_writes_agent_code(db_session):
+    """spec §4.1 step 5: save_user_message 透传 agent_code 到 ai_message.agent_code."""
+    from sqlalchemy import select
+
+    from app.core.id_generator import next_id
+    from app.modules.ai.models.conversation import AiConversation
+    from app.modules.ai.models.message import AiMessage
+    from app.modules.ai.service.chat_service import chat_service
+
+    await _add_user(db_session, user_id=9001, user_name="ai_test_u1")
+    conv = AiConversation(
+        conversation_id=next_id(),
+        user_id=9001,
+        title="test",
+    )
+    db_session.add(conv)
+    await db_session.flush()
+
+    await chat_service.save_user_message(
+        db_session,
+        conv.conversation_id,
+        9001,
+        "hello",
+        agent_code="user_mgmt",
+    )
+    await db_session.flush()
+
+    msg = (
+        await db_session.execute(
+            select(AiMessage).where(
+                AiMessage.conversation_id == conv.conversation_id,
+                AiMessage.role == "user",
+            )
+        )
+    ).scalar_one()
+    assert msg.agent_code == "user_mgmt"
+
+
+@pytest.mark.asyncio
+async def test_save_assistant_message_writes_agent_code(db_session):
+    """spec §4.1 step 5: save_assistant_message 透传 agent_code."""
+    from sqlalchemy import select
+
+    from app.core.id_generator import next_id
+    from app.modules.ai.models.conversation import AiConversation
+    from app.modules.ai.models.message import AiMessage
+    from app.modules.ai.service.chat_service import chat_service
+
+    await _add_user(db_session, user_id=9002, user_name="ai_test_u2")
+    conv = AiConversation(conversation_id=next_id(), user_id=9002, title="t")
+    db_session.add(conv)
+    await db_session.flush()
+
+    await chat_service.save_assistant_message(
+        db_session,
+        conv.conversation_id,
+        content="hi",
+        agent_code="role_mgmt",
+    )
+    await db_session.flush()
+
+    msg = (
+        await db_session.execute(
+            select(AiMessage).where(
+                AiMessage.conversation_id == conv.conversation_id,
+                AiMessage.role == "assistant",
+            )
+        )
+    ).scalar_one()
+    assert msg.agent_code == "role_mgmt"
