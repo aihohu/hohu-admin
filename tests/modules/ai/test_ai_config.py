@@ -234,3 +234,74 @@ async def test_routing_legacy_null_mode_default_false(db_session):
             db_session, "ai:routing_legacy_null_mode", default=False
         )
     assert result is False
+
+
+class TestGetAiConfigBoolParsing:
+    """spec §15.3 / §9: get_ai_config_bool 解析矩阵 + 默认值往返"""
+
+    async def test_parses_true_variants(self, db_session) -> None:
+        from app.modules.ai.agents.safety import ai_config as cfg_mod
+        from app.modules.ai.agents.safety.ai_config import get_ai_config_bool
+
+        for raw in ("true", "True", "TRUE", "tRuE", "1", "yes", "YES", "  true  "):
+            cfg_mod._cache.clear()
+            with patch.object(
+                cfg_mod.config_service, "get_value", AsyncMock(return_value=raw)
+            ):
+                result = await get_ai_config_bool(
+                    db_session, "ai:test:bool", default=False
+                )
+            assert result is True, f"raw={raw!r} should parse to True"
+
+    async def test_parses_false_variants(self, db_session) -> None:
+        from app.modules.ai.agents.safety import ai_config as cfg_mod
+        from app.modules.ai.agents.safety.ai_config import get_ai_config_bool
+
+        for raw in ("false", "False", "0", "no", "NO", "off"):
+            cfg_mod._cache.clear()
+            with patch.object(
+                cfg_mod.config_service, "get_value", AsyncMock(return_value=raw)
+            ):
+                result = await get_ai_config_bool(
+                    db_session, "ai:test:bool", default=True
+                )
+            assert result is False, f"raw={raw!r} should parse to False"
+
+    async def test_invalid_value_returns_false_not_default(self, db_session) -> None:
+        """spec §15.3: 非法值返回 False（不 fallback default）— feature flag 安全侧倒"""
+        from app.modules.ai.agents.safety import ai_config as cfg_mod
+        from app.modules.ai.agents.safety.ai_config import get_ai_config_bool
+
+        for raw in ("maybe", "2", "yep", "null", "{", '"'):
+            cfg_mod._cache.clear()
+            with patch.object(
+                cfg_mod.config_service, "get_value", AsyncMock(return_value=raw)
+            ):
+                result = await get_ai_config_bool(
+                    db_session, "ai:test:bool", default=True
+                )
+            assert result is False, (
+                f"raw={raw!r} should return False (not default=True)"
+            )
+
+    async def test_sys_config_missing_falls_back_to_default(self, db_session) -> None:
+        """sys_config 返回 None / 空字符串 → 走 default（通过 str round-trip）"""
+        from app.modules.ai.agents.safety import ai_config as cfg_mod
+        from app.modules.ai.agents.safety.ai_config import get_ai_config_bool
+
+        for raw in (None, ""):
+            cfg_mod._cache.clear()
+            with patch.object(
+                cfg_mod.config_service, "get_value", AsyncMock(return_value=raw)
+            ):
+                result_true = await get_ai_config_bool(
+                    db_session, "ai:test:bool_t", default=True
+                )
+                cfg_mod._cache.clear()
+                result_false = await get_ai_config_bool(
+                    db_session, "ai:test:bool_f", default=False
+                )
+            assert result_true is True, f"raw={raw!r}, default=True should round-trip"
+            assert result_false is False, (
+                f"raw={raw!r}, default=False should round-trip"
+            )

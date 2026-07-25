@@ -150,8 +150,12 @@ async def get_ai_config_bool(
 ) -> bool:
     """读 bool 配置（缓存 60s）.
 
-    接受 'true' / 'false' / '1' / '0' / 'yes' / 'no'（大小写不敏感）.
-    其它非法值 → fallback default（与 get_ai_config_int 同样的容错策略）.
+    接受 'true' / '1' / 'yes'（大小写不敏感、自动 strip）→ True.
+    其它值（含 'false' / '0' / 'no' / 非法字符串）→ False.
+    sys_config 无值时 fallback default（通过 str(default).lower() 往返）.
+
+    注意：与 get_ai_config_int 不同，非法值不 fallback default，而是返回 False
+    （feature flag 安全侧倒：垃圾值 → 关闭功能）.
     """
     raw = await get_ai_config_str(
         db, key, default=str(default).lower(), force_refresh=force_refresh
