@@ -198,8 +198,20 @@ async def resume_chat(
     )
     log_id = log.log_id if log else None
 
-    deps = await chat_service.build_chat_deps(db, current_user, agent_code=None)
+    deps = await chat_service.build_chat_deps(
+        db,
+        current_user,
+        agent_code=None,
+        conversation_id=pending.conversation_id,
+    )
     deps.conversation_id = pending.conversation_id
+    # spec §5.3: build_chat_deps 内部已调 stickiness；如果走 supervisor 路径
+    # 导致 deps.agent 为 None（如新会话 / conv_agent_code 失效），resume 流程
+    # 不需要重新路由（tool 已经选定），直接 fallback 到 DEFAULT_AGENT_CODE.
+    if deps.agent is None:
+        from app.modules.ai.constants import DEFAULT_AGENT_CODE  # noqa: PLC0415
+
+        await chat_service.attach_agent_to_deps(deps, DEFAULT_AGENT_CODE)
 
     # 6. 构造 SSE 流（在 finally 释放锁）
     resumed_event = _build_resumed_event(confirmation_id, pending)

@@ -10,6 +10,8 @@ session 绑定到一个手动管理的外层事务；session.commit() 只提交 
 outer rollback 兜底。
 """
 
+# ruff: noqa: ARG001, PLC0415, UP017  test fixture 占位参数 + 函数内 import（避免顶层副作用）
+
 import pytest
 import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,6 +41,24 @@ def _reset_redis_client() -> None:
     from app.modules.ai.agents.gateway import executor as exec_mod  # noqa: PLC0415
 
     exec_mod.redis_client = redis_module.redis_client
+
+    # Task 11+: 刷新 auth.service.redis_client 引用 —— /ai/chat 经 get_current_user
+    # dependency 调 _is_blacklisted（redis_client.get token blacklist）。若不刷新，
+    # 跨测试 loop 关闭后此引用仍指向上轮 loop 的客户端，触发 "Event loop is closed".
+    from app.modules.auth import service as auth_service  # noqa: PLC0415
+
+    auth_service.redis_client = redis_module.redis_client
+
+    # Task 11+: chat.py 顶部 `from app.core.redis import redis_client` 也绑死引用，
+    # is_ip_blacklisted / record_injection_hit_conversation 用的是这个引用.
+    from app.modules.ai.api import chat as chat_mod  # noqa: PLC0415
+
+    chat_mod.redis_client = redis_module.redis_client
+
+    # Task 11+: supervisor.quota 模块也顶部 import redis_client（spec §9 配额检查）.
+    from app.modules.ai.agents.supervisor import quota as quota_mod  # noqa: PLC0415
+
+    quota_mod.redis_client = redis_module.redis_client
 
 
 @pytest.fixture
@@ -98,3 +118,81 @@ async def db_session() -> AsyncSession:
     except RuntimeError as e:
         if "Event loop is closed" not in str(e):
             raise
+
+
+@pytest.fixture
+async def auth_token(db_session) -> str:
+    """构造一个合法 JWT（不通过 /auth/login，直接 jwt.encode，参考 test_refresh_token.py:26）.
+
+    使用 init_db.py 创建的 admin 用户（user_name='admin'，超管）.
+    CI 在 pytest 前跑 `python scripts/init_db.py`（.github/workflows/ci.yml:92），
+    本地 dev 同样假设已 init（README 标准步骤）.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from jose import jwt
+    from sqlalchemy import select
+
+    from app.core.config import settings
+    from app.modules.system.models.user import User
+
+    user = (
+        await db_session.execute(select(User).where(User.user_name == "admin"))
+    ).scalar_one()
+    exp = datetime.now(timezone.utc) + timedelta(hours=1)
+    payload = {
+        "exp": exp,
+        "sub": str(user.user_id),
+        "user_id": user.user_id,
+        "user_name": user.user_name,
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def _make_agent(code: str, name: str, description: str = "", display_order: int = 0):
+    """构造内存 AiAgent-like 对象（不查 DB）."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        code=code,
+        name=name,
+        description=description or f"desc for {code}",
+        display_order=display_order,
+        agent_id=abs(hash(code)) & 0xFFFFFFFF,  # 占位 ID，仅用于 dedup
+        enabled=True,
+    )
+
+
+@pytest.fixture
+def mock_visible_agents(monkeypatch):
+    """spec §6.3 测试前置：monkeypatch `list_visible_agents` 返回内存对象.
+
+    比 UPDATE ai_agent SET enabled=true 更优：
+    - 零 DB 写入，无污染（CLAUDE.md 硬规则 #7 测试隔离）
+    - 无 teardown 责任（monkeypatch 自动还原）
+    - 无 xdist 并发竞态
+
+    候选 Agent：shared + 6 业务（与 seed_ai_agents.py 一致）.
+
+    Patches 两处引用：api/agent.py（GET /ai/agents）+ service/agent_visibility.py
+    （chat.py + routing_feedback_service.py 调用）.
+    """
+    from app.modules.ai.api import agent as agent_mod
+    from app.modules.ai.service import agent_visibility as vis_mod
+
+    candidates = [
+        _make_agent("shared", "通用工具助手", "fallback agent", 1),
+        _make_agent("user_mgmt", "用户管理助手", "用户 CRUD", 2),
+        _make_agent("role_mgmt", "角色权限助手", "角色 CRUD", 3),
+        _make_agent("config_mgmt", "系统配置助手", "配置查询", 4),
+        _make_agent("dept_mgmt", "部门管理助手", "部门树", 5),
+        _make_agent("provider_mgmt", "AI Provider 助手", "Provider 配置", 6),
+        _make_agent("job_mgmt", "定时任务助手", "cron job", 7),
+    ]
+
+    async def _fake_list(db, user):
+        return candidates
+
+    monkeypatch.setattr(agent_mod, "list_visible_agents", _fake_list)
+    monkeypatch.setattr(vis_mod, "list_visible_agents", _fake_list)
+    return candidates
