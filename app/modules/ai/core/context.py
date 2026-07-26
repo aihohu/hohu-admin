@@ -66,8 +66,13 @@ class ChatDeps:
     """chat endpoint 的 session，不暴露给 tool（tool 用独立 tool_db）"""
 
     data_scope: DataScopeContext
-    agent: "AiAgent"
-    """MVP：单会话绑定单 Agent；平台支持多 Agent 注册（§10.1）"""
+    agent: "AiAgent | None"
+    """当前会话绑定的 Agent。
+
+    None 表示 supervisor 路由模式下 build_chat_deps 未预加载（run_supervisor=True 时
+    由 chat.py 路由块通过 attach_agent_to_deps 注入）。下游访问 deps.agent.code 必须
+    先 None 检查（参考 chat.py:654 / resume.py:211）。
+    """
 
     trace_id: str
     """必填非空，build_tool_context 时断言校验，防 "" 漏到 DB 索引"""
