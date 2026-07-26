@@ -5,6 +5,9 @@ spec §17.2 重写 + §8.1 流式协议：
   - 自定义事件（tool_call_started / tool_call_result / confirmation_required / ai_error / done）
     走 `data: {...}\n\n` 格式，由 ChatDeps.signal_event 注入
   - ChatDeps.signal_event 是 asyncio.Queue.put 的封装
+
+spec §4-§5（Task 11）: 顶层生成 trace_id + safety 短路统一写 routing_log +
+Supervisor 路由块插入（safety 后、attach_trace 前）.
 """
 
 import asyncio
@@ -12,6 +15,7 @@ import base64
 import ipaddress
 import json
 import logging
+import uuid
 from http import HTTPStatus
 from pathlib import Path
 from urllib.parse import urlparse
@@ -149,6 +153,47 @@ def _collect_text_delta(sse_frame: str, collected: list[str]) -> None:
         collected.append(ev["delta"])
 
 
+async def _emit_safety_blocked(
+    db: AsyncSession,
+    *,
+    trace_id: str,
+    user_id: int,
+    conversation_id: int | None,
+    user_message: str,
+    error_code: str,
+    error_msg: str,
+    accept: str = SSE_CONTENT_TYPE,
+) -> StreamingResponse:
+    """spec §13 决策 14: safety 短路统一写 routing_log + emit AiErrorEvent.
+
+    用于 keyword / topic / url 三个硬短路（injection 不是短路，单独处理）.
+    所有 safety 短路必须由此 helper 处理，保证审计日志不断裂（spec §13 决策 14）.
+    """
+    from app.modules.ai.service.routing_log_service import (  # noqa: PLC0415
+        routing_log_service,
+    )
+
+    await routing_log_service.write_log(
+        db,
+        trace_id=trace_id,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        input_message=user_message or "",  # 防 None
+        candidates=[],
+        llm_choice=None,
+        final_agent=None,
+        reason="safety_blocked",
+        latency_ms=0,
+    )
+    await db.commit()
+
+    async def _stream():
+        yield _format_sse_chunk(AiErrorEvent(error_code=error_code, message=error_msg))
+        yield _format_sse_chunk(DoneEvent())
+
+    return StreamingResponse(_stream(), media_type=accept)
+
+
 router = APIRouter()
 
 
@@ -163,7 +208,14 @@ async def chat(
     spec §17.2 + §8.1：构造完整 ChatDeps（含 data_scope / perms / agent /
     trace_id / conversation_id / signal_event），合并 Vercel 原生 text-delta
     与自定义事件（tool_call_started / tool_call_result / confirmation_required）。
+
+    spec §4-§5（Task 11）: 顶层生成 trace_id，safety 短路统一写 routing_log，
+    safety 通过后调 Supervisor 路由（如启用），最后才持久化 user 消息（避免孤儿）.
     """
+    # spec §13 决策 14: trace_id 在所有 audit log（routing_log / operation_log）共用，
+    # 提前生成给 safety 短路 / build_chat_deps / attach_trace_to_conversation 复用.
+    trace_id = f"tr_{uuid.uuid4().hex[:16]}"
+
     # 读取原始 body（只能读一次）
     raw_body = await request.body()
 
@@ -222,21 +274,12 @@ async def chat(
             status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
         )
 
-    # 保存用户消息
-    if conversation_id and (user_message or user_parts):
-        # v1.5+ SR-25: 持久化优先用 display 版（不含 file_id 注入文本）
-        persist_content = (
-            display_content if display_content is not None else user_message
-        )
-        persist_parts = display_parts if display_parts is not None else user_parts
-        await chat_service.save_user_message(
-            db,
-            conversation_id,
-            _current_user.user_id,
-            persist_content,
-            parts=persist_parts,
-        )
-        await db.commit()
+    # v1.5+: 前端传 agentCode 切换助手（默认 user_mgmt）
+    # 提前解析：build_chat_deps 内部 stickiness + 后续 save_user_message 都要用
+    agent_code = body.get("agentCode") or body.get("agent_code")
+
+    # spec §13 决策 13: user 消息持久化推迟到路由块成功后（避免 safety / clarification
+    # 路径产生孤儿消息）；早 save_user_message 块已移除.
 
     # 解析模型选择
     conv = None
@@ -255,10 +298,55 @@ async def chat(
     if conv and model_name and conv.model_name != model_name:
         conv.model_name = model_name
 
-    # 构造完整 ChatDeps（spec §4.6 + §17.2）
-    # v1.5+: 前端传 agentCode 切换助手（默认 user_mgmt）
-    agent_code = body.get("agentCode") or body.get("agent_code")
-    deps = await chat_service.build_chat_deps(db, _current_user, agent_code=agent_code)
+    # 构造完整 ChatDeps（spec §4.6 + §17.2 + §5.3 粘滞）
+    # spec §13 决策 15: agent_code 找不到 → 不让 ValueError 透到 FastAPI 默认 500，
+    # 改为 emit AI_ROUTING_FAILED（spec §8）+ 写 routing_log.
+    try:
+        deps = await chat_service.build_chat_deps(
+            db,
+            _current_user,
+            agent_code=agent_code,
+            trace_id=trace_id,
+            conversation_id=conversation_id,
+        )
+    except ValueError as exc:
+        from app.modules.ai.service.routing_log_service import (  # noqa: PLC0415
+            routing_log_service,
+        )
+
+        # 捕获异常消息到本地变量，避免 generator 函数体内 e 退出 except 后被 deref.
+        err_msg = str(exc)
+        logger.warning(
+            "agent load failed",
+            extra={"error": err_msg, "trace_id": trace_id},
+        )
+        await routing_log_service.write_log(
+            db,
+            trace_id=trace_id,
+            user_id=_current_user.user_id,
+            conversation_id=conversation_id,
+            input_message=user_message or "",
+            candidates=[],
+            llm_choice=None,
+            final_agent=None,
+            reason="agent_load_failed",
+            latency_ms=0,
+        )
+        await db.commit()
+
+        accept = request.headers.get("accept", SSE_CONTENT_TYPE)
+
+        async def _agent_load_failed_stream():
+            yield _format_sse_chunk(
+                AiErrorEvent(
+                    error_code="AI_ROUTING_FAILED",
+                    message=f"Agent 加载失败：{err_msg}",
+                )
+            )
+            yield _format_sse_chunk(DoneEvent())
+
+        return StreamingResponse(_agent_load_failed_stream(), media_type=accept)
+
     deps.conversation_id = conversation_id
     # §11.4: 注入 client_ip 给 executor（用于鉴权拒绝时的 IP 级拉黑计数）
     deps.client_ip = request.client.host if request.client else None
@@ -321,17 +409,16 @@ async def chat(
             from app.modules.ai.metrics import record_security_event  # noqa: PLC0415
 
             record_security_event("keyword")
-
-            async def _blocked_stream():
-                yield _format_sse_chunk(
-                    AiErrorEvent(
-                        error_code="AI_KEYWORD_BLOCKED",
-                        message="消息含敏感词，已被管理员配置拦截，请修改后再试",
-                    )
-                )
-                yield _format_sse_chunk(DoneEvent())
-
-            return StreamingResponse(_blocked_stream(), media_type=SSE_CONTENT_TYPE)
+            # spec §13 决策 14: safety 短路统一写 routing_log（reason='safety_blocked'）
+            return await _emit_safety_blocked(
+                db,
+                trace_id=trace_id,
+                user_id=_current_user.user_id,
+                conversation_id=conversation_id,
+                user_message=user_message,
+                error_code="AI_KEYWORD_BLOCKED",
+                error_msg="消息含敏感词，已被管理员配置拦截，请修改后再试",
+            )
 
     # §11.2 v1.5+ SR-23 forbidden_topics：主题级黑名单（政治 / 宗教 / 竞品对比等）
     topics = await load_forbidden_topics(db)
@@ -349,17 +436,15 @@ async def chat(
             from app.modules.ai.metrics import record_security_event  # noqa: PLC0415
 
             record_security_event("forbidden_topic")
-
-            async def _blocked_stream():
-                yield _format_sse_chunk(
-                    AiErrorEvent(
-                        error_code="AI_FORBIDDEN_TOPIC",
-                        message="消息涉及禁讨论主题，请修改后再试",
-                    )
-                )
-                yield _format_sse_chunk(DoneEvent())
-
-            return StreamingResponse(_blocked_stream(), media_type=SSE_CONTENT_TYPE)
+            return await _emit_safety_blocked(
+                db,
+                trace_id=trace_id,
+                user_id=_current_user.user_id,
+                conversation_id=conversation_id,
+                user_message=user_message,
+                error_code="AI_FORBIDDEN_TOPIC",
+                error_msg="消息涉及禁讨论主题，请修改后再试",
+            )
 
     # §11.2 v1.5+ SR-23 forbidden_urls：URL 域名黑名单（竞品 / 恶意网站）
     url_blocklist = await load_forbidden_urls(db)
@@ -377,17 +462,15 @@ async def chat(
             from app.modules.ai.metrics import record_security_event  # noqa: PLC0415
 
             record_security_event("forbidden_url")
-
-            async def _blocked_stream():
-                yield _format_sse_chunk(
-                    AiErrorEvent(
-                        error_code="AI_FORBIDDEN_URL",
-                        message="消息含禁访问的链接，请删除后重试",
-                    )
-                )
-                yield _format_sse_chunk(DoneEvent())
-
-            return StreamingResponse(_blocked_stream(), media_type=SSE_CONTENT_TYPE)
+            return await _emit_safety_blocked(
+                db,
+                trace_id=trace_id,
+                user_id=_current_user.user_id,
+                conversation_id=conversation_id,
+                user_message=user_message,
+                error_code="AI_FORBIDDEN_URL",
+                error_msg="消息含禁访问的链接，请删除后重试",
+            )
 
     # §11.1 prompt injection 检测（修订 S-16：跨轮持久化到 conversation 级）
     # 流程：
@@ -414,6 +497,178 @@ async def chat(
             },
         )
 
+    # ============================================================
+    # spec §5: Supervisor 路由块（仅在 safety 通过后）
+    # ============================================================
+    # 不重调 stickiness（build_chat_deps 内已调，挂在 deps.sticky_decision）
+    # 路由块必须严格在 attach_trace_to_conversation 之前 —— 否则 deps.agent.code
+    # 会 AttributeError（deps.agent 在 run_supervisor=True 时为 None，由本块注入）.
+    import time  # noqa: PLC0415
+
+    from app.modules.ai.agents.hitl.events import (  # noqa: PLC0415
+        ClarificationRequiredEvent,
+    )
+    from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
+        get_ai_config_bool,
+    )
+    from app.modules.ai.agents.supervisor.quota import (  # noqa: PLC0415
+        check_supervisor_quota,
+        increment_daily_count,
+    )
+    from app.modules.ai.agents.supervisor.router import agent_router  # noqa: PLC0415
+    from app.modules.ai.constants import DEFAULT_AGENT_CODE  # noqa: PLC0415
+    from app.modules.ai.service.agent_visibility import (  # noqa: PLC0415
+        list_visible_agents,
+    )
+    from app.modules.ai.service.routing_log_service import (  # noqa: PLC0415
+        routing_log_service,
+    )
+
+    accept = request.headers.get("accept", SSE_CONTENT_TYPE)
+
+    stick_decision = deps.sticky_decision
+    supervisor_enabled = await get_ai_config_bool(
+        db, "ai:supervisor_enabled", default=True
+    )
+
+    candidates: list = []
+    final_agent_code: str | None = stick_decision.agent_code if stick_decision else None
+    route_reason: str = stick_decision.reason if stick_decision else "no_decision"
+    # spec §7.2: llm_choice 是 LLM 解析后的 agent_code（仅 supervisor 成功路径有值），
+    # 区别于 final_agent（粘滞 / 手动 / 路由三条路径都可能产生 final_agent）.
+    llm_choice: str | None = None
+    clarification_payload: dict | None = None
+    routing_failed = False
+    routing_latency_ms = 0
+
+    if stick_decision and stick_decision.run_supervisor:
+        if not supervisor_enabled:
+            # spec §15.3: supervisor 关闭 → 用 DEFAULT_AGENT_CODE 旧行为
+            route_reason = "supervisor_disabled"
+            final_agent_code = DEFAULT_AGENT_CODE
+        elif deps.injection_hit:
+            # spec §13 决策 7: injection 命中 → 不调 supervisor LLM（防跨 LLM 污染）
+            route_reason = "injection_blocked_from_supervisor"
+            final_agent_code = DEFAULT_AGENT_CODE
+        elif not user_message or not user_message.strip():
+            # 兜底：空消息不进 supervisor（防 LLM 乱选）
+            route_reason = "empty_message"
+            final_agent_code = DEFAULT_AGENT_CODE
+        else:
+            candidates = await list_visible_agents(db, _current_user)
+            if not candidates:
+                routing_failed = True
+                route_reason = "no_candidates"
+            else:
+                quota = await check_supervisor_quota(db, user_id=_current_user.user_id)
+                if not quota.allowed:
+                    route_reason = "quota_exceeded"
+                    clarification_payload = {
+                        "candidates": tuple(
+                            {
+                                "code": c.code,
+                                "name": c.name,
+                                "description": c.description,
+                            }
+                            for c in candidates
+                        ),
+                        "message": "AI 路由配额已用尽，请手动选择 Agent",
+                    }
+                else:
+                    # spec §9: increment-before-call 防并发逃配额.
+                    # 权衡：LLM 抖动 / 网络超时也会扣用户配额（不 refund）.
+                    # 因为 refund 会引入 race（攻击者故意触发 timeout 反复退额），
+                    # 选择"宁错杀不放过"。运维监控 routing_log.reason='llm_call_failed'
+                    # 比例异常时调高 sys_config.ai:supervisor_daily_limit.
+                    await increment_daily_count(redis_client, _current_user.user_id)
+                    start = time.monotonic()
+                    result = await agent_router.route(db, user_message, candidates)
+                    routing_latency_ms = int((time.monotonic() - start) * 1000)
+
+                    if result.failed:
+                        routing_failed = True
+                        route_reason = result.reason
+                    elif result.clarification:
+                        clarification_payload = {
+                            "candidates": tuple(
+                                {
+                                    "code": c.code,
+                                    "name": c.name,
+                                    "description": c.description,
+                                }
+                                for c in result.candidates
+                            ),
+                            "message": "请确认你想咨询哪类问题",
+                        }
+                        route_reason = result.reason
+                    else:
+                        final_agent_code = result.agent_code
+                        llm_choice = result.agent_code  # spec §7.2 LLM 解析结果
+                        route_reason = result.reason
+
+    # 写 audit log（spec §13 决策 14: 覆盖所有路径）
+    # input_message 用 `or ""` 兜底：边界防御统一为空串写入 HMAC hash.
+    # 注：success path 在此处立即 commit；clarification / failed 路径在 emit stream 前 commit.
+    await routing_log_service.write_log(
+        db,
+        trace_id=trace_id,
+        user_id=_current_user.user_id,
+        conversation_id=conversation_id,
+        input_message=user_message or "",
+        candidates=candidates,
+        llm_choice=llm_choice,
+        final_agent=final_agent_code,
+        reason=route_reason,
+        latency_ms=routing_latency_ms,
+    )
+    # success path 立即提交，避免后续 attach_trace_to_conversation 失败时丢日志
+    if not routing_failed and clarification_payload is None:
+        await db.commit()
+
+    # AI_ROUTING_FAILED → emit error + 结束（user 消息不落库）
+    if routing_failed:
+        await db.commit()
+
+        async def _routing_failed_stream():
+            yield _format_sse_chunk(
+                AiErrorEvent(
+                    error_code="AI_ROUTING_FAILED",
+                    message="路由失败，请重试或手动选择 Agent",
+                )
+            )
+            yield _format_sse_chunk(DoneEvent())
+
+        return StreamingResponse(_routing_failed_stream(), media_type=accept)
+
+    # clarification → emit + 结束（spec §13 决策 11: user 消息不落库）
+    if clarification_payload is not None:
+        await db.commit()
+
+        async def _clarification_stream():
+            yield _format_sse_chunk(ClarificationRequiredEvent(**clarification_payload))
+            yield _format_sse_chunk(DoneEvent())
+
+        return StreamingResponse(_clarification_stream(), media_type=accept)
+
+    # 路由成功 / 粘滞 / 手动 → 注入 agent 到 deps（如还是 None）
+    if deps.agent is None and final_agent_code:
+        await chat_service.attach_agent_to_deps(deps, final_agent_code)
+
+    # 现在才持久化 user 消息（spec §13 决策 13: 避免 safety / clarification 孤儿消息）
+    if conversation_id and (user_message or user_parts):
+        persist_content = (
+            display_content if display_content is not None else user_message
+        )
+        persist_parts = display_parts if display_parts is not None else user_parts
+        await chat_service.save_user_message(
+            db,
+            conversation_id,
+            _current_user.user_id,
+            persist_content,
+            parts=persist_parts,
+            agent_code=deps.agent.code,
+        )
+
     # 把 trace_id + agent_code 写到 ai_conversation（spec §4.5）
     await chat_service.attach_trace_to_conversation(
         db, conversation_id, deps.agent.code, deps.trace_id
@@ -427,7 +682,7 @@ async def chat(
 
     # 流式响应：自定义事件队列 + PydanticAI stream 并发合并（spec §8.1）
     # spec §11: usage_limits 兜底防 agent 无限循环（tool_calls_limit=5 / request_limit=10）
-    accept = request.headers.get("accept", SSE_CONTENT_TYPE)
+    # 注：accept 已在路由块前定义（spec §13 决策 14：safety / 路由短路复用）
     adapter = VercelAIAdapter(agent=agent, run_input=run_input, accept=accept)
     event_stream = adapter.run_stream(
         deps=deps,
@@ -581,6 +836,7 @@ async def chat(
                     saved_conversation_id,
                     content=collected_text,
                     tool_calls=collected_tool_calls if collected_tool_calls else None,
+                    agent_code=deps.agent.code if deps.agent else None,
                 )
                 await saved_db.commit()
             except Exception:

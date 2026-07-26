@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import (
     JSON,
     BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Integer,
@@ -22,6 +23,12 @@ if TYPE_CHECKING:
 
 class AiMessage(Base):
     __tablename__ = "ai_message"
+    __table_args__ = (
+        CheckConstraint(
+            "routing_feedback IS NULL OR routing_feedback IN ('correct', 'wrong')",
+            name="ck_ai_message_routing_feedback",
+        ),
+    )
 
     message_id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, default=next_id, comment="消息ID"
@@ -59,6 +66,16 @@ class AiMessage(Base):
     )
     trace_id: Mapped[str | None] = mapped_column(
         String(64), nullable=True, comment="追踪ID，与 ai_operation_log 关联"
+    )
+    agent_code: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="spec §7.1b: 本条消息实际处理的 Agent code（按消息粒度还原 Agent）",
+    )
+    routing_feedback: Mapped[str | None] = mapped_column(
+        String(16),
+        nullable=True,
+        comment="spec §7.1b: 用户路由反馈 'correct' / 'wrong' / null",
     )
     create_time: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), comment="创建时间"

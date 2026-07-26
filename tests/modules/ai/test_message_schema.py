@@ -93,3 +93,31 @@ class TestMessageOutToolCallsList:
         out = MessageOut.model_validate(msg)
         assert out.tool_calls[0]["args"]["user_ids"] == ["7483433649145122816"]
         assert out.tool_calls[0]["result"]["user_ids"] == ["7483433649145122816"]
+
+
+def test_ai_message_has_agent_code_column():
+    """spec §7.1b: ai_message.agent_code 记录本条消息实际处理的 Agent code."""
+    from app.modules.ai.models.message import AiMessage
+
+    col = AiMessage.__table__.columns.get("agent_code")
+    assert col is not None, "ai_message.agent_code 列必须存在"
+    assert col.nullable is True, "agent_code 必须 nullable（历史消息可能没有）"
+    assert str(col.type) == "VARCHAR(64)"
+
+
+def test_ai_message_has_routing_feedback_column():
+    """spec §7.1b: routing_feedback 'correct' / 'wrong' / null."""
+    from app.modules.ai.models.message import AiMessage
+
+    col = AiMessage.__table__.columns.get("routing_feedback")
+    assert col is not None, "ai_message.routing_feedback 列必须存在"
+    assert col.nullable is True
+    assert str(col.type) == "VARCHAR(16)"
+
+
+def test_ai_message_routing_feedback_check_constraint():
+    """spec §7.1b: CHECK 约束限定 'correct' / 'wrong' / NULL."""
+    from app.modules.ai.models.message import AiMessage
+
+    constraints = {c.name for c in AiMessage.__table__.constraints if c.name}
+    assert "ck_ai_message_routing_feedback" in constraints

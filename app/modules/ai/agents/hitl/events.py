@@ -122,11 +122,28 @@ class DoneEvent:
     type: Literal["done"] = "done"
 
 
+@dataclass(frozen=True)
+class ClarificationRequiredEvent:
+    """spec §6.2 v4: clarification 无状态化 — 前端弹候选卡片，无 confirmationId.
+
+    与 ConfirmationRequiredEvent 区别：
+      - ConfirmationRequiredEvent：HITL tool 确认（带 confirmationId + expiresAt + Redis）
+      - ClarificationRequiredEvent：Agent 路由模糊（无状态，前端重发即可）
+    """
+
+    candidates: tuple[dict, ...]
+    """({"code": "user_mgmt", "name": "...", "description": "..."}, ...)"""
+
+    message: str
+    type: Literal["clarification_required"] = "clarification_required"
+
+
 AiStreamEvent = (
     ToolCallStartedEvent
     | ToolCallResultEvent
     | ConfirmationRequiredEvent
     | ConfirmationResumedEvent
+    | ClarificationRequiredEvent
     | AiErrorEvent
     | DoneEvent
 )
@@ -189,6 +206,12 @@ def event_to_sse_data(event: AiStreamEvent) -> str:
             "expiresAt": event.expires_at,
             "resumedAt": event.resumed_at,
             "dryRun": _dry_run_to_dict(event.dry_run),
+        }
+    elif isinstance(event, ClarificationRequiredEvent):
+        payload = {
+            "type": event.type,
+            "candidates": list(event.candidates),
+            "message": event.message,
         }
     elif isinstance(event, AiErrorEvent):
         payload = {

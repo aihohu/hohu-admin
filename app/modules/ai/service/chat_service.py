@@ -12,6 +12,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.ai.agents.chat_agent import create_chat_agent
+
+# spec §13 决策 15: 从 constants.py import 避免 service ↔ agents.supervisor 循环依赖.
+# 现有 `from app.modules.ai.service.chat_service import DEFAULT_AGENT_CODE` 调用方不破坏.
+from app.modules.ai.constants import DEFAULT_AGENT_CODE  # noqa: F401  re-export
 from app.modules.ai.core.context import ChatDeps
 from app.modules.ai.core.data_scope_loader import build_data_scope_context
 from app.modules.ai.models.agent import AiAgent
@@ -21,9 +25,6 @@ from app.modules.ai.service.conversation_service import conversation_service
 from app.modules.ai.service.provider_service import provider_service
 from app.modules.auth.permission_collect import collect_user_buttons
 from app.modules.system.models.user import User
-
-# MVP 单 Agent code（spec §2.5）；v1.5 启用 ≥2 业务 Agent 时改为请求参数选择
-DEFAULT_AGENT_CODE = "user_mgmt"
 
 
 class ChatService:
@@ -43,10 +44,16 @@ class ChatService:
         _user_id: int,
         content: str,
         parts: list[dict] | None = None,
+        agent_code: str | None = None,
     ):
-        """保存用户消息"""
+        """保存用户消息（spec §4.1 step 5: 透传 agent_code）."""
         await conversation_service.save_message(
-            db, conversation_id, role="user", content=content, parts=parts
+            db,
+            conversation_id,
+            role="user",
+            content=content,
+            parts=parts,
+            agent_code=agent_code,
         )
 
     async def save_assistant_message(
@@ -57,6 +64,7 @@ class ChatService:
         tokens_input: int | None = None,
         tokens_output: int | None = None,
         tool_calls: list[dict] | None = None,
+        agent_code: str | None = None,
     ):
         """保存 AI 响应消息
 
@@ -65,6 +73,7 @@ class ChatService:
                         格式 [{"tool": ..., "tool_call_id": ..., "args": ..., "ok": ..., ...}]
                         存到 ai_message.tool_calls JSON 字段，前端 reload 会话时还原
                         streamEvents 让用户重连后能看到 tool-call 卡片。
+            agent_code: spec §4.1 step 5 透传到 ai_message.agent_code
         """
         await conversation_service.save_message(
             db,
@@ -74,6 +83,7 @@ class ChatService:
             tokens_input=tokens_input,
             tokens_output=tokens_output,
             tool_calls=tool_calls,
+            agent_code=agent_code,
         )
 
     async def create_agent(
@@ -109,30 +119,75 @@ class ChatService:
         *,
         agent_code: str | None = None,
         trace_id: str | None = None,
+        conversation_id: int | None = None,
     ) -> ChatDeps:
-        """构造完整 ChatDeps（spec §4.6）
+        """构造完整 ChatDeps（spec §4.6 + §5.3 粘滞）
 
         组装顺序：
           1. perms ← collect_user_buttons(user)（启用角色下的按钮权限码）
           2. data_scope ← build_data_scope_context(db, user)（§6.2 物化 accessible_*_ids + filters）
-          3. agent ← ai_agent 表查 code（MVP 单 Agent，code='user_mgmt'）
-          4. trace_id ← 默认生成 tr_<uuid4.hex[:16]>，可由调用方传入复用
+          3. sticky_decision ← resolve_sticky_agent_code（spec §5.3，单次调用）
+          4. agent ← 根据 sticky_decision 加载（run_supervisor=True 时为 None，
+             由 chat.py 路由后通过 attach_agent_to_deps 注入）
+          5. trace_id ← 默认生成 tr_<uuid4.hex[:16]>，可由调用方传入复用
+
+        关键：
+          - agent 字段可能为 None（run_supervisor=True 时由 chat.py 在路由后注入）
+          - sticky_decision 字段挂上 StickyDecision，chat.py 读它再分支（不重调 stickiness）
+          - agent_code 找不到 → 抛 ValueError（chat.py 入口 try/except 捕获后 emit AI_ROUTING_FAILED）
 
         注意：
           - 超管 perms 不特殊处理（与 §6.4 L1/L2 不豁免一致）
-          - agent_code 必须在 ai_agent 表存在，否则抛 ValueError
         """
+        from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
+            get_ai_config_bool,
+        )
+        from app.modules.ai.agents.supervisor.stickiness import (  # noqa: PLC0415
+            resolve_sticky_agent_code,
+        )
+
         perms = set(collect_user_buttons(user))
         data_scope = await build_data_scope_context(db, user)
 
-        # v1.5+: 前端传 agentCode 切换助手；未传则用默认（user_mgmt）
-        actual_agent_code = agent_code or DEFAULT_AGENT_CODE
-        agent = await self._load_agent(db, actual_agent_code)
-        if agent is None:
-            raise ValueError(
-                f"Agent code {actual_agent_code!r} not found in ai_agent table; "
-                f"run scripts/seed_ai_agents.py to seed built-in agents"
+        # 取会话上轮 agent_code（粘滞用）
+        conv_agent_code: str | None = None
+        if conversation_id:
+            conv = await db.get(AiConversation, int(conversation_id))
+            if conv:
+                conv_agent_code = conv.agent_code
+
+        # spec §5.3: 粘滞决策（chat.py 不重调）
+        decision = await resolve_sticky_agent_code(
+            db,
+            user_id=user.user_id,
+            conversation_id=conversation_id,
+            agent_code_param=agent_code,
+            conv_agent_code=conv_agent_code,
+        )
+
+        agent: AiAgent | None = None
+        if not decision.run_supervisor:
+            actual_code = decision.agent_code
+            agent = await self._load_agent(db, actual_code) if actual_code else None
+            if agent is None and actual_code:
+                # spec §13 决策 15: agent_code 在 ai_agent 表找不到 → 抛 ValueError，
+                # chat.py 入口（Step 7c 的 try/except）捕获后 emit AI_ROUTING_FAILED，
+                # 不让异常透到 FastAPI 默认 500 处理.
+                raise ValueError(
+                    f"Agent code {actual_code!r} not found in ai_agent table; "
+                    f"run scripts/seed_ai_agents.py to seed built-in agents"
+                )
+        else:
+            # run_supervisor=True：检查 supervisor_enabled（决定 deps.agent 是否预加载）
+            supervisor_on = await get_ai_config_bool(
+                db, "ai:supervisor_enabled", default=True
             )
+            if not supervisor_on:
+                agent = await self._load_agent(db, DEFAULT_AGENT_CODE)
+                if agent is None:
+                    raise ValueError(
+                        f"DEFAULT_AGENT_CODE {DEFAULT_AGENT_CODE!r} not found"
+                    )
 
         return ChatDeps(
             user=user,
@@ -141,7 +196,19 @@ class ChatService:
             data_scope=data_scope,
             agent=agent,
             trace_id=trace_id or f"tr_{uuid.uuid4().hex[:16]}",
+            sticky_decision=decision,
         )
+
+    async def attach_agent_to_deps(self, deps: ChatDeps, agent_code: str) -> None:
+        """spec §5.1: Supervisor 路由完成后注入 agent 到 deps.
+
+        chat.py 在路由块成功后调用，把 router 选定的 agent_code 加载成 AiAgent
+        挂到 deps.agent，让下游 attach_trace_to_conversation / create_agent 可用.
+        """
+        agent = await self._load_agent(deps.db, agent_code)
+        if agent is None:
+            raise ValueError(f"Routed agent {agent_code!r} not found in ai_agent table")
+        deps.agent = agent
 
     async def _load_agent(self, db: AsyncSession, agent_code: str) -> AiAgent | None:
         """从 ai_agent 表加载 Agent 行（按 code 唯一索引）"""

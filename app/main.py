@@ -26,6 +26,9 @@ from app.modules.ai.api.operation_log import router as ai_operation_log_router
 from app.modules.ai.api.provider import router as ai_provider_router
 from app.modules.ai.api.query_cache import router as ai_query_cache_router
 from app.modules.ai.api.resume import router as ai_resume_router
+from app.modules.ai.api.routing_feedback import (
+    router as ai_routing_feedback_router,
+)
 from app.modules.auth.api import router as auth_router
 from app.modules.job.api.job import router as job_router
 from app.modules.job.api.job_log import router as job_log_router
@@ -203,6 +206,11 @@ if settings.AI_MODULE_ENABLED:
     )
     app.include_router(
         ai_query_cache_router, prefix="/ai/query-cache", tags=["AI chip 跳转回放"]
+    )
+    app.include_router(
+        ai_routing_feedback_router,
+        prefix="/ai/messages",
+        tags=["AI 路由反馈"],
     )
 # Marketplace（注册顺序：developer/admin 先注册，避免被 marketplace 抢匹配）
 app.include_router(

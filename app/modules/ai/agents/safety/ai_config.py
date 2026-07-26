@@ -12,6 +12,9 @@
   - ai:auto_disable:duration_sec          (int, default 86400=24h) 自动禁用时长
   - ai:failures:threshold                 (int, default 2)         连续失败兜底阈值
   - ai:failures:ttl_sec                   (int, default 600=10min) 失败计数 TTL
+  - ai:supervisor_enabled                 (bool, default True)     Supervisor 总开关（§15.3）
+  - ai:supervisor_daily_limit             (int, default 100)       Supervisor LLM 日配额（§9）
+  - ai:routing_legacy_null_mode           (bool, default False)    null 走 DEFAULT_AGENT_CODE 旧行为（§15.3）
 
 设计：
   - 模块级缓存（key → (value, fetched_at)），60s 自然过期
@@ -136,6 +139,28 @@ async def get_ai_config_str_list(
 
     _cache[key] = (value, time.time())
     return value
+
+
+async def get_ai_config_bool(
+    db: AsyncSession,
+    key: str,
+    default: bool,
+    *,
+    force_refresh: bool = False,
+) -> bool:
+    """读 bool 配置（缓存 60s）.
+
+    接受 'true' / '1' / 'yes'（大小写不敏感、自动 strip）→ True.
+    其它值（含 'false' / '0' / 'no' / 非法字符串）→ False.
+    sys_config 无值时 fallback default（通过 str(default).lower() 往返）.
+
+    注意：与 get_ai_config_int 不同，非法值不 fallback default，而是返回 False
+    （feature flag 安全侧倒：垃圾值 → 关闭功能）.
+    """
+    raw = await get_ai_config_str(
+        db, key, default=str(default).lower(), force_refresh=force_refresh
+    )
+    return raw.strip().lower() in ("true", "1", "yes")
 
 
 def invalidate_ai_config_cache(prefix: str = "ai:") -> None:

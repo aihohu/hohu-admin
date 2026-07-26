@@ -5,6 +5,8 @@ from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
+from app.modules.ai.models.routing_feedback import AiRoutingFeedback
+from app.modules.ai.models.routing_log import AiRoutingLog
 
 __all__ = [
     "AiAgent",
@@ -14,4 +16,6 @@ __all__ = [
     "AiOperationLog",
     "AiProvider",
     "RoleAiAgent",
+    "AiRoutingFeedback",
+    "AiRoutingLog",
 ]

@@ -24,6 +24,7 @@ from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.system.models.user import User
 
 if TYPE_CHECKING:
+    from app.modules.ai.agents.supervisor.stickiness import StickyDecision
     from app.modules.ai.models.agent import AiAgent
 
 
@@ -91,6 +92,11 @@ class ChatDeps:
     client_ip: str | None = None
     """§11.4 客户端 IP（从 FastAPI request.client.host 注入）。
     用于鉴权拒绝时的 IP 级自动拉黑计数；None 表示单元测试 / 旧路径。"""
+
+    sticky_decision: "StickyDecision | None" = None
+    """spec §5.3: build_chat_deps 调一次 stickiness 后挂这里；chat.py 入口直接读，
+    不再重复调用（避免双调 / 状态不一致）.
+    None 表示走 build_chat_deps 旧路径（未传 conversation_id 时）."""
 
 
 @dataclass

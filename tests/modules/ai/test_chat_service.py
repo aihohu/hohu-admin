@@ -4,17 +4,40 @@
 
 验证 ChatDeps 完整字段构造（user / perms / db / data_scope / agent / trace_id），
 超管 / 普通 user 两条路径，agent_code 不存在时抛错。
+
+注：Task 11 后 build_chat_deps 内部调 resolve_sticky_agent_code；本文件单测
+patch 该函数返回 manual_override，聚焦测 build_chat_deps 自身字段构造逻辑
+（stickiness 决策树由 test_session_stickiness.py 覆盖）.
 """
 
 # ruff: noqa: ARG001, ARG005, PLC0415  test 占位参数 + 局部 monkeypatch import
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.ai.core.context import ChatDeps
 from app.modules.ai.service.chat_service import chat_service
+
+
+def _patch_sticky_manual(agent_code: str = "user_mgmt"):
+    """Patch resolve_sticky_agent_code 返回 manual_override，绕过决策树.
+
+    build_chat_deps 内部 inline import 调用，所以 patch 源模块即可.
+    """
+    from app.modules.ai.agents.supervisor.stickiness import StickyDecision
+
+    return patch(
+        "app.modules.ai.agents.supervisor.stickiness.resolve_sticky_agent_code",
+        AsyncMock(
+            return_value=StickyDecision(
+                agent_code=agent_code,
+                run_supervisor=False,
+                reason="manual_override",
+            )
+        ),
+    )
 
 
 class TestBuildChatDeps:
@@ -33,7 +56,8 @@ class TestBuildChatDeps:
         mock_user.roles = []
         mock_user.depts = []
 
-        deps = await chat_service.build_chat_deps(db_session, mock_user)
+        with _patch_sticky_manual():
+            deps = await chat_service.build_chat_deps(db_session, mock_user)
 
         assert isinstance(deps, ChatDeps)
         assert deps.user is mock_user
@@ -54,7 +78,8 @@ class TestBuildChatDeps:
         mock_user.roles = []
         mock_user.depts = []
 
-        deps = await chat_service.build_chat_deps(db_session, mock_user)
+        with _patch_sticky_manual():
+            deps = await chat_service.build_chat_deps(db_session, mock_user)
 
         assert deps.trace_id.startswith("tr_")
         assert len(deps.trace_id) >= 19  # tr_ + 16 hex chars
@@ -70,9 +95,10 @@ class TestBuildChatDeps:
         mock_user.roles = []
         mock_user.depts = []
 
-        deps = await chat_service.build_chat_deps(
-            db_session, mock_user, trace_id="tr_custom_abc"
-        )
+        with _patch_sticky_manual():
+            deps = await chat_service.build_chat_deps(
+                db_session, mock_user, trace_id="tr_custom_abc"
+            )
         assert deps.trace_id == "tr_custom_abc"
 
     async def test_agent_code_not_found_raises(
@@ -86,10 +112,11 @@ class TestBuildChatDeps:
         mock_user.roles = []
         mock_user.depts = []
 
-        with pytest.raises(ValueError, match="not found in ai_agent table"):
-            await chat_service.build_chat_deps(
-                db_session, mock_user, agent_code="missing_agent"
-            )
+        with _patch_sticky_manual("missing_agent"):
+            with pytest.raises(ValueError, match="not found in ai_agent table"):
+                await chat_service.build_chat_deps(
+                    db_session, mock_user, agent_code="missing_agent"
+                )
 
     async def test_default_agent_code_is_user_mgmt(
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
@@ -102,7 +129,8 @@ class TestBuildChatDeps:
         mock_user.roles = []
         mock_user.depts = []
 
-        deps = await chat_service.build_chat_deps(db_session, mock_user)
+        with _patch_sticky_manual():
+            deps = await chat_service.build_chat_deps(db_session, mock_user)
         assert deps.agent.code == "user_mgmt"
         assert deps.agent.is_builtin is True
 
@@ -124,3 +152,92 @@ class TestAttachTraceToConversation:
         await chat_service.attach_trace_to_conversation(
             db_session, 99999999, "user_mgmt", "tr_abc"
         )
+
+
+async def _add_user(db: AsyncSession, *, user_id: int, user_name: str) -> None:
+    """建用户（满足 ai_conversation.user_id 外键）"""
+    from app.modules.system.models.user import User  # noqa: PLC0415
+
+    db.add(
+        User(
+            user_id=user_id,
+            user_name=user_name,
+            nickname=user_name,
+            hashed_password="$2b$12$dummy",
+            status="1",
+        )
+    )
+    await db.flush()
+
+
+@pytest.mark.asyncio
+async def test_save_user_message_writes_agent_code(db_session):
+    """spec §4.1 step 5: save_user_message 透传 agent_code 到 ai_message.agent_code."""
+    from sqlalchemy import select
+
+    from app.core.id_generator import next_id
+    from app.modules.ai.models.conversation import AiConversation
+    from app.modules.ai.models.message import AiMessage
+    from app.modules.ai.service.chat_service import chat_service
+
+    await _add_user(db_session, user_id=9001, user_name="ai_test_u1")
+    conv = AiConversation(
+        conversation_id=next_id(),
+        user_id=9001,
+        title="test",
+    )
+    db_session.add(conv)
+    await db_session.flush()
+
+    await chat_service.save_user_message(
+        db_session,
+        conv.conversation_id,
+        9001,
+        "hello",
+        agent_code="user_mgmt",
+    )
+    await db_session.flush()
+
+    msg = (
+        await db_session.execute(
+            select(AiMessage).where(
+                AiMessage.conversation_id == conv.conversation_id,
+                AiMessage.role == "user",
+            )
+        )
+    ).scalar_one()
+    assert msg.agent_code == "user_mgmt"
+
+
+@pytest.mark.asyncio
+async def test_save_assistant_message_writes_agent_code(db_session):
+    """spec §4.1 step 5: save_assistant_message 透传 agent_code."""
+    from sqlalchemy import select
+
+    from app.core.id_generator import next_id
+    from app.modules.ai.models.conversation import AiConversation
+    from app.modules.ai.models.message import AiMessage
+    from app.modules.ai.service.chat_service import chat_service
+
+    await _add_user(db_session, user_id=9002, user_name="ai_test_u2")
+    conv = AiConversation(conversation_id=next_id(), user_id=9002, title="t")
+    db_session.add(conv)
+    await db_session.flush()
+
+    await chat_service.save_assistant_message(
+        db_session,
+        conv.conversation_id,
+        content="hi",
+        agent_code="role_mgmt",
+    )
+    await db_session.flush()
+
+    msg = (
+        await db_session.execute(
+            select(AiMessage).where(
+                AiMessage.conversation_id == conv.conversation_id,
+                AiMessage.role == "assistant",
+            )
+        )
+    ).scalar_one()
+    assert msg.agent_code == "role_mgmt"
