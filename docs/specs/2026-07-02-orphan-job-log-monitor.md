@@ -1,10 +1,60 @@
 # 孤儿定时任务日志守护方案
 
-> 状态：⚠️ Plan 待实施（2026-07-02 起草）
+> 状态：✅ Plan 已完成（2026-07-26）
 >
 > 通过周期性守护协程，根治"进程崩溃 / 重启 / 业务 hang 死后 `SysJobLog` 永久卡在
 > RUNNING 状态"的问题；并解锁因此导致的非并发任务（`concurrent="2"`）永久阻塞
 > 调度链路。
+
+## Ship 记录（2026-07-26）
+
+- **commit**：单 commit 直推 main（hotfix 规则，spec §"实施步骤" 步骤 9）
+- **测试**：job 模块 34/34 绿；全量 1150/1150 绿（含本次 10 测试）
+- **新增**：
+  - `app/modules/job/models/job.py`：`SysJobLog.runner_id` + `Index("ix_sys_job_log_status_start_time", "status", "start_time")`
+  - `app/modules/job/job_runner.py`：模块级 `RUNNER_ID = uuid4().hex`；`_do_execute` 写 log 时填 `runner_id=RUNNER_ID`
+  - `app/modules/job/log_monitor.py`（新文件）：`JobLogMonitor` 类（`start/stop/_loop/_scan_once`）
+  - `alembic/versions/fba0cf4a5e82_add_runner_id_to_sys_job_log.py`：migration
+  - `tests/modules/job/test_log_monitor.py`：8 测试（spec §"测试矩阵" 1-8）
+  - `tests/modules/job/test_job_runner.py`：2 测试（spec §"测试矩阵" 9-10）
+- **改动**：
+  - `app/main.py`：lifespan 启动 `JobLogMonitor`（仅 `APP_ROLE == "all"`），shutdown 时 `stop()`
+  - `CLAUDE.md`：Common Pitfalls 第 13 条
+  - `docs/MODULE-DEVELOPMENT-GUIDE.md`：3.1 节末尾加"长时任务 timeout 配置"子节
+
+### Ship-time 决策记录
+
+#### 10. **粗筛仅按 status 过滤，不在 SQL 用 start_time 阈值** —
+spec 决策 5 原计划粗筛用 `start_time < now - DEFAULT_TIMEOUT`，但与测试 5
+（timeout=300, start=now-11min 期望标 FAILED）矛盾：粗筛阈值 30min 会漏掉
+11min 的孤儿。实施时改为粗筛只 `WHERE status="3"`（status 索引前缀命中），
+细筛 Python 按 `job.timeout_seconds * 2` 二次过滤。理由：任务 timeout 配置各异，
+grace 可能短至秒级（如 timeout=30s，grace=60s），统一粗筛阈值必然漏配；
+RUNNING log 通常 < 100，纯 status 过滤性能 OK。**反例**：粗筛用 30min 阈值 →
+timeout < 15min 的任务的孤儿永远扫不到，违反决策 3 "2x timeout grace" 的承诺。
+**回归**：`test_orphan_job_with_timeout_uses_2x` 直接覆盖（start=now-11min 通过
+粗筛，细筛按 grace=600s 判定标 FAILED）。
+
+#### 11. **测试用 `_FakeSessionFactory` monkey-patch `AsyncSessionLocal`** —
+monitor._scan_once 内 `async with AsyncSessionLocal() as db` 创建独立 session，
+fixture 写入的 seed 数据在外层事务里（未真 commit），独立 session 看不到。
+测试时把 `log_monitor.AsyncSessionLocal` 替换为返回 fixture `db_session` 的
+fake context manager，让 monitor 看到测试 seed 数据，commit 也只触发 SAVEPOINT
+release，最终 outer.rollback() 全部回滚——零污染。
+
+#### 12. **测试查询用 `db.expire_all()` + select 重查，不用 `db_session.get(...)`** —
+monitor._scan_once 内 `update(...)` 是 SQLAlchemy core 操作，不经过 ORM identity map，
+缓存中的 `SysJobLog` 实例 status 字段不会自动刷新。直接 `db_session.get()`
+拿到的是缓存对象（status 还是旧值）。`db.expire_all()` 强制失效后 select
+才能拿到 DB 最新值。
+
+### 与 spec 的偏差
+
+| # | spec 原计划 | 实施 | 原因 |
+|---|---|---|---|
+| 1 | 决策 5 粗筛 `start_time < now - DEFAULT_TIMEOUT` | 仅 `status` 过滤 | 测试 5 矛盾（11min < 30min 漏扫），见决策 10 |
+| 2 | spec §"实施步骤" 步骤 9 "一次性 commit" | 单 commit 直推 main | 按 memory `feedback_hotfix_no_pr.md`（1-2 文件级 hotfix 直推），spec 改动跨 5 文件 + migration + 10 测试，但内聚单一功能，仍按 hotfix 流程 |
+
 
 ## 背景
 

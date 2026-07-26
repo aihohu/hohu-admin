@@ -32,6 +32,8 @@ from app.modules.ai.api.routing_feedback import (
 from app.modules.auth.api import router as auth_router
 from app.modules.job.api.job import router as job_router
 from app.modules.job.api.job_log import router as job_log_router
+from app.modules.job.job_runner import RUNNER_ID
+from app.modules.job.log_monitor import JobLogMonitor
 from app.modules.marketplace.api.admin import router as marketplace_admin_router
 from app.modules.marketplace.api.app_data import router as app_data_router
 from app.modules.marketplace.api.contributes import (
@@ -57,6 +59,10 @@ from app.modules.system.api.user import router as user_router
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """应用生命周期管理"""
+    # spec 2026-07-02 §"lifespan 集成"：JobLogMonitor 实例引用必须在外层声明，
+    # 否则 shutdown 段拿不到（startup 异常会导致 yield 不执行，但 finally 仍需清理）。
+    job_log_monitor: JobLogMonitor | None = None
+
     # spec §8.4 单 worker 约束 + 修订 S-6：env var 不可信（uvicorn --workers 4
     # 不经过 gunicorn 时各 worker lifespan 独立运行，都通过 env var 检查），
     # 必须用 Redis SADD 实测活跃 worker 数。
@@ -93,8 +99,15 @@ async def lifespan(_app: FastAPI):
             await scheduler_manager.reload_jobs(db)
         await scheduler_manager.start_with_pubsub()
 
+        # 孤儿任务日志守护（spec 2026-07-02-orphan-job-log-monitor.md）：
+        # start() 内部跑一次启动扫描（吞异常）+ 启动周期 _loop
+        job_log_monitor = JobLogMonitor(runner_id=RUNNER_ID)
+        await job_log_monitor.start()
+
     yield
 
+    if job_log_monitor is not None:
+        await job_log_monitor.stop()
     if settings.APP_ROLE == "all":
         scheduler_manager.shutdown()
     # 修订 S-6：lifespan 结束时从 Redis active worker 集合移除自己，让下次启动

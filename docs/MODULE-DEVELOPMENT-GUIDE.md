@@ -285,6 +285,22 @@ from .customer import Customer
 __all__ = ["Customer"]
 ```
 
+#### 长时任务 timeout 配置（定时任务模块）
+
+定时任务（`sys_job` 表）的 `timeout_seconds` 字段除了控制 `asyncio.wait_for`
+单次超时外，**还参与孤儿日志守护判定**（spec
+`docs/specs/2026-07-02-orphan-job-log-monitor.md`）：
+
+- 任务执行时进程崩溃 / 重启 → `sys_job_log` 永远停在 `status="3"` (RUNNING)
+- 守护协程（`JobLogMonitor`）周期扫描 RUNNING 日志，超过
+  `timeout_seconds * 2` 的孤儿 log 标 FAILED
+- 未配置 `timeout_seconds` 时用 `DEFAULT_TIMEOUT=1800s`（grace=60min）
+
+**强烈建议**：长时任务（数据迁移 / 批量同步 / 外部 HTTP 长轮询）显式声明
+`timeout_seconds`，否则守护协程需要等 60min 才能识别孤儿。例：
+批量同步任务实际跑 5min，配置 `timeout_seconds=600`（10min）→ grace=20min，
+孤儿在 20min 内被回收，远快于默认 60min。
+
 ### 3.2 Schema（请求/响应模型）
 
 ```python

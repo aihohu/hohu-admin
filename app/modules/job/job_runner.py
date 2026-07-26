@@ -3,6 +3,7 @@ import json
 import logging
 import traceback
 from datetime import datetime
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +19,11 @@ logger = logging.getLogger(__name__)
 LOG_STATUS_RUNNING = "3"
 LOG_STATUS_SUCCESS = "1"
 LOG_STATUS_FAILED = "2"
+
+# 进程级 runner 标识（孤儿日志守护用，spec 2026-07-02 §决策 1/2）：
+# 模块加载时生成一次，进程内所有 _do_execute 共享同一 RUNNER_ID；
+# 重启进程后值变化，JobLogMonitor 据此识别"上一进程遗留的孤儿 log"。
+RUNNER_ID = uuid4().hex
 
 
 async def execute_job(job_id: int) -> None:
@@ -52,12 +58,16 @@ async def _do_execute(job_id: int, *, skip_status_check: bool = False) -> None:
                     return
 
             # 写入执行日志（执行中）
+            # runner_id 标识本进程（孤儿日志守护用，决策 1/2）
+            # start_time 强制用 Python now（决策 9：与 monitor 算 grace 同基准，
+            # 避免 Python ↔ DB 时钟漂移导致 grace 误判）
             log = SysJobLog(
                 job_id=job.job_id,
                 job_name=job.job_name,
                 job_key=job.job_key,
                 status=LOG_STATUS_RUNNING,
                 start_time=datetime.now(),
+                runner_id=RUNNER_ID,
             )
             db.add(log)
             await db.commit()

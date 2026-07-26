@@ -1,6 +1,15 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.id_generator import next_id
@@ -75,6 +84,9 @@ class SysJobLog(Base):
     """定时任务执行日志模型"""
 
     __tablename__ = "sys_job_log"
+    __table_args__ = (
+        Index("ix_sys_job_log_status_start_time", "status", "start_time"),
+    )
 
     job_log_id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, default=next_id, comment="日志ID"
@@ -101,4 +113,9 @@ class SysJobLog(Base):
     )
     attempt_count: Mapped[int] = mapped_column(
         Integer, default=1, comment="本次触发实际执行次数（含重试）"
+    )
+    runner_id: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="写入此日志的执行进程标识（uuid4，孤儿守护用）",
     )
