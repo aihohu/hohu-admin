@@ -2,7 +2,7 @@
 
 # ruff: noqa: ARG001, PLC0415  test fixture 占位参数 + 函数内 import（断言用）
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import AsyncClient
@@ -67,9 +67,20 @@ async def test_injection_blocks_before_routing(
     则 supervisor LLM 会被调用。本测试用 mock.assert_not_called() 显式校验.
     """
     llm_mock = AsyncMock()
-    with patch(
-        "app.modules.ai.agents.supervisor.router.call_llm_text",
-        llm_mock,
+    # mock create_agent：injection_hit 路径会进入 save_user_message + create_agent，
+    # CI 没有 LLM provider 配置时 create_agent 会抛 BusinessRuleException(400)。
+    # 本测试只关心路由决策正确（injection 不进 supervisor），create_agent 成功与否不在范围。
+    fake_exec_agent = MagicMock(name="fake_exec_agent")
+
+    with (
+        patch(
+            "app.modules.ai.agents.supervisor.router.call_llm_text",
+            llm_mock,
+        ),
+        patch(
+            "app.modules.ai.api.chat.chat_service.create_agent",
+            AsyncMock(return_value=fake_exec_agent),
+        ),
     ):
         response = await client.post(
             "/ai/chat",

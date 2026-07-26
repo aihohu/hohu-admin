@@ -119,6 +119,11 @@ async def test_supervisor_disabled_uses_default_agent_code(
             return False
         return default
 
+    # mock create_agent：supervisor_disabled 路径会进入 save_user_message + create_agent，
+    # CI 没有 LLM provider 配置时 create_agent 会抛 BusinessRuleException(400)。
+    # 本测试只关心路由决策正确（不进 supervisor），create_agent 成功与否不在范围。
+    fake_exec_agent = MagicMock(name="fake_exec_agent")
+
     with (
         patch(
             "app.modules.ai.agents.safety.ai_config.get_ai_config_bool",
@@ -127,6 +132,10 @@ async def test_supervisor_disabled_uses_default_agent_code(
         patch(
             "app.modules.ai.agents.supervisor.router.call_llm_text",
             AsyncMock(side_effect=AssertionError("should not call LLM when disabled")),
+        ),
+        patch(
+            "app.modules.ai.api.chat.chat_service.create_agent",
+            AsyncMock(return_value=fake_exec_agent),
         ),
     ):
         response = await client.post(

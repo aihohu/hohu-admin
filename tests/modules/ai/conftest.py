@@ -181,11 +181,19 @@ def mock_visible_agents(monkeypatch):
 
     候选 Agent：shared + 6 业务（与 seed_ai_agents.py 一致）.
 
-    Patches 两处引用：api/agent.py（GET /ai/agents）+ service/agent_visibility.py
-    （chat.py + routing_feedback_service.py 调用）.
+    Patches 三处引用：
+    - api/agent.py（GET /ai/agents）
+    - service/agent_visibility.py（chat.py 内 inline import 调用）
+    - service/routing_feedback_service.py（module-level import，必须显式 patch 否则不生效）
+
+    第三个 patch 是关键：routing_feedback_service 顶部 `from ... import list_visible_agents`
+    在 import 时 bind 到原函数对象；monkeypatch 必须 setattr 该 module 的 attribute
+    才能让 service 调用看到 mock。否则 CI 上 seed_ai_agents.py 默认 enabled=False，
+    真实 list_visible_agents 返回空集 → correctedAgentCode 不在 visible_codes → 403.
     """
     from app.modules.ai.api import agent as agent_mod
     from app.modules.ai.service import agent_visibility as vis_mod
+    from app.modules.ai.service import routing_feedback_service as fb_mod
 
     candidates = [
         _make_agent("shared", "通用工具助手", "fallback agent", 1),
@@ -202,6 +210,7 @@ def mock_visible_agents(monkeypatch):
 
     monkeypatch.setattr(agent_mod, "list_visible_agents", _fake_list)
     monkeypatch.setattr(vis_mod, "list_visible_agents", _fake_list)
+    monkeypatch.setattr(fb_mod, "list_visible_agents", _fake_list)
     return candidates
 
 
