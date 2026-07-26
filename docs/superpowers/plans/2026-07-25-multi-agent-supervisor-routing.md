@@ -12,6 +12,41 @@
 
 ---
 
+## ✅ Plan 已完成（2026-07-26）
+
+**Ship 形态**：后端 PR [aihohu/hohu-admin#7](https://github.com/aihohu/hohu-admin/pull/7) squash merge + 前端 PR [aihohu/hohu-admin-web#3](https://github.com/aihohu/hohu-admin-web/pull/3) squash merge + main 直推（`71afa1c1` 候选自动重发 polish）。
+
+**测试**：732/732 AI 测试绿，CI 4/4 全过（Ruff + 3×Pytest py3.12/3.13/3.14），浏览器 E2E 3/3（auto 路由 + clarification 卡片 + routing feedback 200 OK）。
+
+**实施过程中收敛的决策**（plan v5 之外补的）：
+
+1. **mock_visible_agents fixture 加第 3 处 patch** — `routing_feedback_service.list_visible_agents` 是 module-level import binding，monkeypatch 必须 setattr 该 module 的 attribute 才能让 service 调用看到 mock；否则 CI 上 seed 默认 `enabled=False` → 真实 list_visible_agents 返回空 → correctedAgentCode 校验 403。**反例**：只在 api/agent.py + agent_visibility.py 两处 patch，service 内的 import-time binding 拿不到 mock。**回归**：3 个 routing-feedback 测试在 CI 失败 403。
+2. **supervisor_disabled / injection 测试加 create_agent mock** — CI .env.test 无 LLM provider 配置，`resolve_model` 抛 `BusinessRuleException(400)`；本地能过是因为本地 .env 有 `AI_OPENAI_API_KEY` 真实 key。**反例**：测试只 mock `call_llm_text` 不 mock `create_agent`。**回归**：2 个 chat-supervisor 测试在 CI 失败 400。
+3. **ClarificationRequired 候选点击自动重发** — spec §6.2 v4 没明确要求，但 UX 上"点候选就是想用这个 agent 重试"，让用户重输消息是多余动作。store.pickClarificationAgent 加 `await doStream()` 复用上轮 user message（currentMessages 已有），后端走 manual_override 路径。**反例**：候选点击只切 agentCode + 关卡片，用户必须重输再发送。
+
+**实施过程中的合理 deviation**（plan 内已记录，这里汇总）：
+
+- Task 4（migration）：autogenerate 漏检 `ai_message` CHECK 约束，手工补 `op.create_check_constraint`。
+- Task 5：`get_ai_config_bool` 非法值返回 False（feature flag 安全侧倒），不 fallback default。
+- Task 5.5：chat.py 的 save_user_message 调用点 `deps` 还没构造，改用局部 `agent_code` 变量。
+- Task 9：`llm_choice` 改为 optional（plan 写 required，但 non-LLM 路径没值）。
+- Task 11：resume.py 加 `attach_agent_to_deps(DEFAULT_AGENT_CODE)` fallback（supervisor 路径下 deps.agent 可能 None）。
+- Task 11：现有 5 个 TestBuildChatDeps 测试加 `_patch_sticky_manual` helper（stub stickiness，让现有测试聚焦字段组装）。
+- Task 12：`seed_test_message` / `seed_test_message_other_user` 用独立 `AsyncSessionLocal`（不能用 db_session outer transaction）。
+
+**顺手修的预存在 bug**：
+
+- `audit_middleware.redis_client` 模块级 import 在 pytest-asyncio 跨 event loop 时报 "Event loop is closed" — Task 12 实施时在 conftest `_reset_redis_client` 加 refresh。
+
+**遗留的非阻塞 follow-up**（code reviewer 建议，独立 PR）：
+
+- Task 11.5: 扩展 `_emit_safety_blocked` 到 ip_blacklist + user_disabled 路径（spec §13 决策 14 全覆盖）。
+- Task 11.6: chat.py 抽 routing 块到 `service/chat_routing.py`（chat.py 现 845 行）。
+- `ChatDeps.agent` 改 `Optional[AiAgent]`（现在是非 Optional 但 build_chat_deps 可能返回 None）。
+- audit_middleware redis refresh backport 到其它 conftest（防 future 测试踩坑）。
+
+---
+
 ## File Structure
 
 **Create:**

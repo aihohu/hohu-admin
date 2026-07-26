@@ -1,6 +1,6 @@
 # Multi-Agent Supervisor 路由设计
 
-**Status**: ⚠️ Plan draft v4（incorporated review #3 feedback：砍规则阶段 / 砍 Redis confirmation / 加反馈闭环；awaiting impl kickoff）  
+**Status**: ✅ Plan 已完成（2026-07-26）— 后端 PR [aihohu/hohu-admin#7](https://github.com/aihohu/hohu-admin/pull/7) + 前端 PR [aihohu/hohu-admin-web#3](https://github.com/aihohu/hohu-admin-web/pull/3) squash merge，732/732 测试绿，E2E 3/3 通过。实施过程决策记录见 plan `2026-07-25-multi-agent-supervisor-routing.md` 头部"✅ Plan 已完成"块。  
 **Created**: 2026-07-24  
 **Revised**: 2026-07-24（v2: factual errors + design gaps；v3: 内部矛盾 + clarification 协议 + 审计完备性；**v4: LLM-only router + 无状态 clarification + routing_feedback + legacy null 开关**，详见 §16 修订日志）  
 **Owner**: hohu core team  
