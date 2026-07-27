@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.modules.ai.models.agent import AiAgent
 from app.modules.system.models.menu import Menu as SysMenu
 
-from .meta import AiToolMeta
+from .meta import STANDARD_VIEW_TYPES, AiToolMeta
 
 
 class ToolRegistryError(Exception):
@@ -205,6 +205,18 @@ class ToolRegistry:
                 f"Tools with dry_run_supported=True must define _dry_run_<tool> "
                 f"in the same module: {missing_dry_run}. "
                 "Naming convention: name='user.create' → _dry_run_user_create."
+            )
+
+        # 5. spec 2026-07-16 §2.4: result_view 必须在 STANDARD_VIEW_TYPES
+        invalid_views = {
+            t.meta.name: t.meta.result_view
+            for t in self._tools.values()
+            if t.meta.result_view not in STANDARD_VIEW_TYPES
+        }
+        if invalid_views:
+            raise ToolRegistryError(
+                f"Tools declare invalid result_view (must be in {sorted(STANDARD_VIEW_TYPES)}): "
+                f"{invalid_views}."
             )
 
 
