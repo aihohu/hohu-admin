@@ -313,3 +313,142 @@ class TestExecuteTool:
         assert result.ok is False
         assert result.error_code == "AI_INTERNAL_ERROR"
         assert "RuntimeError" in result.error_msg
+
+
+class TestSseSerializesUiAndChipTarget:
+    """spec 2026-07-16 §2.5: SSE 协议扩展（ui + chipTarget 字段）。"""
+
+    def test_tool_call_result_serializes_ui(self) -> None:
+        import json
+
+        from app.modules.ai.agents.gateway.result import UIResult
+        from app.modules.ai.agents.hitl.events import (
+            ToolCallResultEvent,
+            event_to_sse_data,
+        )
+
+        ui = UIResult(
+            view_type="rows_affected",
+            view_data={"count": 2, "ids": ["u1", "u2"]},
+            audit={"affected_user_ids": ["u1", "u2"]},
+            label_key="ai.tool.user.batch_delete.result",
+            label_params={"count": 2},
+        )
+        event = ToolCallResultEvent(
+            tool="user.batch_delete",
+            tool_call_id="tc_test1",
+            ok=True,
+            duration_ms=230,
+            result={"deleted": 2},
+            ui=ui,
+            affected_rows=2,
+        )
+        payload = json.loads(event_to_sse_data(event))
+
+        assert payload["ui"]["viewType"] == "rows_affected"
+        assert payload["ui"]["viewData"]["count"] == 2
+        assert payload["ui"]["audit"]["affected_user_ids"] == ["u1", "u2"]
+        assert payload["ui"]["labelKey"] == "ai.tool.user.batch_delete.result"
+        assert payload["ui"]["labelParams"] == {"count": 2}
+
+    def test_tool_call_started_serializes_chip_target(self) -> None:
+        import json
+
+        from app.modules.ai.agents.hitl.events import (
+            ToolCallStartedEvent,
+            event_to_sse_data,
+        )
+
+        event = ToolCallStartedEvent(
+            tool="user.count",
+            tool_call_id="tc_test2",
+            summary="count users",
+            args={},
+            risk="low",
+            trace_id="trace_xxx",
+            chip_target="/system/user",
+        )
+        payload = json.loads(event_to_sse_data(event))
+        assert payload["chipTarget"] == "/system/user"
+
+    def test_tool_call_result_without_ui_omits_field(self) -> None:
+        """ui=None 时序列化后 ui 字段不出现（_compact_json 移除 None）。"""
+        import json
+
+        from app.modules.ai.agents.hitl.events import (
+            ToolCallResultEvent,
+            event_to_sse_data,
+        )
+
+        event = ToolCallResultEvent(
+            tool="user.batch_delete",
+            tool_call_id="tc_test3",
+            ok=False,
+            duration_ms=10,
+            error_code="AI_DATA_SCOPE_VIOLATION",
+            error_msg="target not in scope",
+        )
+        payload = json.loads(event_to_sse_data(event))
+        assert "ui" not in payload
+
+
+class TestExecutorIsinstanceBranch:
+    """spec 2026-07-16 §3 决策 11: executor 双路径分支。"""
+
+    async def test_executor_preserves_tool_result_when_business_returns_it(
+        self, db_session: AsyncSession
+    ) -> None:
+        """业务方返回 ToolResult 时 executor 不 double-wrap，保留 ui。"""
+        from app.modules.ai.agents.gateway.result import UIResult
+
+        ui = UIResult(
+            view_type="rows_affected",
+            view_data={"count": 2},
+            audit={"affected_user_ids": ["u1", "u2"]},
+            label_key="ai.tool.user.batch_delete.result",
+            label_params={"count": 2},
+        )
+
+        @ai_tool(
+            AiToolMeta(
+                name="user.tool_result_path",
+                agent="user_mgmt",
+                summary="x",
+                required_perms=("system:user:list",),
+                risk="low",
+            )
+        )
+        async def _fn(ctx: Any) -> ToolResult:
+            return ToolResult.success(data={"deleted": 2}, ui=ui)
+
+        deps = _make_deps(db=db_session)
+        result = await execute_tool("user.tool_result_path", {}, deps)
+        assert result.ok is True
+        # ToolResult 直接保留，不被 double-wrap 成 {"deleted": 2} 外层 data
+        assert result.data == {"deleted": 2}
+        assert result.ui is not None
+        assert result.ui.view_type == "rows_affected"
+        assert result.ui.view_data == {"count": 2}
+
+    async def test_executor_wraps_dict_return_fallback(
+        self, db_session: AsyncSession
+    ) -> None:
+        """业务方返回 dict 时 executor fallback 包装为 ui=None 的 ToolResult。"""
+
+        @ai_tool(
+            AiToolMeta(
+                name="user.dict_path",
+                agent="user_mgmt",
+                summary="x",
+                required_perms=("system:user:list",),
+                risk="low",
+            )
+        )
+        async def _fn(ctx: Any) -> dict:
+            return {"deleted": 2}
+
+        deps = _make_deps(db=db_session)
+        result = await execute_tool("user.dict_path", {}, deps)
+        assert result.ok is True
+        assert result.data == {"deleted": 2}
+        assert result.ui is None

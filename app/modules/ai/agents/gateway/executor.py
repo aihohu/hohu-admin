@@ -131,20 +131,28 @@ _AFFECTED_ROW_KEYS: tuple[str, ...] = (
 )
 
 
-def _infer_affected_rows(*, dry_run_count: int | None, result_data: Any) -> int | None:
-    """从 dry_run_count 或 result.data 推断影响行数（spec §8.1 卡片状态文本用）
+def _infer_affected_rows(
+    *,
+    dry_run_count: int | None,
+    result_data: Any,
+    ui_audit: dict[str, Any] | None = None,
+) -> int | None:
+    """从 dry_run_count / ui.audit / result_data 推断影响行数（决策 6）
 
     优先级：
-      1. dry_run_count（写 tool HITL 路径已精确算出，最权威）
-      2. result_data 是 dict 且含 _AFFECTED_ROW_KEYS 任一字段 → 取整数值
-      3. result_data 是 list → 长度
-      4. 否则 None（前端隐藏「N 行」尾部）
-
-    spec §5.5 readonly tool 直接返回 [{group, count}] 或 dict，这里 best-effort
-    提取，tool fn 不强求字段命名约定。
+      1. dry_run_count（HITL 路径精确算出）
+      2. ui.audit（业务方显式声明，最权威运行时值）
+      3. result_data dict 含 _AFFECTED_ROW_KEYS 任一字段
+      4. result_data list → len
+      5. None
     """
     if dry_run_count is not None:
         return dry_run_count
+    if ui_audit:
+        for key in _AFFECTED_ROW_KEYS:
+            val = ui_audit.get(key)
+            if isinstance(val, int) and not isinstance(val, bool):
+                return val
     if isinstance(result_data, dict):
         for key in _AFFECTED_ROW_KEYS:
             val = result_data.get(key)
@@ -344,6 +352,7 @@ async def execute_tool(
             args=args,
             risk=meta.risk,
             trace_id=deps.trace_id,
+            chip_target=meta.chip_target,
         ),
     )
 
@@ -442,9 +451,11 @@ async def execute_tool(
             ok=result.ok,
             duration_ms=duration_ms,
             result=result.data if result.ok else None,
+            ui=result.ui if result.ok else None,
             affected_rows=_infer_affected_rows(
                 dry_run_count=dry_run_count,
                 result_data=result.data if result.ok else None,
+                ui_audit=result.ui.audit if result.ok and result.ui else None,
             ),
             error_code=result.error_code if not result.ok else None,
             error_msg=result.error_msg if not result.ok else None,
@@ -794,15 +805,29 @@ async def _invoke_tool_fn(
             async with tool_db.begin():
                 tool_ctx = build_tool_context(deps, tool_db, meta)
                 # L3 单 tool 超时包装
-                result = await with_l3_timeout(tool_fn(tool_ctx, **args))
-                # spec §7.3: 返回值脱敏后再给 LLM
-                safe_data = serialize_for_llm(meta.sensitive_output, result)
+                raw = await with_l3_timeout(tool_fn(tool_ctx, **args))
+                # 决策 11: isinstance 双路径分支
+                if isinstance(raw, ToolResult):
+                    # 业务方已构造完整 ToolResult（builtin tool 新风格）
+                    # 仍要脱敏 data 字段（ui 不脱敏，不进 LLM）
+                    raw.data = serialize_for_llm(meta.sensitive_output, raw.data)
+                    result = raw
+                else:
+                    # 业务方返回裸 dict / list / 标量（第三方 tool / 老代码 / fallback）
+                    safe_data = serialize_for_llm(meta.sensitive_output, raw)
+                    result = ToolResult.success(
+                        data=safe_data
+                    )  # ui=None，前端 fallback
                 # spec §6.5: 成功路径清零失败计数
                 await clear_failures(redis_client, user_id, meta.name, args_hash)
                 # spec §8.7: readonly tool 写 query_cache 给 chip 跳转用
-                if meta.readonly and meta.query_cache_module and deps.trace_id:
-                    _safe_write_query_cache(meta, args, deps, user_id)
-                return ToolResult.success(data=safe_data)
+                # 决策 8: chip_target 优先，query_cache_module 兼容 alias
+                cache_module = meta.chip_target or meta.query_cache_module
+                if meta.readonly and cache_module and deps.trace_id:
+                    _safe_write_query_cache(
+                        meta, args, deps, user_id, module=cache_module
+                    )
+                return result
     except AuthorizationException as e:
         # 修订 S-11：data_scope 越界等授权失败，回滚 L1/L2/L4 已写计数
         # v1.5+ SR-16：若 per-agent L2 已写（agent_code_for_rollback 非 None），
@@ -861,12 +886,19 @@ async def _invoke_tool_fn(
 
 
 def _safe_write_query_cache(
-    meta: Any, args: dict[str, Any], deps: ChatDeps, user_id: int
+    meta: Any,
+    args: dict[str, Any],
+    deps: ChatDeps,
+    user_id: int,
+    *,
+    module: str | None = None,
 ) -> None:
     """写 ai:query_cache hash（spec §8.7），filters 按 allowed_filters 白名单过滤
 
     失败静默——query_cache 是辅助功能，不能让 chip 跳转失败影响主流程。
     异步调度避免阻塞 LLM 响应。
+
+    决策 8: module 参数优先（chip_target 优先），未传时回退到 meta.query_cache_module。
     """
     import asyncio  # noqa: PLC0415
 
@@ -874,6 +906,7 @@ def _safe_write_query_cache(
         set_query_cache,
     )
 
+    cache_module = module or meta.query_cache_module
     raw_filters = args.get("filters") or {}
     if not isinstance(raw_filters, dict):
         raw_filters = {}
@@ -889,7 +922,7 @@ def _safe_write_query_cache(
                 redis_client,
                 trace_id=deps.trace_id,
                 tool_name=meta.name,
-                module=meta.query_cache_module,
+                module=cache_module,
                 filters=safe_filters,
                 user_id=user_id,
             )
