@@ -111,7 +111,10 @@ class TestUserCount:
 
         ctx = _make_ctx(db_session, visible_user_ids={1001, 1002, 1003})
         result = await user_count(ctx, filters=None)
-        assert result == {"count": 3}
+        assert result.data == {"count": 3}
+        assert result.ui is not None
+        assert result.ui.view_type == "plain_json"
+        assert result.ui.view_data["count"] == 3
 
     async def test_count_with_status_filter(self, db_session: AsyncSession) -> None:
         """status='1' 过滤：3 启用 + 1 禁用 → count=3"""
@@ -123,7 +126,9 @@ class TestUserCount:
 
         ctx = _make_ctx(db_session, visible_user_ids={1001, 1002, 1003, 1004})
         result = await user_count(ctx, filters={"status": "1"})
-        assert result == {"count": 3}
+        assert result.data == {"count": 3}
+        assert result.ui.view_type == "plain_json"
+        assert result.ui.view_data["count"] == 3
 
     async def test_count_with_gender_filter(self, db_session: AsyncSession) -> None:
         """user_gender='1' 过滤"""
@@ -134,12 +139,15 @@ class TestUserCount:
 
         ctx = _make_ctx(db_session, visible_user_ids={1001, 1002, 1003})
         result = await user_count(ctx, filters={"user_gender": "1"})
-        assert result == {"count": 2}
+        assert result.data == {"count": 2}
+        assert result.ui.view_type == "plain_json"
 
     async def test_count_empty_table(self, db_session: AsyncSession) -> None:
         ctx = _make_ctx(db_session, visible_user_ids={999999})  # 不存在的 id
         result = await user_count(ctx, filters=None)
-        assert result == {"count": 0}
+        assert result.data == {"count": 0}
+        assert result.ui is not None
+        assert result.ui.view_data["count"] == 0
 
     async def test_count_filter_out_of_whitelist_raises(
         self, db_session: AsyncSession
@@ -164,10 +172,15 @@ class TestUserStats:
         ctx = _make_ctx(db_session, visible_user_ids={1001, 1002, 1003})
         result = await user_stats(ctx, group_by="user_gender", filters=None)
         # 按 count 降序
-        assert result == [
+        expected = [
             {"group": "1", "count": 2},
             {"group": "2", "count": 1},
         ]
+        assert result.data["groups"] == expected
+        assert result.ui is not None
+        assert result.ui.view_type == "stats_chart"
+        assert result.ui.view_data["rows"] == expected
+        assert result.ui.audit["total"] == 3
 
     async def test_stats_by_status(self, db_session: AsyncSession) -> None:
         await _add_user(db_session, user_id=1001, user_name="u1", status="1")
@@ -177,10 +190,11 @@ class TestUserStats:
 
         ctx = _make_ctx(db_session, visible_user_ids={1001, 1002, 1003})
         result = await user_stats(ctx, group_by="status", filters=None)
-        assert result == [
+        assert result.data["groups"] == [
             {"group": "1", "count": 2},
             {"group": "0", "count": 1},
         ]
+        assert result.ui.view_type == "stats_chart"
 
     async def test_stats_with_filter(self, db_session: AsyncSession) -> None:
         """filter+group_by 同时使用"""
@@ -198,7 +212,11 @@ class TestUserStats:
         ctx = _make_ctx(db_session, visible_user_ids={1001, 1002, 1003})
         # 只统计启用用户按性别分组（count 同为 1，order 不稳定，转 dict 比较）
         result = await user_stats(ctx, group_by="user_gender", filters={"status": "1"})
-        assert {item["group"]: item["count"] for item in result} == {"1": 1, "2": 1}
+        assert {item["group"]: item["count"] for item in result.data["groups"]} == {
+            "1": 1,
+            "2": 1,
+        }
+        assert result.ui.view_type == "stats_chart"
 
     async def test_stats_group_by_none_uses_default(
         self, db_session: AsyncSession
@@ -210,7 +228,8 @@ class TestUserStats:
         ctx = _make_ctx(db_session, visible_user_ids={1001})
         result = await user_stats(ctx, group_by=None, filters=None)
         # 默认按 user_gender 分组
-        assert result == [{"group": "1", "count": 1}]
+        assert result.data["groups"] == [{"group": "1", "count": 1}]
+        assert result.ui.view_type == "stats_chart"
 
     async def test_stats_max_groups_truncation(self, db_session: AsyncSession) -> None:
         """spec §5.5 max_groups 截断"""
@@ -221,8 +240,9 @@ class TestUserStats:
         # max_groups=1 截断
         ctx = _make_ctx(db_session, visible_user_ids={1001, 1002}, max_groups=1)
         result = await user_stats(ctx, group_by="status", filters=None)
-        assert len(result) == 1
-        assert result[0]["count"] == 1
+        assert len(result.data["groups"]) == 1
+        assert result.data["groups"][0]["count"] == 1
+        assert result.ui.view_type == "stats_chart"
 
     async def test_stats_group_by_out_of_whitelist_raises(
         self, db_session: AsyncSession
@@ -246,7 +266,10 @@ class TestUserDistinct:
         ctx = _make_ctx(db_session, visible_user_ids={1001, 1002, 1003})
         result = await user_distinct(ctx, field="status")
         # distinct 值不保证顺序，转 set 对比
-        assert set(result) == {"0", "1"}
+        assert set(result.data["values"]) == {"0", "1"}
+        assert result.ui is not None
+        assert result.ui.view_type == "plain_json"
+        assert result.ui.audit["count"] == 2
 
     async def test_distinct_gender(self, db_session: AsyncSession) -> None:
         await _add_user(db_session, user_id=1001, user_name="u1", user_gender="1")
@@ -255,7 +278,8 @@ class TestUserDistinct:
 
         ctx = _make_ctx(db_session, visible_user_ids={1001, 1002})
         result = await user_distinct(ctx, field="user_gender")
-        assert set(result) == {"1", "2"}
+        assert set(result.data["values"]) == {"1", "2"}
+        assert result.ui.view_type == "plain_json"
 
     async def test_distinct_field_out_of_whitelist_raises(
         self, db_session: AsyncSession
@@ -292,7 +316,7 @@ class TestDataScopeFilter:
         ctx = _make_ctx(db_session, data_scope=data_scope)
 
         result = await user_count(ctx, filters=None)
-        assert result == {"count": 1}
+        assert result.data == {"count": 1}
 
 
 # ============ role.count（v1.5+，chip 跳转回放扩展） ============
