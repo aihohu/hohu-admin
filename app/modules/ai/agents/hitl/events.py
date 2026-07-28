@@ -18,7 +18,10 @@ text-delta / reasoning-delta 走 Vercel UI Protocol v4（`data: {"type":"text-de
 
 import json
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from app.modules.ai.agents.gateway.result import UIResult
 
 
 @dataclass(frozen=True)
@@ -30,6 +33,9 @@ class ToolCallStartedEvent:
 
     trace_id 用于 §8.7 chip 跳转：readonly tool 成功后前端用 trace_id 调
     /ai/query-cache/<trace_id> 拿到 filters 回放到业务模块页。
+
+    chip_target（v1.6+ SR-13）: readonly tool 的 chip 跳转路径（声明式，
+    替代前端 CHIP_TARGETS map）。None 表示无 chip。
     """
 
     tool: str
@@ -38,6 +44,7 @@ class ToolCallStartedEvent:
     args: dict[str, Any]
     risk: Literal["low", "high", "destructive"]
     trace_id: str
+    chip_target: str | None = None
     type: Literal["tool_call_started"] = "tool_call_started"
 
 
@@ -49,6 +56,10 @@ class ToolCallResultEvent:
     等待时间。前端展示「已执行 · 230ms」。
     affected_rows: 影响行数推断值（dry_run_count 优先；否则从 result 推断），
     None 表示无法推断，前端不展示「N 行」尾部。
+
+    ui（v1.6+ SR-13）: UI 层结果，前端按 ui.view_type 路由标准组件。
+    None（ok=False / 业务方未填 / executor fallback）→ 前端 fallback 到 plain_json。
+    不进 LLM context（executor 内 strip）。
     """
 
     tool: str
@@ -59,6 +70,7 @@ class ToolCallResultEvent:
     affected_rows: int | None = None
     error_code: str | None = None
     error_msg: str | None = None
+    ui: "UIResult | None" = None
     type: Literal["tool_call_result"] = "tool_call_result"
 
 
@@ -171,6 +183,7 @@ def event_to_sse_data(event: AiStreamEvent) -> str:
             "args": event.args,  # snake_case 保留（LLM 参数命名）
             "risk": event.risk,
             "traceId": event.trace_id,
+            "chipTarget": event.chip_target,
         }
     elif isinstance(event, ToolCallResultEvent):
         payload = {
@@ -183,6 +196,7 @@ def event_to_sse_data(event: AiStreamEvent) -> str:
             "errorMsg": event.error_msg,
             "durationMs": event.duration_ms,
             "affectedRows": event.affected_rows,
+            "ui": _ui_to_dict(event.ui),
         }
     elif isinstance(event, ConfirmationRequiredEvent):
         payload = {
@@ -235,6 +249,19 @@ def _dry_run_to_dict(s: DryRunSummary | None) -> dict[str, Any] | None:
         "summary": s.summary,
         "affectedCount": s.affected_count,
         "affectedExamples": s.affected_examples,
+    }
+
+
+def _ui_to_dict(ui: "UIResult | None") -> dict[str, Any] | None:
+    """UIResult 转 camelCase dict（None 字段交给 _compact_json 移除）"""
+    if ui is None:
+        return None
+    return {
+        "viewType": ui.view_type,
+        "viewData": ui.view_data,
+        "audit": ui.audit,
+        "labelKey": ui.label_key,
+        "labelParams": ui.label_params,
     }
 
 

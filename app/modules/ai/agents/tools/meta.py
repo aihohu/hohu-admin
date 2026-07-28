@@ -88,6 +88,25 @@ class AiToolMeta:
     max_groups: int = 20
     """group_by 返回组数上限，超限截断"""
 
+    # ============ Tool Result View（v1.6+ SR-13） ============
+    result_view: str = "plain_json"
+    """spec 2026-07-16 §2.4: 标准 view_type key，决定前端按哪个组件渲染 result。
+    必须在 STANDARD_VIEW_TYPES 内（启动校验）：
+      - rows_affected: 写操作影响行数（user.batch_delete）
+      - data_list: 列表查询（role.list / dept.list）
+      - stats_chart: 统计图表（user.stats）
+      - detail_card: 单实体详情（job.update_cron 返回值）
+      - plain_json: fallback（user.count 这种纯数字 + chip 跳转）
+    默认 'plain_json' 向后兼容老 tool。"""
+
+    chip_target: str | None = None
+    """spec 2026-07-16 §3 决策 2: chip 跳转目标路径（如 '/system/user'）。
+    readonly tool 声明 chip_target 后：
+      - 后端写 ai:query_cache hash 时 module 字段填此路径
+      - 前端 tool_call_started 事件携带 chipTarget，不再硬编码 CHIP_TARGETS map
+    None = 不显示 chip（写 tool / stats tool / detail tool 都不需要 chip）。
+    替代旧字段 query_cache_module（保留为 alias，新代码用 chip_target）。"""
+
     # ============ chip 跳转（§2.9 / §8.7） ============
     query_cache_module: str | None = None
     """readonly tool 的查询条件写入 ai:query_cache:<trace_id> hash 时的 module 字段，
@@ -130,4 +149,16 @@ SENSITIVE_INPUT_BLOCKLIST = (
     "session_token",
     "secret",
     "token",
+)
+
+# spec 2026-07-16-tool-result-view-design.md §2.3: 标准 view_type registry
+# 启动校验：meta.result_view 必须在此集合内（registry.validate_on_startup）
+STANDARD_VIEW_TYPES: frozenset[str] = frozenset(
+    {
+        "rows_affected",
+        "data_list",
+        "stats_chart",
+        "detail_card",
+        "plain_json",
+    }
 )

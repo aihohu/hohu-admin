@@ -21,7 +21,12 @@
 """
 
 from .decorator import ai_tool
-from .meta import SENSITIVE_INPUT_BLOCKLIST, SHARED_AGENT_CODE, AiToolMeta
+from .meta import (
+    SENSITIVE_INPUT_BLOCKLIST,
+    SHARED_AGENT_CODE,
+    STANDARD_VIEW_TYPES,
+    AiToolMeta,
+)
 from .registry import (
     RegisteredTool,
     ToolRegistry,
@@ -39,6 +44,7 @@ __all__ = [
     "RegisteredTool",
     "SENSITIVE_INPUT_BLOCKLIST",
     "SHARED_AGENT_CODE",
+    "STANDARD_VIEW_TYPES",
     "ToolRegistry",
     "ToolRegistryError",
     "ai_tool",

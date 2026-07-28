@@ -1,22 +1,57 @@
-"""ToolResult — Gateway 执行结果标准化
+"""ToolResult / UIResult — Gateway 执行结果标准化
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §6.5 / §9.6。
+按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §6.5 / §9.6 +
+spec docs/specs/2026-07-16-tool-result-view-design.md §2.1/§2.2。
 
-Gateway 内部所有 tool 执行都返回 ToolResult，统一异常转译：
-  - 成功: ToolResult(ok=True, data=...)
-  - 业务异常: ToolResult(ok=False, error_code=..., error_msg=...)
-  - 不中断 SSE 流，LLM 看到 ok=false 会自然反问澄清
+双层设计（决策 3 修正：ui 可选，lint 强制 builtin tool 填 ui）：
+  ToolResult.data — 给 LLM（精简，进 prompt cache，serialize_for_llm 脱敏）
+  ToolResult.ui  — 给前端（丰富，不进 LLM context）
+
+业务方写 builtin tool 时**强烈推荐**填 ui（lint 强制，Task 9）：
+  return ToolResult.success(
+      data={"deleted": 2},
+      ui=UIResult(view_type="rows_affected", view_data={"count": 2, "ids": [...]}),
+  )
+
+executor 兼容路径（dict / list 返回值，第三方 tool 或老代码）：
+  return ToolResult.success(data=safe_data)  # ui=None，前端 fallback plain_json
 """
 
 from dataclasses import dataclass, field
 from typing import Any
 
 
+@dataclass(frozen=True)
+class UIResult:
+    """UI 层结果（spec §2.2）— 给前端按 view_type 路由组件用，不进 LLM prompt。
+
+    view_data 不强校验 schema（决策 10）：后端保持 dict[str, Any] 灵活，
+    前端 TS discriminated union 给类型安全。业务方写错只影响自家 tool 渲染。
+    """
+
+    view_type: str
+    """标准 view_type key（启动校验，必须在 STANDARD_VIEW_TYPES）"""
+
+    view_data: dict[str, Any]
+    """view_type 对应组件的 props（如 rows_affected 的 {count, ids}）"""
+
+    audit: dict[str, Any] = field(default_factory=dict)
+    """标准化审计字段（affected_user_ids / before_value / after_value 等），
+    写入 ai_operation_log.result_summary 供后台审计页反查。决策 4 注：与
+    args_summary_fields 正交——前者审计入参，后者审计结果。"""
+
+    label_key: str = ""
+    """i18n key（如 ai.tool.user.batch_delete.result）；空字符串表示用默认文案"""
+
+    label_params: dict[str, Any] = field(default_factory=dict)
+    """i18n 插值参数（如 {"count": 2} → "已删除 {count} 行"）"""
+
+
 @dataclass
 class ToolResult:
     """Gateway tool 执行结果（统一容器）
 
-    PydanticAI 包装层把 ToolResult 转成 LLM 可读的格式（如 JSON 字符串）返回给 LLM。
+    PydanticAI 包装层把 ToolResult.data 转成 LLM 可读的格式返回给 LLM。
     API 层（如 /ai/confirm 端点）也可直接序列化 ToolResult 给前端。
     """
 
@@ -24,7 +59,12 @@ class ToolResult:
     """True = 业务成功；False = 业务异常或鉴权拒绝"""
 
     data: Any = None
-    """业务返回值（ok=True 时有效）"""
+    """业务返回值（ok=True 时有效）— 给 LLM 看，serialize_for_llm 脱敏后进 prompt"""
+
+    ui: UIResult | None = None
+    """UI 层结果（spec §2.1）— 给前端用，不进 LLM context。
+    None（ok=False / executor 兼容路径 / 业务方未声明）→ 前端 fallback plain_json。
+    builtin tool 由 lint 强制带 ui（Task 9）。"""
 
     error_code: str = ""
     """UPPER_SNAKE_CASE 错误码（ok=False 时必填），如 AI_DATA_SCOPE_VIOLATION"""
@@ -33,12 +73,24 @@ class ToolResult:
     """给 LLM 看的错误描述（ok=False 时必填），LLM 据此反问用户"""
 
     meta: dict[str, Any] = field(default_factory=dict)
-    """附加元信息（如 execution_mode / dry_run_count / duration_ms），不进 LLM context"""
+    """执行元信息（duration_ms / execution_mode / retry_count），不进 SSE，仅日志 / metric"""
 
     @classmethod
-    def success(cls, data: Any, **meta: Any) -> "ToolResult":
-        """构造成功结果"""
-        return cls(ok=True, data=data, meta=meta)
+    def success(
+        cls,
+        data: Any,
+        *,
+        ui: UIResult | None = None,
+        **meta: Any,
+    ) -> "ToolResult":
+        """构造成功结果
+
+        Args:
+            data: 给 LLM 的精简数据（进 prompt cache）
+            ui: 给前端 UI 的丰富数据（不进 prompt）；None 时前端 fallback plain_json
+            **meta: 执行元信息（duration_ms 等，不进 SSE）
+        """
+        return cls(ok=True, data=data, ui=ui, meta=meta)
 
     @classmethod
     def failure(cls, error_code: str, error_msg: str, **meta: Any) -> "ToolResult":

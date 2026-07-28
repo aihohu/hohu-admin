@@ -20,6 +20,7 @@ from typing import Any
 from sqlalchemy import func, select
 
 from app.modules.ai.agents.gateway import ensure_targets_in_scope
+from app.modules.ai.agents.gateway.result import ToolResult, UIResult
 from app.modules.ai.agents.tools.decorator import ai_tool
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.agents.tools.stats_validator import (
@@ -47,10 +48,12 @@ from app.modules.system.models.user import User
         risk="low",
         readonly=True,
         allowed_filters=("status", "user_gender"),
-        query_cache_module="system/user",
+        chip_target="/system/user",
     )
 )
-async def user_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) -> dict:
+async def user_count(
+    ctx: AiToolContext, filters: dict[str, Any] | None = None
+) -> ToolResult:
     """统计满足条件的用户数量，仅返回数字
 
     filters:
@@ -68,8 +71,17 @@ async def user_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) 
         # sys_user 表的 allowed_filters 字段都是 varchar，强制 stringify 防类型错
         stmt = stmt.where(getattr(User, key) == str(value))
 
-    count = await ctx.db.scalar(stmt)
-    return {"count": int(count or 0)}
+    count = int(await ctx.db.scalar(stmt) or 0)
+    return ToolResult.success(
+        data={"count": count},
+        ui=UIResult(
+            view_type="plain_json",
+            view_data={"count": count},
+            audit={"count": count},
+            label_key="ai.tool.user.count.result",
+            label_params={"count": count},
+        ),
+    )
 
 
 # ============ user.stats ============
@@ -89,13 +101,14 @@ async def user_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) 
         allowed_filters=("status", "user_gender"),
         allowed_group_by=("user_gender", "status"),
         max_groups=20,
+        result_view="stats_chart",
     )
 )
 async def user_stats(
     ctx: AiToolContext,
     group_by: str | None = None,
     filters: dict[str, Any] | None = None,
-) -> list[dict]:
+) -> ToolResult:
     """按维度分组统计用户数量，返回 [{group, count}]
 
     group_by:
@@ -120,7 +133,18 @@ async def user_stats(
         stmt = stmt.where(getattr(User, key) == str(value))
 
     rows = (await ctx.db.execute(stmt)).all()
-    return [{"group": str(g) if g is not None else "null", "count": c} for g, c in rows]
+    groups = [
+        {"group": str(g) if g is not None else "null", "count": c} for g, c in rows
+    ]
+    return ToolResult.success(
+        data={"groups": groups},
+        ui=UIResult(
+            view_type="stats_chart",
+            view_data={"rows": groups},
+            audit={"total": sum(g["count"] for g in groups)},
+            label_key="ai.tool.user.stats.result",
+        ),
+    )
 
 
 # ============ user.distinct ============
@@ -139,10 +163,10 @@ async def user_stats(
         readonly=True,
         allowed_group_by=("user_gender", "status"),
         max_groups=50,
-        query_cache_module="system/user",
+        chip_target="/system/user",
     )
 )
-async def user_distinct(ctx: AiToolContext, field: str) -> list[str]:
+async def user_distinct(ctx: AiToolContext, field: str) -> ToolResult:
     """枚举用户某字段的去重值
 
     field: user_gender / status（复用 allowed_group_by 作白名单，语义一致）
@@ -157,7 +181,17 @@ async def user_distinct(ctx: AiToolContext, field: str) -> list[str]:
         .limit(ctx.tool_meta.max_groups)
     )
     rows = (await ctx.db.execute(stmt)).scalars().all()
-    return [str(v) if v is not None else "null" for v in rows]
+    values = [str(v) if v is not None else "null" for v in rows]
+    return ToolResult.success(
+        data={"values": values},
+        ui=UIResult(
+            view_type="plain_json",
+            view_data={"values": values},
+            audit={"count": len(values)},
+            label_key="ai.tool.user.distinct.result",
+            label_params={"count": len(values)},
+        ),
+    )
 
 
 # ============ role.count（v1.5+，复用 user.count 模式，演示 chip 跳转回放到 role 模块页） ============
@@ -175,10 +209,12 @@ async def user_distinct(ctx: AiToolContext, field: str) -> list[str]:
         risk="low",
         readonly=True,
         allowed_filters=("status",),
-        query_cache_module="system/role",
+        chip_target="/system/role",
     )
 )
-async def role_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) -> dict:
+async def role_count(
+    ctx: AiToolContext, filters: dict[str, Any] | None = None
+) -> ToolResult:
     """统计角色数量，仅返回数字
 
     filters:
@@ -191,8 +227,17 @@ async def role_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) 
         # sys_role 表字段都是 varchar，强制 stringify 防类型错
         stmt = stmt.where(getattr(Role, key) == str(value))
 
-    count = await ctx.db.scalar(stmt)
-    return {"count": int(count or 0)}
+    count = int(await ctx.db.scalar(stmt) or 0)
+    return ToolResult.success(
+        data={"count": count},
+        ui=UIResult(
+            view_type="plain_json",
+            view_data={"count": count},
+            audit={"count": count},
+            label_key="ai.tool.role.count.result",
+            label_params={"count": count},
+        ),
+    )
 
 
 # ============ dept.count（v1.5+，演示 chip 跳转回放到 dept 模块页） ============
@@ -207,10 +252,12 @@ async def role_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) 
         risk="low",
         readonly=True,
         allowed_filters=("status",),
-        query_cache_module="system/dept",
+        chip_target="/system/dept",
     )
 )
-async def dept_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) -> dict:
+async def dept_count(
+    ctx: AiToolContext, filters: dict[str, Any] | None = None
+) -> ToolResult:
     """统计部门数量，仅返回数字
 
     filters:
@@ -223,8 +270,17 @@ async def dept_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) 
         # sys_dept 表字段都是 varchar，强制 stringify 防类型错
         stmt = stmt.where(getattr(Dept, key) == str(value))
 
-    count = await ctx.db.scalar(stmt)
-    return {"count": int(count or 0)}
+    count = int(await ctx.db.scalar(stmt) or 0)
+    return ToolResult.success(
+        data={"count": count},
+        ui=UIResult(
+            view_type="plain_json",
+            view_data={"count": count},
+            audit={"count": count},
+            label_key="ai.tool.dept.count.result",
+            label_params={"count": count},
+        ),
+    )
 
 
 # ============ role.list / dept.list（v1.5+ SR-22，LLM 需少量行而非仅 count） ============
@@ -246,22 +302,26 @@ def _coerce_list_limit(limit: int | None) -> int:
         name="role.list",
         agent="role_mgmt",
         summary=(
-            "List roles → {total, limit, records:[{id,name,code,status}]}. "
+            "List roles → {total, limit, sample[3]}. Frontend renders data_list. "
             "Use role.count for count-only."
         ),
         required_perms=("system:role:list",),
         risk="low",
         readonly=True,
         allowed_filters=("status",),
-        query_cache_module="system/role",
+        chip_target="/system/role",
+        result_view="data_list",
     )
 )
 async def role_list(
     ctx: AiToolContext,
     filters: dict[str, Any] | None = None,
     limit: int | None = None,
-) -> dict:
+) -> ToolResult:
     """列出角色，返回前 N 条精简字段
+
+    LLM 看 data.{total, limit, sample[3]}（精简，进 prompt cache）；
+    前端看 ui.view_data.{columns, rows}（全量 limit 条，渲染 table）。
 
     filters:
         status: '1' (启用) / '2' (禁用)
@@ -276,7 +336,9 @@ async def role_list(
         base = base.where(getattr(Role, key) == str(value))
 
     # total 反映真实总数（不受 limit 截断），供 LLM 判断是否需 chip 跳转
-    total = await ctx.db.scalar(select(func.count()).select_from(base.subquery()))
+    total = int(
+        await ctx.db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    )
 
     rows = (
         (await ctx.db.execute(base.order_by(Role.role_id.asc()).limit(safe_limit)))
@@ -284,19 +346,35 @@ async def role_list(
         .all()
     )
 
-    return {
-        "total": int(total or 0),
-        "limit": safe_limit,
-        "records": [
-            {
-                "id": str(r.role_id),
-                "name": r.role_name,
-                "code": r.role_code,
-                "status": r.status,
-            }
-            for r in rows
-        ],
-    }
+    columns = [
+        {"key": "id", "label": "ID"},
+        {"key": "name", "label": "名称"},
+        {"key": "code", "label": "编码"},
+        {"key": "status", "label": "状态"},
+    ]
+    records = [
+        {
+            "id": str(r.role_id),
+            "name": r.role_name,
+            "code": r.role_code,
+            "status": r.status,
+        }
+        for r in rows
+    ]
+    return ToolResult.success(
+        data={
+            "total": total,
+            "limit": safe_limit,
+            "sample": records[:3],  # 给 LLM 看前 3 条（prompt cache 友好）
+        },
+        ui=UIResult(
+            view_type="data_list",
+            view_data={"columns": columns, "rows": records},
+            audit={"total": total},
+            label_key="ai.tool.role.list.result",
+            label_params={"count": total},
+        ),
+    )
 
 
 @ai_tool(
@@ -304,22 +382,26 @@ async def role_list(
         name="dept.list",
         agent="dept_mgmt",
         summary=(
-            "List depts → {total, limit, records:[{id,name,parent_id,status}]}. "
+            "List depts → {total, limit, sample[3]}. Frontend renders data_list. "
             "Use dept.count for count-only."
         ),
         required_perms=("system:dept:list",),
         risk="low",
         readonly=True,
         allowed_filters=("status",),
-        query_cache_module="system/dept",
+        chip_target="/system/dept",
+        result_view="data_list",
     )
 )
 async def dept_list(
     ctx: AiToolContext,
     filters: dict[str, Any] | None = None,
     limit: int | None = None,
-) -> dict:
+) -> ToolResult:
     """列出部门，返回前 N 条精简字段
+
+    LLM 看 data.{total, limit, sample[3]}（精简，进 prompt cache）；
+    前端看 ui.view_data.{columns, rows}（全量 limit 条，渲染 table）。
 
     filters:
         status: '1' (启用) / '0' (禁用)
@@ -333,7 +415,9 @@ async def dept_list(
     for key, value in filters.items():
         base = base.where(getattr(Dept, key) == str(value))
 
-    total = await ctx.db.scalar(select(func.count()).select_from(base.subquery()))
+    total = int(
+        await ctx.db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    )
 
     rows = (
         (await ctx.db.execute(base.order_by(Dept.dept_id.asc()).limit(safe_limit)))
@@ -341,19 +425,35 @@ async def dept_list(
         .all()
     )
 
-    return {
-        "total": int(total or 0),
-        "limit": safe_limit,
-        "records": [
-            {
-                "id": str(d.dept_id),
-                "name": d.dept_name,
-                "parent_id": str(d.parent_id) if d.parent_id else None,
-                "status": d.status,
-            }
-            for d in rows
-        ],
-    }
+    columns = [
+        {"key": "id", "label": "ID"},
+        {"key": "name", "label": "名称"},
+        {"key": "parent_id", "label": "父部门 ID"},
+        {"key": "status", "label": "状态"},
+    ]
+    records = [
+        {
+            "id": str(d.dept_id),
+            "name": d.dept_name,
+            "parent_id": str(d.parent_id) if d.parent_id else None,
+            "status": d.status,
+        }
+        for d in rows
+    ]
+    return ToolResult.success(
+        data={
+            "total": total,
+            "limit": safe_limit,
+            "sample": records[:3],
+        },
+        ui=UIResult(
+            view_type="data_list",
+            view_data={"columns": columns, "rows": records},
+            audit={"total": total},
+            label_key="ai.tool.dept.list.result",
+            label_params={"count": total},
+        ),
+    )
 
 
 # ============ user.batch_delete（destructive + HITL，spec §11.3 示例） ============
@@ -407,6 +507,7 @@ async def _resolve_users(
         risk="destructive",
         hitl_always=True,
         dry_run_supported=True,
+        result_view="rows_affected",
     )
 )
 async def user_batch_delete(
@@ -415,7 +516,7 @@ async def user_batch_delete(
     user_ids: list[int] | None = None,
     user_names: list[str] | None = None,
     phones: list[str] | None = None,
-) -> dict[str, Any]:
+) -> ToolResult:
     """Delete users by their identifiers.
 
     Call this tool immediately when the user requests deletion — the HITL
@@ -453,10 +554,19 @@ async def user_batch_delete(
     count = await user_service.batch_delete_users(
         ctx.db, resolved_ids, current_user_id=ctx.user.user_id
     )
-    return {
-        "deleted": count,
-        "user_ids": [str(i) for i in resolved_ids],
-    }
+    # spec 2026-07-16 §2.4: LLM 只看 {"deleted": N}（user_ids 不进 prompt cache），
+    # 受影响 IDs 进 ui.view_data.ids + ui.audit.affected_user_ids（后台审计页反查）。
+    str_ids = [str(i) for i in resolved_ids]
+    return ToolResult.success(
+        data={"deleted": count},
+        ui=UIResult(
+            view_type="rows_affected",
+            view_data={"count": count, "ids": str_ids},
+            audit={"affected_user_ids": str_ids},
+            label_key="ai.tool.user.batch_delete.result",
+            label_params={"count": count},
+        ),
+    )
 
 
 async def _dry_run_user_batch_delete(

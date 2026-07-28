@@ -16,6 +16,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from app.core.exceptions import BusinessRuleException
+from app.modules.ai.agents.gateway.result import ToolResult, UIResult
 from app.modules.ai.agents.tools.decorator import ai_tool
 from app.modules.ai.agents.tools.file_parser import (
     SUPPORTED_MIME_TYPES,
@@ -45,13 +46,14 @@ def _accepted_mime_types() -> tuple[str, ...]:
             "Pass file_id. Raw bytes never enter LLM."
         ),
         readonly=True,
+        result_view="plain_json",
     )
 )
 async def file_parse(
     ctx: AiToolContext,
     file_id: str,
     hint: str = "",  # noqa: ARG001  审计可见，不参与解析逻辑
-) -> dict:
+) -> ToolResult:
     """解析用户上传的文件，返回结构化摘要（rows / columns / 前 3 行预览）
 
     Args:
@@ -59,7 +61,9 @@ async def file_parse(
         hint: 用途提示（如 "用户批量导入模板"），仅用于审计，不参与解析
 
     Returns:
-        FileParseResult 的 dict 形式（cell 已 stringify）
+        ToolResult：data 给 LLM（{rows, columns, preview, parser, file_size}，
+        cell 已 stringify），ui 给前端 plain_json 兜底渲染（无 chip 跳转 —
+        文件预览自包含，无模块页可去）。
 
     Raises:
         BusinessRuleException: AI_FILE_NOT_FOUND / AI_FILE_TYPE_UNSUPPORTED / AI_FILE_TOO_LARGE
@@ -89,4 +93,21 @@ async def file_parse(
         file_path=Path(file_record.file_path),
         mime_type=file_record.mime_type or "",
     )
-    return asdict(result)
+    parsed = asdict(result)
+    rows_count = int(parsed.get("rows", 0))
+    columns = parsed.get("columns", [])
+    preview = parsed.get("preview", [])
+    return ToolResult.success(
+        data=parsed,
+        ui=UIResult(
+            view_type="plain_json",
+            view_data={
+                "rows": rows_count,
+                "columns": columns,
+                "preview": preview,
+            },
+            audit={"rows_parsed": rows_count},
+            label_key="ai.tool.file.parse.result",
+            label_params={"rows": rows_count},
+        ),
+    )

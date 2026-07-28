@@ -119,6 +119,18 @@ class TestFileParseRegistry:
         assert reg is not None
         assert reg.meta.readonly is True
 
+    def test_meta_result_view_plain_json(self) -> None:
+        """spec 2026-07-16 §2.4: file.parse 显式声明 result_view=plain_json"""
+        reg = ToolRegistry.get().find("file.parse")
+        assert reg is not None
+        assert reg.meta.result_view == "plain_json"
+
+    def test_meta_no_chip_target(self) -> None:
+        """file.parse 是纯读但无 chip_target — 文件预览自包含，无模块页可去"""
+        reg = ToolRegistry.get().find("file.parse")
+        assert reg is not None
+        assert reg.meta.chip_target is None
+
     def test_meta_accepts_file_covers_supported_mimes(self) -> None:
         """accepts_file 必须覆盖所有 parser 支持的 MIME"""
         reg = ToolRegistry.get().find("file.parse")
@@ -149,10 +161,25 @@ class TestFileParseFunction:
         )
         ctx = _make_ctx(db_session)
         result = await file_parse(ctx, file_id=str(_FILE_ID), hint="用户导入")
-        assert result["parser"] == "CsvParser"
-        assert result["rows"] == 2
-        assert result["columns"] == ["name", "email"]
-        assert result["preview"][0] == {"name": "alice", "email": "a@x.com"}
+        # ToolResult: data 给 LLM（含 parser/rows/columns/preview 全字段）
+        assert result.ok is True
+        assert result.data["parser"] == "CsvParser"
+        assert result.data["rows"] == 2
+        assert result.data["columns"] == ["name", "email"]
+        assert result.data["preview"][0] == {"name": "alice", "email": "a@x.com"}
+        # UIResult: ui 给前端 plain_json 渲染
+        assert result.ui is not None
+        assert result.ui.view_type == "plain_json"
+        assert result.ui.view_data["rows"] == 2
+        assert result.ui.view_data["columns"] == ["name", "email"]
+        assert result.ui.view_data["preview"][0] == {
+            "name": "alice",
+            "email": "a@x.com",
+        }
+        # 审计字段（行数）
+        assert result.ui.audit == {"rows_parsed": 2}
+        assert result.ui.label_key == "ai.tool.file.parse.result"
+        assert result.ui.label_params == {"rows": 2}
 
     async def test_parse_file_not_found_raises(self, db_session: AsyncSession) -> None:
         ctx = _make_ctx(db_session)

@@ -17,6 +17,7 @@ import pytest
 from app.modules.ai.agents.tools import (
     SENSITIVE_INPUT_BLOCKLIST,
     SHARED_AGENT_CODE,
+    STANDARD_VIEW_TYPES,
     AiToolMeta,
     ToolRegistry,
     ToolRegistryError,
@@ -534,3 +535,60 @@ class TestConstants:
         """spec §7.2: 关键字段必须命中黑名单"""
         required = {"password", "password_hash", "api_key", "secret", "token"}
         assert required <= set(SENSITIVE_INPUT_BLOCKLIST)
+
+
+# ============ v1.6+ SR-13: result_view 启动校验 ============
+
+
+class TestValidateResultViewOnStartup:
+    """spec 2026-07-16-tool-result-view-design.md §2.4：result_view 启动校验。"""
+
+    async def test_invalid_result_view_rejected(self) -> None:
+        """meta.result_view 不在 STANDARD_VIEW_TYPES 时启动校验失败。"""
+        meta = AiToolMeta(
+            name="test.invalid_view",
+            agent="user_mgmt",
+            summary="t",
+            required_perms=("system:user:add",),
+            risk="low",
+        )
+        # 绕过 frozen dataclass 校验，直接改 result_view
+        object.__setattr__(meta, "result_view", "invalid_view_type")
+        assert "invalid_view_type" not in STANDARD_VIEW_TYPES
+
+        registry = ToolRegistry.get()
+        registry.register(meta, _noop_fn)
+
+        # mock db：agent / perm 都存在，绕过 step 1-3，让 step 5 触发
+        mock_db = MagicMock()
+        scalars_mock_1 = MagicMock()
+        scalars_mock_1.all.return_value = ["user_mgmt"]
+        result_1 = MagicMock()
+        result_1.scalars.return_value = scalars_mock_1
+
+        scalars_mock_2 = MagicMock()
+        scalars_mock_2.all.return_value = ["system:user:add"]
+        result_2 = MagicMock()
+        result_2.scalars.return_value = scalars_mock_2
+
+        mock_db.execute = AsyncMock(side_effect=[result_1, result_2])
+
+        with pytest.raises(ToolRegistryError, match="invalid_view_type"):
+            await registry.validate_on_startup(mock_db)
+
+    def test_default_result_view_is_plain_json(self) -> None:
+        """未声明 result_view 时默认 'plain_json'。"""
+        meta = AiToolMeta(
+            name="test.default",
+            agent="user_mgmt",
+            summary="t",
+            required_perms=("p",),
+            risk="low",
+        )
+        assert meta.result_view == "plain_json"
+        assert "plain_json" in STANDARD_VIEW_TYPES
+
+    def test_standard_view_types_has_five_members(self) -> None:
+        assert STANDARD_VIEW_TYPES == frozenset(
+            {"rows_affected", "data_list", "stats_chart", "detail_card", "plain_json"}
+        )
