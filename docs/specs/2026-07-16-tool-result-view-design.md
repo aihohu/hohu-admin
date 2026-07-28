@@ -1,12 +1,39 @@
 # Tool Result View Registry（分层 result + 标准 view type） — v1.6+
 
-**Status**: ⚠️ Plan v1.6+（待实现，2026-07-16 决策登记）
+**Status**: ✅ Plan 已完成（2026-07-28）
+**Completed**: 2026-07-28
 **Created**: 2026-07-16
 **Owner**: hohu core team
 **Depends on**: §8.1 SSE 协议（已落地）/ §5.1 AiToolMeta（已落地）
 **Related**: [`2026-07-02-ai-tool-gateway-design.md`](./2026-07-02-ai-tool-gateway-design.md) §8.1 / §14 / §22 SR-13
 
 ---
+
+## Ship 记录（2026-07-28）
+
+- 后端 9 commit（Task 1-9）+ 前端 5 commit（Task 10-14）
+- 测试：Task 1-9 加 ~25 个新单测；全量 1150+ pytest 绿；前端 typecheck 绿
+- 10 个 builtin tool 全部迁移到 ToolResult.success(data=..., ui=...)
+- 新增 lint `scripts/check_ai_tools_ui.py`（pre-commit 集成）强制 builtin tool 带 ui=
+
+### Ship-time 决策记录
+
+5. **view_type 5 种**（spec §2.3 收窄）：移除 redirect_chip（基于 tool 性质非 result）和 confirmation_summary（时态早于 result）。
+6. **chip_target 声明式**（替代 query_cache_module + 前端 CHIP_TARGETS map），旧字段保留 alias。
+7. **ToolResult.success(data, *, ui=None)** ui 可选 + lint 强制 builtin tool 函数带 ui（决策 3 修正，避免 break 现有 executor / 测试 / 第三方 tool）。
+8. **一次性全迁移 10 个 builtin tool**（user.count/stats/distinct + role.count/list + dept.count/list + user.batch_delete + job.update_cron + file.parse）。
+9. **affected_rows 优先级**：dry_run_count > ui.audit > _infer_affected_rows 推断。
+10. **ui 字段不进 LLM context**（executor isinstance 双路径，business 返回 ToolResult 时仅脱敏 data）。
+11. **TS discriminated union 给 view_data 强类型；后端不强校验 view_data schema**。
+
+### 与原 spec 的偏差
+
+| # | spec 原计划 | 实施 | 原因 |
+|---|---|---|---|
+| 1 | §2.3 view_type 7 种 | 5 种（移除 chip / confirmation） | 范畴错误（chip 基于 tool 性质，confirmation 时态早于 result） |
+| 2 | §2.1 ToolResult.data + ui 都必填 | ui 可选 + lint 强制 | 避免 break 现有 executor.py:805 fallback + test_events.py + 第三方 tool；lint 等价约束 builtin tool |
+| 3 | §3 Phase 1-3 渐进迁移 | 一次性全迁移 10 tool | 用户决策：避免长期 fallback plain_json 没压力 |
+| 4 | job.update_cron audit 用 before_value/after_value | 实际用 before/after | 决策 10 (audit dict 灵活)，命名上更紧凑；可在后续重构统一 |
 
 ## 1. Context
 

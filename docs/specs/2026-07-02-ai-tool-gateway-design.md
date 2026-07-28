@@ -2234,7 +2234,7 @@ AI 已可用但只能 autonomous：
 | 多 Agent + Supervisor 路由 | 启用 ≥2 业务 Agent | `available_agents: list[AiAgent]` + `build_supervisor()` |
 | 跨会话 HITL 恢复 | 用户反馈"刷新页面后丢失确认" | `GET /ai/pending-confirmations` + 前端 30s 心跳 |
 | ✅ **SSE 续传（HITL 期热接管）— 已完成 2026-07-16**（spec [`2026-07-13-sse-resume-design.md`](./2026-07-13-sse-resume-design.md) / SR-9 / SR-10 / SR-11 / SR-12）| 网络抖动频繁 | SSE 标准 `id:` 字段 + `Last-Event-ID` 头 + Redis SETNX owner 锁（TTL 60s ≥ `AI_TOOL_TIMEOUT`） + `confirmation_resumed` 新事件 |
-| ⚠️ **Plan v1.6+ gap**：分层 tool result + view type registry（spec [`2026-07-16-tool-result-view-design.md`](./2026-07-16-tool-result-view-design.md) / SR-13）| TOB 开源协作：业务方加 tool 不应改前端代码；当前 `tool_call_result.result` 是 free-form dict，前端只能 JSON 打印或硬编码 by tool name | `ToolResult` 拆双层（LLM 层精简 dict + UI 层 `UIResult(view_type, view_data, audit)`）；`AiToolMeta.result_view` 启动校验；前端按 `view_type` 路由标准组件库（rows_affected / data_list / stats_chart / detail_card / redirect_chip / plain_json fallback）；UI 层数据不进 LLM prompt；i18n 走 `label_key` |
+| ✅ **分层 tool result + view type registry — 已完成 2026-07-28**（spec [`2026-07-16-tool-result-view-design.md`](./2026-07-16-tool-result-view-design.md) / SR-13）| TOB 开源协作：业务方加 tool 不应改前端代码 | 实施 detail 见 `2026-07-16-tool-result-view-design.md` Ship 记录块 |
 | Conversation Manager 摘要 | 长对话超 token | `ai_conversation_summary` 表 + 小模型摘要 |
 | ✅ **风险偏好 `risk_appetite` — 已完成 2026-07-20**（spec §5.3 / SR-21） | 不同 Agent 需不同阈值 | `AiAgent.risk_appetite: Literal["conservative", "balanced", "aggressive"]`（默认 `"balanced"`，向后兼容）+ `classify_execution_mode(risk_appetite=...)` 仅调整 high risk 的 dry_run_count 阈值；destructive / hitl_always / injection_hit 不受影响 |
 | 异步任务通道（`broadcast_to_user`） | 文件导出耗时 >30s | WebSocket / Redis pub/sub + arq 队列 |
