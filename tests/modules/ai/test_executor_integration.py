@@ -36,8 +36,8 @@ async def clean_env():
     """每个测试前：重建 redis_client + 清 Redis + reset hitl_manager + 清本轮测试日志。
 
     ai_operation_log 不能用 TRUNCATE（会清掉生产 AI 审计日志）。所有测试代码
-    通过 _build_deps 写入的行 trace_id 都是 'tr_test_001'，只 DELETE 这部分
-    精准清理，生产数据保持不动。
+    通过 _build_deps 写入的行 trace_id 都以 'tr_test_' 前缀开头（如 tr_test_001 /
+    tr_test_agent_pass / tr_test_agent_full），用 LIKE 精准清理，生产数据保持不动。
     """
     original_pool = redis_module.redis_pool
     original_client = redis_module.redis_client
@@ -72,7 +72,7 @@ async def clean_env():
     async with AsyncSessionLocal() as db:
         async with db.begin():
             await db.execute(
-                text("DELETE FROM ai_operation_log WHERE trace_id = 'tr_test_001'")
+                text("DELETE FROM ai_operation_log WHERE trace_id LIKE 'tr_test_%'")
             )
 
     yield
@@ -92,7 +92,7 @@ async def clean_env():
     async with AsyncSessionLocal() as db:
         async with db.begin():
             await db.execute(
-                text("DELETE FROM ai_operation_log WHERE trace_id = 'tr_test_001'")
+                text("DELETE FROM ai_operation_log WHERE trace_id LIKE 'tr_test_%'")
             )
 
     # 释放连接池避免跨测试 event loop 干扰
