@@ -507,6 +507,7 @@ async def _resolve_users(
         risk="destructive",
         hitl_always=True,
         dry_run_supported=True,
+        result_view="rows_affected",
     )
 )
 async def user_batch_delete(
@@ -515,7 +516,7 @@ async def user_batch_delete(
     user_ids: list[int] | None = None,
     user_names: list[str] | None = None,
     phones: list[str] | None = None,
-) -> dict[str, Any]:
+) -> ToolResult:
     """Delete users by their identifiers.
 
     Call this tool immediately when the user requests deletion — the HITL
@@ -553,10 +554,19 @@ async def user_batch_delete(
     count = await user_service.batch_delete_users(
         ctx.db, resolved_ids, current_user_id=ctx.user.user_id
     )
-    return {
-        "deleted": count,
-        "user_ids": [str(i) for i in resolved_ids],
-    }
+    # spec 2026-07-16 §2.4: LLM 只看 {"deleted": N}（user_ids 不进 prompt cache），
+    # 受影响 IDs 进 ui.view_data.ids + ui.audit.affected_user_ids（后台审计页反查）。
+    str_ids = [str(i) for i in resolved_ids]
+    return ToolResult.success(
+        data={"deleted": count},
+        ui=UIResult(
+            view_type="rows_affected",
+            view_data={"count": count, "ids": str_ids},
+            audit={"affected_user_ids": str_ids},
+            label_key="ai.tool.user.batch_delete.result",
+            label_params={"count": count},
+        ),
+    )
 
 
 async def _dry_run_user_batch_delete(

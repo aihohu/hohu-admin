@@ -6,6 +6,9 @@ catch 成「预估失败（内部错误）」，用户抽屉显示 count=0。
 
 bug 现场（2026-07-18 E2E）：发「删除用户 cs123」→ 抽屉弹 count=0 + 内部错误，
 stderr 是 AttributeError: 'User' object has no attribute 'phone'。
+
+Task 7（2026-07-28）：migrate 到 ToolResult.success + UIResult(rows_affected)。
+LLM 只看 {"deleted": N}，user_ids 移到 ui.view_data.ids + ui.audit.affected_user_ids。
 """
 
 # ruff: noqa: PLC0415
@@ -14,10 +17,15 @@ from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import Select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.core.context import AiToolContext, DataScopeContext
-from app.modules.system.ai_tools import _dry_run_user_batch_delete, _resolve_users
+from app.modules.system.ai_tools import (
+    _dry_run_user_batch_delete,
+    _resolve_users,
+    user_batch_delete,
+)
 from app.modules.system.models.user import User
 
 
@@ -108,3 +116,70 @@ class TestDryRunExamplesUseUserPhone:
         assert result.ok is False
         assert result.count == 0
         assert "未找到匹配用户" in (result.reason or "")
+
+
+async def _add_user(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    user_name: str,
+) -> None:
+    """建用户（绕过 ORM 关系，直接 insert）"""
+    db.add(
+        User(
+            user_id=user_id,
+            user_name=user_name,
+            nickname=user_name,
+            hashed_password="$2b$12$dummy",
+            status="1",
+        )
+    )
+    await db.flush()
+
+
+@pytest.mark.usefixtures("db_session")
+class TestUserBatchDeleteToolResult:
+    """Task 7: user_batch_delete 迁移到 ToolResult.success + UIResult(rows_affected)"""
+
+    async def test_returns_tool_result_with_rows_affected_view(
+        self, db_session
+    ) -> None:
+        """LLM 只看 {"deleted": N}；user_ids 进 ui.view_data.ids + ui.audit.affected_user_ids"""
+        await _add_user(db_session, user_id=1001, user_name="bd1")
+        await _add_user(db_session, user_id=1002, user_name="bd2")
+        await db_session.flush()
+
+        ctx = _make_ctx(
+            db_session,
+            accessible_user_scope=None,
+        )
+        # data_scope.filters 限定为这两个 ID，避免误删 admin 等历史用户
+        ctx.data_scope.filters.append(User.user_id.in_([1001, 1002]))
+
+        result = await user_batch_delete(ctx, user_ids=[1001, 1002])
+
+        # LLM 只看 deleted count（user_ids 不在 data 里）
+        assert result.ok is True
+        assert result.data == {"deleted": 2}
+        # UI 层：rows_affected 视图
+        assert result.ui is not None
+        assert result.ui.view_type == "rows_affected"
+        assert result.ui.view_data["count"] == 2
+        assert result.ui.view_data["ids"] == ["1001", "1002"]
+        # 审计字段：affected_user_ids 供后台审计页反查
+        assert result.ui.audit["affected_user_ids"] == ["1001", "1002"]
+
+    async def test_single_delete_returns_count_one(self, db_session) -> None:
+        """单条删除 → count=1 + ids 长度 1"""
+        await _add_user(db_session, user_id=1003, user_name="bd3")
+        await db_session.flush()
+
+        ctx = _make_ctx(db_session)
+        ctx.data_scope.filters.append(User.user_id.in_([1003]))
+
+        result = await user_batch_delete(ctx, user_ids=[1003])
+
+        assert result.data == {"deleted": 1}
+        assert result.ui.view_data["count"] == 1
+        assert result.ui.view_data["ids"] == ["1003"]
+        assert result.ui.audit["affected_user_ids"] == ["1003"]
