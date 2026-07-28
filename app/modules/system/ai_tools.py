@@ -302,22 +302,26 @@ def _coerce_list_limit(limit: int | None) -> int:
         name="role.list",
         agent="role_mgmt",
         summary=(
-            "List roles → {total, limit, records:[{id,name,code,status}]}. "
+            "List roles → {total, limit, sample[3]}. Frontend renders data_list. "
             "Use role.count for count-only."
         ),
         required_perms=("system:role:list",),
         risk="low",
         readonly=True,
         allowed_filters=("status",),
-        query_cache_module="system/role",
+        chip_target="/system/role",
+        result_view="data_list",
     )
 )
 async def role_list(
     ctx: AiToolContext,
     filters: dict[str, Any] | None = None,
     limit: int | None = None,
-) -> dict:
+) -> ToolResult:
     """列出角色，返回前 N 条精简字段
+
+    LLM 看 data.{total, limit, sample[3]}（精简，进 prompt cache）；
+    前端看 ui.view_data.{columns, rows}（全量 limit 条，渲染 table）。
 
     filters:
         status: '1' (启用) / '2' (禁用)
@@ -332,7 +336,9 @@ async def role_list(
         base = base.where(getattr(Role, key) == str(value))
 
     # total 反映真实总数（不受 limit 截断），供 LLM 判断是否需 chip 跳转
-    total = await ctx.db.scalar(select(func.count()).select_from(base.subquery()))
+    total = int(
+        await ctx.db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    )
 
     rows = (
         (await ctx.db.execute(base.order_by(Role.role_id.asc()).limit(safe_limit)))
@@ -340,19 +346,35 @@ async def role_list(
         .all()
     )
 
-    return {
-        "total": int(total or 0),
-        "limit": safe_limit,
-        "records": [
-            {
-                "id": str(r.role_id),
-                "name": r.role_name,
-                "code": r.role_code,
-                "status": r.status,
-            }
-            for r in rows
-        ],
-    }
+    columns = [
+        {"key": "id", "label": "ID"},
+        {"key": "name", "label": "名称"},
+        {"key": "code", "label": "编码"},
+        {"key": "status", "label": "状态"},
+    ]
+    records = [
+        {
+            "id": str(r.role_id),
+            "name": r.role_name,
+            "code": r.role_code,
+            "status": r.status,
+        }
+        for r in rows
+    ]
+    return ToolResult.success(
+        data={
+            "total": total,
+            "limit": safe_limit,
+            "sample": records[:3],  # 给 LLM 看前 3 条（prompt cache 友好）
+        },
+        ui=UIResult(
+            view_type="data_list",
+            view_data={"columns": columns, "rows": records},
+            audit={"total": total},
+            label_key="ai.tool.role.list.result",
+            label_params={"count": total},
+        ),
+    )
 
 
 @ai_tool(
@@ -360,22 +382,26 @@ async def role_list(
         name="dept.list",
         agent="dept_mgmt",
         summary=(
-            "List depts → {total, limit, records:[{id,name,parent_id,status}]}. "
+            "List depts → {total, limit, sample[3]}. Frontend renders data_list. "
             "Use dept.count for count-only."
         ),
         required_perms=("system:dept:list",),
         risk="low",
         readonly=True,
         allowed_filters=("status",),
-        query_cache_module="system/dept",
+        chip_target="/system/dept",
+        result_view="data_list",
     )
 )
 async def dept_list(
     ctx: AiToolContext,
     filters: dict[str, Any] | None = None,
     limit: int | None = None,
-) -> dict:
+) -> ToolResult:
     """列出部门，返回前 N 条精简字段
+
+    LLM 看 data.{total, limit, sample[3]}（精简，进 prompt cache）；
+    前端看 ui.view_data.{columns, rows}（全量 limit 条，渲染 table）。
 
     filters:
         status: '1' (启用) / '0' (禁用)
@@ -389,7 +415,9 @@ async def dept_list(
     for key, value in filters.items():
         base = base.where(getattr(Dept, key) == str(value))
 
-    total = await ctx.db.scalar(select(func.count()).select_from(base.subquery()))
+    total = int(
+        await ctx.db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    )
 
     rows = (
         (await ctx.db.execute(base.order_by(Dept.dept_id.asc()).limit(safe_limit)))
@@ -397,19 +425,35 @@ async def dept_list(
         .all()
     )
 
-    return {
-        "total": int(total or 0),
-        "limit": safe_limit,
-        "records": [
-            {
-                "id": str(d.dept_id),
-                "name": d.dept_name,
-                "parent_id": str(d.parent_id) if d.parent_id else None,
-                "status": d.status,
-            }
-            for d in rows
-        ],
-    }
+    columns = [
+        {"key": "id", "label": "ID"},
+        {"key": "name", "label": "名称"},
+        {"key": "parent_id", "label": "父部门 ID"},
+        {"key": "status", "label": "状态"},
+    ]
+    records = [
+        {
+            "id": str(d.dept_id),
+            "name": d.dept_name,
+            "parent_id": str(d.parent_id) if d.parent_id else None,
+            "status": d.status,
+        }
+        for d in rows
+    ]
+    return ToolResult.success(
+        data={
+            "total": total,
+            "limit": safe_limit,
+            "sample": records[:3],
+        },
+        ui=UIResult(
+            view_type="data_list",
+            view_data={"columns": columns, "rows": records},
+            audit={"total": total},
+            label_key="ai.tool.dept.list.result",
+            label_params={"count": total},
+        ),
+    )
 
 
 # ============ user.batch_delete（destructive + HITL，spec §11.3 示例） ============

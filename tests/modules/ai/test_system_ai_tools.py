@@ -551,7 +551,12 @@ def _make_dept_list_ctx(db: AsyncSession) -> AiToolContext:
 
 
 class TestRoleList:
-    """spec §5.5 SR-22: role.list 返回精简字段 + limit 截断"""
+    """spec §5.5 SR-22: role.list 返回精简字段 + limit 截断
+
+    双层返回（Task 6）：
+      LLM 看 data.{total, limit, sample[3]}（精简，进 prompt cache）
+      前端看 ui.view_data.{columns, rows}（全量 limit 条，渲染 table）
+    """
 
     async def test_returns_records_with_default_limit(self, db_session) -> None:
         from app.modules.system.ai_tools import role_list
@@ -562,30 +567,46 @@ class TestRoleList:
 
         ctx = _make_role_list_ctx(db_session)
         result = await role_list(ctx, filters=None)
-        assert result["limit"] == 20  # 默认
-        assert result["total"] >= 2  # 含 _add_role 加的 + 其它测试残留
-        assert len(result["records"]) >= 2
-        # records 应含本次新建的 role
-        names = [r["name"] for r in result["records"]]
-        assert "r1" in names and "r2" in names
+        # LLM 层
+        assert result.data["limit"] == 20  # 默认
+        assert result.data["total"] >= 2  # 含 _add_role 加的 + 其它测试残留
+        assert len(result.data["sample"]) == min(3, result.data["total"])
+        # rows 是全量 limit 范围；sample 只取前 3，可能漏掉本次新建（残留干扰），
+        # 故用 rows 验证新建项命中。
+        rows = result.ui.view_data["rows"]
+        rows_names = [r["name"] for r in rows]
+        assert "r1" in rows_names and "r2" in rows_names
         # 精简字段：含 id/name/code/status
-        rec0 = result["records"][0]
+        rec0 = rows[0]
         assert set(rec0.keys()) == {"id", "name", "code", "status"}
         # id 字符串化（防 JS BigInt）
         assert isinstance(rec0["id"], str)
+        # UI 层：data_list
+        assert result.ui is not None
+        assert result.ui.view_type == "data_list"
+        assert result.ui.view_data["columns"] == [
+            {"key": "id", "label": "ID"},
+            {"key": "name", "label": "名称"},
+            {"key": "code", "label": "编码"},
+            {"key": "status", "label": "状态"},
+        ]
+        assert len(rows) >= 2
+        # audit total 反映真实总数（_AFFECTED_ROW_KEYS 命中 total）
+        assert result.ui.audit["total"] == result.data["total"]
 
     async def test_status_filter_applied(self, db_session) -> None:
         from app.modules.system.ai_tools import role_list
 
-        await _add_role(db_session, role_id=4011, role_name="on", status="1")
-        await _add_role(db_session, role_id=4012, role_name="off", status="2")
+        await _add_role(db_session, role_id=4011, role_name="role_on_uniq", status="1")
+        await _add_role(db_session, role_id=4012, role_name="role_off_uniq", status="2")
         await db_session.flush()
 
         ctx = _make_role_list_ctx(db_session)
         result = await role_list(ctx, filters={"status": "2"})
-        names = [r["name"] for r in result["records"]]
-        assert "off" in names
-        assert "on" not in names  # status='1' 被过滤
+        # rows 全量（受 filter 约束）；sample 截断可能漏，故断言 rows
+        names = [r["name"] for r in result.ui.view_data["rows"]]
+        assert "role_off_uniq" in names
+        assert "role_on_uniq" not in names  # status='1' 被过滤
 
     async def test_limit_over_50_truncated(self, db_session) -> None:
         """spec §5.5 SR-22 反例 3: limit > 50 强制截断到 50"""
@@ -593,7 +614,9 @@ class TestRoleList:
 
         ctx = _make_role_list_ctx(db_session)
         result = await role_list(ctx, filters=None, limit=999)
-        assert result["limit"] == 50  # 截断
+        assert result.data["limit"] == 50  # 截断
+        # rows 也受同样 limit 约束
+        assert len(result.ui.view_data["rows"]) <= 50
 
     async def test_limit_none_or_zero_uses_default(self, db_session) -> None:
         from app.modules.system.ai_tools import role_list
@@ -602,9 +625,9 @@ class TestRoleList:
         r1 = await role_list(ctx, filters=None, limit=None)
         r2 = await role_list(ctx, filters=None, limit=0)
         r3 = await role_list(ctx, filters=None, limit=-5)
-        assert r1["limit"] == 20
-        assert r2["limit"] == 20
-        assert r3["limit"] == 20  # 负数也走默认
+        assert r1.data["limit"] == 20
+        assert r2.data["limit"] == 20
+        assert r3.data["limit"] == 20  # 负数也走默认
 
     async def test_total_reflects_real_count_not_limit(self, db_session) -> None:
         """spec §5.5 SR-22 反例 4: total 不受 limit 截断"""
@@ -618,10 +641,27 @@ class TestRoleList:
 
         ctx = _make_role_list_ctx(db_session)
         result = await role_list(ctx, filters=None, limit=1)
-        # total ≥ 3（真实总数），但 records 只有 1 条
-        assert result["total"] >= 3
-        assert len(result["records"]) == 1
-        assert result["limit"] == 1
+        # total ≥ 3（真实总数），但 rows / sample 受 limit 影响
+        assert result.data["total"] >= 3
+        assert len(result.ui.view_data["rows"]) == 1
+        # sample 最多 3，但因 limit=1 实际只取 1 条
+        assert len(result.data["sample"]) == 1
+        assert result.data["limit"] == 1
+
+    async def test_sample_truncated_to_3(self, db_session) -> None:
+        """sample 最多给 LLM 3 条（prompt cache 友好）"""
+        from app.modules.system.ai_tools import role_list
+
+        for i in range(5):
+            await _add_role(
+                db_session, role_id=4030 + i, role_name=f"s{i}", role_code=f"S_{i}"
+            )
+        await db_session.flush()
+
+        ctx = _make_role_list_ctx(db_session)
+        result = await role_list(ctx, filters=None, limit=10)
+        # rows 全量（10 条上限），sample 只前 3
+        assert len(result.data["sample"]) <= 3
 
     async def test_filter_out_of_whitelist_raises(self, db_session) -> None:
         from app.modules.system.ai_tools import role_list
@@ -633,42 +673,71 @@ class TestRoleList:
 
 
 class TestDeptList:
-    """spec §5.5 SR-22: dept.list 返回精简字段"""
+    """spec §5.5 SR-22: dept.list 返回精简字段
+
+    双层返回（Task 6）：LLM 看 data.{total, limit, sample[3]}，前端看
+    ui.view_data.{columns, rows}（data_list 视图）。
+    """
 
     async def test_returns_records_with_default_limit(self, db_session) -> None:
         from app.modules.system.ai_tools import dept_list
 
-        await _add_dept(db_session, dept_id=5001, dept_name="d1")
-        await _add_dept(db_session, dept_id=5002, dept_name="d2")
+        # 用唯一名字避开其它测试残留（"d1" / "D1" 冲突）+ sample 截断漏掉
+        await _add_dept(db_session, dept_id=5001, dept_name="dept_list_d1_unique")
+        await _add_dept(db_session, dept_id=5002, dept_name="dept_list_d2_unique")
         await db_session.flush()
 
         ctx = _make_dept_list_ctx(db_session)
         result = await dept_list(ctx, filters=None)
-        assert result["limit"] == 20
-        assert result["total"] >= 2
-        names = [r["name"] for r in result["records"]]
-        assert "d1" in names and "d2" in names
+        assert result.data["limit"] == 20
+        assert result.data["total"] >= 2
+        # rows 是全量 limit 范围；sample 只取前 3，可能漏掉本次新建（残留干扰）
+        rows_names = [r["name"] for r in result.ui.view_data["rows"]]
+        assert "dept_list_d1_unique" in rows_names
+        assert "dept_list_d2_unique" in rows_names
         # 精简字段：含 id/name/parent_id/status（dept 无 code 字段）
-        rec0 = result["records"][0]
+        rec0 = result.ui.view_data["rows"][0]
         assert set(rec0.keys()) == {"id", "name", "parent_id", "status"}
         assert isinstance(rec0["id"], str)
+        # sample 至少 1 条且 ≤3，字段结构与 rows 一致
+        assert 1 <= len(result.data["sample"]) <= 3
+        if result.data["sample"]:
+            assert set(result.data["sample"][0].keys()) == {
+                "id",
+                "name",
+                "parent_id",
+                "status",
+            }
+        # UI 层：data_list with parent_id 列
+        assert result.ui is not None
+        assert result.ui.view_type == "data_list"
+        assert result.ui.view_data["columns"] == [
+            {"key": "id", "label": "ID"},
+            {"key": "name", "label": "名称"},
+            {"key": "parent_id", "label": "父部门 ID"},
+            {"key": "status", "label": "状态"},
+        ]
+        assert len(rows_names) >= 2
+        assert result.ui.audit["total"] == result.data["total"]
 
     async def test_status_filter_applied(self, db_session) -> None:
         from app.modules.system.ai_tools import dept_list
 
-        await _add_dept(db_session, dept_id=5011, dept_name="on", status="1")
-        await _add_dept(db_session, dept_id=5012, dept_name="off", status="0")
+        await _add_dept(db_session, dept_id=5011, dept_name="dept_on_uniq", status="1")
+        await _add_dept(db_session, dept_id=5012, dept_name="dept_off_uniq", status="0")
         await db_session.flush()
 
         ctx = _make_dept_list_ctx(db_session)
         result = await dept_list(ctx, filters={"status": "0"})
-        names = [r["name"] for r in result["records"]]
-        assert "off" in names
-        assert "on" not in names
+        # rows 全量（受 filter 约束）；sample 截断可能漏，故断言 rows
+        names = [r["name"] for r in result.ui.view_data["rows"]]
+        assert "dept_off_uniq" in names
+        assert "dept_on_uniq" not in names  # status='1' 被过滤
 
     async def test_limit_truncated_to_50(self, db_session) -> None:
         from app.modules.system.ai_tools import dept_list
 
         ctx = _make_dept_list_ctx(db_session)
         result = await dept_list(ctx, filters=None, limit=100)
-        assert result["limit"] == 50
+        assert result.data["limit"] == 50
+        assert len(result.ui.view_data["rows"]) <= 50
