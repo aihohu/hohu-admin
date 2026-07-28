@@ -48,7 +48,7 @@ from app.modules.system.models.user import User
         risk="low",
         readonly=True,
         allowed_filters=("status", "user_gender"),
-        chip_target="system/user",
+        chip_target="/system/user",
     )
 )
 async def user_count(
@@ -163,7 +163,7 @@ async def user_stats(
         readonly=True,
         allowed_group_by=("user_gender", "status"),
         max_groups=50,
-        chip_target="system/user",
+        chip_target="/system/user",
     )
 )
 async def user_distinct(ctx: AiToolContext, field: str) -> ToolResult:
