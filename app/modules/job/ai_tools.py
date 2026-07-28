@@ -13,6 +13,7 @@ max_retries / concurrent — JobAiUpdate schema 在 update_for_ai 入口兜底�
 
 from typing import Any
 
+from app.modules.ai.agents.gateway.result import ToolResult, UIResult
 from app.modules.ai.agents.tools.decorator import ai_tool
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.core.context import AiToolContext
@@ -29,11 +30,12 @@ from app.modules.job.service.job_service import job_service
         risk="high",
         hitl_always=True,
         dry_run_supported=True,
+        result_view="detail_card",
     )
 )
 async def job_update_cron(
     ctx: AiToolContext, *, job_id: int, cron_expression: str
-) -> dict[str, Any]:
+) -> ToolResult:
     """更新任务 cron 表达式（白名单字段，spec §11.3）
 
     Args:
@@ -42,17 +44,34 @@ async def job_update_cron(
         cron_expression: 新 cron 表达式（如 '*/5 * * * *'）
 
     Returns:
-        {"ok": True, "job_id": job_id, "new_cron": "..."}
+        ToolResult：data 给 LLM（{ok, job_id, new_cron}），ui 给前端 detail_card
+        渲染（title + 任务 ID/新 cron 两个字段 + before/after 审计用于合规追溯）。
     """
+    # 先读旧 cron，做 before/after 审计（cron 变更必须留合规轨迹）
+    old_job = await job_service.get_by_id(ctx.db, job_id)
+    old_cron = old_job.cron_expression or ""
+
     data = JobAiUpdate(job_id=job_id, cron_expression=cron_expression)
     job = await job_service.update_for_ai(
         ctx.db, data, current_user=str(ctx.user.user_id)
     )
-    return {
-        "ok": True,
-        "job_id": str(job.job_id),
-        "new_cron": job.cron_expression or "",
-    }
+    new_cron = job.cron_expression or ""
+    job_id_str = str(job.job_id)
+    return ToolResult.success(
+        data={"ok": True, "job_id": job_id_str, "new_cron": new_cron},
+        ui=UIResult(
+            view_type="detail_card",
+            view_data={
+                "title": "定时任务 cron 已更新",
+                "fields": [
+                    {"label": "任务 ID", "value": job_id_str},
+                    {"label": "新 cron", "value": new_cron},
+                ],
+            },
+            audit={"job_id": job_id_str, "before": old_cron, "after": new_cron},
+            label_key="ai.tool.job.update_cron.result",
+        ),
+    )
 
 
 # ============ dry_run 函数（命名约定 _dry_run_job_update_cron） ============
