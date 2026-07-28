@@ -376,7 +376,10 @@ class TestRoleCount:
 
         ctx = _make_role_ctx(db_session)
         result = await role_count(ctx, filters=None)
-        assert result["count"] >= 2
+        assert result.data["count"] >= 2
+        assert result.ui is not None
+        assert result.ui.view_type == "plain_json"
+        assert result.ui.view_data["count"] >= 2
 
     async def test_count_with_status_filter(self, db_session: AsyncSession) -> None:
         """status='1' 过滤"""
@@ -386,7 +389,7 @@ class TestRoleCount:
 
         ctx = _make_role_ctx(db_session)
         result = await role_count(ctx, filters={"status": "1"})
-        assert result["count"] >= 1
+        assert result.data["count"] >= 1
 
     async def test_count_filter_out_of_whitelist_raises(
         self, db_session: AsyncSession
@@ -401,7 +404,7 @@ class TestRoleCount:
         """空表 → count=0（可能含 seed 数据，至少 ≥0）"""
         ctx = _make_role_ctx(db_session)
         result = await role_count(ctx, filters=None)
-        assert result["count"] >= 0
+        assert result.data["count"] >= 0
 
 
 # ============ dept.count（v1.5+，演示 chip 跳转回放到 dept 模块页） ============
@@ -464,7 +467,10 @@ class TestDeptCount:
 
         ctx = _make_dept_ctx(db_session)
         result = await dept_count(ctx, filters=None)
-        assert result["count"] >= 2
+        assert result.data["count"] >= 2
+        assert result.ui is not None
+        assert result.ui.view_type == "plain_json"
+        assert result.ui.view_data["count"] >= 2
 
     async def test_count_with_status_filter(self, db_session: AsyncSession) -> None:
         from app.modules.system.ai_tools import dept_count
@@ -475,7 +481,7 @@ class TestDeptCount:
 
         ctx = _make_dept_ctx(db_session)
         result = await dept_count(ctx, filters={"status": "1"})
-        assert result["count"] >= 1
+        assert result.data["count"] >= 1
 
     async def test_count_filter_out_of_whitelist_raises(
         self, db_session: AsyncSession

@@ -209,10 +209,12 @@ async def user_distinct(ctx: AiToolContext, field: str) -> ToolResult:
         risk="low",
         readonly=True,
         allowed_filters=("status",),
-        query_cache_module="system/role",
+        chip_target="/system/role",
     )
 )
-async def role_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) -> dict:
+async def role_count(
+    ctx: AiToolContext, filters: dict[str, Any] | None = None
+) -> ToolResult:
     """统计角色数量，仅返回数字
 
     filters:
@@ -225,8 +227,17 @@ async def role_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) 
         # sys_role 表字段都是 varchar，强制 stringify 防类型错
         stmt = stmt.where(getattr(Role, key) == str(value))
 
-    count = await ctx.db.scalar(stmt)
-    return {"count": int(count or 0)}
+    count = int(await ctx.db.scalar(stmt) or 0)
+    return ToolResult.success(
+        data={"count": count},
+        ui=UIResult(
+            view_type="plain_json",
+            view_data={"count": count},
+            audit={"count": count},
+            label_key="ai.tool.role.count.result",
+            label_params={"count": count},
+        ),
+    )
 
 
 # ============ dept.count（v1.5+，演示 chip 跳转回放到 dept 模块页） ============
@@ -241,10 +252,12 @@ async def role_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) 
         risk="low",
         readonly=True,
         allowed_filters=("status",),
-        query_cache_module="system/dept",
+        chip_target="/system/dept",
     )
 )
-async def dept_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) -> dict:
+async def dept_count(
+    ctx: AiToolContext, filters: dict[str, Any] | None = None
+) -> ToolResult:
     """统计部门数量，仅返回数字
 
     filters:
@@ -257,8 +270,17 @@ async def dept_count(ctx: AiToolContext, filters: dict[str, Any] | None = None) 
         # sys_dept 表字段都是 varchar，强制 stringify 防类型错
         stmt = stmt.where(getattr(Dept, key) == str(value))
 
-    count = await ctx.db.scalar(stmt)
-    return {"count": int(count or 0)}
+    count = int(await ctx.db.scalar(stmt) or 0)
+    return ToolResult.success(
+        data={"count": count},
+        ui=UIResult(
+            view_type="plain_json",
+            view_data={"count": count},
+            audit={"count": count},
+            label_key="ai.tool.dept.count.result",
+            label_params={"count": count},
+        ),
+    )
 
 
 # ============ role.list / dept.list（v1.5+ SR-22，LLM 需少量行而非仅 count） ============
