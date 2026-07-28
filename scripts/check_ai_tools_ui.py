@@ -27,6 +27,13 @@ import ast
 import sys
 from pathlib import Path
 
+# Windows console defaults to gbk; force utf-8 so Chinese error messages render.
+# Sibling script scripts/check_ai_tools.py uses the same pattern.
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 
 class CheckAiToolsUiError(Exception):
     """ToolResult.success 调用缺 ui= 参数"""
@@ -59,6 +66,28 @@ def _is_tool_result_success_call(node: ast.AST) -> bool:
     return False
 
 
+def _iter_return_statements(fn: ast.AsyncFunctionDef | ast.FunctionDef):
+    """遍历函数体内的 return 语句，不递归进入嵌套函数定义。
+
+    ast.walk 会下钻到嵌套 def/async def，可能误报 builtin tool 内部
+    辅助函数（如 "重试时返回精简 data" helper）的合法 return。
+    这里只检查直接属于 @ai_tool 函数体的 return。
+    """
+    for child in ast.iter_child_nodes(fn):
+        if isinstance(child, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            continue  # skip nested function definitions
+        yield from _walk_excluding_nested_funcs(child)
+
+
+def _walk_excluding_nested_funcs(node: ast.AST):
+    """Walk an AST node's subtree but don't descend into nested function defs."""
+    yield node
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            continue  # don't recurse into nested def
+        yield from _walk_excluding_nested_funcs(child)
+
+
 def check_function_for_missing_ui(
     fn: ast.AsyncFunctionDef | ast.FunctionDef,
     *,
@@ -69,7 +98,7 @@ def check_function_for_missing_ui(
     Raises:
         CheckAiToolsUiError: 若任一 ToolResult.success 缺 ui=
     """
-    for node in ast.walk(fn):
+    for node in _iter_return_statements(fn):
         if not _is_tool_result_success_call(node):
             continue
         call: ast.Call = node.value  # type: ignore[assignment]

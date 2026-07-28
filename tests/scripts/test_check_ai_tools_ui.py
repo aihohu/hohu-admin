@@ -54,3 +54,24 @@ async def user_count(ctx):
         tree = ast.parse(code)
         fn_node = tree.body[0]
         check_function_for_missing_ui(fn_node, file="test.py")
+
+
+def test_ignores_nested_helper_function_return():
+    """Nested def inside @ai_tool function returning ToolResult.success without ui= is OK.
+
+    ast.walk would descend into nested def and false-positive; the lint should
+    only check returns directly within the @ai_tool function body.
+    """
+    code = """
+async def user_count(ctx):
+    async def _retry_without_ui():
+        return ToolResult.success(data={"count": 0})
+    result = await _retry_without_ui()
+    return ToolResult.success(
+        data={"count": 5},
+        ui=UIResult(view_type="plain_json", view_data={"count": 5}),
+    )
+"""
+    tree = ast.parse(code)
+    fn_node = tree.body[0]
+    check_function_for_missing_ui(fn_node, file="test.py")  # no exception
