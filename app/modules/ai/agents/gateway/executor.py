@@ -443,6 +443,18 @@ async def execute_tool(
 
     # 9. emit tool_call_result + 写 log 终态
     duration_ms = int((time.monotonic() - started_at) * 1000)
+    # spec §2.3 v1.6+: readonly tool 的 affected_rows 不展示（user.count 返回
+    # {"count": 42} 会被推断成 affected_rows=42，误导成「42 行受影响」）.
+    # readonly = 查询类，无受影响行概念；强制 None 让前端隐藏「N 行」后缀.
+    inferred_affected_rows = (
+        _infer_affected_rows(
+            dry_run_count=dry_run_count,
+            result_data=result.data if result.ok else None,
+            ui_audit=result.ui.audit if result.ok and result.ui else None,
+        )
+        if not meta.readonly
+        else None
+    )
     await _emit(
         deps,
         ToolCallResultEvent(
@@ -452,11 +464,7 @@ async def execute_tool(
             duration_ms=duration_ms,
             result=result.data if result.ok else None,
             ui=result.ui if result.ok else None,
-            affected_rows=_infer_affected_rows(
-                dry_run_count=dry_run_count,
-                result_data=result.data if result.ok else None,
-                ui_audit=result.ui.audit if result.ok and result.ui else None,
-            ),
+            affected_rows=inferred_affected_rows,
             error_code=result.error_code if not result.ok else None,
             error_msg=result.error_msg if not result.ok else None,
         ),

@@ -94,6 +94,38 @@ class TestMessageOutToolCallsList:
         assert out.tool_calls[0]["args"]["user_ids"] == ["7483433649145122816"]
         assert out.tool_calls[0]["result"]["user_ids"] == ["7483433649145122816"]
 
+    def test_chip_target_and_ui_round_trip(self) -> None:
+        """v1.6+ SR-13: chat.py::_record_tool_event 持久化时必须含 chip_target + ui,
+        否则 reload 后 chip 跳转消失 + 卡片 fallback PlainJsonView. (C1 回归)"""
+        msg = _make_msg(
+            tool_calls=[
+                {
+                    "tool": "user.count",
+                    "tool_call_id": "tc_1",
+                    "summary": "count users",
+                    "args": {"status": "1"},
+                    "risk": "low",
+                    "trace_id": "tr_abc",
+                    "chip_target": "/system/user",
+                    "ok": True,
+                    "result": {"count": 5},
+                    "affected_rows": None,
+                    "duration_ms": 42,
+                    "ui": {
+                        "viewType": "rows_affected",
+                        "viewData": {"count": 5},
+                        "labelKey": "ai.tool.user.count.result",
+                    },
+                }
+            ]
+        )
+        out = MessageOut.model_validate(msg)
+        tc = out.tool_calls[0]
+        assert tc["chip_target"] == "/system/user"
+        assert tc["ui"]["viewType"] == "rows_affected"
+        assert tc["ui"]["viewData"]["count"] == 5
+        assert tc["ui"]["labelKey"] == "ai.tool.user.count.result"
+
 
 def test_ai_message_has_agent_code_column():
     """spec §7.1b: ai_message.agent_code 记录本条消息实际处理的 Agent code."""

@@ -644,6 +644,80 @@ class TestQueryCacheWrite:
         assert entry is None  # 没写
 
 
+# ============ readonly tool affected_rows 门控（spec §2.3 v1.6+） ============
+
+
+class TestReadonlyAffectedRowsGate:
+    """spec §2.3 v1.6+: readonly tool 不展示 affected_rows（防误导）.
+
+    user.count 返回 {"count": 42}，旧逻辑会推断 affected_rows=42 → 前端显示
+    「已执行 · 230ms · 42 行」误导用户以为 42 行受影响。修法：readonly tool
+    强制 affected_rows=None，前端 v-if 据此隐藏「N 行」后缀.
+    """
+
+    async def test_readonly_emits_null_affected_rows(self) -> None:
+        """readonly tool 返回 {"count": 42} → emit affected_rows=None（非 42）"""
+        _register_test_tools()
+
+        events: list[Any] = []
+
+        async def collect(ev: Any) -> None:
+            events.append(ev)
+
+        deps = _build_deps(signal_event=collect)
+        result = await execute_tool(_TEST_TOOL_READONLY, {}, deps)
+        assert result.ok
+        # 业务层 ToolResult.data 仍保留原始 count（不破坏 LLM 可见的 data）
+        assert result.data == {"count": 0}
+
+        result_events = [e for e in events if isinstance(e, ToolCallResultEvent)]
+        assert len(result_events) == 1
+        # 关键断言：readonly tool 的 affected_rows 必须为 None（不是 0 也不是 42）
+        assert result_events[0].affected_rows is None
+
+    async def test_non_readonly_still_infers_affected_rows(self) -> None:
+        """对照：非 readonly tool 返回 {"count": 5} 仍走推断（受影响行）"""
+        _register_test_tools()
+
+        events: list[Any] = []
+
+        async def collect(ev: Any) -> None:
+            events.append(ev)
+
+        # _TEST_TOOL_LOW 不是 readonly，返回 {"echo": {...}}，无 count 信号 → None
+        # 用动态注册一个带 count 的 non-readonly tool
+        from app.modules.ai.agents.tools.decorator import ai_tool as _ai_tool
+        from app.modules.ai.agents.tools.meta import AiToolMeta as _Meta
+        from app.modules.ai.agents.tools.registry import ToolRegistry
+
+        tool_name = "testint.non_readonly_count"
+
+        @_ai_tool(
+            _Meta(
+                name=tool_name,
+                agent="shared",
+                summary="non-readonly with count",
+                required_perms=(),
+                risk="low",
+                # readonly 默认 False
+            )
+        )
+        async def _fn(ctx, **kwargs: Any) -> dict[str, Any]:
+            return {"count": 7}
+
+        try:
+            deps = _build_deps(signal_event=collect)
+            res = await execute_tool(tool_name, {}, deps)
+            assert res.ok
+            result_events = [e for e in events if isinstance(e, ToolCallResultEvent)]
+            assert len(result_events) == 1
+            # 非 readonly + result_data={"count": 7} → 推断 affected_rows=7
+            assert result_events[0].affected_rows == 7
+        finally:
+            # 清理：避免污染其它测试
+            ToolRegistry.get()._tools.pop(tool_name, None)  # noqa: SLF001
+
+
 # ============ 边界：Redis down 时 executor 降级（spec §2.6） ============
 
 

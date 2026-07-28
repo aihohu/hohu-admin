@@ -721,6 +721,7 @@ async def chat(
             from app.modules.ai.agents.hitl.events import (  # noqa: PLC0415
                 ToolCallResultEvent,
                 ToolCallStartedEvent,
+                _ui_to_dict,
                 stringify_large_ints,
             )
 
@@ -733,6 +734,7 @@ async def chat(
                     "args": stringify_large_ints(ev.args),
                     "risk": ev.risk,
                     "trace_id": ev.trace_id,
+                    "chip_target": ev.chip_target,
                 }
             elif isinstance(ev, ToolCallResultEvent):
                 started = started_events.pop(ev.tool_call_id, {})
@@ -745,6 +747,7 @@ async def chat(
                         "error_code": ev.error_code,
                         "error_msg": ev.error_msg,
                         "duration_ms": ev.duration_ms,
+                        "ui": _ui_to_dict(ev.ui) if ev.ui else None,
                     }
                 )
 
