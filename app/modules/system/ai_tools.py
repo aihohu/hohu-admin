@@ -102,6 +102,7 @@ async def user_count(
         allowed_group_by=("user_gender", "status"),
         max_groups=20,
         result_view="stats_chart",
+        chip_target="/system/user",
     )
 )
 async def user_stats(

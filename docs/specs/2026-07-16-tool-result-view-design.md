@@ -48,6 +48,14 @@
     **反例**: 后端 Pydantic 校验 view_data schema → 业务方写错启动失败，过度严苛（数据 shape 多样，强约束挡住迭代）；前端无类型 → view 组件 props 写错运行时崩。
     **回归**: 前端 `ai.d.ts` 用 `RowsAffectedViewData | DataListViewData | StatsChartViewData | DetailCardViewData | PlainJsonViewData` union（Task 10）；后端 `UIResult.view_data: dict[str, Any]` 保持灵活（Task 1），业务方写错只影响自家 tool 渲染，不阻塞服务启动。
 
+12. **Chip 跳转用 `<router-link>` 而非 `<a :href>`**（2026-07-29 hotfix） — chip 链接用 Vue Router SPA 导航，不触发整页刷新；不加 `target="_blank"`，依赖浏览器原生 cmd/ctrl+click 给"想新窗口"的用户。
+    **反例**: `<a :href="/system/user?ai_query_id=...">` 触发浏览器整页跳转 → Vue app 重新 bootstrap、Pinia store 全部 reset、chat 历史 / SSE 流 / HITL pending 状态丢失；用户视觉上"页面闪一下"。
+    **回归**: `chat-tool-call.vue` chip 行用 `<router-link :to="chipHref">`；`global-tab/index.vue:170-175` 的 `watch(route.fullPath)` 自动把新路由加入 in-app tab 栏，原 chat tab 保留可切回；`user.stats` meta 补 `chip_target="/system/user"`（之前漏声明导致图表 tool 无 chip）。
+
+13. **`user.stats` 也声明 `chip_target="/system/user"`**（2026-07-29 hotfix） — `stats_chart` view_type 的 tool 同样需要 chip 跳转入口，跟 `user.count` / `user.distinct` 对齐。
+    **反例**: `user.stats` meta 只声明 `result_view="stats_chart"` 漏 `chip_target` → 图表渲染正常但 chip 不显示，用户问"统计启用的用户按性别分布"后无法跳到详情列表回放筛选。
+    **回归**: `app/modules/system/ai_tools.py` `user.stats` meta 加 `chip_target="/system/user"`；`executor.py:832-836` 自动写 query_cache（filters 经 `allowed_filters` 白名单过滤，不含 `group_by` —— list 页无分组概念）；用户点 chip 跳 `/system/user?ai_query_id=<trace_id>` 回放 `status=1` 筛选（性别维度由图表本身承载，list 页只筛选不分组，符合直觉）。
+
 ## 1. Context
 
 ### 1.1 问题
