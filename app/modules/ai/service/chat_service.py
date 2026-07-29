@@ -137,16 +137,27 @@ class ChatService:
           - agent_code 找不到 → 抛 ValueError（chat.py 入口 try/except 捕获后 emit AI_ROUTING_FAILED）
 
         注意：
-          - 超管 perms 不特殊处理（与 §6.4 L1/L2 不豁免一致）
+          - 超管 perm 可见性 bypass（与 HTTP API 层 require_permissions 对齐）：
+            is_super_admin(user) → perms = all_registry_perms()，跳过按钮 menu 绑定检查
+          - 配额（§6.4 L1/L2）仍不豁免：超管也受限额限制
         """
+        from app.core.rbac import is_super_admin  # noqa: PLC0415
         from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
             get_ai_config_bool,
         )
         from app.modules.ai.agents.supervisor.stickiness import (  # noqa: PLC0415
             resolve_sticky_agent_code,
         )
+        from app.modules.ai.agents.tools.registry import (  # noqa: PLC0415
+            all_registry_perms,
+        )
 
-        perms = set(collect_user_buttons(user))
+        # 超管 bypass：覆盖所有 tool 的 required_perms（agent_code 过滤仍在
+        # compute_available_tools 内做，这里只让 perm 维度通过）
+        if is_super_admin(user):
+            perms = all_registry_perms()
+        else:
+            perms = set(collect_user_buttons(user))
         data_scope = await build_data_scope_context(db, user)
 
         # 取会话上轮 agent_code（粘滞用）

@@ -253,3 +253,16 @@ def compute_available_tools(
                 continue
         result.append(t)
     return result
+
+
+def all_registry_perms() -> set[str]:
+    """返回 Registry 中所有 tool 的 required_perms 并集。
+
+    用于超管 bypass：超管在 AI tool 网关层跳过 perm 过滤（与 HTTP API 层
+    require_permissions 对齐），用本函数构造"覆盖全部 tool"的 perms 集合。
+    """
+    registry = ToolRegistry.get()
+    perms: set[str] = set()
+    for t in registry.all():
+        perms.update(t.meta.required_perms)
+    return perms
