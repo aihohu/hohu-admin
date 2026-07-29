@@ -88,7 +88,7 @@ app/
 - **RBAC:** User → Role → Menu (three-tier)
 - **Permission check:** `require_permissions("sys:user:list")` or `require_permissions(super_admin_only=True)` in `app/core/auth.py`
 - **Super admin:** `user_name == "admin"` or `R_SUPER` in role codes → bypasses all checks
-- **Button-level permission:** see [按钮级权限指南](./docs/button-permission-guide.md) for naming convention, full data flow, and how to add new permission codes. **Every write/delete endpoint MUST declare `dependencies=[Depends(require_permissions("..."))]`** — frontend button hiding is UX-only, users can bypass UI to call APIs directly.
+- **Button-level permission:** see [Button-level Permission Guide](./docs/button-permission-guide.md) for naming convention, full data flow, and how to add new permission codes. **Every write/delete endpoint MUST declare `dependencies=[Depends(require_permissions("..."))]`** — frontend button hiding is UX-only, users can bypass UI to call APIs directly.
 
 ## Exception Hierarchy
 
@@ -104,7 +104,7 @@ BusinessException (base, has error_code for frontend i18n)
 
 **Rules:**
 - **Never use `HTTPException`** in business logic — use classes from `app/core/exceptions.py`
-- **Reuse generic exceptions** (`NotFoundException("资源名")`, `DuplicateException("字段", "值")`) instead of creating new subclasses per entity
+- **Reuse generic exceptions** (`NotFoundException("resource_name")`, `DuplicateException("field", "value")`) instead of creating new subclasses per entity
 - Only create a new subclass when it needs unique logic (not just a different message)
 - **Always set `error_code`** for frontend i18n mapping — use `UPPER_SNAKE_CASE` (e.g., `AI_PROVIDER_NOT_FOUND`), response includes `errorCode` field automatically
 - Frontend maps `errorCode` via `$t('errorCode.XXX')`; if no mapping exists, falls back to backend `msg`
@@ -138,16 +138,16 @@ BusinessException (base, has error_code for frontend i18n)
 4. **Base import:** Models import `Base` from `app.db.base` (has association tables), not `app.db.session`
 5. **to_camel import:** `from pydantic.alias_generators import to_camel`
 6. **No HTTPException:** Use domain exceptions from `app/core/exceptions.py`
-7. **Reuse exceptions:** Use `NotFoundException("资源名")` directly instead of creating per-entity subclasses
+7. **Reuse exceptions:** Use `NotFoundException("resource_name")` directly instead of creating per-entity subclasses
 7. **Password handling:** Never expose `hashed_password` in responses; accept plain `password` in create/update
 8. **Role assignment:** Users receive roles by `role_code` (string), not `role_id`
 9. **Async queries:** Always `await`; use `selectinload` for eager loading relationships
 10. **i18n_key field:** May need manual `Field(alias="i18nKey")` if auto-conversion is incorrect
-11. **Button permission code spelling:** Must match exactly across `sync_menus.py` seed, API `require_permissions(...)`, and frontend `v-permission="'...'"`. A typo in any layer silently breaks the gate. See [按钮级权限指南](./docs/button-permission-guide.md).
-12. **datetime 范围查询（NDatePicker）必须用 `LocalNaiveDatetime`** — 任何 Query schema 含 `start_time` / `end_time` / `create_time` 等时间范围字段，类型用 `from app.schemas.types import LocalNaiveDatetime`，**不要写 `datetime`**。原因：DB 列是 `TIMESTAMP WITHOUT TIME ZONE`（naive），前端 NDatePicker 发 unix ms timestamp，Pydantic 默认解析成 aware datetime 会触发 asyncpg `TypeError: can't subtract offset-naive and offset-aware datetimes` → HTTP 500。`LocalNaiveDatetime` 自动按服务器本地时区转 naive。前端 vue 里的 `<NDatePicker type="datetimerange">` 必须**直接发 `value[0]` / `value[1]`**（ms timestamp），**不要 `new Date(ts).toISOString()`**（会转 UTC 导致跨时区 8 小时偏差）。参考：`JobLogQuery` / `LoginLogQuery` / `OperationLogQuery`。
-13. **定时任务长时执行必须配 `timeout_seconds`** — `sys_job.timeout_seconds` 不仅控制 `asyncio.wait_for` 单次超时，还参与孤儿日志守护判定（`JobLogMonitor`，spec `docs/specs/2026-07-02-orphan-job-log-monitor.md`）。任务进程崩溃 / 重启后 `sys_job_log` 永远停在 `status="3"` (RUNNING)，守护协程按 `timeout_seconds * 2` 作 grace 阈值识别孤儿并标 FAILED。**未配 timeout** 时 grace 用 `DEFAULT_TIMEOUT=1800s`（60min）——长任务（数据迁移 / 批量同步）回收延迟过大。**强烈建议**长时任务显式声明 `timeout_seconds`。**新增 RUNNING log 必须填 `runner_id=RUNNER_ID`**（`app.modules.job.job_runner.RUNNER_ID`）+ `start_time=datetime.now()`（**不用 `func.now()`**，决策 9：Python ↔ DB 时钟基准对齐，避免 grace 误判）。
-14. **AI builtin tool 函数必须返回 `ToolResult.success(data=..., ui=...)`** — 决策 3：`data` 给 LLM（精简，进 prompt cache，经 `serialize_for_llm` 脱敏），`ui` 给前端（`UIResult(view_type, view_data, audit, label_key, label_params)`，不进 LLM context）。`view_type` 必须在 `STANDARD_VIEW_TYPES`（启动校验）：`rows_affected` / `data_list` / `stats_chart` / `detail_card` / `plain_json`。readonly tool 加 `chip_target="/system/xxx"` 声明式 chip 跳转（**必须带前导斜杠**，替代旧 `query_cache_module`，后者保留 alias）。**lint 强制 builtin tool 函数返回 ToolResult.success 时带 ui=**（`scripts/check_ai_tools_ui.py`，pre-commit 集成）。详见 `docs/specs/2026-07-16-tool-result-view-design.md`。
+11. **Button permission code spelling:** Must match exactly across `sync_menus.py` seed, API `require_permissions(...)`, and frontend `v-permission="'...'"`. A typo in any layer silently breaks the gate. See [Button-level Permission Guide](./docs/button-permission-guide.md).
+12. **Datetime range queries (NDatePicker) must use `LocalNaiveDatetime`** — Any Query schema with `start_time` / `end_time` / `create_time` style range fields must type them as `from app.schemas.types import LocalNaiveDatetime`, **not plain `datetime`**. Reason: DB column is `TIMESTAMP WITHOUT TIME ZONE` (naive), frontend NDatePicker sends unix ms timestamp, Pydantic default parses to aware datetime which triggers asyncpg `TypeError: can't subtract offset-naive and offset-aware datetimes` → HTTP 500. `LocalNaiveDatetime` auto-converts to naive using server local timezone. Frontend `<NDatePicker type="datetimerange">` must **send `value[0]` / `value[1]` directly** (ms timestamp), **not `new Date(ts).toISOString()`** (converts to UTC, causes 8-hour cross-timezone skew). Reference: `JobLogQuery` / `LoginLogQuery` / `OperationLogQuery`.
+13. **Long-running scheduled jobs must set `timeout_seconds`** — `sys_job.timeout_seconds` controls both the `asyncio.wait_for` single-run timeout and the orphan-log-daemon grace threshold (`JobLogMonitor`, spec `docs/specs/2026-07-02-orphan-job-log-monitor.md`). If a job process crashes / restarts, `sys_job_log` stays at `status="3"` (RUNNING) forever; the daemon uses `timeout_seconds * 2` as grace threshold to identify orphans and mark them FAILED. **Without timeout**, grace falls back to `DEFAULT_TIMEOUT=1800s` (60min) — too long for long tasks (data migration / batch sync). **Strongly recommended** to explicitly declare `timeout_seconds` on long-running jobs. **New RUNNING log entries must set `runner_id=RUNNER_ID`** (`app.modules.job.job_runner.RUNNER_ID`) + `start_time=datetime.now()` (**not `func.now()`** — decision 9: align Python ↔ DB clock baseline to avoid grace misdetection).
+14. **AI builtin tool functions must return `ToolResult.success(data=..., ui=...)`** — Decision 3: `data` is for LLM (concise, prompt-cacheable, scrubbed via `serialize_for_llm`), `ui` is for frontend (`UIResult(view_type, view_data, audit, label_key, label_params)`, never enters LLM context). `view_type` must be in `STANDARD_VIEW_TYPES` (startup validation): `rows_affected` / `data_list` / `stats_chart` / `detail_card` / `plain_json`. Readonly tools add `chip_target="/system/xxx"` for declarative chip navigation (**leading slash required**, replaces legacy `query_cache_module` which is kept as alias). **Lint enforces builtin tool functions returning `ToolResult.success` with `ui=`** (`scripts/check_ai_tools_ui.py`, pre-commit integrated). See `docs/specs/2026-07-16-tool-result-view-design.md`.
 
 ## Project Structure Note
 
-跨模块复用的 Pydantic 类型放在 `app/schemas/types.py`（如 `LocalNaiveDatetime`）。不要在每个 module 的 schema 里手写 datetime 转换 validator。
+Cross-module reusable Pydantic types live in `app/schemas/types.py` (e.g., `LocalNaiveDatetime`). Do not hand-write datetime conversion validators in each module's schema.
