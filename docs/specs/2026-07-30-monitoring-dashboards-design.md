@@ -1,6 +1,6 @@
 # Grafana Dashboard Provisioning（PR-2）
 
-> 状态：⚠️ Plan 已实施待验证 | 创建日期：2026-07-30
+> 状态：✅ Plan 已完成（2026-07-30） | 创建日期：2026-07-30
 >
 > 配套 [monitoring CLI 集成方案](./2026-07-29-monitoring-cli-design.md) PR-1，补齐"Grafana
 > 启动后客户第一眼能看到什么"。PR-1 已 provisioning datasource，本 spec 在此基础上加
@@ -8,6 +8,27 @@
 >
 > **相关文档**：hohu-admin `app/modules/ai/metrics.py`（8 个 metric 定义）；
 > [`monitoring/alerts.yml`](../monitoring/alerts.yml)（6 条告警规则）。
+
+## Ship 记录
+
+| 项 | 值 |
+|---|---|
+| 实施 commit | `hohu-cli@da2a9d4`（与 PR-1 同 commit，按 `feedback_no_bump_before_release.md` 偏好合并发布）|
+| spec commit | `hohu-admin@1b914d1` |
+| 实施日期 | 2026-07-30 |
+| 决策数 | 7 |
+| 测试数 | 8（`tests/test_monitoring.py::test_dashboard_*`，编号 15-22）|
+| 新增 dashboard | 2（`ai-tool-gateway-overview.json` 8 panel + `hitl-health.json` 6 panel）|
+| datasource 补丁 | `datasources/prometheus.yml` 加 `uid: hohu-prometheus`（让 dashboard 稳定引用）|
+| 验证 | `uv run pytest` 22/22 全绿 |
+| 待客户验证 | 真机 `hohu monitoring up` 后 Grafana UI Dashboards 列表能看到 2 个 dashboard；panel 在 metric 有数据时显示曲线 |
+
+### Ship-time 决策补充
+
+- **未单独 bump 版本**：PR-2 与 PR-1 共用 0.1.14，未发布前不 bump（按 `feedback_no_bump_before_release.md`）。
+- **dashboard JSON 内联**：未使用 library panel，2 个 dashboard 各自独立 ~200-300 行 JSON。
+- **schemaVersion 39**：对齐 Grafana 11.3.0（PR-1 pinned 版本），不依赖 11.4+ 字段。
+- **客户升级路径**：dashboard `editable: false`，客户想改 UI 上 Duplicate 副本；hohu-cli 模板版本 bump 时 `_sync_templates` 触发 confirm。
 
 ## 背景
 

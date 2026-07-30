@@ -1,6 +1,6 @@
 # hohu monitoring CLI 集成方案
 
-> 状态：⚠️ Plan 未开始 | 创建日期：2026-07-29
+> 状态：✅ Plan 已完成（2026-07-30） | 创建日期：2026-07-29
 >
 > 配套 hohu-admin v1.5+ Prometheus 接入（commit `7ea6e8f` 已 ship 到 main via PR #5），补齐
 > 客户运维侧"如何起 Prometheus + Grafana 抓 hohu-admin metrics" 的体验缺口。
@@ -8,6 +8,26 @@
 > **相关文档**：[AI Tool Gateway 设计](./2026-07-02-ai-tool-gateway-design.md) §14 v1.5+ Roadmap；
 > 告警规则源 [`monitoring/alerts.yml`](../monitoring/alerts.yml)（6 条规则，critical/warning）；
 > 现有 deploy 实现参考 `hohu-cli/hohu/commands/admin/deploy.py`。
+
+## Ship 记录
+
+| 项 | 值 |
+|---|---|
+| 实施 commit | `hohu-cli@da2a9d4` feat: add monitoring command group with prometheus/grafana stack and dashboard templates |
+| spec commit | `hohu-admin@1b914d1` docs: add monitoring cli integration and grafana dashboards design specs |
+| 实施日期 | 2026-07-30 |
+| 决策数 | 10 |
+| 测试数 | 14（`tests/test_monitoring.py`，覆盖决策 1-10）|
+| 改动文件 | 18（hohu-cli 内）+ 2 spec（hohu-admin 内）|
+| 验证 | `uv run ruff check .` + `uv run pytest` 全绿；`hohu monitoring --help` 列出 6 子命令 |
+| 待客户验证 | 真机起栈（`hohu deploy && hohu monitoring init && hohu monitoring up`）后 prometheus target UP + 6 条 alert rule 加载 + grafana datasource 通 |
+
+### Ship-time 决策补充
+
+- **B1（网络名）+ B2（down 作用域）**：审查阶段发现的两个阻断问题，在 spec 内修了再实施，未引入回归。
+- **N1（删 `.tpl`）**：实施时确认 prometheus.yml 直接放固定文件，删 `_render_prometheus_config` 死代码。
+- **datasource UID**：PR-2 dashboard JSON 引用 `uid: hohu-prometheus`，同步给 `datasources/prometheus.yml` 加 `uid: hohu-prometheus` 字段（小修补丁，随 PR-2 一起 ship）。
+- **版本号 0.1.13 → 0.1.14**：PR-1 + PR-2 合并发布，未单独 bump 0.1.15（按 `feedback_no_bump_before_release.md` 偏好）。
 
 ## 背景
 
