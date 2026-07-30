@@ -65,9 +65,8 @@ async def test_list_returns_all_agents_without_query_params(
     # 至少包含 seed 的 2 行
     codes = {row["code"] for row in data}
     assert {"shared", "user_mgmt"} <= codes
-    # 无分页字段（不是 PageResult）
+    # 无分页字段（不是 PageResult）—— PageResult 是 dict，list 即证明无分页.
     assert isinstance(data, list)
-    assert "total" not in body["data"] if isinstance(data, dict) else True
 
 
 async def test_list_excludes_system_prompt(

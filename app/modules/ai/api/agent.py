@@ -16,7 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import require_permissions
 from app.core.base_response import ResponseModel
 from app.db.session import get_db
-from app.modules.ai.schemas.agent_admin import AgentAdminUpdateReq
+from app.modules.ai.schemas.agent_admin import (
+    AgentAdminDetailItem,
+    AgentAdminListItem,
+    AgentAdminUpdateReq,
+)
 from app.modules.ai.service.agent_admin import agent_admin_service
 from app.modules.ai.service.agent_visibility import list_visible_agents
 from app.modules.auth.service import get_current_user
@@ -63,48 +67,46 @@ admin_router = APIRouter()
 @admin_router.get(
     "",
     summary="管理端：列出所有 AI Agent（含禁用）",
-    response_model=ResponseModel[list],
+    response_model=ResponseModel[list[AgentAdminListItem]],
     dependencies=[Depends(require_permissions("ai:agent:list"))],
 )
 async def admin_list_agents(
     db: AsyncSession = Depends(get_db),
-) -> ResponseModel[list]:
+) -> ResponseModel[list[AgentAdminListItem]]:
     """决策 #23：无 query 参数、无分页，返回全量列表."""
     items = await agent_admin_service.list_agents(db)
-    return ResponseModel.success(
-        data=[item.model_dump(by_alias=True) for item in items]
-    )
+    return ResponseModel.success(data=items)
 
 
 @admin_router.get(
     "/{agent_id}",
     summary="管理端：Agent 详情",
-    response_model=ResponseModel[dict],
+    response_model=ResponseModel[AgentAdminDetailItem],
     dependencies=[Depends(require_permissions("ai:agent:list"))],
 )
 async def admin_get_agent(
     agent_id: int,
     db: AsyncSession = Depends(get_db),
-) -> ResponseModel[dict]:
+) -> ResponseModel[AgentAdminDetailItem]:
     """决策 #5：detail 返回含 systemPrompt，list 不返回."""
     item = await agent_admin_service.get_agent(db, agent_id)
-    return ResponseModel.success(data=item.model_dump(by_alias=True))
+    return ResponseModel.success(data=item)
 
 
 @admin_router.put(
     "/{agent_id}",
     summary="管理端：更新 Agent 配置",
-    response_model=ResponseModel[dict],
+    response_model=ResponseModel[AgentAdminDetailItem],
     dependencies=[Depends(require_permissions("ai:agent:edit"))],
 )
 async def admin_update_agent(
     agent_id: int,
     req: AgentAdminUpdateReq,
     db: AsyncSession = Depends(get_db),
-) -> ResponseModel[dict]:
+) -> ResponseModel[AgentAdminDetailItem]:
     """决策 #1：code / is_builtin / agent_id 字段在 service 层强制 strip；
     决策 #20：partial update，未传字段保持原值.
     """
     item = await agent_admin_service.update_agent(db, agent_id, req)
     await db.commit()
-    return ResponseModel.success(data=item.model_dump(by_alias=True))
+    return ResponseModel.success(data=item)

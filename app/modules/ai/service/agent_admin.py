@@ -26,24 +26,24 @@ class AgentAdminService:
         agents = result.scalars().all()
         return [AgentAdminListItem.model_validate(a) for a in agents]
 
-    async def get_agent(self, db: AsyncSession, agent_id: int) -> AgentAdminDetailItem:
+    async def _get_agent_or_404(self, db: AsyncSession, agent_id: int) -> AiAgent:
+        """决策 #6: 公共 fetch + raise，被 get_agent / update_agent 复用 (DRY)."""
         agent = await db.get(AiAgent, agent_id)
         if agent is None:
             raise NotFoundException(
                 resource_type="AI Agent",
                 error_code="AI_AGENT_NOT_FOUND",
             )
+        return agent
+
+    async def get_agent(self, db: AsyncSession, agent_id: int) -> AgentAdminDetailItem:
+        agent = await self._get_agent_or_404(db, agent_id)
         return AgentAdminDetailItem.model_validate(agent)
 
     async def update_agent(
         self, db: AsyncSession, agent_id: int, req: AgentAdminUpdateReq
     ) -> AgentAdminDetailItem:
-        agent = await db.get(AiAgent, agent_id)
-        if agent is None:
-            raise NotFoundException(
-                resource_type="AI Agent",
-                error_code="AI_AGENT_NOT_FOUND",
-            )
+        agent = await self._get_agent_or_404(db, agent_id)
         data = req.model_dump(exclude_unset=True)
         # 显式忽略 code / is_builtin / agent_id 字段（决策 #1）
         # —— 即使客户端绕过 UI 直接 PUT 也兜底，绝不改 identity 字段
@@ -52,7 +52,10 @@ class AgentAdminService:
         for k, v in data.items():
             setattr(agent, k, v)
         await db.flush()
-        return await self.get_agent(db, agent_id)
+        # refresh 让 onupdate（如 update_time）服务端默认值回写到对象，
+        # 否则返回的 AgentAdminDetailItem 会带上旧 update_time.
+        await db.refresh(agent)
+        return AgentAdminDetailItem.model_validate(agent)
 
 
 agent_admin_service = AgentAdminService()
