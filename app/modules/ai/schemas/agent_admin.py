@@ -3,7 +3,8 @@
 import re
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic.alias_generators import to_camel
 
 from app.modules.ai.models.agent import RiskAppetite
 
@@ -11,9 +12,16 @@ from app.modules.ai.models.agent import RiskAppetite
 class AgentAdminListItem(BaseModel):
     """GET /ai/admin/agents list item（不含 systemPrompt，spec 决策 #5）."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, from_attributes=True
+    )
 
-    agent_id: str
+    agent_id: int
+
+    @field_serializer("agent_id")
+    def _serialize_agent_id(self, v: int) -> str:
+        return str(v)
+
     code: str
     name: str
     description: str
@@ -36,14 +44,16 @@ class AgentAdminDetailItem(AgentAdminListItem):
 class AgentAdminUpdateReq(BaseModel):
     """PUT /ai/admin/agents/{id} partial update（spec §6.1）."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, from_attributes=True
+    )
 
     name: str | None = Field(None, min_length=1, max_length=128)
     description: str | None = None
     enabled: bool | None = None
     display_order: int | None = Field(None, ge=0)
     system_prompt: str | None = Field(None, max_length=32 * 1024)
-    model_preference: str | None = None
+    model_preference: str | None = Field(None, max_length=128)
     daily_quota_per_user: int | None = None
     risk_appetite: RiskAppetite | None = None
 
