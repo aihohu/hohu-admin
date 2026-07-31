@@ -72,7 +72,18 @@ class AgentAdminService:
             if not re.match(r"^[a-z0-9_-]+:[a-z0-9_-]+$", pref):
                 raise BusinessRuleException(
                     "model_preference 必须为 'provider:model' 格式",
-                    error_code="AI_AGENT_MODEL_PREF_FORMAT_INVALID",
+                    error_code="AI_AGENT_MODEL_PREFERENCE_INVALID",
+                )
+
+        # 显式 daily_quota_per_user 取值校验（决策 §6.1 line 234）—— Pydantic
+        # field_validator 会返 422 + 无 errorCode，无法满足「400 + AI_AGENT_QUOTA_INVALID」
+        # 契约，故移到 Service 层抛 BusinessRuleException.
+        if "daily_quota_per_user" in data and data["daily_quota_per_user"] is not None:
+            quota = data["daily_quota_per_user"]
+            if quota <= 0:
+                raise BusinessRuleException(
+                    "daily_quota_per_user 必须 ≥ 1 或 null",
+                    error_code="AI_AGENT_QUOTA_INVALID",
                 )
 
         for k, v in data.items():

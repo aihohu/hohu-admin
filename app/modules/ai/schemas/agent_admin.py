@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from pydantic.alias_generators import to_camel
 
 from app.modules.ai.models.agent import RiskAppetite
@@ -43,12 +43,11 @@ class AgentAdminDetailItem(AgentAdminListItem):
 class AgentAdminUpdateReq(BaseModel):
     """PUT /ai/admin/agents/{id} partial update（spec §6.1）.
 
-    校验分层说明：description 长度 + model_preference 格式由 Service 层抛
-    BusinessRuleException 处理，目的是产出精确 errorCode（供前端 i18n 映射）。
-    Pydantic 全局 RequestValidationError handler 返 422 + 无 errorCode，无法
-    满足契约；故这两个字段不再加 field_validator，避免 Pydantic 在请求解析阶段
-    提前拦截。daily_quota_per_user / name 等无精确 errorCode 需求的约束仍走
-    Pydantic Field 约束.
+    校验分层说明：description 长度 + model_preference 格式 + daily_quota_per_user
+    取值由 Service 层抛 BusinessRuleException 处理，目的是产出精确 errorCode
+    （供前端 i18n 映射）。Pydantic 全局 RequestValidationError handler 返 422 +
+    无 errorCode，无法满足契约；故这三个字段不再加 field_validator，避免 Pydantic
+    在请求解析阶段提前拦截。name 等无精确 errorCode 需求的约束仍走 Pydantic Field.
     """
 
     model_config = ConfigDict(
@@ -63,10 +62,3 @@ class AgentAdminUpdateReq(BaseModel):
     model_preference: str | None = Field(None, max_length=128)
     daily_quota_per_user: int | None = None
     risk_appetite: RiskAppetite | None = None
-
-    @field_validator("daily_quota_per_user")
-    @classmethod
-    def _validate_quota(cls, v: int | None) -> int | None:
-        if v is not None and v <= 0:
-            raise ValueError("daily_quota_per_user 必须 ≥ 1 或 null")
-        return v

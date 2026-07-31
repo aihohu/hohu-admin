@@ -292,7 +292,7 @@ async def test_model_preference_format_only_no_existence_check(
 async def test_model_preference_invalid_format(
     authed_client: tuple[AsyncClient, str], db_session, seed_agents
 ):
-    """决策 #25：model_preference 非法格式（无冒号）返 400."""
+    """决策 #25：model_preference 非法格式（无冒号）返 400 + AI_AGENT_MODEL_PREFERENCE_INVALID."""
     client, _ = authed_client
     shared_id = await _get_agent_id_by_code(client, "shared")
     resp = await client.put(
@@ -300,3 +300,32 @@ async def test_model_preference_invalid_format(
         json={"modelPreference": "invalid_no_colon"},
     )
     assert resp.status_code == 400
+    assert resp.json().get("errorCode") == "AI_AGENT_MODEL_PREFERENCE_INVALID"
+
+
+async def test_update_daily_quota_zero_returns_400(
+    authed_client: tuple[AsyncClient, str], db_session, seed_agents
+):
+    """决策：daily_quota_per_user ≤ 0 返 400 + AI_AGENT_QUOTA_INVALID."""
+    client, _ = authed_client
+    shared_id = await _get_agent_id_by_code(client, "shared")
+    resp = await client.put(
+        f"/ai/admin/agents/{shared_id}",
+        json={"dailyQuotaPerUser": 0},
+    )
+    assert resp.status_code == 400
+    assert resp.json().get("errorCode") == "AI_AGENT_QUOTA_INVALID"
+
+
+async def test_update_daily_quota_negative_returns_400(
+    authed_client: tuple[AsyncClient, str], db_session, seed_agents
+):
+    """决策：daily_quota_per_user 负值返 400 + AI_AGENT_QUOTA_INVALID."""
+    client, _ = authed_client
+    shared_id = await _get_agent_id_by_code(client, "shared")
+    resp = await client.put(
+        f"/ai/admin/agents/{shared_id}",
+        json={"dailyQuotaPerUser": -5},
+    )
+    assert resp.status_code == 400
+    assert resp.json().get("errorCode") == "AI_AGENT_QUOTA_INVALID"
