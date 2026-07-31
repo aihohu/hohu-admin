@@ -219,3 +219,84 @@ async def test_update_code_field_ignored(
     data = resp.json()["data"]
     assert data["code"] == "shared"  # 未变
     assert data["name"] == "Renamed"
+
+
+# ============ Task 4: 校验规则测试（决策 #3, #20, #25） ============
+
+
+async def test_update_description_too_short(
+    authed_client: tuple[AsyncClient, str], db_session, seed_agents
+):
+    """决策 #20：description < 50 字返 400 + AI_AGENT_DESC_LENGTH_INVALID.
+
+    Service 层显式抛 BusinessRuleException（非依赖 Pydantic ValidationError
+    全局映射），保证 errorCode 精确供前端 i18n 映射.
+    """
+    client, _ = authed_client
+    shared_id = await _get_agent_id_by_code(client, "shared")
+    resp = await client.put(
+        f"/ai/admin/agents/{shared_id}",
+        json={"description": "x" * 49},
+    )
+    assert resp.status_code == 400
+    assert resp.json().get("errorCode") == "AI_AGENT_DESC_LENGTH_INVALID"
+
+
+async def test_update_description_too_long(
+    authed_client: tuple[AsyncClient, str], db_session, seed_agents
+):
+    """决策 #20：description > 200 字返 400."""
+    client, _ = authed_client
+    shared_id = await _get_agent_id_by_code(client, "shared")
+    resp = await client.put(
+        f"/ai/admin/agents/{shared_id}",
+        json={"description": "x" * 201},
+    )
+    assert resp.status_code == 400
+
+
+async def test_description_length_algorithm_uses_code_points(
+    authed_client: tuple[AsyncClient, str], db_session, seed_agents
+):
+    """决策 #20：按 Python len() 计 code point，中英文同权重.
+
+    100 个中文字 = 100 code points，应在 [50, 200] 范围内通过。
+    若按 UTF-8 字节计 (100*3=300 字节) 会超过 200 失败 —— 本测试
+    锁定算法语义，防止日后改成 len(s.encode('utf-8')) 的回归.
+    """
+    client, _ = authed_client
+    shared_id = await _get_agent_id_by_code(client, "shared")
+    resp = await client.put(
+        f"/ai/admin/agents/{shared_id}",
+        json={"description": "中" * 100},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["description"] == "中" * 100
+
+
+async def test_model_preference_format_only_no_existence_check(
+    authed_client: tuple[AsyncClient, str], db_session, seed_agents
+):
+    """决策 #25：model_preference 只校验 'provider:model' 格式，不校验存在性."""
+    client, _ = authed_client
+    shared_id = await _get_agent_id_by_code(client, "shared")
+    # 假 provider/model，但格式合法（小写字母+冒号+小写字母）
+    resp = await client.put(
+        f"/ai/admin/agents/{shared_id}",
+        json={"modelPreference": "xxx:yyy"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["modelPreference"] == "xxx:yyy"
+
+
+async def test_model_preference_invalid_format(
+    authed_client: tuple[AsyncClient, str], db_session, seed_agents
+):
+    """决策 #25：model_preference 非法格式（无冒号）返 400."""
+    client, _ = authed_client
+    shared_id = await _get_agent_id_by_code(client, "shared")
+    resp = await client.put(
+        f"/ai/admin/agents/{shared_id}",
+        json={"modelPreference": "invalid_no_colon"},
+    )
+    assert resp.status_code == 400

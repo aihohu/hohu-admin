@@ -1,6 +1,5 @@
 """Multi-Agent admin UI schemas (spec §6.1)."""
 
-import re
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
@@ -42,7 +41,15 @@ class AgentAdminDetailItem(AgentAdminListItem):
 
 
 class AgentAdminUpdateReq(BaseModel):
-    """PUT /ai/admin/agents/{id} partial update（spec §6.1）."""
+    """PUT /ai/admin/agents/{id} partial update（spec §6.1）.
+
+    校验分层说明：description 长度 + model_preference 格式由 Service 层抛
+    BusinessRuleException 处理，目的是产出精确 errorCode（供前端 i18n 映射）。
+    Pydantic 全局 RequestValidationError handler 返 422 + 无 errorCode，无法
+    满足契约；故这两个字段不再加 field_validator，避免 Pydantic 在请求解析阶段
+    提前拦截。daily_quota_per_user / name 等无精确 errorCode 需求的约束仍走
+    Pydantic Field 约束.
+    """
 
     model_config = ConfigDict(
         alias_generator=to_camel, populate_by_name=True, from_attributes=True
@@ -57,29 +64,9 @@ class AgentAdminUpdateReq(BaseModel):
     daily_quota_per_user: int | None = None
     risk_appetite: RiskAppetite | None = None
 
-    @field_validator("description")
-    @classmethod
-    def _validate_desc_length(cls, v: str | None) -> str | None:
-        # partial update：None 表示未传，跳过校验（spec 决策 #20）
-        if v is None:
-            return None
-        if not (50 <= len(v) <= 200):
-            raise ValueError("description 长度必须在 50-200 字之间")
-        return v
-
     @field_validator("daily_quota_per_user")
     @classmethod
     def _validate_quota(cls, v: int | None) -> int | None:
         if v is not None and v <= 0:
             raise ValueError("daily_quota_per_user 必须 ≥ 1 或 null")
-        return v
-
-    @field_validator("model_preference")
-    @classmethod
-    def _validate_model_pref(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-
-        if not re.match(r"^[a-z0-9_-]+:[a-z0-9_-]+$", v):
-            raise ValueError("model_preference 必须为 'provider:model' 格式")
         return v
