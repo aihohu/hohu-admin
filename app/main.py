@@ -29,6 +29,9 @@ from app.modules.ai.api.query_cache import router as ai_query_cache_router
 from app.modules.ai.api.resume import router as ai_resume_router
 from app.modules.ai.api.role_agent import router as ai_role_agent_router
 from app.modules.ai.api.routing_feedback import (
+    query_router as ai_routing_feedback_query_router,
+)
+from app.modules.ai.api.routing_feedback import (
     router as ai_routing_feedback_router,
 )
 from app.modules.auth.api import router as auth_router
@@ -228,6 +231,12 @@ if settings.AI_MODULE_ENABLED:
     app.include_router(
         ai_routing_feedback_router,
         prefix="/ai/messages",
+        tags=["AI 路由反馈"],
+    )
+    # Multi-Agent admin UI (spec §6.2): 路由反馈 KPI/明细查询端点
+    app.include_router(
+        ai_routing_feedback_query_router,
+        prefix="/ai/routing-feedback",
         tags=["AI 路由反馈"],
     )
     # Multi-Agent admin UI (spec §6.3): Role ↔ AI Agent 绑定管理端点
