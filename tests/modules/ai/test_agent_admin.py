@@ -253,6 +253,7 @@ async def test_update_description_too_long(
         json={"description": "x" * 201},
     )
     assert resp.status_code == 400
+    assert resp.json().get("errorCode") == "AI_AGENT_DESC_LENGTH_INVALID"
 
 
 async def test_description_length_algorithm_uses_code_points(
