@@ -24,7 +24,11 @@ class RoutingFeedbackRequest(BaseModel):
 
 
 class FeedbackListQuery(BaseModel):
-    """spec §6.4: 路由反馈列表查询参数。"""
+    """GET /ai/routing-feedback/list 查询参数.
+
+    决策 #6：默认 feedback=wrong；不支持 feedback=correct 单独过滤（correct 在
+    summary 段聚合成 correct 计数，但不作为列表过滤维度）.
+    """
 
     model_config = ConfigDict(
         alias_generator=to_camel, populate_by_name=True, from_attributes=True
@@ -33,7 +37,7 @@ class FeedbackListQuery(BaseModel):
     days: int = Field(7, ge=1, le=365)
     current: int = Field(1, ge=1)
     size: int = Field(20, ge=1, le=100)
-    feedback: str = Field("wrong", pattern="^(wrong|all|correct)$")
+    feedback: str = Field("wrong", pattern="^(wrong|all)$")
     original_agent: str | None = None
     corrected_agent: str | None = None
 

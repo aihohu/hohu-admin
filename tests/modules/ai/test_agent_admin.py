@@ -410,19 +410,21 @@ async def test_put_triggers_audit_middleware(
         "5s 内未在审计日志中找到 request_params 含 'Audit Test' 的记录 "
         "(middleware 异步写入可能延迟)"
     )
-    assert new_log.module == "ai"
-    assert new_log.action == "update"
-    assert new_log.method == "PUT"
-    assert audit_path in new_log.path
-    # request_params 应含 PUT body 全量（middleware 不脱敏 name/enabled）
-    params = new_log.request_params or ""
-    assert "Audit Test" in params
-    assert "enabled" in params
-
-    # teardown：清理本测试产生的审计日志，避免污染后续审计相关测试.
-    # middleware 写入不归 db_session outer-rollback 管控，必须显式清理.
-    async with AsyncSessionLocal() as s:
-        await s.execute(
-            delete(SysOperationLog).where(SysOperationLog.path == audit_path)
-        )
-        await s.commit()
+    # 用 try/finally 包裹断言：任一断言失败时仍清理本测试产生的审计日志，
+    # 避免污染后续审计相关测试（middleware 写入不归 db_session outer-rollback 管控）.
+    try:
+        assert new_log.module == "ai"
+        assert new_log.action == "update"
+        assert new_log.method == "PUT"
+        assert audit_path in new_log.path
+        # request_params 应含 PUT body 全量（middleware 不脱敏 name/enabled）
+        params = new_log.request_params or ""
+        assert "Audit Test" in params
+        assert "enabled" in params
+    finally:
+        # teardown：按精确 path 删除本测试产生的审计日志.
+        async with AsyncSessionLocal() as s:
+            await s.execute(
+                delete(SysOperationLog).where(SysOperationLog.path == audit_path)
+            )
+            await s.commit()
