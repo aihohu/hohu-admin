@@ -330,3 +330,88 @@ async def test_update_daily_quota_negative_returns_400(
     )
     assert resp.status_code == 400
     assert resp.json().get("errorCode") == "AI_AGENT_QUOTA_INVALID"
+
+
+# ============ Task 5: 审计 middleware 回归测试（决策 #27） ============
+
+
+async def test_put_triggers_audit_middleware(
+    authed_client: tuple[AsyncClient, str], db_session, seed_agents
+):
+    """决策 #27：PUT /ai/admin/agents/{id} 由 AuditLogMiddleware 自动审计，无需端点内审计代码.
+
+    Plan 假设：现有 ``app/middleware/audit_middleware.py`` 的 ``AuditLogMiddleware``
+    会拦截所有 PUT/POST/DELETE/PATCH 写操作并写入 ``sys_operation_log``. 本测试验证
+    该假设对 ``/ai/admin/agents/{id}`` 路径成立 —— PUT 成功后日志表多一行，
+    module/ action / path / request_params 与预期一致.
+
+    实施要点：
+    1. **动态 agent_id** —— Plan 原文硬编码 ``9001``，但实际 agent_id 由 Snowflake
+       ``next_id()`` 生成，无法预测. 用 ``_get_agent_id_by_code`` 解耦 ID.
+    2. **不查 db_session** —— middleware 用自己的 ``AsyncSessionLocal()`` 独立 session
+       写日志并 commit；``db_session`` fixture 绑定 outer transaction + rollback，
+       看不到这层写入. 必须用独立 ``AsyncSessionLocal()`` session 查询.
+    3. **model 类名修正** —— Plan 写 ``OperationLog``，实际类名是
+       ``SysOperationLog``（``app/modules/system/models/operation_log.py``）.
+    4. **审计日志 teardown** —— middleware 写入的日志行会落库（不归 db_session 管控），
+       必须显式按 ``path LIKE`` 清理，避免污染后续审计相关测试.
+    """
+    from sqlalchemy import delete, select
+
+    from app.db.session import AsyncSessionLocal
+    from app.modules.system.models.operation_log import SysOperationLog
+
+    client, _ = authed_client
+    shared_id = await _get_agent_id_by_code(client, "shared")
+    audit_path = f"/ai/admin/agents/{shared_id}"
+
+    # 用独立 session 读 audit log（middleware 写入对 db_session 外层事务不可见）
+    async with AsyncSessionLocal() as s:
+        before = (
+            (
+                await s.execute(
+                    select(SysOperationLog).where(SysOperationLog.path == audit_path)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        before_count = len(before)
+
+    # 触发 PUT —— middleware 会在响应返回后用独立 session 异步写审计日志
+    resp = await client.put(
+        audit_path,
+        json={"enabled": False, "name": "Audit Test"},
+    )
+    assert resp.status_code == 200, f"PUT failed: {resp.status_code} {resp.text}"
+
+    # 重新开 session 读取 —— middleware commit 后立即可见
+    async with AsyncSessionLocal() as s:
+        after = (
+            (
+                await s.execute(
+                    select(SysOperationLog).where(SysOperationLog.path == audit_path)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        try:
+            assert len(after) == before_count + 1
+            new_log = after[-1]
+            assert new_log.module == "ai"
+            assert new_log.action == "update"
+            assert new_log.method == "PUT"
+            assert audit_path in new_log.path
+            # request_params 应含 PUT body 全量（middleware 不脱敏 name/enabled）
+            params = new_log.request_params or ""
+            assert "Audit Test" in params
+            assert "enabled" in params
+        finally:
+            # teardown：清理本测试产生的审计日志，避免污染后续审计相关测试.
+            # middleware 写入不归 db_session outer-rollback 管控，必须显式清理.
+            await s.execute(
+                delete(SysOperationLog).where(SysOperationLog.path == audit_path)
+            )
+            await s.commit()
