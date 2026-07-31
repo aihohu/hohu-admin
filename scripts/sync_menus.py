@@ -13,7 +13,7 @@ Usage:
 
 import asyncio
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -1408,12 +1408,8 @@ async def sync_menus():
             old_feedback_menu.component = "view.ai_routing-feedback"
             old_feedback_menu.page = "ai_routing-feedback"
             old_feedback_menu.i18n_key = "route.ai_routing-feedback"
-            # 同步子按钮的 parent_route
-            await db.execute(
-                update(Menu)
-                .where(Menu.parent_route == "ai_routing_feedback")
-                .values(parent_route="ai_routing-feedback")
-            )
+            # 子按钮通过 parent_id (int) 关联父菜单，父菜单 menu_id 不变，
+            # 所以无需 UPDATE 子行的 parent 链接 — 它们自动跟随。
             await db.commit()
             print(
                 "Renamed ai_routing_feedback -> ai_routing-feedback (kebab convention)"
