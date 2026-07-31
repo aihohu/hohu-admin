@@ -365,19 +365,6 @@ async def test_put_triggers_audit_middleware(
     shared_id = await _get_agent_id_by_code(client, "shared")
     audit_path = f"/ai/admin/agents/{shared_id}"
 
-    # 用独立 session 读 audit log（middleware 写入对 db_session 外层事务不可见）
-    async with AsyncSessionLocal() as s:
-        before = (
-            (
-                await s.execute(
-                    select(SysOperationLog).where(SysOperationLog.path == audit_path)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        before_count = len(before)
-
     # 触发 PUT —— middleware 会在响应返回后用独立 session 异步写审计日志
     resp = await client.put(
         audit_path,
@@ -385,33 +372,57 @@ async def test_put_triggers_audit_middleware(
     )
     assert resp.status_code == 200, f"PUT failed: {resp.status_code} {resp.text}"
 
-    # 重新开 session 读取 —— middleware commit 后立即可见
-    async with AsyncSessionLocal() as s:
-        after = (
-            (
-                await s.execute(
-                    select(SysOperationLog).where(SysOperationLog.path == audit_path)
-                )
-            )
-            .scalars()
-            .all()
-        )
+    # 重新开 session 读取 —— middleware commit 后立即可见.
+    # 注意: 其他 update 测试 (test_update_partial_skips_unsent_fields /
+    # test_update_description_too_long 等) 也 PUT 到同一 shared agent 路径,
+    # 审计 middleware 异步写入会落库; 不能简单地 after[-1] 取最后一条 ——
+    # 在并发场景下 after[-1] 可能是其他测试的 PUT body (before_count 捕获后,
+    # 其他测试的 middleware write 才异步落库). 必须按 request_params 含
+    # "Audit Test" 轮询过滤, 才能稳定定位本测试的日志.
+    import asyncio
+    import time
 
-        try:
-            assert len(after) == before_count + 1
-            new_log = after[-1]
-            assert new_log.module == "ai"
-            assert new_log.action == "update"
-            assert new_log.method == "PUT"
-            assert audit_path in new_log.path
-            # request_params 应含 PUT body 全量（middleware 不脱敏 name/enabled）
-            params = new_log.request_params or ""
-            assert "Audit Test" in params
-            assert "enabled" in params
-        finally:
-            # teardown：清理本测试产生的审计日志，避免污染后续审计相关测试.
-            # middleware 写入不归 db_session outer-rollback 管控，必须显式清理.
-            await s.execute(
-                delete(SysOperationLog).where(SysOperationLog.path == audit_path)
-            )
-            await s.commit()
+    new_log = None
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        async with AsyncSessionLocal() as s:
+            candidates = [
+                log
+                for log in (
+                    (
+                        await s.execute(
+                            select(SysOperationLog).where(
+                                SysOperationLog.path == audit_path
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                if "Audit Test" in (log.request_params or "")
+            ]
+        if candidates:
+            new_log = candidates[-1]
+            break
+        await asyncio.sleep(0.1)
+
+    assert new_log is not None, (
+        "5s 内未在审计日志中找到 request_params 含 'Audit Test' 的记录 "
+        "(middleware 异步写入可能延迟)"
+    )
+    assert new_log.module == "ai"
+    assert new_log.action == "update"
+    assert new_log.method == "PUT"
+    assert audit_path in new_log.path
+    # request_params 应含 PUT body 全量（middleware 不脱敏 name/enabled）
+    params = new_log.request_params or ""
+    assert "Audit Test" in params
+    assert "enabled" in params
+
+    # teardown：清理本测试产生的审计日志，避免污染后续审计相关测试.
+    # middleware 写入不归 db_session outer-rollback 管控，必须显式清理.
+    async with AsyncSessionLocal() as s:
+        await s.execute(
+            delete(SysOperationLog).where(SysOperationLog.path == audit_path)
+        )
+        await s.commit()
