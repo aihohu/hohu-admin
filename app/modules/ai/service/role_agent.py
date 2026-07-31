@@ -103,6 +103,18 @@ class RoleAgentService:
         """
         await self._get_role_or_404(db, role_id)
 
+        # 校验 agent_id 必须为数字字符串 —— 非数字（如 "abc"）返 400 +
+        # AI_AGENT_ID_INVALID（Task 6 review Important #1：原 `int(aid)` 裸调用
+        # 抛 ValueError 未被捕获 → HTTP 500 无 errorCode，前端无法 i18n）.
+        for aid in req.agent_ids:
+            try:
+                int(aid)
+            except (TypeError, ValueError):
+                raise BusinessRuleException(
+                    f"agent_id 必须为数字字符串: {aid!r}",
+                    error_code="AI_AGENT_ID_INVALID",
+                )
+
         # 去重
         unique_ids = list({int(aid) for aid in req.agent_ids})
 

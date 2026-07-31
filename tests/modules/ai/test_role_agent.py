@@ -215,3 +215,241 @@ async def test_role_not_found_error_code_prefix(
     body = resp.json()
     assert body["code"] == 404
     assert body.get("errorCode") == "AI_ROLE_NOT_FOUND"
+
+
+# ============ Task 7: PUT 全量覆盖 + 边界测试（决策 #14, #15） ============
+
+
+async def _get_agent_id_by_code(client: AsyncClient, code: str) -> str:
+    """通过 GET /ai/admin/agents 按 code 查 agent_id（str，Snowflake 已序列化）.
+
+    Plan 硬编码 agent_id（9101/9102/9103）无法落地 —— seed_ai_agents.py 用
+    next_id() 生成 Snowflake ID 不可预测. 复用 test_agent_admin._get_agent_id_by_code
+    同构逻辑（不 import 跨文件测试函数，保持模块自包含）.
+    """
+    resp = await client.get("/ai/admin/agents")
+    assert resp.status_code == 200, f"list agents failed: {resp.status_code}"
+    row = next(r for r in resp.json()["data"] if r["code"] == code)
+    return row["agentId"]
+
+
+async def test_put_full_replace_semantics(
+    authed_client: tuple[AsyncClient, str], db_session, seed_role_agents
+):
+    """决策 #15：PUT 全量覆盖 —— 新列表完全替换旧绑定（DELETE + INSERT）.
+
+    预置（fixture）：role 绑了 user_mgmt（enabled=True）.
+    操作：PUT 提交 [role_mgmt]，原 user_mgmt 绑定应被 DELETE，只剩 role_mgmt.
+    断言：GET 返回 boundAgentIds == [role_mgmt]（不含 user_mgmt，体现全量覆盖）.
+    """
+    client, _ = authed_client
+    role_id = seed_role_agents["role_id"]
+    role_mgmt_id = await _get_agent_id_by_code(client, "role_mgmt")
+    user_id_str = str(seed_role_agents["user_id"])
+
+    resp = await client.put(
+        f"/ai/role-agent/{role_id}",
+        json={"agentIds": [role_mgmt_id]},
+    )
+    assert resp.status_code == 200, f"PUT failed: {resp.status_code} {resp.text}"
+
+    # GET 验证：boundAgentIds == [role_mgmt]，user_mgmt 已被覆盖掉
+    get_resp = await client.get(f"/ai/role-agent/{role_id}")
+    assert get_resp.status_code == 200
+    bound = get_resp.json()["data"]["boundAgentIds"]
+    assert bound == [role_mgmt_id]
+    assert user_id_str not in bound
+
+
+async def test_put_normalizes_soft_disabled_to_enabled(
+    authed_client: tuple[AsyncClient, str], db_session, seed_role_agents
+):
+    """决策 #15：PUT 全量覆盖 normalize 软禁用态为 enabled=True.
+
+    预置：通过 AsyncSessionLocal 真实 commit 插入一条 enabled=False 的
+    RoleAiAgent 绑定（模拟「软禁用」历史态）.
+    操作：PUT 提交该 agent_id.
+    断言：PUT 后 GET boundAgentIds 含该 id（说明 enabled=True，因为 GET
+    只返回 enabled=True 的绑定 —— 见 service.get_binding 第 65 行）.
+    """
+    from sqlalchemy import select
+
+    from app.db.session import AsyncSessionLocal
+    from app.modules.ai.models.role_ai_agent import RoleAiAgent
+
+    client, _ = authed_client
+    role_id = seed_role_agents["role_id"]
+    user_id = seed_role_agents["user_id"]
+
+    # 预置：把 user_mgmt 这条绑定 UPDATE 为 enabled=False（fixture 原本 enabled=True）
+    async with AsyncSessionLocal() as s:
+        row = (
+            await s.execute(
+                select(RoleAiAgent).where(
+                    RoleAiAgent.role_id == role_id,
+                    RoleAiAgent.agent_id == user_id,
+                )
+            )
+        ).scalar_one()
+        row.enabled = False
+        await s.commit()
+
+    # PUT 提交该 agent_id —— service 全量覆盖会 DELETE + INSERT enabled=True
+    resp = await client.put(
+        f"/ai/role-agent/{role_id}",
+        json={"agentIds": [str(user_id)]},
+    )
+    assert resp.status_code == 200, f"PUT failed: {resp.status_code} {resp.text}"
+
+    # GET 验证：boundAgentIds 含 user_id（说明 normalize 成 enabled=True）
+    get_resp = await client.get(f"/ai/role-agent/{role_id}")
+    assert get_resp.status_code == 200
+    bound = get_resp.json()["data"]["boundAgentIds"]
+    assert str(user_id) in bound
+
+
+async def test_put_shared_binding_rejected(
+    authed_client: tuple[AsyncClient, str], db_session, seed_role_agents
+):
+    """决策 #14：PUT 含 shared Agent 返 400 + AI_ROLE_AGENT_BIND_SHARED_FORBIDDEN.
+
+    shared Agent 直通所有用户无需绑定 —— service 显式拦截（Task 6 review Important
+    #2：本测试断言 400，而非 422/500 —— 验证 BusinessRuleException → HTTP 400
+    映射在 app/core/exceptions.py:75 配置正确）.
+    """
+    client, _ = authed_client
+    role_id = seed_role_agents["role_id"]
+    shared_id = seed_role_agents["shared_id"]
+
+    resp = await client.put(
+        f"/ai/role-agent/{role_id}",
+        json={"agentIds": [str(shared_id)]},
+    )
+    assert resp.status_code == 400  # 不是 422 / 500
+    body = resp.json()
+    assert body.get("errorCode") == "AI_ROLE_AGENT_BIND_SHARED_FORBIDDEN"
+
+
+async def test_put_empty_array_unbinds_all(
+    authed_client: tuple[AsyncClient, str], db_session, seed_role_agents
+):
+    """决策 #15：PUT 空数组 = 全量覆盖为空集 = 解绑全部.
+
+    预置（fixture）：role 绑了 user_mgmt.
+    操作：PUT 提交 [].
+    断言：GET boundAgentIds == []（全量覆盖语义，DELETE + INSERT 0 行）.
+    """
+    client, _ = authed_client
+    role_id = seed_role_agents["role_id"]
+
+    resp = await client.put(
+        f"/ai/role-agent/{role_id}",
+        json={"agentIds": []},
+    )
+    assert resp.status_code == 200, f"PUT failed: {resp.status_code} {resp.text}"
+
+    get_resp = await client.get(f"/ai/role-agent/{role_id}")
+    assert get_resp.status_code == 200
+    bound = get_resp.json()["data"]["boundAgentIds"]
+    assert bound == []
+
+
+async def test_put_triggers_audit_middleware(
+    authed_client: tuple[AsyncClient, str], db_session, seed_role_agents
+):
+    """决策 #27：PUT /ai/role-agent/{id} 由 AuditLogMiddleware 自动审计.
+
+    验证 middleware 写入 sys_operation_log（不查 db_session —— middleware 用
+    独立 AsyncSessionLocal 写入，对 outer transaction 不可见）：
+    - module == 'ai'（_extract_module 取 path 首段）
+    - action == 'update'（PUT 在 METHOD_ACTION_MAP 映射）
+    - method == 'PUT'
+    - path 含 /ai/role-agent/{role_id}
+    - request_params 含 PUT body（agentIds）
+
+    teardown：显式按 path DELETE middleware 写入的日志行，避免污染后续审计
+    相关测试（不归 db_session outer-rollback 管控）.
+    """
+    from sqlalchemy import delete, select
+
+    from app.db.session import AsyncSessionLocal
+    from app.modules.system.models.operation_log import SysOperationLog
+
+    client, _ = authed_client
+    role_id = seed_role_agents["role_id"]
+    user_id_str = str(seed_role_agents["user_id"])
+    audit_path = f"/ai/role-agent/{role_id}"
+
+    # 用独立 session 读 audit log（middleware 写入对 db_session 外层事务不可见）
+    async with AsyncSessionLocal() as s:
+        before = (
+            (
+                await s.execute(
+                    select(SysOperationLog).where(SysOperationLog.path == audit_path)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        before_count = len(before)
+
+    # 触发 PUT —— middleware 在响应返回后用独立 session 异步写审计日志
+    resp = await client.put(
+        audit_path,
+        json={"agentIds": [user_id_str]},
+    )
+    assert resp.status_code == 200, f"PUT failed: {resp.status_code} {resp.text}"
+
+    # 重新开 session 读 —— middleware commit 后立即可见
+    async with AsyncSessionLocal() as s:
+        after = (
+            (
+                await s.execute(
+                    select(SysOperationLog).where(SysOperationLog.path == audit_path)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        try:
+            assert len(after) == before_count + 1
+            new_log = after[-1]
+            assert new_log.module == "ai"
+            assert new_log.action == "update"
+            assert new_log.method == "PUT"
+            assert audit_path in new_log.path
+            # request_params 应含 PUT body（middleware 不脱敏 agentIds）
+            params = new_log.request_params or ""
+            assert "agentIds" in params
+            assert user_id_str in params
+        finally:
+            # teardown：清理本测试产生的审计日志，避免污染后续审计相关测试
+            await s.execute(
+                delete(SysOperationLog).where(SysOperationLog.path == audit_path)
+            )
+            await s.commit()
+
+
+# ============ Task 6 review Important #1: agent_ids 格式校验 ============
+
+
+async def test_put_invalid_agent_id_format_returns_400(
+    authed_client: tuple[AsyncClient, str], db_session, seed_role_agents
+):
+    """agent_ids 必须为数字字符串 —— 非数字（"abc"）返 400 + AI_AGENT_ID_INVALID.
+
+    回归 Task 6 review Important #1：原 put_binding 内 `int(aid)` 裸调用，
+    非数字字符串会抛 ValueError → 未捕获 → HTTP 500 无 errorCode. Fix A 在
+    service 层 try/except 包裹，抛 BusinessRuleException（→ HTTP 400，
+    app/core/exceptions.py:75 映射）.
+    """
+    client, _ = authed_client
+    role_id = seed_role_agents["role_id"]
+
+    resp = await client.put(
+        f"/ai/role-agent/{role_id}",
+        json={"agentIds": ["abc"]},
+    )
+    assert resp.status_code == 400
+    assert resp.json().get("errorCode") == "AI_AGENT_ID_INVALID"
