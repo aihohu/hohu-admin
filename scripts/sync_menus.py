@@ -1241,7 +1241,7 @@ MENU_DEFINITIONS = [
         "parent_route": "ai",
         "menu_name": "AI 路由反馈",
         "menu_type": "C",
-        "icon": "carbon:feedback",
+        "icon": "carbon:analytics",
         "icon_type": "1",
         "component": "view.ai_routing-feedback",
         "page": "ai_routing-feedback",
