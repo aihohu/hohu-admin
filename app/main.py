@@ -27,6 +27,7 @@ from app.modules.ai.api.operation_log import router as ai_operation_log_router
 from app.modules.ai.api.provider import router as ai_provider_router
 from app.modules.ai.api.query_cache import router as ai_query_cache_router
 from app.modules.ai.api.resume import router as ai_resume_router
+from app.modules.ai.api.role_agent import router as ai_role_agent_router
 from app.modules.ai.api.routing_feedback import (
     router as ai_routing_feedback_router,
 )
@@ -228,6 +229,10 @@ if settings.AI_MODULE_ENABLED:
         ai_routing_feedback_router,
         prefix="/ai/messages",
         tags=["AI 路由反馈"],
+    )
+    # Multi-Agent admin UI (spec §6.3): Role ↔ AI Agent 绑定管理端点
+    app.include_router(
+        ai_role_agent_router, prefix="/ai/role-agent", tags=["AI Role-Agent 绑定"]
     )
 # Marketplace（注册顺序：developer/admin 先注册，避免被 marketplace 抢匹配）
 app.include_router(
