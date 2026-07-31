@@ -1179,9 +1179,8 @@ MENU_DEFINITIONS = [
         "i18n_key": "route.ai_agent",
         "order": 3,
         "status": "1",
-        # v1.5+ 实现 src/views/ai/agent/index.vue 后改回 False；
-        # 当前前端组件未实现，避免菜单点击触发 "View component not found" 报错
-        "hide_in_menu": True,
+        # Task 12: 前端 src/views/ai/agent/index.vue 已实现，菜单可见
+        "hide_in_menu": False,
         "keep_alive": False,
         "constant": False,
         "multi_tab": False,
@@ -1230,6 +1229,45 @@ MENU_DEFINITIONS = [
         "menu_name": "AI Trace 查看",
         "menu_type": "F",
         "permission": "ai:trace:view",
+        "route_path": "",
+        "status": "1",
+    },
+    # ---- AI 路由反馈（Task 12 新增菜单） ----
+    {
+        "route_name": "ai_routing_feedback",
+        "parent_route": "ai",
+        "menu_name": "AI 路由反馈",
+        "menu_type": "C",
+        "icon": "carbon:feedback",
+        "icon_type": "1",
+        "component": "view.ai_routing_feedback",
+        "page": "ai_routing_feedback",
+        "route_path": "/ai/routing-feedback",
+        "i18n_key": "route.ai_routing_feedback",
+        "order": 4,
+        "status": "1",
+        "hide_in_menu": False,
+        "keep_alive": False,
+        "constant": False,
+        "multi_tab": False,
+    },
+    # ---- AI 路由反馈按钮权限（Task 12） ----
+    {
+        "key": "ai_routing_feedback_list",
+        "parent_route": "ai_routing_feedback",
+        "menu_name": "查询",
+        "menu_type": "F",
+        "permission": "ai:routing-feedback:list",
+        "route_path": "",
+        "status": "1",
+    },
+    # ---- 角色 AI Agent 授权按钮权限（Task 12） ----
+    {
+        "key": "system_role_ai_agent_auth",
+        "parent_route": "system_role",
+        "menu_name": "AI Agent 授权",
+        "menu_type": "F",
+        "permission": "system:role:ai-agent-auth",
         "route_path": "",
         "status": "1",
     },
@@ -1345,6 +1383,16 @@ async def sync_menus():
                 print(f"  - {d['menu_name']} (parent: {d['parent_route']})")
 
         await db.commit()
+
+        # 一次性兜底：把 ai_agent 菜单的 hide_in_menu 从 True 改 False
+        # （Task 12：前端 src/views/ai/agent/index.vue 已实现，旧库需要翻牌）
+        result = await db.execute(select(Menu).where(Menu.route_name == "ai_agent"))
+        ai_agent_menu = result.scalars().first()
+        if ai_agent_menu and ai_agent_menu.hide_in_menu:
+            ai_agent_menu.hide_in_menu = False
+            await db.commit()
+            print("Updated ai_agent menu: hide_in_menu -> False")
+
         print(
             f"\nSynced {len(inserted)} new menus. Total menus in DB: {len(existing_routes) + len(inserted)}"
         )
