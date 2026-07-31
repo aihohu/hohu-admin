@@ -368,3 +368,219 @@ async def test_top_corrected_tie_breaker(
         except RuntimeError as e:
             if "Event loop is closed" not in str(e):
                 raise
+
+
+# ---------------------------------------------------------------------------
+# Task 10: GET /ai/routing-feedback/list 端点测试（决策 #6 / #7 / #15）
+# ---------------------------------------------------------------------------
+
+
+def _sentinel_records(records: list, prefix: str) -> list:
+    """筛出 trace_id / original_agent 以 sentinel prefix 开头的列表行.
+
+    Plan 原始版本断言 total==N，但 DB 有其它测试残留（478 行 user_mgmt），
+    无法靠 absolute total 隔离 —— 这里按 sentinel 前缀过滤再做断言.
+    """
+    return [
+        r
+        for r in records
+        if str(r.get("originalAgent", "")).startswith(prefix)
+        or str(r.get("traceId", "")).startswith(prefix)
+    ]
+
+
+async def test_list_default_filter_wrong_only(
+    authed_client: tuple[AsyncClient, str], db_session, seed_feedback
+):
+    """决策 #6：默认 feedback=wrong，列表只返回 wrong 行（不掺 correct）.
+
+    断言只针对 sentinel 子集（避开 DB 残留）：sentinel 子集里只能有 wrong 行，
+    不应出现 correct 行（fixture seed 的 correct 行有 user_mgmt / shared）.
+    """
+    client, _ = authed_client
+    prefix = seed_feedback["prefix"]
+    # 默认 feedback=wrong，size 给大一点确保 sentinel 子集全收
+    resp = await client.get("/ai/routing-feedback/list?days=7&size=100")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    assert "records" in data
+    assert "total" in data
+    assert data["current"] == 1
+    assert data["size"] == 100
+
+    sentinel_rows = _sentinel_records(data["records"], prefix)
+    assert sentinel_rows, "no sentinel rows in default list (wrong-only)"
+    # sentinel 子集内全部 wrong（不含 fixture 的 correct 行）
+    assert all(r["feedback"] == "wrong" for r in sentinel_rows)
+    # fixture 默认 wrong 行有 3 条（role_mgmt×2 + config_mgmt×1），可能被其它
+    # 测试加入更多 sentinel 不可能 → 至少 3 条
+    assert len(sentinel_rows) >= 3
+
+
+async def test_list_supports_feedback_all(
+    authed_client: tuple[AsyncClient, str], db_session, seed_feedback
+):
+    """决策 #6：feedback=all 同时返回 wrong + correct.
+
+    sentinel 子集应包含 fixture seed 的 5 行（3 wrong + 2 correct）.
+    """
+    client, _ = authed_client
+    prefix = seed_feedback["prefix"]
+    resp = await client.get("/ai/routing-feedback/list?days=7&size=100&feedback=all")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    sentinel_rows = _sentinel_records(data["records"], prefix)
+    # sentinel 子集应至少有 5 行（3 wrong + 2 correct）
+    assert len(sentinel_rows) >= 5
+    feedback_values = {r["feedback"] for r in sentinel_rows}
+    # feedback=all 下 sentinel 子集应同时出现 wrong 和 correct
+    assert "wrong" in feedback_values
+    assert "correct" in feedback_values
+
+
+async def test_list_supports_original_agent_filter(
+    authed_client: tuple[AsyncClient, str], db_session, seed_feedback
+):
+    """originalAgent 过滤：sentinel role_mgmt code 应只返回 role_mgmt 的 wrong 行."""
+    client, _ = authed_client
+    prefix = seed_feedback["prefix"]
+    role_code = seed_feedback["agent_codes"]["role_mgmt"]
+    resp = await client.get(
+        f"/ai/routing-feedback/list?days=7&size=100&originalAgent={role_code}"
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+    # 默认 feedback=wrong，role_mgmt 有 2 行 wrong
+    sentinel_rows = _sentinel_records(data["records"], prefix)
+    assert sentinel_rows, "no sentinel rows for role_mgmt filter"
+    # 全部 original_agent == role_code（端点 hard-filter）
+    assert all(r["originalAgent"] == role_code for r in sentinel_rows)
+    assert all(r["feedback"] == "wrong" for r in sentinel_rows)
+    assert len(sentinel_rows) >= 2
+
+
+async def test_list_no_message_content_leak(
+    authed_client: tuple[AsyncClient, str], db_session, seed_feedback
+):
+    """决策 #7：列表项不能泄露消息正文（content / messageContent / contentSnapshot 等字段）."""
+    client, _ = authed_client
+    prefix = seed_feedback["prefix"]
+    resp = await client.get("/ai/routing-feedback/list?days=7&size=100&feedback=all")
+    assert resp.status_code == 200, resp.text
+    records = resp.json()["data"]["records"]
+    sentinel_rows = _sentinel_records(records, prefix)
+    assert sentinel_rows, "no sentinel rows to inspect for content leak"
+    # spec §6.2 列表项 schema 字段固定，禁止出现任何正文相关字段
+    forbidden_keys = {"content", "messageContent", "contentSnapshot", "text", "body"}
+    for r in sentinel_rows:
+        leak = forbidden_keys & set(r.keys())
+        assert not leak, f"feedback list item leaks message content: {leak}"
+
+
+async def test_list_explicit_order_by_feedback_id(
+    authed_client: tuple[AsyncClient, str], db_session, seed_feedback
+):
+    """决策 #15：列表按 feedback_id DESC（最新在前）.
+
+    sentinel 子集内：feedback_id 较大的应排在较小的前面.
+    """
+    client, _ = authed_client
+    prefix = seed_feedback["prefix"]
+    resp = await client.get("/ai/routing-feedback/list?days=7&size=100&feedback=all")
+    assert resp.status_code == 200, resp.text
+    records = resp.json()["data"]["records"]
+    sentinel_rows = _sentinel_records(records, prefix)
+    assert len(sentinel_rows) >= 2, "need >=2 sentinel rows to verify ordering"
+    # sentinel 子集内按 records 顺序应满足 feedback_id DESC
+    ids = [int(r["feedbackId"]) for r in sentinel_rows]
+    for i in range(len(ids) - 1):
+        assert ids[i] > ids[i + 1], (
+            f"sentinel rows not DESC by feedback_id: pos {i} {ids[i]} <= {ids[i + 1]}"
+        )
+
+
+async def test_list_joins_username(
+    authed_client: tuple[AsyncClient, str], db_session, seed_feedback
+):
+    """决策：LEFT JOIN sys_user 把 user_name 带出来.
+
+    fixture 创建的 sentinel user 的 user_name 形如 `<prefix>user`，
+    列表项应填充非空 userName 与之一致.
+    """
+    client, _ = authed_client
+    prefix = seed_feedback["prefix"]
+    user_id = seed_feedback["user_id"]
+    user_name = f"{prefix}user"
+
+    resp = await client.get("/ai/routing-feedback/list?days=7&size=100&feedback=all")
+    assert resp.status_code == 200, resp.text
+    records = resp.json()["data"]["records"]
+    # 找到所有指向 fixture sentinel user 的行
+    sentinel_user_rows = [r for r in records if r["userId"] == str(user_id)]
+    assert sentinel_user_rows, "no rows joined to fixture sentinel user"
+    for r in sentinel_user_rows:
+        assert r["userName"] == user_name
+
+
+async def test_list_user_deleted_returns_empty_username(
+    authed_client: tuple[AsyncClient, str], db_session, seed_feedback
+):
+    """LEFT JOIN User 缺失（user 被删除）→ userName 返回空串.
+
+    用 ghost-user 模式：插一行 feedback 指向不存在的 user_id，避免实际删 user
+    带来的 teardown 复杂度。trace_id 带 `<prefix>ghost_` 前缀方便定位 + 清理.
+    """
+    from sqlalchemy import delete
+
+    from app.core.id_generator import next_id
+    from app.db.session import AsyncSessionLocal, engine
+    from app.modules.ai.models.routing_feedback import AiRoutingFeedback
+
+    client, _ = authed_client
+    prefix = seed_feedback["prefix"]
+    ghost_user_id = next_id()
+    role_code = seed_feedback["agent_codes"]["role_mgmt"]
+    ghost_trace = f"{prefix}ghost_"
+
+    # 插 ghost 行（真实 commit 让 API 端点看见）
+    async with AsyncSessionLocal() as s:
+        s.add(
+            AiRoutingFeedback(
+                feedback_id=next_id(),
+                message_id=next_id(),
+                user_id=ghost_user_id,
+                original_agent=role_code,
+                feedback="wrong",
+                corrected_agent=seed_feedback["agent_codes"]["user_mgmt"],
+                trace_id=ghost_trace,
+                create_time=datetime.now() - timedelta(days=1),
+            )
+        )
+        await s.commit()
+
+    try:
+        resp = await client.get(
+            f"/ai/routing-feedback/list?days=7&size=100&originalAgent={role_code}"
+        )
+        assert resp.status_code == 200, resp.text
+        records = resp.json()["data"]["records"]
+        ghost_rows = [r for r in records if r["userId"] == str(ghost_user_id)]
+        assert ghost_rows, "ghost feedback row missing from list"
+        assert len(ghost_rows) >= 1
+        for r in ghost_rows:
+            # LEFT JOIN 缺失 user → service 用 `username or ""` 填空串
+            assert r["userName"] == ""
+            assert r["traceId"] == ghost_trace
+    finally:
+        async with AsyncSessionLocal() as s:
+            await s.execute(
+                delete(AiRoutingFeedback).where(
+                    AiRoutingFeedback.trace_id == ghost_trace
+                )
+            )
+            await s.commit()
+        try:
+            await engine.dispose()
+        except RuntimeError as e:
+            if "Event loop is closed" not in str(e):
+                raise
