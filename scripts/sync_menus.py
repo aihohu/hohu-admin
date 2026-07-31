@@ -13,7 +13,7 @@ Usage:
 
 import asyncio
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -1233,17 +1233,20 @@ MENU_DEFINITIONS = [
         "status": "1",
     },
     # ---- AI 路由反馈（Task 12 新增菜单） ----
+    # route_name / component / page / i18n_key 用 kebab-case 匹配前端 @elegant-router 命名约定
+    # （view.ai_routing-feedback 对应 src/views/ai/routing-feedback/index.vue；下划线形式会被
+    # transformElegantRouteToVueRoute 视为查不到 view 而抛 "View component not found"，路由被静默丢弃）
     {
-        "route_name": "ai_routing_feedback",
+        "route_name": "ai_routing-feedback",
         "parent_route": "ai",
         "menu_name": "AI 路由反馈",
         "menu_type": "C",
         "icon": "carbon:feedback",
         "icon_type": "1",
-        "component": "view.ai_routing_feedback",
-        "page": "ai_routing_feedback",
+        "component": "view.ai_routing-feedback",
+        "page": "ai_routing-feedback",
         "route_path": "/ai/routing-feedback",
-        "i18n_key": "route.ai_routing_feedback",
+        "i18n_key": "route.ai_routing-feedback",
         "order": 4,
         "status": "1",
         "hide_in_menu": False,
@@ -1254,7 +1257,7 @@ MENU_DEFINITIONS = [
     # ---- AI 路由反馈按钮权限（Task 12） ----
     {
         "key": "ai_routing_feedback_list",
-        "parent_route": "ai_routing_feedback",
+        "parent_route": "ai_routing-feedback",
         "menu_name": "查询",
         "menu_type": "F",
         "permission": "ai:routing-feedback:list",
@@ -1392,6 +1395,29 @@ async def sync_menus():
             ai_agent_menu.hide_in_menu = False
             await db.commit()
             print("Updated ai_agent menu: hide_in_menu -> False")
+
+        # 一次性兜底：把 ai_routing_feedback (underscore) 改为 ai_routing-feedback (mixed)
+        # 匹配前端 @elegant-router kebab-case 命名约定，避免动态路由模式下 view component
+        # 查找失败（transformElegantRouteToVueRoute 会抛 "View component not found" 静默丢弃路由）
+        result = await db.execute(
+            select(Menu).where(Menu.route_name == "ai_routing_feedback")
+        )
+        old_feedback_menu = result.scalars().first()
+        if old_feedback_menu:
+            old_feedback_menu.route_name = "ai_routing-feedback"
+            old_feedback_menu.component = "view.ai_routing-feedback"
+            old_feedback_menu.page = "ai_routing-feedback"
+            old_feedback_menu.i18n_key = "route.ai_routing-feedback"
+            # 同步子按钮的 parent_route
+            await db.execute(
+                update(Menu)
+                .where(Menu.parent_route == "ai_routing_feedback")
+                .values(parent_route="ai_routing-feedback")
+            )
+            await db.commit()
+            print(
+                "Renamed ai_routing_feedback -> ai_routing-feedback (kebab convention)"
+            )
 
         print(
             f"\nSynced {len(inserted)} new menus. Total menus in DB: {len(existing_routes) + len(inserted)}"
