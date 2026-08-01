@@ -18,6 +18,7 @@ from app.middleware.rate_limit_middleware import RateLimitMiddleware
 from app.modules.ai.agents.hitl.manager import hitl_manager
 from app.modules.ai.agents.tools import load_builtin_tools
 from app.modules.ai.agents.tools.registry import ToolRegistry, ToolRegistryError
+from app.modules.ai.api.agent import admin_router as ai_agent_admin_router
 from app.modules.ai.api.agent import router as ai_agent_router
 from app.modules.ai.api.chat import router as ai_chat_router
 from app.modules.ai.api.confirm import router as ai_confirm_router
@@ -26,6 +27,10 @@ from app.modules.ai.api.operation_log import router as ai_operation_log_router
 from app.modules.ai.api.provider import router as ai_provider_router
 from app.modules.ai.api.query_cache import router as ai_query_cache_router
 from app.modules.ai.api.resume import router as ai_resume_router
+from app.modules.ai.api.role_agent import router as ai_role_agent_router
+from app.modules.ai.api.routing_feedback import (
+    query_router as ai_routing_feedback_query_router,
+)
 from app.modules.ai.api.routing_feedback import (
     router as ai_routing_feedback_router,
 )
@@ -207,6 +212,9 @@ app.include_router(login_log_router, prefix="/system/login-log", tags=["登录�
 # spec §11.5: AI_MODULE_ENABLED=False 时整体不注册 AI router（安全降级开关）
 if settings.AI_MODULE_ENABLED:
     app.include_router(ai_agent_router, prefix="/ai/agents", tags=["AI Agent"])
+    app.include_router(
+        ai_agent_admin_router, prefix="/ai/admin/agents", tags=["AI Agent 管理"]
+    )
     app.include_router(ai_chat_router, prefix="/ai/chat", tags=["AI对话"])
     app.include_router(ai_resume_router, prefix="/ai/chat", tags=["AI对话"])
     app.include_router(ai_confirm_router, prefix="/ai/confirm", tags=["AI HITL 确认"])
@@ -224,6 +232,16 @@ if settings.AI_MODULE_ENABLED:
         ai_routing_feedback_router,
         prefix="/ai/messages",
         tags=["AI 路由反馈"],
+    )
+    # Multi-Agent admin UI (spec §6.2): 路由反馈 KPI/明细查询端点
+    app.include_router(
+        ai_routing_feedback_query_router,
+        prefix="/ai/routing-feedback",
+        tags=["AI 路由反馈"],
+    )
+    # Multi-Agent admin UI (spec §6.3): Role ↔ AI Agent 绑定管理端点
+    app.include_router(
+        ai_role_agent_router, prefix="/ai/role-agent", tags=["AI Role-Agent 绑定"]
     )
 # Marketplace（注册顺序：developer/admin 先注册，避免被 marketplace 抢匹配）
 app.include_router(

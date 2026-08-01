@@ -14,6 +14,7 @@ outer rollback 兜底。
 
 import pytest
 import redis.asyncio as aioredis
+from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import redis as redis_module
@@ -355,3 +356,17 @@ async def seed_test_message_other_user(auth_token) -> int:
     except RuntimeError as e:
         if "Event loop is closed" not in str(e):
             raise
+
+
+@pytest.fixture
+async def authed_client(
+    client: AsyncClient, auth_token: str
+) -> tuple[AsyncClient, str]:
+    """Combined fixture for tests that need both client and token (plan convention).
+
+    把 token 注入 client 的默认 headers —— plan 测试代码用 `client.get(...)` 不
+    显式传 Authorization 也能通过认证。返回 tuple 兼容 plan 中 `client, _ = authed_client`
+    解构模式。
+    """
+    client.headers["Authorization"] = f"Bearer {auth_token}"
+    return client, auth_token

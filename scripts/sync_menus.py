@@ -1179,9 +1179,8 @@ MENU_DEFINITIONS = [
         "i18n_key": "route.ai_agent",
         "order": 3,
         "status": "1",
-        # v1.5+ 实现 src/views/ai/agent/index.vue 后改回 False；
-        # 当前前端组件未实现，避免菜单点击触发 "View component not found" 报错
-        "hide_in_menu": True,
+        # Task 12: 前端 src/views/ai/agent/index.vue 已实现，菜单可见
+        "hide_in_menu": False,
         "keep_alive": False,
         "constant": False,
         "multi_tab": False,
@@ -1230,6 +1229,48 @@ MENU_DEFINITIONS = [
         "menu_name": "AI Trace 查看",
         "menu_type": "F",
         "permission": "ai:trace:view",
+        "route_path": "",
+        "status": "1",
+    },
+    # ---- AI 路由反馈（Task 12 新增菜单） ----
+    # route_name / component / page / i18n_key 用 kebab-case 匹配前端 @elegant-router 命名约定
+    # （view.ai_routing-feedback 对应 src/views/ai/routing-feedback/index.vue；下划线形式会被
+    # transformElegantRouteToVueRoute 视为查不到 view 而抛 "View component not found"，路由被静默丢弃）
+    {
+        "route_name": "ai_routing-feedback",
+        "parent_route": "ai",
+        "menu_name": "AI 路由反馈",
+        "menu_type": "C",
+        "icon": "carbon:analytics",
+        "icon_type": "1",
+        "component": "view.ai_routing-feedback",
+        "page": "ai_routing-feedback",
+        "route_path": "/ai/routing-feedback",
+        "i18n_key": "route.ai_routing-feedback",
+        "order": 4,
+        "status": "1",
+        "hide_in_menu": False,
+        "keep_alive": False,
+        "constant": False,
+        "multi_tab": False,
+    },
+    # ---- AI 路由反馈按钮权限（Task 12） ----
+    {
+        "key": "ai_routing_feedback_list",
+        "parent_route": "ai_routing-feedback",
+        "menu_name": "查询",
+        "menu_type": "F",
+        "permission": "ai:routing-feedback:list",
+        "route_path": "",
+        "status": "1",
+    },
+    # ---- 角色 AI Agent 授权按钮权限（Task 12） ----
+    {
+        "key": "system_role_ai_agent_auth",
+        "parent_route": "system_role",
+        "menu_name": "AI Agent 授权",
+        "menu_type": "F",
+        "permission": "system:role:ai-agent-auth",
         "route_path": "",
         "status": "1",
     },
@@ -1345,6 +1386,35 @@ async def sync_menus():
                 print(f"  - {d['menu_name']} (parent: {d['parent_route']})")
 
         await db.commit()
+
+        # 一次性兜底：把 ai_agent 菜单的 hide_in_menu 从 True 改 False
+        # （Task 12：前端 src/views/ai/agent/index.vue 已实现，旧库需要翻牌）
+        result = await db.execute(select(Menu).where(Menu.route_name == "ai_agent"))
+        ai_agent_menu = result.scalars().first()
+        if ai_agent_menu and ai_agent_menu.hide_in_menu:
+            ai_agent_menu.hide_in_menu = False
+            await db.commit()
+            print("Updated ai_agent menu: hide_in_menu -> False")
+
+        # 一次性兜底：把 ai_routing_feedback (underscore) 改为 ai_routing-feedback (mixed)
+        # 匹配前端 @elegant-router kebab-case 命名约定，避免动态路由模式下 view component
+        # 查找失败（transformElegantRouteToVueRoute 会抛 "View component not found" 静默丢弃路由）
+        result = await db.execute(
+            select(Menu).where(Menu.route_name == "ai_routing_feedback")
+        )
+        old_feedback_menu = result.scalars().first()
+        if old_feedback_menu:
+            old_feedback_menu.route_name = "ai_routing-feedback"
+            old_feedback_menu.component = "view.ai_routing-feedback"
+            old_feedback_menu.page = "ai_routing-feedback"
+            old_feedback_menu.i18n_key = "route.ai_routing-feedback"
+            # 子按钮通过 parent_id (int) 关联父菜单，父菜单 menu_id 不变，
+            # 所以无需 UPDATE 子行的 parent 链接 — 它们自动跟随。
+            await db.commit()
+            print(
+                "Renamed ai_routing_feedback -> ai_routing-feedback (kebab convention)"
+            )
+
         print(
             f"\nSynced {len(inserted)} new menus. Total menus in DB: {len(existing_routes) + len(inserted)}"
         )
