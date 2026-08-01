@@ -1,11 +1,40 @@
 # Multi-Agent 管理后台 UI 设计
 
-**Status**: ⚠️ Plan 待实现 | 创建日期：2026-07-30
+**Status**: ✅ Plan 已完成（2026-08-01） | 创建日期：2026-07-30
 **关联 spec**：
 - [`2026-07-24-multi-agent-supervisor-routing-design.md`](./2026-07-24-multi-agent-supervisor-routing-design.md) §10.1 — 管理后台 gap
 - [`2026-07-02-ai-tool-gateway-design.md`](../specs/2026-07-02-ai-tool-gateway-design.md) §4.2 / §4.3 / §5.4 — `ai_agent` / `role_ai_agent` 表定义 + shared Agent 直通机制
 
-**Ship 记录块**：待补（merge 后写）
+## Ship 记录
+
+| 项 | 值 |
+|---|---|
+| 实施 commit | 后端 squash `3e8d980`（PR#10）+ 前端 squash `723d82b5`（PR#5） |
+| spec commit | `6e93ba8` |
+| 实施日期 | 2026-08-01 |
+| 决策数 | 27 |
+| 测试数 | 后端 34（`test_agent_admin.py` 14 + `test_role_agent.py` 9 + `test_routing_feedback_query.py` 11）；前端 vitest 8 + E2E 4 |
+| 新增端点 | 7（`/ai/admin/agents` GET/GET-by-id/PUT + `/ai/role-agent/{id}` GET/PUT + `/ai/routing-feedback/summary` + `/ai/routing-feedback/list`） |
+| 新增前端页面 | 3（Agent 管理 + Role-Agent 授权 modal + 路由反馈仪表盘） |
+| 新增菜单 / 权限码 | 1 C 菜单（`ai_routing-feedback`）+ 2 F 按钮（`ai:routing-feedback:list` / `system:role:ai-agent-auth`）+ 翻转 `ai_agent.hide_in_menu` |
+| 前端测试基建 | 首次引入 vitest + @vue/test-utils + jsdom + Playwright MCP E2E |
+| 验证 | 后端 752 AI pytest 全绿（除 pre-existing flaky `test_executor_integration.py`）；前端 typecheck + lint 0 errors + vitest 8/8 + E2E 浏览器实测 4/4 |
+| 待客户验证 | 真机 `uv run fastapi dev` + `pnpm dev` 后 admin 登录 → 4 个页面 CRUD 联调；2 周后看 `ai_routing_feedback` 累积数据是否能驱动路由策略调整 |
+
+### Ship-time 决策补充
+
+- **菜单命名 kebab-case**：`ai_routing-feedback`（mixed `_` + `-`）而非 `ai_routing_feedback`（纯下划线）。前端 `@elegant-router` 自动生成的 `I18nRouteKey` 类型按 hyphenated leaf 解析 view component；纯下划线会让 `transformElegantRouteToVueRoute` 抛 "View component not found" 静默丢路由。同步了 `route_name` / `component` / `page` / `i18n_key` 4 字段 + 在 `sync_menus()` 加一次性 UPDATE 兜底老 DB。**回归**：手动开 dev server 浏览器实测菜单 + tab icon。
+- **菜单图标 `carbon:analytics`（非 `carbon:feedback`）**：`carbon:feedback` 不在 iconify Carbon set，菜单 + tab 都不显示。**回归**：浏览器实测 tab icon 出现。
+- **Agent 管理页对齐 system/user 模式**：原实现是简化版（inline filters / 无工具栏 / 无索引列），用户测试反馈"应该参考角色管理或者用户管理"。重构为：独立 `AgentSearch` 组件（NCollapse + NGrid + reset/search）+ `TableHeaderOperation`（refresh + 列设置，按决策 #1 不带 add/delete）+ TSX 列 + 索引列。**反例**：保留简化版 → 视觉一致性差，admin 用户切换页面认知成本高。
+- **textarea 用 `:rows` + 默认 `resizable`（非 `:autosize`）**：NaiveUI 的 `--resizable` class 仅在 `resizable=true && !autosize` 时生效（`Input.mjs:1038`）；用 autosize 会让 resize handle 消失。改成 `:rows="4"` / `:rows="8"` + 默认 resizable，用户可拖动调整。**反例**：autosize → 输入框高度自动增长但用户无法主动收缩，长 systemPrompt 占满屏幕。
+- **风险偏好 / System Prompt 等表单标签全 i18n**：原 drawer 留了硬编码中文（启用/排序/风险偏好/...）+ 英文枚举值（Conservative/Balanced/Aggressive）+ "System Prompt" 标签两 locale 都是英文。补 11 个 `page.ai.agent.*` key（含 riskAppetiteConservative/Balanced/Aggressive + dailyQuotaHint）。
+- **`createTime` 用 dayjs 格式化**：原列表直接渲染 ISO raw（`2026-07-31T09:28:19.237784`），改为 `dayjs(createTime).format('YYYY-MM-DD HH:mm:ss')`。
+- **`formRules` 死代码清理**：drawer 里 `formRules.name.message` 用了错误的 i18n key（`common.modifySuccess`），且 `formRef.validate()` 从未调用，是潜在 trap。直接删除 formRules + formRef + `:rules` 绑定，仅保留 description 长度校验（通过 `descInvalid` computed）。
+- **`defineOptions.meta` 移除**：`meta` 不是 Vue core option，被 Vue 忽略；route 元信息走 `src/router/elegant/routes.ts` 自动生成（来自 backend menu seed）。
+- **后端 `OperationLog` 实际类名 `SysOperationLog`**：plan 写的是 `OperationLog`，实施期发现实际是 `SysOperationLog`（`app/modules/system/models/operation_log.py`）。同步测试 import。
+- **测试 fixture 用独立 `AsyncSessionLocal` 真实 commit（非 `db_session.flush`）**：API endpoint + AuditLogMiddleware 走连接池另一条 connection，看不到 outer-transaction 的写入。所有需要"API 可见"的 seed 都改成独立 session + real commit + teardown（DELETE/UPDATE 还原）。**反例**：用 `db_session.flush` → 测试看到 404 / 空 list，假阳性 fail。
+
+
 
 ---
 
@@ -567,19 +596,19 @@ RoleAgentBindReq = {
 
 ### Phase 1：v1.5 首期实现（本 spec 范围）
 
-- [ ] 后端 schemas：`agent_admin.py` 新建 / `routing_feedback.py` 扩展 / `role_agent.py` 新建
-- [ ] 后端 service：`AgentAdminService` / `RoutingFeedbackQueryService` / `RoleAgentService`（含审计写入）
-- [ ] 后端 api：扩展 `agent.py` + `routing_feedback.py`，新建 `role_agent.py`
-- [ ] 后端测试：3 个 test 文件 ≥ 70% 覆盖率（含决策 #16-#27 回归）
-- [ ] 菜单 + 权限码 seed：`scripts/sync_menus.py` 加 2 菜单 + 4 权限码
-- [ ] 前端 types + api：`ai-agent.ts` + `ai-routing-feedback.ts`
-- [ ] 前端 Agent 管理页：`views/ai/agent/{index.vue,modules/agent-operate-drawer.vue}`
-- [ ] 前端 Role-Agent modal：`views/system/role/modules/ai-agent-auth-modal.vue` + Role 列表加按钮
-- [ ] 前端反馈仪表盘：`views/ai/routing-feedback/index.vue`
-- [ ] 前端 i18n：`zh-cn.ts` / `en-us.ts` 同步更新
-- [ ] 前端测试：3 个 vitest spec（Agent drawer / 反馈仪表盘 / Role-Agent modal）
-- [ ] E2E：Playwright 4 场景
-- [ ] 回写 spec：Status 改 `✅ Plan 已完成（YYYY-MM-DD）` + 加 Ship 记录块
+- [x] 后端 schemas：`agent_admin.py` 新建 / `routing_feedback.py` 扩展 / `role_agent.py` 新建
+- [x] 后端 service：`AgentAdminService` / `RoutingFeedbackQueryService` / `RoleAgentService`（含审计写入）
+- [x] 后端 api：扩展 `agent.py` + `routing_feedback.py`，新建 `role_agent.py`
+- [x] 后端测试：3 个 test 文件 ≥ 70% 覆盖率（含决策 #16-#27 回归）
+- [x] 菜单 + 权限码 seed：`scripts/sync_menus.py` 加 2 菜单 + 4 权限码
+- [x] 前端 types + api：`ai-agent.ts` + `ai-routing-feedback.ts`
+- [x] 前端 Agent 管理页：`views/ai/agent/{index.vue,modules/agent-operate-drawer.vue}`
+- [x] 前端 Role-Agent modal：`views/system/role/modules/ai-agent-auth-modal.vue` + Role 列表加按钮
+- [x] 前端反馈仪表盘：`views/ai/routing-feedback/index.vue`
+- [x] 前端 i18n：`zh-cn.ts` / `en-us.ts` 同步更新
+- [x] 前端测试：3 个 vitest spec（Agent drawer / 反馈仪表盘 / Role-Agent modal）
+- [x] E2E：Playwright 4 场景
+- [x] 回写 spec：Status 改 `✅ Plan 已完成（YYYY-MM-DD）` + 加 Ship 记录块
 
 ---
 

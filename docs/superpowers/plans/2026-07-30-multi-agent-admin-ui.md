@@ -21,7 +21,7 @@
 **Files:**
 - Create: `hohu-admin/app/modules/ai/schemas/agent_admin.py`
 
-- [ ] **Step 1: 写 schema 文件**
+- [x] **Step 1: 写 schema 文件**
 
 ```python
 """Multi-Agent admin UI schemas (spec §6.1)."""
@@ -101,13 +101,13 @@ class AgentAdminUpdateReq(BaseModel):
         return v
 ```
 
-- [ ] **Step 2: lint**
+- [x] **Step 2: lint**
 
 ```bash
 cd hohu-admin && ruff check app/modules/ai/schemas/agent_admin.py && ruff format app/modules/ai/schemas/agent_admin.py
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd hohu-admin && git add app/modules/ai/schemas/agent_admin.py && git commit -m "feat(ai): add agent admin schemas for admin ui"
@@ -123,7 +123,7 @@ cd hohu-admin && git add app/modules/ai/schemas/agent_admin.py && git commit -m 
 - Test: `hohu-admin/tests/modules/ai/test_agent_admin.py`
 - Modify: `hohu-admin/app/main.py` (router prefix 已存在，确认即可)
 
-- [ ] **Step 1: 先写失败测试（list 全量返回 + 不含 systemPrompt）**
+- [x] **Step 1: 先写失败测试（list 全量返回 + 不含 systemPrompt）**
 
 ```python
 """Multi-Agent admin UI tests (spec §6.1, §9.1)."""
@@ -196,7 +196,7 @@ async def test_list_excludes_system_prompt(
         assert "systemPrompt" not in row
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 cd hohu-admin && pytest tests/modules/ai/test_agent_admin.py -v 2>&1 | head -30
@@ -204,7 +204,7 @@ cd hohu-admin && pytest tests/modules/ai/test_agent_admin.py -v 2>&1 | head -30
 
 Expected: FAIL with 404 (endpoint 不存在)
 
-- [ ] **Step 3: 写 service 骨架**
+- [x] **Step 3: 写 service 骨架**
 
 ```python
 """Agent admin service (spec §6.1).
@@ -283,7 +283,7 @@ class AgentAdminService:
 agent_admin_service = AgentAdminService()
 ```
 
-- [ ] **Step 4: 扩展 API 端点（在 agent.py 末尾追加 admin 路由）**
+- [x] **Step 4: 扩展 API 端点（在 agent.py 末尾追加 admin 路由）**
 
 ```python
 # app/modules/ai/api/agent.py 末尾追加
@@ -336,7 +336,7 @@ async def admin_update_agent(
     return ResponseModel.success(data=item.model_dump(by_alias=True))
 ```
 
-- [ ] **Step 5: 跑测试，确认 list 测试通过**
+- [x] **Step 5: 跑测试，确认 list 测试通过**
 
 ```bash
 cd hohu-admin && pytest tests/modules/ai/test_agent_admin.py::test_list_returns_all_agents_without_query_params tests/modules/ai/test_agent_admin.py::test_list_excludes_system_prompt -v
@@ -344,7 +344,7 @@ cd hohu-admin && pytest tests/modules/ai/test_agent_admin.py::test_list_returns_
 
 Expected: PASS
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd hohu-admin && git add app/modules/ai/service/agent_admin.py app/modules/ai/api/agent.py tests/modules/ai/test_agent_admin.py && git commit -m "feat(ai): add agent admin list endpoint with tests"
@@ -357,7 +357,7 @@ cd hohu-admin && git add app/modules/ai/service/agent_admin.py app/modules/ai/ap
 **Files:**
 - Modify: `hohu-admin/tests/modules/ai/test_agent_admin.py`
 
-- [ ] **Step 1: 写 detail 测试（包含 not_found）**
+- [x] **Step 1: 写 detail 测试（包含 not_found）**
 
 ```python
 async def test_detail_returns_system_prompt(
@@ -381,7 +381,7 @@ async def test_detail_not_found(authed_client: tuple[AsyncClient, str], db_sessi
     assert body.get("errorCode") == "AI_AGENT_NOT_FOUND"
 ```
 
-- [ ] **Step 2: 写 update happy path 测试**
+- [x] **Step 2: 写 update happy path 测试**
 
 ```python
 async def test_update_partial_skips_unsent_fields(
@@ -416,7 +416,7 @@ async def test_update_code_field_ignored(
     assert data["name"] == "Renamed"
 ```
 
-- [ ] **Step 3: 跑测试，全绿**
+- [x] **Step 3: 跑测试，全绿**
 
 ```bash
 cd hohu-admin && pytest tests/modules/ai/test_agent_admin.py -v
@@ -424,7 +424,7 @@ cd hohu-admin && pytest tests/modules/ai/test_agent_admin.py -v
 
 Expected: PASS
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cd hohu-admin && git add tests/modules/ai/test_agent_admin.py && git commit -m "test(ai): add agent admin detail and update tests"
@@ -437,7 +437,7 @@ cd hohu-admin && git add tests/modules/ai/test_agent_admin.py && git commit -m "
 **Files:**
 - Modify: `hohu-admin/tests/modules/ai/test_agent_admin.py`
 
-- [ ] **Step 1: 写 description 长度边界测试**
+- [x] **Step 1: 写 description 长度边界测试**
 
 ```python
 async def test_update_description_too_short(
@@ -478,7 +478,7 @@ async def test_description_length_algorithm_uses_code_points(
 
 > **注意 errorCode 映射**：要让 description 长度错误返 `AI_AGENT_DESC_LENGTH_INVALID`，需在全局 exception handler 把 Pydantic ValidationError 映射到该 code。如果项目已有统一 ValidationError → 400 + `VALIDATION_ERROR` 映射，可在 service 层加显式校验抛 `BusinessRuleException(error_code="AI_AGENT_DESC_LENGTH_INVALID")`，避免改全局映射影响其他端点。**实施期先验证现有 ValidationError 映射路径，按需选择**。
 
-- [ ] **Step 2: 若需要 service 层显式校验，修改 service**
+- [x] **Step 2: 若需要 service 层显式校验，修改 service**
 
 ```python
 # app/modules/ai/service/agent_admin.py 的 update_agent 内
@@ -512,7 +512,7 @@ async def update_agent(
     return await self.get_agent(db, agent_id)
 ```
 
-- [ ] **Step 3: 写 model_preference 格式测试（决策 #25）**
+- [x] **Step 3: 写 model_preference 格式测试（决策 #25）**
 
 ```python
 async def test_model_preference_format_only_no_existence_check(
@@ -540,13 +540,13 @@ async def test_model_preference_invalid_format(
     assert resp.status_code == 400
 ```
 
-- [ ] **Step 4: 跑测试，全绿**
+- [x] **Step 4: 跑测试，全绿**
 
 ```bash
 cd hohu-admin && pytest tests/modules/ai/test_agent_admin.py -v
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd hohu-admin && git add app/modules/ai/service/agent_admin.py tests/modules/ai/test_agent_admin.py && git commit -m "test(ai): cover agent admin validation rules"
@@ -559,7 +559,7 @@ cd hohu-admin && git add app/modules/ai/service/agent_admin.py tests/modules/ai/
 **Files:**
 - Modify: `hohu-admin/tests/modules/ai/test_agent_admin.py`
 
-- [ ] **Step 1: 写审计 middleware 验证测试**
+- [x] **Step 1: 写审计 middleware 验证测试**
 
 ```python
 async def test_put_triggers_audit_middleware(
@@ -603,13 +603,13 @@ async def test_put_triggers_audit_middleware(
 
 > **实施前先验证**：用 `grep -n "class OperationLog" app/modules/system/models/operation_log.py` 确认字段名（`module` / `action` / `path` / `request_params`），如名字不同需调整测试。`authed_client` fixture 见 `tests/modules/ai/conftest.py` 或类似文件，确认 fixture 已存在；如不存在，参考 `tests/modules/ai/test_routing_feedback.py` 的 fixture 写法。
 
-- [ ] **Step 2: 跑测试**
+- [x] **Step 2: 跑测试**
 
 ```bash
 cd hohu-admin && pytest tests/modules/ai/test_agent_admin.py::test_put_triggers_audit_middleware -v
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd hohu-admin && git add tests/modules/ai/test_agent_admin.py && git commit -m "test(ai): assert audit middleware records agent admin update"
@@ -626,7 +626,7 @@ cd hohu-admin && git add tests/modules/ai/test_agent_admin.py && git commit -m "
 - Test: `hohu-admin/tests/modules/ai/test_role_agent.py`
 - Modify: `hohu-admin/app/main.py` (注册新 router)
 
-- [ ] **Step 1: 写 schema**
+- [x] **Step 1: 写 schema**
 
 ```python
 # app/modules/ai/schemas/role_agent.py
@@ -665,7 +665,7 @@ class RoleAgentBindReq(BaseModel):
     agent_ids: list[str]
 ```
 
-- [ ] **Step 2: 写失败测试**
+- [x] **Step 2: 写失败测试**
 
 ```python
 # tests/modules/ai/test_role_agent.py
@@ -751,7 +751,7 @@ async def test_role_not_found_error_code_prefix(
     assert resp.json().get("errorCode") == "AI_ROLE_NOT_FOUND"
 ```
 
-- [ ] **Step 3: 写 service**
+- [x] **Step 3: 写 service**
 
 ```python
 # app/modules/ai/service/role_agent.py
@@ -884,7 +884,7 @@ class RoleAgentService:
 role_agent_service = RoleAgentService()
 ```
 
-- [ ] **Step 4: 写 API**
+- [x] **Step 4: 写 API**
 
 ```python
 # app/modules/ai/api/role_agent.py
@@ -936,7 +936,7 @@ async def put_role_agent_binding(
     return ResponseModel.success(data=None)
 ```
 
-- [ ] **Step 5: 注册 router（app/main.py 找到 ai 模块 router 注册处）**
+- [x] **Step 5: 注册 router（app/main.py 找到 ai 模块 router 注册处）**
 
 ```python
 # app/main.py 内 ai 路由组注册处加：
@@ -952,13 +952,13 @@ app.include_router(
 
 > 实施期 Read `app/main.py` 找现有 `include_router(... prefix="/ai/..." ...)` 写法，模仿格式。
 
-- [ ] **Step 6: 跑测试，全绿**
+- [x] **Step 6: 跑测试，全绿**
 
 ```bash
 cd hohu-admin && pytest tests/modules/ai/test_role_agent.py -v
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd hohu-admin && git add app/modules/ai/schemas/role_agent.py app/modules/ai/service/role_agent.py app/modules/ai/api/role_agent.py app/main.py tests/modules/ai/test_role_agent.py && git commit -m "feat(ai): add role-agent binding get endpoint"
@@ -971,7 +971,7 @@ cd hohu-admin && git add app/modules/ai/schemas/role_agent.py app/modules/ai/ser
 **Files:**
 - Modify: `hohu-admin/tests/modules/ai/test_role_agent.py`
 
-- [ ] **Step 1: 写 PUT happy path 测试**
+- [x] **Step 1: 写 PUT happy path 测试**
 
 ```python
 async def test_put_full_replace_semantics(
@@ -1090,13 +1090,13 @@ async def test_put_triggers_audit_middleware(
     assert "9102" in (last.request_params or "")
 ```
 
-- [ ] **Step 2: 跑测试**
+- [x] **Step 2: 跑测试**
 
 ```bash
 cd hohu-admin && pytest tests/modules/ai/test_role_agent.py -v
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd hohu-admin && git add tests/modules/ai/test_role_agent.py && git commit -m "test(ai): cover role-agent put replace and shared rejection"
@@ -1109,7 +1109,7 @@ cd hohu-admin && git add tests/modules/ai/test_role_agent.py && git commit -m "t
 **Files:**
 - Modify: `hohu-admin/app/modules/ai/schemas/routing_feedback.py`
 
-- [ ] **Step 1: 在文件末尾追加 query schemas**
+- [x] **Step 1: 在文件末尾追加 query schemas**
 
 ```python
 # app/modules/ai/schemas/routing_feedback.py 末尾追加
@@ -1177,13 +1177,13 @@ class FeedbackListItem(BaseModel):
     create_time: datetime
 ```
 
-- [ ] **Step 2: lint**
+- [x] **Step 2: lint**
 
 ```bash
 cd hohu-admin && ruff check app/modules/ai/schemas/routing_feedback.py && ruff format app/modules/ai/schemas/routing_feedback.py
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd hohu-admin && git add app/modules/ai/schemas/routing_feedback.py && git commit -m "feat(ai): add routing feedback query schemas"
@@ -1198,7 +1198,7 @@ cd hohu-admin && git add app/modules/ai/schemas/routing_feedback.py && git commi
 - Modify: `hohu-admin/app/modules/ai/api/routing_feedback.py`
 - Test: `hohu-admin/tests/modules/ai/test_routing_feedback_query.py`
 
-- [ ] **Step 1: 写 summary 失败测试**
+- [x] **Step 1: 写 summary 失败测试**
 
 ```python
 # tests/modules/ai/test_routing_feedback_query.py
@@ -1382,13 +1382,13 @@ async def test_top_corrected_tie_breaker(
     assert config_row["topCorrected"]["code"] == "role_mgmt"
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 cd hohu-admin && pytest tests/modules/ai/test_routing_feedback_query.py -v 2>&1 | head -20
 ```
 
-- [ ] **Step 3: 写 service**
+- [x] **Step 3: 写 service**
 
 ```python
 # app/modules/ai/service/routing_feedback_query.py
@@ -1572,7 +1572,7 @@ class RoutingFeedbackQueryService:
 routing_feedback_query_service = RoutingFeedbackQueryService()
 ```
 
-- [ ] **Step 4: 扩展 API（routing_feedback.py 追加 summary + list）**
+- [x] **Step 4: 扩展 API（routing_feedback.py 追加 summary + list）**
 
 ```python
 # app/modules/ai/api/routing_feedback.py 末尾追加
@@ -1626,13 +1626,13 @@ async def get_routing_feedback_list(
     )
 ```
 
-- [ ] **Step 5: 跑 summary 测试**
+- [x] **Step 5: 跑 summary 测试**
 
 ```bash
 cd hohu-admin && pytest tests/modules/ai/test_routing_feedback_query.py::test_summary_7_day_window tests/modules/ai/test_routing_feedback_query.py::test_summary_zero_division tests/modules/ai/test_routing_feedback_query.py::test_summary_top_wrong_agents_sorted tests/modules/ai/test_routing_feedback_query.py::test_top_corrected_tie_breaker -v
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd hohu-admin && git add app/modules/ai/service/routing_feedback_query.py app/modules/ai/api/routing_feedback.py tests/modules/ai/test_routing_feedback_query.py && git commit -m "feat(ai): add routing feedback summary endpoint"
@@ -1645,7 +1645,7 @@ cd hohu-admin && git add app/modules/ai/service/routing_feedback_query.py app/mo
 **Files:**
 - Modify: `hohu-admin/tests/modules/ai/test_routing_feedback_query.py`
 
-- [ ] **Step 1: 写 list 测试**
+- [x] **Step 1: 写 list 测试**
 
 ```python
 async def test_list_default_filter_wrong_only(
@@ -1735,13 +1735,13 @@ async def test_list_user_deleted_returns_empty_username(
         assert row["userName"] == ""
 ```
 
-- [ ] **Step 2: 跑测试**
+- [x] **Step 2: 跑测试**
 
 ```bash
 cd hohu-admin && pytest tests/modules/ai/test_routing_feedback_query.py -v
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd hohu-admin && git add tests/modules/ai/test_routing_feedback_query.py && git commit -m "test(ai): cover routing feedback list filters and ordering"
@@ -1753,13 +1753,13 @@ cd hohu-admin && git add tests/modules/ai/test_routing_feedback_query.py && git 
 
 **Files:** 无新文件
 
-- [ ] **Step 1: 全量 lint**
+- [x] **Step 1: 全量 lint**
 
 ```bash
 cd hohu-admin && ruff check . && ruff format .
 ```
 
-- [ ] **Step 2: 全量 pytest**
+- [x] **Step 2: 全量 pytest**
 
 ```bash
 cd hohu-admin && pytest tests/modules/ai/ -v
@@ -1767,7 +1767,7 @@ cd hohu-admin && pytest tests/modules/ai/ -v
 
 Expected: 全绿
 
-- [ ] **Step 3: 覆盖率检查**
+- [x] **Step 3: 覆盖率检查**
 
 ```bash
 cd hohu-admin && pytest tests/modules/ai/test_agent_admin.py tests/modules/ai/test_role_agent.py tests/modules/ai/test_routing_feedback_query.py --cov=app/modules/ai --cov-report=term-missing
@@ -1775,7 +1775,7 @@ cd hohu-admin && pytest tests/modules/ai/test_agent_admin.py tests/modules/ai/te
 
 Expected: 三个新 service + api 文件覆盖率 ≥ 70%
 
-- [ ] **Step 4: Commit（如 lint 修了格式）**
+- [x] **Step 4: Commit（如 lint 修了格式）**
 
 ```bash
 cd hohu-admin && git add -p && git commit -m "style(ai): apply ruff format to admin module"
@@ -1788,7 +1788,7 @@ cd hohu-admin && git add -p && git commit -m "style(ai): apply ruff format to ad
 **Files:**
 - Modify: `hohu-admin/scripts/sync_menus.py`
 
-- [ ] **Step 1: 翻转 ai_agent 菜单 hide_in_menu（行 ~1184）**
+- [x] **Step 1: 翻转 ai_agent 菜单 hide_in_menu（行 ~1184）**
 
 ```python
 # scripts/sync_menus.py 内 ai_agent 菜单定义
@@ -1802,7 +1802,7 @@ cd hohu-admin && git add -p && git commit -m "style(ai): apply ruff format to ad
 
 > 注意：`sync_menus.py` 是增量同步（只 add 不 update），改 `hide_in_menu` 不会自动迁移已 seed 的行。**需要写一次性 SQL 升级脚本或在 sync_menus 内加 update 逻辑**。最简方案：在 `sync_menus()` 函数末尾加 update 兜底。
 
-- [ ] **Step 2: 在 sync_menus.py 末尾加 ai_routing_feedback 菜单（在 ai_agent 之后）**
+- [x] **Step 2: 在 sync_menus.py 末尾加 ai_routing_feedback 菜单（在 ai_agent 之后）**
 
 ```python
 # scripts/sync_menus.py MENU_DEFINITIONS 末尾追加
@@ -1846,7 +1846,7 @@ cd hohu-admin && git add -p && git commit -m "style(ai): apply ruff format to ad
 },
 ```
 
-- [ ] **Step 3: 在 sync_menus() 末尾加 hide_in_menu 兜底 update**
+- [x] **Step 3: 在 sync_menus() 末尾加 hide_in_menu 兜底 update**
 
 ```python
 # scripts/sync_menus.py sync_menus() 函数末尾追加
@@ -1862,7 +1862,7 @@ if ai_agent_menu and ai_agent_menu.hide_in_menu:
     print(f"Updated ai_agent menu: hide_in_menu -> False")
 ```
 
-- [ ] **Step 4: 跑 sync_menus 验证**
+- [x] **Step 4: 跑 sync_menus 验证**
 
 ```bash
 cd hohu-admin && python scripts/sync_menus.py
@@ -1870,7 +1870,7 @@ cd hohu-admin && python scripts/sync_menus.py
 
 Expected: 输出 "Inserted ..." 或 "Updated ai_agent menu: hide_in_menu -> False"
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd hohu-admin && git add scripts/sync_menus.py && git commit -m "feat(ai): seed ai routing feedback menu and role-agent auth permission"
@@ -1886,7 +1886,7 @@ cd hohu-admin && git add scripts/sync_menus.py && git commit -m "feat(ai): seed 
 - Create: `hohu-admin-web/src/typings/api/ai-agent.ts`
 - Create: `hohu-admin-web/src/typings/api/ai-routing-feedback.ts`
 
-- [ ] **Step 1: 写 ai-agent.ts 类型**
+- [x] **Step 1: 写 ai-agent.ts 类型**
 
 ```typescript
 // src/typings/api/ai-agent.ts
@@ -1947,7 +1947,7 @@ declare namespace Api {
 }
 ```
 
-- [ ] **Step 2: 写 ai-routing-feedback.ts 类型**
+- [x] **Step 2: 写 ai-routing-feedback.ts 类型**
 
 ```typescript
 // src/typings/api/ai-routing-feedback.ts
@@ -2001,13 +2001,13 @@ declare namespace Api {
 }
 ```
 
-- [ ] **Step 3: typecheck**
+- [x] **Step 3: typecheck**
 
 ```bash
 cd hohu-admin-web && pnpm typecheck
 ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cd hohu-admin-web && git add src/typings/api/ai-agent.ts src/typings/api/ai-routing-feedback.ts && git commit -m "feat(ai): add admin ui types"
@@ -2022,7 +2022,7 @@ cd hohu-admin-web && git add src/typings/api/ai-agent.ts src/typings/api/ai-rout
 - Create: `hohu-admin-web/src/service/api/ai-routing-feedback.ts`
 - Modify: `hohu-admin-web/src/service/api/index.ts` (export)
 
-- [ ] **Step 1: 写 ai-agent.ts API**
+- [x] **Step 1: 写 ai-agent.ts API**
 
 ```typescript
 // src/service/api/ai-agent.ts
@@ -2073,7 +2073,7 @@ export function fetchUpdateRoleAgentBinding(roleId: string, agentIds: string[]) 
 
 > **`Api.AiAgent` namespace 来自 Task 13**。`fetchProviderModels` 是现有端点封装（参考 `src/service/api/ai-provider.ts` 或同类文件名，实施期 grep 确认）。
 
-- [ ] **Step 2: 写 ai-routing-feedback.ts API**
+- [x] **Step 2: 写 ai-routing-feedback.ts API**
 
 ```typescript
 // src/service/api/ai-routing-feedback.ts
@@ -2101,7 +2101,7 @@ export function fetchRoutingFeedbackList(params: Api.AiRoutingFeedback.ListQuery
 }
 ```
 
-- [ ] **Step 3: 在 src/service/api/index.ts 加 export**
+- [x] **Step 3: 在 src/service/api/index.ts 加 export**
 
 ```typescript
 // src/service/api/index.ts 末尾追加
@@ -2109,13 +2109,13 @@ export * from './ai-agent';
 export * from './ai-routing-feedback';
 ```
 
-- [ ] **Step 4: typecheck + lint**
+- [x] **Step 4: typecheck + lint**
 
 ```bash
 cd hohu-admin-web && pnpm typecheck && pnpm lint
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd hohu-admin-web && git add src/service/api/ai-agent.ts src/service/api/ai-routing-feedback.ts src/service/api/index.ts && git commit -m "feat(ai): add admin api wrappers"
@@ -2129,7 +2129,7 @@ cd hohu-admin-web && git add src/service/api/ai-agent.ts src/service/api/ai-rout
 - Create: `hohu-admin-web/src/views/ai/agent/index.vue`
 - Create: `hohu-admin-web/src/views/ai/agent/modules/agent-operate-drawer.vue`
 
-- [ ] **Step 1: 写 index.vue（参考 views/ai/provider/index.vue 模式）**
+- [x] **Step 1: 写 index.vue（参考 views/ai/provider/index.vue 模式）**
 
 ```vue
 <!-- src/views/ai/agent/index.vue -->
@@ -2305,7 +2305,7 @@ onMounted(loadList);
 
 > **`hasAuth` 来自 `@/composables/auth`**（CLAUDE.md §Button-level Permission Control：TSX/render 内用 `hasAuth`，模板内用 `v-permission` directive）。实施期 `grep -rn "export.*hasAuth" hohu-admin-web/src/` 确认路径。
 
-- [ ] **Step 2: 写 agent-operate-drawer.vue**
+- [x] **Step 2: 写 agent-operate-drawer.vue**
 
 ```vue
 <!-- src/views/ai/agent/modules/agent-operate-drawer.vue -->
@@ -2486,7 +2486,7 @@ watch(
 </template>
 ```
 
-- [ ] **Step 3: dev server 启动验证**
+- [x] **Step 3: dev server 启动验证**
 
 ```bash
 cd hohu-admin-web && pnpm dev
@@ -2494,13 +2494,13 @@ cd hohu-admin-web && pnpm dev
 
 浏览器打开 `http://localhost:9527/ai/agent`，登录 R_SUPER，应能看到 Agent 列表。
 
-- [ ] **Step 4: lint + typecheck**
+- [x] **Step 4: lint + typecheck**
 
 ```bash
 cd hohu-admin-web && pnpm lint && pnpm typecheck
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd hohu-admin-web && git add src/views/ai/agent/ && git commit -m "feat(ai): add agent management page with edit drawer"
@@ -2514,7 +2514,7 @@ cd hohu-admin-web && git add src/views/ai/agent/ && git commit -m "feat(ai): add
 - Create: `hohu-admin-web/src/views/system/role/modules/ai-agent-auth-modal.vue`
 - Modify: `hohu-admin-web/src/views/system/role/index.vue` (加按钮)
 
-- [ ] **Step 1: 写 modal（仿 menu-auth-modal.vue）**
+- [x] **Step 1: 写 modal（仿 menu-auth-modal.vue）**
 
 ```vue
 <!-- src/views/system/role/modules/ai-agent-auth-modal.vue -->
@@ -2614,7 +2614,7 @@ watch(visible, v => {
 </template>
 ```
 
-- [ ] **Step 2: 在 role/index.vue 加按钮（找操作列）**
+- [x] **Step 2: 在 role/index.vue 加按钮（找操作列）**
 
 ```vue
 <!-- src/views/system/role/index.vue 内操作列加按钮 -->
@@ -2655,7 +2655,7 @@ function openAiAgentAuth(roleId: string) {
 
 > 实施期 Read `src/views/system/role/index.vue` 找现有"菜单权限"按钮位置，紧邻加新按钮。注意按钮的 v-permission 字符串必须精确匹配后端种子 `'system:role:ai-agent-auth'`。
 
-- [ ] **Step 3: dev 验证**
+- [x] **Step 3: dev 验证**
 
 ```bash
 cd hohu-admin-web && pnpm dev
@@ -2663,13 +2663,13 @@ cd hohu-admin-web && pnpm dev
 
 浏览器 `/system/role` → 行内点 "AI Agent 授权" → modal 出现 → shared 行 disabled → 勾选提交。
 
-- [ ] **Step 4: lint + typecheck**
+- [x] **Step 4: lint + typecheck**
 
 ```bash
 cd hohu-admin-web && pnpm lint && pnpm typecheck
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd hohu-admin-web && git add src/views/system/role/ && git commit -m "feat(system-role): add ai agent auth modal"
@@ -2682,7 +2682,7 @@ cd hohu-admin-web && git add src/views/system/role/ && git commit -m "feat(syste
 **Files:**
 - Create: `hohu-admin-web/src/views/ai/routing-feedback/index.vue`
 
-- [ ] **Step 1: 写 dashboard**
+- [x] **Step 1: 写 dashboard**
 
 ```vue
 <!-- src/views/ai/routing-feedback/index.vue -->
@@ -2886,7 +2886,7 @@ import { h } from 'vue';
 </template>
 ```
 
-- [ ] **Step 2: dev 验证**
+- [x] **Step 2: dev 验证**
 
 ```bash
 cd hohu-admin-web && pnpm dev
@@ -2894,13 +2894,13 @@ cd hohu-admin-web && pnpm dev
 
 浏览器 `/ai/routing-feedback` → 切 7/30 天 → KPI 变 → 点 traceId 新 tab 跳。
 
-- [ ] **Step 3: lint + typecheck**
+- [x] **Step 3: lint + typecheck**
 
 ```bash
 cd hohu-admin-web && pnpm lint && pnpm typecheck
 ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cd hohu-admin-web && git add src/views/ai/routing-feedback/ && git commit -m "feat(ai): add routing feedback dashboard"
@@ -2914,7 +2914,7 @@ cd hohu-admin-web && git add src/views/ai/routing-feedback/ && git commit -m "fe
 - Modify: `hohu-admin-web/src/locales/langs/zh-cn.ts`
 - Modify: `hohu-admin-web/src/locales/langs/en-us.ts`
 
-- [ ] **Step 1: zh-cn.ts 加翻译**
+- [x] **Step 1: zh-cn.ts 加翻译**
 
 在 `route` 命名空间加：
 
@@ -2964,7 +2964,7 @@ AI_ROLE_NOT_FOUND: '角色不存在',
 AI_ROLE_AGENT_BIND_SHARED_FORBIDDEN: 'shared Agent 直通所有用户，无需绑定',
 ```
 
-- [ ] **Step 2: en-us.ts 同步加英文翻译**
+- [x] **Step 2: en-us.ts 同步加英文翻译**
 
 ```typescript
 ai_agent: 'AI Agent Management',
@@ -3009,13 +3009,13 @@ AI_ROLE_AGENT_BIND_SHARED_FORBIDDEN:
   'Shared agent bypasses all users, no binding needed',
 ```
 
-- [ ] **Step 3: lint + typecheck**
+- [x] **Step 3: lint + typecheck**
 
 ```bash
 cd hohu-admin-web && pnpm lint && pnpm typecheck
 ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cd hohu-admin-web && git add src/locales/langs/zh-cn.ts src/locales/langs/en-us.ts && git commit -m "feat(ai): add i18n for admin ui"
@@ -3028,7 +3028,7 @@ cd hohu-admin-web && git add src/locales/langs/zh-cn.ts src/locales/langs/en-us.
 **Files:**
 - Create: `hohu-admin-web/src/views/ai/agent/__tests__/agent-operate-drawer.spec.ts`
 
-- [ ] **Step 1: 写 spec**
+- [x] **Step 1: 写 spec**
 
 ```typescript
 // src/views/ai/agent/__tests__/agent-operate-drawer.spec.ts
@@ -3138,13 +3138,13 @@ describe('agent-operate-drawer', () => {
 });
 ```
 
-- [ ] **Step 2: 跑 vitest**
+- [x] **Step 2: 跑 vitest**
 
 ```bash
 cd hohu-admin-web && pnpm vitest run src/views/ai/agent/__tests__/agent-operate-drawer.spec.ts
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd hohu-admin-web && git add src/views/ai/agent/__tests__/ && git commit -m "test(ai): add agent drawer vitest spec"
@@ -3157,7 +3157,7 @@ cd hohu-admin-web && git add src/views/ai/agent/__tests__/ && git commit -m "tes
 **Files:**
 - Create: `hohu-admin-web/src/views/system/role/modules/__tests__/ai-agent-auth-modal.spec.ts`
 
-- [ ] **Step 1: 写 spec**
+- [x] **Step 1: 写 spec**
 
 ```typescript
 // src/views/system/role/modules/__tests__/ai-agent-auth-modal.spec.ts
@@ -3301,13 +3301,13 @@ describe('ai-agent-auth-modal', () => {
 });
 ```
 
-- [ ] **Step 2: 跑 vitest**
+- [x] **Step 2: 跑 vitest**
 
 ```bash
 cd hohu-admin-web && pnpm vitest run src/views/system/role/modules/__tests__/ai-agent-auth-modal.spec.ts
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd hohu-admin-web && git add src/views/system/role/modules/__tests__/ && git commit -m "test(system-role): add ai agent auth modal vitest spec"
@@ -3320,7 +3320,7 @@ cd hohu-admin-web && git add src/views/system/role/modules/__tests__/ && git com
 **Files:**
 - Create: `hohu-admin-web/src/views/ai/routing-feedback/__tests__/index.spec.ts`
 
-- [ ] **Step 1: 写 spec**
+- [x] **Step 1: 写 spec**
 
 ```typescript
 // src/views/ai/routing-feedback/__tests__/index.spec.ts
@@ -3442,13 +3442,13 @@ describe('routing-feedback dashboard', () => {
 });
 ```
 
-- [ ] **Step 2: 跑 vitest**
+- [x] **Step 2: 跑 vitest**
 
 ```bash
 cd hohu-admin-web && pnpm vitest run src/views/ai/routing-feedback/__tests__/index.spec.ts
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd hohu-admin-web && git add src/views/ai/routing-feedback/__tests__/ && git commit -m "test(ai): add routing feedback dashboard vitest spec"
@@ -3465,7 +3465,7 @@ cd hohu-admin-web && git add src/views/ai/routing-feedback/__tests__/ && git com
 
 > 实施期先 `ls hohu-admin-web/tests/` 找现有 e2e 测试目录约定。
 
-- [ ] **Step 1: 写 4 个 E2E 测试**
+- [x] **Step 1: 写 4 个 E2E 测试**
 
 ```typescript
 // tests/e2e/ai-admin.spec.ts
@@ -3532,13 +3532,13 @@ test('反馈仪表盘', async ({ page }) => {
 });
 ```
 
-- [ ] **Step 2: 跑 e2e**
+- [x] **Step 2: 跑 e2e**
 
 ```bash
 cd hohu-admin-web && pnpm playwright test tests/e2e/ai-admin.spec.ts
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd hohu-admin-web && git add tests/e2e/ai-admin.spec.ts && git commit -m "test(ai): add admin ui e2e scenarios"
@@ -3551,7 +3551,7 @@ cd hohu-admin-web && git add tests/e2e/ai-admin.spec.ts && git commit -m "test(a
 **Files:**
 - Modify: `hohu-admin/docs/superpowers/specs/2026-07-30-multi-agent-admin-ui-design.md`
 
-- [ ] **Step 1: 改 Status + 加 Ship 记录**
+- [x] **Step 1: 改 Status + 加 Ship 记录**
 
 ```markdown
 **Status**: ✅ Plan 已完成（YYYY-MM-DD）
@@ -3570,11 +3570,11 @@ cd hohu-admin-web && git add tests/e2e/ai-admin.spec.ts && git commit -m "test(a
 | 验证 | `pytest tests/modules/ai/ -v` 全绿 + `pnpm typecheck && pnpm lint` 通过 |
 ```
 
-- [ ] **Step 2: 改 §13 Phase 1 状态块**
+- [x] **Step 2: 改 §13 Phase 1 状态块**
 
 把所有 `- [ ]` 改为 `- [x]`，文末加完成日期。
 
-- [ ] **Step 3: Commit spec rewrite**
+- [x] **Step 3: Commit spec rewrite**
 
 ```bash
 cd hohu-admin && git add docs/superpowers/specs/2026-07-30-multi-agent-admin-ui-design.md && git commit -m "docs(ai): mark multi-agent admin ui spec as completed"
@@ -3603,7 +3603,7 @@ cd hohu-admin && git add docs/superpowers/specs/2026-07-30-multi-agent-admin-ui-
 
 ## 实施完成后
 
-- [ ] 跑两个仓库全量 lint + test
-- [ ] 前后端联调（启动后端 :8000 + 前端 :9527，手动跑 §9.3 E2E 4 场景）
-- [ ] 回写 spec（Task 23）
-- [ ] 创建 PR（前后端各一个，遵循 DCO）
+- [x] 跑两个仓库全量 lint + test
+- [x] 前后端联调（启动后端 :8000 + 前端 :9527，手动跑 §9.3 E2E 4 场景）
+- [x] 回写 spec（Task 23）
+- [x] 创建 PR（前后端各一个，遵循 DCO）
