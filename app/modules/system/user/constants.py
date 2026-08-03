@@ -86,3 +86,17 @@ TERMINAL_STATUSES: frozenset[ImportBatchStatus] = frozenset(
     }
 )
 """终态集合，用于 cleanup cron / cancel 校验。"""
+
+
+# 行数硬上限（spec §2.6 / §2.10 / §3.2）
+USER_IMPORT_MAX_ROWS = 2000
+"""单次导入同步上限。> 2000 拒绝（AI_IMPORT_TOO_MANY_ROWS），引导分批或等 Phase 3 异步通道。"""
+
+USER_IMPORT_SYNC_THRESHOLD = 2000
+"""Phase 3 异步切换逻辑用同义词（spec §2.6 双阈值）。当前恒等于 USER_IMPORT_MAX_ROWS。"""
+
+USER_EXPORT_ASYNC_THRESHOLD = 5000
+"""单次导出同步上限。> 5000 抛 AI_EXPORT_ASYNC_REQUIRED（Phase 3 异步）。"""
+
+MAX_PREVIEW_RECORDS = 2000
+"""预检结果展示上限（spec §3.2）。与 USER_IMPORT_MAX_ROWS 对齐；超出的 records 写 *_records_file。"""
