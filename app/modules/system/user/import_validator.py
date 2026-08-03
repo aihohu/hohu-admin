@@ -1,13 +1,17 @@
-"""User import validator（spec §2.17 / §2.18 / §2.15 / §2.11）。
+"""User import validator（spec §2.17 / §2.18 / §2.15 / §2.11 / §2.24）。
 
 职责：
 - resolve_dept：dept_input 名称 / 路径反查 dept_id（#2.17）
 - resolve_role_input：role_input 反查 role_ids（#2.18，code/name 双支持）
-- check_permission_boundary：批量操作 Permission Boundary 校验（#2.15，Task 6 落地）
-- check_dept_data_scope：dept 是否在 operator 的 data_scope 内（#2.11，Task 7 落地）
+- check_permission_boundary：批量操作 Permission Boundary 校验（#2.15）
+- check_dept_data_scope：dept 是否在 operator 的 data_scope 内（#2.11）
+- resolve_existing_user + classify_sync_action：employee_no / user_name 命中 +
+  EmployeeNoSyncMode 三模式分类（#2.24 v2.2 P1，Task 7a）
 
-Service 层调用：dry_run / execute 阶段对每行 record 反查 dept_id / role_ids。
+Service 层调用：dry_run / execute 阶段对每行 record 反查 + 越界检查 + 命中分类。
 """
+
+import enum
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,12 +28,31 @@ from app.core.rbac import is_super_admin
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
+from app.modules.system.user.constants import EmployeeNoSyncMode
 from app.modules.system.user.schemas import FailedRow, UserImportRecord
 from app.utils.data_scope import (
     get_best_scope,
     get_custom_dept_ids,
     get_dept_and_sub_ids,
 )
+
+
+class SyncAction(enum.Enum):
+    """sync_mode 应用后的下一步动作（Task 7a）。
+
+    调用方（batch_create_users_from_records）按返回值决定 INSERT/UPDATE/SKIP/FAILED：
+    - NEW：existing is None，调用方直接判定（不在 classify_sync_action 范围内）
+    - EXISTS_BY_USERNAME：employee_no 兜底按 user_name 命中 → 调用方按 on_conflict 处理
+    - REJECT_EMPLOYEE_NO_EXISTS：CREATE_ONLY + employee_no 命中 → FailedRow
+    - UPDATE_SAFE：UPDATE_PROFILE + employee_no 命中 → 仅更新 OVERWRITE_ALLOWED（不动 user_name）
+    - UPDATE_FULL：FULL_SYNC + employee_no 命中 → 含 user_name 全字段更新
+    """
+
+    NEW = "NEW"
+    EXISTS_BY_USERNAME = "EXISTS_BY_USERNAME"
+    REJECT_EMPLOYEE_NO_EXISTS = "REJECT_EMPLOYEE_NO_EXISTS"
+    UPDATE_SAFE = "UPDATE_SAFE"
+    UPDATE_FULL = "UPDATE_FULL"
 
 
 async def resolve_dept(db: AsyncSession, dept_input: str) -> int:
@@ -325,3 +348,59 @@ async def check_dept_data_scope(
             )
 
     return failed_rows
+
+
+async def resolve_existing_user(
+    db: AsyncSession, record: UserImportRecord
+) -> tuple[User | None, bool]:
+    """反查已存在用户（spec §2.24 v2.2 P1 line 879-894）。
+
+    匹配顺序：
+    1. record.employee_no 非空 → select User where employee_no == record.employee_no
+    2. 退化到 user_name 匹配
+
+    Returns:
+        (user, matched_by_employee_no):
+        - (None, False) — 无任何匹配（新建场景）
+        - (user, True) — 按 employee_no 命中（sync_mode 决定后续行为）
+        - (user, False) — 按 user_name 命中（employee_no 为 NULL 或未命中；
+          spec §2.24 line 874：按 on_conflict 处理，sync_mode 不适用）
+    """
+    if record.employee_no:
+        existing = (
+            await db.execute(select(User).where(User.employee_no == record.employee_no))
+        ).scalar_one_or_none()
+        if existing is not None:
+            return existing, True
+
+    existing = (
+        await db.execute(select(User).where(User.user_name == record.user_name))
+    ).scalar_one_or_none()
+    return existing, False
+
+
+def classify_sync_action(
+    matched_by_employee_no: bool,
+    sync_mode: EmployeeNoSyncMode,
+) -> SyncAction:
+    """根据「是否按 employee_no 命中」+ sync_mode 决定后续动作（spec §2.24 v2.2 P1）。
+
+    employee_no 命中 → sync_mode 决定 REJECT / UPDATE_SAFE / UPDATE_FULL
+    user_name 命中（employee_no 兜底）→ 一律 EXISTS_BY_USERNAME，由调用方按
+        on_conflict 处理（spec §2.24 line 874）
+
+    Args:
+        matched_by_employee_no: resolve_existing_user 返回的 matched 标志
+        sync_mode: 调用方传入的策略
+
+    Returns:
+        SyncAction 枚举值（NEW 由调用方在 user=None 时直接判定）
+    """
+    if not matched_by_employee_no:
+        return SyncAction.EXISTS_BY_USERNAME
+
+    if sync_mode == EmployeeNoSyncMode.CREATE_ONLY:
+        return SyncAction.REJECT_EMPLOYEE_NO_EXISTS
+    if sync_mode == EmployeeNoSyncMode.UPDATE_PROFILE:
+        return SyncAction.UPDATE_SAFE
+    return SyncAction.UPDATE_FULL

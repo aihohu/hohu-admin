@@ -1,10 +1,12 @@
-"""import_validator 单测（Task 4 + Task 5 + Task 6 + Task 7）。
+"""import_validator 单测（Task 4 + Task 5 + Task 6 + Task 7 + Task 7a）。
 
 覆盖：
 - resolve_dept 5 用例（spec §2.17）：名称 / 路径 / 重名 / 不存在 / 路径段断
 - resolve_role_input 4 用例（spec §2.18）：code / name / 混合去重 / 未匹配
 - check_permission_boundary 3 用例（spec §2.15）：越界 / 超管豁免 / 错误提示含名
 - check_dept_data_scope 3 用例（spec §2.11）：self / dept_and_sub / 越界
+- resolve_existing_user + classify_sync_action 4 用例（spec §2.24 v2.2 P1）：
+  CREATE_ONLY / UPDATE_PROFILE / FULL_SYNC / NULL 兜底
 
 依赖 db_session outer-transaction fixture（不落库）。
 """
@@ -21,13 +23,18 @@ from app.constants import (
     SUPER_ADMIN_ROLE_CODE,
 )
 from app.core.exceptions import BusinessRuleException
+from app.core.security import get_password_hash
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
+from app.modules.system.user.constants import EmployeeNoSyncMode
 from app.modules.system.user.import_validator import (
+    SyncAction,
     check_dept_data_scope,
     check_permission_boundary,
+    classify_sync_action,
     resolve_dept,
+    resolve_existing_user,
     resolve_role_input,
 )
 from app.modules.system.user.schemas import UserImportRecord
@@ -587,3 +594,136 @@ class TestCheckDeptDataScope:
         assert len(failed) == 1
         # 应该是 DUPLICATE 而不是 OUT_OF_SCOPE（resolve 失败保留原 error_code）
         assert failed[0].error_code == "AI_IMPORT_DEPT_DUPLICATE"
+
+
+def _make_existing_user(
+    user_id: int,
+    user_name: str,
+    employee_no: str | None = None,
+) -> User:
+    """构造已存在用户（resolve_existing_user 测试用）。"""
+    return User(
+        user_id=user_id,
+        user_name=user_name,
+        employee_no=employee_no,
+        hashed_password=get_password_hash("x"),
+        status="1",
+    )
+
+
+def _make_record_with_emp(
+    row_num: int,
+    user_name: str,
+    employee_no: str | None,
+) -> UserImportRecord:
+    return UserImportRecord(
+        row_num=row_num,
+        user_name=user_name,
+        employee_no=employee_no,
+        dept_input="QA-Dept-Placeholder",
+        role_input=None,
+    )
+
+
+class TestResolveExistingUser:
+    """resolve_existing_user DB 行为测试（spec §2.24 v2.2 P1 line 879-894）。
+
+    匹配顺序：employee_no（优先）→ user_name（兜底）。
+    """
+
+    async def test_resolve_existing_user_matches_by_employee_no(self, db_session):
+        """employee_no 命中 → 返回 user, matched=True。"""
+        existing = _make_existing_user(11001, "QA_Old_Name", employee_no="QA_E001")
+        db_session.add(existing)
+        await db_session.flush()
+
+        record = _make_record_with_emp(200, "QA_New_Name", "QA_E001")
+        user, matched = await resolve_existing_user(db_session, record)
+
+        assert user is not None
+        assert user.user_id == 11001
+        assert matched is True
+
+    async def test_resolve_existing_user_falls_back_to_username(self, db_session):
+        """employee_no 为 NULL + user_name 命中 → 返回 user, matched=False。"""
+        existing = _make_existing_user(11002, "QA_FB_User", employee_no=None)
+        db_session.add(existing)
+        await db_session.flush()
+
+        record = _make_record_with_emp(201, "QA_FB_User", None)
+        user, matched = await resolve_existing_user(db_session, record)
+
+        assert user is not None
+        assert user.user_id == 11002
+        assert matched is False
+
+    async def test_resolve_existing_user_employee_no_miss_username_hit(
+        self, db_session
+    ):
+        """employee_no 未命中但 user_name 命中 → 兜底按 user_name，matched=False。"""
+        # 不同 employee_no 的同 user_name 不可能（user_name UNIQUE），构造 user_name
+        # 命中场景：record.employee_no 是另一个值，user_name 命中
+        existing = _make_existing_user(11003, "QA_Shared", employee_no="QA_OLD")
+        db_session.add(existing)
+        await db_session.flush()
+
+        record = _make_record_with_emp(202, "QA_Shared", "QA_NEW_EMP")
+        user, matched = await resolve_existing_user(db_session, record)
+
+        # employee_no 没命中，但 user_name 命中 → 兜底
+        assert user is not None
+        assert user.user_id == 11003
+        assert matched is False
+
+    async def test_resolve_existing_user_no_match_returns_none(self, db_session):
+        """employee_no 和 user_name 都未命中 → (None, False)。"""
+        record = _make_record_with_emp(203, "QA_No_Match", "QA_No_Such")
+        user, matched = await resolve_existing_user(db_session, record)
+        assert user is None
+        assert matched is False
+
+
+class TestClassifySyncAction:
+    """classify_sync_action 纯逻辑测试（spec §2.24 v2.2 P1 line 856-862）。
+
+    spec 4 用例：
+    - CREATE_ONLY + employee_no 命中 → REJECT
+    - UPDATE_PROFILE + employee_no 命中 → UPDATE_SAFE
+    - FULL_SYNC + employee_no 命中 → UPDATE_FULL
+    - employee_no NULL → EXISTS_BY_USERNAME（与 sync_mode 无关）
+    """
+
+    def test_create_only_employee_no_match_rejects(self):
+        """sync_mode=CREATE_ONLY + employee_no 命中 → REJECT_EMPLOYEE_NO_EXISTS。"""
+        action = classify_sync_action(
+            matched_by_employee_no=True,
+            sync_mode=EmployeeNoSyncMode.CREATE_ONLY,
+        )
+        assert action == SyncAction.REJECT_EMPLOYEE_NO_EXISTS
+
+    def test_update_profile_employee_no_match_safe_fields(self):
+        """sync_mode=UPDATE_PROFILE + employee_no 命中 → UPDATE_SAFE（不动 user_name）。"""
+        action = classify_sync_action(
+            matched_by_employee_no=True,
+            sync_mode=EmployeeNoSyncMode.UPDATE_PROFILE,
+        )
+        assert action == SyncAction.UPDATE_SAFE
+
+    def test_full_sync_employee_no_match_full_fields(self):
+        """sync_mode=FULL_SYNC + employee_no 命中 → UPDATE_FULL（含 user_name）。"""
+        action = classify_sync_action(
+            matched_by_employee_no=True,
+            sync_mode=EmployeeNoSyncMode.FULL_SYNC,
+        )
+        assert action == SyncAction.UPDATE_FULL
+
+    def test_employee_no_null_username_match_exists_by_username(self):
+        """employee_no NULL → 不论 sync_mode 一律 EXISTS_BY_USERNAME（line 874）。"""
+        for mode in EmployeeNoSyncMode:
+            action = classify_sync_action(
+                matched_by_employee_no=False,
+                sync_mode=mode,
+            )
+            assert action == SyncAction.EXISTS_BY_USERNAME, (
+                f"sync_mode={mode} 时 employee_no NULL 兜底应一律 EXISTS_BY_USERNAME"
+            )
