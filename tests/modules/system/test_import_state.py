@@ -29,6 +29,7 @@ def _make_batch(batch_id: str, status: S, token: str | None = None) -> UserImpor
         operator_id=1,
         filename="test.xlsx",
         file_sha256="abc",
+        records_hash="fake-records-hash",
         total_rows=10,
         preview_token=token or f"tok-{batch_id}",
         on_conflict="skip",

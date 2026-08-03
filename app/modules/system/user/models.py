@@ -46,6 +46,11 @@ class UserImportBatch(Base):
     operator_id: Mapped[int] = mapped_column(BigInteger, index=True)
     filename: Mapped[str] = mapped_column(String(256))
     file_sha256: Mapped[str] = mapped_column(String(64))
+    records_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        comment="records 序列化后的 sha256（spec §2.19 三重校验：execute 时比对防 dry_run 后改字段值）",
+    )
     total_rows: Mapped[int] = mapped_column(Integer)
 
     preview_token: Mapped[str] = mapped_column(

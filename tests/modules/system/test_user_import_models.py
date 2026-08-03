@@ -32,6 +32,7 @@ def _sample_batch_kwargs(**overrides):
         "operator_id": 1,
         "filename": "users.xlsx",
         "file_sha256": "abc",
+        "records_hash": "fake-records-hash",
         "total_rows": 10,
         "preview_token": "tok-1",
         "on_conflict": "skip",
