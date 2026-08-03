@@ -1,8 +1,8 @@
-"""import_validator 单测（Task 4，spec §2.17）。
+"""import_validator 单测（Task 4 + Task 5，spec §2.17 / §2.18）。
 
-覆盖 resolve_dept 5 用例（spec line 2635-2639）：
-- 名称模式：唯一命中 / 重名 / 不存在
-- 路径模式：逐级命中 / 某段不存在
+覆盖：
+- resolve_dept 5 用例（spec line 2635-2639）：名称 / 路径 / 重名 / 不存在 / 路径段断
+- resolve_role_input 4 用例（spec line 2640-2643）：code / name / 混合去重 / 未匹配
 
 依赖 db_session outer-transaction fixture（不落库）。
 """
@@ -11,7 +11,11 @@ import pytest
 
 from app.core.exceptions import BusinessRuleException
 from app.modules.system.models.dept import Dept
-from app.modules.system.user.import_validator import resolve_dept
+from app.modules.system.models.role import Role
+from app.modules.system.user.import_validator import (
+    resolve_dept,
+    resolve_role_input,
+)
 
 
 def _make_dept(
@@ -129,3 +133,83 @@ class TestResolveDeptStatusFilter:
         with pytest.raises(BusinessRuleException) as exc:
             await resolve_dept(db_session, "QA-Disabled-Root/QA-Disabled-Mid")
         assert exc.value.error_code == "AI_IMPORT_DEPT_PATH_NOT_FOUND"
+
+
+def _make_role(
+    role_id: int,
+    code: str,
+    name: str,
+    status: str = "1",
+    data_scope: str = "1",
+) -> Role:
+    return Role(
+        role_id=role_id,
+        role_code=code,
+        role_name=name,
+        data_scope=data_scope,
+        status=status,
+    )
+
+
+class TestResolveRoleInput:
+    """resolve_role_input 4 用例（spec line 2640-2643）。"""
+
+    async def test_resolve_role_input_by_code(self, db_session):
+        """spec 用例 1：'R_DEV' (code) → role_id。"""
+        db_session.add(_make_role(1001, "QA_R_DEV", "QA开发者"))
+        await db_session.flush()
+
+        result = await resolve_role_input(db_session, "QA_R_DEV")
+        assert result == [1001]
+
+    async def test_resolve_role_input_by_name(self, db_session):
+        """spec 用例 2：'QA开发者' (name) → role_id。"""
+        db_session.add(_make_role(1002, "QA_R_PM", "QA产品经理"))
+        await db_session.flush()
+
+        result = await resolve_role_input(db_session, "QA产品经理")
+        assert result == [1002]
+
+    async def test_resolve_role_input_mixed_dedup(self, db_session):
+        """spec 用例 3：混合 code+name 输入 + 同角色写两次去重。
+
+        'QA_R_QA,QA测试,QA_R_QA' → 同一 role_id 只出现一次。
+        """
+        db_session.add_all(
+            [
+                _make_role(1010, "QA_R_QA", "QA测试"),
+                _make_role(1011, "QA_R_OPS", "QA运维"),
+            ]
+        )
+        await db_session.flush()
+
+        result = await resolve_role_input(db_session, "QA_R_QA, QA测试, QA_R_OPS")
+        assert sorted(result) == [1010, 1011]
+
+    async def test_resolve_role_input_not_found(self, db_session):
+        """spec 用例 4：未匹配 → AI_IMPORT_ROLE_NOT_FOUND（含未匹配项）。"""
+        with pytest.raises(BusinessRuleException) as exc:
+            await resolve_role_input(db_session, "QA_Not_Exist_Role")
+        assert exc.value.error_code == "AI_IMPORT_ROLE_NOT_FOUND"
+        assert "QA_Not_Exist_Role" in str(exc.value)
+
+    async def test_resolve_role_input_skips_disabled(self, db_session):
+        """禁用角色（status='2'）一律视为不存在（与 dept 一致）。"""
+        db_session.add(_make_role(1020, "QA_R_DISABLED", "QA禁用角色", status="2"))
+        await db_session.flush()
+
+        with pytest.raises(BusinessRuleException) as exc:
+            await resolve_role_input(db_session, "QA_R_DISABLED")
+        assert exc.value.error_code == "AI_IMPORT_ROLE_NOT_FOUND"
+
+    async def test_resolve_role_input_partial_match_reports_unmatched(self, db_session):
+        """部分匹配：未匹配项进入异常信息（spec line 499 含 remaining）。"""
+        db_session.add(_make_role(1030, "QA_R_OK", "QA存在角色"))
+        await db_session.flush()
+
+        with pytest.raises(BusinessRuleException) as exc:
+            await resolve_role_input(db_session, "QA_R_OK,QA_Not_Exist")
+        assert exc.value.error_code == "AI_IMPORT_ROLE_NOT_FOUND"
+        assert "QA_Not_Exist" in str(exc.value)
+        # 已匹配的 QA_R_OK 不应进入异常信息
+        assert "QA_R_OK" not in str(exc.value)
