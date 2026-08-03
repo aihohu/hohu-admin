@@ -100,3 +100,59 @@ USER_EXPORT_ASYNC_THRESHOLD = 5000
 
 MAX_PREVIEW_RECORDS = 2000
 """预检结果展示上限（spec §3.2）。与 USER_IMPORT_MAX_ROWS 对齐；超出的 records 写 *_records_file。"""
+
+
+# 字段白名单（spec §2.21 / §3.8 line 1786-1807）
+OVERWRITE_NEVER: frozenset[str] = frozenset(
+    {
+        "user_id",
+        "user_name",
+        "hashed_password",
+        "create_time",
+    }
+)
+"""on_conflict=overwrite 时永不覆盖的字段（spec §2.21）。
+
+- user_id：主键，身份锚点
+- user_name：登录账号，改了破坏审计 + 外部系统关联
+- hashed_password：默认密码覆盖已改密码 → 用户已改密码失效（安全 + 体验灾难）
+- create_time：审计时间戳
+"""
+
+OVERWRITE_ALLOWED: frozenset[str] = frozenset(
+    {
+        "employee_no",  # spec §2.24 v2.2 P1
+        "nickname",
+        "user_email",
+        "user_phone",
+        "dept_id",
+        "role_ids",
+        "user_gender",
+        "status",
+    }
+)
+"""on_conflict=overwrite 时允许更新的字段（spec §2.21 / §3.8）。
+
+不含 user_id / user_name / hashed_password（在 OVERWRITE_NEVER 中）。
+AI tool / HTTP / 前端统一使用本集合：Excel 中的 user_name 列仅用于"识别已存在"，
+不一致 → 跳过/报错，不强行覆盖 user_name（spec §2.21 line 701）。
+"""
+
+EXPORT_ALLOWED_FIELDS: frozenset[str] = frozenset(
+    {
+        "user_name",
+        "nickname",
+        "user_email",
+        "user_phone",
+        "dept_id",
+        "role_codes",
+        "user_gender",
+        "status",
+        "create_time",
+    }
+)
+"""导出 Excel 字段白名单（spec §2.9 / §3.6 line 266）。
+
+未列入的字段不进 Excel。新增敏感字段时本白名单不变（默认安全）。
+- hashed_password：永不导出（spec §2.9 反例 1）
+- employee_no：v2.2 P1 决定不导出（员工工号属 PII，按最小化原则）"""
