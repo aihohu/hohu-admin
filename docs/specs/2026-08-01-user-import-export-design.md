@@ -2936,7 +2936,7 @@ async def user_export(
 - [ ] Task 1: `UserImportRecord`（含 `dept_input` / `role_input` / `employee_no`）/ `ImportDryRunResult`（v2.2 P1 含 `*_truncated` 字段 + `*_records_file`）/ `ImportResult`（v2.2 P1 含 `failed_rows_preview` / `failed_rows_file` / `idempotent_replay`）/ `FailedRow` / `UserImportBatch`（v2.2 P1-2：原 ImportPreviewSession 已合并删除）/ `UserExportTask`（v2.2 P1-5 #2.31）Pydantic schema
 - [ ] Task 2: alembic migration：`sys_user_import_batch` 新表（v2.2 P0：`status` 用 PostgreSQL ENUM 类型含 `PREVIEW_DONE` + CHECK；v2.2 P1-3：加 `reason` 字段）+ `sys_user.employee_no` 字段（UNIQUE 索引）+ `sys_user_import_batch_log` 表（v2.2 P1 #2.28，FK CASCADE）+ `sys_user_export_task` 表（v2.2 P1-5 #2.31）
 - [x] Task 3 ✅ Plan 已完成（2026-08-03）：`OVERWRITE_NEVER` / `OVERWRITE_ALLOWED` / `EXPORT_ALLOWED_FIELDS` 常量落 `app/modules/system/user/constants.py`；`get_default_password(db)` helper 落 `app/modules/system/user/helpers.py`，缺失/禁用抛 `AI_IMPORT_DEFAULT_PASSWORD_NOT_SET`（直接查 sys_config 不走 redis cache，避免测试间污染 + admin 改值即时生效）。11 用例（含常量静态校验防 typo + helper DB 行为）。
-- [ ] Task 4: `user_service.resolve_dept`（路径 / 名称 / 重名容错，#2.17）+ 单测（5 用例）
+- [x] Task 4 ✅ Plan 已完成（2026-08-03）：`resolve_dept` 落 `app/modules/system/user/import_validator.py`，名称 / 路径双模式 + 禁用部门（status='2'）一律视为不存在（安全原则：防用户分到停用部门）。8 用例（spec 5 + 新增 whitespace 段 + 禁用名称/路径各 1）。
 - [ ] Task 5: `user_service.resolve_role_input`（code/name 双支持 + 去重，#2.18）+ 单测（4 用例）
 - [ ] Task 6: `user_service.check_permission_boundary`（#2.15）+ 单测（3 用例）
 - [ ] Task 7: `user_service.check_dept_data_scope`（#2.11）+ 单测（3 用例）
