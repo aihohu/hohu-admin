@@ -78,6 +78,22 @@ async def cleanup_expired_batches(*args: Any, **kwargs: Any) -> None:
     """
 
 
+def validate_reason_consistency(
+    preview_reason: str,
+    execute_reason: str,
+) -> None:
+    """校验 preview 与 execute 阶段 reason 一致（spec §2.30 v2.2 P1-3）。
+
+    防止用户 preview 时填「HR 同步」，execute 时填「ERP 推送」绕过审计一致性。
+    不一致抛 AI_IMPORT_REASON_MISMATCH。
+    """
+    if preview_reason != execute_reason:
+        raise BusinessRuleException(
+            "execute 阶段 reason 必须与 preview 阶段一致（spec §2.30）",
+            error_code="AI_IMPORT_REASON_MISMATCH",
+        )
+
+
 async def cleanup_expired_previews(*args: Any, **kwargs: Any) -> None:
     """PREVIEW_DONE 超 10min → EXPIRED，删孤儿 preview 文件。
 
