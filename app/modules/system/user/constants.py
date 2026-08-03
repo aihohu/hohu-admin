@@ -156,3 +156,40 @@ EXPORT_ALLOWED_FIELDS: frozenset[str] = frozenset(
 未列入的字段不进 Excel。新增敏感字段时本白名单不变（默认安全）。
 - hashed_password：永不导出（spec §2.9 反例 1）
 - employee_no：v2.2 P1 决定不导出（员工工号属 PII，按最小化原则）"""
+
+
+# spec §2.20：chunk size + 可恢复错误码白名单
+USER_IMPORT_CHUNK_SIZE = 100
+"""单 chunk 行数（spec §2.20）：外层 transaction 每 100 行 commit 一次，控制 undo segment + 锁持有时间。"""
+
+RECOVERABLE_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        # 业务校验类（单行问题，不影响其他行）
+        "AI_IMPORT_USERNAME_DUPLICATE",  # spec §2.25 并发冲突
+        "AI_IMPORT_EMPLOYEE_NO_DUPLICATE",  # employee_no 并发冲突
+        "AI_IMPORT_EMPLOYEE_NO_EXISTS",  # CREATE_ONLY 模式拒绝已存在 employee_no
+        "AI_IMPORT_DEPT_NOT_FOUND",
+        "AI_IMPORT_DEPT_PATH_NOT_FOUND",
+        "AI_IMPORT_DEPT_DUPLICATE",
+        "AI_IMPORT_ROLE_NOT_FOUND",
+        "AI_IMPORT_DEPT_OUT_OF_SCOPE",  # data_scope 越界
+        "AI_IMPORT_ROLE_OUT_OF_SCOPE",
+        "AI_IMPORT_USERNAME_INVALID",  # 字段格式
+        "AI_IMPORT_EMAIL_INVALID",
+        "AI_IMPORT_PHONE_INVALID",
+        "VALIDATION_ERROR",  # Pydantic 通用校验失败
+        "BusinessRuleException",  # 业务规则（catch-all 业务异常）
+    }
+)
+"""可恢复错误码白名单（spec §2.20 line 631-647）。
+
+不在此白名单的异常视为致命错误 → chunk transaction rollback + abort 整批
+（OperationalError / InterfaceError / MemoryError / TimeoutError 等直接冒泡）。
+"""
+
+FAILED_ROWS_PREVIEW_LIMIT = 20
+"""API 响应 failed_rows_preview 上限（spec §3.3 line 1702）。
+
+2000 行 Excel 全失败的 response 不应撑到几 MB；前 20 条给前端 toast，
+全量走 failed_rows_file Excel 下载链接。
+"""

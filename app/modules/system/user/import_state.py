@@ -9,7 +9,15 @@ Task 2 ORM 落地后仍可用本 Table 路径（CAS rowcount 精确性是核心�
 
 from typing import Any
 
-from sqlalchemy import Column, MetaData, String, Table, update
+from sqlalchemy import (
+    Column,
+    DateTime,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    update,
+)
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,6 +48,18 @@ _batch_table = Table(
         ),
         nullable=False,
     ),
+    # Task 10：CAS UPDATE 可能同步写这些列（避免 Unconsumed column names）
+    Column("summary_new", Integer),
+    Column("summary_exists", Integer),
+    Column("summary_conflict", Integer),
+    Column("summary_out_of_scope", Integer),
+    Column("success_count", Integer),
+    Column("skipped_count", Integer),
+    Column("overwritten_count", Integer),
+    Column("failed_count", Integer),
+    Column("failed_rows_file", String(512)),
+    Column("started_at", DateTime),
+    Column("finished_at", DateTime),
     extend_existing=True,
 )
 
@@ -73,6 +93,10 @@ async def _transition_batch_status(
         True: 转换成功（rowcount=1）
         False: from_status 不匹配（rowcount=0），调用方按业务语义处理
               （如 spec §2.27 重放场景视为幂等成功）
+
+    Notes:
+        raw UPDATE 绕过 ORM synchronize_session；调用方在依赖 batch 实例新状态时
+        需自己 ``await db.refresh(batch)`` 或重新 select（spec §2.27 重放场景）。
     """
     validate_transition(from_status, to_status)
     set_values = {**updates, "status": to_status.value}
@@ -83,6 +107,7 @@ async def _transition_batch_status(
             _batch_table.c.status == from_status.value,
         )
         .values(**set_values)
+        .execution_options(synchronize_session=False)
     )
     return result.rowcount == 1
 
