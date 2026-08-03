@@ -1,9 +1,10 @@
-"""import_validator 单测（Task 4 + Task 5 + Task 6）。
+"""import_validator 单测（Task 4 + Task 5 + Task 6 + Task 7）。
 
 覆盖：
 - resolve_dept 5 用例（spec §2.17）：名称 / 路径 / 重名 / 不存在 / 路径段断
 - resolve_role_input 4 用例（spec §2.18）：code / name / 混合去重 / 未匹配
 - check_permission_boundary 3 用例（spec §2.15）：越界 / 超管豁免 / 错误提示含名
+- check_dept_data_scope 3 用例（spec §2.11）：self / dept_and_sub / 越界
 
 依赖 db_session outer-transaction fixture（不落库）。
 """
@@ -11,12 +12,20 @@
 import pytest
 from sqlalchemy import select as _select
 
-from app.constants import ADMIN_USERNAME, SUPER_ADMIN_ROLE_CODE
+from app.constants import (
+    ADMIN_USERNAME,
+    DATA_SCOPE_ALL,
+    DATA_SCOPE_DEPT,
+    DATA_SCOPE_DEPT_AND_SUB,
+    DATA_SCOPE_SELF,
+    SUPER_ADMIN_ROLE_CODE,
+)
 from app.core.exceptions import BusinessRuleException
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.user.import_validator import (
+    check_dept_data_scope,
     check_permission_boundary,
     resolve_dept,
     resolve_role_input,
@@ -394,3 +403,187 @@ class TestCheckPermissionBoundary:
         assert len(failed) == 1
         assert failed[0].row_num == 71
         assert failed[0].error_code == "AI_IMPORT_ROLE_OUT_OF_SCOPE"
+
+
+def _make_dept_for_scope(
+    dept_id: int,
+    name: str,
+    parent_id: int | None = None,
+    ancestors: str | None = None,
+) -> Dept:
+    """带 ancestors 字段（get_dept_and_sub_ids 用），用于 data_scope 测试。"""
+    return Dept(
+        dept_id=dept_id,
+        parent_id=parent_id,
+        ancestors=ancestors,
+        dept_name=name,
+        order_num=0,
+        status="1",
+    )
+
+
+def _make_scoped_record(
+    row_num: int, user_name: str, dept_input: str
+) -> UserImportRecord:
+    """dept scope 测试专用 record（role_input 留空，与 scope 无关）。"""
+    return UserImportRecord(
+        row_num=row_num,
+        user_name=user_name,
+        dept_input=dept_input,
+        role_input=None,
+    )
+
+
+class TestCheckDeptDataScope:
+    """check_dept_data_scope 3 用例（spec §2.11 / line 2664-2666）。
+
+    测试场景：
+    - DATA_SCOPE_SELF → 空 accessible_dept_ids → 任何 dept 都越界
+    - DATA_SCOPE_DEPT_AND_SUB → 子部门可访问（验证 ancestors like）
+    - DATA_SCOPE_DEPT → 其他部门越界
+    - DATA_SCOPE_ALL / 超管 → 跳过
+    - resolve_dept 失败 → FailedRow 携带对应 error_code
+    """
+
+    async def test_dept_data_scope_self_only_blocks_all(self, db_session):
+        """spec 用例 1：DATA_SCOPE_SELF → accessible_dept_ids=set()，全越界。"""
+        # 准备：user 在 dept 8001，role 是 DATA_SCOPE_SELF
+        dept = _make_dept_for_scope(8001, "QA-Self-Dept")
+        role = _make_role(3001, "QA_R_SELF", "QA-self-role", data_scope=DATA_SCOPE_SELF)
+        db_session.add_all([dept, role])
+        await db_session.flush()
+
+        operator = _make_user(9100, "QA_Self_User", [role])
+        operator.depts = [dept]
+        record = _make_scoped_record(80, "QA_New_Self", "QA-Self-Dept")
+        db_session.add(operator)
+        await db_session.flush()
+
+        failed = await check_dept_data_scope(db_session, [record], operator)
+        assert len(failed) == 1
+        assert failed[0].row_num == 80
+        assert failed[0].field == "dept_input"
+        assert failed[0].error_code == "AI_IMPORT_DEPT_OUT_OF_SCOPE"
+
+    async def test_dept_data_scope_dept_and_sub_allows_sub(self, db_session):
+        """spec 用例 2：DATA_SCOPE_DEPT_AND_SUB → 子部门用户可导入。
+
+        ancestors 字段：get_dept_and_sub_ids 用 func.concat like 匹配。
+        """
+        # 部门树：root(8100) > mid(8101) > leaf(8102)
+        root = _make_dept_for_scope(8100, "QA-Sub-Root", ancestors="0")
+        mid = _make_dept_for_scope(
+            8101, "QA-Sub-Mid", parent_id=8100, ancestors="0,8100"
+        )
+        leaf = _make_dept_for_scope(
+            8102, "QA-Sub-Leaf", parent_id=8101, ancestors="0,8100,8101"
+        )
+        # 干扰：另一棵树
+        other = _make_dept_for_scope(8199, "QA-Sub-Other", ancestors="0")
+        role = _make_role(
+            3002, "QA_R_DS", "QA-ds-role", data_scope=DATA_SCOPE_DEPT_AND_SUB
+        )
+        db_session.add_all([root, mid, leaf, other, role])
+        await db_session.flush()
+
+        operator = _make_user(9101, "QA_DS_Manager", [role])
+        operator.depts = [mid]  # 在 mid 部门 → mid + leaf 可见，root / other 不可见
+        records = [
+            _make_scoped_record(81, "QA_New_Mid", "QA-Sub-Mid"),  # OK
+            _make_scoped_record(82, "QA_New_Leaf", "QA-Sub-Leaf"),  # OK（子部门）
+            _make_scoped_record(83, "QA_New_Other", "QA-Sub-Other"),  # 越界
+        ]
+        db_session.add(operator)
+        await db_session.flush()
+
+        failed = await check_dept_data_scope(db_session, records, operator)
+        assert len(failed) == 1
+        assert failed[0].row_num == 83
+        assert failed[0].error_code == "AI_IMPORT_DEPT_OUT_OF_SCOPE"
+
+    async def test_dept_data_scope_violation_dept_scope(self, db_session):
+        """spec 用例 3：DATA_SCOPE_DEPT 操作人导入其他部门 → 越界。"""
+        own_dept = _make_dept_for_scope(8201, "QA-Own-Dept")
+        other_dept = _make_dept_for_scope(8202, "QA-Other-Dept")
+        role = _make_role(3003, "QA_R_D", "QA-d-role", data_scope=DATA_SCOPE_DEPT)
+        db_session.add_all([own_dept, other_dept, role])
+        await db_session.flush()
+
+        operator = _make_user(9102, "QA_Dept_Mgr", [role])
+        operator.depts = [own_dept]
+        records = [
+            _make_scoped_record(91, "QA_Ok", "QA-Own-Dept"),  # OK
+            _make_scoped_record(92, "QA_Bad", "QA-Other-Dept"),  # 越界
+        ]
+        db_session.add(operator)
+        await db_session.flush()
+
+        failed = await check_dept_data_scope(db_session, records, operator)
+        assert len(failed) == 1
+        assert failed[0].row_num == 92
+        assert failed[0].error_code == "AI_IMPORT_DEPT_OUT_OF_SCOPE"
+
+    async def test_dept_data_scope_super_admin_bypass(self, db_session):
+        """超管豁免（accessible_dept_ids=None）。"""
+        super_role = (
+            await db_session.execute(
+                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+            )
+        ).scalar_one()
+        any_dept = _make_dept_for_scope(8301, "QA-SA-Dept")
+        db_session.add(any_dept)
+        await db_session.flush()
+
+        operator = _make_user(9103, "QA_SA_Op", [super_role])
+        record = _make_scoped_record(100, "QA_New_SA", "QA-SA-Dept")
+        db_session.add(operator)
+        await db_session.flush()
+
+        failed = await check_dept_data_scope(db_session, [record], operator)
+        assert failed == []
+
+    async def test_dept_data_scope_all_scope_bypass(self, db_session):
+        """DATA_SCOPE_ALL 角色（非超管）也豁免。"""
+        all_role = _make_role(
+            3005, "QA_R_ALL", "QA-all-role", data_scope=DATA_SCOPE_ALL
+        )
+        any_dept = _make_dept_for_scope(8401, "QA-All-Dept")
+        db_session.add_all([all_role, any_dept])
+        await db_session.flush()
+
+        operator = _make_user(9104, "QA_All_Op", [all_role])
+        record = _make_scoped_record(110, "QA_New_All", "QA-All-Dept")
+        db_session.add(operator)
+        await db_session.flush()
+
+        failed = await check_dept_data_scope(db_session, [record], operator)
+        assert failed == []
+
+    async def test_dept_data_scope_dept_resolve_failure_keeps_error_code(
+        self, db_session
+    ):
+        """dept_input 反查失败 → FailedRow 携带原 error_code（不混淆为 OUT_OF_SCOPE）。"""
+        dept = _make_dept_for_scope(8501, "QA-Real-Dept")
+        role = _make_role(3006, "QA_R_DF", "QA-df-role", data_scope=DATA_SCOPE_DEPT)
+        db_session.add_all([dept, role])
+        await db_session.flush()
+
+        operator = _make_user(9105, "QA_DF_Op", [role])
+        operator.depts = [dept]
+        # 重名 dept（spec §2.17）
+        db_session.add_all(
+            [
+                _make_dept_for_scope(8502, "QA-Dup"),
+                _make_dept_for_scope(
+                    8503, "QA-Dup", parent_id=9999, ancestors="0,9999"
+                ),
+            ]
+        )
+        record = _make_scoped_record(120, "QA_New_DF", "QA-Dup")
+        db_session.add(operator)
+        await db_session.flush()
+
+        failed = await check_dept_data_scope(db_session, [record], operator)
+        assert len(failed) == 1
+        # 应该是 DUPLICATE 而不是 OUT_OF_SCOPE（resolve 失败保留原 error_code）
+        assert failed[0].error_code == "AI_IMPORT_DEPT_DUPLICATE"

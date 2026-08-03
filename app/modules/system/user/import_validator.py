@@ -12,13 +12,24 @@ Service 层调用：dry_run / execute 阶段对每行 record 反查 dept_id / ro
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants import STATUS_ENABLED
+from app.constants import (
+    DATA_SCOPE_ALL,
+    DATA_SCOPE_CUSTOM,
+    DATA_SCOPE_DEPT,
+    DATA_SCOPE_DEPT_AND_SUB,
+    STATUS_ENABLED,
+)
 from app.core.exceptions import BusinessRuleException
 from app.core.rbac import is_super_admin
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.user.schemas import FailedRow, UserImportRecord
+from app.utils.data_scope import (
+    get_best_scope,
+    get_custom_dept_ids,
+    get_dept_and_sub_ids,
+)
 
 
 async def resolve_dept(db: AsyncSession, dept_input: str) -> int:
@@ -238,3 +249,79 @@ async def _fetch_role_names(db: AsyncSession, role_ids: set[int]) -> list[str]:
         .all()
     )
     return list(rows)
+
+
+async def _compute_accessible_dept_ids(db: AsyncSession, user: User) -> set[int] | None:
+    """计算 user 可访问的 dept_id 集合（spec §2.11 line 283）。
+
+    Returns:
+        None: 全部可见（超管 / DATA_SCOPE_ALL）→ 调用方跳过校验
+        set[int]: 限定部门集合；空 set 表示无可见部门（DATA_SCOPE_SELF
+                  在 dept 维度上等价于 "对任何部门无导入权"，spec line 289）
+    """
+    if is_super_admin(user):
+        return None
+
+    scope = get_best_scope(user)
+    if scope == DATA_SCOPE_ALL:
+        return None
+
+    user_dept_ids = [d.dept_id for d in user.depts]
+
+    if scope == DATA_SCOPE_CUSTOM:
+        return set(await get_custom_dept_ids(db, user))
+    if scope == DATA_SCOPE_DEPT:
+        return set(user_dept_ids)
+    if scope == DATA_SCOPE_DEPT_AND_SUB:
+        return set(await get_dept_and_sub_ids(db, user_dept_ids))
+    # DATA_SCOPE_SELF：用户维度只看自己，dept 维度上无权导入任何部门
+    return set()
+
+
+async def check_dept_data_scope(
+    db: AsyncSession,
+    records: list[UserImportRecord],
+    current_user: User,
+) -> list[FailedRow]:
+    """对每行做 dept DataScope 校验（spec §2.11）。
+
+    防 HR 把用户塞到超管部门绕过权限（权限提升攻击主入口之一）。
+
+    流程：
+    1. 计算 accessible_dept_ids（None=全部可见 → 跳过）
+    2. 每行 resolve_dept → requested_dept_id
+       - resolve 失败 → FailedRow(对应 error_code)
+       - 不在 accessible_dept_ids → FailedRow(AI_IMPORT_DEPT_OUT_OF_SCOPE)
+    """
+    accessible_dept_ids = await _compute_accessible_dept_ids(db, current_user)
+    if accessible_dept_ids is None:
+        return []
+
+    failed_rows: list[FailedRow] = []
+    for record in records:
+        try:
+            requested_dept_id = await resolve_dept(db, record.dept_input)
+        except BusinessRuleException as exc:
+            failed_rows.append(
+                FailedRow(
+                    row_num=record.row_num,
+                    field="dept_input",
+                    value=record.dept_input,
+                    reason=str(exc),
+                    error_code=exc.error_code,
+                )
+            )
+            continue
+
+        if requested_dept_id not in accessible_dept_ids:
+            failed_rows.append(
+                FailedRow(
+                    row_num=record.row_num,
+                    field="dept_input",
+                    value=record.dept_input,
+                    reason="部门不在 data_scope 内（spec §2.11）",
+                    error_code="AI_IMPORT_DEPT_OUT_OF_SCOPE",
+                )
+            )
+
+    return failed_rows

@@ -2939,7 +2939,7 @@ async def user_export(
 - [x] Task 4 ✅ Plan 已完成（2026-08-03）：`resolve_dept` 落 `app/modules/system/user/import_validator.py`，名称 / 路径双模式 + 禁用部门（status='2'）一律视为不存在（安全原则：防用户分到停用部门）。8 用例（spec 5 + 新增 whitespace 段 + 禁用名称/路径各 1）。
 - [x] Task 5 ✅ Plan 已完成（2026-08-03）：`resolve_role_input` 落 `app/modules/system/user/import_validator.py`，code/name 双支持 + set() 去重 + 禁用角色 status='2' 一律视为不存在（与 resolve_dept 一致）。6 用例（spec 4 + 新增禁用 + 部分匹配报错信息）。
 - [x] Task 6 ✅ Plan 已完成（2026-08-03）：`check_permission_boundary` 落 `app/modules/system/user/import_validator.py`，超管 / `user_name='admin'` 双判豁免 + operator_role_ids 集合差集 + 越界 reason 含角色名（非 ID）。7 用例（spec 3 + admin_username_bypass / all_in_scope / role_not_found / partial_failure）。复用 init_db.py seed 的 R_SUPER / admin user 避免 UniqueViolation。
-- [ ] Task 7: `user_service.check_dept_data_scope`（#2.11）+ 单测（3 用例）
+- [x] Task 7 ✅ Plan 已完成（2026-08-03）：`check_dept_data_scope` + `_compute_accessible_dept_ids` 落 `app/modules/system/user/import_validator.py`，DATA_SCOPE_SELF=空 set（任何 dept 都越界）+ DEPT_AND_SUB 通过 ancestors like 拿子树 + 超管 / DATA_SCOPE_ALL 跳过；resolve_dept 失败时 FailedRow 保留原 error_code（不混淆为 OUT_OF_SCOPE）。6 用例（spec 3 + ALL/SA bypass + resolve_failure 携带原 error_code）。system 模块直接 import utils.data_scope 公开函数（get_best_scope/get_custom_dept_ids/get_dept_and_sub_ids），避免 system→ai 反向依赖。
 - [ ] Task 7a **[v2.2 P1 #2.24]**: `_resolve_existing_user`（employee_no 优先 + user_name 兜底）+ `EmployeeNoSyncMode` 应用逻辑 + 单测（4 用例：CREATE_ONLY / UPDATE_PROFILE / FULL_SYNC / NULL 兜底）
 
 #### 主流程方法
