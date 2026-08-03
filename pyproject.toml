@@ -56,6 +56,7 @@ select = [
     "T201", # print statements are not allowed
     "ASYNC", # flake8-async
     "PLC0415", # import should be at the top-level of a file
+    "TID",     # flake8-tidy-imports（spec §3.9 banned-api）
 ]
 ignore = [
     "E501",  # line too long, handled by black
@@ -67,9 +68,19 @@ ignore = [
 fixable = ["ALL"]
 unfixable = []
 
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# spec §3.9 v2.2 P1-4：业务层禁止 import 具体存储实现，强制走 get_file_storage() 工厂
+"app.core.file_storage.LocalFileStorage".msg = "业务层用 get_file_storage() 工厂注入；测试用 reset_file_storage_for_test(MockFileStorage())"
+"app.core.file_storage.MockFileStorage".msg = "测试专用，业务层禁止 import；测试目录豁免 TID251"
+"app.core.file_storage.S3FileStorage".msg = "Phase 3+ 才落地，业务层用 get_file_storage()"
+
 [tool.ruff.lint.per-file-ignores]
 # Scripts are CLI tools that use print() for user-facing output (init_db.py precedent)
 "scripts/*" = ["T201"]
+# 测试可 import 具体存储实现（MockFileStorage 等）
+# file_storage 模块自身实现可引用具体类；Protocol 实现要求签名一致，未用参数是契约
+"tests/*" = ["TID251"]
+"app/core/file_storage.py" = ["TID251", "ARG002"]
 
 [tool.ruff.format]
 quote-style = "double"
