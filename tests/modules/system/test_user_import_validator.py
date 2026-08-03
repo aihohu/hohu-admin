@@ -1,21 +1,27 @@
-"""import_validator 单测（Task 4 + Task 5，spec §2.17 / §2.18）。
+"""import_validator 单测（Task 4 + Task 5 + Task 6）。
 
 覆盖：
-- resolve_dept 5 用例（spec line 2635-2639）：名称 / 路径 / 重名 / 不存在 / 路径段断
-- resolve_role_input 4 用例（spec line 2640-2643）：code / name / 混合去重 / 未匹配
+- resolve_dept 5 用例（spec §2.17）：名称 / 路径 / 重名 / 不存在 / 路径段断
+- resolve_role_input 4 用例（spec §2.18）：code / name / 混合去重 / 未匹配
+- check_permission_boundary 3 用例（spec §2.15）：越界 / 超管豁免 / 错误提示含名
 
 依赖 db_session outer-transaction fixture（不落库）。
 """
 
 import pytest
+from sqlalchemy import select as _select
 
+from app.constants import ADMIN_USERNAME, SUPER_ADMIN_ROLE_CODE
 from app.core.exceptions import BusinessRuleException
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
+from app.modules.system.models.user import User
 from app.modules.system.user.import_validator import (
+    check_permission_boundary,
     resolve_dept,
     resolve_role_input,
 )
+from app.modules.system.user.schemas import UserImportRecord
 
 
 def _make_dept(
@@ -213,3 +219,178 @@ class TestResolveRoleInput:
         assert "QA_Not_Exist" in str(exc.value)
         # 已匹配的 QA_R_OK 不应进入异常信息
         assert "QA_R_OK" not in str(exc.value)
+
+
+def _make_user(
+    user_id: int,
+    user_name: str,
+    roles: list[Role],
+    status: str = "1",
+) -> User:
+    """构造 user 并关联 roles（spec §2.15 测试用）。"""
+    return User(
+        user_id=user_id,
+        user_name=user_name,
+        hashed_password="x",
+        status=status,
+        roles=roles,
+    )
+
+
+def _make_record(
+    row_num: int,
+    user_name: str,
+    role_input: str | None,
+) -> UserImportRecord:
+    return UserImportRecord(
+        row_num=row_num,
+        user_name=user_name,
+        dept_input="QA-Dept-Placeholder",
+        role_input=role_input,
+    )
+
+
+class TestCheckPermissionBoundary:
+    """check_permission_boundary 3 用例（spec §2.15 / line 2661-2663）。
+
+    注意：R_SUPER / admin 是 init_db.py seed 数据。本测试组通过 select
+    已有 R_SUPER 角色 + 关联到测试 user，避免 UniqueViolation。
+    """
+
+    async def test_permission_boundary_role_out_of_scope(self, db_session):
+        """spec 用例 1：HR 拥有 QA_R_HR，给用户分配 QA_R_FORBIDDEN → 越界。"""
+        hr_role = _make_role(2001, "QA_R_HR_OOS", "QA人事-OOS")
+        forbidden_role = _make_role(2002, "QA_R_FORBIDDEN", "QA禁止分配")
+        db_session.add_all([hr_role, forbidden_role])
+        await db_session.flush()
+
+        operator = _make_user(9001, "QA_HR_OOS_User", [hr_role])
+        record = _make_record(10, "QA_Newbie1", "QA_R_FORBIDDEN")
+        db_session.add(operator)
+        await db_session.flush()
+
+        failed = await check_permission_boundary(db_session, [record], operator)
+
+        assert len(failed) == 1
+        assert failed[0].row_num == 10
+        assert failed[0].field == "role_input"
+        assert failed[0].error_code == "AI_IMPORT_ROLE_OUT_OF_SCOPE"
+        assert failed[0].value == "QA_R_FORBIDDEN"
+
+    async def test_permission_boundary_super_admin_bypass(self, db_session):
+        """spec 用例 2：超管（拥有 R_SUPER）导入可分配任意角色（豁免）。"""
+        # 复用 init_db.py seed 的 R_SUPER 角色（避免 UniqueViolation）
+        super_role = (
+            await db_session.execute(
+                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+            )
+        ).scalar_one()
+        any_role = _make_role(2011, "QA_R_ANY", "QA任意角色")
+        db_session.add(any_role)
+        await db_session.flush()
+
+        operator = _make_user(9010, "QA_Super_User", [super_role])
+        record = _make_record(20, "QA_New_SA", "QA_R_ANY")
+        db_session.add(operator)
+        await db_session.flush()
+
+        failed = await check_permission_boundary(db_session, [record], operator)
+        assert failed == []
+
+    async def test_permission_boundary_error_lists_role_names(self, db_session):
+        """spec 用例 3：错误提示含角色名（非 ID）。
+
+        HR 越权分配「QA财务-X」+「QA系统管理员-X」两个角色 → reason 应含两个名字。
+        """
+        hr_role = _make_role(2020, "QA_R_HR_NAMES", "QA人事-N")
+        fin_role = _make_role(2021, "QA_R_FIN_NAMES", "QA财务-X")
+        sys_role = _make_role(2022, "QA_R_SYS_NAMES", "QA系统管理员-X")
+        db_session.add_all([hr_role, fin_role, sys_role])
+        await db_session.flush()
+
+        operator = _make_user(9020, "QA_HR_N", [hr_role])
+        record = _make_record(30, "QA_Newbie2", "QA_R_FIN_NAMES,QA_R_SYS_NAMES")
+        db_session.add(operator)
+        await db_session.flush()
+
+        failed = await check_permission_boundary(db_session, [record], operator)
+        assert len(failed) == 1
+        assert failed[0].error_code == "AI_IMPORT_ROLE_OUT_OF_SCOPE"
+        # reason 含角色名（不是 ID）
+        assert "QA财务-X" in failed[0].reason
+        assert "QA系统管理员-X" in failed[0].reason
+        # 不含 role_id 数字
+        assert "2021" not in failed[0].reason
+        assert "2022" not in failed[0].reason
+
+    async def test_permission_boundary_admin_username_bypass(self, db_session):
+        """user_name='admin' 即使无 R_SUPER 角色也豁免（is_super_admin 双判）。"""
+        # 复用 init_db.py seed 的 admin user（避免 user_name UniqueViolation）
+        admin_user = (
+            await db_session.execute(
+                _select(User).where(User.user_name == ADMIN_USERNAME)
+            )
+        ).scalar_one()
+        any_role = _make_role(2030, "QA_R_ANY_ADM", "QA任意-ADM")
+        db_session.add(any_role)
+        await db_session.flush()
+
+        record = _make_record(40, "QA_New_ADM", "QA_R_ANY_ADM")
+
+        failed = await check_permission_boundary(db_session, [record], admin_user)
+        assert failed == []
+
+    async def test_permission_boundary_all_in_scope_returns_empty(self, db_session):
+        """所有请求角色都在 operator scope 内 → 返回空 list。"""
+        r1 = _make_role(2040, "QA_R_OK1", "QA允许1")
+        r2 = _make_role(2041, "QA_R_OK2", "QA允许2")
+        db_session.add_all([r1, r2])
+        await db_session.flush()
+
+        operator = _make_user(9040, "QA_Manager", [r1, r2])
+        record = _make_record(50, "QA_Newbie3", "QA_R_OK1,QA_R_OK2")
+        db_session.add(operator)
+        await db_session.flush()
+
+        failed = await check_permission_boundary(db_session, [record], operator)
+        assert failed == []
+
+    async def test_permission_boundary_role_not_found_treated_as_failed_row(
+        self, db_session
+    ):
+        """role_input 反查失败 → FailedRow(error_code=AI_IMPORT_ROLE_NOT_FOUND)。"""
+        hr_role = _make_role(2050, "QA_R_HR_NF", "QA人事-NF")
+        db_session.add(hr_role)
+        await db_session.flush()
+
+        operator = _make_user(9050, "QA_HR_NF", [hr_role])
+        record = _make_record(60, "QA_Newbie4", "QA_Not_Exist_Role_NF")
+        db_session.add(operator)
+        await db_session.flush()
+
+        failed = await check_permission_boundary(db_session, [record], operator)
+        assert len(failed) == 1
+        assert failed[0].error_code == "AI_IMPORT_ROLE_NOT_FOUND"
+
+    async def test_permission_boundary_partial_failure_only_others_succeed(
+        self, db_session
+    ):
+        """多行 records：部分越界 / 部分合法 → 只越界行进 failed_rows。"""
+        hr_role = _make_role(2060, "QA_R_HR_PF", "QA人事-PF")
+        dev_role = _make_role(2061, "QA_R_DEV_PF", "QA开发者-PF")
+        db_session.add_all([hr_role, dev_role])
+        await db_session.flush()
+
+        operator = _make_user(9060, "QA_HR_PF", [hr_role])  # 只有 HR
+        records = [
+            _make_record(70, "QA_ok1", "QA_R_HR_PF"),  # OK
+            _make_record(71, "QA_bad1", "QA_R_DEV_PF"),  # 越权
+            _make_record(72, "QA_ok2", "QA_R_HR_PF"),  # OK
+        ]
+        db_session.add(operator)
+        await db_session.flush()
+
+        failed = await check_permission_boundary(db_session, records, operator)
+        assert len(failed) == 1
+        assert failed[0].row_num == 71
+        assert failed[0].error_code == "AI_IMPORT_ROLE_OUT_OF_SCOPE"

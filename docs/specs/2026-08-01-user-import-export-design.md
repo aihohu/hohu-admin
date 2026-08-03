@@ -2938,7 +2938,7 @@ async def user_export(
 - [x] Task 3 ✅ Plan 已完成（2026-08-03）：`OVERWRITE_NEVER` / `OVERWRITE_ALLOWED` / `EXPORT_ALLOWED_FIELDS` 常量落 `app/modules/system/user/constants.py`；`get_default_password(db)` helper 落 `app/modules/system/user/helpers.py`，缺失/禁用抛 `AI_IMPORT_DEFAULT_PASSWORD_NOT_SET`（直接查 sys_config 不走 redis cache，避免测试间污染 + admin 改值即时生效）。11 用例（含常量静态校验防 typo + helper DB 行为）。
 - [x] Task 4 ✅ Plan 已完成（2026-08-03）：`resolve_dept` 落 `app/modules/system/user/import_validator.py`，名称 / 路径双模式 + 禁用部门（status='2'）一律视为不存在（安全原则：防用户分到停用部门）。8 用例（spec 5 + 新增 whitespace 段 + 禁用名称/路径各 1）。
 - [x] Task 5 ✅ Plan 已完成（2026-08-03）：`resolve_role_input` 落 `app/modules/system/user/import_validator.py`，code/name 双支持 + set() 去重 + 禁用角色 status='2' 一律视为不存在（与 resolve_dept 一致）。6 用例（spec 4 + 新增禁用 + 部分匹配报错信息）。
-- [ ] Task 6: `user_service.check_permission_boundary`（#2.15）+ 单测（3 用例）
+- [x] Task 6 ✅ Plan 已完成（2026-08-03）：`check_permission_boundary` 落 `app/modules/system/user/import_validator.py`，超管 / `user_name='admin'` 双判豁免 + operator_role_ids 集合差集 + 越界 reason 含角色名（非 ID）。7 用例（spec 3 + admin_username_bypass / all_in_scope / role_not_found / partial_failure）。复用 init_db.py seed 的 R_SUPER / admin user 避免 UniqueViolation。
 - [ ] Task 7: `user_service.check_dept_data_scope`（#2.11）+ 单测（3 用例）
 - [ ] Task 7a **[v2.2 P1 #2.24]**: `_resolve_existing_user`（employee_no 优先 + user_name 兜底）+ `EmployeeNoSyncMode` 应用逻辑 + 单测（4 用例：CREATE_ONLY / UPDATE_PROFILE / FULL_SYNC / NULL 兜底）
 

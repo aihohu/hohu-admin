@@ -12,9 +12,13 @@ Service 层调用：dry_run / execute 阶段对每行 record 反查 dept_id / ro
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants import STATUS_ENABLED
 from app.core.exceptions import BusinessRuleException
+from app.core.rbac import is_super_admin
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
+from app.modules.system.models.user import User
+from app.modules.system.user.schemas import FailedRow, UserImportRecord
 
 
 async def resolve_dept(db: AsyncSession, dept_input: str) -> int:
@@ -157,3 +161,80 @@ async def resolve_role_input(db: AsyncSession, role_input_str: str) -> list[int]
         )
 
     return list(set(role_ids))
+
+
+async def check_permission_boundary(
+    db: AsyncSession,
+    records: list[UserImportRecord],
+    current_user: User,
+) -> list[FailedRow]:
+    """对每行做 Permission Boundary 校验（spec §2.15）。
+
+    防 HR 给导入用户分配自己不拥有的角色（权限提升攻击主入口）。
+
+    流程（spec §2.15 line 382-387）：
+    1. 超管（user_name='admin' 或拥有启用 R_SUPER）豁免 → 返回 []
+    2. operator_role_ids = current_user 启用状态的 role_id 集合
+    3. 每行 resolve_role_input → requested_role_ids
+       - role_input 反查失败 → FailedRow(AI_IMPORT_ROLE_NOT_FOUND)
+       - 越界 (requested - operator 非空) → FailedRow(AI_IMPORT_ROLE_OUT_OF_SCOPE)
+    4. 越界 reason 含角色名（非 ID），便于运营定位
+
+    Args:
+        db: 异步 session
+        records: Excel 解析后的所有记录
+        current_user: 当前操作人（含 roles 关系）
+
+    Returns:
+        所有失败行的 FailedRow 列表；合法行不进列表，由调用方落库。
+    """
+    if is_super_admin(current_user):
+        return []
+
+    operator_role_ids = {
+        r.role_id for r in current_user.roles if r.status == STATUS_ENABLED
+    }
+
+    failed_rows: list[FailedRow] = []
+    for record in records:
+        role_input = record.role_input or ""
+        try:
+            requested_role_ids = await resolve_role_input(db, role_input)
+        except BusinessRuleException as exc:
+            failed_rows.append(
+                FailedRow(
+                    row_num=record.row_num,
+                    field="role_input",
+                    value=role_input,
+                    reason=str(exc),
+                    error_code="AI_IMPORT_ROLE_NOT_FOUND",
+                )
+            )
+            continue
+
+        out_of_scope_ids = set(requested_role_ids) - operator_role_ids
+        if out_of_scope_ids:
+            out_of_scope_names = await _fetch_role_names(db, out_of_scope_ids)
+            failed_rows.append(
+                FailedRow(
+                    row_num=record.row_num,
+                    field="role_input",
+                    value=role_input,
+                    reason=f"无权分配角色 [{','.join(out_of_scope_names)}]",
+                    error_code="AI_IMPORT_ROLE_OUT_OF_SCOPE",
+                )
+            )
+
+    return failed_rows
+
+
+async def _fetch_role_names(db: AsyncSession, role_ids: set[int]) -> list[str]:
+    """role_id → role_name 映射，错误信息用人读名称（spec line 391）。"""
+    if not role_ids:
+        return []
+    rows = (
+        (await db.execute(select(Role.role_name).where(Role.role_id.in_(role_ids))))
+        .scalars()
+        .all()
+    )
+    return list(rows)
