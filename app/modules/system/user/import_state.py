@@ -10,6 +10,7 @@ Task 2 ORM 落地后仍可用本 Table 路径（CAS rowcount 精确性是核心�
 from typing import Any
 
 from sqlalchemy import Column, MetaData, String, Table, update
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessRuleException
@@ -23,7 +24,22 @@ _batch_table = Table(
     "sys_user_import_batch",
     _batch_metadata,
     Column("batch_id", String(64), primary_key=True),
-    Column("status", String(32), nullable=False),
+    Column(
+        "status",
+        postgresql.ENUM(
+            "CREATED",
+            "PREVIEW_DONE",
+            "RUNNING",
+            "SUCCESS",
+            "PARTIAL_SUCCESS",
+            "FAILED",
+            "EXPIRED",
+            "CANCELLED",
+            name="import_batch_status",
+            create_type=False,
+        ),
+        nullable=False,
+    ),
     extend_existing=True,
 )
 

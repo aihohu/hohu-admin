@@ -81,6 +81,8 @@ unfixable = []
 # file_storage 模块自身实现可引用具体类；Protocol 实现要求签名一致，未用参数是契约
 "tests/*" = ["TID251"]
 "app/core/file_storage.py" = ["TID251", "ARG002"]
+# alembic autogenerate 模板使用 Union/Sequence 是 alembic 惯例（与现有 migration 一致）
+"alembic/versions/*.py" = ["UP007", "UP035", "I001"]
 
 [tool.ruff.format]
 quote-style = "double"
