@@ -47,6 +47,7 @@ from app.modules.system.user.import_service import (
     dry_run_import_users,
     get_batch_detail,
     list_batch_logs,
+    list_batches,
 )
 from app.modules.system.user.schemas import (
     ReasonSchema,
@@ -56,6 +57,7 @@ from app.modules.system.user.schemas import (
     UserExportTaskResponse,
     UserImportBatchCancelResponse,
     UserImportBatchLogItem,
+    UserImportBatchQuery,
     UserImportBatchResponse,
 )
 from app.modules.system.user.template_service import generate_import_template
@@ -694,6 +696,49 @@ def _build_batch_response(batch, operator_name: str | None) -> dict:
         expires_at=_compute_batch_expires_at(batch),
     )
     return payload.model_dump(mode="json", by_alias=True)
+
+
+@router.get(
+    "/import",
+    response_model=ResponseModel[PageResult[UserImportBatchResponse]],
+    summary="分页查询导入批次列表（v2.2 P2）",
+    description=(
+        "spec §5.4 v2.2 P2 line 2272-2278：admin 查「我/团队导入过的批次列表」。"
+        "支持 operator_id / status / created_at 时间窗过滤。"
+        "权限：system:user:list（spec §5.4 line 2234，同 GET /import/{batch_id}）。"
+    ),
+    responses={
+        200: {"description": "分页批次列表"},
+        401: {"description": "未登录或令牌已过期"},
+        403: {"description": "权限不足"},
+        422: {"description": "非法 status 值"},
+    },
+    dependencies=[Depends(require_permissions("system:user:list"))],
+)
+async def list_import_batches(
+    query: UserImportBatchQuery = Depends(),
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    """spec §5.4 line 2272-2278：分页查询导入批次列表。
+
+    流程：
+    1. ``list_batches(db, query)`` outerjoin sys_user + 按 created_at DESC 排序
+    2. 每个 batch 复用 ``_build_batch_response``（剥离敏感字段 + 动态算 expires_at）
+    → PageResult[UserImportBatchResponse]
+    """
+    rows, total = await list_batches(db, query)
+    records = [
+        _build_batch_response(batch, operator_name) for batch, operator_name in rows
+    ]
+    return ResponseModel.success(
+        data=PageResult(
+            records=records,
+            total=total,
+            current=query.current,
+            size=query.size,
+        )
+    )
 
 
 @router.get(

@@ -71,6 +71,7 @@ from app.modules.system.user.schemas import (
     FailedRow,
     ImportDryRunResult,
     ImportResult,
+    UserImportBatchQuery,
     UserImportRecord,
 )
 
@@ -1018,6 +1019,69 @@ async def list_batch_logs(
     return rows, total
 
 
+async def list_batches(
+    db: AsyncSession,
+    query: UserImportBatchQuery,
+) -> tuple[list[tuple[UserImportBatch, str | None]], int]:
+    """分页查询导入批次列表（spec §5.4 v2.2 P2 line 2272-2278）。
+
+    支持 ``operator_id`` / ``status`` / ``created_at`` 时间窗过滤；按
+    ``(created_at DESC, batch_id DESC)`` 排序保证分页稳定（同秒批次按 batch_id
+    字典序降序兜底，避免 tie-flicker）。
+
+    outerjoin sys_user 拿 operator_name（同 ``get_batch_detail`` / ``list_batch_logs``）：
+    user 删除时返 ``None``，batch 行保留（审计完整性 > 引用完整性）。
+
+    Args:
+        db: 异步数据库会话
+        query: 分页 + 过滤参数（current/size/operator_id/status/start_time/end_time）
+
+    Returns:
+        ``(rows, total)``：
+        - ``rows`` 是 ``[(batch, operator_name), ...]`` 元组列表
+        - ``total`` 是过滤后总条数（前端分页器用）
+
+    Raises:
+        BusinessRuleException: ``AI_IMPORT_INVALID_STATUS`` — status 非合法枚举值
+    """
+    from app.modules.system.models.user import User  # noqa: PLC0415
+
+    filters: list = []
+    if query.operator_id is not None:
+        filters.append(UserImportBatch.operator_id == query.operator_id)
+    if query.status:
+        try:
+            status_enum = ImportBatchStatus(query.status)
+        except ValueError as e:
+            raise BusinessRuleException(
+                f"非法 status 值：{query.status}",
+                error_code="AI_IMPORT_INVALID_STATUS",
+            ) from e
+        filters.append(UserImportBatch.status == status_enum)
+    if query.start_time is not None:
+        filters.append(UserImportBatch.created_at >= query.start_time)
+    if query.end_time is not None:
+        filters.append(UserImportBatch.created_at <= query.end_time)
+
+    count_stmt = select(func.count()).select_from(UserImportBatch).where(*filters)
+    total = (await db.execute(count_stmt)).scalar() or 0
+
+    stmt = (
+        select(UserImportBatch, User.user_name)
+        .outerjoin(User, User.user_id == UserImportBatch.operator_id)
+        .where(*filters)
+        .order_by(
+            UserImportBatch.created_at.desc(),
+            UserImportBatch.batch_id.desc(),
+        )
+        .offset((query.current - 1) * query.size)
+        .limit(query.size)
+    )
+    rows = (await db.execute(stmt)).all()
+
+    return rows, total
+
+
 #: spec §2.29 line 1335：协作式 cancel Redis 标志前缀（chunk loop 检查）
 _CANCEL_REDIS_PREFIX = "user_import:cancel:"
 
@@ -1159,5 +1223,6 @@ __all__ = [
     "dry_run_import_users",
     "get_batch_by_preview_token",
     "get_batch_detail",
+    "list_batches",
     "list_batch_logs",
 ]

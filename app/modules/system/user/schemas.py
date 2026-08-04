@@ -21,6 +21,8 @@ from pydantic import (
 )
 from pydantic.alias_generators import to_camel
 
+from app.schemas.types import LocalNaiveDatetime
+
 
 class _CamelBase(BaseModel):
     """项目内 Pydantic v2 基类（snake_case ↔ camelCase 自动转换）。"""
@@ -212,6 +214,33 @@ class UserExportTaskQuery(_CamelBase):
     )
 
 
+class UserImportBatchQuery(_CamelBase):
+    """GET /system/user/import 列表查询参数（spec §5.4 v2.2 P2 line 2272-2278）。
+
+    支持 current / size 分页 + operator_id / status / created_at 时间窗过滤。
+    status 用 str（与 UserExportTaskQuery 对称），service 层抛
+    ``BusinessRuleException(AI_IMPORT_INVALID_STATUS)``。
+    created_at 用 ``LocalNaiveDatetime``（CLAUDE.md pitfall 12：DB 列 naive，
+    前端 NDatePicker ms timestamp 必须本地时区化）。
+    """
+
+    current: int = Field(1, ge=1, description="页码（1-based）")
+    size: int = Field(10, ge=1, le=100, description="每页数量（1-100）")
+    operator_id: int | None = Field(None, description="按操作人 user_id 过滤")
+    status: str | None = Field(
+        None,
+        description="按状态过滤：CREATED/PREVIEW_DONE/RUNNING/SUCCESS/PARTIAL_SUCCESS/FAILED/EXPIRED/CANCELLED",
+    )
+    start_time: LocalNaiveDatetime | None = Field(
+        None,
+        description="created_at（起），接受 ms timestamp / ISO / datetime",
+    )
+    end_time: LocalNaiveDatetime | None = Field(
+        None,
+        description="created_at（止），接受 ms timestamp / ISO / datetime",
+    )
+
+
 class UserImportBatchResponse(_CamelBase):
     """导入批次 API 响应（spec §3.6 v2.2 P1-2 + §5.4 v2.2 P2：唯一 aggregate root）。
 
@@ -356,6 +385,7 @@ __all__ = [
     "UserExportTaskResponse",
     "UserImportBatchCancelResponse",
     "UserImportBatchLogItem",
+    "UserImportBatchQuery",
     "UserImportBatchResponse",
     "UserImportRecord",
 ]
