@@ -93,4 +93,4 @@ jobs:
           uv run python scripts/seed_ai_agents.py
 
       - name: Run Tests
-        run: uv run pytest
+        run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=70

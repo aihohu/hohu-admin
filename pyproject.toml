@@ -107,6 +107,31 @@ filterwarnings = [
 ]
 addopts = "-v -s --strict-markers -p no:unraisableexception"
 
+# Coverage gate（spec §10 Task 20 + CLAUDE.md §8「覆盖率门禁 ≥ 70%」）。
+# 默认 pytest 不开 coverage（dev 体验流畅）；CI / 收尾时显式加：
+#   pytest --cov=app --cov-report=term-missing --cov-fail-under=70
+[tool.coverage.run]
+source = ["app"]
+branch = true
+omit = [
+    "alembic/*",
+    "app/main.py",
+    "scripts/*",
+    "tests/*",
+    "**/__init__.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "@overload",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
 
@@ -127,4 +152,5 @@ major_version_zero = true
 dev = [
     "pre-commit>=4.6.0",
     "fakeredis>=2.36.0",
+    "pytest-cov>=7.1.0",
 ]
