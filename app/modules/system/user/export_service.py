@@ -23,6 +23,7 @@ from openpyxl import Workbook
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.base_response import PageResult
 from app.core.exceptions import BusinessRuleException, UnprocessableEntityException
 from app.core.file_storage import FileStorage, get_file_storage
 from app.core.id_generator import next_id
@@ -35,8 +36,9 @@ from app.modules.system.user.constants import (
 )
 from app.modules.system.user.import_validator import _compute_accessible_dept_ids
 from app.modules.system.user.models import UserExportTask
-from app.modules.system.user.schemas import UserExportFilter
+from app.modules.system.user.schemas import UserExportFilter, UserExportTaskQuery
 from app.utils.data_scope import get_user_data_scope_filters
+from app.utils.pagination import paginate
 
 #: Excel 列顺序（spec §2.9 line 266 EXPORT_ALLOWED_FIELDS 顺序）。
 #: 字段名 ↔ 中文表头，第 1 项是 ORM 属性 / 派生属性名。
@@ -280,4 +282,60 @@ async def export_users_to_excel(
         raise
 
 
-__all__ = ["export_users_to_excel"]
+__all__ = ["export_users_to_excel", "get_export_task", "list_export_tasks"]
+
+
+async def get_export_task(
+    db: AsyncSession,
+    export_id: str,
+) -> UserExportTask | None:
+    """按 export_id 查询导出任务详情（spec §2.31 v2.2 P1-5 line 1589-1591）。
+
+    Args:
+        db: 异步数据库会话
+        export_id: 任务 ID（Snowflake 字符串）
+
+    Returns:
+        UserExportTask | None：找不到返回 None，由 API 层抛
+        ``NotFoundException(error_code="AI_EXPORT_TASK_NOT_FOUND")``。
+    """
+    return await db.get(UserExportTask, export_id)
+
+
+async def list_export_tasks(
+    db: AsyncSession,
+    query: UserExportTaskQuery,
+) -> PageResult:
+    """分页查询导出任务列表（spec §2.31 v2.2 P1-5 line 1593-1595）。
+
+    支持按 operator_id / status 过滤；默认按 created_at desc（最新优先）。
+    返回 ``PageResult``，records 是 UserExportTask ORM 实例（API 层负责转
+    UserExportTaskResponse）。
+
+    Args:
+        db: 异步数据库会话
+        query: 分页 + 过滤参数（current/size/operator_id/status）
+
+    Raises:
+        BusinessRuleException: ``AI_EXPORT_INVALID_STATUS`` — status 非合法枚举值
+    """
+    filters: list = []
+    if query.operator_id is not None:
+        filters.append(UserExportTask.operator_id == query.operator_id)
+    if query.status:
+        try:
+            status_enum = ExportTaskStatus(query.status)
+        except ValueError as e:
+            raise BusinessRuleException(
+                f"非法 status 值：{query.status}",
+                error_code="AI_EXPORT_INVALID_STATUS",
+            ) from e
+        filters.append(UserExportTask.status == status_enum)
+
+    return await paginate(
+        db,
+        UserExportTask,
+        query,
+        filters=filters or None,
+        order_by=UserExportTask.created_at.desc(),
+    )

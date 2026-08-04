@@ -1,14 +1,19 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import IS_PRIMARY_YES
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
-from app.core.exceptions import BusinessRuleException, UnprocessableEntityException
+from app.core.exceptions import (
+    BusinessRuleException,
+    NotFoundException,
+    UnprocessableEntityException,
+)
 from app.db.base import user_depts
 from app.db.session import get_db
 from app.modules.system.models.user import User
@@ -27,6 +32,11 @@ from app.modules.system.service.config_service import config_service
 from app.modules.system.service.dept_service import dept_service
 from app.modules.system.service.user_service import user_service
 from app.modules.system.user.constants import EmployeeNoSyncMode
+from app.modules.system.user.export_service import (
+    export_users_to_excel,
+    get_export_task,
+    list_export_tasks,
+)
 from app.modules.system.user.import_parser import (
     ImportErrorCollection,
     parse_import_excel,
@@ -34,6 +44,12 @@ from app.modules.system.user.import_parser import (
 from app.modules.system.user.import_service import (
     batch_create_users_from_records,
     dry_run_import_users,
+)
+from app.modules.system.user.schemas import (
+    UserExportFilter,
+    UserExportRequest,
+    UserExportTaskQuery,
+    UserExportTaskResponse,
 )
 
 router = APIRouter()
@@ -561,3 +577,133 @@ async def import_users(
     await db.commit()
 
     return ResponseModel.success(data=result.model_dump(mode="json", by_alias=True))
+
+
+# ========== 用户导出（spec §5.2 + §2.31 P1-5，Task 13）==========
+
+#: spec §5.2 line 2200：xlsx MIME（与 export_service._EXPORT_MIME_TYPE 对齐）
+_EXPORT_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+@router.post(
+    "/export",
+    summary="导出用户列表到 Excel（同步路径 ≤ 5000 行）",
+    description=(
+        "spec §5.2 + §2.31 P1-5：POST body 含 filter + reason（必填），"
+        "返回 StreamingResponse xlsx + Content-Disposition。"
+        "行数 > USER_EXPORT_ASYNC_THRESHOLD（5000）抛 422 AI_EXPORT_ASYNC_REQUIRED。"
+    ),
+    responses={
+        200: {"description": "xlsx 文件流"},
+        401: {"description": "未登录或令牌已过期"},
+        403: {"description": "权限不足"},
+        422: {"description": "reason 校验失败 / 行数 > 5000（异步阈值）"},
+    },
+    dependencies=[Depends(require_permissions("system:user:export"))],
+)
+async def export_users(
+    body: UserExportRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """spec §5.2 + §2.31 P1-5：同步导出。
+
+    流程：
+    1. UserExportRequest 校验（filter + reason，Pydantic 已拦空白 reason）
+    2. export_users_to_excel 内部建 task → 查询 → 构造 Excel
+       → service 层行数超阈值抛 AI_EXPORT_ASYNC_REQUIRED
+    3. ``await db.commit()``（spec §3.6：API 层负责 commit）
+    4. StreamingResponse + Content-Disposition: attachment; filename=users_YYYYMMDD.xlsx
+    """
+    filter_ = UserExportFilter(
+        user_name=body.user_name,
+        nickname=body.nickname,
+        user_email=body.user_email,
+        user_phone=body.user_phone,
+        dept_id=body.dept_id,
+        status=body.status,
+    )
+    xlsx_bytes, _row_count, _export_id = await export_users_to_excel(
+        db,
+        filter_,
+        current_user,
+        reason=body.reason,
+    )
+    await db.commit()
+
+    today = datetime.now().strftime("%Y%m%d")
+    filename = f"users_{today}.xlsx"
+    # 用 Response（非 StreamingResponse）：bytes 已全在内存，无流式收益；
+    # BaseHTTPMiddleware（audit_middleware）与 StreamingResponse 冲突
+    # （starlette 已知问题：BackgroundTask + receive hook 时序错乱），
+    # Response 等价但兼容。spec §5.2 line 2200 「StreamingResponse」是契约
+    # 描述（xlsx + Content-Disposition），实现细节用 Response 满足同样契约。
+    return Response(
+        content=xlsx_bytes,
+        media_type=_EXPORT_MIME_TYPE,
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@router.get(
+    "/export",
+    response_model=ResponseModel[PageResult[UserExportTaskResponse]],
+    summary="分页查询导出任务列表",
+    description="spec §2.31 v2.2 P1-5 line 1593-1595：按 operator_id / status 过滤。",
+    responses={
+        200: {"description": "分页列表"},
+        401: {"description": "未登录或令牌已过期"},
+        403: {"description": "权限不足"},
+    },
+    dependencies=[Depends(require_permissions("system:user:list"))],
+)
+async def list_export_tasks_endpoint(
+    query: UserExportTaskQuery = Depends(),
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    """spec §2.31 line 1593-1595：admin 查「我/团队导出过的列表」。
+
+    返回 PageResult，records 是 UserExportTaskResponse（operator_id 字符串化）。
+    """
+    page = await list_export_tasks(db, query)
+    records = [UserExportTaskResponse.model_validate(t) for t in page.records]
+    return ResponseModel.success(
+        data=PageResult(
+            records=records,
+            total=page.total,
+            current=page.current,
+            size=page.size,
+        )
+    )
+
+
+@router.get(
+    "/export/{export_id}",
+    response_model=ResponseModel[UserExportTaskResponse],
+    summary="按 export_id 查询导出任务详情",
+    description="spec §2.31 v2.2 P1-5 line 1589-1591：审计反查用。",
+    responses={
+        200: {"description": "任务详情"},
+        401: {"description": "未登录或令牌已过期"},
+        403: {"description": "权限不足"},
+        404: {"description": "export_id 不存在"},
+    },
+    dependencies=[Depends(require_permissions("system:user:list"))],
+)
+async def get_export_task_detail(
+    export_id: str,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    """spec §2.31 line 1589-1591：导出任务详情查询。
+
+    找不到抛 NotFoundException(AI_EXPORT_TASK_NOT_FOUND)。
+    """
+    task = await get_export_task(db, export_id)
+    if task is None:
+        raise NotFoundException(
+            "用户导出任务",
+            error_code="AI_EXPORT_TASK_NOT_FOUND",
+        )
+    return ResponseModel.success(data=UserExportTaskResponse.model_validate(task))

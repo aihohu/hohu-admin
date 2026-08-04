@@ -171,6 +171,47 @@ class UserExportFilter(_CamelBase):
     status: Literal["0", "1"] | None = None
 
 
+class UserExportRequest(UserExportFilter):
+    """POST /system/user/export body（spec §5.2 + §2.30 v2.2 P1-3）。
+
+    继承 UserExportFilter 全部 filter 字段 + 加必填 reason（1-256 字符）。
+    reason 校验与 ReasonSchema 对称：strip 后非空。
+    """
+
+    reason: str = Field(
+        ...,
+        min_length=1,
+        max_length=256,
+        description="业务理由（spec §2.30 v2.2 P1-3，1-256 字符）",
+    )
+
+    @field_validator("reason")
+    @classmethod
+    def _strip_reason(cls, v: str) -> str:
+        """与 ReasonSchema._strip_and_require_non_empty 对称：strip 后非空。"""
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("reason 不能为空或全空白")
+        return stripped
+
+
+class UserExportTaskQuery(_CamelBase):
+    """GET /system/user/export 列表查询参数（spec §2.31 P1-5 line 1593-1595）。
+
+    支持 current / size 分页 + operator_id / status 过滤。
+    status 用 str（不是 Literal[ExportTaskStatus]）以便 service 层
+    统一抛 BusinessRuleException(AI_EXPORT_INVALID_STATUS)。
+    """
+
+    current: int = Field(1, ge=1, description="页码（1-based）")
+    size: int = Field(10, ge=1, le=100, description="每页数量（1-100）")
+    operator_id: int | None = Field(None, description="按操作人 user_id 过滤")
+    status: str | None = Field(
+        None,
+        description="按状态过滤：CREATED/RUNNING/SUCCESS/FAILED/EXPIRED",
+    )
+
+
 class UserImportBatchResponse(_CamelBase):
     """导入批次 API 响应（spec §3.6 v2.2 P1-2：唯一 aggregate root）。
 
@@ -236,6 +277,8 @@ __all__ = [
     "ImportResult",
     "ReasonSchema",
     "UserExportFilter",
+    "UserExportRequest",
+    "UserExportTaskQuery",
     "UserExportTaskResponse",
     "UserImportBatchResponse",
     "UserImportRecord",
