@@ -43,15 +43,18 @@ from app.modules.system.user.import_parser import (
 )
 from app.modules.system.user.import_service import (
     batch_create_users_from_records,
+    cancel_batch,
     dry_run_import_users,
     get_batch_detail,
     list_batch_logs,
 )
 from app.modules.system.user.schemas import (
+    ReasonSchema,
     UserExportFilter,
     UserExportRequest,
     UserExportTaskQuery,
     UserExportTaskResponse,
+    UserImportBatchCancelResponse,
     UserImportBatchLogItem,
     UserImportBatchResponse,
 )
@@ -793,6 +796,54 @@ async def get_import_batch_logs(
     ]
     return ResponseModel.success(
         data=PageResult(records=records, total=total, current=current, size=size)
+    )
+
+
+@router.post(
+    "/import/{batch_id}/cancel",
+    response_model=ResponseModel[UserImportBatchCancelResponse],
+    summary="取消导入批次（v2.2 P2）",
+    description=(
+        "spec §5.6 v2.2 P2 line 2290-2299 + §2.29：取消导入批次。两种场景："
+        "PREVIEW_DONE 直接 CAS 转 CANCELLED + 清理 preview 文件；"
+        "RUNNING 设置 Redis cancel 标志，chunk loop 下一个 chunk 边界跳出 → "
+        "PARTIAL_SUCCESS（协作式 cancel）。"
+        "权限：system:user:import（必须是 batch operator 本人或超管）。"
+    ),
+    responses={
+        200: {"description": "取消成功（已转 CANCELLED 或已设置 cancel 标志）"},
+        401: {"description": "未登录或令牌已过期"},
+        403: {"description": "非 operator 本人且非超管"},
+        404: {"description": "batch_id 不存在"},
+        422: {
+            "description": "reason 校验失败 / 状态不可取消（AI_IMPORT_BATCH_NOT_CANCELLABLE）"
+        },
+    },
+    dependencies=[Depends(require_permissions("system:user:import"))],
+)
+async def cancel_import_batch(
+    batch_id: str,
+    body: ReasonSchema,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """spec §5.6 line 2290-2299：取消导入批次。
+
+    流程：
+    1. ``cancel_batch`` 处理两种场景 + 权限校验 + 状态校验
+    2. API 层 ``db.commit``（CLAUDE.md：service 不 commit）
+    3. 构造响应：``status`` 反映当前 batch.status（CANCELLED 或 RUNNING）
+
+    reason：spec §2.30 v2.2 P1-3 必填，1-256 字符（ReasonSchema 入口校验）。
+    """
+    batch = await cancel_batch(db, batch_id, current_user, reason=body.reason)
+    await db.commit()
+    return ResponseModel.success(
+        data=UserImportBatchCancelResponse(
+            batch_id=batch.batch_id,
+            status=batch.status.value,
+            cancelled_at=batch.finished_at or datetime.now(),
+        )
     )
 
 

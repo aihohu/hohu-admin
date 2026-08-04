@@ -31,8 +31,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import redis as redis_module
 from app.core.exceptions import (
+    AuthorizationException,
     BusinessException,
     BusinessRuleException,
+    NotFoundException,
     UnprocessableEntityException,
 )
 from app.core.file_storage import FileStorage, get_file_storage
@@ -1016,8 +1018,144 @@ async def list_batch_logs(
     return rows, total
 
 
+#: spec §2.29 line 1335：协作式 cancel Redis 标志前缀（chunk loop 检查）
+_CANCEL_REDIS_PREFIX = "user_import:cancel:"
+
+#: spec §2.29 line 1335：cancel 标志 TTL 1h（足够 chunk loop 检测）
+_CANCEL_REDIS_TTL_SECONDS = 3600
+
+
+async def cancel_batch(
+    db: AsyncSession,
+    batch_id: str,
+    operator: User,
+    reason: str,
+    *,
+    file_storage: FileStorage | None = None,
+) -> UserImportBatch:
+    """取消导入批次（spec §5.6 + §2.29 v2.2 P2）。
+
+    两种取消场景：
+
+    - **场景 1 PREVIEW_DONE → CANCELLED**（spec §2.26 line 1117 + §2.29 场景 1）：
+      CAS 直接转 CANCELLED + 写 batch_log（event=CANCELLED）+ 删除 preview 文件
+      + 删除 Redis preview cache。dry_run 完成态的批次可以无损取消（数据未落库）。
+    - **场景 2 RUNNING 协作式 cancel**（spec §2.29 场景 2 line 1296-1300）：
+      设置 Redis 标志 ``user_import:cancel:{batch_id}``（TTL 1h），立即返回。
+      chunk loop 在下一个 chunk 边界检测到标志 → break → 状态转 PARTIAL_SUCCESS
+      （已 commit 的 chunk 保留，无法回滚）。
+
+    Args:
+        db: 异步数据库会话（API 层 commit）
+        batch_id: 批次 ID
+        operator: 操作人（必须是 batch.operator_id 本人或超管）
+        reason: 业务理由（API 层 ReasonSchema 已校验，service 层 defense-in-depth）
+        file_storage: 可选注入（测试用）
+
+    Returns:
+        更新后的 ``UserImportBatch``：
+
+        - 场景 1：``status=CANCELLED`` + ``finished_at`` 已设置
+        - 场景 2：``status=RUNNING``（未变），调用方需提示前端「已请求取消，
+          正在等待当前 chunk 完成」
+
+    Raises:
+        NotFoundException: batch_id 不存在（``AI_IMPORT_BATCH_NOT_FOUND``）
+        AuthorizationException: 非 operator 本人且非超管（spec §2.29 line 1314-1316）
+        UnprocessableEntityException: 状态不可取消（CREATED / SUCCESS /
+            PARTIAL_SUCCESS / FAILED / EXPIRED / CANCELLED，
+            ``AI_IMPORT_BATCH_NOT_CANCELLABLE``）
+    """
+    reason = _validate_reason(reason)
+
+    batch = await db.get(UserImportBatch, batch_id)
+    if batch is None:
+        raise NotFoundException(
+            "用户导入批次",
+            error_code="AI_IMPORT_BATCH_NOT_FOUND",
+        )
+
+    # 权限：operator 本人或超管（spec §2.29 line 1314-1316）
+    from app.core.rbac import is_super_admin  # noqa: PLC0415
+
+    if batch.operator_id != operator.user_id and not is_super_admin(operator):
+        raise AuthorizationException("无权取消此批次")
+
+    now = datetime.now()
+
+    if batch.status == ImportBatchStatus.PREVIEW_DONE:
+        # 场景 1：CREATED/PREVIEW_DONE → CANCELLED（v2.2 P1-2 改为仅 PREVIEW_DONE，
+        # spec §2.26 line 1117）。CAS 防并发 execute 与 cancel 同时跑。
+        ok = await _transition_batch_status(
+            db,
+            batch_id,
+            ImportBatchStatus.PREVIEW_DONE,
+            ImportBatchStatus.CANCELLED,
+            finished_at=now,
+        )
+        if not ok:
+            # CAS 失败：并发 execute 已把 status 改成 RUNNING，或并发 cancel 已抢
+            raise UnprocessableEntityException(
+                "批次状态已变化，无法取消",
+                error_code="AI_IMPORT_BATCH_NOT_CANCELLABLE",
+            )
+
+        # 同步 ORM 实例状态（_transition_batch_status 绕过 synchronize_session）
+        batch.status = ImportBatchStatus.CANCELLED
+        batch.finished_at = now
+        await db.flush()
+
+        # 写 batch_log（spec §2.28 + §2.29：CANCELLED 事件审计链路）
+        await _write_batch_log(
+            db,
+            batch,
+            operator,
+            event="CANCELLED",
+            from_status=ImportBatchStatus.PREVIEW_DONE,
+            to_status=ImportBatchStatus.CANCELLED,
+            detail={
+                "reason": reason,
+                "cancelled_by": operator.user_id,
+                "scenario": "preview_done_direct_cancel",
+            },
+        )
+
+        # 清理 preview 文件 + Redis cache（spec §2.29 line 1328-1329）
+        storage = file_storage or get_file_storage()
+        try:
+            await storage.delete(batch.file_storage_key)
+        except FileNotFoundError:
+            # 文件已被 cleanup cron 清理 / never existed — 不影响 cancel 主流程
+            pass
+        await redis_module.redis_client.delete(
+            f"{_PREVIEW_REDIS_PREFIX}{batch.preview_token}"
+        )
+
+        return batch
+
+    if batch.status == ImportBatchStatus.RUNNING:
+        # 场景 2：协作式 cancel — 设置 Redis 标志，chunk loop 检测后 break
+        # spec §2.29 line 1334-1339
+        await redis_module.redis_client.setex(
+            f"{_CANCEL_REDIS_PREFIX}{batch_id}",
+            _CANCEL_REDIS_TTL_SECONDS,
+            "1",
+        )
+        # batch.status 保持 RUNNING，actual transition 在 chunk loop 内发生
+        # API 层根据返回的 batch.status（RUNNING）告知前端「已请求取消」
+        return batch
+
+    # CREATED / SUCCESS / PARTIAL_SUCCESS / FAILED / EXPIRED / CANCELLED → 拒绝
+    # spec §2.29 line 1342-1343 + §2.26 line 1117（CREATED 不在 cancel-from-state）
+    raise UnprocessableEntityException(
+        "批次状态不可取消",
+        error_code="AI_IMPORT_BATCH_NOT_CANCELLABLE",
+    )
+
+
 __all__ = [
     "batch_create_users_from_records",
+    "cancel_batch",
     "dry_run_import_users",
     "get_batch_by_preview_token",
     "get_batch_detail",

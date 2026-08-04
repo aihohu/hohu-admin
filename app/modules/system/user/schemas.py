@@ -301,6 +301,27 @@ class UserImportBatchLogItem(_CamelBase):
         return str(v)
 
 
+class UserImportBatchCancelResponse(_CamelBase):
+    """POST /import/{batch_id}/cancel 响应（spec §5.6 v2.2 P2 #2.29 line 2298）。
+
+    spec §5.6 line 2298 契约：``{batchId, status, cancelledAt}``。
+
+    ``status`` 反映 cancel 操作完成后的当前 batch.status：
+
+    - **PREVIEW_DONE → CANCELLED**：status=``CANCELLED``，cancelledAt=finished_at
+      （CAS 成功，批次已终态化）
+    - **RUNNING 协作式 cancel**：status=``RUNNING``（标志已设，等待 chunk loop
+      在下一个 chunk 边界检测并跳出 → PARTIAL_SUCCESS），cancelledAt=now（标志
+      设置时间，前端可显示「已请求取消，等待当前 chunk 完成」）
+
+    spec §2.29 line 1338：cancel 请求立即 200，不等待 chunk 真的暂停。
+    """
+
+    batch_id: str
+    status: str
+    cancelled_at: datetime
+
+
 class UserExportTaskResponse(_CamelBase):
     """导出任务 API 响应（spec §2.31 v2.2 P1-5）。"""
 
@@ -333,6 +354,7 @@ __all__ = [
     "UserExportRequest",
     "UserExportTaskQuery",
     "UserExportTaskResponse",
+    "UserImportBatchCancelResponse",
     "UserImportBatchLogItem",
     "UserImportBatchResponse",
     "UserImportRecord",

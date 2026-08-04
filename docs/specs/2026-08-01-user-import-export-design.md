@@ -1288,10 +1288,10 @@ GET /system/user/import/{batch_id}/logs
 
 **两种取消场景**：
 
-**场景 1：CREATED 状态取消（简单）**
-- 用户上传文件 → dry_run 完成 → status=CREATED → 用户点「取消」
-- 直接 CAS `CREATED → CANCELLED`，删除 preview 文件 + Redis cache
-- 不影响任何用户数据（CREATED 阶段还没落库）
+**场景 1：PREVIEW_DONE 状态取消（简单，spec §2.26 line 1117 v2.2 P1-2 改）**
+- 用户上传文件 → dry_run 完成 → status=PREVIEW_DONE → 用户点「取消」
+- 直接 CAS `PREVIEW_DONE → CANCELLED`，删除 preview 文件 + Redis cache
+- 不影响任何用户数据（PREVIEW_DONE 阶段还没落库；CREATED 是 dry_run 中间瞬时态用户不可见，不可取消）
 
 **场景 2：RUNNING 状态取消（协作式 cancel，复杂）**
 - 用户点确认 → status=RUNNING → chunk 1 完成 → chunk 2 进行中 → 用户点「取消」
@@ -1315,10 +1315,10 @@ async def cancel_batch(
     if batch.operator_id != operator.user_id and not is_super_admin(operator):
         raise AuthorizationException("无权取消此批次")
 
-    if batch.status == ImportBatchStatus.CREATED:
-        # 场景 1：简单 cancel
+    if batch.status == ImportBatchStatus.PREVIEW_DONE:
+        # 场景 1：简单 cancel（spec §2.26 line 1117 v2.2 P1-2 改为仅 PREVIEW_DONE → CANCELLED）
         ok = await _transition_batch_status(
-            db, batch_id, ImportBatchStatus.CREATED, ImportBatchStatus.CANCELLED,
+            db, batch_id, ImportBatchStatus.PREVIEW_DONE, ImportBatchStatus.CANCELLED,
             finished_at=datetime.now(),
         )
         if not ok:
@@ -1369,7 +1369,7 @@ for chunk_index, chunk in enumerate(chunks(records, CHUNK_SIZE)):
 
 **反例**: (1) **RUNNING 状态强杀 PostgreSQL transaction → 不可能，PostgreSQL 不支持**（v2.2 P2：协作式 cancel 是唯一可行方案）。(2) cancel 请求同步等待 chunk 真的暂停 → HTTP 请求超时，用户体验差（v2.2 P2：cancel 立即返回 200，下一个 chunk 之间才生效）。(3) cancel 后状态转 CANCELLED → 已 commit 的 chunk 用户以为没生效，重新导入会撞 UNIQUE 约束（v2.2 P2：转 PARTIAL_SUCCESS + log 标记 cancelled=true，数据状态准确）。(4) 任何状态都能 cancel → SUCCESS 的 batch 被 cancel → 状态被破坏（v2.2 P2：SUCCESS/PARTIAL_SUCCESS/FAILED/EXPIRED/CANCELLED 终态拒绝 cancel）。
 
-**回归**: `ImportBatchStatus.CANCELLED` 加入状态机（v2.2 #2.26 已含）；`POST /import/{batch_id}/cancel` endpoint；CREATED 直接 CAS 转 CANCELLED + 清理 preview 文件；RUNNING 设置 Redis cancel_requested 标志 + chunk 之间检查 + 跳出循环转 PARTIAL_SUCCESS；权限校验（operator 本人或超管）；终态拒绝 cancel 抛 `AI_IMPORT_BATCH_NOT_CANCELLABLE`；测试 `test_cancel_created_batch_cancels` + `test_cancel_running_batch_stops_after_current_chunk` + `test_cancel_terminal_batch_rejected` + `test_cancel_by_non_operator_forbidden`。
+**回归**: `ImportBatchStatus.CANCELLED` 加入状态机（v2.2 #2.26 已含）；`POST /import/{batch_id}/cancel` endpoint；PREVIEW_DONE 直接 CAS 转 CANCELLED + 清理 preview 文件（spec §2.26 line 1117 v2.2 P1-2 改，不允 CREATED → CANCELLED）；RUNNING 设置 Redis cancel_requested 标志 + chunk 之间检查 + 跳出循环转 PARTIAL_SUCCESS；权限校验（operator 本人或超管）；终态 + CREATED 拒绝 cancel 抛 `AI_IMPORT_BATCH_NOT_CANCELLABLE`；测试 `test_cancel_preview_done_returns_cancelled` + `test_cancel_running_sets_redis_flag_and_returns_running` + `test_cancel_non_cancellable_states_returns_422` (6 状态参数化) + `test_cancel_by_non_operator_returns_403`。✅ Task 15b 已完成（2026-08-04），见 §10 决策 15b.1-15b.13。
 
 ### 2.30 **批量操作强制 `reason` 审计参数（v2.2 P1-3）** — 批量写入操作（import_execute / cancel / export）必须携带 `reason: str` 业务理由（导入场景例：「2026年8月 HR 入职名单同步」/「ERP 集成全量推送」），写入 `sys_user_import_batch.reason` 字段 + `sys_user_import_batch_log.detail.reason`，进入审计链路（与 `sys_operation_log` / `ai_operation_log` 联动），便于事后反查「为什么 2026-08-03 凌晨 02:00 导入了 1500 个用户」。
 
@@ -3064,7 +3064,20 @@ async def user_export(
   - 15a.8 **路由顺序无冲突** — `/import/{batch_id}/logs` 是 3 段路径，`/import/{batch_id}` 是 2 段，Starlette 路由按段数匹配，`{batch_id}` 不会拦截 `/logs` 后缀。**反例**: 无。**回归**: 全 10 测试通过证明路由匹配正确。
   - 15a.9 **`detail` JSON 字段直传不做脱敏** — spec §2.28 line 1245 已声明 detail 仅存业务字段（chunk_index / chunk_size / failed_in_chunk / reason 等），不含密码 / token 等敏感数据。**反例**: 担心 reason 暴露做脱敏 → 破坏审计完整性（reason 是批量操作的业务理由，本来就该让管理员看到）。**回归**: `test_returns_paginated_logs_with_field_mapping` 验证 detail 原样透传。
   - 15a.10 **pagination 默认 current=1 / size=10** — 对齐 `UserExportTaskQuery` / `QueryParams` 基类，前端不传参数时返回首页 10 条。**反例**: 默认 size=20 → 长 batch（CHUNK_PROGRESS * 20 = 400 条）一次拉太多。**回归**: `test_default_current_size` + `test_custom_current_size`。
-- [ ] Task 15b **[v2.2 P2 #2.29]**: HTTP `POST /system/user/import/{batch_id}/cancel`（CREATED 直接 cancel + RUNNING 协作式 cancel + 终态拒绝）+ 测试（4 用例）
+- [x] Task 15b ✅ 已完成（2026-08-04） **[v2.2 P2 #2.29]**: HTTP `POST /system/user/import/{batch_id}/cancel`（PREVIEW_DONE 直接 cancel + RUNNING 协作式 cancel + 终态拒绝）+ 测试（17 用例）
+  - 15b.1 **HTTP 契约测试用 patch service 替身** — 对齐 Task 15 / 15a 模式：HTTP 测试只验路由 + 字段映射 + 状态码 + auth gating + reason 校验，service 业务逻辑（CAS / Redis / file cleanup）由集成测试在 `test_user_import_execute.py` 等覆盖。**反例**: HTTP 测试用真实 DB → 测试 setup 复杂 + 业务 bug 会同时打破 HTTP 和 service 测试难以定位。**回归**: `tests/modules/system/test_user_import_cancel_api.py` 17 测试全 patch `cancel_batch`。
+  - 15b.2 **权限码 `system:user:import`** — spec §5.6 line 2297 明确：cancel 是写入操作（修改批次状态），用 `system:user:import` 而非 `system:user:list`（detail / logs 是读操作才用 list）。**反例**: 用 `system:user:list` → 持有 list 权限的运营人员能取消他人的导入批次，违反最小权限。**回归**: `TestCancelBatchAuth::test_no_token_returns_401` + `test_invalid_token_returns_401`。
+  - 15b.3 **`AI_IMPORT_BATCH_NOT_FOUND` 用 404 而非 spec §5.7 表写的 422** — spec §5.7 line 2323 标 422，但 Task 15 (GET detail) + Task 15a (GET logs) 早已 ship 用 `NotFoundException` → 404 + errorCode。跨端点一致性优先于单条 spec 文字（前端 `if (err.errorCode === 'AI_IMPORT_BATCH_NOT_FOUND')` 不关心 HTTP code）。**反例**: cancel 用 422 → detail/logs 用 404 → 前端要为同一 errorCode 写两套 HTTP code 处理。**回归**: `TestCancelBatchNotFound::test_cancel_nonexistent_batch_returns_404`。
+  - 15b.4 **`AI_IMPORT_BATCH_NOT_CANCELLABLE` 用 422（spec §5.7 line 2324）** — 终态（SUCCESS/PARTIAL_SUCCESS/FAILED/EXPIRED/CANCELLED）+ CREATED 都不可取消，抛 `UnprocessableEntityException` → 422。CREATED 拒绝因 spec §2.26 line 1117 v2.2 P1-2 已把 cancel-from-state 改为仅 `PREVIEW_DONE → CANCELLED`（dry_run 完成 = PREVIEW_DONE，CREATED 是 dry_run 中间的瞬时态用户不可见）。**反例**: 允许 CREATED cancel → dry_run 中用户点 cancel → CAS 与 dry_run 末尾的 CREATED → PREVIEW_DONE 竞态。**回归**: `TestCancelTerminalBatchRejected` 6 个状态参数化（CREATED/SUCCESS/PARTIAL_SUCCESS/FAILED/EXPIRED/CANCELLED 全 422）。
+  - 15b.5 **RUNNING 协作式 cancel 立即返回 status=RUNNING** — spec §2.29 line 1338：cancel 请求不等待 chunk 真暂停。响应 `status` 字段反映当前 batch.status（RUNNING），`cancelledAt` 反映 Redis flag 设置时间（前端显示「已请求取消，等待当前 chunk 完成」）。实际 `RUNNING → PARTIAL_SUCCESS` 转换发生在 chunk loop 内（spec §2.29 line 1351-1368）。**反例**: cancel 同步等 chunk 暂停 → HTTP 超时 + chunk 长（100 rows × 多 chunk）用户等待 30s+。**回归**: `TestCancelRunningBatch::test_cancel_running_sets_redis_flag_and_returns_running`。
+  - 15b.6 **`cancelledAt` = batch.finished_at or now** — PREVIEW_DONE cancel 成功后 service 设置 `finished_at=now`，CANCELLED 状态直接用；RUNNING 协作式 cancel 不改 finished_at，API 层 fallback 到 `datetime.now()`（标志设置时间）。**反例**: 强制要求 service 改 finished_at → RUNNING 状态 finished_at 被错误设置成 cancel 请求时间，与实际批次结束时间（chunk loop 结束后）冲突。**回归**: `test_cancel_preview_done_returns_cancelled` 校验 `cancelledAt == finished_at`。
+  - 15b.7 **复用 `ReasonSchema` 作 body 类型** — spec §5.6 line 2294-2296 body 仅含 `reason` 字段，直接用 `ReasonSchema`（Task 8 已导出），不另建 `UserImportCancelRequest`。**反例**: 每个端点都建一个空的 Request 子类 → 类爆炸。**回归**: `TestCancelReasonValidation` 4 测试（required / empty / whitespace / too_long）覆盖 ReasonSchema 入口校验。
+  - 15b.8 **`cancel_batch` 为模块级函数（非 UserService 方法）** — 对齐 Task 9 `dry_run_import_users` / Task 10 `batch_create_users_from_records` / Task 15 `get_batch_detail` / Task 15a `list_batch_logs` 全部模块级函数模式。无状态 + 易测试 + 易注入 `file_storage` 参数。**反例**: 加到 UserService 单例 → 增加循环依赖（UserService → import_service → UserService）。**回归**: service 模块 `__all__` 导出 `cancel_batch`，API 层直接 `from import_service import cancel_batch`。
+  - 15b.9 **PREVIEW_DONE 场景清理 preview 文件 + Redis cache** — spec §2.29 line 1328-1329：CAS 成功后删 `file_storage_key` 文件 + `user_import:preview:{preview_token}` Redis key。`storage.delete` 容忍 `FileNotFoundError`（cleanup cron 可能已清 / 测试环境文件未生成）。**反例**: 文件不存在时 raise → cancel 主流程被文件系统状态污染。**回归**: service 层 `try/except FileNotFoundError: pass` 兜底。
+  - 15b.10 **RUNNING 场景 Redis flag key + TTL** — key 格式 `user_import:cancel:{batch_id}`（前缀 + batch_id，便于 chunk loop 反查），TTL=3600s（1h，spec §2.29 line 1335）。chunk loop 在 `batch_create_users_from_records` 内每个 chunk 边界检查 `redis.exists(flag)`，命中则 break + 转 PARTIAL_SUCCESS（Task 10 内嵌的协作式 cancel checkpoint，本 task 仅实现 flag 设置侧）。**反例**: TTL=10min → 长 chunk（2000 rows / 100 = 20 chunks × 30s/chunk = 10min）flag 可能过期。**回归**: HTTP 测试覆盖「service 被 cancel_batch 调用」契约，flag 设置逻辑由后续 Task 10 协作式 cancel checkpoint 集成测试覆盖。
+  - 15b.11 **`is_super_admin` 在函数内 import（避免循环依赖）** — `app.core.rbac` 链路 `rbac → User → ...`，import_service 顶部 import 会循环。函数内 `from app.core.rbac import is_super_admin` (`# noqa: PLC0415`) 是 Python 惯用法（同 `get_batch_detail` 内的 `from app.modules.system.models.user import User`）。**反例**: 顶部 import → `ImportError: cannot import name 'is_super_admin'` 启动失败。**回归**: `TestCancelByNonOperatorForbidden::test_cancel_by_non_operator_returns_403`。
+  - 15b.12 **Service 层 `_validate_reason` defense-in-depth** — API 层 `ReasonSchema` 已 strip + 校验长度，service 入口仍调 `_validate_reason(reason)` 防 AI tool 直接调用 / 内部代码绕过 API。**反例**: 信任 API 入口校验 → AI tool 用 raw 字符串调 cancel_batch 跳过校验 → reason 入库 null / 超长。**回归**: `_validate_reason` 抛 `AI_IMPORT_REASON_REQUIRED`，service 测试覆盖。
+  - 15b.13 **Service 抛 NotFoundException 而非返 None** — Task 15 `get_batch_detail` 返 `(None, None)` 让 API 层抛 404；Task 15b `cancel_batch` 直接在 service 抛 `NotFoundException`。差异原因：cancel_batch 是单一返回类型（UserImportBatch），不像 get_batch_detail 还要返 operator_name 元组；service 抛异常让 API 层更简洁（无 if None 分支）。**反例**: cancel_batch 返 None → API 层判 None 后抛 404 → 业务异常处理散落两层。**回归**: HTTP 测试 patch service 抛 NotFoundException 验证 404 转换。
 - [ ] Task 15c **[v2.2 P2]**: HTTP `GET /system/user/import`（批次列表分页查询，按 operator_id / status / created_at 过滤）+ 测试
 
 #### Seed + 前端
