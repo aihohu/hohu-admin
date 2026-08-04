@@ -1291,3 +1291,156 @@ async def _dry_run_user_import_execute(
         reason=summary,
         examples=examples,
     )
+
+
+# ============ user.export（spec §10 Task 27） ============
+
+
+@ai_tool(
+    AiToolMeta(
+        name="user.export",
+        agent="user_mgmt",
+        summary=(
+            "Export users to xlsx → {exportId, rowCount}. "
+            "Reason required. Filter via name/email/status."
+        ),
+        required_perms=("system:user:export",),
+        risk="high",
+        readonly=False,  # 写 ExportTask 表 + 生成 xlsx 文件
+        produces_file=True,
+        dry_run_supported=True,
+        result_view="rows_affected",
+        args_summary_fields=("reason",),
+    )
+)
+async def user_export(
+    ctx: AiToolContext,
+    *,
+    reason: str,
+    user_name: str | None = None,
+    nickname: str | None = None,
+    user_email: str | None = None,
+    user_phone: str | None = None,
+    status: Literal["0", "1"] | None = None,
+) -> ToolResult:
+    """AI tool 入口：导出用户列表到 Excel（spec §10 Task 27）
+
+    强制建 ExportTask（spec §2.31 P1-5）+ filter_snapshot 冻结 + 30 天 TTL。
+    行数 > USER_EXPORT_ASYNC_THRESHOLD（5000）抛 AI_EXPORT_ASYNC_REQUIRED，
+    Phase 3 异步通道上线后改为自动入队。
+
+    Args:
+        reason: 业务理由（必填，spec §2.30 P1-3，1-256 字符）
+        user_name / nickname / user_email / user_phone: filter（可选）
+        status: '1' (启用) / '0' (禁用)，None=不过滤
+    """
+    from app.modules.system.user.export_service import (  # noqa: PLC0415
+        export_users_to_excel,
+    )
+    from app.modules.system.user.schemas import UserExportFilter  # noqa: PLC0415
+
+    filter_ = UserExportFilter(
+        user_name=user_name,
+        nickname=nickname,
+        user_email=user_email,
+        user_phone=user_phone,
+        status=status,
+    )
+
+    _xlsx_bytes, row_count, export_id = await export_users_to_excel(
+        ctx.db,
+        filter_,
+        ctx.user,
+        reason=reason,
+    )
+
+    return ToolResult.success(
+        data={
+            "exportId": export_id,
+            "rowCount": row_count,
+        },
+        ui=UIResult(
+            view_type="rows_affected",
+            view_data={
+                "count": row_count,
+                "export_id": export_id,
+            },
+            audit={
+                "export_id": export_id,
+                "row_count": row_count,
+                "filter": {
+                    "user_name": user_name,
+                    "nickname": nickname,
+                    "user_email": user_email,
+                    "user_phone": user_phone,
+                    "status": status,
+                },
+            },
+            label_key="ai.tool.user.export.result",
+            label_params={"count": row_count},
+        ),
+    )
+
+
+async def _dry_run_user_export(
+    ctx: AiToolContext,
+    *,
+    reason: str,  # noqa: ARG001  与 execute 签名对齐；dry_run 阶段不重复校验 reason
+    user_name: str | None = None,
+    nickname: str | None = None,
+    user_email: str | None = None,
+    user_phone: str | None = None,
+    status: Literal["0", "1"] | None = None,
+) -> Any:
+    """dry_run：预估导出行数供 HITL 抽屉确认（spec §10 Task 27）
+
+    用 User.count(*) + filter 估算行数，不实际跑导出（避免重复建 task）。
+    行数 > USER_EXPORT_ASYNC_THRESHOLD → 提示用户缩窄 filter；行数为 0 → 警告。
+    """
+    from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
+
+    base = select(User).where(*ctx.data_scope.filters)
+    if user_name:
+        base = base.where(User.user_name.ilike(f"%{user_name}%"))
+    if nickname:
+        base = base.where(User.nickname.ilike(f"%{nickname}%"))
+    if user_email:
+        base = base.where(User.user_email == user_email)
+    if user_phone:
+        base = base.where(User.user_phone == user_phone)
+    if status is not None:
+        base = base.where(User.status == status)
+
+    estimated = int(
+        await ctx.db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    )
+
+    if estimated == 0:
+        return DryRunResult(
+            ok=False,
+            count=0,
+            reason="筛选条件下无用户匹配，导出会生成空文件",
+        )
+
+    from app.modules.system.user.constants import (  # noqa: PLC0415
+        USER_EXPORT_ASYNC_THRESHOLD,
+    )
+
+    if estimated > USER_EXPORT_ASYNC_THRESHOLD:
+        return DryRunResult(
+            ok=False,
+            count=estimated,
+            reason=(
+                f"预计导出 {estimated} 行，超过同步阈值 {USER_EXPORT_ASYNC_THRESHOLD}，"
+                "请缩窄 filter 或等待异步通道开放"
+            ),
+        )
+
+    return DryRunResult(
+        ok=True,
+        count=estimated,
+        reason=f"将导出约 {estimated} 行用户数据到 xlsx 文件（30 天后过期清理）",
+        examples=[
+            f"filter: user_name={user_name or '*'}, status={status or '*'}",
+        ],
+    )
