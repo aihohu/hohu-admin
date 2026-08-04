@@ -51,6 +51,7 @@ from app.modules.system.user.schemas import (
     UserExportTaskQuery,
     UserExportTaskResponse,
 )
+from app.modules.system.user.template_service import generate_import_template
 
 router = APIRouter()
 
@@ -579,10 +580,49 @@ async def import_users(
     return ResponseModel.success(data=result.model_dump(mode="json", by_alias=True))
 
 
+@router.get(
+    "/import/template",
+    summary="下载用户导入 Excel 模板（4 sheet + DataValidation）",
+    description=(
+        "spec §5.3 + §2.13 + §2.16：返 xlsx，含 4 sheet（数据 / 说明 / 部门字典 / 角色字典），"
+        "字典 sheet 实时查 sys_dept / sys_role。"
+        "权限：system:user:import（同 import，避免未授权下载模板探查字段）。"
+    ),
+    responses={
+        200: {"description": "xlsx 文件流"},
+        401: {"description": "未登录或令牌已过期"},
+        403: {"description": "权限不足"},
+    },
+    dependencies=[Depends(require_permissions("system:user:import"))],
+)
+async def download_import_template(
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    """spec §5.3：下载导入模板。
+
+    流程：
+    1. ``generate_import_template`` 内部查 sys_dept / sys_role，构造 4 sheet xlsx
+    2. ``Response(content=bytes, media_type=xlsx)`` + Content-Disposition
+       （决策 13.1：用 Response 而非 StreamingResponse 避免 audit_middleware 冲突）
+    """
+    xlsx_bytes = await generate_import_template(db)
+    return Response(
+        content=xlsx_bytes,
+        media_type=_EXPORT_MIME_TYPE,
+        headers={
+            "Content-Disposition": f"attachment; filename={_TEMPLATE_FILENAME}",
+        },
+    )
+
+
 # ========== 用户导出（spec §5.2 + §2.31 P1-5，Task 13）==========
 
 #: spec §5.2 line 2200：xlsx MIME（与 export_service._EXPORT_MIME_TYPE 对齐）
 _EXPORT_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+#: spec §5.3 line 2213：导入模板文件名（固定，不含日期 — 模板不分版本）
+_TEMPLATE_FILENAME = "user_import_template.xlsx"
 
 
 @router.post(
