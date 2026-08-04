@@ -274,6 +274,33 @@ class UserImportBatchResponse(_CamelBase):
         return str(v)
 
 
+class UserImportBatchLogItem(_CamelBase):
+    """batch_log 单条记录响应（spec §5.5 v2.2 P2 #2.28）。
+
+    spec §5.5 line 2285 契约：``{event, fromStatus, toStatus, detail, createdAt}``。
+    额外暴露 ``log_id``（前端列表 row key，避免用 createdAt 做 key 在同秒事件下碰撞）
+    + ``operator_id`` / ``operator_name``（审计追溯，对齐 Task 15 GET /import/{batch_id}
+    字段约定，outerjoin sys_user 反查 user_name）。
+
+    安全：``detail`` 是 JSON 字段，spec §2.28 line 1245 已声明「不存敏感数据」，
+    内含 chunk_index / chunk_size / failed_in_chunk / reason 等业务字段，可直传。
+    """
+
+    log_id: str
+    event: str
+    from_status: str | None = None
+    to_status: str | None = None
+    detail: dict
+    operator_id: int
+    operator_name: str | None = None
+    created_at: datetime
+
+    @field_serializer("operator_id")
+    def _serialize_operator_id(self, v: int) -> str:
+        """Snowflake ID 字符串化（防 JS BigInt 精度丢失）。"""
+        return str(v)
+
+
 class UserExportTaskResponse(_CamelBase):
     """导出任务 API 响应（spec §2.31 v2.2 P1-5）。"""
 
@@ -306,6 +333,7 @@ __all__ = [
     "UserExportRequest",
     "UserExportTaskQuery",
     "UserExportTaskResponse",
+    "UserImportBatchLogItem",
     "UserImportBatchResponse",
     "UserImportRecord",
 ]

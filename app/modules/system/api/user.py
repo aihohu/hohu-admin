@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,12 +45,14 @@ from app.modules.system.user.import_service import (
     batch_create_users_from_records,
     dry_run_import_users,
     get_batch_detail,
+    list_batch_logs,
 )
 from app.modules.system.user.schemas import (
     UserExportFilter,
     UserExportRequest,
     UserExportTaskQuery,
     UserExportTaskResponse,
+    UserImportBatchLogItem,
     UserImportBatchResponse,
 )
 from app.modules.system.user.template_service import generate_import_template
@@ -727,6 +729,71 @@ async def get_import_batch_detail(
             error_code="AI_IMPORT_BATCH_NOT_FOUND",
         )
     return ResponseModel.success(data=_build_batch_response(batch, operator_name))
+
+
+@router.get(
+    "/import/{batch_id}/logs",
+    response_model=ResponseModel[PageResult[UserImportBatchLogItem]],
+    summary="按 batch_id 查询导入批次操作日志（v2.2 P2）",
+    description=(
+        "spec §5.5 v2.2 P2 line 2280-2288 + §2.28：批次操作日志查询，支持 event 过滤 + 分页。"
+        "权限：system:user:list（spec §5.5 line 2284，同 GET /import/{batch_id}）。"
+    ),
+    responses={
+        200: {"description": "日志列表（分页）"},
+        401: {"description": "未登录或令牌已过期"},
+        403: {"description": "权限不足"},
+        404: {"description": "batch_id 不存在"},
+    },
+    dependencies=[Depends(require_permissions("system:user:list"))],
+)
+async def get_import_batch_logs(
+    batch_id: str,
+    event: str | None = Query(
+        None,
+        description=(
+            "事件类型过滤：CREATED / PREVIEW_DONE / EXECUTE_START / CHUNK_PROGRESS / "
+            "EXECUTE_FINISH / EXECUTE_FAILED / EXPIRED / CANCELLED（spec §2.28 line 1252）"
+        ),
+    ),
+    current: int = Query(1, ge=1, description="页码（1-based）"),
+    size: int = Query(10, ge=1, le=100, description="每页数量（1-100）"),
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    """spec §5.5 line 2280-2288：批次操作日志查询。
+
+    流程：
+    1. 先 ``get_batch_detail`` 校验 batch 存在（404 一致性，与 GET /import/{batch_id} 对齐）
+    2. ``list_batch_logs`` outerjoin sys_user + 按 created_at ASC 排序返回 [(log, operator_name), ...]
+    3. 构造 UserImportBatchLogItem 列表 → PageResult
+    """
+    batch, _ = await get_batch_detail(db, batch_id)
+    if batch is None:
+        raise NotFoundException(
+            "用户导入批次",
+            error_code="AI_IMPORT_BATCH_NOT_FOUND",
+        )
+
+    rows, total = await list_batch_logs(
+        db, batch_id, event=event, current=current, size=size
+    )
+    records = [
+        UserImportBatchLogItem(
+            log_id=log.log_id,
+            event=log.event,
+            from_status=log.from_status.value if log.from_status else None,
+            to_status=log.to_status.value if log.to_status else None,
+            detail=log.detail,
+            operator_id=log.operator_id,
+            operator_name=operator_name,
+            created_at=log.created_at,
+        )
+        for log, operator_name in rows
+    ]
+    return ResponseModel.success(
+        data=PageResult(records=records, total=total, current=current, size=size)
+    )
 
 
 # ========== 用户导出（spec §5.2 + §2.31 P1-5，Task 13）==========

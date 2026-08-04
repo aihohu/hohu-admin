@@ -25,7 +25,7 @@ from datetime import datetime
 from typing import Literal
 
 from openpyxl import Workbook
-from sqlalchemy import insert, select
+from sqlalchemy import func, insert, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -959,9 +959,67 @@ async def get_batch_detail(
     return batch, operator_name
 
 
+async def list_batch_logs(
+    db: AsyncSession,
+    batch_id: str,
+    *,
+    event: str | None = None,
+    current: int = 1,
+    size: int = 10,
+) -> tuple[list[tuple[UserImportBatchLog, str | None]], int]:
+    """按 batch_id 分页查 batch_log（spec §5.5 v2.2 P2 #2.28）。
+
+    spec §2.28 line 1269：``(batch_id, created_at)`` 索引 → 按 created_at ASC
+    排序返回完整状态转换历史（CREATED → PREVIEW_DONE → EXECUTE_START →
+    CHUNK_PROGRESS * N → EXECUTE_FINISH）。
+
+    outerjoin sys_user 拿 operator_name（同 ``get_batch_detail``）：user 删除时
+    返 ``None``，log 行保留（审计完整性 > 引用完整性，spec §2.28 反例 5）。
+
+    Args:
+        db: 异步数据库会话
+        batch_id: 批次 ID
+        event: 可选事件类型过滤（CREATED/PREVIEW_DONE/EXECUTE_START/CHUNK_PROGRESS/
+            EXECUTE_FINISH/EXECUTE_FAILED/EXPIRED/CANCELLED）。决策 15a.x：
+            不在 API 层做 Literal 校验，前端传 typo 时返回空列表（spec §5.5
+            未要求严格校验 + 错误码 §5.7 无对应项）
+        current: 页码（1-based）
+        size: 每页数量
+
+    Returns:
+        ``(rows, total)``：
+        - ``rows`` 是 ``[(log, operator_name), ...]`` 元组列表
+        - ``total`` 是过滤后总条数（用于前端分页器）
+    """
+    from app.modules.system.models.user import User  # noqa: PLC0415
+
+    filters: list = [UserImportBatchLog.batch_id == batch_id]
+    if event:
+        filters.append(UserImportBatchLog.event == event)
+
+    count_stmt = select(func.count()).select_from(UserImportBatchLog).where(*filters)
+    total = (await db.execute(count_stmt)).scalar() or 0
+
+    stmt = (
+        select(UserImportBatchLog, User.user_name)
+        .outerjoin(User, User.user_id == UserImportBatchLog.operator_id)
+        .where(*filters)
+        .order_by(
+            UserImportBatchLog.created_at.asc(),
+            UserImportBatchLog.log_id.asc(),
+        )
+        .offset((current - 1) * size)
+        .limit(size)
+    )
+    rows = (await db.execute(stmt)).all()
+
+    return rows, total
+
+
 __all__ = [
     "batch_create_users_from_records",
     "dry_run_import_users",
     "get_batch_by_preview_token",
     "get_batch_detail",
+    "list_batch_logs",
 ]
