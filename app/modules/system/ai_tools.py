@@ -15,7 +15,7 @@ dept_id / role_code 走关联表 EXISTS 子查询，留 v1.5。
 user_mgmt agent + system:user:list 权限码（spec §5.1）。
 """
 
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import func, select
 
@@ -971,6 +971,323 @@ async def _dry_run_user_update(
     return DryRunResult(
         ok=True,
         count=1,
+        reason=summary,
+        examples=examples,
+    )
+
+
+# ============ user.import_preview / user.import_execute（spec §10 Task 26/26a） ============
+
+
+async def _load_file_bytes(ctx: AiToolContext, file_id: str) -> tuple[bytes, str, str]:
+    """从 sys_file 加载 file_bytes + filename + mime_type（spec §10 Task 26）
+
+    抛 BusinessRuleException:
+        - AI_FILE_ID_INVALID: file_id 不是合法数字字符串
+        - AI_FILE_NOT_FOUND: file_id 不存在 / 已删除
+
+    Returns: (file_bytes, filename, mime_type)
+    """
+    from pathlib import Path  # noqa: PLC0415
+
+    from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+    from app.modules.system.models.file import File  # noqa: PLC0415
+
+    try:
+        file_id_int = int(file_id)
+    except (TypeError, ValueError) as e:
+        raise BusinessRuleException(
+            f"file_id 格式无效: {file_id!r}",
+            error_code="AI_FILE_ID_INVALID",
+        ) from e
+
+    stmt = select(File).where(File.file_id == file_id_int, File.del_flag == "0")
+    file_record = (await ctx.db.execute(stmt)).scalars().first()
+    if file_record is None:
+        raise BusinessRuleException(
+            f"文件不存在: file_id={file_id}",
+            error_code="AI_FILE_NOT_FOUND",
+        )
+
+    file_path = Path(file_record.file_path)
+    if not file_path.exists():  # noqa: ASYNC240  AI 调用频次低，同步 IO 可接受
+        raise BusinessRuleException(
+            f"文件已被删除（DB 记录存在但磁盘文件丢失）: file_id={file_id}",
+            error_code="AI_FILE_NOT_FOUND",
+        )
+
+    file_bytes = file_path.read_bytes()  # noqa: ASYNC240
+    return file_bytes, file_record.file_name, file_record.mime_type or ""
+
+
+@ai_tool(
+    AiToolMeta(
+        name="user.import_preview",
+        agent="user_mgmt",
+        summary=(
+            "Dry-run user import → {batchId, previewToken, summary}. "
+            "Read-only. Call user.import_execute next."
+        ),
+        required_perms=("system:user:import",),
+        risk="low",
+        readonly=True,
+        accepts_file=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.ms-excel",
+            "text/csv",
+        ),
+        result_view="detail_card",
+        chip_target="/system/user",
+        args_summary_fields=("file_id", "reason"),
+    )
+)
+async def user_import_preview(
+    ctx: AiToolContext,
+    *,
+    file_id: str,
+    reason: str,
+    on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
+) -> ToolResult:
+    """AI tool 入口：解析 + dry_run 用户导入（spec §10 Task 26, v2.2 P0 #2.14 拆分）
+
+    流程（spec §6 / §2.14）：
+    1. _load_file_bytes(file_id) → file_bytes + filename + mime_type
+    2. user_service.parse_import_excel(file_bytes, mime_type) → records
+    3. dry_run_import_users(records, current_user, file_bytes, filename, reason,
+                             on_conflict=...) → (ImportDryRunResult, batch)
+    4. ToolResult.success(
+         data={batch_id, preview_token, summary{new, exists, conflict, out_of_scope}},
+         ui=detail_card（HITL 抽屉展示 summary 供用户确认）
+       )
+
+    **强制 HITL**：本 tool 是 readonly，不写用户；execute 走 user.import_execute
+    （risk=high + hitl_always），LLM 不能跳过 preview 直接 execute。
+
+    Args:
+        file_id: 文件 ID（sys_file.file_id 字符串形式）
+        reason: 业务理由（1-256 字符，spec §2.30 P1-3 强制）
+        on_conflict: 'skip' (默认) / 'overwrite' / 'fail_fast'（详见 spec §2.7）
+    """
+    from app.modules.system.service.user_service import user_service  # noqa: PLC0415
+    from app.modules.system.user.import_service import (  # noqa: PLC0415
+        dry_run_import_users,
+    )
+
+    file_bytes, filename, mime_type = await _load_file_bytes(ctx, file_id)
+    records = user_service.parse_import_excel(file_bytes, mime_type)
+
+    dry_run_result, batch = await dry_run_import_users(
+        ctx.db,
+        records,
+        ctx.user,
+        file_bytes,
+        filename,
+        reason,
+        on_conflict=on_conflict,
+    )
+
+    summary = {
+        "new": dry_run_result.new_count,
+        "exists": dry_run_result.exists_count,
+        "conflict": dry_run_result.conflict_count,
+        "outOfScope": dry_run_result.out_of_scope_count,
+    }
+    return ToolResult.success(
+        data={
+            "batchId": batch.batch_id,
+            "previewToken": batch.preview_token,
+            "total": dry_run_result.total,
+            "summary": summary,
+        },
+        ui=UIResult(
+            view_type="detail_card",
+            view_data={
+                "batchId": batch.batch_id,
+                "previewToken": batch.preview_token[:8],  # 截断展示前 8 位
+                "total": dry_run_result.total,
+                "summary": summary,
+                "expiresAt": (
+                    batch.created_at.isoformat() if batch.created_at else None
+                ),
+            },
+            audit={
+                "batch_id": batch.batch_id,
+                "total_rows": dry_run_result.total,
+            },
+            label_key="ai.tool.user.import_preview.result",
+            label_params={"total": dry_run_result.total},
+        ),
+    )
+
+
+@ai_tool(
+    AiToolMeta(
+        name="user.import_execute",
+        agent="user_mgmt",
+        summary=(
+            "Execute previewed user import → {successCount}. "
+            "HITL confirms. Pass previewToken from preview."
+        ),
+        required_perms=("system:user:import",),
+        risk="high",
+        hitl_always=True,
+        dry_run_supported=True,
+        result_view="rows_affected",
+        args_summary_fields=("preview_token", "reason"),
+    )
+)
+async def user_import_execute(
+    ctx: AiToolContext,
+    *,
+    preview_token: str,
+    reason: str,
+    on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
+    sync_mode: Literal["CREATE_ONLY", "UPDATE_PROFILE", "FULL_SYNC"] = "CREATE_ONLY",
+) -> ToolResult:
+    """AI tool 入口：执行用户导入（spec §10 Task 26a, v2.2 P0 #2.14 拆分）
+
+    **强制 HITL**（hitl_always=True）：用户必须在抽屉确认 preview summary 后才执行。
+    LLM 不能跳过 preview → 直接 execute（spec §2.14 反例）。
+
+    流程：
+    1. 凭 preview_token 反查 batch（含 file_sha256 + records_hash + operator_id）
+    2. 从 sys_file 重新加载 file_bytes（spec §2.19 file_storage_key 在 execute 阶段读）
+    3. parse_import_excel → records（与 preview 时 hash 一致）
+    4. batch_create_users_from_records(...) → ImportResult
+    5. ToolResult.rows_affected（successCount + skippedCount + ...）
+
+    Args:
+        preview_token: 来自 user.import_preview 返回值，10min TTL
+        reason: 业务理由（必须与 preview 时一致，spec §2.30）
+        on_conflict: 与 preview 时一致（spec §2.7）
+        sync_mode: 'CREATE_ONLY' (默认) / 'UPDATE_PROFILE' / 'FULL_SYNC'（spec §2.24）
+    """
+    from app.modules.system.service.user_service import user_service  # noqa: PLC0415
+    from app.modules.system.user.constants import EmployeeNoSyncMode  # noqa: PLC0415
+    from app.modules.system.user.import_service import (  # noqa: PLC0415  # noqa: PLC0415
+        batch_create_users_from_records,
+        get_batch_by_preview_token,
+    )
+
+    # 1. 反查 batch 拿 file 信息
+    batch = await get_batch_by_preview_token(ctx.db, preview_token)
+    if batch is None:
+        from app.core.exceptions import UnprocessableEntityException  # noqa: PLC0415
+
+        raise UnprocessableEntityException(
+            "preview_token 无效或已过期",
+            error_code="AI_IMPORT_PREVIEW_INVALID",
+        )
+
+    # 2. 直接从 batch.file_storage_key 读 file_bytes（spec §2.19 line 575 设计）
+    #    dry_run 阶段已把上传文件保存到 LocalFileStorage（或 Phase 3 S3）；
+    #    execute 阶段凭 batch.file_storage_key 反查，不需要 LLM 重新传 file_id。
+    from pathlib import Path  # noqa: PLC0415
+
+    if not batch.file_storage_key:
+        from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+
+        raise BusinessRuleException(
+            "批次未关联上传文件，无法 execute（请重新 import_preview）",
+            error_code="AI_IMPORT_PREVIEW_INVALID",
+        )
+
+    file_path = Path(batch.file_storage_key)
+    if not file_path.exists():  # noqa: ASYNC240  AI 调用频次低，同步 IO 可接受
+        from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+
+        raise BusinessRuleException(
+            f"预检文件已丢失（{batch.filename}），请重新 import_preview",
+            error_code="AI_IMPORT_PREVIEW_INVALID",
+        )
+
+    file_bytes = file_path.read_bytes()  # noqa: ASYNC240
+    filename = batch.filename or ""
+
+    # 3. parse + execute
+    records = user_service.parse_import_excel(
+        file_bytes,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    result = await batch_create_users_from_records(
+        ctx.db,
+        records,
+        preview_token=preview_token,
+        file_bytes=file_bytes,
+        filename=filename,
+        reason=reason,
+        current_user=ctx.user,
+        on_conflict=on_conflict,
+        sync_mode=EmployeeNoSyncMode(sync_mode),
+    )
+
+    return ToolResult.success(
+        data={
+            "successCount": result.success_count,
+            "skippedCount": result.skipped_count,
+            "overwrittenCount": result.overwritten_count,
+            "failedCount": result.failed_count,
+            "batchId": result.batch_id,
+        },
+        ui=UIResult(
+            view_type="rows_affected",
+            view_data={
+                "count": result.success_count,
+                "ids": [result.batch_id],  # batch_id 而非 user_ids（避免大量 ID 进 UI）
+            },
+            audit={
+                "batch_id": result.batch_id,
+                "success_count": result.success_count,
+                "failed_count": result.failed_count,
+            },
+            label_key="ai.tool.user.import_execute.result",
+            label_params={"count": result.success_count},
+        ),
+    )
+
+
+async def _dry_run_user_import_execute(
+    ctx: AiToolContext,
+    *,
+    preview_token: str,
+    reason: str,  # noqa: ARG001  与 execute 签名对齐，dry_run 阶段不校验 reason（execute 入口校验）
+    on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
+    sync_mode: Literal["CREATE_ONLY", "UPDATE_PROFILE", "FULL_SYNC"] = "CREATE_ONLY",
+) -> Any:
+    """dry_run：列出 batch summary 供 HITL 抽屉二次确认（spec §10 Task 26a）
+
+    本 tool 已 hitl_always=True 强制走 HITL；dry_run 是「确认前再看一次 summary」，
+    返回 batch_id + total + 四象限计数 + 文件名（让用户对照确认）。
+    """
+    from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
+    from app.modules.system.user.import_service import (  # noqa: PLC0415
+        get_batch_by_preview_token,
+    )
+
+    batch = await get_batch_by_preview_token(ctx.db, preview_token)
+    if batch is None:
+        return DryRunResult(
+            ok=False,
+            count=0,
+            reason="preview_token 无效或已过期",
+        )
+
+    summary = (
+        f"将执行批次 {batch.batch_id[:8]}… "
+        f"共 {batch.total_rows} 行 "
+        f"(新增 {batch.summary_new} / 已存在 {batch.summary_exists} / "
+        f"冲突 {batch.summary_conflict} / 越界 {batch.summary_out_of_scope})"
+    )
+    examples = [
+        f"批次 ID: {batch.batch_id}",
+        f"文件名: {batch.filename or '(未知)'}",
+        f"冲突策略: {on_conflict}",
+        f"同步模式: {sync_mode}",
+    ]
+    return DryRunResult(
+        ok=True,
+        count=batch.summary_new,  # 预计将新增的用户数
         reason=summary,
         examples=examples,
     )

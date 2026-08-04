@@ -203,8 +203,11 @@ def check_scope_param_requires_check(
 ) -> list[Violation]:
     """spec §6.2: 签名含 *_id / *_ids 参数必须调 ensure_targets_in_scope
 
-    豁免：SHARED_AGENT_CODE（file.parse 等通用 tool 无 data_scope 概念，
-    file_id / log_id 等不属于业务资源 scope）。
+    豁免：
+      - SHARED_AGENT_CODE（file.parse 等通用 tool 无 data_scope 概念）
+      - file_id：sys_file 资源不属于业务 data_scope（任何有 system:user:import 权限
+        的用户都可读自己上传的 file_id；data_scope 控制的是 file 内的目标用户，
+        在后续业务调用 dry_run_import_users / batch_create 内部强制）。
     """
     if reg.meta.agent == SHARED_AGENT_CODE:
         return []
@@ -221,7 +224,8 @@ def check_scope_param_requires_check(
         scope_params = [
             a.arg
             for a in node.args.args + node.args.kwonlyargs
-            if a.arg.endswith("_id") or a.arg.endswith("_ids")
+            if (a.arg.endswith("_id") or a.arg.endswith("_ids"))
+            and a.arg != "file_id"  # sys_file 资源不属于业务 data_scope
         ]
         if not scope_params:
             continue
