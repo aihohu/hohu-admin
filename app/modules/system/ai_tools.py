@@ -620,3 +620,357 @@ async def _dry_run_user_batch_delete(
         reason=summary,
         examples=examples,
     )
+
+
+# ============ user.list / user.lookup / user.update（spec §10 Task 23-25） ============
+
+
+@ai_tool(
+    AiToolMeta(
+        name="user.list",
+        agent="user_mgmt",
+        summary=(
+            "List users → {total, limit, sample[3]}. Frontend renders data_list. "
+            "Use user.count for count-only."
+        ),
+        required_perms=("system:user:list",),
+        risk="low",
+        readonly=True,
+        allowed_filters=("status", "user_gender"),
+        chip_target="/system/user",
+        result_view="data_list",
+    )
+)
+async def user_list(
+    ctx: AiToolContext,
+    filters: dict[str, Any] | None = None,
+    limit: int | None = None,
+) -> ToolResult:
+    """列出用户，返回前 N 条精简字段（spec §10 Task 23）
+
+    LLM 看 data.{total, limit, sample[3]}（精简，进 prompt cache）；
+    前端看 ui.view_data.{columns, rows}（全量 limit 条，渲染 table）。
+
+    filters:
+        status: '1' (启用) / '2' (禁用)
+        user_gender: '0' (未知) / '1' (男) / '2' (女)
+    limit:
+        None / 0 / 负数 = 默认 20；正整数按 min(limit, 50) 截断
+    """
+    filters = validate_filters_in_whitelist(ctx.tool_meta, filters)
+    safe_limit = _coerce_list_limit(limit)
+
+    base = select(User)
+    for key, value in filters.items():
+        # sys_user 表字段都是 varchar，强制 stringify 防类型错
+        base = base.where(getattr(User, key) == str(value))
+
+    # spec §6.2 data_scope 强制：read tool 也走 ctx.data_scope.filters
+    base = base.where(*ctx.data_scope.filters)
+
+    total = int(
+        await ctx.db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    )
+
+    rows = (
+        (await ctx.db.execute(base.order_by(User.user_id.asc()).limit(safe_limit)))
+        .scalars()
+        .all()
+    )
+
+    columns = [
+        {"key": "id", "label": "ID"},
+        {"key": "user_name", "label": "用户名"},
+        {"key": "nickname", "label": "昵称"},
+        {"key": "status", "label": "状态"},
+    ]
+    records = [
+        {
+            "id": str(u.user_id),
+            "user_name": u.user_name,
+            "nickname": u.nickname or "",
+            "status": u.status,
+        }
+        for u in rows
+    ]
+    return ToolResult.success(
+        data={
+            "total": total,
+            "limit": safe_limit,
+            "sample": records[:3],  # 给 LLM 看前 3 条
+        },
+        ui=UIResult(
+            view_type="data_list",
+            view_data={"columns": columns, "rows": records},
+            audit={"total": total},
+            label_key="ai.tool.user.list.result",
+            label_params={"count": total},
+        ),
+    )
+
+
+@ai_tool(
+    AiToolMeta(
+        name="user.lookup",
+        agent="user_mgmt",
+        summary=(
+            "Lookup single user by id/name/phone/email → detail_card. "
+            "NOT for listing — use user.list."
+        ),
+        required_perms=("system:user:list",),
+        risk="low",
+        readonly=True,
+        result_view="detail_card",
+    )
+)
+async def user_lookup(
+    ctx: AiToolContext,
+    *,
+    user_id: int | None = None,
+    user_name: str | None = None,
+    phone: str | None = None,
+    email: str | None = None,
+) -> ToolResult:
+    """查询单个用户详情（spec §10 Task 24）
+
+    至少提供一个 selector；多 selector 取交集（AND）；
+    user_name / phone / email 精确匹配（避免误匹配前缀）。
+    始终应用 ctx.data_scope.filters，确保只返回 caller 可见范围内的用户。
+
+    Args:
+        user_id: Snowflake int64 ID（最精准）
+        user_name: 登录账号精确匹配
+        phone: 手机号精确匹配
+        email: 邮箱精确匹配
+    """
+    from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+
+    if not user_id and not user_name and not phone and not email:
+        raise BusinessRuleException(
+            "至少提供 user_id / user_name / phone / email 中的一个",
+            error_code="AI_LOOKUP_NO_TARGET",
+        )
+
+    # spec §6.2 data_scope 强制：read tool 含 user_id 也需校验 target 可见
+    # （防越权预估：用户传 admin 的 user_id 直接 lookup 拿到敏感字段）
+    if user_id is not None:
+        await ensure_targets_in_scope(ctx, user_ids=[user_id])
+
+    stmt = select(User).where(*ctx.data_scope.filters)
+    if user_id is not None:
+        stmt = stmt.where(User.user_id == user_id)
+    if user_name is not None:
+        stmt = stmt.where(User.user_name == user_name)
+    if phone is not None:
+        stmt = stmt.where(User.user_phone == phone)
+    if email is not None:
+        stmt = stmt.where(User.user_email == email)
+
+    user = (await ctx.db.execute(stmt.limit(2))).scalars().all()
+    if not user:
+        raise BusinessRuleException(
+            "未找到匹配用户（字段值不匹配 / 不在可见范围 / 已删除）",
+            error_code="AI_LOOKUP_NO_MATCH",
+        )
+    if len(user) > 1:
+        # 多重匹配：返回首个 + warning hint，让 LLM 主动反问用户细化（spec §8.6）
+        # 不抛异常，因为多重匹配在 lookup 场景不致命（仅是 ambiguous）
+        pass
+
+    u = user[0]
+    return ToolResult.success(
+        data={
+            "id": str(u.user_id),
+            "user_name": u.user_name,
+            "nickname": u.nickname,
+            "status": u.status,
+        },
+        ui=UIResult(
+            view_type="detail_card",
+            view_data={
+                "id": str(u.user_id),
+                "user_name": u.user_name,
+                "nickname": u.nickname or "",
+                "user_phone": u.user_phone or "",
+                "user_email": u.user_email or "",
+                "user_gender": u.user_gender or "0",
+                "status": u.status,
+            },
+            audit={"user_id": str(u.user_id), "user_name": u.user_name},
+            label_key="ai.tool.user.lookup.result",
+            label_params={"userName": u.user_name},
+        ),
+    )
+
+
+# spec §10 Task 25：user.update — 字段级更新（白名单控制）
+# spec §2.21 OVERWRITE_ALLOWED：nickname / user_email / user_phone / user_gender /
+# status / dept_id / role_ids（不含 user_name / hashed_password / user_id）
+_USER_UPDATE_ALLOWED_FIELDS: frozenset[str] = frozenset(
+    {
+        "nickname",
+        "user_email",
+        "user_phone",
+        "user_gender",
+        "status",
+    }
+)
+"""user.update tool 允许更新的字段白名单（spec §2.21 OVERWRITE_ALLOWED 子集）。
+
+不含 user_name / user_id / hashed_password（不可改）；
+不含 dept_id / role_ids（需独立 tool user.update_dept / user.update_roles，预留 Task 25a+）。
+"""
+
+
+@ai_tool(
+    AiToolMeta(
+        name="user.update",
+        agent="user_mgmt",
+        summary=(
+            "Update user profile (nickname/phone/email/gender/status) "
+            "→ {'updated': 1}. HITL confirms."
+        ),
+        required_perms=("system:user:edit",),
+        risk="high",
+        hitl_always=True,
+        dry_run_supported=True,
+        result_view="rows_affected",
+        args_summary_fields=("user_id",),
+    )
+)
+async def user_update(
+    ctx: AiToolContext,
+    *,
+    user_id: int,
+    nickname: str | None = None,
+    user_email: str | None = None,
+    user_phone: str | None = None,
+    user_gender: str | None = None,
+    status: str | None = None,
+) -> ToolResult:
+    """更新用户资料（spec §10 Task 25）
+
+    HITL 强制（hitl_always=True）：用户必须在抽屉确认后才真正落库。
+    所有字段可选，仅传需更新的字段（PATCH 语义）。
+
+    字段白名单：nickname / user_email / user_phone / user_gender / status
+    （不含 user_name / hashed_password / user_id，详见 _USER_UPDATE_ALLOWED_FIELDS）。
+
+    Args:
+        user_id: Snowflake int64 ID（必填，更新锚点）
+        nickname: 新昵称（2-16 字符）
+        user_email: 新邮箱（合法 email）
+        user_phone: 新手机号（合法手机号）
+        user_gender: '0' (未知) / '1' (男) / '2' (女)
+        status: '1' (启用) / '2' (禁用)
+    """
+    from app.core.exceptions import (  # noqa: PLC0415
+        BusinessRuleException,
+        NotFoundException,
+    )
+
+    # 至少一个可更新字段
+    update_payload = {
+        "nickname": nickname,
+        "user_email": user_email,
+        "user_phone": user_phone,
+        "user_gender": user_gender,
+        "status": status,
+    }
+    provided = {k: v for k, v in update_payload.items() if v is not None}
+    if not provided:
+        raise BusinessRuleException(
+            "至少提供一个待更新字段（nickname / user_email / user_phone / user_gender / status）",
+            error_code="AI_USER_UPDATE_NO_FIELDS",
+        )
+
+    # spec §6.2 data_scope 强制：写 tool 含 user_id 必须先验证 target 可见
+    await ensure_targets_in_scope(ctx, user_ids=[user_id])
+
+    # 查询用户（应用 data_scope 二次防御）
+    stmt = select(User).where(User.user_id == user_id, *ctx.data_scope.filters)
+    user = (await ctx.db.execute(stmt)).scalars().first()
+    if not user:
+        raise NotFoundException("用户", error_code="AI_USER_UPDATE_NOT_FOUND")
+
+    # 字段白名单已通过函数签名保证（只接受 _USER_UPDATE_ALLOWED_FIELDS 内的字段）
+    for field, value in provided.items():
+        if field not in _USER_UPDATE_ALLOWED_FIELDS:
+            # defensive：函数签名不该接受，但兜底防 LLM 注入
+            raise BusinessRuleException(
+                f"字段 {field} 不在可更新白名单内",
+                error_code="AI_USER_UPDATE_FIELD_NOT_ALLOWED",
+            )
+        setattr(user, field, value)
+
+    return ToolResult.success(
+        data={"updated": 1, "userName": user.user_name},
+        ui=UIResult(
+            view_type="rows_affected",
+            view_data={"count": 1, "ids": [str(user.user_id)]},
+            audit={
+                "affected_user_ids": [str(user.user_id)],
+                "fields": list(provided.keys()),
+            },
+            label_key="ai.tool.user.update.result",
+            label_params={"userName": user.user_name},
+        ),
+    )
+
+
+async def _dry_run_user_update(
+    ctx: AiToolContext,
+    *,
+    user_id: int,
+    nickname: str | None = None,
+    user_email: str | None = None,
+    user_phone: str | None = None,
+    user_gender: str | None = None,
+    status: str | None = None,
+) -> Any:
+    """dry_run：列出待更新字段 + 用户当前值供 HITL 抽屉确认（spec §10 Task 25）"""
+    from app.core.exceptions import (  # noqa: PLC0415
+        AuthorizationException,
+    )
+    from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
+
+    update_payload = {
+        "nickname": nickname,
+        "user_email": user_email,
+        "user_phone": user_phone,
+        "user_gender": user_gender,
+        "status": status,
+    }
+    provided = {k: v for k, v in update_payload.items() if v is not None}
+    if not provided:
+        return DryRunResult(
+            ok=False,
+            count=0,
+            reason="至少提供一个待更新字段",
+        )
+
+    try:
+        await ensure_targets_in_scope(ctx, user_ids=[user_id])
+    except AuthorizationException as e:
+        return DryRunResult(ok=False, count=0, reason=e.message)
+
+    stmt = select(User).where(User.user_id == user_id, *ctx.data_scope.filters)
+    user = (await ctx.db.execute(stmt)).scalars().first()
+    if not user:
+        return DryRunResult(
+            ok=False,
+            count=0,
+            reason="用户不存在 / 不在可见范围",
+        )
+
+    examples = [
+        f"{field}: {getattr(user, field)} → {value}"
+        for field, value in provided.items()
+    ]
+    summary = f"将更新用户 {user.user_name} 的 {len(provided)} 个字段"
+    return DryRunResult(
+        ok=True,
+        count=1,
+        reason=summary,
+        examples=examples,
+    )

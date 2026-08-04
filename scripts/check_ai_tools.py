@@ -162,7 +162,22 @@ def check_high_risk_requires_dry_run(reg: RegisteredTool) -> list[Violation]:
     影响单行修改场景的体验）"""
     if reg.meta.risk != "high":
         return []
-    if reg.meta.dry_run_supported and reg.dry_run_fn is None:
+
+    # dry_run_fn 在 validate_on_startup 时统一解析（commit 51d732f），装饰器执行
+    # 期 reg.dry_run_fn 还是 None。static check 时主动 sys.modules 查找一次，
+    # 与 check_dry_run_tool_must_implement_hook 同款（spec §5.1）。
+    def _has_dry_run_fn() -> bool:
+        if reg.dry_run_fn is not None:
+            return True
+        import sys  # noqa: PLC0415
+
+        module = sys.modules.get(reg.fn.__module__)
+        if module is None:
+            return False
+        fn_name = f"_dry_run_{reg.meta.name.replace('.', '_')}"
+        return hasattr(module, fn_name)
+
+    if reg.meta.dry_run_supported and not _has_dry_run_fn():
         return [
             Violation(
                 reg.meta.name,
@@ -170,7 +185,7 @@ def check_high_risk_requires_dry_run(reg: RegisteredTool) -> list[Violation]:
                 "risk=high + dry_run_supported=True 但未实现 _dry_run_<tool>",
             )
         ]
-    if not reg.meta.dry_run_supported and reg.dry_run_fn is None:
+    if not reg.meta.dry_run_supported and not _has_dry_run_fn():
         return [
             Violation(
                 reg.meta.name,
