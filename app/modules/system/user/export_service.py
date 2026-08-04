@@ -17,7 +17,7 @@ Task 11：export_users_to_excel（spec §3.6 line 2099-2111 + §2.31 P1-5 line 1
 """
 
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from openpyxl import Workbook
 from sqlalchemy import select
@@ -282,7 +282,12 @@ async def export_users_to_excel(
         raise
 
 
-__all__ = ["export_users_to_excel", "get_export_task", "list_export_tasks"]
+__all__ = [
+    "cleanup_expired_export_tasks",
+    "export_users_to_excel",
+    "get_export_task",
+    "list_export_tasks",
+]
 
 
 async def get_export_task(
@@ -339,3 +344,39 @@ async def list_export_tasks(
         filters=filters or None,
         order_by=UserExportTask.created_at.desc(),
     )
+
+
+async def cleanup_expired_export_tasks(db: AsyncSession) -> int:
+    """清理 30 天前 ExportTask + 关联 export 文件（spec §2.31 v2.2 P1-5）。
+
+    每日 02:30 cron 入口（``app.tasks.user_cleanup_tasks.clean_expired_export_tasks``）。
+    本函数不 commit。
+
+    Returns:
+        删除的 task 行数
+
+    设计要点（决策 22.3）：
+    - 不分 status 全删（CREATED 30 天前说明异步任务挂了；RUNNING 30 天前是 zombie；
+      SUCCESS / FAILED 是终态正常清理）。ExportTask 无状态机 CAS 需求，直接删。
+    - file_storage_key 缺失（FAILED task 没生成文件）不抛错
+    - file_storage_key 指向不存在的文件（被外部删了）也不抛错（FileStorage.delete
+      返 False 而非 raise；MockFileStorage 同款）
+    """
+    cutoff = datetime.now() - timedelta(days=30)
+    fs = get_file_storage()
+
+    stmt = select(UserExportTask).where(UserExportTask.created_at < cutoff)
+    tasks = (await db.execute(stmt)).scalars().all()
+
+    for task in tasks:
+        if task.file_storage_key:
+            try:
+                await fs.delete(task.file_storage_key)
+            except FileNotFoundError:
+                pass
+        await db.delete(task)
+
+    if tasks:
+        await db.flush()
+
+    return len(tasks)

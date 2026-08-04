@@ -21,7 +21,7 @@ import hashlib
 import io
 import json
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal
 
 from openpyxl import Workbook
@@ -47,6 +47,7 @@ from app.modules.system.user.constants import (
     MAX_PREVIEW_RECORDS,
     OVERWRITE_ALLOWED,
     RECOVERABLE_ERROR_CODES,
+    TERMINAL_STATUSES,
     USER_IMPORT_CHUNK_SIZE,
     EmployeeNoSyncMode,
     ImportBatchStatus,
@@ -1217,9 +1218,121 @@ async def cancel_batch(
     )
 
 
+async def cleanup_expired_batches(db: AsyncSession) -> int:
+    """清理 90 天前终态 batch + 关联 failed_rows_file + preview 文件（spec §2.22.1）。
+
+    每日 02:00 cron 入口（``app.tasks.user_cleanup_tasks.clean_expired_import_batches``）。
+    本函数不 commit，由 task wrapper / API 层负责。
+
+    Returns:
+        删除的 batch 行数（含 CASCADE 自动删的 batch_log）
+
+    安全边界（决策 22.1）：
+    - 只删 ``TERMINAL_STATUSES`` 内的 batch（SUCCESS / PARTIAL_SUCCESS / FAILED /
+      EXPIRED / CANCELLED）；CREATED / PREVIEW_DONE / RUNNING 不动：
+        - CREATED 90 天前不可能存在（dry_run 即时转入 PREVIEW_DONE）
+        - PREVIEW_DONE 应由 ``cleanup_expired_previews`` 处理
+        - RUNNING 90 天前是 zombie，归 ``JobLogMonitor`` 类孤儿监控
+    - failed_rows_file / file_storage_key 缺失（None 或文件已被外部删）不抛错，
+      继续删 DB 行（防 dangling file 阻塞 cleanup）
+    """
+    cutoff = datetime.now() - timedelta(days=90)
+    fs = get_file_storage()
+    terminal_values = [s.value for s in TERMINAL_STATUSES]
+
+    stmt = select(UserImportBatch).where(
+        UserImportBatch.created_at < cutoff,
+        UserImportBatch.status.in_(terminal_values),
+    )
+    batches = (await db.execute(stmt)).scalars().all()
+
+    for batch in batches:
+        if batch.failed_rows_file:
+            try:
+                await fs.delete(batch.failed_rows_file)
+            except FileNotFoundError:
+                pass
+        if batch.file_storage_key:
+            try:
+                await fs.delete(batch.file_storage_key)
+            except FileNotFoundError:
+                pass
+        await db.delete(batch)
+        # batch_log FK ondelete=CASCADE 自动跟着删（DB 层触发，flush 后生效）
+
+    if batches:
+        # 触发 DELETE SQL + CASCADE，让调用方查询时数据一致
+        await db.flush()
+
+    return len(batches)
+
+
+async def cleanup_expired_previews(db: AsyncSession) -> int:
+    """PREVIEW_DONE 超 10min → EXPIRED + 删 preview 文件 + 写 batch_log（spec §2.26）。
+
+    每小时 cron 入口（``app.tasks.user_cleanup_tasks.clean_expired_import_previews``）。
+    本函数不 commit。
+
+    Returns:
+        标记为 EXPIRED 的 batch 行数
+
+    设计要点（决策 22.2）：
+    - 用 CAS ``_transition_batch_status(PREVIEW_DONE → EXPIRED)`` 防并发覆盖：
+      用户在 10min 边界刚 cancel / 刚 execute 时，CAS rowcount=0，本函数跳过不报错
+    - 删 file_storage_key 用 ``try/except FileNotFoundError`` 兜底（cancel 流程
+      可能已删过；双重删除不抛错）
+    - 写 batch_log EXPIRED event 进审计链路（spec §2.28 + §2.26 状态机），
+      operator_id 用 batch.operator_id（系统触发但归属原操作人，便于审计反查）
+    """
+    cutoff = datetime.now() - timedelta(minutes=10)
+    fs = get_file_storage()
+
+    stmt = select(UserImportBatch).where(
+        UserImportBatch.status == ImportBatchStatus.PREVIEW_DONE,
+        UserImportBatch.created_at < cutoff,
+    )
+    batches = (await db.execute(stmt)).scalars().all()
+
+    expired_count = 0
+    for batch in batches:
+        success = await _transition_batch_status(
+            db,
+            batch.batch_id,
+            ImportBatchStatus.PREVIEW_DONE,
+            ImportBatchStatus.EXPIRED,
+            finished_at=datetime.now(),
+        )
+        if not success:
+            continue
+
+        if batch.file_storage_key:
+            try:
+                await fs.delete(batch.file_storage_key)
+            except FileNotFoundError:
+                pass
+
+        db.add(
+            UserImportBatchLog(
+                log_id=str(next_id()),
+                batch_id=batch.batch_id,
+                operator_id=batch.operator_id,
+                event="EXPIRED",
+                from_status=ImportBatchStatus.PREVIEW_DONE,
+                to_status=ImportBatchStatus.EXPIRED,
+                detail={"reason": "preview TTL 10min expired (cleanup cron)"},
+            )
+        )
+        await db.flush()
+        expired_count += 1
+
+    return expired_count
+
+
 __all__ = [
     "batch_create_users_from_records",
     "cancel_batch",
+    "cleanup_expired_batches",
+    "cleanup_expired_previews",
     "dry_run_import_users",
     "get_batch_by_preview_token",
     "get_batch_detail",

@@ -112,11 +112,12 @@ async def _transition_batch_status(
     return result.rowcount == 1
 
 
-async def cleanup_expired_batches(*args: Any, **kwargs: Any) -> None:
-    """清理 90 天前已结束 batch + 关联 failed_rows 文件 + batch_log。
+async def cleanup_expired_batches(*args: Any, **kwargs: Any) -> None:  # noqa: ARG001
+    """[已废弃] Task 22 已搬到 ``import_service.cleanup_expired_batches``。
 
-    Task 22 落地：每日 02:00 cron，spec §10 Task 22。
+    保留空壳防外部 import 漂移；调用方应改用 service 层签名（接 ``db`` 参数）。
     """
+    return None
 
 
 def validate_reason_consistency(
@@ -135,15 +136,11 @@ def validate_reason_consistency(
         )
 
 
-async def cleanup_expired_previews(*args: Any, **kwargs: Any) -> None:
-    """PREVIEW_DONE 超 10min → EXPIRED，删孤儿 preview 文件。
-
-    Task 22 落地：每小时 cron，spec §2.26 + v2.2 P1-2。
-    """
+async def cleanup_expired_previews(*args: Any, **kwargs: Any) -> None:  # noqa: ARG001
+    """[已废弃] Task 22 已搬到 ``import_service.cleanup_expired_previews``。"""
+    return None
 
 
-async def cleanup_expired_export_tasks(*args: Any, **kwargs: Any) -> None:
-    """清理 30 天前 ExportTask + 关联 export 文件。
-
-    Task 22 落地：每日 02:30 cron，spec §2.31。
-    """
+async def cleanup_expired_export_tasks(*args: Any, **kwargs: Any) -> None:  # noqa: ARG001
+    """[已废弃] Task 22 已搬到 ``export_service.cleanup_expired_export_tasks``."""
+    return None
