@@ -21,7 +21,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import BusinessRuleException
+from app.core.exceptions import BusinessRuleException, UnprocessableEntityException
 from app.modules.system.user.constants import (
     LEGAL_TRANSITIONS,
     ImportBatchStatus,
@@ -74,7 +74,7 @@ def validate_transition(
     让非法业务逻辑（如终态 → 任意态）在 service 层就被拒绝，避免脏 UPDATE。
     """
     if to_status not in LEGAL_TRANSITIONS.get(from_status, frozenset()):
-        raise BusinessRuleException(
+        raise UnprocessableEntityException(
             f"非法状态转换 {from_status.value} → {to_status.value}",
             error_code="AI_IMPORT_ILLEGAL_TRANSITION",
         )

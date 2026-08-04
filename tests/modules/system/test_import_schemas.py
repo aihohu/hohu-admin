@@ -128,7 +128,12 @@ class TestImportDryRunResult:
 
 class TestImportResult:
     def test_defaults(self):
-        result = ImportResult(batch_id="b1", success_count=5, failed_count=0)
+        result = ImportResult(
+            batch_id="b1",
+            status="SUCCESS",
+            success_count=5,
+            failed_count=0,
+        )
         assert result.skipped_count == 0
         assert result.overwritten_count == 0
         assert result.failed_rows_preview == []
@@ -137,7 +142,11 @@ class TestImportResult:
 
     def test_idempotent_replay_flag(self):
         result = ImportResult(
-            batch_id="b1", success_count=0, failed_count=0, idempotent_replay=True
+            batch_id="b1",
+            status="SUCCESS",
+            success_count=0,
+            failed_count=0,
+            idempotent_replay=True,
         )
         assert result.idempotent_replay is True
 

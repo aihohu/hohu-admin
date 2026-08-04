@@ -30,7 +30,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import redis as redis_module
-from app.core.exceptions import BusinessException, BusinessRuleException
+from app.core.exceptions import (
+    BusinessException,
+    BusinessRuleException,
+    UnprocessableEntityException,
+)
 from app.core.file_storage import FileStorage, get_file_storage
 from app.core.id_generator import next_id
 from app.core.security import get_password_hash
@@ -557,7 +561,7 @@ async def _handle_idempotent_replay(
         )
     ).scalar_one_or_none()
     if fresh is None:
-        raise BusinessRuleException(
+        raise UnprocessableEntityException(
             "preview_token 无效或已过期",
             error_code="AI_IMPORT_PREVIEW_INVALID",
         )
@@ -565,6 +569,7 @@ async def _handle_idempotent_replay(
     if fresh.status in (ImportBatchStatus.SUCCESS, ImportBatchStatus.PARTIAL_SUCCESS):
         return ImportResult(
             batch_id=fresh.batch_id,
+            status=fresh.status.value,
             success_count=fresh.success_count,
             skipped_count=fresh.skipped_count,
             overwritten_count=fresh.overwritten_count,
@@ -573,12 +578,12 @@ async def _handle_idempotent_replay(
             idempotent_replay=True,
         )
     if fresh.status == ImportBatchStatus.RUNNING:
-        raise BusinessRuleException(
+        raise UnprocessableEntityException(
             "批次正在执行中，请等待",
             error_code="AI_IMPORT_BATCH_RUNNING",
         )
     # FAILED / EXPIRED / CANCELLED → 不能重放
-    raise BusinessRuleException(
+    raise UnprocessableEntityException(
         f"批次已 {fresh.status.value}，不能重复执行",
         error_code="AI_IMPORT_ALREADY_EXECUTED",
     )
@@ -631,7 +636,7 @@ async def batch_create_users_from_records(
     # 1. 反查 batch
     batch = await get_batch_by_preview_token(db, preview_token)
     if batch is None:
-        raise BusinessRuleException(
+        raise UnprocessableEntityException(
             "preview_token 无效或已过期",
             error_code="AI_IMPORT_PREVIEW_INVALID",
         )
@@ -871,6 +876,7 @@ async def batch_create_users_from_records(
 
     return ImportResult(
         batch_id=batch.batch_id,
+        status=end_status.value,
         success_count=success_count,
         skipped_count=skipped_count,
         overwritten_count=overwritten_count,

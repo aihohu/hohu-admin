@@ -82,6 +82,29 @@ class InvalidParameterException(BusinessRuleException):
         super().__init__(message=message, error_code=error_code)
 
 
+class UnprocessableEntityException(BusinessRuleException):
+    """业务规则不允许的操作（HTTP 422，spec §5.7）。
+
+    继承 ``BusinessRuleException`` 让 ``pytest.raises(BusinessRuleException)``
+    兼容既有 service 单测（只校验 error_code，不关心 code）。
+    单独覆写 ``self.code = 422`` 让全局 handler 走 422 而非 400。
+
+    用于「请求格式合法但业务语义拒绝」的场景，与 400（请求字段格式错）区分：
+    - AI_IMPORT_PREVIEW_INVALID — preview_token 三重校验失败
+    - AI_IMPORT_BATCH_RUNNING — 并发 execute 同 batch
+    - AI_IMPORT_ALREADY_EXECUTED — 终态 batch 不能重放
+    - AI_IMPORT_ILLEGAL_TRANSITION — 状态机非法转换
+    - AI_IMPORT_EMPLOYEE_NO_EXISTS — sync_mode=CREATE_ONLY 时 employee_no 已存在
+    - AI_IMPORT_BATCH_NOT_FOUND — batch_id 不存在
+    - AI_IMPORT_BATCH_NOT_CANCELLABLE — 终态 batch 不能取消
+    - AI_EXPORT_ASYNC_REQUIRED — 行数 > 5000，需走异步通道
+    """
+
+    def __init__(self, message: str, error_code: str = ""):
+        super().__init__(message=message, error_code=error_code)
+        self.code = 422
+
+
 class SSRFBlockedException(BusinessRuleException):
     """SSRF 防护拦截异常（spec §SSRF Phase 1）。
 

@@ -23,7 +23,7 @@ from openpyxl import Workbook
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import BusinessRuleException
+from app.core.exceptions import BusinessRuleException, UnprocessableEntityException
 from app.core.file_storage import FileStorage, get_file_storage
 from app.core.id_generator import next_id
 from app.db.base import user_depts
@@ -238,7 +238,7 @@ async def export_users_to_excel(
 
         # 5. 行数限制（spec §2.6）
         if len(rows) > USER_EXPORT_ASYNC_THRESHOLD:
-            raise BusinessRuleException(
+            raise UnprocessableEntityException(
                 f"导出行数 {len(rows)} 超过同步阈值 {USER_EXPORT_ASYNC_THRESHOLD}"
                 f"，请等待异步通道开放",
                 error_code="AI_EXPORT_ASYNC_REQUIRED",

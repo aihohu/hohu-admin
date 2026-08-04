@@ -133,11 +133,16 @@ class ImportDryRunResult(_CamelBase):
 
 
 class ImportResult(_CamelBase):
-    """正式导入结果（spec §3.3 v2.2 P1：API 不返回 failed_rows 数组，只返文件）。"""
+    """正式导入结果（spec §3.3 v2.2 P1：API 不返回 failed_rows 数组，只返文件）。
+
+    ``status`` 字段（spec §5.1 execute 响应）：SUCCESS / PARTIAL_SUCCESS / FAILED，
+    让前端不查 batch 详情就能判断结果。
+    """
 
     batch_id: str = Field(
         ..., description="关联 sys_user_import_batch（spec §2.27 幂等用）"
     )
+    status: str = Field(..., description="批次终态：SUCCESS/PARTIAL_SUCCESS/FAILED")
     success_count: int
     skipped_count: int = Field(0, description="on_conflict=skip 命中的")
     overwritten_count: int = Field(0, description="on_conflict=overwrite 命中的")
