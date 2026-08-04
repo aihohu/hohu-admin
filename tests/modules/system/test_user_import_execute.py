@@ -14,6 +14,9 @@
 再调 batch_create_users_from_records 验证 execute 阶段语义。
 """
 
+import asyncio
+import json
+
 import pytest
 from fakeredis import aioredis as fakeredis_async
 from sqlalchemy import select as _select
@@ -33,6 +36,7 @@ from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.user.constants import (
     FAILED_ROWS_PREVIEW_LIMIT,
+    USER_IMPORT_CHUNK_SIZE,
     ImportBatchStatus,
 )
 from app.modules.system.user.import_service import (
@@ -40,7 +44,7 @@ from app.modules.system.user.import_service import (
     dry_run_import_users,
 )
 from app.modules.system.user.models import UserImportBatch, UserImportBatchLog
-from app.modules.system.user.schemas import UserImportRecord
+from app.modules.system.user.schemas import ImportResult, UserImportRecord
 
 # ========== helpers ==========
 
@@ -879,3 +883,383 @@ class TestSuperAdminBypass:
             )
         ).scalar_one()
         assert any(r.role_code == "QA_R_ANY_EXEC" for r in created.roles)
+
+
+# ========== Concurrent Execute (spec §2.27 Task 22b P0) ==========
+
+
+class TestConcurrentExecute:
+    """并发 execute 同 batch — CAS 保证仅 1 成功（spec §2.27 Task 22b P0）。"""
+
+    async def test_concurrent_execute_same_batch(self, db_session, file_storage):
+        """spec §2.27 line 1207：asyncio.gather 模拟并发 → CAS 保证仅 1 成功 + 仅 1 用户入库。
+
+        SQLAlchemy ``AsyncSession`` 不支持单 session 并发 IO（``MissingGreenlet``），
+        真并发场景下 gather 会部分抛 ``MissingGreenlet``；本测试用 ``return_exceptions=True``
+        容错，**关键不变量**是「无论多少 coroutine 抢占，最终入库用户数 == 1」（CAS 在 SQL
+        层 ``UPDATE WHERE status='PREVIEW_DONE'`` 原子，spec §2.27 幂等核心）。
+
+        SQL 层 CAS rowcount 互斥由 ``test_import_state.py::test_state_cas_prevents_race``
+        覆盖；service 层 RUNNING 重放由 ``test_execute_same_token_twice_running_concurrent``
+        覆盖；本测试补「gather 不破坏不变量」端到端验证。
+
+        **反例**: 若 CAS 失效（如改成 ``SELECT status`` + Python 判断 + ``UPDATE``）→
+        多个 coroutine 都看到 PREVIEW_DONE → 都进 chunk loop → 重复创建多个用户。
+        **回归**: ``await _count_users_by_prefix(db_session, "QA_CE_U") == 1``。
+        """
+        dept = _make_dept(8901, "QA-Exec-Dept-CE")
+        super_role = await _fetch_super_role(db_session)
+        operator = _make_user(9901, "QA_EXEC_CE", [super_role], [dept])
+        db_session.add_all([dept, operator])
+        await db_session.flush()
+
+        records = [_make_record(2, "QA_CE_U1", dept_input="QA-Exec-Dept-CE")]
+        batch = await _setup_preview(db_session, records, operator)
+
+        async def _execute():
+            return await batch_create_users_from_records(
+                db_session,
+                records,
+                preview_token=batch.preview_token,
+                file_bytes=_FILE_BYTES,
+                filename="test.xlsx",
+                reason="QA execute test",
+                current_user=operator,
+                file_storage=file_storage,
+            )
+
+        # gather 3 并发：AsyncSession 单 session 限制下，部分 coroutine 可能撞
+        # MissingGreenlet；return_exceptions=True 容错，重点验证「最终仅 1 用户入库」
+        results = await asyncio.gather(
+            _execute(),
+            _execute(),
+            _execute(),
+            return_exceptions=True,
+        )
+
+        # 至少 1 个成功（idempotent_replay=False）
+        successes = [
+            r
+            for r in results
+            if isinstance(r, ImportResult) and not r.idempotent_replay
+        ]
+        assert len(successes) == 1
+
+        # 核心不变量：CAS 防止重复入库
+        assert await _count_users_by_prefix(db_session, "QA_CE_U") == 1
+
+    async def test_execute_same_token_twice_running_concurrent(
+        self, db_session, file_storage
+    ):
+        """spec §2.27 line 1208：CAS 失败 + status=RUNNING → AI_IMPORT_BATCH_RUNNING。
+
+        模拟并发场景：另一 coroutine 已把 status 从 PREVIEW_DONE 转 RUNNING（CAS 已抢走），
+        本调用 CAS 失败后 ``_handle_idempotent_replay`` 读到 RUNNING → 抛 ``AI_IMPORT_BATCH_RUNNING``。
+
+        **反例**: 不区分 RUNNING vs FAILED/EXPIRED 都抛 ``AI_IMPORT_ALREADY_EXECUTED``
+        → 前端无法提示「请等待」vs「已结束不能重放」，UX 退化。
+        **回归**: 本测试严格断言 ``error_code == "AI_IMPORT_BATCH_RUNNING"``。
+        """
+        dept = _make_dept(8902, "QA-Exec-Dept-RUN")
+        super_role = await _fetch_super_role(db_session)
+        operator = _make_user(9902, "QA_EXEC_RUN", [super_role], [dept])
+        db_session.add_all([dept, operator])
+        await db_session.flush()
+
+        records = [_make_record(2, "QA_RUN_U1", dept_input="QA-Exec-Dept-RUN")]
+        batch = await _setup_preview(db_session, records, operator)
+
+        # 手动模拟另一 coroutine 已 CAS 转 RUNNING（chunk loop 进行中）
+        batch.status = ImportBatchStatus.RUNNING
+        await db_session.flush()
+
+        with pytest.raises(BusinessRuleException) as exc:
+            await batch_create_users_from_records(
+                db_session,
+                records,
+                preview_token=batch.preview_token,
+                file_bytes=_FILE_BYTES,
+                filename="test.xlsx",
+                reason="QA execute test",
+                current_user=operator,
+                file_storage=file_storage,
+            )
+        assert exc.value.error_code == "AI_IMPORT_BATCH_RUNNING"
+
+    async def test_execute_expired_batch_rejected(self, db_session, file_storage):
+        """spec §2.27 line 1209：CAS 失败 + status=EXPIRED → AI_IMPORT_ALREADY_EXECUTED。
+
+        EXPIRED 是终态（preview TTL 10min 过期由 cleanup cron 转换），重放应被拒绝。
+        区别于 RUNNING（可重试）：EXPIRED 不可恢复，必须重新走 dry_run。
+
+        **反例**: 允许 EXPIRED 重放 → 用户拿到 10min 前的 preview_token 直接 execute
+        → 跳过重新 dry_run → 但 Redis cache 已被 cleanup 清，会走 DB fallback →
+        可能基于过时数据 execute。
+        **回归**: 本测试严格断言 ``error_code == "AI_IMPORT_ALREADY_EXECUTED"``。
+        """
+        dept = _make_dept(8903, "QA-Exec-Dept-EXP")
+        super_role = await _fetch_super_role(db_session)
+        operator = _make_user(9903, "QA_EXEC_EXP", [super_role], [dept])
+        db_session.add_all([dept, operator])
+        await db_session.flush()
+
+        records = [_make_record(2, "QA_EXP_U1", dept_input="QA-Exec-Dept-EXP")]
+        batch = await _setup_preview(db_session, records, operator)
+
+        batch.status = ImportBatchStatus.EXPIRED
+        await db_session.flush()
+
+        with pytest.raises(BusinessRuleException) as exc:
+            await batch_create_users_from_records(
+                db_session,
+                records,
+                preview_token=batch.preview_token,
+                file_bytes=_FILE_BYTES,
+                filename="test.xlsx",
+                reason="QA execute test",
+                current_user=operator,
+                file_storage=file_storage,
+            )
+        assert exc.value.error_code == "AI_IMPORT_ALREADY_EXECUTED"
+
+
+# ========== Redis Cache Fallback (spec §2.19 Task 22b P0) ==========
+
+
+class TestRedisCacheFallback:
+    """Redis cache miss / corrupt → DB 反查（spec §2.19 Task 22b P0）。
+
+    preview_token 是 SoT（Source of Truth），Redis 仅加速。即使 Redis 全丢或被篡改，
+    execute 仍可凭 preview_token 反查 DB 拿到 batch 行（spec §2.19 line 2696）。
+    """
+
+    async def test_preview_cache_missing_falls_back_to_db(
+        self, db_session, file_storage, fake_redis
+    ):
+        """spec §2.19 反例 2：Redis 全丢 → DB 反查 execute 仍成功。
+
+        场景：Redis 故障 / flushall / key 过期后，execute 凭 preview_token 反查
+        ``sys_user_import_batch.preview_token`` 唯一索引拿到 batch 行，三重校验通过 → 落库。
+
+        **反例**: Redis 是 SoT（cache 丢失则 token 失效）→ Redis 一抖动所有 in-flight
+        import 全部卡死，用户必须重新上传文件 + 重新 dry_run。
+        **回归**: 本测试 ``await fake_redis.flushall()`` 后 execute 仍返回 ``success_count == 1``。
+        """
+        dept = _make_dept(8904, "QA-Exec-Dept-MISS")
+        super_role = await _fetch_super_role(db_session)
+        operator = _make_user(9904, "QA_EXEC_MISS", [super_role], [dept])
+        db_session.add_all([dept, operator])
+        await db_session.flush()
+
+        records = [_make_record(2, "QA_MISS_U1", dept_input="QA-Exec-Dept-MISS")]
+        batch = await _setup_preview(db_session, records, operator)
+
+        # 清空 Redis（模拟 cache miss / 故障）
+        await fake_redis.flushall()
+
+        result = await batch_create_users_from_records(
+            db_session,
+            records,
+            preview_token=batch.preview_token,
+            file_bytes=_FILE_BYTES,
+            filename="test.xlsx",
+            reason="QA execute test",
+            current_user=operator,
+            file_storage=file_storage,
+        )
+
+        assert result.success_count == 1
+        assert result.idempotent_replay is False
+        assert await _count_users_by_prefix(db_session, "QA_MISS_U") == 1
+
+    async def test_preview_cache_corrupted_falls_back_to_db(
+        self, db_session, file_storage, fake_redis
+    ):
+        """spec §2.19 反例 2：Redis value 篡改（指向不存在 batch_id）→ DB 反查 execute 仍成功。
+
+        场景：运维误操作 / Redis 复制 bug 导致 cache value 被改。``get_batch_by_preview_token``
+        先读 Redis 拿到 batch_id → SELECT 找不到 row（spec §2.19 反例 2 fall-through）→
+        再用 preview_token 反查 DB 拿到真实 batch → 三重校验通过 → 落库。
+
+        **反例**: Redis 命中就信任（不验证 batch_id 存在）→ 篡改后 execute 找不到 batch
+        抛 AI_IMPORT_PREVIEW_INVALID，用户必须重新 dry_run。
+        **回归**: ``get_batch_by_preview_token`` 的 fall-through 逻辑由本测试覆盖。
+        """
+        dept = _make_dept(8905, "QA-Exec-Dept-CORR")
+        super_role = await _fetch_super_role(db_session)
+        operator = _make_user(9905, "QA_EXEC_CORR", [super_role], [dept])
+        db_session.add_all([dept, operator])
+        await db_session.flush()
+
+        records = [_make_record(2, "QA_CORR_U1", dept_input="QA-Exec-Dept-CORR")]
+        batch = await _setup_preview(db_session, records, operator)
+
+        # 篡改 Redis value：JSON 仍合法但 batch_id 指向不存在的批次
+        cache_key = f"user_import:preview:{batch.preview_token}"
+        await fake_redis.setex(
+            cache_key,
+            600,
+            json.dumps({"batch_id": "non-existent-batch-id-tampered"}),
+        )
+
+        result = await batch_create_users_from_records(
+            db_session,
+            records,
+            preview_token=batch.preview_token,
+            file_bytes=_FILE_BYTES,
+            filename="test.xlsx",
+            reason="QA execute test",
+            current_user=operator,
+            file_storage=file_storage,
+        )
+
+        assert result.success_count == 1
+        assert result.idempotent_replay is False
+        assert await _count_users_by_prefix(db_session, "QA_CORR_U") == 1
+
+
+# ========== Chunk Progress + Fatal Error Log (spec §2.28 Task 22b P1) ==========
+
+
+class TestBatchLogAdvanced:
+    """chunk_progress 计数 + fatal_error 审计（spec §2.28 Task 22b P1）。
+
+    附加在 TestBatchLog 之上，覆盖 Task 22a 审计发现的 2 条缺口：
+    - 多 chunk 的 CHUNK_PROGRESS 行计数
+    - chunk 致命错误 → EXECUTE_FINISH 写 aborted 详情
+    """
+
+    async def test_log_records_chunk_progress_per_chunk(self, db_session, file_storage):
+        """spec §2.28：N 行 → ceil(N/100) 个 CHUNK_PROGRESS log + chunk_index 顺序递增。
+
+        USER_IMPORT_CHUNK_SIZE=100（constants.py），200 行 → 2 个 chunk → 2 条 CHUNK_PROGRESS。
+        每条 detail.chunk_index 严格递增（0/1），便于前端按 chunk 维度绘制进度条。
+
+        **反例**: 不写 chunk_index 或全写 0 → 前端无法区分「chunk 0 完成」vs「chunk 1 完成」，
+        进度条卡在 50% 不动直到全部完成。
+        **回归**: 本测试断言 chunk_index 严格为 [0, 1]。
+        """
+        dept = _make_dept(8906, "QA-Exec-Dept-CP")
+        super_role = await _fetch_super_role(db_session)
+        operator = _make_user(9906, "QA_EXEC_CP", [super_role], [dept])
+        db_session.add_all([dept, operator])
+        await db_session.flush()
+
+        # 200 行 = 2 chunks（USER_IMPORT_CHUNK_SIZE=100）
+        records = [
+            _make_record(i, f"QA_CP_U{i}", dept_input="QA-Exec-Dept-CP")
+            for i in range(2, 202)
+        ]
+        batch = await _setup_preview(db_session, records, operator)
+
+        await batch_create_users_from_records(
+            db_session,
+            records,
+            preview_token=batch.preview_token,
+            file_bytes=_FILE_BYTES,
+            filename="test.xlsx",
+            reason="QA execute test",
+            current_user=operator,
+            file_storage=file_storage,
+        )
+
+        logs = (
+            (
+                await db_session.execute(
+                    _select(UserImportBatchLog)
+                    .where(UserImportBatchLog.batch_id == batch.batch_id)
+                    .order_by(UserImportBatchLog.created_at, UserImportBatchLog.log_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        chunk_logs = [log for log in logs if log.event == "CHUNK_PROGRESS"]
+
+        # 200 / 100 = 2 chunks
+        assert USER_IMPORT_CHUNK_SIZE == 100
+        assert len(chunk_logs) == 2
+        # chunk_index 严格递增
+        assert chunk_logs[0].detail["chunk_index"] == 0
+        assert chunk_logs[1].detail["chunk_index"] == 1
+        # total_chunks 字段
+        assert chunk_logs[0].detail["total_chunks"] == 2
+        assert chunk_logs[1].detail["total_chunks"] == 2
+
+    async def test_log_records_fatal_error_in_execute_finish(
+        self, db_session, file_storage, monkeypatch
+    ):
+        """spec §2.28 + §2.20：chunk 致命错误 → EXECUTE_FINISH.aborted 写入 + 全批 failed。
+
+        模拟 _process_create_row 抛 RuntimeError（非 BusinessException / IntegrityError），
+        chunk savepoint 自动 ROLLBACK → outer except 捕获 → aborted_error 写入 EXECUTE_FINISH
+        detail + 当前 chunk + 后续 chunk 所有行进 failed_rows（error_code=AI_IMPORT_BATCH_ABORTED）。
+
+        **注**: 当前实现把 aborted 信息合并到 EXECUTE_FINISH.detail.aborted；spec §2.28
+        comment 列出 EXECUTE_FAILED 事件但代码未单独写。Task 22b 决策：保持现有合并语义，
+        不拆 EXECUTE_FAILED 单独事件（避免 Task 22b 范围扩散 + 现有 EXECUTE_FINISH.aborted
+        已满足「致命错误可审计」需求）。
+
+        **反例**: 致命错误静默 → batch 状态显示 SUCCESS 但实际 0 用户入库（数据不一致）。
+        **回归**: 本测试断言 EXECUTE_FINISH.detail 含 ``aborted`` 键 + result.failed_count > 0。
+        """
+        dept = _make_dept(8907, "QA-Exec-Dept-FE")
+        super_role = await _fetch_super_role(db_session)
+        operator = _make_user(9907, "QA_EXEC_FE", [super_role], [dept])
+        db_session.add_all([dept, operator])
+        await db_session.flush()
+
+        records = [
+            _make_record(2, "QA_FE_U1", dept_input="QA-Exec-Dept-FE"),
+            _make_record(3, "QA_FE_U2", dept_input="QA-Exec-Dept-FE"),
+        ]
+        batch = await _setup_preview(db_session, records, operator)
+
+        # 模拟致命错误：monkeypatch _process_create_row 抛 RuntimeError
+        async def _raise_fatal(db, record, hashed_password):  # noqa: ARG001
+            raise RuntimeError("simulated fatal DB error")
+
+        monkeypatch.setattr(
+            "app.modules.system.user.import_service._process_create_row",
+            _raise_fatal,
+        )
+
+        result = await batch_create_users_from_records(
+            db_session,
+            records,
+            preview_token=batch.preview_token,
+            file_bytes=_FILE_BYTES,
+            filename="test.xlsx",
+            reason="QA execute test",
+            current_user=operator,
+            file_storage=file_storage,
+        )
+
+        # 全部记录失败（chunk savepoint rollback + 后续 chunk 也归 failed）
+        assert result.success_count == 0
+        assert result.failed_count >= 1
+        assert result.status == ImportBatchStatus.FAILED.value
+
+        # EXECUTE_FINISH log 写入 aborted 详情（str(exc) 不含类型名，只含 message）
+        logs = (
+            (
+                await db_session.execute(
+                    _select(UserImportBatchLog)
+                    .where(UserImportBatchLog.batch_id == batch.batch_id)
+                    .order_by(UserImportBatchLog.created_at, UserImportBatchLog.log_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        finish_logs = [log for log in logs if log.event == "EXECUTE_FINISH"]
+        assert len(finish_logs) == 1
+        assert "aborted" in finish_logs[0].detail
+        # str(RuntimeError("...")) 只返回 message；类型名在 failed_rows.reason 里
+        assert "simulated fatal DB error" in finish_logs[0].detail["aborted"]
+
+        # failed_rows.reason 含 type(e).__name__（service 写 failed_rows 时拼了类型名）
+        aborted_failed_rows = [
+            fr for fr in result.failed_rows_preview if "RuntimeError" in fr.reason
+        ]
+        assert len(aborted_failed_rows) >= 1

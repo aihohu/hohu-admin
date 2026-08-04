@@ -88,6 +88,19 @@ class TestValidateTransition:
         validate_transition(S.RUNNING, S.PARTIAL_SUCCESS)
         validate_transition(S.RUNNING, S.FAILED)
 
+    def test_state_created_to_failed_on_parse_error(self):
+        """spec §2.26 + Task 22b P1：CREATED → FAILED 合法（解析失败兜底路径）。
+
+        dry_run_import_users 内部若 ``_classify_records`` 抛异常（如 IO 错误 / 解析失败），
+        理论上应主动把 batch 从 CREATED 转 FAILED 标记失败终态（当前代码未实现此分支，
+        Task 22b 仅验证状态机允许此转换；集成路径补在 Task 22c+ 跟进）。
+
+        **反例**: LEGAL_TRANSITIONS 不允许 CREATED → FAILED → 调用方只能删除 batch 行
+        或留 CREATED 状态悬挂（cleanup cron 不删非终态，行永久驻留）。
+        **回归**: ``constants.LEGAL_TRANSITIONS[CREATED]`` 含 FAILED。
+        """
+        validate_transition(S.CREATED, S.FAILED)  # should not raise
+
 
 class TestTransitionBatchStatus:
     async def test_state_created_to_preview_done(self, db_session, batch_table):
