@@ -172,12 +172,9 @@ class TestUserImportBatchResponse:
             batch_id="b1",
             operator_id=1234567890123456,
             filename="users.xlsx",
-            file_sha256="abc",
             total_rows=100,
-            preview_token="tok",
             on_conflict="skip",
             status="CREATED",
-            reason="HR 同步",
             created_at=datetime(2026, 8, 3, 10, 0, 0),
         )
         # int 输入 → 序列化为 string
@@ -190,19 +187,25 @@ class TestUserImportBatchResponse:
             batch_id="b1",
             operator_id="1",
             filename="users.xlsx",
-            file_sha256="abc",
             total_rows=0,
-            preview_token="tok",
             on_conflict="skip",
             status="CREATED",
-            reason="HR 同步",
             created_at=datetime(2026, 8, 3, 10, 0, 0),
         )
         serialized = resp.model_dump(by_alias=True)
+        # Task 15 决策 15.4：剥离敏感字段（preview_token / file_sha256 /
+        # records_hash / reason），仅审计链路保留 → 序列化结果不应含这些键
         assert "batchId" in serialized
-        assert "previewToken" in serialized
         assert "createdAt" in serialized
         assert "totalRows" in serialized
+        assert "operatorName" in serialized
+        assert "expiresAt" in serialized
+        assert "syncMode" in serialized
+        # 敏感字段已剥离
+        assert "previewToken" not in serialized
+        assert "fileSha256" not in serialized
+        assert "recordsHash" not in serialized
+        assert "reason" not in serialized
 
 
 class TestUserExportTaskResponse:

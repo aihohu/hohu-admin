@@ -44,12 +44,14 @@ from app.modules.system.user.import_parser import (
 from app.modules.system.user.import_service import (
     batch_create_users_from_records,
     dry_run_import_users,
+    get_batch_detail,
 )
 from app.modules.system.user.schemas import (
     UserExportFilter,
     UserExportRequest,
     UserExportTaskQuery,
     UserExportTaskResponse,
+    UserImportBatchResponse,
 )
 from app.modules.system.user.template_service import generate_import_template
 
@@ -614,6 +616,117 @@ async def download_import_template(
             "Content-Disposition": f"attachment; filename={_TEMPLATE_FILENAME}",
         },
     )
+
+
+# ========== 用户导入批次详情（spec §5.4 v2.2 P2，Task 15）==========
+
+#: spec §5.4 line 2262 + §2.19：preview_token 10min TTL（CREATED/PREVIEW_DONE 用）
+_PREVIEW_TTL_SECONDS = 600
+
+#: spec §3.x 失败行文件 24h TTL（终态批次文件保留 1 天）
+_FINISHED_TTL_SECONDS = 24 * 3600
+
+
+def _compute_batch_expires_at(batch) -> datetime | None:
+    """按 batch 状态动态算 expires_at（spec §5.4 line 2262 + 决策 15.5）。
+
+    - CREATED / PREVIEW_DONE / RUNNING：created_at + 10min（preview 窗口，spec §2.19）
+    - SUCCESS / PARTIAL_SUCCESS / FAILED / EXPIRED / CANCELLED：
+      finished_at + 24h（finished_at 缺失回退 created_at + 24h）
+
+    Args:
+        batch: UserImportBatch ORM（已包含 status / created_at / finished_at）
+
+    Returns:
+        过期时间 datetime；batch 或 created_at 缺失时返回 None
+    """
+    if batch is None or batch.created_at is None:
+        return None
+    from app.modules.system.user.constants import ImportBatchStatus  # noqa: PLC0415
+
+    preview_states = {
+        ImportBatchStatus.CREATED,
+        ImportBatchStatus.PREVIEW_DONE,
+        ImportBatchStatus.RUNNING,
+    }
+    if batch.status in preview_states:
+        return batch.created_at + timedelta(seconds=_PREVIEW_TTL_SECONDS)
+
+    # 终态：优先用 finished_at，回退 created_at（CANCELLED 可能 finished_at 还没写）
+    base = batch.finished_at or batch.created_at
+    return base + timedelta(seconds=_FINISHED_TTL_SECONDS)
+
+
+def _build_batch_response(batch, operator_name: str | None) -> dict:
+    """构造 GET /import/{batch_id} 响应 dict（spec §5.4 line 2238-2264）。
+
+    安全：剥离 preview_token / file_sha256 / records_hash / reason
+    （决策 15.4：reason 仅审计链路保留；preview_token 是 execute 凭证不能泄露）。
+    """
+    payload = UserImportBatchResponse(
+        batch_id=batch.batch_id,
+        operator_id=batch.operator_id,
+        operator_name=operator_name,
+        filename=batch.filename,
+        total_rows=batch.total_rows,
+        summary_new=batch.summary_new,
+        summary_exists=batch.summary_exists,
+        summary_conflict=batch.summary_conflict,
+        summary_out_of_scope=batch.summary_out_of_scope,
+        success_count=batch.success_count,
+        skipped_count=batch.skipped_count,
+        overwritten_count=batch.overwritten_count,
+        failed_count=batch.failed_count,
+        failed_rows_file=batch.failed_rows_file,
+        on_conflict=batch.on_conflict,
+        sync_mode=None,  # 决策 15.6：暂不查 batch_log，spec §5.4 字段保留 None
+        status=batch.status.value
+        if hasattr(batch.status, "value")
+        else str(batch.status),
+        created_at=batch.created_at,
+        started_at=batch.started_at,
+        finished_at=batch.finished_at,
+        expires_at=_compute_batch_expires_at(batch),
+    )
+    return payload.model_dump(mode="json", by_alias=True)
+
+
+@router.get(
+    "/import/{batch_id}",
+    response_model=ResponseModel[UserImportBatchResponse],
+    summary="按 batch_id 查询导入批次详情",
+    description=(
+        "spec §5.4 v2.2 P2 line 2229-2278：导入批次状态查询，前端导入历史 + "
+        "Phase 3 异步轮询 + 审计反查（batch_id 来自 sys_operation_log 反查）。"
+        "权限：system:user:list（spec §5.4 line 2234：list 即可，因为查的是导入历史不是用户敏感数据）。"
+    ),
+    responses={
+        200: {"description": "批次详情"},
+        401: {"description": "未登录或令牌已过期"},
+        403: {"description": "权限不足"},
+        404: {"description": "batch_id 不存在"},
+    },
+    dependencies=[Depends(require_permissions("system:user:list"))],
+)
+async def get_import_batch_detail(
+    batch_id: str,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    """spec §5.4 line 2229-2278：按 batch_id 查批次详情。
+
+    流程：
+    1. ``get_batch_detail(db, batch_id)`` → ``(batch, operator_name)``（outerjoin sys_user）
+    2. batch 为 None → 抛 ``AI_IMPORT_BATCH_NOT_FOUND``
+    3. 构造响应（含 expires_at 动态计算，剥离敏感字段）
+    """
+    batch, operator_name = await get_batch_detail(db, batch_id)
+    if batch is None:
+        raise NotFoundException(
+            "用户导入批次",
+            error_code="AI_IMPORT_BATCH_NOT_FOUND",
+        )
+    return ResponseModel.success(data=_build_batch_response(batch, operator_name))
 
 
 # ========== 用户导出（spec §5.2 + §2.31 P1-5，Task 13）==========

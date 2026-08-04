@@ -928,8 +928,40 @@ def _make_failed_row_from_exc(
     )
 
 
+async def get_batch_detail(
+    db: AsyncSession,
+    batch_id: str,
+) -> tuple[UserImportBatch | None, str | None]:
+    """按 batch_id 查询批次详情 + 操作人 user_name（spec §5.4 v2.2 P2）。
+
+    一次性 outerjoin sys_user 拿 operator_name，避免 N+1。
+
+    Args:
+        db: 异步数据库会话
+        batch_id: 批次 ID（UUID 字符串）
+
+    Returns:
+        ``(batch, operator_name)``：
+        - batch 找不到时 → ``(None, None)``，API 层抛 ``AI_IMPORT_BATCH_NOT_FOUND``
+        - operator 用户的 user_name；user 被删除时 → ``None``（outerjoin）
+    """
+    from app.modules.system.models.user import User  # noqa: PLC0415
+
+    stmt = (
+        select(UserImportBatch, User.user_name)
+        .outerjoin(User, User.user_id == UserImportBatch.operator_id)
+        .where(UserImportBatch.batch_id == batch_id)
+    )
+    row = (await db.execute(stmt)).first()
+    if row is None:
+        return None, None
+    batch, operator_name = row
+    return batch, operator_name
+
+
 __all__ = [
     "batch_create_users_from_records",
     "dry_run_import_users",
     "get_batch_by_preview_token",
+    "get_batch_detail",
 ]

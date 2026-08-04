@@ -213,19 +213,30 @@ class UserExportTaskQuery(_CamelBase):
 
 
 class UserImportBatchResponse(_CamelBase):
-    """导入批次 API 响应（spec §3.6 v2.2 P1-2：唯一 aggregate root）。
+    """导入批次 API 响应（spec §3.6 v2.2 P1-2 + §5.4 v2.2 P2：唯一 aggregate root）。
 
     Pydantic 类，与 ORM UserImportBatch（models.py Task 2）分离：
     - ORM 用于 DB 层
     - 本响应类用于 API 序列化（ID 字符串化、时间 ISO 字符串）
+
+    Task 15 GET /import/{batch_id} 字段补充（spec §5.4 line 2238-2264）：
+    - ``operator_name``：join sys_user 拿的 user_name（spec §5.4 line 2246）
+    - ``expires_at``：动态计算（CREATED/PREVIEW_DONE = created_at+10min；
+      终态 = finished_at+24h）
+    - ``sync_mode``：当前不查 batch_log，先返 None（决策 15.x 待 task 22 补齐）
+
+    安全：不暴露 ``preview_token`` / ``file_sha256`` / ``records_hash`` /
+    ``reason``（reason 仅审计链路保留，前端查询接口不返回）。
     """
 
     batch_id: str
     operator_id: int
+    operator_name: str | None = Field(
+        None,
+        description="操作人 user_name（join sys_user 反查，spec §5.4 line 2246）",
+    )
     filename: str
-    file_sha256: str
     total_rows: int
-    preview_token: str
     summary_new: int = 0
     summary_exists: int = 0
     summary_conflict: int = 0
@@ -236,11 +247,26 @@ class UserImportBatchResponse(_CamelBase):
     failed_count: int = 0
     failed_rows_file: str | None = None
     on_conflict: Literal["skip", "overwrite", "fail_fast"]
+    sync_mode: str | None = Field(
+        None,
+        description=(
+            "employee_no 同步策略（CREATE_ONLY / UPDATE_PROFILE / FULL_SYNC）。"
+            "当前不查 batch_log，先返 None（决策 15.x）。"
+        ),
+    )
     status: str
-    reason: str
     created_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    expires_at: datetime | None = Field(
+        None,
+        description=(
+            "批次过期时间（动态计算）。CREATED/PREVIEW_DONE：created_at + 10min"
+            "（preview TTL，spec §2.19）；"
+            "SUCCESS/PARTIAL_SUCCESS/FAILED/EXPIRED/CANCELLED：finished_at + 24h"
+            "（failed_rows_file 文件 TTL，spec §3.x）。"
+        ),
+    )
 
     @field_serializer("operator_id")
     def _serialize_operator_id(self, v: int) -> str:
