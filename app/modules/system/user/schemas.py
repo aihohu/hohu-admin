@@ -78,7 +78,10 @@ class UserImportRecord(_CamelBase):
         description="逗号分隔 code/name 混合，如「R_ADMIN,内容编辑」",
     )
     user_gender: Literal["0", "1", "2"] = Field("0", description="0 未知 / 1 男 / 2 女")
-    status: Literal["0", "1"] = Field("1", description="0 禁用 / 1 启用（默认启用）")
+    status: Literal["1", "2"] = Field(
+        "1",
+        description="1 启用 / 2 禁用（v2.3 §2.9.1 修订：对齐 DB / 前端 / 其他模块真实取值）",
+    )
 
 
 class FailedRow(_CamelBase):
@@ -170,7 +173,7 @@ class UserExportFilter(_CamelBase):
     user_email: str | None = None
     user_phone: str | None = None
     dept_id: str | None = Field(None, description="部门 ID（Snowflake 字符串）")
-    status: Literal["0", "1"] | None = None
+    status: Literal["1", "2"] | None = None
 
 
 class UserExportRequest(UserExportFilter):

@@ -33,6 +33,7 @@ from app.modules.system.service.dept_service import dept_service
 from app.modules.system.service.user_service import user_service
 from app.modules.system.user.constants import EmployeeNoSyncMode
 from app.modules.system.user.export_service import (
+    download_export_file,
     export_users_to_excel,
     get_export_task,
     list_export_tasks,
@@ -947,8 +948,9 @@ async def export_users(
     )
     await db.commit()
 
-    today = datetime.now().strftime("%Y%m%d")
-    filename = f"users_{today}.xlsx"
+    # v2.3 §2.9.1 决策 30.6：hohu_ 前缀 + YYYYMMDD_HHmmss 时间戳避免同日多次导出冲突
+    now = datetime.now()
+    filename = f"hohu_users_{now.strftime('%Y%m%d_%H%M%S')}.xlsx"
     # 用 Response（非 StreamingResponse）：bytes 已全在内存，无流式收益；
     # BaseHTTPMiddleware（audit_middleware）与 StreamingResponse 冲突
     # （starlette 已知问题：BackgroundTask + receive hook 时序错乱），
@@ -1023,3 +1025,42 @@ async def get_export_task_detail(
             error_code="AI_EXPORT_TASK_NOT_FOUND",
         )
     return ResponseModel.success(data=UserExportTaskResponse.model_validate(task))
+
+
+@router.get(
+    "/export/{export_id}/download",
+    summary="按 export_id 下载已导出文件（Task 33）",
+    description=(
+        "spec §2.31 line 1626 落地：AI 对话内 detail_card 下载按钮触发本端点。"
+        "从 task.file_storage_key 读 bytes → 流式返回。"
+        "任务不存在 / 状态非 SUCCESS / 文件被删 → 各自 errorCode。"
+    ),
+    responses={
+        200: {"description": "xlsx 文件流"},
+        400: {"description": "任务未成功 / 文件缺失 / 文件已过期"},
+        401: {"description": "未登录或令牌已过期"},
+        403: {"description": "权限不足"},
+        404: {"description": "export_id 不存在"},
+    },
+    dependencies=[Depends(require_permissions("system:user:export"))],
+)
+async def download_export_file_endpoint(
+    export_id: str,
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
+    """Task 33：AI 对话内点击下载闭环。
+
+    权限与 POST /export 一致（system:user:export）：能导出的角色就能
+    重下载历史任务文件（同等敏感级别）。
+
+    决策 33.4：filename 从 task.created_at 派生（与同步导出决策 30.6
+    一致），不重新生成当前时间 — 重下载历史任务时反映真实导出时刻，
+    便于审计反查「这份文件是哪次导出的」。
+    """
+    xlsx_bytes, filename = await download_export_file(db, export_id)
+    return Response(
+        content=xlsx_bytes,
+        media_type=_EXPORT_MIME_TYPE,
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )

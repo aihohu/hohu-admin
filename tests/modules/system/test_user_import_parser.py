@@ -371,3 +371,76 @@ class TestImportErrorCollection:
         assert isinstance(exc, Exception)
         assert len(exc.errors) == 1
         assert "1 field errors" in str(exc)
+
+
+# ========== v2.3 §2.9.1：导入侧中文字面值反查 + status 取值统一 1/2 ==========
+
+
+class TestChineseLabelRoundTrip:
+    """v2.3 §2.9.1：导出 Excel 翻译后的中文标签可 round-trip 给导入。
+
+    场景：管理员导出 users.xlsx（status="启用"，user_gender="男"，dept_input="总公司/研发中心"），
+    修改后重新导入 — status / user_gender 中文字面值必须被反查回字面值。
+    """
+
+    def test_status_chinese_label_round_trip(self):
+        """status 中文标签 "启用" → "1"；"禁用" → "2"。"""
+        rows = [
+            ["alice", "", "Alice", "", "", "QA-Dept", "", "0", "启用"],
+            ["bob", "", "Bob", "", "", "QA-Dept", "", "0", "禁用"],
+        ]
+        records = parse_import_excel(_xlsx_bytes(rows), MIME_XLSX)
+        assert records[0].status == "1"
+        assert records[1].status == "2"
+
+    def test_gender_chinese_label_round_trip(self):
+        """user_gender 中文标签 "未知"→"0"，"男"→"1"，"女"→"2"。"""
+        rows = [
+            ["alice", "", "Alice", "", "", "QA-Dept", "", "未知", "1"],
+            ["bob", "", "Bob", "", "", "QA-Dept", "", "男", "1"],
+            ["carol", "", "Carol", "", "", "QA-Dept", "", "女", "1"],
+        ]
+        records = parse_import_excel(_xlsx_bytes(rows), MIME_XLSX)
+        assert records[0].user_gender == "0"
+        assert records[1].user_gender == "1"
+        assert records[2].user_gender == "2"
+
+    def test_status_disabled_two_now_accepted(self):
+        """v2.3 §2.9.1 修复 bug：_STATUS_VALUES 从 {"0","1"} 改 {"1","2"}，
+        DB 真实取值 status="2"（禁用）必须可导入。"""
+        rows = [["alice", "", "Alice", "", "", "QA-Dept", "", "0", "2"]]
+        records = parse_import_excel(_xlsx_bytes(rows), MIME_XLSX)
+        assert records[0].status == "2"
+
+    def test_status_zero_now_rejected(self):
+        """v2.3 §2.9.1 修订：status="0" 字面值不属于 DB 真实取值集合（"1","2"），
+        应抛 AI_IMPORT_STATUS_INVALID 让用户改 Excel（不能静默写错数据）。"""
+        rows = [["alice", "", "Alice", "", "", "QA-Dept", "", "0", "0"]]
+        with pytest.raises(ImportErrorCollection) as exc_info:
+            parse_import_excel(_xlsx_bytes(rows), MIME_XLSX)
+        errors = exc_info.value.errors
+        assert any(
+            e.field == "status" and e.error_code == "AI_IMPORT_STATUS_INVALID"
+            for e in errors
+        )
+
+    def test_status_literal_still_works(self):
+        """字面值 "1" / "2" 仍然合法（向后兼容非 round-trip 场景）。"""
+        rows = [
+            ["alice", "", "Alice", "", "", "QA-Dept", "", "0", "1"],
+            ["bob", "", "Bob", "", "", "QA-Dept", "", "0", "2"],
+        ]
+        records = parse_import_excel(_xlsx_bytes(rows), MIME_XLSX)
+        assert records[0].status == "1"
+        assert records[1].status == "2"
+
+    def test_unknown_chinese_label_rejected(self):
+        """非翻译字典中的中文字面值（如 "启用中"）应抛 AI_IMPORT_STATUS_INVALID。"""
+        rows = [["alice", "", "Alice", "", "", "QA-Dept", "", "0", "启用中"]]
+        with pytest.raises(ImportErrorCollection) as exc_info:
+            parse_import_excel(_xlsx_bytes(rows), MIME_XLSX)
+        errors = exc_info.value.errors
+        assert any(
+            e.field == "status" and e.error_code == "AI_IMPORT_STATUS_INVALID"
+            for e in errors
+        )

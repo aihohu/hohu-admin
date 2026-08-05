@@ -28,7 +28,11 @@ from sqlalchemy import select
 
 from app.core.base_response import PageResult
 from app.core.config import settings
-from app.core.exceptions import UnprocessableEntityException
+from app.core.exceptions import (
+    BusinessRuleException,
+    NotFoundException,
+    UnprocessableEntityException,
+)
 from app.main import app
 from app.modules.system.models.user import User
 from app.modules.system.user.constants import ExportTaskStatus
@@ -139,7 +143,11 @@ class TestPostExportSync:
     async def test_returns_streaming_xlsx_with_content_disposition(
         self, client, admin_token
     ):
-        """200 + Content-Disposition: attachment; filename=users_YYYYMMDD.xlsx。"""
+        """200 + Content-Disposition: attachment; filename=hohu_users_YYYYMMDD_HHmmss.xlsx。
+
+        决策 30.6：文件名格式 hohu_users_YYYYMMDD_HHmmss.xlsx
+        （hohu_ 前缀 + 时间戳避免同日多次导出冲突）。
+        """
         with patch(
             f"{_API_MODULE}.export_users_to_excel",
             new=AsyncMock(return_value=(_fake_xlsx_bytes(), 10, "exp-xxx")),
@@ -158,12 +166,12 @@ class TestPostExportSync:
         assert response.status_code == 200, response.text
         # Content-Type 是 xlsx MIME
         assert response.headers["content-type"] == XLSX_MIME
-        # Content-Disposition 格式：attachment; filename=users_YYYYMMDD.xlsx
+        # Content-Disposition 格式：attachment; filename=hohu_users_YYYYMMDD_HHmmss.xlsx
         cd = response.headers.get("content-disposition", "")
         assert "attachment" in cd, f"Content-Disposition 缺 attachment: {cd}"
-        # 8 位日期（今日）
-        match = re.search(r"filename=users_(\d{8})\.xlsx", cd)
-        assert match is not None, f"filename 不符合 spec: {cd}"
+        # 决策 30.6：hohu_users_ + 8 位日期 + _ + 6 位时分秒
+        match = re.search(r"filename=hohu_users_(\d{8})_(\d{6})\.xlsx", cd)
+        assert match is not None, f"filename 不符合决策 30.6: {cd}"
         # body 是 xlsx bytes（PK magic header）
         assert response.content.startswith(_XLSX_MAGIC)
         mock_service.assert_awaited_once()
@@ -350,3 +358,125 @@ class TestGetExportList:
         assert query_arg.size == 20
         assert query_arg.status == "SUCCESS"
         assert query_arg.operator_id == 1
+
+
+# ========== GET /export/{export_id}/download（Task 33） ==========
+
+
+class TestGetExportDownload:
+    """Task 33 / spec §2.31 line 1626 落地：AI 场景对话内点击下载。
+
+    端点：GET /system/user/export/{export_id}/download
+    - 从 sys_user_export_task.file_storage_key 读 bytes → 流式返回
+    - Content-Disposition 文件名沿用决策 30.6 规范（hohu_users_*）
+    - 任务不存在 / 状态非 SUCCESS / 文件被删 → 各自 errorCode
+    """
+
+    async def test_no_token_returns_401(self, client):
+        response = await client.get("/system/user/export/exp-xxx/download")
+        assert response.status_code == 401
+
+    async def test_success_returns_xlsx_stream(self, client, admin_token):
+        """200 + Content-Type=xlsx + Content-Disposition attachment。
+
+        filename 沿用决策 30.6 的 hohu_users_YYYYMMDD_HHmmss 格式
+        （从 task.created_at 派生，与同步导出一致，不重新生成当前时间）。
+        """
+        with patch(
+            f"{_API_MODULE}.download_export_file",
+            new=AsyncMock(
+                return_value=(
+                    _fake_xlsx_bytes(),
+                    "hohu_users_20260805_103525.xlsx",
+                )
+            ),
+        ) as mock_download:
+            response = await client.get(
+                "/system/user/export/exp-xxx/download",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+
+        assert response.status_code == 200, response.text
+        assert response.headers["content-type"] == XLSX_MIME
+        cd = response.headers.get("content-disposition", "")
+        assert "attachment" in cd
+        assert "hohu_users_20260805_103525.xlsx" in cd
+        assert response.content.startswith(_XLSX_MAGIC)
+        # service 收到 export_id
+        assert mock_download.call_args.args[1] == "exp-xxx"
+
+    async def test_task_not_found_returns_404(self, client, admin_token):
+        """任务不存在 → 404 AI_EXPORT_TASK_NOT_FOUND。"""
+        with patch(
+            f"{_API_MODULE}.download_export_file",
+            new=AsyncMock(
+                side_effect=NotFoundException(
+                    "用户导出任务",
+                    error_code="AI_EXPORT_TASK_NOT_FOUND",
+                )
+            ),
+        ):
+            response = await client.get(
+                "/system/user/export/nonexistent/download",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+
+        assert response.status_code == 404
+        assert response.json()["errorCode"] == "AI_EXPORT_TASK_NOT_FOUND"
+
+    async def test_not_success_status_returns_400(self, client, admin_token):
+        """任务 status != SUCCESS（FAILED/CREATED）→ 400 AI_EXPORT_TASK_NOT_READY。"""
+        with patch(
+            f"{_API_MODULE}.download_export_file",
+            new=AsyncMock(
+                side_effect=BusinessRuleException(
+                    "导出任务未成功，无法下载",
+                    error_code="AI_EXPORT_TASK_NOT_READY",
+                )
+            ),
+        ):
+            response = await client.get(
+                "/system/user/export/exp-failed/download",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+
+        assert response.status_code == 400
+        assert response.json()["errorCode"] == "AI_EXPORT_TASK_NOT_READY"
+
+    async def test_file_missing_returns_400(self, client, admin_token):
+        """file_storage_key 为 None（FAILED task 或异常路径）→ 400 AI_EXPORT_FILE_MISSING。"""
+        with patch(
+            f"{_API_MODULE}.download_export_file",
+            new=AsyncMock(
+                side_effect=BusinessRuleException(
+                    "导出文件缺失",
+                    error_code="AI_EXPORT_FILE_MISSING",
+                )
+            ),
+        ):
+            response = await client.get(
+                "/system/user/export/exp-no-file/download",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+
+        assert response.status_code == 400
+        assert response.json()["errorCode"] == "AI_EXPORT_FILE_MISSING"
+
+    async def test_file_expired_returns_400(self, client, admin_token):
+        """文件被 30 天 TTL 清理 / 外部删除 → 400 AI_EXPORT_FILE_EXPIRED。"""
+        with patch(
+            f"{_API_MODULE}.download_export_file",
+            new=AsyncMock(
+                side_effect=BusinessRuleException(
+                    "导出文件已过期（30 天 TTL）",
+                    error_code="AI_EXPORT_FILE_EXPIRED",
+                )
+            ),
+        ):
+            response = await client.get(
+                "/system/user/export/exp-expired/download",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+
+        assert response.status_code == 400
+        assert response.json()["errorCode"] == "AI_EXPORT_FILE_EXPIRED"

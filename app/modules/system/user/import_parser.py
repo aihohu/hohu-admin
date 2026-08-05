@@ -54,7 +54,15 @@ _PHONE_RE = re.compile(r"^1[3-9]\d{9}$")
 
 #: gender / status 合法取值（与 UserImportRecord Literal 对齐）
 _GENDER_VALUES: frozenset[str] = frozenset({"0", "1", "2"})
-_STATUS_VALUES: frozenset[str] = frozenset({"0", "1"})
+#: v2.3 §2.9.1 修订：status 取值对齐 DB / 前端 / 其他模块真实约定 ("1","2")
+#: （原 {"0","1"} 是 spec §3.1 line 1634 笔误，会拦掉真实合法的 "2" 禁用用户）。
+_STATUS_VALUES: frozenset[str] = frozenset({"1", "2"})
+
+#: v2.3 §2.9.1：中文字面值反查表（导出 Excel 翻译后的值可 round-trip 给导入）。
+#: 反向与 export_service._STATUS_LABELS / _GENDER_LABELS 一一对应。
+#: 反查失败 fallback 到字面值继续走 _STATUS_VALUES / _GENDER_VALUES 校验。
+_STATUS_LABELS_INV: dict[str, str] = {"启用": "1", "禁用": "2"}
+_GENDER_LABELS_INV: dict[str, str] = {"未知": "0", "男": "1", "女": "2"}
 
 
 class ImportErrorCollection(Exception):
@@ -349,14 +357,16 @@ def _validate_row(
     role_input: str | None = role_input_raw or None
 
     # user_gender Literal["0","1","2"]，默认 "0"
-    gender_raw = _get("user_gender") or "0"
+    # v2.3 §2.9.1：先反查中文字面值（"男"/"女"/"未知"），未命中走原字面值
+    gender_input = _get("user_gender") or "0"
+    gender_raw = _GENDER_LABELS_INV.get(gender_input, gender_input)
     if gender_raw not in _GENDER_VALUES:
         errors.append(
             FailedRow(
                 row_num=row_num,
                 field="user_gender",
-                value=gender_raw,
-                reason="user_gender 取值需 0/1/2",
+                value=gender_input,
+                reason="user_gender 取值需 0/1/2 或 未知/男/女",
                 error_code="AI_IMPORT_GENDER_INVALID",
             )
         )
@@ -364,15 +374,17 @@ def _validate_row(
     else:
         gender = gender_raw
 
-    # status Literal["0","1"]，默认 "1"
-    status_raw = _get("status") or "1"
+    # status Literal["1","2"]（v2.3 §2.9.1 修订对齐 DB），默认 "1"
+    # v2.3 §2.9.1：先反查中文字面值（"启用"/"禁用"），未命中走原字面值
+    status_input = _get("status") or "1"
+    status_raw = _STATUS_LABELS_INV.get(status_input, status_input)
     if status_raw not in _STATUS_VALUES:
         errors.append(
             FailedRow(
                 row_num=row_num,
                 field="status",
-                value=status_raw,
-                reason="status 取值需 0/1",
+                value=status_input,
+                reason="status 取值需 1/2 或 启用/禁用",
                 error_code="AI_IMPORT_STATUS_INVALID",
             )
         )

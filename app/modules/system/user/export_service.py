@@ -24,10 +24,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_response import PageResult
-from app.core.exceptions import BusinessRuleException, UnprocessableEntityException
+from app.core.exceptions import (
+    BusinessRuleException,
+    NotFoundException,
+    UnprocessableEntityException,
+)
 from app.core.file_storage import FileStorage, get_file_storage
 from app.core.id_generator import next_id
 from app.db.base import user_depts
+from app.modules.system.models.dept import Dept
 from app.modules.system.models.user import User
 from app.modules.system.user.constants import (
     EXPORT_ALLOWED_FIELDS,
@@ -37,17 +42,19 @@ from app.modules.system.user.constants import (
 from app.modules.system.user.import_validator import _compute_accessible_dept_ids
 from app.modules.system.user.models import UserExportTask
 from app.modules.system.user.schemas import UserExportFilter, UserExportTaskQuery
+from app.modules.system.user.template_service import _build_dept_full_path
 from app.utils.data_scope import get_user_data_scope_filters
 from app.utils.pagination import paginate
 
 #: Excel 列顺序（spec §2.9 line 266 EXPORT_ALLOWED_FIELDS 顺序）。
 #: 字段名 ↔ 中文表头，第 1 项是 ORM 属性 / 派生属性名。
+#: v2.3 §2.9.1：dept_id 表头改「部门」（内容已是 full_path 而非数字 ID）。
 _EXPORT_COLUMN_ORDER: tuple[tuple[str, str], ...] = (
     ("user_name", "账号"),
     ("nickname", "昵称"),
     ("user_email", "邮箱"),
     ("user_phone", "手机号"),
-    ("dept_id", "部门ID"),
+    ("dept_id", "部门"),
     ("role_codes", "角色编码"),
     ("user_gender", "性别"),
     ("status", "状态"),
@@ -68,6 +75,12 @@ _EXPORT_FILE_NAMESPACE = "user-export"
 
 #: spec §2.31 line 1551：mime
 _EXPORT_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+#: v2.3 §2.9.1：status 翻译表（DB 真实取值 1=启用 / 2=禁用）
+_STATUS_LABELS: dict[str, str] = {"1": "启用", "2": "禁用"}
+
+#: v2.3 §2.9.1：user_gender 翻译表
+_GENDER_LABELS: dict[str, str] = {"0": "未知", "1": "男", "2": "女"}
 
 
 def _validate_reason(reason: str) -> str:
@@ -128,13 +141,16 @@ async def _query_users_with_data_scope(
     return list(result.scalars().all())
 
 
-def _build_excel(rows: list[User]) -> bytes:
-    """按 EXPORT_ALLOWED_FIELDS 白名单构造 Excel bytes（spec §2.9 + §3.8）。
+def _build_excel(rows: list[User], dept_lookup: dict[int, Dept]) -> bytes:
+    """按 EXPORT_ALLOWED_FIELDS 白名单构造 Excel bytes（spec §2.9 + §3.8 + v2.3 §2.9.1）。
 
     - 列顺序固定（_EXPORT_COLUMN_ORDER）
     - hashed_password 永不导出（spec §2.9 反例 1）
-    - role_codes：逗号分隔 role_code（仅启用角色）
-    - dept_id：第一个 dept 的 id（多部门场景导出主部门即可，反查场景按 dept_id 单独查）
+    - role_codes：逗号分隔 role_code（仅启用角色，§2.18 已支持 code 输入 round-trip）
+    - dept_id：v2.3 §2.9.1 改为 full_path（总公司/研发中心/前端部），复用
+      ``template_service._build_dept_full_path``；多部门场景取第一个 dept
+    - status：v2.3 §2.9.1 翻译 ``"1"→"启用"`` / ``"2"→"禁用"``（_STATUS_LABELS）
+    - user_gender：v2.3 §2.9.1 翻译 ``"0"→"未知"`` / ``"1"→"男"`` / ``"2"→"女"``（_GENDER_LABELS）
     - create_time：YYYY-MM-DD HH:MM:SS 格式（防 Excel 时区漂移）
     """
     wb = Workbook()
@@ -148,16 +164,25 @@ def _build_excel(rows: list[User]) -> bytes:
         role_codes = ",".join(
             r.role_code for r in (user.roles or []) if r.status == "1"
         )
-        dept_id_str = ""
+        # v2.3 §2.9.1：dept 列输出 full_path（不是数字 ID）
+        dept_display = ""
         if user.depts:
-            dept_id_str = str(user.depts[0].dept_id)
+            first_dept = user.depts[0]
+            dept_display = _build_dept_full_path(first_dept, dept_lookup)
 
         row_values = []
         for field, _ in _EXPORT_COLUMN_ORDER:
             if field == "role_codes":
                 row_values.append(role_codes)
             elif field == "dept_id":
-                row_values.append(dept_id_str)
+                row_values.append(dept_display)
+            elif field == "status":
+                # v2.3 §2.9.1：翻译为中文标签；未识别值兜底原值（防御）
+                row_values.append(_STATUS_LABELS.get(user.status, user.status or ""))
+            elif field == "user_gender":
+                row_values.append(
+                    _GENDER_LABELS.get(user.user_gender, user.user_gender or "")
+                )
             elif field == "create_time":
                 row_values.append(
                     user.create_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -172,6 +197,61 @@ def _build_excel(rows: list[User]) -> bytes:
     buffer = io.BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
+
+
+async def _build_dept_lookup_for_rows(
+    db: AsyncSession, rows: list[User]
+) -> dict[int, Dept]:
+    """预查 dept_lookup（v2.3 §2.9.1：dept full_path 翻译用）。
+
+    - 收集所有用户的第一个 dept_id（多部门场景取第一个，与 _build_excel 对齐）
+    - 解析每个 dept 的 ancestors → 收集祖先 dept_id
+    - 一次性 select 拿到所有 dept（叶子 + 祖先），构建 dept_id → Dept 映射
+
+    避免 N+1：user.depts 已 selectin eager load，但祖先 dept 不在其中，
+    需要单独一次性查询。
+    """
+    if not rows:
+        return {}
+
+    # 1. 收集叶子 dept_id
+    leaf_ids: set[int] = set()
+    for user in rows:
+        if user.depts:
+            leaf_ids.add(user.depts[0].dept_id)
+
+    if not leaf_ids:
+        return {}
+
+    # 2. 查叶子 dept（拿 ancestors）
+    leaf_stmt = select(Dept).where(Dept.dept_id.in_(leaf_ids))
+    leaf_depts = list((await db.execute(leaf_stmt)).scalars().all())
+
+    # 3. 解析 ancestors 收集祖先 dept_id
+    ancestor_ids: set[int] = set()
+    for dept in leaf_depts:
+        if not dept.ancestors:
+            continue
+        for raw in dept.ancestors.split(","):
+            raw = raw.strip()
+            if not raw or raw == "0":
+                continue
+            try:
+                ancestor_ids.add(int(raw))
+            except ValueError:
+                continue
+
+    # 4. 查祖先 dept（排除已查过的叶子，避免重复）
+    missing = ancestor_ids - leaf_ids
+    ancestors: list[Dept] = []
+    if missing:
+        anc_stmt = select(Dept).where(Dept.dept_id.in_(missing))
+        ancestors = list((await db.execute(anc_stmt)).scalars().all())
+
+    # 5. 合并构建 dept_lookup
+    dept_lookup: dict[int, Dept] = {d.dept_id: d for d in leaf_depts}
+    dept_lookup.update({d.dept_id: d for d in ancestors})
+    return dept_lookup
 
 
 async def export_users_to_excel(
@@ -246,8 +326,9 @@ async def export_users_to_excel(
                 error_code="AI_EXPORT_ASYNC_REQUIRED",
             )
 
-        # 6. 构造 Excel
-        xlsx_bytes = _build_excel(rows)
+        # 6. 构造 Excel（v2.3 §2.9.1：dept_lookup 预查，full_path 翻译用）
+        dept_lookup = await _build_dept_lookup_for_rows(db, rows)
+        xlsx_bytes = _build_excel(rows, dept_lookup)
 
         # 7. 写文件（30 天 TTL）
         storage_key = await storage.save(
@@ -287,6 +368,7 @@ __all__ = [
     "export_users_to_excel",
     "get_export_task",
     "list_export_tasks",
+    "download_export_file",
 ]
 
 
@@ -380,3 +462,66 @@ async def cleanup_expired_export_tasks(db: AsyncSession) -> int:
         await db.flush()
 
     return len(tasks)
+
+
+async def download_export_file(
+    db: AsyncSession,
+    export_id: str,
+    *,
+    file_storage: FileStorage | None = None,
+) -> tuple[bytes, str]:
+    """按 export_id 下载已导出文件（Task 33，spec §2.31 line 1626 落地）。
+
+    AI 对话内闭环关键路径：AI tool 返回 detail_card + downloadUrl，前端
+    DetailCardView 渲染下载按钮 → 点击触发本端点 → 返回 xlsx bytes。
+
+    Args:
+        db: 异步数据库会话
+        export_id: 任务 ID（Snowflake 字符串）
+        file_storage: 可选注入（测试用 MockFileStorage；生产用 get_file_storage()）
+
+    Returns:
+        ``(xlsx_bytes, filename)``；filename 沿用决策 30.6 规范
+        ``hohu_users_YYYYMMDD_HHmmss.xlsx``（从 task.created_at 派生，
+        与同步导出一致，不重新生成当前时间）。
+
+    Raises:
+        NotFoundException: ``AI_EXPORT_TASK_NOT_FOUND`` — export_id 不存在
+        BusinessRuleException: ``AI_EXPORT_TASK_NOT_READY`` — status != SUCCESS
+            （FAILED / CREATED / RUNNING zombie）
+        BusinessRuleException: ``AI_EXPORT_FILE_MISSING`` — task.file_storage_key
+            为 None（FAILED task 或异常路径）
+        BusinessRuleException: ``AI_EXPORT_FILE_EXPIRED`` — 文件被 30 天 TTL
+            清理 / 外部删除（FileStorage.read 抛 FileNotFoundError）
+    """
+    task = await db.get(UserExportTask, export_id)
+    if task is None:
+        raise NotFoundException(
+            "用户导出任务",
+            error_code="AI_EXPORT_TASK_NOT_FOUND",
+        )
+
+    if task.status != ExportTaskStatus.SUCCESS:
+        raise BusinessRuleException(
+            f"导出任务未成功（status={task.status.value}），无法下载",
+            error_code="AI_EXPORT_TASK_NOT_READY",
+        )
+
+    if not task.file_storage_key:
+        raise BusinessRuleException(
+            "导出文件缺失（task.file_storage_key 为空）",
+            error_code="AI_EXPORT_FILE_MISSING",
+        )
+
+    storage = file_storage or get_file_storage()
+    try:
+        xlsx_bytes = await storage.read(task.file_storage_key)
+    except FileNotFoundError as e:
+        raise BusinessRuleException(
+            "导出文件已过期（30 天 TTL 已清理）",
+            error_code="AI_EXPORT_FILE_EXPIRED",
+        ) from e
+
+    # 决策 30.6 同款：hohu_users_YYYYMMDD_HHmmss.xlsx（从 created_at 派生）
+    filename = f"hohu_users_{task.created_at.strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return xlsx_bytes, filename

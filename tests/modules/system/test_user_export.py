@@ -25,7 +25,7 @@ from app.constants import (
     DATA_SCOPE_DEPT,
     SUPER_ADMIN_ROLE_CODE,
 )
-from app.core.exceptions import BusinessRuleException
+from app.core.exceptions import BusinessRuleException, NotFoundException
 from app.core.file_storage import MockFileStorage
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
@@ -35,7 +35,10 @@ from app.modules.system.user.constants import (
     USER_EXPORT_ASYNC_THRESHOLD,
     ExportTaskStatus,
 )
-from app.modules.system.user.export_service import export_users_to_excel
+from app.modules.system.user.export_service import (
+    download_export_file,
+    export_users_to_excel,
+)
 from app.modules.system.user.models import UserExportTask
 from app.modules.system.user.schemas import UserExportFilter
 
@@ -264,7 +267,7 @@ class TestExportTaskAudit:
         db_session.add_all([own_dept, other_dept, hr_role, operator])
         await db_session.flush()
 
-        _bytes, _count, _export_id = await export_users_to_excel(
+        _bytes, _count, export_id = await export_users_to_excel(
             db_session,
             UserExportFilter(),
             operator,
@@ -272,7 +275,12 @@ class TestExportTaskAudit:
             file_storage=file_storage,
         )
 
-        task = (await db_session.execute(_select(UserExportTask))).scalar_one()
+        # 用 export_id 反查（不假设全表只 1 行：dev DB 可能有真实导出残留）
+        task = (
+            await db_session.execute(
+                _select(UserExportTask).where(UserExportTask.export_id == export_id)
+            )
+        ).scalar_one()
         # DATA_SCOPE_DEPT → accessible_dept_ids = own_dept 的 id
         assert task.filter_snapshot["accessible_dept_ids"] == [own_dept.dept_id]
 
@@ -511,8 +519,240 @@ class TestExportFailureRecordsError:
                 file_storage=file_storage,
             )
 
-        task = (await db_session.execute(_select(UserExportTask))).scalar_one()
+        # 用 reason 反查（不假设全表只 1 行：dev DB 可能有真实导出残留；
+        # 失败路径 export_users_to_excel 抛异常不返回 export_id，reason 是唯一锚点）
+        task = (
+            await db_session.execute(
+                _select(UserExportTask).where(
+                    UserExportTask.reason == "QA failure task"
+                )
+            )
+        ).scalar_one()
         assert task.status == ExportTaskStatus.FAILED
         assert task.error_code == "AI_EXPORT_ASYNC_REQUIRED"
         assert task.error_message is not None
         assert task.finished_at is not None
+
+
+# ========== v2.3 §2.9.1：导出 Excel 字段翻译（display labels） ==========
+
+
+class TestDisplayTranslation:
+    """v2.3 §2.9.1：导出 Excel 字段翻译为可读中文标签 + dept full_path。"""
+
+    async def test_export_translates_status_label(self, db_session, file_storage):
+        """status "1" → "启用"；status "2" → "禁用"。"""
+        dept = _make_dept(5930, "QA-Exp-Status")
+        super_role = await _fetch_super_role(db_session)
+        operator = _make_user(6930, "QA_EXP_ST_OP", [super_role], [dept])
+        enabled_user = _make_user(
+            6931, "QA_EXP_ST_ON", [super_role], [dept], status="1"
+        )
+        disabled_user = _make_user(
+            6932, "QA_EXP_ST_OFF", [super_role], [dept], status="2"
+        )
+        db_session.add_all([dept, operator, enabled_user, disabled_user])
+        await db_session.flush()
+
+        xlsx_bytes, _count, _ = await export_users_to_excel(
+            db_session,
+            UserExportFilter(),
+            operator,
+            reason="QA status label",
+            file_storage=file_storage,
+        )
+
+        headers, rows = _read_xlsx(xlsx_bytes)
+        status_col = headers.index("状态")
+        user_name_col = headers.index("账号")
+        status_by_name = {r[user_name_col]: r[status_col] for r in rows}
+        assert status_by_name["QA_EXP_ST_ON"] == "启用"
+        assert status_by_name["QA_EXP_ST_OFF"] == "禁用"
+
+    async def test_export_translates_gender_label(self, db_session, file_storage):
+        """user_gender "0"/"1"/"2" → "未知"/"男"/"女"。"""
+        dept = _make_dept(5931, "QA-Exp-Gender")
+        super_role = await _fetch_super_role(db_session)
+        operator = _make_user(6933, "QA_EXP_GD_OP", [super_role], [dept])
+        male = _make_user(6934, "QA_EXP_GD_M", [super_role], [dept], user_gender="1")
+        female = _make_user(6935, "QA_EXP_GD_F", [super_role], [dept], user_gender="2")
+        unknown = _make_user(6936, "QA_EXP_GD_U", [super_role], [dept], user_gender="0")
+        db_session.add_all([dept, operator, male, female, unknown])
+        await db_session.flush()
+
+        xlsx_bytes, _count, _ = await export_users_to_excel(
+            db_session,
+            UserExportFilter(),
+            operator,
+            reason="QA gender label",
+            file_storage=file_storage,
+        )
+
+        headers, rows = _read_xlsx(xlsx_bytes)
+        gender_col = headers.index("性别")
+        user_name_col = headers.index("账号")
+        gender_by_name = {r[user_name_col]: r[gender_col] for r in rows}
+        assert gender_by_name["QA_EXP_GD_M"] == "男"
+        assert gender_by_name["QA_EXP_GD_F"] == "女"
+        assert gender_by_name["QA_EXP_GD_U"] == "未知"
+
+    async def test_export_formats_dept_full_path(self, db_session, file_storage):
+        """dept_id 列输出 full_path「总公司/研发中心/前端部」（不是数字 ID）。"""
+        root = _make_dept(5940, "总公司", ancestors="0")
+        middle = _make_dept(5941, "研发中心", parent_id=5940, ancestors="0,5940")
+        leaf = _make_dept(5942, "前端部", parent_id=5941, ancestors="0,5940,5941")
+        super_role = await _fetch_super_role(db_session)
+        operator = _make_user(6940, "QA_EXP_DP_OP", [super_role], [leaf])
+        target = _make_user(6941, "QA_EXP_DP_T", [super_role], [leaf])
+        db_session.add_all([root, middle, leaf, operator, target])
+        await db_session.flush()
+
+        xlsx_bytes, _count, _ = await export_users_to_excel(
+            db_session,
+            UserExportFilter(),
+            operator,
+            reason="QA dept path",
+            file_storage=file_storage,
+        )
+
+        headers, rows = _read_xlsx(xlsx_bytes)
+        dept_col = headers.index("部门")
+        user_name_col = headers.index("账号")
+        dept_by_name = {r[user_name_col]: r[dept_col] for r in rows}
+        assert dept_by_name["QA_EXP_DP_T"] == "总公司/研发中心/前端部"
+
+    async def test_export_role_codes_unchanged(self, db_session, file_storage):
+        """role_codes 保持 role_code 字面值（§2.18 已支持 code round-trip）。"""
+        dept = _make_dept(5943, "QA-Exp-Role")
+        super_role = await _fetch_super_role(db_session)
+        dev_role = _make_role(5944, "QA_R_DEV_TL", "QA-开发者-翻译")
+        operator = _make_user(6942, "QA_EXP_RC_OP", [super_role], [dept])
+        target = _make_user(6943, "QA_EXP_RC_T", [dev_role], [dept])
+        db_session.add_all([dept, dev_role, operator, target])
+        await db_session.flush()
+
+        xlsx_bytes, _count, _ = await export_users_to_excel(
+            db_session,
+            UserExportFilter(),
+            operator,
+            reason="QA role code unchanged",
+            file_storage=file_storage,
+        )
+
+        headers, rows = _read_xlsx(xlsx_bytes)
+        role_col = headers.index("角色编码")
+        user_name_col = headers.index("账号")
+        role_by_name = {r[user_name_col]: r[role_col] for r in rows}
+        assert role_by_name["QA_EXP_RC_T"] == "QA_R_DEV_TL"
+
+
+# ========== Task 33：download_export_file（AI 对话内点击下载落地） ==========
+
+
+class TestDownloadExportFile:
+    """Task 33 / spec §2.31 line 1626：download_export_file service。
+
+    从 sys_user_export_task.file_storage_key 读 bytes 返回；
+    任务不存在 / 状态非 SUCCESS / file_storage_key 缺失 / 文件被删 → 各 errorCode。
+    filename 从 task.created_at 派生（决策 30.6 同款格式）。
+    """
+
+    async def test_download_returns_bytes_and_filename(self, db_session, file_storage):
+        """成功路径：返回 (xlsx_bytes, filename)；filename 从 created_at 派生。"""
+        dept = _make_dept(5950, "QA-Exp-DL")
+        super_role = await _fetch_super_role(db_session)
+        operator = _make_user(6950, "QA_EXP_DL_OP", [super_role], [dept])
+        db_session.add_all([dept, operator])
+        await db_session.flush()
+
+        xlsx_bytes, _count, export_id = await export_users_to_excel(
+            db_session,
+            UserExportFilter(),
+            operator,
+            reason="QA download",
+            file_storage=file_storage,
+        )
+
+        got_bytes, filename = await download_export_file(
+            db_session, export_id, file_storage=file_storage
+        )
+        assert got_bytes == xlsx_bytes
+        # 决策 30.6 同款：hohu_users_YYYYMMDD_HHmmss.xlsx
+        assert filename.startswith("hohu_users_")
+        assert filename.endswith(".xlsx")
+
+    async def test_download_task_not_found(self, db_session, file_storage):
+        """任务不存在 → NotFoundException(AI_EXPORT_TASK_NOT_FOUND)。"""
+        with pytest.raises(NotFoundException) as exc:
+            await download_export_file(
+                db_session, "nonexistent-id", file_storage=file_storage
+            )
+        assert exc.value.error_code == "AI_EXPORT_TASK_NOT_FOUND"
+
+    async def test_download_rejects_failed_task(self, db_session, file_storage):
+        """status=FAILED（无 file_storage_key）→ AI_EXPORT_TASK_NOT_READY。"""
+        dept = _make_dept(5951, "QA-Exp-DL-F")
+        super_role = await _fetch_super_role(db_session)
+        operator = _make_user(6951, "QA_EXP_DL_F_OP", [super_role], [dept])
+        db_session.add_all([dept, operator])
+        await db_session.flush()
+
+        # 制造 FAILED task（超阈值）
+        bulk_users = [
+            _make_user(6952 + i, f"QA_EXP_DL_F_{i:04d}", [super_role], [dept])
+            for i in range(USER_EXPORT_ASYNC_THRESHOLD + 1)
+        ]
+        db_session.add_all(bulk_users)
+        await db_session.flush()
+
+        with pytest.raises(BusinessRuleException):
+            await export_users_to_excel(
+                db_session,
+                UserExportFilter(),
+                operator,
+                reason="QA download failed",
+                file_storage=file_storage,
+            )
+
+        task = (
+            await db_session.execute(
+                _select(UserExportTask).where(
+                    UserExportTask.reason == "QA download failed"
+                )
+            )
+        ).scalar_one()
+        assert task.status == ExportTaskStatus.FAILED
+
+        with pytest.raises(BusinessRuleException) as exc:
+            await download_export_file(
+                db_session, task.export_id, file_storage=file_storage
+            )
+        assert exc.value.error_code == "AI_EXPORT_TASK_NOT_READY"
+
+    async def test_download_file_missing_from_storage(self, db_session, file_storage):
+        """file_storage_key 在 DB 但文件被外部删除 → AI_EXPORT_FILE_EXPIRED。"""
+        dept = _make_dept(5952, "QA-Exp-DL-E")
+        super_role = await _fetch_super_role(db_session)
+        operator = _make_user(6970, "QA_EXP_DL_E_OP", [super_role], [dept])
+        db_session.add_all([dept, operator])
+        await db_session.flush()
+
+        _bytes, _count, export_id = await export_users_to_excel(
+            db_session,
+            UserExportFilter(),
+            operator,
+            reason="QA download expired",
+            file_storage=file_storage,
+        )
+
+        # 手动从 storage 删文件，模拟 30 天 TTL 清理或外部删除
+        task = (
+            await db_session.execute(
+                _select(UserExportTask).where(UserExportTask.export_id == export_id)
+            )
+        ).scalar_one()
+        await file_storage.delete(task.file_storage_key)
+
+        with pytest.raises(BusinessRuleException) as exc:
+            await download_export_file(db_session, export_id, file_storage=file_storage)
+        assert exc.value.error_code == "AI_EXPORT_FILE_EXPIRED"

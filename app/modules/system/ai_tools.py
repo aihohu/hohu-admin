@@ -15,6 +15,7 @@ dept_id / role_code 走关联表 EXISTS 子查询，留 v1.5。
 user_mgmt agent + system:user:list 权限码（spec §5.1）。
 """
 
+from datetime import timedelta
 from typing import Any, Literal
 
 from sqlalchemy import func, select
@@ -1301,7 +1302,7 @@ async def _dry_run_user_import_execute(
         name="user.export",
         agent="user_mgmt",
         summary=(
-            "Export users to xlsx → {exportId, rowCount}. "
+            "Export users to xlsx → {exportId, downloadUrl}. "
             "Reason required. Filter via name/email/status."
         ),
         required_perms=("system:user:export",),
@@ -1309,7 +1310,9 @@ async def _dry_run_user_import_execute(
         readonly=False,  # 写 ExportTask 表 + 生成 xlsx 文件
         produces_file=True,
         dry_run_supported=True,
-        result_view="rows_affected",
+        # Task 33：rows_affected → detail_card（spec §2.31 line 1626 落地），
+        # detail_card 携带 downloadUrl 让前端渲染下载按钮（AI 对话内闭环）
+        result_view="detail_card",
         args_summary_fields=("reason",),
     )
 )
@@ -1321,7 +1324,7 @@ async def user_export(
     nickname: str | None = None,
     user_email: str | None = None,
     user_phone: str | None = None,
-    status: Literal["0", "1"] | None = None,
+    status: Literal["1", "2"] | None = None,
 ) -> ToolResult:
     """AI tool 入口：导出用户列表到 Excel（spec §10 Task 27）
 
@@ -1336,6 +1339,7 @@ async def user_export(
     """
     from app.modules.system.user.export_service import (  # noqa: PLC0415
         export_users_to_excel,
+        get_export_task,
     )
     from app.modules.system.user.schemas import UserExportFilter  # noqa: PLC0415
 
@@ -1354,16 +1358,41 @@ async def user_export(
         reason=reason,
     )
 
+    # Task 33：取 task 拿 file_size_bytes + created_at（用于 detail_card 元数据
+    # + expiresAt 计算 = created_at + 30 天 TTL）
+    task = await get_export_task(ctx.db, export_id)
+    file_size = task.file_size_bytes if task else None
+    expires_at = (task.created_at + timedelta(days=30)).isoformat() if task else None
+    download_url = f"/system/user/export/{export_id}/download"
+
     return ToolResult.success(
         data={
             "exportId": export_id,
             "rowCount": row_count,
+            "downloadUrl": download_url,
         },
         ui=UIResult(
-            view_type="rows_affected",
+            view_type="detail_card",
             view_data={
-                "count": row_count,
-                "export_id": export_id,
+                "title": "用户导出",
+                "fields": [
+                    {"label": "导出批次 ID", "value": export_id},
+                    {"label": "导出行数", "value": str(row_count)},
+                    {
+                        "label": "文件大小",
+                        "value": f"{file_size} B" if file_size is not None else "—",
+                    },
+                    {"label": "过期时间", "value": expires_at or "—"},
+                ],
+                "downloadUrl": download_url,
+                "downloadFilename": (
+                    f"hohu_users_{task.created_at.strftime('%Y%m%d_%H%M%S')}.xlsx"
+                    if task
+                    else "hohu_users.xlsx"
+                ),
+                "rowCount": row_count,
+                "fileSize": file_size,
+                "expiresAt": expires_at,
             },
             audit={
                 "export_id": export_id,
@@ -1390,7 +1419,7 @@ async def _dry_run_user_export(
     nickname: str | None = None,
     user_email: str | None = None,
     user_phone: str | None = None,
-    status: Literal["0", "1"] | None = None,
+    status: Literal["1", "2"] | None = None,
 ) -> Any:
     """dry_run：预估导出行数供 HITL 抽屉确认（spec §10 Task 27）
 

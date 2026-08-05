@@ -265,6 +265,26 @@ USER_EXPORT_ASYNC_THRESHOLD = 5000   # 单次导出同步上限；> 5000 抛 AI_
 
 **回归**: `export_users_to_excel` 内部用 `EXPORT_ALLOWED_FIELDS = {"user_name", "nickname", "user_email", "user_phone", "dept_id", "role_codes", "user_gender", "status", "create_time"}` 白名单，未列入的字段不进 Excel；新增敏感字段时白名单不变（默认安全）。
 
+### 2.9.1 **导出 Excel 字段翻译 + 导入侧中文字面值反查 + status 取值统一对齐 DB**（v2.3 修订 2026-08-05）— §2.9 白名单只规定字段集，未规定展示形态。原实现直接 dump DB 原值带来两个真实问题：(a) 用户读不懂 `dept_id=1` / `status="1"` / `user_gender="1"` ；(b) 导出的 Excel 无法直接 round-trip 给导入（§2.17 导入要 `dept_input` 名/路径，不是数字 ID）。
+
+**status 取值矛盾（顺手修复）**：spec §3.1 line 1634 `status: Literal["0","1"]`（0 禁用 / 1 启用）与 DB / 前端 / 其他模块真实约定 `("1","2")`（1 启用 / 2 禁用）矛盾。证据：`app/utils/validators.py:68 STATUS_ALLOWED = ("1","2")`、Menu 模型注释「1-启用，2-禁用」、前端 `enableStatusRecord = {'1': enable, '2': disable}`。原 spec 的 0/1 是笔误，导致 `import_parser._STATUS_VALUES = {"0","1"}` 拦掉真实合法的 `status="2"` 禁用用户。**v2.3 决策：全部统一对齐 `("1","2")`**，涉及 spec §3.1 line 1634、`schemas.py:81` UserImportRecord.status、`ai_tools.py:1324,1393` user_update/user_lookup filter、`import_parser.py:57 _STATUS_VALUES`。
+
+**导出翻译决策**：`_build_excel` 加翻译层，与导入侧字段语义对齐：
+
+| 字段 | v2.2（原） | v2.3（新） |
+|---|---|---|
+| `dept_id` | `1`（Snowflake 数字 ID） | `总公司/研发中心/前端部`（full_path，复用 `template_service._build_dept_full_path`） |
+| `role_codes` | `admin,user`（role_code 逗号分隔） | 不变（§2.18 已支持 code 输入，可 round-trip） |
+| `status` | `1` / `2` | `启用` / `禁用` |
+| `user_gender` | `0` / `1` / `2` | `未知` / `男` / `女` |
+| `create_time` | ISO 格式 | 不变 |
+
+**导入反查决策**（round-trip 兼容）：`_parse_row_to_record` 在 `status` / `user_gender` 字段加中文字面值反查：先查翻译字典（"启用"→"1" / "禁用"→"2" / "未知"→"0" / "男"→"1" / "女"→"2"），未命中走原字面值（"1"/"2"/"0"）继续走 Literal 校验。原 Literal 校验保持（白名单兜底，非法值仍抛 `AI_IMPORT_STATUS_INVALID` / `AI_IMPORT_GENDER_INVALID`）。
+
+**反例**: (1) 翻译后 status 字面值"启用"被当作字面值回流导入 → 导入侧必须加反查字典（本决策已实现）。(2) dept full_path 包含 `/` 分隔符与导入路径解析冲突 → 沿用 §2.17 同款 `/` 拼接，`_resolve_dept_by_path` 已实现递归。(3) 角色改名后旧 Excel 失效 → §2.18 已论证用 role_code 锚点不变，导出仍 dump role_code 而非 role_name。(4) status 翻译走 i18n 多语言 → Excel 是离线文件，跨语言用户打开会乱码，**固定中文「启用/禁用/未知/男/女」**（管理员 Excel 场景，业务侧按中文约定）。(5) `_STATUS_VALUES` 改 `{"1","2"}` 后老 Excel 含 `"0"` 仍可导入 → 不能保留 `{"0","1","2"}` 三值，那会污染 DB 真实取值集合；DB 内不允许 "0" status（用户导入侧**必须**抛 `AI_IMPORT_STATUS_INVALID` 让用户改 Excel，不能静默写错数据）。(6) 翻译层放在 `_build_excel` 而非 schema 层 → schema 层是契约（保持原值），Excel 渲染是展示（可翻译），分层铁律。
+
+**回归**: `export_service._build_excel` 加 `_STATUS_LABELS = {"1":"启用","2":"禁用"}` / `_GENDER_LABELS = {"0":"未知","1":"男","2":"女"}` / `_format_dept_path(dept, dept_lookup)` 内部 helper（复用 `template_service._build_dept_full_path`）；`_query_users_with_data_scope` 加 `dept_lookup` 预查（一次性 select Dept where dept_id in user_dept_ids，避免 N+1）；`import_parser._resolve_status_label` / `_resolve_gender_label` helper（字典反查 → 字面值兜底 → Literal 校验）；`_STATUS_VALUES = frozenset({"1","2"})`（修 bug）；新增测试 `test_export_translates_display_fields`（_build_excel 输出启用/禁用/男/女/部门路径）+ `test_import_status_chinese_label`（"启用"→"1" / "禁用"→"2" 反查）+ `test_import_status_disabled_two_now_accepted`（修复 _STATUS_VALUES bug 后的回归测试：status="2" 禁用用户可正常导入）。
+
 ### 2.10 **导入文件限制：≤ 10MB / MIME 白名单（xlsx, xls, csv）/ 行数 ≤ 2000**（v2.2 P0 修订，原 50000 → 2000）— 用户导入属于 admin 管理操作，**不作为 ETL 数据同步入口**。2000 行以内保证 Excel parser 内存可控、dry_run 同步返回、前端 preview 可展示、单次事务时间可控、AI Tool 操作安全。> 2000 行的场景（HR 系统批量同步、ERP 集成）走 Phase 3 异步 ImportJob（独立 spec）。
 
 **为什么 2000 而不是 50000**（v2.2 调整理由）：
@@ -1590,6 +1610,12 @@ Body: {
 权限：system:user:list
 返回：导出任务详情（status / row_count / file_storage_key / filter_snapshot / reason / created_at / 可选下载 URL）
 
+# HTTP GET /system/user/export/{export_id}/download（Task 33 新增，v2.3 §2.9.1 后续补齐）
+权限：system:user:export（与 POST /export 同级，能导出就能重下载）
+返回：xlsx 文件流（从 file_storage_key 读 bytes）
+错误码：AI_EXPORT_TASK_NOT_FOUND / AI_EXPORT_TASK_NOT_READY / AI_EXPORT_FILE_MISSING / AI_EXPORT_FILE_EXPIRED
+用途：AI 对话内 detail_card 下载按钮触发，闭环「AI 导出 → 对话内点击下载」
+
 # HTTP GET /system/user/export（v2.2 P1-5 新增）
 权限：system:user:list
 返回：导出任务列表分页（按 operator_id / status / created_at 过滤）
@@ -1631,7 +1657,7 @@ class UserImportRecord(BaseModel):
     dept_input: str                       # 必填；部门名 or 完整路径（详见 #2.17）
     role_input: str | None = None         # 可选；逗号分隔 code/name 混合（详见 #2.18）
     user_gender: Literal["0", "1", "2"] = "0"  # 默认未知
-    status: Literal["0", "1"] = "1"       # 默认启用
+    status: Literal["1", "2"] = "1"       # 默认启用（v2.3 §2.9.1 修订：原 "0"/"1" 与 DB 真实取值矛盾）
 ```
 
 ### 3.2 `ImportDryRunResult`（预检结果，v2.2 P1：records 限流 + 大批走文件下载）
@@ -3201,6 +3227,26 @@ async def user_export(
 - [x] Task 29 ✅ 已完成（2026-08-04）：浏览器 E2E spec 落地（`tests/e2e/user-import-export.spec.ts` 3 smoke 用例：导入按钮 / 导出弹窗 reason 校验 / 历史抽屉）。决策 29.1-29.2：
   - 29.1 **AI tool 链路 E2E 推迟到独立 spec** — 「贴文本"加这几个用户" → import_preview → HITL 抽屉 → 确认 → import_execute」端到端流程依赖：AI chat UI + 真实 LLM API + 后端 dev stack + DB seed + 测试 xlsx。组合 setup 成本高 + LLM 输出非确定性（即使 temp=0 也可能漂移）。**反例**: 强行写完整 AI flow E2E → CI flaky，每次 LLM 输出略变就 break。**回归**: Task 21 ship 的 3 smoke 用例覆盖页面层按钮可达性；AI tool 端到端验证由 manual QA / staging 环境定期跑（参考 spec §10.3 11 场景的合成版本已在 test_authz_matrix.py 覆盖 framework 行为）。
   - 29.2 **页面 E2E + service 单测 + authz matrix 三层覆盖** — 页面 smoke（Task 21）+ service 单测（Task 17-22a 已 ship）+ authz matrix framework 测试（Task 28）三层互补。**反例**: 只信 E2E → 脆且慢；只信单测 → 集成 gap（如 i18n key 拼写 / API URL 错）漏检。**回归**: 当前覆盖率 70.74% ≥ 70% 门禁 + 5 vitest 文件 / 28 测试 + 15 AI tools 全过静态检查 = Phase 1+2 完工基线。
+- [x] Task 30 ✅ 已完成（2026-08-05）：导出 Excel 字段翻译 + dept full_path（v2.3 §2.9.1）。决策 30.1-30.4：
+  - 30.1 **翻译层放 `_build_excel` 不放 schema 层** — schema 层是契约（保持原值），Excel 渲染是展示（可翻译），分层铁律。**反例**: schema 层加 `display_label` 字段 → API 契约污染，前端要再走一次翻译；导出 Excel 是离线文件，不存在 i18n 切换场景。**回归**: `_build_excel(rows, dept_lookup)` 内部查 `_STATUS_LABELS` / `_GENDER_LABELS`；`UserExportTaskResponse` schema 保持原值不变。
+  - 30.2 **dept full_path 复用 template_service._build_dept_full_path** — 同一函数模板下载 / 导出 Excel 共用，避免双实现漂移。`export_service._build_dept_lookup_for_rows` 一次性预查所有 leaf + ancestor dept（避免 N+1），构建 dept_id → Dept 映射传入 `_build_excel`。**反例**: 在 `_build_excel` 内部逐行 `await db.get(Dept, ...)` → 1000 行用户导出触发 1000 次 DB 查询。**回归**: `_build_dept_lookup_for_rows` 走两次 select（leaf + ancestor），复杂度 O(N+M)；`test_export_formats_dept_full_path` 用 3 层 dept 树验证。
+  - 30.3 **role_codes 不翻译保持 code 字面值** — §2.18 已支持 code round-trip（导入侧 `_resolve_role_input` Pass 1 code 优先匹配），导出 dump code 直接 round-trip 可用；role_name 翻译会引入「角色改名后旧 Excel 失效」回归（§2.18 反例 3）。**回归**: `test_export_role_codes_unchanged` 验证导出仍是 role_code 而非 role_name。
+  - 30.4 **翻译固定中文不走 i18n** — Excel 是离线文件，跨语言用户打开会乱码；管理员 Excel 场景业务侧按中文约定。**反例**: 走 `i18n.t("status.enable")` → 导出时英文 locale 用户得到 "Enabled"，导入时反查字典只识别中文 "启用" → round-trip 断。**回归**: `_STATUS_LABELS = {"1":"启用","2":"禁用"}` / `_GENDER_LABELS = {"0":"未知","1":"男","2":"女"}` 字面值常量，不走翻译函数。
+  - 30.5 **dept 列表头改「部门」（原「部门ID」）** — v2.3 §2.9.1 改动后内容是 full_path「总公司/研发中心/前端部」，表头仍叫「部门ID」会让用户误以为单元格里应该是数字 ID。**反例**: 保留「部门ID」表头 → 用户看到「部门ID = 总公司/研发中心/前端部」困惑「这到底是 ID 还是名字」；改「部门路径」→ 与「部门字典」sheet 的 full_path 列对齐也行，但「部门」更短且与导入模板「数据」sheet 的 dept_input 列对齐（用户读导出 Excel 改完可直接复制到导入 Excel 的 dept_input 列）。**回归**: `_EXPORT_COLUMN_ORDER` 表头 `("dept_id", "部门")`；`test_export_formats_dept_full_path` 断言 `headers.index("部门")`。
+  - 30.6 **导出文件名 `hohu_users_YYYYMMDD_HHmmss.xlsx`（hohu_ 前缀 + 时分秒）** — v2.2 原名 `users_YYYYMMDD.xlsx` 有两个问题：(a) 同日多次导出文件名冲突（浏览器自动加 "(1)" "(2)" 用户分不清哪个是最新）；(b) 无品牌前缀（用户下载文件夹多个项目的 users_*.xlsx 混杂）。**反例**: (1) 只加时分秒不加 hohu_ 前缀 → 文件名仍无项目标识。(2) 加毫秒 → 文件名过长无收益。(3) 用 UTC 时间 → 用户看到的是 +8 偏移的「不直观时间」（管理员在中国时区工作）。**回归**: 前端 `use-export-flow.ts buildFilename()` 用 `new Date()` 本地时间生成 `hohu_users_${ymd}_${hms}.xlsx`；后端 `user.py` Content-Disposition 同款（fallback，前端 `a.download` 实际生效）；vitest `use-export-flow.spec.ts` 断言 `/^hohu_users_\d{8}_\d{6}\.xlsx$/`。
+- [x] Task 31 ✅ 已完成（2026-08-05）：导入侧中文字面值反查 + status 取值 0/1 → 1/2 矛盾修复（v2.3 §2.9.1）。决策 31.1-31.3：
+  - 31.1 **status 取值统一对齐 DB / 前端 / 其他模块真实约定 ("1","2")** — spec §3.1 line 1634 原写 `Literal["0","1"]` 是笔误，与 `app/utils/validators.py:68 STATUS_ALLOWED = ("1","2")` + Menu 模型注释「1-启用，2-禁用」+ 前端 `enableStatusRecord = {'1': enable, '2': disable}` 矛盾；`import_parser._STATUS_VALUES = {"0","1"}` 会拦掉真实合法的 `status="2"` 禁用用户。**反例**: 保留 `{"0","1","2"}` 三值向后兼容 → 污染 DB 真实取值集合；DB 内不允许 "0" status，用户导入侧**必须**抛 `AI_IMPORT_STATUS_INVALID` 让用户改 Excel（不能静默写错数据）。**回归**: `import_parser._STATUS_VALUES = frozenset({"1","2"})`；`schemas.py:81` UserImportRecord.status Literal 改 `("1","2")`；`schemas.py:173` UserExportFilter.status 同步；`ai_tools.py:1324,1393` user_export / `_dry_run_user_export` filter 同步；`test_import_status_disabled_two_now_accepted` + `test_import_status_zero_now_rejected` 覆盖正反两个 case。
+  - 31.2 **中文字面值反查走字典查表 + 字面值兜底** — `_STATUS_LABELS_INV = {"启用":"1","禁用":"2"}` / `_GENDER_LABELS_INV = {"未知":"0","男":"1","女":"2"}`；先查表，未命中走原字面值继续走 Literal 校验（白名单兜底）。**反例**: 用正则 / startswith 模糊匹配 → "启用中" 误命中 "启用" → 静默错误数据；模糊匹配违反 §2.17 反例 3（"研发" 误命中 "研发部"）。**回归**: `import_parser._validate_row` 在 status / user_gender 字段先 `_STATUS_LABELS_INV.get(input, input)` 再校验；`test_unknown_chinese_label_rejected` 验证 "启用中" 抛 `AI_IMPORT_STATUS_INVALID`。
+  - 31.3 **test_import_schemas 两个 status="2" 测试断言需更新** — v2.2 断言 `status="2"` 抛 ValidationError；v2.3 后 "2" 是合法值，测试改为断言 `status="0"` 抛 ValidationError。**反例**: 保留旧断言 → CI 红；改为 `status="3"` → 也对（"3" 非法），但 "0" 更贴近真实误用场景（用户从旧 spec / 旧模板复制 status="0"）。**回归**: `test_import_schemas.py::TestUserImportRecord::test_invalid_status_rejected` + `TestUserExportFilter::test_invalid_status_rejected` 改用 `status="0"`。
+- [x] Task 32 ✅ 已完成（2026-08-05）：test_user_export.py 两个 MultipleResultsFound 修复（v2.3 §2.9.1 顺手清理）。决策 32.1：
+  - 32.1 **测试不假设全表只 1 行，用 export_id / reason 反查** — `test_export_filter_snapshot_freezes_accessible_dept_ids` + `test_export_failure_records_async_required_in_task` 用 `select(UserExportTask)).scalar_one()` 假设全表只 1 行；pytest 实际连的是 dev DB（pyproject.toml 未设 `ENV=test`，`.env` 是 dev 数据库 192.168.7.52），用户手动测试导出按钮留的真实 task 行让 `scalar_one()` 拿到 3 行 → MultipleResultsFound。**反例**: (1) 改 conftest 强制 `ENV=test` → 需要 .env.test 的 localhost DB 同步迁移，scope 蔓延。(2) 改 db_session fixture 测试前清空 sys_user_export_task → 违反 outer-transaction 零污染铁律，DELETE 会影响并发测试。(3) 用 `order_by(created_at desc).limit(1)` 拿最新一条 → 违反 spec 「不依赖 created_at DESC 排序」铁律。**回归**: 第一个测试用返回的 `export_id` 反查 `where export_id == export_id`；第二个测试失败路径 export_users_to_excel 抛异常不返回 export_id，用测试内唯一 reason `"QA failure task"` 反查 `where reason == "QA failure task"`；符合 spec 「显式 version/id 而非 created_at DESC」铁律；17/17 test_user_export.py 通过（原 15/17）。
+- [x] Task 33 ✅ 已完成（2026-08-05）：AI 对话内导出下载闭环（spec §2.31 line 1626 / line 2619 落地）。Phase 1/2 实现缺口补齐：spec 承诺 AI tool 返回 `detail_card` 含 `downloadUrl`，实现时只做了 `rows_affected` + 缺下载端点，导致 AI 引导「去导出记录下载」但前端无此页面、文件落盘拿不到。决策 33.1-33.5：
+  - 33.1 **新端点 `GET /system/user/export/{export_id}/download`** — 从 `sys_user_export_task.file_storage_key` 读 bytes 流式返回；权限 `system:user:export`（与 POST /export 同级）；service 层 `download_export_file()` 区分 4 种 errorCode：`AI_EXPORT_TASK_NOT_FOUND`（export_id 不存在）/ `AI_EXPORT_TASK_NOT_READY`（status != SUCCESS）/ `AI_EXPORT_FILE_MISSING`（file_storage_key 为 None）/ `AI_EXPORT_FILE_EXPIRED`（FileStorage.read 抛 FileNotFoundError，30 天 TTL 清理或外部删除）。**反例**: (1) 复用 `GET /export/{export_id}` 详情端点直接返回 bytes → 混淆元数据查询 vs 文件下载两种语义，前端要按 Content-Type 分支处理。(2) 不区分 errorCode 统一 400 → 用户看到「文件已过期」和「任务失败」是同一提示，误导重试。(3) 权限放宽到 `system:user:list` → 只读角色也能拿到 PII 文件，违反导出权限独立原则。**回归**: `app/modules/system/api/user.py` `download_export_file_endpoint`；`test_user_export_api.py::TestGetExportDownload` 6 个测试覆盖 401/200/404/400×3。
+  - 33.2 **filename 从 task.created_at 派生，不重新生成** — 决策 30.6 同款 `hohu_users_YYYYMMDD_HHmmss.xlsx` 格式；用 task.created_at 而非 `datetime.now()` — 重下载历史任务时反映真实导出时刻，便于审计反查「这份文件是哪次导出的」。**反例**: 用 `datetime.now()` → 同一文件多次下载文件名不同，下载文件夹混乱 + 违反「同名文件即同一内容」直觉。**回归**: `export_service.download_export_file` 用 `task.created_at.strftime('%Y%m%d_%H%M%S')`；`test_download_returns_bytes_and_filename` 断言前缀 + 后缀。
+  - 33.3 **AI tool `user.export` result_view 从 rows_affected → detail_card** — spec line 2619 本来就承诺 `detail_card` 展示下载链接 + 行数 + 字段；Task 27 实现时简化成 `rows_affected`（只显示行数），LLM 拿不到 downloadUrl 只能糊弄「去导出记录下载」。detail_card view_data 含 `fields`（导出批次 ID / 导出行数 / 文件大小 / 过期时间）+ `downloadUrl` + `downloadFilename` + `rowCount` + `fileSize` + `expiresAt`；data（LLM 视角）含 `exportId` + `rowCount` + `downloadUrl`（LLM 可直接引用字面 URL 给用户）。**反例**: 保留 rows_affected + 用 chip_target 跳转 → chip 是模块页路由（`/system/user`），不是文件下载链接；用户还得手动找「导出记录」页面（不存在）。**回归**: `ai_tools.py user_export` 调用 `get_export_task` 拿 file_size_bytes + created_at 计算 expiresAt；`test_ai_tools_user_export.py::TestUserExportDetailCard` 4 个测试覆盖 result_view / downloadUrl / fileSize+expiresAt / data 三字段。
+  - 33.4 **前端 DetailCardViewData 类型扩展 + DetailCardView 下载按钮** — `Api.Ai.DetailCardViewData` 加可选 `downloadUrl` / `downloadFilename`；`DetailCardView.vue` 在 fields 下方条件渲染 NButton（`v-if="viewData.downloadUrl"`），点击调 `request({url, responseType:'blob'})` → `URL.createObjectURL` → a.click 触发浏览器保存（与 use-export-flow 的 triggerBlobDownload 同款模式）；loading 状态防重复点击；错误 toast 走 `common.exportModal.errorCode.EXPORT_FAILED`。**反例**: (1) 新建独立 view_type `file_download` → 为单个场景扩张标准视图集（STANDARD_VIEW_TYPES 启动校验），不如复用 detail_card 通用。(2) `<a href={downloadUrl}>` 直接链接 → 没有 Authorization header，后端 401；Blob 下载才能走 request 拦截器带 token。(3) chip_target 承载 → chip 是 SPA 路由跳转，不是文件下载。**回归**: `src/views/ai/chat/modules/tool-views/DetailCardView.vue` + `src/typings/api/ai.d.ts DetailCardViewData` + `src/service/api/system.ts fetchDownloadExportFile`（备用，组件内直接用 request 更通用）；新增 i18n key `common.download`；typecheck + lint + vitest 28/28 通过。
+  - 33.5 **i18n key 走公共 `common.download`，不开 `ai.tool.user.export.download`** — 按钮文案「下载」是纯通用动作，与 import 模块的 `common.downloadTemplate` 等已有 key 同款处理；放公共区让其他模块（role / dept / job）后续接入 detail_card 时无需重复声明。**反例**: 每个模块各开 `ai.tool.{module}.export.download` → 5 个模块 5 个 key 字面量一致，违反 DRY。**回归**: `zh-cn.ts` + `en-us.ts` + `app.d.ts Schema` 三处同步。
+  - 33.6 **下载按钮提到 chat-tool-call 卡片底部 chip-row 常显，不放 DetailCardView 折叠 body 内**（2026-08-05 二次修正） — 初版（决策 33.4）把下载按钮放在 DetailCardView fields 下方，但 chat-tool-call 的 body 默认折叠（`expanded = ref(false)`），用户必须点卡片头才能看到下载按钮 → 实测用户找不到，只看到 LLM 文本回复里的「下载地址」字面字符串（非可点链接，且 `<a href>` 也不带 Authorization header 会 401）。修正为：chat-tool-call.vue 在 `chipHref` 同级新增 `downloadAction` computed（从 `result.ui.viewData.downloadUrl` 提取），渲染与 chip-link 同视觉样式的绿色 `<button>`（区分「拿文件」vs「跳转」），点击调 `request({responseType:'blob'})` → URL.createObjectURL → a.click 触发浏览器保存；DetailCardView 不再承担下载按钮职责（回归纯字段 grid）。**反例**: (1) 保留 DetailCardView 内嵌按钮 + 默认展开卡片 → 破坏其他 detail_card tool（如 job.update_cron）的折叠 UX；下载是动作不是视图，属于卡片级 UX 而非 view-level。(2) 让用户看 LLM 文本里的下载地址点击 → URL 字符串不可点；变成 `<a>` 也没 Authorization header；违反「动作走 UI 不走 LLM 文本」原则。(3) 加 auto-expand 逻辑只对含 downloadUrl 的卡片默认展开 → 状态管理复杂化，且 chip-row 已经是「常显动作区」语义位置。**回归**: `chat-tool-call.vue` 加 `downloadAction` computed + `handleDownload` 函数 + chip-row 第二行；`DetailCardView.vue` 移除下载按钮（回退到决策 33.4 之前的纯渲染职责）；typecheck + lint 通过。
 
 ### Phase 3（推迟到独立 spec）
 

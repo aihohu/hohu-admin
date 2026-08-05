@@ -58,8 +58,9 @@ class TestUserImportRecord:
             UserImportRecord(**_sample_record_kwargs(user_gender="3"))
 
     def test_invalid_status_rejected(self):
+        # v2.3 §2.9.1：status 取值对齐 DB ("1","2")，"0" 是非法值
         with pytest.raises(ValidationError):
-            UserImportRecord(**_sample_record_kwargs(status="2"))
+            UserImportRecord(**_sample_record_kwargs(status="0"))
 
     def test_user_name_too_short(self):
         with pytest.raises(ValidationError):
@@ -162,8 +163,9 @@ class TestUserExportFilter:
         assert flt.status == "1"
 
     def test_invalid_status_rejected(self):
+        # v2.3 §2.9.1：status 取值对齐 DB ("1","2")，"0" 是非法值
         with pytest.raises(ValidationError):
-            UserExportFilter(status="2")
+            UserExportFilter(status="0")
 
 
 class TestUserImportBatchResponse:
