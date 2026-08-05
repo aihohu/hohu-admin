@@ -704,3 +704,94 @@ class TestSuperAdminBypass:
 
         assert result.out_of_scope_count == 0
         assert result.new_count == 1
+
+
+# ========== CREATED → FAILED 集成路径（Task 34 / spec §3.6 line 1134） ==========
+
+
+class TestCreatedToFailedTransition:
+    """spec §3.6 line 1134 + §8.1 line 2892：dry_run 阶段失败 → batch CREATED → FAILED。
+
+    覆盖两个失败分支：
+    - 0 行 records（解析后无有效数据）
+    - 分类阶段意外异常（如 DB 错误）
+
+    反例（旧行为）：batch 停留在 CREATED 成僵尸行，审计看到「创建一年后还是 CREATED」。
+    """
+
+    async def test_state_created_to_failed_on_zero_records(self, db_session):
+        """0 行 records → CREATED → FAILED + 抛 AI_IMPORT_EMPTY_FILE。"""
+        dept = _make_dept(7950, "QA-DryRun-Dept-Empty")
+        super_role = (
+            await db_session.execute(
+                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+            )
+        ).scalar_one()
+        operator = _make_user(9250, "QA_DR_EMPTY", [super_role], [dept])
+        db_session.add_all([dept, operator])
+        await db_session.flush()
+
+        with pytest.raises(BusinessRuleException) as exc:
+            await dry_run_import_users(
+                db_session,
+                [],  # 0 行
+                operator,
+                file_bytes=_file_bytes(),
+                filename="empty.xlsx",
+                reason="QA zero records",
+            )
+        assert exc.value.error_code == "AI_IMPORT_EMPTY_FILE"
+
+        # batch 落 FAILED（用 reason 反查 + populate_existing 强制覆盖 identity map
+        # 旧对象 —— _transition_batch_status 用 raw UPDATE 绕过 ORM synchronize）
+        batch = (
+            await db_session.execute(
+                _select(UserImportBatch)
+                .where(UserImportBatch.reason == "QA zero records")
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        assert batch.status == ImportBatchStatus.FAILED
+
+    async def test_state_created_to_failed_on_classification_error(
+        self, db_session, monkeypatch
+    ):
+        """分类阶段异常 → CREATED → FAILED + 原异常 re-raise。"""
+        dept = _make_dept(7951, "QA-DryRun-Dept-CE")
+        super_role = (
+            await db_session.execute(
+                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+            )
+        ).scalar_one()
+        operator = _make_user(9251, "QA_DR_CE", [super_role], [dept])
+        db_session.add_all([dept, operator])
+        await db_session.flush()
+
+        # mock _classify_records 抛 DB 错误
+        async def _boom(*_args, **_kwargs):
+            raise RuntimeError("QA simulated DB error during classification")
+
+        monkeypatch.setattr(
+            "app.modules.system.user.import_service._classify_records", _boom
+        )
+
+        records = _make_records(1, prefix="QA-DR-CE")
+        with pytest.raises(RuntimeError, match="QA simulated DB error"):
+            await dry_run_import_users(
+                db_session,
+                records,
+                operator,
+                file_bytes=_file_bytes(),
+                filename="classification_error.xlsx",
+                reason="QA classification error",
+            )
+
+        # batch 落 FAILED
+        batch = (
+            await db_session.execute(
+                _select(UserImportBatch)
+                .where(UserImportBatch.reason == "QA classification error")
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        assert batch.status == ImportBatchStatus.FAILED

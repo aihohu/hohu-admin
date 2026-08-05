@@ -272,36 +272,61 @@ async def dry_run_import_users(
     db.add(batch)
     await db.flush()  # 拿默认 server_default 字段（created_at 等）
 
-    # 2. 四象限分类
-    (
-        new_records,
-        exists_records,
-        conflict_records,
-        out_of_scope_records,
-    ) = await _classify_records(db, records, current_user)
+    # Task 34 / spec §3.6 line 1134：0 行 + 分类异常 → CREATED → FAILED
+    # 反例（旧行为）：batch 停留在 CREATED 成僵尸行，审计看到「创建一年后还是 CREATED」
+    if len(records) == 0:
+        await _transition_batch_status(
+            db,
+            batch_id,
+            ImportBatchStatus.CREATED,
+            ImportBatchStatus.FAILED,
+        )
+        raise BusinessRuleException(
+            "文件解析后 0 行有效记录（spec §3.6 CREATED→FAILED）",
+            error_code="AI_IMPORT_EMPTY_FILE",
+        )
 
-    # 3. 截断（spec §3.2 v2.2 P1）
-    new_truncated_list, new_trunc = _truncate(new_records)
-    exists_truncated_list, exists_trunc = _truncate(exists_records)
-    conflict_truncated_list, conflict_trunc = _truncate(conflict_records)
-    oos_truncated_list, oos_trunc = _truncate(out_of_scope_records)
+    try:
+        # 2. 四象限分类
+        (
+            new_records,
+            exists_records,
+            conflict_records,
+            out_of_scope_records,
+        ) = await _classify_records(db, records, current_user)
 
-    # 4. UPDATE batch summary + status=PREVIEW_DONE（spec line 2063）
-    validate_transition(ImportBatchStatus.CREATED, ImportBatchStatus.PREVIEW_DONE)
-    batch.summary_new = len(new_records)
-    batch.summary_exists = len(exists_records)
-    batch.summary_conflict = len(conflict_records)
-    batch.summary_out_of_scope = len(out_of_scope_records)
-    batch.status = ImportBatchStatus.PREVIEW_DONE
-    await db.flush()
+        # 3. 截断（spec §3.2 v2.2 P1）
+        new_truncated_list, new_trunc = _truncate(new_records)
+        exists_truncated_list, exists_trunc = _truncate(exists_records)
+        conflict_truncated_list, conflict_trunc = _truncate(conflict_records)
+        oos_truncated_list, oos_trunc = _truncate(out_of_scope_records)
 
-    # 5. Redis cache（spec §2.19 v2.2 P0：仅 cache batch_id）
-    cache_payload = json.dumps({"batch_id": batch_id})
-    await redis_module.redis_client.setex(
-        f"{_PREVIEW_REDIS_PREFIX}{preview_token}",
-        _PREVIEW_REDIS_TTL_SECONDS,
-        cache_payload,
-    )
+        # 4. UPDATE batch summary + status=PREVIEW_DONE（spec line 2063）
+        validate_transition(ImportBatchStatus.CREATED, ImportBatchStatus.PREVIEW_DONE)
+        batch.summary_new = len(new_records)
+        batch.summary_exists = len(exists_records)
+        batch.summary_conflict = len(conflict_records)
+        batch.summary_out_of_scope = len(out_of_scope_records)
+        batch.status = ImportBatchStatus.PREVIEW_DONE
+        await db.flush()
+
+        # 5. Redis cache（spec §2.19 v2.2 P0：仅 cache batch_id）
+        cache_payload = json.dumps({"batch_id": batch_id})
+        await redis_module.redis_client.setex(
+            f"{_PREVIEW_REDIS_PREFIX}{preview_token}",
+            _PREVIEW_REDIS_TTL_SECONDS,
+            cache_payload,
+        )
+    except Exception:
+        # Task 34 / spec §3.6 line 1134：dry_run 阶段任何异常 → CREATED → FAILED
+        # 防 batch 停留 CREATED 成僵尸行（审计反查看到「创建一年后还是 CREATED」）
+        await _transition_batch_status(
+            db,
+            batch_id,
+            ImportBatchStatus.CREATED,
+            ImportBatchStatus.FAILED,
+        )
+        raise
 
     # 6. 构造 result（conflict/out_of_scope 截断展示）
     result = ImportDryRunResult(

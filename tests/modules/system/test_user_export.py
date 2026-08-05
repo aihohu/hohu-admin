@@ -14,10 +14,12 @@
 """
 
 import io
+import json as _json
 
 import pytest
 from openpyxl import load_workbook
 from sqlalchemy import select as _select
+from sqlalchemy import text as _text
 
 from app.constants import (
     ADMIN_USERNAME,
@@ -28,6 +30,7 @@ from app.constants import (
 from app.core.exceptions import BusinessRuleException, NotFoundException
 from app.core.file_storage import MockFileStorage
 from app.modules.system.models.dept import Dept
+from app.modules.system.models.operation_log import SysOperationLog
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.user.constants import (
@@ -756,3 +759,86 @@ class TestDownloadExportFile:
         with pytest.raises(BusinessRuleException) as exc:
             await download_export_file(db_session, export_id, file_storage=file_storage)
         assert exc.value.error_code == "AI_EXPORT_FILE_EXPIRED"
+
+
+# ========== Task 34：audit chain JOIN 测试（spec §8.1 line 2902） ==========
+
+
+class TestAuditChainJoinable:
+    """spec §8.1 line 2902：审计链 sys_operation_log ↔ sys_user_export_task 可对照。
+
+    spec 原文写「sys_operation_log.export_id ↔ sys_user_export_task.export_id 可 JOIN」，
+    但 sys_operation_log schema（app/modules/system/models/operation_log.py）**没有
+    export_id 字段**。真实 audit chain 机制（spec §2.30 line 1450 + §2.8 line 256）：
+
+      sys_operation_log.path='/system/user/export'
+        + request_params.reason + user_id + create_time
+        ↔ sys_user_export_task.reason + operator_id + created_at
+
+    本测试验证：给定 operation_log 行（模拟 AuditLogMiddleware 写入），
+    能通过 reason + user_id + 时间窗反查到正确的 export task 行。
+    """
+
+    async def test_audit_chain_joinable_via_reason_and_operator(
+        self, db_session, file_storage
+    ):
+        """sys_operation_log 行 ↔ sys_user_export_task 行可通过 reason + operator_id 对照。"""
+        dept = _make_dept(5960, "QA-Exp-Audit")
+        super_role = await _fetch_super_role(db_session)
+        operator = _make_user(6960, "QA_EXP_AUDIT_OP", [super_role], [dept])
+        db_session.add_all([dept, operator])
+        await db_session.flush()
+
+        # 1. 创建 export task（模拟 export_users_to_excel 内部行为）
+        unique_reason = "QA audit chain 2026-08-05 unique"
+        _bytes, _count, export_id = await export_users_to_excel(
+            db_session,
+            UserExportFilter(),
+            operator,
+            reason=unique_reason,
+            file_storage=file_storage,
+        )
+
+        # 2. 模拟 AuditLogMiddleware 写 sys_operation_log（HTTP POST /export）
+        #    request_params 是 request body 的 JSON 摘要（含 reason）
+        operation_log = SysOperationLog(
+            user_id=operator.user_id,
+            username=operator.user_name,
+            module="system",
+            action="create",
+            method="POST",
+            path="/system/user/export",
+            request_params=_json.dumps(
+                {"reason": unique_reason, "status": None}, ensure_ascii=False
+            ),
+            status_code=200,
+            ip="127.0.0.1",
+            duration=150,
+        )
+        db_session.add(operation_log)
+        await db_session.flush()
+
+        # 3. 验证 audit chain：从 operation_log 反查 export_task
+        #    真实场景：审计员看到 operation_log → 想知道导出了什么 → 反查 export_task
+        #    JOIN 条件：path + user_id + request_params.reason 匹配 task.reason
+        # 用 SQL 验证 JOIN 可行性（模拟审计员手工 SQL 反查）
+        result = await db_session.execute(
+            _text("""
+                SELECT t.export_id, t.reason, t.row_count, t.status,
+                       l.username, l.path, l.create_time as log_time
+                FROM sys_user_export_task t
+                JOIN sys_operation_log l
+                  ON l.user_id = t.operator_id
+                 AND l.path = '/system/user/export'
+                 AND l.request_params LIKE '%' || t.reason || '%'
+                WHERE t.export_id = :export_id
+            """),
+            {"export_id": export_id},
+        )
+        row = result.first()
+        assert row is not None, (
+            "audit chain JOIN 失败：operation_log 无法反查到 export_task"
+        )
+        assert row.export_id == export_id
+        assert row.reason == unique_reason
+        assert row.username == "QA_EXP_AUDIT_OP"
