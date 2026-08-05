@@ -1053,7 +1053,7 @@ async def user_import_preview(
 
     流程（spec §6 / §2.14）：
     1. _load_file_bytes(file_id) → file_bytes + filename + mime_type
-    2. user_service.parse_import_excel(file_bytes, mime_type) → records
+    2. parse_import_excel(file_bytes, mime_type) → records
     3. dry_run_import_users(records, current_user, file_bytes, filename, reason,
                              on_conflict=...) → (ImportDryRunResult, batch)
     4. ToolResult.success(
@@ -1069,13 +1069,15 @@ async def user_import_preview(
         reason: 业务理由（1-256 字符，spec §2.30 P1-3 强制）
         on_conflict: 'skip' (默认) / 'overwrite' / 'fail_fast'（详见 spec §2.7）
     """
-    from app.modules.system.service.user_service import user_service  # noqa: PLC0415
+    from app.modules.system.user.import_parser import (  # noqa: PLC0415
+        parse_import_excel,
+    )
     from app.modules.system.user.import_service import (  # noqa: PLC0415
         dry_run_import_users,
     )
 
     file_bytes, filename, mime_type = await _load_file_bytes(ctx, file_id)
-    records = user_service.parse_import_excel(file_bytes, mime_type)
+    records = parse_import_excel(file_bytes, mime_type)
 
     dry_run_result, batch = await dry_run_import_users(
         ctx.db,
@@ -1086,6 +1088,20 @@ async def user_import_preview(
         reason,
         on_conflict=on_conflict,
     )
+
+    # Task 34 修：preview 阶段保存上传文件到 storage，execute 凭 file_storage_key 反查
+    # （AI 路径 execute 不重新上传文件，与 HTTP 路径前端重传不同）
+    from app.core.file_storage import get_file_storage  # noqa: PLC0415
+
+    storage = get_file_storage()
+    storage_key = await storage.save(
+        file_bytes,
+        mime_type=mime_type,
+        namespace="import-preview",
+        suffix=".xlsx",
+    )
+    batch.file_storage_key = storage_key
+    await ctx.db.flush()
 
     summary = {
         "new": dry_run_result.new_count,
@@ -1163,9 +1179,11 @@ async def user_import_execute(
         on_conflict: 与 preview 时一致（spec §2.7）
         sync_mode: 'CREATE_ONLY' (默认) / 'UPDATE_PROFILE' / 'FULL_SYNC'（spec §2.24）
     """
-    from app.modules.system.service.user_service import user_service  # noqa: PLC0415
     from app.modules.system.user.constants import EmployeeNoSyncMode  # noqa: PLC0415
-    from app.modules.system.user.import_service import (  # noqa: PLC0415  # noqa: PLC0415
+    from app.modules.system.user.import_parser import (  # noqa: PLC0415
+        parse_import_excel,
+    )
+    from app.modules.system.user.import_service import (  # noqa: PLC0415
         batch_create_users_from_records,
         get_batch_by_preview_token,
     )
@@ -1180,10 +1198,11 @@ async def user_import_execute(
             error_code="AI_IMPORT_PREVIEW_INVALID",
         )
 
-    # 2. 直接从 batch.file_storage_key 读 file_bytes（spec §2.19 line 575 设计）
-    #    dry_run 阶段已把上传文件保存到 LocalFileStorage（或 Phase 3 S3）；
-    #    execute 阶段凭 batch.file_storage_key 反查，不需要 LLM 重新传 file_id。
-    from pathlib import Path  # noqa: PLC0415
+    # 2. 凭 batch.file_storage_key 从 FileStorage 读 file_bytes
+    #    （Task 34 修：preview 阶段已通过 FileStorage.save 写入；
+    #    execute 阶段走 FileStorage.read 抽象，不直接拼文件系统路径，
+    #    Phase 3 切 S3 时零改业务代码）
+    from app.core.file_storage import get_file_storage  # noqa: PLC0415
 
     if not batch.file_storage_key:
         from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
@@ -1193,20 +1212,20 @@ async def user_import_execute(
             error_code="AI_IMPORT_PREVIEW_INVALID",
         )
 
-    file_path = Path(batch.file_storage_key)
-    if not file_path.exists():  # noqa: ASYNC240  AI 调用频次低，同步 IO 可接受
+    storage = get_file_storage()
+    try:
+        file_bytes = await storage.read(batch.file_storage_key)
+    except FileNotFoundError:
         from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
 
         raise BusinessRuleException(
             f"预检文件已丢失（{batch.filename}），请重新 import_preview",
             error_code="AI_IMPORT_PREVIEW_INVALID",
-        )
-
-    file_bytes = file_path.read_bytes()  # noqa: ASYNC240
+        ) from None
     filename = batch.filename or ""
 
     # 3. parse + execute
-    records = user_service.parse_import_excel(
+    records = parse_import_excel(
         file_bytes,
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
