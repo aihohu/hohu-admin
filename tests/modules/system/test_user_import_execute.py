@@ -19,6 +19,7 @@ import json
 
 import pytest
 from fakeredis import aioredis as fakeredis_async
+from sqlalchemy import delete as _delete
 from sqlalchemy import select as _select
 
 from app.constants import (
@@ -146,7 +147,16 @@ async def _seed_default_password(
     db_session,
     password: str = "QA-Default-Pwd-123",
 ) -> None:
-    """设置 sys_config.auth:default_password（spec §2.5）。"""
+    """设置 sys_config.auth:default_password（spec §2.5）。
+
+    Why DELETE-first: db_session is outer-transaction rollback, but the dev DB
+    itself may already hold a seeded auth:default_password row (init_db.py or
+    prior manual test). INSERT collides with the unique key regardless of
+    transaction isolation; DELETE first to keep the helper idempotent.
+    """
+    await db_session.execute(
+        _delete(Config).where(Config.config_key == "auth:default_password")
+    )
     db_session.add(
         Config(
             config_id=999_001,

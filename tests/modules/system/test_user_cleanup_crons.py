@@ -14,6 +14,7 @@
 from datetime import datetime, timedelta
 
 import pytest
+from sqlalchemy import delete as _delete
 from sqlalchemy import select
 
 from app.core.file_storage import MockFileStorage, reset_file_storage_for_test
@@ -86,6 +87,22 @@ def _make_export_task(
         status=status,
         created_at=created_at or datetime.now(),
     )
+
+
+@pytest.fixture(autouse=True)
+async def _cleanup_persisted_batches(db_session):
+    """DELETE all persisted sys_user_import_batch / sys_user_export_task rows.
+
+    Why: db_session is outer-transaction rollback (no test pollution), but the
+    dev DB itself may already hold seeded batches from prior manual tests /
+    E2E runs / Playwright smoke. cleanup_expired_previews / cleanup_expired_batches
+    SELECT by status and created_at without test-scoped filtering, so any
+    persisted PREVIEW_DONE/RUNNING rows leak into assertions (count == N
+    instead of 0 or 1). DELETE first to keep tests deterministic.
+    """
+    await db_session.execute(_delete(UserImportBatch))
+    await db_session.execute(_delete(UserExportTask))
+    await db_session.flush()
 
 
 @pytest.fixture

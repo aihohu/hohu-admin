@@ -11,6 +11,7 @@
 """
 
 import pytest
+from sqlalchemy import delete
 
 from app.core.exceptions import BusinessRuleException
 from app.modules.system.models.config import Config
@@ -20,6 +21,22 @@ from app.modules.system.user.constants import (
     OVERWRITE_NEVER,
 )
 from app.modules.system.user.helpers import get_default_password
+
+
+@pytest.fixture(autouse=True)
+async def _cleanup_default_password_rows(db_session):
+    """Clear any persisted sys_config.auth:default_password rows so the test's
+    INSERT does not collide with the unique key.
+
+    Why: db_session is outer-transaction rollback (no test pollution), but the
+    dev DB itself may already hold a seeded auth:default_password row (init_db.py
+    leaves one). A test INSERT of the same config_key triggers a unique-key
+    violation regardless of transaction isolation. DELETE first, then INSERT.
+    """
+    await db_session.execute(
+        delete(Config).where(Config.config_key == "auth:default_password")
+    )
+    await db_session.flush()
 
 
 class TestOverwriteConstants:
