@@ -243,7 +243,8 @@ async def chat(
 
     # v1.5+ SR-25: 前端可能注入了 file_id 到最后一条 user message 末尾（chat 上传文件场景）。
     # display_content 是用户原始输入（不含注入），用于持久化 + UI 显示；
-    # messages 里的注入版仅给 LLM 看。display_parts 是 display_content + 图片 parts。
+    # messages 里的注入版仅给 LLM 看。display_parts 是 display_content + 所有 file parts
+    # （含 image + 非 image 文件如 Excel/CSV，前者渲染 <img>，后者渲染文件 chip）。
     display_content = body.get("displayContent")
     display_parts: list[dict] | None = None
     if display_content is not None:
@@ -251,22 +252,43 @@ async def chat(
         if display_content:
             display_parts.append({"type": "text", "text": display_content})
         if user_parts:
-            display_parts.extend(
-                p
-                for p in user_parts
-                if p.get("type") == "file"
-                and str(p.get("mediaType", "")).startswith("image/")
-            )
+            display_parts.extend(p for p in user_parts if p.get("type") == "file")
         if not display_parts:
             display_parts = None
 
     # 将内网图片 URL 转为 base64 data URI（LLM 提供商无法访问内网）
     body = await _convert_local_images_to_data_uri(body)
-    raw_body = json.dumps(body).encode()
+
+    # 给 PydanticAI 的请求体移除非 image 文件 part + 剥 fileSize（PydanticAI FileUIPart.url
+    # 必须合法 http(s) URL 且不允许 extra 字段；Excel/CSV 等业务文件无预览 URL，通过 file_id
+    # 在 request body 其他字段传递，发 LLM 时不应作为 file part 出现）。
+    # user_parts（持久化用）已在前面提取，保留完整文件元数据用于 UI chip 渲染。
+    body_for_llm = dict(body)
+    new_messages = []
+    for msg in body.get("messages", []):
+        new_msg = dict(msg)
+        parts = msg.get("parts")
+        if isinstance(parts, list):
+            filtered = []
+            for p in parts:
+                if not isinstance(p, dict):
+                    filtered.append(p)
+                    continue
+                if p.get("type") == "file":
+                    if not str(p.get("mediaType", "")).startswith("image/"):
+                        continue
+                    p = {k: v for k, v in p.items() if k != "fileSize"}
+                filtered.append(p)
+            if filtered:
+                new_msg["parts"] = filtered
+            else:
+                new_msg.pop("parts", None)
+        new_messages.append(new_msg)
+    body_for_llm["messages"] = new_messages
 
     # 解析前端请求
     try:
-        run_input = VercelAIAdapter.build_run_input(raw_body)
+        run_input = VercelAIAdapter.build_run_input(json.dumps(body_for_llm).encode())
     except ValidationError as e:
         return Response(
             content=json.dumps(e.json()),

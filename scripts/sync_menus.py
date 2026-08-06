@@ -308,6 +308,27 @@ MENU_DEFINITIONS = [
         "route_path": "",
         "status": "1",
     },
+    # ---- 用户导入导出按钮权限（Task 16，spec §10 line 3095） ----
+    # 路由层 require_permissions("system:user:import" / "system:user:export") 依赖这两个 seed
+    # 父菜单 system_user 已存在（line 238），sync_menus 按 permission 去重，重复执行安全。
+    {
+        "key": "system_user_import",
+        "parent_route": "system_user",
+        "menu_name": "导入",
+        "menu_type": "F",
+        "permission": "system:user:import",
+        "route_path": "",
+        "status": "1",
+    },
+    {
+        "key": "system_user_export",
+        "parent_route": "system_user",
+        "menu_name": "导出",
+        "menu_type": "F",
+        "permission": "system:user:export",
+        "route_path": "",
+        "status": "1",
+    },
     {
         "route_name": "system_role",
         "parent_route": "auth",

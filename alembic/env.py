@@ -1,27 +1,32 @@
 import asyncio
-from logging.config import fileConfig
 import os
+from logging.config import fileConfig
 
 from dotenv import load_dotenv
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+import app.modules.marketplace.models  # noqa: F401
 from alembic import context
 
 # Import your model
 from app.db.base import Base
-from app.modules.system.models.user import User
-from app.modules.system.models.role import Role
-from app.modules.system.models.menu import Menu
-from app.modules.system.models.dept import Dept
-from app.modules.job.models.job import SysJob, SysJobLog
-from app.modules.ai.models.provider import AiProvider
-from app.modules.ai.models.conversation import AiConversation
-from app.modules.ai.models.message import AiMessage
-from app.modules.system.models.operation_log import SysOperationLog  # noqa: F401
+from app.modules.ai.models.conversation import AiConversation  # noqa: F401
+from app.modules.ai.models.message import AiMessage  # noqa: F401
+from app.modules.ai.models.provider import AiProvider  # noqa: F401
+from app.modules.job.models.job import SysJob, SysJobLog  # noqa: F401
+from app.modules.system.models.dept import Dept  # noqa: F401
 from app.modules.system.models.login_log import SysLoginLog  # noqa: F401
-import app.modules.marketplace.models  # noqa: F401
+from app.modules.system.models.menu import Menu  # noqa: F401
+from app.modules.system.models.operation_log import SysOperationLog  # noqa: F401
+from app.modules.system.models.role import Role  # noqa: F401
+from app.modules.system.models.user import User  # noqa: F401
+from app.modules.system.user.models import (  # noqa: F401
+    UserExportTask,
+    UserImportBatch,
+    UserImportBatchLog,
+)
 
 load_dotenv()
 config = context.config

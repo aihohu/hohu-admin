@@ -57,6 +57,11 @@ class Settings(BaseSettings):
         ".jpg,.jpeg,.png,.gif,.webp,.pdf,.doc,.docx,.xls,.xlsx,.zip,.rar,.txt,.csv"
     )
 
+    # 文件存储抽象（spec §3.9 v2.2 P1-4）
+    # Phase 1 默认 local；Phase 3+ 切 s3 时业务代码零改动（仅切换 get_file_storage 工厂）
+    FILE_STORAGE_BACKEND: Literal["local", "s3"] = "local"
+    LOCAL_FILE_STORAGE_ROOT: str = "uploads/file_storage"
+
     # 频率限制配置
     # 登录接口：每分钟最多登录尝试次数
     RATE_LIMIT_LOGIN: str = "5/minute"

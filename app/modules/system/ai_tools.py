@@ -15,7 +15,8 @@ dept_id / role_code 走关联表 EXISTS 子查询，留 v1.5。
 user_mgmt agent + system:user:list 权限码（spec §5.1）。
 """
 
-from typing import Any
+from datetime import timedelta
+from typing import Any, Literal
 
 from sqlalchemy import func, select
 
@@ -619,4 +620,875 @@ async def _dry_run_user_batch_delete(
         count=len(users),
         reason=summary,
         examples=examples,
+    )
+
+
+# ============ user.list / user.lookup / user.update（spec §10 Task 23-25） ============
+
+
+@ai_tool(
+    AiToolMeta(
+        name="user.list",
+        agent="user_mgmt",
+        summary=(
+            "List users → {total, limit, sample[3]}. Frontend renders data_list. "
+            "Use user.count for count-only."
+        ),
+        required_perms=("system:user:list",),
+        risk="low",
+        readonly=True,
+        allowed_filters=("status", "user_gender"),
+        chip_target="/system/user",
+        result_view="data_list",
+    )
+)
+async def user_list(
+    ctx: AiToolContext,
+    filters: dict[str, Any] | None = None,
+    limit: int | None = None,
+) -> ToolResult:
+    """列出用户，返回前 N 条精简字段（spec §10 Task 23）
+
+    LLM 看 data.{total, limit, sample[3]}（精简，进 prompt cache）；
+    前端看 ui.view_data.{columns, rows}（全量 limit 条，渲染 table）。
+
+    filters:
+        status: '1' (启用) / '2' (禁用)
+        user_gender: '0' (未知) / '1' (男) / '2' (女)
+    limit:
+        None / 0 / 负数 = 默认 20；正整数按 min(limit, 50) 截断
+    """
+    filters = validate_filters_in_whitelist(ctx.tool_meta, filters)
+    safe_limit = _coerce_list_limit(limit)
+
+    base = select(User)
+    for key, value in filters.items():
+        # sys_user 表字段都是 varchar，强制 stringify 防类型错
+        base = base.where(getattr(User, key) == str(value))
+
+    # spec §6.2 data_scope 强制：read tool 也走 ctx.data_scope.filters
+    base = base.where(*ctx.data_scope.filters)
+
+    total = int(
+        await ctx.db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    )
+
+    rows = (
+        (await ctx.db.execute(base.order_by(User.user_id.asc()).limit(safe_limit)))
+        .scalars()
+        .all()
+    )
+
+    columns = [
+        {"key": "id", "label": "ID"},
+        {"key": "user_name", "label": "用户名"},
+        {"key": "nickname", "label": "昵称"},
+        {"key": "status", "label": "状态"},
+    ]
+    records = [
+        {
+            "id": str(u.user_id),
+            "user_name": u.user_name,
+            "nickname": u.nickname or "",
+            "status": u.status,
+        }
+        for u in rows
+    ]
+    return ToolResult.success(
+        data={
+            "total": total,
+            "limit": safe_limit,
+            "sample": records[:3],  # 给 LLM 看前 3 条
+        },
+        ui=UIResult(
+            view_type="data_list",
+            view_data={"columns": columns, "rows": records},
+            audit={"total": total},
+            label_key="ai.tool.user.list.result",
+            label_params={"count": total},
+        ),
+    )
+
+
+@ai_tool(
+    AiToolMeta(
+        name="user.lookup",
+        agent="user_mgmt",
+        summary=(
+            "Lookup single user by id/name/phone/email → detail_card. "
+            "NOT for listing — use user.list."
+        ),
+        required_perms=("system:user:list",),
+        risk="low",
+        readonly=True,
+        result_view="detail_card",
+    )
+)
+async def user_lookup(
+    ctx: AiToolContext,
+    *,
+    user_id: int | None = None,
+    user_name: str | None = None,
+    phone: str | None = None,
+    email: str | None = None,
+) -> ToolResult:
+    """查询单个用户详情（spec §10 Task 24）
+
+    至少提供一个 selector；多 selector 取交集（AND）；
+    user_name / phone / email 精确匹配（避免误匹配前缀）。
+    始终应用 ctx.data_scope.filters，确保只返回 caller 可见范围内的用户。
+
+    Args:
+        user_id: Snowflake int64 ID（最精准）
+        user_name: 登录账号精确匹配
+        phone: 手机号精确匹配
+        email: 邮箱精确匹配
+    """
+    from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+
+    if not user_id and not user_name and not phone and not email:
+        raise BusinessRuleException(
+            "至少提供 user_id / user_name / phone / email 中的一个",
+            error_code="AI_LOOKUP_NO_TARGET",
+        )
+
+    # spec §6.2 data_scope 强制：read tool 含 user_id 也需校验 target 可见
+    # （防越权预估：用户传 admin 的 user_id 直接 lookup 拿到敏感字段）
+    if user_id is not None:
+        await ensure_targets_in_scope(ctx, user_ids=[user_id])
+
+    stmt = select(User).where(*ctx.data_scope.filters)
+    if user_id is not None:
+        stmt = stmt.where(User.user_id == user_id)
+    if user_name is not None:
+        stmt = stmt.where(User.user_name == user_name)
+    if phone is not None:
+        stmt = stmt.where(User.user_phone == phone)
+    if email is not None:
+        stmt = stmt.where(User.user_email == email)
+
+    user = (await ctx.db.execute(stmt.limit(2))).scalars().all()
+    if not user:
+        raise BusinessRuleException(
+            "未找到匹配用户（字段值不匹配 / 不在可见范围 / 已删除）",
+            error_code="AI_LOOKUP_NO_MATCH",
+        )
+    if len(user) > 1:
+        # 多重匹配：返回首个 + warning hint，让 LLM 主动反问用户细化（spec §8.6）
+        # 不抛异常，因为多重匹配在 lookup 场景不致命（仅是 ambiguous）
+        pass
+
+    u = user[0]
+    return ToolResult.success(
+        data={
+            "id": str(u.user_id),
+            "user_name": u.user_name,
+            "nickname": u.nickname,
+            "status": u.status,
+        },
+        ui=UIResult(
+            view_type="detail_card",
+            view_data={
+                "id": str(u.user_id),
+                "user_name": u.user_name,
+                "nickname": u.nickname or "",
+                "user_phone": u.user_phone or "",
+                "user_email": u.user_email or "",
+                "user_gender": u.user_gender or "0",
+                "status": u.status,
+            },
+            audit={"user_id": str(u.user_id), "user_name": u.user_name},
+            label_key="ai.tool.user.lookup.result",
+            label_params={"userName": u.user_name},
+        ),
+    )
+
+
+# spec §10 Task 25：user.update — 字段级更新（白名单控制）
+# spec §2.21 OVERWRITE_ALLOWED：nickname / user_email / user_phone / user_gender /
+# status / dept_id / role_ids（不含 user_name / hashed_password / user_id）
+_USER_UPDATE_ALLOWED_FIELDS: frozenset[str] = frozenset(
+    {
+        "nickname",
+        "user_email",
+        "user_phone",
+        "user_gender",
+        "status",
+    }
+)
+"""user.update tool 允许更新的字段白名单（spec §2.21 OVERWRITE_ALLOWED 子集）。
+
+不含 user_name / user_id / hashed_password（不可改）；
+不含 dept_id / role_ids（需独立 tool user.update_dept / user.update_roles，预留 Task 25a+）。
+"""
+
+
+@ai_tool(
+    AiToolMeta(
+        name="user.update",
+        agent="user_mgmt",
+        summary=(
+            "Update user profile (nickname/phone/email/gender/status) "
+            "→ {'updated': 1}. HITL confirms."
+        ),
+        required_perms=("system:user:edit",),
+        risk="high",
+        hitl_always=True,
+        dry_run_supported=True,
+        result_view="rows_affected",
+        args_summary_fields=("user_id",),
+    )
+)
+async def user_update(
+    ctx: AiToolContext,
+    *,
+    user_id: int,
+    nickname: str | None = None,
+    user_email: str | None = None,
+    user_phone: str | None = None,
+    user_gender: str | None = None,
+    status: str | None = None,
+) -> ToolResult:
+    """更新用户资料（spec §10 Task 25）
+
+    HITL 强制（hitl_always=True）：用户必须在抽屉确认后才真正落库。
+    所有字段可选，仅传需更新的字段（PATCH 语义）。
+
+    字段白名单：nickname / user_email / user_phone / user_gender / status
+    （不含 user_name / hashed_password / user_id，详见 _USER_UPDATE_ALLOWED_FIELDS）。
+
+    Args:
+        user_id: Snowflake int64 ID（必填，更新锚点）
+        nickname: 新昵称（2-16 字符）
+        user_email: 新邮箱（合法 email）
+        user_phone: 新手机号（合法手机号）
+        user_gender: '0' (未知) / '1' (男) / '2' (女)
+        status: '1' (启用) / '2' (禁用)
+    """
+    from app.core.exceptions import (  # noqa: PLC0415
+        BusinessRuleException,
+        NotFoundException,
+    )
+
+    # 至少一个可更新字段
+    update_payload = {
+        "nickname": nickname,
+        "user_email": user_email,
+        "user_phone": user_phone,
+        "user_gender": user_gender,
+        "status": status,
+    }
+    provided = {k: v for k, v in update_payload.items() if v is not None}
+    if not provided:
+        raise BusinessRuleException(
+            "至少提供一个待更新字段（nickname / user_email / user_phone / user_gender / status）",
+            error_code="AI_USER_UPDATE_NO_FIELDS",
+        )
+
+    # spec §6.2 data_scope 强制：写 tool 含 user_id 必须先验证 target 可见
+    await ensure_targets_in_scope(ctx, user_ids=[user_id])
+
+    # 查询用户（应用 data_scope 二次防御）
+    stmt = select(User).where(User.user_id == user_id, *ctx.data_scope.filters)
+    user = (await ctx.db.execute(stmt)).scalars().first()
+    if not user:
+        raise NotFoundException("用户", error_code="AI_USER_UPDATE_NOT_FOUND")
+
+    # 字段白名单已通过函数签名保证（只接受 _USER_UPDATE_ALLOWED_FIELDS 内的字段）
+    for field, value in provided.items():
+        if field not in _USER_UPDATE_ALLOWED_FIELDS:
+            # defensive：函数签名不该接受，但兜底防 LLM 注入
+            raise BusinessRuleException(
+                f"字段 {field} 不在可更新白名单内",
+                error_code="AI_USER_UPDATE_FIELD_NOT_ALLOWED",
+            )
+        setattr(user, field, value)
+
+    return ToolResult.success(
+        data={"updated": 1, "userName": user.user_name},
+        ui=UIResult(
+            view_type="rows_affected",
+            view_data={"count": 1, "ids": [str(user.user_id)]},
+            audit={
+                "affected_user_ids": [str(user.user_id)],
+                "fields": list(provided.keys()),
+            },
+            label_key="ai.tool.user.update.result",
+            label_params={"userName": user.user_name},
+        ),
+    )
+
+
+async def _dry_run_user_update(
+    ctx: AiToolContext,
+    *,
+    user_id: int,
+    nickname: str | None = None,
+    user_email: str | None = None,
+    user_phone: str | None = None,
+    user_gender: str | None = None,
+    status: str | None = None,
+) -> Any:
+    """dry_run：列出待更新字段 + 用户当前值供 HITL 抽屉确认（spec §10 Task 25）"""
+    from app.core.exceptions import (  # noqa: PLC0415
+        AuthorizationException,
+    )
+    from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
+
+    update_payload = {
+        "nickname": nickname,
+        "user_email": user_email,
+        "user_phone": user_phone,
+        "user_gender": user_gender,
+        "status": status,
+    }
+    provided = {k: v for k, v in update_payload.items() if v is not None}
+    if not provided:
+        return DryRunResult(
+            ok=False,
+            count=0,
+            reason="至少提供一个待更新字段",
+        )
+
+    try:
+        await ensure_targets_in_scope(ctx, user_ids=[user_id])
+    except AuthorizationException as e:
+        return DryRunResult(ok=False, count=0, reason=e.message)
+
+    stmt = select(User).where(User.user_id == user_id, *ctx.data_scope.filters)
+    user = (await ctx.db.execute(stmt)).scalars().first()
+    if not user:
+        return DryRunResult(
+            ok=False,
+            count=0,
+            reason="用户不存在 / 不在可见范围",
+        )
+
+    examples = [
+        f"{field}: {getattr(user, field)} → {value}"
+        for field, value in provided.items()
+    ]
+    summary = f"将更新用户 {user.user_name} 的 {len(provided)} 个字段"
+    return DryRunResult(
+        ok=True,
+        count=1,
+        reason=summary,
+        examples=examples,
+    )
+
+
+# ============ user.import_preview / user.import_execute（spec §10 Task 26/26a） ============
+
+
+async def _load_file_bytes(ctx: AiToolContext, file_id: str) -> tuple[bytes, str, str]:
+    """从 sys_file 加载 file_bytes + filename + mime_type（spec §10 Task 26）
+
+    抛 BusinessRuleException:
+        - AI_FILE_ID_INVALID: file_id 不是合法数字字符串
+        - AI_FILE_NOT_FOUND: file_id 不存在 / 已删除
+
+    Returns: (file_bytes, filename, mime_type)
+    """
+    from pathlib import Path  # noqa: PLC0415
+
+    from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+    from app.modules.system.models.file import File  # noqa: PLC0415
+
+    try:
+        file_id_int = int(file_id)
+    except (TypeError, ValueError) as e:
+        raise BusinessRuleException(
+            f"file_id 格式无效: {file_id!r}",
+            error_code="AI_FILE_ID_INVALID",
+        ) from e
+
+    stmt = select(File).where(File.file_id == file_id_int, File.del_flag == "0")
+    file_record = (await ctx.db.execute(stmt)).scalars().first()
+    if file_record is None:
+        raise BusinessRuleException(
+            f"文件不存在: file_id={file_id}",
+            error_code="AI_FILE_NOT_FOUND",
+        )
+
+    file_path = Path(file_record.file_path)
+    if not file_path.exists():  # noqa: ASYNC240  AI 调用频次低，同步 IO 可接受
+        raise BusinessRuleException(
+            f"文件已被删除（DB 记录存在但磁盘文件丢失）: file_id={file_id}",
+            error_code="AI_FILE_NOT_FOUND",
+        )
+
+    file_bytes = file_path.read_bytes()  # noqa: ASYNC240
+    return file_bytes, file_record.file_name, file_record.mime_type or ""
+
+
+@ai_tool(
+    AiToolMeta(
+        name="user.import_preview",
+        agent="user_mgmt",
+        summary=(
+            "Dry-run user import → {batchId, previewToken, summary}. "
+            "Read-only. Call user.import_execute next."
+        ),
+        required_perms=("system:user:import",),
+        risk="low",
+        readonly=True,
+        accepts_file=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.ms-excel",
+            "text/csv",
+        ),
+        result_view="detail_card",
+        chip_target="/system/user",
+        args_summary_fields=("file_id", "reason"),
+    )
+)
+async def user_import_preview(
+    ctx: AiToolContext,
+    *,
+    file_id: str,
+    reason: str,
+    on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
+) -> ToolResult:
+    """AI tool 入口：解析 + dry_run 用户导入（spec §10 Task 26, v2.2 P0 #2.14 拆分）
+
+    流程（spec §6 / §2.14）：
+    1. _load_file_bytes(file_id) → file_bytes + filename + mime_type
+    2. parse_import_excel(file_bytes, mime_type) → records
+    3. dry_run_import_users(records, current_user, file_bytes, filename, reason,
+                             on_conflict=...) → (ImportDryRunResult, batch)
+    4. ToolResult.success(
+         data={batch_id, preview_token, summary{new, exists, conflict, out_of_scope}},
+         ui=detail_card（HITL 抽屉展示 summary 供用户确认）
+       )
+
+    **强制 HITL**：本 tool 是 readonly，不写用户；execute 走 user.import_execute
+    （risk=high + hitl_always），LLM 不能跳过 preview 直接 execute。
+
+    Args:
+        file_id: 文件 ID（sys_file.file_id 字符串形式）
+        reason: 业务理由（1-256 字符，spec §2.30 P1-3 强制）
+        on_conflict: 'skip' (默认) / 'overwrite' / 'fail_fast'（详见 spec §2.7）
+    """
+    from app.modules.system.user.import_parser import (  # noqa: PLC0415
+        parse_import_excel,
+    )
+    from app.modules.system.user.import_service import (  # noqa: PLC0415
+        dry_run_import_users,
+    )
+
+    file_bytes, filename, mime_type = await _load_file_bytes(ctx, file_id)
+    records = parse_import_excel(file_bytes, mime_type)
+
+    dry_run_result, batch = await dry_run_import_users(
+        ctx.db,
+        records,
+        ctx.user,
+        file_bytes,
+        filename,
+        reason,
+        on_conflict=on_conflict,
+    )
+
+    # Task 34 修：preview 阶段保存上传文件到 storage，execute 凭 file_storage_key 反查
+    # （AI 路径 execute 不重新上传文件，与 HTTP 路径前端重传不同）
+    from app.core.file_storage import get_file_storage  # noqa: PLC0415
+
+    storage = get_file_storage()
+    storage_key = await storage.save(
+        file_bytes,
+        mime_type=mime_type,
+        namespace="import-preview",
+        suffix=".xlsx",
+    )
+    batch.file_storage_key = storage_key
+    await ctx.db.flush()
+
+    summary = {
+        "new": dry_run_result.new_count,
+        "exists": dry_run_result.exists_count,
+        "conflict": dry_run_result.conflict_count,
+        "outOfScope": dry_run_result.out_of_scope_count,
+    }
+    return ToolResult.success(
+        data={
+            "batchId": batch.batch_id,
+            "previewToken": batch.preview_token,
+            "total": dry_run_result.total,
+            "summary": summary,
+        },
+        ui=UIResult(
+            view_type="detail_card",
+            view_data={
+                "batchId": batch.batch_id,
+                "previewToken": batch.preview_token[:8],  # 截断展示前 8 位
+                "total": dry_run_result.total,
+                "summary": summary,
+                "expiresAt": (
+                    batch.created_at.isoformat() if batch.created_at else None
+                ),
+            },
+            audit={
+                "batch_id": batch.batch_id,
+                "total_rows": dry_run_result.total,
+            },
+            label_key="ai.tool.user.import_preview.result",
+            label_params={"total": dry_run_result.total},
+        ),
+    )
+
+
+@ai_tool(
+    AiToolMeta(
+        name="user.import_execute",
+        agent="user_mgmt",
+        summary=(
+            "Execute previewed user import → {successCount}. "
+            "HITL confirms. Pass previewToken from preview."
+        ),
+        required_perms=("system:user:import",),
+        risk="high",
+        hitl_always=True,
+        dry_run_supported=True,
+        result_view="rows_affected",
+        args_summary_fields=("preview_token", "reason"),
+    )
+)
+async def user_import_execute(
+    ctx: AiToolContext,
+    *,
+    preview_token: str,
+    reason: str,
+    on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
+    sync_mode: Literal["CREATE_ONLY", "UPDATE_PROFILE", "FULL_SYNC"] = "CREATE_ONLY",
+) -> ToolResult:
+    """AI tool 入口：执行用户导入（spec §10 Task 26a, v2.2 P0 #2.14 拆分）
+
+    **强制 HITL**（hitl_always=True）：用户必须在抽屉确认 preview summary 后才执行。
+    LLM 不能跳过 preview → 直接 execute（spec §2.14 反例）。
+
+    流程：
+    1. 凭 preview_token 反查 batch（含 file_sha256 + records_hash + operator_id）
+    2. 从 sys_file 重新加载 file_bytes（spec §2.19 file_storage_key 在 execute 阶段读）
+    3. parse_import_excel → records（与 preview 时 hash 一致）
+    4. batch_create_users_from_records(...) → ImportResult
+    5. ToolResult.rows_affected（successCount + skippedCount + ...）
+
+    Args:
+        preview_token: 来自 user.import_preview 返回值，10min TTL
+        reason: 业务理由（必须与 preview 时一致，spec §2.30）
+        on_conflict: 与 preview 时一致（spec §2.7）
+        sync_mode: 'CREATE_ONLY' (默认) / 'UPDATE_PROFILE' / 'FULL_SYNC'（spec §2.24）
+    """
+    from app.modules.system.user.constants import EmployeeNoSyncMode  # noqa: PLC0415
+    from app.modules.system.user.import_parser import (  # noqa: PLC0415
+        parse_import_excel,
+    )
+    from app.modules.system.user.import_service import (  # noqa: PLC0415
+        batch_create_users_from_records,
+        get_batch_by_preview_token,
+    )
+
+    # 1. 反查 batch 拿 file 信息
+    batch = await get_batch_by_preview_token(ctx.db, preview_token)
+    if batch is None:
+        from app.core.exceptions import UnprocessableEntityException  # noqa: PLC0415
+
+        raise UnprocessableEntityException(
+            "preview_token 无效或已过期",
+            error_code="AI_IMPORT_PREVIEW_INVALID",
+        )
+
+    # 2. 凭 batch.file_storage_key 从 FileStorage 读 file_bytes
+    #    （Task 34 修：preview 阶段已通过 FileStorage.save 写入；
+    #    execute 阶段走 FileStorage.read 抽象，不直接拼文件系统路径，
+    #    Phase 3 切 S3 时零改业务代码）
+    from app.core.file_storage import get_file_storage  # noqa: PLC0415
+
+    if not batch.file_storage_key:
+        from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+
+        raise BusinessRuleException(
+            "批次未关联上传文件，无法 execute（请重新 import_preview）",
+            error_code="AI_IMPORT_PREVIEW_INVALID",
+        )
+
+    storage = get_file_storage()
+    try:
+        file_bytes = await storage.read(batch.file_storage_key)
+    except FileNotFoundError:
+        from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+
+        raise BusinessRuleException(
+            f"预检文件已丢失（{batch.filename}），请重新 import_preview",
+            error_code="AI_IMPORT_PREVIEW_INVALID",
+        ) from None
+    filename = batch.filename or ""
+
+    # 3. parse + execute
+    records = parse_import_excel(
+        file_bytes,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    result = await batch_create_users_from_records(
+        ctx.db,
+        records,
+        preview_token=preview_token,
+        file_bytes=file_bytes,
+        filename=filename,
+        reason=reason,
+        current_user=ctx.user,
+        on_conflict=on_conflict,
+        sync_mode=EmployeeNoSyncMode(sync_mode),
+    )
+
+    return ToolResult.success(
+        data={
+            "successCount": result.success_count,
+            "skippedCount": result.skipped_count,
+            "overwrittenCount": result.overwritten_count,
+            "failedCount": result.failed_count,
+            "batchId": result.batch_id,
+        },
+        ui=UIResult(
+            view_type="rows_affected",
+            view_data={
+                "count": result.success_count,
+                "ids": [result.batch_id],  # batch_id 而非 user_ids（避免大量 ID 进 UI）
+            },
+            audit={
+                "batch_id": result.batch_id,
+                "success_count": result.success_count,
+                "failed_count": result.failed_count,
+            },
+            label_key="ai.tool.user.import_execute.result",
+            label_params={"count": result.success_count},
+        ),
+    )
+
+
+async def _dry_run_user_import_execute(
+    ctx: AiToolContext,
+    *,
+    preview_token: str,
+    reason: str,  # noqa: ARG001  与 execute 签名对齐，dry_run 阶段不校验 reason（execute 入口校验）
+    on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
+    sync_mode: Literal["CREATE_ONLY", "UPDATE_PROFILE", "FULL_SYNC"] = "CREATE_ONLY",
+) -> Any:
+    """dry_run：列出 batch summary 供 HITL 抽屉二次确认（spec §10 Task 26a）
+
+    本 tool 已 hitl_always=True 强制走 HITL；dry_run 是「确认前再看一次 summary」，
+    返回 batch_id + total + 四象限计数 + 文件名（让用户对照确认）。
+    """
+    from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
+    from app.modules.system.user.import_service import (  # noqa: PLC0415
+        get_batch_by_preview_token,
+    )
+
+    batch = await get_batch_by_preview_token(ctx.db, preview_token)
+    if batch is None:
+        return DryRunResult(
+            ok=False,
+            count=0,
+            reason="preview_token 无效或已过期",
+        )
+
+    summary = (
+        f"将执行批次 {batch.batch_id[:8]}… "
+        f"共 {batch.total_rows} 行 "
+        f"(新增 {batch.summary_new} / 已存在 {batch.summary_exists} / "
+        f"冲突 {batch.summary_conflict} / 越界 {batch.summary_out_of_scope})"
+    )
+    examples = [
+        f"批次 ID: {batch.batch_id}",
+        f"文件名: {batch.filename or '(未知)'}",
+        f"冲突策略: {on_conflict}",
+        f"同步模式: {sync_mode}",
+    ]
+    return DryRunResult(
+        ok=True,
+        count=batch.summary_new,  # 预计将新增的用户数
+        reason=summary,
+        examples=examples,
+    )
+
+
+# ============ user.export（spec §10 Task 27） ============
+
+
+@ai_tool(
+    AiToolMeta(
+        name="user.export",
+        agent="user_mgmt",
+        summary=(
+            "Export users to xlsx → {exportId, downloadUrl}. "
+            "Reason required. Filter via name/email/status."
+        ),
+        required_perms=("system:user:export",),
+        risk="high",
+        readonly=False,  # 写 ExportTask 表 + 生成 xlsx 文件
+        produces_file=True,
+        dry_run_supported=True,
+        # Task 33：rows_affected → detail_card（spec §2.31 line 1626 落地），
+        # detail_card 携带 downloadUrl 让前端渲染下载按钮（AI 对话内闭环）
+        result_view="detail_card",
+        args_summary_fields=("reason",),
+    )
+)
+async def user_export(
+    ctx: AiToolContext,
+    *,
+    reason: str,
+    user_name: str | None = None,
+    nickname: str | None = None,
+    user_email: str | None = None,
+    user_phone: str | None = None,
+    status: Literal["1", "2"] | None = None,
+) -> ToolResult:
+    """AI tool 入口：导出用户列表到 Excel（spec §10 Task 27）
+
+    强制建 ExportTask（spec §2.31 P1-5）+ filter_snapshot 冻结 + 30 天 TTL。
+    行数 > USER_EXPORT_ASYNC_THRESHOLD（5000）抛 AI_EXPORT_ASYNC_REQUIRED，
+    Phase 3 异步通道上线后改为自动入队。
+
+    Args:
+        reason: 业务理由（必填，spec §2.30 P1-3，1-256 字符）
+        user_name / nickname / user_email / user_phone: filter（可选）
+        status: '1' (启用) / '0' (禁用)，None=不过滤
+    """
+    from app.modules.system.user.export_service import (  # noqa: PLC0415
+        export_users_to_excel,
+        get_export_task,
+    )
+    from app.modules.system.user.schemas import UserExportFilter  # noqa: PLC0415
+
+    filter_ = UserExportFilter(
+        user_name=user_name,
+        nickname=nickname,
+        user_email=user_email,
+        user_phone=user_phone,
+        status=status,
+    )
+
+    _xlsx_bytes, row_count, export_id = await export_users_to_excel(
+        ctx.db,
+        filter_,
+        ctx.user,
+        reason=reason,
+    )
+
+    # Task 33：取 task 拿 file_size_bytes + created_at（用于 detail_card 元数据
+    # + expiresAt 计算 = created_at + 30 天 TTL）
+    task = await get_export_task(ctx.db, export_id)
+    file_size = task.file_size_bytes if task else None
+    expires_at = (task.created_at + timedelta(days=30)).isoformat() if task else None
+    download_url = f"/system/user/export/{export_id}/download"
+
+    return ToolResult.success(
+        data={
+            "exportId": export_id,
+            "rowCount": row_count,
+            "downloadUrl": download_url,
+        },
+        ui=UIResult(
+            view_type="detail_card",
+            view_data={
+                "title": "用户导出",
+                "fields": [
+                    {"label": "导出批次 ID", "value": export_id},
+                    {"label": "导出行数", "value": str(row_count)},
+                    {
+                        "label": "文件大小",
+                        "value": f"{file_size} B" if file_size is not None else "—",
+                    },
+                    {"label": "过期时间", "value": expires_at or "—"},
+                ],
+                "downloadUrl": download_url,
+                "downloadFilename": (
+                    f"hohu_users_{task.created_at.strftime('%Y%m%d_%H%M%S')}.xlsx"
+                    if task
+                    else "hohu_users.xlsx"
+                ),
+                "rowCount": row_count,
+                "fileSize": file_size,
+                "expiresAt": expires_at,
+            },
+            audit={
+                "export_id": export_id,
+                "row_count": row_count,
+                "filter": {
+                    "user_name": user_name,
+                    "nickname": nickname,
+                    "user_email": user_email,
+                    "user_phone": user_phone,
+                    "status": status,
+                },
+            },
+            label_key="ai.tool.user.export.result",
+            label_params={"count": row_count},
+        ),
+    )
+
+
+async def _dry_run_user_export(
+    ctx: AiToolContext,
+    *,
+    reason: str,  # noqa: ARG001  与 execute 签名对齐；dry_run 阶段不重复校验 reason
+    user_name: str | None = None,
+    nickname: str | None = None,
+    user_email: str | None = None,
+    user_phone: str | None = None,
+    status: Literal["1", "2"] | None = None,
+) -> Any:
+    """dry_run：预估导出行数供 HITL 抽屉确认（spec §10 Task 27）
+
+    用 User.count(*) + filter 估算行数，不实际跑导出（避免重复建 task）。
+    行数 > USER_EXPORT_ASYNC_THRESHOLD → 提示用户缩窄 filter；行数为 0 → 警告。
+    """
+    from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
+
+    base = select(User).where(*ctx.data_scope.filters)
+    if user_name:
+        base = base.where(User.user_name.ilike(f"%{user_name}%"))
+    if nickname:
+        base = base.where(User.nickname.ilike(f"%{nickname}%"))
+    if user_email:
+        base = base.where(User.user_email == user_email)
+    if user_phone:
+        base = base.where(User.user_phone == user_phone)
+    if status is not None:
+        base = base.where(User.status == status)
+
+    estimated = int(
+        await ctx.db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    )
+
+    if estimated == 0:
+        return DryRunResult(
+            ok=False,
+            count=0,
+            reason="筛选条件下无用户匹配，导出会生成空文件",
+        )
+
+    from app.modules.system.user.constants import (  # noqa: PLC0415
+        USER_EXPORT_ASYNC_THRESHOLD,
+    )
+
+    if estimated > USER_EXPORT_ASYNC_THRESHOLD:
+        return DryRunResult(
+            ok=False,
+            count=estimated,
+            reason=(
+                f"预计导出 {estimated} 行，超过同步阈值 {USER_EXPORT_ASYNC_THRESHOLD}，"
+                "请缩窄 filter 或等待异步通道开放"
+            ),
+        )
+
+    return DryRunResult(
+        ok=True,
+        count=estimated,
+        reason=f"将导出约 {estimated} 行用户数据到 xlsx 文件（30 天后过期清理）",
+        examples=[
+            f"filter: user_name={user_name or '*'}, status={status or '*'}",
+        ],
     )

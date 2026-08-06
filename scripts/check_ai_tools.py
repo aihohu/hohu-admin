@@ -162,7 +162,22 @@ def check_high_risk_requires_dry_run(reg: RegisteredTool) -> list[Violation]:
     影响单行修改场景的体验）"""
     if reg.meta.risk != "high":
         return []
-    if reg.meta.dry_run_supported and reg.dry_run_fn is None:
+
+    # dry_run_fn 在 validate_on_startup 时统一解析（commit 51d732f），装饰器执行
+    # 期 reg.dry_run_fn 还是 None。static check 时主动 sys.modules 查找一次，
+    # 与 check_dry_run_tool_must_implement_hook 同款（spec §5.1）。
+    def _has_dry_run_fn() -> bool:
+        if reg.dry_run_fn is not None:
+            return True
+        import sys  # noqa: PLC0415
+
+        module = sys.modules.get(reg.fn.__module__)
+        if module is None:
+            return False
+        fn_name = f"_dry_run_{reg.meta.name.replace('.', '_')}"
+        return hasattr(module, fn_name)
+
+    if reg.meta.dry_run_supported and not _has_dry_run_fn():
         return [
             Violation(
                 reg.meta.name,
@@ -170,7 +185,7 @@ def check_high_risk_requires_dry_run(reg: RegisteredTool) -> list[Violation]:
                 "risk=high + dry_run_supported=True 但未实现 _dry_run_<tool>",
             )
         ]
-    if not reg.meta.dry_run_supported and reg.dry_run_fn is None:
+    if not reg.meta.dry_run_supported and not _has_dry_run_fn():
         return [
             Violation(
                 reg.meta.name,
@@ -188,8 +203,11 @@ def check_scope_param_requires_check(
 ) -> list[Violation]:
     """spec §6.2: 签名含 *_id / *_ids 参数必须调 ensure_targets_in_scope
 
-    豁免：SHARED_AGENT_CODE（file.parse 等通用 tool 无 data_scope 概念，
-    file_id / log_id 等不属于业务资源 scope）。
+    豁免：
+      - SHARED_AGENT_CODE（file.parse 等通用 tool 无 data_scope 概念）
+      - file_id：sys_file 资源不属于业务 data_scope（任何有 system:user:import 权限
+        的用户都可读自己上传的 file_id；data_scope 控制的是 file 内的目标用户，
+        在后续业务调用 dry_run_import_users / batch_create 内部强制）。
     """
     if reg.meta.agent == SHARED_AGENT_CODE:
         return []
@@ -206,7 +224,8 @@ def check_scope_param_requires_check(
         scope_params = [
             a.arg
             for a in node.args.args + node.args.kwonlyargs
-            if a.arg.endswith("_id") or a.arg.endswith("_ids")
+            if (a.arg.endswith("_id") or a.arg.endswith("_ids"))
+            and a.arg != "file_id"  # sys_file 资源不属于业务 data_scope
         ]
         if not scope_params:
             continue

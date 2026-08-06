@@ -21,6 +21,12 @@ class User(Base):
     user_name: Mapped[str] = mapped_column(
         String(50), unique=True, index=True, nullable=False, comment="账号"
     )
+    employee_no: Mapped[str | None] = mapped_column(
+        String(64),
+        unique=True,
+        nullable=True,
+        comment="员工工号（spec §2.24）：企业同步 / LDAP / ERP 对接，UNIQUE 但允许多个 NULL",
+    )
     nickname: Mapped[str] = mapped_column(String(50), nullable=True, comment="昵称")
     hashed_password: Mapped[str] = mapped_column(
         String(255), nullable=False, comment="加密密码"

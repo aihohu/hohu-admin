@@ -13,7 +13,17 @@ from app.db.session import AsyncSessionLocal, engine
 
 
 def _reset_redis_client() -> None:
-    """每个测试新建事件循环时，重建 redis 客户端绑定到当前 loop。"""
+    """每个测试新建事件循环时，重建 redis 客户端绑定到当前 loop。
+
+    同步刷新多个 module-load 时绑死引用的模块（顶部 ``from app.core.redis
+    import redis_client`` 不会跟着 redis_module.redis_client 重新解析）：
+
+    - ``app.middleware.audit_middleware`` — 审计日志 user_id → username 反查
+    - ``app.modules.auth.service`` — JWT 黑名单校验（``_is_blacklisted``）
+
+    与 ``tests/modules/ai/conftest.py`` 同款，避免跨 loop ``RuntimeError:
+    Event loop is closed`` 污染后续测试。
+    """
     redis_module.redis_pool = aioredis.ConnectionPool.from_url(
         redis_module.settings.REDIS_URL,
         encoding="utf-8",
@@ -24,6 +34,14 @@ def _reset_redis_client() -> None:
         retry_on_timeout=True,
     )
     redis_module.redis_client = aioredis.Redis(connection_pool=redis_module.redis_pool)
+
+    from app.middleware import audit_middleware as audit_mod  # noqa: PLC0415
+
+    audit_mod.redis_client = redis_module.redis_client
+
+    from app.modules.auth import service as auth_service  # noqa: PLC0415
+
+    auth_service.redis_client = redis_module.redis_client
 
 
 @pytest.fixture

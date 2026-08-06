@@ -1,0 +1,61 @@
+"""用户导入导出清理任务（Task 22，spec §10 line 3112）。
+
+3 个 ``@register_task`` 入口，对应 ``sys_job.job_key``：
+- ``clean_expired_import_batches``：每日 02:00，删 90 天前终态 batch + 文件
+- ``clean_expired_import_previews``：每小时，PREVIEW_DONE > 10min → EXPIRED
+- ``clean_expired_export_tasks``：每日 02:30，删 30 天前 ExportTask + 文件
+
+service 层函数（``cleanup_expired_*``）只接 ``db`` 参数不 commit，
+本模块负责 ``AsyncSessionLocal()`` 上下文 + commit。
+"""
+
+import logging
+
+from app.db.session import AsyncSessionLocal
+from app.modules.job.task_registry import register_task
+from app.modules.system.user.export_service import cleanup_expired_export_tasks
+from app.modules.system.user.import_service import (
+    cleanup_expired_batches,
+    cleanup_expired_previews,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@register_task("clean_expired_import_batches")
+async def clean_expired_import_batches(_args: dict | None = None) -> int:
+    """清理 90 天前导入批次 + 关联文件（每日 02:00）。
+
+    spec §2.22.1 line 781-797 + §10 Task 22 line 3112。
+    """
+    async with AsyncSessionLocal() as db:
+        count = await cleanup_expired_batches(db)
+        await db.commit()
+    logger.info("clean_expired_import_batches: cleaned %d batches", count)
+    return count
+
+
+@register_task("clean_expired_import_previews")
+async def clean_expired_import_previews(_args: dict | None = None) -> int:
+    """PREVIEW_DONE > 10min → EXPIRED + 删孤儿 preview 文件（每小时）。
+
+    spec §2.26 line 1116 + §10 Task 22 line 3112。
+    """
+    async with AsyncSessionLocal() as db:
+        count = await cleanup_expired_previews(db)
+        await db.commit()
+    logger.info("clean_expired_import_previews: expired %d previews", count)
+    return count
+
+
+@register_task("clean_expired_export_tasks")
+async def clean_expired_export_tasks(_args: dict | None = None) -> int:
+    """清理 30 天前导出任务 + 关联文件（每日 02:30）。
+
+    spec §2.31 line 1452 / 1554 + §10 Task 22 line 3112。
+    """
+    async with AsyncSessionLocal() as db:
+        count = await cleanup_expired_export_tasks(db)
+        await db.commit()
+    logger.info("clean_expired_export_tasks: cleaned %d tasks", count)
+    return count
