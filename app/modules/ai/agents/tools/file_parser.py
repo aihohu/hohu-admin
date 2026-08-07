@@ -19,14 +19,21 @@ import csv
 import io
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import NoReturn, Protocol
+from xml.etree.ElementTree import ParseError
+from zipfile import BadZipFile
 
 from openpyxl import load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
 
 from app.core.exceptions import BusinessRuleException
+from app.modules.ai.agents.tools.file_access import validate_xlsx_archive
 
 # spec §16.1: 摘要只含前 3 行预览（避免大文件 LLM 上下文爆炸）
 PREVIEW_ROW_LIMIT = 3
+MAX_PARSE_ROWS = 10_000
+MAX_PARSE_COLUMNS = 256
+MAX_PARSE_CELLS = 200_000
 
 
 @dataclass(frozen=True)
@@ -61,6 +68,8 @@ class FileParser(Protocol):
 
     async def parse(self, file_path: Path) -> FileParseResult: ...
 
+    async def parse_bytes(self, data: bytes) -> FileParseResult: ...
+
 
 # ============ 工具函数 ============
 
@@ -74,7 +83,7 @@ def _row_to_dict(columns: list[str], row: tuple) -> dict[str, str]:
     return result
 
 
-def _read_text_with_fallback(file_path: Path) -> str:
+def _decode_text_with_fallback(raw: bytes) -> str:
     """CSV 多编码兜底（utf-8 → gbk → latin-1 replace）+ BOM 剥离
 
     Windows 上导出的 CSV 多为 gbk，macOS 多为 utf-8-sig（带 BOM）；latin-1 永不抛
@@ -83,7 +92,6 @@ def _read_text_with_fallback(file_path: Path) -> str:
     utf-8 decode 时 BOM ('﻿') 会被当作普通字符保留，需手动剥（utf-8-sig 优先
     方案不可行：utf-8-sig 对纯 gbk 文件会 UnicodeDecodeError，顺序敏感）。
     """
-    raw = file_path.read_bytes()
     for enc in ("utf-8", "gbk"):
         try:
             text = raw.decode(enc)
@@ -98,11 +106,35 @@ def _read_text_with_fallback(file_path: Path) -> str:
     return text
 
 
+def _read_text_with_fallback(file_path: Path) -> str:
+    """Read a path and delegate CSV decoding to the bytes implementation."""
+    return _decode_text_with_fallback(file_path.read_bytes())
+
+
+def _raise_resource_budget_exceeded() -> None:
+    raise BusinessRuleException(
+        "文件结构超过解析预算（行、列或单元格过多）",
+        error_code="AI_FILE_TOO_LARGE",
+    )
+
+
+def _raise_invalid_xlsx() -> NoReturn:
+    raise BusinessRuleException(
+        "文件不是有效的 XLSX 工作簿",
+        error_code="AI_FILE_TYPE_NOT_ALLOWED",
+    )
+
+
+def _check_dimensions(*, rows: int, columns: int, cells: int) -> None:
+    if rows > MAX_PARSE_ROWS or columns > MAX_PARSE_COLUMNS or cells > MAX_PARSE_CELLS:
+        _raise_resource_budget_exceeded()
+
+
 # ============ Excel 解析器 ============
 
 
 class ExcelParser:
-    """openpyxl 解析 .xlsx / .xls，仅读 active sheet
+    """openpyxl 解析 .xlsx，仅读 active sheet
 
     max_bytes = 50MB（spec §16.1）
 
@@ -111,13 +143,15 @@ class ExcelParser:
     """
 
     mime_types = (
-        "application/vnd.ms-excel",  # .xls（旧版 Office）
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # .xlsx
     )
     max_bytes = 50 * 1024 * 1024
 
     async def parse(self, file_path: Path) -> FileParseResult:
         return await asyncio.to_thread(self._check_and_parse, file_path)
+
+    async def parse_bytes(self, data: bytes) -> FileParseResult:
+        return await asyncio.to_thread(self._check_and_parse_bytes, data)
 
     def _check_and_parse(self, file_path: Path) -> FileParseResult:
         size = file_path.stat().st_size
@@ -128,8 +162,67 @@ class ExcelParser:
             )
         return self._parse_sync(file_path, size)
 
+    def _check_and_parse_bytes(self, data: bytes) -> FileParseResult:
+        size = len(data)
+        if size > self.max_bytes:
+            raise BusinessRuleException(
+                f"Excel 文件过大（{_mb(size)}MB），上限 {_mb(self.max_bytes)}MB",
+                error_code="AI_FILE_TOO_LARGE",
+            )
+        return self._parse_bytes_sync(data, size)
+
     def _parse_sync(self, file_path: Path, size: int) -> FileParseResult:
-        wb = load_workbook(filename=str(file_path), read_only=True, data_only=True)
+        data = file_path.read_bytes()
+        validate_xlsx_archive(data, self.max_bytes)
+        try:
+            wb = load_workbook(
+                filename=io.BytesIO(data),
+                read_only=True,
+                data_only=True,
+                keep_links=False,
+            )
+        except (
+            BadZipFile,
+            EOFError,
+            IndexError,
+            InvalidFileException,
+            KeyError,
+            OSError,
+            ParseError,
+            RuntimeError,
+            SyntaxError,
+            TypeError,
+            ValueError,
+        ):
+            _raise_invalid_xlsx()
+        return self._parse_workbook(wb, size)
+
+    def _parse_bytes_sync(self, data: bytes, size: int) -> FileParseResult:
+        validate_xlsx_archive(data, self.max_bytes)
+        try:
+            wb = load_workbook(
+                filename=io.BytesIO(data),
+                read_only=True,
+                data_only=True,
+                keep_links=False,
+            )
+        except (
+            BadZipFile,
+            EOFError,
+            IndexError,
+            InvalidFileException,
+            KeyError,
+            OSError,
+            ParseError,
+            RuntimeError,
+            SyntaxError,
+            TypeError,
+            ValueError,
+        ):
+            _raise_invalid_xlsx()
+        return self._parse_workbook(wb, size)
+
+    def _parse_workbook(self, wb, size: int) -> FileParseResult:
         try:
             sheet = wb.active
             if sheet is None:
@@ -137,6 +230,11 @@ class ExcelParser:
                     "Excel 无工作表",
                     error_code="AI_FILE_EMPTY",
                 )
+            _check_dimensions(
+                rows=max(0, (sheet.max_row or 1) - 1),
+                columns=sheet.max_column or 0,
+                cells=max(0, (sheet.max_row or 1) - 1) * (sheet.max_column or 0),
+            )
             rows_iter = sheet.iter_rows(values_only=True)
             try:
                 header_row = next(rows_iter)
@@ -149,10 +247,19 @@ class ExcelParser:
                     file_size=size,
                 )
             columns = [str(c) if c is not None else "" for c in header_row]
+            _check_dimensions(rows=0, columns=len(columns), cells=len(columns))
             preview: list[dict[str, str]] = []
             total_rows = 0
+            total_cells = len(columns)
             for row in rows_iter:
                 total_rows += 1
+                row_width = max(len(columns), len(row))
+                total_cells += row_width
+                _check_dimensions(
+                    rows=total_rows,
+                    columns=row_width,
+                    cells=total_cells,
+                )
                 if len(preview) < PREVIEW_ROW_LIMIT:
                     preview.append(_row_to_dict(columns, row))
             return FileParseResult(
@@ -162,6 +269,20 @@ class ExcelParser:
                 parser="ExcelParser",
                 file_size=size,
             )
+        except (
+            BadZipFile,
+            EOFError,
+            IndexError,
+            InvalidFileException,
+            KeyError,
+            OSError,
+            ParseError,
+            RuntimeError,
+            SyntaxError,
+            TypeError,
+            ValueError,
+        ):
+            _raise_invalid_xlsx()
         finally:
             wb.close()
 
@@ -185,6 +306,9 @@ class CsvParser:
     async def parse(self, file_path: Path) -> FileParseResult:
         return await asyncio.to_thread(self._check_and_parse, file_path)
 
+    async def parse_bytes(self, data: bytes) -> FileParseResult:
+        return await asyncio.to_thread(self._check_and_parse_bytes, data)
+
     def _check_and_parse(self, file_path: Path) -> FileParseResult:
         size = file_path.stat().st_size
         if size > self.max_bytes:
@@ -194,8 +318,19 @@ class CsvParser:
             )
         return self._parse_sync(file_path, size)
 
+    def _check_and_parse_bytes(self, data: bytes) -> FileParseResult:
+        size = len(data)
+        if size > self.max_bytes:
+            raise BusinessRuleException(
+                f"CSV 文件过大（{_mb(size)}MB），上限 {_mb(self.max_bytes)}MB",
+                error_code="AI_FILE_TOO_LARGE",
+            )
+        return self._parse_text(_decode_text_with_fallback(data), size)
+
     def _parse_sync(self, file_path: Path, size: int) -> FileParseResult:
-        text = _read_text_with_fallback(file_path)
+        return self._parse_text(_read_text_with_fallback(file_path), size)
+
+    def _parse_text(self, text: str, size: int) -> FileParseResult:
         reader = csv.reader(io.StringIO(text))
         try:
             header_row = next(reader)
@@ -208,10 +343,19 @@ class CsvParser:
                 file_size=size,
             )
         columns = [str(c) for c in header_row]
+        _check_dimensions(rows=0, columns=len(columns), cells=len(columns))
         preview: list[dict[str, str]] = []
         total_rows = 0
+        total_cells = len(columns)
         for row in reader:
             total_rows += 1
+            row_width = max(len(columns), len(row))
+            total_cells += row_width
+            _check_dimensions(
+                rows=total_rows,
+                columns=row_width,
+                cells=total_cells,
+            )
             if len(preview) < PREVIEW_ROW_LIMIT:
                 preview.append(_row_to_dict(columns, tuple(row)))
         return FileParseResult(
@@ -274,3 +418,14 @@ async def parse_file(file_path: Path, mime_type: str) -> FileParseResult:
             error_code="AI_FILE_TYPE_UNSUPPORTED",
         )
     return await parser.parse(file_path)
+
+
+async def parse_file_bytes(data: bytes, mime_type: str) -> FileParseResult:
+    """Parse already-authorized bytes without reopening an attacker-controlled path."""
+    parser = PARSERS.get(mime_type)
+    if parser is None:
+        raise BusinessRuleException(
+            f"不支持的文件类型: {mime_type}",
+            error_code="AI_FILE_TYPE_UNSUPPORTED",
+        )
+    return await parser.parse_bytes(data)

@@ -44,6 +44,7 @@ def _make_deps(
     trace_id: str = "tr_abc123",
     user: Any = None,
     perms: set[str] | None = None,
+    tenant_id: int = 0,
 ) -> ChatDeps:
     return ChatDeps(
         user=user or MagicMock(user_id=1, __str__=lambda self: "u"),
@@ -52,6 +53,7 @@ def _make_deps(
         data_scope=_make_data_scope(),
         agent=MagicMock(),
         trace_id=trace_id,
+        tenant_id=tenant_id,
     )
 
 
@@ -81,6 +83,7 @@ class TestChatDeps:
         assert deps.trace_id == "tr_xyz"
         assert deps.perms == {"system:user:list"}
         assert deps.data_scope.accessible_user_scope is not None
+        assert deps.tenant_id == 0
 
     def test_no_default_trace_id(self) -> None:
         """trace_id 必填，无默认值（spec §4.6 防 "" 漏到 DB 索引）"""
@@ -102,6 +105,7 @@ class TestAiToolContext:
             tool_meta=_make_meta(),
         )
         assert ctx.secrets == {}  # MVP 留空（§7.2）
+        assert ctx.tenant_id == 0
 
     def test_tool_meta_required(self) -> None:
         """聚合 tool 通过 ctx.tool_meta 读 max_groups / allowed_filters（§5.5）"""
@@ -135,7 +139,7 @@ class TestAiToolContext:
 class TestBuildContext:
     def test_basic_conversion(self) -> None:
         """spec §4.6: ChatDeps → AiToolContext 替换 db + 注入 tool_meta + 复用其它"""
-        deps = _make_deps(trace_id="tr_test_basic")
+        deps = _make_deps(trace_id="tr_test_basic", tenant_id=37)
         tool_db = MagicMock()
         meta = _make_meta()
 
@@ -149,6 +153,7 @@ class TestBuildContext:
         assert ctx.perms is deps.perms
         assert ctx.data_scope is deps.data_scope
         assert ctx.trace_id == "tr_test_basic"
+        assert ctx.tenant_id == 37
         # 注入
         assert ctx.tool_meta is meta
         # agent 被丢弃（不在 AiToolContext 字段中）

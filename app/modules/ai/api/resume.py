@@ -40,6 +40,7 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.redis import redis_client
+from app.core.tenant import resolve_tenant_id
 from app.db.session import AsyncSessionLocal, get_db
 from app.modules.ai.agents.gateway.executor import resume_tool_execution
 from app.modules.ai.agents.hitl.constants import (
@@ -147,6 +148,16 @@ async def resume_chat(
             pending.user_id,
             current_user.user_id,
         )
+        raise AuthorizationException(error_code="AI_RESUME_FORBIDDEN")
+    current_tenant_id = resolve_tenant_id(current_user)
+    if pending.tenant_id != current_tenant_id:
+        logger.warning(
+            "resume tenant mismatch: confirmation_id=%s pending_tenant=%d current_tenant=%d",
+            confirmation_id,
+            pending.tenant_id,
+            current_tenant_id,
+        )
+        # 与 owner mismatch 共用拒绝语义，避免泄露 pending 是否属于其它租户。
         raise AuthorizationException(error_code="AI_RESUME_FORBIDDEN")
     if pending.wake_action is not None:
         logger.info(

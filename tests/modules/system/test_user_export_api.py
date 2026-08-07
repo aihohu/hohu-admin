@@ -102,7 +102,6 @@ def _fake_export_task_response(
         filter_snapshot={"user_name": "alice"},
         reason="QA export reason",
         row_count=10,
-        file_storage_key="user-export/abc.xlsx",
         file_size_bytes=1024,
         status=status.value,
         created_at=datetime(2026, 8, 4, 10, 0, 0),
@@ -270,7 +269,7 @@ class TestGetExportDetail:
         with patch(
             f"{_API_MODULE}.get_export_task",
             new=AsyncMock(return_value=fake_task),
-        ):
+        ) as mock_get:
             response = await client.get(
                 "/system/user/export/exp-xxx",
                 headers={"Authorization": f"Bearer {admin_token}"},
@@ -287,6 +286,8 @@ class TestGetExportDetail:
         # operator_id 字符串化（防 JS BigInt 精度丢失）
         assert data["operatorId"] == "1"
         assert isinstance(data["operatorId"], str)
+        assert mock_get.call_args.kwargs["operator_id"] > 0
+        assert mock_get.call_args.kwargs["allow_cross_owner"] is True
 
     async def test_not_found_returns_404(self, client, admin_token):
         with patch(
@@ -342,14 +343,17 @@ class TestGetExportList:
         assert query_arg.size == 10
 
     async def test_passes_filters_to_service(self, client, admin_token):
-        """status / operator_id 过滤参数透传到 list_export_tasks。"""
+        """请求过滤参数与 trusted 当前用户 ID 分开传给 service。"""
         fake_page = PageResult(records=[], total=0, current=1, size=10)
-        with patch(
-            f"{_API_MODULE}.list_export_tasks",
-            new=AsyncMock(return_value=fake_page),
-        ) as mock_list:
+        with (
+            patch(
+                f"{_API_MODULE}.list_export_tasks",
+                new=AsyncMock(return_value=fake_page),
+            ) as mock_list,
+            patch(f"{_API_MODULE}.is_super_admin", return_value=False) as mock_super,
+        ):
             await client.get(
-                "/system/user/export?current=2&size=20&status=SUCCESS&operatorId=1",
+                "/system/user/export?current=2&size=20&status=SUCCESS&operatorId=999",
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
 
@@ -357,7 +361,11 @@ class TestGetExportList:
         assert query_arg.current == 2
         assert query_arg.size == 20
         assert query_arg.status == "SUCCESS"
-        assert query_arg.operator_id == 1
+        assert query_arg.operator_id == 999
+        trusted_user = mock_super.call_args.args[0]
+        assert mock_list.call_args.kwargs["operator_id"] == trusted_user.user_id
+        assert mock_list.call_args.kwargs["operator_id"] != query_arg.operator_id
+        assert mock_list.call_args.kwargs["allow_cross_owner"] is False
 
 
 # ========== GET /export/{export_id}/download（Task 33） ==========
@@ -404,6 +412,8 @@ class TestGetExportDownload:
         assert response.content.startswith(_XLSX_MAGIC)
         # service 收到 export_id
         assert mock_download.call_args.args[1] == "exp-xxx"
+        assert mock_download.call_args.kwargs["operator_id"] > 0
+        assert mock_download.call_args.kwargs["allow_cross_owner"] is True
 
     async def test_task_not_found_returns_404(self, client, admin_token):
         """任务不存在 → 404 AI_EXPORT_TASK_NOT_FOUND。"""

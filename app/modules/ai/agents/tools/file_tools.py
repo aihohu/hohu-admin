@@ -11,26 +11,35 @@
 """
 
 from dataclasses import asdict
-from pathlib import Path
 
-from sqlalchemy import select
-
-from app.core.exceptions import BusinessRuleException
 from app.modules.ai.agents.gateway.result import ToolResult, UIResult
 from app.modules.ai.agents.tools.decorator import ai_tool
+from app.modules.ai.agents.tools.file_access import (
+    AI_CHAT_MIME_TYPES_BY_EXTENSION,
+    FileAccessPolicy,
+    chat_or_private_upload_root,
+    load_protected_file,
+)
 from app.modules.ai.agents.tools.file_parser import (
     SUPPORTED_MIME_TYPES,
     FileParseResult,
-    parse_file,
+    parse_file_bytes,
 )
 from app.modules.ai.agents.tools.meta import SHARED_AGENT_CODE, AiToolMeta
 from app.modules.ai.core.context import AiToolContext
-from app.modules.system.models.file import File
 
 
 def _accepted_mime_types() -> tuple[str, ...]:
     """按字母序输出，便于 LLM schema 稳定 + lint diff 友好"""
     return tuple(sorted(SUPPORTED_MIME_TYPES))
+
+
+_FILE_PARSE_ACCESS_POLICY = FileAccessPolicy(
+    allowed_business_types=frozenset({"ai-chat", "ai-chat-private", "user-import"}),
+    mime_types_by_extension=AI_CHAT_MIME_TYPES_BY_EXTENSION,
+    max_bytes=10 * 1024 * 1024,
+    storage_root_resolver=chat_or_private_upload_root,
+)
 
 
 @ai_tool(
@@ -46,6 +55,7 @@ def _accepted_mime_types() -> tuple[str, ...]:
             "Pass file_id. Raw bytes never enter LLM."
         ),
         readonly=True,
+        idempotent=True,
         result_view="plain_json",
     )
 )
@@ -66,32 +76,17 @@ async def file_parse(
         文件预览自包含，无模块页可去）。
 
     Raises:
-        BusinessRuleException: AI_FILE_NOT_FOUND / AI_FILE_TYPE_UNSUPPORTED / AI_FILE_TOO_LARGE
+        BusinessRuleException: AI_FILE_NOT_FOUND / AI_FILE_TYPE_NOT_ALLOWED /
+            AI_FILE_TOO_LARGE / AI_FILE_PATH_INVALID
     """
-    try:
-        file_id_int = int(file_id)
-    except (TypeError, ValueError) as e:
-        raise BusinessRuleException(
-            f"file_id 格式无效: {file_id!r}",
-            error_code="AI_FILE_ID_INVALID",
-        ) from e
-
-    stmt = select(File).where(
-        File.file_id == file_id_int,
-        File.del_flag == "0",
+    protected = await load_protected_file(
+        ctx,
+        file_id,
+        policy=_FILE_PARSE_ACCESS_POLICY,
     )
-    file_record = (await ctx.db.execute(stmt)).scalars().first()
-    if file_record is None:
-        raise BusinessRuleException(
-            f"文件不存在: file_id={file_id}",
-            error_code="AI_FILE_NOT_FOUND",
-        )
-
-    # sys_file.file_path 是相对路径（"uploads/2026/.../xxx.xlsx"），相对 cwd
-    # （fastapi dev / uvicorn 项目根启动）。与 file_service._delete_disk_file 同逻辑。
-    result: FileParseResult = await parse_file(
-        file_path=Path(file_record.file_path),
-        mime_type=file_record.mime_type or "",
+    result: FileParseResult = await parse_file_bytes(
+        protected.data,
+        protected.mime_type,
     )
     parsed = asdict(result)
     rows_count = int(parsed.get("rows", 0))

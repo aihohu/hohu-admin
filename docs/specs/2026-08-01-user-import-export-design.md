@@ -1,15 +1,16 @@
 # 用户管理导入导出设计（页面 + AI 双轨对齐）
 
-> 状态：✅ Phase 1 + Phase 2 已完成（2026-08-05，Task 0a-34 全部 ship，覆盖率 70.48%）/ ⚠️ Phase 3 推迟到独立 spec（异步通道 + 批量 HITL + role/dept/job 同款改造） | 创建日期：2026-08-01 | v2 修订：2026-08-01 | v2.1 修订：2026-08-01 | v2.2 修订：2026-08-03（含 P1 二次细化）
+> 状态：✅ Phase 1 + Phase 2 已完成（2026-08-05，Task 0a-34 全部 ship，覆盖率 70.48%）/ ✅ v2.4 Task 35 Safety Gate 已完成（2026-08-07）/ ⚠️ Task 36 容量证据待实施 / ⚠️ 完整 Phase 3 明确推迟到 `ai-tool-gateway v1.5+` 重新评估，不建设异步任务基础设施 | 创建日期：2026-08-01 | v2 修订：2026-08-01 | v2.1 修订：2026-08-01 | v2.2 修订：2026-08-03（含 P1 二次细化） | v2.4 边界修订：2026-08-06 | v2.4 Safety Gate 实施：2026-08-07
 > 作者：Jack
 > 影响项目：`hohu-admin`（后端）、`hohu-admin-web`（前端）
 > 关联文档：
 > - [`2026-07-02-ai-tool-gateway-design.md`](./2026-07-02-ai-tool-gateway-design.md) §5.2 `user.create` 示例 / §10 异步通道 / §16.2 export 设计
-> - [`APP-MARKETPLACE.md`](./APP-MARKETPLACE.md)（标杆 spec 样本）
+> - [`ADR-0001: AI 延迟执行前先完成安全与一致性闭环`](../adr/0001-ai-safety-consistency-before-deferred-execution.md)（当前边界与 v1.5+ 量化触发条件）
+> - [`APP-MARKETPLACE.md`](../APP-MARKETPLACE.md)（标杆 spec 样本）
 > - 待写：`2026-XX-cli-module-generator-design.md`（Phase B 模板提炼，依赖本 spec 落地）
 >
 > **v2 修订增量**（7 条）：
-> - #2.19 ImportPreviewSession + preview_token（Redis 10min TTL）
+> - #2.19 ImportBatch + preview_token（Redis 10min TTL；原 ImportPreviewSession 已合并）
 > - #2.20 行级事务 savepoint + chunk 100 rows
 > - #2.21 overwrite 字段白名单
 > - #2.22 ImportBatchContext 持久化表
@@ -27,24 +28,31 @@
 >
 > **v2.2 修订增量**（CTO 架构评审 P0/P1/P2，12 条，2026-08-03，定位调整：「安全、小规模同步导入 + 为未来异步大规模导入预留接口」）：
 > - #2.2 修订 UserService facade + 子模块拆分（P1）：保留 `user_service` facade 接口，内部拆 `import_service` / `export_service` / `import_parser` / `import_validator` / `import_state`
-> - #2.6 修订 sync/async 边界统一（P0）：导入 `USER_IMPORT_SYNC_THRESHOLD=2000`，导出 `USER_EXPORT_ASYNC_THRESHOLD=5000`，Phase 1/2 全同步 ≤2000
-> - #2.10 修订行数 50000 → 2000（P0）：用户导入非 ETL 入口；> 2000 走 Phase 3 异步 ImportJob
+> - #2.6 修订 sync/async 边界统一（P0）：导入同步上限 2000，导出同步上限 5000
+> - #2.10 修订行数 50000 → 2000（P0）：用户导入非 ETL 入口；当时为 Phase 3 预留异步 ImportJob，已由 v2.4 收紧为超限稳定拒绝
 > - #2.14 修订 AI tool 拆 `import_preview` + `import_execute`（P0）：原 `user.batch_create` 拆两个 tool，强制 HITL 确认防 AI 直接 execute
 > - #2.19 修订 Redis cache-only（P0）：业务数据全部进 PostgreSQL `sys_user_import_batch`，Redis 只缓存 `preview_token → batch_id`；execute 凭 token 反查 DB
 > - #2.24 修订 employee_no `sync_mode`（P1）：CREATE_ONLY（默认）/UPDATE_PROFILE/FULL_SYNC 三模式，CREATE_ONLY 防误覆盖
 > - #2.26 修订 ImportBatchStatus Enum + CHECK 约束（P0）：Python `Enum` + SQLAlchemy `Enum` 类型 / DB CHECK
-> - #2.27 新增 execute 幂等保护（P0）：CAS `UPDATE ... WHERE status='CREATED'`，0 rows 命中 → `AI_IMPORT_ALREADY_EXECUTED`
+> - #2.27 新增 execute 幂等保护（P0）：CAS `UPDATE ... WHERE status='PREVIEW_DONE'`，0 rows 命中 → 按最新终态返回幂等结果或稳定错误
 > - #2.28 新增 ImportBatch 业务日志表 `sys_user_import_batch_log`（P1）：CREATED/PREVIEW_DONE/EXECUTE_START/EXECUTE_FINISH/EXPIRED 节点留痕
 > - #2.29 新增 取消能力（P2）：状态机加 `CANCELLED`，API `POST /import/{batch_id}/cancel`
 > - §3/§5 修订 records/failed_rows 限流（P1）：API 响应不返回 `failed_rows` 数组，只返回 `failed_count + failed_rows_file`；preview records 限 `MAX_PREVIEW_RECORDS=2000`
-> - §5 新增 GET `/import/{batch_id}` 状态查询 + POST `/import/{batch_id}/cancel`（P2，为 Phase 3 异步预留）
+> - §5 新增 GET `/import/{batch_id}` 状态查询 + POST `/import/{batch_id}/cancel`（P2，当前用于同步批次审计与一致性；也可作为未来演进输入）
 >
 > **v2.2 P1 二次细化**（5 条，2026-08-03，进开发前一致性 / 健壮性修补）：
 > - P1-1 全局 `PARTIAL → PARTIAL_SUCCESS` 统一（状态机 / 代码 / 文档 / 测试名）
 > - P1-2 合并 `ImportPreviewSession` + `UserImportBatch` 为单一 aggregate root；状态机加 `PREVIEW_DONE` 中间态（CREATED → PREVIEW_DONE → RUNNING）
 > - #2.30 批量操作强制 `reason` 审计参数（P1-3）：preview / execute / cancel / export 全部必填 `reason`，写入 batch.reason + batch_log.detail.reason
-> - #3.9 `FileStorage` Protocol 抽象（P1-4）：save/read/delete/exists/public_url；LocalFileStorage 默认 + Phase 3 S3FileStorage 切换零改业务
+> - #3.9 `FileStorage` Protocol 抽象（P1-4）：save/read/delete/exists/public_url；LocalFileStorage 默认，未来存储实现切换不绑定 Phase 3
 > - #2.31 ExportTask 审计表（P1-5）：与 ImportBatch 对称设计；所有导出（同步/异步/AI）强制建任务 + filter_snapshot 冻结 + 30 天 TTL
+>
+> **v2.4 边界修订**（2026-08-06，不重开已完成 Task）：
+> - 完整 Phase 3 统一归 `ai-tool-gateway v1.5+`，是否启动由 §10 的量化门槛决定，不按日期自动启动
+> - 当前版本只维护权限与 data scope、文件白名单与大小、同步硬上限、事务与幂等、审计与稳定错误码
+> - 明确不实现 ARQ/Worker、任务队列、第二套实时进度通道和通用行级 Chat HITL
+> - 超过同步硬上限继续稳定拒绝；不会在缺少 v1.5 契约时静默入队或自动切换执行模式
+> - `role` / `dept` / `job` 同款改造仍归 CLI generator 主线，不作为 AI Phase 3 的启动理由
 
 ---
 
@@ -57,7 +65,7 @@
 | **dry_run（预检）** | 不落库，仅返回"将影响哪些行"的预览，三端共用（HTTP `?dry_run=true` / AI HITL 抽屉 / 前端弹窗） |
 | **on_conflict** | 已存在用户的处理策略：`skip`（默认）/ `overwrite`（覆盖更新）/ `fail_fast`（首个冲突即终止） |
 | **半成功策略** | 部分行失败时，成功行正常落库，失败行收集返回；不回滚成功行 |
-| **异步阈值** | 行数 > 阈值（5000）时切换异步通道（broadcast_to_user），本 spec 仅留接口位，**Phase 3 推迟实现** |
+| **同步硬上限** | 导入最多 2000 行、导出最多 5000 行；超限返回稳定业务错误。只有 `ai-tool-gateway v1.5+` 经 §10 门槛重新立项后，才讨论 deferred execution |
 | **三端对齐** | 同一业务能力在 HTTP API / AI tool / 前端页面 三处都有，且共享同一 service 函数 |
 
 ---
@@ -77,7 +85,7 @@
 | 新增 | ✅ | ✅ `POST /` | ✅ `user.create` | — |
 | 修改 | ✅ | ✅ `PUT /{id}` | ❌ 缺 `user.update` | Phase 2 |
 | 删除（单/批） | ✅ | ✅ `DELETE /{ids}` | ✅ `user.batch_delete` | — |
-| **批量导入** | ❌ 无按钮 | ❌ 无 endpoint | ❌ 缺 `user.batch_create` | **Phase 1 + 2** |
+| **批量导入** | ❌ 无按钮 | ❌ 无 endpoint | ❌ 缺 `user.import_preview` / `user.import_execute` | **Phase 1 + 2** |
 | **批量导出** | ❌ 无按钮 | ❌ 无 endpoint | ❌ 缺 `user.export` | **Phase 1 + 2** |
 | 聚合统计 | — | — | ✅ count/stats/distinct | — |
 
@@ -89,21 +97,24 @@
 - Excel 解析在后端（`openpyxl`），HTTP API 自包含
 
 **Phase 2（AI 层，2-3 周）**：
-- AI tool：`user.batch_create`（接 Excel 文件路径，与 SR-24 `file.parse` 一致）
-- AI tool：`user.export`（同步版，> 阈值走 Phase 3 异步通道）
+- AI tool：`user.import_preview` + `user.import_execute`（文件预检与 HITL 写入分离，与 SR-24 `file.parse` 一致）
+- AI tool：`user.export`（同步版，超过 5000 行返回稳定错误 `AI_EXPORT_ASYNC_REQUIRED`）
 - 复用 `user_service` 同一方法（dry_run / batch_create / export 零拷贝复用）
 
-**Phase 3（推迟到独立 spec）**：
-- 异步通道 `broadcast_to_user`（arq + WebSocket/SSE 双通道）
-- 批量 HITL 协议扩展（行级勾选，spec §8 当前只支持单 tool_call 确认）
-- `role` / `dept` / `job` 等模块同款改造
+**Phase 3（推迟到 `ai-tool-gateway v1.5+` 重新立项）**：
+- 不预先承诺 ARQ 或其他队列实现；v1.5 先确定 deferred execution 契约，再选基础设施
+- 不同时建设 WebSocket/SSE/轮询等多套进度通道；根据已验证的跨设备需求选择最小通道
+- 通用 Chat HITL 保持单次 tool-call 确认；批量行级复核优先走业务审核页面，Chat API 仅携带 `reviewRef`（后端字段 `review_ref`）
+- `role` / `dept` / `job` 等模块同款改造继续归 CLI generator 主线，与 AI 异步架构解耦
 
 ### 1.3 范围外
 
-- ❌ **跨设备导入进度推送**（Phase 3 异步通道）
-- ❌ **批量 HITL 行级勾选**（Phase 3 协议扩展，本期用单次确认 + summary 表达）
+- ❌ **跨设备导入进度推送**（只有 v1.5+ 断线存活 / 进度门槛触发后才立项）
+- ❌ **ARQ/Worker、任务队列与自动入队**（`ai-tool-gateway v1.5+` 经 §10 门槛重新立项前不实现）
+- ❌ **WebSocket + SSE/轮询双实时通道**（现有 Chat SSE 不扩成异步任务进度总线）
+- ❌ **通用 Chat HITL 行级勾选**（本期用单次确认 + summary；需要逐行复核时优先业务审核页面，Chat API 仅携带 `reviewRef`）
 - ❌ **PDF / Word 导入**（业务场景 < 10%，独立 spec 处理）
-- ❌ **导入实时进度条**（同步无进度，异步通道落地后再加）
+- ❌ **导入实时进度条**（同步无需进度；v1.5+ 门槛触发后再决定是否需要）
 - ❌ **role / dept 模块同款改造**（等 CLI generator 模板抽象，参考待写 spec `2026-XX-cli-module-generator-design.md`）
 
 ---
@@ -116,7 +127,7 @@
 
 **反例**: 前端解析 Excel → JSON records 发后端 → 客户必须用我们的前端才能导入，HTTP API 不通用；且与 AI tool 的 SR-24 `file.parse` 路径分裂，dry_run 逻辑要在两套入口分别实现。
 
-**回归**: HTTP `POST /system/user/import` 接 multipart/form-data（file: UploadFile）；AI tool `user.batch_create` 接 `file_path: str`（Gateway 走 `file.parse` 已建立的文件解析通道），两端最终调同一个 `user_service.parse_import_excel(file_bytes)`。
+**回归**: HTTP `POST /system/user/import` 接 multipart/form-data（file: UploadFile）；AI tool `user.import_preview` 接 `file_id: str` 并从 `sys_file` 加载 bytes，两端最终复用同一 `parse_import_excel(file_bytes, mime_type)` 与 import service。
 
 ### 2.2 **`user_service` facade 不变，内部拆子模块（v2.2 P1 修订）** — 项目惯例是「模块级单例」（`user_service = UserService()`），import/export 是用户模块的核心业务能力，不是独立子域。但 v2.1 把全部逻辑塞进 `user_service.py` 单文件，加上 v2.2 P0/P1 决策（preview token + 状态机 + 幂等 + sync_mode + 业务日志）会让文件膨胀到 1000+ 行。**v2.2 P1 拆为 facade + 子模块**：`user_service` 对外接口不变（HTTP / AI 调用方零改动），内部按职责拆 5 个子模块。
 
@@ -223,29 +234,29 @@ UserService(facade)
 
 **回归**: V1 部署文档明确标注「默认密码长期有效，建议部署方在 admin UI 改强密码 + 定期轮换 + 用户自行改密」；未来加 `must_change_password` 时导入逻辑只改 1 行（`User(must_change_password=True, ...)`），无破坏性；新增用户来源（admin 手动 / LDAP 首登）一并受益。
 
-### 2.6 **同步/异步边界统一（v2.2 P0 修订）：导入 ≤ 2000 同步 / 导出 ≤ 5000 同步；超限走 Phase 3 异步通道** — 导入与导出的同步阈值**分开定义**（导入更小，因为含写库 + 权限校验 + savepoint；导出只读 + streaming，可承受更大）。两者都明确「同步路径上限 + 异步通道预留」，避免导入/导出阈值冲突。
+### 2.6 **同步执行硬边界（v2.4 修订）：导入 ≤ 2000 / 导出 ≤ 5000；当前超限稳定拒绝，v1.5+ 才评估 deferred execution** — 导入与导出的同步上限**分开定义**（导入更小，因为含写库 + 权限校验 + savepoint；导出只读，可承受更大）。当前契约是「同步路径硬上限 + 稳定错误」，不是达到阈值就自动切换执行模式。
 
 **两套阈值**（v2.2 P0）：
 
 ```python
 # app/modules/system/user/constants.py
-USER_IMPORT_MAX_ROWS = 2000          # 单次导入同步上限（#2.10）；> 2000 拒绝并引导 Phase 3
-USER_IMPORT_SYNC_THRESHOLD = 2000    # 同义词，给 Phase 3 异步切换逻辑用（保留接口位）
-USER_EXPORT_ASYNC_THRESHOLD = 5000   # 单次导出同步上限；> 5000 抛 AI_EXPORT_ASYNC_REQUIRED
+USER_IMPORT_MAX_ROWS = 2000          # 单次导入同步硬上限；> 2000 稳定拒绝
+USER_IMPORT_SYNC_THRESHOLD = 2000    # 兼容既有命名；当前不承担自动异步切换语义
+USER_EXPORT_ASYNC_THRESHOLD = 5000   # 兼容既有命名；当前语义是同步硬上限
 ```
 
 **导入路径**：
 - `0 ≤ rows ≤ 2000`：Phase 1/2 同步路径（HTTP `POST /import` + AI `import_preview` / `import_execute`）
-- `rows > 2000`：拒绝（`AI_IMPORT_TOO_MANY_ROWS`），引导用户「分批导入或等待 Phase 3 异步 ImportJob」
-- Phase 3 异步通道上线后：阈值不变，但 > 2000 时不再拒绝而是入队（`status='QUEUED'` → `RUNNING`）
+- `rows > 2000`：稳定拒绝（`AI_IMPORT_TOO_MANY_ROWS`），引导用户拆分文件；不创建伪任务、不静默入队
+- `ai-tool-gateway v1.5+` 只有满足 §10 重启门槛并完成独立契约后，才能改变该行为
 
 **导出路径**（保持原设计）：
 - `0 ≤ rows ≤ 5000`：同步 StreamingResponse xlsx
-- `rows > 5000`：抛 `AI_EXPORT_ASYNC_REQUIRED`，Phase 3 实现后自动切换异步
+- `rows > 5000`：稳定抛 `AI_EXPORT_ASYNC_REQUIRED`，引导缩小筛选范围；当前不自动切换异步
 
-**反例**: (1) 导入导出共用一个阈值 → 导入 5000 行同步阻塞 worker 60s，破坏系统稳定。(2) 阈值都在 settings → 部署方误改成 50000，绕过 v2.2 P0 决策。(3) 导入超阈值自动异步 → Phase 1/2 没异步通道，行为未定义。
+**反例**: (1) 导入导出共用一个阈值 → 导入 5000 行同步阻塞 worker 60s，破坏系统稳定。(2) 阈值都在 settings → 部署方误改成 50000，绕过 v2.2 P0 决策。(3) 仅因常量名含 `ASYNC` 就在 controller 内自动入队 → 没有 job 契约、worker、幂等和通知闭环，产生不可追踪的半实现。(4) 为避免错误码而临时放宽上限 → 将稳定性风险转嫁给所有同步请求。
 
-**回归**: 两套常量在 `user/constants.py` 模块级（**非 settings，避免误改**）；service 层先 `count(*)` 再分支；导入超限拒绝（不异步），导出超限拒绝（Phase 3 后改异步）；测试 `test_import_rejects_over_2000_rows` + `test_export_rejects_over_5000_rows`。
+**回归**: 两套常量在 `user/constants.py` 模块级（**非 settings，避免误改**）；service 层先 `count(*)` 再分支；导入与导出超限都走稳定业务错误且不创建异步 job；测试 `test_import_rejects_over_2000_rows` + `test_export_rejects_over_5000_rows`。任何自动入队变更必须先更新 gateway v1.5 契约和本节。
 
 ### 2.7 **半成功策略：成功行落库 + 失败行收集返回，不回滚** — Excel 1000 行里 5 行字段冲突，应允许 995 行成功 + 返回 5 行错误清单。回滚会让用户每次都得修完全部错误才能导入，体验极差。
 
@@ -257,7 +268,7 @@ USER_EXPORT_ASYNC_THRESHOLD = 5000   # 单次导出同步上限；> 5000 抛 AI_
 
 **反例**: (1) HTTP import 也走 `ai_operation_log` → 概念混淆（HTTP 不是 AI 维度）。(2) AI import 复用 `sys_operation_log` → spec §2.7 明确反对，AI 调用是高频低密，与 HTTP 噪音混在一起难排查。
 
-**回归**: HTTP import / export 自动被 `AuditLogMiddleware` 记录（path=`/system/user/import`，无需特殊处理）；AI import 在 Gateway executor 内按 tool_call 落 `ai_operation_log`（spec §4.4 既有逻辑），`tool_name="user.batch_create"` / `args_summary="file=xxx.xlsx, rows=245"`。
+**回归**: HTTP import / export 自动被 `AuditLogMiddleware` 记录（path=`/system/user/import`，无需特殊处理）；AI import 在 Gateway executor 内按 tool_call 分别落 `ai_operation_log`，`tool_name="user.import_preview"` / `tool_name="user.import_execute"`，并以 `source_user_message_id` 串联触发消息。
 
 ### 2.9 **导出字段白名单：`hashed_password` / `api_key` / `hashed_password` 永不导出** — 即使 SQL 直查也不能让敏感字段出库，从 service 层兜底。
 
@@ -285,7 +296,7 @@ USER_EXPORT_ASYNC_THRESHOLD = 5000   # 单次导出同步上限；> 5000 抛 AI_
 
 **回归**: `export_service._build_excel` 加 `_STATUS_LABELS = {"1":"启用","2":"禁用"}` / `_GENDER_LABELS = {"0":"未知","1":"男","2":"女"}` / `_format_dept_path(dept, dept_lookup)` 内部 helper（复用 `template_service._build_dept_full_path`）；`_query_users_with_data_scope` 加 `dept_lookup` 预查（一次性 select Dept where dept_id in user_dept_ids，避免 N+1）；`import_parser._resolve_status_label` / `_resolve_gender_label` helper（字典反查 → 字面值兜底 → Literal 校验）；`_STATUS_VALUES = frozenset({"1","2"})`（修 bug）；新增测试 `test_export_translates_display_fields`（_build_excel 输出启用/禁用/男/女/部门路径）+ `test_import_status_chinese_label`（"启用"→"1" / "禁用"→"2" 反查）+ `test_import_status_disabled_two_now_accepted`（修复 _STATUS_VALUES bug 后的回归测试：status="2" 禁用用户可正常导入）。
 
-### 2.10 **导入文件限制：≤ 10MB / MIME 白名单（xlsx, xls, csv）/ 行数 ≤ 2000**（v2.2 P0 修订，原 50000 → 2000）— 用户导入属于 admin 管理操作，**不作为 ETL 数据同步入口**。2000 行以内保证 Excel parser 内存可控、dry_run 同步返回、前端 preview 可展示、单次事务时间可控、AI Tool 操作安全。> 2000 行的场景（HR 系统批量同步、ERP 集成）走 Phase 3 异步 ImportJob（独立 spec）。
+### 2.10 **导入文件限制：≤ 10MB / MIME 白名单（xlsx, csv）/ 行数 ≤ 2000**（v2.4 边界确认，原 50000 → 2000）— 用户导入属于 admin 管理操作，**不作为 ETL 数据同步入口**。2000 行以内保证 Excel parser 内存可控、dry_run 同步返回、前端 preview 可展示、单次事务时间可控、AI Tool 操作安全。> 2000 行的场景当前必须拆分文件；持续的大规模身份同步应优先评估 IAM/LDAP/SCIM，而不是默认建设 Excel 异步 ImportJob。旧 BIFF `.xls` 不再对外宣称支持：当前依赖的 openpyxl 不能安全解析该格式，在正式引入受维护的 BIFF parser 前统一 fail-closed。
 
 **为什么 2000 而不是 50000**（v2.2 调整理由）：
 1. **同步路径上限**：50000 行 Excel 解析 + Pydantic 验证 + chunk 100 落库 ≈ 30-60s 同步阻塞，FastAPI worker 占用影响其他请求
@@ -294,7 +305,7 @@ USER_EXPORT_ASYNC_THRESHOLD = 5000   # 单次导出同步上限；> 5000 抛 AI_
 4. **错误回溯成本**：50000 行一半失败（25000 行错误清单）用户根本修不动，违反「批量导入的反馈必须 actionable」原则
 5. **业务实际**：admin 用户管理 ≠ 大规模身份同步，> 2000 行的真实场景应该走 IAM/LDAP/SCIM 集成，不是 Excel
 
-**回归**: 复用 `settings.UPLOAD_MAX_SIZE = 10MB`；MIME 白名单 `{"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel", "text/csv"}`；行数硬上限 `USER_IMPORT_MAX_ROWS = 2000`（常量在 `app/modules/system/user/constants.py`，可由部署方下调但不可上调，避免运维误改回 50000）；超限抛 `BusinessRuleException(error_code="AI_IMPORT_TOO_MANY_ROWS")`，message 引导用户「分批导入或等待 Phase 3 异步通道」。
+**回归**: 复用 `settings.UPLOAD_MAX_SIZE = 10MB`；MIME 白名单 `{"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "text/csv"}`；HTTP UploadFile 只读取 `10MB + 1 byte`；XLSX 在 openpyxl 前校验 OOXML 必要成员、加密/路径/重复成员、entry 数、单 entry/总解压大小和压缩比；行数硬上限 `USER_IMPORT_MAX_ROWS = 2000`，解析器读到第 2001 个非空数据行立即拒绝，不先 materialize 全文件。超限分别抛 `AI_IMPORT_FILE_TOO_LARGE` / `AI_IMPORT_TOO_MANY_ROWS`，message 稳定引导用户拆分文件后重试。
 
 ### 2.11 **Data Scope 强制应用：操作人管辖范围校验（部门越界防御）** — 与现有 RBAC 完全一致：HR（DATA_SCOPE_DEPT）不能导入/导出他不可见部门的用户；部门管理员（DATA_SCOPE_DEPT_AND_SUB）可管理本部门 + 所有子部门；超管 / DATA_SCOPE_ALL 不受限。
 
@@ -320,7 +331,11 @@ USER_EXPORT_ASYNC_THRESHOLD = 5000   # 单次导出同步上限；> 5000 抛 AI_
 
 **回归**: `GET /system/user/import/template` 返回 xlsx，含 2 sheet：「数据」（列顺序固定 + 2 行示例）+「说明」（每列字段说明 + 必填标记 + 取值范围）。
 
-### 2.14 **AI tool 接 `file_path` 而非 file upload multipart（v2.2 P0：拆 `import_preview` + `import_execute` 两个 tool）** — 与 SR-24 `file.parse` 一致：用户先上传文件到 `/file/upload` 拿 file_path，再把 path 传给 AI tool。Gateway 不直接处理 multipart。**v2.2 P0 修订**：原 `user.batch_create` 单一 tool 让 AI 可以跳过预检直接 execute，违反 HITL 原则（批量写入必须人在回路确认）。**v2.2 拆为两个 tool**：`user.import_preview`（只读，跑 dry_run + 生成 batch）+ `user.import_execute`（写入，必须 HITL 确认 + preview_token）。
+### 2.14 **AI tool 接 `file_id` 而非 multipart（v2.4 语义收口：拆 `import_preview` + `import_execute` 两个 tool）** — 用户先上传文件到 `/file/upload` 获得 `file_id`，`user.import_preview` 从 `sys_file` 加载 bytes；Gateway 不直接处理 multipart。原 `user.batch_create` 单一 tool 会让 AI 跳过预检直接 execute，违反 HITL 原则，因此拆成 `user.import_preview`（low risk，生成持久 batch / 预检文件，不写用户业务行）和 `user.import_execute`（写用户，必须 HITL + preview_token）。
+
+`user.import_preview` **不是 `readonly` / replay-safe / idempotent tool**：它会 INSERT `sys_user_import_batch`、写 FileStorage 和 Redis cache，每次调用都会产生新的 batch/file。`AiToolMeta.readonly=True` 的契约是“除 Gateway 自身审计/短期 query cache 外不产生持久副作用”，不能用“没有写 `sys_user`”偷换概念；`AiToolMeta.idempotent=True` 也不能在没有稳定幂等键和同一 preview batch 复用协议时声明。当前实现必须将其改为 `readonly=False / idempotent=False`；`risk="low"` 仍保持 autonomous，不因此增加一次 HITL。edit/regenerate guard 和未来重试策略会据此保守阻止自动重放 preview，避免重复 batch 和文件。
+
+`file_id` 只豁免“用户业务数据的 data scope helper”，**不豁免文件资源本身的授权**。`_load_file_bytes` 必须在读取磁盘前同时验证：`owner_user_id == ctx.user.user_id`、`tenant_id == ctx.tenant_id`（单租户也写 `0`）、`business_type == "user-import"`、`del_flag == "0"`、扩展名/MIME/magic bytes 在导入白名单内、`file_size` 与实际 bytes 均不超过上传上限，以及 resolve 后路径仍位于配置的私有 upload root。`ctx.tenant_id` 必须由认证中间件/服务端 tenant resolver 注入 `ChatDeps → AiToolContext`，禁止从 ChatCommand、tool args 或其他客户端字段信任 tenant；进入 HITL 时连同 user/trace 写入 PendingPayload，resume 后再与当前认证 tenant 复核。当前 `sys_file.create_by` 只存可变 username 且没有 tenant 锚点，Task 35 迁移增加 `owner_user_id BIGINT NULL`（仅为兼容历史行；所有新上传强制认证 ID）与 `tenant_id BIGINT NOT NULL DEFAULT 0`。由于 username 可修改、账号可硬删除后同名重建，历史 `create_by` 不是不可变归属证据，**迁移不得据此回填 owner**；全部历史 owner 保持 NULL 并对 AI/普通 owner 读取 fail-closed。不存在、已删除、跨 owner/tenant 统一返回 `AI_FILE_NOT_FOUND`，避免资源枚举；类型、大小、路径分别返回 `AI_FILE_TYPE_NOT_ALLOWED`、`AI_FILE_TOO_LARGE`、`AI_FILE_PATH_INVALID`。
 
 **两 tool 契约**：
 
@@ -330,11 +345,12 @@ USER_EXPORT_ASYNC_THRESHOLD = 5000   # 单次导出同步上限；> 5000 抛 AI_
     agent="user_mgmt",
     summary=(
         "Parse Excel + dry-run import → returns {batch_id, preview_token, summary}. "
-        "Read-only, does NOT write users. Call user.import_execute next."
+        "Does not write users, but creates a durable preview batch. Call user.import_execute next."
     ),
-    required_perms=("system:user:add",),
-    risk="low",                          # 只读，不写库
-    readonly=True,
+    required_perms=("system:user:import",),
+    risk="low",                          # 不写用户行，但会写预检 artifact
+    readonly=False,                       # 持久化 batch / file / cache，不可自动重放
+    idempotent=False,                     # 无稳定幂等键；每次调用都会新建 preview batch/file
     accepts_file=("text/csv", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
     produces_file=False,
     result_view="detail_card",           # 展示 batch_id + preview_token + summary
@@ -342,17 +358,18 @@ USER_EXPORT_ASYNC_THRESHOLD = 5000   # 单次导出同步上限；> 5000 抛 AI_
 async def user_import_preview(
     ctx: AiToolContext,
     *,
-    file_path: str,
+    file_id: str,
+    reason: str,
     on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
 ) -> ToolResult:
-    """file_path 来自 /file/upload。
+    """file_id 来自 /file/upload。
 
     流程：
-    1. file_path → file_bytes（Gateway 内部解析）
+    1. file_id → sys_file → file_bytes
     2. user_service.parse_import_excel → records
     3. user_service.dry_run_import_users(records, current_user, file_bytes, filename)
-       → INSERT sys_user_import_batch (status=CREATED)
-       → 写 Redis cache (preview_token → batch_id)
+       → INSERT sys_user_import_batch (CREATED) → PREVIEW_DONE
+       → 持久化 preview file + 写 Redis cache (preview_token → batch_id)
     4. ToolResult.success(data={batch_id, preview_token, summary}, ui=detail_card)
     """
 
@@ -363,10 +380,10 @@ async def user_import_preview(
         "Execute previously previewed batch import. REQUIRES HITL confirmation. "
         "Pass preview_token from user.import_preview."
     ),
-    required_perms=("system:user:add",),
+    required_perms=("system:user:import",),
     risk="high",                         # 写入，批量创建用户
     hitl_always=True,                    # 强制 HITL（批量写入永远人在回路）
-    dry_run_supported=False,             # execute 本身不是 dry_run
+    dry_run_supported=True,              # HITL 前只读 batch summary，不重跑 preview
     accepts_file=(),                     # 不接文件，凭 preview_token 取
     produces_file=True,                  # 输出 failed_rows.xlsx
     result_view="rows_affected",
@@ -375,27 +392,29 @@ async def user_import_execute(
     ctx: AiToolContext,
     *,
     preview_token: str,
+    reason: str,
     on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
+    sync_mode: Literal["CREATE_ONLY", "UPDATE_PROFILE", "FULL_SYNC"] = "CREATE_ONLY",
 ) -> ToolResult:
-    """凭 preview_token 反查 batch → CAS CREATED→RUNNING → chunk + savepoint。
+    """凭 preview_token 反查 batch → CAS PREVIEW_DONE→RUNNING → chunk + savepoint。
 
     幂等保护（#2.27）：重复 execute 已 SUCCESS 的 batch 返回原结果。
     """
 ```
 
 **两个 tool 而不是一个的根本理由**：
-1. **HITL 强制**：`import_execute` 必须 `hitl_always=True`，AI 不能跳过；`import_preview` 只读无需 HITL（用户体验：连续两个 HITL 太烦）
-2. **风险评级不同**：preview 是 low risk（只读），execute 是 high risk（写库）；分开后权限审计粒度更细
+1. **HITL 强制**：`import_execute` 必须 `hitl_always=True`，AI 不能跳过；`import_preview` 是 low risk autonomous，但并非 readonly/replay-safe（用户体验上不增加第二次 HITL）
+2. **风险评级不同**：preview 只写可过期预检 artifact，不写用户业务行；execute 是 high risk 用户写入，分开后权限与审计粒度更细
 3. **结果视图不同**：preview 用 `detail_card`（展示 batch_id + summary），execute 用 `rows_affected`（展示成功 N 行 / 跳过 M 行）
 4. **错误恢复路径不同**：preview 失败用户改 Excel 重传即可（生成新 batch_id）；execute 失败需要查 batch_id 审计反查
-5. **未来异步通道扩展**：Phase 3 实现 `import_execute` 改异步时只影响 execute tool，preview 仍同步
+5. **v1.5+ 演进边界**：若量化门槛触发 deferred import，优先保持 preview 同步并只评估 execute 调度；这只是兼容性输入，不是当前实现承诺
 
 **LLM Prompt 引导**（在 tool description 内嵌）：
 > "用户给一份用户列表 Excel 想批量导入：先调 user.import_preview 拿 preview_token 展示给用户确认，再调 user.import_execute（用户确认后）。**禁止跳过 preview 直接 execute**。"
 
-**反例**: (1) **单 tool `batch_create` 让 AI 自行决定是否 dry_run → AI 可能为了「快」跳过预检直接 execute，违反 HITL 原则**（v2.2 P0 修订核心）。(2) AI tool 直接接 multipart → 与 SR-24 路径分裂，Gateway 要单独实现文件接收逻辑。(3) 拆 tool 但不强制 HITL → AI 仍可自行调 execute，绕过预检。(4) 用 `dry_run_supported=True` 单 tool 标志位区分 → AI 可主动设 `dry_run=false` 跳过预检，与拆 tool 等价但更脆弱。
+**反例**: (1) **单 tool `batch_create` 让 AI 自行决定是否 dry_run → AI 可能为了「快」跳过预检直接 execute，违反 HITL 原则**（v2.2 P0 修订核心）。(2) AI tool 直接接 multipart → 与 SR-24 路径分裂，Gateway 要单独实现文件接收逻辑。(3) 拆 tool 但不强制 HITL → AI 仍可自行调 execute，绕过预检。(4) 用 `dry_run_supported=True` 单 tool 标志位区分 → AI 可主动设 `dry_run=false` 跳过预检，与拆 tool 等价但更脆弱。(5) 仅凭 `file_id` 查 `sys_file` 后读路径 → 泄露或枚举出的 ID 可读取他人/其他租户文件，形成 IDOR。(6) 只信 DB 中的 MIME/路径 → 被篡改的记录可绕过上传白名单或越出 upload root。
 
-**回归**: AI tool `user.import_preview(file_path, on_conflict) -> {batch_id, preview_token, summary}` + `user.import_execute(preview_token, on_conflict)`（强制 HITL）；前端 chat 上传文件 → `/file/upload` → 拿 path → AI 调 `import_preview` → 展示 summary → 用户确认 → AI 调 `import_execute`；Excel 解析复用 SR-24 `file.parse` 的解析通道；HITL 抽屉展示 preview summary + execute 按钮；测试 `test_ai_cannot_skip_preview`（验证 LLM tool 调用历史中 execute 必须在 preview 之后）。
+**回归**: AI tool `user.import_preview(file_id, reason, on_conflict) -> {batch_id, preview_token, summary}` + `user.import_execute(preview_token, reason, on_conflict, sync_mode)`（强制 HITL）；前端 chat 上传文件时写 `business_type="user-import"` 与 owner/tenant → `/file/upload` → 拿 `file_id` → AI 调 `import_preview` → 展示 summary → 用户确认 → AI 调 `import_execute`；测试同时断言 preview `readonly=False / idempotent=False`、会持久化预检 artifact 但不写 `sys_user`、同参数调用不会被 Gateway 自动重放、他人/跨租户/错误业务类型/伪造 MIME/超限/越界路径均在 read 前拒绝，以及 LLM 不能跳过 preview。
 
 ### 2.15 **Permission Boundary：操作人不能分配自己不拥有的角色（权限提升防御）** — 批量导入是权限提升攻击的高风险入口（HR 给被导入用户分配 R_SUPER），后端必须在 service 层强制校验：`Excel 中请求的角色 ⊆ 操作人自己拥有的角色`，否则整行 FailedRow。
 
@@ -529,9 +548,9 @@ async def _resolve_role_input(db: AsyncSession, role_input_str: str) -> list[int
 
 **回归**: 字段名 `role_input`（不叫 `role_codes` 因可能含 name）；模板「角色字典」sheet 提供 `role_code` + `role_name` 双列，用户复制任一列粘贴；service `_resolve_role_input` Pass 1 code / Pass 2 name 两轮匹配；最后 `set()` 去重；匹配后立即跑 #2.15 Permission Boundary 校验。
 
-### 2.19 **ImportPreviewSession + preview_token：dry_run 与 execute 之间绑定（v2.2 P0：业务数据落 PostgreSQL，Redis 仅 cache）** — 用户 dry_run 后可能改 Excel 重传 / 切换账号 / 多 tab 操作 → 实际执行的数据不是预检过的数据。preview_token 强制绑定预检结果 + 文件存储路径，execute 时校验 `file_sha256 + records_hash + operator_id` 三重一致性，任一不匹配 → 拒绝执行。
+### 2.19 **ImportBatch + preview_token：dry_run 与 execute 之间绑定（v2.2 P0/P1-2：业务数据落 PostgreSQL，Redis 仅 cache）** — 用户 dry_run 后可能改 Excel 重传 / 切换账号 / 多 tab 操作 → 实际执行的数据不是预检过的数据。preview_token 强制绑定预检结果 + 文件存储路径，execute 时校验 `file_sha256 + records_hash + operator_id` 三重一致性，任一不匹配 → 拒绝执行。原独立 `ImportPreviewSession` 已按 §3.6 合并进 `UserImportBatch`。
 
-**v2.2 P0 关键修订（Redis cache-only）**：原 v2.1 把 `preview_token → { file_storage_key, file_sha256, records_hash, summary, operator_id, expires_at }` 全部存 Redis，存在「Redis 丢失但 batch 表还在」的审计断裂问题（Redis 重启 / eviction / 容量满 → preview_token 失效但 DB 中 batch.status='CREATED' 永远停在那）。**v2.2 改为**：业务数据（hash / file_storage_key / summary / operator_id）全部存在 PostgreSQL `sys_user_import_batch` 表，Redis 仅缓存 `preview_token → batch_id` 映射（10min TTL，纯加速用）。
+**v2.2 P0 关键修订（Redis cache-only）**：原 v2.1 把 `preview_token → { file_storage_key, file_sha256, records_hash, summary, operator_id, expires_at }` 全部存 Redis，存在「Redis 丢失后 DB batch 无法独立恢复预检事实与执行输入」的审计断裂问题。**v2.2 改为**：业务数据（hash / file_storage_key / summary / operator_id）全部存在 PostgreSQL `sys_user_import_batch` 表，Redis 仅缓存 `preview_token → batch_id` 映射（10min TTL，纯加速用）。
 
 **两份存储职责**：
 
@@ -546,7 +565,7 @@ async def _resolve_role_input(db: AsyncSession, role_input_str: str) -> list[int
     "records_hash": "def...",
     "summary_new": 100, "summary_exists": 20,
     "summary_conflict": 5, "summary_out_of_scope": 3,
-    "status": "CREATED",
+    "status": "PREVIEW_DONE",  # CREATED 仅是 dry_run 内部 INSERT 瞬态
     "created_at": "2026-08-01T14:00:00",
     "expires_at": "2026-08-01T14:10:00"   # 软过期标记，cron 扫描转 EXPIRED
 }
@@ -579,8 +598,8 @@ if not batch_id:
 # 3. DB 读完整 batch 行（业务数据 SoT）
 batch = await db.get(UserImportBatch, batch_id)
 
-# 4. 状态校验：必须是 CREATED（v2.2 #2.27 幂等保护）
-if batch.status != "CREATED":
+# 4. 状态校验：必须是 PREVIEW_DONE（v2.2 #2.27 / P1-2 幂等保护）
+if batch.status != ImportBatchStatus.PREVIEW_DONE:
     raise BusinessRuleException(error_code="AI_IMPORT_ALREADY_EXECUTED")
 
 # 5. TTL 软过期校验
@@ -591,23 +610,27 @@ if batch.created_at < datetime.now() - timedelta(minutes=10):
 # 6. 凭 file_storage_key 取文件
 file_bytes = await file_storage.read(batch.file_storage_key)
 
-# 7. 三重校验：file_sha256 + records_hash + operator_id
+# 7. 仅按 batch.filename 的可信后缀恢复 parser MIME（.csv/.xlsx 白名单）
+mime_type = import_mime_from_batch_filename(batch.filename)  # 其他后缀稳定拒绝
+
+# 8. 三重校验：file_sha256 + records_hash + operator_id
 if sha256(file_bytes) != batch.file_sha256: raise ...
-records = await user_service.parse_import_excel(...)
+records = await user_service.parse_import_excel(file_bytes, mime_type)
 if hash(records) != batch.records_hash: raise ...
 if current_user.user_id != batch.operator_id: raise ...
 
-# 8. CAS 状态机转换 CREATED → RUNNING（v2.2 #2.27）
+# 9. CAS 状态机转换 PREVIEW_DONE → RUNNING（v2.2 #2.27 / P1-2）
 ```
 
 **storage 实现**：
-- **复用现有 `/file/upload` 通道**（推荐）：与 SR-24 `file.parse` 一致，file_storage_key 是 `/file/` 下的路径，统一管理 + TTL 清理复用现有逻辑
-- **独立 `import-preview/` 目录**：与一般上传文件隔离，便于单独清理（10min 过期 vs 永久存储）
-- **本 spec 选「独立目录」**：导入预览文件生命周期短（10min），不应混入永久文件存储；cron 清理 `/tmp/import/` 超过 1h 的文件
+- **统一走 FileStorage Protocol**：`file_storage_key` 是服务端内部 locator，不进入公共 DTO，也不直接映射为静态 URL。
+- **独立 `import-preview/` namespace**：与一般上传文件隔离，便于按预检生命周期清理；Local 实现写入 `private_uploads/file_storage/import-preview/`。
+- **历史兼容只读**：升级前 `uploads/file_storage/` artifact 仅可通过认证 service fallback 读取/删除；静态 GET/HEAD 必须拒绝整个历史 namespace。
+- **格式保真**：preview 按受保护 loader 已验证的 MIME 保存 `.csv` 或 `.xlsx`；execute 只按 batch 中可信文件名后缀恢复 parser MIME，不能把 CSV artifact 固定当 XLSX 解析。
 
-**反例**: (1) **preview_token 携带完整 records → 5000 行 Excel 序列化进 Redis 撑爆内存**（v2.1 已修）。(2) **业务数据存 Redis → Redis 重启 / eviction → preview_token 失效但 batch.status='CREATED' 在 DB 永远停着**（v2.2 P0 修订：业务数据落 PostgreSQL，Redis 仅 cache `batch_id`）。(3) execute 时让前端重传 file → preview_token 的"绑定"语义被削弱；用户删了临时文件 / 关 tab 后无法 execute。(4) 不绑定 operator_id → A 账号 dry_run 后 B 账号 execute，预检失效。(5) 不绑定 file_sha256 → 用户改 Excel 重传同一 token，权限校验失效。(6) Redis 命中后不再查 DB → Redis 数据被篡改 / TTL 错乱，绕过 DB 状态校验。
+**反例**: (1) **preview_token 携带完整 records → 5000 行 Excel 序列化进 Redis 撑爆内存**（v2.1 已修）。(2) **业务数据只存 Redis → Redis 重启 / eviction 后 PREVIEW_DONE batch 无法从 DB 恢复执行输入**（v2.2 P0 修订：业务数据落 PostgreSQL，Redis 仅 cache `batch_id`）。(3) execute 时让前端重传 file → preview_token 的"绑定"语义被削弱；用户删了临时文件 / 关 tab 后无法 execute。(4) 不绑定 operator_id → A 账号 dry_run 后 B 账号 execute，预检失效。(5) 不绑定 file_sha256 → 用户改 Excel 重传同一 token，权限校验失效。(6) Redis 命中后不再查 DB → Redis 数据被篡改 / TTL 错乱，绕过 DB 状态校验。
 
-**回归**: `dry_run_import_users` 接 `file_bytes` + 持久化文件 + **INSERT sys_user_import_batch 行（含所有业务字段）+ 写 Redis cache（仅 batch_id）**；`POST /import` 不带 file，只带 `preview_token`；execute 先查 Redis 加速、miss 时反查 DB（**不丢业务数据**），然后状态校验 + 三重 hash 校验 + CAS 转 RUNNING；`/tmp/import/` cron 清理超过 1h 的孤儿文件；Redis 全量丢失 → execute 仍可从 DB 反查（性能降级但功能不丢）；测试 `test_preview_cache_missing_falls_back_to_db`。
+**回归**: `dry_run_import_users` 接 `file_bytes` + 持久化文件 + **INSERT sys_user_import_batch 行（含所有业务字段）+ 写 Redis cache（仅 batch_id）**；`POST /import` 不带 file，只带 `preview_token`；execute 先查 Redis 加速、miss 时反查 DB（**不丢业务数据**），然后状态校验 + 三重 hash 校验 + CAS 转 RUNNING；私有 `import-preview/` namespace 清理超期孤儿文件；Redis 全量丢失 → execute 仍可从 DB 反查（性能降级但功能不丢）；CSV preview artifact 以 `.csv` 保存且 preview/execute 两次均按 `text/csv` 解析；测试 `test_preview_cache_missing_falls_back_to_db` 与 CSV preview→execute 串联回归。
 
 ### 2.20 **行级事务（savepoint）+ chunk 100 rows：失败行 ROLLBACK 当前行，不污染外层事务** — 「半成功」（#2.7）只说"失败行不阻断成功行"，但**没明确单行内的多步操作原子性**：user 创建成功但 user_role 失败 → 残留无角色用户脏数据。每行用 savepoint 包裹多步操作（create_user + create_roles + update_relation），失败 ROLLBACK 当前行；外层 chunk 100 rows 一个 transaction 控制 undo segment 大小。
 
@@ -737,9 +760,11 @@ dry_run 阶段：
     created_at=now()
   )
   + Redis 写 preview_token → file_storage_key 绑定（#2.19）
+  + CAS UPDATE status='PREVIEW_DONE' WHERE batch_id=? AND status='CREATED'
 
 execute 阶段：
-  UPDATE sys_user_import_batch SET status='RUNNING', started_at=now() WHERE batch_id=?
+  UPDATE sys_user_import_batch SET status='RUNNING', started_at=now()
+  WHERE batch_id=? AND status='PREVIEW_DONE'
   ... chunk + savepoint 执行 ...
   UPDATE sys_user_import_batch SET
     status='SUCCESS' / 'PARTIAL_SUCCESS' / 'FAILED',
@@ -750,7 +775,7 @@ execute 阶段：
 
 10min TTL 过期（用户没 execute）：
   UPDATE sys_user_import_batch SET status='EXPIRED', finished_at=now()
-  WHERE status='CREATED' AND created_at < now() - 10min
+  WHERE status='PREVIEW_DONE' AND created_at < now() - 10min
   （由定时任务或下次 dry_run 触发清理时批量更新）
 ```
 
@@ -780,17 +805,30 @@ class UserImportBatch(Base):
         comment="失败行 Excel 文件路径 /file/import-error/{batch_id}.xlsx，#2.22 文件化",
     )
     on_conflict: Mapped[str] = mapped_column(String(16))
-    status: Mapped[str] = mapped_column(String(32), index=True, comment="详见 §2.26 状态机")
+    # 统一引用 §2.26 的 ImportBatchStatus + SAEnum；不得退回无约束 String。
+    status: Mapped[ImportBatchStatus] = mapped_column(
+        SAEnum(
+            ImportBatchStatus,
+            name="import_batch_status",
+            values_callable=lambda x: [e.value for e in x],
+            native_enum=True,
+            create_constraint=True,
+        ),
+        nullable=False,
+        index=True,
+        default=ImportBatchStatus.CREATED,
+        comment="状态机详见 §2.26",
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)   # execute 开始
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True) # execute 完成 / EXPIRED
 ```
 
-**Phase 3 异步通道复用**：表结构 + 状态机不变，execute 改异步时只是把 `RUNNING → SUCCESS/PARTIAL_SUCCESS` 的间隔拉长，`broadcast_to_user` 推 status 变化。
+**v1.5+ 演进输入（非当前承诺）**：现有表结构与状态机可作为 deferred 专项的迁移输入，但不能假设「只把执行时间拉长 + broadcast 状态」就足够；专项 spec 仍须补齐 QUEUED、worker lease、重试、取消、恢复和单一进度协议。
 
 **反例**: (1) 只在 execute 创建 batch → dry_run 后关浏览器的动作无审计，安全盲区。(2) failed_rows 存 JSON 字段 → 50000 行失败几十 MB，DB 单行过大。(3) 不加 status 字段 → Phase 3 异步实现时改表，破坏向前兼容。(4) 不持久化只存 Redis → 审计 90 天反查丢失。
 
-**回归**: alembic migration 新建表 + `preview_token` UNIQUE 索引 + `(operator_id, created_at)` / `(status, created_at)` 索引；`dry_run_import_users` 内 INSERT batch 行（status='CREATED'）；`batch_create_users_from_records` 内 UPDATE 状态流转；定时任务（或下次 dry_run 顺带）清理 `CREATED + created_at < now() - 10min` → `EXPIRED`；HTTP dry_run 响应含 `batchId`；正式导入响应含 `failedRowsDownloadUrl`。
+**回归**: alembic migration 新建表 + `preview_token` UNIQUE 索引 + `(operator_id, created_at)` / `(status, created_at)` 索引；`dry_run_import_users` 内 INSERT `CREATED` 并在预检完成后转 `PREVIEW_DONE`；`batch_create_users_from_records` 内从 `PREVIEW_DONE` CAS 到 `RUNNING`；定时任务清理 `PREVIEW_DONE + created_at < now() - 10min` → `EXPIRED`；HTTP dry_run 响应含 `batchId`；正式导入响应含 `failedRowsDownloadUrl`。
 
 ### 2.22.1 **failed_rows 文件 retention = batch retention（90 天）** — failed_rows_file 的生命周期与 batch 行强绑定：删 batch 行时同时删文件，避免文件垃圾残留。
 
@@ -823,7 +861,7 @@ async def cleanup_expired_batches(db: AsyncSession):
 ```
 原: GET /system/user/export?user_name=xxx&dept_id=1&status=1
 改: POST /system/user/export
-    Body: {"userName": "xxx", "deptId": 1, "status": "1"}
+    Body: {"userName": "xxx", "deptId": "1", "status": "1"}
     Response: StreamingResponse (xlsx bytes) 或 422 (超阈值)
 ```
 
@@ -955,7 +993,7 @@ async with db.begin_nested():
 
 **回归**: service 层捕获 `IntegrityError` 并区分 `ix_sys_user_user_name` 约束名；新增错误码 `AI_IMPORT_USERNAME_DUPLICATE`；测试 `test_concurrent_same_user_name_import`（用 `asyncio.gather` 模拟两个并发 batch_create，验证其中一个的 user_name 行进 failed_rows）。
 
-### 2.26 **Import Lifecycle State Machine：状态机集中定义 + Enum + CHECK 约束（v2.2 P0：Enum 化强制）** — 导入流程跨 Redis（preview cache）+ DB（batch state）+ execute（chunk/savepoint）三处状态，状态越来越多。集中定义状态机避免实现时漂移，且为 Phase 3 异步通道 / WebSocket 进度推送 / retry 机制预留扩展点。**v2.2 P0 强制 Enum 化 + DB CHECK 约束**：原 `String(32)` 字段无法在 DB 层防 typo（`'RUNING'` / `'SUCESS'`），且 Python 端散落字符串字面量。
+### 2.26 **Import Lifecycle State Machine：状态机集中定义 + Enum + CHECK 约束（v2.2 P0：Enum 化强制）** — 导入流程跨 Redis（preview cache）+ DB（batch state）+ execute（chunk/savepoint）三处状态，状态越来越多。集中定义状态机首先服务当前同步一致性，也可作为 v1.5+ deferred 专项的迁移输入；它不等于已经批准 WebSocket、重试或 Worker。**v2.2 P0 强制 Enum 化 + DB CHECK 约束**：原 `String(32)` 字段无法在 DB 层防 typo（`'RUNING'` / `'SUCESS'`），且 Python 端散落字符串字面量。
 
 **完整状态机**（v2.2 P0：加 `CANCELLED`，详见 #2.29）：
 
@@ -1140,13 +1178,13 @@ async def _transition_batch_status(
 | RUNNING → FAILED | success_count = 0，或 preview_token 校验失败 | 同上 |
 | SUCCESS/PARTIAL_SUCCESS/FAILED/EXPIRED/CANCELLED → (deleted) | created_at + 90 天 | `cleanup_expired_batches` cron |
 
-**Phase 3 异步通道扩展**：
-- 加 `status='QUEUED'`（CREATED → QUEUED → RUNNING，execute 入队后立即返回）
+**v1.5+ 候选扩展（非当前 Plan）**：
+- 加 `status='QUEUED'`（PREVIEW_DONE → QUEUED → RUNNING，execute 入队后立即返回）
 - 加 `progress_percent` 字段（chunk 完成数 / total_chunks）让前端显示进度条
-- 加 `broadcast_to_user` 在每次 status 变化时推送
-- `ImportBatchStatus` 加 `QUEUED = "QUEUED"` 一行 + `LEGAL_TRANSITIONS[CREATED]` 加 `QUEUED`，向后兼容
+- 仅在进度验收确有需要时，把状态变化暴露给 v1.5+ 选定的**单一**进度协议；不预设 `broadcast_to_user` 或具体传输技术
+- `ImportBatchStatus` 加 `QUEUED = "QUEUED"` 一行 + `LEGAL_TRANSITIONS[PREVIEW_DONE]` 加 `QUEUED`，向后兼容
 
-**反例**: (1) 状态机散落在多决策记录里（#2.19 提 CREATED/RUNNING，#2.22 提 SUCCESS/PARTIAL_SUCCESS）→ 实现时漏状态转换。(2) 不预留 EXPIRED → 直接 Redis TTL 过期后 DB 行永远停在 CREATED，审计反查看到一堆"CREATED + created_at 一年前"的僵尸行。(3) **`status: String(32)` 无 DB 层校验 → 写入 `'RUNING'` typo，状态机查询永远查不到该行**（v2.2 P0：Enum + CHECK 强制）。(4) **Python 端散落字符串字面量 → 重构状态名时漏改**（v2.2 P0：`ImportBatchStatus` 集中）。(5) Phase 3 异步实现时重新设计状态机 → 破坏向前兼容。
+**反例**: (1) 状态机散落在多决策记录里（#2.19 提 CREATED/RUNNING，#2.22 提 SUCCESS/PARTIAL_SUCCESS）→ 实现时漏状态转换。(2) 不预留 EXPIRED → Redis TTL 过期后 DB 行永远停在 PREVIEW_DONE，审计反查看到一堆长期未执行的预检批次。(3) **`status: String(32)` 无 DB 层校验 → 写入 `'RUNING'` typo，状态机查询永远查不到该行**（v2.2 P0：Enum + CHECK 强制）。(4) **Python 端散落字符串字面量 → 重构状态名时漏改**（v2.2 P0：`ImportBatchStatus` 集中）。(5) 未来 deferred 专项完全推翻已有状态机 → 破坏向前兼容。
 
 **回归**: §2.26 集中状态机图 + `ImportBatchStatus(Enum)` + `LEGAL_TRANSITIONS` 映射；ORM 用 `SAEnum(native_enum=True, create_constraint=True)`；alembic 建 PostgreSQL ENUM 类型；转换逻辑集中在 `_transition_batch_status(db, batch_id, from, to, **updates)` helper（CAS 防并发覆盖 + 非法转换抛 `AI_IMPORT_ILLEGAL_TRANSITION`）；测试覆盖每条转换边 + Enum 类型写入 / 读取往返。
 
@@ -1169,17 +1207,17 @@ async def batch_create_users_from_records(
     # 2. 三重 hash + operator 校验（#2.19 不变）
     self._verify_three_way(batch, file_bytes, records, current_user)
 
-    # 3. CAS 状态机转换 CREATED → RUNNING（v2.2 P0 幂等核心）
+    # 3. CAS 状态机转换 PREVIEW_DONE → RUNNING（v2.2 P0/P1-2 幂等核心）
     cas_ok = await _transition_batch_status(
         db,
         batch.batch_id,
-        ImportBatchStatus.CREATED,
+        ImportBatchStatus.PREVIEW_DONE,
         ImportBatchStatus.RUNNING,
         started_at=datetime.now(),
     )
 
     if not cas_ok:
-        # CAS 失败：状态已被其他 worker 改（RUNNING / SUCCESS / PARTIAL_SUCCESS / FAILED / EXPIRED / CANCELLED）
+        # CAS 失败：状态已被并发请求改动（RUNNING / SUCCESS / PARTIAL_SUCCESS / FAILED / EXPIRED / CANCELLED）
         # → 这次 execute 是重复提交
         fresh = await db.get(UserImportBatch, batch.batch_id)
         if fresh.status in (ImportBatchStatus.SUCCESS, ImportBatchStatus.PARTIAL_SUCCESS):
@@ -1233,7 +1271,7 @@ async def batch_create_users_from_records(
 
 **反例**: (1) **不防双击 → 用户连续点 2 次「确认导入」，第二次因为 username UNIQUE 进 failed_rows，用户看到「失败 N 行」误以为导入失败**（v2.2 P0 核心场景）。(2) 用 Redis SETNX 做幂等锁 → Redis 重启 / eviction → 锁丢失，仍可重放。(3) CAS 失败一律抛错 → 双击用户体验差。(4) 不区分「成功重放」vs「失败重放」→ 失败批次也能重放，造成数据不一致（首次失败 100 行，第二次重放恰好环境恢复，100 行又被处理一遍，但前面可能已部分 commit）。(5) CAS 用 `version` 字段而非 `status` → 状态机和幂等两套机制，复杂度翻倍。
 
-**回归**: `_transition_batch_status` 用 CAS `WHERE batch_id=? AND status='CREATED'`，0 rows 命中说明已被其他 worker 改；SUCCESS/PARTIAL_SUCCESS 重放返回 200 + `idempotent_replay=true`；FAILED/EXPIRED/CANCELLED 重放返回 422 + `AI_IMPORT_ALREADY_EXECUTED`；RUNNING 返回 422 + `AI_IMPORT_BATCH_RUNNING`；测试 `test_execute_same_token_twice_success_replay`（首次成功，第二次返回原结果 + idempotent_replay=true）+ `test_execute_same_token_twice_running_concurrent`（并发 execute 同 token，第二个抛 BATCH_RUNNING）+ `test_execute_failed_batch_rejected`（FAILED 状态重放被拒绝）+ `test_concurrent_execute_same_batch`（asyncio.gather 模拟并发，验证 CAS 互斥）。
+**回归**: `_transition_batch_status` 用 CAS `WHERE batch_id=? AND status='PREVIEW_DONE'`，0 rows 命中说明已被并发请求改动；SUCCESS/PARTIAL_SUCCESS 重放返回 200 + `idempotent_replay=true`；FAILED/EXPIRED/CANCELLED 重放返回 422 + `AI_IMPORT_ALREADY_EXECUTED`；RUNNING 返回 422 + `AI_IMPORT_BATCH_RUNNING`；测试 `test_execute_same_token_twice_success_replay`（首次成功，第二次返回原结果 + idempotent_replay=true）+ `test_execute_same_token_twice_running_concurrent`（并发 execute 同 token，第二个抛 BATCH_RUNNING）+ `test_execute_failed_batch_rejected`（FAILED 状态重放被拒绝）+ `test_concurrent_execute_same_batch`（asyncio.gather 模拟并发，验证 CAS 互斥）。
 
 ### 2.28 **ImportBatch 业务日志表 `sys_user_import_batch_log`（v2.2 P1）** — batch 是长期对象（CREATED → 90 天归档），单一 `status` 字段只反映最新状态，**丢失中间过程**（什么时候 RUNNING → SUCCESS？哪个 chunk 失败？EXPIRED 是 cron 扫的还是用户手动取消？）。HTTP import 走 `sys_operation_log`、AI import 走 `ai_operation_log` 都是「调用维度」审计，无法回答「batch X 经历了哪些状态」。**v2.2 P1 新增 `sys_user_import_batch_log` 表**，按 batch 维度记录状态转换节点。
 
@@ -1273,11 +1311,11 @@ class UserImportBatchLog(Base):
 |---|---|---|
 | `CREATED` | dry_run 完成 INSERT batch 行 | `{filename, total_rows, on_conflict, sync_mode, summary}` |
 | `PREVIEW_DONE` | preview_token 写 Redis cache 后 | `{preview_token, expires_at}` |
-| `EXECUTE_START` | CAS CREATED → RUNNING 成功 | `{operator_id, started_at}` |
+| `EXECUTE_START` | CAS PREVIEW_DONE → RUNNING 成功 | `{operator_id, started_at}` |
 | `CHUNK_PROGRESS` | 每个 chunk 100 行 commit 后 | `{chunk_index, total_chunks, success_in_chunk, failed_in_chunk}` |
 | `EXECUTE_FINISH` | chunk 全部跑完 + 状态转 SUCCESS/PARTIAL_SUCCESS/FAILED | `{success_count, skipped_count, failed_count, finished_at, duration_ms}` |
 | `EXECUTE_FAILED` | 致命错误中断（OperationalError 等） | `{error_code, error_message, chunk_index_where_failed}` |
-| `EXPIRED` | cron 扫到 CREATED + 10min | `{expired_by: "cron", original_created_at}` |
+| `EXPIRED` | cron 扫到 PREVIEW_DONE + 10min | `{expired_by: "cron", original_created_at}` |
 | `CANCELLED` | 用户 POST /cancel | `{cancelled_by: operator_id, reason}` |
 
 **写入策略**：
@@ -1298,13 +1336,13 @@ GET /system/user/import/{batch_id}/logs
 返回：[{event, fromStatus, toStatus, detail, createdAt}, ...]
 ```
 
-**Phase 3 异步通道扩展**：CHUNK_PROGRESS 推送 WebSocket 时直接读 log 表 → 前端进度条 = log 表 CHUNK_PROGRESS 行的 `chunk_index / total_chunks`。
+**v1.5+ 演进输入（非当前承诺）**：如果量化门槛触发中间进度需求，`CHUNK_PROGRESS` 可作为选定协议的持久化数据源；是否采用 WebSocket、SSE 或轮询由专项 spec 决定，不能同时维护两个权威进度源。
 
-**反例**: (1) **不建 log 表 → batch.status='FAILED' 时管理员不知道是 chunk 5 失败还是 chunk 19 失败**（v2.2 P1 修订核心）。(2) detail 用 String → 不同 event 字段不同，序列化困难。(3) log 表用 sys_operation_log 复用 → batch_id 维度查询需要扫全表，性能差。(4) 不写 CHUNK_PROGRESS → Phase 3 异步进度条无法实现。(5) ondelete=RESTRICT → 删 batch 行时残留 log 垃圾，必须 CASCADE。
+**反例**: (1) **不建 log 表 → batch.status='FAILED' 时管理员不知道是 chunk 5 失败还是 chunk 19 失败**（v2.2 P1 修订核心）。(2) detail 用 String → 不同 event 字段不同，序列化困难。(3) log 表用 sys_operation_log 复用 → batch_id 维度查询需要扫全表，性能差。(4) 未来若确需展示中间阶段却不持久化 CHUNK_PROGRESS → 没有可靠的进度事实源。(5) ondelete=RESTRICT → 删 batch 行时残留 log 垃圾，必须 CASCADE。
 
 **回归**: alembic migration 建 `sys_user_import_batch_log` 表 + 3 个索引 + FK CASCADE；`_transition_batch_status` 同事务 INSERT log 行；CHUNK_PROGRESS 在每个 chunk commit 后 INSERT（同事务）；EXPIRED 由 cron 写；CANCELLED 由 cancel endpoint 写；API `GET /import/{batch_id}/logs` 查询；测试 `test_log_records_all_lifecycle_events`（dry_run → execute → chunk → finish 全流程跑一遍，验证 log 行覆盖所有 event）+ `test_log_cascade_delete_with_batch`（删 batch 自动删 log）。
 
-### 2.29 **导入取消能力（v2.2 P2：CREATED 直接 cancel / RUNNING 协作式 cancel）** — 用户 dry_run 后改主意不想导了 / 上传错文件 / 发现数据有问题 → 应该能主动取消批次，而不是等 10min TTL 过期。**v2.2 P2 加 `CANCELLED` 终态 + cancel API**。
+### 2.29 **导入取消能力（v2.2 P2：PREVIEW_DONE 直接 cancel / RUNNING 协作式 cancel）** — 用户 dry_run 后改主意不想导了 / 上传错文件 / 发现数据有问题 → 应该能主动取消批次，而不是等 10min TTL 过期。**v2.2 P2 加 `CANCELLED` 终态 + cancel API**。
 
 **两种取消场景**：
 
@@ -1326,8 +1364,9 @@ async def cancel_batch(
     db: AsyncSession,
     batch_id: str,
     operator: User,
-    reason: str | None = None,
+    reason: str,
 ) -> UserImportBatch:
+    reason = validate_reason(reason)  # trim 后 1-256；失败 AI_IMPORT_REASON_REQUIRED
     batch = await db.get(UserImportBatch, batch_id)
     if not batch:
         raise BusinessRuleException(error_code="AI_IMPORT_BATCH_NOT_FOUND")
@@ -1418,7 +1457,7 @@ Body 加：
 async def user_import_preview(
     ctx: AiToolContext,
     *,
-    file_path: str,
+    file_id: str,
     on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
     sync_mode: EmployeeNoSyncMode = EmployeeNoSyncMode.CREATE_ONLY,
     reason: str,   # v2.2 P1-3 必填
@@ -1457,7 +1496,7 @@ async def user_import_execute(
 
 **触发建任务的场景**（v2.2 P1-5）：
 1. **HTTP 同步导出**（行数 ≤ 5000）：建任务 → 行数 / filter_snapshot / status=SUCCESS / 耗时 / file_key（即使同步立即返回也要建任务）
-2. **HTTP 异步导出**（行数 > 5000，Phase 3）：建任务 → status=QUEUED → RUNNING → SUCCESS / FAILED
+2. **HTTP deferred 导出候选**（行数 > 5000，v1.5+ 且触发门槛满足后）：建任务 → status=QUEUED → RUNNING → SUCCESS / FAILED
 3. **AI `user.export`**（任何行数）：强制建任务（高风险审计），与 #2.30 reason 字段联动
 
 **与 import batch 表的对称设计**：
@@ -1465,17 +1504,17 @@ async def user_import_execute(
 | 维度 | `sys_user_import_batch` | `sys_user_export_task` |
 |---|---|---|
 | 用途 | 用户导入生命周期 | 用户导出生命周期 |
-| 触发 | HTTP / AI / Phase 3 异步 | HTTP / AI / Phase 3 异步 |
+| 触发 | HTTP / AI（v1.5+ 可评估 deferred） | HTTP / AI（v1.5+ 可评估 deferred） |
 | 状态机 | CREATED → PREVIEW_DONE → RUNNING → SUCCESS/... | CREATED → RUNNING → SUCCESS / FAILED / EXPIRED |
 | 文件 | failed_rows.xlsx（失败行） | export.xlsx（导出结果） |
 | 审计 | operator_id + reason | operator_id + reason + filter_snapshot |
 | Retention | 90 天 | 30 天（导出文件含敏感数据，更短） |
-| 业务日志 | sys_user_import_batch_log | sys_user_export_task_log（Phase 3 异步时启用，同步无需） |
+| 业务日志 | sys_user_import_batch_log | 同步无需独立 log；v1.5+ 是否增加由专项 spec 决定 |
 
 **为什么导出不需要 batch_log**：
 - 导出无 chunk 概念（一次 query + streaming），无中间进度
 - 同步导出只有 CREATED → SUCCESS 一跳，log 表过载
-- Phase 3 异步导出再加 log 表（参考 import 设计）
+- v1.5+ 若 deferred 导出确需多个中间阶段，再由专项 spec 决定是否增加 log 表
 
 **ExportTask ORM**：
 
@@ -1591,7 +1630,7 @@ async def export_users_to_excel(self, db, filter, current_user, reason: str):
         task.finished_at = datetime.now()
         raise
 
-# Phase 3 异步路径：build → 入队 → broadcast 推送下载链接（结构已就位）
+# v1.5+ 候选路径：是否入队、如何通知由专项 spec 决定；当前不实现
 ```
 
 **API 契约扩展**：
@@ -1601,14 +1640,14 @@ async def export_users_to_excel(self, db, filter, current_user, reason: str):
 POST /system/user/export
 Body: {
   "userName": "xxx",
-  "deptId": 1,
+  "deptId": "1",
   "status": "1",
   "reason": "全公司通讯录月度归档"   # 必填（v2.2 P1-5 + P1-3 #2.30）
 }
 
 # HTTP GET /system/user/export/{export_id}（v2.2 P1-5 新增）
 权限：system:user:list
-返回：导出任务详情（status / row_count / file_storage_key / filter_snapshot / reason / created_at / 可选下载 URL）
+返回：导出任务详情（status / row_count / file_size_bytes / filter_snapshot / reason / created_at / 可选下载 URL）；内部 `file_storage_key` 不进入 API DTO
 
 # HTTP GET /system/user/export/{export_id}/download（Task 33 新增，v2.3 §2.9.1 后续补齐）
 权限：system:user:export（与 POST /export 同级，能导出就能重下载）
@@ -1618,7 +1657,7 @@ Body: {
 
 # HTTP GET /system/user/export（v2.2 P1-5 新增）
 权限：system:user:list
-返回：导出任务列表分页（按 operator_id / status / created_at 过滤）
+返回：导出任务列表分页（默认强制当前认证 operator；只有显式 superadmin 可跨 operator；按 status / created_at 过滤）
 
 # AI tool（v2.2 P1-5）
 async def user_export(
@@ -1638,6 +1677,23 @@ async def user_export(
 **反例**: (1) **同步导出不建任务 → 「HR 凌晨导出 5000 行通讯录」无任何 DB 记录，事后无法追溯**（v2.2 P1-5 核心：所有导出一律建任务）。(2) filter_snapshot 只存 filter dict → 用户事后改部门结构，审计反查数据漂移（v2.2 P1-5：snapshot 含 accessible_dept_ids 解析结果 + filter_evaluated_at 时间戳）。(3) ExportTask 与 ImportBatch 表结构完全相同 → 字段语义不同（export 无 chunk / preview_token，import 无 filter_snapshot），强行复用一张表混淆职责。(4) 不加 reason 字段 → 与 #2.30 import 不对称，审计链路有缺口（v2.2 P1-5 + P1-3：export 也必填 reason）。(5) 同步路径跳过 task 创建 → 「同步即成功」的导出无审计（v2.2 P1-5：同步也要建，只是 status 瞬间 CREATED → SUCCESS）。(6) 文件永久存储 → 累积敏感数据导出文件，磁盘 + 合规风险（v2.2 P1-5：30 天 TTL，比 import 90 天更短，因含全量字段）。
 
 **回归**: `sys_user_export_task` 表（alembic migration）+ `ExportTaskStatus(Enum)` + `UserExportTask` ORM + `filter_snapshot` JSONB 字段（含 accessible_dept_ids 解析）；HTTP `POST /export` 加 `reason` 必填；HTTP `GET /export/{export_id}` + `GET /export` 列表查询；AI `user.export` 加 `reason` 必填 + 强制建 task；同步路径建 task → 瞬间 SUCCESS；30 天 TTL cron（与 `cleanup_expired_batches` 类似）；测试 `test_export_creates_task_with_filter_snapshot` + `test_export_filter_snapshot_freezes_accessible_dept_ids` + `test_export_reason_required` + `test_export_task_30_day_retention` + `test_export_failure_records_error` + `test_export_audit_chain_joinable_with_operation_log`。
+
+### 2.32 **完整 Phase 3 按证据推迟，当前版本冻结为同步安全与一致性闭环（v2.4）** — Phase 1/2 已覆盖管理后台的主要规模，现阶段缺少负载和 SLA 证据证明必须同时承担队列、Worker、跨进程恢复、多套进度通道与行级审核协议的复杂度。当前只允许修复或强化下列发布基线；本决策不重开 Task 0a-34，也不改变其完成状态。
+
+| 当前发布基线 | 必须保持的契约 |
+|---|---|
+| 权限与数据范围 | HTTP / AI 入口权限一致；service 层强制 operator ownership、Permission Boundary 与 data scope，前端隐藏按钮不作为授权依据 |
+| 文件输入安全 | MIME 白名单、10MB 硬上限、路径穿越防御、storage key 不透明；不得因“未来会异步”放宽输入限制 |
+| 同步容量边界 | 导入 ≤ 2000、导出 ≤ 5000；超限分别稳定返回 `AI_IMPORT_TOO_MANY_ROWS` / `AI_EXPORT_ASYNC_REQUIRED`，不生成伪 job |
+| 事务与幂等 | chunk transaction + 行级 savepoint、preview hash/operator 绑定、CAS 状态转换与 execute 重放语义继续作为单一实现 |
+| 审计与保留 | import batch/log、export task、必填 reason、filter snapshot、终态和文件 retention 可反查；HTTP 与 AI 各自进入既有审计轨道 |
+| 稳定错误 | 同一失败原因在 HTTP / AI 路径使用同一 errorCode；错误响应保持 `{code, msg, data}`，不得用 500 或自然语言替代已声明业务码 |
+
+**明确推迟**：ARQ/Worker 或其他任务队列、`dispatch_mode=deferred`、自动入队、断线恢复、WebSocket + SSE/轮询双实时通道、通用 Chat HITL 行级勾选均不在当前范围。需要逐行选择、审核意见、指派或长期待办时，优先建立业务审核对象与审核页面，Chat API 仅携带 `reviewRef`（后端字段 `review_ref`）；是否抽象通用能力由 `ai-tool-gateway v1.5+` 专项决定。
+
+**反例**: (1) 仅因为常量名为 `USER_EXPORT_ASYNC_THRESHOLD` 就直接接 ARQ → 审批、调度、重试和通知契约未冻结，形成半套基础设施。(2) 同时维护 WebSocket 和 SSE/轮询两个权威进度源 → 重连后状态漂移。(3) 把 2000 行预览塞进 Chat HITL 逐行勾选 → Gateway 被业务表格编辑与审核 SLA 污染。(4) 为“先跑起来”临时绕过权限、阈值或审计 → 把已完成的安全闭环回退。
+
+**回归**: 当前版本的回归门禁以本表六项为准；发现回归按 release blocker 修复，但不借机引入 deferred 基础设施。v1.5+ 的重启条件与选型约束统一由 [`ADR-0001`](../adr/0001-ai-safety-consistency-before-deferred-execution.md) 管理；满足触发条件后必须先写专项 spec，再修改本 spec 的同步拒绝契约。
 
 ---
 
@@ -1706,7 +1762,7 @@ class ImportDryRunResult(BaseModel):
 - 前端展示文案：`conflict_records_truncated=true` 时显示「⚠️ 仅展示前 200 条冲突，完整清单下载 conflicts.xlsx」
 
 **为什么 new/exists 也加 truncated 字段**（防御性）：
-- 未来 Phase 3 异步通道上线后 `USER_IMPORT_MAX_ROWS` 可能放宽到 50000，那时 `new_records` 会触发截断
+- 未来若 v1.5+ 新增独立 deferred job，业务审核页可能读取更大的 batch；`*_truncated` 字段可继续作为分页/文件化保护，但同步 `USER_IMPORT_MAX_ROWS=2000` 不因此自动放宽
 - 加字段零成本（默认 False），未来不用 schema migration
 
 > **dry_run 也做权限校验**（防用户在前端预检阶段就看到越界提示，避免点了"确认导入"才发现一堆权限错误）：
@@ -1762,6 +1818,10 @@ class UserExportFilter(BaseModel):
     dept_id: int | None = None
     status: str | None = None
     # ... 现有 list 端点的所有 filter 字段
+
+class UserExportRequest(UserExportFilter):
+    """HTTP 导出请求；filter 之外强制携带审计理由。"""
+    reason: str = Field(..., min_length=1, max_length=256)
 ```
 
 ### 3.6 `UserImportBatch`（**v2.2 P1-2 修订：唯一 aggregate root**，原 ImportPreviewSession 类已合并删除）
@@ -1793,9 +1853,18 @@ class UserImportBatch(Base):
         comment="失败行 Excel 路径 /file/import-error/{batch_id}.xlsx",
     )
     on_conflict: Mapped[str] = mapped_column(String(16))
-    status: Mapped[str] = mapped_column(
-        String(32), index=True,
-        comment="状态机详见 §2.26：CREATED/RUNNING/SUCCESS/PARTIAL_SUCCESS/FAILED/EXPIRED",
+    status: Mapped[ImportBatchStatus] = mapped_column(
+        SAEnum(
+            ImportBatchStatus,
+            name="import_batch_status",
+            values_callable=lambda x: [e.value for e in x],
+            native_enum=True,
+            create_constraint=True,
+        ),
+        nullable=False,
+        index=True,
+        default=ImportBatchStatus.CREATED,
+        comment="状态机详见 §2.26（含 PREVIEW_DONE / CANCELLED）",
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -1804,7 +1873,7 @@ class UserImportBatch(Base):
 
 **索引建议**：
 - `(operator_id, created_at)` — admin 查"我导过的批次"
-- `(status, created_at)` — 状态机清理（CREATED + 10min → EXPIRED；任意状态 + 90 天 → 删除）
+- `(status, created_at)` — 状态机清理（PREVIEW_DONE + 10min → EXPIRED；任意终态 + 90 天 → 删除）
 - `preview_token` UNIQUE — execute 时反查 batch 行
 - `created_at` — 90 天归档
 
@@ -1834,7 +1903,7 @@ OVERWRITE_ALLOWED = frozenset({
 
 ### 3.9 `FileStorage` Protocol（v2.2 P1-4：文件存储抽象，业务层不依赖 local_path）
 
-> **v2.2 P1-4 修订理由**：原 v2.1/v2.2 决策中 #2.19 / #2.22 / #2.22.1 / #2.27 散落 `file_storage.save()` / `file_storage.read()` / `file_storage.delete()` 调用，但**未明确接口契约**。Phase 1 用本地文件系统（`/tmp/import/` + `/file/import-error/`）够用，但部署到 K8s / Docker Swarm 时本地文件系统不共享（多副本间 preview 文件丢失）；Phase 3 切对象存储（S3 / OSS / MinIO）时改业务代码代价大。**v2.2 P1-4 提前定义 `FileStorage` Protocol，业务层依赖 Protocol，部署时切换实现即可**。
+> **v2.2 P1-4 修订理由**：原 v2.1/v2.2 决策中 #2.19 / #2.22 / #2.22.1 / #2.27 散落 `file_storage.save()` / `file_storage.read()` / `file_storage.delete()` 调用，但**未明确接口契约**。Phase 1 用本地文件系统（`/tmp/import/` + `/file/import-error/`）够用，但部署到 K8s / Docker Swarm 时本地文件系统不共享（多副本间 preview 文件丢失）；未来切对象存储（S3 / OSS / MinIO）时改业务代码代价大。**v2.2 P1-4 提前定义 `FileStorage` Protocol，业务层依赖 Protocol，部署时切换实现即可；存储后端切换是部署能力，不与 AI Phase 3 绑定**。
 
 **Protocol 定义**：
 
@@ -1849,7 +1918,7 @@ class FileStorage(Protocol):
 
     业务层只依赖 Protocol，不依赖具体实现。
     - Phase 1: LocalFileStorage（本地文件系统 /tmp/import/）
-    - Phase 3+: S3FileStorage / MinIOFileStorage / GridFSFileStorage
+    - 未来多副本部署: S3FileStorage / MinIOFileStorage / GridFSFileStorage
     """
 
     async def save(
@@ -1939,12 +2008,12 @@ class LocalFileStorage:
         return None   # 本地实现无 URL，业务层 fallback 到 /file/{storage_key} 端点
 ```
 
-**Phase 3 切换 S3 示例**（不修改业务代码）：
+**未来部署切换 S3 示例**（不修改业务代码，也不触发 deferred execution）：
 
 ```python
 # app/core/file_storage.py
 class S3FileStorage:
-    """S3 / MinIO / OSS 实现（Phase 3+）"""
+    """S3 / MinIO / OSS 实现（按部署需求启用）"""
     def __init__(self, bucket: str, client):
         self.bucket = bucket
         self.s3 = client
@@ -1999,9 +2068,9 @@ class ImportService:
         # 业务层不关心是 local 还是 s3，只保存 storage_key
 ```
 
-**反例**: (1) **散落 `local_path` / `f"/tmp/import/{batch_id}.xlsx"` 硬编码 → Phase 3 切 S3 时改 100+ 处调用**（v2.2 P1-4 提前抽象，业务层零改动）。(2) FileStorage 用 ABC 强约束 → Protocol（runtime_checkable）更灵活，mock 测试不需继承。(3) save 返回绝对路径 → 跨实现不兼容（local 是 /tmp/...，s3 是 s3://...）；返回相对 storage_key 实现无关。(4) 不暴露 public_url → Phase 3 S3 presigned URL 体验更好（直链下载不经服务端），但业务层不知道何时切；Protocol 加 public_url 方法返回 None 时业务层 fallback。(5) ttl_seconds 参数业务层到处算 → 由 FileStorage 实现内部记账（LocalFileStorage 用文件 mtime + cron 扫，S3 用 Expires 元数据），业务层只传意图。
+**反例**: (1) **散落 `local_path` / `f"/tmp/import/{batch_id}.xlsx"` 硬编码 → 多副本部署切 S3 时改 100+ 处调用**（v2.2 P1-4 提前抽象，业务层零改动）。(2) FileStorage 用 ABC 强约束 → Protocol（runtime_checkable）更灵活，mock 测试不需继承。(3) save 返回绝对路径 → 跨实现不兼容（local 是 /tmp/...，s3 是 s3://...）；返回相对 storage_key 实现无关。(4) 不暴露 public_url → S3 presigned URL 无法直链下载；Protocol 加 public_url 方法返回 None 时业务层 fallback。(5) ttl_seconds 参数业务层到处算 → 由 FileStorage 实现内部记账（LocalFileStorage 用文件 mtime + cron 扫，S3 用 Expires 元数据），业务层只传意图。
 
-**回归**: `app/core/file_storage.py` 模块（FileStorage Protocol + LocalFileStorage 默认实现）；`settings.FILE_STORAGE_BACKEND` 配置项（local / s3，默认 local）；`get_file_storage()` DI 工厂；ImportService / ExportService 通过 `__init__` 注入 FileStorage；业务层只调 `save / read / delete / exists / public_url`，**禁止 import LocalFileStorage / S3FileStorage 具体类**（lint 规则 `banned-imports`）；测试用 `MockFileStorage`（in-memory dict 实现）；Phase 3 切 S3 时只改 `get_file_storage` 工厂，业务代码零改动；测试 `test_file_storage_protocol_contract`（LocalFileStorage 通过 Protocol runtime check）+ `test_file_storage_path_traversal_blocked`（namespace 含 `../` 拒绝）+ `test_business_layer_independent_of_storage_impl`（mock LocalFileStorage / S3FileStorage 都能跑通 ImportService.dry_run）。
+**回归**: `app/core/file_storage.py` 模块（FileStorage Protocol + LocalFileStorage 默认实现）；`settings.FILE_STORAGE_BACKEND` 配置项（local / s3，默认 local）；`get_file_storage()` DI 工厂；ImportService / ExportService 通过 `__init__` 注入 FileStorage；业务层只调 `save / read / delete / exists / public_url`，**禁止 import LocalFileStorage / S3FileStorage 具体类**（lint 规则 `banned-imports`）；测试用 `MockFileStorage`（in-memory dict 实现）；切 S3 时只改 `get_file_storage` 工厂，业务代码零改动，且不自动启用 Worker 或 deferred execution；测试 `test_file_storage_protocol_contract`（LocalFileStorage 通过 Protocol runtime check）+ `test_file_storage_path_traversal_blocked`（namespace 含 `../` 拒绝）+ `test_business_layer_independent_of_storage_impl`（mock LocalFileStorage / S3FileStorage 都能跑通 ImportService.dry_run）。
 
 ## 4. `user_service` 扩展（4 方法签名）
 
@@ -2067,7 +2136,7 @@ class UserService:
     ) -> list[UserImportRecord]:
         """解析 Excel/CSV → 验证 → 返回 records（不落库）
         
-        - openpyxl 读 xlsx/xls；csv 用标准库
+        - openpyxl 仅读取 xlsx；csv 用标准库；旧式 xls 稳定拒绝
         - 字段校验：必填字段 / 邮箱格式 / 手机号格式（dept_input / role_input 不在这里校验存在性，留给 dry_run）
         - 失败行抛 ImportErrorCollection（含全部 FailedRow，不一次一个）
         """
@@ -2215,8 +2284,9 @@ Authorization: Bearer <jwt>
 Body:
 {
   "userName": "xxx",           # 可选 filter
-  "deptId": 1,                 # 可选 filter
-  "status": "1"                # 可选 filter
+  "deptId": "1",               # 可选 filter，Snowflake ID 字符串
+  "status": "1",               # 可选 filter
+  "reason": "全公司通讯录月度归档" # 必填，1-256 字符
 }
 
 权限：system:user:export
@@ -2224,7 +2294,7 @@ Body:
 
 **响应**：
 - 同步（行数 ≤ 5000）：`StreamingResponse` xlsx，`Content-Disposition: attachment; filename=users_20260801.xlsx`
-- 超阈值（> 5000）：HTTP 422 + `errorCode: AI_EXPORT_ASYNC_REQUIRED`，message 提示"行数过多，请等待异步通道开放"（Phase 3 实现后改为自动异步）
+- 超阈值（> 5000）：HTTP 422 + `errorCode: AI_EXPORT_ASYNC_REQUIRED`，message 稳定提示"行数超过同步上限，请缩小筛选范围"；v1.5+ 专项修改契约前不自动异步
 
 > 前端用 `fetch(POST)` + `Blob` + `URL.createObjectURL` + 隐藏 `<a>` 触发下载（不能用 `<a href>` 直接触发）。
 
@@ -2252,7 +2322,7 @@ Authorization: Bearer <jwt>
 
 **生成时间标注**：「部门字典」/「角色字典」sheet 顶部加一行「⏰ 生成时间：2026-08-01 14:30（数据可能已变化，请重新下载模板获取最新）」，提示用户旧模板可能过期。
 
-### 5.4 `GET /system/user/import/{batch_id}`（v2.2 P2：批次状态查询，为 Phase 3 异步预留）
+### 5.4 `GET /system/user/import/{batch_id}`（v2.2 P2：同步批次状态与审计查询）
 
 ```
 GET /system/user/import/{batch_id}
@@ -2292,7 +2362,7 @@ Authorization: Bearer <jwt>
 
 **用途**：
 - 前端导入历史页面（管理员查看自己 / 团队的导入批次）
-- Phase 3 异步通道上线后，前端轮询此接口拿 RUNNING 进度
+- v1.5+ 若选择查询式进度协议，可复用此接口；当前不承诺轮询，也不并行建设第二实时通道
 - 审计反查（batch_id 来自 sys_operation_log → 反查具体批次详情）
 
 **列表查询**（v2.2 P2 扩展）：
@@ -2347,7 +2417,7 @@ Body: {
 | 422 | **`AI_IMPORT_ILLEGAL_TRANSITION`** | **非法状态转换（v2.2 #2.26，例如 SUCCESS → RUNNING）** |
 | 422 | **`AI_IMPORT_EMPLOYEE_NO_EXISTS`** | **sync_mode=CREATE_ONLY 时 employee_no 已存在（v2.2 #2.24）** |
 | 422 | **`AI_IMPORT_BATCH_NOT_FOUND`** | batch_id 不存在（v2.2 P2 §5.4/5.6） |
-| 422 | **`AI_IMPORT_BATCH_NOT_CANCELLABLE`** | status 不是 CREATED/RUNNING，不能取消（v2.2 #2.29） |
+| 422 | **`AI_IMPORT_BATCH_NOT_CANCELLABLE`** | status 不是 PREVIEW_DONE/RUNNING，不能取消（v2.2 #2.29） |
 | 400 | `AI_IMPORT_USERNAME_DUPLICATE` | 并发导入同 user_name，UNIQUE 约束兜底（#2.25） |
 | 400 | `AI_IMPORT_EMPLOYEE_NO_DUPLICATE` | employee_no 重复（UNIQUE 约束，#2.24） |
 | 400 | `AI_IMPORT_EMPTY` | Excel 解析后 0 行 |
@@ -2498,14 +2568,14 @@ page: {
 ```ts
 errorCode: {
   AI_IMPORT_FILE_TOO_LARGE: '文件超过 10MB',
-  AI_IMPORT_INVALID_MIME: '不支持的文件格式（仅 xlsx / xls / csv）',
-  AI_IMPORT_TOO_MANY_ROWS: '行数超过 50000，请分批导入',
+  AI_IMPORT_INVALID_MIME: '不支持的文件格式（仅 xlsx / csv）',
+  AI_IMPORT_TOO_MANY_ROWS: '行数超过 2000，请拆分文件后重试',
   AI_IMPORT_USERNAME_INVALID: '用户名格式错误',
   AI_IMPORT_EMAIL_INVALID: '邮箱格式错误',
   AI_IMPORT_PHONE_INVALID: '手机号格式错误',
   AI_IMPORT_DEPT_NOT_FOUND: '部门不存在',
   AI_IMPORT_EMPTY: 'Excel 解析后无有效行',
-  AI_EXPORT_ASYNC_REQUIRED: '导出行数过多，请分批或等待异步通道开放',
+  AI_EXPORT_ASYNC_REQUIRED: '导出行数超过同步上限 5000，请缩小筛选范围',
 }
 ```
 
@@ -2525,37 +2595,39 @@ errorCode: {
 详见决策 #2.14。两个 tool 的契约：
 
 ```python
-# Tool 1: 只读，跑 dry_run + 生成 batch
+# Tool 1: low risk autonomous，跑 dry_run + 生成持久 preview artifact
 @ai_tool(AiToolMeta(
     name="user.import_preview",
     agent="user_mgmt",
     summary=(
         "Parse Excel + dry-run user import → returns {batch_id, preview_token, summary}. "
-        "Read-only, does NOT write users. "
+        "Does not write users, but creates a durable preview batch. "
         "**Workflow**: Call this first, show summary to user, then call user.import_execute after user confirms."
     ),
-    required_perms=("system:user:add",),
-    risk="low",                          # 只读
-    readonly=True,
+    required_perms=("system:user:import",),
+    risk="low",                          # 不写用户行
+    readonly=False,                       # 会写 batch / file / cache，不可自动重放
+    idempotent=False,                     # 无稳定幂等键；每次调用都会新建 preview batch/file
     dry_run_supported=False,             # 本身就是预检，不需要 dry_run 模式
     accepts_file=("text/csv", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
     produces_file=False,
     result_view="detail_card",           # 展示 batch_id + preview_token + summary
-    chip_target="/system/user",          # 跳转用户列表（readonly tool 标准 chip）
 ))
 async def user_import_preview(
     ctx: AiToolContext,
     *,
-    file_path: str,
+    file_id: str,
+    reason: str,
     on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
 ) -> ToolResult:
-    """file_path 来自 /file/upload。
+    """file_id 来自 /file/upload。
 
     流程：
-    1. file_path → file_bytes（Gateway 内部解析）
+    1. file_id → sys_file → file_bytes
     2. user_service.parse_import_excel(file_bytes) → records
     3. user_service.dry_run_import_users(records, current_user, file_bytes, filename)
-       → INSERT sys_user_import_batch (status=CREATED) + 写 Redis cache
+       → INSERT sys_user_import_batch (CREATED) → PREVIEW_DONE
+       → 持久化 preview file + 写 Redis cache
     4. ToolResult.success(
          data={batch_id, preview_token, summary:{new,exists,conflict,out_of_scope}},
          ui=UIResult(view_type="detail_card", view_data={...}, audit=..., label_key="user.importPreview"),
@@ -2571,10 +2643,10 @@ async def user_import_preview(
         "Pass preview_token from user.import_preview. "
         "**Idempotent**: re-executing a SUCCESS batch returns original result."
     ),
-    required_perms=("system:user:add",),
+    required_perms=("system:user:import",),
     risk="high",                         # 写入，批量创建用户
     hitl_always=True,                    # 强制 HITL（批量写入永远人在回路）
-    dry_run_supported=False,             # execute 不是 dry_run
+    dry_run_supported=True,              # HITL 前只读 batch summary，不重跑 preview
     accepts_file=(),                     # 不接文件，凭 preview_token
     produces_file=True,                  # 输出 failed_rows.xlsx
     result_view="rows_affected",
@@ -2583,11 +2655,13 @@ async def user_import_execute(
     ctx: AiToolContext,
     *,
     preview_token: str,
+    reason: str,
     on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
+    sync_mode: Literal["CREATE_ONLY", "UPDATE_PROFILE", "FULL_SYNC"] = "CREATE_ONLY",
 ) -> ToolResult:
     """凭 preview_token 反查 batch（v2.2 #2.19 Redis cache → DB SoT 回退）→
     三重校验（file_sha256 + records_hash + operator_id）→
-    CAS CREATED→RUNNING（v2.2 #2.27 幂等）→ chunk + savepoint 落库。
+    CAS PREVIEW_DONE→RUNNING（v2.2 #2.27 / P1-2 幂等）→ chunk + savepoint 落库。
 
     幂等返回：
     - SUCCESS/PARTIAL_SUCCESS 重放 → 200 + idempotent_replay=true + 原结果
@@ -2602,7 +2676,7 @@ async def user_import_execute(
 
 ```
 用户批量导入 Excel 流程：
-1. 调 user.import_preview(file_path) 拿 batch_id + preview_token + summary
+1. 调 user.import_preview(file_id, reason) 拿 batch_id + preview_token + summary
 2. 把 summary（新增 X / 已存在 Y / 冲突 Z）展示给用户
 3. 用户确认后调 user.import_execute(preview_token)
 禁止跳过步骤 1 直接调 execute（会因 preview_token 不存在而失败）。
@@ -2619,22 +2693,26 @@ async def user_import_execute(
         "For 'export current filter' / 'download all users'."
     ),
     required_perms=("system:user:export",),
-    risk="low",                          # 只读，不写库
-    readonly=True,
+    risk="high",                         # 生成敏感导出文件 + 持久 ExportTask
+    readonly=False,
+    idempotent=False,                     # 每次调用都会新建 ExportTask/file
+    dry_run_supported=True,
     produces_file=True,
     result_view="detail_card",           # 展示下载链接 + 行数 + 字段
 ))
 async def user_export(
     ctx: AiToolContext,
     *,
+    reason: str,
     user_name: str | None = None,
     dept_id: int | None = None,
     status: str | None = None,
 ) -> ToolResult:
     """调 user_service.export_users_to_excel → 写入 /file/ 目录 → 返回 download_url。
     
-    超阈值（> 5000）抛 BusinessRuleException("AI_EXPORT_ASYNC_REQUIRED")，
-    LLM 应告知用户「行数过多，请到管理后台分批导出或等待异步通道」。
+    reason 为必填审计理由；超阈值（> 5000）抛
+    BusinessRuleException("AI_EXPORT_ASYNC_REQUIRED")，
+    LLM 应告知用户「行数超过同步上限，请缩小筛选范围后重试」。
     """
 ```
 
@@ -2651,7 +2729,7 @@ async def user_export(
 | `test_parse_csv_basic` | CSV 同样解析 |
 | `test_parse_invalid_mime` | 不在白名单 → AI_IMPORT_INVALID_MIME |
 | `test_parse_too_large` | > 10MB → AI_IMPORT_FILE_TOO_LARGE |
-| `test_parse_too_many_rows` | > 50000 → AI_IMPORT_TOO_MANY_ROWS |
+| `test_parse_too_many_rows` | > 2000 → AI_IMPORT_TOO_MANY_ROWS |
 | `test_parse_missing_required` | 缺 user_name → FailedRow 收集 |
 | `test_parse_user_email_format` | 邮箱格式错 → AI_IMPORT_EMAIL_INVALID |
 
@@ -2747,7 +2825,7 @@ async def user_export(
 #### Batch Context（#2.22）
 | 测试 | 验证点 |
 |---|---|
-| `test_batch_record_created_on_dry_run` | dry_run 阶段 sys_user_import_batch 表 INSERT status=CREATED（v2.1 P0-2） |
+| `test_batch_record_reaches_preview_done_after_dry_run` | dry_run 内先 INSERT CREATED 并记录日志；成功返回前 CAS 为 PREVIEW_DONE |
 | `test_batch_status_partial_success` | 部分成功 → UPDATE status=PARTIAL_SUCCESS + counts 正确 |
 | `test_batch_failed_rows_file_persisted` | 失败行写 /file/import-error/{batch_id}.xlsx，路径存 batch.failed_rows_file |
 | `test_batch_queryable_by_operator` | admin 查"我导过的批次" 按 operator_id 索引命中 |
@@ -2755,8 +2833,8 @@ async def user_export(
 #### Lifecycle State Machine（§2.26，v2.1 P2）
 | 测试 | 验证点 |
 |---|---|
-| `test_state_created_to_running` | CREATED → execute → RUNNING（preview_token 三重校验通过） |
-| `test_state_created_to_expired` | CREATED + 10min → EXPIRED（cron 扫描更新） |
+| `test_state_preview_done_to_running` | PREVIEW_DONE → execute → RUNNING（preview_token 三重校验通过） |
+| `test_state_preview_done_to_expired` | PREVIEW_DONE + 10min → EXPIRED（cron 扫描更新） |
 | `test_state_running_to_success` | RUNNING → SUCCESS（success_count = total_rows） |
 | `test_state_running_to_partial_on_fatal_error` | RUNNING → PARTIAL_SUCCESS（致命错误中断，已 commit 的 chunk 保留） |
 | `test_state_transition_cas_prevents_race` | 并发 UPDATE status 用 CAS（防双 worker 同时改） |
@@ -2772,7 +2850,7 @@ async def user_export(
 | 测试 | 验证点 |
 |---|---|
 | `test_cleanup_expired_batches_deletes_db_and_file` | 90 天前 batch 删 DB 行 + 同时删 failed_rows_file |
-| `test_cleanup_expired_previews_marks_expired` | CREATED + 10min 的 batch → EXPIRED + 删孤儿 preview 文件 |
+| `test_cleanup_expired_previews_marks_expired` | PREVIEW_DONE + 10min 的 batch → EXPIRED + 删孤儿 preview 文件 |
 | `test_cleanup_preserves_recent_records` | 89 天前的 batch 不被清理（边界条件） |
 
 #### employee_no Normalization（#2.24，v2.1 P1-3）
@@ -2805,7 +2883,7 @@ async def user_export(
 | `test_state_enum_writes_and_reads_roundtrip` | ORM `ImportBatchStatus.SUCCESS` 写入 → 读回仍是 Enum 成员 |
 | `test_state_db_check_rejects_invalid_value` | 直接 SQL 写 `status="RUNING"`（typo）→ DB CHECK 拒绝 |
 | `test_state_illegal_transition_rejected` | SUCCESS → RUNNING 转换 → `AI_IMPORT_ILLEGAL_TRANSITION` |
-| `test_state_cas_prevents_race` | 并发 `_transition_batch_status(CREATED → RUNNING)` → 仅 1 个成功（CAS 互斥） |
+| `test_state_cas_prevents_race` | 并发 `_transition_batch_status(PREVIEW_DONE → RUNNING)` → 仅 1 个成功（CAS 互斥） |
 
 #### Redis Cache Fallback（#2.19 v2.2 P0）
 | 测试 | 验证点 |
@@ -2833,10 +2911,11 @@ async def user_export(
 #### Import Cancel（#2.29，v2.2 P2）
 | 测试 | 验证点 |
 |---|---|
-| `test_cancel_created_batch_cancels` | CREATED 状态 → POST /cancel → CANCELLED + 清理 preview 文件 |
+| `test_cancel_preview_done_batch_cancels` | PREVIEW_DONE 状态 → POST /cancel（reason 必填）→ CANCELLED + 清理 preview 文件 |
 | `test_cancel_running_batch_stops_after_current_chunk` | RUNNING 状态 → POST /cancel → 当前 chunk 完成，剩余 chunk 不跑 → PARTIAL_SUCCESS + log 标记 cancelled=true |
-| `test_cancel_terminal_batch_rejected` | SUCCESS/PARTIAL_SUCCESS/FAILED/EXPIRED/CANCELLED 终态 → POST /cancel → `AI_IMPORT_BATCH_NOT_CANCELLABLE` |
+| `test_cancel_non_cancellable_batch_rejected` | CREATED + SUCCESS/PARTIAL_SUCCESS/FAILED/EXPIRED/CANCELLED → POST /cancel → `AI_IMPORT_BATCH_NOT_CANCELLABLE` |
 | `test_cancel_by_non_operator_forbidden` | 非 operator 非超管 → 403 |
+| `test_cancel_reason_required_and_trimmed` | 空/全空白/超过 256 字符拒绝；合法 reason trim 后写入 CANCELLED log |
 
 #### API Response 精简（#3.3 v2.2 P1）
 | 测试 | 验证点 |
@@ -2857,7 +2936,7 @@ async def user_export(
 | `test_ai_import_preview_returns_batch_and_token` | `user.import_preview` 返回 `batch_id + preview_token + summary`，不写用户 |
 | `test_ai_import_execute_requires_token_from_preview` | 无 preview_token → execute 拒绝 |
 | `test_ai_cannot_skip_preview` | LLM 直接调 execute（无 preview）→ 失败（防 AI 跳过 HITL） |
-| `test_ai_import_preview_is_readonly` | preview 后 DB sys_user 行数不变 |
+| `test_ai_import_preview_writes_only_preview_artifacts` | preview 后 `sys_user` 行数不变，但 batch / file 已持久化且 meta `readonly=False` |
 
 #### Records Truncation（#3.2 v2.2 P1）
 | 测试 | 验证点 |
@@ -2936,7 +3015,7 @@ async def user_export(
 |---|---|---|
 | 现有 `user_service.batch_delete_users` | ✅ | 半成功 + 审计 + data_scope 的实现模式直接复用 |
 | 现有 `user.batch_delete` AI tool | ✅ | HITL + dry_run + result_view 模式参考 |
-| SR-24 `file.parse` | ✅ | AI tool 接 file_path 而非 multipart 的设计 |
+| SR-24 文件上传模式 | ✅ | AI tool 接 `file_id`、后端从 `sys_file` 加载 bytes，而非在 Gateway 接 multipart |
 | spec §2.4 sensitive_input 二分法 | ✅ | password 不进签名策略 |
 | spec §6.4 data_scope | ✅ | ensure_targets_in_scope 校验 dept_id |
 | openpyxl 文档 | ✅ | xlsx 读写标准库 |
@@ -2961,7 +3040,7 @@ async def user_export(
 #### 数据模型 + Helper（基础）
 - [x] Task 1 ✅ 已完成（2026-08-03）：14 个 Pydantic schema 落 `app/modules/system/user/schemas.py`（行号映射：`_CamelBase` 27 / `ReasonSchema` 33 / `UserImportRecord` 62 / `FailedRow` 87 / `ImportDryRunResult` 100 / `ImportResult` 140 / `UserExportFilter` 168 / `UserExportRequest` 179 / `UserExportTaskQuery` 203 / `UserImportBatchQuery` 220 / `UserImportBatchResponse` 247 / `UserImportBatchLogItem` 309 / `UserImportBatchCancelResponse` 336 / `UserExportTaskResponse` 357）。决策 1.1-1.6：
   - 1.1 **`_CamelBase(BaseModel)` 抽统一 base** — `model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True, from_attributes=True)` + 禁 `extra`。**反例**: 每个 class 重复写 `model_config` → 改一处忘改另一处，camelCase 漂移。**回归**: `schemas.py:27` `_CamelBase`；所有业务 schema 继承 `_CamelBase`。
-  - 1.2 **v2.2 P1-2: `ImportPreviewSession` 合并删除，统一用 `UserImportBatch`** — 旧 spec v2.0 设计独立的 preview_session 表（仅存 preview_token + Redis mirror），v2.2 P1-2 评估后认为「session 与 batch 是 1:1 关系 + 同生命周期 + 同审计需求」，合并到 `sys_user_import_batch`（status 流含 PREVIEW_DONE 中间态）。**反例**: 独立表 → JOIN 多一层 + Redis 与 DB 双写一致性窗口 + 取消时两表都要 UPDATE。**回归**: `ImportPreviewSession` 类不存在；`UserImportBatch` 包含 preview_token / records_hash / summary_* 字段；Task 0b 状态机 `CREATED → PREVIEW_DONE → RUNNING → SUCCESS/PARTIAL_SUCCESS/FAILED/CANCELLED` 5 终态。
+  - 1.2 **v2.2 P1-2: `ImportPreviewSession` 合并删除，统一用 `UserImportBatch`** — 旧 spec v2.0 设计独立的 preview_session 表（仅存 preview_token + Redis mirror），v2.2 P1-2 评估后认为「session 与 batch 是 1:1 关系 + 同生命周期 + 同审计需求」，合并到 `sys_user_import_batch`（status 流含 PREVIEW_DONE 中间态）。**反例**: 独立表 → JOIN 多一层 + Redis 与 DB 双写一致性窗口 + 取消时两表都要 UPDATE。**回归**: `ImportPreviewSession` 类不存在；`UserImportBatch` 包含 preview_token / records_hash / summary_* 字段；Task 0b 状态机 `CREATED → PREVIEW_DONE → RUNNING → SUCCESS/PARTIAL_SUCCESS/FAILED/EXPIRED/CANCELLED`，共 5 个终态。
   - 1.3 **v2.2 P1 字段命名 `*_truncated` + `*_records_file`** — `ImportDryRunResult` 含 `{new, exists, conflict, out_of_scope}_count` + `{new, exists, conflict, out_of_scope}_truncated: bool` + `{conflict, out_of_scope}_records_file: str | None`，前端按 `*_truncated=true` 显示「仅展示前 200 条，完整清单下载」+ 下载按钮指向 `*_records_file` URL。**反例**: 只返 `*_count` 数字 → 前端不知道是否截断，无法决定是否显示下载按钮。**回归**: `schemas.py:100` `ImportDryRunResult`；Task 9 service 层截断逻辑 + Task 17 前端 4 卡片 + 下载按钮。
   - 1.4 **`ImportResult.idempotent_replay: bool`** — v2.2 P0 #2.27 CAS 幂等保护：preview_token 三重校验通过后，再校验 batch.status ∈ {PREVIEW_DONE}，CAS UPDATE `WHERE status='PREVIEW_DONE'` 失败 → 不抛错，返回 `idempotent_replay=True` + 首次执行的统计结果。**反例**: CAS 失败抛错 → 用户 retry 拿不到首次结果，重复点确认按钮永远失败。**回归**: `schemas.py:140` `ImportResult` 含 `idempotent_replay`；Task 10 service 层 CAS + Task 17 前端 idempotentReplay=true 时蓝色 toast「检测到重复提交，已返回首次执行结果」。
   - 1.5 **`ReasonSchema` mixin 模式** — Task 0e 落地 `ReasonSchema(BaseModel)` 含 `reason: str = Field(min_length=1, max_length=256)` + `field_validator` strip 后非空校验。Task 1 的 `UserImportDryRun` / `UserImportExecute` / `UserExportRequest` 通过「继承 ReasonSchema」复用，不重复定义 `reason` 字段。**反例**: 每个请求 schema 重复写 `reason` + validator → strip 规则不一致（A 模块 strip 前 B 模块不 strip）→ 数据脏。**回归**: `schemas.py:33` `ReasonSchema`；`UserExportRequest(UserExportFilter, ReasonSchema)` 多继承；Task 12 / 13 HTTP layer 直接复用。
@@ -3023,8 +3102,8 @@ async def user_export(
   - **决策 11.6**: data_scope 复用 `app.utils.data_scope.get_user_data_scope_filters`（User 模型专用，多对多部门关系）。**理由**: spec §2.31 line 1545「data_scope 自动应用」；User 通过 `user_depts` 多对多关联 Dept，与一般业务模型的 `dept_id` 直接字段不同，需要子查询匹配；现有工具函数已处理 DATA_SCOPE_ALL/DEPT/DEPT_AND_SUB/CUSTOM/SELF 五种场景 + 超管豁免。**反例**: 自己实现 data_scope → 与 list 接口逻辑分叉，HR 权限边界不一致。**回归**: HR (DATA_SCOPE_DEPT) 只能导他可见部门用户；超管无过滤。
   - **决策 11.7**: dept_id 列输出 user 的第一个 dept_id（多部门场景取首个）。**理由**: User 与 Dept 多对多，一列装不下多个 dept_id；导出主要用途是审计 / 通讯录，主部门即可；多部门反查场景按 user_id 单独 JOIN。**反例**: dept_id 列存逗号分隔多值 → Excel 排序/筛选困难，Excel DataValidation 不支持。**回归**: `dept_id_str = str(user.depts[0].dept_id) if user.depts else ""`；多部门用户主部门即 `user.depts[0]`。
   - **决策 11.8**: 失败也建 task：`except Exception` 捕获后 UPDATE task → FAILED + error_code + error_message[:1024]，再 raise。**理由**: spec §2.31 line 1567-1572「失败也写 task」；超阈值（AI_EXPORT_ASYNC_REQUIRED）/ DB 错误等场景都需要事后反查（用户问「我刚才的导出为什么失败了」时查 task 表）。**反例**: 失败不写 task → 用户事后查不到失败原因，运维也无法定位。**回归**: `test_export_failure_records_async_required_in_task` 验证超阈值场景下 task.status=FAILED + error_code=AI_EXPORT_ASYNC_REQUIRED。
-  - **决策 11.9**: 不写 ExportTaskLog 表（与 import batch_log 不对称）。**理由**: spec §2.31 line 1456-1458「导出无 chunk 概念（一次 query + streaming），无中间进度；同步路径只有 CREATED → SUCCESS 一跳，log 表过载」；Phase 3 异步导出再加 log 表。**反例**: 同步路径也建 log 表 → CREATED/SUCCESS 两行 log 几乎无信息量。**回归**: UserExportTask 单表足够覆盖同步路径全生命周期；Phase 3 异步任务再决定是否引入 export_task_log。
-  - **决策 11.10**: 30 天 TTL 通过 FileStorage.save 的 `ttl_seconds=30*86400` 参数（LocalFileStorage 实现 TTL 标记，Phase 3 cron 清理）。**理由**: spec §2.31 line 1452「Retention 30 天（导出文件含敏感数据，更短）」vs import 90 天；FileStorage Protocol 抽象让 service 层不感知存储介质（local / S3 / GridFS），统一通过 `ttl_seconds` 表达保留期。**反例**: service 层自己管 TTL → LocalFileStorage vs S3FileStorage 实现差异泄漏到业务层。**回归**: MockFileStorage 的 ttl_seconds 参数即使被忽略也接受；`cleanup_expired_export_tasks` cron（Task 22）扫 sys_user_export_task 表 + 调 file_storage.delete。
+  - **决策 11.9**: 不写 ExportTaskLog 表（与 import batch_log 不对称）。**理由**: spec §2.31 line 1456-1458「导出无 chunk 概念（一次 query + streaming），无中间进度；同步路径只有 CREATED → SUCCESS 一跳，log 表过载」；v2.4 进一步明确，只有 deferred 专项确需多个中间阶段时才评估 log 表。**反例**: 同步路径也建 log 表 → CREATED/SUCCESS 两行 log 几乎无信息量。**回归**: UserExportTask 单表足够覆盖同步路径全生命周期；v1.5+ 专项再决定是否引入 export_task_log。
+  - **决策 11.10**: 30 天 TTL 通过 FileStorage.save 的 `ttl_seconds=30*86400` 参数（LocalFileStorage 实现 TTL 标记，Task 22 cron 清理）。**理由**: spec §2.31 line 1452「Retention 30 天（导出文件含敏感数据，更短）」vs import 90 天；FileStorage Protocol 抽象让 service 层不感知存储介质（local / S3 / GridFS），统一通过 `ttl_seconds` 表达保留期。**反例**: service 层自己管 TTL → LocalFileStorage vs S3FileStorage 实现差异泄漏到业务层。**回归**: MockFileStorage 的 ttl_seconds 参数即使被忽略也接受；`cleanup_expired_export_tasks` cron（Task 22）扫 sys_user_export_task 表 + 调 file_storage.delete。
   - **决策 11.11**: 表头用中文（账号/昵称/邮箱/...），导入模板表头用英文（user_name/nickname/...）。**理由**: 导出文件主要给人读（管理员审阅 / 通讯录分发），中文表头友好；导入模板主要给 Excel DataValidation + parser 用（按字段名匹配），英文表头稳定。**反例**: 导出也用英文表头 → 管理员看不懂「user_gender=1」是什么；导入用中文表头 → parser 字段映射易碎（中文表头被改一个字就失败）。**回归**: `_EXPORT_COLUMN_ORDER` 第二项是中文表头；`import_parser.EXCEL_HEADERS` 是英文字段名。
 
 #### HTTP API
@@ -3157,7 +3236,7 @@ async def user_export(
   - 19.1 **composable 抽 `buildExportPayload` + `summarizeFilter` 纯函数** — `use-export-flow.ts` 导出 2 个纯函数（无 ref），单测直接 import 跑，不挂 vue runtime。**理由**: filter → payload 映射逻辑可单测，避免 mount 组件 + 模拟 watch/setFilter；与 `use-import-flow.ts` 模式一致（`validateFile` / `notifyError` 内部函数 → 纯函数 helper）。**反例**: 把 buildExportPayload 写在组件 setup 内 → 必须挂组件才能测；或写在 composable 内不导出 → 单测无法 import。**回归**: `use-export-flow.spec.ts::buildExportPayload` + `summarizeFilter` 4 用例（null filter / 完整 filter / 字段排除 / 空摘要）。
   - 19.2 **Blob 下载文件名 `users_YYYYMMDD.xlsx`** — 后端 `Content-Disposition: attachment; filename=users_20260801.xlsx`（spec §5.2 line 2200），前端不解析 Content-Disposition（Blob URL 无法读 header），自行按本地时区拼 `users_${ymd}.xlsx`。**理由**: 与后端命名一致（年月日 8 位），前端 timezone = server timezone（CLAUDE.md pitfall 12 已锁定 naive datetime 用 server local tz）。**反例**: 解析 Content-Disposition → Blob response 不带原始 header（fetch wrapper 已剥）；用 ISO `users_2026-08-04.xlsx` → 与后端 `users_20260804.xlsx` 不一致。**回归**: `use-export-flow.ts::buildFilename` 内 `new Date()` 拼 `getFullYear + 2-digit month + 2-digit date`；`spec.ts::confirmExport triggers API + Blob download on success` 断言 `/^users_\d{8}\.xlsx$/`。
   - 19.3 **`responseType: 'blob' as any` 绕过 axios typing** — fetchExportUsers 用 `responseType: 'blob' as any`（参考 `fetchDownloadImportTemplate` / `fetchExportConfig` 既有模式）。**理由**: axios type 不接受 'blob' 字面量；用 `as any` 是项目惯例，运行时正确。**反例**: 用 `responseType: 'arraybuffer'` → 后端返回 xlsx binary 正确但前端无 Blob MIME → 文件下载扩展名可能错；或 fork @sa/axios 包加 typing → 范围扩散到 monorepo package。**回归**: `service/api/system.ts:fetchExportUsers` `responseType: 'blob' as any`。
-  - 19.4 **AI_EXPORT_ASYNC_REQUIRED errorCode 短路 + modal 保持打开** — 后端返回 422 + `errorCode: AI_EXPORT_ASYNC_REQUIRED` 时，`useExportFlow.confirmExport` 检测到 → `notifyError('ASYNC_REQUIRED')` → return false；modal 不关闭（用户可改 reason 重试或关闭）。**理由**: spec §5.2 line 2201 要求 toast 提示「请分批或等待异步通道开放」；关闭 modal 强迫用户重新点导出 → UX 退化。**反例**: 任意 error 都关闭 modal → 用户看到 toast 但已经回到 list，重试点开 modal 又要输 reason。**回归**: `use-export-flow.ts::confirmExport` `if (errCode === 'AI_EXPORT_ASYNC_REQUIRED') notifyError('ASYNC_REQUIRED')`，return false → modal 保持打开（`user-export-modal.vue::handleConfirmExport` 不调 close）。
+  - 19.4 **AI_EXPORT_ASYNC_REQUIRED errorCode 短路 + modal 保持打开** — 后端返回 422 + `errorCode: AI_EXPORT_ASYNC_REQUIRED` 时，`useExportFlow.confirmExport` 检测到 → `notifyError('ASYNC_REQUIRED')` → return false；modal 不关闭（用户可缩小筛选范围后重试或关闭）。**理由**: v2.4 的稳定提示是「行数超过同步上限，请缩小筛选范围」；关闭 modal 强迫用户重新点导出 → UX 退化。**反例**: 任意 error 都关闭 modal → 用户看到 toast 但已经回到 list，重试点开 modal 又要输 reason。**回归**: `use-export-flow.ts::confirmExport` `if (errCode === 'AI_EXPORT_ASYNC_REQUIRED') notifyError('ASYNC_REQUIRED')`，return false → modal 保持打开（`user-export-modal.vue::handleConfirmExport` 不调 close）。
 - [x] Task 19a ✅ 已完成（2026-08-04）**[v2.2 P2]**: 前端「导入历史」抽屉（`user-import-history.vue`：批次列表 + status filter + 详情双 tab（summary + logs）+ cancel 弹窗 + 状态色映射）+ 决策回写。决策 19a.1-19a.5：
   - 19a.1 **NDrawer 而非独立 route** — 决策 18.4 已记录，本 task 落实：`<NDrawer v-model:show="visible" :width="920">` + `<NDrawerContent :title closable>`，列表 + filter + 详情都在抽屉内。**反例**: 独立 route → 离开 list 上下文，UX 退化。**回归**: `index.vue` `<UserImportHistory ref="userImportHistoryRef" />`，按钮 `@click="openImportHistory"` 调 `userImportHistoryRef.value?.open()`。
   - 19a.2 **状态色 tagType 映射** — `tagType(status)` 返回 NaiveUI.ThemeColor：SUCCESS→success / PARTIAL_SUCCESS→warning / FAILED/EXPIRED/CANCELLED→error / RUNNING/PREVIEW_DONE→info / 默认→default。**理由**: 状态语义对齐 NaiveUI color convention（success/warning/error 是用户期望的语义色）。**反例**: 全用 default tag → 状态色无差异，用户需逐行看 status 字段才能区分。**回归**: 列表 status 列 + 详情 status 描述都走 `tagType`。
@@ -3185,7 +3264,7 @@ async def user_export(
   - 22.4 **service 层不 commit，task wrapper 持 session + commit** — 3 个 cleanup 函数签名 ``async def cleanup_xxx(db: AsyncSession) -> int``，由 ``app/tasks/user_cleanup_tasks.py`` 的 ``@register_task`` wrapper ``async with AsyncSessionLocal() as db: ... await db.commit()``。对齐 CLAUDE.md「Service 永不 commit」铁律 + 与 ``clean_operation_logs`` / ``clean_login_logs`` 既有 task 模式一致。**反例**: service 内部 commit → 测试必须用 ``MockAsyncSession`` 截 commit，破坏 outer-transaction rollback 测试模式。**回归**: ``test_user_cleanup_crons.py`` 全部 22 测试用 ``db_session`` fixture（outer-transaction rollback），service 函数 flush 后调用方可立即查询。
   - 22.5 **flush 后调用方可查询（DB ↔ ORM 一致性）** — service 删 batch 后 ``await db.flush()`` 触发 DELETE SQL + CASCADE，调用方 ``db.get(UserImportBatch, pk)`` 立即返回 None。**反例**: 不 flush → ORM identity map 仍持已删对象，``db.get()`` 返回 stale 对象（不查 DB），测试 ``assert ... is None`` 失败。**回归**: ``test_deletes_old_terminal_batch_with_files`` + ``test_cascades_batch_log_on_delete``（FK ondelete=CASCADE 在 flush 后由 DB 触发，不需 ORM 显式删 log）。
   - 22.6 **FileStorage.delete 缺失文件不抛错（防 dangling 阻塞 cleanup）** — failed_rows_file / file_storage_key 指向的文件可能已被外部删（cancel 流程 / 手工清理），用 ``try/except FileNotFoundError: pass`` 兜底；LocalFileStorage.delete 内部也 ``if not exists: return False``。**反例**: 抛 FileNotFoundError 中断 cleanup → 一个 dangling 文件阻塞整批 90 天清理。**回归**: ``test_missing_file_does_not_break_cleanup`` 两个测试（batch + export_task）断言不抛错 + DB 行照删。
-  - 22.7 **ExportTask 无状态机 CAS 需求，直接删** — ``cleanup_expired_export_tasks`` 不像 batch 有 RUNNING 等活跃状态（异步导出 Phase 3 才有），30 天前一律删（CREATED 30 天前说明异步挂了 / RUNNING 30 天前是 zombie / SUCCESS / FAILED 是终态正常清理）。**反例**: 加 CAS → 增加复杂度但无实际防并发收益（30 天窗口不可能并发）。**回归**: ``test_deletes_old_export_task_with_file`` + ``test_deletes_task_without_file`` 覆盖有 / 无文件两条路径。
+  - 22.7 **ExportTask 无状态机 CAS 需求，直接删** — ``cleanup_expired_export_tasks`` 的当前同步模型不需要 deferred Worker 的 lease/CAS；30 天前一律删（CREATED/RUNNING 30 天前均视为 zombie，SUCCESS/FAILED 是终态正常清理）。**反例**: 当前路径提前加 CAS → 增加复杂度但无实际防并发收益（30 天窗口不可能并发）。**回归**: ``test_deletes_old_export_task_with_file`` + ``test_deletes_task_without_file`` 覆盖有 / 无文件两条路径；v1.5+ 若引入 Worker，需在专项 spec 重新定义 lease 与清理竞态。
   - 22.8 **task wrapper 注册到 ``app/tasks/__init__.py``** — 在 ``app/tasks/user_cleanup_tasks.py`` 定义 3 个 ``@register_task`` 入口（``clean_expired_import_batches`` / ``clean_expired_import_previews`` / ``clean_expired_export_tasks``），``app/tasks/__init__.py`` import 触发装饰器注册。前端 admin UI 通过 ``sys_job`` 表配置 cron schedule（每日 02:00 / 每小时 / 每日 02:30）。**反例**: 注册在 ``app/main.py`` lifespan → 启动顺序耦合 / 单测启动 app 时也会注册（污染）。**回归**: ``app/tasks/__init__.py`` 的 ``__all__`` 加 ``user_cleanup_tasks`` + ``list_registered_tasks()`` 能枚举 3 个 key。
   - **历史 stub 清理** — 原 ``import_state.py`` 的 3 个 cleanup_expired_* stub（``*args, **kwargs`` 占位）保留为 deprecated wrappers 返回 None，防外部 import 漂移；实际实现搬到 service 层。**回归**: ``app/modules/system/user/import_state.py:115-145`` 3 个 deprecated 函数 + noqa: ARG001。
 - [x] Task 22a ✅ 已完成（2026-08-04）：v2.2 P0/P1/P2 全部 14 条决策审计完成（spec §8.1 决策测试矩阵 vs `tests/modules/system/` + `tests/core/test_file_storage.py` 真实测试集交叉验证）。直接覆盖 40/56 测试（71%）+ 间接覆盖 8 条；7 条 P0/P1 必补缺口拆 Task 22b 跟进，4 条 AI tool 缺口属 Task 23+ 范围。决策 22a.1-22a.7。
@@ -3195,7 +3274,7 @@ async def user_export(
   - 22a.4 **#2.19 Redis Cache Fallback 缺 2 测试（中风险）** — spec §8.1 line 2786-2789 期望 3 测试：`test_preview_neither_cache_nor_db_rejected` ✅（`test_preview_invalid_returns_422` API 层 + `test_execute_with_invalid_token_rejected` service 层）+ 间接覆盖（`test_dry_run_writes_redis_cache_token_to_batch_id` line 386 / `test_dry_run_redis_cache_ttl_is_600_seconds` line 417 验证 Redis 写入路径）+ 缺 `test_preview_cache_missing_falls_back_to_db` ❌（Redis 全丢 → DB 反查 execute 仍成功）/ `test_preview_cache_corrupted_falls_back_to_db` ❌（Redis value 篡改 → DB 反查 execute 仍成功）。**理由**: 三重校验逻辑（file_sha256 / records_hash / operator_id）已由 4 个 execute 测试充分覆盖；Redis fallback 路径靠 `get_batch_by_preview_token` 实现（spec §2.19 line 2696「Redis value 不含 records，miss 时 DB 反查」），但端到端「Redis miss → DB hit → execute 成功」无显式单测。**回归**: Task 22b 占位。
   - 22a.5 **#2.28 ImportBatch 业务日志 缺 2 测试（中风险）** — spec §8.1 line 2802-2805 期望 4 测试：`test_log_records_all_lifecycle_events` ✅（`test_execute_writes_lifecycle_logs` test_user_import_execute.py:708）+ `test_log_cascade_delete_with_batch` ✅（`test_cascade_delete_when_batch_deleted` test_user_import_models.py:108 + `test_cascades_batch_log_on_delete` test_user_cleanup_crons.py:245 双覆盖）+ 缺 `test_log_records_chunk_progress` ❌（2000 行 → 20 条 CHUNK_PROGRESS log 行计数未断言；`test_execute_writes_lifecycle_logs` 仅断言 lifecycle event 类型存在，未严格断言 chunk 行数 = rows/chunk_size）/ `test_log_records_fatal_error` ❌（模拟 OperationalError → EXECUTE_FAILED event + error_code + chunk_index 未写）。**回归**: Task 22b 占位。
   - 22a.6 **#3.6 ImportBatch Single Aggregate Root 缺 2 测试（低 + 中风险）** — spec §8.1 line 2862-2866 期望 5 测试：`test_state_created_to_preview_done` ✅（test_import_state.py:93 + test_user_import_dry_run.py:499 双覆盖）+ `test_state_preview_done_to_running` ✅（test_import_state.py:103）+ `test_state_preview_done_to_expired` ✅（test_user_cleanup_crons.py:289 + 343 双覆盖）+ 缺 `test_no_import_preview_session_class` ❌（grep codebase 无 `class ImportPreviewSession` 残留，spec §3.6 v2.2 P1-2 已合并删除，但无防回归单测；建议加 `tests/test_no_import_preview_session.py` 静态扫描脚本，`assert "ImportPreviewSession" not in "".join(Path("app").rglob("*.py"))`，可进 pre-commit）/ `test_state_created_to_failed_on_parse_error` ❌（文件解析失败 → CREATED 直接 FAILED 异常路径，未写）。**回归**: Task 22b 占位（前者可加静态扫描脚本进 pre-commit 防回归）。
-  - 22a.7 **#2.14 AI Tool Split 全缺 4 测试（不属本 task 范围）+ #2.31 audit_chain + ai_export_always 缺 2 测试** — #2.14 spec §8.1 line 2831-2834 期望 4 测试全缺：`test_ai_import_preview_returns_batch_and_token` / `test_ai_import_execute_requires_token_from_preview` / `test_ai_cannot_skip_preview` / `test_ai_import_preview_is_readonly` —— 这 4 测试需要先实现 AI tool `user.import_preview` + `user.import_execute`（spec §10 Task 26/26a，Phase 2 范围），本 task 不补；Task 26/26a 实现时配套写。#2.31 ExportTask Audit 5/7 covered（缺 `test_export_audit_chain_joinable_with_operation_log` schema JOIN 单测 + `test_ai_export_always_creates_task`，后者属 Task 27 范围）。**反例**: 在 Task 22a 强行写 AI tool 测试 → 实现不存在，测试只能 mock-heavy 写假实现，违反 TDD「实现先于测试」原则。**回归**: Task 22b 占位（audit_chain 单测可补，AI tool 部分等 Task 26/26a/27）。
+  - 22a.7 **#2.14 AI Tool Split 全缺 4 测试（不属本 task 范围）+ #2.31 audit_chain + ai_export_always 缺 2 测试** — #2.14 当时列出的 4 个测试为 `test_ai_import_preview_returns_batch_and_token` / `test_ai_import_execute_requires_token_from_preview` / `test_ai_cannot_skip_preview` / `test_ai_import_preview_is_readonly`；其中最后一项的旧命名与 v2.4 effect 语义冲突，Task 35 改为 `test_ai_import_preview_writes_only_preview_artifacts`。其余为历史审计记录，不改变 Task 22a 当时结论。
   - **小结** — 直接覆盖矩阵：14 决策 / 56 测试期望 / 40 直接 + 8 间接 + 8 缺口（其中 4 属 Task 23+ 范围不可补，剩 4 真实缺口 + 3 间接缺口 + 1 静态扫描需求 = 8 拆 Task 22b）。覆盖良好的核心模块：import_parser / import_validator / import_state / reason_schema / file_storage / cleanup_crons / cancel_api。覆盖中等的核心模块：import_service（63%，靠 Task 22b 补）/ import_models（schema-level）。覆盖率通过 70% 门禁（70.48%）但 buffer 仅 0.48pp，Task 22b 必须在新增前端代码（Task 17-21）前完成以免跌破门禁。
 - [x] Task 22b ✅ 已完成（2026-08-04）：补 Task 22a 审计发现的 8 测试缺口 + 1 静态防回归脚本，全部 P0/P1 高/中风险缺口关闭，覆盖率门禁 buffer 从 0.48pp 拉回 ≥ 0.6pp（待 Task 17 前端代码增加后回归测试）。决策 22b.1-22b.9。
   - 22b.1 **审计方法（spec §8.1 ↔ 新测试集 1:1 配套）** — Task 22a 列出 8 个缺口名，本 task 按风险分级（P0/P1 高/P1 中/P1 低/静态）逐条补，每条测试 docstring 含「**反例** + **回归**」对（与 spec §3.6 决策记录格式一致）。**反例**: 仅追求覆盖率百分比（如拉到 80%）但不补审计发现的特定决策缺口 → 测试集与决策矩阵脱钩，未来重构容易把「CAS 防并发」误删而单测仍绿。**回归**: 8 个新测试 method 名严格对齐 Task 22a §10 状态块列出的期望名（`test_concurrent_execute_same_batch` / `test_preview_cache_missing_falls_back_to_db` / `test_preview_cache_corrupted_falls_back_to_db` / `test_execute_same_token_twice_running_concurrent` / `test_execute_expired_batch_rejected` / `test_log_records_fatal_error_in_execute_finish` / `test_state_created_to_failed_on_parse_error` / `test_log_records_chunk_progress_per_chunk`），便于后续审计反查。
@@ -3223,10 +3302,10 @@ async def user_export(
   - 25.2 **hitl_always=True 强制** — risk=high 的 tool 默认走 HITL 抽屉确认，但单行修改场景用户可能反复点（如批量改名）；hitl_always 强制每次都确认（防 LLM 自动批量调）。**反例**: 仅靠 risk=high 触发 HITL → LLM 重试时降级跳过 → 用户体验不一致。**回归**: meta `hitl_always=True` + `_dry_run_user_update` 实现，HITL 抽屉展示字段变更前后对照。
   - 25.3 **dry_run 列字段变更对照表** — `_dry_run_user_update` 返回 `examples=[f"{field}: {getattr(user, field)} → {value}"]`，让用户在 HITL 抽屉看到具体每个字段的 old → new 对照。**反例**: 仅 summary「将更新 2 个字段」 → 用户不知是哪 2 个，必须 trust LLM。**回归**: `test_dry_run_returns_examples` 断言 examples 含字段名。
   - 25.4 **no-fields 短路 + AI_USER_UPDATE_NO_FIELDS** — 所有字段 None 时立刻抛 BusinessRuleException，不查 DB。**反例**: 直接调 user_service.update_user({}) → Pydantic 校验过 → DB UPDATE 无字段 → 空操作但浪费 query。**回归**: `test_update_requires_at_least_one_field` 验证 errorCode。
-- [x] Task 26 ✅ 已完成（2026-08-04）**[v2.2 P0 #2.14 拆分]**: AI tool `user.import_preview`（risk=low / readonly / detail_card / chip_target=/system/user），返回 `{batchId, previewToken, total, summary{new, exists, conflict, outOfScope}}`。决策 26.1-26.3：
+- [x] Task 26 ✅ 已完成（2026-08-04）**[v2.2 P0 #2.14 拆分]**: AI tool `user.import_preview` 当时按（risk=low / readonly / detail_card / chip_target=/system/user）落地；v2.4 复核确认 `readonly` 与其持久 batch/file 的真实行为冲突，修正列入 Task 35，不回写 Task 26 的历史完成事实。决策 26.1-26.3：
   - 26.1 **复用现有 dry_run_import_users + parse_import_excel** — Tool 函数仅做参数转换 + file_id → file_bytes 加载 + 调 service + 包装 ToolResult。零业务逻辑（service 层已完整 + 测试覆盖）。**反例**: tool 内部重写 dry_run 逻辑 → 与 HTTP 路径分叉，单测必须复制粘贴一份。**回归**: `user_import_preview` 函数 < 50 行；逻辑测试由 `test_user_import_dry_run.py` 等 service 层覆盖。
-  - 26.2 **file_id → file_bytes 加载 helper `_load_file_bytes`** — 通过 ctx.db 查 sys_file 表拿 file_path → 同步 read_bytes（`# noqa: ASYNC240`，AI 调用频次低，同步 IO 可接受）。**反例**: 把加载逻辑塞 tool 函数内 → import_execute 也要一份；违反 DRY。**回归**: `_load_file_bytes(ctx, file_id) -> (bytes, filename, mime_type)` 模块级 helper。
-  - 26.3 **file_id 豁免 scope_param_requires_check 静态校验** — `scripts/check_ai_tools.py::check_scope_param_requires_check` 原本要求任何 `*_id` 参数必须调 `ensure_targets_in_scope`；但 `file_id` 是 sys_file 资源（用户上传的临时文件），不属于业务 data_scope 范畴。在 check 函数加 `and a.arg != "file_id"` 豁免。**反例**: 不豁免 → user.import_preview 强制调 `ensure_targets_in_scope(user_ids=[file_id_int])` → 拿 file_id 当 user_id 查询，必然失败。**回归**: `scripts/check_ai_tools.py:230` 添加 `and a.arg != "file_id"`；docstring 注明豁免理由；15 tools 全过 8 static checks。
+  - 26.2 **file_id → file_bytes 加载 helper `_load_file_bytes`** — 当时通过 ctx.db 查 sys_file 表拿 file_path → 同步 read_bytes（`# noqa: ASYNC240`，AI 调用频次低，同步 IO 可接受）。v2.4 复核发现该实现缺 owner/tenant/business type 与路径边界校验，安全修复列入 Task 35，不回写历史完成事实。**反例**: 把加载逻辑塞 tool 函数内 → import_execute 也要一份；违反 DRY。**回归**: `_load_file_bytes(ctx, file_id) -> (bytes, filename, mime_type)` 模块级 helper；Task 35 加资源授权与内容验证。
+  - 26.3 **file_id 只豁免用户 data-scope helper，不豁免文件 ACL** — `scripts/check_ai_tools.py::check_scope_param_requires_check` 原本要求任何 `*_id` 参数必须调 `ensure_targets_in_scope`；`file_id` 不是 user ID，不能错误传入该 helper，因此静态规则豁免仍保留。但 v2.4 复核确认必须由 `_load_file_bytes` 独立执行 sys_file owner/tenant/business type/MIME/size/path 校验。**反例**: 把 file_id 当 user_id 校验会必然失败；完全不做文件资源校验则形成 IDOR。**回归**: 静态检查允许专用 `ensure_file_access`（或等价 helper）替代 user data-scope helper；注册/业务测试证明无裸 `select(File).where(file_id)` 后直接 `read_bytes` 路径。
 - [x] Task 26a ✅ 已完成（2026-08-04）**[v2.2 P0 #2.14 拆分]**: AI tool `user.import_execute`（risk=high / hitl_always / dry_run_supported / rows_affected），强制走 HITL 防止 LLM 跳过 preview。决策 26a.1-26a.3：
   - 26a.1 **直接从 batch.file_storage_key 读 file_bytes** — 不要求 LLM 在 execute 时重新传 file_id（spec §2.19 line 575 设计）；dry_run 阶段已保存文件到 LocalFileStorage，execute 凭 batch.file_storage_key 反查。**反例**: execute 要求 LLM 重传 file_id → LLM 可能传错文件 → 三重校验（file_sha256）失败。**回归**: `user_import_execute` 内 `Path(batch.file_storage_key).read_bytes()`；空 file_storage_key → AI_IMPORT_PREVIEW_INVALID。
   - 26a.2 **强制 HITL + LLM prompt 引导防跳过** — `hitl_always=True` + meta.summary 明确「Pass previewToken from preview」；LLM 必须先调 preview 拿 token，不能直接 execute。**反例**: 仅 risk=high 触发 HITL → LLM 可能在 prompt 里编造 preview_token 直调 execute。**回归**: meta `hitl_always=True` + dry_run_supported=True；`_dry_run_user_import_execute` 在 HITL 抽屉二次确认 batch summary。
@@ -3266,21 +3345,52 @@ async def user_export(
   - 34.2 **CREATED → FAILED 集成路径：0 行 + 分类异常两个分支** — spec §3.6 line 1134 要求 dry_run 阶段失败 → CREATED → FAILED，但旧代码 `dry_run_import_users` 无 try/except：0 行当正常处理（PREVIEW_DONE 全 0 统计）；分类阶段异常 → batch 停留 CREATED 成僵尸行。修正：(a) 入口加 `len(records) == 0` 检查 → CREATED → FAILED + 抛 `AI_IMPORT_EMPTY_FILE`；(b) try/except 包住 INSERT 后的分类 + Redis 逻辑，任何异常 → CREATED → FAILED + 原异常 re-raise。**反例**: (1) 不动 → batch 停留 CREATED，cron `cleanup_expired_previews` 只扫 PREVIEW_DONE，CREATED 僵尸行永不清理（审计看到「创建一年后还是 CREATED」）。(2) 0 行当正常 → 用户上传空 Excel 得到「PREVIEW_DONE 全 0」预览，以为可以 execute，违反「空文件是错误」直觉。**回归**: `import_service.py::dry_run_import_users` 加 0 行检查 + try/except；`test_user_import_dry_run.py::TestCreatedToFailedTransition` 2 测试（0 行 + 分类异常）；测试反查用 `populate_existing=True` 强制覆盖 identity map（`_transition_batch_status` 用 raw UPDATE 绕过 ORM synchronize_session）。
   - 34.3 **audit chain JOIN 测试按真实机制写 + spec §8.1 描述修正** — spec §8.1 line 2902 原文写「sys_operation_log.export_id ↔ sys_user_export_task.export_id 可 JOIN」，但 `sys_operation_log` schema（`app/modules/system/models/operation_log.py`）**没有 export_id 字段**。真实 audit chain（spec §2.30 line 1450 + §2.8 line 256）：`sys_operation_log.path='/system/user/export'` + `request_params` 含 reason + `user_id` + `create_time` ↔ `sys_user_export_task.reason` + `operator_id` + `created_at`。测试模拟 AuditLogMiddleware 写 operation_log 行 → 用 SQL JOIN 验证能反查到正确的 export_task。**反例**: 强行给 sys_operation_log 加 export_id 字段 → schema 变更 + migration + AuditLogMiddleware 改 + 所有写 operation_log 的地方改，过度工程（当前机制已能满足审计反查需求）。**回归**: `test_user_export.py::TestAuditChainJoinable::test_audit_chain_joinable_via_reason_and_operator`；spec §8.1 line 2902 描述已修正为真实 JOIN 机制。
 
-### Phase 3（推迟到 ai-tool-gateway v1.5 章节）
+### v2.4 当前安全与一致性收尾
 
-> **指针**: 以下 4 项异步通道工作归 [`2026-07-02-ai-tool-gateway-design.md`](./2026-07-02-ai-tool-gateway-design.md) §14 Roadmap v1.5+ 章节，本 spec 不重复设计（避免两处设计漂移）。仅第 5 项是模块复制工程，与本 spec 异步通道无关。
+- [x] Task 35 **✅ 已完成（2026-08-07，P0，edit/regenerate 仍由 Safety Gate 保持关闭）**：(a) `user.import_preview` 已为 `risk="low" / readonly=False / idempotent=False`，`user.export` 已为 `readonly=False / idempotent=False`，未知 metadata 默认 write/non-idempotent；16 个内置 tool 建立精确 effect 审计矩阵，standalone 静态门禁必须完整加载 16/16，必需模块导入失败不得吞掉。(b) `sys_file` 增加 `owner_user_id + tenant_id`；历史 username 无法证明不可变归属，owner 全部保留 NULL/fail-closed；新上传强制认证 owner + 服务端 tenant。`ChatDeps/AiToolContext/PendingPayload` 携带 trusted tenant，resume/confirm 复核当前认证 tenant。(c) chat CSV/XLSX 服务端重分类为 `user-import`，chat text 为 `ai-chat-private`，统一私有落盘；受保护 loader 校验 owner/tenant/del/business/ext/MIME/OOXML magic+ZIP budgets/DB 与实际大小/resolved root，并用已验证 bytes 解析，避免 TOCTOU。(d) 私有导入/导出 artifact 默认迁至 `private_uploads`；启动前校验私有根不在 `/uploads`；历史 `uploads/file_storage` 仅作认证 fallback，静态 GET/HEAD 拒绝该 namespace 及历史 `.csv/.txt/.xls/.xlsx`。反向代理升级时也必须应用同一 deny。(e) HTTP import 使用 `limit+1` bounded read，XLSX 解压和 file.parse 行/列/cell 有硬预算；`.xls` 在安全 parser 引入前从 AI/用户导入契约和 UI allowlist 移除。(f) sys_file list/detail/delete/batch-delete 强制 tenant SQL predicate，普通 detail/delete 绑定 owner，内部路径/存储名不进入 FileOut；export task list/detail/download 强制 operator ownership，只有显式 superadmin 可跨 operator，`file_storage_key` 不进入 API DTO。超限继续稳定拒绝，不自动入队。(g) import preview artifact 保留受信任的 `.csv/.xlsx` 格式，execute 按 batch 文件名白名单恢复 MIME，避免 CSV 在 HITL 后被错误按 OOXML 解析。
+  - 35.1 **Tool effect metadata 默认 fail-closed** — 未明确证明的 tool 一律 `readonly=False / idempotent=False`，纯读与稳定 CAS replay 才显式放宽。**反例**: 把“未写主业务表”的 preview 标 readonly → edit/regenerate 或自动重试重复创建 batch/file。**回归**: 16 个 built-in 精确矩阵 + 必需模块导入失败测试 + standalone gate 输出 16/16。
+  - 35.2 **历史 sys_file owner 不按 username 回填** — `create_by` 可变且账号硬删除后可同名重建，不能作为不可变 ownership 证据。**反例**: 按当前唯一 username 回填 → 新同名账号继承旧账号文件。**回归**: migration 不执行 owner UPDATE；owner NULL 的历史行对普通详情、删除和 AI loader 均不可见。
+  - 35.3 **文件 ID 是受保护资源引用** — owner、trusted tenant、删除状态、业务类型、扩展/MIME/结构、大小和 resolved root 必须在 IO/解析前统一验证。**反例**: 只按 Snowflake file_id 查路径 → IDOR；校验后重新开路径 → TOCTOU。**回归**: 跨 owner/tenant/legacy 使用同一 `AI_FILE_NOT_FOUND`，内容异常使用稳定类型/大小/路径错误，parser 只消费 validated bytes。
+  - 35.4 **敏感 artifact 与公共静态资源物理分根** — 新 import/export/chat 文档写入 `private_uploads`，旧 public artifact 只提供认证 fallback；应用和反向代理都拒绝历史 namespace/文档后缀。**反例**: 仅把 DB API 加 ACL、继续暴露 `/uploads/<snowflake>.xlsx` → 匿名静态 GET 绕过 ACL。**回归**: 启动前 private-root invariant、GET/HEAD 404、普通图片 200、legacy authenticated read 和 new-write-private 测试。
+  - 35.5 **XLSX 先验证压缩结构再解析** — raw 10MB 不能代表解压后安全，必须限制 entry 数、单 entry/总解压量、压缩比、加密与路径，并限制解析行/列/cell。**反例**: 只验 `PK` magic 后交 openpyxl → 任意 ZIP/zip bomb 消耗 CPU/内存；完整收集 2001+ 行后才拒绝 → 上限失去资源保护意义。**回归**: 真实 XLSX 正例、损坏/缺成员/高压缩比/超预算反例与第 2001 行短路测试；legacy `.xls` 稳定拒绝。
+  - 35.6 **文件与导出查询在 service 层强制 scope** — sys_file 全路径使用 tenant predicate，普通用户再绑定 owner；export list/detail/download 默认绑定 operator，只有显式 superadmin 可跨 owner。**反例**: 只在前端隐藏或只检查 `system:user:export` → 部门管理员枚举超管 export_id 下载越 data-scope PII。**回归**: list/detail/download/delete/batch-delete 跨 scope 测试均在触碰磁盘前返回不可区分的 not-found/拒绝。
+  - 35.7 **内部 storage locator 永不进入公共 DTO** — `file_path`、内部存储名与 `file_storage_key` 只供服务端定位。**反例**: 返回物理路径/key → 泄露部署结构并帮助构造静态绕过。**回归**: FileOut/UserExportTaskResponse 序列化断言不含对应 camelCase 字段。
+  - 35.8 **预检 artifact 必须保持解析格式** — preview 只使用受保护 loader 已验证的 MIME 决定 `.csv/.xlsx` suffix，execute 只从 batch 的白名单后缀恢复 MIME。**反例**: 所有 artifact 固定保存 `.xlsx` 且 execute 固定传 XLSX MIME → CSV preview 成功、确认后却被 OOXML 结构校验拒绝。**回归**: CSV preview→execute 串联测试断言保存 `.csv`，两次 parser 调用均使用 `text/csv`；未知后缀稳定返回 `AI_IMPORT_PREVIEW_INVALID`。
+  - 35.9 **部署边缘与私有存储必须和应用安全边界一致** — 内置 Nginx 与外部代理 snippet 在转发普通 `/uploads/` 前，统一对 `/uploads/file_storage(?:/|$)` 及 `.csv/.txt/.xls/.xlsx` 返回 404；API 与 Scheduler 共享持久化 `private_uploads` volume，并同时挂载历史 public root 供认证 fallback/cleanup，部署命令预创建目录，镜像也声明该私有卷。**反例**: 只在 FastAPI StaticFiles 拒绝 → 未来 Nginx `alias`/CDN 直连绕过应用；只把私有目录放容器 writable layer → 重建 API 后 preview/export artifact 丢失，Scheduler 也无法清理同一文件；Scheduler 不挂 legacy public root → 旧 artifact 过期后 DB 已清但磁盘残留。**回归**: 三份 Nginx 模板静态测试断言 deny 先于通用 uploads proxy；Compose 测试断言 API/Scheduler 使用相同 public/private bind mount 与私有根；部署目录测试断言两个目录同时创建；Dockerfile 构建检查声明两个 volume。
+- [ ] Task 36（P1，量化门槛证据）：定义 `user_bulk_request_terminal` 为**唯一容量证据事件**，由 HTTP/AI adapter 在一个逻辑请求终态仅写一次到保留至少 30 天的结构化日志；`request_key` 为 HTTP `request_id`、AI `tool_call_id`（重试沿用并按 key 去重/upsert），不得作为 metric label。固定字段为 `occurred_at / request_key / operation(import_preview|export) / entrypoint(http|ai) / outcome(success|rejected|failed|cancelled) / error_code / duration_ms / terminal_status / requested_rows`；低基数 metric/dashboard 只能由该事件派生，batch/task/operation log 仅用于审计对账，不另作容量真相源。30 天超限占比分母分别为所有 row-count 已解析的 `import_preview` 逻辑请求、所有已完成 count/dry-run 的 `export` 逻辑请求；AI dry-run 与 execute 共享同一 tool_call request_key，只计一次。提供滚动 7/30 天去重查询、终态对账与 dashboard 验收；只补观测，不增加 Worker、自动入队或第二实时通道。
 
-| # | 项目 | 归属 | 当前状态 |
-|---|---|---|---|
-| 1 | 异步通道 `broadcast_to_user`（arq + WebSocket/SSE 双通道） | ai-tool-gateway §13 Phase 4 + §14 Roadmap + §15 风险表 + §16.2 — **4 处明确「v1.5+ 推迟」** | gateway spec 已识别 v1.5+ 项目，未设计细节 |
-| 2 | 批量 HITL 协议扩展（行级勾选） | ai-tool-gateway §8.1（单条协议）+ 本 spec §Phase 3 | gateway §8 单条 confirmationId 协议未含批量，待 v1.5 章节扩展 |
-| 3 | `user.export` 改造支持异步（> 阈值自动切换） | ai-tool-gateway §16.2 + 本 spec §Phase 3 | gateway §16.2「大数据量场景（导出 > 30s）走 v1.5 异步通道」承诺，待 v1.5 章节设计 |
-| 4 | `user.import_execute` 异步通道（> 2000 行入队，CREATED → QUEUED → RUNNING → ...） | ai-tool-gateway §16.1（同步链路）+ 本 spec §Phase 3 | gateway 未提异步 import；本 spec Phase 3 提及未设计 |
-| 5 | `role` / `dept` / `job` 模块同款改造（依赖 CLI generator 模板） | 不归属 AI 协议层 | 模块复制工程，归 `hohu-cli` generator 模板工作 |
+### Phase 3（⚠️ 推迟到 `ai-tool-gateway v1.5+`，当前不排期）
 
-**Why pointer-only**: Phase 3 的 4/5 项是 ai-tool-gateway §14 已经识别的 v1.5+ 项目。若在本 spec 重复设计异步通道架构（arq 队列 / Redis pub/sub / 任务状态机 / WebSocket 重连），两份 spec 维护成本叠加且极易漂移；保持单一真相源（gateway spec），本 spec 只声明「user 模块的异步场景需求」（导出 > 5000 行 / 导入 > 2000 行 / 行级勾选批量确认）作为 v1.5 章节的输入。第 5 项模块复制工作与 AI 协议层正交，单列即可。
+> **单一真相源**：架构边界与重启条件见 [`ADR-0001`](../adr/0001-ai-safety-consistency-before-deferred-execution.md)，Gateway 演进见 [`2026-07-02-ai-tool-gateway-design.md`](./2026-07-02-ai-tool-gateway-design.md) §14 Roadmap。本 spec 只提供 user import/export 的容量数据与业务约束，不设计通用异步基础设施。
 
-**Regression**: 真要动手做 v1.5 时，先在 ai-tool-gateway spec 写 §17 异步通道架构 / §18 批量 HITL 协议 / §19 异步 export+import 适配 章节；本 spec §Phase 3 改成 ✅ + 引用 v1.5 章节锚点。第 5 项 role/dept/job 模块复制单独走 hohu-cli 仓库的 generator spec。
+#### 当前版本只做什么
+
+Phase 1/2 的已完成状态保持不变。后续若发现缺陷，只在以下六类内做安全与一致性收尾：权限与 operator ownership、data scope / Permission Boundary、文件 MIME/大小/路径白名单、2000/5000 同步硬上限、chunk/savepoint/CAS 幂等、审计/retention/稳定 errorCode。上述任一回归都是 release blocker，但不构成引入队列的授权。
+
+#### 明确不实现什么
+
+| 推迟能力 | 当前决策 | v1.5+ 立项后仍需先回答 |
+|---|---|---|
+| deferred execution + Worker | 不实现 ARQ、Celery 或自建 Worker；超限继续拒绝 | job 状态机、幂等键、重试/取消、租户与权限快照、部署模型 |
+| 自动异步 import/export | 不把 >2000 导入或 >5000 导出静默入队 | 是否仍用 Excel、任务输入快照、结果保留、失败恢复和容量 SLO |
+| 第二实时进度通道 | 不建设 WebSocket + SSE/轮询双通道；现有 Chat SSE 只服务当前对话流 | 是否只需最终通知；若需进度，选择一个主要状态协议和重连语义 |
+| 通用行级 Chat HITL | 保持一个 `tool_call` 的 approve/reject；不在聊天中做逐行表格审核 | 业务审核对象、不可变 snapshot/hash、`reviewRef`（后端 `review_ref`）、审核人/意见/SLA |
+| `role` / `dept` / `job` 同款复制 | 与 AI Phase 3 解耦，继续归 `hohu-cli` generator spec | 模板抽象的复用收益与各模块独立权限/字段差异 |
+
+#### 量化重启条件
+
+满足任一条件只触发**对应能力的专项 spec 与容量验证**，不表示一次性实现整套 Phase 3：
+
+| 能力 | 重启条件（滚动窗口） | 证据来源 |
+|---|---|---|
+| deferred execution + Worker | 生产环境滚动 30 天窗口内，`AI_IMPORT_TOO_MANY_ROWS` / `AI_EXPORT_ASYNC_REQUIRED` 合计达到 20 次或占同类请求 ≥ 5%；或者滚动 7 天窗口内有效样本不少于 100 次，且该窗口 `p95 ≥ 10s` 或超时/非用户取消率 ≥ 1% | 按 `request_key` 去重的 `user_bulk_request_terminal` canonical event；batch/task/operation log 仅用于审计对账，不另算容量样本 |
+| 断线或进程重启后继续执行 | 出现已批准业务 SLA，明确要求客户端断线或 Web 进程重启后继续，且 inline 无法满足验收 | 需求审批、故障复现、验收测试 |
+| 中间进度协议 | 已有 deferred 任务在滚动 7 天窗口内 `p95 ≥ 30s`，且验收要求展示至少两个中间阶段 | 任务时长指标、产品验收用例 |
+| 行级业务审核 / `reviewRef` | 至少一个已批准流程要求单批 >100 行的部分通过/拒绝，或要求审核人指派、意见与 SLA，整次 yes/no 无法表达 | 业务 spec、真实审核样例、验收矩阵 |
+
+**Why pointer-only**: 队列选型、Worker 运维、状态机、重试、取消、通知和业务审核是不同能力，不能因为一个超限文件就整包引入。保持 Gateway/ADR 为通用能力的单一真相源，本 spec 只冻结同步边界并提供量化证据。
+
+**Regression**: 触发条件满足后，先在 gateway v1.5+ 新建对应专项 spec，明确 `approval_mode` 与 `dispatch_mode` 的正交关系、单一主要进度协议和失败语义；随后再修改本 spec 的超限错误契约与 Plan 状态。未完成这些步骤前，Phase 3 保持 ⚠️ 推迟，禁止直接实现 ARQ/Worker、双实时通道或通用行级 Chat HITL。
 
 ---
 
@@ -3306,7 +3416,8 @@ hohu-cli/hohu/templates/module/
 ## 12. 关联
 
 - 实施进度：本 spec §10 Plan 状态块
+- 当前 AI 演进边界：[`ADR-0001`](../adr/0001-ai-safety-consistency-before-deferred-execution.md)
 - 审计设计：spec `2026-07-02-ai-tool-gateway-design.md` §2.7
 - data_scope：spec `2026-07-02-ai-tool-gateway-design.md` §6.2
 - HITL：spec `2026-07-02-ai-tool-gateway-design.md` §8
-- 异步通道（推迟）：spec §10 v1.5+ Roadmap
+- deferred execution（推迟）：gateway spec §14 Roadmap + 本 spec §10 Phase 3 量化重启条件

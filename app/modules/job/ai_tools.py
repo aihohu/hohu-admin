@@ -28,6 +28,8 @@ from app.modules.job.service.job_service import job_service
         summary="Update job cron expression → {'ok': true}. HITL required.",
         required_perms=("system:job:edit",),
         risk="high",
+        readonly=False,
+        idempotent=False,
         hitl_always=True,
         dry_run_supported=True,
         result_view="detail_card",

@@ -21,11 +21,13 @@ from app.modules.ai.api.resume import resume_chat
 
 def _make_pending(
     user_id: int = 100,
+    tenant_id: int = 0,
     wake_action: str | None = None,
     expires_at: str = "2099-01-01T00:00:00Z",
 ) -> PendingPayload:
     return PendingPayload(
         user_id=user_id,
+        tenant_id=tenant_id,
         conversation_id=1,
         tool_call_id="tc_test",
         trace_id="tr_test",
@@ -161,6 +163,31 @@ class TestResumeForbidden:
                     current_user=_make_user(user_id=999),  # 非 owner
                 )
         assert exc_info.value.error_code == "AI_RESUME_FORBIDDEN"
+
+    async def test_tenant_mismatch_returns_same_forbidden_semantics(
+        self, _resume_enabled, _redis_pubsub_mode
+    ) -> None:
+        """pending tenant 与当前认证 tenant 不同必须在抢执行锁前拒绝。"""
+        with (
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.get_pending",
+                AsyncMock(return_value=_make_pending(tenant_id=999)),
+            ),
+            patch(
+                "app.modules.ai.api.resume.redis_client.set",
+                AsyncMock(),
+            ) as lock_set,
+        ):
+            with pytest.raises(AuthorizationException) as exc_info:
+                await resume_chat(
+                    request=_make_request("cid"),
+                    confirmation_id_query="cid",
+                    db=MagicMock(),
+                    current_user=_make_user(),
+                )
+
+        assert exc_info.value.error_code == "AI_RESUME_FORBIDDEN"
+        lock_set.assert_not_awaited()
 
 
 # ============ 410 AI_RESUME_ALREADY_RESOLVED ============

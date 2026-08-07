@@ -101,6 +101,29 @@ class TestBuildChatDeps:
             )
         assert deps.trace_id == "tr_custom_abc"
 
+    async def test_tenant_id_comes_from_server_resolver(
+        self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """客户端字段不参与 tenant 解析；ChatDeps 只接收服务端 resolver 结果。"""
+        import app.modules.ai.core.data_scope_loader as loader_mod
+
+        monkeypatch.setattr(loader_mod, "is_super_admin", lambda u: True)
+        mock_user = MagicMock()
+        mock_user.roles = []
+        mock_user.depts = []
+
+        with (
+            _patch_sticky_manual(),
+            patch(
+                "app.modules.ai.service.chat_service.resolve_tenant_id",
+                return_value=37,
+            ) as resolver,
+        ):
+            deps = await chat_service.build_chat_deps(db_session, mock_user)
+
+        resolver.assert_called_once_with(mock_user)
+        assert deps.tenant_id == 37
+
     async def test_agent_code_not_found_raises(
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:

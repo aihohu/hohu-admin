@@ -362,7 +362,6 @@ class UserExportTaskResponse(_CamelBase):
     filter_snapshot: dict
     reason: str
     row_count: int | None = None
-    file_storage_key: str | None = None
     file_size_bytes: int | None = None
     status: str
     error_code: str | None = None

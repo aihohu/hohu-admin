@@ -49,21 +49,44 @@ class LocalFileStorage:
     """本地文件系统实现（Phase 1 默认，spec §3.9）。
 
     配置 LOCAL_FILE_STORAGE_ROOT：
-    - 单机部署：默认 "uploads/file_storage"（相对工作目录）
+    - 单机部署：默认 "private_uploads/file_storage"（相对工作目录，不静态挂载）
     - Docker：volume mount 到容器内
     - K8s：必须用 PVC 或换 S3FileStorage（多副本本地不共享）
     """
 
-    def __init__(self, root: Path | str):
+    def __init__(
+        self,
+        root: Path | str,
+        *,
+        legacy_read_roots: tuple[Path | str, ...] = (),
+    ):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        # Compatibility is read/delete only.  New artifacts are always written
+        # below the private primary root.
+        self.legacy_read_roots = tuple(
+            Path(legacy_root).resolve() for legacy_root in legacy_read_roots
+        )
 
-    def _resolve_path(self, *parts: str) -> Path:
-        """拼接路径并校验仍在 root 内（防穿越）。"""
-        target = (self.root.joinpath(*parts)).resolve()
-        if not target.is_relative_to(self.root):
+    @staticmethod
+    def _resolve_in_root(root: Path, *parts: str) -> Path:
+        target = root.joinpath(*parts).resolve()
+        if not target.is_relative_to(root):
             raise ValueError(f"非法 storage_key（路径穿越）: {'/'.join(parts)}")
         return target
+
+    def _resolve_path(self, *parts: str) -> Path:
+        """拼接路径并校验仍在 primary root 内（防穿越）。"""
+        return self._resolve_in_root(self.root, *parts)
+
+    def _candidate_paths(self, storage_key: str) -> tuple[Path, ...]:
+        return (
+            self._resolve_path(storage_key),
+            *(
+                self._resolve_in_root(legacy_root, storage_key)
+                for legacy_root in self.legacy_read_roots
+            ),
+        )
 
     async def save(
         self,
@@ -83,20 +106,20 @@ class LocalFileStorage:
         return f"{namespace}/{file_id}"
 
     async def read(self, storage_key: str) -> bytes:
-        file_path = self._resolve_path(storage_key)
-        if not file_path.exists():
-            raise FileNotFoundError(f"文件不存在: {storage_key}")
-        return file_path.read_bytes()
+        for file_path in self._candidate_paths(storage_key):
+            if file_path.is_file():
+                return file_path.read_bytes()
+        raise FileNotFoundError(f"文件不存在: {storage_key}")
 
     async def delete(self, storage_key: str) -> bool:
-        file_path = self._resolve_path(storage_key)
-        if not file_path.exists():
-            return False
-        file_path.unlink()
-        return True
+        for file_path in self._candidate_paths(storage_key):
+            if file_path.is_file():
+                file_path.unlink()
+                return True
+        return False
 
     async def exists(self, storage_key: str) -> bool:
-        return self._resolve_path(storage_key).exists()
+        return any(path.is_file() for path in self._candidate_paths(storage_key))
 
     def public_url(self, storage_key: str, *, expires_in: int = 3600) -> str | None:
         return None
@@ -143,6 +166,31 @@ class MockFileStorage:
 _file_storage: FileStorage | None = None
 
 
+def validate_private_storage_roots() -> None:
+    """Fail fast if a private storage root is exposed by ``/uploads``.
+
+    This is called before the public static mount and again by the lazy storage
+    factory.  Re-validating is cheap and keeps direct service/test use safe.
+    """
+    public_root = Path(settings.UPLOAD_DIR).resolve()
+    private_roots: list[tuple[str, Path]] = [
+        ("PRIVATE_UPLOAD_DIR", Path(settings.PRIVATE_UPLOAD_DIR).resolve()),
+    ]
+    if settings.FILE_STORAGE_BACKEND == "local":
+        private_roots.append(
+            (
+                "LOCAL_FILE_STORAGE_ROOT",
+                Path(settings.LOCAL_FILE_STORAGE_ROOT).resolve(),
+            )
+        )
+
+    for setting_name, private_root in private_roots:
+        if private_root == public_root or private_root.is_relative_to(public_root):
+            raise RuntimeError(
+                f"{setting_name} must not be inside the public upload root"
+            )
+
+
 def get_file_storage() -> FileStorage:
     """DI 工厂（spec §3.9）。进程级单例，首次调用时按 settings 实例化。
 
@@ -153,7 +201,11 @@ def get_file_storage() -> FileStorage:
     global _file_storage
     if _file_storage is None:
         if settings.FILE_STORAGE_BACKEND == "local":
-            _file_storage = LocalFileStorage(settings.LOCAL_FILE_STORAGE_ROOT)
+            validate_private_storage_roots()
+            _file_storage = LocalFileStorage(
+                settings.LOCAL_FILE_STORAGE_ROOT,
+                legacy_read_roots=(Path(settings.UPLOAD_DIR) / "file_storage",),
+            )
         else:
             raise ValueError(
                 f"未实现的 FILE_STORAGE_BACKEND: {settings.FILE_STORAGE_BACKEND}"

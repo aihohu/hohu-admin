@@ -8,6 +8,7 @@ tmp_path 写真实 .csv / .xlsx 文件，测完自动清理。
 
 # ruff: noqa: ARG001, PLC0415
 
+import asyncio
 import csv
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -15,7 +16,9 @@ from unittest.mock import MagicMock
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.exceptions import BusinessRuleException
+from app.modules.ai.agents.tools import load_builtin_tools
 from app.modules.ai.agents.tools.file_parser import SUPPORTED_MIME_TYPES
 from app.modules.ai.agents.tools.file_tools import file_parse
 from app.modules.ai.agents.tools.meta import SHARED_AGENT_CODE, AiToolMeta
@@ -47,6 +50,7 @@ def _make_ctx(db: AsyncSession, *, meta: AiToolMeta | None = None) -> AiToolCont
         data_scope=data_scope,
         trace_id="tr_test_file",
         tool_meta=meta,
+        tenant_id=0,
     )
 
 
@@ -57,15 +61,20 @@ async def _add_file_record(
     file_path: str,
     mime_type: str,
 ) -> File:
+    path = Path(file_path)
+    file_size = (await asyncio.to_thread(path.stat)).st_size
     file_record = File(
         file_id=file_id,
         original_name="test.csv",
         file_name=str(file_id),
         file_path=file_path,
         file_url=f"/uploads/{file_id}",
-        file_size=100,
-        file_ext=".csv",
+        file_size=file_size,
+        file_ext=path.suffix,
         mime_type=mime_type,
+        business_type="ai-chat",
+        owner_user_id=1,
+        tenant_id=0,
         del_flag="0",
     )
     db.add(file_record)
@@ -78,6 +87,13 @@ def _make_csv(path: Path, rows: list[list[str]]) -> None:
         writer = csv.writer(f)
         for row in rows:
             writer.writerow(row)
+
+
+@pytest.fixture(autouse=True)
+def public_upload_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ai-chat files are resolved below the public upload root."""
+    load_builtin_tools()
+    monkeypatch.setattr(settings, "UPLOAD_DIR", str(tmp_path))
 
 
 # ============ Registry / meta ============
@@ -196,7 +212,7 @@ class TestFileParseFunction:
     async def test_parse_unsupported_mime_raises(
         self, db_session: AsyncSession, tmp_path: Path
     ) -> None:
-        """DB 有 file 但 MIME 不在 PARSERS（如 image/png）→ AI_FILE_TYPE_UNSUPPORTED"""
+        """DB 有 file 但 MIME 不在 allowlist → AI_FILE_TYPE_NOT_ALLOWED"""
         path = tmp_path / "img.png"
         path.write_bytes(b"\x89PNG\r\n\x1a\n")
         await _add_file_record(
@@ -207,7 +223,7 @@ class TestFileParseFunction:
         ctx = _make_ctx(db_session)
         with pytest.raises(BusinessRuleException) as exc_info:
             await file_parse(ctx, file_id=str(_FILE_ID))
-        assert exc_info.value.error_code == "AI_FILE_TYPE_UNSUPPORTED"
+        assert exc_info.value.error_code == "AI_FILE_TYPE_NOT_ALLOWED"
 
     async def test_parse_deleted_file_skipped(
         self, db_session: AsyncSession, tmp_path: Path
@@ -224,6 +240,9 @@ class TestFileParseFunction:
             file_size=10,
             file_ext=".csv",
             mime_type="text/csv",
+            business_type="ai-chat",
+            owner_user_id=1,
+            tenant_id=0,
             del_flag="1",
         )
         db_session.add(file_record)
@@ -232,3 +251,72 @@ class TestFileParseFunction:
         with pytest.raises(BusinessRuleException) as exc_info:
             await file_parse(ctx, file_id=str(_FILE_ID))
         assert exc_info.value.error_code == "AI_FILE_NOT_FOUND"
+
+    @pytest.mark.parametrize(
+        ("owner_user_id", "tenant_id"),
+        [(2, 0), (1, 9), (None, 0)],
+    )
+    async def test_parse_cross_owner_tenant_and_legacy_owner_are_hidden(
+        self,
+        db_session: AsyncSession,
+        tmp_path: Path,
+        owner_user_id: int | None,
+        tenant_id: int,
+    ) -> None:
+        path = tmp_path / f"scope-{owner_user_id}-{tenant_id}.csv"
+        _make_csv(path, [["a"], ["1"]])
+        record = await _add_file_record(
+            db_session,
+            file_path=str(path),
+            mime_type="text/csv",
+        )
+        record.owner_user_id = owner_user_id
+        record.tenant_id = tenant_id
+        await db_session.flush()
+
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await file_parse(_make_ctx(db_session), file_id=str(_FILE_ID))
+
+        assert exc_info.value.error_code == "AI_FILE_NOT_FOUND"
+        assert exc_info.value.message == "文件不存在或不可访问"
+
+    async def test_parse_rejects_wrong_business_type(
+        self, db_session: AsyncSession, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "avatar.csv"
+        _make_csv(path, [["a"], ["1"]])
+        record = await _add_file_record(
+            db_session,
+            file_path=str(path),
+            mime_type="text/csv",
+        )
+        record.business_type = "avatar"
+        await db_session.flush()
+
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await file_parse(_make_ctx(db_session), file_id=str(_FILE_ID))
+
+        assert exc_info.value.error_code == "AI_FILE_TYPE_NOT_ALLOWED"
+
+    async def test_parse_user_import_uses_private_root(
+        self,
+        db_session: AsyncSession,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        private_root = tmp_path / "private"
+        private_root.mkdir()
+        monkeypatch.setattr(settings, "PRIVATE_UPLOAD_DIR", str(private_root))
+        path = private_root / "import.csv"
+        _make_csv(path, [["a"], ["1"]])
+        record = await _add_file_record(
+            db_session,
+            file_path=str(path),
+            mime_type="text/csv",
+        )
+        record.business_type = "user-import"
+        await db_session.flush()
+
+        result = await file_parse(_make_ctx(db_session), file_id=str(_FILE_ID))
+
+        assert result.data["rows"] == 1

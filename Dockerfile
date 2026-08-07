@@ -36,9 +36,10 @@ COPY --from=builder --chown=appuser:appuser /app/alembic /app/alembic
 COPY --from=builder --chown=appuser:appuser /app/alembic.ini /app/alembic.ini
 COPY --from=builder --chown=appuser:appuser /app/scripts /app/scripts
 
-RUN mkdir -p /app/uploads && chown appuser:appuser /app/uploads
+RUN mkdir -p /app/uploads /app/private_uploads && \
+    chown appuser:appuser /app/uploads /app/private_uploads
 
-VOLUME /app/uploads
+VOLUME ["/app/uploads", "/app/private_uploads"]
 
 USER appuser
 

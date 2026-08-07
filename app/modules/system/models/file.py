@@ -42,6 +42,18 @@ class File(Base):
     business_id: Mapped[int | None] = mapped_column(
         BigInteger, nullable=True, comment="业务记录ID"
     )
+    owner_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+        comment="文件所有者用户ID（NULL 仅兼容无法回填的历史记录）",
+    )
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default="0",
+        comment="租户ID（当前单租户固定为0）",
+    )
     del_flag: Mapped[str] = mapped_column(
         String(1), default="0", comment="删除标记: 0-正常, 1-已删除"
     )

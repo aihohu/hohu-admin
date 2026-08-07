@@ -50,8 +50,8 @@ class AiToolMeta:
     dry_run_supported: bool = False
     """True 时同模块必须有 _dry_run_<tool>（命名约定，spec §5.1）"""
 
-    idempotent: bool = True
-    """是否幂等（重复调用安全）。非幂等 tool 在 LLM 重试场景需特殊处理"""
+    idempotent: bool = False
+    """是否可安全重放。未知默认 False；仅纯读或有稳定幂等键的 tool 可声明 True"""
 
     super_admin_only: bool = False
     """§11.2 super_admin gate：True 时仅超管（is_super_admin）可调，非超管短路

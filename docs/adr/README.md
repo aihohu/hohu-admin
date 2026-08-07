@@ -39,7 +39,7 @@
 
 | 编号 | 标题 | 状态 | 日期 |
 |---|---|---|---|
-| _待第一条 ADR_ | | | |
+| ADR-0001 | [AI 延迟执行前先完成安全与一致性闭环](./0001-ai-safety-consistency-before-deferred-execution.md) | Accepted | 2026-08-06 |
 
 ## 模板
 

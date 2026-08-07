@@ -38,6 +38,7 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.redis import redis_client
+from app.core.tenant import resolve_tenant_id
 from app.db.session import AsyncSessionLocal, get_db
 from app.modules.ai.agents.hitl.constants import ConfirmAction
 from app.modules.ai.agents.hitl.manager import hitl_manager
@@ -84,6 +85,17 @@ async def confirm_tool(
             pending.user_id,
             current_user.user_id,
         )
+        raise AuthorizationException(error_code="NOT_CONFIRMATION_OWNER")
+    current_tenant_id = resolve_tenant_id(current_user)
+    if pending.tenant_id != current_tenant_id:
+        logger.warning(
+            "HITL confirm tenant mismatch: confirmation_id=%s "
+            "pending_tenant=%d current_tenant=%d",
+            req.confirmation_id,
+            pending.tenant_id,
+            current_tenant_id,
+        )
+        # 与 owner mismatch 共用拒绝语义，避免泄露其它租户的 pending。
         raise AuthorizationException(error_code="NOT_CONFIRMATION_OWNER")
 
     # 3. 修订 S-13：用户禁用检查

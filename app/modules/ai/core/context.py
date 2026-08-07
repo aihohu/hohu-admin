@@ -77,6 +77,9 @@ class ChatDeps:
     trace_id: str
     """必填非空，build_tool_context 时断言校验，防 "" 漏到 DB 索引"""
 
+    tenant_id: int = 0
+    """服务端 tenant resolver 注入的可信租户；禁止从 Chat body/tool args 读取。"""
+
     conversation_id: int | None = None
     """当前会话 ID（spec §4.5 / §9.3 关联 ai_conversation + ai_operation_log 用）。
     None 表示新建会话首条消息（attach_trace_to_conversation 时仍写）。
@@ -122,6 +125,9 @@ class AiToolContext:
     tool_meta: AiToolMeta
     """聚合 tool 用（如 max_groups / allowed_filters，§5.5）"""
 
+    tenant_id: int = 0
+    """继承自 ChatDeps 的可信租户，用于 file/resource ACL。"""
+
     secrets: dict[str, str] = field(default_factory=dict)
     """sensitive_input 注入点（MVP 留空，v1.5+ 扩展，§7.2）"""
 
@@ -148,5 +154,6 @@ def build_tool_context(
         data_scope=deps.data_scope,
         trace_id=deps.trace_id,
         tool_meta=tool_meta,
+        tenant_id=deps.tenant_id,
         secrets={},  # MVP 留空（§7.2）
     )

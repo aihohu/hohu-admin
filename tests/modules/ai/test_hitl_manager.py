@@ -128,6 +128,7 @@ class TestCreatePending:
             redis_module.redis_client,
             confirmation_id=cid,
             user_id=9001,
+            tenant_id=37,
             conversation_id=100,
             tool_call_id="tc_1",
             trace_id="tr_1",
@@ -138,6 +139,7 @@ class TestCreatePending:
         # 返回 payload
         assert isinstance(payload, PendingPayload)
         assert payload.user_id == 9001
+        assert payload.tenant_id == 37
         assert payload.tool_call_id == "tc_1"
         assert payload.expires_at.endswith("Z")
 
@@ -146,6 +148,7 @@ class TestCreatePending:
         assert body is not None
         data = json.loads(body)
         assert data["user_id"] == 9001
+        assert data["tenant_id"] == 37
         assert data["args"] == {"user_id": 42, "new_dept_id": 8}
 
         # 进程内 Event 已注册
@@ -346,6 +349,31 @@ class TestRedisPayload:
         assert pending is not None
         assert pending.user_id == 1
         assert pending.args == {"k": "v"}
+
+    async def test_legacy_payload_without_tenant_defaults_to_single_tenant(
+        self,
+    ) -> None:
+        """升级前仍在 Redis 的 pending 只能恢复为当前单租户 0。"""
+        cid = hitl_manager.generate_confirmation_id()
+        legacy = {
+            "user_id": 1,
+            "conversation_id": 1,
+            "tool_call_id": "tc_legacy",
+            "trace_id": "tr_legacy",
+            "tool_name": "x",
+            "args": {},
+            "dry_run_result": None,
+            "expires_at": "2099-01-01T00:00:00Z",
+            "wake_action": None,
+        }
+        await redis_module.redis_client.set(
+            f"{AI_CONFIRM_REDIS_PREFIX}:{cid}", json.dumps(legacy)
+        )
+
+        pending = await hitl_manager.get_pending(redis_module.redis_client, cid)
+
+        assert pending is not None
+        assert pending.tenant_id == 0
 
     async def test_get_pending_not_found(self) -> None:
         pending = await hitl_manager.get_pending(
@@ -568,3 +596,4 @@ class TestPubSubMode:
             expires_at="2026-07-13T00:00:00Z",
         )
         assert payload.wake_action is None
+        assert payload.tenant_id == 0

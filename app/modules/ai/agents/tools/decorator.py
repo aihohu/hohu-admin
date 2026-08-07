@@ -66,6 +66,11 @@ def ai_tool(
         )
 
     def decorator(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
+        # Keep the immutable declaration on the function as well as in the
+        # process registry.  Static/audit tests can inspect built-ins without
+        # depending on mutable Registry singleton state or import order.
+        fn.__ai_tool_meta__ = meta  # type: ignore[attr-defined]
+
         # 注册到 Registry
         registry = ToolRegistry.get()
         registry.register(meta, fn)

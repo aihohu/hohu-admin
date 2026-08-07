@@ -13,7 +13,7 @@ Task 11：export_users_to_excel（spec §3.6 line 2099-2111 + §2.31 P1-5 line 1
 - 失败也建 task（status=FAILED + error_code + error_message，spec §2.31 line 1567-1572）
 
 无 batch_log（导出无 chunk 概念，spec §2.31 line 1456-1458）。
-异步导出（> USER_EXPORT_ASYNC_THRESHOLD）推迟到 Phase 3。
+超出同步上限时稳定拒绝并要求缩窄筛选；当前不会自动入队。
 """
 
 import io
@@ -282,7 +282,7 @@ async def export_users_to_excel(
     Raises:
         BusinessRuleException:
             - ``AI_EXPORT_REASON_REQUIRED`` — reason 缺失 / 全空白 / >256
-            - ``AI_EXPORT_ASYNC_REQUIRED`` — 行数 > 5000（Phase 3 异步通道）
+            - ``AI_EXPORT_ASYNC_REQUIRED`` — 行数 > 5000，需缩窄筛选后重试
     """
     storage = file_storage or get_file_storage()
     reason_clean = _validate_reason(reason)
@@ -322,7 +322,7 @@ async def export_users_to_excel(
         if len(rows) > USER_EXPORT_ASYNC_THRESHOLD:
             raise UnprocessableEntityException(
                 f"导出行数 {len(rows)} 超过同步阈值 {USER_EXPORT_ASYNC_THRESHOLD}"
-                f"，请等待异步通道开放",
+                "，请缩窄筛选条件后重试",
                 error_code="AI_EXPORT_ASYNC_REQUIRED",
             )
 
@@ -375,38 +375,55 @@ __all__ = [
 async def get_export_task(
     db: AsyncSession,
     export_id: str,
+    *,
+    operator_id: int,
+    allow_cross_owner: bool = False,
 ) -> UserExportTask | None:
-    """按 export_id 查询导出任务详情（spec §2.31 v2.2 P1-5 line 1589-1591）。
+    """按 export_id 查询当前 operator 可见的导出任务。
 
     Args:
         db: 异步数据库会话
         export_id: 任务 ID（Snowflake 字符串）
+        operator_id: 来自认证上下文的当前用户 ID；不得使用请求参数
+        allow_cross_owner: 仅 API 显式确认当前用户为 super admin 时传 True
 
     Returns:
-        UserExportTask | None：找不到返回 None，由 API 层抛
+        UserExportTask | None：不存在或不属于当前 operator 均返回 None，由 API 层抛
         ``NotFoundException(error_code="AI_EXPORT_TASK_NOT_FOUND")``。
     """
-    return await db.get(UserExportTask, export_id)
+    stmt = select(UserExportTask).where(UserExportTask.export_id == export_id)
+    if not allow_cross_owner:
+        stmt = stmt.where(UserExportTask.operator_id == operator_id)
+    return (await db.execute(stmt)).scalar_one_or_none()
 
 
 async def list_export_tasks(
     db: AsyncSession,
     query: UserExportTaskQuery,
+    *,
+    operator_id: int,
+    allow_cross_owner: bool = False,
 ) -> PageResult:
-    """分页查询导出任务列表（spec §2.31 v2.2 P1-5 line 1593-1595）。
+    """分页查询当前 operator 可见的导出任务列表。
 
-    支持按 operator_id / status 过滤；默认按 created_at desc（最新优先）。
+    非超管始终追加 ``operator_id == 当前认证用户`` SQL 条件；即使请求中传入
+    其他 ``operator_id`` 也不会扩大结果集。仅 ``allow_cross_owner=True`` 时，
+    query.operator_id 才能用于选择其他 operator。默认按 created_at desc。
     返回 ``PageResult``，records 是 UserExportTask ORM 实例（API 层负责转
     UserExportTaskResponse）。
 
     Args:
         db: 异步数据库会话
         query: 分页 + 过滤参数（current/size/operator_id/status）
+        operator_id: 来自认证上下文的当前用户 ID；不得使用 query.operator_id
+        allow_cross_owner: 仅 API 显式确认当前用户为 super admin 时传 True
 
     Raises:
         BusinessRuleException: ``AI_EXPORT_INVALID_STATUS`` — status 非合法枚举值
     """
     filters: list = []
+    if not allow_cross_owner:
+        filters.append(UserExportTask.operator_id == operator_id)
     if query.operator_id is not None:
         filters.append(UserExportTask.operator_id == query.operator_id)
     if query.status:
@@ -468,6 +485,8 @@ async def download_export_file(
     db: AsyncSession,
     export_id: str,
     *,
+    operator_id: int,
+    allow_cross_owner: bool = False,
     file_storage: FileStorage | None = None,
 ) -> tuple[bytes, str]:
     """按 export_id 下载已导出文件（Task 33，spec §2.31 line 1626 落地）。
@@ -478,6 +497,8 @@ async def download_export_file(
     Args:
         db: 异步数据库会话
         export_id: 任务 ID（Snowflake 字符串）
+        operator_id: 来自认证上下文的当前用户 ID；不得使用请求参数
+        allow_cross_owner: 仅当前用户为 super admin 时显式传 True
         file_storage: 可选注入（测试用 MockFileStorage；生产用 get_file_storage()）
 
     Returns:
@@ -486,7 +507,8 @@ async def download_export_file(
         与同步导出一致，不重新生成当前时间）。
 
     Raises:
-        NotFoundException: ``AI_EXPORT_TASK_NOT_FOUND`` — export_id 不存在
+        NotFoundException: ``AI_EXPORT_TASK_NOT_FOUND`` — export_id 不存在或不属于
+            当前 operator（避免泄露任务状态、filter_snapshot 与文件存在性）
         BusinessRuleException: ``AI_EXPORT_TASK_NOT_READY`` — status != SUCCESS
             （FAILED / CREATED / RUNNING zombie）
         BusinessRuleException: ``AI_EXPORT_FILE_MISSING`` — task.file_storage_key
@@ -494,7 +516,12 @@ async def download_export_file(
         BusinessRuleException: ``AI_EXPORT_FILE_EXPIRED`` — 文件被 30 天 TTL
             清理 / 外部删除（FileStorage.read 抛 FileNotFoundError）
     """
-    task = await db.get(UserExportTask, export_id)
+    task = await get_export_task(
+        db,
+        export_id,
+        operator_id=operator_id,
+        allow_cross_owner=allow_cross_owner,
+    )
     if task is None:
         raise NotFoundException(
             "用户导出任务",

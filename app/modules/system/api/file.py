@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import is_super_admin, require_permissions
 from app.core.base_response import PageResult, ResponseModel
+from app.core.tenant import resolve_tenant_id
 from app.db.session import get_db
 from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
@@ -29,7 +30,13 @@ async def upload(
 ):
     """上传单个文件"""
     file_record = await file_service.upload(
-        db, file, _current_user.user_name, business_type, business_id
+        db,
+        file,
+        current_user_name=_current_user.user_name,
+        business_type=business_type,
+        business_id=business_id,
+        owner_user_id=_current_user.user_id,
+        tenant_id=resolve_tenant_id(_current_user),
     )
     await db.commit()
     await db.refresh(file_record)
@@ -51,7 +58,13 @@ async def batch_upload(
 ):
     """批量上传文件"""
     file_records = await file_service.batch_upload(
-        db, files, _current_user.user_name, business_type, business_id
+        db,
+        files,
+        current_user_name=_current_user.user_name,
+        business_type=business_type,
+        business_id=business_id,
+        owner_user_id=_current_user.user_id,
+        tenant_id=resolve_tenant_id(_current_user),
     )
     await db.commit()
     for record in file_records:
@@ -74,7 +87,11 @@ async def get_list(
     _current_user: User = Depends(get_current_user),
 ):
     """获取文件分页列表"""
-    page_data = await file_service.get_list(db, query)
+    page_data = await file_service.get_list(
+        db,
+        query,
+        tenant_id=resolve_tenant_id(_current_user),
+    )
     return ResponseModel.success(data=page_data)
 
 
@@ -90,7 +107,14 @@ async def get_by_id(
     _current_user: User = Depends(get_current_user),
 ):
     """获取文件详情"""
-    file_record = await file_service.get_by_id(db, file_id)
+    admin = is_super_admin(_current_user)
+    file_record = await file_service.get_by_id(
+        db,
+        file_id,
+        tenant_id=resolve_tenant_id(_current_user),
+        owner_user_id=_current_user.user_id,
+        is_admin=admin,
+    )
     return ResponseModel.success(data=file_record)
 
 
@@ -106,7 +130,11 @@ async def delete(
 ):
     """删除文件（ownership 检查在 service）"""
     await file_service.delete(
-        db, file_id, current_user=current_user, is_admin=is_super_admin(current_user)
+        db,
+        file_id,
+        current_user=current_user,
+        is_admin=is_super_admin(current_user),
+        tenant_id=resolve_tenant_id(current_user),
     )
     await db.commit()
     return ResponseModel.success(msg="文件删除成功")
@@ -124,6 +152,12 @@ async def batch_delete(
     _current_user: User = Depends(get_current_user),
 ):
     """批量删除文件"""
-    count = await file_service.batch_delete(db, ids, is_admin=True)
+    count = await file_service.batch_delete(
+        db,
+        ids,
+        current_user=_current_user,
+        is_admin=True,
+        tenant_id=resolve_tenant_id(_current_user),
+    )
     await db.commit()
     return ResponseModel.success(msg=f"成功删除 {count} 个文件")

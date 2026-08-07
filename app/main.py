@@ -4,12 +4,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse
-from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 import app.tasks  # noqa: F401  # pyright: ignore[reportUnusedImport]
 from app.core.config import settings
 from app.core.exceptions import setup_exception_handlers
+from app.core.file_storage import validate_private_storage_roots
+from app.core.public_uploads import PublicUploadStaticFiles
 from app.core.redis import close_redis
 from app.core.scheduler import scheduler_manager
 from app.db.session import AsyncSessionLocal
@@ -260,9 +261,15 @@ app.include_router(
     contributes_router, prefix="/api/v1/contributes", tags=["contributes"]
 )
 
-# 确保上传目录存在
+# 公共上传目录可静态访问；私有上传目录只创建，禁止 StaticFiles mount。
+validate_private_storage_roots()
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")
+os.makedirs(settings.PRIVATE_UPLOAD_DIR, exist_ok=True)
+app.mount(
+    "/uploads",
+    PublicUploadStaticFiles(directory=settings.UPLOAD_DIR),
+    name="uploads",
+)
 
 
 # 健康检查

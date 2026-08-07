@@ -49,6 +49,8 @@ class Settings(BaseSettings):
 
     # 文件上传配置
     UPLOAD_DIR: str = "uploads"
+    # 私有上传根目录：不得通过 StaticFiles 或反向代理静态映射直接暴露
+    PRIVATE_UPLOAD_DIR: str = "private_uploads"
     UPLOAD_MAX_SIZE: int = 10 * 1024 * 1024  # 10MB
     # 数据库配置
     DB_ECHO: bool = False
@@ -60,7 +62,8 @@ class Settings(BaseSettings):
     # 文件存储抽象（spec §3.9 v2.2 P1-4）
     # Phase 1 默认 local；Phase 3+ 切 s3 时业务代码零改动（仅切换 get_file_storage 工厂）
     FILE_STORAGE_BACKEND: Literal["local", "s3"] = "local"
-    LOCAL_FILE_STORAGE_ROOT: str = "uploads/file_storage"
+    # 导入预检、失败清单和导出文件含业务数据，必须位于未静态挂载的私有根。
+    LOCAL_FILE_STORAGE_ROOT: str = "private_uploads/file_storage"
 
     # 频率限制配置
     # 登录接口：每分钟最多登录尝试次数

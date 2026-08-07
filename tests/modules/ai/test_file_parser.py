@@ -11,6 +11,8 @@
 # ruff: noqa: PLC0415
 
 import csv
+import io
+import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -19,12 +21,16 @@ from openpyxl import Workbook
 
 from app.core.exceptions import BusinessRuleException
 from app.modules.ai.agents.tools.file_parser import (
+    MAX_PARSE_CELLS,
+    MAX_PARSE_COLUMNS,
+    MAX_PARSE_ROWS,
     PARSERS,
     PREVIEW_ROW_LIMIT,
     SUPPORTED_MIME_TYPES,
     CsvParser,
     ExcelParser,
     parse_file,
+    parse_file_bytes,
 )
 
 # ============ 辅助：构造测试文件 ============
@@ -52,6 +58,18 @@ def _make_csv(path: Path, rows: list[list[str]], *, encoding: str = "utf-8") -> 
         writer = csv.writer(f)
         for row in rows:
             writer.writerow(row)
+
+
+def _replace_zip_member(data: bytes, name: str, replacement: bytes) -> bytes:
+    source = zipfile.ZipFile(io.BytesIO(data))
+    output = io.BytesIO()
+    with source, zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as target:
+        for info in source.infolist():
+            target.writestr(
+                info,
+                replacement if info.filename == name else source.read(info.filename),
+            )
+    return output.getvalue()
 
 
 # ============ ExcelParser ============
@@ -137,12 +155,57 @@ class TestExcelParser:
         finally:
             object.__setattr__(parser, "max_bytes", original)
 
-    def test_mime_types_declared(self) -> None:
-        assert "application/vnd.ms-excel" in ExcelParser.mime_types
+    def test_only_modern_xlsx_mime_is_declared(self) -> None:
+        assert "application/vnd.ms-excel" not in ExcelParser.mime_types
         assert (
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             in ExcelParser.mime_types
         )
+
+    async def test_invalid_xlsx_has_stable_type_error(self) -> None:
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await ExcelParser().parse_bytes(b"PK\x03\x04damaged")
+        assert exc_info.value.error_code == "AI_FILE_TYPE_NOT_ALLOWED"
+
+    async def test_malformed_worksheet_xml_has_stable_type_error(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "malformed-sheet.xlsx"
+        _make_xlsx(path, [["name"], ["alice"]])
+        data = _replace_zip_member(
+            path.read_bytes(), "xl/worksheets/sheet1.xml", b"<broken"
+        )
+
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await ExcelParser().parse_bytes(data)
+
+        assert exc_info.value.error_code == "AI_FILE_TYPE_NOT_ALLOWED"
+
+    async def test_row_budget_stops_excel_parse(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "too-many-rows.xlsx"
+        _make_xlsx(path, [["id"], [1], [2], [3]])
+        monkeypatch.setattr("app.modules.ai.agents.tools.file_parser.MAX_PARSE_ROWS", 2)
+
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await ExcelParser().parse(path)
+
+        assert exc_info.value.error_code == "AI_FILE_TOO_LARGE"
+
+    async def test_column_budget_stops_excel_parse(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "too-many-columns.xlsx"
+        _make_xlsx(path, [["a", "b", "c"], [1, 2, 3]])
+        monkeypatch.setattr(
+            "app.modules.ai.agents.tools.file_parser.MAX_PARSE_COLUMNS", 2
+        )
+
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await ExcelParser().parse(path)
+
+        assert exc_info.value.error_code == "AI_FILE_TOO_LARGE"
 
     def test_max_bytes_is_50mb(self) -> None:
         assert ExcelParser.max_bytes == 50 * 1024 * 1024
@@ -201,6 +264,20 @@ class TestCsvParser:
         result = await CsvParser().parse(path)
         assert result.rows == 5
         assert len(result.preview) == PREVIEW_ROW_LIMIT
+
+    async def test_cell_budget_stops_csv_parse(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = tmp_path / "too-many-cells.csv"
+        _make_csv(path, [["a", "b"], ["1", "2"], ["3", "4"]])
+        monkeypatch.setattr(
+            "app.modules.ai.agents.tools.file_parser.MAX_PARSE_CELLS", 5
+        )
+
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await CsvParser().parse(path)
+
+        assert exc_info.value.error_code == "AI_FILE_TOO_LARGE"
 
     async def test_empty_file_returns_empty_result(self, tmp_path: Path) -> None:
         """完全空文件 → rows=0"""
@@ -266,6 +343,30 @@ class TestParseFile:
             await parse_file(path, "")
         assert exc_info.value.error_code == "AI_FILE_TYPE_UNSUPPORTED"
 
+    async def test_parse_authorized_xlsx_bytes_without_reopening_path(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "authorized.xlsx"
+        _make_xlsx(path, [["name"], ["alice"]])
+        data = path.read_bytes()
+        path.unlink()
+
+        result = await parse_file_bytes(
+            data,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        assert result.parser == "ExcelParser"
+        assert result.rows == 1
+        assert result.file_size == len(data)
+
+    async def test_parse_authorized_empty_csv_bytes(self) -> None:
+        result = await parse_file_bytes(b"", "text/csv")
+
+        assert result.parser == "CsvParser"
+        assert result.rows == 0
+        assert result.columns == []
+
 
 # ============ PARSERS 注册表（启动一致性） ============
 
@@ -275,6 +376,11 @@ class TestParsersRegistry:
 
     def test_supported_mime_types_match_parsers(self) -> None:
         assert set(SUPPORTED_MIME_TYPES) == set(PARSERS.keys())
+
+    def test_resource_budgets_are_bounded(self) -> None:
+        assert MAX_PARSE_ROWS == 10_000
+        assert MAX_PARSE_COLUMNS == 256
+        assert MAX_PARSE_CELLS == 200_000
 
     def test_excel_mimes_registered(self) -> None:
         for mt in ExcelParser.mime_types:

@@ -1,4 +1,4 @@
-"""scripts/check_ai_tools.py 8 项 static-only 检查的单测 — spec §12.4
+"""scripts/check_ai_tools.py 10 项 static-only 检查的单测 — spec §12.4
 
 构造违规 meta + 函数签名，验证 check_xxx 函数能正确检出。
 不依赖 Registry（直接构造 RegisteredTool dataclass）。
@@ -6,19 +6,26 @@
 
 # ruff: noqa: PLC0415
 
+import importlib
+
+import pytest
+
 from app.modules.ai.agents.tools.meta import SENSITIVE_INPUT_BLOCKLIST, AiToolMeta
 from app.modules.ai.agents.tools.registry import RegisteredTool
 from scripts.check_ai_tools import (
+    EXPECTED_BUILTIN_TOOL_NAMES,
     SUMMARY_MAX_UNICODE_CHARS,
     check_accepts_file_mime_valid,
     check_args_summary_fields_not_sensitive,
     check_blocklist_field_must_be_sensitive,
     check_destructive_requires_hitl,
     check_dry_run_tool_must_implement_hook,
+    check_file_param_requires_protected_loader,
     check_high_risk_requires_dry_run,
     check_scope_param_requires_check,
     check_sensitive_input_not_in_signature,
     check_summary_length_limit,
+    load_all_tools,
 )
 
 
@@ -173,6 +180,15 @@ class TestScopeParamRequiresCheck:
         fn_src = "async def _tool(ctx, status): pass"
         assert check_scope_param_requires_check(reg, fn_src) == []
 
+    def test_job_exemption_is_exact_to_job_agent(self) -> None:
+        reg = _make_reg(agent="user_mgmt")
+        fn_src = "async def _tool(ctx, job_id: str): return {}"
+
+        violations = check_scope_param_requires_check(reg, fn_src)
+
+        assert len(violations) == 1
+        assert "job_id" in violations[0].detail
+
     def test_scope_param_with_check_no_violation(self) -> None:
         reg = _make_reg()
         fn_src = """
@@ -206,6 +222,88 @@ async def _tool(ctx, user_id: int):
         reg = _make_reg(agent="shared")
         fn_src = "async def _tool(ctx, file_id: str): return {}"
         assert check_scope_param_requires_check(reg, fn_src) == []
+
+    def test_job_id_uses_global_permission_scope(self) -> None:
+        reg = _make_reg(agent="job_mgmt")
+        fn_src = "async def _tool(ctx, job_id: str): return {}"
+
+        assert check_scope_param_requires_check(reg, fn_src) == []
+
+
+class TestFileParamRequiresProtectedLoader:
+    """Task 35: file_id is a protected resource, including shared tools."""
+
+    def test_file_id_with_shared_loader_has_no_violation(self) -> None:
+        reg = _make_reg()
+        fn_src = """
+async def _tool(ctx, file_id: str):
+    return await load_protected_file(ctx, file_id, policy=POLICY)
+"""
+        assert check_file_param_requires_protected_loader(reg, fn_src) == []
+
+    def test_file_id_with_business_wrapper_has_no_violation(self) -> None:
+        reg = _make_reg()
+        fn_src = """
+async def _tool(ctx, file_id: str):
+    return await _load_file_bytes(ctx, file_id)
+"""
+        assert check_file_param_requires_protected_loader(reg, fn_src) == []
+
+    def test_file_id_with_bare_query_is_rejected(self) -> None:
+        reg = _make_reg(agent="shared")
+        fn_src = """
+async def _tool(ctx, file_id: str):
+    record = await ctx.db.get(File, int(file_id))
+    return Path(record.file_path).read_bytes()
+"""
+        violations = check_file_param_requires_protected_loader(reg, fn_src)
+
+        assert len(violations) == 1
+        assert violations[0].check == "file_param_requires_protected_loader"
+
+    def test_similar_helper_name_does_not_bypass_check(self) -> None:
+        reg = _make_reg(agent="shared")
+        fn_src = """
+async def _tool(ctx, file_id: str):
+    return await unsafe_load_protected_file(ctx, file_id)
+"""
+
+        violations = check_file_param_requires_protected_loader(reg, fn_src)
+
+        assert len(violations) == 1
+        assert violations[0].check == "file_param_requires_protected_loader"
+
+    def test_tool_without_file_id_is_ignored(self) -> None:
+        reg = _make_reg()
+        fn_src = "async def _tool(ctx, user_id: int): return {}"
+
+        assert check_file_param_requires_protected_loader(reg, fn_src) == []
+
+
+class TestBuiltinScanSurface:
+    def test_all_16_mandatory_builtins_are_loaded(self) -> None:
+        names = {tool.meta.name for tool in load_all_tools()}
+
+        assert len(EXPECTED_BUILTIN_TOOL_NAMES) == 16
+        assert EXPECTED_BUILTIN_TOOL_NAMES <= names
+
+    def test_mandatory_module_import_failure_is_not_swallowed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real_import = importlib.import_module
+
+        def fail_job_module(name: str):
+            if name == "app.modules.job.ai_tools":
+                raise ImportError("broken mandatory module")
+            return real_import(name)
+
+        monkeypatch.setattr(
+            "scripts.check_ai_tools.importlib.import_module",
+            fail_job_module,
+        )
+
+        with pytest.raises(ImportError, match="broken mandatory module"):
+            load_all_tools()
 
 
 class TestAcceptsFileMimeValid:

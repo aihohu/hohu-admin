@@ -85,11 +85,36 @@ def load_builtin_tools() -> None:
     """
     from importlib import import_module  # noqa: PLC0415  延迟 import 避免循环
 
-    # Phase 1.4：system 模块的 user.count / user.stats / user.distinct
-    import_module("app.modules.system.ai_tools")
+    module_names = (
+        # Phase 1.4：system 模块的 user.count / user.stats / user.distinct
+        "app.modules.system.ai_tools",
+        # v1.5+：job.update_cron（spec §11.3 白名单 + JobAiUpdate schema）
+        "app.modules.job.ai_tools",
+        # v1.5+ SR-24：file.parse（Excel/CSV 解析，spec §16）
+        "app.modules.ai.agents.tools.file_tools",
+    )
+    modules = [import_module(module_name) for module_name in module_names]
 
-    # v1.5+：job 模块的 job.update_cron（spec §11.3 白名单 + JobAiUpdate schema）
-    import_module("app.modules.job.ai_tools")
+    # import_module() 对已缓存模块不会再次执行装饰器。测试隔离、热重载或其他
+    # 显式 reset 场景下，Registry 可能已清空而模块仍在 sys.modules；此时从函数
+    # 上的不可变声明恢复注册，避免注册结果依赖导入顺序。正常启动路径中 existing
+    # 与 candidate 是同一函数，因此保持幂等；同名异源仍 fail-fast。
+    registry = ToolRegistry.get()
+    for module in modules:
+        for candidate in vars(module).values():
+            meta = getattr(candidate, "__ai_tool_meta__", None)
+            if not isinstance(meta, AiToolMeta):
+                continue
+            if getattr(candidate, "__module__", None) != module.__name__:
+                continue
 
-    # v1.5+ SR-24：file.parse（Excel/CSV 解析，spec §16）
-    import_module("app.modules.ai.agents.tools.file_tools")
+            existing = registry.find(meta.name)
+            if existing is None:
+                registry.register(meta, candidate)
+                continue
+            if existing.fn is not candidate or existing.meta != meta:
+                raise ToolRegistryError(
+                    f"Tool name conflict while loading built-ins: {meta.name!r} "
+                    f"already registered at {existing.module_path}, cannot restore "
+                    f"{candidate.__module__}.{candidate.__qualname__}"
+                )

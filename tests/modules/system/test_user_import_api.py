@@ -24,7 +24,7 @@ service 层（dry_run_import_users / batch_create_users_from_records）用 patch
 import io
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -34,12 +34,17 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.exceptions import (
+    BusinessRuleException,
     UnprocessableEntityException,
 )
 from app.main import app
+from app.modules.system.api.user import import_users
 from app.modules.system.models.user import User
 from app.modules.system.user.constants import ImportBatchStatus
-from app.modules.system.user.import_parser import ImportErrorCollection
+from app.modules.system.user.import_parser import (
+    MAX_FILE_SIZE_BYTES,
+    ImportErrorCollection,
+)
 from app.modules.system.user.models import UserImportBatch
 from app.modules.system.user.schemas import (
     FailedRow,
@@ -238,6 +243,24 @@ def _make_field_errors_xlsx() -> bytes:
 
 
 # ========== Auth ==========
+
+
+async def test_endpoint_reads_upload_with_hard_size_bound() -> None:
+    upload = MagicMock()
+    upload.read = AsyncMock(return_value=b"x" * (MAX_FILE_SIZE_BYTES + 1))
+    upload.content_type = MIME_XLSX
+    upload.filename = _DEFAULT_FILENAME
+
+    with pytest.raises(BusinessRuleException) as exc_info:
+        await import_users(
+            file=upload,
+            reason="QA bounded upload",
+            db=MagicMock(),
+            current_user=MagicMock(),
+        )
+
+    assert exc_info.value.error_code == "AI_IMPORT_FILE_TOO_LARGE"
+    upload.read.assert_awaited_once_with(MAX_FILE_SIZE_BYTES + 1)
 
 
 class TestPostImportAuth:

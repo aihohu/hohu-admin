@@ -18,8 +18,14 @@ user_service.parse_import_excel（service 层）是 thin wrapper：直接 delega
 import csv
 import io
 import re
+import struct
+import zipfile
+from pathlib import PurePosixPath
+from typing import NoReturn
+from xml.etree.ElementTree import ParseError
 
 from openpyxl import load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
 
 from app.core.exceptions import BusinessRuleException
 from app.modules.system.user.constants import USER_IMPORT_MAX_ROWS
@@ -27,12 +33,25 @@ from app.modules.system.user.schemas import FailedRow, UserImportRecord
 
 #: spec §2.10 line 277 MIME 白名单
 MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-MIME_XLS = "application/vnd.ms-excel"
 MIME_CSV = "text/csv"
-ALLOWED_MIME_TYPES: frozenset[str] = frozenset({MIME_XLSX, MIME_XLS, MIME_CSV})
+ALLOWED_MIME_TYPES: frozenset[str] = frozenset({MIME_XLSX, MIME_CSV})
 
 #: spec §2.10：≤ 10MB（常量在模块内，避免 settings 误改导致安全边界漂移）
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
+XLSX_MAX_ZIP_ENTRIES = 2048
+XLSX_MAX_ENTRY_UNCOMPRESSED_BYTES = 32 * 1024 * 1024
+XLSX_MAX_TOTAL_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
+XLSX_MAX_COMPRESSION_RATIO = 200.0
+XLSX_MAX_DECLARED_COLUMNS = 256
+
+_XLSX_REQUIRED_MEMBERS = frozenset(
+    {
+        "[Content_Types].xml",
+        "_rels/.rels",
+        "xl/workbook.xml",
+        "xl/_rels/workbook.xml.rels",
+    }
+)
 
 #: 模板表头顺序（与 Task 14 模板下载一致；解析时按表头名称匹配列索引）
 EXCEL_HEADERS: tuple[str, ...] = (
@@ -106,7 +125,7 @@ def parse_import_excel(file_bytes: bytes, mime_type: str) -> list[UserImportReco
     """
     if mime_type not in ALLOWED_MIME_TYPES:
         raise BusinessRuleException(
-            f"不支持的文件类型: {mime_type}（允许 xlsx/xls/csv）",
+            f"不支持的文件类型: {mime_type}（允许 xlsx/csv）",
             error_code="AI_IMPORT_INVALID_MIME",
         )
 
@@ -123,11 +142,7 @@ def parse_import_excel(file_bytes: bytes, mime_type: str) -> list[UserImportReco
         raw_rows = _parse_xlsx_rows(file_bytes)
 
     if len(raw_rows) > USER_IMPORT_MAX_ROWS:
-        raise BusinessRuleException(
-            f"行数超 {USER_IMPORT_MAX_ROWS} 上限（实际 {len(raw_rows)} 行），"
-            "请分批导入或等待 Phase 3 异步通道",
-            error_code="AI_IMPORT_TOO_MANY_ROWS",
-        )
+        _raise_too_many_rows(len(raw_rows))
 
     records: list[UserImportRecord] = []
     errors: list[FailedRow] = []
@@ -144,16 +159,45 @@ def parse_import_excel(file_bytes: bytes, mime_type: str) -> list[UserImportReco
 
 
 def _parse_xlsx_rows(file_bytes: bytes) -> list[dict[str, str]]:
-    """openpyxl 解析 xlsx/xls → list[row_dict]（按 EXCEL_HEADERS 提取列）。
+    """openpyxl 解析 xlsx → list[row_dict]（按 EXCEL_HEADERS 提取列）。
 
     - read_only + data_only 模式（不加载公式 / 样式）
     - 表头按名称匹配（大小写不敏感），允许列顺序变化
     - 完全空行跳过（防止模板尾部空白行被误判）
     - 单元格 None → ""（统一字符串处理）
     """
-    wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+    _validate_xlsx_archive(file_bytes)
+    try:
+        wb = load_workbook(
+            io.BytesIO(file_bytes),
+            read_only=True,
+            data_only=True,
+            keep_links=False,
+        )
+    except (
+        EOFError,
+        IndexError,
+        InvalidFileException,
+        KeyError,
+        OSError,
+        ParseError,
+        RuntimeError,
+        SyntaxError,
+        TypeError,
+        ValueError,
+        zipfile.BadZipFile,
+    ):
+        _raise_invalid_xlsx()
     try:
         ws = wb.active
+        if ws is None:
+            _raise_invalid_xlsx()
+        declared_rows = ws.max_row or 0
+        declared_columns = ws.max_column or 0
+        if declared_rows > USER_IMPORT_MAX_ROWS + 1:
+            _raise_too_many_rows(declared_rows - 1)
+        if declared_columns > XLSX_MAX_DECLARED_COLUMNS:
+            _raise_xlsx_expansion_too_large()
         rows_iter = ws.iter_rows(values_only=True)
         try:
             header_row = next(rows_iter)
@@ -172,7 +216,23 @@ def _parse_xlsx_rows(file_bytes: bytes) -> list[dict[str, str]]:
                 else:
                     row_dict[fname] = str(raw[i]).strip()
             result.append(row_dict)
+            if len(result) > USER_IMPORT_MAX_ROWS:
+                _raise_too_many_rows(len(result))
         return result
+    except (
+        EOFError,
+        IndexError,
+        InvalidFileException,
+        KeyError,
+        OSError,
+        ParseError,
+        RuntimeError,
+        SyntaxError,
+        TypeError,
+        ValueError,
+        zipfile.BadZipFile,
+    ):
+        _raise_invalid_xlsx()
     finally:
         wb.close()
 
@@ -185,6 +245,10 @@ def _parse_csv_rows(file_bytes: bytes) -> list[dict[str, str]]:
     - 完全空行跳过
     """
     text = file_bytes.decode("utf-8-sig", errors="strict")
+    line_separators = text.count("\n") + text.count("\r") - text.count("\r\n")
+    physical_lines = line_separators + bool(text and not text.endswith(("\n", "\r")))
+    if physical_lines > USER_IMPORT_MAX_ROWS + 1:
+        _raise_too_many_rows(physical_lines - 1)
     reader = csv.DictReader(io.StringIO(text))
     fieldnames = reader.fieldnames or []
     header_idx = _resolve_header_indices(fieldnames)
@@ -200,7 +264,149 @@ def _parse_csv_rows(file_bytes: bytes) -> list[dict[str, str]]:
             cell = raw.get(csv_key) if csv_key else None
             row_dict[fname] = "" if cell is None else str(cell).strip()
         result.append(row_dict)
+        if len(result) > USER_IMPORT_MAX_ROWS:
+            _raise_too_many_rows(len(result))
     return result
+
+
+def _raise_too_many_rows(actual_rows: int) -> NoReturn:
+    raise BusinessRuleException(
+        f"行数超 {USER_IMPORT_MAX_ROWS} 上限（实际至少 {actual_rows} 行），"
+        "请拆分为多个文件后分批导入",
+        error_code="AI_IMPORT_TOO_MANY_ROWS",
+    )
+
+
+def _raise_invalid_xlsx() -> NoReturn:
+    raise BusinessRuleException(
+        "文件不是有效的 XLSX 工作簿",
+        error_code="AI_IMPORT_INVALID_MIME",
+    )
+
+
+def _raise_xlsx_expansion_too_large() -> NoReturn:
+    raise BusinessRuleException(
+        "XLSX 解压结构超过安全预算",
+        error_code="AI_IMPORT_FILE_TOO_LARGE",
+    )
+
+
+def _safe_zip_member_name(name: str) -> bool:
+    if not name or "\x00" in name or "\\" in name:
+        return False
+    path = PurePosixPath(name)
+    return (
+        not path.is_absolute()
+        and ".." not in path.parts
+        and not (path.parts and ":" in path.parts[0])
+    )
+
+
+def _declared_zip_entry_count(file_bytes: bytes) -> int:
+    """Read EOCD before ZipFile allocates one ZipInfo per declared member."""
+    signature = b"PK\x05\x06"
+    search_start = max(0, len(file_bytes) - (65_535 + 22))
+    search_end = len(file_bytes)
+    while True:
+        offset = file_bytes.rfind(signature, search_start, search_end)
+        if offset < 0:
+            _raise_invalid_xlsx()
+        if offset + 22 <= len(file_bytes):
+            (
+                disk_number,
+                central_directory_disk,
+                entries_on_disk,
+                total_entries,
+                central_directory_size,
+                central_directory_offset,
+                comment_length,
+            ) = struct.unpack_from("<4H2LH", file_bytes, offset + 4)
+            if offset + 22 + comment_length == len(file_bytes):
+                if (
+                    disk_number != 0
+                    or central_directory_disk != 0
+                    or entries_on_disk != total_entries
+                ):
+                    _raise_invalid_xlsx()
+                if (
+                    total_entries == 0xFFFF
+                    or central_directory_size == 0xFFFFFFFF
+                    or central_directory_offset == 0xFFFFFFFF
+                ):
+                    _raise_xlsx_expansion_too_large()
+                if total_entries > XLSX_MAX_ZIP_ENTRIES:
+                    _raise_xlsx_expansion_too_large()
+                if central_directory_offset + central_directory_size != offset:
+                    _raise_invalid_xlsx()
+                return total_entries
+        search_end = offset
+
+
+def _validate_xlsx_archive(file_bytes: bytes) -> None:
+    """Bound ZIP expansion before openpyxl sees attacker-controlled OOXML."""
+    if not file_bytes.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
+        _raise_invalid_xlsx()
+    declared_entries = _declared_zip_entry_count(file_bytes)
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as archive:
+            infos = archive.infolist()
+            if len(infos) != declared_entries:
+                _raise_invalid_xlsx()
+            if len(infos) > XLSX_MAX_ZIP_ENTRIES:
+                _raise_xlsx_expansion_too_large()
+
+            names: set[str] = set()
+            total_uncompressed = 0
+            total_compressed = 0
+            for info in infos:
+                is_symlink = (info.external_attr >> 16) & 0o170000 == 0o120000
+                if (
+                    not _safe_zip_member_name(info.filename)
+                    or info.filename in names
+                    or info.flag_bits & 0x1
+                    or is_symlink
+                ):
+                    _raise_invalid_xlsx()
+                names.add(info.filename)
+
+                if info.file_size > XLSX_MAX_ENTRY_UNCOMPRESSED_BYTES:
+                    _raise_xlsx_expansion_too_large()
+                if (
+                    info.file_size > 0
+                    and info.file_size / max(1, info.compress_size)
+                    > XLSX_MAX_COMPRESSION_RATIO
+                ):
+                    _raise_xlsx_expansion_too_large()
+                total_uncompressed += info.file_size
+                total_compressed += info.compress_size
+
+            if total_uncompressed > XLSX_MAX_TOTAL_UNCOMPRESSED_BYTES or (
+                total_uncompressed > 0
+                and total_uncompressed / max(1, total_compressed)
+                > XLSX_MAX_COMPRESSION_RATIO
+            ):
+                _raise_xlsx_expansion_too_large()
+
+            if not _XLSX_REQUIRED_MEMBERS.issubset(names) or not any(
+                name.startswith("xl/worksheets/") and name.endswith(".xml")
+                for name in names
+            ):
+                _raise_invalid_xlsx()
+            if archive.testzip() is not None:
+                _raise_invalid_xlsx()
+    except BusinessRuleException:
+        raise
+    except (
+        EOFError,
+        KeyError,
+        NotImplementedError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        zipfile.BadZipFile,
+        zipfile.LargeZipFile,
+    ):
+        _raise_invalid_xlsx()
 
 
 def _resolve_header_indices(header_row) -> dict[str, int | None]:
@@ -415,7 +621,6 @@ __all__ = [
     "EXCEL_HEADERS",
     "MAX_FILE_SIZE_BYTES",
     "MIME_CSV",
-    "MIME_XLS",
     "MIME_XLSX",
     "ImportErrorCollection",
     "parse_import_excel",

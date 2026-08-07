@@ -14,6 +14,7 @@ from app.core.exceptions import (
     NotFoundException,
     UnprocessableEntityException,
 )
+from app.core.rbac import is_super_admin
 from app.db.base import user_depts
 from app.db.session import get_db
 from app.modules.system.models.user import User
@@ -39,6 +40,7 @@ from app.modules.system.user.export_service import (
     list_export_tasks,
 )
 from app.modules.system.user.import_parser import (
+    MAX_FILE_SIZE_BYTES,
     ImportErrorCollection,
     parse_import_excel,
 )
@@ -480,7 +482,7 @@ def _coerce_dry_run(raw: str | None) -> bool:
     dependencies=[Depends(require_permissions("system:user:import"))],
 )
 async def import_users(
-    file: Annotated[UploadFile, File(description="Excel 文件（≤ 10MB，xlsx/xls/csv）")],
+    file: Annotated[UploadFile, File(description="Excel 文件（≤ 10MB，xlsx/csv）")],
     reason: Annotated[str, Form(description="业务理由（1-256 字符，spec §2.30）")],
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -517,7 +519,10 @@ async def import_users(
     reason_clean = _validate_import_reason(reason)
 
     # UploadFile → bytes + mime（spec §2.10 MIME 白名单在 parser 内校验）
-    file_bytes = await file.read()
+    # Read at most one byte beyond the hard parser cap.  Calling read() without
+    # a bound would let an oversized multipart body exhaust worker memory before
+    # the parser can return AI_IMPORT_FILE_TOO_LARGE.
+    file_bytes = await file.read(MAX_FILE_SIZE_BYTES + 1)
     mime_type = file.content_type or ""
 
     # 解析 + 字段校验（spec §2.10 / §2.12）
@@ -967,7 +972,9 @@ async def export_users(
     "/export",
     response_model=ResponseModel[PageResult[UserExportTaskResponse]],
     summary="分页查询导出任务列表",
-    description="spec §2.31 v2.2 P1-5 line 1593-1595：按 operator_id / status 过滤。",
+    description=(
+        "默认只查询当前用户创建的导出任务；超管可按 operator_id / status 过滤。"
+    ),
     responses={
         200: {"description": "分页列表"},
         401: {"description": "未登录或令牌已过期"},
@@ -978,13 +985,18 @@ async def export_users(
 async def list_export_tasks_endpoint(
     query: UserExportTaskQuery = Depends(),
     db: AsyncSession = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
-    """spec §2.31 line 1593-1595：admin 查「我/团队导出过的列表」。
+    """查询当前用户自己的导出列表；仅超管可跨 operator 查询。
 
     返回 PageResult，records 是 UserExportTaskResponse（operator_id 字符串化）。
     """
-    page = await list_export_tasks(db, query)
+    page = await list_export_tasks(
+        db,
+        query,
+        operator_id=current_user.user_id,
+        allow_cross_owner=is_super_admin(current_user),
+    )
     records = [UserExportTaskResponse.model_validate(t) for t in page.records]
     return ResponseModel.success(
         data=PageResult(
@@ -1000,25 +1012,30 @@ async def list_export_tasks_endpoint(
     "/export/{export_id}",
     response_model=ResponseModel[UserExportTaskResponse],
     summary="按 export_id 查询导出任务详情",
-    description="spec §2.31 v2.2 P1-5 line 1589-1591：审计反查用。",
+    description="默认仅任务创建人可见；超管可跨 operator 审计反查。",
     responses={
         200: {"description": "任务详情"},
         401: {"description": "未登录或令牌已过期"},
         403: {"description": "权限不足"},
-        404: {"description": "export_id 不存在"},
+        404: {"description": "export_id 不存在或当前用户不可见"},
     },
     dependencies=[Depends(require_permissions("system:user:list"))],
 )
 async def get_export_task_detail(
     export_id: str,
     db: AsyncSession = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """spec §2.31 line 1589-1591：导出任务详情查询。
 
     找不到抛 NotFoundException(AI_EXPORT_TASK_NOT_FOUND)。
     """
-    task = await get_export_task(db, export_id)
+    task = await get_export_task(
+        db,
+        export_id,
+        operator_id=current_user.user_id,
+        allow_cross_owner=is_super_admin(current_user),
+    )
     if task is None:
         raise NotFoundException(
             "用户导出任务",
@@ -1047,18 +1064,23 @@ async def get_export_task_detail(
 async def download_export_file_endpoint(
     export_id: str,
     db: AsyncSession = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Task 33：AI 对话内点击下载闭环。
 
-    权限与 POST /export 一致（system:user:export）：能导出的角色就能
-    重下载历史任务文件（同等敏感级别）。
+    权限与 POST /export 一致（system:user:export），且默认只能重下载本人创建的
+    历史任务；仅超管可跨 operator 下载。
 
     决策 33.4：filename 从 task.created_at 派生（与同步导出决策 30.6
     一致），不重新生成当前时间 — 重下载历史任务时反映真实导出时刻，
     便于审计反查「这份文件是哪次导出的」。
     """
-    xlsx_bytes, filename = await download_export_file(db, export_id)
+    xlsx_bytes, filename = await download_export_file(
+        db,
+        export_id,
+        operator_id=current_user.user_id,
+        allow_cross_owner=is_super_admin(current_user),
+    )
     return Response(
         content=xlsx_bytes,
         media_type=_EXPORT_MIME_TYPE,

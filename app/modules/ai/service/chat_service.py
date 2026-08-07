@@ -11,6 +11,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.tenant import resolve_tenant_id
 from app.modules.ai.agents.chat_agent import create_chat_agent
 
 # spec §13 决策 15: 从 constants.py import 避免 service ↔ agents.supervisor 循环依赖.
@@ -207,6 +208,7 @@ class ChatService:
             data_scope=data_scope,
             agent=agent,
             trace_id=trace_id or f"tr_{uuid.uuid4().hex[:16]}",
+            tenant_id=resolve_tenant_id(user),
             sticky_decision=decision,
         )
 

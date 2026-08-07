@@ -41,9 +41,11 @@ from app.modules.system.user.constants import (
 from app.modules.system.user.export_service import (
     download_export_file,
     export_users_to_excel,
+    get_export_task,
+    list_export_tasks,
 )
 from app.modules.system.user.models import UserExportTask
-from app.modules.system.user.schemas import UserExportFilter
+from app.modules.system.user.schemas import UserExportFilter, UserExportTaskQuery
 
 # ========== helpers ==========
 
@@ -422,6 +424,8 @@ class TestExportThreshold:
                 file_storage=file_storage,
             )
         assert exc.value.error_code == "AI_EXPORT_ASYNC_REQUIRED"
+        assert "缩窄" in exc.value.message
+        assert "异步" not in exc.value.message
 
 
 # ========== Data Scope（spec §2.31 line 1545） ==========
@@ -677,7 +681,10 @@ class TestDownloadExportFile:
         )
 
         got_bytes, filename = await download_export_file(
-            db_session, export_id, file_storage=file_storage
+            db_session,
+            export_id,
+            operator_id=operator.user_id,
+            file_storage=file_storage,
         )
         assert got_bytes == xlsx_bytes
         # 决策 30.6 同款：hohu_users_YYYYMMDD_HHmmss.xlsx
@@ -688,7 +695,10 @@ class TestDownloadExportFile:
         """任务不存在 → NotFoundException(AI_EXPORT_TASK_NOT_FOUND)。"""
         with pytest.raises(NotFoundException) as exc:
             await download_export_file(
-                db_session, "nonexistent-id", file_storage=file_storage
+                db_session,
+                "nonexistent-id",
+                operator_id=1,
+                file_storage=file_storage,
             )
         assert exc.value.error_code == "AI_EXPORT_TASK_NOT_FOUND"
 
@@ -728,7 +738,10 @@ class TestDownloadExportFile:
 
         with pytest.raises(BusinessRuleException) as exc:
             await download_export_file(
-                db_session, task.export_id, file_storage=file_storage
+                db_session,
+                task.export_id,
+                operator_id=operator.user_id,
+                file_storage=file_storage,
             )
         assert exc.value.error_code == "AI_EXPORT_TASK_NOT_READY"
 
@@ -757,8 +770,131 @@ class TestDownloadExportFile:
         await file_storage.delete(task.file_storage_key)
 
         with pytest.raises(BusinessRuleException) as exc:
-            await download_export_file(db_session, export_id, file_storage=file_storage)
+            await download_export_file(
+                db_session,
+                export_id,
+                operator_id=operator.user_id,
+                file_storage=file_storage,
+            )
         assert exc.value.error_code == "AI_EXPORT_FILE_EXPIRED"
+
+
+class TestExportTaskOwnership:
+    """Task 35：导出任务 list/detail/download 默认只能访问当前 operator。"""
+
+    @staticmethod
+    def _task(export_id: str, operator_id: int, *, reason: str) -> UserExportTask:
+        return UserExportTask(
+            export_id=export_id,
+            operator_id=operator_id,
+            filter_snapshot={"user_name": reason},
+            reason=reason,
+            row_count=1,
+            file_storage_key=f"user-export/{export_id}.xlsx",
+            file_size_bytes=4,
+            status=ExportTaskStatus.SUCCESS,
+        )
+
+    async def test_detail_hides_cross_owner_as_not_found(self, db_session):
+        own = self._task("qa-owner-detail-own", 88101, reason="own-filter")
+        other = self._task("qa-owner-detail-other", 88102, reason="secret-filter")
+        db_session.add_all([own, other])
+        await db_session.flush()
+
+        assert (
+            await get_export_task(
+                db_session,
+                own.export_id,
+                operator_id=own.operator_id,
+            )
+            is own
+        )
+        assert (
+            await get_export_task(
+                db_session,
+                other.export_id,
+                operator_id=own.operator_id,
+            )
+            is None
+        )
+
+    async def test_detail_allows_explicit_super_admin_cross_owner(self, db_session):
+        other = self._task("qa-owner-detail-admin", 88112, reason="admin-visible")
+        db_session.add(other)
+        await db_session.flush()
+
+        assert (
+            await get_export_task(
+                db_session,
+                other.export_id,
+                operator_id=88111,
+                allow_cross_owner=True,
+            )
+            is other
+        )
+
+    async def test_list_forces_owner_scope_for_non_super_admin(self, db_session):
+        own = self._task("qa-owner-list-own", 88121, reason="own-list")
+        other = self._task("qa-owner-list-other", 88122, reason="secret-list")
+        db_session.add_all([own, other])
+        await db_session.flush()
+
+        page = await list_export_tasks(
+            db_session,
+            UserExportTaskQuery(operator_id=other.operator_id, size=100),
+            operator_id=own.operator_id,
+        )
+
+        assert page.total == 0
+        assert page.records == []
+
+    async def test_list_allows_super_admin_operator_filter(self, db_session):
+        own = self._task("qa-owner-list-admin-own", 88131, reason="admin-own")
+        other = self._task("qa-owner-list-admin-other", 88132, reason="admin-other")
+        db_session.add_all([own, other])
+        await db_session.flush()
+
+        page = await list_export_tasks(
+            db_session,
+            UserExportTaskQuery(operator_id=other.operator_id, size=100),
+            operator_id=own.operator_id,
+            allow_cross_owner=True,
+        )
+
+        assert page.total == 1
+        assert [task.export_id for task in page.records] == [other.export_id]
+
+    async def test_download_hides_cross_owner_before_reading_file(
+        self, db_session, file_storage, monkeypatch
+    ):
+        other = self._task(
+            "qa-owner-download-other",
+            88142,
+            reason="secret-download",
+        )
+        db_session.add(other)
+        await db_session.flush()
+        read_called = False
+
+        async def track_read(storage_key: str) -> bytes:  # noqa: ARG001
+            nonlocal read_called
+            read_called = True
+            return b"secret-file-bytes"
+
+        monkeypatch.setattr(file_storage, "read", track_read)
+
+        with pytest.raises(NotFoundException) as exc:
+            await download_export_file(
+                db_session,
+                other.export_id,
+                operator_id=88141,
+                file_storage=file_storage,
+            )
+
+        assert exc.value.error_code == "AI_EXPORT_TASK_NOT_FOUND"
+        assert other.export_id not in str(exc.value)
+        assert other.reason not in str(exc.value)
+        assert read_called is False
 
 
 # ========== Task 34：audit chain JOIN 测试（spec §8.1 line 2902） ==========

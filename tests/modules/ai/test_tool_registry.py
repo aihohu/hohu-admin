@@ -23,6 +23,7 @@ from app.modules.ai.agents.tools import (
     ToolRegistryError,
     ai_tool,
     compute_available_tools,
+    load_builtin_tools,
 )
 
 
@@ -59,6 +60,7 @@ class TestAiToolMeta:
             risk="low",
         )
         assert meta.readonly is False
+        assert meta.idempotent is False
         assert meta.allowed_filters == ()
         assert meta.allowed_group_by == ()
         assert meta.max_groups == 20
@@ -93,6 +95,16 @@ class TestToolRegistrySingleton:
         ToolRegistry.reset()
         r2 = ToolRegistry.get()
         assert r1 is not r2
+
+    def test_builtin_loader_rehydrates_cached_modules_after_reset(self) -> None:
+        load_builtin_tools()
+        expected_names = {tool.meta.name for tool in ToolRegistry.get().all()}
+        assert "file.parse" in expected_names
+
+        ToolRegistry.reset()
+        load_builtin_tools()
+
+        assert {tool.meta.name for tool in ToolRegistry.get().all()} == expected_names
 
 
 # ============ register / get / all / by_agent ============

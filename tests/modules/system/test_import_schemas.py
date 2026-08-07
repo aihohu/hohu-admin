@@ -234,5 +234,5 @@ class TestUserExportTaskResponse:
             created_at=datetime(2026, 8, 3, 10, 0, 0),
         )
         assert resp.row_count is None
-        assert resp.file_storage_key is None
         assert resp.duration_ms is None
+        assert "fileStorageKey" not in resp.model_dump(by_alias=True)

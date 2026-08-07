@@ -12,6 +12,7 @@ htmlcov
 .DS_Store
 DEV_README.md
 uploads
+private_uploads
 
 __pycache__/
 *.py[oc]

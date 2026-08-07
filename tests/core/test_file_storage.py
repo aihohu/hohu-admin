@@ -8,19 +8,76 @@
 - exists 行为
 """
 
+from pathlib import Path
+
 import pytest
 
+from app.core.config import settings
 from app.core.file_storage import (
     FileStorage,
     LocalFileStorage,
     MockFileStorage,
+    get_file_storage,
+    reset_file_storage_for_test,
+    validate_private_storage_roots,
 )
 
 
 class TestProtocolContract:
+    def test_docker_image_declares_public_and_private_storage_volumes(self):
+        dockerfile = (Path(__file__).resolve().parents[2] / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+
+        assert "mkdir -p /app/uploads /app/private_uploads" in dockerfile
+        assert 'VOLUME ["/app/uploads", "/app/private_uploads"]' in dockerfile
+
     def test_local_storage_is_file_storage(self, tmp_path):
         fs = LocalFileStorage(tmp_path)
         assert isinstance(fs, FileStorage)
+
+    def test_configured_local_storage_cannot_live_under_public_upload_root(
+        self, tmp_path, monkeypatch
+    ):
+        public_root = tmp_path / "public"
+        monkeypatch.setattr(settings, "UPLOAD_DIR", str(public_root))
+        monkeypatch.setattr(
+            settings,
+            "LOCAL_FILE_STORAGE_ROOT",
+            str(public_root / "file_storage"),
+        )
+        reset_file_storage_for_test()
+
+        try:
+            with pytest.raises(RuntimeError, match="public upload root"):
+                get_file_storage()
+        finally:
+            reset_file_storage_for_test()
+
+    @pytest.mark.parametrize(
+        ("setting_name", "relative_path"),
+        [
+            ("PRIVATE_UPLOAD_DIR", "private"),
+            ("LOCAL_FILE_STORAGE_ROOT", "file_storage"),
+        ],
+    )
+    def test_every_private_storage_root_must_be_outside_public_upload_root(
+        self,
+        tmp_path,
+        monkeypatch,
+        setting_name,
+        relative_path,
+    ):
+        public_root = tmp_path / "public"
+        monkeypatch.setattr(settings, "UPLOAD_DIR", str(public_root))
+        monkeypatch.setattr(
+            settings,
+            setting_name,
+            str(public_root / relative_path),
+        )
+
+        with pytest.raises(RuntimeError, match=setting_name):
+            validate_private_storage_roots()
 
     def test_mock_storage_is_file_storage(self):
         fs = MockFileStorage()
@@ -86,6 +143,26 @@ class TestSaveReadRoundtrip:
         fs = LocalFileStorage(tmp_path)
         with pytest.raises(FileNotFoundError):
             await fs.read("import-preview/nonexistent.xlsx")
+
+    async def test_legacy_public_artifact_is_read_only_fallback(self, tmp_path):
+        private_root = tmp_path / "private"
+        legacy_root = tmp_path / "public" / "file_storage"
+        legacy_file = legacy_root / "import-preview" / "legacy.xlsx"
+        legacy_file.parent.mkdir(parents=True)
+        legacy_file.write_bytes(b"legacy")
+        fs = LocalFileStorage(private_root, legacy_read_roots=(legacy_root,))
+
+        assert await fs.read("import-preview/legacy.xlsx") == b"legacy"
+        assert await fs.exists("import-preview/legacy.xlsx") is True
+
+        new_key = await fs.save(
+            b"new",
+            mime_type="application/octet-stream",
+            namespace="import-preview",
+            suffix=".xlsx",
+        )
+        assert (private_root / new_key).read_bytes() == b"new"
+        assert not (legacy_root / new_key).exists()
 
 
 class TestDeleteIdempotent:

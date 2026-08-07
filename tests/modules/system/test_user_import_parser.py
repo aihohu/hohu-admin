@@ -1,7 +1,7 @@
 """parse_import_excel 单测（Task 8，spec §3.6 line 2036 + line 2624-2630）。
 
 覆盖：
-- MIME 白名单（xlsx/xls/csv）→ AI_IMPORT_INVALID_MIME
+- MIME 白名单（xlsx/csv；legacy xls fail-closed）→ AI_IMPORT_INVALID_MIME
 - 文件大小 ≤ 10MB → AI_IMPORT_FILE_TOO_LARGE
 - 行数 ≤ 2000 → AI_IMPORT_TOO_MANY_ROWS
 - 字段校验：user_name 必填 / 邮箱 / 手机 / gender / status / 长度
@@ -13,6 +13,7 @@
 """
 
 import io
+import zipfile
 
 import pytest
 from openpyxl import Workbook
@@ -21,8 +22,11 @@ from app.core.exceptions import BusinessRuleException
 from app.modules.system.user.constants import USER_IMPORT_MAX_ROWS
 from app.modules.system.user.import_parser import (
     ALLOWED_MIME_TYPES,
+    EXCEL_HEADERS,
     MAX_FILE_SIZE_BYTES,
     ImportErrorCollection,
+    _parse_csv_rows,
+    _parse_xlsx_rows,
     parse_import_excel,
 )
 from app.modules.system.user.schemas import FailedRow, UserImportRecord
@@ -73,18 +77,38 @@ def _csv_bytes(rows: list[list[str]], headers: list[str] | None = None) -> bytes
     return "\n".join(lines).encode("utf-8")
 
 
+def _replace_zip_member(data: bytes, name: str, replacement: bytes) -> bytes:
+    source = zipfile.ZipFile(io.BytesIO(data))
+    output = io.BytesIO()
+    with source, zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as target:
+        for info in source.infolist():
+            target.writestr(
+                info,
+                replacement if info.filename == name else source.read(info.filename),
+            )
+    return output.getvalue()
+
+
 MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 MIME_CSV = "text/csv"
 MIME_INVALID = "application/pdf"
 
 
 class TestMimeTypeWhitelist:
-    """spec §2.10：MIME 白名单 {xlsx, xls, csv}。"""
+    """安全边界仅声明当前解析器真正支持的 {xlsx, csv}。"""
 
-    def test_allowed_mime_types_includes_xlsx_xls_csv(self):
+    def test_allowed_mime_types_include_xlsx_csv_but_not_legacy_xls(self):
         assert MIME_XLSX in ALLOWED_MIME_TYPES
-        assert "application/vnd.ms-excel" in ALLOWED_MIME_TYPES
+        assert "application/vnd.ms-excel" not in ALLOWED_MIME_TYPES
         assert MIME_CSV in ALLOWED_MIME_TYPES
+
+    def test_legacy_xls_is_fail_closed(self):
+        with pytest.raises(BusinessRuleException) as exc:
+            parse_import_excel(
+                b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",
+                "application/vnd.ms-excel",
+            )
+        assert exc.value.error_code == "AI_IMPORT_INVALID_MIME"
 
     def test_invalid_mime_raises(self):
         with pytest.raises(BusinessRuleException) as exc:
@@ -105,6 +129,31 @@ class TestFileSizeLimit:
             parse_import_excel(bogus, MIME_XLSX)
         assert exc.value.error_code == "AI_IMPORT_FILE_TOO_LARGE"
 
+    def test_damaged_xlsx_has_stable_type_error(self):
+        with pytest.raises(BusinessRuleException) as exc:
+            parse_import_excel(b"PK\x03\x04damaged", MIME_XLSX)
+        assert exc.value.error_code == "AI_IMPORT_INVALID_MIME"
+
+    def test_malformed_worksheet_xml_has_stable_type_error(self):
+        malformed = _replace_zip_member(
+            _xlsx_bytes([["alice", "", "", "", "", "QA", "", "0", "1"]]),
+            "xl/worksheets/sheet1.xml",
+            b"<broken",
+        )
+        with pytest.raises(BusinessRuleException) as exc:
+            parse_import_excel(malformed, MIME_XLSX)
+        assert exc.value.error_code == "AI_IMPORT_INVALID_MIME"
+
+    def test_xlsx_expansion_budget_is_enforced(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "app.modules.system.user.import_parser.XLSX_MAX_COMPRESSION_RATIO", 1.0
+        )
+        with pytest.raises(BusinessRuleException) as exc:
+            parse_import_excel(_xlsx_bytes([]), MIME_XLSX)
+        assert exc.value.error_code == "AI_IMPORT_FILE_TOO_LARGE"
+
 
 class TestRowCountLimit:
     """spec §2.10：行数 ≤ 2000（v2.2 P0）。"""
@@ -119,6 +168,109 @@ class TestRowCountLimit:
         ]
         with pytest.raises(BusinessRuleException) as exc:
             parse_import_excel(_xlsx_bytes(rows), MIME_XLSX)
+        assert exc.value.error_code == "AI_IMPORT_TOO_MANY_ROWS"
+        assert "分批" in exc.value.message
+        assert "异步" not in exc.value.message
+
+    def test_xlsx_parser_stops_on_row_2001(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class WorkbookStub:
+            closed = False
+            max_row = 1
+            max_column = len(EXCEL_HEADERS)
+
+            @property
+            def active(self):
+                return self
+
+            def iter_rows(self, *, values_only: bool):
+                assert values_only is True
+                yield EXCEL_HEADERS
+                valid = ("alice", "", "", "", "", "QA", "", "0", "1")
+                for _ in range(USER_IMPORT_MAX_ROWS + 1):
+                    yield valid
+                raise AssertionError("parser consumed beyond row 2001")
+
+            def close(self):
+                self.closed = True
+
+        workbook = WorkbookStub()
+        monkeypatch.setattr(
+            "app.modules.system.user.import_parser.load_workbook",
+            lambda *_args, **_kwargs: workbook,
+        )
+        monkeypatch.setattr(
+            "app.modules.system.user.import_parser._validate_xlsx_archive",
+            lambda *_args, **_kwargs: None,
+        )
+
+        with pytest.raises(BusinessRuleException) as exc:
+            _parse_xlsx_rows(b"test")
+
+        assert exc.value.error_code == "AI_IMPORT_TOO_MANY_ROWS"
+        assert workbook.closed is True
+
+    def test_xlsx_declared_dimension_is_rejected_before_iteration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class WorkbookStub:
+            closed = False
+            max_row = 1_048_576
+            max_column = 16_384
+
+            @property
+            def active(self):
+                return self
+
+            def iter_rows(self, *, values_only: bool):
+                assert values_only is True
+                raise AssertionError("oversized worksheet must not be iterated")
+
+            def close(self):
+                self.closed = True
+
+        workbook = WorkbookStub()
+        monkeypatch.setattr(
+            "app.modules.system.user.import_parser.load_workbook",
+            lambda *_args, **_kwargs: workbook,
+        )
+        monkeypatch.setattr(
+            "app.modules.system.user.import_parser._validate_xlsx_archive",
+            lambda *_args, **_kwargs: None,
+        )
+
+        with pytest.raises(BusinessRuleException) as exc:
+            _parse_xlsx_rows(b"test")
+
+        assert exc.value.error_code == "AI_IMPORT_TOO_MANY_ROWS"
+        assert workbook.closed is True
+
+    def test_csv_parser_stops_on_row_2001(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class ReaderStub:
+            fieldnames = list(EXCEL_HEADERS)
+
+            def __iter__(self):
+                valid = {
+                    "user_name": "alice",
+                    "dept_input": "QA",
+                    "user_gender": "0",
+                    "status": "1",
+                }
+                for _ in range(USER_IMPORT_MAX_ROWS + 1):
+                    yield valid
+                raise AssertionError("parser consumed beyond row 2001")
+
+        monkeypatch.setattr(
+            "app.modules.system.user.import_parser.csv.DictReader",
+            lambda *_args, **_kwargs: ReaderStub(),
+        )
+
+        with pytest.raises(BusinessRuleException) as exc:
+            _parse_csv_rows(b"test")
+
         assert exc.value.error_code == "AI_IMPORT_TOO_MANY_ROWS"
 
 

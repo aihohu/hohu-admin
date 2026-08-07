@@ -2,7 +2,7 @@
 
 pre-commit + CI 双跑。零 DB 依赖（启动时不调 validate_on_startup）。
 
-9 项检查（spec §12.4）：
+10 项检查（spec §12.4 + Task 35）：
   ✅ static-only（不查 DB）：
     1. sensitive_input_not_in_signature
     2. blocklist_field_must_be_sensitive
@@ -11,6 +11,7 @@ pre-commit + CI 双跑。零 DB 依赖（启动时不调 validate_on_startup）�
     7. scope_param_requires_check（ast 解析函数体）
     8. summary_length_limit
     9. dry_run_tool_must_implement_hook
+    10. file_param_requires_protected_loader
   ⏭️ startup-only（validate_on_startup 已覆盖，本脚本跳过）：
     5. agent_must_exist_in_registry
     6. perms_must_exist_in_menu
@@ -36,6 +37,7 @@ if hasattr(sys.stdout, "reconfigure"):
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from app.modules.ai.agents.tools import load_builtin_tools  # noqa: E402
 from app.modules.ai.agents.tools.file_parser import (  # noqa: E402
     SUPPORTED_MIME_TYPES,
 )
@@ -50,6 +52,35 @@ from app.modules.ai.agents.tools.registry import (  # noqa: E402
 
 # spec §5.5: summary 上限
 SUMMARY_MAX_UNICODE_CHARS = 100
+
+# Built-ins are mandatory, not optional imports.  Keep this exact inventory next
+# to the standalone gate so a broken module import cannot silently reduce the
+# scan surface and still report success.
+EXPECTED_BUILTIN_TOOL_NAMES = frozenset(
+    {
+        "dept.count",
+        "dept.list",
+        "file.parse",
+        "job.update_cron",
+        "role.count",
+        "role.list",
+        "user.batch_delete",
+        "user.count",
+        "user.distinct",
+        "user.export",
+        "user.import_execute",
+        "user.import_preview",
+        "user.list",
+        "user.lookup",
+        "user.stats",
+        "user.update",
+    }
+)
+
+# ``job_id`` is authorized by the global job permission rather than the
+# user/dept data-scope model.  Exemptions are deliberately exact (agent, param)
+# pairs so new ``*_id`` inputs remain fail-closed.
+DATA_SCOPE_PARAM_EXEMPTIONS = frozenset({("job_mgmt", "job_id")})
 
 
 class Violation:
@@ -69,7 +100,7 @@ class Violation:
         )
 
 
-# ============ 9 项检查 ============
+# ============ 10 项检查 ============
 
 
 def check_sensitive_input_not_in_signature(
@@ -225,7 +256,9 @@ def check_scope_param_requires_check(
             a.arg
             for a in node.args.args + node.args.kwonlyargs
             if (a.arg.endswith("_id") or a.arg.endswith("_ids"))
-            and a.arg != "file_id"  # sys_file 资源不属于业务 data_scope
+            # sys_file has a separate mandatory protected-loader check below.
+            and a.arg != "file_id"
+            and (reg.meta.agent, a.arg) not in DATA_SCOPE_PARAM_EXEMPTIONS
         ]
         if not scope_params:
             continue
@@ -244,6 +277,38 @@ def check_scope_param_requires_check(
                 )
             )
     return violations
+
+
+def check_file_param_requires_protected_loader(
+    reg: RegisteredTool, fn_src: str | None
+) -> list[Violation]:
+    """Task 35: a ``file_id`` argument must enter the protected file boundary."""
+    if fn_src is None:
+        return []
+    try:
+        tree = ast.parse(fn_src)
+    except SyntaxError:
+        return []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        params = {arg.arg for arg in node.args.args + node.args.kwonlyargs}
+        if "file_id" not in params:
+            continue
+        called_helpers = {
+            call.func.id
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+        }
+        if called_helpers.isdisjoint({"load_protected_file", "_load_file_bytes"}):
+            return [
+                Violation(
+                    reg.meta.name,
+                    "file_param_requires_protected_loader",
+                    "签名含 file_id 但未调用受保护文件 loader（owner/tenant/type/size/path）",
+                )
+            ]
+    return []
 
 
 def check_summary_length_limit(reg: RegisteredTool) -> list[Violation]:
@@ -350,14 +415,23 @@ def load_all_tools() -> list[RegisteredTool]:
     # 扫描所有 ai_tools.py 文件
     candidates = [
         "app.modules.system.ai_tools",
+        "app.modules.job.ai_tools",
         "app.modules.ai.agents.tools.file_tools",
     ]
     for mod_name in candidates:
-        try:
-            importlib.import_module(mod_name)
-        except ImportError:
-            pass
-    return ToolRegistry.get().all()
+        importlib.import_module(mod_name)
+    # Mandatory imports above preserve the static gate's fail-fast semantics.
+    # The loader then idempotently restores declarations if another test/reset
+    # cleared the Registry while Python kept those modules cached.
+    load_builtin_tools()
+    tools = ToolRegistry.get().all()
+    names = {tool.meta.name for tool in tools}
+    missing = EXPECTED_BUILTIN_TOOL_NAMES - names
+    if missing:
+        raise RuntimeError(
+            f"Built-in AI tools missing from static scan: {sorted(missing)}"
+        )
+    return tools
 
 
 def get_fn_source(reg: RegisteredTool) -> str | None:
@@ -380,6 +454,7 @@ def run_all_checks() -> list[Violation]:
         violations.extend(check_destructive_requires_hitl(reg))
         violations.extend(check_high_risk_requires_dry_run(reg))
         violations.extend(check_scope_param_requires_check(reg, fn_src))
+        violations.extend(check_file_param_requires_protected_loader(reg, fn_src))
         violations.extend(check_summary_length_limit(reg))
         violations.extend(check_args_summary_fields_not_sensitive(reg))
         violations.extend(check_accepts_file_mime_valid(reg))
@@ -394,7 +469,7 @@ def main() -> int:
     warnings = [v for v in violations if v.severity == "warning"]
 
     if not violations:
-        print(f"✅ All {len(ToolRegistry.get().all())} tools passed 8 static checks")
+        print(f"✅ All {len(ToolRegistry.get().all())} tools passed 10 static checks")
         return 0
 
     for v in violations:

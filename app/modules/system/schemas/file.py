@@ -11,8 +11,6 @@ class FileOut(BaseModel):
 
     file_id: int
     original_name: str
-    file_name: str
-    file_path: str
     file_url: str
     file_size: int
     file_ext: str
@@ -33,7 +31,7 @@ class FileOut(BaseModel):
     @field_serializer("file_url")
     def serialize_file_url(self, v: str, _info) -> str:
         """拼接完整可访问 URL"""
-        if v.startswith("http"):
+        if not v or v.startswith("http"):
             return v
         return f"{settings.SERVER_URL}{v}"
 

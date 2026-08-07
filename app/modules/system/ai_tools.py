@@ -23,6 +23,11 @@ from sqlalchemy import func, select
 from app.modules.ai.agents.gateway import ensure_targets_in_scope
 from app.modules.ai.agents.gateway.result import ToolResult, UIResult
 from app.modules.ai.agents.tools.decorator import ai_tool
+from app.modules.ai.agents.tools.file_access import (
+    IMPORT_MIME_TYPES_BY_EXTENSION,
+    FileAccessPolicy,
+    load_protected_file,
+)
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.agents.tools.stats_validator import (
     validate_field_in_whitelist,
@@ -48,6 +53,7 @@ from app.modules.system.models.user import User
         required_perms=("system:user:list",),
         risk="low",
         readonly=True,
+        idempotent=True,
         allowed_filters=("status", "user_gender"),
         chip_target="/system/user",
     )
@@ -99,6 +105,7 @@ async def user_count(
         required_perms=("system:user:list",),
         risk="low",
         readonly=True,
+        idempotent=True,
         allowed_filters=("status", "user_gender"),
         allowed_group_by=("user_gender", "status"),
         max_groups=20,
@@ -163,6 +170,7 @@ async def user_stats(
         required_perms=("system:user:list",),
         risk="low",
         readonly=True,
+        idempotent=True,
         allowed_group_by=("user_gender", "status"),
         max_groups=50,
         chip_target="/system/user",
@@ -210,6 +218,7 @@ async def user_distinct(ctx: AiToolContext, field: str) -> ToolResult:
         required_perms=("system:role:list",),
         risk="low",
         readonly=True,
+        idempotent=True,
         allowed_filters=("status",),
         chip_target="/system/role",
     )
@@ -253,6 +262,7 @@ async def role_count(
         required_perms=("system:dept:list",),
         risk="low",
         readonly=True,
+        idempotent=True,
         allowed_filters=("status",),
         chip_target="/system/dept",
     )
@@ -310,6 +320,7 @@ def _coerce_list_limit(limit: int | None) -> int:
         required_perms=("system:role:list",),
         risk="low",
         readonly=True,
+        idempotent=True,
         allowed_filters=("status",),
         chip_target="/system/role",
         result_view="data_list",
@@ -390,6 +401,7 @@ async def role_list(
         required_perms=("system:dept:list",),
         risk="low",
         readonly=True,
+        idempotent=True,
         allowed_filters=("status",),
         chip_target="/system/dept",
         result_view="data_list",
@@ -507,6 +519,8 @@ async def _resolve_users(
         ),
         required_perms=("system:user:delete",),
         risk="destructive",
+        readonly=False,
+        idempotent=False,
         hitl_always=True,
         dry_run_supported=True,
         result_view="rows_affected",
@@ -637,6 +651,7 @@ async def _dry_run_user_batch_delete(
         required_perms=("system:user:list",),
         risk="low",
         readonly=True,
+        idempotent=True,
         allowed_filters=("status", "user_gender"),
         chip_target="/system/user",
         result_view="data_list",
@@ -721,6 +736,7 @@ async def user_list(
         required_perms=("system:user:list",),
         risk="low",
         readonly=True,
+        idempotent=True,
         result_view="detail_card",
     )
 )
@@ -833,6 +849,8 @@ _USER_UPDATE_ALLOWED_FIELDS: frozenset[str] = frozenset(
         ),
         required_perms=("system:user:edit",),
         risk="high",
+        readonly=False,
+        idempotent=False,
         hitl_always=True,
         dry_run_supported=True,
         result_view="rows_affected",
@@ -980,45 +998,64 @@ async def _dry_run_user_update(
 # ============ user.import_preview / user.import_execute（spec §10 Task 26/26a） ============
 
 
+_USER_IMPORT_FILE_POLICY = FileAccessPolicy(
+    allowed_business_types=frozenset({"user-import"}),
+    mime_types_by_extension=IMPORT_MIME_TYPES_BY_EXTENSION,
+    max_bytes=10 * 1024 * 1024,
+)
+
+
+def _user_import_suffix_for_mime(mime_type: str) -> str:
+    normalized = mime_type.split(";", maxsplit=1)[0].strip().lower()
+    for suffix, allowed_mime_types in IMPORT_MIME_TYPES_BY_EXTENSION.items():
+        if normalized in allowed_mime_types:
+            return suffix
+
+    from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+
+    raise BusinessRuleException(
+        "导入文件类型不允许",
+        error_code="AI_FILE_TYPE_NOT_ALLOWED",
+    )
+
+
+def _user_import_mime_for_filename(filename: str) -> str:
+    suffix = (
+        f".{filename.rsplit('.', maxsplit=1)[-1].lower()}" if "." in filename else ""
+    )
+    allowed_mime_types = IMPORT_MIME_TYPES_BY_EXTENSION.get(suffix)
+    if allowed_mime_types:
+        return next(iter(allowed_mime_types))
+
+    from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+
+    raise BusinessRuleException(
+        "预检文件类型无效，请重新 import_preview",
+        error_code="AI_IMPORT_PREVIEW_INVALID",
+    )
+
+
 async def _load_file_bytes(ctx: AiToolContext, file_id: str) -> tuple[bytes, str, str]:
-    """从 sys_file 加载 file_bytes + filename + mime_type（spec §10 Task 26）
+    """从受保护的 ``sys_file`` 加载用户导入文件。
 
     抛 BusinessRuleException:
         - AI_FILE_ID_INVALID: file_id 不是合法数字字符串
-        - AI_FILE_NOT_FOUND: file_id 不存在 / 已删除
+        - AI_FILE_NOT_FOUND: 不存在 / 已删除 / owner 或 tenant 不匹配
+        - AI_FILE_TYPE_NOT_ALLOWED: 业务类型、扩展名、MIME 或 magic 不允许
+        - AI_FILE_TOO_LARGE: DB 声明或磁盘实际大小超限
+        - AI_FILE_PATH_INVALID: 路径越出私有上传根或不可安全读取
 
     Returns: (file_bytes, filename, mime_type)
     """
-    from pathlib import Path  # noqa: PLC0415
-
-    from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
-    from app.modules.system.models.file import File  # noqa: PLC0415
-
-    try:
-        file_id_int = int(file_id)
-    except (TypeError, ValueError) as e:
-        raise BusinessRuleException(
-            f"file_id 格式无效: {file_id!r}",
-            error_code="AI_FILE_ID_INVALID",
-        ) from e
-
-    stmt = select(File).where(File.file_id == file_id_int, File.del_flag == "0")
-    file_record = (await ctx.db.execute(stmt)).scalars().first()
-    if file_record is None:
-        raise BusinessRuleException(
-            f"文件不存在: file_id={file_id}",
-            error_code="AI_FILE_NOT_FOUND",
-        )
-
-    file_path = Path(file_record.file_path)
-    if not file_path.exists():  # noqa: ASYNC240  AI 调用频次低，同步 IO 可接受
-        raise BusinessRuleException(
-            f"文件已被删除（DB 记录存在但磁盘文件丢失）: file_id={file_id}",
-            error_code="AI_FILE_NOT_FOUND",
-        )
-
-    file_bytes = file_path.read_bytes()  # noqa: ASYNC240
-    return file_bytes, file_record.file_name, file_record.mime_type or ""
+    protected = await load_protected_file(
+        ctx,
+        file_id,
+        policy=_USER_IMPORT_FILE_POLICY,
+    )
+    # Use the resolved on-disk name: its suffix has already been checked against
+    # the trusted DB extension and MIME.  ``record.file_name`` is a bare
+    # Snowflake ID, so persisting it would lose the CSV/XLSX parser contract.
+    return protected.data, protected.path.name, protected.mime_type
 
 
 @ai_tool(
@@ -1026,19 +1063,18 @@ async def _load_file_bytes(ctx: AiToolContext, file_id: str) -> tuple[bytes, str
         name="user.import_preview",
         agent="user_mgmt",
         summary=(
-            "Dry-run user import → {batchId, previewToken, summary}. "
-            "Read-only. Call user.import_execute next."
+            "Create user import preview → {batchId, previewToken, summary}. "
+            "Call user.import_execute next."
         ),
         required_perms=("system:user:import",),
         risk="low",
-        readonly=True,
+        readonly=False,
+        idempotent=False,
         accepts_file=(
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            "application/vnd.ms-excel",
             "text/csv",
         ),
         result_view="detail_card",
-        chip_target="/system/user",
         args_summary_fields=("file_id", "reason"),
     )
 )
@@ -1061,8 +1097,9 @@ async def user_import_preview(
          ui=detail_card（HITL 抽屉展示 summary 供用户确认）
        )
 
-    **强制 HITL**：本 tool 是 readonly，不写用户；execute 走 user.import_execute
-    （risk=high + hitl_always），LLM 不能跳过 preview 直接 execute。
+    **预检会写 artifact**：本 tool 不写 ``sys_user``，但每次都会新建 batch、
+    cache 和预检文件，因此不是 readonly / idempotent。真正写用户必须继续调用
+    user.import_execute（risk=high + hitl_always），LLM 不能跳过 preview。
 
     Args:
         file_id: 文件 ID（sys_file.file_id 字符串形式）
@@ -1094,11 +1131,12 @@ async def user_import_preview(
     from app.core.file_storage import get_file_storage  # noqa: PLC0415
 
     storage = get_file_storage()
+    storage_suffix = _user_import_suffix_for_mime(mime_type)
     storage_key = await storage.save(
         file_bytes,
         mime_type=mime_type,
         namespace="import-preview",
-        suffix=".xlsx",
+        suffix=storage_suffix,
     )
     batch.file_storage_key = storage_key
     await ctx.db.flush()
@@ -1147,6 +1185,8 @@ async def user_import_preview(
         ),
         required_perms=("system:user:import",),
         risk="high",
+        readonly=False,
+        idempotent=True,
         hitl_always=True,
         dry_run_supported=True,
         result_view="rows_affected",
@@ -1225,9 +1265,10 @@ async def user_import_execute(
     filename = batch.filename or ""
 
     # 3. parse + execute
+    mime_type = _user_import_mime_for_filename(filename)
     records = parse_import_excel(
         file_bytes,
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        mime_type,
     )
 
     result = await batch_create_users_from_records(
@@ -1327,6 +1368,7 @@ async def _dry_run_user_import_execute(
         required_perms=("system:user:export",),
         risk="high",
         readonly=False,  # 写 ExportTask 表 + 生成 xlsx 文件
+        idempotent=False,
         produces_file=True,
         dry_run_supported=True,
         # Task 33：rows_affected → detail_card（spec §2.31 line 1626 落地），
@@ -1349,7 +1391,7 @@ async def user_export(
 
     强制建 ExportTask（spec §2.31 P1-5）+ filter_snapshot 冻结 + 30 天 TTL。
     行数 > USER_EXPORT_ASYNC_THRESHOLD（5000）抛 AI_EXPORT_ASYNC_REQUIRED，
-    Phase 3 异步通道上线后改为自动入队。
+    用户必须缩窄筛选条件或拆分请求；当前不会自动入队。
 
     Args:
         reason: 业务理由（必填，spec §2.30 P1-3，1-256 字符）
@@ -1379,7 +1421,11 @@ async def user_export(
 
     # Task 33：取 task 拿 file_size_bytes + created_at（用于 detail_card 元数据
     # + expiresAt 计算 = created_at + 30 天 TTL）
-    task = await get_export_task(ctx.db, export_id)
+    task = await get_export_task(
+        ctx.db,
+        export_id,
+        operator_id=ctx.user.user_id,
+    )
     file_size = task.file_size_bytes if task else None
     expires_at = (task.created_at + timedelta(days=30)).isoformat() if task else None
     download_url = f"/system/user/export/{export_id}/download"
@@ -1480,7 +1526,7 @@ async def _dry_run_user_export(
             count=estimated,
             reason=(
                 f"预计导出 {estimated} 行，超过同步阈值 {USER_EXPORT_ASYNC_THRESHOLD}，"
-                "请缩窄 filter 或等待异步通道开放"
+                "请缩窄 filter 后重试"
             ),
         )
 

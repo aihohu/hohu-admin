@@ -25,9 +25,10 @@ from app.modules.ai.api.confirm import confirm_tool
 from app.modules.ai.schemas.confirm import ConfirmRequest
 
 
-def _make_pending(user_id: int = 100) -> PendingPayload:
+def _make_pending(user_id: int = 100, tenant_id: int = 0) -> PendingPayload:
     return PendingPayload(
         user_id=user_id,
+        tenant_id=tenant_id,
         conversation_id=1,
         tool_call_id="tc_test",
         trace_id="tr_test",
@@ -162,6 +163,25 @@ class TestOwnerMismatch:
                 # attacker user_id=999
                 await confirm_tool(req, db=MagicMock(), current_user=_make_user(999))
             assert exc_info.value.error_code == "NOT_CONFIRMATION_OWNER"
+
+    async def test_tenant_mismatch_is_rejected_before_wake(self) -> None:
+        """同一 user_id 也不能确认其它可信 tenant 创建的 pending。"""
+        with (
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.get_pending",
+                AsyncMock(return_value=_make_pending(user_id=100, tenant_id=999)),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.wake",
+                AsyncMock(),
+            ) as wake,
+        ):
+            req = ConfirmRequest(confirmationId="cid_test_0123", action="approved")
+            with pytest.raises(AuthorizationException) as exc_info:
+                await confirm_tool(req, db=MagicMock(), current_user=_make_user(100))
+
+        assert exc_info.value.error_code == "NOT_CONFIRMATION_OWNER"
+        wake.assert_not_awaited()
 
 
 # ============ 修订 S-13：用户被自动禁用 ============

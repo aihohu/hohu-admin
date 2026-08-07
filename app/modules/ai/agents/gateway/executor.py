@@ -725,6 +725,7 @@ async def _hang_for_confirmation(
         redis_client,
         confirmation_id=confirmation_id,
         user_id=deps.user.user_id,
+        tenant_id=deps.tenant_id,
         conversation_id=deps.conversation_id or 0,
         tool_call_id=tool_call_id,
         trace_id=deps.trace_id,

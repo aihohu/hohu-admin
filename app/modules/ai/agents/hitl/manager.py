@@ -88,6 +88,8 @@ class PendingPayload:
     args: dict[str, Any]
     dry_run_result: dict[str, Any] | None
     expires_at: str  # ISO 8601 UTC
+    tenant_id: int = 0
+    """创建 pending 时的可信租户；0 默认仅兼容升级前的单租户 payload。"""
     wake_action: str | None = None
 
     def to_json_bytes(self) -> bytes:
@@ -143,6 +145,7 @@ class HitlManager:
         *,
         confirmation_id: str,
         user_id: int,
+        tenant_id: int = 0,
         conversation_id: int,
         tool_call_id: str,
         trace_id: str,
@@ -172,6 +175,7 @@ class HitlManager:
         )
         payload = PendingPayload(
             user_id=user_id,
+            tenant_id=tenant_id,
             conversation_id=conversation_id,
             tool_call_id=tool_call_id,
             trace_id=trace_id,
