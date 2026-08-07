@@ -1,6 +1,6 @@
-# AI Message Edit Semantics（AI 消息编辑语义） — v1.1
+# AI Message Edit Semantics（AI 消息编辑语义） — v1.2
 
-**Status**: 🛡️ Safety Gate 已完成（2026-08-07）；D.1-D.8 主实现尚未开始，edit/regenerate 继续关闭
+**Status**: 🛡️ Safety Gate 已完成（2026-08-07）；D.1-D.9 主实现及 ADR-0002 action binding 尚未开始，edit/regenerate 继续关闭
 **Created**: 2026-08-06
 **Updated**: 2026-08-07
 **Owner**: hohu core team
@@ -11,7 +11,8 @@
 - 前端 `hohu-admin-web/src/store/modules/ai/index.ts`（当前 `editAndResend` / `regenerate` 是 bug 源头）
 **Related**:
 - [`../adr/0001-ai-safety-consistency-before-deferred-execution.md`](../adr/0001-ai-safety-consistency-before-deferred-execution.md)（AI 当前版本先收口安全与一致性）
-- [`2026-07-02-ai-tool-gateway-design.md`](./2026-07-02-ai-tool-gateway-design.md) §8.1 SSE 事件协议（本 spec 不新增第二条实时通道）
+- [`../adr/0002-gateway-owned-confirmation-flow.md`](../adr/0002-gateway-owned-confirmation-flow.md)（PreparedAction 绑定 source message revision）
+- [`2026-07-02-ai-tool-gateway-design.md`](./2026-07-02-ai-tool-gateway-design.md) §8.1 / §8.8（本 spec 不新增第二条实时通道）
 - [`2026-07-16-tool-result-view-design.md`](./2026-07-16-tool-result-view-design.md)（tool_call result UI 不变）
 - [`2026-08-05-chat-tool-card-embed-in-message.md`](./2026-08-05-chat-tool-card-embed-in-message.md)（卡片是展示投影，不是编辑授权事实源）
 - [`APP-MARKETPLACE.md`](../APP-MARKETPLACE.md)（决策记录格式标杆）
@@ -84,12 +85,12 @@ TOC AI（ChatGPT/Claude）的编辑是"换个问法探索答案"，答案纯文�
 
 ### D.1 **执行事实与展示投影分离，并建立 user message 因果键**
 
-`ai_operation_log` 是编辑 / regenerate 安全判断的唯一事实源；`assistant_message.tool_calls` 只负责历史卡片展示，不参与授权。每条 operation log 新增：
+`ai_operation_log` 是 tool 执行事实源；`ai_prepared_action` 是准备/批准事实源。编辑 / regenerate 的安全判断必须联合读取二者；`assistant_message.tool_calls` 和前端 pending card 只负责展示，不参与授权。每条 operation log 新增：
 
 - `source_user_message_id`：触发本次 tool 执行的 user message ID，nullable 仅用于兼容迁移前历史数据，并建立索引；
 - `readonly_snapshot`：执行当时 `AiToolMeta.readonly` 的不可变快照，默认 `false`（未知按 write 保守处理）。
 
-同时把已有 `trace_id` 真正写入本轮 user / assistant message。`trace_id` 用于观测和跨日志串联，`source_user_message_id` 用于业务因果，二者不互相替代。编辑中间消息时，检查范围必须覆盖**目标消息及被截断后缀内全部 user message**对应的 operation log。
+同时把已有 `trace_id` 真正写入本轮 user / assistant message。`trace_id` 用于观测和跨日志串联，`source_user_message_id` 用于业务因果，二者不互相替代。编辑中间消息时，检查范围必须覆盖**目标消息及被截断后缀内全部 user message**对应的 operation log 和 PreparedAction。
 
 `readonly_snapshot=true` 只有在 tool 确实不产生持久副作用时才成立；Gateway 自身 operation log / 短期 query cache 不算业务 tool 副作用，但业务 batch、导出任务、持久文件和外部写入都算。开放 edit/regenerate 前必须完成内置 tool metadata 审计；已知反例 `user.import_preview` 会写 batch/file/cache，必须先改为 `readonly=False`。旧日志、未知 tool 或未经证明的 metadata 一律按 write 处理，本期不为此引入完整 effect/reversibility 框架。
 
@@ -102,6 +103,15 @@ TOC AI（ChatGPT/Claude）的编辑是"换个问法探索答案"，答案纯文�
 | `failed` | `false` | 保守拒绝：`AI_EDIT_BLOCKED_OPERATION_UNCERTAIN` |
 | `running` / `pending_confirmation` | 任意 | 拒绝：`AI_EDIT_BLOCKED_OPERATION_IN_PROGRESS` |
 
+PreparedAction 补充矩阵：
+
+| action 状态 | 编辑 / regenerate |
+|---|---|
+| `prepared` / `pending_confirmation` / `approved` / `running` | 拒绝：`AI_EDIT_BLOCKED_ACTION_IN_PROGRESS` |
+| `rejected` / `expired` | 允许；execute 未运行 |
+| `succeeded` | 按绑定 execute operation 的 readonly snapshot 判定，写操作拒绝 |
+| `failed` | 按 execute operation 判定；缺失/未知一律按 write outcome uncertain 拒绝 |
+
 未来 deferred 状态（如 queued）一律按 in-progress 拒绝，但本期不因此引入 ARQ / Worker。
 
 **反例**:
@@ -111,7 +121,7 @@ TOC AI（ChatGPT/Claude）的编辑是"换个问法探索答案"，答案纯文�
 - 运行时读取当前 Tool Registry 的 `readonly` → tool 元数据升级后会改写历史语义，必须落 snapshot。
 - 把“没有修改主业务表”当 readonly → `user.import_preview` 会重复生成 batch/file，仍是持久副作用；必须按真实 effect 标注。
 
-**回归**: 覆盖 readonly/write × success/failed/rejected/expired/running/pending 的策略矩阵、后缀多轮检查和 source message 因果关联。
+**回归**: 覆盖 operation + action 双矩阵、后缀多轮检查和 source message 因果关联；action 存在但 operation 尚未创建/终态不一致时 fail-closed。
 
 ### D.2 **消息表永不物理删除，使用 active projection + revision lineage**
 
@@ -142,9 +152,9 @@ TOC AI（ChatGPT/Claude）的编辑是"换个问法探索答案"，答案纯文�
 
 ### D.4 **并发运行、HITL pending 与双编辑由后端统一阻止**
 
-前端 `isStreaming` 只做即时 UX。后端必须使用 conversation-scoped run guard（复用现有 Redis，owner token + TTL/续期）覆盖 send / edit / regenerate 整个运行，并在 mutation 事务内锁定 conversation/target active message。被截断后缀存在 `running` / `pending_confirmation` operation 时拒绝编辑。普通 streaming lease 由服务端 heartbeat 续期；进入 HITL pending 时将 lease 延长为 `AI_HITL_PENDING_TTL_SEC + 60s`，并把 owner token / run trace / 服务端解析的 tenant_id 写入 PendingPayload，不能因客户端 SSE 断开而释放。resume 先把 pending tenant 与当前认证 tenant 复核，再把 lease 延长为 `AI_TOOL_TIMEOUT + 60s`；客户端 tenantId 不参与授权。只有 success/failed/rejected/expired 等 terminal 在 operation/message commit 后才能用 compare-and-delete owner token 释放。
+前端 `isStreaming` 只做即时 UX。后端必须使用 conversation-scoped run guard（复用现有 Redis，owner token + TTL/续期）覆盖 send / edit / regenerate 整个运行，并在 mutation 事务内锁定 conversation/target active message。被截断后缀存在 in-progress operation 或 PreparedAction 时拒绝编辑。普通 streaming lease 由 heartbeat 续期；进入 pending 时将 guard owner、run trace、可信 tenant 和 ChatCommand finalization context 写入 PreparedAction，并把 lease 延长到 action expiry + 60s，不能因 SSE 断开而释放。每个新 ChatCommand 在 Redis guard 前后都查询 DB in-progress action，Redis flush/重启不能绕过；启动可从 action 重建 guard cache。confirm handler 复核当前认证 tenant/source 后成为唯一执行 authority；Redis waiter 只接收 terminal 通知。只有 action/operation/message terminal commit 后才能 compare-and-delete owner token。
 
-terminal cleanup 必须有一个共享入口，覆盖正常原流、resume、confirm `wake=False`、5 分钟 hang/Redis TTL、以及服务启动时对遗留 pending 的清扫。TTL/启动清扫即使没有可写 SSE 客户端，也要先把 operation 标为 expired、按 action/outcome 执行 finalizer（regenerate 失败保持旧 active），再按 token 释放 conversation guard。guard lease 过期只是防死锁兜底，不得代替领域终态持久化。
+terminal cleanup 必须有一个共享入口，覆盖正常在线流、confirm approve/reject、action TTL、Redis waiter 丢失和服务启动清理。即使没有可写 SSE 客户端，也要先把 PreparedAction/operation 标为 terminal、按 ChatCommand action/outcome 执行 finalizer（regenerate 失败保持旧 active），再按 token 释放 conversation guard。guard lease 过期只是防死锁兜底，不得代替领域终态持久化。
 
 这不是 deferred execution 或第二实时通道，只是当前同步 SSE 链路的互斥安全边界。
 
@@ -152,11 +162,11 @@ terminal cleanup 必须有一个共享入口，覆盖正常原流、resume、con
 - 只依赖当前浏览器 `isStreaming` → 另一个标签页或直接 API 可绕过；
 - pending 检查后再无锁更新 → confirm 与 edit 竞态，旧操作可能在编辑后获批执行；
 - Redis lock 无 owner token → 旧请求 finally 误删新请求的锁。
-- SSE 断开就 finally 释放 pending run guard → resume 前另一标签可 send/edit，旧 tool 随后获批执行到已变化的上下文。
+- SSE 断开就 finally 释放 pending run guard → action 仍可由 detail 恢复批准，另一标签却能先 edit，旧 tool 随后执行到已变化上下文。
 - guard TTL 只覆盖单次 tool timeout 而短于 HITL 5 分钟窗口 → pending 尚有效时互斥已消失。
-- 只有 resume 路径 finalizer，wake=false/TTL/启动清扫只删 Redis → operation、卡片投影与 guard 三者终态不一致。
+- 只有在线 SSE 路径 finalizer，confirm/TTL/启动清扫只改 action 或删 Redis → action、operation、卡片投影与 guard 终态不一致。
 
-**回归**: 覆盖双标签并发编辑只有一个成功、streaming 期间拒绝、pending confirm 与 edit 竞态不产生业务执行、pending lease 大于确认 TTL、resume 续租，以及 resume/wake-false/TTL/startup cleanup 均先持久化 terminal 再由 owner 释放 guard。
+**回归**: 覆盖双标签并发编辑只有一个成功、streaming 期间拒绝、confirm 与 edit 竞态只有一个 CAS 获胜、pending lease 大于确认 TTL，以及 confirm/TTL/startup cleanup 均先持久化 terminal 再由 owner 释放 guard。
 
 ### D.5 **编辑能力由后端返回，前端只负责展示与本地临时收紧**
 
@@ -201,7 +211,7 @@ conversation detail 为每条 active user message 返回：
 
 前端不直接改写 authoritative `currentMessages`，而是用 `pendingCommand` 生成临时 active projection：edit 隐藏目标后缀并展示 replacement user，regenerate 暂时隐藏待替换 assistant；streaming 卡片/文本挂在该临时 projection 下。正常或错误终止后都必须刷新 detail：成功时原子接管，失败时按后端真实 active projection 收敛。若 refresh 失败，保留临时 projection 并标记 `stale`，阻止同 conversation 的下一条 ChatCommand，只允许重试 detail 或放弃本地临时展示；不得回退显示与后端已失活状态冲突的旧 suffix。
 
-edit 的 mutation 在模型调用前短事务提交：若随后 LLM / assistant 持久化失败，replacement user 仍是 active，旧后缀仍 inactive，done 返回 `persistence="failed", projection="updated", messageId=null`；detail 按 request trace 找到 replacement并显示“已编辑但回复失败”，用户可基于 replacement 重试，不偷偷恢复旧后缀。send 同理保留已提交 source user。regenerate 则维持旧 assistant active，只有 `run_outcome=success` 的新 assistant 持久化成功时才在同一事务切换 active 与 supersedes。rejected/expired/tool failed 不创建新 active assistant、不建立 supersedes，operation log 保留执行事实，done 返回 `persistence="committed", projection="unchanged", messageId=null`；纯 LLM / assistant persistence 失败返回 `persistence="failed", projection="unchanged"`。regenerate 两类非成功情况 refresh 后都恢复旧回答，所有 action 均不得自动重跑 tool。
+edit 的 mutation 在模型调用前短事务提交：若随后 LLM / assistant 持久化失败，replacement user 仍是 active，旧后缀仍 inactive，done 返回 `persistence="failed", projection="updated", messageId=null`；detail 按 request trace 找到 replacement并显示“已编辑但回复失败”，用户可基于 replacement 重试，不偷偷恢复旧后缀。send 同理保留已提交 source user。regenerate 则维持旧 assistant active，只有 `run_outcome=success` 的新 assistant 持久化成功时才在同一事务切换 active 与 supersedes。rejected/expired/tool failed 不创建新 active assistant、不建立 supersedes，PreparedAction/operation log 保留授权与执行事实，done 返回 `persistence="committed", projection="unchanged", messageId=null`；纯 LLM / assistant persistence 失败返回 `persistence="failed", projection="unchanged"`。regenerate 两类非成功情况 refresh 后都恢复旧回答，所有 action 均不得自动重跑 tool。
 
 **反例**:
 - edit endpoint INSERT replacement 后 `doStream()` 又触发 `/ai/chat` INSERT → 双 user message；
@@ -224,6 +234,22 @@ edit 的 mutation 在模型调用前短事务提交：若随后 LLM / assistant 
 - legacy assistant parent null 仍按“前一条 user”猜 regenerate 来源 → 删除/旧数据异常时可能重跑错误上下文。
 
 **回归**: 覆盖 legacy 纯文本 edit 允许、legacy tool-bearing suffix edit 拒绝、legacy parent-null regenerate 拒绝，以及迁移后 operation source ID / assistant parent 非空。
+
+### D.9 **PreparedAction 绑定不可变 source message revision，旧 action 不迁移到新分支**
+
+每个 `PreparedAction.source_user_message_id` 指向当次 ChatCommand 已持久化的不可变 user message 行；由于 edit 创建新 message ID 并以 `supersedes_message_id` 建立 lineage，message ID 本身就是 revision identity，不再增加可变 `revision_number`。confirm 执行前必须验证 source message 仍 `is_active=true`、属于原 conversation/owner/tenant，并且 action trace 与该 run 一致。
+
+编辑目标后缀或 regenerate source 上存在 in-progress action 时，命令端在 mutation 前拒绝，用户必须先显式 reject 或等待 expiry；不得由 edit 静默批准、迁移或修改 action。若 confirm 与 edit 并发，双方都按 `conversation -> source/target message -> PreparedAction` 固定顺序加锁：edit 只有在确认 action 非 in-progress 后才能失活 suffix；confirm 必须在 action 仍 pending 时检查 source active 和 snapshot，再 CAS approved/running。任何观察到 source 已失活的 confirm 都将 action 从 pending 收口为 `expired + AI_PREPARED_ACTION_SOURCE_STALE`，不调用 execute。
+
+terminal action 不迁移到 replacement：rejected/expired 可按 D.1 继续编辑；succeeded/failed 由 execution fact 决定是否阻止。preview-only 没有 PreparedAction，但 `user.import_preview` 自身是 write/non-idempotent operation，会按 D.1 阻止自动 replay/编辑后重跑，不能因“没弹确认”当作 readonly。
+
+**反例**:
+- edit 后把旧 action 的 source ID 更新为 replacement → 用户批准的是旧内容/旧附件/旧策略，却在新分支执行；
+- edit 自动 reject pending → 另一个标签页正在确认时产生隐式状态改变，审计无法解释是谁拒绝；
+- confirm 不按与 edit 相同的锁顺序锁定 source/action → 检查与执行之间 source 可能失活，或双方死锁；
+- preview-only 无 action就允许 replay → 重复创建 batch/file/cache。
+
+**回归**: 覆盖 pending action 阻止 edit/regenerate、显式 reject 后允许、confirm/edit 双竞态只有一方推进、source inactive confirm 不执行并写 stale error、replacement 不继承 action，以及 preview-only operation 仍按 write metadata 判定。
 
 ---
 
@@ -360,14 +386,14 @@ stmt = (
 命令处理顺序：
 
 1. 验证 traceId 格式与未被占用，再验证 conversation owner、target conversation/role/active；
-2. 以 traceId 作为 owner context 获取 conversation run guard，初步计算 suffix operation policy；
+2. 以 traceId 作为 owner context 获取 conversation run guard，初步计算 suffix operation + PreparedAction policy；
 3. 使用新内容（regenerate 使用 source user 内容）完成 safety / routing / agent resolution；若被阻断或需要 clarification，不修改 active projection；
-4. 在短事务中锁定 conversation/target，重新校验 active 与 operation policy；
+4. 在短事务中按固定顺序锁定 conversation/target/action，重新校验 active 与 operation/action policy；
 5. edit：后缀失活 + INSERT 一次 replacement user；regenerate：运行期仅从上下文逻辑排除旧 assistant，不 INSERT user；
 6. 从数据库 active history 构造 LLM 上下文，不信任前端 slice 后的历史，随后复用 Gateway / SSE pipeline；
 7. edit 在流结束时保存新 assistant；regenerate 仅在 `run_outcome=success` 的新 assistant 持久化成功的同一事务中把旧 assistant 置 inactive 并建立 supersedes 关系，非成功时不建 active assistant且保留旧 assistant；所有已创建 assistant 写正确 parent；
 8. finalizer/terminal fact commit 后发带 `projection=updated|unchanged` 的 `done`；无论成功/失败前端都 reload conversation detail。updated + messageId 以新 assistant 接管；updated + messageId null（send/edit 回复失败）以 request trace 对应的 active user/replacement 收敛；regenerate unchanged 恢复旧 assistant；
-9. 非 pending terminal 在 commit 后按 owner token 释放 run guard；进入 HITL pending 时把 token 存入 PendingPayload并延长 lease，原 SSE finally 不释放，交由 resume/wake-false/TTL/startup cleanup 收口后释放。
+9. 非 pending terminal 在 commit 后按 owner token 释放 run guard；进入 HITL pending 时把 token/finalization context 绑定 PreparedAction 并延长 lease，原 SSE finally 不释放，交由 confirm/action TTL/startup cleanup 收口后释放。
 
 pre-stream 拒绝返回领域错误，前端不得再发第二次 chat 请求：
 
@@ -376,13 +402,14 @@ pre-stream 拒绝返回领域错误，前端不得再发第二次 chat 请求：
 | `AI_EDIT_BLOCKED_HAS_SIDE_EFFECT` | 后缀存在成功 write operation |
 | `AI_EDIT_BLOCKED_OPERATION_UNCERTAIN` | failed write 无法证明无副作用 |
 | `AI_EDIT_BLOCKED_OPERATION_IN_PROGRESS` | streaming/running/HITL pending |
+| `AI_EDIT_BLOCKED_ACTION_IN_PROGRESS` | 后缀存在 prepared/pending/approved/running action |
 | `AI_EDIT_BLOCKED_LEGACY_UNCERTAIN` | 历史 tool 事实无法建立 source 因果 |
 | `AI_REGENERATE_BLOCKED_LEGACY_UNCERTAIN` | 历史 assistant 无 parent，无法可靠定位 source user |
 | `AI_MESSAGE_EDIT_CONFLICT` | target 已 inactive 或并发 mutation 冲突 |
 | `AI_CHAT_TRACE_CONFLICT` | traceId 格式非法、已被其他 run 使用或 owner/conversation 不匹配 |
 | `AI_CHAT_COMMAND_INVALID` | action 与 target/content 字段组合不合法 |
 
-### 5.2 Conversation detail 增加 `editPolicy`
+### 5.2 Conversation detail 增加 `editPolicy` 与 `pendingActions`
 
 仅 active user message 返回 policy；assistant 的 regenerate policy 可使用同一结构命名为 `regeneratePolicy`。Snowflake ID 仍序列化为字符串。
 
@@ -401,6 +428,30 @@ pre-stream 拒绝返回领域错误，前端不得再发第二次 chat 请求：
 ```
 
 `executedTools` 只返回已脱敏摘要，不返回原始 args。
+
+conversation 顶层同时按 Gateway spec §8.8 返回当前 owner/tenant 的 `pendingActions`。message policy 只给按钮判定，pendingActions 给确认 UI 恢复，二者不可互相推导：
+
+```json
+{
+  "messages": [],
+  "pendingActions": [
+    {
+      "actionId": "1900000000000000001",
+      "confirmationId": "opaque-token",
+      "sourceUserMessageId": "456",
+      "traceId": "tr_0123...",
+      "tool": "user.import_execute",
+      "toolCallId": "tc_execute_1",
+      "sourceToolCallId": "tc_preview_1",
+      "interactionFlow": "prepared",
+      "presentation": {"title": "导入用户", "fields": []},
+      "expiresAt": "2026-08-07T14:10:00Z"
+    }
+  ]
+}
+```
+
+DTO 不返回 frozen args、snapshot、preview token、tenant 或内部 subject ref；source message inactive/跨 owner/tenant/已过期 action 不进入列表。
 
 ### 5.3 前端 store
 
@@ -476,6 +527,12 @@ const editBlockedReason = computed(() => {
 | `test_chat_command_field_matrix_rejects_invalid_combinations` | D.7 — 三 action target/content 互斥 |
 | `test_legacy_tool_suffix_is_blocked_but_plain_text_allowed` | D.8 — 保守兼容 |
 | `test_detail_computes_edit_policy_without_n_plus_one` | D.5 — 批量 policy |
+| `test_pending_prepared_action_blocks_edit_and_regenerate` | D.1/D.9 — action 未终态时两个入口都拒绝 |
+| `test_rejected_action_allows_revision_but_success_uses_execution_fact` | D.1/D.9 — terminal action 与 operation 联合判定 |
+| `test_confirm_edit_race_has_single_winner` | D.4/D.9 — 固定锁序 + CAS，不在失活 source 上执行 |
+| `test_stale_source_expires_action_without_execute` | D.9 — source inactive → stale error/expired，业务函数未调用 |
+| `test_replacement_does_not_inherit_prepared_action` | D.2/D.9 — 新 revision 使用新 message ID，无 action 迁移 |
+| `test_detail_pending_actions_are_scoped_and_sanitized` | D.5/D.9 — owner/tenant/active scope，隐藏 frozen data |
 
 ### 6.2 前端（vitest）
 
@@ -492,6 +549,7 @@ const editBlockedReason = computed(() => {
 | `editFailedUpdatedProjectionKeepsReplacementUser` | D.7 — assistant 未持久化仍以 detail replacement 为准，并显示回复失败 |
 | `failedDetailRefreshKeepsStaleProjectionAndBlocksNextCommand` | D.7 — 不回退到与后端冲突的旧 suffix |
 | `blockedReasonTooltipAndCopyOriginal` | D.5 — 替代路径 |
+| `pendingActionPolicyCannotBeRelaxedByToolCards` | D.1/D.5 — 前端卡片不参与放宽 |
 
 ### 6.3 E2E（Playwright）
 
@@ -502,6 +560,7 @@ const editBlockedReason = computed(() => {
 | write 后编辑/regenerate | 两个入口都 disabled，直接 API 也被后端拒绝 |
 | 编辑中间消息 | 后续 active 消息全部隐藏，审计数据仍保留 |
 | HITL 与并发 | pending 时拒绝；两个标签同时编辑只有一个成功 |
+| PreparedAction 与编辑竞态 | 一个标签批准、另一个编辑：最多一方推进；旧 action 永不执行到 replacement |
 
 审计历史页面 / diff 的 E2E 随 Phase 2 实现，不阻塞本期核心语义上线。
 
@@ -513,20 +572,21 @@ const editBlockedReason = computed(() => {
 
 - [x] Task 0 **✅ 已完成（2026-08-07）**：`AI_MESSAGE_REVISION_ACTIONS_ENABLED=false` 统一隐藏 edit/regenerate 入口；store 方法只返回 `false`，不 slice/pop/push authoritative messages、不清附件、不发 stream 请求
 - [x] Task 0a **✅ 已完成（2026-08-07）**：用户导入导出 spec Task 35 已完成 16 个 built-in effect metadata 审计、file_id owner/trusted tenant/内容/私有路径边界及 HITL tenant 复核；这只完成 guard 前置信任基础，不代表 edit/regenerate 可以开放
+- [ ] Task 0b（P0 跨 spec 门禁）：Task 1/2/2b 先作为 Gateway Task 35a 的共享基础落地，再完成 PreparedAction 持久化、source binding、confirm sole authority 和 detail pendingActions；整个过程中 edit/regenerate 继续关闭
   - 0.1 **Safety Gate 同时禁 UI 与命令副作用** — 单靠隐藏按钮不能防其他组件或测试直接调用 store action，因此 action 本身也必须 no-op。**反例**: 只用 `v-if` 隐藏 → 调用 `regenerate()` 仍会 pop 历史并重复 tool。**回归**: Vitest 断言按钮不存在、两 action 返回 false 且消息/附件/stream 调用均不变。
   - 0.2 **Gate 只由单一常量控制** — UI 与 store 共享 `AI_MESSAGE_REVISION_ACTIONS_ENABLED`，避免一端误开。**反例**: 两处硬编码 boolean → 后续只改一处形成隐藏入口或无响应按钮。**回归**: safety-gate 测试同时覆盖 store 与 `chat-message.vue`。
 
 ### Current release（安全与一致性收尾）
 
 - [ ] Task 1：`AiMessage.is_active` / `supersedes_message_id` + `AiOperationLog.source_user_message_id` / `readonly_snapshot` migration；补 active、operation guard 和 assistant run partial unique indexes
-- [x] Task 2a **✅ trusted tenant 子集已完成（2026-08-07）**：服务端 resolver 向 `ChatDeps/AiToolContext` 注入 tenant_id；PendingPayload 保存 tenant，resume/confirm 与当前认证 tenant 复核；客户端字段不能覆盖
+- [x] Task 2a **✅ trusted tenant 子集已完成（2026-08-07）**：服务端 resolver 向 `ChatDeps/AiToolContext` 注入 tenant_id；旧 direct HITL PendingPayload 已保存 tenant 并在 resume/confirm 复核；Task 35a 将同一不变量迁入 PreparedAction，客户端字段仍不能覆盖
 - [ ] Task 2：ChatCommand/Web 在请求前生成并验证稳定 traceId，MessageOut 返回 traceId；user message flush/返回 ID，注入 `ChatDeps.source_user_message_id`，user/assistant 写原 run trace，Gateway operation log 写因果键与 readonly snapshot（Task 35 已提供可信 metadata，但因果链仍待实现）
-- [ ] Task 2b（共享 guard 前置）：先为现有 send/resume 实现 conversation run guard 基础、owner token、stream heartbeat、pending lease（≥ HITL TTL+60s）和统一 terminal cleanup；PendingPayload 保存 tenant，resume 与当前认证 tenant 复核；覆盖 resume/wake-false/TTL/startup cleanup，pending SSE finally 不释放
+- [ ] Task 2b（共享 guard 前置）：为 send/confirm 实现 conversation run guard、owner token、stream heartbeat、action expiry+60s pending lease 和统一 terminal cleanup；PreparedAction 保存 trusted tenant/source/finalization context，Redis waiter 只通知；覆盖 confirm/TTL/startup cleanup，pending SSE finally 不释放
 - [ ] Task 2c（跨 spec 前置）：完成工具卡 spec Phase 1 的 action/outcome-aware finalizer、HITL resume 持久化、durability/projection done、ack-loss reconciliation 与前端 handoff state；后续 edit/regenerate 直接复用，不另建收口链路
-- [ ] Task 3：实现 suffix operation policy + legacy policy，统一领域错误层级
+- [ ] Task 3：实现 suffix operation + PreparedAction policy、legacy policy和 D.9 固定锁序/CAS，统一领域错误层级
 - [ ] Task 4：在 Task 2b guard 上补 edit/regenerate 的 target row lock、owner/active/role 重验和 mutation conflict；不再实现第二套 guard
 - [ ] Task 5：重构共享 ChatRunService，接入工具卡 spec 已落地的 `finalize_assistant_turn`；`POST /ai/chat` 支持 send/edit/regenerate，保证单次 mutation、assistant parent、run 级幂等收口和 action 字段互斥
-- [ ] Task 6：active history 查询、revision lineage、conversation detail 批量 `editPolicy` / `regeneratePolicy`
+- [ ] Task 6：active history 查询、revision lineage、conversation detail 批量 `editPolicy` / `regeneratePolicy` + scoped `pendingActions`
 - [ ] Task 7：后端 pytest 覆盖 §6.1，包含并发、越权、legacy 与无双写
 - [ ] Task 8：前端 store 改为 messageId ChatCommand，删除 edit slice / regenerate pop；以 pendingCommand 派生临时 active projection，detail 失败进入 stale 并阻止下一条 command
 - [ ] Task 9：chat-message 使用服务端 policy，补 tooltip / 复制原文 / 双语 i18n
@@ -560,7 +620,7 @@ const editBlockedReason = computed(() => {
 
 ## 9. 开放问题
 
-无。D.1-D.8 已给出当前版本可实现且保守的安全边界。未来只有在 ADR-0001 的 v1.5 量化触发条件满足时，才重新设计 deferred 状态与 reversibility；不提前建设。
+无。D.1-D.9 已给出当前版本可实现且保守的安全边界。ADR-0002 PreparedAction 属于当前 action 级确认收尾，不等同于 deferred；未来只有在 ADR-0001 的量化触发条件满足时，才重新设计 deferred 状态与 reversibility。
 
 ---
 
@@ -569,3 +629,4 @@ const editBlockedReason = computed(() => {
 - 本 spec 是 hohu 生态 AI 的 replay 行为契约：Gateway 定义“如何执行 tool”，本 spec 定义“何时允许重新执行”；
 - 与 [`2026-08-05-chat-tool-card-embed-in-message.md`](./2026-08-05-chat-tool-card-embed-in-message.md) 在数据生命周期上协同：inactive assistant 的卡片从 active UI 自然消失，但安全判断永远使用 operation log；
 - 与 [`../adr/0001-ai-safety-consistency-before-deferred-execution.md`](../adr/0001-ai-safety-consistency-before-deferred-execution.md) 一致：当前只做同步链路的安全与一致性收尾，不扩建完整 deferred 基础设施。
+- 与 [`../adr/0002-gateway-owned-confirmation-flow.md`](../adr/0002-gateway-owned-confirmation-flow.md) 一致：action 绑定不可变 source message ID，批准前复验 active revision，旧 action 不迁移。

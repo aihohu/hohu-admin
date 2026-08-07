@@ -1,10 +1,11 @@
 # AI Tool Gateway 设计
 
-> **状态**: Draft
+> **状态**: Draft（现有 direct HITL 已落地；ADR-0002 `PreparedAction` 确认编排为 P0 待实施）
 > **日期**: 2026-07-02
+> **更新**: 2026-08-07
 > **作者**: Jack
 > **影响项目**: `hohu-admin`（后端，主战场）、`hohu-admin-web`（前端，配合流式协议与 HITL 抽屉）
-> **关联文档**: `docs/APP-MARKETPLACE.md`、`docs/SECURITY.md`、`docs/ARCHITECTURE-GUIDELINES.md`
+> **关联文档**: [`ADR-0001`](../adr/0001-ai-safety-consistency-before-deferred-execution.md)、[`ADR-0002`](../adr/0002-gateway-owned-confirmation-flow.md)、`docs/APP-MARKETPLACE.md`、`docs/SECURITY.md`、`docs/ARCHITECTURE-GUIDELINES.md`
 
 ---
 
@@ -105,6 +106,10 @@
 ### 2.13 **tool-call 卡片视觉走原型 §12 复刻（3px 状态色条 + 中文 desc 字典 + risk chip + 时长/行数 status text）** — Phase 3.5 重写 `chat-tool-call.vue`：左侧 3px 状态色条（running=蓝 / success=绿 / failed=红）+ 状态色 icon + tool name + 中文 desc（前端本地字典，未知 tool 显示空）+ risk chip（low=绿/high=黄/destructive=红）+ 状态文本（`已执行 · 230ms · 1 行`，无 `affected_rows` 时隐藏「N 行」尾部）+ chev 折叠；body 展开后展示 args + result，head **不**展示 summary（summary 是审计字段，放 body「参数」小标题下）。
 **反例**: head 同时显示 summary 文本 → 视觉冗余（已有中文 desc + risk chip + status text 三行信息），summary 是给审计看的「tool=user.x, risk=high, mode=hitl」格式不适合人读；从 `result.data` 解析 `affected_rows` → 各 tool 返回结构不同（dict/list/scalar）需要推断 helper，但若**不**展示行数，原型「1 行」「3 行」「23 行」关键视觉信息丢失。
 **回归**: `chat-tool-call.vue::statusText` 按 `cardStatus` + `result.ok` + `affectedRows` 三元组生成 5 种文案（执行中 / 已执行 · Nms / 已执行 · Nms · N 行 / 失败 · 友好名 / 失败 · errorCode）；`_infer_affected_rows` 推断规则：`dry_run_count` 优先 → `result.data` 是 dict 取 `affected_count`/`affected_rows`/`count`/`total`/`groups_count` 任一字段 → list 取长度 → 都无则 None（隐藏尾部）；status 文本里 `durationMs` 来自 executor `started_at` 到 emit result 的墙钟耗时（含 HITL 等待时间）。
+
+### 2.14 **确认编排归 Gateway，Prompt 与 Markdown 不是控制面** — [ADR-0002](../adr/0002-gateway-owned-confirmation-flow.md) 修正原 direct-only HITL 的能力缺口：单 tool 确认与 preview → bound execute 都由 Gateway 创建持久 `PreparedAction`；LLM 只表达 `requested_outcome`，不得负责在 preview 后再次调用 execute 或用文本向用户索取授权。
+**反例**: preview 返回后依赖 Prompt 让 LLM 说“请确认”并调用第二个 tool → 模型可能只输出 Markdown、重复预览或换参，Gateway/客户端均拿不到确定状态。
+**回归**: `direct`、`prepared + preview_only`、`prepared + execute_if_approved` 三条协议矩阵；执行型 prepared flow 必须自动发 `confirmation_required`，execute capability 不进入 LLM schema，批准请求不携带业务参数。
 
 ---
 
@@ -445,9 +450,71 @@ def build_tool_context(
 
 **PydanticAI 接入**：`Agent(deps_type=ChatDeps, ...)` 保持不变；自定义 `@ai_tool` 装饰器内部把 `RunContext[ChatDeps]` 拆包，调用 `build_tool_context(deps, tool_db, meta)` 生成 `AiToolContext`（携带 `tool_meta` 供聚合 tool 读 `max_groups` / `allowed_filters` 等），再调业务方函数。业务方函数签名是 `async def fn(ctx: AiToolContext, **args)`，**不直接接触 `RunContext`**。
 
-**HITL 恢复路径**（§8.3）：从 Redis 取出 `pending` 后直接 `AiToolContext(...)` 重建（不经过 `ChatDeps`），见 §8.3 `resume_confirmation`。
+**HITL 恢复路径**：§8.3 记录现有 direct HITL 的 Redis 恢复实现；ADR-0002 目标协议改为从 PostgreSQL `ai_prepared_action` 重建授权事实，Redis 只负责通知/缓存，见 §4.7 / §8.8。
 
 `recent_failures`（连续失败兜底）走 Redis 跨 `/ai/chat` 流持久化：key=`ai:failures:{user_id}:{tool_name}:{args_hash}`，TTL=10min。
+
+### 4.7 `ai_prepared_action` — Gateway 确认事实源（ADR-0002，P0 待实施）
+
+`ai_operation_log` 继续记录 tool 的执行事实；`ai_prepared_action` 独立记录“准备了什么、谁批准、最终是否执行”的授权事实。SSE、Redis PendingPayload 和 `ai_message.tool_calls` 都只是可恢复投影，不得替代此表。
+
+```python
+class PreparedActionStatus(str, Enum):
+    PREPARED = "prepared"
+    PENDING_CONFIRMATION = "pending_confirmation"
+    APPROVED = "approved"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
+class AiPreparedAction(Base):
+    __tablename__ = "ai_prepared_action"
+
+    action_id: Mapped[int]                         # Snowflake，API 序列化为 string
+    confirmation_id: Mapped[str]                   # 256-bit opaque token，unique
+    status: Mapped[PreparedActionStatus]
+    row_version: Mapped[int]                       # CAS，一次批准/执行
+
+    interaction_flow: Mapped[str]                  # direct | prepared
+    requested_outcome: Mapped[str | None]          # prepared 时固定 execute_if_approved
+    approval_mode: Mapped[str]                     # 当前确认对象恒为 hitl
+    dispatch_mode: Mapped[str]                     # 当前恒为 inline
+
+    prepare_tool_call_id: Mapped[str | None]
+    execute_tool_call_id: Mapped[str]
+    execute_tool_name: Mapped[str]
+    frozen_args: Mapped[dict]                      # 服务端内部 JSON，不进入 API/presentation
+    args_hash: Mapped[str]                         # canonical JSON SHA-256
+    snapshot: Mapped[dict | None]                  # 业务 preview/impact 的不可变快照
+    snapshot_hash: Mapped[str | None]
+    subject_ref: Mapped[dict | None]               # batch/review 等不透明业务引用
+    presentation: Mapped[dict]                     # 已脱敏、允许客户端展示的结构
+
+    user_id: Mapped[int]
+    tenant_id: Mapped[int]
+    conversation_id: Mapped[int]
+    source_user_message_id: Mapped[int]
+    trace_id: Mapped[str]
+    agent_code: Mapped[str]
+
+    expires_at: Mapped[datetime]
+    approved_by: Mapped[int | None]
+    approved_at: Mapped[datetime | None]
+    finished_at: Mapped[datetime | None]
+    error_code: Mapped[str | None]
+```
+
+约束与索引：
+
+- `confirmation_id` 唯一且不可枚举；公共 API 以它定位 action，不接受 Snowflake action ID 作为批准凭证。
+- `(conversation_id, status, expires_at)` 支持恢复当前会话 pending；`(source_user_message_id, status)` 支持 edit/regenerate guard；`execute_tool_call_id` 唯一。
+- `frozen_args`、snapshot 与 subject ref 均不进入客户端 DTO；presentation 必须先按 tool `sensitive_input/sensitive_output` 和全局 blocklist 脱敏，最大 16KB。
+- secret 值不得进入 `frozen_args`；仍按 §7 从服务端策略或受保护引用在执行时注入。
+- 状态转换使用 `UPDATE ... WHERE confirmation_id=:id AND status=:expected AND row_version=:version`；0 rows 视为重复批准、过期或并发冲突，不得重试业务执行。
+- `prepared -> pending_confirmation` 与对应 operation pending fact 在同一事务提交；`pending_confirmation -> approved|rejected|expired`；`approved -> running|failed`；`running -> succeeded|failed`；terminal 不可逆。
 
 ---
 
@@ -471,6 +538,9 @@ class AiToolMeta:
     ambiguous_without: tuple[str, ...] = ()          # 缺这些字段时主动反问
     accepts_file: tuple[str, ...] = ()              # 接受的 MIME 类型
     produces_file: bool = False                     # 是否产生文件下载
+    interaction_flow: Literal["direct", "prepared"] = "direct"
+    prepared_execute_tool: str | None = None        # prepared flow 绑定的 Gateway-only execute tool
+    llm_visible: bool = True                        # False = 仅 Gateway 内部可调用
     # —— §5.5 聚合 tool 专用字段（默认值保证非聚合 tool 不受影响）——
     readonly: bool = False                          # True = 纯读无副作用，被 §2.9 chip 机制忽略（聚合结果即答案）
     allowed_filters: tuple[str, ...] = ()           # filters dict 允许的 key 白名单
@@ -731,6 +801,33 @@ async def user_distinct(ctx: AiToolContext, field: str) -> list[str]:
 - 在 `user.list` 加 `count_only=True` 参数走同一函数 → 语义混淆 + 装饰器白名单难表达
 - 让 LLM 输出 chart fenced block → LLM 不可控、流式跳变、小程序 markdown 渲染器认不出
 - 卡片图表吞掉 LLM 转述 → 纯文本场景拿不到数字（违反 §7.6 read obligation）
+
+### 5.6 prepared tool 注册契约（ADR-0002）
+
+`interaction_flow="prepared"` 的 prepare tool 仍对 LLM 可见；其绑定 execute tool 必须 `llm_visible=False`，只能由 Gateway 根据已批准 `PreparedAction` 调用。Registry 启动校验必须满足：
+
+1. prepared tool 必须声明 `prepared_execute_tool`，目标存在、同 agent 或显式 shared、`llm_visible=False`，且不能再绑定下一个 prepared tool；
+2. execute tool 不进入 `compute_available_tools` / PydanticAI schema，即使 LLM 猜到名字也返回 `AI_TOOL_NOT_AVAILABLE_TO_MODEL`；
+3. prepared tool 的模型侧 schema 由 wrapper 增加保留字段 `requested_outcome: preview_only | execute_if_approved`，Gateway 在调用业务函数前剥离该字段；业务函数不以它作为授权输入；
+4. prepared tool 成功结果必须提供内部 `PreparedActionProposal`，其中含 frozen execute args、snapshot/hash、subject ref、过期时间和 presentation；该 proposal 不序列化给 LLM；
+5. `preview_only` 只把已脱敏 preview data 返回 LLM，不持久化 `PreparedAction`；`execute_if_approved` 校验 proposal 后自动持久化 action 并进入 confirmation，不要求第二次 LLM tool call；
+6. preview-only 不得事后“升级”为执行型 action；用户之后改为要求执行时必须重新调用 prepare，确保策略、权限和 snapshot 都是当前值。
+7. 被 prepared tool 绑定的 `llm_visible=False` execute 可豁免 `high_risk_requires_dry_run`，因为业务 preview snapshot 已承担 impact 展示；但普通 executor 入口缺少 `approved_action_context` 时必须拒绝 `AI_PREPARED_ACTION_REQUIRED`，不能因此成为内部绕过。
+
+```python
+@dataclass(frozen=True)
+class PreparedActionProposal:
+    frozen_args: dict[str, JsonValue]
+    snapshot: dict[str, JsonValue]
+    snapshot_hash: str
+    subject_ref: dict[str, str]
+    presentation: ConfirmationPresentation
+    expires_at: datetime
+```
+
+**反例**: 只在 `summary` 写“Call execute next” → LLM 仍是编排器；execute 保持可见但依赖 `hitl_always` → LLM 可以不调用、重复调用或换参；把 preview token 放 presentation → 浏览器/模型重新提交 capability，破坏服务器冻结参数。
+
+**回归**: Registry/static gate 覆盖缺绑定、绑定不存在、execute 可见、prepared 链式绑定和保留字段冲突；集成测试证明 preview-only 无 action、execute intent 自动 pending、LLM schema 不含 execute tool、proposal/frozen args 不出现在模型结果和 API。
 
 ---
 
@@ -1316,6 +1413,13 @@ def build_system_prompt(agent: AiAgent, deps: ChatDeps) -> str:
 
 ```typescript
 // 前端 src/typings/api/ai.d.ts
+type ConfirmationPresentation = {
+  title: string;
+  summary?: string;
+  fields: Array<{ label: string; value: string | number; tone?: "default" | "success" | "warning" | "danger" }>;
+  warnings?: string[];
+};
+
 type AiStreamEvent =
   | { type: "text-delta"; text: string }   // 仅由 VercelAIAdapter 产生
   | { type: "tool_call_started"; tool: string; toolCallId: string;
@@ -1326,9 +1430,10 @@ type AiStreamEvent =
       affectedRows?: number | null;
       errorCode?: string; errorMsg?: string }
   | { type: "confirmation_required";
-      confirmationId: string; tool: string; toolCallId: string;
-      summary: string; args: Record<string, unknown>;
-      dryRun?: { summary: string; affectedCount: number; affectedExamples?: string[] };
+      confirmationId: string; actionId: string;
+      tool: string; toolCallId: string; sourceToolCallId?: string;
+      interactionFlow: "direct" | "prepared";
+      presentation: ConfirmationPresentation;
       expiresAt: string }   // ISO 8601 UTC, e.g. "2026-07-02T14:07:30Z"
   | { type: "ai_error"; errorCode: string; message: string }
   | { type: "done" };
@@ -1343,6 +1448,7 @@ type AiStreamEvent =
 - `tool_call_started.risk` 来自 §5.3 风险分级（`AiToolMeta.risk`），前端据此渲染色条 + chip 标签。
 - `tool_call_result.duration_ms` 是从 `started_at` 到 emit 此事件的墙钟耗时（毫秒），含 HITL 等待时间。前端展示「已执行 · 230ms」。
 - `tool_call_result.affected_rows` 是影响行数推断值（`_infer_affected_rows`：`dry_run_count` 优先；否则从 `result.data` 取 `affected_count` / `affected_rows` / `count` / `total` / `groups_count` 任一字段；list 取长度；都无则 None）。前端 None 时隐藏「N 行」尾部。
+- `confirmation_required.presentation` 是 Gateway 持久化并脱敏后的展示 DTO；事件不再携带 raw `args`、preview token 或 frozen args。direct dry-run 摘要和 prepared 业务预览都先归一化为 presentation fields/warnings。
 
 **砍掉的事件**（vs 完整版 9.1）：
 - `tool_call_input`（合并到 `tool_call_started.args`）
@@ -1360,7 +1466,9 @@ type AiStreamEvent =
 
 **后端约束**：自定义事件**不发** `text-delta` / `reasoning-delta` 类型（避免与 Vercel v4 标准事件双源去重复杂度）。这两个 type 只由 `VercelAIAdapter.encode_stream` 产生。
 
-### 8.2 完整生命周期
+### 8.2 direct HITL 完整生命周期（历史实现）
+
+> 本节记录已落地的 Prompt/tool-call 驱动链路，仅用于兼容与迁移基线；ADR-0002 目标生命周期统一见 §8.8，不得据此新增确认流程。
 
 ```
 用户: "把张三从开发部调到产品部"
@@ -1380,7 +1488,9 @@ Gateway:
        → yield tool_call_result + text-delta
 ```
 
-### 8.3 `/ai/confirm` 端点
+### 8.3 `/ai/confirm` 端点（现有 direct HITL 历史实现；目标契约见 §8.8）
+
+> ⚠️ **ADR-0002 override**：本节 Redis payload + `wake_hung_stream` 代码保留用于解释当前实现和兼容迁移，不再是目标授权协议。新实现以 `ai_prepared_action` 为事实源，由确认 API 按 §8.8 CAS 批准并执行；Redis 只通知等待中的原 SSE，不决定能否执行。
 
 ```python
 @router.post("/ai/confirm")
@@ -1505,7 +1615,9 @@ async def resume_confirmation(confirmation_id: str, action: str) -> ToolResult:
 - 若 SSE 在轮询窗口内自然恢复并吐出 `tool_call_result`，取消轮询（双源去重：以 SSE 为准）
 - 30s 内无结果，提示"操作仍在执行，请稍后到 AI Trace 查看"
 
-### 8.4 MVP 单 worker 约束 + 服务重启清扫
+### 8.4 MVP 单 worker 约束 + 服务重启清扫（memory 模式历史实现）
+
+> 本节保留早期 memory 模式的部署约束。ADR-0002 落地后，持久化 `PreparedAction` 是授权事实，服务重启不得清除仍有效的 pending action；目标规则见 §8.8。
 
 进程内 `asyncio.Event` 在多 worker 下静默失效。MVP 强制：
 
@@ -1567,7 +1679,9 @@ async def cleanup_pending_on_startup():
                 await redis.delete(key)
 ```
 
-### 8.4.1 redis_pubsub 模式（v1.5+，2026-07-13 落地）
+### 8.4.1 redis_pubsub 模式（direct HITL 历史实现，2026-07-13 落地）
+
+> pub/sub 的既有实现可在迁移期继续承担 waiter 通知，但不得继续承担授权事实或执行权；ADR-0002 目标模式以 DB action 为准，Redis 仅作缓存与通知。
 
 跨 worker 部署时设置 `AI_HITL_MODE=redis_pubsub`，wake 走 Redis pub/sub。本节由 §22 SR-7 决策落地。
 
@@ -1601,7 +1715,9 @@ async def cleanup_pending_on_startup():
 
 **外部调用方零改动**：`executor.py:await hitl_manager.hang(...)` / `api/confirm.py:await hitl_manager.wake(...)` 签名不变；mode 分支在 `HitlManager` 内部。
 
-### 8.5 SSE 断流兜底（MVP 简化）
+### 8.5 SSE 断流兜底（direct HITL 历史实现）
+
+> 本节记录现有热接管行为。PreparedAction 目标架构的恢复入口是 conversation detail `pendingActions`，SSE 恢复仅作为在线体验增强，见 §8.8。
 
 **不做 sequence_id / 心跳定时器**。MVP 策略：
 
@@ -1695,6 +1811,108 @@ GET /ai/query-cache/<trace_id>
 模块页前端：路由组件挂载时检测 `route.query.ai_query_id`，存在则调用 `/ai/query-cache/<id>`，把返回的 `filters` 合并到查询表单并触发查询。**用户主动改筛选条件时清掉 `ai_query_id` URL param**，避免后续刷新重复回放。
 
 system_prompt（§7.6）补一条："readonly tool 返回后，必须在消息气泡里用 markdown 表格转述关键发现（单条全转 / 长列表前 N 条 + 聚合），不能只说'已查询'。长列表场景必须配 chip 引导用户去模块页看完整。"
+
+### 8.8 Gateway-owned Confirmation Flow（ADR-0002，P0）
+
+本节是 §8.2-§8.4 的权威演进契约。它保留 `confirmation_required` 事件与现有抽屉入口，但把授权事实从“LLM 是否调用 execute + Redis 中是否还有等待流”迁移为 PostgreSQL `PreparedAction`。迁移完成后，Prompt 文案、Markdown、Redis wake 和 SSE 是否在线都不能决定业务执行。
+
+#### 8.8.1 交互矩阵
+
+| interaction_flow | requested_outcome / approval_mode | Gateway 行为 | 是否弹确认 |
+|---|---|---|---|
+| `direct` | `autonomous` | 按现有鉴权、risk、dry-run 后直接执行 | 否 |
+| `direct` | `hitl` | 冻结本次 args/impact，创建 `PreparedAction` | 是 |
+| `prepared` | `preview_only` | 执行 preview，返回结构化预览；不创建 action | 否 |
+| `prepared` | `execute_if_approved` | 执行 preview，校验 proposal，自动创建绑定 execute 的 action | 是 |
+
+`prepared + execute_if_approved` 当前固定为 `hitl + inline`。`risk_appetite` 不能把它降级为 autonomous；`dispatch_mode` 将来即使变为 deferred，也只能发生在 action 已批准之后。
+
+#### 8.8.2 prepared 生命周期
+
+```text
+用户：“导入这个用户表”
+  -> LLM 调 user.import_preview(..., requested_outcome=execute_if_approved)
+  -> Gateway 剥离 requested_outcome，执行 preview tool
+  -> preview 返回公开 preview data + 内部 PreparedActionProposal
+  -> Gateway 校验/冻结 proposal
+  -> 同一事务创建 execute operation(pending_confirmation) + PreparedAction
+  -> emit confirmation_required(presentation)，agent tool call 暂停
+  -> 客户端按协议打开抽屉；LLM 不生成授权文本、不调用 execute
+  -> 用户 POST /ai/confirm {confirmationId, action:"approve"}
+  -> Gateway 复验身份/tenant/权限/scope/source/snapshot，CAS 后 inline 调 Gateway-only execute
+  -> action + operation + message projection commit
+  -> 原 SSE 在线则收到 tool_call_result/后续文本；不在线则 conversation detail 可恢复终态卡片
+```
+
+`preview_only` 在 preview result 返回 LLM 后正常结束，不发 `confirmation_required`。之后用户若改为要求执行，必须重新发起 prepared preview；不得把旧 preview-only 结果由浏览器或 LLM 直接升级成 action。
+
+#### 8.8.3 direct 生命周期
+
+direct tool 继续使用 §5.3 风险分类；当结果为 HITL 时，Gateway 用原 tool args、dry-run impact 和同一个 execute tool 构造 `PreparedAction`。批准后的执行仍读取 frozen args，不从 LLM/browser 重建。这样 direct 与 prepared 的差异只在“action 如何准备”，批准、复验、状态机和 UI 协议完全相同。
+
+#### 8.8.4 `/ai/confirm` 目标契约
+
+```json
+POST /ai/confirm
+{
+  "confirmationId": "opaque-256-bit-token",
+  "action": "approve"
+}
+
+200
+{
+  "code": 200,
+  "msg": "success",
+  "data": {
+    "actionId": "1900000000000000001",
+    "toolCallId": "tc_execute_1",
+    "status": "succeeded"
+  }
+}
+```
+
+- `action` 只允许 `approve | reject`；请求体禁止 tool 名、args、preview token、文件 ID、策略和 tenant。
+- approve 由该 HTTP 请求在 `AI_TOOL_TIMEOUT` 内 inline 执行，不返回伪 `queued`；响应丢失时，重复请求只返回已有 `running/terminal` 状态，不得再次执行。
+- reject 只做 `pending_confirmation -> rejected`，写 operation/action 终态并调用共享 finalizer。
+- owner/tenant 不匹配统一返回 not-found 语义且不泄露/修改 action；TTL、用户禁用、tool disable、权限/scope/source/snapshot 在执行前失效时从 pending 收口为 `expired` 并记录具体 errorCode；只有已经进入执行后的异常才是 `failed`。
+- 只有 confirm handler 是批准后的执行 authority。原 SSE waiter 只等待 action terminal 并投递结果；`wake=False` 不再代表“批准无效”或阻止 action 执行。
+
+#### 8.8.5 执行前复验与一次性语义
+
+approve 的锁顺序和执行顺序固定为：
+
+1. 先用 `confirmation_id + owner + tenant` 做不加锁定位，取得 conversation/source；不存在统一 not-found；
+2. DB transaction 按 `conversation -> source message -> PreparedAction` 固定顺序锁定，检查 `pending_confirmation`、TTL 和 row version；edit/regenerate 使用同一锁序；
+3. 在 action 仍 pending 时重查用户启用状态、Agent/tool enablement、required perms、Data Scope、super-admin gate和 source active/owner；
+4. 业务 adapter 使用 subject ref 重算或验证 snapshot hash；文件类同时复验 owner/tenant/type/size/path；任一失败 CAS `pending -> expired`，不调用 execute；
+5. CAS 到 `approved` 并记录 `approved_by/approved_at`，随后 CAS `approved -> running`；`running`/operation fact commit 成功后释放锁，commit 失败不得调用业务函数；
+6. 按 §6.3 使用独立 tool session，以 frozen args 和 `approved_action_context` 调 `llm_visible=False` execute tool；API/Gateway 层负责提交或回滚业务 transaction，Service 不 commit；
+7. 业务 transaction 成功后在终态 transaction 写 operation/action success；异常写 failed。若业务 commit 已成功但终态写入失败，按 execution interrupted/outcome uncertain 处理，禁止自动重试并告警人工对账；
+8. 调共享 terminal finalizer 持久化工具卡投影，commit 后再通知 SSE/返回。
+
+步骤 2-4 失败不得调用业务函数。source 已 inactive 或 snapshot 变化时 action 进入 `expired`，错误码分别为 `AI_PREPARED_ACTION_SOURCE_STALE` / `AI_PREPARED_ACTION_SNAPSHOT_STALE`。进程在 `running` 中崩溃时，启动清理标为 `failed + AI_PREPARED_ACTION_EXECUTION_INTERRUPTED`，保守视为 write outcome uncertain，禁止自动 replay。
+
+#### 8.8.6 持久恢复与单一实时通道
+
+`GET /ai/conversation/{conversation_id}` 在现有 messages 外返回 `pendingActions`，只包含当前 owner/tenant、未过期、source message active 的 action；DTO 复用 `confirmation_required` 的 action ID、toolCallId、sourceToolCallId、presentation、expiresAt，不返回 frozen args/snapshot/token。前端刷新或切换会话后据此恢复 pending 卡片和抽屉。
+
+Redis 可缓存 pending DTO、承担 pub/sub/进程内 waiter 通知，但 cache miss 必须回源 DB；Redis 清空、SSE 断开或服务重启不会删除仍有效的 pending action。任何新 ChatCommand 在获取 Redis conversation guard 前后都必须查询 DB 是否存在同 conversation 的 in-progress action，存在即拒绝；启动时可按 action 中的 owner token/expiry 重建 Redis guard 作为加速，但 Redis guard 不得覆盖 DB 结论。过期清理和启动清理都以 DB CAS 为准，并调用与正常 reject/failed 相同的 finalizer。系统仍只有 Chat SSE 一条实时通道；confirm HTTP 响应和 conversation detail 查询是命令/恢复接口，不新增 WebSocket 或任务进度流。
+
+#### 8.8.7 安全展示协议
+
+`ConfirmationPresentation` 只允许 title、summary、扁平 fields 和 warnings；字段 value 为 string/number，禁止任意 HTML、Markdown action、URL、raw args 和嵌套业务对象。业务 tool 生成候选 presentation，Gateway 统一做字段数/长度限制、敏感键扫描和全局输出脱敏后再持久化。抽屉只渲染该 DTO，不再默认展开原始 args JSON。
+
+#### 8.8.8 回归门禁
+
+- direct autonomous 无 action；direct HITL 创建 action 且双击只执行一次；
+- prepared preview-only 不创建 action；execute intent 自动 pending，LLM 不需第二次调用；
+- execute tool 从模型 schema、available tools 和幻觉调用路径全部不可达；
+- approve/reject 请求带额外 args/tenant 时 schema 拒绝；跨 owner/tenant 返回不可区分 not-found；
+- 权限/scope/source/snapshot 在 preview 后变化时不执行；
+- Redis flush、reload、SSE 断开后 pending 可由 detail 恢复并批准；
+- process crash 的 running action 只标 uncertain failed，不自动重放；
+- presentation 不含 frozen args、preview token、内部路径和敏感字段；
+- action、operation log、assistant tool card 的 trace/source/toolCallId 可双向对账。
 
 ---
 
@@ -1850,8 +2068,12 @@ ai_security_events_total{event_type}                        Counter（injection 
 
 | code | HTTP | 触发条件 | LLM hint |
 |---|---|---|---|
-| `CONFIRMATION_EXPIRED_OR_NOT_FOUND` | 404 | confirmation_id 不存在或已过期（含 5min TTL 超时 + 服务重启清扫） | （不进 LLM） |
+| `CONFIRMATION_EXPIRED_OR_NOT_FOUND` | 404 | action 不存在、已过期或不属于当前 owner/tenant | （不进 LLM） |
 | `USER_REJECTED` | - | 用户在 HITL 抽屉点取消 | LLM 礼貌接受并询问下一步 |
+| `AI_PREPARED_ACTION_REQUIRED` | 409 | Gateway-only execute 缺 approved action context | （不进 LLM） |
+| `AI_PREPARED_ACTION_SOURCE_STALE` | 409 | source message 已 inactive/换 revision | （不进 LLM；提示重新发起） |
+| `AI_PREPARED_ACTION_SNAPSHOT_STALE` | 409 | preview/impact snapshot 已变化 | （不进 LLM；提示重新预览） |
+| `AI_PREPARED_ACTION_EXECUTION_INTERRUPTED` | 500 | running 时进程终止，outcome uncertain | （不自动重试，走审计/人工检查） |
 
 #### 业务类
 
@@ -1862,6 +2084,7 @@ ai_security_events_total{event_type}                        Counter（injection 
 | `AI_FILE_TOO_LARGE` | 413 | 文件超过 parser max_bytes | 告知用户拆分或压缩 |
 | `AI_FILE_TYPE_UNSUPPORTED` | 415 | MIME 无对应 parser | 告知用户支持的类型 |
 | `AI_TOOL_NOT_FOUND` | 404 | LLM 调用了不存在的 tool | LLM 自检并切换引导 |
+| `AI_TOOL_NOT_AVAILABLE_TO_MODEL` | 404 | LLM 猜测调用 `llm_visible=False` capability | LLM 只能调用可见 prepare/direct tool |
 | `AI_QUERY_CACHE_EXPIRED` | 404 | trace_id 不存在或已过期（5min TTL，§2.9 跳转 chip 反查） | （HTTP 直接拒绝，前端清掉 URL param 让用户手动筛选） |
 | `AI_STATS_FIELD_NOT_ALLOWED` | 400 | `filters` 或 `group_by` 字段不在 `@ai_tool` 白名单内（§2.10 / §5.5） | LLM 提示字段不可用，引导用户换可聚合维度（如 gender / status / dept） |
 
@@ -2167,8 +2390,20 @@ CHECKS = [
     "scope_param_requires_check",             # 签名含 *_id/*_ids 必须调 ensure_targets_in_scope
     "summary_length_limit",                   # ≤ 100 Unicode chars
     "dry_run_tool_must_implement_hook",       # dry_run_supported=True 必须有 _dry_run_<tool>
+    "prepared_binding_valid",                 # prepared 必须绑定存在且 Gateway-only 的 execute tool
+    "gateway_only_tool_not_llm_visible",      # llm_visible=False 不得进入模型 schema
 ]
 ```
+
+### 12.5 PreparedAction 专项矩阵（ADR-0002）
+
+| 层 | 必测内容 |
+|---|---|
+| Registry/static | prepared binding、execute 隐藏、禁止链式 prepared、reserved `requested_outcome` 冲突 |
+| Service/unit | 状态机合法边、CAS 双击、TTL、presentation 脱敏、canonical args/snapshot hash |
+| Gateway integration | direct/prepared/preview-only 三模式、权限/scope/source/snapshot 二次校验、confirm 请求拒绝换参 |
+| Durability | DB commit 先于通知；Redis flush/SSE 断开/reload 可恢复；running crash 标 uncertain failed 且不 replay |
+| Cross-project | 后端 event/detail DTO 与前端 typings、store、drawer、message card 一致；Snowflake actionId 字符串化 |
 
 ---
 
@@ -2494,6 +2729,8 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 > ✅ **Plan 3.4 已完成（2026-07-06）**: 前端 SSE 协议 + HITL 抽屉 + tool-call 卡片（hohu-admin-web）— `src/typings/api/ai.d.ts` 加 `AiStreamEvent` union（5 类事件 + DryRunSummary）+ `ConfirmRequest/Response` + `OperationLog` + `QueryCache` 类型 + `src/typings/app.d.ts` Schema 加 16 个 i18n 键（confirmTitle/confirmTool/.../toolError）+ `src/service/api/ai.ts` 加 `fetchAiConfirm` / `fetchAiOperationLog` / `fetchAiQueryCache` + `src/store/modules/ai/index.ts` 重写：`parseSsePayload` 按 spec §8.1 解析规则（Vercel 原生 `数字:JSON` / 自定义 `{...}` / `[DONE]`）；`handleAiStreamEvent` 5 类事件分流（tool_call_started/result 入 streamEvents，confirmation_required 设 pendingConfirmation 并弹抽屉，ai_error 全局 message，done 结束）；新增 `streamEvents`/`pendingConfirmation` 状态 + `approveTool`/`rejectTool` action + 30s 1.5s 间隔轮询 `fetchAiOperationLog` 兜底（终态停止 + UI 合成 tool_call_result 事件）+ `src/views/ai/chat/modules/chat-confirmation-drawer.vue`（NDrawer + NTag/NStatistic + 倒计时基于 expires_at + 参数 JSON 折叠 + 确认/取消按钮 + dark theme）+ `src/views/ai/chat/modules/chat-tool-call.vue`（NCollapse 折叠卡片：tool 名 + 状态 NTag（info/success/error）+ summary + args JSON + result JSON + errorCode/errorMsg 红色高亮）+ `chat-main.vue` 集成：toolCallCards computed 按 toolCallId 配对 started/result，showConfirmDrawer computed 自动随 pendingConfirmation 弹抽屉 + 中英文 i18n 完整翻译。**未含**：stats tool 三 tab（图表）/ 业务模块页 ai_query_id URL param 自动回放（v1.5+）/ 端到端 Playwright E2E（v1.5+）。
 > ✅ **Plan 4 已完成（2026-07-08）**: Phase 4 安全硬化完整版 — (1) `AiToolMeta.super_admin_only` 字段 + executor 短路返回 `AI_SUPER_ADMIN_REQUIRED`（鉴权矩阵 #7 双 case 覆盖）；(2) `app/modules/ai/agents/safety/injection_detector.py` 落地 L2 7 类攻击 pattern 检测（中英双语 + 大小写不敏感），chat.py 入口跑 detector 写 `ChatDeps.injection_hit=True`，executor 据此强制 HITL（鉴权矩阵 #10 双 case 覆盖）；(3) `executor._start_log` 命中 injection_hit 时传 `is_security_event=True, event_type='injection_pattern_matched'` 落 `ai_operation_log`（§11.1）；(4) `scripts/check_ai_tools.py` 7 项 static-only 检查 + `.pre-commit-config.yaml` 集成 ai-tools-static-check hook（pre-commit + CI 双跑）；(5) `tests/modules/ai/test_injection_detector.py` 39 测试（pattern 命中 + 不误报）+ `tests/scripts/test_check_ai_tools.py` 27 测试（构造违规 meta 验证 7 项检查器能检出）；(6) 鉴权矩阵从 9/11 推到 11/11 全通 + 注入命中后断言 `ai_operation_log.is_security_event=True`。**未含**：L3 通用 `_sanitize_arg`（spec §11.1 L3 层）— MVP 阶段实际由 §6.2 ensure_targets_in_scope（数据鉴权）+ §5.5 allowed_filters/allowed_group_by 白名单 + §7 sensitive_output 黑名单覆盖，通用版本（每 tool 的 args 形态不同难统一）留 v2+。
 > ✅ **Plan 3.5 已完成（2026-07-08）**: §12 卡片视觉增强 + §8.7 chip 跳转回放 — (1) §12 卡片视觉：`events.py` 加 `risk`/`duration_ms`/`affected_rows`/`trace_id` 字段 + `event_to_sse_data` 改显式 camelCase 构造（修了后端 snake_case / 前端 camelCase 不一致 bug）；executor emit 时透传 risk=meta.risk + 计算 duration_ms + `_infer_affected_rows` 推断（dry_run_count 优先 → dict `affected_count`/`count`/`groups_count` 等 → list 长度 → None）；前端 `chat-tool-call.vue` 完整重写：3px 状态色条 + 中文 desc 字典 + risk chip + 状态文本「已执行 · 230ms · 1 行」+ chevron 折叠/展开 + pulse 动画 + dark theme。(2) §12 场景 4/5 HITL 内联 bar：`chat-tool-call.vue` 加 `isPending`/`pendingExpiresAt` props + `approve`/`reject` emits + pending 黄色状态（icon ⚠ + dot pulse + 状态文本「等待你确认」）+ 倒计时（基于 expiresAt，每秒更新，<30s urgent 红色）+ 「立即确认」/「取消」按钮；`chat-main.vue` toolCallCards computed 关联 `pendingConfirmation.toolCallId`。(3) §12 场景 13 stats 三 tab：新建 `chat-tool-stats-tabs.vue`（150 行，table/bar/pie 三 tab + ECharts tree-shake 手动 use）+ user_gender 字段友好映射（1→男/2→女/null→未知）；chat-tool-call 检测 `started.tool === 'user.stats'` 渲染 stats tabs 替代普通 result pre。(4) §8.7 chip 跳转回放：events.py `ToolCallStartedEvent` 加 `trace_id` 字段（前端据此构造 chip URL）；`chat-tool-call.vue` readonly tool（user.list/count/distinct）成功后渲染 chip 链接（→ `/system/user?ai_query_id=<trace_id>`）；`user/index.vue` onMounted 检测 `?ai_query_id` 调 `fetchAiQueryCache` 拿 filters，按 `EnableStatus`/`UserGender` 类型守卫映射到 searchParams 触发 `getData()`；`app/modules/system/ai_tools.py` 给 `user.count`/`user.distinct` 加 `query_cache_module="system/user"`（stats 不加，数据已在卡片内）。端到端验证：触发 `user.count(status='1')` → Redis hash 写入 `filters={status:"1"}` + chip 渲染 → 点 chip 跳转 → onMounted 调 query-cache → searchParams.status='1' → getData 带 status=1 → 表格只显示启用用户。
+>
+> ⚠️ **Plan 5 / Task 35a gap（P0，阻塞 Task 36）**: 先完成 stable trace/source、conversation guard 和共享 terminal finalizer/handoff（消息编辑 spec Task 1/2/2b + 工具卡 spec Task 0-2，期间不开放 edit/regenerate），再落地 `ai_prepared_action` migration、prepared metadata/Registry gate、confirm sole execution authority、持久 pending/detail 恢复、source/snapshot 复验、用户导入首个纵向切片及跨前后端测试。现有 direct HITL 的完成记录保持历史事实，但不能再宣称已覆盖 preview → bound execute。
 
 **v1.5+ 扩展（2026-07-09）**：role.count / dept.count AI tool + chip 回放（role/index.vue / dept/index.vue onMounted 接 ai_query_id）+ chip TTL 5min 过期 fallback 提示（user/role/dept 三页 `$message.info('筛选条件已过期')` 8s duration）+ UI agent 切换器（chat-input 下拉 + chat.py 接收 agentCode）。详见 §20 v1.5+ 已完成。
 
@@ -2502,6 +2739,8 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 ---
 
 ## 20. MVP 完整性盘点（2026-07-08 稳定阶段汇总）
+
+> 本节是 2026-07-08 时点的交付快照。其中“Phase 3 HITL 已完成”仅指旧 direct-HITL 链路；ADR-0002 的 Gateway-owned PreparedAction 仍属于 Plan 5 / Task 35a P0 gap，不得将本盘点作为其完成依据。
 
 ### ✅ MVP 完整版（已交付 + 测试覆盖）
 
@@ -2767,6 +3006,10 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 #### SR-26. **chat-input UI 重做用「ChatGPT 风（选择器挪到输入框下方）+ 场景卡（替代 quickActions）+ NDropdown 替代手写 menu」**（2026-07-21 v1.5+ 落地）— 原 chat-input 选择器在输入框上方垂直堆 2 行（agent + model）+ quickActions 4 个小按钮（icon + label），UX 拥挤且首次进入缺引导。v1.5+ 重做：(1) 选择器挪到输入框下方水平 1 行（仿 ChatGPT/Claude），输入框成为视觉焦点；(2) 空状态从 4 个按钮改为 4 个场景卡（图标 + 标题 + 描述 + 推荐 agent + 示例 prompt），点击直接预选 agent + 填 prompt；(3) selector menu 用 NaiveUI `NDropdown` 替代手写 Transition + document click outside 监听，彻底解决 HMR 残留 listener 问题。
 **反例**: (1) agent menu 用 `<Transition>` + `document.addEventListener('click', handleDocClick)` 手写 click outside——vite HMR 重新挂载组件时 onBeforeUnmount 不一定触发，旧 listener 残留 + 新 listener 也注册，旧逻辑（root.contains）覆盖新逻辑（closest），菜单永远关不掉；必须用 NaiveUI `NDropdown`（内部 v-binder 管理 click outside，HMR 无副作用）。(2) NDropdown label 用 `<style scoped>` 的 `.selector-menu-name` / `.selector-menu-desc`——NDropdown 用 Teleport 把 menu 渲染到 body，scoped style 的 `data-v-xxx` 选择器在 teleport 后失效；必须用 `:render-label` + `h()` 渲染 + **inline style**（不受 scoped 影响）。(3) NDropdown option 强制 `--n-option-height: 34px`，name + desc 内容 ~50px 被挤压重叠——必须加全局 CSS（不带 scoped）覆盖 `.n-dropdown-menu .n-dropdown-option { height: auto !important }` 让高度自适应。(4) selector-btn 用 kebab 字符串 `icon-ic-round-bar-chart` + `<component :is="...">`——unplugin-icons auto-import 只在 template 生效，script 内引用必须显式 `import IconIcRoundXxx from '~icons/ic/round-xxx'`。(5) 场景卡 quickActions 用 `icon: 'icon-ic-round-xxx'` 字符串 + `<component :is>`——同样问题，sceneCards 必须用 PascalCase 组件引用 + import。(6) `handleSend` 只检查 `attachedImages.length` 漏 `attachedFiles.length`——用户只上传 csv 不输文本时无法发送。(7) attach button 用 `e.stopPropagation()` 防冒泡——不必要且阻止 NDropdown outside click 检测，去掉让 click 自然冒泡。
 **回归**: 前端 `chat-input.vue` 把 .selector-bar 从 input-box 上方挪到下方 + 改用 NDropdown（trigger="click" + placement="top-start"）+ agent menu 用 `:render-label="renderAgentLabel"` 渲染 name+desc（inline style）+ 全局 CSS（不带 scoped）覆盖 `.n-dropdown-menu .n-dropdown-option { height: auto }`；`chat-main.vue` 把 quickActions 改为 sceneCards（4 个场景：数据洞察 / 用户管理 / 文件处理 / 任务管理，对应 user_mgmt / user_mgmt / shared / job_mgmt agent）+ `handleSceneClick` 预选 agent + 填 prompt；修 `handleSend` 加 `hasFiles` 检查 + title 兜底"文件对话"；`handlePaste` 加文件粘贴分支；`chat-tool-call.vue` 补 TOOL_DESC（`file.parse` / `role.list` / `role.count` / `dept.list` / `dept.count` / `user.count` / `job.update_cron`）+ CHIP_TARGETS（`role.list` / `dept.list`）；i18n 加 12 个 scene* key（zh + en）+ Schema 同步；Playwright 验证：场景卡点击预选 agent + 填 prompt、NDropdown click outside 正常关闭、agent menu name + desc 完整显示无重叠。
+
+#### SR-27. **Gateway 持久化 PreparedAction 并成为唯一确认编排者**（2026-08-07，ADR-0002，P0 待实施）— direct HITL 只能在 LLM 已调用具体 execute tool 后确认，无法表达业务 preview 与后续 execute 的绑定；用户导入实测出现“LLM 输出 Markdown 请确认但没有 confirmation UI”。修订 §2.14 / §4.7 / §5.6 / §8.8：preview-only 正常返回，execute intent 在 preview 成功后由 Gateway 自动创建 action；execute 对模型隐藏，confirm handler 用冻结参数和 DB CAS inline 执行。
+**反例**: 继续修 Prompt 或让业务 tool 自己弹窗 → 模型/客户端差异仍可破坏确认时机，且换参、刷新恢复、重复批准和审计各自实现。
+**回归**: Task 35a 完成前该能力保持 gap；以用户导入跑通 preview → structured pending → approve → execute，并覆盖 reject、expiry、double approve、Redis flush、reload、source/snapshot stale 和跨 tenant。
 
 
 

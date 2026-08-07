@@ -1,11 +1,12 @@
 # 用户管理导入导出设计（页面 + AI 双轨对齐）
 
-> 状态：✅ Phase 1 + Phase 2 已完成（2026-08-05，Task 0a-34 全部 ship，覆盖率 70.48%）/ ✅ v2.4 Task 35 Safety Gate 已完成（2026-08-07）/ ⚠️ Task 36 容量证据待实施 / ⚠️ 完整 Phase 3 明确推迟到 `ai-tool-gateway v1.5+` 重新评估，不建设异步任务基础设施 | 创建日期：2026-08-01 | v2 修订：2026-08-01 | v2.1 修订：2026-08-01 | v2.2 修订：2026-08-03（含 P1 二次细化） | v2.4 边界修订：2026-08-06 | v2.4 Safety Gate 实施：2026-08-07
+> 状态：✅ Phase 1 + Phase 2 已完成（2026-08-05，Task 0a-34 全部 ship，覆盖率 70.48%）/ ✅ v2.4 Task 35 Safety Gate 已完成（2026-08-07）/ ⚠️ v2.5 Task 35a Gateway-owned Confirmation Flow（P0，阻塞 Task 36）/ ⚠️ Task 36 容量证据待实施 / ⚠️ 完整 Phase 3 明确推迟到 `ai-tool-gateway v1.5+` 重新评估，不建设异步任务基础设施 | 创建日期：2026-08-01 | v2 修订：2026-08-01 | v2.1 修订：2026-08-01 | v2.2 修订：2026-08-03（含 P1 二次细化） | v2.4 边界修订：2026-08-06 | v2.4 Safety Gate 实施：2026-08-07 | v2.5 确认编排修订：2026-08-07
 > 作者：Jack
 > 影响项目：`hohu-admin`（后端）、`hohu-admin-web`（前端）
 > 关联文档：
 > - [`2026-07-02-ai-tool-gateway-design.md`](./2026-07-02-ai-tool-gateway-design.md) §5.2 `user.create` 示例 / §10 异步通道 / §16.2 export 设计
 > - [`ADR-0001: AI 延迟执行前先完成安全与一致性闭环`](../adr/0001-ai-safety-consistency-before-deferred-execution.md)（当前边界与 v1.5+ 量化触发条件）
+> - [`ADR-0002: AI 操作确认编排由 Gateway 统一负责`](../adr/0002-gateway-owned-confirmation-flow.md)（preview-only / prepared confirmation / Gateway-only execute）
 > - [`APP-MARKETPLACE.md`](../APP-MARKETPLACE.md)（标杆 spec 样本）
 > - 待写：`2026-XX-cli-module-generator-design.md`（Phase B 模板提炼，依赖本 spec 落地）
 >
@@ -53,6 +54,12 @@
 > - 明确不实现 ARQ/Worker、任务队列、第二套实时进度通道和通用行级 Chat HITL
 > - 超过同步硬上限继续稳定拒绝；不会在缺少 v1.5 契约时静默入队或自动切换执行模式
 > - `role` / `dept` / `job` 同款改造仍归 CLI generator 主线，不作为 AI Phase 3 的启动理由
+>
+> **v2.5 确认编排修订**（2026-08-07，不回写 Task 26/26a 的历史完成事实）：
+> - `user.import_preview` 改为 Gateway `interaction_flow="prepared"` 的首个业务切片，模型侧显式 `requested_outcome`
+> - preview 成功且 intent 为执行时，由 Gateway 自动创建 `PreparedAction`；不再依赖 Prompt/LLM 第二次调用 execute
+> - `user.import_execute` 改为 `llm_visible=false` 的 Gateway-only capability；preview token 和冻结参数不进入 LLM/浏览器批准请求
+> - `preview_only` 不弹确认；之后若改为执行，必须重新 preview，不能升级旧预览
 
 ---
 
@@ -62,7 +69,9 @@
 |---|---|
 | **导入（import）** | Excel/CSV 文件 → 解析 → 批量新增用户，含冲突处理 |
 | **导出（export）** | 按 filter 查询 → 生成 Excel 文件 → 下载 |
-| **dry_run（预检）** | 不落库，仅返回"将影响哪些行"的预览，三端共用（HTTP `?dry_run=true` / AI HITL 抽屉 / 前端弹窗） |
+| **业务预览（import preview）** | 解析文件、分类影响并持久化 ImportBatch/私有 artifact；不写 `sys_user`，但不是 readonly/replay-safe。历史 service 名 `dry_run_import_users` 暂保留 |
+| **Gateway dry-run** | direct tool 执行前的短期影响估算，用于风险分类/确认摘要；不等同于可绑定后续 execute 的业务预览 |
+| **PreparedAction** | Gateway 持久化的一次性批准对象，绑定 preview snapshot、冻结执行参数、操作者/tenant/source message 和 Gateway-only execute |
 | **on_conflict** | 已存在用户的处理策略：`skip`（默认）/ `overwrite`（覆盖更新）/ `fail_fast`（首个冲突即终止） |
 | **半成功策略** | 部分行失败时，成功行正常落库，失败行收集返回；不回滚成功行 |
 | **同步硬上限** | 导入最多 2000 行、导出最多 5000 行；超限返回稳定业务错误。只有 `ai-tool-gateway v1.5+` 经 §10 门槛重新立项后，才讨论 deferred execution |
@@ -331,11 +340,11 @@ USER_EXPORT_ASYNC_THRESHOLD = 5000   # 兼容既有命名；当前语义是同�
 
 **回归**: `GET /system/user/import/template` 返回 xlsx，含 2 sheet：「数据」（列顺序固定 + 2 行示例）+「说明」（每列字段说明 + 必填标记 + 取值范围）。
 
-### 2.14 **AI tool 接 `file_id` 而非 multipart（v2.4 语义收口：拆 `import_preview` + `import_execute` 两个 tool）** — 用户先上传文件到 `/file/upload` 获得 `file_id`，`user.import_preview` 从 `sys_file` 加载 bytes；Gateway 不直接处理 multipart。原 `user.batch_create` 单一 tool 会让 AI 跳过预检直接 execute，违反 HITL 原则，因此拆成 `user.import_preview`（low risk，生成持久 batch / 预检文件，不写用户业务行）和 `user.import_execute`（写用户，必须 HITL + preview_token）。
+### 2.14 **AI 导入采用 Gateway prepared flow，execute 对 LLM 隐藏（v2.5 / ADR-0002）** — 用户先上传文件到 `/file/upload` 获得 `file_id`，`user.import_preview` 从受保护 `sys_file` 加载 bytes；Gateway 不直接处理 multipart。`user.import_preview` 是 LLM 可见的 prepared tool，负责业务预览；`user.import_execute` 是绑定 action 批准后由 Gateway 调用的内部 capability，不进入模型 tool schema。
 
 `user.import_preview` **不是 `readonly` / replay-safe / idempotent tool**：它会 INSERT `sys_user_import_batch`、写 FileStorage 和 Redis cache，每次调用都会产生新的 batch/file。`AiToolMeta.readonly=True` 的契约是“除 Gateway 自身审计/短期 query cache 外不产生持久副作用”，不能用“没有写 `sys_user`”偷换概念；`AiToolMeta.idempotent=True` 也不能在没有稳定幂等键和同一 preview batch 复用协议时声明。当前实现必须将其改为 `readonly=False / idempotent=False`；`risk="low"` 仍保持 autonomous，不因此增加一次 HITL。edit/regenerate guard 和未来重试策略会据此保守阻止自动重放 preview，避免重复 batch 和文件。
 
-`file_id` 只豁免“用户业务数据的 data scope helper”，**不豁免文件资源本身的授权**。`_load_file_bytes` 必须在读取磁盘前同时验证：`owner_user_id == ctx.user.user_id`、`tenant_id == ctx.tenant_id`（单租户也写 `0`）、`business_type == "user-import"`、`del_flag == "0"`、扩展名/MIME/magic bytes 在导入白名单内、`file_size` 与实际 bytes 均不超过上传上限，以及 resolve 后路径仍位于配置的私有 upload root。`ctx.tenant_id` 必须由认证中间件/服务端 tenant resolver 注入 `ChatDeps → AiToolContext`，禁止从 ChatCommand、tool args 或其他客户端字段信任 tenant；进入 HITL 时连同 user/trace 写入 PendingPayload，resume 后再与当前认证 tenant 复核。当前 `sys_file.create_by` 只存可变 username 且没有 tenant 锚点，Task 35 迁移增加 `owner_user_id BIGINT NULL`（仅为兼容历史行；所有新上传强制认证 ID）与 `tenant_id BIGINT NOT NULL DEFAULT 0`。由于 username 可修改、账号可硬删除后同名重建，历史 `create_by` 不是不可变归属证据，**迁移不得据此回填 owner**；全部历史 owner 保持 NULL 并对 AI/普通 owner 读取 fail-closed。不存在、已删除、跨 owner/tenant 统一返回 `AI_FILE_NOT_FOUND`，避免资源枚举；类型、大小、路径分别返回 `AI_FILE_TYPE_NOT_ALLOWED`、`AI_FILE_TOO_LARGE`、`AI_FILE_PATH_INVALID`。
+`file_id` 只豁免“用户业务数据的 data scope helper”，**不豁免文件资源本身的授权**。`_load_file_bytes` 必须在读取磁盘前同时验证：`owner_user_id == ctx.user.user_id`、`tenant_id == ctx.tenant_id`（单租户也写 `0`）、`business_type == "user-import"`、`del_flag == "0"`、扩展名/MIME/magic bytes 在导入白名单内、`file_size` 与实际 bytes 均不超过上传上限，以及 resolve 后路径仍位于配置的私有 upload root。`ctx.tenant_id` 必须由认证中间件/服务端 tenant resolver 注入 `ChatDeps → AiToolContext`，禁止从 ChatCommand、tool args 或其他客户端字段信任 tenant；Task 35 已在旧 direct HITL PendingPayload 中携带 trusted tenant，Task 35a 迁移为 PreparedAction 持久绑定并在 confirm 时复核。当前 `sys_file.create_by` 只存可变 username 且没有 tenant 锚点，Task 35 迁移增加 `owner_user_id BIGINT NULL`（仅为兼容历史行；所有新上传强制认证 ID）与 `tenant_id BIGINT NOT NULL DEFAULT 0`。由于 username 可修改、账号可硬删除后同名重建，历史 `create_by` 不是不可变归属证据，**迁移不得据此回填 owner**；全部历史 owner 保持 NULL 并对 AI/普通 owner 读取 fail-closed。不存在、已删除、跨 owner/tenant 统一返回 `AI_FILE_NOT_FOUND`，避免资源枚举；类型、大小、路径分别返回 `AI_FILE_TYPE_NOT_ALLOWED`、`AI_FILE_TOO_LARGE`、`AI_FILE_PATH_INVALID`。
 
 **两 tool 契约**：
 
@@ -344,16 +353,18 @@ USER_EXPORT_ASYNC_THRESHOLD = 5000   # 兼容既有命名；当前语义是同�
     name="user.import_preview",
     agent="user_mgmt",
     summary=(
-        "Parse Excel + dry-run import → returns {batch_id, preview_token, summary}. "
-        "Does not write users, but creates a durable preview batch. Call user.import_execute next."
+        "Preview CSV/XLSX user import and show add/skip/conflict counts; "
+        "use requested_outcome to view only or prepare approval."
     ),
     required_perms=("system:user:import",),
     risk="low",                          # 不写用户行，但会写预检 artifact
     readonly=False,                       # 持久化 batch / file / cache，不可自动重放
     idempotent=False,                     # 无稳定幂等键；每次调用都会新建 preview batch/file
+    interaction_flow="prepared",
+    prepared_execute_tool="user.import_execute",
     accepts_file=("text/csv", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
     produces_file=False,
-    result_view="detail_card",           # 展示 batch_id + preview_token + summary
+    result_view="detail_card",           # 只展示安全 summary；不展示 token/frozen args
 ))
 async def user_import_preview(
     ctx: AiToolContext,
@@ -361,8 +372,9 @@ async def user_import_preview(
     file_id: str,
     reason: str,
     on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
+    sync_mode: Literal["CREATE_ONLY", "UPDATE_PROFILE", "FULL_SYNC"] = "CREATE_ONLY",
 ) -> ToolResult:
-    """file_id 来自 /file/upload。
+    """Gateway 在模型侧 schema 追加 requested_outcome，并在调用前剥离。
 
     流程：
     1. file_id → sys_file → file_bytes
@@ -370,20 +382,23 @@ async def user_import_preview(
     3. user_service.dry_run_import_users(records, current_user, file_bytes, filename)
        → INSERT sys_user_import_batch (CREATED) → PREVIEW_DONE
        → 持久化 preview file + 写 Redis cache (preview_token → batch_id)
-    4. ToolResult.success(data={batch_id, preview_token, summary}, ui=detail_card)
+    4. 返回：
+       - public data={batch_id, summary, policy}，供 LLM/preview 卡片展示
+       - internal PreparedActionProposal：
+         frozen_args={preview_token, reason, on_conflict, sync_mode}
+         snapshot={batch_id, file_sha256, records_hash, summary, operator_id}
+         subject_ref={type: "user_import_batch", id: batch_id}
+         presentation={title, summary fields, warnings}
     """
 
 @ai_tool(AiToolMeta(
     name="user.import_execute",
     agent="user_mgmt",
-    summary=(
-        "Execute previously previewed batch import. REQUIRES HITL confirmation. "
-        "Pass preview_token from user.import_preview."
-    ),
+    summary="Gateway-only execution for an approved user import preview.",
     required_perms=("system:user:import",),
     risk="high",                         # 写入，批量创建用户
-    hitl_always=True,                    # 强制 HITL（批量写入永远人在回路）
-    dry_run_supported=True,              # HITL 前只读 batch summary，不重跑 preview
+    llm_visible=False,                    # 不进入模型 schema；猜名字调用也拒绝
+    dry_run_supported=False,              # presentation 直接使用已绑定 preview snapshot
     accepts_file=(),                     # 不接文件，凭 preview_token 取
     produces_file=True,                  # 输出 failed_rows.xlsx
     result_view="rows_affected",
@@ -396,25 +411,33 @@ async def user_import_execute(
     on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
     sync_mode: Literal["CREATE_ONLY", "UPDATE_PROFILE", "FULL_SYNC"] = "CREATE_ONLY",
 ) -> ToolResult:
-    """凭 preview_token 反查 batch → CAS PREVIEW_DONE→RUNNING → chunk + savepoint。
+    """仅接受 Gateway 注入的 approved prepared_action context。
+
+    凭冻结 preview_token 反查 batch → 复验 snapshot → CAS PREVIEW_DONE→RUNNING
+    → chunk + savepoint。
 
     幂等保护（#2.27）：重复 execute 已 SUCCESS 的 batch 返回原结果。
     """
 ```
 
 **两个 tool 而不是一个的根本理由**：
-1. **HITL 强制**：`import_execute` 必须 `hitl_always=True`，AI 不能跳过；`import_preview` 是 low risk autonomous，但并非 readonly/replay-safe（用户体验上不增加第二次 HITL）
+1. **编排确定性**：`execute_if_approved` 在 preview 成功后由 Gateway 自动进入 confirmation；不等待 LLM 再次调用 execute
 2. **风险评级不同**：preview 只写可过期预检 artifact，不写用户业务行；execute 是 high risk 用户写入，分开后权限与审计粒度更细
-3. **结果视图不同**：preview 用 `detail_card`（展示 batch_id + summary），execute 用 `rows_affected`（展示成功 N 行 / 跳过 M 行）
+3. **参数不可替换**：`reason/on_conflict/sync_mode/preview_token` 在 preview 时冻结；批准请求只有 confirmation ID + approve/reject
 4. **错误恢复路径不同**：preview 失败用户改 Excel 重传即可（生成新 batch_id）；execute 失败需要查 batch_id 审计反查
 5. **v1.5+ 演进边界**：若量化门槛触发 deferred import，优先保持 preview 同步并只评估 execute 调度；这只是兼容性输入，不是当前实现承诺
 
-**LLM Prompt 引导**（在 tool description 内嵌）：
-> "用户给一份用户列表 Excel 想批量导入：先调 user.import_preview 拿 preview_token 展示给用户确认，再调 user.import_execute（用户确认后）。**禁止跳过 preview 直接 execute**。"
+**requested_outcome 语义**：
 
-**反例**: (1) **单 tool `batch_create` 让 AI 自行决定是否 dry_run → AI 可能为了「快」跳过预检直接 execute，违反 HITL 原则**（v2.2 P0 修订核心）。(2) AI tool 直接接 multipart → 与 SR-24 路径分裂，Gateway 要单独实现文件接收逻辑。(3) 拆 tool 但不强制 HITL → AI 仍可自行调 execute，绕过预检。(4) 用 `dry_run_supported=True` 单 tool 标志位区分 → AI 可主动设 `dry_run=false` 跳过预检，与拆 tool 等价但更脆弱。(5) 仅凭 `file_id` 查 `sys_file` 后读路径 → 泄露或枚举出的 ID 可读取他人/其他租户文件，形成 IDOR。(6) 只信 DB 中的 MIME/路径 → 被篡改的记录可绕过上传白名单或越出 upload root。
+- 用户表达“看看、检查、预览、不要执行” → LLM 调 preview 时传 `preview_only`；Gateway 返回预览，不创建 action、不弹抽屉。
+- 用户表达“导入、执行、应用这些用户” → LLM 传 `execute_if_approved`；Gateway preview 成功后自动创建 action 并发 `confirmation_required`。
+- preview-only 之后用户又要求执行 → 必须重新调用 preview 生成新的 batch/action；旧 preview 不能由 LLM 或浏览器提升为可执行 action。
 
-**回归**: AI tool `user.import_preview(file_id, reason, on_conflict) -> {batch_id, preview_token, summary}` + `user.import_execute(preview_token, reason, on_conflict, sync_mode)`（强制 HITL）；前端 chat 上传文件时写 `business_type="user-import"` 与 owner/tenant → `/file/upload` → 拿 `file_id` → AI 调 `import_preview` → 展示 summary → 用户确认 → AI 调 `import_execute`；测试同时断言 preview `readonly=False / idempotent=False`、会持久化预检 artifact 但不写 `sys_user`、同参数调用不会被 Gateway 自动重放、他人/跨租户/错误业务类型/伪造 MIME/超限/越界路径均在 read 前拒绝，以及 LLM 不能跳过 preview。
+LLM 仍可用 Prompt 帮助选择 `requested_outcome`，但 Prompt 只影响意图理解，不承担授权、换参保护或 preview → execute 转移。
+
+**反例**: (1) **单 tool `batch_create` 让 AI 自行决定是否 dry_run → AI 可能跳过预检直接 execute**。(2) preview 后依赖 Prompt 让 LLM 调 execute → 实测会只输出 Markdown“请确认”，没有结构化 UI。(3) execute 继续对模型可见 → LLM 可编造 token、重复调用或改变策略。(4) 批准 API 重传 on_conflict/sync_mode → 用户看到的 preview 与执行输入不一致。(5) AI tool 直接接 multipart → Gateway 重复文件接收逻辑。(6) 仅凭 `file_id` 查路径或只信 DB MIME → IDOR/路径越界/伪造内容。
+
+**回归**: 模型侧只有 `user.import_preview(file_id, reason, on_conflict, sync_mode, requested_outcome)`；`user.import_execute` 不在 schema/available tools，且缺 approved action context 时拒绝。`preview_only` 有 summary 无 action；`execute_if_approved` 自动产生 pending action，presentation 展示新增/跳过/冲突/越界和冻结策略，批准后 Gateway 用 frozen args 执行。测试同时断言 preview `readonly=False / idempotent=False`、不会写 `sys_user`、token/frozen args 不进入 LLM/浏览器、跨 owner/tenant/错误类型/伪造 MIME/超限/越界路径均在 IO 前拒绝。
 
 ### 2.15 **Permission Boundary：操作人不能分配自己不拥有的角色（权限提升防御）** — 批量导入是权限提升攻击的高风险入口（HR 给被导入用户分配 R_SUPER），后端必须在 service 层强制校验：`Excel 中请求的角色 ⊆ 操作人自己拥有的角色`，否则整行 FailedRow。
 
@@ -548,9 +571,11 @@ async def _resolve_role_input(db: AsyncSession, role_input_str: str) -> list[int
 
 **回归**: 字段名 `role_input`（不叫 `role_codes` 因可能含 name）；模板「角色字典」sheet 提供 `role_code` + `role_name` 双列，用户复制任一列粘贴；service `_resolve_role_input` Pass 1 code / Pass 2 name 两轮匹配；最后 `set()` 去重；匹配后立即跑 #2.15 Permission Boundary 校验。
 
-### 2.19 **ImportBatch + preview_token：dry_run 与 execute 之间绑定（v2.2 P0/P1-2：业务数据落 PostgreSQL，Redis 仅 cache）** — 用户 dry_run 后可能改 Excel 重传 / 切换账号 / 多 tab 操作 → 实际执行的数据不是预检过的数据。preview_token 强制绑定预检结果 + 文件存储路径，execute 时校验 `file_sha256 + records_hash + operator_id` 三重一致性，任一不匹配 → 拒绝执行。原独立 `ImportPreviewSession` 已按 §3.6 合并进 `UserImportBatch`。
+### 2.19 **ImportBatch + preview_token + PreparedAction：业务 preview 与 execute 绑定（v2.5）** — 用户 preview 后可能改 Excel、策略、账号、tenant 或消息 revision；实际执行必须仍是预览过的同一批数据和同一组策略。ImportBatch 绑定文件/records/operator，Gateway `PreparedAction` 再绑定可信 tenant、source message、冻结 `reason/on_conflict/sync_mode/preview_token` 和 snapshot hash；任一不一致都拒绝执行。原独立 `ImportPreviewSession` 已按 §3.6 合并进 `UserImportBatch`。
 
 **v2.2 P0 关键修订（Redis cache-only）**：原 v2.1 把 `preview_token → { file_storage_key, file_sha256, records_hash, summary, operator_id, expires_at }` 全部存 Redis，存在「Redis 丢失后 DB batch 无法独立恢复预检事实与执行输入」的审计断裂问题。**v2.2 改为**：业务数据（hash / file_storage_key / summary / operator_id）全部存在 PostgreSQL `sys_user_import_batch` 表，Redis 仅缓存 `preview_token → batch_id` 映射（10min TTL，纯加速用）。
+
+**v2.5 AI 适配**：HTTP 页面流程仍可在认证 API 内使用 `preview_token`；AI 流程不把 token 返回 LLM、confirmation event 或浏览器。preview tool 将 token 放入内部 `PreparedActionProposal.frozen_args`，Gateway 持久化 hash/subject/presentation 后只向客户端暴露 opaque `confirmation_id`。批准时由 Gateway 读取 token；客户端不能重传或替换。
 
 **两份存储职责**：
 
@@ -576,10 +601,11 @@ async def _resolve_role_input(db: AsyncSession, role_input_str: str) -> list[int
 }
 ```
 
-**execute 阶段（凭 token 反查 DB，Redis 仅做加速）**：
+**execute 阶段（HTTP 凭认证 token；AI 凭 approved action 中的 frozen token，Redis 仅做加速）**：
 
 ```python
-# POST /import with { preview_token }（不带 file）
+# HTTP: POST /import with { preview_token }（不带 file）
+# AI: Gateway-only user.import_execute 从 PreparedAction.frozen_args 读取 preview_token
 # 1. Redis 先查（hot path，加速）
 cached = redis.get(f"user_import:preview:{preview_token}")
 batch_id = cached["batch_id"] if cached else None
@@ -613,7 +639,7 @@ file_bytes = await file_storage.read(batch.file_storage_key)
 # 7. 仅按 batch.filename 的可信后缀恢复 parser MIME（.csv/.xlsx 白名单）
 mime_type = import_mime_from_batch_filename(batch.filename)  # 其他后缀稳定拒绝
 
-# 8. 三重校验：file_sha256 + records_hash + operator_id
+# 8. ImportBatch 三重校验 + PreparedAction 外层 tenant/source/snapshot 复验
 if sha256(file_bytes) != batch.file_sha256: raise ...
 records = await user_service.parse_import_excel(file_bytes, mime_type)
 if hash(records) != batch.records_hash: raise ...
@@ -630,7 +656,9 @@ if current_user.user_id != batch.operator_id: raise ...
 
 **反例**: (1) **preview_token 携带完整 records → 5000 行 Excel 序列化进 Redis 撑爆内存**（v2.1 已修）。(2) **业务数据只存 Redis → Redis 重启 / eviction 后 PREVIEW_DONE batch 无法从 DB 恢复执行输入**（v2.2 P0 修订：业务数据落 PostgreSQL，Redis 仅 cache `batch_id`）。(3) execute 时让前端重传 file → preview_token 的"绑定"语义被削弱；用户删了临时文件 / 关 tab 后无法 execute。(4) 不绑定 operator_id → A 账号 dry_run 后 B 账号 execute，预检失效。(5) 不绑定 file_sha256 → 用户改 Excel 重传同一 token，权限校验失效。(6) Redis 命中后不再查 DB → Redis 数据被篡改 / TTL 错乱，绕过 DB 状态校验。
 
-**回归**: `dry_run_import_users` 接 `file_bytes` + 持久化文件 + **INSERT sys_user_import_batch 行（含所有业务字段）+ 写 Redis cache（仅 batch_id）**；`POST /import` 不带 file，只带 `preview_token`；execute 先查 Redis 加速、miss 时反查 DB（**不丢业务数据**），然后状态校验 + 三重 hash 校验 + CAS 转 RUNNING；私有 `import-preview/` namespace 清理超期孤儿文件；Redis 全量丢失 → execute 仍可从 DB 反查（性能降级但功能不丢）；CSV preview artifact 以 `.csv` 保存且 preview/execute 两次均按 `text/csv` 解析；测试 `test_preview_cache_missing_falls_back_to_db` 与 CSV preview→execute 串联回归。
+AI 专属反例：把 preview token 放进 tool public result 或确认抽屉 → LLM/浏览器重新提交 capability；批准时允许覆盖 `on_conflict/sync_mode` → preview 展示 skip、execute 实际 overwrite；只绑定 batch 不绑定 source message → 编辑/重新生成后旧 action 仍能在新上下文执行。
+
+**回归**: `dry_run_import_users` 接 `file_bytes` + 持久化文件 + **INSERT sys_user_import_batch 行（含所有业务字段）+ 写 Redis cache（仅 batch_id）**；HTTP `POST /import` 不带 file，只带 `preview_token`；AI confirm 不带 token，由 Gateway 从 action 读取。execute 先查 Redis 加速、miss 时反查 DB，然后状态/hash/operator 校验 + action tenant/source/snapshot 复验 + CAS 转 RUNNING；Redis 全量丢失仍可从 DB 反查；CSV preview/execute 两次均按 `text/csv`；覆盖 token 不出 public DTO、策略不可换、source stale、double approve 与 cache-miss 串联回归。
 
 ### 2.20 **行级事务（savepoint）+ chunk 100 rows：失败行 ROLLBACK 当前行，不污染外层事务** — 「半成功」（#2.7）只说"失败行不阻断成功行"，但**没明确单行内的多步操作原子性**：user 创建成功但 user_role 失败 → 残留无角色用户脏数据。每行用 savepoint 包裹多步操作（create_user + create_roles + update_relation），失败 ROLLBACK 当前行；外层 chunk 100 rows 一个 transaction 控制 undo segment 大小。
 
@@ -1480,8 +1508,8 @@ async def user_import_execute(
 - AI tool：同样长度校验，失败抛 `BusinessRuleException(error_code="AI_IMPORT_REASON_REQUIRED")`
 - execute 阶段校验 `reason == batch.reason`（防止用户 preview 时填 A，execute 时填 B，绕过一致性）
 
-**LLM Prompt 引导**（system prompt 追加）：
-> 调用 user.import_preview / user.import_execute 时必须填写 `reason` 参数（业务背景，1-256 字符）。例如：「2026年8月 HR 入职名单同步」「ERP 全量推送」「离职用户批量禁用」。
+**LLM 意图提示**（仅帮助收集 preview 入参，不承担确认编排）：
+> 调用 user.import_preview 时必须填写 `reason` 参数（业务背景，1-256 字符），并在 preview 时一次确定 on_conflict/sync_mode。例如：「2026年8月 HR 入职名单同步」。execute 不对 LLM 可见，沿用 Gateway 冻结值。
 
 **写入位置**：
 - `dry_run_import_users` 阶段：INSERT batch 行时写 `reason`，写 batch_log CREATED event（detail.reason）
@@ -2590,97 +2618,22 @@ errorCode: {
 
 ## 7. AI tool 设计（Phase 2）
 
-### 7.1 `user.import_preview` + `user.import_execute`（v2.2 P0：原 `user.batch_create` 拆为两个 tool）
+### 7.1 `user.import_preview` + Gateway-only `user.import_execute`（v2.5）
 
-详见决策 #2.14。两个 tool 的契约：
+权威 tool metadata/函数契约见决策 #2.14，通用协议见 Gateway spec §5.6 / §8.8。本节只冻结用户导入 presentation 和 UI 行为，避免再次复制实现伪代码。
 
-```python
-# Tool 1: low risk autonomous，跑 dry_run + 生成持久 preview artifact
-@ai_tool(AiToolMeta(
-    name="user.import_preview",
-    agent="user_mgmt",
-    summary=(
-        "Parse Excel + dry-run user import → returns {batch_id, preview_token, summary}. "
-        "Does not write users, but creates a durable preview batch. "
-        "**Workflow**: Call this first, show summary to user, then call user.import_execute after user confirms."
-    ),
-    required_perms=("system:user:import",),
-    risk="low",                          # 不写用户行
-    readonly=False,                       # 会写 batch / file / cache，不可自动重放
-    idempotent=False,                     # 无稳定幂等键；每次调用都会新建 preview batch/file
-    dry_run_supported=False,             # 本身就是预检，不需要 dry_run 模式
-    accepts_file=("text/csv", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-    produces_file=False,
-    result_view="detail_card",           # 展示 batch_id + preview_token + summary
-))
-async def user_import_preview(
-    ctx: AiToolContext,
-    *,
-    file_id: str,
-    reason: str,
-    on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
-) -> ToolResult:
-    """file_id 来自 /file/upload。
+| 能力 | 模型可见 | 调用者 | 公开结果 |
+|---|---:|---|---|
+| `user.import_preview` | 是 | LLM，经 Gateway prepared wrapper | `batchId + summary + policy`；无 previewToken |
+| `user.import_execute` | 否 | confirm handler，必须携带 approved action context | rows affected / failed rows download action |
 
-    流程：
-    1. file_id → sys_file → file_bytes
-    2. user_service.parse_import_excel(file_bytes) → records
-    3. user_service.dry_run_import_users(records, current_user, file_bytes, filename)
-       → INSERT sys_user_import_batch (CREATED) → PREVIEW_DONE
-       → 持久化 preview file + 写 Redis cache
-    4. ToolResult.success(
-         data={batch_id, preview_token, summary:{new,exists,conflict,out_of_scope}},
-         ui=UIResult(view_type="detail_card", view_data={...}, audit=..., label_key="user.importPreview"),
-       )
-    """
+模型侧 preview schema 包含 `file_id / reason / on_conflict / sync_mode / requested_outcome`。Gateway 剥离 `requested_outcome` 后调用业务函数；业务函数总是生成内部 proposal。`preview_only` 丢弃 proposal、不弹窗；`execute_if_approved` 持久化 action 并自动发确认事件。
 
-# Tool 2: 写入，强制 HITL
-@ai_tool(AiToolMeta(
-    name="user.import_execute",
-    agent="user_mgmt",
-    summary=(
-        "Execute previously previewed user import batch. REQUIRES HITL confirmation. "
-        "Pass preview_token from user.import_preview. "
-        "**Idempotent**: re-executing a SUCCESS batch returns original result."
-    ),
-    required_perms=("system:user:import",),
-    risk="high",                         # 写入，批量创建用户
-    hitl_always=True,                    # 强制 HITL（批量写入永远人在回路）
-    dry_run_supported=True,              # HITL 前只读 batch summary，不重跑 preview
-    accepts_file=(),                     # 不接文件，凭 preview_token
-    produces_file=True,                  # 输出 failed_rows.xlsx
-    result_view="rows_affected",
-))
-async def user_import_execute(
-    ctx: AiToolContext,
-    *,
-    preview_token: str,
-    reason: str,
-    on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
-    sync_mode: Literal["CREATE_ONLY", "UPDATE_PROFILE", "FULL_SYNC"] = "CREATE_ONLY",
-) -> ToolResult:
-    """凭 preview_token 反查 batch（v2.2 #2.19 Redis cache → DB SoT 回退）→
-    三重校验（file_sha256 + records_hash + operator_id）→
-    CAS PREVIEW_DONE→RUNNING（v2.2 #2.27 / P1-2 幂等）→ chunk + savepoint 落库。
+preview 的 `detail_card` 必须遵守既有 `DetailCardViewData {title, fields[]}`，不能直接把 `{batchId, summary, expiresAt}` 当 viewData；fields 固定为文件名、待新增数、已存在跳过数、冲突数、越界数。导入 `ConfirmationPresentation` 复用这些安全字段，再追加 on_conflict、sync_mode、reason；冲突/越界非零时进入 warnings。两者都不得展示 preview token、fileId、内部路径、records、hash 或原始 Excel 单元格。
 
-    幂等返回：
-    - SUCCESS/PARTIAL_SUCCESS 重放 → 200 + idempotent_replay=true + 原结果
-    - RUNNING → 422 + AI_IMPORT_BATCH_RUNNING
-    - FAILED/EXPIRED/CANCELLED → 422 + AI_IMPORT_ALREADY_EXECUTED
-    """
-```
+**反例**: 再维护一份 `@ai_tool` 伪代码 → 与 #2.14 metadata 漂移；用 `_dry_run_user_import_execute` 重建抽屉 → preview 已经是绑定 snapshot，重复 dry-run 增加双源；让 LLM 转述 presentation 再靠文字确认 → 回到本次缺陷。
 
-`_dry_run_user_import_execute` HITL 抽屉展示：preview summary + on_conflict 选项 + 「确认执行」按钮（不允许跳过）。
-
-**LLM Prompt 引导**（system prompt 中追加，防 AI 跳过 preview）：
-
-```
-用户批量导入 Excel 流程：
-1. 调 user.import_preview(file_id, reason) 拿 batch_id + preview_token + summary
-2. 把 summary（新增 X / 已存在 Y / 冲突 Z）展示给用户
-3. 用户确认后调 user.import_execute(preview_token)
-禁止跳过步骤 1 直接调 execute（会因 preview_token 不存在而失败）。
-```
+**回归**: #2.14 metadata snapshot 与本表一致；presentation contract 测试按字段顺序/脱敏断言；deterministic E2E 覆盖“导入用户”自动抽屉和“只看看”不弹抽屉。
 
 ### 7.2 `user.export`
 
@@ -3310,6 +3263,7 @@ async def user_export(
   - 26a.1 **直接从 batch.file_storage_key 读 file_bytes** — 不要求 LLM 在 execute 时重新传 file_id（spec §2.19 line 575 设计）；dry_run 阶段已保存文件到 LocalFileStorage，execute 凭 batch.file_storage_key 反查。**反例**: execute 要求 LLM 重传 file_id → LLM 可能传错文件 → 三重校验（file_sha256）失败。**回归**: `user_import_execute` 内 `Path(batch.file_storage_key).read_bytes()`；空 file_storage_key → AI_IMPORT_PREVIEW_INVALID。
   - 26a.2 **强制 HITL + LLM prompt 引导防跳过** — `hitl_always=True` + meta.summary 明确「Pass previewToken from preview」；LLM 必须先调 preview 拿 token，不能直接 execute。**反例**: 仅 risk=high 触发 HITL → LLM 可能在 prompt 里编造 preview_token 直调 execute。**回归**: meta `hitl_always=True` + dry_run_supported=True；`_dry_run_user_import_execute` 在 HITL 抽屉二次确认 batch summary。
   - 26a.3 **dry_run 不重复跑 service** — `_dry_run_user_import_execute` 只读 batch 表拿 summary（不重新 parse_import_excel + dry_run_import_users，避免双跑）。**反例**: dry_run 重跑完整 service → 用户每次看 HITL 抽屉都重新跑一次预检，浪费 IO + 可能因并发状态机乱。**回归**: `_dry_run_user_import_execute` 直接读 batch.summary_* + batch.filename 展示。
+  - **v2.5 纠偏说明**：26a.2/26a.3 是 2026-08-04 的历史实现事实，不再是目标编排；Task 35a 将其替换为 Gateway PreparedAction、Gateway-only execute 和已绑定 preview presentation，但保留 ImportBatch/hash/CAS 业务基础。
 - [x] Task 27 ✅ 已完成（2026-08-04）：AI tool `user.export`（risk=high / dry_run_supported / produces_file / rows_affected），复用 `export_users_to_excel` service（含强制建 ExportTask + filter_snapshot 冻结 + 30 天 TTL）。决策 27.1-27.3：
   - 27.1 **复用 export_service 全套** — Tool 函数仅做参数转换（5 filter field → UserExportFilter）+ 调 service + 包装 ToolResult；service 层已强制建 task + filter_snapshot + 30 天 TTL（spec §2.31 P1-5）。**反例**: tool 重写 task 创建逻辑 → 与 HTTP 路径分叉，审计链路断。**回归**: `user_export` 函数 < 40 行；`test_export_audit_chain_joinable_with_operation_log` 等 service 层测试覆盖（Task 22c+ 跟进）。
   - 27.2 **dry_run 用 count(*) 预估不实际跑导出** — `_dry_run_user_export` 调 SELECT COUNT(*) 拿 estimated，不建 ExportTask（避免 dry_run 阶段也产生 task 行）。**反例**: dry_run 也跑 export_users_to_excel → 每次 HITL 抽屉展示都建一个空 task → 历史列表一堆 dry_run 残留。**回归**: `_dry_run_user_export` 仅 count；预估 > USER_EXPORT_ASYNC_THRESHOLD → DryRunResult.ok=False 提示缩窄 filter。
@@ -3357,7 +3311,14 @@ async def user_export(
   - 35.7 **内部 storage locator 永不进入公共 DTO** — `file_path`、内部存储名与 `file_storage_key` 只供服务端定位。**反例**: 返回物理路径/key → 泄露部署结构并帮助构造静态绕过。**回归**: FileOut/UserExportTaskResponse 序列化断言不含对应 camelCase 字段。
   - 35.8 **预检 artifact 必须保持解析格式** — preview 只使用受保护 loader 已验证的 MIME 决定 `.csv/.xlsx` suffix，execute 只从 batch 的白名单后缀恢复 MIME。**反例**: 所有 artifact 固定保存 `.xlsx` 且 execute 固定传 XLSX MIME → CSV preview 成功、确认后却被 OOXML 结构校验拒绝。**回归**: CSV preview→execute 串联测试断言保存 `.csv`，两次 parser 调用均使用 `text/csv`；未知后缀稳定返回 `AI_IMPORT_PREVIEW_INVALID`。
   - 35.9 **部署边缘与私有存储必须和应用安全边界一致** — 内置 Nginx 与外部代理 snippet 在转发普通 `/uploads/` 前，统一对 `/uploads/file_storage(?:/|$)` 及 `.csv/.txt/.xls/.xlsx` 返回 404；API 与 Scheduler 共享持久化 `private_uploads` volume，并同时挂载历史 public root 供认证 fallback/cleanup，部署命令预创建目录，镜像也声明该私有卷。**反例**: 只在 FastAPI StaticFiles 拒绝 → 未来 Nginx `alias`/CDN 直连绕过应用；只把私有目录放容器 writable layer → 重建 API 后 preview/export artifact 丢失，Scheduler 也无法清理同一文件；Scheduler 不挂 legacy public root → 旧 artifact 过期后 DB 已清但磁盘残留。**回归**: 三份 Nginx 模板静态测试断言 deny 先于通用 uploads proxy；Compose 测试断言 API/Scheduler 使用相同 public/private bind mount 与私有根；部署目录测试断言两个目录同时创建；Dockerfile 构建检查声明两个 volume。
-- [ ] Task 36（P1，量化门槛证据）：定义 `user_bulk_request_terminal` 为**唯一容量证据事件**，由 HTTP/AI adapter 在一个逻辑请求终态仅写一次到保留至少 30 天的结构化日志；`request_key` 为 HTTP `request_id`、AI `tool_call_id`（重试沿用并按 key 去重/upsert），不得作为 metric label。固定字段为 `occurred_at / request_key / operation(import_preview|export) / entrypoint(http|ai) / outcome(success|rejected|failed|cancelled) / error_code / duration_ms / terminal_status / requested_rows`；低基数 metric/dashboard 只能由该事件派生，batch/task/operation log 仅用于审计对账，不另作容量真相源。30 天超限占比分母分别为所有 row-count 已解析的 `import_preview` 逻辑请求、所有已完成 count/dry-run 的 `export` 逻辑请求；AI dry-run 与 execute 共享同一 tool_call request_key，只计一次。提供滚动 7/30 天去重查询、终态对账与 dashboard 验收；只补观测，不增加 Worker、自动入队或第二实时通道。
+- [ ] Task 35a **⚠️ P0，Gateway-owned Confirmation Flow，阻塞 Task 36**：按 ADR-0002 和 Gateway spec §4.7/§5.6/§8.8，把用户导入改为首个 `prepared + hitl + inline` 纵向切片；完成前当前“Markdown 请确认”行为视为 release blocker，不用 Prompt hotfix 冒充修复。
+  - 35a.0 **先落共享因果与收口基础** — 完成消息编辑 spec Task 1/2/2b 和工具卡 spec Task 0-2 所需的 stable trace/source、conversation guard、action/outcome finalizer 与 durability handoff；只建设 send/confirm 共用基础，不开放 edit/regenerate。**反例**: 直接在现有临时 SSE/PendingPayload 上叠 PreparedAction → action terminal、assistant card 和 guard 仍可能三方分叉。**回归**: commit-before-done、offline finalizer、owned guard cleanup 和 source message 非空先绿。
+  - 35a.1 **Gateway 自动接管 preview → confirmation** — LLM 只选择 `requested_outcome` 并调用 preview；execute intent 在 preview 成功后自动创建 `PreparedAction`，不需要第二次 model tool call。**反例**: 强化 system prompt 要求“务必调用 execute” → 换模型/语言/上下文后仍可只输出文本。**回归**: mock LLM 只调用一次 preview，仍收到 `confirmation_required`。
+  - 35a.2 **导入策略在 preview 时一次冻结** — `reason/on_conflict/sync_mode/preview_token`、batch/file/records hash、operator/tenant/source message 全部绑定 action；变更任一策略必须重新 preview。**反例**: confirmation 请求再传 overwrite → 用户批准的 summary 与实际写入策略不同。**回归**: approve body 只有 confirmationId/action；额外字段 schema 拒绝；snapshot stale 不执行。
+  - 35a.3 **execute 是 Gateway-only capability** — `user.import_execute.llm_visible=False`，模型 schema/available tools 中不存在；缺 approved action context 的内部直调也拒绝。preview token 只在服务端 frozen args/ImportBatch 中存在，不进 LLM、event、drawer 或 message JSON。**反例**: 只靠工具描述说“不要直接调用” → capability 仍暴露。**回归**: registry/static/runtime 三层不可达测试。
+  - 35a.4 **纯预览不弹窗且不可原地升级** — `preview_only` 返回结构化 summary，无 pending action；后续要求执行必须重新 preview。**反例**: 所有 preview 都弹确认 → 用户明确只查看仍被打断；把旧 token 提升为 action → 权限/策略/source 已可能变化。**回归**: preview-only/execute-intent 双场景 + 二次意图重新 preview。
+  - 35a.5 **持久 pending 和一次性执行** — Redis flush、SSE 断开、刷新/切换会话后，conversation detail 仍可恢复 pending；approve/reject/double-click/expiry/source stale/tenant mismatch 均由 action CAS 和共享 finalizer 收口。**回归**: 后端 pytest + 前端 vitest + staging deterministic E2E 覆盖“导入用户”和“只看看可导入哪些用户”。
+- [ ] Task 36（P1，Task 35a 后实施，量化门槛证据）：定义 `user_bulk_request_terminal` 为**唯一容量证据事件**，由 HTTP/AI adapter 在一个逻辑请求终态仅写一次到保留至少 30 天的结构化日志；`request_key` 为 HTTP `request_id`，AI preview-only 使用 `prepare_tool_call_id`，AI prepared execute 也沿用其 action 中冻结的同一个 `prepare_tool_call_id`（不得改用服务器生成的 execute toolCallId 重复计数），并按 key 去重/upsert；高基数 key 不得作为 metric label。固定字段为 `occurred_at / request_key / operation(import_preview|export) / entrypoint(http|ai) / outcome(success|rejected|failed|cancelled) / error_code / duration_ms / terminal_status / requested_rows`；低基数 metric/dashboard 只能由该事件派生，batch/task/action/operation log 仅用于审计对账，不另作容量真相源。30 天超限占比分母分别为所有 row-count 已解析的 `import_preview` 逻辑请求、所有已完成 count/dry-run 的 `export` 逻辑请求；同一 AI prepare→approve→execute 链只计一次。提供滚动 7/30 天去重查询、终态对账与 dashboard 验收；只补观测，不增加 Worker、自动入队或第二实时通道。
 
 ### Phase 3（⚠️ 推迟到 `ai-tool-gateway v1.5+`，当前不排期）
 
@@ -3365,7 +3326,7 @@ async def user_export(
 
 #### 当前版本只做什么
 
-Phase 1/2 的已完成状态保持不变。后续若发现缺陷，只在以下六类内做安全与一致性收尾：权限与 operator ownership、data scope / Permission Boundary、文件 MIME/大小/路径白名单、2000/5000 同步硬上限、chunk/savepoint/CAS 幂等、审计/retention/稳定 errorCode。上述任一回归都是 release blocker，但不构成引入队列的授权。
+Phase 1/2 的已完成状态保持不变。后续只在以下安全与一致性范围收尾：权限与 operator ownership、data scope / Permission Boundary、文件 MIME/大小/路径白名单、2000/5000 同步硬上限、chunk/savepoint/CAS 幂等、审计/retention/稳定 errorCode，以及 ADR-0002 的 action 级确认绑定。上述任一回归都是 release blocker，但不构成引入队列的授权。
 
 #### 明确不实现什么
 
@@ -3374,7 +3335,7 @@ Phase 1/2 的已完成状态保持不变。后续若发现缺陷，只在以下�
 | deferred execution + Worker | 不实现 ARQ、Celery 或自建 Worker；超限继续拒绝 | job 状态机、幂等键、重试/取消、租户与权限快照、部署模型 |
 | 自动异步 import/export | 不把 >2000 导入或 >5000 导出静默入队 | 是否仍用 Excel、任务输入快照、结果保留、失败恢复和容量 SLO |
 | 第二实时进度通道 | 不建设 WebSocket + SSE/轮询双通道；现有 Chat SSE 只服务当前对话流 | 是否只需最终通知；若需进度，选择一个主要状态协议和重连语义 |
-| 通用行级 Chat HITL | 保持一个 `tool_call` 的 approve/reject；不在聊天中做逐行表格审核 | 业务审核对象、不可变 snapshot/hash、`reviewRef`（后端 `review_ref`）、审核人/意见/SLA |
+| 通用行级 Chat HITL | 保持一个 `PreparedAction` 的 approve/reject；不在聊天中做逐行表格审核 | 业务审核对象、不可变 snapshot/hash、`reviewRef`（后端 `review_ref`）、审核人/意见/SLA |
 | `role` / `dept` / `job` 同款复制 | 与 AI Phase 3 解耦，继续归 `hohu-cli` generator spec | 模板抽象的复用收益与各模块独立权限/字段差异 |
 
 #### 量化重启条件
@@ -3417,7 +3378,8 @@ hohu-cli/hohu/templates/module/
 
 - 实施进度：本 spec §10 Plan 状态块
 - 当前 AI 演进边界：[`ADR-0001`](../adr/0001-ai-safety-consistency-before-deferred-execution.md)
+- 当前 AI 确认编排：[`ADR-0002`](../adr/0002-gateway-owned-confirmation-flow.md)
 - 审计设计：spec `2026-07-02-ai-tool-gateway-design.md` §2.7
 - data_scope：spec `2026-07-02-ai-tool-gateway-design.md` §6.2
-- HITL：spec `2026-07-02-ai-tool-gateway-design.md` §8
+- HITL / PreparedAction：spec `2026-07-02-ai-tool-gateway-design.md` §4.7、§5.6、§8.8
 - deferred execution（推迟）：gateway spec §14 Roadmap + 本 spec §10 Phase 3 量化重启条件

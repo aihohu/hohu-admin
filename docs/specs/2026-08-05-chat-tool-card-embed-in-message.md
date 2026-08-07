@@ -1,6 +1,6 @@
-# Chat Tool Card Embed in Message（工具卡片嵌入消息流） — v1.1
+# Chat Tool Card Embed in Message（工具卡片嵌入消息流） — v1.2
 
-**Status**: 📝 Ready for Plan（Safety 前置已完成 2026-08-07；消息归属/耐久性仍待 §6 Task 0-7）
+**Status**: 📝 Ready for Plan（Safety 前置已完成；ADR-0002 confirmation projection 与消息归属/耐久性待 §6）
 **Created**: 2026-08-05
 **Updated**: 2026-08-07
 **Owner**: hohu core team
@@ -10,7 +10,8 @@
 - BUG-FE-18 修复（`ai_message.tool_calls` JSON 已可反序列化；本 spec 将历史消息恢复路径从 `streamEvents` 迁回 `message.toolCalls`）
 **Related**:
 - [`../adr/0001-ai-safety-consistency-before-deferred-execution.md`](../adr/0001-ai-safety-consistency-before-deferred-execution.md)（执行事实、消息投影与当前同步边界）
-- [`2026-07-02-ai-tool-gateway-design.md`](./2026-07-02-ai-tool-gateway-design.md) §8.1 SSE 协议（本 spec 不新增事件类型；收紧正常 `done` 的耐久性语义）
+- [`../adr/0002-gateway-owned-confirmation-flow.md`](../adr/0002-gateway-owned-confirmation-flow.md)（结构化 confirmation 与 PreparedAction）
+- [`2026-07-02-ai-tool-gateway-design.md`](./2026-07-02-ai-tool-gateway-design.md) §8.1 / §8.8（本 spec 不新增事件类型；定义客户端投影与恢复）
 - [`2026-08-06-ai-message-edit-semantics.md`](./2026-08-06-ai-message-edit-semantics.md)（active message 投影与编辑/重新生成安全语义）
 
 ---
@@ -128,17 +129,17 @@ SSE 流式过程中，当前 assistant 消息还没 persist（没 messageId）�
 
 **回归**: `store/ai/index.ts::selectConversation` 删除 BUG-FE-18 引入的 `restoredEvents` 重建 streamEvents 逻辑（约 30 行）；`currentMessages` 本身已经含 toolCalls（`fetchGetConversationDetail` 返回），无需额外处理。配合消息编辑 spec，常规 conversation detail 只返回 active messages；被软删除的 assistant message 不进入渲染循环，其 `tool_calls` 卡片自然一并隐藏，审计数据仍留在数据库。
 
-### 2.5 **HITL pending 卡片：仍在 streaming message 下方（流式期间特例）**
+### 2.5 **HITL pending 卡片：流式时属于 transient assistant group，reload 后由 PreparedAction 恢复**
 
 HITL confirmation_required 事件发生在 tool 执行**前**，此时：
 - 当前 assistant message 尚未 persist
 - pending 卡片需要内联倒计时 bar（spec §12 场景 4/5）
 
-**做法**：pending 卡片渲染逻辑不变，位置跟流式期间的 tool 卡片一致 —— streaming message 下方。
+**做法**：流式期间 pending 卡片仍在 transient assistant group 下；Gateway action 进入 `pending_confirmation` 后，conversation detail 的 `pendingActions` 成为刷新恢复来源。reload 时若该 trace 尚无持久 assistant message，`displayMessages` 在 source user message 后派生一个 transient pending assistant group，展示 action.presentation 与倒计时；它不是伪造的 `AiMessage`，终态 detail 接管后自动消失。
 
-**反例**: pending 卡片也嵌入到「上一条」assistant 消息 → 时态错乱（pending 属于即将产生的消息，不是上一条）；reload 后 pending 卡片找不到挂载点（pending 状态本来就不会持久化，spec §8.3 续传恢复走另一路径）。
+**反例**: pending 卡片嵌入上一条 assistant → 归属错误；只存在 Pinia `pendingConfirmation` → 刷新/切换会话后丢失；为 pending 预先 INSERT 一个假 assistant message → 终态 finalizer 需要替换/合并第二种消息模型，扩大双写风险。
 
-**回归**: `pendingConfirmation` 状态不动；`ChatToolCall` 的 `isPending` / `pendingExpiresAt` prop 透传逻辑不动。
+**回归**: store 以 `pendingActionsById` 为持久投影缓存，SSE event 与 detail 都按 actionId upsert；streaming、reload、SSE 接管三条路径最多渲染一张 pending 卡。terminal detail 出现 execution toolCallId 后移除 transient group。
 
 ### 2.6 **空 toolCalls 不渲染占位**
 
@@ -176,9 +177,9 @@ HITL confirmation_required 事件发生在 tool 执行**前**，此时：
 
 ### 2.10 **所有 terminal SSE 路径共用幂等 finalizer；`done` 是显式耐久性回执**
 
-后端保存 assistant message 的一般条件从“`collected_text` 非空”改为“`collected_text` 非空 **或** `collected_tool_calls` 非空”。`chat.py` 原流、`resume.py` HITL 热接管以及 pending 超时/启动清理必须调用同一组 `finalize_assistant_turn` / `finalize_pending_terminal` 收口服务，不能各自 emit result + done。finalizer 显式接收 `action` 与 `run_outcome`；需要生成消息时，以 `(conversation_id, original_trace_id)` 的 assistant partial unique index 幂等 insert/merge，写 `parent_message_id=source_user_message_id`，tool_calls 按 `tool_call_id` 去重并保持 started ordinal；已有非空文本不被 tool-only resume 覆盖。
+后端保存 assistant message 的一般条件从“`collected_text` 非空”改为“`collected_text` 非空 **或** `collected_tool_calls` 非空”。`chat.py` 在线原流、confirm/action terminal、pending 超时/启动清理必须调用同一组 `finalize_assistant_turn` / `finalize_pending_terminal` 收口服务，不能各自 emit result + done。finalizer 显式接收 ChatCommand `action` 与 `run_outcome`；需要生成消息时，以 `(conversation_id, original_trace_id)` 的 assistant partial unique index 幂等 insert/merge，写 `parent_message_id=source_user_message_id`，tool_calls 按 `tool_call_id` 去重并保持 started ordinal；已有非空文本不被离线 tool-only finalizer 覆盖。
 
-`PendingPayload` 必须保存原 `trace_id`、`source_user_message_id`、conversation/user/tenant/agent、conversation run-guard ownership、started tool snapshot，以及 ChatCommand 收口上下文（`action`；regenerate 时含待 supersede 的旧 assistant ID）。tenant 只能来自认证中间件/服务端 resolver；resume 重建 `ChatDeps` 时恢复原 trace/source/guard/command context，并把 pending tenant 与当前认证 tenant 复核，不接受客户端 tenantId、不生成新 run trace。SSE 断开不能释放仍 pending 的 conversation guard。进入 pending 时 conversation guard lease 延长至 `AI_HITL_PENDING_TTL_SEC + 60s`，resume 时延长至 `AI_TOOL_TIMEOUT + 60s`；仅 owner token 可续租/释放。confirm `wake=False`、hang TTL、rejected/failed、startup cleanup 与正常 resume 都必须经 terminal finalizer，且在 operation/message commit 后按 token 释放 guard。
+`PreparedAction` 持久保存原 `trace_id`、`source_user_message_id`、conversation/user/tenant/agent、prepare/execute toolCallId、安全 presentation、conversation run-guard ownership 和 ChatCommand 收口上下文；Redis PendingPayload 只缓存 waiter/通知所需 actionId，不能成为授权事实源。tenant 只能来自认证中间件/服务端 resolver。SSE 断开不能释放仍 pending 的 conversation guard；进入 pending 时 lease 延长至 `expires_at + 60s`。confirm terminal、action TTL、rejected/failed、启动清理与正常在线流都必须经共享 finalizer，且在 action/operation/message commit 后按 owner token 释放 guard。
 
 active projection 必须按 action/outcome 分支：
 
@@ -201,7 +202,7 @@ assistant 保存或 commit 失败时，后端 rollback assistant transaction 并
 - regenerate rejected/expired/failed 仍写 active tool-only assistant并 supersede → 一次失败尝试会错误隐藏原本可用的旧回答。
 - pending 只靠普通短 lease 或 SSE finally 释放 guard → 用户确认窗口尚未结束时另一标签可启动新 run；旧 tool 随后恢复到已变化上下文。
 
-**回归**: 调整 `chat.py::sse_with_save`、`resume.py::resume_stream`、pending timeout/startup cleanup、PendingPayload、conversation guard 与共享 finalizer；测试分别断言 send/edit terminal tool-only 可落 active、regenerate 仅 success supersede、regenerate 非成功返回 projection unchanged 且旧回答 active、原 trace/source 保留、并发 finalizer 仅一条 assistant、commit 先于 committed done、所有 pending terminal 按 owner token 释放 guard。assistant 持久化失败时 send/edit 返回 failed+updated 并保留已提交 user projection，regenerate 返回 failed+unchanged；两者均不自动重放。SSE **事件类型集合**与 `ai_message.tool_calls` JSON 结构不变；仅扩展 done payload。
+**回归**: 调整 `chat.py::sse_with_save`、confirm/action terminal、pending timeout/startup cleanup、conversation guard 与共享 finalizer；在线流可直接合并 collected cards，离线终态可从 PreparedAction + operation 重建 prepare/execute 两张卡，并按 toolCallId 去重。测试分别断言 send/edit terminal tool-only 可落 active、regenerate 仅 success supersede、原 trace/source 保留、并发 finalizer 仅一条 assistant、commit 先于 committed done、所有 pending terminal 按 owner token 释放 guard。SSE **事件类型集合**不增加；`confirmation_required` 字段和 conversation detail 增加 action projection。
 
 ### 2.11 **长对话性能：本期先测量，不引入 `v-memo` 或虚拟滚动**
 
@@ -213,6 +214,38 @@ assistant 保存或 commit 失败时，后端 rollback assistant transaction 并
 - 把性能问题与正确性修复捆绑为同一验收门槛 → 容易让工具卡归属与耐久性收尾被非必要优化阻塞。
 
 **回归**: Phase 1 不添加 `v-memo`、不引入虚拟列表依赖；保留历史卡片默认折叠和 StatsChartView 折叠时不初始化 ECharts 的既有优化。基准数据达到单独性能 Plan 的触发条件后再决策，不回改本 spec 的正确性契约。
+
+### 2.12 **确认 UI 只由结构化 action 状态触发，不解析 LLM 文本**
+
+`ChatConfirmationDrawer` 的打开条件固定为 store 中存在当前会话、当前 owner 的有效 `pending_confirmation` action。Markdown 中出现“确认”“是否执行”、表格或按钮样式文本都只是 assistant content，不创建 pending、不打开抽屉，也不能调用 approve API。
+
+**反例**: regex 扫描“请确认”自动弹窗 → 多语言、否定句和普通解释误触发，且文本没有冻结参数/授权对象；让业务卡片自行 open drawer → 每种 tool 都要复制 action 生命周期。
+
+**回归**: 文本-only“请确认”不弹窗；`confirmation_required` 即使没有任何 assistant text 也弹窗；event/detail 重复到达按 actionId 去重。
+
+### 2.13 **confirmation presentation 是安全 DTO，抽屉不展示 raw args**
+
+抽屉和 pending 卡片只消费 Gateway `ConfirmationPresentation {title, summary?, fields[], warnings?}`。fields 按服务端顺序显示；tone 只控制颜色，不允许 HTML。前端不得回退展示 event args、preview token、fileId、内部路径、snapshot 或 frozen args。批准/拒绝请求仅提交 confirmationId 与 action。
+
+**反例**: 通用抽屉默认 `JSON.stringify(args)` → 泄露内部 capability/PII，也让用户误以为可在浏览器修改参数；前端从 result 自己拼摘要 → Web/App/Desktop 对同一 action 展示不同。
+
+**回归**: typings 不再要求 confirmation args/dryRun；恶意 HTML 按纯文本渲染；approve/reject request 类型无索引签名、不能附加业务字段。
+
+### 2.14 **store 支持多个 pending action，主抽屉一次只聚焦一个**
+
+状态从单值 `pendingConfirmation` 改为 `pendingActionsById: Map<actionId, PendingAction>`。消息流可以同时保留多个 pending 卡片（例如多个会话切换后恢复），当前会话主抽屉按 `createdAt/actionId` 稳定顺序聚焦最早有效 action；用户关闭抽屉只隐藏 UI，不 reject action，点击任一 pending 卡片可重新打开。approve/reject 成功或 detail 已无该 action时才移除。
+
+**反例**: 新 confirmation 覆盖单值旧 confirmation → 旧 action 仍可执行但 UI 不可达；切换会话直接 clear → 返回后无法批准；关闭 Drawer 等价 reject → 误取消业务操作。
+
+**回归**: 两 action upsert/排序/聚焦、跨会话隔离、关闭再打开、terminal 移除、detail authoritative reconciliation 全覆盖。
+
+### 2.15 **prepared flow 的 preview、pending、execute 卡片共享一个 message group**
+
+prepared flow 使用 `sourceToolCallId` 表示 LLM 发起的 preview，用 `toolCallId` 表示 Gateway 生成的 execute operation。流式时按 preview started/result → pending execute 顺序渲染；reload pending 时由 action.presentation 重建组合 pending 卡；批准终态后 finalizer 将 preview 与 execute 卡按 started ordinal 合并到同一 assistant message。不得把 preview 卡留在临时流、execute 卡挂到另一条消息。
+
+**反例**: 只持久 execute result → 用户无法追溯批准时看过什么；preview 和 execute 各建一条 assistant → 一次回答被拆成两个 message owner，edit/regenerate 因果范围错误。
+
+**回归**: 在线/断流/reload 三条路径最终得到同一 message group、相同 toolCallId 顺序和 presentation；重复 finalizer 不重复卡。
 
 ---
 
@@ -286,11 +319,11 @@ fetchGetConversationDetail → currentMessages (含每条 message.toolCalls)
 常规 detail 只返回 active messages；inactive assistant 及卡片自然不渲染
 ```
 
-### 3.5 HITL resume terminal
+### 3.5 HITL action terminal / 可选 SSE resume
 
 ```
-PendingPayload(trace=tr_1, sourceUserMessageId=u_1, guardOwner=g_1, action, tool started snapshot)
-  → GET /ai/chat/resume 恢复原 trace/source
+PreparedAction(trace=tr_1, sourceUserMessageId=u_1, guardOwner=g_1, action, presentation/tool snapshots)
+  → confirm handler 以 action 恢复原 trace/source；在线/热接管 SSE 只接收投影通知
   → approved / rejected / expired / failed terminal result
   → send/edit: finalize tool-only assistant → commit → projection=updated
   → regenerate success: 新 assistant + 原子 supersede → commit → projection=updated
@@ -302,6 +335,26 @@ PendingPayload(trace=tr_1, sourceUserMessageId=u_1, guardOwner=g_1, action, tool
   → 最终最多一条 assistant；tool_call_id 不重复，非空文本优先保留
 ```
 
+### 3.6 prepared import + reload
+
+```text
+SSE: tool_call_started(user.import_preview, tc_preview)
+SSE: tool_call_result(tc_preview, preview summary)
+SSE: confirmation_required(actionId=a_1, sourceToolCallId=tc_preview, toolCallId=tc_execute)
+  -> pendingActionsById[a_1] upsert + Drawer 自动打开
+
+刷新页面：
+GET /ai/conversation/c_1
+  -> messages=[source user ...], pendingActions=[a_1]
+  -> source user 后派生 transient pending assistant group
+  -> 展示 action.presentation，不解析旧 Markdown，不需要原 SSE
+
+approve：
+POST /ai/confirm {confirmationId, action:"approve"}
+  -> Gateway inline execute + finalizer commit assistant(toolCalls=[tc_preview, tc_execute])
+  -> detail 接管；pendingActions 不再含 a_1；transient group 消失
+```
+
 ---
 
 ## 4. 影响面
@@ -311,23 +364,24 @@ PendingPayload(trace=tr_1, sourceUserMessageId=u_1, guardOwner=g_1, action, tool
 | 文件 | 改动 |
 |---|---|
 | `hohu-admin-web/src/views/ai/chat/modules/chat-main.vue` | 渲染循环改：每条 assistant ChatMessage 后嵌入对应 ChatToolCall；streaming ChatMessage 下方渲染 streamEvents 衍生卡片；删除「整个列表末尾的 tool-call-list」块 |
-| `hohu-admin-web/src/store/modules/ai/index.ts` | 请求前生成 traceId；删除 `selectConversation` 的 restoredEvents 重建；新增 `messageToolCards` 和 stream handoff state；关闭后 temp snapshot 单源渲染，detail 可按 ack 或 request trace 接管，stale 阻止下一 command |
+| `hohu-admin-web/src/store/modules/ai/index.ts` | 请求前生成 traceId；新增 `pendingActionsById`、message groups 和 stream handoff state；SSE/detail 按 actionId upsert，terminal authoritative reconciliation |
+| `hohu-admin-web/src/typings/api/ai.d.ts` / `src/service/api/ai.ts` | ConfirmationPresentation/PendingAction/detail typings；confirm request 仅 confirmationId/action |
+| `hohu-admin-web/src/views/ai/chat/modules/chat-confirmation-drawer.vue` | 从 presentation 渲染，不展示 raw args；支持关闭后由 pending card 重开 |
+| `hohu-admin/app/modules/ai/models/prepared_action.py` / schemas | 持久 action 与 conversation detail pendingActions DTO，Gateway spec §4.7/§8.8 为 SoT |
 | `hohu-admin/app/modules/ai/schemas/chat.py` / `schemas/message.py` | ChatCommand 接收并校验稳定 traceId；MessageOut 返回 traceId，供 ack 丢失后的 detail reconciliation |
 | `hohu-admin/app/modules/ai/api/chat.py` | `tool_calls` 按 started ordinal 收集；所有 terminal 路径调用共享 finalizer；commit 后发送带 trace/message/persistence/projection 的 done ack |
 | `hohu-admin/app/modules/ai/api/resume.py` | HITL resume 按 action/outcome 收口；send/edit terminal 可持久化 tool-only，regenerate 非成功保持旧 active；commit 后按 token 释放 guard |
-| `hohu-admin/app/modules/ai/agents/hitl/manager.py` | PendingPayload 持久原 trace、source user、可信 tenant、agent、started tool snapshot、guard owner 与 command finalization context；resume 复核当前 tenant，TTL/启动清理也走 terminal finalizer |
+| `hohu-admin/app/modules/ai/agents/hitl/manager.py` | Redis 只做 waiter/通知缓存；按 actionId 回源 DB，不再以 PendingPayload 作为授权事实 |
 | `hohu-admin/app/modules/ai/service/chat_service.py`（或独立 message service） | `finalize_assistant_turn`：run 级幂等 insert/merge、action/outcome projection、parent/source 绑定、tool_call_id 去重 |
 | `hohu-admin-web/src/views/ai/chat/modules/__tests__/chat-tool-call-embed.spec.ts`（新） | vitest 覆盖嵌入渲染逻辑 |
 | `hohu-admin/tests/modules/ai/test_chat_tool_persistence.py`（新或并入现有 chat 测试） | pytest 覆盖 started 顺序、tool-only 持久化和 `done` 耐久性顺序 |
 
 ### 4.2 不改
 
-- 后端 SSE **事件类型集合**（不新增 `message_save` 或第二通道；只为既有 `done` 增加可选 durability/projection 字段）
+- 后端 SSE **事件类型集合**（不新增 `message_save` 或第二通道；扩展既有 `confirmation_required` 字段，并为 `done` 增加可选 durability/projection）
 - `ai_message.tool_calls` JSON 对外结构 / 列类型（assistant run 唯一索引与 parent 语义由消息编辑 spec 的同一 migration 负责）
 - `chat-message.vue`（保持纯气泡组件，不增加 toolCards prop / slot）
-- `chat-tool-call.vue` 内部（视图 + chip-row + 下载按钮全保留）
 - 5 种 view_type 组件（DetailCardView / RowsAffectedView 等）
-- HITL 抽屉（`chat-confirmation-drawer.vue`）
 - `ChatClarification`（supervisor routing 候选卡片，独立机制）
 
 ### 4.3 测试调整
@@ -359,6 +413,11 @@ PendingPayload(trace=tr_1, sourceUserMessageId=u_1, guardOwner=g_1, action, tool
 | `test_ai_error_then_failed_done_reconciles_by_projection` | `ai_error + done(persistence=failed)` → 不标成功/不重跑；send/edit updated 收敛已提交 user，regenerate unchanged 保留旧回答 |
 | `test_edit_assistant_persist_failure_keeps_replacement_projection` | edit replacement 已 commit、assistant save 失败 → detail 保留 replacement/旧 suffix inactive，显示回复失败 |
 | `test_regenerate_unchanged_projection_restores_old_answer` | regenerate rejected/expired/failed + projection=unchanged → 撤销 temp projection，detail 保留旧 active assistant |
+| `test_text_confirmation_does_not_open_drawer` | Markdown“请确认”无 action → 不弹抽屉 |
+| `test_event_and_detail_upsert_pending_by_action_id` | SSE/detail 重复 action → 单卡、单抽屉 |
+| `test_reload_derives_transient_pending_group_after_source_user` | reload 有 pendingActions、无 assistant → 正确派生 transient group |
+| `test_multiple_pending_actions_are_isolated_and_stably_focused` | 多 action/多会话不覆盖，关闭 Drawer 不 reject |
+| `test_drawer_uses_presentation_and_confirm_request_has_no_args` | 不展示 raw args/token；请求体只有 confirmationId/action |
 
 ### 5.2 后端 pytest
 
@@ -370,10 +429,12 @@ PendingPayload(trace=tr_1, sourceUserMessageId=u_1, guardOwner=g_1, action, tool
 | `test_persist_failure_emits_action_aware_projection` | assistant save/commit 失败 → rollback + `AI_MESSAGE_PERSIST_FAILED` + persistence=failed；send/edit projection=updated，regenerate=unchanged |
 | `test_send_edit_resume_terminal_results_persist_tool_only_assistant` | send/edit 的 approved/rejected/expired/failed 以原 trace/source/command context 落 tool-only assistant后再 updated done |
 | `test_regenerate_only_success_supersedes_old_assistant` | regenerate success 原子 supersede；rejected/expired/failed 不建 active assistant，返回 unchanged，旧 assistant 保持 active |
-| `test_pending_terminal_paths_finalize_and_release_owned_guard` | resume、wake=false、TTL 与 startup cleanup 均 commit terminal fact后按 owner token 释放 guard；非 owner 不得释放 |
-| `test_resume_rejects_tenant_mismatch_without_client_override` | PendingPayload tenant 来自服务端；resume 当前 tenant 不匹配则拒绝，客户端 tenantId 无法覆盖 |
-| `test_original_and_resume_finalize_once` | 原流与 resume 并发 finalizer → partial unique + merge 后仅一条 assistant、tool_call_id 不重复、非空文本保留 |
+| `test_pending_terminal_paths_finalize_and_release_owned_guard` | confirm、action TTL 与 startup cleanup 均 commit terminal fact后按 owner token 释放 guard；非 owner 不得释放 |
+| `test_confirm_rejects_tenant_mismatch_without_client_override` | PreparedAction tenant 来自服务端；当前 tenant 不匹配则拒绝，客户端 tenantId 无法覆盖 |
+| `test_online_and_confirm_finalize_once` | 在线流与 confirm terminal 并发 finalizer → partial unique + merge 后仅一条 assistant、tool_call_id 不重复、非空文本保留 |
 | `test_client_trace_is_validated_persisted_and_returned` | 请求 traceId 写 user/assistant/operation，MessageOut 返回；格式错误/跨 owner 冲突稳定拒绝 |
+| `test_conversation_detail_returns_owned_active_pending_actions` | 仅 owner/tenant、未过期、source active action；DTO 不含 frozen args/snapshot/token |
+| `test_offline_prepared_finalizer_rebuilds_preview_and_execute_cards_once` | 原 SSE 不在时从 action/operation 重建同一 message group，toolCallId 去重 |
 
 ### 5.3 E2E（Playwright）
 
@@ -384,19 +445,28 @@ PendingPayload(trace=tr_1, sourceUserMessageId=u_1, guardOwner=g_1, action, tool
 | HITL 流程 | 触发 HITL 工具 → pending 卡片在 streaming 气泡下倒计时 → 确认后 result 卡片替换位置不变 |
 | Task 33 回归 | user.export 完成 → 卡片在消息下 → 下载按钮可见可点 |
 | Tool-only + reload | 模拟仅返回工具结果的轮次 → 卡片有 assistant owner → reload 后仍在原消息位置 |
-| HITL 断流续传 + reload | pending 后断流 → send/edit resume approve/reject → committed updated done → reload 卡片仍归原 source user 对应 assistant；regenerate 失败仍显示旧回答 |
+| HITL 断流 + reload | pending 后断流 → detail 恢复 action → approve/reject → reload 卡片仍归原 source user 对应 assistant；regenerate 失败仍显示旧回答 |
+| 用户导入 prepared flow | “导入用户”→ preview 卡 + 自动抽屉 → approve → execute 卡；全程无第二次 LLM execute 调用 |
+| 用户导入纯预览 | “只看看可导入哪些用户”→ preview 卡，无抽屉、无 pending action |
 
 ---
 
 ## 6. Plan / Task 状态块
+
+### Task 35a confirmation slice（P0，与 Phase 1 基础交错）
+
+- [ ] Task 35a-W1：同步 Gateway event/detail/confirm DTO typings；store 从单值 `pendingConfirmation` 迁为 `pendingActionsById`，SSE/detail 按 actionId reconcile
+- [ ] Task 35a-W2：Drawer 只渲染 ConfirmationPresentation，approve/reject 只传 confirmationId/action；文本“请确认”永不触发 UI
+- [ ] Task 35a-W3（依赖下方 Task 0-2）：streaming/reload 派生 transient pending assistant group；prepared preview/pending/execute 最终归同一 message group
+- [ ] Task 35a-W4：完成 §5 新增 vitest/pytest/E2E；Task 35a 未绿前不进入 Task 36
 
 ### Phase 1（消息归属与耐久性收尾，本期）
 
 - [x] Safety 前置 **✅ 已完成（2026-08-07）**：Task 35 已把 operation effect metadata、file_id ACL/trusted tenant、HITL tenant 复核和私有 artifact 边界收口；edit/regenerate UI/store Safety Gate 已关闭。该完成项只保证后续 finalizer 可依赖可信执行事实，不代表 message projection/handoff 已实现。
   - S.1 **执行安全前置与卡片耐久实现分开验收** — Task 35 修复 execution fact 的可信度，本 spec Phase 1 仍负责 message owner、terminal commit 和 handoff。**反例**: metadata/file ACL 通过就把工具卡 spec 标完成 → reload/HITL resume 仍可能丢卡或双写。**回归**: Safety 测试与 §5 durability/projection 测试保持两组独立门禁；Task 0-7 状态不因 Safety Gate 自动变更。
 - [ ] Task 0（共享基础）：先落消息编辑 spec Task 1、2、2b：assistant run partial unique index、source/trace/parent 语义、客户端稳定 traceId 以及 conversation run guard/terminal cleanup；暂不开放 edit/regenerate
-- [ ] Task 1（Red）：新增后端失败测试，覆盖 started 顺序、send/edit 与 regenerate 分支、chat/resume/wake-false/TTL/startup cleanup、原 trace/source、owned guard、并发 finalizer、commit 先于 committed `done`、ack 丢失与持久化失败错误流
-- [ ] Task 2（Green）：实现 action/outcome-aware `finalize_assistant_turn` 与 terminal cleanup；修改 chat.py、resume.py 与 PendingPayload；为既有 done 增加可选 traceId/messageId/persistence/projection，保持事件类型集合和 `tool_calls` JSON schema 不变
+- [ ] Task 1（Red）：新增后端失败测试，覆盖 started 顺序、send/edit 与 regenerate 分支、chat/confirm/action TTL/startup cleanup、原 trace/source、owned guard、并发 finalizer、commit 先于 committed `done`、ack 丢失与持久化失败错误流
+- [ ] Task 2（Green）：实现 action/outcome-aware `finalize_assistant_turn` 与 terminal cleanup；修改 chat.py、confirm/action service 与 Redis waiter；为既有 done 增加可选 traceId/messageId/persistence/projection，保持事件类型集合和 `tool_calls` JSON schema 不变
 - [ ] Task 3（Red/Green）：修改 aiStore — 请求前生成 traceId；删除 restoredEvents；新增 `messageToolCards` 与 handoff state；streaming 用 events，关闭后只渲染 temp snapshot；detail 按 ack 或 request trace 完整接管才清 buffer，unchanged 恢复旧回答，失败 stale + 阻止下一 command
 - [ ] Task 4：修改 chat-main.vue — 每条 assistant 消息后嵌入对应卡片；streaming / transient group 下渲染本轮卡片；tool-only 不显示空文字气泡；删除末尾 tool-call-list
 - [ ] Task 5：vitest 覆盖 §5.1，pytest 覆盖 §5.2；回归现有 AI store、chat、resume、HITL、export 测试
@@ -414,17 +484,17 @@ PendingPayload(trace=tr_1, sourceUserMessageId=u_1, guardOwner=g_1, action, tool
 
 ## 7. 范围外
 
-- 新增或重命名 SSE 事件类型（不需要；既有 `done` 仅扩展可选 durability/projection 字段）
+- 新增或重命名 SSE 事件类型（不需要；扩展既有 `confirmation_required` payload 和 `done` durability/projection 字段）
 - 修改 `ai_message.tool_calls` JSON schema 或为工具卡单独新增数据库字段（不需要；trace/source/active 等共享字段由消息编辑 spec migration 负责）
-- HITL 抽屉流程改动（独立机制）
 - view_type registry 扩张（不需要）
+- 逐行勾选、多级审批、审批意见/SLA 等业务审核 UI（仍走 reviewRef/业务页面）
 - 消息编辑 / 重新生成的副作用校验与软删除实现（由 `2026-08-06-ai-message-edit-semantics.md` 负责）；本 spec 只约定常规 active 投影不返回 inactive assistant，因此其卡片自然隐藏
 
 ---
 
 ## 8. 开放问题
 
-无。原有问题及本次 code cross-check 发现的问题均已闭环：
+无。原有问题和 ADR-0002 新增问题均已有决定：
 - ChatMessage prop vs wrapper → 决策 2.8（chat-main wrapper）
 - pending 混合渲染顺序 → 决策 2.9（严格时间顺序）
 - 正常流结束与前端接管 → 决策 2.3 / 2.10（commit 后 done；detail 成功才接管）
@@ -434,13 +504,18 @@ PendingPayload(trace=tr_1, sourceUserMessageId=u_1, guardOwner=g_1, action, tool
 - commit 后 done 丢失 → 决策 2.3（请求前 traceId + MessageOut.traceId reconciliation）
 - 临时卡双源与 stale history → 决策 2.3（分阶段单一渲染源 + detail 收敛门禁）
 - 长对话性能 → 决策 2.11（本期 measure-first，不加 v-memo / 虚拟滚动）
+- confirmation 触发源 → 决策 2.12（只认结构化 action）
+- 参数展示与批准请求 → 决策 2.13（presentation + ID-only command）
+- 多 pending/reload → 决策 2.14（Map + detail recovery）
+- preview/execute 归属 → 决策 2.15（同一 message group）
 
 ---
 
 ## 9. 关联
 
-- 本 spec 不动 [`2026-08-01-user-import-export-design.md`](./2026-08-01-user-import-export-design.md)（职责分离；Task 33 决策 33.6 的 chip-row 设计仍然成立）
+- 用户导入业务 binding 由 [`2026-08-01-user-import-export-design.md`](./2026-08-01-user-import-export-design.md) Task 35a 定义；本 spec 只消费通用 action/presentation
 - 演进自 BUG-FE-18 修复（streamEvents 反序列化）；本 spec 完成度高后该修复路径退役
 - 与 [`2026-08-06-ai-message-edit-semantics.md`](./2026-08-06-ai-message-edit-semantics.md) 共用“message 是卡片 owner”的边界：active message 负责常规 UI 投影，operation log 负责执行事实与审计
 - 与 [`../adr/0001-ai-safety-consistency-before-deferred-execution.md`](../adr/0001-ai-safety-consistency-before-deferred-execution.md) 一致：本期只收紧同步 SSE 的耐久与接管，不引入 deferred 或第二实时通道
+- 与 [`../adr/0002-gateway-owned-confirmation-flow.md`](../adr/0002-gateway-owned-confirmation-flow.md) 一致：Gateway 产生确认事实，客户端只投影并提交 ID-only 决策
 - 主流标杆参考：ChatGPT / Claude.ai / 文心 / 通义 的 tool 卡片嵌入位置
