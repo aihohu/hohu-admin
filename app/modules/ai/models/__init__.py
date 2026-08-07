@@ -3,6 +3,7 @@ from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.operation_log import AiOperationLog
+from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
 from app.modules.ai.models.routing_feedback import AiRoutingFeedback
@@ -14,6 +15,7 @@ __all__ = [
     "AiMessage",
     "AiModel",
     "AiOperationLog",
+    "AiPreparedAction",
     "AiProvider",
     "RoleAiAgent",
     "AiRoutingFeedback",

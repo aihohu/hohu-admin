@@ -21,6 +21,8 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from redis.exceptions import RedisError
@@ -68,8 +70,16 @@ from app.modules.ai.agents.safety.auto_disable import record_injection
 from app.modules.ai.agents.tools.registry import RegisteredTool, ToolRegistry
 from app.modules.ai.core.context import ChatDeps, build_tool_context
 from app.modules.ai.service.operation_log_service import operation_log_service
+from app.modules.ai.service.prepared_action_service import prepared_action_service
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _PreparedExecutionContext:
+    proposal: PreparedActionProposal
+    prepare_tool_call_id: str
+
 
 USER_FACING_MSG: dict[str, str] = {
     "AI_TOOL_NOT_FOUND": "该工具不在当前助手范围内，请换种方式问。",
@@ -172,7 +182,7 @@ async def execute_tool(
     args: dict[str, Any],
     deps: ChatDeps,
     *,
-    _prepared_confirmation_args: dict[str, Any] | None = None,
+    _prepared_action_context: _PreparedExecutionContext | None = None,
 ) -> ToolResult:
     """统一 tool 执行入口（spec §3 / §6 / §8.2）
 
@@ -221,7 +231,7 @@ async def execute_tool(
 
     # Gateway-only execute 不允许模型/普通调用方猜名称直调。prepared preview
     # 只能通过本函数的内部递归传入安全 confirmation presentation。
-    if not meta.llm_visible and _prepared_confirmation_args is None:
+    if not meta.llm_visible and _prepared_action_context is None:
         _rec("not_available_to_model", risk=meta.risk)
         return ToolResult.failure(
             error_code="AI_TOOL_NOT_AVAILABLE_TO_MODEL",
@@ -242,7 +252,9 @@ async def execute_tool(
     # 普通/preview 事件可展示模型参数；prepared execute 事件只展示 proposal
     # 中的 presentation，真实 frozen args 仅保存在服务端 pending payload。
     public_event_args = (
-        _prepared_confirmation_args if _prepared_confirmation_args is not None else args
+        _prepared_action_context.proposal.presentation
+        if _prepared_action_context is not None
+        else args
     )
 
     # 2. 功能鉴权（spec §6.1）
@@ -443,6 +455,7 @@ async def execute_tool(
             summary,
             dry_run_summary,
             event_args=public_event_args,
+            prepared_action_context=_prepared_action_context,
         )
         if action is None:
             # 5min TTL 超时 → mark_expired（_hang_for_confirmation 内已迁移）
@@ -547,7 +560,10 @@ async def execute_tool(
             execute_name,
             proposal.frozen_args,
             deps,
-            _prepared_confirmation_args=proposal.presentation,
+            _prepared_action_context=_PreparedExecutionContext(
+                proposal=proposal,
+                prepare_tool_call_id=tool_call_id,
+            ),
         )
     return result
 
@@ -792,6 +808,7 @@ async def _hang_for_confirmation(
     dry_run_summary: DryRunSummary | None,
     *,
     event_args: dict[str, Any] | None = None,
+    prepared_action_context: _PreparedExecutionContext | None = None,
 ) -> ConfirmAction | None:
     """HITL 流：create_pending → emit confirmation_required → hang
 
@@ -845,6 +862,33 @@ async def _hang_for_confirmation(
             await operation_log_service.attach_confirmation(
                 log_db, log_id, confirmation_id
             )
+            if prepared_action_context is not None:
+                proposal = prepared_action_context.proposal
+                pending_expires_at = datetime.fromisoformat(
+                    payload.expires_at.replace("Z", "+00:00")
+                )
+                proposal_expires_at = proposal.expires_at
+                if proposal_expires_at.tzinfo is None:
+                    proposal_expires_at = proposal_expires_at.replace(tzinfo=UTC)
+                await prepared_action_service.create_pending(
+                    log_db,
+                    confirmation_id=confirmation_id,
+                    prepare_tool_call_id=(prepared_action_context.prepare_tool_call_id),
+                    execute_tool_call_id=tool_call_id,
+                    execute_tool_name=meta.name,
+                    frozen_args=proposal.frozen_args,
+                    snapshot=proposal.snapshot,
+                    snapshot_hash=proposal.snapshot_hash,
+                    subject_ref=proposal.subject_ref,
+                    presentation=proposal.presentation,
+                    user_id=deps.user.user_id,
+                    tenant_id=deps.tenant_id,
+                    conversation_id=deps.conversation_id or 0,
+                    source_user_message_id=deps.source_user_message_id or 0,
+                    trace_id=deps.trace_id,
+                    agent_code=deps.agent.code if deps.agent else meta.agent,
+                    expires_at=min(proposal_expires_at, pending_expires_at),
+                )
 
     # emit confirmation_required（spec §8.1）
     await _emit(

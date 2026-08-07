@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import redis.asyncio as aioredis
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from app.core import redis as redis_module
 from app.core.config import settings
@@ -74,6 +74,9 @@ async def clean_env():
     async with AsyncSessionLocal() as db:
         async with db.begin():
             await db.execute(
+                text("DELETE FROM ai_prepared_action WHERE trace_id LIKE 'tr_test_%'")
+            )
+            await db.execute(
                 text("DELETE FROM ai_operation_log WHERE trace_id LIKE 'tr_test_%'")
             )
 
@@ -93,6 +96,9 @@ async def clean_env():
 
     async with AsyncSessionLocal() as db:
         async with db.begin():
+            await db.execute(
+                text("DELETE FROM ai_prepared_action WHERE trace_id LIKE 'tr_test_%'")
+            )
             await db.execute(
                 text("DELETE FROM ai_operation_log WHERE trace_id LIKE 'tr_test_%'")
             )
@@ -251,7 +257,9 @@ def _build_deps(
         data_scope=data_scope,
         agent=agent,
         trace_id="tr_test_001",
+        tenant_id=77,
         conversation_id=100,
+        source_user_message_id=101,
         signal_event=signal_event,
     )
 
@@ -574,6 +582,37 @@ class TestHitlFlow:
             "warnings": [],
         }
         assert "server-only-token" not in repr(events)
+
+        from app.db.session import AsyncSessionLocal
+        from app.modules.ai.models.prepared_action import AiPreparedAction
+
+        async with AsyncSessionLocal() as db:
+            action = (
+                await db.execute(
+                    select(AiPreparedAction).where(
+                        AiPreparedAction.confirmation_id == confirmation.confirmation_id
+                    )
+                )
+            ).scalar_one()
+
+        assert action.status == "pending_confirmation"
+        assert action.prepare_tool_call_id is not None
+        assert action.execute_tool_call_id == confirmation.tool_call_id
+        assert action.execute_tool_name == _TEST_TOOL_PREPARED_EXECUTE
+        assert action.frozen_args == {
+            "preview_token": "server-only-token",
+            "reason": "test import",
+        }
+        assert action.args_hash
+        assert action.snapshot_hash
+        assert action.user_id == 9001
+        assert action.tenant_id == 77
+        assert action.conversation_id == 100
+        assert action.source_user_message_id == 101
+        assert action.trace_id == "tr_test_001"
+        assert action.expires_at == datetime.fromisoformat(
+            confirmation.expires_at.replace("Z", "+00:00")
+        )
 
     async def test_high_risk_triggers_hitl_approved(self, monkeypatch) -> None:
         """high risk + count=None（无 dry_run_fn）→ HITL，mock hang 立即 APPROVED"""
@@ -938,7 +977,7 @@ class TestPerAgentQuota:
         )
         assert exists == 0  # per-agent key 未写
 
-    async def test_agent_quota_under_limit_passes(self) -> None:
+    async def test_agent_quota_under_limit_passes(self, monkeypatch) -> None:
         """agent.daily_quota_per_user=5 → 单次 high-risk tool 通过"""
         _register_test_tools()
         # 用 unique user_id 隔离避免污染
@@ -965,6 +1004,10 @@ class TestPerAgentQuota:
         # 但 high risk + dry_run_count=None → HITL 路径，等 confirm → expired。
         # 解决：换用 _TEST_TOOL_HIGH 但工具内部已 self-contained，HITL expired 是预期。
         # 这里只验证 per-agent key 在 quota check 阶段已被写入（即使最终 HITL expired）。
+        async def expire_immediately(confirmation_id, *, timeout_sec=None):
+            raise TimeoutError("quota test does not wait for human input")
+
+        monkeypatch.setattr(hitl_manager, "hang", expire_immediately)
         await execute_tool(_TEST_TOOL_HIGH, {"x": 1}, deps)
 
         from datetime import UTC, datetime

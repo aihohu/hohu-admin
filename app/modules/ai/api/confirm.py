@@ -49,6 +49,7 @@ from app.modules.ai.service.chat_run_service import (
     chat_run_guard,
 )
 from app.modules.ai.service.operation_log_service import operation_log_service
+from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
 
@@ -116,6 +117,21 @@ async def confirm_tool(
             error_code="AI_USER_DISABLED",
         )
 
+    # Task 35a.2: prepared flows are authorized by the frozen PostgreSQL fact.
+    # Legacy single-tool HITL has no prepared action and continues on the old path.
+    prepared_action = await prepared_action_service.get_by_confirmation_id(
+        db, req.confirmation_id
+    )
+    if prepared_action is not None:
+        if (
+            prepared_action.user_id != current_user.user_id
+            or prepared_action.tenant_id != current_tenant_id
+        ):
+            raise AuthorizationException(error_code="NOT_CONFIRMATION_OWNER")
+        prepared_action_service.validate_pending_binding(prepared_action, pending)
+        if req.action == "approve":
+            await prepared_action_service.validate_snapshot(db, prepared_action)
+
     # 4. 写 ai_operation_log.approved_by（审计追责，无论 stream 是否还在）
     #    reject 也写 approved_by（§4.4 字段语义：按 confirm 的用户）
     log = await operation_log_service.get_by_tool_call_id(
@@ -128,7 +144,9 @@ async def confirm_tool(
         await db.commit()
 
     # 5. 唤醒挂起的 SSE 流
-    action = ConfirmAction(req.action)
+    action = (
+        ConfirmAction.APPROVED if req.action == "approve" else ConfirmAction.REJECTED
+    )
     woken = await hitl_manager.wake(req.confirmation_id, action)
 
     if not woken:

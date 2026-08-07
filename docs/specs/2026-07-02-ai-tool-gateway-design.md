@@ -1,6 +1,6 @@
 # AI Tool Gateway 设计
 
-> **状态**: Draft（现有 direct HITL 已落地；ADR-0002 Task 35a.1 prepared 自动接管已完成，持久 `PreparedAction`/CAS/reload 恢复仍为 P0 待实施）
+> **状态**: Draft（现有 direct HITL 已落地；ADR-0002 Task 35a.1 prepared 自动接管与 35a.2 持久冻结授权事实已完成，CAS/reload 恢复仍为 P0 待实施）
 > **日期**: 2026-07-02
 > **更新**: 2026-08-07
 > **作者**: Jack
@@ -454,7 +454,7 @@ def build_tool_context(
 
 `recent_failures`（连续失败兜底）走 Redis 跨 `/ai/chat` 流持久化：key=`ai:failures:{user_id}:{tool_name}:{args_hash}`，TTL=10min。
 
-### 4.7 `ai_prepared_action` — Gateway 确认事实源（ADR-0002，P0 待实施）
+### 4.7 `ai_prepared_action` — Gateway 确认事实源（ADR-0002，35a.2 冻结事实已实施；CAS/恢复待 35a.5）
 
 `ai_operation_log` 继续记录 tool 的执行事实；`ai_prepared_action` 独立记录“准备了什么、谁批准、最终是否执行”的授权事实。SSE、Redis PendingPayload 和 `ai_message.tool_calls` 都只是可恢复投影，不得替代此表。
 
@@ -3013,7 +3013,11 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 
 #### SR-28. **Task 35a.1 先交付确定性的 prepared handoff，但不得冒充持久授权事实源**（2026-08-07，已实施）— `AiToolMeta` 增加 `interaction_flow/prepared_execute_tool/llm_visible`；wrapper 只对 prepared preview 注入保留的 `requested_outcome`，Gateway 剥离后调用业务函数。preview 用 `ToolResult.prepared_action` 返回内部 proposal；`execute_if_approved` 自动调用绑定的 Gateway-only execute 并沿现有 HITL 通道发 `confirmation_required`，`preview_only` 正常返回。模型和 SSE 只拿 public data/presentation，frozen args 继续只在服务端 pending payload 中流转。
 **反例**: 为尽快弹窗直接把 preview token 回传给 LLM，再要求它调用 execute → 仍由模型编排且泄漏 capability；在 35a.1 就宣称 Redis pending 等于 `PreparedAction` → 掩盖刷新/重启/双击一致性仍未完成。
-**回归**: 单次 preview 调用自动产生确认；execute 不在模型 tool 集合且普通直调返回 `AI_TOOL_NOT_AVAILABLE_TO_MODEL`；事件/抽屉不含 token；真实浏览器拒绝确认后 operation 终态为 cancelled。PostgreSQL action、冻结 hash/CAS、detail pending projection 仍由 35a.2/35a.5 完成。
+**回归**: 单次 preview 调用自动产生确认；execute 不在模型 tool 集合且普通直调返回 `AI_TOOL_NOT_AVAILABLE_TO_MODEL`；事件/抽屉不含 token；真实浏览器拒绝确认后 operation 终态为 cancelled。PostgreSQL action 与冻结 hash 已由 35a.2 完成；CAS、detail pending projection 仍由 35a.5 完成。
+
+#### SR-29. **Task 35a.2 先把 prepared confirmation 固化为可验证授权事实，在线 waiter 暂不替换**（2026-08-07，已实施）— 新增 `ai_prepared_action` 模型、迁移与 service；prepared execute 的 confirmation 绑定 frozen args、canonical args/snapshot hash、subject/presentation、operator、可信 tenant、conversation/source、trace/agent 和 prepare/execute call。confirm body 收紧为 `confirmationId + approve|reject` 且拒绝额外字段；prepared flow 在 wake 前校验 DB action 与 Redis pending 完全一致，并对首个用户导入 adapter 复验 batch 状态、token、reason、on_conflict 与 file/records/summary snapshot。
+**反例**: 只把 preview token 放 Redis → 无持久授权事实可审计；允许 confirm body 重传策略 → 批准摘要与执行输入分叉；35a.2 同时重写离线恢复/CAS/finalizer → 与 35a.5 边界混叠。
+**回归**: canonical hash 键序无关且类型敏感；持久 action 含可信 identity/source 和 frozen policy；Redis 换参或 snapshot stale 均在 wake 前失败；旧 direct HITL 没有 action 时保持兼容。35a.5 继续负责 action/operation CAS 终态、完整执行前复验、Redis flush/reload 恢复和消息投影。
 
 
 

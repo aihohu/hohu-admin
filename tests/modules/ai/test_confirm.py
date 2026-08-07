@@ -18,8 +18,13 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
-from app.core.exceptions import AuthorizationException, NotFoundException
+from app.core.exceptions import (
+    AuthorizationException,
+    BusinessRuleException,
+    NotFoundException,
+)
 from app.modules.ai.agents.hitl.manager import PendingPayload
 from app.modules.ai.api.confirm import confirm_tool
 from app.modules.ai.schemas.confirm import ConfirmRequest
@@ -54,12 +59,28 @@ def _make_user(user_id: int = 100, user_name: str = "alice"):
     return SimpleNamespace(user_id=user_id, user_name=user_name)
 
 
+def test_confirm_request_rejects_policy_override_fields() -> None:
+    """Task 35a.2: confirm can choose only the decision, never new tool args."""
+    with pytest.raises(ValidationError):
+        ConfirmRequest.model_validate(
+            {
+                "confirmationId": "cid_test_0123",
+                "action": "approve",
+                "onConflict": "overwrite",
+            }
+        )
+
+
 @pytest.fixture(autouse=True)
 def _mock_external():
     """统一 mock redis_client + AsyncSessionLocal，避免污染真实 Redis / DB"""
     with (
         patch("app.modules.ai.api.confirm.redis_client") as mock_redis,
         patch("app.modules.ai.api.confirm.AsyncSessionLocal") as mock_session_local,
+        patch(
+            "app.modules.ai.api.confirm.prepared_action_service.get_by_confirmation_id",
+            AsyncMock(return_value=None),
+        ),
     ):
         # mock_redis 默认所有方法返回 False / None / 空值
         mock_redis.exists = AsyncMock(return_value=False)
@@ -102,7 +123,7 @@ class TestConfirmSuccess:
                 AsyncMock(return_value=None),
             ),
         ):
-            req = ConfirmRequest(confirmationId="cid_test_123", action="approved")
+            req = ConfirmRequest(confirmationId="cid_test_123", action="approve")
             db_mock = MagicMock()
             db_mock.commit = AsyncMock()
 
@@ -111,6 +132,99 @@ class TestConfirmSuccess:
         assert result.code == 200
         assert result.data.tool_call_id == "tc_test"
         assert result.data.status == "queued"
+
+
+class TestPreparedConfirmation:
+    async def test_stale_snapshot_is_rejected_before_wake(self) -> None:
+        from types import SimpleNamespace
+
+        action = SimpleNamespace(user_id=100, tenant_id=0)
+        stale = BusinessRuleException(
+            "preview snapshot changed",
+            error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
+        )
+        with (
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.get_pending",
+                AsyncMock(return_value=_make_pending()),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.check_user_disabled",
+                AsyncMock(return_value=False),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.prepared_action_service.get_by_confirmation_id",
+                AsyncMock(return_value=action),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.prepared_action_service.validate_pending_binding"
+            ),
+            patch(
+                "app.modules.ai.api.confirm.prepared_action_service.validate_snapshot",
+                AsyncMock(side_effect=stale),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.wake",
+                AsyncMock(),
+            ) as wake,
+        ):
+            req = ConfirmRequest(confirmationId="cid_test_0123", action="approve")
+            with pytest.raises(BusinessRuleException) as exc_info:
+                await confirm_tool(
+                    req,
+                    db=MagicMock(),
+                    current_user=_make_user(100),
+                )
+
+        assert exc_info.value.error_code == "AI_PREPARED_ACTION_SNAPSHOT_STALE"
+        wake.assert_not_awaited()
+
+    async def test_reject_does_not_require_business_snapshot_to_stay_fresh(
+        self,
+    ) -> None:
+        from types import SimpleNamespace
+
+        action = SimpleNamespace(user_id=100, tenant_id=0)
+        with (
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.get_pending",
+                AsyncMock(return_value=_make_pending()),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.check_user_disabled",
+                AsyncMock(return_value=False),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.prepared_action_service.get_by_confirmation_id",
+                AsyncMock(return_value=action),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.prepared_action_service.validate_pending_binding"
+            ),
+            patch(
+                "app.modules.ai.api.confirm.prepared_action_service.validate_snapshot",
+                AsyncMock(),
+            ) as validate_snapshot,
+            patch(
+                "app.modules.ai.api.confirm.operation_log_service.get_by_tool_call_id",
+                AsyncMock(return_value=None),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.wake",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            result = await confirm_tool(
+                ConfirmRequest(
+                    confirmationId="cid_test_0123",
+                    action="reject",
+                ),
+                db=MagicMock(),
+                current_user=_make_user(100),
+            )
+
+        assert result.data.status == "queued"
+        validate_snapshot.assert_not_awaited()
 
     async def test_reject_wakes_stream_returns_queued(self) -> None:
         """reject + wake 成功 → status=queued（reject 也是 wake 成功）"""
@@ -132,7 +246,7 @@ class TestConfirmSuccess:
                 AsyncMock(return_value=None),
             ),
         ):
-            req = ConfirmRequest(confirmationId="cid_test_123", action="rejected")
+            req = ConfirmRequest(confirmationId="cid_test_123", action="reject")
             db_mock = MagicMock()
             db_mock.commit = AsyncMock()
 
@@ -150,7 +264,7 @@ class TestPendingMissing:
             "app.modules.ai.api.confirm.hitl_manager.get_pending",
             AsyncMock(return_value=None),
         ):
-            req = ConfirmRequest(confirmationId="cid_unknown_0123", action="approved")
+            req = ConfirmRequest(confirmationId="cid_unknown_0123", action="approve")
             with pytest.raises(NotFoundException) as exc_info:
                 await confirm_tool(req, db=MagicMock(), current_user=_make_user(100))
             assert exc_info.value.error_code == "CONFIRMATION_EXPIRED_OR_NOT_FOUND"
@@ -166,7 +280,7 @@ class TestOwnerMismatch:
             "app.modules.ai.api.confirm.hitl_manager.get_pending",
             AsyncMock(return_value=_make_pending(user_id=100)),  # owner=100
         ):
-            req = ConfirmRequest(confirmationId="cid_test_0123", action="approved")
+            req = ConfirmRequest(confirmationId="cid_test_0123", action="approve")
             with pytest.raises(AuthorizationException) as exc_info:
                 # attacker user_id=999
                 await confirm_tool(req, db=MagicMock(), current_user=_make_user(999))
@@ -184,7 +298,7 @@ class TestOwnerMismatch:
                 AsyncMock(),
             ) as wake,
         ):
-            req = ConfirmRequest(confirmationId="cid_test_0123", action="approved")
+            req = ConfirmRequest(confirmationId="cid_test_0123", action="approve")
             with pytest.raises(AuthorizationException) as exc_info:
                 await confirm_tool(req, db=MagicMock(), current_user=_make_user(100))
 
@@ -210,7 +324,7 @@ class TestUserDisabled:
                 AsyncMock(return_value=True),  # 用户已被禁用
             ),
         ):
-            req = ConfirmRequest(confirmationId="cid_test_0123", action="approved")
+            req = ConfirmRequest(confirmationId="cid_test_0123", action="approve")
             with pytest.raises(AuthorizationException) as exc_info:
                 await confirm_tool(req, db=MagicMock(), current_user=_make_user(100))
             assert exc_info.value.error_code == "AI_USER_DISABLED"
@@ -227,7 +341,7 @@ class TestUserDisabled:
                 AsyncMock(return_value=True),
             ) as mock_disabled,
         ):
-            req = ConfirmRequest(confirmationId="cid_test_0123", action="approved")
+            req = ConfirmRequest(confirmationId="cid_test_0123", action="approve")
             with pytest.raises(AuthorizationException) as exc_info:
                 await confirm_tool(
                     req,
@@ -275,7 +389,7 @@ class TestWakeStreamGone:
                 AsyncMock(return_value=None),
             ) as mock_mark_expired,
         ):
-            req = ConfirmRequest(confirmationId="cid_test_0123", action="approved")
+            req = ConfirmRequest(confirmationId="cid_test_0123", action="approve")
             result = await confirm_tool(
                 req, db=MagicMock(), current_user=_make_user(100)
             )
@@ -335,7 +449,7 @@ class TestWakeStreamGone:
                 AsyncMock(),
             ) as delete_pending,
         ):
-            req = ConfirmRequest(confirmationId="cid_test_0123", action="approved")
+            req = ConfirmRequest(confirmationId="cid_test_0123", action="approve")
             db_mock = MagicMock()
             db_mock.commit = AsyncMock()
 
@@ -402,7 +516,7 @@ class TestWakeStreamGone:
                 AsyncMock(),
             ) as delete_pending,
         ):
-            req = ConfirmRequest(confirmationId="cid_test_0123", action="approved")
+            req = ConfirmRequest(confirmationId="cid_test_0123", action="approve")
             db_mock = MagicMock()
             db_mock.commit = AsyncMock()
 
@@ -447,7 +561,7 @@ class TestWakeStreamGone:
                 AsyncMock(side_effect=Exception("DB down")),
             ),
         ):
-            req = ConfirmRequest(confirmationId="cid_test_0123", action="approved")
+            req = ConfirmRequest(confirmationId="cid_test_0123", action="approve")
             db_mock = MagicMock()
             db_mock.commit = AsyncMock()
             result = await confirm_tool(req, db=db_mock, current_user=_make_user(100))

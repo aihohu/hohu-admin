@@ -14,6 +14,7 @@ from alembic import context
 from app.db.base import Base
 from app.modules.ai.models.conversation import AiConversation  # noqa: F401
 from app.modules.ai.models.message import AiMessage  # noqa: F401
+from app.modules.ai.models.prepared_action import AiPreparedAction  # noqa: F401
 from app.modules.ai.models.provider import AiProvider  # noqa: F401
 from app.modules.job.models.job import SysJob, SysJobLog  # noqa: F401
 from app.modules.system.models.dept import Dept  # noqa: F401

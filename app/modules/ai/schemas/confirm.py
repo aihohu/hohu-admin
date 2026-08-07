@@ -12,9 +12,13 @@ class ConfirmRequest(BaseModel):
     confirmation_id: str = Field(
         ..., min_length=10, description="HITL 抽屉拿到的 confirmation_id"
     )
-    action: Literal["approved", "rejected"] = Field(..., description="用户点确认或拒绝")
+    action: Literal["approve", "reject"] = Field(..., description="用户点确认或拒绝")
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class ConfirmResponse(BaseModel):
