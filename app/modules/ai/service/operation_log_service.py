@@ -23,7 +23,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessRuleException
@@ -43,6 +43,8 @@ class OperationLogService:
         *,
         trace_id: str,
         conversation_id: int,
+        source_user_message_id: int | None = None,
+        readonly_snapshot: bool = False,
         user_id: int,
         tool_name: str,
         tool_call_id: str,
@@ -72,6 +74,8 @@ class OperationLogService:
         log = AiOperationLog(
             trace_id=trace_id,
             conversation_id=conversation_id,
+            source_user_message_id=source_user_message_id,
+            readonly_snapshot=readonly_snapshot,
             user_id=user_id,
             tool_name=tool_name,
             tool_call_id=tool_call_id,
@@ -103,14 +107,36 @@ class OperationLogService:
         hitl_wait_ms = started_at - queued_at（pending 等待时间）。
         """
         log = await self._get(db, log_id)
-        self._transition(log, AiOperationStatus.RUNNING)
+        if log.status != AiOperationStatus.PENDING_CONFIRMATION.value:
+            if AiOperationStatus(log.status).is_terminal:
+                self._transition(log, AiOperationStatus.RUNNING)
+            raise BusinessRuleException(
+                f"ai_operation_log log_id={log_id} 已进入 running",
+                error_code="AI_OPERATION_LOG_ALREADY_RUNNING",
+            )
         now = datetime.now(UTC).replace(tzinfo=None)
         # queued_at 由 server_default 填充；HITL 流 mark_running 时计算等待耗时
         if log.queued_at is not None:
             delta = (now - log.queued_at).total_seconds() * 1000
-            log.hitl_wait_ms = max(0, int(delta))
-        log.started_at = now
-        return log
+            hitl_wait_ms = max(0, int(delta))
+        else:
+            hitl_wait_ms = 0
+        transitioned = await self._update_if_pending(
+            db,
+            log_id,
+            status=AiOperationStatus.RUNNING.value,
+            started_at=now,
+            hitl_wait_ms=hitl_wait_ms,
+        )
+        if transitioned is not None:
+            return transitioned
+        await db.refresh(log)
+        if AiOperationStatus(log.status).is_terminal:
+            self._transition(log, AiOperationStatus.RUNNING)
+        raise BusinessRuleException(
+            f"ai_operation_log log_id={log_id} 已被其它执行者接管",
+            error_code="AI_OPERATION_LOG_ALREADY_RUNNING",
+        )
 
     async def mark_success(
         self,
@@ -161,6 +187,22 @@ class OperationLogService:
         log.finished_at = datetime.now(UTC).replace(tzinfo=None)
         return log
 
+    async def mark_rejected_if_pending(
+        self,
+        db: AsyncSession,
+        log_id: int,
+        *,
+        approved_by: int,
+    ) -> AiOperationLog | None:
+        """Reject only an orphaned pending operation; never overwrite a live run."""
+        return await self._update_if_pending(
+            db,
+            log_id,
+            status=AiOperationStatus.REJECTED.value,
+            approved_by=approved_by,
+            finished_at=datetime.now(UTC).replace(tzinfo=None),
+        )
+
     async def mark_expired(self, db: AsyncSession, log_id: int) -> AiOperationLog:
         """状态迁移：pending_confirmation → expired（终态）
 
@@ -188,12 +230,12 @@ class OperationLogService:
             迁移后的 log（如果做了迁移）；None 表示当前状态非 pending_confirmation，
             调用方无需操作。
         """
-        log = await self._get(db, log_id)
-        if log.status != AiOperationStatus.PENDING_CONFIRMATION.value:
-            return None
-        self._transition(log, AiOperationStatus.EXPIRED)
-        log.finished_at = datetime.now(UTC).replace(tzinfo=None)
-        return log
+        return await self._update_if_pending(
+            db,
+            log_id,
+            status=AiOperationStatus.EXPIRED.value,
+            finished_at=datetime.now(UTC).replace(tzinfo=None),
+        )
 
     async def attach_confirmation(
         self,
@@ -267,6 +309,24 @@ class OperationLogService:
                 error_code="AI_OPERATION_LOG_NOT_FOUND",
             )
         return log
+
+    async def _update_if_pending(
+        self,
+        db: AsyncSession,
+        log_id: int,
+        **values,
+    ) -> AiOperationLog | None:
+        """CAS pending transition so wake/cleanup races cannot overwrite each other."""
+        stmt = (
+            update(AiOperationLog)
+            .where(
+                AiOperationLog.log_id == log_id,
+                AiOperationLog.status == AiOperationStatus.PENDING_CONFIRMATION.value,
+            )
+            .values(**values)
+            .returning(AiOperationLog)
+        )
+        return (await db.execute(stmt)).scalars().one_or_none()
 
     def _transition(self, log: AiOperationLog, target: AiOperationStatus) -> None:
         """状态机迁移合法性校验 + 执行迁移

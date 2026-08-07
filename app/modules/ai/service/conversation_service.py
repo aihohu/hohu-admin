@@ -85,8 +85,11 @@ class ConversationService:
         await self.get_by_id(db, conversation_id, user_id)  # 验证权限
         stmt = (
             select(AiMessage)
-            .where(AiMessage.conversation_id == conversation_id)
-            .order_by(AiMessage.create_time.asc())
+            .where(
+                AiMessage.conversation_id == conversation_id,
+                AiMessage.is_active.is_(True),
+            )
+            .order_by(AiMessage.create_time.asc(), AiMessage.message_id.asc())
         )
         result = await db.execute(stmt)
         messages = list(result.scalars().all())
@@ -108,6 +111,10 @@ class ConversationService:
         parts: list[dict] | None = None,
         tool_calls: list[dict] | None = None,
         agent_code: str | None = None,
+        parent_message_id: int | None = None,
+        trace_id: str | None = None,
+        is_active: bool = True,
+        supersedes_message_id: int | None = None,
     ) -> AiMessage:
         """保存一条消息
 
@@ -129,6 +136,10 @@ class ConversationService:
             parts=parts,
             tool_calls=tool_calls,
             agent_code=agent_code,
+            parent_message_id=parent_message_id,
+            trace_id=trace_id,
+            is_active=is_active,
+            supersedes_message_id=supersedes_message_id,
         )
         db.add(msg)
         return msg

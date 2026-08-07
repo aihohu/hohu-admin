@@ -106,6 +106,18 @@ class ChatDeps:
     不再重复调用（避免双调 / 状态不一致）.
     None 表示走 build_chat_deps 旧路径（未传 conversation_id 时）."""
 
+    source_user_message_id: int | None = None
+    """本 run 已持久化的 source user message；operation/assistant 因果键。"""
+
+    command_action: str = "send"
+    """当前仅启用 send；为共享 finalizer/handoff 保留 action 语义。"""
+
+    guard_owner_token: str | None = None
+    """conversation run guard owner；只能由同 token 续期或释放。"""
+
+    guard_handoff: bool = False
+    """进入 HITL pending 后为 True；原 SSE 断开不得释放 guard。"""
+
 
 @dataclass
 class AiToolContext:

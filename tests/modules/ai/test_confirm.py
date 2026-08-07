@@ -25,7 +25,13 @@ from app.modules.ai.api.confirm import confirm_tool
 from app.modules.ai.schemas.confirm import ConfirmRequest
 
 
-def _make_pending(user_id: int = 100, tenant_id: int = 0) -> PendingPayload:
+def _make_pending(
+    user_id: int = 100,
+    tenant_id: int = 0,
+    *,
+    source_user_message_id: int | None = None,
+    guard_owner_token: str | None = None,
+) -> PendingPayload:
     return PendingPayload(
         user_id=user_id,
         tenant_id=tenant_id,
@@ -36,6 +42,8 @@ def _make_pending(user_id: int = 100, tenant_id: int = 0) -> PendingPayload:
         args={"user_id": 42},
         dry_run_result=None,
         expires_at="2026-07-10T15:00:00Z",
+        source_user_message_id=source_user_message_id,
+        guard_owner_token=guard_owner_token,
     )
 
 
@@ -284,11 +292,82 @@ class TestWakeStreamGone:
         from types import SimpleNamespace
 
         fake_log = SimpleNamespace(log_id=12345)
+        pending = _make_pending(
+            source_user_message_id=987,
+            guard_owner_token="owner-token",
+        )
 
         with (
             patch(
                 "app.modules.ai.api.confirm.hitl_manager.get_pending",
-                AsyncMock(return_value=_make_pending()),
+                AsyncMock(return_value=pending),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.check_user_disabled",
+                AsyncMock(return_value=False),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.wake",
+                AsyncMock(return_value=False),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.operation_log_service.get_by_tool_call_id",
+                AsyncMock(return_value=fake_log),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.operation_log_service.mark_approved",
+                AsyncMock(),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.operation_log_service.mark_expired_if_pending",
+                AsyncMock(return_value=fake_log),
+            ) as mock_mark_expired,
+            patch(
+                "app.modules.ai.api.confirm.chat_run_finalizer.finalize_pending_turn",
+                AsyncMock(),
+            ) as finalize,
+            patch(
+                "app.modules.ai.api.confirm.chat_run_guard.release",
+                AsyncMock(),
+            ) as release,
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.delete_pending",
+                AsyncMock(),
+            ) as delete_pending,
+        ):
+            req = ConfirmRequest(confirmationId="cid_test_0123", action="approved")
+            db_mock = MagicMock()
+            db_mock.commit = AsyncMock()
+
+            result = await confirm_tool(req, db=db_mock, current_user=_make_user(100))
+
+        assert result.data.status == "stream_gone"
+        # mark_expired_if_pending 应被调用一次（在独立 session 里）
+        mock_mark_expired.assert_awaited_once()
+        finalize.assert_awaited_once()
+        release.assert_awaited_once()
+        assert release.await_args.kwargs == {
+            "conversation_id": 1,
+            "owner_token": "owner-token",
+        }
+        delete_pending.assert_awaited_once()
+
+    async def test_second_approve_does_not_finalize_or_release_running_turn(
+        self,
+    ) -> None:
+        """A losing duplicate confirm must not terminate the already-running stream."""
+        from types import SimpleNamespace
+
+        fake_log = SimpleNamespace(log_id=12345)
+        pending = _make_pending(
+            source_user_message_id=987,
+            guard_owner_token="owner-token",
+        )
+
+        with (
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.get_pending",
+                AsyncMock(return_value=pending),
             ),
             patch(
                 "app.modules.ai.api.confirm.check_user_disabled",
@@ -309,7 +388,19 @@ class TestWakeStreamGone:
             patch(
                 "app.modules.ai.api.confirm.operation_log_service.mark_expired_if_pending",
                 AsyncMock(return_value=None),
-            ) as mock_mark_expired,
+            ),
+            patch(
+                "app.modules.ai.api.confirm.chat_run_finalizer.finalize_pending_turn",
+                AsyncMock(),
+            ) as finalize,
+            patch(
+                "app.modules.ai.api.confirm.chat_run_guard.release",
+                AsyncMock(),
+            ) as release,
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.delete_pending",
+                AsyncMock(),
+            ) as delete_pending,
         ):
             req = ConfirmRequest(confirmationId="cid_test_0123", action="approved")
             db_mock = MagicMock()
@@ -318,8 +409,9 @@ class TestWakeStreamGone:
             result = await confirm_tool(req, db=db_mock, current_user=_make_user(100))
 
         assert result.data.status == "stream_gone"
-        # mark_expired_if_pending 应被调用一次（在独立 session 里）
-        mock_mark_expired.assert_awaited_once()
+        finalize.assert_not_awaited()
+        release.assert_not_awaited()
+        delete_pending.assert_not_awaited()
 
     async def test_wake_stream_gone_mark_expired_failure_does_not_break_response(
         self, _mock_external: Any

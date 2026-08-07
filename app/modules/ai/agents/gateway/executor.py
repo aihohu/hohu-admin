@@ -26,6 +26,7 @@ from typing import Any
 from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.exceptions import AuthorizationException, BusinessException
 from app.core.rbac import is_super_admin
 from app.core.redis import redis_client
@@ -548,6 +549,8 @@ async def _start_log(
             log_db,
             trace_id=deps.trace_id,
             conversation_id=deps.conversation_id or 0,
+            source_user_message_id=deps.source_user_message_id,
+            readonly_snapshot=registered.meta.readonly,
             user_id=deps.user.user_id,
             tool_name=registered.meta.name,
             tool_call_id=tool_call_id,
@@ -732,7 +735,32 @@ async def _hang_for_confirmation(
         tool_name=meta.name,
         args=args,
         dry_run_result=_summary_to_dict(dry_run_summary),
+        source_user_message_id=deps.source_user_message_id,
+        guard_owner_token=deps.guard_owner_token,
+        command_action=deps.command_action,
+        agent_code=deps.agent.code if deps.agent else None,
+        risk_level=meta.risk,
+        chip_target=meta.chip_target,
     )
+
+    if deps.guard_owner_token and deps.conversation_id:
+        from app.modules.ai.service.chat_run_service import (  # noqa: PLC0415
+            chat_run_guard,
+        )
+
+        handed_off = await chat_run_guard.handoff_pending(
+            redis_client,
+            conversation_id=deps.conversation_id,
+            owner_token=deps.guard_owner_token,
+            confirmation_ttl_sec=settings.AI_HITL_PENDING_TTL_SEC,
+        )
+        if not handed_off:
+            async with AsyncSessionLocal() as log_db:
+                async with log_db.begin():
+                    await operation_log_service.mark_expired_if_pending(log_db, log_id)
+            await hitl_manager.delete_pending(redis_client, confirmation_id)
+            return None
+    deps.guard_handoff = True
 
     # 回填 confirmation_id 到 log 行（spec §4.4）
     async with AsyncSessionLocal() as log_db:
@@ -764,7 +792,10 @@ async def _hang_for_confirmation(
             async with log_db.begin():
                 await operation_log_service.mark_expired(log_db, log_id)
         await hitl_manager.delete_pending(redis_client, confirmation_id)
+        deps.guard_handoff = False
         return None
+    else:
+        deps.guard_handoff = False
 
     # 用户确认后清 Redis pending
     await hitl_manager.delete_pending(redis_client, confirmation_id)

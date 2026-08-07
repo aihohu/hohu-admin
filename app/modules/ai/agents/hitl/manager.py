@@ -90,6 +90,12 @@ class PendingPayload:
     expires_at: str  # ISO 8601 UTC
     tenant_id: int = 0
     """创建 pending 时的可信租户；0 默认仅兼容升级前的单租户 payload。"""
+    source_user_message_id: int | None = None
+    guard_owner_token: str | None = None
+    command_action: str = "send"
+    agent_code: str | None = None
+    risk_level: str = "high"
+    chip_target: str | None = None
     wake_action: str | None = None
 
     def to_json_bytes(self) -> bytes:
@@ -152,6 +158,12 @@ class HitlManager:
         tool_name: str,
         args: dict[str, Any],
         dry_run_result: dict[str, Any] | None = None,
+        source_user_message_id: int | None = None,
+        guard_owner_token: str | None = None,
+        command_action: str = "send",
+        agent_code: str | None = None,
+        risk_level: str = "high",
+        chip_target: str | None = None,
     ) -> PendingPayload:
         """创建挂起：写 Redis + 注册进程内 Event
 
@@ -183,6 +195,12 @@ class HitlManager:
             args=args,
             dry_run_result=dry_run_result,
             expires_at=expires_at_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            source_user_message_id=source_user_message_id,
+            guard_owner_token=guard_owner_token,
+            command_action=command_action,
+            agent_code=agent_code,
+            risk_level=risk_level,
+            chip_target=chip_target,
         )
 
         # 3. confirmation_id 不应重复（防御性，仅 memory 模式检查进程内 dict）

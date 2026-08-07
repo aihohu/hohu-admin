@@ -131,6 +131,10 @@ class AiErrorEvent:
 class DoneEvent:
     """流结束事件"""
 
+    trace_id: str | None = None
+    message_id: int | None = None
+    persistence: Literal["committed", "failed", "not_applicable"] | None = None
+    projection: Literal["updated", "unchanged"] | None = None
     type: Literal["done"] = "done"
 
 
@@ -234,7 +238,13 @@ def event_to_sse_data(event: AiStreamEvent) -> str:
             "message": event.message,
         }
     elif isinstance(event, DoneEvent):
-        payload = {"type": event.type}
+        payload = {
+            "type": event.type,
+            "traceId": event.trace_id,
+            "messageId": event.message_id,
+            "persistence": event.persistence,
+            "projection": event.projection,
+        }
     else:  # pragma: no cover — 类型穷尽后 unreachable
         raise ValueError(f"unknown event type: {type(event).__name__}")
 

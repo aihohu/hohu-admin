@@ -16,7 +16,6 @@ from app.core.scheduler import scheduler_manager
 from app.db.session import AsyncSessionLocal
 from app.middleware.audit_middleware import AuditLogMiddleware
 from app.middleware.rate_limit_middleware import RateLimitMiddleware
-from app.modules.ai.agents.hitl.manager import hitl_manager
 from app.modules.ai.agents.tools import load_builtin_tools
 from app.modules.ai.agents.tools.registry import ToolRegistry, ToolRegistryError
 from app.modules.ai.api.agent import admin_router as ai_agent_admin_router
@@ -35,6 +34,7 @@ from app.modules.ai.api.routing_feedback import (
 from app.modules.ai.api.routing_feedback import (
     router as ai_routing_feedback_router,
 )
+from app.modules.ai.lifecycle import cleanup_orphaned_pending_on_startup
 from app.modules.auth.api import router as auth_router
 from app.modules.job.api.job import router as job_router
 from app.modules.job.api.job_log import router as job_log_router
@@ -95,7 +95,7 @@ async def lifespan(_app: FastAPI):
     # spec §8.4 启动清扫：服务重启 = 所有挂起的 SSE 流已断，
     # asyncio.Event 已丢，Redis 残留 pending 必须清扫避免 stale。
     if settings.AI_HITL_MODE == "memory":
-        await hitl_manager.cleanup_pending_on_startup()
+        await cleanup_orphaned_pending_on_startup()
 
     # 仅在嵌入式（开发）模式下随 API 启停调度器。
     # 生产模式下调度器由独立的 `app.scheduler_worker` 进程承担，

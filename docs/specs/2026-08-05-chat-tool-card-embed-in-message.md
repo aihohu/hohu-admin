@@ -1,6 +1,6 @@
 # Chat Tool Card Embed in Message（工具卡片嵌入消息流） — v1.2
 
-**Status**: 📝 Ready for Plan（Safety 前置已完成；ADR-0002 confirmation projection 与消息归属/耐久性待 §6）
+**Status**: 🚧 Phase 1（Safety 与 Task 35a.0 共享因果/收口基础已完成；PreparedAction projection、前端 handoff 与消息内嵌待 §6）
 **Created**: 2026-08-05
 **Updated**: 2026-08-07
 **Owner**: hohu core team
@@ -464,9 +464,11 @@ POST /ai/confirm {confirmationId, action:"approve"}
 
 - [x] Safety 前置 **✅ 已完成（2026-08-07）**：Task 35 已把 operation effect metadata、file_id ACL/trusted tenant、HITL tenant 复核和私有 artifact 边界收口；edit/regenerate UI/store Safety Gate 已关闭。该完成项只保证后续 finalizer 可依赖可信执行事实，不代表 message projection/handoff 已实现。
   - S.1 **执行安全前置与卡片耐久实现分开验收** — Task 35 修复 execution fact 的可信度，本 spec Phase 1 仍负责 message owner、terminal commit 和 handoff。**反例**: metadata/file ACL 通过就把工具卡 spec 标完成 → reload/HITL resume 仍可能丢卡或双写。**回归**: Safety 测试与 §5 durability/projection 测试保持两组独立门禁；Task 0-7 状态不因 Safety Gate 自动变更。
-- [ ] Task 0（共享基础）：先落消息编辑 spec Task 1、2、2b：assistant run partial unique index、source/trace/parent 语义、客户端稳定 traceId 以及 conversation run guard/terminal cleanup；暂不开放 edit/regenerate
+- [x] Task 0（共享基础）**✅ 已完成（2026-08-07）**：已落 assistant run partial unique index、source/trace/parent 语义、客户端请求前稳定 traceId，以及 send/direct-HITL 的 conversation run guard/terminal cleanup；edit/regenerate 继续关闭，PreparedAction 专属上下文由 Task 35a.1-35a.5 补齐
 - [ ] Task 1（Red）：新增后端失败测试，覆盖 started 顺序、send/edit 与 regenerate 分支、chat/confirm/action TTL/startup cleanup、原 trace/source、owned guard、并发 finalizer、commit 先于 committed `done`、ack 丢失与持久化失败错误流
+  - [x] Task 1a **✅ Task 35a.0 Red 子集已完成（2026-08-07）**：覆盖 send、direct HITL confirm/resume/timeout/startup、started 稳定顺序、原 trace/source、tool-only/并发幂等 finalizer、owned guard、commit-before-done 和持久化失败；edit/regenerate、PreparedAction action CAS 与前端 ack-loss 场景仍归后续任务
 - [ ] Task 2（Green）：实现 action/outcome-aware `finalize_assistant_turn` 与 terminal cleanup；修改 chat.py、confirm/action service 与 Redis waiter；为既有 done 增加可选 traceId/messageId/persistence/projection，保持事件类型集合和 `tool_calls` JSON schema 不变
+  - [x] Task 2a **✅ Task 35a.0 Green 子集已完成（2026-08-07）**：chat/direct HITL 已接共享 finalizer 和 terminal cleanup，既有 done 已兼容可选 durability/projection 字段，`tool_calls` schema 与事件类型集合未变；PreparedAction/action service 接入仍由 Task 35a.1-35a.5 完成
 - [ ] Task 3（Red/Green）：修改 aiStore — 请求前生成 traceId；删除 restoredEvents；新增 `messageToolCards` 与 handoff state；streaming 用 events，关闭后只渲染 temp snapshot；detail 按 ack 或 request trace 完整接管才清 buffer，unchanged 恢复旧回答，失败 stale + 阻止下一 command
 - [ ] Task 4：修改 chat-main.vue — 每条 assistant 消息后嵌入对应卡片；streaming / transient group 下渲染本轮卡片；tool-only 不显示空文字气泡；删除末尾 tool-call-list
 - [ ] Task 5：vitest 覆盖 §5.1，pytest 覆盖 §5.2；回归现有 AI store、chat、resume、HITL、export 测试

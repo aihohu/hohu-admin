@@ -19,9 +19,17 @@ class MessageOut(BaseModel):
     tokens_input: int | None
     tokens_output: int | None
     tool_calls: list[dict] | None
+    trace_id: str | None
+    is_active: bool
+    supersedes_message_id: int | None
     create_time: datetime
 
-    @field_serializer("message_id", "conversation_id", "parent_message_id")
+    @field_serializer(
+        "message_id",
+        "conversation_id",
+        "parent_message_id",
+        "supersedes_message_id",
+    )
     def serialize_id(self, v: int | None, _info):
         return str(v) if v is not None else None
 

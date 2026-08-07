@@ -96,6 +96,11 @@ class Settings(BaseSettings):
     AI_HITL_PENDING_TTL_SEC: int = 300
     # Redis 中 args JSON 大小上限（字节）：spec §8.3 防恶意 user 撑爆 Redis
     AI_HITL_ARGS_MAX_BYTES: int = 4096
+    # Task 35a.0: conversation-scoped ChatCommand lease。普通流由 heartbeat 续期；
+    # HITL handoff 至少延长到 confirmation TTL + grace，终态 commit 后 owner 释放。
+    AI_CHAT_RUN_GUARD_TTL_SEC: int = 60
+    AI_CHAT_RUN_GUARD_HEARTBEAT_SEC: int = 20
+    AI_CHAT_RUN_GUARD_PENDING_GRACE_SEC: int = 60
     # spec §2.4 v1.5+: SSE 续传功能开关（默认开）
     # False 时 confirmation_required 不发 id: 字段，/ai/chat/resume 端点返回 410。
     # 关闭场景：Redis 内存紧张 / 内网部署不需要移动端续传。

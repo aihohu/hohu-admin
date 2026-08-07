@@ -44,6 +44,10 @@ from app.modules.ai.agents.hitl.constants import ConfirmAction
 from app.modules.ai.agents.hitl.manager import hitl_manager
 from app.modules.ai.agents.safety.auto_disable import check_user_disabled
 from app.modules.ai.schemas.confirm import ConfirmRequest, ConfirmResponse
+from app.modules.ai.service.chat_run_service import (
+    chat_run_finalizer,
+    chat_run_guard,
+)
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
@@ -137,21 +141,59 @@ async def confirm_tool(
             req.confirmation_id,
             pending.tool_call_id,
         )
-        # 独立 session 标 expired（避免污染主请求 session）
-        if log is not None:
-            try:
-                async with AsyncSessionLocal() as cleanup_db:
-                    async with cleanup_db.begin():
-                        await operation_log_service.mark_expired_if_pending(
-                            cleanup_db, log.log_id
+        # 独立 session 写 operation + assistant projection；事务 commit 后才能释放
+        # conversation guard。即使原 SSE 已不存在，reload 也能看到终态卡片。
+        try:
+            terminalized = False
+            async with AsyncSessionLocal() as cleanup_db:
+                async with cleanup_db.begin():
+                    if log is not None:
+                        if action == ConfirmAction.REJECTED:
+                            transitioned = (
+                                await operation_log_service.mark_rejected_if_pending(
+                                    cleanup_db,
+                                    log.log_id,
+                                    approved_by=current_user.user_id,
+                                )
+                            )
+                        else:
+                            transitioned = (
+                                await operation_log_service.mark_expired_if_pending(
+                                    cleanup_db, log.log_id
+                                )
+                            )
+                        terminalized = transitioned is not None
+                    if terminalized:
+                        await chat_run_finalizer.finalize_pending_turn(
+                            cleanup_db,
+                            pending=pending,
+                            ok=False,
+                            error_code=(
+                                "USER_REJECTED"
+                                if action == ConfirmAction.REJECTED
+                                else "AI_HITL_STREAM_GONE"
+                            ),
+                            error_msg=(
+                                "用户已取消此操作"
+                                if action == ConfirmAction.REJECTED
+                                else "原对话流已断开，请重新发起"
+                            ),
                         )
-            except Exception:
-                # mark_expired 失败不阻断主响应（审计 gap 走告警追查）
-                logger.exception(
-                    "mark_expired_if_pending failed confirmation_id=%s log_id=%s",
-                    req.confirmation_id,
-                    log.log_id if log else None,
-                )
+            if terminalized:
+                if pending.guard_owner_token:
+                    await chat_run_guard.release(
+                        redis_client,
+                        conversation_id=pending.conversation_id,
+                        owner_token=pending.guard_owner_token,
+                    )
+                await hitl_manager.delete_pending(redis_client, req.confirmation_id)
+        except Exception:
+            # terminal commit 失败不释放 guard；lease 仅作为最后防死锁兜底。
+            logger.exception(
+                "offline terminal finalization failed confirmation_id=%s log_id=%s",
+                req.confirmation_id,
+                log.log_id if log else None,
+            )
 
         return ResponseModel.success(
             data=ConfirmResponse(

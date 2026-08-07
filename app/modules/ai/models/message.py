@@ -4,13 +4,16 @@ from typing import TYPE_CHECKING
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -28,6 +31,21 @@ class AiMessage(Base):
             "routing_feedback IS NULL OR routing_feedback IN ('correct', 'wrong')",
             name="ck_ai_message_routing_feedback",
         ),
+        Index(
+            "ix_ai_message_active_history",
+            "conversation_id",
+            "create_time",
+            "message_id",
+            postgresql_where=text("is_active = true"),
+        ),
+        Index(
+            "uq_ai_message_assistant_run",
+            "conversation_id",
+            "trace_id",
+            unique=True,
+            postgresql_where=text("role = 'assistant' AND trace_id IS NOT NULL"),
+        ),
+        Index("ix_ai_message_supersedes_message_id", "supersedes_message_id"),
     )
 
     message_id: Mapped[int] = mapped_column(
@@ -66,6 +84,18 @@ class AiMessage(Base):
     )
     trace_id: Mapped[str | None] = mapped_column(
         String(64), nullable=True, comment="追踪ID，与 ai_operation_log 关联"
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=text("true"),
+        comment="当前 active projection；inactive 仅供审计",
+    )
+    supersedes_message_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+        comment="本消息替换的原 message_id；不复用 parent_message_id",
     )
     agent_code: Mapped[str | None] = mapped_column(
         String(64),

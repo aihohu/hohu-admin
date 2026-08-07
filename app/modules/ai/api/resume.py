@@ -55,8 +55,12 @@ from app.modules.ai.agents.hitl.events import (
     DryRunSummary,
     ToolCallResultEvent,
 )
-from app.modules.ai.agents.hitl.manager import hitl_manager
+from app.modules.ai.agents.hitl.manager import PendingPayload, hitl_manager
 from app.modules.ai.api.chat import _format_sse_chunk
+from app.modules.ai.service.chat_run_service import (
+    chat_run_finalizer,
+    chat_run_guard,
+)
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.auth.service import get_current_user
@@ -101,6 +105,76 @@ def _build_resumed_event(confirmation_id: str, pending) -> ConfirmationResumedEv
         resumed_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         dry_run=dry_run,
     )
+
+
+async def _finalize_resume_terminal(
+    db: AsyncSession,
+    *,
+    confirmation_id: str,
+    pending: PendingPayload,
+    ok: bool,
+    duration_ms: int = 0,
+    result=None,  # noqa: ANN001
+    error_code: str | None = None,
+    error_msg: str | None = None,
+) -> list[AiErrorEvent | DoneEvent]:
+    """续传/离线 terminal projection 的 durability barrier。"""
+    if pending.source_user_message_id is None:
+        # 升级前 PendingPayload 无 durable source，不能猜测 parent；保留旧协议。
+        try:
+            await hitl_manager.delete_pending(redis_client, confirmation_id)
+        except Exception:
+            logger.exception("resume terminal legacy pending cleanup failed")
+        return [DoneEvent()]
+    try:
+        message = await chat_run_finalizer.finalize_pending_turn(
+            db,
+            pending=pending,
+            ok=ok,
+            duration_ms=duration_ms,
+            result=result,
+            error_code=error_code,
+            error_msg=error_msg,
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception(
+            "resume terminal finalization failed",
+            extra={"trace_id": pending.trace_id, "tool_call_id": pending.tool_call_id},
+        )
+        return [
+            AiErrorEvent(
+                error_code="AI_MESSAGE_PERSIST_FAILED",
+                message="工具终态持久化失败，请刷新会话确认状态",
+            ),
+            DoneEvent(
+                trace_id=pending.trace_id,
+                persistence="failed",
+                projection="updated",
+            ),
+        ]
+    if pending.guard_owner_token:
+        try:
+            await chat_run_guard.release(
+                redis_client,
+                conversation_id=pending.conversation_id,
+                owner_token=pending.guard_owner_token,
+            )
+        except Exception:
+            logger.exception("resume terminal conversation guard cleanup failed")
+    try:
+        await hitl_manager.delete_pending(redis_client, confirmation_id)
+    except Exception:
+        logger.exception("resume terminal pending cleanup failed")
+    return [
+        DoneEvent(
+            trace_id=pending.trace_id,
+            message_id=message.message_id if message else None,
+            persistence="committed",
+            projection="updated",
+        )
+    ]
 
 
 @router.get("/resume", summary="SSE 流断流续传（HITL 期热接管）")
@@ -213,9 +287,14 @@ async def resume_chat(
         db,
         current_user,
         agent_code=None,
+        trace_id=pending.trace_id,
         conversation_id=pending.conversation_id,
     )
     deps.conversation_id = pending.conversation_id
+    deps.source_user_message_id = pending.source_user_message_id
+    deps.guard_owner_token = pending.guard_owner_token
+    deps.command_action = pending.command_action
+    deps.guard_handoff = True
     # spec §5.3: build_chat_deps 内部已调 stickiness；如果走 supervisor 路径
     # 导致 deps.agent 为 None（如新会话 / conv_agent_code 失效），resume 流程
     # 不需要重新路由（tool 已经选定），直接 fallback 到 DEFAULT_AGENT_CODE.
@@ -236,13 +315,6 @@ async def resume_chat(
             try:
                 action = await hitl_manager.hang(confirmation_id)
             except TimeoutError:
-                yield _format_sse_chunk(
-                    AiErrorEvent(
-                        error_code="AI_HITL_TIMEOUT",
-                        message="HITL 确认超时（5min 无人确认），请重新发起",
-                    )
-                )
-                yield _format_sse_chunk(DoneEvent())
                 if log_id is not None:
                     try:
                         async with AsyncSessionLocal() as cleanup_db:
@@ -252,17 +324,51 @@ async def resume_chat(
                                 )
                     except Exception:
                         logger.exception("resume: mark_expired_if_pending failed")
+                yield _format_sse_chunk(
+                    AiErrorEvent(
+                        error_code="AI_HITL_TIMEOUT",
+                        message="HITL 确认超时（5min 无人确认），请重新发起",
+                    )
+                )
+                terminal_events = await _finalize_resume_terminal(
+                    db,
+                    confirmation_id=confirmation_id,
+                    pending=pending,
+                    ok=False,
+                    error_code="AI_HITL_TIMEOUT",
+                    error_msg="HITL 确认超时（5min 无人确认）",
+                )
+                for terminal_event in terminal_events:
+                    yield _format_sse_chunk(terminal_event)
                 return
             except Exception:
-                # hang 抛非 Timeout 异常（如 Redis down）→ emit error + done
+                # hang 抛非 Timeout 异常（如 Redis down）→ 先收口事实再 done
                 logger.exception("resume: hang unexpected error")
+                if log_id is not None:
+                    try:
+                        async with AsyncSessionLocal() as cleanup_db:
+                            async with cleanup_db.begin():
+                                await operation_log_service.mark_expired_if_pending(
+                                    cleanup_db, log_id
+                                )
+                    except Exception:
+                        logger.exception("resume: unexpected mark_expired failed")
                 yield _format_sse_chunk(
                     AiErrorEvent(
                         error_code="AI_INTERNAL_ERROR",
                         message="续传异常，请重新发起",
                     )
                 )
-                yield _format_sse_chunk(DoneEvent())
+                terminal_events = await _finalize_resume_terminal(
+                    db,
+                    confirmation_id=confirmation_id,
+                    pending=pending,
+                    ok=False,
+                    error_code="AI_INTERNAL_ERROR",
+                    error_msg="续传异常，请重新发起",
+                )
+                for terminal_event in terminal_events:
+                    yield _format_sse_chunk(terminal_event)
                 return
 
             # 6.3 REJECTED → mark_rejected + emit failure result
@@ -286,7 +392,16 @@ async def resume_chat(
                         error_msg="用户已取消此操作",
                     )
                 )
-                yield _format_sse_chunk(DoneEvent())
+                terminal_events = await _finalize_resume_terminal(
+                    db,
+                    confirmation_id=confirmation_id,
+                    pending=pending,
+                    ok=False,
+                    error_code="USER_REJECTED",
+                    error_msg="用户已取消此操作",
+                )
+                for terminal_event in terminal_events:
+                    yield _format_sse_chunk(terminal_event)
                 return
 
             # 6.4 APPROVED → execute_tool
@@ -297,7 +412,16 @@ async def resume_chat(
                         message="续传找不到原 log，请重新发起",
                     )
                 )
-                yield _format_sse_chunk(DoneEvent())
+                terminal_events = await _finalize_resume_terminal(
+                    db,
+                    confirmation_id=confirmation_id,
+                    pending=pending,
+                    ok=False,
+                    error_code="AI_OPERATION_LOG_NOT_FOUND",
+                    error_msg="续传找不到原 log，请重新发起",
+                )
+                for terminal_event in terminal_events:
+                    yield _format_sse_chunk(terminal_event)
                 return
 
             try:
@@ -310,22 +434,41 @@ async def resume_chat(
                         message="续传 tool 执行失败，请重新发起",
                     )
                 )
-                yield _format_sse_chunk(DoneEvent())
+                terminal_events = await _finalize_resume_terminal(
+                    db,
+                    confirmation_id=confirmation_id,
+                    pending=pending,
+                    ok=False,
+                    error_code="AI_INTERNAL_ERROR",
+                    error_msg="续传 tool 执行失败，请重新发起",
+                )
+                for terminal_event in terminal_events:
+                    yield _format_sse_chunk(terminal_event)
                 return
 
             # 6.5 emit tool_call_result + done
-            yield _format_sse_chunk(
-                ToolCallResultEvent(
-                    tool=pending.tool_name,
-                    tool_call_id=pending.tool_call_id,
-                    ok=result.ok,
-                    duration_ms=duration_ms,
-                    result=result.data if result.ok else None,
-                    error_code=result.error_code if not result.ok else None,
-                    error_msg=result.error_msg if not result.ok else None,
-                )
+            result_event = ToolCallResultEvent(
+                tool=pending.tool_name,
+                tool_call_id=pending.tool_call_id,
+                ok=result.ok,
+                duration_ms=duration_ms,
+                result=result.data if result.ok else None,
+                error_code=result.error_code if not result.ok else None,
+                error_msg=result.error_msg if not result.ok else None,
             )
-            yield _format_sse_chunk(DoneEvent())
+            yield _format_sse_chunk(result_event)
+            terminal_events = await _finalize_resume_terminal(
+                db,
+                confirmation_id=confirmation_id,
+                pending=pending,
+                ok=result.ok,
+                duration_ms=duration_ms,
+                result=result.data if result.ok else None,
+                error_code=result.error_code if not result.ok else None,
+                error_msg=result.error_msg if not result.ok else None,
+            )
+            for terminal_event in terminal_events:
+                yield _format_sse_chunk(terminal_event)
 
         finally:
             # 释放 owner 锁（Lua 防误删）

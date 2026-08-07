@@ -15,7 +15,6 @@ import base64
 import ipaddress
 import json
 import logging
-import uuid
 from http import HTTPStatus
 from pathlib import Path
 from urllib.parse import urlparse
@@ -30,6 +29,7 @@ from pydantic_ai.usage import UsageLimits
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.exceptions import BusinessRuleException
 from app.core.redis import redis_client
 from app.db.session import get_db
 from app.modules.ai.agents.hitl.events import (
@@ -57,6 +57,12 @@ from app.modules.ai.agents.safety.ip_blacklist import is_ip_blacklisted
 from app.modules.ai.agents.safety.keyword_blocklist import (
     check_keywords,
     load_blocklist,
+)
+from app.modules.ai.schemas.chat import resolve_chat_trace_id
+from app.modules.ai.service.chat_run_service import (
+    ToolCallCollector,
+    chat_run_finalizer,
+    chat_run_guard,
 )
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.conversation_service import conversation_service
@@ -153,6 +159,75 @@ def _collect_text_delta(sse_frame: str, collected: list[str]) -> None:
         collected.append(ev["delta"])
 
 
+def _run_guard_heartbeat_ttl(*, pending_handoff: bool) -> int:
+    """HITL heartbeat must never shrink the lease below its confirmation window."""
+    if pending_handoff:
+        return (
+            settings.AI_HITL_PENDING_TTL_SEC
+            + settings.AI_CHAT_RUN_GUARD_PENDING_GRACE_SEC
+        )
+    return settings.AI_CHAT_RUN_GUARD_TTL_SEC
+
+
+async def _finalize_stream_turn(
+    db: AsyncSession,
+    *,
+    conversation_id: int,
+    trace_id: str,
+    source_user_message_id: int,
+    content: str,
+    tool_calls: list[dict] | None,
+    agent_code: str | None,
+    stream_error_code: str | None,
+) -> list[AiStreamEvent]:
+    """建立 durability barrier：assistant/terminal commit 完成后才构造 done。"""
+    if stream_error_code is not None:
+        await db.rollback()
+        return [
+            DoneEvent(
+                trace_id=trace_id,
+                persistence="failed",
+                projection="updated",
+            )
+        ]
+    try:
+        message = await chat_run_finalizer.finalize_assistant_turn(
+            db,
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            source_user_message_id=source_user_message_id,
+            content=content,
+            tool_calls=tool_calls,
+            agent_code=agent_code,
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception(
+            "finalize_assistant_turn failed",
+            extra={"conversation_id": conversation_id, "trace_id": trace_id},
+        )
+        return [
+            AiErrorEvent(
+                error_code="AI_MESSAGE_PERSIST_FAILED",
+                message="AI 回复持久化失败，请刷新会话确认状态",
+            ),
+            DoneEvent(
+                trace_id=trace_id,
+                persistence="failed",
+                projection="updated",
+            ),
+        ]
+    return [
+        DoneEvent(
+            trace_id=trace_id,
+            message_id=message.message_id if message else None,
+            persistence="committed",
+            projection="updated",
+        )
+    ]
+
+
 async def _emit_safety_blocked(
     db: AsyncSession,
     *,
@@ -189,9 +264,19 @@ async def _emit_safety_blocked(
 
     async def _stream():
         yield _format_sse_chunk(AiErrorEvent(error_code=error_code, message=error_msg))
-        yield _format_sse_chunk(DoneEvent())
+        yield _format_sse_chunk(
+            DoneEvent(
+                trace_id=trace_id,
+                persistence="not_applicable",
+                projection="unchanged",
+            )
+        )
 
-    return StreamingResponse(_stream(), media_type=accept)
+    return StreamingResponse(
+        _stream(),
+        media_type=accept,
+        headers={"X-AI-Trace-ID": trace_id},
+    )
 
 
 router = APIRouter()
@@ -212,15 +297,18 @@ async def chat(
     spec §4-§5（Task 11）: 顶层生成 trace_id，safety 短路统一写 routing_log，
     safety 通过后调 Supervisor 路由（如启用），最后才持久化 user 消息（避免孤儿）.
     """
-    # spec §13 决策 14: trace_id 在所有 audit log（routing_log / operation_log）共用，
-    # 提前生成给 safety 短路 / build_chat_deps / attach_trace_to_conversation 复用.
-    trace_id = f"tr_{uuid.uuid4().hex[:16]}"
-
     # 读取原始 body（只能读一次）
     raw_body = await request.body()
 
     # 解析 JSON
     body = json.loads(raw_body) if raw_body else {}
+    trace_id = resolve_chat_trace_id(body.get("traceId") or body.get("trace_id"))
+    command_action = body.get("action", "send")
+    if command_action != "send":
+        raise BusinessRuleException(
+            "消息编辑与重新生成尚未开放",
+            error_code="AI_CHAT_COMMAND_INVALID",
+        )
     conversation_id = body.get("conversationId") or body.get("conversation_id")
     if conversation_id is not None:
         conversation_id = int(conversation_id)
@@ -309,6 +397,11 @@ async def chat(
         conv = await conversation_service.get_by_id(
             db, int(conversation_id), _current_user.user_id
         )
+        await chat_service.ensure_trace_available(
+            db,
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+        )
 
     model_name = body.get("modelId") or None
 
@@ -365,11 +458,22 @@ async def chat(
                     message=f"Agent 加载失败：{err_msg}",
                 )
             )
-            yield _format_sse_chunk(DoneEvent())
+            yield _format_sse_chunk(
+                DoneEvent(
+                    trace_id=trace_id,
+                    persistence="not_applicable",
+                    projection="unchanged",
+                )
+            )
 
-        return StreamingResponse(_agent_load_failed_stream(), media_type=accept)
+        return StreamingResponse(
+            _agent_load_failed_stream(),
+            media_type=accept,
+            headers={"X-AI-Trace-ID": trace_id},
+        )
 
     deps.conversation_id = conversation_id
+    deps.command_action = command_action
     # §11.4: 注入 client_ip 给 executor（用于鉴权拒绝时的 IP 级拉黑计数）
     deps.client_ip = request.client.host if request.client else None
 
@@ -388,9 +492,19 @@ async def chat(
                         message="您的 IP 因异常 AI 调用被临时拉黑，请联系管理员",
                     )
                 )
-                yield _format_sse_chunk(DoneEvent())
+                yield _format_sse_chunk(
+                    DoneEvent(
+                        trace_id=trace_id,
+                        persistence="not_applicable",
+                        projection="unchanged",
+                    )
+                )
 
-            return StreamingResponse(_ip_blocked_stream(), media_type=SSE_CONTENT_TYPE)
+            return StreamingResponse(
+                _ip_blocked_stream(),
+                media_type=SSE_CONTENT_TYPE,
+                headers={"X-AI-Trace-ID": trace_id},
+            )
 
     # §11.4 用户级自动禁用短路：被禁用时 emit ai_error + done，流结束
     if await check_user_disabled(redis_client, _current_user.user_id):
@@ -410,9 +524,19 @@ async def chat(
                     message="AI 功能已被自动禁用（24h），如非本人操作请联系管理员",
                 )
             )
-            yield _format_sse_chunk(DoneEvent())
+            yield _format_sse_chunk(
+                DoneEvent(
+                    trace_id=trace_id,
+                    persistence="not_applicable",
+                    projection="unchanged",
+                )
+            )
 
-        return StreamingResponse(_disabled_stream(), media_type=SSE_CONTENT_TYPE)
+        return StreamingResponse(
+            _disabled_stream(),
+            media_type=SSE_CONTENT_TYPE,
+            headers={"X-AI-Trace-ID": trace_id},
+        )
 
     # §11.2 keyword_blocklist：用户输入命中项目自定义敏感词 → 整条消息拦截
     blocklist = await load_blocklist(db)
@@ -658,9 +782,19 @@ async def chat(
                     message="路由失败，请重试或手动选择 Agent",
                 )
             )
-            yield _format_sse_chunk(DoneEvent())
+            yield _format_sse_chunk(
+                DoneEvent(
+                    trace_id=trace_id,
+                    persistence="not_applicable",
+                    projection="unchanged",
+                )
+            )
 
-        return StreamingResponse(_routing_failed_stream(), media_type=accept)
+        return StreamingResponse(
+            _routing_failed_stream(),
+            media_type=accept,
+            headers={"X-AI-Trace-ID": trace_id},
+        )
 
     # clarification → emit + 结束（spec §13 决策 11: user 消息不落库）
     if clarification_payload is not None:
@@ -668,39 +802,81 @@ async def chat(
 
         async def _clarification_stream():
             yield _format_sse_chunk(ClarificationRequiredEvent(**clarification_payload))
-            yield _format_sse_chunk(DoneEvent())
+            yield _format_sse_chunk(
+                DoneEvent(
+                    trace_id=trace_id,
+                    persistence="not_applicable",
+                    projection="unchanged",
+                )
+            )
 
-        return StreamingResponse(_clarification_stream(), media_type=accept)
+        return StreamingResponse(
+            _clarification_stream(),
+            media_type=accept,
+            headers={"X-AI-Trace-ID": trace_id},
+        )
 
     # 路由成功 / 粘滞 / 手动 → 注入 agent 到 deps（如还是 None）
     if deps.agent is None and final_agent_code:
         await chat_service.attach_agent_to_deps(deps, final_agent_code)
 
-    # 现在才持久化 user 消息（spec §13 决策 13: 避免 safety / clarification 孤儿消息）
-    if conversation_id and (user_message or user_parts):
-        persist_content = (
-            display_content if display_content is not None else user_message
-        )
-        persist_parts = display_parts if display_parts is not None else user_parts
-        await chat_service.save_user_message(
-            db,
-            conversation_id,
-            _current_user.user_id,
-            persist_content,
-            parts=persist_parts,
-            agent_code=deps.agent.code,
-        )
-
-    # 把 trace_id + agent_code 写到 ai_conversation（spec §4.5）
-    await chat_service.attach_trace_to_conversation(
-        db, conversation_id, deps.agent.code, deps.trace_id
-    )
-    await db.commit()
-
     # 创建 Agent（按 user_perms + agent_code 过滤 tool，spec §5.4）
     agent = await chat_service.create_agent(
         db, model_name, user_perms=deps.perms, agent_code=deps.agent.code
     )
+
+    # Task 35a.0：所有 durable mutation 前获取 conversation-scoped owner lease。
+    # create_agent 放在 guard 前，provider 配置失败不会留下 source/guard 半状态。
+    guard_owner_token: str | None = None
+    if conversation_id is not None:
+        guard_owner_token = chat_run_guard.generate_owner_token()
+        acquired = await chat_run_guard.acquire(
+            redis_client,
+            conversation_id=conversation_id,
+            owner_token=guard_owner_token,
+        )
+        if not acquired:
+            exc = BusinessRuleException(
+                "该会话已有 AI 操作正在执行",
+                error_code="AI_CHAT_RUN_IN_PROGRESS",
+            )
+            exc.code = 409
+            raise exc
+        deps.guard_owner_token = guard_owner_token
+
+    try:
+        # 现在才持久化 user 消息（避免 safety / clarification 孤儿消息）。flush 后
+        # message_id 立即成为本 run 的 source 因果键，供 Gateway operation 使用。
+        if conversation_id and (user_message or user_parts):
+            persist_content = (
+                display_content if display_content is not None else user_message
+            )
+            persist_parts = display_parts if display_parts is not None else user_parts
+            source_message = await chat_service.save_user_message(
+                db,
+                conversation_id,
+                _current_user.user_id,
+                persist_content,
+                parts=persist_parts,
+                agent_code=deps.agent.code,
+                trace_id=deps.trace_id,
+            )
+            deps.source_user_message_id = source_message.message_id
+
+        # 把 trace_id + agent_code 写到 ai_conversation（spec §4.5）
+        await chat_service.attach_trace_to_conversation(
+            db, conversation_id, deps.agent.code, deps.trace_id
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        if conversation_id is not None and guard_owner_token is not None:
+            await chat_run_guard.release(
+                redis_client,
+                conversation_id=conversation_id,
+                owner_token=guard_owner_token,
+            )
+        raise
 
     # 流式响应：自定义事件队列 + PydanticAI stream 并发合并（spec §8.1）
     # spec §11: usage_limits 兜底防 agent 无限循环（tool_calls_limit=5 / request_limit=10）
@@ -728,50 +904,8 @@ async def chat(
     async def sse_with_save():
         """合并 PydanticAI vercel stream + 自定义事件 queue → 单一 SSE 输出"""
         collected: list[str] = []
-        # 修订 BUG-FE-18: 收集 tool_call 事件，save_assistant_message 时存到
-        # ai_message.tool_calls JSON，前端重连会话时还原 streamEvents
-        collected_tool_calls: list[dict] = []
-        started_events: dict[str, dict] = {}  # tool_call_id → started event dict
-
-        def _record_tool_event(ev):
-            """拦截 ToolCallStarted/Result 事件，配对后存 collected_tool_calls
-
-            args / result 在写入前调 stringify_large_ints：Snowflake ID 是 int64，
-            超 JS Number.MAX_SAFE_INTEGER，DB JSON 列直接存 int 会让前端 reload
-            会话时还原 streamEvents 丢精度（CLAUDE.md 跨项目硬规则 #3）。
-            """
-            from app.modules.ai.agents.hitl.events import (  # noqa: PLC0415
-                ToolCallResultEvent,
-                ToolCallStartedEvent,
-                _ui_to_dict,
-                stringify_large_ints,
-            )
-
-            if isinstance(ev, ToolCallStartedEvent):
-                # 按 toolCallId 缓存 started；等 result 配对后入列
-                started_events[ev.tool_call_id] = {
-                    "tool": ev.tool,
-                    "tool_call_id": ev.tool_call_id,
-                    "summary": ev.summary,
-                    "args": stringify_large_ints(ev.args),
-                    "risk": ev.risk,
-                    "trace_id": ev.trace_id,
-                    "chip_target": ev.chip_target,
-                }
-            elif isinstance(ev, ToolCallResultEvent):
-                started = started_events.pop(ev.tool_call_id, {})
-                collected_tool_calls.append(
-                    {
-                        **started,
-                        "ok": ev.ok,
-                        "result": stringify_large_ints(ev.result),
-                        "affected_rows": ev.affected_rows,
-                        "error_code": ev.error_code,
-                        "error_msg": ev.error_msg,
-                        "duration_ms": ev.duration_ms,
-                        "ui": _ui_to_dict(ev.ui) if ev.ui else None,
-                    }
-                )
+        tool_collector = ToolCallCollector()
+        stream_error_code: str | None = None
 
         # 生产者：跑 PydanticAI stream，把 vercel chunk 转发到 unified_queue
         # 修订 BUG: PydanticAI 调 tool fn 时 stream 协程在 tool fn 内 hang（HITL
@@ -792,10 +926,11 @@ async def chat(
                 ev = await custom_event_queue.get()
                 if ev is None:  # sentinel
                     break
-                _record_tool_event(ev)
+                tool_collector.record(ev)
                 await unified_queue.put(_format_sse_chunk(ev))
 
         async def produce_pydantic():
+            nonlocal stream_error_code
             try:
                 async for chunk in adapter.encode_stream(event_stream):
                     # 提取 text-delta 收集（spec §8.1: Vercel UI Protocol v4
@@ -809,6 +944,7 @@ async def chat(
                     "PydanticAI usage limit exceeded",
                     extra={"trace_id": deps.trace_id, "error": str(e)},
                 )
+                stream_error_code = "AI_USAGE_LIMIT_EXCEEDED"
                 await unified_queue.put(
                     _format_sse_chunk(
                         AiErrorEvent(
@@ -821,6 +957,15 @@ async def chat(
             except Exception:
                 # 其它未预期异常：log + sentinel，前端靠 SSE done 兜底
                 logger.exception("PydanticAI stream error")
+                stream_error_code = "AI_INTERNAL_ERROR"
+                await unified_queue.put(
+                    _format_sse_chunk(
+                        AiErrorEvent(
+                            error_code="AI_INTERNAL_ERROR",
+                            message="AI 流式响应异常，请稍后重试",
+                        )
+                    )
+                )
                 await unified_queue.put(None)
             else:
                 await unified_queue.put(None)  # sentinel
@@ -828,13 +973,53 @@ async def chat(
         drain_task = asyncio.create_task(drain_custom_events())
         pydantic_task = asyncio.create_task(produce_pydantic())
 
+        async def heartbeat_guard() -> None:
+            nonlocal stream_error_code
+            if saved_conversation_id is None or guard_owner_token is None:
+                return
+            while True:
+                await asyncio.sleep(settings.AI_CHAT_RUN_GUARD_HEARTBEAT_SEC)
+                try:
+                    renewed = await chat_run_guard.renew(
+                        redis_client,
+                        conversation_id=saved_conversation_id,
+                        owner_token=guard_owner_token,
+                        ttl_sec=_run_guard_heartbeat_ttl(
+                            pending_handoff=deps.guard_handoff
+                        ),
+                    )
+                except Exception:
+                    logger.exception(
+                        "chat run guard heartbeat failed",
+                        extra={"conversation_id": saved_conversation_id},
+                    )
+                    renewed = False
+                if renewed:
+                    continue
+                stream_error_code = "AI_CHAT_GUARD_LOST"
+                await unified_queue.put(
+                    _format_sse_chunk(
+                        AiErrorEvent(
+                            error_code="AI_CHAT_GUARD_LOST",
+                            message="会话执行锁已失效，请刷新后重试",
+                        )
+                    )
+                )
+                pydantic_task.cancel()
+                await unified_queue.put(None)
+                return
+
+        heartbeat_task = asyncio.create_task(heartbeat_guard())
+
         # 主循环：消费 unified_queue
+        stream_consumed = False
         try:
             while True:
                 chunk = await unified_queue.get()
                 if chunk is None:  # sentinel: PydanticAI stream 结束
                     break
                 yield chunk
+            stream_consumed = True
         finally:
             if not pydantic_task.done():
                 pydantic_task.cancel()
@@ -848,23 +1033,77 @@ async def chat(
                 await drain_task
             except (asyncio.CancelledError, Exception):
                 pass
+            if not heartbeat_task.done():
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            # 客户端在 terminal barrier 前断流：普通 run 已被取消，可释放；HITL
+            # pending 已把 durable handoff context 写入 payload，必须保留 lease。
+            if (
+                not stream_consumed
+                and saved_conversation_id is not None
+                and guard_owner_token is not None
+                and not deps.guard_handoff
+            ):
+                try:
+                    await chat_run_guard.release(
+                        redis_client,
+                        conversation_id=saved_conversation_id,
+                        owner_token=guard_owner_token,
+                    )
+                except Exception:
+                    logger.exception(
+                        "chat run guard release after disconnect failed",
+                        extra={"conversation_id": saved_conversation_id},
+                    )
 
-        # 流结束 emit done（spec §8.1）
-        yield _format_sse_chunk(DoneEvent())
-
-        # 保存 AI 响应消息
-        collected_text = "".join(collected)
-        if saved_conversation_id and collected_text:
-            try:
-                await chat_service.save_assistant_message(
+        try:
+            collected_text = "".join(collected)
+            if saved_conversation_id and deps.source_user_message_id:
+                terminal_events = await _finalize_stream_turn(
                     saved_db,
-                    saved_conversation_id,
+                    conversation_id=saved_conversation_id,
+                    trace_id=deps.trace_id,
+                    source_user_message_id=deps.source_user_message_id,
                     content=collected_text,
-                    tool_calls=collected_tool_calls if collected_tool_calls else None,
+                    tool_calls=tool_collector.snapshot() or None,
                     agent_code=deps.agent.code if deps.agent else None,
+                    stream_error_code=stream_error_code,
                 )
-                await saved_db.commit()
-            except Exception:
-                logger.exception("save_assistant_message failed")
+            else:
+                terminal_events = [
+                    DoneEvent(
+                        trace_id=deps.trace_id,
+                        persistence="not_applicable",
+                        projection="unchanged",
+                    )
+                ]
+            for terminal_event in terminal_events:
+                yield _format_sse_chunk(terminal_event)
+        finally:
+            # pending handoff 的 guard 交给 confirm/resume/TTL 收口；其它路径必须在
+            # terminal commit（或失败 rollback）之后由原 owner compare-and-delete。
+            if (
+                saved_conversation_id is not None
+                and guard_owner_token is not None
+                and not deps.guard_handoff
+            ):
+                try:
+                    await chat_run_guard.release(
+                        redis_client,
+                        conversation_id=saved_conversation_id,
+                        owner_token=guard_owner_token,
+                    )
+                except Exception:
+                    logger.exception(
+                        "chat run guard release failed",
+                        extra={"conversation_id": saved_conversation_id},
+                    )
 
-    return StreamingResponse(sse_with_save(), media_type=accept)
+    return StreamingResponse(
+        sse_with_save(),
+        media_type=accept,
+        headers={"X-AI-Trace-ID": trace_id},
+    )

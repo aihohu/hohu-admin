@@ -62,6 +62,15 @@ def _resume_enabled():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _mock_pending_delete():
+    with patch(
+        "app.modules.ai.api.resume.hitl_manager.delete_pending",
+        AsyncMock(),
+    ):
+        yield
+
+
 # ============ 410 AI_RESUME_DISABLED ============
 
 

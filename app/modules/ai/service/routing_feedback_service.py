@@ -33,7 +33,7 @@ class RoutingFeedbackService:
     ) -> None:
         """spec §6.4: 写 ai_message.routing_feedback + 追加 ai_routing_feedback."""
         msg = await db.get(AiMessage, message_id)
-        if msg is None:
+        if msg is None or not msg.is_active:
             raise NotFoundException(
                 resource_type="AI消息",
                 error_code="AI_MESSAGE_NOT_FOUND",

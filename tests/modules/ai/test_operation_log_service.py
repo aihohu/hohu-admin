@@ -79,6 +79,27 @@ class TestStartOperation:
         assert log.status == "running"
         assert log.confirmation_id is None
 
+    async def test_records_source_and_readonly_snapshot(self, db_session) -> None:
+        log_id = await operation_log_service.start_operation(
+            db_session,
+            trace_id="tr_test_causality",
+            conversation_id=123,
+            source_user_message_id=456,
+            readonly_snapshot=True,
+            user_id=9001,
+            tool_name="user.count",
+            tool_call_id="tc_test_causality",
+            args_hash="c" * 64,
+            args_summary="tool=user.count, risk=low, mode=autonomous",
+            risk_level="low",
+            execution_mode=AiExecutionMode.AUTONOMOUS.value,
+            status=AiOperationStatus.RUNNING,
+        )
+
+        log = await db_session.get(AiOperationLog, log_id)
+        assert log.source_user_message_id == 456
+        assert log.readonly_snapshot is True
+
 
 class TestStateMachine:
     async def test_pending_to_running(self, db_session) -> None:
@@ -161,6 +182,38 @@ class TestStateMachine:
         log = await db_session.get(AiOperationLog, log_id)
         assert log.status == "running"  # 状态不变
 
+    async def test_mark_rejected_if_pending_migrates_when_pending(
+        self, db_session
+    ) -> None:
+        log_id = await _start(db_session)
+
+        result = await operation_log_service.mark_rejected_if_pending(
+            db_session,
+            log_id,
+            approved_by=9001,
+        )
+
+        assert result is not None
+        log = await db_session.get(AiOperationLog, log_id)
+        assert log.status == "rejected"
+        assert log.approved_by == 9001
+
+    async def test_mark_rejected_if_pending_skips_when_running(
+        self, db_session
+    ) -> None:
+        log_id = await _start(db_session)
+        await operation_log_service.mark_running(db_session, log_id)
+
+        result = await operation_log_service.mark_rejected_if_pending(
+            db_session,
+            log_id,
+            approved_by=9001,
+        )
+
+        assert result is None
+        log = await db_session.get(AiOperationLog, log_id)
+        assert log.status == "running"
+
     async def test_mark_expired_if_pending_skips_when_terminal(
         self, db_session
     ) -> None:
@@ -181,6 +234,15 @@ class TestStateMachine:
 
 
 class TestTransitionGuard:
+    async def test_second_mark_running_is_rejected(self, db_session) -> None:
+        log_id = await _start(db_session)
+        await operation_log_service.mark_running(db_session, log_id)
+
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await operation_log_service.mark_running(db_session, log_id)
+
+        assert exc_info.value.error_code == "AI_OPERATION_LOG_ALREADY_RUNNING"
+
     async def test_terminal_cannot_transition(self, db_session) -> None:
         """终态后不能再迁移"""
         log_id = await _start(db_session)

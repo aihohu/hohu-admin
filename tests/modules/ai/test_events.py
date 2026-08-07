@@ -223,6 +223,15 @@ class TestEventDataclasses:
         data = json.loads(event_to_sse_data(event))
         assert data == {"type": "done"}
 
+    def test_done_event_supports_not_applicable_persistence(self) -> None:
+        event = DoneEvent(persistence="not_applicable", projection="unchanged")
+        data = json.loads(event_to_sse_data(event))
+        assert data == {
+            "type": "done",
+            "persistence": "not_applicable",
+            "projection": "unchanged",
+        }
+
 
 class TestStringifyLargeInts:
     """spec §8.1 + CLAUDE.md #3: Snowflake ID（int64）序列化为 JSON 必须转 str

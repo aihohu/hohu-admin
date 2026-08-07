@@ -25,6 +25,7 @@ def _make_msg(*, tool_calls: list | None) -> AiMessage:
         tokens_input=None,
         tokens_output=None,
         tool_calls=tool_calls,
+        is_active=True,
         create_time=datetime(2026, 7, 17, 12, 0, 0),
     )
 

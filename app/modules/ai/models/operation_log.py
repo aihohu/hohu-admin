@@ -1,6 +1,16 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.id_generator import next_id
@@ -18,6 +28,14 @@ class AiOperationLog(Base):
     """
 
     __tablename__ = "ai_operation_log"
+    __table_args__ = (
+        Index(
+            "ix_ai_operation_source_status",
+            "conversation_id",
+            "source_user_message_id",
+            "status",
+        ),
+    )
 
     log_id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, default=next_id, comment="日志ID"
@@ -26,6 +44,18 @@ class AiOperationLog(Base):
         String(64), comment="追踪ID，串联同对话多 tool"
     )
     conversation_id: Mapped[int] = mapped_column(BigInteger, comment="会话ID")
+    source_user_message_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+        comment="触发 operation 的 user message；NULL 仅兼容历史数据",
+    )
+    readonly_snapshot: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+        comment="执行时 AiToolMeta.readonly 快照；未知按 write 处理",
+    )
     user_id: Mapped[int] = mapped_column(BigInteger, comment="调用用户ID")
     tool_name: Mapped[str] = mapped_column(String(128), comment="tool 全限定名")
     tool_call_id: Mapped[str] = mapped_column(

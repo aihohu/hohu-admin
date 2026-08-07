@@ -1,6 +1,6 @@
 # AI Message Edit Semantics（AI 消息编辑语义） — v1.2
 
-**Status**: 🛡️ Safety Gate 已完成（2026-08-07）；D.1-D.9 主实现及 ADR-0002 action binding 尚未开始，edit/regenerate 继续关闭
+**Status**: 🚧 Safety Gate 与 Task 35a.0 共享 send/confirm 基础已完成（2026-08-07）；PreparedAction binding 及 edit/regenerate 主实现未开始，入口继续关闭
 **Created**: 2026-08-06
 **Updated**: 2026-08-07
 **Owner**: hohu core team
@@ -578,10 +578,11 @@ const editBlockedReason = computed(() => {
 
 ### Current release（安全与一致性收尾）
 
-- [ ] Task 1：`AiMessage.is_active` / `supersedes_message_id` + `AiOperationLog.source_user_message_id` / `readonly_snapshot` migration；补 active、operation guard 和 assistant run partial unique indexes
+- [x] Task 1 **✅ 已完成（2026-08-07）**：`AiMessage.is_active` / `supersedes_message_id` + `AiOperationLog.source_user_message_id` / `readonly_snapshot` migration；已补 active history、operation source/status 和 assistant run partial unique indexes
 - [x] Task 2a **✅ trusted tenant 子集已完成（2026-08-07）**：服务端 resolver 向 `ChatDeps/AiToolContext` 注入 tenant_id；旧 direct HITL PendingPayload 已保存 tenant 并在 resume/confirm 复核；Task 35a 将同一不变量迁入 PreparedAction，客户端字段仍不能覆盖
-- [ ] Task 2：ChatCommand/Web 在请求前生成并验证稳定 traceId，MessageOut 返回 traceId；user message flush/返回 ID，注入 `ChatDeps.source_user_message_id`，user/assistant 写原 run trace，Gateway operation log 写因果键与 readonly snapshot（Task 35 已提供可信 metadata，但因果链仍待实现）
+- [x] Task 2 **✅ 已完成（2026-08-07）**：ChatCommand/Web 在请求前生成并验证稳定 traceId，MessageOut 返回 traceId；user message flush/返回 ID，注入 `ChatDeps.source_user_message_id`，user/assistant 写原 run trace，Gateway operation log 写因果键与 readonly snapshot
 - [ ] Task 2b（共享 guard 前置）：为 send/confirm 实现 conversation run guard、owner token、stream heartbeat、action expiry+60s pending lease 和统一 terminal cleanup；PreparedAction 保存 trusted tenant/source/finalization context，Redis waiter 只通知；覆盖 confirm/TTL/startup cleanup，pending SSE finally 不释放
+  - [x] Task 2b.0 **✅ send/direct-HITL 子集已完成（2026-08-07）**：conversation owner token、stream heartbeat、pending TTL+grace handoff、confirm/resume/timeout/startup terminal cleanup 已落地；PendingPayload 保存 trusted tenant/source/finalization context，pending SSE finally 不释放。PreparedAction 替换旧 PendingPayload 仍属于 Task 35a.1-35a.5，因此 Task 2b 保持未完成
 - [ ] Task 2c（跨 spec 前置）：完成工具卡 spec Phase 1 的 action/outcome-aware finalizer、HITL resume 持久化、durability/projection done、ack-loss reconciliation 与前端 handoff state；后续 edit/regenerate 直接复用，不另建收口链路
 - [ ] Task 3：实现 suffix operation + PreparedAction policy、legacy policy和 D.9 固定锁序/CAS，统一领域错误层级
 - [ ] Task 4：在 Task 2b guard 上补 edit/regenerate 的 target row lock、owner/active/role 重验和 mutation conflict；不再实现第二套 guard
