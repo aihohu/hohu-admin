@@ -47,7 +47,7 @@ from app.modules.ai.agents.gateway.quota import (
     is_write_tool,
     with_l3_timeout,
 )
-from app.modules.ai.agents.gateway.result import ToolResult
+from app.modules.ai.agents.gateway.result import PreparedActionProposal, ToolResult
 from app.modules.ai.agents.gateway.sensitive import serialize_for_llm
 from app.modules.ai.agents.hitl.constants import (
     AiExecutionMode,
@@ -82,6 +82,9 @@ USER_FACING_MSG: dict[str, str] = {
     "AI_INTERNAL_ERROR": "内部错误，请稍后重试。",
     "AI_HITL_EXPIRED": "操作超时未确认，请重新发起。",
     "USER_REJECTED": "用户已取消此操作。",
+    "AI_TOOL_NOT_AVAILABLE_TO_MODEL": "该工具只能由系统在批准后调用。",
+    "AI_PREPARED_OUTCOME_REQUIRED": "请明确本次只预览，或在预览后请求确认执行。",
+    "AI_PREPARED_ACTION_INVALID": "预览结果无法生成安全确认，请重新发起。",
 }
 
 
@@ -168,6 +171,8 @@ async def execute_tool(
     name: str,
     args: dict[str, Any],
     deps: ChatDeps,
+    *,
+    _prepared_confirmation_args: dict[str, Any] | None = None,
 ) -> ToolResult:
     """统一 tool 执行入口（spec §3 / §6 / §8.2）
 
@@ -213,6 +218,32 @@ async def execute_tool(
     meta = registered.meta
     metric_risk = meta.risk
     user_id = deps.user.user_id
+
+    # Gateway-only execute 不允许模型/普通调用方猜名称直调。prepared preview
+    # 只能通过本函数的内部递归传入安全 confirmation presentation。
+    if not meta.llm_visible and _prepared_confirmation_args is None:
+        _rec("not_available_to_model", risk=meta.risk)
+        return ToolResult.failure(
+            error_code="AI_TOOL_NOT_AVAILABLE_TO_MODEL",
+            error_msg=USER_FACING_MSG["AI_TOOL_NOT_AVAILABLE_TO_MODEL"],
+        )
+
+    requested_outcome: str | None = None
+    business_args = dict(args)
+    if meta.interaction_flow == "prepared":
+        requested_outcome = business_args.pop("requested_outcome", None)
+        if requested_outcome not in {"preview_only", "execute_if_approved"}:
+            _rec("invalid_prepared_outcome", risk=meta.risk)
+            return ToolResult.failure(
+                error_code="AI_PREPARED_OUTCOME_REQUIRED",
+                error_msg=USER_FACING_MSG["AI_PREPARED_OUTCOME_REQUIRED"],
+            )
+
+    # 普通/preview 事件可展示模型参数；prepared execute 事件只展示 proposal
+    # 中的 presentation，真实 frozen args 仅保存在服务端 pending payload。
+    public_event_args = (
+        _prepared_confirmation_args if _prepared_confirmation_args is not None else args
+    )
 
     # 2. 功能鉴权（spec §6.1）
     if not set(meta.required_perms) <= deps.perms:
@@ -298,8 +329,8 @@ async def execute_tool(
     # 4. ai_operation_log 起始行（spec §6.5 修订 S-12：必须先写 log 再检查
     #    repeated_failure，否则 AI_REPEATED_FAILURE 路径漏审计行）
     # 修订 S-15：_start_log 失败 = 整 tool 调用失败（业务还没执行，不能漏审计行）
-    args_hash = compute_args_hash(args)
-    dry_run_count, dry_run_summary = await _run_dry_run(registered, args, deps)
+    args_hash = compute_args_hash(business_args)
+    dry_run_count, dry_run_summary = await _run_dry_run(registered, business_args, deps)
     # v1.5+ SR-21: risk_appetite 从 deps.agent 读（与 SR-16/19 同模式）
     agent_risk_appetite = (
         getattr(deps.agent, "risk_appetite", "balanced")
@@ -319,7 +350,7 @@ async def execute_tool(
         risk_level=meta.risk,
         execution_mode=mode.value,
         dry_run_count=dry_run_count,
-        args=args,
+        args=business_args,
         summary_fields=meta.args_summary_fields,
     )
     try:
@@ -350,7 +381,7 @@ async def execute_tool(
             tool=meta.name,
             tool_call_id=tool_call_id,
             summary=summary,
-            args=args,
+            args=public_event_args,
             risk=meta.risk,
             trace_id=deps.trace_id,
             chip_target=meta.chip_target,
@@ -404,7 +435,14 @@ async def execute_tool(
     # 7. HITL 分支
     if mode == AiExecutionMode.HITL:
         action = await _hang_for_confirmation(
-            deps, registered, log_id, tool_call_id, args, summary, dry_run_summary
+            deps,
+            registered,
+            log_id,
+            tool_call_id,
+            business_args,
+            summary,
+            dry_run_summary,
+            event_args=public_event_args,
         )
         if action is None:
             # 5min TTL 超时 → mark_expired（_hang_for_confirmation 内已迁移）
@@ -433,7 +471,7 @@ async def execute_tool(
     #    v1.5+ SR-20 传 l4_conv_key_for_rollback 同步回滚 L4 会话预算）
     result = await _invoke_tool_fn(
         registered,
-        args,
+        business_args,
         deps,
         args_hash,
         agent_code_for_rollback=agent_code_for_rollback,
@@ -443,6 +481,17 @@ async def execute_tool(
     )
 
     # 9. emit tool_call_result + 写 log 终态
+    if (
+        result.ok
+        and meta.interaction_flow == "prepared"
+        and requested_outcome == "execute_if_approved"
+        and not isinstance(result.prepared_action, PreparedActionProposal)
+    ):
+        result = ToolResult.failure(
+            error_code="AI_PREPARED_ACTION_INVALID",
+            error_msg=USER_FACING_MSG["AI_PREPARED_ACTION_INVALID"],
+        )
+
     duration_ms = int((time.monotonic() - started_at) * 1000)
     # spec §2.3 v1.6+: readonly tool 的 affected_rows 不展示（user.count 返回
     # {"count": 42} 会被推断成 affected_rows=42，误导成「42 行受影响」）.
@@ -474,6 +523,32 @@ async def execute_tool(
 
     metric_status = "success" if result.ok else "failed"
     _rec(metric_status)
+
+    # Task 35a.1: preview 成功后由 Gateway 自动进入绑定 execute 的 HITL；
+    # wrapper 仍只代表模型的一次 preview tool call。proposal 不序列化给模型。
+    if (
+        result.ok
+        and meta.interaction_flow == "prepared"
+        and requested_outcome == "execute_if_approved"
+    ):
+        proposal = result.prepared_action
+        if not isinstance(proposal, PreparedActionProposal):
+            return ToolResult.failure(
+                error_code="AI_PREPARED_ACTION_INVALID",
+                error_msg=USER_FACING_MSG["AI_PREPARED_ACTION_INVALID"],
+            )
+        execute_name = meta.prepared_execute_tool
+        if not execute_name:
+            return ToolResult.failure(
+                error_code="AI_PREPARED_ACTION_INVALID",
+                error_msg=USER_FACING_MSG["AI_PREPARED_ACTION_INVALID"],
+            )
+        return await execute_tool(
+            execute_name,
+            proposal.frozen_args,
+            deps,
+            _prepared_confirmation_args=proposal.presentation,
+        )
     return result
 
 
@@ -715,6 +790,8 @@ async def _hang_for_confirmation(
     args: dict[str, Any],
     summary: str,
     dry_run_summary: DryRunSummary | None,
+    *,
+    event_args: dict[str, Any] | None = None,
 ) -> ConfirmAction | None:
     """HITL 流：create_pending → emit confirmation_required → hang
 
@@ -777,7 +854,7 @@ async def _hang_for_confirmation(
             tool=meta.name,
             tool_call_id=tool_call_id,
             summary=summary,
-            args=args,
+            args=event_args if event_args is not None else args,
             expires_at=payload.expires_at,
             dry_run=dry_run_summary,
         ),

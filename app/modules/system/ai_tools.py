@@ -21,7 +21,11 @@ from typing import Any, Literal
 from sqlalchemy import func, select
 
 from app.modules.ai.agents.gateway import ensure_targets_in_scope
-from app.modules.ai.agents.gateway.result import ToolResult, UIResult
+from app.modules.ai.agents.gateway.result import (
+    PreparedActionProposal,
+    ToolResult,
+    UIResult,
+)
 from app.modules.ai.agents.tools.decorator import ai_tool
 from app.modules.ai.agents.tools.file_access import (
     IMPORT_MIME_TYPES_BY_EXTENSION,
@@ -1063,13 +1067,14 @@ async def _load_file_bytes(ctx: AiToolContext, file_id: str) -> tuple[bytes, str
         name="user.import_preview",
         agent="user_mgmt",
         summary=(
-            "Create user import preview → {batchId, previewToken, summary}. "
-            "Call user.import_execute next."
+            "Preview a user import; set requested_outcome to preview only or request approval."
         ),
         required_perms=("system:user:import",),
         risk="low",
         readonly=False,
         idempotent=False,
+        interaction_flow="prepared",
+        prepared_execute_tool="user.import_execute",
         accepts_file=(
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "text/csv",
@@ -1084,6 +1089,7 @@ async def user_import_preview(
     file_id: str,
     reason: str,
     on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
+    sync_mode: Literal["CREATE_ONLY", "UPDATE_PROFILE", "FULL_SYNC"] = "CREATE_ONLY",
 ) -> ToolResult:
     """AI tool 入口：解析 + dry_run 用户导入（spec §10 Task 26, v2.2 P0 #2.14 拆分）
 
@@ -1093,18 +1099,19 @@ async def user_import_preview(
     3. dry_run_import_users(records, current_user, file_bytes, filename, reason,
                              on_conflict=...) → (ImportDryRunResult, batch)
     4. ToolResult.success(
-         data={batch_id, preview_token, summary{new, exists, conflict, out_of_scope}},
+         data={batch_id, summary{new, exists, conflict, out_of_scope}},
          ui=detail_card（HITL 抽屉展示 summary 供用户确认）
        )
 
     **预检会写 artifact**：本 tool 不写 ``sys_user``，但每次都会新建 batch、
-    cache 和预检文件，因此不是 readonly / idempotent。真正写用户必须继续调用
-    user.import_execute（risk=high + hitl_always），LLM 不能跳过 preview。
+    cache 和预检文件，因此不是 readonly / idempotent。若模型请求执行，Gateway
+    使用 PreparedActionProposal 自动进入绑定 execute 的 HITL，不再依赖第二次模型调用。
 
     Args:
         file_id: 文件 ID（sys_file.file_id 字符串形式）
         reason: 业务理由（1-256 字符，spec §2.30 P1-3 强制）
         on_conflict: 'skip' (默认) / 'overwrite' / 'fail_fast'（详见 spec §2.7）
+        sync_mode: 员工编号同步策略，在 preview 时冻结
     """
     from app.modules.system.user.import_parser import (  # noqa: PLC0415
         parse_import_excel,
@@ -1150,17 +1157,23 @@ async def user_import_preview(
     return ToolResult.success(
         data={
             "batchId": batch.batch_id,
-            "previewToken": batch.preview_token,
             "total": dry_run_result.total,
             "summary": summary,
+            "policy": {
+                "onConflict": on_conflict,
+                "syncMode": sync_mode,
+            },
         },
         ui=UIResult(
             view_type="detail_card",
             view_data={
                 "batchId": batch.batch_id,
-                "previewToken": batch.preview_token[:8],  # 截断展示前 8 位
                 "total": dry_run_result.total,
                 "summary": summary,
+                "policy": {
+                    "onConflict": on_conflict,
+                    "syncMode": sync_mode,
+                },
                 "expiresAt": (
                     batch.created_at.isoformat() if batch.created_at else None
                 ),
@@ -1172,6 +1185,40 @@ async def user_import_preview(
             label_key="ai.tool.user.import_preview.result",
             label_params={"total": dry_run_result.total},
         ),
+        prepared_action=PreparedActionProposal(
+            frozen_args={
+                "preview_token": batch.preview_token,
+                "reason": reason,
+                "on_conflict": on_conflict,
+                "sync_mode": sync_mode,
+            },
+            snapshot={
+                "batch_id": str(batch.batch_id),
+                "file_sha256": getattr(batch, "file_sha256", ""),
+                "records_hash": getattr(batch, "records_hash", ""),
+                "operator_id": getattr(batch, "operator_id", ctx.user.user_id),
+                "total": dry_run_result.total,
+                "summary": summary,
+            },
+            subject_ref={
+                "type": "user_import_batch",
+                "id": str(batch.batch_id),
+            },
+            presentation={
+                "title": "确认导入用户",
+                "fields": {
+                    "total": dry_run_result.total,
+                    "new": dry_run_result.new_count,
+                    "exists": dry_run_result.exists_count,
+                    "conflict": dry_run_result.conflict_count,
+                    "outOfScope": dry_run_result.out_of_scope_count,
+                    "onConflict": on_conflict,
+                    "syncMode": sync_mode,
+                },
+                "warnings": [],
+            },
+            expires_at=batch.created_at + timedelta(minutes=10),
+        ),
     )
 
 
@@ -1179,18 +1226,16 @@ async def user_import_preview(
     AiToolMeta(
         name="user.import_execute",
         agent="user_mgmt",
-        summary=(
-            "Execute previewed user import → {successCount}. "
-            "HITL confirms. Pass previewToken from preview."
-        ),
+        summary=("Gateway-only execution for an approved user import preview."),
         required_perms=("system:user:import",),
         risk="high",
         readonly=False,
         idempotent=True,
         hitl_always=True,
+        llm_visible=False,
         dry_run_supported=True,
         result_view="rows_affected",
-        args_summary_fields=("preview_token", "reason"),
+        args_summary_fields=("reason", "on_conflict", "sync_mode"),
     )
 )
 async def user_import_execute(

@@ -75,6 +75,15 @@ class AiToolMeta:
     produces_file: bool = False
     """是否产生文件下载（spec §16.2 同步导出）"""
 
+    interaction_flow: Literal["direct", "prepared"] = "direct"
+    """确认拓扑。prepared tool 成功后由 Gateway 根据 requested_outcome 编排。"""
+
+    prepared_execute_tool: str | None = None
+    """prepared preview 绑定的 Gateway-only execute tool 全限定名。"""
+
+    llm_visible: bool = True
+    """False 表示仅 Gateway 可调用，不进入模型可见 tool 集合。"""
+
     # ============ 聚合 tool 专用（§5.5，默认值不影响普通 tool） ============
     readonly: bool = False
     """True = 纯读无副作用，被 §2.9 chip 机制忽略（聚合结果即答案）"""

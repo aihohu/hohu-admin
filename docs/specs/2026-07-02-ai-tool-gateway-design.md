@@ -1,6 +1,6 @@
 # AI Tool Gateway 设计
 
-> **状态**: Draft（现有 direct HITL 已落地；ADR-0002 `PreparedAction` 确认编排为 P0 待实施）
+> **状态**: Draft（现有 direct HITL 已落地；ADR-0002 Task 35a.1 prepared 自动接管已完成，持久 `PreparedAction`/CAS/reload 恢复仍为 P0 待实施）
 > **日期**: 2026-07-02
 > **更新**: 2026-08-07
 > **作者**: Jack
@@ -3010,6 +3010,10 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 #### SR-27. **Gateway 持久化 PreparedAction 并成为唯一确认编排者**（2026-08-07，ADR-0002，P0 待实施）— direct HITL 只能在 LLM 已调用具体 execute tool 后确认，无法表达业务 preview 与后续 execute 的绑定；用户导入实测出现“LLM 输出 Markdown 请确认但没有 confirmation UI”。修订 §2.14 / §4.7 / §5.6 / §8.8：preview-only 正常返回，execute intent 在 preview 成功后由 Gateway 自动创建 action；execute 对模型隐藏，confirm handler 用冻结参数和 DB CAS inline 执行。
 **反例**: 继续修 Prompt 或让业务 tool 自己弹窗 → 模型/客户端差异仍可破坏确认时机，且换参、刷新恢复、重复批准和审计各自实现。
 **回归**: Task 35a 完成前该能力保持 gap；以用户导入跑通 preview → structured pending → approve → execute，并覆盖 reject、expiry、double approve、Redis flush、reload、source/snapshot stale 和跨 tenant。
+
+#### SR-28. **Task 35a.1 先交付确定性的 prepared handoff，但不得冒充持久授权事实源**（2026-08-07，已实施）— `AiToolMeta` 增加 `interaction_flow/prepared_execute_tool/llm_visible`；wrapper 只对 prepared preview 注入保留的 `requested_outcome`，Gateway 剥离后调用业务函数。preview 用 `ToolResult.prepared_action` 返回内部 proposal；`execute_if_approved` 自动调用绑定的 Gateway-only execute 并沿现有 HITL 通道发 `confirmation_required`，`preview_only` 正常返回。模型和 SSE 只拿 public data/presentation，frozen args 继续只在服务端 pending payload 中流转。
+**反例**: 为尽快弹窗直接把 preview token 回传给 LLM，再要求它调用 execute → 仍由模型编排且泄漏 capability；在 35a.1 就宣称 Redis pending 等于 `PreparedAction` → 掩盖刷新/重启/双击一致性仍未完成。
+**回归**: 单次 preview 调用自动产生确认；execute 不在模型 tool 集合且普通直调返回 `AI_TOOL_NOT_AVAILABLE_TO_MODEL`；事件/抽屉不含 token；真实浏览器拒绝确认后 operation 终态为 cancelled。PostgreSQL action、冻结 hash/CAS、detail pending projection 仍由 35a.2/35a.5 完成。
 
 
 

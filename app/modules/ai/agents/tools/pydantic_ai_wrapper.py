@@ -23,7 +23,7 @@ Phase 3.2 关键变化（vs Phase 1.2b）：
 import inspect
 import json
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Literal
 
 from pydantic_ai import RunContext, Tool
 
@@ -39,6 +39,8 @@ from app.modules.ai.core.context import ChatDeps
 
 def _build_wrapper_signature(
     original_fn: Callable[..., Awaitable[Any]],
+    *,
+    interaction_flow: Literal["direct", "prepared"] = "direct",
 ) -> inspect.Signature:
     """从原函数签名构造 wrapper 签名
 
@@ -63,6 +65,21 @@ def _build_wrapper_signature(
         annotation=RunContext[ChatDeps],
     )
     new_params = [new_ctx_param] + orig_params[1:]
+    if interaction_flow == "prepared":
+        requested_outcome = inspect.Parameter(
+            "requested_outcome",
+            kind=inspect.Parameter.KEYWORD_ONLY,
+            annotation=Literal["preview_only", "execute_if_approved"],
+        )
+        var_keyword_index = next(
+            (
+                index
+                for index, param in enumerate(new_params)
+                if param.kind is inspect.Parameter.VAR_KEYWORD
+            ),
+            len(new_params),
+        )
+        new_params.insert(var_keyword_index, requested_outcome)
     return orig_sig.replace(parameters=new_params)
 
 
@@ -99,7 +116,10 @@ def wrap_tool_for_pydantic_ai(registered: RegisteredTool) -> Tool:
         return _tool_result_to_llm_string(result)
 
     # 注入动态签名（让 PydanticAI 推断正确的 JSON schema）
-    wrapper.__signature__ = _build_wrapper_signature(registered.fn)  # type: ignore[attr-defined]
+    wrapper.__signature__ = _build_wrapper_signature(  # type: ignore[attr-defined]
+        registered.fn,
+        interaction_flow=meta.interaction_flow,
+    )
 
     # 同步 __annotations__（PydanticAI 用 typing.get_type_hints 读它推断参数类型）
     # 复制原函数 annotations，但把 ctx 类型替换为 RunContext[ChatDeps]
@@ -107,6 +127,10 @@ def wrap_tool_for_pydantic_ai(registered: RegisteredTool) -> Tool:
     orig_sig = inspect.signature(registered.fn)
     first_param_name = next(iter(orig_sig.parameters.keys()))
     orig_annotations[first_param_name] = RunContext[ChatDeps]
+    if meta.interaction_flow == "prepared":
+        orig_annotations["requested_outcome"] = Literal[
+            "preview_only", "execute_if_approved"
+        ]
     wrapper.__annotations__ = orig_annotations
 
     wrapper.__name__ = meta.name.replace(".", "_")

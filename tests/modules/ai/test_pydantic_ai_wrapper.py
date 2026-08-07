@@ -16,6 +16,7 @@ from app.modules.ai.agents.tools import (
     RegisteredTool,
     ToolRegistry,
     ai_tool,
+    load_builtin_tools,
 )
 from app.modules.ai.agents.tools.pydantic_ai_wrapper import (
     build_pydantic_ai_tools,
@@ -56,6 +57,30 @@ def _register_sample_tool(
 
 
 class TestWrapTool:
+    def test_prepared_wrapper_adds_requested_outcome_to_model_signature(self) -> None:
+        registered = _register_sample_tool()
+        prepared = RegisteredTool(
+            meta=AiToolMeta(
+                name="sample.preview",
+                agent="user_mgmt",
+                summary="preview sample import",
+                required_perms=("system:user:list",),
+                risk="low",
+                interaction_flow="prepared",
+                prepared_execute_tool="sample.execute",
+            ),
+            fn=registered.fn,
+        )
+
+        tool = wrap_tool_for_pydantic_ai(prepared)
+        param = inspect.signature(tool.function).parameters["requested_outcome"]
+
+        assert param.default is inspect.Parameter.empty
+        assert set(param.annotation.__args__) == {
+            "preview_only",
+            "execute_if_approved",
+        }
+
     def test_returns_pydantic_ai_tool_instance(self) -> None:
         registered = _register_sample_tool()
         tool = wrap_tool_for_pydantic_ai(registered)
@@ -120,6 +145,38 @@ class TestWrapTool:
 
 
 class TestBuildPydanticAiTools:
+    def test_user_import_exposes_only_prepared_preview(self) -> None:
+        load_builtin_tools()
+
+        tools = build_pydantic_ai_tools(
+            {"system:user:import"},
+            "user_mgmt",
+        )
+        names = {tool.name for tool in tools}
+        preview = next(tool for tool in tools if tool.name == "user_import_preview")
+
+        assert "user_import_preview" in names
+        assert "user_import_execute" not in names
+        assert "requested_outcome" in inspect.signature(preview.function).parameters
+
+    def test_gateway_only_tool_is_not_model_visible(self) -> None:
+        @ai_tool(
+            AiToolMeta(
+                name="sample.internal_execute",
+                agent="user_mgmt",
+                summary="internal execute",
+                required_perms=("system:user:list",),
+                risk="high",
+                llm_visible=False,
+            )
+        )
+        async def internal_execute(ctx: Any) -> dict:
+            return {"ok": True}
+
+        tools = build_pydantic_ai_tools({"system:user:list"}, "user_mgmt")
+
+        assert all(tool.name != "sample_internal_execute" for tool in tools)
+
     def test_returns_empty_for_no_matching_tools(self) -> None:
         """Agent code 匹配但 perms 不满足 → 空"""
         _register_sample_tool()

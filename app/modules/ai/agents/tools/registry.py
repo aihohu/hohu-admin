@@ -219,6 +219,40 @@ class ToolRegistry:
                 f"{invalid_views}."
             )
 
+        # 6. ADR-0002 prepared binding：preview 必须绑定同域 Gateway-only execute。
+        for tool in self._tools.values():
+            meta = tool.meta
+            if meta.interaction_flow == "direct":
+                if meta.prepared_execute_tool is not None:
+                    raise ToolRegistryError(
+                        f"Direct tool {meta.name!r} cannot declare prepared_execute_tool."
+                    )
+                continue
+            if not meta.prepared_execute_tool:
+                raise ToolRegistryError(
+                    f"Prepared tool {meta.name!r} must declare prepared_execute_tool."
+                )
+            execute_tool = self.find(meta.prepared_execute_tool)
+            if execute_tool is None:
+                raise ToolRegistryError(
+                    f"Prepared tool {meta.name!r} binds unknown execute tool "
+                    f"{meta.prepared_execute_tool!r}."
+                )
+            execute_meta = execute_tool.meta
+            if execute_meta.llm_visible:
+                raise ToolRegistryError(
+                    f"Prepared execute tool {execute_meta.name!r} must set llm_visible=False."
+                )
+            if execute_meta.interaction_flow != "direct":
+                raise ToolRegistryError(
+                    f"Prepared execute tool {execute_meta.name!r} cannot bind another prepared flow."
+                )
+            if execute_meta.agent not in {meta.agent, "shared"}:
+                raise ToolRegistryError(
+                    f"Prepared tool {meta.name!r} cannot bind execute tool from agent "
+                    f"{execute_meta.agent!r}."
+                )
+
 
 def compute_available_tools(
     user_perms: set[str],
@@ -245,6 +279,8 @@ def compute_available_tools(
     extra_set = set(enabled_extra) if enabled_extra is not None else None
     result: list[RegisteredTool] = []
     for t in registry.by_agent(agent_code):
+        if not t.meta.llm_visible:
+            continue
         if not set(t.meta.required_perms) <= user_perms:
             continue
         if extra_set is not None:

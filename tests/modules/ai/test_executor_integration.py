@@ -9,6 +9,7 @@
 # ruff: noqa: ARG001, PLC0415
 
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -19,6 +20,7 @@ from sqlalchemy import text
 from app.core import redis as redis_module
 from app.core.config import settings
 from app.modules.ai.agents.gateway.executor import execute_tool
+from app.modules.ai.agents.gateway.result import PreparedActionProposal, ToolResult
 from app.modules.ai.agents.hitl.constants import ConfirmAction
 from app.modules.ai.agents.hitl.events import (
     ConfirmationRequiredEvent,
@@ -115,6 +117,8 @@ _TEST_TOOL_LOW = "testint.echo_low"  # autonomous
 _TEST_TOOL_HIGH = "testint.echo_high"  # HITL（risk=high + count=None）
 _TEST_TOOL_PERMED = "testint.perm_required"  # 用于 perm denied 测试
 _TEST_TOOL_READONLY = "testint.readonly_list"  # 写 query_cache
+_TEST_TOOL_PREPARE = "testint.import_preview"  # prepared preview
+_TEST_TOOL_PREPARED_EXECUTE = "testint.import_execute"  # bound HITL execute
 
 _TOOLS_REGISTERED = False
 
@@ -176,6 +180,50 @@ def _register_test_tools() -> None:
     )
     async def _readonly_list(ctx, **kwargs: Any) -> dict[str, Any]:
         return {"count": 0}
+
+    @ai_tool(
+        AiToolMeta(
+            name=_TEST_TOOL_PREPARE,
+            agent="shared",
+            summary="prepare a test import",
+            required_perms=(),
+            risk="low",
+            interaction_flow="prepared",
+            prepared_execute_tool=_TEST_TOOL_PREPARED_EXECUTE,
+        )
+    )
+    async def _prepare_import(ctx, resource_id: str) -> ToolResult:
+        return ToolResult.success(
+            data={"total": 2, "summary": {"new": 2, "exists": 0}},
+            prepared_action=PreparedActionProposal(
+                frozen_args={
+                    "preview_token": "server-only-token",
+                    "reason": "test import",
+                },
+                snapshot={"batch_id": "batch-1", "new": 2, "exists": 0},
+                subject_ref={"type": "test_import", "id": "batch-1"},
+                presentation={
+                    "title": "Import 2 users",
+                    "fields": {"new": 2, "exists": 0},
+                    "warnings": [],
+                },
+                expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            ),
+        )
+
+    @ai_tool(
+        AiToolMeta(
+            name=_TEST_TOOL_PREPARED_EXECUTE,
+            agent="shared",
+            summary="execute a prepared test import",
+            required_perms=(),
+            risk="high",
+            hitl_always=True,
+            llm_visible=False,
+        )
+    )
+    async def _execute_import(ctx, **kwargs: Any) -> ToolResult:
+        return ToolResult.success(data={"successCount": 2})
 
 
 def _build_deps(
@@ -414,6 +462,18 @@ class TestShortCircuit:
         assert not result.ok
         assert result.error_code == "AI_TOOL_PERM_DENIED"
 
+    async def test_gateway_only_execute_rejects_direct_model_path(self) -> None:
+        _register_test_tools()
+
+        result = await execute_tool(
+            _TEST_TOOL_PREPARED_EXECUTE,
+            {"preview_token": "guessed"},
+            _build_deps(),
+        )
+
+        assert not result.ok
+        assert result.error_code == "AI_TOOL_NOT_AVAILABLE_TO_MODEL"
+
 
 # ============ autonomous 流 ============
 
@@ -479,6 +539,42 @@ class TestAutonomousFlow:
 
 
 class TestHitlFlow:
+    async def test_prepared_preview_auto_enters_confirmation(self, monkeypatch) -> None:
+        """Task 35a.1: one model preview call is enough to enter HITL."""
+        _register_test_tools()
+
+        async def fake_hang(confirmation_id, *, timeout_sec=None):
+            return ConfirmAction.APPROVED
+
+        monkeypatch.setattr(hitl_manager, "hang", fake_hang)
+        events: list[Any] = []
+
+        async def collect(ev: Any) -> None:
+            events.append(ev)
+
+        deps = _build_deps(signal_event=collect)
+        result = await execute_tool(
+            _TEST_TOOL_PREPARE,
+            {
+                "resource_id": "file-1",
+                "requested_outcome": "execute_if_approved",
+            },
+            deps,
+        )
+
+        assert result.ok
+        assert result.data == {"successCount": 2}
+        confirmation = next(
+            event for event in events if isinstance(event, ConfirmationRequiredEvent)
+        )
+        assert confirmation.tool == _TEST_TOOL_PREPARED_EXECUTE
+        assert confirmation.args == {
+            "title": "Import 2 users",
+            "fields": {"new": 2, "exists": 0},
+            "warnings": [],
+        }
+        assert "server-only-token" not in repr(events)
+
     async def test_high_risk_triggers_hitl_approved(self, monkeypatch) -> None:
         """high risk + count=None（无 dry_run_fn）→ HITL，mock hang 立即 APPROVED"""
         _register_test_tools()

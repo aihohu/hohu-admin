@@ -125,8 +125,13 @@ class TestBuiltinToolEffectMetadata:
         assert preview.readonly is False
         assert preview.idempotent is False
         assert preview.chip_target is None
+        assert preview.interaction_flow == "prepared"
+        assert preview.prepared_execute_tool == "user.import_execute"
         assert "read-only" not in preview.summary.lower()
         assert "application/vnd.ms-excel" not in preview.accepts_file
+
+        execute = user_import_execute.__ai_tool_meta__  # type: ignore[attr-defined]
+        assert execute.llm_visible is False
 
         assert export.readonly is False
         assert export.idempotent is False
@@ -196,6 +201,11 @@ class TestImportPreviewArtifacts:
 
         assert first.data["batchId"] == "batch-1"
         assert second.data["batchId"] == "batch-2"
+        assert "previewToken" not in first.data
+        assert first.prepared_action is not None
+        assert first.prepared_action.frozen_args["preview_token"] == "preview-token-1"
+        assert "preview-token-1" not in repr(first.data)
+        assert "preview-token-1" not in repr(first.ui)
         assert batches[0].file_storage_key == "key-1"
         assert batches[1].file_storage_key == "key-2"
         assert dry_run.await_count == 2

@@ -18,6 +18,7 @@ executor 兼容路径（dict / list 返回值，第三方 tool 或老代码）�
 """
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 
@@ -47,6 +48,29 @@ class UIResult:
     """i18n 插值参数（如 {"count": 2} → "已删除 {count} 行"）"""
 
 
+@dataclass(frozen=True)
+class PreparedActionProposal:
+    """prepared tool 给 Gateway 的内部执行提案，不进入 LLM/SSE。"""
+
+    frozen_args: dict[str, Any]
+    """批准后调用绑定 execute tool 的服务端冻结参数。"""
+
+    snapshot: dict[str, Any]
+    """preview 时的业务快照；Task 35a.2/35a.5 将持久化并复验。"""
+
+    subject_ref: dict[str, str]
+    """业务对象的不透明引用，例如 user_import_batch。"""
+
+    presentation: dict[str, Any]
+    """允许确认 UI 展示的安全摘要；不得含 token/raw args。"""
+
+    expires_at: datetime
+    """提案失效时间。"""
+
+    snapshot_hash: str = ""
+    """快照 canonical hash；Task 35a.2 强制非空并在批准前复验。"""
+
+
 @dataclass
 class ToolResult:
     """Gateway tool 执行结果（统一容器）
@@ -66,6 +90,9 @@ class ToolResult:
     None（ok=False / executor 兼容路径 / 业务方未声明）→ 前端 fallback plain_json。
     builtin tool 由 lint 强制带 ui（Task 9）。"""
 
+    prepared_action: PreparedActionProposal | None = None
+    """prepared tool 的内部提案；序列化层只读取 data/ui，不得向模型或客户端暴露。"""
+
     error_code: str = ""
     """UPPER_SNAKE_CASE 错误码（ok=False 时必填），如 AI_DATA_SCOPE_VIOLATION"""
 
@@ -81,6 +108,7 @@ class ToolResult:
         data: Any,
         *,
         ui: UIResult | None = None,
+        prepared_action: PreparedActionProposal | None = None,
         **meta: Any,
     ) -> "ToolResult":
         """构造成功结果
@@ -90,7 +118,13 @@ class ToolResult:
             ui: 给前端 UI 的丰富数据（不进 prompt）；None 时前端 fallback plain_json
             **meta: 执行元信息（duration_ms 等，不进 SSE）
         """
-        return cls(ok=True, data=data, ui=ui, meta=meta)
+        return cls(
+            ok=True,
+            data=data,
+            ui=ui,
+            prepared_action=prepared_action,
+            meta=meta,
+        )
 
     @classmethod
     def failure(cls, error_code: str, error_msg: str, **meta: Any) -> "ToolResult":

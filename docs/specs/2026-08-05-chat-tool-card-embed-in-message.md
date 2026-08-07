@@ -1,6 +1,6 @@
 # Chat Tool Card Embed in Message（工具卡片嵌入消息流） — v1.2
 
-**Status**: 🚧 Phase 1（Safety 与 Task 35a.0 共享因果/收口基础已完成；PreparedAction projection、前端 handoff 与消息内嵌待 §6）
+**Status**: 🚧 Phase 1（Safety/Task 35a.0 共享基础与 35a.1 流式 prepared pending 已完成；持久 PreparedAction projection、reload handoff 与消息内嵌待 §6）
 **Created**: 2026-08-05
 **Updated**: 2026-08-07
 **Owner**: hohu core team
