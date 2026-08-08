@@ -549,6 +549,125 @@ class TestAutonomousFlow:
             assert row.execution_mode == "autonomous"
 
 
+# ============ prepared preview-only flow ============
+
+
+class TestPreparedPreviewOnlyFlow:
+    async def test_preview_only_discards_capability_and_creates_no_action(
+        self,
+    ) -> None:
+        """Task 35a.4: preview-only is a terminal, non-upgradeable projection."""
+        _register_test_tools()
+        events: list[Any] = []
+
+        async def collect(event: Any) -> None:
+            events.append(event)
+
+        deps = _build_deps(signal_event=collect)
+        result = await execute_tool(
+            _TEST_TOOL_PREPARE,
+            {
+                "resource_id": "file-preview-only",
+                "requested_outcome": "preview_only",
+            },
+            deps,
+        )
+
+        assert result.ok
+        assert result.data == {"total": 2, "summary": {"new": 2, "exists": 0}}
+        assert result.prepared_action is None
+        assert [type(event) for event in events] == [
+            ToolCallStartedEvent,
+            ToolCallResultEvent,
+        ]
+        assert not await redis_module.redis_client.keys("ai:confirm:*")
+
+        from app.db.session import AsyncSessionLocal
+        from app.modules.ai.models.prepared_action import AiPreparedAction
+
+        async with AsyncSessionLocal() as db:
+            action = (
+                await db.execute(
+                    select(AiPreparedAction).where(
+                        AiPreparedAction.trace_id == deps.trace_id
+                    )
+                )
+            ).scalar_one_or_none()
+
+        assert action is None
+
+    async def test_later_execute_intent_must_run_a_new_preview(
+        self, monkeypatch
+    ) -> None:
+        """Task 35a.4: an old preview cannot be promoted into an action."""
+        _register_test_tools()
+        events: list[Any] = []
+
+        async def collect(event: Any) -> None:
+            events.append(event)
+
+        deps = _build_deps(signal_event=collect)
+        preview = await execute_tool(
+            _TEST_TOOL_PREPARE,
+            {
+                "resource_id": "file-preview-only",
+                "requested_outcome": "preview_only",
+            },
+            deps,
+        )
+        assert preview.ok
+        assert preview.prepared_action is None
+
+        direct_execute = await execute_tool(
+            _TEST_TOOL_PREPARED_EXECUTE,
+            {"preview_token": "server-only-token"},
+            deps,
+        )
+        assert not direct_execute.ok
+        assert direct_execute.error_code == "AI_PREPARED_ACTION_REQUIRED"
+
+        async def fake_hang(confirmation_id, *, timeout_sec=None):
+            return ConfirmAction.REJECTED
+
+        monkeypatch.setattr(hitl_manager, "hang", fake_hang)
+        execute_intent = await execute_tool(
+            _TEST_TOOL_PREPARE,
+            {
+                "resource_id": "file-preview-only",
+                "requested_outcome": "execute_if_approved",
+            },
+            deps,
+        )
+
+        assert not execute_intent.ok
+        assert execute_intent.error_code == "USER_REJECTED"
+        prepare_events = [
+            event
+            for event in events
+            if isinstance(event, ToolCallStartedEvent)
+            and event.tool == _TEST_TOOL_PREPARE
+        ]
+        assert len(prepare_events) == 2
+        assert prepare_events[0].tool_call_id != prepare_events[1].tool_call_id
+        confirmation = next(
+            event for event in events if isinstance(event, ConfirmationRequiredEvent)
+        )
+
+        from app.db.session import AsyncSessionLocal
+        from app.modules.ai.models.prepared_action import AiPreparedAction
+
+        async with AsyncSessionLocal() as db:
+            action = (
+                await db.execute(
+                    select(AiPreparedAction).where(
+                        AiPreparedAction.confirmation_id == confirmation.confirmation_id
+                    )
+                )
+            ).scalar_one()
+
+        assert action.prepare_tool_call_id == prepare_events[1].tool_call_id
+
+
 # ============ HITL 流（mock hitl_manager.hang 立即返回） ============
 
 

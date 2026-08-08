@@ -1,6 +1,6 @@
 # AI Tool Gateway 设计
 
-> **状态**: Draft（现有 direct HITL 已落地；ADR-0002 Task 35a.1 prepared 自动接管、35a.2 持久冻结授权事实与 35a.3 Gateway-only capability 已完成，35a.4/35a.5 仍为 P0 待实施）
+> **状态**: Draft（现有 direct HITL 已落地；ADR-0002 Task 35a.1 prepared 自动接管、35a.2 持久冻结授权事实、35a.3 Gateway-only capability 与 35a.4 preview-only 隔离已完成，35a.5 仍为 P0 待实施）
 > **日期**: 2026-07-02
 > **更新**: 2026-08-08
 > **作者**: Jack
@@ -3022,6 +3022,10 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 #### SR-30. **Task 35a.3 用不可注入的公共入口、Registry 和静态门禁共同封闭 execute capability**（2026-08-08，已实施）— 公共 `execute_tool(name,args,deps)` 不再接受 prepared context；只有 Gateway 内部 `_execute_tool` 能携带与注册 prepare source 匹配的私有 context。Registry 启动时要求 prepared target 存在、同域或 shared、`interaction_flow=direct`、`llm_visible=False` 且 `hitl_always=True`；独立静态扫描新增 `prepared_binding_valid` 与 `gateway_only_tool_not_llm_visible`，总计 12 项。`user.import_execute` 删除旧 dry-run hook，确认展示只读取冻结的 preview presentation。
 **反例**: 公共 executor 保留“下划线参数”供任意内部调用者注入 → 只是命名约定，不是 capability 边界；只隐藏模型 schema、不校验 forced HITL → metadata 漂移可让 prepared execute 自动执行；保留 execute dry-run → 同一确认存在 preview presentation 与二次 batch summary 两个来源。
 **回归**: PydanticAI/available tools 不含 execute；公共函数签名不含 capability 参数；直调绑定 execute 返回 `AI_PREPARED_ACTION_REQUIRED`；Registry 拒绝未强制 HITL 的 target；静态扫描覆盖 target 缺失、可见和非 HITL 三类反例。35a.5 仍负责持久 action CAS、完整批准上下文与跨进程恢复。
+
+#### SR-31. **Task 35a.4 把 preview-only 定义为终止性公开投影，不保留可升级 capability**（2026-08-08，已实施）— prepared 业务函数不接收授权意图并始终生成内部 proposal；Gateway 校验 proposal 后，对 `preview_only` 在返回边界主动丢弃，只公开结构化 `data/ui`，且不创建 Redis pending、PostgreSQL action 或确认事件。后续执行意图必须重新调用 prepared preview，形成新的 tool call、快照与 action；35a.3 的 Gateway-only execute 拒绝任何旧结果直调。
+**反例**: 纯预览只是不弹抽屉，但仍把 `PreparedActionProposal` 留在 executor 返回对象中 → 内部调用者可以绕过重新 preview，沿用已经陈旧的 token、策略或 source。
+**回归**: preview-only 集成测试断言只有 started/result 事件、公开 summary、proposal 为 `None`、Redis/DB 均无 pending；同一会话随后要求执行时必须观察到第二次 preview tool call，PreparedAction 绑定第二次 call，直接 execute 返回 `AI_PREPARED_ACTION_REQUIRED`。35a.5 继续负责持久 action CAS、恢复与一次性执行。
 
 
 

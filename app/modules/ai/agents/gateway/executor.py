@@ -524,16 +524,17 @@ async def _execute_tool(
     )
 
     # 9. emit tool_call_result + 写 log 终态
-    if (
-        result.ok
-        and meta.interaction_flow == "prepared"
-        and requested_outcome == "execute_if_approved"
-        and not isinstance(result.prepared_action, PreparedActionProposal)
-    ):
-        result = ToolResult.failure(
-            error_code="AI_PREPARED_ACTION_INVALID",
-            error_msg=USER_FACING_MSG["AI_PREPARED_ACTION_INVALID"],
-        )
+    if result.ok and meta.interaction_flow == "prepared":
+        if not isinstance(result.prepared_action, PreparedActionProposal):
+            result = ToolResult.failure(
+                error_code="AI_PREPARED_ACTION_INVALID",
+                error_msg=USER_FACING_MSG["AI_PREPARED_ACTION_INVALID"],
+            )
+        elif requested_outcome == "preview_only":
+            # Task 35a.4: a preview-only response is terminal. Consume the
+            # internal proposal before returning so no caller can promote an
+            # old preview into an executable action.
+            result.prepared_action = None
 
     duration_ms = int((time.monotonic() - started_at) * 1000)
     # spec §2.3 v1.6+: readonly tool 的 affected_rows 不展示（user.count 返回
