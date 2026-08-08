@@ -1,6 +1,6 @@
 # AI Tool Gateway 设计
 
-> **状态**: Draft（现有 direct HITL 已落地；ADR-0002 Task 35a.1 prepared 自动接管、35a.2 持久冻结授权事实、35a.3 Gateway-only capability 与 35a.4 preview-only 隔离已完成，35a.5 仍为 P0 待实施）
+> **状态**: Draft（现有 direct HITL 与 ADR-0002 Task 35a `prepared + hitl + inline` 首个完整纵向切片已落地；完整消息内嵌与 edit/regenerate 仍按各自 spec 推进）
 > **日期**: 2026-07-02
 > **更新**: 2026-08-08
 > **作者**: Jack
@@ -454,7 +454,7 @@ def build_tool_context(
 
 `recent_failures`（连续失败兜底）走 Redis 跨 `/ai/chat` 流持久化：key=`ai:failures:{user_id}:{tool_name}:{args_hash}`，TTL=10min。
 
-### 4.7 `ai_prepared_action` — Gateway 确认事实源（ADR-0002，35a.2 冻结事实已实施；CAS/恢复待 35a.5）
+### 4.7 `ai_prepared_action` — Gateway 确认事实源（ADR-0002，35a.2 冻结事实与 35a.5 CAS/恢复已实施）
 
 `ai_operation_log` 继续记录 tool 的执行事实；`ai_prepared_action` 独立记录“准备了什么、谁批准、最终是否执行”的授权事实。SSE、Redis PendingPayload 和 `ai_message.tool_calls` 都只是可恢复投影，不得替代此表。
 
@@ -3025,7 +3025,11 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 
 #### SR-31. **Task 35a.4 把 preview-only 定义为终止性公开投影，不保留可升级 capability**（2026-08-08，已实施）— prepared 业务函数不接收授权意图并始终生成内部 proposal；Gateway 校验 proposal 后，对 `preview_only` 在返回边界主动丢弃，只公开结构化 `data/ui`，且不创建 Redis pending、PostgreSQL action 或确认事件。后续执行意图必须重新调用 prepared preview，形成新的 tool call、快照与 action；35a.3 的 Gateway-only execute 拒绝任何旧结果直调。
 **反例**: 纯预览只是不弹抽屉，但仍把 `PreparedActionProposal` 留在 executor 返回对象中 → 内部调用者可以绕过重新 preview，沿用已经陈旧的 token、策略或 source。
-**回归**: preview-only 集成测试断言只有 started/result 事件、公开 summary、proposal 为 `None`、Redis/DB 均无 pending；同一会话随后要求执行时必须观察到第二次 preview tool call，PreparedAction 绑定第二次 call，直接 execute 返回 `AI_PREPARED_ACTION_REQUIRED`。35a.5 继续负责持久 action CAS、恢复与一次性执行。
+**回归**: preview-only 集成测试断言只有 started/result 事件、公开 summary、proposal 为 `None`、Redis/DB 均无 pending；同一会话随后要求执行时必须观察到第二次 preview tool call，PreparedAction 绑定第二次 call，直接 execute 返回 `AI_PREPARED_ACTION_REQUIRED`。持久 action CAS、恢复与一次性执行由 SR-32 收口。
+
+#### SR-32. **Task 35a.5 由 PostgreSQL action CAS 独占执行权，Redis 只做 guard 加速和终态通知**（2026-08-08，已实施）— conversation detail 从 DB 恢复 owner/tenant/active-source scoped pending；confirm 按固定锁序重验当前授权与业务 snapshot，以 `pending_confirmation -> approved -> running` row-version CAS 选出唯一执行者，并直接调用冻结的 Gateway-only capability。在线 waiter 不再执行业务，只读取 action 终态并向原流投影；所有终态经共享 finalizer 写 operation/message 后才清缓存与 guard。启动时有效 pending 保留，残留 approved/running fail-closed 为 `AI_PREPARED_ACTION_EXECUTION_INTERRUPTED`。
+**反例**: Redis `wake_action` 作为执行票据 → flush 后无法恢复且双 worker 可双写；waiter 与 confirm handler 都调用 execute → 双击确认会执行两次；只恢复 pending UI、不用 DB guard 拦新 ChatCommand → Redis 丢失后新旧 run 重叠。
+**回归**: CAS 并发与重复 approve 断言业务函数只调用一次；无 Redis 仍可 approve/reject；expiry/source stale/tenant mismatch/current agent-permission/snapshot-artifact 失败均不执行；detail 不含 frozen args/token；startup recovery、前端 running-poll handoff 和真实 reload E2E 保证最终投影收敛。
 
 
 

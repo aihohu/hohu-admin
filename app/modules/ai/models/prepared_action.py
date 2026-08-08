@@ -86,6 +86,14 @@ class AiPreparedAction(Base):
     source_user_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     trace_id: Mapped[str] = mapped_column(String(64), nullable=False)
     agent_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    guard_owner_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    command_action: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="send", server_default=text("'send'")
+    )
+    risk_level: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="high", server_default=text("'high'")
+    )
+    chip_target: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
@@ -98,6 +106,9 @@ class AiPreparedAction(Base):
         DateTime(timezone=True), nullable=True
     )
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result_data: Mapped[Any | None] = mapped_column(JSON, nullable=True)
+    result_ui: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

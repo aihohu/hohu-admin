@@ -1,8 +1,8 @@
 # AI Message Edit Semantics（AI 消息编辑语义） — v1.2
 
-**Status**: 🚧 Safety Gate 与 Task 35a.0 共享 send/confirm 基础已完成（2026-08-07）；PreparedAction binding 及 edit/regenerate 主实现未开始，入口继续关闭
+**Status**: 🚧 Safety Gate 与 Task 35a 共享 send/confirm/PreparedAction binding 已完成（2026-08-08）；edit/regenerate 主实现未开始，入口继续关闭
 **Created**: 2026-08-06
-**Updated**: 2026-08-07
+**Updated**: 2026-08-08
 **Owner**: hohu core team
 **Depends on**:
 - `app/modules/ai/models/message.py`（`AiMessage` 已存在，本 spec 加 active projection / revision 字段）
@@ -572,7 +572,7 @@ const editBlockedReason = computed(() => {
 
 - [x] Task 0 **✅ 已完成（2026-08-07）**：`AI_MESSAGE_REVISION_ACTIONS_ENABLED=false` 统一隐藏 edit/regenerate 入口；store 方法只返回 `false`，不 slice/pop/push authoritative messages、不清附件、不发 stream 请求
 - [x] Task 0a **✅ 已完成（2026-08-07）**：用户导入导出 spec Task 35 已完成 16 个 built-in effect metadata 审计、file_id owner/trusted tenant/内容/私有路径边界及 HITL tenant 复核；这只完成 guard 前置信任基础，不代表 edit/regenerate 可以开放
-- [ ] Task 0b（P0 跨 spec 门禁）：Task 1/2/2b 先作为 Gateway Task 35a 的共享基础落地，再完成 PreparedAction 持久化、source binding、confirm sole authority 和 detail pendingActions；整个过程中 edit/regenerate 继续关闭
+- [x] Task 0b **✅ P0 跨 spec 门禁已完成（2026-08-08）**：Task 1/2/2b 的 send/confirm 共享基础、PreparedAction 持久化、source binding、confirm sole authority 和 detail pendingActions 已随 Gateway Task 35a 落地；edit/regenerate 入口继续关闭，开放仍需完成 Task 2c-11
   - 0.1 **Safety Gate 同时禁 UI 与命令副作用** — 单靠隐藏按钮不能防其他组件或测试直接调用 store action，因此 action 本身也必须 no-op。**反例**: 只用 `v-if` 隐藏 → 调用 `regenerate()` 仍会 pop 历史并重复 tool。**回归**: Vitest 断言按钮不存在、两 action 返回 false 且消息/附件/stream 调用均不变。
   - 0.2 **Gate 只由单一常量控制** — UI 与 store 共享 `AI_MESSAGE_REVISION_ACTIONS_ENABLED`，避免一端误开。**反例**: 两处硬编码 boolean → 后续只改一处形成隐藏入口或无响应按钮。**回归**: safety-gate 测试同时覆盖 store 与 `chat-message.vue`。
 
@@ -581,8 +581,9 @@ const editBlockedReason = computed(() => {
 - [x] Task 1 **✅ 已完成（2026-08-07）**：`AiMessage.is_active` / `supersedes_message_id` + `AiOperationLog.source_user_message_id` / `readonly_snapshot` migration；已补 active history、operation source/status 和 assistant run partial unique indexes
 - [x] Task 2a **✅ trusted tenant 子集已完成（2026-08-07）**：服务端 resolver 向 `ChatDeps/AiToolContext` 注入 tenant_id；旧 direct HITL PendingPayload 已保存 tenant 并在 resume/confirm 复核；Task 35a 将同一不变量迁入 PreparedAction，客户端字段仍不能覆盖
 - [x] Task 2 **✅ 已完成（2026-08-07）**：ChatCommand/Web 在请求前生成并验证稳定 traceId，MessageOut 返回 traceId；user message flush/返回 ID，注入 `ChatDeps.source_user_message_id`，user/assistant 写原 run trace，Gateway operation log 写因果键与 readonly snapshot
-- [ ] Task 2b（共享 guard 前置）：为 send/confirm 实现 conversation run guard、owner token、stream heartbeat、action expiry+60s pending lease 和统一 terminal cleanup；PreparedAction 保存 trusted tenant/source/finalization context，Redis waiter 只通知；覆盖 confirm/TTL/startup cleanup，pending SSE finally 不释放
-  - [x] Task 2b.0 **✅ send/direct-HITL 子集已完成（2026-08-07）**：conversation owner token、stream heartbeat、pending TTL+grace handoff、confirm/resume/timeout/startup terminal cleanup 已落地；PendingPayload 保存 trusted tenant/source/finalization context，pending SSE finally 不释放。PreparedAction 替换旧 PendingPayload 仍属于 Task 35a.1-35a.5，因此 Task 2b 保持未完成
+- [x] Task 2b **✅ 共享 guard 前置已完成（2026-08-08）**：send/confirm 已实现 conversation run guard、owner token、stream heartbeat、action expiry+60s pending lease 和统一 terminal cleanup；PreparedAction 保存 trusted tenant/source/finalization context，Redis waiter 只通知；confirm/TTL/startup cleanup 与 pending SSE finally 不释放均有回归
+  - [x] Task 2b.0 **✅ send/direct-HITL 子集已完成（2026-08-07）**：conversation owner token、stream heartbeat、pending TTL+grace handoff、confirm/resume/timeout/startup terminal cleanup 已落地；PendingPayload 保存 trusted tenant/source/finalization context，pending SSE finally 不释放
+  - [x] Task 2b.1 **✅ PreparedAction 子集已完成（2026-08-08）**：DB action 保存 owner/tenant/source/trace/guard 与冻结执行事实；ChatCommand 在 Redis guard 前后检查 DB in-progress action；confirm 固定锁序重验 source 并 CAS 独占执行，waiter 只读取终态；startup 保留有效 pending、收口 interrupted running，detail 返回脱敏 pendingActions
 - [ ] Task 2c（跨 spec 前置）：完成工具卡 spec Phase 1 的 action/outcome-aware finalizer、HITL resume 持久化、durability/projection done、ack-loss reconciliation 与前端 handoff state；后续 edit/regenerate 直接复用，不另建收口链路
 - [ ] Task 3：实现 suffix operation + PreparedAction policy、legacy policy和 D.9 固定锁序/CAS，统一领域错误层级
 - [ ] Task 4：在 Task 2b guard 上补 edit/regenerate 的 target row lock、owner/active/role 重验和 mutation conflict；不再实现第二套 guard

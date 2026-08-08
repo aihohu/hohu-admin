@@ -1,8 +1,8 @@
 # Chat Tool Card Embed in Message（工具卡片嵌入消息流） — v1.2
 
-**Status**: 🚧 Phase 1（Safety/Task 35a.0 共享基础与 35a.1 流式 prepared pending 已完成；持久 PreparedAction projection、reload handoff 与消息内嵌待 §6）
+**Status**: 🚧 Phase 1（Safety 与 Task 35a 持久 PreparedAction projection/reload handoff 已完成；完整逐消息内嵌仍待 §6 Task 3-7）
 **Created**: 2026-08-05
-**Updated**: 2026-08-07
+**Updated**: 2026-08-08
 **Owner**: hohu core team
 **Depends on**:
 - [`2026-07-16-tool-result-view-design.md`](./2026-07-16-tool-result-view-design.md)（Tool Result View Registry 已 ship，5 种 view_type + DetailCardView 承载 downloadUrl）
@@ -247,6 +247,14 @@ prepared flow 使用 `sourceToolCallId` 表示 LLM 发起的 preview，用 `tool
 
 **回归**: 在线/断流/reload 三条路径最终得到同一 message group、相同 toolCallId 顺序和 presentation；重复 finalizer 不重复卡。
 
+### 2.16 **Task 35a 先完成 durable pending handoff，不冒充完整逐消息内嵌已交付**
+
+conversation detail 已返回 scoped `pendingActions`，store 已按 actionId reconcile；reload 时可用安全 presentation 派生 pending execute 卡，terminal 后由同 trace/source 的持久 assistant toolCalls 接管。Task 35a 阶段继续复用现有末尾工具卡容器，完整移除 `tool-call-list`、把每轮卡片嵌入对应 assistant wrapper 仍由 §6 Task 3/4 完成。
+
+**反例**: pending 能刷新恢复就把整个 Phase 1 标完成 → 历史多轮卡片仍集中在末尾，message owner 的布局目标尚未实现；为了提前完成布局而让前端伪造持久 assistant message → 产生第二个 owner 真相源。
+
+**回归**: Task 35a Vitest/E2E 单独固定 pending reload、terminal handoff 与安全 presentation；Phase 1 Task 3-7 继续以 per-message owner、stale handoff、tool-only 与完整回归为独立门禁。
+
 ---
 
 ## 3. 数据流 / 时序图
@@ -455,10 +463,11 @@ POST /ai/confirm {confirmationId, action:"approve"}
 
 ### Task 35a confirmation slice（P0，与 Phase 1 基础交错）
 
-- [ ] Task 35a-W1：同步 Gateway event/detail/confirm DTO typings；store 从单值 `pendingConfirmation` 迁为 `pendingActionsById`，SSE/detail 按 actionId reconcile
-- [ ] Task 35a-W2：Drawer 只渲染 ConfirmationPresentation，approve/reject 只传 confirmationId/action；文本“请确认”永不触发 UI
+- [x] Task 35a-W1 **✅ 已完成（2026-08-08）**：已同步 Gateway event/detail/confirm DTO typings；store 使用 `pendingActionsById`，SSE/detail 按 actionId reconcile
+- [x] Task 35a-W2 **✅ 已完成（2026-08-08）**：Drawer 只渲染 ConfirmationPresentation，approve/reject 只传 confirmationId/action；文本“请确认”永不触发 UI
 - [ ] Task 35a-W3（依赖下方 Task 0-2）：streaming/reload 派生 transient pending assistant group；prepared preview/pending/execute 最终归同一 message group
-- [ ] Task 35a-W4：完成 §5 新增 vitest/pytest/E2E；Task 35a 未绿前不进入 Task 36
+  - [x] Task 35a-W3a **✅ durable prepared 子集已完成（2026-08-08）**：reload 派生安全 transient pending 卡，terminal detail 以同 trace/source 的 preview/execute toolCalls 接管并去重；完整 per-message wrapper/末尾列表移除仍由 Phase 1 Task 3/4 完成
+- [x] Task 35a-W4 **✅ 已完成（2026-08-08）**：后端 1768 pytest、前端 43 Vitest/typecheck/build 与真实浏览器 prepared execute/reload/preview-only E2E 全绿；Task 35a 已解除对 Task 36 的阻塞
 
 ### Phase 1（消息归属与耐久性收尾，本期）
 
@@ -466,9 +475,9 @@ POST /ai/confirm {confirmationId, action:"approve"}
   - S.1 **执行安全前置与卡片耐久实现分开验收** — Task 35 修复 execution fact 的可信度，本 spec Phase 1 仍负责 message owner、terminal commit 和 handoff。**反例**: metadata/file ACL 通过就把工具卡 spec 标完成 → reload/HITL resume 仍可能丢卡或双写。**回归**: Safety 测试与 §5 durability/projection 测试保持两组独立门禁；Task 0-7 状态不因 Safety Gate 自动变更。
 - [x] Task 0（共享基础）**✅ 已完成（2026-08-07）**：已落 assistant run partial unique index、source/trace/parent 语义、客户端请求前稳定 traceId，以及 send/direct-HITL 的 conversation run guard/terminal cleanup；edit/regenerate 继续关闭，PreparedAction 专属上下文由 Task 35a.1-35a.5 补齐
 - [ ] Task 1（Red）：新增后端失败测试，覆盖 started 顺序、send/edit 与 regenerate 分支、chat/confirm/action TTL/startup cleanup、原 trace/source、owned guard、并发 finalizer、commit 先于 committed `done`、ack 丢失与持久化失败错误流
-  - [x] Task 1a **✅ Task 35a.0 Red 子集已完成（2026-08-07）**：覆盖 send、direct HITL confirm/resume/timeout/startup、started 稳定顺序、原 trace/source、tool-only/并发幂等 finalizer、owned guard、commit-before-done 和持久化失败；edit/regenerate、PreparedAction action CAS 与前端 ack-loss 场景仍归后续任务
+  - [x] Task 1a **✅ Task 35a Red 子集已完成（2026-08-08）**：覆盖 send/direct HITL、PreparedAction confirm/CAS/timeout/startup、started 稳定顺序、原 trace/source、tool-only/并发幂等 finalizer、owned guard、commit-before-done、reload pending 与 running-poll terminal handoff；edit/regenerate 和完整前端 ack-loss 场景仍归后续任务
 - [ ] Task 2（Green）：实现 action/outcome-aware `finalize_assistant_turn` 与 terminal cleanup；修改 chat.py、confirm/action service 与 Redis waiter；为既有 done 增加可选 traceId/messageId/persistence/projection，保持事件类型集合和 `tool_calls` JSON schema 不变
-  - [x] Task 2a **✅ Task 35a.0 Green 子集已完成（2026-08-07）**：chat/direct HITL 已接共享 finalizer 和 terminal cleanup，既有 done 已兼容可选 durability/projection 字段，`tool_calls` schema 与事件类型集合未变；PreparedAction/action service 接入仍由 Task 35a.1-35a.5 完成
+  - [x] Task 2a **✅ Task 35a Green 子集已完成（2026-08-08）**：chat/direct HITL/PreparedAction 已接共享 finalizer、terminal cleanup 与 detail pending projection，既有 done 已兼容可选 durability/projection 字段，`tool_calls` schema 与事件类型集合未变；edit/regenerate 的 outcome-aware 接入仍待本 Phase 后续任务
 - [ ] Task 3（Red/Green）：修改 aiStore — 请求前生成 traceId；删除 restoredEvents；新增 `messageToolCards` 与 handoff state；streaming 用 events，关闭后只渲染 temp snapshot；detail 按 ack 或 request trace 完整接管才清 buffer，unchanged 恢复旧回答，失败 stale + 阻止下一 command
 - [ ] Task 4：修改 chat-main.vue — 每条 assistant 消息后嵌入对应卡片；streaming / transient group 下渲染本轮卡片；tool-only 不显示空文字气泡；删除末尾 tool-call-list
 - [ ] Task 5：vitest 覆盖 §5.1，pytest 覆盖 §5.2；回归现有 AI store、chat、resume、HITL、export 测试

@@ -1,15 +1,21 @@
 """Prepared-action freezing and confirmation-time verification."""
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessRuleException
 from app.modules.ai.agents.gateway.failures import compute_args_hash
+from app.modules.ai.agents.hitl.constants import PreparedActionStatus
 from app.modules.ai.agents.hitl.manager import PendingPayload
+from app.modules.ai.models.conversation import AiConversation
+from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.prepared_action import AiPreparedAction
+from app.modules.ai.schemas.conversation import PendingActionOut
 
 
 def canonical_payload_hash(payload: dict[str, Any]) -> str:
@@ -35,6 +41,34 @@ def _snapshot_stale(message: str) -> BusinessRuleException:
     )
 
 
+_ALLOWED_TRANSITIONS: dict[PreparedActionStatus, set[PreparedActionStatus]] = {
+    PreparedActionStatus.PREPARED: {
+        PreparedActionStatus.PENDING_CONFIRMATION,
+        PreparedActionStatus.EXPIRED,
+    },
+    PreparedActionStatus.PENDING_CONFIRMATION: {
+        PreparedActionStatus.APPROVED,
+        PreparedActionStatus.REJECTED,
+        PreparedActionStatus.EXPIRED,
+    },
+    PreparedActionStatus.APPROVED: {
+        PreparedActionStatus.RUNNING,
+        PreparedActionStatus.FAILED,
+    },
+    PreparedActionStatus.RUNNING: {
+        PreparedActionStatus.SUCCEEDED,
+        PreparedActionStatus.FAILED,
+    },
+}
+
+
+@dataclass(frozen=True)
+class PreparedConfirmationContext:
+    action: AiPreparedAction
+    conversation: AiConversation
+    source_message: AiMessage
+
+
 class PreparedActionService:
     async def create_pending(
         self,
@@ -56,12 +90,17 @@ class PreparedActionService:
         trace_id: str,
         agent_code: str,
         expires_at: datetime,
+        guard_owner_token: str | None = None,
+        command_action: str = "send",
+        risk_level: str = "high",
+        chip_target: str | None = None,
     ) -> AiPreparedAction:
         """Persist one immutable authorization proposal without committing."""
         if conversation_id <= 0 or source_user_message_id <= 0 or not trace_id:
             raise _binding_invalid("prepared action 缺少可信会话或 source message 绑定")
         if not frozen_args or not snapshot or not presentation:
             raise _binding_invalid("prepared action 冻结参数、快照或展示摘要为空")
+        self.validate_presentation(presentation)
 
         computed_snapshot_hash = canonical_payload_hash(snapshot)
         if snapshot_hash and snapshot_hash != computed_snapshot_hash:
@@ -92,6 +131,10 @@ class PreparedActionService:
             source_user_message_id=source_user_message_id,
             trace_id=trace_id,
             agent_code=agent_code,
+            guard_owner_token=guard_owner_token,
+            command_action=command_action,
+            risk_level=risk_level,
+            chip_target=chip_target,
             expires_at=_as_utc(expires_at),
         )
         db.add(action)
@@ -108,6 +151,218 @@ class PreparedActionService:
                 )
             )
         ).scalar_one_or_none()
+
+    async def get_by_execute_tool_call_id(
+        self, db: AsyncSession, tool_call_id: str
+    ) -> AiPreparedAction | None:
+        return (
+            await db.execute(
+                select(AiPreparedAction).where(
+                    AiPreparedAction.execute_tool_call_id == tool_call_id
+                )
+            )
+        ).scalar_one_or_none()
+
+    async def lock_confirmation_context(
+        self,
+        db: AsyncSession,
+        *,
+        confirmation_id: str,
+    ) -> PreparedConfirmationContext | None:
+        """Lock conversation -> source message -> action in the canonical order."""
+        action_ref = await self.get_by_confirmation_id(db, confirmation_id)
+        if action_ref is None:
+            return None
+        conversation = (
+            await db.execute(
+                select(AiConversation)
+                .where(AiConversation.conversation_id == action_ref.conversation_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        source = (
+            await db.execute(
+                select(AiMessage)
+                .where(AiMessage.message_id == action_ref.source_user_message_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        action = (
+            await db.execute(
+                select(AiPreparedAction)
+                .where(AiPreparedAction.confirmation_id == confirmation_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if conversation is None or source is None or action is None:
+            return None
+        return PreparedConfirmationContext(action, conversation, source)
+
+    async def transition_status(
+        self,
+        db: AsyncSession,
+        *,
+        action_id: int,
+        expected_status: PreparedActionStatus,
+        expected_version: int,
+        target_status: PreparedActionStatus,
+        approved_by: int | None = None,
+        error_code: str | None = None,
+        result_data: Any = None,
+        result_ui: dict[str, Any] | None = None,
+        duration_ms: int | None = None,
+    ) -> AiPreparedAction | None:
+        """CAS one legal action transition; zero rows means another winner."""
+        if target_status not in _ALLOWED_TRANSITIONS.get(expected_status, set()):
+            raise BusinessRuleException(
+                f"prepared action 非法状态迁移 {expected_status} -> {target_status}",
+                error_code="AI_PREPARED_ACTION_STATE_INVALID",
+            )
+
+        now = datetime.now(UTC)
+        values: dict[str, Any] = {
+            "status": target_status.value,
+            "row_version": expected_version + 1,
+        }
+        if target_status == PreparedActionStatus.APPROVED:
+            values.update(approved_by=approved_by, approved_at=now)
+        elif target_status == PreparedActionStatus.REJECTED:
+            values.update(approved_by=approved_by, approved_at=now)
+        if target_status.is_terminal:
+            values.update(
+                finished_at=now,
+                error_code=error_code,
+                result_data=result_data,
+                result_ui=result_ui,
+                duration_ms=duration_ms,
+            )
+
+        stmt = (
+            update(AiPreparedAction)
+            .where(
+                AiPreparedAction.action_id == action_id,
+                AiPreparedAction.status == expected_status.value,
+                AiPreparedAction.row_version == expected_version,
+            )
+            .values(**values)
+            .returning(AiPreparedAction)
+            .execution_options(populate_existing=True)
+        )
+        return (await db.execute(stmt)).scalars().one_or_none()
+
+    async def list_pending_for_conversation(
+        self,
+        db: AsyncSession,
+        *,
+        conversation_id: int,
+        user_id: int,
+        tenant_id: int,
+    ) -> list[AiPreparedAction]:
+        """Return only live actions whose conversation and source remain owned/active."""
+        stmt = (
+            select(AiPreparedAction)
+            .join(
+                AiConversation,
+                AiConversation.conversation_id == AiPreparedAction.conversation_id,
+            )
+            .join(
+                AiMessage,
+                AiMessage.message_id == AiPreparedAction.source_user_message_id,
+            )
+            .where(
+                AiPreparedAction.conversation_id == conversation_id,
+                AiPreparedAction.user_id == user_id,
+                AiPreparedAction.tenant_id == tenant_id,
+                AiPreparedAction.status
+                == PreparedActionStatus.PENDING_CONFIRMATION.value,
+                AiPreparedAction.expires_at > datetime.now(UTC),
+                AiConversation.user_id == user_id,
+                AiMessage.conversation_id == conversation_id,
+                AiMessage.role == "user",
+                AiMessage.is_active.is_(True),
+            )
+            .order_by(
+                AiPreparedAction.created_at.asc(), AiPreparedAction.action_id.asc()
+            )
+        )
+        return list((await db.execute(stmt)).scalars().all())
+
+    async def has_in_progress_for_conversation(
+        self,
+        db: AsyncSession,
+        *,
+        conversation_id: int,
+        user_id: int,
+        tenant_id: int,
+    ) -> bool:
+        statuses = (
+            PreparedActionStatus.PREPARED.value,
+            PreparedActionStatus.PENDING_CONFIRMATION.value,
+            PreparedActionStatus.APPROVED.value,
+            PreparedActionStatus.RUNNING.value,
+        )
+        value = await db.scalar(
+            select(AiPreparedAction.action_id)
+            .where(
+                AiPreparedAction.conversation_id == conversation_id,
+                AiPreparedAction.user_id == user_id,
+                AiPreparedAction.tenant_id == tenant_id,
+                AiPreparedAction.status.in_(statuses),
+                or_(
+                    AiPreparedAction.status
+                    != PreparedActionStatus.PENDING_CONFIRMATION.value,
+                    AiPreparedAction.expires_at > datetime.now(UTC),
+                ),
+            )
+            .limit(1)
+        )
+        return value is not None
+
+    @staticmethod
+    def to_pending_out(action: AiPreparedAction) -> PendingActionOut:
+        return PendingActionOut(
+            action_id=action.action_id,
+            confirmation_id=action.confirmation_id,
+            source_user_message_id=action.source_user_message_id,
+            trace_id=action.trace_id,
+            tool=action.execute_tool_name,
+            tool_call_id=action.execute_tool_call_id,
+            source_tool_call_id=action.prepare_tool_call_id,
+            interaction_flow=action.interaction_flow,
+            presentation=action.presentation,
+            expires_at=action.expires_at,
+        )
+
+    @staticmethod
+    def validate_presentation(presentation: dict[str, Any]) -> None:
+        """Keep confirmation UI data flat, bounded and free of capability fields."""
+        allowed = {"title", "summary", "fields", "warnings"}
+        forbidden_fragments = ("token", "secret", "password", "path", "url", "html")
+        if set(presentation) - allowed:
+            raise _binding_invalid("confirmation presentation 含未允许字段")
+        fields = presentation.get("fields", {})
+        warnings = presentation.get("warnings", [])
+        if not isinstance(fields, dict) or len(fields) > 20:
+            raise _binding_invalid("confirmation presentation fields 无效或过多")
+        if not isinstance(warnings, list) or len(warnings) > 10:
+            raise _binding_invalid("confirmation presentation warnings 无效或过多")
+        for key, value in fields.items():
+            key_text = str(key).lower()
+            if any(fragment in key_text for fragment in forbidden_fragments):
+                raise _binding_invalid("confirmation presentation 含敏感字段")
+            if not isinstance(value, str | int | float) or isinstance(value, bool):
+                raise _binding_invalid(
+                    "confirmation presentation fields 必须为扁平标量"
+                )
+            if len(str(key)) > 64 or len(str(value)) > 256:
+                raise _binding_invalid("confirmation presentation field 过长")
+        for key in ("title", "summary"):
+            value = presentation.get(key)
+            if value is not None and (not isinstance(value, str) or len(value) > 500):
+                raise _binding_invalid(f"confirmation presentation {key} 无效")
+        if any(not isinstance(item, str) or len(item) > 500 for item in warnings):
+            raise _binding_invalid("confirmation presentation warning 无效")
 
     def validate_pending_binding(
         self, action: AiPreparedAction, pending: PendingPayload
@@ -183,6 +438,17 @@ class PreparedActionService:
             or batch.on_conflict != frozen_args.get("on_conflict")
         ):
             raise _snapshot_stale("用户导入批次或冻结策略已变化，请重新 preview")
+
+        if not batch.file_storage_key:
+            raise _snapshot_stale("用户导入预检文件已丢失，请重新 preview")
+        from app.core.file_storage import get_file_storage  # noqa: PLC0415
+
+        try:
+            file_bytes = await get_file_storage().read(batch.file_storage_key)
+        except FileNotFoundError as exc:
+            raise _snapshot_stale("用户导入预检文件已丢失，请重新 preview") from exc
+        if sha256(file_bytes).hexdigest() != batch.file_sha256:
+            raise _snapshot_stale("用户导入预检文件内容已变化，请重新 preview")
 
         current_snapshot = {
             "batch_id": str(batch.batch_id),

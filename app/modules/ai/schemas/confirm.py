@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from pydantic.alias_generators import to_camel
 
 
@@ -24,8 +24,19 @@ class ConfirmRequest(BaseModel):
 class ConfirmResponse(BaseModel):
     """/ai/confirm 响应 data 字段（spec §8.3 + 修订 S-14）"""
 
+    action_id: int | None = Field(
+        default=None, description="PreparedAction ID；legacy direct HITL 为 null"
+    )
     tool_call_id: str = Field(..., description="对应 ai_operation_log.tool_call_id")
-    status: Literal["queued", "stream_gone"] = Field(
+    status: Literal[
+        "queued",
+        "stream_gone",
+        "running",
+        "succeeded",
+        "failed",
+        "rejected",
+        "expired",
+    ] = Field(
         default="queued",
         description=(
             "queued = 唤醒成功，业务将正常执行（前端启动 30s SSE 断流轮询兜底）；"
@@ -33,5 +44,9 @@ class ConfirmResponse(BaseModel):
             "tool 不会执行，前端应立即停止轮询并提示用户重新发起（修订 S-14）"
         ),
     )
+
+    @field_serializer("action_id")
+    def serialize_action_id(self, value: int | None, _info) -> str | None:
+        return str(value) if value is not None else None
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)

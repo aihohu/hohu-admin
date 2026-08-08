@@ -27,6 +27,8 @@ POST /ai/confirm
 """
 
 import logging
+import time
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,13 +36,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.base_response import ResponseModel
 from app.core.exceptions import (
     AuthorizationException,
+    BusinessException,
     BusinessRuleException,
     NotFoundException,
 )
 from app.core.redis import redis_client
 from app.core.tenant import resolve_tenant_id
 from app.db.session import AsyncSessionLocal, get_db
-from app.modules.ai.agents.hitl.constants import ConfirmAction
+from app.modules.ai.agents.gateway.executor import (
+    execute_approved_prepared_action,
+    validate_prepared_execution,
+)
+from app.modules.ai.agents.gateway.result import ToolResult
+from app.modules.ai.agents.hitl.constants import ConfirmAction, PreparedActionStatus
+from app.modules.ai.agents.hitl.events import _ui_to_dict
 from app.modules.ai.agents.hitl.manager import hitl_manager
 from app.modules.ai.agents.safety.auto_disable import check_user_disabled
 from app.modules.ai.schemas.confirm import ConfirmRequest, ConfirmResponse
@@ -48,6 +57,7 @@ from app.modules.ai.service.chat_run_service import (
     chat_run_finalizer,
     chat_run_guard,
 )
+from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.auth.service import get_current_user
@@ -56,6 +66,317 @@ from app.modules.system.models.user import User
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _prepared_response(action) -> ConfirmResponse:  # noqa: ANN001
+    status = action.status
+    if status in {
+        PreparedActionStatus.APPROVED.value,
+        PreparedActionStatus.RUNNING.value,
+    }:
+        status = "running"
+    return ConfirmResponse(
+        actionId=action.action_id,
+        toolCallId=action.execute_tool_call_id,
+        status=status,
+    )
+
+
+def _is_expired(value: datetime) -> bool:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value <= datetime.now(UTC)
+
+
+async def _notify_prepared_terminal(action, decision: ConfirmAction) -> None:  # noqa: ANN001
+    """Best-effort realtime/cache cleanup after the durable terminal commit."""
+    try:
+        await hitl_manager.wake(action.confirmation_id, decision)
+    except Exception:
+        logger.info(
+            "prepared terminal waiter notification unavailable confirmation_id=%s",
+            action.confirmation_id,
+            exc_info=True,
+        )
+    if action.guard_owner_token:
+        try:
+            await chat_run_guard.release(
+                redis_client,
+                conversation_id=action.conversation_id,
+                owner_token=action.guard_owner_token,
+            )
+        except Exception:
+            logger.info(
+                "prepared terminal guard cleanup unavailable action_id=%s",
+                action.action_id,
+                exc_info=True,
+            )
+    try:
+        await hitl_manager.delete_pending(redis_client, action.confirmation_id)
+    except Exception:
+        logger.info(
+            "prepared terminal cache cleanup unavailable action_id=%s",
+            action.action_id,
+            exc_info=True,
+        )
+
+
+async def _terminalize_before_execution(
+    db: AsyncSession,
+    *,
+    action,
+    log,
+    status: PreparedActionStatus,
+    error_code: str,
+    error_msg: str,
+    approved_by: int | None = None,
+):  # noqa: ANN001
+    terminal = await prepared_action_service.transition_status(
+        db,
+        action_id=action.action_id,
+        expected_status=PreparedActionStatus.PENDING_CONFIRMATION,
+        expected_version=action.row_version,
+        target_status=status,
+        approved_by=approved_by,
+        error_code=error_code,
+    )
+    if terminal is None:
+        return action
+    if log is not None:
+        if status == PreparedActionStatus.REJECTED:
+            await operation_log_service.mark_rejected_if_pending(
+                db, log.log_id, approved_by=approved_by or action.user_id
+            )
+        else:
+            await operation_log_service.mark_expired_if_pending(db, log.log_id)
+    await chat_run_finalizer.finalize_prepared_action(
+        db,
+        action=terminal,
+        ok=False,
+        error_code=error_code,
+        error_msg=error_msg,
+    )
+    return terminal
+
+
+async def _confirm_prepared(
+    req: ConfirmRequest,
+    *,
+    db: AsyncSession,
+    current_user: User,
+    current_tenant_id: int,
+    action_ref,
+) -> ResponseModel[ConfirmResponse]:  # noqa: ANN001
+    """PostgreSQL-authoritative prepared confirmation and inline execution."""
+    if (
+        action_ref.user_id != current_user.user_id
+        or action_ref.tenant_id != current_tenant_id
+    ):
+        raise NotFoundException(
+            "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
+        )
+    if await check_user_disabled(redis_client, current_user.user_id):
+        raise AuthorizationException(
+            "AI 已被禁用，无法确认操作", error_code="AI_USER_DISABLED"
+        )
+
+    context = await prepared_action_service.lock_confirmation_context(
+        db, confirmation_id=req.confirmation_id
+    )
+    if context is None:
+        raise NotFoundException(
+            "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
+        )
+    action = context.action
+    if (
+        action.user_id != current_user.user_id
+        or action.tenant_id != current_tenant_id
+        or context.conversation.user_id != current_user.user_id
+    ):
+        raise NotFoundException(
+            "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
+        )
+    status = PreparedActionStatus(action.status)
+    if status != PreparedActionStatus.PENDING_CONFIRMATION:
+        return ResponseModel.success(data=_prepared_response(action))
+
+    log = await operation_log_service.get_by_tool_call_id(
+        db, action.execute_tool_call_id, user_id=current_user.user_id
+    )
+    source_active = (
+        context.source_message.conversation_id == action.conversation_id
+        and context.source_message.role == "user"
+        and context.source_message.is_active
+    )
+    if _is_expired(action.expires_at) or not source_active:
+        error_code = (
+            "AI_HITL_EXPIRED"
+            if _is_expired(action.expires_at)
+            else "AI_PREPARED_ACTION_SOURCE_STALE"
+        )
+        terminal = await _terminalize_before_execution(
+            db,
+            action=action,
+            log=log,
+            status=PreparedActionStatus.EXPIRED,
+            error_code=error_code,
+            error_msg="确认已过期，请重新发起预览",
+        )
+        await db.commit()
+        await _notify_prepared_terminal(terminal, ConfirmAction.REJECTED)
+        return ResponseModel.success(data=_prepared_response(terminal))
+
+    if req.action == "reject":
+        terminal = await _terminalize_before_execution(
+            db,
+            action=action,
+            log=log,
+            status=PreparedActionStatus.REJECTED,
+            error_code="USER_REJECTED",
+            error_msg="用户已取消此操作",
+            approved_by=current_user.user_id,
+        )
+        await db.commit()
+        await _notify_prepared_terminal(terminal, ConfirmAction.REJECTED)
+        return ResponseModel.success(data=_prepared_response(terminal))
+
+    try:
+        await prepared_action_service.validate_snapshot(db, action)
+        deps = await chat_service.build_chat_deps(
+            db,
+            current_user,
+            agent_code=action.agent_code,
+            trace_id=action.trace_id,
+            conversation_id=action.conversation_id,
+        )
+        deps.conversation_id = action.conversation_id
+        deps.source_user_message_id = action.source_user_message_id
+        deps.guard_owner_token = action.guard_owner_token
+        deps.command_action = action.command_action
+        validate_prepared_execution(action, deps)
+    except BusinessException as exc:
+        terminal = await _terminalize_before_execution(
+            db,
+            action=action,
+            log=log,
+            status=PreparedActionStatus.EXPIRED,
+            error_code=exc.error_code or "AI_PREPARED_ACTION_REVALIDATION_FAILED",
+            error_msg=exc.message,
+        )
+        await db.commit()
+        await _notify_prepared_terminal(terminal, ConfirmAction.REJECTED)
+        raise
+
+    approved = await prepared_action_service.transition_status(
+        db,
+        action_id=action.action_id,
+        expected_status=PreparedActionStatus.PENDING_CONFIRMATION,
+        expected_version=action.row_version,
+        target_status=PreparedActionStatus.APPROVED,
+        approved_by=current_user.user_id,
+    )
+    if approved is None:
+        await db.rollback()
+        latest = await prepared_action_service.get_by_confirmation_id(
+            db, req.confirmation_id
+        )
+        if latest is None:
+            raise NotFoundException(
+                "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
+            )
+        return ResponseModel.success(data=_prepared_response(latest))
+    running = await prepared_action_service.transition_status(
+        db,
+        action_id=approved.action_id,
+        expected_status=PreparedActionStatus.APPROVED,
+        expected_version=approved.row_version,
+        target_status=PreparedActionStatus.RUNNING,
+    )
+    if running is None:
+        await db.rollback()
+        latest = await prepared_action_service.get_by_confirmation_id(
+            db, req.confirmation_id
+        )
+        return ResponseModel.success(data=_prepared_response(latest or approved))
+    if log is not None:
+        await operation_log_service.mark_approved(
+            db, log.log_id, approved_by=current_user.user_id
+        )
+        await operation_log_service.mark_running(db, log.log_id)
+    await db.commit()
+
+    started_at = time.monotonic()
+    try:
+        result = await execute_approved_prepared_action(running, deps)
+    except Exception:
+        logger.exception(
+            "prepared action execution failed unexpectedly action_id=%s",
+            running.action_id,
+        )
+        result = ToolResult.failure(
+            error_code="AI_INTERNAL_ERROR",
+            error_msg="工具执行失败，请稍后重新发起",
+        )
+    duration_ms = int((time.monotonic() - started_at) * 1000)
+    target_status = (
+        PreparedActionStatus.SUCCEEDED if result.ok else PreparedActionStatus.FAILED
+    )
+    async with AsyncSessionLocal() as terminal_db:
+        async with terminal_db.begin():
+            current = await prepared_action_service.get_by_confirmation_id(
+                terminal_db, req.confirmation_id
+            )
+            if current is None:
+                raise NotFoundException(
+                    "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
+                )
+            was_running = current.status == PreparedActionStatus.RUNNING.value
+            terminal = await prepared_action_service.transition_status(
+                terminal_db,
+                action_id=current.action_id,
+                expected_status=PreparedActionStatus.RUNNING,
+                expected_version=current.row_version,
+                target_status=target_status,
+                error_code=result.error_code or None,
+                result_data=result.data if result.ok else None,
+                result_ui=_ui_to_dict(result.ui) if result.ok else None,
+                duration_ms=duration_ms,
+            )
+            if terminal is None:
+                terminal = current
+            terminal_log = await operation_log_service.get_by_tool_call_id(
+                terminal_db,
+                terminal.execute_tool_call_id,
+                user_id=current_user.user_id,
+            )
+            if terminal_log is not None and was_running:
+                if result.ok:
+                    await operation_log_service.mark_success(
+                        terminal_db,
+                        terminal_log.log_id,
+                        result_summary="prepared action succeeded",
+                        duration_ms=duration_ms,
+                    )
+                else:
+                    await operation_log_service.mark_failed(
+                        terminal_db,
+                        terminal_log.log_id,
+                        error_code=result.error_code or "AI_INTERNAL_ERROR",
+                        duration_ms=duration_ms,
+                    )
+            await chat_run_finalizer.finalize_prepared_action(
+                terminal_db,
+                action=terminal,
+                ok=result.ok,
+                duration_ms=duration_ms,
+                result=result.data if result.ok else None,
+                result_ui=_ui_to_dict(result.ui) if result.ok else None,
+                error_code=result.error_code or None,
+                error_msg=result.error_msg or None,
+            )
+
+    await _notify_prepared_terminal(terminal, ConfirmAction.APPROVED)
+    return ResponseModel.success(data=_prepared_response(terminal))
 
 
 @router.post("", summary="HITL 工具调用确认")
@@ -73,7 +394,20 @@ async def confirm_tool(
       - 修订 S-13：必须查 check_user_disabled
       - 修订 S-14：wake 失败时返回 status="stream_gone"
     """
-    # 1. 取 Redis pending
+    current_tenant_id = resolve_tenant_id(current_user)
+    prepared_action = await prepared_action_service.get_by_confirmation_id(
+        db, req.confirmation_id
+    )
+    if prepared_action is not None:
+        return await _confirm_prepared(
+            req,
+            db=db,
+            current_user=current_user,
+            current_tenant_id=current_tenant_id,
+            action_ref=prepared_action,
+        )
+
+    # 1. legacy direct HITL 继续从 Redis pending 恢复
     pending = await hitl_manager.get_pending(redis_client, req.confirmation_id)
     if pending is None:
         # 不存在 / 已过期 / 服务重启清扫后
@@ -91,7 +425,6 @@ async def confirm_tool(
             current_user.user_id,
         )
         raise AuthorizationException(error_code="NOT_CONFIRMATION_OWNER")
-    current_tenant_id = resolve_tenant_id(current_user)
     if pending.tenant_id != current_tenant_id:
         logger.warning(
             "HITL confirm tenant mismatch: confirmation_id=%s "
@@ -116,21 +449,6 @@ async def confirm_tool(
             "AI 已被禁用，无法确认操作",
             error_code="AI_USER_DISABLED",
         )
-
-    # Task 35a.2: prepared flows are authorized by the frozen PostgreSQL fact.
-    # Legacy single-tool HITL has no prepared action and continues on the old path.
-    prepared_action = await prepared_action_service.get_by_confirmation_id(
-        db, req.confirmation_id
-    )
-    if prepared_action is not None:
-        if (
-            prepared_action.user_id != current_user.user_id
-            or prepared_action.tenant_id != current_tenant_id
-        ):
-            raise AuthorizationException(error_code="NOT_CONFIRMATION_OWNER")
-        prepared_action_service.validate_pending_binding(prepared_action, pending)
-        if req.action == "approve":
-            await prepared_action_service.validate_snapshot(db, prepared_action)
 
     # 4. 写 ai_operation_log.approved_by（审计追责，无论 stream 是否还在）
     #    reject 也写 approved_by（§4.4 字段语义：按 confirm 的用户）

@@ -829,6 +829,25 @@ async def chat(
     # create_agent 放在 guard 前，provider 配置失败不会留下 source/guard 半状态。
     guard_owner_token: str | None = None
     if conversation_id is not None:
+        from app.modules.ai.service.prepared_action_service import (  # noqa: PLC0415
+            prepared_action_service,
+        )
+
+        action_in_progress = (
+            await prepared_action_service.has_in_progress_for_conversation(
+                db,
+                conversation_id=conversation_id,
+                user_id=_current_user.user_id,
+                tenant_id=deps.tenant_id,
+            )
+        )
+        if action_in_progress:
+            exc = BusinessRuleException(
+                "该会话仍有待确认或正在执行的操作",
+                error_code="AI_CHAT_RUN_IN_PROGRESS",
+            )
+            exc.code = 409
+            raise exc
         guard_owner_token = chat_run_guard.generate_owner_token()
         acquired = await chat_run_guard.acquire(
             redis_client,
@@ -843,6 +862,26 @@ async def chat(
             exc.code = 409
             raise exc
         deps.guard_owner_token = guard_owner_token
+        action_in_progress = (
+            await prepared_action_service.has_in_progress_for_conversation(
+                db,
+                conversation_id=conversation_id,
+                user_id=_current_user.user_id,
+                tenant_id=deps.tenant_id,
+            )
+        )
+        if action_in_progress:
+            await chat_run_guard.release(
+                redis_client,
+                conversation_id=conversation_id,
+                owner_token=guard_owner_token,
+            )
+            exc = BusinessRuleException(
+                "该会话仍有待确认或正在执行的操作",
+                error_code="AI_CHAT_RUN_IN_PROGRESS",
+            )
+            exc.code = 409
+            raise exc
 
     try:
         # 现在才持久化 user 消息（避免 safety / clarification 孤儿消息）。flush 后

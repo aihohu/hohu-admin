@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_response import PageResult, ResponseModel
+from app.core.tenant import resolve_tenant_id
 from app.db.session import get_db
 from app.modules.ai.schemas.conversation import (
     ConversationCreate,
@@ -11,6 +12,7 @@ from app.modules.ai.schemas.conversation import (
 )
 from app.modules.ai.schemas.message import MessageOut
 from app.modules.ai.service.conversation_service import conversation_service
+from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
 
@@ -45,7 +47,22 @@ async def get_conversation_detail(
     )
     conv_out = ConversationOut.model_validate(conversation)
     msg_outs = [MessageOut.model_validate(m) for m in messages]
-    return ResponseModel.success(data={"conversation": conv_out, "messages": msg_outs})
+    actions = await prepared_action_service.list_pending_for_conversation(
+        db,
+        conversation_id=conversation_id,
+        user_id=_current_user.user_id,
+        tenant_id=resolve_tenant_id(_current_user),
+    )
+    pending_actions = [
+        prepared_action_service.to_pending_out(action) for action in actions
+    ]
+    return ResponseModel.success(
+        data={
+            "conversation": conv_out,
+            "messages": msg_outs,
+            "pendingActions": pending_actions,
+        }
+    )
 
 
 @router.post("", summary="创建会话")

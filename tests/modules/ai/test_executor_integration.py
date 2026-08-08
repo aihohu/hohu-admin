@@ -629,7 +629,14 @@ class TestPreparedPreviewOnlyFlow:
         async def fake_hang(confirmation_id, *, timeout_sec=None):
             return ConfirmAction.REJECTED
 
+        async def fake_terminal_result(confirmation_id):
+            return ToolResult.failure("USER_REJECTED", "cancelled"), 0
+
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
+        monkeypatch.setattr(
+            "app.modules.ai.agents.gateway.executor._load_prepared_terminal_result",
+            fake_terminal_result,
+        )
         execute_intent = await execute_tool(
             _TEST_TOOL_PREPARE,
             {
@@ -679,7 +686,14 @@ class TestHitlFlow:
         async def fake_hang(confirmation_id, *, timeout_sec=None):
             return ConfirmAction.APPROVED
 
+        async def fake_terminal_result(confirmation_id):
+            return ToolResult.success({"successCount": 2}), 1
+
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
+        monkeypatch.setattr(
+            "app.modules.ai.agents.gateway.executor._load_prepared_terminal_result",
+            fake_terminal_result,
+        )
         events: list[Any] = []
 
         async def collect(ev: Any) -> None:

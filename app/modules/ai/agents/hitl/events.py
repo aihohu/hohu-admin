@@ -94,6 +94,10 @@ class ConfirmationRequiredEvent:
     args: dict[str, Any]
     expires_at: str  # ISO 8601 UTC，e.g. "2026-07-02T14:07:30Z"
     dry_run: DryRunSummary | None = None
+    action_id: int | None = None
+    source_tool_call_id: str | None = None
+    interaction_flow: Literal["direct", "prepared"] = "direct"
+    presentation: dict[str, Any] | None = None
     type: Literal["confirmation_required"] = "confirmation_required"
 
 
@@ -115,6 +119,10 @@ class ConfirmationResumedEvent:
     expires_at: str
     resumed_at: str
     dry_run: DryRunSummary | None = None
+    action_id: int | None = None
+    source_tool_call_id: str | None = None
+    interaction_flow: Literal["direct", "prepared"] = "direct"
+    presentation: dict[str, Any] | None = None
     type: Literal["confirmation_resumed"] = "confirmation_resumed"
 
 
@@ -212,6 +220,10 @@ def event_to_sse_data(event: AiStreamEvent) -> str:
             "args": event.args,
             "expiresAt": event.expires_at,
             "dryRun": _dry_run_to_dict(event.dry_run),
+            "actionId": event.action_id,
+            "sourceToolCallId": event.source_tool_call_id,
+            "interactionFlow": event.interaction_flow,
+            "presentation": event.presentation,
         }
     elif isinstance(event, ConfirmationResumedEvent):
         payload = {
@@ -224,6 +236,10 @@ def event_to_sse_data(event: AiStreamEvent) -> str:
             "expiresAt": event.expires_at,
             "resumedAt": event.resumed_at,
             "dryRun": _dry_run_to_dict(event.dry_run),
+            "actionId": event.action_id,
+            "sourceToolCallId": event.source_tool_call_id,
+            "interactionFlow": event.interaction_flow,
+            "presentation": event.presentation,
         }
     elif isinstance(event, ClarificationRequiredEvent):
         payload = {

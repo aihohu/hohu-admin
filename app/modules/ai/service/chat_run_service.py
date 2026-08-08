@@ -19,6 +19,7 @@ from app.modules.ai.agents.hitl.events import (
 )
 from app.modules.ai.agents.hitl.manager import PendingPayload
 from app.modules.ai.models.message import AiMessage
+from app.modules.ai.models.prepared_action import AiPreparedAction
 
 _RENEW_GUARD_LUA = (
     "if redis.call('get', KEYS[1]) == ARGV[1] then "
@@ -277,6 +278,72 @@ class ChatRunFinalizer:
             content="",
             tool_calls=[tool_call],
             agent_code=pending.agent_code,
+        )
+
+    async def finalize_prepared_action(
+        self,
+        db: AsyncSession,
+        *,
+        action: AiPreparedAction,
+        ok: bool,
+        duration_ms: int = 0,
+        result: Any = None,
+        result_ui: dict[str, Any] | None = None,
+        error_code: str | None = None,
+        error_msg: str | None = None,
+    ) -> AiMessage | None:
+        """Project one prepared authorization without exposing frozen capability data."""
+        from app.modules.ai.agents.tools.registry import ToolRegistry  # noqa: PLC0415
+
+        source = ToolRegistry.get().prepared_source_for(action.execute_tool_name)
+        presentation = stringify_large_ints(action.presentation)
+        title = str(action.presentation.get("title") or action.execute_tool_name)
+        cards: list[dict[str, Any]] = []
+        if action.prepare_tool_call_id:
+            cards.append(
+                {
+                    "tool": source.meta.name if source else "prepared.preview",
+                    "tool_call_id": action.prepare_tool_call_id,
+                    "summary": title,
+                    "args": {},
+                    "risk": source.meta.risk if source else "low",
+                    "trace_id": action.trace_id,
+                    "chip_target": source.meta.chip_target if source else None,
+                    "ok": True,
+                    "result": presentation,
+                    "affected_rows": None,
+                    "error_code": None,
+                    "error_msg": None,
+                    "duration_ms": 0,
+                    "ui": None,
+                }
+            )
+        cards.append(
+            {
+                "tool": action.execute_tool_name,
+                "tool_call_id": action.execute_tool_call_id,
+                "summary": title,
+                "args": presentation,
+                "risk": action.risk_level,
+                "trace_id": action.trace_id,
+                "chip_target": action.chip_target,
+                "ok": ok,
+                "result": stringify_large_ints(result),
+                "affected_rows": None,
+                "error_code": error_code,
+                "error_msg": error_msg,
+                "duration_ms": duration_ms,
+                "ui": stringify_large_ints(result_ui),
+            }
+        )
+        return await self.finalize_assistant_turn(
+            db,
+            conversation_id=action.conversation_id,
+            trace_id=action.trace_id,
+            source_user_message_id=action.source_user_message_id,
+            content="",
+            tool_calls=cards,
+            agent_code=action.agent_code,
         )
 
     @staticmethod

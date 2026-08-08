@@ -54,6 +54,28 @@ class ConfirmAction(StrEnum):
     REJECTED = "rejected"
 
 
+class PreparedActionStatus(StrEnum):
+    """Durable Gateway authorization state (ADR-0002 / spec §4.7)."""
+
+    PREPARED = "prepared"
+    PENDING_CONFIRMATION = "pending_confirmation"
+    APPROVED = "approved"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+    @property
+    def is_terminal(self) -> bool:
+        return self in {
+            PreparedActionStatus.SUCCEEDED,
+            PreparedActionStatus.FAILED,
+            PreparedActionStatus.REJECTED,
+            PreparedActionStatus.EXPIRED,
+        }
+
+
 # Redis key 前缀（spec §8.3）：
 #   ai:confirm:{confirmation_id} → JSON pending payload，TTL 5min
 #   ai:failures:{...}            → 连续失败计数（Gateway failures.py 已用）

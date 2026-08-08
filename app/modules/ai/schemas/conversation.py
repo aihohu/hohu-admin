@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from pydantic.alias_generators import to_camel
@@ -50,6 +51,31 @@ class ConversationOut(BaseModel):
     model_config = ConfigDict(
         from_attributes=True, populate_by_name=True, alias_generator=to_camel
     )
+
+
+class PendingActionOut(BaseModel):
+    """Safe, reloadable projection of a prepared confirmation."""
+
+    action_id: int
+    confirmation_id: str
+    source_user_message_id: int
+    trace_id: str
+    tool: str
+    tool_call_id: str
+    source_tool_call_id: str | None
+    interaction_flow: str
+    presentation: dict[str, Any]
+    expires_at: datetime
+
+    @field_serializer("action_id", "source_user_message_id")
+    def serialize_pending_id(self, value: int, _info) -> str:
+        return str(value)
+
+    @field_serializer("expires_at")
+    def serialize_pending_time(self, value: datetime, _info) -> str:
+        return value.isoformat().replace("+00:00", "Z")
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
 class ConversationQuery(BaseModel):

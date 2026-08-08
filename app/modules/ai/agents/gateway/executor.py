@@ -49,13 +49,18 @@ from app.modules.ai.agents.gateway.quota import (
     is_write_tool,
     with_l3_timeout,
 )
-from app.modules.ai.agents.gateway.result import PreparedActionProposal, ToolResult
+from app.modules.ai.agents.gateway.result import (
+    PreparedActionProposal,
+    ToolResult,
+    UIResult,
+)
 from app.modules.ai.agents.gateway.sensitive import serialize_for_llm
 from app.modules.ai.agents.hitl.constants import (
     AiExecutionMode,
     AiOperationStatus,
     ConfirmAction,
     DryRunResult,
+    PreparedActionStatus,
 )
 from app.modules.ai.agents.hitl.events import (
     AiStreamEvent,
@@ -69,6 +74,7 @@ from app.modules.ai.agents.hitl.risk import classify_execution_mode
 from app.modules.ai.agents.safety.auto_disable import record_injection
 from app.modules.ai.agents.tools.registry import RegisteredTool, ToolRegistry
 from app.modules.ai.core.context import ChatDeps, build_tool_context
+from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.ai.service.prepared_action_service import prepared_action_service
 
@@ -80,6 +86,12 @@ class _PreparedExecutionContext:
     proposal: PreparedActionProposal
     prepare_tool_call_id: str
     prepare_tool_name: str
+
+
+@dataclass(frozen=True)
+class _ConfirmationResolution:
+    confirmation_id: str
+    decision: ConfirmAction
 
 
 USER_FACING_MSG: dict[str, str] = {
@@ -476,7 +488,7 @@ async def _execute_tool(
 
     # 7. HITL 分支
     if mode == AiExecutionMode.HITL:
-        action = await _hang_for_confirmation(
+        resolution = await _hang_for_confirmation(
             deps,
             registered,
             log_id,
@@ -487,14 +499,37 @@ async def _execute_tool(
             event_args=public_event_args,
             prepared_action_context=_prepared_action_context,
         )
-        if action is None:
+        if resolution is None:
             # 5min TTL 超时 → mark_expired（_hang_for_confirmation 内已迁移）
             _rec("hitl_expired")
             return ToolResult.failure(
                 error_code="AI_HITL_EXPIRED",
                 error_msg=USER_FACING_MSG["AI_HITL_EXPIRED"],
             )
-        if action == ConfirmAction.REJECTED:
+        if _prepared_action_context is not None:
+            prepared_result, prepared_duration = await _load_prepared_terminal_result(
+                resolution.confirmation_id
+            )
+            await _emit(
+                deps,
+                ToolCallResultEvent(
+                    tool=meta.name,
+                    tool_call_id=tool_call_id,
+                    ok=prepared_result.ok,
+                    duration_ms=prepared_duration,
+                    result=prepared_result.data if prepared_result.ok else None,
+                    ui=prepared_result.ui if prepared_result.ok else None,
+                    error_code=(
+                        prepared_result.error_code if not prepared_result.ok else None
+                    ),
+                    error_msg=(
+                        prepared_result.error_msg if not prepared_result.ok else None
+                    ),
+                ),
+            )
+            _rec("success" if prepared_result.ok else "failed")
+            return prepared_result
+        if resolution.decision == ConfirmAction.REJECTED:
             await _finish_log_rejected(log_id, user_id)
             _rec("user_rejected")
             return ToolResult.failure(
@@ -598,6 +633,120 @@ async def _execute_tool(
             ),
         )
     return result
+
+
+def validate_prepared_execution(
+    action: AiPreparedAction,
+    deps: ChatDeps,
+) -> RegisteredTool:
+    """Revalidate the frozen action against current Gateway policy."""
+    registry = ToolRegistry.get()
+    registered = registry.find(action.execute_tool_name)
+    source = registry.prepared_source_for(action.execute_tool_name)
+    if registered is None or source is None or registered.meta.llm_visible:
+        raise AuthorizationException(
+            "Prepared execute capability is no longer available",
+            error_code="AI_PREPARED_ACTION_CAPABILITY_UNAVAILABLE",
+        )
+    if compute_args_hash(action.frozen_args) != action.args_hash:
+        raise AuthorizationException(
+            "Prepared action arguments failed integrity validation",
+            error_code="AI_PREPARED_ACTION_BINDING_INVALID",
+        )
+    if (
+        deps.agent is None
+        or not deps.agent.enabled
+        or deps.agent.code != action.agent_code
+    ):
+        raise AuthorizationException(
+            "Prepared action agent is no longer enabled",
+            error_code="AI_PREPARED_ACTION_AGENT_UNAVAILABLE",
+        )
+    if registered.meta.agent not in {action.agent_code, "shared"}:
+        raise AuthorizationException(
+            "Prepared action tool binding changed",
+            error_code="AI_PREPARED_ACTION_BINDING_INVALID",
+        )
+    if not set(registered.meta.required_perms) <= deps.perms:
+        raise AuthorizationException(
+            "Current permissions no longer allow this operation",
+            error_code="AI_TOOL_PERM_DENIED",
+        )
+    if registered.meta.super_admin_only and not is_super_admin(deps.user):
+        raise AuthorizationException(
+            "This operation requires a super administrator",
+            error_code="AI_SUPER_ADMIN_REQUIRED",
+        )
+    return registered
+
+
+async def execute_approved_prepared_action(
+    action: AiPreparedAction,
+    deps: ChatDeps,
+) -> ToolResult:
+    """Execute a CAS-claimed action without creating a second log/HITL cycle."""
+    registered = validate_prepared_execution(action, deps)
+    return await _invoke_tool_fn(
+        registered,
+        dict(action.frozen_args),
+        deps,
+        action.args_hash,
+    )
+
+
+async def _get_prepared_action_by_confirmation(
+    confirmation_id: str,
+) -> AiPreparedAction | None:
+    async with AsyncSessionLocal() as db:
+        return await prepared_action_service.get_by_confirmation_id(db, confirmation_id)
+
+
+def _ui_from_dict(value: dict[str, Any] | None) -> UIResult | None:
+    if not value:
+        return None
+    return UIResult(
+        view_type=str(value.get("viewType") or value.get("view_type") or "plain_json"),
+        view_data=dict(value.get("viewData") or value.get("view_data") or {}),
+        audit=dict(value.get("audit") or {}),
+        label_key=str(value.get("labelKey") or value.get("label_key") or ""),
+        label_params=dict(value.get("labelParams") or value.get("label_params") or {}),
+    )
+
+
+async def _load_prepared_terminal_result(
+    confirmation_id: str,
+) -> tuple[ToolResult, int]:
+    action = await _get_prepared_action_by_confirmation(confirmation_id)
+    if action is None:
+        return (
+            ToolResult.failure(
+                "AI_PREPARED_ACTION_NOT_FOUND",
+                "Prepared action no longer exists",
+            ),
+            0,
+        )
+    status = PreparedActionStatus(action.status)
+    if status == PreparedActionStatus.SUCCEEDED:
+        return (
+            ToolResult.success(
+                action.result_data,
+                ui=_ui_from_dict(action.result_ui),
+            ),
+            action.duration_ms or 0,
+        )
+    code = action.error_code or (
+        "USER_REJECTED"
+        if status == PreparedActionStatus.REJECTED
+        else "AI_HITL_EXPIRED"
+        if status == PreparedActionStatus.EXPIRED
+        else "AI_PREPARED_ACTION_EXECUTION_INTERRUPTED"
+    )
+    return (
+        ToolResult.failure(
+            code, USER_FACING_MSG.get(code, "Operation did not complete")
+        ),
+        action.duration_ms or 0,
+    )
 
 
 # ============ dry_run ============
@@ -841,7 +990,7 @@ async def _hang_for_confirmation(
     *,
     event_args: dict[str, Any] | None = None,
     prepared_action_context: _PreparedExecutionContext | None = None,
-) -> ConfirmAction | None:
+) -> _ConfirmationResolution | None:
     """HITL 流：create_pending → emit confirmation_required → hang
 
     Returns:
@@ -889,6 +1038,7 @@ async def _hang_for_confirmation(
     deps.guard_handoff = True
 
     # 回填 confirmation_id 到 log 行（spec §4.4）
+    durable_action: AiPreparedAction | None = None
     async with AsyncSessionLocal() as log_db:
         async with log_db.begin():
             await operation_log_service.attach_confirmation(
@@ -902,7 +1052,7 @@ async def _hang_for_confirmation(
                 proposal_expires_at = proposal.expires_at
                 if proposal_expires_at.tzinfo is None:
                     proposal_expires_at = proposal_expires_at.replace(tzinfo=UTC)
-                await prepared_action_service.create_pending(
+                durable_action = await prepared_action_service.create_pending(
                     log_db,
                     confirmation_id=confirmation_id,
                     prepare_tool_call_id=(prepared_action_context.prepare_tool_call_id),
@@ -920,6 +1070,10 @@ async def _hang_for_confirmation(
                     trace_id=deps.trace_id,
                     agent_code=deps.agent.code if deps.agent else meta.agent,
                     expires_at=min(proposal_expires_at, pending_expires_at),
+                    guard_owner_token=deps.guard_owner_token,
+                    command_action=deps.command_action,
+                    risk_level=meta.risk,
+                    chip_target=meta.chip_target,
                 )
 
     # emit confirmation_required（spec §8.1）
@@ -933,6 +1087,14 @@ async def _hang_for_confirmation(
             args=event_args if event_args is not None else args,
             expires_at=payload.expires_at,
             dry_run=dry_run_summary,
+            action_id=durable_action.action_id if durable_action else None,
+            source_tool_call_id=(
+                prepared_action_context.prepare_tool_call_id
+                if prepared_action_context
+                else None
+            ),
+            interaction_flow=("prepared" if durable_action else "direct"),
+            presentation=(durable_action.presentation if durable_action else None),
         ),
     )
 
@@ -940,10 +1102,50 @@ async def _hang_for_confirmation(
     try:
         action = await hitl_manager.hang(confirmation_id)
     except TimeoutError:
+        if durable_action is not None:
+            terminal = await _get_prepared_action_by_confirmation(confirmation_id)
+            if (
+                terminal is not None
+                and PreparedActionStatus(terminal.status).is_terminal
+            ):
+                deps.guard_handoff = False
+                return _ConfirmationResolution(
+                    confirmation_id=confirmation_id,
+                    decision=(
+                        ConfirmAction.REJECTED
+                        if terminal.status == PreparedActionStatus.REJECTED.value
+                        else ConfirmAction.APPROVED
+                    ),
+                )
         # 5min TTL 超时 → mark_expired
         async with AsyncSessionLocal() as log_db:
             async with log_db.begin():
-                await operation_log_service.mark_expired(log_db, log_id)
+                if durable_action is not None:
+                    transitioned = await prepared_action_service.transition_status(
+                        log_db,
+                        action_id=durable_action.action_id,
+                        expected_status=PreparedActionStatus.PENDING_CONFIRMATION,
+                        expected_version=durable_action.row_version,
+                        target_status=PreparedActionStatus.EXPIRED,
+                        error_code="AI_HITL_EXPIRED",
+                    )
+                    if transitioned is not None:
+                        await operation_log_service.mark_expired_if_pending(
+                            log_db, log_id
+                        )
+                        from app.modules.ai.service.chat_run_service import (  # noqa: PLC0415
+                            chat_run_finalizer,
+                        )
+
+                        await chat_run_finalizer.finalize_prepared_action(
+                            log_db,
+                            action=transitioned,
+                            ok=False,
+                            error_code="AI_HITL_EXPIRED",
+                            error_msg="确认已过期，请重新发起",
+                        )
+                else:
+                    await operation_log_service.mark_expired(log_db, log_id)
         await hitl_manager.delete_pending(redis_client, confirmation_id)
         deps.guard_handoff = False
         return None
@@ -952,7 +1154,10 @@ async def _hang_for_confirmation(
 
     # 用户确认后清 Redis pending
     await hitl_manager.delete_pending(redis_client, confirmation_id)
-    return action
+    return _ConfirmationResolution(
+        confirmation_id=confirmation_id,
+        decision=action,
+    )
 
 
 def _summary_to_dict(s: DryRunSummary | None) -> dict[str, Any] | None:
