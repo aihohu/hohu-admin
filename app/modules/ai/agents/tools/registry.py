@@ -9,6 +9,7 @@
      - perms_must_exist_in_menu（spec §12.4）
      - agent_must_exist_in_db（spec §10.1）
      - dry_run_fn_must_be_set（dry_run_supported=True 时强制）
+     - prepared binding 必须指向隐藏且强制 HITL 的 direct capability
   3. /ai/chat 请求期：compute_available_tools(user, agent) 按 perms 过滤
 """
 
@@ -118,6 +119,24 @@ class ToolRegistry:
         """spec §5.4: 按 Agent code 过滤 tool"""
         return [t for t in self._tools.values() if t.meta.agent == agent_code]
 
+    def prepared_source_for(
+        self,
+        execute_name: str,
+        *,
+        prepare_name: str | None = None,
+    ) -> RegisteredTool | None:
+        """Return the prepared preview that binds a Gateway-only execute tool."""
+        return next(
+            (
+                tool
+                for tool in self._tools.values()
+                if tool.meta.interaction_flow == "prepared"
+                and tool.meta.prepared_execute_tool == execute_name
+                and (prepare_name is None or tool.meta.name == prepare_name)
+            ),
+            None,
+        )
+
     def __len__(self) -> int:
         return len(self._tools)
 
@@ -134,6 +153,8 @@ class ToolRegistry:
         校验在 validate_on_startup 第 4 步统一报错）。
         """
         for name, tool in self._tools.items():
+            if not tool.meta.dry_run_supported:
+                continue
             if tool.dry_run_fn is not None:
                 continue  # 已有（极少见，避免重复查找覆盖）
             module_name = tool.fn.__module__
@@ -153,6 +174,7 @@ class ToolRegistry:
           1. agent_must_exist_in_db: 每个 tool 的 meta.agent 必须在 ai_agent 表存在
           2. perms_must_exist_in_menu: 每个 required_perms 必须在 sys_menu 表存在
           3. dry_run_fn_must_be_set: dry_run_supported=True 的 tool 必须有 dry_run_fn
+          4. prepared binding: target 必须存在、同域、隐藏、direct 且强制 HITL
 
         任一校验失败抛 ToolRegistryError，FastAPI lifespan 应捕获并拒绝启动。
         """
@@ -242,6 +264,10 @@ class ToolRegistry:
             if execute_meta.llm_visible:
                 raise ToolRegistryError(
                     f"Prepared execute tool {execute_meta.name!r} must set llm_visible=False."
+                )
+            if not execute_meta.hitl_always:
+                raise ToolRegistryError(
+                    f"Prepared execute tool {execute_meta.name!r} must set hitl_always=True."
                 )
             if execute_meta.interaction_flow != "direct":
                 raise ToolRegistryError(

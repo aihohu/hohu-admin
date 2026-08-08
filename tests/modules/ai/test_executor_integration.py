@@ -8,6 +8,7 @@
 
 # ruff: noqa: ARG001, PLC0415
 
+import inspect
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -456,6 +457,11 @@ class TestBuildArgsSummary:
 
 
 class TestShortCircuit:
+    def test_public_executor_does_not_accept_prepared_capability(self) -> None:
+        assert (
+            "_prepared_action_context" not in inspect.signature(execute_tool).parameters
+        )
+
     async def test_tool_not_found(self) -> None:
         deps = _build_deps()
         result = await execute_tool("nonexistent.tool", {}, deps)
@@ -480,7 +486,7 @@ class TestShortCircuit:
         )
 
         assert not result.ok
-        assert result.error_code == "AI_TOOL_NOT_AVAILABLE_TO_MODEL"
+        assert result.error_code == "AI_PREPARED_ACTION_REQUIRED"
 
 
 # ============ autonomous 流 ============

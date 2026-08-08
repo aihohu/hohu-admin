@@ -1,8 +1,8 @@
 # AI Tool Gateway 设计
 
-> **状态**: Draft（现有 direct HITL 已落地；ADR-0002 Task 35a.1 prepared 自动接管与 35a.2 持久冻结授权事实已完成，CAS/reload 恢复仍为 P0 待实施）
+> **状态**: Draft（现有 direct HITL 已落地；ADR-0002 Task 35a.1 prepared 自动接管、35a.2 持久冻结授权事实与 35a.3 Gateway-only capability 已完成，35a.4/35a.5 仍为 P0 待实施）
 > **日期**: 2026-07-02
-> **更新**: 2026-08-07
+> **更新**: 2026-08-08
 > **作者**: Jack
 > **影响项目**: `hohu-admin`（后端，主战场）、`hohu-admin-web`（前端，配合流式协议与 HITL 抽屉）
 > **关联文档**: [`ADR-0001`](../adr/0001-ai-safety-consistency-before-deferred-execution.md)、[`ADR-0002`](../adr/0002-gateway-owned-confirmation-flow.md)、`docs/APP-MARKETPLACE.md`、`docs/SECURITY.md`、`docs/ARCHITECTURE-GUIDELINES.md`
@@ -807,7 +807,7 @@ async def user_distinct(ctx: AiToolContext, field: str) -> list[str]:
 `interaction_flow="prepared"` 的 prepare tool 仍对 LLM 可见；其绑定 execute tool 必须 `llm_visible=False`，只能由 Gateway 根据已批准 `PreparedAction` 调用。Registry 启动校验必须满足：
 
 1. prepared tool 必须声明 `prepared_execute_tool`，目标存在、同 agent 或显式 shared、`llm_visible=False`，且不能再绑定下一个 prepared tool；
-2. execute tool 不进入 `compute_available_tools` / PydanticAI schema，即使 LLM 猜到名字也返回 `AI_TOOL_NOT_AVAILABLE_TO_MODEL`；
+2. execute tool 不进入 `compute_available_tools` / PydanticAI schema；普通 executor 入口即使猜到已绑定 execute 名字也返回 `AI_PREPARED_ACTION_REQUIRED`，未绑定的其他隐藏 capability 返回 `AI_TOOL_NOT_AVAILABLE_TO_MODEL`；
 3. prepared tool 的模型侧 schema 由 wrapper 增加保留字段 `requested_outcome: preview_only | execute_if_approved`，Gateway 在调用业务函数前剥离该字段；业务函数不以它作为授权输入；
 4. prepared tool 成功结果必须提供内部 `PreparedActionProposal`，其中含 frozen execute args、snapshot/hash、subject ref、过期时间和 presentation；该 proposal 不序列化给 LLM；
 5. `preview_only` 只把已脱敏 preview data 返回 LLM，不持久化 `PreparedAction`；`execute_if_approved` 校验 proposal 后自动持久化 action 并进入 confirmation，不要求第二次 LLM tool call；
@@ -3013,11 +3013,15 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 
 #### SR-28. **Task 35a.1 先交付确定性的 prepared handoff，但不得冒充持久授权事实源**（2026-08-07，已实施）— `AiToolMeta` 增加 `interaction_flow/prepared_execute_tool/llm_visible`；wrapper 只对 prepared preview 注入保留的 `requested_outcome`，Gateway 剥离后调用业务函数。preview 用 `ToolResult.prepared_action` 返回内部 proposal；`execute_if_approved` 自动调用绑定的 Gateway-only execute 并沿现有 HITL 通道发 `confirmation_required`，`preview_only` 正常返回。模型和 SSE 只拿 public data/presentation，frozen args 继续只在服务端 pending payload 中流转。
 **反例**: 为尽快弹窗直接把 preview token 回传给 LLM，再要求它调用 execute → 仍由模型编排且泄漏 capability；在 35a.1 就宣称 Redis pending 等于 `PreparedAction` → 掩盖刷新/重启/双击一致性仍未完成。
-**回归**: 单次 preview 调用自动产生确认；execute 不在模型 tool 集合且普通直调返回 `AI_TOOL_NOT_AVAILABLE_TO_MODEL`；事件/抽屉不含 token；真实浏览器拒绝确认后 operation 终态为 cancelled。PostgreSQL action 与冻结 hash 已由 35a.2 完成；CAS、detail pending projection 仍由 35a.5 完成。
+**回归**: 单次 preview 调用自动产生确认；execute 不在模型 tool 集合且普通直调返回 `AI_PREPARED_ACTION_REQUIRED`；事件/抽屉不含 token；真实浏览器拒绝确认后 operation 终态为 cancelled。PostgreSQL action 与冻结 hash 已由 35a.2 完成；CAS、detail pending projection 仍由 35a.5 完成。
 
 #### SR-29. **Task 35a.2 先把 prepared confirmation 固化为可验证授权事实，在线 waiter 暂不替换**（2026-08-07，已实施）— 新增 `ai_prepared_action` 模型、迁移与 service；prepared execute 的 confirmation 绑定 frozen args、canonical args/snapshot hash、subject/presentation、operator、可信 tenant、conversation/source、trace/agent 和 prepare/execute call。confirm body 收紧为 `confirmationId + approve|reject` 且拒绝额外字段；prepared flow 在 wake 前校验 DB action 与 Redis pending 完全一致，并对首个用户导入 adapter 复验 batch 状态、token、reason、on_conflict 与 file/records/summary snapshot。
 **反例**: 只把 preview token 放 Redis → 无持久授权事实可审计；允许 confirm body 重传策略 → 批准摘要与执行输入分叉；35a.2 同时重写离线恢复/CAS/finalizer → 与 35a.5 边界混叠。
 **回归**: canonical hash 键序无关且类型敏感；持久 action 含可信 identity/source 和 frozen policy；Redis 换参或 snapshot stale 均在 wake 前失败；旧 direct HITL 没有 action 时保持兼容。35a.5 继续负责 action/operation CAS 终态、完整执行前复验、Redis flush/reload 恢复和消息投影。
+
+#### SR-30. **Task 35a.3 用不可注入的公共入口、Registry 和静态门禁共同封闭 execute capability**（2026-08-08，已实施）— 公共 `execute_tool(name,args,deps)` 不再接受 prepared context；只有 Gateway 内部 `_execute_tool` 能携带与注册 prepare source 匹配的私有 context。Registry 启动时要求 prepared target 存在、同域或 shared、`interaction_flow=direct`、`llm_visible=False` 且 `hitl_always=True`；独立静态扫描新增 `prepared_binding_valid` 与 `gateway_only_tool_not_llm_visible`，总计 12 项。`user.import_execute` 删除旧 dry-run hook，确认展示只读取冻结的 preview presentation。
+**反例**: 公共 executor 保留“下划线参数”供任意内部调用者注入 → 只是命名约定，不是 capability 边界；只隐藏模型 schema、不校验 forced HITL → metadata 漂移可让 prepared execute 自动执行；保留 execute dry-run → 同一确认存在 preview presentation 与二次 batch summary 两个来源。
+**回归**: PydanticAI/available tools 不含 execute；公共函数签名不含 capability 参数；直调绑定 execute 返回 `AI_PREPARED_ACTION_REQUIRED`；Registry 拒绝未强制 HITL 的 target；静态扫描覆盖 target 缺失、可见和非 HITL 三类反例。35a.5 仍负责持久 action CAS、完整批准上下文与跨进程恢复。
 
 
 

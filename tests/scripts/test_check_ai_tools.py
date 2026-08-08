@@ -1,4 +1,4 @@
-"""scripts/check_ai_tools.py 10 项 static-only 检查的单测 — spec §12.4
+"""scripts/check_ai_tools.py 12 项检查的 static-only 单测 — spec §12.4
 
 构造违规 meta + 函数签名，验证 check_xxx 函数能正确检出。
 不依赖 Registry（直接构造 RegisteredTool dataclass）。
@@ -21,7 +21,9 @@ from scripts.check_ai_tools import (
     check_destructive_requires_hitl,
     check_dry_run_tool_must_implement_hook,
     check_file_param_requires_protected_loader,
+    check_gateway_only_tool_not_llm_visible,
     check_high_risk_requires_dry_run,
+    check_prepared_binding_valid,
     check_scope_param_requires_check,
     check_sensitive_input_not_in_signature,
     check_summary_length_limit,
@@ -41,6 +43,9 @@ def _make_reg(
     accepts_file: tuple[str, ...] = (),
     dry_run_fn=None,
     args_summary_fields: tuple[str, ...] = (),
+    interaction_flow: str = "direct",
+    prepared_execute_tool: str | None = None,
+    llm_visible: bool = True,
 ) -> RegisteredTool:
     """构造 RegisteredTool，meta 字段可定制
 
@@ -58,6 +63,9 @@ def _make_reg(
         sensitive_input=sensitive_input,
         accepts_file=accepts_file,
         args_summary_fields=args_summary_fields,
+        interaction_flow=interaction_flow,
+        prepared_execute_tool=prepared_execute_tool,
+        llm_visible=llm_visible,
     )
     return RegisteredTool(
         meta=meta, fn=lambda *_args, **_kw: None, dry_run_fn=dry_run_fn
@@ -170,6 +178,88 @@ class TestHighRiskRequiresDryRun:
     def test_low_risk_no_check(self) -> None:
         reg = _make_reg(risk="low", dry_run_supported=False, dry_run_fn=None)
         assert check_high_risk_requires_dry_run(reg) == []
+
+    def test_bound_gateway_execute_uses_frozen_preview_instead(self) -> None:
+        reg = _make_reg(
+            name="user.import_execute",
+            risk="high",
+            hitl_always=True,
+            llm_visible=False,
+        )
+
+        assert (
+            check_high_risk_requires_dry_run(
+                reg,
+                prepared_execute_names={"user.import_execute"},
+            )
+            == []
+        )
+
+
+class TestPreparedGatewayOnlyContract:
+    def test_valid_prepared_binding_passes_static_checks(self) -> None:
+        prepare = _make_reg(
+            name="user.import_preview",
+            interaction_flow="prepared",
+            prepared_execute_tool="user.import_execute",
+        )
+        execute = _make_reg(
+            name="user.import_execute",
+            risk="high",
+            hitl_always=True,
+            llm_visible=False,
+        )
+
+        tools = [prepare, execute]
+        assert check_prepared_binding_valid(tools) == []
+        assert check_gateway_only_tool_not_llm_visible(tools) == []
+
+    def test_missing_execute_target_fails_static_check(self) -> None:
+        prepare = _make_reg(
+            name="user.import_preview",
+            interaction_flow="prepared",
+            prepared_execute_tool="user.import_execute",
+        )
+
+        violations = check_prepared_binding_valid([prepare])
+
+        assert [item.check for item in violations] == ["prepared_binding_valid"]
+
+    def test_visible_execute_target_fails_static_check(self) -> None:
+        prepare = _make_reg(
+            name="user.import_preview",
+            interaction_flow="prepared",
+            prepared_execute_tool="user.import_execute",
+        )
+        execute = _make_reg(
+            name="user.import_execute",
+            risk="high",
+            hitl_always=True,
+            llm_visible=True,
+        )
+
+        violations = check_gateway_only_tool_not_llm_visible([prepare, execute])
+
+        assert [item.check for item in violations] == [
+            "gateway_only_tool_not_llm_visible"
+        ]
+
+    def test_execute_without_forced_confirmation_fails_static_check(self) -> None:
+        prepare = _make_reg(
+            name="user.import_preview",
+            interaction_flow="prepared",
+            prepared_execute_tool="user.import_execute",
+        )
+        execute = _make_reg(
+            name="user.import_execute",
+            risk="high",
+            hitl_always=False,
+            llm_visible=False,
+        )
+
+        violations = check_prepared_binding_valid([prepare, execute])
+
+        assert [item.check for item in violations] == ["prepared_binding_valid"]
 
 
 class TestScopeParamRequiresCheck:

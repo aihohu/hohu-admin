@@ -1233,7 +1233,7 @@ async def user_import_preview(
         idempotent=True,
         hitl_always=True,
         llm_visible=False,
-        dry_run_supported=True,
+        dry_run_supported=False,
         result_view="rows_affected",
         args_summary_fields=("reason", "on_conflict", "sync_mode"),
     )
@@ -1350,52 +1350,6 @@ async def user_import_execute(
             label_key="ai.tool.user.import_execute.result",
             label_params={"count": result.success_count},
         ),
-    )
-
-
-async def _dry_run_user_import_execute(
-    ctx: AiToolContext,
-    *,
-    preview_token: str,
-    reason: str,  # noqa: ARG001  与 execute 签名对齐，dry_run 阶段不校验 reason（execute 入口校验）
-    on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
-    sync_mode: Literal["CREATE_ONLY", "UPDATE_PROFILE", "FULL_SYNC"] = "CREATE_ONLY",
-) -> Any:
-    """dry_run：列出 batch summary 供 HITL 抽屉二次确认（spec §10 Task 26a）
-
-    本 tool 已 hitl_always=True 强制走 HITL；dry_run 是「确认前再看一次 summary」，
-    返回 batch_id + total + 四象限计数 + 文件名（让用户对照确认）。
-    """
-    from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
-    from app.modules.system.user.import_service import (  # noqa: PLC0415
-        get_batch_by_preview_token,
-    )
-
-    batch = await get_batch_by_preview_token(ctx.db, preview_token)
-    if batch is None:
-        return DryRunResult(
-            ok=False,
-            count=0,
-            reason="preview_token 无效或已过期",
-        )
-
-    summary = (
-        f"将执行批次 {batch.batch_id[:8]}… "
-        f"共 {batch.total_rows} 行 "
-        f"(新增 {batch.summary_new} / 已存在 {batch.summary_exists} / "
-        f"冲突 {batch.summary_conflict} / 越界 {batch.summary_out_of_scope})"
-    )
-    examples = [
-        f"批次 ID: {batch.batch_id}",
-        f"文件名: {batch.filename or '(未知)'}",
-        f"冲突策略: {on_conflict}",
-        f"同步模式: {sync_mode}",
-    ]
-    return DryRunResult(
-        ok=True,
-        count=batch.summary_new,  # 预计将新增的用户数
-        reason=summary,
-        examples=examples,
     )
 
 

@@ -79,6 +79,7 @@ logger = logging.getLogger(__name__)
 class _PreparedExecutionContext:
     proposal: PreparedActionProposal
     prepare_tool_call_id: str
+    prepare_tool_name: str
 
 
 USER_FACING_MSG: dict[str, str] = {
@@ -93,6 +94,7 @@ USER_FACING_MSG: dict[str, str] = {
     "AI_HITL_EXPIRED": "操作超时未确认，请重新发起。",
     "USER_REJECTED": "用户已取消此操作。",
     "AI_TOOL_NOT_AVAILABLE_TO_MODEL": "该工具只能由系统在批准后调用。",
+    "AI_PREPARED_ACTION_REQUIRED": "该操作必须由已批准的预览授权发起。",
     "AI_PREPARED_OUTCOME_REQUIRED": "请明确本次只预览，或在预览后请求确认执行。",
     "AI_PREPARED_ACTION_INVALID": "预览结果无法生成安全确认，请重新发起。",
 }
@@ -181,6 +183,15 @@ async def execute_tool(
     name: str,
     args: dict[str, Any],
     deps: ChatDeps,
+) -> ToolResult:
+    """Public model/runtime entry; prepared capabilities are not injectable."""
+    return await _execute_tool(name, args, deps)
+
+
+async def _execute_tool(
+    name: str,
+    args: dict[str, Any],
+    deps: ChatDeps,
     *,
     _prepared_action_context: _PreparedExecutionContext | None = None,
 ) -> ToolResult:
@@ -231,11 +242,30 @@ async def execute_tool(
 
     # Gateway-only execute 不允许模型/普通调用方猜名称直调。prepared preview
     # 只能通过本函数的内部递归传入安全 confirmation presentation。
-    if not meta.llm_visible and _prepared_action_context is None:
-        _rec("not_available_to_model", risk=meta.risk)
+    prepared_source = registry.prepared_source_for(name)
+    context_source = (
+        registry.prepared_source_for(
+            name,
+            prepare_name=_prepared_action_context.prepare_tool_name,
+        )
+        if _prepared_action_context is not None
+        else None
+    )
+    prepared_context_valid = (
+        _prepared_action_context is not None
+        and context_source is not None
+        and bool(_prepared_action_context.prepare_tool_call_id)
+    )
+    if not meta.llm_visible and not prepared_context_valid:
+        error_code = (
+            "AI_PREPARED_ACTION_REQUIRED"
+            if prepared_source is not None
+            else "AI_TOOL_NOT_AVAILABLE_TO_MODEL"
+        )
+        _rec("prepared_action_required", risk=meta.risk)
         return ToolResult.failure(
-            error_code="AI_TOOL_NOT_AVAILABLE_TO_MODEL",
-            error_msg=USER_FACING_MSG["AI_TOOL_NOT_AVAILABLE_TO_MODEL"],
+            error_code=error_code,
+            error_msg=USER_FACING_MSG[error_code],
         )
 
     requested_outcome: str | None = None
@@ -556,13 +586,14 @@ async def execute_tool(
                 error_code="AI_PREPARED_ACTION_INVALID",
                 error_msg=USER_FACING_MSG["AI_PREPARED_ACTION_INVALID"],
             )
-        return await execute_tool(
+        return await _execute_tool(
             execute_name,
             proposal.frozen_args,
             deps,
             _prepared_action_context=_PreparedExecutionContext(
                 proposal=proposal,
                 prepare_tool_call_id=tool_call_id,
+                prepare_tool_name=meta.name,
             ),
         )
     return result
@@ -581,7 +612,7 @@ async def _run_dry_run(
     Returns:
         (count, summary) — count None 表示未跑或失败；summary 含 reason 给 HITL 抽屉
     """
-    if registered.dry_run_fn is None:
+    if not registered.meta.dry_run_supported or registered.dry_run_fn is None:
         return None, None
 
     try:

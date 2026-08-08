@@ -185,6 +185,42 @@ class TestToolRegistryOps:
         assert found is not None
         assert found.dry_run_fn is _noop_fn
 
+    def test_prepared_source_for_returns_bound_preview(self) -> None:
+        registry = ToolRegistry.get()
+        prepare = AiToolMeta(
+            name="user.import_preview",
+            agent="user_mgmt",
+            summary="preview import",
+            required_perms=("system:user:import",),
+            risk="low",
+            interaction_flow="prepared",
+            prepared_execute_tool="user.import_execute",
+        )
+        execute = AiToolMeta(
+            name="user.import_execute",
+            agent="user_mgmt",
+            summary="execute import",
+            required_perms=("system:user:import",),
+            risk="high",
+            hitl_always=True,
+            llm_visible=False,
+        )
+        registry.register(prepare, _noop_fn)
+        registry.register(execute, _noop_fn)
+
+        source = registry.prepared_source_for("user.import_execute")
+
+        assert source is not None
+        assert source.meta.name == "user.import_preview"
+        assert (
+            registry.prepared_source_for(
+                "user.import_execute",
+                prepare_name="other.import_preview",
+            )
+            is None
+        )
+        assert registry.prepared_source_for("missing.execute") is None
+
 
 # ============ compute_available_tools ============
 
@@ -533,6 +569,42 @@ class TestValidateOnStartup:
         mock_db.execute = AsyncMock(side_effect=[result_1, result_2])
 
         with pytest.raises(ToolRegistryError, match="_dry_run_<tool>"):
+            await registry.validate_on_startup(mock_db)
+
+    async def test_prepared_execute_must_force_confirmation(self) -> None:
+        registry = ToolRegistry.get()
+        registry.register(
+            AiToolMeta(
+                name="user.import_preview",
+                agent="user_mgmt",
+                summary="preview import",
+                required_perms=("system:user:import",),
+                risk="low",
+                interaction_flow="prepared",
+                prepared_execute_tool="user.import_execute",
+            ),
+            _noop_fn,
+        )
+        registry.register(
+            AiToolMeta(
+                name="user.import_execute",
+                agent="user_mgmt",
+                summary="execute import",
+                required_perms=("system:user:import",),
+                risk="high",
+                hitl_always=False,
+                llm_visible=False,
+            ),
+            _noop_fn,
+        )
+        mock_db = MagicMock()
+        agent_result = MagicMock()
+        agent_result.scalars.return_value.all.return_value = ["user_mgmt"]
+        perm_result = MagicMock()
+        perm_result.scalars.return_value.all.return_value = ["system:user:import"]
+        mock_db.execute = AsyncMock(side_effect=[agent_result, perm_result])
+
+        with pytest.raises(ToolRegistryError, match="hitl_always=True"):
             await registry.validate_on_startup(mock_db)
 
 

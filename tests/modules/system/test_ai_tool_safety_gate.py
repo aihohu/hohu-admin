@@ -132,6 +132,8 @@ class TestBuiltinToolEffectMetadata:
 
         execute = user_import_execute.__ai_tool_meta__  # type: ignore[attr-defined]
         assert execute.llm_visible is False
+        assert execute.hitl_always is True
+        assert execute.dry_run_supported is False
 
         assert export.readonly is False
         assert export.idempotent is False

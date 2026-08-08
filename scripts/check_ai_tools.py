@@ -2,19 +2,21 @@
 
 pre-commit + CI 双跑。零 DB 依赖（启动时不调 validate_on_startup）。
 
-10 项检查（spec §12.4 + Task 35）：
+12 项检查（spec §12.4 + Task 35a.3）：
   ✅ static-only（不查 DB）：
     1. sensitive_input_not_in_signature
     2. blocklist_field_must_be_sensitive
     3. destructive_requires_hitl
     4. high_risk_requires_dry_run
+    5. prepared_binding_valid
+    6. gateway_only_tool_not_llm_visible
     7. scope_param_requires_check（ast 解析函数体）
     8. summary_length_limit
     9. dry_run_tool_must_implement_hook
     10. file_param_requires_protected_loader
   ⏭️ startup-only（validate_on_startup 已覆盖，本脚本跳过）：
-    5. agent_must_exist_in_registry
-    6. perms_must_exist_in_menu
+    11. agent_must_exist_in_registry
+    12. perms_must_exist_in_menu
 
 用法：
   uv run python scripts/check_ai_tools.py
@@ -100,7 +102,7 @@ class Violation:
         )
 
 
-# ============ 10 项检查 ============
+# ============ 12 项检查 ============
 
 
 def check_sensitive_input_not_in_signature(
@@ -188,10 +190,19 @@ def check_destructive_requires_hitl(reg: RegisteredTool) -> list[Violation]:
     return []
 
 
-def check_high_risk_requires_dry_run(reg: RegisteredTool) -> list[Violation]:
+def check_high_risk_requires_dry_run(
+    reg: RegisteredTool,
+    *,
+    prepared_execute_names: set[str] | None = None,
+) -> list[Violation]:
     """spec §5.3: high risk 应有 dry_run_fn（否则 count=None 保守降级 HITL，
     影响单行修改场景的体验）"""
     if reg.meta.risk != "high":
+        return []
+
+    # Prepared execute tools display the already-frozen business preview.
+    # Running a second dry-run would create a competing confirmation summary.
+    if reg.meta.name in (prepared_execute_names or set()):
         return []
 
     # dry_run_fn 在 validate_on_startup 时统一解析（commit 51d732f），装饰器执行
@@ -227,6 +238,93 @@ def check_high_risk_requires_dry_run(reg: RegisteredTool) -> list[Violation]:
             )
         ]
     return []
+
+
+def check_prepared_binding_valid(
+    tools: list[RegisteredTool],
+) -> list[Violation]:
+    """ADR-0002: prepared tools must bind a forced-HITL direct capability."""
+    by_name = {tool.meta.name: tool for tool in tools}
+    violations: list[Violation] = []
+    for reg in tools:
+        meta = reg.meta
+        if meta.interaction_flow == "direct":
+            if meta.prepared_execute_tool is not None:
+                violations.append(
+                    Violation(
+                        meta.name,
+                        "prepared_binding_valid",
+                        "interaction_flow=direct cannot declare prepared_execute_tool",
+                    )
+                )
+            continue
+        if not meta.llm_visible:
+            violations.append(
+                Violation(
+                    meta.name,
+                    "prepared_binding_valid",
+                    "prepared preview must remain visible to the model",
+                )
+            )
+        execute_name = meta.prepared_execute_tool
+        execute = by_name.get(execute_name) if execute_name else None
+        if execute is None:
+            violations.append(
+                Violation(
+                    meta.name,
+                    "prepared_binding_valid",
+                    f"prepared_execute_tool {execute_name!r} is not registered",
+                )
+            )
+            continue
+        execute_meta = execute.meta
+        if execute_meta.interaction_flow != "direct":
+            violations.append(
+                Violation(
+                    meta.name,
+                    "prepared_binding_valid",
+                    f"execute tool {execute_name!r} cannot bind another prepared flow",
+                )
+            )
+        if execute_meta.agent not in {meta.agent, "shared"}:
+            violations.append(
+                Violation(
+                    meta.name,
+                    "prepared_binding_valid",
+                    f"execute tool {execute_name!r} belongs to agent {execute_meta.agent!r}",
+                )
+            )
+        if not execute_meta.hitl_always:
+            violations.append(
+                Violation(
+                    meta.name,
+                    "prepared_binding_valid",
+                    f"execute tool {execute_name!r} must set hitl_always=True",
+                )
+            )
+    return violations
+
+
+def check_gateway_only_tool_not_llm_visible(
+    tools: list[RegisteredTool],
+) -> list[Violation]:
+    """ADR-0002: prepared execute capabilities must never enter model schemas."""
+    by_name = {tool.meta.name: tool for tool in tools}
+    violations: list[Violation] = []
+    for reg in tools:
+        execute_name = reg.meta.prepared_execute_tool
+        if reg.meta.interaction_flow != "prepared" or not execute_name:
+            continue
+        execute = by_name.get(execute_name)
+        if execute is not None and execute.meta.llm_visible:
+            violations.append(
+                Violation(
+                    execute_name,
+                    "gateway_only_tool_not_llm_visible",
+                    f"prepared execute bound by {reg.meta.name!r} must set llm_visible=False",
+                )
+            )
+    return violations
 
 
 def check_scope_param_requires_check(
@@ -446,13 +544,26 @@ def run_all_checks() -> list[Violation]:
     """跑所有 static-only 检查"""
     tools = load_all_tools()
     violations: list[Violation] = []
+    prepared_execute_names = {
+        tool.meta.prepared_execute_tool
+        for tool in tools
+        if tool.meta.interaction_flow == "prepared"
+        and tool.meta.prepared_execute_tool is not None
+    }
+    violations.extend(check_prepared_binding_valid(tools))
+    violations.extend(check_gateway_only_tool_not_llm_visible(tools))
 
     for reg in tools:
         fn_src = get_fn_source(reg)
         violations.extend(check_sensitive_input_not_in_signature(reg, fn_src))
         violations.extend(check_blocklist_field_must_be_sensitive(reg, fn_src))
         violations.extend(check_destructive_requires_hitl(reg))
-        violations.extend(check_high_risk_requires_dry_run(reg))
+        violations.extend(
+            check_high_risk_requires_dry_run(
+                reg,
+                prepared_execute_names=prepared_execute_names,
+            )
+        )
         violations.extend(check_scope_param_requires_check(reg, fn_src))
         violations.extend(check_file_param_requires_protected_loader(reg, fn_src))
         violations.extend(check_summary_length_limit(reg))
@@ -469,7 +580,7 @@ def main() -> int:
     warnings = [v for v in violations if v.severity == "warning"]
 
     if not violations:
-        print(f"✅ All {len(ToolRegistry.get().all())} tools passed 10 static checks")
+        print(f"✅ All {len(ToolRegistry.get().all())} tools passed 12 static checks")
         return 0
 
     for v in violations:
