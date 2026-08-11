@@ -181,6 +181,8 @@ HITL confirmation_required 事件发生在 tool 执行**前**，此时：
 
 `PreparedAction` 持久保存原 `trace_id`、`source_user_message_id`、conversation/user/tenant/agent、prepare/execute toolCallId、安全 presentation、conversation run-guard ownership 和 ChatCommand 收口上下文；Redis PendingPayload 只缓存 waiter/通知所需 actionId，不能成为授权事实源。tenant 只能来自认证中间件/服务端 resolver。SSE 断开不能释放仍 pending 的 conversation guard；进入 pending 时 lease 延长至 `expires_at + 60s`。confirm terminal、action TTL、rejected/failed、启动清理与正常在线流都必须经共享 finalizer，且在 action/operation/message commit 后按 owner token 释放 guard。
 
+finalizer 在 INSERT/MERGE assistant 前必须复验 `source_user_message_id` 仍是同 conversation 下的 active user message。source/conversation 已删除、失活或绑定不一致时，只保留 action/operation terminal fact并返回 `messageId=null, projection=unchanged`，不得伪造孤儿 assistant，也不得让单条损坏/测试残留 action 阻断启动清理。**反例**: 直接按 action 中的数值 ID INSERT → source 删除或测试 fixture 使用假 ID 时触发 FK violation，整个 startup recovery 回滚。**回归**: missing/inactive/cross-conversation source 均不 INSERT；合法 active source 仍按 `(conversation, trace)` 幂等收口。
+
 active projection 必须按 action/outcome 分支：
 
 - `send` / `edit`：有 terminal tool result 时，approved/rejected/expired/failed 均可形成可 reload 的 active tool-only assistant；edit 的 replacement user 已提交，失败不恢复旧 suffix。
@@ -467,7 +469,7 @@ POST /ai/confirm {confirmationId, action:"approve"}
 - [x] Task 35a-W2 **✅ 已完成（2026-08-08）**：Drawer 只渲染 ConfirmationPresentation，approve/reject 只传 confirmationId/action；文本“请确认”永不触发 UI
 - [ ] Task 35a-W3（依赖下方 Task 0-2）：streaming/reload 派生 transient pending assistant group；prepared preview/pending/execute 最终归同一 message group
   - [x] Task 35a-W3a **✅ durable prepared 子集已完成（2026-08-08）**：reload 派生安全 transient pending 卡，terminal detail 以同 trace/source 的 preview/execute toolCalls 接管并去重；完整 per-message wrapper/末尾列表移除仍由 Phase 1 Task 3/4 完成
-- [x] Task 35a-W4 **✅ 已完成（2026-08-08）**：后端 1768 pytest、前端 43 Vitest/typecheck/build 与真实浏览器 prepared execute/reload/preview-only E2E 全绿；Task 35a 已解除对 Task 36 的阻塞
+- [ ] Task 35a-W4 **⚠️ 实跑验收 gap（2026-08-11 纠偏）**：后端 867 个 AI pytest、前端 43 Vitest/typecheck/build 已通过；仓库已新增 prepared execute、reload pending、preview-only 三条确定性 Playwright，且 `--list` 可发现 3/3。由于本地 9527/8000/5432 未启动，尚未真实浏览器实跑，完成前不得宣称 Task 35a 浏览器验收完成
 
 ### Phase 1（消息归属与耐久性收尾，本期）
 

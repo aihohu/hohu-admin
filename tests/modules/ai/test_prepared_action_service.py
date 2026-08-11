@@ -55,7 +55,10 @@ def _create_kwargs() -> dict:
         "subject_ref": {"type": "user_import_batch", "id": "batch-prepared-1"},
         "presentation": {
             "title": "Import 2 users",
-            "fields": {"new": 2, "onConflict": "skip"},
+            "fields": [
+                {"label": "new", "value": 2},
+                {"label": "onConflict", "value": "skip"},
+            ],
             "warnings": [],
         },
         "user_id": 9001,
@@ -93,6 +96,76 @@ async def test_create_pending_freezes_policy_and_trusted_identity(db_session) ->
     assert action.user_id == 9001
     assert action.tenant_id == 77
     assert action.source_user_message_id == 101
+
+
+async def test_create_pending_supports_direct_hitl_with_same_state_machine(
+    db_session,
+) -> None:
+    kwargs = _create_kwargs()
+    snapshot = {"tool": "user.batch_delete", "argsHash": "hash", "dryRun": None}
+    kwargs.update(
+        confirmation_id="cid_direct_action_001",
+        prepare_tool_call_id=None,
+        execute_tool_call_id="tc_direct_001",
+        execute_tool_name="user.batch_delete",
+        frozen_args={},
+        snapshot=snapshot,
+        snapshot_hash=canonical_payload_hash(snapshot),
+        subject_ref=None,
+        presentation={
+            "title": "user.batch_delete",
+            "fields": [],
+            "warnings": ["此操作不可逆，请确认影响范围。"],
+        },
+        interaction_flow="direct",
+        requested_outcome="direct",
+    )
+
+    action = await prepared_action_service.create_pending(db_session, **kwargs)
+
+    assert action.interaction_flow == "direct"
+    assert action.requested_outcome == "direct"
+    assert action.prepare_tool_call_id is None
+    assert action.status == "pending_confirmation"
+
+
+@pytest.mark.parametrize(
+    "presentation",
+    [
+        {"title": "Import", "fields": {"new": 2}, "warnings": []},
+        {
+            "title": "Import",
+            "fields": [{"label": "previewToken", "value": "secret"}],
+            "warnings": [],
+        },
+        {
+            "title": "Import",
+            "fields": [{"label": "new", "value": {"count": 2}}],
+            "warnings": [],
+        },
+        {
+            "title": "Import",
+            "summary": "preview_token=server-only-token",
+            "fields": [],
+            "warnings": [],
+        },
+        {
+            "title": "Import",
+            "fields": [],
+            "warnings": ["See https://private.example/import/1"],
+        },
+    ],
+)
+async def test_confirmation_presentation_rejects_noncanonical_or_sensitive_fields(
+    db_session, presentation
+) -> None:
+    kwargs = _create_kwargs()
+    kwargs["presentation"] = presentation
+
+    with pytest.raises(BusinessRuleException) as exc_info:
+        await prepared_action_service.create_pending(db_session, **kwargs)
+
+    assert exc_info.value.error_code == "AI_PREPARED_ACTION_BINDING_INVALID"
 
 
 async def test_pending_binding_rejects_changed_execute_args(db_session) -> None:

@@ -91,7 +91,6 @@ class ConfirmationRequiredEvent:
     tool: str
     tool_call_id: str
     summary: str
-    args: dict[str, Any]
     expires_at: str  # ISO 8601 UTC，e.g. "2026-07-02T14:07:30Z"
     dry_run: DryRunSummary | None = None
     action_id: int | None = None
@@ -115,7 +114,6 @@ class ConfirmationResumedEvent:
     tool: str
     tool_call_id: str
     summary: str
-    args: dict[str, Any]
     expires_at: str
     resumed_at: str
     dry_run: DryRunSummary | None = None
@@ -217,7 +215,6 @@ def event_to_sse_data(event: AiStreamEvent) -> str:
             "tool": event.tool,
             "toolCallId": event.tool_call_id,
             "summary": event.summary,
-            "args": event.args,
             "expiresAt": event.expires_at,
             "dryRun": _dry_run_to_dict(event.dry_run),
             "actionId": event.action_id,
@@ -232,7 +229,6 @@ def event_to_sse_data(event: AiStreamEvent) -> str:
             "tool": event.tool,
             "toolCallId": event.tool_call_id,
             "summary": event.summary,
-            "args": event.args,
             "expiresAt": event.expires_at,
             "resumedAt": event.resumed_at,
             "dryRun": _dry_run_to_dict(event.dry_run),

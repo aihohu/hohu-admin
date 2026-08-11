@@ -36,6 +36,7 @@ from app.core import redis as redis_module
 from app.core.config import settings
 from app.modules.ai.agents.gateway.executor import execute_tool
 from app.modules.ai.agents.gateway.quota import _KEY_L2, DEFAULT_L2_DAILY_QUOTA
+from app.modules.ai.agents.gateway.result import ToolResult
 from app.modules.ai.agents.gateway.targets import ensure_targets_in_scope
 from app.modules.ai.agents.hitl.constants import ConfirmAction
 from app.modules.ai.agents.hitl.events import (
@@ -86,6 +87,9 @@ async def clean_env():
     async with AsyncSessionLocal() as db:
         async with db.begin():
             await db.execute(
+                text("DELETE FROM ai_prepared_action WHERE trace_id = 'tr_authz_test'")
+            )
+            await db.execute(
                 text("DELETE FROM ai_operation_log WHERE trace_id = 'tr_authz_test'")
             )
 
@@ -105,6 +109,9 @@ async def clean_env():
 
     async with AsyncSessionLocal() as db:
         async with db.begin():
+            await db.execute(
+                text("DELETE FROM ai_prepared_action WHERE trace_id = 'tr_authz_test'")
+            )
             await db.execute(
                 text("DELETE FROM ai_operation_log WHERE trace_id = 'tr_authz_test'")
             )
@@ -302,7 +309,18 @@ def _build_deps(
         agent=agent,
         trace_id="tr_authz_test",
         conversation_id=200,
+        source_user_message_id=201,
         signal_event=signal_event,
+    )
+
+
+def _mock_durable_success(monkeypatch) -> None:  # noqa: ANN001
+    async def fake_terminal_result(confirmation_id):  # noqa: ARG001
+        return ToolResult.success({"approved": True}), 1
+
+    monkeypatch.setattr(
+        "app.modules.ai.agents.gateway.executor._load_prepared_terminal_result",
+        fake_terminal_result,
     )
 
 
@@ -382,6 +400,7 @@ class TestCase3HighRiskMultiRowHitl:
             return ConfirmAction.APPROVED
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
+        _mock_durable_success(monkeypatch)
 
         deps = _build_deps()
         result, events = await _execute_and_collect(_T_HIGH_MULTI, {}, deps)
@@ -405,6 +424,7 @@ class TestCase4DestructiveHitl:
             return ConfirmAction.APPROVED
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
+        _mock_durable_success(monkeypatch)
 
         deps = _build_deps()
         result, events = await _execute_and_collect(_T_DESTRUCTIVE, {}, deps)
@@ -526,6 +546,7 @@ class TestCase8HitlAlwaysForcesHitl:
             return ConfirmAction.APPROVED
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
+        _mock_durable_success(monkeypatch)
 
         deps = _build_deps()
         result, events = await _execute_and_collect(_T_HITL_ALWAYS, {}, deps)
@@ -582,6 +603,7 @@ class TestCase10InjectionDetector:
             return ConfirmAction.APPROVED
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
+        _mock_durable_success(monkeypatch)
 
         # injection_hit=True 触发强制 HITL（即使 risk=low）
         deps = _build_deps()

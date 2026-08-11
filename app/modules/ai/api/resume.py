@@ -100,10 +100,17 @@ def _build_resumed_event(confirmation_id: str, pending) -> ConfirmationResumedEv
         tool=pending.tool_name,
         tool_call_id=pending.tool_call_id,
         summary=f"resume: tool={pending.tool_name}",
-        args=pending.args,
         expires_at=pending.expires_at,
         resumed_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         dry_run=dry_run,
+        presentation={
+            "title": pending.tool_name,
+            "summary": (
+                dry_run.summary if dry_run is not None else f"tool={pending.tool_name}"
+            ),
+            "fields": [],
+            "warnings": [],
+        },
     )
 
 

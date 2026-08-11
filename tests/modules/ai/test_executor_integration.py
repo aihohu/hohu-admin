@@ -12,7 +12,7 @@ import inspect
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import redis.asyncio as aioredis
@@ -211,7 +211,10 @@ def _register_test_tools() -> None:
                 subject_ref={"type": "test_import", "id": "batch-1"},
                 presentation={
                     "title": "Import 2 users",
-                    "fields": {"new": 2, "exists": 0},
+                    "fields": [
+                        {"label": "new", "value": 2},
+                        {"label": "exists", "value": 0},
+                    ],
                     "warnings": [],
                 },
                 expires_at=datetime.now(UTC) + timedelta(minutes=10),
@@ -679,8 +682,66 @@ class TestPreparedPreviewOnlyFlow:
 
 
 class TestHitlFlow:
+    async def test_action_persistence_failure_rolls_back_pending_handoff(
+        self, monkeypatch
+    ) -> None:
+        """SR-36: no durable action means no Redis pending or handed-off guard."""
+        from app.modules.ai.service.chat_run_service import chat_run_guard
+        from app.modules.ai.service.prepared_action_service import (
+            prepared_action_service,
+        )
+
+        _register_test_tools()
+        deps = _build_deps()
+        deps.guard_owner_token = "guard-owner-test"
+
+        handoff = AsyncMock(return_value=True)
+        release = AsyncMock(return_value=True)
+        delete_pending = AsyncMock()
+        persist = AsyncMock(side_effect=RuntimeError("action persistence failed"))
+        monkeypatch.setattr(chat_run_guard, "handoff_pending", handoff)
+        monkeypatch.setattr(chat_run_guard, "release", release)
+        monkeypatch.setattr(hitl_manager, "delete_pending", delete_pending)
+        monkeypatch.setattr(prepared_action_service, "create_pending", persist)
+
+        with pytest.raises(RuntimeError, match="action persistence failed"):
+            await execute_tool(_TEST_TOOL_HIGH, {"x": 1}, deps)
+
+        handoff.assert_awaited_once()
+        delete_pending.assert_awaited_once()
+        release.assert_awaited_once_with(
+            redis_module.redis_client,
+            conversation_id=100,
+            owner_token="guard-owner-test",
+        )
+        assert deps.guard_handoff is False
+
+    def test_direct_action_revalidates_current_gateway_binding(self) -> None:
+        from types import SimpleNamespace
+
+        from app.modules.ai.agents.gateway.executor import (
+            validate_prepared_execution,
+        )
+        from app.modules.ai.agents.gateway.failures import compute_args_hash
+
+        _register_test_tools()
+        frozen_args = {"x": 1}
+        action = SimpleNamespace(
+            interaction_flow="direct",
+            execute_tool_name=_TEST_TOOL_HIGH,
+            frozen_args=frozen_args,
+            args_hash=compute_args_hash(frozen_args),
+            agent_code="shared",
+        )
+        deps = _build_deps()
+        deps.agent.enabled = True
+
+        registered = validate_prepared_execution(action, deps)
+
+        assert registered.meta.name == _TEST_TOOL_HIGH
+
     async def test_prepared_preview_auto_enters_confirmation(self, monkeypatch) -> None:
-        """Task 35a.1: one model preview call is enough to enter HITL."""
+        """Task 35a.1: one explicit execute intent is enough to enter HITL."""
         _register_test_tools()
 
         async def fake_hang(confirmation_id, *, timeout_sec=None):
@@ -715,9 +776,12 @@ class TestHitlFlow:
             event for event in events if isinstance(event, ConfirmationRequiredEvent)
         )
         assert confirmation.tool == _TEST_TOOL_PREPARED_EXECUTE
-        assert confirmation.args == {
+        assert confirmation.presentation == {
             "title": "Import 2 users",
-            "fields": {"new": 2, "exists": 0},
+            "fields": [
+                {"label": "new", "value": 2},
+                {"label": "exists", "value": 0},
+            ],
             "warnings": [],
         }
         assert "server-only-token" not in repr(events)
@@ -753,6 +817,24 @@ class TestHitlFlow:
             confirmation.expires_at.replace("Z", "+00:00")
         )
 
+    async def test_prepared_preview_rejects_missing_outcome(self) -> None:
+        """SR-33: omission is not treated as execute intent."""
+        _register_test_tools()
+        events: list[Any] = []
+
+        async def collect(ev: Any) -> None:
+            events.append(ev)
+
+        result = await execute_tool(
+            _TEST_TOOL_PREPARE,
+            {"resource_id": "file-1"},
+            _build_deps(signal_event=collect),
+        )
+
+        assert not result.ok
+        assert result.error_code == "AI_PREPARED_OUTCOME_REQUIRED"
+        assert events == []
+
     async def test_high_risk_triggers_hitl_approved(self, monkeypatch) -> None:
         """high risk + count=None（无 dry_run_fn）→ HITL，mock hang 立即 APPROVED"""
         _register_test_tools()
@@ -760,7 +842,14 @@ class TestHitlFlow:
         async def fake_hang(confirmation_id, *, timeout_sec=None):
             return ConfirmAction.APPROVED
 
+        async def fake_terminal_result(confirmation_id):
+            return ToolResult.success({"echo": {"x": 1}}), 1
+
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
+        monkeypatch.setattr(
+            "app.modules.ai.agents.gateway.executor._load_prepared_terminal_result",
+            fake_terminal_result,
+        )
 
         events: list[Any] = []
 
@@ -790,27 +879,20 @@ class TestHitlFlow:
         async def fake_hang(confirmation_id, *, timeout_sec=None):
             return ConfirmAction.REJECTED
 
+        async def fake_terminal_result(confirmation_id):
+            return ToolResult.failure("USER_REJECTED", "cancelled"), 0
+
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
+        monkeypatch.setattr(
+            "app.modules.ai.agents.gateway.executor._load_prepared_terminal_result",
+            fake_terminal_result,
+        )
 
         deps = _build_deps()
         result = await execute_tool(_TEST_TOOL_HIGH, {}, deps)
 
         assert not result.ok
         assert result.error_code == "USER_REJECTED"
-
-        from app.db.session import AsyncSessionLocal
-
-        async with AsyncSessionLocal() as db:
-            res = await db.execute(
-                text(
-                    "SELECT status FROM ai_operation_log "
-                    "WHERE trace_id = 'tr_test_001' "
-                    "ORDER BY log_id DESC LIMIT 1"
-                )
-            )
-            row = res.first()
-            assert row is not None
-            assert row.status == "rejected"
 
     async def test_hitl_timeout(self, monkeypatch) -> None:
         """HITL 超时 → AI_HITL_EXPIRED + log status=expired"""
@@ -820,6 +902,10 @@ class TestHitlFlow:
             raise TimeoutError("test timeout")
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
+        monkeypatch.setattr(
+            "app.modules.ai.service.chat_run_service.chat_run_finalizer.finalize_prepared_action",
+            AsyncMock(return_value=None),
+        )
 
         deps = _build_deps()
         result = await execute_tool(_TEST_TOOL_HIGH, {}, deps)
@@ -841,8 +927,10 @@ class TestHitlFlow:
             assert row is not None
             assert row.status == "expired"
 
-    async def test_confirmation_event_carries_payload(self, monkeypatch) -> None:
-        """confirmation_required 事件含 confirmation_id / expires_at / args"""
+    async def test_confirmation_event_carries_safe_presentation(
+        self, monkeypatch
+    ) -> None:
+        """confirmation_required exposes an action and safe DTO, never raw args."""
         _register_test_tools()
 
         async def fake_hang(confirmation_id, *, timeout_sec=None):
@@ -864,7 +952,15 @@ class TestHitlFlow:
         assert ev.tool == _TEST_TOOL_HIGH
         assert ev.confirmation_id
         assert ev.expires_at.endswith("Z")
-        assert ev.args == {"x": 1}
+        assert ev.action_id is not None
+        assert ev.interaction_flow == "direct"
+        assert ev.presentation == {
+            "title": _TEST_TOOL_HIGH,
+            "summary": "test high risk",
+            "fields": [],
+            "warnings": [],
+        }
+        assert not hasattr(ev, "args")
 
 
 # ============ query_cache 写入（spec §8.7） ============
@@ -1136,6 +1232,7 @@ class TestPerAgentQuota:
             agent=agent,
             trace_id="tr_test_agent_pass",
             conversation_id=400,
+            source_user_message_id=401,
         )
 
         # low risk tool 也会触发 quota 检查吗？不会——is_write_tool=False。
@@ -1147,6 +1244,10 @@ class TestPerAgentQuota:
             raise TimeoutError("quota test does not wait for human input")
 
         monkeypatch.setattr(hitl_manager, "hang", expire_immediately)
+        monkeypatch.setattr(
+            "app.modules.ai.service.chat_run_service.chat_run_finalizer.finalize_prepared_action",
+            AsyncMock(return_value=None),
+        )
         await execute_tool(_TEST_TOOL_HIGH, {"x": 1}, deps)
 
         from datetime import UTC, datetime

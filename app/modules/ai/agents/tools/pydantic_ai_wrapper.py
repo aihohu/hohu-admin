@@ -23,8 +23,9 @@ Phase 3.2 关键变化（vs Phase 1.2b）：
 import inspect
 import json
 from collections.abc import Awaitable, Callable
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
+from pydantic import Field
 from pydantic_ai import RunContext, Tool
 
 from app.modules.ai.agents.gateway.executor import execute_tool
@@ -35,6 +36,17 @@ from app.modules.ai.agents.tools.registry import (
     compute_available_tools,
 )
 from app.modules.ai.core.context import ChatDeps
+
+PreparedRequestedOutcome = Annotated[
+    Literal["preview_only", "execute_if_approved"],
+    Field(
+        description=(
+            "Use preview_only only when the user explicitly asks to preview without "
+            "executing. For import, apply, or execute requests, use "
+            "execute_if_approved so the Gateway opens a confirmation."
+        )
+    ),
+]
 
 
 def _build_wrapper_signature(
@@ -69,7 +81,7 @@ def _build_wrapper_signature(
         requested_outcome = inspect.Parameter(
             "requested_outcome",
             kind=inspect.Parameter.KEYWORD_ONLY,
-            annotation=Literal["preview_only", "execute_if_approved"],
+            annotation=PreparedRequestedOutcome,
         )
         var_keyword_index = next(
             (
@@ -83,7 +95,11 @@ def _build_wrapper_signature(
     return orig_sig.replace(parameters=new_params)
 
 
-def _tool_result_to_llm_string(result: ToolResult) -> str:
+def _tool_result_to_llm_string(
+    result: ToolResult,
+    *,
+    prepared_outcome: str | None = None,
+) -> str:
     """把 ToolResult 序列化为 LLM 友好字符串
 
     LLM 看到的格式：
@@ -91,10 +107,29 @@ def _tool_result_to_llm_string(result: ToolResult) -> str:
       failure: "[ToolError:CODE] msg"（让 LLM 知道是失败而非业务数据）
     """
     if result.ok:
+        data = result.data
+        if prepared_outcome == "execute_if_approved":
+            data = {
+                "_gateway": {
+                    "interactionFlow": "prepared",
+                    "actionStatus": "executed",
+                    "confirmationStatus": "approved",
+                },
+                "result": result.data,
+            }
+        elif prepared_outcome == "preview_only":
+            data = {
+                "_gateway": {
+                    "interactionFlow": "prepared",
+                    "actionStatus": "previewed",
+                    "confirmationStatus": "not_requested",
+                },
+                "result": result.data,
+            }
         try:
-            return json.dumps(result.data, ensure_ascii=False, default=str)
+            return json.dumps(data, ensure_ascii=False, default=str)
         except (TypeError, ValueError):
-            return str(result.data)
+            return str(data)
     return f"[ToolError:{result.error_code}] {result.error_msg}"
 
 
@@ -112,8 +147,16 @@ def wrap_tool_for_pydantic_ai(registered: RegisteredTool) -> Tool:
 
     async def wrapper(ctx: RunContext[ChatDeps], **kwargs: Any) -> str:
         deps = ctx.deps
+        prepared_outcome = (
+            kwargs.get("requested_outcome")
+            if meta.interaction_flow == "prepared"
+            else None
+        )
         result = await execute_tool(meta.name, kwargs, deps)
-        return _tool_result_to_llm_string(result)
+        return _tool_result_to_llm_string(
+            result,
+            prepared_outcome=prepared_outcome,
+        )
 
     # 注入动态签名（让 PydanticAI 推断正确的 JSON schema）
     wrapper.__signature__ = _build_wrapper_signature(  # type: ignore[attr-defined]
@@ -128,9 +171,7 @@ def wrap_tool_for_pydantic_ai(registered: RegisteredTool) -> Tool:
     first_param_name = next(iter(orig_sig.parameters.keys()))
     orig_annotations[first_param_name] = RunContext[ChatDeps]
     if meta.interaction_flow == "prepared":
-        orig_annotations["requested_outcome"] = Literal[
-            "preview_only", "execute_if_approved"
-        ]
+        orig_annotations["requested_outcome"] = PreparedRequestedOutcome
     wrapper.__annotations__ = orig_annotations
 
     wrapper.__name__ = meta.name.replace(".", "_")

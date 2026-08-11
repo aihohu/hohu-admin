@@ -1067,7 +1067,8 @@ async def _load_file_bytes(ctx: AiToolContext, file_id: str) -> tuple[bytes, str
         name="user.import_preview",
         agent="user_mgmt",
         summary=(
-            "Preview a user import; set requested_outcome to preview only or request approval."
+            "Prepare user import; requested_outcome is required. Gateway owns "
+            "confirmation and execution."
         ),
         required_perms=("system:user:import",),
         risk="low",
@@ -1206,15 +1207,18 @@ async def user_import_preview(
             },
             presentation={
                 "title": "确认导入用户",
-                "fields": {
-                    "total": dry_run_result.total,
-                    "new": dry_run_result.new_count,
-                    "exists": dry_run_result.exists_count,
-                    "conflict": dry_run_result.conflict_count,
-                    "outOfScope": dry_run_result.out_of_scope_count,
-                    "onConflict": on_conflict,
-                    "syncMode": sync_mode,
-                },
+                "fields": [
+                    {"label": "total", "value": dry_run_result.total},
+                    {"label": "new", "value": dry_run_result.new_count},
+                    {"label": "exists", "value": dry_run_result.exists_count},
+                    {"label": "conflict", "value": dry_run_result.conflict_count},
+                    {
+                        "label": "outOfScope",
+                        "value": dry_run_result.out_of_scope_count,
+                    },
+                    {"label": "onConflict", "value": on_conflict},
+                    {"label": "syncMode", "value": sync_mode},
+                ],
                 "warnings": [],
             },
             expires_at=batch.created_at + timedelta(minutes=10),

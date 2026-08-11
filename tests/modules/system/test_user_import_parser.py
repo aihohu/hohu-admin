@@ -13,6 +13,7 @@
 """
 
 import io
+import warnings
 import zipfile
 
 import pytest
@@ -87,6 +88,20 @@ def _replace_zip_member(data: bytes, name: str, replacement: bytes) -> bytes:
                 replacement if info.filename == name else source.read(info.filename),
             )
     return output.getvalue()
+
+
+def _xlsx_with_data_validation_extension(rows: list[list[str]]) -> bytes:
+    data = _xlsx_bytes(rows)
+    with zipfile.ZipFile(io.BytesIO(data)) as source:
+        worksheet = source.read("xl/worksheets/sheet1.xml")
+    extension = (
+        b'<extLst><ext uri="{CCE6A557-97BC-4B89-ADB6-D9C93CAAB3DF}">'
+        b'<x14:dataValidations xmlns:x14="http://schemas.microsoft.com/'
+        b'office/spreadsheetml/2009/9/main" count="0"/>'
+        b"</ext></extLst>"
+    )
+    worksheet = worksheet.replace(b"</worksheet>", extension + b"</worksheet>")
+    return _replace_zip_member(data, "xl/worksheets/sheet1.xml", worksheet)
 
 
 MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -315,6 +330,20 @@ class TestParseXlsxBasic:
         assert records[0].role_input == "R_DEV"
         assert records[0].user_gender == "1"
         assert records[0].status == "1"
+
+    def test_value_only_import_suppresses_data_validation_extension_warning(self):
+        rows = [["alice", "", "Alice", "", "", "QA", "", "0", "1"]]
+        data = _xlsx_with_data_validation_extension(rows)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            records = parse_import_excel(data, MIME_XLSX)
+
+        assert records[0].user_name == "alice"
+        assert not any(
+            "Data Validation extension is not supported" in str(item.message)
+            for item in caught
+        )
 
     def test_parse_csv_basic(self):
         rows = [

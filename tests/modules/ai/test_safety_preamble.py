@@ -50,9 +50,9 @@ class TestSafetyPreambleContent:
         """spec §7.6: 必须以 [SAFETY PREAMBLE — priority...] 开头"""
         assert SAFETY_PREAMBLE.startswith("[SAFETY PREAMBLE")
 
-    def test_contains_six_rules(self) -> None:
+    def test_contains_seven_rules(self) -> None:
         """spec §7.6: 6 条规则全"""
-        for i in range(1, 7):
+        for i in range(1, 8):
             assert f"\n{i}. " in SAFETY_PREAMBLE, f"Rule {i} missing"
 
     def test_rule_1_permission_boundary(self) -> None:
@@ -78,6 +78,11 @@ class TestSafetyPreambleContent:
         """spec §7.6 / §2.9: readonly tool 后必须转述关键发现"""
         assert "Read obligation" in SAFETY_PREAMBLE
         assert "risk=low" in SAFETY_PREAMBLE
+
+    def test_rule_7_gateway_owned_prepared_confirmation(self) -> None:
+        assert "Prepared-action confirmation is Gateway-owned" in SAFETY_PREAMBLE
+        assert "actionStatus=executed" in SAFETY_PREAMBLE
+        assert "Never ask for confirmation" in SAFETY_PREAMBLE
 
 
 # ============ _perm_prefix ============

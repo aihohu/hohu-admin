@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any
 
+from pydantic import ValidationError
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +16,7 @@ from app.modules.ai.agents.hitl.manager import PendingPayload
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.prepared_action import AiPreparedAction
+from app.modules.ai.schemas.confirm import ConfirmationPresentation
 from app.modules.ai.schemas.conversation import PendingActionOut
 
 
@@ -83,6 +85,8 @@ class PreparedActionService:
         snapshot_hash: str,
         subject_ref: dict[str, Any] | None,
         presentation: dict[str, Any],
+        interaction_flow: str = "prepared",
+        requested_outcome: str = "execute_if_approved",
         user_id: int,
         tenant_id: int,
         conversation_id: int,
@@ -98,9 +102,18 @@ class PreparedActionService:
         """Persist one immutable authorization proposal without committing."""
         if conversation_id <= 0 or source_user_message_id <= 0 or not trace_id:
             raise _binding_invalid("prepared action 缺少可信会话或 source message 绑定")
-        if not frozen_args or not snapshot or not presentation:
-            raise _binding_invalid("prepared action 冻结参数、快照或展示摘要为空")
-        self.validate_presentation(presentation)
+        if not snapshot or not presentation:
+            raise _binding_invalid("action 快照或展示摘要为空")
+        if interaction_flow not in {"direct", "prepared"}:
+            raise _binding_invalid("action interaction flow 无效")
+        if (
+            interaction_flow == "prepared"
+            and requested_outcome != "execute_if_approved"
+        ):
+            raise _binding_invalid("prepared action outcome 无效")
+        if interaction_flow == "direct" and requested_outcome != "direct":
+            raise _binding_invalid("direct action outcome 无效")
+        normalized_presentation = self.validate_presentation(presentation)
 
         computed_snapshot_hash = canonical_payload_hash(snapshot)
         if snapshot_hash and snapshot_hash != computed_snapshot_hash:
@@ -112,8 +125,8 @@ class PreparedActionService:
             confirmation_id=confirmation_id,
             status="pending_confirmation",
             row_version=1,
-            interaction_flow="prepared",
-            requested_outcome="execute_if_approved",
+            interaction_flow=interaction_flow,
+            requested_outcome=requested_outcome,
             approval_mode="hitl",
             dispatch_mode="inline",
             prepare_tool_call_id=prepare_tool_call_id,
@@ -124,7 +137,7 @@ class PreparedActionService:
             snapshot=dict(snapshot),
             snapshot_hash=computed_snapshot_hash,
             subject_ref=dict(subject_ref) if subject_ref is not None else None,
-            presentation=dict(presentation),
+            presentation=normalized_presentation,
             user_id=user_id,
             tenant_id=tenant_id,
             conversation_id=conversation_id,
@@ -335,34 +348,15 @@ class PreparedActionService:
         )
 
     @staticmethod
-    def validate_presentation(presentation: dict[str, Any]) -> None:
-        """Keep confirmation UI data flat, bounded and free of capability fields."""
-        allowed = {"title", "summary", "fields", "warnings"}
-        forbidden_fragments = ("token", "secret", "password", "path", "url", "html")
-        if set(presentation) - allowed:
-            raise _binding_invalid("confirmation presentation 含未允许字段")
-        fields = presentation.get("fields", {})
-        warnings = presentation.get("warnings", [])
-        if not isinstance(fields, dict) or len(fields) > 20:
-            raise _binding_invalid("confirmation presentation fields 无效或过多")
-        if not isinstance(warnings, list) or len(warnings) > 10:
-            raise _binding_invalid("confirmation presentation warnings 无效或过多")
-        for key, value in fields.items():
-            key_text = str(key).lower()
-            if any(fragment in key_text for fragment in forbidden_fragments):
-                raise _binding_invalid("confirmation presentation 含敏感字段")
-            if not isinstance(value, str | int | float) or isinstance(value, bool):
-                raise _binding_invalid(
-                    "confirmation presentation fields 必须为扁平标量"
-                )
-            if len(str(key)) > 64 or len(str(value)) > 256:
-                raise _binding_invalid("confirmation presentation field 过长")
-        for key in ("title", "summary"):
-            value = presentation.get(key)
-            if value is not None and (not isinstance(value, str) or len(value) > 500):
-                raise _binding_invalid(f"confirmation presentation {key} 无效")
-        if any(not isinstance(item, str) or len(item) > 500 for item in warnings):
-            raise _binding_invalid("confirmation presentation warning 无效")
+    def validate_presentation(presentation: dict[str, Any]) -> dict[str, Any]:
+        """Return the canonical ordered DTO or fail closed."""
+        try:
+            validated = ConfirmationPresentation.model_validate(presentation)
+        except ValidationError as exc:
+            raise _binding_invalid(
+                "confirmation presentation 无效或含敏感字段"
+            ) from exc
+        return validated.model_dump(exclude_none=True)
 
     def validate_pending_binding(
         self, action: AiPreparedAction, pending: PendingPayload

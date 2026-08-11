@@ -1,6 +1,6 @@
 # AI Tool Gateway 设计
 
-> **状态**: Draft（现有 direct HITL 与 ADR-0002 Task 35a `prepared + hitl + inline` 首个完整纵向切片已落地；完整消息内嵌与 edit/regenerate 仍按各自 spec 推进）
+> **状态**: Draft（ADR-0002 的 prepared/direct 统一 action 主链与安全 DTO 已落地；真实浏览器验收与完整消息内嵌仍是 release gap）
 > **日期**: 2026-07-02
 > **更新**: 2026-08-08
 > **作者**: Jack
@@ -808,7 +808,7 @@ async def user_distinct(ctx: AiToolContext, field: str) -> list[str]:
 
 1. prepared tool 必须声明 `prepared_execute_tool`，目标存在、同 agent 或显式 shared、`llm_visible=False`，且不能再绑定下一个 prepared tool；
 2. execute tool 不进入 `compute_available_tools` / PydanticAI schema；普通 executor 入口即使猜到已绑定 execute 名字也返回 `AI_PREPARED_ACTION_REQUIRED`，未绑定的其他隐藏 capability 返回 `AI_TOOL_NOT_AVAILABLE_TO_MODEL`；
-3. prepared tool 的模型侧 schema 由 wrapper 增加保留字段 `requested_outcome: preview_only | execute_if_approved`，Gateway 在调用业务函数前剥离该字段；业务函数不以它作为授权输入；
+3. prepared tool 的模型侧 schema 由 wrapper 增加**必填**保留字段 `requested_outcome: preview_only | execute_if_approved`，Gateway 在调用业务函数前剥离该字段；业务函数不以它作为授权输入。模型必须结构化表达当前用户意图，字段缺失或非法时返回 `AI_PREPARED_OUTCOME_REQUIRED`，不得把省略参数解释为执行意图；
 4. prepared tool 成功结果必须提供内部 `PreparedActionProposal`，其中含 frozen execute args、snapshot/hash、subject ref、过期时间和 presentation；该 proposal 不序列化给 LLM；
 5. `preview_only` 只把已脱敏 preview data 返回 LLM，不持久化 `PreparedAction`；`execute_if_approved` 校验 proposal 后自动持久化 action 并进入 confirmation，不要求第二次 LLM tool call；
 6. preview-only 不得事后“升级”为执行型 action；用户之后改为要求执行时必须重新调用 prepare，确保策略、权限和 snapshot 都是当前值。
@@ -2730,7 +2730,7 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 > ✅ **Plan 4 已完成（2026-07-08）**: Phase 4 安全硬化完整版 — (1) `AiToolMeta.super_admin_only` 字段 + executor 短路返回 `AI_SUPER_ADMIN_REQUIRED`（鉴权矩阵 #7 双 case 覆盖）；(2) `app/modules/ai/agents/safety/injection_detector.py` 落地 L2 7 类攻击 pattern 检测（中英双语 + 大小写不敏感），chat.py 入口跑 detector 写 `ChatDeps.injection_hit=True`，executor 据此强制 HITL（鉴权矩阵 #10 双 case 覆盖）；(3) `executor._start_log` 命中 injection_hit 时传 `is_security_event=True, event_type='injection_pattern_matched'` 落 `ai_operation_log`（§11.1）；(4) `scripts/check_ai_tools.py` 7 项 static-only 检查 + `.pre-commit-config.yaml` 集成 ai-tools-static-check hook（pre-commit + CI 双跑）；(5) `tests/modules/ai/test_injection_detector.py` 39 测试（pattern 命中 + 不误报）+ `tests/scripts/test_check_ai_tools.py` 27 测试（构造违规 meta 验证 7 项检查器能检出）；(6) 鉴权矩阵从 9/11 推到 11/11 全通 + 注入命中后断言 `ai_operation_log.is_security_event=True`。**未含**：L3 通用 `_sanitize_arg`（spec §11.1 L3 层）— MVP 阶段实际由 §6.2 ensure_targets_in_scope（数据鉴权）+ §5.5 allowed_filters/allowed_group_by 白名单 + §7 sensitive_output 黑名单覆盖，通用版本（每 tool 的 args 形态不同难统一）留 v2+。
 > ✅ **Plan 3.5 已完成（2026-07-08）**: §12 卡片视觉增强 + §8.7 chip 跳转回放 — (1) §12 卡片视觉：`events.py` 加 `risk`/`duration_ms`/`affected_rows`/`trace_id` 字段 + `event_to_sse_data` 改显式 camelCase 构造（修了后端 snake_case / 前端 camelCase 不一致 bug）；executor emit 时透传 risk=meta.risk + 计算 duration_ms + `_infer_affected_rows` 推断（dry_run_count 优先 → dict `affected_count`/`count`/`groups_count` 等 → list 长度 → None）；前端 `chat-tool-call.vue` 完整重写：3px 状态色条 + 中文 desc 字典 + risk chip + 状态文本「已执行 · 230ms · 1 行」+ chevron 折叠/展开 + pulse 动画 + dark theme。(2) §12 场景 4/5 HITL 内联 bar：`chat-tool-call.vue` 加 `isPending`/`pendingExpiresAt` props + `approve`/`reject` emits + pending 黄色状态（icon ⚠ + dot pulse + 状态文本「等待你确认」）+ 倒计时（基于 expiresAt，每秒更新，<30s urgent 红色）+ 「立即确认」/「取消」按钮；`chat-main.vue` toolCallCards computed 关联 `pendingConfirmation.toolCallId`。(3) §12 场景 13 stats 三 tab：新建 `chat-tool-stats-tabs.vue`（150 行，table/bar/pie 三 tab + ECharts tree-shake 手动 use）+ user_gender 字段友好映射（1→男/2→女/null→未知）；chat-tool-call 检测 `started.tool === 'user.stats'` 渲染 stats tabs 替代普通 result pre。(4) §8.7 chip 跳转回放：events.py `ToolCallStartedEvent` 加 `trace_id` 字段（前端据此构造 chip URL）；`chat-tool-call.vue` readonly tool（user.list/count/distinct）成功后渲染 chip 链接（→ `/system/user?ai_query_id=<trace_id>`）；`user/index.vue` onMounted 检测 `?ai_query_id` 调 `fetchAiQueryCache` 拿 filters，按 `EnableStatus`/`UserGender` 类型守卫映射到 searchParams 触发 `getData()`；`app/modules/system/ai_tools.py` 给 `user.count`/`user.distinct` 加 `query_cache_module="system/user"`（stats 不加，数据已在卡片内）。端到端验证：触发 `user.count(status='1')` → Redis hash 写入 `filters={status:"1"}` + chip 渲染 → 点 chip 跳转 → onMounted 调 query-cache → searchParams.status='1' → getData 带 status=1 → 表格只显示启用用户。
 >
-> ⚠️ **Plan 5 / Task 35a gap（P0，阻塞 Task 36）**: 先完成 stable trace/source、conversation guard 和共享 terminal finalizer/handoff（消息编辑 spec Task 1/2/2b + 工具卡 spec Task 0-2，期间不开放 edit/regenerate），再落地 `ai_prepared_action` migration、prepared metadata/Registry gate、confirm sole execution authority、持久 pending/detail 恢复、source/snapshot 复验、用户导入首个纵向切片及跨前后端测试。现有 direct HITL 的完成记录保持历史事实，但不能再宣称已覆盖 preview → bound execute。
+> ✅ **Plan 5 / Task 35a 主实现已完成（2026-08-11 纠偏）**: stable trace/source、conversation guard、共享 terminal finalizer、`ai_prepared_action`、prepared binding、confirm sole execution authority、pending/detail 恢复、source/snapshot 复验、用户导入纵向切片均已落地；2026-08-11 又把所有新 direct HITL 迁入同一 action 状态机、恢复 required outcome，并统一安全 presentation DTO。⚠️ **Plan 5.6 验收 gap**：Web 三条确定性 Playwright 已提交且 `--list` 通过，但本地 9527/8000/5432 未启动，尚未实跑，不得标记完整 E2E ship。
 
 **v1.5+ 扩展（2026-07-09）**：role.count / dept.count AI tool + chip 回放（role/index.vue / dept/index.vue onMounted 接 ai_query_id）+ chip TTL 5min 过期 fallback 提示（user/role/dept 三页 `$message.info('筛选条件已过期')` 8s duration）+ UI agent 切换器（chat-input 下拉 + chat.py 接收 agentCode）。详见 §20 v1.5+ 已完成。
 
@@ -2740,7 +2740,7 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 
 ## 20. MVP 完整性盘点（2026-07-08 稳定阶段汇总）
 
-> 本节是 2026-07-08 时点的交付快照。其中“Phase 3 HITL 已完成”仅指旧 direct-HITL 链路；ADR-0002 的 Gateway-owned PreparedAction 仍属于 Plan 5 / Task 35a P0 gap，不得将本盘点作为其完成依据。
+> 本节是 2026-07-08 时点的交付快照。其中“Phase 3 HITL 已完成”仅指当时的旧 direct-HITL 链路；ADR-0002 后续主实现与 2026-08-11 纠偏以 Plan 5 状态块为准，不得用本历史快照覆盖当前验收 gap。
 
 ### ✅ MVP 完整版（已交付 + 测试覆盖）
 
@@ -3030,6 +3030,14 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 #### SR-32. **Task 35a.5 由 PostgreSQL action CAS 独占执行权，Redis 只做 guard 加速和终态通知**（2026-08-08，已实施）— conversation detail 从 DB 恢复 owner/tenant/active-source scoped pending；confirm 按固定锁序重验当前授权与业务 snapshot，以 `pending_confirmation -> approved -> running` row-version CAS 选出唯一执行者，并直接调用冻结的 Gateway-only capability。在线 waiter 不再执行业务，只读取 action 终态并向原流投影；所有终态经共享 finalizer 写 operation/message 后才清缓存与 guard。启动时有效 pending 保留，残留 approved/running fail-closed 为 `AI_PREPARED_ACTION_EXECUTION_INTERRUPTED`。
 **反例**: Redis `wake_action` 作为执行票据 → flush 后无法恢复且双 worker 可双写；waiter 与 confirm handler 都调用 execute → 双击确认会执行两次；只恢复 pending UI、不用 DB guard 拦新 ChatCommand → Redis 丢失后新旧 run 重叠。
 **回归**: CAS 并发与重复 approve 断言业务函数只调用一次；无 Redis 仍可 approve/reject；expiry/source stale/tenant mismatch/current agent-permission/snapshot-artifact 失败均不执行；detail 不含 frozen args/token；startup recovery、前端 running-poll handoff 和真实 reload E2E 保证最终投影收敛。
+
+#### SR-33. **prepared outcome 必须显式表达，缺失时 fail closed**（2026-08-11，纠偏）— `requested_outcome` 是 LLM 对本轮用户意图的结构化表达，必须在模型 schema 中保持 required；Gateway 只接受 `preview_only | execute_if_approved`，缺失与非法值统一返回 `AI_PREPARED_OUTCOME_REQUIRED`。**反例**: 缺省为 `execute_if_approved` → 模型没有表达执行意图也会创建待确认 action，控制流从“结构化意图”退化为“参数省略即执行候选”。**回归**: wrapper schema 断言 required/no default；executor 断言缺失 outcome 不调用 preview、不创建 Redis/DB action；两种显式 outcome 分别覆盖 preview-only 与 confirmation。
+
+#### SR-34. **所有新 direct/prepared HITL 共用 PostgreSQL action，Redis 只兼容旧记录和通知**（2026-08-11，纠偏）— direct HITL 与 prepared HITL 必须在发出 `confirmation_required` 前持久化同一 `ai_prepared_action` 状态机；批准后的能力复验按 `interaction_flow` 分支，但 CAS、owner/tenant/source binding、终态投影和客户端 DTO 完全共用。旧版本已产生且数据库无 action 的 Redis pending 可保留只读兼容确认路径，任何新确认不得再以 Redis payload 作为授权事实。**反例**: prepared 写 PostgreSQL、direct 只写 Redis → 重启/断流后的恢复、双击语义和下一 ChatCommand guard 分叉。**回归**: direct HITL 事件必含 actionId，Redis 丢失后仍可 approve/reject，双确认只执行一次；旧 Redis-only pending 仍可按兼容路径收口。
+
+#### SR-35. **ConfirmationPresentation 使用有序字段 DTO，确认事件不携带 raw args**（2026-08-11，纠偏）— 契约固定为 `fields: Array<{label,value,tone?}>`；Gateway 对字段数、长度、tone、敏感 label/value 做统一验证，direct dry-run 与 prepared preview 都先归一化后持久化。`confirmation_required` / `confirmation_resumed` 的 `args` 字段退出新协议，前端不得回退展示。**反例**: 后端 dict、spec array、前端 `Object.entries` 三套形态并存，或 presentation 缺失时展示 raw args → 字段顺序漂移并暴露 capability。**回归**: 后端 schema/序列化与 Web typings/component contract 测试一致；事件 JSON 不含 `args`、token、内部路径或 frozen args。
+
+#### SR-36. **durable action 发布失败必须撤销 Redis pending 与 conversation guard 交接**（2026-08-11，纠偏）— `confirmation_required` 只能在 PostgreSQL action 提交成功后发布；若 action 创建或事务提交失败，Gateway 必须删除临时 pending、释放同 owner 的会话 guard 并清除本次 handoff 标记。**反例**: Redis/guard 先成功而数据库失败后继续等待 TTL → 客户端拿不到 action，但后续 ChatCommand 被假 pending 阻塞。**回归**: 注入 action persistence failure，断言无确认事件、pending 删除、guard release 且 `guard_handoff=false`。
 
 
 

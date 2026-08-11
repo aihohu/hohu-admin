@@ -178,6 +178,18 @@ class ChatRunFinalizer:
         tool_calls: list[dict[str, Any]] | None,
         agent_code: str | None,
     ) -> AiMessage | None:
+        source_is_active = await db.scalar(
+            select(AiMessage.message_id).where(
+                AiMessage.message_id == source_user_message_id,
+                AiMessage.conversation_id == conversation_id,
+                AiMessage.role == "user",
+                AiMessage.trace_id == trace_id,
+                AiMessage.is_active.is_(True),
+            )
+        )
+        if source_is_active is None:
+            return None
+
         stmt = (
             select(AiMessage)
             .where(
@@ -292,7 +304,7 @@ class ChatRunFinalizer:
         error_code: str | None = None,
         error_msg: str | None = None,
     ) -> AiMessage | None:
-        """Project one prepared authorization without exposing frozen capability data."""
+        """Project one durable authorization without exposing frozen capability data."""
         from app.modules.ai.agents.tools.registry import ToolRegistry  # noqa: PLC0415
 
         source = ToolRegistry.get().prepared_source_for(action.execute_tool_name)

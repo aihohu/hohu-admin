@@ -123,6 +123,8 @@ Gateway 在 action 进入 `pending_confirmation` 后发出结构化 `confirmatio
 - [x] 修订工具卡嵌入 spec：定义 preview/pending presentation 与 reload 恢复（2026-08-07）。
 - [x] 修订消息编辑 spec：定义 source message/revision 绑定及失效规则（2026-08-07）。
 - [ ] 以用户导入完成首个 `prepared + hitl + inline` 纵向切片和安全/E2E 回归，再迁移其他适用 tool。
+- [x] 完成 2026-08-11 代码纠偏：所有新 direct HITL 也持久化同一 action；`requested_outcome` 保持必填；ConfirmationPresentation 统一为有序 fields DTO；后端 867 个 AI pytest 与前端 43 Vitest/typecheck/build 通过。
+- [ ] 在可用 dev stack 实跑仓库内新增的三条确定性 Playwright；当前 `--list` 3/3 通过，但 9527/8000/5432 未启动，浏览器验收仍是 release gap。
 - [ ] Task 36 容量观测继续后移；本决策不授权 ARQ/Worker、第二实时通道或行级 HITL。
 
 ## References（参考）

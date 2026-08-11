@@ -33,7 +33,6 @@ class TestFormatSseChunkIdField:
             tool="t",
             tool_call_id="tc_x",
             summary="s",
-            args={},
             expires_at="...",
         )
         chunk = _format_sse_chunk(ev)
@@ -46,7 +45,6 @@ class TestFormatSseChunkIdField:
             tool="t",
             tool_call_id="tc_x",
             summary="s",
-            args={},
             expires_at="...",
         )
         chunk = _format_sse_chunk(ev)

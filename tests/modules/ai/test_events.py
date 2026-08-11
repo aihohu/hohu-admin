@@ -1,7 +1,7 @@
 """SSE 5 类事件 + event_to_sse_data 单元测试 — spec §8.1
 
-字段命名决策：顶层 camelCase（与项目其他 API 响应一致），args 嵌套保留
-snake_case（与 LLM tool schema 一致）。
+字段命名决策：顶层 camelCase（与项目其他 API 响应一致）；确认事件只暴露
+安全 presentation，不再携带 raw args。
 """
 
 # ruff: noqa: PLC0415
@@ -67,7 +67,6 @@ class TestCamelCaseKeys:
             tool="user.batch_delete",
             tool_call_id="tc_bd",
             summary="tool=user.batch_delete, risk=destructive, mode=hitl",
-            args={"user_ids": [1, 2, 3]},
             expires_at="2026-07-04T14:07:30Z",
         )
         data = json.loads(event_to_sse_data(event))
@@ -75,6 +74,7 @@ class TestCamelCaseKeys:
         assert "expiresAt" in data
         assert "confirmation_id" not in data
         assert "expires_at" not in data
+        assert "args" not in data
 
     def test_error_camel_case(self) -> None:
         event = AiErrorEvent(error_code="LLM_API_ERROR", message="provider timeout")
@@ -98,7 +98,6 @@ class TestCamelCaseKeys:
             tool="user.update_dept",
             tool_call_id="tc_z",
             summary="tool=user.update_dept, risk=high, mode=hitl",
-            args={"user_id": 42, "new_dept_id": 8},
             expires_at="2026-07-04T14:07:30Z",
             dry_run=DryRunSummary(summary="将影响 1 行", affected_count=1),
         )
@@ -189,7 +188,6 @@ class TestEventDataclasses:
             tool="user.update_dept",
             tool_call_id="tc_z",
             summary="tool=user.update_dept, risk=high, mode=hitl",
-            args={"user_id": 42, "new_dept_id": 8},
             expires_at="2026-07-04T14:07:30Z",
             dry_run=DryRunSummary(summary="将影响 1 行", affected_count=1),
         )
@@ -206,7 +204,6 @@ class TestEventDataclasses:
             tool="user.batch_delete",
             tool_call_id="tc_bd",
             summary="tool=user.batch_delete, risk=destructive, mode=hitl",
-            args={"user_ids": [1, 2, 3]},
             expires_at="2026-07-04T14:07:30Z",
         )
         data = json.loads(event_to_sse_data(event))
@@ -241,21 +238,22 @@ class TestStringifyLargeInts:
     若 JSON 序列化为 number，前端 JSON.parse 丢末尾精度（→ ...3000）。
     """
 
-    def test_snowflake_id_in_args_stringified(self) -> None:
-        """confirmation_required.args.user_ids 大 int → str"""
+    def test_snowflake_id_in_presentation_stringified(self) -> None:
+        """confirmation presentation 中的大 ID 仍按跨端契约转 str。"""
         event = ConfirmationRequiredEvent(
             confirmation_id="conf_x",
             tool="user.batch_delete",
             tool_call_id="tc_bd",
             summary="tool=user.batch_delete, risk=destructive, mode=hitl",
-            args={"user_ids": [7483433649145122816, 7483433587736317952]},
             expires_at="2026-07-04T14:07:30Z",
+            presentation={
+                "title": "确认删除",
+                "fields": [{"label": "targetId", "value": 7483433649145122816}],
+                "warnings": [],
+            },
         )
         data = json.loads(event_to_sse_data(event))
-        assert data["args"]["user_ids"] == [
-            "7483433649145122816",
-            "7483433587736317952",
-        ]
+        assert data["presentation"]["fields"][0]["value"] == ("7483433649145122816")
 
     def test_small_int_in_args_kept_as_int(self) -> None:
         """count / status 等小 int 保持 int 不变（避免无差别字符串化）"""

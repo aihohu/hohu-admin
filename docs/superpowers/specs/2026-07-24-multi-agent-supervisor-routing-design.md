@@ -590,7 +590,7 @@ AGENTS = [
 
 1. **Supervisor 只做单次路由** — 降低实现复杂度和审计难度，v1.5+ 先不实现多 Agent 协作。**反例**: 让 Agent A 调 Agent B → 状态机爆炸、审计链断裂、HITL 难以归属。**回归**: `test_router.py::test_no_agent_chain`。
 2. ~~**路由关键词分 strong/weak 两层**~~ **OBSOLETED by 决策 18（v4）**：砍规则阶段后不再需要关键词维护；路由准确率由 `ai_agent.description` 决定。
-3. **`agentCode=null` 改为会话粘滞** — 现状默认 `user_mgmt` 在多 Agent 场景下不合常理；粘滞避免会话中途切 Agent。**反例**: 每轮都重路由 → 上下文割裂、tool 调用历史混乱。**回归**: `test_session_stickiness.py::test_null_reuses_last_agent`。
+3. **`agentCode=null` 改为会话粘滞** — 现状默认 `user_mgmt` 在多 Agent 场景下不合常理；粘滞避免会话中途切 Agent。`agentCode="auto"` 明确表示基于当前消息重新路由，不得隐式携带上一 Agent 偏置；需要续接上下文时客户端使用 null。**反例**: auto 注入上一 Agent 提示 → 用户主动选择重新判断仍被历史域黏住，null/auto 两个开关失去可解释差异。**回归**: `test_session_stickiness.py::test_null_reuses_last_agent`，router prompt 测试断言只含候选与当前消息。
 4. **LLM 分类失败降级到 clarification** — 避免 500，把最终决定权交还用户。**反例**: 静默随机选 → 错路由不可追溯、用户失去信任。**回归**: `test_router.py::test_llm_failure_falls_back_to_clarification`。
 5. **Supervisor 配额独立于 `UsageLimits`** — 物理 separation：PydanticAI 的 `UsageLimits` 是 Agent loop 内兜底，无法覆盖路由 LLM 调用。**反例**: 复用 `request_limit` → 实现者误以为能拦截，实际漏判。**回归**: `test_chat_supervisor.py::test_supervisor_quota_independent`。
 6. **用户无权限 / 禁用 Agent 不参与路由** — 安全底线，防止泄露未授权业务域。**反例**: 路由把无权 Agent 名字写进 clarification 候选 → 信息泄露。**回归**: `test_router.py::test_unauthorized_agent_excluded`。

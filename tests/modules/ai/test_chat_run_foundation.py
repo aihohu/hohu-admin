@@ -146,6 +146,47 @@ async def test_tool_only_turn_finalizes_once_and_keeps_started_order(
 
 
 @pytest.mark.asyncio
+async def test_terminal_finalizer_skips_missing_source_binding(db_session) -> None:
+    result = await chat_run_finalizer.finalize_assistant_turn(
+        db_session,
+        conversation_id=200,
+        trace_id="tr_missing_source_0000000000000000",
+        source_user_message_id=201,
+        content="",
+        tool_calls=[{"tool": "test.missing", "tool_call_id": "tc_missing"}],
+        agent_code="shared",
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_finalizer_skips_inactive_source_binding(db_session) -> None:
+    conversation = await _create_conversation(db_session, suffix="inactive")
+    source = await chat_service.save_user_message(
+        db_session,
+        conversation.conversation_id,
+        conversation.user_id,
+        "superseded command",
+        trace_id="tr_inactive_source_00000000000000",
+    )
+    source.is_active = False
+    await db_session.flush()
+
+    result = await chat_run_finalizer.finalize_assistant_turn(
+        db_session,
+        conversation_id=conversation.conversation_id,
+        trace_id="tr_inactive_terminal_0000000000000",
+        source_user_message_id=source.message_id,
+        content="",
+        tool_calls=[{"tool": "test.inactive", "tool_call_id": "tc_inactive"}],
+        agent_code="shared",
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
 async def test_active_history_filters_and_orders_stably(db_session) -> None:
     conversation = await _create_conversation(db_session, suffix="history")
     trace_id = "tr_77777777777777777777777777777777"

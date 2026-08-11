@@ -22,7 +22,6 @@ class TestConfirmationResumedEventSerialization:
             tool="user.update_dept",
             tool_call_id="tc_xxx",
             summary="tool=user.update_dept, risk=high",
-            args={"user_ids": [1, 2]},
             expires_at="2026-07-13T15:00:00Z",
             resumed_at="2026-07-13T14:35:00Z",
         )
@@ -43,7 +42,6 @@ class TestConfirmationResumedEventSerialization:
             tool="user.batch_delete",
             tool_call_id="tc_yyy",
             summary="...",
-            args={},
             dry_run=DryRunSummary(summary="将影响 3 行", affected_count=3),
             expires_at="2026-07-13T15:00:00Z",
             resumed_at="2026-07-13T14:35:00Z",
@@ -60,7 +58,6 @@ class TestConfirmationResumedEventSerialization:
             tool="t",
             tool_call_id="tc_z",
             summary="s",
-            args={},
             expires_at="...",
             resumed_at="...",
         )

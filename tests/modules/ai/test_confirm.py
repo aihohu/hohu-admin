@@ -61,7 +61,9 @@ def _make_user(user_id: int = 100, user_name: str = "alice"):
     return SimpleNamespace(user_id=user_id, user_name=user_name)
 
 
-def _make_prepared_action(*, status: str = "pending_confirmation"):
+def _make_prepared_action(
+    *, status: str = "pending_confirmation", interaction_flow: str = "prepared"
+):
     versions = {
         "pending_confirmation": 1,
         "approved": 2,
@@ -80,6 +82,10 @@ def _make_prepared_action(*, status: str = "pending_confirmation"):
         source_user_message_id=987,
         execute_tool_call_id="tc_test",
         execute_tool_name="user.import_execute",
+        interaction_flow=interaction_flow,
+        requested_outcome=(
+            "execute_if_approved" if interaction_flow == "prepared" else "direct"
+        ),
         status=status,
         row_version=versions[status],
         expires_at=datetime.now(UTC) + timedelta(minutes=5),
@@ -91,8 +97,12 @@ def _make_prepared_action(*, status: str = "pending_confirmation"):
         chip_target=None,
         frozen_args={"preview_token": "server-secret"},
         args_hash="hash",
-        presentation={"title": "Import users", "fields": {"new": 2}},
-        prepare_tool_call_id="tc_preview",
+        presentation={
+            "title": "Import users",
+            "fields": [{"label": "new", "value": 2}],
+            "warnings": [],
+        },
+        prepare_tool_call_id=("tc_preview" if interaction_flow == "prepared" else None),
         result_data={"successCount": 2} if status == "succeeded" else None,
         result_ui=None,
         duration_ms=2 if status == "succeeded" else None,
@@ -307,13 +317,22 @@ class TestPreparedConfirmation:
         assert result.data.status == "rejected"
         validate_snapshot.assert_not_awaited()
 
-    async def test_approve_executes_inline_without_redis_pending(self) -> None:
+    @pytest.mark.parametrize("interaction_flow", ["prepared", "direct"])
+    async def test_approve_executes_inline_without_redis_pending(
+        self, interaction_flow: str
+    ) -> None:
         from app.modules.ai.agents.gateway.result import ToolResult
 
-        pending = _make_prepared_action()
-        approved = _make_prepared_action(status="approved")
-        running = _make_prepared_action(status="running")
-        terminal = _make_prepared_action(status="succeeded")
+        pending = _make_prepared_action(interaction_flow=interaction_flow)
+        approved = _make_prepared_action(
+            status="approved", interaction_flow=interaction_flow
+        )
+        running = _make_prepared_action(
+            status="running", interaction_flow=interaction_flow
+        )
+        terminal = _make_prepared_action(
+            status="succeeded", interaction_flow=interaction_flow
+        )
         db = MagicMock()
         db.commit = AsyncMock()
         db.rollback = AsyncMock()

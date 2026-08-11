@@ -19,6 +19,7 @@ import csv
 import io
 import re
 import struct
+import warnings
 import zipfile
 from pathlib import PurePosixPath
 from typing import NoReturn
@@ -167,6 +168,18 @@ def _parse_xlsx_rows(file_bytes: bytes) -> list[dict[str, str]]:
     - 单元格 None → ""（统一字符串处理）
     """
     _validate_xlsx_archive(file_bytes)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=("Data Validation extension is not supported and will be removed"),
+            category=UserWarning,
+            module=r"openpyxl\.worksheet\._reader",
+        )
+        return _load_xlsx_value_rows(file_bytes)
+
+
+def _load_xlsx_value_rows(file_bytes: bytes) -> list[dict[str, str]]:
+    """Read cell values while the caller owns extension-warning policy."""
     try:
         wb = load_workbook(
             io.BytesIO(file_bytes),

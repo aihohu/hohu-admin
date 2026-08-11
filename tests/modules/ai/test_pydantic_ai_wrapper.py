@@ -76,10 +76,13 @@ class TestWrapTool:
         param = inspect.signature(tool.function).parameters["requested_outcome"]
 
         assert param.default is inspect.Parameter.empty
-        assert set(param.annotation.__args__) == {
+        assert set(param.annotation.__args__[0].__args__) == {
             "preview_only",
             "execute_if_approved",
         }
+        assert (
+            "explicitly asks to preview" in param.annotation.__metadata__[0].description
+        )
 
     def test_returns_pydantic_ai_tool_instance(self) -> None:
         registered = _register_sample_tool()
