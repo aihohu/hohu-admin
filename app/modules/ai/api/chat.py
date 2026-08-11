@@ -992,7 +992,6 @@ async def chat(
                         )
                     )
                 )
-                await unified_queue.put(None)
             except Exception:
                 # 其它未预期异常：log + sentinel，前端靠 SSE done 兜底
                 logger.exception("PydanticAI stream error")
@@ -1005,9 +1004,16 @@ async def chat(
                         )
                     )
                 )
-                await unified_queue.put(None)
-            else:
-                await unified_queue.put(None)  # sentinel
+            finally:
+                # The model stream may finish while tool events are still queued.
+                # Close and fully drain that queue before publishing the terminal
+                # sentinel; otherwise the consumer can stop before the final
+                # started/result/confirmation card reaches the browser.
+                await custom_event_queue.put(None)
+                try:
+                    await drain_task
+                finally:
+                    await unified_queue.put(None)
 
         drain_task = asyncio.create_task(drain_custom_events())
         pydantic_task = asyncio.create_task(produce_pydantic())
@@ -1045,7 +1051,6 @@ async def chat(
                     )
                 )
                 pydantic_task.cancel()
-                await unified_queue.put(None)
                 return
 
         heartbeat_task = asyncio.create_task(heartbeat_guard())
@@ -1066,8 +1071,10 @@ async def chat(
                     await pydantic_task
                 except (asyncio.CancelledError, Exception):
                     pass
-            # 通知 drain_task 退出 + 等它处理完残留事件
-            await custom_event_queue.put(None)
+            # produce_pydantic normally owns the drain barrier. Client disconnect
+            # may cancel it before startup, so keep this idempotent fallback.
+            if not drain_task.done():
+                await custom_event_queue.put(None)
             try:
                 await drain_task
             except (asyncio.CancelledError, Exception):

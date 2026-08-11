@@ -1169,6 +1169,12 @@ async def _hang_for_confirmation(
                         risk_level=meta.risk,
                         chip_target=meta.chip_target,
                     )
+                if durable_action is not None:
+                    payload = await hitl_manager.bind_durable_action(
+                        redis_client,
+                        confirmation_id,
+                        durable_action.action_id,
+                    )
     except BaseException:
         await _rollback_failed_confirmation_setup(deps, confirmation_id)
         raise

@@ -96,6 +96,8 @@ class PendingPayload:
     agent_code: str | None = None
     risk_level: str = "high"
     chip_target: str | None = None
+    action_id: int | None = None
+    """Durable PostgreSQL action binding; None only for legacy Redis-only payloads."""
     wake_action: str | None = None
 
     def to_json_bytes(self) -> bytes:
@@ -495,6 +497,39 @@ class HitlManager:
         Redis key 不存在时返回 -2（Redis 标准）。
         """
         return await redis.ttl(HitlManager._redis_key(confirmation_id))
+
+    @staticmethod
+    async def bind_durable_action(
+        redis: Redis,
+        confirmation_id: str,
+        action_id: int,
+    ) -> PendingPayload:
+        """Bind a newly committed action before its confirmation is exposed."""
+        pending = await HitlManager.get_pending(redis, confirmation_id)
+        if pending is None:
+            raise BusinessRuleException(
+                "HITL pending 在绑定 action 前已丢失",
+                error_code="AI_PREPARED_ACTION_BINDING_INVALID",
+            )
+        ttl_sec = await redis.ttl(HitlManager._redis_key(confirmation_id))
+        if ttl_sec <= 0:
+            raise BusinessRuleException(
+                "HITL pending 在绑定 action 前已过期",
+                error_code="AI_PREPARED_ACTION_BINDING_INVALID",
+            )
+        bound = replace(pending, action_id=action_id)
+        updated = await redis.set(
+            HitlManager._redis_key(confirmation_id),
+            bound.to_json_bytes(),
+            ex=ttl_sec,
+            xx=True,
+        )
+        if not updated:
+            raise BusinessRuleException(
+                "HITL pending action 绑定失败",
+                error_code="AI_PREPARED_ACTION_BINDING_INVALID",
+            )
+        return bound
 
     @staticmethod
     async def delete_pending(

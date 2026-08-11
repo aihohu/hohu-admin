@@ -16,7 +16,7 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.modules.ai.agents.hitl.manager import PendingPayload
-from app.modules.ai.api.resume import resume_chat
+from app.modules.ai.api.resume import _load_durable_resume_terminal, resume_chat
 
 
 def _make_pending(
@@ -24,6 +24,7 @@ def _make_pending(
     tenant_id: int = 0,
     wake_action: str | None = None,
     expires_at: str = "2099-01-01T00:00:00Z",
+    action_id: int | None = None,
 ) -> PendingPayload:
     return PendingPayload(
         user_id=user_id,
@@ -35,6 +36,7 @@ def _make_pending(
         args={"user_id": 42},
         dry_run_result=None,
         expires_at=expires_at,
+        action_id=action_id,
         wake_action=wake_action,
     )
 
@@ -67,6 +69,16 @@ def _mock_pending_delete():
     with patch(
         "app.modules.ai.api.resume.hitl_manager.delete_pending",
         AsyncMock(),
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _mock_prepared_action_lookup():
+    """Legacy fixtures remain Redis-only unless a test opts into durable mode."""
+    with patch(
+        "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
+        AsyncMock(return_value=None),
     ):
         yield
 
@@ -412,6 +424,228 @@ class TestResumeSuccessPath:
         assert body.index("confirmation_resumed") < body.index("tool_call_result")
         assert '"durationMs":150' in body or '"durationMs": 150' in body
 
+    async def test_durable_action_resume_replays_terminal_without_executing_tool(
+        self, _resume_enabled, _redis_pubsub_mode
+    ) -> None:
+        from app.modules.ai.agents.hitl.constants import ConfirmAction
+        from app.modules.ai.agents.hitl.events import DoneEvent, ToolCallResultEvent
+
+        execute = AsyncMock()
+        durable_action = SimpleNamespace(
+            action_id=9001,
+            confirmation_id="cid",
+            user_id=100,
+            tenant_id=0,
+            conversation_id=1,
+            execute_tool_call_id="tc_test",
+            execute_tool_name="user.update",
+            prepare_tool_call_id="tc_preview",
+            trace_id="tr_test",
+            interaction_flow="prepared",
+            presentation={"title": "确认更新用户", "summary": "将更新 1 个用户"},
+            guard_owner_token=None,
+            status="succeeded",
+        )
+        with (
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.get_pending",
+                AsyncMock(return_value=_make_pending(action_id=9001)),
+            ),
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.ttl",
+                AsyncMock(return_value=240),
+            ),
+            patch(
+                "app.modules.ai.api.resume.redis_client.set",
+                AsyncMock(return_value=True),
+            ),
+            patch(
+                "app.modules.ai.api.resume.redis_client.eval",
+                AsyncMock(return_value=1),
+            ),
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.hang",
+                AsyncMock(return_value=ConfirmAction.APPROVED),
+            ),
+            patch(
+                "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
+                AsyncMock(return_value=durable_action),
+            ),
+            patch(
+                "app.modules.ai.api.resume.resume_tool_execution",
+                execute,
+            ),
+            patch(
+                "app.modules.ai.api.resume._load_durable_resume_terminal",
+                AsyncMock(
+                    return_value=[
+                        ToolCallResultEvent(
+                            tool="user.update",
+                            tool_call_id="tc_test",
+                            ok=True,
+                            duration_ms=7,
+                            result={"updated": 1},
+                        ),
+                        DoneEvent(
+                            trace_id="tr_test",
+                            message_id=123,
+                            persistence="committed",
+                            projection="updated",
+                        ),
+                    ]
+                ),
+            ),
+        ):
+            result = await resume_chat(
+                request=_make_request("cid"),
+                confirmation_id_query="cid",
+                db=MagicMock(),
+                current_user=_make_user(),
+            )
+            body = ""
+            async for chunk in result.body_iterator:
+                body += chunk
+
+        execute.assert_not_awaited()
+        assert '"messageId":123' in body or '"messageId": 123' in body
+        assert '"toolCallId":"tc_test"' in body or '"toolCallId": "tc_test"' in body
+        assert (
+            '"sourceToolCallId":"tc_preview"' in body
+            or '"sourceToolCallId": "tc_preview"' in body
+        )
+        assert (
+            '"interactionFlow":"prepared"' in body
+            or '"interactionFlow": "prepared"' in body
+        )
+
+    async def test_rolling_upgrade_payload_without_action_id_still_uses_durable_replay(
+        self, _resume_enabled, _redis_pubsub_mode
+    ) -> None:
+        from app.modules.ai.agents.hitl.constants import ConfirmAction
+        from app.modules.ai.agents.hitl.events import DoneEvent
+
+        durable_action = SimpleNamespace(
+            action_id=9001,
+            confirmation_id="cid",
+            user_id=100,
+            tenant_id=0,
+            conversation_id=1,
+            execute_tool_call_id="tc_test",
+            execute_tool_name="user.update",
+            prepare_tool_call_id=None,
+            trace_id="tr_test",
+            interaction_flow="direct",
+            presentation={"title": "确认更新用户", "summary": "将更新 1 个用户"},
+            guard_owner_token=None,
+            status="succeeded",
+        )
+        execute = AsyncMock()
+        with (
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.get_pending",
+                AsyncMock(return_value=_make_pending(action_id=None)),
+            ),
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.ttl",
+                AsyncMock(return_value=240),
+            ),
+            patch(
+                "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
+                AsyncMock(return_value=durable_action),
+            ),
+            patch(
+                "app.modules.ai.api.resume.redis_client.set",
+                AsyncMock(return_value=True),
+            ),
+            patch(
+                "app.modules.ai.api.resume.redis_client.eval",
+                AsyncMock(return_value=1),
+            ),
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.hang",
+                AsyncMock(return_value=ConfirmAction.APPROVED),
+            ),
+            patch("app.modules.ai.api.resume.resume_tool_execution", execute),
+            patch(
+                "app.modules.ai.api.resume._load_durable_resume_terminal",
+                AsyncMock(
+                    return_value=[
+                        DoneEvent(
+                            trace_id="tr_test",
+                            message_id=123,
+                            persistence="committed",
+                            projection="updated",
+                        )
+                    ]
+                ),
+            ),
+        ):
+            result = await resume_chat(
+                request=_make_request("cid"),
+                confirmation_id_query="cid",
+                db=MagicMock(),
+                current_user=_make_user(),
+            )
+            body = "".join([chunk async for chunk in result.body_iterator])
+
+        execute.assert_not_awaited()
+        assert '"messageId":123' in body or '"messageId": 123' in body
+
+
+class TestDurableTerminalProjection:
+    async def test_replays_result_ui_and_accepts_legacy_payload_without_action_id(
+        self,
+    ) -> None:
+        action = SimpleNamespace(
+            action_id=9001,
+            confirmation_id="cid",
+            status="succeeded",
+            user_id=100,
+            tenant_id=0,
+            conversation_id=1,
+            execute_tool_call_id="tc_test",
+            execute_tool_name="user.export",
+            trace_id="tr_test",
+            duration_ms=8,
+            result_data={"fileId": "file-1"},
+            result_ui={
+                "viewType": "detail_card",
+                "viewData": {"downloadUrl": "/api/v1/files/file-1/download"},
+                "audit": {"affectedCount": 12},
+                "labelKey": "ai.tool.user.export.result",
+                "labelParams": {"count": 12},
+            },
+            error_code=None,
+        )
+        fake_db = AsyncMock()
+        fake_db.__aenter__ = AsyncMock(return_value=fake_db)
+        fake_db.__aexit__ = AsyncMock(return_value=None)
+        fake_db.scalar = AsyncMock(return_value=123)
+        with (
+            patch(
+                "app.modules.ai.api.resume.AsyncSessionLocal",
+                MagicMock(return_value=fake_db),
+            ),
+            patch(
+                "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
+                AsyncMock(return_value=action),
+            ),
+        ):
+            events = await _load_durable_resume_terminal(
+                confirmation_id="cid",
+                pending=_make_pending(action_id=None),
+                user_id=100,
+                tenant_id=0,
+            )
+
+        result = events[0]
+        assert result.type == "tool_call_result"
+        assert result.ok is True
+        assert result.ui is not None
+        assert result.ui.view_type == "detail_card"
+        assert result.ui.view_data["downloadUrl"].endswith("/file-1/download")
+        assert events[1].message_id == 123
+
     async def test_rejected_path_emits_failure_result(
         self, _resume_enabled, _redis_pubsub_mode
     ) -> None:
@@ -538,6 +772,82 @@ class TestResumeTimeoutPath:
                 body += chunk
         assert "AI_HITL_TIMEOUT" in body
         assert '"type":"done"' in body or '"type": "done"' in body
+
+    async def test_durable_timeout_uses_action_terminalizer_not_legacy_finalizer(
+        self, _resume_enabled, _redis_pubsub_mode
+    ) -> None:
+        from app.modules.ai.agents.hitl.events import DoneEvent
+
+        durable_action = SimpleNamespace(
+            action_id=9001,
+            confirmation_id="cid",
+            user_id=100,
+            tenant_id=0,
+            conversation_id=1,
+            execute_tool_call_id="tc_test",
+            execute_tool_name="user.update",
+            prepare_tool_call_id=None,
+            trace_id="tr_test",
+            interaction_flow="direct",
+            presentation={"title": "确认更新用户"},
+            guard_owner_token=None,
+            status="pending_confirmation",
+        )
+        durable_terminalizer = AsyncMock(
+            return_value=[
+                DoneEvent(
+                    trace_id="tr_test",
+                    persistence="committed",
+                    projection="updated",
+                )
+            ]
+        )
+        legacy_terminalizer = AsyncMock()
+        with (
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.get_pending",
+                AsyncMock(return_value=_make_pending(action_id=None)),
+            ),
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.ttl",
+                AsyncMock(return_value=240),
+            ),
+            patch(
+                "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
+                AsyncMock(return_value=durable_action),
+            ),
+            patch(
+                "app.modules.ai.api.resume.redis_client.set",
+                AsyncMock(return_value=True),
+            ),
+            patch(
+                "app.modules.ai.api.resume.redis_client.eval",
+                AsyncMock(return_value=1),
+            ),
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.hang",
+                AsyncMock(side_effect=TimeoutError()),
+            ),
+            patch(
+                "app.modules.ai.api.resume._terminalize_durable_resume_failure",
+                durable_terminalizer,
+            ),
+            patch(
+                "app.modules.ai.api.resume._finalize_resume_terminal",
+                legacy_terminalizer,
+            ),
+        ):
+            result = await resume_chat(
+                request=_make_request("cid"),
+                confirmation_id_query="cid",
+                db=MagicMock(),
+                current_user=_make_user(),
+            )
+            body = "".join([chunk async for chunk in result.body_iterator])
+
+        durable_terminalizer.assert_awaited_once()
+        legacy_terminalizer.assert_not_awaited()
+        assert "AI_HITL_TIMEOUT" in body
 
 
 class TestOwnerLockRelease:

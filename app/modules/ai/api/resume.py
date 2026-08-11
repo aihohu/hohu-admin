@@ -31,6 +31,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic_ai.ui import SSE_CONTENT_TYPE
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -43,10 +44,12 @@ from app.core.redis import redis_client
 from app.core.tenant import resolve_tenant_id
 from app.db.session import AsyncSessionLocal, get_db
 from app.modules.ai.agents.gateway.executor import resume_tool_execution
+from app.modules.ai.agents.gateway.result import UIResult
 from app.modules.ai.agents.hitl.constants import (
     AI_HITL_OWNER_LOCK_PREFIX,
     AI_HITL_OWNER_LOCK_TTL_SEC,
     ConfirmAction,
+    PreparedActionStatus,
 )
 from app.modules.ai.agents.hitl.events import (
     AiErrorEvent,
@@ -57,12 +60,14 @@ from app.modules.ai.agents.hitl.events import (
 )
 from app.modules.ai.agents.hitl.manager import PendingPayload, hitl_manager
 from app.modules.ai.api.chat import _format_sse_chunk
+from app.modules.ai.models.message import AiMessage
 from app.modules.ai.service.chat_run_service import (
     chat_run_finalizer,
     chat_run_guard,
 )
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.operation_log_service import operation_log_service
+from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
 
@@ -83,7 +88,11 @@ def _set_exc_code(exc: BusinessRuleException, code: int) -> BusinessRuleExceptio
     return exc
 
 
-def _build_resumed_event(confirmation_id: str, pending) -> ConfirmationResumedEvent:  # noqa: ANN001
+def _build_resumed_event(
+    confirmation_id: str,
+    pending: PendingPayload,
+    durable_action=None,  # noqa: ANN001
+) -> ConfirmationResumedEvent:
     """从 pending payload 构造 ConfirmationResumedEvent
 
     pending 是 PendingPayload dataclass。注意 confirmation_id 参数从 caller 传入
@@ -95,23 +104,282 @@ def _build_resumed_event(confirmation_id: str, pending) -> ConfirmationResumedEv
             summary=pending.dry_run_result.get("summary", ""),
             affected_count=pending.dry_run_result.get("affected_count", 0),
         )
-    return ConfirmationResumedEvent(
-        confirmation_id=confirmation_id,
-        tool=pending.tool_name,
-        tool_call_id=pending.tool_call_id,
-        summary=f"resume: tool={pending.tool_name}",
-        expires_at=pending.expires_at,
-        resumed_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        dry_run=dry_run,
-        presentation={
+    presentation = (
+        durable_action.presentation
+        if durable_action is not None
+        else {
             "title": pending.tool_name,
             "summary": (
                 dry_run.summary if dry_run is not None else f"tool={pending.tool_name}"
             ),
             "fields": [],
             "warnings": [],
-        },
+        }
     )
+    return ConfirmationResumedEvent(
+        confirmation_id=confirmation_id,
+        tool=(
+            durable_action.execute_tool_name
+            if durable_action is not None
+            else pending.tool_name
+        ),
+        tool_call_id=(
+            durable_action.execute_tool_call_id
+            if durable_action is not None
+            else pending.tool_call_id
+        ),
+        summary=str(
+            presentation.get("summary")
+            or presentation.get("title")
+            or f"resume: tool={pending.tool_name}"
+        ),
+        expires_at=pending.expires_at,
+        resumed_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        dry_run=dry_run,
+        action_id=(
+            durable_action.action_id
+            if durable_action is not None
+            else pending.action_id
+        ),
+        source_tool_call_id=(
+            durable_action.prepare_tool_call_id if durable_action is not None else None
+        ),
+        interaction_flow=(
+            durable_action.interaction_flow if durable_action is not None else "direct"
+        ),
+        presentation=presentation,
+    )
+
+
+def _durable_binding_valid(
+    action,  # noqa: ANN001
+    *,
+    pending: PendingPayload,
+    user_id: int,
+    tenant_id: int,
+) -> bool:
+    return bool(
+        action is not None
+        and (pending.action_id is None or action.action_id == pending.action_id)
+        and action.user_id == user_id
+        and action.tenant_id == tenant_id
+        and action.conversation_id == pending.conversation_id
+        and action.execute_tool_call_id == pending.tool_call_id
+        and action.trace_id == pending.trace_id
+    )
+
+
+def _ui_result_from_dict(value: dict | None) -> UIResult | None:
+    if value is None:
+        return None
+    return UIResult(
+        view_type=str(value.get("viewType") or value.get("view_type") or "plain_json"),
+        view_data=value.get("viewData") or value.get("view_data") or {},
+        audit=value.get("audit") or {},
+        label_key=str(value.get("labelKey") or value.get("label_key") or ""),
+        label_params=value.get("labelParams") or value.get("label_params") or {},
+    )
+
+
+async def _load_durable_resume_terminal(
+    *,
+    confirmation_id: str,
+    pending: PendingPayload,
+    user_id: int,
+    tenant_id: int,
+) -> list[ToolCallResultEvent | AiErrorEvent | DoneEvent]:
+    """Read a confirm-owned terminal fact without ever re-executing its tool."""
+    try:
+        async with AsyncSessionLocal() as terminal_db:
+            action = await prepared_action_service.get_by_confirmation_id(
+                terminal_db, confirmation_id
+            )
+            if not _durable_binding_valid(
+                action,
+                pending=pending,
+                user_id=user_id,
+                tenant_id=tenant_id,
+            ):
+                raise BusinessRuleException(
+                    "续传 action 绑定无效",
+                    error_code="AI_PREPARED_ACTION_BINDING_INVALID",
+                )
+            status = PreparedActionStatus(action.status)
+            if not status.is_terminal:
+                raise BusinessRuleException(
+                    "续传收到唤醒但 action 尚未进入终态",
+                    error_code="AI_PREPARED_ACTION_TERMINAL_MISSING",
+                )
+            message_id = await terminal_db.scalar(
+                select(AiMessage.message_id).where(
+                    AiMessage.conversation_id == action.conversation_id,
+                    AiMessage.role == "assistant",
+                    AiMessage.trace_id == action.trace_id,
+                    AiMessage.is_active.is_(True),
+                )
+            )
+            ok = status == PreparedActionStatus.SUCCEEDED
+            fallback_error = {
+                PreparedActionStatus.REJECTED: "USER_REJECTED",
+                PreparedActionStatus.EXPIRED: "AI_HITL_EXPIRED",
+                PreparedActionStatus.FAILED: "AI_INTERNAL_ERROR",
+            }.get(status)
+            result_event = ToolCallResultEvent(
+                tool=action.execute_tool_name,
+                tool_call_id=action.execute_tool_call_id,
+                ok=ok,
+                duration_ms=action.duration_ms or 0,
+                result=action.result_data if ok else None,
+                error_code=None if ok else action.error_code or fallback_error,
+                error_msg=(
+                    None
+                    if ok
+                    else {
+                        PreparedActionStatus.REJECTED: "用户已取消此操作",
+                        PreparedActionStatus.EXPIRED: "确认已过期，请重新发起",
+                        PreparedActionStatus.FAILED: "工具执行失败，请稍后重试",
+                    }.get(status, "操作执行失败")
+                ),
+                ui=_ui_result_from_dict(action.result_ui) if ok else None,
+            )
+            done_event = DoneEvent(
+                trace_id=action.trace_id,
+                message_id=message_id,
+                persistence="committed",
+                projection="updated",
+            )
+            return [result_event, done_event]
+    except Exception as exc:
+        logger.exception(
+            "resume durable terminal projection failed",
+            extra={"confirmation_id": confirmation_id, "action_id": pending.action_id},
+        )
+        error_code = getattr(exc, "error_code", "AI_PREPARED_ACTION_TERMINAL_MISSING")
+        return [
+            AiErrorEvent(
+                error_code=error_code,
+                message="操作终态读取失败，请刷新会话确认结果",
+            ),
+            DoneEvent(
+                trace_id=pending.trace_id,
+                persistence="failed",
+                projection="updated",
+            ),
+        ]
+
+
+async def _cleanup_durable_resume(action) -> None:  # noqa: ANN001
+    """Best-effort cleanup after PostgreSQL has become the terminal authority."""
+    try:
+        if not PreparedActionStatus(action.status).is_terminal:
+            async with AsyncSessionLocal() as cleanup_db:
+                latest = await prepared_action_service.get_by_confirmation_id(
+                    cleanup_db, action.confirmation_id
+                )
+            if latest is None or not PreparedActionStatus(latest.status).is_terminal:
+                return
+            action = latest
+    except Exception:
+        logger.exception("resume durable cleanup terminal check failed")
+        return
+    if action.guard_owner_token:
+        try:
+            await chat_run_guard.release(
+                redis_client,
+                conversation_id=action.conversation_id,
+                owner_token=action.guard_owner_token,
+            )
+        except Exception:
+            logger.exception("resume durable conversation guard cleanup failed")
+    try:
+        await hitl_manager.delete_pending(redis_client, action.confirmation_id)
+    except Exception:
+        logger.exception("resume durable pending cleanup failed")
+
+
+async def _terminalize_durable_resume_failure(
+    *,
+    confirmation_id: str,
+    pending: PendingPayload,
+    user_id: int,
+    tenant_id: int,
+    error_code: str,
+    error_msg: str,
+) -> list[ToolCallResultEvent | AiErrorEvent | DoneEvent]:
+    """Expire a still-pending durable action; never fall back to tool execution."""
+    terminal_action = None
+    try:
+        async with AsyncSessionLocal() as terminal_db:
+            async with terminal_db.begin():
+                action = await prepared_action_service.get_by_confirmation_id(
+                    terminal_db, confirmation_id
+                )
+                if not _durable_binding_valid(
+                    action,
+                    pending=pending,
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                ):
+                    raise BusinessRuleException(
+                        "续传 action 绑定无效",
+                        error_code="AI_PREPARED_ACTION_BINDING_INVALID",
+                    )
+                status = PreparedActionStatus(action.status)
+                terminal_action = action
+                if status == PreparedActionStatus.PENDING_CONFIRMATION:
+                    transitioned = await prepared_action_service.transition_status(
+                        terminal_db,
+                        action_id=action.action_id,
+                        expected_status=status,
+                        expected_version=action.row_version,
+                        target_status=PreparedActionStatus.EXPIRED,
+                        error_code=error_code,
+                    )
+                    if transitioned is not None:
+                        terminal_action = transitioned
+                        log = await operation_log_service.get_by_tool_call_id(
+                            terminal_db,
+                            transitioned.execute_tool_call_id,
+                            user_id=user_id,
+                        )
+                        if log is not None:
+                            await operation_log_service.mark_expired_if_pending(
+                                terminal_db, log.log_id
+                            )
+                        await chat_run_finalizer.finalize_prepared_action(
+                            terminal_db,
+                            action=transitioned,
+                            ok=False,
+                            error_code=error_code,
+                            error_msg=error_msg,
+                        )
+        if (
+            terminal_action is not None
+            and PreparedActionStatus(terminal_action.status).is_terminal
+        ):
+            await _cleanup_durable_resume(terminal_action)
+        return await _load_durable_resume_terminal(
+            confirmation_id=confirmation_id,
+            pending=pending,
+            user_id=user_id,
+            tenant_id=tenant_id,
+        )
+    except Exception:
+        logger.exception(
+            "resume durable failure terminalization failed",
+            extra={"confirmation_id": confirmation_id},
+        )
+        return [
+            AiErrorEvent(
+                error_code="AI_PREPARED_ACTION_TERMINAL_MISSING",
+                message="操作状态暂不可用，请刷新会话确认结果",
+            ),
+            DoneEvent(
+                trace_id=pending.trace_id,
+                persistence="failed",
+                projection="updated",
+            ),
+        ]
 
 
 async def _finalize_resume_terminal(
@@ -182,6 +450,23 @@ async def _finalize_resume_terminal(
             projection="updated",
         )
     ]
+
+
+async def _mark_legacy_resume_expired(
+    db: AsyncSession,
+    *,
+    pending: PendingPayload,
+    user_id: int,
+) -> None:
+    """Keep the legacy operation-log audit transition in the guarded stream."""
+    try:
+        log = await operation_log_service.get_by_tool_call_id(
+            db, pending.tool_call_id, user_id=user_id
+        )
+        if log is not None:
+            await operation_log_service.mark_expired_if_pending(db, log.log_id)
+    except Exception:
+        logger.exception("resume: legacy mark_expired_if_pending failed")
 
 
 @router.get("/resume", summary="SSE 流断流续传（HITL 期热接管）")
@@ -264,6 +549,29 @@ async def resume_chat(
             422,
         )
 
+    # PostgreSQL is the mode authority. During a rolling deployment an older
+    # Redis payload may not contain action_id even though its durable Action has
+    # already been committed; treating that payload as legacy would execute the
+    # same tool a second time after POST /ai/confirm.
+    durable_action = await prepared_action_service.get_by_confirmation_id(
+        db, confirmation_id
+    )
+    if durable_action is not None and not _durable_binding_valid(
+        durable_action,
+        pending=pending,
+        user_id=current_user.user_id,
+        tenant_id=current_tenant_id,
+    ):
+        raise BusinessRuleException(
+            "续传 action 绑定无效",
+            error_code="AI_PREPARED_ACTION_BINDING_INVALID",
+        )
+    if durable_action is None and pending.action_id is not None:
+        raise BusinessRuleException(
+            "续传缺少已绑定的 durable action",
+            error_code="AI_PREPARED_ACTION_BINDING_INVALID",
+        )
+
     # 4. 抢 owner 锁（防 worker A cancel 慢导致 worker B 双执行，spec §2.3）
     worker_token = secrets.token_urlsafe(16)
     lock_key = f"{AI_HITL_OWNER_LOCK_PREFIX}:{confirmation_id}"
@@ -284,34 +592,11 @@ async def resume_chat(
             409,
         )
 
-    # 5. 查 log_id + 重建 ChatDeps（局部 import 防循环）
-    log = await operation_log_service.get_by_tool_call_id(
-        db, pending.tool_call_id, user_id=current_user.user_id
+    # 5. 构造 SSE 流（在 finally 释放锁）。Legacy-only DB/deps setup stays
+    # inside the generator so every post-lock failure is covered by finally.
+    resumed_event = _build_resumed_event(
+        confirmation_id, pending, durable_action=durable_action
     )
-    log_id = log.log_id if log else None
-
-    deps = await chat_service.build_chat_deps(
-        db,
-        current_user,
-        agent_code=None,
-        trace_id=pending.trace_id,
-        conversation_id=pending.conversation_id,
-    )
-    deps.conversation_id = pending.conversation_id
-    deps.source_user_message_id = pending.source_user_message_id
-    deps.guard_owner_token = pending.guard_owner_token
-    deps.command_action = pending.command_action
-    deps.guard_handoff = True
-    # spec §5.3: build_chat_deps 内部已调 stickiness；如果走 supervisor 路径
-    # 导致 deps.agent 为 None（如新会话 / conv_agent_code 失效），resume 流程
-    # 不需要重新路由（tool 已经选定），直接 fallback 到 DEFAULT_AGENT_CODE.
-    if deps.agent is None:
-        from app.modules.ai.constants import DEFAULT_AGENT_CODE  # noqa: PLC0415
-
-        await chat_service.attach_agent_to_deps(deps, DEFAULT_AGENT_CODE)
-
-    # 6. 构造 SSE 流（在 finally 释放锁）
-    resumed_event = _build_resumed_event(confirmation_id, pending)
 
     async def resume_stream():
         try:
@@ -322,48 +607,100 @@ async def resume_chat(
             try:
                 action = await hitl_manager.hang(confirmation_id)
             except TimeoutError:
-                if log_id is not None:
-                    try:
-                        async with AsyncSessionLocal() as cleanup_db:
-                            async with cleanup_db.begin():
-                                await operation_log_service.mark_expired_if_pending(
-                                    cleanup_db, log_id
-                                )
-                    except Exception:
-                        logger.exception("resume: mark_expired_if_pending failed")
                 yield _format_sse_chunk(
                     AiErrorEvent(
                         error_code="AI_HITL_TIMEOUT",
                         message="HITL 确认超时（5min 无人确认），请重新发起",
                     )
                 )
-                terminal_events = await _finalize_resume_terminal(
-                    db,
-                    confirmation_id=confirmation_id,
-                    pending=pending,
-                    ok=False,
-                    error_code="AI_HITL_TIMEOUT",
-                    error_msg="HITL 确认超时（5min 无人确认）",
-                )
+                if durable_action is not None:
+                    terminal_events = await _terminalize_durable_resume_failure(
+                        confirmation_id=confirmation_id,
+                        pending=pending,
+                        user_id=current_user.user_id,
+                        tenant_id=current_tenant_id,
+                        error_code="AI_HITL_TIMEOUT",
+                        error_msg="HITL 确认超时（5min 无人确认）",
+                    )
+                else:
+                    await _mark_legacy_resume_expired(
+                        db,
+                        pending=pending,
+                        user_id=current_user.user_id,
+                    )
+                    terminal_events = await _finalize_resume_terminal(
+                        db,
+                        confirmation_id=confirmation_id,
+                        pending=pending,
+                        ok=False,
+                        error_code="AI_HITL_TIMEOUT",
+                        error_msg="HITL 确认超时（5min 无人确认）",
+                    )
                 for terminal_event in terminal_events:
                     yield _format_sse_chunk(terminal_event)
                 return
             except Exception:
                 # hang 抛非 Timeout 异常（如 Redis down）→ 先收口事实再 done
                 logger.exception("resume: hang unexpected error")
-                if log_id is not None:
-                    try:
-                        async with AsyncSessionLocal() as cleanup_db:
-                            async with cleanup_db.begin():
-                                await operation_log_service.mark_expired_if_pending(
-                                    cleanup_db, log_id
-                                )
-                    except Exception:
-                        logger.exception("resume: unexpected mark_expired failed")
                 yield _format_sse_chunk(
                     AiErrorEvent(
                         error_code="AI_INTERNAL_ERROR",
                         message="续传异常，请重新发起",
+                    )
+                )
+                if durable_action is not None:
+                    terminal_events = await _terminalize_durable_resume_failure(
+                        confirmation_id=confirmation_id,
+                        pending=pending,
+                        user_id=current_user.user_id,
+                        tenant_id=current_tenant_id,
+                        error_code="AI_INTERNAL_ERROR",
+                        error_msg="续传异常，请重新发起",
+                    )
+                else:
+                    await _mark_legacy_resume_expired(
+                        db,
+                        pending=pending,
+                        user_id=current_user.user_id,
+                    )
+                    terminal_events = await _finalize_resume_terminal(
+                        db,
+                        confirmation_id=confirmation_id,
+                        pending=pending,
+                        ok=False,
+                        error_code="AI_INTERNAL_ERROR",
+                        error_msg="续传异常，请重新发起",
+                    )
+                for terminal_event in terminal_events:
+                    yield _format_sse_chunk(terminal_event)
+                return
+
+            # All new direct/prepared confirmations are executed exactly once by
+            # POST /ai/confirm. A resumed waiter may only replay that committed
+            # terminal projection; resume_tool_execution is legacy-only.
+            if durable_action is not None:
+                terminal_events = await _load_durable_resume_terminal(
+                    confirmation_id=confirmation_id,
+                    pending=pending,
+                    user_id=current_user.user_id,
+                    tenant_id=current_tenant_id,
+                )
+                await _cleanup_durable_resume(durable_action)
+                for terminal_event in terminal_events:
+                    yield _format_sse_chunk(terminal_event)
+                return
+
+            try:
+                log = await operation_log_service.get_by_tool_call_id(
+                    db, pending.tool_call_id, user_id=current_user.user_id
+                )
+                log_id = log.log_id if log else None
+            except Exception:
+                logger.exception("resume: legacy operation log setup failed")
+                yield _format_sse_chunk(
+                    AiErrorEvent(
+                        error_code="AI_INTERNAL_ERROR",
+                        message="续传初始化失败，请重新发起",
                     )
                 )
                 terminal_events = await _finalize_resume_terminal(
@@ -372,7 +709,7 @@ async def resume_chat(
                     pending=pending,
                     ok=False,
                     error_code="AI_INTERNAL_ERROR",
-                    error_msg="续传异常，请重新发起",
+                    error_msg="续传初始化失败，请重新发起",
                 )
                 for terminal_event in terminal_events:
                     yield _format_sse_chunk(terminal_event)
@@ -426,6 +763,45 @@ async def resume_chat(
                     ok=False,
                     error_code="AI_OPERATION_LOG_NOT_FOUND",
                     error_msg="续传找不到原 log，请重新发起",
+                )
+                for terminal_event in terminal_events:
+                    yield _format_sse_chunk(terminal_event)
+                return
+
+            try:
+                deps = await chat_service.build_chat_deps(
+                    db,
+                    current_user,
+                    agent_code=None,
+                    trace_id=pending.trace_id,
+                    conversation_id=pending.conversation_id,
+                )
+                deps.conversation_id = pending.conversation_id
+                deps.source_user_message_id = pending.source_user_message_id
+                deps.guard_owner_token = pending.guard_owner_token
+                deps.command_action = pending.command_action
+                deps.guard_handoff = True
+                if deps.agent is None:
+                    from app.modules.ai.constants import (  # noqa: PLC0415
+                        DEFAULT_AGENT_CODE,
+                    )
+
+                    await chat_service.attach_agent_to_deps(deps, DEFAULT_AGENT_CODE)
+            except Exception:
+                logger.exception("resume: legacy ChatDeps setup failed")
+                yield _format_sse_chunk(
+                    AiErrorEvent(
+                        error_code="AI_INTERNAL_ERROR",
+                        message="续传初始化失败，请重新发起",
+                    )
+                )
+                terminal_events = await _finalize_resume_terminal(
+                    db,
+                    confirmation_id=confirmation_id,
+                    pending=pending,
+                    ok=False,
+                    error_code="AI_INTERNAL_ERROR",
+                    error_msg="续传初始化失败，请重新发起",
                 )
                 for terminal_event in terminal_events:
                     yield _format_sse_chunk(terminal_event)

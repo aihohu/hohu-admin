@@ -154,6 +154,30 @@ class TestCreatePending:
         # 进程内 Event 已注册
         assert hitl_manager._has_pending(cid)
 
+    async def test_binds_durable_action_without_losing_pending_payload(self) -> None:
+        cid = hitl_manager.generate_confirmation_id()
+        await hitl_manager.create_pending(
+            redis_module.redis_client,
+            confirmation_id=cid,
+            user_id=9001,
+            tenant_id=37,
+            conversation_id=100,
+            tool_call_id="tc_bound",
+            trace_id="tr_bound",
+            tool_name="user.update_dept",
+            args={"user_id": 42},
+        )
+
+        bound = await hitl_manager.bind_durable_action(
+            redis_module.redis_client, cid, 7483433649145122816
+        )
+        restored = await hitl_manager.get_pending(redis_module.redis_client, cid)
+
+        assert bound.action_id == 7483433649145122816
+        assert restored is not None
+        assert restored.action_id == 7483433649145122816
+        assert restored.tool_call_id == "tc_bound"
+
     async def test_oversized_args_rejected(self) -> None:
         """create_pending 入口必须先校验 args 大小"""
         cid = hitl_manager.generate_confirmation_id()
