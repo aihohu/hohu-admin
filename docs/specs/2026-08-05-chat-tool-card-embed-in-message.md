@@ -1,8 +1,8 @@
 # Chat Tool Card Embed in Message（工具卡片嵌入消息流） — v1.2
 
-**Status**: 🚧 Phase 1（Safety 与 Task 35a 持久 PreparedAction projection/reload handoff 已完成；完整逐消息内嵌仍待 §6 Task 3-7）
+**Status**: 🚧 Phase 1（Safety、Task 35a 持久 PreparedAction projection/reload handoff 与确定性真实浏览器 4/4 已完成；完整逐消息内嵌仍待 §6 Task 3-7）
 **Created**: 2026-08-05
-**Updated**: 2026-08-08
+**Updated**: 2026-08-11
 **Owner**: hohu core team
 **Depends on**:
 - [`2026-07-16-tool-result-view-design.md`](./2026-07-16-tool-result-view-design.md)（Tool Result View Registry 已 ship，5 种 view_type + DetailCardView 承载 downloadUrl）
@@ -469,7 +469,7 @@ POST /ai/confirm {confirmationId, action:"approve"}
 - [x] Task 35a-W2 **✅ 已完成（2026-08-08）**：Drawer 只渲染 ConfirmationPresentation，approve/reject 只传 confirmationId/action；文本“请确认”永不触发 UI
 - [ ] Task 35a-W3（依赖下方 Task 0-2）：streaming/reload 派生 transient pending assistant group；prepared preview/pending/execute 最终归同一 message group
   - [x] Task 35a-W3a **✅ durable prepared 子集已完成（2026-08-08）**：reload 派生安全 transient pending 卡，terminal detail 以同 trace/source 的 preview/execute toolCalls 接管并去重；完整 per-message wrapper/末尾列表移除仍由 Phase 1 Task 3/4 完成
-- [ ] Task 35a-W4 **⚠️ 实跑验收 gap（2026-08-11 纠偏）**：后端 867 个 AI pytest、前端 43 Vitest/typecheck/build 已通过；仓库已新增 prepared execute、reload pending、preview-only 三条确定性 Playwright，且 `--list` 可发现 3/3。由于本地 9527/8000/5432 未启动，尚未真实浏览器实跑，完成前不得宣称 Task 35a 浏览器验收完成
+- [x] Task 35a-W4 **✅ 已完成（2026-08-11）**：真实 Chrome 确定性 Playwright 4/4 已通过，覆盖 prepared execute 自动确认、reload pending 恢复、preview-only 无 action 和用户导出确认国际化；同一纠偏批次最终门禁为后端 pytest 1784/1784、前端 Vitest 46/46 与 typecheck 通过。浏览器用真实登录和页面交互验证 store、drawer、detail reconcile 与 confirm request 边界，AI chat/detail/confirm 使用受控 route fixture；因此本项只关闭 Task 35a confirmation slice，不将完整 per-message wrapper（Task 3/4）或真实模型/provider smoke 标为完成
 
 ### Phase 1（消息归属与耐久性收尾，本期）
 

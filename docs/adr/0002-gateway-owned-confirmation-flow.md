@@ -122,9 +122,9 @@ Gateway 在 action 进入 `pending_confirmation` 后发出结构化 `confirmatio
 - [x] 修订用户导入导出 spec：删除 Prompt 驱动 transition，冻结导入参数，并将 `user.import_execute` 改为 Gateway-only（2026-08-07）。
 - [x] 修订工具卡嵌入 spec：定义 preview/pending presentation 与 reload 恢复（2026-08-07）。
 - [x] 修订消息编辑 spec：定义 source message/revision 绑定及失效规则（2026-08-07）。
-- [ ] 以用户导入完成首个 `prepared + hitl + inline` 纵向切片和安全/E2E 回归，再迁移其他适用 tool。
+- [x] 以用户导入完成首个 `prepared + hitl + inline` 纵向切片和安全/E2E 回归，再迁移其他适用 tool（2026-08-11）。
 - [x] 完成 2026-08-11 代码纠偏：所有新 direct HITL 也持久化同一 action；`requested_outcome` 保持必填；ConfirmationPresentation 统一为有序 fields DTO；后端 867 个 AI pytest 与前端 43 Vitest/typecheck/build 通过。
-- [ ] 在可用 dev stack 实跑仓库内新增的三条确定性 Playwright；当前 `--list` 3/3 通过，但 9527/8000/5432 未启动，浏览器验收仍是 release gap。
+- [x] 在本地 dev stack 使用真实 Chrome 实跑确定性 Playwright 4/4：真实登录和页面交互覆盖自动确认、reload pending 恢复、preview-only 无 action 与用户导出确认国际化；AI chat/detail/confirm 使用受控 route fixture，真实模型/provider smoke 仍独立验收（2026-08-11）。
 - [ ] Task 36 容量观测继续后移；本决策不授权 ARQ/Worker、第二实时通道或行级 HITL。
 
 ## References（参考）
@@ -142,3 +142,4 @@ Gateway 在 action 进入 `pending_confirmation` 后发出结构化 `confirmatio
 - **2026-08-07**: ADR 初稿建立，状态为 Proposed；待四份关联 spec 完成协议收敛和评审后再转 Accepted。
 - **2026-08-07**: 四份关联 spec 已完成协议收敛；ADR 继续保持 Proposed，待架构评审确认后转 Accepted。
 - **2026-08-07**: 架构评审确认，状态转为 Accepted；后续实现按 Task 35a 分阶段落地。
+- **2026-08-11**: 真实 Chrome 确定性 Playwright 4/4 通过，关闭 Task 35a 浏览器验收 gap；真实模型/provider 纵向 smoke 仍作为独立发布验收，不由 fixture E2E 冒充。
