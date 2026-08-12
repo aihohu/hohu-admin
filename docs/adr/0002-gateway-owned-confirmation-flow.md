@@ -125,6 +125,7 @@ Gateway 在 action 进入 `pending_confirmation` 后发出结构化 `confirmatio
 - [x] 以用户导入完成首个 `prepared + hitl + inline` 纵向切片和安全/E2E 回归，再迁移其他适用 tool（2026-08-11）。
 - [x] 完成 2026-08-11 代码纠偏：所有新 direct HITL 也持久化同一 action；`requested_outcome` 保持必填；ConfirmationPresentation 统一为有序 fields DTO；后端 867 个 AI pytest 与前端 43 Vitest/typecheck/build 通过。
 - [x] 在本地 dev stack 使用真实 Chrome 实跑确定性 Playwright 4/4：真实登录和页面交互覆盖自动确认、reload pending 恢复、preview-only 无 action 与用户导出确认国际化；AI chat/detail/confirm 使用受控 route fixture，真实模型/provider smoke 仍独立验收（2026-08-11）。
+- [x] 纠正 prepared-action E2E 终态 fixture：持久 assistant 必须同时覆盖 `sourceToolCallId` 与执行 `toolCallId`，成功断言使用唯一消息类型定位；全套浏览器测试复用一次登录状态，避免认证波动伪装成多个 AI 场景失败（2026-08-12）。
 - [ ] Task 36 容量观测继续后移；本决策不授权 ARQ/Worker、第二实时通道或行级 HITL。
 
 ## References（参考）
@@ -143,3 +144,4 @@ Gateway 在 action 进入 `pending_confirmation` 后发出结构化 `confirmatio
 - **2026-08-07**: 四份关联 spec 已完成协议收敛；ADR 继续保持 Proposed，待架构评审确认后转 Accepted。
 - **2026-08-07**: 架构评审确认，状态转为 Accepted；后续实现按 Task 35a 分阶段落地。
 - **2026-08-11**: 真实 Chrome 确定性 Playwright 4/4 通过，关闭 Task 35a 浏览器验收 gap；真实模型/provider 纵向 smoke 仍作为独立发布验收，不由 fixture E2E 冒充。
+- **2026-08-12**: 确定性 E2E fixture 与当前逐消息工具卡契约重新对齐：prepared 终态同时持久 preview/execute 两个 tool call；测试不得用笼统 `.n-message` 选择器或逐用例重复 UI 登录。**反例**: 只伪造 execute 终态会让前端正确报告投影未同步，却被测试误判为执行失败；每个用例重新登录会把一次认证抖动放大成多个业务失败。**回归**: `tests/e2e/prepared-action-confirmation.spec.ts` 全部通过且成功场景无持久化同步警告。

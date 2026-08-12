@@ -544,6 +544,8 @@ RoleAgentBindReq = {
 
 27. **审计复用 `AuditLogMiddleware`，不在 service 手写**（修订 §8.1 + 决策 #10） — 项目已有 `app/middleware/audit_middleware.py` 拦截所有 PUT/POST/DELETE 请求（EXCLUDED_PATHS 仅排除 `/ai/chat` / `/ai/confirm` 等）自动写入 `sys_operation_log`，字段是 `user_id` / `username` / `module`（URL 第一段）/ `action`（METHOD_ACTION_MAP：PUT→update）/ `path` / `request_params`（脱敏后整个 body）。本期 admin 端点（`/ai/admin/agents/{id}` PUT、`/ai/role-agent/{roleId}` PUT）自动被审计，无需 service 手写。**理由**: 复用单一审计入口避免字段命名漂移（早期 spec 误用 `operator_type` / `operation`，实际表无此字段）；`request_params` 全量列表可由运维反推增量（v1.5 不在 UI 展示）。`ai_operation_log` 表是 AI tool 调用专用（`tool_name` / `tool_call_id` / `args_hash` 等字段），与管理员配置变更语义不匹配，**不复用**。**反例**: service 手写 → 双写冗余、字段命名偏离 schema、每加一个 admin 端点都要重复实现。**回归**: `test_role_agent.py::test_put_triggers_audit_middleware` + `test_agent_admin.py::test_put_triggers_audit_middleware`。
 
+28. **写入型 admin E2E 必须快照并恢复真实配置**（2026-08-12，纠偏）— description、enabled 与 Role-Agent 全量绑定在浏览器操作前通过 API 读取原值，测试主体即使断言失败也必须在 `finally` 中恢复并回读验证；元素按 `agent.code` / `role.code` 的 `data-testid` 定位。**反例**: description 写成固定 80 个 `A`、enabled 每跑一次反转、Role-Agent 保存后不恢复 → 开发库配置与权限永久漂移，后续真实模型验收依赖执行顺序；使用 `nth()` → 排序变化后修改错误 Agent/角色。**回归**: `tests/e2e/ai-admin.spec.ts` 连续运行前后 Agent 详情和 `boundAgentIds` 完全一致。
+
 
 ---
 
