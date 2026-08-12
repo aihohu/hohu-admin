@@ -19,12 +19,14 @@ def test_clarification_event_serializes():
             {"code": "dept_mgmt", "name": "部门管理助手", "description": "..."},
         ),
         message="请问你想查询用户还是部门？",
+        reason_code="selection_required",
     )
     payload = json.loads(event_to_sse_data(ev))
     assert payload["type"] == "clarification_required"
     assert len(payload["candidates"]) == 2
     assert payload["candidates"][0]["code"] == "user_mgmt"
     assert payload["message"] == "请问你想查询用户还是部门？"
+    assert payload["reasonCode"] == "selection_required"
     # 无状态化：不存 confirmationId / expiresAt
     assert "confirmationId" not in payload
     assert "expiresAt" not in payload

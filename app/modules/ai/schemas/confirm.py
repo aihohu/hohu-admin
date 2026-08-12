@@ -97,10 +97,15 @@ class ConfirmationPresentation(BaseModel):
 
     title: str = Field(..., min_length=1, max_length=120)
     summary: str | None = Field(default=None, max_length=500)
+    summary_key: str | None = Field(default=None, min_length=1, max_length=160)
+    summary_params: dict[str, StrictStr | StrictInt | StrictFloat] = Field(
+        default_factory=dict, max_length=20
+    )
     fields: list[ConfirmationPresentationField] = Field(
         default_factory=list, max_length=20
     )
     warnings: list[str] = Field(default_factory=list, max_length=10)
+    warning_keys: list[str] = Field(default_factory=list, max_length=10)
 
     @field_validator("title", "summary")
     @classmethod
@@ -118,7 +123,37 @@ class ConfirmationPresentation(BaseModel):
             _reject_sensitive_text(value, field_name="warning")
         return values
 
-    model_config = ConfigDict(extra="forbid")
+    @field_validator("summary_key")
+    @classmethod
+    def validate_summary_key(cls, value: str | None) -> str | None:
+        if value is not None and not value.startswith("page.ai.chat."):
+            raise ValueError("confirmation summary key is outside the AI chat locale")
+        return value
+
+    @field_validator("warning_keys")
+    @classmethod
+    def validate_warning_keys(cls, values: list[str]) -> list[str]:
+        if any(not value.startswith("page.ai.chat.") for value in values):
+            raise ValueError("confirmation warning key is outside the AI chat locale")
+        return values
+
+    @field_validator("summary_params")
+    @classmethod
+    def validate_summary_params(
+        cls, values: dict[str, StrictStr | StrictInt | StrictFloat]
+    ) -> dict[str, StrictStr | StrictInt | StrictFloat]:
+        for key, value in values.items():
+            if not key or len(key) > 64 or len(str(value)) > 256:
+                raise ValueError("confirmation summary parameter is invalid")
+            if isinstance(value, str):
+                _reject_sensitive_text(value, field_name="summary parameter")
+        return values
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class ConfirmRequest(BaseModel):

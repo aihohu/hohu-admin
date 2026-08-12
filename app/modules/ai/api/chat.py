@@ -719,6 +719,7 @@ async def chat(
                             for c in candidates
                         ),
                         "message": "AI 路由配额已用尽，请手动选择 Agent",
+                        "reason_code": "quota_exceeded",
                     }
                 else:
                     # spec §9: increment-before-call 防并发逃配额.
@@ -745,6 +746,7 @@ async def chat(
                                 for c in result.candidates
                             ),
                             "message": "请确认你想咨询哪类问题",
+                            "reason_code": "selection_required",
                         }
                         route_reason = result.reason
                     else:

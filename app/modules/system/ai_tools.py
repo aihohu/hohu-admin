@@ -366,9 +366,9 @@ async def role_list(
 
     columns = [
         {"key": "id", "label": "ID"},
-        {"key": "name", "label": "名称"},
-        {"key": "code", "label": "编码"},
-        {"key": "status", "label": "状态"},
+        {"key": "name", "label": "ai.tool.field.name"},
+        {"key": "code", "label": "ai.tool.field.code"},
+        {"key": "status", "label": "ai.tool.field.status"},
     ]
     records = [
         {
@@ -446,9 +446,9 @@ async def dept_list(
 
     columns = [
         {"key": "id", "label": "ID"},
-        {"key": "name", "label": "名称"},
-        {"key": "parent_id", "label": "父部门 ID"},
-        {"key": "status", "label": "状态"},
+        {"key": "name", "label": "ai.tool.field.name"},
+        {"key": "parent_id", "label": "ai.tool.field.parentDeptId"},
+        {"key": "status", "label": "ai.tool.field.status"},
     ]
     records = [
         {
@@ -830,6 +830,13 @@ async def _dry_run_user_create(
             ok=False,
             count=0,
             reason="用户名已存在，请更换账号",
+            confirmation_fields=[
+                {
+                    "label": "primary_dept_id",
+                    "value": primary_dept_id,
+                    "display_value": f"{dept.dept_name}（{primary_dept_id}）",
+                }
+            ],
         )
 
     return DryRunResult(
@@ -1166,6 +1173,14 @@ async def _dry_run_user_batch_delete(
         ok=True,
         count=len(users),
         reason=summary,
+        summary_key="page.ai.chat.confirmBatchDeleteSummary",
+        summary_params={
+            "count": len(users),
+            "users": (
+                f"{', '.join(u.user_name for u in users[:3])}"
+                f"{'...' if len(users) > 3 else ''}"
+            ),
+        },
         examples=examples,
     )
 
@@ -1229,9 +1244,9 @@ async def user_list(
 
     columns = [
         {"key": "id", "label": "ID"},
-        {"key": "user_name", "label": "用户名"},
-        {"key": "nickname", "label": "昵称"},
-        {"key": "status", "label": "状态"},
+        {"key": "user_name", "label": "ai.tool.field.userName"},
+        {"key": "nickname", "label": "ai.tool.field.nickname"},
+        {"key": "status", "label": "ai.tool.field.status"},
     ]
     records = [
         {
@@ -1988,13 +2003,13 @@ async def user_export(
             view_data={
                 "title": "用户导出",
                 "fields": [
-                    {"label": "导出批次 ID", "value": export_id},
-                    {"label": "导出行数", "value": str(row_count)},
+                    {"label": "ai.tool.field.exportId", "value": export_id},
+                    {"label": "ai.tool.field.exportRows", "value": str(row_count)},
                     {
-                        "label": "文件大小",
+                        "label": "ai.tool.field.fileSize",
                         "value": f"{file_size} B" if file_size is not None else "—",
                     },
-                    {"label": "过期时间", "value": expires_at or "—"},
+                    {"label": "ai.tool.field.expiresAt", "value": expires_at or "—"},
                 ],
                 "downloadUrl": download_url,
                 "downloadFilename": (

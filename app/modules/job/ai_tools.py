@@ -66,8 +66,8 @@ async def job_update_cron(
             view_data={
                 "title": "定时任务 cron 已更新",
                 "fields": [
-                    {"label": "任务 ID", "value": job_id_str},
-                    {"label": "新 cron", "value": new_cron},
+                    {"label": "ai.tool.field.jobId", "value": job_id_str},
+                    {"label": "ai.tool.field.newCron", "value": new_cron},
                 ],
             },
             audit={"job_id": job_id_str, "before": old_cron, "after": new_cron},
@@ -94,4 +94,6 @@ async def _dry_run_job_update_cron(
         ok=True,
         count=1,
         reason=f"将 cron 从 '{old_cron}' 改为 '{cron_expression}'",
+        summary_key="page.ai.chat.confirmUpdateCronSummary",
+        summary_params={"oldCron": old_cron, "newCron": cron_expression},
     )

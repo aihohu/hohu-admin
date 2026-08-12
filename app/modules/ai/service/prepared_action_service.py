@@ -356,7 +356,12 @@ class PreparedActionService:
             raise _binding_invalid(
                 "confirmation presentation 无效或含敏感字段"
             ) from exc
-        return validated.model_dump(exclude_none=True)
+        result = validated.model_dump(by_alias=True, exclude_none=True)
+        if not validated.summary_params:
+            result.pop("summaryParams", None)
+        if not validated.warning_keys:
+            result.pop("warningKeys", None)
+        return result
 
     def validate_pending_binding(
         self, action: AiPreparedAction, pending: PendingPayload

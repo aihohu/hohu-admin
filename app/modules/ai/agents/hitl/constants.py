@@ -115,6 +115,8 @@ class DryRunResult:
     ok: bool
     count: int = 0
     reason: str | None = None
+    summary_key: str | None = None
+    summary_params: dict[str, str | int | float] | None = None
     examples: list[str] | None = None
     confirmation_fields: list[dict[str, str | int | float]] | None = None
     """仅用于 direct HITL canonical presentation 的安全展示覆盖。

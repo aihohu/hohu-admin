@@ -771,3 +771,7 @@ AGENTS = [
 - 与 §17.4 SLO 联动：错路由率 > 阈值时触发 batch job
 
 **不做**：实时 feedback → 模型微调（冷启动噪声大，运维复杂度高）。
+
+### 17.6 ✅ clarification 展示使用稳定原因码（2026-08-12）
+
+23. **`clarification_required` 增加可选 `reasonCode`** — 新事件以 `quota_exceeded` / `selection_required` 表达客户端展示语义，Web 按 locale 渲染；`message` 保留供旧客户端兼容，候选 Agent 的管理员配置名称/描述保持原样。**反例**: Web 直接展示后端中文 `message`，或翻译管理员填写的 Agent 描述。**回归**: `test_clarification.py` 校验 `reasonCode` 序列化；前端 clarification mapper 校验双语映射与缺码回退。

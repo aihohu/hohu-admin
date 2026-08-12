@@ -586,9 +586,9 @@ class TestRoleList:
         assert result.ui.view_type == "data_list"
         assert result.ui.view_data["columns"] == [
             {"key": "id", "label": "ID"},
-            {"key": "name", "label": "名称"},
-            {"key": "code", "label": "编码"},
-            {"key": "status", "label": "状态"},
+            {"key": "name", "label": "ai.tool.field.name"},
+            {"key": "code", "label": "ai.tool.field.code"},
+            {"key": "status", "label": "ai.tool.field.status"},
         ]
         assert len(rows) >= 2
         # audit total 反映真实总数（_AFFECTED_ROW_KEYS 命中 total）
@@ -713,9 +713,9 @@ class TestDeptList:
         assert result.ui.view_type == "data_list"
         assert result.ui.view_data["columns"] == [
             {"key": "id", "label": "ID"},
-            {"key": "name", "label": "名称"},
-            {"key": "parent_id", "label": "父部门 ID"},
-            {"key": "status", "label": "状态"},
+            {"key": "name", "label": "ai.tool.field.name"},
+            {"key": "parent_id", "label": "ai.tool.field.parentDeptId"},
+            {"key": "status", "label": "ai.tool.field.status"},
         ]
         assert len(rows_names) >= 2
         assert result.ui.audit["total"] == result.data["total"]

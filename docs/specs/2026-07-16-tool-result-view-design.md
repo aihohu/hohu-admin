@@ -203,3 +203,9 @@ class UIResult:
 - `view_data` 强类型怎么实现（Pydantic 模型 per view_type？还是 TS 接口？）
 - 迁移现有 tool 时如何处理 LLM prompt 变化（result 精简后 LLM 行为可能不同）
 - 历史 `ai_message.tool_calls` JSON 是否需要迁移（已有数据的 result 没 `ui` 字段）
+
+---
+
+## 6. 纠偏决策（2026-08-12）
+
+11. **字段标签传 locale key，业务值保持原样** — `data_list.columns[].label` 与 `detail_card.fields[].label` 对内置工具统一返回 `ai.tool.field.*` 或已有 `page.*` key；客户端存在该 key 时翻译，不存在时原样回退，兼容第三方工具与历史消息。`labelKey` 继续只负责结果卡标题。**反例**: 后端返回“导出行数”“任务 ID”等最终中文 → 英文 locale 无法修复；翻译字段值 → 可能改写用户名、cron、文件名等业务事实。**回归**: 后端工具测试断言内置 UI 字段无中文 label；Web 视图组件测试固定 known-key 翻译与 unknown label 原样回退。

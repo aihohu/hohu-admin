@@ -774,6 +774,8 @@ async def _run_dry_run(
         return dr.count, DryRunSummary(
             summary=dr.reason or f"将影响 {dr.count} 行",
             affected_count=dr.count,
+            summary_key=dr.summary_key,
+            summary_params=dr.summary_params,
             affected_examples=dr.examples,
             confirmation_fields=dr.confirmation_fields,
         )
@@ -1138,9 +1140,24 @@ async def _hang_for_confirmation(
                                 if dry_run_summary is not None
                                 else meta.summary
                             ),
+                            "summaryKey": (
+                                dry_run_summary.summary_key
+                                if dry_run_summary is not None
+                                else None
+                            ),
+                            "summaryParams": (
+                                dry_run_summary.summary_params or {}
+                                if dry_run_summary is not None
+                                else {}
+                            ),
                             "fields": fields,
                             "warnings": (
                                 ["此操作不可逆，请确认影响范围。"]
+                                if meta.risk == "destructive"
+                                else []
+                            ),
+                            "warningKeys": (
+                                ["page.ai.chat.destructiveWarning"]
                                 if meta.risk == "destructive"
                                 else []
                             ),
@@ -1189,6 +1206,7 @@ async def _hang_for_confirmation(
             ),
             interaction_flow=durable_action.interaction_flow,
             presentation=durable_action.presentation,
+            dry_run=dry_run_summary,
         ),
     )
 
@@ -1297,7 +1315,13 @@ def _build_direct_confirmation_fields(
 def _summary_to_dict(s: DryRunSummary | None) -> dict[str, Any] | None:
     if s is None:
         return None
-    return {"summary": s.summary, "affected_count": s.affected_count}
+    return {
+        "summary": s.summary,
+        "affected_count": s.affected_count,
+        "summary_key": s.summary_key,
+        "summary_params": s.summary_params,
+        "affected_examples": s.affected_examples,
+    }
 
 
 # ============ 业务执行（独立 session + L3 超时 + 脱敏） ============

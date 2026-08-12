@@ -103,6 +103,18 @@ def _build_resumed_event(
         dry_run = DryRunSummary(
             summary=pending.dry_run_result.get("summary", ""),
             affected_count=pending.dry_run_result.get("affected_count", 0),
+            summary_key=(
+                pending.dry_run_result.get("summaryKey")
+                or pending.dry_run_result.get("summary_key")
+            ),
+            summary_params=(
+                pending.dry_run_result.get("summaryParams")
+                or pending.dry_run_result.get("summary_params")
+            ),
+            affected_examples=(
+                pending.dry_run_result.get("affectedExamples")
+                or pending.dry_run_result.get("affected_examples")
+            ),
         )
     presentation = (
         durable_action.presentation

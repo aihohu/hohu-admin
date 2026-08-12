@@ -3041,6 +3041,8 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 
 #### SR-37. **prepared terminal 通知成功后 guard/pending 所有权必须归还在线 SSE**（2026-08-12，纠偏）— confirm handler 完成 action、operation 与 assistant tool-card 终态提交后先通知 waiter；`wake=True` 表示原 SSE 仍负责读取终态、继续模型收尾、提交最终 assistant 投影，再依次删除 pending 和 compare-owner release guard，confirm handler 不得抢先清理。只有 `wake=False`（原流不可达）时，confirm handler 才释放 guard 并删除 pending。**反例**: confirm 在成功 wake 后立即释放 guard → 原流下一次 heartbeat 报 `AI_CHAT_GUARD_LOST`，工具已成功但最终 AI 回复中断；立即删除 pending → `redis_pubsub` 的 `wake_action` 防丢失兜底被破坏。**回归**: `test_live_prepared_waiter_retains_guard_and_pending_for_stream` 与 `test_offline_prepared_waiter_cleans_guard_and_pending` 固定在线/离线清理所有权；真实模型连续两次 direct HITL 均完整收尾且无 guard-lost 提示。
 
+#### SR-38. **LLM 错误说明与客户端展示文案分层**（2026-08-12，纠偏）— `ToolResult.error_msg` 和 SSE `message` 继续服务于 LLM/日志与旧客户端兼容；所有新 Web 展示必须优先使用稳定 `errorCode` 查询 `errorCode.*` locale，已知错误不得把后端语言文本直接渲染。HITL presentation 追加可选 `summaryKey/summaryParams/warningKeys`，旧 `summary/warnings` 仅作兼容回退；direct dry-run 通过结构化 key/params 表达动态摘要。**反例**: 工具卡同时显示本地化错误和后端中文 `errorMsg`，或按中文正则解析 dry-run 摘要 → 英文界面混入中文且文案修改即失配。**回归**: Web `tool-call-i18n.spec.ts` 校验 `errorCode.*` 路径和 unknown fallback；后端 `test_confirmation_presentation_i18n_metadata.py` 校验结构化摘要/警告元数据及兼容字段共存。
+
 
 
 

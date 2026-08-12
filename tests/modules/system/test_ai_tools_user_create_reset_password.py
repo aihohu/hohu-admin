@@ -489,6 +489,51 @@ class TestUserCreate:
             is None
         )
 
+    async def test_duplicate_username_dry_run_keeps_department_display_value(
+        self, db_session: AsyncSession
+    ) -> None:
+        await _seed_default_password(db_session)
+        await _seed_default_role(db_session)
+        dept = await _add_dept(db_session, 81006, "总部")
+        user_name = "duplicatepreview"
+        await _add_user(db_session, user_id=81007, user_name=user_name)
+        ctx = _make_ctx(
+            db_session,
+            tool_name="user.create",
+            permission="system:user:add",
+            accessible_dept_ids={dept.dept_id},
+        )
+
+        result = await _dry_run_user_create(
+            ctx,
+            user_name=user_name,
+            primary_dept_id=dept.dept_id,
+        )
+
+        assert result.ok is False
+        assert result.count == 0
+        assert result.confirmation_fields == [
+            {
+                "label": "primary_dept_id",
+                "value": dept.dept_id,
+                "display_value": f"{dept.dept_name}（{dept.dept_id}）",
+            }
+        ]
+
+        fields = _build_direct_confirmation_fields(
+            user_create.__ai_tool_meta__,
+            {"user_name": user_name, "primary_dept_id": dept.dept_id},
+            DryRunSummary(
+                summary=result.reason or "",
+                affected_count=result.count,
+                confirmation_fields=result.confirmation_fields,
+            ),
+        )
+        assert fields[1] == {
+            "label": "primary_dept_id",
+            "value": f"{dept.dept_name}（{dept.dept_id}）",
+        }
+
 
 class TestUserResetPassword:
     async def test_reset_uses_system_default_without_returning_secret(

@@ -80,6 +80,8 @@ class DryRunSummary:
 
     summary: str
     affected_count: int
+    summary_key: str | None = None
+    summary_params: dict[str, str | int | float] | None = None
     affected_examples: list[str] | None = None
     confirmation_fields: list[dict[str, str | int | float]] | None = None
 
@@ -158,6 +160,7 @@ class ClarificationRequiredEvent:
     """({"code": "user_mgmt", "name": "...", "description": "..."}, ...)"""
 
     message: str
+    reason_code: str | None = None
     type: Literal["clarification_required"] = "clarification_required"
 
 
@@ -243,6 +246,7 @@ def event_to_sse_data(event: AiStreamEvent) -> str:
             "type": event.type,
             "candidates": list(event.candidates),
             "message": event.message,
+            "reasonCode": event.reason_code,
         }
     elif isinstance(event, AiErrorEvent):
         payload = {
@@ -271,6 +275,8 @@ def _dry_run_to_dict(s: DryRunSummary | None) -> dict[str, Any] | None:
     return {
         "summary": s.summary,
         "affectedCount": s.affected_count,
+        "summaryKey": s.summary_key,
+        "summaryParams": s.summary_params,
         "affectedExamples": s.affected_examples,
     }
 
