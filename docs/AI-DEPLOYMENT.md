@@ -118,6 +118,9 @@ alembic upgrade head
 # 7 个内置 Agent（user_mgmt / role_mgmt / dept_mgmt / config_mgmt / provider_mgmt / job_mgmt / shared）
 uv run python scripts/seed_ai_agents.py
 
+# 写入空 prompt，并把已知旧版内置默认 prompt 安全升级到当前版本；自定义 prompt 不覆盖
+uv run python scripts/seed_agent_prompts.py
+
 # 同步菜单 + 5 个权限码（ai:agent:list/add/edit/delete + ai:trace:view）
 uv run python scripts/init_db.py
 ```
@@ -446,6 +449,7 @@ systemctl restart hohu-admin
 - 原型：`docs/prototype/12-ai-chat-tool-call.html` / `13-ai-hitl-drawer.html` / `14-ai-clarification.html`
 - 静态检查：`scripts/check_ai_tools.py`（pre-commit + CI 双跑）
 - seed 脚本：`scripts/seed_ai_agents.py`（7 个内置 Agent）
+- prompt 升级：`scripts/seed_agent_prompts.py`（空值/已知旧默认值安全升级）
 - 初始化：`scripts/init_db.py`（菜单 + 权限码 + 管理员）
 
 ---

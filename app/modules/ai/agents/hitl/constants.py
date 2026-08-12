@@ -116,6 +116,13 @@ class DryRunResult:
     count: int = 0
     reason: str | None = None
     examples: list[str] | None = None
+    confirmation_fields: list[dict[str, str | int | float]] | None = None
+    """仅用于 direct HITL canonical presentation 的安全展示覆盖。
+
+    每项必须包含 ``label``、与 frozen args 相等的 ``value``，以及可选的
+    ``display_value``。Gateway 先验证 raw value 与冻结参数绑定，再把 display
+    value 写入 canonical presentation，禁止出现展示 A、实际执行 B。
+    """
 
     def __post_init__(self) -> None:
         if not self.ok and self.count > 0:

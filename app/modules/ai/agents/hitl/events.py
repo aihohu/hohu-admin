@@ -81,6 +81,7 @@ class DryRunSummary:
     summary: str
     affected_count: int
     affected_examples: list[str] | None = None
+    confirmation_fields: list[dict[str, str | int | float]] | None = None
 
 
 @dataclass(frozen=True)

@@ -13,6 +13,7 @@
 import pytest
 from sqlalchemy import delete
 
+from app.core.config import settings
 from app.core.exceptions import BusinessRuleException
 from app.modules.system.models.config import Config
 from app.modules.system.user.constants import (
@@ -20,7 +21,10 @@ from app.modules.system.user.constants import (
     OVERWRITE_ALLOWED,
     OVERWRITE_NEVER,
 )
-from app.modules.system.user.helpers import get_default_password
+from app.modules.system.user.helpers import (
+    INSECURE_DEFAULT_PASSWORD_SENTINELS,
+    get_default_password,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -157,3 +161,25 @@ class TestGetDefaultPassword:
 
         value = await get_default_password(db_session)
         assert value == "Hohu@Init#2026"
+
+    async def test_prod_rejects_public_seed_password(
+        self, db_session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        public_seed = next(iter(INSECURE_DEFAULT_PASSWORD_SENTINELS))
+        db_session.add(
+            Config(
+                config_id=4,
+                config_name="默认密码",
+                config_key="auth:default_password",
+                config_value=public_seed,
+                config_group="auth",
+                status="1",
+            )
+        )
+        await db_session.flush()
+        monkeypatch.setattr(settings, "ENV", "prod")
+
+        with pytest.raises(BusinessRuleException) as exc:
+            await get_default_password(db_session)
+
+        assert exc.value.error_code == "AI_IMPORT_DEFAULT_PASSWORD_INVALID"

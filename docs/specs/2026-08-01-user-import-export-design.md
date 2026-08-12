@@ -83,7 +83,7 @@
 
 ### 1.1 现状盘点
 
-`user_service` 现有 9 方法 / 275 行（CRUD + batch_delete + profile/password）。AI tool 现有 7 个（`count` / `stats` / `distinct` / `create` / `batch_delete` + `role.count/list` + `dept.count/list`）。
+`user_service` 现有 CRUD + batch_delete + profile/password 等能力。AI tool 的实际 Registry 以代码与 [`2026-08-11-ai-user-management-tools.md`](./2026-08-11-ai-user-management-tools.md) 为准；本 spec 初稿曾把尚未实现的 `user.create` 误计为已完成，现已纠正。
 
 **用户管理「CRUD + 导入导出」完整度对照**：
 
@@ -91,7 +91,7 @@
 |---|---|---|---|---|
 | 列表查询 | ✅ | ✅ `/list` | ❌ 缺 `user.list` | Phase 2 |
 | 单条详情 | ✅ | ✅ `/{id}` | ❌ 缺 `user.lookup` | Phase 2 |
-| 新增 | ✅ | ✅ `POST /` | ✅ `user.create` | — |
+| 新增 | ✅ | ✅ `POST /` | ✅ `user.create` | 2026-08-11 纠偏完成 |
 | 修改 | ✅ | ✅ `PUT /{id}` | ❌ 缺 `user.update` | Phase 2 |
 | 删除（单/批） | ✅ | ✅ `DELETE /{ids}` | ✅ `user.batch_delete` | — |
 | **批量导入** | ❌ 无按钮 | ❌ 无 endpoint | ❌ 缺 `user.import_preview` / `user.import_execute` | **Phase 1 + 2** |
@@ -229,7 +229,7 @@ UserService(facade)
 
 **回归**: 默认 `skip`（最安全）；HTTP `?on_conflict=overwrite` query param；AI tool 函数签名 `on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip"`；前端导入弹窗 radio 切换（默认 skip）。
 
-### 2.5 **password 列不入 Excel 模板；导入用全局默认密码（`sys_config.auth:default_password`）** — `password` 是敏感字段（spec §2.4 二分法），导入时所有新用户用配置项中的默认密码哈希入库；管理员线下告知用户默认密码值。部门 / 角色字段用业务语义（name/code）而非 ID，详见 #2.17 / #2.18。
+### 2.5 **password 列不入 Excel 模板；导入用全局默认密码（`sys_config.auth:default_password`）** — `password` 是敏感字段（spec §2.4 二分法），导入时所有新用户用配置项中的默认密码哈希入库；管理员线下告知用户默认密码值。prod 环境必须由部署方显式配置私有值，公开 dev/test seed 或空值均 fail closed。部门 / 角色字段用业务语义（name/code）而非 ID，详见 #2.17 / #2.18。
 
 **反例**: (1) 模板含 password 列 → 用户在 Excel 里写明文密码，文件流传过程中泄露面扩大；与 §2.4「sensitive_input 不在签名」原则冲突。(2) 每用户随机生成 + 返回明文密码清单 → 管理员分发过程中邮件 / IM / U盘 都是泄露点，离职员工仍持有。(3) 默认密码硬编码 → 部署方无法改，违反「配置驱动」。
 
@@ -3170,7 +3170,7 @@ async def user_export(
 - [x] Task 16 ✅ 已完成（2026-08-04）：权限码 seed（`system:user:import` / `system:user:export`）+ `sys_config.auth:default_password` seed 到 `sync_menus.py` / `init_db.py`。15 用例（test_sync_menus_definitions 6 + test_init_db_seed 9）。决策 16.1-16.8。
   - 16.1 **双 seed 入口（sync_menus + init_db）** — sync_menus.py 增量同步（已部署环境跑一次拿新按钮）；init_db.py 全新部署 fresh install 一次到位。两者都必须 seed，单边会导致某条路径缺权限码（已部署环境只有 sync_menus / 新环境只有 init_db）。**反例**: 只动 init_db → 已部署环境升级后 admin 看不到导入导出按钮；只动 sync_menus → 全新部署后第一次 sync_menus 之前没有按钮（且 admin 角色没绑定）。**回归**: `test_sync_menus_definitions.py::TestUserImportExportPermissionSeed` + `test_init_db_seed.py::TestUserButtonPermissionSeed` 双文件覆盖。
   - 16.2 **sys_config seed 只放 init_db.py** — sync_menus.py 只管 sys_menu 表，sys_config 是不同表 + 不同生命周期（admin UI 可改值）。已部署环境的 `auth:default_password` 由部署方在 admin UI 手动配，helper 缺失时抛 `AI_IMPORT_DEFAULT_PASSWORD_NOT_SET`（防代码默认值蒙混）。**反例**: 写 alembic migration INSERT sys_config → migration 跑完后部署方改值，下次环境重建 migration 又覆盖回默认值。**回归**: `test_init_db_seed.py::TestDefaultPasswordConfigSeed::test_default_password_config_seeded`。
-  - 16.3 **默认密码 `hohu123456` 与 admin 一致 + remark 强警告** — fresh install 默认值与 admin 密码默认值一致（运维一处记），remark 含「上线前请改 / prod 禁止保留默认值」安全提示（spec §2.5 反例 3：默认密码硬编码 → 部署方无法改）。helper 不读 remark，纯提示用。**反例**: 默认值用空字符串 → helper 立即抛 NOT_SET，admin 必须先配才能用，但 init_db 后管理员可能困惑「为什么刚 seed 完就用不了」；或默认值用 random UUID → 与 admin 密码不一致，运维多记一份。**回归**: `test_default_password_config_seeded` 验证 value 非空 + status='1'；`test_default_password_config_remark_warns_to_change` 验证 remark 含安全关键词（修改 / 安全 / prod / 上线 等）。
+  - 16.3 **默认密码 seed 使用符合统一校验器的 `Hohu123456` + remark 强警告** — 2026-08-11 纠偏发现旧值 `hohu123456` 不含大写字母，无法通过 `validate_password`，使复用 `UserCreate` / `ResetPassword` 的后端策略工具在 fresh install 必然失败；因此 fresh install 配置改为强度合法值，仍要求部署方上线前修改并定期轮换。admin 交互初始化密码保持独立，不再强求二者字面一致。**反例**: 为兼容旧弱值而让 AI tool 绕过 Pydantic 校验，会让入口之间的密码强度规则继续漂移。**回归**: `test_default_password_config_seeded` 增加 `validate_password` 校验；AI create/reset 定向测试都用同一 helper + schema。
   - 16.4 **`is_public=False`** — sys_config 模型有 `is_public` 字段控制是否暴露给 `/system/config/public` 接口（前端登录页等未授权场景拿配置）。默认密码属于敏感配置，必须 `is_public=False`，否则任何匿名访问者都能拿到默认密码 → 全员越权。**反例**: `is_public=True`（或漏配默认值）→ 攻击者 curl 公开接口拿默认密码 → 用默认密码 + 任意 user_name 登录新导入用户。**回归**: `test_default_password_not_marked_public` 严格断言 `cfg.is_public is False`。
   - 16.5 **模块级 `_system_user_menu_id` 共享 menu_id** — init_db.py 原 `Menu(menu_id=next_id(), ...)` 内联调用，按钮子菜单拿不到父 menu_id（F-type 按钮 parent_id 必须指 system_user 的 menu_id，否则前端菜单树挂不上 orphan button）。重构成 `_system_user_menu_id = next_id()` 模块级常量，system_user Menu + 2 按钮都引用它。**反例**: 按钮用 `parent_id=0` → 前端 build_menu_tree 找不到父，按钮悬挂不显示；或按钮再调一次 `next_id()` 当 parent_id → 永远碰不到 system_user。**回归**: `test_import_button_parent_links_to_system_user` + `test_export_button_parent_links_to_system_user` 用 `_find_menu_by_route_name("system_user").menu_id` 反查并断言 `button.parent_id == parent.menu_id`。
   - 16.6 **静态测试（不调用 init_db / sync_menus）** — init_db() 入口含 `input()` 交互 + DROP TABLE 灾难性副作用，sync_menus() 真连 DB 写入。两者都不适合在单测里直接跑。改为静态校验 `init_menus` / `init_configs` / `MENU_DEFINITIONS` 列表内容（形状 + 关键字段），覆盖 99% 的 seed 错误（漏 seed / 错 permission / orphan parent / 漏 remark）。**反例**: 用 testcontainers 跑真实 init_db → 慢 + 脆 + 还原成本高。**回归**: 15 测试全静态，0 DB 依赖，0.08s 跑完。
@@ -3260,6 +3260,7 @@ async def user_export(
   - 25.2 **hitl_always=True 强制** — risk=high 的 tool 默认走 HITL 抽屉确认，但单行修改场景用户可能反复点（如批量改名）；hitl_always 强制每次都确认（防 LLM 自动批量调）。**反例**: 仅靠 risk=high 触发 HITL → LLM 重试时降级跳过 → 用户体验不一致。**回归**: meta `hitl_always=True` + `_dry_run_user_update` 实现，HITL 抽屉展示字段变更前后对照。
   - 25.3 **dry_run 列字段变更对照表** — `_dry_run_user_update` 返回 `examples=[f"{field}: {getattr(user, field)} → {value}"]`，让用户在 HITL 抽屉看到具体每个字段的 old → new 对照。**反例**: 仅 summary「将更新 2 个字段」 → 用户不知是哪 2 个，必须 trust LLM。**回归**: `test_dry_run_returns_examples` 断言 examples 含字段名。
   - 25.4 **no-fields 短路 + AI_USER_UPDATE_NO_FIELDS** — 所有字段 None 时立刻抛 BusinessRuleException，不查 DB。**反例**: 直接调 user_service.update_user({}) → Pydantic 校验过 → DB UPDATE 无字段 → 空操作但浪费 query。**回归**: `test_update_requires_at_least_one_field` 验证 errorCode。
+  - 25.5 **确认抽屉展示目标用户与字段新值** — `user.update` 的 `args_summary_fields` 声明 `user_id` 和全部可更新字段，dry-run 以 `confirmation_fields` 返回与冻结参数严格相等的原始值，并仅为 `user_id` 补充“用户名（ID）”展示值；前端按字段键国际化标签和枚举值，单字段摘要明确“谁的什么字段将改成什么”。**反例**: 只展示 `user_id + affectedCount`，或依赖不可持久化、不可国际化的 `examples` → 用户无法确认实际修改内容。**回归**: `test_dry_run_returns_examples` 同时校验结构化字段，前端 `confirmation-presentation-i18n.spec.ts` 校验昵称单字段与状态枚举展示。
 - [x] Task 26 ✅ 已完成（2026-08-04）**[v2.2 P0 #2.14 拆分]**: AI tool `user.import_preview` 当时按（risk=low / readonly / detail_card / chip_target=/system/user）落地；v2.4 复核确认 `readonly` 与其持久 batch/file 的真实行为冲突，修正列入 Task 35，不回写 Task 26 的历史完成事实。决策 26.1-26.3：
   - 26.1 **复用现有 dry_run_import_users + parse_import_excel** — Tool 函数仅做参数转换 + file_id → file_bytes 加载 + 调 service + 包装 ToolResult。零业务逻辑（service 层已完整 + 测试覆盖）。**反例**: tool 内部重写 dry_run 逻辑 → 与 HTTP 路径分叉，单测必须复制粘贴一份。**回归**: `user_import_preview` 函数 < 50 行；逻辑测试由 `test_user_import_dry_run.py` 等 service 层覆盖。
   - 26.2 **file_id → file_bytes 加载 helper `_load_file_bytes`** — 当时通过 ctx.db 查 sys_file 表拿 file_path → 同步 read_bytes（`# noqa: ASYNC240`，AI 调用频次低，同步 IO 可接受）。v2.4 复核发现该实现缺 owner/tenant/business type 与路径边界校验，安全修复列入 Task 35，不回写历史完成事实。**反例**: 把加载逻辑塞 tool 函数内 → import_execute 也要一份；违反 DRY。**回归**: `_load_file_bytes(ctx, file_id) -> (bytes, filename, mime_type)` 模块级 helper；Task 35 加资源授权与内容验证。

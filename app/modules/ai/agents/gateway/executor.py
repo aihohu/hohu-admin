@@ -72,6 +72,7 @@ from app.modules.ai.agents.hitl.events import (
 from app.modules.ai.agents.hitl.manager import PendingPayload, hitl_manager
 from app.modules.ai.agents.hitl.risk import classify_execution_mode
 from app.modules.ai.agents.safety.auto_disable import record_injection
+from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.agents.tools.registry import RegisteredTool, ToolRegistry
 from app.modules.ai.core.context import ChatDeps, build_tool_context
 from app.modules.ai.models.prepared_action import AiPreparedAction
@@ -774,6 +775,7 @@ async def _run_dry_run(
             summary=dr.reason or f"将影响 {dr.count} 行",
             affected_count=dr.count,
             affected_examples=dr.examples,
+            confirmation_fields=dr.confirmation_fields,
         )
     except BusinessException as e:
         logger.info(
@@ -1116,21 +1118,9 @@ async def _hang_for_confirmation(
                         "argsHash": compute_args_hash(args),
                         "dryRun": _summary_to_dict(dry_run_summary),
                     }
-                    fields: list[dict[str, Any]] = []
-                    for field_name in meta.args_summary_fields:
-                        value = args.get(field_name)
-                        if isinstance(value, str | int | float) and not isinstance(
-                            value, bool
-                        ):
-                            fields.append({"label": field_name, "value": value})
-                    if dry_run_summary is not None:
-                        fields.append(
-                            {
-                                "label": "affectedCount",
-                                "value": dry_run_summary.affected_count,
-                                "tone": "warning",
-                            }
-                        )
+                    fields = _build_direct_confirmation_fields(
+                        meta, args, dry_run_summary
+                    )
                     durable_action = await prepared_action_service.create_pending(
                         log_db,
                         confirmation_id=confirmation_id,
@@ -1253,6 +1243,55 @@ async def _hang_for_confirmation(
         confirmation_id=confirmation_id,
         decision=action,
     )
+
+
+def _build_direct_confirmation_fields(
+    meta: AiToolMeta,
+    args: dict[str, Any],
+    dry_run_summary: DryRunSummary | None,
+) -> list[dict[str, Any]]:
+    """合并原始参数与已绑定的 dry-run 展示值，不修改冻结执行参数。"""
+    enriched_by_label: dict[str, dict[str, Any]] = {}
+    allowed_labels = set(meta.args_summary_fields)
+    if dry_run_summary is not None:
+        for field in dry_run_summary.confirmation_fields or []:
+            label = field.get("label")
+            if not isinstance(label, str) or label not in allowed_labels:
+                raise ValueError("confirmation field label is not a frozen argument")
+            if label in enriched_by_label:
+                raise ValueError("confirmation field label must be unique")
+            raw_value = field.get("value")
+            frozen_value = args.get(label)
+            if type(raw_value) is not type(frozen_value) or raw_value != frozen_value:
+                raise ValueError(
+                    "confirmation field value does not match frozen argument"
+                )
+            enriched_by_label[label] = {
+                "label": label,
+                "value": field.get("display_value", raw_value),
+            }
+
+    fields: list[dict[str, Any]] = []
+    for field_name in meta.args_summary_fields:
+        value = args.get(field_name)
+        if isinstance(value, str | int | float) and not isinstance(value, bool):
+            fields.append(
+                enriched_by_label.pop(
+                    field_name,
+                    {"label": field_name, "value": value},
+                )
+            )
+
+    fields.extend(enriched_by_label.values())
+    if dry_run_summary is not None:
+        fields.append(
+            {
+                "label": "affectedCount",
+                "value": dry_run_summary.affected_count,
+                "tone": "warning",
+            }
+        )
+    return fields
 
 
 def _summary_to_dict(s: DryRunSummary | None) -> dict[str, Any] | None:

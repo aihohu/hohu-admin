@@ -15,7 +15,19 @@
 
 import pytest
 
-from scripts.init_db import init_configs, init_menus
+from app.constants import (
+    DATA_SCOPE_SELF,
+    STATUS_ENABLED,
+    SUPER_ADMIN_ROLE_CODE,
+    USER_ROLE_CODE,
+)
+from app.utils.validators import validate_password
+from scripts.init_db import (
+    build_init_roles,
+    default_password_seed_value,
+    init_configs,
+    init_menus,
+)
 
 
 def _find_menu_by_permission(menus: list, perm: str):
@@ -87,12 +99,17 @@ class TestDefaultPasswordConfigSeed:
 
         # config_value 非空（否则 helper 仍会抛 NOT_SET）
         assert cfg.config_value, "default_password value must be non-empty"
+        assert validate_password(cfg.config_value) == cfg.config_value
         # status='1' 启用（helper WHERE status='1' 过滤）
         assert cfg.status == "1", f"status must be '1', got {cfg.status!r}"
         # config_group 非空（模型 NOT NULL）
         assert cfg.config_group
         # config_name 非空
         assert cfg.config_name
+
+    def test_prod_does_not_seed_a_usable_public_password(self):
+        assert default_password_seed_value("prod") == ""
+        assert validate_password(default_password_seed_value("dev"))
 
     def test_default_password_config_remark_warns_to_change(self):
         """remark 含安全提示，防部署方上线前忘记改默认密码（spec §2.5 反例 3）。"""
@@ -126,3 +143,19 @@ class TestDefaultPasswordConfigSeed:
         """同一 key 不能在 init_configs 出现两次（防 seed 漂移导致 UniqueViolation）。"""
         matches = [c for c in init_configs if c.config_key == key]
         assert len(matches) == 1
+
+
+class TestRoleSeed:
+    """初始化角色必须沿用现有数据库的 R_* 编码契约。"""
+
+    def test_default_user_role_matches_existing_role_contract(self):
+        assert USER_ROLE_CODE == "R_USER"
+
+        roles = build_init_roles()
+        roles_by_code = {role.role_code: role for role in roles}
+
+        assert set(roles_by_code) == {SUPER_ADMIN_ROLE_CODE, USER_ROLE_CODE}
+        default_role = roles_by_code[USER_ROLE_CODE]
+        assert default_role.role_name == "普通用户"
+        assert default_role.data_scope == DATA_SCOPE_SELF
+        assert default_role.status == STATUS_ENABLED

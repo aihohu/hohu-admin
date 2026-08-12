@@ -371,10 +371,10 @@ async def _tool(ctx, file_id: str):
 
 
 class TestBuiltinScanSurface:
-    def test_all_16_mandatory_builtins_are_loaded(self) -> None:
+    def test_all_19_mandatory_builtins_are_loaded(self) -> None:
         names = {tool.meta.name for tool in load_all_tools()}
 
-        assert len(EXPECTED_BUILTIN_TOOL_NAMES) == 16
+        assert len(EXPECTED_BUILTIN_TOOL_NAMES) == 19
         assert EXPECTED_BUILTIN_TOOL_NAMES <= names
 
     def test_mandatory_module_import_failure_is_not_swallowed(

@@ -75,6 +75,7 @@ MVP 阶段 AI 默认**关闭**，需手动启用：
 2. **seed 7 个内置 Agent + 5 个权限码**：
    ```bash
    uv run python scripts/seed_ai_agents.py
+   uv run python scripts/seed_agent_prompts.py  # 安全升级内置默认 prompt，保留自定义值
    uv run python scripts/init_db.py  # 含菜单 + 权限码同步
    ```
 3. **配置 LLM Provider**（管理后台 → 模型管理）：填 `apiKey` + `baseUrl`，启用至少一个模型

@@ -19,6 +19,7 @@ from datetime import timedelta
 from typing import Any, Literal
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import aliased
 
 from app.modules.ai.agents.gateway import ensure_targets_in_scope
 from app.modules.ai.agents.gateway.result import (
@@ -474,6 +475,534 @@ async def dept_list(
     )
 
 
+# ============ user.dept_lookup / user.create / user.reset_password（2026-08-11 纠偏） ============
+
+_DEPT_LOOKUP_MAX_MATCHES = 20
+
+
+@ai_tool(
+    AiToolMeta(
+        name="user.dept_lookup",
+        agent="user_mgmt",
+        summary=(
+            "Resolve an exact visible department name before user.create; "
+            "returns candidate IDs and parents."
+        ),
+        required_perms=("system:user:add",),
+        risk="low",
+        readonly=True,
+        idempotent=True,
+        result_view="data_list",
+        args_summary_fields=("dept_name",),
+    )
+)
+async def user_dept_lookup(
+    ctx: AiToolContext,
+    *,
+    dept_name: str,
+) -> ToolResult:
+    """按完整名称解析 user.create 可使用的可见、启用部门候选。"""
+    from app.constants import STATUS_ENABLED  # noqa: PLC0415
+    from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+
+    query = dept_name.strip()
+    if not query:
+        raise BusinessRuleException(
+            "部门名称不能为空",
+            error_code="AI_USER_DEPT_NAME_REQUIRED",
+        )
+
+    parent = aliased(Dept)
+    filters = [
+        Dept.dept_name == query,
+        Dept.status == STATUS_ENABLED,
+    ]
+    if ctx.data_scope.accessible_dept_ids is not None:
+        filters.append(Dept.dept_id.in_(ctx.data_scope.accessible_dept_ids))
+
+    match_count = int(
+        await ctx.db.scalar(select(func.count(Dept.dept_id)).where(*filters)) or 0
+    )
+    rows = (
+        await ctx.db.execute(
+            select(Dept, parent.dept_name.label("parent_name"))
+            .outerjoin(parent, Dept.parent_id == parent.dept_id)
+            .where(*filters)
+            .order_by(Dept.parent_id.asc().nulls_first(), Dept.dept_id.asc())
+            .limit(_DEPT_LOOKUP_MAX_MATCHES)
+        )
+    ).all()
+
+    matches = [
+        {
+            "id": str(dept.dept_id),
+            "name": dept.dept_name,
+            "parentId": str(dept.parent_id) if dept.parent_id else None,
+            "parentName": parent_name,
+        }
+        for dept, parent_name in rows
+    ]
+    return ToolResult.success(
+        data={
+            "query": query,
+            "matchCount": match_count,
+            "matches": matches,
+        },
+        ui=UIResult(
+            view_type="data_list",
+            view_data={
+                "columns": [
+                    {"key": "id", "label": "ID"},
+                    {"key": "name", "label": "page.system.dept.deptName"},
+                    {"key": "parentName", "label": "page.system.dept.parentId"},
+                ],
+                "rows": matches,
+            },
+            audit={
+                "query": query,
+                "match_count": match_count,
+                "returned_count": len(matches),
+            },
+            label_key="ai.tool.user.dept_lookup.result",
+            label_params={"count": match_count},
+        ),
+    )
+
+
+async def _get_ai_default_password(ctx: AiToolContext) -> str:
+    """读取并校验仅后端可见的默认密码策略。"""
+    from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+    from app.modules.system.user.helpers import (  # noqa: PLC0415
+        get_default_password,
+    )
+    from app.utils.validators import validate_password  # noqa: PLC0415
+
+    try:
+        default_password = await get_default_password(ctx.db)
+    except BusinessRuleException as exc:
+        if exc.error_code == "AI_IMPORT_DEFAULT_PASSWORD_INVALID":
+            raise BusinessRuleException(
+                "生产环境默认密码未显式配置，无法执行用户凭据操作",
+                error_code="AI_USER_DEFAULT_PASSWORD_INVALID",
+            ) from exc
+        raise BusinessRuleException(
+            "系统默认密码未配置，无法执行用户凭据操作",
+            error_code="AI_USER_DEFAULT_PASSWORD_NOT_SET",
+        ) from exc
+
+    try:
+        validate_password(default_password)
+    except ValueError:
+        raise BusinessRuleException(
+            "系统默认密码不符合强度要求，请先更新 auth:default_password",
+            error_code="AI_USER_DEFAULT_PASSWORD_INVALID",
+        ) from None
+    return default_password
+
+
+async def _load_ai_create_policy(
+    ctx: AiToolContext,
+    *,
+    primary_dept_id: int,
+) -> tuple[Dept, Role, str]:
+    """校验新用户的部门、默认角色与默认密码策略。"""
+    from app.constants import STATUS_ENABLED, USER_ROLE_CODE  # noqa: PLC0415
+    from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+
+    dept = await ctx.db.scalar(
+        select(Dept).where(
+            Dept.dept_id == primary_dept_id,
+            Dept.status == STATUS_ENABLED,
+        )
+    )
+    if dept is None:
+        raise BusinessRuleException(
+            "主部门不存在或已禁用",
+            error_code="AI_USER_PRIMARY_DEPT_NOT_FOUND",
+        )
+
+    role = await ctx.db.scalar(
+        select(Role).where(
+            Role.role_code == USER_ROLE_CODE,
+            Role.status == STATUS_ENABLED,
+        )
+    )
+    if role is None:
+        raise BusinessRuleException(
+            f"默认角色 {USER_ROLE_CODE} 不存在或已禁用",
+            error_code="AI_USER_DEFAULT_ROLE_NOT_FOUND",
+        )
+
+    return dept, role, await _get_ai_default_password(ctx)
+
+
+def _build_ai_user_create_schema(
+    *,
+    user_name: str,
+    nickname: str | None,
+    user_email: str | None,
+    user_phone: str | None,
+    user_gender: str | None,
+    status: str,
+    primary_dept_id: int,
+    role_code: str,
+    default_password: str,
+) -> Any:
+    """用 HTTP 同款 schema 校验 AI 创建参数，不回显敏感值。"""
+    from pydantic import ValidationError  # noqa: PLC0415
+
+    from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+    from app.modules.system.schemas.user import (  # noqa: PLC0415
+        UserCreate,
+        UserDeptItem,
+    )
+
+    try:
+        return UserCreate(
+            user_name=user_name,
+            nickname=nickname,
+            user_email=user_email,
+            user_phone=user_phone,
+            user_gender=user_gender,
+            status=status,
+            roles=[role_code],
+            dept_ids=[UserDeptItem(dept_id=str(primary_dept_id), is_primary=True)],
+            password=default_password,
+        )
+    except ValidationError:
+        # Pydantic 的错误上下文可能含 input；不能把 exc 文本带进 LLM。
+        raise BusinessRuleException(
+            "用户资料格式不合法，请检查用户名、昵称、邮箱、手机号、性别和状态",
+            error_code="AI_USER_CREATE_INVALID",
+        ) from None
+
+
+@ai_tool(
+    AiToolMeta(
+        name="user.create",
+        agent="user_mgmt",
+        summary="Create one user in a primary dept with backend password/default role; HITL confirms.",
+        required_perms=("system:user:add",),
+        risk="high",
+        readonly=False,
+        idempotent=False,
+        hitl_always=True,
+        dry_run_supported=True,
+        sensitive_input=("password", "initial_role_ids"),
+        sensitive_output=("hashed_password",),
+        result_view="detail_card",
+        args_summary_fields=("user_name", "primary_dept_id"),
+    )
+)
+async def user_create(
+    ctx: AiToolContext,
+    *,
+    user_name: str,
+    primary_dept_id: int,
+    nickname: str | None = None,
+    user_email: str | None = None,
+    user_phone: str | None = None,
+    user_gender: str | None = "0",
+    status: str = "1",
+) -> ToolResult:
+    """创建单个用户；密码与角色完全由后端策略决定。"""
+    from app.constants import USER_ROLE_CODE  # noqa: PLC0415
+    from app.modules.system.service.dept_service import (  # noqa: PLC0415
+        dept_service,
+    )
+    from app.modules.system.service.user_service import (  # noqa: PLC0415
+        user_service,
+    )
+
+    # spec §6.2：创建目标部门也必须在 caller 可见范围内。
+    await ensure_targets_in_scope(ctx, dept_ids=[primary_dept_id])
+    dept, role, default_password = await _load_ai_create_policy(
+        ctx,
+        primary_dept_id=primary_dept_id,
+    )
+    user_in = _build_ai_user_create_schema(
+        user_name=user_name,
+        nickname=nickname,
+        user_email=user_email,
+        user_phone=user_phone,
+        user_gender=user_gender,
+        status=status,
+        primary_dept_id=primary_dept_id,
+        role_code=role.role_code,
+        default_password=default_password,
+    )
+
+    new_user = await user_service.create_user(ctx.db, user_in)
+    await ctx.db.flush()
+    await dept_service.update_user_depts(
+        ctx.db,
+        new_user.user_id,
+        [{"dept_id": primary_dept_id, "is_primary": True}],
+    )
+    await ctx.db.flush()
+
+    user_id = str(new_user.user_id)
+    dept_id = str(primary_dept_id)
+    return ToolResult.success(
+        data={
+            "created": 1,
+            "userId": user_id,
+            "userName": new_user.user_name,
+            "roleCode": USER_ROLE_CODE,
+            "primaryDeptId": dept_id,
+            "passwordPolicy": "system_default",
+        },
+        ui=UIResult(
+            view_type="detail_card",
+            view_data={
+                "title": new_user.user_name,
+                "fields": [
+                    {
+                        "label": "page.system.user.userName",
+                        "value": new_user.user_name,
+                    },
+                    {
+                        "label": "page.system.user.primaryDept",
+                        "value": dept.dept_name,
+                    },
+                    {
+                        "label": "page.system.user.userRole",
+                        "value": role.role_code,
+                    },
+                    {
+                        "label": "page.system.user.userStatus",
+                        "value": new_user.status,
+                    },
+                ],
+            },
+            audit={
+                "affected_user_ids": [user_id],
+                "role_code": role.role_code,
+                "primary_dept_id": dept_id,
+                "password_policy": "system_default",
+            },
+            label_key="ai.tool.user.create.result",
+            label_params={"userName": new_user.user_name},
+        ),
+    )
+
+
+async def _dry_run_user_create(
+    ctx: AiToolContext,
+    *,
+    user_name: str,
+    primary_dept_id: int,
+    nickname: str | None = None,
+    user_email: str | None = None,
+    user_phone: str | None = None,
+    user_gender: str | None = "0",
+    status: str = "1",
+) -> Any:
+    """预检创建目标、唯一性与后端默认策略，不写业务数据。"""
+    from app.core.exceptions import BusinessException  # noqa: PLC0415
+    from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
+
+    try:
+        await ensure_targets_in_scope(ctx, dept_ids=[primary_dept_id])
+        dept, role, default_password = await _load_ai_create_policy(
+            ctx,
+            primary_dept_id=primary_dept_id,
+        )
+        _build_ai_user_create_schema(
+            user_name=user_name,
+            nickname=nickname,
+            user_email=user_email,
+            user_phone=user_phone,
+            user_gender=user_gender,
+            status=status,
+            primary_dept_id=primary_dept_id,
+            role_code=role.role_code,
+            default_password=default_password,
+        )
+    except BusinessException as exc:
+        return DryRunResult(ok=False, count=0, reason=exc.message)
+
+    exists = await ctx.db.scalar(
+        select(func.count(User.user_id)).where(User.user_name == user_name)
+    )
+    if exists:
+        return DryRunResult(
+            ok=False,
+            count=0,
+            reason="用户名已存在，请更换账号",
+        )
+
+    return DryRunResult(
+        ok=True,
+        count=1,
+        reason=f"将创建用户 {user_name} 并加入主部门 {dept.dept_name}",
+        examples=[
+            f"账号：{user_name}",
+            f"主部门：{dept.dept_name}",
+            f"默认角色：{role.role_code}",
+            "密码策略：系统默认密码（不展示明文）",
+        ],
+        confirmation_fields=[
+            {
+                "label": "primary_dept_id",
+                "value": primary_dept_id,
+                "display_value": f"{dept.dept_name}（{primary_dept_id}）",
+            }
+        ],
+    )
+
+
+async def _load_ai_reset_target(ctx: AiToolContext, *, user_id: int) -> User:
+    """读取重置目标并应用保底账号/当前账号保护。"""
+    from app.constants import (  # noqa: PLC0415
+        ADMIN_USERNAME,
+        STATUS_ENABLED,
+        SUPER_ADMIN_ROLE_CODE,
+    )
+    from app.core.exceptions import (  # noqa: PLC0415
+        AuthorizationException,
+        BusinessRuleException,
+        NotFoundException,
+    )
+    from app.db.base import user_roles  # noqa: PLC0415
+
+    target = await ctx.db.scalar(
+        select(User).where(User.user_id == user_id, *ctx.data_scope.filters)
+    )
+    if target is None:
+        raise NotFoundException(
+            "用户",
+            error_code="AI_USER_RESET_NOT_FOUND",
+        )
+    if target.user_id == ctx.user.user_id:
+        raise BusinessRuleException(
+            "不能通过 AI 重置当前登录账号，请使用个人改密功能",
+            error_code="AI_USER_RESET_SELF_FORBIDDEN",
+        )
+    target_has_super_role = bool(
+        await ctx.db.scalar(
+            select(func.count())
+            .select_from(user_roles.join(Role, user_roles.c.role_id == Role.role_id))
+            .where(
+                user_roles.c.user_id == target.user_id,
+                Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                Role.status == STATUS_ENABLED,
+            )
+        )
+    )
+    if target.user_name == ADMIN_USERNAME or target_has_super_role:
+        actor_is_super_admin = ctx.user.user_name == ADMIN_USERNAME
+        if not actor_is_super_admin:
+            actor_is_super_admin = bool(
+                await ctx.db.scalar(
+                    select(func.count())
+                    .select_from(
+                        user_roles.join(Role, user_roles.c.role_id == Role.role_id)
+                    )
+                    .where(
+                        user_roles.c.user_id == ctx.user.user_id,
+                        Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                        Role.status == STATUS_ENABLED,
+                    )
+                )
+            )
+        if not actor_is_super_admin:
+            raise AuthorizationException(
+                "只有超级管理员可以重置系统管理员密码",
+                error_code="AI_SUPER_ADMIN_REQUIRED",
+            )
+    return target
+
+
+@ai_tool(
+    AiToolMeta(
+        name="user.reset_password",
+        agent="user_mgmt",
+        summary="Reset one user's password to the backend default policy; HITL confirms.",
+        required_perms=("system:user:reset-password",),
+        risk="high",
+        readonly=False,
+        idempotent=False,
+        hitl_always=True,
+        dry_run_supported=True,
+        sensitive_input=("password",),
+        sensitive_output=("hashed_password",),
+        result_view="rows_affected",
+        args_summary_fields=("user_id",),
+    )
+)
+async def user_reset_password(ctx: AiToolContext, *, user_id: int) -> ToolResult:
+    """把目标用户密码重置为后端默认策略，绝不返回明文。"""
+    from app.modules.system.schemas.user import ResetPassword  # noqa: PLC0415
+    from app.modules.system.service.user_service import (  # noqa: PLC0415
+        user_service,
+    )
+
+    await ensure_targets_in_scope(ctx, user_ids=[user_id])
+    target = await _load_ai_reset_target(ctx, user_id=user_id)
+    default_password = await _get_ai_default_password(ctx)
+    await user_service.reset_password(
+        ctx.db,
+        user_id,
+        ResetPassword(new_password=default_password),
+    )
+
+    str_user_id = str(user_id)
+    return ToolResult.success(
+        data={
+            "updated": 1,
+            "userId": str_user_id,
+            "userName": target.user_name,
+            "passwordPolicy": "system_default",
+        },
+        ui=UIResult(
+            view_type="rows_affected",
+            view_data={"count": 1, "ids": [str_user_id]},
+            audit={
+                "affected_user_ids": [str_user_id],
+                "password_policy": "system_default",
+            },
+            label_key="ai.tool.user.reset_password.result",
+            label_params={"userName": target.user_name},
+        ),
+    )
+
+
+async def _dry_run_user_reset_password(
+    ctx: AiToolContext,
+    *,
+    user_id: int,
+) -> Any:
+    """预检重置目标与默认密码策略，不读取或展示密码值。"""
+    from app.core.exceptions import BusinessException  # noqa: PLC0415
+    from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
+
+    try:
+        await ensure_targets_in_scope(ctx, user_ids=[user_id])
+        target = await _load_ai_reset_target(ctx, user_id=user_id)
+        await _get_ai_default_password(ctx)
+    except BusinessException as exc:
+        return DryRunResult(ok=False, count=0, reason=exc.message)
+
+    return DryRunResult(
+        ok=True,
+        count=1,
+        reason=f"将重置用户 {target.user_name} 的密码",
+        examples=[
+            f"目标账号：{target.user_name}",
+            "影响：旧密码立即失效",
+            "新密码策略：系统默认密码（不展示明文）",
+        ],
+        confirmation_fields=[
+            {
+                "label": "user_id",
+                "value": user_id,
+                "display_value": f"{target.user_name}（{user_id}）",
+            }
+        ],
+    )
+
+
 # ============ user.batch_delete（destructive + HITL，spec §11.3 示例） ============
 
 
@@ -858,7 +1387,14 @@ _USER_UPDATE_ALLOWED_FIELDS: frozenset[str] = frozenset(
         hitl_always=True,
         dry_run_supported=True,
         result_view="rows_affected",
-        args_summary_fields=("user_id",),
+        args_summary_fields=(
+            "user_id",
+            "nickname",
+            "user_email",
+            "user_phone",
+            "user_gender",
+            "status",
+        ),
     )
 )
 async def user_update(
@@ -996,6 +1532,14 @@ async def _dry_run_user_update(
         count=1,
         reason=summary,
         examples=examples,
+        confirmation_fields=[
+            {
+                "label": "user_id",
+                "value": user_id,
+                "display_value": f"{user.user_name}（{user_id}）",
+            },
+            *[{"label": field, "value": value} for field, value in provided.items()],
+        ],
     )
 
 

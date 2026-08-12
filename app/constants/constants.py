@@ -7,7 +7,7 @@ SUPER_ADMIN_USERNAME = "super_admin"
 # 角色编码常量
 SUPER_ADMIN_ROLE_CODE = "R_SUPER"
 ADMIN_ROLE_CODE = "admin"
-USER_ROLE_CODE = "user"
+USER_ROLE_CODE = "R_USER"
 
 # 菜单类型常量
 MENU_TYPE_DIRECTORY = "M"  # 目录

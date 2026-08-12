@@ -1,10 +1,11 @@
-"""v1.5+: 给 system_prompt 为空的内置 Agent 写默认 prompt
+"""v1.5+: 给内置 Agent 写入或安全升级默认 prompt。
 
-管理员可在后台覆盖（spec §11.5）。默认只在 system_prompt == '' 时写入。
+管理员可在后台覆盖（spec §11.5）。默认写入空 prompt，也会把已知旧版默认
+prompt 升级到当前版本；无法识别的部署方自定义 prompt 始终保留。
 加 `--force` 强制覆盖所有内置 Agent（用于刷新默认 prompt 模板）。
 
 用法：
-    uv run python scripts/seed_agent_prompts.py            # 仅填空
+    uv run python scripts/seed_agent_prompts.py            # 填空 + 升级已知旧默认值
     uv run python scripts/seed_agent_prompts.py --force    # 覆盖所有内置
 """
 
@@ -20,6 +21,23 @@ from app.modules.ai.models.agent import AiAgent
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
+_USER_MGMT_PROMPT_V1 = (
+    "你是用户管理助手，能调用以下工具：\n\n"
+    '- 数量类（"多少"/"几个"/"总数"） → 调 user.count，返回 {"count": N}\n'
+    '- 分布类（"分布"/"按性别"/"按状态分布"） → 调 user.stats，返回 [{group, count}]\n'
+    '- 取值类（"有哪些值"/"几种状态"） → 调 user.distinct，返回 ["v1", "v2"]\n\n'
+    "示例：\n"
+    '- "总共有多少用户" → user.count（无参数）\n'
+    '- "性别分布" → user.stats(group_by="user_gender")\n'
+    '- "用户有哪些状态值" → user.distinct(field="status")\n\n'
+    '注意：不需要用 user.distinct 回答"有多少个"这类问题，user.distinct 只回答"列出字段取值"。'
+)
+
+LEGACY_DEFAULT_PROMPTS: dict[str, frozenset[str]] = {
+    "user_mgmt": frozenset({_USER_MGMT_PROMPT_V1}),
+}
+"""可安全自动升级的历史内置默认值；不包含任何部署方自定义 prompt。"""
+
 # 默认 system_prompt：模仿 user_mgmt 详细格式（中文 + 工具映射 + 示例），
 # 指引 LLM 优先调本 agent 的 tool，避免 doubao 模型幻觉吐 <function> 文本
 DEFAULT_PROMPTS: dict[str, str] = {
@@ -27,11 +45,21 @@ DEFAULT_PROMPTS: dict[str, str] = {
         "你是用户管理助手，能调用以下工具：\n\n"
         '- 数量类（"多少"/"几个"/"总数"） → 调 user.count，返回 {"count": N}\n'
         '- 分布类（"分布"/"按性别"/"按状态分布"） → 调 user.stats，返回 [{group, count}]\n'
-        '- 取值类（"有哪些值"/"几种状态"） → 调 user.distinct，返回 ["v1", "v2"]\n\n'
+        '- 取值类（"有哪些值"/"几种状态"） → 调 user.distinct，返回 ["v1", "v2"]\n'
+        "- 列表/详情 → 调 user.list / user.lookup\n"
+        "- 创建用户 → 用户只需说部门名称；先调 user.dept_lookup，再调 user.create；密码与默认角色由后端策略生成\n"
+        "  · 唯一命中 → 使用 matches[0].id 作为 primary_dept_id 调 user.create\n"
+        "  · 零命中 → 请用户检查部门名称；多命中 → 展示上级部门并请用户消歧，禁止猜测\n"
+        "  · 部门名称唯一时不要要求用户输入部门 ID\n"
+        "- 修改资料/删除 → 调 user.update / user.batch_delete\n"
+        "- 重置密码 → 调 user.reset_password；新密码由后端默认策略生成且不会展示\n"
+        "- 批量导入/导出 → 调 user.import_preview / user.export\n\n"
         "示例：\n"
         '- "总共有多少用户" → user.count（无参数）\n'
         '- "性别分布" → user.stats(group_by="user_gender")\n'
-        '- "用户有哪些状态值" → user.distinct(field="status")\n\n'
+        '- "用户有哪些状态值" → user.distinct(field="status")\n'
+        '- "新建用户圣诞，部门是总部" → user.dept_lookup(dept_name="总部")；唯一命中后调 user.create\n'
+        '- "重置张三密码" → 先 user.lookup 确认 ID，再调 user.reset_password\n\n'
         '注意：不需要用 user.distinct 回答"有多少个"这类问题，user.distinct 只回答"列出字段取值"。'
     ),
     "role_mgmt": (
@@ -73,8 +101,15 @@ DEFAULT_PROMPTS: dict[str, str] = {
 }
 
 
+def should_update_prompt(agent_code: str, current: str | None, *, force: bool) -> bool:
+    """仅覆盖空值、已知历史默认值或显式 force，保护部署方自定义内容。"""
+    if force or not current or not current.strip():
+        return True
+    return current in LEGACY_DEFAULT_PROMPTS.get(agent_code, frozenset())
+
+
 async def main(force: bool = False) -> None:
-    """对 system_prompt 为空的 agent 写默认值（force=True 时覆盖所有内置 Agent）"""
+    """写入空值并升级已知旧默认值；force=True 时覆盖所有内置 Agent。"""
     async with AsyncSessionLocal() as db:
         async with db.begin():
             result = await db.execute(select(AiAgent))
@@ -88,7 +123,11 @@ async def main(force: bool = False) -> None:
                 if not default:
                     skipped_no_default += 1
                     continue
-                if agent.system_prompt and agent.system_prompt.strip() and not force:
+                if not should_update_prompt(
+                    agent.code,
+                    agent.system_prompt,
+                    force=force,
+                ):
                     skipped_has_prompt += 1
                     continue
                 agent.system_prompt = default

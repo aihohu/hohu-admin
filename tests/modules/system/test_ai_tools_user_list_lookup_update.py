@@ -19,6 +19,8 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessRuleException
+from app.modules.ai.agents.gateway.executor import _build_direct_confirmation_fields
+from app.modules.ai.agents.hitl.events import DryRunSummary
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.core.context import AiToolContext, DataScopeContext
 from app.modules.system.ai_tools import (
@@ -366,6 +368,31 @@ class TestDryRunUserUpdate:
         assert "2 个字段" in result.reason
         assert any("nickname" in ex for ex in result.examples)
         assert any("status" in ex for ex in result.examples)
+        assert result.confirmation_fields == [
+            {
+                "label": "user_id",
+                "value": 4100,
+                "display_value": "kate（4100）",
+            },
+            {"label": "nickname", "value": "kate-new"},
+            {"label": "status", "value": "2"},
+        ]
+
+        fields = _build_direct_confirmation_fields(
+            user_update.__ai_tool_meta__,
+            {"user_id": 4100, "nickname": "kate-new", "status": "2"},
+            DryRunSummary(
+                summary=result.reason,
+                affected_count=result.count,
+                confirmation_fields=result.confirmation_fields,
+            ),
+        )
+        assert fields == [
+            {"label": "user_id", "value": "kate（4100）"},
+            {"label": "nickname", "value": "kate-new"},
+            {"label": "status", "value": "2"},
+            {"label": "affectedCount", "value": 1, "tone": "warning"},
+        ]
 
     async def test_dry_run_no_fields_returns_not_ok(
         self, db_session: AsyncSession

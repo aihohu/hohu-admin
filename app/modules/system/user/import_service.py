@@ -658,6 +658,7 @@ async def batch_create_users_from_records(
             - ``AI_IMPORT_BATCH_RUNNING`` — 并发 execute 同 token，后者抛此
             - ``AI_IMPORT_ALREADY_EXECUTED`` — FAILED/EXPIRED/CANCELLED 重放
             - ``AI_IMPORT_DEFAULT_PASSWORD_NOT_SET`` — sys_config 未配置默认密码
+            - ``AI_IMPORT_DEFAULT_PASSWORD_INVALID`` — prod 仍使用公开初始化密码
     """
     storage = file_storage or get_file_storage()
     reason_clean = _validate_reason(reason)

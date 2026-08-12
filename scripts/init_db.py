@@ -6,7 +6,13 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.constants.constants import ADMIN_ROLE_CODE, SUPER_ADMIN_ROLE_CODE
+from app.constants.constants import (
+    ADMIN_ROLE_CODE,
+    DATA_SCOPE_SELF,
+    STATUS_ENABLED,
+    SUPER_ADMIN_ROLE_CODE,
+    USER_ROLE_CODE,
+)
 from app.core.config import settings
 from app.core.id_generator import next_id
 from app.core.security import get_password_hash
@@ -430,24 +436,30 @@ init_menus.extend(
     ]
 )
 
+
 # sys_config 种子：fresh install 自动注入业务必须的配置项（spec §10 Task 16）。
 # 已有部署走 sync_menus.py 增量拿菜单按钮，但 sys_config 不归 sync_menus 管，
 # 现有部署的 default_password 由部署方在 admin UI 手动配（helper 缺失时抛
 # AI_IMPORT_DEFAULT_PASSWORD_NOT_SET，避免静默用错密码）。
+def default_password_seed_value(env: str) -> str:
+    """开发环境提供可用种子；生产环境必须由部署方显式配置。"""
+    return "" if env == "prod" else "Hohu123456"
+
+
 init_configs = [
     # spec §2.5 line 212：导入新用户的默认密码（明文存库，导入时哈希）
     # is_public=False：未授权访问 /system/config/public 不暴露此键（防敏感配置泄漏）
     Config(
         config_name="导入用户默认密码",
         config_key="auth:default_password",
-        config_value="hohu123456",
+        config_value=default_password_seed_value(settings.ENV),
         config_type="text",
         config_group="auth",
         status="1",
         is_public=False,
         remark=(
             "【安全提示】批量导入新用户的初始密码（明文存库，导入时哈希）。"
-            "上线前请改为强密码并定期轮换；prod 环境禁止保留默认值 hohu123456。"
+            "上线前请改为强密码并定期轮换；prod 环境禁止保留默认值 Hohu123456。"
             "决策 §2.5：管理员线下告知用户初始密码，导入接口不返回此值。"
         ),
     ),
@@ -461,6 +473,24 @@ SEED_TABLES = [
     "sys_menu",
     "sys_config",
 ]
+
+
+def build_init_roles() -> list[Role]:
+    """构造与既有角色编码契约一致的 fresh-install 角色种子。"""
+    return [
+        Role(
+            role_name="超级管理员",
+            role_code=SUPER_ADMIN_ROLE_CODE,
+            status=STATUS_ENABLED,
+        ),
+        Role(
+            role_name="普通用户",
+            role_code=USER_ROLE_CODE,
+            role_desc="AI user.create 与普通账号使用的后端默认角色",
+            data_scope=DATA_SCOPE_SELF,
+            status=STATUS_ENABLED,
+        ),
+    ]
 
 
 async def check_data_exists(db: AsyncSession) -> bool:
@@ -496,11 +526,9 @@ async def init_db():
         # 创建初始 sys_config（spec §2.5：导入默认密码必须 seed）
         db.add_all(init_configs)
 
-        # 创建超级管理员角色
-        admin_role = Role(
-            role_name="超级管理员", role_code=SUPER_ADMIN_ROLE_CODE, status="1"
-        )
-        db.add(admin_role)
+        # 创建与既有 R_* 编码契约一致的初始角色
+        admin_role, default_user_role = build_init_roles()
+        db.add_all([admin_role, default_user_role])
 
         # 创建初始管理员用户
         admin_user = User(

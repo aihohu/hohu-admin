@@ -13,11 +13,14 @@ model 查询，避免重复样板代码 + 集中安全策略（默认密码缺�
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.exceptions import BusinessRuleException
 from app.modules.system.models.config import Config
 
 #: sys_config 中默认密码的 key（spec §2.5 / §3.6 line 2093）。
 DEFAULT_PASSWORD_CONFIG_KEY = "auth:default_password"
+INSECURE_DEFAULT_PASSWORD_SENTINELS = frozenset({"Hohu123456"})
+"""公开开发种子；生产环境必须显式改掉，不能用于创建或重置账号。"""
 
 
 async def get_default_password(db: AsyncSession) -> str:
@@ -38,9 +41,14 @@ async def get_default_password(db: AsyncSession) -> str:
         )
     )
     value = result.scalar_one_or_none()
-    if value is None:
+    if value is None or not value.strip():
         raise BusinessRuleException(
             "默认密码未配置（sys_config.auth:default_password），无法导入新用户",
             error_code="AI_IMPORT_DEFAULT_PASSWORD_NOT_SET",
+        )
+    if settings.ENV == "prod" and value in INSECURE_DEFAULT_PASSWORD_SENTINELS:
+        raise BusinessRuleException(
+            "生产环境禁止使用公开的初始化默认密码，请先更新 auth:default_password",
+            error_code="AI_IMPORT_DEFAULT_PASSWORD_INVALID",
         )
     return value
