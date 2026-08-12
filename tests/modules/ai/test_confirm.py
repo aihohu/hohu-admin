@@ -17,7 +17,7 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -27,8 +27,9 @@ from app.core.exceptions import (
     BusinessRuleException,
     NotFoundException,
 )
+from app.modules.ai.agents.hitl.constants import ConfirmAction
 from app.modules.ai.agents.hitl.manager import PendingPayload
-from app.modules.ai.api.confirm import confirm_tool
+from app.modules.ai.api.confirm import _notify_prepared_terminal, confirm_tool
 from app.modules.ai.schemas.confirm import ConfirmRequest
 
 
@@ -52,6 +53,65 @@ def _make_pending(
         source_user_message_id=source_user_message_id,
         guard_owner_token=guard_owner_token,
     )
+
+
+class TestPreparedTerminalCleanupOwnership:
+    async def test_live_prepared_waiter_retains_guard_and_pending_for_stream(
+        self,
+    ) -> None:
+        """成功 wake 后由在线 SSE 在最终 assistant commit 后清理 guard/pending。"""
+        action = SimpleNamespace(
+            action_id=901,
+            confirmation_id="cid_live",
+            conversation_id=902,
+            guard_owner_token="owner-live",
+        )
+        with (
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.wake",
+                AsyncMock(return_value=True),
+            ) as wake,
+            patch(
+                "app.modules.ai.api.confirm.chat_run_guard.release", AsyncMock()
+            ) as release,
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.delete_pending", AsyncMock()
+            ) as delete_pending,
+        ):
+            await _notify_prepared_terminal(action, ConfirmAction.APPROVED)
+
+        wake.assert_awaited_once_with("cid_live", ConfirmAction.APPROVED)
+        release.assert_not_awaited()
+        delete_pending.assert_not_awaited()
+
+    async def test_offline_prepared_waiter_cleans_guard_and_pending(self) -> None:
+        """wake=False 表示没有在线 SSE，由 confirm handler 负责终态清理。"""
+        action = SimpleNamespace(
+            action_id=903,
+            confirmation_id="cid_offline",
+            conversation_id=904,
+            guard_owner_token="owner-offline",
+        )
+        with (
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.wake",
+                AsyncMock(return_value=False),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.chat_run_guard.release", AsyncMock()
+            ) as release,
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.delete_pending", AsyncMock()
+            ) as delete_pending,
+        ):
+            await _notify_prepared_terminal(action, ConfirmAction.REJECTED)
+
+        release.assert_awaited_once_with(
+            ANY,
+            conversation_id=904,
+            owner_token="owner-offline",
+        )
+        delete_pending.assert_awaited_once_with(ANY, "cid_offline")
 
 
 def _make_user(user_id: int = 100, user_name: str = "alice"):

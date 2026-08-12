@@ -89,15 +89,22 @@ def _is_expired(value: datetime) -> bool:
 
 
 async def _notify_prepared_terminal(action, decision: ConfirmAction) -> None:  # noqa: ANN001
-    """Best-effort realtime/cache cleanup after the durable terminal commit."""
+    """Notify an online waiter; only clean guard/cache when no stream owns them."""
+    waiter_woken = False
     try:
-        await hitl_manager.wake(action.confirmation_id, decision)
+        waiter_woken = await hitl_manager.wake(action.confirmation_id, decision)
     except Exception:
         logger.info(
             "prepared terminal waiter notification unavailable confirmation_id=%s",
             action.confirmation_id,
             exc_info=True,
         )
+    if waiter_woken:
+        # The live SSE still needs the same owner lease while it reads the durable
+        # result, resumes the model, commits the final assistant projection, and
+        # then performs compare-owner release.  It also owns pending cleanup so
+        # redis_pubsub mode retains wake_action until the waiter observes it.
+        return
     if action.guard_owner_token:
         try:
             await chat_run_guard.release(

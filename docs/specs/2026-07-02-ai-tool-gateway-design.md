@@ -3039,6 +3039,8 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 
 #### SR-36. **durable action 发布失败必须撤销 Redis pending 与 conversation guard 交接**（2026-08-11，纠偏）— `confirmation_required` 只能在 PostgreSQL action 提交成功后发布；若 action 创建或事务提交失败，Gateway 必须删除临时 pending、释放同 owner 的会话 guard 并清除本次 handoff 标记。**反例**: Redis/guard 先成功而数据库失败后继续等待 TTL → 客户端拿不到 action，但后续 ChatCommand 被假 pending 阻塞。**回归**: 注入 action persistence failure，断言无确认事件、pending 删除、guard release 且 `guard_handoff=false`。
 
+#### SR-37. **prepared terminal 通知成功后 guard/pending 所有权必须归还在线 SSE**（2026-08-12，纠偏）— confirm handler 完成 action、operation 与 assistant tool-card 终态提交后先通知 waiter；`wake=True` 表示原 SSE 仍负责读取终态、继续模型收尾、提交最终 assistant 投影，再依次删除 pending 和 compare-owner release guard，confirm handler 不得抢先清理。只有 `wake=False`（原流不可达）时，confirm handler 才释放 guard 并删除 pending。**反例**: confirm 在成功 wake 后立即释放 guard → 原流下一次 heartbeat 报 `AI_CHAT_GUARD_LOST`，工具已成功但最终 AI 回复中断；立即删除 pending → `redis_pubsub` 的 `wake_action` 防丢失兜底被破坏。**回归**: `test_live_prepared_waiter_retains_guard_and_pending_for_stream` 与 `test_offline_prepared_waiter_cleans_guard_and_pending` 固定在线/离线清理所有权；真实模型连续两次 direct HITL 均完整收尾且无 guard-lost 提示。
+
 
 
 
