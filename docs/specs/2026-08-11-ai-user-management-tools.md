@@ -44,7 +44,7 @@
 
 16. **已解析的部门展示值不得因后续预检失败而丢失** — `user.create` dry-run 一旦完成部门 scope、状态和名称解析，后续即使因用户名已存在返回 `ok=False/count=0`，仍必须携带绑定原始 `primary_dept_id` 的 `confirmation_fields.display_value`，确保 HITL 显示 `部门名称（ID）`。**反例**: 重复用户名分支只返回 reason → Gateway 回退展示 Snowflake ID，用户无法确认实际部门。**回归**: 重复用户名 dry-run 测试断言部门 display value 保留，并经 `_build_direct_confirmation_fields` 输出名称与 ID。
 
-16. **新工具所有用户可见表面统一 i18n** — 工具卡描述和 errorCode 从 locale 解析；确认抽屉对已知工具不再渲染后端中文 dry-run 文案；data_list 列名使用 i18n key 并在组件端解析。**反例**: 只国际化 presentation summary，会让英文界面仍出现中文影响摘要、表头或原始错误码。**回归**: mapper Vitest 覆盖 create/reset dry-run、工具描述、全部 `AI_USER_*` locale 解析与 unknown fallback；DataListView 对未知 label 保留原文。
+17. **新工具所有用户可见表面统一 i18n** — 工具卡描述和 errorCode 从 locale 解析；确认抽屉对已知工具不再渲染后端中文 dry-run 文案；data_list 列名使用 i18n key 并在组件端解析。**反例**: 只国际化 presentation summary，会让英文界面仍出现中文影响摘要、表头或原始错误码。**回归**: mapper Vitest 覆盖 create/reset dry-run、工具描述、全部 `AI_USER_*` locale 解析与 unknown fallback；DataListView 对未知 label 保留原文。
 
 ## 3. 工具契约
 
