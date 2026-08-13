@@ -109,6 +109,10 @@ class AiPreparedAction(Base):
     result_data: Mapped[Any | None] = mapped_column(JSON, nullable=True)
     result_ui: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    execution_owner: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    execution_lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -334,12 +334,28 @@ async def test_action_status_cas_allows_only_one_execution_claim(db_session) -> 
     assert approved.approved_at is not None
     assert duplicate is None
 
+    lease_expires_at = datetime.now(UTC) + timedelta(minutes=1)
     running = await prepared_action_service.transition_status(
         db_session,
         action_id=action.action_id,
         expected_status=PreparedActionStatus.APPROVED,
         expected_version=2,
         target_status=PreparedActionStatus.RUNNING,
+        execution_owner="test-executor",
+        execution_lease_expires_at=lease_expires_at,
+    )
+    assert running is not None
+    renewed = await prepared_action_service.renew_execution_lease(
+        db_session,
+        action_id=action.action_id,
+        execution_owner="test-executor",
+        lease_expires_at=lease_expires_at + timedelta(minutes=1),
+    )
+    wrong_owner_renewed = await prepared_action_service.renew_execution_lease(
+        db_session,
+        action_id=action.action_id,
+        execution_owner="other-executor",
+        lease_expires_at=lease_expires_at + timedelta(minutes=2),
     )
     succeeded = await prepared_action_service.transition_status(
         db_session,
@@ -352,12 +368,15 @@ async def test_action_status_cas_allows_only_one_execution_claim(db_session) -> 
         duration_ms=12,
     )
 
-    assert running is not None
+    assert renewed is True
+    assert wrong_owner_renewed is False
     assert succeeded is not None
     assert succeeded.row_version == 4
     assert succeeded.result_data == {"successCount": 2}
     assert succeeded.duration_ms == 12
     assert succeeded.finished_at is not None
+    assert succeeded.execution_owner is None
+    assert succeeded.execution_lease_expires_at is None
 
 
 async def test_pending_query_is_scoped_and_requires_active_source(db_session) -> None:

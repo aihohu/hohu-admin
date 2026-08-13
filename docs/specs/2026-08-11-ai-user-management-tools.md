@@ -1,7 +1,7 @@
 # AI 用户管理缺失工具补齐
 
-> 状态：✅ Plan 已完成（2026-08-11）  
-> 日期：2026-08-11  
+> 状态：✅ Plan 已完成（2026-08-11）
+> 日期：2026-08-11
 > 关联：[`2026-07-02-ai-tool-gateway-design.md`](./2026-07-02-ai-tool-gateway-design.md)、[`2026-08-01-user-import-export-design.md`](./2026-08-01-user-import-export-design.md)
 
 ## 1. 背景与范围

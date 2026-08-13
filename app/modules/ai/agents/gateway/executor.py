@@ -498,6 +498,10 @@ async def _execute_tool(
             summary,
             dry_run_summary,
             prepared_action_context=_prepared_action_context,
+            agent_code_for_rollback=agent_code_for_rollback,
+            l1_member=l1_member,
+            l1_global_member=l1_global_member,
+            l4_conv_key_for_rollback=l4_conv_key_for_rollback,
         )
         if resolution is None:
             # 5min TTL 超时 → mark_expired（_hang_for_confirmation 内已迁移）
@@ -985,7 +989,14 @@ async def _with_log_retry(
 
 async def _rollback_failed_confirmation_setup(
     deps: ChatDeps,
+    registered: RegisteredTool,
     confirmation_id: str,
+    log_id: int,
+    *,
+    agent_code_for_rollback: str | None,
+    l1_member: str | None,
+    l1_global_member: str | None,
+    l4_conv_key_for_rollback: str | None,
 ) -> None:
     """Best-effort rollback for a notification published before DB persistence."""
     try:
@@ -1017,6 +1028,32 @@ async def _rollback_failed_confirmation_setup(
             )
     deps.guard_handoff = False
 
+    try:
+        async with AsyncSessionLocal() as log_db:
+            async with log_db.begin():
+                await operation_log_service.mark_expired_if_pending(log_db, log_id)
+    except Exception:
+        logger.exception(
+            "failed to terminalize operation after durable action setup failure",
+            extra={"confirmation_id": confirmation_id, "log_id": log_id},
+        )
+
+    if is_write_tool(registered.meta):
+        try:
+            await decr_quota(
+                redis_client,
+                deps.user.user_id,
+                agent_code=agent_code_for_rollback,
+                l1_member=l1_member,
+                l1_global_member=l1_global_member,
+                l4_conv_key=l4_conv_key_for_rollback,
+            )
+        except RedisError:
+            logger.exception(
+                "failed to roll back quota after durable action setup failure",
+                extra={"confirmation_id": confirmation_id},
+            )
+
 
 async def _hang_for_confirmation(
     deps: ChatDeps,
@@ -1028,6 +1065,10 @@ async def _hang_for_confirmation(
     dry_run_summary: DryRunSummary | None,
     *,
     prepared_action_context: _PreparedExecutionContext | None = None,
+    agent_code_for_rollback: str | None = None,
+    l1_member: str | None = None,
+    l1_global_member: str | None = None,
+    l4_conv_key_for_rollback: str | None = None,
 ) -> _ConfirmationResolution | None:
     """HITL 流：create_pending → emit confirmation_required → hang
 
@@ -1075,10 +1116,16 @@ async def _hang_for_confirmation(
             confirmation_ttl_sec=settings.AI_HITL_PENDING_TTL_SEC,
         )
         if not handed_off:
-            async with AsyncSessionLocal() as log_db:
-                async with log_db.begin():
-                    await operation_log_service.mark_expired_if_pending(log_db, log_id)
-            await hitl_manager.delete_pending(redis_client, confirmation_id)
+            await _rollback_failed_confirmation_setup(
+                deps,
+                registered,
+                confirmation_id,
+                log_id,
+                agent_code_for_rollback=agent_code_for_rollback,
+                l1_member=l1_member,
+                l1_global_member=l1_global_member,
+                l4_conv_key_for_rollback=l4_conv_key_for_rollback,
+            )
             return None
     deps.guard_handoff = True
 
@@ -1199,7 +1246,16 @@ async def _hang_for_confirmation(
                         durable_action.action_id,
                     )
     except BaseException:
-        await _rollback_failed_confirmation_setup(deps, confirmation_id)
+        await _rollback_failed_confirmation_setup(
+            deps,
+            registered,
+            confirmation_id,
+            log_id,
+            agent_code_for_rollback=agent_code_for_rollback,
+            l1_member=l1_member,
+            l1_global_member=l1_global_member,
+            l4_conv_key_for_rollback=l4_conv_key_for_rollback,
+        )
         raise
 
     if durable_action is None:  # pragma: no cover - fail-closed invariant

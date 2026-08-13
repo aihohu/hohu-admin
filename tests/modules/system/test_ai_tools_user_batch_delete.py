@@ -16,7 +16,7 @@ LLM 只看 {"deleted": N}，user_ids 移到 ui.view_data.ids + ui.audit.affected
 from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import Select
+from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.ai.agents.tools.meta import AiToolMeta
@@ -217,3 +217,26 @@ class TestUserBatchDeleteToolResult:
         assert result.ui.view_data["count"] == 1
         assert result.ui.view_data["ids"] == ["1003"]
         assert result.ui.audit["affected_user_ids"] == ["1003"]
+
+    async def test_partial_scope_loss_rejects_entire_frozen_delete(
+        self, db_session
+    ) -> None:
+        """审批冻结两个 ID 后 scope 缩小，不能静默只删除仍可见的一个。"""
+        from app.core.exceptions import AuthorizationException
+
+        await _add_user(db_session, user_id=1004, user_name="scope-visible")
+        await _add_user(db_session, user_id=1005, user_name="scope-lost")
+        await db_session.flush()
+
+        ctx = _make_ctx(
+            db_session,
+            accessible_user_scope=select(User.user_id).where(User.user_id == 1004),
+        )
+        ctx.data_scope.filters.append(User.user_id == 1004)
+
+        with pytest.raises(AuthorizationException) as exc_info:
+            await user_batch_delete(ctx, user_ids=[1004, 1005])
+
+        assert exc_info.value.error_code == "AI_DATA_SCOPE_VIOLATION"
+        assert await db_session.get(User, 1004) is not None
+        assert await db_session.get(User, 1005) is not None

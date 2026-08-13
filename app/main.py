@@ -34,7 +34,10 @@ from app.modules.ai.api.routing_feedback import (
 from app.modules.ai.api.routing_feedback import (
     router as ai_routing_feedback_router,
 )
-from app.modules.ai.lifecycle import cleanup_orphaned_pending_on_startup
+from app.modules.ai.lifecycle import (
+    cleanup_durable_prepared_actions_on_startup,
+    cleanup_orphaned_pending_on_startup,
+)
 from app.modules.auth.api import router as auth_router
 from app.modules.job.api.job import router as job_router
 from app.modules.job.api.job_log import router as job_log_router
@@ -96,6 +99,8 @@ async def lifespan(_app: FastAPI):
     # asyncio.Event 已丢，Redis 残留 pending 必须清扫避免 stale。
     if settings.AI_HITL_MODE == "memory":
         await cleanup_orphaned_pending_on_startup()
+    else:
+        await cleanup_durable_prepared_actions_on_startup()
 
     # 仅在嵌入式（开发）模式下随 API 启停调度器。
     # 生产模式下调度器由独立的 `app.scheduler_worker` 进程承担，

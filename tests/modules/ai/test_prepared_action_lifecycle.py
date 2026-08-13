@@ -41,6 +41,38 @@ async def test_startup_keeps_unexpired_pending_when_redis_was_flushed() -> None:
     transition.assert_not_awaited()
 
 
+async def test_startup_keeps_running_action_with_live_execution_lease() -> None:
+    """滚动发布时不能把仍由其它 Pod 执行的 action 标为失败。"""
+    action = SimpleNamespace(
+        action_id=9003,
+        confirmation_id="cid_running_9003",
+        status="running",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        execution_lease_expires_at=datetime.now(UTC) + timedelta(seconds=45),
+        guard_owner_token="guard-live",
+        conversation_id=102,
+    )
+    db = MagicMock()
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = [action]
+    db.execute = AsyncMock(return_value=result)
+    session_factory = MagicMock()
+    session_factory.return_value.__aenter__ = AsyncMock(return_value=db)
+    session_factory.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch("app.modules.ai.lifecycle.AsyncSessionLocal", session_factory),
+        patch(
+            "app.modules.ai.lifecycle.prepared_action_service.transition_status",
+            AsyncMock(),
+        ) as transition,
+    ):
+        cleaned = await cleanup_prepared_actions_on_startup(MagicMock())
+
+    assert cleaned == 0
+    transition.assert_not_awaited()
+
+
 async def test_startup_expires_unexpired_pending_when_source_is_orphaned() -> None:
     action = SimpleNamespace(
         action_id=9002,

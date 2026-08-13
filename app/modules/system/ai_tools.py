@@ -1089,6 +1089,12 @@ async def user_batch_delete(
         user_names: user_name exact matches (for "by name" requests)
         phones: phone exact matches (for "by phone" requests)
     """
+    # Durable confirmation freezes exact IDs. Validate that exact set before
+    # resolving rows; otherwise a later scope reduction would silently turn an
+    # approved N-row delete into a smaller partial delete.
+    if user_ids and user_names is None and phones is None:
+        await ensure_targets_in_scope(ctx, user_ids=user_ids)
+
     users = await _resolve_users(
         ctx, user_ids=user_ids, user_names=user_names, phones=phones
     )

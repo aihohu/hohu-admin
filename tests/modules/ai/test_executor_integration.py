@@ -733,11 +733,15 @@ class TestHitlFlow:
         handoff = AsyncMock(return_value=True)
         release = AsyncMock(return_value=True)
         delete_pending = AsyncMock()
+        rollback_quota = AsyncMock()
         persist = AsyncMock(side_effect=RuntimeError("action persistence failed"))
         monkeypatch.setattr(chat_run_guard, "handoff_pending", handoff)
         monkeypatch.setattr(chat_run_guard, "release", release)
         monkeypatch.setattr(hitl_manager, "delete_pending", delete_pending)
         monkeypatch.setattr(prepared_action_service, "create_pending", persist)
+        monkeypatch.setattr(
+            "app.modules.ai.agents.gateway.executor.decr_quota", rollback_quota
+        )
 
         with pytest.raises(RuntimeError, match="action persistence failed"):
             await execute_tool(_TEST_TOOL_HIGH, {"x": 1}, deps)
@@ -750,6 +754,21 @@ class TestHitlFlow:
             owner_token="guard-owner-test",
         )
         assert deps.guard_handoff is False
+        rollback_quota.assert_awaited_once()
+
+        from app.db.session import AsyncSessionLocal
+        from app.modules.ai.models.operation_log import AiOperationLog
+
+        async with AsyncSessionLocal() as db:
+            log = (
+                await db.execute(
+                    select(AiOperationLog).where(
+                        AiOperationLog.trace_id == deps.trace_id,
+                        AiOperationLog.tool_name == _TEST_TOOL_HIGH,
+                    )
+                )
+            ).scalar_one()
+        assert log.status == "expired"
 
     def test_direct_action_revalidates_current_gateway_binding(self) -> None:
         from types import SimpleNamespace

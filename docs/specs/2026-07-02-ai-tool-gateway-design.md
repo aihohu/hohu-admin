@@ -3049,6 +3049,14 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 
 #### SR-41. **会话删除必须与 durable action 生命周期互斥，历史孤儿由恢复流程终态化**（2026-08-12，已完成）— 删除会话前在同一事务查询 owner/tenant 下 `prepared|pending_confirmation|approved|running` action；存在时返回 `409 AI_CHAT_RUN_IN_PROGRESS`，不得级联抹除授权/审计事实。启动恢复保留有效 pending 前必须确认 conversation/source 仍存在、属于 owner 且 source active；缺失时以 `AI_PREPARED_ACTION_SOURCE_STALE` 过期并清理 guard/pending。**反例**: 直接删除 conversation 并级联 message、action 又无 FK → confirm 永久 404、DB pending 与 Redis guard 无法收口；给 action 加 `ON DELETE CASCADE` → 静默删除授权和执行审计。**回归**: `tests/modules/ai/test_conversation_api.py` 覆盖 409；`tests/modules/ai/test_prepared_action_lifecycle.py` 覆盖孤儿 pending 启动收口。
 
+#### SR-42. **审批冻结的批量删除目标必须整体重验当前 data scope**（2026-08-13，纠偏）— `user.batch_delete` 执行精确 `user_ids` 时先验证整个冻结集合仍在当前 scope，再加载和删除目标；任一 ID 因权限收缩不可见即整体拒绝，不允许把已批准集合静默缩成子集。**反例**: 复用普通列表查询并只删除查到的行 → 用户批准 A+B，执行时 B 不可见后却成功删除 A，审批对象与实际事务不再一致。**回归**: `test_partial_scope_loss_rejects_entire_frozen_delete` 断言 scope 收缩时事务零删除并返回 `AI_DATA_SCOPE_VIOLATION`。
+
+#### SR-43. **Redis Pub/Sub 的 wake 成功只表示存在在线 waiter**（2026-08-13，纠偏）— wake 先写 `wake_action` 防订阅竞态，再以 Redis `PUBLISH` 返回的 subscriber 数决定返回值；零订阅返回 `False`，让 confirm handler 承担 guard/pending 清理，持久 action 终态仍是唯一事实源。**反例**: 只要 pending key 存在就返回 `True` → 会把清理责任交给不存在的 SSE，留下 guard 与 pending；完全不写 `wake_action` → wake-before-subscribe 丢决定。**回归**: Pub/Sub 测试分别覆盖在线订阅、先 wake 后订阅及无订阅清理判定。
+
+#### SR-44. **执行中的 durable action 使用 owner lease，启动恢复只接管过期 lease**（2026-08-13，纠偏）— `running` action 持久化随机 `execution_owner` 与可续租 `execution_lease_expires_at`；执行期间独立事务周期续租，终态清空 lease。所有 HITL 模式启动都扫描 durable action，但仅以 row-version CAS 接管 lease 已过期或旧版本无 lease 的 running action。确认准备阶段若 PostgreSQL action 创建失败，还必须删除临时 pending、释放 guard、把 operation log 终态化并对称回滚已占配额。**反例**: 每个 Pub/Sub Pod 启动都把全部 running 标失败 → 滚动发布会中断其它 Pod 正常执行；准备失败只清 Redis → 审计永久 pending 且用户配额被偷。**回归**: lifecycle 测试固定活 lease 不迁移；executor 集成测试固定 setup failure 的 pending/guard/audit/quota 全部收口；迁移 `a7d3e9f1c5b2` 支持 upgrade/downgrade。
+
+#### SR-45. **Web 恢复请求必须绑定会话代次，轮询同一 action 严格串行**（2026-08-13，纠偏）— 每个 confirmation 独立持有 AbortController 与重试预算；切换或清空会话时取消全部 resume/到期 reconciliation，旧响应在解析前校验 conversation/run 代次。404 立即以 detail 对账，422 立即对账并在过期后再收敛；operation-log 下一轮只在上一请求完成后安排。删除会话仅在 API 成功后清本地状态。**反例**: 多 confirmation 共用 singleton toolCallId、`setInterval(async ...)` 或忽略 delete error → 旧 SSE 写入新会话、慢请求重叠乱序、后端拒删但前端假删除。**回归**: `prepared-action-recovery.spec.ts` 覆盖切换会话丢弃旧续传、404 对账、删除失败保留状态、并发 action 隔离及单 action 无重叠轮询。
+
 
 
 

@@ -455,7 +455,7 @@ class HitlManager:
         )
 
         channel = f"{AI_HITL_WAKE_CHANNEL_PREFIX}:{confirmation_id}"
-        await redis_client.publish(
+        subscribers = await redis_client.publish(
             channel,
             json.dumps(
                 {
@@ -465,8 +465,9 @@ class HitlManager:
                 }
             ),
         )
-        record_hitl_wake("redis_pubsub", "success")
-        return True
+        result = "success" if subscribers > 0 else "not_found"
+        record_hitl_wake("redis_pubsub", result)
+        return subscribers > 0
 
     # ============ Redis 查询（/ai/confirm endpoint 用） ============
 

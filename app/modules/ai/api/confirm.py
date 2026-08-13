@@ -26,9 +26,12 @@ POST /ai/confirm
     防双击 race（spec §8.3 修订 wake 契约 + manager.py wake pop entry）
 """
 
+import asyncio
 import logging
+import secrets
 import time
-from datetime import UTC, datetime
+from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -67,6 +70,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+_EXECUTION_LEASE_TTL = timedelta(minutes=1)
+_EXECUTION_LEASE_RENEW_INTERVAL_SEC = 20
+
 
 def _prepared_response(action) -> ConfirmResponse:  # noqa: ANN001
     status = action.status
@@ -86,6 +92,32 @@ def _is_expired(value: datetime) -> bool:
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
     return value <= datetime.now(UTC)
+
+
+async def _keep_execution_lease_alive(
+    action_id: int,
+    execution_owner: str,
+) -> None:
+    """Renew the durable RUNNING lease while this worker owns execution."""
+    while True:
+        await asyncio.sleep(_EXECUTION_LEASE_RENEW_INTERVAL_SEC)
+        try:
+            async with AsyncSessionLocal() as lease_db:
+                async with lease_db.begin():
+                    renewed = await prepared_action_service.renew_execution_lease(
+                        lease_db,
+                        action_id=action_id,
+                        execution_owner=execution_owner,
+                        lease_expires_at=datetime.now(UTC) + _EXECUTION_LEASE_TTL,
+                    )
+            if not renewed:
+                return
+        except Exception:
+            logger.warning(
+                "prepared action execution lease renewal failed action_id=%s",
+                action_id,
+                exc_info=True,
+            )
 
 
 async def _notify_prepared_terminal(action, decision: ConfirmAction) -> None:  # noqa: ANN001
@@ -292,12 +324,15 @@ async def _confirm_prepared(
                 "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
             )
         return ResponseModel.success(data=_prepared_response(latest))
+    execution_owner = secrets.token_urlsafe(16)
     running = await prepared_action_service.transition_status(
         db,
         action_id=approved.action_id,
         expected_status=PreparedActionStatus.APPROVED,
         expected_version=approved.row_version,
         target_status=PreparedActionStatus.RUNNING,
+        execution_owner=execution_owner,
+        execution_lease_expires_at=datetime.now(UTC) + _EXECUTION_LEASE_TTL,
     )
     if running is None:
         await db.rollback()
@@ -313,17 +348,25 @@ async def _confirm_prepared(
     await db.commit()
 
     started_at = time.monotonic()
+    lease_task = asyncio.create_task(
+        _keep_execution_lease_alive(running.action_id, execution_owner)
+    )
     try:
-        result = await execute_approved_prepared_action(running, deps)
-    except Exception:
-        logger.exception(
-            "prepared action execution failed unexpectedly action_id=%s",
-            running.action_id,
-        )
-        result = ToolResult.failure(
-            error_code="AI_INTERNAL_ERROR",
-            error_msg="工具执行失败，请稍后重新发起",
-        )
+        try:
+            result = await execute_approved_prepared_action(running, deps)
+        except Exception:
+            logger.exception(
+                "prepared action execution failed unexpectedly action_id=%s",
+                running.action_id,
+            )
+            result = ToolResult.failure(
+                error_code="AI_INTERNAL_ERROR",
+                error_msg="工具执行失败，请稍后重新发起",
+            )
+    finally:
+        lease_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await lease_task
     duration_ms = int((time.monotonic() - started_at) * 1000)
     target_status = (
         PreparedActionStatus.SUCCEEDED if result.ok else PreparedActionStatus.FAILED

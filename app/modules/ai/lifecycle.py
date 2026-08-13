@@ -66,6 +66,13 @@ async def cleanup_prepared_actions_on_startup(redis: Redis) -> int:
         if candidate_expires.tzinfo is None:
             candidate_expires = candidate_expires.replace(tzinfo=UTC)
         status = PreparedActionStatus(candidate.status)
+        if status == PreparedActionStatus.RUNNING:
+            candidate_lease = candidate.execution_lease_expires_at
+            if candidate_lease is not None:
+                if candidate_lease.tzinfo is None:
+                    candidate_lease = candidate_lease.replace(tzinfo=UTC)
+                if candidate_lease > datetime.now(UTC):
+                    continue
         if (
             status == PreparedActionStatus.PENDING_CONFIRMATION
             and candidate_expires > datetime.now(UTC)
@@ -116,10 +123,16 @@ async def cleanup_prepared_actions_on_startup(redis: Redis) -> int:
                         error_code = "AI_PREPARED_ACTION_SOURCE_STALE"
                     else:
                         error_code = "AI_HITL_EXPIRED"
-                elif current_status in {
-                    PreparedActionStatus.APPROVED,
-                    PreparedActionStatus.RUNNING,
-                }:
+                elif current_status == PreparedActionStatus.APPROVED:
+                    target = PreparedActionStatus.FAILED
+                    error_code = "AI_PREPARED_ACTION_EXECUTION_INTERRUPTED"
+                elif current_status == PreparedActionStatus.RUNNING:
+                    lease_expires = current.execution_lease_expires_at
+                    if lease_expires is not None:
+                        if lease_expires.tzinfo is None:
+                            lease_expires = lease_expires.replace(tzinfo=UTC)
+                        if lease_expires > datetime.now(UTC):
+                            continue
                     target = PreparedActionStatus.FAILED
                     error_code = "AI_PREPARED_ACTION_EXECUTION_INTERRUPTED"
                 else:
@@ -131,6 +144,11 @@ async def cleanup_prepared_actions_on_startup(redis: Redis) -> int:
                     expected_version=current.row_version,
                     target_status=target,
                     error_code=error_code,
+                    execution_lease_not_after=(
+                        datetime.now(UTC)
+                        if current_status == PreparedActionStatus.RUNNING
+                        else None
+                    ),
                 )
                 if terminal is None:
                     continue
@@ -316,3 +334,10 @@ async def cleanup_orphaned_pending_on_startup() -> int:
             exc_info=True,
         )
     return cleaned
+
+
+async def cleanup_durable_prepared_actions_on_startup() -> int:
+    """Recover durable state in every HITL mode without scanning legacy cache."""
+    from app.core.redis import redis_client  # noqa: PLC0415
+
+    return await cleanup_prepared_actions_on_startup(redis_client)

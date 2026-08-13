@@ -566,7 +566,9 @@ class TestPubSubMode:
 
         # B wake 在 A hang 之前
         woken = await manager_b.wake(cid, ConfirmAction.REJECTED)
-        assert woken is True
+        # 没有在线订阅者时返回 False，让 confirm 端负责 durable 收口；
+        # wake_action 仍保留，因此稍后订阅不会丢失决定。
+        assert woken is False
 
         # 验证 wake_action 已写入 Redis
         pending = await manager_a.get_pending(redis_module.redis_client, cid)
@@ -584,6 +586,30 @@ class TestPubSubMode:
         manager = HitlManager()
         woken = await manager.wake("nonexistent", ConfirmAction.APPROVED)
         assert woken is False
+
+    async def test_wake_without_subscriber_reports_no_live_waiter(
+        self, pubsub_mode
+    ) -> None:
+        """持久 pending 不等于在线 SSE；无人订阅时 confirm 必须负责清理。"""
+        from app.modules.ai.agents.hitl.manager import HitlManager
+
+        manager = HitlManager()
+        cid = manager.generate_confirmation_id()
+        await manager.create_pending(
+            redis_module.redis_client,
+            confirmation_id=cid,
+            user_id=1,
+            conversation_id=1,
+            tool_call_id="tc_offline",
+            trace_id="tr_offline",
+            tool_name="x",
+            args={},
+        )
+
+        assert await manager.wake(cid, ConfirmAction.APPROVED) is False
+        pending = await manager.get_pending(redis_module.redis_client, cid)
+        assert pending is not None
+        assert pending.wake_action == "approved"
 
     async def test_pubsub_timeout_raises(self, pubsub_mode) -> None:
         """5min TTL 超时 → TimeoutError"""

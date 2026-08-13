@@ -268,6 +268,9 @@ class PreparedActionService:
         result_data: Any = None,
         result_ui: dict[str, Any] | None = None,
         duration_ms: int | None = None,
+        execution_owner: str | None = None,
+        execution_lease_expires_at: datetime | None = None,
+        execution_lease_not_after: datetime | None = None,
     ) -> AiPreparedAction | None:
         """CAS one legal action transition; zero rows means another winner."""
         if target_status not in _ALLOWED_TRANSITIONS.get(expected_status, set()):
@@ -285,6 +288,16 @@ class PreparedActionService:
             values.update(approved_by=approved_by, approved_at=now)
         elif target_status == PreparedActionStatus.REJECTED:
             values.update(approved_by=approved_by, approved_at=now)
+        elif target_status == PreparedActionStatus.RUNNING:
+            if not execution_owner or execution_lease_expires_at is None:
+                raise BusinessRuleException(
+                    "prepared action 执行认领缺少 owner lease",
+                    error_code="AI_PREPARED_ACTION_STATE_INVALID",
+                )
+            values.update(
+                execution_owner=execution_owner,
+                execution_lease_expires_at=_as_utc(execution_lease_expires_at),
+            )
         if target_status.is_terminal:
             values.update(
                 finished_at=now,
@@ -292,20 +305,52 @@ class PreparedActionService:
                 result_data=result_data,
                 result_ui=result_ui,
                 duration_ms=duration_ms,
+                execution_owner=None,
+                execution_lease_expires_at=None,
             )
 
+        conditions = [
+            AiPreparedAction.action_id == action_id,
+            AiPreparedAction.status == expected_status.value,
+            AiPreparedAction.row_version == expected_version,
+        ]
+        if execution_lease_not_after is not None:
+            cutoff = _as_utc(execution_lease_not_after)
+            conditions.append(
+                or_(
+                    AiPreparedAction.execution_lease_expires_at.is_(None),
+                    AiPreparedAction.execution_lease_expires_at <= cutoff,
+                )
+            )
         stmt = (
             update(AiPreparedAction)
-            .where(
-                AiPreparedAction.action_id == action_id,
-                AiPreparedAction.status == expected_status.value,
-                AiPreparedAction.row_version == expected_version,
-            )
+            .where(*conditions)
             .values(**values)
             .returning(AiPreparedAction)
             .execution_options(populate_existing=True)
         )
         return (await db.execute(stmt)).scalars().one_or_none()
+
+    async def renew_execution_lease(
+        self,
+        db: AsyncSession,
+        *,
+        action_id: int,
+        execution_owner: str,
+        lease_expires_at: datetime,
+    ) -> bool:
+        """Extend a RUNNING action lease only for its current executor."""
+        stmt = (
+            update(AiPreparedAction)
+            .where(
+                AiPreparedAction.action_id == action_id,
+                AiPreparedAction.status == PreparedActionStatus.RUNNING.value,
+                AiPreparedAction.execution_owner == execution_owner,
+            )
+            .values(execution_lease_expires_at=_as_utc(lease_expires_at))
+            .returning(AiPreparedAction.action_id)
+        )
+        return (await db.execute(stmt)).scalar_one_or_none() is not None
 
     async def list_pending_for_conversation(
         self,
