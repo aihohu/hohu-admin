@@ -3043,6 +3043,12 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 
 #### SR-38. **LLM 错误说明与客户端展示文案分层**（2026-08-12，纠偏）— `ToolResult.error_msg` 和 SSE `message` 继续服务于 LLM/日志与旧客户端兼容；所有新 Web 展示必须优先使用稳定 `errorCode` 查询 `errorCode.*` locale，已知错误不得把后端语言文本直接渲染。HITL presentation 追加可选 `summaryKey/summaryParams/warningKeys`，旧 `summary/warnings` 仅作兼容回退；direct dry-run 通过结构化 key/params 表达动态摘要。**反例**: 工具卡同时显示本地化错误和后端中文 `errorMsg`，或按中文正则解析 dry-run 摘要 → 英文界面混入中文且文案修改即失配。**回归**: Web `tool-call-i18n.spec.ts` 校验 `errorCode.*` 路径和 unknown fallback；后端 `test_confirmation_presentation_i18n_metadata.py` 校验结构化摘要/警告元数据及兼容字段共存。
 
+#### SR-39. **destructive direct HITL 必须冻结 dry-run 解析出的精确目标，批准时不得重新扩展选择器**（2026-08-12，已完成）— `user.batch_delete` 的名称/手机号选择器只用于 dry-run；Gateway 持久 action 时把内部 `execution_args` 改写为精确 `user_ids`，并保存目标身份快照。确认前按 ID 重读并校验快照，任一目标缺失或身份变化均以 `AI_PREPARED_ACTION_SNAPSHOT_STALE` 过期，要求重新预览。**反例**: 批准时继续按 `user_names/phones` 查询当前数据 → 等待期间新增同手机号账号会扩大删除集合，展示 A、执行 A+B。**回归**: `tests/modules/system/test_ai_tools_user_batch_delete.py` 固定内部执行参数/快照；`tests/modules/ai/test_prepared_action_service.py` 固定目标集合变化时拒绝执行。
+
+#### SR-40. **Web 多 action 恢复只按稳定标识定位，焦点 singleton 不参与状态迁移**（2026-08-12，已完成）— `pendingConfirmation/pendingToolCallId` 仅表示默认抽屉焦点；终态事件始终按 `toolCallId` 清理，410 resume fallback 按入参 `confirmationId` 反查对应 action/toolCallId，续传重试预算按 confirmation 隔离。**反例**: 第二个 action 续传却读取第一个焦点 action 的 `pendingToolCallId` → 轮询错日志；非焦点 action 已完成但不清理 → 新消息永久被 pending gate 阻塞。**回归**: `src/store/modules/ai/__tests__/prepared-action-recovery.spec.ts` 覆盖非焦点终态清理、410 精确轮询与独立重试预算。
+
+#### SR-41. **会话删除必须与 durable action 生命周期互斥，历史孤儿由恢复流程终态化**（2026-08-12，已完成）— 删除会话前在同一事务查询 owner/tenant 下 `prepared|pending_confirmation|approved|running` action；存在时返回 `409 AI_CHAT_RUN_IN_PROGRESS`，不得级联抹除授权/审计事实。启动恢复保留有效 pending 前必须确认 conversation/source 仍存在、属于 owner 且 source active；缺失时以 `AI_PREPARED_ACTION_SOURCE_STALE` 过期并清理 guard/pending。**反例**: 直接删除 conversation 并级联 message、action 又无 FK → confirm 永久 404、DB pending 与 Redis guard 无法收口；给 action 加 `ON DELETE CASCADE` → 静默删除授权和执行审计。**回归**: `tests/modules/ai/test_conversation_api.py` 覆盖 409；`tests/modules/ai/test_prepared_action_lifecycle.py` 覆盖孤儿 pending 启动收口。
+
 
 
 

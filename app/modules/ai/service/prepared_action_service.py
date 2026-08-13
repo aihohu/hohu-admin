@@ -98,6 +98,7 @@ class PreparedActionService:
         command_action: str = "send",
         risk_level: str = "high",
         chip_target: str | None = None,
+        require_live_source: bool = False,
     ) -> AiPreparedAction:
         """Persist one immutable authorization proposal without committing."""
         if conversation_id <= 0 or source_user_message_id <= 0 or not trace_id:
@@ -113,6 +114,13 @@ class PreparedActionService:
             raise _binding_invalid("prepared action outcome 无效")
         if interaction_flow == "direct" and requested_outcome != "direct":
             raise _binding_invalid("direct action outcome 无效")
+        if require_live_source and not await self.lock_source_binding(
+            db,
+            conversation_id=conversation_id,
+            source_user_message_id=source_user_message_id,
+            user_id=user_id,
+        ):
+            raise _binding_invalid("prepared action 的会话或源消息已失效")
         normalized_presentation = self.validate_presentation(presentation)
 
         computed_snapshot_hash = canonical_payload_hash(snapshot)
@@ -153,6 +161,41 @@ class PreparedActionService:
         db.add(action)
         await db.flush()
         return action
+
+    async def lock_source_binding(
+        self,
+        db: AsyncSession,
+        *,
+        conversation_id: int,
+        source_user_message_id: int,
+        user_id: int,
+    ) -> bool:
+        """Serialize action creation with conversation deletion."""
+        conversation = (
+            await db.execute(
+                select(AiConversation)
+                .where(
+                    AiConversation.conversation_id == conversation_id,
+                    AiConversation.user_id == user_id,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if conversation is None:
+            return False
+        source = (
+            await db.execute(
+                select(AiMessage)
+                .where(
+                    AiMessage.message_id == source_user_message_id,
+                    AiMessage.conversation_id == conversation_id,
+                    AiMessage.role == "user",
+                    AiMessage.is_active.is_(True),
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        return source is not None
 
     async def get_by_confirmation_id(
         self, db: AsyncSession, confirmation_id: str
@@ -332,6 +375,27 @@ class PreparedActionService:
         )
         return value is not None
 
+    async def pending_source_is_valid(
+        self, db: AsyncSession, action: AiPreparedAction
+    ) -> bool:
+        """Check that a recoverable action still has its owned active source."""
+        value = await db.scalar(
+            select(AiMessage.message_id)
+            .join(
+                AiConversation,
+                AiConversation.conversation_id == AiMessage.conversation_id,
+            )
+            .where(
+                AiMessage.message_id == action.source_user_message_id,
+                AiMessage.conversation_id == action.conversation_id,
+                AiMessage.role == "user",
+                AiMessage.is_active.is_(True),
+                AiConversation.user_id == action.user_id,
+            )
+            .limit(1)
+        )
+        return value is not None
+
     @staticmethod
     def to_pending_out(action: AiPreparedAction) -> PendingActionOut:
         return PendingActionOut(
@@ -408,6 +472,35 @@ class PreparedActionService:
             action.snapshot
         ):
             raise _snapshot_stale("prepared action 快照已损坏")
+        if action.execute_tool_name == "user.batch_delete":
+            frozen_args = action.frozen_args
+            user_ids = frozen_args.get("user_ids")
+            precise_binding = (
+                isinstance(user_ids, list)
+                and bool(user_ids)
+                and all(
+                    isinstance(user_id, int) and not isinstance(user_id, bool)
+                    for user_id in user_ids
+                )
+                and frozen_args.get("user_names") is None
+                and frozen_args.get("phones") is None
+                and action.snapshot.get("argsHash") == action.args_hash
+            )
+            business_snapshot = action.snapshot.get("business")
+            if not precise_binding or not isinstance(business_snapshot, dict):
+                raise _snapshot_stale("用户批量删除缺少精确目标绑定，请重新发起操作")
+
+            from app.modules.system.service.user_service import (  # noqa: PLC0415
+                user_service,
+            )
+
+            current_snapshot = await user_service.get_batch_delete_identity_snapshot(
+                db, user_ids
+            )
+            if current_snapshot != business_snapshot:
+                raise _snapshot_stale("用户批量删除目标身份已变化，请重新确认")
+            return
+
         if action.execute_tool_name != "user.import_execute":
             return
 

@@ -26,7 +26,7 @@
 
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import redis.asyncio as aioredis
@@ -52,7 +52,7 @@ from app.modules.ai.core.context import ChatDeps, DataScopeContext
 
 
 @pytest.fixture(autouse=True)
-async def clean_env():
+async def clean_env(monkeypatch):
     """每测试清 Redis + reset hitl_manager + 清本轮测试日志。"""
     original_pool = redis_module.redis_pool
     original_client = redis_module.redis_client
@@ -81,6 +81,14 @@ async def clean_env():
             await redis_module.redis_client.delete(*keys)
 
     hitl_manager._reset_for_test()
+
+    from app.modules.ai.service.prepared_action_service import prepared_action_service
+
+    monkeypatch.setattr(
+        prepared_action_service,
+        "lock_source_binding",
+        AsyncMock(return_value=True),
+    )
 
     from app.db.session import AsyncSessionLocal
 

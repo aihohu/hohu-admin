@@ -107,6 +107,40 @@ class TestDryRunExamplesUseUserPhone:
         assert len(result.examples) >= 1
         assert "phone:" in result.examples[0]
 
+    async def test_dry_run_freezes_resolved_ids_and_identity_snapshot(
+        self, db_session
+    ) -> None:
+        """名称/手机号只用于预检，持久 action 必须执行审批时解析出的精确 IDs。"""
+        await _add_user(db_session, user_id=1010, user_name="freeze-target")
+        user = await db_session.get(User, 1010)
+        user.user_phone = "13900000000"
+        await db_session.flush()
+
+        ctx = _make_ctx(db_session)
+        ctx.data_scope.filters.append(User.user_id == 1010)
+        result = await _dry_run_user_batch_delete(
+            ctx,
+            user_ids=None,
+            user_names=["freeze-target"],
+            phones=["13900000000"],
+        )
+
+        assert result.ok is True
+        assert result.execution_args == {
+            "user_ids": [1010],
+            "user_names": None,
+            "phones": None,
+        }
+        assert result.business_snapshot == {
+            "targets": [
+                {
+                    "userId": "1010",
+                    "userName": "freeze-target",
+                    "userPhone": "13900000000",
+                }
+            ]
+        }
+
     async def test_dry_run_no_match_returns_ok_false(self, db_session) -> None:
         """无匹配 → ok=False + count=0 + 中文 reason"""
         ctx = _make_ctx(db_session)

@@ -236,6 +236,29 @@ class UserService:
 
         return result.rowcount
 
+    @staticmethod
+    def build_batch_delete_identity_snapshot(users: list[User]) -> dict:
+        """Build the stable identity snapshot bound to a destructive approval."""
+        ordered_users = sorted(users, key=lambda user: user.user_id)
+        return {
+            "targets": [
+                {
+                    "userId": str(user.user_id),
+                    "userName": user.user_name,
+                    "userPhone": user.user_phone,
+                }
+                for user in ordered_users
+            ]
+        }
+
+    async def get_batch_delete_identity_snapshot(
+        self, db: AsyncSession, user_ids: list[int]
+    ) -> dict:
+        result = await db.execute(
+            select(User).where(User.user_id.in_(user_ids)).order_by(User.user_id.asc())
+        )
+        return self.build_batch_delete_identity_snapshot(list(result.scalars().all()))
+
     def get_profile(self, current_user: User) -> ProfileOut:
         """获取当前用户个人信息"""
         profile = ProfileOut(

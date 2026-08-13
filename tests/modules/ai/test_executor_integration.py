@@ -22,7 +22,7 @@ from app.core import redis as redis_module
 from app.core.config import settings
 from app.modules.ai.agents.gateway.executor import execute_tool
 from app.modules.ai.agents.gateway.result import PreparedActionProposal, ToolResult
-from app.modules.ai.agents.hitl.constants import ConfirmAction
+from app.modules.ai.agents.hitl.constants import ConfirmAction, DryRunResult
 from app.modules.ai.agents.hitl.events import (
     ConfirmationRequiredEvent,
     ToolCallResultEvent,
@@ -31,11 +31,12 @@ from app.modules.ai.agents.hitl.events import (
 from app.modules.ai.agents.hitl.manager import hitl_manager
 from app.modules.ai.agents.tools.decorator import ai_tool
 from app.modules.ai.agents.tools.meta import AiToolMeta
+from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.ai.core.context import ChatDeps, DataScopeContext
 
 
 @pytest.fixture(autouse=True)
-async def clean_env():
+async def clean_env(monkeypatch):
     """每个测试前：重建 redis_client + 清 Redis + reset hitl_manager + 清本轮测试日志。
 
     ai_operation_log 不能用 TRUNCATE（会清掉生产 AI 审计日志）。所有测试代码
@@ -69,6 +70,14 @@ async def clean_env():
             await redis_module.redis_client.delete(*keys)
 
     hitl_manager._reset_for_test()
+
+    from app.modules.ai.service.prepared_action_service import prepared_action_service
+
+    monkeypatch.setattr(
+        prepared_action_service,
+        "lock_source_binding",
+        AsyncMock(return_value=True),
+    )
 
     from app.db.session import AsyncSessionLocal
 
@@ -126,6 +135,7 @@ _TEST_TOOL_PERMED = "testint.perm_required"  # 用于 perm denied 测试
 _TEST_TOOL_READONLY = "testint.readonly_list"  # 写 query_cache
 _TEST_TOOL_PREPARE = "testint.import_preview"  # prepared preview
 _TEST_TOOL_PREPARED_EXECUTE = "testint.import_execute"  # bound HITL execute
+_TEST_TOOL_FREEZE_DIRECT = "testint.freeze_direct"  # direct HITL exact binding
 
 _TOOLS_REGISTERED = False
 
@@ -234,6 +244,31 @@ def _register_test_tools() -> None:
     )
     async def _execute_import(ctx, **kwargs: Any) -> ToolResult:
         return ToolResult.success(data={"successCount": 2})
+
+    @ai_tool(
+        AiToolMeta(
+            name=_TEST_TOOL_FREEZE_DIRECT,
+            agent="shared",
+            summary="freeze a direct destructive target",
+            required_perms=(),
+            risk="high",
+            hitl_always=True,
+            dry_run_supported=True,
+        )
+    )
+    async def _freeze_direct(ctx, **kwargs: Any) -> ToolResult:
+        return ToolResult.success(data={"deleted": 1})
+
+    async def _dry_run_freeze_direct(ctx, **kwargs: Any) -> DryRunResult:
+        return DryRunResult(
+            ok=True,
+            count=1,
+            reason="delete one exact target",
+            execution_args={"target_ids": [7001]},
+            business_snapshot={"targets": [{"id": "7001", "name": "approved"}]},
+        )
+
+    ToolRegistry.get().set_dry_run_fn(_TEST_TOOL_FREEZE_DIRECT, _dry_run_freeze_direct)
 
 
 def _build_deps(
@@ -871,6 +906,43 @@ class TestHitlFlow:
         idx_confirm = types.index("ConfirmationRequiredEvent")
         idx_result = types.index("ToolCallResultEvent")
         assert idx_confirm < idx_result
+
+    async def test_direct_hitl_persists_dry_run_exact_binding(
+        self, monkeypatch
+    ) -> None:
+        _register_test_tools()
+
+        async def fake_hang(confirmation_id, *, timeout_sec=None):
+            return ConfirmAction.REJECTED
+
+        monkeypatch.setattr(hitl_manager, "hang", fake_hang)
+        deps = _build_deps()
+        result = await execute_tool(
+            _TEST_TOOL_FREEZE_DIRECT,
+            {"selector": "approved-name"},
+            deps,
+        )
+
+        assert not result.ok
+
+        from app.db.session import AsyncSessionLocal
+        from app.modules.ai.models.prepared_action import AiPreparedAction
+
+        async with AsyncSessionLocal() as db:
+            action = (
+                await db.execute(
+                    select(AiPreparedAction).where(
+                        AiPreparedAction.trace_id == deps.trace_id,
+                        AiPreparedAction.execute_tool_name == _TEST_TOOL_FREEZE_DIRECT,
+                    )
+                )
+            ).scalar_one()
+
+        assert action.frozen_args == {"target_ids": [7001]}
+        assert action.snapshot["argsHash"] == action.args_hash
+        assert action.snapshot["business"] == {
+            "targets": [{"id": "7001", "name": "approved"}]
+        }
 
     async def test_hitl_rejected(self, monkeypatch) -> None:
         """HITL reject → USER_REJECTED + log status=rejected"""

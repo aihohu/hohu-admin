@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 async def cleanup_prepared_actions_on_startup(redis: Redis) -> int:
     """Recover durable prepared actions; Redis loss never expires a valid pending."""
     cleaned = 0
+    pending_source_validity: dict[int, bool] = {}
     async with AsyncSessionLocal() as db:
         actions = list(
             (
@@ -49,6 +50,17 @@ async def cleanup_prepared_actions_on_startup(redis: Redis) -> int:
             .scalars()
             .all()
         )
+        for action in actions:
+            action_expires = action.expires_at
+            if action_expires.tzinfo is None:
+                action_expires = action_expires.replace(tzinfo=UTC)
+            if (
+                action.status == PreparedActionStatus.PENDING_CONFIRMATION.value
+                and action_expires > datetime.now(UTC)
+            ):
+                pending_source_validity[
+                    action.action_id
+                ] = await prepared_action_service.pending_source_is_valid(db, action)
     for candidate in actions:
         candidate_expires = candidate.expires_at
         if candidate_expires.tzinfo is None:
@@ -57,6 +69,7 @@ async def cleanup_prepared_actions_on_startup(redis: Redis) -> int:
         if (
             status == PreparedActionStatus.PENDING_CONFIRMATION
             and candidate_expires > datetime.now(UTC)
+            and pending_source_validity.get(candidate.action_id, False)
         ):
             if candidate.guard_owner_token:
                 try:
@@ -97,7 +110,12 @@ async def cleanup_prepared_actions_on_startup(redis: Redis) -> int:
                 current_status = PreparedActionStatus(current.status)
                 if current_status == PreparedActionStatus.PENDING_CONFIRMATION:
                     target = PreparedActionStatus.EXPIRED
-                    error_code = "AI_HITL_EXPIRED"
+                    if candidate_expires > datetime.now(
+                        UTC
+                    ) and not pending_source_validity.get(candidate.action_id, False):
+                        error_code = "AI_PREPARED_ACTION_SOURCE_STALE"
+                    else:
+                        error_code = "AI_HITL_EXPIRED"
                 elif current_status in {
                     PreparedActionStatus.APPROVED,
                     PreparedActionStatus.RUNNING,

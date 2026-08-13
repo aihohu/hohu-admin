@@ -92,20 +92,28 @@ class TestCamelCaseKeys:
         assert data["args"] == {"user_id": 42, "new_dept_id": 8}
 
     def test_dry_run_camel_case(self) -> None:
-        """dryRun 是事件元字段，camelCase；嵌套 affectedCount 也转"""
+        """dryRun is public, but server-only authorization data is omitted."""
         event = ConfirmationRequiredEvent(
             confirmation_id="conf_abc",
             tool="user.update_dept",
             tool_call_id="tc_z",
             summary="tool=user.update_dept, risk=high, mode=hitl",
             expires_at="2026-07-04T14:07:30Z",
-            dry_run=DryRunSummary(summary="将影响 1 行", affected_count=1),
+            dry_run=DryRunSummary(
+                summary="will affect 1 row",
+                affected_count=1,
+                execution_args={"server_only": "secret-execution-binding"},
+                business_snapshot={"server_only": "secret-business-snapshot"},
+            ),
         )
         data = json.loads(event_to_sse_data(event))
         assert "dryRun" in data
         assert "dry_run" not in data
         assert data["dryRun"]["affectedCount"] == 1
         assert "affected_count" not in data["dryRun"]
+        assert "executionArgs" not in data["dryRun"]
+        assert "businessSnapshot" not in data["dryRun"]
+        assert "secret" not in json.dumps(data)
 
 
 class TestStartedRisk:

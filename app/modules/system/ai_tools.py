@@ -1153,12 +1153,15 @@ async def _dry_run_user_batch_delete(
             reason="未找到匹配用户（字段值不匹配 / 不在可见范围 / 已删除）",
         )
 
+    users = sorted(users, key=lambda user: user.user_id)
     resolved_ids = [u.user_id for u in users]
     try:
         # spec §6.2: dry_run 也要校验 data_scope（防越权预估）
         await ensure_targets_in_scope(ctx, user_ids=resolved_ids)
     except AuthorizationException as e:
         return DryRunResult(ok=False, count=0, reason=e.message)
+
+    from app.modules.system.service.user_service import user_service  # noqa: PLC0415
 
     examples = [
         f"{u.user_name}（ID: {u.user_id}, phone: {u.user_phone or '-'}）"
@@ -1182,6 +1185,12 @@ async def _dry_run_user_batch_delete(
             ),
         },
         examples=examples,
+        execution_args={
+            "user_ids": resolved_ids,
+            "user_names": None,
+            "phones": None,
+        },
+        business_snapshot=user_service.build_batch_delete_identity_snapshot(users),
     )
 
 

@@ -10,6 +10,7 @@
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 
 class AiOperationStatus(StrEnum):
@@ -125,6 +126,10 @@ class DryRunResult:
     ``display_value``。Gateway 先验证 raw value 与冻结参数绑定，再把 display
     value 写入 canonical presentation，禁止出现展示 A、实际执行 B。
     """
+    # Gateway-only approval binding. Dry-run SSE/Redis summary serialization omits
+    # both fields; the Gateway separately persists only their trusted bindings.
+    execution_args: dict[str, Any] | None = None
+    business_snapshot: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not self.ok and self.count > 0:

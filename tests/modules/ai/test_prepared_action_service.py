@@ -248,6 +248,63 @@ async def test_user_import_snapshot_stale_is_rejected_before_execute(
         reset_file_storage_for_test(None)
 
 
+async def test_batch_delete_snapshot_rejects_identity_drift(db_session) -> None:
+    target = User(
+        user_id=91001,
+        user_name="approved-target",
+        nickname="Approved target",
+        hashed_password="$2b$12$dummy",
+        user_phone="13900000001",
+        status="1",
+    )
+    db_session.add(target)
+    await db_session.flush()
+
+    kwargs = _create_kwargs()
+    snapshot = {
+        "tool": "user.batch_delete",
+        "argsHash": canonical_payload_hash(
+            {"user_ids": [91001], "user_names": None, "phones": None}
+        ),
+        "business": {
+            "targets": [
+                {
+                    "userId": "91001",
+                    "userName": "approved-target",
+                    "userPhone": "13900000001",
+                }
+            ]
+        },
+    }
+    kwargs.update(
+        confirmation_id="cid_batch_delete_snapshot_001",
+        prepare_tool_call_id=None,
+        execute_tool_call_id="tc_batch_delete_snapshot_001",
+        execute_tool_name="user.batch_delete",
+        frozen_args={"user_ids": [91001], "user_names": None, "phones": None},
+        snapshot=snapshot,
+        snapshot_hash=canonical_payload_hash(snapshot),
+        subject_ref=None,
+        presentation={
+            "title": "user.batch_delete",
+            "fields": [{"label": "affectedCount", "value": 1}],
+            "warnings": ["此操作不可逆，请确认影响范围。"],
+        },
+        interaction_flow="direct",
+        requested_outcome="direct",
+    )
+    action = await prepared_action_service.create_pending(db_session, **kwargs)
+
+    await prepared_action_service.validate_snapshot(db_session, action)
+    target.user_phone = "13900000999"
+    await db_session.flush()
+
+    with pytest.raises(BusinessRuleException) as exc_info:
+        await prepared_action_service.validate_snapshot(db_session, action)
+
+    assert exc_info.value.error_code == "AI_PREPARED_ACTION_SNAPSHOT_STALE"
+
+
 async def test_action_status_cas_allows_only_one_execution_claim(db_session) -> None:
     action = await prepared_action_service.create_pending(
         db_session, **_create_kwargs()

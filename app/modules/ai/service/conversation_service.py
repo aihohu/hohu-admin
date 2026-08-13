@@ -75,6 +75,26 @@ class ConversationService:
         obj = await self.get_by_id(db, conversation_id, user_id)
         await db.delete(obj)
 
+    async def lock_for_delete(
+        self, db: AsyncSession, conversation_id: int, user_id: int
+    ) -> AiConversation:
+        """Lock the conversation before checking durable action blockers."""
+        obj = (
+            await db.execute(
+                select(AiConversation)
+                .where(
+                    AiConversation.conversation_id == conversation_id,
+                    AiConversation.user_id == user_id,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if obj is None:
+            raise NotFoundException(
+                resource_type="AI会话", error_code="AI_CONVERSATION_NOT_FOUND"
+            )
+        return obj
+
     async def get_messages(
         self, db: AsyncSession, conversation_id: int, user_id: int
     ) -> list[AiMessage]:

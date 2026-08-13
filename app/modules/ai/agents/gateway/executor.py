@@ -778,6 +778,8 @@ async def _run_dry_run(
             summary_params=dr.summary_params,
             affected_examples=dr.examples,
             confirmation_fields=dr.confirmation_fields,
+            execution_args=dr.execution_args,
+            business_snapshot=dr.business_snapshot,
         )
     except BusinessException as e:
         logger.info(
@@ -1034,6 +1036,13 @@ async def _hang_for_confirmation(
         None — 已 expired（5min TTL 超时，log 已迁移到 EXPIRED）
     """
     meta = registered.meta
+    execution_args = args
+    if (
+        prepared_action_context is None
+        and dry_run_summary is not None
+        and dry_run_summary.execution_args is not None
+    ):
+        execution_args = dry_run_summary.execution_args
     confirmation_id = hitl_manager.generate_confirmation_id()
     payload = await hitl_manager.create_pending(
         redis_client,
@@ -1044,7 +1053,7 @@ async def _hang_for_confirmation(
         tool_call_id=tool_call_id,
         trace_id=deps.trace_id,
         tool_name=meta.name,
-        args=args,
+        args=execution_args,
         dry_run_result=_summary_to_dict(dry_run_summary),
         source_user_message_id=deps.source_user_message_id,
         guard_owner_token=deps.guard_owner_token,
@@ -1113,13 +1122,19 @@ async def _hang_for_confirmation(
                         command_action=deps.command_action,
                         risk_level=meta.risk,
                         chip_target=meta.chip_target,
+                        require_live_source=True,
                     )
                 else:
                     direct_snapshot = {
                         "tool": meta.name,
-                        "argsHash": compute_args_hash(args),
+                        "argsHash": compute_args_hash(execution_args),
                         "dryRun": _summary_to_dict(dry_run_summary),
                     }
+                    if (
+                        dry_run_summary is not None
+                        and dry_run_summary.business_snapshot is not None
+                    ):
+                        direct_snapshot["business"] = dry_run_summary.business_snapshot
                     fields = _build_direct_confirmation_fields(
                         meta, args, dry_run_summary
                     )
@@ -1129,7 +1144,7 @@ async def _hang_for_confirmation(
                         prepare_tool_call_id=None,
                         execute_tool_call_id=tool_call_id,
                         execute_tool_name=meta.name,
-                        frozen_args=args,
+                        frozen_args=execution_args,
                         snapshot=direct_snapshot,
                         snapshot_hash="",
                         subject_ref=None,
@@ -1175,6 +1190,7 @@ async def _hang_for_confirmation(
                         command_action=deps.command_action,
                         risk_level=meta.risk,
                         chip_target=meta.chip_target,
+                        require_live_source=True,
                     )
                 if durable_action is not None:
                     payload = await hitl_manager.bind_durable_action(
