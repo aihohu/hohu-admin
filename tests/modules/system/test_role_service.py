@@ -9,10 +9,17 @@ checked-keys 包含父，会反向级联「父 checked → 所有当前子 check
 from sqlalchemy import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants import MENU_TYPE_BUTTON, MENU_TYPE_DIRECTORY, STATUS_ENABLED
+from app.constants import (
+    DATA_SCOPE_ALL,
+    DATA_SCOPE_CUSTOM,
+    MENU_TYPE_BUTTON,
+    MENU_TYPE_DIRECTORY,
+    STATUS_ENABLED,
+)
 from app.db.base import role_menus
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
+from app.modules.system.schemas.role import RoleQuery
 from app.modules.system.service.role_service import role_service
 
 
@@ -45,6 +52,33 @@ async def db_session_execute_insert(
         )
     )
     await db.flush()
+
+
+class TestGetRoleListDataScope:
+    async def test_filters_roles_by_exact_data_scope(self, db_session: AsyncSession):
+        name_prefix = "QA-data-scope-filter"
+        all_role = Role(
+            role_name=f"{name_prefix}-all",
+            role_code="R_TEST_LIST_SCOPE_ALL",
+            data_scope=DATA_SCOPE_ALL,
+            status=STATUS_ENABLED,
+        )
+        custom_role = Role(
+            role_name=f"{name_prefix}-custom",
+            role_code="R_TEST_LIST_SCOPE_CUSTOM",
+            data_scope=DATA_SCOPE_CUSTOM,
+            status=STATUS_ENABLED,
+        )
+        db_session.add_all([all_role, custom_role])
+        await db_session.flush()
+
+        page = await role_service.get_role_list(
+            db_session,
+            RoleQuery(role_name=name_prefix, data_scope=DATA_SCOPE_CUSTOM),
+        )
+
+        assert page.total == 1
+        assert [role.role_code for role in page.records] == ["R_TEST_LIST_SCOPE_CUSTOM"]
 
 
 class TestGetRoleMenusReturnsLeaves:

@@ -335,6 +335,20 @@ PUT /order/{id}
 
 ## 七、已接入与待接入
 
+### 角色管理列表展示与筛选
+
+✅ Plan 1 已完成（2026-08-13）：角色管理列表展示每个角色的 `data_scope` 中文名称，并允许通过
+`GET /system/role/list?dataScope=<1~5>` 进行等值筛选；Web 新增、搜索和列表共用同一份
+五种数据权限映射。
+
+1. **角色列表筛选使用现有 `data_scope` 字段的等值查询** — 该条件描述角色配置本身，
+   不改变当前操作者能访问哪些角色的权限边界；查询参数沿用 Pydantic camelCase 别名，
+   Web 发送 `dataScope`，后端内部保持 `data_scope`。**反例**: 前端拿到整页数据后本地
+   过滤，会造成分页总数和跨页结果错误；接受任意字符串则会隐藏配置错误。
+   **回归**: `tests/modules/system/test_role_service.py`、
+   `tests/modules/system/test_role_schema.py`、
+   `hohu-admin-web/src/views/system/role/__tests__/role-list-data-scope.spec.ts`。
+
 | 模块 | 是否接入 data scope |
 |---|---|
 | 用户列表（`/system/user/list`） | ✅ 已接入（`user_service.get_user_list`） |

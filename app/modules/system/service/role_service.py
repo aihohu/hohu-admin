@@ -24,6 +24,7 @@ class RoleService:
         field_mapping = {
             "role_name": ("role_name", "contains"),
             "role_code": ("role_code", "contains"),
+            "data_scope": ("data_scope", "=="),
             "status": ("status", "=="),
         }
         filters = build_filters(Role, field_mapping, **query.model_dump())

@@ -185,7 +185,18 @@ class RoleQuery(BaseModel):
     size: int = Field(10, ge=1, le=100, description="每页数量")
     role_name: str | None = Field(None, description="角色名称（支持模糊查询）")
     role_code: str | None = Field(None, description="角色编码（支持模糊查询）")
+    data_scope: str | None = Field(
+        None,
+        description="数据权限范围：1-全部，2-自定义，3-本部门，4-本部门及以下，5-仅本人",
+    )
     status: str | None = Field(None, description="状态")
+
+    @field_validator("data_scope")
+    @classmethod
+    def validate_data_scope(cls, v: str | None) -> str | None:
+        if v is not None and v not in VALID_DATA_SCOPES:
+            raise ValueError("数据权限范围必须是 1~5")
+        return v
 
     @field_validator("status")
     @classmethod

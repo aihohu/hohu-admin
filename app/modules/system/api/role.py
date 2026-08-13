@@ -21,7 +21,7 @@ router = APIRouter()
     "/list",
     response_model=ResponseModel[PageResult[RoleOut]],
     summary="获取角色列表分页",
-    description="根据查询条件获取角色分页列表，支持按角色名称和角色编码筛选",
+    description="根据查询条件获取角色分页列表，支持按角色名称、角色编码、数据权限和状态筛选",
     responses={
         200: {"description": "获取成功，返回角色分页数据"},
         401: {"description": "未登录或令牌已过期"},
@@ -50,6 +50,7 @@ async def list_roles(
         - size: 每页数量（默认10，最大100）
         - role_name: 角色名称（支持模糊查询）
         - role_code: 角色编码（支持模糊查询）
+        - data_scope: 数据权限范围（1-全部，2-自定义，3-本部门，4-本部门及以下，5-仅本人）
         - status: 角色状态（1-启用，2-禁用）
     """
     page_data = await role_service.get_role_list(db, query)

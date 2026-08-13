@@ -10,10 +10,14 @@ _sa_instance_state，但脆弱。重构后必须保证：
 
 from datetime import datetime
 
+import pytest
+from pydantic import ValidationError
+
 from app.constants import DATA_SCOPE_CUSTOM, STATUS_ENABLED
+from app.main import app
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
-from app.modules.system.schemas.role import RoleOut
+from app.modules.system.schemas.role import RoleOut, RoleQuery
 
 
 def _make_role_with_depts(*, role_id: int, dept_ids: list[int]) -> Role:
@@ -66,3 +70,21 @@ class TestRoleOutSerialization:
         role = _make_role_with_depts(role_id=1003, dept_ids=[])
         out = RoleOut.model_validate(role)
         assert out.model_dump(mode="json")["dept_ids"] == []
+
+
+class TestRoleQueryDataScope:
+    def test_accepts_camel_case_data_scope_filter(self):
+        query = RoleQuery.model_validate({"dataScope": DATA_SCOPE_CUSTOM})
+
+        assert query.data_scope == DATA_SCOPE_CUSTOM
+
+    def test_rejects_unknown_data_scope_filter(self):
+        with pytest.raises(ValidationError, match="数据权限范围必须是 1~5"):
+            RoleQuery(data_scope="9")
+
+    def test_openapi_exposes_camel_case_data_scope_query_parameter(self):
+        operation = app.openapi()["paths"]["/system/role/list"]["get"]
+        parameter_names = {parameter["name"] for parameter in operation["parameters"]}
+
+        assert "dataScope" in parameter_names
+        assert "data_scope" not in parameter_names
