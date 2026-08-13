@@ -1,12 +1,11 @@
-"""导入模板下载 service（spec §5.3 + §2.13 + §2.16 + §2.17 + §2.18，Task 14）。
+"""用户导入模板生成服务。
 
 职责：
 - 生成 4 sheet xlsx：「数据」/「说明」/「部门字典」/「角色字典」
-- 「数据」sheet 列顺序固定 + 2 行示例（spec §2.13）
+- 「数据」sheet 列顺序固定并提供两行示例
 - 「数据」sheet E 列（dept_input）+ F 列（role_input）加 DataValidation
-  下拉，引用字典 sheet（spec §2.16）
-- 「部门字典」/「角色字典」sheet 实时查 sys_dept / sys_role 填充（spec §5.3
-  line 2219-2220）+ 顶部加生成时间标注（spec §5.3 line 2227）
+  下拉，引用字典 sheet
+- 「部门字典」/「角色字典」sheet 实时查询并标注生成时间
 
 不在本模块做：
 - HTTP 响应封装（API 层用 Response(content=bytes) 包装）
@@ -25,8 +24,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 
-#: 「数据」sheet 列顺序（spec §5.3 line 2217 + §2.13）。
-#: 与 ``import_parser.EXCEL_HEADERS`` 不完全一致 —— 模板按 spec §5.3 line 2217
+#: 「数据」sheet 列顺序。
+#: 与 ``import_parser.EXCEL_HEADERS`` 不完全一致：模板展示 8 列，
 #: 8 列展示（不带 employee_no），但 parser 表头大小写不敏感匹配可容忍缺失列。
 _DATA_COLUMNS: tuple[str, ...] = (
     "user_name",
@@ -39,7 +38,7 @@ _DATA_COLUMNS: tuple[str, ...] = (
     "status",
 )
 
-#: 2 行示例（spec §2.13 反例 2「只给空表头 → 用户不知道哪些必填」）。
+#: 两行示例帮助用户理解必填项和格式。
 #: 示例值用明显的「示例」语义，避免用户直接落库（dry_run 会拦下重名）。
 _DATA_EXAMPLE_ROWS: tuple[tuple[str, ...], ...] = (
     (
@@ -64,7 +63,7 @@ _DATA_EXAMPLE_ROWS: tuple[tuple[str, ...], ...] = (
     ),
 )
 
-#: 「说明」sheet 字段说明（spec §5.3 line 2218）。
+#: 「说明」sheet 字段说明。
 #: 每行 4 列：字段名 / 必填 / 取值范围 / 冲突处理。
 _INSTRUCTION_ROWS: tuple[tuple[str, str, str, str], ...] = (
     ("字段名", "必填", "取值范围", "冲突处理策略"),
@@ -118,7 +117,7 @@ _INSTRUCTION_ROWS: tuple[tuple[str, str, str, str], ...] = (
     ),
 )
 
-#: 字典 sheet 表头（spec §5.3 line 2219-2220）
+#: 字典 sheet 表头。
 _DEPT_DICT_COLUMNS: tuple[str, ...] = (
     "dept_name",
     "full_path",
@@ -131,23 +130,22 @@ _ROLE_DICT_COLUMNS: tuple[str, ...] = (
     "status",
 )
 
-#: spec §5.3 line 2227：生成时间标注（顶部行）
+#: 顶部生成时间标注。
 _TIMESTAMP_LABEL = "⏰ 生成时间"
 _TIMESTAMP_HINT = "（数据可能已变化，请重新下载模板获取最新）"
 
-#: spec §5.3 line 2227 / §2.16 line 405-409
+#: 数据验证应用范围。
 _DEPT_DV_RANGE = "E2:E10000"
 _ROLE_DV_RANGE = "F2:F10000"
 
-#: 字典 sheet 引用范围（spec §2.16 line 402-410）。
-#: 字典 sheet 顶部 row 1 是生成时间标注（spec §5.3 line 2227），row 2 是表头，
+#: 字典 sheet 顶部 row 1 是生成时间标注，row 2 是表头，
 #: row 3+ 才是数据行 —— DataValidation formula 起点是 ``$X$3`` 而非 ``$X$2``。
 _DEPT_DV_FORMULA = "部门字典!$B$3:$B$1000"
 _ROLE_DV_FORMULA = "角色字典!$A$3:$A$50"
 
 
 async def _fetch_depts(db: AsyncSession) -> list[Dept]:
-    """实时查 sys_dept（spec §5.3 line 2219）。
+    """实时查询启用部门。
 
     - 仅 status='1' 启用部门（决策：禁用部门不展示给用户选）
     - 按 dept_id 升序（稳定输出，便于测试 + 用户对比）
@@ -158,7 +156,7 @@ async def _fetch_depts(db: AsyncSession) -> list[Dept]:
 
 
 async def _fetch_roles(db: AsyncSession) -> list[Role]:
-    """实时查 sys_role（spec §5.3 line 2220）。
+    """实时查询启用角色。
 
     - 仅 status='1' 启用角色
     - 按 role_id 升序
@@ -205,16 +203,16 @@ def _build_dept_full_path(dept: Dept, dept_lookup: dict[int, Dept]) -> str:
 def _build_data_sheet(ws) -> None:
     """「数据」sheet：表头 + 2 行示例 + DataValidation。
 
-    spec §5.3 line 2217 + §2.13 + §2.16。
+    包含固定表头、示例行和字典数据验证。
     """
     # 表头
     ws.append(list(_DATA_COLUMNS))
 
-    # 2 行示例（spec §2.13 反例 2）
+    # 两行示例。
     for row in _DATA_EXAMPLE_ROWS:
         ws.append(list(row))
 
-    # DataValidation（spec §2.16）
+    # 部门与角色数据验证。
     # 部门列（E）：引用「部门字典」sheet 的 full_path 列
     dept_dv = DataValidation(
         type="list",
@@ -241,7 +239,7 @@ def _build_data_sheet(ws) -> None:
 
 
 def _build_instruction_sheet(ws) -> None:
-    """「说明」sheet：字段说明 / 必填 / 取值范围 / 冲突处理（spec §5.3 line 2218）。"""
+    """构建字段说明、必填项、取值范围和冲突处理说明。"""
     for row in _INSTRUCTION_ROWS:
         ws.append(list(row))
 
@@ -249,9 +247,9 @@ def _build_instruction_sheet(ws) -> None:
 def _build_dept_dict_sheet(ws, depts: list[Dept], dept_lookup: dict[int, Dept]) -> None:
     """「部门字典」sheet：生成时间行 + 表头 + 数据行。
 
-    spec §5.3 line 2219 + line 2227。
+    数据从当前启用部门实时生成。
     """
-    # 顶部生成时间标注（spec §5.3 line 2227）
+    # 顶部生成时间标注。
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     ws.append([f"{_TIMESTAMP_LABEL}：{now_str}{_TIMESTAMP_HINT}"])
 
@@ -274,7 +272,7 @@ def _build_dept_dict_sheet(ws, depts: list[Dept], dept_lookup: dict[int, Dept]) 
 def _build_role_dict_sheet(ws, roles: list[Role]) -> None:
     """「角色字典」sheet：生成时间行 + 表头 + 数据行。
 
-    spec §5.3 line 2220 + line 2227。
+    数据从当前启用角色实时生成。
     """
     # 顶部生成时间标注
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -295,10 +293,10 @@ def _build_role_dict_sheet(ws, roles: list[Role]) -> None:
 
 
 async def generate_import_template(db: AsyncSession) -> bytes:
-    """生成用户导入模板 xlsx（spec §5.3 + §2.13 + §2.16 + §2.17 + §2.18）。
+    """生成用户导入模板 xlsx。
 
     流程：
-    1. 查询启用 dept + role（实时，spec §5.3 line 2219-2220）
+    1. 实时查询启用部门和角色
     2. 构建 dept_lookup（ancestors 反查 full_path 用）
     3. 新建 Workbook + 4 sheet（顺序：数据 / 说明 / 部门字典 / 角色字典）
     4. 各 sheet 填内容

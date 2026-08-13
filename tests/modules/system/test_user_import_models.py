@@ -1,4 +1,4 @@
-"""ORM roundtrip smoke 测试（Task 2）。
+"""用户导入导出 ORM roundtrip smoke 测试。
 
 验证 ORM ↔ DB 表映射正确：
 - UserImportBatch INSERT/SELECT 含 ImportBatchStatus enum
@@ -173,7 +173,7 @@ class TestUserExportTaskOrm:
 
 
 class TestUserEmployeeNo:
-    """sys_user.employee_no UNIQUE 约束 + 多个 NULL 允许（spec §2.24）。"""
+    """employee_no 唯一约束允许多个 NULL。"""
 
     async def test_employee_no_unique_constraint(self, db_session):
         """两个 user 同 employee_no 应触发 UNIQUE 违反。"""
@@ -194,7 +194,7 @@ class TestUserEmployeeNo:
             await db_session.flush()
 
     async def test_multiple_null_employee_no_allowed(self, db_session):
-        """spec §2.24：UNIQUE 但允许多个 NULL（PostgreSQL 默认行为）。"""
+        """PostgreSQL UNIQUE 约束允许多个 NULL。"""
         u1 = User(
             user_name="charlie",
             employee_no=None,

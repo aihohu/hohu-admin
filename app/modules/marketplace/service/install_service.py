@@ -2,7 +2,7 @@
 
 操作本地 mk_tenant_app 表 + 调 MigrationRunner 建 app_data_*。
 云市场不接触此 service。
-Phase 2 拆分时迁移到 app/modules/marketplace/service/local/install_service.py
+如按云端与本地职责拆分，本服务归入 local/install_service.py。
 详见 docs/MARKETPLACE-CLOUD-SPLIT.md
 
 原描述：应用市场 - 安装/卸载/重装 service（spec 14.4 + 决策 6.4）
@@ -11,7 +11,7 @@ Phase 2 拆分时迁移到 app/modules/marketplace/service/local/install_service
 UNIQUE(tenant_id, app_id) 通过「重装 UPDATE 同行」实现循环，避免反复 install/uninstall
 产生大量行。
 
-Phase 2 接入低代码：install 时根据 manifest 建 app_data_* 表；
+低代码安装会根据 manifest 创建 app_data_* 表；
 uninstall 时 DROP 表并把表名回填 retained_table_names。
 """
 
@@ -201,7 +201,7 @@ class InstallService(MarketplaceBaseService):
     ) -> None:
         """卸载：status='uninstalled'，DROP app_data_* 表并记录 retained_table_names。
 
-        Phase 1 决策（spec 6.4）：默认硬 DROP，软删除留 Phase 2。
+        当前卸载默认硬 DROP；如引入软删除，需要同时调整重装检测。
         retained_table_names 记录曾存在的表名，供未来重装检测使用。
 
         Args:

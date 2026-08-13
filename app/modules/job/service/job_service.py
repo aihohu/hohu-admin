@@ -146,7 +146,7 @@ class JobService:
     async def update_for_ai(
         self, db: AsyncSession, data: JobAiUpdate, current_user: str | None = None
     ) -> SysJob:
-        """spec §11.3 AI 入口更新 — 强制走 JobAiUpdate schema 白名单
+        """AI 入口更新，强制使用 ``JobAiUpdate`` 字段白名单。
 
         即使 AI tool 漏传 job_key / run_on_enable 等危险字段，Pydantic 在反序列化
         阶段就丢弃（不报错，但字段不进 update_data）。安全边界由 schema 定义，

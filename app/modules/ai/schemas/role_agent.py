@@ -1,9 +1,9 @@
-"""Role-Agent binding schemas (spec §6.3).
+"""Role-Agent binding schemas。
 
-应用 Task 1 统一约定：
+统一约定：
 - `alias_generator=to_camel` + `from_attributes=True`
 - Snowflake ID 声明为 `int` + `@field_serializer` 返回 `str(v)`，
-  防止 JS BigInt 精度丢失（CLAUDE.md 硬规则 + Task 1 c5748b2）
+  防止 JavaScript BigInt 精度丢失
 """
 
 from pydantic import BaseModel, ConfigDict, field_serializer

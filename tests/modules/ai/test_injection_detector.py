@@ -1,4 +1,4 @@
-"""Prompt Injection 检测器单测 — spec §11.1 / §12.3
+"""Prompt Injection 检测器测试。
 
 8 类攻击 pattern + 5 类正常查询不应误报。
 
@@ -22,7 +22,7 @@ from app.modules.ai.agents.safety.injection_detector import (
 
 
 class TestInjectionAttackHits:
-    """spec §12.3 8 类攻击 pattern 命中"""
+    """八类攻击 pattern 均可命中。"""
 
     @pytest.mark.parametrize(
         "text",
@@ -150,7 +150,7 @@ class TestMatchedPatternsHelper:
 
 
 class TestExtremeInputs:
-    """spec §11.1: 极端输入不应让 detector 崩溃"""
+    """极端输入不应让 detector 崩溃。"""
 
     def test_null_bytes(self) -> None:
         """null bytes 不应让正则崩"""

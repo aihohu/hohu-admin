@@ -1,4 +1,4 @@
-"""Prometheus 指标埋点测试 — spec §6.3 v1.5+
+"""Prometheus 指标埋点测试。
 
 验证：
   - 8 个核心 metric 已注册到 REGISTRY
@@ -29,7 +29,7 @@ class TestMetricRegistration:
     """8 个核心 metric 都注册到 REGISTRY"""
 
     def test_all_metrics_registered(self) -> None:
-        """spec §6.3 + §8.4.1 v1.5+: 8 个 metric 全部在 REGISTRY
+        """八个核心 metric 全部注册到 REGISTRY。
 
         prometheus_client REGISTRY.collect() 对 Counter 返回去掉 _total 后缀的
         sample name，所以直接断言 sample name 不稳。改为遍历 collect() 后用
@@ -56,7 +56,7 @@ class TestMetricRegistration:
         assert set(labelnames) == {"tool", "status", "risk", "execution_mode"}
 
     def test_no_high_cardinality_labels(self) -> None:
-        """spec §22 SR-8: 禁用 user_id / confirmation_id / tool_call_id 等高基数 label
+        """禁止使用 user_id、confirmation_id、tool_call_id 等高基数 label。
 
         高基数 label 会导致 Prometheus cardinality 爆炸（每用户 / 每调用一行），
         内存吃不消。需要 user 维度的走日志 + trace（OTel 未来加）。
@@ -168,7 +168,7 @@ class TestRecordHelpers:
         assert after == before + 1
 
     def test_record_hitl_gauge_inc_dec_pairs(self) -> None:
-        """spec §6.3: HITL_PENDING_COUNT Gauge 必须 inc / dec 配对"""
+        """HITL_PENDING_COUNT Gauge 的 inc 和 dec 必须配对。"""
         from app.modules.ai.metrics import record_hitl_created, record_hitl_resolved
 
         labels = ("memory_test",)
@@ -194,7 +194,7 @@ class TestMetricsEndpoint:
     """
 
     async def test_metrics_endpoint_returns_200_with_metric_names(self) -> None:
-        """spec §6.3 v1.5+: /metrics 暴露所有指标文本格式"""
+        """/metrics 以文本格式暴露所有指标。"""
         from app.main import metrics
 
         resp = await metrics()

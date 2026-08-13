@@ -1,4 +1,4 @@
-"""SafeHttpClient 单测 — 覆盖 spec §SSRF Phase 1 全部要点。"""
+"""SafeHttpClient SSRF 防护测试。"""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def _patch_httpx_with_handler(monkeypatch, handler):
 
 
 class TestValidateIp:
-    """IP 黑名单覆盖 spec §SSRF Phase 1 第 4 条。"""
+    """IP 黑名单覆盖私网、回环和保留地址。"""
 
     @pytest.mark.parametrize(
         "ip",
@@ -65,7 +65,7 @@ class TestValidateIp:
             _validate_ip(ip)
 
     def test_ipv4_mapped_ipv6_blocked(self):
-        # ::ffff:10.0.0.1 必须按 IPv4 规则拒（spec §SSRF Phase 1 第 3 条）
+        # IPv4-mapped IPv6 地址必须按 IPv4 规则拒绝。
         with pytest.raises(SSRFBlockedException):
             _validate_ip("::ffff:10.0.0.1")
 
@@ -75,7 +75,7 @@ class TestValidateIp:
 
 
 class TestScheme:
-    """协议白名单：spec §SSRF Phase 1 第 1 条。"""
+    """仅允许白名单协议。"""
 
     async def test_file_scheme_rejected(self):
         client = SafeHttpClient()
@@ -99,7 +99,7 @@ class TestScheme:
 
 
 class TestUrlPattern:
-    """URL pattern 白名单：spec §SSRF Phase 1 第 3 条。"""
+    """URL pattern 白名单测试。"""
 
     async def test_pattern_mismatch_rejected(self):
         # 协议层先过，pattern 层拒；不需要 DNS / httpx
@@ -125,7 +125,7 @@ class TestUrlPattern:
 
 
 class TestBlockedUrls:
-    """spec §21.4 test_ssrf_blocked 全量覆盖。"""
+    """覆盖 SSRF 阻断的主要地址类型。"""
 
     @pytest.mark.parametrize(
         "url,ips",
@@ -147,7 +147,7 @@ class TestBlockedUrls:
 
 
 class TestResponseSize:
-    """响应大小限制：spec §SSRF Phase 1 第 6 条。"""
+    """验证响应大小限制。"""
 
     async def test_oversize_body_rejected(self, monkeypatch):
         monkeypatch.setattr(
@@ -166,7 +166,7 @@ class TestResponseSize:
 
 
 class TestFollowRedirects:
-    """重定向禁用：spec §SSRF Phase 1 第 4 条末段。"""
+    """验证重定向被禁用。"""
 
     async def test_redirect_not_followed(self, monkeypatch):
         monkeypatch.setattr(

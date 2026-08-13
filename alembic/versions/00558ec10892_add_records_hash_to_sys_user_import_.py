@@ -19,7 +19,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """加 records_hash 列（spec §2.19 三重校验字段）。
+    """增加 records_hash 列，用于预检结果一致性校验。
 
     batch 行由 dry_run 创建（status=CREATED）→ records_hash 在 INSERT 时即写入，
     所以 nullable=False 不需要 backfill。
@@ -31,7 +31,7 @@ def upgrade() -> None:
             sa.String(length=64),
             nullable=False,
             server_default="",
-            comment="records 序列化后的 sha256（spec §2.19 execute 三重校验）",
+            comment="records 序列化后的 sha256，用于执行前一致性校验",
         ),
     )
     # server_default="" 仅为加列时通过 NOT NULL 约束；后续 INSERT 永远显式提供真实 hash

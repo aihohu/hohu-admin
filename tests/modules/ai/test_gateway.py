@@ -1,9 +1,9 @@
 """Gateway Executor + ensure_targets_in_scope + ToolResult 单元测试
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §6.1 / §6.2 / §6.5。
+覆盖网关工具查找、权限、数据范围和错误映射。
 
 execute_tool 测试用 db_session fixture（ai/conftest.py），不用 mock AsyncSessionLocal。
-ensure_targets_in_scope v1.5+ 走 SQL count 路径，user 维度 mock ctx.db.execute。
+ensure_targets_in_scope 使用 SQL count 路径，用户维度 mock ctx.db.execute。
 """
 
 # ruff: noqa: ARG001, ARG005, PLC0415
@@ -138,7 +138,7 @@ class TestEnsureTargetsInScope:
         assert exc_info.value.error_code == "AI_DATA_SCOPE_VIOLATION"
 
     async def test_create_bys_uses_user_scope(self) -> None:
-        # create_bys 走 accessible_user_scope（spec §14），2 targets 1 visible 抛
+        # create_bys 使用 accessible_user_scope；两个目标仅一个可见时拒绝。
         ctx = _make_ctx(
             accessible_user_scope=_DUMMY_SCOPE,
             accessible_dept_ids={10},
@@ -178,14 +178,14 @@ def _make_deps(
 
 class TestExecuteTool:
     async def test_tool_not_found(self, db_session: AsyncSession) -> None:
-        """spec §6.1: LLM 幻觉调用了不存在的 tool"""
+        """LLM 调用不存在的工具时返回稳定错误。"""
         deps = _make_deps(db=db_session)
         result = await execute_tool("missing.tool", {}, deps)
         assert result.ok is False
         assert result.error_code == "AI_TOOL_NOT_FOUND"
 
     async def test_perm_denied(self, db_session: AsyncSession) -> None:
-        """spec §6.1: tool 存在但用户 perms 不满足"""
+        """工具存在但用户权限不足时拒绝执行。"""
 
         @ai_tool(
             AiToolMeta(
@@ -205,7 +205,7 @@ class TestExecuteTool:
         assert result.error_code == "AI_TOOL_PERM_DENIED"
 
     async def test_success_calls_tool_fn(self, db_session: AsyncSession) -> None:
-        """spec §6.3: 独立 session + 调业务函数 + 返回 ToolResult.success"""
+        """使用独立 session 调用业务函数并返回 ToolResult.success。"""
 
         @ai_tool(
             AiToolMeta(
@@ -227,7 +227,7 @@ class TestExecuteTool:
     async def test_business_exception_translates(
         self, db_session: AsyncSession
     ) -> None:
-        """spec §6.5: 业务异常 → ToolResult.failure(原 error_code)"""
+        """业务异常映射为保留原 error_code 的 ToolResult.failure。"""
 
         @ai_tool(
             AiToolMeta(
@@ -250,7 +250,7 @@ class TestExecuteTool:
     async def test_authorization_exception_translates(
         self, db_session: AsyncSession
     ) -> None:
-        """spec §6.5: AuthorizationException → ToolResult.failure(AI_DATA_SCOPE_VIOLATION)"""
+        """AuthorizationException 映射为 AI_DATA_SCOPE_VIOLATION。"""
 
         @ai_tool(
             AiToolMeta(
@@ -272,7 +272,7 @@ class TestExecuteTool:
     async def test_not_found_exception_translates(
         self, db_session: AsyncSession
     ) -> None:
-        """spec §6.5: NotFoundException → ToolResult.failure(原 error_code)"""
+        """NotFoundException 映射为保留原 error_code 的失败结果。"""
 
         @ai_tool(
             AiToolMeta(
@@ -294,7 +294,7 @@ class TestExecuteTool:
     async def test_unexpected_exception_translates_to_internal_error(
         self, db_session: AsyncSession
     ) -> None:
-        """spec §6.5: 未预期异常 → AI_INTERNAL_ERROR（保留异常类型名便于 debug）"""
+        """未预期异常映射为 AI_INTERNAL_ERROR，并保留异常类型便于排障。"""
 
         @ai_tool(
             AiToolMeta(
@@ -316,7 +316,7 @@ class TestExecuteTool:
 
 
 class TestSseSerializesUiAndChipTarget:
-    """spec 2026-07-16 §2.5: SSE 协议扩展（ui + chipTarget 字段）。"""
+    """验证 SSE 结果包含 ui 和 chipTarget 字段。"""
 
     def test_tool_call_result_serializes_ui(self) -> None:
         import json
@@ -393,7 +393,7 @@ class TestSseSerializesUiAndChipTarget:
 
 
 class TestExecutorIsinstanceBranch:
-    """spec 2026-07-16 §3 决策 11: executor 双路径分支。"""
+    """验证 executor 的标准结果和兼容结果双路径。"""
 
     async def test_executor_preserves_tool_result_when_business_returns_it(
         self, db_session: AsyncSession

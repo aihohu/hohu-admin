@@ -1,4 +1,4 @@
-"""UIResult + ToolResult.ui 字段测试（spec 2026-07-16-tool-result-view-design.md §2.1/§2.2）。"""
+"""UIResult 和 ToolResult.ui 字段测试。"""
 
 from app.modules.ai.agents.gateway.result import ToolResult, UIResult
 
@@ -36,7 +36,7 @@ class TestToolResultUi:
 
     def test_success_without_ui_returns_none_ui(self):
         """决策 3 修正：ui 可选，向后兼容现有 executor / 第三方 tool。
-        builtin tool 强制带 ui 由 lint（Task 9）保证，不靠 ToolResult.success 签名。
+        内置工具必须带 ui 由 lint 保证，不依赖 ToolResult.success 签名。
         """
         r = ToolResult.success(data={"count": 5})
         assert r.ok is True

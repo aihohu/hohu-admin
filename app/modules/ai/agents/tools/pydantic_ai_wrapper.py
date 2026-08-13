@@ -1,6 +1,6 @@
 """PydanticAI Tool 包装层 — Registry tool → PydanticAI Tool
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §5.1 / §6.3 / §8.2。
+负责将注册表中的工具包装为 PydanticAI Tool，并统一接入 Gateway Executor。
 
 业务函数签名约定：
     async def fn(ctx: AiToolContext, **args) -> ...
@@ -11,10 +11,10 @@ PydanticAI 期望的签名：
 本模块用 inspect.signature 动态构造 wrapper 签名：
   - 第一个参数 ctx 类型从 AiToolContext 替换为 RunContext[ChatDeps]
   - 其余参数保持原样（PydanticAI 据此生成 JSON schema 给 LLM）
-  - wrapper 运行时**通过 Gateway Executor 路由**（spec §3 / §6）：
+  - wrapper 运行时通过 Gateway Executor 路由：
     perm check → 容量三层 → 风险分级 → HITL → 业务执行 → 脱敏 → 事件 emit
 
-Phase 3.2 关键变化（vs Phase 1.2b）：
+当前执行流程：
   - wrapper 不再直接调 original_fn（绕过 Gateway 的 critical gap）
   - wrapper 调 execute_tool，由 Executor 调 original_fn
   - ToolResult → LLM 友好字符串
@@ -60,7 +60,7 @@ def _build_wrapper_signature(
     wrapper : async def fn(ctx: RunContext[ChatDeps], foo: str, bar: int = 0)
 
     PydanticAI 据此生成 LLM 可见的 JSON schema（foo / bar 进 schema，
-    ctx 不进；spec §7.2 sensitive_input 不进函数签名所以也不进 schema）。
+    ctx 不进入；``sensitive_input`` 不在函数签名中，因此也不进入 schema）。
     """
     orig_sig = inspect.signature(original_fn)
     orig_params = list(orig_sig.parameters.values())
@@ -136,7 +136,7 @@ def _tool_result_to_llm_string(
 def wrap_tool_for_pydantic_ai(registered: RegisteredTool) -> Tool:
     """把 RegisteredTool 包装为 PydanticAI Tool
 
-    Phase 3.2 工作流（spec §3 / §6 / §8.2）：
+    工作流：
       1. PydanticAI 调 wrapper(ctx: RunContext[ChatDeps], **args)
       2. wrapper 调 execute_tool(meta.name, args, deps)
       3. Executor 内：perm → 容量 → HITL → 业务（独立 session）→ 脱敏
@@ -194,13 +194,13 @@ def build_pydantic_ai_tools(
     *,
     enabled_extra: list[str] | None = None,
 ) -> list[Tool]:
-    """spec §5.4: 按 Agent + 用户 perms 过滤后，包装为 PydanticAI Tool 列表
+    """按 Agent 和用户权限过滤后包装为 PydanticAI Tool 列表。
 
     用法（chat_agent.py）:
         agent = Agent(model, deps_type=ChatDeps, tools=build_pydantic_ai_tools(perms, "user_mgmt"))
 
     Args:
-        enabled_extra: v1.5+ SR-17 sys_config.ai:enabled_tools 解析结果，
+        enabled_extra: ``sys_config.ai:enabled_tools`` 的解析结果，
             由 chat_service.create_agent 预 await 后传入（保持本函数同步）。
 
     返回顺序：按 Registry 注册顺序（稳定，便于调试）

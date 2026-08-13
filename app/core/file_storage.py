@@ -1,8 +1,8 @@
-"""文件存储抽象（spec §3.9 v2.2 P1-4）。
+"""文件存储抽象。
 
 业务层只依赖 FileStorage Protocol，部署时切换实现：
-- Phase 1: LocalFileStorage（本地文件系统，单机 / Docker volume）
-- Phase 3+: S3FileStorage / MinIOFileStorage / GridFSFileStorage
+- LocalFileStorage：本地文件系统，适用于单机或 Docker volume
+- 其他后端可实现同一接口接入 S3、MinIO 或 GridFS
 
 业务层禁止 import 具体类（pyproject.toml ruff.banned-imports 限制），
 只通过 get_file_storage() 注入。
@@ -19,7 +19,7 @@ from app.core.config import settings
 
 @runtime_checkable
 class FileStorage(Protocol):
-    """文件存储抽象（spec §3.9）。
+    """文件存储接口。
 
     save 返回的 storage_key 是不透明字符串（业务层不解析）：
     - LocalFileStorage: "namespace/uuid.xlsx"（相对 root 的路径）
@@ -46,7 +46,7 @@ class FileStorage(Protocol):
 
 
 class LocalFileStorage:
-    """本地文件系统实现（Phase 1 默认，spec §3.9）。
+    """默认的本地文件系统实现。
 
     配置 LOCAL_FILE_STORAGE_ROOT：
     - 单机部署：默认 "private_uploads/file_storage"（相对工作目录，不静态挂载）
@@ -192,7 +192,7 @@ def validate_private_storage_roots() -> None:
 
 
 def get_file_storage() -> FileStorage:
-    """DI 工厂（spec §3.9）。进程级单例，首次调用时按 settings 实例化。
+    """进程级 DI 工厂，首次调用时按 settings 实例化。
 
     业务层注入方式：
         fs = get_file_storage()

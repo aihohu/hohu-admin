@@ -38,6 +38,6 @@ class TestMarketplaceBaseService:
         assert apps[0].tenant_id == 42
 
     async def test_default_tenant_is_zero(self):
-        """Phase 1 默认 tenant_id=0"""
+        """单租户模式默认 tenant_id=0。"""
         service = MarketplaceBaseService()
         assert service.tenant_id == 0

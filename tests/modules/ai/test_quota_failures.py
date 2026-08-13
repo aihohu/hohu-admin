@@ -1,6 +1,6 @@
 """容量三层 + 连续失败兜底 单元测试
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §6.4 / §6.5。
+覆盖多级配额、回滚和连续失败计数。
 
 Redis 用真实 redis_client（ai/conftest.py 的 db_session fixture 已 reset），
 不用 mock（mock Redis INCR + EXPIRE 复杂且易错）。
@@ -55,7 +55,7 @@ def _meta(risk: str = "low", hitl_always: bool = False) -> AiToolMeta:
 
 class TestIsWriteTool:
     def test_low_is_not_write(self) -> None:
-        """spec §6.4: risk=low 不计入 L1/L2"""
+        """risk=low 不计入 L1/L2。"""
         assert is_write_tool(_meta(risk="low")) is False
 
     def test_high_is_write(self) -> None:
@@ -65,7 +65,7 @@ class TestIsWriteTool:
         assert is_write_tool(_meta(risk="destructive")) is True
 
     def test_hitl_always_is_write(self) -> None:
-        """spec §6.4: hitl_always=True 即使 risk=low 也算写"""
+        """hitl_always=True 时即使 risk=low 也按写操作计数。"""
         assert is_write_tool(_meta(risk="low", hitl_always=True)) is True
 
 
@@ -109,10 +109,8 @@ async def clean_redis_rate_keys():
         keys = await redis_module.redis_client.keys("ai:write:*")
         keys += await redis_module.redis_client.keys("ai:quota:*")
         keys += await redis_module.redis_client.keys("ai:failures:*")
-        keys += await redis_module.redis_client.keys("ai:rate:*")  # v1.5+ SR-19 全局 L1
-        keys += await redis_module.redis_client.keys(
-            "ai:budget:*"
-        )  # v1.5+ SR-20 会话预算
+        keys += await redis_module.redis_client.keys("ai:rate:*")  # 全局 L1。
+        keys += await redis_module.redis_client.keys("ai:budget:*")  # 会话预算。
         if keys:
             await redis_module.redis_client.delete(*keys)
 
@@ -200,11 +198,11 @@ class TestL1RateLimit:
         assert count == 1
 
 
-# ============ L1 全局速率（v1.5+ SR-19） ============
+# ============ L1 全局速率 ============
 
 
 class TestL1GlobalRateLimit:
-    """spec §6.4 SR-19：全局 L1 叠加用户级 L1"""
+    """全局 L1 与用户级 L1 叠加。"""
 
     async def test_limit_zero_skips_check(self) -> None:
         """limit=0（默认）→ 跳过，返回 None，不写 zset"""
@@ -229,7 +227,7 @@ class TestL1GlobalRateLimit:
         assert exc_info.value.error_code == "AI_RATE_LIMIT_GLOBAL"
 
     async def test_over_limit_rolls_back_self(self) -> None:
-        """SR-19 + 修订 S-11：超限时 ZREM 自身，zset 回到 limit"""
+        """超限时移除本次成员，使 zset 回到 limit。"""
         for _ in range(2):
             await check_l1_global_rate_limit(redis_module.redis_client, limit=2)
         with pytest.raises(BusinessRuleException):
@@ -327,11 +325,11 @@ class TestL2DailyQuota:
             assert 50 <= ttl <= 60
 
 
-# ============ L2 per-agent 维度（v1.5+ SR-16） ============
+# ============ L2 per-agent 维度 ============
 
 
 class TestL2AgentQuota:
-    """spec §6.4 SR-16：per-agent L2 叠加全局 L2"""
+    """per-agent L2 与全局 L2 叠加。"""
 
     async def test_limit_none_skips_check(self) -> None:
         """agent 未配专属额度（limit=None）→ 跳过，不写 Redis key"""
@@ -369,7 +367,7 @@ class TestL2AgentQuota:
         assert exc_info.value.error_code == "AI_DAILY_QUOTA_EXHAUSTED"
 
     async def test_over_quota_rolls_back_self(self) -> None:
-        """SR-16 + 修订 S-11：超限时 DECR 自身，计数回到 limit"""
+        """超限时回滚本次递增，使计数回到 limit。"""
         user_id = 99978
         for _ in range(2):
             await check_l2_agent_quota(
@@ -439,11 +437,11 @@ class TestL3Timeout:
         assert exc_info.value.error_code == "AI_TOOL_TIMEOUT"
 
 
-# ============ L4 会话预算（v1.5+ SR-20） ============
+# ============ L4 会话预算 ============
 
 
 class TestL4ConvBudget:
-    """spec §6.4 SR-20：防用户拆分对话绕过日配额"""
+    """会话预算防止用户拆分对话绕过日配额。"""
 
     async def test_limit_zero_skips_check(self) -> None:
         """limit=0（默认）→ 跳过，返回 None，不写 key"""
@@ -475,7 +473,7 @@ class TestL4ConvBudget:
         assert exc_info.value.error_code == "AI_CONV_BUDGET_EXHAUSTED"
 
     async def test_over_limit_rolls_back_self(self) -> None:
-        """SR-20 + 修订 S-11：超限时 DECR 自身，key 计数回到 limit"""
+        """超限时回滚本次递增，使 key 计数回到 limit。"""
         for _ in range(2):
             await check_l4_conv_budget(redis_module.redis_client, 12348, limit=2)
         with pytest.raises(BusinessRuleException):
@@ -485,14 +483,14 @@ class TestL4ConvBudget:
         assert count == 2  # 回到 limit
 
     async def test_first_call_sets_ttl_24h(self) -> None:
-        """SR-20: 首次 INCR 时 EXPIRE 24h（滚动窗口，非 UTC 日）"""
+        """首次递增时设置 24 小时滚动窗口。"""
         await check_l4_conv_budget(redis_module.redis_client, 12349, limit=100)
         ttl = await redis_module.redis_client.ttl("ai:budget:conv:12349")
         # 24h = 86400s，允许 ±60s 误差（测试执行耗时）
         assert 86340 <= ttl <= 86400
 
     async def test_ttl_not_reset_on_subsequent_calls(self) -> None:
-        """SR-20: 第二次 INCR 不重置 TTL（首次设置的 24h 不变）"""
+        """后续递增不重置首次设置的 TTL。"""
         await check_l4_conv_budget(redis_module.redis_client, 12350, limit=100)
         ttl1 = await redis_module.redis_client.ttl("ai:budget:conv:12350")
 
@@ -564,7 +562,7 @@ class TestDecrQuota:
         assert count_after == count_before  # 没动
 
     async def test_decr_agent_quota_with_agent_code(self) -> None:
-        """v1.5+ SR-16：传 agent_code 时同步 DECR per-agent L2 key"""
+        """传入 agent_code 时同步回滚 per-agent L2 key。"""
         user_id = 99971
         # 先 INCR 3 次 per-agent
         for _ in range(3):
@@ -597,7 +595,7 @@ class TestDecrQuota:
         assert global_count == 2  # 3 - 1 = 2
 
     async def test_decr_without_agent_code_skips_per_agent(self) -> None:
-        """v1.5+ SR-16：agent_code=None 时不 decr per-agent key（与 executor 配对）"""
+        """agent_code=None 时不回滚 per-agent key。"""
         user_id = 99970
         for _ in range(3):
             await check_l2_agent_quota(
@@ -618,7 +616,7 @@ class TestDecrQuota:
         assert agent_count == 3  # 没 decr
 
     async def test_decr_global_l1_with_member(self) -> None:
-        """v1.5+ SR-19：传 l1_global_member 时 ZREM 全局 zset 成员"""
+        """传入 l1_global_member 时移除全局 zset 成员。"""
         # 先 INCR 全局 L1 3 次，拿到最后一次的 member
         members = []
         for _ in range(3):
@@ -637,7 +635,7 @@ class TestDecrQuota:
         assert count == 2  # 3 - 1 = 2
 
     async def test_decr_without_global_member_skips_global_l1(self) -> None:
-        """v1.5+ SR-19：l1_global_member=None 时不 ZREM 全局 zset"""
+        """l1_global_member=None 时不修改全局 zset。"""
         for _ in range(3):
             await check_l1_global_rate_limit(redis_module.redis_client, limit=100)
 
@@ -651,7 +649,7 @@ class TestDecrQuota:
         assert count == 3  # 没 ZREM
 
     async def test_decr_l4_conv_with_key(self) -> None:
-        """v1.5+ SR-20：传 l4_conv_key 时 DECR 会话预算"""
+        """传入 l4_conv_key 时回滚会话预算。"""
         # 先 INCR 3 次
         for _ in range(3):
             await check_l4_conv_budget(redis_module.redis_client, 77701, limit=100)
@@ -666,7 +664,7 @@ class TestDecrQuota:
         assert count == 2  # 3 - 1 = 2
 
     async def test_decr_without_l4_conv_key_skips_l4(self) -> None:
-        """v1.5+ SR-20：l4_conv_key=None 时不 DECR 会话预算"""
+        """l4_conv_key=None 时不回滚会话预算。"""
         for _ in range(3):
             await check_l4_conv_budget(redis_module.redis_client, 77702, limit=100)
 
@@ -685,7 +683,7 @@ class TestDecrQuota:
 
 class TestRepeatedFailure:
     async def test_first_two_failures_pass(self) -> None:
-        """spec §6.5: < 2 次失败不拦截"""
+        """少于两次失败时不拦截。"""
         user_id = 99985
         tool = "user.fail_test"
         args_hash = "hash1"
@@ -698,7 +696,7 @@ class TestRepeatedFailure:
         )  # 1 < 2，不抛
 
     async def test_third_failure_blocked(self) -> None:
-        """spec §6.5: 失败 >= 2 次后第 3 次抛 AI_REPEATED_FAILURE"""
+        """累计两次失败后，第三次调用抛 AI_REPEATED_FAILURE。"""
         user_id = 99984
         tool = "user.fail_test_3"
         args_hash = "hash3"
@@ -713,7 +711,7 @@ class TestRepeatedFailure:
         assert exc_info.value.error_code == "AI_REPEATED_FAILURE"
 
     async def test_clear_failures_resets(self) -> None:
-        """spec §6.5: 成功路径清零失败计数"""
+        """成功后清零失败计数。"""
         user_id = 99983
         tool = "user.fail_test_clear"
         args_hash = "hash_clear"
@@ -726,7 +724,7 @@ class TestRepeatedFailure:
         )
 
     async def test_different_args_hash_independent(self) -> None:
-        """spec §6.5: 不同 args_hash 失败计数独立"""
+        """不同 args_hash 的失败计数相互独立。"""
         user_id = 99982
         tool = "user.fail_test_diff"
 
@@ -738,7 +736,7 @@ class TestRepeatedFailure:
         )  # 不抛
 
     async def test_different_user_independent(self) -> None:
-        """spec §6.5: 不同用户的失败计数独立"""
+        """不同用户的失败计数相互独立。"""
         tool = "user.fail_test_user"
         args_hash = "hash_user"
 
@@ -924,7 +922,7 @@ class TestAuthorizationExceptionRollback:
         assert l2_after == l2_before - 1  # DECR
 
     async def test_business_exception_does_not_decrement_quota(self) -> None:
-        """业务异常（非 AuthorizationException）按 spec §6.4 保留计数"""
+        """非鉴权业务异常保留配额计数。"""
         from app.core.exceptions import BusinessRuleException
         from app.modules.ai.agents.gateway import executor as exec_mod
         from app.modules.ai.agents.tools import AiToolMeta
@@ -981,7 +979,7 @@ class TestAuthorizationExceptionRollback:
             l1_member=member,
         )
 
-        # 业务异常不回滚 L2（保留计数，spec §6.4）
+        # 业务异常不回滚 L2，保留本次计数。
         l2_after = int(
             await redis_module.redis_client.get(f"ai:quota:{user_id}:{date_str}") or 0
         )

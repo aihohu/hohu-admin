@@ -1,10 +1,10 @@
-"""file 模块的 AI Tool — spec §16 v1.5+ SR-24
+"""file 模块的 AI Tool。
 
-按 spec §16.4 实现 file.parse tool：
+``file.parse`` 工具约束：
   - agent=SHARED_AGENT_CODE（任何登录用户直通，不绑定业务 Agent）
-  - required_perms=()（与 SHARED_AGENT_CODE 配对，spec §5.4 豁免）
+  - required_perms=()，任何登录用户均可调用
   - risk=low（纯读解析，无副作用）
-  - default_enabled=False（spec §5.4 SR-17：默认禁用，部署方显式加 ai:enabled_tools 启用）
+  - default_enabled=False，由部署方通过 ai:enabled_tools 显式启用
   - accepts_file=Excel/CSV MIME 列表
 
 返回值仅含结构化摘要（rows/columns/preview/parser/file_size），raw bytes 永不进 LLM。

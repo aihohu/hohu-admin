@@ -1,4 +1,4 @@
-"""用户导入导出 Pydantic schemas 测试（Task 1）。
+"""用户导入导出 Pydantic schema 测试。
 
 覆盖：
 - UserImportRecord：必填 / Literal / default 值
@@ -58,7 +58,7 @@ class TestUserImportRecord:
             UserImportRecord(**_sample_record_kwargs(user_gender="3"))
 
     def test_invalid_status_rejected(self):
-        # v2.3 §2.9.1：status 取值对齐 DB ("1","2")，"0" 是非法值
+        # status 使用数据库取值 "1" 和 "2"，"0" 非法。
         with pytest.raises(ValidationError):
             UserImportRecord(**_sample_record_kwargs(status="0"))
 
@@ -163,7 +163,7 @@ class TestUserExportFilter:
         assert flt.status == "1"
 
     def test_invalid_status_rejected(self):
-        # v2.3 §2.9.1：status 取值对齐 DB ("1","2")，"0" 是非法值
+        # status 使用数据库取值 "1" 和 "2"，"0" 非法。
         with pytest.raises(ValidationError):
             UserExportFilter(status="0")
 
@@ -195,7 +195,7 @@ class TestUserImportBatchResponse:
             created_at=datetime(2026, 8, 3, 10, 0, 0),
         )
         serialized = resp.model_dump(by_alias=True)
-        # Task 15 决策 15.4：剥离敏感字段（preview_token / file_sha256 /
+        # 响应剥离 preview_token、file_sha256 等敏感字段。
         # records_hash / reason），仅审计链路保留 → 序列化结果不应含这些键
         assert "batchId" in serialized
         assert "createdAt" in serialized

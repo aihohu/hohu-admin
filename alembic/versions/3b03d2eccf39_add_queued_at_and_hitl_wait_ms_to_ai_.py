@@ -4,7 +4,7 @@ Revision ID: 3b03d2eccf39
 Revises: c7d8e9f0a1b2
 Create Date: 2026-07-11 11:21:12.689020
 
-时间字段语义重整（spec §4.4 修订 S-3）：
+重整操作日志时间字段语义：
   - queued_at（新增）: 行级创建时间，含 HITL 等待之前
   - started_at（改为 nullable + 去 server_default）: 业务执行起点
   - hitl_wait_ms（新增）: HITL 等待耗时，autonomous 流为 None
@@ -15,6 +15,7 @@ Create Date: 2026-07-11 11:21:12.689020
   - idx_ai_op_log_trace 改用 queued_at（trace 时间排序）
   - idx_ai_op_log_security 改用 queued_at
 """
+
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -109,7 +110,10 @@ def downgrade() -> None:
         postgresql_where=sa.text("is_security_event = true"),
     )
     op.create_index(
-        "idx_ai_op_log_trace", "ai_operation_log", ["trace_id", "started_at"], unique=False
+        "idx_ai_op_log_trace",
+        "ai_operation_log",
+        ["trace_id", "started_at"],
+        unique=False,
     )
     op.create_index(
         "idx_ai_op_log_user_started",

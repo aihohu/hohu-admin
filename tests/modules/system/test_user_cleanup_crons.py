@@ -1,4 +1,4 @@
-"""用户导入导出清理 cron 测试（Task 22，spec §10 line 3112 + §2.22.1 + §2.26 + §2.31）。
+"""用户导入导出清理 cron 行为测试。
 
 验证 3 个 cleanup 函数的 DB 行为 + 文件清理：
 - ``cleanup_expired_batches``：90 天前终态 batch → 删 DB + failed_rows_file + preview 文件
@@ -33,11 +33,11 @@ from app.modules.system.user.models import (
     UserImportBatchLog,
 )
 
-#: spec §2.22.1 line 1121：终态 batch 90 天后归档删除
+#: 终态批次保留 90 天。
 BATCH_RETENTION_DAYS = 90
-#: spec §2.26 line 1116：PREVIEW_DONE 10min 后过期
+#: PREVIEW_DONE 批次 10 分钟后过期。
 PREVIEW_TTL_MINUTES = 10
-#: spec §2.31 line 1452 / 1554：导出文件 30 天 TTL
+#: 导出文件保留 30 天。
 EXPORT_RETENTION_DAYS = 30
 
 
@@ -76,7 +76,7 @@ def _make_export_task(
     created_at: datetime | None = None,
     status: ExportTaskStatus = ExportTaskStatus.SUCCESS,
 ) -> UserExportTask:
-    """构造 UserExportTask 行（spec §2.31）。"""
+    """构造 UserExportTask 测试行。"""
     return UserExportTask(
         export_id=export_id,
         operator_id=1,
@@ -118,7 +118,7 @@ def mock_fs():
 
 
 class TestCleanupExpiredBatches:
-    """spec §2.22.1 line 1121 + line 781-797：90 天前终态 batch 删除。"""
+    """删除 90 天前的终态批次。"""
 
     async def test_deletes_old_terminal_batch_with_files(self, db_session, mock_fs):
         """90 天前 SUCCESS batch → 删 DB 行 + failed_rows_file + preview 文件。"""
@@ -152,7 +152,7 @@ class TestCleanupExpiredBatches:
         assert not await mock_fs.exists(preview_key)
 
     async def test_preserves_recent_batch_under_90_days(self, db_session):
-        """89 天前 batch 不删（边界条件，spec §2.22.1）。"""
+        """89 天前的批次不删除。"""
         recent = datetime.now() - timedelta(days=BATCH_RETENTION_DAYS - 1)
         batch = _make_batch(
             batch_id="b-recent-1",
@@ -260,7 +260,7 @@ class TestCleanupExpiredBatches:
         assert await db_session.get(UserImportBatch, "b-dangling-file") is None
 
     async def test_cascades_batch_log_on_delete(self, db_session):
-        """删 batch 行后 batch_log FK CASCADE 自动删（spec §2.28）。"""
+        """删除批次后 batch_log 通过外键级联删除。"""
         old = datetime.now() - timedelta(days=BATCH_RETENTION_DAYS + 1)
         batch = _make_batch(
             batch_id="b-with-log",
@@ -301,7 +301,7 @@ class TestCleanupExpiredBatches:
 
 
 class TestCleanupExpiredPreviews:
-    """spec §2.26 line 1116 + v2.2 P1-2：PREVIEW_DONE 超 10min → EXPIRED。"""
+    """PREVIEW_DONE 超过 10 分钟后迁移为 EXPIRED。"""
 
     async def test_marks_old_preview_done_as_expired(self, db_session):
         """PREVIEW_DONE + created_at < now-10min → EXPIRED + finished_at 写入。"""
@@ -322,7 +322,7 @@ class TestCleanupExpiredPreviews:
         assert batch.finished_at is not None
 
     async def test_preserves_fresh_preview_done(self, db_session):
-        """PREVIEW_DONE + 5min 不动（边界，spec §2.26 + 10min TTL）。"""
+        """PREVIEW_DONE 仅过去 5 分钟时保持不变。"""
         fresh = datetime.now() - timedelta(minutes=5)
         batch = _make_batch(
             batch_id="b-preview-fresh",
@@ -339,7 +339,7 @@ class TestCleanupExpiredPreviews:
         assert batch.status == ImportBatchStatus.PREVIEW_DONE
 
     async def test_deletes_orphan_preview_file(self, db_session, mock_fs):
-        """EXPIRED 同时删 preview 文件（spec §2.22.1 反例 1：防文件垃圾残留）。"""
+        """批次过期时同时删除 preview 文件，避免垃圾文件残留。"""
         old = datetime.now() - timedelta(minutes=PREVIEW_TTL_MINUTES + 5)
         preview_key = await mock_fs.save(
             b"preview-data", mime_type="...", namespace="import-preview"
@@ -358,7 +358,7 @@ class TestCleanupExpiredPreviews:
         assert not await mock_fs.exists(preview_key)
 
     async def test_writes_batch_log_expired_event(self, db_session):
-        """写 batch_log EXPIRED event 进审计链路（spec §2.28）。"""
+        """写入 batch_log EXPIRED 事件进入审计链路。"""
         old = datetime.now() - timedelta(minutes=PREVIEW_TTL_MINUTES + 5)
         batch = _make_batch(
             batch_id="b-preview-log",
@@ -409,7 +409,7 @@ class TestCleanupExpiredPreviews:
         assert await mock_fs.exists(preview_key)
 
     async def test_skips_running_batch(self, db_session):
-        """RUNNING 状态不扫（preview cron 只针对 PREVIEW_DONE，spec §2.26 v2.2 P1-2）。"""
+        """预检清理任务不处理 RUNNING 批次。"""
         old = datetime.now() - timedelta(minutes=PREVIEW_TTL_MINUTES + 5)
         batch = _make_batch(
             batch_id="b-running",
@@ -430,7 +430,7 @@ class TestCleanupExpiredPreviews:
 
 
 class TestCleanupExpiredExportTasks:
-    """spec §2.31 line 1452 / 1554：30 天前 ExportTask 删除。"""
+    """删除 30 天前的导出任务。"""
 
     async def test_deletes_old_export_task_with_file(self, db_session, mock_fs):
         """30 天前 ExportTask → 删 DB 行 + export 文件。"""
@@ -453,7 +453,7 @@ class TestCleanupExpiredExportTasks:
         assert not await mock_fs.exists(export_key)
 
     async def test_preserves_recent_export_task(self, db_session):
-        """29 天前 ExportTask 不删（边界，spec §2.31 30 天 TTL）。"""
+        """29 天前的导出任务不删除。"""
         recent = datetime.now() - timedelta(days=EXPORT_RETENTION_DAYS - 1)
         task = _make_export_task(
             export_id="exp-recent-1",

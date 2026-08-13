@@ -1,6 +1,6 @@
 """[SPLIT-ME] 混合 router：browse 部分 cloud-only，install/enable 部分 local-only
 
-Phase 2 物理拆分时按 endpoint 切到两个文件：
+如按云端与本地职责物理拆分，可按 endpoint 切到两个文件：
 - cloud/browse.py: GET /list, /search, /detail/{slug}, /{slug}/manifest
 - local/install.py: POST /install, /uninstall/{slug}, /enable/{slug}, /disable/{slug}, GET /installed
 - local/rating.py: POST /rating, PUT /rating/{app_id}, DELETE /rating/{app_id}
@@ -72,7 +72,7 @@ async def search_apps(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),  # noqa: ARG001
 ):
-    """关键词搜索（Phase 1 ILIKE 降级，需登录）"""
+    """关键词搜索；全文索引不可用时使用 ILIKE。"""
     result = await app_service.search(db, keyword=keyword, current=current, size=size)
     return ResponseModel.success(
         data=PageResult(
@@ -214,7 +214,7 @@ async def list_installed(
 @router.post(
     "/rating",
     response_model=ResponseModel[RatingOut],
-    summary="评分（需先安装，Phase 1 简化为所有登录用户可评）",
+    summary="评分（需先安装，当前所有登录用户可评）",
 )
 async def create_rating(
     req: RatingCreate,

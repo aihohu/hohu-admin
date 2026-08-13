@@ -13,7 +13,7 @@ RiskAppetite = Literal["conservative", "balanced", "aggressive"]
 class AiAgent(Base):
     """AI Agent 注册中心
 
-    按 spec §4.2 / §10.1 设计。Agent 是 tool 集合的"分组"，与 tool 实现解耦：
+    Agent 是工具集合的分组，与工具实现解耦：
     - 代码层 @ai_tool(agent="user_mgmt", ...) 仅声明归属
     - DB 层 ai_agent 行持有 system_prompt / model_preference / enabled 等运行时配置
     - 两者通过 code 字段强约束（启动时 ToolRegistry 校验）
@@ -53,7 +53,7 @@ class AiAgent(Base):
         Text,
         nullable=False,
         default="",
-        comment="管理员 custom prompt，与硬编码 SAFETY_PREAMBLE 拼接（§7.6），应用层 32KB 限制",
+        comment="管理员 custom prompt，与固定 SAFETY_PREAMBLE 拼接，应用层限制 32KB",
     )
     model_preference: Mapped[str | None] = mapped_column(
         String(128),
@@ -64,16 +64,16 @@ class AiAgent(Base):
         Integer,
         nullable=True,
         default=None,
-        comment="v1.5+ per-agent 日配额上限，None=仅走全局 L2（spec §6.4 SR-16）",
+        comment="Agent 日配额上限，None 表示仅使用全局 L2 配额",
     )
     risk_appetite: Mapped[str] = mapped_column(
         String(16),
         nullable=False,
         default="balanced",
-        comment="v1.5+ 风险偏好：conservative（high 永远 HITL）/ "
+        comment="风险偏好：conservative（high 永远 HITL）/ "
         "balanced（默认，high + dry_run_count≤1 autonomous）/ "
         "aggressive（high 永远 autonomous）。仅影响 high risk，"
-        "destructive / hitl_always / injection_hit 不受影响（spec §5.3 SR-21）",
+        "destructive / hitl_always / injection_hit 不受影响",
     )
     create_time: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), comment="创建时间"

@@ -1,4 +1,4 @@
-"""FileStorage Protocol 测试（Task 0d，spec §3.9）。
+"""FileStorage Protocol 行为测试。
 
 覆盖 5 个核心场景：
 - Protocol runtime check（LocalFileStorage / MockFileStorage 都通过 isinstance）

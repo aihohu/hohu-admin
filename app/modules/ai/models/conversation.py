@@ -44,7 +44,7 @@ class AiConversation(Base):
         SmallInteger, nullable=False, default=0, comment="状态：0=活跃, 1=归档"
     )
     agent_code: Mapped[str | None] = mapped_column(
-        String(64), nullable=True, comment="绑定的 Agent code（§4.5 / §10）"
+        String(64), nullable=True, comment="绑定的 Agent code"
     )
     trace_id: Mapped[str | None] = mapped_column(
         String(64), nullable=True, comment="会话级追踪ID，串联 ai_operation_log"

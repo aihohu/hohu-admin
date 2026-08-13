@@ -1,10 +1,10 @@
-"""AI 用户级自动禁用 — spec §11.4
+"""AI 用户级自动禁用。
 
 单用户 1 小时内 `injection_pattern_matched` ≥ 5 → 自动禁用该用户 AI 功能 24h
 （Redis `ai:user_disabled:{user_id}` TTL 24h）。
 
 **超管豁免**：超管命中只发告警，不禁用——防止攻击者诱导超主触发注入把超主
-AI 锁死、运维无入口（spec §11.4 原文）。
+系统必须保留运维解锁入口，避免用户被永久锁死。
 
 未含（留 v2+）：
   - 单 IP mass_permission_denied 自动拉黑（依赖 system_config.ai:auto_disable:perm_denied_per_hour + ai:ip_allowlist NAT 豁免）
@@ -25,7 +25,7 @@ from app.modules.system.models.user import User
 
 logger = logging.getLogger(__name__)
 
-# 阈值（spec §11.4 原文）
+# 自动禁用阈值。
 # 运行时从 sys_config 读，60s 缓存；这里仅作为 fallback default
 INJECTION_THRESHOLD_PER_HOUR = 5
 DISABLE_DURATION_SEC = 24 * 3600  # 24h
@@ -103,7 +103,7 @@ async def record_injection(redis: Redis, user: User) -> int:
                     "count": current,
                 },
             )
-            # 超管只告警，不禁用（spec §11.4）
+            # 超级管理员只告警，不自动禁用。
         else:
             disabled_key = _disabled_key(user.user_id)
             already_disabled = await redis.get(disabled_key)
@@ -119,7 +119,7 @@ async def record_injection(redis: Redis, user: User) -> int:
                         "duration_sec": DISABLE_DURATION_SEC,
                     },
                 )
-                # spec §6.3 / §11.4 metric：用户首次禁用计数（不重复计 already_disabled）
+                # 仅首次禁用时记录指标，避免重复统计 already_disabled。
                 from app.modules.ai.metrics import (  # noqa: PLC0415
                     record_security_event,
                 )

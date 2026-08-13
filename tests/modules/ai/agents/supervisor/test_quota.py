@@ -1,4 +1,4 @@
-"""spec §9: supervisor_daily_limit Redis 计数器."""
+"""supervisor_daily_limit Redis 计数器测试。"""
 
 from unittest.mock import AsyncMock, patch
 
@@ -48,7 +48,7 @@ async def test_quota_blocks_at_limit():
 
 @pytest.mark.asyncio
 async def test_quota_increment_after_check():
-    """spec §9: 路由 LLM 调用前先 increment，确保并发安全."""
+    """路由 LLM 调用前先递增计数，确保并发安全。"""
     fake_redis = AsyncMock()
     fake_redis.incr = AsyncMock(return_value=51)
     fake_redis.expire = AsyncMock()

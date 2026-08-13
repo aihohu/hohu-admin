@@ -1,4 +1,4 @@
-"""User import/export helpers（Task 3，spec §2.5 / §3.6）。
+"""用户导入导出公共 helper。
 
 依赖反转层：业务层（import_service / export_service）通过 helpers 调用
 model 查询，避免重复样板代码 + 集中安全策略（默认密码缺失抛异常而不是
@@ -17,19 +17,19 @@ from app.core.config import settings
 from app.core.exceptions import BusinessRuleException
 from app.modules.system.models.config import Config
 
-#: sys_config 中默认密码的 key（spec §2.5 / §3.6 line 2093）。
+#: sys_config 中默认密码的 key。
 DEFAULT_PASSWORD_CONFIG_KEY = "auth:default_password"
 INSECURE_DEFAULT_PASSWORD_SENTINELS = frozenset({"Hohu123456"})
 """公开开发种子；生产环境必须显式改掉，不能用于创建或重置账号。"""
 
 
 async def get_default_password(db: AsyncSession) -> str:
-    """读取 sys_config.auth:default_password（spec §2.5）。
+    """读取 ``sys_config.auth:default_password``。
 
     所有新用户用本值哈希入库；管理员线下告知用户初始密码。
     缺失 / 禁用 → 抛 ``AI_IMPORT_DEFAULT_PASSWORD_NOT_SET``：
     - 防 admin 误以为已配置但实际未配置导致导入后无法登录
-    - 防代码硬编码默认密码安全风险（spec §2.5 反例 3）
+    - 避免在代码中硬编码默认密码
 
     Returns:
         配置值（明文，调用方负责 ``get_password_hash`` 哈希入库）

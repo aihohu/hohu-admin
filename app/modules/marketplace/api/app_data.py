@@ -1,7 +1,7 @@
 """[LOCAL-ONLY] 动态数据 CRUD API
 
 部署在本地 HoHu，操作 app_data_* 业务表。云市场不接触用户数据。
-Phase 2 拆分时迁移到 app/modules/marketplace/api/local/app_data.py
+如按云端与本地职责拆分，本接口归入 local/app_data.py。
 详见 docs/MARKETPLACE-CLOUD-SPLIT.md
 
 原描述：通用动态数据 API（spec 6.2）

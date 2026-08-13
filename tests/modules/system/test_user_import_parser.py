@@ -1,12 +1,12 @@
-"""parse_import_excel 单测（Task 8，spec §3.6 line 2036 + line 2624-2630）。
+"""``parse_import_excel`` 行为测试。
 
 覆盖：
 - MIME 白名单（xlsx/csv；legacy xls fail-closed）→ AI_IMPORT_INVALID_MIME
 - 文件大小 ≤ 10MB → AI_IMPORT_FILE_TOO_LARGE
 - 行数 ≤ 2000 → AI_IMPORT_TOO_MANY_ROWS
 - 字段校验：user_name 必填 / 邮箱 / 手机 / gender / status / 长度
-- 失败行一次性收集（ImportErrorCollection，spec §2.12）
-- 空字符串 employee_no 规范化为 None（spec §2.24）
+- 使用 ImportErrorCollection 一次性收集失败行
+- 空字符串 employee_no 规范化为 None
 - 可选字段默认值（gender="0" / status="1"）
 
 不依赖 DB（解析层零 DB 查询，dept_input / role_input 存在性留给 dry_run）。
@@ -132,7 +132,7 @@ class TestMimeTypeWhitelist:
 
 
 class TestFileSizeLimit:
-    """spec §2.10：≤ 10MB。"""
+    """文件大小上限为 10MB。"""
 
     def test_max_file_size_is_10mb(self):
         assert MAX_FILE_SIZE_BYTES == 10 * 1024 * 1024
@@ -171,7 +171,7 @@ class TestFileSizeLimit:
 
 
 class TestRowCountLimit:
-    """spec §2.10：行数 ≤ 2000（v2.2 P0）。"""
+    """导入行数上限为 2000。"""
 
     def test_user_import_max_rows_is_2000(self):
         assert USER_IMPORT_MAX_ROWS == 2000
@@ -362,7 +362,7 @@ class TestParseXlsxBasic:
         records = parse_import_excel(_csv_bytes(rows), MIME_CSV)
         assert len(records) == 1
         assert records[0].user_name == "carol"
-        assert records[0].employee_no is None  # 空串 → None（spec §2.24）
+        assert records[0].employee_no is None  # 空字符串规范化为 None。
 
     def test_parse_skips_empty_rows(self):
         rows = [
@@ -385,7 +385,7 @@ class TestOptionalFieldsDefaults:
         assert records[0].status == "1"  # 默认启用
 
     def test_employee_no_blank_normalized_to_none(self):
-        """spec §2.24 line 839：normalize_employee_no 空 → None（避免 UNIQUE 冲突）。"""
+        """normalize_employee_no 将空值转为 None，避免 UNIQUE 冲突。"""
         rows = [["eve", "   ", "Eve", "", "", "QA-Dept", "", "0", "1"]]
         records = parse_import_excel(_xlsx_bytes(rows), MIME_XLSX)
         assert records[0].employee_no is None
@@ -397,7 +397,7 @@ class TestOptionalFieldsDefaults:
 
 
 class TestFieldValidationCollectsErrors:
-    """spec §2.12 + line 2046：失败行收集 → ImportErrorCollection（不一次一个）。"""
+    """失败行应汇总到一个 ImportErrorCollection。"""
 
     def test_missing_required_user_name_collected(self):
         rows = [
@@ -482,7 +482,7 @@ class TestFieldValidationCollectsErrors:
         )
 
     def test_collects_multiple_errors_across_rows(self):
-        """spec §2.12：一次收集所有错误（不让用户改一行重传一次）。"""
+        """一次收集所有错误，避免用户逐行修复和重传。"""
         rows = [
             ["", "", "NoName", "", "", "QA-Dept", "", "0", "1"],  # row 2 user_name 缺
             [
@@ -535,7 +535,7 @@ class TestFieldValidationCollectsErrors:
 
 
 class TestImportErrorCollection:
-    """ImportErrorCollection 异常行为（spec §2.12 + §3.6 line 2046）。"""
+    """验证 ImportErrorCollection 异常行为。"""
 
     def test_is_exception_subclass(self):
         exc = ImportErrorCollection(
@@ -554,11 +554,11 @@ class TestImportErrorCollection:
         assert "1 field errors" in str(exc)
 
 
-# ========== v2.3 §2.9.1：导入侧中文字面值反查 + status 取值统一 1/2 ==========
+# ========== 中文显示文本反查与 status 取值 ==========
 
 
 class TestChineseLabelRoundTrip:
-    """v2.3 §2.9.1：导出 Excel 翻译后的中文标签可 round-trip 给导入。
+    """导出 Excel 的中文显示文本可以往返导入。
 
     场景：管理员导出 users.xlsx（status="启用"，user_gender="男"，dept_input="总公司/研发中心"），
     修改后重新导入 — status / user_gender 中文字面值必须被反查回字面值。
@@ -587,14 +587,14 @@ class TestChineseLabelRoundTrip:
         assert records[2].user_gender == "2"
 
     def test_status_disabled_two_now_accepted(self):
-        """v2.3 §2.9.1 修复 bug：_STATUS_VALUES 从 {"0","1"} 改 {"1","2"}，
+        """_STATUS_VALUES 使用数据库真实取值 {"1", "2"}，
         DB 真实取值 status="2"（禁用）必须可导入。"""
         rows = [["alice", "", "Alice", "", "", "QA-Dept", "", "0", "2"]]
         records = parse_import_excel(_xlsx_bytes(rows), MIME_XLSX)
         assert records[0].status == "2"
 
     def test_status_zero_now_rejected(self):
-        """v2.3 §2.9.1 修订：status="0" 字面值不属于 DB 真实取值集合（"1","2"），
+        """status="0" 不属于数据库真实取值集合（"1", "2"），
         应抛 AI_IMPORT_STATUS_INVALID 让用户改 Excel（不能静默写错数据）。"""
         rows = [["alice", "", "Alice", "", "", "QA-Dept", "", "0", "0"]]
         with pytest.raises(ImportErrorCollection) as exc_info:

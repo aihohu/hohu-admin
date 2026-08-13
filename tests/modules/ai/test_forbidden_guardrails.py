@@ -1,4 +1,4 @@
-"""Forbidden Topics / Forbidden URLs Guardrails 单测 — spec §11.2 v1.5+ SR-23
+"""Forbidden Topics 与 Forbidden URLs Guardrails 测试。
 
 测试 check_topics / check_forbidden_urls 函数 + load_* 缓存逻辑（monkeypatch config_service）。
 """

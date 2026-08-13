@@ -1,4 +1,4 @@
-"""AI 用户级自动禁用单测 — spec §11.4
+"""AI 用户级自动禁用测试。
 
 使用 fakeredis 隔离 Redis（无外部依赖）。
 """
@@ -109,7 +109,7 @@ class TestAutoDisableThreshold:
 
 
 class TestSuperAdminExemption:
-    """超管命中阈值不禁用（spec §11.4 超主豁免）"""
+    """超级管理员命中阈值时只告警、不禁用。"""
 
     async def test_super_admin_at_threshold_not_disabled(self, fake_redis) -> None:
         user = _mock_user(is_super=True)

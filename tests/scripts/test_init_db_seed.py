@@ -1,4 +1,4 @@
-"""scripts/init_db.py 种子数据静态校验（Task 16，spec §10 line 3095 + §2.5）。
+"""scripts/init_db.py 种子数据静态校验。
 
 验证初始化种子包含：
 1. ``system:user:import`` / ``system:user:export`` 两个按钮权限 Menu
@@ -6,7 +6,7 @@
 2. 两个按钮的 ``parent_id`` 指向 ``system_user`` 菜单的 ``menu_id``
    （防 orphan button：parent_id=0 时前端菜单树挂不上去）
 3. ``sys_config.auth:default_password`` 种子 Config 对象
-   （spec §2.5 line 212：导入用全局默认密码；helper 缺失时抛
+   导入使用全局默认密码；helper 缺失时抛
    ``AI_IMPORT_DEFAULT_PASSWORD_NOT_SET``，所以 fresh install 必须先种好）
 
 不调用 ``init_db()``：那需要 input() 交互 + DROP TABLE，跑它会清库。
@@ -45,7 +45,7 @@ def _find_menu_by_route_name(menus: list, route_name: str):
 
 
 class TestUserButtonPermissionSeed:
-    """spec §10 Task 16：2 个按钮权限 + parent_id 指向 system_user。"""
+    """导入和导出按钮权限的 parent_id 指向 system_user。"""
 
     def test_import_button_seeded(self):
         """init_menus 含 system:user:import F-type Menu。"""
@@ -84,7 +84,7 @@ class TestUserButtonPermissionSeed:
 
 
 class TestDefaultPasswordConfigSeed:
-    """spec §2.5 line 212 + Task 16：sys_config.auth:default_password seed。
+    """验证 sys_config.auth:default_password 种子。
 
     helper ``get_default_password`` 缺失抛 AI_IMPORT_DEFAULT_PASSWORD_NOT_SET，
     所以 fresh install 必须有种；否则首次导入直接报错，UX 差。
@@ -112,7 +112,7 @@ class TestDefaultPasswordConfigSeed:
         assert validate_password(default_password_seed_value("dev"))
 
     def test_default_password_config_remark_warns_to_change(self):
-        """remark 含安全提示，防部署方上线前忘记改默认密码（spec §2.5 反例 3）。"""
+        """remark 包含修改默认密码的安全提示。"""
         matches = [c for c in init_configs if c.config_key == "auth:default_password"]
         assert matches
         cfg = matches[0]

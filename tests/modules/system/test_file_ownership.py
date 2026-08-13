@@ -1,4 +1,4 @@
-"""sys_file owner/tenant persistence regression tests (Task 35)."""
+"""sys_file owner/tenant persistence regression tests."""
 
 # ruff: noqa: ASYNC240
 

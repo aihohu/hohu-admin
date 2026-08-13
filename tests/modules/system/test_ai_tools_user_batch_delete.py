@@ -7,7 +7,7 @@ catch 成「预估失败（内部错误）」，用户抽屉显示 count=0。
 bug 现场（2026-07-18 E2E）：发「删除用户 cs123」→ 抽屉弹 count=0 + 内部错误，
 stderr 是 AttributeError: 'User' object has no attribute 'phone'。
 
-Task 7（2026-07-28）：migrate 到 ToolResult.success + UIResult(rows_affected)。
+批量删除返回 ToolResult.success 和 UIResult(rows_affected)。
 LLM 只看 {"deleted": N}，user_ids 移到 ui.view_data.ids + ui.audit.affected_user_ids。
 """
 
@@ -173,7 +173,7 @@ async def _add_user(
 
 @pytest.mark.usefixtures("db_session")
 class TestUserBatchDeleteToolResult:
-    """Task 7: user_batch_delete 迁移到 ToolResult.success + UIResult(rows_affected)"""
+    """user_batch_delete 返回 ToolResult.success 和 UIResult(rows_affected)。"""
 
     async def test_returns_tool_result_with_rows_affected_view(
         self, db_session

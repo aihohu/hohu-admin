@@ -1,18 +1,18 @@
-"""POST /system/user/import/{batch_id}/cancel HTTP 契约测试（Task 15b，spec §5.6 v2.2 P2 #2.29）。
+"""``POST /system/user/import/{batch_id}/cancel`` HTTP 契约测试。
 
-spec §5.6 line 2290-2299 + §2.29：取消导入批次。
+验证导入批次取消行为。
 
-两种取消场景（spec §2.29）：
+两种取消场景：
 - **场景 1**：PREVIEW_DONE → CAS 转 CANCELLED + 清理 preview 文件 + Redis cache
-  （spec §2.26 line 1117：v2.2 P1-2 改为 PREVIEW_DONE → CANCELLED，不允 CREATED → CANCELLED）
+  仅允许 PREVIEW_DONE → CANCELLED，不允许 CREATED → CANCELLED
 - **场景 2**：RUNNING 协作式 cancel — 设置 Redis 标志，chunk 之间检查标志，
   下一个 chunk 开始前跳出循环转 PARTIAL_SUCCESS（已 commit 的 chunk 保留）
 
 终态拒绝：SUCCESS / PARTIAL_SUCCESS / FAILED / EXPIRED / CANCELLED / CREATED →
-``AI_IMPORT_BATCH_NOT_CANCELLABLE``（422，spec §5.7 line 2324）。
+``AI_IMPORT_BATCH_NOT_CANCELLABLE``（422）。
 
 权限：``system:user:import`` + 必须是 batch operator 本人或超管
-（spec §5.6 line 2297，spec §2.29 line 1314-1316）。
+并校验操作人或超级管理员权限。
 
 只验证 HTTP 契约层（路由 / 字段映射 / 状态码 / auth gating / reason 校验），
 service 层（``cancel_batch``）用 patch 替身。完整业务流程在
@@ -106,7 +106,7 @@ def _make_batch_row(
 
 
 class TestCancelBatchAuth:
-    """spec §5.6 line 2297：权限 system:user:import（auth gating）。"""
+    """验证 system:user:import 权限。"""
 
     async def test_no_token_returns_401(self, client):
         response = await client.post(
@@ -124,11 +124,11 @@ class TestCancelBatchAuth:
         assert response.status_code == 401
 
 
-# ========== Reason Validation (spec §2.30) ==========
+# ========== Reason Validation ==========
 
 
 class TestCancelReasonValidation:
-    """spec §2.30 v2.2 P1-3：reason 必填，1-256 字符，strip 后非空。
+    """reason 必填，长度为 1-256 字符，strip 后非空。
 
     Pydantic ReasonSchema 在 API 入口校验，不通过返 422（FastAPI 默认 validation_response）。
     """
@@ -152,7 +152,7 @@ class TestCancelReasonValidation:
         assert response.status_code == 422
 
     async def test_reason_whitespace_only_422(self, client, admin_token):
-        """reason="   " → 422（validator strip 后判空，spec §2.30 line 1420）。"""
+        """reason 全空白时 validator 返回 422。"""
         response = await client.post(
             "/system/user/import/batch-abc-001/cancel",
             json={"reason": "   "},
@@ -174,7 +174,7 @@ class TestCancelReasonValidation:
 
 
 class TestCancelPreviewDoneBatch:
-    """spec §2.29 场景 1 + §2.26 line 1117：PREVIEW_DONE → CANCELLED 直接 CAS。"""
+    """PREVIEW_DONE 通过 CAS 直接迁移为 CANCELLED。"""
 
     async def test_cancel_preview_done_returns_cancelled(self, client, admin_token):
         """200 + {batchId, status=CANCELLED, cancelledAt}。
@@ -210,7 +210,7 @@ class TestCancelPreviewDoneBatch:
         assert call.kwargs.get("reason") == "用户主动取消"
 
     async def test_cancel_passes_reason_to_service(self, client, admin_token):
-        """reason 透传到 service（spec §2.30 审计链路）。"""
+        """reason 应透传到 service 进入审计链路。"""
         batch = _make_batch_row(status=ImportBatchStatus.CANCELLED)
         with patch(
             f"{_API_MODULE}.cancel_batch",
@@ -230,9 +230,9 @@ class TestCancelPreviewDoneBatch:
 
 
 class TestCancelRunningBatch:
-    """spec §2.29 场景 2：RUNNING → 设置 Redis cancel 标志，立即 200 返回。
+    """RUNNING 批次设置 Redis cancel 标志并立即返回 200。
 
-    spec §2.29 line 1338：cancel 请求立即 200，不等待 chunk 真的暂停。
+    cancel 请求不等待当前分块实际暂停。
     实际 RUNNING → PARTIAL_SUCCESS 转换发生在 chunk loop（batch_create 内）。
     """
 
@@ -259,7 +259,7 @@ class TestCancelRunningBatch:
 
         assert response.status_code == 200, response.text
         data = response.json()["data"]
-        # RUNNING 协作式 cancel：status 仍为 RUNNING（spec §2.29 line 1338）
+        # 协作式取消时响应中的状态仍为 RUNNING。
         assert data["status"] == "RUNNING"
         assert data["batchId"] == "batch-abc-001"
         # cancelledAt 仍返回（标志设置时间，前端可显示「已请求取消」）
@@ -270,10 +270,10 @@ class TestCancelRunningBatch:
 
 
 class TestCancelTerminalBatchRejected:
-    """spec §2.29 line 1342-1343 + §5.7 line 2324：终态 + CREATED 拒绝 cancel。
+    """终态批次和 CREATED 批次拒绝取消。
 
     - SUCCESS / PARTIAL_SUCCESS / FAILED / EXPIRED / CANCELLED：终态不可 cancel
-    - CREATED：spec §2.26 line 1117 v2.2 P1-2 改为 PREVIEW_DONE → CANCELLED，
+    - CREATED：仅允许 PREVIEW_DONE → CANCELLED，
       CREATED 不在合法 cancel-from-state（dry_run 完成 = PREVIEW_DONE）
     """
 
@@ -319,10 +319,9 @@ class TestCancelTerminalBatchRejected:
 
 
 class TestCancelBatchNotFound:
-    """spec §5.7 line 2323：batch_id 不存在 → AI_IMPORT_BATCH_NOT_FOUND。
+    """batch_id 不存在时返回 AI_IMPORT_BATCH_NOT_FOUND。
 
-    决策 15b.X：与 GET /import/{batch_id} (Task 15) + GET /import/{batch_id}/logs
-    (Task 15a) 保持一致用 NotFoundException → 404（spec §5.7 表写 422 但 Task 15/15a
+    与批次详情和日志接口保持一致，使用 NotFoundException 返回 404，
     早已 ship 404，跨端点一致性 > 单条 spec 文字）。
     """
 
@@ -351,7 +350,7 @@ class TestCancelBatchNotFound:
 
 
 class TestCancelByNonOperatorForbidden:
-    """spec §2.29 line 1314-1316 + §5.6 line 2297：必须是 operator 本人或超管。
+    """只有批次操作人或超级管理员可以取消。
 
     HTTP 层只验证 service 抛 AuthorizationException → 403 转换；service 层
     的 operator 校验逻辑（is_super_admin / operator_id 比对）在

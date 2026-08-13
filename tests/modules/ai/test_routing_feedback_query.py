@@ -1,9 +1,9 @@
-"""Routing feedback query tests (spec §6.2, §9.1).
+"""Routing feedback 查询与 API 测试。
 
 污染说明：
 本地/CI 数据库里存在其它测试文件（tests/modules/ai/agents/supervisor/
 test_routing_feedback.py）真实 commit 但不 teardown 的 AiRoutingFeedback 残留
-（478 行 user_mgmt），summary 端点是**全局聚合**（spec §6.2 设计如此），无法靠
+（478 行 user_mgmt），summary 端点是全局聚合，无法靠
 user/tenant 隔离. 本文件用「sentinel original_agent code」策略：
 - fixture seed 的 feedback 行用唯一前缀 code（如 `test_rf_<snowflake>_role_mgmt`）
   避开预置 agent code，summary 聚合时这些 sentinel 自成一组，断言时按前缀过滤
@@ -187,7 +187,7 @@ def _filter_sentinel(items: list, key: str, prefix: str) -> list:
 async def test_summary_7_day_window(
     authed_client: tuple[AsyncClient, str], db_session, seed_feedback
 ):
-    """决策（§6.2）：days=7 窗口聚合正确.
+    """days=7 时按七天窗口正确聚合。
 
     本测试只断言 sentinel 数据子集（避开 DB 中其它测试残留）：
     - role_mgmt sentinel 出现 2 wrong + topCorrected=user_mgmt(2)
@@ -232,7 +232,7 @@ async def test_summary_7_day_window(
 async def test_summary_zero_division(
     authed_client: tuple[AsyncClient, str], db_session
 ):
-    """决策（§6.2）：total=0 时 wrongRate=0（不除零）.
+    """total=0 时 wrongRate=0，避免除零。
 
     全局 summary 在有数据污染时无法直接构造 total=0，所以只断言字段存在 +
     wrongRate 在 [0, 1]；total=0 的不除零分支靠 unit test 覆盖（service 单测）.
@@ -371,7 +371,7 @@ async def test_top_corrected_tie_breaker(
 
 
 # ---------------------------------------------------------------------------
-# Task 10: GET /ai/routing-feedback/list 端点测试（决策 #6 / #7 / #15）
+# GET /ai/routing-feedback/list 端点测试。
 # ---------------------------------------------------------------------------
 
 
@@ -470,7 +470,7 @@ async def test_list_no_message_content_leak(
     records = resp.json()["data"]["records"]
     sentinel_rows = _sentinel_records(records, prefix)
     assert sentinel_rows, "no sentinel rows to inspect for content leak"
-    # spec §6.2 列表项 schema 字段固定，禁止出现任何正文相关字段
+    # 列表项 schema 字段固定，禁止出现正文相关字段。
     forbidden_keys = {"content", "messageContent", "contentSnapshot", "text", "body"}
     for r in sentinel_rows:
         leak = forbidden_keys & set(r.keys())

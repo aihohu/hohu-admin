@@ -1,4 +1,4 @@
-"""spec §2.2 v1.5+: ConfirmationResumedEvent 序列化测试
+"""ConfirmationResumedEvent 序列化测试。
 
 断言风格对齐 tests/modules/ai/test_events.py：用 json.loads 解析后检查结构，
 不依赖底层 _compact_json 的具体空格策略（robust to separators 调整）。

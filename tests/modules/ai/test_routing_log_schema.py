@@ -1,4 +1,4 @@
-"""spec §7.2: ai_routing_log 表 schema 验证。"""
+"""ai_routing_log 表 schema 验证。"""
 
 # ruff: noqa: PLC0415
 
@@ -29,7 +29,7 @@ def test_routing_log_required_columns():
 
 
 def test_routing_log_fanout_fields_nullable():
-    """spec §13 决策 22: parent_log_id / plan_step_index 首期始终 NULL，留扩展位。"""
+    """parent_log_id 和 plan_step_index 当前为 NULL，保留扩展位。"""
     from app.modules.ai.models.routing_log import AiRoutingLog
 
     cols = AiRoutingLog.__table__.columns
@@ -38,7 +38,7 @@ def test_routing_log_fanout_fields_nullable():
 
 
 def test_routing_log_no_rule_hits_column():
-    """spec §16 R-1: v4 砍规则阶段，ai_routing_log 不应有 rule_hits 列。"""
+    """LLM-only 路由日志不应包含 rule_hits 列。"""
     from app.modules.ai.models.routing_log import AiRoutingLog
 
     assert "rule_hits" not in AiRoutingLog.__table__.columns

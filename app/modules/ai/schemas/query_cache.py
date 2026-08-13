@@ -1,4 +1,4 @@
-"""读操作 chip 跳转回放查询 schema — spec §8.7"""
+"""只读工具结果 chip 的查询回放 schema。"""
 
 from typing import Any
 
@@ -7,7 +7,7 @@ from pydantic.alias_generators import to_camel
 
 
 class QueryCacheOut(BaseModel):
-    """/ai/query-cache/<trace_id> 响应 data 字段（spec §8.7）"""
+    """``/ai/query-cache/<trace_id>`` 响应的 data 字段。"""
 
     tool_name: str
     module: str = Field(..., description="模块页路由前缀，如 'system/user'")

@@ -1,13 +1,12 @@
 """ToolResult / UIResult — Gateway 执行结果标准化
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §6.5 / §9.6 +
-spec docs/specs/2026-07-16-tool-result-view-design.md §2.1/§2.2。
+区分供 LLM 使用的结果和供前端渲染的 UI 结果，避免展示数据进入模型上下文。
 
 双层设计（决策 3 修正：ui 可选，lint 强制 builtin tool 填 ui）：
   ToolResult.data — 给 LLM（精简，进 prompt cache，serialize_for_llm 脱敏）
   ToolResult.ui  — 给前端（丰富，不进 LLM context）
 
-业务方写 builtin tool 时**强烈推荐**填 ui（lint 强制，Task 9）：
+内置工具必须填写 ``ui``，并由 lint 强制检查：
   return ToolResult.success(
       data={"deleted": 2},
       ui=UIResult(view_type="rows_affected", view_data={"count": 2, "ids": [...]}),
@@ -24,7 +23,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class UIResult:
-    """UI 层结果（spec §2.2）— 给前端按 view_type 路由组件用，不进 LLM prompt。
+    """供前端按 ``view_type`` 路由组件的 UI 结果，不进入 LLM prompt。
 
     view_data 不强校验 schema（决策 10）：后端保持 dict[str, Any] 灵活，
     前端 TS discriminated union 给类型安全。业务方写错只影响自家 tool 渲染。
@@ -56,7 +55,7 @@ class PreparedActionProposal:
     """批准后调用绑定 execute tool 的服务端冻结参数。"""
 
     snapshot: dict[str, Any]
-    """preview 时的业务快照；Task 35a.2/35a.5 将持久化并复验。"""
+    """预检时生成、批准前复验的业务快照。"""
 
     subject_ref: dict[str, str]
     """业务对象的不透明引用，例如 user_import_batch。"""
@@ -68,7 +67,7 @@ class PreparedActionProposal:
     """提案失效时间。"""
 
     snapshot_hash: str = ""
-    """快照 canonical hash；Task 35a.2 强制非空并在批准前复验。"""
+    """业务快照的 canonical hash，批准前必须复验。"""
 
 
 @dataclass
@@ -86,9 +85,9 @@ class ToolResult:
     """业务返回值（ok=True 时有效）— 给 LLM 看，serialize_for_llm 脱敏后进 prompt"""
 
     ui: UIResult | None = None
-    """UI 层结果（spec §2.1）— 给前端用，不进 LLM context。
+    """供前端使用且不进入 LLM context 的 UI 结果。
     None（ok=False / executor 兼容路径 / 业务方未声明）→ 前端 fallback plain_json。
-    builtin tool 由 lint 强制带 ui（Task 9）。"""
+    内置工具由 lint 强制要求提供 ``ui``。"""
 
     prepared_action: PreparedActionProposal | None = None
     """prepared tool 的内部提案；序列化层只读取 data/ui，不得向模型或客户端暴露。"""
@@ -131,7 +130,7 @@ class ToolResult:
         """构造失败结果
 
         Args:
-            error_code: UPPER_SNAKE_CASE，前端 i18n 映射用（§9.6）
+            error_code: UPPER_SNAKE_CASE，供前端 i18n 映射
             error_msg: 给 LLM 的友好描述（如"目标用户不在你的可见范围"）
         """
         return cls(ok=False, error_code=error_code, error_msg=error_msg, meta=meta)

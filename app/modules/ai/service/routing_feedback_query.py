@@ -1,4 +1,4 @@
-"""Routing feedback aggregate query service (spec §6.2, 决策 #22).
+"""Routing feedback aggregate query service.
 
 与 routing_feedback_service.py（POST submit）分离：submit 是 append-only 写，
 本 service 是复杂聚合查询，职责正交。
@@ -22,10 +22,10 @@ from app.modules.system.models.user import User
 
 class RoutingFeedbackQueryService:
     async def summary(self, db: AsyncSession, days: int) -> FeedbackSummary:
-        """spec §6.2: KPI 汇总（total / correct / wrong / wrongRate）+ topWrongAgents.
+        """汇总 total、correct、wrong、wrongRate 和 topWrongAgents。
 
         决策 #21：topCorrected 并列时按 corrected_agent code ASC 取首.
-        决策（§6.2）：total=0 时 wrongRate=0（不除零）.
+        total=0 时 wrongRate=0，避免除零。
         """
         cutoff = datetime.now() - timedelta(days=days)
 
@@ -113,10 +113,7 @@ class RoutingFeedbackQueryService:
         original_agent: str | None,
         corrected_agent: str | None,
     ) -> tuple[list[FeedbackListItem], int]:
-        """spec §6.2: 明细分页（feedback=wrong / all，默认 wrong）.
-
-        Task 9 ship service.list_items，Task 10 加端点测试覆盖.
-        """
+        """分页查询反馈明细，feedback 支持 wrong 或 all，默认 wrong。"""
         cutoff = datetime.now() - timedelta(days=days)
 
         conditions = [AiRoutingFeedback.create_time >= cutoff]

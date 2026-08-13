@@ -1,14 +1,14 @@
-"""export_users_to_excel 单测（Task 11，spec §3.6 line 2099-2111 + §2.31）。
+"""``export_users_to_excel`` 行为测试。
 
 覆盖：
-- 强制建 UserExportTask（spec §2.31 line 1436-1453）
-- filter_snapshot 冻结 accessible_dept_ids（spec §2.31 line 1516-1520）
-- reason 必填（spec §2.30 v2.2 P1-3）
-- EXPORT_ALLOWED_FIELDS 白名单（hashed_password 永不导出，spec §2.9）
-- 行数 > USER_EXPORT_ASYNC_THRESHOLD → AI_EXPORT_ASYNC_REQUIRED（spec §2.6）
-- data_scope 自动应用（HR 只能导他可见的，spec §2.31 line 1545）
-- 失败也建 task（status=FAILED + error_code，spec §2.31 line 1567-1572）
-- 30 天 TTL 文件存储（spec §2.31 line 1554）
+- 每次导出都创建 UserExportTask
+- filter_snapshot 冻结 accessible_dept_ids
+- reason 必填
+- EXPORT_ALLOWED_FIELDS 白名单确保 hashed_password 永不导出
+- 超过同步行数上限时返回 AI_EXPORT_ASYNC_REQUIRED
+- 自动应用 data_scope
+- 失败任务记录 status 和 error_code
+- 导出文件保留 30 天
 
 依赖 db_session outer-transaction fixture（不落库）。
 """
@@ -111,7 +111,7 @@ def _make_user(
 
 @pytest.fixture
 def file_storage() -> MockFileStorage:
-    """每个测试独立 MockFileStorage（spec §3.9 注入）。"""
+    """为每个测试提供独立的 MockFileStorage。"""
     return MockFileStorage()
 
 
@@ -135,7 +135,7 @@ def _read_xlsx(xlsx_bytes: bytes) -> tuple[list[str], list[list]]:
 
 
 class TestHappyPath:
-    """spec §3.6 line 2099-2111：基本导出流程。"""
+    """验证基本导出流程。"""
 
     async def test_export_returns_xlsx_and_count(self, db_session, file_storage):
         """返回 (xlsx_bytes, row_count, export_id) 三元组。"""
@@ -169,7 +169,7 @@ class TestHappyPath:
         assert export_id
 
     async def test_export_only_includes_allowed_fields(self, db_session, file_storage):
-        """spec §2.9：hashed_password 永不出现在 Excel。"""
+        """hashed_password 永不出现在 Excel。"""
         dept = _make_dept(5102, "QA-Exp-Dept-FW")
         super_role = await _fetch_super_role(db_session)
         operator = _make_user(6103, "QA_EXP_FW", [super_role], [dept])
@@ -198,7 +198,7 @@ class TestHappyPath:
         assert "$2b$12$super-secret-bcrypt-hash" not in all_values
 
     async def test_export_includes_all_allowed_fields(self, db_session, file_storage):
-        """spec §2.9：EXPORT_ALLOWED_FIELDS 中所有字段都应有对应列。"""
+        """EXPORT_ALLOWED_FIELDS 中所有字段都应有对应列。"""
         dept = _make_dept(5103, "QA-Exp-Dept-Col")
         super_role = await _fetch_super_role(db_session)
         operator = _make_user(6105, "QA_EXP_COL", [super_role], [dept])
@@ -219,16 +219,16 @@ class TestHappyPath:
         assert len(headers) >= len(EXPORT_ALLOWED_FIELDS)
 
 
-# ========== Task 审计（spec §2.31） ==========
+# ========== 导出任务审计 ==========
 
 
 class TestExportTaskAudit:
-    """spec §2.31：所有导出一律建 UserExportTask。"""
+    """所有导出都必须创建 UserExportTask。"""
 
     async def test_export_creates_task_with_filter_snapshot(
         self, db_session, file_storage
     ):
-        """spec §2.31 line 1525-1536：建 task，filter_snapshot 含 filter + accessible_dept_ids。"""
+        """任务的 filter_snapshot 包含筛选条件和可访问部门。"""
         dept = _make_dept(5201, "QA-Exp-Dept-FS")
         super_role = await _fetch_super_role(db_session)
         operator = _make_user(6201, "QA_EXP_FS", [super_role], [dept])
@@ -262,7 +262,7 @@ class TestExportTaskAudit:
     async def test_export_filter_snapshot_freezes_accessible_dept_ids(
         self, db_session, file_storage
     ):
-        """spec §2.31 line 1516-1520：filter_snapshot.accessible_dept_ids 冻结当时的部门集合。"""
+        """filter_snapshot.accessible_dept_ids 冻结导出时的部门集合。"""
         own_dept = _make_dept(5301, "QA-Exp-Own")
         other_dept = _make_dept(5302, "QA-Exp-Other")
         hr_role = _make_role(
@@ -292,7 +292,7 @@ class TestExportTaskAudit:
     async def test_export_status_transitions_created_to_success(
         self, db_session, file_storage
     ):
-        """spec §2.31 line 1540-1565：CREATED → RUNNING → SUCCESS。"""
+        """成功导出的状态依次迁移为 CREATED、RUNNING、SUCCESS。"""
         dept = _make_dept(5401, "QA-Exp-Dept-ST")
         super_role = await _fetch_super_role(db_session)
         operator = _make_user(6401, "QA_EXP_ST", [super_role], [dept])
@@ -319,7 +319,7 @@ class TestExportTaskAudit:
         assert task.duration_ms >= 0
 
     async def test_export_writes_file_to_storage(self, db_session, file_storage):
-        """spec §2.31 line 1549-1555：xlsx 写入 FileStorage，路径存 task.file_storage_key。"""
+        """xlsx 写入 FileStorage，路径保存到 task.file_storage_key。"""
         dept = _make_dept(5501, "QA-Exp-Dept-FL")
         super_role = await _fetch_super_role(db_session)
         operator = _make_user(6501, "QA_EXP_FL", [super_role], [dept])
@@ -346,11 +346,11 @@ class TestExportTaskAudit:
         assert await file_storage.exists(task.file_storage_key)
 
 
-# ========== Reason 必填（spec §2.30） ==========
+# ========== 导出原因校验 ==========
 
 
 class TestReasonValidation:
-    """spec §2.30：reason 必填，1-256 字符（service 层 defense-in-depth）。"""
+    """service 层兜底校验 reason 必填且长度为 1-256 字符。"""
 
     async def test_export_reason_required(self, db_session, file_storage):
         dept = _make_dept(5601, "QA-Exp-Dept-RSN")
@@ -387,11 +387,11 @@ class TestReasonValidation:
         assert exc.value.error_code == "AI_EXPORT_REASON_REQUIRED"
 
 
-# ========== 阈值（spec §2.6） ==========
+# ========== 同步导出阈值 ==========
 
 
 class TestExportThreshold:
-    """spec §2.6：行数 > USER_EXPORT_ASYNC_THRESHOLD → AI_EXPORT_ASYNC_REQUIRED。"""
+    """超过 USER_EXPORT_ASYNC_THRESHOLD 时返回 AI_EXPORT_ASYNC_REQUIRED。"""
 
     async def test_export_over_threshold_raises_async_required(
         self, db_session, file_storage
@@ -428,14 +428,14 @@ class TestExportThreshold:
         assert "异步" not in exc.value.message
 
 
-# ========== Data Scope（spec §2.31 line 1545） ==========
+# ========== Data Scope ==========
 
 
 class TestDataScope:
     """data_scope 自动应用：HR 只能导他可见的部门用户。"""
 
     async def test_export_data_scope_filters_by_dept(self, db_session, file_storage):
-        """spec §2.31 line 1545 + §2.11：DATA_SCOPE_DEPT 限定本部门。"""
+        """DATA_SCOPE_DEPT 将导出范围限定为当前部门。"""
         own_dept = _make_dept(5801, "QA-Exp-Own-D")
         other_dept = _make_dept(5802, "QA-Exp-Other-D")
         hr_role = _make_role(5803, "QA_R_HR_D", "QA-HR-D", data_scope=DATA_SCOPE_DEPT)
@@ -489,11 +489,11 @@ class TestDataScope:
         assert row_count >= 2
 
 
-# ========== 失败也建 task（spec §2.31 line 1567-1572） ==========
+# ========== 失败任务持久化 ==========
 
 
 class TestExportFailureRecordsError:
-    """spec §2.31 line 1567-1572：失败也建 task，status=FAILED + error_code。"""
+    """导出失败时仍持久化任务状态和错误码。"""
 
     async def test_export_failure_records_async_required_in_task(
         self, db_session, file_storage
@@ -541,11 +541,11 @@ class TestExportFailureRecordsError:
         assert task.finished_at is not None
 
 
-# ========== v2.3 §2.9.1：导出 Excel 字段翻译（display labels） ==========
+# ========== Excel 字段显示文本 ==========
 
 
 class TestDisplayTranslation:
-    """v2.3 §2.9.1：导出 Excel 字段翻译为可读中文标签 + dept full_path。"""
+    """导出字段使用中文显示文本和部门完整路径。"""
 
     async def test_export_translates_status_label(self, db_session, file_storage):
         """status "1" → "启用"；status "2" → "禁用"。"""
@@ -629,7 +629,7 @@ class TestDisplayTranslation:
         assert dept_by_name["QA_EXP_DP_T"] == "总公司/研发中心/前端部"
 
     async def test_export_role_codes_unchanged(self, db_session, file_storage):
-        """role_codes 保持 role_code 字面值（§2.18 已支持 code round-trip）。"""
+        """role_codes 保持 role_code 字面值，确保可往返导入。"""
         dept = _make_dept(5943, "QA-Exp-Role")
         super_role = await _fetch_super_role(db_session)
         dev_role = _make_role(5944, "QA_R_DEV_TL", "QA-开发者-翻译")
@@ -653,11 +653,11 @@ class TestDisplayTranslation:
         assert role_by_name["QA_EXP_RC_T"] == "QA_R_DEV_TL"
 
 
-# ========== Task 33：download_export_file（AI 对话内点击下载落地） ==========
+# ========== download_export_file ==========
 
 
 class TestDownloadExportFile:
-    """Task 33 / spec §2.31 line 1626：download_export_file service。
+    """验证 AI 对话内下载导出文件的 service 行为。
 
     从 sys_user_export_task.file_storage_key 读 bytes 返回；
     任务不存在 / 状态非 SUCCESS / file_storage_key 缺失 / 文件被删 → 各 errorCode。
@@ -780,7 +780,7 @@ class TestDownloadExportFile:
 
 
 class TestExportTaskOwnership:
-    """Task 35：导出任务 list/detail/download 默认只能访问当前 operator。"""
+    """导出任务列表、详情和下载默认只能由任务创建人访问。"""
 
     @staticmethod
     def _task(export_id: str, operator_id: int, *, reason: str) -> UserExportTask:
@@ -897,15 +897,15 @@ class TestExportTaskOwnership:
         assert read_called is False
 
 
-# ========== Task 34：audit chain JOIN 测试（spec §8.1 line 2902） ==========
+# ========== 审计链关联测试 ==========
 
 
 class TestAuditChainJoinable:
-    """spec §8.1 line 2902：审计链 sys_operation_log ↔ sys_user_export_task 可对照。
+    """验证 sys_operation_log 与 sys_user_export_task 可形成审计关联。
 
     spec 原文写「sys_operation_log.export_id ↔ sys_user_export_task.export_id 可 JOIN」，
     但 sys_operation_log schema（app/modules/system/models/operation_log.py）**没有
-    export_id 字段**。真实 audit chain 机制（spec §2.30 line 1450 + §2.8 line 256）：
+    export_id 字段**。实际审计链机制为：
 
       sys_operation_log.path='/system/user/export'
         + request_params.reason + user_id + create_time

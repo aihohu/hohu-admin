@@ -1,4 +1,4 @@
-"""OperationLogOut schema 字段类型测试 — spec §9.3
+"""OperationLogOut schema 字段类型测试。
 
 started_at 在 pending_confirmation / expired / rejected 状态下可能为 NULL
 （业务还没真正开始执行）。与 AiOperationLog model 的 nullable 一致。

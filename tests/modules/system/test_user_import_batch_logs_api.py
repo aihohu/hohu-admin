@@ -1,6 +1,6 @@
-"""GET /system/user/import/{batch_id}/logs HTTP 契约测试（Task 15a，spec §5.5 v2.2 P2 #2.28）。
+"""``GET /system/user/import/{batch_id}/logs`` HTTP 契约测试。
 
-spec §5.5 line 2280-2288：批次操作日志查询，分页 + event filter。
+验证批次操作日志的分页和事件过滤。
 
 只验证 HTTP 契约层（路由 / 200 字段映射 / 404 / auth gating / event filter /
 pagination 参数转发），service 层（``list_batch_logs``）用 patch 替身。
@@ -8,8 +8,8 @@ service 层的 ordering / outerjoin / 过滤逻辑由 ``test_user_import_execute
 等集成测试覆盖（写入侧 + 反查侧）。
 
 覆盖：
-- 401 未登录 / 无效 JWT（auth gating，spec §5.5 line 2284）
-- 200 + PageResult[UserImportBatchLogItem] 字段映射（spec §5.5 line 2285）
+- 401 未登录或 JWT 无效
+- 200 + PageResult[UserImportBatchLogItem] 字段映射
 - 200 + 空列表（batch 存在但无日志，理论不应发生但需容错）
 - 200 + operator_name=None（操作人已删除，outerjoin 兼容）
 - 404 + AI_IMPORT_BATCH_NOT_FOUND（batch 不存在）
@@ -102,7 +102,7 @@ def _patch_batch_exists():
 
 
 class TestGetBatchLogsAuth:
-    """spec §5.5 line 2284：权限 system:user:list（同 GET /import/{batch_id}）。"""
+    """验证 system:user:list 权限。"""
 
     async def test_no_token_returns_401(self, client):
         response = await client.get("/system/user/import/batch-abc-001/logs")
@@ -120,7 +120,7 @@ class TestGetBatchLogsAuth:
 
 
 class TestGetBatchLogsResponse:
-    """spec §5.5 line 2285：返回 ``[{event, fromStatus, toStatus, detail, createdAt}, ...]``。"""
+    """返回事件、状态迁移、详情和创建时间。"""
 
     async def test_returns_paginated_logs_with_field_mapping(self, client, admin_token):
         """200 + PageResult[UserImportBatchLogItem]，records 字段映射正确。"""
@@ -163,7 +163,7 @@ class TestGetBatchLogsResponse:
         assert len(data["records"]) == 2
 
         rec0 = data["records"][0]
-        # spec §5.5 line 2285 核心字段
+        # 日志核心字段。
         assert rec0["logId"] == "log-001"
         assert rec0["event"] == "CREATED"
         assert rec0["fromStatus"] is None
@@ -200,7 +200,7 @@ class TestGetBatchLogsResponse:
         assert data["records"] == []
 
     async def test_operator_name_none_for_deleted_user(self, client, admin_token):
-        """outerjoin sys_user：操作人已删除 → operator_name=None（spec §2.28：
+        """outerjoin sys_user 后，操作人已删除时 operator_name=None。
         user 删除不级联删 log，审计完整性优先）。"""
         log = _make_log_row(operator_id=999, event="CREATED")
         with (
@@ -225,7 +225,7 @@ class TestGetBatchLogsResponse:
 
 
 class TestGetBatchLogsNotFound:
-    """spec §5.7：batch_id 不存在 → 404 AI_IMPORT_BATCH_NOT_FOUND（同 detail endpoint）。"""
+    """batch_id 不存在时返回 404 AI_IMPORT_BATCH_NOT_FOUND。"""
 
     async def test_batch_not_found_returns_404(self, client, admin_token):
         with patch(
@@ -246,7 +246,7 @@ class TestGetBatchLogsNotFound:
 
 
 class TestGetBatchLogsEventFilter:
-    """spec §5.5 line 2285：event filter（CREATED/PREVIEW_DONE/EXECUTE_START/...）。"""
+    """event 参数可过滤 CREATED、PREVIEW_DONE、EXECUTE_START 等事件。"""
 
     async def test_event_filter_passed_to_service(self, client, admin_token):
         """?event=EXECUTE_FINISH 透传到 service.event 参数。"""

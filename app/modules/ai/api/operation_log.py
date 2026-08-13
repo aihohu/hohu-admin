@@ -1,7 +1,7 @@
-"""AI 操作日志查询端点 — spec §9.3
+"""AI 操作日志查询端点。
 
 GET /ai/operation-log?tool_call_id=<tool_call_id>
-  用途：前端 SSE 断流兜底轮询（spec §8.3 confirm 后 30s 轮询）
+  用途：前端在 SSE 断流后进行兜底轮询
   权限：本人 / 超管 / 拥有 ai:trace:view 权限码的角色
   字段过滤：只暴露审计元信息（不含 args_summary / result_summary）
 """
@@ -48,7 +48,7 @@ async def get_operation_log(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ResponseModel[OperationLogOut]:
-    """spec §9.3 SSE 断流兜底查询端点
+    """SSE 断流后的兜底查询端点。
 
     权限：tool_call_id 对应 user_id 本人 / 超管 / ai:trace:view 角色
     字段过滤：只暴露 tool_call_id / tool_name / status / error_code /

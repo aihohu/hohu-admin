@@ -59,8 +59,7 @@ class Settings(BaseSettings):
         ".jpg,.jpeg,.png,.gif,.webp,.pdf,.doc,.docx,.xls,.xlsx,.zip,.rar,.txt,.csv"
     )
 
-    # 文件存储抽象（spec §3.9 v2.2 P1-4）
-    # Phase 1 默认 local；Phase 3+ 切 s3 时业务代码零改动（仅切换 get_file_storage 工厂）
+    # 业务代码通过文件存储工厂访问后端，切换 local/s3 不应改变调用方。
     FILE_STORAGE_BACKEND: Literal["local", "s3"] = "local"
     # 导入预检、失败清单和导出文件含业务数据，必须位于未静态挂载的私有根。
     LOCAL_FILE_STORAGE_ROOT: str = "private_uploads/file_storage"
@@ -80,28 +79,27 @@ class Settings(BaseSettings):
     AI_ANTHROPIC_API_KEY: str = ""
     AI_MAX_TOKENS: int = 4096
     AI_TEMPERATURE: float = 0.7
-    # spec §11.5: 整个 AI 模块全局开关（False = 不注册 AI router，安全降级）
+    # 关闭后不注册任何 AI 路由，用于安全降级和无 AI 部署。
     AI_MODULE_ENABLED: bool = True
 
-    # AI HITL（spec §8.4 + 修订 S-6）
-    # MVP 强制单 worker：进程内 dict[confirmation_id, asyncio.Event] 在多 worker 下静默失效。
-    # v1.5+ 改 redis_pubsub 模式后可放开多 worker
+    # memory 模式的确认事件只存在于当前进程，因此只能运行一个 worker；
+    # redis_pubsub 模式可跨 worker 唤醒确认流程。
     AI_HITL_MODE: Literal["memory", "redis_pubsub"] = "memory"
     WEB_CONCURRENCY: int = 1
-    # 修订 S-6: 启动时用 Redis SADD 实测活跃 worker 数（env var WEB_CONCURRENCY
+    # 启动时用 Redis 集合实测活跃 worker 数；环境变量 WEB_CONCURRENCY
     # 不可信——uvicorn --workers 4 不经 gunicorn 时各 worker lifespan 独立检查
     # 都通过）。测试环境可关闭此检查（AI_REQUIRE_SINGLE_WORKER=False）
     AI_REQUIRE_SINGLE_WORKER: bool = True
-    # HITL 挂起 TTL（秒）：spec §8.3 默认 5min
+    # 人工确认窗口的有效期（秒）。
     AI_HITL_PENDING_TTL_SEC: int = 300
-    # Redis 中 args JSON 大小上限（字节）：spec §8.3 防恶意 user 撑爆 Redis
+    # Redis 中工具参数 JSON 的大小上限，防止恶意请求耗尽内存。
     AI_HITL_ARGS_MAX_BYTES: int = 4096
-    # Task 35a.0: conversation-scoped ChatCommand lease。普通流由 heartbeat 续期；
+    # 会话级运行租约：普通流由 heartbeat 续期；
     # HITL handoff 至少延长到 confirmation TTL + grace，终态 commit 后 owner 释放。
     AI_CHAT_RUN_GUARD_TTL_SEC: int = 60
     AI_CHAT_RUN_GUARD_HEARTBEAT_SEC: int = 20
     AI_CHAT_RUN_GUARD_PENDING_GRACE_SEC: int = 60
-    # spec §2.4 v1.5+: SSE 续传功能开关（默认开）
+    # SSE 确认续传开关。
     # False 时 confirmation_required 不发 id: 字段，/ai/chat/resume 端点返回 410。
     # 关闭场景：Redis 内存紧张 / 内网部署不需要移动端续传。
     AI_SSE_RESUME_ENABLED: bool = True

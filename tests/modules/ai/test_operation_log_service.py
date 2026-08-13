@@ -1,6 +1,6 @@
-"""operation_log_service 状态机迁移测试 — spec §4.4 / §8.3
+"""operation_log_service 状态机迁移测试。
 
-按 spec §4.4 状态机覆盖：
+覆盖状态机的合法迁移、幂等和终态保护：
   autonomous:  running → success | failed
   HITL:        pending_confirmation → running → success | failed
                 pending_confirmation → rejected | expired

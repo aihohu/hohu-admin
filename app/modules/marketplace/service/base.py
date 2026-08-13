@@ -1,13 +1,13 @@
 """[SHARED] MarketplaceBaseService
 
 云市场与本地 HoHu 都用此基类（共享 tenant_id 过滤逻辑）。
-Phase 2 拆分时位置：app/modules/marketplace/service/base.py（保留原位）
+按云端与本地职责拆分时，本基类仍保留原位。
 详见 docs/MARKETPLACE-CLOUD-SPLIT.md
 
 原描述：所有 marketplace Service 必须继承，强制 tenant_id 过滤。
 
 决策 #1：所有应用数据相关查询必须带 WHERE tenant_id = ?
-Phase 1 单租户模式（默认 0）也要传，养成习惯防止未来升级多租户时遗漏导致越权。
+单租户模式（默认 0）也必须显式传入，避免未来升级多租户时遗漏过滤导致越权。
 """
 
 from typing import TypeVar

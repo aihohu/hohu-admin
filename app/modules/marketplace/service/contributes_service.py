@@ -2,7 +2,7 @@
 
 聚合本地已 enabled 应用的菜单/页面，前端启动时一次加载。
 云市场不接触此 service。
-Phase 2 拆分时迁移到 app/modules/marketplace/service/local/contributes_service.py
+如按云端与本地职责拆分，本服务归入 local/contributes_service.py。
 详见 docs/MARKETPLACE-CLOUD-SPLIT.md
 
 原描述：聚合 contributes 到 Redis 缓存（spec 5.2）

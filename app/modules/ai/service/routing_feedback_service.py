@@ -1,10 +1,10 @@
-"""spec §6.4 / §7.1c: routing feedback service.
+"""Routing feedback service.
 
 权限校验链：
 1. message 存在 → 否则 NotFoundException(AI_MESSAGE_NOT_FOUND)
 2. message owner 校验：通过 AiConversation.user_id（AiMessage 本身无 user_id 字段）
    - owner 或超管可提交
-3. correctedAgentCode 可见性：复用 list_visible_agents（spec §6.4 明说复用，避免双份维护）
+3. correctedAgentCode 可见性复用 list_visible_agents，避免重复维护查询逻辑
 """
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,7 +31,7 @@ class RoutingFeedbackService:
         request,
         user: User,
     ) -> None:
-        """spec §6.4: 写 ai_message.routing_feedback + 追加 ai_routing_feedback."""
+        """更新 ai_message.routing_feedback 并追加 ai_routing_feedback。"""
         msg = await db.get(AiMessage, message_id)
         if msg is None or not msg.is_active:
             raise NotFoundException(
@@ -39,7 +39,7 @@ class RoutingFeedbackService:
                 error_code="AI_MESSAGE_NOT_FOUND",
             )
 
-        # spec §6.4: 通过 AiConversation 校验 owner（AiMessage 无 user_id 字段）
+        # AiMessage 没有 user_id，通过 AiConversation 校验 owner。
         conv = await db.get(AiConversation, msg.conversation_id)
         is_admin = is_super_admin(user)
         if conv is None or (conv.user_id != user.user_id and not is_admin):
@@ -56,7 +56,7 @@ class RoutingFeedbackService:
                     "feedback='wrong' 时必须提供 correctedAgentCode",
                     error_code="AI_ROUTING_FEEDBACK_MISSING_CORRECTION",
                 )
-            # spec §6.4: 复用 list_visible_agents（单一真相源，避免 SQL 漂移）
+            # 复用 list_visible_agents，避免两套可见性 SQL 漂移。
             visible_agents = await list_visible_agents(db, user)
             visible_codes = {a.code for a in visible_agents}
             if request.corrected_agent_code not in visible_codes:

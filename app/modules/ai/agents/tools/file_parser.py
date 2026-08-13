@@ -1,9 +1,9 @@
-"""文件解析器 — spec §16 v1.5+ SR-24
+"""文件解析器。
 
-实现 spec §16.3 的 FileParser 协议 + Excel/CSV 两个解析器。PDF / Word 留 v1.6+
+实现 ``FileParser`` 协议及 Excel/CSV 解析器；PDF 和 Word 暂不支持。
 （需要 pdfplumber / python-docx 依赖，且业务场景占比 < 10%）。
 
-关键约束（spec §16.1）：
+关键约束：
   - 文件 raw bytes 永不进 LLM context（仅返回结构化摘要）
   - 解析器上限：Excel 50MB / CSV 10MB
   - 摘要只含 rows / columns / preview(前 3 行)
@@ -29,7 +29,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 from app.core.exceptions import BusinessRuleException
 from app.modules.ai.agents.tools.file_access import validate_xlsx_archive
 
-# spec §16.1: 摘要只含前 3 行预览（避免大文件 LLM 上下文爆炸）
+# 摘要只包含前三行预览，避免大文件撑爆 LLM 上下文。
 PREVIEW_ROW_LIMIT = 3
 MAX_PARSE_ROWS = 10_000
 MAX_PARSE_COLUMNS = 256
@@ -40,7 +40,7 @@ MAX_PARSE_CELLS = 200_000
 class FileParseResult:
     """文件解析结构化摘要（传给 LLM 的全部信息）
 
-    raw bytes 不在返回值内（spec §16.1 硬约束）。LLM 收到摘要后，如需用完整数据
+    原始字节不进入返回值。LLM 收到摘要后，如需使用完整数据
     应调具体业务 tool（如 user.batch_create）继续处理，业务 tool 内部自行读文件。
     """
 
@@ -61,7 +61,7 @@ class FileParseResult:
 
 
 class FileParser(Protocol):
-    """spec §16.3 文件解析器协议"""
+    """文件解析器协议。"""
 
     mime_types: tuple[str, ...]
     max_bytes: int
@@ -136,10 +136,10 @@ def _check_dimensions(*, rows: int, columns: int, cells: int) -> None:
 class ExcelParser:
     """openpyxl 解析 .xlsx，仅读 active sheet
 
-    max_bytes = 50MB（spec §16.1）
+    ``max_bytes`` 为 50MB。
 
     用 read_only=True + data_only=True 减少内存占用（公式只取缓存值）。
-    超 50MB 文件留 v1.6+ 流式优化。
+    超过 50MB 的文件当前拒绝解析。
     """
 
     mime_types = (
@@ -293,7 +293,7 @@ class ExcelParser:
 class CsvParser:
     """csv 标准库解析（无外部依赖）
 
-    max_bytes = 10MB（spec §16.1）
+    ``max_bytes`` 为 10MB。
     """
 
     mime_types = (

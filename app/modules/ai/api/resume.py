@@ -1,16 +1,16 @@
-"""SSE 流断流续传端点 — spec §3 v1.5+
+"""SSE 流断流续传端点。
 
 GET /ai/chat/resume
   - 读 Last-Event-ID 头作为 confirmation_id（SSE 协议标准）
   - 校验 owner / TTL
-  - 抢 Redis owner 锁防双执行（spec §2.3）
+  - 获取 Redis owner 锁防止重复执行
   - emit confirmation_resumed → hang → execute_tool → emit tool_call_result + done
   - finally 释放 owner 锁（Lua 脚本防误删）
 
 模式说明（不再硬校验）：
   - memory 模式：单 worker 本地开发可用。_hang_memory + _wake_memory 跨请求
     同进程工作，Event 在 confirm 端点被 set 后 hang 协程返回 action。
-  - redis_pubsub 模式：多 worker 生产部署必需（spec §8.4）。SR-7 跨 worker wake
+  - Redis Pub/Sub 模式支持多 worker 跨进程唤醒
     走 pubsub + SETNX owner 锁兜底。多 worker 部署用 memory 会双执行 race，
     由部署文档约束，不在端点强校验（避免本地开发被锁死）。
 
@@ -83,7 +83,7 @@ _RELEASE_LOCK_LUA = (
 
 
 def _set_exc_code(exc: BusinessRuleException, code: int) -> BusinessRuleException:
-    """spec §9.6: BusinessRuleException 默认 code=400，手动改 code 返 409/410/422"""
+    """将业务异常的默认 400 状态按场景调整为 409、410 或 422。"""
     exc.code = code
     return exc
 
@@ -492,13 +492,13 @@ async def resume_chat(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """spec §3 v1.5+: SSE 续传入口
+    """SSE 续传入口。
 
     读 confirmation_id 顺序：Last-Event-ID 头 > ?confirmation_id= query param
     """
     # 1. 功能开关校验（mode 不强校验：memory 模式单 worker 下 resume 同样可用，
     #    _hang_memory/_wake_memory 跨请求同进程工作；多 worker 部署需 redis_pubsub
-    #    由部署文档 spec §8.4 约束，端点不强制）
+    #    由部署配置保证，端点不重复强制校验。）
     if not settings.AI_SSE_RESUME_ENABLED:
         raise _set_exc_code(
             BusinessRuleException(
@@ -584,7 +584,7 @@ async def resume_chat(
             error_code="AI_PREPARED_ACTION_BINDING_INVALID",
         )
 
-    # 4. 抢 owner 锁（防 worker A cancel 慢导致 worker B 双执行，spec §2.3）
+    # 4. 获取 owner 锁，防止旧 worker 取消较慢时新 worker 重复执行。
     worker_token = secrets.token_urlsafe(16)
     lock_key = f"{AI_HITL_OWNER_LOCK_PREFIX}:{confirmation_id}"
     lock_ok = await redis_client.set(

@@ -1,4 +1,4 @@
-"""Forbidden URLs Guardrail — spec §11.2 v1.5+ SR-23
+"""Forbidden URLs Guardrail。
 
 管理员配置 `system_config.ai:guardrail:forbidden_urls`（JSON 字符串数组，域名级别），
 用户输入命中后**整条消息拦截**（不进 LLM，emit AiErrorEvent 短路）。

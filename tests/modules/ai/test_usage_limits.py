@@ -1,4 +1,4 @@
-"""spec §11.6 UsageLimitExceeded → AiErrorEvent 转换测试
+"""UsageLimitExceeded 到 AiErrorEvent 的转换测试。
 
 修订 S-4：chat.py 显式捕获 UsageLimitExceeded + emit AiErrorEvent。
 本测试通过源码静态检查 + AiErrorEvent 构造验证，避免完整 SSE 流测试的复杂 mock。
@@ -12,7 +12,7 @@ from app.modules.ai.agents.hitl.events import AiErrorEvent
 
 
 def test_chat_endpoint_uses_usage_limits():
-    """spec §11.6: UsageLimits(request_limit=10, tool_calls_limit=5) 配置必须存在"""
+    """必须配置 request_limit=10 和 tool_calls_limit=5。"""
     from app.modules.ai.api import chat as chat_module
 
     source = inspect.getsource(chat_module)

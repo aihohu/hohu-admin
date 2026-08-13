@@ -1,7 +1,6 @@
-"""GET /system/user/import HTTP 契约测试（Task 15c，spec §5.4 v2.2 P2 line 2272-2278）。
+"""``GET /system/user/import`` HTTP 契约测试。
 
-spec §5.4 v2.2 P2 列表查询：``GET /system/user/import?current=1&size=20&status=...``
-权限：``system:user:list``（同 GET /import/{batch_id}，spec §5.4 line 2234）。
+验证分页、状态过滤和 ``system:user:list`` 权限。
 
 只验证 HTTP 契约层（路由 / 字段映射 / 状态码 / auth gating / 过滤参数透传），
 service 层（``list_batches``）用 patch 替身。完整业务流程（DB 真实查询 / outerjoin
@@ -9,7 +8,7 @@ sys_user / 排序稳定性）在 ``test_user_import_service.py`` 已覆盖。
 
 覆盖：
 - 401 未登录 / 无效 JWT（auth gating）
-- 200 + PageResult[UserImportBatchResponse] 字段映射（spec §5.4 line 2238-2264）
+- 200 + PageResult[UserImportBatchResponse] 字段映射
 - query 透传 operator_id / status / start_time / end_time 到 service
 - 非法 status → service 抛 BusinessRuleException(AI_IMPORT_INVALID_STATUS) → 400
 - 默认分页（current=1, size=10）
@@ -117,7 +116,7 @@ def _make_batch_row(
 
 
 class TestListBatchesAuth:
-    """spec §5.4 line 2234 + line 2276：权限 system:user:list（auth gating）。"""
+    """验证 system:user:list 权限。"""
 
     async def test_no_token_returns_401(self, client):
         response = await client.get("/system/user/import")
@@ -135,7 +134,7 @@ class TestListBatchesAuth:
 
 
 class TestListBatchesResponse:
-    """spec §5.4 line 2272-2278 + line 2238-2264：分页 + UserImportBatchResponse 字段。"""
+    """验证分页和 UserImportBatchResponse 字段。"""
 
     async def test_returns_paginated_list_with_response_fields(
         self, client, admin_token
@@ -192,7 +191,7 @@ class TestListBatchesResponse:
         assert first["totalRows"] == 100
         # expires_at 动态计算（PARTIAL_SUCCESS → finished_at + 24h）
         assert first["expiresAt"].startswith("2026-08-02T14:01:30")
-        # 安全字段剥离（spec §5.4 + 决策 15.4）
+        # 剥离预检凭证等敏感字段。
         assert "previewToken" not in first
         assert "fileSha256" not in first
         assert "recordsHash" not in first
@@ -229,7 +228,7 @@ class TestListBatchesResponse:
 
 
 class TestListBatchesFilters:
-    """spec §5.4 line 2275 + line 3081：operator_id / status / created_at 时间窗。"""
+    """验证 operator_id、status 和 created_at 时间窗过滤。"""
 
     async def test_passes_status_and_operator_filters_to_service(
         self, client, admin_token

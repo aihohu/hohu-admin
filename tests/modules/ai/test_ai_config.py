@@ -1,4 +1,4 @@
-"""ai_config helper 单元测试（spec §11.2 / §5.4 SR-17）
+"""ai_config helper 单元测试。
 
 覆盖 get_ai_config_int / get_ai_config_str / get_ai_config_str_list 三个 helper。
 Redis 用 db_session fixture 提供的真实 DB（清 ai:* sys_config 行隔离）。
@@ -51,7 +51,7 @@ class TestGetAiConfigInt:
 
 
 class TestGetAiConfigStrList:
-    """v1.5+ SR-17：JSON 数组解析（ai:enabled_tools 用）"""
+    """解析 ai:enabled_tools 使用的 JSON 数组。"""
 
     async def test_returns_default_when_key_missing(self, db_session) -> None:
         from app.modules.ai.agents.safety.ai_config import get_ai_config_str_list
@@ -186,7 +186,7 @@ class TestInvalidateCache:
 
 @pytest.mark.asyncio
 async def test_supervisor_enabled_default_true(db_session):
-    """spec §15.3: supervisor_enabled 默认 True（新部署 Supervisor 接管 auto 路由）.
+    """supervisor_enabled 默认 True，使 Supervisor 接管 auto 路由。
 
     清模块级 _cache（变量名是 _cache，不是 _config_cache）绕开 60s 缓存.
     """
@@ -206,7 +206,7 @@ async def test_supervisor_enabled_default_true(db_session):
 
 @pytest.mark.asyncio
 async def test_supervisor_daily_limit_default_100(db_session):
-    """spec §9: 默认 100 次/用户/日."""
+    """默认限制为每用户每天 100 次。"""
     from app.modules.ai.agents.safety import ai_config as cfg_mod
     from app.modules.ai.agents.safety.ai_config import get_ai_config_int
 
@@ -222,7 +222,7 @@ async def test_supervisor_daily_limit_default_100(db_session):
 
 @pytest.mark.asyncio
 async def test_routing_legacy_null_mode_default_false(db_session):
-    """spec §15.3 / §13 决策 21: 默认 False（新行为 = 粘滞 + auto）."""
+    """legacy null 模式默认 False，使用粘滞和 auto 语义。"""
     from app.modules.ai.agents.safety import ai_config as cfg_mod
     from app.modules.ai.agents.safety.ai_config import get_ai_config_bool
 
@@ -237,7 +237,7 @@ async def test_routing_legacy_null_mode_default_false(db_session):
 
 
 class TestGetAiConfigBoolParsing:
-    """spec §15.3 / §9: get_ai_config_bool 解析矩阵 + 默认值往返"""
+    """验证 get_ai_config_bool 的解析矩阵和默认值。"""
 
     async def test_parses_true_variants(self, db_session) -> None:
         from app.modules.ai.agents.safety import ai_config as cfg_mod
@@ -268,7 +268,7 @@ class TestGetAiConfigBoolParsing:
             assert result is False, f"raw={raw!r} should parse to False"
 
     async def test_invalid_value_returns_false_not_default(self, db_session) -> None:
-        """spec §15.3: 非法值返回 False（不 fallback default）— feature flag 安全侧倒"""
+        """非法 feature flag 值返回 False，不回退到宽松默认值。"""
         from app.modules.ai.agents.safety import ai_config as cfg_mod
         from app.modules.ai.agents.safety.ai_config import get_ai_config_bool
 

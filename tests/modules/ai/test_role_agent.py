@@ -1,4 +1,4 @@
-"""Role-Agent binding GET tests (spec §6.3, §9.1)."""
+"""Role-Agent binding API 与 service 测试。"""
 
 # ruff: noqa: ARG001, PLC0415  test fixture 占位参数 + 函数内 import（沿用 ai conftest 约定）
 
@@ -217,7 +217,7 @@ async def test_role_not_found_error_code_prefix(
     assert body.get("errorCode") == "AI_ROLE_NOT_FOUND"
 
 
-# ============ Task 7: PUT 全量覆盖 + 边界测试（决策 #14, #15） ============
+# ============ PUT 全量覆盖与边界测试 ============
 
 
 async def _get_agent_id_by_code(client: AsyncClient, code: str) -> str:
@@ -313,7 +313,7 @@ async def test_put_shared_binding_rejected(
 ):
     """决策 #14：PUT 含 shared Agent 返 400 + AI_ROLE_AGENT_BIND_SHARED_FORBIDDEN.
 
-    shared Agent 直通所有用户无需绑定 —— service 显式拦截（Task 6 review Important
+    shared Agent 对所有用户可用且无需绑定，因此 service 显式拦截。
     #2：本测试断言 400，而非 422/500 —— 验证 BusinessRuleException → HTTP 400
     映射在 app/core/exceptions.py:75 配置正确）.
     """
@@ -431,7 +431,7 @@ async def test_put_triggers_audit_middleware(
             await s.commit()
 
 
-# ============ Task 6 review Important #1: agent_ids 格式校验 ============
+# ============ agent_ids 格式校验 ============
 
 
 async def test_put_invalid_agent_id_format_returns_400(
@@ -439,7 +439,7 @@ async def test_put_invalid_agent_id_format_returns_400(
 ):
     """agent_ids 必须为数字字符串 —— 非数字（"abc"）返 400 + AI_AGENT_ID_INVALID.
 
-    回归 Task 6 review Important #1：原 put_binding 内 `int(aid)` 裸调用，
+    防回归：put_binding 不应让 ``int(aid)`` 的 ValueError 透传为 500，
     非数字字符串会抛 ValueError → 未捕获 → HTTP 500 无 errorCode. Fix A 在
     service 层 try/except 包裹，抛 BusinessRuleException（→ HTTP 400，
     app/core/exceptions.py:75 映射）.

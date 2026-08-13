@@ -530,7 +530,7 @@ class TestDataApiOrderBy:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# belongs_to relation expansion (spec §6.5 / decision #79)
+# belongs_to relation expansion
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -637,7 +637,7 @@ async def setup_belongs_to_tables(db_session):
 
 
 class TestDataApiBelongsTo:
-    """spec §6.5 + decision #79：list 时 auto-expand belongs_to 关联 label"""
+    """列表查询自动展开 belongs_to 关联标签。"""
 
     async def test_belongs_to_label_attached(self, db_session, setup_belongs_to_tables):
         svc = DataApiService()
@@ -715,7 +715,7 @@ class TestDataApiBelongsTo:
     async def test_belongs_to_relations_priority_over_xref(
         self, db_session, setup_belongs_to_tables
     ):
-        """relations[].label_field 优先于 field-level x-ref-label (spec §6.5 line 614)"""
+        """relations[].label_field 优先于字段级 x-ref-label。"""
         svc = DataApiService()
         env = setup_belongs_to_tables
         # Override models: add explicit relations pointing at `level` instead of `name`

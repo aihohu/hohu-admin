@@ -1,12 +1,12 @@
 """[CLOUD-ONLY] 应用包文件存储 service
 
 云市场保存 zip 到 /uploads/marketplace/，本地 HoHu 不需要存 zip（直接 install 时拉到内存解析）。
-Phase 2 切 S3/MinIO 时仅改此文件。
+切换到 S3 或 MinIO 时只需修改此文件。
 详见 docs/MARKETPLACE-CLOUD-SPLIT.md
 
 原描述：应用包上传服务（spec 14.13）。
 
-Phase 1 用本地文件存储；Phase 2 切 S3/MinIO（接口不变，仅 save_file 内部切换）。
+当前使用本地文件存储；切换存储后端时保持接口不变。
 仅负责：读字节、校验 zip 魔数、计算 SHA-256、写文件并返回 URL。
 不负责数据库写入（由调用方 VersionService.create 落库）。
 """

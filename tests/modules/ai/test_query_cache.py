@@ -1,4 +1,4 @@
-"""query_cache Redis helper 单元测试 — spec §8.7 / §2.9
+"""query_cache Redis helper 单元测试。
 
 覆盖：
   - set + get 最新（按 created_at 降序）
@@ -176,7 +176,7 @@ class TestTtl:
         assert entry is None
 
     async def test_ttl_value_is_300(self) -> None:
-        """spec §8.7: TTL=300s 写入后 TTL 接近 300"""
+        """写入后 TTL 应接近 300 秒。"""
         await set_query_cache(
             redis_module.redis_client,
             trace_id="tr_6",
@@ -216,7 +216,7 @@ class TestDelete:
 
 class TestHsetResetsTtl:
     async def test_hset_resets_ttl(self) -> None:
-        """spec §8.7: 每次 HSET 重置整个 hash 的 TTL"""
+        """每次 HSET 都重置整个 hash 的 TTL。"""
         await set_query_cache(
             redis_module.redis_client,
             trace_id="tr_8",

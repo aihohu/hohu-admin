@@ -1,6 +1,6 @@
 """ensure_targets_in_scope — 数据鉴权 list 版 helper
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §6.2 / §14 v1.5+。
+使用数据权限子查询验证工具目标是否对当前用户可见。
 
 所有接受 *_id / *_ids 参数的 tool 必须在第一行调用，一次传全。
 强制业务方在 user.update_dept(user_id, new_dept_id) 这种"双 ID"场景
@@ -8,7 +8,7 @@
 
 None 表示"全部可见"（超管 / data_scope=DATA_SCOPE_ALL），跳过检查。
 
-v1.5+ 改造（spec §14）：
+当前实现：
   accessible_user_scope 从 set[int] 物化改为 SQL Select 子查询，避免大部门 OOM。
   本函数因此改成 async，user_ids / create_bys 走 SQL count(*) 路径验证目标。
   dept_ids 数量小，保留 set 内存检查（同步）。
@@ -27,7 +27,7 @@ async def ensure_targets_in_scope(
     dept_ids: list[int] | None = None,
     create_bys: list[int] | None = None,
 ) -> None:
-    """检查目标 ID 是否在用户可见范围内（v1.5+ async，spec §14）
+    """异步检查目标 ID 是否在用户可见范围内。
 
     Args:
         ctx: AiToolContext（含 data_scope + db）
@@ -45,7 +45,7 @@ async def ensure_targets_in_scope(
         - user_ids / create_bys 走 SQL count（10ms 级，AI 上下文可忽略）
         - dept_ids 仍走 set 内存检查（部门数量小）
     """
-    # user_ids / create_bys 都用 accessible_user_scope 子查询验证（spec §14）
+    # user_ids 和 create_bys 都通过 accessible_user_scope 子查询验证。
     targets: set[int] = set()
     if user_ids:
         targets.update(user_ids)

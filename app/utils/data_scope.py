@@ -49,8 +49,7 @@ def get_best_scope(user: User) -> str:
     return best
 
 
-# 向后兼容 alias（spec §17.1 Phase 1 配套重构）
-# 新代码请用公开名 get_best_scope，下划线版本将在 v1.5+ 移除
+# 兼容旧调用方；新代码使用公开名称。
 _get_best_scope = get_best_scope
 
 
@@ -201,8 +200,6 @@ async def get_dept_and_sub_ids(db: AsyncSession, dept_ids: list[int]) -> list[in
     return list({*dept_ids, *result.scalars().all()})
 
 
-# 向后兼容 alias（spec §17.1 Phase 1 配套重构）
-# 新代码请用公开名 get_custom_dept_ids / get_dept_and_sub_ids，
-# 下划线版本将在 v1.5+ 移除
+# 兼容旧调用方；新代码使用公开名称。
 _get_custom_dept_ids = get_custom_dept_ids
 _get_dept_and_sub_ids = get_dept_and_sub_ids

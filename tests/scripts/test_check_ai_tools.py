@@ -1,4 +1,4 @@
-"""scripts/check_ai_tools.py 12 项检查的 static-only 单测 — spec §12.4
+"""``scripts/check_ai_tools.py`` 静态检查测试。
 
 构造违规 meta + 函数签名，验证 check_xxx 函数能正确检出。
 不依赖 Registry（直接构造 RegisteredTool dataclass）。
@@ -82,7 +82,7 @@ async def _tool({sig}):
 
 
 class TestSensitiveInputNotInSignature:
-    """spec §7.2: sensitive_input 字段禁止出现在函数签名"""
+    """sensitive_input 字段禁止出现在函数签名中。"""
 
     def test_clean_no_violation(self) -> None:
         reg = _make_reg(sensitive_input=("password",))
@@ -110,7 +110,7 @@ class TestSensitiveInputNotInSignature:
 
 
 class TestBlocklistFieldMustBeSensitive:
-    """spec §7.2: 命中 SENSITIVE_INPUT_BLOCKLIST 的字段必须声明 sensitive_input"""
+    """命中敏感字段黑名单的参数必须声明为 sensitive_input。"""
 
     def test_blocklist_field_declared_no_violation(self) -> None:
         reg = _make_reg(sensitive_input=("password",))
@@ -139,7 +139,7 @@ class TestBlocklistFieldMustBeSensitive:
 
 
 class TestDestructiveRequiresHitl:
-    """spec §5.3: destructive risk 应显式声明 hitl_always"""
+    """destructive risk 应显式声明 hitl_always。"""
 
     def test_destructive_with_hitl_always_no_violation(self) -> None:
         reg = _make_reg(risk="destructive", hitl_always=True)
@@ -157,7 +157,7 @@ class TestDestructiveRequiresHitl:
 
 
 class TestHighRiskRequiresDryRun:
-    """spec §5.3: high risk 应有 dry_run_fn"""
+    """high risk 应提供 dry_run_fn。"""
 
     def test_high_risk_with_dry_run_no_violation(self) -> None:
         reg = _make_reg(risk="high", dry_run_supported=True, dry_run_fn=lambda: None)
@@ -263,7 +263,7 @@ class TestPreparedGatewayOnlyContract:
 
 
 class TestScopeParamRequiresCheck:
-    """spec §6.2: 签名含 *_id / *_ids 参数必须调 ensure_targets_in_scope"""
+    """签名含 *_id 或 *_ids 参数时必须调用 ensure_targets_in_scope。"""
 
     def test_no_scope_param_no_violation(self) -> None:
         reg = _make_reg()
@@ -302,13 +302,13 @@ async def _tool(ctx, user_id: int):
         assert len(violations) == 1
 
     def test_ctx_excluded_from_scope_params(self) -> None:
-        """ctx 参数不应被视为 scope 参数（约定，spec §6.2）"""
+        """ctx 参数不应被视为 scope 参数。"""
         reg = _make_reg()
         fn_src = "async def _tool(ctx): pass"
         assert check_scope_param_requires_check(reg, fn_src) == []
 
     def test_shared_agent_exempt(self) -> None:
-        """spec §16 SR-24: SHARED_AGENT_CODE 豁免 scope check（file_id 非业务资源）"""
+        """SHARED_AGENT_CODE 的非业务资源参数可豁免通用 scope check。"""
         reg = _make_reg(agent="shared")
         fn_src = "async def _tool(ctx, file_id: str): return {}"
         assert check_scope_param_requires_check(reg, fn_src) == []
@@ -321,7 +321,7 @@ async def _tool(ctx, user_id: int):
 
 
 class TestFileParamRequiresProtectedLoader:
-    """Task 35: file_id is a protected resource, including shared tools."""
+    """file_id 是受保护资源，shared tools 也不例外。"""
 
     def test_file_id_with_shared_loader_has_no_violation(self) -> None:
         reg = _make_reg()
@@ -397,7 +397,7 @@ class TestBuiltinScanSurface:
 
 
 class TestAcceptsFileMimeValid:
-    """spec §16 SR-24: accepts_file 中 MIME 必须在 parser 覆盖范围内"""
+    """accepts_file 中的 MIME 必须在解析器覆盖范围内。"""
 
     def test_no_accepts_file_no_violation(self) -> None:
         reg = _make_reg(accepts_file=())
@@ -438,7 +438,7 @@ class TestAcceptsFileMimeValid:
 
 
 class TestSummaryLengthLimit:
-    """spec §5.1: summary ≤ 100 Unicode chars"""
+    """summary 不得超过 100 个 Unicode 字符。"""
 
     def test_short_summary_no_violation(self) -> None:
         reg = _make_reg(summary="short")
@@ -461,7 +461,7 @@ class TestSummaryLengthLimit:
 
 
 class TestArgsSummaryFieldsNotSensitive:
-    """spec §9.2 SR-18: args_summary_fields 不得含敏感字段名"""
+    """args_summary_fields 不得包含敏感字段名。"""
 
     def test_empty_fields_no_violation(self) -> None:
         reg = _make_reg(args_summary_fields=())
@@ -496,7 +496,7 @@ class TestArgsSummaryFieldsNotSensitive:
 
     def test_non_sensitive_token_substring_no_violation(self) -> None:
         """csrf_token 含 'token' 子串但不是 SENSITIVE_INPUT_BLOCKLIST 完全匹配，
-        word-boundary 检查应放过（与 §7.3 GLOBAL_OUTPUT_BLOCKLIST 同逻辑）。"""
+        词边界检查应放过该字段，与 GLOBAL_OUTPUT_BLOCKLIST 的逻辑一致。"""
         reg = _make_reg(args_summary_fields=("csrf_token", "pagination_token"))
         # 注意：csrf_token 不应被检出（'token' 是 SENSITIVE_INPUT_BLOCKLIST 里的项，
         # 但 csrf_token 既不是完全相等 'token'，也不是 'token_xxx' 前缀模式，
@@ -505,7 +505,7 @@ class TestArgsSummaryFieldsNotSensitive:
         # 当前实现用 startswith(bl + "_") 检前缀，csrf_token 不命中
         assert violations == []
 
-    """spec §5.1: dry_run_supported=True 必须有 _dry_run_<tool>"""
+    """dry_run_supported=True 时必须实现 ``_dry_run_<tool>``。"""
 
     def test_supported_with_fn_no_violation(self) -> None:
         reg = _make_reg(dry_run_supported=True, dry_run_fn=lambda: None)

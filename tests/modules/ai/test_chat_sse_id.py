@@ -1,4 +1,4 @@
-"""spec §3.2 v1.5+: confirmation_required SSE 帧自动附 id: 字段（当 AI_SSE_RESUME_ENABLED=True）"""
+"""启用 SSE 续传时，confirmation_required 帧自动附带 id 字段。"""
 
 # ruff: noqa: ARG001, PLC0415
 

@@ -43,25 +43,25 @@ def _reset_redis_client() -> None:
 
     exec_mod.redis_client = redis_module.redis_client
 
-    # Task 11+: 刷新 auth.service.redis_client 引用 —— /ai/chat 经 get_current_user
+    # 刷新 auth.service.redis_client 引用；/ai/chat 经 get_current_user
     # dependency 调 _is_blacklisted（redis_client.get token blacklist）。若不刷新，
     # 跨测试 loop 关闭后此引用仍指向上轮 loop 的客户端，触发 "Event loop is closed".
     from app.modules.auth import service as auth_service  # noqa: PLC0415
 
     auth_service.redis_client = redis_module.redis_client
 
-    # Task 11+: chat.py 顶部 `from app.core.redis import redis_client` 也绑死引用，
+    # chat.py 顶部导入 redis_client，也需要刷新绑定引用。
     # is_ip_blacklisted / record_injection_hit_conversation 用的是这个引用.
     from app.modules.ai.api import chat as chat_mod  # noqa: PLC0415
 
     chat_mod.redis_client = redis_module.redis_client
 
-    # Task 11+: supervisor.quota 模块也顶部 import redis_client（spec §9 配额检查）.
+    # supervisor.quota 也在模块顶部导入 redis_client。
     from app.modules.ai.agents.supervisor import quota as quota_mod  # noqa: PLC0415
 
     quota_mod.redis_client = redis_module.redis_client
 
-    # Task 12+: audit_middleware.py 顶部 `from app.core.redis import redis_client` 也
+    # audit_middleware.py 顶部导入 redis_client，也
     # 绑死引用（_resolve_username 走 redis 缓存）。每个请求都过 middleware，loop
     # 切换后若不刷新，会触发 "Event loop is closed" 让整个请求 500.
     from app.middleware import audit_middleware as audit_mod  # noqa: PLC0415
@@ -173,7 +173,7 @@ def _make_agent(code: str, name: str, description: str = "", display_order: int 
 
 @pytest.fixture
 def mock_visible_agents(monkeypatch):
-    """spec §6.3 测试前置：monkeypatch `list_visible_agents` 返回内存对象.
+    """monkeypatch ``list_visible_agents`` 返回内存对象。
 
     比 UPDATE ai_agent SET enabled=true 更优：
     - 零 DB 写入，无污染（CLAUDE.md 硬规则 #7 测试隔离）
@@ -285,7 +285,7 @@ async def seed_test_message(auth_token) -> int:
 async def seed_test_message_other_user(auth_token) -> int:
     """创建一条属于另一个用户的 assistant 消息，返回 message_id.
 
-    用于 test_admin_can_feedback_other_users_message（spec §6.4: 超管可反馈他人消息）.
+    用于验证超级管理员可以反馈其他用户的消息。
     """
     from sqlalchemy import delete, select
 

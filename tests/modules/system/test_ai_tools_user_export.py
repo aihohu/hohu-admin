@@ -1,6 +1,6 @@
-"""AI tool `user.export` 单测（Task 33，spec §2.31 line 1626 落地）。
+"""AI 工具 ``user.export`` 行为测试。
 
-Task 27 已实现同步导出 + 强制建 ExportTask；Task 33 把 result_view 从
+同步导出始终创建 ExportTask，并将 result_view 从
 rows_affected 升级为 detail_card，携带 downloadUrl / fileSize / expiresAt，
 让前端 DetailCardView 渲染「下载」按钮（AI 对话内闭环）。
 
@@ -56,7 +56,7 @@ def file_storage() -> MockFileStorage:
 
 
 class TestUserExportDetailCard:
-    """Task 33：user_export 返回 detail_card + downloadUrl。"""
+    """user_export 返回 detail_card 和 downloadUrl。"""
 
     async def test_result_view_is_detail_card(
         self, db_session: AsyncSession, file_storage: MockFileStorage, monkeypatch
@@ -116,7 +116,7 @@ class TestUserExportDetailCard:
         """data（LLM 视角）含 exportId + rowCount + downloadUrl。
 
         LLM 引导用户点击下载时需要 downloadUrl 字面量；
-        rowCount 已在 data 中（Task 27 现状），保持。
+        rowCount 已在 data 中，保持现有兼容行为。
         """
         monkeypatch.setattr(
             "app.modules.system.user.export_service.get_file_storage",
@@ -132,7 +132,7 @@ class TestUserExportDetailCard:
 
 
 class TestAlwaysCreatesTask:
-    """Task 34 / spec §8.1 line 2903 + §2.31 v2.2 P1-5 反例 1：
+    """同步 AI 导出也必须形成完整审计链。
     AI tool `user.export` 任何行数都建 ExportTask。
 
     防止「HR 凌晨通过 AI 导出 1 行员工数据，事后无 DB 记录可追溯」。
@@ -146,7 +146,7 @@ class TestAlwaysCreatesTask:
     ) -> None:
         """AI tool 入口导出 → DB 有 ExportTask 行 + status=SUCCESS + 审计字段齐。
 
-        spec §2.31 v2.2 P1-5：即使同步路径（甚至只 1 行）也强制建 task。
+        即使同步路径只有一行，也必须创建任务。
         """
         monkeypatch.setattr(
             "app.modules.system.user.export_service.get_file_storage",
@@ -165,7 +165,7 @@ class TestAlwaysCreatesTask:
             )
         ).scalar_one()
 
-        # 审计字段齐全（spec §2.31 line 1436-1453）
+        # 审计字段齐全。
         assert task.status == ExportTaskStatus.SUCCESS
         assert task.row_count == row_count
         assert task.reason == "QA always creates task"
@@ -173,7 +173,7 @@ class TestAlwaysCreatesTask:
         assert task.file_storage_key is not None
         assert task.file_size_bytes is not None
         assert task.file_size_bytes > 0
-        # filter_snapshot 冻结（spec §2.31 line 1516-1520）
+        # filter_snapshot 冻结导出时条件。
         assert "accessible_dept_ids" in task.filter_snapshot
         assert "filter_evaluated_at" in task.filter_snapshot
         # 时间戳链路完整

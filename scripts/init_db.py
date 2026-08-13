@@ -24,7 +24,7 @@ from app.modules.system.models.user import User
 system_id = next_id()
 ai_id = next_id()
 monitor_id = next_id()
-# Task 16 spec §10 line 3095：用户管理菜单 + 2 按钮（import / export）共用 menu_id
+# 用户管理菜单和导入、导出按钮共用 menu_id。
 # 链路，按钮 parent_id 必须指向 system_user 菜单。模块级避免内联 next_id() 后无法被
 # 后续按钮引用。
 _system_user_menu_id = next_id()
@@ -107,7 +107,7 @@ init_menus = [
         multi_tab=False,
         menu_id=_system_user_menu_id,
     ),
-    # Task 16 spec §10 line 3095：用户导入 / 导出按钮权限（fresh install 立即生效）
+    # 初始化用户导入和导出按钮权限。
     Menu(
         parent_id=_system_user_menu_id,
         menu_name="导入",
@@ -437,7 +437,7 @@ init_menus.extend(
 )
 
 
-# sys_config 种子：fresh install 自动注入业务必须的配置项（spec §10 Task 16）。
+# sys_config 种子：初始化业务必需配置项。
 # 已有部署走 sync_menus.py 增量拿菜单按钮，但 sys_config 不归 sync_menus 管，
 # 现有部署的 default_password 由部署方在 admin UI 手动配（helper 缺失时抛
 # AI_IMPORT_DEFAULT_PASSWORD_NOT_SET，避免静默用错密码）。
@@ -447,7 +447,7 @@ def default_password_seed_value(env: str) -> str:
 
 
 init_configs = [
-    # spec §2.5 line 212：导入新用户的默认密码（明文存库，导入时哈希）
+    # 导入新用户的默认密码以配置值保存，创建用户时再哈希。
     # is_public=False：未授权访问 /system/config/public 不暴露此键（防敏感配置泄漏）
     Config(
         config_name="导入用户默认密码",
@@ -460,7 +460,7 @@ init_configs = [
         remark=(
             "【安全提示】批量导入新用户的初始密码（明文存库，导入时哈希）。"
             "上线前请改为强密码并定期轮换；prod 环境禁止保留默认值 Hohu123456。"
-            "决策 §2.5：管理员线下告知用户初始密码，导入接口不返回此值。"
+            "管理员线下告知用户初始密码，导入接口不返回此值。"
         ),
     ),
 ]
@@ -523,7 +523,7 @@ async def init_db():
         # 创建初始菜单
         db.add_all(init_menus)
 
-        # 创建初始 sys_config（spec §2.5：导入默认密码必须 seed）
+        # 创建初始 sys_config，包括用户导入默认密码。
         db.add_all(init_configs)
 
         # 创建与既有 R_* 编码契约一致的初始角色

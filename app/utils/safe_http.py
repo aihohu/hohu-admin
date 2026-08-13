@@ -1,11 +1,11 @@
-"""低代码应用外部 HTTP 调用的 SSRF 防护层（spec §SSRF Phase 1）。
+"""低代码应用外部 HTTP 调用的 SSRF 防护层。
 
 所有低代码 api_call / x-external-ref 拉外部数据都必须走 SafeHttpClient，
 不允许应用代码直接 httpx.get。
 
-Phase 1 防护：协议白名单 + URL pattern 白名单 + IP 黑名单 + IPv4-mapped IPv6
+当前防护：协议白名单 + URL pattern 白名单 + IP 黑名单 + IPv4-mapped IPv6
 双栈校验 + follow_redirects=False + 1MB 响应上限 + 5s/10s 超时。
-Phase 2 升级点：DNS rebinding 防护（解析→校验→直连 IP + Host header）。
+当前实现只做单次 DNS 解析；如需抵御 DNS rebinding，必须改为解析、校验后直连 IP 并固定 Host。
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ MAX_RESPONSE_BYTES = 1024 * 1024  # 1MB
 DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 ALLOWED_SCHEMES = frozenset({"http", "https"})
 
-# spec §6.5 line 968：含 0.0.0.0/8（伪代码遗漏，按文字描述补）
+# 阻止未指定地址、私网、环回、链路本地和运营商共享地址段。
 BLOCKED_NETWORKS: tuple[ip_network, ...] = (
     ip_network("0.0.0.0/8"),
     ip_network("10.0.0.0/8"),
@@ -41,7 +41,7 @@ BLOCKED_NETWORKS: tuple[ip_network, ...] = (
 def _validate_ip(ip_str: str) -> None:
     """单 IP 校验：IPv4-mapped IPv6 双栈检查后查黑名单。"""
     addr = ip_address(ip_str)
-    # IPv4-mapped IPv6（::ffff:x.x.x.x）：取出内嵌 IPv4 再查（spec §SSRF Phase 1 第 3 条）
+    # IPv4-mapped IPv6 必须按内嵌 IPv4 再检查，避免绕过 IPv4 黑名单。
     if isinstance(addr, IPv6Address) and addr.ipv4_mapped is not None:
         addr = addr.ipv4_mapped
     for net in BLOCKED_NETWORKS:
@@ -89,7 +89,7 @@ class SafeHttpClient:
         if allowed_pattern is not None and not re.match(allowed_pattern, url):
             raise SSRFBlockedException(f"URL 不匹配声明的 pattern：{allowed_pattern}")
 
-        # 3. DNS 解析 + IP 黑名单（单次解析，Phase 2 加 rebinding 防护）
+        # 3. 单次 DNS 解析 + IP 黑名单；此处尚不抵御解析后换绑。
         infos = await _async_getaddrinfo(parsed.hostname)
         for info in infos:
             _validate_ip(info[4][0])

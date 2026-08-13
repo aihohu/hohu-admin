@@ -1,20 +1,20 @@
-"""AI 配置读取（spec §11.2 / §11.4 / §6.4）
+"""AI 安全、配额与路由配置读取。
 
 把硬编码常量改读 sys_config 表，60s 进程内缓存（参考 keyword_blocklist.py 模式）。
 
-支持的 key（spec §11.2）：
+支持的 key：
   - ai:rate_limit:user_write_per_min      (int, default 20)        L1 用户写速率
   - ai:quota:daily_per_user               (int, default 2000)      L2 用户日配额
   - ai:limit:tool_timeout_sec             (int, default 10)        L3 单 tool 超时
   - ai:limit:max_history_messages         (int, default 50)        历史消息滑窗
   - ai:auto_disable:injection_per_hour    (int, default 5)         注入自动禁用阈值
-  - ai:auto_disable:perm_denied_per_hour  (int, default 50)        §11.4 IP 拉黑阈值
+  - ai:auto_disable:perm_denied_per_hour  (int, default 50)        IP 拉黑阈值
   - ai:auto_disable:duration_sec          (int, default 86400=24h) 自动禁用时长
   - ai:failures:threshold                 (int, default 2)         连续失败兜底阈值
   - ai:failures:ttl_sec                   (int, default 600=10min) 失败计数 TTL
-  - ai:supervisor_enabled                 (bool, default True)     Supervisor 总开关（§15.3）
-  - ai:supervisor_daily_limit             (int, default 100)       Supervisor LLM 日配额（§9）
-  - ai:routing_legacy_null_mode           (bool, default False)    null 走 DEFAULT_AGENT_CODE 旧行为（§15.3）
+  - ai:supervisor_enabled                 (bool, default True)     Supervisor 总开关
+  - ai:supervisor_daily_limit             (int, default 100)       Supervisor LLM 日配额
+  - ai:routing_legacy_null_mode           (bool, default False)    null 使用默认 agent_code
 
 设计：
   - 模块级缓存（key → (value, fetched_at)），60s 自然过期
@@ -106,7 +106,7 @@ async def get_ai_config_str_list(
     *,
     force_refresh: bool = False,
 ) -> list[str]:
-    """读 JSON 数组配置（缓存 60s，spec §5.4 SR-17 ai:enabled_tools 用）
+    """读取 JSON 数组配置并缓存 60 秒，供 ``ai:enabled_tools`` 等配置使用。
 
     sys_config 存的是 JSON 字符串（如 '["file.parse", "provider.export"]'）。
     解析失败 / 非 list / 元素非 str 时回退到 default（容错优先，不抛异常）。

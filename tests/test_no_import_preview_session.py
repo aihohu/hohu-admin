@@ -1,6 +1,6 @@
-"""静态防回归：ImportPreviewSession 类应无残留（spec §3.6 v2.2 P1-2 + Task 22b）。
+"""静态防回归：ImportPreviewSession 类不应再出现。
 
-v2.2 P1-2 决策（spec §3.6 line 2489-2510）：合并 ImportPreviewSession → ImportBatch
+ImportPreviewSession 已合并到 ImportBatch，
 作为唯一 aggregate root。删除独立 ImportPreviewSession 类，所有 preview 状态/字段进
 ImportBatch（status=PREVIEW_DONE / preview_token / summary_new 等）。
 
@@ -28,17 +28,16 @@ def _scan_import_preview_session() -> list[str]:
 
 
 def test_no_import_preview_session_class_in_app() -> None:
-    """spec §3.6 v2.2 P1-2：``ImportPreviewSession`` 已合并到 ``UserImportBatch``。
+    """``ImportPreviewSession`` 已合并到 ``UserImportBatch``。
 
     扫描 ``app/`` 目录所有 .py 文件，不应出现 ``ImportPreviewSession`` 字符串
     （类定义、import、注释、字符串都算）。
 
     **反例**: 重新引入 ``class ImportPreviewSession`` → 违反 single aggregate root
-    设计（spec §3.6 line 2489），状态机分散到两个表 → 跨表事务 + 一致性陷阱。
+    若状态机重新分散到两个表，会引入跨表事务和一致性陷阱。
     **回归**: 本测试 grep 整个 ``app/``，任何残留都会失败。
     """
     matches = _scan_import_preview_session()
-    assert not matches, (
-        "Found ImportPreviewSession references (spec §3.6 v2.2 P1-2 forbids this): "
-        + ", ".join(matches)
+    assert not matches, "Found obsolete ImportPreviewSession references: " + ", ".join(
+        matches
     )

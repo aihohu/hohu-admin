@@ -1,4 +1,4 @@
-"""HITL 确认端点 — spec §8.3（含 2026-07-10 修订 S-13 / S-14）
+"""HITL 确认端点。
 
 POST /ai/confirm
   body: {confirmationId, action}
@@ -19,11 +19,11 @@ POST /ai/confirm
      status="stream_gone"（前端停止轮询，提示用户重新发起）
 
 修订记录：
-  - 2026-07-10 S-13：HITL 期间用户被 §11.4 自动禁用后仍可 POST /ai/confirm
+  - HITL 期间用户被自动禁用后仍可调用 POST /ai/confirm
     执行破坏性操作 → 加 check_user_disabled 阻断
   - 2026-07-10 S-14：wake 失败时返回 200+queued 误导前端轮询 30s → 改返回
     status="stream_gone" + mark_expired_if_pending 兜底审计；wake 实现要求
-    防双击 race（spec §8.3 修订 wake 契约 + manager.py wake pop entry）
+    通过原子状态迁移和唤醒载荷消费防止双击竞态
 """
 
 import asyncio
@@ -437,7 +437,7 @@ async def confirm_tool(
 ) -> ResponseModel[ConfirmResponse]:
     """用户在 HITL 抽屉点确认 / 取消
 
-    spec §8.3：
+    确认流程：
       - confirmation_id 不可枚举（secrets.token_urlsafe(32)）
       - 5min TTL，过期自动 reject
       - 必须原会话所有者确认
@@ -467,7 +467,7 @@ async def confirm_tool(
 
     # 2. owner 校验
     if pending.user_id != current_user.user_id:
-        # 他人 token 尝试确认非自己会话的 HITL（spec §9.6 NOT_CONFIRMATION_OWNER）
+        # 禁止用户确认不属于自己会话的操作。
         logger.warning(
             "HITL confirm owner mismatch: confirmation_id=%s pending_user=%d current_user=%d",
             req.confirmation_id,
@@ -487,7 +487,7 @@ async def confirm_tool(
         raise AuthorizationException(error_code="NOT_CONFIRMATION_OWNER")
 
     # 3. 修订 S-13：用户禁用检查
-    # HITL 挂起期间用户可能被 §11.4 自动禁用（注入命中 5 次/h），禁用后用户仍
+    # HITL 挂起期间用户可能被自动禁用；禁用后用户仍
     # 持有 confirmation_id 可直接 POST /ai/confirm，必须阻断。
     if await check_user_disabled(redis_client, current_user.user_id):
         logger.warning(
@@ -501,7 +501,7 @@ async def confirm_tool(
         )
 
     # 4. 写 ai_operation_log.approved_by（审计追责，无论 stream 是否还在）
-    #    reject 也写 approved_by（§4.4 字段语义：按 confirm 的用户）
+    # 拒绝操作同样记录 approved_by，表示执行确认动作的用户。
     log = await operation_log_service.get_by_tool_call_id(
         db, pending.tool_call_id, user_id=current_user.user_id
     )
@@ -597,5 +597,5 @@ async def confirm_tool(
     )
 
 
-# 给 lint / IDE：避免未使用导入告警（BusinessRuleException 在 Phase 3.2 executor 接入时用）
+# 给 lint / IDE：避免未使用导入告警，执行器会使用 BusinessRuleException。
 _ = BusinessRuleException

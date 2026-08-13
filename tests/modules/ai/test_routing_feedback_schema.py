@@ -1,4 +1,4 @@
-"""spec §7.1c: ai_routing_feedback 表 schema 验证."""
+"""ai_routing_feedback 表 schema 验证。"""
 
 # ruff: noqa: PLC0415
 
@@ -27,7 +27,7 @@ def test_routing_feedback_columns():
 
 
 def test_routing_feedback_check_constraints():
-    """spec §7.1c: 2 个 CHECK 约束 — feedback 枚举 + correction 必填匹配."""
+    """CHECK 约束限制 feedback 枚举并匹配 correction 必填规则。"""
     from app.modules.ai.models.routing_feedback import AiRoutingFeedback
 
     constraint_names = {

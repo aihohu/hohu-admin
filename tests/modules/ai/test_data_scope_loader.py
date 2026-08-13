@@ -1,6 +1,6 @@
 """build_data_scope_context 单元测试
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §6.2。
+覆盖 AI 工具数据范围上下文构造。
 
 super_admin / DATA_SCOPE_ALL 路径不依赖 db，做纯单元测试。
 其它 scope 路径需要 user / role / dept 关系数据，留 Plan 1.5 鉴权矩阵测试覆盖。
@@ -63,7 +63,7 @@ class TestBuildDataScopeContextSuperAdmin:
     async def test_super_admin_returns_all_visible(
         self, mock_super_admin: MagicMock, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """spec §6.2: 超管 → accessible_*_ids=None + filters=[]"""
+        """超级管理员返回无限制 ID 和空过滤器。"""
         monkeypatch.setattr(loader_mod, "is_super_admin", lambda u: True)
 
         ctx = await build_data_scope_context(MagicMock(), mock_super_admin)
@@ -76,7 +76,7 @@ class TestBuildDataScopeContextSuperAdmin:
     async def test_data_scope_all_returns_all_visible(
         self, mock_normal_user: MagicMock, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """spec §6.2: DATA_SCOPE_ALL → accessible_*_ids=None + filters=[]"""
+        """DATA_SCOPE_ALL 返回无限制 ID 和空过滤器。"""
         _patch(monkeypatch)  # is_super_admin=False, get_best_scope=ALL
 
         ctx = await build_data_scope_context(MagicMock(), mock_normal_user)
@@ -87,7 +87,7 @@ class TestBuildDataScopeContextSuperAdmin:
 
 
 class TestBuildDataScopeContextStructure:
-    """验证返回类型是 DataScopeContext（spec §4.6 契约）"""
+    """返回类型应为 DataScopeContext。"""
 
     async def test_returns_data_scope_context_instance(
         self, mock_super_admin: MagicMock, monkeypatch: pytest.MonkeyPatch

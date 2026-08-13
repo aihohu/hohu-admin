@@ -1,12 +1,11 @@
-"""用户导入导出 Pydantic schemas（spec §3 + §2.30，Task 1 + Task 0e）。
+"""用户导入导出 Pydantic schemas。
 
 Pydantic v2 惯例（与 app/modules/system/schemas/user.py 对齐）：
 - alias_generator=to_camel + populate_by_name=True
 - BigInteger ID 通过 @field_serializer 序列化为字符串（防 JS BigInt 精度丢失）
 - 时间字段 ISO 8601 字符串
 
-ORM（UserImportBatch / UserExportTask）在 models.py Task 2 落地，
-本模块仅含 API 响应 / 请求 body 的 Pydantic 类 + ReasonSchema mixin。
+本模块只定义 API 请求、响应和审计理由校验；ORM 位于 models.py。
 """
 
 from datetime import datetime
@@ -31,7 +30,7 @@ class _CamelBase(BaseModel):
 
 
 class ReasonSchema(BaseModel):
-    """批量操作审计理由 mixin（spec §2.30 v2.2 P1-3）。
+    """批量操作审计理由 mixin。
 
     所有批量写入操作（import preview / execute / cancel / export）必填 reason，
     进入 sys_user_import_batch.reason + batch_log.detail.reason 审计链路。
@@ -52,7 +51,7 @@ class ReasonSchema(BaseModel):
     @field_validator("reason")
     @classmethod
     def _strip_and_require_non_empty(cls, v: str) -> str:
-        """strip 后存库（防审计字段两端空白漂移）；全空白拒绝（spec §2.30 line 1420）。"""
+        """去除两端空白后存库，并拒绝全空白理由。"""
         stripped = v.strip()
         if not stripped:
             raise ValueError("reason 不能为空或全空白")
@@ -60,13 +59,11 @@ class ReasonSchema(BaseModel):
 
 
 class UserImportRecord(_CamelBase):
-    """Excel 一行 → 一个 record（spec §3.1）。"""
+    """从一行表格数据规范化得到的用户记录。"""
 
     row_num: int = Field(..., description="Excel 行号（错误定位用）")
     user_name: str = Field(..., min_length=2, max_length=16, description="账号（必填）")
-    employee_no: str | None = Field(
-        None, max_length=64, description="员工工号（spec §2.24）"
-    )
+    employee_no: str | None = Field(None, max_length=64, description="员工工号")
     nickname: str | None = Field(None, max_length=16)
     user_email: str | None = Field(None, max_length=128)
     user_phone: str | None = Field(None, max_length=32)
@@ -80,12 +77,12 @@ class UserImportRecord(_CamelBase):
     user_gender: Literal["0", "1", "2"] = Field("0", description="0 未知 / 1 男 / 2 女")
     status: Literal["1", "2"] = Field(
         "1",
-        description="1 启用 / 2 禁用（v2.3 §2.9.1 修订：对齐 DB / 前端 / 其他模块真实取值）",
+        description="1 启用 / 2 禁用",
     )
 
 
 class FailedRow(_CamelBase):
-    """导入失败行（spec §3.4）。"""
+    """导入失败行及错误信息。"""
 
     row_num: int
     field: str = Field(..., description="出错字段名")
@@ -98,7 +95,7 @@ class FailedRow(_CamelBase):
 
 
 class ImportDryRunResult(_CamelBase):
-    """预检结果（spec §3.2 v2.2 P1：records 限流 + 大批走文件下载）。
+    """导入预检结果，明细限流，大批量结果通过文件下载。
 
     records 截断到 MAX_PREVIEW_RECORDS=2000，超出写 *_records_file 供下载。
     """
@@ -138,15 +135,13 @@ class ImportDryRunResult(_CamelBase):
 
 
 class ImportResult(_CamelBase):
-    """正式导入结果（spec §3.3 v2.2 P1：API 不返回 failed_rows 数组，只返文件）。
+    """正式导入结果；API 不返回失败行数组，只返回失败文件。
 
-    ``status`` 字段（spec §5.1 execute 响应）：SUCCESS / PARTIAL_SUCCESS / FAILED，
+    ``status`` 可为 SUCCESS、PARTIAL_SUCCESS 或 FAILED，
     让前端不查 batch 详情就能判断结果。
     """
 
-    batch_id: str = Field(
-        ..., description="关联 sys_user_import_batch（spec §2.27 幂等用）"
-    )
+    batch_id: str = Field(..., description="关联 sys_user_import_batch，用于幂等控制")
     status: str = Field(..., description="批次终态：SUCCESS/PARTIAL_SUCCESS/FAILED")
     success_count: int
     skipped_count: int = Field(0, description="on_conflict=skip 命中的")
@@ -161,12 +156,12 @@ class ImportResult(_CamelBase):
     )
     idempotent_replay: bool = Field(
         False,
-        description="True 表示这是幂等重放，非首次执行（spec §2.27）",
+        description="True 表示这是幂等重放，不是首次执行",
     )
 
 
 class UserExportFilter(_CamelBase):
-    """导出筛选（spec §3.5，POST body）。"""
+    """用户导出的 POST body 筛选条件。"""
 
     user_name: str | None = None
     nickname: str | None = None
@@ -177,7 +172,7 @@ class UserExportFilter(_CamelBase):
 
 
 class UserExportRequest(UserExportFilter):
-    """POST /system/user/export body（spec §5.2 + §2.30 v2.2 P1-3）。
+    """POST /system/user/export 请求体。
 
     继承 UserExportFilter 全部 filter 字段 + 加必填 reason（1-256 字符）。
     reason 校验与 ReasonSchema 对称：strip 后非空。
@@ -187,7 +182,7 @@ class UserExportRequest(UserExportFilter):
         ...,
         min_length=1,
         max_length=256,
-        description="业务理由（spec §2.30 v2.2 P1-3，1-256 字符）",
+        description="业务理由（1-256 字符）",
     )
 
     @field_validator("reason")
@@ -201,7 +196,7 @@ class UserExportRequest(UserExportFilter):
 
 
 class UserExportTaskQuery(_CamelBase):
-    """GET /system/user/export 列表查询参数（spec §2.31 P1-5 line 1593-1595）。
+    """GET /system/user/export 列表查询参数。
 
     支持 current / size 分页 + operator_id / status 过滤。
     status 用 str（不是 Literal[ExportTaskStatus]）以便 service 层
@@ -218,7 +213,7 @@ class UserExportTaskQuery(_CamelBase):
 
 
 class UserImportBatchQuery(_CamelBase):
-    """GET /system/user/import 列表查询参数（spec §5.4 v2.2 P2 line 2272-2278）。
+    """GET /system/user/import 列表查询参数。
 
     支持 current / size 分页 + operator_id / status / created_at 时间窗过滤。
     status 用 str（与 UserExportTaskQuery 对称），service 层抛
@@ -245,17 +240,17 @@ class UserImportBatchQuery(_CamelBase):
 
 
 class UserImportBatchResponse(_CamelBase):
-    """导入批次 API 响应（spec §3.6 v2.2 P1-2 + §5.4 v2.2 P2：唯一 aggregate root）。
+    """导入批次 API 响应。
 
-    Pydantic 类，与 ORM UserImportBatch（models.py Task 2）分离：
+    Pydantic 类与 ORM UserImportBatch 分离：
     - ORM 用于 DB 层
     - 本响应类用于 API 序列化（ID 字符串化、时间 ISO 字符串）
 
-    Task 15 GET /import/{batch_id} 字段补充（spec §5.4 line 2238-2264）：
-    - ``operator_name``：join sys_user 拿的 user_name（spec §5.4 line 2246）
+    详情响应补充：
+    - ``operator_name``：关联 sys_user 获取的 user_name
     - ``expires_at``：动态计算（CREATED/PREVIEW_DONE = created_at+10min；
       终态 = finished_at+24h）
-    - ``sync_mode``：当前不查 batch_log，先返 None（决策 15.x 待 task 22 补齐）
+    - ``sync_mode``：批次冻结的员工同步策略
 
     安全：不暴露 ``preview_token`` / ``file_sha256`` / ``records_hash`` /
     ``reason``（reason 仅审计链路保留，前端查询接口不返回）。
@@ -265,7 +260,7 @@ class UserImportBatchResponse(_CamelBase):
     operator_id: int
     operator_name: str | None = Field(
         None,
-        description="操作人 user_name（join sys_user 反查，spec §5.4 line 2246）",
+        description="关联 sys_user 查询得到的操作人 user_name",
     )
     filename: str
     total_rows: int
@@ -283,7 +278,7 @@ class UserImportBatchResponse(_CamelBase):
         None,
         description=(
             "employee_no 同步策略（CREATE_ONLY / UPDATE_PROFILE / FULL_SYNC）。"
-            "当前不查 batch_log，先返 None（决策 15.x）。"
+            "未记录同步策略的历史批次返回 None。"
         ),
     )
     status: str
@@ -294,9 +289,9 @@ class UserImportBatchResponse(_CamelBase):
         None,
         description=(
             "批次过期时间（动态计算）。CREATED/PREVIEW_DONE：created_at + 10min"
-            "（preview TTL，spec §2.19）；"
+            "（预览有效期）；"
             "SUCCESS/PARTIAL_SUCCESS/FAILED/EXPIRED/CANCELLED：finished_at + 24h"
-            "（failed_rows_file 文件 TTL，spec §3.x）。"
+            "（失败清单文件有效期）。"
         ),
     )
 
@@ -307,14 +302,14 @@ class UserImportBatchResponse(_CamelBase):
 
 
 class UserImportBatchLogItem(_CamelBase):
-    """batch_log 单条记录响应（spec §5.5 v2.2 P2 #2.28）。
+    """批次日志单条响应。
 
-    spec §5.5 line 2285 契约：``{event, fromStatus, toStatus, detail, createdAt}``。
+    核心字段为 ``{event, fromStatus, toStatus, detail, createdAt}``。
     额外暴露 ``log_id``（前端列表 row key，避免用 createdAt 做 key 在同秒事件下碰撞）
-    + ``operator_id`` / ``operator_name``（审计追溯，对齐 Task 15 GET /import/{batch_id}
+    + ``operator_id`` / ``operator_name``（用于审计追溯，
     字段约定，outerjoin sys_user 反查 user_name）。
 
-    安全：``detail`` 是 JSON 字段，spec §2.28 line 1245 已声明「不存敏感数据」，
+    ``detail`` 不得存敏感数据，
     内含 chunk_index / chunk_size / failed_in_chunk / reason 等业务字段，可直传。
     """
 
@@ -334,9 +329,7 @@ class UserImportBatchLogItem(_CamelBase):
 
 
 class UserImportBatchCancelResponse(_CamelBase):
-    """POST /import/{batch_id}/cancel 响应（spec §5.6 v2.2 P2 #2.29 line 2298）。
-
-    spec §5.6 line 2298 契约：``{batchId, status, cancelledAt}``。
+    """POST /import/{batch_id}/cancel 响应。
 
     ``status`` 反映 cancel 操作完成后的当前 batch.status：
 
@@ -346,7 +339,7 @@ class UserImportBatchCancelResponse(_CamelBase):
       在下一个 chunk 边界检测并跳出 → PARTIAL_SUCCESS），cancelledAt=now（标志
       设置时间，前端可显示「已请求取消，等待当前 chunk 完成」）
 
-    spec §2.29 line 1338：cancel 请求立即 200，不等待 chunk 真的暂停。
+    取消请求立即返回，不等待正在执行的 chunk 完全停止。
     """
 
     batch_id: str
@@ -355,7 +348,7 @@ class UserImportBatchCancelResponse(_CamelBase):
 
 
 class UserExportTaskResponse(_CamelBase):
-    """导出任务 API 响应（spec §2.31 v2.2 P1-5）。"""
+    """导出任务 API 响应。"""
 
     export_id: str
     operator_id: int

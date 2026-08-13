@@ -79,7 +79,7 @@ def fake_task_function():
 
 
 class TestDoExecuteWritesRunnerIdAndPythonNow:
-    """spec §"测试矩阵" 9-10。"""
+    """验证任务运行器的超时与失败边界。"""
 
     async def test_log_written_with_runner_id(
         self, db_session, monkeypatch, fake_task_function

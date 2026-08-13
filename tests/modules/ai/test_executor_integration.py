@@ -1,6 +1,6 @@
-"""execute_tool 集成测试 — Phase 3.2 HITL + 流式协议 + 审计
+"""execute_tool 的 HITL、流式协议和审计集成测试。
 
-按 spec §3 / §6 / §8.2 验证：
+覆盖：
   - tool not found / perm denied 短路返回 ToolResult.failure
   - autonomous 流：emit tool_call_started + tool_call_result + 写 ai_operation_log
   - HITL 流（mock hitl_manager.hang）：emit confirmation_required + 接受 wake
@@ -287,7 +287,7 @@ def _build_deps(
     )
     agent = MagicMock()
     agent.code = agent_code
-    agent.daily_quota_per_user = agent_daily_quota  # v1.5+ SR-16
+    agent.daily_quota_per_user = agent_daily_quota  # Agent 级日配额。
 
     return ChatDeps(
         user=user,
@@ -307,7 +307,7 @@ def _build_deps(
 
 
 class TestInferAffectedRows:
-    """spec §8.1: result 卡片「N 行」尾部的来源规则"""
+    """验证结果卡片 affected_rows 的来源规则。"""
 
     def test_dry_run_count_takes_priority(self) -> None:
         from app.modules.ai.agents.gateway.executor import _infer_affected_rows
@@ -379,11 +379,11 @@ class TestInferAffectedRows:
 # ============ tool not found / perm denied ============
 
 
-# ============ v1.5+ SR-18: build_args_summary 白名单字段 ============
+# ============ build_args_summary 白名单字段 ============
 
 
 class TestBuildArgsSummary:
-    """spec §9.2 SR-18: args_summary 仅元信息（MVP 默认）+ 可选白名单字段"""
+    """args_summary 只包含元信息和可选白名单字段。"""
 
     def test_mvp_default_no_fields(self) -> None:
         """默认不传 args / summary_fields → 仅元信息（MVP 行为）"""
@@ -532,9 +532,9 @@ class TestShortCircuit:
 
 class TestAutonomousFlow:
     async def test_emits_started_and_result(self) -> None:
-        """spec §8.1: autonomous 流 emit tool_call_started + tool_call_result
+        """autonomous 流发送 tool_call_started 和 tool_call_result。
 
-        spec §8.1（更新）: started 透传 risk；result 含 duration_ms + affected_rows
+        started 透传 risk；result 包含 duration_ms 和 affected_rows。
         """
         _register_test_tools()
 
@@ -563,7 +563,7 @@ class TestAutonomousFlow:
         assert events[1].affected_rows is None
 
     async def test_writes_ai_operation_log(self) -> None:
-        """spec §9.1: 每次 tool 调用写一行 ai_operation_log（autonomous → success）"""
+        """每次 autonomous 工具调用写入一条成功操作日志。"""
         _register_test_tools()
 
         deps = _build_deps()
@@ -594,7 +594,7 @@ class TestPreparedPreviewOnlyFlow:
     async def test_preview_only_discards_capability_and_creates_no_action(
         self,
     ) -> None:
-        """Task 35a.4: preview-only is a terminal, non-upgradeable projection."""
+        """Preview-only 是终态投影，不能升级为执行。"""
         _register_test_tools()
         events: list[Any] = []
 
@@ -637,7 +637,7 @@ class TestPreparedPreviewOnlyFlow:
     async def test_later_execute_intent_must_run_a_new_preview(
         self, monkeypatch
     ) -> None:
-        """Task 35a.4: an old preview cannot be promoted into an action."""
+        """历史预检结果不能被提升为执行动作。"""
         _register_test_tools()
         events: list[Any] = []
 
@@ -720,7 +720,7 @@ class TestHitlFlow:
     async def test_action_persistence_failure_rolls_back_pending_handoff(
         self, monkeypatch
     ) -> None:
-        """SR-36: no durable action means no Redis pending or handed-off guard."""
+        """没有持久化动作时，不创建 Redis pending 或 handed-off guard。"""
         from app.modules.ai.service.chat_run_service import chat_run_guard
         from app.modules.ai.service.prepared_action_service import (
             prepared_action_service,
@@ -795,7 +795,7 @@ class TestHitlFlow:
         assert registered.meta.name == _TEST_TOOL_HIGH
 
     async def test_prepared_preview_auto_enters_confirmation(self, monkeypatch) -> None:
-        """Task 35a.1: one explicit execute intent is enough to enter HITL."""
+        """一次明确的执行意图即可进入 HITL。"""
         _register_test_tools()
 
         async def fake_hang(confirmation_id, *, timeout_sec=None):
@@ -872,7 +872,7 @@ class TestHitlFlow:
         )
 
     async def test_prepared_preview_rejects_missing_outcome(self) -> None:
-        """SR-33: omission is not treated as execute intent."""
+        """省略执行意图字段不应被视为执行请求。"""
         _register_test_tools()
         events: list[Any] = []
 
@@ -1054,12 +1054,12 @@ class TestHitlFlow:
         assert not hasattr(ev, "args")
 
 
-# ============ query_cache 写入（spec §8.7） ============
+# ============ query_cache 写入 ============
 
 
 class TestQueryCacheWrite:
     async def test_readonly_writes_query_cache(self) -> None:
-        """spec §8.7: readonly tool 成功后写 ai:query_cache:<trace_id>"""
+        """只读工具成功后写入 ai:query_cache:<trace_id>。"""
         _register_test_tools()
 
         deps = _build_deps()
@@ -1105,11 +1105,11 @@ class TestQueryCacheWrite:
         assert entry is None  # 没写
 
 
-# ============ readonly tool affected_rows 门控（spec §2.3 v1.6+） ============
+# ============ readonly tool affected_rows 门控 ============
 
 
 class TestReadonlyAffectedRowsGate:
-    """spec §2.3 v1.6+: readonly tool 不展示 affected_rows（防误导）.
+    """只读工具不展示 affected_rows，避免误导用户。
 
     user.count 返回 {"count": 42}，旧逻辑会推断 affected_rows=42 → 前端显示
     「已执行 · 230ms · 42 行」误导用户以为 42 行受影响。修法：readonly tool
@@ -1179,11 +1179,11 @@ class TestReadonlyAffectedRowsGate:
             ToolRegistry.get()._tools.pop(tool_name, None)  # noqa: SLF001
 
 
-# ============ 边界：Redis down 时 executor 降级（spec §2.6） ============
+# ============ Redis 故障时 executor 降级 ============
 
 
 class TestRedisDownGracefulDegrade:
-    """spec §2.6: Redis 故障 → 所有写操作拒绝 + 告警
+    """Redis 故障时拒绝所有写操作并告警。
 
     Redis 是 quota / failures / hitl_manager / query_cache 的核心依赖。
     故障时应该优雅降级，不应让异常冒到用户层导致 500。
@@ -1220,7 +1220,7 @@ class TestRedisDownGracefulDegrade:
     async def test_high_risk_tool_redis_down_failure(self) -> None:
         """high risk 写工具 Redis down → quota check 抛异常 → 应转 ToolResult.failure
 
-        spec §2.6: Redis 故障时写操作拒绝（保守降级，不静默放过）。
+        Redis 故障时写操作保守拒绝，不静默放过。
         executor.py 已加 RedisError 兜底，转 AI_REDIS_DOWN。
         """
         from redis.exceptions import ConnectionError as RedisConnectionError
@@ -1253,7 +1253,7 @@ class TestRedisDownGracefulDegrade:
         """连续失败检查 Redis down → low risk 也应短路拒绝（保守降级）
 
         即使是 low risk，check_repeated_failure 走 Redis，故障时拒绝。
-        spec §2.6: 安全检查失败时不放过任何 tool。
+        安全检查失败时不允许任何工具继续执行。
         """
         from redis.exceptions import ConnectionError as RedisConnectionError
 
@@ -1279,11 +1279,11 @@ class TestRedisDownGracefulDegrade:
             exec_mod.redis_client = original
 
 
-# ============ v1.5+ SR-16: per-agent L2 叠加全局 L2 ============
+# ============ per-agent L2 叠加全局 L2 ============
 
 
 class TestPerAgentQuota:
-    """spec §6.4 SR-16：agent.daily_quota_per_user 非 None 时叠加 per-agent L2"""
+    """配置 agent.daily_quota_per_user 时叠加 per-agent L2。"""
 
     async def test_no_agent_quota_skips_per_agent_check(self) -> None:
         """agent.daily_quota_per_user=None → 不调 check_l2_agent_quota，key 不存在"""

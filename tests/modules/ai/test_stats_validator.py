@@ -1,6 +1,6 @@
 """stats_validator 单元测试
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §5.5 / §9.6。
+覆盖聚合工具字段白名单校验。
 """
 
 import pytest

@@ -1,9 +1,9 @@
-"""User import/export helpers 测试（Task 3）。
+"""User import/export helpers 行为测试。
 
 覆盖：
 - OVERWRITE_NEVER / OVERWRITE_ALLOWED 不交集（防同一字段被误归类）
 - OVERWRITE_NEVER 必含 user_id / user_name / hashed_password（安全锚点）
-- OVERWRITE_ALLOWED 含 employee_no（spec §2.24 v2.2 P1）
+- OVERWRITE_ALLOWED 包含 employee_no
 - EXPORT_ALLOWED_FIELDS 不含 hashed_password / employee_no（导出最小化）
 - get_default_password：配置存在返回值 / 缺失抛 AI_IMPORT_DEFAULT_PASSWORD_NOT_SET
 
@@ -47,21 +47,21 @@ class TestOverwriteConstants:
     """OVERWRITE_* 常量静态校验（防 typo / 防误归类）。"""
 
     def test_overwrite_never_and_allowed_disjoint(self):
-        """安全锚点：永不覆盖的字段不应出现在 ALLOWED 中（spec §2.21 反例 1）。"""
+        """永不覆盖的字段不应出现在 ALLOWED 中。"""
         assert OVERWRITE_NEVER & OVERWRITE_ALLOWED == frozenset(), (
             "OVERWRITE_NEVER ∩ OVERWRITE_ALLOWED 必须为空，否则 on_conflict=overwrite "
             "时敏感字段（如 hashed_password）会被覆盖"
         )
 
     def test_overwrite_never_contains_security_anchors(self):
-        """spec §2.21：user_id / user_name / hashed_password 必须在 NEVER 集合。"""
+        """user_id、user_name 和 hashed_password 必须在 NEVER 集合。"""
         for required in ("user_id", "user_name", "hashed_password"):
             assert required in OVERWRITE_NEVER, (
                 f"{required} 必须在 OVERWRITE_NEVER（防 identity / 凭据被覆盖）"
             )
 
     def test_overwrite_allowed_contains_employee_no(self):
-        """spec §2.24 v2.2 P1：employee_no 在 ALLOWED（HR 改工号场景）。"""
+        """employee_no 位于 ALLOWED，支持 HR 修改工号。"""
         assert "employee_no" in OVERWRITE_ALLOWED
 
     def test_overwrite_allowed_excludes_security_anchors(self):
@@ -71,15 +71,15 @@ class TestOverwriteConstants:
 
 
 class TestExportAllowedFields:
-    """EXPORT_ALLOWED_FIELDS 白名单（spec §2.9 / §3.6 line 266）。"""
+    """EXPORT_ALLOWED_FIELDS 白名单测试。"""
 
     def test_export_excludes_sensitive_fields(self):
-        """hashed_password / employee_no 不进 Excel（spec §2.9 反例 1）。"""
+        """hashed_password 和 employee_no 不进入 Excel。"""
         assert "hashed_password" not in EXPORT_ALLOWED_FIELDS
         assert "employee_no" not in EXPORT_ALLOWED_FIELDS
 
     def test_export_contains_safe_fields(self):
-        """白名单必含的展示字段（spec §3.6 line 266）。"""
+        """白名单包含所有必要展示字段。"""
         required = {
             "user_name",
             "nickname",
@@ -99,7 +99,7 @@ class TestExportAllowedFields:
 
 
 class TestGetDefaultPassword:
-    """get_default_password helper（spec §2.5 / §3.6 line 2093）。
+    """get_default_password helper 行为测试。
 
     所有导入用户用 sys_config.auth:default_password 哈希入库。
     缺失时抛 AI_IMPORT_DEFAULT_PASSWORD_NOT_SET（防硬编码默认密码安全风险）。

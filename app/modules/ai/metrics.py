@@ -1,24 +1,24 @@
-"""AI Tool Gateway Prometheus 指标（spec §6.3 v1.5+）
+"""AI Tool Gateway Prometheus 指标。
 
-集中定义 8 个核心 metric + record helper（v2+ 提前到 v1.5+）：
+集中定义 8 个核心 metric 和记录 helper：
 
-  spec §6.3 核心：
+  核心工具调用：
     - ai_tool_calls_total{tool, status, risk, execution_mode}  Counter
     - ai_tool_call_duration_seconds{tool}                      Histogram
 
-  HITL（spec §6.3 + §8.4.1 多 worker 配套）：
+  HITL 与多 worker 协作：
     - ai_hitl_pending_count{mode}                              Gauge
     - ai_hitl_wake_total{mode, result}                         Counter
     - ai_hitl_pubsub_lost_total                                Counter（防丢失兜底命中）
     - ai_hitl_timeout_total{mode}                              Counter
 
-  配额 / 安全（spec §6.4 / §11）：
+  配额与安全：
     - ai_quota_rejected_total{level}                           Counter
     - ai_security_events_total{event_type}                     Counter
 
 label 命名遵循 Prometheus 最佳实践：
   - 一律 lowercase + snake_case
-  - **不含 user_id / confirmation_id / tool_call_id 等高基数 label**（§22 SR-8）
+  - 不包含 user_id、confirmation_id、tool_call_id 等高基数 label
   - 标签集合冻结：上线后改标签 = 数据断档
 
 业务代码不直接操作 prometheus 对象，只调 record_* helper。
@@ -26,7 +26,7 @@ label 命名遵循 Prometheus 最佳实践：
 
 from prometheus_client import Counter, Gauge, Histogram
 
-# ============ spec §6.3 核心 ============
+# ============ 核心工具调用 ============
 
 TOOL_CALLS_TOTAL = Counter(
     "ai_tool_calls_total",
@@ -41,7 +41,7 @@ TOOL_CALL_DURATION_SECONDS = Histogram(
     buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60),
 )
 
-# ============ HITL（spec §6.3 + §8.4.1 多 worker 配套） ============
+# ============ HITL 与多 worker 协作 ============
 
 HITL_PENDING_COUNT = Gauge(
     "ai_hitl_pending_count",
@@ -66,7 +66,7 @@ HITL_TIMEOUT_TOTAL = Counter(
     ["mode"],
 )
 
-# ============ 配额 / 安全（spec §6.4 / §11） ============
+# ============ 配额与安全 ============
 
 QUOTA_REJECTED_TOTAL = Counter(
     "ai_quota_rejected_total",
@@ -87,7 +87,7 @@ SECURITY_EVENTS_TOTAL = Counter(
 def record_tool_call(
     tool: str, status: str, risk: str, execution_mode: str, duration_sec: float
 ) -> None:
-    """埋点单次 tool 调用（spec §6.3）
+    """记录单次工具调用指标。
 
     Args:
         tool: tool 名（如 user.update_dept）

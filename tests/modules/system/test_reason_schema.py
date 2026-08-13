@@ -1,6 +1,6 @@
-"""ReasonSchema + reason 一致性校验测试（Task 0e，spec §2.30 v2.2 P1-3）。
+"""ReasonSchema 与业务 reason 一致性校验测试。
 
-覆盖 spec §8 测试清单中 4 个核心：
+覆盖四个核心边界：
 - test_reason_required_validation：缺失 / 空 / 全空白 → ValidationError
 - test_reason_max_length_256：超 256 字符 → ValidationError
 - test_reason_mismatch_between_preview_and_execute_rejected：一致性校验

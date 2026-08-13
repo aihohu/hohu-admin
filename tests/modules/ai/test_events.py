@@ -1,4 +1,4 @@
-"""SSE 5 类事件 + event_to_sse_data 单元测试 — spec §8.1
+"""SSE 事件模型和 event_to_sse_data 测试。
 
 字段命名决策：顶层 camelCase（与项目其他 API 响应一致）；确认事件只暴露
 安全 presentation，不再携带 raw args。
@@ -47,7 +47,7 @@ def _result(**overrides) -> ToolCallResultEvent:
 
 
 class TestCamelCaseKeys:
-    """spec §8.1: SSE 事件顶层字段全部 camelCase（决策记录在 events.py docstring）"""
+    """SSE 事件顶层字段全部使用 camelCase。"""
 
     def test_started_camel_case(self) -> None:
         data = json.loads(event_to_sse_data(_started()))
@@ -117,7 +117,7 @@ class TestCamelCaseKeys:
 
 
 class TestStartedRisk:
-    """risk 字段透传（spec §5.3 风险分级）"""
+    """risk 字段应原样透传。"""
 
     def test_low_risk_emitted(self) -> None:
         data = json.loads(event_to_sse_data(_started(risk="low")))
@@ -134,7 +134,7 @@ class TestStartedRisk:
         assert data["risk"] == "destructive"
 
     def test_trace_id_emitted_camel_case(self) -> None:
-        """spec §8.7: traceId 暴露给前端用于 chip 跳转回放"""
+        """traceId 暴露给前端用于 chip 跳转回放。"""
         data = json.loads(event_to_sse_data(_started(trace_id="tr_abc123")))
         assert data["traceId"] == "tr_abc123"
         assert "trace_id" not in data
@@ -239,7 +239,7 @@ class TestEventDataclasses:
 
 
 class TestStringifyLargeInts:
-    """spec §8.1 + CLAUDE.md #3: Snowflake ID（int64）序列化为 JSON 必须转 str
+    """Snowflake ID 序列化为 JSON 时必须转为字符串。
 
     JS Number.MAX_SAFE_INTEGER = 2^53 - 1 = 9007199254740991。
     Snowflake ID 是 int64，普遍 > 2^53（如 7483433649145122816）。
@@ -325,7 +325,7 @@ class TestStringifyLargeInts:
 
 
 class TestSseDataCompact:
-    """spec §8.1: 自定义事件 JSON 序列化，None 字段剔除"""
+    """自定义事件序列化时剔除 None 字段。"""
 
     def test_none_omitted(self) -> None:
         """error_code/error_msg 是 None 时不应出现在 JSON"""

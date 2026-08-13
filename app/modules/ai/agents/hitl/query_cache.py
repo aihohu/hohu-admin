@@ -1,4 +1,4 @@
-"""读操作查询缓存 — spec §2.9 / §8.7
+"""只读工具结果的查询回放缓存。
 
 readonly tool 成功后，Gateway 把查询条件写入 Redis hash，5min TTL；
 前端 chip 跳转带 ai_query_id=<trace_id>，模块页反查本缓存回放筛选。
@@ -59,7 +59,7 @@ async def set_query_cache(
 ) -> None:
     """HSET ai:query_cache:<trace_id> <tool_name> <json> + EXPIRE <ttl>
 
-    spec §8.7: 每次写入重置整个 hash 的 TTL（同 trace_id 多 tool 场景）。
+    每次写入都会重置整个 hash 的 TTL，以覆盖同一 trace_id 下的多个工具。
     """
     entry = QueryCacheEntry(
         module=module,
@@ -81,7 +81,7 @@ async def get_query_cache(
 ) -> QueryCacheEntry | None:
     """取最新写入（按 created_at 降序）或指定 tool_name 的 entry
 
-    spec §8.7:
+    读取规则：
       - 默认行为：取 hash 中最新写入（created_at 降序）
       - tool_name 给定：直接 HGET
       - hash 不存在 / field 不存在：返回 None

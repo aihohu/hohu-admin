@@ -1,4 +1,4 @@
-"""读操作 chip 跳转回放查询端点 — spec §2.9 / §8.7
+"""只读工具结果 chip 的查询回放端点。
 
 GET /ai/query-cache/<trace_id>
   用途：前端 chip 跳模块页后，模块页 mounted 时反查此端点回放筛选
@@ -37,7 +37,7 @@ async def get_query_cache_endpoint(
     tool_name: str | None = Query(None, description="指定 tool_name 取特定 field"),
     _current_user: User = Depends(get_current_user),
 ) -> ResponseModel[QueryCacheOut | None]:
-    """spec §8.7: chip 跳转回放——返回 trace_id 对应的最新 query_cache entry
+    """返回 trace_id 对应的最新 query_cache 记录。
 
     权限：仅 trace_id 对应 user_id 本人查询（防越权）
     返回规则：取 hash 中最新写入（按 created_at 降序）的 field；不传 tool_name 时
@@ -45,10 +45,10 @@ async def get_query_cache_endpoint(
     """
     entry = await get_query_cache(redis_client, trace_id, tool_name=tool_name)
     if entry is None:
-        # spec §8.7: hash 不存在或已过期 → data=null（不是 404）
+        # hash 不存在或已过期时返回 data=null，而不是 404。
         return ResponseModel.success(data=None)
 
-    # owner 校验（spec §8.7: 防越权）
+    # 校验 owner，防止越权读取。
     if entry.user_id != _current_user.user_id:
         logger.info(
             "query_cache denied: user=%s cache_user=%s trace_id=%s",

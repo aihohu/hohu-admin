@@ -1,1 +1,1 @@
-"""safety 子模块占位 — Phase 4 safety_preamble / injection_detector 归类于此"""
+"""AI 安全前言、注入检测和内容黑名单模块。"""

@@ -7,7 +7,7 @@ Run:
 Creates:
   - mk_app        slug=demo-crm, status=published
   - mk_app_version 1.0.0, review_status=approved, manifest with 2 models (customer + order)
-                    where order.customer_id has x-ref → customer (spec §6.5 / decision #79)
+                    where order.customer_id has x-ref → customer
   - mk_tenant_app  status=enabled
   - 2 physical tables: app_data_demo_crm_customer + app_data_demo_crm_order
   - 5 sample customers + 5 sample orders (referencing customers)
@@ -47,7 +47,7 @@ MANIFEST = {
     "version": "1.0.0",
     "type": "lowcode",
     "category": "business",
-    # Multi-model mode (spec §6.2 / decision #70): models[] instead of top-level data_schema.
+    # Multi-model mode uses models[] instead of top-level data_schema.
     # order.customer_id declares x-ref → customer, so the backend auto-joins
     # the customer name into order list responses (decision #79).
     "models": [

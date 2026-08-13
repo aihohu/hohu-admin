@@ -1,11 +1,11 @@
 """chat_service.build_chat_deps 单元测试
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §4.6 / §17.2。
+覆盖 ChatDeps 构造、Agent 加载和消息持久化。
 
 验证 ChatDeps 完整字段构造（user / perms / db / data_scope / agent / trace_id），
 超管 / 普通 user 两条路径，agent_code 不存在时抛错。
 
-注：Task 11 后 build_chat_deps 内部调 resolve_sticky_agent_code；本文件单测
+build_chat_deps 内部调用 resolve_sticky_agent_code；本文件单测
 patch 该函数返回 manual_override，聚焦测 build_chat_deps 自身字段构造逻辑
 （stickiness 决策树由 test_session_stickiness.py 覆盖）.
 """
@@ -70,7 +70,7 @@ class TestBuildChatDeps:
     async def test_trace_id_auto_generated_format(
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """spec §4.6: trace_id 默认 tr_<uuid hex>"""
+        """trace_id 默认格式为 tr_<uuid hex>。"""
         import app.modules.ai.core.data_scope_loader as loader_mod
 
         monkeypatch.setattr(loader_mod, "is_super_admin", lambda u: True)
@@ -127,7 +127,7 @@ class TestBuildChatDeps:
     async def test_agent_code_not_found_raises(
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """spec §4.6: agent_code 必须在 ai_agent 表存在"""
+        """agent_code 必须在 ai_agent 表中存在。"""
         import app.modules.ai.core.data_scope_loader as loader_mod
 
         monkeypatch.setattr(loader_mod, "is_super_admin", lambda u: True)
@@ -144,7 +144,7 @@ class TestBuildChatDeps:
     async def test_default_agent_code_is_user_mgmt(
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """spec §10.1: MVP 默认 user_mgmt Agent"""
+        """默认使用 user_mgmt Agent。"""
         import app.modules.ai.core.data_scope_loader as loader_mod
 
         monkeypatch.setattr(loader_mod, "is_super_admin", lambda u: True)
@@ -196,7 +196,7 @@ class TestBuildChatDeps:
 
 
 class TestAttachTraceToConversation:
-    """spec §4.5: trace_id + agent_code 写到 ai_conversation"""
+    """trace_id 和 agent_code 写入 ai_conversation。"""
 
     async def test_none_conversation_id_skips(self, db_session: AsyncSession) -> None:
         """conversation_id=None 时跳过（不报错）"""
@@ -232,7 +232,7 @@ async def _add_user(db: AsyncSession, *, user_id: int, user_name: str) -> None:
 
 @pytest.mark.asyncio
 async def test_save_user_message_writes_agent_code(db_session):
-    """spec §4.1 step 5: save_user_message 透传 agent_code 到 ai_message.agent_code."""
+    """save_user_message 将 agent_code 写入 ai_message.agent_code。"""
     from sqlalchemy import select
 
     from app.core.id_generator import next_id
@@ -271,7 +271,7 @@ async def test_save_user_message_writes_agent_code(db_session):
 
 @pytest.mark.asyncio
 async def test_save_assistant_message_writes_agent_code(db_session):
-    """spec §4.1 step 5: save_assistant_message 透传 agent_code."""
+    """save_assistant_message 透传 agent_code。"""
     from sqlalchemy import select
 
     from app.core.id_generator import next_id

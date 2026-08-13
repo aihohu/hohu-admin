@@ -1,6 +1,6 @@
 """PydanticAI 包装层单元测试
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §5.1 / §6.3 / §5.4。
+覆盖 PydanticAI 工具包装、参数 schema 和 Agent 权限隔离。
 """
 
 # ruff: noqa: ARG001, PLC0415  test 函数 ctx / kwargs 占位 + 测试内局部 import
@@ -112,7 +112,7 @@ class TestWrapTool:
         assert first_param.annotation.__args__ == (ChatDeps,)
 
     def test_wrapper_preserves_business_params(self) -> None:
-        """spec §5.1: 业务参数（除 ctx）保持原样，进 LLM schema"""
+        """除 ctx 外的业务参数保持原样进入 LLM schema。"""
         registered = _register_sample_tool()
         tool = wrap_tool_for_pydantic_ai(registered)
 
@@ -193,7 +193,7 @@ class TestBuildPydanticAiTools:
         assert tools == []
 
     def test_filters_by_agent_code(self) -> None:
-        """spec §5.4: 不同 Agent 的 tool 不串"""
+        """不同 Agent 的工具集合相互隔离。"""
         _register_sample_tool(name="user.lookup", agent="user_mgmt")
         _register_sample_tool(name="role.list", agent="role_mgmt")
 
@@ -204,7 +204,7 @@ class TestBuildPydanticAiTools:
         assert user_tools[0].name == "user_lookup"
 
     def test_filters_by_perms(self) -> None:
-        """spec §5.4: required_perms ⊆ user.perms"""
+        """required_perms 必须是 user.perms 的子集。"""
         _register_sample_tool(name="user.create", perms=("system:user:add",))
         _register_sample_tool(name="user.delete", perms=("system:user:delete",))
 

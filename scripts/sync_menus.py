@@ -308,7 +308,7 @@ MENU_DEFINITIONS = [
         "route_path": "",
         "status": "1",
     },
-    # ---- 用户导入导出按钮权限（Task 16，spec §10 line 3095） ----
+    # ---- 用户导入导出按钮权限 ----
     # 路由层 require_permissions("system:user:import" / "system:user:export") 依赖这两个 seed
     # 父菜单 system_user 已存在（line 238），sync_menus 按 permission 去重，重复执行安全。
     {
@@ -1158,7 +1158,7 @@ MENU_DEFINITIONS = [
     },
     {
         # 应用审核（仅 marketplace:review 权限可见）
-        # Phase 2 拆分时迁移到 cloud-only 菜单（详见 docs/MARKETPLACE-CLOUD-SPLIT.md）
+        # 云端与本地拆分后归入 cloud-only 菜单。
         "route_name": "marketplace_review",
         "parent_route": "app-management",
         "menu_name": "应用审核",
@@ -1186,7 +1186,7 @@ MENU_DEFINITIONS = [
         "route_path": "",
         "status": "1",
     },
-    # ============ AI 助手管理（spec §10.2） ============
+    # ============ AI 助手管理 ============
     {
         "route_name": "ai_agent",
         "parent_route": "ai",
@@ -1200,13 +1200,13 @@ MENU_DEFINITIONS = [
         "i18n_key": "route.ai_agent",
         "order": 3,
         "status": "1",
-        # Task 12: 前端 src/views/ai/agent/index.vue 已实现，菜单可见
+        # 前端管理页面已实现，菜单可见。
         "hide_in_menu": False,
         "keep_alive": False,
         "constant": False,
         "multi_tab": False,
     },
-    # ---- AI Agent 管理按钮权限（spec §10.2） ----
+    # ---- AI Agent 管理按钮权限 ----
     {
         "key": "ai_agent_list",
         "parent_route": "ai_agent",
@@ -1243,7 +1243,7 @@ MENU_DEFINITIONS = [
         "route_path": "",
         "status": "1",
     },
-    # ---- AI Trace 查看（审计员，独立于 ai:agent:*，spec §10.1 末尾） ----
+    # ---- AI Trace 查看（审计员，独立于 ai:agent:*） ----
     {
         "key": "ai_trace_view",
         "parent_route": "ai",
@@ -1253,7 +1253,7 @@ MENU_DEFINITIONS = [
         "route_path": "",
         "status": "1",
     },
-    # ---- AI 路由反馈（Task 12 新增菜单） ----
+    # ---- AI 路由反馈 ----
     # route_name / component / page / i18n_key 用 kebab-case 匹配前端 @elegant-router 命名约定
     # （view.ai_routing-feedback 对应 src/views/ai/routing-feedback/index.vue；下划线形式会被
     # transformElegantRouteToVueRoute 视为查不到 view 而抛 "View component not found"，路由被静默丢弃）
@@ -1275,7 +1275,7 @@ MENU_DEFINITIONS = [
         "constant": False,
         "multi_tab": False,
     },
-    # ---- AI 路由反馈按钮权限（Task 12） ----
+    # ---- AI 路由反馈按钮权限 ----
     {
         "key": "ai_routing_feedback_list",
         "parent_route": "ai_routing-feedback",
@@ -1285,7 +1285,7 @@ MENU_DEFINITIONS = [
         "route_path": "",
         "status": "1",
     },
-    # ---- 角色 AI Agent 授权按钮权限（Task 12） ----
+    # ---- 角色 AI Agent 授权按钮权限 ----
     {
         "key": "system_role_ai_agent_auth",
         "parent_route": "system_role",
@@ -1409,7 +1409,7 @@ async def sync_menus():
         await db.commit()
 
         # 一次性兜底：把 ai_agent 菜单的 hide_in_menu 从 True 改 False
-        # （Task 12：前端 src/views/ai/agent/index.vue 已实现，旧库需要翻牌）
+        # 前端管理页面已实现，旧库需要将菜单更新为可见。
         result = await db.execute(select(Menu).where(Menu.route_name == "ai_agent"))
         ai_agent_menu = result.scalars().first()
         if ai_agent_menu and ai_agent_menu.hide_in_menu:

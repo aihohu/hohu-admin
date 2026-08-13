@@ -1,12 +1,11 @@
-"""User import validator（spec §2.17 / §2.18 / §2.15 / §2.11 / §2.24）。
+"""用户导入的引用解析、权限边界与同步策略校验。
 
 职责：
 - resolve_dept：dept_input 名称 / 路径反查 dept_id（#2.17）
 - resolve_role_input：role_input 反查 role_ids（#2.18，code/name 双支持）
 - check_permission_boundary：批量操作 Permission Boundary 校验（#2.15）
 - check_dept_data_scope：dept 是否在 operator 的 data_scope 内（#2.11）
-- resolve_existing_user + classify_sync_action：employee_no / user_name 命中 +
-  EmployeeNoSyncMode 三模式分类（#2.24 v2.2 P1，Task 7a）
+- resolve_existing_user + classify_sync_action：employee_no / user_name 命中与同步策略分类
 
 Service 层调用：dry_run / execute 阶段对每行 record 反查 + 越界检查 + 命中分类。
 """
@@ -38,7 +37,7 @@ from app.utils.data_scope import (
 
 
 class SyncAction(enum.Enum):
-    """sync_mode 应用后的下一步动作（Task 7a）。
+    """应用 sync_mode 后的下一步动作。
 
     调用方（batch_create_users_from_records）按返回值决定 INSERT/UPDATE/SKIP/FAILED：
     - NEW：existing is None，调用方直接判定（不在 classify_sync_action 范围内）
@@ -56,7 +55,7 @@ class SyncAction(enum.Enum):
 
 
 async def resolve_dept(db: AsyncSession, dept_input: str) -> int:
-    """反查 dept_input → dept_id（spec §2.17）。
+    """将 dept_input 解析为唯一 dept_id。
 
     dept_input 不含 ``/`` → 名称模式：唯一性校验，重名抛 DUPLICATE。
     dept_input 含 ``/`` → 路径模式：按 ``/`` 拆段逐级走 parent_id 链。
@@ -144,7 +143,7 @@ async def _resolve_dept_by_path(db: AsyncSession, path: str) -> int:
 
 
 async def resolve_role_input(db: AsyncSession, role_input_str: str) -> list[int]:
-    """反查 role_input → role_id 列表（spec §2.18）。
+    """将 role_input 解析为 role_id 列表。
 
     支持逗号分隔的 code/name 混合输入（如 ``"R_DEV,开发者,R_QA"``）。
     两轮匹配：Pass 1 role_code 精确匹配，Pass 2 role_name 精确匹配剩余项。
@@ -202,11 +201,11 @@ async def check_permission_boundary(
     records: list[UserImportRecord],
     current_user: User,
 ) -> list[FailedRow]:
-    """对每行做 Permission Boundary 校验（spec §2.15）。
+    """对每行执行角色权限边界校验。
 
     防 HR 给导入用户分配自己不拥有的角色（权限提升攻击主入口）。
 
-    流程（spec §2.15 line 382-387）：
+    流程：
     1. 超管（user_name='admin' 或拥有启用 R_SUPER）豁免 → 返回 []
     2. operator_role_ids = current_user 启用状态的 role_id 集合
     3. 每行 resolve_role_input → requested_role_ids
@@ -263,7 +262,7 @@ async def check_permission_boundary(
 
 
 async def _fetch_role_names(db: AsyncSession, role_ids: set[int]) -> list[str]:
-    """role_id → role_name 映射，错误信息用人读名称（spec line 391）。"""
+    """将 role_id 映射为适合错误信息展示的角色名称。"""
     if not role_ids:
         return []
     rows = (
@@ -275,12 +274,12 @@ async def _fetch_role_names(db: AsyncSession, role_ids: set[int]) -> list[str]:
 
 
 async def _compute_accessible_dept_ids(db: AsyncSession, user: User) -> set[int] | None:
-    """计算 user 可访问的 dept_id 集合（spec §2.11 line 283）。
+    """计算用户可访问的 dept_id 集合。
 
     Returns:
         None: 全部可见（超管 / DATA_SCOPE_ALL）→ 调用方跳过校验
         set[int]: 限定部门集合；空 set 表示无可见部门（DATA_SCOPE_SELF
-                  在 dept 维度上等价于 "对任何部门无导入权"，spec line 289）
+                  在部门维度上等价于没有导入权限）
     """
     if is_super_admin(user):
         return None
@@ -306,7 +305,7 @@ async def check_dept_data_scope(
     records: list[UserImportRecord],
     current_user: User,
 ) -> list[FailedRow]:
-    """对每行做 dept DataScope 校验（spec §2.11）。
+    """对每行执行部门数据权限校验。
 
     防 HR 把用户塞到超管部门绕过权限（权限提升攻击主入口之一）。
 
@@ -342,7 +341,7 @@ async def check_dept_data_scope(
                     row_num=record.row_num,
                     field="dept_input",
                     value=record.dept_input,
-                    reason="部门不在 data_scope 内（spec §2.11）",
+                    reason="部门不在当前用户的数据权限范围内",
                     error_code="AI_IMPORT_DEPT_OUT_OF_SCOPE",
                 )
             )
@@ -353,7 +352,7 @@ async def check_dept_data_scope(
 async def resolve_existing_user(
     db: AsyncSession, record: UserImportRecord
 ) -> tuple[User | None, bool]:
-    """反查已存在用户（spec §2.24 v2.2 P1 line 879-894）。
+    """按 employee_no 优先、user_name 兜底反查已有用户。
 
     匹配顺序：
     1. record.employee_no 非空 → select User where employee_no == record.employee_no
@@ -363,8 +362,7 @@ async def resolve_existing_user(
         (user, matched_by_employee_no):
         - (None, False) — 无任何匹配（新建场景）
         - (user, True) — 按 employee_no 命中（sync_mode 决定后续行为）
-        - (user, False) — 按 user_name 命中（employee_no 为 NULL 或未命中；
-          spec §2.24 line 874：按 on_conflict 处理，sync_mode 不适用）
+        - (user, False) — 按 user_name 命中，后续按 on_conflict 处理
     """
     if record.employee_no:
         existing = (
@@ -383,11 +381,10 @@ def classify_sync_action(
     matched_by_employee_no: bool,
     sync_mode: EmployeeNoSyncMode,
 ) -> SyncAction:
-    """根据「是否按 employee_no 命中」+ sync_mode 决定后续动作（spec §2.24 v2.2 P1）。
+    """根据命中方式和 sync_mode 决定后续动作。
 
     employee_no 命中 → sync_mode 决定 REJECT / UPDATE_SAFE / UPDATE_FULL
-    user_name 命中（employee_no 兜底）→ 一律 EXISTS_BY_USERNAME，由调用方按
-        on_conflict 处理（spec §2.24 line 874）
+    user_name 命中时一律返回 EXISTS_BY_USERNAME，由调用方按 on_conflict 处理。
 
     Args:
         matched_by_employee_no: resolve_existing_user 返回的 matched 标志

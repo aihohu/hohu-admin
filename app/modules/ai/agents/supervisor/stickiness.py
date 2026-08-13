@@ -1,4 +1,4 @@
-"""spec §5.3 + §15.3: agentCode 三种语义的决策树.
+"""agentCode 三种语义的粘滞路由决策树。
 
 值           | conv_agent_code 存在？ | legacy_null_mode？ | 决策
 -------------|------------------------|--------------------|----
@@ -50,7 +50,7 @@ async def resolve_sticky_agent_code(
     conv_agent_code: str | None,
     sticky_agent_enabled: bool | None = None,
 ) -> StickyDecision:
-    """spec §5.3: 解析 agentCode 三种语义 → StickyDecision.
+    """解析 agentCode 三种语义并返回 StickyDecision。
 
     Args:
         db: 用于查 sys_config / ai_agent 的 session.

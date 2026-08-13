@@ -83,7 +83,7 @@ class InvalidParameterException(BusinessRuleException):
 
 
 class UnprocessableEntityException(BusinessRuleException):
-    """业务规则不允许的操作（HTTP 422，spec §5.7）。
+    """业务规则不允许的操作（HTTP 422）。
 
     继承 ``BusinessRuleException`` 让 ``pytest.raises(BusinessRuleException)``
     兼容既有 service 单测（只校验 error_code，不关心 code）。
@@ -106,7 +106,7 @@ class UnprocessableEntityException(BusinessRuleException):
 
 
 class SSRFBlockedException(BusinessRuleException):
-    """SSRF 防护拦截异常（spec §SSRF Phase 1）。
+    """SSRF 防护拦截异常。
 
     error_code: SSRF_BLOCKED — 前端可映射为「请求被安全策略拦截」
     """

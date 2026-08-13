@@ -1,4 +1,4 @@
-"""HITL Manager 单元测试 — spec §8.3 / §8.4
+"""HITL Manager 单元测试。
 
 覆盖：
   - generate_confirmation_id / generate_tool_call_id 格式
@@ -105,7 +105,7 @@ class TestValidateArgsSize:
         hitl_manager.validate_args_size({})
 
     def test_oversized_args_raises(self) -> None:
-        """spec §8.3: args JSON 超 4KB 拒绝（防恶意 user 撑爆 Redis）"""
+        """args JSON 超过 4KB 时拒绝，防止撑爆 Redis。"""
         big_str = "x" * (settings.AI_HITL_ARGS_MAX_BYTES + 100)
         with pytest.raises(BusinessRuleException) as exc_info:
             hitl_manager.validate_args_size({"hint": big_str})
@@ -202,7 +202,7 @@ class TestCreatePending:
 
 class TestHangWake:
     async def test_wake_with_approved(self) -> None:
-        """spec §8.3: hang 被 wake 唤醒后返回 APPROVED"""
+        """hang 被 wake 唤醒后返回 APPROVED。"""
         cid = hitl_manager.generate_confirmation_id()
         await hitl_manager.create_pending(
             redis_module.redis_client,
@@ -256,7 +256,7 @@ class TestHangWake:
         assert result == ConfirmAction.REJECTED
 
     async def test_hang_timeout(self) -> None:
-        """spec §8.3: 5min TTL 无人确认 → EXPIRED（抛 TimeoutError）"""
+        """5 分钟内无人确认时过期并抛 TimeoutError。"""
         cid = hitl_manager.generate_confirmation_id()
         await hitl_manager.create_pending(
             redis_module.redis_client,
@@ -440,7 +440,7 @@ class TestRedisPayload:
 
 class TestCleanupOnStartup:
     async def test_cleanup_removes_stale_pending(self) -> None:
-        """spec §8.4: 服务重启清扫 Redis 残留"""
+        """服务重启时清扫 Redis 残留。"""
         # 模拟 3 个孤儿 pending（写 Redis 但不创建 Event，等同 stream 已断）
         for i in range(3):
             await redis_module.redis_client.set(
@@ -486,12 +486,12 @@ class TestCleanupOnStartup:
             redis_module.redis_client.scan_iter = original_scan
 
 
-# ============ v1.5+ redis_pubsub 模式 ============
+# ============ redis_pubsub 模式 ============
 
 
 @pytest.fixture
 async def pubsub_mode(monkeypatch):
-    """切到 redis_pubsub 模式（spec §8.4.1 v1.5+）
+    """切换到 redis_pubsub 模式。
 
     非 autouse：仅显式声明的测试用，确保现有 memory 模式测试不变。
     """
@@ -500,14 +500,14 @@ async def pubsub_mode(monkeypatch):
 
 
 class TestPubSubMode:
-    """redis_pubsub 模式：跨 worker 唤醒 + 防丢失（spec §8.4.1 v1.5+）"""
+    """redis_pubsub 模式支持跨 worker 唤醒并防止消息丢失。"""
 
     async def test_cross_worker_wake(self, pubsub_mode) -> None:
         """模拟跨 worker：两个 HitlManager 实例共享同一 Redis
 
         场景：worker A 持有 SSE 流（hang），wake 落到 worker B。
         修订前（memory 模式）：worker B 找不到 entry → False → 5min 超时。
-        v1.5+（redis_pubsub 模式）：B PUBLISH channel → A 收到 → 唤醒 hang。
+        redis_pubsub 模式下 B 发布 channel，A 收到后唤醒 hang。
         """
         from app.modules.ai.agents.hitl.manager import HitlManager
 

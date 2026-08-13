@@ -1,4 +1,4 @@
-"""AI 操作日志 schema — spec §9.3 SSE 断流兜底查询"""
+"""供 SSE 断流兜底查询使用的 AI 操作日志 schema。"""
 
 from datetime import datetime
 
@@ -9,7 +9,7 @@ from pydantic.alias_generators import to_camel
 class OperationLogOut(BaseModel):
     """GET /ai/operation-log?tool_call_id=... 响应
 
-    spec §9.3: 字段过滤——只暴露审计元信息（不含 args_summary / result_summary 详细内容，避免泄漏）
+    只暴露审计元信息，不返回 args_summary 或 result_summary 明细，避免泄漏。
     """
 
     tool_call_id: str = Field(..., description="单次 tool 调用 ID")

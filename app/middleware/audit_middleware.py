@@ -47,7 +47,7 @@ EXCLUDED_PATHS = (
     "/system/operation-log",
     "/system/login-log",
     "/ai/chat",
-    "/ai/confirm",  # spec §13 Phase 3：HITL 确认通道与 /ai/chat 同级排除，避免双重审计
+    "/ai/confirm",  # HITL 确认通道与 /ai/chat 同级排除，避免双重审计。
 )
 
 

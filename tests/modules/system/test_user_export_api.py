@@ -1,4 +1,4 @@
-"""POST/GET /system/user/export HTTP 契约测试（Task 13，spec §5.2 + §2.31 P1-5）。
+"""``/system/user/export`` 导出接口契约测试。
 
 只验证 HTTP 契约层（路由 / JSON body / streaming 响应 / 错误码），
 service 层（export_users_to_excel / get_export_task / list_export_tasks）
@@ -6,15 +6,15 @@ service 层（export_users_to_excel / get_export_task / list_export_tasks）
 
 覆盖：
 - 401 未登录 / 无效 JWT（auth gating）
-- POST /export → 200 StreamingResponse xlsx + Content-Disposition（spec §5.2 line 2200）
+- POST /export → 200 xlsx + Content-Disposition
 - POST /export 透传 filter + reason 给 service
 - POST /export 缺 reason → 422（Pydantic 校验）
-- POST /export 全空白 reason → 422（spec §2.30）
-- POST /export service 抛 AI_EXPORT_ASYNC_REQUIRED → 422（spec §5.2 line 2201）
-- GET /export/{id} → 200 + UserExportTaskResponse（spec §2.31 line 1589-1591）
+- POST /export 全空白 reason → 422
+- POST /export service 抛 AI_EXPORT_ASYNC_REQUIRED → 422
+- GET /export/{id} → 200 + UserExportTaskResponse
 - GET /export/{id} 不存在 → 404 + AI_EXPORT_TASK_NOT_FOUND
-- GET /export → 分页列表（spec §2.31 line 1593-1595）
-- 调用方 commit + service 调用顺序（spec §3.6）
+- GET /export → 分页列表
+- API 提交事务并保持 service 调用顺序
 """
 
 import re
@@ -40,7 +40,7 @@ from app.modules.system.user.schemas import UserExportTaskResponse
 
 # ========== Constants ==========
 
-#: spec §2.9 / §5.2：xlsx MIME
+#: xlsx MIME 类型。
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 #: xlsx 文件 magic bytes（PK zip header），用于校验 streaming body 是真实 xlsx
@@ -95,7 +95,7 @@ def _fake_export_task_response(
     export_id: str = "exp-xxx",
     status: ExportTaskStatus = ExportTaskStatus.SUCCESS,
 ) -> UserExportTaskResponse:
-    """GET /export/{id} 替身返回值（spec §3.6 UserExportTaskResponse）。"""
+    """GET /export/{id} 替身返回的 UserExportTaskResponse。"""
     return UserExportTaskResponse(
         export_id=export_id,
         operator_id=1,
@@ -115,7 +115,7 @@ def _fake_export_task_response(
 
 
 class TestPostExportAuth:
-    """spec §5.2 line 2196：权限 system:user:export。"""
+    """验证 system:user:export 权限。"""
 
     async def test_no_token_returns_401(self, client):
         response = await client.post(
@@ -137,7 +137,7 @@ class TestPostExportAuth:
 
 
 class TestPostExportSync:
-    """spec §5.2 line 2200：同步路径返回 StreamingResponse xlsx。"""
+    """同步路径返回 xlsx 响应。"""
 
     async def test_returns_streaming_xlsx_with_content_disposition(
         self, client, admin_token
@@ -176,7 +176,7 @@ class TestPostExportSync:
         mock_service.assert_awaited_once()
 
     async def test_passes_filter_and_reason_to_service(self, client, admin_token):
-        """filter + reason 透传到 export_users_to_excel（spec §5.2 line 2189-2194）。"""
+        """filter 和 reason 应透传到 export_users_to_excel。"""
         with patch(
             f"{_API_MODULE}.export_users_to_excel",
             new=AsyncMock(return_value=(_fake_xlsx_bytes(), 5, "exp-xxx")),
@@ -203,10 +203,10 @@ class TestPostExportSync:
 
 
 class TestPostExportValidation:
-    """spec §2.30 v2.2 P1-3：reason 必填，1-256 字符。"""
+    """reason 必填且长度为 1-256 字符。"""
 
     async def test_missing_reason_returns_422(self, client, admin_token):
-        """spec §2.30：reason 必填。"""
+        """reason 必填。"""
         response = await client.post(
             "/system/user/export",
             headers={"Authorization": f"Bearer {admin_token}"},
@@ -215,7 +215,7 @@ class TestPostExportValidation:
         assert response.status_code == 422
 
     async def test_empty_reason_returns_422(self, client, admin_token):
-        """spec §2.30：全空白 reason 拒绝（ReasonSchema._strip_and_require_non_empty）。"""
+        """ReasonSchema 拒绝全空白 reason。"""
         response = await client.post(
             "/system/user/export",
             headers={"Authorization": f"Bearer {admin_token}"},
@@ -228,7 +228,7 @@ class TestPostExportValidation:
 
 
 class TestPostExportAsyncRequired:
-    """spec §5.2 line 2201 + §2.6：行数 > 5000 → 422 AI_EXPORT_ASYNC_REQUIRED。"""
+    """行数超过 5000 时返回 422 AI_EXPORT_ASYNC_REQUIRED。"""
 
     async def test_async_required_returns_422(self, client, admin_token):
         """service 抛 UnprocessableEntityException(AI_EXPORT_ASYNC_REQUIRED)
@@ -258,7 +258,7 @@ class TestPostExportAsyncRequired:
 
 
 class TestGetExportDetail:
-    """spec §2.31 line 1589-1591：GET /export/{export_id} 任务详情。"""
+    """验证 GET /export/{export_id} 任务详情。"""
 
     async def test_no_token_returns_401(self, client):
         response = await client.get("/system/user/export/exp-xxx")
@@ -308,7 +308,7 @@ class TestGetExportDetail:
 
 
 class TestGetExportList:
-    """spec §2.31 line 1593-1595：GET /export 分页列表。"""
+    """验证 GET /export 分页列表。"""
 
     async def test_no_token_returns_401(self, client):
         response = await client.get("/system/user/export")
@@ -368,11 +368,11 @@ class TestGetExportList:
         assert mock_list.call_args.kwargs["allow_cross_owner"] is False
 
 
-# ========== GET /export/{export_id}/download（Task 33） ==========
+# ========== GET /export/{export_id}/download ==========
 
 
 class TestGetExportDownload:
-    """Task 33 / spec §2.31 line 1626 落地：AI 场景对话内点击下载。
+    """验证 AI 对话内点击下载的 HTTP 契约。
 
     端点：GET /system/user/export/{export_id}/download
     - 从 sys_user_export_task.file_storage_key 读 bytes → 流式返回

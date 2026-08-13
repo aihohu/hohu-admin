@@ -3,7 +3,7 @@
 新增 AI Tool Gateway 三张表（ai_agent / role_ai_agent / ai_operation_log），
 ALTER 现有 ai_conversation / ai_message 加 trace_id 字段。
 
-对应 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §4.2 / §4.3 / §4.4 / §4.5。
+创建 AI Tool Gateway 所需的 Agent、角色绑定、操作日志和会话字段。
 
 Revision ID: c7d8e9f0a1b2
 Revises: bf244f9a8b76
@@ -26,7 +26,7 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     """Upgrade schema."""
-    # ============ 1. 新建 ai_agent 表（spec §4.2） ============
+    # ============ 1. 新建 ai_agent 表 ============
     op.create_table(
         "ai_agent",
         sa.Column("agent_id", sa.BigInteger(), nullable=False, comment="AgentID"),
@@ -64,7 +64,7 @@ def upgrade() -> None:
             sa.Text(),
             nullable=False,
             server_default="",
-            comment="管理员 custom prompt，与硬编码 SAFETY_PREAMBLE 拼接（§7.6），应用层 32KB 限制",
+            comment="管理员 custom prompt，与固定 SAFETY_PREAMBLE 拼接，应用层限制 32KB",
         ),
         sa.Column(
             "model_preference",
@@ -91,7 +91,7 @@ def upgrade() -> None:
         comment="AI Agent 注册中心",
     )
 
-    # ============ 2. 新建 role_ai_agent 关联表（spec §4.3） ============
+    # ============ 2. 新建 role_ai_agent 关联表 ============
     op.create_table(
         "role_ai_agent",
         sa.Column(
@@ -128,7 +128,7 @@ def upgrade() -> None:
         comment="角色 ↔ Agent RBAC 关联表",
     )
 
-    # ============ 3. 新建 ai_operation_log 表（spec §4.4 / §9.1 / §9.6） ============
+    # ============ 3. 新建 ai_operation_log 表 ============
     op.create_table(
         "ai_operation_log",
         sa.Column("log_id", sa.BigInteger(), nullable=False, comment="日志ID"),
@@ -147,7 +147,7 @@ def upgrade() -> None:
             "tool_call_id",
             sa.String(length=64),
             nullable=False,
-            comment="单次 tool 调用 ID，§8.3 兜底轮询用",
+            comment="单次工具调用 ID，供兜底轮询使用",
         ),
         sa.Column(
             "args_hash",
@@ -218,14 +218,14 @@ def upgrade() -> None:
         comment="AI 操作日志 + 安全事件（合并表）",
     )
 
-    # ============ 4. ALTER 现有表加字段（spec §4.5） ============
+    # ============ 4. 为现有表增加字段 ============
     op.add_column(
         "ai_conversation",
         sa.Column(
             "agent_code",
             sa.String(length=64),
             nullable=True,
-            comment="绑定的 Agent code（§4.5 / §10）",
+            comment="绑定的 Agent code",
         ),
     )
     op.add_column(
@@ -247,7 +247,7 @@ def upgrade() -> None:
         ),
     )
 
-    # ============ 5. 索引（spec §4.4 推荐索引 + §9.3 查询端点） ============
+    # ============ 5. 查询与审计索引 ============
     # ai_message: 按 conversation + trace 反查消息流
     op.create_index(
         "idx_ai_message_conv_trace",
@@ -255,14 +255,14 @@ def upgrade() -> None:
         ["conversation_id", "trace_id"],
     )
 
-    # ai_operation_log: §9.5 alert"单用户 1 小时内 X ≥ N"聚合
+    # ai_operation_log：支持按用户和时间窗聚合告警。
     op.create_index(
         "idx_ai_op_log_user_started",
         "ai_operation_log",
         ["user_id", "started_at"],
     )
 
-    # ai_operation_log: §9.3 AI Trace 视图按时间排序
+    # ai_operation_log：支持 AI Trace 视图按时间排序。
     op.create_index(
         "idx_ai_op_log_trace",
         "ai_operation_log",
@@ -276,7 +276,7 @@ def upgrade() -> None:
         ["conversation_id"],
     )
 
-    # ai_operation_log: §9.5 安全事件统计（部分索引，仅 is_security_event=true 行）
+    # ai_operation_log：安全事件统计的部分索引，仅覆盖 is_security_event=true。
     op.create_index(
         "idx_ai_op_log_security",
         "ai_operation_log",

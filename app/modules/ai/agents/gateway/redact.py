@@ -1,6 +1,6 @@
 r"""redact_secrets — 用户输入 / 历史消息正则脱敏
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §7.4。
+负责对进入持久化和模型上下文的文本执行密钥脱敏。
 
 识别 4 类 pattern + 1 类 MIME 白名单豁免：
   1. OpenAI API Key: sk-[A-Za-z0-9]{20,}
@@ -20,7 +20,7 @@ import re
 logger = logging.getLogger(__name__)
 
 
-# spec §7.4 4 类 pattern
+# 四类敏感信息 pattern。
 REDACT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("OPENAI_API_KEY", re.compile(r"sk-[A-Za-z0-9]{20,}")),
     ("AWS_ACCESS_KEY", re.compile(r"AKIA[A-Z0-9]{16}")),
@@ -37,7 +37,7 @@ REDACT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ),
 ]
 
-# spec §7.4 MIME 白名单：data:image/* / audio/* / video/* / pdf / zip 跳过扫描
+# MIME 白名单：data:image/*、audio/*、video/*、pdf 和 zip 跳过扫描。
 MIME_WHITELIST_PREFIXES: tuple[str, ...] = (
     "data:image/",
     "data:audio/",

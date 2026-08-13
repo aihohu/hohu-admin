@@ -1,4 +1,4 @@
-"""Forbidden Topics Guardrail — spec §11.2 v1.5+ SR-23
+"""Forbidden Topics Guardrail。
 
 管理员配置 `system_config.ai:guardrail:forbidden_topics`（JSON 字符串数组），
 用户输入命中后**整条消息拦截**（不进 LLM，emit AiErrorEvent 短路）。

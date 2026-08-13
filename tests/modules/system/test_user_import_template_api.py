@@ -1,4 +1,4 @@
-"""GET /system/user/import/template HTTP 契约测试（Task 14，spec §5.3 + §2.13 + §2.16）。
+"""``GET /system/user/import/template`` HTTP 契约测试。
 
 只验证 HTTP 契约层（路由 / streaming 响应 / Content-Disposition / 错误码）+
 xlsx 内部结构（4 sheet / 列顺序 / DataValidation / 字典实时数据）。
@@ -11,7 +11,7 @@ service 层完整业务逻辑（部门字典实时查询 / 角色字典实时查
 - 4 sheet：数据 / 说明 / 部门字典 / 角色字典
 - 「数据」sheet 列顺序固定（user_name / nickname / user_email / user_phone /
   dept_input / role_input / user_gender / status）
-- 「数据」sheet 含 2 行示例（spec §2.13 反例 2「只给空表头 → 用户不知道哪些必填」）
+- 「数据」sheet 包含两行示例，避免只有空表头
 - 「数据」sheet 部门列（E）+ 角色列（F）有 DataValidation 下拉
 - 「部门字典」sheet 实时查 sys_dept（含 full_path 列）+ 生成时间标注
 - 「角色字典」sheet 实时查 sys_role + 生成时间标注
@@ -33,13 +33,13 @@ from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 
-#: spec §5.3 line 2213：xlsx MIME
+#: xlsx MIME 类型。
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 #: xlsx 文件 magic bytes（PK zip header）
 _XLSX_MAGIC = b"\x50\x4b\x03\x04"
 
-#: 数据 sheet 列顺序（spec §5.3 line 2217 + §2.13）
+#: 数据 sheet 的固定列顺序。
 _EXPECTED_DATA_COLUMNS: tuple[str, ...] = (
     "user_name",
     "nickname",
@@ -51,7 +51,7 @@ _EXPECTED_DATA_COLUMNS: tuple[str, ...] = (
     "status",
 )
 
-#: 4 sheet 名称（spec §5.3 line 2215-2220）
+#: 四个 sheet 的名称。
 _EXPECTED_SHEET_NAMES: tuple[str, ...] = (
     "数据",
     "说明",
@@ -131,7 +131,7 @@ async def _seed_dept_and_role(db_session) -> tuple[Dept, Role]:
 
 
 class TestDownloadTemplateAuth:
-    """spec §5.3 line 2210：权限 system:user:import。"""
+    """验证 system:user:import 权限。"""
 
     async def test_no_token_returns_401(self, client):
         response = await client.get("/system/user/import/template")
@@ -149,7 +149,7 @@ class TestDownloadTemplateAuth:
 
 
 class TestDownloadTemplateResponse:
-    """spec §5.3 line 2213：返 xlsx 文件 + Content-Disposition。"""
+    """响应返回 xlsx 文件和 Content-Disposition。"""
 
     async def test_returns_xlsx_with_content_disposition(self, client, admin_token):
         response = await client.get(
@@ -173,7 +173,7 @@ class TestDownloadTemplateResponse:
 
 
 class TestTemplateSheets:
-    """spec §5.3 line 2215-2220：4 sheet。「数据」/「说明」固定；
+    """模板包含四个 sheet；数据和说明固定，
     「部门字典」/「角色字典」实时查 DB 填充。
     """
 
@@ -189,7 +189,7 @@ class TestTemplateSheets:
         )
 
     async def test_data_sheet_has_correct_columns(self, client, admin_token):
-        """「数据」sheet 第 1 行表头是固定英文列名（spec §5.3 line 2217）。
+        """数据 sheet 第一行使用固定英文列名。
 
         英文表头与 import_parser.EXCEL_HEADERS 对齐（决策 11.11：导入模板用英文），
         parser 按表头名匹配列索引。
@@ -201,13 +201,11 @@ class TestTemplateSheets:
         wb = _load_xlsx(response.content)
         ws = wb["数据"]
         header = [cell.value for cell in ws[1]]
-        # 模板把 employee_no 也带上（spec §2.24 v2.2 P1：可选字段）
-        # 但 spec §5.3 line 2217 只列了 8 列，employee_no 不在主表头列表 —
-        # 模板按 spec 严格 8 列，employee_no 让用户走 update 路径
+        # employee_no 是可选同步字段，不进入主模板的固定八列表头。
         assert header == list(_EXPECTED_DATA_COLUMNS), f"「数据」sheet 表头错: {header}"
 
     async def test_data_sheet_has_two_example_rows(self, client, admin_token):
-        """spec §2.13 反例 2「只给空表头 → 用户不知道哪些必填」→ 模板带 2 行示例。"""
+        """模板提供两行示例，帮助用户理解必填列和格式。"""
         response = await client.get(
             "/system/user/import/template",
             headers={"Authorization": f"Bearer {admin_token}"},
@@ -221,7 +219,7 @@ class TestTemplateSheets:
         assert row3_user_name, "第 3 行示例 user_name 不应为空"
 
     async def test_data_sheet_has_data_validations(self, client, admin_token):
-        """spec §2.16：「数据」sheet 部门列（E）+ 角色列（F）有 DataValidation。"""
+        """数据 sheet 的部门列和角色列包含 DataValidation。"""
         response = await client.get(
             "/system/user/import/template",
             headers={"Authorization": f"Bearer {admin_token}"},
@@ -248,7 +246,7 @@ class TestTemplateSheets:
 
 
 class TestTemplateDictSheets:
-    """spec §5.3 line 2219-2220 + §2.17 / §2.18：字典 sheet 实时查 DB。"""
+    """部门和角色字典 sheet 从数据库实时生成。"""
 
     async def test_dept_dict_sheet_has_header_and_timestamp(
         self, client, admin_token, db_session
@@ -269,7 +267,7 @@ class TestTemplateDictSheets:
         wb = _load_xlsx(response.content)
         ws = wb["部门字典"]
 
-        # row 1 是生成时间标注（spec §5.3 line 2227）
+        # 第一行记录模板生成时间。
         row1 = [cell.value for cell in ws[1]]
         assert any("生成时间" in str(c) for c in row1 if c), (
             f"「部门字典」sheet row 1 应是生成时间标注: {row1}"

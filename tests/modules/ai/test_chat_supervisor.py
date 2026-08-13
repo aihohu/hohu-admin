@@ -1,4 +1,4 @@
-"""spec §11 test_chat_supervisor: /ai/chat 端到端 supervisor 集成."""
+"""``/ai/chat`` 的 Supervisor 端到端集成测试。"""
 
 # ruff: noqa: ARG001, PLC0415  test fixture 占位参数 + 函数内 import（断言用）
 
@@ -33,7 +33,7 @@ def _chat_body(text: str, **extra) -> dict:
 async def test_auto_routes_via_supervisor(
     client: AsyncClient, db_session, auth_token, mock_visible_agents
 ):
-    """spec §6.1: agentCode='auto' → 走 Supervisor → 路由成功 → 走单 Agent 执行.
+    """agentCode='auto' 时由 Supervisor 路由到单个 Agent 执行。
 
     端到端断言 3 件事：
     1. HTTP 200（请求成功）
@@ -95,7 +95,7 @@ async def test_auto_routes_via_supervisor(
 async def test_auto_falls_back_to_clarification_on_no_provider(
     client: AsyncClient, auth_token, mock_visible_agents
 ):
-    """spec §9: 无 Provider → emit clarification_required."""
+    """无 Provider 时发送 clarification_required。"""
     with patch(
         "app.modules.ai.agents.supervisor.router.provider_service.resolve_model",
         AsyncMock(side_effect=Exception("AI_MODEL_NOT_CONFIGURED")),
@@ -112,7 +112,7 @@ async def test_auto_falls_back_to_clarification_on_no_provider(
 async def test_supervisor_disabled_uses_default_agent_code(
     client: AsyncClient, auth_token, mock_visible_agents
 ):
-    """spec §15.3: supervisor_enabled=False → auto 不进路由，用 DEFAULT_AGENT_CODE."""
+    """Supervisor 关闭时 auto 使用 DEFAULT_AGENT_CODE。"""
 
     async def fake_bool(db, key, default=False, **kw):
         if key == "ai:supervisor_enabled":
@@ -151,7 +151,7 @@ async def test_supervisor_disabled_uses_default_agent_code(
 async def test_legacy_null_mode_uses_default_agent_code(
     client: AsyncClient, auth_token, mock_visible_agents
 ):
-    """spec §15.3 / §13 决策 21: routing_legacy_null_mode=True + agentCode=null → DEFAULT_AGENT_CODE."""
+    """legacy null 模式下 agentCode=null 使用 DEFAULT_AGENT_CODE。"""
 
     async def fake_bool(db, key, default=False, **kw):
         if key == "ai:routing_legacy_null_mode":
@@ -180,7 +180,7 @@ async def test_legacy_null_mode_uses_default_agent_code(
 async def test_supervisor_quota_independent_of_usage_limits(
     client: AsyncClient, auth_token, mock_visible_agents
 ):
-    """spec §13 决策 5: Supervisor 配额独立于 PydanticAI UsageLimits.
+    """Supervisor 配额独立于 PydanticAI UsageLimits。
 
     构造 supervisor 配额已满场景，验证：
     1. supervisor LLM 不被调用（直接走 clarification 降级）
@@ -220,7 +220,7 @@ async def test_supervisor_quota_independent_of_usage_limits(
 async def test_clarification_does_not_save_user_message(
     client: AsyncClient, db_session, auth_token, mock_visible_agents
 ):
-    """spec §13 决策 11: clarification 时 user 消息不落库（避免孤儿消息）.
+    """需要澄清时不持久化用户消息，避免孤儿消息。
 
     构造 LLM 返回不合法 JSON → 触发 clarification_required → 验证 ai_message 无新行.
     """
@@ -253,17 +253,17 @@ async def test_clarification_does_not_save_user_message(
         .scalars()
         .all()
     )
-    assert len(msgs) == 0, "clarification 路径不应持久化 user 消息（spec §13 决策 11）"
+    assert len(msgs) == 0, "clarification 路径不应持久化 user 消息"
 
 
 @pytest.mark.asyncio
 async def test_clarification_works_without_conversation_id(
     client: AsyncClient, auth_token, mock_visible_agents
 ):
-    """spec §11 + §6.2: clarification 在 conversation_id=null（新会话首条）时正常工作.
+    """新会话首条消息的 conversation_id=null 时仍可正常澄清。
 
     新会话首条消息触发 clarification 时，前端无 conversation_id 暂存；
-    spec §6.2.6 明说"conversation_id 可为 null"——后端不应假设非空.
+    后端不应假设 conversation_id 非空。
     """
     with (
         patch(

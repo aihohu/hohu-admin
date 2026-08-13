@@ -100,7 +100,7 @@ class ConversationService:
     ) -> list[AiMessage]:
         """获取会话的所有历史消息
 
-        spec §7.4: 加载时再 scrub 一次，防早期版本（脱敏上线前）的脏数据
+        加载时再次脱敏，防止历史未脱敏数据回灌模型上下文。
         """
         await self.get_by_id(db, conversation_id, user_id)  # 验证权限
         stmt = (
@@ -113,7 +113,7 @@ class ConversationService:
         )
         result = await db.execute(stmt)
         messages = list(result.scalars().all())
-        # 防 §7.4 越权回灌：历史消息加载时再 scrub
+        # 历史消息加载时再次脱敏，防止敏感信息回灌。
         for msg in messages:
             if msg.content:
                 msg.content = redact_secrets(msg.content)
@@ -138,9 +138,9 @@ class ConversationService:
     ) -> AiMessage:
         """保存一条消息
 
-        spec §4.1 step 5 / §7.1b: agent_code 透传到 ai_message.agent_code
+        agent_code 透传到 ai_message.agent_code。
         （按消息粒度记录处理 Agent，让历史会话也能还原）.
-        spec §7.4: 用户输入保存前先 redact_secrets，防 LLM 上下文回灌
+        用户输入保存前先执行 redact_secrets，防止敏感信息回灌 LLM 上下文。
         修订 BUG-FE-18: assistant 消息含 tool_calls 时存 JSON，前端重连还原卡片
         """
         if role == "user" and content:

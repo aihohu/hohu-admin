@@ -1,4 +1,4 @@
-"""Task 35a.0: ChatCommand 因果、收口和 conversation guard 基础测试。"""
+"""ChatCommand 因果、收口和 conversation guard 基础测试。"""
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch

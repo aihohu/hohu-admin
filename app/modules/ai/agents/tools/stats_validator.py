@@ -1,12 +1,11 @@
 """聚合 tool 白名单校验 helper
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §5.5 关键约束 1：
+聚合字段必须由业务工具显式声明白名单：
   allowed_filters / allowed_group_by 在 @ai_tool 装饰器层校验，业务函数内
-  不重复检查；越界字段直接抛 AI_STATS_FIELD_NOT_ALLOWED（§9.6）。
+  不重复检查；越界字段直接抛 AI_STATS_FIELD_NOT_ALLOWED。
 
-MVP 阶段装饰器执行期拿不到运行时 args（白名单校验必须在调用时），
-本 helper 由业务函数第一行显式调用。Phase 1.2b PydanticAI 包装层实施时
-挪到包装层统一处理，业务函数不再调用。
+装饰器执行期拿不到运行时参数，因此业务函数在入口显式调用本 helper；
+包装层也可以统一处理，但业务层保留兜底校验。
 """
 
 from app.core.exceptions import BusinessRuleException

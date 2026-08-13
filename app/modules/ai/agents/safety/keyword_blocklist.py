@@ -1,15 +1,15 @@
-"""Keyword Blocklist Guardrail — spec §11.2
+"""Keyword Blocklist Guardrail。
 
 管理员配置 `system_config.ai:guardrail:keyword_blocklist`（JSON 字符串数组），
 用户输入命中后**整条消息拦截**（不进 LLM，emit AiErrorEvent 短路）。
 
 用途：项目自定义敏感词（公司机密 / 商标 / 内部代号 / 政治敏感词等），
-比 §11.1 injection_detector 更宽松（不一定是攻击，可能只是合规要求）。
+它比 injection_detector 更宽松；命中内容不一定是攻击，也可能只是合规限制。
 
 设计：
   - 进程内缓存 60s（避免每次 chat 都查 DB），通过 `invalidate_blocklist_cache`
     管理员改配置后立即生效（ConfigService.update 时调）
-  - 命中规则：大小写不敏感子串匹配（与 §11.1 injection_detector 一致）
+  - 命中规则：大小写不敏感的子串匹配
   - 多语言支持：blocklist 字符串本身含中文 / 英文都行
 
 未含（留 v2+）：

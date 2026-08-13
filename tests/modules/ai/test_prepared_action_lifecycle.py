@@ -1,4 +1,4 @@
-"""Task 35a.5 durable prepared-action startup recovery."""
+"""Durable prepared-action startup recovery tests."""
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace

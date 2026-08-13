@@ -20,11 +20,11 @@ from app.db.base import Base
 class AiOperationLog(Base):
     """AI 操作日志 + 安全事件（合并表）
 
-    按 spec §4.4 / §9.1 / §9.6 设计：
+    记录工具执行状态、输入摘要、结果摘要和审计主体：
     - 每次 tool 调用写一行，按 trace_id 串联同一对话的多次调用
     - 安全事件（注入命中 / Guardrail 命中）合并到 is_security_event 字段，不独立建表
     - status 含 running / pending_confirmation / success / failed / rejected / expired
-    - tool_call_id 唯一索引：§8.3 SSE 断流兜底轮询端点用
+    - tool_call_id 唯一索引供 SSE 断流后的兜底轮询使用
     """
 
     __tablename__ = "ai_operation_log"
@@ -59,7 +59,7 @@ class AiOperationLog(Base):
     user_id: Mapped[int] = mapped_column(BigInteger, comment="调用用户ID")
     tool_name: Mapped[str] = mapped_column(String(128), comment="tool 全限定名")
     tool_call_id: Mapped[str] = mapped_column(
-        String(64), unique=True, comment="单次 tool 调用 ID，§8.3 兜底轮询用"
+        String(64), unique=True, comment="单次工具调用 ID，供兜底轮询使用"
     )
     args_hash: Mapped[str] = mapped_column(
         String(64), comment="SHA256 完整 64 字符，不截断"
@@ -83,7 +83,7 @@ class AiOperationLog(Base):
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     confirmation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     approved_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    # 时间语义（spec §4.4 时间戳约定，2026-07-10 修订 S-3）：
+    # 时间语义：
     # - queued_at:    行级创建时间（pending_confirmation 入库时刻），含 HITL 等待之前
     # - started_at:   业务执行起点（HITL approved 后 / autonomous 入库后真正开始执行）
     # - finished_at:  业务执行终点（success / failed / rejected / expired）

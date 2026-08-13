@@ -1,9 +1,9 @@
-"""导入模板 service 层测试（Task 14，spec §5.3 + §2.13 + §2.16）。
+"""用户导入模板 service 行为测试。
 
 直接调 ``generate_import_template(db_session)`` 验证 service 层契约：
 - 部门字典 sheet 实时查 sys_dept（seed 后能立即出现在 xlsx）
 - 角色字典 sheet 实时查 sys_role
-- full_path 按 ancestors 链正确拼接（spec §2.17）
+- full_path 按 ancestors 链正确拼接
 - 禁用 dept / role 不进字典（仅 status='1'）
 
 HTTP 契约测试在 ``test_user_import_template_api.py``；本文件聚焦 service 业务逻辑。
@@ -19,7 +19,7 @@ from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.user.template_service import generate_import_template
 
-#: 4 sheet 名称（spec §5.3 line 2215-2220）
+#: 四个 sheet 名称。
 _EXPECTED_SHEET_NAMES: tuple[str, ...] = (
     "数据",
     "说明",
@@ -147,7 +147,7 @@ class TestTemplateSheetStructure:
     async def test_data_sheet_has_data_validations_referencing_dict_sheets(
         self, db_session
     ):
-        """spec §2.16：dept E 列 + role F 列 DataValidation 引用字典 sheet。"""
+        """部门列和角色列的 DataValidation 引用对应字典 sheet。"""
         xlsx_bytes = await generate_import_template(db_session)
         wb = _load_xlsx(xlsx_bytes)
         ws = wb["数据"]
@@ -166,7 +166,7 @@ class TestTemplateSheetStructure:
 
 
 class TestDeptDictSheetRealtime:
-    """「部门字典」sheet 实时查 sys_dept（spec §5.3 line 2219）。"""
+    """部门字典 sheet 从 sys_dept 实时生成。"""
 
     async def test_seed_dept_appears_in_dict_sheet(self, db_session, seed_dept_tree):
         """seed 的 3 级 dept 树应全部出现在「部门字典」sheet。"""
@@ -185,7 +185,7 @@ class TestDeptDictSheetRealtime:
     async def test_full_path_built_from_ancestors_chain(
         self, db_session, seed_dept_tree
     ):
-        """spec §2.17：full_path = 祖先链 + 当前 dept_name（如「总公司/研发中心/前端部」）。"""
+        """full_path 由祖先链和当前部门名称拼接。"""
         root, mid, leaf = seed_dept_tree
         xlsx_bytes = await generate_import_template(db_session)
         wb = _load_xlsx(xlsx_bytes)
@@ -222,7 +222,7 @@ class TestDeptDictSheetRealtime:
         )
 
     async def test_dept_dict_sheet_has_timestamp_at_row_1(self, db_session):
-        """spec §5.3 line 2227：row 1 是生成时间标注。"""
+        """第一行记录生成时间。"""
         xlsx_bytes = await generate_import_template(db_session)
         wb = _load_xlsx(xlsx_bytes)
         ws = wb["部门字典"]
@@ -238,7 +238,7 @@ class TestDeptDictSheetRealtime:
 
 
 class TestRoleDictSheetRealtime:
-    """「角色字典」sheet 实时查 sys_role（spec §5.3 line 2220）。"""
+    """角色字典 sheet 从 sys_role 实时生成。"""
 
     async def test_seed_role_appears_in_dict_sheet(self, db_session, seed_role):
         """seed 的 role 应出现在字典 sheet。"""
@@ -266,7 +266,7 @@ class TestRoleDictSheetRealtime:
         )
 
     async def test_role_dict_sheet_has_timestamp_at_row_1(self, db_session):
-        """spec §5.3 line 2227：row 1 是生成时间标注。"""
+        """第一行记录生成时间。"""
         xlsx_bytes = await generate_import_template(db_session)
         wb = _load_xlsx(xlsx_bytes)
         ws = wb["角色字典"]
@@ -277,7 +277,7 @@ class TestRoleDictSheetRealtime:
 
 
 class TestInstructionSheet:
-    """「说明」sheet：字段说明 / 必填 / 取值范围 / 冲突处理（spec §5.3 line 2218）。"""
+    """说明 sheet 包含字段说明、必填、取值范围和冲突处理。"""
 
     async def test_instruction_sheet_has_field_descriptions(self, db_session):
         """说明 sheet 至少覆盖 8 个字段 + 表头行。"""

@@ -107,7 +107,7 @@ def _cast_for_range_op(data_type: str) -> str:
 
 
 def _collect_belongs_to(data_schema: dict | None, models: list | None) -> list[dict]:
-    """Parse `belongs_to` relations from manifest (spec §6.5 / decision #79).
+    """Parse ``belongs_to`` relations from the manifest.
 
     Priority: explicit model.relations[] takes precedence over field-level x-ref.
     Returns list of {model, foreign_key, label_field?} dicts.
@@ -177,7 +177,7 @@ def _collect_belongs_to(data_schema: dict | None, models: list | None) -> list[d
 async def _first_string_field(db: AsyncSession, table_name: str) -> str | None:
     """Return first text-typed column name on table, or None if no string cols.
 
-    Used as fallback when relation.label_field is missing (spec §6.5 line 613).
+    Used as fallback when ``relation.label_field`` is missing.
     """
     info = await introspect_table(db, table_name)
     if info is None:
@@ -424,7 +424,7 @@ class DataApiService:
     ) -> None:
         """Merge related label field onto each record (mutates in place).
 
-        Spec §6.5 + decision #79. Sources of relation declarations, in priority:
+        Relation declarations are read from these sources in priority order:
         1. model.relations[] (explicit, takes precedence)
         2. field-level `x-ref` + optional `x-ref-label`
 

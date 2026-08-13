@@ -1,12 +1,12 @@
-"""用户导入导出 ORM（spec §2.26 / §2.28 / §2.31，Task 2）。
+"""用户导入导出 ORM。
 
 User ORM 仍在 app.modules.system.models.user（不动），
 本模块只含导入导出相关 ORM：
-- UserImportBatch（sys_user_import_batch，唯一 aggregate root，v2.2 P1-2）
-- UserImportBatchLog（sys_user_import_batch_log，FK CASCADE，v2.2 P1 #2.28）
-- UserExportTask（sys_user_export_task，v2.2 P1-5 #2.31）
+- UserImportBatch（sys_user_import_batch，导入聚合根）
+- UserImportBatchLog（sys_user_import_batch_log，FK CASCADE）
+- UserExportTask（sys_user_export_task）
 
-sys_user.employee_no 字段加在现有 User ORM（spec §2.24）。
+sys_user.employee_no 字段位于现有 User ORM。
 """
 
 from datetime import datetime
@@ -34,7 +34,7 @@ from app.modules.system.user.constants import (
 
 
 class UserImportBatch(Base):
-    """一次导入的批次上下文 + 状态机（spec §3.6 v2.2 P1-2）。
+    """一次导入的批次上下文和状态机。
 
     状态机：CREATED → PREVIEW_DONE → RUNNING →
             SUCCESS / PARTIAL_SUCCESS / FAILED / EXPIRED / CANCELLED
@@ -49,7 +49,7 @@ class UserImportBatch(Base):
     records_hash: Mapped[str] = mapped_column(
         String(64),
         nullable=False,
-        comment="records 序列化后的 sha256（spec §2.19 三重校验：execute 时比对防 dry_run 后改字段值）",
+        comment="records 序列化后的 sha256，执行时比对以防预览后字段被修改",
     )
     total_rows: Mapped[int] = mapped_column(Integer)
 
@@ -57,7 +57,7 @@ class UserImportBatch(Base):
         String(64),
         unique=True,
         index=True,
-        comment="execute 时反查 batch 行（spec §2.27 幂等）",
+        comment="执行时用于反查批次并保证幂等",
     )
     summary_new: Mapped[int] = mapped_column(Integer, default=0)
     summary_exists: Mapped[int] = mapped_column(Integer, default=0)
@@ -75,7 +75,7 @@ class UserImportBatch(Base):
     file_storage_key: Mapped[str | None] = mapped_column(
         String(512),
         nullable=True,
-        comment="原始上传文件 storage_key（spec §3.9 FileStorage Protocol）",
+        comment="原始上传文件的 storage key",
     )
 
     on_conflict: Mapped[str] = mapped_column(
@@ -84,7 +84,7 @@ class UserImportBatch(Base):
     reason: Mapped[str] = mapped_column(
         String(256),
         nullable=False,
-        comment="操作理由（spec §2.30 v2.2 P1-3）：批量操作的业务背景，进入审计链路",
+        comment="批量操作的业务理由，进入审计链路",
     )
 
     status: Mapped[ImportBatchStatus] = mapped_column(
@@ -98,7 +98,7 @@ class UserImportBatch(Base):
         nullable=False,
         index=True,
         default=ImportBatchStatus.CREATED,
-        comment="状态机详见 §2.26",
+        comment="导入批次状态",
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -109,7 +109,7 @@ class UserImportBatch(Base):
 
 
 class UserImportBatchLog(Base):
-    """批次操作日志（spec §2.28 v2.2 P1）。
+    """批次操作日志。
 
     按 batch 维度记录状态转换 + 关键节点（CHUNK_PROGRESS 等）。
     FK ondelete=CASCADE：删 batch 自动删 log。
@@ -162,7 +162,7 @@ class UserImportBatchLog(Base):
 
 
 class UserExportTask(Base):
-    """用户导出任务审计（spec §2.31 v2.2 P1-5）。
+    """用户导出任务审计。
 
     所有导出（HTTP 同步 / HTTP 异步 / AI）一律建任务记录，
     高风险数据外流动作可追溯。
@@ -181,7 +181,7 @@ class UserExportTask(Base):
     reason: Mapped[str] = mapped_column(
         String(256),
         nullable=False,
-        comment="操作理由（spec §2.30）：与 import batch.reason 对称",
+        comment="导出的业务理由，与导入批次理由语义一致",
     )
 
     row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)

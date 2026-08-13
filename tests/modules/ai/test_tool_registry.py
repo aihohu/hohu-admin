@@ -1,6 +1,6 @@
 """ToolRegistry + @ai_tool 装饰器 单元测试
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §5.1 / §5.4 / §5.5。
+覆盖工具注册、权限过滤、默认启用和启动校验。
 
 不依赖 DB（async db fixture 重），启动校验测试用 mock AsyncSession。
 """
@@ -227,7 +227,7 @@ class TestToolRegistryOps:
 
 class TestComputeAvailableTools:
     def test_perm_filter(self) -> None:
-        """spec §5.4: required_perms ⊆ user.perms"""
+        """工具可见性要求 required_perms 是 user.perms 的子集。"""
         registry = ToolRegistry.get()
         registry.register(_make_meta("u.create", perms=("system:user:add",)), _noop_fn)
         registry.register(
@@ -260,11 +260,11 @@ class TestComputeAvailableTools:
         assert result[0].meta.name == "u.x"
 
 
-# ============ v1.5+ SR-17: default_enabled + ai:enabled_tools 白名单 ============
+# ============ default_enabled 与 ai:enabled_tools 白名单 ============
 
 
 class TestComputeAvailableToolsDefaultEnabled:
-    """spec §5.4 SR-17: default_enabled=False 时需在 ai:enabled_tools 白名单才可见"""
+    """default_enabled=False 的工具只有显式加入白名单后可见。"""
 
     def test_default_enabled_true_visible(self) -> None:
         """default_enabled=True（默认）→ 可见（perms 满足时）"""
@@ -319,7 +319,7 @@ class TestComputeAvailableToolsDefaultEnabled:
     def test_default_enabled_false_extra_does_not_bypass_perms(self) -> None:
         """default_enabled=False + 在 extra 中 + perms 不足 → 仍不可见
 
-        extra 白名单不能绕过 perm 检查（spec §5.4 双维度 AND 关系）。
+        extra 白名单不能绕过权限检查，两者为 AND 关系。
         """
         registry = ToolRegistry.get()
         registry.register(
@@ -429,7 +429,7 @@ class TestAiToolDecorator:
             )
 
     def test_decorator_allows_empty_perms_for_shared(self) -> None:
-        """spec §16.4: file.parse agent='shared' required_perms=() 合法"""
+        """file.parse 绑定 shared 且 required_perms=() 是合法配置。"""
 
         @ai_tool(
             AiToolMeta(
@@ -446,7 +446,7 @@ class TestAiToolDecorator:
         assert "shared.ping" in ToolRegistry.get()
 
     def test_decorator_finds_dry_run_fn(self) -> None:
-        """spec §5.1: dry_run_fn 在 _resolve_dry_run_fns 时查找（不是装饰器执行期）
+        """dry_run_fn 在 _resolve_dry_run_fns 阶段查找，而非装饰器执行期。
 
         业务方文件 _dry_run_<tool> 可能定义在 @ai_tool 之后，装饰器执行期
         sys.modules[fn.__module__] 还找不到。延迟到 _resolve_dry_run_fns
@@ -616,16 +616,16 @@ class TestConstants:
         assert SHARED_AGENT_CODE == "shared"
 
     def test_sensitive_input_blocklist_contains_key_fields(self) -> None:
-        """spec §7.2: 关键字段必须命中黑名单"""
+        """关键敏感字段必须命中黑名单。"""
         required = {"password", "password_hash", "api_key", "secret", "token"}
         assert required <= set(SENSITIVE_INPUT_BLOCKLIST)
 
 
-# ============ v1.6+ SR-13: result_view 启动校验 ============
+# ============ result_view 启动校验 ============
 
 
 class TestValidateResultViewOnStartup:
-    """spec 2026-07-16-tool-result-view-design.md §2.4：result_view 启动校验。"""
+    """验证 result_view 的启动期校验。"""
 
     async def test_invalid_result_view_rejected(self) -> None:
         """meta.result_view 不在 STANDARD_VIEW_TYPES 时启动校验失败。"""

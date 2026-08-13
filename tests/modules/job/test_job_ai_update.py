@@ -1,4 +1,4 @@
-"""JobAiUpdate schema 白名单单测 — spec §11.3
+"""JobAiUpdate schema 白名单测试。
 
 验证 AI 入口更新请求的字段级硬约束。即使调用方传入危险字段，
 Pydantic 在反序列化阶段就丢弃。
@@ -13,7 +13,7 @@ from app.modules.job.schemas.job import JobAiUpdate
 
 
 class TestJobAiUpdateWhitelist:
-    """spec §11.3: AI 入口只允许调度配置 + 启停 + 任务参数"""
+    """AI 入口只允许修改调度配置、启停和任务参数。"""
 
     def test_clean_cron_update_accepted(self) -> None:
         """正常 cron 表达式更新被接受"""
@@ -42,7 +42,7 @@ class TestJobAiUpdateWhitelist:
 
 
 class TestJobAiUpdateForbiddenFieldsDropped:
-    """spec §11.3 禁止字段：调用方传过来时 Pydantic 自动丢弃（不报错）"""
+    """禁止字段由 Pydantic 自动丢弃。"""
 
     def test_job_key_dropped(self) -> None:
         """job_key 改了等同于改执行哪个 Python 代码（等同改 code），禁止"""
@@ -129,16 +129,16 @@ class TestJobAiUpdateValidation:
 
 
 class TestFullWhitelistCoverage:
-    """spec §11.3 表格逐项验证：所有允许字段在 schema 里，所有禁止字段不在"""
+    """验证允许字段均存在、禁止字段均不存在。"""
 
-    # spec §11.3 允许字段
+    # 允许字段。
     ALLOWED_FIELDS = {
         "job_name",  # spec name
         "cron_expression",
         "status",  # spec enabled
         "job_args",  # spec params
     }
-    # spec §11.3 禁止字段 + 我额外加的运维字段
+    # 禁止字段和运维字段。
     FORBIDDEN_FIELDS = {
         "job_key",  # 改代码标识
         "run_on_enable",  # 手动触发等价物（spec run_now）

@@ -1,6 +1,6 @@
 """AI Tool Gateway — 装饰器 + Registry + Meta
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §5。
+集中导出工具注册、元数据、执行结果和包装入口。
 
 典型用法：
     from app.modules.ai.agents.tools import AiToolMeta, ai_tool
@@ -64,12 +64,12 @@ __all__ = [
 
 
 # ============ 启动扫描：触发各业务模块 @ai_tool 装饰器注册到 Registry ============
-# spec §3：启动时扫描 @ai_tool 装饰器 → ToolRegistry（单例）
+# 启动时导入带 @ai_tool 的模块，填充全局 ToolRegistry。
 # 由 main.py lifespan 或测试 fixture 显式调用，避免在 import 期触发循环依赖。
 
 
 def load_builtin_tools() -> None:
-    """触发内置 tool 注册（spec §3 启动扫描）
+    """触发内置工具注册。
 
     显式调用（不在 import 期触发），避免 system/ai_tools → context → User →
     db.base 的 import 链与 tools/__init__.py 自身形成循环。
@@ -86,11 +86,11 @@ def load_builtin_tools() -> None:
     from importlib import import_module  # noqa: PLC0415  延迟 import 避免循环
 
     module_names = (
-        # Phase 1.4：system 模块的 user.count / user.stats / user.distinct
+        # system 模块的 user.count、user.stats 和 user.distinct。
         "app.modules.system.ai_tools",
-        # v1.5+：job.update_cron（spec §11.3 白名单 + JobAiUpdate schema）
+        # job.update_cron 使用字段白名单和 JobAiUpdate schema。
         "app.modules.job.ai_tools",
-        # v1.5+ SR-24：file.parse（Excel/CSV 解析，spec §16）
+        # file.parse 负责 Excel/CSV 解析。
         "app.modules.ai.agents.tools.file_tools",
     )
     modules = [import_module(module_name) for module_name in module_names]

@@ -1,4 +1,4 @@
-"""spec §3 v1.5+: /ai/chat/resume 端点单元测试
+"""``/ai/chat/resume`` 端点单元测试。
 
 直接调端点函数，mock 掉 redis_client + hitl_manager + settings。
 """
@@ -103,7 +103,7 @@ class TestResumeDisabled:
         """memory 模式不再硬 410——单 worker 本地开发可用 resume。
 
         端点移除了 AI_HITL_MODE 硬校验：memory 模式下 _hang_memory + _wake_memory
-        跨请求同进程工作。多 worker 部署需 redis_pubsub 由 spec §8.4 / 部署文档约束。
+        跨请求同进程工作；多 worker 部署需要 redis_pubsub。
         """
         from app.core.exceptions import NotFoundException
 
@@ -337,7 +337,7 @@ class TestLastEventIdHeaderPriority:
 
 
 class TestResumeSuccessPath:
-    """spec §3.1 + §4.3: 续传成功路径（emit resumed → hang → execute_tool → emit result）"""
+    """续传成功路径依次发送 resumed、等待确认、执行工具并返回结果。"""
 
     @pytest.fixture
     def _mock_deps_for_success(self, _resume_enabled, _redis_pubsub_mode):
@@ -851,7 +851,7 @@ class TestResumeTimeoutPath:
 
 
 class TestOwnerLockRelease:
-    """spec §2.3: owner 锁在 finally 块释放（Lua 脚本 token 校验）"""
+    """owner 锁在 finally 中通过 token 校验后释放。"""
 
     async def test_lock_released_after_success(
         self, _resume_enabled, _redis_pubsub_mode

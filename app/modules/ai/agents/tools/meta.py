@@ -1,11 +1,9 @@
-"""AiToolMeta 与常量定义
-
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §5.1 / §5.5 / §7.2。
+"""AiToolMeta 与常量定义。
 
 AiToolMeta 是 tool 的"声明式元数据"，与业务函数同源不漂移：
 - 鉴权（risk / required_perms / hitl_always）
 - 脱敏（sensitive_input / sensitive_output）
-- 聚合专用（readonly / allowed_filters / allowed_group_by / max_groups，§5.5）
+- 聚合专用（readonly / allowed_filters / allowed_group_by / max_groups）
 - LLM 友好（summary / ambiguous_without）
 
 frozen dataclass 保证运行时不可变，装饰器注册后字段值不会被业务方误改。
@@ -24,7 +22,7 @@ class AiToolMeta:
       鉴权控制：hitl_always / dry_run_supported / idempotent
       脱敏：sensitive_input / sensitive_output
       LLM 交互：ambiguous_without / accepts_file / produces_file
-      聚合专用（§5.5，默认值不影响普通 tool）：readonly / allowed_filters / allowed_group_by / max_groups
+      聚合专用：readonly / allowed_filters / allowed_group_by / max_groups
     """
 
     # ============ 基础（必填） ============
@@ -32,7 +30,7 @@ class AiToolMeta:
     """Tool 全局唯一全限定名，如 'user.create' / 'user.stats'"""
 
     agent: str
-    """所属 Agent code，必须在 ai_agent 表中存在（启动校验，spec §10.1）"""
+    """所属 Agent code，启动时校验其在 ai_agent 表中存在。"""
 
     summary: str
     """给 LLM 的 1 句描述，≤ 100 Unicode chars（lint 校验）"""
@@ -41,39 +39,39 @@ class AiToolMeta:
     """权限码，复数同时满足（⊆ user.perms）。每个 perm 必须在 sys_menu 表存在（启动校验）"""
 
     risk: Literal["low", "high", "destructive"]
-    """风险等级，§5.3 风险分级判定用。注意：只有 3 档，无 'medium'"""
+    """风险等级。仅允许 low、high、destructive，无 medium。"""
 
     # ============ 鉴权控制 ============
     hitl_always: bool = False
     """True 时强制走 HITL，无视 risk + dry_run_count"""
 
     dry_run_supported: bool = False
-    """True 时同模块必须有 _dry_run_<tool>（命名约定，spec §5.1）"""
+    """True 时同模块必须按约定提供 _dry_run_<tool>。"""
 
     idempotent: bool = False
     """是否可安全重放。未知默认 False；仅纯读或有稳定幂等键的 tool 可声明 True"""
 
     super_admin_only: bool = False
-    """§11.2 super_admin gate：True 时仅超管（is_super_admin）可调，非超管短路
+    """True 时仅超管可调，非超管在 dry_run 和风险分级前短路
     返回 AI_SUPER_ADMIN_REQUIRED（不走 HITL，不进入 dry_run / 风险分级）。
     典型场景：改权限码 / 改 R_SUPER 角色绑定 / 删除 super_admin 账号。"""
 
     # ============ 脱敏 ============
     sensitive_input: tuple[str, ...] = field(default_factory=tuple)
-    """字段名列表。声明但**不进函数签名**（spec §7.2），由后端策略生成"""
+    """由可信后端策略生成且不会进入模型可见函数签名的字段。"""
 
     sensitive_output: tuple[str, ...] = field(default_factory=tuple)
-    """返回字段列表，永不回显给 LLM（spec §7.3）"""
+    """永不回显给模型的返回字段列表。"""
 
     # ============ LLM 交互 ============
     ambiguous_without: tuple[str, ...] = field(default_factory=tuple)
-    """缺这些字段时 LLM 应主动反问（spec §8.6 MISSING_ARGUMENT）"""
+    """缺少这些字段时模型应向用户澄清。"""
 
     accepts_file: tuple[str, ...] = field(default_factory=tuple)
-    """接受的 MIME 类型（spec §16 文件上传场景）"""
+    """工具接受的文件 MIME 类型。"""
 
     produces_file: bool = False
-    """是否产生文件下载（spec §16.2 同步导出）"""
+    """工具是否产生可下载文件。"""
 
     interaction_flow: Literal["direct", "prepared"] = "direct"
     """确认拓扑。prepared tool 成功后由 Gateway 根据 requested_outcome 编排。"""
@@ -84,9 +82,9 @@ class AiToolMeta:
     llm_visible: bool = True
     """False 表示仅 Gateway 可调用，不进入模型可见 tool 集合。"""
 
-    # ============ 聚合 tool 专用（§5.5，默认值不影响普通 tool） ============
+    # ============ 聚合工具专用 ============
     readonly: bool = False
-    """True = 纯读无副作用，被 §2.9 chip 机制忽略（聚合结果即答案）"""
+    """True 表示纯读无副作用。"""
 
     allowed_filters: tuple[str, ...] = field(default_factory=tuple)
     """filters dict 允许的 key 白名单（防 LLM 查 password_hash 等敏感字段）"""
@@ -97,39 +95,39 @@ class AiToolMeta:
     max_groups: int = 20
     """group_by 返回组数上限，超限截断"""
 
-    # ============ Tool Result View（v1.6+ SR-13） ============
+    # ============ Tool Result View ============
     result_view: str = "plain_json"
-    """spec 2026-07-16 §2.4: 标准 view_type key，决定前端按哪个组件渲染 result。
+    """标准 view_type key，决定前端按哪个组件渲染结果。
     必须在 STANDARD_VIEW_TYPES 内（启动校验）：
       - rows_affected: 写操作影响行数（user.batch_delete）
       - data_list: 列表查询（role.list / dept.list）
       - stats_chart: 统计图表（user.stats）
       - detail_card: 单实体详情（job.update_cron 返回值）
       - plain_json: fallback（user.count 这种纯数字 + chip 跳转）
-    默认 'plain_json' 向后兼容老 tool。"""
+    默认使用 plain_json 兼容未声明结构化视图的工具。"""
 
     chip_target: str | None = None
-    """spec 2026-07-16 §3 决策 2: chip 跳转目标路径（如 '/system/user'）。
+    """结果卡跳转目标路径（如 '/system/user'）。
     readonly tool 声明 chip_target 后：
       - 后端写 ai:query_cache hash 时 module 字段填此路径
       - 前端 tool_call_started 事件携带 chipTarget，不再硬编码 CHIP_TARGETS map
     None = 不显示 chip（写 tool / stats tool / detail tool 都不需要 chip）。
     替代旧字段 query_cache_module（保留为 alias，新代码用 chip_target）。"""
 
-    # ============ chip 跳转（§2.9 / §8.7） ============
+    # ============ 结果卡跳转 ============
     query_cache_module: str | None = None
     """readonly tool 的查询条件写入 ai:query_cache:<trace_id> hash 时的 module 字段，
     用于前端 chip 跳转回放筛选（如 "system/user"）。
     None = 不写 query_cache（非 readonly / 不需 chip 跳转的 tool）。"""
 
-    # ============ 可见性（v1.5+ SR-17） ============
+    # ============ 可见性 ============
     default_enabled: bool = True
     """True=默认启用（受 perms 过滤后可见），False=默认禁用，
     仅当 tool.name 在 sys_config.ai:enabled_tools JSON 数组中时才启用。
     典型场景：file.parse / provider.export 等高风险 tool 默认 False，
     部署方评估后显式加入 ai:enabled_tools 启用。"""
 
-    # ============ 审计（v1.5+ SR-18） ============
+    # ============ 审计 ============
     args_summary_fields: tuple[str, ...] = field(default_factory=tuple)
     """声明要写入 ai_operation_log.args_summary 的 args 字段名（白名单）。
     默认空 tuple → summary 仅含元信息（MVP 行为，向后兼容）。
@@ -139,12 +137,12 @@ class AiToolMeta:
 
 # ============ 常量 ============
 
-# spec §5.4: shared Agent code 是特殊值
+# shared Agent 对所有登录用户可见，不要求角色绑定。
 # - 任何登录用户直通（不需要 role_ai_agent 绑定）
 # - file.parse 等通用 tool 归属它
 SHARED_AGENT_CODE = "shared"
 
-# spec §7.2: sensitive_input 字段命中此黑名单时，Lint 强制要求声明 sensitive_input
+# 工具参数命中此黑名单时，Lint 强制要求声明 sensitive_input。
 # 命中但未声明 → 阻断合并（scripts/check_ai_tools.py 的 blocklist_field_must_be_sensitive）
 SENSITIVE_INPUT_BLOCKLIST = (
     "password",
@@ -160,8 +158,7 @@ SENSITIVE_INPUT_BLOCKLIST = (
     "token",
 )
 
-# spec 2026-07-16-tool-result-view-design.md §2.3: 标准 view_type registry
-# 启动校验：meta.result_view 必须在此集合内（registry.validate_on_startup）
+# 标准 view_type 集合；启动时校验工具声明。
 STANDARD_VIEW_TYPES: frozenset[str] = frozenset(
     {
         "rows_affected",

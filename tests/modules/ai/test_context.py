@@ -1,6 +1,6 @@
 """ChatDeps / AiToolContext / build_tool_context / DataScopeContext 单元测试
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §4.6。
+覆盖 ChatDeps 与 AiToolContext 的构造和转换。
 """
 
 # ruff: noqa: ARG001, ARG005  test 函数 ctx / kwargs 是与生产签名一致的占位
@@ -86,7 +86,7 @@ class TestChatDeps:
         assert deps.tenant_id == 0
 
     def test_no_default_trace_id(self) -> None:
-        """trace_id 必填，无默认值（spec §4.6 防 "" 漏到 DB 索引）"""
+        """trace_id 必填且无默认值，防止空值进入数据库索引。"""
         fields = {f.name: f for f in dataclasses.fields(ChatDeps)}
         assert fields["trace_id"].default is dataclasses.MISSING
 
@@ -104,11 +104,11 @@ class TestAiToolContext:
             trace_id="tr_x",
             tool_meta=_make_meta(),
         )
-        assert ctx.secrets == {}  # MVP 留空（§7.2）
+        assert ctx.secrets == {}  # 当前默认不注入 secrets。
         assert ctx.tenant_id == 0
 
     def test_tool_meta_required(self) -> None:
-        """聚合 tool 通过 ctx.tool_meta 读 max_groups / allowed_filters（§5.5）"""
+        """聚合工具通过 ctx.tool_meta 读取分组和过滤白名单。"""
         meta_with_aggregation = AiToolMeta(
             name="user.stats",
             agent="user_mgmt",
@@ -138,7 +138,7 @@ class TestAiToolContext:
 
 class TestBuildContext:
     def test_basic_conversion(self) -> None:
-        """spec §4.6: ChatDeps → AiToolContext 替换 db + 注入 tool_meta + 复用其它"""
+        """ChatDeps 转 AiToolContext 时替换 db、注入 tool_meta 并复用其他字段。"""
         deps = _make_deps(trace_id="tr_test_basic", tenant_id=37)
         tool_db = MagicMock()
         meta = _make_meta()
@@ -162,7 +162,7 @@ class TestBuildContext:
         assert ctx.secrets == {}
 
     def test_rejects_empty_trace_id(self) -> None:
-        """spec §4.6: trace_id 必填非空，防 "" 漏到 DB 索引"""
+        """trace_id 必须非空，防止空字符串进入数据库索引。"""
         deps = _make_deps(trace_id="")
         with pytest.raises(AssertionError, match="trace_id"):
             build_tool_context(deps, MagicMock(), _make_meta())

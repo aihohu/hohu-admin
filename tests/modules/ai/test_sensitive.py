@@ -1,6 +1,6 @@
 """敏感数据脱敏单元测试（serialize_for_llm + _scrub_fields + redact_secrets）
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §7.3 / §7.4。
+覆盖参数摘要、输出脱敏和密钥清洗。
 """
 
 # ruff: noqa: ARG001
@@ -309,7 +309,7 @@ class TestRedactSecrets:
         assert "[REDACTED:CONTEXT_SENSITIVE]" in result
 
     def test_mime_whitelist_image_skipped(self) -> None:
-        """spec §7.4: data:image/* 不被扫描"""
+        """data:image/* 内容不进行文本密钥扫描。"""
         text = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA..."
         result = redact_secrets(text)
         assert result == text
@@ -364,7 +364,7 @@ class TestContainsRedactedMarker:
 
 class TestRedactPatterns:
     def test_four_patterns_defined(self) -> None:
-        """spec §7.4 4 类 pattern"""
+        """覆盖四类密钥 pattern。"""
         names = {name for name, _ in REDACT_PATTERNS}
         assert names == {
             "OPENAI_API_KEY",

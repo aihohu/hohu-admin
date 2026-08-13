@@ -25,7 +25,7 @@ class User(Base):
         String(64),
         unique=True,
         nullable=True,
-        comment="员工工号（spec §2.24）：企业同步 / LDAP / ERP 对接，UNIQUE 但允许多个 NULL",
+        comment="员工工号，用于企业同步、LDAP 或 ERP 对接；UNIQUE 但允许多个 NULL",
     )
     nickname: Mapped[str] = mapped_column(String(50), nullable=True, comment="昵称")
     hashed_password: Mapped[str] = mapped_column(

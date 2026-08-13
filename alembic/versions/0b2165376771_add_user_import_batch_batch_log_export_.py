@@ -4,15 +4,15 @@ Revision ID: 0b2165376771
 Revises: fba0cf4a5e82
 Create Date: 2026-08-03 11:48:30.548682
 
-Task 2（spec §2.26 / §2.28 / §2.31 / §2.24）：
+新增用户导入导出审计与员工工号结构：
 - sys_user_import_batch（PostgreSQL ENUM status + CHECK，含 PREVIEW_DONE + reason）
-- sys_user_import_batch_log（FK CASCADE，spec §2.28）
-- sys_user_export_task（spec §2.31）
-- sys_user.employee_no 字段（UNIQUE 索引，spec §2.24）
+- sys_user_import_batch_log（FK CASCADE）
+- sys_user_export_task
+- sys_user.employee_no 字段（UNIQUE 索引）
 
 注：alembic autogenerate 检测到 ai_message / ai_model / ai_operation_log /
 role_ai_agent 等表的 comment / index 漂移，这些是历史遗留 ORM ↔ DB schema 漂移，
-不在 Task 2 范围，已修剪。需要单独的 migration 处理。
+不属于本次迁移的表结构已修剪，需要单独迁移处理。
 """
 
 from typing import Sequence, Union
@@ -30,7 +30,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Upgrade schema."""
-    # 1. PostgreSQL ENUM 类型（spec §2.26 v2.2 P0：原生 ENUM + CHECK 双重保证）
+    # 1. PostgreSQL 原生 ENUM，并由应用层状态机共同约束。
     # 用 raw DDL 避免 sa.Enum().create() 在 asyncpg 下 checkfirst 行为问题
     op.execute(
         "CREATE TYPE import_batch_status AS ENUM "
@@ -65,7 +65,7 @@ def upgrade() -> None:
         create_type=False,
     )
 
-    # 2. sys_user_import_batch（spec §3.6 v2.2 P1-2：唯一 aggregate root）
+    # 2. sys_user_import_batch 导入聚合根。
     op.create_table(
         "sys_user_import_batch",
         sa.Column("batch_id", sa.String(length=64), nullable=False, comment="UUID"),
@@ -77,7 +77,7 @@ def upgrade() -> None:
             "preview_token",
             sa.String(length=64),
             nullable=False,
-            comment="execute 时反查 batch 行（spec §2.27 幂等）",
+            comment="execute 时反查 batch 行，用于幂等控制",
         ),
         sa.Column("summary_new", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("summary_exists", sa.Integer(), nullable=False, server_default="0"),
@@ -101,7 +101,7 @@ def upgrade() -> None:
             "file_storage_key",
             sa.String(length=512),
             nullable=True,
-            comment="原始上传文件 storage_key（spec §3.9 FileStorage Protocol）",
+            comment="原始上传文件的 storage_key",
         ),
         sa.Column(
             "on_conflict",
@@ -113,14 +113,14 @@ def upgrade() -> None:
             "reason",
             sa.String(length=256),
             nullable=False,
-            comment="操作理由（spec §2.30 v2.2 P1-3）：批量操作的业务背景，进入审计链路",
+            comment="批量操作的业务理由，进入审计链路",
         ),
         sa.Column(
             "status",
             import_batch_status_type,
             nullable=False,
             server_default="CREATED",
-            comment="状态机详见 §2.26",
+            comment="导入批次状态机",
         ),
         sa.Column(
             "created_at",
@@ -157,7 +157,7 @@ def upgrade() -> None:
         unique=False,
     )
 
-    # 3. sys_user_import_batch_log（spec §2.28 v2.2 P1，FK CASCADE）
+    # 3. sys_user_import_batch_log，随批次级联删除。
     op.create_table(
         "sys_user_import_batch_log",
         sa.Column(
@@ -214,7 +214,7 @@ def upgrade() -> None:
         unique=False,
     )
 
-    # 4. sys_user_export_task（spec §2.31 v2.2 P1-5）
+    # 4. sys_user_export_task。
     op.create_table(
         "sys_user_export_task",
         sa.Column(
@@ -234,7 +234,7 @@ def upgrade() -> None:
             "reason",
             sa.String(length=256),
             nullable=False,
-            comment="操作理由（spec §2.30）：与 import batch.reason 对称",
+            comment="导出操作理由，与 import batch.reason 对称",
         ),
         sa.Column("row_count", sa.Integer(), nullable=True),
         sa.Column(
@@ -279,14 +279,14 @@ def upgrade() -> None:
         unique=False,
     )
 
-    # 5. sys_user.employee_no（spec §2.24，UNIQUE 索引，允许多个 NULL）
+    # 5. sys_user.employee_no，UNIQUE 索引允许多个 NULL。
     op.add_column(
         "sys_user",
         sa.Column(
             "employee_no",
             sa.String(length=64),
             nullable=True,
-            comment="员工工号（spec §2.24）：企业同步 / LDAP / ERP 对接，UNIQUE 但允许多个 NULL",
+            comment="员工工号，用于企业同步、LDAP 或 ERP 对接；UNIQUE 但允许多个 NULL",
         ),
     )
     op.create_unique_constraint("uq_sys_user_employee_no", "sys_user", ["employee_no"])

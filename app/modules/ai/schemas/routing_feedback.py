@@ -1,4 +1,4 @@
-"""spec §6.4: routing feedback request and query schemas."""
+"""Routing feedback 请求和查询 schema。"""
 
 from datetime import datetime
 

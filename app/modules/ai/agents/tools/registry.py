@@ -1,13 +1,11 @@
 """ToolRegistry — 启动时反射构建，运行时按 Agent + perms 过滤
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §3 / §5.1 / §5.4 / §12.4。
-
 生命周期：
   1. 装饰器执行期（import time）：ToolRegistry.register(meta, fn)
   2. FastAPI lifespan 启动：ToolRegistry.get().validate_on_startup(db)
-     - resolve_dry_run_fns（spec §5.1，所有模块加载完后查找）
-     - perms_must_exist_in_menu（spec §12.4）
-     - agent_must_exist_in_db（spec §10.1）
+     - 所有模块加载后解析 dry_run 函数
+     - 校验权限码在菜单表中存在
+     - 校验 Agent 在数据库中存在
      - dry_run_fn_must_be_set（dry_run_supported=True 时强制）
      - prepared binding 必须指向隐藏且强制 HITL 的 direct capability
   3. /ai/chat 请求期：compute_available_tools(user, agent) 按 perms 过滤
@@ -35,8 +33,7 @@ class ToolRegistryError(Exception):
 class RegisteredTool:
     """ToolRegistry 注册项：meta + 业务函数 + dry_run 函数（可选）。
 
-    PydanticAI 包装（RunContext[ChatDeps] → AiToolContext 拆包）在 Phase 1.2b 实施，
-    届时本类会加 `pydantic_ai_tool: ToolDefinition` 字段。
+    PydanticAI 包装负责把 RunContext[ChatDeps] 转换为 AiToolContext。
     """
 
     meta: AiToolMeta
@@ -116,7 +113,7 @@ class ToolRegistry:
         return list(self._tools.values())
 
     def by_agent(self, agent_code: str) -> list[RegisteredTool]:
-        """spec §5.4: 按 Agent code 过滤 tool"""
+        """按 Agent code 过滤工具。"""
         return [t for t in self._tools.values() if t.meta.agent == agent_code]
 
     def prepared_source_for(
@@ -143,10 +140,10 @@ class ToolRegistry:
     def __contains__(self, name: object) -> bool:
         return name in self._tools
 
-    # ============ dry_run_fn 解析（spec §5.1） ============
+    # ============ dry_run_fn 解析 ============
 
     def _resolve_dry_run_fns(self) -> None:
-        """启动时统一查找每个 tool 的 _dry_run_<tool> 函数（spec §5.1）
+        """启动时统一查找每个工具的 _dry_run_<tool> 函数。
 
         命名约定：name='user.create' → 同模块必须定义 async def _dry_run_user_create。
         用 sys.modules[fn.__module__] + getattr 查找，找不到则跳过（dry_run_supported
@@ -167,7 +164,7 @@ class ToolRegistry:
                 tool.dry_run_fn = dry_run_fn
 
     async def validate_on_startup(self, db: AsyncSession) -> None:
-        """启动校验（spec §5.1 / §12.4）。
+        """启动校验。
 
         校验项：
           0. resolve_dry_run_fns: 装饰器执行期未查找的 dry_run_fn 此时统一解析
@@ -182,7 +179,7 @@ class ToolRegistry:
             # 空注册表（业务 tool 还没写），跳过校验避免误报
             return
 
-        # 0. 解析 dry_run_fn（spec §5.1）
+        # 0. 解析 dry_run_fn。
         # 装饰器执行期业务方文件可能还没解析完（_dry_run_<tool> 定义在 @ai_tool
         # 之后），此时 sys.modules[fn.__module__] 找不到。startup 时所有模块都
         # 已加载完，可靠查找。
@@ -229,7 +226,7 @@ class ToolRegistry:
                 "Naming convention: name='user.create' → _dry_run_user_create."
             )
 
-        # 5. spec 2026-07-16 §2.4: result_view 必须在 STANDARD_VIEW_TYPES
+        # 5. result_view 必须在 STANDARD_VIEW_TYPES 中。
         invalid_views = {
             t.meta.name: t.meta.result_view
             for t in self._tools.values()
@@ -286,12 +283,12 @@ def compute_available_tools(
     *,
     enabled_extra: list[str] | None = None,
 ) -> list[RegisteredTool]:
-    """spec §5.4: 运行时按 Agent + 用户权限码过滤可见 tool
+    """运行时按 Agent、用户权限码和部署配置过滤可见工具。
 
     - Tool 可见性看两个维度：
       1. required_perms ⊆ user_perms（perm 维度）
-      2. v1.5+ SR-17: meta.default_enabled OR name in enabled_extra（部署方控制维度）
-    - Agent 可见性在 compute_available_agents（spec §5.4）单独处理
+      2. meta.default_enabled 或 name 位于 enabled_extra
+    - Agent 可见性由 compute_available_agents 单独处理
     - 超管 user_perms={'*'} 时单独走 is_super_admin 路径（调用方负责）
 
     Args:
@@ -299,7 +296,7 @@ def compute_available_tools(
             None（默认）= 不做 default_enabled 过滤（向后兼容旧调用方 / 测试 fixture），
             实际生产路径由 chat_service.create_agent 预解析后传入。
 
-    返回值不包含 sensitive_input 字段信息（LLM schema 看不到这些字段，§7.2）。
+    返回值不包含 sensitive_input 字段信息，模型 schema 无法看到这些字段。
     """
     registry = ToolRegistry.get()
     extra_set = set(enabled_extra) if enabled_extra is not None else None
@@ -310,7 +307,7 @@ def compute_available_tools(
         if not set(t.meta.required_perms) <= user_perms:
             continue
         if extra_set is not None:
-            # v1.5+ SR-17: default_enabled=False 且不在白名单 → 不可见
+            # 默认关闭且不在部署白名单中的工具不可见。
             if not t.meta.default_enabled and t.meta.name not in extra_set:
                 continue
         result.append(t)

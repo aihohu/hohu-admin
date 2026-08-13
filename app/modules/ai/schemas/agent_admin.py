@@ -1,4 +1,4 @@
-"""Multi-Agent admin UI schemas (spec §6.1)."""
+"""Multi-Agent 管理端 schema。"""
 
 from datetime import datetime
 
@@ -41,7 +41,7 @@ class AgentAdminDetailItem(AgentAdminListItem):
 
 
 class AgentAdminUpdateReq(BaseModel):
-    """PUT /ai/admin/agents/{id} partial update（spec §6.1）.
+    """``PUT /ai/admin/agents/{id}`` 的部分更新请求。
 
     校验分层说明：description 长度 + model_preference 格式 + daily_quota_per_user
     取值由 Service 层抛 BusinessRuleException 处理，目的是产出精确 errorCode

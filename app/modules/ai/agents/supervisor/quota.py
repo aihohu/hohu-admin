@@ -1,4 +1,4 @@
-"""spec §9: Supervisor LLM 路由日配额（独立于 PydanticAI UsageLimits）.
+"""Supervisor LLM 路由日配额，独立于 PydanticAI UsageLimits。
 
 Redis key: ai:supervisor:quota:{user_id}:{YYYY-MM-DD}，TTL 25h（跨时区兜底）.
 超限时跳过 LLM 路由直接 emit clarification_required.
@@ -42,7 +42,7 @@ async def increment_daily_count(r, user_id: int) -> int:
 
 
 async def check_supervisor_quota(db: AsyncSession, *, user_id: int) -> QuotaResult:
-    """spec §9: 检查 Supervisor 日配额是否超限."""
+    """检查 Supervisor 日配额是否超限。"""
     daily_limit = await get_ai_config_int(db, "ai:supervisor_daily_limit", default=100)
     current = await get_daily_count(redis_client, user_id)
     if current >= daily_limit:

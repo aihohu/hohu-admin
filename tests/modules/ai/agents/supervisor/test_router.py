@@ -1,4 +1,4 @@
-"""spec §11 test_router.py: LLM-only 路由测试.
+"""LLM-only Supervisor 路由测试。
 
 覆盖：
 - LLM 唯一解析成功
@@ -40,7 +40,7 @@ def _make_agent(code: str, name: str = "", description: str = ""):
 
 
 def test_build_router_prompt_includes_candidate_descriptions():
-    """spec §5.1: prompt 必须含每个候选 Agent 的 name + description."""
+    """prompt 必须包含每个候选 Agent 的名称和描述。"""
     candidates = [
         _make_agent("user_mgmt", "用户管理助手", "处理用户 CRUD"),
         _make_agent("role_mgmt", "角色权限助手", "处理角色绑定"),
@@ -54,7 +54,7 @@ def test_build_router_prompt_includes_candidate_descriptions():
 
 
 def test_build_router_prompt_includes_shared_catchall_instruction():
-    """spec §13 决策 9: shared Agent 在 prompt 中显式声明 fallback 角色."""
+    """shared Agent 在 prompt 中显式声明 fallback 角色。"""
     candidates = [_make_agent("shared"), _make_agent("user_mgmt")]
     prompt = build_router_prompt(candidates, "any query")
     # shared 的 description 由 seed_ai_agents.py 维护为 fallback 角色，
@@ -88,7 +88,7 @@ def test_parse_prose_wrapped_json():
 
 
 def test_parse_code_not_in_candidates_returns_none():
-    """spec §5.1: code 不在候选集 → 失败."""
+    """返回的 code 不在候选集时解析失败。"""
     candidates = [_make_agent("user_mgmt")]
     assert parse_agent_code_robustly('{"agent_code": "role_mgmt"}', candidates) is None
 
@@ -108,7 +108,7 @@ def test_parse_garbage_returns_none():
 
 @pytest.mark.asyncio
 async def test_route_llm_resolved(db_session):
-    """spec §5.1 主路径：LLM 返回合法 code → RouteResult(agent_code=..., reason='llm_resolved')."""
+    """LLM 返回合法 code 时生成 llm_resolved 路由结果。"""
     candidates = [_make_agent("user_mgmt"), _make_agent("shared")]
     router = AgentRouter()
 
@@ -130,7 +130,7 @@ async def test_route_llm_resolved(db_session):
 
 @pytest.mark.asyncio
 async def test_route_no_provider_falls_back_to_clarification(db_session):
-    """spec §5.2 / §9: 无 Provider → clarification_required + reason='no_provider'."""
+    """无 Provider 时返回 clarification_required 和 no_provider。"""
     candidates = [_make_agent("user_mgmt")]
     router = AgentRouter()
 
@@ -147,7 +147,7 @@ async def test_route_no_provider_falls_back_to_clarification(db_session):
 
 @pytest.mark.asyncio
 async def test_route_llm_call_failed_falls_back_to_clarification(db_session):
-    """spec §5.2: LLM 异常 → clarification + reason='llm_call_failed'."""
+    """LLM 调用异常时返回 clarification 和 llm_call_failed。"""
     candidates = [_make_agent("user_mgmt")]
     router = AgentRouter()
 
@@ -166,7 +166,7 @@ async def test_route_llm_call_failed_falls_back_to_clarification(db_session):
 
 @pytest.mark.asyncio
 async def test_route_llm_unparsable_falls_back_to_clarification(db_session):
-    """spec §5.1 / §5.2: LLM 返回不合法 JSON → clarification + reason='llm_unparsable_or_out_of_scope'."""
+    """LLM 返回非法 JSON 时要求澄清并标记解析失败。"""
     candidates = [_make_agent("user_mgmt")]
     router = AgentRouter()
 
@@ -185,7 +185,7 @@ async def test_route_llm_unparsable_falls_back_to_clarification(db_session):
 
 @pytest.mark.asyncio
 async def test_route_no_candidates_returns_failed(db_session):
-    """spec §5.1: 候选集空 → RouteResult(failed=True, reason='no_candidates')."""
+    """候选集为空时返回 failed 和 no_candidates。"""
     router = AgentRouter()
     result = await router.route(db_session, "any", [], model=None)
 
@@ -195,7 +195,7 @@ async def test_route_no_candidates_returns_failed(db_session):
 
 @pytest.mark.asyncio
 async def test_route_shared_selected_when_no_match(db_session):
-    """spec §13 决策 9: LLM 在其它 Agent 都不合适时选 shared."""
+    """其他 Agent 都不合适时 LLM 可以选择 shared。"""
     candidates = [
         _make_agent("shared", description="其它 Agent 都不合适时选我"),
         _make_agent("user_mgmt", description="用户管理"),
@@ -215,7 +215,7 @@ async def test_route_shared_selected_when_no_match(db_session):
 
 
 def test_pure_llm_routing_no_keywords():
-    """spec §13 决策 18: v4 砍规则阶段，router 模块不存在 keyword 相关入口."""
+    """router 只使用 LLM 路由，不保留 keyword 规则入口。"""
     public_names = [n for n in dir(router_mod) if not n.startswith("_")]
     assert not any(
         "keyword" in n.lower() or "rule" in n.lower() for n in public_names

@@ -1,8 +1,8 @@
-"""Tool 接入合规静态检查 — spec §12.4
+"""AI Tool 接入合规静态检查。
 
 pre-commit + CI 双跑。零 DB 依赖（启动时不调 validate_on_startup）。
 
-12 项检查（spec §12.4 + Task 35a.3）：
+检查项目：
   ✅ static-only（不查 DB）：
     1. sensitive_input_not_in_signature
     2. blocklist_field_must_be_sensitive
@@ -52,7 +52,7 @@ from app.modules.ai.agents.tools.registry import (  # noqa: E402
     ToolRegistry,
 )
 
-# spec §5.5: summary 上限
+# 工具摘要长度上限。
 SUMMARY_MAX_UNICODE_CHARS = 100
 
 # Built-ins are mandatory, not optional imports.  Keep this exact inventory next
@@ -111,7 +111,7 @@ class Violation:
 def check_sensitive_input_not_in_signature(
     reg: RegisteredTool, fn_src: str | None
 ) -> list[Violation]:
-    """spec §7.2: sensitive_input 字段禁止出现在函数签名"""
+    """禁止 sensitive_input 字段出现在函数签名中。"""
     if not reg.meta.sensitive_input:
         return []
     if fn_src is None:
@@ -148,7 +148,7 @@ def check_sensitive_input_not_in_signature(
 def check_blocklist_field_must_be_sensitive(
     reg: RegisteredTool, fn_src: str | None
 ) -> list[Violation]:
-    """spec §7.2: 命中 SENSITIVE_INPUT_BLOCKLIST 的字段必须声明 sensitive_input"""
+    """命中敏感字段黑名单的参数必须声明为 sensitive_input。"""
     if fn_src is None:
         return []
     try:
@@ -179,7 +179,7 @@ def check_blocklist_field_must_be_sensitive(
 
 
 def check_destructive_requires_hitl(reg: RegisteredTool) -> list[Violation]:
-    """spec §5.3: destructive risk 必须走 HITL（classify_execution_mode 已强制，
+    """destructive risk 必须走 HITL；运行时已强制，
     但显式声明 hitl_always=True 提高可读性 / 防矩阵规则改动后破坏语义）"""
     if reg.meta.risk == "destructive" and not reg.meta.hitl_always:
         return [
@@ -198,7 +198,7 @@ def check_high_risk_requires_dry_run(
     *,
     prepared_execute_names: set[str] | None = None,
 ) -> list[Violation]:
-    """spec §5.3: high risk 应有 dry_run_fn（否则 count=None 保守降级 HITL，
+    """high risk 应提供 dry_run_fn；否则 count=None 会保守降级 HITL，
     影响单行修改场景的体验）"""
     if reg.meta.risk != "high":
         return []
@@ -210,7 +210,7 @@ def check_high_risk_requires_dry_run(
 
     # dry_run_fn 在 validate_on_startup 时统一解析（commit 51d732f），装饰器执行
     # 期 reg.dry_run_fn 还是 None。static check 时主动 sys.modules 查找一次，
-    # 与 check_dry_run_tool_must_implement_hook 同款（spec §5.1）。
+    # 与 check_dry_run_tool_must_implement_hook 使用相同约束。
     def _has_dry_run_fn() -> bool:
         if reg.dry_run_fn is not None:
             return True
@@ -333,7 +333,7 @@ def check_gateway_only_tool_not_llm_visible(
 def check_scope_param_requires_check(
     reg: RegisteredTool, fn_src: str | None
 ) -> list[Violation]:
-    """spec §6.2: 签名含 *_id / *_ids 参数必须调 ensure_targets_in_scope
+    """签名含 *_id 或 *_ids 参数时必须调用 ensure_targets_in_scope。
 
     豁免：
       - SHARED_AGENT_CODE（file.parse 等通用 tool 无 data_scope 概念）
@@ -383,7 +383,7 @@ def check_scope_param_requires_check(
 def check_file_param_requires_protected_loader(
     reg: RegisteredTool, fn_src: str | None
 ) -> list[Violation]:
-    """Task 35: a ``file_id`` argument must enter the protected file boundary."""
+    """``file_id`` 参数必须进入受保护的文件访问边界。"""
     if fn_src is None:
         return []
     try:
@@ -413,7 +413,7 @@ def check_file_param_requires_protected_loader(
 
 
 def check_summary_length_limit(reg: RegisteredTool) -> list[Violation]:
-    """spec §5.1: summary ≤ 100 Unicode chars"""
+    """summary 不得超过 100 个 Unicode 字符。"""
     if len(reg.meta.summary) > SUMMARY_MAX_UNICODE_CHARS:
         return [
             Violation(
@@ -426,14 +426,14 @@ def check_summary_length_limit(reg: RegisteredTool) -> list[Violation]:
 
 
 def check_args_summary_fields_not_sensitive(reg: RegisteredTool) -> list[Violation]:
-    """spec §9.2 SR-18: args_summary_fields 白名单不得含敏感字段
+    """args_summary_fields 白名单不得包含敏感字段。
 
     防业务方误把 'password' / 'api_key' 等字段加入 args_summary_fields，
     导致敏感值落库到 ai_operation_log.args_summary。
     """
     violations: list[Violation] = []
     for field_name in reg.meta.args_summary_fields:
-        # word-boundary 检查（与 §7.3 sensitive.py GLOBAL_OUTPUT_BLOCKLIST 同逻辑）：
+        # 使用与 sensitive.py GLOBAL_OUTPUT_BLOCKLIST 相同的词边界检查：
         # 命中完全相等 / 前缀（password_hash → password）
         if field_name in SENSITIVE_INPUT_BLOCKLIST or any(
             field_name.startswith(bl + "_") or field_name == bl
@@ -451,7 +451,7 @@ def check_args_summary_fields_not_sensitive(reg: RegisteredTool) -> list[Violati
 
 
 def check_accepts_file_mime_valid(reg: RegisteredTool) -> list[Violation]:
-    """spec §16 SR-24: accepts_file 中声明的 MIME 必须在 parser 覆盖范围内
+    """accepts_file 声明的 MIME 必须在解析器覆盖范围内。
 
     防 typo（application/vnd.ms-excel 写错成 application/vnd.msexcel）+
     防漂移（parser 改了 MIME 但 tool meta 忘同步）。
@@ -472,7 +472,7 @@ def check_accepts_file_mime_valid(reg: RegisteredTool) -> list[Violation]:
 
 
 def check_dry_run_tool_must_implement_hook(reg: RegisteredTool) -> list[Violation]:
-    """spec §5.1: dry_run_supported=True 必须有 _dry_run_<tool>
+    """dry_run_supported=True 时必须实现 ``_dry_run_<tool>``。
 
     dry_run_fn 在 validate_on_startup 时统一解析（commit 51d732f），装饰器执行
     期 reg.dry_run_fn 还是 None。本检查直接 sys.modules 查找 _dry_run_<tool>

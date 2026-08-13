@@ -1,7 +1,7 @@
-"""HITL Manager — Redis 挂起 + 双模式唤醒（spec §8.3 / §8.4 / §8.4.1）
+"""HITL Manager — Redis 挂起 + 双模式唤醒。
 
 机制：
-  1. Gateway Executor（Phase 3.2 接入）判定 mode=HITL 后：
+  1. Gateway Executor 判定 mode=HITL 后：
      - operation_log_service.start_operation(status=PENDING_CONFIRMATION)
      - hitl_manager.create_pending(...) 写 Redis pending payload
      - emit confirmation_required SSE 事件
@@ -11,17 +11,17 @@
      - hitl_manager.wake(confirmation_id, action)
   3. hang 返回 action，Executor 据此 mark_running 或 mark_rejected
 
-双模式（spec §8.4.1 v1.5+）：
-  - memory（默认，MVP）：进程内 asyncio.Event 唤醒；强制单 worker。
+双模式：
+  - memory（默认）：进程内 asyncio.Event 唤醒；强制单 worker。
     Redis pending payload 仍写（用于 owner 校验 + 重启清扫），但 wake 只走进程内 dict。
-  - redis_pubsub（v1.5+）：Redis pub/sub 跨 worker 唤醒；允许多 worker / k8s 多 pod。
+  - redis_pubsub：Redis pub/sub 跨 worker 唤醒；允许多 worker / k8s 多 pod。
     wake 时 SET pending.wake_action + PUBLISH channel；hang 时 SUBSCRIBE channel +
     防丢失检查 wake_action（subscribe 前到达的 wake 不丢）。
 
 为什么进程内 dict + Redis 双存（memory 模式）：
-  - asyncio.Event 是进程内对象，多 worker 下其它进程拿不到（spec §8.4 强制单 worker）
+  - asyncio.Event 是进程内对象，多 worker 下其它进程拿不到
   - Redis 存 pending payload 是为了：
-      a) 服务重启后能清扫（spec §8.4 cleanup_pending_on_startup）
+      a) 服务重启后能清扫
       b) /ai/confirm endpoint 跨请求取 pending 信息
 
 为什么 pub/sub + wake_action 字段双写（redis_pubsub 模式，防丢失）：
@@ -30,7 +30,7 @@
     立即 GET pending 检查 wake_action，已设则直接返回（race-safe）
   - 替代方案 LIST+BRPOP 在 SSE 取消时需 LREM 清理 LIST 残留，复杂度高
 
-Args 4KB 限制（spec §8.3）：
+Args 4KB 限制：
   防恶意 user 把 hint 字段塞 1MB 撑爆 Redis。校验在 create_pending 入口。
 """
 
@@ -70,12 +70,12 @@ class _PendingEntry:
 
 @dataclass(frozen=True)
 class PendingPayload:
-    """Redis 中的 pending JSON 结构（spec §8.3 + §8.4.1 v1.5+）
+    """Redis 中的 pending JSON 结构。
 
     ID 字段按 DB 列原值存（int / str），与 Snowflake 序列化策略无关。
     expires_at 是 ISO 8601 UTC 字符串。
 
-    wake_action（v1.5+ redis_pubsub 模式新增）：
+    wake_action：
       None = 尚未被 wake；"approved"/"rejected" = 已被 wake。
       hang 在 subscribe 完成后立即检查此字段，防 race 丢失。
     """
@@ -114,22 +114,22 @@ class HitlManager:
         # confirmation_id → _PendingEntry（仅本进程的挂起流）
         self._pending: dict[str, _PendingEntry] = {}
 
-    # ============ ID 生成（spec §8.3） ============
+    # ============ ID 生成 ============
 
     @staticmethod
     def generate_confirmation_id() -> str:
-        """spec §8.3: secrets.token_urlsafe(32)，不可枚举"""
+        """生成不可枚举的确认 ID。"""
         return secrets.token_urlsafe(32)
 
     @staticmethod
     def generate_tool_call_id() -> str:
-        """每次 tool 调用独立 ID（§4.4 tool_call_id 唯一索引）
+        """生成与操作日志唯一索引匹配的工具调用 ID。
 
         格式：tc_<32 hex chars>，前缀便于 grep / 日志识别
         """
         return f"tc_{secrets.token_hex(16)}"
 
-    # ============ Args 大小校验（spec §8.3 4KB 限制） ============
+    # ============ Args 大小校验 ============
 
     @staticmethod
     def validate_args_size(args: dict[str, Any]) -> None:
@@ -170,7 +170,7 @@ class HitlManager:
         """创建挂起：写 Redis + 注册进程内 Event
 
         校验：
-          - args 4KB 限制（spec §8.3）
+          - args 4KB 限制
           - confirmation_id 不重复（防御性，正常 token_urlsafe 不会撞）
 
         Args:
@@ -227,7 +227,7 @@ class HitlManager:
 
         return payload
 
-    # ============ 挂起等待唤醒（spec §8.3 hang） ============
+    # ============ 挂起等待唤醒 ============
 
     async def hang(
         self,
@@ -235,7 +235,7 @@ class HitlManager:
         *,
         timeout_sec: int | None = None,
     ) -> ConfirmAction:
-        """挂起当前协程直到 wake 或超时（spec §8.3，v1.5+ 双模式）
+        """按当前模式挂起协程，直到 wake 或超时。
 
         Args:
             confirmation_id: 必须先 create_pending 注册过
@@ -265,7 +265,7 @@ class HitlManager:
         confirmation_id: str,
         timeout_sec: int,
     ) -> ConfirmAction:
-        """memory 模式 hang：进程内 asyncio.Event（spec §8.3）"""
+        """memory 模式：等待进程内 asyncio.Event。"""
         from app.modules.ai.metrics import record_hitl_timeout  # noqa: PLC0415
 
         entry = self._pending.get(confirmation_id)
@@ -304,7 +304,7 @@ class HitlManager:
         confirmation_id: str,
         timeout_sec: int,
     ) -> ConfirmAction:
-        """redis_pubsub 模式 hang：Redis pub/sub + wake_action 防丢失（§8.4.1 v1.5+）
+        """redis_pubsub 模式：使用 pub/sub，并用 wake_action 防止订阅前消息丢失。
 
         流程：
           1. SUBSCRIBE channel
@@ -329,7 +329,7 @@ class HitlManager:
             # 防丢失：subscribe 后立即检查 wake_action（race-safe）
             pending = await self.get_pending(redis_client, confirmation_id)
             if pending is not None and pending.wake_action is not None:
-                # spec §6.3 metric：防丢失分支命中（PUBLISH 在 SUBSCRIBE 之前
+                # 记录订阅前已写入 wake_action 的防丢失分支。
                 # 到达，靠 wake_action 兜底）。redis_pubsub 模式健康度核心指标。
                 record_hitl_pubsub_lost()
                 return ConfirmAction(pending.wake_action)
@@ -365,7 +365,7 @@ class HitlManager:
         confirmation_id: str,
         action: ConfirmAction,
     ) -> bool:
-        """唤醒挂起的协程（spec §8.3 + §8.4.1 v1.5+ 双模式）
+        """按当前模式唤醒挂起协程。
 
         Args:
             confirmation_id: pending 流的 ID
@@ -377,7 +377,7 @@ class HitlManager:
                    create_pending / 已被另一个并发 wake 唤醒过）
 
         mode 分支：
-          - memory：进程内 dict pop + Event.set（修订 S-14 防双击）
+          - memory：先从进程内字典移除，再 Event.set，防止双击重复唤醒
           - redis_pubsub：SET pending.wake_action + PUBLISH channel
         """
         if settings.AI_HITL_MODE == "redis_pubsub":
@@ -389,17 +389,17 @@ class HitlManager:
         confirmation_id: str,
         action: ConfirmAction,
     ) -> bool:
-        """memory 模式 wake：进程内 dict pop + Event.set（修订 S-14 防双击 race）
+        """memory 模式：原子移除挂起项后设置 Event，防止双击竞争。
 
         立即 pop entry（其它 wake 看不到）→ set action → event.set() → True。
         第二次 wake（双击 / 双标签）：pop 返回 None → False。
 
-        spec §8.3: wake 写回 Redis 不必要，Redis 只用于跨请求取 pending payload。
+        memory 模式下 Redis 只保存跨请求所需 payload，无需写回 wake 状态。
         进程内 Event 是同步唤醒机制。
         """
         from app.modules.ai.metrics import record_hitl_wake  # noqa: PLC0415
 
-        # 修订 S-14：立即 pop，防双击 race
+        # 立即移除，确保同一确认只能被唤醒一次。
         entry = self._pending.pop(confirmation_id, None)
         if entry is None:
             record_hitl_wake("memory", "not_found")
@@ -422,7 +422,7 @@ class HitlManager:
         confirmation_id: str,
         action: ConfirmAction,
     ) -> bool:
-        """redis_pubsub 模式 wake：SET pending.wake_action + PUBLISH（§8.4.1 v1.5+）
+        """redis_pubsub 模式：先写 wake_action，再发布唤醒消息。
 
         流程：
           1. GET Redis pending；不存在 → False（已 expired / 未 create_pending）
@@ -492,7 +492,7 @@ class HitlManager:
 
     @staticmethod
     async def ttl(redis: Redis, confirmation_id: str) -> int:
-        """返回 pending 剩余 TTL（秒）— spec §2.6 v1.5+: 续传时剩余 < 60s 拒绝
+        """返回 pending 剩余 TTL；续传接口会拒绝剩余不足 60 秒的确认。
 
         /ai/chat/resume endpoint 用：剩余 < 60s → 422 AI_RESUME_TTL_TOO_SHORT。
         Redis key 不存在时返回 -2（Redis 标准）。
@@ -540,10 +540,10 @@ class HitlManager:
         """显式删 Redis pending（mark_rejected / mark_expired 时调）"""
         await redis.delete(HitlManager._redis_key(confirmation_id))
 
-    # ============ 服务重启清扫（spec §8.4） ============
+    # ============ 服务重启清扫 ============
 
     async def cleanup_pending_on_startup(self) -> int:
-        """服务重启时清扫 Redis 残留 pending（spec §8.4）
+        """服务重启时清扫 Redis 中失去流所有者的 pending。
 
         服务重启 = 所有挂起的 SSE 流已断，进程内 Event 已丢，
         Redis 里的 pending 成了"孤儿"，必须清扫避免：
@@ -554,7 +554,7 @@ class HitlManager:
         本方法只清 Redis；DB 中的 ai_operation_log 状态由调用方（lifespan）
         配合 operation_log_service.mark_expired 清扫。
 
-        Redis 故障容错（修订 S-14）：
+        Redis 故障容错：
           - 启动时 Redis 短暂不可用，scan_iter / delete 抛 RedisError
           - 不阻断 lifespan（应用仍能启动；Redis 恢复后 stale pending 由
             Redis TTL 5min 自然清掉；DB 端 lifespan 调用方应额外跑一次

@@ -1,4 +1,4 @@
-"""Task 35a.0 ChatCommand run guard 与 assistant terminal finalizer。"""
+"""ChatCommand 运行守卫与 assistant 终态收口器。"""
 
 import secrets
 from typing import Any

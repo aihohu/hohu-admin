@@ -1,7 +1,7 @@
 """[LOCAL-ONLY] 本地安装记录 mk_tenant_app
 
 部署在本地 DB，云市场不知道用户装了什么。
-Phase 2 拆分时迁移到 app/modules/marketplace/models/local/install.py
+如按云端与本地职责拆分，本模型归入 local/install.py。
 详见 docs/MARKETPLACE-CLOUD-SPLIT.md
 """
 
@@ -45,7 +45,7 @@ class TenantApp(Base):
         nullable=False,
         default=0,
         server_default="0",
-        comment="租户ID（Phase 1 单租户默认 0）",
+        comment="租户 ID；单租户模式默认 0",
     )
     app_id: Mapped[int] = mapped_column(
         BigInteger,

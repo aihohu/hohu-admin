@@ -99,7 +99,7 @@ class TestInstallService:
             )
         ).scalar_one()
         assert record.status == "uninstalled"
-        # Phase 1 没建表，retained_table_names 为空 list
+        # 未创建业务表时 retained_table_names 为空列表。
         assert record.retained_table_names == []
         assert record.has_data is False
 

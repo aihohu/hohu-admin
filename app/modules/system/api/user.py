@@ -426,14 +426,14 @@ async def batch_delete_users(
     return ResponseModel.success(msg=f"成功删除 {deleted_count} 个用户")
 
 
-# ========== 用户导入（spec §5.1，Task 12）==========
+# ========== 用户导入 ==========
 
-#: spec §2.19 line 534 + import_service._PREVIEW_REDIS_TTL_SECONDS
+#: 预检令牌有效期，与导入服务保持一致。
 _PREVIEW_TOKEN_TTL_SECONDS = 600
 
 
 def _validate_import_reason(reason: str) -> str:
-    """spec §2.30 v2.2 P1-3：reason 必填，1-256 字符（API 层入口校验）。
+    """在 API 入口校验导入原因必填且长度为 1-256 字符。
 
     service 层有 defense-in-depth（dry_run_import_users /
     batch_create_users_from_records 内部都校验），这里负责把
@@ -441,22 +441,22 @@ def _validate_import_reason(reason: str) -> str:
     """
     if reason is None:
         raise UnprocessableEntityException(
-            "reason 必填（spec §2.30）",
+            "reason 必填",
             error_code="AI_IMPORT_REASON_REQUIRED",
         )
     stripped = reason.strip()
     if not stripped or len(stripped) > 256:
         raise UnprocessableEntityException(
-            "reason 必填且长度 1-256 字符（spec §2.30）",
+            "reason 必填且长度 1-256 字符",
             error_code="AI_IMPORT_REASON_REQUIRED",
         )
     return stripped
 
 
 def _coerce_dry_run(raw: str | None) -> bool:
-    """把 multipart Form 的 dry_run 字符串转 bool（spec §5.1 line 2130）。
+    """把 multipart Form 的 ``dry_run`` 字符串转为布尔值。
 
-    兼容 ``"true"``/``"false"``（spec 原文）/ ``"1"``/``"0"`` /
+    兼容 ``"true"``/``"false"``、``"1"``/``"0"`` 和
     空值（视为 false）。其他非法值视为 false（不抛错，避免抢占业务异常）。
     """
     if raw is None:
@@ -468,9 +468,9 @@ def _coerce_dry_run(raw: str | None) -> bool:
     "/import",
     summary="批量导入用户（dry_run=true 预检 / dry_run=false 正式导入）",
     description=(
-        "spec §5.1：multipart 上传 Excel + on_conflict + sync_mode + reason + "
+        "multipart 上传 Excel，并提交 on_conflict、sync_mode、reason、"
         "dry_run + preview_token。dry_run=true 跑预检 + 生成 preview_token；"
-        "dry_run=false 凭 preview_token 落库（幂等重放见 §2.27）。"
+        "dry_run=false 凭 preview_token 落库，并支持幂等重放。"
     ),
     responses={
         200: {"description": "导入成功（dry_run 或正式）"},
@@ -483,7 +483,7 @@ def _coerce_dry_run(raw: str | None) -> bool:
 )
 async def import_users(
     file: Annotated[UploadFile, File(description="Excel 文件（≤ 10MB，xlsx/csv）")],
-    reason: Annotated[str, Form(description="业务理由（1-256 字符，spec §2.30）")],
+    reason: Annotated[str, Form(description="业务理由（1-256 字符）")],
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
     on_conflict: Annotated[
@@ -492,7 +492,7 @@ async def import_users(
     ] = "skip",
     sync_mode: Annotated[
         Literal["CREATE_ONLY", "UPDATE_PROFILE", "FULL_SYNC"],
-        Form(description="employee_no 同步策略（spec §2.24），默认 CREATE_ONLY"),
+        Form(description="employee_no 同步策略，默认 CREATE_ONLY"),
     ] = "CREATE_ONLY",
     dry_run: Annotated[
         str | None,
@@ -500,36 +500,36 @@ async def import_users(
     ] = None,
     preview_token: Annotated[
         str | None,
-        Form(description="dry_run=false 时必填，spec §2.19 三重校验用"),
+        Form(description="dry_run=false 时必填，用于校验预检结果"),
     ] = None,
 ):
-    """批量导入用户（spec §5.1，Task 12）
+    """批量导入用户。
 
     流程：
-    1. 入口校验 reason（spec §2.30）
+    1. 入口校验 reason
     2. 读 UploadFile bytes + Content-Type
-    3. ``parse_import_excel`` 解析 + 字段校验（spec §2.10 / §2.12）
+    3. ``parse_import_excel`` 解析文件并校验字段
        - 字段错误抛 ``ImportErrorCollection`` → API 层 catch 转 400 + errors[]
     4. 分流：
        - dry_run=true → ``dry_run_import_users`` 返回 preview_token + 四象限计数
        - dry_run=false → 校验 preview_token → ``batch_create_users_from_records``
-    5. ``await db.commit()``（spec §3.6：API 层负责 commit）
+    5. API 层提交事务
     6. 返回 ``ResponseModel.success(data=...)``，data 含 camelCase 字段
     """
     reason_clean = _validate_import_reason(reason)
 
-    # UploadFile → bytes + mime（spec §2.10 MIME 白名单在 parser 内校验）
+    # MIME 白名单由解析器统一校验。
     # Read at most one byte beyond the hard parser cap.  Calling read() without
     # a bound would let an oversized multipart body exhaust worker memory before
     # the parser can return AI_IMPORT_FILE_TOO_LARGE.
     file_bytes = await file.read(MAX_FILE_SIZE_BYTES + 1)
     mime_type = file.content_type or ""
 
-    # 解析 + 字段校验（spec §2.10 / §2.12）
+    # 解析文件并校验字段。
     try:
         records = parse_import_excel(file_bytes, mime_type)
     except ImportErrorCollection as exc:
-        # 字段错误：转 400 + errorCode=AI_IMPORT_FIELD_ERRORS + errors[]（spec §2.12）
+        # 字段错误转换为稳定错误码，并返回逐行错误明细。
         # 全局 exception handler 只识别 BusinessException，所以这里手动构造
         wrapped = BusinessRuleException(
             f"{len(exc.errors)} 个字段错误",
@@ -541,7 +541,7 @@ async def import_users(
         raise wrapped from exc
 
     if _coerce_dry_run(dry_run):
-        # dry_run 路径（spec §5.1 line 2136-2151）
+        # 预检路径：生成令牌但不写入用户数据。
         result, batch = await dry_run_import_users(
             db,
             records,
@@ -553,9 +553,9 @@ async def import_users(
         )
         await db.commit()
 
-        # 构造响应：result（四象限）+ previewToken + expiresAt（spec §5.1）
+        # 响应包含四类统计、预检令牌和过期时间。
         # batch.summary_* 是真实计数（防 records 截断后 count 漂移）
-        # result 的 records list 已截断（spec §3.2 MAX_PREVIEW_RECORDS）
+        # 明细列表已按 ``MAX_PREVIEW_RECORDS`` 截断。
         result_data = result.model_dump(mode="json", by_alias=True)
         result_data.update(
             {
@@ -571,11 +571,11 @@ async def import_users(
         )
         return ResponseModel.success(data=result_data)
 
-    # execute 路径（spec §5.1 line 2156-2175）
+    # 正式执行路径：凭预检令牌写入用户数据。
     if not preview_token or not preview_token.strip():
-        # spec §5.1 line 2180：dry_run=false 缺 preview_token → 422
+        # 正式执行必须携带预检令牌。
         raise UnprocessableEntityException(
-            "dry_run=false 时 preview_token 必填（spec §2.19）",
+            "dry_run=false 时 preview_token 必填",
             error_code="AI_IMPORT_PREVIEW_INVALID",
         )
 
@@ -599,7 +599,7 @@ async def import_users(
     "/import/template",
     summary="下载用户导入 Excel 模板（4 sheet + DataValidation）",
     description=(
-        "spec §5.3 + §2.13 + §2.16：返 xlsx，含 4 sheet（数据 / 说明 / 部门字典 / 角色字典），"
+        "返回 xlsx，含 4 个 sheet（数据 / 说明 / 部门字典 / 角色字典），"
         "字典 sheet 实时查 sys_dept / sys_role。"
         "权限：system:user:import（同 import，避免未授权下载模板探查字段）。"
     ),
@@ -614,12 +614,12 @@ async def download_import_template(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ):
-    """spec §5.3：下载导入模板。
+    """下载用户导入模板。
 
     流程：
     1. ``generate_import_template`` 内部查 sys_dept / sys_role，构造 4 sheet xlsx
     2. ``Response(content=bytes, media_type=xlsx)`` + Content-Disposition
-       （决策 13.1：用 Response 而非 StreamingResponse 避免 audit_middleware 冲突）
+       使用 Response，避免 StreamingResponse 与审计中间件的时序冲突
     """
     xlsx_bytes = await generate_import_template(db)
     return Response(
@@ -631,19 +631,19 @@ async def download_import_template(
     )
 
 
-# ========== 用户导入批次详情（spec §5.4 v2.2 P2，Task 15）==========
+# ========== 用户导入批次 ==========
 
-#: spec §5.4 line 2262 + §2.19：preview_token 10min TTL（CREATED/PREVIEW_DONE 用）
+#: 预检与执行中批次的有效期。
 _PREVIEW_TTL_SECONDS = 600
 
-#: spec §3.x 失败行文件 24h TTL（终态批次文件保留 1 天）
+#: 终态批次及失败行文件保留 24 小时。
 _FINISHED_TTL_SECONDS = 24 * 3600
 
 
 def _compute_batch_expires_at(batch) -> datetime | None:
-    """按 batch 状态动态算 expires_at（spec §5.4 line 2262 + 决策 15.5）。
+    """根据批次状态动态计算过期时间。
 
-    - CREATED / PREVIEW_DONE / RUNNING：created_at + 10min（preview 窗口，spec §2.19）
+    - CREATED / PREVIEW_DONE / RUNNING：created_at + 10 分钟
     - SUCCESS / PARTIAL_SUCCESS / FAILED / EXPIRED / CANCELLED：
       finished_at + 24h（finished_at 缺失回退 created_at + 24h）
 
@@ -671,10 +671,10 @@ def _compute_batch_expires_at(batch) -> datetime | None:
 
 
 def _build_batch_response(batch, operator_name: str | None) -> dict:
-    """构造 GET /import/{batch_id} 响应 dict（spec §5.4 line 2238-2264）。
+    """构造导入批次详情响应。
 
     安全：剥离 preview_token / file_sha256 / records_hash / reason
-    （决策 15.4：reason 仅审计链路保留；preview_token 是 execute 凭证不能泄露）。
+    ``reason`` 仅保留在审计链路；``preview_token`` 是执行凭证，不能泄露。
     """
     payload = UserImportBatchResponse(
         batch_id=batch.batch_id,
@@ -692,7 +692,7 @@ def _build_batch_response(batch, operator_name: str | None) -> dict:
         failed_count=batch.failed_count,
         failed_rows_file=batch.failed_rows_file,
         on_conflict=batch.on_conflict,
-        sync_mode=None,  # 决策 15.6：暂不查 batch_log，spec §5.4 字段保留 None
+        sync_mode=None,  # 当前响应不额外查询批次日志，字段保持为空。
         status=batch.status.value
         if hasattr(batch.status, "value")
         else str(batch.status),
@@ -707,11 +707,11 @@ def _build_batch_response(batch, operator_name: str | None) -> dict:
 @router.get(
     "/import",
     response_model=ResponseModel[PageResult[UserImportBatchResponse]],
-    summary="分页查询导入批次列表（v2.2 P2）",
+    summary="分页查询导入批次列表",
     description=(
-        "spec §5.4 v2.2 P2 line 2272-2278：admin 查「我/团队导入过的批次列表」。"
+        "查询当前用户或团队执行过的导入批次。"
         "支持 operator_id / status / created_at 时间窗过滤。"
-        "权限：system:user:list（spec §5.4 line 2234，同 GET /import/{batch_id}）。"
+        "需要 system:user:list 权限。"
     ),
     responses={
         200: {"description": "分页批次列表"},
@@ -726,7 +726,7 @@ async def list_import_batches(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ):
-    """spec §5.4 line 2272-2278：分页查询导入批次列表。
+    """分页查询导入批次列表。
 
     流程：
     1. ``list_batches(db, query)`` outerjoin sys_user + 按 created_at DESC 排序
@@ -752,9 +752,8 @@ async def list_import_batches(
     response_model=ResponseModel[UserImportBatchResponse],
     summary="按 batch_id 查询导入批次详情",
     description=(
-        "spec §5.4 v2.2 P2 line 2229-2278：导入批次状态查询，前端导入历史 + "
-        "Phase 3 异步轮询 + 审计反查（batch_id 来自 sys_operation_log 反查）。"
-        "权限：system:user:list（spec §5.4 line 2234：list 即可，因为查的是导入历史不是用户敏感数据）。"
+        "查询导入批次状态，供导入历史、异步轮询和审计反查使用。"
+        "需要 system:user:list 权限；响应不包含用户敏感字段。"
     ),
     responses={
         200: {"description": "批次详情"},
@@ -769,7 +768,7 @@ async def get_import_batch_detail(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ):
-    """spec §5.4 line 2229-2278：按 batch_id 查批次详情。
+    """按 ``batch_id`` 查询批次详情。
 
     流程：
     1. ``get_batch_detail(db, batch_id)`` → ``(batch, operator_name)``（outerjoin sys_user）
@@ -788,10 +787,9 @@ async def get_import_batch_detail(
 @router.get(
     "/import/{batch_id}/logs",
     response_model=ResponseModel[PageResult[UserImportBatchLogItem]],
-    summary="按 batch_id 查询导入批次操作日志（v2.2 P2）",
+    summary="按 batch_id 查询导入批次操作日志",
     description=(
-        "spec §5.5 v2.2 P2 line 2280-2288 + §2.28：批次操作日志查询，支持 event 过滤 + 分页。"
-        "权限：system:user:list（spec §5.5 line 2284，同 GET /import/{batch_id}）。"
+        "查询批次操作日志，支持按 event 过滤和分页。需要 system:user:list 权限。"
     ),
     responses={
         200: {"description": "日志列表（分页）"},
@@ -807,7 +805,7 @@ async def get_import_batch_logs(
         None,
         description=(
             "事件类型过滤：CREATED / PREVIEW_DONE / EXECUTE_START / CHUNK_PROGRESS / "
-            "EXECUTE_FINISH / EXECUTE_FAILED / EXPIRED / CANCELLED（spec §2.28 line 1252）"
+            "EXECUTE_FINISH / EXECUTE_FAILED / EXPIRED / CANCELLED"
         ),
     ),
     current: int = Query(1, ge=1, description="页码（1-based）"),
@@ -815,7 +813,7 @@ async def get_import_batch_logs(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ):
-    """spec §5.5 line 2280-2288：批次操作日志查询。
+    """查询批次操作日志。
 
     流程：
     1. 先 ``get_batch_detail`` 校验 batch 存在（404 一致性，与 GET /import/{batch_id} 对齐）
@@ -853,9 +851,9 @@ async def get_import_batch_logs(
 @router.post(
     "/import/{batch_id}/cancel",
     response_model=ResponseModel[UserImportBatchCancelResponse],
-    summary="取消导入批次（v2.2 P2）",
+    summary="取消导入批次",
     description=(
-        "spec §5.6 v2.2 P2 line 2290-2299 + §2.29：取消导入批次。两种场景："
+        "取消导入批次。两种场景："
         "PREVIEW_DONE 直接 CAS 转 CANCELLED + 清理 preview 文件；"
         "RUNNING 设置 Redis cancel 标志，chunk loop 下一个 chunk 边界跳出 → "
         "PARTIAL_SUCCESS（协作式 cancel）。"
@@ -878,14 +876,14 @@ async def cancel_import_batch(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """spec §5.6 line 2290-2299：取消导入批次。
+    """取消导入批次。
 
     流程：
     1. ``cancel_batch`` 处理两种场景 + 权限校验 + 状态校验
     2. API 层 ``db.commit``（CLAUDE.md：service 不 commit）
     3. 构造响应：``status`` 反映当前 batch.status（CANCELLED 或 RUNNING）
 
-    reason：spec §2.30 v2.2 P1-3 必填，1-256 字符（ReasonSchema 入口校验）。
+    ``reason`` 必填且长度为 1-256 字符，由 ``ReasonSchema`` 校验。
     """
     batch = await cancel_batch(db, batch_id, current_user, reason=body.reason)
     await db.commit()
@@ -898,12 +896,12 @@ async def cancel_import_batch(
     )
 
 
-# ========== 用户导出（spec §5.2 + §2.31 P1-5，Task 13）==========
+# ========== 用户导出 ==========
 
-#: spec §5.2 line 2200：xlsx MIME（与 export_service._EXPORT_MIME_TYPE 对齐）
+#: Excel MIME 类型，与导出服务保持一致。
 _EXPORT_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
-#: spec §5.3 line 2213：导入模板文件名（固定，不含日期 — 模板不分版本）
+#: 导入模板使用固定文件名，便于客户端识别。
 _TEMPLATE_FILENAME = "user_import_template.xlsx"
 
 
@@ -911,7 +909,7 @@ _TEMPLATE_FILENAME = "user_import_template.xlsx"
     "/export",
     summary="导出用户列表到 Excel（同步路径 ≤ 5000 行）",
     description=(
-        "spec §5.2 + §2.31 P1-5：POST body 含 filter + reason（必填），"
+        "POST body 包含 filter 和必填的 reason，"
         "返回 StreamingResponse xlsx + Content-Disposition。"
         "行数 > USER_EXPORT_ASYNC_THRESHOLD（5000）抛 422 AI_EXPORT_ASYNC_REQUIRED。"
     ),
@@ -928,13 +926,13 @@ async def export_users(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """spec §5.2 + §2.31 P1-5：同步导出。
+    """同步导出用户列表。
 
     流程：
     1. UserExportRequest 校验（filter + reason，Pydantic 已拦空白 reason）
     2. export_users_to_excel 内部建 task → 查询 → 构造 Excel
        → service 层行数超阈值抛 AI_EXPORT_ASYNC_REQUIRED
-    3. ``await db.commit()``（spec §3.6：API 层负责 commit）
+    3. API 层提交事务
     4. StreamingResponse + Content-Disposition: attachment; filename=users_YYYYMMDD.xlsx
     """
     filter_ = UserExportFilter(
@@ -953,14 +951,13 @@ async def export_users(
     )
     await db.commit()
 
-    # v2.3 §2.9.1 决策 30.6：hohu_ 前缀 + YYYYMMDD_HHmmss 时间戳避免同日多次导出冲突
+    # 使用秒级时间戳，避免同日多次导出产生同名文件。
     now = datetime.now()
     filename = f"hohu_users_{now.strftime('%Y%m%d_%H%M%S')}.xlsx"
     # 用 Response（非 StreamingResponse）：bytes 已全在内存，无流式收益；
     # BaseHTTPMiddleware（audit_middleware）与 StreamingResponse 冲突
     # （starlette 已知问题：BackgroundTask + receive hook 时序错乱），
-    # Response 等价但兼容。spec §5.2 line 2200 「StreamingResponse」是契约
-    # 描述（xlsx + Content-Disposition），实现细节用 Response 满足同样契约。
+    # Response 同样返回 xlsx 和 Content-Disposition，并兼容审计中间件。
     return Response(
         content=xlsx_bytes,
         media_type=_EXPORT_MIME_TYPE,
@@ -1026,7 +1023,7 @@ async def get_export_task_detail(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """spec §2.31 line 1589-1591：导出任务详情查询。
+    """查询导出任务详情。
 
     找不到抛 NotFoundException(AI_EXPORT_TASK_NOT_FOUND)。
     """
@@ -1046,9 +1043,9 @@ async def get_export_task_detail(
 
 @router.get(
     "/export/{export_id}/download",
-    summary="按 export_id 下载已导出文件（Task 33）",
+    summary="按 export_id 下载已导出文件",
     description=(
-        "spec §2.31 line 1626 落地：AI 对话内 detail_card 下载按钮触发本端点。"
+        "AI 对话内的详情卡片下载按钮可调用本端点。"
         "从 task.file_storage_key 读 bytes → 流式返回。"
         "任务不存在 / 状态非 SUCCESS / 文件被删 → 各自 errorCode。"
     ),
@@ -1066,13 +1063,12 @@ async def download_export_file_endpoint(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Task 33：AI 对话内点击下载闭环。
+    """处理 AI 对话内的导出文件下载。
 
     权限与 POST /export 一致（system:user:export），且默认只能重下载本人创建的
     历史任务；仅超管可跨 operator 下载。
 
-    决策 33.4：filename 从 task.created_at 派生（与同步导出决策 30.6
-    一致），不重新生成当前时间 — 重下载历史任务时反映真实导出时刻，
+    文件名从 ``task.created_at`` 派生，不重新生成当前时间；重下载历史任务时反映真实导出时刻，
     便于审计反查「这份文件是哪次导出的」。
     """
     xlsx_bytes, filename = await download_export_file(

@@ -1,11 +1,11 @@
-"""import_validator 单测（Task 4 + Task 5 + Task 6 + Task 7 + Task 7a）。
+"""import_validator 行为测试。
 
 覆盖：
-- resolve_dept 5 用例（spec §2.17）：名称 / 路径 / 重名 / 不存在 / 路径段断
-- resolve_role_input 4 用例（spec §2.18）：code / name / 混合去重 / 未匹配
-- check_permission_boundary 3 用例（spec §2.15）：越界 / 超管豁免 / 错误提示含名
-- check_dept_data_scope 3 用例（spec §2.11）：self / dept_and_sub / 越界
-- resolve_existing_user + classify_sync_action 4 用例（spec §2.24 v2.2 P1）：
+- resolve_dept：名称、路径、重名、不存在和路径中断
+- resolve_role_input：code、name、混合去重和未匹配
+- check_permission_boundary：越界、超管豁免和错误提示
+- check_dept_data_scope：self、dept_and_sub 和越界
+- resolve_existing_user 与 classify_sync_action：
   CREATE_ONLY / UPDATE_PROFILE / FULL_SYNC / NULL 兜底
 
 依赖 db_session outer-transaction fixture（不落库）。
@@ -131,7 +131,7 @@ class TestResolveDeptPathMode:
 
 
 class TestResolveDeptStatusFilter:
-    """禁用部门不应被命中（spec §2.17 line 451 未明确，但安全原则：禁止把用户分到停用部门）。"""
+    """禁用部门不应被命中，避免把用户分配到停用组织。"""
 
     async def test_resolve_dept_skips_disabled_name_mode(self, db_session):
         """名称模式下：禁用部门等于不存在。"""
@@ -243,7 +243,7 @@ def _make_user(
     roles: list[Role],
     status: str = "1",
 ) -> User:
-    """构造 user 并关联 roles（spec §2.15 测试用）。"""
+    """构造用户并关联角色。"""
     return User(
         user_id=user_id,
         user_name=user_name,
@@ -267,7 +267,7 @@ def _make_record(
 
 
 class TestCheckPermissionBoundary:
-    """check_permission_boundary 3 用例（spec §2.15 / line 2661-2663）。
+    """覆盖 check_permission_boundary 的越界和豁免行为。
 
     注意：R_SUPER / admin 是 init_db.py seed 数据。本测试组通过 select
     已有 R_SUPER 角色 + 关联到测试 user，避免 UniqueViolation。
@@ -442,7 +442,7 @@ def _make_scoped_record(
 
 
 class TestCheckDeptDataScope:
-    """check_dept_data_scope 3 用例（spec §2.11 / line 2664-2666）。
+    """覆盖 check_dept_data_scope 的范围判断。
 
     测试场景：
     - DATA_SCOPE_SELF → 空 accessible_dept_ids → 任何 dept 都越界
@@ -577,7 +577,7 @@ class TestCheckDeptDataScope:
 
         operator = _make_user(9105, "QA_DF_Op", [role])
         operator.depts = [dept]
-        # 重名 dept（spec §2.17）
+        # 构造重名部门。
         db_session.add_all(
             [
                 _make_dept_for_scope(8502, "QA-Dup"),
@@ -626,7 +626,7 @@ def _make_record_with_emp(
 
 
 class TestResolveExistingUser:
-    """resolve_existing_user DB 行为测试（spec §2.24 v2.2 P1 line 879-894）。
+    """resolve_existing_user 数据库行为测试。
 
     匹配顺序：employee_no（优先）→ user_name（兜底）。
     """
@@ -684,7 +684,7 @@ class TestResolveExistingUser:
 
 
 class TestClassifySyncAction:
-    """classify_sync_action 纯逻辑测试（spec §2.24 v2.2 P1 line 856-862）。
+    """classify_sync_action 纯逻辑测试。
 
     spec 4 用例：
     - CREATE_ONLY + employee_no 命中 → REJECT

@@ -1,7 +1,7 @@
 """[LOCAL-ONLY] 前端初始化加载 contributes 缓存
 
 部署在本地 HoHu，聚合本机已 enabled 应用的菜单/页面。
-Phase 2 拆分时迁移到 app/modules/marketplace/api/local/contributes.py
+如按云端与本地职责拆分，本接口归入 local/contributes.py。
 详见 docs/MARKETPLACE-CLOUD-SPLIT.md
 
 原描述：前端初始化加载 contributes 缓存

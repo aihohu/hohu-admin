@@ -1,4 +1,4 @@
-"""Task 35a.2 prepared-action freezing and snapshot verification."""
+"""Prepared-action freezing and snapshot verification tests."""
 
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256

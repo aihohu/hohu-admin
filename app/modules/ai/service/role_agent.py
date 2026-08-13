@@ -1,4 +1,4 @@
-"""Role-Agent binding service (spec §6.3).
+"""Role-Agent binding service.
 
 职责：
 - GET：返回 allAgents + boundAgentIds，不暴露软禁用段（决策 #19）
@@ -7,8 +7,7 @@
 跨模块校验 role 存在抛 AI 前缀 errorCode（决策 #18），方便前端 i18n 区分模块归属.
 Service 不 commit，由 API 层 `await db.commit()`（CLAUDE.md 硬规则 #9）.
 
-put_binding 在 Task 6 内 ship 但 Task 7 才补 PUT 边界测试 —— 提前实现避免后续
-大段重写 service，TDD 红绿针对 GET 即可.
+``put_binding`` 与查询使用同一套规范化和校验逻辑，避免 service/API 漂移。
 """
 
 from sqlalchemy import delete, select
@@ -99,12 +98,12 @@ class RoleAgentService:
         - shared Agent 拦截（AI_ROLE_AGENT_BIND_SHARED_FORBIDDEN，决策 #14）
         - normalize：所有新绑定 enabled=True（软禁用态归零，决策 #15 全量覆盖语义）
 
-        Task 7 补 PUT 边界测试（shared 拦截 / agent 不存在 / 全量覆盖 normalize）.
+        边界覆盖 shared 拦截、Agent 不存在和全量覆盖规范化。
         """
         await self._get_role_or_404(db, role_id)
 
         # 校验 agent_id 必须为数字字符串 —— 非数字（如 "abc"）返 400 +
-        # AI_AGENT_ID_INVALID（Task 6 review Important #1：原 `int(aid)` 裸调用
+        # AI_AGENT_ID_INVALID；原 ``int(aid)`` 裸调用
         # 抛 ValueError 未被捕获 → HTTP 500 无 errorCode，前端无法 i18n）.
         for aid in req.agent_ids:
             try:

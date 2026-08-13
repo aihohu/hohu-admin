@@ -1,6 +1,6 @@
-"""spec §12.2 鉴权矩阵端到端覆盖
+"""AI 工具鉴权矩阵端到端覆盖。
 
-9 个 case 覆盖（#7 #10 留 Phase 4）：
+覆盖以下场景：
 
 | # | 场景 | 测试方式 | 预期 |
 |---|---|---|---|
@@ -10,13 +10,13 @@
 | 4 | 破坏性操作 | execute_tool | HITL |
 | 5 | 无权限 | compute_available_tools | tool 不可见 |
 | 6 | data_scope 越界 | execute_tool | AI_DATA_SCOPE_VIOLATION |
-| 7 | 改权限码 + 非超管 | — | AI_SUPER_ADMIN_REQUIRED（skip: Phase 4） |
+| 7 | 改权限码 + 非超管 | — | AI_SUPER_ADMIN_REQUIRED |
 | 8 | hitl_always=True | execute_tool | 强制 HITL |
 | 9 | 日配额超限 | execute_tool | AI_DAILY_QUOTA_EXHAUSTED |
-| 10 | Prompt injection 命中 | — | 强制 HITL（skip: Phase 4） |
+| 10 | Prompt injection 命中 | — | 强制 HITL |
 | 11 | LLM 幻觉调不存在 tool | execute_tool | AI_TOOL_NOT_FOUND |
 
-断言约定（spec §12.2）：
+断言约定：
 - autonomous / HITL 类用例 → 调 execute_tool，断言事件序列含/不含 confirmation_required
 - 错误码类用例 → 断言 ToolResult.error_code
 - tool 不可见类用例 → 断言 compute_available_tools 不含
@@ -307,7 +307,7 @@ def _build_deps(
     )
     agent = MagicMock()
     agent.code = _AGENT_CODE
-    agent.daily_quota_per_user = None  # v1.5+ SR-16: 默认未配专属额度
+    agent.daily_quota_per_user = None  # 默认未配置 Agent 专属额度。
 
     return ChatDeps(
         user=user,
@@ -381,7 +381,7 @@ class TestCase1LowRiskAutonomous:
 
 
 class TestCase2HighRiskSingleRowAutonomous:
-    """#2: risk=high + dry_run_count=1 → §5.3 矩阵 autonomous"""
+    """#2: risk=high 且 dry_run_count=1 时 autonomous。"""
 
     async def test_high_risk_single_row_is_autonomous(self) -> None:
         _register_test_tools()
@@ -398,7 +398,7 @@ class TestCase2HighRiskSingleRowAutonomous:
 
 
 class TestCase3HighRiskMultiRowHitl:
-    """#3: risk=high + dry_run_count=2 → §5.3 矩阵 HITL"""
+    """#3: risk=high 且 dry_run_count=2 时进入 HITL。"""
 
     async def test_high_risk_multi_row_triggers_hitl(self, monkeypatch) -> None:
         _register_test_tools()
@@ -423,7 +423,7 @@ class TestCase3HighRiskMultiRowHitl:
 
 
 class TestCase4DestructiveHitl:
-    """#4: risk=destructive → §5.3 矩阵 HITL（无视 dry_run_count）"""
+    """#4: destructive 操作始终进入 HITL。"""
 
     async def test_destructive_always_triggers_hitl(self, monkeypatch) -> None:
         _register_test_tools()
@@ -516,7 +516,7 @@ class TestCase6DataScopeViolation:
 class TestCase7SuperAdminGate:
     """#7: super_admin_only=True + 非超管 → AI_SUPER_ADMIN_REQUIRED（short-circuit）
 
-    spec §11.2: 改权限码 / 删 super_admin 账号等高权限操作仅超管可执行。
+    修改权限码或删除 super_admin 等高权限操作仅允许超级管理员执行。
     短路在 perm check 之后、dry_run 之前，不走 HITL 也不进风险分级。
     """
 
@@ -545,7 +545,7 @@ class TestCase7SuperAdminGate:
 
 
 class TestCase8HitlAlwaysForcesHitl:
-    """#8: low risk + hitl_always=True → §5.3 优先级 1 强制 HITL"""
+    """#8: low risk 但 hitl_always=True 时强制 HITL。"""
 
     async def test_hitl_always_forces_hitl(self, monkeypatch) -> None:
         _register_test_tools()
@@ -596,9 +596,9 @@ class TestCase9DailyQuotaExhausted:
 
 
 class TestCase10InjectionDetector:
-    """#10: 命中 prompt injection pattern → 强制 HITL（spec §11.1 降级而非拒绝）
+    """#10: 命中 prompt injection pattern 时强制 HITL，而非直接拒绝。
 
-    spec §11.1: 注入命中后**降级**到强制 HITL，不直接拒绝。这样：
+    注入命中后降级到强制 HITL，不直接拒绝。这样：
       - 真用户偶然命中（误报）仍能通过 HITL 完成
       - 攻击者必须经过 HITL（被审计 + 人工把关）
     """
@@ -626,7 +626,7 @@ class TestCase10InjectionDetector:
         assert result_events[0].ok is True
         assert result.ok is True
 
-        # §11.1: injection_hit=True 时 ai_operation_log 落 is_security_event=True
+        # injection_hit=True 时操作日志标记为安全事件。
         from app.db.session import AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:

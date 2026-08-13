@@ -1,12 +1,12 @@
-"""dry_run_import_users 单测（Task 9，spec §3.6 line 2049-2066）。
+"""``dry_run_import_users`` 行为测试。
 
 覆盖：
 - 四象限分类：new / exists / conflict / out_of_scope
-- preview_token 生成 + Redis cache（spec §2.19 v2.2 P0：业务数据落 DB，Redis 仅 cache batch_id）
-- file_sha256 + records_hash 写入（spec §2.19 三重校验字段）
-- 状态机 CREATED → PREVIEW_DONE（spec §2.26 + v2.2 P1-2）
-- records 截断（spec §3.2 v2.2 P1）
-- reason 必填（spec §2.30 v2.2 P1-3）
+- preview_token 生成和 Redis 缓存
+- file_sha256 与 records_hash 持久化
+- CREATED → PREVIEW_DONE 状态迁移
+- records 明细截断
+- reason 校验
 
 依赖 db_session outer-transaction fixture（不落库）；Redis 用 fakeredis 隔离。
 """
@@ -178,7 +178,7 @@ class TestDryRunClassification:
         """spec 用例 2：record.user_name 已存在 → exists_count = N。
 
         resolve_existing_user 兜底按 user_name 命中 → matched_by_employee_no=False
-        → 归入 exists_records（spec §2.24 line 874）。
+        → 归入 exists_records。
         """
         dept = _make_dept(7201, "QA-DryRun-Dept-E")
         super_role = (
@@ -342,7 +342,7 @@ class TestDryRunClassification:
         )
 
 
-# ========== Preview Token + Redis cache（spec §2.19） ==========
+# ========== Preview Token 与 Redis 缓存 ==========
 
 
 class TestPreviewToken:
@@ -386,7 +386,7 @@ class TestPreviewToken:
     async def test_dry_run_writes_redis_cache_token_to_batch_id(
         self, db_session, fake_redis
     ):
-        """spec §2.19 v2.2 P0：Redis 仅 cache preview_token → batch_id（10min TTL）。"""
+        """Redis 仅缓存 preview_token → batch_id，TTL 为 10 分钟。"""
         dept = _make_dept(7602, "QA-DryRun-Dept-RC")
         super_role = (
             await db_session.execute(
@@ -440,7 +440,7 @@ class TestPreviewToken:
         assert 595 <= ttl <= 600
 
     async def test_dry_run_computes_file_sha256(self, db_session):
-        """spec §2.19：file_sha256 = sha256(file_bytes)，execute 三重校验用。"""
+        """file_sha256 等于 sha256(file_bytes)，供执行前校验。"""
         dept = _make_dept(7604, "QA-DryRun-Dept-SHA")
         super_role = (
             await db_session.execute(
@@ -465,7 +465,7 @@ class TestPreviewToken:
         assert batch.file_sha256 == expected
 
     async def test_dry_run_computes_records_hash(self, db_session):
-        """spec §2.19：records_hash 字段非空（execute 比对防 dry_run 后改字段值）。"""
+        """records_hash 非空，防止预检后记录内容被修改。"""
         dept = _make_dept(7605, "QA-DryRun-Dept-RH")
         super_role = (
             await db_session.execute(
@@ -490,7 +490,7 @@ class TestPreviewToken:
         assert len(batch.records_hash) == 64  # sha256 hex
 
 
-# ========== 状态机（spec §2.26 + v2.2 P1-2） ==========
+# ========== 状态机 ==========
 
 
 class TestStateMachine:
@@ -520,7 +520,7 @@ class TestStateMachine:
         assert batch.status == ImportBatchStatus.PREVIEW_DONE
 
 
-# ========== Records Truncation（spec §3.2 v2.2 P1） ==========
+# ========== Records Truncation ==========
 
 
 class TestRecordsTruncation:
@@ -588,11 +588,11 @@ class TestRecordsTruncation:
         assert result.conflict_records_truncated is False
 
 
-# ========== Reason 校验（spec §2.30 v2.2 P1-3） ==========
+# ========== Reason 校验 ==========
 
 
 class TestReasonValidation:
-    """spec §2.30：reason 必填，1-256 字符。dry_run 入口 defense-in-depth 校验。"""
+    """dry-run 入口兜底校验 reason 必填且长度为 1-256 字符。"""
 
     async def test_dry_run_reason_required(self, db_session):
         """reason 缺失 / 全空白 → AI_IMPORT_REASON_REQUIRED。"""
@@ -619,7 +619,7 @@ class TestReasonValidation:
         assert exc.value.error_code == "AI_IMPORT_REASON_REQUIRED"
 
     async def test_dry_run_reason_too_long_rejected(self, db_session):
-        """spec §2.30：reason 长度上限 256 字符。"""
+        """reason 长度上限为 256 字符。"""
         dept = _make_dept(7802, "QA-DryRun-Dept-RSL")
         super_role = (
             await db_session.execute(
@@ -643,7 +643,7 @@ class TestReasonValidation:
         assert exc.value.error_code == "AI_IMPORT_REASON_REQUIRED"
 
     async def test_dry_run_persists_reason_in_batch(self, db_session):
-        """spec §2.30：reason 写入 batch.reason，进审计链路。"""
+        """reason 写入 batch.reason 并进入审计链路。"""
         dept = _make_dept(7803, "QA-DryRun-Dept-RSP")
         super_role = (
             await db_session.execute(
@@ -706,11 +706,11 @@ class TestSuperAdminBypass:
         assert result.new_count == 1
 
 
-# ========== CREATED → FAILED 集成路径（Task 34 / spec §3.6 line 1134） ==========
+# ========== CREATED → FAILED 集成路径 ==========
 
 
 class TestCreatedToFailedTransition:
-    """spec §3.6 line 1134 + §8.1 line 2892：dry_run 阶段失败 → batch CREATED → FAILED。
+    """dry-run 阶段失败时批次从 CREATED 迁移为 FAILED。
 
     覆盖两个失败分支：
     - 0 行 records（解析后无有效数据）

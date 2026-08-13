@@ -2,10 +2,9 @@
 
 创建 Pydantic AI Agent 实例。
 
-spec §17.2：从 system_tools.register_system_tools(agent) 模式迁移到
-ToolRegistry + build_pydantic_ai_tools（声明式装饰器）。
-spec §7.6：system prompt 用 build_system_prompt 三段拼接（SAFETY_PREAMBLE +
-agent.system_prompt + dynamic_block），不再硬编码 instruction。
+使用 ToolRegistry 和 ``build_pydantic_ai_tools`` 动态构造工具。
+system prompt 由 ``build_system_prompt`` 拼接 SAFETY_PREAMBLE、
+agent.system_prompt 和 dynamic_block，不再硬编码 instruction。
 """
 
 from typing import Any
@@ -29,15 +28,15 @@ def create_chat_agent(
 
     Args:
         model: Pydantic AI Model 实例
-        user_perms: 用户权限码集合，用于按 Agent + perms 过滤 tool（spec §5.4）
+        user_perms: 用户权限码集合，用于按 Agent 和权限过滤工具
                     None 表示用所有内置 tool（向后兼容旧 ChatDeps 调用方）
-        enabled_extra: v1.5+ SR-17 sys_config.ai:enabled_tools 解析结果，
+        enabled_extra: ``sys_config.ai:enabled_tools`` 的解析结果，
                        None=不做 default_enabled 过滤（向后兼容）
 
     Returns:
         配置好工具的 Agent 实例
 
-    system prompt（spec §7.6）：
+    system prompt：
         用动态 instructions（Callable[[RunContext[ChatDeps]], str]），
         每次推理时从 ctx.deps 重新构造（保证 data_scope / 时间 / trace_id 实时）。
         agent.system_prompt 字段在 chat_service.build_chat_deps 加载时已设到 deps.agent。
@@ -46,8 +45,8 @@ def create_chat_agent(
     # 1.5 完成后由 chat.py 显式传入从 user 加载的真实 perms
     effective_perms = user_perms if user_perms is not None else _all_registry_perms()
 
-    # v1.5+: agent_code 决定可见 tool 集合（spec §5.4）
-    # v1.5+ SR-17: enabled_extra 来自 sys_config.ai:enabled_tools，控制 default_enabled=False 的 tool
+    # agent_code 决定可见工具集合。
+    # enabled_extra 控制默认关闭工具的显式启用。
     tools = build_pydantic_ai_tools(
         effective_perms, agent_code, enabled_extra=enabled_extra
     )

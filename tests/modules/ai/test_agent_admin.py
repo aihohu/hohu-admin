@@ -1,4 +1,4 @@
-"""Multi-Agent admin UI tests (spec §6.1, §9.1)."""
+"""Multi-Agent 管理端测试。"""
 
 # ruff: noqa: ARG001, PLC0415  test fixture 占位参数 + 函数内 import（沿用 ai conftest 约定）
 
@@ -15,7 +15,7 @@ async def seed_agents():
     `SELECT ... WHERE code IN (...)`，缺哪个补哪个；测试断言用 code 而非 id，
     所以补种时 agent_id 用 next_id 即可（不影响断言）.
 
-    Task 3 起对已存在行也 UPDATE 关键字段（name/description/system_prompt/
+    对已存在行也更新关键字段（name/description/system_prompt/
     enabled/risk_appetite）—— 否则 CI 预置的 shared 会带着空 system_prompt
     和非 `"x"*60` 的 description，让 detail/update 测试不稳定。UPSERT 后无论
     本地是否跑过 seed_ai_agents.py，断言都能稳定通过.
@@ -221,7 +221,7 @@ async def test_update_code_field_ignored(
     assert data["name"] == "Renamed"
 
 
-# ============ Task 4: 校验规则测试（决策 #3, #20, #25） ============
+# ============ 校验规则测试 ============
 
 
 async def test_update_description_too_short(
@@ -332,7 +332,7 @@ async def test_update_daily_quota_negative_returns_400(
     assert resp.json().get("errorCode") == "AI_AGENT_QUOTA_INVALID"
 
 
-# ============ Task 5: 审计 middleware 回归测试（决策 #27） ============
+# ============ 审计 middleware 回归测试 ============
 
 
 async def test_put_triggers_audit_middleware(

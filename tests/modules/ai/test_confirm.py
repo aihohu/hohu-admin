@@ -1,4 +1,4 @@
-"""HITL /ai/confirm 端点单元测试（spec §8.3，含 2026-07-10 修订 S-13 / S-14）
+"""HITL ``/ai/confirm`` 端点单元测试。
 
 直接调端点函数，mock 掉 deps（不用 TestClient，避免 FastAPI lifespan + DB
 + auth 中间件的全套启动开销）。
@@ -179,7 +179,7 @@ def _make_prepared_context(action):  # noqa: ANN001
 
 
 def test_confirm_request_rejects_policy_override_fields() -> None:
-    """Task 35a.2: confirm can choose only the decision, never new tool args."""
+    """confirm 只能选择批准或拒绝，不能提交新的工具参数。"""
     with pytest.raises(ValidationError):
         ConfirmRequest.model_validate(
             {

@@ -1,6 +1,6 @@
 """system/ai_tools.py 业务逻辑集成测试
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §5.5 / §2.10。
+覆盖系统聚合、列表工具的数据权限和字段白名单。
 
 db_session fixture 用 SAVEPOINT 回滚模式，所有写入不真正落库。
 本测试只验证业务逻辑（count / stats / distinct），data_scope 过滤留 1.5 鉴权矩阵。
@@ -152,7 +152,7 @@ class TestUserCount:
     async def test_count_filter_out_of_whitelist_raises(
         self, db_session: AsyncSession
     ) -> None:
-        """spec §5.5: filters 含 phone 越界 → AI_STATS_FIELD_NOT_ALLOWED"""
+        """filters 包含 phone 时返回 AI_STATS_FIELD_NOT_ALLOWED。"""
         ctx = _make_ctx(db_session, visible_user_ids=set())
         with pytest.raises(BusinessRuleException) as exc_info:
             await user_count(ctx, filters={"phone": "13800000000"})
@@ -232,7 +232,7 @@ class TestUserStats:
         assert result.ui.view_type == "stats_chart"
 
     async def test_stats_max_groups_truncation(self, db_session: AsyncSession) -> None:
-        """spec §5.5 max_groups 截断"""
+        """max_groups 应截断分组结果。"""
         await _add_user(db_session, user_id=1001, user_name="u1", status="1")
         await _add_user(db_session, user_id=1002, user_name="u2", status="0")
         await db_session.flush()
@@ -290,14 +290,14 @@ class TestUserDistinct:
         assert exc_info.value.error_code == "AI_STATS_FIELD_NOT_ALLOWED"
 
 
-# ============ data_scope 过滤（spec §6.2，验证 filters 拼到 WHERE） ============
+# ============ data_scope 过滤 ============
 
 
 class TestDataScopeFilter:
     async def test_count_respects_data_scope_filters(
         self, db_session: AsyncSession
     ) -> None:
-        """spec §6.2: ctx.data_scope.filters 拼到 WHERE 子句
+        """ctx.data_scope.filters 应拼入 WHERE 子句。
 
         构造 3 个用户，data_scope filter 限定 user_id=1001 → count=1
         """
@@ -319,7 +319,7 @@ class TestDataScopeFilter:
         assert result.data == {"count": 1}
 
 
-# ============ role.count（v1.5+，chip 跳转回放扩展） ============
+# ============ role.count 与 chip 回放 ============
 
 
 async def _add_role(
@@ -394,7 +394,7 @@ class TestRoleCount:
     async def test_count_filter_out_of_whitelist_raises(
         self, db_session: AsyncSession
     ) -> None:
-        """spec §5.5: role_code 越界（allowed_filters 只有 status）→ AI_STATS_FIELD_NOT_ALLOWED"""
+        """role_code 不在白名单时返回 AI_STATS_FIELD_NOT_ALLOWED。"""
         ctx = _make_role_ctx(db_session)
         with pytest.raises(BusinessRuleException) as exc_info:
             await role_count(ctx, filters={"role_code": "admin"})
@@ -407,7 +407,7 @@ class TestRoleCount:
         assert result.data["count"] >= 0
 
 
-# ============ dept.count（v1.5+，演示 chip 跳转回放到 dept 模块页） ============
+# ============ dept.count 与 chip 回放 ============
 
 
 async def _add_dept(
@@ -486,7 +486,7 @@ class TestDeptCount:
     async def test_count_filter_out_of_whitelist_raises(
         self, db_session: AsyncSession
     ) -> None:
-        """spec §5.5: dept_name 越界（allowed_filters 只有 status）→ AI_STATS_FIELD_NOT_ALLOWED"""
+        """dept_name 不在白名单时返回 AI_STATS_FIELD_NOT_ALLOWED。"""
         from app.modules.system.ai_tools import dept_count
 
         ctx = _make_dept_ctx(db_session)
@@ -495,7 +495,7 @@ class TestDeptCount:
         assert exc_info.value.error_code == "AI_STATS_FIELD_NOT_ALLOWED"
 
 
-# ============ role.list / dept.list（v1.5+ SR-22） ============
+# ============ role.list / dept.list ============
 
 
 def _make_role_list_ctx(db: AsyncSession) -> AiToolContext:
@@ -551,9 +551,9 @@ def _make_dept_list_ctx(db: AsyncSession) -> AiToolContext:
 
 
 class TestRoleList:
-    """spec §5.5 SR-22: role.list 返回精简字段 + limit 截断
+    """role.list 返回精简字段并按 limit 截断。
 
-    双层返回（Task 6）：
+    双层返回：
       LLM 看 data.{total, limit, sample[3]}（精简，进 prompt cache）
       前端看 ui.view_data.{columns, rows}（全量 limit 条，渲染 table）
     """
@@ -609,7 +609,7 @@ class TestRoleList:
         assert "role_on_uniq" not in names  # status='1' 被过滤
 
     async def test_limit_over_50_truncated(self, db_session) -> None:
-        """spec §5.5 SR-22 反例 3: limit > 50 强制截断到 50"""
+        """limit 大于 50 时强制截断为 50。"""
         from app.modules.system.ai_tools import role_list
 
         ctx = _make_role_list_ctx(db_session)
@@ -630,7 +630,7 @@ class TestRoleList:
         assert r3.data["limit"] == 20  # 负数也走默认
 
     async def test_total_reflects_real_count_not_limit(self, db_session) -> None:
-        """spec §5.5 SR-22 反例 4: total 不受 limit 截断"""
+        """total 不受 limit 截断影响。"""
         from app.modules.system.ai_tools import role_list
 
         # 至少 3 个 role（含本次 + 残留）
@@ -673,9 +673,9 @@ class TestRoleList:
 
 
 class TestDeptList:
-    """spec §5.5 SR-22: dept.list 返回精简字段
+    """dept.list 返回精简字段。
 
-    双层返回（Task 6）：LLM 看 data.{total, limit, sample[3]}，前端看
+    双层返回：LLM 读取 data.{total, limit, sample[3]}，前端读取
     ui.view_data.{columns, rows}（data_list 视图）。
     """
 

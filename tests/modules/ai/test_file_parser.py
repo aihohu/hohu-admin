@@ -1,4 +1,4 @@
-"""File Parser 单测 — spec §16 v1.5+ SR-24
+"""File Parser 行为测试。
 
 测试 ExcelParser / CsvParser / parse_file 入口函数。
 

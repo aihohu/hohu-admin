@@ -1,4 +1,4 @@
-"""scripts/sync_menus.py MENU_DEFINITIONS 静态校验（Task 16，spec §10 line 3095）。
+"""scripts/sync_menus.py MENU_DEFINITIONS 静态校验。
 
 验证 ``system:user:import`` / ``system:user:export`` 两个按钮权限已被 seed 到
 MENU_DEFINITIONS，形状正确（``menu_type=F`` / ``parent_route=system_user`` /
@@ -23,7 +23,7 @@ def _find_by_permission(perm: str) -> dict:
 
 
 class TestUserImportExportPermissionSeed:
-    """spec §10 Task 16 line 3095：sync_menus 必须含两个按钮权限 seed。"""
+    """sync_menus 必须包含导入和导出按钮权限种子。"""
 
     def test_import_permission_seeded(self):
         """system:user:import 在 MENU_DEFINITIONS 里。"""

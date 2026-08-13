@@ -1,12 +1,12 @@
-"""Gateway Executor — 统一 tool 执行入口（spec §3 / §6 / §8.2）
+"""Gateway Executor — 统一工具执行入口。
 
-Phase 3.2 完整流程（HITL + 流式协议 + 审计）：
+完整流程（人工确认 + 流式协议 + 审计）：
 
   1. tool 存在性 + 功能鉴权（perm）
-  2. 容量鉴权 L1/L2（仅写 tool）+ 连续失败兜底（§6.4/§6.5）
-  3. emit tool_call_started（spec §8.1）
+  2. 容量鉴权 L1/L2（仅写工具）+ 连续失败兜底
+  3. emit tool_call_started
   4. 写 ai_operation_log 行（initial status 由 mode 决定）
-  5. risk classification（§5.3）+ dry_run 调用拿 count
+  5. risk classification + dry_run 调用拿 count
   6. HITL 分支：
        a. create_pending + attach_confirmation + emit confirmation_required
        b. hang(confirmation_id) — 阻塞等 wake 或 5min TTL 超时
@@ -14,7 +14,7 @@ Phase 3.2 完整流程（HITL + 流式协议 + 审计）：
   7. 业务执行（独立 session + L3 超时 + serialize_for_llm 脱敏）
   8. emit tool_call_result + 写 log mark_success/failed
 
-ChatDeps.signal_event 注入 SSE 事件回调，事件按 spec §8.1 流式协议 emit。
+ChatDeps.signal_event 注入 SSE 事件回调。
 """
 
 import asyncio
@@ -122,7 +122,7 @@ def build_args_summary(
     args: dict[str, Any] | None = None,
     summary_fields: tuple[str, ...] = (),
 ) -> str:
-    """spec §9.2: 仅元信息（MVP 默认）+ v1.5+ SR-18 可选白名单字段
+    """构造仅包含执行元信息和显式白名单字段的参数摘要。
 
     Args:
         args: 调用方传入的 args dict；None（默认）= 不提取字段（MVP 行为）
@@ -135,7 +135,7 @@ def build_args_summary(
     parts = [f"tool={tool_name}", f"risk={risk_level}", f"mode={execution_mode}"]
     if dry_run_count is not None:
         parts.append(f"dry_run_count={dry_run_count}")
-    # v1.5+ SR-18: 业务方显式声明 args_summary_fields 时，提取白名单字段原值追加
+    # 只提取业务方显式声明的字段，避免敏感参数进入操作日志。
     # 默认空 tuple → 不追加（MVP 行为）
     if args is not None and summary_fields:
         for field_name in summary_fields:
@@ -166,7 +166,7 @@ def _infer_affected_rows(
     result_data: Any,
     ui_audit: dict[str, Any] | None = None,
 ) -> int | None:
-    """从 dry_run_count / ui.audit / result_data 推断影响行数（决策 6）
+    """从 dry_run_count、ui.audit 或 result_data 推断影响行数。
 
     优先级：
       1. dry_run_count（HITL 路径精确算出）
@@ -208,13 +208,13 @@ async def _execute_tool(
     *,
     _prepared_action_context: _PreparedExecutionContext | None = None,
 ) -> ToolResult:
-    """统一 tool 执行入口（spec §3 / §6 / §8.2）
+    """统一工具执行入口。
 
     Returns:
         ToolResult.success / ToolResult.failure
         不抛业务异常给上游 LLM，SSE 流不被中断
 
-    spec §6.3 metric：每个 return 前用 _rec(status) 埋点
+    每个返回分支都通过 _rec(status) 记录指标。
     ai_tool_calls_total{tool, status, risk, execution_mode}。
     """
     from app.modules.ai.metrics import record_tool_call  # noqa: PLC0415
@@ -300,13 +300,13 @@ async def _execute_tool(
         else args
     )
 
-    # 2. 功能鉴权（spec §6.1）
+    # 2. 功能鉴权
     if not set(meta.required_perms) <= deps.perms:
         logger.warning(
             "perm denied via runtime check",
             extra={"user_id": user_id, "tool": name},
         )
-        # §11.4 IP 拉黑计数（异步 fire-and-forget，不阻断主流程）
+        # 异步记录来源 IP 的鉴权拒绝，不阻断主流程。
         await _record_perm_denied_for_ip(deps, name)
         _rec("perm_denied")
         return ToolResult.failure(
@@ -314,7 +314,7 @@ async def _execute_tool(
             error_msg=USER_FACING_MSG["AI_TOOL_PERM_DENIED"],
         )
 
-    # 2b. super_admin gate（spec §11.2）：仅超管可调，短路在所有其他检查前
+    # 2b. super_admin gate：仅超管可调，并在其他检查前短路。
     if meta.super_admin_only and not is_super_admin(deps.user):
         logger.warning(
             "super_admin_only gate denied",
@@ -326,14 +326,13 @@ async def _execute_tool(
             error_msg="此操作仅超级管理员可执行，请联系超管或走传统界面",
         )
 
-    # 3. 容量鉴权 L1/L2/L4（仅写 tool，spec §6.4 + 修订 S-11 + SR-16 per-agent L2 + SR-19 全局 L1 + SR-20 L4 会话预算）
+    # 3. 写工具的用户级、全局、Agent 级和会话级容量鉴权。
     # check_l1_rate_limit 返回 (count, l1_member)，l1_member 用于业务函数内
-    # 抛 AuthorizationException 时精确回滚（修订 S-11）
-    # v1.5+ SR-16: 全局 L2 通过后再 check_l2_agent_quota（仅当 agent 配了专属额度），
+    # 抛 AuthorizationException 时按成员精确回滚。
+    # Agent 配置专属额度时，在用户日额度之后叠加检查。
     #              agent_code 从 deps.agent.code 取（非 tool.meta.agent，避免 shared
     #              agent 调 file.parse 时归属与运行时会话不一致）
-    # v1.5+ SR-19: 用户级 L1 通过后再 check_l1_global_rate_limit（仅当部署方配了全局限制）
-    # v1.5+ SR-20: L2 全部通过后再 check_l4_conv_budget（仅当部署方配了会话预算 + conversation_id != 0）
+    # 部署方可叠加全局速率限制和会话日预算。
     l1_member: str | None = None
     l1_global_member: str | None = None
     l4_conv_key_for_rollback: str | None = None
@@ -341,12 +340,12 @@ async def _execute_tool(
     if is_write_tool(meta):
         try:
             _, l1_member = await check_l1_rate_limit(redis_client, user_id)
-            # v1.5+ SR-19: 全局 L1 叠加（仅当部署方配了 ai:rate_limit:global_per_min > 0）
+            # 仅在部署方配置全局每分钟限制时启用。
             global_result = await check_l1_global_rate_limit(redis_client)
             if global_result is not None:
                 _, l1_global_member = global_result
             await check_l2_daily_quota(redis_client, user_id)
-            # v1.5+ SR-16 per-agent L2 叠加（仅当 deps.agent 非 None 且配了专属额度）
+            # 仅在当前 Agent 配置专属日额度时启用。
             agent_quota_limit = (
                 getattr(deps.agent, "daily_quota_per_user", None)
                 if deps.agent is not None
@@ -361,7 +360,7 @@ async def _execute_tool(
                 )
                 # 标记：AuthorizationException 时需要回滚 per-agent key
                 agent_code_for_rollback = deps.agent.code
-            # v1.5+ SR-20: L4 会话预算（仅当 conversation_id != 0 + 部署方配了 conv_per_day > 0）
+            # 仅在已有会话且部署方配置会话预算时启用。
             conv_id = deps.conversation_id or 0
             l4_result = await check_l4_conv_budget(redis_client, conv_id)
             if l4_result is not None:
@@ -370,7 +369,7 @@ async def _execute_tool(
             _rec("quota_rejected")
             return ToolResult.failure(error_code=e.error_code, error_msg=e.message)
         except RedisError:
-            # spec §2.6: Redis 故障时写操作拒绝（保守降级，不静默放过）
+            # Redis 故障时拒绝写操作，避免绕过配额保护。
             logger.exception(
                 "Redis unavailable during quota check",
                 extra={"user_id": user_id, "tool": name},
@@ -381,12 +380,12 @@ async def _execute_tool(
                 error_msg="AI 服务暂时不可用（容量校验失败），请稍后重试",
             )
 
-    # 4. ai_operation_log 起始行（spec §6.5 修订 S-12：必须先写 log 再检查
+    # 4. 必须先写 ai_operation_log 起始行，再执行可能短路的安全检查，
     #    repeated_failure，否则 AI_REPEATED_FAILURE 路径漏审计行）
-    # 修订 S-15：_start_log 失败 = 整 tool 调用失败（业务还没执行，不能漏审计行）
+    # 起始日志失败时终止工具调用；业务尚未执行，不能留下审计缺口。
     args_hash = compute_args_hash(business_args)
     dry_run_count, dry_run_summary = await _run_dry_run(registered, business_args, deps)
-    # v1.5+ SR-21: risk_appetite 从 deps.agent 读（与 SR-16/19 同模式）
+    # 风险偏好来自当前 Agent 配置。
     agent_risk_appetite = (
         getattr(deps.agent, "risk_appetite", "balanced")
         if deps.agent is not None
@@ -443,12 +442,12 @@ async def _execute_tool(
         ),
     )
 
-    # 5. 连续失败兜底（spec §6.5）
+    # 5. 相同参数连续失败时短路，避免重复消耗资源。
     try:
         await check_repeated_failure(redis_client, user_id, name, args_hash)
     except BusinessException as e:
-        # 修订 S-12：触发 AI_REPEATED_FAILURE 时 log 已在 step 4 写入，
-        # 这里写终态 failed + AI_REPEATED_FAILURE（满足 spec §6.5
+        # 连续失败短路前已经写入起始日志，因此必须补齐终态。
+        # 写入终态失败，确保审计日志与用户看到的短路结果一致。
         # "连续失败兜底触发... 仍写一行 ai_operation_log"）
         await _finish_log_final(
             log_id,
@@ -464,7 +463,7 @@ async def _execute_tool(
             error_msg=USER_FACING_MSG.get(e.error_code, e.message),
         )
     except RedisError:
-        # spec §2.6: 连续失败检查也走 Redis，故障时保守降级（拒绝）
+        # Redis 故障时保守拒绝写操作。
         logger.exception(
             "Redis unavailable during failure check",
             extra={"user_id": user_id, "tool": name},
@@ -483,7 +482,7 @@ async def _execute_tool(
             error_msg="AI 服务暂时不可用（安全检查失败），请稍后重试",
         )
 
-    # §11.4 用户级 injection 自动禁用（命中 ≥5/h 且非超管 → 禁用 24h）
+    # 非超管用户一小时内多次命中注入检测后自动禁用 24 小时。
     if deps.injection_hit:
         await record_injection(redis_client, deps.user)
 
@@ -529,11 +528,7 @@ async def _execute_tool(
         _rec("success" if action_result.ok else "failed")
         return action_result
 
-    # 8. 业务执行（修订 S-11：传 l1_member 进去，业务函数内抛
-    #    AuthorizationException 时 decr_quota 精确回滚 L1 zset 成员；
-    #    v1.5+ SR-16 传 agent_code_for_rollback 同步回滚 per-agent L2；
-    #    v1.5+ SR-19 传 l1_global_member 同步回滚全局 L1；
-    #    v1.5+ SR-20 传 l4_conv_key_for_rollback 同步回滚 L4 会话预算）
+    # 8. 业务执行；授权失败时按已写入的成员精确回滚各层配额。
     result = await _invoke_tool_fn(
         registered,
         business_args,
@@ -553,13 +548,13 @@ async def _execute_tool(
                 error_msg=USER_FACING_MSG["AI_PREPARED_ACTION_INVALID"],
             )
         elif requested_outcome == "preview_only":
-            # Task 35a.4: a preview-only response is terminal. Consume the
+            # A preview-only response is terminal. Consume the
             # internal proposal before returning so no caller can promote an
             # old preview into an executable action.
             result.prepared_action = None
 
     duration_ms = int((time.monotonic() - started_at) * 1000)
-    # spec §2.3 v1.6+: readonly tool 的 affected_rows 不展示（user.count 返回
+    # 只读工具不展示 affected_rows（user.count 返回
     # {"count": 42} 会被推断成 affected_rows=42，误导成「42 行受影响」）.
     # readonly = 查询类，无受影响行概念；强制 None 让前端隐藏「N 行」后缀.
     inferred_affected_rows = (
@@ -590,7 +585,7 @@ async def _execute_tool(
     metric_status = "success" if result.ok else "failed"
     _rec(metric_status)
 
-    # Task 35a.1: preview 成功后由 Gateway 自动进入绑定 execute 的 HITL；
+    # 预览成功后由 Gateway 自动进入与执行工具绑定的人工确认；
     # wrapper 仍只代表模型的一次 preview tool call。proposal 不序列化给模型。
     if (
         result.ok
@@ -760,7 +755,7 @@ async def _run_dry_run(
     args: dict[str, Any],
     deps: ChatDeps,
 ) -> tuple[int | None, DryRunSummary | None]:
-    """调 dry_run_fn 拿 count（spec §5.3 风险分级用）
+    """调用 dry_run_fn 获取风险判断和确认展示所需摘要。
 
     Returns:
         (count, summary) — count None 表示未跑或失败；summary 含 reason 给 HITL 抽屉
@@ -809,11 +804,11 @@ async def _start_log(
     args_summary: str,
     mode: AiExecutionMode,
 ) -> int:
-    """写 ai_operation_log 行（spec §9.1，修订 S-15：失败必抛）
+    """写入 ai_operation_log 起始行；失败必须向上传播。
 
     initial status：autonomous → RUNNING；HITL → PENDING_CONFIRMATION
 
-    修订 S-15：与 `_finish_log_final` 不同，`_start_log` 失败时业务**还没执行**，
+    与 `_finish_log_final` 不同，`_start_log` 失败时业务**还没执行**，
     必须抛异常终止 execute_tool —— 否则业务执行了但无审计行，audit gap 比
     业务失败更严重。`_with_log_retry` 在 3 次重试后仍失败时抛
     `LogWriteError`，execute_tool 内部捕获并返回 ToolResult.failure。
@@ -847,7 +842,7 @@ async def _start_log(
 
 
 async def _finish_log_running(log_id: int) -> None:
-    """HITL approved → status pending_confirmation → running（修订 S-15：3 次重试）"""
+    """HITL approved → status pending_confirmation → running，失败最多重试三次。"""
 
     async def _op(log_db: AsyncSession) -> None:
         await operation_log_service.mark_running(log_db, log_id)
@@ -856,7 +851,7 @@ async def _finish_log_running(log_id: int) -> None:
 
 
 async def _finish_log_rejected(log_id: int, user_id: int) -> None:
-    """HITL rejected → status pending_confirmation → rejected（修订 S-15：3 次重试）"""
+    """HITL rejected → status pending_confirmation → rejected，失败最多重试三次。"""
 
     async def _op(log_db: AsyncSession) -> None:
         await operation_log_service.mark_rejected(log_db, log_id, approved_by=user_id)
@@ -867,11 +862,9 @@ async def _finish_log_rejected(log_id: int, user_id: int) -> None:
 
 
 async def _finish_log_final(log_id: int, result: ToolResult, started_at: float) -> None:
-    """业务执行结束，写 log 终态（success / failed）（修订 S-15：3 次重试 + 不抛）
+    """业务执行结束后写入日志终态，失败最多重试三次且不向业务传播。
 
-    修订 S-15 关键设计：
-      - 业务事务（tool_db.begin()）已先于本函数返回时 commit/rollback，本函数
-        写 log 失败**不**回滚业务（spec §6.3 "log 写入优先级低于业务"）
+    业务事务已先于本函数提交或回滚，因此终态日志失败不能反向回滚业务；
       - 3 次重试（0.5s / 1s / 1.5s backoff）后仍失败 → logger.critical
         （未来 Prometheus 接入时挂 `ai_log_write_failure_total{status}` counter）
       - 不抛异常：业务已成功 = 用户感知成功，审计 gap 走告警追查
@@ -905,7 +898,7 @@ async def _finish_log_final(log_id: int, result: ToolResult, started_at: float) 
     )
 
 
-# ============ log 写入重试 helper（修订 S-15） ============
+# ============ 日志写入重试 ============
 
 
 class LogWriteError(RuntimeError):
@@ -923,7 +916,7 @@ async def _with_log_retry(
     op: Callable[[AsyncSession], Awaitable[Any]],
     raise_on_failure: bool = True,
 ) -> Any:
-    """log 写入重试 helper（修订 S-15）
+    """带退避的日志写入重试。
 
     Args:
         operation: 操作名（start_operation / mark_success / mark_failed / 等），
@@ -984,7 +977,7 @@ async def _with_log_retry(
     return None
 
 
-# ============ HITL 挂起 / 唤醒（spec §8.3） ============
+# ============ 人工确认挂起 / 唤醒 ============
 
 
 async def _rollback_failed_confirmation_setup(
@@ -1261,7 +1254,7 @@ async def _hang_for_confirmation(
     if durable_action is None:  # pragma: no cover - fail-closed invariant
         raise RuntimeError("durable HITL action was not created")
 
-    # emit confirmation_required（spec §8.1）
+    # 通知客户端展示确认界面。
     await _emit(
         deps,
         ConfirmationRequiredEvent(
@@ -1282,7 +1275,7 @@ async def _hang_for_confirmation(
         ),
     )
 
-    # 阻塞等 wake（spec §8.3）
+    # 阻塞等待批准、拒绝或超时唤醒。
     try:
         action = await hitl_manager.hang(confirmation_id)
     except TimeoutError:
@@ -1410,19 +1403,10 @@ async def _invoke_tool_fn(
     l1_global_member: str | None = None,
     l4_conv_key_for_rollback: str | None = None,
 ) -> ToolResult:
-    """独立 session 内调用业务函数（spec §6.3）
+    """在独立数据库会话内调用业务函数。
 
-    修订 S-11：业务函数内抛 AuthorizationException（典型场景：
-    `ensure_targets_in_scope` 命中 data_scope 越界）时，必须 decr_quota
-    回滚 L1/L2 计数器——否则用户被偷配额（spec §6.4 计数策略
-    "data_scope 拒绝不计入"）。
-
-    v1.5+ SR-16：agent_code_for_rollback 非 None 时同步回滚 per-agent L2 key
-    （仅当 agent.daily_quota_per_user 非 None，由 execute_tool 决定是否传）。
-
-    v1.5+ SR-19：l1_global_member 非 None 时同步 ZREM 全局 L1 zset 成员。
-
-    v1.5+ SR-20：l4_conv_key_for_rollback 非 None 时同步 DECR 会话预算 key。
+    授权或数据权限失败时回滚已经写入的用户、Agent、全局和会话配额，
+    避免拒绝请求消耗用户额度。
     """
     meta = registered.meta
     tool_fn = registered.fn
@@ -1434,7 +1418,7 @@ async def _invoke_tool_fn(
                 tool_ctx = build_tool_context(deps, tool_db, meta)
                 # L3 单 tool 超时包装
                 raw = await with_l3_timeout(tool_fn(tool_ctx, **args))
-                # 决策 11: isinstance 双路径分支
+                # 同时兼容完整 ToolResult 和第三方工具返回的裸值。
                 if isinstance(raw, ToolResult):
                     # 业务方已构造完整 ToolResult（builtin tool 新风格）
                     # 仍要脱敏 data 字段（ui 不脱敏，不进 LLM）
@@ -1446,10 +1430,9 @@ async def _invoke_tool_fn(
                     result = ToolResult.success(
                         data=safe_data
                     )  # ui=None，前端 fallback
-                # spec §6.5: 成功路径清零失败计数
+                # 成功后清零相同参数的连续失败计数。
                 await clear_failures(redis_client, user_id, meta.name, args_hash)
-                # spec §8.7: readonly tool 写 query_cache 给 chip 跳转用
-                # 决策 8: chip_target 优先，query_cache_module 兼容 alias
+                # 只读工具缓存白名单筛选条件，供结果卡跳转后恢复页面查询。
                 cache_module = meta.chip_target or meta.query_cache_module
                 if meta.readonly and cache_module and deps.trace_id:
                     _safe_write_query_cache(
@@ -1457,13 +1440,7 @@ async def _invoke_tool_fn(
                     )
                 return result
     except AuthorizationException as e:
-        # 修订 S-11：data_scope 越界等授权失败，回滚 L1/L2/L4 已写计数
-        # v1.5+ SR-16：若 per-agent L2 已写（agent_code_for_rollback 非 None），
-        #              同步回滚 per-agent key（对称原则）
-        # v1.5+ SR-19：若全局 L1 已写（l1_global_member 非 None），
-        #              同步 ZREM 全局 zset member（对称原则）
-        # v1.5+ SR-20：若 L4 会话预算已写（l4_conv_key_for_rollback 非 None），
-        #              同步 DECR 会话预算 key（对称原则）
+        # 授权失败不消耗额度，回滚此前成功写入的所有配额层级。
         if is_write_tool(meta):
             try:
                 await decr_quota(
@@ -1480,9 +1457,9 @@ async def _invoke_tool_fn(
                     "quota decr failed on AuthorizationException",
                     extra={"user_id": user_id, "tool": meta.name},
                 )
-        # §11.4 IP 拉黑计数（异步，不阻断主流程）
+        # 异步记录来源 IP 的鉴权拒绝。
         await _record_perm_denied_for_ip(deps, meta.name)
-        # 授权失败不计入失败计数（spec §6.4 计数策略）
+        # 授权失败不是工具业务失败，不计入连续失败统计。
         logger.info(
             "tool authorization denied (data_scope / etc)",
             extra={"user_id": user_id, "tool": meta.name, "error_code": e.error_code},
@@ -1521,12 +1498,12 @@ def _safe_write_query_cache(
     *,
     module: str | None = None,
 ) -> None:
-    """写 ai:query_cache hash（spec §8.7），filters 按 allowed_filters 白名单过滤
+    """写查询回放缓存，且只保存 allowed_filters 白名单字段。
 
     失败静默——query_cache 是辅助功能，不能让 chip 跳转失败影响主流程。
     异步调度避免阻塞 LLM 响应。
 
-    决策 8: module 参数优先（chip_target 优先），未传时回退到 meta.query_cache_module。
+    module 参数优先，未传时回退到工具元数据中的兼容字段。
     """
     import asyncio  # noqa: PLC0415
 
@@ -1569,11 +1546,11 @@ def _safe_write_query_cache(
         pass
 
 
-# ============ §11.4 IP 拉黑计数（fire-and-forget） ============
+# ============ IP 鉴权拒绝计数 ============
 
 
 async def _record_perm_denied_for_ip(deps: ChatDeps, tool_name: str) -> None:
-    """鉴权拒绝时调 ip_blacklist.record_perm_denied（§11.4）
+    """鉴权拒绝时异步记录来源 IP。
 
     fire-and-forget：开独立 session + 失败吞异常，绝不影响主流程。
     IP 来源：FastAPI request.client.host，由 chat.py 注入 deps（暂未注入则跳过）。
@@ -1596,7 +1573,7 @@ async def _record_perm_denied_for_ip(deps: ChatDeps, tool_name: str) -> None:
         )
 
 
-# ============ SSE 续传：跳过 perm/quota/dry_run/log_start 的业务执行（spec §3 v1.5+） ============
+# ============ SSE 续传业务执行 ============
 
 
 async def resume_tool_execution(
@@ -1606,7 +1583,7 @@ async def resume_tool_execution(
 ) -> tuple[ToolResult, int]:
     """续传端点专用：从 pending payload 重建执行上下文，跑业务函数
 
-    与 execute_tool 区别（spec §4.3）：
+    与 execute_tool 的区别：
       - 不重做 perm/quota/dry_run/log_start（首次 execute_tool 已做，避免双扣 quota / 双写 log）
       - 不 emit tool_call_started（首次已发）
       - 不 emit tool_call_result（resume 端点自己 emit，让 SSE 顺序连续）

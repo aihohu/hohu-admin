@@ -1,10 +1,10 @@
 """add supervisor routing tables
 
 新增 Supervisor 路由相关 schema：
-1. ai_message 加 agent_code / routing_feedback 列（spec §7.1b）+ CHECK 约束
-2. 新建 ai_routing_log 表（spec §7.2 路由决策审计）
-3. 新建 ai_routing_feedback 表（spec §7.1c 用户反馈历史轨迹）
-4. 回填 ai_message.agent_code（spec §7.3）
+1. ai_message 增加 agent_code / routing_feedback 列和 CHECK 约束
+2. 新建 ai_routing_log 路由决策审计表
+3. 新建 ai_routing_feedback 用户反馈历史表
+4. 回填 ai_message.agent_code
 
 对应 spec docs/superpowers/specs/2026-07-24-multi-agent-supervisor-routing-design.md。
 
@@ -31,19 +31,19 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     """Upgrade schema.
 
-    1. ai_message 加列 + CHECK 约束（spec §7.1b）
-    2. ai_routing_log 建表（spec §7.2）
-    3. ai_routing_feedback 建表（spec §7.1c）
-    4. 回填 ai_message.agent_code（spec §7.3）
+    1. ai_message 增加列和 CHECK 约束
+    2. 新建 ai_routing_log
+    3. 新建 ai_routing_feedback
+    4. 回填 ai_message.agent_code
     """
-    # ============ 1. ai_message 加列 + CHECK（spec §7.1b） ============
+    # ============ 1. ai_message 增加列和 CHECK ============
     op.add_column(
         "ai_message",
         sa.Column(
             "agent_code",
             sa.String(length=64),
             nullable=True,
-            comment="spec §7.1b: 本条消息实际处理的 Agent code（按消息粒度还原 Agent）",
+            comment="本条消息实际处理的 Agent code，用于按消息粒度还原 Agent",
         ),
     )
     op.add_column(
@@ -52,7 +52,7 @@ def upgrade() -> None:
             "routing_feedback",
             sa.String(length=16),
             nullable=True,
-            comment="spec §7.1b: 用户路由反馈 'correct' / 'wrong' / null",
+            comment="用户路由反馈：correct、wrong 或 null",
         ),
     )
     # autogenerate 漏检 __table_args__ 内的 CheckConstraint（已知问题），手工补
@@ -62,7 +62,7 @@ def upgrade() -> None:
         "routing_feedback IS NULL OR routing_feedback IN ('correct', 'wrong')",
     )
 
-    # ============ 2. ai_routing_log 建表（spec §7.2） ============
+    # ============ 2. 新建 ai_routing_log ============
     op.create_table(
         "ai_routing_log",
         sa.Column("log_id", sa.BigInteger(), nullable=False),
@@ -74,8 +74,7 @@ def upgrade() -> None:
             sa.String(length=128),
             nullable=False,
             comment=(
-                "HMAC-SHA256(server_secret + user_id + message)；运维调试用，"
-                "非法证取证（spec §13 决策 17）"
+                "HMAC-SHA256(server_secret + user_id + message)；运维调试用，非法证取证"
             ),
         ),
         sa.Column(
@@ -98,13 +97,13 @@ def upgrade() -> None:
             "parent_log_id",
             sa.BigInteger(),
             nullable=True,
-            comment="spec §13 决策 22: v2+ 多 Agent 协作预留；首期始终 NULL",
+            comment="为多 Agent 协作预留；当前始终为 NULL",
         ),
         sa.Column(
             "plan_step_index",
             sa.Integer(),
             nullable=True,
-            comment="spec §13 决策 22: v2+ 多 Agent 协作预留；首期始终 NULL",
+            comment="为多 Agent 协作预留；当前始终为 NULL",
         ),
         sa.Column(
             "create_time",
@@ -121,7 +120,7 @@ def upgrade() -> None:
     op.create_index(op.f("ix_ai_routing_log_trace_id"), "ai_routing_log", ["trace_id"])
     op.create_index(op.f("ix_ai_routing_log_user_id"), "ai_routing_log", ["user_id"])
 
-    # ============ 3. ai_routing_feedback 建表（spec §7.1c） ============
+    # ============ 3. 新建 ai_routing_feedback ============
     op.create_table(
         "ai_routing_feedback",
         sa.Column("feedback_id", sa.BigInteger(), nullable=False),
@@ -168,11 +167,11 @@ def upgrade() -> None:
         op.f("ix_ai_routing_feedback_user_id"), "ai_routing_feedback", ["user_id"]
     )
 
-    # ============ 4. 回填 ai_message.agent_code（spec §7.3） ============
+    # ============ 4. 回填 ai_message.agent_code ============
     # 只回填 role='assistant' 的消息——user/tool 消息无 agent 归属语义；
     # 历史会话中途切 agent 时，user 消息不强行打标（避免近似错误扩大）.
     # 如果会话当前 agent_code 已变（比如切换过），所有历史 assistant 消息都打当前值，
-    # 这是已知近似——v1.5+ 起新消息按消息粒度准确，历史数据接受不完美.
+    # 这是已知近似；新消息按消息粒度准确，历史数据允许不完全精确。
     op.execute(
         """
         UPDATE ai_message m

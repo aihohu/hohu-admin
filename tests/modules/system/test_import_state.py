@@ -1,12 +1,12 @@
-"""import_state 状态机单测（Task 0b）。
+"""import_state 状态机测试。
 
-覆盖 spec §2.26 + v2.2 P1-2 + §2.27 CAS 幂等基础：
+覆盖合法迁移、终态保护和 CAS 幂等基础：
 - validate_transition 拒绝非法转换
 - _transition_batch_status 成功转换（CREATED → PREVIEW_DONE / PREVIEW_DONE → RUNNING）
 - _transition_batch_status CAS 互斥（同一 session 第二次调用 rowcount=0）
 
 batch_table fixture 用 raw DDL 临时建最小化测试表（batch_id + status 两列），
-不依赖 ORM（Task 2 才落地）。outer-transaction fixture 保证测试结束 outer.rollback()
+状态机本身不依赖 ORM；outer-transaction fixture 保证测试结束时回滚。
 撤销 DDL，不污染其他测试。
 """
 
@@ -40,7 +40,7 @@ def _make_batch(batch_id: str, status: S, token: str | None = None) -> UserImpor
 
 @pytest.fixture
 async def batch_table(db_session) -> str:
-    """复用 Task 2 已建的 sys_user_import_batch 表（含 batch_log FK CASCADE）。
+    """复用 sys_user_import_batch 表及其 batch_log 级联外键。
 
     fixture 仅清空表数据避免测试间残留；outer-transaction fixture 保证
     测试结束 outer.rollback() 撤销 INSERT，不真落库。
@@ -89,11 +89,11 @@ class TestValidateTransition:
         validate_transition(S.RUNNING, S.FAILED)
 
     def test_state_created_to_failed_on_parse_error(self):
-        """spec §2.26 + Task 22b P1：CREATED → FAILED 合法（解析失败兜底路径）。
+        """CREATED → FAILED 是解析失败时的合法兜底路径。
 
         dry_run_import_users 内部若 ``_classify_records`` 抛异常（如 IO 错误 / 解析失败），
         理论上应主动把 batch 从 CREATED 转 FAILED 标记失败终态（当前代码未实现此分支，
-        Task 22b 仅验证状态机允许此转换；集成路径补在 Task 22c+ 跟进）。
+        本测试只验证状态机允许该转换，集成路径由导入服务测试覆盖。
 
         **反例**: LEGAL_TRANSITIONS 不允许 CREATED → FAILED → 调用方只能删除 batch 行
         或留 CREATED 状态悬挂（cleanup cron 不删非终态，行永久驻留）。

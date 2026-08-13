@@ -1,4 +1,4 @@
-"""spec §6.3 + §6.4: Agent 可见性逻辑（单一真相源）.
+"""Agent 可见性逻辑的单一真相源。
 
 API 层（GET /ai/agents）+ Service 层（chat.py supervisor 候选集 / routing feedback 校验）共用.
 抽出独立 service 模块避免 service → api 反向依赖（CLAUDE.md 硬规则 #9 分层铁律）.

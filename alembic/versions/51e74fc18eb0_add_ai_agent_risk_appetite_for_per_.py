@@ -1,6 +1,6 @@
 """add ai_agent.risk_appetite for per-agent risk classification
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §5.3 SR-21（2026-07-20 v1.5+），
+为 Agent 增加独立风险偏好配置，
 ai_agent 表加 risk_appetite 字段（默认 'balanced'，向后兼容 MVP 矩阵）。
 
 仅影响 high risk 的 dry_run_count 阈值：
@@ -37,10 +37,10 @@ def upgrade() -> None:
             sa.String(length=16),
             nullable=False,
             server_default="balanced",
-            comment="v1.5+ 风险偏好：conservative（high 永远 HITL）/ "
+            comment="风险偏好：conservative（high 永远 HITL）/ "
             "balanced（默认，high + dry_run_count≤1 autonomous）/ "
             "aggressive（high 永远 autonomous）。仅影响 high risk，"
-            "destructive / hitl_always / injection_hit 不受影响（spec §5.3 SR-21）",
+            "destructive / hitl_always / injection_hit 不受影响",
         ),
     )
     # DB 层 CHECK 约束防任意字符串（与 Python Literal 类型双保险）

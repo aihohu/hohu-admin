@@ -1,15 +1,15 @@
-"""AI 操作日志服务 — spec §9.1 / §4.4 状态机
+"""AI 操作日志服务及状态机。
 
 每次 tool 调用写一行 ai_operation_log，按 trace_id 串联同对话多 tool。
 安全事件（注入命中 / Guardrail 命中）合并到 is_security_event 字段。
 
-状态流转（§4.4 / §8.3）：
+状态流转：
   autonomous:  start(running) → mark_success | mark_failed
   HITL:        start(pending_confirmation) → mark_running → mark_success | mark_failed
                 pending_confirmation → mark_rejected（用户拒绝）
                 pending_confirmation → mark_expired（5min TTL 超时 / 服务重启）
 
-调用方（Phase 3.2 Gateway Executor 接入）：
+Gateway Executor 调用方式：
     log_id = await operation_log_service.start_operation(
         db, trace_id=..., tool_name=..., tool_call_id=..., risk_level=...,
         execution_mode=AiExecutionMode.HITL, status=AiOperationStatus.PENDING_CONFIRMATION,
@@ -179,7 +179,7 @@ class OperationLogService:
     ) -> AiOperationLog:
         """状态迁移：pending_confirmation → rejected（终态，用户主动拒绝）
 
-        approved_by 字段记录"拒绝者"，与 approved 的 approved_by 共用字段（§4.4）。
+        ``approved_by`` 同时记录批准者或拒绝者。
         """
         log = await self._get(db, log_id)
         self._transition(log, AiOperationStatus.REJECTED)
@@ -206,11 +206,11 @@ class OperationLogService:
     async def mark_expired(self, db: AsyncSession, log_id: int) -> AiOperationLog:
         """状态迁移：pending_confirmation → expired（终态）
 
-        触发场景：5min TTL 超时 / 服务重启清扫（spec §8.4）
+        触发场景：5 分钟 TTL 超时或服务重启清扫。
 
         注意：此方法要求 log 当前状态必须是 pending_confirmation（其它状态
         会抛 AI_OPERATION_LOG_TERMINAL_STATE）。若调用方不确定当前状态
-        （如 spec §8.3 修订 S-14 wake 失败时 log 可能已被 mark_running），
+        （例如唤醒失败时日志可能已进入 running），
         请用幂等版本 `mark_expired_if_pending`。
         """
         log = await self._get(db, log_id)
@@ -266,8 +266,8 @@ class OperationLogService:
           - approved_by：谁按了 approve（审计追责）
           - status.running：业务真正开始执行（Gateway 拿到锁后迁移）
 
-        Phase 3.1 /ai/confirm endpoint 用此方法记 approved_by，
-        Phase 3.2 Gateway Executor 接到唤醒后调 mark_running。
+        ``/ai/confirm`` 用此方法记录 approved_by，Gateway Executor
+        接到唤醒后调用 ``mark_running``。
         """
         log = await self._get(db, log_id)
         log.approved_by = approved_by
@@ -280,7 +280,7 @@ class OperationLogService:
         *,
         user_id: int | None = None,
     ) -> AiOperationLog | None:
-        """按 tool_call_id 查（§9.3 SSE 断流兜底轮询用）
+        """按 tool_call_id 查询，供 SSE 断流后的兜底轮询使用。
 
         Args:
             user_id: 给定时做 owner 校验（不匹配抛 AI_OPERATION_LOG_FORBIDDEN）
@@ -331,7 +331,7 @@ class OperationLogService:
     def _transition(self, log: AiOperationLog, target: AiOperationStatus) -> None:
         """状态机迁移合法性校验 + 执行迁移
 
-        规则（spec §4.4）：
+        规则：
           - 已终态（success/failed/rejected/expired）不可再迁移
           - 其它状态可迁到任意非终态（pending_confirmation ↔ running 允许双向？不允许：只能向前）
         """

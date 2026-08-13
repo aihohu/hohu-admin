@@ -1,4 +1,4 @@
-"""风险分级 helper 单元测试 — spec §5.3 矩阵"""
+"""风险分级 helper 矩阵测试。"""
 
 from app.modules.ai.agents.hitl.constants import AiExecutionMode
 from app.modules.ai.agents.hitl.risk import classify_execution_mode
@@ -21,7 +21,7 @@ def _meta(
 
 
 class TestClassifyExecutionMode:
-    """spec §5.3 矩阵逐行覆盖"""
+    """逐行覆盖风险矩阵。"""
 
     def test_low_autonomous(self) -> None:
         """risk=low → autonomous"""
@@ -90,7 +90,7 @@ class TestClassifyExecutionMode:
         )
 
     def test_injection_hit_overrides_everything(self) -> None:
-        """spec §11.1: injection_hit=True 永远 HITL（降级而非拒绝）"""
+        """injection_hit=True 时始终降级到 HITL。"""
         assert (
             classify_execution_mode(_meta(risk="low"), injection_hit=True)
             == AiExecutionMode.HITL
@@ -113,11 +113,11 @@ class TestClassifyExecutionMode:
         assert result == AiExecutionMode.HITL
 
 
-# ============ v1.5+ SR-21: risk_appetite 三档修正（仅 high risk） ============
+# ============ risk_appetite 三档行为 ============
 
 
 class TestClassifyExecutionModeRiskAppetite:
-    """spec §5.3 SR-21: conservative/balanced/aggressive 仅影响 high risk"""
+    """conservative、balanced 和 aggressive 仅影响 high risk。"""
 
     # ----- balanced（默认，与 MVP 行为等价） -----
 

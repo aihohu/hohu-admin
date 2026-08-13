@@ -1,10 +1,10 @@
 """build_data_scope_context — 把用户的角色 data_scope 转为 DataScopeContext
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §6.2 / §14 v1.5+。
+构造用于 AI 工具目标校验的数据权限子查询。
 
-为什么改成 subquery（v1.5+）：
+为什么使用 subquery：
   旧实现物化 set[int] 做 O(1) 集合包含检查，但单部门 5000+ 用户场景 OOM。
-  v1.5+ 改成携带 SQL Select 子查询，ensure_targets_in_scope 走 EXISTS 验证目标。
+  当前携带 SQL Select 子查询，由 ensure_targets_in_scope 使用 EXISTS 验证目标。
   AI tool 调用上下文里多一次 10ms SQL 查询可忽略，但 OOM 风险根除。
 
   filters 仍走 ColumnElement 路径（stats tool / 业务函数拼 WHERE 用），保持透明。
@@ -82,7 +82,7 @@ async def build_data_scope_context(
         dept_ids = set(user_dept_ids)
 
     # user 维度子查询：SELF = 仅自己；其它 = user_depts 反查 + 自己
-    # 用 union 把"自己"和"部门关联的用户"合并（spec §6.2：当前用户始终可见）
+    # 合并当前用户和部门关联用户；当前用户始终可见。
     # label("user_id") 保留列名，下游 targets.py::ensure_targets_in_scope 通过
     # subq.c.user_id 引用（union 后默认列名可能丢失）
     own_user_stmt = select(User.user_id.label("user_id")).where(

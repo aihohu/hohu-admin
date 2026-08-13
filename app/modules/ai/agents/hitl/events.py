@@ -1,4 +1,4 @@
-"""SSE 5 类事件 — spec §8.1
+"""AI 工具调用使用的 SSE 事件模型。
 
 后端 → 前端 SSE 帧协议（前端 src/typings/api/ai.d.ts 对应）：
   - tool_call_started: tool 开始执行（autonomous / HITL 唤醒后都发）
@@ -11,7 +11,7 @@ text-delta / reasoning-delta 走 Vercel UI Protocol v4（`data: {"type":"text-de
 后端不发。前端按 `\n\n` 切 SSE 帧，每帧解析 `data: (.*)`。
 
 **字段命名（camelCase 决策）**：SSE 自定义事件 JSON 顶层字段全部 camelCase
-（如 `toolCallId` / `durationMs`），与项目其他 API 响应命名一致（§6.1）。
+（如 `toolCallId` / `durationMs`），与项目其他 API 响应命名一致。
 唯一例外是 `args` 内部 — LLM schema 参数定义保持 snake_case（与 ToolFn 签名一致），
 不转 camelCase，避免 LLM 看到的 tool schema 与前端透传 args 形态对不上。
 """
@@ -28,13 +28,13 @@ if TYPE_CHECKING:
 class ToolCallStartedEvent:
     """tool 开始执行事件
 
-    risk 来自 §5.3 风险分级（low / high / destructive），前端用来渲染色条 +
+    risk 为 low / high / destructive，前端用来渲染色条、
     chip 标签 + 状态文本。
 
-    trace_id 用于 §8.7 chip 跳转：readonly tool 成功后前端用 trace_id 调
+    trace_id 用于结果 chip 跳转：readonly tool 成功后前端用 trace_id 调
     /ai/query-cache/<trace_id> 拿到 filters 回放到业务模块页。
 
-    chip_target（v1.6+ SR-13）: readonly tool 的 chip 跳转路径（声明式，
+    chip_target: readonly tool 的声明式 chip 跳转路径，
     替代前端 CHIP_TARGETS map）。None 表示无 chip。
     """
 
@@ -57,7 +57,7 @@ class ToolCallResultEvent:
     affected_rows: 影响行数推断值（dry_run_count 优先；否则从 result 推断），
     None 表示无法推断，前端不展示「N 行」尾部。
 
-    ui（v1.6+ SR-13）: UI 层结果，前端按 ui.view_type 路由标准组件。
+    ui: UI 层结果，前端按 ui.view_type 路由标准组件。
     None（ok=False / 业务方未填 / executor fallback）→ 前端 fallback 到 plain_json。
     不进 LLM context（executor 内 strip）。
     """
@@ -76,7 +76,7 @@ class ToolCallResultEvent:
 
 @dataclass(frozen=True)
 class DryRunSummary:
-    """HITL 抽屉展示的影响范围（spec §8.1 confirmation_required.dry_run）"""
+    """HITL 确认抽屉展示的影响范围。"""
 
     summary: str
     affected_count: int
@@ -109,7 +109,7 @@ class ConfirmationRequiredEvent:
 
 @dataclass(frozen=True)
 class ConfirmationResumedEvent:
-    """SSE 续传重连事件（spec §2.2 v1.5+）
+    """SSE 续传重连事件。
 
     schema 与 ConfirmationRequiredEvent 兼容（前端可统一渲染），仅多 resumedAt
     字段用于"已重连"UI badge。前端收到此事件后：
@@ -153,7 +153,7 @@ class DoneEvent:
 
 @dataclass(frozen=True)
 class ClarificationRequiredEvent:
-    """spec §6.2 v4: clarification 无状态化 — 前端弹候选卡片，无 confirmationId.
+    """无状态澄清事件：前端展示候选卡片，不生成 confirmationId。
 
     与 ConfirmationRequiredEvent 区别：
       - ConfirmationRequiredEvent：HITL tool 确认（带 confirmationId + expiresAt + Redis）
@@ -183,7 +183,7 @@ AiStreamEvent = (
 def event_to_sse_data(event: AiStreamEvent) -> str:
     """把事件序列化为 SSE `data: {...}` 行的 payload 字符串
 
-    spec §8.1: 自定义事件 JSON 序列化后放 `data: ` 后，前端 JSON.parse 即得
+    自定义事件 JSON 序列化后放在 ``data:`` 后，前端解析即可得到
     camelCase keys 的对象。
 
     Args:

@@ -1,4 +1,4 @@
-"""spec §11 test_routing_audit: ai_routing_log 字段完整 + HMAC hash."""
+"""ai_routing_log 字段完整性和 HMAC hash 测试。"""
 
 import hashlib
 
@@ -11,7 +11,7 @@ from app.modules.ai.service.routing_log_service import routing_log_service
 
 @pytest.mark.asyncio
 async def test_log_contains_llm_decision(db_session):
-    """spec §13 决策 8: 路由成功 → ai_routing_log 记完整决策链."""
+    """路由成功时记录完整决策链。"""
     await routing_log_service.write_log(
         db_session,
         trace_id="tr_abc",
@@ -41,7 +41,7 @@ async def test_log_contains_llm_decision(db_session):
 
 @pytest.mark.asyncio
 async def test_hash_is_hmac_not_plain(db_session):
-    """spec §13 决策 17: input_message_hash 必须是 HMAC，不能是裸 SHA256."""
+    """input_message_hash 必须使用 HMAC，不能是裸 SHA256。"""
     await routing_log_service.write_log(
         db_session,
         trace_id="tr_hmac",
@@ -71,7 +71,7 @@ async def test_hash_is_hmac_not_plain(db_session):
 
 @pytest.mark.asyncio
 async def test_all_request_types_logged(db_session):
-    """spec §13 决策 14: 所有 reason 都写日志（不只 llm_resolved）."""
+    """所有路由 reason 都必须写日志。"""
     reasons = [
         "llm_resolved",
         "clarification",
@@ -116,7 +116,7 @@ async def test_all_request_types_logged(db_session):
 
 
 def test_fanout_fields_nullable_by_default():
-    """spec §13 决策 22: parent_log_id / plan_step_index 默认 NULL."""
+    """parent_log_id 和 plan_step_index 默认 NULL。"""
     cols = AiRoutingLog.__table__.columns
     assert cols["parent_log_id"].nullable is True
     assert cols["plan_step_index"].nullable is True

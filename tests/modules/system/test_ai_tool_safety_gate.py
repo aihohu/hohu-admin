@@ -1,4 +1,4 @@
-"""Task 35: built-in effect metadata and AI import file boundary tests."""
+"""Built-in effect metadata and AI import file boundary tests."""
 
 import io
 import zipfile

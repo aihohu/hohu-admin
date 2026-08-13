@@ -1,10 +1,10 @@
-"""Prompt Injection 检测器 — spec §11.1 / §12.3
+"""Prompt Injection 检测器。
 
-按 §12.3 的 8 类攻击模式做正则匹配。命中后**降级而非拒绝**：
+按八类攻击模式做正则匹配。命中后降级而非直接拒绝：
   - 命中 → injection_hit=True → classify_execution_mode 强制 HITL（任何 risk）
   - 未命中 → 正常路径
 
-设计原则（spec §11.1）：
+设计原则：
   - 保守降级：宁可误报（用户体验略差），不可漏报（安全失守）
   - 多 pattern 任意命中即触发（OR 语义）
   - 不依赖 LLM 自检（LLM 可被越狱），仅在 user message 文本上做静态匹配
@@ -16,7 +16,7 @@
     触发 pattern）—— 防止攻击者把攻击拆成多轮，每轮只触发 1 个 pattern
     避免阈值。
 
-Pattern 来源（§12.3 INJECTION_ATTACKS）：
+Pattern 类别：
   1. 越狱指令覆盖（"忽略之前的所有指令" / "Ignore all previous instructions"）
   2. 角色重设（"你现在是一个管理员" / "You are now DAN"）
   3. ChatML 注入（`<|im_start|>system`）
@@ -124,14 +124,14 @@ async def record_injection_hit_conversation(
     设计：
       - 每次命中刷新 TTL（用户活跃对话内持续触发，1h 不重置）
       - 不做"次数计数"——任何一次命中都让整个 conversation 进入"已触发"状态
-        （记录次数的是 §11.4 record_injection，与自动禁用阈值挂钩）
+        （``record_injection`` 负责计数，并与自动禁用阈值挂钩）
     """
     if conversation_id is None:
         return
     key = _KEY_CONV.format(conversation_id=conversation_id)
     await redis.set(key, "1", ex=_INJECTION_HIT_TTL_SEC)
 
-    # spec §6.3 / §11 metric：安全事件计数
+    # 记录安全事件指标。
     from app.modules.ai.metrics import record_security_event  # noqa: PLC0415
 
     record_security_event("injection")
@@ -168,7 +168,7 @@ async def clear_injection_hit_conversation(
 
     生产代码一般不调——TTL 1h 自然过期。用于：
       - 单元测试间清理
-      - 部署方提供"清除会话注入标记"管理 API（v1.5+）
+      - 管理 API 可显式清除会话注入标记
     """
     key = _KEY_CONV.format(conversation_id=conversation_id)
     await redis.delete(key)

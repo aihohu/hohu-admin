@@ -333,7 +333,7 @@ class VersionService:
         record = result.scalar_one_or_none()
         if record is None:
             # 简化处理：版本不存在时报"应用不存在"。
-            # Phase 1 接口未细分版本不存在错误，沿用通用 NOT_FOUND。
+            # 当前接口未细分版本不存在错误，沿用通用 NOT_FOUND。
             raise AppNotFoundException(app_id=app_id)
         return record
 

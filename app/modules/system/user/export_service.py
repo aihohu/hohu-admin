@@ -1,19 +1,9 @@
-"""ExportService 导出（v2.2 P0/P1）。
+"""用户导出服务。
 
-Task 11：export_users_to_excel（spec §3.6 line 2099-2111 + §2.31 P1-5 line 1436-1614）
-
-职责：
-- 强制建 UserExportTask（即使同步路径也建，spec §2.31 P1-5 反例 1）
-- filter_snapshot 冻结当时的 filter + accessible_dept_ids + filter_evaluated_at
-  （spec §2.31 line 1516-1520，防事后部门结构变化导致审计反查漂移）
-- reason 必填（spec §2.30 v2.2 P1-3，与 import batch.reason 对称）
-- EXPORT_ALLOWED_FIELDS 白名单（hashed_password 永不导出，spec §2.9）
-- 行数 > USER_EXPORT_ASYNC_THRESHOLD → AI_EXPORT_ASYNC_REQUIRED（spec §2.6）
-- 30 天 TTL 文件存储（spec §2.31 line 1452 / 1554）
-- 失败也建 task（status=FAILED + error_code + error_message，spec §2.31 line 1567-1572）
-
-无 batch_log（导出无 chunk 概念，spec §2.31 line 1456-1458）。
-超出同步上限时稳定拒绝并要求缩窄筛选；当前不会自动入队。
+每次导出都会创建任务记录，并冻结筛选条件、可访问部门和筛选时间，避免后续
+组织结构变化导致审计结果漂移。导出原因必填，字段由白名单控制，文件保留
+30 天；失败任务也会持久化错误信息。导出没有分块处理，因此不生成批次日志。
+超过同步行数上限时要求调用方缩小筛选范围，当前不自动入队。
 """
 
 import io
@@ -46,9 +36,9 @@ from app.modules.system.user.template_service import _build_dept_full_path
 from app.utils.data_scope import get_user_data_scope_filters
 from app.utils.pagination import paginate
 
-#: Excel 列顺序（spec §2.9 line 266 EXPORT_ALLOWED_FIELDS 顺序）。
+#: Excel 列顺序，与 ``EXPORT_ALLOWED_FIELDS`` 保持一致。
 #: 字段名 ↔ 中文表头，第 1 项是 ORM 属性 / 派生属性名。
-#: v2.3 §2.9.1：dept_id 表头改「部门」（内容已是 full_path 而非数字 ID）。
+#: ``dept_id`` 列展示部门完整路径，而不是数字 ID。
 _EXPORT_COLUMN_ORDER: tuple[tuple[str, str], ...] = (
     ("user_name", "账号"),
     ("nickname", "昵称"),
@@ -60,43 +50,41 @@ _EXPORT_COLUMN_ORDER: tuple[tuple[str, str], ...] = (
     ("status", "状态"),
     ("create_time", "创建时间"),
 )
-# 防御性断言：列顺序必须与 EXPORT_ALLOWED_FIELDS 集合一致，新增敏感字段时
-# 这里会立刻报错（spec §2.9 line 268「未列入的字段不进 Excel；新增敏感字段
-# 时本白名单不变（默认安全）」）。
+# 防御性断言：列顺序必须与白名单一致，确保未显式允许的字段不会进入 Excel。
 assert {col for col, _ in _EXPORT_COLUMN_ORDER} == EXPORT_ALLOWED_FIELDS, (
     "EXPORT_COLUMN_ORDER 必须与 EXPORT_ALLOWED_FIELDS 一致"
 )
 
-#: spec §2.31 line 1452 / 1554：30 天 TTL
+#: 导出文件保留 30 天。
 _EXPORT_FILE_TTL_SECONDS = 30 * 86400
 
-#: spec §2.31 line 1552：namespace
+#: 导出文件的存储命名空间。
 _EXPORT_FILE_NAMESPACE = "user-export"
 
-#: spec §2.31 line 1551：mime
+#: Excel 文件的 MIME 类型。
 _EXPORT_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
-#: v2.3 §2.9.1：status 翻译表（DB 真实取值 1=启用 / 2=禁用）
+#: 状态显示文本（数据库取值 1=启用、2=禁用）。
 _STATUS_LABELS: dict[str, str] = {"1": "启用", "2": "禁用"}
 
-#: v2.3 §2.9.1：user_gender 翻译表
+#: 用户性别显示文本。
 _GENDER_LABELS: dict[str, str] = {"0": "未知", "1": "男", "2": "女"}
 
 
 def _validate_reason(reason: str) -> str:
-    """reason 入口校验（spec §2.30 v2.2 P1-3，与 import_service._validate_reason 对称）。
+    """校验导出原因，与导入原因保持相同约束。
 
     service 层 defense-in-depth：AI tool 直接调 export_service 时也能拦住。
     """
     if reason is None:
         raise BusinessRuleException(
-            "reason 必填（spec §2.30）",
+            "reason 必填",
             error_code="AI_EXPORT_REASON_REQUIRED",
         )
     stripped = reason.strip()
     if not stripped or len(stripped) > 256:
         raise BusinessRuleException(
-            "reason 必填且长度 1-256 字符（spec §2.30）",
+            "reason 必填且长度 1-256 字符",
             error_code="AI_EXPORT_REASON_REQUIRED",
         )
     return stripped
@@ -107,7 +95,7 @@ async def _query_users_with_data_scope(
     filter_: UserExportFilter,
     current_user: User,
 ) -> list[User]:
-    """按 filter + data_scope 查询用户列表（spec §2.31 line 1545）。
+    """按筛选条件和数据权限查询用户列表。
 
     - filter 字段：user_name / nickname / user_email / user_phone / status / dept_id
     - data_scope 自动应用：HR 只能导他可见的部门用户
@@ -142,15 +130,15 @@ async def _query_users_with_data_scope(
 
 
 def _build_excel(rows: list[User], dept_lookup: dict[int, Dept]) -> bytes:
-    """按 EXPORT_ALLOWED_FIELDS 白名单构造 Excel bytes（spec §2.9 + §3.8 + v2.3 §2.9.1）。
+    """按 ``EXPORT_ALLOWED_FIELDS`` 白名单构造 Excel 字节流。
 
     - 列顺序固定（_EXPORT_COLUMN_ORDER）
-    - hashed_password 永不导出（spec §2.9 反例 1）
-    - role_codes：逗号分隔 role_code（仅启用角色，§2.18 已支持 code 输入 round-trip）
-    - dept_id：v2.3 §2.9.1 改为 full_path（总公司/研发中心/前端部），复用
+    - ``hashed_password`` 永不导出
+    - ``role_codes``：逗号分隔启用角色的 ``role_code``
+    - ``dept_id``：输出完整路径（总公司/研发中心/前端部），复用
       ``template_service._build_dept_full_path``；多部门场景取第一个 dept
-    - status：v2.3 §2.9.1 翻译 ``"1"→"启用"`` / ``"2"→"禁用"``（_STATUS_LABELS）
-    - user_gender：v2.3 §2.9.1 翻译 ``"0"→"未知"`` / ``"1"→"男"`` / ``"2"→"女"``（_GENDER_LABELS）
+    - ``status``：翻译为启用或禁用
+    - ``user_gender``：翻译为未知、男或女
     - create_time：YYYY-MM-DD HH:MM:SS 格式（防 Excel 时区漂移）
     """
     wb = Workbook()
@@ -164,7 +152,7 @@ def _build_excel(rows: list[User], dept_lookup: dict[int, Dept]) -> bytes:
         role_codes = ",".join(
             r.role_code for r in (user.roles or []) if r.status == "1"
         )
-        # v2.3 §2.9.1：dept 列输出 full_path（不是数字 ID）
+        # 部门列输出完整路径，而不是数字 ID。
         dept_display = ""
         if user.depts:
             first_dept = user.depts[0]
@@ -177,7 +165,7 @@ def _build_excel(rows: list[User], dept_lookup: dict[int, Dept]) -> bytes:
             elif field == "dept_id":
                 row_values.append(dept_display)
             elif field == "status":
-                # v2.3 §2.9.1：翻译为中文标签；未识别值兜底原值（防御）
+                # 翻译为中文标签；未识别值保留原值。
                 row_values.append(_STATUS_LABELS.get(user.status, user.status or ""))
             elif field == "user_gender":
                 row_values.append(
@@ -202,7 +190,7 @@ def _build_excel(rows: list[User], dept_lookup: dict[int, Dept]) -> bytes:
 async def _build_dept_lookup_for_rows(
     db: AsyncSession, rows: list[User]
 ) -> dict[int, Dept]:
-    """预查 dept_lookup（v2.3 §2.9.1：dept full_path 翻译用）。
+    """预查部门映射，用于生成部门完整路径。
 
     - 收集所有用户的第一个 dept_id（多部门场景取第一个，与 _build_excel 对齐）
     - 解析每个 dept 的 ancestors → 收集祖先 dept_id
@@ -262,22 +250,22 @@ async def export_users_to_excel(
     reason: str,
     file_storage: FileStorage | None = None,
 ) -> tuple[bytes, int, str]:
-    """导出用户到 Excel（spec §3.6 line 2099-2111 + §2.31 P1-5）。
+    """导出用户到 Excel。
 
-    流程（v2.2 P1-5 全套）：
-    1. reason defense-in-depth 校验（spec §2.30）
+    流程：
+    1. 对导出原因执行服务层兜底校验
     2. 计算 accessible_dept_ids（filter_snapshot 冻结用）
     3. 建 UserExportTask（CREATED）+ flush 拿 export_id
     4. UPDATE task → RUNNING + started_at
-    5. 查询用户（filter + data_scope，spec §2.31 line 1545）
-    6. 行数 > USER_EXPORT_ASYNC_THRESHOLD → AI_EXPORT_ASYNC_REQUIRED（spec §2.6）
+    5. 按筛选条件和数据权限查询用户
+    6. 超过同步行数上限时返回 ``AI_EXPORT_ASYNC_REQUIRED``
     7. 构造 Excel（EXPORT_ALLOWED_FIELDS 白名单）
     8. 写文件（FileStorage.save，30 天 TTL）
     9. UPDATE task → SUCCESS（row_count / file_storage_key / file_size_bytes /
        finished_at / duration_ms）
     10. 返回 (xlsx_bytes, row_count, export_id)
 
-    失败：UPDATE task → FAILED + error_code + error_message（spec §2.31 line 1567-1572）
+    失败时将任务更新为 ``FAILED``，并记录错误码和错误信息。
 
     Raises:
         BusinessRuleException:
@@ -318,7 +306,7 @@ async def export_users_to_excel(
         # 4. 查询用户
         rows = await _query_users_with_data_scope(db, filter_, current_user)
 
-        # 5. 行数限制（spec §2.6）
+        # 5. 同步导出行数限制。
         if len(rows) > USER_EXPORT_ASYNC_THRESHOLD:
             raise UnprocessableEntityException(
                 f"导出行数 {len(rows)} 超过同步阈值 {USER_EXPORT_ASYNC_THRESHOLD}"
@@ -326,7 +314,7 @@ async def export_users_to_excel(
                 error_code="AI_EXPORT_ASYNC_REQUIRED",
             )
 
-        # 6. 构造 Excel（v2.3 §2.9.1：dept_lookup 预查，full_path 翻译用）
+        # 6. 预查部门映射并构造 Excel。
         dept_lookup = await _build_dept_lookup_for_rows(db, rows)
         xlsx_bytes = _build_excel(rows, dept_lookup)
 
@@ -352,7 +340,7 @@ async def export_users_to_excel(
         return xlsx_bytes, len(rows), task.export_id
 
     except Exception as e:
-        # spec §2.31 line 1567-1572：失败也写 task
+        # 失败任务同样持久化，便于审计和排障。
         finished_at = datetime.now()
         task.status = ExportTaskStatus.FAILED
         task.error_code = getattr(e, "error_code", "") or e.__class__.__name__
@@ -446,7 +434,7 @@ async def list_export_tasks(
 
 
 async def cleanup_expired_export_tasks(db: AsyncSession) -> int:
-    """清理 30 天前 ExportTask + 关联 export 文件（spec §2.31 v2.2 P1-5）。
+    """清理 30 天前的导出任务及关联文件。
 
     每日 02:30 cron 入口（``app.tasks.user_cleanup_tasks.clean_expired_export_tasks``）。
     本函数不 commit。
@@ -454,7 +442,7 @@ async def cleanup_expired_export_tasks(db: AsyncSession) -> int:
     Returns:
         删除的 task 行数
 
-    设计要点（决策 22.3）：
+    设计要点：
     - 不分 status 全删（CREATED 30 天前说明异步任务挂了；RUNNING 30 天前是 zombie；
       SUCCESS / FAILED 是终态正常清理）。ExportTask 无状态机 CAS 需求，直接删。
     - file_storage_key 缺失（FAILED task 没生成文件）不抛错
@@ -489,7 +477,7 @@ async def download_export_file(
     allow_cross_owner: bool = False,
     file_storage: FileStorage | None = None,
 ) -> tuple[bytes, str]:
-    """按 export_id 下载已导出文件（Task 33，spec §2.31 line 1626 落地）。
+    """按 ``export_id`` 下载已导出的文件。
 
     AI 对话内闭环关键路径：AI tool 返回 detail_card + downloadUrl，前端
     DetailCardView 渲染下载按钮 → 点击触发本端点 → 返回 xlsx bytes。
@@ -502,7 +490,7 @@ async def download_export_file(
         file_storage: 可选注入（测试用 MockFileStorage；生产用 get_file_storage()）
 
     Returns:
-        ``(xlsx_bytes, filename)``；filename 沿用决策 30.6 规范
+        ``(xlsx_bytes, filename)``；文件名格式为
         ``hohu_users_YYYYMMDD_HHmmss.xlsx``（从 task.created_at 派生，
         与同步导出一致，不重新生成当前时间）。
 
@@ -549,6 +537,6 @@ async def download_export_file(
             error_code="AI_EXPORT_FILE_EXPIRED",
         ) from e
 
-    # 决策 30.6 同款：hohu_users_YYYYMMDD_HHmmss.xlsx（从 created_at 派生）
+    # 从任务创建时间派生稳定文件名，避免下载时间改变文件名。
     filename = f"hohu_users_{task.created_at.strftime('%Y%m%d_%H%M%S')}.xlsx"
     return xlsx_bytes, filename

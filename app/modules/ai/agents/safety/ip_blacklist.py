@@ -1,4 +1,4 @@
-"""IP 级自动拉黑 — spec §11.4
+"""IP 级自动拉黑。
 
 单 IP 1 小时内 AI 鉴权拒绝 ≥ threshold → 拉黑该 IP（复用现有 IP 黑名单）。
 NAT 网络豁免：白名单（system_config.ai:ip_allowlist）中的 IP 命中阈值时只告警不拉黑
@@ -138,7 +138,7 @@ async def record_perm_denied(
         },
     )
 
-    # spec §6.3 / §11.4 metric：IP 拉黑事件计数
+    # 记录 IP 拉黑事件指标。
     from app.modules.ai.metrics import record_security_event  # noqa: PLC0415
 
     record_security_event("ip_blacklist")

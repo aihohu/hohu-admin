@@ -1,6 +1,6 @@
 """system/ai_tools.py user.list / user.lookup / user.update 集成测试
 
-按 spec docs/specs/2026-08-01-user-import-export-design.md §10 Task 23-25。
+覆盖用户列表、查找和更新 AI 工具。
 
 db_session fixture 用 outer-transaction 回滚模式，所有写入不真正落库。
 测试覆盖：
@@ -102,7 +102,7 @@ def _make_ctx(
     )
 
 
-# ============ user.list（Task 23） ============
+# ============ user.list ============
 
 
 class TestUserList:
@@ -166,7 +166,7 @@ class TestUserList:
         assert result.data["limit"] == 20  # _LIST_DEFAULT_LIMIT
 
 
-# ============ user.lookup（Task 24） ============
+# ============ user.lookup ============
 
 
 class TestUserLookup:
@@ -256,7 +256,7 @@ class TestUserLookup:
         assert exc_info.value.error_code == "AI_LOOKUP_NO_MATCH"
 
 
-# ============ user.update（Task 25） ============
+# ============ user.update ============
 
 
 class TestUserUpdate:

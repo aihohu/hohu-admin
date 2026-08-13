@@ -1,4 +1,4 @@
-"""spec v4 §5.1: LLM-only Supervisor 路由.
+"""LLM-only Supervisor 路由。
 
 候选集 = 当前用户有权限且已启用的 Agent（shared 永远在候选集，作 catch-all）.
 LLM 阶段：把候选 Agent 的 name / description 拼进 prompt，返回 agent_code JSON.
@@ -23,7 +23,7 @@ _ARROW_JSON_RE = re.compile(r"\{[^{}]*\}")
 
 @dataclass
 class RouteResult:
-    """路由结果（spec §5.1）.
+    """Supervisor 路由结果。
 
     三种状态互斥：
     - agent_code != None + reason='llm_resolved'：路由成功
@@ -41,7 +41,7 @@ class RouteResult:
 
 
 def build_router_prompt(candidates: list["AiAgent"], message: str) -> str:
-    """spec §5.1: 拼候选 Agent name + description + user message → LLM prompt."""
+    """将候选 Agent 名称、描述和用户消息拼成 LLM prompt。"""
     agent_lines = []
     for a in candidates:
         agent_lines.append(f"- {a.code}（{a.name}）: {a.description}")
@@ -55,7 +55,7 @@ def build_router_prompt(candidates: list["AiAgent"], message: str) -> str:
 
 
 def parse_agent_code_robustly(raw: str, candidates: list["AiAgent"]) -> str | None:
-    """spec §5.1: 鲁棒解析 LLM 返回.
+    """容错解析 LLM 返回。
 
     顺序：
     1. 整段 json.loads
@@ -91,7 +91,7 @@ def parse_agent_code_robustly(raw: str, candidates: list["AiAgent"]) -> str | No
 
 
 async def call_llm_text(model, prompt: str) -> str:
-    """spec §5.1: 用 PydanticAI Model 跑一次纯文本 completion.
+    """使用 PydanticAI Model 执行一次纯文本 completion。
 
     model 是 provider_service.resolve_model 返回的 PydanticAI Model 实例.
     API（PydanticAI 1.89，参考 app/modules/ai/api/provider.py:242-245）：
@@ -110,7 +110,7 @@ async def call_llm_text(model, prompt: str) -> str:
 
 
 class AgentRouter:
-    """spec §5.1 LLM-only 路由器."""
+    """LLM-only 路由器。"""
 
     async def route(
         self,

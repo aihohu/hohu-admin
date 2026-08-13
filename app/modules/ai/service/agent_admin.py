@@ -1,9 +1,9 @@
-"""Agent admin service (spec §6.1).
+"""Agent admin service。
 
 注意：Service 层不 commit，由 API 层 `await db.commit()`。
 agent_id 序列化由 AgentAdminListItem/DetailItem 上的 @field_serializer 处理
 （返回 str(v)），Service 直接用 model_validate(agent) 走 from_attributes=True，
-无需手动构造 dict 或 str() 包裹（Task 1 c5748b2 已统一约定）。
+无需手动构造 dict 或用 str() 包裹 ID。
 """
 
 import re
@@ -75,7 +75,7 @@ class AgentAdminService:
                     error_code="AI_AGENT_MODEL_PREFERENCE_INVALID",
                 )
 
-        # 显式 daily_quota_per_user 取值校验（决策 §6.1 line 234）—— Pydantic
+        # 显式校验 daily_quota_per_user 取值；Pydantic
         # field_validator 会返 422 + 无 errorCode，无法满足「400 + AI_AGENT_QUOTA_INVALID」
         # 契约，故移到 Service 层抛 BusinessRuleException.
         if "daily_quota_per_user" in data and data["daily_quota_per_user"] is not None:

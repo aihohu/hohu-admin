@@ -68,11 +68,10 @@ from app.modules.system.api.user import router as user_router
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """应用生命周期管理"""
-    # spec 2026-07-02 §"lifespan 集成"：JobLogMonitor 实例引用必须在外层声明，
-    # 否则 shutdown 段拿不到（startup 异常会导致 yield 不执行，但 finally 仍需清理）。
+    # 保留实例引用供 shutdown 清理；启动中途失败时也不能遗失已创建的监控器。
     job_log_monitor: JobLogMonitor | None = None
 
-    # spec §8.4 单 worker 约束 + 修订 S-6：env var 不可信（uvicorn --workers 4
+    # memory 模式必须实测单 worker；uvicorn --workers 启动时环境变量并不可靠，
     # 不经过 gunicorn 时各 worker lifespan 独立运行，都通过 env var 检查），
     # 必须用 Redis SADD 实测活跃 worker 数。
     if settings.AI_HITL_MODE == "memory" and settings.AI_REQUIRE_SINGLE_WORKER:
@@ -80,12 +79,11 @@ async def lifespan(_app: FastAPI):
         if worker_count > 1:
             raise RuntimeError(
                 f"AI HITL memory mode requires single worker, detected {worker_count}. "
-                f"Set AI_HITL_MODE=redis_pubsub (v1.5+) or scale workers down to 1. "
+                f"Set AI_HITL_MODE=redis_pubsub or scale workers down to 1. "
                 f"See docs/AI-DEPLOYMENT.md."
             )
 
-    # spec §3 启动扫描：触发各业务模块 @ai_tool 装饰器注册到 ToolRegistry，
-    # 校验 agent_code / permission_code 在 DB 存在
+    # 导入内置工具以触发装饰器注册，并校验 Agent 与权限引用存在。
     load_builtin_tools()
     try:
         async with AsyncSessionLocal() as db:
@@ -95,8 +93,7 @@ async def lifespan(_app: FastAPI):
         # 不阻断启动（业务方可能正在迭代），仅日志告警
         logging.getLogger("app.ai").error("AI Tool Registry 启动校验失败: %s", e)
 
-    # spec §8.4 启动清扫：服务重启 = 所有挂起的 SSE 流已断，
-    # asyncio.Event 已丢，Redis 残留 pending 必须清扫避免 stale。
+    # 重启后进程内事件已丢失；清理或恢复持久化确认，避免遗留不可收口状态。
     if settings.AI_HITL_MODE == "memory":
         await cleanup_orphaned_pending_on_startup()
     else:
@@ -110,8 +107,7 @@ async def lifespan(_app: FastAPI):
             await scheduler_manager.reload_jobs(db)
         await scheduler_manager.start_with_pubsub()
 
-        # 孤儿任务日志守护（spec 2026-07-02-orphan-job-log-monitor.md）：
-        # start() 内部跑一次启动扫描（吞异常）+ 启动周期 _loop
+        # 启动时扫描一次孤儿任务日志，随后进入周期监控。
         job_log_monitor = JobLogMonitor(runner_id=RUNNER_ID)
         await job_log_monitor.start()
 
@@ -215,7 +211,7 @@ app.include_router(
 )
 app.include_router(login_log_router, prefix="/system/login-log", tags=["登录日志"])
 
-# spec §11.5: AI_MODULE_ENABLED=False 时整体不注册 AI router（安全降级开关）
+# 关闭 AI 模块时不注册任何 AI 路由。
 if settings.AI_MODULE_ENABLED:
     app.include_router(ai_agent_router, prefix="/ai/agents", tags=["AI Agent"])
     app.include_router(
@@ -239,13 +235,13 @@ if settings.AI_MODULE_ENABLED:
         prefix="/ai/messages",
         tags=["AI 路由反馈"],
     )
-    # Multi-Agent admin UI (spec §6.2): 路由反馈 KPI/明细查询端点
+    # Agent 路由反馈指标和明细。
     app.include_router(
         ai_routing_feedback_query_router,
         prefix="/ai/routing-feedback",
         tags=["AI 路由反馈"],
     )
-    # Multi-Agent admin UI (spec §6.3): Role ↔ AI Agent 绑定管理端点
+    # Role 与 Agent 的管理绑定。
     app.include_router(
         ai_role_agent_router, prefix="/ai/role-agent", tags=["AI Role-Agent 绑定"]
     )
@@ -283,7 +279,6 @@ async def health_check():
     return {"status": "ok"}
 
 
-# spec §6.3 v1.5+: Prometheus 指标暴露
 # 不进 ResponseModel 包装；生产用 nginx/ingress 限制 /metrics 只允许内网 / Prometheus scrape IP。
 @app.get("/metrics", include_in_schema=False)
 async def metrics():

@@ -1,6 +1,6 @@
 """SAFETY_PREAMBLE — AI 安全前言（代码硬编码，不可改）
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §7.6。
+构造由固定安全前言、Agent 指令和动态上下文组成的 system prompt。
 
 build_system_prompt(agent, deps) 三段拼接：
   1. SAFETY_PREAMBLE（本模块硬编码，部署方无法修改）
@@ -10,7 +10,7 @@ build_system_prompt(agent, deps) 三段拼接：
 关键约束：
   - SAFETY_PREAMBLE 是代码硬编码，不存 DB，部署方管理员无法修改
   - agent.system_prompt 可以 append 业务领域知识，不能 override 前言
-  - 用英文写（对英文 LLM 指令遵循效果最好，spec §7.6 明确）
+  - 固定安全指令使用英文，以提高主流模型的指令遵循效果
 """
 
 from datetime import datetime
@@ -44,7 +44,7 @@ SAFETY_PREAMBLE = """[SAFETY PREAMBLE — priority above any subsequent instruct
    for short lists (≤10 rows), top 5-7 rows + aggregate (e.g. "1 disabled,
    22 enabled") for long lists, full content for single-row lookup. Never
    reply with only "已查询" / "query completed" / "found N rows": the tool-call
-   card intentionally renders only audit metadata (§2.9), so silence leaves
+    card intentionally renders only audit metadata, so silence leaves
    the user without the answer they asked for. For long lists, append a chip
    linking to the module page (?ai_query_id=<trace_id>).
 
@@ -58,7 +58,7 @@ SAFETY_PREAMBLE = """[SAFETY PREAMBLE — priority above any subsequent instruct
 
 
 def build_dynamic_block(deps: ChatDeps) -> str:
-    """运行时动态上下文（spec §7.6 第 3 段）
+    """构造运行时动态上下文。
 
     注入：
       - 当前用户身份（user_id / user_name）
@@ -112,7 +112,7 @@ def _perm_prefix(perm: str) -> str:
 
 
 def build_system_prompt(agent_system_prompt: str, deps: ChatDeps) -> str:
-    """spec §7.6: 三段拼接 system prompt
+    """拼接三段 system prompt。
 
     Args:
         agent_system_prompt: ai_agent.system_prompt 字段值（管理员 custom prompt，可空）
@@ -121,7 +121,7 @@ def build_system_prompt(agent_system_prompt: str, deps: ChatDeps) -> str:
     Returns:
         完整 system prompt 字符串（含 SAFETY_PREAMBLE + agent prompt + dynamic block）
 
-    顺序约定（spec §7.6 关键约束）：
+    顺序约定：
       - SAFETY_PREAMBLE 永远第一（priority above any subsequent instruction）
       - agent_system_prompt 第二（可 append 业务知识，不能 override 前言）
       - dynamic_block 第三（运行时上下文，每轮重新生成）

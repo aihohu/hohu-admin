@@ -1,6 +1,4 @@
-"""ChatDeps / AiToolContext / DataScopeContext — AI 模块上下文对象
-
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §4.6。
+"""ChatDeps / AiToolContext / DataScopeContext — AI 模块上下文对象。
 
 两套上下文分工：
   ChatDeps       — /ai/chat SSE 主流上下文（PydanticAI Agent deps_type）
@@ -8,8 +6,8 @@
   AiToolContext  — Gateway 内 tool 执行子流上下文（独立 session）
                    鉴权 / 调 service / 写 ai_operation_log
 
-build_tool_context 把 ChatDeps 转换成 AiToolContext（替换 db，丢弃 agent，
-注入 tool_meta），由 Phase 1.2b 的 PydanticAI 包装层调用。
+build_tool_context 把 ChatDeps 转换成 AiToolContext：替换数据库会话、丢弃 Agent，
+并注入工具元数据。
 """
 
 from collections.abc import Awaitable, Callable
@@ -30,7 +28,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class DataScopeContext:
-    """用户数据权限视图（spec §6.2 / §14 v1.5+ subquery 优化）
+    """用户数据权限视图。
 
     accessible_dept_ids：
         None = 全部可见（超管 / data_scope=DATA_SCOPE_ALL），ensure_targets_in_scope 跳过检查
@@ -39,10 +37,10 @@ class DataScopeContext:
     accessible_user_scope：
         None = 全部可见（同上）
         非 None = SQL Select 子查询，返可见 user_id 集合。ensure_targets_in_scope 走
-        SQL EXISTS 路径验证目标是否在可见范围内（避免物化大 set OOM，spec §14）。
+        SQL EXISTS 路径验证目标是否在可见范围内，避免物化大集合导致内存压力。
 
     filters：
-        SQLAlchemy ColumnElement 列表，给 stats tool 等聚合函数直接拼到 WHERE 子句用（§5.5）。
+        SQLAlchemy ColumnElement 列表，供聚合工具直接拼接 WHERE 子句。
         默认空 list。User 模型 filter 由 build_data_scope_context 填（最常见 stats 目标），
         其它模型 stats tool 在函数内自行调 get_data_scope_filters(db, user, OtherModel)。
     """
@@ -54,11 +52,7 @@ class DataScopeContext:
 
 @dataclass
 class ChatDeps:
-    """PydanticAI Agent 的 deps_type，绑定到 /ai/chat 端点
-
-    spec §4.6 / §17.2：从 core/config.py 迁移到 core/context.py 并扩展。
-    旧 ChatDeps（user_id + db 两字段）在 1.5 chat_agent 重写时切换到本类。
-    """
+    """绑定到 /ai/chat 端点的 PydanticAI Agent 依赖。"""
 
     user: User
     perms: set[str]
@@ -81,28 +75,28 @@ class ChatDeps:
     """服务端 tenant resolver 注入的可信租户；禁止从 Chat body/tool args 读取。"""
 
     conversation_id: int | None = None
-    """当前会话 ID（spec §4.5 / §9.3 关联 ai_conversation + ai_operation_log 用）。
+    """当前会话 ID，用于关联会话和工具操作日志。
     None 表示新建会话首条消息（attach_trace_to_conversation 时仍写）。
-    Phase 3.2 execute_tool 写 ai_operation_log.conversation_id 用此字段。"""
+    execute_tool 写 ai_operation_log.conversation_id 时使用此字段。"""
 
     signal_event: Callable[[AiStreamEvent], Awaitable[None]] | None = None
-    """SSE 自定义事件回调（spec §8.1）。
+    """SSE 自定义事件回调。
     chat.py 创建 asyncio.Queue，把 queue.put 注入此字段；
     execute_tool emit tool_call_started / tool_call_result / confirmation_required 时调。
     None 表示无 SSE 环境（如直接调 execute_tool 的单元测试），事件被静默丢弃。"""
 
     injection_hit: bool = False
-    """§11.1 prompt injection 检测命中标记。
+    """prompt injection 检测命中标记。
     chat.py 入口对当前 user message 跑 injection_detector，命中则 True。
     execute_tool 据此调 classify_execution_mode(injection_hit=True) → 强制 HITL
-    （降级而非拒绝，§11.1）。"""
+    命中后强制人工确认而不是直接拒绝。"""
 
     client_ip: str | None = None
-    """§11.4 客户端 IP（从 FastAPI request.client.host 注入）。
+    """从 FastAPI request.client.host 注入的客户端 IP。
     用于鉴权拒绝时的 IP 级自动拉黑计数；None 表示单元测试 / 旧路径。"""
 
     sticky_decision: "StickyDecision | None" = None
-    """spec §5.3: build_chat_deps 调一次 stickiness 后挂这里；chat.py 入口直接读，
+    """build_chat_deps 只计算一次粘滞路由决策，chat.py 入口直接复用，
     不再重复调用（避免双调 / 状态不一致）.
     None 表示走 build_chat_deps 旧路径（未传 conversation_id 时）."""
 
@@ -121,10 +115,10 @@ class ChatDeps:
 
 @dataclass
 class AiToolContext:
-    """Gateway 内 tool 执行的上下文，独立 session（spec §6.3）
+    """Gateway 内工具执行上下文，使用独立数据库会话。
 
     业务 tool 函数签名约定：async def fn(ctx: AiToolContext, **args)
-    不直接接触 PydanticAI 的 RunContext（拆包由装饰器包装层负责，Phase 1.2b）
+    不直接接触 PydanticAI 的 RunContext，拆包由装饰器包装层负责。
     """
 
     user: User
@@ -135,13 +129,13 @@ class AiToolContext:
     data_scope: DataScopeContext
     trace_id: str
     tool_meta: AiToolMeta
-    """聚合 tool 用（如 max_groups / allowed_filters，§5.5）"""
+    """工具运行时元数据，例如聚合分组上限和过滤白名单。"""
 
     tenant_id: int = 0
     """继承自 ChatDeps 的可信租户，用于 file/resource ACL。"""
 
     secrets: dict[str, str] = field(default_factory=dict)
-    """sensitive_input 注入点（MVP 留空，v1.5+ 扩展，§7.2）"""
+    """由可信服务端注入、不会出现在普通工具参数中的敏感值。"""
 
 
 def build_tool_context(
@@ -149,14 +143,14 @@ def build_tool_context(
     tool_db: AsyncSession,
     tool_meta: AiToolMeta,
 ) -> AiToolContext:
-    """从 ChatDeps 构造 AiToolContext（spec §4.6）
+    """从 ChatDeps 构造 AiToolContext。
 
-    - 替换 db：tool 用独立 session（事务边界隔离，§6.3）
+    - 替换 db：工具使用独立会话隔离事务边界
     - 丢弃 agent：tool 不需要 Agent 信息（meta 已含）
     - 注入 tool_meta：聚合 tool 读取 max_groups / allowed_filters 等
     - 复用 user / perms / data_scope / trace_id
 
-    在 Phase 1.2b 的 PydanticAI 包装层调用，每次 tool 执行前调用一次。
+    每次工具执行前由 PydanticAI 包装层调用一次。
     """
     assert deps.trace_id, "ChatDeps.trace_id 必填非空，build 前由端点设置"
     return AiToolContext(
@@ -167,5 +161,5 @@ def build_tool_context(
         trace_id=deps.trace_id,
         tool_meta=tool_meta,
         tenant_id=deps.tenant_id,
-        secrets={},  # MVP 留空（§7.2）
+        secrets={},
     )

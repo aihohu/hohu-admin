@@ -1,4 +1,4 @@
-"""spec §7.3: seed_ai_agents.py 维护高区分度 description（路由准确率唯一关键变量）."""
+"""验证 seed_ai_agents.py 的 Agent 描述具有足够区分度。"""
 
 import importlib.util
 import re
@@ -17,7 +17,7 @@ def _load_agents_list():
 
 
 def test_each_agent_description_50_to_200_chars():
-    """spec §7.3: 每个 description 应在 50-200 字."""
+    """每个 description 长度应在 50-200 字。"""
     agents = _load_agents_list()
     for agent in agents:
         desc_len = len(agent["description"])
@@ -27,7 +27,7 @@ def test_each_agent_description_50_to_200_chars():
 
 
 def test_each_description_has_boundary_clause():
-    """spec §7.3: description 应含与相邻 Agent 的边界声明（shared 除外）."""
+    """除 shared 外，description 应包含与相邻 Agent 的边界声明。"""
     agents = _load_agents_list()
     for agent in agents:
         if agent["code"] == "shared":
@@ -38,7 +38,7 @@ def test_each_description_has_boundary_clause():
 
 
 def test_each_description_has_typical_query():
-    """spec §7.3: description 应含 ≥2 个典型 query 示例（用单引号包 'xxx'）.
+    """description 应包含至少两个用单引号标记的典型查询示例。
 
     原 `assert "query" in desc` 太弱（所有 description 写"典型 query："都通过，
     无防御能力）. 改为统计单引号 quoted example 数量，要求 ≥2.
@@ -49,12 +49,12 @@ def test_each_description_has_typical_query():
         examples = quoted_example_re.findall(agent["description"])
         assert len(examples) >= 2, (
             f"Agent {agent['code']} description 仅含 {len(examples)} 个 "
-            f"'xxx' quoted example，spec §7.3 要求 ≥2. 内容：{agent['description']!r}"
+            f"缺少至少两个引号查询示例：{agent['description']!r}"
         )
 
 
 def test_seed_contains_seven_agents():
-    """spec §1: 7 个内置 Agent（shared + 6 业务）."""
+    """种子包含 shared 和六个业务 Agent。"""
     agents = _load_agents_list()
     codes = {a["code"] for a in agents}
     expected = {

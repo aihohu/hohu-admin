@@ -1,4 +1,4 @@
-"""file.parse AI Tool 集成测试 — spec §16 v1.5+ SR-24
+"""file.parse AI Tool 集成测试。
 
 测试 tool 注册 / meta 字段 / 端到端调用（真实文件 + DB）。
 
@@ -100,7 +100,7 @@ def public_upload_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestFileParseRegistry:
-    """file.parse tool 注册到 Registry + meta 字段符合 spec §16.4"""
+    """file.parse 注册到 Registry 且元数据完整。"""
 
     def test_tool_registered(self) -> None:
         reg = ToolRegistry.get().find("file.parse")
@@ -113,7 +113,7 @@ class TestFileParseRegistry:
         assert reg.meta.agent == SHARED_AGENT_CODE
 
     def test_meta_required_perms_empty(self) -> None:
-        """shared agent + 空 perms：任何登录用户直通（spec §5.4 豁免）"""
+        """shared agent 且权限为空时允许任何登录用户调用。"""
         reg = ToolRegistry.get().find("file.parse")
         assert reg is not None
         assert reg.meta.required_perms == ()
@@ -124,7 +124,7 @@ class TestFileParseRegistry:
         assert reg.meta.risk == "low"
 
     def test_meta_default_enabled_false(self) -> None:
-        """SR-17: 默认禁用，部署方显式加 ai:enabled_tools 启用"""
+        """工具默认禁用，加入 ai:enabled_tools 后启用。"""
         reg = ToolRegistry.get().find("file.parse")
         assert reg is not None
         assert reg.meta.default_enabled is False
@@ -136,7 +136,7 @@ class TestFileParseRegistry:
         assert reg.meta.readonly is True
 
     def test_meta_result_view_plain_json(self) -> None:
-        """spec 2026-07-16 §2.4: file.parse 显式声明 result_view=plain_json"""
+        """file.parse 显式声明 result_view=plain_json。"""
         reg = ToolRegistry.get().find("file.parse")
         assert reg is not None
         assert reg.meta.result_view == "plain_json"

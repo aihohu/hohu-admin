@@ -1,4 +1,4 @@
-"""Keyword Blocklist Guardrail 单测 — spec §11.2
+"""Keyword Blocklist Guardrail 测试。
 
 测试 check_keywords 函数 + load_blocklist 缓存逻辑（monkeypatch config_service）。
 """
@@ -181,7 +181,7 @@ class TestInvalidateCache:
 
 
 class TestExtremeInputs:
-    """spec §11.2: 极端输入不应让 check_keywords 崩溃"""
+    """极端输入不应让 check_keywords 崩溃。"""
 
     def test_null_bytes_in_text(self) -> None:
         text = "contains\x00keyword"

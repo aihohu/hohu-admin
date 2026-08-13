@@ -1,18 +1,15 @@
-"""system 模块的 AI 聚合 tool
-
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §5.5 / §2.10。
+"""system 模块的 AI tool。
 
 三个聚合 tool：
   user.count    → 返回 {"count": N}，用于"有多少"类问题
   user.stats    → 返回 [{"group": ..., "count": ...}]，用于按维度分布
   user.distinct → 返回 ["v1", "v2"]，用于枚举字段取值
 
-MVP 阶段 sys_user 表可聚合字段仅 status / user_gender（spec §2.10 / §5.5）。
-dept_id / role_code 走关联表 EXISTS 子查询，留 v1.5。
+用户聚合仅开放 status / user_gender 两个低基数字段，避免任意字段查询和敏感信息枚举。
 
 注意：本模块 @ai_tool 装饰器执行期会把 tool 注册到 ToolRegistry，
 启动时 ToolRegistry.validate_on_startup(db) 会校验 ai_agent 表里有
-user_mgmt agent + system:user:list 权限码（spec §5.1）。
+user_mgmt Agent 和工具声明的权限码。
 """
 
 from datetime import timedelta
@@ -77,7 +74,7 @@ async def user_count(
     """
     filters = validate_filters_in_whitelist(ctx.tool_meta, filters)
 
-    # ctx.data_scope.filters 已含 User 模型的 data_scope 过滤（§6.2 build_data_scope_context）
+    # data_scope 已收敛到调用者可见的用户范围。
     stmt = select(func.count(User.user_id)).where(*ctx.data_scope.filters)
     for key, value in filters.items():
         # sys_user 表的 allowed_filters 字段都是 varchar，强制 stringify 防类型错
@@ -209,7 +206,7 @@ async def user_distinct(ctx: AiToolContext, field: str) -> ToolResult:
     )
 
 
-# ============ role.count（v1.5+，复用 user.count 模式，演示 chip 跳转回放到 role 模块页） ============
+# ============ role.count ============
 
 
 @ai_tool(
@@ -256,7 +253,7 @@ async def role_count(
     )
 
 
-# ============ dept.count（v1.5+，演示 chip 跳转回放到 dept 模块页） ============
+# ============ dept.count ============
 
 
 @ai_tool(
@@ -300,10 +297,10 @@ async def dept_count(
     )
 
 
-# ============ role.list / dept.list（v1.5+ SR-22，LLM 需少量行而非仅 count） ============
+# ============ role.list / dept.list ============
 
-# 返回字段精简（id/name/code/status），phone/email/create_by 等不进 records（§7.3 兜底剥离）
-_LIST_MAX_LIMIT = 50  # 强制上限，防大客户 OOM + LLM token 爆炸（SR-22 反例 3）
+# 只返回识别和展示所需字段，避免敏感信息进入模型上下文。
+_LIST_MAX_LIMIT = 50  # 限制数据库结果和模型上下文大小。
 _LIST_DEFAULT_LIMIT = 20
 
 
@@ -714,7 +711,7 @@ async def user_create(
         user_service,
     )
 
-    # spec §6.2：创建目标部门也必须在 caller 可见范围内。
+    # 创建目标部门必须在调用者的数据权限范围内。
     await ensure_targets_in_scope(ctx, dept_ids=[primary_dept_id])
     dept, role, default_password = await _load_ai_create_policy(
         ctx,
@@ -1010,7 +1007,7 @@ async def _dry_run_user_reset_password(
     )
 
 
-# ============ user.batch_delete（destructive + HITL，spec §11.3 示例） ============
+# ============ user.batch_delete ============
 
 
 async def _resolve_users(
@@ -1020,7 +1017,7 @@ async def _resolve_users(
     user_names: list[str] | None,
     phones: list[str] | None,
 ) -> list[User]:
-    """按 IDs / 用户名 / 手机号解析为 User 列表（spec §6.2 data_scope 强制）。
+    """按 IDs、用户名或手机号解析调用者可见的用户列表。
 
     三个选择器至少提供一个；同时提供则取并集（任一匹配即纳入）。
     始终应用 ctx.data_scope.filters，确保只返回 caller 可见范围内的用户。
@@ -1107,8 +1104,7 @@ async def user_batch_delete(
         )
 
     resolved_ids = [u.user_id for u in users]
-    # spec §6.2 data_scope 强制：写 tool 含 *_ids 必须先验证 targets 可见。
-    # _resolve_users 已应用 data_scope.filters，此处 defensive 二次校验。
+    # 写操作在解析后再次验证完整目标集合，防止权限变化导致部分执行。
     await ensure_targets_in_scope(ctx, user_ids=resolved_ids)
 
     from app.modules.system.service.user_service import user_service  # noqa: PLC0415
@@ -1116,8 +1112,7 @@ async def user_batch_delete(
     count = await user_service.batch_delete_users(
         ctx.db, resolved_ids, current_user_id=ctx.user.user_id
     )
-    # spec 2026-07-16 §2.4: LLM 只看 {"deleted": N}（user_ids 不进 prompt cache），
-    # 受影响 IDs 进 ui.view_data.ids + ui.audit.affected_user_ids（后台审计页反查）。
+    # 模型只接收删除数量；用户 ID 仅进入结构化 UI 和审计数据。
     str_ids = [str(i) for i in resolved_ids]
     return ToolResult.success(
         data={"deleted": count},
@@ -1162,7 +1157,7 @@ async def _dry_run_user_batch_delete(
     users = sorted(users, key=lambda user: user.user_id)
     resolved_ids = [u.user_id for u in users]
     try:
-        # spec §6.2: dry_run 也要校验 data_scope（防越权预估）
+        # 预览同样校验数据权限，防止通过估算接口探测越权目标。
         await ensure_targets_in_scope(ctx, user_ids=resolved_ids)
     except AuthorizationException as e:
         return DryRunResult(ok=False, count=0, reason=e.message)
@@ -1200,7 +1195,7 @@ async def _dry_run_user_batch_delete(
     )
 
 
-# ============ user.list / user.lookup / user.update（spec §10 Task 23-25） ============
+# ============ user.list / user.lookup / user.update ============
 
 
 @ai_tool(
@@ -1225,7 +1220,7 @@ async def user_list(
     filters: dict[str, Any] | None = None,
     limit: int | None = None,
 ) -> ToolResult:
-    """列出用户，返回前 N 条精简字段（spec §10 Task 23）
+    """列出用户，返回前 N 条精简字段。
 
     LLM 看 data.{total, limit, sample[3]}（精简，进 prompt cache）；
     前端看 ui.view_data.{columns, rows}（全量 limit 条，渲染 table）。
@@ -1244,7 +1239,7 @@ async def user_list(
         # sys_user 表字段都是 varchar，强制 stringify 防类型错
         base = base.where(getattr(User, key) == str(value))
 
-    # spec §6.2 data_scope 强制：read tool 也走 ctx.data_scope.filters
+    # 读取工具同样受调用者数据权限约束。
     base = base.where(*ctx.data_scope.filters)
 
     total = int(
@@ -1311,7 +1306,7 @@ async def user_lookup(
     phone: str | None = None,
     email: str | None = None,
 ) -> ToolResult:
-    """查询单个用户详情（spec §10 Task 24）
+    """查询单个用户详情。
 
     至少提供一个 selector；多 selector 取交集（AND）；
     user_name / phone / email 精确匹配（避免误匹配前缀）。
@@ -1331,8 +1326,7 @@ async def user_lookup(
             error_code="AI_LOOKUP_NO_TARGET",
         )
 
-    # spec §6.2 data_scope 强制：read tool 含 user_id 也需校验 target 可见
-    # （防越权预估：用户传 admin 的 user_id 直接 lookup 拿到敏感字段）
+    # 显式 ID 查询也必须验证目标可见，防止绕过列表过滤读取敏感字段。
     if user_id is not None:
         await ensure_targets_in_scope(ctx, user_ids=[user_id])
 
@@ -1353,7 +1347,7 @@ async def user_lookup(
             error_code="AI_LOOKUP_NO_MATCH",
         )
     if len(user) > 1:
-        # 多重匹配：返回首个 + warning hint，让 LLM 主动反问用户细化（spec §8.6）
+        # 多重匹配返回首项并提示模型向用户澄清。
         # 不抛异常，因为多重匹配在 lookup 场景不致命（仅是 ambiguous）
         pass
 
@@ -1383,8 +1377,7 @@ async def user_lookup(
     )
 
 
-# spec §10 Task 25：user.update — 字段级更新（白名单控制）
-# spec §2.21 OVERWRITE_ALLOWED：nickname / user_email / user_phone / user_gender /
+# user.update 仅允许字段级白名单更新：nickname / user_email / user_phone / user_gender /
 # status / dept_id / role_ids（不含 user_name / hashed_password / user_id）
 _USER_UPDATE_ALLOWED_FIELDS: frozenset[str] = frozenset(
     {
@@ -1395,10 +1388,10 @@ _USER_UPDATE_ALLOWED_FIELDS: frozenset[str] = frozenset(
         "status",
     }
 )
-"""user.update tool 允许更新的字段白名单（spec §2.21 OVERWRITE_ALLOWED 子集）。
+"""user.update 工具允许更新的字段白名单。
 
 不含 user_name / user_id / hashed_password（不可改）；
-不含 dept_id / role_ids（需独立 tool user.update_dept / user.update_roles，预留 Task 25a+）。
+部门和角色必须由独立工具更新，避免一个操作跨越多个权限边界。
 """
 
 
@@ -1437,7 +1430,7 @@ async def user_update(
     user_gender: str | None = None,
     status: str | None = None,
 ) -> ToolResult:
-    """更新用户资料（spec §10 Task 25）
+    """更新用户资料。
 
     HITL 强制（hitl_always=True）：用户必须在抽屉确认后才真正落库。
     所有字段可选，仅传需更新的字段（PATCH 语义）。
@@ -1473,7 +1466,7 @@ async def user_update(
             error_code="AI_USER_UPDATE_NO_FIELDS",
         )
 
-    # spec §6.2 data_scope 强制：写 tool 含 user_id 必须先验证 target 可见
+    # 写操作必须先验证目标处于调用者的数据权限范围。
     await ensure_targets_in_scope(ctx, user_ids=[user_id])
 
     # 查询用户（应用 data_scope 二次防御）
@@ -1517,7 +1510,7 @@ async def _dry_run_user_update(
     user_gender: str | None = None,
     status: str | None = None,
 ) -> Any:
-    """dry_run：列出待更新字段 + 用户当前值供 HITL 抽屉确认（spec §10 Task 25）"""
+    """列出待更新字段和当前值，供确认界面展示。"""
     from app.core.exceptions import (  # noqa: PLC0415
         AuthorizationException,
     )
@@ -1573,7 +1566,7 @@ async def _dry_run_user_update(
     )
 
 
-# ============ user.import_preview / user.import_execute（spec §10 Task 26/26a） ============
+# ============ user.import_preview / user.import_execute ============
 
 
 _USER_IMPORT_FILE_POLICY = FileAccessPolicy(
@@ -1666,9 +1659,9 @@ async def user_import_preview(
     on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
     sync_mode: Literal["CREATE_ONLY", "UPDATE_PROFILE", "FULL_SYNC"] = "CREATE_ONLY",
 ) -> ToolResult:
-    """AI tool 入口：解析 + dry_run 用户导入（spec §10 Task 26, v2.2 P0 #2.14 拆分）
+    """解析用户导入文件并生成只读预览。
 
-    流程（spec §6 / §2.14）：
+    流程：
     1. _load_file_bytes(file_id) → file_bytes + filename + mime_type
     2. parse_import_excel(file_bytes, mime_type) → records
     3. dry_run_import_users(records, current_user, file_bytes, filename, reason,
@@ -1684,8 +1677,8 @@ async def user_import_preview(
 
     Args:
         file_id: 文件 ID（sys_file.file_id 字符串形式）
-        reason: 业务理由（1-256 字符，spec §2.30 P1-3 强制）
-        on_conflict: 'skip' (默认) / 'overwrite' / 'fail_fast'（详见 spec §2.7）
+        reason: 业务理由（1-256 字符）
+        on_conflict: 'skip'（默认）/ 'overwrite' / 'fail_fast'
         sync_mode: 员工编号同步策略，在 preview 时冻结
     """
     from app.modules.system.user.import_parser import (  # noqa: PLC0415
@@ -1708,8 +1701,7 @@ async def user_import_preview(
         on_conflict=on_conflict,
     )
 
-    # Task 34 修：preview 阶段保存上传文件到 storage，execute 凭 file_storage_key 反查
-    # （AI 路径 execute 不重新上传文件，与 HTTP 路径前端重传不同）
+    # 预览阶段持久化文件；执行阶段按 storage key 读取，避免依赖客户端重复上传。
     from app.core.file_storage import get_file_storage  # noqa: PLC0415
 
     storage = get_file_storage()
@@ -1824,23 +1816,23 @@ async def user_import_execute(
     on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
     sync_mode: Literal["CREATE_ONLY", "UPDATE_PROFILE", "FULL_SYNC"] = "CREATE_ONLY",
 ) -> ToolResult:
-    """AI tool 入口：执行用户导入（spec §10 Task 26a, v2.2 P0 #2.14 拆分）
+    """执行已经预览并确认的用户导入。
 
     **强制 HITL**（hitl_always=True）：用户必须在抽屉确认 preview summary 后才执行。
-    LLM 不能跳过 preview → 直接 execute（spec §2.14 反例）。
+    模型不能跳过预览直接执行。
 
     流程：
     1. 凭 preview_token 反查 batch（含 file_sha256 + records_hash + operator_id）
-    2. 从 sys_file 重新加载 file_bytes（spec §2.19 file_storage_key 在 execute 阶段读）
+    2. 从 sys_file 的存储引用重新加载文件
     3. parse_import_excel → records（与 preview 时 hash 一致）
     4. batch_create_users_from_records(...) → ImportResult
     5. ToolResult.rows_affected（successCount + skippedCount + ...）
 
     Args:
         preview_token: 来自 user.import_preview 返回值，10min TTL
-        reason: 业务理由（必须与 preview 时一致，spec §2.30）
-        on_conflict: 与 preview 时一致（spec §2.7）
-        sync_mode: 'CREATE_ONLY' (默认) / 'UPDATE_PROFILE' / 'FULL_SYNC'（spec §2.24）
+        reason: 必须与预览时的业务理由一致
+        on_conflict: 必须与预览时一致
+        sync_mode: 'CREATE_ONLY'（默认）/ 'UPDATE_PROFILE' / 'FULL_SYNC'
     """
     from app.modules.system.user.constants import EmployeeNoSyncMode  # noqa: PLC0415
     from app.modules.system.user.import_parser import (  # noqa: PLC0415
@@ -1862,9 +1854,7 @@ async def user_import_execute(
         )
 
     # 2. 凭 batch.file_storage_key 从 FileStorage 读 file_bytes
-    #    （Task 34 修：preview 阶段已通过 FileStorage.save 写入；
-    #    execute 阶段走 FileStorage.read 抽象，不直接拼文件系统路径，
-    #    Phase 3 切 S3 时零改业务代码）
+    # 执行阶段通过 FileStorage 抽象读取，不直接拼接文件系统路径。
     from app.core.file_storage import get_file_storage  # noqa: PLC0415
 
     if not batch.file_storage_key:
@@ -1931,7 +1921,7 @@ async def user_import_execute(
     )
 
 
-# ============ user.export（spec §10 Task 27） ============
+# ============ user.export ============
 
 
 @ai_tool(
@@ -1948,8 +1938,7 @@ async def user_import_execute(
         idempotent=False,
         produces_file=True,
         dry_run_supported=True,
-        # Task 33：rows_affected → detail_card（spec §2.31 line 1626 落地），
-        # detail_card 携带 downloadUrl 让前端渲染下载按钮（AI 对话内闭环）
+        # 导出结果使用详情卡，并提供鉴权下载地址。
         result_view="detail_card",
         args_summary_fields=("reason",),
     )
@@ -1964,14 +1953,14 @@ async def user_export(
     user_phone: str | None = None,
     status: Literal["1", "2"] | None = None,
 ) -> ToolResult:
-    """AI tool 入口：导出用户列表到 Excel（spec §10 Task 27）
+    """导出用户列表到 Excel。
 
-    强制建 ExportTask（spec §2.31 P1-5）+ filter_snapshot 冻结 + 30 天 TTL。
+    始终创建 ExportTask、冻结筛选快照，并设置 30 天文件有效期。
     行数 > USER_EXPORT_ASYNC_THRESHOLD（5000）抛 AI_EXPORT_ASYNC_REQUIRED，
     用户必须缩窄筛选条件或拆分请求；当前不会自动入队。
 
     Args:
-        reason: 业务理由（必填，spec §2.30 P1-3，1-256 字符）
+        reason: 业务理由（必填，1-256 字符）
         user_name / nickname / user_email / user_phone: filter（可选）
         status: '1' (启用) / '0' (禁用)，None=不过滤
     """
@@ -1996,8 +1985,7 @@ async def user_export(
         reason=reason,
     )
 
-    # Task 33：取 task 拿 file_size_bytes + created_at（用于 detail_card 元数据
-    # + expiresAt 计算 = created_at + 30 天 TTL）
+    # 从持久化任务读取文件元数据和到期时间，避免前端自行推断。
     task = await get_export_task(
         ctx.db,
         export_id,
@@ -2063,7 +2051,7 @@ async def _dry_run_user_export(
     user_phone: str | None = None,
     status: Literal["1", "2"] | None = None,
 ) -> Any:
-    """dry_run：预估导出行数供 HITL 抽屉确认（spec §10 Task 27）
+    """预估导出行数供确认界面展示。
 
     用 User.count(*) + filter 估算行数，不实际跑导出（避免重复建 task）。
     行数 > USER_EXPORT_ASYNC_THRESHOLD → 提示用户缩窄 filter；行数为 0 → 警告。

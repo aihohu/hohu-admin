@@ -1,6 +1,6 @@
 """AI Tool Gateway — 鉴权 / 风险分级 / HITL / 调度
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §3 / §6 / §7。
+集中导出网关执行、结果、失败处理、目标校验和脱敏能力。
 
 Gateway 是 tool 执行的"中间层"，业务方函数永远不直接被 LLM 调用，
 全部经过 Gateway 三件套鉴权 + 审计 + 异常转译 + 脱敏 + 容量限制。

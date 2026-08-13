@@ -117,7 +117,7 @@ async def _fetch_log(db: AsyncSession, job_log_id: int) -> SysJobLog:
 
 
 class TestJobLogMonitorScanOnce:
-    """测试 _scan_once 的核心行为（spec §"测试矩阵" 1-8）。"""
+    """测试 _scan_once 的核心行为。"""
 
     async def test_orphan_with_different_runner_marked_failed(
         self, db_session, monkeypatch

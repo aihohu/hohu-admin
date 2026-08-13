@@ -1,7 +1,7 @@
 """[CLOUD-ONLY] 应用目录表 mk_app
 
 部署在云市场 DB，本地 HoHu 不创建此表。
-Phase 2 拆分时迁移到 app/modules/marketplace/models/cloud/app.py
+如按云端与本地职责拆分，本模型归入 cloud/app.py。
 详见 docs/MARKETPLACE-CLOUD-SPLIT.md
 """
 
@@ -50,7 +50,7 @@ class App(Base):
         nullable=False,
         default=0,
         server_default="0",
-        comment="租户ID（Phase 1 单租户默认 0，强制过滤）",
+        comment="租户 ID；单租户模式默认 0，查询必须强制过滤",
     )
     name: Mapped[str] = mapped_column(String(100), nullable=False, comment="应用名称")
     slug: Mapped[str] = mapped_column(

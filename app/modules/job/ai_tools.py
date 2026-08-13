@@ -1,11 +1,11 @@
-"""job 模块的 AI Tool — spec §11.3
+"""job 模块的 AI Tool。
 
 job.update_cron: 改调度 cron 表达式（白名单字段，经 JobAiUpdate schema 强制过滤）
   - risk=high（改调度 = 改执行行为）
   - hitl_always=True（调度变更必须 HITL）
   - dry_run_supported=True（dry_run 显示当前 cron vs 拟变更）
 
-不能 AI 操作的字段（spec §11.3 表格禁止）：job_key / run_on_enable / timeout /
+AI 不允许修改的字段：job_key / run_on_enable / timeout /
 max_retries / concurrent — JobAiUpdate schema 在 update_for_ai 入口兜底丢弃。
 """
 
@@ -38,7 +38,7 @@ from app.modules.job.service.job_service import job_service
 async def job_update_cron(
     ctx: AiToolContext, *, job_id: int, cron_expression: str
 ) -> ToolResult:
-    """更新任务 cron 表达式（白名单字段，spec §11.3）
+    """通过字段白名单更新任务 cron 表达式。
 
     Args:
         ctx: AiToolContext

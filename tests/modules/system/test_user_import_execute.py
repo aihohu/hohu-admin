@@ -1,14 +1,14 @@
-"""batch_create_users_from_records 单测（Task 10，spec §3.6 line 2068-2097）。
+"""``batch_create_users_from_records`` 行为测试。
 
 覆盖：
-- preview_token 三重校验（spec §2.19 line 575-577）
-- CAS PREVIEW_DONE → RUNNING（spec §2.27 line 1133-1216）
-- chunk + savepoint 落库（spec §2.20 line 592-622）
-- IntegrityError 区分 user_name UNIQUE → AI_IMPORT_USERNAME_DUPLICATE（spec §2.25）
-- on_conflict skip / overwrite / fail_fast（spec §2.21）
-- batch_log 写 EXECUTE_START / CHUNK_PROGRESS / EXECUTE_FINISH（spec §2.28）
-- failed_rows_file 文件化（spec §3.3 line 1700-1717）
-- 状态转 SUCCESS / PARTIAL_SUCCESS / FAILED（spec §2.26）
+- preview_token 的批次、文件和记录哈希校验
+- CAS 将 PREVIEW_DONE 原子迁移为 RUNNING
+- 分块和 savepoint 落库
+- 将 user_name 唯一键冲突映射为 AI_IMPORT_USERNAME_DUPLICATE
+- on_conflict 的 skip、overwrite 和 fail_fast 行为
+- 批次执行与分块进度日志
+- 失败行文件生成
+- SUCCESS、PARTIAL_SUCCESS 和 FAILED 状态迁移
 
 测试通过 dry_run_import_users 走完整 preview 流程建 PREVIEW_DONE batch，
 再调 batch_create_users_from_records 验证 execute 阶段语义。
@@ -139,7 +139,7 @@ async def fake_redis(db_session, monkeypatch):  # noqa: ARG001
 
 @pytest.fixture
 def file_storage() -> MockFileStorage:
-    """每个测试独立 MockFileStorage（spec §3.9 注入）。"""
+    """为每个测试提供独立的 MockFileStorage。"""
     return MockFileStorage()
 
 
@@ -147,7 +147,7 @@ async def _seed_default_password(
     db_session,
     password: str = "QA-Default-Pwd-123",
 ) -> None:
-    """设置 sys_config.auth:default_password（spec §2.5）。
+    """设置 ``sys_config.auth:default_password``。
 
     Why DELETE-first: db_session is outer-transaction rollback, but the dev DB
     itself may already hold a seeded auth:default_password row (init_db.py or
@@ -216,7 +216,7 @@ async def _count_users_by_prefix(db_session, prefix: str) -> int:
     return len(rows)
 
 
-# ========== Triple Validation（spec §2.19 line 575-577） ==========
+# ========== 预检令牌三重校验 ==========
 
 
 class TestTripleValidation:
@@ -367,7 +367,7 @@ class TestTripleValidation:
         assert exc.value.error_code == "AI_IMPORT_PREVIEW_INVALID"
 
 
-# ========== Idempotency（spec §2.27 line 1133-1216） ==========
+# ========== 幂等执行 ==========
 
 
 class TestExecuteIdempotency:
@@ -472,7 +472,7 @@ class TestExecuteIdempotency:
         assert exc.value.error_code == "AI_IMPORT_ALREADY_EXECUTED"
 
 
-# ========== Chunk + Savepoint（spec §2.20） ==========
+# ========== 分块与 Savepoint ==========
 
 
 class TestChunkSavepoint:
@@ -481,7 +481,7 @@ class TestChunkSavepoint:
     async def test_execute_creates_users_with_default_password(
         self, db_session, file_storage
     ):
-        """spec §2.5：新用户用 sys_config.auth:default_password 哈希入库。"""
+        """新用户使用配置的默认密码哈希入库。"""
         dept = _make_dept(8301, "QA-Exec-Dept-PWD")
         super_role = await _fetch_super_role(db_session)
         operator = _make_user(9501, "QA_EXEC_PWD", [super_role], [dept])
@@ -517,7 +517,7 @@ class TestChunkSavepoint:
         assert verify_password("MyInitPwd-999", created.hashed_password)
 
     async def test_execute_username_duplicate_in_batch(self, db_session, file_storage):
-        """spec §2.25：同 batch 内两条记录 user_name 相同 → 第二条进 failed_rows。
+        """同一批次内重复 user_name 时，第二条进入 failed_rows。
 
         dry_run 阶段两条都不在 DB → 都归 new_records；
         execute 阶段第一条 INSERT 成功，第二条命中 UNIQUE 约束 → IntegrityError
@@ -556,7 +556,7 @@ class TestChunkSavepoint:
     async def test_execute_writes_failed_rows_file_when_failures(
         self, db_session, file_storage
     ):
-        """spec §3.3 line 1700：失败行写 Excel 文件，路径存 batch.failed_rows_file。"""
+        """失败行写入 Excel，路径保存到 batch.failed_rows_file。"""
         dept = _make_dept(8303, "QA-Exec-Dept-FF")
         super_role = await _fetch_super_role(db_session)
         operator = _make_user(9503, "QA_EXEC_FF", [super_role], [dept])
@@ -599,7 +599,7 @@ class TestChunkSavepoint:
     async def test_execute_failed_rows_preview_capped_at_20(
         self, db_session, file_storage
     ):
-        """spec §3.3 line 1702：failed_rows_preview 仅前 20 条（toast 用）。"""
+        """failed_rows_preview 仅保留前 20 条供提示展示。"""
         dept = _make_dept(8304, "QA-Exec-Dept-PV")
         super_role = await _fetch_super_role(db_session)
         operator = _make_user(9504, "QA_EXEC_PV", [super_role], [dept])
@@ -628,14 +628,14 @@ class TestChunkSavepoint:
         assert len(result.failed_rows_preview) == FAILED_ROWS_PREVIEW_LIMIT
 
 
-# ========== on_conflict 处理（spec §2.21） ==========
+# ========== on_conflict 处理 ==========
 
 
 class TestOnConflict:
     """on_conflict=skip / overwrite / fail_fast 不同行为。"""
 
     async def test_execute_skip_skips_existing_records(self, db_session, file_storage):
-        """spec §2.21：on_conflict=skip → 已存在记录跳过，skipped_count += 1。"""
+        """on_conflict=skip 时跳过已存在记录并增加 skipped_count。"""
         dept = _make_dept(8401, "QA-Exec-Dept-SK")
         super_role = await _fetch_super_role(db_session)
         operator = _make_user(9601, "QA_EXEC_SK", [super_role], [dept])
@@ -673,7 +673,7 @@ class TestOnConflict:
     async def test_execute_fail_fast_records_existing_as_failed(
         self, db_session, file_storage
     ):
-        """spec §2.21：on_conflict=fail_fast → 已存在记录进 failed_rows。"""
+        """on_conflict=fail_fast 时已存在记录进入 failed_rows。"""
         dept = _make_dept(8402, "QA-Exec-Dept-FF")
         super_role = await _fetch_super_role(db_session)
         operator = _make_user(9602, "QA_EXEC_FF_OP", [super_role], [dept])
@@ -713,14 +713,14 @@ class TestOnConflict:
         )
 
 
-# ========== Batch Log（spec §2.28） ==========
+# ========== 批次日志 ==========
 
 
 class TestBatchLog:
     """execute 写 EXECUTE_START / CHUNK_PROGRESS / EXECUTE_FINISH log。"""
 
     async def test_execute_writes_lifecycle_logs(self, db_session, file_storage):
-        """spec §2.28：每次状态转换 + chunk 完成 → 写 batch_log 行。"""
+        """每次状态迁移和分块完成都写入 batch_log。"""
         dept = _make_dept(8501, "QA-Exec-Dept-LG")
         super_role = await _fetch_super_role(db_session)
         operator = _make_user(9701, "QA_EXEC_LG", [super_role], [dept])
@@ -761,7 +761,7 @@ class TestBatchLog:
         assert "EXECUTE_FINISH" in events
 
 
-# ========== Status Transition（spec §2.26） ==========
+# ========== 状态迁移 ==========
 
 
 class TestStatusTransition:
@@ -895,19 +895,19 @@ class TestSuperAdminBypass:
         assert any(r.role_code == "QA_R_ANY_EXEC" for r in created.roles)
 
 
-# ========== Concurrent Execute (spec §2.27 Task 22b P0) ==========
+# ========== 并发执行 ==========
 
 
 class TestConcurrentExecute:
-    """并发 execute 同 batch — CAS 保证仅 1 成功（spec §2.27 Task 22b P0）。"""
+    """并发执行同一批次时，CAS 保证仅一个调用成功。"""
 
     async def test_concurrent_execute_same_batch(self, db_session, file_storage):
-        """spec §2.27 line 1207：asyncio.gather 模拟并发 → CAS 保证仅 1 成功 + 仅 1 用户入库。
+        """asyncio.gather 模拟并发，CAS 保证仅一次成功且只创建一个用户。
 
         SQLAlchemy ``AsyncSession`` 不支持单 session 并发 IO（``MissingGreenlet``），
         真并发场景下 gather 会部分抛 ``MissingGreenlet``；本测试用 ``return_exceptions=True``
         容错，**关键不变量**是「无论多少 coroutine 抢占，最终入库用户数 == 1」（CAS 在 SQL
-        层 ``UPDATE WHERE status='PREVIEW_DONE'`` 原子，spec §2.27 幂等核心）。
+        层 ``UPDATE WHERE status='PREVIEW_DONE'`` 保持原子性）。
 
         SQL 层 CAS rowcount 互斥由 ``test_import_state.py::test_state_cas_prevents_race``
         覆盖；service 层 RUNNING 重放由 ``test_execute_same_token_twice_running_concurrent``
@@ -961,7 +961,7 @@ class TestConcurrentExecute:
     async def test_execute_same_token_twice_running_concurrent(
         self, db_session, file_storage
     ):
-        """spec §2.27 line 1208：CAS 失败 + status=RUNNING → AI_IMPORT_BATCH_RUNNING。
+        """CAS 失败且状态为 RUNNING 时返回 AI_IMPORT_BATCH_RUNNING。
 
         模拟并发场景：另一 coroutine 已把 status 从 PREVIEW_DONE 转 RUNNING（CAS 已抢走），
         本调用 CAS 失败后 ``_handle_idempotent_replay`` 读到 RUNNING → 抛 ``AI_IMPORT_BATCH_RUNNING``。
@@ -997,7 +997,7 @@ class TestConcurrentExecute:
         assert exc.value.error_code == "AI_IMPORT_BATCH_RUNNING"
 
     async def test_execute_expired_batch_rejected(self, db_session, file_storage):
-        """spec §2.27 line 1209：CAS 失败 + status=EXPIRED → AI_IMPORT_ALREADY_EXECUTED。
+        """CAS 失败且状态为 EXPIRED 时返回 AI_IMPORT_ALREADY_EXECUTED。
 
         EXPIRED 是终态（preview TTL 10min 过期由 cleanup cron 转换），重放应被拒绝。
         区别于 RUNNING（可重试）：EXPIRED 不可恢复，必须重新走 dry_run。
@@ -1033,20 +1033,20 @@ class TestConcurrentExecute:
         assert exc.value.error_code == "AI_IMPORT_ALREADY_EXECUTED"
 
 
-# ========== Redis Cache Fallback (spec §2.19 Task 22b P0) ==========
+# ========== Redis 缓存回退 ==========
 
 
 class TestRedisCacheFallback:
-    """Redis cache miss / corrupt → DB 反查（spec §2.19 Task 22b P0）。
+    """Redis 缓存缺失或损坏时回退数据库反查。
 
     preview_token 是 SoT（Source of Truth），Redis 仅加速。即使 Redis 全丢或被篡改，
-    execute 仍可凭 preview_token 反查 DB 拿到 batch 行（spec §2.19 line 2696）。
+    execute 仍可凭 preview_token 从数据库找到批次。
     """
 
     async def test_preview_cache_missing_falls_back_to_db(
         self, db_session, file_storage, fake_redis
     ):
-        """spec §2.19 反例 2：Redis 全丢 → DB 反查 execute 仍成功。
+        """Redis 数据全部丢失时，数据库回退仍可完成执行。
 
         场景：Redis 故障 / flushall / key 过期后，execute 凭 preview_token 反查
         ``sys_user_import_batch.preview_token`` 唯一索引拿到 batch 行，三重校验通过 → 落库。
@@ -1085,10 +1085,10 @@ class TestRedisCacheFallback:
     async def test_preview_cache_corrupted_falls_back_to_db(
         self, db_session, file_storage, fake_redis
     ):
-        """spec §2.19 反例 2：Redis value 篡改（指向不存在 batch_id）→ DB 反查 execute 仍成功。
+        """Redis 指向不存在批次时，数据库回退仍可完成执行。
 
         场景：运维误操作 / Redis 复制 bug 导致 cache value 被改。``get_batch_by_preview_token``
-        先读 Redis 拿到 batch_id → SELECT 找不到 row（spec §2.19 反例 2 fall-through）→
+        先读 Redis 拿到 batch_id，查询不到记录后继续回退，
         再用 preview_token 反查 DB 拿到真实 batch → 三重校验通过 → 落库。
 
         **反例**: Redis 命中就信任（不验证 batch_id 存在）→ 篡改后 execute 找不到 batch
@@ -1128,19 +1128,19 @@ class TestRedisCacheFallback:
         assert await _count_users_by_prefix(db_session, "QA_CORR_U") == 1
 
 
-# ========== Chunk Progress + Fatal Error Log (spec §2.28 Task 22b P1) ==========
+# ========== 分块进度与致命错误日志 ==========
 
 
 class TestBatchLogAdvanced:
-    """chunk_progress 计数 + fatal_error 审计（spec §2.28 Task 22b P1）。
+    """验证 chunk_progress 计数和 fatal_error 审计。
 
-    附加在 TestBatchLog 之上，覆盖 Task 22a 审计发现的 2 条缺口：
+    覆盖批次日志中的两个边界：
     - 多 chunk 的 CHUNK_PROGRESS 行计数
     - chunk 致命错误 → EXECUTE_FINISH 写 aborted 详情
     """
 
     async def test_log_records_chunk_progress_per_chunk(self, db_session, file_storage):
-        """spec §2.28：N 行 → ceil(N/100) 个 CHUNK_PROGRESS log + chunk_index 顺序递增。
+        """N 行产生 ceil(N/100) 个 CHUNK_PROGRESS，且 chunk_index 递增。
 
         USER_IMPORT_CHUNK_SIZE=100（constants.py），200 行 → 2 个 chunk → 2 条 CHUNK_PROGRESS。
         每条 detail.chunk_index 严格递增（0/1），便于前端按 chunk 维度绘制进度条。
@@ -1199,15 +1199,14 @@ class TestBatchLogAdvanced:
     async def test_log_records_fatal_error_in_execute_finish(
         self, db_session, file_storage, monkeypatch
     ):
-        """spec §2.28 + §2.20：chunk 致命错误 → EXECUTE_FINISH.aborted 写入 + 全批 failed。
+        """分块发生致命错误时写入 EXECUTE_FINISH.aborted，并将全批标记失败。
 
         模拟 _process_create_row 抛 RuntimeError（非 BusinessException / IntegrityError），
         chunk savepoint 自动 ROLLBACK → outer except 捕获 → aborted_error 写入 EXECUTE_FINISH
         detail + 当前 chunk + 后续 chunk 所有行进 failed_rows（error_code=AI_IMPORT_BATCH_ABORTED）。
 
-        **注**: 当前实现把 aborted 信息合并到 EXECUTE_FINISH.detail.aborted；spec §2.28
-        comment 列出 EXECUTE_FAILED 事件但代码未单独写。Task 22b 决策：保持现有合并语义，
-        不拆 EXECUTE_FAILED 单独事件（避免 Task 22b 范围扩散 + 现有 EXECUTE_FINISH.aborted
+        当前实现把 aborted 信息合并到 EXECUTE_FINISH.detail.aborted，
+        不额外拆分 EXECUTE_FAILED 事件，以保持现有日志消费语义和
         已满足「致命错误可审计」需求）。
 
         **反例**: 致命错误静默 → batch 状态显示 SUCCESS 但实际 0 用户入库（数据不一致）。

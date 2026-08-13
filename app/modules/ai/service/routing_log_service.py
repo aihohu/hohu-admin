@@ -1,7 +1,7 @@
-"""spec §7.2 / §13 决策 14: ai_routing_log 写入服务.
+"""ai_routing_log 写入服务。
 
 所有 /ai/chat 请求都写一条（不仅 "auto"），reason 区分 9 种类型.
-input_message_hash 用 HMAC-SHA256（§13 决策 17）.
+input_message_hash 使用 HMAC-SHA256。
 """
 
 import hashlib
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 
 def _hash_message(message: str, user_id: int) -> str:
-    """spec §13 决策 17: HMAC-SHA256(server_secret + user_id + message).
+    """计算 HMAC-SHA256(server_secret + user_id + message)。
 
     用 settings.SECRET_KEY（已必填）而非单独配置 AI_ROUTING_HMAC_SECRET，
     避免默认值导致跨部署 HMAC 等价（彩虹表反查风险）.

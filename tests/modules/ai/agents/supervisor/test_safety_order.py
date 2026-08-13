@@ -1,4 +1,4 @@
-"""spec §11 test_safety_order: 安全检查必须在路由前 + 不产生孤儿 user 消息."""
+"""安全检查顺序和孤儿用户消息防回归测试。"""
 
 # ruff: noqa: ARG001, PLC0415  test fixture 占位参数 + 函数内 import（断言用）
 
@@ -35,7 +35,7 @@ def _chat_body(text: str, **extra) -> dict:
 async def test_keyword_blocked_does_not_save_user_message(
     client: AsyncClient, db_session, auth_token
 ):
-    """spec §13 决策 13: 敏感词命中不产生孤儿 user 消息（修现存 bug）."""
+    """敏感词命中时不产生孤儿用户消息。"""
     # patch load_blocklist 让它返回测试用敏感词列表
     with patch(
         "app.modules.ai.api.chat.load_blocklist",
@@ -60,7 +60,7 @@ async def test_keyword_blocked_does_not_save_user_message(
 async def test_injection_blocks_before_routing(
     client: AsyncClient, auth_token, mock_visible_agents
 ):
-    """spec §13 决策 7: injection 命中 → 不进入路由 + 不调 LLM.
+    """命中 injection 时不进入路由也不调用 LLM。
 
     注：injection 不是硬短路（chat.py:399-415），它设 deps.injection_hit=True；
     但路由分支应在 safety 检查后、llm 调用前。如果 injection_hit 仍允许走 supervisor，
@@ -100,7 +100,7 @@ async def test_injection_blocks_before_routing(
 async def test_routing_log_written_for_safety_block(
     client: AsyncClient, db_session, auth_token
 ):
-    """spec §13 决策 14: 安全短路也写 routing_log，reason='safety_blocked'."""
+    """安全短路也写 routing_log，reason 为 safety_blocked。"""
     from app.modules.ai.models.routing_log import AiRoutingLog
 
     with patch(

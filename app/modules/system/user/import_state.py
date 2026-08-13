@@ -1,10 +1,8 @@
-"""ImportState 状态机 + CAS helper + 清理 cron（v2.2 P0/P1）。
+"""导入状态机、CAS helper 与兼容清理入口。
 
-spec §2.26 / §2.27 / §2.29 + spec §2.31 ExportTask 状态机。
-
-CAS helper 用 sqlalchemy.Table 抽象写 raw UPDATE（spec §2.26 反例 3：
+CAS helper 用 sqlalchemy.Table 抽象写 raw UPDATE；
 ORM 的 synchronize_session 容易引入意外），同时避免循环依赖 ORM。
-Task 2 ORM 落地后仍可用本 Table 路径（CAS rowcount 精确性是核心需求）。
+该路径依赖精确 rowcount 判断并发状态是否匹配。
 """
 
 from typing import Any
@@ -48,7 +46,7 @@ _batch_table = Table(
         ),
         nullable=False,
     ),
-    # Task 10：CAS UPDATE 可能同步写这些列（避免 Unconsumed column names）
+    # CAS UPDATE 可同步写这些汇总列。
     Column("summary_new", Integer),
     Column("summary_exists", Integer),
     Column("summary_conflict", Integer),
@@ -70,7 +68,7 @@ def validate_transition(
 ) -> None:
     """校验状态转换合法性，非法转换抛 AI_IMPORT_ILLEGAL_TRANSITION。
 
-    spec §2.26 集中状态机 + §2.27 CAS 幂等基础：调用方在写 DB 前先校验，
+    调用方在写 DB 前先校验集中状态机，
     让非法业务逻辑（如终态 → 任意态）在 service 层就被拒绝，避免脏 UPDATE。
     """
     if to_status not in LEGAL_TRANSITIONS.get(from_status, frozenset()):
@@ -87,16 +85,16 @@ async def _transition_batch_status(
     to_status: ImportBatchStatus,
     **updates: Any,
 ) -> bool:
-    """CAS 状态转换，防并发覆盖（spec §2.27 幂等基础）。
+    """CAS 状态转换，防止并发覆盖。
 
     Returns:
         True: 转换成功（rowcount=1）
         False: from_status 不匹配（rowcount=0），调用方按业务语义处理
-              （如 spec §2.27 重放场景视为幂等成功）
+              （调用方可按业务语义视为幂等成功）
 
     Notes:
         raw UPDATE 绕过 ORM synchronize_session；调用方在依赖 batch 实例新状态时
-        需自己 ``await db.refresh(batch)`` 或重新 select（spec §2.27 重放场景）。
+        需自行 ``await db.refresh(batch)`` 或重新查询。
     """
     validate_transition(from_status, to_status)
     set_values = {**updates, "status": to_status.value}
@@ -113,7 +111,7 @@ async def _transition_batch_status(
 
 
 async def cleanup_expired_batches(*args: Any, **kwargs: Any) -> None:  # noqa: ARG001
-    """[已废弃] Task 22 已搬到 ``import_service.cleanup_expired_batches``。
+    """已废弃；实现位于 ``import_service.cleanup_expired_batches``。
 
     保留空壳防外部 import 漂移；调用方应改用 service 层签名（接 ``db`` 参数）。
     """
@@ -124,23 +122,23 @@ def validate_reason_consistency(
     preview_reason: str,
     execute_reason: str,
 ) -> None:
-    """校验 preview 与 execute 阶段 reason 一致（spec §2.30 v2.2 P1-3）。
+    """校验预览与执行阶段的业务理由一致。
 
     防止用户 preview 时填「HR 同步」，execute 时填「ERP 推送」绕过审计一致性。
     不一致抛 AI_IMPORT_REASON_MISMATCH。
     """
     if preview_reason != execute_reason:
         raise BusinessRuleException(
-            "execute 阶段 reason 必须与 preview 阶段一致（spec §2.30）",
+            "execute 阶段 reason 必须与 preview 阶段一致",
             error_code="AI_IMPORT_REASON_MISMATCH",
         )
 
 
 async def cleanup_expired_previews(*args: Any, **kwargs: Any) -> None:  # noqa: ARG001
-    """[已废弃] Task 22 已搬到 ``import_service.cleanup_expired_previews``。"""
+    """已废弃；实现位于 ``import_service.cleanup_expired_previews``。"""
     return None
 
 
 async def cleanup_expired_export_tasks(*args: Any, **kwargs: Any) -> None:  # noqa: ARG001
-    """[已废弃] Task 22 已搬到 ``export_service.cleanup_expired_export_tasks``."""
+    """已废弃；实现位于 ``export_service.cleanup_expired_export_tasks``。"""
     return None

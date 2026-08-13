@@ -1,4 +1,4 @@
-"""POST /system/user/import HTTP 契约测试（Task 12，spec §5.1 line 2118-2180）。
+"""``POST /system/user/import`` HTTP 契约测试。
 
 只验证 HTTP 契约层（路由 / multipart / Form 解析 / 响应 envelope / 错误码），
 service 层（dry_run_import_users / batch_create_users_from_records）用 patch 替身。
@@ -6,19 +6,19 @@ service 层（dry_run_import_users / batch_create_users_from_records）用 patch
 
 覆盖：
 - 401 未登录 / 无效 JWT（auth gating）
-- dry_run=true → 200 + previewToken + expiresAt（spec §5.1 line 2136-2151）
+- dry_run=true → 200 + previewToken + expiresAt
 - dry_run=false + preview_token → 200 + batchId + status + counts + failedRowsPreview
-  + idempotentReplay（spec §5.1 line 2156-2175）
-- 缺 preview_token → 422（spec §5.1 line 2180）
+  + idempotentReplay
+- 缺 preview_token → 422
 - 缺 file → 422（multipart 必填）
 - 缺 reason → 422（Pydantic 校验）
-- 文件 MIME 非白名单 → 400 + AI_IMPORT_INVALID_MIME（spec §2.10）
-- 文件 > 10MB → 400 + AI_IMPORT_FILE_TOO_LARGE（spec §2.10）
-- 行数 > 2000 → 400 + AI_IMPORT_TOO_MANY_ROWS（spec §2.10）
-- ImportErrorCollection → 400 + errors[] 含全部字段错误（spec §2.12）
-- service 抛 AI_IMPORT_PREVIEW_INVALID → 422 + errorCode（spec §5.1 line 2180）
-- service 抛 AI_IMPORT_BATCH_RUNNING → 422 + errorCode（spec §5.1 line 2320）
-- 调用方 commit + service 调用顺序（spec §3.6）
+- 文件 MIME 非白名单 → 400 + AI_IMPORT_INVALID_MIME
+- 文件 > 10MB → 400 + AI_IMPORT_FILE_TOO_LARGE
+- 行数 > 2000 → 400 + AI_IMPORT_TOO_MANY_ROWS
+- ImportErrorCollection → 400 + errors[] 含全部字段错误
+- service 抛 AI_IMPORT_PREVIEW_INVALID → 422 + errorCode
+- service 抛 AI_IMPORT_BATCH_RUNNING → 422 + errorCode
+- API 提交事务并保持 service 调用顺序
 """
 
 import io
@@ -54,7 +54,7 @@ from app.modules.system.user.schemas import (
 
 # ========== Constants ==========
 
-#: spec §2.10 MIME 白名单
+#: 支持的导入文件 MIME 类型。
 MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 #: 10MB + 1 字节（trigger AI_IMPORT_FILE_TOO_LARGE）
@@ -161,7 +161,7 @@ def _make_simple_xlsx() -> bytes:
 
 
 def _fake_dry_run_result() -> ImportDryRunResult:
-    """dry_run_import_users 替身的返回值（spec §3.2 ImportDryRunResult）。"""
+    """dry_run_import_users 替身返回的 ImportDryRunResult。"""
     return ImportDryRunResult(
         total=2,
         new_records=[],
@@ -197,7 +197,7 @@ def _fake_import_result(
     status: str = ImportBatchStatus.SUCCESS.value,
     failed_count: int = 0,
 ) -> ImportResult:
-    """batch_create_users_from_records 替身的返回值（spec §3.3 ImportResult）。"""
+    """batch_create_users_from_records 替身返回的 ImportResult。"""
     return ImportResult(
         batch_id="batch-xxx",
         status=status,
@@ -264,7 +264,7 @@ async def test_endpoint_reads_upload_with_hard_size_bound() -> None:
 
 
 class TestPostImportAuth:
-    """spec §5.1 line 2133：权限 system:user:import。"""
+    """验证 system:user:import 权限。"""
 
     async def test_no_token_returns_401(self, client):
         """未带 Authorization → OAuth2PasswordBearer 抛 401。"""
@@ -302,7 +302,7 @@ class TestPostImportAuth:
 
 
 class TestPostImportDryRun:
-    """spec §5.1 line 2136-2151：dry_run=true 预检响应。"""
+    """验证 dry_run=true 的预检响应。"""
 
     async def test_returns_preview_token_and_expires_at(self, client, admin_token):
         """dry_run=true → 200 + data.previewToken + data.expiresAt。"""
@@ -396,7 +396,7 @@ class TestPostImportDryRun:
 
 
 class TestPostImportExecute:
-    """spec §5.1 line 2156-2175：正式导入响应（含 idempotentReplay）。"""
+    """验证正式导入响应包含 idempotentReplay。"""
 
     async def test_execute_with_preview_token_returns_batch_id(
         self, client, admin_token
@@ -442,7 +442,7 @@ class TestPostImportExecute:
         mock_execute.assert_awaited_once()
 
     async def test_execute_passes_sync_mode_to_service(self, client, admin_token):
-        """v2.2 P1 #2.24：sync_mode 透传到 batch_create_users_from_records。"""
+        """sync_mode 应透传到 batch_create_users_from_records。"""
         with (
             patch(
                 f"{_API_MODULE}.parse_import_excel",
@@ -475,7 +475,7 @@ class TestPostImportExecute:
     async def test_execute_returns_idempotent_replay_when_service_says_so(
         self, client, admin_token
     ):
-        """v2.2 P0 #2.27：service 返回 idempotent_replay=True → 响应透传。"""
+        """service 返回 idempotent_replay=True 时响应应透传。"""
         replay_result = ImportResult(
             batch_id="batch-xxx",
             status=ImportBatchStatus.SUCCESS.value,
@@ -518,7 +518,7 @@ class TestPostImportExecute:
         assert body["data"]["idempotentReplay"] is True
 
     async def test_missing_preview_token_returns_422(self, client, admin_token):
-        """spec §5.1 line 2180：dry_run=false 缺 preview_token → 422。"""
+        """dry_run=false 且缺少 preview_token 时返回 422。"""
         response = await client.post(
             "/system/user/import",
             headers={"Authorization": f"Bearer {admin_token}"},
@@ -539,7 +539,7 @@ class TestPostImportExecute:
 
 
 class TestPostImportValidation:
-    """spec §2.10 / §5.1 + §5.7：MIME / 大小 / 行数 / 必填字段。"""
+    """验证 MIME、大小、行数和必填字段约束。"""
 
     async def test_missing_file_returns_422(self, client, admin_token):
         """multipart 缺 file 字段 → FastAPI 422。"""
@@ -551,7 +551,7 @@ class TestPostImportValidation:
         assert response.status_code == 422
 
     async def test_missing_reason_returns_422(self, client, admin_token):
-        """spec §2.30：reason 必填。"""
+        """reason 必填。"""
         response = await client.post(
             "/system/user/import",
             headers={"Authorization": f"Bearer {admin_token}"},
@@ -566,7 +566,7 @@ class TestPostImportValidation:
         assert response.status_code == 422
 
     async def test_invalid_mime_returns_400(self, client, admin_token):
-        """spec §2.10 + §5.7：MIME 不在白名单 → 400 + AI_IMPORT_INVALID_MIME。"""
+        """MIME 不在白名单时返回 400 AI_IMPORT_INVALID_MIME。"""
         response = await client.post(
             "/system/user/import",
             headers={"Authorization": f"Bearer {admin_token}"},
@@ -584,7 +584,7 @@ class TestPostImportValidation:
         assert body["errorCode"] == "AI_IMPORT_INVALID_MIME"
 
     async def test_file_too_large_returns_400(self, client, admin_token):
-        """spec §2.10：> 10MB → 400 + AI_IMPORT_FILE_TOO_LARGE。"""
+        """文件超过 10MB 时返回 400 AI_IMPORT_FILE_TOO_LARGE。"""
         response = await client.post(
             "/system/user/import",
             headers={"Authorization": f"Bearer {admin_token}"},
@@ -602,7 +602,7 @@ class TestPostImportValidation:
         assert body["errorCode"] == "AI_IMPORT_FILE_TOO_LARGE"
 
     async def test_field_errors_returns_400_with_errors(self, client, admin_token):
-        """spec §2.12：ImportErrorCollection → 400 + errors[] 含全部 FailedRow。"""
+        """ImportErrorCollection 应返回 400 和全部 FailedRow。"""
         # parser 抛 ImportErrorCollection
         fake_errors = [
             FailedRow(
@@ -641,10 +641,10 @@ class TestPostImportValidation:
 
 
 class TestPostImportServiceExceptionPropagation:
-    """service 抛异常 → API 层应透传给全局 exception handler（spec §5.7）。"""
+    """service 异常应透传给全局 exception handler。"""
 
     async def test_preview_invalid_returns_422(self, client, admin_token):
-        """spec §5.1 line 2180：preview_token 三重校验失败 → 422 + AI_IMPORT_PREVIEW_INVALID。"""
+        """preview_token 校验失败时返回 422 AI_IMPORT_PREVIEW_INVALID。"""
         with (
             patch(
                 f"{_API_MODULE}.parse_import_excel",
@@ -681,7 +681,7 @@ class TestPostImportServiceExceptionPropagation:
         assert body["errorCode"] == "AI_IMPORT_PREVIEW_INVALID"
 
     async def test_batch_running_returns_422(self, client, admin_token):
-        """spec §5.7：批次 RUNNING → 422 + AI_IMPORT_BATCH_RUNNING。"""
+        """批次处于 RUNNING 时返回 422 AI_IMPORT_BATCH_RUNNING。"""
         with (
             patch(
                 f"{_API_MODULE}.parse_import_excel",

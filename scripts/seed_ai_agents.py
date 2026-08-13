@@ -5,7 +5,7 @@ AI Agent 内置数据填充
 
 按 code upsert：已存在则 UPDATE name/description/display_order（保留部署方自定义的
 enabled / system_prompt / model_preference），不存在则 INSERT 完整行。
-对应 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §7.3 + §10.1。
+集中定义内置 Agent 的初始配置。
 
 所有内置 Agent 默认 enabled=False（开源 TOB 默认禁用，部署方按需启用），
 system_prompt="" 留给部署方填业务领域知识，model_preference=None 用全局默认。
@@ -25,7 +25,7 @@ from app.core.config import settings
 from app.core.id_generator import next_id
 from app.modules.ai.models.agent import AiAgent
 
-# 内置 Agent 定义（spec §10.1）
+# 内置 Agent 定义。
 # display_order 决定 UI 列表顺序；shared 必须存在（file.parse 等 tool 归属它）
 AGENT_SEED = [
     {
@@ -133,9 +133,9 @@ async def seed_ai_agents() -> None:
                 name=item["name"],
                 description=item["description"],
                 display_order=item["display_order"],
-                enabled=False,  # spec §10.1: 开源 TOB 默认禁用
+                enabled=False,  # 开源 TOB 默认禁用。
                 is_builtin=True,  # 内置 Agent，UI 禁止删除
-                system_prompt="",  # 部署方自定义（§7.6 与硬编码 SAFETY_PREAMBLE 拼接）
+                system_prompt="",  # 部署方自定义，并与固定 SAFETY_PREAMBLE 拼接。
                 model_preference=None,  # 用全局默认 openai:gpt-4o
             )
             db.add(agent)

@@ -1,6 +1,6 @@
 """add ai_agent.daily_quota_per_user for per-agent L2 quota
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §6.4 SR-16（2026-07-20 v1.5+），
+为 Agent 增加每用户日配额上限，
 ai_agent 表加 daily_quota_per_user 字段（nullable，None=仅走全局 L2）。
 
 叠加不替代全局 L2：executor 先 check_l2_daily_quota（全局），再 check_l2_agent_quota
@@ -33,7 +33,7 @@ def upgrade() -> None:
             "daily_quota_per_user",
             sa.Integer(),
             nullable=True,
-            comment="v1.5+ per-agent 日配额上限，None=仅走全局 L2（spec §6.4 SR-16）",
+            comment="Agent 日配额上限，None 表示仅使用全局 L2 配额",
         ),
     )
 

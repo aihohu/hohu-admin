@@ -1,20 +1,12 @@
-"""ImportService 主流程（v2.2 P0/P1）。
-
-Task 9：dry_run_import_users（spec §3.6 line 2049-2066）
-Task 10：batch_create_users_from_records（spec §3.6 line 2068-2097）
+"""用户导入预览、执行、查询、取消与清理主流程。
 
 职责：
-- dry_run_import_users：四象限分类 + preview_token + Redis cache（详见 Task 9）
+- dry_run_import_users：四象限分类、preview_token 和 Redis cache
 - batch_create_users_from_records：
-  - preview_token 三重校验（file_sha256 + records_hash + operator_id，spec §2.19）
-  - CAS PREVIEW_DONE → RUNNING（spec §2.27 幂等核心）
-  - chunk 100 rows + 行级 savepoint（spec §2.20）
-  - IntegrityError 区分 user_name UNIQUE → AI_IMPORT_USERNAME_DUPLICATE（spec §2.25）
-  - on_conflict skip / overwrite / fail_fast（spec §2.21）
-  - 写 batch_log（EXECUTE_START / CHUNK_PROGRESS / EXECUTE_FINISH，spec §2.28）
-  - failed_rows 文件化（spec §3.3）
-
-parse（已 Task 8 在 import_parser.py）/ export（Task 11）后续补。
+  - 校验 file_sha256、records_hash 和 operator_id，确保执行内容与预览一致
+  - CAS PREVIEW_DONE → RUNNING，保证幂等和并发安全
+  - 每 100 行一个 chunk，每行使用 savepoint 隔离可恢复错误
+  - 支持 skip / overwrite / fail_fast，并持久化批次日志和失败清单
 """
 
 import hashlib
@@ -76,7 +68,7 @@ from app.modules.system.user.schemas import (
     UserImportRecord,
 )
 
-#: Redis key 前缀 + TTL（spec line 534 + 557：10min cache only）
+#: Redis 只缓存 preview_token 到 batch_id 的映射，事实源仍是数据库。
 _PREVIEW_REDIS_PREFIX = "user_import:preview:"
 _PREVIEW_REDIS_TTL_SECONDS = 600
 
@@ -86,22 +78,22 @@ _PREVIEW_TOKEN_LENGTH = 32
 
 
 def _generate_batch_id() -> str:
-    """UUID-style batch_id（spec §3.6 line 1749）。"""
+    """生成 URL-safe batch_id。"""
     return secrets.token_urlsafe(_BATCH_ID_LENGTH)[:_BATCH_ID_LENGTH]
 
 
 def _generate_preview_token() -> str:
-    """preview_token：URL-safe 随机串（spec §2.19）。"""
+    """生成不可枚举的 URL-safe preview_token。"""
     return secrets.token_urlsafe(_PREVIEW_TOKEN_LENGTH)[:_PREVIEW_TOKEN_LENGTH]
 
 
 def _compute_file_sha256(file_bytes: bytes) -> str:
-    """file_sha256：execute 三重校验用（spec §2.19 line 575）。"""
+    """计算文件哈希，执行时用于校验预览输入未变化。"""
     return hashlib.sha256(file_bytes).hexdigest()
 
 
 def _compute_records_hash(records: list[UserImportRecord]) -> str:
-    """records_hash：序列化 records 为 sorted JSON 后 sha256（spec §2.19 line 577）。
+    """将 records 稳定序列化后计算哈希。
 
     排序保证：相同 records → 相同 hash（防 list 顺序变化误报）。
     row_num 是 record 的天然排序键。
@@ -126,20 +118,20 @@ def _truncate(
 
 
 def _validate_reason(reason: str) -> str:
-    """reason 入口校验（spec §2.30 v2.2 P1-3）。
+    """对业务理由做 service 层防御性校验。
 
     API 层 ReasonSchema 已校验，service 层 defense-in-depth（AI tool 直接调用时
     也能拦住）。strip 后 1-256 字符；不通过抛 AI_IMPORT_REASON_REQUIRED。
     """
     if reason is None:
         raise BusinessRuleException(
-            "reason 必填（spec §2.30）",
+            "reason 必填",
             error_code="AI_IMPORT_REASON_REQUIRED",
         )
     stripped = reason.strip()
     if not stripped or len(stripped) > 256:
         raise BusinessRuleException(
-            "reason 必填且长度 1-256 字符（spec §2.30）",
+            "reason 必填且长度 1-256 字符",
             error_code="AI_IMPORT_REASON_REQUIRED",
         )
     return stripped
@@ -155,7 +147,7 @@ async def _classify_records(
     list[FailedRow],
     list[FailedRow],
 ]:
-    """四象限分类核心逻辑（spec §3.6 line 2060-2062）。
+    """将导入记录分类为新增、已存在、冲突和越权四类。
 
     顺序：先做越界集合校验（一次性算所有行的 out_of_scope），再逐行做 conflict
     反查；剩余行按 resolve_existing_user 命中分 new / exists。
@@ -210,7 +202,7 @@ async def _classify_records(
                 )
                 continue
 
-        # 命中已存在：spec §2.24 line 874，按 user_name 命中归 exists
+        # 按 user_name 命中已有用户时归入 exists，由冲突策略决定后续动作。
         existing, _matched_by_emp = await resolve_existing_user(db, record)
         if existing is not None:
             exists_records.append(record)
@@ -230,21 +222,21 @@ async def dry_run_import_users(
     *,
     on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
 ) -> tuple[ImportDryRunResult, UserImportBatch]:
-    """预检 + 生成 preview_token（spec §3.6 line 2049-2066）。
+    """预检导入内容并生成 preview_token。
 
     流程：
-    1. 入口校验 reason（spec §2.30）
+    1. 校验业务理由
     2. 算 file_sha256 / records_hash / preview_token / batch_id
     3. INSERT sys_user_import_batch (status=CREATED)
     4. 四象限分类（new / exists / conflict / out_of_scope）
-    5. 截断每个象限到 MAX_PREVIEW_RECORDS（spec §3.2）
+    5. 截断每个象限到 MAX_PREVIEW_RECORDS
     6. CAS 状态 CREATED → PREVIEW_DONE（validate_transition 校验合法）
-    7. Redis cache preview_token → batch_id（10min TTL，spec §2.19）
+    7. 在 Redis 缓存 preview_token → batch_id，TTL 10 分钟
     8. 返回 (ImportDryRunResult, batch)，调用方拿 preview_token 给前端
 
     Notes:
         - Service 层不 commit（API 层负责）；outer-transaction rollback 时 INSERT 自动撤销
-        - Redis cache 即使后续丢失，execute 仍可凭 preview_token 反查 DB（spec §2.19 反例 2）
+        - Redis 缓存丢失时，执行仍可凭 preview_token 回查数据库
 
     Raises:
         BusinessRuleException: ``AI_IMPORT_REASON_REQUIRED`` — reason 缺失或超长
@@ -272,7 +264,7 @@ async def dry_run_import_users(
     db.add(batch)
     await db.flush()  # 拿默认 server_default 字段（created_at 等）
 
-    # Task 34 / spec §3.6 line 1134：0 行 + 分类异常 → CREATED → FAILED
+    # 空文件或分类异常必须把已创建批次收口为 FAILED。
     # 反例（旧行为）：batch 停留在 CREATED 成僵尸行，审计看到「创建一年后还是 CREATED」
     if len(records) == 0:
         await _transition_batch_status(
@@ -282,7 +274,7 @@ async def dry_run_import_users(
             ImportBatchStatus.FAILED,
         )
         raise BusinessRuleException(
-            "文件解析后 0 行有效记录（spec §3.6 CREATED→FAILED）",
+            "文件解析后 0 行有效记录",
             error_code="AI_IMPORT_EMPTY_FILE",
         )
 
@@ -295,13 +287,13 @@ async def dry_run_import_users(
             out_of_scope_records,
         ) = await _classify_records(db, records, current_user)
 
-        # 3. 截断（spec §3.2 v2.2 P1）
+        # 3. 截断预览记录。
         new_truncated_list, new_trunc = _truncate(new_records)
         exists_truncated_list, exists_trunc = _truncate(exists_records)
         conflict_truncated_list, conflict_trunc = _truncate(conflict_records)
         oos_truncated_list, oos_trunc = _truncate(out_of_scope_records)
 
-        # 4. UPDATE batch summary + status=PREVIEW_DONE（spec line 2063）
+        # 4. 更新批次汇总并进入 PREVIEW_DONE。
         validate_transition(ImportBatchStatus.CREATED, ImportBatchStatus.PREVIEW_DONE)
         batch.summary_new = len(new_records)
         batch.summary_exists = len(exists_records)
@@ -310,7 +302,7 @@ async def dry_run_import_users(
         batch.status = ImportBatchStatus.PREVIEW_DONE
         await db.flush()
 
-        # 5. Redis cache（spec §2.19 v2.2 P0：仅 cache batch_id）
+        # 5. Redis 只缓存 batch_id。
         cache_payload = json.dumps({"batch_id": batch_id})
         await redis_module.redis_client.setex(
             f"{_PREVIEW_REDIS_PREFIX}{preview_token}",
@@ -318,7 +310,7 @@ async def dry_run_import_users(
             cache_payload,
         )
     except Exception:
-        # Task 34 / spec §3.6 line 1134：dry_run 阶段任何异常 → CREATED → FAILED
+        # 预览阶段任何异常都必须把批次收口为 FAILED。
         # 防 batch 停留 CREATED 成僵尸行（审计反查看到「创建一年后还是 CREATED」）
         await _transition_batch_status(
             db,
@@ -347,10 +339,7 @@ async def get_batch_by_preview_token(
     db: AsyncSession,
     preview_token: str,
 ) -> UserImportBatch | None:
-    """凭 preview_token 反查 batch（spec §2.19 v2.2 P0：先 Redis 后 DB）。
-
-    Task 10 execute 阶段使用；本模块集中管理 cache fallback 逻辑。
-    """
+    """凭 preview_token 反查批次，先查 Redis，未命中时回退数据库。"""
     # 1. Redis 加速
     cached = await redis_module.redis_client.get(
         f"{_PREVIEW_REDIS_PREFIX}{preview_token}"
@@ -365,7 +354,7 @@ async def get_batch_by_preview_token(
             ).scalar_one_or_none()
             if row is not None:
                 return row
-            # spec §2.19 反例 2：Redis 命中但 batch 不存在（脏数据）→ fall through 到 DB 反查
+            # Redis 映射可能是脏数据，批次不存在时回退数据库反查。
 
     # 2. DB 反查（cache miss / 脏数据 fallback）
     return (
@@ -378,7 +367,7 @@ async def get_batch_by_preview_token(
 
 
 # ============================================================================
-# Task 10: batch_create_users_from_records（spec §3.6 line 2068-2097）
+# ============ 执行导入 ============
 # ============================================================================
 
 
@@ -395,7 +384,7 @@ def _extract_constraint_name(exc: IntegrityError) -> str:
 
 
 def _classify_integrity_error(exc: IntegrityError) -> str:
-    """UNIQUE IntegrityError → 业务 error_code（spec §2.25 line 921-932）。
+    """将 UNIQUE IntegrityError 转换为稳定业务错误码。
 
     - ``ix_sys_user_user_name`` → ``AI_IMPORT_USERNAME_DUPLICATE``
     - ``uq_sys_user_employee_no`` → ``AI_IMPORT_EMPLOYEE_NO_DUPLICATE``
@@ -429,7 +418,7 @@ async def _write_batch_log(
     to_status: ImportBatchStatus | None = None,
     detail: dict,
 ) -> None:
-    """写一行 batch_log（spec §2.28）。
+    """写入一条批次审计日志。
 
     _transition_batch_status 内部已经写过部分状态转换 log；本 helper 用于
     EXECUTE_START / CHUNK_PROGRESS / EXECUTE_FINISH 等业务事件。
@@ -449,7 +438,7 @@ async def _write_batch_log(
 
 
 def _failed_rows_to_xlsx_bytes(failed_rows: list[FailedRow]) -> bytes:
-    """生成 failed_rows Excel 文件 bytes（spec §3.3 line 1700 + §5.4）。
+    """生成失败行 Excel 文件。
 
     列顺序固定：row_num / field / value / reason / error_code。
     用 openpyxl 内存 workbook → BytesIO，避免磁盘 IO。
@@ -470,7 +459,7 @@ def _determine_end_status(
     success_count: int,
     failed_count: int,
 ) -> ImportBatchStatus:
-    """execute 完成后状态判定（spec §2.26 line 970-976）。
+    """根据成功和失败数量判断执行终态。
 
     - failed_count == 0 → SUCCESS（全部成功）
     - failed_count > 0 且 success_count > 0 → PARTIAL_SUCCESS
@@ -528,7 +517,7 @@ async def _process_overwrite_row(
     record: UserImportRecord,
     existing: User,
 ) -> None:
-    """overwrite 已存在用户：仅更新 OVERWRITE_ALLOWED 字段（spec §2.21）。
+    """覆盖已有用户时只更新 OVERWRITE_ALLOWED 字段。
 
     user_name / hashed_password / user_id / create_time 永不覆盖。
     """
@@ -553,7 +542,7 @@ async def _process_overwrite_row(
 
     await db.flush()
 
-    # 覆盖 roles / dept（全量重置，spec §2.21 line 740-744）
+    # roles 和 dept 使用全量重置语义。
     if role_ids:
         await db.execute(
             user_roles.delete().where(user_roles.c.user_id == existing.user_id)
@@ -577,7 +566,7 @@ async def _handle_idempotent_replay(
     db: AsyncSession,
     batch_id: str,
 ) -> ImportResult:
-    """CAS 失败后查最新 batch 行，按状态返回幂等响应或抛异常（spec §2.27 line 1205-1210）。
+    """CAS 失败后读取最新批次，按当前状态返回幂等响应或抛错。
 
     使用 ``populate_existing`` 强制从 DB 重读，绕开 identity map 缓存的 stale 实例
     （raw UPDATE 不更新 ORM session 的实例属性）。
@@ -631,18 +620,17 @@ async def batch_create_users_from_records(
     sync_mode: EmployeeNoSyncMode = EmployeeNoSyncMode.CREATE_ONLY,
     file_storage: FileStorage | None = None,
 ) -> ImportResult:
-    """批量新建 / 更新（spec §3.6 line 2068-2097）。
+    """执行批量新建或更新。
 
     流程（#2.19-2.22 + #2.25-2.28 全套）：
-    1. 凭 preview_token 反查 batch（Redis 加速 + DB SoT，spec §2.19）
-    2. reason 一致性校验（preview vs execute，spec §2.30）
-    3. 三重校验：file_sha256 + records_hash + operator_id 一致（spec §2.19 line 575-577）
-    4. CAS PREVIEW_DONE → RUNNING（spec §2.27 幂等核心）
+    1. 凭 preview_token 反查批次，数据库是事实源
+    2. 校验预览和执行的业务理由一致
+    3. 校验 file_sha256、records_hash 和 operator_id 一致
+    4. CAS PREVIEW_DONE → RUNNING
        - CAS 失败 → 幂等重放或抛错（详见 _handle_idempotent_replay）
     5. dry_run 二次跑分类（防 dry_run 后数据变化）→ conflict + oos 直接进 failed_rows
     6. exists_records 按 sync_mode + on_conflict 分流：skipped / failed / overwrite
-    7. chunk 100 rows（spec §2.20）：行级 savepoint + 可恢复错误白名单
-       - IntegrityError 区分 user_name UNIQUE → AI_IMPORT_USERNAME_DUPLICATE（spec §2.25）
+    7. 每 100 行一个 chunk，使用行级 savepoint 和可恢复错误白名单
     8. 写 failed_rows xlsx 文件 → failed_rows_file
     9. 状态转 SUCCESS / PARTIAL_SUCCESS / FAILED + counts + finished_at
     10. 返回 ImportResult（含 failed_rows_preview 前 20 条）
@@ -671,10 +659,10 @@ async def batch_create_users_from_records(
             error_code="AI_IMPORT_PREVIEW_INVALID",
         )
 
-    # 2. reason 一致性（spec §2.30）
+    # 2. 业务理由一致性。
     validate_reason_consistency(batch.reason, reason_clean)
 
-    # 3. 三重校验（spec §2.19 line 575-577）
+    # 3. 文件、记录和操作人一致性。
     expected_file_sha256 = _compute_file_sha256(file_bytes)
     expected_records_hash = _compute_records_hash(records)
     if (
@@ -687,7 +675,7 @@ async def batch_create_users_from_records(
             error_code="AI_IMPORT_PREVIEW_INVALID",
         )
 
-    # 4. CAS PREVIEW_DONE → RUNNING（spec §2.27 幂等核心）
+    # 4. CAS 进入 RUNNING，保证并发与幂等。
     started_at = datetime.now()
     cas_ok = await _transition_batch_status(
         db,
@@ -701,7 +689,7 @@ async def batch_create_users_from_records(
     # raw UPDATE 不更新 ORM session 实例；refresh 让后续读取 / 测试断言看到新状态
     await db.refresh(batch)
 
-    # 5. EXECUTE_START log（spec §2.28 line 1256）
+    # 5. 写 EXECUTE_START 日志。
     await _write_batch_log(
         db,
         batch,
@@ -778,11 +766,11 @@ async def batch_create_users_from_records(
         else:  # overwrite
             rows_to_overwrite.append((record, existing))
 
-    # 8. 默认密码（spec §2.5）
+    # 8. 读取系统默认密码。
     default_password = await get_default_password(db)
     hashed_password = get_password_hash(default_password)
 
-    # 9. chunk + savepoint 落库（spec §2.20）
+    # 9. 分块并按行 savepoint 落库。
     # 行级处理统一封装为 (kind, record, existing) 三元组
     rows_to_process: list[tuple[str, UserImportRecord, User | None]] = [
         ("create", r, None) for r in rows_to_create
@@ -838,7 +826,7 @@ async def batch_create_users_from_records(
                 )
             break
 
-        # CHUNK_PROGRESS log（spec §2.28 line 1257）
+        # 写 CHUNK_PROGRESS 日志。
         await _write_batch_log(
             db,
             batch,
@@ -852,7 +840,7 @@ async def batch_create_users_from_records(
             },
         )
 
-    # 10. 写 failed_rows xlsx 文件（spec §3.3 + §2.22）
+    # 10. 写失败行文件。
     failed_rows_file: str | None = None
     if failed_rows:
         xlsx_bytes = _failed_rows_to_xlsx_bytes(failed_rows)
@@ -863,7 +851,7 @@ async def batch_create_users_from_records(
             suffix=".xlsx",
         )
 
-    # 11. 状态转 SUCCESS / PARTIAL_SUCCESS / FAILED（spec §2.26）
+    # 11. 根据执行结果进入终态。
     end_status = _determine_end_status(
         success_count + overwritten_count,
         len(failed_rows),
@@ -885,7 +873,7 @@ async def batch_create_users_from_records(
     )
     await db.refresh(batch)  # 同步 ORM 实例（failed_rows_file / status 等）
 
-    # 12. EXECUTE_FINISH log（spec §2.28 line 1258）
+    # 12. 写 EXECUTE_FINISH 日志。
     await _write_batch_log(
         db,
         batch,
@@ -962,7 +950,7 @@ async def get_batch_detail(
     db: AsyncSession,
     batch_id: str,
 ) -> tuple[UserImportBatch | None, str | None]:
-    """按 batch_id 查询批次详情 + 操作人 user_name（spec §5.4 v2.2 P2）。
+    """按 batch_id 查询批次详情和操作人 user_name。
 
     一次性 outerjoin sys_user 拿 operator_name，避免 N+1。
 
@@ -997,22 +985,21 @@ async def list_batch_logs(
     current: int = 1,
     size: int = 10,
 ) -> tuple[list[tuple[UserImportBatchLog, str | None]], int]:
-    """按 batch_id 分页查 batch_log（spec §5.5 v2.2 P2 #2.28）。
+    """按 batch_id 分页查询批次日志。
 
-    spec §2.28 line 1269：``(batch_id, created_at)`` 索引 → 按 created_at ASC
+    使用 ``(batch_id, created_at)`` 索引并按 created_at ASC
     排序返回完整状态转换历史（CREATED → PREVIEW_DONE → EXECUTE_START →
     CHUNK_PROGRESS * N → EXECUTE_FINISH）。
 
     outerjoin sys_user 拿 operator_name（同 ``get_batch_detail``）：user 删除时
-    返 ``None``，log 行保留（审计完整性 > 引用完整性，spec §2.28 反例 5）。
+    返回 ``None``，日志行仍保留，优先保证审计完整性。
 
     Args:
         db: 异步数据库会话
         batch_id: 批次 ID
         event: 可选事件类型过滤（CREATED/PREVIEW_DONE/EXECUTE_START/CHUNK_PROGRESS/
-            EXECUTE_FINISH/EXECUTE_FAILED/EXPIRED/CANCELLED）。决策 15a.x：
-            不在 API 层做 Literal 校验，前端传 typo 时返回空列表（spec §5.5
-            未要求严格校验 + 错误码 §5.7 无对应项）
+            EXECUTE_FINISH/EXECUTE_FAILED/EXPIRED/CANCELLED）。未知事件值返回空列表，
+            不额外引入请求校验错误。
         current: 页码（1-based）
         size: 每页数量
 
@@ -1050,7 +1037,7 @@ async def list_batches(
     db: AsyncSession,
     query: UserImportBatchQuery,
 ) -> tuple[list[tuple[UserImportBatch, str | None]], int]:
-    """分页查询导入批次列表（spec §5.4 v2.2 P2 line 2272-2278）。
+    """分页查询导入批次列表。
 
     支持 ``operator_id`` / ``status`` / ``created_at`` 时间窗过滤；按
     ``(created_at DESC, batch_id DESC)`` 排序保证分页稳定（同秒批次按 batch_id
@@ -1109,10 +1096,10 @@ async def list_batches(
     return rows, total
 
 
-#: spec §2.29 line 1335：协作式 cancel Redis 标志前缀（chunk loop 检查）
+#: 协作式取消标志前缀，由 chunk loop 检查。
 _CANCEL_REDIS_PREFIX = "user_import:cancel:"
 
-#: spec §2.29 line 1335：cancel 标志 TTL 1h（足够 chunk loop 检测）
+#: 取消标志保留 1 小时，覆盖正常 chunk 执行窗口。
 _CANCEL_REDIS_TTL_SECONDS = 3600
 
 
@@ -1124,14 +1111,14 @@ async def cancel_batch(
     *,
     file_storage: FileStorage | None = None,
 ) -> UserImportBatch:
-    """取消导入批次（spec §5.6 + §2.29 v2.2 P2）。
+    """取消导入批次。
 
     两种取消场景：
 
-    - **场景 1 PREVIEW_DONE → CANCELLED**（spec §2.26 line 1117 + §2.29 场景 1）：
+    - **PREVIEW_DONE → CANCELLED**：
       CAS 直接转 CANCELLED + 写 batch_log（event=CANCELLED）+ 删除 preview 文件
       + 删除 Redis preview cache。dry_run 完成态的批次可以无损取消（数据未落库）。
-    - **场景 2 RUNNING 协作式 cancel**（spec §2.29 场景 2 line 1296-1300）：
+    - **RUNNING 协作式取消**：
       设置 Redis 标志 ``user_import:cancel:{batch_id}``（TTL 1h），立即返回。
       chunk loop 在下一个 chunk 边界检测到标志 → break → 状态转 PARTIAL_SUCCESS
       （已 commit 的 chunk 保留，无法回滚）。
@@ -1152,7 +1139,7 @@ async def cancel_batch(
 
     Raises:
         NotFoundException: batch_id 不存在（``AI_IMPORT_BATCH_NOT_FOUND``）
-        AuthorizationException: 非 operator 本人且非超管（spec §2.29 line 1314-1316）
+        AuthorizationException: 非操作人本人且非超管
         UnprocessableEntityException: 状态不可取消（CREATED / SUCCESS /
             PARTIAL_SUCCESS / FAILED / EXPIRED / CANCELLED，
             ``AI_IMPORT_BATCH_NOT_CANCELLABLE``）
@@ -1166,7 +1153,7 @@ async def cancel_batch(
             error_code="AI_IMPORT_BATCH_NOT_FOUND",
         )
 
-    # 权限：operator 本人或超管（spec §2.29 line 1314-1316）
+    # 仅操作人本人或超管可取消。
     from app.core.rbac import is_super_admin  # noqa: PLC0415
 
     if batch.operator_id != operator.user_id and not is_super_admin(operator):
@@ -1175,8 +1162,7 @@ async def cancel_batch(
     now = datetime.now()
 
     if batch.status == ImportBatchStatus.PREVIEW_DONE:
-        # 场景 1：CREATED/PREVIEW_DONE → CANCELLED（v2.2 P1-2 改为仅 PREVIEW_DONE，
-        # spec §2.26 line 1117）。CAS 防并发 execute 与 cancel 同时跑。
+        # PREVIEW_DONE 直接转 CANCELLED；CAS 防止 execute 与 cancel 并发覆盖。
         ok = await _transition_batch_status(
             db,
             batch_id,
@@ -1196,7 +1182,7 @@ async def cancel_batch(
         batch.finished_at = now
         await db.flush()
 
-        # 写 batch_log（spec §2.28 + §2.29：CANCELLED 事件审计链路）
+        # 写入 CANCELLED 审计日志。
         await _write_batch_log(
             db,
             batch,
@@ -1211,7 +1197,7 @@ async def cancel_batch(
             },
         )
 
-        # 清理 preview 文件 + Redis cache（spec §2.29 line 1328-1329）
+        # 清理预览文件和 Redis 缓存。
         storage = file_storage or get_file_storage()
         try:
             await storage.delete(batch.file_storage_key)
@@ -1226,7 +1212,7 @@ async def cancel_batch(
 
     if batch.status == ImportBatchStatus.RUNNING:
         # 场景 2：协作式 cancel — 设置 Redis 标志，chunk loop 检测后 break
-        # spec §2.29 line 1334-1339
+        # RUNNING 由 chunk loop 协作检查取消标志。
         await redis_module.redis_client.setex(
             f"{_CANCEL_REDIS_PREFIX}{batch_id}",
             _CANCEL_REDIS_TTL_SECONDS,
@@ -1237,7 +1223,7 @@ async def cancel_batch(
         return batch
 
     # CREATED / SUCCESS / PARTIAL_SUCCESS / FAILED / EXPIRED / CANCELLED → 拒绝
-    # spec §2.29 line 1342-1343 + §2.26 line 1117（CREATED 不在 cancel-from-state）
+    # 其他状态不可取消。
     raise UnprocessableEntityException(
         "批次状态不可取消",
         error_code="AI_IMPORT_BATCH_NOT_CANCELLABLE",
@@ -1245,7 +1231,7 @@ async def cancel_batch(
 
 
 async def cleanup_expired_batches(db: AsyncSession) -> int:
-    """清理 90 天前终态 batch + 关联 failed_rows_file + preview 文件（spec §2.22.1）。
+    """清理 90 天前终态批次及其失败清单和预览文件。
 
     每日 02:00 cron 入口（``app.tasks.user_cleanup_tasks.clean_expired_import_batches``）。
     本函数不 commit，由 task wrapper / API 层负责。
@@ -1253,7 +1239,7 @@ async def cleanup_expired_batches(db: AsyncSession) -> int:
     Returns:
         删除的 batch 行数（含 CASCADE 自动删的 batch_log）
 
-    安全边界（决策 22.1）：
+    安全边界：
     - 只删 ``TERMINAL_STATUSES`` 内的 batch（SUCCESS / PARTIAL_SUCCESS / FAILED /
       EXPIRED / CANCELLED）；CREATED / PREVIEW_DONE / RUNNING 不动：
         - CREATED 90 天前不可能存在（dry_run 即时转入 PREVIEW_DONE）
@@ -1294,7 +1280,7 @@ async def cleanup_expired_batches(db: AsyncSession) -> int:
 
 
 async def cleanup_expired_previews(db: AsyncSession) -> int:
-    """PREVIEW_DONE 超 10min → EXPIRED + 删 preview 文件 + 写 batch_log（spec §2.26）。
+    """将超过 10 分钟的 PREVIEW_DONE 批次标记为 EXPIRED 并清理文件。
 
     每小时 cron 入口（``app.tasks.user_cleanup_tasks.clean_expired_import_previews``）。
     本函数不 commit。
@@ -1302,12 +1288,12 @@ async def cleanup_expired_previews(db: AsyncSession) -> int:
     Returns:
         标记为 EXPIRED 的 batch 行数
 
-    设计要点（决策 22.2）：
+    设计要点：
     - 用 CAS ``_transition_batch_status(PREVIEW_DONE → EXPIRED)`` 防并发覆盖：
       用户在 10min 边界刚 cancel / 刚 execute 时，CAS rowcount=0，本函数跳过不报错
     - 删 file_storage_key 用 ``try/except FileNotFoundError`` 兜底（cancel 流程
       可能已删过；双重删除不抛错）
-    - 写 batch_log EXPIRED event 进审计链路（spec §2.28 + §2.26 状态机），
+    - 写入 EXPIRED 批次日志，
       operator_id 用 batch.operator_id（系统触发但归属原操作人，便于审计反查）
     """
     cutoff = datetime.now() - timedelta(minutes=10)

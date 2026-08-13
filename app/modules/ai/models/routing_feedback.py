@@ -1,4 +1,4 @@
-"""spec §7.1c: ai_routing_feedback 表 — 用户对路由决策的反馈历史轨迹（append-only）.
+"""用户对路由决策的追加式反馈历史表。
 
 与 ai_message.routing_feedback 配合：后者是当前态（覆盖更新），本表是历史轨迹.
 """

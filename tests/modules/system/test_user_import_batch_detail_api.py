@@ -1,20 +1,19 @@
-"""GET /system/user/import/{batch_id} HTTP 契约测试（Task 15，spec §5.4）。
+"""``GET /system/user/import/{batch_id}`` HTTP 契约测试。
 
-spec §5.4 v2.2 P2 line 2229-2278：按 batch_id 查导入结果（前端导入历史 +
-Phase 3 异步轮询 + 审计反查）。
+按 batch_id 查询导入结果，供导入历史、异步轮询和审计反查使用。
 
 只验证 HTTP 契约层（路由 / 200 字段映射 / 404 / auth gating），
 service 层（get_batch_detail）用 patch 替身。完整业务流程在
 ``test_user_import_service.py`` / ``test_user_import_api.py`` 已覆盖。
 
 覆盖：
-- 401 未登录 / 无效 JWT（auth gating，spec §5.4 line 2234）
-- 200 + UserImportBatchResponse 字段映射（spec §5.4 line 2238-2264）
-- 404 + AI_IMPORT_BATCH_NOT_FOUND（spec §5.7 错误码表）
-- expires_at 计算（spec §5.4 line 2262 + §2.19 preview TTL 10min）
-- sync_mode=None（决策：当前不查 batch_log，spec §5.4 line 2258 字段保留）
-- operator_name 反查 sys_user（spec §5.4 line 2246）
-- system:user:list 权限（spec §5.4 line 2234：list 即可）
+- 401 未登录或 JWT 无效
+- 200 响应字段映射
+- 404 AI_IMPORT_BATCH_NOT_FOUND
+- expires_at 按状态计算
+- 当前不查询 batch_log，因此 sync_mode=None
+- operator_name 从 sys_user 反查
+- system:user:list 权限校验
 """
 
 from datetime import UTC, datetime, timedelta
@@ -95,7 +94,7 @@ def _make_batch_row(
 ) -> UserImportBatch:
     """构造一个 UserImportBatch ORM 实例替身。
 
-    默认值对齐 spec §5.4 line 2238-2264 示例（PARTIAL_SUCCESS，1500/400/50/50/100）。
+    默认构造 PARTIAL_SUCCESS 批次及各类计数。
     """
     now = datetime(2026, 8, 1, 14, 0, 0)
     return UserImportBatch(
@@ -128,7 +127,7 @@ def _make_batch_row(
 
 
 class TestGetBatchDetailAuth:
-    """spec §5.4 line 2234：权限 system:user:list（list 即可）。"""
+    """验证 system:user:list 权限。"""
 
     async def test_no_token_returns_401(self, client):
         response = await client.get("/system/user/import/batch-abc-001")
@@ -146,10 +145,10 @@ class TestGetBatchDetailAuth:
 
 
 class TestGetBatchDetailResponse:
-    """spec §5.4 line 2238-2264：返回 batch 详情。"""
+    """验证批次详情响应。"""
 
     async def test_returns_batch_fields(self, client, admin_token):
-        """200 + 全部字段映射正确（spec §5.4 line 2238-2264）。"""
+        """200 响应应正确映射全部公开字段。"""
         batch = _make_batch_row()
         with patch(
             f"{_API_MODULE}.get_batch_detail",
@@ -171,11 +170,11 @@ class TestGetBatchDetailResponse:
         assert data["filename"] == "users_20260801.xlsx"
         assert data["onConflict"] == "skip"
 
-        # 操作人（spec §5.4 line 2245-2246）
+        # 操作人。
         assert data["operatorId"] == "1"  # Snowflake 字符串化
         assert data["operatorName"] == "admin"
 
-        # 计数（spec §5.4 line 2247-2255）
+        # 导入计数。
         assert data["totalRows"] == 2000
         assert data["summaryNew"] == 1500
         assert data["summaryExists"] == 400
@@ -186,10 +185,10 @@ class TestGetBatchDetailResponse:
         assert data["overwrittenCount"] == 0
         assert data["failedCount"] == 100
 
-        # 失败行文件（spec §5.4 line 2256）
+        # 失败行文件。
         assert data["failedRowsFile"] == "/file/import-error/batch-abc-001.xlsx"
 
-        # 时间（spec §5.4 line 2259-2262，ISO 8601）
+        # ISO 8601 时间字段。
         assert data["createdAt"].startswith("2026-08-01T14:00:00")
         assert data["startedAt"].startswith("2026-08-01T14:01:00")
         assert data["finishedAt"].startswith("2026-08-01T14:02:00")
@@ -198,10 +197,10 @@ class TestGetBatchDetailResponse:
         assert data["expiresAt"] is not None
 
     async def test_does_not_expose_sensitive_fields(self, client, admin_token):
-        """spec §5.4 line 2238-2264 + 安全：不返 preview_token / file_sha256 /
+        """响应不得返回 preview_token、file_sha256、
         records_hash / reason（reason 进入审计链路但 GET 详情不暴露给前端列表）。
 
-        决策 15.x：preview_token 是 execute 凭证，泄露可被重放（spec §2.19）；
+        preview_token 是 execute 凭证，泄露后可被重放；
         file_sha256 / records_hash 是内部三重校验指纹，对前端无意义；
         reason 在 GET /import 列表场景下不宜返回（敏感），仅 audit 链路保留。
         """
@@ -218,9 +217,7 @@ class TestGetBatchDetailResponse:
         assert response.status_code == 200
         data = response.json()["data"]
         # 敏感字段不应出现在响应中
-        assert "previewToken" not in data, (
-            "preview_token 不应暴露给前端（spec §2.19 三重校验凭证）"
-        )
+        assert "previewToken" not in data, "preview_token 不应暴露给前端"
         assert "fileSha256" not in data
         assert "recordsHash" not in data
         assert "reason" not in data, (
@@ -228,7 +225,7 @@ class TestGetBatchDetailResponse:
         )
 
     async def test_operator_name_from_user_join(self, client, admin_token):
-        """spec §5.4 line 2246：operatorName 是 join sys_user 拿的 user_name。
+        """operatorName 从关联的 sys_user.user_name 获取。
 
         service 层返回 (batch, operator_name)，API 层透传到 response.operator_name。
         """
@@ -251,7 +248,7 @@ class TestGetBatchDetailResponse:
         assert mock_service.call_args.args[1] == "batch-abc-001"
 
     async def test_sync_mode_returns_none_when_not_in_batch(self, client, admin_token):
-        """spec §5.4 line 2258 syncMode 字段：sync_mode 不在 batch 表（在
+        """sync_mode 不在 batch 表中，
         batch_log.detail），决策：本版不查 batch_log，先返 None。
 
         字段保留为 spec 兼容（前端容错 null），后续 task 22 可补 batch_log 反查。
@@ -276,7 +273,7 @@ class TestGetBatchDetailResponse:
 
 
 class TestGetBatchDetailNotFound:
-    """spec §5.7：batch_id 不存在 → 404 AI_IMPORT_BATCH_NOT_FOUND。"""
+    """batch_id 不存在时返回 404 AI_IMPORT_BATCH_NOT_FOUND。"""
 
     async def test_not_found_returns_404(self, client, admin_token):
         with patch(
@@ -297,20 +294,20 @@ class TestGetBatchDetailNotFound:
 
 
 class TestGetBatchDetailExpiresAt:
-    """spec §5.4 line 2262 + §2.19 preview TTL 10min + 历史保留 24h。
+    """预检状态保留 10 分钟，终态批次保留 24 小时。
 
     决策 15.x：expires_at 按状态动态算：
-    - CREATED / PREVIEW_DONE：created_at + 10min（preview_token TTL，spec §2.19）
+    - CREATED / PREVIEW_DONE：created_at + 10 分钟
     - RUNNING：created_at + 10min（保险，RUNNING 不应长存）
     - SUCCESS / PARTIAL_SUCCESS / FAILED：finished_at + 24h（文件保留 24h，
-      spec §3.x 失败行文件存储默认 1 天 TTL）
+      失败行文件默认保留 1 天）
     - EXPIRED / CANCELLED：finished_at + 24h（若 finished_at 为 None，回退 created_at + 24h）
     """
 
     async def test_preview_state_expires_at_created_plus_10min(
         self, client, admin_token
     ):
-        """CREATED → expires_at = created_at + 10min（spec §2.19 preview TTL）。"""
+        """CREATED 状态的 expires_at 为 created_at + 10 分钟。"""
         created = datetime(2026, 8, 1, 14, 0, 0)
         batch = _make_batch_row(
             status=ImportBatchStatus.CREATED,
@@ -413,7 +410,7 @@ class TestGetBatchDetailExpiresAt:
         )
 
     async def test_failed_rows_file_optional(self, client, admin_token):
-        """spec §5.4 line 2256：failed_rows_file 可空（无失败行时）。"""
+        """没有失败行时 failed_rows_file 可以为空。"""
         batch = _make_batch_row(
             status=ImportBatchStatus.SUCCESS,
             failed_count=0,

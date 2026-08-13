@@ -1,12 +1,12 @@
-"""AI Agent 列表端点（spec §4.3 / §10.3）
+"""AI Agent 用户端与管理端接口。
 
 GET /ai/agents 返回当前用户可见的 Agent 列表：
   - 超管：所有 enabled=True 的 Agent
   - 普通用户：role_ai_agent 关联 + shared Agent（直通）
 
-可见性查询逻辑下沉到 service/agent_visibility.py（spec §6.3 单一真相源）.
+可见性查询统一由 ``service/agent_visibility.py`` 提供。
 
-另含 admin 端点 router（spec §6.1，path 走 `/ai/admin/agents` 与用户视角分离，
+管理端使用 ``/ai/admin/agents`` 路径，与用户视角分离，
 在 main.py 用 admin_router + 独立 prefix 注册，避免与 /ai/agents 用户视角路径混用）.
 """
 
@@ -34,7 +34,7 @@ async def list_agents(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ResponseModel[list[dict]]:
-    """spec §4.3 / §10.3: 列出当前用户可见的 Agent（query 逻辑下沉到 service）.
+    """列出当前用户可见的 Agent，查询逻辑由 service 统一维护。
 
     Returns:
         agents: [{code, name, description, modelPreference, displayOrder}, ...]
@@ -55,7 +55,7 @@ async def list_agents(
     )
 
 
-# ===================== Multi-Agent admin UI endpoints (spec §6.1) =====================
+# ===================== Multi-Agent 管理端接口 =====================
 # 决策 #2：admin 视角全量返回（含禁用），与 GET /ai/agents 用户视角分离.
 # 决策 #21：admin 端点走 /ai/admin/agents（spec 强约束），与用户视角 /ai/agents 区分.
 # Service 不 commit，PUT 端点显式 `await db.commit()`（分层铁律 #9）.

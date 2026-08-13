@@ -1,15 +1,15 @@
-"""Excel/CSV 解析 + 字段校验（spec §3.6 line 2036, Task 8）。
+"""Excel/CSV 解析与字段校验。
 
 职责：
 - ``parse_import_excel(file_bytes, mime_type) -> list[UserImportRecord]``
-- MIME 白名单 / 文件大小 / 行数硬上限校验（spec §2.10）
-- 字段级格式校验：必填 / 长度 / 邮箱 / 手机号 / gender / status（spec §2.12）
+- MIME 白名单、文件大小和行数硬上限校验
+- 字段级格式校验：必填、长度、邮箱、手机号、gender、status
 - 失败行一次性抛 ``ImportErrorCollection``（不一次一个）
-- ``employee_no`` 空串 → ``None`` 规范化（spec §2.24）
+- ``employee_no`` 空串规范化为 ``None``
 
 **不在本模块做**：
-- ``dept_input`` / ``role_input`` 存在性反查（留给 dry_run，spec line 2045）
-- ``file_sha256`` 计算（dry_run 调用方算，spec line 2056）
+- ``dept_input`` / ``role_input`` 存在性反查（由预览阶段处理）
+- ``file_sha256`` 计算（由预览调用方处理）
 - DB 查询（解析层纯函数，便于复用 + 单测）
 
 user_service.parse_import_excel（service 层）是 thin wrapper：直接 delegate 到本模块。
@@ -32,12 +32,12 @@ from app.core.exceptions import BusinessRuleException
 from app.modules.system.user.constants import USER_IMPORT_MAX_ROWS
 from app.modules.system.user.schemas import FailedRow, UserImportRecord
 
-#: spec §2.10 line 277 MIME 白名单
+#: 允许导入的 MIME 类型。
 MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 MIME_CSV = "text/csv"
 ALLOWED_MIME_TYPES: frozenset[str] = frozenset({MIME_XLSX, MIME_CSV})
 
-#: spec §2.10：≤ 10MB（常量在模块内，避免 settings 误改导致安全边界漂移）
+#: 固定 10MB 安全上限，避免运行时配置意外放宽边界。
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
 XLSX_MAX_ZIP_ENTRIES = 2048
 XLSX_MAX_ENTRY_UNCOMPRESSED_BYTES = 32 * 1024 * 1024
@@ -54,7 +54,7 @@ _XLSX_REQUIRED_MEMBERS = frozenset(
     }
 )
 
-#: 模板表头顺序（与 Task 14 模板下载一致；解析时按表头名称匹配列索引）
+#: 解析支持的表头顺序；实际按表头名称匹配列索引。
 EXCEL_HEADERS: tuple[str, ...] = (
     "user_name",
     "employee_no",
@@ -74,11 +74,10 @@ _PHONE_RE = re.compile(r"^1[3-9]\d{9}$")
 
 #: gender / status 合法取值（与 UserImportRecord Literal 对齐）
 _GENDER_VALUES: frozenset[str] = frozenset({"0", "1", "2"})
-#: v2.3 §2.9.1 修订：status 取值对齐 DB / 前端 / 其他模块真实约定 ("1","2")
-#: （原 {"0","1"} 是 spec §3.1 line 1634 笔误，会拦掉真实合法的 "2" 禁用用户）。
+#: status 取值与数据库和前端约定一致。
 _STATUS_VALUES: frozenset[str] = frozenset({"1", "2"})
 
-#: v2.3 §2.9.1：中文字面值反查表（导出 Excel 翻译后的值可 round-trip 给导入）。
+#: 中文标签反查表，使导出的中文值可再次导入。
 #: 反向与 export_service._STATUS_LABELS / _GENDER_LABELS 一一对应。
 #: 反查失败 fallback 到字面值继续走 _STATUS_VALUES / _GENDER_VALUES 校验。
 _STATUS_LABELS_INV: dict[str, str] = {"启用": "1", "禁用": "2"}
@@ -86,7 +85,7 @@ _GENDER_LABELS_INV: dict[str, str] = {"未知": "0", "男": "1", "女": "2"}
 
 
 class ImportErrorCollection(Exception):
-    """字段格式校验失败集合（spec §2.12 + §3.6 line 2046）。
+    """一次性收集所有字段格式错误。
 
     一次收集所有 FailedRow（避免用户改一行重传一次）。HTTP 层 catch 后转
     400 响应，errorCode 由前端 i18n 表兜底（ ``AI_IMPORT_FIELD_ERRORS`` 或
@@ -102,7 +101,7 @@ class ImportErrorCollection(Exception):
 
 
 def parse_import_excel(file_bytes: bytes, mime_type: str) -> list[UserImportRecord]:
-    """解析 Excel/CSV → 验证 → 返回 records（spec §3.6 line 2036, Task 8）。
+    """解析并验证 Excel/CSV，返回规范化 records。
 
     流程：
     1. MIME 白名单校验 → ``AI_IMPORT_INVALID_MIME``
@@ -480,7 +479,7 @@ def _validate_row(
             )
         )
 
-    # employee_no 可选，max 64；空串 → None（spec §2.24）
+    # employee_no 可选，最长 64；空串规范化为 None。
     employee_no_raw = _get("employee_no")
     employee_no: str | None = employee_no_raw or None
     if employee_no and len(employee_no) > 64:
@@ -576,7 +575,7 @@ def _validate_row(
     role_input: str | None = role_input_raw or None
 
     # user_gender Literal["0","1","2"]，默认 "0"
-    # v2.3 §2.9.1：先反查中文字面值（"男"/"女"/"未知"），未命中走原字面值
+    # 先反查中文标签，未命中时按原始枚举值处理。
     gender_input = _get("user_gender") or "0"
     gender_raw = _GENDER_LABELS_INV.get(gender_input, gender_input)
     if gender_raw not in _GENDER_VALUES:
@@ -593,8 +592,7 @@ def _validate_row(
     else:
         gender = gender_raw
 
-    # status Literal["1","2"]（v2.3 §2.9.1 修订对齐 DB），默认 "1"
-    # v2.3 §2.9.1：先反查中文字面值（"启用"/"禁用"），未命中走原字面值
+    # status 取值为 "1"/"2"，默认 "1"；中文标签可反向解析。
     status_input = _get("status") or "1"
     status_raw = _STATUS_LABELS_INV.get(status_input, status_input)
     if status_raw not in _STATUS_VALUES:

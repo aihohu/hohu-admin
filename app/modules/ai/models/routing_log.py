@@ -1,4 +1,4 @@
-"""spec §7.2: ai_routing_log 表 — Supervisor 路由决策审计."""
+"""Supervisor 路由决策审计表。"""
 
 from datetime import datetime
 
@@ -17,7 +17,7 @@ from app.db.base import Base
 
 
 class AiRoutingLog(Base):
-    """路由决策日志（覆盖所有 /ai/chat 请求类型，spec §4.1.6 / §13 决策 14）。"""
+    """覆盖所有 ``/ai/chat`` 请求类型的路由决策日志。"""
 
     __tablename__ = "ai_routing_log"
 
@@ -29,8 +29,7 @@ class AiRoutingLog(Base):
         String(128),
         nullable=False,
         comment=(
-            "HMAC-SHA256(server_secret + user_id + message)；运维调试用，"
-            "非法证取证（spec §13 决策 17）"
+            "HMAC-SHA256(server_secret + user_id + message)；运维调试用，非法证取证"
         ),
     )
     candidates: Mapped[list] = mapped_column(JSONB, nullable=False)
@@ -49,12 +48,12 @@ class AiRoutingLog(Base):
     parent_log_id: Mapped[int | None] = mapped_column(
         BigInteger,
         nullable=True,
-        comment=("spec §13 决策 22: v2+ 多 Agent 协作预留；首期始终 NULL"),
+        comment=("为多 Agent 协作预留；当前始终为 NULL"),
     )
     plan_step_index: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,
-        comment="spec §13 决策 22: v2+ 多 Agent 协作预留；首期始终 NULL",
+        comment="为多 Agent 协作预留；当前始终为 NULL",
     )
     create_time: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), index=True

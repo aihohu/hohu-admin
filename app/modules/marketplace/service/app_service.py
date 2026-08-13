@@ -5,7 +5,7 @@
 
 原描述：应用主表 service（spec 14.1）。
 
-提供 CRUD、分页列表、关键词搜索（Phase 1 ILIKE 降级，zhparser 不可用时使用）。
+提供 CRUD、分页列表和关键词搜索；zhparser 不可用时使用 ILIKE。
 所有查询都强制带 tenant_id 过滤（通过 MarketplaceBaseService.scoped）。
 """
 
@@ -113,7 +113,7 @@ class AppService(MarketplaceBaseService):
         current: int = 1,
         size: int = 10,
     ) -> PageResult:
-        """Phase 1 用 ILIKE 降级搜索（zhparser 不可用时）。
+        """在 zhparser 不可用时使用 ILIKE 搜索。
 
         仅搜索已发布应用，按下载量倒序。
         """

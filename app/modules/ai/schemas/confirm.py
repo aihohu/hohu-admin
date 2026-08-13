@@ -157,7 +157,7 @@ class ConfirmationPresentation(BaseModel):
 
 
 class ConfirmRequest(BaseModel):
-    """POST /ai/confirm 请求体（spec §8.3）"""
+    """``POST /ai/confirm`` 请求体。"""
 
     confirmation_id: str = Field(
         ..., min_length=10, description="HITL 抽屉拿到的 confirmation_id"
@@ -172,7 +172,7 @@ class ConfirmRequest(BaseModel):
 
 
 class ConfirmResponse(BaseModel):
-    """/ai/confirm 响应 data 字段（spec §8.3 + 修订 S-14）"""
+    """``/ai/confirm`` 响应的 data 字段。"""
 
     action_id: int | None = Field(
         default=None, description="Durable action ID；legacy Redis-only HITL 为 null"

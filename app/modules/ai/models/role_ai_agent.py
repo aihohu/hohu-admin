@@ -9,7 +9,7 @@ from app.db.base import Base
 class RoleAiAgent(Base):
     """角色 ↔ Agent RBAC 关联表
 
-    按 spec §4.3 / §10.3 设计。与 sys_role_menu 是同构的"角色绑定"模式：
+    与 sys_role_menu 使用同构的角色绑定模式：
     - 角色 R 绑定 Agent A → 该角色的用户能用 A（前提 A.enabled=True）
     - 超管 / shared Agent 直通，不需要绑定
     - role_id ↔ agent_id 联合主键

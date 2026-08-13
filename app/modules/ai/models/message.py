@@ -100,12 +100,12 @@ class AiMessage(Base):
     agent_code: Mapped[str | None] = mapped_column(
         String(64),
         nullable=True,
-        comment="spec §7.1b: 本条消息实际处理的 Agent code（按消息粒度还原 Agent）",
+        comment="本条消息实际处理的 Agent code，用于按消息粒度还原 Agent",
     )
     routing_feedback: Mapped[str | None] = mapped_column(
         String(16),
         nullable=True,
-        comment="spec §7.1b: 用户路由反馈 'correct' / 'wrong' / null",
+        comment="用户路由反馈：correct、wrong 或 null",
     )
     create_time: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), comment="创建时间"

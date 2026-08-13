@@ -1,6 +1,6 @@
 """敏感输出脱敏 — tool 返回值剥离 + 全局字段黑名单
 
-按 spec docs/specs/2026-07-02-ai-tool-gateway-design.md §7.3。
+统一处理工具参数摘要和返回值脱敏。
 
 两道防线：
   1. tool meta 显式声明的 sensitive_output 字段（业务方知情）
@@ -24,7 +24,7 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-# spec §7.3 全局字段黑名单
+# 全局敏感字段黑名单。
 # 命中即剥离，无论 tool meta 是否声明 sensitive_output
 #
 # 修订 S-10：移除裸 "token"（原集合中的最后一个），因为 token_count / token_value
@@ -60,7 +60,7 @@ def _matches_blocklist(key: str, blocklist_lower: set[str]) -> bool:
       2. key 以黑名单词 + "_" 开头：password_hash / token_value / api_key_id
 
     故意 **不** 包含后缀形式（xxx_bl）—— 否则 csrf_token / pagination_token /
-    next_page_token 等业务字段会被误剥离（spec §22 修订日志 S-10 的核心目标）。
+    ``next_page_token`` 等业务字段不会因包含 token 子串而被误删。
 
     不命中的常见情况（业务字段）：
       - csrf_token / pagination_token / next_page_token：xxx_token 后缀形式
@@ -90,7 +90,7 @@ def _scrub_fields(
 ) -> Any:
     """递归剥离 payload 中命中 blocklist 的字段（含嵌套 dict / list）
 
-    spec §7.3 关键约束：
+    关键约束：
       - 不区分大小写（password / Password / PASSWORD 都命中）
       - word-boundary 匹配（修订 S-10）：password_hash 命中 password，
         csrf_token **不** 命中 token
@@ -139,7 +139,7 @@ def serialize_for_llm(
     sensitive_output: tuple[str, ...],
     raw_result: Any,
 ) -> Any:
-    """把 tool 返回值序列化为 LLM 安全的格式（spec §7.3）
+    """把工具返回值序列化为对 LLM 安全的格式。
 
     Args:
         sensitive_output: tool meta 声明的 sensitive_output 字段（业务方知情）

@@ -1,12 +1,12 @@
-"""HITL（Human-in-the-Loop）模块 — spec §8
+"""HITL（Human-in-the-Loop）模块。
 
 组成：
   - constants.py: 状态机 enum（AiOperationStatus / AiExecutionMode / ConfirmAction）+ DryRunResult
-  - risk.py: 风险分级判定（§5.3 autonomous vs HITL 矩阵）
+  - risk.py：autonomous 与 HITL 风险矩阵判定
   - manager.py: HITL Manager（Redis 挂起 + asyncio.Event 唤醒）
 
 调用方：
-  - Gateway Executor（Phase 3.2 接入）：调 classify_execution_mode 决定路径
+  - Gateway Executor：调用 classify_execution_mode 决定执行路径
   - /ai/confirm endpoint：调 hitl_manager.wake 唤醒挂起的 SSE 流
   - main.py lifespan：调 cleanup_pending_on_startup 清扫 Redis 残留
 """

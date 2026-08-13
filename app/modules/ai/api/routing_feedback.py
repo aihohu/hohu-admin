@@ -1,10 +1,10 @@
-"""spec §6.4 / §7.1c: routing feedback API.
+"""Routing feedback API.
 
 两个 router：
 - `router` (prefix 由 main.py 挂 `/ai/messages`): POST submit，路径
   `/{message_id}/routing-feedback`.
 - `query_router` (prefix 由 main.py 挂 `/ai/routing-feedback`): GET summary + list，
-  spec §6.2 KPI/明细查询端点（Task 9 引入）.
+  KPI 汇总和反馈明细查询端点。
 """
 
 from fastapi import APIRouter, Depends, Path, Query
@@ -63,7 +63,7 @@ async def get_routing_feedback_summary(
     days: int = Query(7, ge=1, le=365),
     db: AsyncSession = Depends(get_db),
 ) -> ResponseModel[FeedbackSummary]:
-    """spec §6.2: 返回近 N 天路由反馈 KPI（total/correct/wrong/wrongRate）+ topWrongAgents."""
+    """返回近 N 天路由反馈 KPI 和错误率最高的 Agent。"""
     summary = await routing_feedback_query_service.summary(db, days=days)
     return ResponseModel.success(data=summary)
 
@@ -78,7 +78,7 @@ async def get_routing_feedback_list(
     query: FeedbackListQuery = Depends(),
     db: AsyncSession = Depends(get_db),
 ) -> ResponseModel[PageResult[FeedbackListItem]]:
-    """spec §6.2: 路由反馈明细分页（默认 feedback=wrong）."""
+    """分页查询路由反馈明细，默认只返回 wrong。"""
     items, total = await routing_feedback_query_service.list_items(
         db,
         days=query.days,

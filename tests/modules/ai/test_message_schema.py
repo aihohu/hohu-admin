@@ -1,4 +1,4 @@
-"""MessageOut schema 字段类型测试 — spec §BUG-FE-18
+"""MessageOut schema 字段类型测试。
 
 tool_calls 在 chat.py::_record_tool_event 中以 list[dict] 形式收集
 （每个 tool 调用一个 dict），但旧 schema 写成 dict | None，导致 reload
@@ -96,7 +96,7 @@ class TestMessageOutToolCallsList:
         assert out.tool_calls[0]["result"]["user_ids"] == ["7483433649145122816"]
 
     def test_chip_target_and_ui_round_trip(self) -> None:
-        """v1.6+ SR-13: chat.py::_record_tool_event 持久化时必须含 chip_target + ui,
+        """chat.py::_record_tool_event 持久化时必须包含 chip_target 和 ui，
         否则 reload 后 chip 跳转消失 + 卡片 fallback PlainJsonView. (C1 回归)"""
         msg = _make_msg(
             tool_calls=[
@@ -129,7 +129,7 @@ class TestMessageOutToolCallsList:
 
 
 def test_ai_message_has_agent_code_column():
-    """spec §7.1b: ai_message.agent_code 记录本条消息实际处理的 Agent code."""
+    """ai_message.agent_code 记录本条消息实际处理的 Agent code。"""
     from app.modules.ai.models.message import AiMessage
 
     col = AiMessage.__table__.columns.get("agent_code")
@@ -139,7 +139,7 @@ def test_ai_message_has_agent_code_column():
 
 
 def test_ai_message_has_routing_feedback_column():
-    """spec §7.1b: routing_feedback 'correct' / 'wrong' / null."""
+    """routing_feedback 可为 correct、wrong 或 null。"""
     from app.modules.ai.models.message import AiMessage
 
     col = AiMessage.__table__.columns.get("routing_feedback")
@@ -149,7 +149,7 @@ def test_ai_message_has_routing_feedback_column():
 
 
 def test_ai_message_routing_feedback_check_constraint():
-    """spec §7.1b: CHECK 约束限定 'correct' / 'wrong' / NULL."""
+    """CHECK 约束限定 correct、wrong 或 NULL。"""
     from app.modules.ai.models.message import AiMessage
 
     constraints = {c.name for c in AiMessage.__table__.constraints if c.name}

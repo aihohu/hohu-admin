@@ -5,15 +5,14 @@
 
 原描述：应用市场 - 审核记录 service（spec 13 + 14.3）。
 
-Phase 1 只做规则检查（同步）+ 人工审核（手动 update）。
-AI 审核 Phase 2 接入。
+当前只执行同步规则检查和人工审核，AI 风控尚未接入。
 
 review 三阶段（spec 14.3）：
 1. rule_check：版本提交时同步执行（VersionService.validate_manifest 已经覆盖一部分）
-2. ai_review：Phase 2，调用 AI 风控服务（low/medium/high）
+2. ai_review：预留 AI 风控结果（low/medium/high）
 3. human_review：管理员手动通过/拒绝
 
-Phase 1 跳过 AI：create_pending 时直接 ai_risk_level='skipped'。
+创建待审核记录时将 ai_risk_level 设为 skipped。
 """
 
 from datetime import UTC, datetime
@@ -30,8 +29,7 @@ from app.modules.marketplace.service.base import MarketplaceBaseService
 class ReviewService(MarketplaceBaseService):
     """审核记录 service（spec 13 + 14.3）
 
-    Phase 1 只做规则检查（同步） + 人工审核（手动 update）。
-    AI 审核 Phase 2 加。
+    当前执行同步规则检查和人工审核，AI 风控接口预留。
 
     注意：AppReview 表无 tenant_id（通过 app_id FK 隐式继承），
     因此 list/get 不走 self.scoped()，直接 join App + AppVersion。
@@ -164,7 +162,7 @@ class ReviewService(MarketplaceBaseService):
     ) -> AppReview:
         """版本提交时创建 pending 审核记录。
 
-        Phase 1 跳过 AI 审核：ai_risk_level 直接写 'skipped'，
+        当前未接入 AI 审核，因此 ai_risk_level 写入 'skipped'，
         final_status='pending' 等待人工审核。
 
         Args:
@@ -182,7 +180,7 @@ class ReviewService(MarketplaceBaseService):
             rule_check_result=rule_check_result,
             rule_check_at=datetime.now(UTC),
             human_status="pending",
-            ai_risk_level="skipped",  # Phase 1 跳过 AI
+            ai_risk_level="skipped",  # 当前未接入 AI 审核。
             final_status="pending",
         )
         db.add(review)
@@ -200,8 +198,8 @@ class ReviewService(MarketplaceBaseService):
     ) -> AppReview:
         """人工审核：通过/拒绝 + 同步 final_status。
 
-        Phase 1 没接入 AI，human_status 直接决定 final_status。
-        Phase 2 接入 AI 后，final_status 需要综合 ai_risk_level 和 human_status。
+        当前由 human_status 直接决定 final_status；接入 AI 风控后，
+        需综合 ai_risk_level 和 human_status。
 
         Args:
             db: 数据库会话

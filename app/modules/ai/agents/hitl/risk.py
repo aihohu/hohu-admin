@@ -1,9 +1,9 @@
-"""风险分级判定 — spec §5.3 矩阵
+"""根据工具风险、影响范围和风险偏好判定执行模式。
 
 输入 AiToolMeta + dry_run_count + injection_hit 标记，
 输出执行模式（autonomous / HITL）。
 
-调用方（Phase 3.2 Gateway Executor 接入）：
+Gateway Executor 调用方式：
     dry_run_count = None
     if registered.dry_run_fn is not None:
         dr = await registered.dry_run_fn(ctx, **args)
@@ -17,7 +17,7 @@
         # 直接执行
         ...
 
-判定矩阵（spec §5.3，默认 risk_appetite="balanced"）：
+判定矩阵（默认 ``risk_appetite="balanced"``）：
 | risk        | dry_run_count | hitl_always | injection_hit | mode      |
 |-------------|---------------|-------------|---------------|-----------|
 | low         | -             | False       | False         | autonomous|
@@ -28,7 +28,7 @@
 | any         | n/a           | True        | -             | hitl      |
 | any         | n/a           | -           | True          | hitl      |
 
-v1.5+ SR-21 risk_appetite 三档（仅影响 high risk）：
+``risk_appetite`` 三档仅影响 high risk：
 | risk | risk_appetite | dry_run_count | mode      |
 |------|---------------|---------------|-----------|
 | high | conservative  | any           | hitl      |
@@ -39,7 +39,7 @@ v1.5+ SR-21 risk_appetite 三档（仅影响 high risk）：
 注意：
   - dry_run_count=None 表示"未跑 dry_run 或 dry_run 失败"，对 high 风险保守降级到 HITL
     （aggressive 例外：忽略 None 仍 autonomous）
-  - injection_hit=True 永远走 HITL（spec §11.1 注入命中降级而非拒绝）
+  - injection_hit=True 永远走 HITL，注入命中时降级而不是直接拒绝
   - destructive 永远 HITL，不受 risk_appetite 影响（安全底线）
 """
 
@@ -55,15 +55,15 @@ def classify_execution_mode(
     injection_hit: bool = False,
     risk_appetite: str = "balanced",
 ) -> AiExecutionMode:
-    """按 §5.3 矩阵判定执行模式
+    """按风险矩阵判定执行模式。
 
     Args:
         meta: Tool 元数据（risk / hitl_always）
         dry_run_count: dry_run 函数返回的影响行数；
             None 表示未跑 dry_run 或 dry_run 失败（保守按 HITL 处理）
             0 / 正整数 表示 dry_run 成功的影响行数
-        injection_hit: 是否命中 prompt injection pattern（spec §11.1）
-        risk_appetite: v1.5+ SR-21 风险偏好，仅影响 high risk 的阈值：
+        injection_hit: 是否命中 prompt injection pattern
+        risk_appetite: 风险偏好，仅影响 high risk 的阈值：
             "conservative" → high 永远 HITL
             "balanced"（默认）→ high + dry_run_count≤1 autonomous（MVP 行为）
             "aggressive" → high 永远 autonomous（即使 dry_run_count=None）
@@ -76,17 +76,17 @@ def classify_execution_mode(
     if meta.hitl_always:
         return AiExecutionMode.HITL
 
-    # 优先级 2: prompt injection 命中（spec §11.1 强制 HITL）
+    # Prompt injection 命中时强制 HITL。
     if injection_hit:
         return AiExecutionMode.HITL
 
     # 优先级 3: 按 risk 分级
     if meta.risk == "destructive":
-        # 破坏性操作永远 HITL（§5.3 矩阵 destructive 行，不受 appetite 影响）
+        # 破坏性操作永远 HITL，不受风险偏好影响。
         return AiExecutionMode.HITL
 
     if meta.risk == "high":
-        # v1.5+ SR-21: 按 risk_appetite 调整 high risk 阈值
+        # 按 risk_appetite 调整 high risk 阈值。
         if risk_appetite == "conservative":
             return AiExecutionMode.HITL
         if risk_appetite == "aggressive":

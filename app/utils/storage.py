@@ -1,7 +1,7 @@
-"""对象存储抽象（Phase 1 用本地文件，Phase 2 切 S3/MinIO）。
+"""对象存储抽象，当前使用本地文件实现。
 
 spec 14.13：应用制品包上传后落到 UPLOAD_DIR，并通过 file_url 返回前端可访问路径。
-此模块只提供本地文件实现；Phase 2 切 S3/MinIO 时仅替换 save_file 内部实现，
+切换到 S3 或 MinIO 时只需替换 ``save_file`` 内部实现，
 调用方（UploadService）签名不变。
 """
 

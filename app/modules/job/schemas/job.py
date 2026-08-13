@@ -110,13 +110,13 @@ class JobQuery(BaseModel):
 
 
 class JobAiUpdate(BaseModel):
-    """spec §11.3 AI 入口更新请求 — schema 级白名单
+    """AI 入口更新请求的 schema 级白名单。
 
     只允许 AI 改调度配置 + 启停 + 任务参数；以下字段**禁止 AI 操作**：
       - job_key（任务标识，改了等同于改执行哪个 Python 代码，等同改 code）
       - run_on_enable（手动触发等价物，AI 不应触发立即执行）
       - timeout_seconds / max_retries / concurrent（运维参数，AI 不应改）
-      - code / module_path / func_name（spec §11.3 表格明令禁止）
+      - code / module_path / func_name（禁止由 AI 修改）
 
     Pydantic 默认 extra='ignore'，AI tool 漏传这些字段时自动丢弃（不报错，但字段
     不进 update_data）。即使未来 AI tool wrapper 出 bug 把危险字段透传过来，

@@ -1,7 +1,7 @@
 """[CLOUD-ONLY] 审核 API（approve / reject）
 
 部署在云市场。本地 HoHu 不挂此 router——本地直接信任 published 应用。
-Phase 2 拆分时迁移到 app/modules/marketplace/api/cloud/admin.py
+如按云端与本地职责拆分，本接口归入 cloud/admin.py。
 详见 docs/MARKETPLACE-CLOUD-SPLIT.md
 
 原描述：管理员 API：审核 / 启用禁用应用
