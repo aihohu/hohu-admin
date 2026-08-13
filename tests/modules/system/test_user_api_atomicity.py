@@ -12,12 +12,49 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.core.exceptions import BusinessRuleException
-from app.modules.system.api.user import update_user
-from app.modules.system.schemas.user import UserDeptItem, UserUpdate
+from app.modules.system.api.user import add_user, update_user
+from app.modules.system.schemas.user import UserCreate, UserDeptItem, UserUpdate
 
 
 def _dept_item(*, dept_id: str = "1", is_primary: bool = False) -> UserDeptItem:
     return UserDeptItem(dept_id=dept_id, is_primary=is_primary)
+
+
+async def test_user_create_flushes_generated_id_before_department_update():
+    """创建用户时，部门关联只能在生成 user_id 后写入。"""
+    user_in = UserCreate(
+        user_name="e2ecreate",
+        nickname="E2E Create",
+        password="E2ePass123",
+        roles=["R_USER"],
+        status="1",
+        dept_ids=[_dept_item(is_primary=True)],
+    )
+    created_user = type("CreatedUser", (), {"user_id": 123})()
+    db_mock = AsyncMock()
+
+    with (
+        patch(
+            "app.modules.system.api.user.user_service.create_user",
+            new=AsyncMock(return_value=created_user),
+        ),
+        patch(
+            "app.modules.system.api.user.config_service.get_bool",
+            new=AsyncMock(return_value=False),
+        ),
+        patch(
+            "app.modules.system.api.user.dept_service.update_user_depts",
+            new=AsyncMock(),
+        ) as mock_dept_update,
+    ):
+        await add_user(user_in=user_in, db=db_mock)
+
+    db_mock.flush.assert_awaited_once()
+    mock_dept_update.assert_awaited_once_with(
+        db_mock,
+        123,
+        [{"dept_id": "1", "is_primary": True}],
+    )
 
 
 async def test_dept_validation_runs_before_user_update():

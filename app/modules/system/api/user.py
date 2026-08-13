@@ -204,6 +204,9 @@ async def add_user(
 
     # 处理部门关联
     if user_in.dept_ids:
+        # Snowflake 主键由 ORM default 在 flush 时生成。部门关联依赖 user_id，
+        # 必须先 flush，避免向 sys_user_dept 写入 NULL user_id。
+        await db.flush()
         dept_list = [
             {"dept_id": d.dept_id, "is_primary": d.is_primary} for d in user_in.dept_ids
         ]
