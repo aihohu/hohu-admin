@@ -1,14 +1,14 @@
 # AI 用户管理缺失工具补齐
 
-> 状态：✅ Plan 已完成（2026-08-11）
-> 日期：2026-08-11
-> 关联：[`2026-07-02-ai-tool-gateway-design.md`](./2026-07-02-ai-tool-gateway-design.md)、[`2026-08-01-user-import-export-design.md`](./2026-08-01-user-import-export-design.md)
+> 状态：🚧 Plan 1 已完成（2026-08-11）；Plan 2 `user.update_dept/update_roles` 已批准、待实现
+> 日期：2026-08-11｜更新：2026-08-14
+> 关联：[`2026-08-14-ai-management-mvp-closure.md`](./2026-08-14-ai-management-mvp-closure.md)、[`2026-07-02-ai-tool-gateway-design.md`](./2026-07-02-ai-tool-gateway-design.md)、[`2026-08-01-user-import-export-design.md`](./2026-08-01-user-import-export-design.md)
 
 ## 1. 背景与范围
 
 当前 `user_mgmt` 已注册 `user.count/stats/distinct/list/lookup/update/batch_delete/import_preview/import_execute/export`，但 Gateway 内置 Agent 清单承诺的 `user.create` 与 `user.reset_password` 未实现。旧的导入导出 spec 还把 `user.create` 错标为已完成，造成设计与运行时 Registry 漂移。
 
-本次只补齐这两个已承诺工具。`user.update_dept` / `user.update_roles` 仍按原 Task 25a+ 作为独立后续能力，不混入本次纠偏。
+2026-08-11 的 Plan 1 只补齐这两个已承诺工具。2026-08-14 的 MVP 收口决策已经把原 Task 25a+ 的 `user.update_dept` / `user.update_roles` 提升为 Plan 2 必做能力；它们继续保持独立工具和独立风险边界，不混入通用 `user.update`。
 
 ## 2. 决策记录
 
@@ -46,6 +46,12 @@
 
 17. **新工具所有用户可见表面统一 i18n** — 工具卡描述和 errorCode 从 locale 解析；确认抽屉对已知工具不再渲染后端中文 dry-run 文案；data_list 列名使用 i18n key 并在组件端解析。**反例**: 只国际化 presentation summary，会让英文界面仍出现中文影响摘要、表头或原始错误码。**回归**: mapper Vitest 覆盖 create/reset dry-run、工具描述、全部 `AI_USER_*` locale 解析与 unknown fallback；DataListView 对未知 label 保留原文。
 
+18. **部门与角色调整提升为独立 MVP 工具** — `user.update_dept` 与 `user.update_roles` 分别处理组织数据范围和最终有效授权集合，两者都强制 HITL、冻结完整旧/新 ID 集合、目标用户前后物化 scope 和操作者 `GrantAuthority` 摘要，并在批准执行时按统一锁协议重读重算；不能并入只允许资料字段的 `user.update`。**反例**: 复用一个宽泛 `user.update` payload 会让模型把资料修改、部门迁移和权限提升混成同一审批语义；只比较新角色的枚举型 data_scope 会漏掉旧角色移除、CUSTOM 集合和 Agent/menu 的组合影响。**回归**: `tests/modules/ai/test_user_assignment_tools.py` 覆盖完整集合、越界部门、最终授权 dominance、自改、R_SUPER/admin 保护、审批后权限/目标漂移和事务回滚。
+
+19. **角色授权使用独立 `system:user:role-auth`，不借用角色列表权限** — 用户 update/create/import 各自的写入口权限只决定“能否写该类用户操作”，`system:user:role-auth` 再决定该入口能否接收显式角色；它同时授权查询最小可委派角色候选，但不授予 Role 管理页面。upgrade 向历史 add/edit/import 任一 writer 幂等补权，不横向扩张原入口。**反例**: 用 `system:role:list` 作为用户角色写权限会把页面可见性误当委派能力；给 add-only 角色补 edit 会扩大存量权限。**回归**: add-only/edit-only/import-only 兼容矩阵分别断言原入口保持不变，显式角色写入必须叠加 role-auth。
+
+20. **名称只用于 lookup 和确认展示，写工具只接受冻结 ID** — `user.role_lookup` 只返回当前 `GrantAuthority` 下可委派角色的最小摘要，零/多命中必须澄清；不能依赖 Phase 3 的 `role.lookup`。**反例**: 在批准时再次按名称查找可能命中被改名或新建的另一角色。**回归**: lookup 同名、零命中、不可委派和批准后 ID 对象漂移测试全部 fail closed。
+
 ## 3. 工具契约
 
 ### `user.create`
@@ -72,6 +78,50 @@
 - 结果：`{updated: 1, userId, userName, passwordPolicy}`
 - UI：`rows_affected`，审计只记录目标 ID 与策略名
 
+### `user.dept_lookup`（Plan 2 权限纠偏）
+
+- 权限：`system:dept:list`，不再借用 `system:user:add`
+- 参数：名称/路径 query，`limit <= 20`
+- 返回：只含当前部门 scoped selector 可见的 `{deptId, deptName, path}`
+- 语义：零命中或多命中必须澄清，不拼回 scope 外祖先
+
+### `user.role_lookup`（Plan 2）
+
+- 权限：`system:user:role-auth`，不自动要求或授予 `system:role:list`
+- 参数：名称/code query，`limit <= 20`
+- 返回：当前 `GrantAuthority` 下可委派角色的 `{roleId, roleCode, roleName, dataScope}`
+- 语义：零/多命中必须澄清；名称只供展示，后续写工具只接收稳定 ID
+
+### `user.update_dept`（Plan 2）
+
+- 权限：同时满足 `system:user:edit` 与 `system:dept:list`
+- 参数：`user_id`、完整 `dept_assignments=[{dept_id, is_primary}]`
+- 风险：`high`、`hitl_always=True`、`dry_run_supported=True`
+- 数据权限：目标用户与 `旧部门集合 ∪ 新部门集合` 全部位于当前操作者可写 scope；不能借替换删除越界旧关联
+- 授权影响：按目标用户完整启用角色分别物化变更前/后的部门和用户集合，两者都必须是操作者 `GrantAuthority` 的子集
+- 业务规则：配置要求主部门时非空集合恰好一个主部门，否则最多一个；ID 去重且部门存在、启用、可分配
+- 审批快照：冻结用户、状态、完整旧/新部门、主部门、角色定义、前后物化 scope hash、配置和操作者授权摘要，任一漂移返回 `AI_PREPARED_ACTION_SNAPSHOT_STALE`
+
+### `user.update_roles`（Plan 2）
+
+- 权限：同时满足 `system:user:edit` 与 `system:user:role-auth`
+- 参数：`user_id`、完整 `role_ids`
+- 风险：`high`、`hitl_always=True`、`dry_run_supported=True`
+- 数据权限：目标用户必须位于当前操作者 scope；新集合非空、去重，角色存在且启用
+- 提权防护：禁止自改；admin 或变更前后拥有启用 `R_SUPER` 的用户仅允许超级管理员操作；非超管不得移除自己无权管理的旧角色
+- dominance：用应用完整新角色集合后的 permission/menu、Agent 和实际物化数据集合与操作者 `GrantAuthority` 做集合包含比较，不能只比单个角色或枚举优先级
+- 审批快照：冻结完整旧/新角色、角色定义、目标用户前后有效授权摘要和操作者授权摘要，批准时锁后重新校验
+- 复用边界：安全校验下沉共享 Service，用户管理页面与 AI 工具不得形成两套授权规则
+
+### 传统页面与导入契约（Plan 2 同步交付）
+
+- `PUT /system/user/{user_id}` schema 移除角色/部门字段；提交旧字段直接拒绝，不能静默忽略。
+- `PUT /system/user/{user_id}/roles` body 固定 `{roleIds}`，要求 `system:user:edit + system:user:role-auth` 并复用完整角色替换 Policy。
+- `PUT /system/user/{user_id}/departments` body 固定 `{deptAssignments}`，要求 `system:user:edit + system:dept:list` 并复用完整部门替换 Policy。
+- `GET /system/user/assignable-roles` 只要求 `system:user:role-auth`，返回最多 20 个最小候选。
+- create payload 只要出现 `roleIds`（包括空数组）就要求 `system:user:add + system:user:role-auth`；import 模板只要出现角色列（包括整列空值）就要求 `system:user:import + system:user:role-auth`，任一行越权整批零业务写入。
+- 未显式提供角色时仅允许后端分配唯一、启用且不超过操作者 `GrantAuthority` 的固定 `R_USER`；请求 schema 不接受任意角色，这是唯一不要求 role-auth 的窄例外。
+
 ## 4. Plan 状态
 
 - [x] Task 1 ✅ 已完成（2026-08-11）：纠正旧 spec 的 `user.create` 假完成记录；强制内置 inventory 从 16 更新为 18。
@@ -83,3 +133,8 @@
 - [x] Task 7 ✅ 已完成（2026-08-11）：补齐 `user.dept_lookup`、data scope、同名消歧、Agent 名称解析编排与前端展示，使“新建用户圣诞，部门是总部”无需用户输入部门 ID；19 个工具静态门禁、后端全量 1808 pytest、前端 64 Vitest/typecheck/lint 均通过。
 - [x] Task 8 ✅ 已完成（2026-08-12）：确认抽屉的主部门显示为 `部门名称（ID）`，执行参数和审批快照继续使用原始部门 ID；后端全量 1809 pytest、19 工具静态门禁及前端全量检查通过。
 - [x] Task 9 ✅ 已完成（2026-08-12）：审查纠偏超级管理员目标保护、prod 默认密码 fail-closed、HITL raw/display 绑定、存量 prompt 安全升级及工具卡/dry-run/data-list 全表面 i18n，并补充前后端反例测试。
+- [ ] Task 10：新增 `system:user:role-auth` 的 fresh/upgrade 权限数据与 add/edit/import 兼容矩阵；实现多角色并集 resolver、`GrantAuthority` 和统一锁协议。
+- [ ] Task 11：拆分页面用户资料/部门/角色 API 和 schema，收口 create/import/fixed R_USER 例外，页面与 AI 共用替换 Policy。
+- [ ] Task 12：纠正 data-scoped `user.dept_lookup`，实现 `user.update_dept` 的完整旧/新集合、前后授权影响、dry-run、i18n 与批准时复验。
+- [ ] Task 13：同步实现 `user.role_lookup` 与 `user.update_roles` 的最终有效授权 dominance、dry-run、i18n 与批准时复验。
+- [ ] Task 14：后端定向/全量门禁与真实浏览器多角色 E2E 通过后，将 Plan 2 翻转为完成。

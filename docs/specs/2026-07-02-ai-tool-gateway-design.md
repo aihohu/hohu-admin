@@ -1,11 +1,29 @@
 # AI Tool Gateway 设计
 
-> **状态**: Draft（ADR-0002 的 prepared/direct 统一 action 主链、安全 DTO 与确定性真实浏览器验收已落地；完整逐消息工具卡内嵌仍是 release gap）
+> **状态**: 核心网关已落地；当前 AI 管理 MVP 的范围、优先级与阅读入口以 [`2026-08-14-ai-management-mvp-closure.md`](./2026-08-14-ai-management-mvp-closure.md) 为准
 > **日期**: 2026-07-02
-> **更新**: 2026-08-11
+> **更新**: 2026-08-14
 > **作者**: Jack
 > **影响项目**: `hohu-admin`（后端，主战场）、`hohu-admin-web`（前端，配合流式协议与 HITL 抽屉）
-> **关联文档**: [`ADR-0001`](../adr/0001-ai-safety-consistency-before-deferred-execution.md)、[`ADR-0002`](../adr/0002-gateway-owned-confirmation-flow.md)、`docs/APP-MARKETPLACE.md`、`docs/SECURITY.md`、`docs/ARCHITECTURE-GUIDELINES.md`
+> **关联文档**: [`2026-08-14 AI 管理 MVP 收口`](./2026-08-14-ai-management-mvp-closure.md)、[`ADR-0001`](../adr/0001-ai-safety-consistency-before-deferred-execution.md)、[`ADR-0002`](../adr/0002-gateway-owned-confirmation-flow.md)、`docs/APP-MARKETPLACE.md`、`docs/SECURITY.md`、`docs/ARCHITECTURE-GUIDELINES.md`
+
+> **阅读说明（2026-08-14）**：本文保留 Tool Gateway 的详细技术不变量和历史实现记录，不再承担“当前还要开发什么”的入口职责。日常 AI MVP 规划、实现和验收先读收口 spec；只有修改 Registry、Gateway、HITL、SSE、审计或数据权限核心时，才按入口链接回读本文相关章节。
+
+---
+
+## 0. 2026-08-14 AI 管理 MVP 规范覆盖
+
+以下规则覆盖本文后续章节中的历史范围、示例和已落地记录；详细验收矩阵以 AI 管理 MVP 收口 spec 为准：
+
+1. `AI_MODULE_ENABLED` 默认 `true`；设为 `false` 时不得初始化 AI 业务 router、Service、Provider、Gateway 或 Registry，全部 `/ai/**` 统一返回 503 + `AI_MODULE_DISABLED`，不以 404 作为目标契约。
+2. 用户侧 AI API 先校验 `ai:chat:use`，再校验 owner/tenant、Agent、Tool 和 DataScope；confirm/resume 按 reject、最小状态、完整回放和执行分支授权，不能在 router 层一刀切。
+3. `authorize_agent_access()` 必须同时满足 tenant、Agent enabled、显式 Role-Agent 绑定和至少一个可见 Tool。`shared`、R_SUPER、手工选择、粘滞、Supervisor、默认 Agent 或 fallback 均无旁路。
+4. Tool 必须精确属于运行时 Agent；删除“shared tool 可被任意 Agent 执行”的豁免。`file.parse` 固定 `required_perms=("ai:file:parse",)`、`default_enabled=false`，fresh 通过 seed 显式启用，upgrade 保留部署方现值。
+5. 多角色 DataScope 使用所有启用角色贡献的物化并集，不能用整数优先级选单一 scope；部门和角色读取也必须使用其领域的 scoped selector，SR-22 的“不应用 data_scope”历史语义已废止。
+6. assistant/tool message、PreparedAction 和 query-cache 必须冻结 tenant、Agent、Tool、完整 subject refs、scope hash/version。每个历史结果读取面调用统一 `authorize_result_projection()`；legacy 证据不完整时 fail closed 为 tombstone、最小状态或 404。
+7. PreparedAction 创建时冻结 `resolved_model_id/resolved_provider_id` 并纳入 canonical snapshot。reject 和最小状态回放不依赖模型；只有新 LLM run/continuation 才复验冻结模型，失效时稳定收口，不能遗留 pending。
+8. Provider test 只允许 `POST /ai/provider/{provider_id}/test` + `{modelId}` 引用已保存同租户对象。保存、test、chat、Supervisor、Agent、continuation 全部复用同一 hardened egress transport；协议、origin/IP、DNS、redirect、timeout、响应大小和错误脱敏均 fail closed，存量不合规配置进入 quarantine。
+9. Agent 全局可变字段要求启用 `R_SUPER` 与 `ai:agent:edit` 的交集；Role-Agent 委派另走 `GrantAuthority`，两者不能互相替代。
 
 ---
 
@@ -626,16 +644,15 @@ async def create_user(ctx: AiToolContext, username: str, email: str,
 
 ```python
 # app/modules/ai/agents/constants.py
-SHARED_AGENT_CODE = "shared"   # 特殊 Agent code: 任何登录用户直通, 不需要 role_ai_agent 绑定
+SHARED_AGENT_CODE = "shared"   # 仅表示通用工具归属，不构成可见性或权限豁免
 
 def compute_available_agents(user: User, perms: set[str]) -> list[AiAgent]:
-    """Agent 可见性: 全局启用 + (shared Agent 直通 OR 超管 OR 角色绑定) + 至少 1 tool 可见"""
+    """Agent 可见性: AI 入口权限 + 全局启用 + 显式角色绑定 + 至少 1 tool 可见"""
     return [
         a for a in all_agents
-        if a.enabled
-        and (a.code == SHARED_AGENT_CODE
-             or is_super_admin(user)
-             or a.agent_id in user.role_agent_ids)
+        if "ai:chat:use" in perms
+        and a.enabled
+        and a.agent_id in user.role_agent_ids
         and any_tool_visible(a, perms)
     ]
 
@@ -648,6 +665,8 @@ def compute_available_tools(user, agent) -> list[RegisteredTool]:
         and (t.meta.default_enabled or t.meta.name in enabled_extra)
     ]
 ```
+
+> **2026-08-14 权限修订**：旧实现曾把 `shared` 作为任何登录用户直通、把 R_SUPER 作为全部 Agent 直通；默认开启 AI 后两类例外均不再成立。所有用户都必须显式绑定角色，用户侧 AI API 必须校验 `ai:chat:use`，`file.parse` 固定要求独立 `ai:file:parse` 工具权限。`SHARED_AGENT_CODE` 只保留工具归组语义。
 
 **v1.5+ SR-17（2026-07-20）**：恢复 Tool 级 `default_enabled` 维度（MVP 删除，v1.5+ 加回）。默认 `default_enabled=True`（向后兼容，老 tool 无显式声明视为默认启用）；部署方可设 `default_enabled=False` + 在 `sys_config.ai:enabled_tools`（JSON 数组）显式列出"按需启用"的 tool 名。典型场景：
 
@@ -2101,11 +2120,11 @@ ai_security_events_total{event_type}                        Counter（injection 
 
 ### 10.1 内置 Agent 默认配置（Alembic seed）
 
-> **开源 TOB 默认全部禁用**：所有内置 Agent `enabled=False`，部署方按需启用 + 绑定角色。
+> **2026-08-14 产品基线纠偏**：`AI_MODULE_ENABLED=true` 是默认产品能力，关闭仅用于紧急熔断或明确的无 AI 部署。完成开发并通过门禁的内置 Agent 默认启用；未完成 Agent 继续禁用。普通角色仍必须显式取得 `ai:chat:use`、Role-Agent 绑定和具体工具权限，不能把“全局关闭 AI”当作日常授权手段。fresh install 初始仅让超级管理员使用已完成 Agent。
 
 | code | name | tool 示例 | 默认绑定角色（部署方启用后建议） |
 |---|---|---|---|
-| `shared` | 通用工具助手 | file.parse、system.count/stats/distinct | 任何登录用户（无需绑定，由 `SHARED_AGENT_CODE` 直通，见 §5.4） |
+| `shared` | 通用工具助手 | file.parse、system.count/stats/distinct | 显式绑定角色；不再允许任何登录用户直通 |
 | `user_mgmt` | 用户管理助手 | user.list/count/stats、user.create/update/reset_password/batch_delete | 系统管理员、HR |
 | `role_mgmt` | 角色权限助手 | role.list/count、role.create/update/bind_menus | 系统管理员 |
 | `config_mgmt` | 系统配置助手 | config.list/update、dict.list/distinct | 系统管理员 |
@@ -2131,17 +2150,18 @@ ai_security_events_total{event_type}                        Counter（injection 
 
 仅超管或绑定 `ai:agent:*` 角色可访问管理页；普通用户只能在前端 chat 页用 Agent。这些权限码也写入 `scripts/sync_menus.py` 的 seed 数据，保证三层一致性。
 
-### 10.3 三层正交防线澄清
+### 10.3 AI 入口授权 + 三层正交防线澄清
 
-三层是**正交**的：Agent 可见 ≠ tool 可见 ≠ 数据可见，互不替代、互不冲突。
+AI 模块默认开启不等于任何登录用户都能使用。后端先校验 AI 入口权限，再进入原有三层正交防线；Agent 可见 ≠ tool 可见 ≠ 数据可见，四者互不替代、互不冲突。
 
 | 层 | 控制什么 | 数据源 | 失败错误码 |
 |---|---|---|---|
+| **AI 入口权限** | “这个用户能否访问用户侧 AI API” | `ai:chat:use` | 403 / `AI_CHAT_PERMISSION_DENIED` |
 | **Agent 角色绑定** | "这个角色能用这个助手吗" | `role_ai_agent` 表 | tool 不可见（LLM 看不到 Agent） |
 | **功能权限** | "这个用户能调这个 tool 吗" | `user.perms` | `AI_TOOL_PERM_DENIED` |
 | **数据权限** | "这个用户能看到/改哪些行" | `DataScopeContext` | `AI_DATA_SCOPE_VIOLATION` |
 
-**关键设计**：Agent 角色绑定**不感知** data_scope，data_scope 完全在 tool 执行期由当前用户的 `DataScopeContext` 决定。
+**关键设计**：`AI_MODULE_ENABLED` 只是部署级可用性/紧急熔断开关，不属于授权层。Agent 角色绑定**不感知** data_scope，data_scope 完全在 tool 执行期由当前用户的 `DataScopeContext` 决定。`shared` Agent 也必须经过入口权限和显式角色绑定；共享工具如需所有 AI 用户可用，应通过角色授权表达，不能依赖代码直通或空权限隐式放行。
 
 **注意**：Agent 管理页（`/ai/agent`）走**传统 RBAC 权限码**（`ai:agent:*`），与 chat 页 Agent 切换的可见性（基于 `role_ai_agent` 表）是**两套独立机制**，不要混淆。
 
@@ -2267,12 +2287,13 @@ Service 层 `JobService.update()` 加 schema 级白名单，即使 tool 漏洞�
 ### 11.5 开源 SECURITY.md 前置声明
 
 `docs/SECURITY.md` 加一节，明确：
-- AI 默认禁用整个模块（环境变量 `AI_MODULE_ENABLED=false`）
+- AI 默认开启（`AI_MODULE_ENABLED=true`），`false` 仅用于紧急熔断或无 AI 部署
+- 用户侧 AI API 由 `ai:chat:use`、Role-Agent 绑定、工具功能权限和数据权限共同控制
 - 如何配置 `keyword_blocklist`
 - 如何启用内置 Agent
 - 漏洞报告流程
 
-**✅ Phase 4 实现（2026-07-08）**：`docs/SECURITY.md` 6 节完整版（模块开关 / 安全特性清单 / Agent 启用步骤 / 漏洞报告流程 / 部署 checklist / 代码索引）；`AI_MODULE_ENABLED: bool = True` 加到 `app/core/config.py::settings`，`main.py` 在 `if settings.AI_MODULE_ENABLED` 内注册 6 个 AI router（False 时不注册，业务模块不受影响）；`keyword_blocklist` 配置因 §11.2 留 v2+，SECURITY.md 标注「未实现 / 临时方案」。
+**🚧 2026-08-14 权限基线待收口**：`AI_MODULE_ENABLED: bool = True` 已实现，但当前 `false` 仍通过不注册 router 形成 404，尚未满足统一 503，也未证明 AI 业务依赖不会初始化。Phase 1 必须实现 §0 的熔断契约、用户侧 `ai:chat:use`、无 shared/R_SUPER Agent 旁路，并同步安全/部署文档；在这些测试通过前不得把模块开关标记为完整安全边界。
 
 ### 11.6 Agent loop 硬上限（防 LLM 失控循环）
 
@@ -2605,8 +2626,8 @@ async def parse_file(file_id: str, hint: str = "") -> FileParseResult:
 ```python
 @ai_tool(AiToolMeta(
     name="file.parse",
-    agent="shared",                      # 特殊 code, 所有 Agent 内可见
-    required_perms=(),                   # 任何登录用户可调
+    agent="shared",                      # 通用工具归组，不构成可见性豁免
+    required_perms=("ai:file:parse",),   # 2026-08-14 权限基线；Phase 1 待实现
     risk="low",
     accepts_file=("application/vnd.ms-excel",
                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2630,7 +2651,7 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 | `ai_provider` 表 + 已加密 `api_key` 数据 | 用户配置的密钥不能丢 |
 | `ai_model` 表 + 数据 | Provider 关联的模型配置 |
 | `app/core/security.py` 的 `encrypt_value` / `decrypt_value` | 加密机制本身没问题 |
-| `/ai/provider/*` API（含 `test-model` 端点） | Provider 管理功能完整 |
+| `/ai/provider/*` API | Provider 管理功能保留；历史 `test-model` 任意字典契约废止，Phase 1 改为已保存 Provider/Model 的 `POST /ai/provider/{provider_id}/test` 并接入统一 egress Policy |
 | `VercelAIAdapter` 基础设施 | SSE 流式底层 |
 | `app/modules/ai/core/provider_registry.py` | Provider 适配（openai/deepseek/anthropic）逻辑可复用 |
 
@@ -2758,7 +2779,7 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 
 | 项 | commit | 说明 |
 |---|---|---|
-| UI agent 切换器 | `aa0f51b` + `1d754d07` + `f8ec5f1` | 后端 `GET /ai/agents`（role_ai_agent + shared 直通 + 超管全开）+ 前端 chat-input 下拉 + chat.py 接收 agentCode 传 build_chat_deps → create_agent → create_chat_agent → build_pydantic_ai_tools（修了硬编码 user_mgmt bug） |
+| UI agent 切换器 | `aa0f51b` + `1d754d07` + `f8ec5f1` | 2026-07-09 历史实现为 `role_ai_agent + shared 直通 + 超管全开`；切换器链路已落地，但 shared 与超管直通均由 2026-08-14 收口决策废止，待 Phase 1 改为显式入口权限 + Role-Agent 绑定 + 可见 Tool |
 | dept.count AI tool + chip 回放 | `aa0f51b` | `dept.count`（agent=dept_mgmt, query_cache_module=system/dept）+ chip target 扩展 + dept/index.vue onMounted 接 ai_query_id 应用 status filter（3 单测） |
 | role.count AI tool + chip 回放 | `5caac9b` + `4038f87f` | 同上模式（role_mgmt → /system/role） |
 | job.update_cron AI tool | `aa0f51b` | `app/modules/job/ai_tools.py`（spec §11.3 JobAiUpdate 白名单 + hitl_always + dry_run 显示 cron 对比），注册到 `load_builtin_tools()` |
@@ -2777,7 +2798,7 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 | 容量 L1 全局速率（SR-19） | `f26c46f` | `sys_config.ai:rate_limit:global_per_min`（默认 0=不限）+ Redis key `ai:rate:global` ZSET 滑窗（与用户级 L1 复用 `_L1_LUA`）；错误码 `AI_RATE_LIMIT_GLOBAL` |
 | 容量 L4 会话预算（SR-20） | `9298a8c` | `sys_config.ai:budget:conv_per_day`（默认 0=不限）+ Redis key `ai:budget:conv:{conversation_id}` INCR + TTL 24h 滚动窗口；`conversation_id=0` 跳过；错误码 `AI_CONV_BUDGET_EXHAUSTED` |
 | 风险偏好 risk_appetite（SR-21） | `487941a` | `AiAgent.risk_appetite: Literal["conservative", "balanced", "aggressive"]`（默认 `"balanced"`）+ `classify_execution_mode(risk_appetite=...)` 仅调整 high risk 阈值；DB 层 CHECK 约束 |
-| role.list / dept.list AI tool（SR-22） | `2bd3e19` | `system/ai_tools.py` 加 `role_list` / `dept_list`（readonly，返回 `{total, limit, records}`）；limit 默认 20 截断 50；不应用 user 维度 data_scope（role/dept 是组织元数据） |
+| role.list / dept.list AI tool（SR-22） | `2bd3e19` | 2026-07-21 历史实现为全量组织元数据；2026-08-14 起保留 readonly/limit/minimal DTO，但按修订 SR-22 改用 Role/Dept 领域 scoped selector |
 | Guardrails forbidden_topics / forbidden_urls（SR-23） | `cecddcc` | `forbidden_topics.py` 子串匹配 + 错误码 `AI_FORBIDDEN_TOPIC`；`forbidden_urls.py` regex 提取域名 + 后缀匹配 + 错误码 `AI_FORBIDDEN_URL`；chat.py 串行调三层 detector；`sensitive_output_blocklist` 留 v2+ |
 | 文件解析 Excel/CSV（SR-24） | `01a764d` | `file_parser.py`（ExcelParser 50MB / CsvParser 10MB）+ `file_tools.py` `@ai_tool file.parse`（agent=shared, default_enabled=False, readonly=True）；raw bytes 永不进 LLM，仅返回 `{rows, columns, preview[3], parser, file_size}`；同步 IO 用 `asyncio.to_thread` 包装；`check_ai_tools.py` 加 `accepts_file_mime_valid` + `SHARED_AGENT_CODE` 豁免 scope_param 检查；PDF/Word 留 v1.6+ |
 | chat 内直接上传文件 chip + 注入 file_id（SR-25） | （已合入 SR-26 commit） | `chat-input.vue` 改 📎 按钮（accept 含 .csv/.xlsx/.xls）+ chip 预览；store `attachedFiles` + addFile/removeFile/clearFiles；sendMessage 拼 injectText 传 doStream；前端发 displayContent 字段，后端 chat.py 持久化优先用 display 版（LLM 仍看注入版）；Playwright 验证：用户 bubble 仅显示原始「解析这个文件」，LLM 自动调 file.parse 返回完整 markdown 表格 |
@@ -2791,7 +2812,7 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 
 | 项 | 阻塞原因 |
 |---|---|
-| ~~role.list / dept.list AI tool~~ | ~~MVP 聚合类 tool 已够，list 类 tool 价值递减（chip 跳转已覆盖数据展示）~~ **v1.5+ 已完成 2026-07-21**：补齐 LLM 需要少量行（如「列出当前启用的角色名」）的场景，count 无法替代；返回前 N 条（默认 20）+ data_scope 不应用（role/dept 是组织元数据，admin 可见即放行，与 §6.2 user 维度 data_scope 区分）；返回字段精简（id/name/code/status），敏感字段（phone/email）由 §7.3 GLOBAL_OUTPUT_BLOCKLIST 自动剥离。 |
+| ~~role.list / dept.list AI tool~~ | **2026-07-21 已实现，2026-08-14 授权语义待纠偏**：保留默认 20/最大 50 和最小字段，但必须按 SR-22 复用 Role/Dept 领域 scoped selector；旧的“组织元数据全局可见”不再有效。 |
 
 ### ⏸ v2+ 推迟项（架构级，独立版本规划）
 
@@ -2987,17 +3008,19 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 **反例**: (1) appetite 影响 destructive——破坏性操作永远 HITL 是安全底线，不受 appetite 影响（conservative 也不能更严，aggressive 也不能更宽）；同理 `hitl_always=True` / `injection_hit=True` 也不受影响。(2) 默认 aggressive 破坏 MVP——所有老 agent 没声明 risk_appetite 时行为变化（high 风险不再走 HITL），必须默认 `"balanced"` 与 MVP 等价。(3) risk_appetite 放 tool.meta——同 SR-16 / SR-19 反例，tool 归属 agent 可能与运行时会话 agent 不一致；应放 AiAgent 表。(4) 字符串字面量未用 Literal 类型——任意字符串都能传，运行时静默错误；必须 Literal 限定 3 档 + DB 层 CHECK 约束。
 **回归**: AiAgent 加 `risk_appetite` 字段（默认 `"balanced"`，老 agent 不显式声明完全等价 MVP）；`classify_execution_mode(meta, dry_run_count=..., injection_hit=..., risk_appetite="balanced")` 加可选参数（默认 `"balanced"`，老调用方不传兼容）；executor 从 `deps.agent.risk_appetite` 读取传入；测试覆盖 conservative/balanced/aggressive 三档 × high/destructive/low 三种 risk × dry_run_count ∈ {None, 0, 1, 2} 共 27 个组合的关键 case。
 
-#### SR-22. **`role.list` / `dept.list` AI tool（精简字段 + 不应用 data_scope + 默认 20 条）**（2026-07-21 v1.5+ 落地，spec §5.5 / §14）— MVP 已有 `role.count` / `dept.count` 但缺 list 类 tool，LLM 遇到「列出当前启用的角色名」「显示所有顶级部门」这类需求时只能拉 page 后转述，体验差。v1.5+ 在 `system/ai_tools.py` 加 `role.list` / `dept.list`，`risk=low` readonly，返回前 N 条（默认 20，`limit` 可调到 50）+ `total` 真实总数（不受 limit 截断，供 LLM 判断是否需要 chip 跳转）。
-**反例**: (1) 应用 user 维度 data_scope——role/dept 是组织元数据（角色 / 部门结构），与 user 可见范围正交；admin 看到所有 role 是设计意图（required_perms 已守门），强制 data_scope 过滤会让角色管理 agent 拿不到全量角色列表，破坏 RBAC 配置场景。(2) 返回全部字段（含 create_by / phone / email）——LLM prompt 浪费 + 敏感字段泄漏风险，应精简到 id/name/code/status 4-5 个核心字段，phone/email 等留给 §7.3 GLOBAL_OUTPUT_BLOCKLIST 兜底剥离。(3) `limit=None` 允许拉全量——大客户 5000+ 部门场景 OOM + LLM token 爆炸，必须强制 `limit ≤ 50`，超限截断 + LLM 提示用 chip 跳转看完整列表。(4) 复用 paginate 工具返回 `{records, total, current, size}` 完整 PageResult——LLM 不需要分页元信息（它不会翻页），简化为 `{total, limit, records}` 三字段。
-**回归**: system/ai_tools.py 加 `role_list` / `dept_list` 函数 + `@ai_tool` 装饰器（agent="role_mgmt"/"dept_mgmt"，required_perms="system:role:list"/"system:dept:list"，risk="low"，readonly=True，allowed_filters=("status",)，query_cache_module="system/role"/"system/dept"）；返回 `{"total": N, "limit": L, "records": [{"id": str, "name": ..., "code"/"parent_id": ..., "status": "1"/"0"}]}`（id 字符串化防 JS BigInt）；测试覆盖"无 filters 返回前 20"/"status filter 应用"/"limit > 50 截断到 50"/"total 反映真实总数不受 limit 影响"。
+#### SR-22. **`role.list` / `dept.list` AI tool（精简字段 + 领域 scope + 默认 20 条）**（2026-07-21 v1.5+ 落地；2026-08-14 权限语义纠偏）— MVP 已有 `role.count` / `dept.count` 但缺 list 类 tool，LLM 遇到「列出当前启用的角色名」「显示所有顶级部门」类需求时需要受控的最小候选。两个工具保持 `risk=low`、readonly、默认 20、最大 50，但 2026-08-14 起不再把组织元数据视为全局公开：`dept.list` 必须要求 `system:dept:list` 并复用页面相同的部门 scoped selector；`role.list` 必须要求 `system:role:list` 并只返回当前 GrantAuthority 下可读取的最小角色元数据和 `delegable/blockedReason`，角色委派 lookup 另走 `system:user:role-auth` 或对应 Role Delegation Policy。
+**反例**: (1) 因为 role/dept 是组织元数据而返回全量——部门父链和角色授权定义本身就是敏感授权数据，会让 AI 成为传统页面 scope 的旁路；必须与页面共享 selector。(2) 为拼树补回 scope 外祖先——会泄露隐藏组织结构；局部树只从可见集合构造。(3) 返回完整 permission、成员或 PII——列表只返回当前任务所需 allowlist 字段。(4) `limit=None` 拉全量——大客户会造成内存和 token 放大，必须 `limit ≤ 50`。
+**回归**: `system/ai_tools.py` 的 `role_list/dept_list` 复用共享 selector；测试覆盖不同 DataScope、多角色并集、局部树无隐藏祖先、不可委派角色标记、limit 截断、total 仅反映当前可见集合，以及页面 API 与 AI Tool 返回 ID 集合一致。
 
 #### SR-23. **Guardrails 扩 forbidden_topics（子串）+ forbidden_urls（域名后缀匹配），sensitive_output_blocklist 留 v2+**（2026-07-21 v1.5+ 落地，spec §11.2 / §14）— MVP `keyword_blocklist` 仅支持精确敏感词子串匹配，业务有「禁止讨论某主题」/「禁止粘贴某域名」需求。v1.5+ 加 `forbidden_topics.py`（与 `keyword_blocklist` 同模式，CONFIG_KEY=`ai:guardrail:forbidden_topics`，子串匹配 + 错误码 `AI_FORBIDDEN_TOPIC` 区分主题级与词级）+ `forbidden_urls.py`（CONFIG_KEY=`ai:guardrail:forbidden_urls`，regex 提取 URL 后比对域名，支持精确 + 后缀匹配如 `evil.com` 命中 `sub.evil.com`，错误码 `AI_FORBIDDEN_URL`）。chat.py 入口串行调三层 detector（keyword → topics → urls），任一命中短路 emit AiErrorEvent + Done。
 **反例**: (1) forbidden_topics 复用 keyword_blocklist 的 CONFIG_KEY——语义不同（topics 是宽泛主题词如「政治」，blocklist 是精确敏感词如「公司代号」），错误码也不同（用户文案区分「涉及禁话题」vs「含敏感词」），必须独立 key。(2) forbidden_urls 用子串匹配整个 URL——用户输入 `evil.com.txt`（合法 .txt 域名）会被 `evil.com` 子串误伤，必须 regex 提取域名段后精确 / 后缀匹配（`sub.evil.com` 命中 `evil.com` 是设计意图，但 `evil.com.txt` 不命中）。(3) forbidden_urls 用 URL path 比对——path 经常变（如 `evil.com/article/123`），黑名单不可维护；只比对域名（注册级）。(4) sensitive_output_blocklist 一起做——LLM 输出拦截需在 produce_pydantic 流式阶段过滤 text-delta（与 keyword_blocklist LLM 输出拦截同 v2+ 推迟理由：流式过滤复杂 + PydanticAI 流式 chunk 边界处理）。
 **回归**: 加 `app/modules/ai/agents/safety/{forbidden_topics,forbidden_urls}.py`（同 keyword_blocklist 的 load_* + check_* + invalidate_*_cache 接口，60s 缓存 + force_refresh）；chat.py 在 `keyword_blocklist` 检测后串行调 topics → urls；ConfigService.update 改 `ai:guardrail:*` 后需 `invalidate_forbidden_topics_cache()` / `invalidate_forbidden_urls_cache()`（MVP 靠 60s TTL 自然生效）；测试覆盖 topics 子串/大小写 + urls 三种形态（http / www / 裸域名）+ 后缀匹配 + 误伤场景（`evil.com.txt` 不命中）。
 
 #### SR-24. **文件解析 MVP 优先 Excel + CSV（90% 覆盖），PDF/Word 留 v1.6+；raw bytes 永不进 LLM（仅返回摘要）；同步 IO 用 `asyncio.to_thread` 包装**（2026-07-21 v1.5+ 落地，spec §16）— §16 设计了 4 个解析器（Excel/CSV/PDF/Word），但实际业务场景 Excel + CSV 占 > 90%（用户批量导入 / 报表上传），PDF / Word 解析依赖 pdfplumber / python-docx 未装 + 业务收益低，留 v1.6+。Excel `load_workbook(read_only=True, data_only=True)` + CSV 标准库 + 多编码兜底（utf-8 → gbk → latin-1 replace）+ BOM 手动剥离（utf-8 decode 不剥 BOM，需 `text.startswith("﻿")` 检查）。同步 IO（openpyxl / csv reader）用 `asyncio.to_thread` 包装（参考 chat.py:108 图片转 DataURI 同模式），避免阻塞事件循环。
-**反例**: (1) `text/csv` MIME 走 utf-8-sig decoder 优先——utf-8-sig 对纯 gbk 文件会 UnicodeDecodeError，顺序敏感；正确做法是 utf-8 → gbk → latin-1 三层降级 + 单独剥 BOM。(2) Excel / CSV 的 MIME 集合允许重叠（如 csv 文件被识别为 application/vnd.ms-excel）——`_build_parsers` 启动检测重复 MIME 即 RuntimeError，防配置漂移；CSV 不接管 .xls MIME（上传时 file_service 已记 MIME，parser 信任即可）。(3) 把 raw bytes 直接返回给 LLM 让它"看着办"——大文件 token 爆炸 + LLM 无法稳定解析二进制；必须后端解析为 `{rows, columns, preview[3]}` 摘要，raw bytes 仅在 tool 内部消费。(4) preview 不限量 / cell 不 stringify——datetime / Decimal 等 PydanticAI 不支持的类型会破坏 schema 序列化；必须 cell 一律 stringify + preview 截断到 3 行（spec §16.1）。(5) `file.parse` agent 绑定到具体业务 agent（如 user_mgmt）——文件解析是通用能力，归属 `SHARED_AGENT_CODE` + `required_perms=()` 任何登录用户直通（spec §5.4）。
-**回归**: 加 `app/modules/ai/agents/tools/file_parser.py`（`FileParser` Protocol + `ExcelParser` 50MB / `CsvParser` 10MB + `parse_file(file_path, mime_type)` 入口）；加 `file_tools.py` `@ai_tool file.parse`（agent=shared, required_perms=(), risk=low, default_enabled=False（SR-17 部署方显式启用）, accepts_file=SUPPORTED_MIME_TYPES, readonly=True）；错误码 `AI_FILE_TOO_LARGE` / `AI_FILE_TYPE_UNSUPPORTED` / `AI_FILE_NOT_FOUND` / `AI_FILE_ID_INVALID` / `AI_FILE_EMPTY`；`scripts/check_ai_tools.py` 加 `check_accepts_file_mime_valid`（accepts_file MIME 必须在 PARSERS 覆盖范围）+ `check_scope_param_requires_check` 豁免 SHARED_AGENT_CODE（file_id 等非业务资源 id 不需 scope 检查）；测试覆盖 Excel cell stringify / preview 截断 / 大小超限 + CSV utf-8/gbk/BOM 编码兜底 + 端到端 file_parse 调用（真实文件 + DB）+ Registry 元数据校验。
+> **权限语义修订（2026-08-14）**：解析器、大小限制和 raw bytes 边界继续有效；`SHARED_AGENT_CODE + required_perms=()` 的任何登录用户直通已废止，当前收口 spec Phase 1 固定改为 shared 显式绑定 + `ai:file:parse`。
+
+**反例**: (1) `text/csv` MIME 走 utf-8-sig decoder 优先——utf-8-sig 对纯 gbk 文件会 UnicodeDecodeError，顺序敏感；正确做法是 utf-8 → gbk → latin-1 三层降级 + 单独剥 BOM。(2) Excel / CSV 的 MIME 集合允许重叠（如 csv 文件被识别为 application/vnd.ms-excel）——`_build_parsers` 启动检测重复 MIME 即 RuntimeError，防配置漂移；CSV 不接管 .xls MIME（上传时 file_service 已记 MIME，parser 信任即可）。(3) 把 raw bytes 直接返回给 LLM 让它"看着办"——大文件 token 爆炸 + LLM 无法稳定解析二进制；必须后端解析为 `{rows, columns, preview[3]}` 摘要，raw bytes 仅在 tool 内部消费。(4) preview 不限量 / cell 不 stringify——datetime / Decimal 等 PydanticAI 不支持的类型会破坏 schema 序列化；必须 cell 一律 stringify + preview 截断到 3 行（spec §16.1）。(5) 把通用工具归属 `shared` 理解成授权豁免——工具归组与用户可见性是两件事，必须继续经过入口、Agent 和 Tool 权限。
+**回归**: 加 `app/modules/ai/agents/tools/file_parser.py`（`FileParser` Protocol + `ExcelParser` 50MB / `CsvParser` 10MB + `parse_file(file_path, mime_type)` 入口）；`file_tools.py` 的 `@ai_tool file.parse` 固定 `agent=shared, required_perms=("ai:file:parse",), risk=low, default_enabled=False, accepts_file=SUPPORTED_MIME_TYPES, readonly=True`；`scripts/check_ai_tools.py` 同时检查文件 MIME、独立权限和 Tool-Agent 精确归属；测试覆盖解析边界、无入口/无 shared 绑定/无 Tool 权限三层拒绝、fresh 显式启用和 upgrade 保留现值。
 
 #### SR-25. **chat 内直接上传文件用「附件 chip + 注入 file_id 到最后一条 user message 末尾」+ 后端持久化用 `displayContent` 双轨制**（2026-07-21 v1.5+ 落地，spec §16.1）— §16.1 原设计是"用户拖拽 Excel → 上传 → 复制 file_id → 粘贴到 chat"，UX 极差（OpenAI/Claude/豆包等主流均为 chat 内直接上传 + 用户无需手动复制 file_id）。v1.5+ 实施「附件 chip + 自动注入」方案：前端 `chat-input.vue` 加 📎 按钮（与"上传图片"合并，accept 含 `.csv/.xlsx/.xls` + 图片 MIME）+ chip 预览（`IconIcRoundInsertDriveFile` + 文件名 + size + 删除 X）+ 拖拽支持 Excel/CSV；store 加 `attachedFiles` state + `addFile/removeFile/clearFiles` actions（仿 `attachedImages`）；`sendMessage` 时如有附件，构造 `injectText = "{content}\n\n[附件] users.csv (file_id=xxx, mime=text/csv)"`，传给 `doStream(injectLastMessageText)`；`doStream` 发送 `messages` 时把最后一条 user message 的 text parts 替换为 injectText（图片 parts 仍保留），同时发送 `displayContent`（用户原始输入）字段。
 **反例**: (1) 把 injectText 直接 push 到 `currentMessages.parts`——chat-message.vue 渲染 parts.text 会显示注入文本，UI 污染；正确做法是 `currentMessages` 保持原始 content，`doStream` 内部 map 时替换最后一条 user 的 text parts（仅发送 LLM 用）。(2) 前端只发 injectText 没发 displayContent——后端 chat.py 持久化 user message 时把"发给 LLM 的 parts"（含 `[附件] file_id=...`）存到 `ai_message` 表，前端 SSE 完成后 reload conversation 会再次显示注入文本；必须双轨：`messages`（LLM 看，含注入）+ `displayContent`（持久化 + UI 用，原始）。(3) `displayParts` 不剥离 image parts——用户上传「图片 + 文件」混合附件时，displayParts 只含 displayContent text，图片丢失；必须 displayParts = [displayContent text] + user_parts 里的 image parts。(4) 切换 chat 上传按钮图标从 `IconIcRoundImage` 到 `IconIcRoundAttachFile`——保留旧图标会让用户以为"只能传图片"，新图标含图片+文件双重含义。(5) accept 列表含 `.pdf/.docx`——parser 未实现 PDF/Word，上传后会抛 `AI_FILE_TYPE_UNSUPPORTED`，UX 差；只允许已实现 parser 的类型（Excel + CSV），后续 parser 实现时同步扩 accept。
@@ -3047,7 +3070,7 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 
 #### SR-40. **Web 多 action 恢复只按稳定标识定位，焦点 singleton 不参与状态迁移**（2026-08-12，已完成）— `pendingConfirmation/pendingToolCallId` 仅表示默认抽屉焦点；终态事件始终按 `toolCallId` 清理，410 resume fallback 按入参 `confirmationId` 反查对应 action/toolCallId，续传重试预算按 confirmation 隔离。**反例**: 第二个 action 续传却读取第一个焦点 action 的 `pendingToolCallId` → 轮询错日志；非焦点 action 已完成但不清理 → 新消息永久被 pending gate 阻塞。**回归**: `src/store/modules/ai/__tests__/prepared-action-recovery.spec.ts` 覆盖非焦点终态清理、410 精确轮询与独立重试预算。
 
-#### SR-41. **会话删除必须与 durable action 生命周期互斥，历史孤儿由恢复流程终态化**（2026-08-12，已完成）— 删除会话前在同一事务查询 owner/tenant 下 `prepared|pending_confirmation|approved|running` action；存在时返回 `409 AI_CHAT_RUN_IN_PROGRESS`，不得级联抹除授权/审计事实。启动恢复保留有效 pending 前必须确认 conversation/source 仍存在、属于 owner 且 source active；缺失时以 `AI_PREPARED_ACTION_SOURCE_STALE` 过期并清理 guard/pending。**反例**: 直接删除 conversation 并级联 message、action 又无 FK → confirm 永久 404、DB pending 与 Redis guard 无法收口；给 action 加 `ON DELETE CASCADE` → 静默删除授权和执行审计。**回归**: `tests/modules/ai/test_conversation_api.py` 覆盖 409；`tests/modules/ai/test_prepared_action_lifecycle.py` 覆盖孤儿 pending 启动收口。
+#### SR-41. **会话删除必须锁定并收口 durable action，只有 running 阻断删除**（2026-08-12 初版；2026-08-14 MVP 纠偏）— 删除会话在同一事务按 owner/tenant 锁定 conversation、source message 和全部 action；`prepared/pending_confirmation/approved` 等尚未运行状态统一终态化为 `expired + AI_CONVERSATION_DELETED` 后再删除会话，不能遗留 pending。任一 action 已是 `running` 时返回 `409 AI_ACTION_RUNNING` 并整体回滚；禁止 FK cascade 抹除 action/operation log 授权与审计事实。启动恢复仍需把缺失或失配 source 的历史孤儿以稳定错误过期并清理 guard/pending。**反例**: 只要存在 pending 就拒绝删除会让用户永远无法主动收口对话；直接 cascade 又会丢失确认与审计事实。**回归**: `test_conversation_api.py` 覆盖未运行 action 原子过期、running 整体 409 和删除失败零状态变化；`test_prepared_action_lifecycle.py` 覆盖历史孤儿启动收口。
 
 #### SR-42. **审批冻结的批量删除目标必须整体重验当前 data scope**（2026-08-13，纠偏）— `user.batch_delete` 执行精确 `user_ids` 时先验证整个冻结集合仍在当前 scope，再加载和删除目标；任一 ID 因权限收缩不可见即整体拒绝，不允许把已批准集合静默缩成子集。**反例**: 复用普通列表查询并只删除查到的行 → 用户批准 A+B，执行时 B 不可见后却成功删除 A，审批对象与实际事务不再一致。**回归**: `test_partial_scope_loss_rejects_entire_frozen_delete` 断言 scope 收缩时事务零删除并返回 `AI_DATA_SCOPE_VIOLATION`。
 

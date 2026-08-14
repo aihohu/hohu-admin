@@ -1,8 +1,8 @@
 # AI Message Edit Semantics（AI 消息编辑语义） — v1.2
 
-**Status**: 🚧 Safety Gate 与 Task 35a 共享 send/confirm/PreparedAction binding 已完成（2026-08-08）；edit/regenerate 主实现未开始，入口继续关闭
+**Status**: ⏸ Deferred（不纳入当前 AI 管理 MVP）；Safety Gate 保持生效，edit/regenerate 入口继续关闭
 **Created**: 2026-08-06
-**Updated**: 2026-08-08
+**Updated**: 2026-08-14
 **Owner**: hohu core team
 **Depends on**:
 - `app/modules/ai/models/message.py`（`AiMessage` 已存在，本 spec 加 active projection / revision 字段）
@@ -10,6 +10,7 @@
 - `app/modules/ai/api/chat.py`（send / edit / regenerate 统一进入单次 ChatCommand）
 - 前端 `hohu-admin-web/src/store/modules/ai/index.ts`（当前 `editAndResend` / `regenerate` 是 bug 源头）
 **Related**:
+- [`2026-08-14-ai-management-mvp-closure.md`](./2026-08-14-ai-management-mvp-closure.md)（当前 MVP 范围与恢复条件的权威入口）
 - [`../adr/0001-ai-safety-consistency-before-deferred-execution.md`](../adr/0001-ai-safety-consistency-before-deferred-execution.md)（AI 当前版本先收口安全与一致性）
 - [`../adr/0002-gateway-owned-confirmation-flow.md`](../adr/0002-gateway-owned-confirmation-flow.md)（PreparedAction 绑定 source message revision）
 - [`2026-07-02-ai-tool-gateway-design.md`](./2026-07-02-ai-tool-gateway-design.md) §8.1 / §8.8（本 spec 不新增第二条实时通道）
@@ -18,6 +19,8 @@
 - [`APP-MARKETPLACE.md`](../APP-MARKETPLACE.md)（决策记录格式标杆）
 
 ---
+
+> **范围纠偏（2026-08-14）**：消息编辑/重新生成已经明确不进入当前 MVP。本文保留已完成的 Safety Gate、PreparedAction 因果约束和未来实现设计，但 Task 2c-11 及审计体验任务均不再阻塞 AI 管理 MVP、工具卡 Phase 1 或发布门禁。只有新的产品决策明确恢复该能力时，才重新评审本文并开启实现；在此之前不得仅打开前端常量。
 
 ## 1. Context
 
@@ -250,6 +253,12 @@ terminal action 不迁移到 replacement：rejected/expired 可按 D.1 继续编
 - preview-only 无 action就允许 replay → 重复创建 batch/file/cache。
 
 **回归**: 覆盖 pending action 阻止 edit/regenerate、显式 reject 后允许、confirm/edit 双竞态只有一方推进、source inactive confirm 不执行并写 stale error、replacement 不继承 action，以及 preview-only operation 仍按 write metadata 判定。
+
+### D.10 **消息编辑与重新生成退出当前 MVP，Safety Gate 继续作为唯一入口**
+
+当前阶段优先验证 AI 管理架构在多个业务模块上的功能权限、数据权限、HITL 和真实浏览器闭环，edit/regenerate 不提供新增的管理能力，却会显著扩张消息修订、历史副作用和并发状态机，因此整体延期。`AI_MESSAGE_REVISION_ACTIONS_ENABLED=false`、store no-op 和隐藏入口必须继续保持；本 spec 的未完成任务不再被其他当前 MVP spec 当作前置门禁。
+
+**反例**: 为了关闭工具卡测试清单而顺带实现消息修订，会把当前验证目标从“多个管理模块是否安全可用”转移到复杂的会话分支一致性；只隐藏按钮但放开 store/API，又会保留可绕过入口。**回归**: 现有 Safety Gate Vitest 持续断言按钮不可见、store action 无副作用且不发请求；当前 MVP 测试矩阵不要求 edit/regenerate 成功路径。
 
 ---
 
@@ -576,7 +585,9 @@ const editBlockedReason = computed(() => {
   - 0.1 **Safety Gate 同时禁 UI 与命令副作用** — 单靠隐藏按钮不能防其他组件或测试直接调用 store action，因此 action 本身也必须 no-op。**反例**: 只用 `v-if` 隐藏 → 调用 `regenerate()` 仍会 pop 历史并重复 tool。**回归**: Vitest 断言按钮不存在、两 action 返回 false 且消息/附件/stream 调用均不变。
   - 0.2 **Gate 只由单一常量控制** — UI 与 store 共享 `AI_MESSAGE_REVISION_ACTIONS_ENABLED`，避免一端误开。**反例**: 两处硬编码 boolean → 后续只改一处形成隐藏入口或无响应按钮。**回归**: safety-gate 测试同时覆盖 store 与 `chat-message.vue`。
 
-### Current release（安全与一致性收尾）
+### Deferred release（恢复开发时重新评审）
+
+> Task 2c-11 全部延期，不属于当前 AI 管理 MVP 验收条件；下列清单保留为未来恢复时的设计输入，不表示当前迭代承诺。
 
 - [x] Task 1 **✅ 已完成（2026-08-07）**：`AiMessage.is_active` / `supersedes_message_id` + `AiOperationLog.source_user_message_id` / `readonly_snapshot` migration；已补 active history、operation source/status 和 assistant run partial unique indexes
 - [x] Task 2a **✅ trusted tenant 子集已完成（2026-08-07）**：服务端 resolver 向 `ChatDeps/AiToolContext` 注入 tenant_id；旧 direct HITL PendingPayload 已保存 tenant 并在 resume/confirm 复核；Task 35a 将同一不变量迁入 PreparedAction，客户端字段仍不能覆盖

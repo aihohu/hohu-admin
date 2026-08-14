@@ -1,14 +1,15 @@
 # Chat Tool Card Embed in Message（工具卡片嵌入消息流） — v1.2
 
-**Status**: 🚧 Phase 1（逐消息内嵌核心 Task 3/4 已完成；完整测试矩阵与门禁仍待 §6 Task 5-7）
+**Status**: 🚧 Phase 1（逐消息内嵌核心 Task 3/4 已完成；当前范围只剩 HITL resume/download E2E 与最终门禁，不含已延期的 edit/regenerate）
 **Created**: 2026-08-05
-**Updated**: 2026-08-11
+**Updated**: 2026-08-14
 **Owner**: hohu core team
 **Depends on**:
 - [`2026-07-16-tool-result-view-design.md`](./2026-07-16-tool-result-view-design.md)（Tool Result View Registry 已 ship，5 种 view_type + DetailCardView 承载 downloadUrl）
 - [`2026-08-01-user-import-export-design.md`](./2026-08-01-user-import-export-design.md) §10 Task 33（AI 对话内下载按钮已落地，但渲染位置是当前要重构的「末尾卡片列表」）
 - BUG-FE-18 修复（`ai_message.tool_calls` JSON 已可反序列化；本 spec 将历史消息恢复路径从 `streamEvents` 迁回 `message.toolCalls`）
 **Related**:
+- [`2026-08-14-ai-management-mvp-closure.md`](./2026-08-14-ai-management-mvp-closure.md)（当前 MVP 范围与阅读入口）
 - [`../adr/0001-ai-safety-consistency-before-deferred-execution.md`](../adr/0001-ai-safety-consistency-before-deferred-execution.md)（执行事实、消息投影与当前同步边界）
 - [`../adr/0002-gateway-owned-confirmation-flow.md`](../adr/0002-gateway-owned-confirmation-flow.md)（结构化 confirmation 与 PreparedAction）
 - [`2026-07-02-ai-tool-gateway-design.md`](./2026-07-02-ai-tool-gateway-design.md) §8.1 / §8.8（本 spec 不新增事件类型；定义客户端投影与恢复）
@@ -413,6 +414,8 @@ POST /ai/confirm {confirmationId, action:"approve"}
 
 ## 5. 测试矩阵
 
+> **2026-08-14 范围说明**：下表中涉及 edit/regenerate 的既有行保留为未来消息修订实现的测试设计，但不属于当前 Phase 1 或 AI 管理 MVP 门禁。当前只验收 send、tool-only、HITL、PreparedAction、reload、download 与消息归属/耐久性。
+
 ### 5.1 前端 vitest
 
 | 测试 | 验证点 |
@@ -484,14 +487,14 @@ POST /ai/confirm {confirmationId, action:"approve"}
 - [x] Safety 前置 **✅ 已完成（2026-08-07）**：Task 35 已把 operation effect metadata、file_id ACL/trusted tenant、HITL tenant 复核和私有 artifact 边界收口；edit/regenerate UI/store Safety Gate 已关闭。该完成项只保证后续 finalizer 可依赖可信执行事实，不代表 message projection/handoff 已实现。
   - S.1 **执行安全前置与卡片耐久实现分开验收** — Task 35 修复 execution fact 的可信度，本 spec Phase 1 仍负责 message owner、terminal commit 和 handoff。**反例**: metadata/file ACL 通过就把工具卡 spec 标完成 → reload/HITL resume 仍可能丢卡或双写。**回归**: Safety 测试与 §5 durability/projection 测试保持两组独立门禁；Task 0-7 状态不因 Safety Gate 自动变更。
 - [x] Task 0（共享基础）**✅ 已完成（2026-08-07）**：已落 assistant run partial unique index、source/trace/parent 语义、客户端请求前稳定 traceId，以及 send/direct-HITL 的 conversation run guard/terminal cleanup；edit/regenerate 继续关闭，PreparedAction 专属上下文由 Task 35a.1-35a.5 补齐
-- [ ] Task 1（Red）：新增后端失败测试，覆盖 started 顺序、send/edit 与 regenerate 分支、chat/confirm/action TTL/startup cleanup、原 trace/source、owned guard、并发 finalizer、commit 先于 committed `done`、ack 丢失与持久化失败错误流
+- [ ] Task 1（Red）：新增后端失败测试，覆盖当前范围的 started 顺序、send、chat/confirm/action TTL/startup cleanup、原 trace/source、owned guard、并发 finalizer、commit 先于 committed `done`、ack 丢失与持久化失败错误流；edit/regenerate 分支延期
   - [x] Task 1a **✅ Task 35a Red 子集已完成（2026-08-08）**：覆盖 send/direct HITL、PreparedAction confirm/CAS/timeout/startup、started 稳定顺序、原 trace/source、tool-only/并发幂等 finalizer、owned guard、commit-before-done、reload pending 与 running-poll terminal handoff；edit/regenerate 和完整前端 ack-loss 场景仍归后续任务
-- [ ] Task 2（Green）：实现 action/outcome-aware `finalize_assistant_turn` 与 terminal cleanup；修改 chat.py、confirm/action service 与 Redis waiter；为既有 done 增加可选 traceId/messageId/persistence/projection，保持事件类型集合和 `tool_calls` JSON schema 不变
+- [ ] Task 2（Green）：实现当前范围的 action/outcome-aware `finalize_assistant_turn` 与 terminal cleanup；修改 chat.py、confirm/action service 与 Redis waiter；为既有 done 增加可选 traceId/messageId/persistence/projection，保持事件类型集合和 `tool_calls` JSON schema 不变；edit/regenerate outcome 延期
   - [x] Task 2a **✅ Task 35a Green 子集已完成（2026-08-08）**：chat/direct HITL/PreparedAction 已接共享 finalizer、terminal cleanup 与 detail pending projection，既有 done 已兼容可选 durability/projection 字段，`tool_calls` schema 与事件类型集合未变；edit/regenerate 的 outcome-aware 接入仍待本 Phase 后续任务
 - [x] Task 3（Red/Green）**✅ 已完成（2026-08-11）**：aiStore 已删除 restoredEvents，按 `message.toolCalls`/当前 stream 分离渲染源；实现 temp snapshot、done ack/trace fallback handoff、stale 阻断、多 action 独立轮询和切换会话丢弃迟到流
 - [x] Task 4 **✅ 已完成（2026-08-11）**：chat-main 已按 message wrapper 内嵌卡片；支持 streaming/transient/tool-only group，并移除全局末尾 tool-call-list；`chat-message.vue` 与 `chat-tool-call.vue` 内部保持不变
 - [ ] Task 5：vitest 覆盖 §5.1，pytest 覆盖 §5.2；回归现有 AI store、chat、resume、HITL、export 测试
-  - [x] Task 5a **✅ 核心回归已完成（2026-08-11）**：前端 Vitest 63/63、后端相关 pytest 116/116，覆盖消息归属/顺序、tool-only、pending handoff、ack 丢失、stale、多 action 轮询、跨会话迟到流、durable resume exactly-once 与超时状态机；§5.1/§5.2 其余 edit/regenerate 等矩阵仍待 Task 5 完整关闭
+  - [x] Task 5a **✅ 当前范围核心回归已完成（2026-08-11）**：前端 Vitest 63/63、后端相关 pytest 116/116，覆盖消息归属/顺序、tool-only、pending handoff、ack 丢失、stale、多 action 轮询、跨会话迟到流、durable resume exactly-once 与超时状态机；§5.1/§5.2 的 edit/regenerate 行已延期，不再阻塞 Task 5，Task 5 仅待当前范围全量回归确认
 - [ ] Task 6：E2E 覆盖 §5.3（含 reload、HITL resume、下载、tool-only）并回归现有 ai-chat e2e
   - [x] Task 6a **✅ 核心逐消息 E2E 已完成（2026-08-11）**：真实 Chrome 1/1，覆盖多轮各自归属、单消息多卡顺序、tool-only 无空气泡及 reload 稳定归属；HITL resume/download 等完整矩阵仍待 Task 6 关闭
 - [ ] Task 7：后端 `ruff check . && ruff format . && pytest`、前端 `pnpm lint && pnpm typecheck && pnpm test` 通过；将本状态块改 ✅ 并补 ship-time 决策
