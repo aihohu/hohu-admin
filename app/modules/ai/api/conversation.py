@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import require_ai_chat_use
 from app.core.base_response import PageResult, ResponseModel
 from app.core.exceptions import BusinessRuleException
 from app.core.tenant import resolve_tenant_id
@@ -14,7 +15,6 @@ from app.modules.ai.schemas.conversation import (
 from app.modules.ai.schemas.message import MessageOut
 from app.modules.ai.service.conversation_service import conversation_service
 from app.modules.ai.service.prepared_action_service import prepared_action_service
-from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
 
 router = APIRouter()
@@ -28,7 +28,7 @@ router = APIRouter()
 async def get_conversation_list(
     query: ConversationQuery = Depends(),
     db: AsyncSession = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(require_ai_chat_use),
 ):
     page_data = await conversation_service.get_list(db, query, _current_user.user_id)
     return ResponseModel.success(data=page_data)
@@ -38,7 +38,7 @@ async def get_conversation_list(
 async def get_conversation_detail(
     conversation_id: int,
     db: AsyncSession = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(require_ai_chat_use),
 ):
     conversation = await conversation_service.get_by_id(
         db, conversation_id, _current_user.user_id
@@ -70,9 +70,14 @@ async def get_conversation_detail(
 async def create_conversation(
     data: ConversationCreate,
     db: AsyncSession = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(require_ai_chat_use),
 ):
-    conversation = await conversation_service.create(db, data, _current_user.user_id)
+    conversation = await conversation_service.create(
+        db,
+        data,
+        _current_user.user_id,
+        tenant_id=resolve_tenant_id(_current_user),
+    )
     await db.commit()
     await db.refresh(conversation)
     return ResponseModel.success(data=ConversationOut.model_validate(conversation))
@@ -83,9 +88,15 @@ async def update_conversation(
     conversation_id: int,
     data: ConversationUpdate,
     db: AsyncSession = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(require_ai_chat_use),
 ):
-    await conversation_service.update(db, conversation_id, data, _current_user.user_id)
+    await conversation_service.update(
+        db,
+        conversation_id,
+        data,
+        _current_user.user_id,
+        tenant_id=resolve_tenant_id(_current_user),
+    )
     await db.commit()
     return ResponseModel.success(msg="更新成功")
 
@@ -94,7 +105,7 @@ async def update_conversation(
 async def delete_conversation(
     conversation_id: int,
     db: AsyncSession = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(require_ai_chat_use),
 ):
     await conversation_service.lock_for_delete(
         db, conversation_id, _current_user.user_id

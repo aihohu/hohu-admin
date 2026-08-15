@@ -19,6 +19,10 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
 from app.core.id_generator import next_id
+from app.modules.ai.constants import (
+    AI_CHAT_USE_PERMISSION,
+    AI_FILE_PARSE_PERMISSION,
+)
 from app.modules.system.models.menu import Menu
 
 # 菜单定义：每条记录用 parent_route 替代 parent_id，运行时自动解析。
@@ -87,6 +91,24 @@ MENU_DEFINITIONS = [
         "keep_alive": False,
         "constant": False,
         "multi_tab": False,
+    },
+    {
+        "key": "ai_chat_use",
+        "parent_route": "ai_chat",
+        "menu_name": "使用 AI 对话",
+        "menu_type": "F",
+        "permission": AI_CHAT_USE_PERMISSION,
+        "route_path": "",
+        "status": "1",
+    },
+    {
+        "key": "ai_file_parse",
+        "parent_route": "ai_chat",
+        "menu_name": "解析聊天文件",
+        "menu_type": "F",
+        "permission": AI_FILE_PARSE_PERMISSION,
+        "route_path": "",
+        "status": "1",
     },
     {
         "route_name": "ai_provider",

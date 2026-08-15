@@ -11,13 +11,20 @@ import re
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import BusinessRuleException, NotFoundException
+from app.constants import STATUS_ENABLED, SUPER_ADMIN_ROLE_CODE
+from app.core.auth import has_explicit_permission
+from app.core.exceptions import (
+    AuthorizationException,
+    BusinessRuleException,
+    NotFoundException,
+)
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.schemas.agent_admin import (
     AgentAdminDetailItem,
     AgentAdminListItem,
     AgentAdminUpdateReq,
 )
+from app.modules.system.models.user import User
 
 
 class AgentAdminService:
@@ -43,14 +50,35 @@ class AgentAdminService:
         return AgentAdminDetailItem.model_validate(agent)
 
     async def update_agent(
-        self, db: AsyncSession, agent_id: int, req: AgentAdminUpdateReq
+        self,
+        db: AsyncSession,
+        agent_id: int,
+        req: AgentAdminUpdateReq,
+        *,
+        current_user: User,
     ) -> AgentAdminDetailItem:
+        is_enabled_super = any(
+            role.role_code == SUPER_ADMIN_ROLE_CODE and role.status == STATUS_ENABLED
+            for role in current_user.roles
+        )
+        if not is_enabled_super or not has_explicit_permission(
+            current_user,
+            "ai:agent:edit",
+        ):
+            raise AuthorizationException(
+                "仅显式获权的启用超级管理员可修改 AI Agent",
+                error_code="AI_AGENT_ADMIN_REQUIRED",
+            )
+
+        immutable_fields = {"agent_id", "code", "is_builtin"}
+        if immutable_fields & req.model_fields_set:
+            raise BusinessRuleException(
+                "Agent identity 字段不可修改",
+                error_code="AI_AGENT_IMMUTABLE_FIELD",
+            )
+
         agent = await self._get_agent_or_404(db, agent_id)
         data = req.model_dump(exclude_unset=True)
-        # 显式忽略 code / is_builtin / agent_id 字段（决策 #1）
-        # —— 即使客户端绕过 UI 直接 PUT 也兜底，绝不改 identity 字段
-        for forbidden in ("code", "is_builtin", "agent_id"):
-            data.pop(forbidden, None)
 
         # 显式 description 长度校验（决策 #20）—— Schema field_validator 也会捕，
         # 但全局 RequestValidationError handler 返 422 + 无 errorCode，无法满足

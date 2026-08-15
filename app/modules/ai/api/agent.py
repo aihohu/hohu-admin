@@ -1,10 +1,10 @@
 """AI Agent 用户端与管理端接口。
 
 GET /ai/agents 返回当前用户可见的 Agent 列表：
-  - 超管：所有 enabled=True 的 Agent
-  - 普通用户：role_ai_agent 关联 + shared Agent（直通）
+  - 所有身份：enabled Agent + 启用角色的显式 Role-Agent 绑定
+  - 并且当前身份对该 Agent 至少有一个可见 Tool
 
-可见性查询统一由 ``service/agent_visibility.py`` 提供。
+可见性查询统一委托 ``AgentAuthorizationService``，超管和 shared 均无绑定旁路。
 
 管理端使用 ``/ai/admin/agents`` 路径，与用户视角分离，
 在 main.py 用 admin_router + 独立 prefix 注册，避免与 /ai/agents 用户视角路径混用）.
@@ -13,7 +13,7 @@ GET /ai/agents 返回当前用户可见的 Agent 列表：
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import require_permissions
+from app.core.auth import require_ai_chat_use, require_permissions
 from app.core.base_response import ResponseModel
 from app.db.session import get_db
 from app.modules.ai.schemas.agent_admin import (
@@ -21,8 +21,12 @@ from app.modules.ai.schemas.agent_admin import (
     AgentAdminListItem,
     AgentAdminUpdateReq,
 )
+from app.modules.ai.schemas.model import ModelOption
 from app.modules.ai.service.agent_admin import agent_admin_service
 from app.modules.ai.service.agent_visibility import list_visible_agents
+from app.modules.ai.service.model_authorization_service import (
+    model_authorization_service,
+)
 from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
 
@@ -32,7 +36,7 @@ router = APIRouter()
 @router.get("", summary="列出当前用户可用的 AI Agent")
 async def list_agents(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_ai_chat_use),
 ) -> ResponseModel[list[dict]]:
     """列出当前用户可见的 Agent，查询逻辑由 service 统一维护。
 
@@ -79,6 +83,19 @@ async def admin_list_agents(
 
 
 @admin_router.get(
+    "/model-options",
+    summary="管理端：列出 Agent 可选对话模型",
+    response_model=ResponseModel[list[ModelOption]],
+    dependencies=[Depends(require_permissions("ai:agent:list"))],
+)
+async def admin_list_model_options(
+    db: AsyncSession = Depends(get_db),
+) -> ResponseModel[list[ModelOption]]:
+    items = await model_authorization_service.list_model_options(db, tenant_id=0)
+    return ResponseModel.success(data=items)
+
+
+@admin_router.get(
     "/{agent_id}",
     summary="管理端：Agent 详情",
     response_model=ResponseModel[AgentAdminDetailItem],
@@ -97,16 +114,21 @@ async def admin_get_agent(
     "/{agent_id}",
     summary="管理端：更新 Agent 配置",
     response_model=ResponseModel[AgentAdminDetailItem],
-    dependencies=[Depends(require_permissions("ai:agent:edit"))],
 )
 async def admin_update_agent(
     agent_id: int,
     req: AgentAdminUpdateReq,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> ResponseModel[AgentAdminDetailItem]:
-    """决策 #1：code / is_builtin / agent_id 字段在 service 层强制 strip；
+    """code / is_builtin / agent_id 任一出现即原子拒绝；
     决策 #20：partial update，未传字段保持原值.
     """
-    item = await agent_admin_service.update_agent(db, agent_id, req)
+    item = await agent_admin_service.update_agent(
+        db,
+        agent_id,
+        req,
+        current_user=current_user,
+    )
     await db.commit()
     return ResponseModel.success(data=item)

@@ -114,11 +114,16 @@ class TestPreparedTerminalCleanupOwnership:
         delete_pending.assert_awaited_once_with(ANY, "cid_offline")
 
 
-def _make_user(user_id: int = 100, user_name: str = "alice"):
-    """构造最小 User mock（只需 user_id / user_name 字段）"""
-    from types import SimpleNamespace
-
-    return SimpleNamespace(user_id=user_id, user_name=user_name)
+def _make_user(
+    user_id: int = 100,
+    user_name: str = "alice",
+    *,
+    can_chat: bool = True,
+):
+    """构造带显式 AI 入口权限的最小 User mock。"""
+    menus = [SimpleNamespace(permission="ai:chat:use")] if can_chat else []
+    role = SimpleNamespace(role_code="R_USER", status="1", menus=menus)
+    return SimpleNamespace(user_id=user_id, user_name=user_name, roles=[role])
 
 
 def _make_prepared_action(
@@ -252,8 +257,174 @@ class TestConfirmSuccess:
         assert result.data.tool_call_id == "tc_test"
         assert result.data.status == "queued"
 
+    async def test_legacy_approve_without_permission_expires_and_cleans_pending(
+        self,
+    ) -> None:
+        log = SimpleNamespace(log_id=77)
+        with (
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.get_pending",
+                AsyncMock(return_value=_make_pending(guard_owner_token="guard")),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.operation_log_service.get_by_tool_call_id",
+                AsyncMock(return_value=log),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.operation_log_service.mark_expired_if_pending",
+                AsyncMock(return_value=log),
+            ) as expire,
+            patch(
+                "app.modules.ai.api.confirm.chat_run_finalizer.finalize_pending_turn",
+                AsyncMock(),
+            ) as finalize,
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.wake",
+                AsyncMock(return_value=False),
+            ) as wake,
+            patch(
+                "app.modules.ai.api.confirm.chat_run_guard.release",
+                AsyncMock(),
+            ) as release,
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.delete_pending",
+                AsyncMock(),
+            ) as delete_pending,
+        ):
+            db = MagicMock()
+            db.commit = AsyncMock()
+            with pytest.raises(AuthorizationException) as exc_info:
+                await confirm_tool(
+                    ConfirmRequest(
+                        confirmationId="cid_test_123",
+                        action="approve",
+                    ),
+                    db=db,
+                    current_user=_make_user(can_chat=False),
+                )
+
+        assert exc_info.value.error_code == "AI_CHAT_PERMISSION_DENIED"
+        expire.assert_awaited_once_with(db, 77)
+        finalize.assert_awaited_once()
+        db.commit.assert_awaited_once()
+        wake.assert_awaited_once_with("cid_test_123", ConfirmAction.REJECTED)
+        release.assert_awaited_once()
+        delete_pending.assert_awaited_once()
+
 
 class TestPreparedConfirmation:
+    async def test_reject_bypasses_revoked_chat_permission_and_disabled_state(
+        self,
+    ) -> None:
+        action = _make_prepared_action()
+        terminal = _make_prepared_action(status="rejected")
+        disabled_check = AsyncMock(return_value=True)
+        with (
+            patch(
+                "app.modules.ai.api.confirm.check_user_disabled",
+                disabled_check,
+            ),
+            patch(
+                "app.modules.ai.api.confirm.prepared_action_service.get_by_confirmation_id",
+                AsyncMock(return_value=action),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.prepared_action_service.lock_confirmation_context",
+                AsyncMock(return_value=_make_prepared_context(action)),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.operation_log_service.get_by_tool_call_id",
+                AsyncMock(return_value=None),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.prepared_action_service.transition_status",
+                AsyncMock(return_value=terminal),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.chat_run_finalizer.finalize_prepared_action",
+                AsyncMock(),
+            ),
+            patch(
+                "app.modules.ai.api.confirm._notify_prepared_terminal",
+                AsyncMock(),
+            ),
+        ):
+            db = MagicMock()
+            db.commit = AsyncMock()
+            result = await confirm_tool(
+                ConfirmRequest(
+                    confirmationId="cid_test_0123",
+                    action="reject",
+                ),
+                db=db,
+                current_user=_make_user(can_chat=False),
+            )
+
+        assert result.data.status == "rejected"
+        disabled_check.assert_not_awaited()
+
+    async def test_approve_without_chat_permission_terminalizes_before_execution(
+        self,
+    ) -> None:
+        action = _make_prepared_action()
+        terminal = _make_prepared_action(status="expired")
+        transition = AsyncMock(return_value=terminal)
+        notify = AsyncMock()
+        with (
+            patch(
+                "app.modules.ai.api.confirm.check_user_disabled",
+                AsyncMock(return_value=False),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.prepared_action_service.get_by_confirmation_id",
+                AsyncMock(return_value=action),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.prepared_action_service.lock_confirmation_context",
+                AsyncMock(return_value=_make_prepared_context(action)),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.operation_log_service.get_by_tool_call_id",
+                AsyncMock(return_value=None),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.prepared_action_service.transition_status",
+                transition,
+            ),
+            patch(
+                "app.modules.ai.api.confirm.chat_run_finalizer.finalize_prepared_action",
+                AsyncMock(),
+            ),
+            patch(
+                "app.modules.ai.api.confirm._notify_prepared_terminal",
+                notify,
+            ),
+            patch(
+                "app.modules.ai.api.confirm.execute_approved_prepared_action",
+                AsyncMock(),
+            ) as execute,
+        ):
+            db = MagicMock()
+            db.commit = AsyncMock()
+            with pytest.raises(AuthorizationException) as exc_info:
+                await confirm_tool(
+                    ConfirmRequest(
+                        confirmationId="cid_test_0123",
+                        action="approve",
+                    ),
+                    db=db,
+                    current_user=_make_user(can_chat=False),
+                )
+
+        assert exc_info.value.error_code == "AI_CHAT_PERMISSION_DENIED"
+        assert transition.await_args.kwargs["target_status"].value == "expired"
+        assert transition.await_args.kwargs["error_code"] == (
+            "AI_CHAT_PERMISSION_DENIED"
+        )
+        db.commit.assert_awaited_once()
+        notify.assert_awaited_once()
+        execute.assert_not_awaited()
+
     async def test_stale_snapshot_is_rejected_before_wake(self) -> None:
         action = _make_prepared_action()
         terminal = _make_prepared_action(status="expired")
@@ -662,21 +833,70 @@ class TestUserDisabled:
     """修订 S-13：HITL 期间用户被自动禁用 → 403 AI_USER_DISABLED"""
 
     async def test_disabled_user_blocked(self) -> None:
-        """check_user_disabled=True → 抛 AI_USER_DISABLED"""
+        """legacy approve 被禁用后写 expired 终态并清理离线 pending。"""
+        pending = _make_pending(
+            user_id=100,
+            source_user_message_id=987,
+            guard_owner_token="owner-token",
+        )
+        fake_log = SimpleNamespace(log_id=12345)
+        db = MagicMock()
+        db.commit = AsyncMock()
         with (
             patch(
                 "app.modules.ai.api.confirm.hitl_manager.get_pending",
-                AsyncMock(return_value=_make_pending(user_id=100)),
+                AsyncMock(return_value=pending),
             ),
             patch(
                 "app.modules.ai.api.confirm.check_user_disabled",
                 AsyncMock(return_value=True),  # 用户已被禁用
             ),
+            patch(
+                "app.modules.ai.api.confirm.operation_log_service.get_by_tool_call_id",
+                AsyncMock(return_value=fake_log),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.operation_log_service.mark_expired_if_pending",
+                AsyncMock(return_value=fake_log),
+            ) as mark_expired,
+            patch(
+                "app.modules.ai.api.confirm.chat_run_finalizer.finalize_pending_turn",
+                AsyncMock(),
+            ) as finalize,
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.wake",
+                AsyncMock(return_value=False),
+            ) as wake,
+            patch(
+                "app.modules.ai.api.confirm.chat_run_guard.release",
+                AsyncMock(),
+            ) as release,
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.delete_pending",
+                AsyncMock(),
+            ) as delete_pending,
         ):
             req = ConfirmRequest(confirmationId="cid_test_0123", action="approve")
             with pytest.raises(AuthorizationException) as exc_info:
-                await confirm_tool(req, db=MagicMock(), current_user=_make_user(100))
-            assert exc_info.value.error_code == "AI_USER_DISABLED"
+                await confirm_tool(req, db=db, current_user=_make_user(100))
+
+        assert exc_info.value.error_code == "AI_USER_DISABLED"
+        mark_expired.assert_awaited_once_with(db, fake_log.log_id)
+        finalize.assert_awaited_once_with(
+            db,
+            pending=pending,
+            ok=False,
+            error_code="AI_USER_DISABLED",
+            error_msg="AI 已被禁用，操作未执行",
+        )
+        db.commit.assert_awaited_once()
+        wake.assert_awaited_once_with("cid_test_0123", ConfirmAction.REJECTED)
+        release.assert_awaited_once_with(
+            ANY,
+            conversation_id=pending.conversation_id,
+            owner_token="owner-token",
+        )
+        delete_pending.assert_awaited_once_with(ANY, "cid_test_0123")
 
     async def test_disabled_check_runs_after_owner_check(self) -> None:
         """S-13：owner 校验先于 disabled 校验（owner 不匹配时不应触发 disabled 查询）"""

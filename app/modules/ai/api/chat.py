@@ -28,9 +28,12 @@ from pydantic_ai.ui.vercel_ai import VercelAIAdapter
 from pydantic_ai.usage import UsageLimits
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import require_ai_chat_use
+from app.core.base_response import ResponseModel
 from app.core.config import settings
-from app.core.exceptions import BusinessRuleException
+from app.core.exceptions import AuthorizationException, BusinessRuleException
 from app.core.redis import redis_client
+from app.core.tenant import resolve_tenant_id
 from app.db.session import get_db
 from app.modules.ai.agents.hitl.events import (
     AiErrorEvent,
@@ -59,6 +62,7 @@ from app.modules.ai.agents.safety.keyword_blocklist import (
     load_blocklist,
 )
 from app.modules.ai.schemas.chat import resolve_chat_trace_id
+from app.modules.ai.schemas.model import ModelOption
 from app.modules.ai.service.chat_run_service import (
     ToolCallCollector,
     chat_run_finalizer,
@@ -66,7 +70,9 @@ from app.modules.ai.service.chat_run_service import (
 )
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.conversation_service import conversation_service
-from app.modules.auth.service import get_current_user
+from app.modules.ai.service.model_authorization_service import (
+    model_authorization_service,
+)
 from app.modules.system.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -282,11 +288,27 @@ async def _emit_safety_blocked(
 router = APIRouter()
 
 
+@router.get(
+    "/models",
+    summary="列出当前租户可用于对话的模型",
+    response_model=ResponseModel[list[ModelOption]],
+)
+async def list_chat_models(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_ai_chat_use),
+) -> ResponseModel[list[ModelOption]]:
+    items = await model_authorization_service.list_model_options(
+        db,
+        tenant_id=resolve_tenant_id(current_user),
+    )
+    return ResponseModel.success(data=items)
+
+
 @router.post("", summary="流式对话（SSE）")
 async def chat(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(require_ai_chat_use),
 ):
     """Vercel AI SDK 兼容的流式对话接口
 
@@ -403,15 +425,27 @@ async def chat(
             trace_id=trace_id,
         )
 
-    model_name = body.get("modelId") or None
+    if "modelId" in body:
+        model_name = body["modelId"]
+    elif "model_id" in body:
+        model_name = body["model_id"]
+    else:
+        model_name = None
 
     # 回退到会话绑定的模型
-    if not model_name and conv:
+    if model_name is None and conv:
         model_name = conv.model_name
 
-    # 将使用的模型更新到会话
-    if conv and model_name and conv.model_name != model_name:
-        conv.model_name = model_name
+    # 显式/既有会话模型可以在路由前校验；新会话未指定模型时必须等 Agent
+    # 授权完成，再使用其 model_preference，不能提前固化成全局第一项。
+    selected_model = None
+    if model_name is not None:
+        selected_model = await model_authorization_service.authorize_chat_model(
+            db,
+            model_name,
+            tenant_id=resolve_tenant_id(_current_user),
+        )
+        model_name = str(selected_model.model.model_id)
 
     # 构造包含数据权限和粘滞路由信息的完整 ChatDeps。
     # agent_code 不存在时转换为稳定的 AI_ROUTING_FAILED 事件并记录路由日志，
@@ -685,6 +719,7 @@ async def chat(
     llm_choice: str | None = None
     clarification_payload: dict | None = None
     routing_failed = False
+    routing_error_code = "AI_ROUTING_FAILED"
     routing_latency_ms = 0
 
     if stick_decision and stick_decision.run_supervisor:
@@ -705,6 +740,7 @@ async def chat(
             if not candidates:
                 routing_failed = True
                 route_reason = "no_candidates"
+                routing_error_code = "AI_AGENT_NOT_AVAILABLE"
             else:
                 quota = await check_supervisor_quota(db, user_id=_current_user.user_id)
                 if not quota.allowed:
@@ -729,12 +765,19 @@ async def chat(
                     # 比例异常时调高 sys_config.ai:supervisor_daily_limit.
                     await increment_daily_count(redis_client, _current_user.user_id)
                     start = time.monotonic()
-                    result = await agent_router.route(db, user_message, candidates)
+                    result = await agent_router.route(
+                        db,
+                        user_message,
+                        candidates,
+                        tenant_id=deps.tenant_id,
+                    )
                     routing_latency_ms = int((time.monotonic() - start) * 1000)
 
                     if result.failed:
                         routing_failed = True
                         route_reason = result.reason
+                        if result.reason == "no_candidates":
+                            routing_error_code = "AI_AGENT_NOT_AVAILABLE"
                     elif result.clarification:
                         clarification_payload = {
                             "candidates": tuple(
@@ -753,6 +796,31 @@ async def chat(
                         final_agent_code = result.agent_code
                         llm_choice = result.agent_code  # LLM 解析出的路由结果。
                         route_reason = result.reason
+
+    # Supervisor 结果和安全/default fallback 也必须再次通过统一 Agent Policy。
+    if not routing_failed and clarification_payload is None and final_agent_code:
+        if deps.agent is None:
+            try:
+                await chat_service.attach_agent_to_deps(deps, final_agent_code)
+            except AuthorizationException as exc:
+                routing_failed = True
+                routing_error_code = exc.error_code or "AI_AGENT_NOT_AVAILABLE"
+                route_reason = "agent_policy_rejected"
+
+    # 每个真正要进入执行 Agent 的新 LLM run 都在路由日志/会话 commit 前复验。
+    # 无显式/会话模型时使用已授权 Agent 的偏好；偏好无效时 fail closed，
+    # 绝不静默回退到其它模型。
+    if not routing_failed and clarification_payload is None and deps.agent is not None:
+        if selected_model is None:
+            model_ref = getattr(deps.agent, "model_preference", None)
+            selected_model = await model_authorization_service.authorize_chat_model(
+                db,
+                model_ref,
+                tenant_id=deps.tenant_id,
+            )
+        model_name = str(selected_model.model.model_id)
+        if conv is not None and conv.model_name != model_name:
+            conv.model_name = model_name
 
     # 所有路由路径都写入审计日志。
     # input_message 用 `or ""` 兜底：边界防御统一为空串写入 HMAC hash.
@@ -780,8 +848,12 @@ async def chat(
         async def _routing_failed_stream():
             yield _format_sse_chunk(
                 AiErrorEvent(
-                    error_code="AI_ROUTING_FAILED",
-                    message="路由失败，请重试或手动选择 Agent",
+                    error_code=routing_error_code,
+                    message=(
+                        "当前没有可用的 AI Agent，请联系管理员授权"
+                        if routing_error_code == "AI_AGENT_NOT_AVAILABLE"
+                        else "路由失败，请重试或手动选择 Agent"
+                    ),
                 )
             )
             yield _format_sse_chunk(
@@ -818,13 +890,14 @@ async def chat(
             headers={"X-AI-Trace-ID": trace_id},
         )
 
-    # 路由成功 / 粘滞 / 手动 → 注入 agent 到 deps（如还是 None）
-    if deps.agent is None and final_agent_code:
-        await chat_service.attach_agent_to_deps(deps, final_agent_code)
-
     # 创建 Agent，并按用户权限和 agent_code 过滤工具。
     agent = await chat_service.create_agent(
-        db, model_name, user_perms=deps.perms, agent_code=deps.agent.code
+        db,
+        model_name,
+        user_perms=deps.perms,
+        agent_code=deps.agent.code,
+        tenant_id=deps.tenant_id,
+        agent_config=deps.agent,
     )
 
     # 所有持久化变更前先获取会话级 owner lease。

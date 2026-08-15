@@ -156,6 +156,7 @@ async def cleanup_prepared_actions_on_startup(redis: Redis) -> int:
                     cleanup_db,
                     terminal.execute_tool_call_id,
                     user_id=terminal.user_id,
+                    tenant_id=terminal.tenant_id,
                 )
                 if operation is not None:
                     operation_status = AiOperationStatus(operation.status)
@@ -314,6 +315,7 @@ async def cleanup_orphaned_pending_on_startup() -> int:
                         db,
                         pending.tool_call_id,
                         user_id=pending.user_id,
+                        tenant_id=pending.tenant_id,
                     )
                     await finalize_orphaned_pending(
                         db,

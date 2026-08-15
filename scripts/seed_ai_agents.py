@@ -7,8 +7,8 @@ AI Agent 内置数据填充
 enabled / system_prompt / model_preference），不存在则 INSERT 完整行。
 集中定义内置 Agent 的初始配置。
 
-所有内置 Agent 默认 enabled=False（开源 TOB 默认禁用，部署方按需启用），
-system_prompt="" 留给部署方填业务领域知识，model_preference=None 用全局默认。
+新插入行按发布状态设置 enabled；已存在行保留部署方 enabled 值。
+system_prompt="" 留给部署方填业务领域知识，model_preference=None 用统一模型 selector。
 
 Usage:
     cd hohu-admin
@@ -23,6 +23,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
 from app.core.id_generator import next_id
+from app.modules.ai.constants import PUBLISHED_AGENT_CODES
 from app.modules.ai.models.agent import AiAgent
 
 # 内置 Agent 定义。
@@ -32,9 +33,9 @@ AGENT_SEED = [
         "code": "shared",
         "name": "通用工具助手",
         "description": (
-            "处理通用工具类请求：文件解析（Excel/CSV）、跨模块统计、不属于其他专用 Agent 的杂项。"
-            "当用户问题不属于用户/角色/部门/任务/配置/Provider 任何专用领域时，选本 Agent。"
-            "典型 query：'解析这个文件'、'统计系统的总体情况'。"
+            "处理已上传 Excel/CSV 文件的结构化解析，不承载跨业务模块能力。"
+            "典型 query：'解析这个 CSV 文件'、'读取 Excel 的表头和前三行'。"
+            "边界：用户、角色和部门业务分别归对应专用 Agent。"
         ),
         "display_order": 1,
     },
@@ -42,10 +43,9 @@ AGENT_SEED = [
         "code": "user_mgmt",
         "name": "用户管理助手",
         "description": (
-            "处理用户 CRUD、密码重置、账号解锁、用户状态变更、用户统计数据查询。"
-            "典型 query：'新建用户圣诞到总部'、'重置 cs123 的密码'、'统计启用的用户数'。"
-            "边界：涉及角色/权限的归 role_mgmt；部门结构维护归 dept_mgmt，"
-            "用户创建时的部门名称解析仍由本 Agent 完成。"
+            "用户管理助手尚未发布；现有工具仍缺部门与角色完整集合授权闭环。"
+            "未来典型 query：'调整用户所属部门'、'更新用户角色集合'。"
+            "边界：完成 Phase 2 前保持禁用；角色委派和部门结构分别归专用 Agent。"
         ),
         "display_order": 2,
     },
@@ -53,9 +53,9 @@ AGENT_SEED = [
         "code": "role_mgmt",
         "name": "角色权限助手",
         "description": (
-            "处理角色 CRUD、菜单绑定、权限码分配、角色统计数据查询。"
-            "典型 query：'给 role_editor 加 sys:user:export 权限'、'列出所有启用的角色'。"
-            "边界：涉及用户增删的归 user_mgmt；涉及按钮权限定义的归 config_mgmt。"
+            "角色权限助手尚未发布；现有只读能力尚未形成受限委派写入闭环。"
+            "未来典型 query：'为角色配置菜单权限'、'给角色绑定可委派助手'。"
+            "边界：完成 Phase 3 前保持禁用；用户成员调整归 user_mgmt。"
         ),
         "display_order": 3,
     },
@@ -63,9 +63,9 @@ AGENT_SEED = [
         "code": "config_mgmt",
         "name": "系统配置助手",
         "description": (
-            "处理系统配置、字典数据、参数查询、菜单结构查询。"
-            "典型 query：'查 sys_config 里 ai 相关配置'、'列 dict_data 性别选项'。"
-            "边界：涉及用户/角色业务数据的归 user_mgmt / role_mgmt；本 Agent 只管配置元数据。"
+            "系统配置助手尚未发布，当前不提供配置、字典或菜单工具。"
+            "未来典型 query：'查询 AI 相关配置'、'列出性别字典选项'。"
+            "边界：发布前保持禁用；用户和角色业务分别归 user_mgmt 与 role_mgmt。"
         ),
         "display_order": 4,
     },
@@ -73,9 +73,9 @@ AGENT_SEED = [
         "code": "dept_mgmt",
         "name": "部门管理助手",
         "description": (
-            "处理部门 CRUD、部门树查询、部门下用户统计。"
-            "典型 query：'列出研发部所有子部门'、'统计销售一部有多少人'。"
-            "边界：涉及用户本身的归 user_mgmt；涉及角色权限的归 role_mgmt。"
+            "部门管理助手尚未发布；现有只读能力尚未形成树移动与受控写入闭环。"
+            "未来典型 query：'移动部门节点'、'更新部门负责人和状态'。"
+            "边界：完成 Phase 3 前保持禁用；用户归属调整归 user_mgmt。"
         ),
         "display_order": 5,
     },
@@ -83,9 +83,9 @@ AGENT_SEED = [
         "code": "provider_mgmt",
         "name": "AI Provider 助手",
         "description": (
-            "处理 AI Provider（OpenAI / Claude / 自托管）和模型的 CRUD、密钥验证、连通性测试。"
-            "典型 query：'添加 OpenAI provider'、'测试 claude-sonnet 连通性'。"
-            "边界：本 Agent 只管 Provider/模型元数据；具体对话归其它业务 Agent。"
+            "AI Provider 助手尚未发布，当前不提供 Provider 或模型管理工具。"
+            "未来典型 query：'添加 OpenAI Provider'、'测试模型连通性'。"
+            "边界：发布前保持禁用；具体业务对话归已发布的业务 Agent。"
         ),
         "display_order": 6,
     },
@@ -93,13 +93,51 @@ AGENT_SEED = [
         "code": "job_mgmt",
         "name": "定时任务管理助手",
         "description": (
-            "处理定时任务（cron job）的查看、暂停、激活、cron 表达式修改、任务执行日志查询。"
-            "典型 query：'修改 job_123 的 cron 为每天 8 点'、'暂停数据同步任务'。"
-            "边界：一次性任务（非定时）归 shared。"
+            "定时任务管理助手尚未发布，当前不提供 cron 或执行日志工具。"
+            "未来典型 query：'修改任务执行时间'、'暂停数据同步任务'。"
+            "边界：发布前保持禁用；shared 仅负责已上传文件解析。"
         ),
         "display_order": 7,
     },
 ]
+
+
+async def seed_ai_agents_in_session(db: AsyncSession) -> tuple[int, int]:
+    """幂等写入内置 Agent；调用方负责事务边界。"""
+    existing_result = await db.execute(select(AiAgent.code))
+    existing_codes = set(existing_result.scalars().all())
+    inserted = 0
+    updated = 0
+    for item in AGENT_SEED:
+        if item["code"] in existing_codes:
+            # 保留 enabled / system_prompt / model_preference 等部署方配置。
+            existing = (
+                await db.execute(select(AiAgent).where(AiAgent.code == item["code"]))
+            ).scalar_one()
+            existing.name = item["name"]
+            existing.description = item["description"]
+            existing.display_order = item["display_order"]
+            updated += 1
+            print(f"  update: {item['code']} ({item['name']})")
+            continue
+
+        db.add(
+            AiAgent(
+                agent_id=next_id(),
+                code=item["code"],
+                name=item["name"],
+                description=item["description"],
+                display_order=item["display_order"],
+                enabled=item["code"] in PUBLISHED_AGENT_CODES,
+                is_builtin=True,
+                system_prompt="",
+                model_preference=None,
+            )
+        )
+        inserted += 1
+        print(f"  insert: {item['code']} ({item['name']})")
+    await db.flush()
+    return inserted, updated
 
 
 async def seed_ai_agents() -> None:
@@ -107,41 +145,7 @@ async def seed_ai_agents() -> None:
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async with async_session() as db:
-        existing_result = await db.execute(select(AiAgent.code))
-        existing_codes = set(existing_result.scalars().all())
-
-        inserted = 0
-        updated = 0
-        for item in AGENT_SEED:
-            if item["code"] in existing_codes:
-                # UPDATE description / name / display_order（保留 enabled / system_prompt / model_preference）
-                existing = (
-                    await db.execute(
-                        select(AiAgent).where(AiAgent.code == item["code"])
-                    )
-                ).scalar_one()
-                existing.name = item["name"]
-                existing.description = item["description"]
-                existing.display_order = item["display_order"]
-                updated += 1
-                print(f"  update: {item['code']} ({item['name']})")
-                continue
-
-            agent = AiAgent(
-                agent_id=next_id(),
-                code=item["code"],
-                name=item["name"],
-                description=item["description"],
-                display_order=item["display_order"],
-                enabled=False,  # 开源 TOB 默认禁用。
-                is_builtin=True,  # 内置 Agent，UI 禁止删除
-                system_prompt="",  # 部署方自定义，并与固定 SAFETY_PREAMBLE 拼接。
-                model_preference=None,  # 用全局默认 openai:gpt-4o
-            )
-            db.add(agent)
-            inserted += 1
-            print(f"  insert: {item['code']} ({item['name']})")
-
+        inserted, updated = await seed_ai_agents_in_session(db)
         await db.commit()
         print(f"\nDone: {inserted} inserted, {updated} updated.")
 

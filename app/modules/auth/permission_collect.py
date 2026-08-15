@@ -13,8 +13,12 @@ from app.modules.system.models.menu import Menu
 from app.modules.system.models.user import User
 
 
-def collect_user_buttons(user: User) -> list[str]:
-    """收集用户在启用角色下拥有的全部按钮权限码（已去重）。"""
+def collect_user_permission_codes(user: User) -> set[str]:
+    """收集启用角色显式关联的功能权限码。
+
+    ``menu.status`` 当前只控制 M/C 路由可见性，不撤销角色已关联的功能
+    权限；API、前端 buttons 与 AI Tool 必须共用这里，避免语义漂移。
+    """
     perms: set[str] = set()
     for role in user.roles:
         if role.status != STATUS_ENABLED:
@@ -22,7 +26,12 @@ def collect_user_buttons(user: User) -> list[str]:
         for menu in role.menus:
             if menu.permission:
                 perms.add(menu.permission)
-    return list(perms)
+    return perms
+
+
+def collect_user_buttons(user: User) -> list[str]:
+    """返回前端 buttons 需要的去重权限码列表。"""
+    return list(collect_user_permission_codes(user))
 
 
 def collect_user_menus(user: User) -> list[Menu]:

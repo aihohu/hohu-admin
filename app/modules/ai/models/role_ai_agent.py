@@ -11,7 +11,7 @@ class RoleAiAgent(Base):
 
     与 sys_role_menu 使用同构的角色绑定模式：
     - 角色 R 绑定 Agent A → 该角色的用户能用 A（前提 A.enabled=True）
-    - 超管 / shared Agent 直通，不需要绑定
+    - 超管与 shared Agent 均无旁路，必须显式绑定
     - role_id ↔ agent_id 联合主键
 
     enabled 字段：role 级"软禁用"，比直接删行更友好（保留绑定关系，临时关闭）。

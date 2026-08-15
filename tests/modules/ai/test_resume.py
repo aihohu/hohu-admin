@@ -5,6 +5,7 @@
 
 # ruff: noqa: ARG001, PLC0415
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -41,8 +42,14 @@ def _make_pending(
     )
 
 
-def _make_user(user_id: int = 100):
-    return SimpleNamespace(user_id=user_id, user_name="alice")
+def _make_user(user_id: int = 100, *, can_chat: bool = True):
+    menus = [SimpleNamespace(permission="ai:chat:use")] if can_chat else []
+    role = SimpleNamespace(role_code="R_USER", status="1", menus=menus)
+    return SimpleNamespace(
+        user_id=user_id,
+        user_name="alice",
+        roles=[role],
+    )
 
 
 def _make_request(last_event_id: str | None = None):
@@ -184,6 +191,156 @@ class TestResumeForbidden:
                     current_user=_make_user(user_id=999),  # 非 owner
                 )
         assert exc_info.value.error_code == "AI_RESUME_FORBIDDEN"
+
+
+class TestResumeMinimalStatus:
+    async def test_revoked_permission_replays_durable_terminal_without_redis_pending(
+        self, _resume_enabled, _redis_pubsub_mode
+    ) -> None:
+        """PostgreSQL 是终态权威；confirm 清 Redis 后仍须返回最小状态。"""
+        finished_at = datetime(2026, 8, 14, 8, 0, tzinfo=UTC)
+        durable_action = SimpleNamespace(
+            action_id=9001,
+            confirmation_id="cid",
+            user_id=100,
+            tenant_id=0,
+            conversation_id=1,
+            execute_tool_call_id="tc_test",
+            trace_id="tr_test",
+            status="succeeded",
+            error_code=None,
+            finished_at=finished_at,
+        )
+        with (
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.get_pending",
+                AsyncMock(return_value=None),
+            ),
+            patch(
+                "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
+                AsyncMock(return_value=durable_action),
+            ),
+        ):
+            result = await resume_chat(
+                request=_make_request("cid"),
+                confirmation_id_query="cid",
+                db=MagicMock(),
+                current_user=_make_user(can_chat=False),
+            )
+
+        assert result.data.model_dump(by_alias=True) == {
+            "confirmationId": "cid",
+            "status": "succeeded",
+            "errorCode": "AI_CHAT_PERMISSION_DENIED",
+            "finishedAt": finished_at,
+        }
+
+    async def test_authorized_terminal_replays_without_redis_pending(
+        self, _resume_enabled, _redis_pubsub_mode
+    ) -> None:
+        durable_action = SimpleNamespace(
+            action_id=9001,
+            confirmation_id="cid",
+            user_id=100,
+            tenant_id=0,
+            conversation_id=1,
+            execute_tool_call_id="tc_test",
+            execute_tool_name="user.update",
+            prepare_tool_call_id=None,
+            trace_id="tr_test",
+            status="succeeded",
+            error_code=None,
+            finished_at=datetime(2026, 8, 14, 8, 0, tzinfo=UTC),
+            expires_at=datetime(2026, 8, 14, 8, 5, tzinfo=UTC),
+            frozen_args={"user_id": 42},
+            source_user_message_id=12,
+            guard_owner_token=None,
+            command_action="send",
+            agent_code="user_mgmt",
+            risk_level="high",
+            chip_target=None,
+            presentation={"title": "更新用户", "summary": "更新 1 个用户"},
+            interaction_flow="direct",
+        )
+        load_terminal = AsyncMock(return_value=[])
+        cleanup = AsyncMock()
+        with (
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.get_pending",
+                AsyncMock(return_value=None),
+            ),
+            patch(
+                "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
+                AsyncMock(return_value=durable_action),
+            ),
+            patch(
+                "app.modules.ai.api.resume._load_durable_resume_terminal",
+                load_terminal,
+            ),
+            patch("app.modules.ai.api.resume._cleanup_durable_resume", cleanup),
+        ):
+            response = await resume_chat(
+                request=_make_request("cid"),
+                confirmation_id_query="cid",
+                db=MagicMock(),
+                current_user=_make_user(can_chat=True),
+            )
+            chunks = [chunk async for chunk in response.body_iterator]
+
+        assert any("confirmation_resumed" in chunk for chunk in chunks)
+        load_terminal.assert_awaited_once()
+        cleanup.assert_awaited_once_with(durable_action)
+
+    async def test_revoked_chat_permission_returns_only_minimal_status(
+        self, _resume_enabled, _redis_pubsub_mode
+    ) -> None:
+        finished_at = datetime(2026, 8, 14, 8, 0, tzinfo=UTC)
+        pending = _make_pending(action_id=9001)
+        durable_action = SimpleNamespace(
+            action_id=9001,
+            confirmation_id="cid",
+            user_id=100,
+            tenant_id=0,
+            conversation_id=1,
+            execute_tool_call_id="tc_test",
+            trace_id="tr_test",
+            status="succeeded",
+            error_code=None,
+            finished_at=finished_at,
+        )
+        with (
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.get_pending",
+                AsyncMock(return_value=pending),
+            ),
+            patch(
+                "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
+                AsyncMock(return_value=durable_action),
+            ),
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.ttl",
+                AsyncMock(),
+            ) as ttl,
+            patch(
+                "app.modules.ai.api.resume.redis_client.set",
+                AsyncMock(),
+            ) as acquire_lock,
+        ):
+            result = await resume_chat(
+                request=_make_request("cid"),
+                confirmation_id_query="cid",
+                db=MagicMock(),
+                current_user=_make_user(can_chat=False),
+            )
+
+        assert result.data.model_dump(by_alias=True) == {
+            "confirmationId": "cid",
+            "status": "succeeded",
+            "errorCode": "AI_CHAT_PERMISSION_DENIED",
+            "finishedAt": finished_at,
+        }
+        ttl.assert_not_awaited()
+        acquire_lock.assert_not_awaited()
 
     async def test_tenant_mismatch_returns_same_forbidden_semantics(
         self, _resume_enabled, _redis_pubsub_mode

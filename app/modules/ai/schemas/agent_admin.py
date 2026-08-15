@@ -54,6 +54,10 @@ class AgentAdminUpdateReq(BaseModel):
         alias_generator=to_camel, populate_by_name=True, from_attributes=True
     )
 
+    # 仅用于识别并拒绝 identity 字段；Service 绝不会把它们写回 ORM。
+    agent_id: int | None = None
+    code: str | None = Field(None, max_length=64)
+    is_builtin: bool | None = None
     name: str | None = Field(None, min_length=1, max_length=128)
     description: str | None = None
     enabled: bool | None = None

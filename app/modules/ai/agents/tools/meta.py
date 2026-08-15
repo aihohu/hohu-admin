@@ -137,9 +137,8 @@ class AiToolMeta:
 
 # ============ 常量 ============
 
-# shared Agent 对所有登录用户可见，不要求角色绑定。
-# - 任何登录用户直通（不需要 role_ai_agent 绑定）
-# - file.parse 等通用 tool 归属它
+# shared 只是平台能力 Agent code，仍要求显式 Role-Agent 绑定。
+# file.parse 等通用 Tool 精确归属它，不能被其它运行时 Agent 跨域调用。
 SHARED_AGENT_CODE = "shared"
 
 # 工具参数命中此黑名单时，Lint 强制要求声明 sensitive_input。

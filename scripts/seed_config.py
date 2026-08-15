@@ -21,6 +21,16 @@ from app.core.id_generator import next_id
 from app.modules.system.models.config import Config
 
 CONFIG_SEED_DATA = [
+    {
+        "config_name": "AI 额外启用工具",
+        "config_key": "ai:enabled_tools",
+        "config_value": "[]",
+        "config_type": "text",
+        "config_group": "ai",
+        "status": "1",
+        "is_public": False,
+        "remark": "升级仅在缺失时创建；不自动启用 file.parse",
+    },
     # ============ 基础配置（公开） ============
     {
         "config_name": "网站名称",

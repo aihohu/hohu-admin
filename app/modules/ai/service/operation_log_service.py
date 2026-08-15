@@ -11,7 +11,7 @@
 
 Gateway Executor 调用方式：
     log_id = await operation_log_service.start_operation(
-        db, trace_id=..., tool_name=..., tool_call_id=..., risk_level=...,
+        db, trace_id=..., tenant_id=..., tool_name=..., tool_call_id=..., risk_level=...,
         execution_mode=AiExecutionMode.HITL, status=AiOperationStatus.PENDING_CONFIRMATION,
         ...
     )
@@ -43,6 +43,7 @@ class OperationLogService:
         *,
         trace_id: str,
         conversation_id: int,
+        tenant_id: int,
         source_user_message_id: int | None = None,
         readonly_snapshot: bool = False,
         user_id: int,
@@ -74,6 +75,7 @@ class OperationLogService:
         log = AiOperationLog(
             trace_id=trace_id,
             conversation_id=conversation_id,
+            tenant_id=tenant_id,
             source_user_message_id=source_user_message_id,
             readonly_snapshot=readonly_snapshot,
             user_id=user_id,
@@ -278,15 +280,20 @@ class OperationLogService:
         db: AsyncSession,
         tool_call_id: str,
         *,
+        tenant_id: int,
         user_id: int | None = None,
     ) -> AiOperationLog | None:
         """按 tool_call_id 查询，供 SSE 断流后的兜底轮询使用。
 
         Args:
             user_id: 给定时做 owner 校验（不匹配抛 AI_OPERATION_LOG_FORBIDDEN）
+            tenant_id: 必填可信租户作用域；跨租户与不存在同为 None
         """
         result = await db.execute(
-            select(AiOperationLog).where(AiOperationLog.tool_call_id == tool_call_id)
+            select(AiOperationLog).where(
+                AiOperationLog.tool_call_id == tool_call_id,
+                AiOperationLog.tenant_id == tenant_id,
+            )
         )
         log = result.scalars().first()
         if log is None:

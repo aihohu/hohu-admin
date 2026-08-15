@@ -17,6 +17,7 @@ from app.constants import (
 from app.modules.auth.permission_collect import (
     collect_user_buttons,
     collect_user_menus,
+    collect_user_permission_codes,
 )
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
@@ -93,6 +94,24 @@ def test_buttons_dedup_across_roles():
     buttons = collect_user_buttons(user)
 
     assert buttons.count("sys:dup") == 1
+
+
+def test_permission_codes_are_the_single_button_permission_source():
+    """API、前端 buttons 与 AI Tool 必须共享同一有效权限集合。"""
+    role = _attach_menus(
+        _make_role("R", "R_PERMISSION_SOURCE"),
+        [
+            _make_menu(name="enabled", permission="sys:enabled"),
+            _make_menu(name="disabled", permission="sys:disabled", status="2"),
+        ],
+    )
+    user = _attach_roles(User(user_name="u_source", status=STATUS_ENABLED), [role])
+
+    permission_codes = collect_user_permission_codes(user)
+
+    # 当前全局语义：menu.status 控制路由，不撤销已关联角色的功能权限。
+    assert permission_codes == {"sys:enabled", "sys:disabled"}
+    assert set(collect_user_buttons(user)) == permission_codes
 
 
 def test_menus_only_from_enabled_roles():

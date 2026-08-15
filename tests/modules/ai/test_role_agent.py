@@ -308,15 +308,10 @@ async def test_put_normalizes_soft_disabled_to_enabled(
     assert str(user_id) in bound
 
 
-async def test_put_shared_binding_rejected(
+async def test_put_shared_binding_is_explicitly_supported(
     authed_client: tuple[AsyncClient, str], db_session, seed_role_agents
 ):
-    """决策 #14：PUT 含 shared Agent 返 400 + AI_ROLE_AGENT_BIND_SHARED_FORBIDDEN.
-
-    shared Agent 对所有用户可用且无需绑定，因此 service 显式拦截。
-    #2：本测试断言 400，而非 422/500 —— 验证 BusinessRuleException → HTTP 400
-    映射在 app/core/exceptions.py:75 配置正确）.
-    """
+    """shared 是普通 Agent code，必须允许角色显式绑定。"""
     client, _ = authed_client
     role_id = seed_role_agents["role_id"]
     shared_id = seed_role_agents["shared_id"]
@@ -325,9 +320,10 @@ async def test_put_shared_binding_rejected(
         f"/ai/role-agent/{role_id}",
         json={"agentIds": [str(shared_id)]},
     )
-    assert resp.status_code == 400  # 不是 422 / 500
-    body = resp.json()
-    assert body.get("errorCode") == "AI_ROLE_AGENT_BIND_SHARED_FORBIDDEN"
+    assert resp.status_code == 200
+    get_resp = await client.get(f"/ai/role-agent/{role_id}")
+    assert get_resp.status_code == 200
+    assert str(shared_id) in get_resp.json()["data"]["boundAgentIds"]
 
 
 async def test_put_empty_array_unbinds_all(

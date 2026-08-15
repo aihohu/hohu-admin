@@ -70,3 +70,21 @@ class TestUserImportExportPermissionSeed:
         entry = _find_by_permission("system:user:list")
         assert entry["parent_route"] == "system_user"
         assert entry["menu_type"] == "F"
+
+
+def test_ai_chat_permission_seeded_under_chat_menu() -> None:
+    entry = _find_by_permission("ai:chat:use")
+
+    assert entry["menu_type"] == "F"
+    assert entry["parent_route"] == "ai_chat"
+    assert entry["status"] == "1"
+    assert entry.get("key")
+
+
+def test_ai_file_parse_permission_seeded_under_chat_menu() -> None:
+    entry = _find_by_permission("ai:file:parse")
+
+    assert entry["menu_type"] == "F"
+    assert entry["parent_route"] == "ai_chat"
+    assert entry["status"] == "1"
+    assert entry.get("key")

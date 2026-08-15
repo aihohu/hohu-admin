@@ -10,7 +10,7 @@
 from fastapi import APIRouter, Depends, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import require_permissions
+from app.core.auth import require_ai_chat_use, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.db.session import get_db
 from app.modules.ai.schemas.routing_feedback import (
@@ -25,7 +25,6 @@ from app.modules.ai.service.routing_feedback_query import (
 from app.modules.ai.service.routing_feedback_service import (
     routing_feedback_service,
 )
-from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
 
 router = APIRouter()  # prefix 由 main.py 的 include_router 提供，避免双重叠加
@@ -41,7 +40,7 @@ async def submit_routing_feedback(
     request: RoutingFeedbackRequest,
     message_id: int = Path(...),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_ai_chat_use),
 ):
     await routing_feedback_service.submit(
         db,

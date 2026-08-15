@@ -1,6 +1,6 @@
 # AI 管理能力 MVP 收口实施计划
 
-> 状态：Phase 0 已固化，等待开发确认
+> 状态：Phase 1 / P1-B 已完成；P1-C/P1-D 与 Web 待开发，中间构建禁止部署
 > 日期：2026-08-14
 > 唯一需求基线：[`../specs/2026-08-14-ai-management-mvp-closure.md`](../specs/2026-08-14-ai-management-mvp-closure.md)
 > 影响项目：`hohu-admin`、`hohu-admin-web`
@@ -16,9 +16,9 @@
 
 ## 2. 当前基线
 
-- Alembic 当前单一 head：`a7d3e9f1c5b2`。
-- `AI_MODULE_ENABLED` 默认值已经是 `true`，但关闭时 `/ai/**` 当前为 404，尚未满足统一 503 契约。
-- Chat/Agent/Provider/HITL/PreparedAction 已有基础实现，但入口权限、Agent 可见性、模型选择、Provider egress 和历史结果投影尚未形成统一授权链。
+- Alembic 当前单一 head：`b8e4c7d2a1f0`。
+- `AI_MODULE_ENABLED` 默认值为 `true`；P1-A 已实现关闭态 `/ai`/`/ai/**` 统一 503 且 AI 业务依赖不 import/初始化。
+- P1-A 已完成用户入口和分支权限；P1-B 已完成统一 Agent/Tool Policy、三模型端点、当前 LLM run selector、Agent 全局编辑边界及阶段安全 seed。Provider egress 和完整历史结果投影仍待 P1-C/P1-D。
 - DataScope 当前按最高优先级角色计算，用户/部门/角色传统写入口尚未复用统一 GrantAuthority。
 - Web 已有 AI 和系统管理页面，但仍使用旧的合并写入、模型列表、Provider test、部门移动和 Role-Agent shared 契约。
 - 后端 CI 已有 70% 覆盖率门禁；Web 尚无 `test:coverage`、多角色 E2E 和独立真实 Provider project。
@@ -71,6 +71,7 @@ Phase 0 文档基线
 - `app/main.py`
 - `app/core/config.py`
 - `app/core/auth.py`
+- `app/modules/auth/permission_collect.py`
 - `app/core/exceptions.py`
 - `app/modules/ai/api/agent.py`
 - `app/modules/ai/api/chat.py`
@@ -79,13 +80,41 @@ Phase 0 文档基线
 - `app/modules/ai/api/conversation.py`
 - `app/modules/ai/api/query_cache.py`
 - `app/modules/ai/api/operation_log.py`
+- `app/modules/ai/api/provider.py`
 - `app/modules/ai/api/routing_feedback.py`
+- `app/modules/ai/constants.py`
+- `app/modules/ai/models/operation_log.py`
+- `app/modules/ai/service/chat_service.py`
+- `app/modules/ai/service/operation_log_service.py`
+- `app/modules/ai/agents/gateway/executor.py`
+- `app/modules/ai/lifecycle.py`
+- `app/modules/ai/schemas/operation_log.py`
+- `app/modules/ai/schemas/resume.py`
+- `alembic/versions/b8e4c7d2a1f0_add_tenant_scope_to_ai_operation_log.py`
+- `scripts/init_db.py`
+- `scripts/sync_menus.py`
+- `scripts/migrate_ai_mvp_permissions.py`
+- `tests/modules/ai/test_module_disabled.py`
+- `tests/modules/ai/test_endpoint_permissions.py`
+- `tests/modules/ai/test_operation_log_api.py`
+- `tests/modules/ai/conftest.py`
+- `tests/modules/ai/test_confirm.py`
+- `tests/modules/ai/test_resume.py`
+- `tests/modules/ai/test_permission_migration.py`
 
 实现：
 
-- 模块关闭时只注册 `/ai/{path:path}` 熔断入口，统一 503 + `AI_MODULE_DISABLED`；不 import/初始化 AI 业务 router、Provider、Gateway 和 Registry。
+- 模块关闭时只注册 `/ai/{path:path}` 熔断入口，对包括 `TRACE`/`CONNECT` 在内的标准 HTTP 方法统一 503 + `AI_MODULE_DISABLED`；不 import/初始化 AI 业务 router、Provider、Gateway 和 Registry。
 - 增加 `ai:chat:use`，逐 endpoint 实现基线 §3.4 权限矩阵。
 - confirm/resume router 只认证，Service 在 owner + tenant 无泄露加载并锁定后区分 reject、最小状态、完整回放和执行分支。
+- 权限 dependency、前端按钮和 AI Tool 统一使用同一权限 collector；保留“禁用菜单只隐藏、不撤销既有 API 授权”的全局兼容语义。
+- Postgres PreparedAction 作为终态恢复权威来源；Redis pending 缺失时不重跑 Tool，按当前权限返回最小状态或安全 SSE replay。
+- operation-log 新增 tenant 列与复合索引，所有写入和 owner 查询显式 tenant scope。
+- fresh 创建 `ai:chat:use` F 节点并绑定 R_SUPER；upgrade 脚本幂等授权 R_SUPER 与已有非 shared Role-Agent 绑定角色。
+
+状态：✅ 已完成（2026-08-14；审查修复 2026-08-15）。`ai:chat:use` 已有可执行的 fresh/upgrade 数据路径，且 `R_SUPER` 不保留代码旁路；完整 Agent/Tool/file 权限 seed 仍待后续工作包。本中间构建继续受 Phase 1+2 原子集成与 Phase 4 发布门禁约束。P1-B 负责模型三端点拆分和 Agent/Tool Policy，P1-D 负责完整 lineage/result projection；P1-A 只对现有可证明字段返回最小状态。
+
+验证：`ruff check .`、`ruff format --check .`、`python scripts/check_ai_tools.py`（19 tools / 12 checks）、AI 模块 918 项测试和全量 `pytest` 1873 项均通过；总覆盖率 72.42%，满足 70% 门禁，仅保留 2 条既有 SQLAlchemy transaction warning。新增回归覆盖权限单一来源、禁用菜单兼容语义、无 Redis 终态恢复、operation-log tenant 隔离以及 fresh/upgrade 幂等权限迁移。
 
 #### P1-B Agent、Tool 与模型统一授权
 
@@ -115,6 +144,10 @@ Phase 0 文档基线
 - `file.parse` 固定 `required_perms=("ai:file:parse",)` 且 `default_enabled=false`。
 - 拆分 `/ai/chat/models`、`/ai/admin/agents/model-options`、`/ai/provider/models`；所有新 LLM run 复用 `authorize_chat_model()`。
 - Agent 全局可变字段必须同时满足启用 `R_SUPER` 和 `ai:agent:edit`，混合非法字段 payload 整体拒绝。
+
+状态：✅ 已完成（2026-08-15；审查修复 2026-08-15）。Agent 列表、显式/粘滞/Supervisor/default、confirm/resume 与 Gateway 共用授权规则；R_SUPER/shared 不再绕过 Role-Agent，Tool 与运行时 Agent 精确归属。显式 falsy `modelId` 不再 fallback，Supervisor 保留模型授权错误，legacy approve 的入口撤权和自动禁用统一终态收口。当前阶段只有已闭环的 shared 进入发布集合，`user_mgmt/dept_mgmt/role_mgmt` 在 Phase 2/3 完成前保持 fresh 默认禁用；upgrade 只补缺失绑定并保留显式 disabled 状态。P1-C egress、P1-D lineage/result projection 和 Web endpoint 切换未开始，本构建不可部署。
+
+验证：`ruff check .`、`ruff format --check .`、`python scripts/check_ai_tools.py`（19 tools / 12 checks）、Agent/endpoint/model/seed/migration/Gateway 定向回归、AI 模块 952 项和全量 1911 项测试均通过；总覆盖率 72.74%，Alembic current/head 均为单一 `b8e4c7d2a1f0`，仅保留 2 条既有 SQLAlchemy transaction warning。
 
 #### P1-C Provider egress
 
@@ -184,7 +217,7 @@ Phase 0 文档基线
 
 ### 5.3 数据库与数据升级
 
-新增迁移 `<rev>_add_ai_authorization_lineage.py`，父 revision 为 `a7d3e9f1c5b2`：
+新增迁移 `<rev>_add_ai_authorization_lineage.py`，父 revision 为 `b8e4c7d2a1f0`：
 
 - `ai_prepared_action.resolved_model_id/resolved_provider_id BIGINT NULL`，无级联删除。
 - `ai_message` 增加 tenant、Tool 集合、subject refs、scope hash 和 resolver version 字段；legacy 可空，新业务结果应用层必填。
@@ -198,9 +231,9 @@ Phase 0 文档基线
 - `scripts/seed_config.py`
 - 新增 `scripts/migrate_ai_mvp_permissions.py`
 
-fresh：显式创建 `ai:chat:use`、`ai:file:parse`，R_SUPER 绑定已发布 Agent 与 shared；仅已完成 Agent 默认启用。
+fresh：已创建 `ai:chat:use`、`ai:file:parse`、`ai:agent:list/edit`，R_SUPER 显式获得权限并绑定当前已发布的 shared；`file.parse` 写入 `ai:enabled_tools`。三个 MVP 业务 Agent 在 Phase 2/3 完成前保持默认禁用，后续随各自闭环加入发布集合。
 
-upgrade：保留模块开关、Agent enabled、绑定和 enabled tools；有非 shared 历史绑定的角色幂等补 `ai:chat:use`；普通角色不自动得到 file.parse 权限或 shared 绑定。
+upgrade：保留模块开关、Agent enabled、Role-Agent enabled 和 enabled tools；`scripts/migrate_ai_mvp_permissions.py` 幂等向 R_SUPER 和有非 shared 历史绑定的角色补 `ai:chat:use`，只为 R_SUPER 补缺失的阶段已发布 Agent 绑定；普通角色不自动得到 file.parse 权限或 shared 绑定。
 
 ### 5.4 测试与退出标准
 
@@ -352,12 +385,15 @@ Web：
 
 ### 8.2 数据库与权限
 
-新增 `<rev>_add_ai_operation_log_trace_fields.py`：
+P1-A 已新增 `b8e4c7d2a1f0_add_tenant_scope_to_ai_operation_log.py`：
 
 - `tenant_id BIGINT NOT NULL`，历史单租户数据回填 `0`。
+- 索引 `(tenant_id, trace_id)`、`(tenant_id, queued_at, log_id)`。
+
+Phase 4 再新增 `<rev>_add_ai_operation_log_trace_fields.py`：
+
 - `agent_code VARCHAR(64) NULL`；仅可靠关联 PreparedAction 的旧日志回填，其他显示 unknown。
 - `target_summary TEXT NULL`，只保存 allowlist 后冻结目标摘要。
-- 索引 `(tenant_id, trace_id)`、`(tenant_id, queued_at, log_id)`。
 
 新增 `ai:trace:view` 与 `/ai/trace` C 菜单；fresh/upgrade 默认仅授予 R_SUPER，不自动扩大普通角色审计权限。
 
@@ -403,4 +439,3 @@ pnpm e2e:provider
 - [ ] AI Trace 可核对成功、拒绝和失败终态且 DTO 脱敏。
 - [ ] 所有专项 spec 回写实际测试证据和 ship date。
 - [ ] 唯一基线状态由“实施中”翻转为“已发布”。
-

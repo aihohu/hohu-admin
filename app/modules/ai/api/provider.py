@@ -25,7 +25,11 @@ from app.modules.system.models.user import User
 router = APIRouter()
 
 
-@router.get("/models", summary="获取可用模型列表")
+@router.get(
+    "/models",
+    summary="获取 Provider 管理可用模型列表",
+    dependencies=[Depends(require_permissions("ai:provider:list"))],
+)
 async def get_available_models(
     capability: str | None = None,
     db: AsyncSession = Depends(get_db),

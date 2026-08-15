@@ -6,6 +6,9 @@ from app.modules.ai.agents.gateway.redact import redact_secrets
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.schemas.conversation import ConversationCreate, ConversationUpdate
+from app.modules.ai.service.model_authorization_service import (
+    model_authorization_service,
+)
 from app.utils.pagination import build_filters, paginate
 
 
@@ -45,15 +48,24 @@ class ConversationService:
         return obj
 
     async def create(
-        self, db: AsyncSession, data: ConversationCreate, user_id: int
+        self,
+        db: AsyncSession,
+        data: ConversationCreate,
+        user_id: int,
+        *,
+        tenant_id: int,
     ) -> AiConversation:
+        selected = await model_authorization_service.authorize_chat_model(
+            db,
+            data.model_name,
+            tenant_id=tenant_id,
+        )
         obj = AiConversation(
             user_id=user_id,
             title=data.title or "新对话",
             system_prompt=data.system_prompt,
+            model_name=str(selected.model.model_id),
         )
-        if data.model_name:
-            obj.model_name = data.model_name
         db.add(obj)
         return obj
 
@@ -63,9 +75,19 @@ class ConversationService:
         conversation_id: int,
         data: ConversationUpdate,
         user_id: int,
+        *,
+        tenant_id: int,
     ) -> AiConversation:
         obj = await self.get_by_id(db, conversation_id, user_id)
-        for field, value in data.model_dump(exclude_unset=True).items():
+        update_data = data.model_dump(exclude_unset=True)
+        if "model_name" in update_data:
+            selected = await model_authorization_service.authorize_chat_model(
+                db,
+                update_data["model_name"],
+                tenant_id=tenant_id,
+            )
+            update_data["model_name"] = str(selected.model.model_id)
+        for field, value in update_data.items():
             setattr(obj, field, value)
         return obj
 

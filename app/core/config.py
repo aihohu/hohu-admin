@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     AI_MAX_TOKENS: int = 4096
     AI_TEMPERATURE: float = 0.7
     # 关闭后不注册任何 AI 路由，用于安全降级和无 AI 部署。
+    # 默认开启；false 仅作紧急熔断，/ai/** 统一返回 503。
     AI_MODULE_ENABLED: bool = True
 
     # memory 模式的确认事件只存在于当前进程，因此只能运行一个 worker；

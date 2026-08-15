@@ -306,7 +306,11 @@ class TestStartLogFailureAbortsExecute:
                 data_scope=DataScopeContext(
                     accessible_dept_ids=None, accessible_user_scope=None
                 ),
-                agent=None,
+                agent=SimpleNamespace(
+                    code="test",
+                    enabled=True,
+                    daily_quota_per_user=None,
+                ),
                 trace_id="tr_test_log_fail",
                 conversation_id=1,
             )

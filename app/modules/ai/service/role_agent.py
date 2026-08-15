@@ -95,10 +95,9 @@ class RoleAgentService:
         - 跨模块校验 role 存在（AI_ROLE_NOT_FOUND）
         - agent_ids 去重
         - 每个 agent_id 校验存在（AI_AGENT_NOT_FOUND）
-        - shared Agent 拦截（AI_ROLE_AGENT_BIND_SHARED_FORBIDDEN，决策 #14）
         - normalize：所有新绑定 enabled=True（软禁用态归零，决策 #15 全量覆盖语义）
 
-        边界覆盖 shared 拦截、Agent 不存在和全量覆盖规范化。
+        shared 与其它 Agent 一样必须显式绑定；边界覆盖 Agent 不存在和全量覆盖规范化。
         """
         await self._get_role_or_404(db, role_id)
 
@@ -117,7 +116,7 @@ class RoleAgentService:
         # 去重
         unique_ids = list({int(aid) for aid in req.agent_ids})
 
-        # 校验每个 agent 存在 + 非 shared
+        # 校验每个 agent 存在（shared 同样允许显式绑定）
         if unique_ids:
             rows = (
                 await db.execute(
@@ -133,14 +132,6 @@ class RoleAgentService:
                     resource_type="AI Agent",
                     error_code="AI_AGENT_NOT_FOUND",
                 )
-            # shared 拦截
-            shared_hits = [r for r in rows if r[1] == SHARED_AGENT_CODE]
-            if shared_hits:
-                raise BusinessRuleException(
-                    "shared Agent 直通所有用户，无需绑定",
-                    error_code="AI_ROLE_AGENT_BIND_SHARED_FORBIDDEN",
-                )
-
         # 全量覆盖：DELETE + INSERT
         await db.execute(delete(RoleAiAgent).where(RoleAiAgent.role_id == role_id))
         for aid in unique_ids:

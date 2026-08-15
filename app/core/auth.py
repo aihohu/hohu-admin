@@ -4,13 +4,47 @@ import logging
 
 from fastapi import Depends
 
-from app.constants import STATUS_ENABLED
 from app.core.exceptions import AuthorizationException
 from app.core.rbac import is_super_admin
+from app.modules.ai.constants import AI_CHAT_USE_PERMISSION
+from app.modules.auth.permission_collect import collect_user_permission_codes
 from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
 
 logger = logging.getLogger(__name__)
+
+
+def get_enabled_permissions(user: User) -> set[str]:
+    """兼容入口：返回唯一权限收集器计算出的显式权限码。"""
+    return collect_user_permission_codes(user)
+
+
+def has_explicit_permission(user: User, perm_code: str) -> bool:
+    """检查显式角色权限，不应用 R_SUPER/admin 代码旁路。"""
+    return perm_code in get_enabled_permissions(user)
+
+
+def ensure_ai_chat_use(user: User) -> None:
+    """校验 AI 用户入口权限并返回稳定拒绝码。"""
+    if has_explicit_permission(user, AI_CHAT_USE_PERMISSION):
+        return
+    logger.info(
+        "AI chat permission denied: user=%s required=%s",
+        user.user_name,
+        AI_CHAT_USE_PERMISSION,
+    )
+    raise AuthorizationException(
+        "权限不足",
+        error_code="AI_CHAT_PERMISSION_DENIED",
+    )
+
+
+async def require_ai_chat_use(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """FastAPI dependency：认证后校验显式 ``ai:chat:use``。"""
+    ensure_ai_chat_use(current_user)
+    return current_user
 
 
 def require_permissions(perm_code: str = None, super_admin_only: bool = False):
@@ -52,12 +86,7 @@ def require_permissions(perm_code: str = None, super_admin_only: bool = False):
         # 检查具体权限（如果提供了 perm_code）
         if perm_code:
             # 汇总当前用户所有权限（只考虑启用的角色）
-            user_perms = set()
-            for role in current_user.roles:
-                if role.status == STATUS_ENABLED:
-                    for menu in role.menus:
-                        if menu.permission:
-                            user_perms.add(menu.permission)
+            user_perms = get_enabled_permissions(current_user)
             if perm_code not in user_perms:
                 # 详细权限信息进日志，方便 admin 排查；msg 保持通用
                 logger.info(

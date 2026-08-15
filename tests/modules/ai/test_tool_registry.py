@@ -607,6 +607,42 @@ class TestValidateOnStartup:
         with pytest.raises(ToolRegistryError, match="hitl_always=True"):
             await registry.validate_on_startup(mock_db)
 
+    async def test_prepared_execute_must_belong_to_exact_same_agent(self) -> None:
+        registry = ToolRegistry.get()
+        registry.register(
+            AiToolMeta(
+                name="user.prepare_cross_agent",
+                agent="user_mgmt",
+                summary="preview",
+                required_perms=("system:user:import",),
+                risk="low",
+                interaction_flow="prepared",
+                prepared_execute_tool="shared.execute_cross_agent",
+            ),
+            _noop_fn,
+        )
+        registry.register(
+            AiToolMeta(
+                name="shared.execute_cross_agent",
+                agent="shared",
+                summary="execute",
+                required_perms=("system:user:import",),
+                risk="high",
+                hitl_always=True,
+                llm_visible=False,
+            ),
+            _noop_fn,
+        )
+        mock_db = MagicMock()
+        agent_result = MagicMock()
+        agent_result.scalars.return_value.all.return_value = ["user_mgmt", "shared"]
+        perm_result = MagicMock()
+        perm_result.scalars.return_value.all.return_value = ["system:user:import"]
+        mock_db.execute = AsyncMock(side_effect=[agent_result, perm_result])
+
+        with pytest.raises(ToolRegistryError, match="exact same agent"):
+            await registry.validate_on_startup(mock_db)
+
 
 # ============ 常量校验 ============
 

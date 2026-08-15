@@ -1,6 +1,6 @@
 """LLM-only Supervisor 路由。
 
-候选集 = 当前用户有权限且已启用的 Agent（shared 永远在候选集，作 catch-all）.
+候选集 = 已通过统一 Agent Policy 的当前用户候选；shared 不再自动直通。
 LLM 阶段：把候选 Agent 的 name / description 拼进 prompt，返回 agent_code JSON.
 JSON 解析必须鲁棒（json.loads → 正则截 {...} → 失败降级）.
 """
@@ -12,7 +12,10 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.ai.service.provider_service import provider_service
+from app.core.exceptions import BusinessException
+from app.modules.ai.service.model_authorization_service import (
+    model_authorization_service,
+)
 
 if TYPE_CHECKING:
     from app.modules.ai.models.agent import AiAgent
@@ -93,7 +96,7 @@ def parse_agent_code_robustly(raw: str, candidates: list["AiAgent"]) -> str | No
 async def call_llm_text(model, prompt: str) -> str:
     """使用 PydanticAI Model 执行一次纯文本 completion。
 
-    model 是 provider_service.resolve_model 返回的 PydanticAI Model 实例.
+    model 是统一 ``ModelAuthorizationService`` 返回的 PydanticAI Model 实例.
     API（PydanticAI 1.89，参考 app/modules/ai/api/provider.py:242-245）：
       - Agent(model, instructions="...")  # model 是 positional，instructions 是 system prompt
       - agent.run("user_prompt_str")       # 第一参数是 str，不是 messages list
@@ -119,13 +122,20 @@ class AgentRouter:
         candidates: list["AiAgent"],
         *,
         model=None,
+        tenant_id: int = 0,
     ) -> RouteResult:
         if not candidates:
             return RouteResult(failed=True, reason="no_candidates")
 
         if model is None:
             try:
-                model = await provider_service.resolve_model(db, None)
+                model = await model_authorization_service.resolve_model_instance(
+                    db,
+                    None,
+                    tenant_id=tenant_id,
+                )
+            except BusinessException:
+                raise
             except Exception:
                 return RouteResult(
                     clarification=True,

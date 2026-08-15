@@ -23,6 +23,7 @@ from app.constants import (
 )
 from app.utils.validators import validate_password
 from scripts.init_db import (
+    bind_fresh_role_permissions,
     build_init_roles,
     default_password_seed_value,
     init_configs,
@@ -159,3 +160,43 @@ class TestRoleSeed:
         assert default_role.role_name == "普通用户"
         assert default_role.data_scope == DATA_SCOPE_SELF
         assert default_role.status == STATUS_ENABLED
+
+    def test_super_admin_gets_explicit_ai_chat_permission(self):
+        admin_role, _ = build_init_roles()
+
+        bind_fresh_role_permissions(admin_role, init_menus)
+
+        assert {menu.permission for menu in admin_role.menus} == {
+            "ai:agent:edit",
+            "ai:agent:list",
+            "ai:chat:use",
+            "ai:file:parse",
+        }
+
+
+class TestAiChatPermissionSeed:
+    def test_ai_chat_permission_is_seeded_under_chat_menu(self):
+        button = _find_menu_by_permission(init_menus, "ai:chat:use")
+        parent = _find_menu_by_route_name(init_menus, "ai_chat")
+
+        assert button.menu_type == "F"
+        assert button.status == STATUS_ENABLED
+        assert button.parent_id == parent.menu_id
+
+    def test_file_parse_permission_is_seeded_under_chat_menu(self):
+        button = _find_menu_by_permission(init_menus, "ai:file:parse")
+        parent = _find_menu_by_route_name(init_menus, "ai_chat")
+
+        assert button.menu_type == "F"
+        assert button.status == STATUS_ENABLED
+        assert button.parent_id == parent.menu_id
+
+    def test_agent_permissions_are_seeded_under_agent_menu(self):
+        parent = _find_menu_by_route_name(init_menus, "ai_agent")
+        for permission in ("ai:agent:list", "ai:agent:edit"):
+            button = _find_menu_by_permission(init_menus, permission)
+            assert button.parent_id == parent.menu_id
+
+    def test_file_parse_is_enabled_for_fresh_install(self):
+        config = next(c for c in init_configs if c.config_key == "ai:enabled_tools")
+        assert config.config_value == '["file.parse"]'

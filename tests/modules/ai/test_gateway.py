@@ -166,12 +166,15 @@ def _make_deps(
     perms: set[str] | None = None,
     db: Any = None,
 ) -> ChatDeps:
+    agent = MagicMock()
+    agent.code = "user_mgmt"
+    agent.enabled = True
     return ChatDeps(
         user=MagicMock(user_id=1),
         perms=perms if perms is not None else {"system:user:list"},
         db=db or MagicMock(),
         data_scope=DataScopeContext(None, None, []),
-        agent=MagicMock(),
+        agent=agent,
         trace_id="tr_test",
     )
 
@@ -203,6 +206,33 @@ class TestExecuteTool:
         result = await execute_tool("user.perm_denied", {}, deps)
         assert result.ok is False
         assert result.error_code == "AI_TOOL_PERM_DENIED"
+
+    async def test_runtime_agent_must_exactly_own_tool(
+        self, db_session: AsyncSession
+    ) -> None:
+        called = False
+
+        @ai_tool(
+            AiToolMeta(
+                name="user.agent_mismatch",
+                agent="user_mgmt",
+                summary="x",
+                required_perms=("system:user:list",),
+                risk="low",
+            )
+        )
+        async def _fn(ctx: Any) -> dict:
+            nonlocal called
+            called = True
+            return {"ok": True}
+
+        deps = _make_deps(db=db_session)
+        deps.agent.code = "shared"
+        result = await execute_tool("user.agent_mismatch", {}, deps)
+
+        assert result.ok is False
+        assert result.error_code == "AI_TOOL_AGENT_MISMATCH"
+        assert called is False
 
     async def test_success_calls_tool_fn(self, db_session: AsyncSession) -> None:
         """使用独立 session 调用业务函数并返回 ToolResult.success。"""

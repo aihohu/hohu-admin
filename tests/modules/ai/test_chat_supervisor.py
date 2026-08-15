@@ -2,10 +2,28 @@
 
 # ruff: noqa: ARG001, PLC0415  test fixture 占位参数 + 函数内 import（断言用）
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import AsyncClient
+
+
+@pytest.fixture(autouse=True)
+def authorize_chat_model_for_endpoint():
+    """隔离端点前置 selector；selector 规则由专门测试覆盖。"""
+    selected = SimpleNamespace(model=SimpleNamespace(model_id=123456))
+    with (
+        patch(
+            "app.modules.ai.api.chat.model_authorization_service.authorize_chat_model",
+            AsyncMock(return_value=selected),
+        ),
+        patch(
+            "app.modules.ai.api.chat.chat_service.create_agent",
+            AsyncMock(return_value=MagicMock(name="fake_exec_agent")),
+        ),
+    ):
+        yield
 
 
 def _chat_body(text: str, **extra) -> dict:
@@ -56,7 +74,7 @@ async def test_auto_routes_via_supervisor(
         ),
         patch(
             # 避免依赖真实 Provider 配置（CI / dev 环境可能未配 LLM）
-            "app.modules.ai.agents.supervisor.router.provider_service.resolve_model",
+            "app.modules.ai.agents.supervisor.router.model_authorization_service.resolve_model_instance",
             AsyncMock(return_value=fake_model),
         ),
         patch(
@@ -92,12 +110,71 @@ async def test_auto_routes_via_supervisor(
 
 
 @pytest.mark.asyncio
+async def test_new_chat_uses_authorized_agent_model_preference(
+    client: AsyncClient,
+    auth_token,
+    mock_visible_agents,
+):
+    """没有显式/会话模型时，路由完成后才选择当前 Agent 的默认模型。"""
+    preferred = "provider_preferred:model_preferred"
+    next(
+        agent for agent in mock_visible_agents if agent.code == "user_mgmt"
+    ).model_preference = preferred
+    selected = SimpleNamespace(model=SimpleNamespace(model_id=654321))
+    selector = AsyncMock(return_value=selected)
+
+    with patch(
+        "app.modules.ai.api.chat.model_authorization_service.authorize_chat_model",
+        selector,
+    ):
+        response = await client.post(
+            "/ai/chat",
+            json=_chat_body("查询用户", agentCode="user_mgmt"),
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+
+    assert response.status_code == 200
+    assert selector.await_args_list[0].args[1] == preferred
+
+
+@pytest.mark.asyncio
+async def test_explicit_falsy_model_id_is_rejected_without_fallback(
+    client: AsyncClient,
+    auth_token,
+    mock_visible_agents,
+):
+    """显式提交的 falsy modelId 仍必须进入 selector，而不是当成未提交。"""
+    from app.core.exceptions import BusinessRuleException
+
+    selector = AsyncMock(
+        side_effect=BusinessRuleException(
+            "所选 AI 模型当前不可用",
+            error_code="AI_MODEL_NOT_AVAILABLE",
+        )
+    )
+
+    with patch(
+        "app.modules.ai.api.chat.model_authorization_service.authorize_chat_model",
+        selector,
+    ):
+        response = await client.post(
+            "/ai/chat",
+            json=_chat_body("查询用户", agentCode="user_mgmt", modelId=0),
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["errorCode"] == "AI_MODEL_NOT_AVAILABLE"
+    assert selector.await_args_list[0].args[1] == 0
+
+
+@pytest.mark.asyncio
 async def test_auto_falls_back_to_clarification_on_no_provider(
     client: AsyncClient, auth_token, mock_visible_agents
 ):
     """无 Provider 时发送 clarification_required。"""
     with patch(
-        "app.modules.ai.agents.supervisor.router.provider_service.resolve_model",
+        "app.modules.ai.agents.supervisor.router.model_authorization_service.resolve_model_instance",
         AsyncMock(side_effect=Exception("AI_MODEL_NOT_CONFIGURED")),
     ):
         response = await client.post(
@@ -106,6 +183,57 @@ async def test_auto_falls_back_to_clarification_on_no_provider(
             headers={"Authorization": f"Bearer {auth_token}"},
         )
     assert "clarification_required" in response.text
+
+
+@pytest.mark.asyncio
+async def test_auto_propagates_model_authorization_failure(
+    client: AsyncClient,
+    auth_token,
+    mock_visible_agents,
+):
+    """Supervisor selector 的稳定授权拒绝不能降级成 Agent 澄清。"""
+    from app.core.exceptions import BusinessRuleException
+
+    with patch(
+        "app.modules.ai.agents.supervisor.router.model_authorization_service.resolve_model_instance",
+        AsyncMock(
+            side_effect=BusinessRuleException(
+                "所选 AI 模型当前不可用",
+                error_code="AI_MODEL_NOT_AVAILABLE",
+            )
+        ),
+    ):
+        response = await client.post(
+            "/ai/chat",
+            json=_chat_body("hi", agentCode="auto"),
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["errorCode"] == "AI_MODEL_NOT_AVAILABLE"
+    assert "clarification_required" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_auto_without_authorized_candidates_returns_agent_not_available(
+    client: AsyncClient,
+    auth_token,
+    monkeypatch,
+):
+    from app.modules.ai.service import agent_visibility as visibility_module
+
+    async def no_agents(_db, _user):
+        return []
+
+    monkeypatch.setattr(visibility_module, "list_visible_agents", no_agents)
+    response = await client.post(
+        "/ai/chat",
+        json=_chat_body("hi", agentCode="auto"),
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+
+    assert response.status_code == 200
+    assert "AI_AGENT_NOT_AVAILABLE" in response.text
 
 
 @pytest.mark.asyncio
@@ -230,7 +358,7 @@ async def test_clarification_does_not_save_user_message(
             AsyncMock(return_value="not valid json"),
         ),
         patch(
-            "app.modules.ai.agents.supervisor.router.provider_service.resolve_model",
+            "app.modules.ai.agents.supervisor.router.model_authorization_service.resolve_model_instance",
             AsyncMock(return_value=AsyncMock(name="fake_model")),
         ),
     ):
@@ -271,7 +399,7 @@ async def test_clarification_works_without_conversation_id(
             AsyncMock(return_value="garbage"),
         ),
         patch(
-            "app.modules.ai.agents.supervisor.router.provider_service.resolve_model",
+            "app.modules.ai.agents.supervisor.router.model_authorization_service.resolve_model_instance",
             AsyncMock(return_value=AsyncMock(name="fake_model")),
         ),
     ):

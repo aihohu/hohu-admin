@@ -59,3 +59,18 @@ class ModelOut(BaseModel):
     model_config = ConfigDict(
         from_attributes=True, populate_by_name=True, alias_generator=to_camel
     )
+
+
+class ModelOption(BaseModel):
+    """聊天与 Agent 配置共用的模型安全投影。"""
+
+    model_id: int
+    label: str
+    provider_code: str
+    capabilities: list[str]
+
+    @field_serializer("model_id")
+    def serialize_model_id(self, value: int) -> str:
+        return str(value)
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)

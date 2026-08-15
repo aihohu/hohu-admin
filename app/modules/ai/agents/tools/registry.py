@@ -270,10 +270,11 @@ class ToolRegistry:
                 raise ToolRegistryError(
                     f"Prepared execute tool {execute_meta.name!r} cannot bind another prepared flow."
                 )
-            if execute_meta.agent not in {meta.agent, "shared"}:
+            if execute_meta.agent != meta.agent:
                 raise ToolRegistryError(
-                    f"Prepared tool {meta.name!r} cannot bind execute tool from agent "
-                    f"{execute_meta.agent!r}."
+                    f"Prepared tool {meta.name!r} and execute tool "
+                    f"{execute_meta.name!r} must belong to the exact same agent; "
+                    f"got {meta.agent!r} and {execute_meta.agent!r}."
                 )
 
 

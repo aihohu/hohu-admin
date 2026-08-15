@@ -5,6 +5,11 @@
 import pytest
 from httpx import AsyncClient
 
+from app.constants import STATUS_ENABLED, SUPER_ADMIN_ROLE_CODE
+from app.core.exceptions import AuthorizationException, BusinessRuleException
+from app.modules.ai.schemas.agent_admin import AgentAdminUpdateReq
+from app.modules.ai.service.agent_admin import agent_admin_service
+
 
 @pytest.fixture
 async def seed_agents():
@@ -127,6 +132,72 @@ async def _get_agent_id_by_code(client: AsyncClient, code: str) -> str:
     return row["agentId"]
 
 
+def _admin_principal(*, super_role: bool, edit_permission: bool):
+    from types import SimpleNamespace
+
+    menus = [SimpleNamespace(permission="ai:agent:edit")] if edit_permission else []
+    role = SimpleNamespace(
+        role_code=SUPER_ADMIN_ROLE_CODE if super_role else "R_AGENT_EDITOR",
+        status=STATUS_ENABLED,
+        menus=menus,
+    )
+    return SimpleNamespace(user_name="p1b_agent_admin", roles=[role])
+
+
+@pytest.mark.parametrize(
+    ("super_role", "edit_permission"),
+    [(False, True), (True, False)],
+)
+async def test_update_requires_enabled_super_role_and_explicit_edit_permission(
+    db_session,
+    seed_agents,
+    super_role: bool,
+    edit_permission: bool,
+) -> None:
+    from sqlalchemy import select
+
+    from app.modules.ai.models.agent import AiAgent
+
+    agent = await db_session.scalar(select(AiAgent).where(AiAgent.code == "shared"))
+    assert agent is not None
+
+    with pytest.raises(AuthorizationException) as exc_info:
+        await agent_admin_service.update_agent(
+            db_session,
+            agent.agent_id,
+            AgentAdminUpdateReq(name="Blocked"),
+            current_user=_admin_principal(
+                super_role=super_role,
+                edit_permission=edit_permission,
+            ),
+        )
+
+    assert exc_info.value.error_code == "AI_AGENT_ADMIN_REQUIRED"
+
+
+async def test_update_rejects_immutable_identity_field(
+    db_session,
+    seed_agents,
+) -> None:
+    from sqlalchemy import select
+
+    from app.modules.ai.models.agent import AiAgent
+
+    agent = await db_session.scalar(select(AiAgent).where(AiAgent.code == "shared"))
+    assert agent is not None
+    req = AgentAdminUpdateReq.model_validate({"code": "forged", "name": "Nope"})
+
+    with pytest.raises(BusinessRuleException) as exc_info:
+        await agent_admin_service.update_agent(
+            db_session,
+            agent.agent_id,
+            req,
+            current_user=_admin_principal(super_role=True, edit_permission=True),
+        )
+
+    assert exc_info.value.error_code == "AI_AGENT_IMMUTABLE_FIELD"
+
+
 async def test_list_returns_all_agents_without_query_params(
     authed_client: tuple[AsyncClient, str], db_session, seed_agents
 ):
@@ -205,20 +276,22 @@ async def test_update_partial_skips_unsent_fields(
     assert data["description"] == "x" * 60
 
 
-async def test_update_code_field_ignored(
+async def test_update_code_field_rejected_atomically(
     authed_client: tuple[AsyncClient, str], db_session, seed_agents
 ):
-    """决策 #1：code 字段被静默忽略，不报错也不变更。"""
+    """identity 字段出现即 400，且其它可变字段也不得部分写入。"""
     client, _ = authed_client
     shared_id = await _get_agent_id_by_code(client, "shared")
     resp = await client.put(
         f"/ai/admin/agents/{shared_id}",
         json={"code": "hacked_code", "name": "Renamed"},
     )
-    assert resp.status_code == 200
-    data = resp.json()["data"]
-    assert data["code"] == "shared"  # 未变
-    assert data["name"] == "Renamed"
+    assert resp.status_code == 400
+    assert resp.json()["errorCode"] == "AI_AGENT_IMMUTABLE_FIELD"
+    detail = await client.get(f"/ai/admin/agents/{shared_id}")
+    data = detail.json()["data"]
+    assert data["code"] == "shared"
+    assert data["name"] == "Shared Agent"
 
 
 # ============ 校验规则测试 ============

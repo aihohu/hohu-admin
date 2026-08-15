@@ -83,6 +83,7 @@ async def test_startup_expires_unexpired_pending_when_source_is_orphaned() -> No
         conversation_id=101,
         source_user_message_id=102,
         user_id=103,
+        tenant_id=0,
         execute_tool_call_id="tc_orphaned_9002",
         row_version=1,
     )

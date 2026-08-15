@@ -34,9 +34,12 @@ from pydantic_ai.ui import SSE_CONTENT_TYPE
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import AI_CHAT_USE_PERMISSION, has_explicit_permission
+from app.core.base_response import ResponseModel
 from app.core.config import settings
 from app.core.exceptions import (
     AuthorizationException,
+    BusinessException,
     BusinessRuleException,
     NotFoundException,
 )
@@ -61,6 +64,7 @@ from app.modules.ai.agents.hitl.events import (
 from app.modules.ai.agents.hitl.manager import PendingPayload, hitl_manager
 from app.modules.ai.api.chat import _format_sse_chunk
 from app.modules.ai.models.message import AiMessage
+from app.modules.ai.schemas.resume import ResumeStatusOut
 from app.modules.ai.service.chat_run_service import (
     chat_run_finalizer,
     chat_run_guard,
@@ -178,6 +182,65 @@ def _durable_binding_valid(
         and action.conversation_id == pending.conversation_id
         and action.execute_tool_call_id == pending.tool_call_id
         and action.trace_id == pending.trace_id
+    )
+
+
+def _pending_from_durable_action(action) -> PendingPayload:  # noqa: ANN001
+    """为 Redis 已清理的 durable 终态构造只读回放上下文。"""
+    expires_at = action.expires_at
+    if isinstance(expires_at, datetime):
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        expires_at = expires_at.isoformat().replace("+00:00", "Z")
+    return PendingPayload(
+        user_id=action.user_id,
+        tenant_id=action.tenant_id,
+        conversation_id=action.conversation_id,
+        tool_call_id=action.execute_tool_call_id,
+        trace_id=action.trace_id,
+        tool_name=action.execute_tool_name,
+        args=action.frozen_args,
+        dry_run_result=None,
+        expires_at=str(expires_at),
+        source_user_message_id=action.source_user_message_id,
+        guard_owner_token=action.guard_owner_token,
+        command_action=action.command_action,
+        agent_code=action.agent_code,
+        risk_level=action.risk_level,
+        chip_target=action.chip_target,
+        action_id=action.action_id,
+    )
+
+
+def _minimal_resume_status(
+    confirmation_id: str,
+    *,
+    durable_action=None,  # noqa: ANN001
+    pending: PendingPayload | None = None,
+) -> ResponseModel[ResumeStatusOut]:
+    status = (
+        durable_action.status
+        if durable_action is not None
+        else (
+            pending.wake_action
+            if pending is not None and pending.wake_action
+            else PreparedActionStatus.PENDING_CONFIRMATION.value
+        )
+    )
+    if status in {
+        PreparedActionStatus.APPROVED.value,
+        PreparedActionStatus.RUNNING.value,
+    }:
+        status = PreparedActionStatus.RUNNING.value
+    return ResponseModel.success(
+        data=ResumeStatusOut(
+            confirmationId=confirmation_id,
+            status=status,
+            errorCode="AI_CHAT_PERMISSION_DENIED",
+            finishedAt=(
+                durable_action.finished_at if durable_action is not None else None
+            ),
+        )
     )
 
 
@@ -353,6 +416,7 @@ async def _terminalize_durable_resume_failure(
                             terminal_db,
                             transitioned.execute_tool_call_id,
                             user_id=user_id,
+                            tenant_id=tenant_id,
                         )
                         if log is not None:
                             await operation_log_service.mark_expired_if_pending(
@@ -469,11 +533,15 @@ async def _mark_legacy_resume_expired(
     *,
     pending: PendingPayload,
     user_id: int,
+    tenant_id: int,
 ) -> None:
     """Keep the legacy operation-log audit transition in the guarded stream."""
     try:
         log = await operation_log_service.get_by_tool_call_id(
-            db, pending.tool_call_id, user_id=user_id
+            db,
+            pending.tool_call_id,
+            user_id=user_id,
+            tenant_id=tenant_id,
         )
         if log is not None:
             await operation_log_service.mark_expired_if_pending(db, log.log_id)
@@ -515,11 +583,21 @@ async def resume_chat(
             error_code="AI_RESUME_MISSING_ID",
         )
 
-    # 3. 取 Redis pending → 校验 owner + 已 wake + TTL
+    # 3. PostgreSQL 是 durable action/终态权威；Redis 仅承担活跃 handoff。
+    current_tenant_id = resolve_tenant_id(current_user)
+    durable_action = await prepared_action_service.get_by_confirmation_id(
+        db, confirmation_id
+    )
+    if durable_action is not None and (
+        durable_action.user_id != current_user.user_id
+        or durable_action.tenant_id != current_tenant_id
+    ):
+        raise AuthorizationException(error_code="AI_RESUME_FORBIDDEN")
+
     pending = await hitl_manager.get_pending(redis_client, confirmation_id)
-    if pending is None:
+    if pending is None and durable_action is None:
         raise NotFoundException("HITL confirmation", error_code="AI_RESUME_NOT_FOUND")
-    if pending.user_id != current_user.user_id:
+    if pending is not None and pending.user_id != current_user.user_id:
         logger.warning(
             "resume owner mismatch: confirmation_id=%s pending_user=%d current_user=%d",
             confirmation_id,
@@ -527,8 +605,7 @@ async def resume_chat(
             current_user.user_id,
         )
         raise AuthorizationException(error_code="AI_RESUME_FORBIDDEN")
-    current_tenant_id = resolve_tenant_id(current_user)
-    if pending.tenant_id != current_tenant_id:
+    if pending is not None and pending.tenant_id != current_tenant_id:
         logger.warning(
             "resume tenant mismatch: confirmation_id=%s pending_tenant=%d current_tenant=%d",
             confirmation_id,
@@ -537,6 +614,71 @@ async def resume_chat(
         )
         # 与 owner mismatch 共用拒绝语义，避免泄露 pending 是否属于其它租户。
         raise AuthorizationException(error_code="AI_RESUME_FORBIDDEN")
+    # PostgreSQL is the mode authority. During a rolling deployment an older
+    # Redis payload may not contain action_id even though its durable Action has
+    # already been committed; treating that payload as legacy would execute the
+    # same tool a second time after POST /ai/confirm.
+    if (
+        durable_action is not None
+        and pending is not None
+        and not _durable_binding_valid(
+            durable_action,
+            pending=pending,
+            user_id=current_user.user_id,
+            tenant_id=current_tenant_id,
+        )
+    ):
+        raise BusinessRuleException(
+            "续传 action 绑定无效",
+            error_code="AI_PREPARED_ACTION_BINDING_INVALID",
+        )
+    if durable_action is None and pending is not None and pending.action_id is not None:
+        raise BusinessRuleException(
+            "续传缺少已绑定的 durable action",
+            error_code="AI_PREPARED_ACTION_BINDING_INVALID",
+        )
+
+    if not has_explicit_permission(current_user, AI_CHAT_USE_PERMISSION):
+        return _minimal_resume_status(
+            confirmation_id,
+            durable_action=durable_action,
+            pending=pending,
+        )
+
+    if (
+        durable_action is not None
+        and PreparedActionStatus(durable_action.status).is_terminal
+    ):
+        replay_pending = pending or _pending_from_durable_action(durable_action)
+        resumed_event = _build_resumed_event(
+            confirmation_id,
+            replay_pending,
+            durable_action=durable_action,
+        )
+
+        async def replay_terminal_stream():
+            yield _format_sse_chunk(resumed_event)
+            terminal_events = await _load_durable_resume_terminal(
+                confirmation_id=confirmation_id,
+                pending=replay_pending,
+                user_id=current_user.user_id,
+                tenant_id=current_tenant_id,
+            )
+            await _cleanup_durable_resume(durable_action)
+            for terminal_event in terminal_events:
+                yield _format_sse_chunk(terminal_event)
+
+        return StreamingResponse(
+            replay_terminal_stream(),
+            media_type=SSE_CONTENT_TYPE,
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    if pending is None:
+        # Durable 非终态但 hot handoff 已丢失，不能猜测执行；confirm 仍可按
+        # PostgreSQL 权威收口，resume 维持稳定 not-found 拒绝面。
+        raise NotFoundException("HITL confirmation", error_code="AI_RESUME_NOT_FOUND")
+
     if pending.wake_action is not None:
         logger.info(
             "resume already resolved: confirmation_id=%s wake_action=%s",
@@ -559,29 +701,6 @@ async def resume_chat(
                 error_code="AI_RESUME_TTL_TOO_SHORT",
             ),
             422,
-        )
-
-    # PostgreSQL is the mode authority. During a rolling deployment an older
-    # Redis payload may not contain action_id even though its durable Action has
-    # already been committed; treating that payload as legacy would execute the
-    # same tool a second time after POST /ai/confirm.
-    durable_action = await prepared_action_service.get_by_confirmation_id(
-        db, confirmation_id
-    )
-    if durable_action is not None and not _durable_binding_valid(
-        durable_action,
-        pending=pending,
-        user_id=current_user.user_id,
-        tenant_id=current_tenant_id,
-    ):
-        raise BusinessRuleException(
-            "续传 action 绑定无效",
-            error_code="AI_PREPARED_ACTION_BINDING_INVALID",
-        )
-    if durable_action is None and pending.action_id is not None:
-        raise BusinessRuleException(
-            "续传缺少已绑定的 durable action",
-            error_code="AI_PREPARED_ACTION_BINDING_INVALID",
         )
 
     # 4. 获取 owner 锁，防止旧 worker 取消较慢时新 worker 重复执行。
@@ -639,6 +758,7 @@ async def resume_chat(
                         db,
                         pending=pending,
                         user_id=current_user.user_id,
+                        tenant_id=current_tenant_id,
                     )
                     terminal_events = await _finalize_resume_terminal(
                         db,
@@ -674,6 +794,7 @@ async def resume_chat(
                         db,
                         pending=pending,
                         user_id=current_user.user_id,
+                        tenant_id=current_tenant_id,
                     )
                     terminal_events = await _finalize_resume_terminal(
                         db,
@@ -704,7 +825,10 @@ async def resume_chat(
 
             try:
                 log = await operation_log_service.get_by_tool_call_id(
-                    db, pending.tool_call_id, user_id=current_user.user_id
+                    db,
+                    pending.tool_call_id,
+                    user_id=current_user.user_id,
+                    tenant_id=current_tenant_id,
                 )
                 log_id = log.log_id if log else None
             except Exception:
@@ -784,7 +908,7 @@ async def resume_chat(
                 deps = await chat_service.build_chat_deps(
                     db,
                     current_user,
-                    agent_code=None,
+                    agent_code=pending.agent_code,
                     trace_id=pending.trace_id,
                     conversation_id=pending.conversation_id,
                 )
@@ -793,12 +917,28 @@ async def resume_chat(
                 deps.guard_owner_token = pending.guard_owner_token
                 deps.command_action = pending.command_action
                 deps.guard_handoff = True
-                if deps.agent is None:
-                    from app.modules.ai.constants import (  # noqa: PLC0415
-                        DEFAULT_AGENT_CODE,
+            except BusinessException as exc:
+                logger.info(
+                    "resume: legacy authorization failed error_code=%s",
+                    exc.error_code,
+                )
+                yield _format_sse_chunk(
+                    AiErrorEvent(
+                        error_code=exc.error_code or "AI_AGENT_FORBIDDEN",
+                        message=exc.message,
                     )
-
-                    await chat_service.attach_agent_to_deps(deps, DEFAULT_AGENT_CODE)
+                )
+                terminal_events = await _finalize_resume_terminal(
+                    db,
+                    confirmation_id=confirmation_id,
+                    pending=pending,
+                    ok=False,
+                    error_code=exc.error_code or "AI_AGENT_FORBIDDEN",
+                    error_msg=exc.message,
+                )
+                for terminal_event in terminal_events:
+                    yield _format_sse_chunk(terminal_event)
+                return
             except Exception:
                 logger.exception("resume: legacy ChatDeps setup failed")
                 yield _format_sse_chunk(

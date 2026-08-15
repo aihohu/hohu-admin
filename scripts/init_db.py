@@ -2,7 +2,7 @@
 
 import asyncio
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -16,10 +16,19 @@ from app.constants.constants import (
 from app.core.config import settings
 from app.core.id_generator import next_id
 from app.core.security import get_password_hash
+from app.modules.ai.constants import (
+    AI_AGENT_EDIT_PERMISSION,
+    AI_CHAT_USE_PERMISSION,
+    AI_FILE_PARSE_PERMISSION,
+    PUBLISHED_AGENT_CODES,
+)
+from app.modules.ai.models.agent import AiAgent
+from app.modules.ai.models.role_ai_agent import RoleAiAgent
 from app.modules.system.models.config import Config
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
+from scripts.seed_ai_agents import seed_ai_agents_in_session
 
 system_id = next_id()
 ai_id = next_id()
@@ -28,6 +37,8 @@ monitor_id = next_id()
 # 链路，按钮 parent_id 必须指向 system_user 菜单。模块级避免内联 next_id() 后无法被
 # 后续按钮引用。
 _system_user_menu_id = next_id()
+_ai_chat_menu_id = next_id()
+_ai_agent_menu_id = next_id()
 
 init_menus = [
     Menu(
@@ -412,6 +423,22 @@ init_menus.extend(
             keep_alive=False,
             constant=False,
             multi_tab=False,
+            menu_id=_ai_chat_menu_id,
+        ),
+        Menu(
+            parent_id=_ai_chat_menu_id,
+            menu_name="使用 AI 对话",
+            menu_type="F",
+            permission=AI_CHAT_USE_PERMISSION,
+            status=STATUS_ENABLED,
+            menu_id=next_id(),
+        ),
+        Menu(
+            parent_id=_ai_chat_menu_id,
+            menu_name="解析聊天文件",
+            menu_type="F",
+            permission=AI_FILE_PARSE_PERMISSION,
+            status=STATUS_ENABLED,
             menu_id=next_id(),
         ),
         Menu(
@@ -431,6 +458,41 @@ init_menus.extend(
             keep_alive=False,
             constant=False,
             multi_tab=False,
+            menu_id=next_id(),
+        ),
+        Menu(
+            parent_id=ai_id,
+            menu_name="AI 助手管理",
+            menu_type="C",
+            icon="carbon:bot",
+            icon_type="1",
+            component="view.ai_agent",
+            page="ai_agent",
+            route_name="ai_agent",
+            route_path="/ai/agent",
+            i18n_key="route.ai_agent",
+            order=3,
+            status=STATUS_ENABLED,
+            hide_in_menu=False,
+            keep_alive=False,
+            constant=False,
+            multi_tab=False,
+            menu_id=_ai_agent_menu_id,
+        ),
+        Menu(
+            parent_id=_ai_agent_menu_id,
+            menu_name="查询",
+            menu_type="F",
+            permission="ai:agent:list",
+            status=STATUS_ENABLED,
+            menu_id=next_id(),
+        ),
+        Menu(
+            parent_id=_ai_agent_menu_id,
+            menu_name="修改",
+            menu_type="F",
+            permission=AI_AGENT_EDIT_PERMISSION,
+            status=STATUS_ENABLED,
             menu_id=next_id(),
         ),
     ]
@@ -463,6 +525,16 @@ init_configs = [
             "管理员线下告知用户初始密码，导入接口不返回此值。"
         ),
     ),
+    Config(
+        config_name="AI 额外启用工具",
+        config_key="ai:enabled_tools",
+        config_value='["file.parse"]',
+        config_type="text",
+        config_group="ai",
+        status=STATUS_ENABLED,
+        is_public=False,
+        remark="fresh install 显式启用 file.parse；升级保留部署方既有值",
+    ),
 ]
 
 SEED_TABLES = [
@@ -491,6 +563,43 @@ def build_init_roles() -> list[Role]:
             status=STATUS_ENABLED,
         ),
     ]
+
+
+def bind_fresh_role_permissions(admin_role: Role, menus: list[Menu]) -> None:
+    """fresh install 为 R_SUPER 绑定 AI 入口、文件与 Agent 管理权限。"""
+    permissions = {
+        AI_CHAT_USE_PERMISSION,
+        AI_FILE_PARSE_PERMISSION,
+        "ai:agent:list",
+        AI_AGENT_EDIT_PERMISSION,
+    }
+    admin_role.menus = [menu for menu in menus if menu.permission in permissions]
+
+
+async def bind_fresh_role_agents(db: AsyncSession, admin_role: Role) -> None:
+    """fresh install 显式绑定全部当前启用的已发布 Agent。"""
+    agents = (
+        (
+            await db.execute(
+                select(AiAgent).where(
+                    AiAgent.code.in_(PUBLISHED_AGENT_CODES),
+                    AiAgent.enabled.is_(True),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    db.add_all(
+        [
+            RoleAiAgent(
+                role_id=admin_role.role_id,
+                agent_id=agent.agent_id,
+                enabled=True,
+            )
+            for agent in agents
+        ]
+    )
 
 
 async def check_data_exists(db: AsyncSession) -> bool:
@@ -528,7 +637,11 @@ async def init_db():
 
         # 创建与既有 R_* 编码契约一致的初始角色
         admin_role, default_user_role = build_init_roles()
+        bind_fresh_role_permissions(admin_role, init_menus)
         db.add_all([admin_role, default_user_role])
+        await db.flush()
+        await seed_ai_agents_in_session(db)
+        await bind_fresh_role_agents(db, admin_role)
 
         # 创建初始管理员用户
         admin_user = User(

@@ -35,6 +35,13 @@ class AiOperationLog(Base):
             "source_user_message_id",
             "status",
         ),
+        Index("ix_ai_operation_tenant_trace", "tenant_id", "trace_id"),
+        Index(
+            "ix_ai_operation_tenant_queued_log",
+            "tenant_id",
+            "queued_at",
+            "log_id",
+        ),
     )
 
     log_id: Mapped[int] = mapped_column(
@@ -55,6 +62,11 @@ class AiOperationLog(Base):
         default=False,
         server_default=text("false"),
         comment="执行时 AiToolMeta.readonly 快照；未知按 write 处理",
+    )
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        comment="可信租户ID；历史单租户数据回填 0",
     )
     user_id: Mapped[int] = mapped_column(BigInteger, comment="调用用户ID")
     tool_name: Mapped[str] = mapped_column(String(128), comment="tool 全限定名")

@@ -30,3 +30,18 @@ class OperationLogOut(BaseModel):
         populate_by_name=True,
         from_attributes=True,
     )
+
+
+class OperationLogStatusOut(BaseModel):
+    """owner 失去聊天入口权限后的最小轮询状态。"""
+
+    tool_call_id: str
+    status: str
+    error_code: str | None = None
+    finished_at: datetime | None = None
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        from_attributes=True,
+    )

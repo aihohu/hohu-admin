@@ -36,6 +36,7 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import ensure_ai_chat_use
 from app.core.base_response import ResponseModel
 from app.core.exceptions import (
     AuthorizationException,
@@ -160,6 +161,48 @@ async def _notify_prepared_terminal(action, decision: ConfirmAction) -> None:  #
         )
 
 
+async def _terminalize_legacy_execution_denied(
+    db: AsyncSession,
+    *,
+    confirmation_id: str,
+    pending,
+    current_user: User,
+    error_code: str,
+    error_msg: str,
+) -> None:  # noqa: ANN001
+    """收口 rolling-upgrade 遗留的 Redis-only approve，不执行 Tool。"""
+    log = await operation_log_service.get_by_tool_call_id(
+        db,
+        pending.tool_call_id,
+        user_id=current_user.user_id,
+        tenant_id=pending.tenant_id,
+    )
+    if log is not None:
+        transitioned = await operation_log_service.mark_expired_if_pending(
+            db, log.log_id
+        )
+        if transitioned is not None:
+            await chat_run_finalizer.finalize_pending_turn(
+                db,
+                pending=pending,
+                ok=False,
+                error_code=error_code,
+                error_msg=error_msg,
+            )
+        await db.commit()
+
+    waiter_woken = await hitl_manager.wake(confirmation_id, ConfirmAction.REJECTED)
+    if waiter_woken:
+        return
+    if pending.guard_owner_token:
+        await chat_run_guard.release(
+            redis_client,
+            conversation_id=pending.conversation_id,
+            owner_token=pending.guard_owner_token,
+        )
+    await hitl_manager.delete_pending(redis_client, confirmation_id)
+
+
 async def _terminalize_before_execution(
     db: AsyncSession,
     *,
@@ -214,11 +257,6 @@ async def _confirm_prepared(
         raise NotFoundException(
             "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
         )
-    if await check_user_disabled(redis_client, current_user.user_id):
-        raise AuthorizationException(
-            "AI 已被禁用，无法确认操作", error_code="AI_USER_DISABLED"
-        )
-
     context = await prepared_action_service.lock_confirmation_context(
         db, confirmation_id=req.confirmation_id
     )
@@ -237,10 +275,20 @@ async def _confirm_prepared(
         )
     status = PreparedActionStatus(action.status)
     if status != PreparedActionStatus.PENDING_CONFIRMATION:
+        if req.action == "approve":
+            ensure_ai_chat_use(current_user)
+            if await check_user_disabled(redis_client, current_user.user_id):
+                raise AuthorizationException(
+                    "AI 已被禁用，无法确认操作",
+                    error_code="AI_USER_DISABLED",
+                )
         return ResponseModel.success(data=_prepared_response(action))
 
     log = await operation_log_service.get_by_tool_call_id(
-        db, action.execute_tool_call_id, user_id=current_user.user_id
+        db,
+        action.execute_tool_call_id,
+        user_id=current_user.user_id,
+        tenant_id=current_tenant_id,
     )
     source_active = (
         context.source_message.conversation_id == action.conversation_id
@@ -278,6 +326,36 @@ async def _confirm_prepared(
         await db.commit()
         await _notify_prepared_terminal(terminal, ConfirmAction.REJECTED)
         return ResponseModel.success(data=_prepared_response(terminal))
+
+    try:
+        ensure_ai_chat_use(current_user)
+    except AuthorizationException:
+        terminal = await _terminalize_before_execution(
+            db,
+            action=action,
+            log=log,
+            status=PreparedActionStatus.EXPIRED,
+            error_code="AI_CHAT_PERMISSION_DENIED",
+            error_msg="AI 入口权限已撤销，操作未执行",
+        )
+        await db.commit()
+        await _notify_prepared_terminal(terminal, ConfirmAction.REJECTED)
+        raise
+
+    if await check_user_disabled(redis_client, current_user.user_id):
+        terminal = await _terminalize_before_execution(
+            db,
+            action=action,
+            log=log,
+            status=PreparedActionStatus.EXPIRED,
+            error_code="AI_USER_DISABLED",
+            error_msg="AI 已被禁用，操作未执行",
+        )
+        await db.commit()
+        await _notify_prepared_terminal(terminal, ConfirmAction.REJECTED)
+        raise AuthorizationException(
+            "AI 已被禁用，无法确认操作", error_code="AI_USER_DISABLED"
+        )
 
     try:
         await prepared_action_service.validate_snapshot(db, action)
@@ -398,6 +476,7 @@ async def _confirm_prepared(
                 terminal_db,
                 terminal.execute_tool_call_id,
                 user_id=current_user.user_id,
+                tenant_id=current_tenant_id,
             )
             if terminal_log is not None and was_running:
                 if result.ok:
@@ -486,24 +565,47 @@ async def confirm_tool(
         # 与 owner mismatch 共用拒绝语义，避免泄露其它租户的 pending。
         raise AuthorizationException(error_code="NOT_CONFIRMATION_OWNER")
 
-    # 3. 修订 S-13：用户禁用检查
-    # HITL 挂起期间用户可能被自动禁用；禁用后用户仍
-    # 持有 confirmation_id 可直接 POST /ai/confirm，必须阻断。
-    if await check_user_disabled(redis_client, current_user.user_id):
-        logger.warning(
-            "HITL confirm blocked: user auto-disabled confirmation_id=%s user_id=%d",
-            req.confirmation_id,
-            current_user.user_id,
-        )
-        raise AuthorizationException(
-            "AI 已被禁用，无法确认操作",
-            error_code="AI_USER_DISABLED",
-        )
+    # 3. approve 才复验执行入口与禁用状态；reject 仅按 owner + tenant 收口。
+    if req.action == "approve":
+        try:
+            ensure_ai_chat_use(current_user)
+        except AuthorizationException:
+            await _terminalize_legacy_execution_denied(
+                db,
+                confirmation_id=req.confirmation_id,
+                pending=pending,
+                current_user=current_user,
+                error_code="AI_CHAT_PERMISSION_DENIED",
+                error_msg="AI 入口权限已撤销，操作未执行",
+            )
+            raise
+        if await check_user_disabled(redis_client, current_user.user_id):
+            logger.warning(
+                "HITL confirm blocked: user auto-disabled "
+                "confirmation_id=%s user_id=%d",
+                req.confirmation_id,
+                current_user.user_id,
+            )
+            await _terminalize_legacy_execution_denied(
+                db,
+                confirmation_id=req.confirmation_id,
+                pending=pending,
+                current_user=current_user,
+                error_code="AI_USER_DISABLED",
+                error_msg="AI 已被禁用，操作未执行",
+            )
+            raise AuthorizationException(
+                "AI 已被禁用，无法确认操作",
+                error_code="AI_USER_DISABLED",
+            )
 
     # 4. 写 ai_operation_log.approved_by（审计追责，无论 stream 是否还在）
     # 拒绝操作同样记录 approved_by，表示执行确认动作的用户。
     log = await operation_log_service.get_by_tool_call_id(
-        db, pending.tool_call_id, user_id=current_user.user_id
+        db,
+        pending.tool_call_id,
+        user_id=current_user.user_id,
+        tenant_id=current_tenant_id,
     )
     if log is not None:
         await operation_log_service.mark_approved(

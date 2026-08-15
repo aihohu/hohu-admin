@@ -18,7 +18,8 @@ class AiAgent(Base):
     - DB 层 ai_agent 行持有 system_prompt / model_preference / enabled 等运行时配置
     - 两者通过 code 字段强约束（启动时 ToolRegistry 校验）
 
-    默认全部 enabled=False（开源 TOB 默认禁用，部署方按需启用）。
+    ORM 安全默认值为 enabled=False；fresh seed 仅开启当前阶段已完成的 Agent，
+    upgrade 永远保留部署方已有 enabled 状态。
     """
 
     __tablename__ = "ai_agent"
@@ -38,7 +39,7 @@ class AiAgent(Base):
         Boolean,
         nullable=False,
         default=False,
-        comment="全局开关，默认禁用，部署方按需启用",
+        comment="全局开关；ORM 默认禁用，fresh seed 按阶段发布集合决定",
     )
     is_builtin: Mapped[bool] = mapped_column(
         Boolean,

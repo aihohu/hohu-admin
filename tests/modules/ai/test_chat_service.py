@@ -12,13 +12,25 @@ patch 该函数返回 manual_override，聚焦测 build_chat_deps 自身字段�
 
 # ruff: noqa: ARG001, ARG005, PLC0415  test 占位参数 + 局部 monkeypatch import
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import AuthorizationException
+from app.modules.ai.agents.tools.registry import all_registry_perms
 from app.modules.ai.core.context import ChatDeps
+from app.modules.ai.models.agent import AiAgent
+from app.modules.ai.models.conversation import AiConversation
+from app.modules.ai.service.agent_authorization_service import (
+    agent_authorization_service,
+)
 from app.modules.ai.service.chat_service import chat_service
+from app.modules.ai.service.model_authorization_service import (
+    model_authorization_service,
+)
 
 
 def _patch_sticky_manual(agent_code: str = "user_mgmt"):
@@ -40,6 +52,28 @@ def _patch_sticky_manual(agent_code: str = "user_mgmt"):
     )
 
 
+@pytest.fixture
+async def authorized_agent_policy(db_session: AsyncSession):
+    """本文件只测 deps 组装；Agent Policy 自身由独立测试覆盖。"""
+    agent = await db_session.scalar(select(AiAgent).where(AiAgent.code == "user_mgmt"))
+    assert agent is not None
+    agent.enabled = True
+    with (
+        patch.object(
+            agent_authorization_service,
+            "authorize_agent_access",
+            AsyncMock(return_value=agent),
+        ),
+        patch.object(
+            agent_authorization_service,
+            "tool_permissions",
+            MagicMock(side_effect=lambda _user: all_registry_perms()),
+        ),
+    ):
+        yield
+
+
+@pytest.mark.usefixtures("authorized_agent_policy")
 class TestBuildChatDeps:
     """超管路径：data_scope=None / agent=从 DB 加载 / trace_id 自动生成"""
 
@@ -135,11 +169,23 @@ class TestBuildChatDeps:
         mock_user.roles = []
         mock_user.depts = []
 
-        with _patch_sticky_manual("missing_agent"):
-            with pytest.raises(ValueError, match="not found in ai_agent table"):
+        denied = AuthorizationException(
+            "当前用户不可使用该 AI Agent",
+            error_code="AI_AGENT_FORBIDDEN",
+        )
+        with (
+            _patch_sticky_manual("missing_agent"),
+            patch.object(
+                agent_authorization_service,
+                "authorize_agent_access",
+                AsyncMock(side_effect=denied),
+            ),
+        ):
+            with pytest.raises(AuthorizationException) as exc_info:
                 await chat_service.build_chat_deps(
                     db_session, mock_user, agent_code="missing_agent"
                 )
+        assert exc_info.value.error_code == "AI_AGENT_FORBIDDEN"
 
     async def test_default_agent_code_is_user_mgmt(
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
@@ -193,6 +239,76 @@ class TestBuildChatDeps:
         assert "system:role:list" in deps.perms
         assert "system:dept:list" in deps.perms
         assert all_required_perms <= deps.perms
+
+
+async def test_revoked_sticky_agent_is_cleared_and_rerouted(
+    db_session: AsyncSession,
+) -> None:
+    """旧会话粘滞失权后不沿用，交回最新候选集路由。"""
+    from app.core.id_generator import next_id
+    from app.modules.system.models.user import User
+
+    user = await db_session.scalar(select(User).where(User.user_name == "admin"))
+    conversation = AiConversation(
+        conversation_id=next_id(),
+        user_id=user.user_id,
+        title="sticky revoked",
+        agent_code="role_mgmt",
+    )
+    db_session.add(conversation)
+    await db_session.flush()
+    denied = AuthorizationException(
+        "当前用户不可使用该 AI Agent",
+        error_code="AI_AGENT_FORBIDDEN",
+    )
+
+    with patch.object(
+        agent_authorization_service,
+        "authorize_agent_access",
+        AsyncMock(side_effect=denied),
+    ):
+        deps = await chat_service.build_chat_deps(
+            db_session,
+            user,
+            conversation_id=conversation.conversation_id,
+        )
+
+    assert conversation.agent_code is None
+    assert deps.agent is None
+    assert deps.sticky_decision.run_supervisor is True
+    assert deps.sticky_decision.reason == "auto_fallback_forbidden"
+
+
+async def test_create_agent_preserves_explicit_falsy_model_ref() -> None:
+    """Service 不能把显式空 model ref 替换成 Agent preference。"""
+    db = MagicMock()
+    selected_model = MagicMock(name="selected_model")
+    selector = AsyncMock(return_value=selected_model)
+    built_agent = MagicMock(name="built_agent")
+
+    with (
+        patch.object(
+            model_authorization_service,
+            "resolve_model_instance",
+            selector,
+        ),
+        patch(
+            "app.modules.ai.agents.safety.ai_config.get_ai_config_str_list",
+            AsyncMock(return_value=[]),
+        ),
+        patch(
+            "app.modules.ai.service.chat_service.create_chat_agent",
+            return_value=built_agent,
+        ),
+    ):
+        result = await chat_service.create_agent(
+            db,
+            "",
+            agent_config=SimpleNamespace(model_preference="provider:preferred"),
+        )
+
+    assert result is built_agent
+    selector.assert_awaited_once_with(db, "", tenant_id=0)
 
 
 class TestAttachTraceToConversation:

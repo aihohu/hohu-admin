@@ -1,8 +1,8 @@
 """file 模块的 AI Tool。
 
 ``file.parse`` 工具约束：
-  - agent=SHARED_AGENT_CODE（任何登录用户直通，不绑定业务 Agent）
-  - required_perms=()，任何登录用户均可调用
+  - agent=SHARED_AGENT_CODE（运行时必须由 shared Agent 精确调用）
+  - required_perms=("ai:file:parse",)，必须显式授权
   - risk=low（纯读解析，无副作用）
   - default_enabled=False，由部署方通过 ai:enabled_tools 显式启用
   - accepts_file=Excel/CSV MIME 列表
@@ -26,6 +26,7 @@ from app.modules.ai.agents.tools.file_parser import (
     parse_file_bytes,
 )
 from app.modules.ai.agents.tools.meta import SHARED_AGENT_CODE, AiToolMeta
+from app.modules.ai.constants import AI_FILE_PARSE_PERMISSION
 from app.modules.ai.core.context import AiToolContext
 
 
@@ -46,7 +47,7 @@ _FILE_PARSE_ACCESS_POLICY = FileAccessPolicy(
     AiToolMeta(
         name="file.parse",
         agent=SHARED_AGENT_CODE,
-        required_perms=(),
+        required_perms=(AI_FILE_PARSE_PERMISSION,),
         risk="low",
         default_enabled=False,
         accepts_file=_accepted_mime_types(),

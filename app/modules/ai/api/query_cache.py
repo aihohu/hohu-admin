@@ -12,12 +12,12 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
 
+from app.core.auth import require_ai_chat_use
 from app.core.base_response import ResponseModel
 from app.core.exceptions import AuthorizationException
 from app.core.redis import redis_client
 from app.modules.ai.agents.hitl.query_cache import get_query_cache
 from app.modules.ai.schemas.query_cache import QueryCacheOut
-from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ class EmptyData(BaseModel):
 async def get_query_cache_endpoint(
     trace_id: str,
     tool_name: str | None = Query(None, description="指定 tool_name 取特定 field"),
-    _current_user: User = Depends(get_current_user),
+    _current_user: User = Depends(require_ai_chat_use),
 ) -> ResponseModel[QueryCacheOut | None]:
     """返回 trace_id 对应的最新 query_cache 记录。
 

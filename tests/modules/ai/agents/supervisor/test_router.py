@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.core.exceptions import BusinessRuleException
 from app.modules.ai.agents.supervisor import router as router_mod
 from app.modules.ai.agents.supervisor.router import (
     AgentRouter,
@@ -135,7 +136,7 @@ async def test_route_no_provider_falls_back_to_clarification(db_session):
     router = AgentRouter()
 
     with patch(
-        "app.modules.ai.agents.supervisor.router.provider_service.resolve_model",
+        "app.modules.ai.agents.supervisor.router.model_authorization_service.resolve_model_instance",
         AsyncMock(side_effect=Exception("AI_MODEL_NOT_CONFIGURED")),
     ):
         result = await router.route(db_session, "重置密码", candidates, model=None)
@@ -143,6 +144,26 @@ async def test_route_no_provider_falls_back_to_clarification(db_session):
     assert result.clarification is True
     assert result.reason == "no_provider"
     assert result.candidates == candidates
+
+
+@pytest.mark.asyncio
+async def test_route_propagates_model_authorization_failure(db_session):
+    """统一 selector 的稳定授权错误必须保留，不能伪装成路由歧义。"""
+    candidates = [_make_agent("user_mgmt")]
+    router = AgentRouter()
+    denied = BusinessRuleException(
+        "所选 AI 模型当前不可用",
+        error_code="AI_MODEL_NOT_AVAILABLE",
+    )
+
+    with patch(
+        "app.modules.ai.agents.supervisor.router.model_authorization_service.resolve_model_instance",
+        AsyncMock(side_effect=denied),
+    ):
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await router.route(db_session, "重置密码", candidates, model=None)
+
+    assert exc_info.value.error_code == "AI_MODEL_NOT_AVAILABLE"
 
 
 @pytest.mark.asyncio

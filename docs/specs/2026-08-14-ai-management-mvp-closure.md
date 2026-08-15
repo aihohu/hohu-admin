@@ -257,11 +257,11 @@ upgrade 运行 `python scripts/audit_ai_provider_egress.py` 检查全部存量 P
 
 ### 3.5 AI Trace 数据与页面契约
 
-AI Trace 不能依赖当前 conversation 的可变 `agent_code` 或只在 PreparedAction 中存在的 tenant 信息反推。Phase 4 前必须通过 Alembic 扩展 `ai_operation_log`：
+AI Trace 不能依赖当前 conversation 的可变 `agent_code` 或只在 PreparedAction 中存在的 tenant 信息反推。P1-A 审查修复已先行通过 Alembic 为 `ai_operation_log` 固化 tenant 边界；Phase 4 继续补齐其余 Trace 字段：
 
-- 新增 `tenant_id BIGINT NOT NULL`、`agent_code VARCHAR(64) NULL`、`target_summary TEXT NULL`；新写入的 autonomous/HITL/security-event 日志必须从可信上下文写 tenant，从已授权执行上下文写 Agent，`target_summary` 只存 allowlist 后的冻结目标摘要。
-- 现有单租户数据的 `tenant_id` 回填 `0`；能按 `tool_call_id` 关联 PreparedAction 的历史日志可回填 `agent_code`，其他 legacy 行保持 `NULL` 并在 DTO 显示为 unknown，禁止从当前 Conversation 猜测。
-- 增加 `(tenant_id, trace_id)` 和 `(tenant_id, queued_at, log_id)` 索引；列表按 `queued_at DESC, log_id DESC` 稳定排序。
+- ✅ `tenant_id BIGINT NOT NULL` 已由 `b8e4c7d2a1f0` 增加，现有单租户数据回填 `0`；所有新写入和 owner 查询均从可信上下文显式传入 tenant。
+- ✅ 已增加 `(tenant_id, trace_id)` 和 `(tenant_id, queued_at, log_id)` 索引；后续列表按 `queued_at DESC, log_id DESC` 稳定排序。
+- Phase 4 新增 `agent_code VARCHAR(64) NULL`、`target_summary TEXT NULL`；能按 `tool_call_id` 可靠关联 PreparedAction 的历史日志可回填 `agent_code`，其他 legacy 行保持 `NULL` 并在 DTO 显示为 unknown，禁止从当前 Conversation 猜测；`target_summary` 只存 allowlist 后的冻结目标摘要。
 
 后端契约：
 
@@ -753,6 +753,16 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 
 26. **历史业务结果在所有读取面实时重授权** — conversation、resume、query-cache 和 owner log 是同一持久化结果的不同投影，不能只加固其中一个。**反例**: 撤销 Role-Agent 后 resume 返回 tombstone，但 conversation detail 仍回放旧 tool result/UI。**回归**: 不可变 Agent/Tool/subject lineage 驱动统一 `authorize_result_projection()`；失权或 legacy 不可证明时所有读取面一致 tombstone/最小状态，前端清除旧缓存，审计角色只走独立 allowlist DTO。
 
+27. **功能权限只有一个收集器，菜单禁用只控制路由可见性** — API dependency、前端按钮权限和 AI Tool 权限统一使用启用角色贡献的显式 `menu.permission` 集合；为兼容现有全局语义，`menu.status=2` 不立即撤销已关联角色的 API 权限。**反例**: AI 单独复制权限汇总并过滤禁用菜单，会让页面按钮、普通 API 与 AI Tool 对同一角色给出不同结论。**回归**: 三条调用链委托同一 collector；禁用角色不贡献权限，禁用菜单仍贡献权限，并由权限矩阵测试锁定。
+
+28. **P1-B 以统一 Agent/Model Policy 消除选择路径旁路** — 显式、粘滞、Supervisor、默认和恢复执行若分别查询 Agent/模型，会在撤权、禁用或伪造 ID 时产生不同结果；Agent 列表、选择与恢复统一委托 `AgentAuthorizationService`，新 LLM run 统一委托 `ModelAuthorizationService`。**反例**: 列表隐藏 shared，但 Gateway 仍允许其它运行时 Agent 调用 `file.parse`；或下拉框过滤禁用模型，chat payload 仍能直接提交。**回归**: Role-Agent/Agent/Tool 任一层缺失均稳定拒绝，Tool 与运行时 Agent 必须精确相同，三模型端点只返回安全字段，显式无效模型零写入且不 fallback。
+
+29. **阶段发布集合只包含当前已闭环 Agent，upgrade 不翻转显式状态** — Phase 2/3 尚未补齐的三个业务 Agent 不能因最终 MVP 目标而在 P1-B 中间构建提前启用；upgrade 也只能补缺失绑定，不能把管理员显式禁用的 Agent 或 Role-Agent 重新开启。**反例**: fresh seed 现在就启用 `user_mgmt/dept_mgmt/role_mgmt`，会宣称尚未具备的完整集合/受限委派能力；migration 把 `enabled=false` 的 R_SUPER 绑定改回 true 会覆盖部署决策。**回归**: P1-B 发布集合仅含已闭环的 `shared`，未发布描述明确标注“尚未发布”；fresh 只启用阶段集合，upgrade 保留 Agent、Role-Agent 与 `ai:enabled_tools` 的既有值。
+
+30. **模型拒绝语义不能被 truthiness 或 Supervisor fallback 吞没** — chat raw payload 必须按字段是否存在区分 omitted 与显式 falsy 值，Service 也只能对 `None` 使用 Agent preference；统一 selector 的稳定业务拒绝必须原样传播，不能伪装成 Agent 路由歧义。**反例**: `modelId=0` 被当成未提交并执行会话默认模型，或 Supervisor 把 `AI_MODEL_NOT_AVAILABLE` 转成 `clarification_required`。**回归**: `tests/modules/ai/test_chat_supervisor.py::test_explicit_falsy_model_id_is_rejected_without_fallback`、`tests/modules/ai/test_chat_service.py::test_create_agent_preserves_explicit_falsy_model_ref`、`tests/modules/ai/agents/supervisor/test_router.py::test_route_propagates_model_authorization_failure`。
+
+31. **legacy approve 的执行资格拒绝共用终态收口** — rolling-upgrade 遗留的 Redis-only action 在入口撤权或用户自动禁用后都必须先把 operation log/pending projection 收口为 expired、以 rejected 唤醒 waiter，并在离线时释放 guard 和删除 pending，再返回稳定 403。**反例**: `AI_USER_DISABLED` 只返回错误而让 confirmation 保持 pending 到 TTL。**回归**: `tests/modules/ai/test_confirm.py::TestUserDisabled::test_disabled_user_blocked`。
+
 ---
 
 ## 10. 实施计划
@@ -767,14 +777,19 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 
 ### Phase 1：默认开启的权限地基
 
-- [ ] TDD 新增 `ai:chat:use`，按 §3.4 覆盖全部用户侧 AI API，并拆分 chat/Agent-admin/Provider models 端点。
-- [ ] 实现统一 Agent Policy，覆盖显式、粘滞、Supervisor、默认回退、confirm/resume 和 Tool-Agent 归属。
+- [x] ✅ P1-A 已完成（2026-08-14；审查修复 2026-08-15）：`AI_MODULE_ENABLED=false` 时 fresh process 只注册 `/ai`/`/ai/**` 503 guard，覆盖包括 `TRACE`/`CONNECT` 在内的标准 HTTP 方法，启动与 shutdown 不加载 AI router、Service、Provider、Gateway、Registry 或 lifecycle；新增显式 `ai:chat:use` dependency，覆盖 Agent list、chat、conversation、query-cache 和 routing-feedback 用户入口，Provider 管理模型列表固定要求 `ai:provider:list`；confirm/resume/owner operation-log 保持 authentication-only router，并在 owner + tenant 绑定校验后区分 approve/reject、完整/最小状态分支。Postgres PreparedAction 是终态权威来源，即使 Redis pending 已清理也可按当前权限返回最小状态或安全 SSE replay，且绝不重跑 Tool。权限收集统一复用 auth collector；`ai_operation_log` 已持久化 tenant；fresh 初始化显式把 `ai:chat:use` 绑定给 `R_SUPER`，upgrade 数据迁移幂等补给 `R_SUPER` 与已有非 shared Role-Agent 绑定角色。Agent/Tool/data-scope 结果投影、完整 Agent/file seed 和三模型端点拆分仍未完成，不能独立部署。
+- [x] P1-A 验证证据：`ruff check .`、`ruff format --check .`、`python scripts/check_ai_tools.py`（19 tools / 12 checks）、AI 模块 918 项测试及全量 `pytest` 1873 项通过；总覆盖率 72.42%，满足 70% 门禁，仅保留 2 条既有 SQLAlchemy transaction warning。审查回归覆盖权限单一来源、禁用菜单兼容语义、无 Redis 终态恢复、operation-log tenant 隔离以及 fresh/upgrade 幂等权限迁移。
+- [x] TDD 新增 `ai:chat:use` 并按 §3.4 覆盖当前用户侧 AI API；chat/Agent-admin/Provider models 三端点拆分仍待 P1-B。
+- [x] ✅ P1-B 已完成（2026-08-15；审查修复 2026-08-15）：统一 Agent Policy 覆盖列表、显式、粘滞、Supervisor、默认、confirm/resume；移除 R_SUPER/shared Agent 绑定旁路，Gateway、PreparedAction 与 legacy resume 均要求 Tool 精确归属运行时 Agent。统一模型 selector 覆盖 chat、Supervisor、Agent run 与 conversation create/update，拆分 `/ai/chat/models`、`/ai/admin/agents/model-options` 和 Provider 管理 models；显式 falsy `modelId` 不再 fallback，Supervisor 保留 `AI_MODEL_NOT_AVAILABLE` 拒绝语义，legacy approve 的入口撤权与自动禁用均终态收口。Agent 全局配置要求启用 `R_SUPER + ai:agent:edit`，identity 字段混入时整包拒绝。fresh/upgrade 补齐 chat/file/Agent 菜单、R_SUPER 权限、shared 显式绑定及 `ai:enabled_tools` 兼容迁移；仅当前已闭环的 shared 默认启用，三个业务 Agent 等待 Phase 2/3 后再进入发布集合。
+- [x] P1-B 验证证据：`ruff check .`、`ruff format --check .`、`python scripts/check_ai_tools.py`（19 tools / 12 checks）、AI 模块 952 项和全量 1911 项测试通过；总覆盖率 72.74%，Alembic current/head 均为单一 `b8e4c7d2a1f0`，仅保留 2 条既有 SQLAlchemy transaction warning。P1-C egress、P1-D lineage/result projection、Web 切换和 Phase 2 委派仍未完成，本中间构建禁止部署。
+- [x] 实现统一 Agent Policy，覆盖显式、粘滞、Supervisor、默认回退、confirm/resume 和 Tool-Agent 归属。
 - [ ] 为 assistant/tool message、PreparedAction 和 query-cache 持久化不可变 Agent/Tool/subject refs，实现统一结果投影 Policy，覆盖 resume/conversation/query-cache/owner-log 及 legacy fail-closed tombstone。
-- [ ] 实现统一 chat model selector；PreparedAction 冻结 model/provider ID，仅在新 LLM run 前复验，reject/最小状态回放独立收口、完整回放重新授权但不查模型；Agent 全局配置所有可变字段要求超管 Policy。
+- [x] 实现 chat/Supervisor/Agent/conversation 共用的 chat model selector、三端点拆分和 Agent 全局配置超管 Policy；显式无效模型不 fallback，新聊天在 Agent 授权后采用其模型偏好。
+- [ ] P1-D 为 PreparedAction 冻结 model/provider ID，仅在新 LLM continuation 前复验；reject/最小状态回放独立收口、完整回放重新授权但不查模型。
 - [ ] 收口 Provider test 为已保存 Provider；所有 SDK/adapter 注入共享 hardened transport，在 test/chat/Supervisor/Agent/continuation 全路径落地协议、origin、Provider/Model URL、解析 IP、DNS rebinding、redirect、timeout、响应大小和错误脱敏 egress Policy，并审计/隔离不合规存量配置。
-- [ ] 移除 shared/超管可见性旁路和 shared 跨 Agent 执行豁免；同步 Registry、Gateway executor、PreparedAction 复验、`check_ai_tools.py`，落地显式 Role-Agent + `ai:file:parse`。
-- [ ] 实现 fresh/upgrade 独立 seed/migration，对齐默认启用状态、`R_SUPER` 显式绑定和描述/工具 inventory。
-- [ ] 后端 endpoint/Agent 权限矩阵与前端无入口/无 Agent 状态通过；Phase 1 只形成代码里程碑，不得绕过门禁独立部署。
+- [x] 移除 shared/超管 Agent 可见性旁路和 shared 跨 Agent 执行豁免；同步 Registry、Gateway executor、PreparedAction 复验、`check_ai_tools.py`，落地显式 Role-Agent + `ai:file:parse`。
+- [x] 完成 P1-B fresh/upgrade 独立 seed/migration：补齐 Agent/file/管理权限与 R_SUPER 显式 shared 绑定，保留部署方 Agent/Role-Agent/`ai:enabled_tools` 状态；业务 Agent 待自身阶段闭环后再加入发布集合。
+- [ ] 后端 P1-A/P1-B endpoint/Agent 权限矩阵已通过；前端三模型 endpoint、无入口/无 Agent 状态仍待 Web 工作包。Phase 1 只形成代码里程碑，不得绕过门禁独立部署。
 
 ### Phase 2：用户部门与角色调整
 
@@ -795,7 +810,7 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 ### Phase 4：发布闭环
 
 - [ ] 完成工具卡 HITL resume/download/tool-only/reload 当前范围 E2E，并覆盖撤权后 reject/最小状态回放、所有历史结果读取面的统一 tombstone、前端缓存清除及删除会话原子终态化。
-- [ ] 完成 AI Operation Log migration/index、AI Trace list/detail API、`/ai/trace` 菜单页面、消息元数据 DTO allowlist、脱敏/tenant 测试和浏览器审计 E2E。
+- [ ] 完成 AI Trace：operation-log 的 `tenant_id` migration/index 与写入/查询隔离已提前完成；仍需 agent/target 字段、Trace list/detail API、`/ai/trace` 菜单页面、消息元数据 DTO allowlist、脱敏测试和浏览器审计 E2E。
 - [ ] 使用 §7.1 全部身份执行真实浏览器权限/数据范围 E2E。
 - [ ] 新增独立 `e2e:provider` Playwright project；release 环境使用真实 provider 完成三个 Agent smoke，缺凭据失败，不以 route fixture 代替。
 - [ ] 后端 `ruff check . && ruff format --check . && pytest --cov=app --cov-report=term-missing --cov-fail-under=70` 及 `python scripts/check_ai_tools.py` 通过。

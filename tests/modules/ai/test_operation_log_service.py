@@ -28,12 +28,14 @@ async def _start(
     confirmation_id: str | None = "conf_test_123",
     tool_call_id: str = "tc_test_001",
     user_id: int = 9001,
+    tenant_id: int = 0,
 ) -> int:
     """helper：写入一条 ai_operation_log"""
     return await operation_log_service.start_operation(
         db,
         trace_id="tr_test",
         conversation_id=100,
+        tenant_id=tenant_id,
         user_id=user_id,
         tool_name="user.test",
         tool_call_id=tool_call_id,
@@ -56,6 +58,7 @@ class TestStartOperation:
         assert log.status == "pending_confirmation"
         assert log.confirmation_id == "conf_test_123"
         assert log.tool_call_id == "tc_test_001"
+        assert log.tenant_id == 0
 
     async def test_start_running_autonomous(self, db_session) -> None:
         """autonomous 流初始 status=RUNNING, confirmation_id=None"""
@@ -63,6 +66,7 @@ class TestStartOperation:
             db_session,
             trace_id="tr_a",
             conversation_id=1,
+            tenant_id=0,
             user_id=1,
             tool_name="user.count",
             tool_call_id="tc_auto",
@@ -84,6 +88,7 @@ class TestStartOperation:
             db_session,
             trace_id="tr_test_causality",
             conversation_id=123,
+            tenant_id=0,
             source_user_message_id=456,
             readonly_snapshot=True,
             user_id=9001,
@@ -290,13 +295,19 @@ class TestGetByToolCallId:
     async def test_get_found(self, db_session) -> None:
         log_id = await _start(db_session, tool_call_id="tc_lookup")
 
-        log = await operation_log_service.get_by_tool_call_id(db_session, "tc_lookup")
+        log = await operation_log_service.get_by_tool_call_id(
+            db_session,
+            "tc_lookup",
+            tenant_id=0,
+        )
         assert log is not None
         assert log.log_id == log_id
 
     async def test_get_not_found(self, db_session) -> None:
         log = await operation_log_service.get_by_tool_call_id(
-            db_session, "tc_nonexistent"
+            db_session,
+            "tc_nonexistent",
+            tenant_id=0,
         )
         assert log is None
 
@@ -304,7 +315,10 @@ class TestGetByToolCallId:
         await _start(db_session, user_id=9001, tool_call_id="tc_owner")
 
         log = await operation_log_service.get_by_tool_call_id(
-            db_session, "tc_owner", user_id=9001
+            db_session,
+            "tc_owner",
+            tenant_id=0,
+            user_id=9001,
         )
         assert log is not None
 
@@ -313,9 +327,29 @@ class TestGetByToolCallId:
 
         with pytest.raises(BusinessRuleException) as exc_info:
             await operation_log_service.get_by_tool_call_id(
-                db_session, "tc_owner2", user_id=9999
+                db_session,
+                "tc_owner2",
+                tenant_id=0,
+                user_id=9999,
             )
         assert exc_info.value.error_code == "AI_OPERATION_LOG_FORBIDDEN"
+
+    async def test_tenant_mismatch_is_indistinguishable_from_not_found(
+        self, db_session
+    ) -> None:
+        await _start(
+            db_session,
+            tenant_id=7,
+            tool_call_id="tc_other_tenant",
+        )
+
+        log = await operation_log_service.get_by_tool_call_id(
+            db_session,
+            "tc_other_tenant",
+            tenant_id=8,
+        )
+
+        assert log is None
 
 
 class TestGetNotFoundById:

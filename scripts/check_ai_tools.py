@@ -289,12 +289,13 @@ def check_prepared_binding_valid(
                     f"execute tool {execute_name!r} cannot bind another prepared flow",
                 )
             )
-        if execute_meta.agent not in {meta.agent, "shared"}:
+        if execute_meta.agent != meta.agent:
             violations.append(
                 Violation(
                     meta.name,
                     "prepared_binding_valid",
-                    f"execute tool {execute_name!r} belongs to agent {execute_meta.agent!r}",
+                    f"execute tool {execute_name!r} must belong to exact same agent; "
+                    f"got {meta.agent!r} and {execute_meta.agent!r}",
                 )
             )
         if not execute_meta.hitl_always:

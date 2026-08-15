@@ -14,7 +14,7 @@ class AgentRow(BaseModel):
     """GET /ai/role-agent/{roleId} 响应内 allAgents 的单个 Agent 行.
 
     决策 #19：不暴露软禁用态，故无 enabled_role_level / softDisabled 字段.
-    is_shared: 决策 #14 — shared Agent 直通，前端 UI 显示「无需绑定」徽标.
+    is_shared: 仅供前端标识平台能力 Agent；shared 仍必须显式绑定.
     """
 
     model_config = ConfigDict(

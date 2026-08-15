@@ -132,7 +132,8 @@ async def db_session() -> AsyncSession:
 async def auth_token(db_session) -> str:
     """构造一个合法 JWT（不通过 /auth/login，直接 jwt.encode，参考 test_refresh_token.py:26）.
 
-    使用 init_db.py 创建的 admin 用户（user_name='admin'，超管）.
+    使用 init_db.py 创建的 admin 用户（user_name='admin'，超管）。fresh/upgrade
+    seed 必须为其 R_SUPER 角色显式关联 ``ai:chat:use``，测试不保留权限旁路。
     CI 在 pytest 前跑 `python scripts/init_db.py`（.github/workflows/ci.yml:92），
     本地 dev 同样假设已 init（README 标准步骤）.
     """
@@ -168,6 +169,7 @@ def _make_agent(code: str, name: str, description: str = "", display_order: int 
         display_order=display_order,
         agent_id=abs(hash(code)) & 0xFFFFFFFF,  # 占位 ID，仅用于 dedup
         enabled=True,
+        model_preference=None,
     )
 
 
@@ -180,7 +182,7 @@ def mock_visible_agents(monkeypatch):
     - 无 teardown 责任（monkeypatch 自动还原）
     - 无 xdist 并发竞态
 
-    候选 Agent：shared + 6 业务（与 seed_ai_agents.py 一致）.
+    候选 Agent：shared + 6 业务（测试路由全集，不代表阶段默认启用集合）.
 
     Patches 三处引用：
     - api/agent.py（GET /ai/agents）
@@ -189,12 +191,16 @@ def mock_visible_agents(monkeypatch):
 
     第三个 patch 是关键：routing_feedback_service 顶部 `from ... import list_visible_agents`
     在 import 时 bind 到原函数对象；monkeypatch 必须 setattr 该 module 的 attribute
-    才能让 service 调用看到 mock。否则 CI 上 seed_ai_agents.py 默认 enabled=False，
-    真实 list_visible_agents 返回空集 → correctedAgentCode 不在 visible_codes → 403.
+    才能让 service 调用看到 mock。统一授权 Service 也必须 patch，避免测试依赖
+    fresh/upgrade 的真实 Role-Agent 状态。
     """
+    from app.core.exceptions import AuthorizationException
     from app.modules.ai.api import agent as agent_mod
     from app.modules.ai.service import agent_visibility as vis_mod
     from app.modules.ai.service import routing_feedback_service as fb_mod
+    from app.modules.ai.service.agent_authorization_service import (
+        agent_authorization_service,
+    )
 
     candidates = [
         _make_agent("shared", "通用工具助手", "fallback agent", 1),
@@ -209,9 +215,24 @@ def mock_visible_agents(monkeypatch):
     async def _fake_list(db, user):
         return candidates
 
+    async def _fake_authorize(db, user, agent_code, *, error_code="AI_AGENT_FORBIDDEN"):
+        agent = next((item for item in candidates if item.code == agent_code), None)
+        if agent is None:
+            raise AuthorizationException(
+                "当前用户不可使用该 AI Agent",
+                error_code=error_code,
+            )
+        return agent
+
     monkeypatch.setattr(agent_mod, "list_visible_agents", _fake_list)
     monkeypatch.setattr(vis_mod, "list_visible_agents", _fake_list)
     monkeypatch.setattr(fb_mod, "list_visible_agents", _fake_list)
+    monkeypatch.setattr(agent_authorization_service, "list_agents", _fake_list)
+    monkeypatch.setattr(
+        agent_authorization_service,
+        "authorize_agent_access",
+        _fake_authorize,
+    )
     return candidates
 
 

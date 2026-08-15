@@ -97,6 +97,7 @@ class _ConfirmationResolution:
 
 USER_FACING_MSG: dict[str, str] = {
     "AI_TOOL_NOT_FOUND": "该工具不在当前助手范围内，请换种方式问。",
+    "AI_TOOL_AGENT_MISMATCH": "该工具不属于当前助手，请切换到对应助手后重试。",
     "AI_TOOL_PERM_DENIED": "你没有调用此工具的权限，请联系管理员。",
     "AI_DATA_SCOPE_VIOLATION": "目标不在你的可见范围内，请确认目标 ID 或联系管理员扩权。",
     "AI_RATE_LIMIT_USER_WRITE": "操作过于频繁，请稍后再试。",
@@ -253,6 +254,27 @@ async def _execute_tool(
     metric_risk = meta.risk
     user_id = deps.user.user_id
 
+    # Agent 与 Tool 归属必须精确一致；shared 不再充当跨 Agent 旁路。
+    if (
+        deps.agent is None
+        or not getattr(deps.agent, "enabled", False)
+        or getattr(deps.agent, "code", None) != meta.agent
+    ):
+        logger.warning(
+            "tool agent mismatch",
+            extra={
+                "user_id": user_id,
+                "tool": name,
+                "tool_agent": meta.agent,
+                "runtime_agent": getattr(deps.agent, "code", None),
+            },
+        )
+        _rec("agent_mismatch", risk=meta.risk)
+        return ToolResult.failure(
+            error_code="AI_TOOL_AGENT_MISMATCH",
+            error_msg=USER_FACING_MSG["AI_TOOL_AGENT_MISMATCH"],
+        )
+
     # Gateway-only execute 不允许模型/普通调用方猜名称直调。prepared preview
     # 只能通过本函数的内部递归传入安全 confirmation presentation。
     prepared_source = registry.prepared_source_for(name)
@@ -330,8 +352,7 @@ async def _execute_tool(
     # check_l1_rate_limit 返回 (count, l1_member)，l1_member 用于业务函数内
     # 抛 AuthorizationException 时按成员精确回滚。
     # Agent 配置专属额度时，在用户日额度之后叠加检查。
-    #              agent_code 从 deps.agent.code 取（非 tool.meta.agent，避免 shared
-    #              agent 调 file.parse 时归属与运行时会话不一致）
+    # agent_code 从已通过精确归属校验的 deps.agent.code 取。
     # 部署方可叠加全局速率限制和会话日预算。
     l1_member: str | None = None
     l1_global_member: str | None = None
@@ -660,7 +681,7 @@ def validate_prepared_execution(
             "Prepared action agent is no longer enabled",
             error_code="AI_PREPARED_ACTION_AGENT_UNAVAILABLE",
         )
-    if registered.meta.agent not in {action.agent_code, "shared"}:
+    if registered.meta.agent != action.agent_code:
         raise AuthorizationException(
             "Prepared action tool binding changed",
             error_code="AI_PREPARED_ACTION_BINDING_INVALID",
@@ -824,6 +845,7 @@ async def _start_log(
             log_db,
             trace_id=deps.trace_id,
             conversation_id=deps.conversation_id or 0,
+            tenant_id=deps.tenant_id,
             source_user_message_id=deps.source_user_message_id,
             readonly_snapshot=registered.meta.readonly,
             user_id=deps.user.user_id,
@@ -1609,6 +1631,36 @@ async def resume_tool_execution(
             ToolResult.failure(
                 error_code="AI_TOOL_NOT_FOUND",
                 error_msg=USER_FACING_MSG["AI_TOOL_NOT_FOUND"],
+            ),
+            0,
+        )
+
+    meta = registered.meta
+    if (
+        deps.agent is None
+        or not getattr(deps.agent, "enabled", False)
+        or getattr(deps.agent, "code", None) != meta.agent
+    ):
+        return (
+            ToolResult.failure(
+                error_code="AI_TOOL_AGENT_MISMATCH",
+                error_msg=USER_FACING_MSG["AI_TOOL_AGENT_MISMATCH"],
+            ),
+            0,
+        )
+    if not set(meta.required_perms) <= deps.perms:
+        return (
+            ToolResult.failure(
+                error_code="AI_TOOL_PERM_DENIED",
+                error_msg=USER_FACING_MSG["AI_TOOL_PERM_DENIED"],
+            ),
+            0,
+        )
+    if meta.super_admin_only and not is_super_admin(deps.user):
+        return (
+            ToolResult.failure(
+                error_code="AI_SUPER_ADMIN_REQUIRED",
+                error_msg="此操作仅超级管理员可执行，请联系超管或走传统界面",
             ),
             0,
         )

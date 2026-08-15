@@ -16,6 +16,16 @@ def _load_agents_list():
     return mod.AGENT_SEED
 
 
+def _load_seed_module():
+    spec = importlib.util.spec_from_file_location(
+        "seed_ai_agents_flags",
+        Path(__file__).parent.parent.parent.parent / "scripts" / "seed_ai_agents.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def test_each_agent_description_50_to_200_chars():
     """每个 description 长度应在 50-200 字。"""
     agents = _load_agents_list()
@@ -67,3 +77,23 @@ def test_seed_contains_seven_agents():
         "job_mgmt",
     }
     assert codes == expected
+
+
+def test_only_stage_complete_agents_default_enabled_on_insert() -> None:
+    mod = _load_seed_module()
+
+    # P1-B 只是授权地基；三个 MVP 业务 Agent 要到 Phase 2/3 完成纵向切片后
+    # 才能加入发布集合。中间构建不得把未完成能力预先标记为可用。
+    assert mod.PUBLISHED_AGENT_CODES == {"shared"}
+
+
+def test_unpublished_descriptions_do_not_claim_availability() -> None:
+    mod = _load_seed_module()
+    unpublished = {
+        item["code"]: item["description"]
+        for item in mod.AGENT_SEED
+        if item["code"] not in mod.PUBLISHED_AGENT_CODES
+    }
+
+    assert unpublished
+    assert all("尚未发布" in description for description in unpublished.values())

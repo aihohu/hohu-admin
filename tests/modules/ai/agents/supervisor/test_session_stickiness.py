@@ -47,7 +47,6 @@ async def test_null_reuses_last_agent(db_session):
         conversation_id=10,
         agent_code_param=None,
         conv_agent_code="user_mgmt",
-        sticky_agent_enabled=True,  # 跳过 DB 查询
     )
     assert decision.agent_code == "user_mgmt"
     assert decision.reason == "session_sticky"
@@ -69,18 +68,18 @@ async def test_null_without_conv_agent_falls_back_to_auto(db_session):
 
 
 @pytest.mark.asyncio
-async def test_sticky_agent_disabled_falls_back_to_auto(db_session):
-    """粘滞 Agent 已禁用时回退到 auto。"""
+async def test_sticky_value_is_deferred_to_unified_agent_policy(db_session):
+    """stickiness 只分类；禁用、解绑与 Tool 可见性统一由 Agent Policy 复核。"""
     decision = await resolve_sticky_agent_code(
         db_session,
         user_id=1,
         conversation_id=10,
         agent_code_param=None,
         conv_agent_code="user_mgmt",
-        sticky_agent_enabled=False,  # 模拟 Agent 已禁用
     )
-    assert decision.run_supervisor is True
-    assert decision.reason == "auto_fallback_disabled"
+    assert decision.run_supervisor is False
+    assert decision.agent_code == "user_mgmt"
+    assert decision.reason == "session_sticky"
 
 
 @pytest.mark.asyncio

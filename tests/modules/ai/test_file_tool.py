@@ -112,11 +112,10 @@ class TestFileParseRegistry:
         assert reg is not None
         assert reg.meta.agent == SHARED_AGENT_CODE
 
-    def test_meta_required_perms_empty(self) -> None:
-        """shared agent 且权限为空时允许任何登录用户调用。"""
+    def test_meta_requires_explicit_file_permission(self) -> None:
         reg = ToolRegistry.get().find("file.parse")
         assert reg is not None
-        assert reg.meta.required_perms == ()
+        assert reg.meta.required_perms == ("ai:file:parse",)
 
     def test_meta_risk_is_low(self) -> None:
         reg = ToolRegistry.get().find("file.parse")

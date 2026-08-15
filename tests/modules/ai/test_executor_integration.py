@@ -1288,7 +1288,7 @@ class TestPerAgentQuota:
     async def test_no_agent_quota_skips_per_agent_check(self) -> None:
         """agent.daily_quota_per_user=None → 不调 check_l2_agent_quota，key 不存在"""
         _register_test_tools()
-        deps = _build_deps(agent_daily_quota=None, agent_code="user_mgmt")
+        deps = _build_deps(agent_daily_quota=None, agent_code="shared")
 
         result = await execute_tool(_TEST_TOOL_LOW, {"msg": "hi"}, deps)
         assert result.ok, f"默认 agent 无专属额度应通过，got {result.error_code}"
@@ -1299,7 +1299,7 @@ class TestPerAgentQuota:
 
         date_str = datetime.now(UTC).strftime("%Y%m%d")
         exists = await redis_module.redis_client.exists(
-            f"ai:quota:9001:user_mgmt:{date_str}"
+            f"ai:quota:9001:shared:{date_str}"
         )
         assert exists == 0  # per-agent key 未写
 
@@ -1310,7 +1310,8 @@ class TestPerAgentQuota:
         user = MagicMock()
         user.user_id = 9004
         agent = MagicMock()
-        agent.code = "test_agent_pass"
+        agent.code = "shared"
+        agent.enabled = True
         agent.daily_quota_per_user = 5
 
         deps = ChatDeps(
@@ -1347,10 +1348,7 @@ class TestPerAgentQuota:
 
         date_str = datetime.now(UTC).strftime("%Y%m%d")
         agent_count = int(
-            await redis_module.redis_client.get(
-                f"ai:quota:9004:test_agent_pass:{date_str}"
-            )
-            or 0
+            await redis_module.redis_client.get(f"ai:quota:9004:shared:{date_str}") or 0
         )
         assert agent_count == 1, f"per-agent L2 应 INCR 1 次，got {agent_count}"
 
@@ -1365,7 +1363,8 @@ class TestPerAgentQuota:
         user = MagicMock()
         user.user_id = 9005
         agent = MagicMock()
-        agent.code = "test_agent_full"
+        agent.code = "shared"
+        agent.enabled = True
         agent.daily_quota_per_user = 1
 
         deps = ChatDeps(
@@ -1384,9 +1383,7 @@ class TestPerAgentQuota:
         from app.core import redis as redis_module
         from app.modules.ai.agents.gateway import check_l2_agent_quota
 
-        await check_l2_agent_quota(
-            redis_module.redis_client, 9005, "test_agent_full", limit=1
-        )
+        await check_l2_agent_quota(redis_module.redis_client, 9005, "shared", limit=1)
 
         # 现在 per-agent 已满，high-risk tool 应被拦
         result = await execute_tool(_TEST_TOOL_HIGH, {"x": 1}, deps)

@@ -20,6 +20,7 @@ def _make_log(
         log_id=1,
         trace_id="tr_test",
         conversation_id=1,
+        tenant_id=0,
         user_id=1,
         tool_name="user.batch_delete",
         tool_call_id="tc_test",

@@ -3,7 +3,7 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 import app.tasks  # noqa: F401  # pyright: ignore[reportUnusedImport]
@@ -16,28 +16,6 @@ from app.core.scheduler import scheduler_manager
 from app.db.session import AsyncSessionLocal
 from app.middleware.audit_middleware import AuditLogMiddleware
 from app.middleware.rate_limit_middleware import RateLimitMiddleware
-from app.modules.ai.agents.tools import load_builtin_tools
-from app.modules.ai.agents.tools.registry import ToolRegistry, ToolRegistryError
-from app.modules.ai.api.agent import admin_router as ai_agent_admin_router
-from app.modules.ai.api.agent import router as ai_agent_router
-from app.modules.ai.api.chat import router as ai_chat_router
-from app.modules.ai.api.confirm import router as ai_confirm_router
-from app.modules.ai.api.conversation import router as ai_conversation_router
-from app.modules.ai.api.operation_log import router as ai_operation_log_router
-from app.modules.ai.api.provider import router as ai_provider_router
-from app.modules.ai.api.query_cache import router as ai_query_cache_router
-from app.modules.ai.api.resume import router as ai_resume_router
-from app.modules.ai.api.role_agent import router as ai_role_agent_router
-from app.modules.ai.api.routing_feedback import (
-    query_router as ai_routing_feedback_query_router,
-)
-from app.modules.ai.api.routing_feedback import (
-    router as ai_routing_feedback_router,
-)
-from app.modules.ai.lifecycle import (
-    cleanup_durable_prepared_actions_on_startup,
-    cleanup_orphaned_pending_on_startup,
-)
 from app.modules.auth.api import router as auth_router
 from app.modules.job.api.job import router as job_router
 from app.modules.job.api.job_log import router as job_log_router
@@ -64,6 +42,30 @@ from app.modules.system.api.operation_log import router as operation_log_router
 from app.modules.system.api.role import router as role_router
 from app.modules.system.api.user import router as user_router
 
+if settings.AI_MODULE_ENABLED:
+    from app.modules.ai.agents.tools import load_builtin_tools
+    from app.modules.ai.agents.tools.registry import ToolRegistry, ToolRegistryError
+    from app.modules.ai.api.agent import admin_router as ai_agent_admin_router
+    from app.modules.ai.api.agent import router as ai_agent_router
+    from app.modules.ai.api.chat import router as ai_chat_router
+    from app.modules.ai.api.confirm import router as ai_confirm_router
+    from app.modules.ai.api.conversation import router as ai_conversation_router
+    from app.modules.ai.api.operation_log import router as ai_operation_log_router
+    from app.modules.ai.api.provider import router as ai_provider_router
+    from app.modules.ai.api.query_cache import router as ai_query_cache_router
+    from app.modules.ai.api.resume import router as ai_resume_router
+    from app.modules.ai.api.role_agent import router as ai_role_agent_router
+    from app.modules.ai.api.routing_feedback import (
+        query_router as ai_routing_feedback_query_router,
+    )
+    from app.modules.ai.api.routing_feedback import (
+        router as ai_routing_feedback_router,
+    )
+    from app.modules.ai.lifecycle import (
+        cleanup_durable_prepared_actions_on_startup,
+        cleanup_orphaned_pending_on_startup,
+    )
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -71,33 +73,32 @@ async def lifespan(_app: FastAPI):
     # 保留实例引用供 shutdown 清理；启动中途失败时也不能遗失已创建的监控器。
     job_log_monitor: JobLogMonitor | None = None
 
-    # memory 模式必须实测单 worker；uvicorn --workers 启动时环境变量并不可靠，
-    # 不经过 gunicorn 时各 worker lifespan 独立运行，都通过 env var 检查），
-    # 必须用 Redis SADD 实测活跃 worker 数。
-    if settings.AI_HITL_MODE == "memory" and settings.AI_REQUIRE_SINGLE_WORKER:
-        worker_count = await _detect_actual_worker_count()
-        if worker_count > 1:
-            raise RuntimeError(
-                f"AI HITL memory mode requires single worker, detected {worker_count}. "
-                f"Set AI_HITL_MODE=redis_pubsub or scale workers down to 1. "
-                f"See docs/AI-DEPLOYMENT.md."
-            )
+    if settings.AI_MODULE_ENABLED:
+        # memory 模式必须实测单 worker；uvicorn --workers 启动时环境变量并不可靠，
+        # 必须用 Redis SADD 实测活跃 worker 数。
+        if settings.AI_HITL_MODE == "memory" and settings.AI_REQUIRE_SINGLE_WORKER:
+            worker_count = await _detect_actual_worker_count()
+            if worker_count > 1:
+                raise RuntimeError(
+                    "AI HITL memory mode requires single worker, "
+                    f"detected {worker_count}. Set AI_HITL_MODE=redis_pubsub or "
+                    "scale workers down to 1. See docs/AI-DEPLOYMENT.md."
+                )
 
-    # 导入内置工具以触发装饰器注册，并校验 Agent 与权限引用存在。
-    load_builtin_tools()
-    try:
-        async with AsyncSessionLocal() as db:
-            await ToolRegistry.get().validate_on_startup(db)
-    except ToolRegistryError as e:
-        # 启动校验失败：tool 引用了不存在的 agent_code / permission_code
-        # 不阻断启动（业务方可能正在迭代），仅日志告警
-        logging.getLogger("app.ai").error("AI Tool Registry 启动校验失败: %s", e)
+        # 导入内置工具以触发装饰器注册，并校验 Agent 与权限引用存在。
+        load_builtin_tools()
+        try:
+            async with AsyncSessionLocal() as db:
+                await ToolRegistry.get().validate_on_startup(db)
+        except ToolRegistryError as e:
+            # 业务迭代中的引用漂移仅告警，不阻断非安全相关启动。
+            logging.getLogger("app.ai").error("AI Tool Registry 启动校验失败: %s", e)
 
-    # 重启后进程内事件已丢失；清理或恢复持久化确认，避免遗留不可收口状态。
-    if settings.AI_HITL_MODE == "memory":
-        await cleanup_orphaned_pending_on_startup()
-    else:
-        await cleanup_durable_prepared_actions_on_startup()
+        # 重启后进程内事件已丢失；清理或恢复持久化确认。
+        if settings.AI_HITL_MODE == "memory":
+            await cleanup_orphaned_pending_on_startup()
+        else:
+            await cleanup_durable_prepared_actions_on_startup()
 
     # 仅在嵌入式（开发）模式下随 API 启停调度器。
     # 生产模式下调度器由独立的 `app.scheduler_worker` 进程承担，
@@ -119,7 +120,11 @@ async def lifespan(_app: FastAPI):
         scheduler_manager.shutdown()
     # 修订 S-6：lifespan 结束时从 Redis active worker 集合移除自己，让下次启动
     # 拿到准确计数（不依赖 30s EXPIRE 自然过期）
-    if settings.AI_HITL_MODE == "memory" and settings.AI_REQUIRE_SINGLE_WORKER:
+    if (
+        settings.AI_MODULE_ENABLED
+        and settings.AI_HITL_MODE == "memory"
+        and settings.AI_REQUIRE_SINGLE_WORKER
+    ):
         await _unregister_active_worker()
     await close_redis()
 
@@ -245,6 +250,43 @@ if settings.AI_MODULE_ENABLED:
     app.include_router(
         ai_role_agent_router, prefix="/ai/role-agent", tags=["AI Role-Agent 绑定"]
     )
+else:
+    _AI_DISABLED_METHODS = [
+        "GET",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "OPTIONS",
+        "HEAD",
+        "TRACE",
+        "CONNECT",
+    ]
+
+    @app.api_route(
+        "/ai",
+        methods=_AI_DISABLED_METHODS,
+        include_in_schema=False,
+    )
+    @app.api_route(
+        "/ai/{path:path}",
+        methods=_AI_DISABLED_METHODS,
+        include_in_schema=False,
+    )
+    async def ai_module_disabled(path: str = "") -> JSONResponse:
+        """紧急熔断入口：全部 AI 路径使用同一稳定拒绝面。"""
+        _ = path
+        return JSONResponse(
+            status_code=503,
+            content={
+                "code": 503,
+                "msg": "AI 模块已关闭",
+                "data": None,
+                "errorCode": "AI_MODULE_DISABLED",
+            },
+        )
+
+
 # Marketplace（注册顺序：developer/admin 先注册，避免被 marketplace 抢匹配）
 app.include_router(
     marketplace_developer_router,
