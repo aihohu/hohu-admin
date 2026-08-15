@@ -12,7 +12,6 @@ from app.modules.ai.schemas.conversation import (
     ConversationQuery,
     ConversationUpdate,
 )
-from app.modules.ai.schemas.message import MessageOut
 from app.modules.ai.service.conversation_service import conversation_service
 from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.system.models.user import User
@@ -43,11 +42,12 @@ async def get_conversation_detail(
     conversation = await conversation_service.get_by_id(
         db, conversation_id, _current_user.user_id
     )
-    messages = await conversation_service.get_messages(
-        db, conversation_id, _current_user.user_id
+    messages = await conversation_service.project_messages(
+        db,
+        conversation_id=conversation_id,
+        current_user=_current_user,
     )
     conv_out = ConversationOut.model_validate(conversation)
-    msg_outs = [MessageOut.model_validate(m) for m in messages]
     actions = await prepared_action_service.list_pending_for_conversation(
         db,
         conversation_id=conversation_id,
@@ -55,12 +55,17 @@ async def get_conversation_detail(
         tenant_id=resolve_tenant_id(_current_user),
     )
     pending_actions = [
-        prepared_action_service.to_pending_out(action) for action in actions
+        await prepared_action_service.project_pending_out(
+            db,
+            action=action,
+            current_user=_current_user,
+        )
+        for action in actions
     ]
     return ResponseModel.success(
         data={
             "conversation": conv_out,
-            "messages": msg_outs,
+            "messages": messages,
             "pendingActions": pending_actions,
         }
     )

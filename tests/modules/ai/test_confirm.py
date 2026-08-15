@@ -127,7 +127,10 @@ def _make_user(
 
 
 def _make_prepared_action(
-    *, status: str = "pending_confirmation", interaction_flow: str = "prepared"
+    *,
+    status: str = "pending_confirmation",
+    interaction_flow: str = "prepared",
+    data_scope_hash: str | None = None,
 ):
     versions = {
         "pending_confirmation": 1,
@@ -157,6 +160,7 @@ def _make_prepared_action(
         guard_owner_token=None,
         trace_id="tr_test",
         agent_code="user_mgmt",
+        data_scope_hash=data_scope_hash,
         command_action="send",
         risk_level="high",
         chip_target=None,
@@ -567,7 +571,8 @@ class TestPreparedConfirmation:
         db = MagicMock()
         db.commit = AsyncMock()
         db.rollback = AsyncMock()
-        deps = SimpleNamespace()
+        deps = SimpleNamespace(data_scope_hash="current-scope")
+        validate_scope = MagicMock()
         with (
             patch(
                 "app.modules.ai.api.confirm.prepared_action_service.get_by_confirmation_id",
@@ -580,6 +585,10 @@ class TestPreparedConfirmation:
             patch(
                 "app.modules.ai.api.confirm.prepared_action_service.validate_snapshot",
                 AsyncMock(),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.prepared_action_service.validate_data_scope_snapshot",
+                validate_scope,
             ),
             patch(
                 "app.modules.ai.api.confirm.prepared_action_service.transition_status",
@@ -630,6 +639,10 @@ class TestPreparedConfirmation:
 
         assert result.data.status == "succeeded"
         assert result.data.action_id == 9001
+        validate_scope.assert_called_once_with(
+            pending,
+            current_data_scope_hash="current-scope",
+        )
         execute.assert_awaited_once_with(running, deps)
         finalize.assert_awaited_once()
         get_pending.assert_not_awaited()

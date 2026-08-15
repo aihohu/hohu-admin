@@ -19,7 +19,7 @@ from jose import jwt
 
 from app.core.config import settings
 from app.core.exceptions import AuthenticationException, AuthorizationException
-from app.modules.auth.service import refresh_access_token
+from app.modules.auth.service import get_current_user, refresh_access_token
 from app.modules.system.models.user import User
 
 
@@ -137,3 +137,32 @@ async def test_refresh_fails_when_token_type_wrong():
     ):
         with pytest.raises(AuthenticationException):
             await refresh_access_token(wrong)
+
+
+async def test_access_auth_rejects_download_token_type_before_database_lookup():
+    """A signed download token must never authenticate an API request."""
+    exp = datetime.now(UTC) + timedelta(minutes=5)
+    token = jwt.encode(
+        {
+            "exp": exp,
+            "sub": "123",
+            "type": "ai_result_download",
+        },
+        settings.SECRET_KEY,
+        algorithm=settings.ALGORITHM,
+    )
+    user = User(user_id=123, user_name="alice", status="1")
+    result = MagicMock()
+    result.scalars.return_value.first.return_value = user
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=result)
+
+    with patch(
+        "app.modules.auth.service._is_blacklisted",
+        AsyncMock(return_value=False),
+    ):
+        with pytest.raises(AuthenticationException) as exc_info:
+            await get_current_user(token=token, db=db)
+
+    assert exc_info.value.error_code == "TOKEN_EXPIRED"
+    db.execute.assert_not_awaited()

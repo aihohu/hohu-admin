@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from app.modules.ai.agents.gateway.result import UIResult
+    from app.modules.ai.agents.gateway.result import ResultProjection, UIResult
 
 
 @dataclass(frozen=True)
@@ -71,6 +71,7 @@ class ToolCallResultEvent:
     error_code: str | None = None
     error_msg: str | None = None
     ui: "UIResult | None" = None
+    projection: "ResultProjection | None" = None
     type: Literal["tool_call_result"] = "tool_call_result"
 
 

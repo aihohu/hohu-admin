@@ -18,13 +18,28 @@ import redis.asyncio as aioredis
 
 from app.core import redis as redis_module
 from app.core.config import settings
+from app.modules.ai.agents.gateway.result import ResultProjection
 from app.modules.ai.agents.hitl.query_cache import (
     AI_QUERY_CACHE_PREFIX,
     AI_QUERY_CACHE_TTL_SEC,
     delete_query_cache,
     get_query_cache,
-    set_query_cache,
 )
+from app.modules.ai.agents.hitl.query_cache import (
+    set_query_cache as _set_query_cache,
+)
+
+
+async def set_query_cache(redis, **kwargs) -> None:
+    """Write a complete P1-D cache entry for helper-level tests."""
+    await _set_query_cache(
+        redis,
+        **kwargs,
+        tenant_id=0,
+        agent_code="user_mgmt",
+        projection=ResultProjection(),
+        data_scope_hash=None,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -72,7 +87,22 @@ class TestSetGet:
         assert entry.module == "system/user"
         assert entry.filters == {"status": "1"}
         assert entry.user_id == 100
+        assert entry.tenant_id == 0
+        assert entry.agent_code == "user_mgmt"
+        assert entry.tool_codes == ["user.list"]
+        assert entry.subject_refs == []
+        assert len(entry.subject_refs_hash) == 64
+        assert entry.schema_version == 2
         assert entry.created_at.endswith("Z")
+
+    async def test_legacy_namespace_is_not_read(self) -> None:
+        await redis_module.redis_client.hset(
+            "ai:query_cache:tr_legacy",
+            "user.list",
+            '{"tool_name":"user.list","user_id":100}',
+        )
+
+        assert await get_query_cache(redis_module.redis_client, "tr_legacy") is None
 
     async def test_get_not_found(self) -> None:
         entry = await get_query_cache(redis_module.redis_client, "tr_nonexistent")

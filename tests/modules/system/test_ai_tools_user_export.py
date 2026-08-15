@@ -1,32 +1,30 @@
-"""AI 工具 ``user.export`` 行为测试。
+"""Behavior tests for the ``user.export`` AI tool.
 
-同步导出始终创建 ExportTask，并将 result_view 从
-rows_affected 升级为 detail_card，携带 downloadUrl / fileSize / expiresAt，
-让前端 DetailCardView 渲染「下载」按钮（AI 对话内闭环）。
-
-覆盖：
-- result_view == "detail_card"
-- view_data 含 downloadUrl / fileSize / expiresAt / rowCount / exportId
-- data（LLM 视角）含 exportId + rowCount + downloadUrl
-- downloadUrl 路径与 GET /export/{export_id}/download 端点一致
+The synchronous path always creates an ExportTask and exposes the authorized
+download URL only through UI data. The LLM-facing payload must never contain a
+bearer download token.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import AuthorizationException
 from app.core.file_storage import MockFileStorage
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.core.context import AiToolContext, DataScopeContext
+from app.modules.ai.service.result_projection_service import (
+    result_projection_service,
+)
 from app.modules.system.ai_tools import user_export
 from app.modules.system.user.constants import ExportTaskStatus
 from app.modules.system.user.models import UserExportTask
 
 
 def _make_ctx(db: AsyncSession) -> AiToolContext:
-    """最小 AiToolContext：超管视角（无 data_scope filter）。"""
+    """Build the minimum unrestricted data-scope context for export tests."""
     data_scope = DataScopeContext(
         accessible_dept_ids=None,
         accessible_user_scope=None,
@@ -47,12 +45,28 @@ def _make_ctx(db: AsyncSession) -> AiToolContext:
         data_scope=data_scope,
         trace_id="tr_export_test",
         tool_meta=meta,
+        data_scope_hash="scope-hash",
     )
 
 
 @pytest.fixture
 def file_storage() -> MockFileStorage:
     return MockFileStorage()
+
+
+@pytest.fixture(autouse=True)
+def authorized_download_token(monkeypatch) -> None:
+    """Isolate export rendering from the projection policy's dedicated tests."""
+    monkeypatch.setattr(
+        result_projection_service,
+        "authorize_result_projection",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        result_projection_service,
+        "issue_download_token",
+        AsyncMock(return_value="signed-token"),
+    )
 
 
 class TestUserExportDetailCard:
@@ -87,8 +101,9 @@ class TestUserExportDetailCard:
         view_data = result.ui.view_data
         assert "downloadUrl" in view_data
         export_id = result.data["exportId"]
-        # 路径模板：/system/user/export/{export_id}/download
-        assert view_data["downloadUrl"] == f"/system/user/export/{export_id}/download"
+        assert view_data["downloadUrl"] == (
+            f"/ai/download/user-export/{export_id}?token=signed-token"
+        )
 
     async def test_view_data_contains_file_size_and_expiry(
         self, db_session: AsyncSession, file_storage: MockFileStorage, monkeypatch
@@ -110,14 +125,10 @@ class TestUserExportDetailCard:
         assert isinstance(view_data["expiresAt"], str)
         assert "T" in view_data["expiresAt"]
 
-    async def test_data_carries_export_id_and_download_url(
+    async def test_llm_data_excludes_download_bearer_token(
         self, db_session: AsyncSession, file_storage: MockFileStorage, monkeypatch
     ) -> None:
-        """data（LLM 视角）含 exportId + rowCount + downloadUrl。
-
-        LLM 引导用户点击下载时需要 downloadUrl 字面量；
-        rowCount 已在 data 中，保持现有兼容行为。
-        """
+        """Keep the bearer URL in UI data and out of the LLM prompt payload."""
         monkeypatch.setattr(
             "app.modules.system.user.export_service.get_file_storage",
             lambda: file_storage,
@@ -127,8 +138,68 @@ class TestUserExportDetailCard:
 
         assert "exportId" in result.data
         assert "rowCount" in result.data
-        assert "downloadUrl" in result.data
-        assert result.data["downloadUrl"].endswith("/download")
+        assert result.data["downloadReady"] is True
+        assert "downloadUrl" not in result.data
+        assert "signed-token" not in str(result.data)
+
+    async def test_projection_denial_happens_before_export_side_effects(
+        self, db_session: AsyncSession, file_storage: MockFileStorage, monkeypatch
+    ) -> None:
+        """A denied projection must not create a task or write an export file."""
+        monkeypatch.setattr(
+            "app.modules.system.user.export_service.get_file_storage",
+            lambda: file_storage,
+        )
+        authorize = AsyncMock(return_value=False)
+        issue = AsyncMock(return_value="must-not-be-issued")
+        monkeypatch.setattr(
+            result_projection_service,
+            "authorize_result_projection",
+            authorize,
+        )
+        monkeypatch.setattr(
+            result_projection_service,
+            "issue_download_token",
+            issue,
+        )
+
+        with pytest.raises(AuthorizationException) as exc_info:
+            await user_export(_make_ctx(db_session), reason="QA denied projection")
+
+        assert getattr(exc_info.value, "error_code", None) == (
+            "AI_RESULT_PROJECTION_FORBIDDEN"
+        )
+        assert file_storage._store == {}
+        issue.assert_not_awaited()
+        task_count = await db_session.scalar(
+            select(func.count(UserExportTask.export_id)).where(
+                UserExportTask.operator_id == 1,
+                UserExportTask.reason == "QA denied projection",
+            )
+        )
+        assert task_count == 0
+
+    async def test_late_projection_revocation_removes_the_uncommitted_export_file(
+        self, db_session: AsyncSession, file_storage: MockFileStorage, monkeypatch
+    ) -> None:
+        """Compensate the file write when authorization changes during export."""
+        monkeypatch.setattr(
+            "app.modules.system.user.export_service.get_file_storage",
+            lambda: file_storage,
+        )
+        monkeypatch.setattr(
+            result_projection_service,
+            "issue_download_token",
+            AsyncMock(return_value=None),
+        )
+
+        with pytest.raises(AuthorizationException) as exc_info:
+            await user_export(_make_ctx(db_session), reason="QA denied projection")
+
+        assert getattr(exc_info.value, "error_code", None) == (
+            "AI_RESULT_PROJECTION_FORBIDDEN"
+        )
+        assert file_storage._store == {}
 
 
 class TestAlwaysCreatesTask:

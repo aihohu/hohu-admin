@@ -20,6 +20,10 @@ from app.modules.ai.agents.hitl.events import (
 from app.modules.ai.agents.hitl.manager import PendingPayload
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.prepared_action import AiPreparedAction
+from app.modules.ai.service.result_projection_service import (
+    ProjectionLineage,
+    result_projection_service,
+)
 
 _RENEW_GUARD_LUA = (
     "if redis.call('get', KEYS[1]) == ARGV[1] then "
@@ -37,6 +41,7 @@ class ToolCallCollector:
     def __init__(self) -> None:
         self._items: list[dict[str, Any]] = []
         self._positions: dict[str, int] = {}
+        self._projections: dict[str, Any] = {}
 
     def record(self, event: AiStreamEvent) -> None:
         if isinstance(event, ToolCallStartedEvent):
@@ -57,6 +62,7 @@ class ToolCallCollector:
             return
         if not isinstance(event, ToolCallResultEvent):
             return
+        self._projections[event.tool_call_id] = event.projection
         position = self._positions.get(event.tool_call_id)
         if position is None:
             position = len(self._items)
@@ -81,6 +87,25 @@ class ToolCallCollector:
 
     def snapshot(self) -> list[dict[str, Any]]:
         return [dict(item) for item in self._items]
+
+    def snapshot_projection(self) -> tuple[list[str], list[dict[str, str]], bool, bool]:
+        """Return tools, stable subjects, scope binding, and completeness."""
+        tool_codes: list[str] = []
+        subject_refs: list[dict[str, str]] = []
+        scope_bound = False
+        complete = True
+        for item in self._items:
+            tool_code = item.get("tool")
+            tool_call_id = item.get("tool_call_id")
+            if isinstance(tool_code, str):
+                tool_codes.append(tool_code)
+            projection = self._projections.get(str(tool_call_id))
+            if projection is None:
+                complete = False
+                continue
+            subject_refs.extend(projection.subject_refs)
+            scope_bound = scope_bound or projection.scope_bound
+        return tool_codes, subject_refs, scope_bound, complete
 
 
 class ChatRunGuard:
@@ -177,6 +202,7 @@ class ChatRunFinalizer:
         content: str,
         tool_calls: list[dict[str, Any]] | None,
         agent_code: str | None,
+        lineage: ProjectionLineage | None = None,
     ) -> AiMessage | None:
         source_is_active = await db.scalar(
             select(AiMessage.message_id).where(
@@ -216,6 +242,12 @@ class ChatRunFinalizer:
                     tool_calls=tool_calls or None,
                     trace_id=trace_id,
                     agent_code=agent_code,
+                    tenant_id=lineage.tenant_id if lineage else None,
+                    tool_codes=list(lineage.tool_codes) if lineage else None,
+                    subject_refs=list(lineage.subject_refs) if lineage else None,
+                    subject_refs_hash=lineage.subject_refs_hash if lineage else None,
+                    data_scope_hash=lineage.data_scope_hash if lineage else None,
+                    resolver_version=lineage.resolver_version if lineage else None,
                     is_active=True,
                 )
                 .on_conflict_do_nothing(
@@ -249,6 +281,13 @@ class ChatRunFinalizer:
             message.parent_message_id = source_user_message_id
         if message.agent_code is None:
             message.agent_code = agent_code
+        if lineage is not None and message.subject_refs_hash is None:
+            message.tenant_id = lineage.tenant_id
+            message.tool_codes = list(lineage.tool_codes)
+            message.subject_refs = list(lineage.subject_refs)
+            message.subject_refs_hash = lineage.subject_refs_hash
+            message.data_scope_hash = lineage.data_scope_hash
+            message.resolver_version = lineage.resolver_version
         await db.flush()
         return message
 
@@ -356,6 +395,7 @@ class ChatRunFinalizer:
             content="",
             tool_calls=cards,
             agent_code=action.agent_code,
+            lineage=result_projection_service.lineage_from_record(action),
         )
 
     @staticmethod

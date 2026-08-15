@@ -78,6 +78,17 @@ class PendingActionOut(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
+class PendingActionStatusOut(BaseModel):
+    """Minimal status returned when a pending presentation cannot be projected."""
+
+    confirmation_id: str
+    status: str
+    error_code: str = "AI_RESULT_PROJECTION_FORBIDDEN"
+    finished_at: datetime | None = None
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
 class ConversationQuery(BaseModel):
     """会话查询参数"""
 

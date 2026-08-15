@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from pydantic.alias_generators import to_camel
@@ -58,5 +59,22 @@ class MessageCreate(BaseModel):
     tool_calls: list[dict] | None = Field(
         None, description="工具调用记录（按 tool_call_id 顺序）"
     )
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
+class MessageTombstoneOut(BaseModel):
+    """Fail-closed projection for an authorization-sensitive message."""
+
+    message_id: int
+    role: str
+    status: Literal["redacted"] = "redacted"
+    error_code: Literal["AI_RESULT_PROJECTION_FORBIDDEN"] = (
+        "AI_RESULT_PROJECTION_FORBIDDEN"
+    )
+
+    @field_serializer("message_id")
+    def serialize_message_id(self, value: int, _info) -> str:
+        return str(value)
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)

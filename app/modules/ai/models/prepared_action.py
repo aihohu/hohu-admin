@@ -78,6 +78,13 @@ class AiPreparedAction(Base):
     snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     subject_ref: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    tool_codes: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    subject_refs: Mapped[list[dict[str, str]] | None] = mapped_column(
+        JSON, nullable=True
+    )
+    subject_refs_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    data_scope_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    resolver_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     presentation: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -86,6 +93,8 @@ class AiPreparedAction(Base):
     source_user_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     trace_id: Mapped[str] = mapped_column(String(64), nullable=False)
     agent_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    resolved_model_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    resolved_provider_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     guard_owner_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
     command_action: Mapped[str] = mapped_column(
         String(16), nullable=False, default="send", server_default=text("'send'")

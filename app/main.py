@@ -50,6 +50,7 @@ if settings.AI_MODULE_ENABLED:
     from app.modules.ai.api.chat import router as ai_chat_router
     from app.modules.ai.api.confirm import router as ai_confirm_router
     from app.modules.ai.api.conversation import router as ai_conversation_router
+    from app.modules.ai.api.download import router as ai_download_router
     from app.modules.ai.api.operation_log import router as ai_operation_log_router
     from app.modules.ai.api.provider import router as ai_provider_router
     from app.modules.ai.api.query_cache import router as ai_query_cache_router
@@ -227,6 +228,7 @@ if settings.AI_MODULE_ENABLED:
     )
     app.include_router(ai_chat_router, prefix="/ai/chat", tags=["AI对话"])
     app.include_router(ai_resume_router, prefix="/ai/chat", tags=["AI对话"])
+    app.include_router(ai_download_router, prefix="/ai/download", tags=["AI结果下载"])
     app.include_router(ai_confirm_router, prefix="/ai/confirm", tags=["AI HITL 确认"])
     app.include_router(
         ai_conversation_router, prefix="/ai/conversation", tags=["AI会话"]

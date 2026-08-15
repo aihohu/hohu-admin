@@ -1,6 +1,6 @@
 # AI 管理能力 MVP 收口实施计划
 
-> 状态：Phase 1 / P1-C 已完成；P1-D 与 Web 待开发，中间构建禁止部署
+> 状态：Phase 1 / P1-D 后端已完成；Web 待开发，中间构建禁止部署
 > 日期：2026-08-14
 > 唯一需求基线：[`../specs/2026-08-14-ai-management-mvp-closure.md`](../specs/2026-08-14-ai-management-mvp-closure.md)
 > 影响项目：`hohu-admin`、`hohu-admin-web`
@@ -18,7 +18,7 @@
 
 - Alembic 当前单一 head：`b8e4c7d2a1f0`。
 - `AI_MODULE_ENABLED` 默认值为 `true`；P1-A 已实现关闭态 `/ai`/`/ai/**` 统一 503 且 AI 业务依赖不 import/初始化。
-- P1-A 已完成用户入口和分支权限；P1-B 已完成统一 Agent/Tool Policy、三模型端点、当前 LLM run selector、Agent 全局编辑边界及阶段安全 seed；P1-C 已完成 Provider 全链路 hardened egress、已保存对象测试端点和存量 quarantine 审计。完整历史结果投影仍待 P1-D。
+- P1-A 已完成用户入口和分支权限；P1-B 已完成统一 Agent/Tool Policy、三模型端点、当前 LLM run selector、Agent 全局编辑边界及阶段安全 seed；P1-C 已完成 Provider 全链路 hardened egress、已保存对象测试端点和存量 quarantine 审计；P1-D 已完成后端 lineage、历史结果实时投影授权和短期下载 token。Web 状态与缓存收口仍待开发。
 - DataScope 当前按最高优先级角色计算，用户/部门/角色传统写入口尚未复用统一 GrantAuthority。
 - Web 已有 AI 和系统管理页面，但仍使用旧的合并写入、模型列表、Provider test、部门移动和 Role-Agent shared 契约。
 - 后端 CI 已有 70% 覆盖率门禁；Web 尚无 `test:coverage`、多角色 E2E 和独立真实 Provider project。
@@ -182,6 +182,8 @@ Phase 0 文档基线
 
 #### P1-D lineage 与结果投影
 
+状态：✅ 后端已完成（2026-08-15；审查修复 2026-08-15）。Web tombstone 展示与旧缓存清理仍属于后续 Web 工作包；本中间构建继续禁止部署。
+
 修改：
 
 - `app/modules/ai/models/message.py`
@@ -200,6 +202,10 @@ Phase 0 文档基线
 - `authorize_result_projection()` 覆盖 resume/SSE replay、conversation、pending presentation、query-cache、owner log、download/file retrieval。
 - legacy 缺完整引用统一 tombstone/最小状态/404，禁止从持久化结果反推授权目标。
 - PreparedAction 冻结 resolved model/provider；reject 和最小状态不受模型状态阻断，新 continuation 才复验模型。
+- API 认证 exact-match `type=access`，下载 token 使用独立派生签名域且只进入 UI projection；scope-bound approve 在执行前校验当前 scope hash，resume 在长等待后的终态读取点再次授权。
+- 用户导出在建 task/写文件前完成投影预授权；生成期间撤权时删除未提交文件并 fail closed，LLM data 仅返回 `downloadReady`，不携带 bearer URL。
+
+验证（含审查修复）：JWT/scope/resume/export 定向回归 98 项、AI + 导出专项 1017 项、后端全量 1974 项通过，覆盖率 73.00%；`ruff check .`、`ruff format --check .`、19 tools / 12 checks 通过，仅有 2 条既有 SQLAlchemy warning。Alembic `c9f5d8e3b2a1` current/head 单一；`alembic check` 暴露的是工作包外既有 metadata 漂移，P1-D 新增列没有未生成差异，最终 migration 门禁仍需统一清债。
 
 ### 5.2 Web 工作包
 

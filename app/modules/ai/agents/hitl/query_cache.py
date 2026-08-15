@@ -26,9 +26,15 @@ from typing import Any
 from redis.asyncio import Redis
 
 from app.core.config import settings
+from app.modules.ai.agents.gateway.result import ResultProjection
+from app.modules.ai.service.result_projection_service import (
+    DATA_SCOPE_RESOLVER_VERSION,
+    result_projection_service,
+)
 
-AI_QUERY_CACHE_PREFIX = "ai:query_cache"
+AI_QUERY_CACHE_PREFIX = "ai:query_cache:v2"
 AI_QUERY_CACHE_TTL_SEC = 300
+AI_QUERY_CACHE_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -39,6 +45,14 @@ class QueryCacheEntry:
     filters: dict[str, Any]
     tool_name: str
     user_id: int
+    tenant_id: int
+    agent_code: str
+    tool_codes: list[str]
+    subject_refs: list[dict[str, str]]
+    subject_refs_hash: str
+    data_scope_hash: str | None
+    resolver_version: str
+    schema_version: int
     created_at: str  # ISO 8601 UTC
 
     def to_json_bytes(self) -> bytes:
@@ -55,17 +69,38 @@ async def set_query_cache(
     module: str,
     filters: dict[str, Any],
     user_id: int,
+    tenant_id: int,
+    agent_code: str,
+    projection: ResultProjection | None,
+    data_scope_hash: str | None,
     ttl_sec: int = AI_QUERY_CACHE_TTL_SEC,
 ) -> None:
     """HSET ai:query_cache:<trace_id> <tool_name> <json> + EXPIRE <ttl>
 
     每次写入都会重置整个 hash 的 TTL，以覆盖同一 trace_id 下的多个工具。
     """
+    if projection is None:
+        raise ValueError("query cache requires complete trusted projection metadata")
+    lineage = result_projection_service.freeze_lineage(
+        tenant_id=tenant_id,
+        agent_code=agent_code,
+        tool_codes=[tool_name],
+        subject_refs=projection.subject_refs,
+        data_scope_hash=data_scope_hash if projection.scope_bound else None,
+    )
     entry = QueryCacheEntry(
         module=module,
         filters=filters,
         tool_name=tool_name,
         user_id=user_id,
+        tenant_id=lineage.tenant_id,
+        agent_code=lineage.agent_code,
+        tool_codes=list(lineage.tool_codes),
+        subject_refs=list(lineage.subject_refs),
+        subject_refs_hash=lineage.subject_refs_hash,
+        data_scope_hash=lineage.data_scope_hash,
+        resolver_version=lineage.resolver_version,
+        schema_version=AI_QUERY_CACHE_SCHEMA_VERSION,
         created_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
     key = _key(trace_id)
@@ -129,7 +164,21 @@ def _parse(raw: Any) -> QueryCacheEntry | None:
         data = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return None
-    return QueryCacheEntry(**data)
+    try:
+        entry = QueryCacheEntry(**data)
+    except (TypeError, ValueError):
+        return None
+    if entry.schema_version != AI_QUERY_CACHE_SCHEMA_VERSION:
+        return None
+    if entry.resolver_version != DATA_SCOPE_RESOLVER_VERSION:
+        return None
+    lineage = result_projection_service.lineage_from_record(entry)
+    if lineage is None or (
+        result_projection_service.subject_refs_hash(lineage.subject_refs)
+        != lineage.subject_refs_hash
+    ):
+        return None
+    return entry
 
 
 # 测试 / 调试用：暴露 settings.TTL 给 lint

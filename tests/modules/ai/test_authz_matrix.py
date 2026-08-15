@@ -167,6 +167,7 @@ def _register_test_tools() -> None:
             summary="testz low risk lookup",
             required_perms=(),
             risk="low",
+            projection_kind="none",
         )
     )
     async def _low_fn(ctx, **kw: Any) -> dict[str, Any]:
@@ -179,6 +180,7 @@ def _register_test_tools() -> None:
             summary="testz high risk single row",
             required_perms=(),
             risk="high",
+            projection_kind="none",
             dry_run_supported=True,
         )
     )
@@ -192,6 +194,7 @@ def _register_test_tools() -> None:
             summary="testz high risk multi row",
             required_perms=(),
             risk="high",
+            projection_kind="none",
             dry_run_supported=True,
         )
     )
@@ -205,6 +208,7 @@ def _register_test_tools() -> None:
             summary="testz destructive op",
             required_perms=(),
             risk="destructive",
+            projection_kind="none",
         )
     )
     async def _destructive_fn(ctx, **kw: Any) -> dict[str, Any]:
@@ -242,6 +246,7 @@ def _register_test_tools() -> None:
             summary="testz hitl_always tool",
             required_perms=(),
             risk="low",
+            projection_kind="none",
             hitl_always=True,
         )
     )
@@ -255,6 +260,7 @@ def _register_test_tools() -> None:
             summary="testz write tool for quota test",
             required_perms=(),
             risk="high",
+            projection_kind="none",
         )
     )
     async def _quota_fn(ctx, **kw: Any) -> dict[str, Any]:
@@ -319,6 +325,8 @@ def _build_deps(
         conversation_id=200,
         source_user_message_id=201,
         signal_event=signal_event,
+        resolved_model_id=7001,
+        resolved_provider_id=8001,
     )
 
 

@@ -70,6 +70,14 @@ class UserService:
 
         return page_data
 
+    async def user_exists(self, db: AsyncSession, user_id: int) -> bool:
+        """Return whether a stable user identifier still exists."""
+        return (
+            await db.scalar(
+                select(User.user_id).where(User.user_id == user_id).limit(1)
+            )
+        ) is not None
+
     async def create_user(self, db: AsyncSession, user_in: UserCreate) -> User:
         """
         创建新用户

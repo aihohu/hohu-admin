@@ -51,6 +51,9 @@ class AiToolMeta:
     idempotent: bool = False
     """是否可安全重放。未知默认 False；仅纯读或有稳定幂等键的 tool 可声明 True"""
 
+    projection_kind: Literal["none", "scope_bound"] | None = None
+    """Explicitly declares a complete empty or scope-bound result target set."""
+
     super_admin_only: bool = False
     """True 时仅超管可调，非超管在 dry_run 和风险分级前短路
     返回 AI_SUPER_ADMIN_REQUIRED（不走 HITL，不进入 dry_run / 风险分级）。

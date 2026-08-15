@@ -70,6 +70,14 @@ class PreparedActionProposal:
     """业务快照的 canonical hash，批准前必须复验。"""
 
 
+@dataclass(frozen=True)
+class ResultProjection:
+    """Internal-only stable targets emitted by a tool with its trusted result."""
+
+    subject_refs: tuple[dict[str, str], ...] = field(default_factory=tuple)
+    scope_bound: bool = False
+
+
 @dataclass
 class ToolResult:
     """Gateway tool 执行结果（统一容器）
@@ -92,6 +100,9 @@ class ToolResult:
     prepared_action: PreparedActionProposal | None = None
     """prepared tool 的内部提案；序列化层只读取 data/ui，不得向模型或客户端暴露。"""
 
+    projection: ResultProjection | None = None
+    """Trusted authorization lineage; never serialized into model or client data."""
+
     error_code: str = ""
     """UPPER_SNAKE_CASE 错误码（ok=False 时必填），如 AI_DATA_SCOPE_VIOLATION"""
 
@@ -108,6 +119,7 @@ class ToolResult:
         *,
         ui: UIResult | None = None,
         prepared_action: PreparedActionProposal | None = None,
+        projection: ResultProjection | None = None,
         **meta: Any,
     ) -> "ToolResult":
         """构造成功结果
@@ -122,6 +134,7 @@ class ToolResult:
             data=data,
             ui=ui,
             prepared_action=prepared_action,
+            projection=projection,
             meta=meta,
         )
 
@@ -133,4 +146,10 @@ class ToolResult:
             error_code: UPPER_SNAKE_CASE，供前端 i18n 映射
             error_msg: 给 LLM 的友好描述（如"目标用户不在你的可见范围"）
         """
-        return cls(ok=False, error_code=error_code, error_msg=error_msg, meta=meta)
+        return cls(
+            ok=False,
+            error_code=error_code,
+            error_msg=error_msg,
+            projection=ResultProjection(),
+            meta=meta,
+        )

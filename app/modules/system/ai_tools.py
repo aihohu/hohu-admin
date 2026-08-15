@@ -18,9 +18,11 @@ from typing import Any, Literal
 from sqlalchemy import func, select
 from sqlalchemy.orm import aliased
 
+from app.core.exceptions import AuthorizationException
 from app.modules.ai.agents.gateway import ensure_targets_in_scope
 from app.modules.ai.agents.gateway.result import (
     PreparedActionProposal,
+    ResultProjection,
     ToolResult,
     UIResult,
 )
@@ -40,6 +42,21 @@ from app.modules.ai.core.context import AiToolContext
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
+
+
+def _result_projection(
+    subject_type: str | None = None,
+    subject_ids: list[Any] | tuple[Any, ...] = (),
+    *,
+    scope_bound: bool = False,
+) -> ResultProjection:
+    refs = (
+        tuple({"type": subject_type, "id": str(value)} for value in subject_ids)
+        if subject_type is not None
+        else ()
+    )
+    return ResultProjection(subject_refs=refs, scope_bound=scope_bound)
+
 
 # ============ user.count ============
 
@@ -83,6 +100,7 @@ async def user_count(
     count = int(await ctx.db.scalar(stmt) or 0)
     return ToolResult.success(
         data={"count": count},
+        projection=_result_projection(scope_bound=True),
         ui=UIResult(
             view_type="plain_json",
             view_data={"count": count},
@@ -149,6 +167,7 @@ async def user_stats(
     ]
     return ToolResult.success(
         data={"groups": groups},
+        projection=_result_projection(scope_bound=True),
         ui=UIResult(
             view_type="stats_chart",
             view_data={"rows": groups},
@@ -196,6 +215,7 @@ async def user_distinct(ctx: AiToolContext, field: str) -> ToolResult:
     values = [str(v) if v is not None else "null" for v in rows]
     return ToolResult.success(
         data={"values": values},
+        projection=_result_projection(scope_bound=True),
         ui=UIResult(
             view_type="plain_json",
             view_data={"values": values},
@@ -243,6 +263,7 @@ async def role_count(
     count = int(await ctx.db.scalar(stmt) or 0)
     return ToolResult.success(
         data={"count": count},
+        projection=_result_projection(scope_bound=True),
         ui=UIResult(
             view_type="plain_json",
             view_data={"count": count},
@@ -287,6 +308,7 @@ async def dept_count(
     count = int(await ctx.db.scalar(stmt) or 0)
     return ToolResult.success(
         data={"count": count},
+        projection=_result_projection(scope_bound=True),
         ui=UIResult(
             view_type="plain_json",
             view_data={"count": count},
@@ -382,6 +404,7 @@ async def role_list(
             "limit": safe_limit,
             "sample": records[:3],  # 给 LLM 看前 3 条（prompt cache 友好）
         },
+        projection=_result_projection(scope_bound=True),
         ui=UIResult(
             view_type="data_list",
             view_data={"columns": columns, "rows": records},
@@ -462,6 +485,7 @@ async def dept_list(
             "limit": safe_limit,
             "sample": records[:3],
         },
+        projection=_result_projection(scope_bound=True),
         ui=UIResult(
             view_type="data_list",
             view_data={"columns": columns, "rows": records},
@@ -545,6 +569,7 @@ async def user_dept_lookup(
             "matchCount": match_count,
             "matches": matches,
         },
+        projection=_result_projection("dept", [match["id"] for match in matches]),
         ui=UIResult(
             view_type="data_list",
             view_data={
@@ -749,6 +774,12 @@ async def user_create(
             "primaryDeptId": dept_id,
             "passwordPolicy": "system_default",
         },
+        projection=ResultProjection(
+            subject_refs=(
+                {"type": "user", "id": user_id},
+                {"type": "dept", "id": dept_id},
+            )
+        ),
         ui=UIResult(
             view_type="detail_card",
             view_data={
@@ -959,6 +990,7 @@ async def user_reset_password(ctx: AiToolContext, *, user_id: int) -> ToolResult
             "userName": target.user_name,
             "passwordPolicy": "system_default",
         },
+        projection=_result_projection("user", [str_user_id]),
         ui=UIResult(
             view_type="rows_affected",
             view_data={"count": 1, "ids": [str_user_id]},
@@ -1116,6 +1148,7 @@ async def user_batch_delete(
     str_ids = [str(i) for i in resolved_ids]
     return ToolResult.success(
         data={"deleted": count},
+        projection=_result_projection("user", str_ids),
         ui=UIResult(
             view_type="rows_affected",
             view_data={"count": count, "ids": str_ids},
@@ -1273,6 +1306,7 @@ async def user_list(
             "limit": safe_limit,
             "sample": records[:3],  # 给 LLM 看前 3 条
         },
+        projection=_result_projection(scope_bound=True),
         ui=UIResult(
             view_type="data_list",
             view_data={"columns": columns, "rows": records},
@@ -1359,6 +1393,7 @@ async def user_lookup(
             "nickname": u.nickname,
             "status": u.status,
         },
+        projection=_result_projection("user", [u.user_id]),
         ui=UIResult(
             view_type="detail_card",
             view_data={
@@ -1487,6 +1522,7 @@ async def user_update(
 
     return ToolResult.success(
         data={"updated": 1, "userName": user.user_name},
+        projection=_result_projection("user", [user.user_id]),
         ui=UIResult(
             view_type="rows_affected",
             view_data={"count": 1, "ids": [str(user.user_id)]},
@@ -1731,6 +1767,7 @@ async def user_import_preview(
                 "syncMode": sync_mode,
             },
         },
+        projection=_result_projection("user_import_batch", [batch.batch_id]),
         ui=UIResult(
             view_type="detail_card",
             view_data={
@@ -1904,6 +1941,7 @@ async def user_import_execute(
             "failedCount": result.failed_count,
             "batchId": result.batch_id,
         },
+        projection=_result_projection("user_import_batch", [result.batch_id]),
         ui=UIResult(
             view_type="rows_affected",
             view_data={
@@ -1929,13 +1967,14 @@ async def user_import_execute(
         name="user.export",
         agent="user_mgmt",
         summary=(
-            "Export users to xlsx → {exportId, downloadUrl}. "
-            "Reason required. Filter via name/email/status."
+            "Export xlsx → {exportId,rowCount,downloadReady}. "
+            "Reason required; filters: name/email/status."
         ),
         required_perms=("system:user:export",),
         risk="high",
         readonly=False,  # 写 ExportTask 表 + 生成 xlsx 文件
         idempotent=False,
+        projection_kind="scope_bound",
         produces_file=True,
         dry_run_supported=True,
         # 导出结果使用详情卡，并提供鉴权下载地址。
@@ -1964,9 +2003,13 @@ async def user_export(
         user_name / nickname / user_email / user_phone: filter（可选）
         status: '1' (启用) / '0' (禁用)，None=不过滤
     """
+    from app.modules.ai.service.result_projection_service import (  # noqa: PLC0415
+        result_projection_service,
+    )
     from app.modules.system.user.export_service import (  # noqa: PLC0415
         export_users_to_excel,
         get_export_task,
+        get_file_storage,
     )
     from app.modules.system.user.schemas import UserExportFilter  # noqa: PLC0415
 
@@ -1977,6 +2020,22 @@ async def user_export(
         user_phone=user_phone,
         status=status,
     )
+
+    # Authorize before creating the database task or writing an external file.
+    preflight_lineage = result_projection_service.freeze_lineage(
+        tenant_id=ctx.tenant_id,
+        agent_code=ctx.tool_meta.agent,
+        tool_codes=[ctx.tool_meta.name],
+        subject_refs=[],
+        data_scope_hash=ctx.data_scope_hash,
+    )
+    if not await result_projection_service.authorize_result_projection(
+        ctx.db,
+        ctx.user,
+        owner_user_id=ctx.user.user_id,
+        lineage=preflight_lineage,
+    ):
+        raise AuthorizationException(error_code="AI_RESULT_PROJECTION_FORBIDDEN")
 
     _xlsx_bytes, row_count, export_id = await export_users_to_excel(
         ctx.db,
@@ -1993,14 +2052,35 @@ async def user_export(
     )
     file_size = task.file_size_bytes if task else None
     expires_at = (task.created_at + timedelta(days=30)).isoformat() if task else None
-    download_url = f"/system/user/export/{export_id}/download"
+    projection = _result_projection("user_export_task", [export_id], scope_bound=True)
+
+    lineage = result_projection_service.freeze_lineage(
+        tenant_id=ctx.tenant_id,
+        agent_code=ctx.tool_meta.agent,
+        tool_codes=[ctx.tool_meta.name],
+        subject_refs=projection.subject_refs,
+        data_scope_hash=ctx.data_scope_hash,
+    )
+    download_token = await result_projection_service.issue_download_token(
+        ctx.db,
+        ctx.user,
+        resource_type="user_export",
+        resource_id=export_id,
+        lineage=lineage,
+    )
+    if download_token is None:
+        if task is not None and task.file_storage_key:
+            await get_file_storage().delete(task.file_storage_key)
+        raise AuthorizationException(error_code="AI_RESULT_PROJECTION_FORBIDDEN")
+    download_url = f"/ai/download/user-export/{export_id}?token={download_token}"
 
     return ToolResult.success(
         data={
             "exportId": export_id,
             "rowCount": row_count,
-            "downloadUrl": download_url,
+            "downloadReady": True,
         },
+        projection=projection,
         ui=UIResult(
             view_type="detail_card",
             view_data={

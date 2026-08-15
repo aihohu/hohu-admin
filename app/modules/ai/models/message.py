@@ -102,6 +102,12 @@ class AiMessage(Base):
         nullable=True,
         comment="本条消息实际处理的 Agent code，用于按消息粒度还原 Agent",
     )
+    tenant_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    tool_codes: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    subject_refs: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    subject_refs_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    data_scope_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    resolver_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     routing_feedback: Mapped[str | None] = mapped_column(
         String(16),
         nullable=True,

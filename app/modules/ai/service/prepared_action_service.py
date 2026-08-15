@@ -17,7 +17,14 @@ from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.schemas.confirm import ConfirmationPresentation
-from app.modules.ai.schemas.conversation import PendingActionOut
+from app.modules.ai.schemas.conversation import (
+    PendingActionOut,
+    PendingActionStatusOut,
+)
+from app.modules.ai.service.result_projection_service import (
+    ProjectionLineage,
+    result_projection_service,
+)
 
 
 def canonical_payload_hash(payload: dict[str, Any]) -> str:
@@ -78,6 +85,7 @@ class PreparedActionService:
         *,
         confirmation_id: str,
         prepare_tool_call_id: str | None,
+        prepare_tool_name: str | None,
         execute_tool_call_id: str,
         execute_tool_name: str,
         frozen_args: dict[str, Any],
@@ -94,6 +102,10 @@ class PreparedActionService:
         trace_id: str,
         agent_code: str,
         expires_at: datetime,
+        resolved_model_id: int | None,
+        resolved_provider_id: int | None,
+        data_scope_hash: str | None = None,
+        projection_kind: str | None = None,
         guard_owner_token: str | None = None,
         command_action: str = "send",
         risk_level: str = "high",
@@ -103,6 +115,8 @@ class PreparedActionService:
         """Persist one immutable authorization proposal without committing."""
         if conversation_id <= 0 or source_user_message_id <= 0 or not trace_id:
             raise _binding_invalid("prepared action 缺少可信会话或 source message 绑定")
+        if resolved_model_id is None or resolved_provider_id is None:
+            raise _binding_invalid("prepared action 缺少冻结的 model/provider 绑定")
         if not snapshot or not presentation:
             raise _binding_invalid("action 快照或展示摘要为空")
         if interaction_flow not in {"direct", "prepared"}:
@@ -123,11 +137,46 @@ class PreparedActionService:
             raise _binding_invalid("prepared action 的会话或源消息已失效")
         normalized_presentation = self.validate_presentation(presentation)
 
-        computed_snapshot_hash = canonical_payload_hash(snapshot)
-        if snapshot_hash and snapshot_hash != computed_snapshot_hash:
+        business_snapshot_hash = canonical_payload_hash(snapshot)
+        if snapshot_hash and snapshot_hash != business_snapshot_hash:
             raise _binding_invalid("业务方提供的 snapshot hash 与快照不一致")
         if _as_utc(expires_at) <= datetime.now(UTC):
             raise _snapshot_stale("prepared action 在创建确认前已过期")
+
+        tool_codes = [execute_tool_name]
+        if prepare_tool_call_id is not None:
+            if not prepare_tool_name:
+                raise _binding_invalid("prepared action 缺少稳定的 preview tool 绑定")
+            tool_codes.append(prepare_tool_name)
+        elif prepare_tool_name is not None:
+            raise _binding_invalid("direct action 不得携带 preview tool 绑定")
+        subject_refs = self._build_subject_refs(
+            execute_tool_name=execute_tool_name,
+            frozen_args=frozen_args,
+            subject_ref=subject_ref,
+            projection_kind=projection_kind,
+        )
+        if projection_kind == "scope_bound" and data_scope_hash is None:
+            raise _binding_invalid("aggregate prepared action 缺少 data scope hash")
+        lineage = result_projection_service.freeze_lineage(
+            tenant_id=tenant_id,
+            agent_code=agent_code,
+            tool_codes=tool_codes,
+            subject_refs=subject_refs,
+            data_scope_hash=data_scope_hash,
+        )
+        canonical_snapshot = {
+            **dict(snapshot),
+            "_authorization": {
+                "resolvedModelId": str(resolved_model_id),
+                "resolvedProviderId": str(resolved_provider_id),
+                "toolCodes": list(lineage.tool_codes),
+                "subjectRefsHash": lineage.subject_refs_hash,
+                "dataScopeHash": lineage.data_scope_hash,
+                "resolverVersion": lineage.resolver_version,
+            },
+        }
+        computed_snapshot_hash = canonical_payload_hash(canonical_snapshot)
 
         action = AiPreparedAction(
             confirmation_id=confirmation_id,
@@ -142,9 +191,14 @@ class PreparedActionService:
             execute_tool_name=execute_tool_name,
             frozen_args=dict(frozen_args),
             args_hash=canonical_payload_hash(frozen_args),
-            snapshot=dict(snapshot),
+            snapshot=canonical_snapshot,
             snapshot_hash=computed_snapshot_hash,
             subject_ref=dict(subject_ref) if subject_ref is not None else None,
+            tool_codes=list(lineage.tool_codes),
+            subject_refs=list(lineage.subject_refs),
+            subject_refs_hash=lineage.subject_refs_hash,
+            data_scope_hash=lineage.data_scope_hash,
+            resolver_version=lineage.resolver_version,
             presentation=normalized_presentation,
             user_id=user_id,
             tenant_id=tenant_id,
@@ -152,6 +206,8 @@ class PreparedActionService:
             source_user_message_id=source_user_message_id,
             trace_id=trace_id,
             agent_code=agent_code,
+            resolved_model_id=resolved_model_id,
+            resolved_provider_id=resolved_provider_id,
             guard_owner_token=guard_owner_token,
             command_action=command_action,
             risk_level=risk_level,
@@ -161,6 +217,44 @@ class PreparedActionService:
         db.add(action)
         await db.flush()
         return action
+
+    @staticmethod
+    def _build_subject_refs(
+        *,
+        execute_tool_name: str,
+        frozen_args: dict[str, Any],
+        subject_ref: dict[str, Any] | None,
+        projection_kind: str | None,
+    ) -> list[dict[str, Any]]:
+        """Build complete stable targets from trusted frozen execution inputs."""
+        if subject_ref is not None:
+            return [dict(subject_ref)]
+        if projection_kind in {"none", "scope_bound"}:
+            return []
+        if execute_tool_name == "user.create":
+            primary_dept_id = frozen_args.get("primary_dept_id")
+            return (
+                [{"type": "dept", "id": str(primary_dept_id)}]
+                if primary_dept_id is not None
+                else []
+            )
+        scalar_fields = {
+            "user.reset_password": ("user_id", "user"),
+            "user.update": ("user_id", "user"),
+        }
+        scalar = scalar_fields.get(execute_tool_name)
+        if scalar is not None:
+            field_name, subject_type = scalar
+            value = frozen_args.get(field_name)
+            if value is None:
+                raise _binding_invalid("prepared action 缺少稳定目标 ID")
+            return [{"type": subject_type, "id": str(value)}]
+        if execute_tool_name == "user.batch_delete":
+            values = frozen_args.get("user_ids")
+            if not isinstance(values, list) or not values:
+                raise _binding_invalid("prepared action 缺少完整用户目标")
+            return [{"type": "user", "id": str(value)} for value in values]
+        raise _binding_invalid("prepared action tool 未声明授权目标契约")
 
     async def lock_source_binding(
         self,
@@ -271,6 +365,8 @@ class PreparedActionService:
         execution_owner: str | None = None,
         execution_lease_expires_at: datetime | None = None,
         execution_lease_not_after: datetime | None = None,
+        result_lineage: ProjectionLineage | None = None,
+        replace_result_lineage: bool = False,
     ) -> AiPreparedAction | None:
         """CAS one legal action transition; zero rows means another winner."""
         if target_status not in _ALLOWED_TRANSITIONS.get(expected_status, set()):
@@ -308,6 +404,24 @@ class PreparedActionService:
                 execution_owner=None,
                 execution_lease_expires_at=None,
             )
+            if replace_result_lineage:
+                values.update(
+                    tool_codes=(
+                        list(result_lineage.tool_codes) if result_lineage else None
+                    ),
+                    subject_refs=(
+                        list(result_lineage.subject_refs) if result_lineage else None
+                    ),
+                    subject_refs_hash=(
+                        result_lineage.subject_refs_hash if result_lineage else None
+                    ),
+                    data_scope_hash=(
+                        result_lineage.data_scope_hash if result_lineage else None
+                    ),
+                    resolver_version=(
+                        result_lineage.resolver_version if result_lineage else None
+                    ),
+                )
 
         conditions = [
             AiPreparedAction.action_id == action_id,
@@ -456,6 +570,28 @@ class PreparedActionService:
             expires_at=action.expires_at,
         )
 
+    async def project_pending_out(
+        self,
+        db: AsyncSession,
+        *,
+        action: AiPreparedAction,
+        current_user: Any,
+    ) -> PendingActionOut | PendingActionStatusOut:
+        """Return a presentation only when its immutable lineage is still valid."""
+        allowed = await result_projection_service.authorize_result_projection(
+            db,
+            current_user,
+            owner_user_id=action.user_id,
+            lineage=result_projection_service.lineage_from_record(action),
+        )
+        if allowed:
+            return self.to_pending_out(action)
+        return PendingActionStatusOut(
+            confirmationId=action.confirmation_id,
+            status=action.status,
+            finishedAt=action.finished_at,
+        )
+
     @staticmethod
     def validate_presentation(presentation: dict[str, Any]) -> dict[str, Any]:
         """Return the canonical ordered DTO or fail closed."""
@@ -599,9 +735,23 @@ class PreparedActionService:
                 "conflict": batch.summary_conflict,
                 "outOfScope": batch.summary_out_of_scope,
             },
+            "_authorization": action.snapshot.get("_authorization"),
         }
         if canonical_payload_hash(current_snapshot) != action.snapshot_hash:
             raise _snapshot_stale("用户导入 preview 快照已变化，请重新 preview")
+
+    @staticmethod
+    def validate_data_scope_snapshot(
+        action: AiPreparedAction,
+        *,
+        current_data_scope_hash: str | None,
+    ) -> None:
+        """Reject a scope-bound action when its resolved authorization set drifted."""
+        frozen_hash = action.data_scope_hash
+        if frozen_hash is None:
+            return
+        if current_data_scope_hash != frozen_hash:
+            raise _snapshot_stale("数据权限范围已变化，请重新发起操作")
 
 
 prepared_action_service = PreparedActionService()

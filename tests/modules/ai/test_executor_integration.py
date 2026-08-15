@@ -21,7 +21,11 @@ from sqlalchemy import select, text
 from app.core import redis as redis_module
 from app.core.config import settings
 from app.modules.ai.agents.gateway.executor import execute_tool
-from app.modules.ai.agents.gateway.result import PreparedActionProposal, ToolResult
+from app.modules.ai.agents.gateway.result import (
+    PreparedActionProposal,
+    ResultProjection,
+    ToolResult,
+)
 from app.modules.ai.agents.hitl.constants import ConfirmAction, DryRunResult
 from app.modules.ai.agents.hitl.events import (
     ConfirmationRequiredEvent,
@@ -166,6 +170,7 @@ def _register_test_tools() -> None:
             summary="test high risk",
             required_perms=(),
             risk="high",
+            projection_kind="none",
         )
     )
     async def _echo_high(ctx, **kwargs: Any) -> dict[str, Any]:
@@ -195,8 +200,11 @@ def _register_test_tools() -> None:
             query_cache_module="system/user",
         )
     )
-    async def _readonly_list(ctx, **kwargs: Any) -> dict[str, Any]:
-        return {"count": 0}
+    async def _readonly_list(ctx, **kwargs: Any) -> ToolResult:
+        return ToolResult.success(
+            {"count": 0},
+            projection=ResultProjection(),
+        )
 
     @ai_tool(
         AiToolMeta(
@@ -238,6 +246,7 @@ def _register_test_tools() -> None:
             summary="execute a prepared test import",
             required_perms=(),
             risk="high",
+            projection_kind="none",
             hitl_always=True,
             llm_visible=False,
         )
@@ -252,6 +261,7 @@ def _register_test_tools() -> None:
             summary="freeze a direct destructive target",
             required_perms=(),
             risk="high",
+            projection_kind="none",
             hitl_always=True,
             dry_run_supported=True,
         )
@@ -300,6 +310,8 @@ def _build_deps(
         conversation_id=100,
         source_user_message_id=101,
         signal_event=signal_event,
+        resolved_model_id=7001,
+        resolved_provider_id=8001,
     )
 
 
@@ -1325,6 +1337,8 @@ class TestPerAgentQuota:
             trace_id="tr_test_agent_pass",
             conversation_id=400,
             source_user_message_id=401,
+            resolved_model_id=7001,
+            resolved_provider_id=8001,
         )
 
         # low risk tool 也会触发 quota 检查吗？不会——is_write_tool=False。

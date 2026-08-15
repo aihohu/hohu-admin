@@ -132,6 +132,11 @@ def test_parse_user_id_rejects_refresh_token(fake_request_factory):
     assert _parse_user_id_from_token(fake_request_factory(refresh)) is None
 
 
+def test_parse_user_id_rejects_download_token(fake_request_factory):
+    download = _make_token(sub="123", token_type="ai_result_download")
+    assert _parse_user_id_from_token(fake_request_factory(download)) is None
+
+
 def test_parse_user_id_returns_user_id_for_access_token(fake_request_factory):
     access = _make_token(sub="456", token_type="access")
     assert _parse_user_id_from_token(fake_request_factory(access)) == 456

@@ -1,23 +1,22 @@
-"""只读工具结果 chip 的查询回放端点。
-
-GET /ai/query-cache/<trace_id>
-  用途：前端 chip 跳模块页后，模块页 mounted 时反查此端点回放筛选
-  权限：仅 trace_id 对应 user_id 本人（防越权）
-  返回：最新写入的 field；hash 不存在或已过期 → data=null
-"""
+"""Fail-closed replay endpoint for readonly-tool query chips."""
 
 import logging
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_ai_chat_use
 from app.core.base_response import ResponseModel
-from app.core.exceptions import AuthorizationException
+from app.core.exceptions import NotFoundException
 from app.core.redis import redis_client
+from app.db.session import get_db
 from app.modules.ai.agents.hitl.query_cache import get_query_cache
 from app.modules.ai.schemas.query_cache import QueryCacheOut
+from app.modules.ai.service.result_projection_service import (
+    result_projection_service,
+)
 from app.modules.system.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -26,7 +25,7 @@ router = APIRouter()
 
 
 class EmptyData(BaseModel):
-    """data=null 时占位（FastAPI response_model None 处理麻烦）"""
+    """Compatibility placeholder retained for generated schema stability."""
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -35,27 +34,25 @@ class EmptyData(BaseModel):
 async def get_query_cache_endpoint(
     trace_id: str,
     tool_name: str | None = Query(None, description="指定 tool_name 取特定 field"),
+    db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(require_ai_chat_use),
-) -> ResponseModel[QueryCacheOut | None]:
-    """返回 trace_id 对应的最新 query_cache 记录。
-
-    权限：仅 trace_id 对应 user_id 本人查询（防越权）
-    返回规则：取 hash 中最新写入（按 created_at 降序）的 field；不传 tool_name 时
-             默认最新；hash 不存在或已过期返回 data=null。
-    """
+) -> ResponseModel[QueryCacheOut]:
+    """Return a cache entry only after owner, tenant, and lineage reauthorization."""
     entry = await get_query_cache(redis_client, trace_id, tool_name=tool_name)
-    if entry is None:
-        # hash 不存在或已过期时返回 data=null，而不是 404。
-        return ResponseModel.success(data=None)
-
-    # 校验 owner，防止越权读取。
-    if entry.user_id != _current_user.user_id:
+    allowed = False
+    if entry is not None and entry.user_id == _current_user.user_id:
+        allowed = await result_projection_service.authorize_result_projection(
+            db,
+            _current_user,
+            owner_user_id=entry.user_id,
+            lineage=result_projection_service.lineage_from_record(entry),
+        )
+    if not allowed:
         logger.info(
-            "query_cache denied: user=%s cache_user=%s trace_id=%s",
+            "query_cache unavailable: user=%s trace_id=%s",
             _current_user.user_name,
-            entry.user_id,
             trace_id,
         )
-        raise AuthorizationException(error_code="AI_QUERY_CACHE_FORBIDDEN")
+        raise NotFoundException("AI query cache", error_code="AI_QUERY_CACHE_NOT_FOUND")
 
     return ResponseModel.success(data=QueryCacheOut.model_validate(entry))

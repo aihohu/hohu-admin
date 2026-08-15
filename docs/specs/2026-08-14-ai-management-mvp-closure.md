@@ -252,7 +252,8 @@ upgrade 运行 `python scripts/audit_ai_provider_egress.py` 检查全部存量 P
 - 新写入的 assistant/tool message、PreparedAction 和 query-cache entry 必须持久化 immutable `agent_code`、完整 tool code 集合、tenant、规范化 `subject_refs` 稳定 ID/类型及 canonical hash；聚合/统计结果无法用有限目标 ID 完整表达时，额外冻结当时的 canonical `data_scope_hash` 和 resolver version。message 只保存这些授权引用，不把权限布尔值当作未来凭据。
 - 完整投影要求 owner + tenant、当前 `ai:chat:use`、全部关联 Agent/Tool 仍可访问，并由领域 Policy 对全部有限 `subject_refs` 重新检查当前 data scope；聚合/统计结果则要求当前 resolver version 与 `data_scope_hash` 精确一致，否则拒绝回放。不得解析自然语言 content、result 或 presentation 猜测目标，也不得只检查其中一个目标。
 - 任一检查失败或 legacy 记录无法从不可变 PreparedAction/operation-log lineage 证明完整引用时，conversation/detail 与 history 保留用户自己的 message 和顺序，但把对应 assistant/tool message 整体替换为 `{messageId,role,status:"redacted",errorCode:"AI_RESULT_PROJECTION_FORBIDDEN"}`；pending action 只留 `{confirmationId,status,errorCode,finishedAt}`，query-cache 返回与不存在相同的 404，owner operation-log 只返回最小状态。
-- download token/URL 只能在投影授权通过后签发，绑定 owner + tenant + projection hash、短 TTL 且不可被其他用户复用；实际文件读取再次执行同一 Policy，旧 URL 不能成为撤权后仍有效的 bearer capability。
+- download token/URL 只能在投影授权通过后签发，绑定 owner + tenant + projection hash、短 TTL 且不可被其他用户复用；签名 key 必须与 API access JWT 密码学分域，通用 API 认证只接受显式 `type=access`，无 type、refresh 和 download token 一律拒绝。tokenized URL 只能进入不送给模型的 UI projection，`ToolResult.data`/LLM prompt 不得包含 bearer token；实际文件读取再次执行同一 Policy，旧 URL 不能成为撤权后仍有效的 bearer capability。
+- scope-bound PreparedAction 执行前必须把发起时冻结的 `data_scope_hash` 与当前统一 resolver 结果精确比较，漂移时在任何业务副作用前返回 `AI_PREPARED_ACTION_SNAPSHOT_STALE`。resume 长等待前的授权结果不得跨等待复用；读取成功终态的 `result_data/result_ui` 前必须针对重新加载的 durable action 再次授权。产生外部文件的 Tool 必须在写文件前预授权，若授权在生成期间撤销，则删除未提交文件后 fail closed。
 - `ai:trace:view/R_SUPER` 审计分支不复用 owner 历史读取权，而是严格返回 §3.5 allowlist DTO；不能借审计权限恢复 raw message/result/args。权限重新授予后仍按当次实时 Policy 计算，不缓存旧 allow 结论。
 
 ### 3.5 AI Trace 数据与页面契约
@@ -767,6 +768,10 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 
 33. **固定 IP 不能牺牲 TLS origin 身份、取消归还或解压后大小边界** — httpcore 按实际 URL origin 复用连接，若不同 hostname 共用固定 IP 和同一连接池，后一个请求可能复用前一个 hostname 的 TLS 会话；每个原始精确 origin 必须拥有独立底层池。获得并发 permit 后的取消属于 `BaseException` 路径，必须同步归还；响应大小门禁必须在 SDK 解压前成立，因此请求强制 `Accept-Encoding: identity`，Provider 仍返回压缩成功响应时 fail closed。**反例**: 只断言 request extension 含 SNI，却共享按 IP 分组的真实连接池；客户端断流累计耗尽 semaphore；用 132 字节 gzip 解压出 100 KB 绕过 1 KB 限制。**回归**: `tests/modules/ai/test_provider_egress.py::test_transport_isolates_connection_pools_by_original_origin`、`test_transport_releases_concurrency_permit_when_request_is_cancelled`、`test_transport_rejects_compressed_response_before_sdk_decoding`。
 
+34. **业务结果 lineage 只能由可信 Tool 投影产生，终态读取每次重新授权** — assistant message、PreparedAction、query-cache 与下载 token 共用规范化 Agent/Tool/subject/scope lineage；PreparedAction 在确认前冻结输入目标，成功终态再以 `ToolResult.projection` 原子替换为实际结果目标，legacy/incomplete 不反解析 result 猜授权。**反例**: 从 `result_data` 抽取一个 user ID 当作完整目标，或让旧下载 URL 在撤权后继续作为 bearer capability。**回归**: finite subject refs 逐项走领域 Policy，聚合结果比较 resolver + canonical scope hash；conversation/resume/pending/query-cache/owner-log/download 使用同一 Policy，失权分别 tombstone/最小状态/同面 404；下载 token 绑定 owner、tenant、resource 与 projection hash，5 分钟失效且读取时再次授权，历史加载只在授权后刷新 URL。
+
+35. **Bearer 能力按用途分域并在副作用前与最终读取点重验** — API access JWT、AI 下载 token 和实时投影授权承担不同能力，不能共享可互认的 token 域，也不能把等待前或预检时的授权结论当作最终凭据。**反例**: 下载 token 被通用认证当作 access token，tokenized URL 进入外部 LLM，上次 data scope hash 已漂移仍批准执行，或 resume 等待期间撤权后仍回放成功结果；导出先写文件再发现无权会留下孤儿。**回归**: `tests/modules/auth/test_refresh_token.py`、`tests/middleware/test_audit_user_cache.py`、`tests/modules/ai/test_result_projection_service.py`、`tests/modules/ai/test_prepared_action_service.py`、`tests/modules/ai/test_confirm.py`、`tests/modules/ai/test_resume.py`、`tests/modules/system/test_ai_tools_user_export.py` 分别锁定 exact access type、签名分域、scope 漂移、终态重授权、UI-only token 与导出预授权/补偿删除。
+
 ---
 
 ## 10. 实施计划
@@ -788,14 +793,16 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 - [x] P1-B 验证证据：`ruff check .`、`ruff format --check .`、`python scripts/check_ai_tools.py`（19 tools / 12 checks）、AI 模块 952 项和全量 1911 项测试通过；总覆盖率 72.74%，Alembic current/head 均为单一 `b8e4c7d2a1f0`，仅保留 2 条既有 SQLAlchemy transaction warning。P1-C egress、P1-D lineage/result projection、Web 切换和 Phase 2 委派仍未完成，本中间构建禁止部署。
 - [x] ✅ P1-C 已完成（2026-08-15；P1 审查修复 2026-08-15）：删除任意字典 `/ai/provider/test-model`，新增严格 `{modelId: string}` 的已保存对象 `POST /ai/provider/{provider_id}/test`；Provider/Model 保存、管理状态、chat-safe selector、旧 `resolve_model`、test、Supervisor、Agent 与 continuation 均接入统一 egress Policy。OpenAI、Anthropic、DeepSeek/兼容 adapter 共享禁环境代理 client，并按原始精确 origin 隔离底层连接池；最终 URL 校验精确 origin/port、全部 DNS/IP，连接固定且保持 Host/TLS SNI。禁 redirect，限制连接/读取/总超时、并发、重试及响应大小；取消路径归还 permit，压缩成功响应在 SDK 解压前 fail closed，上游 body/异常统一脱敏为稳定错误。upgrade 审计只报告 `EGRESS_POLICY_BLOCKED`，运行时 quarantine 不修改 Provider/Model `enabled`。
 - [x] P1-C 验证证据：新增 3 项 P1 transport 回归后，transport 单测 21 项、AI 模块 983 项及全量 1943 项测试通过；`ruff check .`、`ruff format --check .`、19 tools / 12 checks 通过，总覆盖率 73.37%，仅保留 2 条既有 SQLAlchemy warning。开发库审计检查 2 个 Provider/5 个 Model，准确报告 4 个 blocked 对象且零数据改写；这些存量对象在部署方补精确 allowlist 或修改 URL 前保持 quarantine。P1-D、Web endpoint 切换与 Phase 2 仍未完成，本中间构建禁止部署。
+- [x] ✅ P1-D 已完成（2026-08-15；审查修复 2026-08-15）：`ai_message`、`ai_prepared_action` 与 query-cache v2 冻结 tenant、Agent、完整 Tool 集合、规范化 subject refs/hash、scope hash 和 resolver version；PreparedAction 同时冻结发起轮次 model/provider ID，成功终态由可信 Tool projection 固化实际结果目标。统一 `authorize_result_projection()` 已覆盖 conversation/history、pending presentation、resume/SSE replay、query-cache、owner operation-log 与独立 AI 下载端点；legacy/incomplete 分别降级 tombstone、最小状态或同面 404。下载 token 绑定 owner/tenant/resource/projection hash、TTL 5 分钟并使用独立派生签名域，API 认证 exact-match `type=access`；tokenized URL 仅进入 UI projection，不进入 LLM data。scope-bound approve 在执行前校验当前 scope hash，resume 在长等待后的最终读取点再次授权，用户导出在文件副作用前预授权并补偿期间撤权产生的文件。reject/最小状态与已持久化 replay 不复验模型；当前无新的 LLM continuation 路径。
+- [x] P1-D 验证证据（含审查修复）：JWT/scope/resume/export 定向回归 98 项、AI + 导出专项 1017 项及全量 1974 项测试通过，总覆盖率 73.00%；`ruff check .`、`ruff format --check .`、`python scripts/check_ai_tools.py`（19 tools / 12 checks）通过，仅保留 2 条既有 SQLAlchemy transaction warning。Alembic `c9f5d8e3b2a1` 已应用且 current/head 单一；`alembic check` 仍因本工作包之外既有 comments/index/FK metadata 漂移失败，P1-D 新增列本身无待生成差异；该 repo 基线债务留作最终 migration 门禁处理。Web 缓存清理/状态展示、Phase 2 及 Phase 4 E2E 仍未完成，本中间构建禁止部署。
 - [x] 实现统一 Agent Policy，覆盖显式、粘滞、Supervisor、默认回退、confirm/resume 和 Tool-Agent 归属。
-- [ ] 为 assistant/tool message、PreparedAction 和 query-cache 持久化不可变 Agent/Tool/subject refs，实现统一结果投影 Policy，覆盖 resume/conversation/query-cache/owner-log 及 legacy fail-closed tombstone。
+- [x] 为 assistant/tool message、PreparedAction 和 query-cache 持久化不可变 Agent/Tool/subject refs，实现统一结果投影 Policy，覆盖 resume/conversation/query-cache/owner-log/download 及 legacy fail-closed tombstone。
 - [x] 实现 chat/Supervisor/Agent/conversation 共用的 chat model selector、三端点拆分和 Agent 全局配置超管 Policy；显式无效模型不 fallback，新聊天在 Agent 授权后采用其模型偏好。
-- [ ] P1-D 为 PreparedAction 冻结 model/provider ID，仅在新 LLM continuation 前复验；reject/最小状态回放独立收口、完整回放重新授权但不查模型。
+- [x] P1-D 为 PreparedAction 冻结 model/provider ID，仅在新 LLM continuation 前复验；reject/最小状态回放独立收口、完整回放重新授权但不查模型。
 - [x] 收口 Provider test 为已保存 Provider；所有 SDK/adapter 注入共享 hardened transport，在 test/chat/Supervisor/Agent/continuation 全路径落地协议、origin、Provider/Model URL、解析 IP、DNS rebinding、redirect、timeout、响应大小和错误脱敏 egress Policy，并审计/隔离不合规存量配置。
 - [x] 移除 shared/超管 Agent 可见性旁路和 shared 跨 Agent 执行豁免；同步 Registry、Gateway executor、PreparedAction 复验、`check_ai_tools.py`，落地显式 Role-Agent + `ai:file:parse`。
 - [x] 完成 P1-B fresh/upgrade 独立 seed/migration：补齐 Agent/file/管理权限与 R_SUPER 显式 shared 绑定，保留部署方 Agent/Role-Agent/`ai:enabled_tools` 状态；业务 Agent 待自身阶段闭环后再加入发布集合。
-- [ ] 后端 P1-A/P1-B/P1-C endpoint、Agent、模型与 Provider egress 矩阵已通过；前端三模型 endpoint、已保存 Provider test、无入口/无 Agent 状态仍待 Web 工作包。Phase 1 只形成代码里程碑，不得绕过门禁独立部署。
+- [ ] 后端 P1-A/P1-B/P1-C/P1-D endpoint、Agent、模型、Provider egress 与结果投影矩阵已通过；前端三模型 endpoint、已保存 Provider test、无入口/无 Agent/tombstone 状态和旧缓存清理仍待 Web 工作包。Phase 1 只形成代码里程碑，不得绕过门禁独立部署。
 
 ### Phase 2：用户部门与角色调整
 

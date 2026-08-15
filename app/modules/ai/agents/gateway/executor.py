@@ -51,6 +51,7 @@ from app.modules.ai.agents.gateway.quota import (
 )
 from app.modules.ai.agents.gateway.result import (
     PreparedActionProposal,
+    ResultProjection,
     ToolResult,
     UIResult,
 )
@@ -542,6 +543,7 @@ async def _execute_tool(
                 duration_ms=action_duration,
                 result=action_result.data if action_result.ok else None,
                 ui=action_result.ui if action_result.ok else None,
+                projection=action_result.projection,
                 error_code=action_result.error_code if not action_result.ok else None,
                 error_msg=action_result.error_msg if not action_result.ok else None,
             ),
@@ -596,6 +598,7 @@ async def _execute_tool(
             duration_ms=duration_ms,
             result=result.data if result.ok else None,
             ui=result.ui if result.ok else None,
+            projection=result.projection,
             affected_rows=inferred_affected_rows,
             error_code=result.error_code if not result.ok else None,
             error_msg=result.error_msg if not result.ok else None,
@@ -750,6 +753,10 @@ async def _load_prepared_terminal_result(
             ToolResult.success(
                 action.result_data,
                 ui=_ui_from_dict(action.result_ui),
+                projection=ResultProjection(
+                    subject_refs=tuple(action.subject_refs or ()),
+                    scope_bound=action.data_scope_hash is not None,
+                ),
             ),
             action.duration_ms or 0,
         )
@@ -1166,6 +1173,7 @@ async def _hang_for_confirmation(
                         prepare_tool_call_id=(
                             prepared_action_context.prepare_tool_call_id
                         ),
+                        prepare_tool_name=prepared_action_context.prepare_tool_name,
                         execute_tool_call_id=tool_call_id,
                         execute_tool_name=meta.name,
                         frozen_args=proposal.frozen_args,
@@ -1180,6 +1188,10 @@ async def _hang_for_confirmation(
                         trace_id=deps.trace_id,
                         agent_code=deps.agent.code if deps.agent else meta.agent,
                         expires_at=min(proposal_expires_at, pending_expires_at),
+                        resolved_model_id=deps.resolved_model_id,
+                        resolved_provider_id=deps.resolved_provider_id,
+                        data_scope_hash=deps.data_scope_hash,
+                        projection_kind=meta.projection_kind,
                         guard_owner_token=deps.guard_owner_token,
                         command_action=deps.command_action,
                         risk_level=meta.risk,
@@ -1204,6 +1216,7 @@ async def _hang_for_confirmation(
                         log_db,
                         confirmation_id=confirmation_id,
                         prepare_tool_call_id=None,
+                        prepare_tool_name=None,
                         execute_tool_call_id=tool_call_id,
                         execute_tool_name=meta.name,
                         frozen_args=execution_args,
@@ -1248,6 +1261,14 @@ async def _hang_for_confirmation(
                         trace_id=deps.trace_id,
                         agent_code=deps.agent.code if deps.agent else meta.agent,
                         expires_at=pending_expires_at,
+                        resolved_model_id=deps.resolved_model_id,
+                        resolved_provider_id=deps.resolved_provider_id,
+                        data_scope_hash=(
+                            deps.data_scope_hash
+                            if meta.projection_kind == "scope_bound"
+                            else None
+                        ),
+                        projection_kind=meta.projection_kind,
                         guard_owner_token=deps.guard_owner_token,
                         command_action=deps.command_action,
                         risk_level=meta.risk,
@@ -1452,13 +1473,22 @@ async def _invoke_tool_fn(
                     result = ToolResult.success(
                         data=safe_data
                     )  # ui=None，前端 fallback
+                if result.projection is None and meta.projection_kind is not None:
+                    result.projection = ResultProjection(
+                        scope_bound=meta.projection_kind == "scope_bound"
+                    )
                 # 成功后清零相同参数的连续失败计数。
                 await clear_failures(redis_client, user_id, meta.name, args_hash)
                 # 只读工具缓存白名单筛选条件，供结果卡跳转后恢复页面查询。
                 cache_module = meta.chip_target or meta.query_cache_module
                 if meta.readonly and cache_module and deps.trace_id:
                     _safe_write_query_cache(
-                        meta, args, deps, user_id, module=cache_module
+                        meta,
+                        args,
+                        deps,
+                        user_id,
+                        projection=result.projection,
+                        module=cache_module,
                     )
                 return result
     except AuthorizationException as e:
@@ -1518,6 +1548,7 @@ def _safe_write_query_cache(
     deps: ChatDeps,
     user_id: int,
     *,
+    projection: ResultProjection | None = None,
     module: str | None = None,
 ) -> None:
     """写查询回放缓存，且只保存 allowed_filters 白名单字段。
@@ -1552,6 +1583,10 @@ def _safe_write_query_cache(
                 module=cache_module,
                 filters=safe_filters,
                 user_id=user_id,
+                tenant_id=deps.tenant_id,
+                agent_code=deps.agent.code if deps.agent else meta.agent,
+                projection=projection,
+                data_scope_hash=deps.data_scope_hash,
             )
         except Exception:
             logger.exception(

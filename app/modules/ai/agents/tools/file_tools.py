@@ -12,7 +12,11 @@
 
 from dataclasses import asdict
 
-from app.modules.ai.agents.gateway.result import ToolResult, UIResult
+from app.modules.ai.agents.gateway.result import (
+    ResultProjection,
+    ToolResult,
+    UIResult,
+)
 from app.modules.ai.agents.tools.decorator import ai_tool
 from app.modules.ai.agents.tools.file_access import (
     AI_CHAT_MIME_TYPES_BY_EXTENSION,
@@ -95,6 +99,9 @@ async def file_parse(
     preview = parsed.get("preview", [])
     return ToolResult.success(
         data=parsed,
+        projection=ResultProjection(
+            subject_refs=({"type": "file", "id": str(file_id)},)
+        ),
         ui=UIResult(
             view_type="plain_json",
             view_data={

@@ -72,6 +72,9 @@ from app.modules.ai.service.chat_run_service import (
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.ai.service.prepared_action_service import prepared_action_service
+from app.modules.ai.service.result_projection_service import (
+    result_projection_service,
+)
 from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
 
@@ -217,6 +220,7 @@ def _minimal_resume_status(
     *,
     durable_action=None,  # noqa: ANN001
     pending: PendingPayload | None = None,
+    error_code: str = "AI_CHAT_PERMISSION_DENIED",
 ) -> ResponseModel[ResumeStatusOut]:
     status = (
         durable_action.status
@@ -236,9 +240,11 @@ def _minimal_resume_status(
         data=ResumeStatusOut(
             confirmationId=confirmation_id,
             status=status,
-            errorCode="AI_CHAT_PERMISSION_DENIED",
+            errorCode=error_code,
             finishedAt=(
-                durable_action.finished_at if durable_action is not None else None
+                getattr(durable_action, "finished_at", None)
+                if durable_action is not None
+                else None
             ),
         )
     )
@@ -262,6 +268,7 @@ async def _load_durable_resume_terminal(
     pending: PendingPayload,
     user_id: int,
     tenant_id: int,
+    current_user: User | None = None,
 ) -> list[ToolCallResultEvent | AiErrorEvent | DoneEvent]:
     """Read a confirm-owned terminal fact without ever re-executing its tool."""
     try:
@@ -294,6 +301,56 @@ async def _load_durable_resume_terminal(
                 )
             )
             ok = status == PreparedActionStatus.SUCCEEDED
+            lineage = result_projection_service.lineage_from_record(action)
+            if ok:
+                allowed = bool(
+                    current_user is not None
+                    and await result_projection_service.authorize_result_projection(
+                        terminal_db,
+                        current_user,
+                        owner_user_id=action.user_id,
+                        lineage=lineage,
+                    )
+                )
+                if not allowed:
+                    return [
+                        AiErrorEvent(
+                            error_code="AI_RESULT_PROJECTION_FORBIDDEN",
+                            message="当前权限不允许读取该操作结果",
+                        ),
+                        DoneEvent(
+                            trace_id=action.trace_id,
+                            message_id=message_id,
+                            persistence="committed",
+                            projection="updated",
+                        ),
+                    ]
+            result_data = action.result_data if ok else None
+            result_ui = action.result_ui if ok else None
+            if current_user is not None and lineage is not None and ok:
+                export_ids: list[str] = []
+                if action.execute_tool_name == "user.export" and isinstance(
+                    result_data, dict
+                ):
+                    export_id = result_data.get("exportId") or result_data.get(
+                        "export_id"
+                    )
+                    if export_id:
+                        export_ids.append(str(export_id))
+                result_data = await result_projection_service.refresh_download_urls(
+                    terminal_db,
+                    current_user,
+                    lineage=lineage,
+                    value=result_data,
+                    resource_ids=export_ids,
+                )
+                result_ui = await result_projection_service.refresh_download_urls(
+                    terminal_db,
+                    current_user,
+                    lineage=lineage,
+                    value=result_ui,
+                    resource_ids=export_ids,
+                )
             fallback_error = {
                 PreparedActionStatus.REJECTED: "USER_REJECTED",
                 PreparedActionStatus.EXPIRED: "AI_HITL_EXPIRED",
@@ -304,7 +361,7 @@ async def _load_durable_resume_terminal(
                 tool_call_id=action.execute_tool_call_id,
                 ok=ok,
                 duration_ms=action.duration_ms or 0,
-                result=action.result_data if ok else None,
+                result=result_data,
                 error_code=None if ok else action.error_code or fallback_error,
                 error_msg=(
                     None
@@ -315,7 +372,7 @@ async def _load_durable_resume_terminal(
                         PreparedActionStatus.FAILED: "工具执行失败，请稍后重试",
                     }.get(status, "操作执行失败")
                 ),
-                ui=_ui_result_from_dict(action.result_ui) if ok else None,
+                ui=_ui_result_from_dict(result_ui) if ok else None,
             )
             done_event = DoneEvent(
                 trace_id=action.trace_id,
@@ -645,6 +702,24 @@ async def resume_chat(
             pending=pending,
         )
 
+    projection_allowed = False
+    if durable_action is not None:
+        projection_allowed = (
+            await result_projection_service.authorize_result_projection(
+                db,
+                current_user,
+                owner_user_id=durable_action.user_id,
+                lineage=result_projection_service.lineage_from_record(durable_action),
+            )
+        )
+    if not projection_allowed:
+        return _minimal_resume_status(
+            confirmation_id,
+            durable_action=durable_action,
+            pending=pending,
+            error_code="AI_RESULT_PROJECTION_FORBIDDEN",
+        )
+
     if (
         durable_action is not None
         and PreparedActionStatus(durable_action.status).is_terminal
@@ -663,6 +738,7 @@ async def resume_chat(
                 pending=replay_pending,
                 user_id=current_user.user_id,
                 tenant_id=current_tenant_id,
+                current_user=current_user,
             )
             await _cleanup_durable_resume(durable_action)
             for terminal_event in terminal_events:
@@ -817,6 +893,7 @@ async def resume_chat(
                     pending=pending,
                     user_id=current_user.user_id,
                     tenant_id=current_tenant_id,
+                    current_user=current_user,
                 )
                 await _cleanup_durable_resume(durable_action)
                 for terminal_event in terminal_events:

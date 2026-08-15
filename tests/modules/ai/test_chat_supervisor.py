@@ -12,7 +12,10 @@ from httpx import AsyncClient
 @pytest.fixture(autouse=True)
 def authorize_chat_model_for_endpoint():
     """隔离端点前置 selector；selector 规则由专门测试覆盖。"""
-    selected = SimpleNamespace(model=SimpleNamespace(model_id=123456))
+    selected = SimpleNamespace(
+        model=SimpleNamespace(model_id=123456),
+        provider=SimpleNamespace(provider_id=223456),
+    )
     with (
         patch(
             "app.modules.ai.api.chat.model_authorization_service.authorize_chat_model",
@@ -120,7 +123,10 @@ async def test_new_chat_uses_authorized_agent_model_preference(
     next(
         agent for agent in mock_visible_agents if agent.code == "user_mgmt"
     ).model_preference = preferred
-    selected = SimpleNamespace(model=SimpleNamespace(model_id=654321))
+    selected = SimpleNamespace(
+        model=SimpleNamespace(model_id=654321),
+        provider=SimpleNamespace(provider_id=754321),
+    )
     selector = AsyncMock(return_value=selected)
 
     with patch(

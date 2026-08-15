@@ -6,9 +6,15 @@ from app.modules.ai.agents.gateway.redact import redact_secrets
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.schemas.conversation import ConversationCreate, ConversationUpdate
+from app.modules.ai.schemas.message import MessageOut, MessageTombstoneOut
 from app.modules.ai.service.model_authorization_service import (
     model_authorization_service,
 )
+from app.modules.ai.service.result_projection_service import (
+    ProjectionLineage,
+    result_projection_service,
+)
+from app.modules.system.models.user import User
 from app.utils.pagination import build_filters, paginate
 
 
@@ -157,6 +163,8 @@ class ConversationService:
         trace_id: str | None = None,
         is_active: bool = True,
         supersedes_message_id: int | None = None,
+        tenant_id: int | None = None,
+        lineage: ProjectionLineage | None = None,
     ) -> AiMessage:
         """保存一条消息
 
@@ -182,9 +190,57 @@ class ConversationService:
             trace_id=trace_id,
             is_active=is_active,
             supersedes_message_id=supersedes_message_id,
+            tenant_id=lineage.tenant_id if lineage else tenant_id,
+            tool_codes=list(lineage.tool_codes) if lineage else None,
+            subject_refs=list(lineage.subject_refs) if lineage else None,
+            subject_refs_hash=lineage.subject_refs_hash if lineage else None,
+            data_scope_hash=lineage.data_scope_hash if lineage else None,
+            resolver_version=lineage.resolver_version if lineage else None,
         )
         db.add(msg)
         return msg
+
+    async def project_messages(
+        self,
+        db: AsyncSession,
+        *,
+        conversation_id: int,
+        current_user: User,
+    ) -> list[MessageOut | MessageTombstoneOut]:
+        """Project each sensitive message through the current authorization policy."""
+        messages = await self.get_messages(db, conversation_id, current_user.user_id)
+        projected: list[MessageOut | MessageTombstoneOut] = []
+        for message in messages:
+            if message.role == "user":
+                projected.append(MessageOut.model_validate(message))
+                continue
+            allowed = await result_projection_service.authorize_result_projection(
+                db,
+                current_user,
+                owner_user_id=current_user.user_id,
+                lineage=result_projection_service.lineage_from_record(message),
+            )
+            if allowed:
+                output = MessageOut.model_validate(message)
+                lineage = result_projection_service.lineage_from_record(message)
+                if lineage is not None and output.tool_calls:
+                    output.tool_calls = (
+                        await result_projection_service.refresh_download_urls(
+                            db,
+                            current_user,
+                            lineage=lineage,
+                            value=output.tool_calls,
+                        )
+                    )
+                projected.append(output)
+            else:
+                projected.append(
+                    MessageTombstoneOut(
+                        messageId=message.message_id,
+                        role=message.role,
+                    )
+                )
+        return projected
 
 
 conversation_service = ConversationService()

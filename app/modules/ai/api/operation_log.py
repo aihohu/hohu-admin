@@ -11,7 +11,7 @@ import logging
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import AI_CHAT_USE_PERMISSION, has_explicit_permission
+from app.core.auth import has_explicit_permission
 from app.core.base_response import ResponseModel
 from app.core.exceptions import (
     AuthorizationException,
@@ -20,8 +20,12 @@ from app.core.exceptions import (
 from app.core.rbac import is_super_admin
 from app.core.tenant import resolve_tenant_id
 from app.db.session import get_db
+from app.modules.ai.constants import AI_CHAT_USE_PERMISSION
 from app.modules.ai.schemas.operation_log import OperationLogOut, OperationLogStatusOut
 from app.modules.ai.service.operation_log_service import operation_log_service
+from app.modules.ai.service.result_projection_service import (
+    result_projection_service,
+)
 from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
 
@@ -67,14 +71,26 @@ async def get_operation_log(
         )
         raise AuthorizationException(error_code="AI_OPERATION_LOG_FORBIDDEN")
 
-    if is_auditor or has_explicit_permission(current_user, AI_CHAT_USE_PERMISSION):
+    if is_auditor:
+        return ResponseModel.success(data=OperationLogOut.model_validate(log))
+
+    allowed = False
+    if has_explicit_permission(current_user, AI_CHAT_USE_PERMISSION):
+        lineage = await result_projection_service.lineage_for_operation_log(db, log)
+        allowed = await result_projection_service.authorize_result_projection(
+            db,
+            current_user,
+            owner_user_id=log.user_id,
+            lineage=lineage,
+        )
+    if allowed:
         return ResponseModel.success(data=OperationLogOut.model_validate(log))
 
     return ResponseModel.success(
         data=OperationLogStatusOut(
             toolCallId=log.tool_call_id,
             status=log.status,
-            errorCode="AI_CHAT_PERMISSION_DENIED",
+            errorCode="AI_RESULT_PROJECTION_FORBIDDEN",
             finishedAt=log.finished_at,
         )
     )

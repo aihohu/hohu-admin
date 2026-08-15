@@ -61,7 +61,7 @@ def _parse_user_id_from_token(request) -> int | None:
         payload = jwt.decode(
             token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
         )
-        if payload.get("type") == "refresh":
+        if payload.get("type") != "access":
             return None
         return int(payload.get("sub"))
     except (JWTError, ValueError):

@@ -87,6 +87,7 @@ async def admin_token(db_session) -> str:
     payload = {
         "exp": exp,
         "sub": str(user.user_id),
+        "type": "access",
         "user_id": user.user_id,
         "user_name": user.user_name,
     }

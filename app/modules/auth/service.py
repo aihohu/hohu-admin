@@ -253,8 +253,8 @@ async def get_current_user(
         payload = jwt.decode(
             token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
         )
-        # 拒绝 refresh token 被当作 access token 使用
-        if payload.get("type") == "refresh":
+        # Only access tokens may authenticate API requests.
+        if payload.get("type") != "access":
             raise AuthenticationException("Token 类型错误", error_code="TOKEN_EXPIRED")
         user_id_str: str = payload.get("sub")
         if user_id_str is None:

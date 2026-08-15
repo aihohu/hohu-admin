@@ -74,6 +74,10 @@ from app.modules.ai.service.conversation_service import conversation_service
 from app.modules.ai.service.model_authorization_service import (
     model_authorization_service,
 )
+from app.modules.ai.service.result_projection_service import (
+    ProjectionLineage,
+    result_projection_service,
+)
 from app.modules.system.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -186,6 +190,7 @@ async def _finalize_stream_turn(
     tool_calls: list[dict] | None,
     agent_code: str | None,
     stream_error_code: str | None,
+    lineage: ProjectionLineage | None = None,
 ) -> list[AiStreamEvent]:
     """建立 durability barrier：assistant/terminal commit 完成后才构造 done。"""
     if stream_error_code is not None:
@@ -206,6 +211,7 @@ async def _finalize_stream_turn(
             content=content,
             tool_calls=tool_calls,
             agent_code=agent_code,
+            lineage=lineage,
         )
         await db.commit()
     except Exception:
@@ -822,6 +828,8 @@ async def chat(
         model_name = str(selected_model.model.model_id)
         if conv is not None and conv.model_name != model_name:
             conv.model_name = model_name
+        deps.resolved_model_id = selected_model.model.model_id
+        deps.resolved_provider_id = selected_model.provider.provider_id
 
     # 所有路由路径都写入审计日志。
     # input_message 用 `or ""` 兜底：边界防御统一为空串写入 HMAC hash.
@@ -975,6 +983,7 @@ async def chat(
                 parts=persist_parts,
                 agent_code=deps.agent.code,
                 trace_id=deps.trace_id,
+                tenant_id=deps.tenant_id,
             )
             deps.source_user_message_id = source_message.message_id
 
@@ -1194,6 +1203,7 @@ async def chat(
         try:
             collected_text = "".join(collected)
             if saved_conversation_id and deps.source_user_message_id:
+                projection_snapshot = tool_collector.snapshot_projection()
                 terminal_events = await _finalize_stream_turn(
                     saved_db,
                     conversation_id=saved_conversation_id,
@@ -1203,6 +1213,19 @@ async def chat(
                     tool_calls=tool_collector.snapshot() or None,
                     agent_code=deps.agent.code if deps.agent else None,
                     stream_error_code=stream_error_code,
+                    lineage=(
+                        result_projection_service.freeze_lineage(
+                            tenant_id=deps.tenant_id,
+                            agent_code=deps.agent.code,
+                            tool_codes=projection_snapshot[0],
+                            subject_refs=projection_snapshot[1],
+                            data_scope_hash=(
+                                deps.data_scope_hash if projection_snapshot[2] else None
+                            ),
+                        )
+                        if deps.agent is not None and projection_snapshot[3]
+                        else None
+                    ),
                 )
             else:
                 terminal_events = [

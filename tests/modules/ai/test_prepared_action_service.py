@@ -16,6 +16,9 @@ from app.modules.ai.service.prepared_action_service import (
     canonical_payload_hash,
     prepared_action_service,
 )
+from app.modules.ai.service.result_projection_service import (
+    result_projection_service,
+)
 from app.modules.system.models.user import User
 from app.modules.system.user.constants import ImportBatchStatus
 from app.modules.system.user.models import UserImportBatch
@@ -42,6 +45,7 @@ def _create_kwargs() -> dict:
     return {
         "confirmation_id": "cid_prepared_action_001",
         "prepare_tool_call_id": "tc_prepare_001",
+        "prepare_tool_name": "user.import_preview",
         "execute_tool_call_id": "tc_execute_001",
         "execute_tool_name": "user.import_execute",
         "frozen_args": {
@@ -67,6 +71,8 @@ def _create_kwargs() -> dict:
         "source_user_message_id": 101,
         "trace_id": "tr_test_prepared_001",
         "agent_code": "user_mgmt",
+        "resolved_model_id": 501,
+        "resolved_provider_id": 601,
         "expires_at": datetime.now(UTC) + timedelta(minutes=5),
     }
 
@@ -77,6 +83,29 @@ def test_canonical_hash_is_key_order_independent_and_type_aware() -> None:
     )
     assert canonical_payload_hash({"value": 1}) != canonical_payload_hash(
         {"value": "1"}
+    )
+
+
+def test_scope_bound_action_rejects_data_scope_drift() -> None:
+    """A scope-bound action cannot execute under a different resolved scope."""
+    action = type("Action", (), {"data_scope_hash": "frozen-scope"})()
+
+    with pytest.raises(BusinessRuleException) as exc_info:
+        prepared_action_service.validate_data_scope_snapshot(
+            action,
+            current_data_scope_hash="current-scope",
+        )
+
+    assert exc_info.value.error_code == "AI_PREPARED_ACTION_SNAPSHOT_STALE"
+
+
+def test_finite_action_does_not_require_a_scope_hash() -> None:
+    """Finite-target actions continue through their domain subject checks."""
+    action = type("Action", (), {"data_scope_hash": None})()
+
+    prepared_action_service.validate_data_scope_snapshot(
+        action,
+        current_data_scope_hash="current-scope",
     )
 
 
@@ -96,6 +125,23 @@ async def test_create_pending_freezes_policy_and_trusted_identity(db_session) ->
     assert action.user_id == 9001
     assert action.tenant_id == 77
     assert action.source_user_message_id == 101
+    assert action.resolved_model_id == 501
+    assert action.resolved_provider_id == 601
+    assert action.tool_codes == ["user.import_execute", "user.import_preview"]
+    assert action.subject_refs == [
+        {"type": "user_import_batch", "id": "batch-prepared-1"}
+    ]
+    assert len(action.subject_refs_hash) == 64
+
+
+async def test_create_pending_rejects_missing_frozen_model(db_session) -> None:
+    kwargs = _create_kwargs()
+    kwargs["resolved_model_id"] = None
+
+    with pytest.raises(BusinessRuleException) as exc_info:
+        await prepared_action_service.create_pending(db_session, **kwargs)
+
+    assert exc_info.value.error_code == "AI_PREPARED_ACTION_BINDING_INVALID"
 
 
 async def test_create_pending_supports_direct_hitl_with_same_state_machine(
@@ -106,9 +152,10 @@ async def test_create_pending_supports_direct_hitl_with_same_state_machine(
     kwargs.update(
         confirmation_id="cid_direct_action_001",
         prepare_tool_call_id=None,
+        prepare_tool_name=None,
         execute_tool_call_id="tc_direct_001",
         execute_tool_name="user.batch_delete",
-        frozen_args={},
+        frozen_args={"user_ids": [9002]},
         snapshot=snapshot,
         snapshot_hash=canonical_payload_hash(snapshot),
         subject_ref=None,
@@ -127,6 +174,31 @@ async def test_create_pending_supports_direct_hitl_with_same_state_machine(
     assert action.requested_outcome == "direct"
     assert action.prepare_tool_call_id is None
     assert action.status == "pending_confirmation"
+
+
+async def test_user_create_without_department_has_complete_empty_input_targets(
+    db_session,
+) -> None:
+    kwargs = _create_kwargs()
+    snapshot = {"tool": "user.create", "argsHash": "hash", "dryRun": None}
+    kwargs.update(
+        confirmation_id="cid_direct_create_001",
+        prepare_tool_call_id=None,
+        prepare_tool_name=None,
+        execute_tool_call_id="tc_direct_create_001",
+        execute_tool_name="user.create",
+        frozen_args={"user_name": "new-user", "primary_dept_id": None},
+        snapshot=snapshot,
+        snapshot_hash=canonical_payload_hash(snapshot),
+        subject_ref=None,
+        interaction_flow="direct",
+        requested_outcome="direct",
+    )
+
+    action = await prepared_action_service.create_pending(db_session, **kwargs)
+
+    assert action.subject_refs == []
+    assert len(action.subject_refs_hash) == 64
 
 
 @pytest.mark.parametrize(
@@ -279,6 +351,7 @@ async def test_batch_delete_snapshot_rejects_identity_drift(db_session) -> None:
     kwargs.update(
         confirmation_id="cid_batch_delete_snapshot_001",
         prepare_tool_call_id=None,
+        prepare_tool_name=None,
         execute_tool_call_id="tc_batch_delete_snapshot_001",
         execute_tool_name="user.batch_delete",
         frozen_args={"user_ids": [91001], "user_names": None, "phones": None},
@@ -357,6 +430,12 @@ async def test_action_status_cas_allows_only_one_execution_claim(db_session) -> 
         execution_owner="other-executor",
         lease_expires_at=lease_expires_at + timedelta(minutes=2),
     )
+    result_lineage = result_projection_service.freeze_lineage(
+        tenant_id=0,
+        agent_code="user_mgmt",
+        tool_codes=["user.reset_password"],
+        subject_refs=[{"type": "user", "id": "99002"}],
+    )
     succeeded = await prepared_action_service.transition_status(
         db_session,
         action_id=action.action_id,
@@ -366,6 +445,8 @@ async def test_action_status_cas_allows_only_one_execution_claim(db_session) -> 
         result_data={"successCount": 2},
         result_ui={"viewType": "rows_affected", "viewData": {"count": 2}},
         duration_ms=12,
+        result_lineage=result_lineage,
+        replace_result_lineage=True,
     )
 
     assert renewed is True
@@ -377,6 +458,8 @@ async def test_action_status_cas_allows_only_one_execution_claim(db_session) -> 
     assert succeeded.finished_at is not None
     assert succeeded.execution_owner is None
     assert succeeded.execution_lease_expires_at is None
+    assert succeeded.subject_refs == [{"type": "user", "id": "99002"}]
+    assert succeeded.subject_refs_hash == result_lineage.subject_refs_hash
 
 
 async def test_pending_query_is_scoped_and_requires_active_source(db_session) -> None:

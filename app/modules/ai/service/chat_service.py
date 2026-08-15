@@ -31,6 +31,10 @@ from app.modules.ai.service.conversation_service import conversation_service
 from app.modules.ai.service.model_authorization_service import (
     model_authorization_service,
 )
+from app.modules.ai.service.result_projection_service import (
+    ProjectionLineage,
+    result_projection_service,
+)
 from app.modules.system.models.user import User
 
 
@@ -83,6 +87,7 @@ class ChatService:
         parts: list[dict] | None = None,
         agent_code: str | None = None,
         trace_id: str | None = None,
+        tenant_id: int | None = None,
     ):
         """保存用户消息并透传 ``agent_code``。"""
         message = await conversation_service.save_message(
@@ -93,6 +98,7 @@ class ChatService:
             parts=parts,
             agent_code=agent_code,
             trace_id=trace_id,
+            tenant_id=tenant_id,
         )
         await db.flush()
         return message
@@ -108,6 +114,7 @@ class ChatService:
         agent_code: str | None = None,
         trace_id: str | None = None,
         source_user_message_id: int | None = None,
+        lineage: ProjectionLineage | None = None,
     ):
         """保存 AI 响应消息
 
@@ -129,6 +136,7 @@ class ChatService:
             agent_code=agent_code,
             trace_id=trace_id,
             parent_message_id=source_user_message_id,
+            lineage=lineage,
         )
         await db.flush()
         return message
@@ -208,6 +216,11 @@ class ChatService:
 
         perms = agent_authorization_service.tool_permissions(user)
         data_scope = await build_data_scope_context(db, user)
+        data_scope_hash = await result_projection_service.compute_data_scope_hash(
+            db,
+            user,
+            data_scope=data_scope,
+        )
 
         # 取会话上轮 agent_code（粘滞用）
         conv_agent_code: str | None = None
@@ -273,6 +286,7 @@ class ChatService:
             trace_id=trace_id or f"tr_{uuid.uuid4().hex[:16]}",
             tenant_id=resolve_tenant_id(user),
             sticky_decision=decision,
+            data_scope_hash=data_scope_hash,
         )
 
     async def attach_agent_to_deps(self, deps: ChatDeps, agent_code: str) -> None:

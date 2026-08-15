@@ -64,6 +64,9 @@ from app.modules.ai.service.chat_run_service import (
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.ai.service.prepared_action_service import prepared_action_service
+from app.modules.ai.service.result_projection_service import (
+    result_projection_service,
+)
 from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
 
@@ -370,6 +373,11 @@ async def _confirm_prepared(
         deps.source_user_message_id = action.source_user_message_id
         deps.guard_owner_token = action.guard_owner_token
         deps.command_action = action.command_action
+        current_data_scope_hash = getattr(deps, "data_scope_hash", None)
+        prepared_action_service.validate_data_scope_snapshot(
+            action,
+            current_data_scope_hash=current_data_scope_hash,
+        )
         validate_prepared_execution(action, deps)
     except BusinessException as exc:
         terminal = await _terminalize_before_execution(
@@ -459,6 +467,19 @@ async def _confirm_prepared(
                     "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
                 )
             was_running = current.status == PreparedActionStatus.RUNNING.value
+            result_lineage = None
+            if result.ok and result.projection is not None:
+                result_lineage = result_projection_service.freeze_lineage(
+                    tenant_id=current.tenant_id,
+                    agent_code=current.agent_code,
+                    tool_codes=current.tool_codes or [current.execute_tool_name],
+                    subject_refs=result.projection.subject_refs,
+                    data_scope_hash=(
+                        current_data_scope_hash
+                        if result.projection.scope_bound
+                        else None
+                    ),
+                )
             terminal = await prepared_action_service.transition_status(
                 terminal_db,
                 action_id=current.action_id,
@@ -469,6 +490,8 @@ async def _confirm_prepared(
                 result_data=result.data if result.ok else None,
                 result_ui=_ui_to_dict(result.ui) if result.ok else None,
                 duration_ms=duration_ms,
+                result_lineage=result_lineage,
+                replace_result_lineage=result.ok,
             )
             if terminal is None:
                 terminal = current

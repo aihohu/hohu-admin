@@ -10,7 +10,7 @@ tool_calls 在 chat.py::_record_tool_event 中以 list[dict] 形式收集
 from datetime import datetime
 
 from app.modules.ai.models.message import AiMessage
-from app.modules.ai.schemas.message import MessageOut
+from app.modules.ai.schemas.message import MessageOut, MessageTombstoneOut
 
 
 def _make_msg(*, tool_calls: list | None) -> AiMessage:
@@ -154,3 +154,31 @@ def test_ai_message_routing_feedback_check_constraint():
 
     constraints = {c.name for c in AiMessage.__table__.constraints if c.name}
     assert "ck_ai_message_routing_feedback" in constraints
+
+
+def test_ai_message_has_nullable_authorization_lineage_columns() -> None:
+    expected = {
+        "tenant_id",
+        "tool_codes",
+        "subject_refs",
+        "subject_refs_hash",
+        "data_scope_hash",
+        "resolver_version",
+    }
+
+    assert expected <= set(AiMessage.__table__.columns.keys())
+    assert all(AiMessage.__table__.columns[name].nullable for name in expected)
+
+
+def test_message_tombstone_contains_no_business_payload() -> None:
+    output = MessageTombstoneOut(
+        messageId=9001,
+        role="assistant",
+    ).model_dump(by_alias=True)
+
+    assert output == {
+        "messageId": "9001",
+        "role": "assistant",
+        "status": "redacted",
+        "errorCode": "AI_RESULT_PROJECTION_FORBIDDEN",
+    }

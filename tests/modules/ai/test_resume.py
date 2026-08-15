@@ -18,6 +18,9 @@ from app.core.exceptions import (
 )
 from app.modules.ai.agents.hitl.manager import PendingPayload
 from app.modules.ai.api.resume import _load_durable_resume_terminal, resume_chat
+from app.modules.ai.service.result_projection_service import (
+    result_projection_service,
+)
 
 
 def _make_pending(
@@ -52,6 +55,47 @@ def _make_user(user_id: int = 100, *, can_chat: bool = True):
     )
 
 
+def _make_durable_action(**overrides):
+    lineage = result_projection_service.freeze_lineage(
+        tenant_id=0,
+        agent_code="user_mgmt",
+        tool_codes=["user.update"],
+        subject_refs=[{"type": "user", "id": "42"}],
+    )
+    values = {
+        "action_id": 9001,
+        "confirmation_id": "cid",
+        "user_id": 100,
+        "tenant_id": lineage.tenant_id,
+        "conversation_id": 1,
+        "execute_tool_call_id": "tc_test",
+        "execute_tool_name": "user.update",
+        "prepare_tool_call_id": None,
+        "trace_id": "tr_test",
+        "interaction_flow": "direct",
+        "presentation": {"title": "Update user", "summary": "Update one user"},
+        "guard_owner_token": None,
+        "status": "pending_confirmation",
+        "finished_at": None,
+        "expires_at": datetime(2099, 1, 1, tzinfo=UTC),
+        "frozen_args": {"user_id": 42},
+        "source_user_message_id": 12,
+        "command_action": "send",
+        "agent_code": lineage.agent_code,
+        "risk_level": "high",
+        "chip_target": None,
+        "tool_codes": list(lineage.tool_codes),
+        "subject_refs": list(lineage.subject_refs),
+        "subject_refs_hash": lineage.subject_refs_hash,
+        "data_scope_hash": lineage.data_scope_hash,
+        "resolver_version": lineage.resolver_version,
+        "resolved_model_id": 7001,
+        "resolved_provider_id": 8001,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 def _make_request(last_event_id: str | None = None):
     """构造 FastAPI Request mock（headers.get('last-event-id')）"""
     req = MagicMock()
@@ -82,10 +126,21 @@ def _mock_pending_delete():
 
 @pytest.fixture(autouse=True)
 def _mock_prepared_action_lookup():
-    """Legacy fixtures remain Redis-only unless a test opts into durable mode."""
+    """Use complete durable lineage unless a test explicitly covers legacy data."""
     with patch(
         "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
-        AsyncMock(return_value=None),
+        AsyncMock(return_value=_make_durable_action()),
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _allow_result_projection():
+    """Keep resume mechanics isolated from the dedicated projection-policy tests."""
+    with patch.object(
+        result_projection_service,
+        "authorize_result_projection",
+        AsyncMock(return_value=True),
     ):
         yield
 
@@ -118,9 +173,15 @@ class TestResumeDisabled:
             # 端点不再因 memory 模式立即抛 410——会继续走 Redis 查 pending。
             # 用 mock 让 get_pending 返 None，验证端点往下走到 AI_RESUME_NOT_FOUND
             # 而不是 AI_RESUME_DISABLED。
-            with patch(
-                "app.modules.ai.api.resume.hitl_manager.get_pending",
-                return_value=None,
+            with (
+                patch(
+                    "app.modules.ai.api.resume.hitl_manager.get_pending",
+                    return_value=None,
+                ),
+                patch(
+                    "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
+                    AsyncMock(return_value=None),
+                ),
             ):
                 with pytest.raises(NotFoundException) as exc_info:
                     await resume_chat(
@@ -158,9 +219,15 @@ class TestResumeNotFound:
     async def test_pending_missing_returns_404(
         self, _resume_enabled, _redis_pubsub_mode
     ) -> None:
-        with patch(
-            "app.modules.ai.api.resume.hitl_manager.get_pending",
-            AsyncMock(return_value=None),
+        with (
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.get_pending",
+                AsyncMock(return_value=None),
+            ),
+            patch(
+                "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
+                AsyncMock(return_value=None),
+            ),
         ):
             with pytest.raises(NotFoundException) as exc_info:
                 await resume_chat(
@@ -194,6 +261,61 @@ class TestResumeForbidden:
 
 
 class TestResumeMinimalStatus:
+    async def test_legacy_pending_without_lineage_returns_minimal_status(
+        self, _resume_enabled, _redis_pubsub_mode
+    ) -> None:
+        with (
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.get_pending",
+                AsyncMock(return_value=_make_pending()),
+            ),
+            patch(
+                "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
+                AsyncMock(return_value=None),
+            ),
+        ):
+            result = await resume_chat(
+                request=_make_request("cid"),
+                confirmation_id_query="cid",
+                db=MagicMock(),
+                current_user=_make_user(can_chat=True),
+            )
+
+        assert result.data.model_dump(by_alias=True) == {
+            "confirmationId": "cid",
+            "status": "pending_confirmation",
+            "errorCode": "AI_RESULT_PROJECTION_FORBIDDEN",
+            "finishedAt": None,
+        }
+
+    async def test_revoked_projection_returns_minimal_status(
+        self, _resume_enabled, _redis_pubsub_mode
+    ) -> None:
+        action = _make_durable_action(status="succeeded")
+        with (
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.get_pending",
+                AsyncMock(return_value=None),
+            ),
+            patch(
+                "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
+                AsyncMock(return_value=action),
+            ),
+            patch.object(
+                result_projection_service,
+                "authorize_result_projection",
+                AsyncMock(return_value=False),
+            ),
+        ):
+            result = await resume_chat(
+                request=_make_request("cid"),
+                confirmation_id_query="cid",
+                db=MagicMock(),
+                current_user=_make_user(can_chat=True),
+            )
+
+        assert result.data.error_code == "AI_RESULT_PROJECTION_FORBIDDEN"
+
     async def test_revoked_permission_replays_durable_terminal_without_redis_pending(
         self, _resume_enabled, _redis_pubsub_mode
     ) -> None:
@@ -458,10 +580,16 @@ class TestLastEventIdHeaderPriority:
         self, _resume_enabled, _redis_pubsub_mode
     ) -> None:
         """同时设头（cid_from_header）和 query param（cid_from_query）→ 用头"""
-        with patch(
-            "app.modules.ai.api.resume.hitl_manager.get_pending",
-            AsyncMock(return_value=None),
-        ) as mock_get:
+        with (
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.get_pending",
+                AsyncMock(return_value=None),
+            ) as mock_get,
+            patch(
+                "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
+                AsyncMock(return_value=None),
+            ),
+        ):
             with pytest.raises(NotFoundException):
                 await resume_chat(
                     request=_make_request(last_event_id="cid_from_header"),
@@ -475,10 +603,16 @@ class TestLastEventIdHeaderPriority:
     async def test_query_param_fallback(
         self, _resume_enabled, _redis_pubsub_mode
     ) -> None:
-        with patch(
-            "app.modules.ai.api.resume.hitl_manager.get_pending",
-            AsyncMock(return_value=None),
-        ) as mock_get:
+        with (
+            patch(
+                "app.modules.ai.api.resume.hitl_manager.get_pending",
+                AsyncMock(return_value=None),
+            ) as mock_get,
+            patch(
+                "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
+                AsyncMock(return_value=None),
+            ),
+        ):
             with pytest.raises(NotFoundException):
                 await resume_chat(
                     request=_make_request(last_event_id=None),
@@ -498,9 +632,9 @@ class TestResumeSuccessPath:
 
     @pytest.fixture
     def _mock_deps_for_success(self, _resume_enabled, _redis_pubsub_mode):
-        """成功路径所需的所有 mock：pending + ttl + 锁 + hang APPROVED + execute_tool"""
-        from app.modules.ai.agents.gateway.result import ToolResult
+        """Mock a complete durable handoff and its committed terminal replay."""
         from app.modules.ai.agents.hitl.constants import ConfirmAction
+        from app.modules.ai.agents.hitl.events import DoneEvent, ToolCallResultEvent
 
         with (
             patch(
@@ -524,10 +658,27 @@ class TestResumeSuccessPath:
                 AsyncMock(return_value=ConfirmAction.APPROVED),
             ),
             patch(
-                "app.modules.ai.api.resume.resume_tool_execution",
+                "app.modules.ai.api.resume._load_durable_resume_terminal",
                 AsyncMock(
-                    return_value=(ToolResult.success(data={"affected_count": 1}), 150)
+                    return_value=[
+                        ToolCallResultEvent(
+                            tool="user.update",
+                            tool_call_id="tc_test",
+                            ok=True,
+                            duration_ms=150,
+                            result={"affected_count": 1},
+                        ),
+                        DoneEvent(
+                            trace_id="tr_test",
+                            persistence="committed",
+                            projection="updated",
+                        ),
+                    ]
                 ),
+            ),
+            patch(
+                "app.modules.ai.api.resume._cleanup_durable_resume",
+                AsyncMock(),
             ),
             patch(
                 "app.modules.ai.api.resume.operation_log_service.get_by_tool_call_id",
@@ -750,27 +901,19 @@ class TestResumeSuccessPath:
 
 
 class TestDurableTerminalProjection:
-    async def test_replays_result_ui_and_accepts_legacy_payload_without_action_id(
+    async def test_replays_result_ui_after_terminal_reauthorization(
         self,
     ) -> None:
-        action = SimpleNamespace(
-            action_id=9001,
-            confirmation_id="cid",
+        action = _make_durable_action(
             status="succeeded",
-            user_id=100,
-            tenant_id=0,
-            conversation_id=1,
-            execute_tool_call_id="tc_test",
-            execute_tool_name="user.export",
-            trace_id="tr_test",
             duration_ms=8,
-            result_data={"fileId": "file-1"},
+            result_data={"updated": 1},
             result_ui={
                 "viewType": "detail_card",
-                "viewData": {"downloadUrl": "/api/v1/files/file-1/download"},
-                "audit": {"affectedCount": 12},
-                "labelKey": "ai.tool.user.export.result",
-                "labelParams": {"count": 12},
+                "viewData": {"count": 1},
+                "audit": {"affectedCount": 1},
+                "labelKey": "ai.tool.user.update.result",
+                "labelParams": {"count": 1},
             },
             error_code=None,
         )
@@ -787,12 +930,18 @@ class TestDurableTerminalProjection:
                 "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
                 AsyncMock(return_value=action),
             ),
+            patch.object(
+                result_projection_service,
+                "authorize_result_projection",
+                AsyncMock(return_value=True),
+            ) as authorize,
         ):
             events = await _load_durable_resume_terminal(
                 confirmation_id="cid",
                 pending=_make_pending(action_id=None),
                 user_id=100,
                 tenant_id=0,
+                current_user=_make_user(),
             )
 
         result = events[0]
@@ -800,13 +949,56 @@ class TestDurableTerminalProjection:
         assert result.ok is True
         assert result.ui is not None
         assert result.ui.view_type == "detail_card"
-        assert result.ui.view_data["downloadUrl"].endswith("/file-1/download")
+        assert result.ui.view_data["count"] == 1
         assert events[1].message_id == 123
+        authorize.assert_awaited_once()
+
+    async def test_revocation_during_wait_suppresses_terminal_business_result(
+        self,
+    ) -> None:
+        """The terminal read must not trust authorization from before the wait."""
+        action = _make_durable_action(
+            status="succeeded",
+            duration_ms=8,
+            result_data={"updated": 1, "secret": "must-not-leak"},
+            result_ui={"viewType": "plain_json", "viewData": {"updated": 1}},
+            error_code=None,
+        )
+        fake_db = AsyncMock()
+        fake_db.__aenter__ = AsyncMock(return_value=fake_db)
+        fake_db.__aexit__ = AsyncMock(return_value=None)
+        fake_db.scalar = AsyncMock(return_value=123)
+        with (
+            patch(
+                "app.modules.ai.api.resume.AsyncSessionLocal",
+                MagicMock(return_value=fake_db),
+            ),
+            patch(
+                "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
+                AsyncMock(return_value=action),
+            ),
+            patch.object(
+                result_projection_service,
+                "authorize_result_projection",
+                AsyncMock(return_value=False),
+            ),
+        ):
+            events = await _load_durable_resume_terminal(
+                confirmation_id="cid",
+                pending=_make_pending(action_id=9001),
+                user_id=100,
+                tenant_id=0,
+                current_user=_make_user(),
+            )
+
+        assert [event.type for event in events] == ["ai_error", "done"]
+        assert events[0].error_code == "AI_RESULT_PROJECTION_FORBIDDEN"
 
     async def test_rejected_path_emits_failure_result(
         self, _resume_enabled, _redis_pubsub_mode
     ) -> None:
         from app.modules.ai.agents.hitl.constants import ConfirmAction
+        from app.modules.ai.agents.hitl.events import DoneEvent, ToolCallResultEvent
 
         # AsyncSessionLocal mock：REJECTED 分支开真实 DB session 做 mark_rejected
         fake_db = AsyncMock()
@@ -833,6 +1025,30 @@ class TestDurableTerminalProjection:
             patch(
                 "app.modules.ai.api.resume.hitl_manager.hang",
                 AsyncMock(return_value=ConfirmAction.REJECTED),
+            ),
+            patch(
+                "app.modules.ai.api.resume._load_durable_resume_terminal",
+                AsyncMock(
+                    return_value=[
+                        ToolCallResultEvent(
+                            tool="user.update",
+                            tool_call_id="tc_test",
+                            ok=False,
+                            duration_ms=0,
+                            error_code="USER_REJECTED",
+                            error_msg="Rejected",
+                        ),
+                        DoneEvent(
+                            trace_id="tr_test",
+                            persistence="committed",
+                            projection="updated",
+                        ),
+                    ]
+                ),
+            ),
+            patch(
+                "app.modules.ai.api.resume._cleanup_durable_resume",
+                AsyncMock(),
             ),
             patch(
                 "app.modules.ai.api.resume.operation_log_service.get_by_tool_call_id",
@@ -872,6 +1088,8 @@ class TestResumeTimeoutPath:
     async def test_hang_timeout_emits_ai_error(
         self, _resume_enabled, _redis_pubsub_mode
     ) -> None:
+        from app.modules.ai.agents.hitl.events import DoneEvent
+
         # AsyncSessionLocal 必须也 mock：resume.py 在 TimeoutError 分支会开真实 DB
         # session 做 mark_expired_if_pending，未 mock 会 checkout 真连接，下个测试
         # 的 event loop 关闭时 asyncpg _terminate_graceful_close 抛 RuntimeError。
@@ -900,6 +1118,18 @@ class TestResumeTimeoutPath:
             patch(
                 "app.modules.ai.api.resume.hitl_manager.hang",
                 AsyncMock(side_effect=TimeoutError()),
+            ),
+            patch(
+                "app.modules.ai.api.resume._terminalize_durable_resume_failure",
+                AsyncMock(
+                    return_value=[
+                        DoneEvent(
+                            trace_id="tr_test",
+                            persistence="committed",
+                            projection="updated",
+                        )
+                    ]
+                ),
             ),
             patch(
                 "app.modules.ai.api.resume.operation_log_service.get_by_tool_call_id",
@@ -1013,8 +1243,8 @@ class TestOwnerLockRelease:
     async def test_lock_released_after_success(
         self, _resume_enabled, _redis_pubsub_mode
     ) -> None:
-        from app.modules.ai.agents.gateway.result import ToolResult
         from app.modules.ai.agents.hitl.constants import ConfirmAction
+        from app.modules.ai.agents.hitl.events import DoneEvent
 
         with (
             patch(
@@ -1038,8 +1268,16 @@ class TestOwnerLockRelease:
                 AsyncMock(return_value=ConfirmAction.APPROVED),
             ),
             patch(
-                "app.modules.ai.api.resume.resume_tool_execution",
-                AsyncMock(return_value=(ToolResult.success(data={}), 100)),
+                "app.modules.ai.api.resume._load_durable_resume_terminal",
+                AsyncMock(
+                    return_value=[
+                        DoneEvent(
+                            trace_id="tr_test",
+                            persistence="committed",
+                            projection="updated",
+                        )
+                    ]
+                ),
             ),
             patch(
                 "app.modules.ai.api.resume.operation_log_service.get_by_tool_call_id",
@@ -1065,6 +1303,8 @@ class TestOwnerLockRelease:
         self, _resume_enabled, _redis_pubsub_mode
     ) -> None:
         """hang 抛非 TimeoutError 异常时锁也要释放（finally 块）"""
+        from app.modules.ai.agents.hitl.events import DoneEvent
+
         with (
             patch(
                 "app.modules.ai.api.resume.hitl_manager.get_pending",
@@ -1085,6 +1325,18 @@ class TestOwnerLockRelease:
             patch(
                 "app.modules.ai.api.resume.hitl_manager.hang",
                 AsyncMock(side_effect=RuntimeError("redis gone")),
+            ),
+            patch(
+                "app.modules.ai.api.resume._terminalize_durable_resume_failure",
+                AsyncMock(
+                    return_value=[
+                        DoneEvent(
+                            trace_id="tr_test",
+                            persistence="failed",
+                            projection="updated",
+                        )
+                    ]
+                ),
             ),
             patch(
                 "app.modules.ai.api.resume.operation_log_service.get_by_tool_call_id",

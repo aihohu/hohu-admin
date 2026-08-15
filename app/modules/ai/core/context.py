@@ -112,6 +112,15 @@ class ChatDeps:
     guard_handoff: bool = False
     """进入 HITL pending 后为 True；原 SSE 断开不得释放 guard。"""
 
+    resolved_model_id: int | None = None
+    """Stable model selected for this run and frozen into new prepared actions."""
+
+    resolved_provider_id: int | None = None
+    """Stable provider selected for this run and frozen into new prepared actions."""
+
+    data_scope_hash: str | None = None
+    """Canonical resolver state used only by scope-bound result projections."""
+
 
 @dataclass
 class AiToolContext:
@@ -133,6 +142,9 @@ class AiToolContext:
 
     tenant_id: int = 0
     """继承自 ChatDeps 的可信租户，用于 file/resource ACL。"""
+
+    data_scope_hash: str | None = None
+    """Canonical resolver state used by scope-bound result projections."""
 
     secrets: dict[str, str] = field(default_factory=dict)
     """由可信服务端注入、不会出现在普通工具参数中的敏感值。"""
@@ -161,5 +173,6 @@ def build_tool_context(
         trace_id=deps.trace_id,
         tool_meta=tool_meta,
         tenant_id=deps.tenant_id,
+        data_scope_hash=deps.data_scope_hash,
         secrets={},
     )
