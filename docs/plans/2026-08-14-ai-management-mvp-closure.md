@@ -1,6 +1,6 @@
 # AI 管理能力 MVP 收口实施计划
 
-> 状态：Phase 1 / P1-D 后端已完成；Web 待开发，中间构建禁止部署
+> 状态：Phase 1（含 Web 审查修复）已完成；只允许进入 Phase 2 集成，中间构建禁止部署
 > 日期：2026-08-14
 > 唯一需求基线：[`../specs/2026-08-14-ai-management-mvp-closure.md`](../specs/2026-08-14-ai-management-mvp-closure.md)
 > 影响项目：`hohu-admin`、`hohu-admin-web`
@@ -16,11 +16,11 @@
 
 ## 2. 当前基线
 
-- Alembic 当前单一 head：`b8e4c7d2a1f0`。
+- Alembic 当前单一 head：`c9f5d8e3b2a1`。
 - `AI_MODULE_ENABLED` 默认值为 `true`；P1-A 已实现关闭态 `/ai`/`/ai/**` 统一 503 且 AI 业务依赖不 import/初始化。
-- P1-A 已完成用户入口和分支权限；P1-B 已完成统一 Agent/Tool Policy、三模型端点、当前 LLM run selector、Agent 全局编辑边界及阶段安全 seed；P1-C 已完成 Provider 全链路 hardened egress、已保存对象测试端点和存量 quarantine 审计；P1-D 已完成后端 lineage、历史结果实时投影授权和短期下载 token。Web 状态与缓存收口仍待开发。
+- P1-A 已完成用户入口和分支权限；P1-B 已完成统一 Agent/Tool Policy、三模型端点、当前 LLM run selector、Agent 全局编辑边界及阶段安全 seed；P1-C 已完成 Provider 全链路 hardened egress、已保存对象测试端点和存量 quarantine 审计；P1-D 已完成 lineage、历史结果实时投影授权、短期下载 token 及 Web fail-closed 投影收口。
 - DataScope 当前按最高优先级角色计算，用户/部门/角色传统写入口尚未复用统一 GrantAuthority。
-- Web 已有 AI 和系统管理页面，但仍使用旧的合并写入、模型列表、Provider test、部门移动和 Role-Agent shared 契约。
+- Web 的 Phase 1 三模型端点、已保存 Provider test、Agent 编辑可见性、稳定不可用状态及 tombstone 缓存清理已完成；部门移动和 Role-Agent shared 等 Phase 2 契约仍待迁移。
 - 后端 CI 已有 70% 覆盖率门禁；Web 尚无 `test:coverage`、多角色 E2E 和独立真实 Provider project。
 
 ## 3. 交付顺序
@@ -145,7 +145,7 @@ Phase 0 文档基线
 - 拆分 `/ai/chat/models`、`/ai/admin/agents/model-options`、`/ai/provider/models`；所有新 LLM run 复用 `authorize_chat_model()`。
 - Agent 全局可变字段必须同时满足启用 `R_SUPER` 和 `ai:agent:edit`，混合非法字段 payload 整体拒绝。
 
-状态：✅ 已完成（2026-08-15；审查修复 2026-08-15）。Agent 列表、显式/粘滞/Supervisor/default、confirm/resume 与 Gateway 共用授权规则；R_SUPER/shared 不再绕过 Role-Agent，Tool 与运行时 Agent 精确归属。显式 falsy `modelId` 不再 fallback，Supervisor 保留模型授权错误，legacy approve 的入口撤权和自动禁用统一终态收口。当前阶段只有已闭环的 shared 进入发布集合，`user_mgmt/dept_mgmt/role_mgmt` 在 Phase 2/3 完成前保持 fresh 默认禁用；upgrade 只补缺失绑定并保留显式 disabled 状态。P1-C egress 已完成，P1-D lineage/result projection 和 Web endpoint 切换仍待开发，本构建不可部署。
+状态：✅ 已完成（2026-08-15；审查修复 2026-08-15）。Agent 列表、显式/粘滞/Supervisor/default、confirm/resume 与 Gateway 共用授权规则；R_SUPER/shared 不再绕过 Role-Agent，Tool 与运行时 Agent 精确归属。显式 falsy `modelId` 不再 fallback，Supervisor 保留模型授权错误，legacy approve 的入口撤权和自动禁用统一终态收口。当前阶段只有已闭环的 shared 进入发布集合，`user_mgmt/dept_mgmt/role_mgmt` 在 Phase 2/3 完成前保持 fresh 默认禁用；upgrade 只补缺失绑定并保留显式 disabled 状态。P1-C、P1-D 及 Web endpoint 切换已完成，本构建仍不可部署。
 
 验证：`ruff check .`、`ruff format --check .`、`python scripts/check_ai_tools.py`（19 tools / 12 checks）、Agent/endpoint/model/seed/migration/Gateway 定向回归、AI 模块 952 项和全量 1911 项测试均通过；总覆盖率 72.74%，Alembic current/head 均为单一 `b8e4c7d2a1f0`，仅保留 2 条既有 SQLAlchemy transaction warning。
 
@@ -182,7 +182,7 @@ Phase 0 文档基线
 
 #### P1-D lineage 与结果投影
 
-状态：✅ 后端已完成（2026-08-15；审查修复 2026-08-15）。Web tombstone 展示与旧缓存清理仍属于后续 Web 工作包；本中间构建继续禁止部署。
+状态：✅ 已完成（后端 2026-08-15；Web 2026-08-15）。Web 已接入 tombstone/最小 pending 状态并清除旧结果、工具卡、流事件和 confirmation presentation；本中间构建继续禁止部署。
 
 修改：
 
@@ -209,6 +209,8 @@ Phase 0 文档基线
 
 ### 5.2 Web 工作包
 
+状态：✅ 已完成（2026-08-15；审查修复 2026-08-15）。三模型调用按聊天、Agent 管理和 Provider 管理分离；Agent option 直接保存稳定字符串 `modelId`，后端兼容接受 `modelId` 与 legacy `provider:model`，不从 `label` 反解析模型名。Agent detail 完成后才加载 option，并用加载序号拒绝旧 Drawer 响应覆盖。Provider 仅测试已保存的 Provider/Model，存在未保存 Provider 修改时禁用测试并提示先保存，同时显示 `EGRESS_POLICY_BLOCKED`。聊天页对无入口、模块关闭、无 Agent、无模型、选中模型失效和 tombstone 显示稳定状态；首次挂载及 `KeepAlive` 再激活均重新获取当前 conversation detail，授权撤销投影会同步中止主 SSE、resume、operation-log polling 并清空 reasoning/stream/presentation 缓存。非 `R_SUPER` 即使持有按钮权限也不显示 Agent 编辑入口，后端继续执行最终 `R_SUPER + ai:agent:edit` 校验。
+
 修改：
 
 - `src/service/api/ai.ts`
@@ -225,6 +227,13 @@ Phase 0 文档基线
 - `src/views/ai/chat/modules/chat-message.vue`
 - `src/views/ai/chat/modules/chat-tool-call.vue`
 - `src/views/ai/chat/modules/chat-confirmation-drawer.vue`
+- `src/locales/langs/en-us.ts`
+- `src/locales/langs/zh-cn.ts`
+- `src/typings/app.d.ts`
+- `app/modules/ai/service/agent_admin.py`
+- Web Agent/Provider/chat/store/API Vitest 与 `tests/modules/ai/test_agent_admin.py`
+
+核对后无需直接修改 `src/typings/api/ai-agent.ts`、`chat-tool-call.vue` 和 `chat-confirmation-drawer.vue`：前者现有字段已覆盖契约，后两者随 store 权威投影替换而卸载旧卡片/抽屉内容。
 
 实现：
 
@@ -232,6 +241,10 @@ Phase 0 文档基线
 - 无入口、无可见 Agent、模型不可用和 tombstone 均使用稳定 UI 状态。
 - 后端判定不可见时清除 store 中对应历史结果、工具卡和 presentation，不能从旧内存恢复。
 - 非 R_SUPER 不显示 Agent 编辑入口；后端仍是最终安全边界。
+
+数据库与权限：本 Web 工作包无数据库迁移、菜单权限或角色绑定变化；继续复用 P1-A/P1-B 已落地的权限记录与 migration。
+
+验证：Web `pnpm fmt`、`pnpm typecheck`、`pnpm test`（29 files / 107 tests）和 `pnpm build` 通过；`pnpm lint` 零 error，仅报告 30 条既有 warning。后端 Agent admin/model authorization 定向回归 26 项及全量 1975 项通过，`ruff check .`、`ruff format --check .` 通过，全量仅保留 2 条既有 SQLAlchemy warning。仓库级 `vitest --coverage` 当前为 statements 31.84%、branches 26.25%、functions 19.58%、lines 33.30%，暴露的是既有全局测试门禁缺口；按本计划 Phase 4 完成 `test:coverage` 与全局 ≥70% 前，仍禁止部署。
 
 ### 5.3 数据库与数据升级
 

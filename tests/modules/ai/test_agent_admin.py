@@ -363,6 +363,22 @@ async def test_model_preference_format_only_no_existence_check(
     assert resp.json()["data"]["modelPreference"] == "xxx:yyy"
 
 
+async def test_model_preference_accepts_safe_option_model_id(
+    authed_client: tuple[AsyncClient, str], db_session, seed_agents
+):
+    """The Agent editor can persist the modelId returned by model-options."""
+    client, _ = authed_client
+    shared_id = await _get_agent_id_by_code(client, "shared")
+
+    resp = await client.put(
+        f"/ai/admin/agents/{shared_id}",
+        json={"modelPreference": "9007199254740993"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["data"]["modelPreference"] == "9007199254740993"
+
+
 async def test_model_preference_invalid_format(
     authed_client: tuple[AsyncClient, str], db_session, seed_agents
 ):

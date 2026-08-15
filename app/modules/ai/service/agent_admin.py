@@ -93,13 +93,16 @@ class AgentAdminService:
                     error_code="AI_AGENT_DESC_LENGTH_INVALID",
                 )
 
-        # 显式 model_preference 格式校验（决策 #25）—— 同上，需要 400 + 精确
-        # errorCode 供前端识别，而非 Pydantic 的 422 通用响应.
+        # Accept the stable modelId emitted by the safe option endpoint while
+        # retaining the legacy provider:model reference during rolling upgrades.
         if "model_preference" in data and data["model_preference"] is not None:
             pref = data["model_preference"]
-            if not re.match(r"^[a-z0-9_-]+:[a-z0-9_-]+$", pref):
+            if not re.fullmatch(
+                r"(?:[1-9][0-9]*|[a-z0-9_-]+:[a-z0-9_-]+)",
+                pref,
+            ):
                 raise BusinessRuleException(
-                    "model_preference 必须为 'provider:model' 格式",
+                    "model_preference 必须为 modelId 或 'provider:model' 格式",
                     error_code="AI_AGENT_MODEL_PREFERENCE_INVALID",
                 )
 
