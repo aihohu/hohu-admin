@@ -1,17 +1,34 @@
+import asyncio
+import logging
+
+from pydantic_ai import Agent
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import (
+    BusinessException,
     BusinessRuleException,
     DuplicateException,
     NotFoundException,
 )
 from app.core.security import decrypt_value, encrypt_value
-from app.modules.ai.core.provider_registry import create_model, get_default_model
+from app.core.tenant import DEFAULT_TENANT_ID
+from app.modules.ai.core.provider_egress import (
+    provider_egress,
+    provider_upstream_error,
+)
+from app.modules.ai.core.provider_registry import create_model
 from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.provider import AiProvider
-from app.modules.ai.schemas.provider import ProviderCreate, ProviderUpdate
+from app.modules.ai.schemas.provider import (
+    ProviderCreate,
+    ProviderOut,
+    ProviderTestResult,
+    ProviderUpdate,
+)
 from app.utils.pagination import build_filters, paginate
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderService:
@@ -24,9 +41,28 @@ class ProviderService:
             "is_enabled": "is_enabled",
         }
         filters = build_filters(AiProvider, field_mapping, **query.model_dump())
-        return await paginate(
+        page = await paginate(
             db=db, model=AiProvider, query_params=query, filters=filters
         )
+        semaphore = asyncio.Semaphore(10)
+
+        async def check(provider: AiProvider) -> bool:
+            async with semaphore:
+                return await provider_egress.is_configuration_allowed(
+                    provider.provider_code,
+                    provider.base_url,
+                    configs=(provider.config,),
+                )
+
+        checks = await asyncio.gather(*(check(provider) for provider in page.records))
+        records: list[ProviderOut] = []
+        for provider, allowed in zip(page.records, checks, strict=True):
+            payload = ProviderOut.model_validate(provider).model_copy(
+                update={"egress_status": None if allowed else "EGRESS_POLICY_BLOCKED"}
+            )
+            records.append(payload)
+        page.records = records
+        return page
 
     async def get_all_enabled(self, db: AsyncSession) -> list[AiProvider]:
         stmt = select(AiProvider).where(AiProvider.is_enabled.is_(True))
@@ -48,6 +84,8 @@ class ProviderService:
         if existing.scalar_one_or_none():
             raise DuplicateException(field="提供商标识", value=data.provider_code)
 
+        provider_egress.validate_adapter_config(data.config)
+        await provider_egress.validate_destination(data.provider_code, data.base_url)
         dump = data.model_dump()
         dump["api_key"] = encrypt_value(dump["api_key"])
         obj = AiProvider(**dump)
@@ -74,6 +112,14 @@ class ProviderService:
                     field="提供商标识", value=update_data["provider_code"]
                 )
 
+        if "config" in update_data:
+            provider_egress.validate_adapter_config(update_data["config"])
+        next_provider_code = update_data.get("provider_code", obj.provider_code)
+        next_base_url = (
+            update_data["base_url"] if "base_url" in update_data else obj.base_url
+        )
+        await provider_egress.validate_destination(next_provider_code, next_base_url)
+
         if "api_key" in update_data:
             if update_data["api_key"]:
                 update_data["api_key"] = encrypt_value(update_data["api_key"])
@@ -88,57 +134,79 @@ class ProviderService:
         obj = await self.get_by_id(db, provider_id)
         await db.delete(obj)
 
-    async def resolve_model(self, db: AsyncSession, model_id: str | None = None):
-        """根据 model_id (Snowflake) 解析 AI 模型实例，回退到第一个文本模型"""
-        model = await self._find_model(db, model_id)
-        if model:
-            return await self._build_model_instance(db, model)
+    @staticmethod
+    async def _probe_model(model_instance) -> None:  # noqa: ANN001
+        agent = Agent(model_instance, instructions="Reply with OK")
+        await agent.run("Say OK")
 
-        # 回退到 .env 默认配置
-        fallback = get_default_model()
-        if fallback:
-            return fallback
-
-        raise BusinessRuleException(
-            message="AI 模型未配置，请先在模型管理中添加配置",
-            error_code="AI_MODEL_NOT_CONFIGURED",
-        )
-
-    async def _find_model(self, db: AsyncSession, model_id: str | None):
-        """按 model_id 查找，未指定则回退第一个文本模型"""
-        if model_id:
-            try:
-                model = await db.get(AiModel, int(model_id))
-                if model and model.is_enabled:
-                    provider = await db.get(AiProvider, model.provider_id)
-                    if provider and provider.is_enabled:
-                        return model
-            except (ValueError, TypeError):
-                pass
-
-        # 回退: 第一个启用的文本模型
-        stmt = (
-            select(AiModel)
-            .join(AiProvider, AiModel.provider_id == AiProvider.provider_id)
-            .where(
-                AiModel.is_enabled.is_(True),
-                AiProvider.is_enabled.is_(True),
-                AiModel.capabilities.contains(["text"]),
+    async def test_connection(
+        self,
+        db: AsyncSession,
+        provider_id: int,
+        model_id: int,
+        *,
+        tenant_id: int,
+    ) -> ProviderTestResult:
+        if tenant_id != DEFAULT_TENANT_ID:
+            raise BusinessException(
+                code=404,
+                message="AI提供商不存在",
+                error_code="AI_PROVIDER_NOT_FOUND",
             )
-            .order_by(AiModel.sort_order, AiModel.model_id)
-            .limit(1)
+        provider = await self.get_by_id(db, provider_id)
+        model = await db.get(AiModel, model_id)
+        if model is None:
+            raise BusinessException(
+                code=404,
+                message="AI模型不存在",
+                error_code="AI_MODEL_NOT_FOUND",
+            )
+        if model.provider_id != provider.provider_id:
+            raise BusinessRuleException(
+                "模型不属于指定 Provider",
+                error_code="AI_PROVIDER_MODEL_MISMATCH",
+            )
+        provider_egress.validate_adapter_config(provider.config)
+        provider_egress.validate_adapter_config(model.config)
+        await provider_egress.validate_destination(
+            provider.provider_code, provider.base_url
         )
-        result = await db.execute(stmt)
-        return result.scalar_one_or_none()
+        if model.base_url:
+            await provider_egress.validate_destination(
+                provider.provider_code, model.base_url
+            )
+        try:
+            instance = create_model(
+                provider.provider_code,
+                model.name,
+                decrypt_value(provider.api_key),
+                model.base_url or provider.base_url,
+            )
+            await self._probe_model(instance)
+        except BusinessException:
+            raise
+        except Exception:
+            logger.warning(
+                "AI Provider test failed provider_id=%s model_id=%s category=upstream",
+                provider.provider_id,
+                model.model_id,
+            )
+            raise provider_upstream_error() from None
+        return ProviderTestResult(
+            provider_id=provider.provider_id,
+            model_id=model.model_id,
+        )
 
-    async def _build_model_instance(self, db: AsyncSession, model: AiModel):
-        """根据模型记录构建 Pydantic AI Model 实例"""
-        provider = await self.get_by_id(db, model.provider_id)
-        return create_model(
-            provider.provider_code,
-            model.name,
-            decrypt_value(provider.api_key),
-            model.base_url or provider.base_url,
+    async def resolve_model(self, db: AsyncSession, model_id: str | None = None):
+        """兼容入口也委托统一 selector，不保留未隔离的旧 fallback。"""
+        from app.modules.ai.service.model_authorization_service import (  # noqa: PLC0415
+            model_authorization_service,
+        )
+
+        return await model_authorization_service.resolve_model_instance(
+            db,
+            model_id,
+            tenant_id=DEFAULT_TENANT_ID,
         )
 
 

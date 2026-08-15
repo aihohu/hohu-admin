@@ -47,6 +47,7 @@ class ModelOut(BaseModel):
     config: dict | None
     create_by: str | None
     create_time: datetime
+    egress_status: str | None = None
 
     @field_serializer("model_id", "provider_id")
     def serialize_id(self, v: int, _info):

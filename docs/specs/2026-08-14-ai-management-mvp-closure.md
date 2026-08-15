@@ -763,6 +763,10 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 
 31. **legacy approve 的执行资格拒绝共用终态收口** — rolling-upgrade 遗留的 Redis-only action 在入口撤权或用户自动禁用后都必须先把 operation log/pending projection 收口为 expired、以 rejected 唤醒 waiter，并在离线时释放 guard 和删除 pending，再返回稳定 403。**反例**: `AI_USER_DISABLED` 只返回错误而让 confirmation 保持 pending 到 TTL。**回归**: `tests/modules/ai/test_confirm.py::TestUserDisabled::test_disabled_user_blocked`。
 
+32. **Provider 出站同时校验存储配置与每次最终请求** — 保存时校验只能阻止新坏配置，不能永久信任 DNS 或兼容存量；Provider/Model 两级 URL、网络配置键和 SDK 最终 request 必须共用部署方 allowlist，连接固定到当次全部校验通过的 IP，重试重新解析。**反例**: 只加固 test endpoint、允许 body 传临时 `baseUrl`，或让 OpenAI/Anthropic SDK 自建读取环境代理的 client，仍可从 chat/Supervisor/continuation 绕过 SSRF 边界；把 `modelId` 接受为 JSON number 还会引入 Snowflake 精度风险。**回归**: `tests/modules/ai/test_provider_egress.py`、`tests/modules/ai/test_provider_service.py`、`tests/modules/ai/test_provider_error_handling.py`、`tests/scripts/test_audit_ai_provider_egress.py`。
+
+33. **固定 IP 不能牺牲 TLS origin 身份、取消归还或解压后大小边界** — httpcore 按实际 URL origin 复用连接，若不同 hostname 共用固定 IP 和同一连接池，后一个请求可能复用前一个 hostname 的 TLS 会话；每个原始精确 origin 必须拥有独立底层池。获得并发 permit 后的取消属于 `BaseException` 路径，必须同步归还；响应大小门禁必须在 SDK 解压前成立，因此请求强制 `Accept-Encoding: identity`，Provider 仍返回压缩成功响应时 fail closed。**反例**: 只断言 request extension 含 SNI，却共享按 IP 分组的真实连接池；客户端断流累计耗尽 semaphore；用 132 字节 gzip 解压出 100 KB 绕过 1 KB 限制。**回归**: `tests/modules/ai/test_provider_egress.py::test_transport_isolates_connection_pools_by_original_origin`、`test_transport_releases_concurrency_permit_when_request_is_cancelled`、`test_transport_rejects_compressed_response_before_sdk_decoding`。
+
 ---
 
 ## 10. 实施计划
@@ -782,14 +786,16 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 - [x] TDD 新增 `ai:chat:use` 并按 §3.4 覆盖当前用户侧 AI API；chat/Agent-admin/Provider models 三端点拆分仍待 P1-B。
 - [x] ✅ P1-B 已完成（2026-08-15；审查修复 2026-08-15）：统一 Agent Policy 覆盖列表、显式、粘滞、Supervisor、默认、confirm/resume；移除 R_SUPER/shared Agent 绑定旁路，Gateway、PreparedAction 与 legacy resume 均要求 Tool 精确归属运行时 Agent。统一模型 selector 覆盖 chat、Supervisor、Agent run 与 conversation create/update，拆分 `/ai/chat/models`、`/ai/admin/agents/model-options` 和 Provider 管理 models；显式 falsy `modelId` 不再 fallback，Supervisor 保留 `AI_MODEL_NOT_AVAILABLE` 拒绝语义，legacy approve 的入口撤权与自动禁用均终态收口。Agent 全局配置要求启用 `R_SUPER + ai:agent:edit`，identity 字段混入时整包拒绝。fresh/upgrade 补齐 chat/file/Agent 菜单、R_SUPER 权限、shared 显式绑定及 `ai:enabled_tools` 兼容迁移；仅当前已闭环的 shared 默认启用，三个业务 Agent 等待 Phase 2/3 后再进入发布集合。
 - [x] P1-B 验证证据：`ruff check .`、`ruff format --check .`、`python scripts/check_ai_tools.py`（19 tools / 12 checks）、AI 模块 952 项和全量 1911 项测试通过；总覆盖率 72.74%，Alembic current/head 均为单一 `b8e4c7d2a1f0`，仅保留 2 条既有 SQLAlchemy transaction warning。P1-C egress、P1-D lineage/result projection、Web 切换和 Phase 2 委派仍未完成，本中间构建禁止部署。
+- [x] ✅ P1-C 已完成（2026-08-15；P1 审查修复 2026-08-15）：删除任意字典 `/ai/provider/test-model`，新增严格 `{modelId: string}` 的已保存对象 `POST /ai/provider/{provider_id}/test`；Provider/Model 保存、管理状态、chat-safe selector、旧 `resolve_model`、test、Supervisor、Agent 与 continuation 均接入统一 egress Policy。OpenAI、Anthropic、DeepSeek/兼容 adapter 共享禁环境代理 client，并按原始精确 origin 隔离底层连接池；最终 URL 校验精确 origin/port、全部 DNS/IP，连接固定且保持 Host/TLS SNI。禁 redirect，限制连接/读取/总超时、并发、重试及响应大小；取消路径归还 permit，压缩成功响应在 SDK 解压前 fail closed，上游 body/异常统一脱敏为稳定错误。upgrade 审计只报告 `EGRESS_POLICY_BLOCKED`，运行时 quarantine 不修改 Provider/Model `enabled`。
+- [x] P1-C 验证证据：新增 3 项 P1 transport 回归后，transport 单测 21 项、AI 模块 983 项及全量 1943 项测试通过；`ruff check .`、`ruff format --check .`、19 tools / 12 checks 通过，总覆盖率 73.37%，仅保留 2 条既有 SQLAlchemy warning。开发库审计检查 2 个 Provider/5 个 Model，准确报告 4 个 blocked 对象且零数据改写；这些存量对象在部署方补精确 allowlist 或修改 URL 前保持 quarantine。P1-D、Web endpoint 切换与 Phase 2 仍未完成，本中间构建禁止部署。
 - [x] 实现统一 Agent Policy，覆盖显式、粘滞、Supervisor、默认回退、confirm/resume 和 Tool-Agent 归属。
 - [ ] 为 assistant/tool message、PreparedAction 和 query-cache 持久化不可变 Agent/Tool/subject refs，实现统一结果投影 Policy，覆盖 resume/conversation/query-cache/owner-log 及 legacy fail-closed tombstone。
 - [x] 实现 chat/Supervisor/Agent/conversation 共用的 chat model selector、三端点拆分和 Agent 全局配置超管 Policy；显式无效模型不 fallback，新聊天在 Agent 授权后采用其模型偏好。
 - [ ] P1-D 为 PreparedAction 冻结 model/provider ID，仅在新 LLM continuation 前复验；reject/最小状态回放独立收口、完整回放重新授权但不查模型。
-- [ ] 收口 Provider test 为已保存 Provider；所有 SDK/adapter 注入共享 hardened transport，在 test/chat/Supervisor/Agent/continuation 全路径落地协议、origin、Provider/Model URL、解析 IP、DNS rebinding、redirect、timeout、响应大小和错误脱敏 egress Policy，并审计/隔离不合规存量配置。
+- [x] 收口 Provider test 为已保存 Provider；所有 SDK/adapter 注入共享 hardened transport，在 test/chat/Supervisor/Agent/continuation 全路径落地协议、origin、Provider/Model URL、解析 IP、DNS rebinding、redirect、timeout、响应大小和错误脱敏 egress Policy，并审计/隔离不合规存量配置。
 - [x] 移除 shared/超管 Agent 可见性旁路和 shared 跨 Agent 执行豁免；同步 Registry、Gateway executor、PreparedAction 复验、`check_ai_tools.py`，落地显式 Role-Agent + `ai:file:parse`。
 - [x] 完成 P1-B fresh/upgrade 独立 seed/migration：补齐 Agent/file/管理权限与 R_SUPER 显式 shared 绑定，保留部署方 Agent/Role-Agent/`ai:enabled_tools` 状态；业务 Agent 待自身阶段闭环后再加入发布集合。
-- [ ] 后端 P1-A/P1-B endpoint/Agent 权限矩阵已通过；前端三模型 endpoint、无入口/无 Agent 状态仍待 Web 工作包。Phase 1 只形成代码里程碑，不得绕过门禁独立部署。
+- [ ] 后端 P1-A/P1-B/P1-C endpoint、Agent、模型与 Provider egress 矩阵已通过；前端三模型 endpoint、已保存 Provider test、无入口/无 Agent 状态仍待 Web 工作包。Phase 1 只形成代码里程碑，不得绕过门禁独立部署。
 
 ### Phase 2：用户部门与角色调整
 

@@ -1,6 +1,6 @@
 # AI 管理能力 MVP 收口实施计划
 
-> 状态：Phase 1 / P1-B 已完成；P1-C/P1-D 与 Web 待开发，中间构建禁止部署
+> 状态：Phase 1 / P1-C 已完成；P1-D 与 Web 待开发，中间构建禁止部署
 > 日期：2026-08-14
 > 唯一需求基线：[`../specs/2026-08-14-ai-management-mvp-closure.md`](../specs/2026-08-14-ai-management-mvp-closure.md)
 > 影响项目：`hohu-admin`、`hohu-admin-web`
@@ -18,7 +18,7 @@
 
 - Alembic 当前单一 head：`b8e4c7d2a1f0`。
 - `AI_MODULE_ENABLED` 默认值为 `true`；P1-A 已实现关闭态 `/ai`/`/ai/**` 统一 503 且 AI 业务依赖不 import/初始化。
-- P1-A 已完成用户入口和分支权限；P1-B 已完成统一 Agent/Tool Policy、三模型端点、当前 LLM run selector、Agent 全局编辑边界及阶段安全 seed。Provider egress 和完整历史结果投影仍待 P1-C/P1-D。
+- P1-A 已完成用户入口和分支权限；P1-B 已完成统一 Agent/Tool Policy、三模型端点、当前 LLM run selector、Agent 全局编辑边界及阶段安全 seed；P1-C 已完成 Provider 全链路 hardened egress、已保存对象测试端点和存量 quarantine 审计。完整历史结果投影仍待 P1-D。
 - DataScope 当前按最高优先级角色计算，用户/部门/角色传统写入口尚未复用统一 GrantAuthority。
 - Web 已有 AI 和系统管理页面，但仍使用旧的合并写入、模型列表、Provider test、部门移动和 Role-Agent shared 契约。
 - 后端 CI 已有 70% 覆盖率门禁；Web 尚无 `test:coverage`、多角色 E2E 和独立真实 Provider project。
@@ -145,7 +145,7 @@ Phase 0 文档基线
 - 拆分 `/ai/chat/models`、`/ai/admin/agents/model-options`、`/ai/provider/models`；所有新 LLM run 复用 `authorize_chat_model()`。
 - Agent 全局可变字段必须同时满足启用 `R_SUPER` 和 `ai:agent:edit`，混合非法字段 payload 整体拒绝。
 
-状态：✅ 已完成（2026-08-15；审查修复 2026-08-15）。Agent 列表、显式/粘滞/Supervisor/default、confirm/resume 与 Gateway 共用授权规则；R_SUPER/shared 不再绕过 Role-Agent，Tool 与运行时 Agent 精确归属。显式 falsy `modelId` 不再 fallback，Supervisor 保留模型授权错误，legacy approve 的入口撤权和自动禁用统一终态收口。当前阶段只有已闭环的 shared 进入发布集合，`user_mgmt/dept_mgmt/role_mgmt` 在 Phase 2/3 完成前保持 fresh 默认禁用；upgrade 只补缺失绑定并保留显式 disabled 状态。P1-C egress、P1-D lineage/result projection 和 Web endpoint 切换未开始，本构建不可部署。
+状态：✅ 已完成（2026-08-15；审查修复 2026-08-15）。Agent 列表、显式/粘滞/Supervisor/default、confirm/resume 与 Gateway 共用授权规则；R_SUPER/shared 不再绕过 Role-Agent，Tool 与运行时 Agent 精确归属。显式 falsy `modelId` 不再 fallback，Supervisor 保留模型授权错误，legacy approve 的入口撤权和自动禁用统一终态收口。当前阶段只有已闭环的 shared 进入发布集合，`user_mgmt/dept_mgmt/role_mgmt` 在 Phase 2/3 完成前保持 fresh 默认禁用；upgrade 只补缺失绑定并保留显式 disabled 状态。P1-C egress 已完成，P1-D lineage/result projection 和 Web endpoint 切换仍待开发，本构建不可部署。
 
 验证：`ruff check .`、`ruff format --check .`、`python scripts/check_ai_tools.py`（19 tools / 12 checks）、Agent/endpoint/model/seed/migration/Gateway 定向回归、AI 模块 952 项和全量 1911 项测试均通过；总覆盖率 72.74%，Alembic current/head 均为单一 `b8e4c7d2a1f0`，仅保留 2 条既有 SQLAlchemy transaction warning。
 
@@ -154,10 +154,18 @@ Phase 0 文档基线
 修改：
 
 - `app/modules/ai/api/provider.py`
+- `app/modules/ai/api/chat.py`
+- `app/modules/ai/agents/supervisor/router.py`
 - `app/modules/ai/schemas/provider.py`
+- `app/modules/ai/schemas/model.py`
 - `app/modules/ai/service/provider_service.py`
+- `app/modules/ai/service/model_service.py`
+- `app/modules/ai/service/model_authorization_service.py`
 - `app/modules/ai/core/provider_registry.py`
+- `app/core/config.py`
+- `app/main.py`
 - `app/utils/safe_http.py`
+- `.env.example`
 - 新增 `app/modules/ai/core/provider_egress.py`
 - 新增 `scripts/audit_ai_provider_egress.py`
 
@@ -167,6 +175,10 @@ Phase 0 文档基线
 - 保存、test、chat、Supervisor、Agent、continuation 共用 hardened transport；禁止 payload 扩张 allowlist 或环境代理绕过。
 - 校验 effective URL、协议、origin/port、全部 DNS 结果、IP 类型、redirect、超时、响应大小和重试；稳定错误脱敏。
 - upgrade 审计不合规存量配置并运行时 quarantine，不改写原 enabled 值。
+
+状态：✅ 已完成（2026-08-15；P1 审查修复 2026-08-15）。Provider test 只接受已保存同域 Provider/Model 与严格字符串 `modelId`；Provider/Model 保存和所有模型选择/运行路径同时检查两级 URL 与网络配置键。OpenAI、Anthropic、DeepSeek/兼容 adapter 注入同一 hardened client/transport，禁环境代理并落实精确 origin、全部 DNS/IP、连接固定、TLS SNI/Host、redirect、timeout、响应大小、并发、重试和错误脱敏。固定 IP 后按原始精确 origin 隔离真实连接池，取消路径可靠归还并发 permit；请求只接受 identity 编码，压缩成功响应在 SDK 解压前 fail closed。无数据库 schema 迁移；upgrade 使用只读审计脚本，保留原 `enabled` 并以 `EGRESS_POLICY_BLOCKED` quarantine。
+
+验证：新增 3 项 P1 transport 回归后，transport 单测 21 项、AI 模块 983 项、全量 1943 项通过；覆盖率 73.37%，`ruff check .`、`ruff format --check .`、19 tools / 12 checks 通过，仅有 2 条既有 SQLAlchemy warning。开发库审计 2 Provider/5 Model，报告 4 个 blocked 对象且零改写；该结果证明 quarantine 生效，不代表这些对象已满足发布 allowlist。
 
 #### P1-D lineage 与结果投影
 

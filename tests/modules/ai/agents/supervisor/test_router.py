@@ -14,6 +14,7 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from app.core.exceptions import BusinessRuleException
@@ -24,6 +25,7 @@ from app.modules.ai.agents.supervisor.router import (
     build_router_prompt,
     parse_agent_code_robustly,
 )
+from app.modules.ai.core.provider_egress import ProviderTransportError
 
 
 def _make_agent(code: str, name: str = "", description: str = ""):
@@ -183,6 +185,27 @@ async def test_route_llm_call_failed_falls_back_to_clarification(db_session):
 
     assert result.clarification is True
     assert result.reason == "llm_call_failed"
+
+
+async def test_route_propagates_sanitized_provider_transport_failure(db_session):
+    candidates = [_make_agent("user_mgmt")]
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    with patch(
+        "app.modules.ai.agents.supervisor.router.call_llm_text",
+        new=AsyncMock(
+            side_effect=ProviderTransportError("network_error", request=request)
+        ),
+    ):
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await AgentRouter().route(
+                db_session,
+                "list users",
+                candidates,
+                model=object(),
+            )
+
+    assert exc_info.value.code == 502
+    assert exc_info.value.error_code == "AI_PROVIDER_UPSTREAM_ERROR"
 
 
 @pytest.mark.asyncio

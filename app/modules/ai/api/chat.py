@@ -61,6 +61,7 @@ from app.modules.ai.agents.safety.keyword_blocklist import (
     check_keywords,
     load_blocklist,
 )
+from app.modules.ai.core.provider_egress import is_provider_failure
 from app.modules.ai.schemas.chat import resolve_chat_trace_id
 from app.modules.ai.schemas.model import ModelOption
 from app.modules.ai.service.chat_run_service import (
@@ -1067,15 +1068,25 @@ async def chat(
                         )
                     )
                 )
-            except Exception:
-                # 其它未预期异常：log + sentinel，前端靠 SSE done 兜底
-                logger.exception("PydanticAI stream error")
-                stream_error_code = "AI_INTERNAL_ERROR"
+            except Exception as exc:
+                if is_provider_failure(exc):
+                    # 不记录上游异常文本，避免 body、URL 或密钥进入日志。
+                    logger.warning(
+                        "PydanticAI Provider stream failed",
+                        extra={"trace_id": deps.trace_id},
+                    )
+                    stream_error_code = "AI_PROVIDER_UPSTREAM_ERROR"
+                    error_message = "Provider 暂时不可用，请稍后重试"
+                else:
+                    # 其它未预期异常：log + sentinel，前端靠 SSE done 兜底
+                    logger.exception("PydanticAI stream error")
+                    stream_error_code = "AI_INTERNAL_ERROR"
+                    error_message = "AI 流式响应异常，请稍后重试"
                 await unified_queue.put(
                     _format_sse_chunk(
                         AiErrorEvent(
-                            error_code="AI_INTERNAL_ERROR",
-                            message="AI 流式响应异常，请稍后重试",
+                            error_code=stream_error_code,
+                            message=error_message,
                         )
                     )
                 )

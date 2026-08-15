@@ -2,6 +2,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DuplicateException, NotFoundException
+from app.modules.ai.core.provider_egress import provider_egress
 from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.schemas.model import ModelCreate, ModelUpdate
@@ -53,6 +54,19 @@ class ModelService:
         data: ModelCreate,
         create_by: str | None = None,
     ) -> AiModel:
+        provider = await db.get(AiProvider, provider_id)
+        if provider is None:
+            raise NotFoundException(
+                resource_type="AI提供商", error_code="AI_PROVIDER_NOT_FOUND"
+            )
+        provider_egress.validate_adapter_config(data.config)
+        await provider_egress.validate_destination(
+            provider.provider_code, provider.base_url
+        )
+        if data.base_url:
+            await provider_egress.validate_destination(
+                provider.provider_code, data.base_url
+            )
         await self._check_duplicate_name(db, provider_id, data.name)
         dump = data.model_dump()
         dump["provider_id"] = provider_id
@@ -67,6 +81,23 @@ class ModelService:
     ) -> AiModel:
         obj = await self.get_by_id(db, model_id)
         update_data = data.model_dump(exclude_unset=True)
+        provider = await db.get(AiProvider, obj.provider_id)
+        if provider is None:
+            raise NotFoundException(
+                resource_type="AI提供商", error_code="AI_PROVIDER_NOT_FOUND"
+            )
+        if "config" in update_data:
+            provider_egress.validate_adapter_config(update_data["config"])
+        effective_override = (
+            update_data["base_url"] if "base_url" in update_data else obj.base_url
+        )
+        await provider_egress.validate_destination(
+            provider.provider_code, provider.base_url
+        )
+        if effective_override:
+            await provider_egress.validate_destination(
+                provider.provider_code, effective_override
+            )
 
         if "name" in update_data and update_data["name"] != obj.name:
             await self._check_duplicate_name(db, obj.provider_id, update_data["name"])

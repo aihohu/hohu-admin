@@ -61,6 +61,7 @@ if settings.AI_MODULE_ENABLED:
     from app.modules.ai.api.routing_feedback import (
         router as ai_routing_feedback_router,
     )
+    from app.modules.ai.core.provider_egress import close_provider_http_clients
     from app.modules.ai.lifecycle import (
         cleanup_durable_prepared_actions_on_startup,
         cleanup_orphaned_pending_on_startup,
@@ -126,6 +127,8 @@ async def lifespan(_app: FastAPI):
         and settings.AI_REQUIRE_SINGLE_WORKER
     ):
         await _unregister_active_worker()
+    if settings.AI_MODULE_ENABLED:
+        await close_provider_http_clients()
     await close_redis()
 
 

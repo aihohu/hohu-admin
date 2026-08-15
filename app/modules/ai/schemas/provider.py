@@ -46,6 +46,7 @@ class ProviderOut(BaseModel):
     is_enabled: bool
     config: dict | None
     create_time: datetime
+    egress_status: str | None = None
 
     @field_serializer("provider_id")
     def serialize_id(self, v: int, _info):
@@ -75,5 +76,34 @@ class ProviderQuery(BaseModel):
     provider_code: str | None = Field(None, description="提供商标识")
     name: str | None = Field(None, description="名称（模糊查询）")
     is_enabled: bool | None = Field(None, description="是否启用")
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
+class ProviderTestRequest(BaseModel):
+    """已保存 Provider/Model 连通性测试请求。"""
+
+    model_id: str = Field(
+        ...,
+        strict=True,
+        pattern=r"^[1-9][0-9]*$",
+        max_length=32,
+    )
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+
+class ProviderTestResult(BaseModel):
+    provider_id: int
+    model_id: int
+    status: str = "ok"
+
+    @field_serializer("provider_id", "model_id")
+    def serialize_id(self, value: int, _info):
+        return str(value)
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)

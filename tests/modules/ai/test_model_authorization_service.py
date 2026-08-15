@@ -19,6 +19,17 @@ from app.modules.ai.service.model_authorization_service import (
 from app.modules.system.models.user import User
 
 
+@pytest.fixture(autouse=True)
+def _public_provider_dns(monkeypatch):
+    async def resolve(_hostname: str) -> list[tuple]:
+        return [(None, None, None, None, ("93.184.216.34", 0))]
+
+    monkeypatch.setattr(
+        "app.modules.ai.core.provider_egress.provider_egress._resolver",
+        resolve,
+    )
+
+
 @pytest.fixture
 async def committed_model_id() -> int:
     """为独立 HTTP session 提供可见数据，并在测试后精准清理。"""
@@ -53,7 +64,7 @@ async def _seed_model(
         provider_code=f"p1b_{marker}",
         name=f"Provider {marker}",
         api_key="encrypted-test-key",
-        base_url="https://example.com/v1",
+        base_url="https://api.openai.com/v1",
         is_enabled=provider_enabled,
     )
     model = AiModel(

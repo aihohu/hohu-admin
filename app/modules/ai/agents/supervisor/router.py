@@ -13,6 +13,10 @@ from typing import TYPE_CHECKING
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessException
+from app.modules.ai.core.provider_egress import (
+    is_provider_failure,
+    provider_upstream_error,
+)
 from app.modules.ai.service.model_authorization_service import (
     model_authorization_service,
 )
@@ -146,7 +150,9 @@ class AgentRouter:
         prompt = build_router_prompt(candidates, message)
         try:
             raw = await call_llm_text(model, prompt)
-        except Exception:
+        except Exception as exc:
+            if is_provider_failure(exc):
+                raise provider_upstream_error() from None
             return RouteResult(
                 clarification=True,
                 candidates=candidates,

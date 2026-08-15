@@ -1,13 +1,12 @@
 from fastapi import APIRouter, Depends
-from pydantic_ai import Agent
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_permissions
 from app.core.base_response import PageResult, ResponseModel
-from app.core.security import decrypt_value
+from app.core.tenant import DEFAULT_TENANT_ID
 from app.db.session import get_db
-from app.modules.ai.core.provider_registry import create_model
+from app.modules.ai.core.provider_egress import provider_egress
 from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.schemas.model import ModelCreate, ModelOut, ModelUpdate
@@ -15,6 +14,7 @@ from app.modules.ai.schemas.provider import (
     ProviderCreate,
     ProviderOut,
     ProviderQuery,
+    ProviderTestRequest,
     ProviderUpdate,
 )
 from app.modules.ai.service.model_service import model_service
@@ -54,6 +54,12 @@ async def get_available_models(
         caps = model.capabilities or []
         if capability and capability not in caps:
             continue
+        allowed = await provider_egress.is_configuration_allowed(
+            provider.provider_code,
+            provider.base_url,
+            model_base_url=model.base_url,
+            configs=(provider.config, model.config),
+        )
         models.append(
             {
                 "modelId": str(model.model_id),
@@ -63,6 +69,7 @@ async def get_available_models(
                 "model": model.name,
                 "capabilities": caps,
                 "baseUrl": model.base_url or provider.base_url,
+                "egressStatus": None if allowed else "EGRESS_POLICY_BLOCKED",
             }
         )
     return ResponseModel.success(data=models)
@@ -142,9 +149,22 @@ async def get_provider_models(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ):
-    await provider_service.get_by_id(db, provider_id)
+    provider = await provider_service.get_by_id(db, provider_id)
     models = await model_service.get_by_provider(db, provider_id)
-    return ResponseModel.success(data=[ModelOut.model_validate(m) for m in models])
+    outputs = []
+    for model in models:
+        allowed = await provider_egress.is_configuration_allowed(
+            provider.provider_code,
+            provider.base_url,
+            model_base_url=model.base_url,
+            configs=(provider.config, model.config),
+        )
+        outputs.append(
+            ModelOut.model_validate(model).model_copy(
+                update={"egress_status": None if allowed else "EGRESS_POLICY_BLOCKED"}
+            )
+        )
+    return ResponseModel.success(data=outputs)
 
 
 @router.post(
@@ -204,49 +224,20 @@ async def delete_model(
 
 
 @router.post(
-    "/test-model",
+    "/{provider_id}/test",
     summary="测试模型连通性",
     dependencies=[Depends(require_permissions("ai:provider:test-model"))],
 )
 async def test_model(
-    data: dict,
+    provider_id: int,
+    data: ProviderTestRequest,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ):
-    """测试指定模型的连通性，支持未保存的提供商配置"""
-    provider_code = data.get("providerCode", "")
-    model_name = data.get("model", "")
-    api_key_raw = data.get("apiKey", "")
-    base_url = data.get("baseUrl") or None
-    provider_id = data.get("providerId")
-
-    if not model_name:
-        return ResponseModel.error(msg="请输入模型名称", code=400)
-
-    if provider_id and not api_key_raw:
-        try:
-            provider = await provider_service.get_by_id(db, int(provider_id))
-            api_key = decrypt_value(provider.api_key)
-            if not base_url:
-                base_url = provider.base_url
-            if not provider_code:
-                provider_code = provider.provider_code
-        except Exception:
-            return ResponseModel.error(msg="提供商不存在", code=404)
-    else:
-        api_key = api_key_raw
-
-    if not api_key:
-        return ResponseModel.error(
-            msg="缺少 API Key，请填写或选择已保存的提供商", code=400
-        )
-
-    try:
-        model = create_model(provider_code, model_name, api_key, base_url)
-        test_agent = Agent(model, instructions="Reply with OK")
-        result = await test_agent.run("Say OK")
-        return ResponseModel.success(
-            msg="连通性测试成功", data={"response": result.output}
-        )
-    except Exception as e:
-        return ResponseModel.error(msg=f"连通性测试失败: {e}", code=500)
+    result = await provider_service.test_connection(
+        db,
+        provider_id,
+        int(data.model_id),
+        tenant_id=DEFAULT_TENANT_ID,
+    )
+    return ResponseModel.success(msg="连通性测试成功", data=result)

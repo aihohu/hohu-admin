@@ -12,7 +12,14 @@ from __future__ import annotations
 
 import asyncio
 import re
-from ipaddress import IPv6Address, ip_address, ip_network
+from collections.abc import Iterable
+from ipaddress import (
+    IPv4Network,
+    IPv6Address,
+    IPv6Network,
+    ip_address,
+    ip_network,
+)
 from urllib.parse import urlparse
 
 import httpx
@@ -38,20 +45,57 @@ BLOCKED_NETWORKS: tuple[ip_network, ...] = (
 )
 
 
-def _validate_ip(ip_str: str) -> None:
-    """单 IP 校验：IPv4-mapped IPv6 双栈检查后查黑名单。"""
+def _validate_ip(
+    ip_str: str,
+    *,
+    allowed_cidrs: Iterable[IPv4Network | IPv6Network] = (),
+) -> None:
+    """校验单个解析地址；显式 CIDR 可用于受控的本地出站。"""
     addr = ip_address(ip_str)
     # IPv4-mapped IPv6 必须按内嵌 IPv4 再检查，避免绕过 IPv4 黑名单。
     if isinstance(addr, IPv6Address) and addr.ipv4_mapped is not None:
         addr = addr.ipv4_mapped
-    for net in BLOCKED_NETWORKS:
-        if addr in net:
-            raise SSRFBlockedException(f"目标 IP 在黑名单段：{addr} 落入 {net}")
+    if any(addr.version == net.version and addr in net for net in allowed_cidrs):
+        return
+    blocked = any(addr in net for net in BLOCKED_NETWORKS)
+    blocked = blocked or any(
+        (
+            addr.is_private,
+            addr.is_loopback,
+            addr.is_link_local,
+            addr.is_multicast,
+            addr.is_unspecified,
+            addr.is_reserved,
+        )
+    )
+    if blocked:
+        raise SSRFBlockedException(f"目标 IP 在黑名单或非公网地址范围：{addr}")
 
 
 async def _async_getaddrinfo(hostname: str) -> list[tuple]:
     """asyncio.getaddrinfo 薄包装，便于单测 monkeypatch。"""
-    return await asyncio.getaddrinfo(hostname, None)
+    return await asyncio.get_running_loop().getaddrinfo(hostname, None)
+
+
+async def resolve_and_validate_addresses(
+    hostname: str,
+    *,
+    allowed_cidrs: Iterable[IPv4Network | IPv6Network] = (),
+) -> tuple[str, ...]:
+    """解析并校验全部 DNS 结果；任一不安全答案都整体拒绝。"""
+    try:
+        literal = ip_address(hostname)
+    except ValueError:
+        infos = await _async_getaddrinfo(hostname)
+        addresses = [str(info[4][0]) for info in infos]
+    else:
+        addresses = [str(literal)]
+    if not addresses:
+        raise SSRFBlockedException("目标主机没有可用地址")
+    unique_addresses = tuple(dict.fromkeys(addresses))
+    for address in unique_addresses:
+        _validate_ip(address, allowed_cidrs=allowed_cidrs)
+    return unique_addresses
 
 
 class SafeHttpClient:
@@ -90,9 +134,7 @@ class SafeHttpClient:
             raise SSRFBlockedException(f"URL 不匹配声明的 pattern：{allowed_pattern}")
 
         # 3. 单次 DNS 解析 + IP 黑名单；此处尚不抵御解析后换绑。
-        infos = await _async_getaddrinfo(parsed.hostname)
-        for info in infos:
-            _validate_ip(info[4][0])
+        await resolve_and_validate_addresses(parsed.hostname)
 
         # 4. 实际请求：follow_redirects=False + stream 控大小
         async with httpx.AsyncClient(

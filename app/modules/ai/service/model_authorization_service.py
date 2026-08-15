@@ -1,5 +1,6 @@
 """对话模型授权与安全选项投影。"""
 
+import asyncio
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -8,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import BusinessRuleException
 from app.core.security import decrypt_value
 from app.core.tenant import DEFAULT_TENANT_ID
+from app.modules.ai.core.provider_egress import provider_egress
 from app.modules.ai.core.provider_registry import create_model
 from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.provider import AiProvider
@@ -50,11 +52,28 @@ class ModelAuthorizationService:
                 .order_by(AiModel.sort_order, AiModel.model_id)
             )
         ).all()
-        return [
+        text_rows = [
             (model, provider)
             for model, provider in rows
             if "text" in (model.capabilities or [])
         ]
+        semaphore = asyncio.Semaphore(10)
+
+        async def check(row: tuple[AiModel, AiProvider]) -> bool:
+            model, provider = row
+            async with semaphore:
+                return await provider_egress.is_model_allowed(
+                    provider.provider_code,
+                    provider.base_url,
+                    model_base_url=model.base_url,
+                    provider_config=provider.config,
+                    model_config=model.config,
+                    provider_id=provider.provider_id,
+                    model_id=model.model_id,
+                )
+
+        checks = await asyncio.gather(*(check(row) for row in text_rows))
+        return [row for row, allowed in zip(text_rows, checks, strict=True) if allowed]
 
     async def authorize_chat_model(
         self,

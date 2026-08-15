@@ -124,6 +124,17 @@ def test_provider_model_management_endpoint_requires_provider_list() -> None:
     assert "ai:provider:list" in _permission_codes(route)
 
 
+def test_saved_provider_test_endpoint_requires_test_permission() -> None:
+    route = _route(provider_router, "/{provider_id}/test", "POST")
+    assert "ai:provider:test-model" in _permission_codes(route)
+    assert not any(
+        isinstance(candidate, APIRoute)
+        and candidate.path == "/test-model"
+        and "POST" in candidate.methods
+        for candidate in provider_router.routes
+    )
+
+
 def test_agent_model_options_endpoint_requires_agent_list() -> None:
     route = _route(agent_admin_router, "/model-options", "GET")
     assert "ai:agent:list" in _permission_codes(route)

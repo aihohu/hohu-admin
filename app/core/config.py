@@ -1,7 +1,7 @@
 import os
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -77,6 +77,17 @@ class Settings(BaseSettings):
     AI_OPENAI_API_KEY: str = ""
     AI_OPENAI_BASE_URL: str = ""
     AI_ANTHROPIC_API_KEY: str = ""
+    # Provider 出站只允许官方 canonical origin 与部署方显式加入的精确 origin。
+    # 私网/本地模型还必须同时命中显式 CIDR；API payload 无权修改这些值。
+    AI_PROVIDER_EGRESS_ALLOWED_ORIGINS: str = ""
+    AI_PROVIDER_EGRESS_ALLOWED_CIDRS: str = ""
+    AI_PROVIDER_EGRESS_PROXY: str = ""
+    AI_PROVIDER_EGRESS_CONNECT_TIMEOUT_SEC: float = Field(5.0, gt=0)
+    AI_PROVIDER_EGRESS_READ_TIMEOUT_SEC: float = Field(30.0, gt=0)
+    AI_PROVIDER_EGRESS_TOTAL_TIMEOUT_SEC: float = Field(60.0, gt=0)
+    AI_PROVIDER_EGRESS_MAX_RESPONSE_BYTES: int = Field(2 * 1024 * 1024, ge=1024)
+    AI_PROVIDER_EGRESS_MAX_CONCURRENCY: int = Field(20, ge=1)
+    AI_PROVIDER_EGRESS_MAX_RETRIES: int = Field(1, ge=0, le=5)
     AI_MAX_TOKENS: int = 4096
     AI_TEMPERATURE: float = 0.7
     # 关闭后不注册任何 AI 路由，用于安全降级和无 AI 部署。
