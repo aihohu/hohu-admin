@@ -5,12 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import STATUS_ENABLED
 from app.core.exceptions import AuthorizationException
-from app.core.rbac import is_super_admin
 from app.modules.ai.agents.safety.ai_config import get_ai_config_str_list
-from app.modules.ai.agents.tools.registry import (
-    all_registry_perms,
-    compute_available_tools,
-)
+from app.modules.ai.agents.tools.registry import compute_available_tools
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
 from app.modules.auth.permission_collect import collect_user_permission_codes
@@ -22,8 +18,6 @@ class AgentAuthorizationService:
 
     def tool_permissions(self, user: User) -> set[str]:
         """返回 Gateway 与 Agent 可见性共用的 Tool 权限集合。"""
-        if is_super_admin(user):
-            return all_registry_perms()
         return collect_user_permission_codes(user)
 
     @staticmethod

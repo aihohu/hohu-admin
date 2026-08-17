@@ -165,6 +165,17 @@ async def test_super_role_has_no_agent_binding_bypass(db_session) -> None:
     assert exc_info.value.error_code == "AI_AGENT_FORBIDDEN"
 
 
+async def test_super_role_tool_permissions_use_explicit_collector(db_session) -> None:
+    user, _role, _agent = await _principal(
+        db_session,
+        role_code=SUPER_ADMIN_ROLE_CODE,
+        permissions=("ai:file:parse",),
+        bind_agent=False,
+    )
+
+    assert agent_authorization_service.tool_permissions(user) == {"ai:file:parse"}
+
+
 async def test_shared_agent_has_no_binding_bypass(db_session) -> None:
     user, _role, _agent = await _principal(
         db_session,

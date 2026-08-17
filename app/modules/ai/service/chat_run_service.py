@@ -203,6 +203,7 @@ class ChatRunFinalizer:
         tool_calls: list[dict[str, Any]] | None,
         agent_code: str | None,
         lineage: ProjectionLineage | None = None,
+        projection_dependency_message_ids: list[int] | tuple[int, ...] = (),
     ) -> AiMessage | None:
         source_is_active = await db.scalar(
             select(AiMessage.message_id).where(
@@ -248,6 +249,9 @@ class ChatRunFinalizer:
                     subject_refs_hash=lineage.subject_refs_hash if lineage else None,
                     data_scope_hash=lineage.data_scope_hash if lineage else None,
                     resolver_version=lineage.resolver_version if lineage else None,
+                    projection_dependency_message_ids=[
+                        str(value) for value in projection_dependency_message_ids
+                    ],
                     is_active=True,
                 )
                 .on_conflict_do_nothing(
@@ -288,6 +292,10 @@ class ChatRunFinalizer:
             message.subject_refs_hash = lineage.subject_refs_hash
             message.data_scope_hash = lineage.data_scope_hash
             message.resolver_version = lineage.resolver_version
+        if message.projection_dependency_message_ids is None:
+            message.projection_dependency_message_ids = [
+                str(value) for value in projection_dependency_message_ids
+            ]
         await db.flush()
         return message
 

@@ -16,7 +16,7 @@
 
 ## 2. 当前基线
 
-- Alembic 当前单一 head：`c9f5d8e3b2a1`。
+- Alembic 当前单一 head：`e6b7f9a2d4c1`。
 - `AI_MODULE_ENABLED` 默认值为 `true`；P1-A 已实现关闭态 `/ai`/`/ai/**` 统一 503 且 AI 业务依赖不 import/初始化。
 - P1-A 已完成用户入口和分支权限；P1-B 已完成统一 Agent/Tool Policy、三模型端点、当前 LLM run selector、Agent 全局编辑边界及阶段安全 seed；P1-C 已完成 Provider 全链路 hardened egress、已保存对象测试端点和存量 quarantine 审计；P1-D 已完成 lineage、历史结果实时投影授权、短期下载 token 及 Web fail-closed 投影收口。
 - DataScope 当前按最高优先级角色计算，用户/部门/角色传统写入口尚未复用统一 GrantAuthority。
@@ -182,7 +182,7 @@ Phase 0 文档基线
 
 #### P1-D lineage 与结果投影
 
-状态：✅ 已完成（后端 2026-08-15；Web 2026-08-15）。Web 已接入 tombstone/最小 pending 状态并清除旧结果、工具卡、流事件和 confirmation presentation；本中间构建继续禁止部署。
+状态：✅ 已完成（后端 2026-08-15；Web 2026-08-15；全面审查修复 2026-08-15）。跨轮 projection dependency、运行时拒绝清理和请求 generation 已补齐；本中间构建继续禁止部署。
 
 修改：
 
@@ -194,22 +194,24 @@ Phase 0 文档基线
 - `app/modules/ai/service/conversation_service.py`
 - `app/modules/ai/service/operation_log_service.py`
 - `app/modules/ai/agents/hitl/query_cache.py`
+- `alembic/versions/d4a6e8f1c3b2_add_ai_message_projection_dependencies.py`
+- `alembic/versions/e6b7f9a2d4c1_add_prepared_action_projection_dependencies.py`
 - 新增 `app/modules/ai/service/result_projection_service.py`
 
 实现：
 
-- assistant/tool message、PreparedAction、query-cache 冻结 tenant、Agent、Tool 集合、完整 subject refs、scope/hash/resolver version。
-- `authorize_result_projection()` 覆盖 resume/SSE replay、conversation、pending presentation、query-cache、owner log、download/file retrieval。
+- assistant/tool message、PreparedAction、query-cache v3 冻结 tenant、Agent、Tool 集合、完整 subject refs、scope/hash/resolver version 和传递 projection dependency message IDs。
+- `authorize_result_projection()` 覆盖 resume/SSE replay、conversation、pending presentation、query-cache、owner log、download/file retrieval，并递归重验同 owner 的全部 message dependency。
 - legacy 缺完整引用统一 tombstone/最小状态/404，禁止从持久化结果反推授权目标。
 - PreparedAction 冻结 resolved model/provider；reject 和最小状态不受模型状态阻断，新 continuation 才复验模型。
 - API 认证 exact-match `type=access`，下载 token 使用独立派生签名域且只进入 UI projection；scope-bound approve 在执行前校验当前 scope hash，resume 在长等待后的终态读取点再次授权。
 - 用户导出在建 task/写文件前完成投影预授权；生成期间撤权时删除未提交文件并 fail closed，LLM data 仅返回 `downloadReady`，不携带 bearer URL。
 
-验证（含审查修复）：JWT/scope/resume/export 定向回归 98 项、AI + 导出专项 1017 项、后端全量 1974 项通过，覆盖率 73.00%；`ruff check .`、`ruff format --check .`、19 tools / 12 checks 通过，仅有 2 条既有 SQLAlchemy warning。Alembic `c9f5d8e3b2a1` current/head 单一；`alembic check` 暴露的是工作包外既有 metadata 漂移，P1-D 新增列没有未生成差异，最终 migration 门禁仍需统一清债。
+验证（含全面审查修复）：跨轮 dependency、PreparedAction、query-cache、download、conversation 与 chat 定向回归 104 项、后端全量 1984 项通过；Web store 专项 42 项通过；`ruff check .`、`ruff format --check .`、19 tools / 12 checks 通过，仅保留 2 条既有 SQLAlchemy transaction warning。Alembic `d4a6e8f1c3b2`、`e6b7f9a2d4c1` 已应用且 current/head 单一；legacy dependency `NULL` 按设计 fail closed。`alembic check` 仍只报告本工作包之外既有 comments/index/FK metadata 漂移，本次新增列无待生成差异。
 
 ### 5.2 Web 工作包
 
-状态：✅ 已完成（2026-08-15；审查修复 2026-08-15）。三模型调用按聊天、Agent 管理和 Provider 管理分离；Agent option 直接保存稳定字符串 `modelId`，后端兼容接受 `modelId` 与 legacy `provider:model`，不从 `label` 反解析模型名。Agent detail 完成后才加载 option，并用加载序号拒绝旧 Drawer 响应覆盖。Provider 仅测试已保存的 Provider/Model，存在未保存 Provider 修改时禁用测试并提示先保存，同时显示 `EGRESS_POLICY_BLOCKED`。聊天页对无入口、模块关闭、无 Agent、无模型、选中模型失效和 tombstone 显示稳定状态；首次挂载及 `KeepAlive` 再激活均重新获取当前 conversation detail，授权撤销投影会同步中止主 SSE、resume、operation-log polling 并清空 reasoning/stream/presentation 缓存。非 `R_SUPER` 即使持有按钮权限也不显示 Agent 编辑入口，后端继续执行最终 `R_SUPER + ai:agent:edit` 校验。
+状态：✅ 已完成（2026-08-15；全面审查修复 2026-08-15）。三模型调用按聊天、Agent 管理和 Provider 管理分离；Agent option 直接保存稳定字符串 `modelId`，后端兼容接受 `modelId` 与 legacy `provider:model`，不从 `label` 反解析模型名。Agent detail 完成后才加载 option，并用加载序号拒绝旧 Drawer 响应覆盖。Provider 仅测试已保存的 Provider/Model，存在未保存 Provider 修改时禁用测试并提示先保存，同时显示 `EGRESS_POLICY_BLOCKED`。聊天页对无入口、模块关闭、Agent forbidden/不可用、无模型、选中模型失效和 tombstone 显示稳定状态；运行时拒绝会按作用域清空旧 list/detail/result/presentation，并同步中止主 SSE、resume、operation-log polling。conversation/model/Agent/select 各自使用 request generation，旧 init 成功响应不能覆盖新的拒绝状态。非 `R_SUPER` 即使持有按钮权限也不显示 Agent 编辑入口，后端继续执行最终 `R_SUPER + ai:agent:edit` 校验。
 
 修改：
 
@@ -244,15 +246,16 @@ Phase 0 文档基线
 
 数据库与权限：本 Web 工作包无数据库迁移、菜单权限或角色绑定变化；继续复用 P1-A/P1-B 已落地的权限记录与 migration。
 
-验证：Web `pnpm fmt`、`pnpm typecheck`、`pnpm test`（29 files / 107 tests）和 `pnpm build` 通过；`pnpm lint` 零 error，仅报告 30 条既有 warning。后端 Agent admin/model authorization 定向回归 26 项及全量 1975 项通过，`ruff check .`、`ruff format --check .` 通过，全量仅保留 2 条既有 SQLAlchemy warning。仓库级 `vitest --coverage` 当前为 statements 31.84%、branches 26.25%、functions 19.58%、lines 33.30%，暴露的是既有全局测试门禁缺口；按本计划 Phase 4 完成 `test:coverage` 与全局 ≥70% 前，仍禁止部署。
+验证：Web `pnpm fmt`、`pnpm typecheck`、`pnpm test`（30 files / 112 tests）和 `pnpm build` 通过；`pnpm lint` 零 error，仅报告 30 条既有 warning。新增 runtime revocation 回归锁定列表失败清理、旧响应竞态、入口撤权终止生产者、`AI_AGENT_FORBIDDEN` 和 confirm 撤权清理。仓库级 `vitest --coverage` 当前为 statements 31.84%、branches 26.25%、functions 19.58%、lines 33.30%，暴露的是既有全局测试门禁缺口；按本计划 Phase 4 完成 `test:coverage` 与全局 ≥70% 前，仍禁止部署。
 
 ### 5.3 数据库与数据升级
 
-新增迁移 `<rev>_add_ai_authorization_lineage.py`，父 revision 为 `b8e4c7d2a1f0`：
+P1-D 审查后迁移链当前为 `c9f5d8e3b2a1 → d4a6e8f1c3b2 → e6b7f9a2d4c1`：
 
 - `ai_prepared_action.resolved_model_id/resolved_provider_id BIGINT NULL`，无级联删除。
 - `ai_message` 增加 tenant、Tool 集合、subject refs、scope hash 和 resolver version 字段；legacy 可空，新业务结果应用层必填。
-- Redis query-cache 升级 namespace/schema version，旧 key 按不存在处理。
+- `ai_message` 和 `ai_prepared_action` 分别增加 nullable `projection_dependency_message_ids JSON`；新写入冻结字符串化 Snowflake ID，legacy `NULL` 无法证明传递谱系时 fail closed。
+- Redis query-cache 升级到 v3 namespace/schema version，包含 dependency IDs；旧 key 按不存在处理。
 
 修改/新增：
 
@@ -270,7 +273,7 @@ upgrade：保留模块开关、Agent enabled、Role-Agent enabled 和 enabled to
 
 - 新增模块关闭、endpoint 权限矩阵、Agent 全选择路径、Tool-Agent mismatch、模型 selector、Provider egress、结果投影和 fresh/upgrade 测试。
 - 更新 `test_authz_matrix.py`、`test_role_agent.py`、`test_gateway.py`、`test_tool_registry.py`、`test_confirm.py`、`test_resume.py`、`test_conversation_api.py`、`test_query_cache.py`。
-- Web 补 Agent/Provider Drawer、无 Agent 状态、tombstone 和 store 清理 Vitest。
+- Web 补 Agent/Provider Drawer、无 Agent 状态、tombstone、运行时 endpoint 拒绝、旧响应竞态和 store 清理 Vitest。
 - 验收：模块关闭统一 503；所有选择/恢复路径无旁路；撤权后所有历史读取面不返回业务结果；不合规 Provider 无任何出站请求。
 - 退出：只允许进入 Phase 2 集成，不得部署。
 

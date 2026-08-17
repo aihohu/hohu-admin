@@ -31,7 +31,6 @@ from .registry import (
     RegisteredTool,
     ToolRegistry,
     ToolRegistryError,
-    all_registry_perms,
     compute_available_tools,
 )
 from .stats_validator import (
@@ -49,7 +48,6 @@ __all__ = [
     "ToolRegistry",
     "ToolRegistryError",
     "ai_tool",
-    "all_registry_perms",
     "compute_available_tools",
     "load_builtin_tools",
     "validate_field_in_whitelist",

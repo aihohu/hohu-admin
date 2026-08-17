@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AuthorizationException
-from app.modules.ai.agents.tools.registry import all_registry_perms
+from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.ai.core.context import ChatDeps
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.conversation import AiConversation
@@ -67,7 +67,13 @@ async def authorized_agent_policy(db_session: AsyncSession):
         patch.object(
             agent_authorization_service,
             "tool_permissions",
-            MagicMock(side_effect=lambda _user: all_registry_perms()),
+            MagicMock(
+                side_effect=lambda _user: {
+                    permission
+                    for tool in ToolRegistry.get().all()
+                    for permission in tool.meta.required_perms
+                }
+            ),
         ),
     ):
         yield
@@ -203,43 +209,6 @@ class TestBuildChatDeps:
         assert deps.agent.code == "user_mgmt"
         assert deps.agent.is_builtin is True
 
-    async def test_super_admin_bypass_perm_filter(
-        self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """超管 bypass AI tool 网关 perm 过滤（与 HTTP API 层 require_permissions 对齐）.
-
-        背景：HTTP API 层 require_permissions 用 is_super_admin bypass，admin 调
-        任何 endpoint 都通过。AI tool 网关原本用 collect_user_buttons 收集 perm，
-        没给超管 bypass → admin 调 role.list 等 tool 时 LLM 看不到，会幻觉"工具不存在"。
-        修复：build_chat_deps 检测 is_super_admin 后用 all_registry_perms() 替代.
-        """
-        import app.modules.ai.agents.tools.file_tools  # noqa: F401
-        import app.modules.ai.core.data_scope_loader as loader_mod
-        import app.modules.job.ai_tools  # noqa: F401
-
-        # 触发 tool 注册
-        import app.modules.system.ai_tools  # noqa: F401
-        from app.modules.ai.agents.tools.registry import ToolRegistry
-
-        monkeypatch.setattr(loader_mod, "is_super_admin", lambda u: True)
-        mock_user = MagicMock()
-        mock_user.user_name = "admin"
-        mock_user.roles = []  # 故意空：没绑任何 menu，验证 bypass 工作
-        mock_user.depts = []
-
-        with _patch_sticky_manual():
-            deps = await chat_service.build_chat_deps(db_session, mock_user)
-
-        # 期望：超管 perms 覆盖 registry 中所有 tool 的 required_perms 并集
-        all_required_perms: set[str] = set()
-        for t in ToolRegistry.get().all():
-            all_required_perms.update(t.meta.required_perms)
-        assert all_required_perms, "registry should have tools"
-        # 用system:role:list / system:dept:list 这两个之前缺的 perm 当代表断言
-        assert "system:role:list" in deps.perms
-        assert "system:dept:list" in deps.perms
-        assert all_required_perms <= deps.perms
-
 
 async def test_revoked_sticky_agent_is_cleared_and_rerouted(
     db_session: AsyncSession,
@@ -304,6 +273,7 @@ async def test_create_agent_preserves_explicit_falsy_model_ref() -> None:
         result = await chat_service.create_agent(
             db,
             "",
+            user_perms=set(),
             agent_config=SimpleNamespace(model_preference="provider:preferred"),
         )
 

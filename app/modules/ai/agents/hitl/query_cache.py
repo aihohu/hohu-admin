@@ -32,9 +32,9 @@ from app.modules.ai.service.result_projection_service import (
     result_projection_service,
 )
 
-AI_QUERY_CACHE_PREFIX = "ai:query_cache:v2"
+AI_QUERY_CACHE_PREFIX = "ai:query_cache:v3"
 AI_QUERY_CACHE_TTL_SEC = 300
-AI_QUERY_CACHE_SCHEMA_VERSION = 2
+AI_QUERY_CACHE_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -52,6 +52,7 @@ class QueryCacheEntry:
     subject_refs_hash: str
     data_scope_hash: str | None
     resolver_version: str
+    projection_dependency_message_ids: list[str]
     schema_version: int
     created_at: str  # ISO 8601 UTC
 
@@ -73,6 +74,7 @@ async def set_query_cache(
     agent_code: str,
     projection: ResultProjection | None,
     data_scope_hash: str | None,
+    projection_dependency_message_ids: list[int] | tuple[int, ...] = (),
     ttl_sec: int = AI_QUERY_CACHE_TTL_SEC,
 ) -> None:
     """HSET ai:query_cache:<trace_id> <tool_name> <json> + EXPIRE <ttl>
@@ -87,6 +89,7 @@ async def set_query_cache(
         tool_codes=[tool_name],
         subject_refs=projection.subject_refs,
         data_scope_hash=data_scope_hash if projection.scope_bound else None,
+        projection_dependency_message_ids=projection_dependency_message_ids,
     )
     entry = QueryCacheEntry(
         module=module,
@@ -100,6 +103,9 @@ async def set_query_cache(
         subject_refs_hash=lineage.subject_refs_hash,
         data_scope_hash=lineage.data_scope_hash,
         resolver_version=lineage.resolver_version,
+        projection_dependency_message_ids=[
+            str(value) for value in lineage.projection_dependency_message_ids
+        ],
         schema_version=AI_QUERY_CACHE_SCHEMA_VERSION,
         created_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )

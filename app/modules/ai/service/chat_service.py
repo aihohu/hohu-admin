@@ -23,7 +23,7 @@ from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
-from app.modules.ai.schemas.message import MessageOut
+from app.modules.ai.schemas.message import MessageOut, MessageTombstoneOut
 from app.modules.ai.service.agent_authorization_service import (
     agent_authorization_service,
 )
@@ -42,11 +42,14 @@ class ChatService:
     """对话核心服务"""
 
     async def load_history(
-        self, db: AsyncSession, conversation_id: int, user_id: int
-    ) -> list[MessageOut]:
-        """加载会话历史消息"""
-        messages = await conversation_service.get_messages(db, conversation_id, user_id)
-        return [MessageOut.model_validate(m) for m in messages]
+        self, db: AsyncSession, conversation_id: int, current_user: User
+    ) -> list[MessageOut | MessageTombstoneOut]:
+        """Load conversation history through the live projection policy."""
+        return await conversation_service.project_messages(
+            db,
+            conversation_id=conversation_id,
+            current_user=current_user,
+        )
 
     async def ensure_trace_available(
         self,
@@ -115,6 +118,7 @@ class ChatService:
         trace_id: str | None = None,
         source_user_message_id: int | None = None,
         lineage: ProjectionLineage | None = None,
+        projection_dependency_message_ids: list[int] | tuple[int, ...] = (),
     ):
         """保存 AI 响应消息
 
@@ -137,6 +141,7 @@ class ChatService:
             trace_id=trace_id,
             parent_message_id=source_user_message_id,
             lineage=lineage,
+            projection_dependency_message_ids=projection_dependency_message_ids,
         )
         await db.flush()
         return message
@@ -146,7 +151,7 @@ class ChatService:
         db: AsyncSession,
         model_name: str | None = None,
         *,
-        user_perms: set[str] | None = None,
+        user_perms: set[str],
         agent_code: str = "user_mgmt",
         tenant_id: int = 0,
         agent_config: AiAgent | None = None,

@@ -85,6 +85,12 @@ class AiPreparedAction(Base):
     subject_refs_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     data_scope_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     resolver_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    projection_dependency_message_ids: Mapped[list[str] | None] = mapped_column(
+        JSON,
+        nullable=True,
+        default=list,
+        comment="Immutable prior assistant message IDs used as model context",
+    )
     presentation: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)

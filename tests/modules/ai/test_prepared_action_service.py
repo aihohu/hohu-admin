@@ -73,6 +73,7 @@ def _create_kwargs() -> dict:
         "agent_code": "user_mgmt",
         "resolved_model_id": 501,
         "resolved_provider_id": 601,
+        "projection_dependency_message_ids": [71, 72],
         "expires_at": datetime.now(UTC) + timedelta(minutes=5),
     }
 
@@ -131,6 +132,7 @@ async def test_create_pending_freezes_policy_and_trusted_identity(db_session) ->
     assert action.subject_refs == [
         {"type": "user_import_batch", "id": "batch-prepared-1"}
     ]
+    assert action.projection_dependency_message_ids == ["71", "72"]
     assert len(action.subject_refs_hash) == 64
 
 

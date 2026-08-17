@@ -191,6 +191,7 @@ async def _finalize_stream_turn(
     agent_code: str | None,
     stream_error_code: str | None,
     lineage: ProjectionLineage | None = None,
+    projection_dependency_message_ids: list[int] | tuple[int, ...] = (),
 ) -> list[AiStreamEvent]:
     """建立 durability barrier：assistant/terminal commit 完成后才构造 done。"""
     if stream_error_code is not None:
@@ -212,6 +213,7 @@ async def _finalize_stream_turn(
             tool_calls=tool_calls,
             agent_code=agent_code,
             lineage=lineage,
+            projection_dependency_message_ids=projection_dependency_message_ids,
         )
         await db.commit()
     except Exception:
@@ -415,16 +417,36 @@ async def chat(
 
     # 前端通过 agentCode 切换助手，未指定时使用 user_mgmt。
     # 提前解析：build_chat_deps 内部 stickiness + 后续 save_user_message 都要用
-    agent_code = body.get("agentCode") or body.get("agent_code")
+    agent_was_supplied = "agentCode" in body or "agent_code" in body
+    if "agentCode" in body:
+        agent_code = body["agentCode"]
+    elif "agent_code" in body:
+        agent_code = body["agent_code"]
+    else:
+        agent_code = None
+    if agent_was_supplied and (
+        not isinstance(agent_code, str) or not agent_code.strip()
+    ):
+        raise AuthorizationException(
+            "The requested AI Agent is unavailable",
+            error_code="AI_AGENT_FORBIDDEN",
+        )
 
     # 用户消息在路由成功后再持久化，避免安全拦截或澄清流程
     # 路径产生孤儿消息）；早 save_user_message 块已移除.
 
     # 解析模型选择
     conv = None
+    projection_dependency_message_ids: list[int] = []
     if conversation_id:
         conv = await conversation_service.get_by_id(
             db, int(conversation_id), _current_user.user_id
+        )
+        projection_dependency_message_ids = (
+            await result_projection_service.collect_message_projection_dependencies(
+                db,
+                conversation_id=int(conversation_id),
+            )
         )
         await chat_service.ensure_trace_available(
             db,
@@ -432,6 +454,7 @@ async def chat(
             trace_id=trace_id,
         )
 
+    model_was_supplied = "modelId" in body or "model_id" in body
     if "modelId" in body:
         model_name = body["modelId"]
     elif "model_id" in body:
@@ -440,7 +463,9 @@ async def chat(
         model_name = None
 
     # 回退到会话绑定的模型
-    if model_name is None and conv:
+    if model_was_supplied and model_name is None:
+        model_name = ""
+    if not model_was_supplied and model_name is None and conv:
         model_name = conv.model_name
 
     # 显式/既有会话模型可以在路由前校验；新会话未指定模型时必须等 Agent
@@ -515,6 +540,7 @@ async def chat(
 
     deps.conversation_id = conversation_id
     deps.command_action = command_action
+    deps.projection_dependency_message_ids = tuple(projection_dependency_message_ids)
     # 注入 client_ip，供执行器统计鉴权拒绝并实施 IP 级封禁。
     deps.client_ip = request.client.host if request.client else None
 
@@ -1222,9 +1248,15 @@ async def chat(
                             data_scope_hash=(
                                 deps.data_scope_hash if projection_snapshot[2] else None
                             ),
+                            projection_dependency_message_ids=(
+                                deps.projection_dependency_message_ids
+                            ),
                         )
                         if deps.agent is not None and projection_snapshot[3]
                         else None
+                    ),
+                    projection_dependency_message_ids=(
+                        projection_dependency_message_ids
                     ),
                 )
             else:

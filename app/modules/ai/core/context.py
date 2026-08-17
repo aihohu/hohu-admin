@@ -121,6 +121,9 @@ class ChatDeps:
     data_scope_hash: str | None = None
     """Canonical resolver state used only by scope-bound result projections."""
 
+    projection_dependency_message_ids: tuple[int, ...] = ()
+    """Immutable prior assistant projections that may influence this run."""
+
 
 @dataclass
 class AiToolContext:
@@ -145,6 +148,9 @@ class AiToolContext:
 
     data_scope_hash: str | None = None
     """Canonical resolver state used by scope-bound result projections."""
+
+    projection_dependency_message_ids: tuple[int, ...] = ()
+    """Immutable prior assistant projections inherited from the chat run."""
 
     secrets: dict[str, str] = field(default_factory=dict)
     """由可信服务端注入、不会出现在普通工具参数中的敏感值。"""
@@ -174,5 +180,6 @@ def build_tool_context(
         tool_meta=tool_meta,
         tenant_id=deps.tenant_id,
         data_scope_hash=deps.data_scope_hash,
+        projection_dependency_message_ids=(deps.projection_dependency_message_ids),
         secrets={},
     )

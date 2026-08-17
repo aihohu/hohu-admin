@@ -290,8 +290,6 @@ def compute_available_tools(
       1. required_perms ⊆ user_perms（perm 维度）
       2. meta.default_enabled 或 name 位于 enabled_extra
     - Agent 可见性由 compute_available_agents 单独处理
-    - 超管 user_perms={'*'} 时单独走 is_super_admin 路径（调用方负责）
-
     Args:
         enabled_extra: sys_config.ai:enabled_tools 解析后的 tool name 列表。
             None（默认）= 不做 default_enabled 过滤（向后兼容旧调用方 / 测试 fixture），
@@ -313,16 +311,3 @@ def compute_available_tools(
                 continue
         result.append(t)
     return result
-
-
-def all_registry_perms() -> set[str]:
-    """返回 Registry 中所有 tool 的 required_perms 并集。
-
-    用于超管 bypass：超管在 AI tool 网关层跳过 perm 过滤（与 HTTP API 层
-    require_permissions 对齐），用本函数构造"覆盖全部 tool"的 perms 集合。
-    """
-    registry = ToolRegistry.get()
-    perms: set[str] = set()
-    for t in registry.all():
-        perms.update(t.meta.required_perms)
-    return perms

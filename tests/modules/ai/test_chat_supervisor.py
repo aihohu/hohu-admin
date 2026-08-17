@@ -144,10 +144,13 @@ async def test_new_chat_uses_authorized_agent_model_preference(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("model_id", "selector_value"), [(0, 0), (None, "")])
 async def test_explicit_falsy_model_id_is_rejected_without_fallback(
     client: AsyncClient,
     auth_token,
     mock_visible_agents,
+    model_id,
+    selector_value,
 ):
     """显式提交的 falsy modelId 仍必须进入 selector，而不是当成未提交。"""
     from app.core.exceptions import BusinessRuleException
@@ -165,13 +168,30 @@ async def test_explicit_falsy_model_id_is_rejected_without_fallback(
     ):
         response = await client.post(
             "/ai/chat",
-            json=_chat_body("查询用户", agentCode="user_mgmt", modelId=0),
+            json=_chat_body("查询用户", agentCode="user_mgmt", modelId=model_id),
             headers={"Authorization": f"Bearer {auth_token}"},
         )
 
     assert response.status_code == 400
     assert response.json()["errorCode"] == "AI_MODEL_NOT_AVAILABLE"
-    assert selector.await_args_list[0].args[1] == 0
+    assert selector.await_args_list[0].args[1] == selector_value
+
+
+@pytest.mark.parametrize("agent_code", ["", 0, False, None])
+async def test_explicit_invalid_falsy_agent_code_is_rejected_without_fallback(
+    client: AsyncClient,
+    auth_token,
+    mock_visible_agents,
+    agent_code,
+):
+    response = await client.post(
+        "/ai/chat",
+        json=_chat_body("查询用户", agentCode=agent_code),
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["errorCode"] == "AI_AGENT_FORBIDDEN"
 
 
 @pytest.mark.asyncio

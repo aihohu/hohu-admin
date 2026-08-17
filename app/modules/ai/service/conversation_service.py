@@ -165,6 +165,7 @@ class ConversationService:
         supersedes_message_id: int | None = None,
         tenant_id: int | None = None,
         lineage: ProjectionLineage | None = None,
+        projection_dependency_message_ids: list[int] | tuple[int, ...] = (),
     ) -> AiMessage:
         """保存一条消息
 
@@ -196,6 +197,9 @@ class ConversationService:
             subject_refs_hash=lineage.subject_refs_hash if lineage else None,
             data_scope_hash=lineage.data_scope_hash if lineage else None,
             resolver_version=lineage.resolver_version if lineage else None,
+            projection_dependency_message_ids=[
+                str(value) for value in projection_dependency_message_ids
+            ],
         )
         db.add(msg)
         return msg
@@ -214,11 +218,11 @@ class ConversationService:
             if message.role == "user":
                 projected.append(MessageOut.model_validate(message))
                 continue
-            allowed = await result_projection_service.authorize_result_projection(
+            allowed = await result_projection_service.authorize_message_projection(
                 db,
                 current_user,
                 owner_user_id=current_user.user_id,
-                lineage=result_projection_service.lineage_from_record(message),
+                message=message,
             )
             if allowed:
                 output = MessageOut.model_validate(message)

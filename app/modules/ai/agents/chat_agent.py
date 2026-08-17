@@ -20,7 +20,7 @@ from app.modules.ai.core.context import ChatDeps as NewChatDeps
 def create_chat_agent(
     model: Any,
     *,
-    user_perms: set[str] | None = None,
+    user_perms: set[str],
     agent_code: str = "user_mgmt",
     enabled_extra: list[str] | None = None,
 ) -> Agent:
@@ -28,8 +28,7 @@ def create_chat_agent(
 
     Args:
         model: Pydantic AI Model 实例
-        user_perms: 用户权限码集合，用于按 Agent 和权限过滤工具
-                    None 表示用所有内置 tool（向后兼容旧 ChatDeps 调用方）
+        user_perms: 用户显式权限码集合，用于按 Agent 和权限过滤工具
         enabled_extra: ``sys_config.ai:enabled_tools`` 的解析结果，
                        None=不做 default_enabled 过滤（向后兼容）
 
@@ -41,15 +40,9 @@ def create_chat_agent(
         每次推理时从 ctx.deps 重新构造（保证 data_scope / 时间 / trace_id 实时）。
         agent.system_prompt 字段在 chat_service.build_chat_deps 加载时已设到 deps.agent。
     """
-    # 默认 perms=所有权限（过渡期兼容旧 chat.py 调用）
-    # 1.5 完成后由 chat.py 显式传入从 user 加载的真实 perms
-    effective_perms = user_perms if user_perms is not None else _all_registry_perms()
-
     # agent_code 决定可见工具集合。
     # enabled_extra 控制默认关闭工具的显式启用。
-    tools = build_pydantic_ai_tools(
-        effective_perms, agent_code, enabled_extra=enabled_extra
-    )
+    tools = build_pydantic_ai_tools(user_perms, agent_code, enabled_extra=enabled_extra)
 
     def instructions(ctx) -> str:
         """动态 system prompt（每轮推理时重新构造）"""
@@ -65,15 +58,3 @@ def create_chat_agent(
     )
 
     return agent
-
-
-def _all_registry_perms() -> set[str]:
-    """调试 / 过渡用：返回 Registry 中所有 tool 的 required_perms 并集"""
-    from app.modules.ai.agents.tools.registry import (  # noqa: PLC0415  避免 chat_agent 与 tools/__init__ 循环
-        ToolRegistry,
-    )
-
-    perms: set[str] = set()
-    for t in ToolRegistry.get().all():
-        perms.update(t.meta.required_perms)
-    return perms

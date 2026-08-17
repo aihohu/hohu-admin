@@ -2028,6 +2028,7 @@ async def user_export(
         tool_codes=[ctx.tool_meta.name],
         subject_refs=[],
         data_scope_hash=ctx.data_scope_hash,
+        projection_dependency_message_ids=(ctx.projection_dependency_message_ids),
     )
     if not await result_projection_service.authorize_result_projection(
         ctx.db,
@@ -2060,6 +2061,7 @@ async def user_export(
         tool_codes=[ctx.tool_meta.name],
         subject_refs=projection.subject_refs,
         data_scope_hash=ctx.data_scope_hash,
+        projection_dependency_message_ids=(ctx.projection_dependency_message_ids),
     )
     download_token = await result_projection_service.issue_download_token(
         ctx.db,

@@ -26,7 +26,8 @@ def _entry(*, user_id: int = 101):
         subject_refs_hash="a" * 64,
         data_scope_hash=None,
         resolver_version="legacy-max-v1",
-        schema_version=2,
+        projection_dependency_message_ids=[],
+        schema_version=3,
         created_at="2026-08-15T09:00:00Z",
     )
 

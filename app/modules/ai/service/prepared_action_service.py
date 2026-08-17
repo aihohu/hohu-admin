@@ -110,6 +110,7 @@ class PreparedActionService:
         command_action: str = "send",
         risk_level: str = "high",
         chip_target: str | None = None,
+        projection_dependency_message_ids: list[int] | tuple[int, ...] = (),
         require_live_source: bool = False,
     ) -> AiPreparedAction:
         """Persist one immutable authorization proposal without committing."""
@@ -164,6 +165,7 @@ class PreparedActionService:
             tool_codes=tool_codes,
             subject_refs=subject_refs,
             data_scope_hash=data_scope_hash,
+            projection_dependency_message_ids=projection_dependency_message_ids,
         )
         canonical_snapshot = {
             **dict(snapshot),
@@ -174,6 +176,9 @@ class PreparedActionService:
                 "subjectRefsHash": lineage.subject_refs_hash,
                 "dataScopeHash": lineage.data_scope_hash,
                 "resolverVersion": lineage.resolver_version,
+                "projectionDependencyMessageIds": [
+                    str(value) for value in lineage.projection_dependency_message_ids
+                ],
             },
         }
         computed_snapshot_hash = canonical_payload_hash(canonical_snapshot)
@@ -199,6 +204,9 @@ class PreparedActionService:
             subject_refs_hash=lineage.subject_refs_hash,
             data_scope_hash=lineage.data_scope_hash,
             resolver_version=lineage.resolver_version,
+            projection_dependency_message_ids=[
+                str(value) for value in lineage.projection_dependency_message_ids
+            ],
             presentation=normalized_presentation,
             user_id=user_id,
             tenant_id=tenant_id,

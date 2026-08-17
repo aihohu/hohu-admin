@@ -56,7 +56,7 @@ async def test_history_keeps_user_order_and_tombstones_denied_assistant() -> Non
             AsyncMock(return_value=messages),
         ),
         patch(
-            "app.modules.ai.service.conversation_service.result_projection_service.authorize_result_projection",
+            "app.modules.ai.service.conversation_service.result_projection_service.authorize_message_projection",
             AsyncMock(return_value=False),
         ),
     ):
@@ -94,7 +94,7 @@ async def test_authorized_history_refreshes_short_lived_download_url() -> None:
             return_value=lineage,
         ),
         patch(
-            "app.modules.ai.service.conversation_service.result_projection_service.authorize_result_projection",
+            "app.modules.ai.service.conversation_service.result_projection_service.authorize_message_projection",
             AsyncMock(return_value=True),
         ),
         patch(

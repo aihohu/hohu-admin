@@ -19,6 +19,7 @@ from app.modules.ai.agents.safety.ai_config import get_ai_config_str_list
 from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.ai.constants import AI_CHAT_USE_PERMISSION
 from app.modules.ai.core.data_scope_loader import build_data_scope_context
+from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
@@ -68,6 +69,7 @@ class ProjectionLineage:
     subject_refs_hash: str
     data_scope_hash: str | None
     resolver_version: str
+    projection_dependency_message_ids: tuple[int, ...] = ()
 
 
 class ResultProjectionService:
@@ -101,6 +103,15 @@ class ResultProjectionService:
         return tuple(normalized[key] for key in sorted(normalized))
 
     @staticmethod
+    def normalize_projection_dependency_message_ids(
+        values: list[int | str] | tuple[int | str, ...],
+    ) -> tuple[int, ...]:
+        normalized = {int(value) for value in values}
+        if any(value <= 0 for value in normalized):
+            raise ValueError("projection dependency message IDs must be positive")
+        return tuple(sorted(normalized))
+
+    @staticmethod
     def subject_refs_hash(subject_refs: tuple[dict[str, str], ...]) -> str:
         return _canonical_hash({"subjectRefs": list(subject_refs)})
 
@@ -113,6 +124,7 @@ class ResultProjectionService:
         subject_refs: list[dict[str, Any]] | tuple[dict[str, Any], ...],
         data_scope_hash: str | None = None,
         resolver_version: str = DATA_SCOPE_RESOLVER_VERSION,
+        projection_dependency_message_ids: list[int | str] | tuple[int | str, ...] = (),
     ) -> ProjectionLineage:
         normalized_refs = self.normalize_subject_refs(subject_refs)
         return ProjectionLineage(
@@ -123,9 +135,19 @@ class ResultProjectionService:
             subject_refs_hash=self.subject_refs_hash(normalized_refs),
             data_scope_hash=data_scope_hash,
             resolver_version=resolver_version,
+            projection_dependency_message_ids=(
+                self.normalize_projection_dependency_message_ids(
+                    projection_dependency_message_ids
+                )
+            ),
         )
 
-    def lineage_from_record(self, record: Any) -> ProjectionLineage | None:
+    def lineage_from_record(
+        self,
+        record: Any,
+        *,
+        include_projection_dependencies: bool = True,
+    ) -> ProjectionLineage | None:
         values = (
             getattr(record, "tenant_id", None),
             getattr(record, "agent_code", None),
@@ -138,6 +160,14 @@ class ResultProjectionService:
             return None
         try:
             normalized_refs = self.normalize_subject_refs(values[3])
+            raw_dependencies = getattr(record, "projection_dependency_message_ids", ())
+            if include_projection_dependencies and raw_dependencies is None:
+                return None
+            dependencies = (
+                self.normalize_projection_dependency_message_ids(raw_dependencies)
+                if include_projection_dependencies
+                else ()
+            )
         except (TypeError, ValueError):
             return None
         return ProjectionLineage(
@@ -148,7 +178,22 @@ class ResultProjectionService:
             subject_refs_hash=str(values[4]),
             data_scope_hash=getattr(record, "data_scope_hash", None),
             resolver_version=str(values[5]),
+            projection_dependency_message_ids=dependencies,
         )
+
+    @staticmethod
+    def projection_dependency_message_ids(record: Any) -> tuple[int, ...] | None:
+        """Return normalized immutable message dependencies, or None for legacy rows."""
+        raw = getattr(record, "projection_dependency_message_ids", None)
+        if raw is None or not isinstance(raw, list):
+            return None
+        try:
+            values = {int(value) for value in raw}
+        except (TypeError, ValueError):
+            return None
+        if any(value <= 0 for value in values):
+            return None
+        return tuple(sorted(values))
 
     async def compute_data_scope_hash(
         self,
@@ -187,6 +232,9 @@ class ResultProjectionService:
                 "subjectRefsHash": lineage.subject_refs_hash,
                 "dataScopeHash": lineage.data_scope_hash,
                 "resolverVersion": lineage.resolver_version,
+                "projectionDependencyMessageIds": list(
+                    lineage.projection_dependency_message_ids
+                ),
             }
         )
 
@@ -222,6 +270,9 @@ class ResultProjectionService:
                 "subjectRefsHash": lineage.subject_refs_hash,
                 "dataScopeHash": lineage.data_scope_hash,
                 "resolverVersion": lineage.resolver_version,
+                "projectionDependencyMessageIds": list(
+                    lineage.projection_dependency_message_ids
+                ),
             },
             "projectionHash": self.projection_hash(lineage),
             "iat": now,
@@ -264,6 +315,9 @@ class ResultProjectionService:
                 subject_refs=projection["subjectRefs"],
                 data_scope_hash=projection.get("dataScopeHash"),
                 resolver_version=projection["resolverVersion"],
+                projection_dependency_message_ids=projection.get(
+                    "projectionDependencyMessageIds", []
+                ),
             )
             if lineage.subject_refs_hash != projection["subjectRefsHash"]:
                 return None
@@ -304,6 +358,9 @@ class ResultProjectionService:
                 ],
                 data_scope_hash=lineage.data_scope_hash,
                 resolver_version=lineage.resolver_version,
+                projection_dependency_message_ids=(
+                    lineage.projection_dependency_message_ids
+                ),
             )
             token = await self.issue_download_token(
                 db,
@@ -354,7 +411,165 @@ class ResultProjectionService:
             current_hash = await self.compute_data_scope_hash(db, user)
             if current_hash != lineage.data_scope_hash:
                 return False
-        return await self._authorize_subjects(db, user, lineage)
+        if not await self._authorize_subjects(db, user, lineage):
+            return False
+        return await self._authorize_projection_dependencies(
+            db,
+            user,
+            owner_user_id=owner_user_id,
+            dependency_message_ids=lineage.projection_dependency_message_ids,
+        )
+
+    async def authorize_message_projection(
+        self,
+        db: AsyncSession,
+        user: Any,
+        *,
+        owner_user_id: int,
+        message: AiMessage | Any,
+    ) -> bool:
+        """Authorize a message and every prior assistant projection used as context."""
+        dependencies = self.projection_dependency_message_ids(message)
+        if dependencies is None:
+            return False
+        if not await self.authorize_result_projection(
+            db,
+            user,
+            owner_user_id=owner_user_id,
+            lineage=self.lineage_from_record(
+                message,
+                include_projection_dependencies=False,
+            ),
+        ):
+            return False
+
+        root_id = int(message.message_id)
+        conversation_id = int(message.conversation_id)
+        if root_id in dependencies:
+            return False
+
+        visited: set[int] = set()
+        pending = set(dependencies)
+        while pending:
+            batch = pending - visited
+            if not batch:
+                break
+            rows = (
+                (
+                    await db.execute(
+                        select(AiMessage).where(
+                            AiMessage.conversation_id == conversation_id,
+                            AiMessage.message_id.in_(batch),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            by_id = {int(item.message_id): item for item in rows}
+            if set(by_id) != batch:
+                return False
+            for dependency in rows:
+                if dependency.role == "user":
+                    return False
+                nested = self.projection_dependency_message_ids(dependency)
+                if nested is None or root_id in nested:
+                    return False
+                if not await self.authorize_result_projection(
+                    db,
+                    user,
+                    owner_user_id=owner_user_id,
+                    lineage=self.lineage_from_record(
+                        dependency,
+                        include_projection_dependencies=False,
+                    ),
+                ):
+                    return False
+                pending.update(nested)
+            visited.update(batch)
+        return True
+
+    async def collect_message_projection_dependencies(
+        self,
+        db: AsyncSession,
+        *,
+        conversation_id: int,
+    ) -> list[int]:
+        """Freeze every prior active assistant projection as a transitive dependency."""
+        messages = (
+            (
+                await db.execute(
+                    select(AiMessage).where(
+                        AiMessage.conversation_id == conversation_id,
+                        AiMessage.role != "user",
+                        AiMessage.is_active.is_(True),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        dependencies: set[int] = set()
+        for message in messages:
+            dependencies.add(int(message.message_id))
+            nested = self.projection_dependency_message_ids(message)
+            if nested is not None:
+                dependencies.update(nested)
+        return sorted(dependencies)
+
+    async def _authorize_projection_dependencies(
+        self,
+        db: AsyncSession,
+        user: Any,
+        *,
+        owner_user_id: int,
+        dependency_message_ids: tuple[int, ...],
+    ) -> bool:
+        visited: set[int] = set()
+        pending = set(dependency_message_ids)
+        while pending:
+            batch = pending - visited
+            if not batch:
+                break
+            rows = (
+                (
+                    await db.execute(
+                        select(AiMessage)
+                        .join(
+                            AiConversation,
+                            AiConversation.conversation_id == AiMessage.conversation_id,
+                        )
+                        .where(
+                            AiMessage.message_id.in_(batch),
+                            AiConversation.user_id == owner_user_id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            by_id = {int(item.message_id): item for item in rows}
+            if set(by_id) != batch:
+                return False
+            for dependency in rows:
+                if dependency.role == "user":
+                    return False
+                nested = self.projection_dependency_message_ids(dependency)
+                if nested is None:
+                    return False
+                if not await self.authorize_result_projection(
+                    db,
+                    user,
+                    owner_user_id=owner_user_id,
+                    lineage=self.lineage_from_record(
+                        dependency,
+                        include_projection_dependencies=False,
+                    ),
+                ):
+                    return False
+                pending.update(nested)
+            visited.update(batch)
+        return True
 
     async def _authorize_agent_and_tools(
         self,

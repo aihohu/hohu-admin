@@ -39,6 +39,7 @@ async def set_query_cache(redis, **kwargs) -> None:
         agent_code="user_mgmt",
         projection=ResultProjection(),
         data_scope_hash=None,
+        projection_dependency_message_ids=[81, 82],
     )
 
 
@@ -92,7 +93,8 @@ class TestSetGet:
         assert entry.tool_codes == ["user.list"]
         assert entry.subject_refs == []
         assert len(entry.subject_refs_hash) == 64
-        assert entry.schema_version == 2
+        assert entry.projection_dependency_message_ids == ["81", "82"]
+        assert entry.schema_version == 3
         assert entry.created_at.endswith("Z")
 
     async def test_legacy_namespace_is_not_read(self) -> None:

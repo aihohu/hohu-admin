@@ -124,6 +124,7 @@ async def test_tool_only_turn_finalizes_once_and_keeps_started_order(
         content="",
         tool_calls=tool_calls,
         agent_code="user_mgmt",
+        projection_dependency_message_ids=[11, 12],
     )
     second = await chat_run_finalizer.finalize_assistant_turn(
         db_session,
@@ -133,12 +134,14 @@ async def test_tool_only_turn_finalizes_once_and_keeps_started_order(
         content="",
         tool_calls=[tool_calls[1]],
         agent_code="user_mgmt",
+        projection_dependency_message_ids=[99],
     )
 
     assert first is second
     assert first.role == "assistant"
     assert first.content == ""
     assert first.parent_message_id == source.message_id
+    assert first.projection_dependency_message_ids == ["11", "12"]
     assert [item["tool_call_id"] for item in first.tool_calls] == [
         "tc_first",
         "tc_second",
@@ -216,10 +219,12 @@ async def test_active_history_filters_and_orders_stably(db_session) -> None:
     db_session.add_all([inactive, last])
     await db_session.flush()
 
+    current_user = await db_session.get(User, conversation.user_id)
+    assert current_user is not None
     messages = await chat_service.load_history(
         db_session,
         conversation.conversation_id,
-        conversation.user_id,
+        current_user,
     )
 
     assert [message.message_id for message in messages] == [

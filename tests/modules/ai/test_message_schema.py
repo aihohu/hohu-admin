@@ -164,6 +164,7 @@ def test_ai_message_has_nullable_authorization_lineage_columns() -> None:
         "subject_refs_hash",
         "data_scope_hash",
         "resolver_version",
+        "projection_dependency_message_ids",
     }
 
     assert expected <= set(AiMessage.__table__.columns.keys())

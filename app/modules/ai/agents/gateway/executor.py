@@ -1196,6 +1196,9 @@ async def _hang_for_confirmation(
                         command_action=deps.command_action,
                         risk_level=meta.risk,
                         chip_target=meta.chip_target,
+                        projection_dependency_message_ids=(
+                            deps.projection_dependency_message_ids
+                        ),
                         require_live_source=True,
                     )
                 else:
@@ -1273,6 +1276,9 @@ async def _hang_for_confirmation(
                         command_action=deps.command_action,
                         risk_level=meta.risk,
                         chip_target=meta.chip_target,
+                        projection_dependency_message_ids=(
+                            deps.projection_dependency_message_ids
+                        ),
                         require_live_source=True,
                     )
                 if durable_action is not None:
@@ -1587,6 +1593,9 @@ def _safe_write_query_cache(
                 agent_code=deps.agent.code if deps.agent else meta.agent,
                 projection=projection,
                 data_scope_hash=deps.data_scope_hash,
+                projection_dependency_message_ids=(
+                    deps.projection_dependency_message_ids
+                ),
             )
         except Exception:
             logger.exception(
