@@ -376,7 +376,7 @@ Role 元数据不应用 Department data scope：拥有 `system:role:list` 的用
 
 - `permission_codes/menu_ids`：操作者全部启用角色贡献的有效功能权限和菜单 ID；
 - `visible_agent_ids`：仅用于聊天列表和路由；操作者启用角色已绑定、Agent 自身已启用且至少有一个可见 Tool 的 Agent；
-- `grantable_agent_ids`：用于 Role dominance；操作者全部启用角色显式绑定的所有同租户 Agent，不受 `AiAgent.enabled` 影响。禁用 Agent 仍是未来可恢复的潜在能力；
+- `grantable_agent_ids`：用于 Role dominance；操作者全部启用角色中 `RoleAiAgent.enabled=true` 的显式绑定贡献所有同租户 Agent，不受 `AiAgent.enabled` 影响。全局禁用 Agent 仍是未来可恢复的潜在能力，但 soft-disabled Role-Agent 行不授予当前委派能力；
 - `scope_kinds`：操作者全部启用角色贡献的 data-scope 类型集合；不压缩成单个整数优先级；
 - `accessible_dept_ids/accessible_user_scope`：与运行时查询使用同一个 `DataScopeContext` resolver，将全部启用角色物化结果取并集；全量用明确的 unbounded 标记表示，不能把 `None` 当空集合；
 - `tenant_id`、操作者状态、启用角色集合及对应版本摘要。
@@ -397,9 +397,9 @@ Role 元数据不应用 Department data scope：拥有 `system:role:list` 的用
 
 模板偏序不是最终授权。角色分配给具体用户，或修改已有成员的角色定义时，必须基于该用户当前部门和完整角色集合物化变更前、变更后的实际可访问用户/部门集合；两者都必须是操作者可管理集合的子集。
 
-从历史“只取最高优先级 scope”切换到并集会扩大一部分存量多角色账号的实际可见集合，因此不能作为无感 helper 替换发布。Phase 2 上线前必须提供并执行 `python scripts/audit_data_scope_union.py --output <protected-path>` 只读预检：在一致性快照中对每个启用的多角色 principal 分别按旧算法和新 resolver 物化范围，报告头冻结 tenant、resolver/build SHA、角色定义/成员关系/部门父链与状态版本摘要，正文输出 principal、角色 code、变更前后部门/用户计数、稳定摘要及新增 ID 集合；报告仅向授权管理员开放。命令对非空扩大项返回非零并输出 canonical report SHA-256。
+从历史“只取最高优先级 scope”切换到并集会扩大一部分存量多角色账号的实际可见集合，因此不能作为无感 helper 替换发布。Phase 2 上线前必须提供并执行 `python scripts/audit_data_scope_union.py --output <protected-path>` 只读预检：在一致性快照中对每个启用的多角色 principal 分别按旧传统 API、旧 AI `DataScopeContext` 和新 resolver 物化范围，报告头使用服务端可信 tenant（当前固定为 `0`）并冻结 resolver/build SHA、角色定义/成员关系/部门父链与状态版本摘要，正文输出 principal、角色 code、三组部门/用户计数、稳定摘要及相对两个旧读取面的新增 ID 集合；报告仅向授权管理员开放。命令不得接受客户端 tenant 重标记；对任一读取面的非空扩大项返回非零并输出 canonical report SHA-256。
 
-release job 只有在受控变量 `DATA_SCOPE_UNION_ACK_SHA256` 与当前报告 hash 精确一致时才可继续。实际切换前必须进入排他维护窗口，获取全局 authorization-migration advisory lock、停止 §5 所有在线 writer，并在新的 repeatable-read 一致快照中重跑完整审计；resolver/build、角色/成员/部门版本或 old/new set digest 任一变化都会生成新 hash，使旧确认失效并阻断发布。校验与代码切换完成前不得释放维护锁；migration 不得读取确认变量修改角色或裁剪集合。发布说明必须把变化标记为授权语义修复，并提供复核与回滚步骤。
+release job 只有在受控变量 `DATA_SCOPE_UNION_ACK_SHA256` 与当前报告 hash 精确一致时才可继续。实际切换使用 `--verify-ack`，并必须同时提供受控的 `--maintenance-command` 与 `--switch-command` JSON argv；脚本先获取 session 级 authorization-migration advisory lock，再由 maintenance command 停止 §5 所有在线 writer，在新的 repeatable-read 一致快照中重跑完整审计，仅在精确 ACK 通过后调用负责激活同一 build 并完成启动验证的 switch command。resolver/build、角色/成员/部门版本或任一旧/新 set digest 变化都会生成新 hash，使旧确认失效并阻断发布；maintenance、审计、校验、代码切换和验证完成前不得释放同一数据库 session lock。migration 不得读取确认变量修改角色或裁剪集合。ACK 或 switch 失败时保持维护态，由发布方按回滚步骤恢复旧构建。
 
 #### 4.3.2 全局影响与保护对象
 
@@ -741,7 +741,7 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 
 19. **AI Trace 只暴露消息元数据和脱敏摘要** — 审计闭环需要关联 source message，但不需要把原始用户内容或 system prompt 返回给审计角色。**反例**: DTO 返回 `sourceMessage.content`，即使页面不渲染也可经 API 泄露敏感会话。**回归**: trace DTO 序列化不存在 message content/raw prompt/raw args/frozen args，仅保留 ID、角色、时间和 allowlist 摘要。
 
-20. **Agent 路由可见集合与委派潜在能力集合分离** — disabled Agent 不能参与聊天路由，但已有绑定会在未来重新启用时恢复能力，Role dominance 必须把它计入潜在上界。**反例**: 用仅含 enabled Agent 的集合检查 `旧 ∪ 新`，会让普通管理员连移除自己已绑定的 disabled Agent 都失败；完全跳过 disabled 又允许接管未来能力。**回归**: `visible_agent_ids/grantable_agent_ids` 分别测试，已绑定 disabled Agent 可移除，未绑定 disabled Agent 不可新增或移除。
+20. **Agent 路由可见集合与委派潜在能力集合分离** — disabled Agent 不能参与聊天路由，但 `RoleAiAgent.enabled=true` 的已有绑定会在 Agent 全局重新启用时恢复能力，Role dominance 必须把它计入潜在上界；soft-disabled Role-Agent 行不贡献当前委派能力。**反例**: 用仅含 enabled Agent 的集合检查 `旧 ∪ 新`，会让普通管理员连移除自己已绑定的 disabled Agent 都失败；把 `RoleAiAgent.enabled=false` 的历史行也计入上界，又会授予操作者当前 UI/API 都不承认的隐藏委派能力。**回归**: `tests/modules/ai/test_agent_authorization_service.py::test_grantable_agents_include_disabled_agent_but_not_disabled_binding`、`tests/modules/system/test_grant_authority.py::test_build_freezes_explicit_authority_and_materialized_scope`。
 
 21. **用户部门调整校验目标用户前后物化授权** — 部门 ID 在操作者 scope 内不代表目标用户的 `DEPT_AND_SUB` 最终可见子树也在范围内。**反例**: CUSTOM 管理员把用户调入一个可见父部门，却让目标用户借角色获得操作者不可见的后代。**回归**: `user.update_dept` 对目标用户完整角色集合物化前后 user/dept scope，任一不为操作者子集时页面与 AI 都拒绝。
 
@@ -785,6 +785,10 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 
 41. **Web 运行时拒绝必须同时撤销内存与异步生产者** — `AI_MODULE_DISABLED`、`AI_CHAT_PERMISSION_DENIED`、`AI_AGENT_FORBIDDEN`、`AI_AGENT_NOT_AVAILABLE` 和 `AI_MODEL_NOT_AVAILABLE` 统一进入 fail-closed availability handler；按错误作用域清除 conversation/result/presentation 或 model/Agent cache，并让 SSE、resume、polling、detail/list/model/Agent 请求 generation 全部失效。**反例**: 新 init 已返回 403，旧 init 的 models/list 成功响应随后覆盖拒绝状态；或 confirm 403 后旧 presentation 和晚到 SSE 仍可见。**回归**: `src/store/modules/ai/__tests__/runtime-revocation.spec.ts` 与 `projection-revocation.spec.ts`。
 
+42. **DataScope 升级审计分别冻结旧 API 与旧 AI 语义** — Phase 2 前传统 User filter 与 AI `DataScopeContext` 对非 SELF scope 是否包含 actor 并不完全相同，不能用一份伪造的 legacy 集合代替两者；tenant 只能来自服务端可信常量。**反例**: 把旧 AI 已可见的 actor 报告为新增用户，或允许 `--tenant-id` 把全局数据重新标记成任意租户后生成可 ACK hash。**回归**: `tests/scripts/test_audit_data_scope_union.py::test_report_separates_legacy_api_and_ai_self_semantics`、`test_release_args_reject_untrusted_tenant_and_incomplete_commands`。
+
+43. **精确 ACK 与代码切换共用一个 session 维护锁生命周期** — transaction advisory lock 会在审计函数返回时释放，不能证明随后切换的仍是刚确认的授权事实；发布脚本持有 session lock，依次执行停止 writer、repeatable-read 重审计、ACK、同 build 激活和验证。**反例**: `--verify-ack` 返回 0 后释放锁，再由另一步重启服务，期间授权 writer 改变角色或部门集合。**回归**: `tests/modules/system/test_authorization_lock.py::test_session_migration_lock_uses_bound_lock_and_unlock_calls`、`tests/scripts/test_audit_data_scope_union.py::test_locked_release_holds_lock_through_switch`。
+
 ---
 
 ## 10. 实施计划
@@ -819,7 +823,8 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 
 ### Phase 2：用户部门与角色调整
 
-- [ ] 新增 `system:user:role-auth`，向历史 add/edit/import 任一用户角色 writer 幂等补权，同时保持 update=`edit + role-auth`、create/import=`原入口权限 + role-auth`；交付共享 DataScope 并集 resolver、`GrantAuthority`（分离 visible/grantable Agent）、集合 dominance 和 §5 锁协议，并提供旧/新算法只读 scope-diff、受限报告与扩大项显式发布确认门禁。
+- [x] ✅ P2-A 已完成（2026-08-17；审查修复 2026-08-17）：新增 `system:user:role-auth`，向历史 add/edit/import 任一用户角色 writer 幂等补权且不横向扩张原入口；交付共享 DataScope 并集 resolver、`GrantAuthority`（分离 visible/grantable Agent）、集合 dominance、§5 稳定锁协议，以及旧 API/旧 AI/新 resolver 只读 scope-diff、可信单租户报告和精确 ACK 门禁。审查修复后，soft-disabled Role-Agent 不再贡献隐藏委派能力，维护/审计/同 build 切换与验证由同一 session advisory lock 覆盖。传统 filter、导入预检、AI `DataScopeContext`/lineage 已共用 resolver；本工作包未接入用户/部门/角色业务 writer，未修改 Web，也未执行生产 scope-diff/ACK。
+- [x] P2-A 验证证据：授权核心、会话锁与 scope 审计定向测试 27 项通过（包含 PostgreSQL 双连接验证 session lock 跨 commit 持有）；`ruff check .`、`ruff format --check .`、19 tools / 12 checks 通过；后端全量 2010 项测试通过，总覆盖率 73.24%，仅保留 2 条既有 SQLAlchemy transaction warning。数据库 schema 无变化；fresh/sync seed 和受 advisory lock 保护的存量权限迁移路径均有回归测试。
 - [ ] 拆分用户资料、部门、角色页面 API；页面 create 显式角色和 import 角色列强制 `system:user:role-auth`，固定 `R_USER` 仅按 §4.1 窄例外处理；收口其他角色/部门 writer，页面与 AI 共用替换 Policy。
 - [ ] 对齐 data-scoped `user.dept_lookup`，实现并验收 `user.update_dept` 的旧/新完整集合、目标用户前后物化授权和快照规则。
 - [ ] 同步交付 `user.role_lookup`，实现并验收 `user.update_roles` 的最终有效授权 dominance。

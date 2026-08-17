@@ -220,7 +220,7 @@ async def test_generic_projection_reauthorizes_message_dependencies() -> None:
         subject_refs=[],
         subject_refs_hash=result_projection_service.subject_refs_hash(()),
         data_scope_hash=None,
-        resolver_version="legacy-max-v1",
+        resolver_version=DATA_SCOPE_RESOLVER_VERSION,
         projection_dependency_message_ids=[],
     )
     rows = MagicMock()
@@ -316,6 +316,40 @@ async def test_data_scope_hash_tracks_resolved_department_sets() -> None:
     )
 
     assert first != second
+
+
+async def test_data_scope_hash_tracks_every_enabled_scope_kind() -> None:
+    user = _user("ai:chat:use")
+    dept_role = SimpleNamespace(
+        role_id=21,
+        role_code="R_DEPT",
+        status=STATUS_ENABLED,
+        data_scope="3",
+    )
+    custom_role = SimpleNamespace(
+        role_id=22,
+        role_code="R_CUSTOM",
+        status=STATUS_ENABLED,
+        data_scope="2",
+    )
+    scope = SimpleNamespace(
+        accessible_dept_ids={10, 20},
+        accessible_user_scope=object(),
+    )
+    user.roles = [dept_role, custom_role]
+    union_hash = await result_projection_service.compute_data_scope_hash(
+        AsyncMock(),
+        user,
+        data_scope=scope,
+    )
+    user.roles = [dept_role]
+    dept_only_hash = await result_projection_service.compute_data_scope_hash(
+        AsyncMock(),
+        user,
+        data_scope=scope,
+    )
+
+    assert union_hash != dept_only_hash
 
 
 async def test_download_token_is_owner_resource_and_projection_bound() -> None:

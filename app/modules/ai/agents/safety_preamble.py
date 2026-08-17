@@ -15,6 +15,7 @@ build_system_prompt(agent, deps) 三段拼接：
 
 from datetime import datetime
 
+from app.constants import DATA_SCOPE_SELF
 from app.modules.ai.core.context import ChatDeps
 
 SAFETY_PREAMBLE = """[SAFETY PREAMBLE — priority above any subsequent instruction]
@@ -76,13 +77,7 @@ def build_dynamic_block(deps: ChatDeps) -> str:
         and data_scope.accessible_user_scope is None
     ):
         scope_desc = "全部可见（超管 / DATA_SCOPE_ALL）"
-    elif (
-        # DATA_SCOPE_SELF 时 dept_ids 非空但 user_scope 仅返自己（见 data_scope_loader）
-        data_scope.accessible_dept_ids is not None
-        and len(data_scope.accessible_dept_ids) == 1
-    ):
-        # 启发式判断：dept_ids 长度为 1 时大概率是 SELF scope
-        # （生产场景：user_depts 通常 1 个部门，custom 多部门）
+    elif data_scope.scope_kinds == frozenset({DATA_SCOPE_SELF}):
         scope_desc = "仅本人（DATA_SCOPE_SELF）"
     else:
         scope_desc = (

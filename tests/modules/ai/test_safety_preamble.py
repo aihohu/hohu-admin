@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 from sqlalchemy import Select
 
+from app.constants import DATA_SCOPE_DEPT, DATA_SCOPE_SELF
 from app.modules.ai.agents.safety_preamble import (
     SAFETY_PREAMBLE,
     _perm_prefix,
@@ -24,6 +25,7 @@ def _make_deps(
     perms: set[str] | None = None,
     accessible_dept_ids: set[int] | None = None,
     accessible_user_scope: Select[tuple[int]] | None = None,
+    scope_kinds: frozenset[str] = frozenset(),
     trace_id: str = "tr_abc123",
     user_name: str = "testuser",
     user_id: int = 100,
@@ -36,6 +38,7 @@ def _make_deps(
             accessible_dept_ids=accessible_dept_ids,
             accessible_user_scope=accessible_user_scope,
             filters=[],
+            scope_kinds=scope_kinds,
         ),
         agent=MagicMock(),
         trace_id=trace_id,
@@ -131,15 +134,29 @@ class TestBuildDynamicBlock:
         assert "全部可见" in block
 
     def test_self_scope_description(self) -> None:
-        """DATA_SCOPE_SELF：accessible_user_scope 非 None + dept_ids 仅 1 个"""
+        """DATA_SCOPE_SELF is explicit and does not depend on department count."""
+        from sqlalchemy import literal_column, select
+
+        deps = _make_deps(
+            accessible_user_scope=select(literal_column("0").label("user_id")),
+            accessible_dept_ids=set(),
+            scope_kinds=frozenset({DATA_SCOPE_SELF}),
+        )
+        block = build_dynamic_block(deps)
+        assert "仅本人" in block
+
+    def test_single_department_scope_is_not_mislabeled_as_self(self) -> None:
         from sqlalchemy import literal_column, select
 
         deps = _make_deps(
             accessible_user_scope=select(literal_column("0").label("user_id")),
             accessible_dept_ids={10},
+            scope_kinds=frozenset({DATA_SCOPE_DEPT}),
         )
         block = build_dynamic_block(deps)
-        assert "仅本人" in block
+
+        assert "限定部门" in block
+        assert "1 个部门" in block
 
     def test_dept_limited_scope_description(self) -> None:
         """DATA_SCOPE_DEPT/CUSTOM：可见多个部门"""

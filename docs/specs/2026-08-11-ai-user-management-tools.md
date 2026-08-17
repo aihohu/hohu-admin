@@ -133,7 +133,7 @@
 - [x] Task 7 ✅ 已完成（2026-08-11）：补齐 `user.dept_lookup`、data scope、同名消歧、Agent 名称解析编排与前端展示，使“新建用户圣诞，部门是总部”无需用户输入部门 ID；19 个工具静态门禁、后端全量 1808 pytest、前端 64 Vitest/typecheck/lint 均通过。
 - [x] Task 8 ✅ 已完成（2026-08-12）：确认抽屉的主部门显示为 `部门名称（ID）`，执行参数和审批快照继续使用原始部门 ID；后端全量 1809 pytest、19 工具静态门禁及前端全量检查通过。
 - [x] Task 9 ✅ 已完成（2026-08-12）：审查纠偏超级管理员目标保护、prod 默认密码 fail-closed、HITL raw/display 绑定、存量 prompt 安全升级及工具卡/dry-run/data-list 全表面 i18n，并补充前后端反例测试。
-- [ ] Task 10：新增 `system:user:role-auth` 的 fresh/upgrade 权限数据与 add/edit/import 兼容矩阵；实现多角色并集 resolver、`GrantAuthority` 和统一锁协议。
+- [x] Task 10 ✅ 已完成（2026-08-17）：新增 `system:user:role-auth` 的 fresh/sync/upgrade 权限数据与 add/edit/import 兼容矩阵；实现多角色并集 resolver、不可变 `GrantAuthority`/集合 dominance、role → dept → user 统一锁服务，以及只读 canonical scope-diff 与 ACK 门禁。传统 filter、导入预检、AI `DataScopeContext`/lineage 已共用新 resolver；授权核心、会话锁与 scope 审计定向测试 27 项、后端全量 2010 项和 73.24% 覆盖率门禁通过。此任务未接入实际用户/部门 writer，也未修改 Web。
 - [ ] Task 11：拆分页面用户资料/部门/角色 API 和 schema，收口 create/import/fixed R_USER 例外，页面与 AI 共用替换 Policy。
 - [ ] Task 12：纠正 data-scoped `user.dept_lookup`，实现 `user.update_dept` 的完整旧/新集合、前后授权影响、dry-run、i18n 与批准时复验。
 - [ ] Task 13：同步实现 `user.role_lookup` 与 `user.update_roles` 的最终有效授权 dominance、dry-run、i18n 与批准时复验。

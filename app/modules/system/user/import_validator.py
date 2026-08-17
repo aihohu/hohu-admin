@@ -15,13 +15,7 @@ import enum
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants import (
-    DATA_SCOPE_ALL,
-    DATA_SCOPE_CUSTOM,
-    DATA_SCOPE_DEPT,
-    DATA_SCOPE_DEPT_AND_SUB,
-    STATUS_ENABLED,
-)
+from app.constants import STATUS_ENABLED
 from app.core.exceptions import BusinessRuleException
 from app.core.rbac import is_super_admin
 from app.modules.system.models.dept import Dept
@@ -29,11 +23,7 @@ from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.user.constants import EmployeeNoSyncMode
 from app.modules.system.user.schemas import FailedRow, UserImportRecord
-from app.utils.data_scope import (
-    get_best_scope,
-    get_custom_dept_ids,
-    get_dept_and_sub_ids,
-)
+from app.utils.data_scope import resolve_data_scope
 
 
 class SyncAction(enum.Enum):
@@ -274,30 +264,16 @@ async def _fetch_role_names(db: AsyncSession, role_ids: set[int]) -> list[str]:
 
 
 async def _compute_accessible_dept_ids(db: AsyncSession, user: User) -> set[int] | None:
-    """计算用户可访问的 dept_id 集合。
+    """Return the shared union resolver's accessible department IDs.
 
     Returns:
-        None: 全部可见（超管 / DATA_SCOPE_ALL）→ 调用方跳过校验
-        set[int]: 限定部门集合；空 set 表示无可见部门（DATA_SCOPE_SELF
-                  在部门维度上等价于没有导入权限）
+        ``None`` means unbounded. An empty set means the principal cannot
+        assign an imported user to any department.
     """
-    if is_super_admin(user):
+    resolution = await resolve_data_scope(db, user)
+    if resolution.unbounded:
         return None
-
-    scope = get_best_scope(user)
-    if scope == DATA_SCOPE_ALL:
-        return None
-
-    user_dept_ids = [d.dept_id for d in user.depts]
-
-    if scope == DATA_SCOPE_CUSTOM:
-        return set(await get_custom_dept_ids(db, user))
-    if scope == DATA_SCOPE_DEPT:
-        return set(user_dept_ids)
-    if scope == DATA_SCOPE_DEPT_AND_SUB:
-        return set(await get_dept_and_sub_ids(db, user_dept_ids))
-    # DATA_SCOPE_SELF：用户维度只看自己，dept 维度上无权导入任何部门
-    return set()
+    return set(resolution.accessible_dept_ids or ())
 
 
 async def check_dept_data_scope(

@@ -24,6 +24,7 @@ from app.modules.ai.constants import (
 )
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
+from app.modules.system.constants import USER_ROLE_AUTH_PERMISSION
 from app.modules.system.models.config import Config
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
@@ -133,6 +134,14 @@ init_menus = [
         menu_type="F",
         permission="system:user:export",
         status="1",
+        menu_id=next_id(),
+    ),
+    Menu(
+        parent_id=_system_user_menu_id,
+        menu_name="角色授权",
+        menu_type="F",
+        permission=USER_ROLE_AUTH_PERMISSION,
+        status=STATUS_ENABLED,
         menu_id=next_id(),
     ),
     Menu(
@@ -566,12 +575,13 @@ def build_init_roles() -> list[Role]:
 
 
 def bind_fresh_role_permissions(admin_role: Role, menus: list[Menu]) -> None:
-    """fresh install 为 R_SUPER 绑定 AI 入口、文件与 Agent 管理权限。"""
+    """Bind explicit AI and role-delegation permissions for fresh R_SUPER."""
     permissions = {
         AI_CHAT_USE_PERMISSION,
         AI_FILE_PARSE_PERMISSION,
         "ai:agent:list",
         AI_AGENT_EDIT_PERMISSION,
+        USER_ROLE_AUTH_PERMISSION,
     }
     admin_role.menus = [menu for menu in menus if menu.permission in permissions]
 

@@ -10,6 +10,7 @@ from jose import JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants import STATUS_ENABLED
 from app.core.auth import has_explicit_permission
 from app.core.config import settings
 from app.core.exceptions import BusinessException
@@ -32,9 +33,9 @@ from app.modules.system.service.role_service import role_service
 from app.modules.system.service.user_service import user_service
 from app.modules.system.user.export_service import get_export_task
 from app.modules.system.user.import_service import get_batch_detail
-from app.utils.data_scope import get_best_scope
+from app.utils.data_scope import DATA_SCOPE_UNION_RESOLVER_VERSION
 
-DATA_SCOPE_RESOLVER_VERSION = "legacy-max-v1"
+DATA_SCOPE_RESOLVER_VERSION = DATA_SCOPE_UNION_RESOLVER_VERSION
 RESULT_DOWNLOAD_TOKEN_TYPE = "ai_result_download"
 RESULT_DOWNLOAD_TOKEN_TTL_SECONDS = 300
 _RESULT_DOWNLOAD_SIGNING_CONTEXT = b"hohu:ai-result-download:v1\0"
@@ -211,7 +212,16 @@ class ResultProjectionService:
         payload = {
             "resolverVersion": DATA_SCOPE_RESOLVER_VERSION,
             "isSuperAdmin": is_super_admin(user),
-            "effectiveScope": str(get_best_scope(user)),
+            "enabledRoleScopes": [
+                {
+                    "roleId": str(role.role_id),
+                    "dataScope": str(role.data_scope),
+                }
+                for role in sorted(
+                    (role for role in user.roles if role.status == STATUS_ENABLED),
+                    key=lambda item: item.role_id,
+                )
+            ],
             "ownerUserId": str(user.user_id),
             "accessibleDeptIds": dept_ids,
             "userScope": (

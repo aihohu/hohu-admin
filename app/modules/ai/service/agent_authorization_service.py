@@ -20,6 +20,28 @@ class AgentAuthorizationService:
         """返回 Gateway 与 Agent 可见性共用的 Tool 权限集合。"""
         return collect_user_permission_codes(user)
 
+    async def grantable_agent_ids(
+        self,
+        db: AsyncSession,
+        user: User,
+    ) -> set[int]:
+        """Return every explicit potential Agent grant from enabled roles.
+
+        Only active Role-Agent bindings contribute delegation authority. The
+        Agent's global enabled flag intentionally does not filter this set, so
+        an explicitly bound disabled Agent can still be removed safely.
+        """
+        role_ids = self._enabled_role_ids(user)
+        if not role_ids:
+            return set()
+        result = await db.execute(
+            select(RoleAiAgent.agent_id).where(
+                RoleAiAgent.role_id.in_(role_ids),
+                RoleAiAgent.enabled.is_(True),
+            )
+        )
+        return {int(agent_id) for agent_id in result.scalars()}
+
     @staticmethod
     def _enabled_role_ids(user: User) -> list[int]:
         return [

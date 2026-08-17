@@ -19,7 +19,7 @@
 - Alembic 当前单一 head：`e6b7f9a2d4c1`。
 - `AI_MODULE_ENABLED` 默认值为 `true`；P1-A 已实现关闭态 `/ai`/`/ai/**` 统一 503 且 AI 业务依赖不 import/初始化。
 - P1-A 已完成用户入口和分支权限；P1-B 已完成统一 Agent/Tool Policy、三模型端点、当前 LLM run selector、Agent 全局编辑边界及阶段安全 seed；P1-C 已完成 Provider 全链路 hardened egress、已保存对象测试端点和存量 quarantine 审计；P1-D 已完成 lineage、历史结果实时投影授权、短期下载 token 及 Web fail-closed 投影收口。
-- DataScope 当前按最高优先级角色计算，用户/部门/角色传统写入口尚未复用统一 GrantAuthority。
+- P2-A 已将传统 filter、导入预检、AI `DataScopeContext` 与 lineage 收敛到多角色并集 resolver，并交付 `GrantAuthority`、授权锁及防漂移 scope-diff；用户/部门/角色业务 writer 尚未接入统一委派 Policy。
 - Web 的 Phase 1 三模型端点、已保存 Provider test、Agent 编辑可见性、稳定不可用状态及 tombstone 缓存清理已完成；部门移动和 Role-Agent shared 等 Phase 2 契约仍待迁移。
 - 后端 CI 已有 70% 覆盖率门禁；Web 尚无 `test:coverage`、多角色 E2E 和独立真实 Provider project。
 
@@ -279,6 +279,22 @@ upgrade：保留模块开关、Agent enabled、Role-Agent enabled 和 enabled to
 
 ## 6. Phase 2：用户部门/角色调整与统一授权内核
 
+#### P2-A 统一授权内核
+
+状态：✅ P2-A 已完成（2026-08-17；审查修复 2026-08-17）。本工作包只交付共享授权地基，不接入用户/部门/角色业务 writer，也未修改 Web。
+
+范围：
+
+- 用单一 resolver 按启用角色分别物化 `SELF/DEPT/DEPT_AND_SUB/CUSTOM` 后取并集；`ALL` 和超级管理员显式表示 unbounded，传统 API filter 与 AI `DataScopeContext` 共用结果。
+- 新增不可变 `GrantAuthority`，冻结 permission/menu、visible Agent、仅由 active Role-Agent 绑定贡献且不受 Agent 全局 enabled 影响的 grantable Agent、scope kinds、物化部门/用户集合、tenant、操作者/启用角色状态和 canonical 版本摘要；集合 dominance 不再使用 scope 整数优先级。
+- 新增 `system:user:role-auth` fresh/sync/upgrade 数据路径；upgrade 只向已有 add/edit/import 任一 writer 和 `R_SUPER` 幂等补权，不扩张其原用户写入口。
+- 新增 role → dept → user 稳定排序锁服务和 authorization-migration advisory lock；Service 不提交事务，后续 writer 在锁后负责重读与二次 Policy。
+- 新增只读 `audit_data_scope_union.py`：分别比较旧传统 API、旧 AI 与新 resolver，tenant 固定由服务端可信常量提供；repeatable-read canonical 报告/hash 对任一读取面的存量扩大项非零退出。发布校验要求 maintenance/switch JSON argv，并以同一 session advisory lock 覆盖停止 writer、重审计、精确 ACK、同 build 切换和验证；不修改角色、成员或部门数据。
+
+退出标准：定向测试锁定 `DEPT + CUSTOM`、`DEPT_AND_SUB + CUSTOM`、禁用角色、unbounded、visible/grantable Agent 分离、权限兼容矩阵、稳定锁顺序、审计零写入与 hash 漂移；通过 Ruff、AI Tool 静态门禁及后端全量测试后停止审查。
+
+完成证据：授权核心、会话锁与 scope 审计定向测试 27 项通过（包含 PostgreSQL 双连接验证 session lock 跨 commit 持有）；`ruff check .`、`ruff format --check .`、19 tools / 12 checks 通过；后端全量 2010 项测试通过，总覆盖率 73.24%，满足 70% 门禁，仅保留 2 条既有 SQLAlchemy transaction warning。数据库 schema 无变化，因此不新增 Alembic revision；fresh/sync 由菜单 seed 覆盖，存量权限使用 `scripts/migrate_phase2_authorization.py` 在 authorization-migration advisory lock 下执行。生产 scope-diff 与 `DATA_SCOPE_UNION_ACK_SHA256` 确认仍属于部署动作，本工作包未代替授权管理员执行。
+
 ### 6.1 修改文件
 
 共享授权：
@@ -329,8 +345,8 @@ Web：
 
 ### 6.3 预检和锁
 
-- `audit_data_scope_union.py --output <protected-path>` 在一致性快照中比较旧/新范围，扩大项返回非零并输出 canonical SHA-256。
-- 发布要求 `DATA_SCOPE_UNION_ACK_SHA256`；维护锁下重跑，hash 或版本摘要漂移即拒绝。
+- `audit_data_scope_union.py --output <protected-path>` 在一致性快照中分别比较旧传统 API、旧 AI 与新范围，任一扩大项返回非零并输出 canonical SHA-256；当前单租户报告固定 `tenantId=0`，不接受 CLI 重标记。
+- 发布要求 `DATA_SCOPE_UNION_ACK_SHA256`；`--verify-ack` 同时要求 maintenance/switch 命令，session 维护锁覆盖停止 writer、重跑、精确 ACK、同 build 切换和验证全过程，hash 或版本摘要漂移即拒绝。
 - writer 统一按 role → dept → user 加锁；锁后重读全部授权事实并阻止 phantom。
 
 ### 6.4 测试与退出标准
@@ -467,7 +483,7 @@ pnpm e2e:provider
 
 - [ ] Alembic fresh upgrade、存量 upgrade 和必要 downgrade 演练通过，保持单一 head。
 - [ ] fresh/upgrade seed 不覆盖部署方开关、Agent enabled、绑定和 enabled tools。
-- [ ] `DATA_SCOPE_UNION_ACK_SHA256` 与维护锁下重跑报告一致。
+- [ ] `DATA_SCOPE_UNION_ACK_SHA256` 与维护锁下重跑报告一致，且同一 session lock 内的 maintenance/switch 命令已激活并验证同一 build。
 - [ ] Provider egress 审计无未确认 quarantine 风险。
 - [ ] 后端/Web lint、typecheck、覆盖率、build、确定性 E2E 和真实 Provider E2E 全绿。
 - [ ] AI Trace 可核对成功、拒绝和失败终态且 DTO 脱敏。

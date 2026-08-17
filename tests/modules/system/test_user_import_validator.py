@@ -12,11 +12,13 @@
 """
 
 import pytest
+from sqlalchemy import insert
 from sqlalchemy import select as _select
 
 from app.constants import (
     ADMIN_USERNAME,
     DATA_SCOPE_ALL,
+    DATA_SCOPE_CUSTOM,
     DATA_SCOPE_DEPT,
     DATA_SCOPE_DEPT_AND_SUB,
     DATA_SCOPE_SELF,
@@ -24,6 +26,7 @@ from app.constants import (
 )
 from app.core.exceptions import BusinessRuleException
 from app.core.security import get_password_hash
+from app.db.base import role_depts
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
@@ -529,6 +532,53 @@ class TestCheckDeptDataScope:
         assert len(failed) == 1
         assert failed[0].row_num == 92
         assert failed[0].error_code == "AI_IMPORT_DEPT_OUT_OF_SCOPE"
+
+    async def test_multi_role_dept_and_custom_scopes_are_unioned(self, db_session):
+        """Every enabled role contributes to the import department boundary."""
+        own_dept = _make_dept_for_scope(8251, "QA-Union-Own")
+        custom_dept = _make_dept_for_scope(8252, "QA-Union-Custom")
+        dept_role = _make_role(
+            3051,
+            "QA_R_UNION_DEPT",
+            "QA-union-dept-role",
+            data_scope=DATA_SCOPE_DEPT,
+        )
+        custom_role = _make_role(
+            3052,
+            "QA_R_UNION_CUSTOM",
+            "QA-union-custom-role",
+            data_scope=DATA_SCOPE_CUSTOM,
+        )
+        db_session.add_all([own_dept, custom_dept, dept_role, custom_role])
+        await db_session.flush()
+        await db_session.execute(
+            insert(role_depts).values(
+                role_id=custom_role.role_id,
+                dept_id=custom_dept.dept_id,
+            )
+        )
+
+        operator = _make_user(
+            9151,
+            "QA_Union_Manager",
+            [dept_role, custom_role],
+        )
+        operator.depts = [own_dept]
+        records = [
+            _make_scoped_record(95, "QA_Union_Own", "QA-Union-Own"),
+            _make_scoped_record(96, "QA_Union_Custom", "QA-Union-Custom"),
+        ]
+        db_session.add(operator)
+        await db_session.flush()
+
+        assert (
+            await check_dept_data_scope(
+                db_session,
+                records,
+                operator,
+            )
+            == []
+        )
 
     async def test_dept_data_scope_super_admin_bypass(self, db_session):
         """超管豁免（accessible_dept_ids=None）。"""

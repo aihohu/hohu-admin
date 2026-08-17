@@ -195,3 +195,46 @@ async def test_shared_agent_has_no_binding_bypass(db_session) -> None:
         )
 
     assert exc_info.value.error_code == "AI_AGENT_FORBIDDEN"
+
+
+async def test_grantable_agents_include_disabled_agent_but_not_disabled_binding(
+    db_session,
+) -> None:
+    user, role, agent = await _principal(
+        db_session,
+        role_code="P2_GRANTABLE",
+        binding_enabled=False,
+    )
+    agent.enabled = False
+    outside = AiAgent(
+        code=f"outside_{next_id()}",
+        name="Outside",
+        description="Outside",
+        enabled=False,
+    )
+    db_session.add(outside)
+    await db_session.flush()
+
+    grantable = await agent_authorization_service.grantable_agent_ids(
+        db_session,
+        user,
+    )
+
+    assert grantable == set()
+    assert role.status == STATUS_ENABLED
+    assert outside.agent_id not in grantable
+
+    binding = await db_session.scalar(
+        select(RoleAiAgent).where(
+            RoleAiAgent.role_id == role.role_id,
+            RoleAiAgent.agent_id == agent.agent_id,
+        )
+    )
+    assert binding is not None
+    binding.enabled = True
+    await db_session.flush()
+
+    assert await agent_authorization_service.grantable_agent_ids(
+        db_session,
+        user,
+    ) == {agent.agent_id}

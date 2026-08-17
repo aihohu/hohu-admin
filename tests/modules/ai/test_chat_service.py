@@ -31,6 +31,7 @@ from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.model_authorization_service import (
     model_authorization_service,
 )
+from app.utils.data_scope import DataScopeResolution
 
 
 def _patch_sticky_manual(agent_code: str = "user_mgmt"):
@@ -47,6 +48,25 @@ def _patch_sticky_manual(agent_code: str = "user_mgmt"):
                 agent_code=agent_code,
                 run_supervisor=False,
                 reason="manual_override",
+            )
+        ),
+    )
+
+
+def _patch_unbounded_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch the shared resolver for tests focused on ChatDeps assembly."""
+    import app.modules.ai.core.data_scope_loader as loader_mod
+
+    monkeypatch.setattr(
+        loader_mod,
+        "resolve_data_scope",
+        AsyncMock(
+            return_value=DataScopeResolution(
+                scope_kinds=frozenset({"1"}),
+                accessible_dept_ids=None,
+                accessible_user_scope=None,
+                include_self=True,
+                unbounded=True,
             )
         ),
     )
@@ -87,9 +107,7 @@ class TestBuildChatDeps:
     async def test_super_admin_returns_all_visible_data_scope(
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        import app.modules.ai.core.data_scope_loader as loader_mod
-
-        monkeypatch.setattr(loader_mod, "is_super_admin", lambda u: True)
+        _patch_unbounded_scope(monkeypatch)
 
         mock_user = MagicMock()
         mock_user.user_id = 999
@@ -111,9 +129,7 @@ class TestBuildChatDeps:
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """trace_id 默认格式为 tr_<uuid hex>。"""
-        import app.modules.ai.core.data_scope_loader as loader_mod
-
-        monkeypatch.setattr(loader_mod, "is_super_admin", lambda u: True)
+        _patch_unbounded_scope(monkeypatch)
         mock_user = MagicMock()
         mock_user.roles = []
         mock_user.depts = []
@@ -128,9 +144,7 @@ class TestBuildChatDeps:
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """调用方传入 trace_id 时复用（如重试场景）"""
-        import app.modules.ai.core.data_scope_loader as loader_mod
-
-        monkeypatch.setattr(loader_mod, "is_super_admin", lambda u: True)
+        _patch_unbounded_scope(monkeypatch)
         mock_user = MagicMock()
         mock_user.roles = []
         mock_user.depts = []
@@ -145,9 +159,7 @@ class TestBuildChatDeps:
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """客户端字段不参与 tenant 解析；ChatDeps 只接收服务端 resolver 结果。"""
-        import app.modules.ai.core.data_scope_loader as loader_mod
-
-        monkeypatch.setattr(loader_mod, "is_super_admin", lambda u: True)
+        _patch_unbounded_scope(monkeypatch)
         mock_user = MagicMock()
         mock_user.roles = []
         mock_user.depts = []
@@ -168,9 +180,7 @@ class TestBuildChatDeps:
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """agent_code 必须在 ai_agent 表中存在。"""
-        import app.modules.ai.core.data_scope_loader as loader_mod
-
-        monkeypatch.setattr(loader_mod, "is_super_admin", lambda u: True)
+        _patch_unbounded_scope(monkeypatch)
         mock_user = MagicMock()
         mock_user.roles = []
         mock_user.depts = []
@@ -197,9 +207,7 @@ class TestBuildChatDeps:
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """默认使用 user_mgmt Agent。"""
-        import app.modules.ai.core.data_scope_loader as loader_mod
-
-        monkeypatch.setattr(loader_mod, "is_super_admin", lambda u: True)
+        _patch_unbounded_scope(monkeypatch)
         mock_user = MagicMock()
         mock_user.roles = []
         mock_user.depts = []

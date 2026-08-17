@@ -12,10 +12,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.constants import DATA_SCOPE_ALL
 from app.modules.ai.core import data_scope_loader as loader_mod
 from app.modules.ai.core.context import DataScopeContext
 from app.modules.ai.core.data_scope_loader import build_data_scope_context
+from app.utils.data_scope import DataScopeResolution
 
 
 @pytest.fixture
@@ -39,13 +39,17 @@ def mock_normal_user() -> MagicMock:
 
 
 def _patch(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> None:
-    """统一 monkeypatch loader_mod 的依赖"""
+    """Patch the single shared resolver consumed by the AI adapter."""
     defaults: dict[str, object] = {
-        "is_super_admin": lambda u: False,
-        "get_best_scope": lambda u: DATA_SCOPE_ALL,
-        "get_user_data_scope_filters": _async_return([]),
-        "get_custom_dept_ids": _async_return([]),
-        "get_dept_and_sub_ids": _async_return([]),
+        "resolve_data_scope": _async_return(
+            DataScopeResolution(
+                scope_kinds=frozenset({"1"}),
+                accessible_dept_ids=None,
+                accessible_user_scope=None,
+                include_self=True,
+                unbounded=True,
+            )
+        ),
     }
     defaults.update(overrides)
     for name, value in defaults.items():
@@ -64,7 +68,7 @@ class TestBuildDataScopeContextSuperAdmin:
         self, mock_super_admin: MagicMock, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """超级管理员返回无限制 ID 和空过滤器。"""
-        monkeypatch.setattr(loader_mod, "is_super_admin", lambda u: True)
+        _patch(monkeypatch)
 
         ctx = await build_data_scope_context(MagicMock(), mock_super_admin)
 
@@ -77,7 +81,7 @@ class TestBuildDataScopeContextSuperAdmin:
         self, mock_normal_user: MagicMock, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """DATA_SCOPE_ALL 返回无限制 ID 和空过滤器。"""
-        _patch(monkeypatch)  # is_super_admin=False, get_best_scope=ALL
+        _patch(monkeypatch)
 
         ctx = await build_data_scope_context(MagicMock(), mock_normal_user)
 
@@ -92,7 +96,7 @@ class TestBuildDataScopeContextStructure:
     async def test_returns_data_scope_context_instance(
         self, mock_super_admin: MagicMock, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(loader_mod, "is_super_admin", lambda u: True)
+        _patch(monkeypatch)
 
         ctx = await build_data_scope_context(MagicMock(), mock_super_admin)
 

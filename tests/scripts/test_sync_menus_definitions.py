@@ -11,6 +11,7 @@ MENU_DEFINITIONS，形状正确（``menu_type=F`` / ``parent_route=system_user``
 
 import pytest
 
+from app.modules.system.constants import USER_ROLE_AUTH_PERMISSION
 from scripts.sync_menus import MENU_DEFINITIONS
 
 
@@ -86,5 +87,14 @@ def test_ai_file_parse_permission_seeded_under_chat_menu() -> None:
 
     assert entry["menu_type"] == "F"
     assert entry["parent_route"] == "ai_chat"
+    assert entry["status"] == "1"
+    assert entry.get("key")
+
+
+def test_user_role_auth_permission_seeded_under_user_menu() -> None:
+    entry = _find_by_permission(USER_ROLE_AUTH_PERMISSION)
+
+    assert entry["menu_type"] == "F"
+    assert entry["parent_route"] == "system_user"
     assert entry["status"] == "1"
     assert entry.get("key")

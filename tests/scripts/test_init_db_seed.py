@@ -21,6 +21,7 @@ from app.constants import (
     SUPER_ADMIN_ROLE_CODE,
     USER_ROLE_CODE,
 )
+from app.modules.system.constants import USER_ROLE_AUTH_PERMISSION
 from app.utils.validators import validate_password
 from scripts.init_db import (
     bind_fresh_role_permissions,
@@ -171,7 +172,16 @@ class TestRoleSeed:
             "ai:agent:list",
             "ai:chat:use",
             "ai:file:parse",
+            USER_ROLE_AUTH_PERMISSION,
         }
+
+    def test_user_role_auth_permission_is_seeded_under_user_menu(self):
+        button = _find_menu_by_permission(init_menus, USER_ROLE_AUTH_PERMISSION)
+        parent = _find_menu_by_route_name(init_menus, "system_user")
+
+        assert button.menu_type == "F"
+        assert button.status == STATUS_ENABLED
+        assert button.parent_id == parent.menu_id
 
 
 class TestAiChatPermissionSeed:

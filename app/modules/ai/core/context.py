@@ -48,6 +48,8 @@ class DataScopeContext:
     accessible_dept_ids: set[int] | None
     accessible_user_scope: Select[tuple[int]] | None
     filters: list[ColumnElement[bool]] = field(default_factory=list)
+    scope_kinds: frozenset[str] = field(default_factory=frozenset)
+    """Exact enabled-role scope kinds supplied by the shared resolver."""
 
 
 @dataclass

@@ -23,6 +23,7 @@ from app.modules.ai.constants import (
     AI_CHAT_USE_PERMISSION,
     AI_FILE_PARSE_PERMISSION,
 )
+from app.modules.system.constants import USER_ROLE_AUTH_PERMISSION
 from app.modules.system.models.menu import Menu
 
 # 菜单定义：每条记录用 parent_route 替代 parent_id，运行时自动解析。
@@ -348,6 +349,15 @@ MENU_DEFINITIONS = [
         "menu_name": "导出",
         "menu_type": "F",
         "permission": "system:user:export",
+        "route_path": "",
+        "status": "1",
+    },
+    {
+        "key": "system_user_role-auth",
+        "parent_route": "system_user",
+        "menu_name": "角色授权",
+        "menu_type": "F",
+        "permission": USER_ROLE_AUTH_PERMISSION,
         "route_path": "",
         "status": "1",
     },

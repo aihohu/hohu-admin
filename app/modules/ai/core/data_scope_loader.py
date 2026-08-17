@@ -10,24 +10,12 @@
   filters 仍走 ColumnElement 路径（stats tool / 业务函数拼 WHERE 用），保持透明。
 """
 
-from sqlalchemy import Select, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants import (
-    DATA_SCOPE_ALL,
-    DATA_SCOPE_CUSTOM,
-    DATA_SCOPE_DEPT,
-    DATA_SCOPE_DEPT_AND_SUB,
-    DATA_SCOPE_SELF,
-)
-from app.core.rbac import is_super_admin
-from app.db.base import user_depts
 from app.modules.system.models.user import User
 from app.utils.data_scope import (
-    get_best_scope,
-    get_custom_dept_ids,
-    get_dept_and_sub_ids,
-    get_user_data_scope_filters,
+    get_user_filters_from_resolution,
+    resolve_data_scope,
 )
 
 from .context import DataScopeContext
@@ -51,53 +39,15 @@ async def build_data_scope_context(
           - filters: User 模型的 data_scope filter（最常见 stats 目标）；
                      其它模型 stats tool 在函数内自行调 get_data_scope_filters
     """
-    if is_super_admin(user):
-        return DataScopeContext(
-            accessible_dept_ids=None,
-            accessible_user_scope=None,
-            filters=[],
-        )
-
-    # User 模型 filter（公开 API，复用现有 user_depts 子查询逻辑）
-    user_filters = await get_user_data_scope_filters(db, user)
-
-    scope = get_best_scope(user)
-    if scope == DATA_SCOPE_ALL:
-        return DataScopeContext(
-            accessible_dept_ids=None,
-            accessible_user_scope=None,
-            filters=[],
-        )
-
-    user_dept_ids = [d.dept_id for d in user.depts]
-
-    if scope == DATA_SCOPE_CUSTOM:
-        dept_ids = set(await get_custom_dept_ids(db, user))
-    elif scope == DATA_SCOPE_DEPT:
-        dept_ids = set(user_dept_ids)
-    elif scope == DATA_SCOPE_DEPT_AND_SUB:
-        dept_ids = set(await get_dept_and_sub_ids(db, user_dept_ids))
-    else:  # DATA_SCOPE_SELF
-        # SELF scope：仍给 dept 视图（用户自己所在部门），但 user 维度收敛到自己
-        dept_ids = set(user_dept_ids)
-
-    # user 维度子查询：SELF = 仅自己；其它 = user_depts 反查 + 自己
-    # 合并当前用户和部门关联用户；当前用户始终可见。
-    # label("user_id") 保留列名，下游 targets.py::ensure_targets_in_scope 通过
-    # subq.c.user_id 引用（union 后默认列名可能丢失）
-    own_user_stmt = select(User.user_id.label("user_id")).where(
-        User.user_id == user.user_id
-    )
-    if scope == DATA_SCOPE_SELF:
-        user_scope: Select[tuple[int]] = own_user_stmt
-    else:
-        dept_user_stmt = select(user_depts.c.user_id.label("user_id")).where(
-            user_depts.c.dept_id.in_(dept_ids)
-        )
-        user_scope = union(own_user_stmt, dept_user_stmt).subquery().select()
+    resolution = await resolve_data_scope(db, user)
 
     return DataScopeContext(
-        accessible_dept_ids=dept_ids,
-        accessible_user_scope=user_scope,
-        filters=list(user_filters),
+        accessible_dept_ids=(
+            None
+            if resolution.accessible_dept_ids is None
+            else set(resolution.accessible_dept_ids)
+        ),
+        accessible_user_scope=resolution.accessible_user_scope,
+        filters=get_user_filters_from_resolution(resolution),
+        scope_kinds=resolution.scope_kinds,
     )
