@@ -6,6 +6,7 @@ from pydantic import (
     ConfigDict,
     EmailStr,
     Field,
+    StrictBool,
     field_serializer,
     field_validator,
 )
@@ -123,6 +124,56 @@ class UserRoleUpdate(BaseModel):
         value = _validate_snowflake_id_list(value)
         if len(set(value)) != len(value):
             raise ValueError("roleIds must not contain duplicates")
+        return value
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+
+class UserDepartmentAssignment(BaseModel):
+    """One canonical department assignment in a complete replacement."""
+
+    dept_id: str
+    is_primary: StrictBool
+
+    @field_validator("dept_id", mode="before")
+    @classmethod
+    def validate_dept_id(cls, value: object) -> object:
+        if not isinstance(value, str) or re.fullmatch(r"[1-9][0-9]*", value) is None:
+            raise ValueError("deptId must be a positive Snowflake ID string")
+        return value
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+
+class UserDepartmentUpdate(BaseModel):
+    """Complete department replacement request for one user."""
+
+    dept_assignments: list[UserDepartmentAssignment]
+
+    @field_validator("dept_assignments", mode="before")
+    @classmethod
+    def validate_assignment_array(cls, value: object) -> object:
+        if not isinstance(value, list):
+            raise ValueError("deptAssignments must be an array")
+        return value
+
+    @field_validator("dept_assignments")
+    @classmethod
+    def validate_unique_dept_ids(
+        cls,
+        value: list[UserDepartmentAssignment],
+    ) -> list[UserDepartmentAssignment]:
+        dept_ids = [item.dept_id for item in value]
+        if len(set(dept_ids)) != len(dept_ids):
+            raise ValueError("deptAssignments must not contain duplicate deptIds")
         return value
 
     model_config = ConfigDict(

@@ -793,6 +793,10 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 
 45. **导入角色授权冻结解析事实并在锁内整批复验** — preview/execute 都使用共享 `GrantAuthority` dominance，不再以“操作者当前持有相同 role ID”作为委派规则；execute 预读每行 role/dept/user 解析结果与目标关联，按 role → dept → user 锁定已发现父 row，锁后重新解析并比较，新增可解析对象、目标用户或关联变化统一 stale。锁内重验 import/role-auth，任一行授权越界时不写任何 `sys_user/user_roles/user_depts`；解析后的稳定 ID 直接进入写入，名称不再二次解析。**反例**: 合法委派角色因 actor 未直接持有而被拒绝；权限在 adapter 检查后撤销仍可落库；未解析对象在锁后出现并改变分类；一行越权但其他行继续创建。**回归**: `tests/modules/system/test_user_import_dry_run.py`、`tests/modules/system/test_user_import_execute.py`、`tests/modules/system/test_user_role_assignment_service.py`。
 
+46. **用户部门写入是完整替换授权操作** — 页面 `PUT /system/user/{id}/departments` 只接受 canonical Snowflake 字符串与严格 boolean 组成的完整集合，API dependency 和共享 Service 都校验 `system:user:edit + system:dept:list`；Service 在任何关联写入前同时校验目标用户、旧/新部门、主部门配置和目标完整角色集合的前后物化授权。预读得到的角色、自定义部门、用户部门和 `DEPT_AND_SUB` 结构影响集合按 role → dept → user 加锁，锁后重载；新发现依赖或主部门关联漂移统一 `AUTHORIZATION_SNAPSHOT_STALE`。**反例**: 只检查新部门 ID 会允许删除 scope 外旧关联，或把用户调入可见父部门后借 `DEPT_AND_SUB` 获得操作者不可见的子树；先删后验会在失败时留下部分集合。**回归**: `tests/modules/system/test_user_department_assignment_service.py`、`tests/modules/system/test_user_role_contracts.py`、`tests/modules/system/test_user_api_atomicity.py`。
+
+47. **策略配置和假设作用域必须使用当前事务事实** — `user_require_primary_dept` 属于授权写入门禁，必须绕过 300 秒 best-effort cache 并在事务内锁定配置行；以候选部门计算目标用户授权时，数据库查询返回的旧主体必须先移除，再仅按候选部门与 `include_self` 语义重建。**反例**: 配置已从 false 改为 true 但旧缓存仍允许清空部门；CUSTOM 角色绑定旧部门 A、用户拟迁往 B 时，旧 A 查询残留该用户并把越权影响误判为可接受。**回归**: `tests/modules/system/test_user_department_assignment_service.py::test_replace_departments_bypasses_stale_primary_policy_cache`、`tests/modules/system/test_user_role_assignment_service.py::test_hypothetical_custom_scope_drops_subject_from_removed_department`。
+
 ---
 
 ## 10. 实施计划
@@ -831,6 +835,8 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 - [x] P2-A 验证证据：授权核心、会话锁与 scope 审计定向测试 27 项通过（包含 PostgreSQL 双连接验证 session lock 跨 commit 持有）；`ruff check .`、`ruff format --check .`、19 tools / 12 checks 通过；后端全量 2010 项测试通过，总覆盖率 73.24%，仅保留 2 条既有 SQLAlchemy transaction warning。数据库 schema 无变化；fresh/sync seed 和受 advisory lock 保护的存量权限迁移路径均有回归测试。
 - [x] ✅ P2-B1 已完成（2026-08-17；审查修复 2026-08-17）：拆分用户资料与角色请求契约，旧角色/部门/password 字段 fail closed；`roleIds` 固定为 canonical Snowflake `string[]`，显式 null 不再等同省略。新增页面完整角色替换和最小可委派角色候选 API。页面 create、AI create 与 import 新建统一使用旧/新角色 dominance 和固定 `R_USER` 窄例外；导入用表头叠加 role-auth，锁内复验权限与完整角色集合，冻结 role/dept/user 名称解析并在全局锁后重新发现，任一授权越界整批零业务写入。本工作包无数据库迁移、seed 或 Web 改动。
 - [x] P2-B1 验证证据：角色契约/Policy 及相关页面、AI、import 定向回归 126 项通过；`ruff check .`、`ruff format --check .`、19 tools / 12 checks 通过；后端全量 2028 项测试通过，总覆盖率 73.57%，仅保留 2 条既有 SQLAlchemy transaction warning。AI 模块关闭 fresh process 继续不加载 Tool Registry。
+- [x] ✅ P2-B2 已完成（2026-08-17；审查修复 2026-08-17）：新增页面 `PUT /system/user/{user_id}/departments` 与严格 `{deptAssignments}` 完整替换契约，API 和 Service 双层要求 `system:user:edit + system:dept:list`。独立 `UserDepartmentAssignmentService` 校验目标用户及旧/新部门完整 scope、启用可分配状态、动态主部门配置、admin/R_SUPER 保护，并以目标完整启用角色分别物化变更前后 permission/menu/Agent/部门/用户授权，任一不受操作者 `GrantAuthority` dominance 即原子拒绝。预读角色、部门结构影响和用户关联后按 role → dept → user 加锁，锁后重载并拒绝关联漂移或新结构依赖。审查修复后，主部门策略绕过 best-effort cache 并锁定配置行，候选部门作用域移除数据库旧主体后按候选事实精确重建；隐藏旧关联删除、admin/R_SUPER 目标保护均有显式回归。本工作包无数据库迁移、seed、AI Tool、import overwrite、部门成员页或 Web 改动。
+- [x] P2-B2 验证证据：部门契约、页面事务和共享 Policy 定向回归 35 项，角色兼容合计 48 项，system 模块 539 项全部通过；`ruff check .`、`ruff format --check .`、19 tools / 12 checks 通过；后端全量 2053 项测试通过，总覆盖率 73.81%，仅保留 2 条既有 SQLAlchemy transaction warning。
 - [ ] 拆分用户资料、部门、角色页面 API；页面 create 显式角色和 import 角色列强制 `system:user:role-auth`，固定 `R_USER` 仅按 §4.1 窄例外处理；收口其他角色/部门 writer，页面与 AI 共用替换 Policy。
 - [ ] 对齐 data-scoped `user.dept_lookup`，实现并验收 `user.update_dept` 的旧/新完整集合、目标用户前后物化授权和快照规则。
 - [ ] 同步交付 `user.role_lookup`，实现并验收 `user.update_roles` 的最终有效授权 dominance。

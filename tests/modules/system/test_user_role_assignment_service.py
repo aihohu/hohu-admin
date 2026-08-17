@@ -429,6 +429,44 @@ async def test_replace_roles_rejects_out_of_scope_custom_role(
     assert exc_info.value.error_code == "USER_ROLE_AUTHORITY_EXCEEDED"
 
 
+async def test_hypothetical_custom_scope_drops_subject_from_removed_department(
+    db_session: AsyncSession,
+) -> None:
+    old_dept = Dept(
+        dept_id=next_id(),
+        dept_name=f"phase2-custom-old-{next_id()}",
+        ancestors="0",
+        order_num=0,
+        status=STATUS_ENABLED,
+    )
+    new_dept = Dept(
+        dept_id=next_id(),
+        dept_name=f"phase2-custom-new-{next_id()}",
+        ancestors="0",
+        order_num=0,
+        status=STATUS_ENABLED,
+    )
+    custom_role = _role(
+        f"R_CUSTOM_TARGET_{next_id()}",
+        data_scope=DATA_SCOPE_CUSTOM,
+    )
+    custom_role.depts = [old_dept]
+    target = _user(f"phase2-custom-target-{next_id()}", [custom_role])
+    target.depts = [old_dept]
+    db_session.add_all([old_dept, new_dept, custom_role, target])
+    await db_session.flush()
+
+    authority = await user_role_assignment_service.materialize_role_set_authority(
+        db_session,
+        user=target,
+        roles=[custom_role],
+        depts=[new_dept],
+    )
+
+    assert authority.accessible_dept_ids == frozenset({old_dept.dept_id})
+    assert authority.accessible_user_ids == frozenset()
+
+
 async def test_replace_roles_rejects_agent_grant_above_actor(
     db_session: AsyncSession,
 ) -> None:

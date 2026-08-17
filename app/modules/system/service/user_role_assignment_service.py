@@ -224,7 +224,7 @@ class UserRoleAssignmentService:
             )
         return depts
 
-    async def _materialize_role_set(
+    async def materialize_role_set_authority(
         self,
         db: AsyncSession,
         *,
@@ -269,7 +269,15 @@ class UserRoleAssignmentService:
                     await db.execute(resolution.accessible_user_scope)
                 ).scalars()
             }
-            if resolution.include_self:
+            materialized.discard(int(user.user_id))
+            own_dept_ids = {
+                int(dept.dept_id)
+                for dept in (depts if depts is not None else (user.depts or []))
+            }
+            if resolution.include_self or (
+                resolution.accessible_dept_ids is not None
+                and bool(own_dept_ids & resolution.accessible_dept_ids)
+            ):
                 materialized.add(int(user.user_id))
             accessible_user_ids = frozenset(materialized)
         return RoleSetAuthority(
@@ -281,7 +289,7 @@ class UserRoleAssignmentService:
         )
 
     @staticmethod
-    def _ensure_role_set_dominated(
+    def ensure_role_set_dominated(
         actor: GrantAuthority,
         candidate: RoleSetAuthority,
         *,
@@ -403,24 +411,24 @@ class UserRoleAssignmentService:
             self._ensure_target_visible(actor, int(target.user_id))
 
         if old_roles:
-            old_authority = await self._materialize_role_set(
+            old_authority = await self.materialize_role_set_authority(
                 db,
                 user=target,
                 roles=old_roles,
                 depts=list(target.depts or []),
             )
-            self._ensure_role_set_dominated(
+            self.ensure_role_set_dominated(
                 actor,
                 old_authority,
                 ignored_user_ids=ignored_user_ids,
             )
-        new_authority = await self._materialize_role_set(
+        new_authority = await self.materialize_role_set_authority(
             db,
             user=target,
             roles=requested_roles,
             depts=prospective_depts,
         )
-        self._ensure_role_set_dominated(
+        self.ensure_role_set_dominated(
             actor,
             new_authority,
             ignored_user_ids=ignored_user_ids,

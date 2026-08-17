@@ -6,7 +6,12 @@ import pytest
 from openpyxl import Workbook
 from pydantic import ValidationError
 
-from app.modules.system.schemas.user import UserCreate, UserRoleUpdate, UserUpdate
+from app.modules.system.schemas.user import (
+    UserCreate,
+    UserDepartmentUpdate,
+    UserRoleUpdate,
+    UserUpdate,
+)
 from app.modules.system.user.import_parser import (
     MIME_CSV,
     MIME_XLSX,
@@ -92,6 +97,53 @@ def test_role_request_json_schema_uses_snowflake_strings() -> None:
     )
     assert create_array_schema["items"]["type"] == "string"
     assert update_role_ids["items"]["type"] == "string"
+
+
+def test_department_update_accepts_only_the_canonical_complete_contract() -> None:
+    valid = UserDepartmentUpdate.model_validate(
+        {
+            "deptAssignments": [
+                {"deptId": "9007199254740993", "isPrimary": True},
+                {"deptId": "9007199254740994", "isPrimary": False},
+            ]
+        }
+    )
+
+    assert [item.dept_id for item in valid.dept_assignments] == [
+        "9007199254740993",
+        "9007199254740994",
+    ]
+    assert valid.dept_assignments[0].is_primary is True
+    schema = UserDepartmentUpdate.model_json_schema(by_alias=True)
+    assignment = schema["$defs"]["UserDepartmentAssignment"]
+    assert assignment["properties"]["deptId"]["type"] == "string"
+    assert assignment["properties"]["isPrimary"]["type"] == "boolean"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"deptAssignments": None},
+        {"deptAssignments": [{"deptId": 9007199254740993, "isPrimary": True}]},
+        {"deptAssignments": [{"deptId": "0", "isPrimary": True}]},
+        {"deptAssignments": [{"deptId": "01", "isPrimary": True}]},
+        {"deptAssignments": [{"deptId": "1", "isPrimary": 1}]},
+        {
+            "deptAssignments": [
+                {"deptId": "1", "isPrimary": True},
+                {"deptId": "1", "isPrimary": False},
+            ]
+        },
+        {"deptAssignments": [{"deptId": "1", "isPrimary": True, "legacy": "ignored"}]},
+        {"deptAssignments": [], "legacy": "ignored"},
+    ],
+)
+def test_department_update_rejects_non_canonical_or_ambiguous_payloads(
+    payload: dict,
+) -> None:
+    with pytest.raises(ValidationError):
+        UserDepartmentUpdate.model_validate(payload)
 
 
 def test_import_role_column_presence_does_not_depend_on_cell_values() -> None:

@@ -1,6 +1,6 @@
 # AI 用户管理缺失工具补齐
 
-> 状态：🚧 Plan 1 已完成（2026-08-11）；Plan 2 已完成 P2-A 与 P2-B1，其余工作包待实现
+> 状态：🚧 Plan 1 已完成（2026-08-11）；Plan 2 已完成 P2-A、P2-B1 与 P2-B2，其余工作包待实现
 > 日期：2026-08-11｜更新：2026-08-17
 > 关联：[`2026-08-14-ai-management-mvp-closure.md`](./2026-08-14-ai-management-mvp-closure.md)、[`2026-07-02-ai-tool-gateway-design.md`](./2026-07-02-ai-tool-gateway-design.md)、[`2026-08-01-user-import-export-design.md`](./2026-08-01-user-import-export-design.md)
 
@@ -52,11 +52,15 @@
 
 20. **名称只用于 lookup 和确认展示，写工具只接受冻结 ID** — `user.role_lookup` 只返回当前 `GrantAuthority` 下可委派角色的最小摘要，零/多命中必须澄清；不能依赖 Phase 3 的 `role.lookup`。**反例**: 在批准时再次按名称查找可能命中被改名或新建的另一角色。**回归**: lookup 同名、零命中、不可委派和批准后 ID 对象漂移测试全部 fail closed。
 
-21. **页面资料与角色使用独立、拒绝额外字段的请求契约** — `PUT /system/user/{id}` 只接收资料字段，角色使用完整 ID 集合的独立 writer，部门留给后续独立 writer；旧 `roles/deptIds` 不能静默忽略。**反例**: 继续用一个宽 schema 再由 Service 忽略角色字段，会让旧 Web 显示保存成功但授权实际未更新。**回归**: schema 测试锁定旧字段 422、`roleIds` 非空且去重，以及页面 writer 独立提交事务。
+21. **页面资料、角色与部门使用独立、拒绝额外字段的请求契约** — `PUT /system/user/{id}` 只接收资料字段，角色和部门分别使用完整集合的独立 writer；旧 `roles/deptIds` 不能静默忽略。**反例**: 继续用一个宽 schema 再由 Service 忽略角色或部门字段，会让旧 Web 显示保存成功但授权实际未更新。**回归**: schema 测试锁定旧字段 422、canonical Snowflake 字符串、严格 boolean、集合去重，以及页面 writer 独立提交事务。
 
 22. **页面创建、AI 创建和导入新建共用完整角色集合 Policy** — 所有路径在关联写入前按 role → dept → user 锁定并重读，比较目标旧/新 permission、menu、active Role-Agent 与物化部门/用户集合；固定 `R_USER` 只免除 role-auth，不免除 dominance。**反例**: AI/导入继续直接写 `sys_user_role`，或只检查角色 ID 是否属于操作者，会形成页面与批处理两套授权规则。**回归**: 合法子集、旧/新越权、CUSTOM、Agent、自改、R_SUPER/admin、固定角色越界及事务顺序测试。
 
 23. **导入角色权限由文件表头存在性决定** — `role_input` 列一旦存在，即使整列为空也要求 `system:user:import + system:user:role-auth`；缺列时导入新用户只能走受 dominance 约束的固定 `R_USER`。**反例**: 按非空单元格判断会允许低权用户保留角色列并在预览/执行间改变内容。**回归**: CSV/XLSX 表头检查、空角色列权限拒绝、缺列默认角色与无业务写入测试。
+
+24. **页面部门完整替换先冻结依赖、锁后重算授权影响** — `PUT /system/user/{id}/departments` 与后续 `user.update_dept` 共用独立 Service；旧/新部门和目标用户都必须在操作者 scope 内，目标完整角色集合在变更前后的物化授权都必须受 `GrantAuthority` dominance。Service 预读角色、自定义部门、用户部门和子树结构影响，按 role → dept → user 加锁后重载；主部门标记或新结构依赖漂移 fail closed。**反例**: 只验证新部门可见会借完整替换删除不可管理的旧关联，或通过可见父部门扩出不可见子树。**回归**: `tests/modules/system/test_user_department_assignment_service.py`、`tests/modules/system/test_user_role_contracts.py`、`tests/modules/system/test_user_api_atomicity.py`。
+
+25. **主部门策略直读锁行且候选作用域不继承旧主体** — `user_require_primary_dept` 在共享部门 Policy 内使用同一事务的 uncached `SELECT FOR UPDATE`；候选部门授权物化必须先移除数据库旧 scope 查询中的目标用户，再按候选部门与 SELF 规则决定是否加入。**反例**: Redis 失效失败让 false 缓存继续放行空部门，或 CUSTOM 旧部门查询残留目标用户而掩盖迁移后的授权变化。**回归**: `test_replace_departments_bypasses_stale_primary_policy_cache`、`test_hypothetical_custom_scope_drops_subject_from_removed_department`，并锁定隐藏旧关联删除与 admin/R_SUPER 目标保护。
 
 ## 3. 工具契约
 
@@ -143,6 +147,8 @@
 - [ ] Task 11：拆分页面用户资料/部门/角色 API 和 schema，收口 create/import/fixed R_USER 例外，页面与 AI 共用替换 Policy。
   - [x] Task 11a ✅ P2-B1 已完成（2026-08-17；审查修复 2026-08-17）：资料/角色请求契约拆分，`roleIds` 固定为 canonical Snowflake `string[]` 且显式 null 失败，资料更新拒绝 password；新增角色完整替换与最小候选 API。页面 create、AI create 和 import 新建使用同一角色 Policy，显式 `roleIds`/角色列表头叠加 role-auth，缺省角色固定为受 dominance 约束的 `R_USER`。import preview/execute 共用 dominance，execute 锁内重验入口权限、冻结并锁后重查 role/dept/user 解析，任一授权越界整批零业务写入。定向回归 126 项、后端全量 2028 项和 73.57% 覆盖率门禁通过；数据库 schema、seed 和 Web 均无变化。
   - [ ] Task 11b：交付独立部门 writer，并把 import overwrite 与其余存量角色/部门 writer 全部接入共享 Policy；完成 Web 契约切换后再关闭 Task 11。
+    - [x] Task 11b-1 ✅ P2-B2 已完成（2026-08-17；审查修复 2026-08-17）：页面部门完整替换 contract/API/Service、双权限、主部门规则、完整 scope、授权影响 dominance、全局锁和锁后复验完成；主部门策略改为 uncached 锁行读取，候选作用域精确重建目标主体，并补齐隐藏旧关联与 admin/R_SUPER 回归。相关 48 项、system 539 项及后端全量 2053 项通过，覆盖率 73.81%，无 migration/seed/Web 改动。
+    - [ ] Task 11b-2：接入页面 create、AI create、import create/overwrite 与其余存量部门 writer，并切换 Web。
 - [ ] Task 12：纠正 data-scoped `user.dept_lookup`，实现 `user.update_dept` 的完整旧/新集合、前后授权影响、dry-run、i18n 与批准时复验。
 - [ ] Task 13：同步实现 `user.role_lookup` 与 `user.update_roles` 的最终有效授权 dominance、dry-run、i18n 与批准时复验。
 - [ ] Task 14：后端定向/全量门禁与真实浏览器多角色 E2E 通过后，将 Plan 2 翻转为完成。

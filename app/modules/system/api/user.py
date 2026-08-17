@@ -25,6 +25,7 @@ from app.modules.system.schemas.user import (
     ResetPassword,
     UpdateProfile,
     UserCreate,
+    UserDepartmentUpdate,
     UserDeptItem,
     UserItemOut,
     UserQuery,
@@ -33,6 +34,9 @@ from app.modules.system.schemas.user import (
 )
 from app.modules.system.service.config_service import config_service
 from app.modules.system.service.dept_service import dept_service
+from app.modules.system.service.user_department_assignment_service import (
+    user_department_assignment_service,
+)
 from app.modules.system.service.user_role_assignment_service import (
     user_role_assignment_service,
 )
@@ -322,6 +326,32 @@ async def update_user_roles(
     )
     await db.commit()
     return ResponseModel.success(msg="角色更新成功")
+
+
+@router.put(
+    "/{user_id}/departments",
+    summary="替换用户部门",
+    dependencies=[
+        Depends(require_permissions("system:user:edit")),
+        Depends(require_permissions("system:dept:list")),
+    ],
+)
+async def update_user_departments(
+    user_id: int,
+    body: UserDepartmentUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    await user_department_assignment_service.replace_departments(
+        db,
+        actor_user_id=current_user.user_id,
+        target_user_id=user_id,
+        dept_assignments=[
+            (int(item.dept_id), item.is_primary) for item in body.dept_assignments
+        ],
+    )
+    await db.commit()
+    return ResponseModel.success(msg="部门更新成功")
 
 
 @router.put(

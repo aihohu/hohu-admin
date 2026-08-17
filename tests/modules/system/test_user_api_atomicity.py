@@ -1,11 +1,24 @@
 """User API transaction ownership and separated-writer tests."""
 
+import inspect
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from app.modules.system.api.user import add_user, update_user, update_user_roles
+from fastapi.routing import APIRoute
+
+from app.modules.system.api.user import (
+    add_user,
+    update_user,
+    update_user_departments,
+    update_user_roles,
+)
+from app.modules.system.api.user import (
+    router as user_router,
+)
 from app.modules.system.schemas.user import (
     UserCreate,
+    UserDepartmentAssignment,
+    UserDepartmentUpdate,
     UserDeptItem,
     UserRoleUpdate,
     UserUpdate,
@@ -114,3 +127,49 @@ async def test_role_update_commits_only_after_shared_policy_succeeds() -> None:
         role_ids=["11", "12"],
     )
     db_mock.commit.assert_awaited_once()
+
+
+async def test_department_update_commits_only_after_shared_policy_succeeds() -> None:
+    body = UserDepartmentUpdate(
+        dept_assignments=[
+            UserDepartmentAssignment(dept_id="21", is_primary=True),
+            UserDepartmentAssignment(dept_id="22", is_primary=False),
+        ]
+    )
+    db_mock = AsyncMock()
+
+    with patch(
+        "app.modules.system.api.user.user_department_assignment_service."
+        "replace_departments",
+        new=AsyncMock(),
+    ) as replace_departments:
+        await update_user_departments(
+            user_id=123,
+            body=body,
+            db=db_mock,
+            current_user=_actor(),
+        )
+
+    replace_departments.assert_awaited_once_with(
+        db_mock,
+        actor_user_id=42,
+        target_user_id=123,
+        dept_assignments=[(21, True), (22, False)],
+    )
+    db_mock.commit.assert_awaited_once()
+
+
+def test_department_update_route_requires_edit_and_department_list() -> None:
+    route = next(
+        route
+        for route in user_router.routes
+        if isinstance(route, APIRoute)
+        and route.path == "/{user_id}/departments"
+        and "PUT" in route.methods
+    )
+    permission_codes = {
+        inspect.getclosurevars(dependency.call).nonlocals.get("perm_code")
+        for dependency in route.dependant.dependencies
+    }
+
+    assert {"system:user:edit", "system:dept:list"} <= permission_codes

@@ -83,6 +83,20 @@ class ConfigService:
             return default
         return value.strip().lower() in ("true", "1", "yes", "on")
 
+    async def get_bool_for_update(
+        self,
+        db: AsyncSession,
+        key: str,
+        default: bool = False,
+    ) -> bool:
+        """Read and lock a policy boolean without using the shared cache."""
+        config = await db.scalar(
+            select(Config).where(Config.config_key == key).with_for_update()
+        )
+        if config is None or config.status != "1":
+            return default
+        return config.config_value.strip().lower() in ("true", "1", "yes", "on")
+
     async def get_int(self, db: AsyncSession, key: str, default: int = 0) -> int:
         """读取整型配置。无法解析时返回 default。"""
         value = await self.get_value(db, key)
