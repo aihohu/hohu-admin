@@ -175,6 +175,7 @@ class TestImportPreviewArtifacts:
         storage = SimpleNamespace(save=AsyncMock(side_effect=["key-1", "key-2"]))
         db = SimpleNamespace(flush=AsyncMock())
         ctx = SimpleNamespace(user=SimpleNamespace(user_id=11), db=db)
+        ensure_import_permissions = AsyncMock()
 
         monkeypatch.setattr(
             "app.modules.system.ai_tools._load_file_bytes",
@@ -183,6 +184,11 @@ class TestImportPreviewArtifacts:
         monkeypatch.setattr(
             "app.modules.system.user.import_parser.parse_import_excel",
             parser,
+        )
+        monkeypatch.setattr(
+            "app.modules.system.service.user_role_assignment_service."
+            "user_role_assignment_service.ensure_import_permissions",
+            ensure_import_permissions,
         )
         monkeypatch.setattr(
             "app.modules.system.user.import_service.dry_run_import_users",
@@ -214,6 +220,11 @@ class TestImportPreviewArtifacts:
         assert batches[0].file_storage_key == "key-1"
         assert batches[1].file_storage_key == "key-2"
         assert dry_run.await_count == 2
+        assert ensure_import_permissions.await_count == 2
+        assert all(
+            awaited.kwargs == {"actor_user_id": 11, "has_role_column": False}
+            for awaited in ensure_import_permissions.await_args_list
+        )
         assert storage.save.await_count == 2
         assert db.flush.await_count == 2
 
@@ -250,6 +261,7 @@ class TestImportPreviewArtifacts:
             failed_count=0,
             batch_id="batch-csv",
         )
+        ensure_import_permissions = AsyncMock()
 
         monkeypatch.setattr(
             "app.modules.system.ai_tools._load_file_bytes",
@@ -258,6 +270,11 @@ class TestImportPreviewArtifacts:
         monkeypatch.setattr(
             "app.modules.system.user.import_parser.parse_import_excel",
             parser,
+        )
+        monkeypatch.setattr(
+            "app.modules.system.service.user_role_assignment_service."
+            "user_role_assignment_service.ensure_import_permissions",
+            ensure_import_permissions,
         )
         monkeypatch.setattr(
             "app.modules.system.user.import_service.dry_run_import_users",
@@ -297,6 +314,11 @@ class TestImportPreviewArtifacts:
             (csv_bytes, "text/csv"),
             (csv_bytes, "text/csv"),
         ]
+        assert ensure_import_permissions.await_count == 2
+        assert all(
+            awaited.kwargs == {"actor_user_id": 11, "has_role_column": False}
+            for awaited in ensure_import_permissions.await_args_list
+        )
 
 
 def _ctx_for(record: object, *, user_id: int = 11, tenant_id: int = 7) -> object:

@@ -789,6 +789,10 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 
 43. **精确 ACK 与代码切换共用一个 session 维护锁生命周期** — transaction advisory lock 会在审计函数返回时释放，不能证明随后切换的仍是刚确认的授权事实；发布脚本持有 session lock，依次执行停止 writer、repeatable-read 重审计、ACK、同 build 激活和验证。**反例**: `--verify-ack` 返回 0 后释放锁，再由另一步重启服务，期间授权 writer 改变角色或部门集合。**回归**: `tests/modules/system/test_authorization_lock.py::test_session_migration_lock_uses_bound_lock_and_unlock_calls`、`tests/scripts/test_audit_data_scope_union.py::test_locked_release_holds_lock_through_switch`。
 
+44. **角色写请求只接受 canonical Snowflake 字符串且显式 null 失败** — `roleIds` 在 JSON/OpenAPI 中固定为正十进制字符串数组；create 只有字段真正省略时才走固定 `R_USER`，显式 `null`、JSON number、零值和前导零均拒绝。普通资料更新不接受 `password`，密码只能走独立 reset/change endpoint。**反例**: 把 `null` 当省略会绕过 role-auth，把 BigInteger 暴露为 JSON number 会在浏览器端丢精度，接受后静默忽略 password 会制造虚假成功。**回归**: `tests/modules/system/test_user_role_contracts.py`、`tests/modules/system/test_user_api_atomicity.py`。
+
+45. **导入角色授权冻结解析事实并在锁内整批复验** — preview/execute 都使用共享 `GrantAuthority` dominance，不再以“操作者当前持有相同 role ID”作为委派规则；execute 预读每行 role/dept/user 解析结果与目标关联，按 role → dept → user 锁定已发现父 row，锁后重新解析并比较，新增可解析对象、目标用户或关联变化统一 stale。锁内重验 import/role-auth，任一行授权越界时不写任何 `sys_user/user_roles/user_depts`；解析后的稳定 ID 直接进入写入，名称不再二次解析。**反例**: 合法委派角色因 actor 未直接持有而被拒绝；权限在 adapter 检查后撤销仍可落库；未解析对象在锁后出现并改变分类；一行越权但其他行继续创建。**回归**: `tests/modules/system/test_user_import_dry_run.py`、`tests/modules/system/test_user_import_execute.py`、`tests/modules/system/test_user_role_assignment_service.py`。
+
 ---
 
 ## 10. 实施计划
@@ -825,6 +829,8 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 
 - [x] ✅ P2-A 已完成（2026-08-17；审查修复 2026-08-17）：新增 `system:user:role-auth`，向历史 add/edit/import 任一用户角色 writer 幂等补权且不横向扩张原入口；交付共享 DataScope 并集 resolver、`GrantAuthority`（分离 visible/grantable Agent）、集合 dominance、§5 稳定锁协议，以及旧 API/旧 AI/新 resolver 只读 scope-diff、可信单租户报告和精确 ACK 门禁。审查修复后，soft-disabled Role-Agent 不再贡献隐藏委派能力，维护/审计/同 build 切换与验证由同一 session advisory lock 覆盖。传统 filter、导入预检、AI `DataScopeContext`/lineage 已共用 resolver；本工作包未接入用户/部门/角色业务 writer，未修改 Web，也未执行生产 scope-diff/ACK。
 - [x] P2-A 验证证据：授权核心、会话锁与 scope 审计定向测试 27 项通过（包含 PostgreSQL 双连接验证 session lock 跨 commit 持有）；`ruff check .`、`ruff format --check .`、19 tools / 12 checks 通过；后端全量 2010 项测试通过，总覆盖率 73.24%，仅保留 2 条既有 SQLAlchemy transaction warning。数据库 schema 无变化；fresh/sync seed 和受 advisory lock 保护的存量权限迁移路径均有回归测试。
+- [x] ✅ P2-B1 已完成（2026-08-17；审查修复 2026-08-17）：拆分用户资料与角色请求契约，旧角色/部门/password 字段 fail closed；`roleIds` 固定为 canonical Snowflake `string[]`，显式 null 不再等同省略。新增页面完整角色替换和最小可委派角色候选 API。页面 create、AI create 与 import 新建统一使用旧/新角色 dominance 和固定 `R_USER` 窄例外；导入用表头叠加 role-auth，锁内复验权限与完整角色集合，冻结 role/dept/user 名称解析并在全局锁后重新发现，任一授权越界整批零业务写入。本工作包无数据库迁移、seed 或 Web 改动。
+- [x] P2-B1 验证证据：角色契约/Policy 及相关页面、AI、import 定向回归 126 项通过；`ruff check .`、`ruff format --check .`、19 tools / 12 checks 通过；后端全量 2028 项测试通过，总覆盖率 73.57%，仅保留 2 条既有 SQLAlchemy transaction warning。AI 模块关闭 fresh process 继续不加载 Tool Registry。
 - [ ] 拆分用户资料、部门、角色页面 API；页面 create 显式角色和 import 角色列强制 `system:user:role-auth`，固定 `R_USER` 仅按 §4.1 窄例外处理；收口其他角色/部门 writer，页面与 AI 共用替换 Policy。
 - [ ] 对齐 data-scoped `user.dept_lookup`，实现并验收 `user.update_dept` 的旧/新完整集合、目标用户前后物化授权和快照规则。
 - [ ] 同步交付 `user.role_lookup`，实现并验收 `user.update_roles` 的最终有效授权 dominance。

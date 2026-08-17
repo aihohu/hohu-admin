@@ -124,7 +124,8 @@ async def test_build_freezes_explicit_authority_and_materialized_scope(
     await db_session.flush()
 
     with patch(
-        "app.modules.system.service.grant_authority.agent_authorization_service.list_agents",
+        "app.modules.ai.service.agent_authorization_service."
+        "agent_authorization_service.list_agents",
         AsyncMock(return_value=[agent]),
     ):
         first = await grant_authority_service.build(db_session, actor.user_id)
@@ -191,7 +192,8 @@ async def test_collection_and_scope_dominance_use_subset_semantics(
     await db_session.flush()
 
     with patch(
-        "app.modules.system.service.grant_authority.agent_authorization_service.list_agents",
+        "app.modules.ai.service.agent_authorization_service."
+        "agent_authorization_service.list_agents",
         AsyncMock(return_value=[]),
     ):
         authority = await grant_authority_service.build(db_session, actor.user_id)

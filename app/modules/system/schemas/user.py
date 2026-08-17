@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 
 from pydantic import (
@@ -22,6 +23,17 @@ from app.utils.validators import (
 )
 
 
+def _validate_snowflake_id_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError("roleIds must be an array of Snowflake ID strings")
+    if any(
+        not isinstance(item, str) or re.fullmatch(r"[1-9][0-9]*", item) is None
+        for item in value
+    ):
+        raise ValueError("roleIds must contain positive Snowflake ID strings")
+    return value
+
+
 class UserDeptItem(BaseModel):
     """用户部门关联项"""
 
@@ -40,8 +52,6 @@ class UserBase(BaseModel):
     user_phone: str | None = Field(None, description="手机号")
     user_gender: str | None = Field(None, description="用户性别")
     status: str = Field(..., description="状态")
-    roles: list[str] = []  # 创建时分配的角色 ID 列表
-    dept_ids: list[UserDeptItem] = []  # 部门关联列表
 
     @field_validator("user_name")
     @classmethod
@@ -68,38 +78,77 @@ class UserBase(BaseModel):
     def _validate_status(cls, v: str) -> str:
         return validate_status(v)
 
-    @field_validator("roles")
-    @classmethod
-    def validate_roles(cls, v: list[str]) -> list[str]:
-        if v is None or len(v) == 0:
-            raise ValueError("必须至少分配一个角色")
-        return v
-
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class UserCreate(UserBase):
     """用户创建请求"""
 
     password: str = Field(..., min_length=6, max_length=20, description="明文密码")
+    role_ids: list[str] | None = Field(
+        None,
+        description="Explicit complete role ID set; omission uses the fixed default role",
+    )
+    dept_ids: list[UserDeptItem] = Field(default_factory=list)
 
     @field_validator("password")
     @classmethod
     def _validate_password(cls, v: str) -> str:
         return validate_password(v)
 
+    @field_validator("role_ids", mode="before")
+    @classmethod
+    def _validate_role_ids(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("roleIds must be omitted instead of null")
+        return _validate_snowflake_id_list(value)
+
 
 class UserUpdate(UserBase):
     """用户更新请求"""
 
-    password: str | None = Field(None, description="明文密码")
 
-    @field_validator("password")
+class UserRoleUpdate(BaseModel):
+    """Complete role replacement request for one user."""
+
+    role_ids: list[str] = Field(..., min_length=1)
+
+    @field_validator("role_ids", mode="before")
     @classmethod
-    def _validate_password(cls, v: str | None) -> str | None:
-        if not v:
-            return None
-        return validate_password(v)
+    def validate_unique_role_ids(cls, value: object) -> object:
+        value = _validate_snowflake_id_list(value)
+        if len(set(value)) != len(value):
+            raise ValueError("roleIds must not contain duplicates")
+        return value
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+
+class AssignableRoleOut(BaseModel):
+    """Minimal role candidate exposed by user-assignment selectors."""
+
+    role_id: int
+    role_code: str
+    role_name: str
+    data_scope: str
+
+    @field_serializer("role_id")
+    def serialize_role_id(self, role_id: int, _info) -> str:
+        return str(role_id)
+
+    model_config = ConfigDict(
+        from_attributes=True,
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
 
 
 class ResetPassword(BaseModel):

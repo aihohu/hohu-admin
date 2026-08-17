@@ -32,15 +32,41 @@ class AgentAuthorizationService:
         an explicitly bound disabled Agent can still be removed safely.
         """
         role_ids = self._enabled_role_ids(user)
-        if not role_ids:
-            return set()
-        result = await db.execute(
-            select(RoleAiAgent.agent_id).where(
-                RoleAiAgent.role_id.in_(role_ids),
-                RoleAiAgent.enabled.is_(True),
+        by_role = await self.grantable_agent_ids_by_role_ids(db, role_ids)
+        return {agent_id for agent_ids in by_role.values() for agent_id in agent_ids}
+
+    async def grantable_agent_ids_by_role_ids(
+        self,
+        db: AsyncSession,
+        role_ids: list[int] | tuple[int, ...] | set[int],
+    ) -> dict[int, set[int]]:
+        """Return active Role-Agent grants grouped by explicit role identifier."""
+        normalized_role_ids = {int(role_id) for role_id in role_ids}
+        result: dict[int, set[int]] = {
+            role_id: set() for role_id in normalized_role_ids
+        }
+        if not normalized_role_ids:
+            return result
+        rows = (
+            await db.execute(
+                select(RoleAiAgent.role_id, RoleAiAgent.agent_id).where(
+                    RoleAiAgent.role_id.in_(normalized_role_ids),
+                    RoleAiAgent.enabled.is_(True),
+                )
             )
-        )
-        return {int(agent_id) for agent_id in result.scalars()}
+        ).all()
+        for role_id, agent_id in rows:
+            result[int(role_id)].add(int(agent_id))
+        return result
+
+    async def grantable_agent_ids_for_role_ids(
+        self,
+        db: AsyncSession,
+        role_ids: list[int] | tuple[int, ...] | set[int],
+    ) -> set[int]:
+        """Return the active Role-Agent union for an explicit role set."""
+        by_role = await self.grantable_agent_ids_by_role_ids(db, role_ids)
+        return {agent_id for agent_ids in by_role.values() for agent_id in agent_ids}
 
     @staticmethod
     def _enabled_role_ids(user: User) -> list[int]:

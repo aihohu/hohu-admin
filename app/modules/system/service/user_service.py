@@ -100,16 +100,9 @@ class UserService:
             raise DuplicateException("用户名", user_in.user_name)
 
         # 准备用户数据
-        obj_data = user_in.model_dump(exclude={"roles", "password", "dept_ids"})
+        obj_data = user_in.model_dump(exclude={"role_ids", "password", "dept_ids"})
         new_user = User(**obj_data)
         new_user.hashed_password = get_password_hash(user_in.password)
-
-        # 分配角色
-        if user_in.roles:
-            role_result = await db.execute(
-                select(Role).where(Role.role_code.in_(user_in.roles))
-            )
-            new_user.roles = role_result.scalars().all()
 
         db.add(new_user)
         return new_user
@@ -131,33 +124,25 @@ class UserService:
         Raises:
             NotFoundException: 用户不存在
         """
-        # 查询用户（带角色预加载）
+        # Serialize profile and status changes with authorization writers.
         stmt = (
             select(User)
             .where(User.user_id == user_id)
             .options(selectinload(User.roles))
+            .with_for_update()
         )
         result = await db.execute(stmt)
         user = result.scalars().first()
         if not user:
             raise NotFoundException("用户")
 
-        # 更新基础字段，排除 roles 和 password
-        update_data = user_in.model_dump(
-            exclude={"roles", "password", "dept_ids"}, exclude_unset=True
-        )
+        # Update profile fields only; roles and departments use dedicated writers.
+        update_data = user_in.model_dump(exclude={"password"}, exclude_unset=True)
         username_changed = (
             "user_name" in update_data and update_data["user_name"] != user.user_name
         )
         for field, value in update_data.items():
             setattr(user, field, value)
-
-        # 更新角色关联
-        if user_in.roles is not None:
-            role_result = await db.execute(
-                select(Role).where(Role.role_code.in_(user_in.roles))
-            )
-            user.roles = role_result.scalars().all()
 
         # 改名后失效审计中间件的 username 缓存，避免 5 分钟内日志记旧名
         if username_changed:

@@ -158,6 +158,63 @@ def parse_import_excel(file_bytes: bytes, mime_type: str) -> list[UserImportReco
     return records
 
 
+def import_file_has_column(
+    file_bytes: bytes,
+    mime_type: str,
+    column_name: str,
+) -> bool:
+    """Inspect the normalized header without trusting row values as presence proof."""
+    if mime_type not in ALLOWED_MIME_TYPES:
+        raise BusinessRuleException(
+            f"不支持的文件类型: {mime_type}（允许 xlsx/csv）",
+            error_code="AI_IMPORT_INVALID_MIME",
+        )
+    if len(file_bytes) > MAX_FILE_SIZE_BYTES:
+        raise BusinessRuleException(
+            f"文件超过 {MAX_FILE_SIZE_BYTES // (1024 * 1024)}MB 限制",
+            error_code="AI_IMPORT_FILE_TOO_LARGE",
+        )
+    expected = column_name.strip().lower()
+    if mime_type == MIME_CSV:
+        text = file_bytes.decode("utf-8-sig", errors="strict")
+        header = next(csv.reader(io.StringIO(text)), [])
+        return any(str(value).strip().lower() == expected for value in header)
+
+    _validate_xlsx_archive(file_bytes)
+    try:
+        workbook = load_workbook(
+            io.BytesIO(file_bytes),
+            read_only=True,
+            data_only=True,
+            keep_links=False,
+        )
+    except (
+        EOFError,
+        IndexError,
+        InvalidFileException,
+        KeyError,
+        OSError,
+        ParseError,
+        RuntimeError,
+        SyntaxError,
+        TypeError,
+        ValueError,
+        zipfile.BadZipFile,
+    ):
+        _raise_invalid_xlsx()
+    try:
+        worksheet = workbook.active
+        if worksheet is None:
+            _raise_invalid_xlsx()
+        header = next(worksheet.iter_rows(values_only=True), ())
+        return any(
+            value is not None and str(value).strip().lower() == expected
+            for value in header
+        )
+    finally:
+        workbook.close()
+
+
 def _parse_xlsx_rows(file_bytes: bytes) -> list[dict[str, str]]:
     """openpyxl 解析 xlsx → list[row_dict]（按 EXCEL_HEADERS 提取列）。
 
@@ -634,5 +691,6 @@ __all__ = [
     "MIME_CSV",
     "MIME_XLSX",
     "ImportErrorCollection",
+    "import_file_has_column",
     "parse_import_excel",
 ]

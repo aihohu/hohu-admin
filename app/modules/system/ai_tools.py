@@ -667,7 +667,6 @@ def _build_ai_user_create_schema(
     user_gender: str | None,
     status: str,
     primary_dept_id: int,
-    role_code: str,
     default_password: str,
 ) -> Any:
     """用 HTTP 同款 schema 校验 AI 创建参数，不回显敏感值。"""
@@ -687,7 +686,6 @@ def _build_ai_user_create_schema(
             user_phone=user_phone,
             user_gender=user_gender,
             status=status,
-            roles=[role_code],
             dept_ids=[UserDeptItem(dept_id=str(primary_dept_id), is_primary=True)],
             password=default_password,
         )
@@ -732,6 +730,9 @@ async def user_create(
     from app.modules.system.service.dept_service import (  # noqa: PLC0415
         dept_service,
     )
+    from app.modules.system.service.user_role_assignment_service import (  # noqa: PLC0415
+        user_role_assignment_service,
+    )
     from app.modules.system.service.user_service import (  # noqa: PLC0415
         user_service,
     )
@@ -750,12 +751,18 @@ async def user_create(
         user_gender=user_gender,
         status=status,
         primary_dept_id=primary_dept_id,
-        role_code=role.role_code,
         default_password=default_password,
     )
 
     new_user = await user_service.create_user(ctx.db, user_in)
     await ctx.db.flush()
+    await user_role_assignment_service.assign_created_user_roles(
+        ctx.db,
+        actor_user_id=ctx.user.user_id,
+        target_user_id=new_user.user_id,
+        role_ids=None,
+        dept_ids=[primary_dept_id],
+    )
     await dept_service.update_user_depts(
         ctx.db,
         new_user.user_id,
@@ -844,7 +851,6 @@ async def _dry_run_user_create(
             user_gender=user_gender,
             status=status,
             primary_dept_id=primary_dept_id,
-            role_code=role.role_code,
             default_password=default_password,
         )
     except BusinessException as exc:
@@ -1717,7 +1723,11 @@ async def user_import_preview(
         on_conflict: 'skip'（默认）/ 'overwrite' / 'fail_fast'
         sync_mode: 员工编号同步策略，在 preview 时冻结
     """
+    from app.modules.system.service.user_role_assignment_service import (  # noqa: PLC0415
+        user_role_assignment_service,
+    )
     from app.modules.system.user.import_parser import (  # noqa: PLC0415
+        import_file_has_column,
         parse_import_excel,
     )
     from app.modules.system.user.import_service import (  # noqa: PLC0415
@@ -1725,6 +1735,16 @@ async def user_import_preview(
     )
 
     file_bytes, filename, mime_type = await _load_file_bytes(ctx, file_id)
+    has_role_column = import_file_has_column(
+        file_bytes,
+        mime_type,
+        "role_input",
+    )
+    await user_role_assignment_service.ensure_import_permissions(
+        ctx.db,
+        actor_user_id=ctx.user.user_id,
+        has_role_column=has_role_column,
+    )
     records = parse_import_excel(file_bytes, mime_type)
 
     dry_run_result, batch = await dry_run_import_users(
@@ -1735,6 +1755,7 @@ async def user_import_preview(
         filename,
         reason,
         on_conflict=on_conflict,
+        has_role_column=has_role_column,
     )
 
     # 预览阶段持久化文件；执行阶段按 storage key 读取，避免依赖客户端重复上传。
@@ -1871,8 +1892,12 @@ async def user_import_execute(
         on_conflict: 必须与预览时一致
         sync_mode: 'CREATE_ONLY'（默认）/ 'UPDATE_PROFILE' / 'FULL_SYNC'
     """
+    from app.modules.system.service.user_role_assignment_service import (  # noqa: PLC0415
+        user_role_assignment_service,
+    )
     from app.modules.system.user.constants import EmployeeNoSyncMode  # noqa: PLC0415
     from app.modules.system.user.import_parser import (  # noqa: PLC0415
+        import_file_has_column,
         parse_import_excel,
     )
     from app.modules.system.user.import_service import (  # noqa: PLC0415
@@ -1916,6 +1941,16 @@ async def user_import_execute(
 
     # 3. parse + execute
     mime_type = _user_import_mime_for_filename(filename)
+    has_role_column = import_file_has_column(
+        file_bytes,
+        mime_type,
+        "role_input",
+    )
+    await user_role_assignment_service.ensure_import_permissions(
+        ctx.db,
+        actor_user_id=ctx.user.user_id,
+        has_role_column=has_role_column,
+    )
     records = parse_import_excel(
         file_bytes,
         mime_type,
@@ -1931,6 +1966,7 @@ async def user_import_execute(
         current_user=ctx.user,
         on_conflict=on_conflict,
         sync_mode=EmployeeNoSyncMode(sync_mode),
+        has_role_column=has_role_column,
     )
 
     return ToolResult.success(

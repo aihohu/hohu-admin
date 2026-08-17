@@ -19,6 +19,7 @@ from app.db.base import user_depts
 from app.db.session import get_db
 from app.modules.system.models.user import User
 from app.modules.system.schemas.user import (
+    AssignableRoleOut,
     ChangePassword,
     ProfileOut,
     ResetPassword,
@@ -27,10 +28,14 @@ from app.modules.system.schemas.user import (
     UserDeptItem,
     UserItemOut,
     UserQuery,
+    UserRoleUpdate,
     UserUpdate,
 )
 from app.modules.system.service.config_service import config_service
 from app.modules.system.service.dept_service import dept_service
+from app.modules.system.service.user_role_assignment_service import (
+    user_role_assignment_service,
+)
 from app.modules.system.service.user_service import user_service
 from app.modules.system.user.constants import EmployeeNoSyncMode
 from app.modules.system.user.export_service import (
@@ -42,6 +47,7 @@ from app.modules.system.user.export_service import (
 from app.modules.system.user.import_parser import (
     MAX_FILE_SIZE_BYTES,
     ImportErrorCollection,
+    import_file_has_column,
     parse_import_excel,
 )
 from app.modules.system.user.import_service import (
@@ -171,27 +177,16 @@ async def get_user_list(
 async def add_user(
     user_in: UserCreate,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """
-    创建新用户
+    """Create a user with optional explicit role IDs and department bindings."""
+    explicit_roles = user_in.role_ids is not None
+    await user_role_assignment_service.ensure_create_permissions(
+        db,
+        actor_user_id=current_user.user_id,
+        explicit_roles=explicit_roles,
+    )
 
-    Args:
-        user_in: 用户创建信息，包含用户名、昵称、邮箱、手机号、性别、状态、密码和角色列表
-        db: 异步数据库会话
-
-    Returns:
-        ResponseModel: 创建成功的消息
-
-    Request Body Fields:
-        - user_name: 账号（必填，字母数字，4-50字符）
-        - nickname: 昵称（可选，最大50字符）
-        - user_email: 邮箱（必填，自动验证格式）
-        - user_phone: 手机号（必填，11位中国手机号）
-        - user_gender: 用户性别（必填，0-未知，1-男，2-女）
-        - status: 用户状态（必填，1-启用，2-禁用）
-        - password: 密码（必填，6-20字符，必须包含大小写字母和数字）
-        - roles: 角色编码列表（必填，至少分配一个角色）
-    """
     # 系统策略校验：是否强制用户必须有主部门
     if await config_service.get_bool(db, "user_require_primary_dept"):
         if not user_in.dept_ids or not any(d.is_primary for d in user_in.dept_ids):
@@ -201,12 +196,16 @@ async def add_user(
             )
 
     new_user = await user_service.create_user(db, user_in)
+    await db.flush()
+    await user_role_assignment_service.assign_created_user_roles(
+        db,
+        actor_user_id=current_user.user_id,
+        target_user_id=new_user.user_id,
+        role_ids=user_in.role_ids,
+        dept_ids=[int(item.dept_id) for item in user_in.dept_ids],
+    )
 
-    # 处理部门关联
     if user_in.dept_ids:
-        # Snowflake 主键由 ORM default 在 flush 时生成。部门关联依赖 user_id，
-        # 必须先 flush，避免向 sys_user_dept 写入 NULL user_id。
-        await db.flush()
         dept_list = [
             {"dept_id": d.dept_id, "is_primary": d.is_primary} for d in user_in.dept_ids
         ]
@@ -214,6 +213,29 @@ async def add_user(
 
     await db.commit()
     return ResponseModel.success(msg="创建成功")
+
+
+@router.get(
+    "/assignable-roles",
+    response_model=ResponseModel[list[AssignableRoleOut]],
+    summary="获取可委派角色",
+    dependencies=[Depends(require_permissions("system:user:role-auth"))],
+)
+async def get_assignable_roles(
+    query: Annotated[str | None, Query(max_length=50)] = None,
+    limit: Annotated[int, Query(ge=1, le=20)] = 20,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    roles = await user_role_assignment_service.list_assignable_roles(
+        db,
+        actor_user_id=current_user.user_id,
+        query=query,
+        limit=limit,
+    )
+    return ResponseModel.success(
+        data=[AssignableRoleOut.model_validate(role) for role in roles]
+    )
 
 
 @router.get(
@@ -256,7 +278,7 @@ async def change_password(
 @router.put(
     "/{user_id}",
     summary="修改用户",
-    description="更新指定用户的基本信息，密码为可选参数",
+    description="更新指定用户的基本信息；密码必须通过独立重置接口修改",
     responses={
         200: {"description": "更新成功"},
         400: {"description": "参数验证失败"},
@@ -271,51 +293,35 @@ async def update_user(
     user_in: UserUpdate,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    更新用户信息
-
-    Args:
-        user_id: 用户ID（路径参数）
-        user_in: 用户更新信息，所有字段都是可选的
-        db: 异步数据库会话
-
-    Returns:
-        ResponseModel: 更新成功的消息
-
-    Path Parameters:
-        - user_id: 要更新的用户ID
-
-    Request Body Fields (Optional):
-        - user_name: 账号
-        - nickname: 昵称
-        - user_email: 邮箱
-        - user_phone: 手机号
-        - user_gender: 用户性别
-        - status: 用户状态
-        - password: 密码（如果提供，会重新加密存储）
-        - roles: 角色编码列表
-    """
-    # 处理部门关联（dept_ids 为 None 表示不改部门）
-    # 先校验 dept_ids 再 update user：保证校验失败时 user 表不会被部分
-    # commit，整个事务保持原子性。
-    if user_in.dept_ids is not None:
-        if await config_service.get_bool(db, "user_require_primary_dept"):
-            if not any(d.is_primary for d in user_in.dept_ids):
-                raise BusinessRuleException(
-                    "系统已开启「强制用户主部门」，必须为用户分配一个主部门",
-                    error_code="USER_PRIMARY_DEPT_REQUIRED",
-                )
-
+    """Update profile fields only; role and department writers are separate."""
     await user_service.update_user(db, user_id, user_in)
-
-    if user_in.dept_ids is not None:
-        dept_list = [
-            {"dept_id": d.dept_id, "is_primary": d.is_primary} for d in user_in.dept_ids
-        ]
-        await dept_service.update_user_depts(db, user_id, dept_list)
 
     await db.commit()
     return ResponseModel.success(msg="更新成功")
+
+
+@router.put(
+    "/{user_id}/roles",
+    summary="替换用户角色",
+    dependencies=[
+        Depends(require_permissions("system:user:edit")),
+        Depends(require_permissions("system:user:role-auth")),
+    ],
+)
+async def update_user_roles(
+    user_id: int,
+    body: UserRoleUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    await user_role_assignment_service.replace_roles(
+        db,
+        actor_user_id=current_user.user_id,
+        target_user_id=user_id,
+        role_ids=body.role_ids,
+    )
+    await db.commit()
+    return ResponseModel.success(msg="角色更新成功")
 
 
 @router.put(
@@ -527,6 +533,16 @@ async def import_users(
     # the parser can return AI_IMPORT_FILE_TOO_LARGE.
     file_bytes = await file.read(MAX_FILE_SIZE_BYTES + 1)
     mime_type = file.content_type or ""
+    has_role_column = import_file_has_column(
+        file_bytes,
+        mime_type,
+        "role_input",
+    )
+    await user_role_assignment_service.ensure_import_permissions(
+        db,
+        actor_user_id=current_user.user_id,
+        has_role_column=has_role_column,
+    )
 
     # 解析文件并校验字段。
     try:
@@ -553,6 +569,7 @@ async def import_users(
             filename=file.filename or "users.xlsx",
             reason=reason_clean,
             on_conflict=on_conflict,
+            has_role_column=has_role_column,
         )
         await db.commit()
 
@@ -592,6 +609,7 @@ async def import_users(
         current_user=current_user,
         on_conflict=on_conflict,
         sync_mode=EmployeeNoSyncMode(sync_mode),
+        has_role_column=has_role_column,
     )
     await db.commit()
 

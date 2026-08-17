@@ -16,23 +16,31 @@
 
 import asyncio
 import json
+from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fakeredis import aioredis as fakeredis_async
 from sqlalchemy import delete as _delete
 from sqlalchemy import select as _select
+from sqlalchemy.orm import selectinload
 
 from app.constants import (
     ADMIN_USERNAME,
     DATA_SCOPE_ALL,
     SUPER_ADMIN_ROLE_CODE,
+    USER_ROLE_CODE,
 )
 from app.core import redis as redis_module
 from app.core.exceptions import BusinessRuleException
 from app.core.file_storage import MockFileStorage
+from app.core.id_generator import next_id
 from app.core.security import verify_password
+from app.modules.system.constants import USER_ROLE_AUTH_PERMISSION
 from app.modules.system.models.config import Config
 from app.modules.system.models.dept import Dept
+from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.user.constants import (
@@ -41,6 +49,8 @@ from app.modules.system.user.constants import (
     ImportBatchStatus,
 )
 from app.modules.system.user.import_service import (
+    ImportAuthorizationResolution,
+    _lock_import_authorization_targets,
     batch_create_users_from_records,
     dry_run_import_users,
 )
@@ -895,6 +905,215 @@ class TestSuperAdminBypass:
         assert any(r.role_code == "QA_R_ANY_EXEC" for r in created.roles)
 
 
+async def test_execute_without_role_input_assigns_fixed_default_role(
+    db_session, file_storage
+):
+    """A new imported user without an explicit role must receive fixed R_USER."""
+    dept = _make_dept(8791, "QA-Exec-Dept-Default-Role")
+    admin_user = (
+        await db_session.execute(_select(User).where(User.user_name == ADMIN_USERNAME))
+    ).scalar_one()
+    db_session.add(dept)
+    await db_session.flush()
+    records = [
+        _make_record(
+            2,
+            "QA_DEF_ROLE_U1",
+            dept_input=dept.dept_name,
+            role_input=None,
+        )
+    ]
+    batch = await _setup_preview(db_session, records, admin_user)
+
+    result = await batch_create_users_from_records(
+        db_session,
+        records,
+        preview_token=batch.preview_token,
+        file_bytes=_FILE_BYTES,
+        filename="test.xlsx",
+        reason="QA execute test",
+        current_user=admin_user,
+        file_storage=file_storage,
+    )
+
+    created = (
+        await db_session.execute(
+            _select(User)
+            .where(User.user_name == "QA_DEF_ROLE_U1")
+            .options(selectinload(User.roles))
+        )
+    ).scalar_one()
+    assert result.success_count == 1
+    assert [role.role_code for role in created.roles] == [USER_ROLE_CODE]
+
+
+async def test_execute_rejects_the_whole_batch_when_one_role_is_unauthorized(
+    db_session, file_storage
+):
+    dept = _make_dept(next_id(), f"QA-Atomic-Dept-{next_id()}")
+    import_menu = Menu(
+        menu_id=next_id(),
+        menu_name=f"QA import {next_id()}",
+        menu_type="F",
+        permission="system:user:import",
+        status="1",
+    )
+    role_auth_menu = Menu(
+        menu_id=next_id(),
+        menu_name=f"QA role auth {next_id()}",
+        menu_type="F",
+        permission=USER_ROLE_AUTH_PERMISSION,
+        status="1",
+    )
+    delegated_menu = Menu(
+        menu_id=next_id(),
+        menu_name=f"QA delegated {next_id()}",
+        menu_type="F",
+        permission=f"qa:delegated:{next_id()}:read",
+        status="1",
+    )
+    outside_menu = Menu(
+        menu_id=next_id(),
+        menu_name=f"QA outside {next_id()}",
+        menu_type="F",
+        permission=f"qa:outside:{next_id()}:read",
+        status="1",
+    )
+    actor_role = _make_role(
+        next_id(),
+        f"QA_R_ATOMIC_ACTOR_{next_id()}",
+        "QA Atomic Actor",
+    )
+    actor_role.menus = [import_menu, role_auth_menu, delegated_menu]
+    allowed_role = _make_role(
+        next_id(),
+        f"QA_R_ATOMIC_ALLOWED_{next_id()}",
+        "QA Atomic Allowed",
+    )
+    allowed_role.menus = [delegated_menu]
+    forbidden_role = _make_role(
+        next_id(),
+        f"QA_R_ATOMIC_FORBIDDEN_{next_id()}",
+        "QA Atomic Forbidden",
+    )
+    forbidden_role.menus = [outside_menu]
+    operator = _make_user(next_id(), f"QA_ATOMIC_ACTOR_{next_id()}", [actor_role])
+    db_session.add_all(
+        [
+            dept,
+            import_menu,
+            role_auth_menu,
+            delegated_menu,
+            outside_menu,
+            actor_role,
+            allowed_role,
+            forbidden_role,
+            operator,
+        ]
+    )
+    await db_session.flush()
+    records = [
+        _make_record(
+            2,
+            "QA_ATOMIC_OK",
+            dept_input=dept.dept_name,
+            role_input=allowed_role.role_code,
+        ),
+        _make_record(
+            3,
+            "QA_ATOMIC_NO",
+            dept_input=dept.dept_name,
+            role_input=forbidden_role.role_code,
+        ),
+    ]
+    batch = await _setup_preview(db_session, records, operator)
+
+    result = await batch_create_users_from_records(
+        db_session,
+        records,
+        preview_token=batch.preview_token,
+        file_bytes=_FILE_BYTES,
+        filename="test.xlsx",
+        reason="QA execute test",
+        current_user=operator,
+        file_storage=file_storage,
+    )
+
+    created = list(
+        (
+            await db_session.execute(
+                _select(User).where(
+                    User.user_name.in_(["QA_ATOMIC_OK", "QA_ATOMIC_NO"])
+                )
+            )
+        ).scalars()
+    )
+    assert result.status == ImportBatchStatus.FAILED.value
+    assert result.success_count == 0
+    assert created == []
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"dept_id": 456, "dept_error": None},
+        {"role_ids": (789,), "role_error": None},
+        {
+            "target_user_id": 999,
+            "prospective_user_id": None,
+            "target_role_ids": (789,),
+        },
+    ],
+)
+async def test_import_lock_rejects_a_reference_that_resolves_after_prelock(
+    monkeypatch,
+    changes,
+):
+    record = _make_record(2, "QA_PHANTOM", dept_input="QA-New-Dept")
+    before = ImportAuthorizationResolution(
+        row_num=2,
+        dept_id=None,
+        dept_error=("AI_IMPORT_DEPT_NOT_FOUND", "missing"),
+        role_ids=None,
+        role_error=("USER_DEFAULT_ROLE_NOT_AVAILABLE", "missing"),
+        target_user_id=None,
+        matched_by_employee_no=False,
+        target_role_ids=(),
+        target_dept_ids=(),
+        target_status="1",
+        prospective_user_id=123,
+    )
+    after = replace(before, **changes)
+    resolver = AsyncMock(side_effect=[[before], [after]])
+    lock_targets = AsyncMock(return_value=SimpleNamespace(user_id=42))
+    ensure_permissions = AsyncMock()
+    monkeypatch.setattr(
+        "app.modules.system.user.import_service._resolve_import_authorization_targets",
+        resolver,
+    )
+    monkeypatch.setattr(
+        "app.modules.system.user.import_service.user_role_assignment_service."
+        "lock_import_targets",
+        lock_targets,
+    )
+    monkeypatch.setattr(
+        "app.modules.system.user.import_service.user_role_assignment_service."
+        "ensure_import_permissions",
+        ensure_permissions,
+    )
+
+    with pytest.raises(BusinessRuleException) as exc_info:
+        await _lock_import_authorization_targets(
+            AsyncMock(),
+            [record],
+            SimpleNamespace(user_id=42),
+            has_role_column=False,
+        )
+
+    assert exc_info.value.error_code == "AUTHORIZATION_SNAPSHOT_STALE"
+    ensure_permissions.assert_not_awaited()
+
+
 # ========== 并发执行 ==========
 
 
@@ -1225,7 +1444,14 @@ class TestBatchLogAdvanced:
         batch = await _setup_preview(db_session, records, operator)
 
         # 模拟致命错误：monkeypatch _process_create_row 抛 RuntimeError
-        async def _raise_fatal(db, record, hashed_password):  # noqa: ARG001
+        async def _raise_fatal(
+            db,  # noqa: ARG001
+            record,  # noqa: ARG001
+            hashed_password,  # noqa: ARG001
+            current_user,  # noqa: ARG001
+            resolution,  # noqa: ARG001
+            **_kwargs,
+        ):
             raise RuntimeError("simulated fatal DB error")
 
         monkeypatch.setattr(

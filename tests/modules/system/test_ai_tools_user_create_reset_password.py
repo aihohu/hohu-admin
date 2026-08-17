@@ -338,10 +338,13 @@ class TestUserCreate:
         await _seed_default_password(db_session)
         await _seed_default_role(db_session)
         dept = await _add_dept(db_session, 81001, "AI 产品部")
+        actor = await db_session.scalar(select(User).where(User.user_name == "admin"))
+        assert actor is not None
         ctx = _make_ctx(
             db_session,
             tool_name="user.create",
             permission="system:user:add",
+            actor=actor,
             accessible_dept_ids={dept.dept_id},
         )
 

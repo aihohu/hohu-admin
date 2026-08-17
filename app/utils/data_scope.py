@@ -23,12 +23,14 @@ from sqlalchemy import Select, func, or_, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import (
+    ADMIN_USERNAME,
     DATA_SCOPE_ALL,
     DATA_SCOPE_CUSTOM,
     DATA_SCOPE_DEPT,
     DATA_SCOPE_DEPT_AND_SUB,
     DATA_SCOPE_SELF,
     STATUS_ENABLED,
+    SUPER_ADMIN_ROLE_CODE,
 )
 from app.core.rbac import is_super_admin
 from app.db.base import role_depts, user_depts
@@ -117,7 +119,21 @@ async def resolve_data_scope(
     user: User,
 ) -> DataScopeResolution:
     """Resolve the union of every enabled role's concrete data scope."""
-    if is_super_admin(user):
+    return await resolve_data_scope_for_roles(db, user=user, roles=user.roles or [])
+
+
+async def resolve_data_scope_for_roles(
+    db: AsyncSession,
+    *,
+    user: User,
+    roles: list[Role],
+    depts: list[Dept] | None = None,
+) -> DataScopeResolution:
+    """Resolve a principal against an explicit role set without mutating ORM state."""
+    enabled_roles = [role for role in roles if role.status == STATUS_ENABLED]
+    if user.user_name == ADMIN_USERNAME or any(
+        role.role_code == SUPER_ADMIN_ROLE_CODE for role in enabled_roles
+    ):
         return DataScopeResolution(
             scope_kinds=frozenset({DATA_SCOPE_ALL}),
             accessible_dept_ids=None,
@@ -126,9 +142,10 @@ async def resolve_data_scope(
             unbounded=True,
         )
 
-    roles = _enabled_roles(user)
     scope_kinds = frozenset(
-        role.data_scope for role in roles if role.data_scope in KNOWN_DATA_SCOPES
+        role.data_scope
+        for role in enabled_roles
+        if role.data_scope in KNOWN_DATA_SCOPES
     )
     if not scope_kinds:
         scope_kinds = frozenset({DATA_SCOPE_SELF})
@@ -141,7 +158,10 @@ async def resolve_data_scope(
             unbounded=True,
         )
 
-    own_dept_ids = {int(dept.dept_id) for dept in (user.depts or [])}
+    own_dept_ids = {
+        int(dept.dept_id)
+        for dept in (depts if depts is not None else (user.depts or []))
+    }
     accessible_dept_ids: set[int] = set()
     include_self = DATA_SCOPE_SELF in scope_kinds
 
@@ -155,7 +175,9 @@ async def resolve_data_scope(
         include_self = include_self or not subtree_ids
 
     custom_role_ids = {
-        int(role.role_id) for role in roles if role.data_scope == DATA_SCOPE_CUSTOM
+        int(role.role_id)
+        for role in enabled_roles
+        if role.data_scope == DATA_SCOPE_CUSTOM
     }
     custom_by_role = await _custom_dept_ids_by_role(db, custom_role_ids)
     for dept_ids in custom_by_role.values():

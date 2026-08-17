@@ -1,39 +1,48 @@
-"""update_user 端点事务原子性测试。
+"""User API transaction ownership and separated-writer tests."""
 
-回归：旧实现先 `await user_service.update_user(...)` 再 `await db.commit()`，
-然后才校验 dept_ids。校验失败抛异常时，user 表已落库，前端看到错误
-弹窗以为没改成功，实际数据已变。
-
-修复后必须先校验 dept_ids 再 update，整个事务一次 commit。
-"""
-
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-import pytest
-
-from app.core.exceptions import BusinessRuleException
-from app.modules.system.api.user import add_user, update_user
-from app.modules.system.schemas.user import UserCreate, UserDeptItem, UserUpdate
-
-
-def _dept_item(*, dept_id: str = "1", is_primary: bool = False) -> UserDeptItem:
-    return UserDeptItem(dept_id=dept_id, is_primary=is_primary)
+from app.modules.system.api.user import add_user, update_user, update_user_roles
+from app.modules.system.schemas.user import (
+    UserCreate,
+    UserDeptItem,
+    UserRoleUpdate,
+    UserUpdate,
+)
 
 
-async def test_user_create_flushes_generated_id_before_department_update():
-    """创建用户时，部门关联只能在生成 user_id 后写入。"""
+def _actor() -> SimpleNamespace:
+    return SimpleNamespace(user_id=42)
+
+
+async def test_user_create_assigns_roles_after_generated_id_and_departments() -> None:
     user_in = UserCreate(
         user_name="e2ecreate",
         nickname="E2E Create",
         password="E2ePass123",
-        roles=["R_USER"],
         status="1",
-        dept_ids=[_dept_item(is_primary=True)],
+        dept_ids=[UserDeptItem(dept_id="1", is_primary=True)],
     )
-    created_user = type("CreatedUser", (), {"user_id": 123})()
+    created_user = SimpleNamespace(user_id=123)
     db_mock = AsyncMock()
+    calls: list[str] = []
 
+    async def flush() -> None:
+        calls.append("flush")
+
+    async def update_departments(*_args, **_kwargs) -> None:
+        calls.append("departments")
+
+    async def assign_roles(*_args, **_kwargs) -> None:
+        calls.append("roles")
+
+    db_mock.flush.side_effect = flush
     with (
+        patch(
+            "app.modules.system.api.user.user_role_assignment_service.ensure_create_permissions",
+            new=AsyncMock(),
+        ) as ensure_permissions,
         patch(
             "app.modules.system.api.user.user_service.create_user",
             new=AsyncMock(return_value=created_user),
@@ -44,100 +53,64 @@ async def test_user_create_flushes_generated_id_before_department_update():
         ),
         patch(
             "app.modules.system.api.user.dept_service.update_user_depts",
-            new=AsyncMock(),
-        ) as mock_dept_update,
+            new=AsyncMock(side_effect=update_departments),
+        ),
+        patch(
+            "app.modules.system.api.user.user_role_assignment_service.assign_created_user_roles",
+            new=AsyncMock(side_effect=assign_roles),
+        ) as assign_created_roles,
     ):
-        await add_user(user_in=user_in, db=db_mock)
+        await add_user(user_in=user_in, db=db_mock, current_user=_actor())
 
-    db_mock.flush.assert_awaited_once()
-    mock_dept_update.assert_awaited_once_with(
+    ensure_permissions.assert_awaited_once_with(
         db_mock,
-        123,
-        [{"dept_id": "1", "is_primary": True}],
+        actor_user_id=42,
+        explicit_roles=False,
     )
-
-
-async def test_dept_validation_runs_before_user_update():
-    """dept_ids 缺主部门时，user_service.update_user 不应被调用。"""
-    user_in = UserUpdate(user_name="alice", status="1", dept_ids=[_dept_item()])
-
-    with (
-        patch(
-            "app.modules.system.api.user.user_service.update_user",
-            new=AsyncMock(),
-        ) as mock_update,
-        patch(
-            "app.modules.system.api.user.config_service.get_bool",
-            new=AsyncMock(return_value=True),
-        ),
-        patch(
-            "app.modules.system.api.user.dept_service.update_user_depts",
-            new=AsyncMock(),
-        ) as mock_dept_update,
-    ):
-        with pytest.raises(BusinessRuleException) as exc_info:
-            await update_user(user_id=123, user_in=user_in, db=AsyncMock())
-
-    assert exc_info.value.error_code == "USER_PRIMARY_DEPT_REQUIRED"
-    mock_update.assert_not_awaited()
-    mock_dept_update.assert_not_awaited()
-
-
-async def test_user_update_runs_when_dept_validation_passes():
-    """dept_ids 有主部门时，user_service.update_user 应被调用。"""
-    user_in = UserUpdate(
-        user_name="alice",
-        status="1",
-        dept_ids=[_dept_item(is_primary=True)],
+    assert calls == ["flush", "roles", "departments"]
+    assign_created_roles.assert_awaited_once_with(
+        db_mock,
+        actor_user_id=42,
+        target_user_id=123,
+        role_ids=None,
+        dept_ids=[1],
     )
+    db_mock.commit.assert_awaited_once()
 
+
+async def test_profile_update_uses_only_the_profile_writer() -> None:
+    user_in = UserUpdate(user_name="alice", status="1")
     db_mock = AsyncMock()
 
-    with (
-        patch(
-            "app.modules.system.api.user.user_service.update_user",
-            new=AsyncMock(),
-        ) as mock_update,
-        patch(
-            "app.modules.system.api.user.config_service.get_bool",
-            new=AsyncMock(return_value=True),
-        ),
-        patch(
-            "app.modules.system.api.user.dept_service.update_user_depts",
-            new=AsyncMock(),
-        ),
-    ):
+    with patch(
+        "app.modules.system.api.user.user_service.update_user",
+        new=AsyncMock(),
+    ) as update_profile:
         await update_user(user_id=123, user_in=user_in, db=db_mock)
 
-    mock_update.assert_awaited_once()
-    db_mock.commit.assert_awaited()
+    update_profile.assert_awaited_once_with(db_mock, 123, user_in)
+    db_mock.commit.assert_awaited_once()
 
 
-async def test_user_update_runs_when_no_dept_ids_provided():
-    """dept_ids=None 时跳过校验，user_service.update_user 应被调用。"""
-    # dept_ids 默认是 []（空 list），不是 None。用 model_construct 绕过校验
-    # 来模拟 "未提供 dept_ids" 的场景。
-    user_in = UserUpdate.model_construct(user_name="alice", status="1")
-    user_in.dept_ids = None
-
+async def test_role_update_commits_only_after_shared_policy_succeeds() -> None:
+    body = UserRoleUpdate(role_ids=["11", "12"])
     db_mock = AsyncMock()
 
-    with (
-        patch(
-            "app.modules.system.api.user.user_service.update_user",
-            new=AsyncMock(),
-        ) as mock_update,
-        patch(
-            "app.modules.system.api.user.config_service.get_bool",
-            new=AsyncMock(return_value=True),
-        ) as mock_get_bool,
-        patch(
-            "app.modules.system.api.user.dept_service.update_user_depts",
-            new=AsyncMock(),
-        ),
-    ):
-        await update_user(user_id=123, user_in=user_in, db=db_mock)
+    with patch(
+        "app.modules.system.api.user.user_role_assignment_service.replace_roles",
+        new=AsyncMock(),
+    ) as replace_roles:
+        await update_user_roles(
+            user_id=123,
+            body=body,
+            db=db_mock,
+            current_user=_actor(),
+        )
 
-    mock_update.assert_awaited_once()
-    # dept_ids is None 时不应查 config
-    mock_get_bool.assert_not_awaited()
+    replace_roles.assert_awaited_once_with(
+        db_mock,
+        actor_user_id=42,
+        target_user_id=123,
+        role_ids=["11", "12"],
+    )
+    db_mock.commit.assert_awaited_once()

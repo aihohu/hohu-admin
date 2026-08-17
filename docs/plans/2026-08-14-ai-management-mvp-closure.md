@@ -295,6 +295,31 @@ upgrade：保留模块开关、Agent enabled、Role-Agent enabled 和 enabled to
 
 完成证据：授权核心、会话锁与 scope 审计定向测试 27 项通过（包含 PostgreSQL 双连接验证 session lock 跨 commit 持有）；`ruff check .`、`ruff format --check .`、19 tools / 12 checks 通过；后端全量 2010 项测试通过，总覆盖率 73.24%，满足 70% 门禁，仅保留 2 条既有 SQLAlchemy transaction warning。数据库 schema 无变化，因此不新增 Alembic revision；fresh/sync 由菜单 seed 覆盖，存量权限使用 `scripts/migrate_phase2_authorization.py` 在 authorization-migration advisory lock 下执行。生产 scope-diff 与 `DATA_SCOPE_UNION_ACK_SHA256` 确认仍属于部署动作，本工作包未代替授权管理员执行。
 
+#### P2-B1 用户资料/角色契约与共享角色写入
+
+状态：✅ P2-B1 已完成（2026-08-17；审查修复 2026-08-17）。本工作包只收口页面资料/角色契约、页面与 AI 创建、导入角色授权预检及新建角色路径；部门独立 writer、import overwrite 的最终关联 writer、AI `user.role_lookup/update_roles`、Web 切换和其他存量 writer 后续交付。
+
+修改文件：
+
+- `app/modules/system/schemas/user.py`、`app/modules/system/api/user.py`、`app/modules/system/service/user_service.py`
+- 新增 `app/modules/system/service/user_role_assignment_service.py`
+- `app/utils/data_scope.py`、`app/modules/system/service/grant_authority.py`、`app/modules/ai/service/agent_authorization_service.py`
+- `app/modules/system/ai_tools.py`、`app/modules/system/user/import_parser.py`、`app/modules/system/user/import_service.py`
+- `tests/modules/system/test_user_role_contracts.py`、`tests/modules/system/test_user_role_assignment_service.py` 及相关页面/AI/import 回归
+
+契约与权限：
+
+- `PUT /system/user/{id}` 只写资料，旧 `roles/deptIds/password` 作为额外字段拒绝；`PUT /system/user/{id}/roles` 接收非空、去重的完整 `{roleIds: string[]}`，要求 edit + role-auth；role ID 必须是 canonical 正十进制 Snowflake 字符串，create 的显式 `null` 不得伪装成字段省略。`GET /system/user/assignable-roles` 只要求 role-auth，最多返回 20 个最小候选。
+- create 省略 `roleIds` 时只分配唯一启用且被操作者 dominance 的固定 `R_USER`；一旦显式出现（包括空数组）即叠加 role-auth。资料/status 更新锁定用户行，与授权 writer 串行化。
+- import 以 `role_input` 表头存在性而非单元格内容判定 role-auth；缺列的新用户使用固定 `R_USER`。preview/execute 使用同一 `GrantAuthority` dominance；execute 冻结每行 role/dept/user 解析与目标关联，按 role → dept → user 锁后重新解析比较并在锁内复验 import/role-auth。任一授权越界时整批不写用户、角色或部门关联，合法委派不再要求 actor 直接持有相同 role ID。
+- Policy 比较 permission/menu、active Role-Agent、实际物化部门和用户集合，保护 self、admin 与变更前后 `R_SUPER`，并按 role → dept → user 锁后重读；Service 不 commit，API/Gateway 事务所有者负责提交或回滚。
+
+数据库与兼容：本工作包不改变表、索引或权限 seed，不新增 Alembic revision。P2-A 已完成的 role-auth fresh/sync/upgrade 数据继续复用；旧 Web 仍提交旧 payload，因此在后续 Web 工作包完成前本中间构建禁止部署。
+
+退出标准：角色契约、完整集合、候选最小化、CUSTOM/Agent 越权、固定 `R_USER`、角色列表头、事务顺序和导入新建回归通过；Ruff、AI Tool 静态门禁、后端全量测试和 ≥70% 覆盖率通过后停止审查。
+
+完成证据：角色契约/Policy 及相关页面、AI、import 定向回归 126 项通过；`ruff check .`、`ruff format --check .`、`python scripts/check_ai_tools.py`（19 tools / 12 checks）通过；后端全量 2028 项测试通过，总覆盖率 73.57%，满足 70% 门禁，仅保留 2 条既有 SQLAlchemy transaction warning。AI 模块关闭 fresh process 继续不加载 Tool Registry；数据库 schema 无变化，因此不新增 Alembic revision。
+
 ### 6.1 修改文件
 
 共享授权：

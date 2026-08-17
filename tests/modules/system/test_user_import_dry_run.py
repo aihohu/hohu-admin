@@ -27,6 +27,7 @@ from app.constants import (
 from app.core import redis as redis_module
 from app.core.exceptions import BusinessRuleException
 from app.modules.system.models.dept import Dept
+from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.user.constants import (
@@ -275,10 +276,7 @@ class TestDryRunClassification:
         assert result.conflict_records[0].field == "role_input"
 
     async def test_dry_run_classifies_out_of_scope_role(self, db_session):
-        """spec 用例 4a：HR 给导入用户分配自己不拥有的角色 → out_of_scope。
-
-        Permission Boundary 校验在 dry_run 阶段就识别（spec line 2667）。
-        """
+        """A role above the actor's materialized authority is out of scope."""
         dept = _make_dept(7401, "QA-DryRun-Dept-OOS")
         hr_role = _make_role(
             7402, "QA_R_HR_OOS", "QA-HR-OOS", data_scope=DATA_SCOPE_ALL
@@ -286,8 +284,16 @@ class TestDryRunClassification:
         forbidden_role = _make_role(
             7403, "QA_R_FORBIDDEN_OOS", "QA-Forbidden-OOS", data_scope=DATA_SCOPE_ALL
         )
+        outside_menu = Menu(
+            menu_id=7407,
+            menu_name="QA forbidden permission",
+            menu_type="F",
+            permission="qa:forbidden:role:read",
+            status="1",
+        )
+        forbidden_role.menus = [outside_menu]
         operator = _make_user(9205, "QA_DR_HR", [hr_role], [dept])
-        db_session.add_all([dept, hr_role, forbidden_role, operator])
+        db_session.add_all([dept, outside_menu, hr_role, forbidden_role, operator])
         await db_session.flush()
 
         records = [
@@ -312,6 +318,45 @@ class TestDryRunClassification:
         assert (
             result.out_of_scope_records[0].error_code == "AI_IMPORT_ROLE_OUT_OF_SCOPE"
         )
+
+    async def test_dry_run_accepts_a_dominated_role_the_actor_does_not_hold(
+        self, db_session
+    ):
+        dept = _make_dept(7404, "QA-DryRun-Dept-Dominated")
+        actor_role = _make_role(
+            7405,
+            "QA_R_DELEGATOR",
+            "QA-Delegator",
+            data_scope=DATA_SCOPE_ALL,
+        )
+        delegated_role = _make_role(
+            7406,
+            "QA_R_DELEGATED",
+            "QA-Delegated",
+            data_scope=DATA_SCOPE_ALL,
+        )
+        operator = _make_user(9207, "QA_DR_DELEGATOR", [actor_role], [dept])
+        db_session.add_all([dept, actor_role, delegated_role, operator])
+        await db_session.flush()
+
+        result, _batch = await dry_run_import_users(
+            db_session,
+            [
+                _make_record(
+                    2,
+                    "QA_Dominated_New",
+                    dept_input=dept.dept_name,
+                    role_input=delegated_role.role_code,
+                )
+            ],
+            operator,
+            file_bytes=_file_bytes(),
+            filename="test.xlsx",
+            reason="QA shared role dominance",
+        )
+
+        assert result.new_count == 1
+        assert result.out_of_scope_count == 0
 
     async def test_dry_run_classifies_out_of_scope_dept(self, db_session):
         """spec 用例 4b：dept 越界（DATA_SCOPE_DEPT 限定本部门）→ out_of_scope。"""

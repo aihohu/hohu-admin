@@ -21,9 +21,6 @@ from app.core.exceptions import AuthorizationException, NotFoundException
 from app.core.rbac import is_super_admin
 from app.core.tenant import resolve_tenant_id
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
-from app.modules.ai.service.agent_authorization_service import (
-    agent_authorization_service,
-)
 from app.modules.auth.permission_collect import collect_user_permission_codes
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
@@ -134,6 +131,10 @@ class GrantAuthorityService:
     """Build live authority from one reloaded principal without committing."""
 
     async def build(self, db: AsyncSession, actor_user_id: int) -> GrantAuthority:
+        from app.modules.ai.service.agent_authorization_service import (  # noqa: PLC0415
+            agent_authorization_service,
+        )
+
         actor = await db.scalar(
             select(User)
             .where(User.user_id == actor_user_id)

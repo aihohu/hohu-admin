@@ -13,6 +13,7 @@ import hashlib
 import io
 import json
 import secrets
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
 
@@ -21,6 +22,7 @@ from sqlalchemy import func, insert, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants import STATUS_ENABLED, USER_ROLE_CODE
 from app.core import redis as redis_module
 from app.core.exceptions import (
     AuthorizationException,
@@ -33,7 +35,12 @@ from app.core.file_storage import FileStorage, get_file_storage
 from app.core.id_generator import next_id
 from app.core.security import get_password_hash
 from app.db.base import user_depts, user_roles
+from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
+from app.modules.system.service.grant_authority import grant_authority_service
+from app.modules.system.service.user_role_assignment_service import (
+    user_role_assignment_service,
+)
 from app.modules.system.user.constants import (
     FAILED_ROWS_PREVIEW_LIMIT,
     MAX_PREVIEW_RECORDS,
@@ -52,8 +59,6 @@ from app.modules.system.user.import_state import (
 )
 from app.modules.system.user.import_validator import (
     SyncAction,
-    check_dept_data_scope,
-    check_permission_boundary,
     classify_sync_action,
     resolve_dept,
     resolve_existing_user,
@@ -75,6 +80,23 @@ _PREVIEW_REDIS_TTL_SECONDS = 600
 #: batch_id / preview_token 生成长度
 _BATCH_ID_LENGTH = 32
 _PREVIEW_TOKEN_LENGTH = 32
+
+
+@dataclass(frozen=True)
+class ImportAuthorizationResolution:
+    """Frozen name-resolution facts used by import authorization and writes."""
+
+    row_num: int
+    dept_id: int | None
+    dept_error: tuple[str, str] | None
+    role_ids: tuple[int, ...] | None
+    role_error: tuple[str, str] | None
+    target_user_id: int | None
+    matched_by_employee_no: bool
+    target_role_ids: tuple[int, ...]
+    target_dept_ids: tuple[int, ...]
+    target_status: str
+    prospective_user_id: int | None
 
 
 def _generate_batch_id() -> str:
@@ -137,79 +159,301 @@ def _validate_reason(reason: str) -> str:
     return stripped
 
 
+async def _resolve_import_authorization_targets(
+    db: AsyncSession,
+    records: list[UserImportRecord],
+    *,
+    has_role_column: bool,
+    prospective_user_ids: dict[int, int] | None = None,
+) -> list[ImportAuthorizationResolution]:
+    """Resolve every authorization reference into one comparable batch snapshot."""
+    stable_user_ids = prospective_user_ids if prospective_user_ids is not None else {}
+    default_role_id = await db.scalar(
+        select(Role.role_id).where(
+            Role.role_code == USER_ROLE_CODE,
+            Role.status == STATUS_ENABLED,
+        )
+    )
+    result: list[ImportAuthorizationResolution] = []
+    for record in records:
+        dept_id: int | None = None
+        dept_error: tuple[str, str] | None = None
+        try:
+            dept_id = int(await resolve_dept(db, record.dept_input))
+        except BusinessRuleException as exc:
+            dept_error = (exc.error_code, str(exc))
+
+        existing, matched_by_employee_no = await resolve_existing_user(db, record)
+        role_ids: tuple[int, ...] | None = None
+        role_error: tuple[str, str] | None = None
+        if record.role_input:
+            try:
+                role_ids = tuple(
+                    sorted(
+                        int(role_id)
+                        for role_id in await resolve_role_input(
+                            db,
+                            record.role_input,
+                        )
+                    )
+                )
+            except BusinessRuleException as exc:
+                role_error = (exc.error_code, str(exc))
+        elif existing is None:
+            if default_role_id is None:
+                role_error = (
+                    "USER_DEFAULT_ROLE_NOT_AVAILABLE",
+                    "默认角色不存在或已禁用",
+                )
+            else:
+                role_ids = (int(default_role_id),)
+        elif has_role_column:
+            role_ids = tuple(sorted(int(role.role_id) for role in existing.roles))
+
+        if existing is None:
+            prospective_user_id = stable_user_ids.setdefault(
+                record.row_num,
+                next_id(),
+            )
+            target_user_id = None
+            target_role_ids: tuple[int, ...] = ()
+            target_dept_ids: tuple[int, ...] = ()
+            target_status = record.status
+        else:
+            prospective_user_id = None
+            target_user_id = int(existing.user_id)
+            target_role_ids = tuple(
+                sorted(int(role.role_id) for role in existing.roles)
+            )
+            target_dept_ids = tuple(
+                sorted(int(dept.dept_id) for dept in existing.depts)
+            )
+            target_status = str(existing.status)
+
+        result.append(
+            ImportAuthorizationResolution(
+                row_num=record.row_num,
+                dept_id=dept_id,
+                dept_error=dept_error,
+                role_ids=role_ids,
+                role_error=role_error,
+                target_user_id=target_user_id,
+                matched_by_employee_no=matched_by_employee_no,
+                target_role_ids=target_role_ids,
+                target_dept_ids=target_dept_ids,
+                target_status=target_status,
+                prospective_user_id=prospective_user_id,
+            )
+        )
+    return result
+
+
+def _failed_resolution(
+    record: UserImportRecord,
+    *,
+    field: str,
+    error: tuple[str, str],
+) -> FailedRow:
+    return FailedRow(
+        row_num=record.row_num,
+        field=field,
+        value=(record.dept_input if field == "dept_input" else record.role_input or ""),
+        reason=error[1],
+        error_code=error[0],
+    )
+
+
 async def _classify_records(
     db: AsyncSession,
     records: list[UserImportRecord],
-    current_user,
+    current_user: User,
+    *,
+    has_role_column: bool,
+    resolutions: list[ImportAuthorizationResolution] | None = None,
 ) -> tuple[
     list[UserImportRecord],
     list[UserImportRecord],
     list[FailedRow],
     list[FailedRow],
 ]:
-    """将导入记录分类为新增、已存在、冲突和越权四类。
-
-    顺序：先做越界集合校验（一次性算所有行的 out_of_scope），再逐行做 conflict
-    反查；剩余行按 resolve_existing_user 命中分 new / exists。
-
-    Returns:
-        (new_records, exists_records, conflict_records, out_of_scope_records)
-    """
-    # 1. 集合级权限校验：一次性返回所有 out_of_scope 行
-    role_oos = await check_permission_boundary(db, records, current_user)
-    dept_oos = await check_dept_data_scope(db, records, current_user)
-    oos_row_nums = {f.row_num for f in role_oos} | {f.row_num for f in dept_oos}
-
+    """Classify rows using the same materialized role policy as online writers."""
+    if resolutions is None:
+        resolutions = await _resolve_import_authorization_targets(
+            db,
+            records,
+            has_role_column=has_role_column,
+        )
+    by_row = {resolution.row_num: resolution for resolution in resolutions}
+    authority = await grant_authority_service.build(db, int(current_user.user_id))
+    ignored_user_ids = frozenset(
+        resolution.prospective_user_id
+        for resolution in resolutions
+        if resolution.prospective_user_id is not None
+    )
     new_records: list[UserImportRecord] = []
     exists_records: list[UserImportRecord] = []
     conflict_records: list[FailedRow] = []
+    out_of_scope_records: list[FailedRow] = []
 
-    # 2. 逐行：跳过 oos 行，反查 dept/role，命中已存在则 exists 否则 new
     for record in records:
-        if record.row_num in oos_row_nums:
-            continue  # 已在 out_of_scope 集合，不重复进 conflict
-
-        # dept 反查（role_input 在 check_permission_boundary 已反查过；
-        # 此处仅校验 dept 存在性，role 已确认有效）
-        try:
-            await resolve_dept(db, record.dept_input)
-        except BusinessRuleException as exc:
+        resolution = by_row[record.row_num]
+        if resolution.dept_error is not None:
             conflict_records.append(
+                _failed_resolution(
+                    record,
+                    field="dept_input",
+                    error=resolution.dept_error,
+                )
+            )
+            continue
+        if resolution.role_error is not None:
+            conflict_records.append(
+                _failed_resolution(
+                    record,
+                    field="role_input",
+                    error=resolution.role_error,
+                )
+            )
+            continue
+        assert resolution.dept_id is not None
+        if (
+            authority.accessible_dept_ids is not None
+            and resolution.dept_id not in authority.accessible_dept_ids
+        ):
+            out_of_scope_records.append(
                 FailedRow(
                     row_num=record.row_num,
                     field="dept_input",
                     value=record.dept_input,
-                    reason=str(exc),
-                    error_code=exc.error_code,
+                    reason="部门不在当前用户的数据权限范围内",
+                    error_code="AI_IMPORT_DEPT_OUT_OF_SCOPE",
                 )
             )
             continue
 
-        # role_input 未在 permission_boundary 中反查（超管豁免路径下不会查）
-        # 这里再做一次确保 conflict 集合完整（超管分配未存在角色也归 conflict）
-        if record.role_input:
+        if resolution.role_ids is not None:
             try:
-                await resolve_role_input(db, record.role_input)
-            except BusinessRuleException as exc:
-                conflict_records.append(
+                await user_role_assignment_service.validate_import_role_assignment(
+                    db,
+                    actor_user_id=int(current_user.user_id),
+                    target_user_id=resolution.target_user_id,
+                    target_user_name=record.user_name,
+                    target_status=resolution.target_status,
+                    role_ids=list(resolution.role_ids),
+                    dept_ids=[resolution.dept_id],
+                    authority=authority,
+                    ignored_user_ids=ignored_user_ids,
+                    prospective_user_id=resolution.prospective_user_id,
+                )
+            except AuthorizationException as exc:
+                out_of_scope_records.append(
                     FailedRow(
                         row_num=record.row_num,
                         field="role_input",
-                        value=record.role_input,
+                        value=record.role_input or "",
                         reason=str(exc),
-                        error_code="AI_IMPORT_ROLE_NOT_FOUND",
+                        error_code="AI_IMPORT_ROLE_OUT_OF_SCOPE",
                     )
                 )
                 continue
+            except BusinessRuleException as exc:
+                if exc.error_code in {
+                    "USER_ROLE_SELF_ASSIGNMENT_FORBIDDEN",
+                    "AUTHORIZATION_SNAPSHOT_STALE",
+                }:
+                    out_of_scope_records.append(
+                        FailedRow(
+                            row_num=record.row_num,
+                            field="role_input",
+                            value=record.role_input or "",
+                            reason=str(exc),
+                            error_code="AI_IMPORT_ROLE_OUT_OF_SCOPE",
+                        )
+                    )
+                else:
+                    conflict_records.append(
+                        FailedRow(
+                            row_num=record.row_num,
+                            field="role_input",
+                            value=record.role_input or "",
+                            reason=str(exc),
+                            error_code=exc.error_code,
+                        )
+                    )
+                continue
 
-        # 按 user_name 命中已有用户时归入 exists，由冲突策略决定后续动作。
-        existing, _matched_by_emp = await resolve_existing_user(db, record)
-        if existing is not None:
-            exists_records.append(record)
-        else:
+        if resolution.target_user_id is None:
             new_records.append(record)
+        else:
+            exists_records.append(record)
 
-    return new_records, exists_records, conflict_records, role_oos + dept_oos
+    return new_records, exists_records, conflict_records, out_of_scope_records
+
+
+async def _lock_import_authorization_targets(
+    db: AsyncSession,
+    records: list[UserImportRecord],
+    current_user: User,
+    *,
+    has_role_column: bool,
+) -> tuple[User, list[ImportAuthorizationResolution]]:
+    """Lock a complete import snapshot and reject reference-set drift."""
+    prospective_user_ids: dict[int, int] = {}
+    before = await _resolve_import_authorization_targets(
+        db,
+        records,
+        has_role_column=has_role_column,
+        prospective_user_ids=prospective_user_ids,
+    )
+    role_ids = {
+        role_id
+        for resolution in before
+        for role_id in (*resolution.target_role_ids, *(resolution.role_ids or ()))
+    }
+    dept_ids = {
+        dept_id
+        for resolution in before
+        for dept_id in (
+            *resolution.target_dept_ids,
+            *((resolution.dept_id,) if resolution.dept_id is not None else ()),
+        )
+    }
+    target_user_ids = {
+        resolution.target_user_id
+        for resolution in before
+        if resolution.target_user_id is not None
+    }
+    try:
+        actor = await user_role_assignment_service.lock_import_targets(
+            db,
+            actor_user_id=int(current_user.user_id),
+            target_user_ids=target_user_ids,
+            role_ids=role_ids,
+            dept_ids=dept_ids,
+        )
+    except (BusinessRuleException, NotFoundException) as exc:
+        raise BusinessRuleException(
+            "授权事实已变化，请重试",
+            error_code="AUTHORIZATION_SNAPSHOT_STALE",
+        ) from exc
+
+    after = await _resolve_import_authorization_targets(
+        db,
+        records,
+        has_role_column=has_role_column,
+        prospective_user_ids=prospective_user_ids,
+    )
+    if after != before:
+        raise BusinessRuleException(
+            "授权事实已变化，请重试",
+            error_code="AUTHORIZATION_SNAPSHOT_STALE",
+        )
+    await user_role_assignment_service.ensure_import_permissions(
+        db,
+        actor_user_id=int(current_user.user_id),
+        has_role_column=has_role_column,
+    )
+    return actor, after
 
 
 async def dry_run_import_users(
@@ -221,6 +465,7 @@ async def dry_run_import_users(
     reason: str,
     *,
     on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
+    has_role_column: bool | None = None,
 ) -> tuple[ImportDryRunResult, UserImportBatch]:
     """预检导入内容并生成 preview_token。
 
@@ -242,6 +487,11 @@ async def dry_run_import_users(
         BusinessRuleException: ``AI_IMPORT_REASON_REQUIRED`` — reason 缺失或超长
     """
     reason_clean = _validate_reason(reason)
+    effective_has_role_column = (
+        has_role_column
+        if has_role_column is not None
+        else any(record.role_input is not None for record in records)
+    )
 
     file_sha256 = _compute_file_sha256(file_bytes)
     records_hash = _compute_records_hash(records)
@@ -285,7 +535,12 @@ async def dry_run_import_users(
             exists_records,
             conflict_records,
             out_of_scope_records,
-        ) = await _classify_records(db, records, current_user)
+        ) = await _classify_records(
+            db,
+            records,
+            current_user,
+            has_role_column=effective_has_role_column,
+        )
 
         # 3. 截断预览记录。
         new_truncated_list, new_trunc = _truncate(new_records)
@@ -476,17 +731,22 @@ async def _process_create_row(
     db: AsyncSession,
     record: UserImportRecord,
     hashed_password: str,
+    current_user: User,
+    resolution: ImportAuthorizationResolution,
+    *,
+    has_role_column: bool,
+    ignored_user_ids: frozenset[int],
 ) -> None:
     """新建用户行级处理（INSERT user + bind roles + bind dept）。
 
     失败抛异常 → 上层 savepoint 自动 ROLLBACK。
     """
-    dept_id = await resolve_dept(db, record.dept_input)
-    role_ids: list[int] = []
-    if record.role_input:
-        role_ids = await resolve_role_input(db, record.role_input)
+    assert resolution.dept_id is not None
+    assert resolution.role_ids is not None
+    assert resolution.prospective_user_id is not None
 
     new_user = User(
+        user_id=resolution.prospective_user_id,
         user_name=record.user_name,
         employee_no=record.employee_no or None,
         nickname=record.nickname or None,
@@ -499,32 +759,39 @@ async def _process_create_row(
     db.add(new_user)
     await db.flush()  # 触发 INSERT，捕获 UNIQUE IntegrityError
 
-    # bind roles / depts via core insert（避免 ORM 二次 SELECT）
-    if role_ids:
-        await db.execute(
-            insert(user_roles),
-            [{"user_id": new_user.user_id, "role_id": rid} for rid in role_ids],
-        )
+    await user_role_assignment_service.assign_imported_user_roles(
+        db,
+        actor_user_id=current_user.user_id,
+        target_user_id=new_user.user_id,
+        role_ids=(list(resolution.role_ids) if has_role_column else None),
+        dept_ids=[resolution.dept_id],
+        has_role_column=has_role_column,
+        ignored_user_ids=ignored_user_ids,
+    )
     await db.execute(
         insert(user_depts),
-        [{"user_id": new_user.user_id, "dept_id": dept_id, "is_primary": "Y"}],
+        [
+            {
+                "user_id": new_user.user_id,
+                "dept_id": resolution.dept_id,
+                "is_primary": "Y",
+            }
+        ],
     )
-    await db.flush()  # 触发 bind INSERT
+    await db.flush()
 
 
 async def _process_overwrite_row(
     db: AsyncSession,
     record: UserImportRecord,
     existing: User,
+    resolution: ImportAuthorizationResolution,
 ) -> None:
     """覆盖已有用户时只更新 OVERWRITE_ALLOWED 字段。
 
     user_name / hashed_password / user_id / create_time 永不覆盖。
     """
-    dept_id = await resolve_dept(db, record.dept_input)
-    role_ids: list[int] = []
-    if record.role_input:
-        role_ids = await resolve_role_input(db, record.role_input)
+    assert resolution.dept_id is not None
 
     # 应用 OVERWRITE_ALLOWED 字段
     if "nickname" in OVERWRITE_ALLOWED and record.nickname is not None:
@@ -543,13 +810,16 @@ async def _process_overwrite_row(
     await db.flush()
 
     # roles 和 dept 使用全量重置语义。
-    if role_ids:
+    if record.role_input and resolution.role_ids:
         await db.execute(
             user_roles.delete().where(user_roles.c.user_id == existing.user_id)
         )
         await db.execute(
             insert(user_roles),
-            [{"user_id": existing.user_id, "role_id": rid} for rid in role_ids],
+            [
+                {"user_id": existing.user_id, "role_id": role_id}
+                for role_id in resolution.role_ids
+            ],
         )
 
     await db.execute(
@@ -557,7 +827,13 @@ async def _process_overwrite_row(
     )
     await db.execute(
         insert(user_depts),
-        [{"user_id": existing.user_id, "dept_id": dept_id, "is_primary": "Y"}],
+        [
+            {
+                "user_id": existing.user_id,
+                "dept_id": resolution.dept_id,
+                "is_primary": "Y",
+            }
+        ],
     )
     await db.flush()
 
@@ -619,6 +895,7 @@ async def batch_create_users_from_records(
     on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
     sync_mode: EmployeeNoSyncMode = EmployeeNoSyncMode.CREATE_ONLY,
     file_storage: FileStorage | None = None,
+    has_role_column: bool | None = None,
 ) -> ImportResult:
     """执行批量新建或更新。
 
@@ -650,6 +927,11 @@ async def batch_create_users_from_records(
     """
     storage = file_storage or get_file_storage()
     reason_clean = _validate_reason(reason)
+    effective_has_role_column = (
+        has_role_column
+        if has_role_column is not None
+        else any(record.role_input is not None for record in records)
+    )
 
     # 1. 反查 batch
     batch = await get_batch_by_preview_token(db, preview_token)
@@ -707,13 +989,37 @@ async def batch_create_users_from_records(
         },
     )
 
+    (
+        authorization_actor,
+        authorization_resolutions,
+    ) = await _lock_import_authorization_targets(
+        db,
+        records,
+        current_user,
+        has_role_column=effective_has_role_column,
+    )
+    resolutions_by_row = {
+        resolution.row_num: resolution for resolution in authorization_resolutions
+    }
+    ignored_user_ids = frozenset(
+        resolution.prospective_user_id
+        for resolution in authorization_resolutions
+        if resolution.prospective_user_id is not None
+    )
+
     # 6. 二次跑分类（防 dry_run 后数据变化）
     (
         new_records,
         exists_records,
         conflict_records,
         out_of_scope_records,
-    ) = await _classify_records(db, records, current_user)
+    ) = await _classify_records(
+        db,
+        records,
+        authorization_actor,
+        has_role_column=effective_has_role_column,
+        resolutions=authorization_resolutions,
+    )
     failed_rows: list[FailedRow] = list(conflict_records) + list(out_of_scope_records)
     skipped_count = 0
     overwritten_count = 0
@@ -724,8 +1030,17 @@ async def batch_create_users_from_records(
     rows_to_overwrite: list[tuple[UserImportRecord, User]] = []
 
     for record in exists_records:
-        existing, matched_by_emp = await resolve_existing_user(db, record)
-        action = classify_sync_action(matched_by_emp, sync_mode)
+        resolution = resolutions_by_row[record.row_num]
+        assert resolution.target_user_id is not None
+        existing = await db.scalar(
+            select(User).where(User.user_id == resolution.target_user_id)
+        )
+        if existing is None:
+            raise BusinessRuleException(
+                "授权事实已变化，请重试",
+                error_code="AUTHORIZATION_SNAPSHOT_STALE",
+            )
+        action = classify_sync_action(resolution.matched_by_employee_no, sync_mode)
 
         if action == SyncAction.REJECT_EMPLOYEE_NO_EXISTS:
             failed_rows.append(
@@ -766,9 +1081,15 @@ async def batch_create_users_from_records(
         else:  # overwrite
             rows_to_overwrite.append((record, existing))
 
+    if out_of_scope_records:
+        rows_to_create = []
+        rows_to_overwrite = []
+
     # 8. 读取系统默认密码。
-    default_password = await get_default_password(db)
-    hashed_password = get_password_hash(default_password)
+    hashed_password = ""
+    if rows_to_create:
+        default_password = await get_default_password(db)
+        hashed_password = get_password_hash(default_password)
 
     # 9. 分块并按行 savepoint 落库。
     # 行级处理统一封装为 (kind, record, existing) 三元组
@@ -795,10 +1116,23 @@ async def batch_create_users_from_records(
                     try:
                         async with db.begin_nested():  # row-level nested savepoint
                             if kind == "create":
-                                await _process_create_row(db, record, hashed_password)
+                                await _process_create_row(
+                                    db,
+                                    record,
+                                    hashed_password,
+                                    authorization_actor,
+                                    resolutions_by_row[record.row_num],
+                                    has_role_column=effective_has_role_column,
+                                    ignored_user_ids=ignored_user_ids,
+                                )
                                 success_count += 1
                             else:  # overwrite
-                                await _process_overwrite_row(db, record, existing)
+                                await _process_overwrite_row(
+                                    db,
+                                    record,
+                                    existing,
+                                    resolutions_by_row[record.row_num],
+                                )
                                 overwritten_count += 1
                         chunk_success += 1
                     except (BusinessException, IntegrityError) as e:
@@ -808,6 +1142,27 @@ async def batch_create_users_from_records(
                             raise
                         failed_rows.append(_make_failed_row_from_exc(record, e, code))
                         chunk_failed += 1
+        except (AuthorizationException, NotFoundException):
+            raise
+        except BusinessRuleException as e:
+            if e.error_code == "AUTHORIZATION_SNAPSHOT_STALE":
+                raise
+            aborted_error = e
+            remaining_after_abort = rows_to_process[chunk_start:]
+            for _kind, record, _existing in remaining_after_abort:
+                failed_rows.append(
+                    FailedRow(
+                        row_num=record.row_num,
+                        field="_batch",
+                        value="",
+                        reason=(
+                            f"批量执行中断（chunk {chunk_index}）："
+                            f"{type(e).__name__}: {e}"
+                        ),
+                        error_code="AI_IMPORT_BATCH_ABORTED",
+                    )
+                )
+            break
         except Exception as e:
             # 致命错误：chunk savepoint 已 ROLLBACK；标记当前 chunk 全部 + 后续 chunk 全部为 failed
             aborted_error = e
