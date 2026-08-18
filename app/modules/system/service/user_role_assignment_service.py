@@ -1,6 +1,7 @@
 """Shared authorization policy for complete user-role replacements."""
 
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +14,7 @@ from app.constants import (
     DATA_SCOPE_DEPT,
     DATA_SCOPE_DEPT_AND_SUB,
     DATA_SCOPE_SELF,
+    IS_PRIMARY_YES,
     STATUS_ENABLED,
     SUPER_ADMIN_ROLE_CODE,
     USER_ROLE_CODE,
@@ -29,6 +31,9 @@ from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.service.authorization_lock import authorization_lock_service
+from app.modules.system.service.authorization_snapshot import (
+    materialized_role_set_snapshot,
+)
 from app.modules.system.service.grant_authority import (
     GrantAuthority,
     grant_authority_service,
@@ -72,6 +77,28 @@ class UserRoleAssignmentResult:
     new_role_ids: tuple[int, ...]
 
 
+@dataclass(frozen=True)
+class UserRoleAssignmentPreview:
+    """Server-owned preview and snapshot for one complete replacement."""
+
+    user_id: int
+    user_name: str
+    old_role_ids: tuple[int, ...]
+    new_role_ids: tuple[int, ...]
+    old_display: tuple[str, ...]
+    new_display: tuple[str, ...]
+    snapshot: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class AssignableRolePage:
+    """Minimal role candidates and their complete assignable match count."""
+
+    match_count: int
+    matched_role_ids: tuple[int, ...]
+    roles: tuple[Role, ...]
+
+
 def _role_ids(roles: list[Role]) -> tuple[int, ...]:
     return tuple(sorted(int(role.role_id) for role in roles))
 
@@ -89,6 +116,78 @@ def _dept_ids(user: User, roles: list[Role]) -> tuple[int, ...]:
 
 class UserRoleAssignmentService:
     """Apply the same role-delegation boundary to page and AI writers."""
+
+    @staticmethod
+    def _role_display(roles: list[Role]) -> tuple[str, ...]:
+        return tuple(
+            f"{role.role_name} ({role.role_code} / {role.role_id})"
+            for role in sorted(roles, key=lambda item: int(item.role_id))
+        )
+
+    async def _load_department_assignment_snapshot(
+        self,
+        db: AsyncSession,
+        user_id: int,
+    ) -> list[dict[str, Any]]:
+        rows = (
+            await db.execute(
+                select(user_depts.c.dept_id, user_depts.c.is_primary)
+                .where(user_depts.c.user_id == user_id)
+                .order_by(user_depts.c.dept_id)
+            )
+        ).all()
+        return [
+            {
+                "deptId": str(dept_id),
+                "isPrimary": is_primary == IS_PRIMARY_YES,
+            }
+            for dept_id, is_primary in rows
+        ]
+
+    @staticmethod
+    def _build_replacement_snapshot(
+        *,
+        authority: GrantAuthority,
+        target: User,
+        old_roles: list[Role],
+        new_roles: list[Role],
+        old_authority: RoleSetAuthority,
+        new_authority: RoleSetAuthority,
+        department_assignments: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        role_map = {int(role.role_id): role for role in [*old_roles, *new_roles]}
+        return {
+            "actor": {
+                "userId": str(authority.actor_user_id),
+                "status": authority.actor_status,
+                "tenantId": str(authority.tenant_id),
+                "superAdmin": authority.super_admin,
+                "authorityVersion": authority.version_summary,
+            },
+            "target": {
+                "userId": str(target.user_id),
+                "userName": target.user_name,
+                "status": target.status,
+                "roleIds": [str(role_id) for role_id in _role_ids(old_roles)],
+                "departmentAssignments": department_assignments,
+            },
+            "oldRoleIds": [str(role_id) for role_id in _role_ids(old_roles)],
+            "newRoleIds": [str(role_id) for role_id in _role_ids(new_roles)],
+            "roleFacts": [
+                {
+                    "roleId": str(role.role_id),
+                    "roleCode": role.role_code,
+                    "roleName": role.role_name,
+                    "status": role.status,
+                    "dataScope": role.data_scope,
+                }
+                for role in sorted(
+                    role_map.values(), key=lambda item: int(item.role_id)
+                )
+            ],
+            "before": materialized_role_set_snapshot(old_authority),
+            "after": materialized_role_set_snapshot(new_authority),
+        }
 
     @staticmethod
     def _require_permissions(
@@ -642,7 +741,7 @@ class UserRoleAssignmentService:
         allow_empty_old_roles: bool,
         created_target: bool,
         ignored_user_ids: frozenset[int] = frozenset(),
-    ) -> None:
+    ) -> tuple[RoleSetAuthority | None, RoleSetAuthority]:
         old_roles = list(target.roles or [])
         self._ensure_target_protection(
             actor=actor,
@@ -661,6 +760,7 @@ class UserRoleAssignmentService:
         else:
             self._ensure_target_visible(actor, int(target.user_id))
 
+        old_authority: RoleSetAuthority | None = None
         if old_roles:
             old_authority = await self.materialize_role_set_authority(
                 db,
@@ -684,6 +784,61 @@ class UserRoleAssignmentService:
             new_authority,
             ignored_user_ids=ignored_user_ids,
         )
+        return old_authority, new_authority
+
+    async def preview_roles(
+        self,
+        db: AsyncSession,
+        *,
+        actor_user_id: int,
+        target_user_id: int,
+        role_ids: list[int | str],
+    ) -> UserRoleAssignmentPreview:
+        """Validate and freeze one complete role replacement without writing it."""
+        requested_roles = await self._load_requested_roles(db, role_ids)
+        authority = await grant_authority_service.build(db, actor_user_id)
+        self._require_permissions(
+            authority,
+            frozenset({USER_EDIT_PERMISSION, USER_ROLE_AUTH_PERMISSION}),
+        )
+        target = await self._load_user(db, target_user_id)
+        old_roles = list(target.roles or [])
+        old_authority, new_authority = await self._authorize_role_set(
+            db,
+            actor=authority,
+            actor_user_id=actor_user_id,
+            target=target,
+            requested_roles=requested_roles,
+            prospective_depts=None,
+            allow_empty_old_roles=False,
+            created_target=False,
+        )
+        if old_authority is None:
+            raise BusinessRuleException(
+                "目标用户当前角色集合为空",
+                error_code="AUTHORIZATION_SNAPSHOT_STALE",
+            )
+        department_assignments = await self._load_department_assignment_snapshot(
+            db,
+            target_user_id,
+        )
+        return UserRoleAssignmentPreview(
+            user_id=int(target.user_id),
+            user_name=target.user_name,
+            old_role_ids=_role_ids(old_roles),
+            new_role_ids=_role_ids(requested_roles),
+            old_display=self._role_display(old_roles),
+            new_display=self._role_display(requested_roles),
+            snapshot=self._build_replacement_snapshot(
+                authority=authority,
+                target=target,
+                old_roles=old_roles,
+                new_roles=requested_roles,
+                old_authority=old_authority,
+                new_authority=new_authority,
+                department_assignments=department_assignments,
+            ),
+        )
 
     async def _replace_roles(
         self,
@@ -696,6 +851,7 @@ class UserRoleAssignmentService:
         allow_empty_old_roles: bool,
         prospective_dept_ids: list[int] | None = None,
         ignored_user_ids: frozenset[int] = frozenset(),
+        expected_snapshot: dict[str, Any] | None = None,
     ) -> UserRoleAssignmentResult:
         actor_before = await self._load_user(db, actor_user_id)
         target_before = await self._load_user(db, target_user_id)
@@ -753,7 +909,7 @@ class UserRoleAssignmentService:
         )
         authority = await grant_authority_service.build(db, actor_user_id)
         self._require_permissions(authority, required_permissions)
-        await self._authorize_role_set(
+        old_authority, new_authority = await self._authorize_role_set(
             db,
             actor=authority,
             actor_user_id=actor_user_id,
@@ -764,6 +920,32 @@ class UserRoleAssignmentService:
             created_target=allow_empty_old_roles,
             ignored_user_ids=ignored_user_ids,
         )
+
+        if expected_snapshot is not None:
+            if old_authority is None:
+                raise BusinessRuleException(
+                    "审批快照已变化，请重新确认",
+                    error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
+                )
+            current_snapshot = self._build_replacement_snapshot(
+                authority=authority,
+                target=target_user,
+                old_roles=list(target_user.roles or []),
+                new_roles=live_requested_roles,
+                old_authority=old_authority,
+                new_authority=new_authority,
+                department_assignments=(
+                    await self._load_department_assignment_snapshot(
+                        db,
+                        target_user_id,
+                    )
+                ),
+            )
+            if current_snapshot != expected_snapshot:
+                raise BusinessRuleException(
+                    "审批快照已变化，请重新确认",
+                    error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
+                )
 
         old_role_ids = _role_ids(target_user.roles)
         target_user.roles = live_requested_roles
@@ -781,6 +963,7 @@ class UserRoleAssignmentService:
         actor_user_id: int,
         target_user_id: int,
         role_ids: list[int | str],
+        expected_snapshot: dict[str, Any] | None = None,
     ) -> UserRoleAssignmentResult:
         """Replace one existing user's complete role set without committing."""
         requested_roles = await self._load_requested_roles(db, role_ids)
@@ -793,6 +976,7 @@ class UserRoleAssignmentService:
                 {USER_EDIT_PERMISSION, USER_ROLE_AUTH_PERMISSION}
             ),
             allow_empty_old_roles=False,
+            expected_snapshot=expected_snapshot,
         )
 
     async def assign_created_user_roles(
@@ -1012,33 +1196,37 @@ class UserRoleAssignmentService:
         limit: int,
     ) -> list[Role]:
         """Return minimal role candidates dominated by the actor's role template."""
+        page = await self.lookup_assignable_roles(
+            db,
+            actor_user_id=actor_user_id,
+            query=query,
+            limit=limit,
+        )
+        return list(page.roles)
+
+    async def _filter_assignable_roles(
+        self,
+        db: AsyncSession,
+        *,
+        authority: GrantAuthority,
+        roles: list[Role],
+    ) -> list[Role]:
+        """Filter enabled roles through the shared delegation ceiling."""
         from app.modules.ai.service.agent_authorization_service import (  # noqa: PLC0415
             agent_authorization_service,
         )
 
-        authority = await grant_authority_service.build(db, actor_user_id)
-        self._require_permissions(authority, frozenset({USER_ROLE_AUTH_PERMISSION}))
-        statement = (
-            select(Role)
-            .where(Role.status == STATUS_ENABLED)
-            .options(selectinload(Role.menus), selectinload(Role.depts))
-            .order_by(Role.role_code, Role.role_id)
-        )
-        normalized_query = (query or "").strip()
-        if normalized_query:
-            pattern = f"%{normalized_query}%"
-            statement = statement.where(
-                or_(Role.role_code.ilike(pattern), Role.role_name.ilike(pattern))
-            )
-        roles = list((await db.execute(statement)).unique().scalars().all())
+        if not roles:
+            return []
         role_ids = [int(role.role_id) for role in roles]
         bindings = await agent_authorization_service.grantable_agent_ids_by_role_ids(
             db,
             role_ids,
         )
-
         result: list[Role] = []
         for role in roles:
+            if role.status != STATUS_ENABLED:
+                continue
             if role.role_code == SUPER_ADMIN_ROLE_CODE and not authority.super_admin:
                 continue
             permission_codes = {
@@ -1054,9 +1242,112 @@ class UserRoleAssignmentService:
             ):
                 continue
             result.append(role)
-            if len(result) >= limit:
-                break
         return result
+
+    async def lookup_assignable_roles(
+        self,
+        db: AsyncSession,
+        *,
+        actor_user_id: int,
+        query: str | None,
+        limit: int,
+    ) -> AssignableRolePage:
+        """Return a bounded role lookup plus its complete assignable match count."""
+        authority = await grant_authority_service.build(db, actor_user_id)
+        self._require_permissions(authority, frozenset({USER_ROLE_AUTH_PERMISSION}))
+        statement = (
+            select(Role)
+            .where(Role.status == STATUS_ENABLED)
+            .options(selectinload(Role.menus), selectinload(Role.depts))
+            .order_by(Role.role_code, Role.role_id)
+        )
+        normalized_query = (query or "").strip()
+        if normalized_query:
+            statement = statement.where(
+                or_(
+                    Role.role_code.icontains(normalized_query, autoescape=True),
+                    Role.role_name.icontains(normalized_query, autoescape=True),
+                )
+            )
+        roles = list((await db.execute(statement)).unique().scalars().all())
+        assignable = await self._filter_assignable_roles(
+            db,
+            authority=authority,
+            roles=roles,
+        )
+        return AssignableRolePage(
+            match_count=len(assignable),
+            matched_role_ids=_role_ids(assignable),
+            roles=tuple(assignable[:limit]),
+        )
+
+    async def roles_are_assignable(
+        self,
+        db: AsyncSession,
+        *,
+        actor_user_id: int,
+        role_ids: list[int | str],
+    ) -> bool:
+        """Re-authorize a complete finite role reference set."""
+        requested_roles = await self._load_requested_roles(db, role_ids)
+        authority = await grant_authority_service.build(db, actor_user_id)
+        self._require_permissions(authority, frozenset({USER_ROLE_AUTH_PERMISSION}))
+        assignable = await self._filter_assignable_roles(
+            db,
+            authority=authority,
+            roles=requested_roles,
+        )
+        return _role_ids(assignable) == _role_ids(requested_roles)
+
+    async def ensure_role_assignment_access(
+        self,
+        db: AsyncSession,
+        *,
+        actor_user_id: int,
+        target_user_id: int,
+    ) -> None:
+        """Re-authorize conditional access to one user's role assignments."""
+        authority = await grant_authority_service.build(db, actor_user_id)
+        self._require_permissions(authority, frozenset({USER_ROLE_AUTH_PERMISSION}))
+        self._ensure_target_visible(authority, target_user_id)
+        await self._load_user(db, target_user_id)
+
+    async def get_complete_assignable_roles(
+        self,
+        db: AsyncSession,
+        *,
+        actor_user_id: int,
+        target_user_id: int,
+    ) -> tuple[list[Role], bool]:
+        """Return a target's roles only when the complete set is delegable."""
+        authority = await grant_authority_service.build(db, actor_user_id)
+        self._require_permissions(authority, frozenset({USER_ROLE_AUTH_PERMISSION}))
+        self._ensure_target_visible(authority, target_user_id)
+        target = await self._load_user(db, target_user_id)
+        current_roles = sorted(
+            target.roles or [],
+            key=lambda role: int(role.role_id),
+        )
+        if not current_roles:
+            return [], False
+        assignable = await self._filter_assignable_roles(
+            db,
+            authority=authority,
+            roles=current_roles,
+        )
+        if _role_ids(assignable) != _role_ids(current_roles):
+            return [], False
+        current_authority = await self.materialize_role_set_authority(
+            db,
+            user=target,
+            roles=current_roles,
+            depts=list(target.depts or []),
+        )
+        try:
+            self.ensure_role_set_dominated(authority, current_authority)
+        except AuthorizationException:
+            return [], False
+        return current_roles, True
 
 
 user_role_assignment_service = UserRoleAssignmentService()

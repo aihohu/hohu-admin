@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -12,6 +12,8 @@ from app.constants import (
     DATA_SCOPE_CUSTOM,
     DATA_SCOPE_DEPT_AND_SUB,
     DATA_SCOPE_SELF,
+    IS_PRIMARY_NO,
+    IS_PRIMARY_YES,
     STATUS_ENABLED,
     SUPER_ADMIN_ROLE_CODE,
     USER_ROLE_CODE,
@@ -85,6 +87,38 @@ async def _reload_user(db: AsyncSession, user_id: int) -> User:
             .execution_options(populate_existing=True)
         )
     ).scalar_one()
+
+
+async def _seed_approved_role_replacement(
+    db: AsyncSession,
+    *,
+    extra_actor_menus: list[Menu] | None = None,
+) -> tuple[User, User, Role, Role, Role]:
+    """Seed one valid role replacement that can be previewed and executed."""
+    delegated_permission = _menu(f"qa:role-approved:{next_id()}:read")
+    actor_role = _role(
+        f"R_ROLE_APPROVED_ACTOR_{next_id()}",
+        data_scope=DATA_SCOPE_ALL,
+        menus=[
+            _menu(USER_EDIT_PERMISSION),
+            _menu(USER_ROLE_AUTH_PERMISSION),
+            delegated_permission,
+            *(extra_actor_menus or []),
+        ],
+    )
+    old_role = _role(
+        f"R_ROLE_APPROVED_OLD_{next_id()}",
+        menus=[delegated_permission],
+    )
+    new_role = _role(
+        f"R_ROLE_APPROVED_NEW_{next_id()}",
+        menus=[delegated_permission],
+    )
+    actor = _user(f"phase2-role-approved-actor-{next_id()}", [actor_role])
+    target = _user(f"phase2-role-approved-target-{next_id()}", [old_role])
+    db.add_all([actor_role, old_role, new_role, actor, target])
+    await db.flush()
+    return actor, target, actor_role, old_role, new_role
 
 
 async def test_bulk_authority_materialization_matches_single_policy(
@@ -532,6 +566,303 @@ async def test_assignable_roles_returns_only_dominated_minimal_candidates(
     )
 
     assert [role.role_id for role in result] == [assignable.role_id]
+    assert await user_role_assignment_service.roles_are_assignable(
+        db_session,
+        actor_user_id=actor.user_id,
+        role_ids=[assignable.role_id],
+    )
+    assert not await user_role_assignment_service.roles_are_assignable(
+        db_session,
+        actor_user_id=actor.user_id,
+        role_ids=[outside.role_id],
+    )
+
+
+async def test_preview_roles_freezes_complete_authorization_snapshot(
+    db_session: AsyncSession,
+) -> None:
+    delegated_permission = _menu(f"qa:role-preview:{next_id()}:read")
+    actor_role = _role(
+        f"R_ROLE_PREVIEW_ACTOR_{next_id()}",
+        data_scope=DATA_SCOPE_ALL,
+        menus=[
+            _menu(USER_EDIT_PERMISSION),
+            _menu(USER_ROLE_AUTH_PERMISSION),
+            delegated_permission,
+        ],
+    )
+    old_role = _role(
+        f"R_ROLE_PREVIEW_OLD_{next_id()}",
+        menus=[delegated_permission],
+    )
+    new_role = _role(
+        f"R_ROLE_PREVIEW_NEW_{next_id()}",
+        menus=[delegated_permission],
+    )
+    actor = _user(f"phase2-role-preview-actor-{next_id()}", [actor_role])
+    target = _user(f"phase2-role-preview-target-{next_id()}", [old_role])
+    db_session.add_all(
+        [delegated_permission, actor_role, old_role, new_role, actor, target]
+    )
+    await db_session.flush()
+
+    preview = await user_role_assignment_service.preview_roles(
+        db_session,
+        actor_user_id=actor.user_id,
+        target_user_id=target.user_id,
+        role_ids=[new_role.role_id],
+    )
+
+    assert preview.old_role_ids == (old_role.role_id,)
+    assert preview.new_role_ids == (new_role.role_id,)
+    assert preview.old_display == (
+        f"{old_role.role_name} ({old_role.role_code} / {old_role.role_id})",
+    )
+    assert preview.new_display == (
+        f"{new_role.role_name} ({new_role.role_code} / {new_role.role_id})",
+    )
+    assert preview.snapshot["target"]["roleIds"] == [str(old_role.role_id)]
+    assert preview.snapshot["oldRoleIds"] == [str(old_role.role_id)]
+    assert preview.snapshot["newRoleIds"] == [str(new_role.role_id)]
+    assert preview.snapshot["actor"]["authorityVersion"]
+    assert preview.snapshot["before"]["authorizationHash"]
+    assert preview.snapshot["after"]["scopeHash"]
+    assert {fact["roleId"] for fact in preview.snapshot["roleFacts"]} == {
+        str(old_role.role_id),
+        str(new_role.role_id),
+    }
+
+
+async def test_replace_roles_rejects_approved_target_status_drift(
+    db_session: AsyncSession,
+) -> None:
+    delegated_permission = _menu(f"qa:role-approved:{next_id()}:read")
+    actor_role = _role(
+        f"R_ROLE_APPROVED_ACTOR_{next_id()}",
+        data_scope=DATA_SCOPE_ALL,
+        menus=[
+            _menu(USER_EDIT_PERMISSION),
+            _menu(USER_ROLE_AUTH_PERMISSION),
+            delegated_permission,
+        ],
+    )
+    old_role = _role(
+        f"R_ROLE_APPROVED_OLD_{next_id()}",
+        menus=[delegated_permission],
+    )
+    new_role = _role(
+        f"R_ROLE_APPROVED_NEW_{next_id()}",
+        menus=[delegated_permission],
+    )
+    actor = _user(f"phase2-role-approved-actor-{next_id()}", [actor_role])
+    target = _user(f"phase2-role-approved-target-{next_id()}", [old_role])
+    db_session.add_all(
+        [delegated_permission, actor_role, old_role, new_role, actor, target]
+    )
+    await db_session.flush()
+
+    preview = await user_role_assignment_service.preview_roles(
+        db_session,
+        actor_user_id=actor.user_id,
+        target_user_id=target.user_id,
+        role_ids=[new_role.role_id],
+    )
+    target.status = "2"
+    await db_session.flush()
+
+    with pytest.raises(BusinessRuleException) as exc_info:
+        await user_role_assignment_service.replace_roles(
+            db_session,
+            actor_user_id=actor.user_id,
+            target_user_id=target.user_id,
+            role_ids=[new_role.role_id],
+            expected_snapshot=preview.snapshot,
+        )
+
+    assert exc_info.value.error_code == "AI_PREPARED_ACTION_SNAPSHOT_STALE"
+    reloaded = await _reload_user(db_session, target.user_id)
+    assert [role.role_id for role in reloaded.roles] == [old_role.role_id]
+
+
+async def test_replace_roles_rejects_approved_candidate_menu_drift(
+    db_session: AsyncSession,
+) -> None:
+    added_permission = _menu(f"qa:role-approved-menu:{next_id()}:read")
+    (
+        actor,
+        target,
+        _actor_role,
+        old_role,
+        new_role,
+    ) = await _seed_approved_role_replacement(
+        db_session,
+        extra_actor_menus=[added_permission],
+    )
+    preview = await user_role_assignment_service.preview_roles(
+        db_session,
+        actor_user_id=actor.user_id,
+        target_user_id=target.user_id,
+        role_ids=[new_role.role_id],
+    )
+    new_role.menus.append(added_permission)
+    await db_session.flush()
+
+    with pytest.raises(BusinessRuleException) as exc_info:
+        await user_role_assignment_service.replace_roles(
+            db_session,
+            actor_user_id=actor.user_id,
+            target_user_id=target.user_id,
+            role_ids=[new_role.role_id],
+            expected_snapshot=preview.snapshot,
+        )
+
+    assert exc_info.value.error_code == "AI_PREPARED_ACTION_SNAPSHOT_STALE"
+    reloaded = await _reload_user(db_session, target.user_id)
+    assert [role.role_id for role in reloaded.roles] == [old_role.role_id]
+
+
+async def test_replace_roles_rejects_approved_actor_authority_drift(
+    db_session: AsyncSession,
+) -> None:
+    (
+        actor,
+        target,
+        actor_role,
+        old_role,
+        new_role,
+    ) = await _seed_approved_role_replacement(db_session)
+    preview = await user_role_assignment_service.preview_roles(
+        db_session,
+        actor_user_id=actor.user_id,
+        target_user_id=target.user_id,
+        role_ids=[new_role.role_id],
+    )
+    actor_role.menus.append(_menu(f"qa:role-actor-drift:{next_id()}:read"))
+    await db_session.flush()
+
+    with pytest.raises(BusinessRuleException) as exc_info:
+        await user_role_assignment_service.replace_roles(
+            db_session,
+            actor_user_id=actor.user_id,
+            target_user_id=target.user_id,
+            role_ids=[new_role.role_id],
+            expected_snapshot=preview.snapshot,
+        )
+
+    assert exc_info.value.error_code == "AI_PREPARED_ACTION_SNAPSHOT_STALE"
+    reloaded = await _reload_user(db_session, target.user_id)
+    assert [role.role_id for role in reloaded.roles] == [old_role.role_id]
+
+
+async def test_replace_roles_rejects_approved_primary_department_drift(
+    db_session: AsyncSession,
+) -> None:
+    (
+        actor,
+        target,
+        _actor_role,
+        old_role,
+        new_role,
+    ) = await _seed_approved_role_replacement(db_session)
+    dept = Dept(
+        dept_id=next_id(),
+        dept_name=f"phase2-role-approved-dept-{next_id()}",
+        ancestors="0",
+        order_num=0,
+        status=STATUS_ENABLED,
+    )
+    db_session.add(dept)
+    await db_session.flush()
+    await db_session.execute(
+        insert(user_depts).values(
+            user_id=target.user_id,
+            dept_id=dept.dept_id,
+            is_primary=IS_PRIMARY_YES,
+        )
+    )
+    preview = await user_role_assignment_service.preview_roles(
+        db_session,
+        actor_user_id=actor.user_id,
+        target_user_id=target.user_id,
+        role_ids=[new_role.role_id],
+    )
+    await db_session.execute(
+        update(user_depts)
+        .where(
+            user_depts.c.user_id == target.user_id,
+            user_depts.c.dept_id == dept.dept_id,
+        )
+        .values(is_primary=IS_PRIMARY_NO)
+    )
+
+    with pytest.raises(BusinessRuleException) as exc_info:
+        await user_role_assignment_service.replace_roles(
+            db_session,
+            actor_user_id=actor.user_id,
+            target_user_id=target.user_id,
+            role_ids=[new_role.role_id],
+            expected_snapshot=preview.snapshot,
+        )
+
+    assert exc_info.value.error_code == "AI_PREPARED_ACTION_SNAPSHOT_STALE"
+    reloaded = await _reload_user(db_session, target.user_id)
+    assert [role.role_id for role in reloaded.roles] == [old_role.role_id]
+
+
+async def test_replace_roles_rejects_approved_role_agent_drift(
+    db_session: AsyncSession,
+) -> None:
+    (
+        actor,
+        target,
+        actor_role,
+        old_role,
+        new_role,
+    ) = await _seed_approved_role_replacement(db_session)
+    agent = AiAgent(
+        agent_id=next_id(),
+        code=f"phase2-approved-agent-{next_id()}",
+        name="Phase 2 approved agent",
+        description="Phase 2 approved agent",
+        enabled=True,
+    )
+    db_session.add(agent)
+    await db_session.flush()
+    db_session.add(
+        RoleAiAgent(
+            role_id=actor_role.role_id,
+            agent_id=agent.agent_id,
+            enabled=True,
+        )
+    )
+    await db_session.flush()
+    preview = await user_role_assignment_service.preview_roles(
+        db_session,
+        actor_user_id=actor.user_id,
+        target_user_id=target.user_id,
+        role_ids=[new_role.role_id],
+    )
+    db_session.add(
+        RoleAiAgent(
+            role_id=new_role.role_id,
+            agent_id=agent.agent_id,
+            enabled=True,
+        )
+    )
+    await db_session.flush()
+
+    with pytest.raises(BusinessRuleException) as exc_info:
+        await user_role_assignment_service.replace_roles(
+            db_session,
+            actor_user_id=actor.user_id,
+            target_user_id=target.user_id,
+            role_ids=[new_role.role_id],
+            expected_snapshot=preview.snapshot,
+        )
+
+    assert exc_info.value.error_code == "AI_PREPARED_ACTION_SNAPSHOT_STALE"
+    reloaded = await _reload_user(db_session, target.user_id)
+    assert [role.role_id for role in reloaded.roles] == [old_role.role_id]
 
 
 async def test_replace_roles_rejects_out_of_scope_custom_role(

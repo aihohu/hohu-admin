@@ -626,8 +626,64 @@ class ResultProjectionService:
     ) -> bool:
         if not lineage.subject_refs:
             return True
+        delegable_role_ids: list[int] = []
+        complete_role_assignment_user_ids: list[int] = []
+        role_assignment_access_user_ids: list[int] = []
+        try:
+            for subject in lineage.subject_refs:
+                subject_type = subject["type"]
+                if subject_type == "delegable_role":
+                    delegable_role_ids.append(int(subject["id"]))
+                elif subject_type == "complete_user_role_assignment":
+                    complete_role_assignment_user_ids.append(int(subject["id"]))
+                elif subject_type == "user_role_assignment_access":
+                    role_assignment_access_user_ids.append(int(subject["id"]))
+
+            if (
+                delegable_role_ids
+                or complete_role_assignment_user_ids
+                or role_assignment_access_user_ids
+            ):
+                from app.modules.system.service.user_role_assignment_service import (  # noqa: PLC0415
+                    user_role_assignment_service,
+                )
+
+            if delegable_role_ids and not (
+                await user_role_assignment_service.roles_are_assignable(
+                    db,
+                    actor_user_id=int(user.user_id),
+                    role_ids=delegable_role_ids,
+                )
+            ):
+                return False
+            for target_user_id in complete_role_assignment_user_ids:
+                (
+                    _roles,
+                    complete,
+                ) = await user_role_assignment_service.get_complete_assignable_roles(
+                    db,
+                    actor_user_id=int(user.user_id),
+                    target_user_id=target_user_id,
+                )
+                if not complete:
+                    return False
+            for target_user_id in role_assignment_access_user_ids:
+                await user_role_assignment_service.ensure_role_assignment_access(
+                    db,
+                    actor_user_id=int(user.user_id),
+                    target_user_id=target_user_id,
+                )
+        except (BusinessException, TypeError, ValueError):
+            return False
+
         scope = await build_data_scope_context(db, user)
         for subject in lineage.subject_refs:
+            if subject["type"] in {
+                "delegable_role",
+                "complete_user_role_assignment",
+                "user_role_assignment_access",
+            }:
+                continue
             if not await self._authorize_subject(
                 db,
                 user,

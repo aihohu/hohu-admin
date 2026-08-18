@@ -1,6 +1,6 @@
 # AI 用户管理缺失工具补齐
 
-> 状态：🚧 Plan 1 已完成（2026-08-11）；Plan 2 已完成 P2-A、P2-B1、P2-B2、P2-B3 与 Task 12，其余工作包待实现
+> 状态：🚧 Plan 1 已完成（2026-08-11）；Plan 2 已完成 P2-A、P2-B1、P2-B2、P2-B3、Task 12 与 Task 13，其余工作包待实现
 > 日期：2026-08-11｜更新：2026-08-18
 > 关联：[`2026-08-14-ai-management-mvp-closure.md`](./2026-08-14-ai-management-mvp-closure.md)、[`2026-07-02-ai-tool-gateway-design.md`](./2026-07-02-ai-tool-gateway-design.md)、[`2026-08-01-user-import-export-design.md`](./2026-08-01-user-import-export-design.md)
 
@@ -78,6 +78,10 @@
 
 33. **部门全集写入只接受严格模型 schema 和可证明完整的当前集合** — `dept_assignments[]` 的每项只允许正整数 `dept_id` 与严格 boolean `is_primary`；`user.lookup` 仅在调用者拥有 `system:dept:list` 且现有部门全集均在当前 scope 时返回 `departmentAssignmentsComplete=true`，否则不返回任何部分部门 ID。Agent 必须先取得该标志为 true 的当前全集才能组合完整替换；dry-run 的领域/授权拒绝保留稳定错误码并在 Gateway confirmation 前终止。`user.dept_lookup` 先筛末级名称候选，再只为候选构造可见路径和物化最多 `limit` 行。**反例**: 把 `list[dict]` 暴露给模型会接受 camelCase 或额外字段；把可见子集伪装为当前全集会在替换时误删隐藏关联；无业务快照仍生成确认会让批准必然 stale。**回归**: `tests/modules/ai/test_user_assignment_tools.py`、`tests/modules/ai/test_executor_integration.py`。
 
+34. **角色全集写入只接受严格 ID schema 和可证明完整的可委派当前集合** — `user.role_lookup` 复用页面可委派角色 Policy，只返回启用且受 `GrantAuthority` 支配的最小摘要；`user.lookup` 只有在 role-auth、目标 user scope 和全部当前角色均可委派时才返回 `roleAssignmentsComplete=true`，否则不返回部分角色 ID。`user.update_roles.role_ids` 只接受非空、去重、正整数且禁止类型强制转换的完整集合；dry-run/approve/锁内执行依次冻结和复验目标部门、旧/新角色、角色定义、Role-Agent/menu、操作者 authority 及目标前后物化授权。**反例**: 用 `role.list` 代替 delegation lookup 会暴露不可授予角色；字符串 ID 或部分旧集合会破坏精确审批；只在批准前复验但锁内不比较会留下 TOCTOU。**回归**: `tests/modules/ai/test_user_role_assignment_tools.py`、`tests/modules/system/test_user_role_assignment_service.py`。
+
+35. **角色条件数据和 lookup 计数使用委派感知的完整结果投影** — `user.lookup` 的角色字段额外冻结 role-auth/目标集合 subject，角色候选与写入结果冻结 `delegable_role`；统一结果读取 Policy 重新校验目标可见性、当前完整集合实际授权和全部历史角色的可委派性。`user.role_lookup.matchCount` 的所有贡献角色都进入内部 refs，即使展示行受 `limit` 截断。Agent 对零/多命中必须停止并澄清。**反例**: 只按 `user.lookup` 的 user-list 权限和通用 role existence 回放，会在 role-auth 或委派上界撤销后继续泄露角色字段；只记录展示行会保留失真的历史计数。**回归**: `tests/modules/ai/test_result_projection_service.py`、`tests/modules/ai/test_user_role_assignment_tools.py`。
+
 ## 3. 工具契约
 
 ### `user.create`
@@ -125,7 +129,8 @@
 ### `user.update_roles`（Plan 2）
 
 - 权限：同时满足 `system:user:edit` 与 `system:user:role-auth`
-- 参数：`user_id`、完整 `role_ids`
+- 参数：`user_id`、完整 `role_ids: positive integer[]`；非空、去重，拒绝字符串强制转换
+- 当前集合：先调 `user.lookup`；只有响应包含 `roleAssignmentsComplete=true` 时才允许把当前保留项与新增项组合成完整集合，否则停止并引导用户使用传统页面
 - 风险：`high`、`hitl_always=True`、`dry_run_supported=True`
 - 数据权限：目标用户必须位于当前操作者 scope；新集合非空、去重，角色存在且启用
 - 提权防护：禁止自改；admin 或变更前后拥有启用 `R_SUPER` 的用户仅允许超级管理员操作；非超管不得移除自己无权管理的旧角色
@@ -161,5 +166,6 @@
     - [x] Task 11b-2 ✅ P2-B3 已完成（2026-08-18；审查修复 2026-08-18）：页面 create、AI create、import create/overwrite 与部门成员页统一使用共享角色/部门 Policy；删除旧 `DeptService` 关联 writer，导入拒绝重复目标并锁定 `DEPT_AND_SUB` 完整后代，部门成员完整集合在全局锁内批量物化且比较完整授权快照，隐藏旧成员、主部门移除和任一越权均整批失败。Web 完成独立 writer、部分提交恢复、最小可委派角色和 fail-closed 分页成员契约。无 migration/seed；最终验证证据见主基线。
 - [x] ✅ Task 12 已完成（2026-08-18；审查修复 2026-08-18）：`user.dept_lookup` 改用 `system:dept:list`，支持名称/可见路径与 `1..20` limit，先筛末级名称候选并仅为候选构造路径；`user.update_dept` 强制严格完整集合、双权限、HITL/dry-run，冻结规范化执行参数和服务端授权/目标业务快照。`user.lookup` 只有在当前部门全集可证明完整时才向 Agent 暴露集合，dry-run 领域拒绝在 confirmation 前原码终止；批准与锁内执行两次复验任一漂移统一 fail closed。Tool 仅编排共享部门 Service，Web 已补齐确认抽屉、错误码、结果卡和中英文 i18n；无数据库 migration、权限/menu seed 或新权限码，仅同步内置 Agent prompt 默认值。
   - [x] Task 12 验证证据：后端 `ruff check .`、`ruff format --check .`、20 tools / 12 static checks、扩展回归 226 项与全量 2091 项测试通过，总覆盖率 74.39%，仅保留 30 条 import fixture 与 2 条既有 transaction warning；Web oxlint、format、typecheck、31 files / 120 tests 与 production build 通过，ESLint 0 error / 30 条既有 warning。
-- [ ] Task 13：同步实现 `user.role_lookup` 与 `user.update_roles` 的最终有效授权 dominance、dry-run、i18n 与批准时复验。
+- [x] ✅ Task 13 已完成（2026-08-18；审查修复 2026-08-18）：`user.role_lookup` 只返回当前 `GrantAuthority` 下启用且可委派的角色最小摘要；`user.lookup` 仅在 role-auth、目标 user scope、完整角色集合及其实际物化授权均可证明受支配时返回可组合全集。`user.update_roles` 使用严格非空正整数全集、双权限、强制 HITL/dry-run，并复用页面 `UserRoleAssignmentService`；审批冻结目标部门、完整旧/新角色、角色定义、Role-Agent/menu、操作者 authority 和前后物化授权 hash，批准前与 role → dept → user 锁内分别重建，漂移统一 fail closed。审查修复后，角色条件数据和完整 match count 采用委派感知 refs 并在历史读取时重验；Prompt 强制零/多命中澄清，真实授权漂移回归覆盖操作者、菜单、主部门与 Role-Agent。本任务无数据库 migration、权限/menu seed 或新权限码。
+  - [x] Task 13 验证证据：后端 `ruff check .`、`ruff format --check .`、22 tools / 12 static checks、角色/部门共享 Policy、结果投影与 PreparedAction 定向回归 145 项及全量 2121 项测试通过，总覆盖率 74.59%，仅保留 32 条既有 warning；Web lint 0 error / 30 条既有 warning、typecheck、31 files / 121 tests 与 production build 通过。
 - [ ] Task 14：后端定向/全量门禁与真实浏览器多角色 E2E 通过后，将 Plan 2 翻转为完成。

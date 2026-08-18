@@ -1,7 +1,5 @@
 """Shared authorization policy for complete user-department replacements."""
 
-import hashlib
-import json
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -28,6 +26,9 @@ from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.service.authorization_lock import authorization_lock_service
+from app.modules.system.service.authorization_snapshot import (
+    materialized_role_set_snapshot,
+)
 from app.modules.system.service.config_service import config_service
 from app.modules.system.service.grant_authority import (
     GrantAuthority,
@@ -116,16 +117,6 @@ def _role_custom_dept_ids(*users: User) -> set[int]:
     }
 
 
-def _canonical_hash(payload: Any) -> str:
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 class UserDepartmentAssignmentService:
     """Apply one department-assignment boundary to page and AI writers."""
 
@@ -211,37 +202,6 @@ class UserDepartmentAssignmentService:
         return tuple(sorted(normalized))
 
     @staticmethod
-    def _scope_snapshot(values: frozenset[int] | None) -> dict[str, Any]:
-        payload = {
-            "unbounded": values is None,
-            "ids": [] if values is None else sorted(values),
-        }
-        return {
-            "unbounded": payload["unbounded"],
-            "count": None if values is None else len(values),
-            "hash": _canonical_hash(payload),
-        }
-
-    @classmethod
-    def _role_set_snapshot(cls, value: RoleSetAuthority) -> dict[str, Any]:
-        scope = {
-            "departments": cls._scope_snapshot(value.accessible_dept_ids),
-            "users": cls._scope_snapshot(value.accessible_user_ids),
-        }
-        authorization = {
-            "permissionCodes": sorted(value.permission_codes),
-            "menuIds": sorted(value.menu_ids),
-            "agentIds": sorted(value.agent_ids),
-            "scope": scope,
-            "roleDefinitions": value.role_definition_signature,
-        }
-        return {
-            "authorizationHash": _canonical_hash(authorization),
-            "scopeHash": _canonical_hash(scope),
-            "roleDefinitionHash": _canonical_hash(value.role_definition_signature),
-        }
-
-    @staticmethod
     def _assignment_payload(
         assignments: tuple[tuple[int, bool], ...],
     ) -> list[dict[str, Any]]:
@@ -301,8 +261,8 @@ class UserDepartmentAssignmentService:
             "newAssignments": cls._assignment_payload(new_assignments),
             "departmentFacts": dept_facts,
             "requirePrimaryDepartment": require_primary,
-            "before": cls._role_set_snapshot(old_authority),
-            "after": cls._role_set_snapshot(new_authority),
+            "before": materialized_role_set_snapshot(old_authority),
+            "after": materialized_role_set_snapshot(new_authority),
         }
 
     async def _load_user(self, db: AsyncSession, user_id: int) -> User:

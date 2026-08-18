@@ -1,17 +1,21 @@
 """P1-D authorization-lineage and fail-closed projection tests."""
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from jose import JWTError, jwt
 
 from app.constants import STATUS_ENABLED
 from app.core.config import settings
+from app.core.exceptions import AuthorizationException
 from app.modules.ai.service.result_projection_service import (
     DATA_SCOPE_RESOLVER_VERSION,
     ProjectionLineage,
     result_projection_service,
+)
+from app.modules.system.service.user_role_assignment_service import (
+    user_role_assignment_service,
 )
 
 
@@ -127,6 +131,104 @@ async def test_projection_accepts_complete_empty_lineage_for_plain_assistant_tex
         )
 
     assert allowed is True
+
+
+async def test_role_assignment_projection_rechecks_conditional_role_permission() -> (
+    None
+):
+    user = _user("ai:chat:use", "system:user:list")
+    lineage = result_projection_service.freeze_lineage(
+        tenant_id=0,
+        agent_code="user_mgmt",
+        tool_codes=["user.lookup"],
+        subject_refs=[
+            {"type": "user_role_assignment_access", "id": "202"},
+        ],
+    )
+
+    with patch.object(
+        user_role_assignment_service,
+        "ensure_role_assignment_access",
+        AsyncMock(
+            side_effect=AuthorizationException(
+                "权限不足",
+                error_code="MISSING_PERMISSION",
+            )
+        ),
+    ) as authorize_assignments:
+        allowed = await result_projection_service._authorize_subjects(
+            AsyncMock(),
+            user,
+            lineage,
+        )
+
+    assert allowed is False
+    authorize_assignments.assert_awaited_once_with(
+        ANY,
+        actor_user_id=user.user_id,
+        target_user_id=202,
+    )
+
+
+async def test_delegable_role_projection_rechecks_every_count_contributor() -> None:
+    user = _user("ai:chat:use", "system:user:role-auth")
+    lineage = result_projection_service.freeze_lineage(
+        tenant_id=0,
+        agent_code="user_mgmt",
+        tool_codes=["user.role_lookup"],
+        subject_refs=[
+            {"type": "delegable_role", "id": "901"},
+            {"type": "delegable_role", "id": "902"},
+        ],
+    )
+
+    with patch.object(
+        user_role_assignment_service,
+        "roles_are_assignable",
+        AsyncMock(return_value=False),
+    ) as authorize_roles:
+        allowed = await result_projection_service._authorize_subjects(
+            AsyncMock(),
+            user,
+            lineage,
+        )
+
+    assert allowed is False
+    authorize_roles.assert_awaited_once_with(
+        ANY,
+        actor_user_id=user.user_id,
+        role_ids=[901, 902],
+    )
+
+
+async def test_complete_role_assignment_projection_rechecks_live_role_set() -> None:
+    user = _user("ai:chat:use", "system:user:role-auth")
+    lineage = result_projection_service.freeze_lineage(
+        tenant_id=0,
+        agent_code="user_mgmt",
+        tool_codes=["user.update_roles"],
+        subject_refs=[
+            {"type": "complete_user_role_assignment", "id": "202"},
+        ],
+    )
+
+    with patch.object(
+        user_role_assignment_service,
+        "get_complete_assignable_roles",
+        AsyncMock(return_value=([], False)),
+    ) as authorize_assignment:
+        allowed = await result_projection_service._authorize_subjects(
+            AsyncMock(),
+            user,
+            lineage,
+        )
+
+    assert allowed is False
+    authorize_assignment.assert_awaited_once_with(
+        ANY,
+        actor_user_id=user.user_id,
+        target_user_id=202,
+    )
 
 
 async def test_message_projection_reauthorizes_transitive_dependencies() -> None:

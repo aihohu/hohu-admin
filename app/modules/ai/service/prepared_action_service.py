@@ -298,6 +298,52 @@ class PreparedActionService:
                     for dept_id in sorted(dept_ids, key=int)
                 ),
             ]
+        if execute_tool_name == "user.update_roles":
+            user_id = frozen_args.get("user_id")
+            new_role_ids = frozen_args.get("role_ids")
+            business = snapshot.get("business")
+            old_role_ids = (
+                business.get("oldRoleIds") if isinstance(business, dict) else None
+            )
+            if (
+                not isinstance(user_id, int)
+                or isinstance(user_id, bool)
+                or user_id <= 0
+                or not isinstance(new_role_ids, list)
+                or not new_role_ids
+                or any(
+                    not isinstance(role_id, int)
+                    or isinstance(role_id, bool)
+                    or role_id <= 0
+                    for role_id in new_role_ids
+                )
+                or len(set(new_role_ids)) != len(new_role_ids)
+                or not isinstance(old_role_ids, list)
+                or not old_role_ids
+                or any(
+                    not isinstance(role_id, str)
+                    or not role_id.isdigit()
+                    or int(role_id) <= 0
+                    or str(int(role_id)) != role_id
+                    for role_id in old_role_ids
+                )
+                or len(set(old_role_ids)) != len(old_role_ids)
+            ):
+                raise _binding_invalid(
+                    "prepared role action lacks complete target bindings"
+                )
+            role_ids = {str(role_id) for role_id in new_role_ids} | set(old_role_ids)
+            return [
+                {"type": "user", "id": str(user_id)},
+                {
+                    "type": "complete_user_role_assignment",
+                    "id": str(user_id),
+                },
+                *(
+                    {"type": "delegable_role", "id": role_id}
+                    for role_id in sorted(role_ids, key=int)
+                ),
+            ]
         scalar_fields = {
             "user.reset_password": ("user_id", "user"),
             "user.update": ("user_id", "user"),
@@ -758,6 +804,48 @@ class PreparedActionService:
                 ) from exc
             if live_preview.snapshot != business_snapshot:
                 raise _snapshot_stale("用户部门调整授权或目标事实已变化，请重新确认")
+            return
+        if action.execute_tool_name == "user.update_roles":
+            frozen_args = action.frozen_args
+            user_id = frozen_args.get("user_id")
+            role_ids = frozen_args.get("role_ids")
+            precise_binding = (
+                isinstance(user_id, int)
+                and not isinstance(user_id, bool)
+                and user_id > 0
+                and isinstance(role_ids, list)
+                and bool(role_ids)
+                and all(
+                    isinstance(role_id, int)
+                    and not isinstance(role_id, bool)
+                    and role_id > 0
+                    for role_id in role_ids
+                )
+                and len(set(role_ids)) == len(role_ids)
+                and action.snapshot.get("argsHash") == action.args_hash
+                and action.args_hash == canonical_payload_hash(frozen_args)
+            )
+            business_snapshot = action.snapshot.get("business")
+            if not precise_binding or not isinstance(business_snapshot, dict):
+                raise _snapshot_stale("用户角色调整缺少完整审批快照，请重新发起操作")
+
+            from app.modules.system.service.user_role_assignment_service import (  # noqa: PLC0415
+                user_role_assignment_service,
+            )
+
+            try:
+                live_preview = await user_role_assignment_service.preview_roles(
+                    db,
+                    actor_user_id=action.user_id,
+                    target_user_id=user_id,
+                    role_ids=role_ids,
+                )
+            except BusinessException as exc:
+                raise _snapshot_stale(
+                    "用户角色调整授权或目标事实已变化，请重新确认"
+                ) from exc
+            if live_preview.snapshot != business_snapshot:
+                raise _snapshot_stale("用户角色调整授权或目标事实已变化，请重新确认")
             return
         if action.execute_tool_name == "user.batch_delete":
             frozen_args = action.frozen_args

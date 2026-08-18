@@ -374,7 +374,7 @@ class TestBuiltinScanSurface:
     def test_all_20_mandatory_builtins_are_loaded(self) -> None:
         names = {tool.meta.name for tool in load_all_tools()}
 
-        assert len(EXPECTED_BUILTIN_TOOL_NAMES) == 20
+        assert len(EXPECTED_BUILTIN_TOOL_NAMES) == 22
         assert EXPECTED_BUILTIN_TOOL_NAMES <= names
 
     def test_mandatory_module_import_failure_is_not_swallowed(

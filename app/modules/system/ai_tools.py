@@ -42,6 +42,7 @@ from app.modules.ai.agents.tools.stats_validator import (
     validate_group_by_in_whitelist,
 )
 from app.modules.ai.core.context import AiToolContext
+from app.modules.system.constants import USER_ROLE_AUTH_PERMISSION
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
@@ -909,6 +910,303 @@ async def _dry_run_user_update_dept(
         execution_args={
             "user_id": int(preview.user_id),
             "dept_assignments": canonical_assignments,
+        },
+        business_snapshot=preview.snapshot,
+    )
+
+
+# ============ user role lookup and assignment ============
+
+_ROLE_LOOKUP_MAX_MATCHES = 20
+
+AiUserRoleId = Annotated[
+    int,
+    Field(
+        strict=True,
+        gt=0,
+        description="Stable role ID returned by user.role_lookup.",
+    ),
+]
+AiUserRoleIds = Annotated[
+    list[AiUserRoleId],
+    Field(
+        min_length=1,
+        description="Complete replacement role ID set; incremental changes are forbidden.",
+    ),
+]
+
+
+def _parse_ai_role_ids(role_ids: list[int]) -> list[int]:
+    """Validate a strict, non-empty, duplicate-free complete role set."""
+    from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+
+    if (
+        not isinstance(role_ids, list)
+        or not role_ids
+        or any(
+            isinstance(role_id, bool) or not isinstance(role_id, int) or role_id <= 0
+            for role_id in role_ids
+        )
+    ):
+        raise BusinessRuleException(
+            "角色集合无效",
+            error_code="USER_ROLE_NOT_AVAILABLE",
+        )
+    if len(set(role_ids)) != len(role_ids):
+        raise BusinessRuleException(
+            "角色集合不能包含重复项",
+            error_code="USER_ROLE_SET_DUPLICATE",
+        )
+    return sorted(role_ids)
+
+
+def _format_ai_roles(
+    role_ids: tuple[int, ...],
+    snapshot: dict[str, Any],
+) -> str:
+    """Build a locale-neutral role value from approved immutable facts."""
+    raw_facts = snapshot.get("roleFacts")
+    facts = raw_facts if isinstance(raw_facts, list) else []
+    role_map = {
+        item["roleId"]: (item["roleName"], item["roleCode"])
+        for item in facts
+        if isinstance(item, dict)
+        and isinstance(item.get("roleId"), str)
+        and isinstance(item.get("roleName"), str)
+        and isinstance(item.get("roleCode"), str)
+    }
+    values: list[str] = []
+    for role_id in role_ids:
+        identifier = str(role_id)
+        role = role_map.get(identifier)
+        values.append(f"{role[0]} ({role[1]} / {identifier})" if role else identifier)
+    return "; ".join(values) or "—"
+
+
+@ai_tool(
+    AiToolMeta(
+        name="user.role_lookup",
+        agent="user_mgmt",
+        summary="Find currently delegable enabled roles by code or name.",
+        required_perms=(USER_ROLE_AUTH_PERMISSION,),
+        risk="low",
+        readonly=True,
+        idempotent=True,
+        result_view="data_list",
+        args_summary_fields=("query", "limit"),
+    )
+)
+async def user_role_lookup(
+    ctx: AiToolContext,
+    *,
+    query: str,
+    limit: int = _ROLE_LOOKUP_MAX_MATCHES,
+) -> ToolResult:
+    """Return only enabled role candidates within the delegation ceiling."""
+    from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+    from app.modules.system.service.user_role_assignment_service import (  # noqa: PLC0415
+        user_role_assignment_service,
+    )
+
+    normalized_query = query.strip()
+    if not normalized_query:
+        raise BusinessRuleException(
+            "角色查询条件不能为空",
+            error_code="AI_USER_ROLE_QUERY_REQUIRED",
+        )
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+        raise BusinessRuleException(
+            "角色查询数量必须在 1 到 20 之间",
+            error_code="AI_USER_ROLE_LOOKUP_LIMIT_INVALID",
+        )
+
+    page = await user_role_assignment_service.lookup_assignable_roles(
+        ctx.db,
+        actor_user_id=ctx.user.user_id,
+        query=normalized_query,
+        limit=limit,
+    )
+    matches = [
+        {
+            "roleId": str(role.role_id),
+            "roleCode": role.role_code,
+            "roleName": role.role_name,
+            "dataScope": role.data_scope,
+        }
+        for role in page.roles
+    ]
+    return ToolResult.success(
+        data={
+            "query": normalized_query,
+            "matchCount": page.match_count,
+            "matches": matches,
+        },
+        projection=_result_projection("delegable_role", page.matched_role_ids),
+        ui=UIResult(
+            view_type="data_list",
+            view_data={
+                "columns": [
+                    {"key": "roleId", "label": "ID"},
+                    {"key": "roleCode", "label": "page.system.role.roleCode"},
+                    {"key": "roleName", "label": "page.system.role.roleName"},
+                    {
+                        "key": "dataScope",
+                        "label": "page.system.role.dataScope.label",
+                    },
+                ],
+                "rows": matches,
+            },
+            audit={
+                "query": normalized_query,
+                "match_count": page.match_count,
+                "returned_count": len(matches),
+            },
+            label_key="ai.tool.user.role_lookup.result",
+            label_params={"count": page.match_count},
+        ),
+    )
+
+
+@ai_tool(
+    AiToolMeta(
+        name="user.update_roles",
+        agent="user_mgmt",
+        summary="Replace one user's complete role set after HITL approval.",
+        required_perms=("system:user:edit", USER_ROLE_AUTH_PERMISSION),
+        risk="high",
+        readonly=False,
+        idempotent=False,
+        hitl_always=True,
+        dry_run_supported=True,
+        result_view="detail_card",
+        args_summary_fields=("user_id", "role_ids"),
+    )
+)
+async def user_update_roles(
+    ctx: AiToolContext,
+    *,
+    user_id: int,
+    role_ids: AiUserRoleIds,
+) -> ToolResult:
+    """Apply an approved complete role set through the shared policy."""
+    from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+    from app.modules.system.service.user_role_assignment_service import (  # noqa: PLC0415
+        user_role_assignment_service,
+    )
+
+    if ctx.approved_business_snapshot is None:
+        raise BusinessRuleException(
+            "用户角色调整缺少审批快照",
+            error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
+        )
+    parsed = _parse_ai_role_ids(role_ids)
+    try:
+        await ensure_targets_in_scope(ctx, user_ids=[user_id])
+        result = await user_role_assignment_service.replace_roles(
+            ctx.db,
+            actor_user_id=ctx.user.user_id,
+            target_user_id=user_id,
+            role_ids=parsed,
+            expected_snapshot=ctx.approved_business_snapshot,
+        )
+    except BusinessException as exc:
+        raise BusinessRuleException(
+            "审批后授权或目标事实已变化，请重新确认",
+            error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
+        ) from exc
+
+    target = await ctx.db.scalar(select(User).where(User.user_id == user_id))
+    user_name = target.user_name if target is not None else str(user_id)
+    old_display = _format_ai_roles(
+        result.old_role_ids,
+        ctx.approved_business_snapshot,
+    )
+    new_display = _format_ai_roles(
+        result.new_role_ids,
+        ctx.approved_business_snapshot,
+    )
+    subject_role_ids = sorted({*result.old_role_ids, *result.new_role_ids})
+    return ToolResult.success(
+        data={
+            "updated": 1,
+            "userId": str(user_id),
+            "userName": user_name,
+            "oldRoleIds": [str(role_id) for role_id in result.old_role_ids],
+            "newRoleIds": [str(role_id) for role_id in result.new_role_ids],
+        },
+        projection=ResultProjection(
+            subject_refs=(
+                {"type": "user", "id": str(user_id)},
+                {"type": "complete_user_role_assignment", "id": str(user_id)},
+                *(
+                    {"type": "delegable_role", "id": str(role_id)}
+                    for role_id in subject_role_ids
+                ),
+            )
+        ),
+        ui=UIResult(
+            view_type="detail_card",
+            view_data={
+                "title": user_name,
+                "fields": [
+                    {"label": "page.ai.chat.previousRoles", "value": old_display},
+                    {"label": "page.ai.chat.newRoles", "value": new_display},
+                ],
+            },
+            audit={
+                "affected_user_ids": [str(user_id)],
+                "old_role_ids": [str(role_id) for role_id in result.old_role_ids],
+                "new_role_ids": [str(role_id) for role_id in result.new_role_ids],
+            },
+            label_key="ai.tool.user.update_roles.result",
+            label_params={"userName": user_name},
+        ),
+    )
+
+
+async def _dry_run_user_update_roles(
+    ctx: AiToolContext,
+    *,
+    user_id: int,
+    role_ids: AiUserRoleIds,
+) -> Any:
+    """Freeze the normalized role replacement and authorization snapshot."""
+    from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
+    from app.modules.system.service.user_role_assignment_service import (  # noqa: PLC0415
+        user_role_assignment_service,
+    )
+
+    parsed = _parse_ai_role_ids(role_ids)
+    preview = await user_role_assignment_service.preview_roles(
+        ctx.db,
+        actor_user_id=ctx.user.user_id,
+        target_user_id=user_id,
+        role_ids=parsed,
+    )
+    old_display = "; ".join(preview.old_display) or "—"
+    new_display = "; ".join(preview.new_display) or "—"
+    return DryRunResult(
+        ok=True,
+        count=1,
+        reason=f"将调整用户 {preview.user_name} 的完整角色集合",
+        summary_key="page.ai.chat.confirmUpdateRolesSummary",
+        summary_params={"userName": preview.user_name},
+        examples=[f"原角色：{old_display}", f"新角色：{new_display}"],
+        confirmation_fields=[
+            {
+                "label": "user_id",
+                "value": user_id,
+                "display_value": f"{preview.user_name}（{user_id}）",
+            },
+            {
+                "label": "role_ids",
+                "value": role_ids,
+                "display_value": f"{old_display} → {new_display}",
+            },
+        ],
+        execution_args={
+            "user_id": int(preview.user_id),
+            "role_ids": list(preview.new_role_ids),
         },
         business_snapshot=preview.snapshot,
     )
@@ -1783,6 +2081,44 @@ async def user_lookup(
             subject_refs.extend(
                 {"type": "dept", "id": assignment["deptId"]}
                 for assignment in assignments
+            )
+    if USER_ROLE_AUTH_PERMISSION in ctx.perms:
+        from app.modules.system.service.user_role_assignment_service import (  # noqa: PLC0415
+            user_role_assignment_service,
+        )
+
+        (
+            roles,
+            roles_complete,
+        ) = await user_role_assignment_service.get_complete_assignable_roles(
+            ctx.db,
+            actor_user_id=ctx.user.user_id,
+            target_user_id=int(u.user_id),
+        )
+        result_data["roleAssignmentsComplete"] = roles_complete
+        result_data["roleAssignments"] = [
+            {
+                "roleId": str(role.role_id),
+                "roleCode": role.role_code,
+                "roleName": role.role_name,
+                "dataScope": role.data_scope,
+                "status": role.status,
+            }
+            for role in roles
+        ]
+        if roles_complete:
+            subject_refs.append(
+                {
+                    "type": "complete_user_role_assignment",
+                    "id": str(u.user_id),
+                }
+            )
+            subject_refs.extend(
+                {"type": "delegable_role", "id": str(role.role_id)} for role in roles
+            )
+        else:
+            subject_refs.append(
+                {"type": "user_role_assignment_access", "id": str(u.user_id)}
             )
     return ToolResult.success(
         data=result_data,
