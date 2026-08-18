@@ -84,7 +84,7 @@ class DryRunSummary:
     summary_key: str | None = None
     summary_params: dict[str, str | int | float] | None = None
     affected_examples: list[str] | None = None
-    confirmation_fields: list[dict[str, str | int | float]] | None = None
+    confirmation_fields: list[dict[str, Any]] | None = None
     # Internal-only authorization data. event_to_sse_data deliberately omits these
     # fields so exact execution bindings and snapshots never become client input.
     execution_args: dict[str, Any] | None = None

@@ -157,6 +157,106 @@ async def test_replace_departments_applies_one_complete_authorized_set(
     ]
 
 
+async def test_preview_departments_freezes_complete_authorization_snapshot(
+    db_session: AsyncSession,
+) -> None:
+    actor_role = _role(
+        f"R_DEPT_PREVIEW_ACTOR_{next_id()}",
+        data_scope=DATA_SCOPE_ALL,
+        menus=[_menu(USER_EDIT_PERMISSION), _menu(DEPT_LIST_PERMISSION)],
+    )
+    target_role = _role(f"R_DEPT_PREVIEW_TARGET_{next_id()}")
+    old_dept = _dept("phase2-preview-old")
+    new_dept = _dept("phase2-preview-new")
+    actor = _user(f"phase2-preview-actor-{next_id()}", [actor_role])
+    target = _user(f"phase2-preview-target-{next_id()}", [target_role])
+    db_session.add_all([actor_role, target_role, old_dept, new_dept, actor, target])
+    await db_session.flush()
+    await _bind_dept(db_session, target, old_dept, primary=True)
+
+    with patch(
+        "app.modules.system.service.user_department_assignment_service."
+        "config_service.get_bool_for_update",
+        AsyncMock(return_value=False),
+    ):
+        preview = await user_department_assignment_service.preview_departments(
+            db_session,
+            actor_user_id=actor.user_id,
+            target_user_id=target.user_id,
+            dept_assignments=[(new_dept.dept_id, False)],
+        )
+
+    assert preview.old_assignments == ((old_dept.dept_id, True),)
+    assert preview.new_assignments == ((new_dept.dept_id, False),)
+    assert preview.old_display == (f"★ {old_dept.dept_name} ({old_dept.dept_id})",)
+    assert preview.new_display == (f"{new_dept.dept_name} ({new_dept.dept_id})",)
+    assert preview.snapshot["target"] == {
+        "userId": str(target.user_id),
+        "userName": target.user_name,
+        "status": STATUS_ENABLED,
+        "roleIds": [str(target_role.role_id)],
+    }
+    assert preview.snapshot["oldAssignments"] == [
+        {"deptId": str(old_dept.dept_id), "isPrimary": True}
+    ]
+    assert preview.snapshot["newAssignments"] == [
+        {"deptId": str(new_dept.dept_id), "isPrimary": False}
+    ]
+    assert preview.snapshot["actor"]["authorityVersion"]
+    assert preview.snapshot["before"]["authorizationHash"]
+    assert preview.snapshot["after"]["scopeHash"]
+    assert {fact["deptId"] for fact in preview.snapshot["departmentFacts"]} == {
+        str(old_dept.dept_id),
+        str(new_dept.dept_id),
+    }
+
+
+async def test_replace_departments_rejects_approved_target_status_drift(
+    db_session: AsyncSession,
+) -> None:
+    actor_role = _role(
+        f"R_DEPT_APPROVAL_ACTOR_{next_id()}",
+        data_scope=DATA_SCOPE_ALL,
+        menus=[_menu(USER_EDIT_PERMISSION), _menu(DEPT_LIST_PERMISSION)],
+    )
+    target_role = _role(f"R_DEPT_APPROVAL_TARGET_{next_id()}")
+    old_dept = _dept("phase2-approval-old")
+    new_dept = _dept("phase2-approval-new")
+    actor = _user(f"phase2-approval-actor-{next_id()}", [actor_role])
+    target = _user(f"phase2-approval-target-{next_id()}", [target_role])
+    db_session.add_all([actor_role, target_role, old_dept, new_dept, actor, target])
+    await db_session.flush()
+    await _bind_dept(db_session, target, old_dept, primary=True)
+
+    with patch(
+        "app.modules.system.service.user_department_assignment_service."
+        "config_service.get_bool_for_update",
+        AsyncMock(return_value=False),
+    ):
+        preview = await user_department_assignment_service.preview_departments(
+            db_session,
+            actor_user_id=actor.user_id,
+            target_user_id=target.user_id,
+            dept_assignments=[(new_dept.dept_id, False)],
+        )
+        target.status = STATUS_DISABLED
+        await db_session.flush()
+
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await user_department_assignment_service.replace_departments(
+                db_session,
+                actor_user_id=actor.user_id,
+                target_user_id=target.user_id,
+                dept_assignments=[(new_dept.dept_id, False)],
+                expected_snapshot=preview.snapshot,
+            )
+
+    assert exc_info.value.error_code == "AI_PREPARED_ACTION_SNAPSHOT_STALE"
+    assert await _assignments(db_session, target.user_id) == [
+        (old_dept.dept_id, IS_PRIMARY_YES)
+    ]
+
+
 async def test_assign_created_departments_uses_add_and_department_permissions(
     db_session: AsyncSession,
 ) -> None:

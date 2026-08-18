@@ -105,6 +105,7 @@ class TestBuiltinToolEffectMetadata:
             "user.create": (False, False),
             "user.reset_password": (False, False),
             "user.update": (False, False),
+            "user.update_dept": (False, False),
             "user.import_preview": (False, False),
             "user.export": (False, False),
             "job.update_cron": (False, False),

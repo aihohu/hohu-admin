@@ -96,6 +96,14 @@ class _ConfirmationResolution:
     decision: ConfirmAction
 
 
+@dataclass(frozen=True)
+class _DryRunOutcome:
+    count: int | None = None
+    summary: DryRunSummary | None = None
+    failure: ToolResult | None = None
+    authorization_denied: bool = False
+
+
 USER_FACING_MSG: dict[str, str] = {
     "AI_TOOL_NOT_FOUND": "该工具不在当前助手范围内，请换种方式问。",
     "AI_TOOL_AGENT_MISMATCH": "该工具不属于当前助手，请切换到对应助手后重试。",
@@ -406,7 +414,9 @@ async def _execute_tool(
     #    repeated_failure，否则 AI_REPEATED_FAILURE 路径漏审计行）
     # 起始日志失败时终止工具调用；业务尚未执行，不能留下审计缺口。
     args_hash = compute_args_hash(business_args)
-    dry_run_count, dry_run_summary = await _run_dry_run(registered, business_args, deps)
+    dry_run_outcome = await _run_dry_run(registered, business_args, deps)
+    dry_run_count = dry_run_outcome.count
+    dry_run_summary = dry_run_outcome.summary
     # 风险偏好来自当前 Agent 配置。
     agent_risk_appetite = (
         getattr(deps.agent, "risk_appetite", "balanced")
@@ -463,6 +473,43 @@ async def _execute_tool(
             chip_target=meta.chip_target,
         ),
     )
+
+    if dry_run_outcome.failure is not None:
+        failure = dry_run_outcome.failure
+        if dry_run_outcome.authorization_denied:
+            if is_write_tool(meta):
+                try:
+                    await decr_quota(
+                        redis_client,
+                        user_id,
+                        agent_code=agent_code_for_rollback,
+                        l1_member=l1_member,
+                        l1_global_member=l1_global_member,
+                        l4_conv_key=l4_conv_key_for_rollback,
+                    )
+                except RedisError:
+                    logger.exception(
+                        "quota rollback failed after dry-run authorization denial",
+                        extra={"user_id": user_id, "tool": meta.name},
+                    )
+            await _record_perm_denied_for_ip(deps, meta.name)
+        else:
+            await record_failure(redis_client, user_id, meta.name, args_hash)
+        await _finish_log_final(log_id, failure, started_at)
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        await _emit(
+            deps,
+            ToolCallResultEvent(
+                tool=meta.name,
+                tool_call_id=tool_call_id,
+                ok=False,
+                duration_ms=duration_ms,
+                error_code=failure.error_code,
+                error_msg=failure.error_msg,
+            ),
+        )
+        _rec("failed")
+        return failure
 
     # 5. 相同参数连续失败时短路，避免重复消耗资源。
     try:
@@ -708,11 +755,18 @@ async def execute_approved_prepared_action(
 ) -> ToolResult:
     """Execute any CAS-claimed durable action without a second log/HITL cycle."""
     registered = validate_prepared_execution(action, deps)
+    business_snapshot = (
+        action.snapshot.get("business")
+        if isinstance(action.snapshot, dict)
+        and isinstance(action.snapshot.get("business"), dict)
+        else None
+    )
     return await _invoke_tool_fn(
         registered,
         dict(action.frozen_args),
         deps,
         action.args_hash,
+        approved_business_snapshot=business_snapshot,
     )
 
 
@@ -782,14 +836,14 @@ async def _run_dry_run(
     registered: RegisteredTool,
     args: dict[str, Any],
     deps: ChatDeps,
-) -> tuple[int | None, DryRunSummary | None]:
+) -> _DryRunOutcome:
     """调用 dry_run_fn 获取风险判断和确认展示所需摘要。
 
     Returns:
-        (count, summary) — count None 表示未跑或失败；summary 含 reason 给 HITL 抽屉
+        A typed outcome containing either the estimate or a terminal failure.
     """
     if not registered.meta.dry_run_supported or registered.dry_run_fn is None:
-        return None, None
+        return _DryRunOutcome()
 
     try:
         async with AsyncSessionLocal() as dry_db:
@@ -798,27 +852,41 @@ async def _run_dry_run(
                 dr: DryRunResult = await with_l3_timeout(
                     registered.dry_run_fn(dry_ctx, **args)
                 )
-        return dr.count, DryRunSummary(
-            summary=dr.reason or f"将影响 {dr.count} 行",
-            affected_count=dr.count,
-            summary_key=dr.summary_key,
-            summary_params=dr.summary_params,
-            affected_examples=dr.examples,
-            confirmation_fields=dr.confirmation_fields,
-            execution_args=dr.execution_args,
-            business_snapshot=dr.business_snapshot,
+        return _DryRunOutcome(
+            count=dr.count,
+            summary=DryRunSummary(
+                summary=dr.reason or f"将影响 {dr.count} 行",
+                affected_count=dr.count,
+                summary_key=dr.summary_key,
+                summary_params=dr.summary_params,
+                affected_examples=dr.examples,
+                confirmation_fields=dr.confirmation_fields,
+                execution_args=dr.execution_args,
+                business_snapshot=dr.business_snapshot,
+            ),
         )
     except BusinessException as e:
         logger.info(
             "dry_run business exception",
             extra={"tool": registered.meta.name, "error_code": e.error_code},
         )
-        return None, DryRunSummary(summary=f"预估失败：{e.message}", affected_count=0)
+        return _DryRunOutcome(
+            failure=ToolResult.failure(
+                error_code=e.error_code or "AI_INTERNAL_ERROR",
+                error_msg=e.message,
+            ),
+            authorization_denied=isinstance(e, AuthorizationException),
+        )
     except Exception:
         logger.exception(
             "dry_run unexpected error", extra={"tool": registered.meta.name}
         )
-        return None, DryRunSummary(summary="预估失败（内部错误）", affected_count=0)
+        return _DryRunOutcome(
+            failure=ToolResult.failure(
+                error_code="AI_INTERNAL_ERROR",
+                error_msg=USER_FACING_MSG["AI_INTERNAL_ERROR"],
+            )
+        )
 
 
 # ============ ai_operation_log 写入 ============
@@ -1451,6 +1519,7 @@ async def _invoke_tool_fn(
     l1_member: str | None = None,
     l1_global_member: str | None = None,
     l4_conv_key_for_rollback: str | None = None,
+    approved_business_snapshot: dict[str, Any] | None = None,
 ) -> ToolResult:
     """在独立数据库会话内调用业务函数。
 
@@ -1464,7 +1533,12 @@ async def _invoke_tool_fn(
     try:
         async with AsyncSessionLocal() as tool_db:
             async with tool_db.begin():
-                tool_ctx = build_tool_context(deps, tool_db, meta)
+                tool_ctx = build_tool_context(
+                    deps,
+                    tool_db,
+                    meta,
+                    approved_business_snapshot=approved_business_snapshot,
+                )
                 # L3 单 tool 超时包装
                 raw = await with_l3_timeout(tool_fn(tool_ctx, **args))
                 # 同时兼容完整 ToolResult 和第三方工具返回的裸值。

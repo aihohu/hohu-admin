@@ -79,6 +79,7 @@ EXPECTED_BUILTIN_TOOL_NAMES = frozenset(
         "user.reset_password",
         "user.stats",
         "user.update",
+        "user.update_dept",
     }
 )
 

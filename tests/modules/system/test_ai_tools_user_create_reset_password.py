@@ -170,7 +170,7 @@ class TestUserToolMetadata:
             "system:user:add",
             "system:dept:list",
         )
-        assert user_dept_lookup.__ai_tool_meta__.required_perms == ("system:user:add",)
+        assert user_dept_lookup.__ai_tool_meta__.required_perms == ("system:dept:list",)
         assert user_reset_password.__ai_tool_meta__.required_perms == (
             "system:user:reset-password",
         )
@@ -204,6 +204,7 @@ class TestUserToolMetadata:
             for tool in compute_available_tools({"system:user:add"}, "user_mgmt")
         }
         assert "user.create" not in add_only
+        assert "user.dept_lookup" not in add_only
 
 
 class TestUserDeptLookup:
@@ -227,21 +228,20 @@ class TestUserDeptLookup:
         ctx = _make_ctx(
             db_session,
             tool_name="user.dept_lookup",
-            permission="system:user:add",
+            permission="system:dept:list",
             accessible_dept_ids={visible.dept_id},
         )
 
-        result = await user_dept_lookup(ctx, dept_name=" 解析测试总部 ")
+        result = await user_dept_lookup(ctx, query=" 解析测试总部 ")
 
         assert result.data == {
             "query": "解析测试总部",
             "matchCount": 1,
             "matches": [
                 {
-                    "id": str(visible.dept_id),
-                    "name": visible.dept_name,
-                    "parentId": str(parent.dept_id),
-                    "parentName": parent.dept_name,
+                    "deptId": str(visible.dept_id),
+                    "deptName": visible.dept_name,
+                    "path": visible.dept_name,
                 }
             ],
         }
@@ -262,16 +262,21 @@ class TestUserDeptLookup:
         ctx = _make_ctx(
             db_session,
             tool_name="user.dept_lookup",
-            permission="system:user:add",
-            accessible_dept_ids={dept_a.dept_id, dept_b.dept_id},
+            permission="system:dept:list",
+            accessible_dept_ids={
+                parent_a.dept_id,
+                parent_b.dept_id,
+                dept_a.dept_id,
+                dept_b.dept_id,
+            },
         )
 
-        result = await user_dept_lookup(ctx, dept_name="解析测试销售部")
+        result = await user_dept_lookup(ctx, query="解析测试销售部")
 
         assert result.data["matchCount"] == 2
-        assert {row["parentName"] for row in result.data["matches"]} == {
-            parent_a.dept_name,
-            parent_b.dept_name,
+        assert {row["path"] for row in result.data["matches"]} == {
+            f"{parent_a.dept_name} / {dept_a.dept_name}",
+            f"{parent_b.dept_name} / {dept_b.dept_name}",
         }
 
     async def test_unknown_name_returns_zero_matches(
@@ -280,11 +285,11 @@ class TestUserDeptLookup:
         ctx = _make_ctx(
             db_session,
             tool_name="user.dept_lookup",
-            permission="system:user:add",
+            permission="system:dept:list",
             accessible_dept_ids=set(),
         )
 
-        result = await user_dept_lookup(ctx, dept_name="不存在的解析测试部门")
+        result = await user_dept_lookup(ctx, query="不存在的解析测试部门")
 
         assert result.data == {
             "query": "不存在的解析测试部门",

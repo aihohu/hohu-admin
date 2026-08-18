@@ -20,6 +20,7 @@ from sqlalchemy import select, text
 
 from app.core import redis as redis_module
 from app.core.config import settings
+from app.core.exceptions import AuthorizationException
 from app.modules.ai.agents.gateway.executor import execute_tool
 from app.modules.ai.agents.gateway.result import (
     PreparedActionProposal,
@@ -140,6 +141,7 @@ _TEST_TOOL_READONLY = "testint.readonly_list"  # 写 query_cache
 _TEST_TOOL_PREPARE = "testint.import_preview"  # prepared preview
 _TEST_TOOL_PREPARED_EXECUTE = "testint.import_execute"  # bound HITL execute
 _TEST_TOOL_FREEZE_DIRECT = "testint.freeze_direct"  # direct HITL exact binding
+_TEST_TOOL_DRY_RUN_DENIED = "testint.dry_run_denied"
 
 _TOOLS_REGISTERED = False
 
@@ -279,6 +281,29 @@ def _register_test_tools() -> None:
         )
 
     ToolRegistry.get().set_dry_run_fn(_TEST_TOOL_FREEZE_DIRECT, _dry_run_freeze_direct)
+
+    @ai_tool(
+        AiToolMeta(
+            name=_TEST_TOOL_DRY_RUN_DENIED,
+            agent="shared",
+            summary="reject a direct tool during dry run",
+            required_perms=(),
+            risk="high",
+            projection_kind="none",
+            hitl_always=True,
+            dry_run_supported=True,
+        )
+    )
+    async def _dry_run_denied_tool(ctx, **kwargs: Any) -> ToolResult:
+        return ToolResult.success(data={"updated": 1})
+
+    async def _dry_run_denied(ctx, **kwargs: Any) -> DryRunResult:
+        raise AuthorizationException(
+            "target is outside the current scope",
+            error_code="AI_DATA_SCOPE_VIOLATION",
+        )
+
+    ToolRegistry.get().set_dry_run_fn(_TEST_TOOL_DRY_RUN_DENIED, _dry_run_denied)
 
 
 def _build_deps(
@@ -937,6 +962,47 @@ class TestHitlFlow:
         idx_confirm = types.index("ConfirmationRequiredEvent")
         idx_result = types.index("ToolCallResultEvent")
         assert idx_confirm < idx_result
+
+    async def test_typed_dry_run_failure_stops_before_confirmation(
+        self, monkeypatch
+    ) -> None:
+        _register_test_tools()
+        hang = AsyncMock(return_value=ConfirmAction.REJECTED)
+        monkeypatch.setattr(hitl_manager, "hang", hang)
+        events: list[Any] = []
+
+        async def collect(event: Any) -> None:
+            events.append(event)
+
+        deps = _build_deps(signal_event=collect)
+        result = await execute_tool(_TEST_TOOL_DRY_RUN_DENIED, {}, deps)
+
+        assert result.ok is False
+        assert result.error_code == "AI_DATA_SCOPE_VIOLATION"
+        hang.assert_not_awaited()
+        assert not any(isinstance(event, ConfirmationRequiredEvent) for event in events)
+        assert [type(event) for event in events] == [
+            ToolCallStartedEvent,
+            ToolCallResultEvent,
+        ]
+
+        from app.db.session import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as db:
+            row = (
+                await db.execute(
+                    text(
+                        "SELECT status, error_code FROM ai_operation_log "
+                        "WHERE trace_id = 'tr_test_001' "
+                        "AND tool_name = :tool_name "
+                        "ORDER BY log_id DESC LIMIT 1"
+                    ),
+                    {"tool_name": _TEST_TOOL_DRY_RUN_DENIED},
+                )
+            ).one()
+
+        assert row.status == "failed"
+        assert row.error_code == "AI_DATA_SCOPE_VIOLATION"
 
     async def test_direct_hitl_persists_dry_run_exact_binding(
         self, monkeypatch

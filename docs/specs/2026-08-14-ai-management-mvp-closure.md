@@ -807,6 +807,14 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 
 52. **完整集合页面在不完整读取和锁后授权漂移时 fail closed** — 部门成员 PUT 比较锁前/后的操作者 version、角色定义、menu/custom dept、active Role-Agent、物化用户/部门集合及部门结构快照，任一变化返回 `AUTHORIZATION_SNAPSHOT_STALE`；Web 成员候选任一分页失败都保持不可提交，用户编辑多个独立 writer 中后续失败时必须明确提示部分成功、关闭旧表单并刷新服务端事实。**反例**: 后页失败后提交空集会删除全部非主部门成员；角色写已 commit 后部门失败却继续展示旧表单会造成虚假原子保存。**回归**: `tests/modules/system/test_department_membership_service.py::test_member_replacement_rejects_role_definition_drift_after_preload`、`dept-users-modal.spec.ts`、`user-operate-drawer.spec.ts`。
 
+53. **Task 12 lookup 不得为路径展示扩大读取面** — `user.dept_lookup` 使用 `system:dept:list` 与当前部门 scope，名称/路径候选仅由可见且启用节点拼接，scope 外祖先不查询、不返回。**反例**: 返回完整祖先链会让可见子部门泄露不可见总部名称；沿用 `system:user:add` 会阻断 edit-only 委派者。**回归**: `tests/modules/ai/test_user_assignment_tools.py`。
+
+54. **Task 12 批准前复验服务端部门业务快照** — direct HITL 冻结规范化完整部门集合及操作者 authority version、目标身份/状态/角色、主部门配置、角色定义和前后物化授权 hash；snapshot 仅存 PostgreSQL，批准时重建，任一漂移统一 `AI_PREPARED_ACTION_SNAPSHOT_STALE`，执行时共享 Service 再按 role → dept → user 锁协议复验。**反例**: 仅依赖冻结 args 或 chat scope hash，无法发现旧部门、目标角色、主部门配置或间接授权影响变化。**回归**: `tests/modules/ai/test_user_assignment_tools.py`、`tests/modules/ai/test_prepared_action_service.py`。
+
+55. **Task 12 不新增第二套部门 writer** — `user.update_dept` 只编排 `UserDepartmentAssignmentService.replace_departments()`，继承页面完整旧/新集合、scope、dominance、主部门与保护账号规则；Tool/Gateway/Service 均不 commit。本工作包不新增数据库 schema/migration、权限或菜单 seed、新权限码；只同步内置 `user_mgmt` prompt 的已知默认值升级集合。**反例**: Tool 直接写 `user_depts` 会绕过已完成的 P2-B2/B3 Policy。**回归**: `tests/modules/ai/test_user_assignment_tools.py` 与现有部门 Service 回归。
+
+56. **Task 12 模型输入、当前集合和 dry-run 拒绝必须形成同一 fail-closed 链路** — `user.update_dept.dept_assignments` 的模型 schema 固定为禁止额外字段的 `{dept_id: positive integer, is_primary: boolean}[]`；`user.lookup` 只有在调用者同时拥有 `system:dept:list` 且全部现有关联都位于当前部门 scope 时才返回 `departmentAssignmentsComplete=true` 和完整集合，否则返回空集合与 `false`，无部门读取权限时保持旧响应形态。`user.dept_lookup` 先按末级名称筛选可见启用候选，再仅向上构造候选路径并限制结果物化。dry-run 抛出的领域/授权异常是 terminal Tool failure，Gateway 保留原始 `errorCode`、写入失败审计并停止在 confirmation 之前。**反例**: 任意 dict schema 允许模型提交 camelCase/多余字段；只返回可见部门子集会让完整替换静默删除隐藏关联；把 scope 拒绝改写成“预估失败”并继续创建 pending 会批准一个没有业务快照的动作；先物化全部部门再在 Python 截断会让 selector 成为线性扫描。**回归**: `tests/modules/ai/test_user_assignment_tools.py`、`tests/modules/ai/test_executor_integration.py`。
+
 ---
 
 ## 10. 实施计划
@@ -849,7 +857,8 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 - [x] P2-B2 验证证据：部门契约、页面事务和共享 Policy 定向回归 35 项，角色兼容合计 48 项，system 模块 539 项全部通过；`ruff check .`、`ruff format --check .`、19 tools / 12 checks 通过；后端全量 2053 项测试通过，总覆盖率 73.81%，仅保留 2 条既有 SQLAlchemy transaction warning。
 - [x] ✅ P2-B3 已完成（2026-08-18；审查修复 2026-08-18）：页面 create、AI `user.create`、import create/overwrite 和部门成员页全部接入共享角色/部门 Policy；移除 `DeptService` 的旧无授权关联 writer，运行时 `user_depts` 写入统一收口到 `UserDepartmentAssignmentService`。导入拒绝重复现有目标并为 `DEPT_AND_SUB` 展开完整后代锁；部门成员 GET 使用 user-scoped 最小分页并对隐藏旧成员整体阻断，PUT 对完整旧/新成员逐用户执行主部门、scope、前后授权 dominance 和锁前/锁后完整授权快照比较，以批量物化避免 N+1。Web 新建按 role-auth/dept-list 条件提交显式集合，编辑使用独立 profile/roles/departments API 且不重写未变化关联，并在部分 writer 已提交后显式刷新；部门成员弹窗只有全部分页成功才允许提交完整候选。本工作包无数据库迁移或 seed 变更。
 - [x] P2-B3 验证证据（含 CI 隔离修复）：后端 `ruff check .`、`ruff format --check .`、19 tools / 12 checks 与全量 2067 项测试通过，总覆盖率 74.18%，仅保留 30 条 import fixture SQLAlchemy warning 和 2 条既有 transaction warning；Supervisor safety-order 测试显式隔离 Agent/Model 可用性并按本次 trace 断言 routing log，不再依赖 fresh seed 未承诺开放的业务 Agent 或历史日志。Web lint 0 error / 30 条既有 warning、typecheck、31 files / 119 tests 与 production build 全部通过。
-- [ ] 对齐 data-scoped `user.dept_lookup`，实现并验收 `user.update_dept` 的旧/新完整集合、目标用户前后物化授权和快照规则。
+- [x] ✅ Task 12 已完成（2026-08-18；审查修复 2026-08-18）：`user.dept_lookup` 使用 `system:dept:list` 与当前部门 scope，支持名称/可见路径及 `1..20` limit，并先筛末级名称候选、再仅为候选构造可见路径；`user.update_dept` 使用严格完整集合 schema、双权限与强制 HITL/dry-run，冻结规范化参数及操作者 authority、目标状态/角色、旧新部门、主部门配置、角色定义和前后物化授权 hash。`user.lookup` 只在部门全集可证明完整时返回可组合集合；dry-run 领域拒绝保留原始错误码并在 confirmation 前终止。批准前重建业务快照，执行时共享部门 Service 在全局锁内再次复验，任一漂移统一 fail closed；Web 确认、错误和结果展示已完成 i18n。本工作包无数据库 migration、权限/menu seed 或新权限码，仅同步内置 Agent prompt 默认值。
+- [x] Task 12 验证证据：后端 `ruff check .`、`ruff format --check .`、20 tools / 12 static checks、Task 12/Gateway/共享 Policy 扩展回归 226 项与全量 2091 项测试通过，总覆盖率 74.39%，仅保留 30 条 import fixture 与 2 条既有 transaction warning；Web oxlint、format、typecheck、31 files / 120 tests 与 production build 通过，ESLint 0 error / 30 条既有 warning。
 - [ ] 同步交付 `user.role_lookup`，实现并验收 `user.update_roles` 的最终有效授权 dominance。
 - [x] 重构 `/system/dept/{id}/users`：候选最小化且 user-scoped，完整旧/新成员及逐用户部门/授权 Policy、主部门拒绝、全局锁和整批原子失败全部落地。
 - [ ] `/ai/role-agent` 普通管理员写入口接入完整 Role Delegation Policy；Phase 1 + Phase 2 安全门禁全部通过后只允许进入集成分支，不允许生产部署。

@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import BusinessRuleException
+from app.core.exceptions import BusinessException, BusinessRuleException
 from app.modules.ai.agents.gateway.failures import compute_args_hash
 from app.modules.ai.agents.hitl.constants import PreparedActionStatus
 from app.modules.ai.agents.hitl.manager import PendingPayload
@@ -154,6 +154,7 @@ class PreparedActionService:
         subject_refs = self._build_subject_refs(
             execute_tool_name=execute_tool_name,
             frozen_args=frozen_args,
+            snapshot=snapshot,
             subject_ref=subject_ref,
             projection_kind=projection_kind,
         )
@@ -231,6 +232,7 @@ class PreparedActionService:
         *,
         execute_tool_name: str,
         frozen_args: dict[str, Any],
+        snapshot: dict[str, Any],
         subject_ref: dict[str, Any] | None,
         projection_kind: str | None,
     ) -> list[dict[str, Any]]:
@@ -246,6 +248,56 @@ class PreparedActionService:
                 if primary_dept_id is not None
                 else []
             )
+        if execute_tool_name == "user.update_dept":
+            user_id = frozen_args.get("user_id")
+            assignments = frozen_args.get("dept_assignments")
+            business = snapshot.get("business")
+            old_assignments = (
+                business.get("oldAssignments") if isinstance(business, dict) else None
+            )
+            if (
+                not isinstance(user_id, int)
+                or isinstance(user_id, bool)
+                or not isinstance(assignments, list)
+                or not isinstance(old_assignments, list)
+            ):
+                raise _binding_invalid(
+                    "prepared department action lacks complete target bindings"
+                )
+            new_dept_ids: list[str] = []
+            for item in assignments:
+                if (
+                    not isinstance(item, dict)
+                    or set(item) != {"dept_id", "is_primary"}
+                    or not isinstance(item["dept_id"], int)
+                    or isinstance(item["dept_id"], bool)
+                    or not isinstance(item["is_primary"], bool)
+                ):
+                    raise _binding_invalid(
+                        "prepared department action contains invalid new bindings"
+                    )
+                new_dept_ids.append(str(item["dept_id"]))
+            old_dept_ids: list[str] = []
+            for item in old_assignments:
+                if (
+                    not isinstance(item, dict)
+                    or set(item) != {"deptId", "isPrimary"}
+                    or not isinstance(item["deptId"], str)
+                    or not item["deptId"].isdigit()
+                    or not isinstance(item["isPrimary"], bool)
+                ):
+                    raise _binding_invalid(
+                        "prepared department action contains invalid old bindings"
+                    )
+                old_dept_ids.append(item["deptId"])
+            dept_ids = set(new_dept_ids) | set(old_dept_ids)
+            return [
+                {"type": "user", "id": str(user_id)},
+                *(
+                    {"type": "dept", "id": dept_id}
+                    for dept_id in sorted(dept_ids, key=int)
+                ),
+            ]
         scalar_fields = {
             "user.reset_password": ("user_id", "user"),
             "user.update": ("user_id", "user"),
@@ -661,6 +713,52 @@ class PreparedActionService:
             action.snapshot
         ):
             raise _snapshot_stale("prepared action 快照已损坏")
+        if action.execute_tool_name == "user.update_dept":
+            frozen_args = action.frozen_args
+            user_id = frozen_args.get("user_id")
+            assignments = frozen_args.get("dept_assignments")
+            precise_binding = (
+                isinstance(user_id, int)
+                and not isinstance(user_id, bool)
+                and isinstance(assignments, list)
+                and all(
+                    isinstance(item, dict)
+                    and set(item) == {"dept_id", "is_primary"}
+                    and isinstance(item["dept_id"], int)
+                    and not isinstance(item["dept_id"], bool)
+                    and item["dept_id"] > 0
+                    and isinstance(item["is_primary"], bool)
+                    for item in assignments
+                )
+                and action.snapshot.get("argsHash") == action.args_hash
+            )
+            business_snapshot = action.snapshot.get("business")
+            if not precise_binding or not isinstance(business_snapshot, dict):
+                raise _snapshot_stale("用户部门调整缺少完整审批快照，请重新发起操作")
+
+            from app.modules.system.service.user_department_assignment_service import (  # noqa: PLC0415
+                user_department_assignment_service,
+            )
+
+            try:
+                live_preview = (
+                    await user_department_assignment_service.preview_departments(
+                        db,
+                        actor_user_id=action.user_id,
+                        target_user_id=user_id,
+                        dept_assignments=[
+                            (item["dept_id"], item["is_primary"])
+                            for item in assignments
+                        ],
+                    )
+                )
+            except BusinessException as exc:
+                raise _snapshot_stale(
+                    "用户部门调整授权或目标事实已变化，请重新确认"
+                ) from exc
+            if live_preview.snapshot != business_snapshot:
+                raise _snapshot_stale("用户部门调整授权或目标事实已变化，请重新确认")
+            return
         if action.execute_tool_name == "user.batch_delete":
             frozen_args = action.frozen_args
             user_ids = frozen_args.get("user_ids")

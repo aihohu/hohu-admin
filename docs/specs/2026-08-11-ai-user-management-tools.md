@@ -1,6 +1,6 @@
 # AI 用户管理缺失工具补齐
 
-> 状态：🚧 Plan 1 已完成（2026-08-11）；Plan 2 已完成 P2-A、P2-B1、P2-B2 与 P2-B3，其余工作包待实现
+> 状态：🚧 Plan 1 已完成（2026-08-11）；Plan 2 已完成 P2-A、P2-B1、P2-B2、P2-B3 与 Task 12，其余工作包待实现
 > 日期：2026-08-11｜更新：2026-08-18
 > 关联：[`2026-08-14-ai-management-mvp-closure.md`](./2026-08-14-ai-management-mvp-closure.md)、[`2026-07-02-ai-tool-gateway-design.md`](./2026-07-02-ai-tool-gateway-design.md)、[`2026-08-01-user-import-export-design.md`](./2026-08-01-user-import-export-design.md)
 
@@ -30,7 +30,7 @@
 
 9. **fresh install 默认密码按环境 fail closed 并 seed 既有普通角色** — 旧 seed `hohu123456` 不含大写字母，与 `validate_password` 冲突；dev/test 使用通过强度校验的 `Hohu123456` 便利值，prod seed 为空并要求部署方显式配置私有值。同时 seed `USER_ROLE_CODE=R_USER` 的普通角色，不能另造 `user` 角色。已部署环境不静默创建/修改角色，缺失时由工具返回稳定错误，交给管理员显式治理。**反例**: 生产仍接受公开 seed、工具绕过 schema 接受弱配置、运行时偷偷创建角色，或初始化生成第二套普通角色编码，会让凭据与授权边界失守。**回归**: init seed 测试验证环境分支、密码强度、角色名称/编码/状态/data scope；工具测试验证缺失/禁用默认角色时 fail closed。
 
-10. **自然语言部门名称先解析、后按 ID 写入** — `user_mgmt` 增加只读 `user.dept_lookup(dept_name)`，在调用者可见部门范围内按启用状态和完整名称查候选；唯一命中时 Agent 把返回 ID 传给 `user.create`，零命中时提示检查名称，多命中时展示父部门并要求用户消歧。`user.create` 继续只接收稳定 ID。**反例**: 让模型凭记忆猜 ID、让写工具按非唯一名称直接更新，或要求普通用户手工查 Snowflake ID，分别会造成误写、歧义和糟糕交互。**回归**: 工具可见性、唯一命中、data scope、同名多候选、零命中与“先 lookup 后 create”提示词测试。
+10. **Plan 1 自然语言部门名称先解析、后按 ID 写入（由决策 30 扩展）** — `user_mgmt` 增加只读部门 lookup，在调用者可见部门范围内查找候选；唯一命中时 Agent 把返回 ID 传给写工具，零命中或多命中必须澄清。Task 12 已将其权限、参数和返回契约升级为决策 30，当前契约以 §3 为准。**反例**: 让模型凭记忆猜 ID、让写工具按非唯一名称直接更新，或要求普通用户手工查 Snowflake ID，分别会造成误写、歧义和糟糕交互。**回归**: 工具可见性、名称/路径、data scope、同名多候选、零命中与“先 lookup 后写入”提示词测试。
 
 11. **确认展示由 dry-run 安全补充名称，但必须绑定原始冻结 ID** — direct HITL 的 `confirmation_fields` 同时携带同名冻结 `value` 与可读 `display_value`；Gateway 校验两者绑定后，`user.create` 才把 `primary_dept_id` 展示为 `部门名称（ID）`。批准后仍执行服务端冻结的 `primary_dept_id`，名称只用于可读展示。**反例**: 前端解析 dry-run 中文摘要提取名称会受文案变化影响；允许未绑定展示值会出现展示 A、执行 B；把名称替换进冻结 args 会破坏 ID 精确授权。**回归**: dry-run 字段、Gateway raw/display 校验、确认抽屉展示值与 frozen args 分离测试。
 
@@ -70,6 +70,14 @@
 
 29. **分页全集与多 writer UI 显式处理不完整状态** — 部门成员分页只有全部成功才启用 PUT；用户编辑中角色/部门已提交而后续 writer 失败时，关闭旧表单、提示部分成功并刷新服务端事实。**反例**: 分页失败后空集合仍可提交，或部分 commit 后让用户继续基于旧快照编辑。**回归**: 部门弹窗首/后页失败和用户编辑后续 writer 失败 Vitest。
 
+30. **部门 lookup 只使用当前可见节点构造路径** — `user.dept_lookup` 改为 `system:dept:list`，接受名称或路径 query 与 `1..20` 的 limit；候选路径只由当前 data scope 内启用节点组成，遇到 scope 外或禁用祖先立即截断。**反例**: 为显示完整组织路径额外查询 scope 外祖先，会通过 selector 泄露不可见组织名称；继续要求 `system:user:add` 会让只有 edit 权限的部门调整者无法消歧。**回归**: `tests/modules/ai/test_user_assignment_tools.py` 覆盖权限、名称/路径、limit、禁用节点和不可见祖先。
+
+31. **部门调整审批冻结规范化全集和服务端业务快照** — dry-run 把完整 `dept_assignments` 规范化为稳定排序的执行参数，并冻结操作者 authority version、目标身份/状态/角色、旧/新部门、主部门配置、角色定义及前后物化授权 hash；这些内部字段不进入 SSE。批准时 `PreparedActionService` 先重建同一快照，任一差异统一 `AI_PREPARED_ACTION_SNAPSHOT_STALE`，随后共享 Service 仍在全局锁内做最终复验。**反例**: 只冻结新部门 ID 会漏掉旧关联、角色定义或操作者授权在审批期间变化；把 snapshot 交给浏览器会把安全事实变成客户端可篡改输入。**回归**: `tests/modules/ai/test_user_assignment_tools.py`、`tests/modules/ai/test_prepared_action_service.py`。
+
+32. **AI 部门写入只编排共享完整替换 Policy** — `user.update_dept` 只接受 `user_id + dept_assignments[]`，要求 `system:user:edit + system:dept:list`，强制 HITL，并调用 `UserDepartmentAssignmentService.replace_departments()`；结果只返回用户与旧/新部门 ID 摘要，Tool 不 commit。**反例**: Tool 自行删除/插入 `user_depts` 或接受单个 `new_dept_id`，会形成与页面不同的授权规则并丢失多部门/主部门语义。**回归**: `tests/modules/ai/test_user_assignment_tools.py` 与 `tests/modules/system/test_user_department_assignment_service.py` 覆盖元数据、dry-run、成功/回滚、越界、自改和保护目标。
+
+33. **部门全集写入只接受严格模型 schema 和可证明完整的当前集合** — `dept_assignments[]` 的每项只允许正整数 `dept_id` 与严格 boolean `is_primary`；`user.lookup` 仅在调用者拥有 `system:dept:list` 且现有部门全集均在当前 scope 时返回 `departmentAssignmentsComplete=true`，否则不返回任何部分部门 ID。Agent 必须先取得该标志为 true 的当前全集才能组合完整替换；dry-run 的领域/授权拒绝保留稳定错误码并在 Gateway confirmation 前终止。`user.dept_lookup` 先筛末级名称候选，再只为候选构造可见路径和物化最多 `limit` 行。**反例**: 把 `list[dict]` 暴露给模型会接受 camelCase 或额外字段；把可见子集伪装为当前全集会在替换时误删隐藏关联；无业务快照仍生成确认会让批准必然 stale。**回归**: `tests/modules/ai/test_user_assignment_tools.py`、`tests/modules/ai/test_executor_integration.py`。
+
 ## 3. 工具契约
 
 ### `user.create`
@@ -82,11 +90,11 @@
 
 ### `user.dept_lookup`
 
-- 权限：`system:user:add`
-- 参数：`dept_name`（用户口语中的完整部门名称）
-- 行为：仅查询启用且位于调用者 data scope 的同名部门，不写数据
-- 结果：`{query, matchCount, matches: [{id, name, parentId, parentName}]}`
-- 编排：唯一命中后调用 `user.create(primary_dept_id=matches[0].id)`；零命中或多命中不得猜测
+- 权限：`system:dept:list`，不借用 `system:user:add`
+- 参数：名称/路径 `query`，可选 `limit` 且范围为 `1..20`
+- 行为：仅查询启用且位于调用者当前 data scope 的节点；路径遇到 scope 外或禁用祖先立即截断，不写数据
+- 结果：`{query, matchCount, matches: [{deptId, deptName, path}]}`
+- 编排：唯一命中后把 `matches[0].deptId` 传给 `user.create` 或 `user.update_dept`；零命中或多命中不得猜测
 
 ### `user.reset_password`
 
@@ -95,13 +103,6 @@
 - 后端策略：新密码=`auth:default_password`
 - 结果：`{updated: 1, userId, userName, passwordPolicy}`
 - UI：`rows_affected`，审计只记录目标 ID 与策略名
-
-### `user.dept_lookup`（Plan 2 权限纠偏）
-
-- 权限：`system:dept:list`，不再借用 `system:user:add`
-- 参数：名称/路径 query，`limit <= 20`
-- 返回：只含当前部门 scoped selector 可见的 `{deptId, deptName, path}`
-- 语义：零命中或多命中必须澄清，不拼回 scope 外祖先
 
 ### `user.role_lookup`（Plan 2）
 
@@ -113,7 +114,8 @@
 ### `user.update_dept`（Plan 2）
 
 - 权限：同时满足 `system:user:edit` 与 `system:dept:list`
-- 参数：`user_id`、完整 `dept_assignments=[{dept_id, is_primary}]`
+- 参数：`user_id`、完整 `dept_assignments=[{dept_id: positive integer, is_primary: boolean}]`；拒绝 camelCase、类型强制转换和额外字段
+- 当前集合：先调 `user.lookup`；只有响应包含 `departmentAssignmentsComplete=true` 时才允许把当前保留项与新增项组合成完整集合，否则停止并引导用户使用传统页面
 - 风险：`high`、`hitl_always=True`、`dry_run_supported=True`
 - 数据权限：目标用户与 `旧部门集合 ∪ 新部门集合` 全部位于当前操作者可写 scope；不能借替换删除越界旧关联
 - 授权影响：按目标用户完整启用角色分别物化变更前/后的部门和用户集合，两者都必须是操作者 `GrantAuthority` 的子集
@@ -157,6 +159,7 @@
   - [x] Task 11b ✅ 已完成（2026-08-18）：交付独立部门 writer，并把 import overwrite 与其余存量角色/部门 writer 全部接入共享 Policy；完成 Web 契约切换。
     - [x] Task 11b-1 ✅ P2-B2 已完成（2026-08-17；审查修复 2026-08-17）：页面部门完整替换 contract/API/Service、双权限、主部门规则、完整 scope、授权影响 dominance、全局锁和锁后复验完成；主部门策略改为 uncached 锁行读取，候选作用域精确重建目标主体，并补齐隐藏旧关联与 admin/R_SUPER 回归。相关 48 项、system 539 项及后端全量 2053 项通过，覆盖率 73.81%，无 migration/seed/Web 改动。
     - [x] Task 11b-2 ✅ P2-B3 已完成（2026-08-18；审查修复 2026-08-18）：页面 create、AI create、import create/overwrite 与部门成员页统一使用共享角色/部门 Policy；删除旧 `DeptService` 关联 writer，导入拒绝重复目标并锁定 `DEPT_AND_SUB` 完整后代，部门成员完整集合在全局锁内批量物化且比较完整授权快照，隐藏旧成员、主部门移除和任一越权均整批失败。Web 完成独立 writer、部分提交恢复、最小可委派角色和 fail-closed 分页成员契约。无 migration/seed；最终验证证据见主基线。
-- [ ] Task 12：纠正 data-scoped `user.dept_lookup`，实现 `user.update_dept` 的完整旧/新集合、前后授权影响、dry-run、i18n 与批准时复验。
+- [x] ✅ Task 12 已完成（2026-08-18；审查修复 2026-08-18）：`user.dept_lookup` 改用 `system:dept:list`，支持名称/可见路径与 `1..20` limit，先筛末级名称候选并仅为候选构造路径；`user.update_dept` 强制严格完整集合、双权限、HITL/dry-run，冻结规范化执行参数和服务端授权/目标业务快照。`user.lookup` 只有在当前部门全集可证明完整时才向 Agent 暴露集合，dry-run 领域拒绝在 confirmation 前原码终止；批准与锁内执行两次复验任一漂移统一 fail closed。Tool 仅编排共享部门 Service，Web 已补齐确认抽屉、错误码、结果卡和中英文 i18n；无数据库 migration、权限/menu seed 或新权限码，仅同步内置 Agent prompt 默认值。
+  - [x] Task 12 验证证据：后端 `ruff check .`、`ruff format --check .`、20 tools / 12 static checks、扩展回归 226 项与全量 2091 项测试通过，总覆盖率 74.39%，仅保留 30 条 import fixture 与 2 条既有 transaction warning；Web oxlint、format、typecheck、31 files / 120 tests 与 production build 通过，ESLint 0 error / 30 条既有 warning。
 - [ ] Task 13：同步实现 `user.role_lookup` 与 `user.update_roles` 的最终有效授权 dominance、dry-run、i18n 与批准时复验。
 - [ ] Task 14：后端定向/全量门禁与真实浏览器多角色 E2E 通过后，将 Plan 2 翻转为完成。

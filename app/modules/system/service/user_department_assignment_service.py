@@ -1,7 +1,10 @@
 """Shared authorization policy for complete user-department replacements."""
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import delete, func, insert, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,6 +57,19 @@ class UserDepartmentAssignmentResult:
 
 
 @dataclass(frozen=True)
+class UserDepartmentAssignmentPreview:
+    """Server-owned preview and snapshot for one complete replacement."""
+
+    user_id: int
+    user_name: str
+    old_assignments: tuple[tuple[int, bool], ...]
+    new_assignments: tuple[tuple[int, bool], ...]
+    old_display: tuple[str, ...]
+    new_display: tuple[str, ...]
+    snapshot: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class DepartmentMemberRecord:
     """Minimal membership candidate safe for department administration."""
 
@@ -98,6 +114,16 @@ def _role_custom_dept_ids(*users: User) -> set[int]:
         for role in (user.roles or [])
         for dept in (role.depts or [])
     }
+
+
+def _canonical_hash(payload: Any) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class UserDepartmentAssignmentService:
@@ -183,6 +209,101 @@ class UserDepartmentAssignmentService:
                 error_code="USER_DEPT_SET_DUPLICATE",
             )
         return tuple(sorted(normalized))
+
+    @staticmethod
+    def _scope_snapshot(values: frozenset[int] | None) -> dict[str, Any]:
+        payload = {
+            "unbounded": values is None,
+            "ids": [] if values is None else sorted(values),
+        }
+        return {
+            "unbounded": payload["unbounded"],
+            "count": None if values is None else len(values),
+            "hash": _canonical_hash(payload),
+        }
+
+    @classmethod
+    def _role_set_snapshot(cls, value: RoleSetAuthority) -> dict[str, Any]:
+        scope = {
+            "departments": cls._scope_snapshot(value.accessible_dept_ids),
+            "users": cls._scope_snapshot(value.accessible_user_ids),
+        }
+        authorization = {
+            "permissionCodes": sorted(value.permission_codes),
+            "menuIds": sorted(value.menu_ids),
+            "agentIds": sorted(value.agent_ids),
+            "scope": scope,
+            "roleDefinitions": value.role_definition_signature,
+        }
+        return {
+            "authorizationHash": _canonical_hash(authorization),
+            "scopeHash": _canonical_hash(scope),
+            "roleDefinitionHash": _canonical_hash(value.role_definition_signature),
+        }
+
+    @staticmethod
+    def _assignment_payload(
+        assignments: tuple[tuple[int, bool], ...],
+    ) -> list[dict[str, Any]]:
+        return [
+            {"deptId": str(dept_id), "isPrimary": is_primary}
+            for dept_id, is_primary in assignments
+        ]
+
+    @staticmethod
+    def _assignment_display(
+        assignments: tuple[tuple[int, bool], ...],
+        dept_map: dict[int, Dept],
+    ) -> tuple[str, ...]:
+        return tuple(
+            f"{'★ ' if is_primary else ''}{dept_map[dept_id].dept_name} ({dept_id})"
+            for dept_id, is_primary in assignments
+        )
+
+    @classmethod
+    def _build_replacement_snapshot(
+        cls,
+        *,
+        authority: GrantAuthority,
+        target: User,
+        old_assignments: tuple[tuple[int, bool], ...],
+        new_assignments: tuple[tuple[int, bool], ...],
+        old_authority: RoleSetAuthority,
+        new_authority: RoleSetAuthority,
+        require_primary: bool,
+        dept_map: dict[int, Dept],
+    ) -> dict[str, Any]:
+        dept_facts = [
+            {
+                "deptId": str(dept.dept_id),
+                "deptName": dept.dept_name,
+                "parentId": str(dept.parent_id) if dept.parent_id else None,
+                "ancestors": dept.ancestors,
+                "status": dept.status,
+            }
+            for dept in sorted(dept_map.values(), key=lambda item: item.dept_id)
+        ]
+        return {
+            "actor": {
+                "userId": str(authority.actor_user_id),
+                "status": authority.actor_status,
+                "tenantId": str(authority.tenant_id),
+                "superAdmin": authority.super_admin,
+                "authorityVersion": authority.version_summary,
+            },
+            "target": {
+                "userId": str(target.user_id),
+                "userName": target.user_name,
+                "status": target.status,
+                "roleIds": [str(role_id) for role_id in _role_ids(target)],
+            },
+            "oldAssignments": cls._assignment_payload(old_assignments),
+            "newAssignments": cls._assignment_payload(new_assignments),
+            "departmentFacts": dept_facts,
+            "requirePrimaryDepartment": require_primary,
+            "before": cls._role_set_snapshot(old_authority),
+            "after": cls._role_set_snapshot(new_authority),
+        }
 
     async def _load_user(self, db: AsyncSession, user_id: int) -> User:
         user = await db.scalar(
@@ -641,6 +762,60 @@ class UserDepartmentAssignmentService:
         )
         return old_authority, new_authority
 
+    async def preview_departments(
+        self,
+        db: AsyncSession,
+        *,
+        actor_user_id: int,
+        target_user_id: int,
+        dept_assignments: list[tuple[int | str, bool]],
+    ) -> UserDepartmentAssignmentPreview:
+        """Validate and freeze one complete replacement without writing it."""
+        normalized = self._normalize_assignments(dept_assignments)
+        authority = await grant_authority_service.build(db, actor_user_id)
+        self._require_permissions(
+            authority,
+            frozenset({USER_EDIT_PERMISSION, DEPT_LIST_PERMISSION}),
+        )
+        target = await self._load_user(db, target_user_id)
+        old_assignments = await self._load_assignments(db, target_user_id)
+        requested_depts = await self._load_requested_depts(db, normalized)
+        require_primary = await config_service.get_bool_for_update(
+            db,
+            "user_require_primary_dept",
+        )
+        old_authority, new_authority = await self._authorize_assignment_change(
+            db,
+            authority=authority,
+            target=target,
+            old_assignments=old_assignments,
+            new_assignments=normalized,
+            requested_depts=requested_depts,
+            require_primary=require_primary,
+        )
+        dept_map = {
+            int(dept.dept_id): dept
+            for dept in [*(target.depts or []), *requested_depts]
+        }
+        return UserDepartmentAssignmentPreview(
+            user_id=int(target.user_id),
+            user_name=target.user_name,
+            old_assignments=old_assignments,
+            new_assignments=normalized,
+            old_display=self._assignment_display(old_assignments, dept_map),
+            new_display=self._assignment_display(normalized, dept_map),
+            snapshot=self._build_replacement_snapshot(
+                authority=authority,
+                target=target,
+                old_assignments=old_assignments,
+                new_assignments=normalized,
+                old_authority=old_authority,
+                new_authority=new_authority,
+                require_primary=require_primary,
+                dept_map=dept_map,
+            ),
+        )
+
     async def _replace_departments(
         self,
         db: AsyncSession,
@@ -651,6 +826,7 @@ class UserDepartmentAssignmentService:
         required_permissions: frozenset[str],
         created_target: bool,
         ignored_user_ids: frozenset[int] = frozenset(),
+        expected_snapshot: dict[str, Any] | None = None,
     ) -> UserDepartmentAssignmentResult:
         normalized = self._normalize_assignments(dept_assignments)
         actor_before = await self._load_user(db, actor_user_id)
@@ -703,6 +879,10 @@ class UserDepartmentAssignmentService:
         authority = await grant_authority_service.build(db, actor_user_id)
         self._require_permissions(authority, required_permissions)
         requested_depts = await self._load_requested_depts(db, normalized)
+        require_primary = await config_service.get_bool_for_update(
+            db,
+            "user_require_primary_dept",
+        )
         old_authority, new_authority = await self._authorize_assignment_change(
             db,
             authority=authority,
@@ -712,6 +892,7 @@ class UserDepartmentAssignmentService:
             requested_depts=requested_depts,
             created_target=created_target,
             ignored_user_ids=ignored_user_ids,
+            require_primary=require_primary,
         )
         live_dependency_ids = self._live_dependency_ids(
             actor=actor,
@@ -726,6 +907,27 @@ class UserDepartmentAssignmentService:
                 "授权事实已变化，请重试",
                 error_code="AUTHORIZATION_SNAPSHOT_STALE",
             )
+
+        if expected_snapshot is not None:
+            dept_map = {
+                int(dept.dept_id): dept
+                for dept in [*(target.depts or []), *requested_depts]
+            }
+            current_snapshot = self._build_replacement_snapshot(
+                authority=authority,
+                target=target,
+                old_assignments=current_assignments,
+                new_assignments=normalized,
+                old_authority=old_authority,
+                new_authority=new_authority,
+                require_primary=require_primary,
+                dept_map=dept_map,
+            )
+            if current_snapshot != expected_snapshot:
+                raise BusinessRuleException(
+                    "审批快照已变化，请重新确认",
+                    error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
+                )
 
         await self._write_assignments(
             db,
@@ -745,6 +947,7 @@ class UserDepartmentAssignmentService:
         actor_user_id: int,
         target_user_id: int,
         dept_assignments: list[tuple[int | str, bool]],
+        expected_snapshot: dict[str, Any] | None = None,
     ) -> UserDepartmentAssignmentResult:
         """Replace one existing user's complete department set without committing."""
         return await self._replace_departments(
@@ -756,6 +959,7 @@ class UserDepartmentAssignmentService:
                 {USER_EDIT_PERMISSION, DEPT_LIST_PERMISSION}
             ),
             created_target=False,
+            expected_snapshot=expected_snapshot,
         )
 
     async def assign_created_user_departments(

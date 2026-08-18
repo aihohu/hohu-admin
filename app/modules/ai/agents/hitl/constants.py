@@ -119,7 +119,7 @@ class DryRunResult:
     summary_key: str | None = None
     summary_params: dict[str, str | int | float] | None = None
     examples: list[str] | None = None
-    confirmation_fields: list[dict[str, str | int | float]] | None = None
+    confirmation_fields: list[dict[str, Any]] | None = None
     """仅用于 direct HITL canonical presentation 的安全展示覆盖。
 
     每项必须包含 ``label``、与 frozen args 相等的 ``value``，以及可选的

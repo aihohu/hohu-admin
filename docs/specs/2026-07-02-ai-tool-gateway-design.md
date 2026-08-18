@@ -3080,6 +3080,8 @@ async def parse_file_tool(ctx, file_id: str, hint: str = ""):
 
 #### SR-45. **Web 恢复请求必须绑定会话代次，轮询同一 action 严格串行**（2026-08-13，纠偏）— 每个 confirmation 独立持有 AbortController 与重试预算；切换或清空会话时取消全部 resume/到期 reconciliation，旧响应在解析前校验 conversation/run 代次。404 立即以 detail 对账，422 立即对账并在过期后再收敛；operation-log 下一轮只在上一请求完成后安排。删除会话仅在 API 成功后清本地状态。**反例**: 多 confirmation 共用 singleton toolCallId、`setInterval(async ...)` 或忽略 delete error → 旧 SSE 写入新会话、慢请求重叠乱序、后端拒删但前端假删除。**回归**: `prepared-action-recovery.spec.ts` 覆盖切换会话丢弃旧续传、404 对账、删除失败保留状态、并发 action 隔离及单 action 无重叠轮询。
 
+#### SR-46. **dry-run 领域拒绝是 confirmation 前的 terminal Tool failure**（2026-08-18，纠偏）— `dry_run_fn` 抛出的 `BusinessException` 不得降级为普通摘要继续风险分类或创建 `PreparedAction`；Gateway 保留原始 `errorCode/message`，完成失败 operation log 和 result event，并按授权拒绝/业务失败语义分别回滚配额或记录连续失败。**反例**: 把 `AI_DATA_SCOPE_VIOLATION` 转成“预估失败”后继续 HITL，会持久化缺少业务快照的动作，用户批准后只能得到 stale，且确认界面错误暗示该操作可执行。**回归**: `tests/modules/ai/test_executor_integration.py::TestHitlFlow::test_typed_dry_run_failure_stops_before_confirmation`。
+
 
 
 

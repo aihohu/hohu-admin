@@ -12,7 +12,7 @@ build_tool_context 把 ChatDeps 转换成 AiToolContext：替换数据库会话�
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import ColumnElement, Select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -157,11 +157,16 @@ class AiToolContext:
     secrets: dict[str, str] = field(default_factory=dict)
     """由可信服务端注入、不会出现在普通工具参数中的敏感值。"""
 
+    approved_business_snapshot: dict[str, Any] | None = None
+    """Server-owned business snapshot attached only to an approved action."""
+
 
 def build_tool_context(
     deps: ChatDeps,
     tool_db: AsyncSession,
     tool_meta: AiToolMeta,
+    *,
+    approved_business_snapshot: dict[str, Any] | None = None,
 ) -> AiToolContext:
     """从 ChatDeps 构造 AiToolContext。
 
@@ -184,4 +189,5 @@ def build_tool_context(
         data_scope_hash=deps.data_scope_hash,
         projection_dependency_message_ids=(deps.projection_dependency_message_ids),
         secrets={},
+        approved_business_snapshot=approved_business_snapshot,
     )

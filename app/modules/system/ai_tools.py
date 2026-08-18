@@ -13,12 +13,15 @@ user_mgmt Agent 和工具声明的权限码。
 """
 
 from datetime import timedelta
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import aliased
+from pydantic import ConfigDict, Field
+from sqlalchemy import Select, Text, cast, exists, func, literal, select
+from typing_extensions import TypedDict
 
-from app.core.exceptions import AuthorizationException
+from app.constants import IS_PRIMARY_YES
+from app.core.exceptions import AuthorizationException, BusinessException
+from app.db.base import user_depts
 from app.modules.ai.agents.gateway import ensure_targets_in_scope
 from app.modules.ai.agents.gateway.result import (
     PreparedActionProposal,
@@ -496,9 +499,93 @@ async def dept_list(
     )
 
 
-# ============ user.dept_lookup / user.create / user.reset_password（2026-08-11 纠偏） ============
+# ============ user department lookup and assignment ============
 
 _DEPT_LOOKUP_MAX_MATCHES = 20
+
+
+def _build_scoped_dept_lookup_stmt(
+    *,
+    accessible_dept_ids: set[int] | None,
+    normalized_query: str,
+    limit: int,
+) -> Select[Any]:
+    """Build paths only for scoped leaf-name candidates and limit matches."""
+    from app.constants import STATUS_ENABLED  # noqa: PLC0415
+
+    filters = [Dept.status == STATUS_ENABLED]
+    if accessible_dept_ids is not None:
+        filters.append(Dept.dept_id.in_(accessible_dept_ids))
+    visible = (
+        select(
+            Dept.dept_id,
+            Dept.parent_id,
+            Dept.dept_name,
+        )
+        .where(*filters)
+        .cte("ai_visible_depts")
+    )
+    folded_query = normalized_query.casefold()
+    leaf_query = normalized_query.rsplit("/", maxsplit=1)[-1].strip().casefold()
+    candidates = select(
+        visible.c.dept_id,
+        visible.c.parent_id.label("next_parent_id"),
+        visible.c.dept_name,
+        cast(visible.c.dept_name, Text).label("path"),
+        (literal(",") + cast(visible.c.dept_id, Text) + literal(",")).label("visited"),
+    ).where(
+        func.lower(visible.c.dept_name).contains(
+            leaf_query,
+            autoescape=True,
+        )
+    )
+    paths = candidates.cte("ai_scoped_dept_paths", recursive=True)
+    parent = visible.alias("ai_visible_dept_parent")
+    parent_marker = literal(",") + cast(parent.c.dept_id, Text) + literal(",")
+    paths = paths.union_all(
+        select(
+            paths.c.dept_id,
+            parent.c.parent_id.label("next_parent_id"),
+            paths.c.dept_name,
+            (parent.c.dept_name + literal(" / ") + paths.c.path).label("path"),
+            (paths.c.visited + cast(parent.c.dept_id, Text) + literal(",")).label(
+                "visited"
+            ),
+        )
+        .join(paths, parent.c.dept_id == paths.c.next_parent_id)
+        .where(~paths.c.visited.contains(parent_marker))
+    )
+    next_parent = visible.alias("ai_visible_dept_next_parent")
+    matched = (
+        select(
+            paths.c.dept_id,
+            paths.c.dept_name,
+            paths.c.path,
+            func.count().over().label("match_count"),
+        )
+        .where(
+            ~exists(
+                select(1)
+                .select_from(next_parent)
+                .where(next_parent.c.dept_id == paths.c.next_parent_id)
+            ),
+            func.lower(paths.c.path).contains(
+                folded_query,
+                autoescape=True,
+            ),
+        )
+        .cte("ai_scoped_dept_matches")
+    )
+    return (
+        select(
+            matched.c.dept_id,
+            matched.c.dept_name,
+            matched.c.path,
+            matched.c.match_count,
+        )
+        .order_by(func.lower(matched.c.path), matched.c.dept_id)
+        .limit(limit)
+    )
 
 
 @ai_tool(
@@ -506,88 +593,324 @@ _DEPT_LOOKUP_MAX_MATCHES = 20
         name="user.dept_lookup",
         agent="user_mgmt",
         summary=(
-            "Resolve an exact visible department name before user.create; "
-            "returns candidate IDs and parents."
+            "Find visible departments by name or scoped path before user create/update."
         ),
-        required_perms=("system:user:add",),
+        required_perms=("system:dept:list",),
         risk="low",
         readonly=True,
         idempotent=True,
         result_view="data_list",
-        args_summary_fields=("dept_name",),
+        args_summary_fields=("query", "limit"),
     )
 )
 async def user_dept_lookup(
     ctx: AiToolContext,
     *,
-    dept_name: str,
+    query: str,
+    limit: int = _DEPT_LOOKUP_MAX_MATCHES,
 ) -> ToolResult:
-    """按完整名称解析 user.create 可使用的可见、启用部门候选。"""
-    from app.constants import STATUS_ENABLED  # noqa: PLC0415
+    """Return enabled scoped department candidates without leaking ancestors."""
     from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
 
-    query = dept_name.strip()
-    if not query:
+    normalized_query = query.strip()
+    path_parts = [part.strip() for part in normalized_query.split("/")]
+    if not normalized_query or any(not part for part in path_parts):
         raise BusinessRuleException(
-            "部门名称不能为空",
-            error_code="AI_USER_DEPT_NAME_REQUIRED",
+            "部门查询条件不能为空",
+            error_code="AI_USER_DEPT_QUERY_REQUIRED",
+        )
+    normalized_query = " / ".join(path_parts)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+        raise BusinessRuleException(
+            "部门查询数量必须在 1 到 20 之间",
+            error_code="AI_USER_DEPT_LOOKUP_LIMIT_INVALID",
         )
 
-    parent = aliased(Dept)
-    filters = [
-        Dept.dept_name == query,
-        Dept.status == STATUS_ENABLED,
-    ]
-    if ctx.data_scope.accessible_dept_ids is not None:
-        filters.append(Dept.dept_id.in_(ctx.data_scope.accessible_dept_ids))
-
-    match_count = int(
-        await ctx.db.scalar(select(func.count(Dept.dept_id)).where(*filters)) or 0
-    )
     rows = (
-        await ctx.db.execute(
-            select(Dept, parent.dept_name.label("parent_name"))
-            .outerjoin(parent, Dept.parent_id == parent.dept_id)
-            .where(*filters)
-            .order_by(Dept.parent_id.asc().nulls_first(), Dept.dept_id.asc())
-            .limit(_DEPT_LOOKUP_MAX_MATCHES)
+        (
+            await ctx.db.execute(
+                _build_scoped_dept_lookup_stmt(
+                    accessible_dept_ids=ctx.data_scope.accessible_dept_ids,
+                    normalized_query=normalized_query,
+                    limit=limit,
+                )
+            )
         )
-    ).all()
-
+        .mappings()
+        .all()
+    )
     matches = [
         {
-            "id": str(dept.dept_id),
-            "name": dept.dept_name,
-            "parentId": str(dept.parent_id) if dept.parent_id else None,
-            "parentName": parent_name,
+            "deptId": str(row["dept_id"]),
+            "deptName": row["dept_name"],
+            "path": row["path"],
         }
-        for dept, parent_name in rows
+        for row in rows
     ]
+    match_count = int(rows[0]["match_count"]) if rows else 0
     return ToolResult.success(
         data={
-            "query": query,
+            "query": normalized_query,
             "matchCount": match_count,
             "matches": matches,
         },
-        projection=_result_projection("dept", [match["id"] for match in matches]),
+        projection=_result_projection("dept", [match["deptId"] for match in matches]),
         ui=UIResult(
             view_type="data_list",
             view_data={
                 "columns": [
-                    {"key": "id", "label": "ID"},
-                    {"key": "name", "label": "page.system.dept.deptName"},
-                    {"key": "parentName", "label": "page.system.dept.parentId"},
+                    {"key": "deptId", "label": "ID"},
+                    {"key": "deptName", "label": "page.system.dept.deptName"},
+                    {"key": "path", "label": "page.ai.chat.departmentPath"},
                 ],
                 "rows": matches,
             },
             audit={
-                "query": query,
+                "query": normalized_query,
                 "match_count": match_count,
                 "returned_count": len(matches),
             },
             label_key="ai.tool.user.dept_lookup.result",
             label_params={"count": match_count},
         ),
+    )
+
+
+class AiUserDepartmentAssignment(TypedDict):
+    """Strict complete-set item exposed in the model-facing tool schema."""
+
+    __pydantic_config__ = ConfigDict(extra="forbid", strict=True)
+
+    dept_id: Annotated[
+        int,
+        Field(gt=0, description="Stable department ID returned by user.dept_lookup."),
+    ]
+    is_primary: Annotated[
+        bool,
+        Field(description="Whether this is the user's single primary department."),
+    ]
+
+
+def _parse_ai_dept_assignments(
+    dept_assignments: list[AiUserDepartmentAssignment],
+) -> list[tuple[int, bool]]:
+    """Validate the model-facing complete collection before shared policy use."""
+    from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+
+    if not isinstance(dept_assignments, list):
+        raise BusinessRuleException(
+            "部门集合无效",
+            error_code="USER_DEPT_NOT_AVAILABLE",
+        )
+    parsed: list[tuple[int, bool]] = []
+    for item in dept_assignments:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"dept_id", "is_primary"}
+            or isinstance(item["dept_id"], bool)
+            or not isinstance(item["dept_id"], int)
+            or item["dept_id"] <= 0
+            or not isinstance(item["is_primary"], bool)
+        ):
+            raise BusinessRuleException(
+                "部门集合无效",
+                error_code="USER_DEPT_NOT_AVAILABLE",
+            )
+        parsed.append((item["dept_id"], item["is_primary"]))
+    return parsed
+
+
+def _format_ai_dept_assignments(
+    assignments: tuple[tuple[int, bool], ...],
+    snapshot: dict[str, Any],
+) -> str:
+    """Build a locale-neutral result value from the approved department facts."""
+    raw_facts = snapshot.get("departmentFacts")
+    facts = raw_facts if isinstance(raw_facts, list) else []
+    names = {
+        item["deptId"]: item["deptName"]
+        for item in facts
+        if isinstance(item, dict)
+        and isinstance(item.get("deptId"), str)
+        and isinstance(item.get("deptName"), str)
+    }
+    values: list[str] = []
+    for dept_id, is_primary in assignments:
+        identifier = str(dept_id)
+        name = names.get(identifier)
+        descriptor = f"{name} ({identifier})" if name else identifier
+        values.append(f"★ {descriptor}" if is_primary else descriptor)
+    return "; ".join(values) or "—"
+
+
+@ai_tool(
+    AiToolMeta(
+        name="user.update_dept",
+        agent="user_mgmt",
+        summary="Replace one user's complete department set after HITL approval.",
+        required_perms=("system:user:edit", "system:dept:list"),
+        risk="high",
+        readonly=False,
+        idempotent=False,
+        hitl_always=True,
+        dry_run_supported=True,
+        result_view="detail_card",
+        args_summary_fields=("user_id", "dept_assignments"),
+    )
+)
+async def user_update_dept(
+    ctx: AiToolContext,
+    *,
+    user_id: int,
+    dept_assignments: list[AiUserDepartmentAssignment],
+) -> ToolResult:
+    """Apply an approved complete department set through the shared policy."""
+    from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
+    from app.modules.system.service.user_department_assignment_service import (  # noqa: PLC0415
+        user_department_assignment_service,
+    )
+
+    if ctx.approved_business_snapshot is None:
+        raise BusinessRuleException(
+            "用户部门调整缺少审批快照",
+            error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
+        )
+    parsed = _parse_ai_dept_assignments(dept_assignments)
+    try:
+        await ensure_targets_in_scope(
+            ctx,
+            user_ids=[user_id],
+            dept_ids=[dept_id for dept_id, _is_primary in parsed],
+        )
+        result = await user_department_assignment_service.replace_departments(
+            ctx.db,
+            actor_user_id=ctx.user.user_id,
+            target_user_id=user_id,
+            dept_assignments=parsed,
+            expected_snapshot=ctx.approved_business_snapshot,
+        )
+    except BusinessException as exc:
+        raise BusinessRuleException(
+            "审批后授权或目标事实已变化，请重新确认",
+            error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
+        ) from exc
+
+    target = await ctx.db.scalar(select(User).where(User.user_id == user_id))
+    user_name = target.user_name if target is not None else str(user_id)
+    old_items = [
+        {"deptId": str(dept_id), "isPrimary": is_primary}
+        for dept_id, is_primary in result.old_assignments
+    ]
+    new_items = [
+        {"deptId": str(dept_id), "isPrimary": is_primary}
+        for dept_id, is_primary in result.new_assignments
+    ]
+    old_display = _format_ai_dept_assignments(
+        result.old_assignments,
+        ctx.approved_business_snapshot,
+    )
+    new_display = _format_ai_dept_assignments(
+        result.new_assignments,
+        ctx.approved_business_snapshot,
+    )
+    subject_dept_ids = sorted(
+        {
+            dept_id
+            for dept_id, _is_primary in (
+                *result.old_assignments,
+                *result.new_assignments,
+            )
+        }
+    )
+    return ToolResult.success(
+        data={
+            "updated": 1,
+            "userId": str(user_id),
+            "userName": user_name,
+            "oldDeptAssignments": old_items,
+            "newDeptAssignments": new_items,
+        },
+        projection=ResultProjection(
+            subject_refs=(
+                {"type": "user", "id": str(user_id)},
+                *({"type": "dept", "id": str(dept_id)} for dept_id in subject_dept_ids),
+            )
+        ),
+        ui=UIResult(
+            view_type="detail_card",
+            view_data={
+                "title": user_name,
+                "fields": [
+                    {
+                        "label": "page.ai.chat.previousDepartments",
+                        "value": old_display,
+                    },
+                    {
+                        "label": "page.ai.chat.newDepartments",
+                        "value": new_display,
+                    },
+                ],
+            },
+            audit={
+                "affected_user_ids": [str(user_id)],
+                "old_dept_ids": [item["deptId"] for item in old_items],
+                "new_dept_ids": [item["deptId"] for item in new_items],
+            },
+            label_key="ai.tool.user.update_dept.result",
+            label_params={"userName": user_name},
+        ),
+    )
+
+
+async def _dry_run_user_update_dept(
+    ctx: AiToolContext,
+    *,
+    user_id: int,
+    dept_assignments: list[AiUserDepartmentAssignment],
+) -> Any:
+    """Freeze the normalized replacement and its server-owned approval facts."""
+    from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
+    from app.modules.system.service.user_department_assignment_service import (  # noqa: PLC0415
+        user_department_assignment_service,
+    )
+
+    parsed = _parse_ai_dept_assignments(dept_assignments)
+    preview = await user_department_assignment_service.preview_departments(
+        ctx.db,
+        actor_user_id=ctx.user.user_id,
+        target_user_id=user_id,
+        dept_assignments=parsed,
+    )
+    canonical_assignments = [
+        {"dept_id": dept_id, "is_primary": is_primary}
+        for dept_id, is_primary in preview.new_assignments
+    ]
+    old_display = "; ".join(preview.old_display) or "—"
+    new_display = "; ".join(preview.new_display) or "—"
+    return DryRunResult(
+        ok=True,
+        count=1,
+        reason=f"将调整用户 {preview.user_name} 的完整部门集合",
+        summary_key="page.ai.chat.confirmUpdateDeptSummary",
+        summary_params={"userName": preview.user_name},
+        examples=[f"原部门：{old_display}", f"新部门：{new_display}"],
+        confirmation_fields=[
+            {
+                "label": "user_id",
+                "value": user_id,
+                "display_value": f"{preview.user_name}（{user_id}）",
+            },
+            {
+                "label": "dept_assignments",
+                "value": dept_assignments,
+                "display_value": f"{old_display} → {new_display}",
+            },
+        ],
+        execution_args={
+            "user_id": int(preview.user_id),
+            "dept_assignments": canonical_assignments,
+        },
+        business_snapshot=preview.snapshot,
     )
 
 
@@ -1329,6 +1652,50 @@ async def user_list(
     )
 
 
+async def _load_ai_user_department_assignments(
+    ctx: AiToolContext,
+    *,
+    user_id: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Return the complete scoped assignment set or no partial identifiers."""
+    assignment_rows = (
+        await ctx.db.execute(
+            select(user_depts.c.dept_id, user_depts.c.is_primary)
+            .where(user_depts.c.user_id == user_id)
+            .order_by(user_depts.c.dept_id)
+        )
+    ).all()
+    dept_ids = {int(dept_id) for dept_id, _is_primary in assignment_rows}
+    visible_dept_ids = ctx.data_scope.accessible_dept_ids
+    if visible_dept_ids is not None and not dept_ids <= visible_dept_ids:
+        return [], False
+    if not dept_ids:
+        return [], True
+
+    depts = list(
+        (
+            await ctx.db.execute(
+                select(Dept).where(Dept.dept_id.in_(dept_ids)).order_by(Dept.dept_id)
+            )
+        ).scalars()
+    )
+    if len(depts) != len(dept_ids):
+        return [], False
+    dept_map = {int(dept.dept_id): dept for dept in depts}
+    return (
+        [
+            {
+                "deptId": str(dept_id),
+                "deptName": dept_map[int(dept_id)].dept_name,
+                "isPrimary": str(is_primary) == IS_PRIMARY_YES,
+                "status": dept_map[int(dept_id)].status,
+            }
+            for dept_id, is_primary in assignment_rows
+        ],
+        True,
+    )
+
+
 @ai_tool(
     AiToolMeta(
         name="user.lookup",
@@ -1398,14 +1765,28 @@ async def user_lookup(
         pass
 
     u = user[0]
+    result_data: dict[str, Any] = {
+        "id": str(u.user_id),
+        "user_name": u.user_name,
+        "nickname": u.nickname,
+        "status": u.status,
+    }
+    subject_refs: list[dict[str, str]] = [{"type": "user", "id": str(u.user_id)}]
+    if "system:dept:list" in ctx.perms:
+        assignments, assignments_complete = await _load_ai_user_department_assignments(
+            ctx,
+            user_id=int(u.user_id),
+        )
+        result_data["departmentAssignmentsComplete"] = assignments_complete
+        result_data["departmentAssignments"] = assignments
+        if assignments_complete:
+            subject_refs.extend(
+                {"type": "dept", "id": assignment["deptId"]}
+                for assignment in assignments
+            )
     return ToolResult.success(
-        data={
-            "id": str(u.user_id),
-            "user_name": u.user_name,
-            "nickname": u.nickname,
-            "status": u.status,
-        },
-        projection=_result_projection("user", [u.user_id]),
+        data=result_data,
+        projection=ResultProjection(subject_refs=tuple(subject_refs)),
         ui=UIResult(
             view_type="detail_card",
             view_data={
