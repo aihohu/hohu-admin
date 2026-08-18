@@ -3,9 +3,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import (
     DEPT_MAX_LEVEL,
-    IS_PRIMARY_NO,
-    IS_PRIMARY_YES,
-    STATUS_ENABLED,
 )
 from app.core.exceptions import (
     BusinessRuleException,
@@ -15,15 +12,11 @@ from app.core.exceptions import (
 )
 from app.db.base import user_depts
 from app.modules.system.models.dept import Dept
-from app.modules.system.models.user import User
 from app.modules.system.schemas.dept import (
     DeptCreate,
     DeptQuery,
     DeptUpdate,
-    DeptUserItem,
-    DeptUsersOut,
 )
-from app.modules.system.service.config_service import config_service
 from app.utils.pagination import build_filters, paginate
 
 
@@ -206,171 +199,6 @@ class DeptService:
         stmt = delete(Dept).where(Dept.dept_id.in_(ids))
         result = await db.execute(stmt)
         return result.rowcount
-
-    async def update_user_depts(
-        self, db: AsyncSession, user_id: int, dept_list: list[dict]
-    ) -> None:
-        """更新用户的部门关联（空列表表示清空所有关联）"""
-        # 先删除旧关联，使空列表也能正确清空
-        await db.execute(delete(user_depts).where(user_depts.c.user_id == user_id))
-
-        if not dept_list:
-            return
-
-        # 校验主部门
-        primary_count = sum(1 for d in dept_list if d.get("is_primary"))
-        if primary_count == 0:
-            raise BusinessRuleException("必须指定一个主部门")
-        if primary_count > 1:
-            raise BusinessRuleException("只能指定一个主部门")
-
-        # 校验部门都存在
-        dept_ids = [int(d["dept_id"]) for d in dept_list]
-        depts = await self.get_by_ids(db, dept_ids)
-        if len(depts) != len(dept_ids):
-            raise NotFoundException("部门")
-
-        # 插入新关联
-        for dept_item in dept_list:
-            await db.execute(
-                user_depts.insert().values(
-                    user_id=user_id,
-                    dept_id=int(dept_item["dept_id"]),
-                    is_primary=IS_PRIMARY_YES
-                    if dept_item.get("is_primary")
-                    else IS_PRIMARY_NO,
-                )
-            )
-
-    async def get_dept_users(self, db: AsyncSession, dept_id: int) -> DeptUsersOut:
-        """获取部门用户管理数据：所有启用用户 + 是否在该部门的标记"""
-        dept = await self.get_by_id(db, dept_id)
-
-        # 查询所有启用用户
-        users_result = await db.execute(
-            select(User)
-            .where(User.status == STATUS_ENABLED)
-            .order_by(User.create_time.desc())
-        )
-        users = list(users_result.scalars().all())
-
-        # 查询该部门的用户关联
-        member_result = await db.execute(
-            select(user_depts.c.user_id, user_depts.c.is_primary).where(
-                user_depts.c.dept_id == dept_id
-            )
-        )
-        member_map: dict[int, bool] = {
-            uid: (is_primary == IS_PRIMARY_YES)
-            for uid, is_primary in member_result.all()
-        }
-
-        items = [
-            DeptUserItem(
-                user_id=u.user_id,
-                user_name=u.user_name,
-                nickname=u.nickname,
-                user_email=u.user_email,
-                user_phone=u.user_phone,
-                status=u.status,
-                is_member=u.user_id in member_map,
-                is_primary=member_map.get(u.user_id, False),
-            )
-            for u in users
-        ]
-
-        return DeptUsersOut(dept_id=dept.dept_id, dept_name=dept.dept_name, users=items)
-
-    async def update_dept_users(
-        self, db: AsyncSession, dept_id: int, user_ids: list[int]
-    ) -> dict:
-        """批量更新部门用户关联：传入最终成员列表，diff 出新增/移除"""
-        await self.get_by_id(db, dept_id)
-
-        # 查询当前成员及主部门标记
-        current_result = await db.execute(
-            select(user_depts.c.user_id, user_depts.c.is_primary).where(
-                user_depts.c.dept_id == dept_id
-            )
-        )
-        current_map: dict[int, bool] = {
-            uid: (is_primary == IS_PRIMARY_YES)
-            for uid, is_primary in current_result.all()
-        }
-        current_ids = set(current_map.keys())
-        target_ids = set(user_ids)
-
-        to_add = target_ids - current_ids
-        to_remove = current_ids - target_ids
-
-        # 系统策略校验：若强制主部门，禁止移除导致用户无部门的操作
-        if to_remove:
-            if await config_service.get_bool(db, "user_require_primary_dept"):
-                # 检查每个待移除用户在本部门之外是否还有部门
-                other_result = await db.execute(
-                    select(user_depts.c.user_id).where(
-                        and_(
-                            user_depts.c.user_id.in_(to_remove),
-                            user_depts.c.dept_id != dept_id,
-                        )
-                    )
-                )
-                users_with_other = set(other_result.scalars().all())
-                orphan_users = to_remove - users_with_other
-                if orphan_users:
-                    raise BusinessRuleException(
-                        f"系统已开启「强制用户主部门」，移除后将导致 {len(orphan_users)} 名用户无任何部门",
-                        error_code="USER_PRIMARY_DEPT_REQUIRED",
-                    )
-
-        # 新增关联（默认非主部门）
-        if to_add:
-            await db.execute(
-                user_depts.insert(),
-                [
-                    {
-                        "user_id": uid,
-                        "dept_id": dept_id,
-                        "is_primary": IS_PRIMARY_NO,
-                    }
-                    for uid in to_add
-                ],
-            )
-
-        # 移除关联；若是主部门，需为受影响用户重新指定主部门
-        if to_remove:
-            await db.execute(
-                delete(user_depts).where(
-                    and_(
-                        user_depts.c.dept_id == dept_id,
-                        user_depts.c.user_id.in_(to_remove),
-                    )
-                )
-            )
-
-            removed_primary_users = [uid for uid in to_remove if current_map.get(uid)]
-            for uid in removed_primary_users:
-                # 查询该用户剩余的任意一个部门，设为主部门
-                other_result = await db.execute(
-                    select(user_depts.c.dept_id)
-                    .where(user_depts.c.user_id == uid)
-                    .order_by(user_depts.c.dept_id.asc())
-                    .limit(1)
-                )
-                other_dept = other_result.scalars().first()
-                if other_dept is not None:
-                    await db.execute(
-                        user_depts.update()
-                        .where(
-                            and_(
-                                user_depts.c.user_id == uid,
-                                user_depts.c.dept_id == other_dept,
-                            )
-                        )
-                        .values(is_primary=IS_PRIMARY_YES)
-                    )
-
-        return {"added": len(to_add), "removed": len(to_remove)}
 
     def _get_dept_level(self, ancestors: str | None) -> int:
         """根据 ancestors 计算当前层级"""

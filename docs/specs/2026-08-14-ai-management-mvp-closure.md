@@ -797,6 +797,16 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 
 47. **策略配置和假设作用域必须使用当前事务事实** — `user_require_primary_dept` 属于授权写入门禁，必须绕过 300 秒 best-effort cache 并在事务内锁定配置行；以候选部门计算目标用户授权时，数据库查询返回的旧主体必须先移除，再仅按候选部门与 `include_self` 语义重建。**反例**: 配置已从 false 改为 true 但旧缓存仍允许清空部门；CUSTOM 角色绑定旧部门 A、用户拟迁往 B 时，旧 A 查询残留该用户并把越权影响误判为可接受。**回归**: `tests/modules/system/test_user_department_assignment_service.py::test_replace_departments_bypasses_stale_primary_policy_cache`、`tests/modules/system/test_user_role_assignment_service.py::test_hypothetical_custom_scope_drops_subject_from_removed_department`。
 
+48. **所有在线用户部门 writer 统一进入共享 Policy** — 页面 create、AI `user.create`、import create/overwrite 和部门中心成员更新都必须使用同一个部门完整集合授权边界；导入在整批 role → dept → user 锁内复验组合后的最终角色/部门事实，再调用仅允许已验证锁内写入的关联 helper。**反例**: import overwrite 或 AI create 继续直接写 `user_depts`，会绕过隐藏旧关联、主部门配置和目标前后物化授权。**回归**: `tests/modules/system/test_user_api_atomicity.py`、`tests/modules/system/test_ai_tools_user_create_reset_password.py`、`tests/modules/system/test_user_import_dry_run.py`、`tests/modules/system/test_user_import_execute.py`，且运行时代码中 `user_depts` 写入只保留在 `UserDepartmentAssignmentService`。
+
+49. **部门中心成员更新先验证完整集合，再批量物化授权** — GET 必须先发现全部旧成员，任一隐藏成员使整体 403；PUT 对全部变更用户批量加载角色、部门、Role-Agent 和 data scope，锁后再次批量物化并在任何写入前完成逐用户 dominance。**反例**: 过滤 scope 外旧成员后提交可见子集会静默删除隐藏关联；逐用户查询又会让大部门产生 N+1。**回归**: `tests/modules/system/test_department_membership_service.py`、`tests/modules/system/test_dept_membership_contracts.py`、`tests/modules/system/test_user_role_assignment_service.py::test_bulk_authority_materialization_matches_single_policy`。
+
+50. **Web 只在授权且关联集合变化时调用独立 writer** — 新建用户只有拥有 `system:user:role-auth` 才提交显式 `roleIds`，只有拥有 `system:dept:list` 才加载/提交部门；编辑页面把 profile、roles、departments 分别提交到独立 API，未变化的关联不重写。部门成员弹窗分页获取完整最小候选，主部门成员不可从该入口移除。**反例**: 沿用宽 payload 会得到虚假保存成功；普通资料编辑时无条件重写关联会把未授权或隐藏旧集合错误带入写请求。**回归**: `src/views/system/user/modules/__tests__/user-operate-drawer.spec.ts`、`src/views/system/dept/modules/__tests__/dept-users-modal.spec.ts`。
+
+51. **导入按唯一目标和传递范围冻结最终授权组合** — 同一现有用户被多行解析命中时，两行都以 `AI_IMPORT_DUPLICATE_TARGET` 进入冲突集合，不允许把前一行角色与后一行部门组合成未经 dominance 的终态；只要批次涉及启用的 `DEPT_AND_SUB`，全局锁集合必须展开所有直接/自定义部门的完整后代，再在锁内分类和写入。**反例**: 第一行写角色 B/部门 X、第二行角色留空/部门 Y 会形成未验证的 B+Y；只锁父部门又允许并发向子部门新增 scope 外成员。**回归**: `tests/modules/system/test_user_import_execute.py::test_import_classification_rejects_duplicate_existing_targets`、`tests/modules/system/test_user_role_assignment_service.py::test_import_lock_includes_descendant_department_dependencies`。
+
+52. **完整集合页面在不完整读取和锁后授权漂移时 fail closed** — 部门成员 PUT 比较锁前/后的操作者 version、角色定义、menu/custom dept、active Role-Agent、物化用户/部门集合及部门结构快照，任一变化返回 `AUTHORIZATION_SNAPSHOT_STALE`；Web 成员候选任一分页失败都保持不可提交，用户编辑多个独立 writer 中后续失败时必须明确提示部分成功、关闭旧表单并刷新服务端事实。**反例**: 后页失败后提交空集会删除全部非主部门成员；角色写已 commit 后部门失败却继续展示旧表单会造成虚假原子保存。**回归**: `tests/modules/system/test_department_membership_service.py::test_member_replacement_rejects_role_definition_drift_after_preload`、`dept-users-modal.spec.ts`、`user-operate-drawer.spec.ts`。
+
 ---
 
 ## 10. 实施计划
@@ -837,10 +847,11 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 - [x] P2-B1 验证证据：角色契约/Policy 及相关页面、AI、import 定向回归 126 项通过；`ruff check .`、`ruff format --check .`、19 tools / 12 checks 通过；后端全量 2028 项测试通过，总覆盖率 73.57%，仅保留 2 条既有 SQLAlchemy transaction warning。AI 模块关闭 fresh process 继续不加载 Tool Registry。
 - [x] ✅ P2-B2 已完成（2026-08-17；审查修复 2026-08-17）：新增页面 `PUT /system/user/{user_id}/departments` 与严格 `{deptAssignments}` 完整替换契约，API 和 Service 双层要求 `system:user:edit + system:dept:list`。独立 `UserDepartmentAssignmentService` 校验目标用户及旧/新部门完整 scope、启用可分配状态、动态主部门配置、admin/R_SUPER 保护，并以目标完整启用角色分别物化变更前后 permission/menu/Agent/部门/用户授权，任一不受操作者 `GrantAuthority` dominance 即原子拒绝。预读角色、部门结构影响和用户关联后按 role → dept → user 加锁，锁后重载并拒绝关联漂移或新结构依赖。审查修复后，主部门策略绕过 best-effort cache 并锁定配置行，候选部门作用域移除数据库旧主体后按候选事实精确重建；隐藏旧关联删除、admin/R_SUPER 目标保护均有显式回归。本工作包无数据库迁移、seed、AI Tool、import overwrite、部门成员页或 Web 改动。
 - [x] P2-B2 验证证据：部门契约、页面事务和共享 Policy 定向回归 35 项，角色兼容合计 48 项，system 模块 539 项全部通过；`ruff check .`、`ruff format --check .`、19 tools / 12 checks 通过；后端全量 2053 项测试通过，总覆盖率 73.81%，仅保留 2 条既有 SQLAlchemy transaction warning。
-- [ ] 拆分用户资料、部门、角色页面 API；页面 create 显式角色和 import 角色列强制 `system:user:role-auth`，固定 `R_USER` 仅按 §4.1 窄例外处理；收口其他角色/部门 writer，页面与 AI 共用替换 Policy。
+- [x] ✅ P2-B3 已完成（2026-08-18；审查修复 2026-08-18）：页面 create、AI `user.create`、import create/overwrite 和部门成员页全部接入共享角色/部门 Policy；移除 `DeptService` 的旧无授权关联 writer，运行时 `user_depts` 写入统一收口到 `UserDepartmentAssignmentService`。导入拒绝重复现有目标并为 `DEPT_AND_SUB` 展开完整后代锁；部门成员 GET 使用 user-scoped 最小分页并对隐藏旧成员整体阻断，PUT 对完整旧/新成员逐用户执行主部门、scope、前后授权 dominance 和锁前/锁后完整授权快照比较，以批量物化避免 N+1。Web 新建按 role-auth/dept-list 条件提交显式集合，编辑使用独立 profile/roles/departments API 且不重写未变化关联，并在部分 writer 已提交后显式刷新；部门成员弹窗只有全部分页成功才允许提交完整候选。本工作包无数据库迁移或 seed 变更。
+- [x] P2-B3 验证证据：后端 `ruff check .`、`ruff format --check .`、19 tools / 12 checks 与全量 2067 项测试通过，总覆盖率 74.22%，仅保留 30 条 import fixture SQLAlchemy warning 和 2 条既有 transaction warning；Web lint 0 error / 30 条既有 warning、typecheck、31 files / 119 tests 与 production build 全部通过。
 - [ ] 对齐 data-scoped `user.dept_lookup`，实现并验收 `user.update_dept` 的旧/新完整集合、目标用户前后物化授权和快照规则。
 - [ ] 同步交付 `user.role_lookup`，实现并验收 `user.update_roles` 的最终有效授权 dominance。
-- [ ] 重构 `/system/dept/{id}/users`：候选最小化且 user-scoped，完整旧/新成员及逐用户部门/授权 Policy、主部门拒绝、全局锁和整批原子失败全部落地。
+- [x] 重构 `/system/dept/{id}/users`：候选最小化且 user-scoped，完整旧/新成员及逐用户部门/授权 Policy、主部门拒绝、全局锁和整批原子失败全部落地。
 - [ ] `/ai/role-agent` 普通管理员写入口接入完整 Role Delegation Policy；Phase 1 + Phase 2 安全门禁全部通过后只允许进入集成分支，不允许生产部署。
 
 ### Phase 3：部门与角色 Agent

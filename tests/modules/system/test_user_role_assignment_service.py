@@ -1,13 +1,16 @@
 """Phase 2-B shared user role-assignment policy tests."""
 
+from unittest.mock import AsyncMock
+
 import pytest
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.constants import (
     DATA_SCOPE_ALL,
     DATA_SCOPE_CUSTOM,
+    DATA_SCOPE_DEPT_AND_SUB,
     DATA_SCOPE_SELF,
     STATUS_ENABLED,
     SUPER_ADMIN_ROLE_CODE,
@@ -15,6 +18,7 @@ from app.constants import (
 )
 from app.core.exceptions import AuthorizationException, BusinessRuleException
 from app.core.id_generator import next_id
+from app.db.base import user_depts
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
 from app.modules.system.constants import USER_ROLE_AUTH_PERMISSION
@@ -22,6 +26,7 @@ from app.modules.system.models.dept import Dept
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
+from app.modules.system.service.authorization_lock import authorization_lock_service
 from app.modules.system.service.user_role_assignment_service import (
     user_role_assignment_service,
 )
@@ -80,6 +85,155 @@ async def _reload_user(db: AsyncSession, user_id: int) -> User:
             .execution_options(populate_existing=True)
         )
     ).scalar_one()
+
+
+async def test_bulk_authority_materialization_matches_single_policy(
+    db_session: AsyncSession,
+) -> None:
+    root = Dept(
+        dept_id=next_id(),
+        dept_name=f"phase2-root-{next_id()}",
+        ancestors="0",
+        order_num=0,
+        status=STATUS_ENABLED,
+    )
+    child = Dept(
+        dept_id=next_id(),
+        dept_name=f"phase2-child-{next_id()}",
+        ancestors=f"0,{root.dept_id}",
+        order_num=0,
+        status=STATUS_ENABLED,
+    )
+    custom = Dept(
+        dept_id=next_id(),
+        dept_name=f"phase2-custom-{next_id()}",
+        ancestors="0",
+        order_num=0,
+        status=STATUS_ENABLED,
+    )
+    subtree_role = _role(
+        f"R_SUBTREE_{next_id()}",
+        data_scope=DATA_SCOPE_DEPT_AND_SUB,
+        menus=[_menu(f"qa:subtree:{next_id()}")],
+    )
+    custom_role = _role(
+        f"R_CUSTOM_{next_id()}",
+        data_scope=DATA_SCOPE_CUSTOM,
+        menus=[_menu(f"qa:custom:{next_id()}")],
+    )
+    custom_role.depts = [custom]
+    agent = AiAgent(
+        agent_id=next_id(),
+        code=f"phase2-bulk-agent-{next_id()}",
+        name="Phase 2 bulk agent",
+        description="Phase 2 bulk agent",
+        enabled=True,
+    )
+    subtree_user = _user(f"phase2-subtree-{next_id()}", [subtree_role])
+    custom_user = _user(f"phase2-custom-{next_id()}", [custom_role])
+    child_member = _user(f"phase2-child-member-{next_id()}", [])
+    custom_member = _user(f"phase2-custom-member-{next_id()}", [])
+    db_session.add_all(
+        [
+            root,
+            child,
+            custom,
+            subtree_role,
+            custom_role,
+            agent,
+            subtree_user,
+            custom_user,
+            child_member,
+            custom_member,
+        ]
+    )
+    await db_session.flush()
+    db_session.add(
+        RoleAiAgent(
+            role_id=custom_role.role_id,
+            agent_id=agent.agent_id,
+            enabled=True,
+        )
+    )
+    await db_session.execute(
+        insert(user_depts),
+        [
+            {"user_id": subtree_user.user_id, "dept_id": root.dept_id},
+            {"user_id": child_member.user_id, "dept_id": child.dept_id},
+            {"user_id": custom_member.user_id, "dept_id": custom.dept_id},
+        ],
+    )
+    await db_session.flush()
+    subtree_user = await user_role_assignment_service._load_user(
+        db_session,
+        subtree_user.user_id,
+    )
+    custom_user = await user_role_assignment_service._load_user(
+        db_session,
+        custom_user.user_id,
+    )
+    candidates = [
+        (subtree_user, list(subtree_user.roles), list(subtree_user.depts)),
+        (custom_user, list(custom_user.roles), list(custom_user.depts)),
+    ]
+
+    bulk = await user_role_assignment_service.materialize_role_set_authorities(
+        db_session,
+        candidates=candidates,
+    )
+    singles = [
+        await user_role_assignment_service.materialize_role_set_authority(
+            db_session,
+            user=user,
+            roles=roles,
+            depts=depts,
+        )
+        for user, roles, depts in candidates
+    ]
+
+    assert bulk == singles
+
+
+async def test_import_lock_includes_descendant_department_dependencies(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Dept(
+        dept_id=next_id(),
+        dept_name=f"phase2-import-root-{next_id()}",
+        ancestors="0",
+        order_num=0,
+        status=STATUS_ENABLED,
+    )
+    child = Dept(
+        dept_id=next_id(),
+        dept_name=f"phase2-import-child-{next_id()}",
+        parent_id=root.dept_id,
+        ancestors=f"0,{root.dept_id}",
+        order_num=0,
+        status=STATUS_ENABLED,
+    )
+    subtree_role = _role(
+        f"R_IMPORT_SUBTREE_{next_id()}",
+        data_scope=DATA_SCOPE_DEPT_AND_SUB,
+    )
+    actor = _user(f"phase2-import-lock-{next_id()}", [subtree_role])
+    db_session.add_all([root, child, subtree_role, actor])
+    await db_session.flush()
+    lock_targets = AsyncMock()
+    monkeypatch.setattr(authorization_lock_service, "lock_targets", lock_targets)
+
+    await user_role_assignment_service.lock_import_targets(
+        db_session,
+        actor_user_id=actor.user_id,
+        target_user_ids=set(),
+        role_ids=set(),
+        dept_ids={root.dept_id},
+    )
+
+    locked_dept_ids = lock_targets.await_args.kwargs["dept_ids"]
+    assert root.dept_id in locked_dept_ids
+    assert child.dept_id in locked_dept_ids
 
 
 async def test_replace_roles_accepts_a_dominated_complete_set(

@@ -13,12 +13,13 @@ import hashlib
 import io
 import json
 import secrets
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
 
 from openpyxl import Workbook
-from sqlalchemy import func, insert, select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,10 +35,12 @@ from app.core.exceptions import (
 from app.core.file_storage import FileStorage, get_file_storage
 from app.core.id_generator import next_id
 from app.core.security import get_password_hash
-from app.db.base import user_depts, user_roles
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.service.grant_authority import grant_authority_service
+from app.modules.system.service.user_department_assignment_service import (
+    user_department_assignment_service,
+)
 from app.modules.system.service.user_role_assignment_service import (
     user_role_assignment_service,
 )
@@ -284,6 +287,14 @@ async def _classify_records(
             has_role_column=has_role_column,
         )
     by_row = {resolution.row_num: resolution for resolution in resolutions}
+    target_counts = Counter(
+        resolution.target_user_id
+        for resolution in resolutions
+        if resolution.target_user_id is not None
+    )
+    duplicate_target_ids = {
+        target_user_id for target_user_id, count in target_counts.items() if count > 1
+    }
     authority = await grant_authority_service.build(db, int(current_user.user_id))
     ignored_user_ids = frozenset(
         resolution.prospective_user_id
@@ -297,6 +308,17 @@ async def _classify_records(
 
     for record in records:
         resolution = by_row[record.row_num]
+        if resolution.target_user_id in duplicate_target_ids:
+            conflict_records.append(
+                FailedRow(
+                    row_num=record.row_num,
+                    field="_batch",
+                    value=record.user_name,
+                    reason="Multiple import rows resolve to the same existing user",
+                    error_code="AI_IMPORT_DUPLICATE_TARGET",
+                )
+            )
+            continue
         if resolution.dept_error is not None:
             conflict_records.append(
                 _failed_resolution(
@@ -382,6 +404,42 @@ async def _classify_records(
                     )
                 continue
 
+        try:
+            await user_department_assignment_service.validate_import_department_assignment(
+                db,
+                actor_user_id=int(current_user.user_id),
+                target_user_id=resolution.target_user_id,
+                target_user_name=record.user_name,
+                target_status=resolution.target_status,
+                role_ids=list(resolution.role_ids or resolution.target_role_ids),
+                dept_assignments=[(resolution.dept_id, True)],
+                authority=authority,
+                ignored_user_ids=ignored_user_ids,
+                prospective_user_id=resolution.prospective_user_id,
+            )
+        except AuthorizationException as exc:
+            out_of_scope_records.append(
+                FailedRow(
+                    row_num=record.row_num,
+                    field="dept_input",
+                    value=record.dept_input,
+                    reason=str(exc),
+                    error_code="AI_IMPORT_DEPT_OUT_OF_SCOPE",
+                )
+            )
+            continue
+        except BusinessRuleException as exc:
+            conflict_records.append(
+                FailedRow(
+                    row_num=record.row_num,
+                    field="dept_input",
+                    value=record.dept_input,
+                    reason=str(exc),
+                    error_code=exc.error_code,
+                )
+            )
+            continue
+
         if resolution.target_user_id is None:
             new_records.append(record)
         else:
@@ -452,6 +510,10 @@ async def _lock_import_authorization_targets(
         db,
         actor_user_id=int(current_user.user_id),
         has_role_column=has_role_column,
+    )
+    await user_department_assignment_service.ensure_import_permissions(
+        db,
+        actor_user_id=int(current_user.user_id),
     )
     return actor, after
 
@@ -768,15 +830,13 @@ async def _process_create_row(
         has_role_column=has_role_column,
         ignored_user_ids=ignored_user_ids,
     )
-    await db.execute(
-        insert(user_depts),
-        [
-            {
-                "user_id": new_user.user_id,
-                "dept_id": resolution.dept_id,
-                "is_primary": "Y",
-            }
-        ],
+    await user_department_assignment_service.replace_imported_user_departments(
+        db,
+        actor_user_id=current_user.user_id,
+        target_user_id=new_user.user_id,
+        dept_assignments=[(resolution.dept_id, True)],
+        created_target=True,
+        ignored_user_ids=ignored_user_ids,
     )
     await db.flush()
 
@@ -811,29 +871,16 @@ async def _process_overwrite_row(
 
     # roles 和 dept 使用全量重置语义。
     if record.role_input and resolution.role_ids:
-        await db.execute(
-            user_roles.delete().where(user_roles.c.user_id == existing.user_id)
-        )
-        await db.execute(
-            insert(user_roles),
-            [
-                {"user_id": existing.user_id, "role_id": role_id}
-                for role_id in resolution.role_ids
-            ],
+        await user_role_assignment_service.apply_locked_import_roles(
+            db,
+            target_user_id=existing.user_id,
+            role_ids=list(resolution.role_ids),
         )
 
-    await db.execute(
-        user_depts.delete().where(user_depts.c.user_id == existing.user_id)
-    )
-    await db.execute(
-        insert(user_depts),
-        [
-            {
-                "user_id": existing.user_id,
-                "dept_id": resolution.dept_id,
-                "is_primary": "Y",
-            }
-        ],
+    await user_department_assignment_service.apply_locked_import_departments(
+        db,
+        target_user_id=existing.user_id,
+        dept_assignments=[(resolution.dept_id, True)],
     )
     await db.flush()
 

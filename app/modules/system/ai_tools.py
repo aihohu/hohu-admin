@@ -702,7 +702,7 @@ def _build_ai_user_create_schema(
         name="user.create",
         agent="user_mgmt",
         summary="Create one user in a primary dept with backend password/default role; HITL confirms.",
-        required_perms=("system:user:add",),
+        required_perms=("system:user:add", "system:dept:list"),
         risk="high",
         readonly=False,
         idempotent=False,
@@ -727,8 +727,8 @@ async def user_create(
 ) -> ToolResult:
     """创建单个用户；密码与角色完全由后端策略决定。"""
     from app.constants import USER_ROLE_CODE  # noqa: PLC0415
-    from app.modules.system.service.dept_service import (  # noqa: PLC0415
-        dept_service,
+    from app.modules.system.service.user_department_assignment_service import (  # noqa: PLC0415
+        user_department_assignment_service,
     )
     from app.modules.system.service.user_role_assignment_service import (  # noqa: PLC0415
         user_role_assignment_service,
@@ -753,6 +753,11 @@ async def user_create(
         primary_dept_id=primary_dept_id,
         default_password=default_password,
     )
+    await user_department_assignment_service.ensure_create_permissions(
+        ctx.db,
+        actor_user_id=ctx.user.user_id,
+        has_departments=True,
+    )
 
     new_user = await user_service.create_user(ctx.db, user_in)
     await ctx.db.flush()
@@ -763,10 +768,11 @@ async def user_create(
         role_ids=None,
         dept_ids=[primary_dept_id],
     )
-    await dept_service.update_user_depts(
+    await user_department_assignment_service.assign_created_user_departments(
         ctx.db,
-        new_user.user_id,
-        [{"dept_id": primary_dept_id, "is_primary": True}],
+        actor_user_id=ctx.user.user_id,
+        target_user_id=new_user.user_id,
+        dept_assignments=[(primary_dept_id, True)],
     )
     await ctx.db.flush()
 

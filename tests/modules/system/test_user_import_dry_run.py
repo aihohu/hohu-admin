@@ -21,7 +21,9 @@ from sqlalchemy import select as _select
 from app.constants import (
     ADMIN_USERNAME,
     DATA_SCOPE_ALL,
+    DATA_SCOPE_CUSTOM,
     DATA_SCOPE_DEPT,
+    DATA_SCOPE_SELF,
     SUPER_ADMIN_ROLE_CODE,
 )
 from app.core import redis as redis_module
@@ -382,6 +384,79 @@ class TestDryRunClassification:
         )
 
         assert result.out_of_scope_count == 1
+        assert (
+            result.out_of_scope_records[0].error_code == "AI_IMPORT_DEPT_OUT_OF_SCOPE"
+        )
+
+    async def test_dry_run_rejects_overwrite_that_removes_hidden_old_department(
+        self,
+        db_session,
+    ):
+        visible_dept = _make_dept(7411, "QA-DryRun-Visible")
+        hidden_dept = _make_dept(7412, "QA-DryRun-Hidden")
+        actor_role = _make_role(
+            7413,
+            "QA_R_IMPORT_SCOPED",
+            "QA Import Scoped",
+            data_scope=DATA_SCOPE_CUSTOM,
+        )
+        actor_role.menus = [
+            Menu(
+                menu_id=7414,
+                menu_name="QA import",
+                menu_type="F",
+                permission="system:user:import",
+                status="1",
+            ),
+            Menu(
+                menu_id=7415,
+                menu_name="QA dept list",
+                menu_type="F",
+                permission="system:dept:list",
+                status="1",
+            ),
+        ]
+        actor_role.depts = [visible_dept]
+        target_role = _make_role(
+            7416,
+            "QA_R_IMPORT_TARGET",
+            "QA Import Target",
+            data_scope=DATA_SCOPE_SELF,
+        )
+        operator = _make_user(
+            9211,
+            "QA_DR_IMPORT_SCOPED",
+            [actor_role],
+            [visible_dept],
+        )
+        target = _make_user(
+            9212,
+            "QA_IMP_TARGET",
+            [target_role],
+            [visible_dept, hidden_dept],
+        )
+        db_session.add_all(
+            [visible_dept, hidden_dept, actor_role, target_role, operator, target]
+        )
+        await db_session.flush()
+
+        result, _batch = await dry_run_import_users(
+            db_session,
+            [
+                _make_record(
+                    2,
+                    target.user_name,
+                    dept_input=visible_dept.dept_name,
+                )
+            ],
+            operator,
+            file_bytes=_file_bytes(),
+            filename="hidden-old.xlsx",
+            reason="QA hidden old department",
+        )
+
+        assert result.out_of_scope_count == 1
+        assert result.exists_count == 0
         assert (
             result.out_of_scope_records[0].error_code == "AI_IMPORT_DEPT_OUT_OF_SCOPE"
         )

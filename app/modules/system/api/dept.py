@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Body, Depends, Query
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +18,9 @@ from app.modules.system.schemas.dept import (
     DeptUsersUpdate,
 )
 from app.modules.system.service.dept_service import dept_service
+from app.modules.system.service.user_department_assignment_service import (
+    user_department_assignment_service,
+)
 from app.utils.pagination import build_filters, paginate
 
 router = APIRouter()
@@ -252,34 +255,57 @@ async def batch_delete_depts(
     "/{dept_id}/users",
     response_model=ResponseModel[DeptUsersOut],
     summary="获取部门用户管理数据",
-    description="返回所有启用用户及是否在该部门的标记，用于部门-用户管理弹窗",
-    dependencies=[Depends(require_permissions("system:dept:edit"))],
+    description="返回当前用户数据范围内的部门成员候选分页",
+    dependencies=[
+        Depends(require_permissions("system:dept:list")),
+        Depends(require_permissions("system:dept:edit")),
+        Depends(require_permissions("system:user:list")),
+    ],
 )
 async def get_dept_users(
     dept_id: int,
+    query: str | None = Query(None, max_length=100),
+    current: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
-    """获取部门用户管理数据"""
-    data = await dept_service.get_dept_users(db, dept_id)
-    return ResponseModel.success(data=data)
+    """Return one user-scoped page of membership candidates."""
+    page = await user_department_assignment_service.list_department_members(
+        db,
+        actor_user_id=current_user.user_id,
+        dept_id=dept_id,
+        query=query,
+        current=current,
+        size=size,
+    )
+    return ResponseModel.success(data=DeptUsersOut.model_validate(page))
 
 
 @router.put(
     "/{dept_id}/users",
     summary="批量更新部门用户",
     description="传入最终成员用户ID列表，后端 diff 出新增/移除并批量更新",
-    dependencies=[Depends(require_permissions("system:dept:edit"))],
+    dependencies=[
+        Depends(require_permissions("system:dept:list")),
+        Depends(require_permissions("system:dept:edit")),
+        Depends(require_permissions("system:user:edit")),
+    ],
 )
 async def update_dept_users(
     dept_id: int,
     body: DeptUsersUpdate,
     db: AsyncSession = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
-    """批量更新部门用户关联"""
-    result = await dept_service.update_dept_users(db, dept_id, body.user_ids)
+    """Replace the complete department member set atomically."""
+    result = await user_department_assignment_service.replace_department_members(
+        db,
+        actor_user_id=current_user.user_id,
+        dept_id=dept_id,
+        user_ids=body.user_ids,
+    )
     await db.commit()
     return ResponseModel.success(
-        msg=f"新增 {result['added']} 人，移除 {result['removed']} 人"
+        msg=f"新增 {result.added} 人，移除 {result.removed} 人"
     )

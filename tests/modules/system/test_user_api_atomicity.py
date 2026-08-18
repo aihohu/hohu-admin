@@ -44,7 +44,7 @@ async def test_user_create_assigns_roles_after_generated_id_and_departments() ->
     async def flush() -> None:
         calls.append("flush")
 
-    async def update_departments(*_args, **_kwargs) -> None:
+    async def assign_departments(*_args, **_kwargs) -> None:
         calls.append("departments")
 
     async def assign_roles(*_args, **_kwargs) -> None:
@@ -61,17 +61,19 @@ async def test_user_create_assigns_roles_after_generated_id_and_departments() ->
             new=AsyncMock(return_value=created_user),
         ),
         patch(
-            "app.modules.system.api.user.config_service.get_bool",
-            new=AsyncMock(return_value=False),
-        ),
-        patch(
-            "app.modules.system.api.user.dept_service.update_user_depts",
-            new=AsyncMock(side_effect=update_departments),
-        ),
+            "app.modules.system.api.user.user_department_assignment_service."
+            "ensure_create_permissions",
+            new=AsyncMock(),
+        ) as ensure_department_permissions,
         patch(
             "app.modules.system.api.user.user_role_assignment_service.assign_created_user_roles",
             new=AsyncMock(side_effect=assign_roles),
         ) as assign_created_roles,
+        patch(
+            "app.modules.system.api.user.user_department_assignment_service."
+            "assign_created_user_departments",
+            new=AsyncMock(side_effect=assign_departments),
+        ) as assign_created_departments,
     ):
         await add_user(user_in=user_in, db=db_mock, current_user=_actor())
 
@@ -80,6 +82,11 @@ async def test_user_create_assigns_roles_after_generated_id_and_departments() ->
         actor_user_id=42,
         explicit_roles=False,
     )
+    ensure_department_permissions.assert_awaited_once_with(
+        db_mock,
+        actor_user_id=42,
+        has_departments=True,
+    )
     assert calls == ["flush", "roles", "departments"]
     assign_created_roles.assert_awaited_once_with(
         db_mock,
@@ -87,6 +94,12 @@ async def test_user_create_assigns_roles_after_generated_id_and_departments() ->
         target_user_id=123,
         role_ids=None,
         dept_ids=[1],
+    )
+    assign_created_departments.assert_awaited_once_with(
+        db_mock,
+        actor_user_id=42,
+        target_user_id=123,
+        dept_assignments=[(1, True)],
     )
     db_mock.commit.assert_awaited_once()
 

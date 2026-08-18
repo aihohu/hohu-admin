@@ -27,11 +27,14 @@ from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.service.authorization_lock import authorization_lock_service
+from app.modules.system.service.grant_authority import grant_authority_service
 from app.modules.system.service.user_department_assignment_service import (
     user_department_assignment_service,
 )
 
 USER_EDIT_PERMISSION = "system:user:edit"
+USER_ADD_PERMISSION = "system:user:add"
+USER_IMPORT_PERMISSION = "system:user:import"
 DEPT_LIST_PERMISSION = "system:dept:list"
 
 
@@ -152,6 +155,107 @@ async def test_replace_departments_applies_one_complete_authorized_set(
     assert await _assignments(db_session, target.user_id) == [
         (new_dept.dept_id, IS_PRIMARY_NO)
     ]
+
+
+async def test_assign_created_departments_uses_add_and_department_permissions(
+    db_session: AsyncSession,
+) -> None:
+    dept = _dept("phase2-created")
+    actor_role = _role(
+        f"R_DEPT_ACTOR_{next_id()}",
+        data_scope=DATA_SCOPE_ALL,
+        menus=[_menu(USER_ADD_PERMISSION), _menu(DEPT_LIST_PERMISSION)],
+    )
+    target_role = _role(f"R_DEPT_TARGET_{next_id()}")
+    actor = _user(f"phase2-dept-actor-{next_id()}", [actor_role])
+    target = _user(f"phase2-dept-created-{next_id()}", [target_role])
+    db_session.add_all([dept, actor_role, target_role, actor, target])
+    await db_session.flush()
+
+    with patch(
+        "app.modules.system.service.user_department_assignment_service."
+        "config_service.get_bool_for_update",
+        AsyncMock(return_value=False),
+    ):
+        result = (
+            await user_department_assignment_service.assign_created_user_departments(
+                db_session,
+                actor_user_id=actor.user_id,
+                target_user_id=target.user_id,
+                dept_assignments=[(dept.dept_id, True)],
+            )
+        )
+
+    assert result.old_assignments == ()
+    assert result.new_assignments == ((dept.dept_id, True),)
+    assert await _assignments(db_session, target.user_id) == [
+        (dept.dept_id, IS_PRIMARY_YES)
+    ]
+
+
+async def test_created_departments_require_department_list_permission(
+    db_session: AsyncSession,
+) -> None:
+    dept = _dept("phase2-created")
+    actor_role = _role(
+        f"R_DEPT_ACTOR_{next_id()}",
+        data_scope=DATA_SCOPE_ALL,
+        menus=[_menu(USER_ADD_PERMISSION)],
+    )
+    target_role = _role(f"R_DEPT_TARGET_{next_id()}")
+    actor = _user(f"phase2-dept-actor-{next_id()}", [actor_role])
+    target = _user(f"phase2-dept-created-{next_id()}", [target_role])
+    db_session.add_all([dept, actor_role, target_role, actor, target])
+    await db_session.flush()
+
+    with pytest.raises(AuthorizationException) as exc_info:
+        await user_department_assignment_service.assign_created_user_departments(
+            db_session,
+            actor_user_id=actor.user_id,
+            target_user_id=target.user_id,
+            dept_assignments=[(dept.dept_id, True)],
+        )
+
+    assert exc_info.value.error_code == "MISSING_PERMISSION"
+    assert await _assignments(db_session, target.user_id) == []
+
+
+async def test_import_department_validation_cannot_delete_a_hidden_old_assignment(
+    db_session: AsyncSession,
+) -> None:
+    visible_dept = _dept("phase2-visible")
+    hidden_dept = _dept("phase2-hidden")
+    actor_role = _role(
+        f"R_DEPT_ACTOR_{next_id()}",
+        data_scope=DATA_SCOPE_CUSTOM,
+        menus=[_menu(USER_IMPORT_PERMISSION), _menu(DEPT_LIST_PERMISSION)],
+    )
+    actor_role.depts = [visible_dept]
+    target_role = _role(f"R_DEPT_TARGET_{next_id()}")
+    actor = _user(f"phase2-dept-actor-{next_id()}", [actor_role])
+    target = _user(f"phase2-dept-target-{next_id()}", [target_role])
+    db_session.add_all(
+        [visible_dept, hidden_dept, actor_role, target_role, actor, target]
+    )
+    await db_session.flush()
+    await _bind_dept(db_session, actor, visible_dept, primary=True)
+    await _bind_dept(db_session, target, visible_dept, primary=True)
+    await _bind_dept(db_session, target, hidden_dept, primary=False)
+    authority = await grant_authority_service.build(db_session, actor.user_id)
+
+    with pytest.raises(AuthorizationException) as exc_info:
+        await user_department_assignment_service.validate_import_department_assignment(
+            db_session,
+            actor_user_id=actor.user_id,
+            target_user_id=target.user_id,
+            target_user_name=target.user_name,
+            target_status=target.status,
+            role_ids=[target_role.role_id],
+            dept_assignments=[(visible_dept.dept_id, True)],
+            authority=authority,
+        )
+
+    assert exc_info.value.error_code == "AI_DATA_SCOPE_VIOLATION"
 
 
 async def test_replace_departments_revalidates_both_entry_permissions(

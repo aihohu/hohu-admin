@@ -50,6 +50,7 @@ from app.modules.system.user.constants import (
 )
 from app.modules.system.user.import_service import (
     ImportAuthorizationResolution,
+    _classify_records,
     _lock_import_authorization_targets,
     batch_create_users_from_records,
     dry_run_import_users,
@@ -965,6 +966,13 @@ async def test_execute_rejects_the_whole_batch_when_one_role_is_unauthorized(
         permission=USER_ROLE_AUTH_PERMISSION,
         status="1",
     )
+    dept_list_menu = Menu(
+        menu_id=next_id(),
+        menu_name=f"QA dept list {next_id()}",
+        menu_type="F",
+        permission="system:dept:list",
+        status="1",
+    )
     delegated_menu = Menu(
         menu_id=next_id(),
         menu_name=f"QA delegated {next_id()}",
@@ -984,7 +992,12 @@ async def test_execute_rejects_the_whole_batch_when_one_role_is_unauthorized(
         f"QA_R_ATOMIC_ACTOR_{next_id()}",
         "QA Atomic Actor",
     )
-    actor_role.menus = [import_menu, role_auth_menu, delegated_menu]
+    actor_role.menus = [
+        import_menu,
+        role_auth_menu,
+        dept_list_menu,
+        delegated_menu,
+    ]
     allowed_role = _make_role(
         next_id(),
         f"QA_R_ATOMIC_ALLOWED_{next_id()}",
@@ -1003,6 +1016,7 @@ async def test_execute_rejects_the_whole_batch_when_one_role_is_unauthorized(
             dept,
             import_menu,
             role_auth_menu,
+            dept_list_menu,
             delegated_menu,
             outside_menu,
             actor_role,
@@ -1112,6 +1126,65 @@ async def test_import_lock_rejects_a_reference_that_resolves_after_prelock(
 
     assert exc_info.value.error_code == "AUTHORIZATION_SNAPSHOT_STALE"
     ensure_permissions.assert_not_awaited()
+
+
+async def test_import_classification_rejects_duplicate_existing_targets(
+    monkeypatch,
+):
+    records = [
+        _make_record(2, "QA_DUPLICATE_A", role_input="R_SAFE"),
+        _make_record(3, "QA_DUPLICATE_B"),
+    ]
+    resolutions = [
+        ImportAuthorizationResolution(
+            row_num=record.row_num,
+            dept_id=456,
+            dept_error=None,
+            role_ids=((789,) if record.role_input else None),
+            role_error=None,
+            target_user_id=999,
+            matched_by_employee_no=True,
+            target_role_ids=(321,),
+            target_dept_ids=(123,),
+            target_status="1",
+            prospective_user_id=None,
+        )
+        for record in records
+    ]
+    monkeypatch.setattr(
+        "app.modules.system.user.import_service.grant_authority_service.build",
+        AsyncMock(return_value=SimpleNamespace(accessible_dept_ids=None)),
+    )
+    validate_departments = AsyncMock()
+    validate_roles = AsyncMock()
+    monkeypatch.setattr(
+        "app.modules.system.user.import_service."
+        "user_role_assignment_service.validate_import_role_assignment",
+        validate_roles,
+    )
+    monkeypatch.setattr(
+        "app.modules.system.user.import_service."
+        "user_department_assignment_service.validate_import_department_assignment",
+        validate_departments,
+    )
+
+    new, existing, conflicts, out_of_scope = await _classify_records(
+        AsyncMock(),
+        records,
+        SimpleNamespace(user_id=42),
+        has_role_column=True,
+        resolutions=resolutions,
+    )
+
+    assert new == []
+    assert existing == []
+    assert out_of_scope == []
+    assert [row.error_code for row in conflicts] == [
+        "AI_IMPORT_DUPLICATE_TARGET",
+        "AI_IMPORT_DUPLICATE_TARGET",
+    ]
+    validate_roles.assert_not_awaited()
+    validate_departments.assert_not_awaited()
 
 
 # ========== 并发执行 ==========

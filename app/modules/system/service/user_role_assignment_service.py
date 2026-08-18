@@ -2,12 +2,17 @@
 
 from dataclasses import dataclass
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.constants import (
     ADMIN_USERNAME,
+    DATA_SCOPE_ALL,
+    DATA_SCOPE_CUSTOM,
+    DATA_SCOPE_DEPT,
+    DATA_SCOPE_DEPT_AND_SUB,
+    DATA_SCOPE_SELF,
     STATUS_ENABLED,
     SUPER_ADMIN_ROLE_CODE,
     USER_ROLE_CODE,
@@ -18,6 +23,7 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.id_generator import next_id
+from app.db.base import user_depts
 from app.modules.system.constants import USER_ROLE_AUTH_PERMISSION
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
@@ -27,7 +33,7 @@ from app.modules.system.service.grant_authority import (
     GrantAuthority,
     grant_authority_service,
 )
-from app.utils.data_scope import resolve_data_scope_for_roles
+from app.utils.data_scope import get_dept_and_sub_ids, resolve_data_scope_for_roles
 
 USER_ADD_PERMISSION = "system:user:add"
 USER_EDIT_PERMISSION = "system:user:edit"
@@ -43,6 +49,18 @@ class RoleSetAuthority:
     agent_ids: frozenset[int]
     accessible_dept_ids: frozenset[int] | None
     accessible_user_ids: frozenset[int] | None
+    role_definition_signature: tuple[
+        tuple[
+            int,
+            str,
+            str,
+            str,
+            tuple[int, ...],
+            tuple[int, ...],
+            tuple[int, ...],
+        ],
+        ...,
+    ]
 
 
 @dataclass(frozen=True)
@@ -246,12 +264,16 @@ class UserRoleAssignmentService:
             for menu in (role.menus or [])
             if menu.permission
         )
-        enabled_role_ids = [int(role.role_id) for role in enabled_roles]
-        agent_ids = frozenset(
-            await agent_authorization_service.grantable_agent_ids_for_role_ids(
+        agents_by_role = (
+            await agent_authorization_service.grantable_agent_ids_by_role_ids(
                 db,
-                enabled_role_ids,
+                [int(role.role_id) for role in roles],
             )
+        )
+        agent_ids = frozenset(
+            agent_id
+            for role in enabled_roles
+            for agent_id in agents_by_role.get(int(role.role_id), set())
         )
 
         resolution = await resolve_data_scope_for_roles(
@@ -286,7 +308,236 @@ class UserRoleAssignmentService:
             agent_ids=agent_ids,
             accessible_dept_ids=resolution.accessible_dept_ids,
             accessible_user_ids=accessible_user_ids,
+            role_definition_signature=self._role_definition_signature(
+                roles,
+                agents_by_role,
+            ),
         )
+
+    @staticmethod
+    def _role_definition_signature(
+        roles: list[Role],
+        agents_by_role: dict[int, set[int]],
+    ) -> tuple[
+        tuple[
+            int,
+            str,
+            str,
+            str,
+            tuple[int, ...],
+            tuple[int, ...],
+            tuple[int, ...],
+        ],
+        ...,
+    ]:
+        """Return stable role, menu, department, and Agent binding facts."""
+        return tuple(
+            sorted(
+                (
+                    int(role.role_id),
+                    str(role.role_code),
+                    str(role.status),
+                    str(role.data_scope),
+                    tuple(sorted(int(menu.menu_id) for menu in (role.menus or []))),
+                    tuple(sorted(int(dept.dept_id) for dept in (role.depts or []))),
+                    tuple(sorted(agents_by_role.get(int(role.role_id), set()))),
+                )
+                for role in roles
+            )
+        )
+
+    async def materialize_role_set_authorities(
+        self,
+        db: AsyncSession,
+        *,
+        candidates: list[tuple[User, list[Role], list[Dept]]],
+    ) -> list[RoleSetAuthority]:
+        """Materialize many role sets with a bounded number of bulk queries."""
+        from app.modules.ai.service.agent_authorization_service import (  # noqa: PLC0415
+            agent_authorization_service,
+        )
+
+        enabled_role_sets = [
+            [role for role in roles if role.status == STATUS_ENABLED]
+            for _user, roles, _depts in candidates
+        ]
+        all_role_ids = {
+            int(role.role_id) for _user, roles, _depts in candidates for role in roles
+        }
+        agents_by_role = (
+            await agent_authorization_service.grantable_agent_ids_by_role_ids(
+                db,
+                all_role_ids,
+            )
+        )
+        all_own_dept_ids = {
+            int(dept.dept_id) for _user, _roles, depts in candidates for dept in depts
+        }
+        descendant_rows: list[tuple[int, str | None]] = []
+        if all_own_dept_ids:
+            descendant_rows = [
+                (int(dept_id), ancestors)
+                for dept_id, ancestors in (
+                    await db.execute(
+                        select(Dept.dept_id, Dept.ancestors).where(
+                            or_(
+                                Dept.dept_id.in_(all_own_dept_ids),
+                                *(
+                                    func.concat(",", Dept.ancestors, ",").like(
+                                        f"%,{dept_id},%"
+                                    )
+                                    for dept_id in sorted(all_own_dept_ids)
+                                ),
+                            )
+                        )
+                    )
+                ).all()
+            ]
+
+        resolved_dept_ids: list[frozenset[int] | None] = []
+        include_self_values: list[bool] = []
+        for (user, _roles, depts), enabled_roles in zip(
+            candidates,
+            enabled_role_sets,
+            strict=True,
+        ):
+            if user.user_name == ADMIN_USERNAME or any(
+                role.role_code == SUPER_ADMIN_ROLE_CODE for role in enabled_roles
+            ):
+                resolved_dept_ids.append(None)
+                include_self_values.append(True)
+                continue
+            scope_kinds = {
+                role.data_scope
+                for role in enabled_roles
+                if role.data_scope
+                in {
+                    DATA_SCOPE_ALL,
+                    DATA_SCOPE_CUSTOM,
+                    DATA_SCOPE_DEPT,
+                    DATA_SCOPE_DEPT_AND_SUB,
+                    DATA_SCOPE_SELF,
+                }
+            }
+            if not scope_kinds:
+                scope_kinds = {DATA_SCOPE_SELF}
+            if DATA_SCOPE_ALL in scope_kinds:
+                resolved_dept_ids.append(None)
+                include_self_values.append(True)
+                continue
+
+            own_dept_ids = {int(dept.dept_id) for dept in depts}
+            accessible_dept_ids: set[int] = set()
+            include_self = DATA_SCOPE_SELF in scope_kinds
+            if DATA_SCOPE_DEPT in scope_kinds:
+                accessible_dept_ids.update(own_dept_ids)
+                include_self = include_self or not own_dept_ids
+            if DATA_SCOPE_DEPT_AND_SUB in scope_kinds:
+                subtree_ids = {
+                    dept_id
+                    for dept_id, ancestors in descendant_rows
+                    if dept_id in own_dept_ids
+                    or bool(
+                        own_dept_ids
+                        & {
+                            int(part)
+                            for part in (ancestors or "").split(",")
+                            if part.isdigit()
+                        }
+                    )
+                }
+                accessible_dept_ids.update(subtree_ids)
+                include_self = include_self or not subtree_ids
+            for role in enabled_roles:
+                if role.data_scope != DATA_SCOPE_CUSTOM:
+                    continue
+                custom_ids = {
+                    int(dept.dept_id)
+                    for dept in (role.depts or [])
+                    if dept.status == STATUS_ENABLED
+                }
+                accessible_dept_ids.update(custom_ids)
+                include_self = include_self or not custom_ids
+            resolved_dept_ids.append(frozenset(accessible_dept_ids))
+            include_self_values.append(include_self)
+
+        bounded_dept_ids = {
+            dept_id
+            for dept_ids in resolved_dept_ids
+            if dept_ids is not None
+            for dept_id in dept_ids
+        }
+        users_by_dept: dict[int, set[int]] = {
+            dept_id: set() for dept_id in bounded_dept_ids
+        }
+        if bounded_dept_ids:
+            rows = (
+                await db.execute(
+                    select(user_depts.c.dept_id, user_depts.c.user_id).where(
+                        user_depts.c.dept_id.in_(bounded_dept_ids)
+                    )
+                )
+            ).all()
+            for dept_id, user_id in rows:
+                users_by_dept[int(dept_id)].add(int(user_id))
+
+        result: list[RoleSetAuthority] = []
+        for (
+            (user, _roles, depts),
+            enabled_roles,
+            accessible_dept_ids,
+            include_self,
+        ) in zip(
+            candidates,
+            enabled_role_sets,
+            resolved_dept_ids,
+            include_self_values,
+            strict=True,
+        ):
+            menu_ids = frozenset(
+                int(menu.menu_id)
+                for role in enabled_roles
+                for menu in (role.menus or [])
+            )
+            permission_codes = frozenset(
+                menu.permission
+                for role in enabled_roles
+                for menu in (role.menus or [])
+                if menu.permission
+            )
+            agent_ids = frozenset(
+                agent_id
+                for role in enabled_roles
+                for agent_id in agents_by_role.get(int(role.role_id), set())
+            )
+            if accessible_dept_ids is None:
+                accessible_user_ids = None
+            else:
+                materialized = {
+                    user_id
+                    for dept_id in accessible_dept_ids
+                    for user_id in users_by_dept.get(dept_id, set())
+                }
+                target_user_id = int(user.user_id)
+                materialized.discard(target_user_id)
+                own_dept_ids = {int(dept.dept_id) for dept in depts}
+                if include_self or bool(own_dept_ids & accessible_dept_ids):
+                    materialized.add(target_user_id)
+                accessible_user_ids = frozenset(materialized)
+            result.append(
+                RoleSetAuthority(
+                    permission_codes=permission_codes,
+                    menu_ids=menu_ids,
+                    agent_ids=agent_ids,
+                    accessible_dept_ids=accessible_dept_ids,
+                    accessible_user_ids=accessible_user_ids,
+                    role_definition_signature=self._role_definition_signature(
+                        list(_roles),
+                        agents_by_role,
+                    ),
+                )
+            )
+        return result
 
     @staticmethod
     def ensure_role_set_dominated(
@@ -656,6 +907,25 @@ class UserRoleAssignmentService:
             ignored_user_ids=ignored_user_ids,
         )
 
+    async def apply_locked_import_roles(
+        self,
+        db: AsyncSession,
+        *,
+        target_user_id: int,
+        role_ids: list[int | str],
+    ) -> UserRoleAssignmentResult:
+        """Apply a set already validated under the import batch authorization lock."""
+        requested_roles = await self._load_requested_roles(db, role_ids)
+        target = await self._load_user(db, target_user_id)
+        old_role_ids = _role_ids(list(target.roles or []))
+        target.roles = requested_roles
+        await db.flush()
+        return UserRoleAssignmentResult(
+            user_id=target_user_id,
+            old_role_ids=old_role_ids,
+            new_role_ids=_role_ids(requested_roles),
+        )
+
     async def lock_import_targets(
         self,
         db: AsyncSession,
@@ -695,6 +965,11 @@ class UserRoleAssignmentService:
             *_dept_ids(actor_before, all_roles),
             *(int(dept.dept_id) for target in targets_before for dept in target.depts),
         }
+        if all_dept_ids and any(
+            role.status == STATUS_ENABLED and role.data_scope == DATA_SCOPE_DEPT_AND_SUB
+            for role in all_roles
+        ):
+            all_dept_ids.update(await get_dept_and_sub_ids(db, sorted(all_dept_ids)))
         await authorization_lock_service.lock_targets(
             db,
             role_ids=set(_role_ids(all_roles)),

@@ -32,8 +32,6 @@ from app.modules.system.schemas.user import (
     UserRoleUpdate,
     UserUpdate,
 )
-from app.modules.system.service.config_service import config_service
-from app.modules.system.service.dept_service import dept_service
 from app.modules.system.service.user_department_assignment_service import (
     user_department_assignment_service,
 )
@@ -190,14 +188,11 @@ async def add_user(
         actor_user_id=current_user.user_id,
         explicit_roles=explicit_roles,
     )
-
-    # 系统策略校验：是否强制用户必须有主部门
-    if await config_service.get_bool(db, "user_require_primary_dept"):
-        if not user_in.dept_ids or not any(d.is_primary for d in user_in.dept_ids):
-            raise BusinessRuleException(
-                "系统已开启「强制用户主部门」，必须为用户分配一个主部门",
-                error_code="USER_PRIMARY_DEPT_REQUIRED",
-            )
+    await user_department_assignment_service.ensure_create_permissions(
+        db,
+        actor_user_id=current_user.user_id,
+        has_departments=bool(user_in.dept_ids),
+    )
 
     new_user = await user_service.create_user(db, user_in)
     await db.flush()
@@ -209,11 +204,14 @@ async def add_user(
         dept_ids=[int(item.dept_id) for item in user_in.dept_ids],
     )
 
-    if user_in.dept_ids:
-        dept_list = [
-            {"dept_id": d.dept_id, "is_primary": d.is_primary} for d in user_in.dept_ids
-        ]
-        await dept_service.update_user_depts(db, new_user.user_id, dept_list)
+    await user_department_assignment_service.assign_created_user_departments(
+        db,
+        actor_user_id=current_user.user_id,
+        target_user_id=new_user.user_id,
+        dept_assignments=[
+            (int(item.dept_id), item.is_primary) for item in user_in.dept_ids
+        ],
+    )
 
     await db.commit()
     return ResponseModel.success(msg="创建成功")
@@ -572,6 +570,10 @@ async def import_users(
         db,
         actor_user_id=current_user.user_id,
         has_role_column=has_role_column,
+    )
+    await user_department_assignment_service.ensure_import_permissions(
+        db,
+        actor_user_id=current_user.user_id,
     )
 
     # 解析文件并校验字段。

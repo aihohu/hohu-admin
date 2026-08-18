@@ -1,7 +1,7 @@
 # AI 用户管理缺失工具补齐
 
-> 状态：🚧 Plan 1 已完成（2026-08-11）；Plan 2 已完成 P2-A、P2-B1 与 P2-B2，其余工作包待实现
-> 日期：2026-08-11｜更新：2026-08-17
+> 状态：🚧 Plan 1 已完成（2026-08-11）；Plan 2 已完成 P2-A、P2-B1、P2-B2 与 P2-B3，其余工作包待实现
+> 日期：2026-08-11｜更新：2026-08-18
 > 关联：[`2026-08-14-ai-management-mvp-closure.md`](./2026-08-14-ai-management-mvp-closure.md)、[`2026-07-02-ai-tool-gateway-design.md`](./2026-07-02-ai-tool-gateway-design.md)、[`2026-08-01-user-import-export-design.md`](./2026-08-01-user-import-export-design.md)
 
 ## 1. 背景与范围
@@ -18,13 +18,13 @@
 
 3. **新建用户使用既有普通用户角色 `USER_ROLE_CODE=R_USER`，AI 不接收角色参数** — `R_USER` 是现有数据库、认证契约与测试长期使用的普通用户角色编码；工具只查找并绑定该启用角色，fresh install 也按同一编码 seed。角色属于权限边界，不能由自然语言直接提升。**反例**: 沿用未被业务使用的旧常量值 `user` 会在已部署数据库误报默认角色不存在；暴露 `roles=["R_SUPER"]` 给模型则会把“创建账号”变成越权提权入口。**回归**: 常量与初始化种子测试锁定 `R_USER`；创建结果只绑定 `USER_ROLE_CODE`；默认角色缺失或禁用时返回稳定业务错误。
 
-4. **AI 新建必须指定一个主部门并同时校验 data scope** — `primary_dept_id` 是创建工具必填参数；执行和 dry-run 都调用 `ensure_targets_in_scope(ctx, dept_ids=[...])`，随后复用 `dept_service.update_user_depts` 建立主部门关系。**反例**: 允许无部门创建，非全量 data-scope 操作者可能创建出自己不可见、无法继续治理的账号。**回归**: 越界部门在 dry-run/执行两条路径均被拒绝；成功用户只有一个主部门。
+4. **AI 新建必须指定一个主部门并同时校验 data scope** — `primary_dept_id` 是创建工具必填参数；执行和 dry-run 都调用 `ensure_targets_in_scope(ctx, dept_ids=[...])`，执行再由共享 `UserDepartmentAssignmentService` 完成完整集合、主部门、锁后重算和授权 dominance。**反例**: 允许无部门创建，或继续用无授权关联 helper，非全量 data-scope 操作者可能创建出自己不可见、无法继续治理的账号。**回归**: 越界部门在 dry-run/执行两条路径均被拒绝；成功用户只有一个主部门。
 
 5. **两个工具都强制 HITL 且支持 dry-run** — 创建账号和使旧密码立即失效均为高风险写操作，确认抽屉在执行前显示目标账号、主部门或密码重置影响，但不显示敏感值。**反例**: 让 balanced agent 自动执行单行创建/重置，会把模型误判直接变成账号或凭据变更。**回归**: `risk="high"`、`hitl_always=True`、`dry_run_supported=True`，并存在同模块命名约定 dry-run hook。
 
 6. **重置密码禁止操作当前登录账号，所有超级管理员目标仅允许超管操作** — 当前账号应走需要旧密码的个人改密流程；用户名 `admin` 或绑定启用 `R_SUPER` 的账号均属于高权限目标，普通委派管理员不得借 AI 重置。**反例**: 当前用户误重置自己会让当前会话与凭据状态割裂；普通管理员重置任一超级管理员可造成接管。**回归**: self-target 返回稳定错误；非超管 targeting `admin` 或其他 `R_SUPER` 均被拒；data-scope 校验仍先于业务写入。
 
-7. **Tool adapter 只编排，事务仍由 Gateway 管理** — 工具复用 `user_service.create_user/reset_password` 与 `dept_service.update_user_depts`，只允许 `flush` 获取 ID，不在 service 或 tool 内 `commit`。**反例**: 工具自行 commit 会破坏 Gateway 的审计、失败回滚和 durable finalizer 原子性。**回归**: 单测用 session 验证结果可回滚；代码静态检查无 `commit()`。
+7. **Tool adapter 只编排，事务仍由 Gateway 管理** — 工具复用用户 Service 与共享角色/部门 Assignment Policy，只允许 `flush` 获取 ID，不在 service 或 tool 内 `commit`。**反例**: 工具自行 commit 会破坏 Gateway 的审计、失败回滚和 durable finalizer 原子性。**回归**: 单测用 session 验证结果可回滚；代码静态检查无 `commit()`。
 
 8. **确认抽屉与结果卡使用语义字段做前端 i18n，不解析后端中文** — direct HITL 继续保存安全 canonical presentation，Web 按 tool code 与 `user_name/primary_dept_id/user_id/affectedCount` 映射中英文工具名、摘要和字段标签；结果卡 title/field label 使用既有 i18n key。**反例**: 正则匹配 dry-run 中文或把用户输入翻译掉，会在文案调整后失效并改变批准对象。**回归**: mapper Vitest 覆盖 create/reset 两个工具、unknown fallback 与无密码值；Vue typecheck 固定所有 key 存在。
 
@@ -62,11 +62,19 @@
 
 25. **主部门策略直读锁行且候选作用域不继承旧主体** — `user_require_primary_dept` 在共享部门 Policy 内使用同一事务的 uncached `SELECT FOR UPDATE`；候选部门授权物化必须先移除数据库旧 scope 查询中的目标用户，再按候选部门与 SELF 规则决定是否加入。**反例**: Redis 失效失败让 false 缓存继续放行空部门，或 CUSTOM 旧部门查询残留目标用户而掩盖迁移后的授权变化。**回归**: `test_replace_departments_bypasses_stale_primary_policy_cache`、`test_hypothetical_custom_scope_drops_subject_from_removed_department`，并锁定隐藏旧关联删除与 admin/R_SUPER 目标保护。
 
+26. **在线用户部门关联只保留一个写入边界** — 页面 create、AI create、import create/overwrite 与部门成员页都调用 `UserDepartmentAssignmentService`；导入先在整批锁内验证组合后的角色/部门事实，再使用仅面向锁内已验证集合的 apply helper。**反例**: 保留 `DeptService.update_user_depts` 或 import raw association SQL 会形成不执行旧/新 scope 与 dominance 的旁路。**回归**: create/AI/import/department-membership 回归覆盖全部入口，运行时代码检索不存在共享 Service 之外的 `user_depts` 写入。
+
+27. **Web 不以宽 payload 模拟独立授权 writer** — create 根据 role-auth/dept-list 决定是否提交显式集合；edit 将 profile、roles、departments 分别提交，且只写实际变化的关联。部门成员页从最小分页 API 获取完整候选，并禁止在该入口移除主部门成员。**反例**: 每次资料保存都重写角色/部门会因隐藏旧集合产生误删或无关授权失败。**回归**: `user-operate-drawer.spec.ts` 与 `dept-users-modal.spec.ts`。
+
+28. **导入的同一现有目标在一个批次中只能出现一次** — 解析结果按稳定 `target_user_id` 查重，重复行全部返回 `AI_IMPORT_DUPLICATE_TARGET`；涉及 `DEPT_AND_SUB` 时在锁前展开完整后代部门，锁内再执行最终角色/部门组合校验。**反例**: 两行分别改变同一用户的角色和部门，会让执行终态成为任一单行都未验证的组合。**回归**: duplicate target 与 descendant lock 定向测试。
+
+29. **分页全集与多 writer UI 显式处理不完整状态** — 部门成员分页只有全部成功才启用 PUT；用户编辑中角色/部门已提交而后续 writer 失败时，关闭旧表单、提示部分成功并刷新服务端事实。**反例**: 分页失败后空集合仍可提交，或部分 commit 后让用户继续基于旧快照编辑。**回归**: 部门弹窗首/后页失败和用户编辑后续 writer 失败 Vitest。
+
 ## 3. 工具契约
 
 ### `user.create`
 
-- 权限：`system:user:add`
+- 权限：`system:user:add + system:dept:list`
 - 参数：`user_name`、`primary_dept_id`、可选 `nickname/user_email/user_phone/user_gender/status`
 - 后端策略：密码=`auth:default_password`，角色=`R_USER`
 - 结果：`{created: 1, userId, userName, roleCode, primaryDeptId, passwordPolicy}`；其中 `passwordPolicy` 只返回固定枚举 `system_default`，不返回值
@@ -144,11 +152,11 @@
 - [x] Task 8 ✅ 已完成（2026-08-12）：确认抽屉的主部门显示为 `部门名称（ID）`，执行参数和审批快照继续使用原始部门 ID；后端全量 1809 pytest、19 工具静态门禁及前端全量检查通过。
 - [x] Task 9 ✅ 已完成（2026-08-12）：审查纠偏超级管理员目标保护、prod 默认密码 fail-closed、HITL raw/display 绑定、存量 prompt 安全升级及工具卡/dry-run/data-list 全表面 i18n，并补充前后端反例测试。
 - [x] Task 10 ✅ 已完成（2026-08-17）：新增 `system:user:role-auth` 的 fresh/sync/upgrade 权限数据与 add/edit/import 兼容矩阵；实现多角色并集 resolver、不可变 `GrantAuthority`/集合 dominance、role → dept → user 统一锁服务，以及只读 canonical scope-diff 与 ACK 门禁。传统 filter、导入预检、AI `DataScopeContext`/lineage 已共用新 resolver；授权核心、会话锁与 scope 审计定向测试 27 项、后端全量 2010 项和 73.24% 覆盖率门禁通过。此任务未接入实际用户/部门 writer，也未修改 Web。
-- [ ] Task 11：拆分页面用户资料/部门/角色 API 和 schema，收口 create/import/fixed R_USER 例外，页面与 AI 共用替换 Policy。
+- [x] Task 11 ✅ 已完成（2026-08-18）：拆分页面用户资料/部门/角色 API 和 schema，收口 create/import/fixed R_USER 例外，页面与 AI 共用替换 Policy。
   - [x] Task 11a ✅ P2-B1 已完成（2026-08-17；审查修复 2026-08-17）：资料/角色请求契约拆分，`roleIds` 固定为 canonical Snowflake `string[]` 且显式 null 失败，资料更新拒绝 password；新增角色完整替换与最小候选 API。页面 create、AI create 和 import 新建使用同一角色 Policy，显式 `roleIds`/角色列表头叠加 role-auth，缺省角色固定为受 dominance 约束的 `R_USER`。import preview/execute 共用 dominance，execute 锁内重验入口权限、冻结并锁后重查 role/dept/user 解析，任一授权越界整批零业务写入。定向回归 126 项、后端全量 2028 项和 73.57% 覆盖率门禁通过；数据库 schema、seed 和 Web 均无变化。
-  - [ ] Task 11b：交付独立部门 writer，并把 import overwrite 与其余存量角色/部门 writer 全部接入共享 Policy；完成 Web 契约切换后再关闭 Task 11。
+  - [x] Task 11b ✅ 已完成（2026-08-18）：交付独立部门 writer，并把 import overwrite 与其余存量角色/部门 writer 全部接入共享 Policy；完成 Web 契约切换。
     - [x] Task 11b-1 ✅ P2-B2 已完成（2026-08-17；审查修复 2026-08-17）：页面部门完整替换 contract/API/Service、双权限、主部门规则、完整 scope、授权影响 dominance、全局锁和锁后复验完成；主部门策略改为 uncached 锁行读取，候选作用域精确重建目标主体，并补齐隐藏旧关联与 admin/R_SUPER 回归。相关 48 项、system 539 项及后端全量 2053 项通过，覆盖率 73.81%，无 migration/seed/Web 改动。
-    - [ ] Task 11b-2：接入页面 create、AI create、import create/overwrite 与其余存量部门 writer，并切换 Web。
+    - [x] Task 11b-2 ✅ P2-B3 已完成（2026-08-18；审查修复 2026-08-18）：页面 create、AI create、import create/overwrite 与部门成员页统一使用共享角色/部门 Policy；删除旧 `DeptService` 关联 writer，导入拒绝重复目标并锁定 `DEPT_AND_SUB` 完整后代，部门成员完整集合在全局锁内批量物化且比较完整授权快照，隐藏旧成员、主部门移除和任一越权均整批失败。Web 完成独立 writer、部分提交恢复、最小可委派角色和 fail-closed 分页成员契约。无 migration/seed；最终验证证据见主基线。
 - [ ] Task 12：纠正 data-scoped `user.dept_lookup`，实现 `user.update_dept` 的完整旧/新集合、前后授权影响、dry-run、i18n 与批准时复验。
 - [ ] Task 13：同步实现 `user.role_lookup` 与 `user.update_roles` 的最终有效授权 dominance、dry-run、i18n 与批准时复验。
 - [ ] Task 14：后端定向/全量门禁与真实浏览器多角色 E2E 通过后，将 Plan 2 翻转为完成。

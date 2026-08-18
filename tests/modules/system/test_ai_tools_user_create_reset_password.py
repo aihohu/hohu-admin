@@ -166,7 +166,10 @@ class TestUserToolMetadata:
         } & set(signature.parameters)
 
     def test_tools_use_expected_permissions(self) -> None:
-        assert user_create.__ai_tool_meta__.required_perms == ("system:user:add",)
+        assert user_create.__ai_tool_meta__.required_perms == (
+            "system:user:add",
+            "system:dept:list",
+        )
         assert user_dept_lookup.__ai_tool_meta__.required_perms == ("system:user:add",)
         assert user_reset_password.__ai_tool_meta__.required_perms == (
             "system:user:reset-password",
@@ -189,9 +192,18 @@ class TestUserToolMetadata:
 
         visible = {
             tool.meta.name
-            for tool in compute_available_tools({"system:user:add"}, "user_mgmt")
+            for tool in compute_available_tools(
+                {"system:user:add", "system:dept:list"},
+                "user_mgmt",
+            )
         }
         assert {"user.dept_lookup", "user.create"} <= visible
+
+        add_only = {
+            tool.meta.name
+            for tool in compute_available_tools({"system:user:add"}, "user_mgmt")
+        }
+        assert "user.create" not in add_only
 
 
 class TestUserDeptLookup:

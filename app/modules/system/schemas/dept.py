@@ -1,5 +1,6 @@
 """部门相关的数据验证模式"""
 
+import re
 from datetime import datetime
 
 from pydantic import (
@@ -163,14 +164,12 @@ class DeptTreeOptionOut(BaseModel):
 
 
 class DeptUserItem(BaseModel):
-    """部门用户管理项：用户基础信息 + 是否在该部门 + 是否为该用户主部门"""
+    """Minimal user candidate for complete department membership editing."""
 
     user_id: int
     user_name: str
     nickname: str | None = None
-    user_email: str | None = None
-    user_phone: str | None = None
-    status: str | None = None
+    status: str
     is_member: bool = False
     is_primary: bool = False
 
@@ -184,15 +183,12 @@ class DeptUserItem(BaseModel):
 
 
 class DeptUsersOut(BaseModel):
-    """部门用户管理数据：所有候选用户 + 部门信息"""
+    """Stable page of user-scoped department membership candidates."""
 
-    dept_id: int
-    dept_name: str
-    users: list[DeptUserItem] = []
-
-    @field_serializer("dept_id")
-    def serialize_id(self, v: int, _info):
-        return str(v)
+    current: int
+    size: int
+    total: int
+    records: list[DeptUserItem] = Field(default_factory=list)
 
     model_config = ConfigDict(
         from_attributes=True, alias_generator=to_camel, populate_by_name=True
@@ -200,8 +196,24 @@ class DeptUsersOut(BaseModel):
 
 
 class DeptUsersUpdate(BaseModel):
-    """更新部门用户关联请求：传入最终的部门成员用户ID列表"""
+    """Complete final member ID set for one department."""
 
-    user_ids: list[int] = Field(..., description="最终的部门成员用户ID列表")
+    user_ids: list[str] = Field(..., description="最终的部门成员用户ID列表")
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    @field_validator("user_ids", mode="before")
+    @classmethod
+    def validate_user_ids(cls, value: object) -> object:
+        if not isinstance(value, list) or any(
+            not isinstance(item, str) or re.fullmatch(r"[1-9][0-9]*", item) is None
+            for item in value
+        ):
+            raise ValueError("userIds must contain canonical Snowflake ID strings")
+        if len(set(value)) != len(value):
+            raise ValueError("userIds must not contain duplicates")
+        return value
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
