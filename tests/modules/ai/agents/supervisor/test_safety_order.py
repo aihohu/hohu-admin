@@ -2,6 +2,7 @@
 
 # ruff: noqa: ARG001, PLC0415  test fixture 占位参数 + 函数内 import（断言用）
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -33,7 +34,7 @@ def _chat_body(text: str, **extra) -> dict:
 
 @pytest.mark.asyncio
 async def test_keyword_blocked_does_not_save_user_message(
-    client: AsyncClient, db_session, auth_token
+    client: AsyncClient, db_session, auth_token, mock_visible_agents
 ):
     """敏感词命中时不产生孤儿用户消息。"""
     # patch load_blocklist 让它返回测试用敏感词列表
@@ -71,6 +72,10 @@ async def test_injection_blocks_before_routing(
     # CI 没有 LLM provider 配置时 create_agent 会抛 BusinessRuleException(400)。
     # 本测试只关心路由决策正确（injection 不进 supervisor），create_agent 成功与否不在范围。
     fake_exec_agent = MagicMock(name="fake_exec_agent")
+    selected_model = SimpleNamespace(
+        model=SimpleNamespace(model_id=123456),
+        provider=SimpleNamespace(provider_id=223456),
+    )
 
     with (
         patch(
@@ -80,6 +85,10 @@ async def test_injection_blocks_before_routing(
         patch(
             "app.modules.ai.api.chat.chat_service.create_agent",
             AsyncMock(return_value=fake_exec_agent),
+        ),
+        patch(
+            "app.modules.ai.api.chat.model_authorization_service.authorize_chat_model",
+            AsyncMock(return_value=selected_model),
         ),
     ):
         response = await client.post(
@@ -98,7 +107,7 @@ async def test_injection_blocks_before_routing(
 
 @pytest.mark.asyncio
 async def test_routing_log_written_for_safety_block(
-    client: AsyncClient, db_session, auth_token
+    client: AsyncClient, db_session, auth_token, mock_visible_agents
 ):
     """安全短路也写 routing_log，reason 为 safety_blocked。"""
     from app.modules.ai.models.routing_log import AiRoutingLog
@@ -107,17 +116,21 @@ async def test_routing_log_written_for_safety_block(
         "app.modules.ai.api.chat.load_blocklist",
         AsyncMock(return_value=["另一敏感词"]),
     ):
-        await client.post(
+        response = await client.post(
             "/ai/chat",
             json=_chat_body("另一敏感词 bar", agentCode="user_mgmt"),
             headers={"Authorization": f"Bearer {auth_token}"},
         )
 
+    assert "AI_KEYWORD_BLOCKED" in response.text
+    trace_id = response.headers["X-AI-Trace-ID"]
+
     logs = (
         (
             await db_session.execute(
                 select(AiRoutingLog.reason).where(
-                    AiRoutingLog.reason == "safety_blocked"
+                    AiRoutingLog.trace_id == trace_id,
+                    AiRoutingLog.reason == "safety_blocked",
                 )
             )
         )
