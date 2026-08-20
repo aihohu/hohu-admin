@@ -450,6 +450,7 @@ class UserRoleAssignmentService:
         db: AsyncSession,
         *,
         candidates: list[tuple[User, list[Role], list[Dept]]],
+        agent_ids_by_role_override: dict[int, set[int]] | None = None,
     ) -> list[RoleSetAuthority]:
         """Materialize many role sets with a bounded number of bulk queries."""
         from app.modules.ai.service.agent_authorization_service import (  # noqa: PLC0415
@@ -469,6 +470,13 @@ class UserRoleAssignmentService:
                 all_role_ids,
             )
         )
+        if agent_ids_by_role_override:
+            agents_by_role.update(
+                {
+                    int(role_id): {int(agent_id) for agent_id in agent_ids}
+                    for role_id, agent_ids in agent_ids_by_role_override.items()
+                }
+            )
         all_own_dept_ids = {
             int(dept.dept_id) for _user, _roles, depts in candidates for dept in depts
         }

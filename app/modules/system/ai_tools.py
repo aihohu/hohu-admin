@@ -563,6 +563,7 @@ def _build_scoped_dept_lookup_stmt(
             paths.c.dept_name,
             paths.c.path,
             func.count().over().label("match_count"),
+            func.array_agg(paths.c.dept_id).over().label("matched_dept_ids"),
         )
         .where(
             ~exists(
@@ -583,6 +584,7 @@ def _build_scoped_dept_lookup_stmt(
             matched.c.dept_name,
             matched.c.path,
             matched.c.match_count,
+            matched.c.matched_dept_ids,
         )
         .order_by(func.lower(matched.c.path), matched.c.dept_id)
         .limit(limit)
@@ -649,13 +651,16 @@ async def user_dept_lookup(
         for row in rows
     ]
     match_count = int(rows[0]["match_count"]) if rows else 0
+    matched_dept_ids = (
+        sorted(int(dept_id) for dept_id in rows[0]["matched_dept_ids"]) if rows else []
+    )
     return ToolResult.success(
         data={
             "query": normalized_query,
             "matchCount": match_count,
             "matches": matches,
         },
-        projection=_result_projection("dept", [match["deptId"] for match in matches]),
+        projection=_result_projection("dept", matched_dept_ids),
         ui=UIResult(
             view_type="data_list",
             view_data={
@@ -2058,9 +2063,10 @@ async def user_lookup(
             error_code="AI_LOOKUP_NO_MATCH",
         )
     if len(user) > 1:
-        # 多重匹配返回首项并提示模型向用户澄清。
-        # 不抛异常，因为多重匹配在 lookup 场景不致命（仅是 ambiguous）
-        pass
+        raise BusinessRuleException(
+            "多个用户匹配当前条件，请补充 user_id 或更多精确条件",
+            error_code="AI_LOOKUP_AMBIGUOUS",
+        )
 
     u = user[0]
     result_data: dict[str, Any] = {

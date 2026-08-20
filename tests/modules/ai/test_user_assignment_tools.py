@@ -136,6 +136,32 @@ async def test_dept_lookup_builds_paths_only_from_visible_enabled_nodes(
     assert hidden_root.dept_name not in result.data["matches"][0]["path"]
 
 
+async def test_dept_lookup_projection_freezes_every_count_contributor(
+    db_session: AsyncSession,
+) -> None:
+    shared_name = f"task12-count-{next_id()}"
+    departments = [_dept(shared_name) for _index in range(3)]
+    db_session.add_all(departments)
+    await db_session.flush()
+    ctx = _tool_ctx(
+        db_session,
+        accessible_dept_ids={dept.dept_id for dept in departments},
+    )
+
+    result = await system_ai_tools.user_dept_lookup(
+        ctx,
+        query=shared_name,
+        limit=1,
+    )
+
+    assert result.data["matchCount"] == 3
+    assert len(result.data["matches"]) == 1
+    assert result.projection.subject_refs == tuple(
+        {"type": "dept", "id": str(dept_id)}
+        for dept_id in sorted(dept.dept_id for dept in departments)
+    )
+
+
 @pytest.mark.parametrize("limit", [0, 21])
 async def test_dept_lookup_rejects_out_of_contract_limit(
     db_session: AsyncSession,

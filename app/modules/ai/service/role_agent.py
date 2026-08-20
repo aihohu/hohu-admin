@@ -10,6 +10,8 @@ Service 不 commit，由 API 层 `await db.commit()`（CLAUDE.md 硬规则 #9）
 ``put_binding`` 与查询使用同一套规范化和校验逻辑，避免 service/API 漂移。
 """
 
+import re
+
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,9 +25,52 @@ from app.modules.ai.schemas.role_agent import (
     RoleAgentBindReq,
 )
 from app.modules.system.models.role import Role
+from app.modules.system.service.role_delegation_service import (
+    role_delegation_service,
+)
 
 
 class RoleAgentService:
+    @staticmethod
+    def _normalize_agent_ids(agent_ids: list[str]) -> list[int]:
+        """Return one canonical, duplicate-free complete Agent set."""
+        if any(
+            not isinstance(agent_id, str)
+            or re.fullmatch(r"[1-9][0-9]*", agent_id) is None
+            for agent_id in agent_ids
+        ):
+            raise BusinessRuleException(
+                "agent_id 必须为正整数规范字符串",
+                error_code="AI_AGENT_ID_INVALID",
+            )
+        normalized = [int(agent_id) for agent_id in agent_ids]
+        if len(set(normalized)) != len(normalized):
+            raise BusinessRuleException(
+                "Agent 集合不能包含重复项",
+                error_code="AI_ROLE_AGENT_SET_DUPLICATE",
+            )
+        return sorted(normalized)
+
+    @staticmethod
+    async def _ensure_agents_exist(
+        db: AsyncSession,
+        agent_ids: list[int],
+    ) -> None:
+        if not agent_ids:
+            return
+        found_ids = set(
+            (
+                await db.execute(
+                    select(AiAgent.agent_id).where(AiAgent.agent_id.in_(agent_ids))
+                )
+            ).scalars()
+        )
+        if found_ids != set(agent_ids):
+            raise NotFoundException(
+                resource_type="AI Agent",
+                error_code="AI_AGENT_NOT_FOUND",
+            )
+
     async def _get_role_or_404(self, db: AsyncSession, role_id: int) -> Role:
         """跨模块校验 role 存在 —— 抛 AI 前缀 errorCode（决策 #18）.
 
@@ -88,51 +133,28 @@ class RoleAgentService:
         )
 
     async def put_binding(
-        self, db: AsyncSession, role_id: int, req: RoleAgentBindReq
+        self,
+        db: AsyncSession,
+        role_id: int,
+        req: RoleAgentBindReq,
+        *,
+        actor_user_id: int,
     ) -> None:
-        """PUT：全量覆盖（决策 #15）—— DELETE 旧绑定 + INSERT 新绑定.
+        """Replace the complete binding set through the shared delegation policy.
 
-        - 跨模块校验 role 存在（AI_ROLE_NOT_FOUND）
-        - agent_ids 去重
-        - 每个 agent_id 校验存在（AI_AGENT_NOT_FOUND）
-        - normalize：所有新绑定 enabled=True（软禁用态归零，决策 #15 全量覆盖语义）
-
-        shared 与其它 Agent 一样必须显式绑定；边界覆盖 Agent 不存在和全量覆盖规范化。
+        Every requested identifier is canonical and unique. The policy validates
+        the actor ceiling, affected members, protected identities, and lock-time
+        drift before all surviving bindings are normalized to ``enabled=True``.
         """
-        await self._get_role_or_404(db, role_id)
+        unique_ids = self._normalize_agent_ids(req.agent_ids)
+        await role_delegation_service.authorize_and_lock_agent_replacement(
+            db,
+            actor_user_id=actor_user_id,
+            role_id=role_id,
+            new_agent_ids=unique_ids,
+        )
+        await self._ensure_agents_exist(db, unique_ids)
 
-        # 校验 agent_id 必须为数字字符串 —— 非数字（如 "abc"）返 400 +
-        # AI_AGENT_ID_INVALID；原 ``int(aid)`` 裸调用
-        # 抛 ValueError 未被捕获 → HTTP 500 无 errorCode，前端无法 i18n）.
-        for aid in req.agent_ids:
-            try:
-                int(aid)
-            except (TypeError, ValueError):
-                raise BusinessRuleException(
-                    f"agent_id 必须为数字字符串: {aid!r}",
-                    error_code="AI_AGENT_ID_INVALID",
-                )
-
-        # 去重
-        unique_ids = list({int(aid) for aid in req.agent_ids})
-
-        # 校验每个 agent 存在（shared 同样允许显式绑定）
-        if unique_ids:
-            rows = (
-                await db.execute(
-                    select(AiAgent.agent_id, AiAgent.code).where(
-                        AiAgent.agent_id.in_(unique_ids)
-                    )
-                )
-            ).all()
-            found_ids = {r[0] for r in rows}
-            missing = set(unique_ids) - found_ids
-            if missing:
-                raise NotFoundException(
-                    resource_type="AI Agent",
-                    error_code="AI_AGENT_NOT_FOUND",
-                )
-        # 全量覆盖：DELETE + INSERT
         await db.execute(delete(RoleAiAgent).where(RoleAiAgent.role_id == role_id))
         for aid in unique_ids:
             db.add(RoleAiAgent(role_id=role_id, agent_id=aid, enabled=True))

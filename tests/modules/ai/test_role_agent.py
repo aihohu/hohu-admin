@@ -104,8 +104,7 @@ async def seed_role_agents():
         # INSERT 顺序需要先让 sys_role 行可见，否则 FK 违反.
         await s.flush()
 
-        # 3. 绑定：role_id ↔ user_mgmt agent_id（enabled=True）
-        #    shared 不绑定 —— 体现 spec「shared Agent 直通，无需绑定」决策
+        # Bind only user_mgmt so the fixture proves shared is not implicit.
         s.add(
             RoleAiAgent(
                 role_id=role_id,
@@ -157,11 +156,7 @@ async def seed_role_agents():
 async def test_get_returns_all_agents_and_bound_ids(
     authed_client: tuple[AsyncClient, str], db_session, seed_role_agents
 ):
-    """决策 #2 / #14：GET 返回 allAgents（全量）+ boundAgentIds（绑定列表）.
-
-    shared Agent 在 allAgents 中 isShared=True（决策 #14），其它 Agent isShared=False.
-    boundAgentIds 只含 enabled=True 的绑定，shared 不在 boundAgentIds 中（直通无需绑定）.
-    """
+    """Return every Agent and only explicitly enabled Role-Agent bindings."""
     client, _ = authed_client
     role_id = seed_role_agents["role_id"]
     shared_id_str = str(seed_role_agents["shared_id"])

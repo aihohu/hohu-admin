@@ -16,6 +16,8 @@ from app.core.base_response import ResponseModel
 from app.db.session import get_db
 from app.modules.ai.schemas.role_agent import RoleAgentBinding, RoleAgentBindReq
 from app.modules.ai.service.role_agent import role_agent_service
+from app.modules.auth.service import get_current_user
+from app.modules.system.models.user import User
 
 router = APIRouter()
 
@@ -49,11 +51,17 @@ async def put_role_agent_binding(
     role_id: int,
     req: RoleAgentBindReq,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> ResponseModel[None]:
     """决策 #15：全量覆盖（DELETE + INSERT），normalize 软禁用态为 enabled=True.
 
     PUT 端点复用 service 层规范化和边界校验，避免 API 与 service 漂移。
     """
-    await role_agent_service.put_binding(db, role_id, req)
+    await role_agent_service.put_binding(
+        db,
+        role_id,
+        req,
+        actor_user_id=current_user.user_id,
+    )
     await db.commit()
     return ResponseModel.success(data=None)

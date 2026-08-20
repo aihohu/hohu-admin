@@ -242,6 +242,31 @@ class TestUserLookup:
             await user_lookup(ctx, user_name="nonexistent")
         assert exc_info.value.error_code == "AI_LOOKUP_NO_MATCH"
 
+    async def test_lookup_ambiguous_phone_fails_closed(
+        self, db_session: AsyncSession
+    ) -> None:
+        """A non-unique selector must never choose an arbitrary write target."""
+        shared_phone = "13900003999"
+        await _add_user(
+            db_session,
+            user_id=3031,
+            user_name="lookup-ambiguous-a",
+            user_phone=shared_phone,
+        )
+        await _add_user(
+            db_session,
+            user_id=3032,
+            user_name="lookup-ambiguous-b",
+            user_phone=shared_phone,
+        )
+        await db_session.flush()
+        ctx = _make_ctx(db_session, visible_user_ids={3031, 3032})
+
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await user_lookup(ctx, phone=shared_phone)
+
+        assert exc_info.value.error_code == "AI_LOOKUP_AMBIGUOUS"
+
     async def test_lookup_data_scope_excludes_outsider(
         self, db_session: AsyncSession
     ) -> None:

@@ -6,7 +6,7 @@
   防止 JavaScript BigInt 精度丢失
 """
 
-from pydantic import BaseModel, ConfigDict, field_serializer
+from pydantic import BaseModel, ConfigDict, StrictStr, field_serializer
 from pydantic.alias_generators import to_camel
 
 
@@ -61,7 +61,10 @@ class RoleAgentBindReq(BaseModel):
     """
 
     model_config = ConfigDict(
-        alias_generator=to_camel, populate_by_name=True, from_attributes=True
+        alias_generator=to_camel,
+        populate_by_name=True,
+        from_attributes=True,
+        extra="forbid",
     )
 
-    agent_ids: list[str]
+    agent_ids: list[StrictStr]
