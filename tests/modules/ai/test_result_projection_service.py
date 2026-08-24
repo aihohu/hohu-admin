@@ -14,6 +14,7 @@ from app.modules.ai.service.result_projection_service import (
     ProjectionLineage,
     result_projection_service,
 )
+from app.modules.system.service.role_management_service import role_management_service
 from app.modules.system.service.user_role_assignment_service import (
     user_role_assignment_service,
 )
@@ -198,6 +199,40 @@ async def test_delegable_role_projection_rechecks_every_count_contributor() -> N
         ANY,
         actor_user_id=user.user_id,
         role_ids=[901, 902],
+    )
+
+
+async def test_managed_role_projection_rechecks_current_delegation_policy() -> None:
+    user = _user("ai:chat:use", "system:role:edit")
+    lineage = result_projection_service.freeze_lineage(
+        tenant_id=0,
+        agent_code="role_mgmt",
+        tool_codes=["role.update"],
+        subject_refs=[{"type": "managed_role", "id": "901"}],
+    )
+
+    with patch.object(
+        role_management_service,
+        "authorize_role_projection",
+        AsyncMock(
+            side_effect=AuthorizationException(
+                "delegation ceiling revoked",
+                error_code="AI_ROLE_AUTHORITY_EXCEEDED",
+            )
+        ),
+        create=True,
+    ) as authorize_role:
+        allowed = await result_projection_service._authorize_subjects(
+            AsyncMock(),
+            user,
+            lineage,
+        )
+
+    assert allowed is False
+    authorize_role.assert_awaited_once_with(
+        ANY,
+        actor_user_id=user.user_id,
+        role_id=901,
     )
 
 

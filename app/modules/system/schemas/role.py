@@ -86,19 +86,10 @@ class RoleCreate(RoleBase):
 
 
 class RoleUpdate(BaseModel):
-    """角色更新请求"""
-
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    """Strict mutable Role definition fields."""
 
     role_name: str | None = Field(
         None, min_length=2, max_length=50, description="角色名称"
-    )
-    role_code: str | None = Field(
-        None,
-        min_length=2,
-        max_length=50,
-        pattern=r"^[a-zA-Z_][a-zA-Z0-9_]*$",
-        description="角色编码",
     )
     role_desc: str | None = Field(None, max_length=200, description="角色描述")
     data_scope: str | None = Field(
@@ -114,14 +105,14 @@ class RoleUpdate(BaseModel):
     @classmethod
     def validate_role_name(cls, v: str | None) -> str | None:
         """验证角色名称（可选字段）"""
-        if v is not None and (not v or v.strip() == ""):
+        if v is None or not v.strip():
             raise ValueError("角色名称不能为空")
-        return v.strip() if v is not None else None
+        return v.strip()
 
     @field_validator("data_scope")
     @classmethod
     def validate_data_scope(cls, v: str | None) -> str | None:
-        if v is not None and v not in VALID_DATA_SCOPES:
+        if v is None or v not in VALID_DATA_SCOPES:
             raise ValueError("数据权限范围必须是 1~5")
         return v
 
@@ -129,9 +120,22 @@ class RoleUpdate(BaseModel):
     @classmethod
     def validate_status(cls, v: str | None) -> str | None:
         """验证状态值（可选字段）"""
-        if v is not None and v not in [STATUS_ENABLED, STATUS_DISABLED]:
+        if v is None or v not in [STATUS_ENABLED, STATUS_DISABLED]:
             raise ValueError("状态必须是 1(启用) 或 2(禁用)")
         return v
+
+    @model_validator(mode="after")
+    def require_at_least_one_field(self) -> "RoleUpdate":
+        """Reject empty role writes and preserve the immutable code boundary."""
+        if not self.model_fields_set:
+            raise ValueError("至少需要提供一个更新字段")
+        return self
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class RoleOut(RoleBase):
@@ -175,6 +179,28 @@ class RoleOut(RoleBase):
 
     model_config = ConfigDict(
         from_attributes=True, populate_by_name=True, alias_generator=to_camel
+    )
+
+
+class RoleSummaryOut(BaseModel):
+    """Minimal tenant-wide Role metadata with a live delegation assessment."""
+
+    role_id: int
+    role_code: str
+    role_name: str
+    status: str
+    data_scope: str
+    delegable: bool
+    blocked_reason_code: str | None = None
+
+    @field_serializer("role_id")
+    def serialize_id(self, role_id: int, _info) -> str:
+        return str(role_id)
+
+    model_config = ConfigDict(
+        from_attributes=True,
+        populate_by_name=True,
+        alias_generator=to_camel,
     )
 
 

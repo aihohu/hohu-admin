@@ -17,9 +17,11 @@ from app.modules.ai.constants import (
     AI_CHAT_USE_PERMISSION,
     AI_FILE_PARSE_PERMISSION,
     PUBLISHED_AGENT_CODES,
+    PUBLISHED_AGENT_TOOL_PERMISSIONS,
 )
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
+from app.modules.system.constants import PHASE3_DESTRUCTIVE_PERMISSIONS
 from app.modules.system.models.config import Config
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
@@ -214,6 +216,45 @@ async def migrate_ai_mvp_permissions(
         name="修改",
     )
 
+    parent_routes = {
+        "system:dept": "system_dept",
+        "system:role": "system_role",
+        "system:user": "system_user",
+    }
+    permission_names = {
+        "add": "新增",
+        "ai-agent-auth": "Agent 授权",
+        "batch-delete": "批量删除",
+        "delete": "删除",
+        "edit": "修改",
+        "export": "导出",
+        "import": "导入",
+        "list": "查询",
+        "menu-auth": "菜单授权",
+        "move": "移动",
+        "reset-password": "重置密码",
+        "role-auth": "角色授权",
+    }
+    business_menus: list[Menu] = []
+    for permission in sorted(
+        PUBLISHED_AGENT_TOOL_PERMISSIONS | PHASE3_DESTRUCTIVE_PERMISSIONS
+    ):
+        prefix, action = permission.rsplit(":", 1)
+        parent = await db.scalar(
+            select(Menu).where(Menu.route_name == parent_routes[prefix])
+        )
+        if parent is None:
+            raise RuntimeError(
+                f"{parent_routes[prefix]} parent menu not found; run menu seed first"
+            )
+        menu, _ = await _ensure_permission_menu(
+            db,
+            permission=permission,
+            parent=parent,
+            name=permission_names[action],
+        )
+        business_menus.append(menu)
+
     super_role_ids = set(
         (
             await db.execute(
@@ -237,7 +278,7 @@ async def migrate_ai_mvp_permissions(
         menu_id=chat_menu.menu_id,
         role_ids=chat_role_ids,
     )
-    for menu in (file_menu, agent_list_menu, agent_edit_menu):
+    for menu in (file_menu, agent_list_menu, agent_edit_menu, *business_menus):
         await _grant_menu(
             db,
             menu_id=menu.menu_id,

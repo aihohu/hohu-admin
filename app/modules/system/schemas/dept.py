@@ -9,6 +9,7 @@ from pydantic import (
     Field,
     field_serializer,
     field_validator,
+    model_validator,
 )
 from pydantic.alias_generators import to_camel
 
@@ -38,9 +39,8 @@ class DeptCreate(BaseModel):
 
 
 class DeptUpdate(BaseModel):
-    """部门更新请求（所有字段可选）"""
+    """Department non-structural update request."""
 
-    parent_id: int | None = Field(None, description="父部门ID")
     dept_name: str | None = Field(
         None, min_length=1, max_length=100, description="部门名称"
     )
@@ -50,16 +50,57 @@ class DeptUpdate(BaseModel):
     email: str | None = Field(None, description="邮箱")
     status: str | None = Field(None, description="状态：1-启用，2-禁用")
 
+    @field_validator("dept_name", "order_num")
+    @classmethod
+    def reject_null_required_fields(cls, v: object) -> object:
+        """Reject explicit nulls for fields backed by non-null columns."""
+        if v is None:
+            raise ValueError("部门名称和显示顺序不能为 NULL")
+        return v
+
     @field_validator("status")
     @classmethod
     def validate_status(cls, v: str | None) -> str | None:
         if v is None:
-            return v
+            raise ValueError("状态不能为 NULL")
         if v not in [STATUS_ENABLED, STATUS_DISABLED]:
             raise ValueError("状态必须是 1(启用) 或 2(禁用)")
         return v
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    @model_validator(mode="after")
+    def require_at_least_one_field(self) -> "DeptUpdate":
+        """Reject empty updates instead of accepting a no-op write."""
+        if not self.model_fields_set:
+            raise ValueError("至少需要提供一个更新字段")
+        return self
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+
+class DeptMove(BaseModel):
+    """Canonical department hierarchy move request."""
+
+    new_parent_id: int | None = Field(..., description="新父部门ID，NULL 表示顶级")
+
+    @field_validator("new_parent_id", mode="before")
+    @classmethod
+    def validate_new_parent_id(cls, value: object) -> object:
+        """Accept only a canonical positive Snowflake string or explicit null."""
+        if value is None:
+            return None
+        if not isinstance(value, str) or re.fullmatch(r"[1-9][0-9]*", value) is None:
+            raise ValueError("newParentId must be a canonical Snowflake ID string")
+        return int(value)
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
 
 
 class DeptQuery(BaseModel):

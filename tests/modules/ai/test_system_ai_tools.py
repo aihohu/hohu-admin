@@ -14,6 +14,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessRuleException
+from app.core.id_generator import next_id
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.core.context import AiToolContext, DataScopeContext
 from app.modules.system.ai_tools import (
@@ -22,6 +23,7 @@ from app.modules.system.ai_tools import (
     user_distinct,
     user_stats,
 )
+from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 
@@ -498,10 +500,36 @@ class TestDeptCount:
 # ============ role.list / dept.list ============
 
 
-def _make_role_list_ctx(db: AsyncSession) -> AiToolContext:
-    """构造 role.list 的 ctx"""
+async def _make_role_list_ctx(db: AsyncSession) -> AiToolContext:
+    """Build role.list context with a real explicitly authorized principal."""
     from app.modules.system.ai_tools import role_list  # noqa: F401
 
+    marker = next_id()
+    permission = Menu(
+        menu_id=next_id(),
+        menu_name=f"role-list-permission-{marker}",
+        menu_type="F",
+        permission="system:role:list",
+        status="1",
+    )
+    actor_role = Role(
+        role_id=next_id(),
+        role_name=f"role-list-actor-{marker}",
+        role_code=f"R_ROLE_LIST_ACTOR_{marker}",
+        data_scope="1",
+        status="1",
+        menus=[permission],
+    )
+    actor = User(
+        user_id=next_id(),
+        user_name=f"role-list-actor-{marker}",
+        nickname="Role list actor",
+        hashed_password="x",
+        status="1",
+        roles=[actor_role],
+    )
+    db.add(actor)
+    await db.flush()
     meta = AiToolMeta(
         name="role.list",
         agent="role_mgmt",
@@ -513,7 +541,7 @@ def _make_role_list_ctx(db: AsyncSession) -> AiToolContext:
         query_cache_module="system/role",
     )
     return AiToolContext(
-        user=MagicMock(user_id=1),
+        user=actor,
         perms={"system:role:list"},
         db=db,
         data_scope=DataScopeContext(
@@ -565,7 +593,7 @@ class TestRoleList:
         await _add_role(db_session, role_id=4002, role_name="r2", role_code="R_R2")
         await db_session.flush()
 
-        ctx = _make_role_list_ctx(db_session)
+        ctx = await _make_role_list_ctx(db_session)
         result = await role_list(ctx, filters=None)
         # LLM 层
         assert result.data["limit"] == 20  # 默认
@@ -576,9 +604,17 @@ class TestRoleList:
         rows = result.ui.view_data["rows"]
         rows_names = [r["name"] for r in rows]
         assert "r1" in rows_names and "r2" in rows_names
-        # 精简字段：含 id/name/code/status
+        # Phase 3 adds delegation state without exposing aggregate internals.
         rec0 = rows[0]
-        assert set(rec0.keys()) == {"id", "name", "code", "status"}
+        assert set(rec0.keys()) == {
+            "id",
+            "name",
+            "code",
+            "status",
+            "dataScope",
+            "delegable",
+            "blockedReasonCode",
+        }
         # id 字符串化（防 JS BigInt）
         assert isinstance(rec0["id"], str)
         # UI 层：data_list
@@ -589,6 +625,11 @@ class TestRoleList:
             {"key": "name", "label": "ai.tool.field.name"},
             {"key": "code", "label": "ai.tool.field.code"},
             {"key": "status", "label": "ai.tool.field.status"},
+            {"key": "delegable", "label": "ai.tool.field.delegable"},
+            {
+                "key": "blockedReasonCode",
+                "label": "ai.tool.field.blockedReasonCode",
+            },
         ]
         assert len(rows) >= 2
         # audit total 反映真实总数（_AFFECTED_ROW_KEYS 命中 total）
@@ -601,7 +642,7 @@ class TestRoleList:
         await _add_role(db_session, role_id=4012, role_name="role_off_uniq", status="2")
         await db_session.flush()
 
-        ctx = _make_role_list_ctx(db_session)
+        ctx = await _make_role_list_ctx(db_session)
         result = await role_list(ctx, filters={"status": "2"})
         # rows 全量（受 filter 约束）；sample 截断可能漏，故断言 rows
         names = [r["name"] for r in result.ui.view_data["rows"]]
@@ -612,7 +653,7 @@ class TestRoleList:
         """limit 大于 50 时强制截断为 50。"""
         from app.modules.system.ai_tools import role_list
 
-        ctx = _make_role_list_ctx(db_session)
+        ctx = await _make_role_list_ctx(db_session)
         result = await role_list(ctx, filters=None, limit=999)
         assert result.data["limit"] == 50  # 截断
         # rows 也受同样 limit 约束
@@ -621,7 +662,7 @@ class TestRoleList:
     async def test_limit_none_or_zero_uses_default(self, db_session) -> None:
         from app.modules.system.ai_tools import role_list
 
-        ctx = _make_role_list_ctx(db_session)
+        ctx = await _make_role_list_ctx(db_session)
         r1 = await role_list(ctx, filters=None, limit=None)
         r2 = await role_list(ctx, filters=None, limit=0)
         r3 = await role_list(ctx, filters=None, limit=-5)
@@ -639,7 +680,7 @@ class TestRoleList:
         await _add_role(db_session, role_id=4023, role_name="total_test_3")
         await db_session.flush()
 
-        ctx = _make_role_list_ctx(db_session)
+        ctx = await _make_role_list_ctx(db_session)
         result = await role_list(ctx, filters=None, limit=1)
         # total ≥ 3（真实总数），但 rows / sample 受 limit 影响
         assert result.data["total"] >= 3
@@ -658,7 +699,7 @@ class TestRoleList:
             )
         await db_session.flush()
 
-        ctx = _make_role_list_ctx(db_session)
+        ctx = await _make_role_list_ctx(db_session)
         result = await role_list(ctx, filters=None, limit=10)
         # rows 全量（10 条上限），sample 只前 3
         assert len(result.data["sample"]) <= 3
@@ -666,7 +707,7 @@ class TestRoleList:
     async def test_filter_out_of_whitelist_raises(self, db_session) -> None:
         from app.modules.system.ai_tools import role_list
 
-        ctx = _make_role_list_ctx(db_session)
+        ctx = await _make_role_list_ctx(db_session)
         with pytest.raises(BusinessRuleException) as exc_info:
             await role_list(ctx, filters={"role_name": "evil"})
         assert exc_info.value.error_code == "AI_STATS_FIELD_NOT_ALLOWED"

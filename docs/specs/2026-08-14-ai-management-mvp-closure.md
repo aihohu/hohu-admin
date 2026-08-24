@@ -31,6 +31,7 @@
 | Registry、Gateway、HITL、权限链、SSE、审计 | [`2026-07-02-ai-tool-gateway-design.md`](./2026-07-02-ai-tool-gateway-design.md) + ADR-0001/0002 |
 | 用户管理 AI 工具 | [`2026-08-11-ai-user-management-tools.md`](./2026-08-11-ai-user-management-tools.md) |
 | 用户导入导出 | [`2026-08-01-user-import-export-design.md`](./2026-08-01-user-import-export-design.md) |
+| 部门管理 AI 工具与传统 Dept writer 收口 | [`2026-08-20-ai-dept-management-tools.md`](./2026-08-20-ai-dept-management-tools.md) |
 | 工具卡归属、reload、HITL resume/download | [`2026-08-05-chat-tool-card-embed-in-message.md`](./2026-08-05-chat-tool-card-embed-in-message.md) |
 | 消息编辑/重新生成 | 当前延期；只有明确恢复该功能后才读 [`2026-08-06-ai-message-edit-semantics.md`](./2026-08-06-ai-message-edit-semantics.md) |
 | Tool Result view type | [`2026-07-16-tool-result-view-design.md`](./2026-07-16-tool-result-view-design.md) |
@@ -825,6 +826,22 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 
 61. **Phase 2 收口审查必须消除歧义目标与授权存在性泄露** — `user.lookup` 对手机号、邮箱等非唯一 selector 的多命中返回稳定 `AI_LOOKUP_AMBIGUOUS` 并停止，禁止任取第一条作为后续高风险写入目标；`user.dept_lookup` 的精确 `matchCount` 将超过展示 `limit` 的全部贡献部门冻结为内部 projection refs，授权撤销后不得回放旧计数；Role-Agent Service 在查询目标 Role 或 Agent 是否存在前先复验入口权限。**反例**: 重复手机号随机选中一名用户会把批准操作写给错误主体；只冻结首屏部门会让 scope 外对象继续贡献历史精确计数；先返回 `AI_ROLE_NOT_FOUND`/`AI_AGENT_NOT_FOUND` 会向无权限的 Service 调用方泄露资源存在性。**回归**: `tests/modules/system/test_ai_tools_user_list_lookup_update.py`、`tests/modules/ai/test_user_assignment_tools.py`、`tests/modules/ai/test_role_agent_delegation.py`、`src/views/ai/chat/modules/__tests__/tool-call-i18n.spec.ts`。
 
+62. **Dept 页面与 AI writer 共用结构和状态授权 Policy** — `system:dept:move`、独立 move endpoint、create/update/move Tool 全部复用同一 scoped Service；status 和树结构变化必须物化全部受影响用户的前后授权，并按 role → dept → user 锁定后重建快照。**反例**: 页面 update 接受 `parentId`，或只检查源/目标部门 scope，会让 `DEPT_AND_SUB` 与 `CUSTOM` 成员在未经 dominance 审查时改变有效范围。**回归**: `tests/modules/system/test_dept_phase3_contracts.py`、`tests/modules/system/test_dept_phase3_authorization.py`、`tests/modules/ai/test_dept_phase3_tools.py`。
+
+63. **Role 聚合变更以全体成员最终授权为委派边界** — create/update/menu/Agent 写入比较旧新角色定义与每名成员的前后有效授权，并在 role → dept → user 锁内复验；只有 `CUSTOM` scope 可携带非空部门集合，避免潜伏授权。**反例**: 只比较目标 Role 自身会把越权菜单、Agent 或 data scope 扩散给混合角色成员；在非 `CUSTOM` 角色保存部门 ID 会在后续 scope 切换时激活未共同审查的权限。**回归**: `tests/modules/system/test_role_phase3_authorization.py`、`tests/modules/ai/test_role_phase3_tools.py`。
+
+64. **传统 Dept/Role 删除要求当前 R_SUPER 与精确原权限同时成立** — AI delete Tool 延期期间，单删和批删分别要求各自原权限，通配符只作为传统授权兼容且前端必须看到显式权限码；引用检查、全局锁与整批原子性阻止 cascade 改写授权。**反例**: 普通管理员持有全部 delete button 仍可删除授权聚合，或 R_SUPER 只有单删权限却调用批删；前端用 `*` 代替精确码会重新显示未授权入口。**回归**: `tests/modules/system/test_phase3_destructive_policy.py`、`tests/modules/auth/test_permission_collect.py`、`src/hooks/business/__tests__/auth.spec.ts`。
+
+65. **已发布 Agent 的 fresh/upgrade 权限必须覆盖完整 Tool 集合且保留部署状态** — fresh seed 与加法迁移向 `R_SUPER` 显式补齐 user/dept/role 已发布 Tool 所需权限和绑定，不从 Registry 运行时隐式合成，也不翻转现有 Agent enabled、Role-Agent 或普通角色状态；AI 模块关闭时业务 Service 不提前加载 Tool Registry。**反例**: Agent 标记已发布但 fresh `R_SUPER` 缺少 move/menu-auth 会出现可见却不可执行；upgrade 把管理员关闭的 Agent 重新开启，或禁用模块仍因导入 Tool 失败启动，都会破坏部署边界。**回归**: `tests/scripts/test_init_db_seed.py`、`tests/modules/ai/test_permission_migration.py`、`tests/modules/ai/test_system_ai_tools.py`。
+
+66. **HITL 影响数量与 Tool Result 字段必须来自完整服务端事实并可本地化** — Dept status/move 预览返回全部受影响用户数，Role 聚合预览返回全部成员数；确认卡、结果字段和稳定错误码统一使用中英文 key，不能由展示行或客户端猜测影响面。**反例**: `count=1` 只描述目标聚合会诱导批准全局授权变更；后端英文标签或中文解析会让另一语言环境丢失安全语义。**回归**: `tests/modules/ai/test_dept_phase3_tools.py`、`tests/modules/ai/test_role_phase3_tools.py`、`src/views/ai/chat/modules/__tests__/confirmation-presentation-i18n.spec.ts`。
+
+67. **Direct HITL 展示只绑定冻结参数并持久化安全标量** — nullable update 参数使用 omitted sentinel 区分“未提供”和显式 `null`，list/null 参数以原值参与冻结等值校验、仅以独立 `display_value` 生成标量确认展示；字段 label 必须属于该 Tool 的 `args_summary_fields`。**反例**: 把合成的 `changes` dict 当作字段会在 Gateway 拒绝非冻结 label，把 menu/Agent list 或 root `null` 直接写入 presentation 会使合法操作无法进入 pending。**回归**: `tests/modules/ai/test_role_phase3_tools.py`、`tests/modules/ai/test_dept_phase3_tools.py`。
+
+68. **Role 完整定义读取和历史写结果都实时重验 Delegation Policy** — tenant-wide Role list/all 只返回最小摘要；详情、菜单、Agent 绑定读取必须先验证目标当前定义、成员边界和成员最终授权，Agent 候选再裁剪到当前 `grantable_agent_ids`；Role 写结果以 `managed_role` lineage 在每个读取面重验相同领域 Policy。**反例**: 仅凭按钮权限返回高权限角色的完整 menu/Agent 集合，或历史结果只检查 Role 仍存在，会在撤销委派上限后继续泄露授权定义。**回归**: `tests/modules/system/test_role_phase3_contracts.py`、`tests/modules/ai/test_role_agent_delegation.py`、`tests/modules/ai/test_result_projection_service.py`、`src/views/system/role/__tests__/role-list-data-scope.spec.ts`。
+
+69. **部门路径、负责人和间接 Role 影响都属于锁内稳定事实** — ancestors 子树匹配必须使用完整 path segment 边界；leader 在操作者 user scope 内唯一解析并冻结稳定 user ID/display；status 变化即使只影响零成员 Role 也要校验并冻结其 definition，Role/Role-Agent writer 的 dept 锁集合纳入前后物化的全部有限后代部门。**反例**: `0,12%` 会误改 `0,123` 子树；把 leader 当自由文本会引用隐藏用户；只审查现有成员会放过 dormant Role 模板变化；只锁直接部门会允许后代成员关系 phantom。**回归**: `tests/modules/system/test_dept_phase3_authorization.py`、`tests/modules/system/test_role_phase3_authorization.py`、`tests/modules/ai/test_role_agent_delegation.py`。
+
 ---
 
 ## 10. 实施计划
@@ -879,10 +896,12 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 
 ### Phase 3：部门与角色 Agent
 
-- [ ] 新写 Dept Agent 短 spec，新增 `system:dept:move` 和独立页面 move API，收口传统 Dept 读/更新 API，并完成 scoped lookup/create/update/move、status/结构间接授权影响分析以及 role → dept → user 全局锁协议。
-- [ ] 新写 Role Agent 短 spec，在 Phase 2 授权地基上完成 lookup/create/update/menu/Agent 聚合根 Policy、受限委派和全局成员影响分析。
-- [ ] AI dept/role delete Tool 保持延期；现有页面单个/批量删除入口改为 `R_SUPER + 原权限`，补引用保护、全局锁、原子批量和无 cascade 授权变更测试。
-- [ ] 更新 prompt、i18n、tool result 和 Agent 管理页 inventory。
+- [x] ✅ Dept Agent 已完成（2026-08-24）：[`短 spec`](./2026-08-20-ai-dept-management-tools.md)、`system:dept:move` 与独立页面 move API、传统 scoped read/update、scoped lookup/create/update/move、status/结构间接授权影响分析和 role → dept → user 全局锁协议全部落地。
+- [x] ✅ Role Agent 已完成（2026-08-24）：[`短 spec`](./2026-08-20-ai-role-management-tools.md)、scoped lookup/create/update/menu/Agent 聚合根 Policy、受限委派、全局成员影响分析、锁内快照复验及非 `CUSTOM` 潜伏部门授权拒绝全部落地。
+- [x] ✅ AI dept/role delete Tool 保持延期；现有页面单个/批量删除已收紧为当前 `R_SUPER + 精确原权限`，引用保护、全局锁、原子批量和无 cascade 授权变更测试通过。
+- [x] ✅ prompt、zh-CN/en-US i18n、Tool Result 字段/错误映射和 Agent 管理页 inventory 已同步；`user_mgmt`、`dept_mgmt`、`role_mgmt` 与 `shared` 进入已发布集合，fresh/upgrade 显式权限闭环且保留部署状态。
+- [x] Phase 3 验证证据：后端全量 2252 项测试通过，总覆盖率 76%，仅保留 32 条既有 warning；`ruff check .`、`ruff format --check .`、31 tools / 12 static checks 通过。Web format、lint（0 error / 30 条既有 warning）、typecheck、33 files / 128 tests 与 production build 通过。按基线，真实浏览器发布矩阵、全局 Web 覆盖率和真实 provider smoke 仍由 Phase 4 收口，当前构建不得生产发布。
+- [x] ✅ Phase 3 审查修复（2026-08-24）：修复 Dept ancestors ID 前缀碰撞、七个 writer 的 scalar HITL confirmation、AI nullable clear、leader scoped reference、零成员 Role status 影响、Role/Role-Agent 物化后代锁、传统 Role 最小读/完整定义重授权、Role 结果实时投影和 disabled `R_SUPER` 前端身份来源；未新增数据库 migration 或权限码。
 
 ### Phase 4：发布闭环
 

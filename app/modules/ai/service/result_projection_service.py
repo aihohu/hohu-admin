@@ -627,6 +627,7 @@ class ResultProjectionService:
         if not lineage.subject_refs:
             return True
         delegable_role_ids: list[int] = []
+        managed_role_ids: list[int] = []
         complete_role_assignment_user_ids: list[int] = []
         role_assignment_access_user_ids: list[int] = []
         try:
@@ -634,6 +635,8 @@ class ResultProjectionService:
                 subject_type = subject["type"]
                 if subject_type == "delegable_role":
                     delegable_role_ids.append(int(subject["id"]))
+                elif subject_type == "managed_role":
+                    managed_role_ids.append(int(subject["id"]))
                 elif subject_type == "complete_user_role_assignment":
                     complete_role_assignment_user_ids.append(int(subject["id"]))
                 elif subject_type == "user_role_assignment_access":
@@ -641,11 +644,17 @@ class ResultProjectionService:
 
             if (
                 delegable_role_ids
+                or managed_role_ids
                 or complete_role_assignment_user_ids
                 or role_assignment_access_user_ids
             ):
                 from app.modules.system.service.user_role_assignment_service import (  # noqa: PLC0415
                     user_role_assignment_service,
+                )
+
+            if managed_role_ids:
+                from app.modules.system.service.role_management_service import (  # noqa: PLC0415
+                    role_management_service,
                 )
 
             if delegable_role_ids and not (
@@ -656,6 +665,12 @@ class ResultProjectionService:
                 )
             ):
                 return False
+            for role_id in managed_role_ids:
+                await role_management_service.authorize_role_projection(
+                    db,
+                    actor_user_id=int(user.user_id),
+                    role_id=role_id,
+                )
             for target_user_id in complete_role_assignment_user_ids:
                 (
                     _roles,
@@ -680,6 +695,7 @@ class ResultProjectionService:
         for subject in lineage.subject_refs:
             if subject["type"] in {
                 "delegable_role",
+                "managed_role",
                 "complete_user_role_assignment",
                 "user_role_assignment_access",
             }:

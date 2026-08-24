@@ -34,8 +34,45 @@ from app.modules.system.service.authorization_lock import authorization_lock_ser
 from app.modules.system.service.role_delegation_service import (
     role_delegation_service,
 )
+from app.modules.system.service.role_management_service import role_management_service
 
 ROLE_AGENT_PERMISSION = "system:role:ai-agent-auth"
+
+
+async def test_role_agent_read_rechecks_current_role_delegation_policy(
+    db_session: AsyncSession,
+) -> None:
+    actor, _actor_role, target_role, delegated, blocked = await _seed_role_agent_case(
+        db_session
+    )
+    db_session.add(
+        RoleAiAgent(
+            role_id=target_role.role_id,
+            agent_id=delegated.agent_id,
+            enabled=True,
+        )
+    )
+    await db_session.flush()
+
+    with patch.object(
+        role_management_service,
+        "authorize_role_projection",
+        AsyncMock(return_value=target_role),
+    ) as authorize:
+        binding = await role_agent_service.get_binding(
+            db_session,
+            target_role.role_id,
+            actor_user_id=actor.user_id,
+        )
+
+    authorize.assert_awaited_once_with(
+        db_session,
+        actor_user_id=actor.user_id,
+        role_id=target_role.role_id,
+    )
+    assert binding.bound_agent_ids == [str(delegated.agent_id)]
+    assert {row.agent_id for row in binding.all_agents} == {delegated.agent_id}
+    assert blocked.agent_id not in {row.agent_id for row in binding.all_agents}
 
 
 def _menu(permission: str) -> Menu:

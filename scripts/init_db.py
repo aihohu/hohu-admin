@@ -21,10 +21,15 @@ from app.modules.ai.constants import (
     AI_CHAT_USE_PERMISSION,
     AI_FILE_PARSE_PERMISSION,
     PUBLISHED_AGENT_CODES,
+    PUBLISHED_AGENT_TOOL_PERMISSIONS,
 )
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
-from app.modules.system.constants import USER_ROLE_AUTH_PERMISSION
+from app.modules.system.constants import (
+    DEPT_MOVE_PERMISSION,
+    PHASE3_DESTRUCTIVE_PERMISSIONS,
+    USER_ROLE_AUTH_PERMISSION,
+)
 from app.modules.system.models.config import Config
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
@@ -38,6 +43,8 @@ monitor_id = next_id()
 # 链路，按钮 parent_id 必须指向 system_user 菜单。模块级避免内联 next_id() 后无法被
 # 后续按钮引用。
 _system_user_menu_id = next_id()
+_system_dept_menu_id = next_id()
+_system_role_menu_id = next_id()
 _ai_chat_menu_id = next_id()
 _ai_agent_menu_id = next_id()
 
@@ -98,6 +105,55 @@ init_menus = [
         keep_alive=False,
         constant=False,
         multi_tab=False,
+        menu_id=_system_dept_menu_id,
+    ),
+    # Department Tool permissions are explicit even for the fresh super role.
+    Menu(
+        parent_id=_system_dept_menu_id,
+        menu_name="查询",
+        menu_type="F",
+        permission="system:dept:list",
+        status=STATUS_ENABLED,
+        menu_id=next_id(),
+    ),
+    Menu(
+        parent_id=_system_dept_menu_id,
+        menu_name="新增",
+        menu_type="F",
+        permission="system:dept:add",
+        status=STATUS_ENABLED,
+        menu_id=next_id(),
+    ),
+    Menu(
+        parent_id=_system_dept_menu_id,
+        menu_name="修改",
+        menu_type="F",
+        permission="system:dept:edit",
+        status=STATUS_ENABLED,
+        menu_id=next_id(),
+    ),
+    Menu(
+        parent_id=_system_dept_menu_id,
+        menu_name="移动",
+        menu_type="F",
+        permission=DEPT_MOVE_PERMISSION,
+        status=STATUS_ENABLED,
+        menu_id=next_id(),
+    ),
+    Menu(
+        parent_id=_system_dept_menu_id,
+        menu_name="删除",
+        menu_type="F",
+        permission="system:dept:delete",
+        status=STATUS_ENABLED,
+        menu_id=next_id(),
+    ),
+    Menu(
+        parent_id=_system_dept_menu_id,
+        menu_name="批量删除",
+        menu_type="F",
+        permission="system:dept:batch-delete",
+        status=STATUS_ENABLED,
         menu_id=next_id(),
     ),
     Menu(
@@ -120,6 +176,46 @@ init_menus = [
         menu_id=_system_user_menu_id,
     ),
     # 初始化用户导入和导出按钮权限。
+    Menu(
+        parent_id=_system_user_menu_id,
+        menu_name="查询",
+        menu_type="F",
+        permission="system:user:list",
+        status=STATUS_ENABLED,
+        menu_id=next_id(),
+    ),
+    Menu(
+        parent_id=_system_user_menu_id,
+        menu_name="新增",
+        menu_type="F",
+        permission="system:user:add",
+        status=STATUS_ENABLED,
+        menu_id=next_id(),
+    ),
+    Menu(
+        parent_id=_system_user_menu_id,
+        menu_name="修改",
+        menu_type="F",
+        permission="system:user:edit",
+        status=STATUS_ENABLED,
+        menu_id=next_id(),
+    ),
+    Menu(
+        parent_id=_system_user_menu_id,
+        menu_name="删除",
+        menu_type="F",
+        permission="system:user:delete",
+        status=STATUS_ENABLED,
+        menu_id=next_id(),
+    ),
+    Menu(
+        parent_id=_system_user_menu_id,
+        menu_name="重置密码",
+        menu_type="F",
+        permission="system:user:reset-password",
+        status=STATUS_ENABLED,
+        menu_id=next_id(),
+    ),
     Menu(
         parent_id=_system_user_menu_id,
         menu_name="导入",
@@ -161,6 +257,62 @@ init_menus = [
         keep_alive=False,
         constant=False,
         multi_tab=False,
+        menu_id=_system_role_menu_id,
+    ),
+    Menu(
+        parent_id=_system_role_menu_id,
+        menu_name="查询",
+        menu_type="F",
+        permission="system:role:list",
+        status=STATUS_ENABLED,
+        menu_id=next_id(),
+    ),
+    Menu(
+        parent_id=_system_role_menu_id,
+        menu_name="新增",
+        menu_type="F",
+        permission="system:role:add",
+        status=STATUS_ENABLED,
+        menu_id=next_id(),
+    ),
+    Menu(
+        parent_id=_system_role_menu_id,
+        menu_name="修改",
+        menu_type="F",
+        permission="system:role:edit",
+        status=STATUS_ENABLED,
+        menu_id=next_id(),
+    ),
+    Menu(
+        parent_id=_system_role_menu_id,
+        menu_name="菜单授权",
+        menu_type="F",
+        permission="system:role:menu-auth",
+        status=STATUS_ENABLED,
+        menu_id=next_id(),
+    ),
+    Menu(
+        parent_id=_system_role_menu_id,
+        menu_name="Agent 授权",
+        menu_type="F",
+        permission="system:role:ai-agent-auth",
+        status=STATUS_ENABLED,
+        menu_id=next_id(),
+    ),
+    Menu(
+        parent_id=_system_role_menu_id,
+        menu_name="删除",
+        menu_type="F",
+        permission="system:role:delete",
+        status=STATUS_ENABLED,
+        menu_id=next_id(),
+    ),
+    Menu(
+        parent_id=_system_role_menu_id,
+        menu_name="批量删除",
+        menu_type="F",
+        permission="system:role:batch-delete",
+        status=STATUS_ENABLED,
         menu_id=next_id(),
     ),
     Menu(
@@ -575,13 +727,14 @@ def build_init_roles() -> list[Role]:
 
 
 def bind_fresh_role_permissions(admin_role: Role, menus: list[Menu]) -> None:
-    """Bind explicit AI and role-delegation permissions for fresh R_SUPER."""
+    """Bind every published Agent permission explicitly for fresh R_SUPER."""
     permissions = {
         AI_CHAT_USE_PERMISSION,
         AI_FILE_PARSE_PERMISSION,
         "ai:agent:list",
         AI_AGENT_EDIT_PERMISSION,
-        USER_ROLE_AUTH_PERMISSION,
+        *PUBLISHED_AGENT_TOOL_PERMISSIONS,
+        *PHASE3_DESTRUCTIVE_PERMISSIONS,
     }
     admin_role.menus = [menu for menu in menus if menu.permission in permissions]
 

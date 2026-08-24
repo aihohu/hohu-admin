@@ -21,7 +21,7 @@ from app.constants import (
     SUPER_ADMIN_ROLE_CODE,
     USER_ROLE_CODE,
 )
-from app.modules.system.constants import USER_ROLE_AUTH_PERMISSION
+from app.modules.system.constants import DEPT_MOVE_PERMISSION, USER_ROLE_AUTH_PERMISSION
 from app.utils.validators import validate_password
 from scripts.init_db import (
     bind_fresh_role_permissions,
@@ -162,7 +162,7 @@ class TestRoleSeed:
         assert default_role.data_scope == DATA_SCOPE_SELF
         assert default_role.status == STATUS_ENABLED
 
-    def test_super_admin_gets_explicit_ai_chat_permission(self):
+    def test_super_admin_gets_all_published_agent_permissions(self):
         admin_role, _ = build_init_roles()
 
         bind_fresh_role_permissions(admin_role, init_menus)
@@ -172,8 +172,42 @@ class TestRoleSeed:
             "ai:agent:list",
             "ai:chat:use",
             "ai:file:parse",
+            "system:dept:add",
+            "system:dept:batch-delete",
+            "system:dept:delete",
+            "system:dept:edit",
+            "system:dept:list",
+            DEPT_MOVE_PERMISSION,
+            "system:role:add",
+            "system:role:ai-agent-auth",
+            "system:role:batch-delete",
+            "system:role:delete",
+            "system:role:edit",
+            "system:role:list",
+            "system:role:menu-auth",
+            "system:user:add",
+            "system:user:delete",
+            "system:user:edit",
+            "system:user:export",
+            "system:user:import",
+            "system:user:list",
+            "system:user:reset-password",
             USER_ROLE_AUTH_PERMISSION,
         }
+
+        parent_routes = {
+            "system:dept": "system_dept",
+            "system:role": "system_role",
+            "system:user": "system_user",
+        }
+        menus_by_id = {menu.menu_id: menu for menu in init_menus}
+        for menu in admin_role.menus:
+            prefix = ":".join(menu.permission.split(":")[:2])
+            route_name = parent_routes.get(prefix)
+            if route_name is None:
+                continue
+            parent = menus_by_id[menu.parent_id]
+            assert parent.route_name == route_name
 
     def test_user_role_auth_permission_is_seeded_under_user_menu(self):
         button = _find_menu_by_permission(init_menus, USER_ROLE_AUTH_PERMISSION)

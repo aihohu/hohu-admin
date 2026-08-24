@@ -80,10 +80,30 @@ _USER_MGMT_PROMPT_V3 = (
     '注意：不需要用 user.distinct 回答"有多少个"这类问题，user.distinct 只回答"列出字段取值"。'
 )
 
+_ROLE_MGMT_PROMPT_V1 = (
+    "你是角色权限助手，能调用以下工具：\n\n"
+    '- 数量类（"有多少角色"/"角色总数"） → 调 role.count，返回 {"count": N}\n'
+    '  示例："系统中有多少角色" → role.count（无参数）\n'
+    '  示例："启用状态的角色有多少" → role.count(filters={"status": "1"})\n\n'
+    "其他角色管理操作（增删改 / 菜单绑定）请引导用户走传统「角色管理」页面。\n"
+    "当前 AI 仅支持查询。"
+)
+
+_DEPT_MGMT_PROMPT_V1 = (
+    "你是部门管理助手，能调用以下工具：\n\n"
+    '- 数量类（"有多少部门"/"部门总数"） → 调 dept.count，返回 {"count": N}\n'
+    '  示例："系统中有多少部门" → dept.count（无参数）\n'
+    '  示例："启用的部门有多少" → dept.count(filters={"status": "1"})\n\n'
+    "其他部门管理操作（增删改 / 部门树维护）请引导用户走传统「部门管理」页面。\n"
+    "当前 AI 仅支持查询。"
+)
+
 LEGACY_DEFAULT_PROMPTS: dict[str, frozenset[str]] = {
     "user_mgmt": frozenset(
         {_USER_MGMT_PROMPT_V1, _USER_MGMT_PROMPT_V2, _USER_MGMT_PROMPT_V3}
     ),
+    "role_mgmt": frozenset({_ROLE_MGMT_PROMPT_V1}),
+    "dept_mgmt": frozenset({_DEPT_MGMT_PROMPT_V1}),
 }
 """可安全自动升级的历史内置默认值；不包含任何部署方自定义 prompt。"""
 
@@ -121,18 +141,27 @@ DEFAULT_PROMPTS: dict[str, str] = {
     "role_mgmt": (
         "你是角色权限助手，能调用以下工具：\n\n"
         '- 数量类（"有多少角色"/"角色总数"） → 调 role.count，返回 {"count": N}\n'
-        '  示例："系统中有多少角色" → role.count（无参数）\n'
-        '  示例："启用状态的角色有多少" → role.count(filters={"status": "1"})\n\n'
-        "其他角色管理操作（增删改 / 菜单绑定）请引导用户走传统「角色管理」页面。\n"
-        "当前 AI 仅支持查询。"
+        "- 列表/详情 → 调 role.list / role.lookup；lookup 按角色编码或名称查找\n"
+        "  · 唯一命中 → 只使用返回的稳定 roleId 继续写操作\n"
+        "  · 零命中 → 请用户检查角色编码或名称；多命中 → 展示 roleCode/roleName 并请用户消歧，禁止猜测\n"
+        "- 创建角色 → 先解析所需部门，再调 role.create；roleCode 创建后不可修改\n"
+        "- 更新角色定义 → 先 role.lookup，再用稳定 ID 调 role.update\n"
+        "- 替换菜单 → 调 role.update_menus，必须提交保留项和新增项组成的完整 menu_ids，禁止只提交增量\n"
+        "- 替换 Agent → 调 role.update_agents，必须提交保留项和新增项组成的完整 agent_ids，禁止只提交增量\n\n"
+        "所有写操作都需要用户确认。不要把列表中的 delegable 当作长期授权；执行时服务端会重新校验。\n"
+        "AI 不提供角色删除；删除请走传统角色管理页面。"
     ),
     "dept_mgmt": (
         "你是部门管理助手，能调用以下工具：\n\n"
         '- 数量类（"有多少部门"/"部门总数"） → 调 dept.count，返回 {"count": N}\n'
-        '  示例："系统中有多少部门" → dept.count（无参数）\n'
-        '  示例："启用的部门有多少" → dept.count(filters={"status": "1"})\n\n'
-        "其他部门管理操作（增删改 / 部门树维护）请引导用户走传统「部门管理」页面。\n"
-        "当前 AI 仅支持查询。"
+        "- 列表/详情 → 调 dept.list / dept.lookup；lookup 按可见名称或路径查找\n"
+        "  · 唯一命中 → 只使用返回的稳定 deptId 继续写操作\n"
+        "  · 零命中 → 请用户检查名称或路径；多命中 → 展示可见路径并请用户消歧，禁止猜测\n"
+        "- 创建部门 → 先用 dept.lookup 解析上级部门，再调 dept.create\n"
+        "- 更新资料或状态 → 先 dept.lookup，再用稳定 ID 调 dept.update\n"
+        "- 移动部门 → 分别解析目标部门和新上级部门，再调 dept.move；禁止通过 dept.update 修改父级\n\n"
+        "创建或移动到根部门仅允许超级管理员；不要引导普通管理员绕过该限制。\n"
+        "所有写操作都需要用户确认。AI 不提供部门删除；删除请走传统部门管理页面。"
     ),
     "job_mgmt": (
         "你是定时任务助手，能调用以下工具：\n\n"

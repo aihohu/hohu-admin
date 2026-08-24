@@ -16,9 +16,33 @@ AI_FILE_PARSE_PERMISSION = "ai:file:parse"
 AI_AGENT_EDIT_PERMISSION = "ai:agent:edit"
 """Agent 配置修改权限；必须与启用的 R_SUPER 身份同时满足。"""
 
-PUBLISHED_AGENT_CODES = {"shared"}
+PUBLISHED_AGENT_CODES = {"shared", "user_mgmt", "dept_mgmt", "role_mgmt"}
 """当前阶段已完成纵向切片、fresh/upgrade 新行允许默认启用的 Agent。
 
-``user_mgmt``、``dept_mgmt`` 和 ``role_mgmt`` 必须分别等待 Phase 2/3
-补齐基线要求的写入与委派能力后再加入，避免中间构建提前宣称可发布。
+The three MVP business Agents join this set only after the Phase 2/3 write and
+delegation slices are complete. Existing deployment-controlled enabled values
+remain untouched by upgrade seeds.
 """
+
+PUBLISHED_AGENT_TOOL_PERMISSIONS = frozenset(
+    {
+        "system:dept:add",
+        "system:dept:edit",
+        "system:dept:list",
+        "system:dept:move",
+        "system:role:add",
+        "system:role:ai-agent-auth",
+        "system:role:edit",
+        "system:role:list",
+        "system:role:menu-auth",
+        "system:user:add",
+        "system:user:delete",
+        "system:user:edit",
+        "system:user:export",
+        "system:user:import",
+        "system:user:list",
+        "system:user:reset-password",
+        "system:user:role-auth",
+    }
+)
+"""Explicit Tool permissions required by the currently published business Agents."""

@@ -23,7 +23,7 @@ from app.modules.ai.constants import (
     AI_CHAT_USE_PERMISSION,
     AI_FILE_PARSE_PERMISSION,
 )
-from app.modules.system.constants import USER_ROLE_AUTH_PERMISSION
+from app.modules.system.constants import DEPT_MOVE_PERMISSION, USER_ROLE_AUTH_PERMISSION
 from app.modules.system.models.menu import Menu
 
 # 菜单定义：每条记录用 parent_route 替代 parent_id，运行时自动解析。
@@ -237,6 +237,15 @@ MENU_DEFINITIONS = [
         "menu_name": "修改",
         "menu_type": "F",
         "permission": "system:dept:edit",
+        "route_path": "",
+        "status": "1",
+    },
+    {
+        "key": "system_dept_move",
+        "parent_route": "system_dept",
+        "menu_name": "移动",
+        "menu_type": "F",
+        "permission": DEPT_MOVE_PERMISSION,
         "route_path": "",
         "status": "1",
     },

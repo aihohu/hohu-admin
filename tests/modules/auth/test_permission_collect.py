@@ -13,7 +13,9 @@ from app.constants import (
     MENU_TYPE_DIRECTORY,
     MENU_TYPE_MENU,
     STATUS_ENABLED,
+    SUPER_ADMIN_ROLE_CODE,
 )
+from app.modules.auth.api import get_user_info
 from app.modules.auth.permission_collect import (
     collect_user_buttons,
     collect_user_menus,
@@ -179,3 +181,50 @@ def test_menus_dedup_across_roles():
 
     assert len(menus) == 1
     assert menus[0].menu_name == "shared"
+
+
+async def test_super_user_info_preserves_explicit_buttons_alongside_wildcard():
+    """Destructive UI gates need exact permissions even when normal gates use '*'."""
+    delete_menu = _make_menu(
+        name="delete role",
+        menu_type="F",
+        permission="system:role:delete",
+    )
+    super_role = _attach_menus(
+        _make_role("Super", SUPER_ADMIN_ROLE_CODE),
+        [delete_menu],
+    )
+    user = _attach_roles(
+        User(
+            user_id=1,
+            user_name="phase3-super-info",
+            status=STATUS_ENABLED,
+        ),
+        [super_role],
+    )
+
+    response = await get_user_info(user)
+
+    assert set(response.data["buttons"]) == {"*", "system:role:delete"}
+
+
+async def test_user_info_omits_disabled_super_role_code() -> None:
+    """The Web must not infer super-admin status from a disabled role."""
+    disabled_super = _make_role("Disabled super", SUPER_ADMIN_ROLE_CODE, status="2")
+    enabled_role = _attach_menus(
+        _make_role("Enabled", "R_ENABLED"),
+        [_make_menu(name="delete role", permission="system:role:delete")],
+    )
+    user = _attach_roles(
+        User(
+            user_id=2,
+            user_name="phase3-disabled-super-info",
+            status=STATUS_ENABLED,
+        ),
+        [disabled_super, enabled_role],
+    )
+
+    response = await get_user_info(user)
+
+    assert response.data["roles"] == ["R_ENABLED"]
+    assert response.data["buttons"] == ["system:role:delete"]

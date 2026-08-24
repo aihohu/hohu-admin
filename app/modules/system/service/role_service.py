@@ -1,18 +1,23 @@
-from sqlalchemy import and_, delete, select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import DATA_SCOPE_CUSTOM, STATUS_ENABLED, SUPER_ADMIN_ROLE_CODE
 from app.core.exceptions import (
+    AuthorizationException,
     BusinessRuleException,
     DuplicateException,
     InvalidParameterException,
     NotFoundException,
 )
-from app.db.base import role_menus
+from app.db.base import role_depts, role_menus, user_roles
+from app.modules.ai.models.role_ai_agent import RoleAiAgent
+from app.modules.system.constants import PHASE3_DESTRUCTIVE_PERMISSIONS
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.schemas.role import RoleCreate, RoleQuery, RoleUpdate
+from app.modules.system.service.authorization_lock import authorization_lock_service
+from app.modules.system.service.grant_authority import grant_authority_service
 from app.utils.pagination import build_filters, paginate
 
 
@@ -160,33 +165,140 @@ class RoleService:
 
         return role
 
-    async def delete_role(self, db: AsyncSession, role_id: int) -> None:
-        """删除角色"""
-        role = await db.get(Role, role_id)
-        if not role:
+    async def delete_role(
+        self,
+        db: AsyncSession,
+        role_id: int,
+        *,
+        actor_user_id: int,
+    ) -> None:
+        """Delete one unreferenced Role through the destructive policy."""
+        await self._delete_roles(
+            db,
+            [role_id],
+            actor_user_id=actor_user_id,
+            required_permission="system:role:delete",
+        )
+
+    async def _delete_role_facts(
+        self,
+        db: AsyncSession,
+        role_ids: tuple[int, ...],
+    ) -> dict[str, tuple]:
+        roles = tuple(
+            (
+                await db.execute(
+                    select(Role.role_id, Role.role_code)
+                    .where(Role.role_id.in_(role_ids))
+                    .order_by(Role.role_id)
+                )
+            ).all()
+        )
+        if tuple(int(row.role_id) for row in roles) != role_ids:
             raise NotFoundException("角色")
-
-        await db.delete(role)
-
-    async def batch_delete_roles(self, db: AsyncSession, ids: list[int]) -> int:
-        """批量删除角色"""
-        if not ids:
-            raise InvalidParameterException("未选择要删除的角色")
-
-        check_stmt = select(Role.role_id).where(
-            and_(
-                Role.role_id.in_(ids),
-                Role.role_code == SUPER_ADMIN_ROLE_CODE,
+        members = tuple(
+            sorted(
+                (int(role_id), int(user_id))
+                for role_id, user_id in (
+                    await db.execute(
+                        select(user_roles.c.role_id, user_roles.c.user_id).where(
+                            user_roles.c.role_id.in_(role_ids)
+                        )
+                    )
+                ).all()
             )
         )
-        admin_result = await db.execute(check_stmt)
-        if admin_result.scalars().first():
-            raise BusinessRuleException("不能删除系统管理员角色")
+        depts = tuple(
+            sorted(
+                (int(role_id), int(dept_id))
+                for role_id, dept_id in (
+                    await db.execute(
+                        select(role_depts.c.role_id, role_depts.c.dept_id).where(
+                            role_depts.c.role_id.in_(role_ids)
+                        )
+                    )
+                ).all()
+            )
+        )
+        return {
+            "roles": tuple((int(row.role_id), str(row.role_code)) for row in roles),
+            "members": members,
+            "depts": depts,
+        }
 
-        stmt = delete(Role).where(Role.role_id.in_(ids))
-        result = await db.execute(stmt)
+    async def batch_delete_roles(
+        self,
+        db: AsyncSession,
+        ids: list[int],
+        *,
+        actor_user_id: int,
+    ) -> int:
+        """Atomically delete unreferenced non-protected Roles as super admin."""
+        return await self._delete_roles(
+            db,
+            ids,
+            actor_user_id=actor_user_id,
+            required_permission="system:role:batch-delete",
+        )
 
-        return result.rowcount
+    async def _delete_roles(
+        self,
+        db: AsyncSession,
+        ids: list[int],
+        *,
+        actor_user_id: int,
+        required_permission: str,
+    ) -> int:
+        """Enforce the exact destructive permission before one atomic delete."""
+        if required_permission not in PHASE3_DESTRUCTIVE_PERMISSIONS:
+            raise RuntimeError("unsupported role destructive permission")
+        if not ids:
+            raise InvalidParameterException("未选择要删除的角色")
+        normalized = tuple(sorted({int(value) for value in ids}))
+        authority = await grant_authority_service.build(db, actor_user_id)
+        if not authority.super_admin:
+            raise AuthorizationException(
+                "仅超级管理员可以删除角色",
+                error_code="SUPER_ADMIN_REQUIRED",
+            )
+        if required_permission not in authority.permission_codes:
+            raise AuthorizationException(
+                "缺少角色删除权限",
+                error_code="MISSING_PERMISSION",
+            )
+        initial = await self._delete_role_facts(db, normalized)
+        if any(
+            role_code == SUPER_ADMIN_ROLE_CODE
+            for _role_id, role_code in initial["roles"]
+        ):
+            raise BusinessRuleException(
+                "不能删除系统管理员角色",
+                error_code="ROLE_DELETE_PROTECTED",
+            )
+        member_ids = {user_id for _role_id, user_id in initial["members"]}
+        dept_ids = {dept_id for _role_id, dept_id in initial["depts"]}
+        await authorization_lock_service.lock_targets(
+            db,
+            role_ids={*authority.enabled_role_ids, *normalized},
+            dept_ids=dept_ids,
+            user_ids={actor_user_id, *member_ids},
+        )
+        locked = await self._delete_role_facts(db, normalized)
+        if locked != initial:
+            raise BusinessRuleException(
+                "角色删除引用事实已变化",
+                error_code="AUTHORIZATION_SNAPSHOT_STALE",
+            )
+        if locked["members"]:
+            raise BusinessRuleException(
+                "角色仍有关联成员",
+                error_code="ROLE_DELETE_REFERENCED",
+            )
+        await db.execute(delete(RoleAiAgent).where(RoleAiAgent.role_id.in_(normalized)))
+        await db.execute(delete(role_menus).where(role_menus.c.role_id.in_(normalized)))
+        await db.execute(delete(role_depts).where(role_depts.c.role_id.in_(normalized)))
+        result = await db.execute(delete(Role).where(Role.role_id.in_(normalized)))
+        return int(result.rowcount or 0)
 
     async def get_role_detail(self, db: AsyncSession, role_id: int) -> Role:
         """获取角色详情（包含 dept_ids）"""

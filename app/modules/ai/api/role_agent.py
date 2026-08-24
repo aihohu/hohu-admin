@@ -31,13 +31,18 @@ router = APIRouter()
 async def get_role_agent_binding(
     role_id: int,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> ResponseModel[RoleAgentBinding]:
     """返回 allAgents（全量）和 boundAgentIds（绑定列表）。
 
     决策 #19: 不返回 softDisabledAgentIds 段；决策 #18: role 不存在返
     AI_ROLE_NOT_FOUND（跨模块 AI 前缀）.
     """
-    binding = await role_agent_service.get_binding(db, role_id)
+    binding = await role_agent_service.get_binding(
+        db,
+        role_id,
+        actor_user_id=current_user.user_id,
+    )
     return ResponseModel.success(data=binding)
 
 

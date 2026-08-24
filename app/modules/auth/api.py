@@ -248,9 +248,13 @@ async def get_user_info(current_user: User = Depends(get_current_user)):
         }
     """
     # 提取角色编码列表 (如: ['R_ADMIN', 'R_USER'])
-    roles = [role.role_code for role in current_user.roles]
+    roles = [
+        role.role_code for role in current_user.roles if role.status == STATUS_ENABLED
+    ]
 
-    # 超级管理员直接返回通配符，前端对所有按钮权限放行
+    permissions = collect_user_buttons(current_user)
+
+    # Keep '*' for ordinary UI gates and exact codes for destructive composition.
     if is_super_admin(current_user):
         return ResponseModel.success(
             data={
@@ -258,12 +262,9 @@ async def get_user_info(current_user: User = Depends(get_current_user)):
                 "userName": current_user.user_name,
                 "userAvatar": current_user.user_avatar or "",
                 "roles": roles,
-                "buttons": ["*"],
+                "buttons": ["*", *permissions],
             }
         )
-
-    # 提取按钮级权限标识（仅启用角色）
-    permissions = collect_user_buttons(current_user)
 
     return ResponseModel.success(
         data={

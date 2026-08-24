@@ -9,9 +9,10 @@ from app.modules.system.schemas.role import (
     RoleCreate,
     RoleOut,
     RoleQuery,
-    RoleSimpleOut,
+    RoleSummaryOut,
     RoleUpdate,
 )
+from app.modules.system.service.role_management_service import role_management_service
 from app.modules.system.service.role_service import role_service
 
 router = APIRouter()
@@ -19,7 +20,7 @@ router = APIRouter()
 
 @router.get(
     "/list",
-    response_model=ResponseModel[PageResult[RoleOut]],
+    response_model=ResponseModel[PageResult[RoleSummaryOut]],
     summary="获取角色列表分页",
     description="根据查询条件获取角色分页列表，支持按角色名称、角色编码、数据权限和状态筛选",
     responses={
@@ -53,13 +54,28 @@ async def list_roles(
         - data_scope: 数据权限范围（1-全部，2-自定义，3-本部门，4-本部门及以下，5-仅本人）
         - status: 角色状态（1-启用，2-禁用）
     """
-    page_data = await role_service.get_role_list(db, query)
+    summaries, total, _contributors = await role_management_service.summarize_roles(
+        db,
+        actor_user_id=_current_user.user_id,
+        role_name=query.role_name,
+        role_code=query.role_code,
+        data_scope=query.data_scope,
+        status=query.status,
+        limit=query.size,
+        offset=(query.current - 1) * query.size,
+    )
+    page_data = PageResult[RoleSummaryOut](
+        records=[RoleSummaryOut.model_validate(value) for value in summaries],
+        total=total,
+        current=query.current,
+        size=query.size,
+    )
     return ResponseModel.success(data=page_data)
 
 
 @router.get(
     "/all",
-    response_model=ResponseModel[list[RoleSimpleOut]],
+    response_model=ResponseModel[list[RoleSummaryOut]],
     summary="获取全部角色列表(不分页)",
     description="获取系统中所有已启用的角色列表，不分页，用于下拉选择等场景",
     responses={
@@ -67,6 +83,7 @@ async def list_roles(
         401: {"description": "未登录或令牌已过期"},
         403: {"description": "权限不足"},
     },
+    dependencies=[Depends(require_permissions("system:role:list"))],
 )
 async def get_all_roles(
     db: AsyncSession = Depends(get_db),
@@ -87,8 +104,15 @@ async def get_all_roles(
         - 不分页，返回所有符合条件的角色
         - 适合用于前端下拉选择框
     """
-    roles = await role_service.get_all_roles(db)
-    return ResponseModel.success(data=roles)
+    roles, _total, _contributors = await role_management_service.summarize_roles(
+        db,
+        actor_user_id=_current_user.user_id,
+        status="1",
+        limit=10_000,
+    )
+    return ResponseModel.success(
+        data=[RoleSummaryOut.model_validate(value) for value in roles]
+    )
 
 
 @router.get(
@@ -103,6 +127,11 @@ async def get_menus(
     _current_user: User = Depends(get_current_user),
 ):
     """获取角色的菜单ID列表"""
+    await role_management_service.authorize_role_projection(
+        db,
+        actor_user_id=_current_user.user_id,
+        role_id=role_id,
+    )
     menu_ids = await role_service.get_role_menus(db, role_id)
     return ResponseModel.success(data=menu_ids)
 
@@ -122,7 +151,7 @@ async def get_menus(
 async def add_role(
     role_in: RoleCreate,
     db: AsyncSession = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """
     创建新角色
@@ -141,7 +170,11 @@ async def add_role(
         - role_desc: 角色描述（可选，最大200字符）
         - status: 角色状态（必填，1-启用，2-禁用）
     """
-    await role_service.create_role(db, role_in)
+    await role_management_service.create(
+        db,
+        role_in,
+        actor_user_id=current_user.user_id,
+    )
     await db.commit()
     return ResponseModel.success(msg="角色创建成功")
 
@@ -155,10 +188,15 @@ async def update_role(
     role_id: int,
     role_in: RoleUpdate,
     db: AsyncSession = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """更新角色基本信息"""
-    await role_service.update_role(db, role_id, role_in)
+    await role_management_service.update(
+        db,
+        role_id,
+        role_in,
+        actor_user_id=current_user.user_id,
+    )
     await db.commit()
     return ResponseModel.success(msg="角色更新成功")
 
@@ -172,10 +210,15 @@ async def update_role_menu(
     role_id: int,
     ids: list[int] = Body(...),
     db: AsyncSession = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """更新角色的菜单权限"""
-    await role_service.update_role_menu(db, role_id, ids)
+    await role_management_service.update_menus(
+        db,
+        role_id,
+        ids,
+        actor_user_id=current_user.user_id,
+    )
     await db.commit()
     return ResponseModel.success(msg="角色更新成功")
 
@@ -195,6 +238,7 @@ async def update_role_menu(
 async def delete_role(
     role_id: int,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     删除指定角色
@@ -210,7 +254,11 @@ async def delete_role(
         - 此操作不可逆，请谨慎操作
         - 角色删除后，关联的用户和菜单关系也会被清除
     """
-    await role_service.delete_role(db, role_id)
+    await role_service.delete_role(
+        db,
+        role_id,
+        actor_user_id=current_user.user_id,
+    )
     await db.commit()
     return ResponseModel.success(msg="角色删除成功")
 
@@ -223,10 +271,14 @@ async def delete_role(
 async def batch_delete_roles(
     ids: list[int] = Body(...),
     db: AsyncSession = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """批量删除角色"""
-    deleted_count = await role_service.batch_delete_roles(db, ids)
+    deleted_count = await role_service.batch_delete_roles(
+        db,
+        ids,
+        actor_user_id=current_user.user_id,
+    )
     await db.commit()
     return ResponseModel.success(msg=f"成功删除 {deleted_count} 条数据")
 
@@ -240,7 +292,12 @@ async def batch_delete_roles(
 async def get_role_detail(
     role_id: int,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """获取角色详情"""
-    role = await role_service.get_role_detail(db, role_id)
+    role = await role_management_service.authorize_role_projection(
+        db,
+        actor_user_id=current_user.user_id,
+        role_id=role_id,
+    )
     return ResponseModel.success(data=role)

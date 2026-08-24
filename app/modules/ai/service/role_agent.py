@@ -15,7 +15,11 @@ import re
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import BusinessRuleException, NotFoundException
+from app.core.exceptions import (
+    AuthorizationException,
+    BusinessRuleException,
+    NotFoundException,
+)
 from app.modules.ai.agents.tools.meta import SHARED_AGENT_CODE
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
@@ -25,9 +29,11 @@ from app.modules.ai.schemas.role_agent import (
     RoleAgentBindReq,
 )
 from app.modules.system.models.role import Role
+from app.modules.system.service.grant_authority import grant_authority_service
 from app.modules.system.service.role_delegation_service import (
     role_delegation_service,
 )
+from app.modules.system.service.role_management_service import role_management_service
 
 
 class RoleAgentService:
@@ -83,14 +89,31 @@ class RoleAgentService:
             )
         return role
 
-    async def get_binding(self, db: AsyncSession, role_id: int) -> RoleAgentBinding:
+    async def get_binding(
+        self,
+        db: AsyncSession,
+        role_id: int,
+        *,
+        actor_user_id: int,
+    ) -> RoleAgentBinding:
         """GET：返回 allAgents + boundAgentIds.
 
         - allAgents: 全量 Agent（含禁用、含 shared），按 displayOrder + agentId 排序.
         - boundAgentIds: 该 role 当前 enabled=True 的绑定 agent_id 列表.
         - 不返回 softDisabledAgentIds 段（决策 #19）.
         """
+        authority = await grant_authority_service.build(db, actor_user_id)
+        if not authority.allows_permission_codes({"system:role:ai-agent-auth"}):
+            raise AuthorizationException(
+                "权限不足",
+                error_code="MISSING_PERMISSION",
+            )
         await self._get_role_or_404(db, role_id)
+        await role_management_service.authorize_role_projection(
+            db,
+            actor_user_id=actor_user_id,
+            role_id=role_id,
+        )
 
         agents = (
             (
@@ -115,6 +138,12 @@ class RoleAgentService:
             .all()
         )
 
+        visible_agents = [
+            agent
+            for agent in agents
+            if authority.super_admin
+            or int(agent.agent_id) in authority.grantable_agent_ids
+        ]
         return RoleAgentBinding(
             role_id=role_id,
             all_agents=[
@@ -127,7 +156,7 @@ class RoleAgentService:
                     is_builtin=a.is_builtin,
                     is_shared=(a.code == SHARED_AGENT_CODE),
                 )
-                for a in agents
+                for a in visible_agents
             ],
             bound_agent_ids=[str(aid) for aid in bound_rows],
         )
@@ -139,6 +168,7 @@ class RoleAgentService:
         req: RoleAgentBindReq,
         *,
         actor_user_id: int,
+        expected_snapshot: dict | None = None,
     ) -> None:
         """Replace the complete binding set through the shared delegation policy.
 
@@ -152,6 +182,7 @@ class RoleAgentService:
             actor_user_id=actor_user_id,
             role_id=role_id,
             new_agent_ids=unique_ids,
+            expected_snapshot=expected_snapshot,
         )
         await self._ensure_agents_exist(db, unique_ids)
 
@@ -159,6 +190,22 @@ class RoleAgentService:
         for aid in unique_ids:
             db.add(RoleAiAgent(role_id=role_id, agent_id=aid, enabled=True))
         await db.flush()
+
+    async def preview_binding(
+        self,
+        db: AsyncSession,
+        role_id: int,
+        agent_ids: list[int],
+        *,
+        actor_user_id: int,
+    ) -> dict:
+        """Preview one complete binding replacement without writing."""
+        return await role_delegation_service.preview_agent_replacement(
+            db,
+            actor_user_id=actor_user_id,
+            role_id=role_id,
+            new_agent_ids=agent_ids,
+        )
 
 
 role_agent_service = RoleAgentService()

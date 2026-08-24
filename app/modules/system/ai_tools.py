@@ -15,12 +15,17 @@ user_mgmt Agent 和工具声明的权限码。
 from datetime import timedelta
 from typing import Annotated, Any, Literal
 
-from pydantic import ConfigDict, Field
-from sqlalchemy import Select, Text, cast, exists, func, literal, select
+from pydantic import AfterValidator, ConfigDict, Field
+from pydantic.experimental.missing_sentinel import MISSING
+from sqlalchemy import Select, func, select
 from typing_extensions import TypedDict
 
-from app.constants import IS_PRIMARY_YES
-from app.core.exceptions import AuthorizationException, BusinessException
+from app.constants import IS_PRIMARY_YES, STATUS_ENABLED
+from app.core.exceptions import (
+    AuthorizationException,
+    BusinessException,
+    BusinessRuleException,
+)
 from app.db.base import user_depts
 from app.modules.ai.agents.gateway import ensure_targets_in_scope
 from app.modules.ai.agents.gateway.result import (
@@ -46,6 +51,11 @@ from app.modules.system.constants import USER_ROLE_AUTH_PERMISSION
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
+from app.modules.system.schemas.dept import DeptCreate, DeptUpdate
+from app.modules.system.schemas.role import RoleCreate, RoleUpdate
+from app.modules.system.service.dept_selector import department_selector
+from app.modules.system.service.dept_service import dept_service
+from app.modules.system.service.role_management_service import role_management_service
 
 
 def _result_projection(
@@ -60,6 +70,34 @@ def _result_projection(
         else ()
     )
     return ResultProjection(subject_refs=refs, scope_bound=scope_bound)
+
+
+def _confirmation_display(value: Any) -> str | int | float:
+    """Convert a frozen non-scalar argument into a safe scalar presentation."""
+    if value is None or value == []:
+        return "—"
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value)
+    if isinstance(value, str | int | float) and not isinstance(value, bool):
+        return value
+    return str(value)
+
+
+def _bound_confirmation_fields(
+    execution_args: dict[str, Any],
+    labels: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """Bind safe display scalars to exact frozen execution arguments."""
+    fields: list[dict[str, Any]] = []
+    for label in labels:
+        if label not in execution_args:
+            continue
+        raw_value = execution_args[label]
+        field: dict[str, Any] = {"label": label, "value": raw_value}
+        if raw_value is None or isinstance(raw_value, list):
+            field["display_value"] = _confirmation_display(raw_value)
+        fields.append(field)
+    return fields
 
 
 # ============ user.count ============
@@ -304,12 +342,16 @@ async def dept_count(
     """
     filters = validate_filters_in_whitelist(ctx.tool_meta, filters)
 
-    stmt = select(func.count(Dept.dept_id))
+    scoped_filters = []
     for key, value in filters.items():
         # sys_dept 表字段都是 varchar，强制 stringify 防类型错
-        stmt = stmt.where(getattr(Dept, key) == str(value))
+        scoped_filters.append(getattr(Dept, key) == str(value))
 
-    count = int(await ctx.db.scalar(stmt) or 0)
+    count = await department_selector.count(
+        ctx.db,
+        scope=ctx.data_scope,
+        filters=scoped_filters,
+    )
     return ToolResult.success(
         data={"count": count},
         projection=_result_projection(scope_bound=True),
@@ -372,19 +414,11 @@ async def role_list(
     filters = validate_filters_in_whitelist(ctx.tool_meta, filters)
     safe_limit = _coerce_list_limit(limit)
 
-    base = select(Role)
-    for key, value in filters.items():
-        base = base.where(getattr(Role, key) == str(value))
-
-    # total 反映真实总数（不受 limit 截断），供 LLM 判断是否需 chip 跳转
-    total = int(
-        await ctx.db.scalar(select(func.count()).select_from(base.subquery())) or 0
-    )
-
-    rows = (
-        (await ctx.db.execute(base.order_by(Role.role_id.asc()).limit(safe_limit)))
-        .scalars()
-        .all()
+    summaries, total, contributor_ids = await role_management_service.summarize_roles(
+        ctx.db,
+        actor_user_id=ctx.user.user_id,
+        status=str(filters["status"]) if "status" in filters else None,
+        limit=safe_limit,
     )
 
     columns = [
@@ -392,15 +426,20 @@ async def role_list(
         {"key": "name", "label": "ai.tool.field.name"},
         {"key": "code", "label": "ai.tool.field.code"},
         {"key": "status", "label": "ai.tool.field.status"},
+        {"key": "delegable", "label": "ai.tool.field.delegable"},
+        {"key": "blockedReasonCode", "label": "ai.tool.field.blockedReasonCode"},
     ]
     records = [
         {
-            "id": str(r.role_id),
-            "name": r.role_name,
-            "code": r.role_code,
-            "status": r.status,
+            "id": str(role.role_id),
+            "name": role.role_name,
+            "code": role.role_code,
+            "status": role.status,
+            "dataScope": role.data_scope,
+            "delegable": role.delegable,
+            "blockedReasonCode": role.blocked_reason_code,
         }
-        for r in rows
+        for role in summaries
     ]
     return ToolResult.success(
         data={
@@ -408,7 +447,11 @@ async def role_list(
             "limit": safe_limit,
             "sample": records[:3],  # 给 LLM 看前 3 条（prompt cache 友好）
         },
-        projection=_result_projection(scope_bound=True),
+        projection=_result_projection(
+            "role",
+            contributor_ids,
+            scope_bound=True,
+        ),
         ui=UIResult(
             view_type="data_list",
             view_data={"columns": columns, "rows": records},
@@ -416,6 +459,499 @@ async def role_list(
             label_key="ai.tool.role.list.result",
             label_params={"count": total},
         ),
+    )
+
+
+AiRoleId = Annotated[int, Field(strict=True, gt=0)]
+AiRoleRelatedId = Annotated[int, Field(strict=True, gt=0)]
+
+
+def _require_unique_role_related_ids(values: list[int]) -> list[int]:
+    """Reject ambiguous complete sets before preview or execution."""
+    if len(values) != len(set(values)):
+        raise ValueError("Role related ID sets must not contain duplicates")
+    return values
+
+
+AiRoleRelatedIds = Annotated[
+    list[AiRoleRelatedId],
+    AfterValidator(_require_unique_role_related_ids),
+]
+
+
+def _role_result(*, action: str, role: Role) -> ToolResult:
+    """Build a locale-neutral result for one approved Role mutation."""
+    role_id = int(role.role_id)
+    return ToolResult.success(
+        data={
+            "action": action,
+            "roleId": str(role_id),
+            "roleCode": role.role_code,
+            "roleName": role.role_name,
+            "status": role.status,
+            "dataScope": role.data_scope,
+        },
+        projection=_result_projection("managed_role", [role_id], scope_bound=True),
+        ui=UIResult(
+            view_type="detail_card",
+            view_data={
+                "title": role.role_name,
+                "fields": [
+                    {"label": "ai.tool.field.roleId", "value": str(role_id)},
+                    {"label": "ai.tool.field.roleCode", "value": role.role_code},
+                    {"label": "ai.tool.field.action", "value": action},
+                ],
+            },
+            audit={"role_id": str(role_id), "action": action},
+            label_key=f"ai.tool.role.{action}.result",
+            label_params={"roleName": role.role_name},
+        ),
+    )
+
+
+def _require_role_snapshot(ctx: AiToolContext) -> dict[str, Any]:
+    """Require the server-owned Role snapshot attached by dry-run."""
+    if ctx.approved_business_snapshot is None:
+        raise BusinessRuleException(
+            "角色操作缺少审批快照",
+            error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
+        )
+    return ctx.approved_business_snapshot
+
+
+@ai_tool(
+    AiToolMeta(
+        name="role.lookup",
+        agent="role_mgmt",
+        summary="Find tenant roles by code or name with delegation status.",
+        required_perms=("system:role:list",),
+        risk="low",
+        readonly=True,
+        idempotent=True,
+        result_view="data_list",
+        args_summary_fields=("query", "limit"),
+    )
+)
+async def role_lookup(
+    ctx: AiToolContext,
+    *,
+    query: str,
+    limit: int = 20,
+) -> ToolResult:
+    """Return minimal Role matches without treating read state as authority."""
+    normalized = query.strip()
+    if not normalized:
+        raise BusinessRuleException(
+            "角色查询条件不能为空",
+            error_code="AI_ROLE_QUERY_REQUIRED",
+        )
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+        raise BusinessRuleException(
+            "角色查询数量必须在 1 到 20 之间",
+            error_code="AI_ROLE_LOOKUP_LIMIT_INVALID",
+        )
+    summaries, total, contributor_ids = await role_management_service.summarize_roles(
+        ctx.db,
+        actor_user_id=ctx.user.user_id,
+        query=normalized,
+        limit=limit,
+    )
+    rows = [
+        {
+            "roleId": str(role.role_id),
+            "roleCode": role.role_code,
+            "roleName": role.role_name,
+            "status": role.status,
+            "dataScope": role.data_scope,
+            "delegable": role.delegable,
+            "blockedReasonCode": role.blocked_reason_code,
+        }
+        for role in summaries
+    ]
+    return ToolResult.success(
+        data={"query": normalized, "matchCount": total, "matches": rows},
+        projection=_result_projection(
+            "role",
+            contributor_ids,
+            scope_bound=True,
+        ),
+        ui=UIResult(
+            view_type="data_list",
+            view_data={
+                "columns": [
+                    {"key": "roleCode", "label": "ai.tool.field.code"},
+                    {"key": "roleName", "label": "ai.tool.field.name"},
+                    {"key": "delegable", "label": "ai.tool.field.delegable"},
+                    {
+                        "key": "blockedReasonCode",
+                        "label": "ai.tool.field.blockedReasonCode",
+                    },
+                ],
+                "rows": rows,
+            },
+            audit={"query": normalized, "match_count": total},
+            label_key="ai.tool.role.lookup.result",
+            label_params={"count": total},
+        ),
+    )
+
+
+@ai_tool(
+    AiToolMeta(
+        name="role.create",
+        agent="role_mgmt",
+        summary="Create one delegated Role after explicit approval.",
+        required_perms=("system:role:add",),
+        risk="high",
+        readonly=False,
+        idempotent=False,
+        hitl_always=True,
+        dry_run_supported=True,
+        result_view="detail_card",
+        args_summary_fields=("role_code", "role_name", "data_scope"),
+    )
+)
+async def role_create(
+    ctx: AiToolContext,
+    *,
+    role_name: str,
+    role_code: str,
+    data_scope: str,
+    status: str,
+    role_desc: str | None = None,
+    dept_ids: AiRoleRelatedIds | None = None,
+) -> ToolResult:
+    """Execute an approved Role create through the shared policy."""
+    snapshot = _require_role_snapshot(ctx)
+    try:
+        await ensure_targets_in_scope(ctx, dept_ids=dept_ids or [])
+        role = await role_management_service.create(
+            ctx.db,
+            RoleCreate(
+                role_name=role_name,
+                role_code=role_code,
+                role_desc=role_desc,
+                data_scope=data_scope,
+                status=status,
+                dept_ids=dept_ids,
+            ),
+            actor_user_id=ctx.user.user_id,
+            expected_snapshot=snapshot,
+        )
+    except BusinessException as exc:
+        raise BusinessRuleException(
+            "审批后角色事实已变化，请重新确认",
+            error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
+        ) from exc
+    return _role_result(action="create", role=role)
+
+
+async def _dry_run_role_create(
+    ctx: AiToolContext,
+    *,
+    role_name: str,
+    role_code: str,
+    data_scope: str,
+    status: str,
+    role_desc: str | None = None,
+    dept_ids: AiRoleRelatedIds | None = None,
+) -> Any:
+    """Freeze a normalized Role create and its delegated authority facts."""
+    from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
+
+    payload = RoleCreate(
+        role_name=role_name,
+        role_code=role_code,
+        role_desc=role_desc,
+        data_scope=data_scope,
+        status=status,
+        dept_ids=dept_ids,
+    )
+    preview = await role_management_service.preview_create(
+        ctx.db,
+        payload,
+        actor_user_id=ctx.user.user_id,
+    )
+    return DryRunResult(
+        ok=True,
+        count=1,
+        reason=f"将创建角色 {role_name}",
+        summary_key="page.ai.chat.confirmRoleCreateSummary",
+        summary_params={"roleName": role_name},
+        confirmation_fields=[
+            {"label": "role_code", "value": role_code},
+            {"label": "role_name", "value": role_name},
+            {"label": "data_scope", "value": data_scope},
+        ],
+        execution_args={
+            "role_name": role_name,
+            "role_code": role_code,
+            "role_desc": role_desc,
+            "data_scope": data_scope,
+            "status": status,
+            "dept_ids": dept_ids,
+        },
+        business_snapshot=preview.snapshot,
+    )
+
+
+@ai_tool(
+    AiToolMeta(
+        name="role.update",
+        agent="role_mgmt",
+        summary="Update one delegated Role definition after approval.",
+        required_perms=("system:role:edit",),
+        risk="high",
+        readonly=False,
+        idempotent=False,
+        hitl_always=True,
+        dry_run_supported=True,
+        result_view="detail_card",
+        args_summary_fields=(
+            "role_id",
+            "role_name",
+            "role_desc",
+            "data_scope",
+            "status",
+            "dept_ids",
+        ),
+    )
+)
+async def role_update(
+    ctx: AiToolContext,
+    *,
+    role_id: AiRoleId,
+    role_name: str | MISSING = MISSING,
+    role_desc: str | None | MISSING = MISSING,
+    data_scope: str | MISSING = MISSING,
+    status: str | MISSING = MISSING,
+    dept_ids: AiRoleRelatedIds | MISSING = MISSING,
+) -> ToolResult:
+    """Execute an approved Role definition update through the shared policy."""
+    snapshot = _require_role_snapshot(ctx)
+    values = {
+        key: value
+        for key, value in {
+            "role_name": role_name,
+            "role_desc": role_desc,
+            "data_scope": data_scope,
+            "status": status,
+            "dept_ids": dept_ids,
+        }.items()
+        if value is not MISSING
+    }
+    try:
+        await ensure_targets_in_scope(
+            ctx,
+            dept_ids=[] if dept_ids is MISSING else dept_ids,
+        )
+        role = await role_management_service.update(
+            ctx.db,
+            role_id,
+            RoleUpdate.model_validate(values),
+            actor_user_id=ctx.user.user_id,
+            expected_snapshot=snapshot,
+        )
+    except BusinessException as exc:
+        raise BusinessRuleException(
+            "审批后角色事实已变化，请重新确认",
+            error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
+        ) from exc
+    return _role_result(action="update", role=role)
+
+
+async def _dry_run_role_update(
+    ctx: AiToolContext,
+    *,
+    role_id: AiRoleId,
+    role_name: str | MISSING = MISSING,
+    role_desc: str | None | MISSING = MISSING,
+    data_scope: str | MISSING = MISSING,
+    status: str | MISSING = MISSING,
+    dept_ids: AiRoleRelatedIds | MISSING = MISSING,
+) -> Any:
+    """Freeze a normalized Role definition update and all member impacts."""
+    from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
+
+    execution_args = {
+        key: value
+        for key, value in {
+            "role_id": role_id,
+            "role_name": role_name,
+            "role_desc": role_desc,
+            "data_scope": data_scope,
+            "status": status,
+            "dept_ids": dept_ids,
+        }.items()
+        if key == "role_id" or value is not MISSING
+    }
+    payload = RoleUpdate.model_validate(
+        {key: value for key, value in execution_args.items() if key != "role_id"}
+    )
+    preview = await role_management_service.preview_update(
+        ctx.db,
+        role_id,
+        payload,
+        actor_user_id=ctx.user.user_id,
+    )
+    return DryRunResult(
+        ok=True,
+        count=len(preview.member_user_ids),
+        reason=f"将更新角色 {role_id}",
+        summary_key="page.ai.chat.confirmRoleUpdateSummary",
+        summary_params={"roleId": str(role_id)},
+        confirmation_fields=_bound_confirmation_fields(
+            execution_args,
+            role_update.__ai_tool_meta__.args_summary_fields,
+        ),
+        execution_args=execution_args,
+        business_snapshot=preview.snapshot,
+    )
+
+
+@ai_tool(
+    AiToolMeta(
+        name="role.update_menus",
+        agent="role_mgmt",
+        summary="Replace one Role's complete menu set after approval.",
+        required_perms=("system:role:menu-auth",),
+        risk="high",
+        readonly=False,
+        idempotent=False,
+        hitl_always=True,
+        dry_run_supported=True,
+        result_view="detail_card",
+        args_summary_fields=("role_id", "menu_ids"),
+    )
+)
+async def role_update_menus(
+    ctx: AiToolContext,
+    *,
+    role_id: AiRoleId,
+    menu_ids: AiRoleRelatedIds,
+) -> ToolResult:
+    """Execute an approved complete Role menu replacement."""
+    snapshot = _require_role_snapshot(ctx)
+    try:
+        role = await role_management_service.update_menus(
+            ctx.db,
+            role_id,
+            menu_ids,
+            actor_user_id=ctx.user.user_id,
+            expected_snapshot=snapshot,
+        )
+    except BusinessException as exc:
+        raise BusinessRuleException(
+            "审批后角色事实已变化，请重新确认",
+            error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
+        ) from exc
+    return _role_result(action="update_menus", role=role)
+
+
+async def _dry_run_role_update_menus(
+    ctx: AiToolContext,
+    *,
+    role_id: AiRoleId,
+    menu_ids: AiRoleRelatedIds,
+) -> Any:
+    """Freeze a complete normalized menu set and member-wide impact."""
+    from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
+
+    preview = await role_management_service.preview_update_menus(
+        ctx.db,
+        role_id,
+        menu_ids,
+        actor_user_id=ctx.user.user_id,
+    )
+    return DryRunResult(
+        ok=True,
+        count=len(preview.member_user_ids),
+        reason=f"将更新角色 {role_id} 的完整菜单集合",
+        summary_key="page.ai.chat.confirmRoleMenusSummary",
+        summary_params={"roleId": str(role_id)},
+        confirmation_fields=[
+            {"label": "role_id", "value": role_id},
+            {
+                "label": "menu_ids",
+                "value": menu_ids,
+                "display_value": _confirmation_display(menu_ids),
+            },
+        ],
+        execution_args={"role_id": role_id, "menu_ids": menu_ids},
+        business_snapshot=preview.snapshot,
+    )
+
+
+@ai_tool(
+    AiToolMeta(
+        name="role.update_agents",
+        agent="role_mgmt",
+        summary="Replace one Role's complete Agent set after approval.",
+        required_perms=("system:role:ai-agent-auth",),
+        risk="high",
+        readonly=False,
+        idempotent=False,
+        hitl_always=True,
+        dry_run_supported=True,
+        result_view="detail_card",
+        args_summary_fields=("role_id", "agent_ids"),
+    )
+)
+async def role_update_agents(
+    ctx: AiToolContext,
+    *,
+    role_id: AiRoleId,
+    agent_ids: AiRoleRelatedIds,
+) -> ToolResult:
+    """Execute an approved complete Role Agent replacement."""
+    snapshot = _require_role_snapshot(ctx)
+    try:
+        role = await role_management_service.update_agents(
+            ctx.db,
+            role_id,
+            agent_ids,
+            actor_user_id=ctx.user.user_id,
+            expected_snapshot=snapshot,
+        )
+    except BusinessException as exc:
+        raise BusinessRuleException(
+            "审批后角色事实已变化，请重新确认",
+            error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
+        ) from exc
+    return _role_result(action="update_agents", role=role)
+
+
+async def _dry_run_role_update_agents(
+    ctx: AiToolContext,
+    *,
+    role_id: AiRoleId,
+    agent_ids: AiRoleRelatedIds,
+) -> Any:
+    """Freeze a complete normalized Agent set and member-wide impact."""
+    from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
+
+    preview = await role_management_service.preview_update_agents(
+        ctx.db,
+        role_id,
+        agent_ids,
+        actor_user_id=ctx.user.user_id,
+    )
+    return DryRunResult(
+        ok=True,
+        count=len(preview.member_user_ids),
+        reason=f"将更新角色 {role_id} 的完整 Agent 集合",
+        summary_key="page.ai.chat.confirmRoleAgentsSummary",
+        summary_params={"roleId": str(role_id)},
+        confirmation_fields=[
+            {"label": "role_id", "value": role_id},
+            {
+                "label": "agent_ids",
+                "value": agent_ids,
+                "display_value": _confirmation_display(agent_ids),
+            },
+        ],
+        execution_args={"role_id": role_id, "agent_ids": agent_ids},
+        business_snapshot=preview.snapshot,
     )
 
 
@@ -441,32 +977,32 @@ async def dept_list(
     filters: dict[str, Any] | None = None,
     limit: int | None = None,
 ) -> ToolResult:
-    """列出部门，返回前 N 条精简字段
+    """List departments and return a bounded compact projection.
 
-    LLM 看 data.{total, limit, sample[3]}（精简，进 prompt cache）；
-    前端看 ui.view_data.{columns, rows}（全量 limit 条，渲染 table）。
+    The LLM receives ``data.{total, limit, sample[3]}`` for prompt caching.
+    The UI receives all bounded rows in ``ui.view_data.{columns, rows}``.
 
-    filters:
-        status: '1' (启用) / '0' (禁用)
-    limit:
-        None / 0 / 负数 = 默认 20；正整数按 min(limit, 50) 截断
+    Filters:
+        status: ``"1"`` for enabled or ``"0"`` for disabled.
+    Limit:
+        Missing or non-positive values use 20; positive values are capped at 50.
     """
     filters = validate_filters_in_whitelist(ctx.tool_meta, filters)
     safe_limit = _coerce_list_limit(limit)
 
-    base = select(Dept)
+    scoped_filters = []
     for key, value in filters.items():
-        base = base.where(getattr(Dept, key) == str(value))
+        scoped_filters.append(getattr(Dept, key) == str(value))
 
-    total = int(
-        await ctx.db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    page = await department_selector.page(
+        ctx.db,
+        scope=ctx.data_scope,
+        current=1,
+        size=safe_limit,
+        filters=scoped_filters,
     )
-
-    rows = (
-        (await ctx.db.execute(base.order_by(Dept.dept_id.asc()).limit(safe_limit)))
-        .scalars()
-        .all()
-    )
+    total = page.total
+    rows = page.records
 
     columns = [
         {"key": "id", "label": "ID"},
@@ -474,11 +1010,20 @@ async def dept_list(
         {"key": "parent_id", "label": "ai.tool.field.parentDeptId"},
         {"key": "status", "label": "ai.tool.field.status"},
     ]
+    accessible_dept_ids = ctx.data_scope.accessible_dept_ids
     records = [
         {
             "id": str(d.dept_id),
             "name": d.dept_name,
-            "parent_id": str(d.parent_id) if d.parent_id else None,
+            "parent_id": (
+                str(d.parent_id)
+                if d.parent_id is not None
+                and (
+                    accessible_dept_ids is None
+                    or int(d.parent_id) in accessible_dept_ids
+                )
+                else None
+            ),
             "status": d.status,
         }
         for d in rows
@@ -511,83 +1056,83 @@ def _build_scoped_dept_lookup_stmt(
     normalized_query: str,
     limit: int,
 ) -> Select[Any]:
-    """Build paths only for scoped leaf-name candidates and limit matches."""
-    from app.constants import STATUS_ENABLED  # noqa: PLC0415
+    """Compatibility wrapper around the shared department selector."""
+    return department_selector.build_lookup_statement(
+        accessible_dept_ids=accessible_dept_ids,
+        normalized_query=normalized_query,
+        limit=limit,
+    )
 
-    filters = [Dept.status == STATUS_ENABLED]
-    if accessible_dept_ids is not None:
-        filters.append(Dept.dept_id.in_(accessible_dept_ids))
-    visible = (
-        select(
-            Dept.dept_id,
-            Dept.parent_id,
-            Dept.dept_name,
+
+async def _lookup_departments(
+    ctx: AiToolContext,
+    *,
+    query: str,
+    limit: int,
+    query_error_code: str,
+    limit_error_code: str,
+    label_key: str,
+    enabled_only: bool,
+) -> ToolResult:
+    """Build one scoped lookup result for both Department-facing agents."""
+    normalized_query = query.strip()
+    path_parts = [part.strip() for part in normalized_query.split("/")]
+    if not normalized_query or any(not part for part in path_parts):
+        raise BusinessRuleException(
+            "部门查询条件不能为空",
+            error_code=query_error_code,
         )
-        .where(*filters)
-        .cte("ai_visible_depts")
+    normalized_query = " / ".join(path_parts)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+        raise BusinessRuleException(
+            "部门查询数量必须在 1 到 20 之间",
+            error_code=limit_error_code,
+        )
+
+    result = await department_selector.lookup(
+        ctx.db,
+        scope=ctx.data_scope,
+        normalized_query=normalized_query,
+        limit=limit,
+        enabled_only=enabled_only,
     )
-    folded_query = normalized_query.casefold()
-    leaf_query = normalized_query.rsplit("/", maxsplit=1)[-1].strip().casefold()
-    candidates = select(
-        visible.c.dept_id,
-        visible.c.parent_id.label("next_parent_id"),
-        visible.c.dept_name,
-        cast(visible.c.dept_name, Text).label("path"),
-        (literal(",") + cast(visible.c.dept_id, Text) + literal(",")).label("visited"),
-    ).where(
-        func.lower(visible.c.dept_name).contains(
-            leaf_query,
-            autoescape=True,
-        )
-    )
-    paths = candidates.cte("ai_scoped_dept_paths", recursive=True)
-    parent = visible.alias("ai_visible_dept_parent")
-    parent_marker = literal(",") + cast(parent.c.dept_id, Text) + literal(",")
-    paths = paths.union_all(
-        select(
-            paths.c.dept_id,
-            parent.c.parent_id.label("next_parent_id"),
-            paths.c.dept_name,
-            (parent.c.dept_name + literal(" / ") + paths.c.path).label("path"),
-            (paths.c.visited + cast(parent.c.dept_id, Text) + literal(",")).label(
-                "visited"
-            ),
-        )
-        .join(paths, parent.c.dept_id == paths.c.next_parent_id)
-        .where(~paths.c.visited.contains(parent_marker))
-    )
-    next_parent = visible.alias("ai_visible_dept_next_parent")
-    matched = (
-        select(
-            paths.c.dept_id,
-            paths.c.dept_name,
-            paths.c.path,
-            func.count().over().label("match_count"),
-            func.array_agg(paths.c.dept_id).over().label("matched_dept_ids"),
-        )
-        .where(
-            ~exists(
-                select(1)
-                .select_from(next_parent)
-                .where(next_parent.c.dept_id == paths.c.next_parent_id)
-            ),
-            func.lower(paths.c.path).contains(
-                folded_query,
-                autoescape=True,
-            ),
-        )
-        .cte("ai_scoped_dept_matches")
-    )
-    return (
-        select(
-            matched.c.dept_id,
-            matched.c.dept_name,
-            matched.c.path,
-            matched.c.match_count,
-            matched.c.matched_dept_ids,
-        )
-        .order_by(func.lower(matched.c.path), matched.c.dept_id)
-        .limit(limit)
+    matches = [
+        {
+            "deptId": str(match.dept_id),
+            "deptName": match.dept_name,
+            "path": match.path,
+        }
+        for match in result.matches
+    ]
+    return ToolResult.success(
+        data={
+            "query": normalized_query,
+            "matchCount": result.match_count,
+            "matches": matches,
+        },
+        projection=_result_projection(
+            "dept",
+            result.matched_dept_ids,
+            scope_bound=True,
+        ),
+        ui=UIResult(
+            view_type="data_list",
+            view_data={
+                "columns": [
+                    {"key": "deptId", "label": "ID"},
+                    {"key": "deptName", "label": "page.system.dept.deptName"},
+                    {"key": "path", "label": "page.ai.chat.departmentPath"},
+                ],
+                "rows": matches,
+            },
+            audit={
+                "query": normalized_query,
+                "match_count": result.match_count,
+                "returned_count": len(matches),
+            },
+            label_key=label_key,
+            label_params={"count": result.match_count},
+        ),
     )
 
 
@@ -613,72 +1158,440 @@ async def user_dept_lookup(
     limit: int = _DEPT_LOOKUP_MAX_MATCHES,
 ) -> ToolResult:
     """Return enabled scoped department candidates without leaking ancestors."""
-    from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
-
-    normalized_query = query.strip()
-    path_parts = [part.strip() for part in normalized_query.split("/")]
-    if not normalized_query or any(not part for part in path_parts):
-        raise BusinessRuleException(
-            "部门查询条件不能为空",
-            error_code="AI_USER_DEPT_QUERY_REQUIRED",
-        )
-    normalized_query = " / ".join(path_parts)
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
-        raise BusinessRuleException(
-            "部门查询数量必须在 1 到 20 之间",
-            error_code="AI_USER_DEPT_LOOKUP_LIMIT_INVALID",
-        )
-
-    rows = (
-        (
-            await ctx.db.execute(
-                _build_scoped_dept_lookup_stmt(
-                    accessible_dept_ids=ctx.data_scope.accessible_dept_ids,
-                    normalized_query=normalized_query,
-                    limit=limit,
-                )
-            )
-        )
-        .mappings()
-        .all()
+    return await _lookup_departments(
+        ctx,
+        query=query,
+        limit=limit,
+        query_error_code="AI_USER_DEPT_QUERY_REQUIRED",
+        limit_error_code="AI_USER_DEPT_LOOKUP_LIMIT_INVALID",
+        label_key="ai.tool.user.dept_lookup.result",
+        enabled_only=True,
     )
-    matches = [
-        {
-            "deptId": str(row["dept_id"]),
-            "deptName": row["dept_name"],
-            "path": row["path"],
-        }
-        for row in rows
-    ]
-    match_count = int(rows[0]["match_count"]) if rows else 0
-    matched_dept_ids = (
-        sorted(int(dept_id) for dept_id in rows[0]["matched_dept_ids"]) if rows else []
+
+
+@ai_tool(
+    AiToolMeta(
+        name="dept.lookup",
+        agent="dept_mgmt",
+        summary="Find visible departments by name or scoped path.",
+        required_perms=("system:dept:list",),
+        risk="low",
+        readonly=True,
+        idempotent=True,
+        result_view="data_list",
+        args_summary_fields=("query", "limit"),
     )
+)
+async def dept_lookup(
+    ctx: AiToolContext,
+    *,
+    query: str,
+    limit: int = _DEPT_LOOKUP_MAX_MATCHES,
+) -> ToolResult:
+    """Return visible Department Agent management targets in any status."""
+    return await _lookup_departments(
+        ctx,
+        query=query,
+        limit=limit,
+        query_error_code="AI_DEPT_QUERY_REQUIRED",
+        limit_error_code="AI_DEPT_LOOKUP_LIMIT_INVALID",
+        label_key="ai.tool.user.dept_lookup.result",
+        enabled_only=False,
+    )
+
+
+AiDepartmentId = Annotated[int, Field(strict=True, gt=0)]
+
+
+def _department_result(
+    *,
+    action: str,
+    department: Dept,
+    affected_user_ids: tuple[int, ...] = (),
+) -> ToolResult:
+    """Build one locale-neutral result for an approved department write."""
+    dept_id = int(department.dept_id)
     return ToolResult.success(
         data={
-            "query": normalized_query,
-            "matchCount": match_count,
-            "matches": matches,
+            "action": action,
+            "deptId": str(dept_id),
+            "deptName": department.dept_name,
+            "parentId": (
+                str(department.parent_id) if department.parent_id is not None else None
+            ),
+            "status": department.status,
+            "affectedUserCount": len(affected_user_ids),
         },
-        projection=_result_projection("dept", matched_dept_ids),
+        projection=_result_projection("dept", [dept_id], scope_bound=True),
         ui=UIResult(
-            view_type="data_list",
+            view_type="detail_card",
             view_data={
-                "columns": [
-                    {"key": "deptId", "label": "ID"},
-                    {"key": "deptName", "label": "page.system.dept.deptName"},
-                    {"key": "path", "label": "page.ai.chat.departmentPath"},
+                "title": department.dept_name,
+                "fields": [
+                    {"label": "ai.tool.field.deptId", "value": str(dept_id)},
+                    {"label": "ai.tool.field.action", "value": action},
+                    {
+                        "label": "ai.tool.field.affectedUserCount",
+                        "value": len(affected_user_ids),
+                    },
                 ],
-                "rows": matches,
             },
             audit={
-                "query": normalized_query,
-                "match_count": match_count,
-                "returned_count": len(matches),
+                "dept_id": str(dept_id),
+                "action": action,
+                "affected_user_ids": [str(value) for value in affected_user_ids],
             },
-            label_key="ai.tool.user.dept_lookup.result",
-            label_params={"count": match_count},
+            label_key=f"ai.tool.dept.{action}.result",
+            label_params={"deptName": department.dept_name},
         ),
+    )
+
+
+def _require_department_snapshot(ctx: AiToolContext) -> dict[str, Any]:
+    """Require the server-owned snapshot attached to an approved action."""
+    if ctx.approved_business_snapshot is None:
+        raise BusinessRuleException(
+            "部门操作缺少审批快照",
+            error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
+        )
+    return ctx.approved_business_snapshot
+
+
+@ai_tool(
+    AiToolMeta(
+        name="dept.create",
+        agent="dept_mgmt",
+        summary="Create one scoped department after explicit approval.",
+        required_perms=("system:dept:add", "system:dept:list"),
+        risk="high",
+        readonly=False,
+        idempotent=False,
+        hitl_always=True,
+        dry_run_supported=True,
+        result_view="detail_card",
+        args_summary_fields=("parent_id", "dept_name", "leader", "status"),
+    )
+)
+async def dept_create(
+    ctx: AiToolContext,
+    *,
+    parent_id: AiDepartmentId | None,
+    dept_name: str,
+    order_num: int = 0,
+    leader: str | None = None,
+    phone: str | None = None,
+    email: str | None = None,
+    status: str = STATUS_ENABLED,
+) -> ToolResult:
+    """Execute an approved department create through the shared service."""
+    snapshot = _require_department_snapshot(ctx)
+    payload = DeptCreate(
+        parent_id=parent_id,
+        dept_name=dept_name,
+        order_num=order_num,
+        leader=leader,
+        phone=phone,
+        email=email,
+        status=status,
+    )
+    try:
+        await ensure_targets_in_scope(
+            ctx,
+            dept_ids=[parent_id] if parent_id is not None else [],
+        )
+        department = await dept_service.create(
+            ctx.db,
+            payload,
+            actor_user_id=ctx.user.user_id,
+            expected_snapshot=snapshot,
+        )
+    except BusinessException as exc:
+        raise BusinessRuleException(
+            "审批后部门事实已变化，请重新确认",
+            error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
+        ) from exc
+    return _department_result(action="create", department=department)
+
+
+async def _dry_run_dept_create(
+    ctx: AiToolContext,
+    *,
+    parent_id: AiDepartmentId | None,
+    dept_name: str,
+    order_num: int = 0,
+    leader: str | None = None,
+    phone: str | None = None,
+    email: str | None = None,
+    status: str = STATUS_ENABLED,
+) -> Any:
+    """Freeze a normalized department create and its authorization facts."""
+    from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
+
+    payload = DeptCreate(
+        parent_id=parent_id,
+        dept_name=dept_name,
+        order_num=order_num,
+        leader=leader,
+        phone=phone,
+        email=email,
+        status=status,
+    )
+    preview = await dept_service.preview_create(
+        ctx.db,
+        payload,
+        actor_user_id=ctx.user.user_id,
+    )
+    execution_args = {
+        "parent_id": parent_id,
+        "dept_name": dept_name,
+        "order_num": order_num,
+        "leader": leader,
+        "phone": phone,
+        "email": email,
+        "status": status,
+    }
+    confirmation_fields = _bound_confirmation_fields(
+        execution_args,
+        dept_create.__ai_tool_meta__.args_summary_fields,
+    )
+    leader_fact = preview.snapshot.get("facts", {}).get("leader")
+    if isinstance(leader_fact, dict):
+        for field in confirmation_fields:
+            if field["label"] == "leader":
+                field["display_value"] = leader_fact["display"]
+    return DryRunResult(
+        ok=True,
+        count=1,
+        reason=f"将创建部门 {dept_name}",
+        summary_key="page.ai.chat.confirmDeptCreateSummary",
+        summary_params={"deptName": dept_name},
+        confirmation_fields=confirmation_fields,
+        execution_args=execution_args,
+        business_snapshot=preview.snapshot,
+    )
+
+
+@ai_tool(
+    AiToolMeta(
+        name="dept.update",
+        agent="dept_mgmt",
+        summary="Update scoped non-structural department fields after approval.",
+        required_perms=("system:dept:edit", "system:dept:list"),
+        risk="high",
+        readonly=False,
+        idempotent=False,
+        hitl_always=True,
+        dry_run_supported=True,
+        result_view="detail_card",
+        args_summary_fields=(
+            "dept_id",
+            "dept_name",
+            "order_num",
+            "leader",
+            "phone",
+            "email",
+            "status",
+        ),
+    )
+)
+async def dept_update(
+    ctx: AiToolContext,
+    *,
+    dept_id: AiDepartmentId,
+    dept_name: str | MISSING = MISSING,
+    order_num: int | MISSING = MISSING,
+    leader: str | None | MISSING = MISSING,
+    phone: str | None | MISSING = MISSING,
+    email: str | None | MISSING = MISSING,
+    status: str | MISSING = MISSING,
+) -> ToolResult:
+    """Execute an approved department update through the shared service."""
+    snapshot = _require_department_snapshot(ctx)
+    values = {
+        key: value
+        for key, value in {
+            "dept_name": dept_name,
+            "order_num": order_num,
+            "leader": leader,
+            "phone": phone,
+            "email": email,
+            "status": status,
+        }.items()
+        if value is not MISSING
+    }
+    payload = DeptUpdate.model_validate(values)
+    try:
+        await ensure_targets_in_scope(ctx, dept_ids=[dept_id])
+        department = await dept_service.update(
+            ctx.db,
+            dept_id,
+            payload,
+            actor_user_id=ctx.user.user_id,
+            expected_snapshot=snapshot,
+        )
+    except BusinessException as exc:
+        raise BusinessRuleException(
+            "审批后部门事实已变化，请重新确认",
+            error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
+        ) from exc
+    affected = tuple(
+        int(value)
+        for value in snapshot.get("facts", {}).get("userIds", [])
+        if int(value) != int(ctx.user.user_id)
+    )
+    return _department_result(
+        action="update",
+        department=department,
+        affected_user_ids=affected,
+    )
+
+
+async def _dry_run_dept_update(
+    ctx: AiToolContext,
+    *,
+    dept_id: AiDepartmentId,
+    dept_name: str | MISSING = MISSING,
+    order_num: int | MISSING = MISSING,
+    leader: str | None | MISSING = MISSING,
+    phone: str | None | MISSING = MISSING,
+    email: str | None | MISSING = MISSING,
+    status: str | MISSING = MISSING,
+) -> Any:
+    """Freeze a normalized department update and its authorization facts."""
+    from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
+
+    execution_args = {
+        key: value
+        for key, value in {
+            "dept_id": dept_id,
+            "dept_name": dept_name,
+            "order_num": order_num,
+            "leader": leader,
+            "phone": phone,
+            "email": email,
+            "status": status,
+        }.items()
+        if key == "dept_id" or value is not MISSING
+    }
+    payload = DeptUpdate.model_validate(
+        {key: value for key, value in execution_args.items() if key != "dept_id"}
+    )
+    preview = await dept_service.preview_update(
+        ctx.db,
+        dept_id,
+        payload,
+        actor_user_id=ctx.user.user_id,
+    )
+    confirmation_fields = _bound_confirmation_fields(
+        execution_args,
+        dept_update.__ai_tool_meta__.args_summary_fields,
+    )
+    leader_fact = preview.snapshot.get("facts", {}).get("leader")
+    if isinstance(leader_fact, dict):
+        for field in confirmation_fields:
+            if field["label"] == "leader":
+                field["display_value"] = leader_fact["display"]
+    return DryRunResult(
+        ok=True,
+        count=len(preview.affected_user_ids),
+        reason=f"将更新部门 {dept_id}",
+        summary_key="page.ai.chat.confirmDeptUpdateSummary",
+        summary_params={"deptId": str(dept_id)},
+        confirmation_fields=confirmation_fields,
+        execution_args=execution_args,
+        business_snapshot=preview.snapshot,
+    )
+
+
+@ai_tool(
+    AiToolMeta(
+        name="dept.move",
+        agent="dept_mgmt",
+        summary="Move one scoped department subtree after explicit approval.",
+        required_perms=("system:dept:move", "system:dept:list"),
+        risk="high",
+        readonly=False,
+        idempotent=False,
+        hitl_always=True,
+        dry_run_supported=True,
+        result_view="detail_card",
+        args_summary_fields=("dept_id", "new_parent_id"),
+    )
+)
+async def dept_move(
+    ctx: AiToolContext,
+    *,
+    dept_id: AiDepartmentId,
+    new_parent_id: AiDepartmentId | None,
+) -> ToolResult:
+    """Execute an approved department move through the shared service."""
+    snapshot = _require_department_snapshot(ctx)
+    try:
+        await ensure_targets_in_scope(
+            ctx,
+            dept_ids=[
+                dept_id,
+                *([new_parent_id] if new_parent_id is not None else []),
+            ],
+        )
+        department = await dept_service.move(
+            ctx.db,
+            dept_id=dept_id,
+            new_parent_id=new_parent_id,
+            actor_user_id=ctx.user.user_id,
+            expected_snapshot=snapshot,
+        )
+    except BusinessException as exc:
+        raise BusinessRuleException(
+            "审批后部门事实已变化，请重新确认",
+            error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
+        ) from exc
+    affected = tuple(
+        int(value)
+        for value in snapshot.get("facts", {}).get("userIds", [])
+        if int(value) != int(ctx.user.user_id)
+    )
+    return _department_result(
+        action="move",
+        department=department,
+        affected_user_ids=affected,
+    )
+
+
+async def _dry_run_dept_move(
+    ctx: AiToolContext,
+    *,
+    dept_id: AiDepartmentId,
+    new_parent_id: AiDepartmentId | None,
+) -> Any:
+    """Freeze a normalized department move and its authorization facts."""
+    from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
+
+    preview = await dept_service.preview_move(
+        ctx.db,
+        dept_id=dept_id,
+        new_parent_id=new_parent_id,
+        actor_user_id=ctx.user.user_id,
+    )
+    return DryRunResult(
+        ok=True,
+        count=len(preview.affected_user_ids),
+        reason=f"将移动部门 {dept_id}",
+        summary_key="page.ai.chat.confirmDeptMoveSummary",
+        summary_params={"deptId": str(dept_id)},
+        confirmation_fields=[
+            {"label": "dept_id", "value": dept_id},
+            {
+                "label": "new_parent_id",
+                "value": new_parent_id,
+                "display_value": _confirmation_display(new_parent_id),
+            },
+        ],
+        execution_args={
+            "dept_id": dept_id,
+            "new_parent_id": new_parent_id,
+        },
+        business_snapshot=preview.snapshot,
     )
 
 

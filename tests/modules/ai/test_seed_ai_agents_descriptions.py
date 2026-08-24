@@ -79,12 +79,25 @@ def test_seed_contains_seven_agents():
     assert codes == expected
 
 
-def test_only_stage_complete_agents_default_enabled_on_insert() -> None:
+def test_phase3_complete_agents_default_enabled_on_fresh_insert() -> None:
     mod = _load_seed_module()
 
-    # P1-B 只是授权地基；三个 MVP 业务 Agent 要到 Phase 2/3 完成纵向切片后
-    # 才能加入发布集合。中间构建不得把未完成能力预先标记为可用。
-    assert mod.PUBLISHED_AGENT_CODES == {"shared"}
+    assert mod.PUBLISHED_AGENT_CODES == {
+        "shared",
+        "user_mgmt",
+        "role_mgmt",
+        "dept_mgmt",
+    }
+
+
+def test_phase3_agent_inventory_describes_current_capabilities() -> None:
+    mod = _load_seed_module()
+    inventory = {item["code"]: item["description"] for item in mod.AGENT_SEED}
+
+    assert "尚未发布" not in inventory["user_mgmt"]
+    assert "完整部门" in inventory["user_mgmt"]
+    assert "受限委派" in inventory["role_mgmt"]
+    assert "移动部门" in inventory["dept_mgmt"]
 
 
 def test_unpublished_descriptions_do_not_claim_availability() -> None:

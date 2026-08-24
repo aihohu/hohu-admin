@@ -270,7 +270,10 @@ class RoleDelegationService:
     ) -> _RoleAgentEvaluation:
         users_for_lock = [actor, *members]
         role_ids = self._role_ids(users_for_lock, int(role.role_id))
-        dept_ids = self._dept_ids(role, users_for_lock)
+        dept_ids = set(self._dept_ids(role, users_for_lock))
+        for materialized in [*before, *after]:
+            if materialized.accessible_dept_ids is not None:
+                dept_ids.update(materialized.accessible_dept_ids)
         member_ids = tuple(sorted(int(member.user_id) for member in members))
         plan = RoleAgentDelegationPlan(
             role_id=int(role.role_id),
@@ -312,7 +315,7 @@ class RoleDelegationService:
         return _RoleAgentEvaluation(
             plan=plan,
             role_ids=role_ids,
-            dept_ids=dept_ids,
+            dept_ids=tuple(sorted(dept_ids)),
             user_ids=tuple(sorted({int(actor.user_id), *member_ids})),
             snapshot=snapshot,
         )
@@ -395,6 +398,7 @@ class RoleDelegationService:
         actor_user_id: int,
         role_id: int,
         new_agent_ids: list[int] | tuple[int, ...],
+        expected_snapshot: dict[str, Any] | None = None,
     ) -> RoleAgentDelegationPlan:
         """Authorize, lock, and re-evaluate one complete Role-Agent set."""
         normalized_new_ids = tuple(sorted(int(agent_id) for agent_id in new_agent_ids))
@@ -432,7 +436,29 @@ class RoleDelegationService:
                 "授权事实已变化，请重新提交",
                 error_code="AUTHORIZATION_SNAPSHOT_STALE",
             )
+        if expected_snapshot is not None and locked.snapshot != expected_snapshot:
+            raise BusinessRuleException(
+                "角色 Agent 审批快照已变化",
+                error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
+            )
         return locked.plan
+
+    async def preview_agent_replacement(
+        self,
+        db: AsyncSession,
+        *,
+        actor_user_id: int,
+        role_id: int,
+        new_agent_ids: list[int] | tuple[int, ...],
+    ) -> dict[str, Any]:
+        """Return the server-owned snapshot without locking or writing."""
+        evaluation = await self._evaluate_agent_replacement(
+            db,
+            actor_user_id=actor_user_id,
+            role_id=role_id,
+            new_agent_ids=tuple(sorted(int(value) for value in new_agent_ids)),
+        )
+        return evaluation.snapshot
 
 
 role_delegation_service = RoleDelegationService()

@@ -61,11 +61,20 @@ SUMMARY_MAX_UNICODE_CHARS = 100
 EXPECTED_BUILTIN_TOOL_NAMES = frozenset(
     {
         "dept.count",
+        "dept.create",
         "dept.list",
+        "dept.lookup",
+        "dept.move",
+        "dept.update",
         "file.parse",
         "job.update_cron",
         "role.count",
+        "role.create",
         "role.list",
+        "role.lookup",
+        "role.update",
+        "role.update_agents",
+        "role.update_menus",
         "user.batch_delete",
         "user.count",
         "user.create",
@@ -88,7 +97,14 @@ EXPECTED_BUILTIN_TOOL_NAMES = frozenset(
 # ``job_id`` is authorized by the global job permission rather than the
 # user/dept data-scope model.  Exemptions are deliberately exact (agent, param)
 # pairs so new ``*_id`` inputs remain fail-closed.
-DATA_SCOPE_PARAM_EXEMPTIONS = frozenset({("job_mgmt", "job_id")})
+DATA_SCOPE_PARAM_EXEMPTIONS = frozenset(
+    {
+        ("job_mgmt", "job_id"),
+        ("role_mgmt", "agent_ids"),
+        ("role_mgmt", "menu_ids"),
+        ("role_mgmt", "role_id"),
+    }
+)
 
 
 class Violation:
