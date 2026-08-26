@@ -552,6 +552,7 @@ class ResultProjectionService:
                         .where(
                             AiMessage.message_id.in_(batch),
                             AiConversation.user_id == owner_user_id,
+                            AiConversation.deleted_at.is_(None),
                         )
                     )
                 )

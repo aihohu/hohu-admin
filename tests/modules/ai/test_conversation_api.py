@@ -112,9 +112,10 @@ async def test_authorized_history_refreshes_short_lived_download_url() -> None:
     refresh.assert_awaited_once()
 
 
-async def test_delete_conversation_rejects_in_progress_prepared_action() -> None:
+async def test_delete_conversation_terminalizes_actions_before_delete() -> None:
     db = AsyncMock()
     current_user = MagicMock(user_id=7001)
+    expired = [SimpleNamespace(confirmation_id="cid-1")]
 
     with (
         patch(
@@ -122,8 +123,45 @@ async def test_delete_conversation_rejects_in_progress_prepared_action() -> None
             AsyncMock(),
         ) as lock_for_delete,
         patch(
-            "app.modules.ai.api.conversation.prepared_action_service.has_in_progress_for_conversation",
-            AsyncMock(return_value=True),
+            "app.modules.ai.api.conversation.prepared_action_service.expire_for_conversation_delete",
+            AsyncMock(return_value=expired),
+        ) as expire,
+        patch(
+            "app.modules.ai.api.conversation.conversation_service.delete",
+            AsyncMock(),
+        ) as delete,
+    ):
+        response = await delete_conversation(8001, db, current_user)
+
+    assert response.code == 200
+    lock_for_delete.assert_awaited_once_with(db, 8001, 7001)
+    expire.assert_awaited_once_with(
+        db,
+        conversation_id=8001,
+        user_id=7001,
+        tenant_id=0,
+    )
+    delete.assert_awaited_once_with(db, 8001, 7001)
+    db.commit.assert_awaited_once()
+
+
+async def test_delete_conversation_does_not_commit_when_action_is_running() -> None:
+    db = AsyncMock()
+    current_user = MagicMock(user_id=7001)
+    error = BusinessRuleException(
+        "action is running",
+        error_code="AI_ACTION_RUNNING",
+    )
+    error.code = 409
+
+    with (
+        patch(
+            "app.modules.ai.api.conversation.conversation_service.lock_for_delete",
+            AsyncMock(),
+        ),
+        patch(
+            "app.modules.ai.api.conversation.prepared_action_service.expire_for_conversation_delete",
+            AsyncMock(side_effect=error),
         ),
         patch(
             "app.modules.ai.api.conversation.conversation_service.delete",
@@ -133,8 +171,7 @@ async def test_delete_conversation_rejects_in_progress_prepared_action() -> None
         with pytest.raises(BusinessRuleException) as exc_info:
             await delete_conversation(8001, db, current_user)
 
-    assert exc_info.value.error_code == "AI_CHAT_RUN_IN_PROGRESS"
+    assert exc_info.value.error_code == "AI_ACTION_RUNNING"
     assert exc_info.value.code == 409
-    lock_for_delete.assert_awaited_once_with(db, 8001, 7001)
     delete.assert_not_awaited()
     db.commit.assert_not_awaited()

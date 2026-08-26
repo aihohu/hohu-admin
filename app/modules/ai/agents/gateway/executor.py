@@ -77,7 +77,10 @@ from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.agents.tools.registry import RegisteredTool, ToolRegistry
 from app.modules.ai.core.context import ChatDeps, build_tool_context
 from app.modules.ai.models.prepared_action import AiPreparedAction
-from app.modules.ai.service.operation_log_service import operation_log_service
+from app.modules.ai.service.operation_log_service import (
+    build_target_summary,
+    operation_log_service,
+)
 from app.modules.ai.service.prepared_action_service import prepared_action_service
 
 logger = logging.getLogger(__name__)
@@ -923,6 +926,7 @@ async def _start_log(
             tenant_id=deps.tenant_id,
             source_user_message_id=deps.source_user_message_id,
             readonly_snapshot=registered.meta.readonly,
+            agent_code=deps.agent.code if deps.agent else registered.meta.agent,
             user_id=deps.user.user_id,
             tool_name=registered.meta.name,
             tool_call_id=tool_call_id,
@@ -976,7 +980,13 @@ async def _finish_log_final(log_id: int, result: ToolResult, started_at: float) 
                 else "ok"
             )
             await operation_log_service.mark_success(
-                log_db, log_id, result_summary=summary, duration_ms=duration_ms
+                log_db,
+                log_id,
+                result_summary=summary,
+                duration_ms=duration_ms,
+                target_summary=build_target_summary(
+                    result.projection.subject_refs if result.projection else None
+                ),
             )
         else:
             await operation_log_service.mark_failed(
@@ -1350,6 +1360,11 @@ async def _hang_for_confirmation(
                         require_live_source=True,
                     )
                 if durable_action is not None:
+                    await operation_log_service.attach_target_summary(
+                        log_db,
+                        log_id,
+                        durable_action.subject_refs,
+                    )
                     payload = await hitl_manager.bind_durable_action(
                         redis_client,
                         confirmation_id,

@@ -78,6 +78,23 @@ class UserService:
             )
         ) is not None
 
+    async def get_user_names_by_ids(
+        self,
+        db: AsyncSession,
+        user_ids: set[int],
+    ) -> dict[int, str]:
+        """Resolve non-sensitive user names for trusted cross-module audit data."""
+        if not user_ids:
+            return {}
+        rows = (
+            await db.execute(
+                select(User.user_id, User.user_name)
+                .where(User.user_id.in_(user_ids))
+                .order_by(User.user_id)
+            )
+        ).all()
+        return {int(user_id): user_name for user_id, user_name in rows}
+
     async def create_user(self, db: AsyncSession, user_in: UserCreate) -> User:
         """
         创建新用户

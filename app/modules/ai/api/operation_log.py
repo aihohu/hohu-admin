@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import has_explicit_permission
-from app.core.base_response import ResponseModel
+from app.core.base_response import PageResult, ResponseModel
 from app.core.exceptions import (
     AuthorizationException,
     NotFoundException,
@@ -21,11 +21,18 @@ from app.core.rbac import is_super_admin
 from app.core.tenant import resolve_tenant_id
 from app.db.session import get_db
 from app.modules.ai.constants import AI_CHAT_USE_PERMISSION
-from app.modules.ai.schemas.operation_log import OperationLogOut, OperationLogStatusOut
+from app.modules.ai.schemas.operation_log import (
+    OperationLogOut,
+    OperationLogStatusOut,
+    TraceDetailOut,
+    TraceListQuery,
+    TraceSummaryOut,
+)
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.ai.service.result_projection_service import (
     result_projection_service,
 )
+from app.modules.ai.service.trace_service import trace_service
 from app.modules.auth.service import get_current_user
 from app.modules.system.models.user import User
 
@@ -34,6 +41,54 @@ AI_TRACE_VIEW_PERM = "ai:trace:view"
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _ensure_trace_view(user: User) -> None:
+    """Enforce the independent Trace audit permission with a stable error code."""
+    if is_super_admin(user) or has_explicit_permission(user, AI_TRACE_VIEW_PERM):
+        return
+    raise AuthorizationException(
+        "权限不足",
+        error_code="AI_TRACE_FORBIDDEN",
+    )
+
+
+@router.get(
+    "/traces",
+    response_model=ResponseModel[PageResult[TraceSummaryOut]],
+    summary="List tenant-scoped AI Traces",
+)
+async def list_traces(
+    query: TraceListQuery = Depends(),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ResponseModel[PageResult[TraceSummaryOut]]:
+    _ensure_trace_view(current_user)
+    page = await trace_service.list_traces(
+        db,
+        tenant_id=resolve_tenant_id(current_user),
+        query=query,
+    )
+    return ResponseModel.success(data=page)
+
+
+@router.get(
+    "/traces/{trace_id}",
+    response_model=ResponseModel[TraceDetailOut],
+    summary="Get one tenant-scoped AI Trace",
+)
+async def get_trace(
+    trace_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ResponseModel[TraceDetailOut]:
+    _ensure_trace_view(current_user)
+    detail = await trace_service.get_trace(
+        db,
+        tenant_id=resolve_tenant_id(current_user),
+        trace_id=trace_id,
+    )
+    return ResponseModel.success(data=detail)
 
 
 @router.get("", summary="按 tool_call_id 查 AI 操作日志（SSE 断流兜底轮询用）")

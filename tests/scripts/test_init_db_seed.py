@@ -241,6 +241,15 @@ class TestAiChatPermissionSeed:
             button = _find_menu_by_permission(init_menus, permission)
             assert button.parent_id == parent.menu_id
 
+    def test_trace_permission_is_seeded_as_an_independent_page(self):
+        page = _find_menu_by_permission(init_menus, "ai:trace:view")
+
+        assert page.menu_type == "C"
+        assert page.parent_id == _find_menu_by_route_name(init_menus, "ai").menu_id
+        assert page.route_name == "ai_trace"
+        assert page.component == "view.ai_trace"
+        assert page.route_path == "/ai/trace"
+
     def test_file_parse_is_enabled_for_fresh_install(self):
         config = next(c for c in init_configs if c.config_key == "ai:enabled_tools")
         assert config.config_value == '["file.parse"]'

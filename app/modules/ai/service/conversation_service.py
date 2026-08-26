@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +33,7 @@ class ConversationService:
         )
         # 只看自己的会话
         filters.append(AiConversation.user_id == user_id)
+        filters.append(AiConversation.deleted_at.is_(None))
         return await paginate(
             db=db,
             model=AiConversation,
@@ -43,7 +46,7 @@ class ConversationService:
         self, db: AsyncSession, conversation_id: int, user_id: int | None = None
     ) -> AiConversation:
         obj = await db.get(AiConversation, conversation_id)
-        if not obj:
+        if not obj or obj.deleted_at is not None:
             raise NotFoundException(
                 resource_type="AI会话", error_code="AI_CONVERSATION_NOT_FOUND"
             )
@@ -101,7 +104,7 @@ class ConversationService:
         self, db: AsyncSession, conversation_id: int, user_id: int
     ) -> None:
         obj = await self.get_by_id(db, conversation_id, user_id)
-        await db.delete(obj)
+        obj.deleted_at = datetime.now(UTC)
 
     async def lock_for_delete(
         self, db: AsyncSession, conversation_id: int, user_id: int
@@ -113,6 +116,7 @@ class ConversationService:
                 .where(
                     AiConversation.conversation_id == conversation_id,
                     AiConversation.user_id == user_id,
+                    AiConversation.deleted_at.is_(None),
                 )
                 .with_for_update()
             )

@@ -113,6 +113,52 @@ async def test_feedback_message_not_found_returns_404(
 
 
 @pytest.mark.asyncio
+async def test_feedback_soft_deleted_conversation_returns_404(
+    client: AsyncClient,
+    auth_token,
+    mock_visible_agents,
+    seed_test_message,
+):
+    """A message in a soft-deleted conversation is no longer writable."""
+    from datetime import UTC, datetime
+
+    from app.db.session import AsyncSessionLocal
+    from app.modules.ai.models.conversation import AiConversation
+    from app.modules.ai.models.message import AiMessage
+
+    msg_id = seed_test_message
+    async with AsyncSessionLocal() as session:
+        message = await session.get(AiMessage, msg_id)
+        conversation = await session.get(AiConversation, message.conversation_id)
+        conversation.deleted_at = datetime.now(UTC)
+        await session.commit()
+
+    response = await client.post(
+        f"/ai/messages/{msg_id}/routing-feedback",
+        json={"feedback": "correct"},
+        headers={"Authorization": f"Bearer {auth_token}"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["errorCode"] == "AI_MESSAGE_NOT_FOUND"
+
+    from sqlalchemy import select
+
+    from app.modules.ai.models.routing_feedback import AiRoutingFeedback
+
+    async with AsyncSessionLocal() as session:
+        message = await session.get(AiMessage, msg_id)
+        feedback = (
+            await session.execute(
+                select(AiRoutingFeedback).where(AiRoutingFeedback.message_id == msg_id)
+            )
+        ).scalar_one_or_none()
+
+    assert message.routing_feedback is None
+    assert feedback is None
+
+
+@pytest.mark.asyncio
 async def test_feedback_upsert_overwrites(
     client: AsyncClient,
     db_session,

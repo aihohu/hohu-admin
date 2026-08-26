@@ -656,6 +656,26 @@ init_menus.extend(
             status=STATUS_ENABLED,
             menu_id=next_id(),
         ),
+        Menu(
+            parent_id=ai_id,
+            menu_name="AI Trace 查看",
+            menu_type="C",
+            permission="ai:trace:view",
+            icon="carbon:flow-logs-vpc",
+            icon_type="1",
+            component="view.ai_trace",
+            page="ai_trace",
+            route_name="ai_trace",
+            route_path="/ai/trace",
+            i18n_key="route.ai_trace",
+            order=4,
+            status=STATUS_ENABLED,
+            hide_in_menu=False,
+            keep_alive=False,
+            constant=False,
+            multi_tab=False,
+            menu_id=next_id(),
+        ),
     ]
 )
 

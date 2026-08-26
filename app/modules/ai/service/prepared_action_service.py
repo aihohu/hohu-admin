@@ -11,10 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessException, BusinessRuleException
 from app.modules.ai.agents.gateway.failures import compute_args_hash
-from app.modules.ai.agents.hitl.constants import PreparedActionStatus
+from app.modules.ai.agents.hitl.constants import (
+    AiOperationStatus,
+    PreparedActionStatus,
+)
 from app.modules.ai.agents.hitl.manager import PendingPayload
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
+from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.schemas.confirm import ConfirmationPresentation
 from app.modules.ai.schemas.conversation import (
@@ -48,6 +52,30 @@ def _snapshot_stale(message: str) -> BusinessRuleException:
     return BusinessRuleException(
         message, error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE"
     )
+
+
+def _stable_positive_id(value: Any, *, field: str) -> str:
+    if isinstance(value, bool):
+        raise _binding_invalid(f"{field} contains an invalid identifier")
+    if isinstance(value, int) and value > 0:
+        return str(value)
+    if (
+        isinstance(value, str)
+        and value.isdigit()
+        and int(value) > 0
+        and str(int(value)) == value
+    ):
+        return value
+    raise _binding_invalid(f"{field} contains an invalid identifier")
+
+
+def _stable_positive_id_list(value: Any, *, field: str) -> list[str]:
+    if not isinstance(value, list):
+        raise _binding_invalid(f"{field} must be a complete identifier list")
+    normalized = [_stable_positive_id(item, field=field) for item in value]
+    if len(set(normalized)) != len(normalized):
+        raise _binding_invalid(f"{field} contains duplicate identifiers")
+    return normalized
 
 
 _ALLOWED_TRANSITIONS: dict[PreparedActionStatus, set[PreparedActionStatus]] = {
@@ -241,6 +269,122 @@ class PreparedActionService:
             return [dict(subject_ref)]
         if projection_kind in {"none", "scope_bound"}:
             return []
+        if execute_tool_name in {"dept.create", "dept.update", "dept.move"}:
+            business = snapshot.get("business")
+            facts = business.get("facts") if isinstance(business, dict) else None
+            if (
+                not isinstance(business, dict)
+                or business.get("version") != "phase3-dept-write/v1"
+                or not isinstance(facts, dict)
+            ):
+                raise _binding_invalid(
+                    "prepared department action lacks its Phase 3 authorization snapshot"
+                )
+            dept_ids = set(
+                _stable_positive_id_list(
+                    facts.get("deptIds"), field="department snapshot deptIds"
+                )
+            )
+            direct_dept_fields = {
+                "dept.create": ("parent_id",),
+                "dept.update": ("dept_id",),
+                "dept.move": ("dept_id", "new_parent_id"),
+            }[execute_tool_name]
+            for field_name in direct_dept_fields:
+                value = frozen_args.get(field_name)
+                if value is not None:
+                    identifier = _stable_positive_id(value, field=field_name)
+                    if identifier not in dept_ids:
+                        raise _binding_invalid(
+                            "prepared department action snapshot omits a direct target"
+                        )
+
+            impact = facts.get("impact")
+            affected_roles = facts.get("affectedRoles")
+            leader = facts.get("leader")
+            if not isinstance(impact, dict) or not isinstance(affected_roles, list):
+                raise _binding_invalid(
+                    "prepared department action snapshot omits indirect impacts"
+                )
+            user_ids = {
+                _stable_positive_id(value, field="department impact user")
+                for value in impact
+            }
+            if leader is not None:
+                if not isinstance(leader, dict) or "userId" not in leader:
+                    raise _binding_invalid(
+                        "prepared department action contains an invalid leader binding"
+                    )
+                user_ids.add(
+                    _stable_positive_id(
+                        leader["userId"], field="department leader user"
+                    )
+                )
+            role_ids: set[str] = set()
+            for item in affected_roles:
+                if not isinstance(item, dict) or "roleId" not in item:
+                    raise _binding_invalid(
+                        "prepared department action contains an invalid role impact"
+                    )
+                role_ids.add(
+                    _stable_positive_id(item["roleId"], field="department impact role")
+                )
+            return [
+                *({"type": "dept", "id": value} for value in sorted(dept_ids, key=int)),
+                *(
+                    {"type": "managed_role", "id": value}
+                    for value in sorted(role_ids, key=int)
+                ),
+                *({"type": "user", "id": value} for value in sorted(user_ids, key=int)),
+            ]
+        if execute_tool_name == "role.create":
+            business = snapshot.get("business")
+            if (
+                not isinstance(business, dict)
+                or business.get("version") != "phase3-role-write/v1"
+            ):
+                raise _binding_invalid(
+                    "prepared role action lacks its Phase 3 authorization snapshot"
+                )
+            raw_dept_ids = frozen_args.get("dept_ids")
+            dept_ids = (
+                []
+                if raw_dept_ids is None
+                else _stable_positive_id_list(
+                    raw_dept_ids, field="role create dept_ids"
+                )
+            )
+            return [
+                {"type": "dept", "id": value} for value in sorted(dept_ids, key=int)
+            ]
+        if execute_tool_name in {
+            "role.update",
+            "role.update_menus",
+            "role.update_agents",
+        }:
+            business = snapshot.get("business")
+            role_id = _stable_positive_id(frozen_args.get("role_id"), field="role_id")
+            valid_snapshot = (
+                isinstance(business, dict)
+                and business.get("version") == "phase3-role-write/v1"
+            )
+            if execute_tool_name == "role.update_agents":
+                target_role = (
+                    business.get("targetRole") if isinstance(business, dict) else None
+                )
+                valid_snapshot = (
+                    isinstance(target_role, dict)
+                    and _stable_positive_id(
+                        target_role.get("roleId"), field="targetRole.roleId"
+                    )
+                    == role_id
+                    and isinstance(business.get("members"), list)
+                )
+            if not valid_snapshot:
+                raise _binding_invalid(
+                    "prepared role action lacks its Phase 3 authorization snapshot"
+                )
+            return [{"type": "managed_role", "id": role_id}]
         if execute_tool_name == "user.create":
             primary_dept_id = frozen_args.get("primary_dept_id")
             return (
@@ -377,6 +521,7 @@ class PreparedActionService:
                 .where(
                     AiConversation.conversation_id == conversation_id,
                     AiConversation.user_id == user_id,
+                    AiConversation.deleted_at.is_(None),
                 )
                 .with_for_update()
             )
@@ -432,7 +577,10 @@ class PreparedActionService:
         conversation = (
             await db.execute(
                 select(AiConversation)
-                .where(AiConversation.conversation_id == action_ref.conversation_id)
+                .where(
+                    AiConversation.conversation_id == action_ref.conversation_id,
+                    AiConversation.deleted_at.is_(None),
+                )
                 .with_for_update()
             )
         ).scalar_one_or_none()
@@ -599,6 +747,7 @@ class PreparedActionService:
                 == PreparedActionStatus.PENDING_CONFIRMATION.value,
                 AiPreparedAction.expires_at > datetime.now(UTC),
                 AiConversation.user_id == user_id,
+                AiConversation.deleted_at.is_(None),
                 AiMessage.conversation_id == conversation_id,
                 AiMessage.role == "user",
                 AiMessage.is_active.is_(True),
@@ -640,6 +789,107 @@ class PreparedActionService:
         )
         return value is not None
 
+    async def expire_for_conversation_delete(
+        self,
+        db: AsyncSession,
+        *,
+        conversation_id: int,
+        user_id: int,
+        tenant_id: int,
+    ) -> list[AiPreparedAction]:
+        """Lock and terminalize deletable actions after the conversation lock."""
+        nonterminal = (
+            PreparedActionStatus.PREPARED.value,
+            PreparedActionStatus.PENDING_CONFIRMATION.value,
+            PreparedActionStatus.APPROVED.value,
+            PreparedActionStatus.RUNNING.value,
+        )
+        actions = list(
+            (
+                await db.execute(
+                    select(AiPreparedAction)
+                    .where(
+                        AiPreparedAction.conversation_id == conversation_id,
+                        AiPreparedAction.user_id == user_id,
+                        AiPreparedAction.tenant_id == tenant_id,
+                        AiPreparedAction.status.in_(nonterminal),
+                    )
+                    .order_by(AiPreparedAction.action_id.asc())
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        now = datetime.now(UTC)
+        live_running = [
+            action
+            for action in actions
+            if action.status == PreparedActionStatus.RUNNING.value
+            and action.execution_lease_expires_at is not None
+            and _as_utc(action.execution_lease_expires_at) > now
+        ]
+        if live_running:
+            error = BusinessRuleException(
+                "会话仍有正在执行的操作，执行终态化后再删除",
+                error_code="AI_ACTION_RUNNING",
+            )
+            error.code = 409
+            raise error
+
+        for action in actions:
+            if action.status == PreparedActionStatus.RUNNING.value:
+                action.status = PreparedActionStatus.FAILED.value
+                action.error_code = "AI_PREPARED_ACTION_EXECUTION_INTERRUPTED"
+            else:
+                action.status = PreparedActionStatus.EXPIRED.value
+                action.error_code = "AI_CONVERSATION_DELETED"
+            action.row_version += 1
+            action.finished_at = now
+            action.execution_owner = None
+            action.execution_lease_expires_at = None
+            action.guard_owner_token = None
+
+        actions_by_tool_call = {
+            action.execute_tool_call_id: action for action in actions
+        }
+        tool_call_ids = list(actions_by_tool_call)
+        if tool_call_ids:
+            operation_logs = list(
+                (
+                    await db.execute(
+                        select(AiOperationLog)
+                        .where(
+                            AiOperationLog.tenant_id == tenant_id,
+                            AiOperationLog.user_id == user_id,
+                            AiOperationLog.conversation_id == conversation_id,
+                            AiOperationLog.tool_call_id.in_(tool_call_ids),
+                            AiOperationLog.status.in_(
+                                (
+                                    AiOperationStatus.PENDING_CONFIRMATION.value,
+                                    AiOperationStatus.RUNNING.value,
+                                )
+                            ),
+                        )
+                        .order_by(AiOperationLog.log_id.asc())
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for operation in operation_logs:
+                action = actions_by_tool_call[operation.tool_call_id]
+                if action.status == PreparedActionStatus.FAILED.value:
+                    operation.status = AiOperationStatus.FAILED.value
+                    operation.error_code = "AI_PREPARED_ACTION_EXECUTION_INTERRUPTED"
+                else:
+                    operation.status = AiOperationStatus.EXPIRED.value
+                    operation.error_code = "AI_CONVERSATION_DELETED"
+                operation.finished_at = now.replace(tzinfo=None)
+        return actions
+
     async def pending_source_is_valid(
         self, db: AsyncSession, action: AiPreparedAction
     ) -> bool:
@@ -656,6 +906,7 @@ class PreparedActionService:
                 AiMessage.role == "user",
                 AiMessage.is_active.is_(True),
                 AiConversation.user_id == action.user_id,
+                AiConversation.deleted_at.is_(None),
             )
             .limit(1)
         )

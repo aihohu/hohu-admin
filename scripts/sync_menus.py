@@ -1284,15 +1284,25 @@ MENU_DEFINITIONS = [
         "route_path": "",
         "status": "1",
     },
-    # ---- AI Trace 查看（审计员，独立于 ai:agent:*） ----
+    # ---- AI Trace audit page, independent from ai:agent:* ----
     {
-        "key": "ai_trace_view",
+        "route_name": "ai_trace",
         "parent_route": "ai",
         "menu_name": "AI Trace 查看",
-        "menu_type": "F",
+        "menu_type": "C",
         "permission": "ai:trace:view",
-        "route_path": "",
+        "icon": "carbon:flow-logs-vpc",
+        "icon_type": "1",
+        "component": "view.ai_trace",
+        "page": "ai_trace",
+        "route_path": "/ai/trace",
+        "i18n_key": "route.ai_trace",
+        "order": 4,
         "status": "1",
+        "hide_in_menu": False,
+        "keep_alive": False,
+        "constant": False,
+        "multi_tab": False,
     },
     # ---- AI 路由反馈 ----
     # route_name / component / page / i18n_key 用 kebab-case 匹配前端 @elegant-router 命名约定
@@ -1309,7 +1319,7 @@ MENU_DEFINITIONS = [
         "page": "ai_routing-feedback",
         "route_path": "/ai/routing-feedback",
         "i18n_key": "route.ai_routing-feedback",
-        "order": 4,
+        "order": 5,
         "status": "1",
         "hide_in_menu": False,
         "keep_alive": False,

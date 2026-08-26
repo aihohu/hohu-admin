@@ -21,7 +21,10 @@ Gateway Executor 调用方式：
     await operation_log_service.mark_success(db, log_id, result_summary=..., duration_ms=...)
 """
 
+import json
+import re
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +32,38 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import BusinessRuleException
 from app.modules.ai.agents.hitl.constants import AiOperationStatus
 from app.modules.ai.models.operation_log import AiOperationLog
+
+_TARGET_TYPE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_TARGET_ID_RE = re.compile(r"^[1-9][0-9]*$")
+
+
+def build_target_summary(subject_refs: Any) -> str | None:
+    """Serialize only canonical subject type/ID pairs for audit display."""
+    if not isinstance(subject_refs, (list, tuple)) or not subject_refs:
+        return None
+    normalized: set[tuple[str, str]] = set()
+    for ref in subject_refs:
+        if not isinstance(ref, dict):
+            return None
+        subject_type = ref.get("type")
+        subject_id = ref.get("id")
+        if not isinstance(subject_type, str) or not _TARGET_TYPE_RE.fullmatch(
+            subject_type
+        ):
+            return None
+        if not isinstance(subject_id, str) or not _TARGET_ID_RE.fullmatch(subject_id):
+            return None
+        normalized.add((subject_type, subject_id))
+    if not normalized:
+        return None
+    payload = [
+        {"id": subject_id, "type": subject_type}
+        for subject_type, subject_id in sorted(
+            normalized,
+            key=lambda item: (int(item[1]), item[0]),
+        )
+    ]
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 class OperationLogService:
@@ -46,6 +81,8 @@ class OperationLogService:
         tenant_id: int,
         source_user_message_id: int | None = None,
         readonly_snapshot: bool = False,
+        agent_code: str | None = None,
+        target_summary: str | None = None,
         user_id: int,
         tool_name: str,
         tool_call_id: str,
@@ -78,6 +115,8 @@ class OperationLogService:
             tenant_id=tenant_id,
             source_user_message_id=source_user_message_id,
             readonly_snapshot=readonly_snapshot,
+            agent_code=agent_code,
+            target_summary=target_summary,
             user_id=user_id,
             tool_name=tool_name,
             tool_call_id=tool_call_id,
@@ -147,11 +186,14 @@ class OperationLogService:
         *,
         result_summary: str,
         duration_ms: int,
+        target_summary: str | None = None,
     ) -> AiOperationLog:
         """状态迁移：running → success（终态）"""
         log = await self._get(db, log_id)
         self._transition(log, AiOperationStatus.SUCCESS)
         log.result_summary = result_summary
+        if target_summary is not None:
+            log.target_summary = target_summary
         log.duration_ms = duration_ms
         log.finished_at = datetime.now(UTC).replace(tzinfo=None)
         return log
@@ -253,6 +295,19 @@ class OperationLogService:
                 error_code="AI_OPERATION_LOG_CONFIRMATION_ALREADY_SET",
             )
         log.confirmation_id = confirmation_id
+        return log
+
+    async def attach_target_summary(
+        self,
+        db: AsyncSession,
+        log_id: int,
+        subject_refs: Any,
+    ) -> AiOperationLog:
+        """Freeze an allowlisted target summary without exposing action arguments."""
+        log = await self._get(db, log_id)
+        summary = build_target_summary(subject_refs)
+        if summary is not None:
+            log.target_summary = summary
         return log
 
     async def mark_approved(

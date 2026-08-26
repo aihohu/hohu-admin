@@ -232,8 +232,10 @@ class ChatService:
         conv: AiConversation | None = None
         if conversation_id:
             conv = await db.get(AiConversation, int(conversation_id))
-            if conv:
+            if conv and conv.deleted_at is None:
                 conv_agent_code = conv.agent_code
+            else:
+                conv = None
 
         # 粘滞路由只在此处计算，chat.py 不重复调用。
         decision = await resolve_sticky_agent_code(
@@ -322,7 +324,7 @@ class ChatService:
         if conversation_id is None:
             return
         conv = await db.get(AiConversation, int(conversation_id))
-        if conv is None:
+        if conv is None or conv.deleted_at is not None:
             return
         conv.trace_id = trace_id
         conv.agent_code = agent_code

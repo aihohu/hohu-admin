@@ -1,7 +1,8 @@
 # AI 管理能力 MVP 收口与阅读入口
 
-> 状态：已批准，实施中
+> 状态：✅ 已发布（2026-08-24）
 > 创建日期：2026-08-14
+> Ship date：2026-08-24
 > 影响项目：`hohu-admin`、`hohu-admin-web`
 > 当前范围负责人：hohu core team
 > 详细技术基线：[`AI Tool Gateway`](./2026-07-02-ai-tool-gateway-design.md)
@@ -433,7 +434,7 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 - 完整集合替换必须在同一事务内完成；任何校验或写入失败都不得留下部分删除、部分新增或只对 scope 内对象生效的局部结果。
 - 页面 API 与 AI Tool 对同一聚合根采用相同锁顺序和 canonical snapshot 规则，避免一侧并发修改绕过另一侧的漂移检测。
 
-删除会话必须先锁 conversation 及其全部非终态 PreparedAction；confirm/worker 的状态转换也必须锁同一 action row。`prepared/pending_confirmation/approved` action 在同一事务标记为 `expired`，写 `AI_CONVERSATION_DELETED`、`finished_at` 并清理 execution lease 后再软删除会话；只要存在 `running` action 就返回 409 + `AI_ACTION_RUNNING` 且会话不删除，过期 lease 先由带 fencing token 的既有恢复流程终态化，delete 不猜测 worker 是否存活。删除提交后 confirm 不再执行任何业务副作用，resume 只可读取终态安全投影；终态转换和会话删除任一失败时整体回滚。
+删除会话必须先锁 conversation 及其全部非终态 PreparedAction；confirm/worker 的状态转换也必须锁同一 action row。`prepared/pending_confirmation/approved` action 在同一事务标记为 `expired`，写 `AI_CONVERSATION_DELETED`、`finished_at` 并清理 execution lease 后再软删除会话；只要存在 `running` action 就返回 409 + `AI_ACTION_RUNNING` 且会话不删除，过期 lease 先由带 fencing token 的既有恢复流程终态化，delete 不猜测 worker 是否存活。删除提交后 confirm 不再执行任何业务副作用，resume 只可读取终态安全投影；所有用户侧消息写入入口（包括 routing feedback）也必须将软删除会话等同于资源不存在并保证零副作用；终态转换和会话删除任一失败时整体回滚。
 
 所有会写 `user_roles`、`user_depts`、`role_menus`、`role_depts`、`role_ai_agent`、`sys_dept.parent_id/ancestors`、会影响授权的 `sys_dept.status`，或删除 `sys_role/sys_dept` 聚合根的页面、AI、导入和后台任务统一遵守授权聚合锁协议；部门结构/status/delete writer 不得先锁 dept 后再补锁受影响角色或用户：
 
@@ -842,6 +843,12 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 
 69. **部门路径、负责人和间接 Role 影响都属于锁内稳定事实** — ancestors 子树匹配必须使用完整 path segment 边界；leader 在操作者 user scope 内唯一解析并冻结稳定 user ID/display；status 变化即使只影响零成员 Role 也要校验并冻结其 definition，Role/Role-Agent writer 的 dept 锁集合纳入前后物化的全部有限后代部门。**反例**: `0,12%` 会误改 `0,123` 子树；把 leader 当自由文本会引用隐藏用户；只审查现有成员会放过 dormant Role 模板变化；只锁直接部门会允许后代成员关系 phantom。**回归**: `tests/modules/system/test_dept_phase3_authorization.py`、`tests/modules/system/test_role_phase3_authorization.py`、`tests/modules/ai/test_role_agent_delegation.py`。
 
+70. **Phase 3 管理写入必须在创建 PreparedAction 前冻结完整主体图** — `dept.create/update/move` 冻结目标部门、受影响 Role/User 和负责人，`role.create/update/update_menus/update_agents` 冻结部门或受管 Role，且只接受 Phase 3 Service 产生的 canonical snapshot。**反例**: 只支持 User Tool 的 subject builder 会让真实模型正确选择 `dept.create` 后在进入确认前 fail closed，或让批准时缺少间接授权依赖。**回归**: `tests/modules/ai/test_prepared_action_service.py`、`tests/e2e/provider-smoke.spec.ts`。
+
+71. **Phase 4 发布证据必须同时包含确定性浏览器矩阵与独立真实 Provider 门禁** — 离线 fixture 负责可重复的权限/HITL/Trace 回归，真实 Provider project 负责验证模型路由、Tool 选择、HITL 写入和 hardened egress；两者任一缺失都不能发布。**反例**: 用 `page.route` fixture 冒充模型 smoke，或缺凭据时 skip，会让 release job 在从未调用 Provider 的情况下变绿。**回归**: `tests/e2e/phase4-identity-matrix.spec.ts`、`tests/e2e/phase4-projection-trace.spec.ts`、`tests/e2e/provider-smoke.spec.ts`、`playwright.config.ts`。
+
+72. **会话软删除是全部用户侧消息写入的统一封锁边界** — 任何以 `message_id` 为入口的写操作都必须重新加载所属 conversation 并拒绝 `deleted_at IS NOT NULL`，对外统一表现为消息不存在。**反例**: routing feedback 只检查 message active 与 owner，会让用户在会话删除后继续改写消息并追加反馈历史。**回归**: `tests/modules/ai/agents/supervisor/test_routing_feedback.py::test_feedback_soft_deleted_conversation_returns_404`。
+
 ---
 
 ## 10. 实施计划
@@ -905,13 +912,15 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 
 ### Phase 4：发布闭环
 
-- [ ] 完成工具卡 HITL resume/download/tool-only/reload 当前范围 E2E，并覆盖撤权后 reject/最小状态回放、所有历史结果读取面的统一 tombstone、前端缓存清除及删除会话原子终态化。
-- [ ] 完成 AI Trace：operation-log 的 `tenant_id` migration/index 与写入/查询隔离已提前完成；仍需 agent/target 字段、Trace list/detail API、`/ai/trace` 菜单页面、消息元数据 DTO allowlist、脱敏测试和浏览器审计 E2E。
-- [ ] 使用 §7.1 全部身份执行真实浏览器权限/数据范围 E2E。
-- [ ] 新增独立 `e2e:provider` Playwright project；release 环境使用真实 provider 完成三个 Agent smoke，缺凭据失败，不以 route fixture 代替。
-- [ ] 后端 `ruff check . && ruff format --check . && pytest --cov=app --cov-report=term-missing --cov-fail-under=70` 及 `python scripts/check_ai_tools.py` 通过。
-- [ ] 前端补齐 `test:coverage`、`e2e:provider`（阈值 ≥ 70%），并通过 `pnpm lint && pnpm typecheck && pnpm test:coverage && pnpm build && pnpm e2e`；release 另通过 `pnpm e2e:provider`。
-- [ ] 回写所有专项 spec 状态、测试证据和 ship date，将本文状态翻转为已发布。
+- [x] ✅ 完成工具卡 HITL resume/download/tool-only/reload 当前范围 E2E，并覆盖撤权后 reject/最小状态回放、所有历史结果读取面的统一 tombstone、前端缓存清除及删除会话原子终态化。
+- [x] ✅ 完成 AI Trace：operation-log 固化 agent/target 字段，提供 Trace list/detail API、`/ai/trace` 菜单页面、消息元数据 DTO allowlist、脱敏测试和浏览器审计 E2E。
+- [x] ✅ 使用 §7.1 全部 11 个身份执行确定性真实浏览器权限/数据范围 E2E。
+- [x] ✅ 新增独立 `e2e:provider` Playwright project；release 环境使用真实 DeepSeek provider 完成三个 Agent 的 read + controlled write smoke，缺凭据失败且未使用 route fixture。
+- [x] ✅ 后端 `ruff check . && ruff format --check . && pytest --cov=app --cov-report=term --cov-fail-under=70` 及 `python scripts/check_ai_tools.py` 通过。
+- [x] ✅ 前端补齐 `test:coverage`、`e2e:provider`，并通过 format、lint、typecheck、coverage、build、确定性 E2E 和真实 provider release smoke。
+- [x] ✅ 回写 Phase 4 短 spec、部署/安全文档、测试证据和 ship date，本文状态已翻转为发布。
+
+- [x] Phase 4 验证证据（2026-08-24）：后端全量 2284 项通过、覆盖率 76.59%，Ruff 及 31 tools / 12 static checks 通过，仅保留 32 条既有 SQLAlchemy warning；Web 44 files / 179 tests 通过，statements 79.43%、branches 70.29%、functions 71.96%、lines 83.06%，lint 0 error / 30 条既有 warning，typecheck 与 production build 通过；确定性 Chrome E2E 28/28、真实 DeepSeek provider smoke 1/1 通过，缺少 6 个 release 环境变量时按契约失败。Provider 证据从真实 Trace detail 读取实际 Agent/Tool 并完成测试会话与业务对象清理；人工浏览器验收确认 AI Trace 菜单、筛选、列表和安全详情可用且不展示 raw message/args。
 
 ---
 

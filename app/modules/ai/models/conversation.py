@@ -55,6 +55,11 @@ class AiConversation(Base):
     update_time: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间"
     )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Soft deletion timestamp; NULL means active",
+    )
 
     messages: Mapped[list["AiMessage"]] = relationship(
         "AiMessage", back_populates="conversation", cascade="all, delete-orphan"

@@ -68,6 +68,16 @@ class AiOperationLog(Base):
         nullable=False,
         comment="可信租户ID；历史单租户数据回填 0",
     )
+    agent_code: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="Immutable executing Agent code; NULL means unknown legacy data",
+    )
+    target_summary: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Allowlisted immutable target references for audit display",
+    )
     user_id: Mapped[int] = mapped_column(BigInteger, comment="调用用户ID")
     tool_name: Mapped[str] = mapped_column(String(128), comment="tool 全限定名")
     tool_call_id: Mapped[str] = mapped_column(

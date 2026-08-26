@@ -98,3 +98,16 @@ def test_user_role_auth_permission_seeded_under_user_menu() -> None:
     assert entry["parent_route"] == "system_user"
     assert entry["status"] == "1"
     assert entry.get("key")
+
+
+def test_ai_trace_permission_is_an_independent_page_menu() -> None:
+    entry = _find_by_permission("ai:trace:view")
+
+    assert entry["menu_type"] == "C"
+    assert entry["parent_route"] == "ai"
+    assert entry["route_name"] == "ai_trace"
+    assert entry["component"] == "view.ai_trace"
+    assert entry["page"] == "ai_trace"
+    assert entry["route_path"] == "/ai/trace"
+    assert entry["i18n_key"] == "route.ai_trace"
+    assert entry["status"] == "1"

@@ -3,7 +3,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_ai_chat_use
 from app.core.base_response import PageResult, ResponseModel
-from app.core.exceptions import BusinessRuleException
 from app.core.tenant import resolve_tenant_id
 from app.db.session import get_db
 from app.modules.ai.schemas.conversation import (
@@ -115,19 +114,12 @@ async def delete_conversation(
     await conversation_service.lock_for_delete(
         db, conversation_id, _current_user.user_id
     )
-    has_in_progress = await prepared_action_service.has_in_progress_for_conversation(
+    await prepared_action_service.expire_for_conversation_delete(
         db,
         conversation_id=conversation_id,
         user_id=_current_user.user_id,
         tenant_id=resolve_tenant_id(_current_user),
     )
-    if has_in_progress:
-        error = BusinessRuleException(
-            "会话仍有待确认或执行中的操作，完成或拒绝后再删除",
-            error_code="AI_CHAT_RUN_IN_PROGRESS",
-        )
-        error.code = 409
-        raise error
     await conversation_service.delete(db, conversation_id, _current_user.user_id)
     await db.commit()
     return ResponseModel.success(msg="删除成功")

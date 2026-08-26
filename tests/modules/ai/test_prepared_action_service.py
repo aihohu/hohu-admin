@@ -8,10 +8,15 @@ from sqlalchemy import select
 
 from app.core.exceptions import BusinessRuleException
 from app.core.file_storage import MockFileStorage, reset_file_storage_for_test
-from app.modules.ai.agents.hitl.constants import PreparedActionStatus
+from app.modules.ai.agents.hitl.constants import (
+    AiOperationStatus,
+    PreparedActionStatus,
+)
 from app.modules.ai.agents.hitl.manager import PendingPayload
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
+from app.modules.ai.models.operation_log import AiOperationLog
+from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.ai.service.prepared_action_service import (
     canonical_payload_hash,
     prepared_action_service,
@@ -110,6 +115,116 @@ def test_finite_action_does_not_require_a_scope_hash() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "frozen_args", "snapshot", "expected_refs"),
+    [
+        (
+            "dept.create",
+            {"parent_id": 20, "dept_name": "New department"},
+            {
+                "business": {
+                    "version": "phase3-dept-write/v1",
+                    "facts": {
+                        "deptIds": [10, 20],
+                        "impact": {"300": {}},
+                        "affectedRoles": [{"roleId": "400"}],
+                        "leader": {"userId": "500"},
+                    },
+                }
+            },
+            {
+                ("dept", "10"),
+                ("dept", "20"),
+                ("managed_role", "400"),
+                ("user", "300"),
+                ("user", "500"),
+            },
+        ),
+        (
+            "dept.update",
+            {"dept_id": 20, "status": "2"},
+            {
+                "business": {
+                    "version": "phase3-dept-write/v1",
+                    "facts": {
+                        "deptIds": [10, 20],
+                        "impact": {"300": {}},
+                        "affectedRoles": [{"roleId": "400"}],
+                        "leader": None,
+                    },
+                }
+            },
+            {
+                ("dept", "10"),
+                ("dept", "20"),
+                ("managed_role", "400"),
+                ("user", "300"),
+            },
+        ),
+        (
+            "dept.move",
+            {"dept_id": 20, "new_parent_id": 30},
+            {
+                "business": {
+                    "version": "phase3-dept-write/v1",
+                    "facts": {
+                        "deptIds": [10, 20, 30],
+                        "impact": {},
+                        "affectedRoles": [],
+                        "leader": None,
+                    },
+                }
+            },
+            {("dept", "10"), ("dept", "20"), ("dept", "30")},
+        ),
+        (
+            "role.create",
+            {"role_code": "R_NEW", "dept_ids": [10, 20]},
+            {"business": {"version": "phase3-role-write/v1"}},
+            {("dept", "10"), ("dept", "20")},
+        ),
+        (
+            "role.update",
+            {"role_id": 400, "status": "2"},
+            {"business": {"version": "phase3-role-write/v1"}},
+            {("managed_role", "400")},
+        ),
+        (
+            "role.update_menus",
+            {"role_id": 400, "menu_ids": [1, 2]},
+            {"business": {"version": "phase3-role-write/v1"}},
+            {("managed_role", "400")},
+        ),
+        (
+            "role.update_agents",
+            {"role_id": 400, "agent_ids": [1, 2]},
+            {
+                "business": {
+                    "targetRole": {"roleId": "400"},
+                    "members": [],
+                }
+            },
+            {("managed_role", "400")},
+        ),
+    ],
+)
+def test_phase3_management_actions_freeze_complete_projection_targets(
+    tool_name: str,
+    frozen_args: dict,
+    snapshot: dict,
+    expected_refs: set[tuple[str, str]],
+) -> None:
+    refs = prepared_action_service._build_subject_refs(
+        execute_tool_name=tool_name,
+        frozen_args=frozen_args,
+        snapshot=snapshot,
+        subject_ref=None,
+        projection_kind=None,
+    )
+
+    assert {(item["type"], item["id"]) for item in refs} == expected_refs
+
+
 async def test_create_pending_freezes_policy_and_trusted_identity(db_session) -> None:
     action = await prepared_action_service.create_pending(
         db_session, **_create_kwargs()
@@ -134,6 +249,145 @@ async def test_create_pending_freezes_policy_and_trusted_identity(db_session) ->
     ]
     assert action.projection_dependency_message_ids == ["71", "72"]
     assert len(action.subject_refs_hash) == 64
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        PreparedActionStatus.PREPARED,
+        PreparedActionStatus.PENDING_CONFIRMATION,
+        PreparedActionStatus.APPROVED,
+    ],
+)
+async def test_conversation_delete_expires_non_running_actions_and_logs(
+    db_session,
+    status: PreparedActionStatus,
+) -> None:
+    kwargs = _create_kwargs()
+    kwargs["confirmation_id"] = f"cid_delete_{status.value}"
+    kwargs["execute_tool_call_id"] = f"tc_delete_{status.value}"
+    action = await prepared_action_service.create_pending(db_session, **kwargs)
+    action.status = status.value
+    action.execution_owner = "worker-1"
+    action.execution_lease_expires_at = datetime.now(UTC) + timedelta(minutes=1)
+    log_id = await operation_log_service.start_operation(
+        db_session,
+        trace_id=action.trace_id,
+        conversation_id=action.conversation_id,
+        tenant_id=action.tenant_id,
+        source_user_message_id=action.source_user_message_id,
+        agent_code=action.agent_code,
+        user_id=action.user_id,
+        tool_name=action.execute_tool_name,
+        tool_call_id=action.execute_tool_call_id,
+        args_hash=action.args_hash,
+        args_summary="safe metadata",
+        risk_level="high",
+        execution_mode="hitl",
+        status=AiOperationStatus.PENDING_CONFIRMATION,
+        confirmation_id=action.confirmation_id,
+    )
+
+    expired = await prepared_action_service.expire_for_conversation_delete(
+        db_session,
+        conversation_id=action.conversation_id,
+        user_id=action.user_id,
+        tenant_id=action.tenant_id,
+    )
+    await db_session.flush()
+    log = await db_session.get(AiOperationLog, log_id)
+
+    assert [item.action_id for item in expired] == [action.action_id]
+    assert action.status == PreparedActionStatus.EXPIRED.value
+    assert action.error_code == "AI_CONVERSATION_DELETED"
+    assert action.finished_at is not None
+    assert action.execution_owner is None
+    assert action.execution_lease_expires_at is None
+    assert action.guard_owner_token is None
+    assert log is not None
+    assert log.status == AiOperationStatus.EXPIRED.value
+    assert log.error_code == "AI_CONVERSATION_DELETED"
+    assert log.finished_at is not None
+
+
+async def test_conversation_delete_rejects_running_action_without_partial_expiry(
+    db_session,
+) -> None:
+    first_kwargs = _create_kwargs()
+    first_kwargs["confirmation_id"] = "cid_delete_pending"
+    first_kwargs["execute_tool_call_id"] = "tc_delete_pending"
+    pending = await prepared_action_service.create_pending(db_session, **first_kwargs)
+    running_kwargs = _create_kwargs()
+    running_kwargs["confirmation_id"] = "cid_delete_running"
+    running_kwargs["execute_tool_call_id"] = "tc_delete_running"
+    running = await prepared_action_service.create_pending(db_session, **running_kwargs)
+    running.status = PreparedActionStatus.RUNNING.value
+    running.execution_owner = "worker-running"
+    running.execution_lease_expires_at = datetime.now(UTC) + timedelta(minutes=1)
+    await db_session.flush()
+
+    with pytest.raises(BusinessRuleException) as exc_info:
+        await prepared_action_service.expire_for_conversation_delete(
+            db_session,
+            conversation_id=pending.conversation_id,
+            user_id=pending.user_id,
+            tenant_id=pending.tenant_id,
+        )
+
+    assert exc_info.value.error_code == "AI_ACTION_RUNNING"
+    assert exc_info.value.code == 409
+    assert pending.status == PreparedActionStatus.PENDING_CONFIRMATION.value
+    assert running.status == PreparedActionStatus.RUNNING.value
+
+
+async def test_conversation_delete_recovers_expired_running_lease(
+    db_session,
+) -> None:
+    kwargs = _create_kwargs()
+    kwargs["confirmation_id"] = "cid_delete_stale_running"
+    kwargs["execute_tool_call_id"] = "tc_delete_stale_running"
+    action = await prepared_action_service.create_pending(db_session, **kwargs)
+    action.status = PreparedActionStatus.RUNNING.value
+    action.execution_owner = "stale-worker"
+    action.execution_lease_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    log_id = await operation_log_service.start_operation(
+        db_session,
+        trace_id=action.trace_id,
+        conversation_id=action.conversation_id,
+        tenant_id=action.tenant_id,
+        source_user_message_id=action.source_user_message_id,
+        agent_code=action.agent_code,
+        user_id=action.user_id,
+        tool_name=action.execute_tool_name,
+        tool_call_id=action.execute_tool_call_id,
+        args_hash=action.args_hash,
+        args_summary="safe metadata",
+        risk_level="high",
+        execution_mode="hitl",
+        status=AiOperationStatus.RUNNING,
+        confirmation_id=action.confirmation_id,
+    )
+
+    recovered = await prepared_action_service.expire_for_conversation_delete(
+        db_session,
+        conversation_id=action.conversation_id,
+        user_id=action.user_id,
+        tenant_id=action.tenant_id,
+    )
+    await db_session.flush()
+    log = await db_session.get(AiOperationLog, log_id)
+
+    assert [item.action_id for item in recovered] == [action.action_id]
+    assert action.status == PreparedActionStatus.FAILED.value
+    assert action.error_code == "AI_PREPARED_ACTION_EXECUTION_INTERRUPTED"
+    assert action.finished_at is not None
+    assert action.execution_owner is None
+    assert action.execution_lease_expires_at is None
+    assert action.guard_owner_token is None
+    assert log is not None
+    assert log.status == AiOperationStatus.FAILED.value
+    assert log.error_code == "AI_PREPARED_ACTION_EXECUTION_INTERRUPTED"
+    assert log.finished_at is not None
 
 
 async def test_create_pending_rejects_missing_frozen_model(db_session) -> None:

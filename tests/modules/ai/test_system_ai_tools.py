@@ -589,15 +589,30 @@ class TestRoleList:
     async def test_returns_records_with_default_limit(self, db_session) -> None:
         from app.modules.system.ai_tools import role_list
 
-        await _add_role(db_session, role_id=4001, role_name="r1", role_code="R_R1")
-        await _add_role(db_session, role_id=4002, role_name="r2", role_code="R_R2")
+        await _add_role(
+            db_session,
+            role_id=4001,
+            role_name="r1",
+            role_code="R_R1",
+            status="9",
+        )
+        await _add_role(
+            db_session,
+            role_id=4002,
+            role_name="r2",
+            role_code="R_R2",
+            status="9",
+        )
         await db_session.flush()
 
         ctx = await _make_role_list_ctx(db_session)
-        result = await role_list(ctx, filters=None)
+        result = await role_list(
+            ctx,
+            filters={"status": "9"},
+        )
         # LLM 层
         assert result.data["limit"] == 20  # 默认
-        assert result.data["total"] >= 2  # 含 _add_role 加的 + 其它测试残留
+        assert result.data["total"] == 2
         assert len(result.data["sample"]) == min(3, result.data["total"])
         # rows 是全量 limit 范围；sample 只取前 3，可能漏掉本次新建（残留干扰），
         # 故用 rows 验证新建项命中。

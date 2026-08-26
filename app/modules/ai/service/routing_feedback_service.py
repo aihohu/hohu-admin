@@ -41,8 +41,14 @@ class RoutingFeedbackService:
 
         # AiMessage 没有 user_id，通过 AiConversation 校验 owner。
         conv = await db.get(AiConversation, msg.conversation_id)
+        if conv is None or conv.deleted_at is not None:
+            raise NotFoundException(
+                resource_type="AI消息",
+                error_code="AI_MESSAGE_NOT_FOUND",
+            )
+
         is_admin = is_super_admin(user)
-        if conv is None or (conv.user_id != user.user_id and not is_admin):
+        if conv.user_id != user.user_id and not is_admin:
             raise AuthorizationException(
                 "非消息 owner，无权提交反馈",
                 error_code="AI_AUTHORIZATION",
