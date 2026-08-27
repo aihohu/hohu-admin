@@ -661,7 +661,17 @@ async def test_replace_departments_bypasses_stale_primary_policy_cache(
     policy = await db_session.scalar(
         select(Config).where(Config.config_key == "user_require_primary_dept")
     )
-    assert policy is not None
+    if policy is None:
+        policy = Config(
+            config_name="Primary department policy test fixture",
+            config_key="user_require_primary_dept",
+            config_value="false",
+            config_type="text",
+            config_group="feature",
+            status=STATUS_ENABLED,
+            is_public=False,
+        )
+        db_session.add(policy)
     policy.config_value = "true"
     policy.status = STATUS_ENABLED
     db_session.add_all([actor_role, target_role, actor, target])

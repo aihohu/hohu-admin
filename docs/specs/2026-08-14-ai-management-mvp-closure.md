@@ -849,6 +849,8 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 
 72. **会话软删除是全部用户侧消息写入的统一封锁边界** — 任何以 `message_id` 为入口的写操作都必须重新加载所属 conversation 并拒绝 `deleted_at IS NOT NULL`，对外统一表现为消息不存在。**反例**: routing feedback 只检查 message active 与 owner，会让用户在会话删除后继续改写消息并追加反馈历史。**回归**: `tests/modules/ai/agents/supervisor/test_routing_feedback.py::test_feedback_soft_deleted_conversation_returns_404`。
 
+73. **Fresh seed 与授权回归必须共享同一最小事实** — `init_db.py` 与增量 config seed 都写入私有、启用、默认 `false` 的 `user_require_primary_dept`；Service 测试在自身事务内构造所需 config 和 `R_USER` 权限事实，不依赖开发库漂移。**反例**: CI fresh database 缺少 policy row，或本地 `R_USER` 恢复过菜单而 CI 保持零菜单，会让同一授权回归因环境不同得出相反结果。**回归**: `tests/scripts/test_init_db_seed.py`、`tests/modules/system/test_user_department_assignment_service.py`、`tests/modules/system/test_user_role_assignment_service.py`。
+
 ---
 
 ## 10. 实施计划
@@ -920,7 +922,7 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 - [x] ✅ 前端补齐 `test:coverage`、`e2e:provider`，并通过 format、lint、typecheck、coverage、build、确定性 E2E 和真实 provider release smoke。
 - [x] ✅ 回写 Phase 4 短 spec、部署/安全文档、测试证据和 ship date，本文状态已翻转为发布。
 
-- [x] Phase 4 验证证据（2026-08-24）：后端全量 2284 项通过、覆盖率 76.59%，Ruff 及 31 tools / 12 static checks 通过，仅保留 32 条既有 SQLAlchemy warning；Web 44 files / 179 tests 通过，statements 79.43%、branches 70.29%、functions 71.96%、lines 83.06%，lint 0 error / 30 条既有 warning，typecheck 与 production build 通过；确定性 Chrome E2E 28/28、真实 DeepSeek provider smoke 1/1 通过，缺少 6 个 release 环境变量时按契约失败。Provider 证据从真实 Trace detail 读取实际 Agent/Tool 并完成测试会话与业务对象清理；人工浏览器验收确认 AI Trace 菜单、筛选、列表和安全详情可用且不展示 raw message/args。
+- [x] Phase 4 验证证据（2026-08-24；CI 移植修复 2026-08-27）：后端全量 2285 项通过、覆盖率 76.60%，Ruff 及 31 tools / 12 static checks 通过，仅保留 32 条既有 SQLAlchemy warning；Web 44 files / 179 tests 通过，statements 79.43%、branches 70.29%、functions 71.96%、lines 83.06%，lint 0 error / 30 条既有 warning，typecheck 与 production build 通过；确定性 Chrome E2E 28/28、真实 DeepSeek provider smoke 1/1 通过，缺少 6 个 release 环境变量时按契约失败。Provider 证据从真实 Trace detail 读取实际 Agent/Tool 并完成测试会话与业务对象清理；人工浏览器验收确认 AI Trace 菜单、筛选、列表和安全详情可用且不展示 raw message/args。
 
 ---
 

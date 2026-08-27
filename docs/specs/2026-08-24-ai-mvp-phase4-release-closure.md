@@ -60,9 +60,11 @@ Out of scope remains message edit/regenerate and every capability explicitly def
 
 7. **Soft deletion fences every user-facing message write** — Message-addressed write paths reload the owning conversation and treat `deleted_at IS NOT NULL` as not found before mutating message state or append-only history. **Counterexample**: Routing feedback that validates only message activity and ownership can still write after the conversation has disappeared from all reads. **Regression**: The routing-feedback integration test asserts 404 plus unchanged message state and no feedback row.
 
+8. **Release tests own their authorization fixtures** — Fresh initialization seeds the lockable primary-department policy with a private disabled-by-default value, while Service regressions explicitly create the policy and role authority they exercise. **Counterexample**: A developer database with restored configuration or `R_USER` menus can hide failures that appear on CI's minimal fresh seed. **Regression**: Seed, department-assignment, and role-assignment tests cover both minimal fresh state and explicit non-dominance.
+
 ## 4. Release evidence
 
-- Backend: Ruff check and format check passed; 2,284 tests passed with 76.59% coverage; all 31 registered Tools passed 12 static checks.
+- Backend: Ruff check and format check passed; 2,285 tests passed with 76.60% coverage; all 31 registered Tools passed 12 static checks.
 - Frontend: format, lint (0 errors), typecheck, and production build passed; 44 Vitest files / 179 tests passed with statements 79.43%, branches 70.29%, functions 71.96%, and lines 83.06%.
 - Browser: deterministic Chrome project passed 28/28 tests, including all 11 baseline identities and the projection/Trace cases. Interactive verification confirmed the AI Trace menu, filters, list, and redacted detail.
 - Provider: the isolated DeepSeek release project passed 1/1 in 33.1 seconds and recorded provider/model plus actual Agent/Tool evidence read back from each Trace detail for User, Department, and Role read plus controlled write paths. It also removes its conversation and created business objects. A run without the six required variables failed before execution as required.

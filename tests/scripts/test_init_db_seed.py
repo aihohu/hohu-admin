@@ -85,7 +85,7 @@ class TestUserButtonPermissionSeed:
         assert perms.count("system:user:export") == 1
 
 
-class TestDefaultPasswordConfigSeed:
+class TestConfigSeed:
     """验证 sys_config.auth:default_password 种子。
 
     helper ``get_default_password`` 缺失抛 AI_IMPORT_DEFAULT_PASSWORD_NOT_SET，
@@ -145,6 +145,20 @@ class TestDefaultPasswordConfigSeed:
         """同一 key 不能在 init_configs 出现两次（防 seed 漂移导致 UniqueViolation）。"""
         matches = [c for c in init_configs if c.config_key == key]
         assert len(matches) == 1
+
+    def test_primary_department_policy_has_a_safe_fresh_default(self):
+        """Fresh installs must seed the lockable primary-department policy."""
+        matches = [
+            config
+            for config in init_configs
+            if config.config_key == "user_require_primary_dept"
+        ]
+
+        assert len(matches) == 1
+        config = matches[0]
+        assert config.config_value == "false"
+        assert config.status == STATUS_ENABLED
+        assert config.is_public is False
 
 
 class TestRoleSeed:

@@ -707,6 +707,19 @@ init_configs = [
         ),
     ),
     Config(
+        config_name="强制用户主部门",
+        config_key="user_require_primary_dept",
+        config_value="false",
+        config_type="text",
+        config_group="feature",
+        status=STATUS_ENABLED,
+        is_public=False,
+        remark=(
+            "是否强制用户必须分配主部门，值为 true 或 false。"
+            "开启后创建或编辑用户必须指定主部门。"
+        ),
+    ),
+    Config(
         config_name="AI 额外启用工具",
         config_key="ai:enabled_tools",
         config_value='["file.parse"]',

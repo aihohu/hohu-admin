@@ -424,6 +424,16 @@ async def test_created_user_uses_fixed_default_role_without_role_auth(
 async def test_created_user_default_role_still_requires_dominance(
     db_session: AsyncSession,
 ) -> None:
+    default_role = await db_session.scalar(
+        select(Role)
+        .where(Role.role_code == USER_ROLE_CODE)
+        .options(selectinload(Role.menus))
+    )
+    assert default_role is not None
+    default_role.menus = [
+        *default_role.menus,
+        _menu(f"qa:default-role-dominance:{next_id()}:read"),
+    ]
     actor_role = _role(
         f"R_NARROW_CREATOR_{next_id()}",
         data_scope=DATA_SCOPE_ALL,
