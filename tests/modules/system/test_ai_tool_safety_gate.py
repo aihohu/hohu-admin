@@ -12,6 +12,7 @@ from openpyxl import Workbook
 
 from app.core.config import settings
 from app.core.exceptions import BusinessRuleException
+from app.modules.ai.agents.tools import ToolRegistry, load_builtin_tools
 from app.modules.ai.agents.tools.file_access import ProtectedFile, load_protected_file
 from app.modules.ai.agents.tools.file_tools import (
     _FILE_PARSE_ACCESS_POLICY,
@@ -82,11 +83,6 @@ class TestBuiltinToolEffectMetadata:
         assert meta.idempotent is False
 
     def test_all_builtin_tools_have_audited_effect_metadata(self) -> None:
-        # Importing these modules is the production built-in scan surface.
-        from app.modules.ai.agents.tools import file_tools  # noqa: PLC0415
-        from app.modules.job import ai_tools as job_tools  # noqa: PLC0415
-        from app.modules.system import ai_tools as system_tools  # noqa: PLC0415
-
         expected = {
             # Proven pure reads: retries do not create a business side effect.
             "user.count": (True, True),
@@ -123,11 +119,10 @@ class TestBuiltinToolEffectMetadata:
             # Execute is a write, but preview_token + CAS reuses a terminal result.
             "user.import_execute": (False, True),
         }
+        load_builtin_tools()
         actual = {
-            meta.name: (meta.readonly, meta.idempotent)
-            for module in (system_tools, job_tools, file_tools)
-            for value in vars(module).values()
-            if (meta := getattr(value, "__ai_tool_meta__", None)) is not None
+            tool.meta.name: (tool.meta.readonly, tool.meta.idempotent)
+            for tool in ToolRegistry.get().all()
         }
 
         assert actual == expected
@@ -190,7 +185,7 @@ class TestImportPreviewArtifacts:
         ensure_import_permissions = AsyncMock()
 
         monkeypatch.setattr(
-            "app.modules.system.ai_tools._load_file_bytes",
+            "app.modules.system.ai_tools.user_transfer._load_file_bytes",
             file_loader,
         )
         monkeypatch.setattr(
@@ -276,7 +271,7 @@ class TestImportPreviewArtifacts:
         ensure_import_permissions = AsyncMock()
 
         monkeypatch.setattr(
-            "app.modules.system.ai_tools._load_file_bytes",
+            "app.modules.system.ai_tools.user_transfer._load_file_bytes",
             AsyncMock(return_value=(csv_bytes, "users.csv", "text/csv")),
         )
         monkeypatch.setattr(

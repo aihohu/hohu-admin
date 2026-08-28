@@ -39,7 +39,10 @@ if hasattr(sys.stdout, "reconfigure"):
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.modules.ai.agents.tools import load_builtin_tools  # noqa: E402
+from app.modules.ai.agents.tools import (  # noqa: E402
+    BUILTIN_TOOL_MODULES,
+    load_builtin_tools,
+)
 from app.modules.ai.agents.tools.file_parser import (  # noqa: E402
     SUPPORTED_MIME_TYPES,
 )
@@ -533,13 +536,7 @@ def check_dry_run_tool_must_implement_hook(reg: RegisteredTool) -> list[Violatio
 
 def load_all_tools() -> list[RegisteredTool]:
     """加载所有 @ai_tool 注册的 tool 到 Registry"""
-    # 扫描所有 ai_tools.py 文件
-    candidates = [
-        "app.modules.system.ai_tools",
-        "app.modules.job.ai_tools",
-        "app.modules.ai.agents.tools.file_tools",
-    ]
-    for mod_name in candidates:
+    for mod_name in BUILTIN_TOOL_MODULES:
         importlib.import_module(mod_name)
     # Mandatory imports above preserve the static gate's fail-fast semantics.
     # The loader then idempotently restores declarations if another test/reset

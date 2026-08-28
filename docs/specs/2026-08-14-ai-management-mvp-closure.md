@@ -851,6 +851,8 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 
 73. **Fresh seed 与授权回归必须共享同一最小事实** — `init_db.py` 与增量 config seed 都写入私有、启用、默认 `false` 的 `user_require_primary_dept`；Service 测试在自身事务内构造所需 config 和 `R_USER` 权限事实，不依赖开发库漂移。**反例**: CI fresh database 缺少 policy row，或本地 `R_USER` 恢复过菜单而 CI 保持零菜单，会让同一授权回归因环境不同得出相反结果。**回归**: `tests/scripts/test_init_db_seed.py`、`tests/modules/system/test_user_department_assignment_service.py`、`tests/modules/system/test_user_role_assignment_service.py`。
 
+74. **业务模块拥有显式分区的 AI Tool 适配包** — 通用 Chat/Gateway/Registry/HITL 继续归 `app.modules.ai`，System 领域的 Tool metadata、dry-run、confirmation 和 projection 按职责拆入 `app.modules.system.ai_tools` 包，并只调用共享 Service/Policy；启动与静态检查使用同一显式叶模块清单，不递归扫描或依赖 import 副作用顺序。**反例**: 把全部领域 Tool 长期堆在单个 `ai_tools.py`，或把业务实现反向集中进 `app.modules.ai`，会造成跨领域耦合、隐藏注册遗漏并让后续模块无法复用统一目录约定。**回归**: `tests/modules/ai/test_tool_registry.py::TestToolRegistrySingleton::test_builtin_modules_are_explicitly_partitioned`、`tests/scripts/test_check_ai_tools.py::TestBuiltinScanSurface::test_all_mandatory_builtins_are_loaded`。
+
 ---
 
 ## 10. 实施计划
@@ -922,7 +924,7 @@ AI 工具不能简单调用当前 HTTP endpoint，也不能复制一套只对 AI
 - [x] ✅ 前端补齐 `test:coverage`、`e2e:provider`，并通过 format、lint、typecheck、coverage、build、确定性 E2E 和真实 provider release smoke。
 - [x] ✅ 回写 Phase 4 短 spec、部署/安全文档、测试证据和 ship date，本文状态已翻转为发布。
 
-- [x] Phase 4 验证证据（2026-08-24；CI 移植修复 2026-08-27）：后端全量 2285 项通过、覆盖率 76.60%，Ruff 及 31 tools / 12 static checks 通过，仅保留 32 条既有 SQLAlchemy warning；Web 44 files / 179 tests 通过，statements 79.43%、branches 70.29%、functions 71.96%、lines 83.06%，lint 0 error / 30 条既有 warning，typecheck 与 production build 通过；确定性 Chrome E2E 28/28、真实 DeepSeek provider smoke 1/1 通过，缺少 6 个 release 环境变量时按契约失败。Provider 证据从真实 Trace detail 读取实际 Agent/Tool 并完成测试会话与业务对象清理；人工浏览器验收确认 AI Trace 菜单、筛选、列表和安全详情可用且不展示 raw message/args。
+- [x] Phase 4 验证证据（2026-08-24；CI 移植与 Tool 包结构收口 2026-08-27）：后端全量 2286 项通过、覆盖率 76.64%，Ruff 及 31 tools / 12 static checks 通过，仅保留 32 条既有 SQLAlchemy warning；System 领域 29 个 Tool 已按 analytics/role/dept/user assignment/user management/user transfer 显式分区，兼容导入、Registry reset 恢复和静态 inventory 保持不变。Web 44 files / 179 tests 通过，statements 79.43%、branches 70.29%、functions 71.96%、lines 83.06%，lint 0 error / 30 条既有 warning，typecheck 与 production build 通过；确定性 Chrome E2E 28/28、真实 DeepSeek provider smoke 1/1 通过，缺少 6 个 release 环境变量时按契约失败。Provider 证据从真实 Trace detail 读取实际 Agent/Tool 并完成测试会话与业务对象清理；人工浏览器验收确认 AI Trace 菜单、筛选、列表和安全详情可用且不展示 raw message/args。
 
 ---
 

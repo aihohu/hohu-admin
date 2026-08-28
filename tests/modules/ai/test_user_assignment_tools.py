@@ -29,6 +29,7 @@ from app.modules.ai.service.prepared_action_service import (
     prepared_action_service,
 )
 from app.modules.system import ai_tools as system_ai_tools
+from app.modules.system.ai_tools import user_assignment as user_assignment_tools
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.user import User
 from app.modules.system.service.user_department_assignment_service import (
@@ -476,7 +477,7 @@ async def test_update_dept_maps_post_approval_scope_drift_to_snapshot_stale(
 
     with (
         patch.object(
-            system_ai_tools,
+            user_assignment_tools,
             "ensure_targets_in_scope",
             AsyncMock(
                 side_effect=AuthorizationException(

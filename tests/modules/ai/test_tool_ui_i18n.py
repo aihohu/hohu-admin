@@ -5,12 +5,13 @@ from pathlib import Path
 
 def test_builtin_tool_ui_metadata_does_not_embed_known_chinese_field_labels():
     root = Path(__file__).parents[3]
+    system_tool_sources = sorted((root / "app/modules/system/ai_tools").glob("*.py"))
     sources = "\n".join(
-        (root / relative).read_text(encoding="utf-8")
-        for relative in (
-            "app/modules/system/ai_tools.py",
-            "app/modules/job/ai_tools.py",
-        )
+        path.read_text(encoding="utf-8")
+        for path in [
+            *system_tool_sources,
+            root / "app/modules/job/ai_tools.py",
+        ]
     )
 
     for label in (

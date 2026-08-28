@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.modules.ai.agents import tools as tools_package
 from app.modules.ai.agents.tools import (
     SENSITIVE_INPUT_BLOCKLIST,
     SHARED_AGENT_CODE,
@@ -25,6 +26,7 @@ from app.modules.ai.agents.tools import (
     compute_available_tools,
     load_builtin_tools,
 )
+from app.modules.system import ai_tools as system_tools_package
 
 
 @pytest.fixture(autouse=True)
@@ -85,6 +87,22 @@ class TestAiToolMeta:
 
 
 class TestToolRegistrySingleton:
+    def test_builtin_modules_are_explicitly_partitioned(self) -> None:
+        assert tools_package.BUILTIN_TOOL_MODULES == (
+            "app.modules.system.ai_tools.analytics",
+            "app.modules.system.ai_tools.role",
+            "app.modules.system.ai_tools.dept",
+            "app.modules.system.ai_tools.user_assignment",
+            "app.modules.system.ai_tools.user_management",
+            "app.modules.system.ai_tools.user_transfer",
+            "app.modules.job.ai_tools",
+            "app.modules.ai.agents.tools.file_tools",
+        )
+        assert all(
+            getattr(system_tools_package, name) is not None
+            for name in system_tools_package.__all__
+        )
+
     def test_get_returns_same_instance(self) -> None:
         r1 = ToolRegistry.get()
         r2 = ToolRegistry.get()

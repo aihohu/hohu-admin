@@ -40,6 +40,7 @@ from .stats_validator import (
 )
 
 __all__ = [
+    "BUILTIN_TOOL_MODULES",
     "AiToolMeta",
     "RegisteredTool",
     "SENSITIVE_INPUT_BLOCKLIST",
@@ -65,6 +66,17 @@ __all__ = [
 # 启动时导入带 @ai_tool 的模块，填充全局 ToolRegistry。
 # 由 main.py lifespan 或测试 fixture 显式调用，避免在 import 期触发循环依赖。
 
+BUILTIN_TOOL_MODULES = (
+    "app.modules.system.ai_tools.analytics",
+    "app.modules.system.ai_tools.role",
+    "app.modules.system.ai_tools.dept",
+    "app.modules.system.ai_tools.user_assignment",
+    "app.modules.system.ai_tools.user_management",
+    "app.modules.system.ai_tools.user_transfer",
+    "app.modules.job.ai_tools",
+    "app.modules.ai.agents.tools.file_tools",
+)
+
 
 def load_builtin_tools() -> None:
     """触发内置工具注册。
@@ -83,15 +95,7 @@ def load_builtin_tools() -> None:
     """
     from importlib import import_module  # noqa: PLC0415  延迟 import 避免循环
 
-    module_names = (
-        # system 模块的 user.count、user.stats 和 user.distinct。
-        "app.modules.system.ai_tools",
-        # job.update_cron 使用字段白名单和 JobAiUpdate schema。
-        "app.modules.job.ai_tools",
-        # file.parse 负责 Excel/CSV 解析。
-        "app.modules.ai.agents.tools.file_tools",
-    )
-    modules = [import_module(module_name) for module_name in module_names]
+    modules = [import_module(module_name) for module_name in BUILTIN_TOOL_MODULES]
 
     # import_module() 对已缓存模块不会再次执行装饰器。测试隔离、热重载或其他
     # 显式 reset 场景下，Registry 可能已清空而模块仍在 sys.modules；此时从函数
