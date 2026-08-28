@@ -529,7 +529,7 @@ class TestFileOwnershipMigration:
             Path(__file__).parents[3]
             / "alembic"
             / "versions"
-            / "a6f4d2c8e1b9_add_sys_file_owner_tenant.py"
+            / "0b2165376771_add_user_transfer_security_schema.py"
         )
         module_spec = importlib.util.spec_from_file_location(
             "task35_file_ownership_migration", migration_path
@@ -542,7 +542,7 @@ class TestFileOwnershipMigration:
             patch.object(migration.op, "add_column") as add_column,
             patch.object(migration.op, "execute") as execute,
         ):
-            migration.upgrade()
+            migration._upgrade_sys_file_owner_tenant()
 
         columns = {
             call.args[1].name: call.args[1] for call in add_column.call_args_list

@@ -21,6 +21,8 @@ from app.constants import (
     SUPER_ADMIN_ROLE_CODE,
     USER_ROLE_CODE,
 )
+from app.modules.ai.agents.tools import load_builtin_tools
+from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.system.constants import DEPT_MOVE_PERMISSION, USER_ROLE_AUTH_PERMISSION
 from app.utils.validators import validate_password
 from scripts.init_db import (
@@ -233,6 +235,31 @@ class TestRoleSeed:
 
 
 class TestAiChatPermissionSeed:
+    def test_every_builtin_tool_permission_exists_in_fresh_menu_seed(self):
+        """Fresh startup must satisfy Registry permission referential integrity."""
+        load_builtin_tools()
+        required_permissions = {
+            permission
+            for tool in ToolRegistry.get().all()
+            for permission in tool.meta.required_perms
+        }
+        seeded_permissions = {
+            menu.permission for menu in init_menus if menu.permission is not None
+        }
+
+        assert required_permissions <= seeded_permissions, (
+            required_permissions - seeded_permissions
+        )
+
+    def test_job_edit_permission_is_seeded_under_job_menu(self):
+        """The job tool permission must remain attached to its page menu."""
+        button = _find_menu_by_permission(init_menus, "system:job:edit")
+        parent = _find_menu_by_route_name(init_menus, "system_job")
+
+        assert button.menu_type == "F"
+        assert button.status == STATUS_ENABLED
+        assert button.parent_id == parent.menu_id
+
     def test_ai_chat_permission_is_seeded_under_chat_menu(self):
         button = _find_menu_by_permission(init_menus, "ai:chat:use")
         parent = _find_menu_by_route_name(init_menus, "ai_chat")

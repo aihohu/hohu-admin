@@ -1,13 +1,14 @@
 """Phase 4 AI Trace migration contract tests."""
 
 import importlib.util
+import inspect
 from pathlib import Path
 
 MIGRATION = (
     Path(__file__).resolve().parents[3]
     / "alembic"
     / "versions"
-    / "f7a8b9c0d1e2_add_phase4_ai_trace_fields.py"
+    / "c7d8e9f0a1b2_add_governed_ai_management_schema.py"
 )
 
 
@@ -19,18 +20,20 @@ def _load_migration():
     return module
 
 
-def test_trace_migration_extends_the_single_current_head() -> None:
+def test_trace_migration_is_part_of_the_governed_ai_schema() -> None:
     migration = _load_migration()
 
-    assert migration.revision == "f7a8b9c0d1e2"
-    assert migration.down_revision == "e6b7f9a2d4c1"
+    assert migration.revision == "c7d8e9f0a1b2"
+    assert migration.down_revision == "0b2165376771"
+    assert callable(migration._upgrade_phase4_trace)
 
 
 def test_trace_migration_adds_nullable_fields_and_reliable_backfill() -> None:
-    source = MIGRATION.read_text(encoding="utf-8")
+    migration = _load_migration()
+    source = inspect.getsource(migration._upgrade_phase4_trace)
 
     assert source.count("op.add_column(") == 2
-    assert source.count('"ai_operation_log"') >= 4
+    assert source.count('"ai_operation_log"') == 2
     assert 'sa.Column("agent_code", sa.String(length=64), nullable=True)' in source
     assert 'sa.Column("target_summary", sa.Text(), nullable=True)' in source
     assert "UPDATE ai_operation_log AS operation" in source

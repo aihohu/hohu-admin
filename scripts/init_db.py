@@ -45,6 +45,7 @@ monitor_id = next_id()
 _system_user_menu_id = next_id()
 _system_dept_menu_id = next_id()
 _system_role_menu_id = next_id()
+_system_job_menu_id = next_id()
 _ai_chat_menu_id = next_id()
 _ai_agent_menu_id = next_id()
 
@@ -408,6 +409,14 @@ init_menus = [
         keep_alive=False,
         constant=False,
         multi_tab=False,
+        menu_id=_system_job_menu_id,
+    ),
+    Menu(
+        parent_id=_system_job_menu_id,
+        menu_name="修改",
+        menu_type="F",
+        permission="system:job:edit",
+        status="1",
         menu_id=next_id(),
     ),
     Menu(

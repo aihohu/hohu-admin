@@ -1,37 +1,40 @@
-"""add user import batch, batch log, export task tables and employee_no
+"""Add user transfer and file ownership security schema.
 
 Revision ID: 0b2165376771
 Revises: fba0cf4a5e82
-Create Date: 2026-08-03 11:48:30.548682
-
-新增用户导入导出审计与员工工号结构：
-- sys_user_import_batch（PostgreSQL ENUM status + CHECK，含 PREVIEW_DONE + reason）
-- sys_user_import_batch_log（FK CASCADE）
-- sys_user_export_task
-- sys_user.employee_no 字段（UNIQUE 索引）
-
-注：alembic autogenerate 检测到 ai_message / ai_model / ai_operation_log /
-role_ai_agent 等表的 comment / index 漂移，这些是历史遗留 ORM ↔ DB schema 漂移，
-不属于本次迁移的表结构已修剪，需要单独迁移处理。
+Create Date: 2026-08-28
 """
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-# revision identifiers, used by Alembic.
 revision: str = "0b2165376771"
-down_revision: Union[str, Sequence[str], None] = "fba0cf4a5e82"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | Sequence[str] | None = "fba0cf4a5e82"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    """Upgrade user transfer and file ownership security schema."""
+    _upgrade_user_import_export()
+    _upgrade_import_records_hash()
+    _upgrade_sys_file_owner_tenant()
+
+
+def downgrade() -> None:
+    """Downgrade user transfer and file ownership security schema."""
+    _downgrade_sys_file_owner_tenant()
+    _downgrade_import_records_hash()
+    _downgrade_user_import_export()
+
+
+def _upgrade_user_import_export() -> None:
     """Upgrade schema."""
-    # 1. PostgreSQL 原生 ENUM，并由应用层状态机共同约束。
-    # 用 raw DDL 避免 sa.Enum().create() 在 asyncpg 下 checkfirst 行为问题
+    # Create native PostgreSQL enums shared with the application state machines.
+    # Raw DDL avoids asyncpg checkfirst issues with sa.Enum().create().
     op.execute(
         "CREATE TYPE import_batch_status AS ENUM "
         "('CREATED', 'PREVIEW_DONE', 'RUNNING', 'SUCCESS', "
@@ -42,7 +45,7 @@ def upgrade() -> None:
         "('CREATED', 'RUNNING', 'SUCCESS', 'FAILED', 'EXPIRED')"
     )
 
-    # 引用 type 的 column type；create_type=False 告诉 SQLAlchemy type 已建好
+    # These column types reference enums already created by the raw DDL above.
     import_batch_status_type = postgresql.ENUM(
         "CREATED",
         "PREVIEW_DONE",
@@ -65,7 +68,7 @@ def upgrade() -> None:
         create_type=False,
     )
 
-    # 2. sys_user_import_batch 导入聚合根。
+    # Create the sys_user_import_batch aggregate root.
     op.create_table(
         "sys_user_import_batch",
         sa.Column("batch_id", sa.String(length=64), nullable=False, comment="UUID"),
@@ -157,7 +160,7 @@ def upgrade() -> None:
         unique=False,
     )
 
-    # 3. sys_user_import_batch_log，随批次级联删除。
+    # Create audit logs that are deleted with their import batch.
     op.create_table(
         "sys_user_import_batch_log",
         sa.Column(
@@ -214,7 +217,7 @@ def upgrade() -> None:
         unique=False,
     )
 
-    # 4. sys_user_export_task。
+    # Create the user export task aggregate.
     op.create_table(
         "sys_user_export_task",
         sa.Column(
@@ -279,7 +282,7 @@ def upgrade() -> None:
         unique=False,
     )
 
-    # 5. sys_user.employee_no，UNIQUE 索引允许多个 NULL。
+    # Add a nullable employee number with uniqueness for non-null values.
     op.add_column(
         "sys_user",
         sa.Column(
@@ -292,7 +295,70 @@ def upgrade() -> None:
     op.create_unique_constraint("uq_sys_user_employee_no", "sys_user", ["employee_no"])
 
 
-def downgrade() -> None:
+def _upgrade_import_records_hash() -> None:
+    """Add the records hash used to verify preview consistency.
+
+    Dry-run inserts the batch with its real hash, so existing rows only need the
+    temporary default while the column is introduced.
+    """
+    op.add_column(
+        "sys_user_import_batch",
+        sa.Column(
+            "records_hash",
+            sa.String(length=64),
+            nullable=False,
+            server_default="",
+            comment="records 序列化后的 sha256，用于执行前一致性校验",
+        ),
+    )
+    # Future inserts always provide the real hash, so remove the temporary default.
+    op.alter_column(
+        "sys_user_import_batch",
+        "records_hash",
+        server_default=None,
+    )
+
+
+def _upgrade_sys_file_owner_tenant() -> None:
+    """Add immutable owner and trusted tenant anchors to uploaded files."""
+    op.add_column(
+        "sys_file",
+        sa.Column(
+            "owner_user_id",
+            sa.BigInteger(),
+            nullable=True,
+            comment="文件所有者用户ID（NULL 仅兼容无法回填的历史记录）",
+        ),
+    )
+    op.add_column(
+        "sys_file",
+        sa.Column(
+            "tenant_id",
+            sa.BigInteger(),
+            nullable=False,
+            server_default="0",
+            comment="租户ID（当前单租户固定为0）",
+        ),
+    )
+
+    # Do not backfill from create_by/user_name.  user_name is mutable and users
+    # are hard-deleted, so a later account may reuse the same name.  Assigning
+    # those legacy files would create an IDOR.  NULL is intentionally fail-closed;
+    # only uploads made after this migration receive an authenticated owner ID.
+
+
+def _downgrade_sys_file_owner_tenant() -> None:
+    """Remove uploaded-file security anchors."""
+    op.drop_column("sys_file", "tenant_id")
+    op.drop_column("sys_file", "owner_user_id")
+
+
+def _downgrade_import_records_hash() -> None:
+    """Downgrade schema."""
+    op.drop_column("sys_user_import_batch", "records_hash")
+
+
+def _downgrade_user_import_export() -> None:
     """Downgrade schema."""
     op.drop_constraint("uq_sys_user_employee_no", "sys_user", type_="unique")
     op.drop_column("sys_user", "employee_no")
