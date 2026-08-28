@@ -35,16 +35,7 @@ from app.core.exceptions import (
 from app.core.file_storage import FileStorage, get_file_storage
 from app.core.id_generator import next_id
 from app.core.security import get_password_hash
-from app.modules.system.models.role import Role
-from app.modules.system.models.user import User
-from app.modules.system.service.grant_authority import grant_authority_service
-from app.modules.system.service.user_department_assignment_service import (
-    user_department_assignment_service,
-)
-from app.modules.system.service.user_role_assignment_service import (
-    user_role_assignment_service,
-)
-from app.modules.system.user.constants import (
+from app.modules.system.constants import (
     FAILED_ROWS_PREVIEW_LIMIT,
     MAX_PREVIEW_RECORDS,
     OVERWRITE_ALLOWED,
@@ -54,27 +45,36 @@ from app.modules.system.user.constants import (
     EmployeeNoSyncMode,
     ImportBatchStatus,
 )
-from app.modules.system.user.helpers import get_default_password
-from app.modules.system.user.import_state import (
-    _transition_batch_status,
-    validate_reason_consistency,
-    validate_transition,
-)
-from app.modules.system.user.import_validator import (
-    SyncAction,
-    classify_sync_action,
-    resolve_dept,
-    resolve_existing_user,
-    resolve_role_input,
-)
-from app.modules.system.user.models import UserImportBatch, UserImportBatchLog
-from app.modules.system.user.schemas import (
+from app.modules.system.models.role import Role
+from app.modules.system.models.user import User
+from app.modules.system.models.user_transfer import UserImportBatch, UserImportBatchLog
+from app.modules.system.schemas.user_transfer import (
     FailedRow,
     ImportDryRunResult,
     ImportResult,
     UserImportBatchQuery,
     UserImportRecord,
 )
+from app.modules.system.service.grant_authority import grant_authority_service
+from app.modules.system.service.user_department_assignment_service import (
+    user_department_assignment_service,
+)
+from app.modules.system.service.user_import_state import (
+    _transition_batch_status,
+    validate_reason_consistency,
+    validate_transition,
+)
+from app.modules.system.service.user_import_validator import (
+    SyncAction,
+    classify_sync_action,
+    resolve_dept,
+    resolve_existing_user,
+    resolve_role_input,
+)
+from app.modules.system.service.user_role_assignment_service import (
+    user_role_assignment_service,
+)
+from app.modules.system.service.user_service import get_default_password
 
 #: Redis 只缓存 preview_token 到 batch_id 的映射，事实源仍是数据库。
 _PREVIEW_REDIS_PREFIX = "user_import:preview:"

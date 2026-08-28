@@ -36,7 +36,7 @@ from .common import (
 
 async def _get_ai_default_password(ctx: AiToolContext) -> str:
     """读取并校验仅后端可见的默认密码策略。"""
-    from app.modules.system.user.helpers import (  # noqa: PLC0415
+    from app.modules.system.service.user_service import (  # noqa: PLC0415
         get_default_password,
     )
     from app.utils.validators import validate_password  # noqa: PLC0415

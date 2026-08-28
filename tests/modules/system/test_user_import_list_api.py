@@ -25,9 +25,9 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.core.exceptions import BusinessRuleException
 from app.main import app
+from app.modules.system.constants import ImportBatchStatus
 from app.modules.system.models.user import User
-from app.modules.system.user.constants import ImportBatchStatus
-from app.modules.system.user.models import UserImportBatch
+from app.modules.system.models.user_transfer import UserImportBatch
 
 #: service 模块路径（patch target）
 _API_MODULE = "app.modules.system.api.user"

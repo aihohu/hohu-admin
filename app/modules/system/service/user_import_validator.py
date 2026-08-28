@@ -15,11 +15,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessRuleException
+from app.modules.system.constants import EmployeeNoSyncMode
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
-from app.modules.system.user.constants import EmployeeNoSyncMode
-from app.modules.system.user.schemas import FailedRow, UserImportRecord
+from app.modules.system.schemas.user_transfer import FailedRow, UserImportRecord
 from app.utils.data_scope import resolve_data_scope
 
 

@@ -30,9 +30,9 @@ from app.modules.ai.service.agent_authorization_service import (
 from app.modules.system.service.dept_service import dept_service
 from app.modules.system.service.file_service import file_service
 from app.modules.system.service.role_service import role_service
+from app.modules.system.service.user_export_service import get_export_task
+from app.modules.system.service.user_import_service import get_batch_detail
 from app.modules.system.service.user_service import user_service
-from app.modules.system.user.export_service import get_export_task
-from app.modules.system.user.import_service import get_batch_detail
 from app.utils.data_scope import DATA_SCOPE_UNION_RESOLVER_VERSION
 
 DATA_SCOPE_RESOLVER_VERSION = DATA_SCOPE_UNION_RESOLVER_VERSION

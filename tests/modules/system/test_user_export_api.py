@@ -34,9 +34,9 @@ from app.core.exceptions import (
     UnprocessableEntityException,
 )
 from app.main import app
+from app.modules.system.constants import ExportTaskStatus
 from app.modules.system.models.user import User
-from app.modules.system.user.constants import ExportTaskStatus
-from app.modules.system.user.schemas import UserExportTaskResponse
+from app.modules.system.schemas.user_transfer import UserExportTaskResponse
 
 # ========== Constants ==========
 

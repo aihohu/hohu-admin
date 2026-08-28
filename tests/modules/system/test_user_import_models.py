@@ -14,12 +14,12 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
 from app.core.security import get_password_hash
-from app.modules.system.models.user import User
-from app.modules.system.user.constants import (
+from app.modules.system.constants import (
     ExportTaskStatus,
     ImportBatchStatus,
 )
-from app.modules.system.user.models import (
+from app.modules.system.models.user import User
+from app.modules.system.models.user_transfer import (
     UserExportTask,
     UserImportBatch,
     UserImportBatchLog,

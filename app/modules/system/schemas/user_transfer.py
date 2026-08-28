@@ -5,7 +5,7 @@ Pydantic v2 惯例（与 app/modules/system/schemas/user.py 对齐）：
 - BigInteger ID 通过 @field_serializer 序列化为字符串（防 JS BigInt 精度丢失）
 - 时间字段 ISO 8601 字符串
 
-本模块只定义 API 请求、响应和审计理由校验；ORM 位于 models.py。
+本模块只定义 API 请求、响应和审计理由校验；ORM 位于 models/user_transfer.py。
 """
 
 from datetime import datetime

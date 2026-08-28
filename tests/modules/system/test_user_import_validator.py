@@ -25,11 +25,12 @@ from app.constants import (
 from app.core.exceptions import BusinessRuleException
 from app.core.security import get_password_hash
 from app.db.base import role_depts
+from app.modules.system.constants import EmployeeNoSyncMode
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
-from app.modules.system.user.constants import EmployeeNoSyncMode
-from app.modules.system.user.import_validator import (
+from app.modules.system.schemas.user_transfer import UserImportRecord
+from app.modules.system.service.user_import_validator import (
     SyncAction,
     check_dept_data_scope,
     classify_sync_action,
@@ -37,7 +38,6 @@ from app.modules.system.user.import_validator import (
     resolve_existing_user,
     resolve_role_input,
 )
-from app.modules.system.user.schemas import UserImportRecord
 
 
 def _make_dept(

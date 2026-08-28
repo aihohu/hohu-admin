@@ -18,19 +18,19 @@ from sqlalchemy import delete as _delete
 from sqlalchemy import select
 
 from app.core.file_storage import MockFileStorage, reset_file_storage_for_test
-from app.modules.system.user.constants import (
+from app.modules.system.constants import (
     ExportTaskStatus,
     ImportBatchStatus,
 )
-from app.modules.system.user.export_service import cleanup_expired_export_tasks
-from app.modules.system.user.import_service import (
-    cleanup_expired_batches,
-    cleanup_expired_previews,
-)
-from app.modules.system.user.models import (
+from app.modules.system.models.user_transfer import (
     UserExportTask,
     UserImportBatch,
     UserImportBatchLog,
+)
+from app.modules.system.service.user_export_service import cleanup_expired_export_tasks
+from app.modules.system.service.user_import_service import (
+    cleanup_expired_batches,
+    cleanup_expired_previews,
 )
 
 #: 终态批次保留 90 天。

@@ -189,7 +189,7 @@ class TestImportPreviewArtifacts:
             file_loader,
         )
         monkeypatch.setattr(
-            "app.modules.system.user.import_parser.parse_import_excel",
+            "app.modules.system.service.user_import_parser.parse_import_excel",
             parser,
         )
         monkeypatch.setattr(
@@ -198,7 +198,7 @@ class TestImportPreviewArtifacts:
             ensure_import_permissions,
         )
         monkeypatch.setattr(
-            "app.modules.system.user.import_service.dry_run_import_users",
+            "app.modules.system.service.user_import_service.dry_run_import_users",
             dry_run,
         )
         monkeypatch.setattr(
@@ -275,7 +275,7 @@ class TestImportPreviewArtifacts:
             AsyncMock(return_value=(csv_bytes, "users.csv", "text/csv")),
         )
         monkeypatch.setattr(
-            "app.modules.system.user.import_parser.parse_import_excel",
+            "app.modules.system.service.user_import_parser.parse_import_excel",
             parser,
         )
         monkeypatch.setattr(
@@ -284,15 +284,15 @@ class TestImportPreviewArtifacts:
             ensure_import_permissions,
         )
         monkeypatch.setattr(
-            "app.modules.system.user.import_service.dry_run_import_users",
+            "app.modules.system.service.user_import_service.dry_run_import_users",
             AsyncMock(return_value=(dry_result, batch)),
         )
         monkeypatch.setattr(
-            "app.modules.system.user.import_service.get_batch_by_preview_token",
+            "app.modules.system.service.user_import_service.get_batch_by_preview_token",
             AsyncMock(return_value=batch),
         )
         monkeypatch.setattr(
-            "app.modules.system.user.import_service.batch_create_users_from_records",
+            "app.modules.system.service.user_import_service.batch_create_users_from_records",
             AsyncMock(return_value=execute_result),
         )
         monkeypatch.setattr(

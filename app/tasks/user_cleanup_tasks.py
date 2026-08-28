@@ -13,8 +13,8 @@ import logging
 
 from app.db.session import AsyncSessionLocal
 from app.modules.job.task_registry import register_task
-from app.modules.system.user.export_service import cleanup_expired_export_tasks
-from app.modules.system.user.import_service import (
+from app.modules.system.service.user_export_service import cleanup_expired_export_tasks
+from app.modules.system.service.user_import_service import (
     cleanup_expired_batches,
     cleanup_expired_previews,
 )

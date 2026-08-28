@@ -142,6 +142,11 @@
 
 **目录结构（v2.2 P1）**：
 
+> **2026-08-28 superseded**：下述 `app/modules/system/user/` 渐进迁移方案已由
+> [`2026-08-28-system-user-horizontal-layout.md`](./2026-08-28-system-user-horizontal-layout.md)
+> 取代。业务契约与状态机决策继续有效，代码归属统一回到
+> `models/user.py`、`schemas/user.py` 和 `service/user_*.py`。
+
 ```
 app/modules/system/user/                 # 新建 user/ 子包（迁移自 service/user_service.py）
 ├── __init__.py                          # 重导出 user_service facade

@@ -28,17 +28,17 @@ from app.constants import (
 )
 from app.core import redis as redis_module
 from app.core.exceptions import BusinessRuleException
+from app.modules.system.constants import (
+    MAX_PREVIEW_RECORDS,
+    ImportBatchStatus,
+)
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
-from app.modules.system.user.constants import (
-    MAX_PREVIEW_RECORDS,
-    ImportBatchStatus,
-)
-from app.modules.system.user.import_service import dry_run_import_users
-from app.modules.system.user.models import UserImportBatch
-from app.modules.system.user.schemas import UserImportRecord
+from app.modules.system.models.user_transfer import UserImportBatch
+from app.modules.system.schemas.user_transfer import UserImportRecord
+from app.modules.system.service.user_import_service import dry_run_import_users
 
 # ========== helpers ==========
 
@@ -892,7 +892,7 @@ class TestCreatedToFailedTransition:
             raise RuntimeError("QA simulated DB error during classification")
 
         monkeypatch.setattr(
-            "app.modules.system.user.import_service._classify_records", _boom
+            "app.modules.system.service.user_import_service._classify_records", _boom
         )
 
         records = _make_records(1, prefix="QA-DR-CE")

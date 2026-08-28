@@ -11,8 +11,8 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.exceptions import BusinessRuleException
-from app.modules.system.user.import_state import validate_reason_consistency
-from app.modules.system.user.schemas import ReasonSchema
+from app.modules.system.schemas.user_transfer import ReasonSchema
+from app.modules.system.service.user_import_state import validate_reason_consistency
 
 
 class _SampleRequest(ReasonSchema):

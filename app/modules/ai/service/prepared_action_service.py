@@ -1130,10 +1130,12 @@ class PreparedActionService:
         if action.execute_tool_name != "user.import_execute":
             return
 
-        from app.modules.system.user.constants import (  # noqa: PLC0415
+        from app.modules.system.constants import (  # noqa: PLC0415
             ImportBatchStatus,
         )
-        from app.modules.system.user.models import UserImportBatch  # noqa: PLC0415
+        from app.modules.system.models.user_transfer import (  # noqa: PLC0415
+            UserImportBatch,
+        )
 
         subject_ref = action.subject_ref or {}
         if subject_ref.get("type") != "user_import_batch" or not subject_ref.get("id"):

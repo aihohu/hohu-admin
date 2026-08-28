@@ -14,12 +14,12 @@ import pytest
 from sqlalchemy import text
 
 from app.core.exceptions import BusinessRuleException
-from app.modules.system.user.constants import ImportBatchStatus as S
-from app.modules.system.user.import_state import (
+from app.modules.system.constants import ImportBatchStatus as S
+from app.modules.system.models.user_transfer import UserImportBatch
+from app.modules.system.service.user_import_state import (
     _transition_batch_status,
     validate_transition,
 )
-from app.modules.system.user.models import UserImportBatch
 
 
 def _make_batch(batch_id: str, status: S, token: str | None = None) -> UserImportBatch:

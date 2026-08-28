@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.constants import ADMIN_USERNAME, REDIS_USER_NAME_PREFIX
+from app.core.config import settings
 from app.core.exceptions import (
     BusinessRuleException,
     DuplicateException,
@@ -11,6 +12,7 @@ from app.core.exceptions import (
 )
 from app.core.redis import redis_client
 from app.core.security import get_password_hash, verify_password
+from app.modules.system.models.config import Config
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.schemas.user import (
@@ -304,5 +306,34 @@ class UserService:
         current_user.hashed_password = get_password_hash(body.new_password)
 
 
-# 创建单例
+DEFAULT_PASSWORD_CONFIG_KEY = "auth:default_password"
+"""Configuration key used to resolve the initial password for new users."""
+
+INSECURE_DEFAULT_PASSWORD_SENTINELS = frozenset({"Hohu123456"})
+"""Public development seeds that must not be used in production."""
+
+
+async def get_default_password(db: AsyncSession) -> str:
+    """Return the active initial password configured for user creation."""
+    result = await db.execute(
+        select(Config.config_value).where(
+            Config.config_key == DEFAULT_PASSWORD_CONFIG_KEY,
+            Config.status == "1",  # noqa: E712
+        )
+    )
+    value = result.scalar_one_or_none()
+    if value is None or not value.strip():
+        raise BusinessRuleException(
+            "默认密码未配置（sys_config.auth:default_password），无法导入新用户",
+            error_code="AI_IMPORT_DEFAULT_PASSWORD_NOT_SET",
+        )
+    if settings.ENV == "prod" and value in INSECURE_DEFAULT_PASSWORD_SENTINELS:
+        raise BusinessRuleException(
+            "生产环境禁止使用公开的初始化默认密码，请先更新 auth:default_password",
+            error_code="AI_IMPORT_DEFAULT_PASSWORD_INVALID",
+        )
+    return value
+
+
+# Module-level singleton shared by request handlers and internal adapters.
 user_service = UserService()

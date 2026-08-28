@@ -20,7 +20,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessRuleException, UnprocessableEntityException
-from app.modules.system.user.constants import (
+from app.modules.system.constants import (
     LEGAL_TRANSITIONS,
     ImportBatchStatus,
 )
@@ -110,14 +110,6 @@ async def _transition_batch_status(
     return result.rowcount == 1
 
 
-async def cleanup_expired_batches(*args: Any, **kwargs: Any) -> None:  # noqa: ARG001
-    """已废弃；实现位于 ``import_service.cleanup_expired_batches``。
-
-    保留空壳防外部 import 漂移；调用方应改用 service 层签名（接 ``db`` 参数）。
-    """
-    return None
-
-
 def validate_reason_consistency(
     preview_reason: str,
     execute_reason: str,
@@ -132,13 +124,3 @@ def validate_reason_consistency(
             "execute 阶段 reason 必须与 preview 阶段一致",
             error_code="AI_IMPORT_REASON_MISMATCH",
         )
-
-
-async def cleanup_expired_previews(*args: Any, **kwargs: Any) -> None:  # noqa: ARG001
-    """已废弃；实现位于 ``import_service.cleanup_expired_previews``。"""
-    return None
-
-
-async def cleanup_expired_export_tasks(*args: Any, **kwargs: Any) -> None:  # noqa: ARG001
-    """已废弃；实现位于 ``export_service.cleanup_expired_export_tasks``。"""
-    return None

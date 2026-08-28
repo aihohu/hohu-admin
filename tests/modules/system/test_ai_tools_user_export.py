@@ -19,8 +19,8 @@ from app.modules.ai.service.result_projection_service import (
     result_projection_service,
 )
 from app.modules.system.ai_tools import user_export
-from app.modules.system.user.constants import ExportTaskStatus
-from app.modules.system.user.models import UserExportTask
+from app.modules.system.constants import ExportTaskStatus
+from app.modules.system.models.user_transfer import UserExportTask
 
 
 def _make_ctx(db: AsyncSession) -> AiToolContext:
@@ -78,7 +78,7 @@ class TestUserExportDetailCard:
         """result_view 从 rows_affected → detail_card（spec line 2619）。"""
         # Mock get_file_storage 让 export_users_to_excel 用 MockFileStorage
         monkeypatch.setattr(
-            "app.modules.system.user.export_service.get_file_storage",
+            "app.modules.system.service.user_export_service.get_file_storage",
             lambda: file_storage,
         )
         ctx = _make_ctx(db_session)
@@ -92,7 +92,7 @@ class TestUserExportDetailCard:
     ) -> None:
         """view_data 含 downloadUrl 指向 GET /export/{export_id}/download。"""
         monkeypatch.setattr(
-            "app.modules.system.user.export_service.get_file_storage",
+            "app.modules.system.service.user_export_service.get_file_storage",
             lambda: file_storage,
         )
         ctx = _make_ctx(db_session)
@@ -110,7 +110,7 @@ class TestUserExportDetailCard:
     ) -> None:
         """view_data 含 fileSize / expiresAt（spec line 1626）。"""
         monkeypatch.setattr(
-            "app.modules.system.user.export_service.get_file_storage",
+            "app.modules.system.service.user_export_service.get_file_storage",
             lambda: file_storage,
         )
         ctx = _make_ctx(db_session)
@@ -130,7 +130,7 @@ class TestUserExportDetailCard:
     ) -> None:
         """Keep the bearer URL in UI data and out of the LLM prompt payload."""
         monkeypatch.setattr(
-            "app.modules.system.user.export_service.get_file_storage",
+            "app.modules.system.service.user_export_service.get_file_storage",
             lambda: file_storage,
         )
         ctx = _make_ctx(db_session)
@@ -147,7 +147,7 @@ class TestUserExportDetailCard:
     ) -> None:
         """A denied projection must not create a task or write an export file."""
         monkeypatch.setattr(
-            "app.modules.system.user.export_service.get_file_storage",
+            "app.modules.system.service.user_export_service.get_file_storage",
             lambda: file_storage,
         )
         authorize = AsyncMock(return_value=False)
@@ -184,7 +184,7 @@ class TestUserExportDetailCard:
     ) -> None:
         """Compensate the file write when authorization changes during export."""
         monkeypatch.setattr(
-            "app.modules.system.user.export_service.get_file_storage",
+            "app.modules.system.service.user_export_service.get_file_storage",
             lambda: file_storage,
         )
         monkeypatch.setattr(
@@ -220,7 +220,7 @@ class TestAlwaysCreatesTask:
         即使同步路径只有一行，也必须创建任务。
         """
         monkeypatch.setattr(
-            "app.modules.system.user.export_service.get_file_storage",
+            "app.modules.system.service.user_export_service.get_file_storage",
             lambda: file_storage,
         )
         ctx = _make_ctx(db_session)

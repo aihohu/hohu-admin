@@ -17,7 +17,9 @@ from openpyxl import load_workbook
 
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
-from app.modules.system.user.template_service import generate_import_template
+from app.modules.system.service.user_import_template_service import (
+    generate_import_template,
+)
 
 #: 四个 sheet 名称。
 _EXPECTED_SHEET_NAMES: tuple[str, ...] = (

@@ -12,7 +12,7 @@ from app.modules.system.schemas.user import (
     UserRoleUpdate,
     UserUpdate,
 )
-from app.modules.system.user.import_parser import (
+from app.modules.system.service.user_import_parser import (
     MIME_CSV,
     MIME_XLSX,
     import_file_has_column,

@@ -37,26 +37,26 @@ from app.core.exceptions import BusinessRuleException
 from app.core.file_storage import MockFileStorage
 from app.core.id_generator import next_id
 from app.core.security import verify_password
-from app.modules.system.constants import USER_ROLE_AUTH_PERMISSION
+from app.modules.system.constants import (
+    FAILED_ROWS_PREVIEW_LIMIT,
+    USER_IMPORT_CHUNK_SIZE,
+    USER_ROLE_AUTH_PERMISSION,
+    ImportBatchStatus,
+)
 from app.modules.system.models.config import Config
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
-from app.modules.system.user.constants import (
-    FAILED_ROWS_PREVIEW_LIMIT,
-    USER_IMPORT_CHUNK_SIZE,
-    ImportBatchStatus,
-)
-from app.modules.system.user.import_service import (
+from app.modules.system.models.user_transfer import UserImportBatch, UserImportBatchLog
+from app.modules.system.schemas.user_transfer import ImportResult, UserImportRecord
+from app.modules.system.service.user_import_service import (
     ImportAuthorizationResolution,
     _classify_records,
     _lock_import_authorization_targets,
     batch_create_users_from_records,
     dry_run_import_users,
 )
-from app.modules.system.user.models import UserImportBatch, UserImportBatchLog
-from app.modules.system.user.schemas import ImportResult, UserImportRecord
 
 # ========== helpers ==========
 
@@ -1102,16 +1102,16 @@ async def test_import_lock_rejects_a_reference_that_resolves_after_prelock(
     lock_targets = AsyncMock(return_value=SimpleNamespace(user_id=42))
     ensure_permissions = AsyncMock()
     monkeypatch.setattr(
-        "app.modules.system.user.import_service._resolve_import_authorization_targets",
+        "app.modules.system.service.user_import_service._resolve_import_authorization_targets",
         resolver,
     )
     monkeypatch.setattr(
-        "app.modules.system.user.import_service.user_role_assignment_service."
+        "app.modules.system.service.user_import_service.user_role_assignment_service."
         "lock_import_targets",
         lock_targets,
     )
     monkeypatch.setattr(
-        "app.modules.system.user.import_service.user_role_assignment_service."
+        "app.modules.system.service.user_import_service.user_role_assignment_service."
         "ensure_import_permissions",
         ensure_permissions,
     )
@@ -1152,18 +1152,18 @@ async def test_import_classification_rejects_duplicate_existing_targets(
         for record in records
     ]
     monkeypatch.setattr(
-        "app.modules.system.user.import_service.grant_authority_service.build",
+        "app.modules.system.service.user_import_service.grant_authority_service.build",
         AsyncMock(return_value=SimpleNamespace(accessible_dept_ids=None)),
     )
     validate_departments = AsyncMock()
     validate_roles = AsyncMock()
     monkeypatch.setattr(
-        "app.modules.system.user.import_service."
+        "app.modules.system.service.user_import_service."
         "user_role_assignment_service.validate_import_role_assignment",
         validate_roles,
     )
     monkeypatch.setattr(
-        "app.modules.system.user.import_service."
+        "app.modules.system.service.user_import_service."
         "user_department_assignment_service.validate_import_department_assignment",
         validate_departments,
     )
@@ -1528,7 +1528,7 @@ class TestBatchLogAdvanced:
             raise RuntimeError("simulated fatal DB error")
 
         monkeypatch.setattr(
-            "app.modules.system.user.import_service._process_create_row",
+            "app.modules.system.service.user_import_service._process_create_row",
             _raise_fatal,
         )
 

@@ -11,7 +11,7 @@ from app.modules.ai.service.result_projection_service import (
     result_projection_service,
 )
 from app.modules.system.models.user import User
-from app.modules.system.user.export_service import download_export_file
+from app.modules.system.service.user_export_service import download_export_file
 
 router = APIRouter()
 

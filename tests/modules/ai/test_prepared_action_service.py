@@ -24,9 +24,9 @@ from app.modules.ai.service.prepared_action_service import (
 from app.modules.ai.service.result_projection_service import (
     result_projection_service,
 )
+from app.modules.system.constants import ImportBatchStatus
 from app.modules.system.models.user import User
-from app.modules.system.user.constants import ImportBatchStatus
-from app.modules.system.user.models import UserImportBatch
+from app.modules.system.models.user_transfer import UserImportBatch
 
 
 def _snapshot(*, records_hash: str = "records-1", file_sha256: str = "file-1") -> dict:

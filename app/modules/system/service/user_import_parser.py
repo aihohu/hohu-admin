@@ -29,8 +29,8 @@ from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 
 from app.core.exceptions import BusinessRuleException
-from app.modules.system.user.constants import USER_IMPORT_MAX_ROWS
-from app.modules.system.user.schemas import FailedRow, UserImportRecord
+from app.modules.system.constants import USER_IMPORT_MAX_ROWS
+from app.modules.system.schemas.user_transfer import FailedRow, UserImportRecord
 
 #: 允许导入的 MIME 类型。
 MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

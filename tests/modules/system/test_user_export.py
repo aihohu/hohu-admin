@@ -29,23 +29,26 @@ from app.constants import (
 )
 from app.core.exceptions import BusinessRuleException, NotFoundException
 from app.core.file_storage import MockFileStorage
-from app.modules.system.models.dept import Dept
-from app.modules.system.models.operation_log import SysOperationLog
-from app.modules.system.models.role import Role
-from app.modules.system.models.user import User
-from app.modules.system.user.constants import (
+from app.modules.system.constants import (
     EXPORT_ALLOWED_FIELDS,
     USER_EXPORT_ASYNC_THRESHOLD,
     ExportTaskStatus,
 )
-from app.modules.system.user.export_service import (
+from app.modules.system.models.dept import Dept
+from app.modules.system.models.operation_log import SysOperationLog
+from app.modules.system.models.role import Role
+from app.modules.system.models.user import User
+from app.modules.system.models.user_transfer import UserExportTask
+from app.modules.system.schemas.user_transfer import (
+    UserExportFilter,
+    UserExportTaskQuery,
+)
+from app.modules.system.service.user_export_service import (
     download_export_file,
     export_users_to_excel,
     get_export_task,
     list_export_tasks,
 )
-from app.modules.system.user.models import UserExportTask
-from app.modules.system.user.schemas import UserExportFilter, UserExportTaskQuery
 
 # ========== helpers ==========
 

@@ -39,17 +39,17 @@ from app.core.exceptions import (
 )
 from app.main import app
 from app.modules.system.api.user import import_users
+from app.modules.system.constants import ImportBatchStatus
 from app.modules.system.models.user import User
-from app.modules.system.user.constants import ImportBatchStatus
-from app.modules.system.user.import_parser import (
-    MAX_FILE_SIZE_BYTES,
-    ImportErrorCollection,
-)
-from app.modules.system.user.models import UserImportBatch
-from app.modules.system.user.schemas import (
+from app.modules.system.models.user_transfer import UserImportBatch
+from app.modules.system.schemas.user_transfer import (
     FailedRow,
     ImportDryRunResult,
     ImportResult,
+)
+from app.modules.system.service.user_import_parser import (
+    MAX_FILE_SIZE_BYTES,
+    ImportErrorCollection,
 )
 
 # ========== Constants ==========

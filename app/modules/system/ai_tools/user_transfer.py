@@ -139,15 +139,15 @@ async def user_import_preview(
         on_conflict: 'skip'（默认）/ 'overwrite' / 'fail_fast'
         sync_mode: 员工编号同步策略，在 preview 时冻结
     """
-    from app.modules.system.service.user_role_assignment_service import (  # noqa: PLC0415
-        user_role_assignment_service,
-    )
-    from app.modules.system.user.import_parser import (  # noqa: PLC0415
+    from app.modules.system.service.user_import_parser import (  # noqa: PLC0415
         import_file_has_column,
         parse_import_excel,
     )
-    from app.modules.system.user.import_service import (  # noqa: PLC0415
+    from app.modules.system.service.user_import_service import (  # noqa: PLC0415
         dry_run_import_users,
+    )
+    from app.modules.system.service.user_role_assignment_service import (  # noqa: PLC0415
+        user_role_assignment_service,
     )
 
     file_bytes, filename, mime_type = await _load_file_bytes(ctx, file_id)
@@ -308,17 +308,17 @@ async def user_import_execute(
         on_conflict: 必须与预览时一致
         sync_mode: 'CREATE_ONLY'（默认）/ 'UPDATE_PROFILE' / 'FULL_SYNC'
     """
-    from app.modules.system.service.user_role_assignment_service import (  # noqa: PLC0415
-        user_role_assignment_service,
-    )
-    from app.modules.system.user.constants import EmployeeNoSyncMode  # noqa: PLC0415
-    from app.modules.system.user.import_parser import (  # noqa: PLC0415
+    from app.modules.system.constants import EmployeeNoSyncMode  # noqa: PLC0415
+    from app.modules.system.service.user_import_parser import (  # noqa: PLC0415
         import_file_has_column,
         parse_import_excel,
     )
-    from app.modules.system.user.import_service import (  # noqa: PLC0415
+    from app.modules.system.service.user_import_service import (  # noqa: PLC0415
         batch_create_users_from_records,
         get_batch_by_preview_token,
+    )
+    from app.modules.system.service.user_role_assignment_service import (  # noqa: PLC0415
+        user_role_assignment_service,
     )
 
     # 1. 反查 batch 拿 file 信息
@@ -458,12 +458,14 @@ async def user_export(
     from app.modules.ai.service.result_projection_service import (  # noqa: PLC0415
         result_projection_service,
     )
-    from app.modules.system.user.export_service import (  # noqa: PLC0415
+    from app.modules.system.schemas.user_transfer import (  # noqa: PLC0415
+        UserExportFilter,
+    )
+    from app.modules.system.service.user_export_service import (  # noqa: PLC0415
         export_users_to_excel,
         get_export_task,
         get_file_storage,
     )
-    from app.modules.system.user.schemas import UserExportFilter  # noqa: PLC0415
 
     filter_ = UserExportFilter(
         user_name=user_name,
@@ -615,7 +617,7 @@ async def _dry_run_user_export(
             reason="筛选条件下无用户匹配，导出会生成空文件",
         )
 
-    from app.modules.system.user.constants import (  # noqa: PLC0415
+    from app.modules.system.constants import (  # noqa: PLC0415
         USER_EXPORT_ASYNC_THRESHOLD,
     )
 

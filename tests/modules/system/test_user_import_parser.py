@@ -20,8 +20,9 @@ import pytest
 from openpyxl import Workbook
 
 from app.core.exceptions import BusinessRuleException
-from app.modules.system.user.constants import USER_IMPORT_MAX_ROWS
-from app.modules.system.user.import_parser import (
+from app.modules.system.constants import USER_IMPORT_MAX_ROWS
+from app.modules.system.schemas.user_transfer import FailedRow, UserImportRecord
+from app.modules.system.service.user_import_parser import (
     ALLOWED_MIME_TYPES,
     EXCEL_HEADERS,
     MAX_FILE_SIZE_BYTES,
@@ -30,7 +31,6 @@ from app.modules.system.user.import_parser import (
     _parse_xlsx_rows,
     parse_import_excel,
 )
-from app.modules.system.user.schemas import FailedRow, UserImportRecord
 
 
 def _xlsx_bytes(rows: list[list[str]], headers: list[str] | None = None) -> bytes:
@@ -163,7 +163,8 @@ class TestFileSizeLimit:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            "app.modules.system.user.import_parser.XLSX_MAX_COMPRESSION_RATIO", 1.0
+            "app.modules.system.service.user_import_parser.XLSX_MAX_COMPRESSION_RATIO",
+            1.0,
         )
         with pytest.raises(BusinessRuleException) as exc:
             parse_import_excel(_xlsx_bytes([]), MIME_XLSX)
@@ -212,11 +213,11 @@ class TestRowCountLimit:
 
         workbook = WorkbookStub()
         monkeypatch.setattr(
-            "app.modules.system.user.import_parser.load_workbook",
+            "app.modules.system.service.user_import_parser.load_workbook",
             lambda *_args, **_kwargs: workbook,
         )
         monkeypatch.setattr(
-            "app.modules.system.user.import_parser._validate_xlsx_archive",
+            "app.modules.system.service.user_import_parser._validate_xlsx_archive",
             lambda *_args, **_kwargs: None,
         )
 
@@ -247,11 +248,11 @@ class TestRowCountLimit:
 
         workbook = WorkbookStub()
         monkeypatch.setattr(
-            "app.modules.system.user.import_parser.load_workbook",
+            "app.modules.system.service.user_import_parser.load_workbook",
             lambda *_args, **_kwargs: workbook,
         )
         monkeypatch.setattr(
-            "app.modules.system.user.import_parser._validate_xlsx_archive",
+            "app.modules.system.service.user_import_parser._validate_xlsx_archive",
             lambda *_args, **_kwargs: None,
         )
 
@@ -279,7 +280,7 @@ class TestRowCountLimit:
                 raise AssertionError("parser consumed beyond row 2001")
 
         monkeypatch.setattr(
-            "app.modules.system.user.import_parser.csv.DictReader",
+            "app.modules.system.service.user_import_parser.csv.DictReader",
             lambda *_args, **_kwargs: ReaderStub(),
         )
 

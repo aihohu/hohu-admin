@@ -27,7 +27,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.id_generator import next_id
 from app.db.base import Base
-from app.modules.system.user.constants import (
+from app.modules.system.constants import (
     ExportTaskStatus,
     ImportBatchStatus,
 )

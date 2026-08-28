@@ -15,13 +15,13 @@ from sqlalchemy import delete
 
 from app.core.config import settings
 from app.core.exceptions import BusinessRuleException
-from app.modules.system.models.config import Config
-from app.modules.system.user.constants import (
+from app.modules.system.constants import (
     EXPORT_ALLOWED_FIELDS,
     OVERWRITE_ALLOWED,
     OVERWRITE_NEVER,
 )
-from app.modules.system.user.helpers import (
+from app.modules.system.models.config import Config
+from app.modules.system.service.user_service import (
     INSECURE_DEFAULT_PASSWORD_SENTINELS,
     get_default_password,
 )

@@ -17,6 +17,7 @@ from app.core.exceptions import (
 from app.core.rbac import is_super_admin
 from app.db.base import user_depts
 from app.db.session import get_db
+from app.modules.system.constants import EmployeeNoSyncMode
 from app.modules.system.models.user import User
 from app.modules.system.schemas.user import (
     AssignableRoleOut,
@@ -32,35 +33,7 @@ from app.modules.system.schemas.user import (
     UserRoleUpdate,
     UserUpdate,
 )
-from app.modules.system.service.user_department_assignment_service import (
-    user_department_assignment_service,
-)
-from app.modules.system.service.user_role_assignment_service import (
-    user_role_assignment_service,
-)
-from app.modules.system.service.user_service import user_service
-from app.modules.system.user.constants import EmployeeNoSyncMode
-from app.modules.system.user.export_service import (
-    download_export_file,
-    export_users_to_excel,
-    get_export_task,
-    list_export_tasks,
-)
-from app.modules.system.user.import_parser import (
-    MAX_FILE_SIZE_BYTES,
-    ImportErrorCollection,
-    import_file_has_column,
-    parse_import_excel,
-)
-from app.modules.system.user.import_service import (
-    batch_create_users_from_records,
-    cancel_batch,
-    dry_run_import_users,
-    get_batch_detail,
-    list_batch_logs,
-    list_batches,
-)
-from app.modules.system.user.schemas import (
+from app.modules.system.schemas.user_transfer import (
     ReasonSchema,
     UserExportFilter,
     UserExportRequest,
@@ -71,7 +44,36 @@ from app.modules.system.user.schemas import (
     UserImportBatchQuery,
     UserImportBatchResponse,
 )
-from app.modules.system.user.template_service import generate_import_template
+from app.modules.system.service.user_department_assignment_service import (
+    user_department_assignment_service,
+)
+from app.modules.system.service.user_export_service import (
+    download_export_file,
+    export_users_to_excel,
+    get_export_task,
+    list_export_tasks,
+)
+from app.modules.system.service.user_import_parser import (
+    MAX_FILE_SIZE_BYTES,
+    ImportErrorCollection,
+    import_file_has_column,
+    parse_import_excel,
+)
+from app.modules.system.service.user_import_service import (
+    batch_create_users_from_records,
+    cancel_batch,
+    dry_run_import_users,
+    get_batch_detail,
+    list_batch_logs,
+    list_batches,
+)
+from app.modules.system.service.user_import_template_service import (
+    generate_import_template,
+)
+from app.modules.system.service.user_role_assignment_service import (
+    user_role_assignment_service,
+)
+from app.modules.system.service.user_service import user_service
 
 router = APIRouter()
 
@@ -708,7 +710,7 @@ def _compute_batch_expires_at(batch) -> datetime | None:
     """
     if batch is None or batch.created_at is None:
         return None
-    from app.modules.system.user.constants import ImportBatchStatus  # noqa: PLC0415
+    from app.modules.system.constants import ImportBatchStatus  # noqa: PLC0415
 
     preview_states = {
         ImportBatchStatus.CREATED,

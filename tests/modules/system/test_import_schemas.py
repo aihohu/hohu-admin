@@ -15,7 +15,7 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
-from app.modules.system.user.schemas import (
+from app.modules.system.schemas.user_transfer import (
     FailedRow,
     ImportDryRunResult,
     ImportResult,

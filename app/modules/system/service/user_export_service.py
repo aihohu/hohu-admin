@@ -22,17 +22,24 @@ from app.core.exceptions import (
 from app.core.file_storage import FileStorage, get_file_storage
 from app.core.id_generator import next_id
 from app.db.base import user_depts
-from app.modules.system.models.dept import Dept
-from app.modules.system.models.user import User
-from app.modules.system.user.constants import (
+from app.modules.system.constants import (
     EXPORT_ALLOWED_FIELDS,
     USER_EXPORT_ASYNC_THRESHOLD,
     ExportTaskStatus,
 )
-from app.modules.system.user.import_validator import _compute_accessible_dept_ids
-from app.modules.system.user.models import UserExportTask
-from app.modules.system.user.schemas import UserExportFilter, UserExportTaskQuery
-from app.modules.system.user.template_service import _build_dept_full_path
+from app.modules.system.models.dept import Dept
+from app.modules.system.models.user import User
+from app.modules.system.models.user_transfer import UserExportTask
+from app.modules.system.schemas.user_transfer import (
+    UserExportFilter,
+    UserExportTaskQuery,
+)
+from app.modules.system.service.user_import_template_service import (
+    _build_dept_full_path,
+)
+from app.modules.system.service.user_import_validator import (
+    _compute_accessible_dept_ids,
+)
 from app.utils.data_scope import get_user_data_scope_filters
 from app.utils.pagination import paginate
 
