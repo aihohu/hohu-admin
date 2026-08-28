@@ -111,3 +111,17 @@ def test_ai_trace_permission_is_an_independent_page_menu() -> None:
     assert entry["route_path"] == "/ai/trace"
     assert entry["i18n_key"] == "route.ai_trace"
     assert entry["status"] == "1"
+
+
+def test_management_routes_preserve_separate_domain_roots() -> None:
+    routes = {
+        entry["route_name"]: entry
+        for entry in MENU_DEFINITIONS
+        if entry["menu_type"] != "F"
+    }
+
+    assert {"auth", "system", "task"} <= routes.keys()
+    for route_name in ("system_dept", "system_user", "system_role", "system_menu"):
+        assert routes[route_name]["parent_route"] == "auth"
+    for route_name in ("system_job", "system_job-log"):
+        assert routes[route_name]["parent_route"] == "task"

@@ -234,6 +234,25 @@ class TestRoleSeed:
         assert button.parent_id == parent.menu_id
 
 
+class TestMenuPartitions:
+    def test_fresh_seed_preserves_auth_system_and_task_roots(self):
+        """Fresh menus must preserve the established domain grouping."""
+        routes = {
+            menu.route_name: menu for menu in init_menus if menu.route_name is not None
+        }
+
+        assert {"auth", "system", "task"} <= routes.keys()
+        for route_name in (
+            "system_dept",
+            "system_user",
+            "system_role",
+            "system_menu",
+        ):
+            assert routes[route_name].parent_id == routes["auth"].menu_id
+        for route_name in ("system_job", "system_job-log"):
+            assert routes[route_name].parent_id == routes["task"].menu_id
+
+
 class TestAiChatPermissionSeed:
     def test_every_builtin_tool_permission_exists_in_fresh_menu_seed(self):
         """Fresh startup must satisfy Registry permission referential integrity."""

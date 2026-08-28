@@ -1348,6 +1348,58 @@ MENU_DEFINITIONS = [
     },
 ]
 
+_MENU_PARTITIONS = {
+    "auth": {
+        "system_dept": 1,
+        "system_user": 2,
+        "system_role": 3,
+        "system_menu": 4,
+    },
+    "system": {
+        "system_dict": 1,
+        "system_dict_data": 2,
+        "system_file": 3,
+        "system_config": 4,
+        "system_data-scope-demo": 8,
+        "system_monitor": 10,
+    },
+    "task": {
+        "system_job": 1,
+        "system_job-log": 2,
+    },
+}
+
+
+async def _reconcile_menu_partitions(
+    db: AsyncSession,
+    *,
+    partitions: dict[str, dict[str, int]] = _MENU_PARTITIONS,
+) -> bool:
+    """Restore known menu pages to their established domain roots and order."""
+    route_names = set(partitions)
+    route_names.update(
+        child_route
+        for child_routes in partitions.values()
+        for child_route in child_routes
+    )
+    result = await db.execute(select(Menu).where(Menu.route_name.in_(route_names)))
+    menus = {menu.route_name: menu for menu in result.scalars().all()}
+    changed = False
+    for root_route, child_routes in partitions.items():
+        root = menus.get(root_route)
+        if root is None:
+            continue
+        for child_route, order in child_routes.items():
+            child = menus.get(child_route)
+            if child is None:
+                continue
+            if child.parent_id != root.menu_id or child.order != order:
+                child.parent_id = root.menu_id
+                child.order = order
+                changed = True
+
+    return changed
+
 
 def _get_def_key(d: dict) -> str:
     """获取菜单定义的唯一标识：F 类型用 key，其他用 route_name"""
@@ -1379,7 +1431,12 @@ async def sync_menus():
             new_defs.append(d)
 
         if not new_defs:
-            print("All menus already exist, nothing to sync.")
+            reconciled = await _reconcile_menu_partitions(db)
+            if reconciled:
+                await db.commit()
+                print("Reconciled menu domain partitions.")
+            else:
+                print("All menus already exist, nothing to sync.")
             await engine.dispose()
             return
 
@@ -1457,7 +1514,10 @@ async def sync_menus():
             for d in remaining:
                 print(f"  - {d['menu_name']} (parent: {d['parent_route']})")
 
+        reconciled = await _reconcile_menu_partitions(db)
         await db.commit()
+        if reconciled:
+            print("Reconciled menu domain partitions.")
 
         # 一次性兜底：把 ai_agent 菜单的 hide_in_menu 从 True 改 False
         # 前端管理页面已实现，旧库需要将菜单更新为可见。

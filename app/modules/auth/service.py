@@ -9,7 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.constants import REDIS_BLACKLIST_PREFIX, REDIS_BLACKLIST_TTL
+from app.constants import (
+    MENU_TYPE_DIRECTORY,
+    REDIS_BLACKLIST_PREFIX,
+    REDIS_BLACKLIST_TTL,
+)
 from app.core.base_response import ResponseModel
 from app.core.config import settings
 from app.core.exceptions import (
@@ -295,6 +299,16 @@ def build_menu_tree(menus: list[Menu], parent_id: int = None) -> list[UserRoute]
     current_level_menus.sort(key=lambda x: x.order or 0)
 
     for menu in current_level_menus:
+        children = build_menu_tree(menus, menu.menu_id)
+        component = menu.component or ""
+        is_layout_only_directory = (
+            menu.menu_type == MENU_TYPE_DIRECTORY
+            and component.startswith("layout.")
+            and "$" not in component
+        )
+        if is_layout_only_directory and not children:
+            continue
+
         route = UserRoute(
             name=menu.route_name,
             path=menu.route_path,
@@ -312,8 +326,6 @@ def build_menu_tree(menus: list[Menu], parent_id: int = None) -> list[UserRoute]
                 multi_tab=menu.multi_tab,
             ),
         )
-        # 递归查找子节点
-        children = build_menu_tree(menus, menu.menu_id)
         if children:
             route.children = children
 

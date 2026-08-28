@@ -37,6 +37,8 @@ from app.modules.system.models.user import User
 from scripts.seed_ai_agents import seed_ai_agents_in_session
 
 system_id = next_id()
+auth_id = next_id()
+task_id = next_id()
 ai_id = next_id()
 monitor_id = next_id()
 # 用户管理菜单和导入、导出按钮共用 menu_id。
@@ -72,6 +74,25 @@ init_menus = [
     ),
     Menu(
         parent_id=0,
+        menu_name="权限管理",
+        menu_type="M",
+        icon="carbon:security",
+        icon_type="1",
+        component="layout.base",
+        layout="base",
+        route_name="auth",
+        route_path="/auth",
+        i18n_key="route.auth",
+        order=98,
+        status="1",
+        hide_in_menu=False,
+        keep_alive=False,
+        constant=False,
+        multi_tab=False,
+        menu_id=auth_id,
+    ),
+    Menu(
+        parent_id=0,
         menu_name="系统管理",
         menu_type="M",
         icon="carbon:cloud-service-management",
@@ -90,7 +111,26 @@ init_menus = [
         menu_id=system_id,
     ),
     Menu(
-        parent_id=system_id,
+        parent_id=0,
+        menu_name="任务中心",
+        menu_type="M",
+        icon="carbon:task",
+        icon_type="1",
+        component="layout.base",
+        layout="base",
+        route_name="task",
+        route_path="/task",
+        i18n_key="route.task",
+        order=100,
+        status="1",
+        hide_in_menu=False,
+        keep_alive=False,
+        constant=False,
+        multi_tab=False,
+        menu_id=task_id,
+    ),
+    Menu(
+        parent_id=auth_id,
         menu_name="部门管理",
         menu_type="C",
         icon="carbon:user-multiple",
@@ -158,7 +198,7 @@ init_menus = [
         menu_id=next_id(),
     ),
     Menu(
-        parent_id=system_id,
+        parent_id=auth_id,
         menu_name="用户管理",
         menu_type="C",
         icon="carbon:user",
@@ -242,7 +282,7 @@ init_menus = [
         menu_id=next_id(),
     ),
     Menu(
-        parent_id=system_id,
+        parent_id=auth_id,
         menu_name="角色管理",
         menu_type="C",
         icon="carbon:user-role",
@@ -317,7 +357,7 @@ init_menus = [
         menu_id=next_id(),
     ),
     Menu(
-        parent_id=system_id,
+        parent_id=auth_id,
         menu_name="菜单管理",
         menu_type="C",
         icon="carbon:menu",
@@ -346,7 +386,7 @@ init_menus = [
         route_name="system_dict",
         route_path="/system/dict",
         i18n_key="route.system_dict",
-        order=5,
+        order=1,
         status="1",
         hide_in_menu=False,
         keep_alive=False,
@@ -365,7 +405,7 @@ init_menus = [
         route_name="system_dict_data",
         route_path="/system/dict/data",
         i18n_key="route.system_dict_data",
-        order=6,
+        order=2,
         status="1",
         hide_in_menu=True,
         keep_alive=False,
@@ -384,7 +424,7 @@ init_menus = [
         route_name="system_file",
         route_path="/system/file",
         i18n_key="route.system_file",
-        order=7,
+        order=3,
         status="1",
         hide_in_menu=False,
         keep_alive=False,
@@ -393,7 +433,7 @@ init_menus = [
         menu_id=next_id(),
     ),
     Menu(
-        parent_id=system_id,
+        parent_id=task_id,
         menu_name="定时任务",
         menu_type="C",
         icon="carbon:timer",
@@ -403,7 +443,7 @@ init_menus = [
         route_name="system_job",
         route_path="/system/job",
         i18n_key="route.system_job",
-        order=8,
+        order=1,
         status="1",
         hide_in_menu=False,
         keep_alive=False,
@@ -420,7 +460,7 @@ init_menus = [
         menu_id=next_id(),
     ),
     Menu(
-        parent_id=system_id,
+        parent_id=task_id,
         menu_name="任务日志",
         menu_type="C",
         icon="carbon:document-tasks",
@@ -430,7 +470,7 @@ init_menus = [
         route_name="system_job-log",
         route_path="/system/job-log",
         i18n_key="route.system_job-log",
-        order=9,
+        order=2,
         status="1",
         hide_in_menu=False,
         keep_alive=False,
