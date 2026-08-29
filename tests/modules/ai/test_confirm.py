@@ -647,6 +647,110 @@ class TestPreparedConfirmation:
         finalize.assert_awaited_once()
         get_pending.assert_not_awaited()
 
+    async def test_scope_bound_result_freezes_post_write_scope_hash(
+        self,
+        _mock_external,
+    ) -> None:
+        from app.modules.ai.agents.gateway.result import ResultProjection, ToolResult
+
+        pending = _make_prepared_action(data_scope_hash="pre-write-scope")
+        approved = _make_prepared_action(
+            status="approved", data_scope_hash="pre-write-scope"
+        )
+        running = _make_prepared_action(
+            status="running", data_scope_hash="pre-write-scope"
+        )
+        running.tool_codes = ["dept.create"]
+        terminal = _make_prepared_action(
+            status="succeeded", data_scope_hash="pre-write-scope"
+        )
+        transition = AsyncMock(side_effect=[approved, running, terminal])
+        post_write_hash = AsyncMock(return_value="post-write-scope")
+        deps = SimpleNamespace(data_scope_hash="pre-write-scope")
+        current_user = _make_user()
+
+        with (
+            patch(
+                "app.modules.ai.api.confirm.prepared_action_service.get_by_confirmation_id",
+                AsyncMock(side_effect=[pending, running]),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.prepared_action_service.lock_confirmation_context",
+                AsyncMock(return_value=_make_prepared_context(pending)),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.prepared_action_service.validate_snapshot",
+                AsyncMock(),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.prepared_action_service.validate_data_scope_snapshot"
+            ),
+            patch(
+                "app.modules.ai.api.confirm.prepared_action_service.transition_status",
+                transition,
+            ),
+            patch(
+                "app.modules.ai.api.confirm.operation_log_service.get_by_tool_call_id",
+                AsyncMock(return_value=None),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.chat_service.build_chat_deps",
+                AsyncMock(return_value=deps),
+            ),
+            patch("app.modules.ai.api.confirm.validate_prepared_execution"),
+            patch(
+                "app.modules.ai.api.confirm.execute_approved_prepared_action",
+                AsyncMock(
+                    return_value=ToolResult.success(
+                        {"deptId": "42"},
+                        projection=ResultProjection(
+                            subject_refs=({"type": "dept", "id": "42"},),
+                            scope_bound=True,
+                        ),
+                    )
+                ),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.result_projection_service.compute_data_scope_hash",
+                post_write_hash,
+            ),
+            patch(
+                "app.modules.ai.api.confirm.chat_run_finalizer.finalize_prepared_action",
+                AsyncMock(),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.wake",
+                AsyncMock(return_value=False),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.hitl_manager.delete_pending",
+                AsyncMock(),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.check_user_disabled",
+                AsyncMock(return_value=False),
+            ),
+        ):
+            db = MagicMock()
+            db.commit = AsyncMock()
+            db.rollback = AsyncMock()
+            result = await confirm_tool(
+                ConfirmRequest(
+                    confirmationId="cid_test_0123",
+                    action="approve",
+                ),
+                db=db,
+                current_user=current_user,
+            )
+
+        terminal_db = _mock_external[
+            "session_local"
+        ].return_value.__aenter__.return_value
+        post_write_hash.assert_awaited_once_with(terminal_db, current_user)
+        result_lineage = transition.await_args_list[2].kwargs["result_lineage"]
+        assert result_lineage.data_scope_hash == "post-write-scope"
+        assert result.data.status == "succeeded"
+
     async def test_unexpected_inline_execution_error_is_finalized_as_failed(
         self,
     ) -> None:

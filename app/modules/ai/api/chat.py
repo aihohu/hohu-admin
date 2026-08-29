@@ -68,6 +68,7 @@ from app.modules.ai.service.chat_run_service import (
     ToolCallCollector,
     chat_run_finalizer,
     chat_run_guard,
+    enforce_grounded_management_write_claim,
 )
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.conversation_service import conversation_service
@@ -203,6 +204,11 @@ async def _finalize_stream_turn(
                 projection="updated",
             )
         ]
+    content, unverified_write_claim = enforce_grounded_management_write_claim(
+        content,
+        agent_code=agent_code,
+        tool_calls=tool_calls,
+    )
     try:
         message = await chat_run_finalizer.finalize_assistant_turn(
             db,
@@ -233,14 +239,23 @@ async def _finalize_stream_turn(
                 projection="updated",
             ),
         ]
-    return [
+    events: list[AiStreamEvent] = []
+    if unverified_write_claim:
+        events.append(
+            AiErrorEvent(
+                error_code="AI_UNVERIFIED_WRITE_CLAIM",
+                message="AI 回复缺少可验证的写工具结果，未确认任何业务变更",
+            )
+        )
+    events.append(
         DoneEvent(
             trace_id=trace_id,
             message_id=message.message_id if message else None,
             persistence="committed",
             projection="updated",
         )
-    ]
+    )
+    return events
 
 
 async def _emit_safety_blocked(

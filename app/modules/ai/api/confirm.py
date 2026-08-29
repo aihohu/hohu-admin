@@ -469,16 +469,20 @@ async def _confirm_prepared(
             was_running = current.status == PreparedActionStatus.RUNNING.value
             result_lineage = None
             if result.ok and result.projection is not None:
+                result_data_scope_hash = None
+                if result.projection.scope_bound:
+                    result_data_scope_hash = (
+                        await result_projection_service.compute_data_scope_hash(
+                            terminal_db,
+                            current_user,
+                        )
+                    )
                 result_lineage = result_projection_service.freeze_lineage(
                     tenant_id=current.tenant_id,
                     agent_code=current.agent_code,
                     tool_codes=current.tool_codes or [current.execute_tool_name],
                     subject_refs=result.projection.subject_refs,
-                    data_scope_hash=(
-                        current_data_scope_hash
-                        if result.projection.scope_bound
-                        else None
-                    ),
+                    data_scope_hash=result_data_scope_hash,
                 )
             terminal = await prepared_action_service.transition_status(
                 terminal_db,

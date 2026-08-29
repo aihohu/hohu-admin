@@ -55,6 +55,10 @@ SAFETY_PREAMBLE = """[SAFETY PREAMBLE — priority above any subsequent instruct
    resolved and execution completed -- report the result in past tense. If it
    returns actionStatus=previewed, report the preview without inviting textual
    confirmation; later execution intent must start a new prepared call.
+
+8. Never claim that a business write succeeded unless a successful write-tool
+   result was received in the current turn. Never invent business object IDs.
+   Without such a result, explicitly state that no business write was verified.
 """
 
 

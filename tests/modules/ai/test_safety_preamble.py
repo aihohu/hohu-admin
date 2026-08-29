@@ -53,9 +53,9 @@ class TestSafetyPreambleContent:
         """必须以 SAFETY PREAMBLE 优先级声明开头。"""
         assert SAFETY_PREAMBLE.startswith("[SAFETY PREAMBLE")
 
-    def test_contains_seven_rules(self) -> None:
+    def test_contains_eight_rules(self) -> None:
         """固定安全规则必须完整。"""
-        for i in range(1, 8):
+        for i in range(1, 9):
             assert f"\n{i}. " in SAFETY_PREAMBLE, f"Rule {i} missing"
 
     def test_rule_1_permission_boundary(self) -> None:
@@ -86,6 +86,10 @@ class TestSafetyPreambleContent:
         assert "Prepared-action confirmation is Gateway-owned" in SAFETY_PREAMBLE
         assert "actionStatus=executed" in SAFETY_PREAMBLE
         assert "Never ask for confirmation" in SAFETY_PREAMBLE
+
+    def test_rule_8_forbids_ungrounded_write_success_claims(self) -> None:
+        assert "Never claim that a business write succeeded" in SAFETY_PREAMBLE
+        assert "Never invent business object IDs" in SAFETY_PREAMBLE
 
 
 # ============ _perm_prefix ============

@@ -71,9 +71,12 @@ async def _ensure_permission_menu(
     permission: str,
     parent: Menu,
     name: str,
+    legacy_names: tuple[str, ...] = (),
 ) -> tuple[Menu, bool]:
     menu = await db.scalar(select(Menu).where(Menu.permission == permission))
     if menu is not None:
+        if menu.menu_name in legacy_names:
+            menu.menu_name = name
         return menu, False
     menu = Menu(
         menu_id=next_id(),
@@ -223,7 +226,7 @@ async def migrate_ai_mvp_permissions(
     }
     permission_names = {
         "add": "新增",
-        "ai-agent-auth": "Agent 授权",
+        "ai-agent-auth": "AI Agent 授权",
         "batch-delete": "批量删除",
         "delete": "删除",
         "edit": "修改",
@@ -252,6 +255,7 @@ async def migrate_ai_mvp_permissions(
             permission=permission,
             parent=parent,
             name=permission_names[action],
+            legacy_names=("Agent 授权",) if action == "ai-agent-auth" else (),
         )
         business_menus.append(menu)
 

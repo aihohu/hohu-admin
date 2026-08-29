@@ -202,3 +202,33 @@ async def test_upgrade_preserves_explicitly_disabled_super_agent_binding(
     await db_session.refresh(binding)
 
     assert binding.enabled is False
+
+
+async def test_upgrade_normalizes_legacy_role_agent_authorization_label(
+    db_session,
+) -> None:
+    menu = await db_session.scalar(
+        select(Menu).where(Menu.permission == "system:role:ai-agent-auth")
+    )
+    assert menu is not None
+    menu.menu_name = "Agent 授权"
+    await db_session.flush()
+
+    await migrate_ai_mvp_permissions(db_session)
+
+    assert menu.menu_name == "AI Agent 授权"
+
+
+async def test_upgrade_preserves_custom_role_agent_authorization_label(
+    db_session,
+) -> None:
+    menu = await db_session.scalar(
+        select(Menu).where(Menu.permission == "system:role:ai-agent-auth")
+    )
+    assert menu is not None
+    menu.menu_name = "自定义 Agent 委派"
+    await db_session.flush()
+
+    await migrate_ai_mvp_permissions(db_session)
+
+    assert menu.menu_name == "自定义 Agent 委派"

@@ -254,6 +254,11 @@ class TestMenuPartitions:
 
 
 class TestAiChatPermissionSeed:
+    def test_role_agent_authorization_uses_canonical_menu_label(self):
+        menu = _find_menu_by_permission(init_menus, "system:role:ai-agent-auth")
+
+        assert menu.menu_name == "AI Agent 授权"
+
     def test_every_builtin_tool_permission_exists_in_fresh_menu_seed(self):
         """Fresh startup must satisfy Registry permission referential integrity."""
         load_builtin_tools()

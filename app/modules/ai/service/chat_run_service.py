@@ -1,5 +1,6 @@
 """ChatCommand 运行守卫与 assistant 终态收口器。"""
 
+import re
 import secrets
 from typing import Any
 
@@ -10,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.id_generator import next_id
+from app.modules.ai.agents.gateway.quota import is_write_tool
 from app.modules.ai.agents.hitl.events import (
     AiStreamEvent,
     ToolCallResultEvent,
@@ -18,6 +20,7 @@ from app.modules.ai.agents.hitl.events import (
     stringify_large_ints,
 )
 from app.modules.ai.agents.hitl.manager import PendingPayload
+from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.result_projection_service import (
@@ -33,6 +36,48 @@ _RELEASE_GUARD_LUA = (
     "if redis.call('get', KEYS[1]) == ARGV[1] then "
     "return redis.call('del', KEYS[1]) else return 0 end"
 )
+
+_MANAGEMENT_AGENT_CODES = frozenset({"dept_mgmt", "role_mgmt", "user_mgmt"})
+_SAFE_UNVERIFIED_WRITE_MESSAGE = (
+    "本轮未产生可验证的写工具结果，因此没有确认任何业务变更。请重新发起操作。"
+)
+_WRITE_CLAIM_PATTERN = re.compile(
+    r"(?:已|已经)成功(?:地)?(?:创建|新增|更新|修改|移动|调整|设置|绑定|授权|分配|禁用|启用|删除|重置|导入)"
+    r"|(?:创建|新增|更新|修改|移动|调整|设置|绑定|授权|分配|禁用|启用|删除|重置|导入)(?:已)?(?:成功|完成)"
+    r"|(?:has|have)\s+been\s+(?:successfully\s+)?(?:created|updated|moved|assigned|enabled|disabled|deleted|reset|imported)"
+    r"|(?:was|were)\s+successfully\s+(?:created|updated|moved|assigned|enabled|disabled|deleted|reset|imported)"
+    r"|(?:created|updated|moved|assigned|enabled|disabled|deleted|reset|imported)\s+successfully",
+    re.IGNORECASE,
+)
+
+
+def enforce_grounded_management_write_claim(
+    content: str,
+    *,
+    agent_code: str | None,
+    tool_calls: list[dict[str, Any]] | None,
+) -> tuple[str, bool]:
+    """Replace an asserted write success that has no successful write tool result."""
+    if agent_code not in _MANAGEMENT_AGENT_CODES or not _WRITE_CLAIM_PATTERN.search(
+        content
+    ):
+        return content, False
+
+    registry = ToolRegistry.get()
+    for call in tool_calls or ():
+        if call.get("ok") is not True:
+            continue
+        registered = registry.find(str(call.get("tool") or ""))
+        if registered is None:
+            continue
+        result = call.get("result")
+        if registered.meta.interaction_flow == "prepared":
+            if isinstance(result, dict) and result.get("actionStatus") == "executed":
+                return content, False
+            continue
+        if is_write_tool(registered.meta):
+            return content, False
+    return _SAFE_UNVERIFIED_WRITE_MESSAGE, True
 
 
 class ToolCallCollector:

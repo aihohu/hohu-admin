@@ -334,7 +334,7 @@ init_menus = [
     ),
     Menu(
         parent_id=_system_role_menu_id,
-        menu_name="Agent 授权",
+        menu_name="AI Agent 授权",
         menu_type="F",
         permission="system:role:ai-agent-auth",
         status=STATUS_ENABLED,

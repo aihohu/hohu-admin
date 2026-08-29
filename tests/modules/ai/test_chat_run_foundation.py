@@ -7,12 +7,14 @@ import pytest
 
 from app.core.id_generator import next_id
 from app.modules.ai.agents.hitl.events import (
+    AiErrorEvent,
     DoneEvent,
     ToolCallResultEvent,
     ToolCallStartedEvent,
     event_to_sse_data,
 )
 from app.modules.ai.agents.hitl.manager import PendingPayload, hitl_manager
+from app.modules.ai.agents.tools import load_builtin_tools
 from app.modules.ai.api.chat import (
     _finalize_stream_turn,
     _run_guard_heartbeat_ttl,
@@ -27,6 +29,7 @@ from app.modules.ai.service.chat_run_service import (
     ToolCallCollector,
     chat_run_finalizer,
     chat_run_guard,
+    enforce_grounded_management_write_claim,
 )
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.operation_log_service import operation_log_service
@@ -351,6 +354,94 @@ async def test_stream_finalizer_commits_before_building_done_ack() -> None:
             projection="updated",
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_stream_finalizer_replaces_ungrounded_management_write_claim() -> None:
+    db = AsyncMock()
+    captured: dict[str, object] = {}
+
+    async def _finalize(*_args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(message_id=9007199254740993)
+
+    with patch.object(
+        chat_run_finalizer,
+        "finalize_assistant_turn",
+        side_effect=_finalize,
+    ):
+        terminal_events = await _finalize_stream_turn(
+            db,
+            conversation_id=123,
+            trace_id="tr_66666666666666666666666666666666",
+            source_user_message_id=456,
+            content="部门已成功创建，部门 ID 为 998877。",
+            tool_calls=None,
+            agent_code="dept_mgmt",
+            stream_error_code=None,
+        )
+
+    assert captured["content"] == (
+        "本轮未产生可验证的写工具结果，因此没有确认任何业务变更。请重新发起操作。"
+    )
+    assert terminal_events[0] == AiErrorEvent(
+        error_code="AI_UNVERIFIED_WRITE_CLAIM",
+        message="AI 回复缺少可验证的写工具结果，未确认任何业务变更",
+    )
+    assert isinstance(terminal_events[1], DoneEvent)
+
+
+def test_successful_write_tool_grounds_management_write_claim() -> None:
+    load_builtin_tools()
+    content = "部门已成功创建。"
+
+    grounded_content, blocked = enforce_grounded_management_write_claim(
+        content,
+        agent_code="dept_mgmt",
+        tool_calls=[{"tool": "dept.create", "ok": True}],
+    )
+
+    assert grounded_content == content
+    assert blocked is False
+
+
+def test_non_assertive_management_guidance_is_not_blocked() -> None:
+    content = "填写部门名称后即可创建部门。"
+
+    grounded_content, blocked = enforce_grounded_management_write_claim(
+        content,
+        agent_code="dept_mgmt",
+        tool_calls=None,
+    )
+
+    assert grounded_content == content
+    assert blocked is False
+
+
+@pytest.mark.parametrize(
+    ("action_status", "expected_blocked"),
+    [("executed", False), ("previewed", True)],
+)
+def test_prepared_tool_only_grounds_an_executed_write(
+    action_status: str,
+    expected_blocked: bool,
+) -> None:
+    load_builtin_tools()
+
+    grounded_content, blocked = enforce_grounded_management_write_claim(
+        "用户已成功导入。",
+        agent_code="user_mgmt",
+        tool_calls=[
+            {
+                "tool": "user.import_preview",
+                "ok": True,
+                "result": {"actionStatus": action_status},
+            }
+        ],
+    )
+
+    assert blocked is expected_blocked
+    assert (grounded_content == "用户已成功导入。") is (not expected_blocked)
 
 
 class TestConversationRunGuard:
