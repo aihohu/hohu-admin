@@ -185,6 +185,7 @@ def wrap_tool_for_pydantic_ai(registered: RegisteredTool) -> Tool:
         function=wrapper,
         name=llm_tool_name,
         description=meta.summary,
+        sequential=not meta.readonly,
     )
 
 

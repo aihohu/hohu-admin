@@ -250,6 +250,7 @@ class ChatRunFinalizer:
         lineage: ProjectionLineage | None = None,
         projection_dependency_message_ids: list[int] | tuple[int, ...] = (),
     ) -> AiMessage | None:
+        tool_calls = stringify_large_ints(tool_calls)
         source_is_active = await db.scalar(
             select(AiMessage.message_id).where(
                 AiMessage.message_id == source_user_message_id,

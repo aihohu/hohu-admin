@@ -36,6 +36,7 @@ from app.core.exceptions import (
 from app.main import app
 from app.modules.system.constants import ExportTaskStatus
 from app.modules.system.models.user import User
+from app.modules.system.models.user_transfer import UserExportTask
 from app.modules.system.schemas.user_transfer import UserExportTaskResponse
 
 # ========== Constants ==========
@@ -342,6 +343,29 @@ class TestGetExportList:
         query_arg = mock_list.call_args.args[1]
         assert query_arg.current == 1
         assert query_arg.size == 10
+
+    async def test_serializes_orm_records(self, client, admin_token):
+        task = UserExportTask(
+            export_id="e-orm",
+            operator_id=1,
+            filter_snapshot={"user_name": "alice"},
+            reason="Provider E2E preflight",
+            row_count=1,
+            status=ExportTaskStatus.SUCCESS,
+            created_at=datetime(2026, 8, 29, 5, 0, 0),
+        )
+        fake_page = PageResult(records=[task], total=1, current=1, size=1)
+        with patch(
+            f"{_API_MODULE}.list_export_tasks",
+            new=AsyncMock(return_value=fake_page),
+        ):
+            response = await client.get(
+                "/system/user/export?current=1&size=1",
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["records"][0]["exportId"] == "e-orm"
 
     async def test_passes_filters_to_service(self, client, admin_token):
         """请求过滤参数与 trusted 当前用户 ID 分开传给 service。"""

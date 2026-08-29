@@ -1291,7 +1291,7 @@ async def _hang_for_confirmation(
                     ):
                         direct_snapshot["business"] = dry_run_summary.business_snapshot
                     fields = _build_direct_confirmation_fields(
-                        meta, args, dry_run_summary
+                        meta, execution_args, dry_run_summary
                     )
                     durable_action = await prepared_action_service.create_pending(
                         log_db,

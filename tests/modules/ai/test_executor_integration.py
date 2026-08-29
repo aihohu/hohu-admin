@@ -141,6 +141,7 @@ _TEST_TOOL_READONLY = "testint.readonly_list"  # 写 query_cache
 _TEST_TOOL_PREPARE = "testint.import_preview"  # prepared preview
 _TEST_TOOL_PREPARED_EXECUTE = "testint.import_execute"  # bound HITL execute
 _TEST_TOOL_FREEZE_DIRECT = "testint.freeze_direct"  # direct HITL exact binding
+_TEST_TOOL_CANONICALIZE_DIRECT = "testint.canonicalize_direct"
 _TEST_TOOL_DRY_RUN_DENIED = "testint.dry_run_denied"
 
 _TOOLS_REGISTERED = False
@@ -281,6 +282,40 @@ def _register_test_tools() -> None:
         )
 
     ToolRegistry.get().set_dry_run_fn(_TEST_TOOL_FREEZE_DIRECT, _dry_run_freeze_direct)
+
+    @ai_tool(
+        AiToolMeta(
+            name=_TEST_TOOL_CANONICALIZE_DIRECT,
+            agent="shared",
+            summary="freeze a semantic value to its canonical code",
+            required_perms=(),
+            risk="high",
+            projection_kind="none",
+            hitl_always=True,
+            dry_run_supported=True,
+            args_summary_fields=("scope",),
+        )
+    )
+    async def _canonicalize_direct(ctx, *, scope: str) -> ToolResult:
+        return ToolResult.success(data={"scope": scope})
+
+    async def _dry_run_canonicalize_direct(ctx, *, scope: str) -> DryRunResult:
+        assert scope == "SELF"
+        return DryRunResult(
+            ok=True,
+            count=1,
+            reason="store canonical scope",
+            confirmation_fields=[
+                {"label": "scope", "value": "5", "display_value": "SELF (5)"}
+            ],
+            execution_args={"scope": "5"},
+            business_snapshot={"scope": "5"},
+        )
+
+    ToolRegistry.get().set_dry_run_fn(
+        _TEST_TOOL_CANONICALIZE_DIRECT,
+        _dry_run_canonicalize_direct,
+    )
 
     @ai_tool(
         AiToolMeta(
@@ -1040,6 +1075,52 @@ class TestHitlFlow:
         assert action.snapshot["business"] == {
             "targets": [{"id": "7001", "name": "approved"}]
         }
+
+    async def test_direct_hitl_presents_canonical_execution_args(
+        self, monkeypatch
+    ) -> None:
+        _register_test_tools()
+
+        async def fake_hang(confirmation_id, *, timeout_sec=None):
+            return ConfirmAction.REJECTED
+
+        monkeypatch.setattr(hitl_manager, "hang", fake_hang)
+        events: list[Any] = []
+
+        async def collect(event: Any) -> None:
+            events.append(event)
+
+        deps = _build_deps(signal_event=collect)
+        result = await execute_tool(
+            _TEST_TOOL_CANONICALIZE_DIRECT,
+            {"scope": "SELF"},
+            deps,
+        )
+
+        assert not result.ok
+        confirmation = next(
+            event for event in events if isinstance(event, ConfirmationRequiredEvent)
+        )
+        assert confirmation.presentation["fields"] == [
+            {"label": "scope", "value": "SELF (5)"},
+            {"label": "affectedCount", "value": 1, "tone": "warning"},
+        ]
+
+        from app.db.session import AsyncSessionLocal
+        from app.modules.ai.models.prepared_action import AiPreparedAction
+
+        async with AsyncSessionLocal() as db:
+            action = (
+                await db.execute(
+                    select(AiPreparedAction).where(
+                        AiPreparedAction.trace_id == deps.trace_id,
+                        AiPreparedAction.execute_tool_name
+                        == _TEST_TOOL_CANONICALIZE_DIRECT,
+                    )
+                )
+            ).scalar_one()
+
+        assert action.frozen_args == {"scope": "5"}
 
     async def test_hitl_rejected(self, monkeypatch) -> None:
         """HITL reject → USER_REJECTED + log status=rejected"""

@@ -627,6 +627,7 @@ class TestRoleList:
             "code",
             "status",
             "dataScope",
+            "dataScopeCode",
             "delegable",
             "blockedReasonCode",
         }

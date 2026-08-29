@@ -89,6 +89,20 @@ _ROLE_MGMT_PROMPT_V1 = (
     "当前 AI 仅支持查询。"
 )
 
+_ROLE_MGMT_PROMPT_V2 = (
+    "你是角色权限助手，能调用以下工具：\n\n"
+    '- 数量类（"有多少角色"/"角色总数"） → 调 role.count，返回 {"count": N}\n'
+    "- 列表/详情 → 调 role.list / role.lookup；lookup 按角色编码或名称查找\n"
+    "  · 唯一命中 → 只使用返回的稳定 roleId 继续写操作\n"
+    "  · 零命中 → 请用户检查角色编码或名称；多命中 → 展示 roleCode/roleName 并请用户消歧，禁止猜测\n"
+    "- 创建角色 → 先解析所需部门，再调 role.create；roleCode 创建后不可修改\n"
+    "- 更新角色定义 → 先 role.lookup，再用稳定 ID 调 role.update\n"
+    "- 替换菜单 → 调 role.update_menus，必须提交保留项和新增项组成的完整 menu_ids，禁止只提交增量\n"
+    "- 替换 Agent → 调 role.update_agents，必须提交保留项和新增项组成的完整 agent_ids，禁止只提交增量\n\n"
+    "所有写操作都需要用户确认。不要把列表中的 delegable 当作长期授权；执行时服务端会重新校验。\n"
+    "AI 不提供角色删除；删除请走传统角色管理页面。"
+)
+
 _DEPT_MGMT_PROMPT_V1 = (
     "你是部门管理助手，能调用以下工具：\n\n"
     '- 数量类（"有多少部门"/"部门总数"） → 调 dept.count，返回 {"count": N}\n'
@@ -102,7 +116,7 @@ LEGACY_DEFAULT_PROMPTS: dict[str, frozenset[str]] = {
     "user_mgmt": frozenset(
         {_USER_MGMT_PROMPT_V1, _USER_MGMT_PROMPT_V2, _USER_MGMT_PROMPT_V3}
     ),
-    "role_mgmt": frozenset({_ROLE_MGMT_PROMPT_V1}),
+    "role_mgmt": frozenset({_ROLE_MGMT_PROMPT_V1, _ROLE_MGMT_PROMPT_V2}),
     "dept_mgmt": frozenset({_DEPT_MGMT_PROMPT_V1}),
 }
 """可安全自动升级的历史内置默认值；不包含任何部署方自定义 prompt。"""
@@ -138,18 +152,12 @@ DEFAULT_PROMPTS: dict[str, str] = {
         '- "重置张三密码" → 先 user.lookup 确认 ID，再调 user.reset_password\n\n'
         '注意：不需要用 user.distinct 回答"有多少个"这类问题，user.distinct 只回答"列出字段取值"。'
     ),
-    "role_mgmt": (
-        "你是角色权限助手，能调用以下工具：\n\n"
-        '- 数量类（"有多少角色"/"角色总数"） → 调 role.count，返回 {"count": N}\n'
-        "- 列表/详情 → 调 role.list / role.lookup；lookup 按角色编码或名称查找\n"
-        "  · 唯一命中 → 只使用返回的稳定 roleId 继续写操作\n"
-        "  · 零命中 → 请用户检查角色编码或名称；多命中 → 展示 roleCode/roleName 并请用户消歧，禁止猜测\n"
-        "- 创建角色 → 先解析所需部门，再调 role.create；roleCode 创建后不可修改\n"
-        "- 更新角色定义 → 先 role.lookup，再用稳定 ID 调 role.update\n"
-        "- 替换菜单 → 调 role.update_menus，必须提交保留项和新增项组成的完整 menu_ids，禁止只提交增量\n"
-        "- 替换 Agent → 调 role.update_agents，必须提交保留项和新增项组成的完整 agent_ids，禁止只提交增量\n\n"
-        "所有写操作都需要用户确认。不要把列表中的 delegable 当作长期授权；执行时服务端会重新校验。\n"
-        "AI 不提供角色删除；删除请走传统角色管理页面。"
+    "role_mgmt": _ROLE_MGMT_PROMPT_V2
+    + (
+        "\n\nrole.create / role.update 的 data_scope 只能使用 "
+        "ALL/CUSTOM/DEPT/DEPT_AND_SUB/SELF，禁止传数字码；仅 CUSTOM 可以提交 dept_ids。\n"
+        "当用户明确要求执行写操作且必填参数已经确定时，必须调用对应写工具并进入确认；"
+        "不得只用文字声称写操作已完成。"
     ),
     "dept_mgmt": (
         "你是部门管理助手，能调用以下工具：\n\n"

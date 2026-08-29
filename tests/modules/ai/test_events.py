@@ -8,6 +8,8 @@
 
 import json
 
+from pydantic.experimental.missing_sentinel import MISSING
+
 from app.modules.ai.agents.hitl.events import (
     AiErrorEvent,
     ConfirmationRequiredEvent,
@@ -31,6 +33,16 @@ def _started(**overrides) -> ToolCallStartedEvent:
     }
     defaults.update(overrides)
     return ToolCallStartedEvent(**defaults)
+
+
+def test_started_event_omits_missing_sentinel_args() -> None:
+    payload = json.loads(
+        event_to_sse_data(
+            _started(args={"role_id": 42, "role_desc": MISSING, "dept_ids": []})
+        )
+    )
+
+    assert payload["args"] == {"role_id": 42, "dept_ids": []}
 
 
 def _result(**overrides) -> ToolCallResultEvent:

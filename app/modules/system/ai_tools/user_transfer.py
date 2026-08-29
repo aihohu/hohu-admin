@@ -426,6 +426,7 @@ async def user_import_execute(
         risk="high",
         readonly=False,  # 写 ExportTask 表 + 生成 xlsx 文件
         idempotent=False,
+        hitl_always=True,
         projection_kind="scope_bound",
         produces_file=True,
         dry_run_supported=True,

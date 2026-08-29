@@ -10,6 +10,7 @@ from typing import Any
 _EXPORT_MODULES = {
     "AiDepartmentId": "dept",
     "AiRoleId": "role",
+    "AiRoleDataScope": "role",
     "AiRoleRelatedId": "role",
     "AiRoleRelatedIds": "role",
     "AiUserRoleId": "user_assignment",

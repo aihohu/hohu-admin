@@ -5,12 +5,17 @@
 
 # ruff: noqa: ARG001, PLC0415  test 函数 ctx / kwargs 占位 + 测试内局部 import
 
+import asyncio
 import inspect
 from typing import Any
 
 import pytest
-from pydantic_ai import RunContext, Tool
+from pydantic_ai import Agent, RunContext, Tool
+from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.models.function import FunctionModel
 
+from app.modules.ai.agents.chat_agent import create_chat_agent
+from app.modules.ai.agents.gateway.result import ToolResult
 from app.modules.ai.agents.tools import (
     AiToolMeta,
     RegisteredTool,
@@ -35,6 +40,9 @@ def _register_sample_tool(
     name: str = "sample.tool",
     agent: str = "user_mgmt",
     perms: tuple[str, ...] = ("system:user:list",),
+    *,
+    risk: str = "low",
+    readonly: bool = True,
 ) -> "RegisteredTool":
     """注册一个示例 tool 并返回 RegisteredTool"""
 
@@ -44,7 +52,8 @@ def _register_sample_tool(
             agent=agent,
             summary=f"sample {name}",
             required_perms=perms,
-            risk="low",
+            risk=risk,
+            readonly=readonly,
         )
     )
     async def sample_fn(ctx: Any, foo: str, bar: int = 0) -> dict:
@@ -57,6 +66,55 @@ def _register_sample_tool(
 
 
 class TestWrapTool:
+    async def test_write_tool_serializes_mixed_provider_tool_calls(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A provider response containing read + write must execute in order."""
+        read = _register_sample_tool(name="sample.read")
+        write = _register_sample_tool(
+            name="sample.write",
+            risk="high",
+            readonly=False,
+        )
+        observed: list[str] = []
+
+        async def execute(name: str, _args: dict[str, Any], _deps: Any) -> ToolResult:
+            observed.append(f"start:{name}")
+            await asyncio.sleep(0)
+            observed.append(f"end:{name}")
+            return ToolResult.success(data={"tool": name})
+
+        monkeypatch.setattr(
+            "app.modules.ai.agents.tools.pydantic_ai_wrapper.execute_tool",
+            execute,
+        )
+
+        def provider(messages, _info) -> ModelResponse:
+            if any(message.kind == "response" for message in messages):
+                return ModelResponse(parts=[TextPart("done")])
+            return ModelResponse(
+                parts=[
+                    ToolCallPart("sample_read", {"foo": "first"}, "call-read"),
+                    ToolCallPart("sample_write", {"foo": "second"}, "call-write"),
+                ]
+            )
+
+        tools = [wrap_tool_for_pydantic_ai(read), wrap_tool_for_pydantic_ai(write)]
+        assert tools[0].sequential is False
+        assert tools[1].sequential is True
+
+        agent = Agent(FunctionModel(provider), tools=tools)
+        result = await agent.run("run both", deps=object())
+
+        assert result.output == "done"
+        assert observed == [
+            "start:sample.read",
+            "end:sample.read",
+            "start:sample.write",
+            "end:sample.write",
+        ]
+
     def test_prepared_wrapper_adds_requested_outcome_to_model_signature(self) -> None:
         registered = _register_sample_tool()
         prepared = RegisteredTool(
@@ -148,6 +206,16 @@ class TestWrapTool:
 
 
 class TestBuildPydanticAiTools:
+    def test_chat_agent_disables_provider_parallel_tool_calls(self) -> None:
+        agent = create_chat_agent(
+            FunctionModel(
+                lambda _messages, _info: ModelResponse(parts=[TextPart("ok")])
+            ),
+            user_perms=set(),
+        )
+
+        assert agent.model_settings["parallel_tool_calls"] is False
+
     def test_user_import_exposes_only_prepared_preview(self) -> None:
         load_builtin_tools()
 

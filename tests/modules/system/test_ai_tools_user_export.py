@@ -23,6 +23,15 @@ from app.modules.system.constants import ExportTaskStatus
 from app.modules.system.models.user_transfer import UserExportTask
 
 
+def test_user_export_always_requires_hitl() -> None:
+    """Exporting personal data must never become autonomous by row count."""
+    meta = user_export.__ai_tool_meta__
+
+    assert meta.risk == "high"
+    assert meta.dry_run_supported is True
+    assert meta.hitl_always is True
+
+
 def _make_ctx(db: AsyncSession) -> AiToolContext:
     """Build the minimum unrestricted data-scope context for export tests."""
     data_scope = DataScopeContext(

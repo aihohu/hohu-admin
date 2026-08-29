@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from pydantic.experimental.missing_sentinel import MISSING
 
 from app.core.id_generator import next_id
 from app.modules.ai.agents.hitl.events import (
@@ -149,6 +150,40 @@ async def test_tool_only_turn_finalizes_once_and_keeps_started_order(
         "tc_first",
         "tc_second",
     ]
+
+
+@pytest.mark.asyncio
+async def test_terminal_finalizer_omits_missing_sentinel_tool_args(db_session) -> None:
+    conversation = await _create_conversation(db_session, suffix="sentinel")
+    trace_id = "tr_missing_sentinel_000000000000000"
+    source = await chat_service.save_user_message(
+        db_session,
+        conversation.conversation_id,
+        conversation.user_id,
+        "update role",
+        agent_code="role_mgmt",
+        trace_id=trace_id,
+    )
+
+    message = await chat_run_finalizer.finalize_assistant_turn(
+        db_session,
+        conversation_id=conversation.conversation_id,
+        trace_id=trace_id,
+        source_user_message_id=source.message_id,
+        content="updated",
+        tool_calls=[
+            {
+                "tool": "role.update",
+                "tool_call_id": "tc_missing_sentinel",
+                "args": {"role_id": 42, "role_desc": MISSING},
+                "ok": True,
+            }
+        ],
+        agent_code="role_mgmt",
+    )
+
+    assert message is not None
+    assert message.tool_calls[0]["args"] == {"role_id": 42}
 
 
 @pytest.mark.asyncio

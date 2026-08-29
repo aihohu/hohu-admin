@@ -350,6 +350,8 @@ class UserImportBatchCancelResponse(_CamelBase):
 class UserExportTaskResponse(_CamelBase):
     """导出任务 API 响应。"""
 
+    model_config = ConfigDict(from_attributes=True)
+
     export_id: str
     operator_id: int
     filter_snapshot: dict

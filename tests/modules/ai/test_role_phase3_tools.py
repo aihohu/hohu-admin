@@ -93,6 +93,80 @@ def test_role_write_result_uses_translatable_field_labels() -> None:
     assert result.projection.subject_refs == (
         {"type": "managed_role", "id": str(role.role_id)},
     )
+    assert result.data["dataScope"] == "SELF"
+    assert result.data["dataScopeCode"] == "5"
+
+
+def test_role_data_scope_model_contract_uses_named_values() -> None:
+    create_scope = (
+        inspect.signature(system_ai_tools.role_create)
+        .parameters["data_scope"]
+        .annotation
+    )
+    update_scope = (
+        inspect.signature(system_ai_tools.role_update)
+        .parameters["data_scope"]
+        .annotation
+    )
+
+    assert create_scope is system_ai_tools.AiRoleDataScope
+    assert set(TypeAdapter(create_scope).json_schema()["enum"]) == {
+        "ALL",
+        "CUSTOM",
+        "DEPT",
+        "DEPT_AND_SUB",
+        "SELF",
+    }
+    with pytest.raises(ValidationError):
+        TypeAdapter(create_scope).validate_python("4")
+    assert "AiRoleDataScope" in str(update_scope)
+
+
+async def test_role_create_dry_run_freezes_canonical_data_scope_code(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = None
+
+    async def preview(_db, payload, **_kwargs):
+        nonlocal captured
+        captured = payload
+        return SimpleNamespace(member_user_ids=(), snapshot={"version": "test"})
+
+    monkeypatch.setattr(
+        system_ai_tools.role_management_service,
+        "preview_create",
+        preview,
+    )
+    tool = system_ai_tools.role_create
+    ctx = AiToolContext(
+        user=MagicMock(user_id=next_id()),
+        perms=set(tool.__ai_tool_meta__.required_perms),
+        db=db_session,
+        data_scope=DataScopeContext(None, None, []),
+        trace_id="tr_role_named_scope",
+        tool_meta=tool.__ai_tool_meta__,
+    )
+
+    result = await system_ai_tools._dry_run_role_create(
+        ctx,
+        role_name="Named scope role",
+        role_code=f"R_NAMED_SCOPE_{next_id()}",
+        data_scope=system_ai_tools.AiRoleDataScope.SELF,
+        status="1",
+    )
+
+    assert captured is not None
+    assert captured.data_scope == "5"
+    assert result.execution_args["data_scope"] == "5"
+    scope_field = next(
+        field for field in result.confirmation_fields if field["label"] == "data_scope"
+    )
+    assert scope_field == {
+        "label": "data_scope",
+        "value": "5",
+        "display_value": "SELF (5)",
+    }
 
 
 @pytest.mark.parametrize(

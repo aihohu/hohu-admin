@@ -55,6 +55,7 @@ def create_chat_agent(
         deps_type=NewChatDeps,
         tools=tools,
         instructions=instructions,
+        model_settings={"parallel_tool_calls": False},
     )
 
     return agent

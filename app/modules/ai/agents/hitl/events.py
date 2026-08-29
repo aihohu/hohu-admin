@@ -20,6 +20,8 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from pydantic.experimental.missing_sentinel import MISSING
+
 if TYPE_CHECKING:
     from app.modules.ai.agents.gateway.result import ResultProjection, UIResult
 
@@ -315,10 +317,12 @@ def stringify_large_ints(v: Any) -> Any:
     用于 SSE 事件 args / result 序列化 + DB ai_message.tool_calls JSON 列。
     业务函数（dry_run_fn / tool_fn）仍接收原始 int args，不受影响。
     """
+    if v is MISSING:
+        return None
     if isinstance(v, dict):
-        return {k: stringify_large_ints(vv) for k, vv in v.items()}
-    if isinstance(v, list):
-        return [stringify_large_ints(x) for x in v]
+        return {k: stringify_large_ints(vv) for k, vv in v.items() if vv is not MISSING}
+    if isinstance(v, (list, tuple)):
+        return [stringify_large_ints(x) for x in v if x is not MISSING]
     if isinstance(v, int) and not isinstance(v, bool) and abs(v) >= JS_MAX_SAFE_INT:
         return str(v)
     return v
@@ -334,10 +338,16 @@ def _compact_json(data: Any) -> str:
 
 
 def _compact_value(v: Any) -> Any:
+    if v is MISSING:
+        return None
     if isinstance(v, dict):
-        return {k: _compact_value(vv) for k, vv in v.items() if vv is not None}
-    if isinstance(v, list):
-        return [_compact_value(x) for x in v]
+        return {
+            k: _compact_value(vv)
+            for k, vv in v.items()
+            if vv is not None and vv is not MISSING
+        }
+    if isinstance(v, (list, tuple)):
+        return [_compact_value(x) for x in v if x is not MISSING]
     if isinstance(v, int) and not isinstance(v, bool) and abs(v) >= JS_MAX_SAFE_INT:
         return str(v)
     return v

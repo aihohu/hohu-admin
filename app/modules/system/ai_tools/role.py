@@ -1,10 +1,18 @@
 """Role management AI tools."""
 
+import enum
 from typing import Annotated, Any
 
 from pydantic import AfterValidator, Field
 from pydantic.experimental.missing_sentinel import MISSING
 
+from app.constants import (
+    DATA_SCOPE_ALL,
+    DATA_SCOPE_CUSTOM,
+    DATA_SCOPE_DEPT,
+    DATA_SCOPE_DEPT_AND_SUB,
+    DATA_SCOPE_SELF,
+)
 from app.core.exceptions import (
     BusinessException,
     BusinessRuleException,
@@ -30,6 +38,63 @@ from .common import (
     _confirmation_display,
     _result_projection,
 )
+
+
+class AiRoleDataScope(enum.StrEnum):
+    """Stable model-facing names for Role data-scope choices."""
+
+    ALL = "ALL"
+    CUSTOM = "CUSTOM"
+    DEPT = "DEPT"
+    DEPT_AND_SUB = "DEPT_AND_SUB"
+    SELF = "SELF"
+
+
+_ROLE_DATA_SCOPE_CODES = {
+    AiRoleDataScope.ALL: DATA_SCOPE_ALL,
+    AiRoleDataScope.CUSTOM: DATA_SCOPE_CUSTOM,
+    AiRoleDataScope.DEPT: DATA_SCOPE_DEPT,
+    AiRoleDataScope.DEPT_AND_SUB: DATA_SCOPE_DEPT_AND_SUB,
+    AiRoleDataScope.SELF: DATA_SCOPE_SELF,
+}
+_ROLE_DATA_SCOPE_NAMES = {
+    code: scope.value for scope, code in _ROLE_DATA_SCOPE_CODES.items()
+}
+
+
+def _role_data_scope_code(value: AiRoleDataScope | str) -> str:
+    """Map a model name or a frozen canonical code to the storage code."""
+    if isinstance(value, AiRoleDataScope):
+        return _ROLE_DATA_SCOPE_CODES[value]
+    if value in _ROLE_DATA_SCOPE_NAMES:
+        return value
+    try:
+        return _ROLE_DATA_SCOPE_CODES[AiRoleDataScope(value)]
+    except ValueError as exc:
+        raise BusinessRuleException(
+            "角色数据权限范围无效",
+            error_code="AI_ROLE_DATA_SCOPE_INVALID",
+        ) from exc
+
+
+def _role_data_scope_name(code: str) -> str:
+    """Return the unambiguous model-facing name for a storage code."""
+    try:
+        return _ROLE_DATA_SCOPE_NAMES[code]
+    except KeyError as exc:
+        raise BusinessRuleException(
+            "角色数据权限范围无效",
+            error_code="AI_ROLE_DATA_SCOPE_INVALID",
+        ) from exc
+
+
+def _role_scope_confirmation_field(code: str) -> dict[str, str]:
+    """Present both the semantic name and its canonical storage code."""
+    return {
+        "label": "data_scope",
+        "value": code,
+        "display_value": f"{_role_data_scope_name(code)} ({code})",
+    }
 
 
 @ai_tool(
@@ -88,7 +153,8 @@ async def role_list(
             "name": role.role_name,
             "code": role.role_code,
             "status": role.status,
-            "dataScope": role.data_scope,
+            "dataScope": _role_data_scope_name(role.data_scope),
+            "dataScopeCode": role.data_scope,
             "delegable": role.delegable,
             "blockedReasonCode": role.blocked_reason_code,
         }
@@ -142,7 +208,8 @@ def _role_result(*, action: str, role: Role) -> ToolResult:
             "roleCode": role.role_code,
             "roleName": role.role_name,
             "status": role.status,
-            "dataScope": role.data_scope,
+            "dataScope": _role_data_scope_name(role.data_scope),
+            "dataScopeCode": role.data_scope,
         },
         projection=_result_projection("managed_role", [role_id], scope_bound=True),
         ui=UIResult(
@@ -215,7 +282,8 @@ async def role_lookup(
             "roleCode": role.role_code,
             "roleName": role.role_name,
             "status": role.status,
-            "dataScope": role.data_scope,
+            "dataScope": _role_data_scope_name(role.data_scope),
+            "dataScopeCode": role.data_scope,
             "delegable": role.delegable,
             "blockedReasonCode": role.blocked_reason_code,
         }
@@ -269,13 +337,14 @@ async def role_create(
     *,
     role_name: str,
     role_code: str,
-    data_scope: str,
+    data_scope: AiRoleDataScope,
     status: str,
     role_desc: str | None = None,
     dept_ids: AiRoleRelatedIds | None = None,
 ) -> ToolResult:
     """Execute an approved Role create through the shared policy."""
     snapshot = _require_role_snapshot(ctx)
+    data_scope_code = _role_data_scope_code(data_scope)
     try:
         await ensure_targets_in_scope(ctx, dept_ids=dept_ids or [])
         role = await role_management_service.create(
@@ -284,7 +353,7 @@ async def role_create(
                 role_name=role_name,
                 role_code=role_code,
                 role_desc=role_desc,
-                data_scope=data_scope,
+                data_scope=data_scope_code,
                 status=status,
                 dept_ids=dept_ids,
             ),
@@ -304,7 +373,7 @@ async def _dry_run_role_create(
     *,
     role_name: str,
     role_code: str,
-    data_scope: str,
+    data_scope: AiRoleDataScope,
     status: str,
     role_desc: str | None = None,
     dept_ids: AiRoleRelatedIds | None = None,
@@ -312,11 +381,12 @@ async def _dry_run_role_create(
     """Freeze a normalized Role create and its delegated authority facts."""
     from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
 
+    data_scope_code = _role_data_scope_code(data_scope)
     payload = RoleCreate(
         role_name=role_name,
         role_code=role_code,
         role_desc=role_desc,
-        data_scope=data_scope,
+        data_scope=data_scope_code,
         status=status,
         dept_ids=dept_ids,
     )
@@ -334,13 +404,13 @@ async def _dry_run_role_create(
         confirmation_fields=[
             {"label": "role_code", "value": role_code},
             {"label": "role_name", "value": role_name},
-            {"label": "data_scope", "value": data_scope},
+            _role_scope_confirmation_field(data_scope_code),
         ],
         execution_args={
             "role_name": role_name,
             "role_code": role_code,
             "role_desc": role_desc,
-            "data_scope": data_scope,
+            "data_scope": data_scope_code,
             "status": status,
             "dept_ids": dept_ids,
         },
@@ -376,18 +446,21 @@ async def role_update(
     role_id: AiRoleId,
     role_name: str | MISSING = MISSING,
     role_desc: str | None | MISSING = MISSING,
-    data_scope: str | MISSING = MISSING,
+    data_scope: AiRoleDataScope | MISSING = MISSING,
     status: str | MISSING = MISSING,
     dept_ids: AiRoleRelatedIds | MISSING = MISSING,
 ) -> ToolResult:
     """Execute an approved Role definition update through the shared policy."""
     snapshot = _require_role_snapshot(ctx)
+    data_scope_code = (
+        MISSING if data_scope is MISSING else _role_data_scope_code(data_scope)
+    )
     values = {
         key: value
         for key, value in {
             "role_name": role_name,
             "role_desc": role_desc,
-            "data_scope": data_scope,
+            "data_scope": data_scope_code,
             "status": status,
             "dept_ids": dept_ids,
         }.items()
@@ -419,20 +492,23 @@ async def _dry_run_role_update(
     role_id: AiRoleId,
     role_name: str | MISSING = MISSING,
     role_desc: str | None | MISSING = MISSING,
-    data_scope: str | MISSING = MISSING,
+    data_scope: AiRoleDataScope | MISSING = MISSING,
     status: str | MISSING = MISSING,
     dept_ids: AiRoleRelatedIds | MISSING = MISSING,
 ) -> Any:
     """Freeze a normalized Role definition update and all member impacts."""
     from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
 
+    data_scope_code = (
+        MISSING if data_scope is MISSING else _role_data_scope_code(data_scope)
+    )
     execution_args = {
         key: value
         for key, value in {
             "role_id": role_id,
             "role_name": role_name,
             "role_desc": role_desc,
-            "data_scope": data_scope,
+            "data_scope": data_scope_code,
             "status": status,
             "dept_ids": dept_ids,
         }.items()
@@ -453,10 +529,15 @@ async def _dry_run_role_update(
         reason=f"将更新角色 {role_id}",
         summary_key="page.ai.chat.confirmRoleUpdateSummary",
         summary_params={"roleId": str(role_id)},
-        confirmation_fields=_bound_confirmation_fields(
-            execution_args,
-            role_update.__ai_tool_meta__.args_summary_fields,
-        ),
+        confirmation_fields=[
+            _role_scope_confirmation_field(str(field["value"]))
+            if field["label"] == "data_scope"
+            else field
+            for field in _bound_confirmation_fields(
+                execution_args,
+                role_update.__ai_tool_meta__.args_summary_fields,
+            )
+        ],
         execution_args=execution_args,
         business_snapshot=preview.snapshot,
     )

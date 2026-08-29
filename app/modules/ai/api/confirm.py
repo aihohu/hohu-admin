@@ -253,8 +253,9 @@ async def _confirm_prepared(
     action_ref,
 ) -> ResponseModel[ConfirmResponse]:  # noqa: ANN001
     """PostgreSQL-authoritative prepared confirmation and inline execution."""
+    current_user_id = int(current_user.user_id)
     if (
-        action_ref.user_id != current_user.user_id
+        action_ref.user_id != current_user_id
         or action_ref.tenant_id != current_tenant_id
     ):
         raise NotFoundException(
@@ -269,9 +270,9 @@ async def _confirm_prepared(
         )
     action = context.action
     if (
-        action.user_id != current_user.user_id
+        action.user_id != current_user_id
         or action.tenant_id != current_tenant_id
-        or context.conversation.user_id != current_user.user_id
+        or context.conversation.user_id != current_user_id
     ):
         raise NotFoundException(
             "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
@@ -280,7 +281,7 @@ async def _confirm_prepared(
     if status != PreparedActionStatus.PENDING_CONFIRMATION:
         if req.action == "approve":
             ensure_ai_chat_use(current_user)
-            if await check_user_disabled(redis_client, current_user.user_id):
+            if await check_user_disabled(redis_client, current_user_id):
                 raise AuthorizationException(
                     "AI 已被禁用，无法确认操作",
                     error_code="AI_USER_DISABLED",
@@ -290,7 +291,7 @@ async def _confirm_prepared(
     log = await operation_log_service.get_by_tool_call_id(
         db,
         action.execute_tool_call_id,
-        user_id=current_user.user_id,
+        user_id=current_user_id,
         tenant_id=current_tenant_id,
     )
     source_active = (
@@ -324,7 +325,7 @@ async def _confirm_prepared(
             status=PreparedActionStatus.REJECTED,
             error_code="USER_REJECTED",
             error_msg="用户已取消此操作",
-            approved_by=current_user.user_id,
+            approved_by=current_user_id,
         )
         await db.commit()
         await _notify_prepared_terminal(terminal, ConfirmAction.REJECTED)
@@ -345,7 +346,7 @@ async def _confirm_prepared(
         await _notify_prepared_terminal(terminal, ConfirmAction.REJECTED)
         raise
 
-    if await check_user_disabled(redis_client, current_user.user_id):
+    if await check_user_disabled(redis_client, current_user_id):
         terminal = await _terminalize_before_execution(
             db,
             action=action,
@@ -398,7 +399,7 @@ async def _confirm_prepared(
         expected_status=PreparedActionStatus.PENDING_CONFIRMATION,
         expected_version=action.row_version,
         target_status=PreparedActionStatus.APPROVED,
-        approved_by=current_user.user_id,
+        approved_by=current_user_id,
     )
     if approved is None:
         await db.rollback()
@@ -428,7 +429,7 @@ async def _confirm_prepared(
         return ResponseModel.success(data=_prepared_response(latest or approved))
     if log is not None:
         await operation_log_service.mark_approved(
-            db, log.log_id, approved_by=current_user.user_id
+            db, log.log_id, approved_by=current_user_id
         )
         await operation_log_service.mark_running(db, log.log_id)
     await db.commit()
@@ -457,79 +458,80 @@ async def _confirm_prepared(
     target_status = (
         PreparedActionStatus.SUCCEEDED if result.ok else PreparedActionStatus.FAILED
     )
-    async with AsyncSessionLocal() as terminal_db:
-        async with terminal_db.begin():
-            current = await prepared_action_service.get_by_confirmation_id(
-                terminal_db, req.confirmation_id
-            )
-            if current is None:
-                raise NotFoundException(
-                    "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
+    if not result.ok:
+        await db.rollback()
+    current = await prepared_action_service.get_by_confirmation_id(
+        db, req.confirmation_id
+    )
+    if current is None:
+        raise NotFoundException(
+            "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
+        )
+    was_running = current.status == PreparedActionStatus.RUNNING.value
+    result_lineage = None
+    if result.ok and result.projection is not None:
+        result_data_scope_hash = None
+        if result.projection.scope_bound:
+            result_data_scope_hash = (
+                await result_projection_service.compute_data_scope_hash(
+                    db,
+                    current_user,
                 )
-            was_running = current.status == PreparedActionStatus.RUNNING.value
-            result_lineage = None
-            if result.ok and result.projection is not None:
-                result_data_scope_hash = None
-                if result.projection.scope_bound:
-                    result_data_scope_hash = (
-                        await result_projection_service.compute_data_scope_hash(
-                            terminal_db,
-                            current_user,
-                        )
-                    )
-                result_lineage = result_projection_service.freeze_lineage(
-                    tenant_id=current.tenant_id,
-                    agent_code=current.agent_code,
-                    tool_codes=current.tool_codes or [current.execute_tool_name],
-                    subject_refs=result.projection.subject_refs,
-                    data_scope_hash=result_data_scope_hash,
-                )
-            terminal = await prepared_action_service.transition_status(
-                terminal_db,
-                action_id=current.action_id,
-                expected_status=PreparedActionStatus.RUNNING,
-                expected_version=current.row_version,
-                target_status=target_status,
-                error_code=result.error_code or None,
-                result_data=result.data if result.ok else None,
-                result_ui=_ui_to_dict(result.ui) if result.ok else None,
+            )
+        result_lineage = result_projection_service.freeze_lineage(
+            tenant_id=current.tenant_id,
+            agent_code=current.agent_code,
+            tool_codes=current.tool_codes or [current.execute_tool_name],
+            subject_refs=result.projection.subject_refs,
+            data_scope_hash=result_data_scope_hash,
+        )
+    terminal = await prepared_action_service.transition_status(
+        db,
+        action_id=current.action_id,
+        expected_status=PreparedActionStatus.RUNNING,
+        expected_version=current.row_version,
+        target_status=target_status,
+        error_code=result.error_code or None,
+        result_data=result.data if result.ok else None,
+        result_ui=_ui_to_dict(result.ui) if result.ok else None,
+        duration_ms=duration_ms,
+        result_lineage=result_lineage,
+        replace_result_lineage=result.ok,
+    )
+    if terminal is None:
+        terminal = current
+    terminal_log = await operation_log_service.get_by_tool_call_id(
+        db,
+        terminal.execute_tool_call_id,
+        user_id=current_user_id,
+        tenant_id=current_tenant_id,
+    )
+    if terminal_log is not None and was_running:
+        if result.ok:
+            await operation_log_service.mark_success(
+                db,
+                terminal_log.log_id,
+                result_summary="prepared action succeeded",
                 duration_ms=duration_ms,
-                result_lineage=result_lineage,
-                replace_result_lineage=result.ok,
             )
-            if terminal is None:
-                terminal = current
-            terminal_log = await operation_log_service.get_by_tool_call_id(
-                terminal_db,
-                terminal.execute_tool_call_id,
-                user_id=current_user.user_id,
-                tenant_id=current_tenant_id,
-            )
-            if terminal_log is not None and was_running:
-                if result.ok:
-                    await operation_log_service.mark_success(
-                        terminal_db,
-                        terminal_log.log_id,
-                        result_summary="prepared action succeeded",
-                        duration_ms=duration_ms,
-                    )
-                else:
-                    await operation_log_service.mark_failed(
-                        terminal_db,
-                        terminal_log.log_id,
-                        error_code=result.error_code or "AI_INTERNAL_ERROR",
-                        duration_ms=duration_ms,
-                    )
-            await chat_run_finalizer.finalize_prepared_action(
-                terminal_db,
-                action=terminal,
-                ok=result.ok,
+        else:
+            await operation_log_service.mark_failed(
+                db,
+                terminal_log.log_id,
+                error_code=result.error_code or "AI_INTERNAL_ERROR",
                 duration_ms=duration_ms,
-                result=result.data if result.ok else None,
-                result_ui=_ui_to_dict(result.ui) if result.ok else None,
-                error_code=result.error_code or None,
-                error_msg=result.error_msg or None,
             )
+    await chat_run_finalizer.finalize_prepared_action(
+        db,
+        action=terminal,
+        ok=result.ok,
+        duration_ms=duration_ms,
+        result=result.data if result.ok else None,
+        result_ui=_ui_to_dict(result.ui) if result.ok else None,
+        error_code=result.error_code or None,
+        error_msg=result.error_msg or None,
+    )
+    await db.commit()
 
     await _notify_prepared_terminal(terminal, ConfirmAction.APPROVED)
     return ResponseModel.success(data=_prepared_response(terminal))

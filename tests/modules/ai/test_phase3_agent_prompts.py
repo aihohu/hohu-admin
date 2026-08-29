@@ -19,6 +19,8 @@ def test_role_agent_prompt_covers_complete_phase3_workflow() -> None:
     assert "零命中" in prompt
     assert "多命中" in prompt
     assert "禁止猜测" in prompt
+    assert "ALL/CUSTOM/DEPT/DEPT_AND_SUB/SELF" in prompt
+    assert "不得只用文字声称写操作已完成" in prompt
 
 
 def test_dept_agent_prompt_covers_scoped_phase3_workflow() -> None:

@@ -569,7 +569,8 @@ class TestPreparedConfirmation:
             status="succeeded", interaction_flow=interaction_flow
         )
         db = MagicMock()
-        db.commit = AsyncMock()
+        lifecycle: list[str] = []
+        db.commit = AsyncMock(side_effect=lambda: lifecycle.append("commit"))
         db.rollback = AsyncMock()
         deps = SimpleNamespace(data_scope_hash="current-scope")
         validate_scope = MagicMock()
@@ -605,7 +606,12 @@ class TestPreparedConfirmation:
             patch("app.modules.ai.api.confirm.validate_prepared_execution"),
             patch(
                 "app.modules.ai.api.confirm.execute_approved_prepared_action",
-                AsyncMock(return_value=ToolResult.success({"successCount": 2})),
+                AsyncMock(
+                    side_effect=lambda *_args: (
+                        lifecycle.append("execute")
+                        or ToolResult.success({"successCount": 2})
+                    )
+                ),
             ) as execute,
             patch(
                 "app.modules.ai.api.confirm.chat_run_finalizer.finalize_prepared_action",
@@ -617,7 +623,7 @@ class TestPreparedConfirmation:
             ) as get_pending,
             patch(
                 "app.modules.ai.api.confirm.hitl_manager.wake",
-                AsyncMock(return_value=False),
+                AsyncMock(side_effect=lambda *_args: lifecycle.append("wake") or False),
             ),
             patch(
                 "app.modules.ai.api.confirm.hitl_manager.delete_pending",
@@ -639,6 +645,8 @@ class TestPreparedConfirmation:
 
         assert result.data.status == "succeeded"
         assert result.data.action_id == 9001
+        assert db.commit.await_count == 2
+        assert lifecycle == ["commit", "execute", "commit", "wake"]
         validate_scope.assert_called_once_with(
             pending,
             current_data_scope_hash="current-scope",
@@ -743,10 +751,8 @@ class TestPreparedConfirmation:
                 current_user=current_user,
             )
 
-        terminal_db = _mock_external[
-            "session_local"
-        ].return_value.__aenter__.return_value
-        post_write_hash.assert_awaited_once_with(terminal_db, current_user)
+        post_write_hash.assert_awaited_once_with(db, current_user)
+        assert db.commit.await_count == 2
         result_lineage = transition.await_args_list[2].kwargs["result_lineage"]
         assert result_lineage.data_scope_hash == "post-write-scope"
         assert result.data.status == "succeeded"
