@@ -4,26 +4,26 @@
 部门（3 层）+ 30 条业务数据，演示者用不同账号登录 admin-web 的「数据
 权限演示」页面，看到同一份数据的不同子集。
 
-幂等：所有 ID 固定常量；运行前先按 user_name/role_code/dept_name 检查
-存在性，已存在则跳过。重跑安全。
+幂等：所有 ID 固定常量；用户按固定 ID 对账并迁移旧用户名，缺失用户及关联
+单独补齐；其余实体按稳定业务键检查。重跑安全，也可修复部分执行后的数据。
 
 Usage:
     cd hohu-admin
     python scripts/seed_demo_data_scope.py
 
 演示账号（密码统一 demo@12345）：
-    demo_all       ALL         看全部 30 条
-    demo_dept_sub  DEPT_AND_SUB 看主部门 BRANCH_A 及子（约 20 条）
-    demo_dept      DEPT        仅看主部门 BRANCH_A（约 10 条）
-    demo_custom    CUSTOM      看 role_depts 配置的 TEAM_A1+TEAM_B1（约 10 条）
-    demo_self      SELF        仅看自己创建的（约 5 条）
+    demoall      ALL          看全部 30 条
+    demodeptsub  DEPT_AND_SUB 看主部门 BRANCH_A 及子（约 20 条）
+    demodept     DEPT         仅看主部门 BRANCH_A（约 10 条）
+    democustom   CUSTOM       看 role_depts 配置的 TEAM_A1+TEAM_B1（约 10 条）
+    demoself     SELF         仅看自己创建的（约 5 条）
 """
 
 # ruff: noqa: T201
 
 import asyncio
 
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -87,10 +87,10 @@ ROLES = [
 
 # 每个用户的 (user_id, user_name, nickname, role_id, primary_dept_id, [dept_ids])
 USERS = [
-    (USER_ALL_ID, "demo_all", "演示-全部", ROLE_ALL_ID, TEAM_A1_ID, [TEAM_A1_ID]),
+    (USER_ALL_ID, "demoall", "演示-全部", ROLE_ALL_ID, TEAM_A1_ID, [TEAM_A1_ID]),
     (
         USER_DEPT_SUB_ID,
-        "demo_dept_sub",
+        "demodeptsub",
         "演示-本部门及以下",
         ROLE_DEPT_SUB_ID,
         BRANCH_A_ID,
@@ -98,7 +98,7 @@ USERS = [
     ),
     (
         USER_DEPT_ID,
-        "demo_dept",
+        "demodept",
         "演示-本部门",
         ROLE_DEPT_ID,
         BRANCH_A_ID,
@@ -106,14 +106,22 @@ USERS = [
     ),
     (
         USER_CUSTOM_ID,
-        "demo_custom",
+        "democustom",
         "演示-自定义",
         ROLE_CUSTOM_ID,
         BRANCH_B_ID,
         [BRANCH_B_ID],
     ),
-    (USER_SELF_ID, "demo_self", "演示-仅本人", ROLE_SELF_ID, TEAM_A1_ID, [TEAM_A1_ID]),
+    (USER_SELF_ID, "demoself", "演示-仅本人", ROLE_SELF_ID, TEAM_A1_ID, [TEAM_A1_ID]),
 ]
+
+LEGACY_USER_NAMES = {
+    USER_ALL_ID: "demo_all",
+    USER_DEPT_SUB_ID: "demo_dept_sub",
+    USER_DEPT_ID: "demo_dept",
+    USER_CUSTOM_ID: "demo_custom",
+    USER_SELF_ID: "demo_self",
+}
 
 
 async def _seed_depts(db: AsyncSession) -> None:
@@ -186,21 +194,33 @@ async def _seed_roles(db: AsyncSession) -> None:
 
 
 async def _seed_users(db: AsyncSession) -> None:
-    existing = (
+    desired_names = {user_id: user_name for user_id, user_name, *_rest in USERS}
+    for user_id, legacy_name in LEGACY_USER_NAMES.items():
+        await db.execute(
+            update(User)
+            .where(User.user_id == user_id, User.user_name == legacy_name)
+            .values(user_name=desired_names[user_id])
+        )
+
+    existing_ids = set(
         (
             await db.execute(
-                select(User.user_name).where(User.user_name.in_([u[1] for u in USERS]))
+                select(User.user_id).where(User.user_id.in_([u[0] for u in USERS]))
             )
         )
         .scalars()
         .all()
     )
-    if existing:
-        print(f"  users: {len(existing)} already exist, skip")
-        return
-
-    hashed = get_password_hash(PASSWORD)
-    for user_id, user_name, nickname, _role_id, _primary_dept_id, _dept_ids in USERS:
+    missing_users = [user for user in USERS if user[0] not in existing_ids]
+    hashed = get_password_hash(PASSWORD) if missing_users else ""
+    for (
+        user_id,
+        user_name,
+        nickname,
+        _role_id,
+        _primary_dept_id,
+        _dept_ids,
+    ) in missing_users:
         db.add(
             User(
                 user_id=user_id,
@@ -218,9 +238,20 @@ async def _seed_users(db: AsyncSession) -> None:
         for u in USERS
         for did in u[5]
     ]
-    await db.execute(insert(user_roles).values(user_role_rows))
-    await db.execute(insert(user_depts).values(user_dept_rows))
-    print(f"  users: created {len(USERS)} (password: {PASSWORD})")
+    await db.execute(
+        pg_insert(user_roles)
+        .values(user_role_rows)
+        .on_conflict_do_nothing(index_elements=["user_id", "role_id"])
+    )
+    await db.execute(
+        pg_insert(user_depts)
+        .values(user_dept_rows)
+        .on_conflict_do_nothing(index_elements=["user_id", "dept_id"])
+    )
+    print(
+        f"  users: created {len(missing_users)}, reconciled {len(existing_ids)} "
+        f"(password for new users: {PASSWORD})"
+    )
 
 
 async def _seed_demo_data(db: AsyncSession) -> None:

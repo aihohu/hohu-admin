@@ -308,7 +308,11 @@ class TestConfirmSuccess:
                 )
 
         assert exc_info.value.error_code == "AI_CHAT_PERMISSION_DENIED"
-        expire.assert_awaited_once_with(db, 77)
+        expire.assert_awaited_once_with(
+            db,
+            77,
+            error_code="AI_CHAT_PERMISSION_DENIED",
+        )
         finalize.assert_awaited_once()
         db.commit.assert_awaited_once()
         wake.assert_awaited_once_with("cid_test_123", ConfirmAction.REJECTED)
@@ -372,7 +376,9 @@ class TestPreparedConfirmation:
     ) -> None:
         action = _make_prepared_action()
         terminal = _make_prepared_action(status="expired")
+        log = SimpleNamespace(log_id=77)
         transition = AsyncMock(return_value=terminal)
+        expire = AsyncMock(return_value=log)
         notify = AsyncMock()
         with (
             patch(
@@ -389,7 +395,11 @@ class TestPreparedConfirmation:
             ),
             patch(
                 "app.modules.ai.api.confirm.operation_log_service.get_by_tool_call_id",
-                AsyncMock(return_value=None),
+                AsyncMock(return_value=log),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.operation_log_service.mark_expired_if_pending",
+                expire,
             ),
             patch(
                 "app.modules.ai.api.confirm.prepared_action_service.transition_status",
@@ -424,6 +434,11 @@ class TestPreparedConfirmation:
         assert transition.await_args.kwargs["target_status"].value == "expired"
         assert transition.await_args.kwargs["error_code"] == (
             "AI_CHAT_PERMISSION_DENIED"
+        )
+        expire.assert_awaited_once_with(
+            db,
+            log.log_id,
+            error_code="AI_CHAT_PERMISSION_DENIED",
         )
         db.commit.assert_awaited_once()
         notify.assert_awaited_once()
@@ -1004,7 +1019,11 @@ class TestUserDisabled:
                 await confirm_tool(req, db=db, current_user=_make_user(100))
 
         assert exc_info.value.error_code == "AI_USER_DISABLED"
-        mark_expired.assert_awaited_once_with(db, fake_log.log_id)
+        mark_expired.assert_awaited_once_with(
+            db,
+            fake_log.log_id,
+            error_code="AI_USER_DISABLED",
+        )
         finalize.assert_awaited_once_with(
             db,
             pending=pending,

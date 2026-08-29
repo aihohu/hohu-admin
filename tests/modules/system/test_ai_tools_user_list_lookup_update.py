@@ -16,9 +16,10 @@ db_session fixture 用 outer-transaction 回滚模式，所有写入不真正落
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import BusinessRuleException
+from app.core.exceptions import AuthorizationException, BusinessRuleException
 from app.modules.ai.agents.gateway.executor import _build_direct_confirmation_fields
 from app.modules.ai.agents.hitl.events import DryRunSummary
 from app.modules.ai.agents.tools.meta import AiToolMeta
@@ -443,3 +444,25 @@ class TestDryRunUserUpdate:
         result = await _dry_run_user_update(ctx, user_id=9999, nickname="x")
         assert result.ok is False
         assert "不存在" in result.reason or "不在" in result.reason
+
+    async def test_dry_run_scope_denial_preserves_typed_error(
+        self, db_session: AsyncSession
+    ) -> None:
+        """An out-of-scope target must fail before Gateway confirmation."""
+        await _add_user(db_session, user_id=4300, user_name="scope-outsider")
+        data_scope = DataScopeContext(
+            accessible_dept_ids=set(),
+            accessible_user_scope=select(User.user_id).where(User.user_id == -1),
+            filters=[User.user_id == -1],
+        )
+        ctx = _make_ctx(
+            db_session,
+            data_scope=data_scope,
+            tool_name="user.update",
+            required_perms=("system:user:edit",),
+        )
+
+        with pytest.raises(AuthorizationException) as exc_info:
+            await _dry_run_user_update(ctx, user_id=4300, nickname="forbidden")
+
+        assert exc_info.value.error_code == "AI_DATA_SCOPE_VIOLATION"

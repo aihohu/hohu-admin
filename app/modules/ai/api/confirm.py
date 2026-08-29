@@ -182,7 +182,9 @@ async def _terminalize_legacy_execution_denied(
     )
     if log is not None:
         transitioned = await operation_log_service.mark_expired_if_pending(
-            db, log.log_id
+            db,
+            log.log_id,
+            error_code=error_code,
         )
         if transitioned is not None:
             await chat_run_finalizer.finalize_pending_turn(
@@ -233,7 +235,11 @@ async def _terminalize_before_execution(
                 db, log.log_id, approved_by=approved_by or action.user_id
             )
         else:
-            await operation_log_service.mark_expired_if_pending(db, log.log_id)
+            await operation_log_service.mark_expired_if_pending(
+                db,
+                log.log_id,
+                error_code=error_code,
+            )
     await chat_run_finalizer.finalize_prepared_action(
         db,
         action=terminal,

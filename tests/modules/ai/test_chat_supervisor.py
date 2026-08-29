@@ -29,6 +29,25 @@ def authorize_chat_model_for_endpoint():
         yield
 
 
+@pytest.fixture(autouse=True)
+def isolate_supervisor_quota():
+    """Keep non-quota routing contracts independent from persistent Redis state."""
+    from app.modules.ai.agents.supervisor.quota import QuotaResult
+
+    allowed = QuotaResult(allowed=True, current_count=0, daily_limit=100)
+    with (
+        patch(
+            "app.modules.ai.agents.supervisor.quota.check_supervisor_quota",
+            AsyncMock(return_value=allowed),
+        ),
+        patch(
+            "app.modules.ai.agents.supervisor.quota.increment_daily_count",
+            AsyncMock(return_value=1),
+        ),
+    ):
+        yield
+
+
 def _chat_body(text: str, **extra) -> dict:
     """构造合法 VercelAI SubmitMessage 请求体.
 
@@ -48,6 +67,88 @@ def _chat_body(text: str, **extra) -> dict:
         ],
         **extra,
     }
+
+
+def test_non_image_file_ids_survive_as_safe_model_context() -> None:
+    from app.modules.ai.api.chat import _prepare_messages_for_llm
+
+    messages = [
+        {
+            "id": "history-file",
+            "role": "user",
+            "parts": [
+                {"type": "text", "text": "Please inspect the attachment"},
+                {
+                    "type": "file",
+                    "url": "",
+                    "mediaType": "text/csv",
+                    "filename": "private-name.csv",
+                    "fileSize": 20,
+                    "fileId": "7499337221737025536",
+                },
+            ],
+        },
+        {
+            "id": "current-message",
+            "role": "user",
+            "parts": [{"type": "text", "text": "Import that file"}],
+        },
+    ]
+
+    prepared = _prepare_messages_for_llm(messages)
+
+    assert prepared[0]["parts"] == [
+        {"type": "text", "text": "Please inspect the attachment"},
+        {
+            "type": "text",
+            "text": "[Attached file reference: file_id=7499337221737025536]",
+        },
+    ]
+    assert "private-name.csv" not in repr(prepared)
+
+
+def test_non_image_file_id_dedup_uses_an_exact_token_boundary() -> None:
+    from app.modules.ai.api.chat import _prepare_messages_for_llm
+
+    prepared = _prepare_messages_for_llm(
+        [
+            {
+                "role": "user",
+                "parts": [
+                    {"type": "text", "text": "already saw file_id=1234"},
+                    {
+                        "type": "file",
+                        "url": "",
+                        "mediaType": "text/csv",
+                        "fileId": "123",
+                    },
+                ],
+            }
+        ]
+    )
+
+    assert prepared[0]["parts"][-1] == {
+        "type": "text",
+        "text": "[Attached file reference: file_id=123]",
+    }
+
+
+def test_sensitive_tool_failure_suppresses_provider_content_frames() -> None:
+    from app.modules.ai.api.chat import _filter_provider_output_frame
+
+    text_frame = 'data: {"type":"text-delta","delta":"private-invalid@example"}\n\n'
+    reasoning_frame = 'data: {"type":"reasoning-delta","delta":"x, east-sales, 1"}\n\n'
+    lifecycle_frame = 'data: {"type":"finish-step"}\n\n'
+
+    assert _filter_provider_output_frame(text_frame, suppress_content=True) is None
+    assert _filter_provider_output_frame(reasoning_frame, suppress_content=True) is None
+    assert (
+        _filter_provider_output_frame(lifecycle_frame, suppress_content=True)
+        == lifecycle_frame
+    )
+    assert (
+        _filter_provider_output_frame(text_frame, suppress_content=False) == text_frame
+    )
 
 
 @pytest.mark.asyncio

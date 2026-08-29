@@ -426,6 +426,52 @@ async def test_stream_finalizer_replaces_ungrounded_management_write_claim() -> 
     assert isinstance(terminal_events[1], DoneEvent)
 
 
+@pytest.mark.asyncio
+async def test_stream_finalizer_redacts_provider_text_after_import_field_errors() -> (
+    None
+):
+    db = AsyncMock()
+    captured: dict[str, object] = {}
+    secret_value = "private-invalid@example"
+    raw_row = "x, 华东-销售组, 1"
+
+    async def _finalize(*_args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(message_id=9007199254740993)
+
+    with patch.object(
+        chat_run_finalizer,
+        "finalize_assistant_turn",
+        side_effect=_finalize,
+    ):
+        await _finalize_stream_turn(
+            db,
+            conversation_id=123,
+            trace_id="tr_import_redaction_000000000000000",
+            source_user_message_id=456,
+            content=f"Invalid value {secret_value}; source row: {raw_row}",
+            tool_calls=[
+                {
+                    "tool": "user.import_preview",
+                    "tool_call_id": "tc_import_redaction",
+                    "ok": False,
+                    "error_code": "AI_IMPORT_FIELD_ERRORS",
+                    "error_msg": (
+                        "Import validation failed: row 2, user_email: "
+                        "user_email format is invalid [AI_IMPORT_EMAIL_INVALID]"
+                    ),
+                }
+            ],
+            agent_code="user_mgmt",
+            stream_error_code=None,
+        )
+
+    persisted = str(captured["content"])
+    assert "行号、字段、原因和错误码" in persisted
+    assert secret_value not in persisted
+    assert raw_row not in persisted
+
+
 def test_successful_write_tool_grounds_management_write_claim() -> None:
     load_builtin_tools()
     content = "部门已成功创建。"

@@ -26,7 +26,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import case, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessRuleException
@@ -35,6 +35,12 @@ from app.modules.ai.models.operation_log import AiOperationLog
 
 _TARGET_TYPE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _TARGET_ID_RE = re.compile(r"^[1-9][0-9]*$")
+
+
+def _now_not_before(*timestamps: datetime | None) -> datetime:
+    """Return an application timestamp that preserves audit event ordering."""
+    now = datetime.now(UTC).replace(tzinfo=None)
+    return max([now, *(timestamp for timestamp in timestamps if timestamp is not None)])
 
 
 def build_target_summary(subject_refs: Any) -> str | None:
@@ -155,7 +161,7 @@ class OperationLogService:
                 f"ai_operation_log log_id={log_id} 已进入 running",
                 error_code="AI_OPERATION_LOG_ALREADY_RUNNING",
             )
-        now = datetime.now(UTC).replace(tzinfo=None)
+        now = _now_not_before(log.queued_at)
         # queued_at 由 server_default 填充；HITL 流 mark_running 时计算等待耗时
         if log.queued_at is not None:
             delta = (now - log.queued_at).total_seconds() * 1000
@@ -195,7 +201,7 @@ class OperationLogService:
         if target_summary is not None:
             log.target_summary = target_summary
         log.duration_ms = duration_ms
-        log.finished_at = datetime.now(UTC).replace(tzinfo=None)
+        log.finished_at = _now_not_before(log.queued_at, log.started_at)
         return log
 
     async def mark_failed(
@@ -211,7 +217,7 @@ class OperationLogService:
         self._transition(log, AiOperationStatus.FAILED)
         log.error_code = error_code
         log.duration_ms = duration_ms
-        log.finished_at = datetime.now(UTC).replace(tzinfo=None)
+        log.finished_at = _now_not_before(log.queued_at, log.started_at)
         return log
 
     async def mark_rejected(
@@ -228,7 +234,7 @@ class OperationLogService:
         log = await self._get(db, log_id)
         self._transition(log, AiOperationStatus.REJECTED)
         log.approved_by = approved_by
-        log.finished_at = datetime.now(UTC).replace(tzinfo=None)
+        log.finished_at = _now_not_before(log.queued_at, log.started_at)
         return log
 
     async def mark_rejected_if_pending(
@@ -247,7 +253,13 @@ class OperationLogService:
             finished_at=datetime.now(UTC).replace(tzinfo=None),
         )
 
-    async def mark_expired(self, db: AsyncSession, log_id: int) -> AiOperationLog:
+    async def mark_expired(
+        self,
+        db: AsyncSession,
+        log_id: int,
+        *,
+        error_code: str | None = None,
+    ) -> AiOperationLog:
         """状态迁移：pending_confirmation → expired（终态）
 
         触发场景：5 分钟 TTL 超时或服务重启清扫。
@@ -259,11 +271,16 @@ class OperationLogService:
         """
         log = await self._get(db, log_id)
         self._transition(log, AiOperationStatus.EXPIRED)
-        log.finished_at = datetime.now(UTC).replace(tzinfo=None)
+        log.error_code = error_code
+        log.finished_at = _now_not_before(log.queued_at, log.started_at)
         return log
 
     async def mark_expired_if_pending(
-        self, db: AsyncSession, log_id: int
+        self,
+        db: AsyncSession,
+        log_id: int,
+        *,
+        error_code: str | None = None,
     ) -> AiOperationLog | None:
         """幂等版本（修订 S-14 配套）：仅当 status=pending_confirmation 时迁移到 expired
 
@@ -278,6 +295,7 @@ class OperationLogService:
             db,
             log_id,
             status=AiOperationStatus.EXPIRED.value,
+            error_code=error_code,
             finished_at=datetime.now(UTC).replace(tzinfo=None),
         )
 
@@ -379,6 +397,19 @@ class OperationLogService:
         **values,
     ) -> AiOperationLog | None:
         """CAS pending transition so wake/cleanup races cannot overwrite each other."""
+        finished_at = values.get("finished_at")
+        if isinstance(finished_at, datetime):
+            terminal_floor = case(
+                (
+                    AiOperationLog.started_at.is_not(None),
+                    AiOperationLog.started_at,
+                ),
+                else_=AiOperationLog.queued_at,
+            )
+            values["finished_at"] = case(
+                (terminal_floor > finished_at, terminal_floor),
+                else_=finished_at,
+            )
         stmt = (
             update(AiOperationLog)
             .where(

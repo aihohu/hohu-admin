@@ -140,6 +140,7 @@ async def user_import_preview(
         sync_mode: 员工编号同步策略，在 preview 时冻结
     """
     from app.modules.system.service.user_import_parser import (  # noqa: PLC0415
+        ImportErrorCollection,
         import_file_has_column,
         parse_import_excel,
     )
@@ -161,7 +162,26 @@ async def user_import_preview(
         actor_user_id=ctx.user.user_id,
         has_role_column=has_role_column,
     )
-    records = parse_import_excel(file_bytes, mime_type)
+    try:
+        records = parse_import_excel(file_bytes, mime_type)
+    except ImportErrorCollection as exc:
+        visible_errors = exc.errors[:20]
+        details = "; ".join(
+            (
+                f"row {error.row_num}, {error.field}: "
+                f"{' '.join(error.reason.split())[:160]} "
+                f"[{error.error_code}]"
+            )
+            for error in visible_errors
+        )
+        remaining = len(exc.errors) - len(visible_errors)
+        if remaining > 0:
+            details = f"{details}; {remaining} more field errors"
+        return ToolResult.failure(
+            "AI_IMPORT_FIELD_ERRORS",
+            f"Import validation failed: {details}",
+            validation_error_count=len(exc.errors),
+        )
 
     dry_run_result, batch = await dry_run_import_users(
         ctx.db,

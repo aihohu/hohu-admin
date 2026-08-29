@@ -15,6 +15,7 @@ import base64
 import ipaddress
 import json
 import logging
+import re
 from http import HTTPStatus
 from pathlib import Path
 from urllib.parse import urlparse
@@ -40,6 +41,7 @@ from app.modules.ai.agents.hitl.events import (
     AiStreamEvent,
     ConfirmationRequiredEvent,
     DoneEvent,
+    ToolCallResultEvent,
     event_to_sse_data,
 )
 from app.modules.ai.agents.safety.auto_disable import check_user_disabled
@@ -69,6 +71,7 @@ from app.modules.ai.service.chat_run_service import (
     chat_run_finalizer,
     chat_run_guard,
     enforce_grounded_management_write_claim,
+    enforce_import_error_output_redaction,
 )
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.conversation_service import conversation_service
@@ -82,6 +85,70 @@ from app.modules.ai.service.result_projection_service import (
 from app.modules.system.models.user import User
 
 logger = logging.getLogger(__name__)
+
+_MAX_BIGINT = 9_223_372_036_854_775_807
+
+
+def _protected_file_id(value: object) -> str | None:
+    """Accept only canonical positive BIGINT strings from protected uploads."""
+    if not isinstance(value, str) or not value.isascii() or not value.isdigit():
+        return None
+    if value.startswith("0") or int(value) > _MAX_BIGINT:
+        return None
+    return value
+
+
+def _prepare_messages_for_llm(messages: list[dict]) -> list[dict]:
+    """Replace protected non-image file parts with stable opaque references."""
+    prepared: list[dict] = []
+    for message in messages:
+        new_message = dict(message)
+        parts = message.get("parts")
+        if not isinstance(parts, list):
+            prepared.append(new_message)
+            continue
+
+        existing_text = "\n".join(
+            str(part.get("text", ""))
+            for part in parts
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+        filtered: list[object] = []
+        for part in parts:
+            if not isinstance(part, dict):
+                filtered.append(part)
+                continue
+            if part.get("type") != "file":
+                filtered.append(part)
+                continue
+            if str(part.get("mediaType", "")).startswith("image/"):
+                filtered.append(
+                    {
+                        key: value
+                        for key, value in part.items()
+                        if key not in {"fileSize", "fileId", "file_id"}
+                    }
+                )
+                continue
+
+            file_id = _protected_file_id(part.get("fileId") or part.get("file_id"))
+            has_exact_reference = file_id is not None and re.search(
+                rf"(?<!\d)file_id={re.escape(file_id)}(?!\d)", existing_text
+            )
+            if file_id is not None and has_exact_reference is None:
+                filtered.append(
+                    {
+                        "type": "text",
+                        "text": f"[Attached file reference: file_id={file_id}]",
+                    }
+                )
+
+        if filtered:
+            new_message["parts"] = filtered
+        else:
+            new_message.pop("parts", None)
+        prepared.append(new_message)
+    return prepared
 
 
 def _is_private_url(url: str) -> bool:
@@ -171,6 +238,28 @@ def _collect_text_delta(sse_frame: str, collected: list[str]) -> None:
         collected.append(ev["delta"])
 
 
+def _filter_provider_output_frame(
+    sse_frame: str,
+    *,
+    suppress_content: bool,
+) -> str | None:
+    """Drop Provider text and reasoning after a sensitive tool failure."""
+    if not suppress_content:
+        return sse_frame
+    if not (sse_frame.startswith("data: ") and sse_frame.endswith("\n\n")):
+        return sse_frame
+    try:
+        event = json.loads(sse_frame[6:-2])
+    except (json.JSONDecodeError, ValueError):
+        return sse_frame
+    if isinstance(event, dict) and event.get("type") in {
+        "text-delta",
+        "reasoning-delta",
+    }:
+        return None
+    return sse_frame
+
+
 def _run_guard_heartbeat_ttl(*, pending_handoff: bool) -> int:
     """HITL heartbeat must never shrink the lease below its confirmation window."""
     if pending_handoff:
@@ -207,6 +296,10 @@ async def _finalize_stream_turn(
     content, unverified_write_claim = enforce_grounded_management_write_claim(
         content,
         agent_code=agent_code,
+        tool_calls=tool_calls,
+    )
+    content, _ = enforce_import_error_output_redaction(
+        content,
         tool_calls=tool_calls,
     )
     try:
@@ -398,27 +491,7 @@ async def chat(
     # 在 request body 其他字段传递，发 LLM 时不应作为 file part 出现）。
     # user_parts（持久化用）已在前面提取，保留完整文件元数据用于 UI chip 渲染。
     body_for_llm = dict(body)
-    new_messages = []
-    for msg in body.get("messages", []):
-        new_msg = dict(msg)
-        parts = msg.get("parts")
-        if isinstance(parts, list):
-            filtered = []
-            for p in parts:
-                if not isinstance(p, dict):
-                    filtered.append(p)
-                    continue
-                if p.get("type") == "file":
-                    if not str(p.get("mediaType", "")).startswith("image/"):
-                        continue
-                    p = {k: v for k, v in p.items() if k != "fileSize"}
-                filtered.append(p)
-            if filtered:
-                new_msg["parts"] = filtered
-            else:
-                new_msg.pop("parts", None)
-        new_messages.append(new_msg)
-    body_for_llm["messages"] = new_messages
+    body_for_llm["messages"] = _prepare_messages_for_llm(body.get("messages", []))
 
     # 解析前端请求
     try:
@@ -1057,8 +1130,15 @@ async def chat(
 
     # 注入 signal_event：execute_tool emit 事件 → push 到 queue
     custom_event_queue: asyncio.Queue[AiStreamEvent] = asyncio.Queue()
+    suppress_provider_output = asyncio.Event()
 
     async def _signal_event(event: AiStreamEvent) -> None:
+        if (
+            isinstance(event, ToolCallResultEvent)
+            and not event.ok
+            and event.error_code == "AI_IMPORT_FIELD_ERRORS"
+        ):
+            suppress_provider_output.set()
         await custom_event_queue.put(event)
 
     deps.signal_event = _signal_event
@@ -1098,6 +1178,12 @@ async def chat(
             nonlocal stream_error_code
             try:
                 async for chunk in adapter.encode_stream(event_stream):
+                    chunk = _filter_provider_output_frame(
+                        chunk,
+                        suppress_content=suppress_provider_output.is_set(),
+                    )
+                    if chunk is None:
+                        continue
                     # 提取并收集 Vercel UI Protocol 的 text-delta。
                     # `data: {"type":"text-delta","delta":"..."}\n\n`）
                     _collect_text_delta(chunk, collected)

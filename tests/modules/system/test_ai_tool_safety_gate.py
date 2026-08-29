@@ -25,6 +25,8 @@ from app.modules.system.ai_tools import (
     user_import_execute,
     user_import_preview,
 )
+from app.modules.system.schemas.user_transfer import FailedRow
+from app.modules.system.service.user_import_parser import ImportErrorCollection
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -150,6 +152,59 @@ class TestBuiltinToolEffectMetadata:
 
 
 class TestImportPreviewArtifacts:
+    async def test_field_errors_remain_actionable_without_echoing_cell_values(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        secret_value = "private-invalid@example"
+        parser = MagicMock(
+            side_effect=ImportErrorCollection(
+                [
+                    FailedRow(
+                        row_num=2,
+                        field="user_email",
+                        value=secret_value,
+                        reason="user_email format is invalid",
+                        error_code="AI_IMPORT_EMAIL_INVALID",
+                    )
+                ]
+            )
+        )
+        ctx = SimpleNamespace(
+            user=SimpleNamespace(user_id=11),
+            db=SimpleNamespace(),
+        )
+
+        monkeypatch.setattr(
+            "app.modules.system.ai_tools.user_transfer._load_file_bytes",
+            AsyncMock(return_value=(b"csv", "users.csv", "text/csv")),
+        )
+        monkeypatch.setattr(
+            "app.modules.system.service.user_import_parser.import_file_has_column",
+            MagicMock(return_value=False),
+        )
+        monkeypatch.setattr(
+            "app.modules.system.service.user_import_parser.parse_import_excel",
+            parser,
+        )
+        monkeypatch.setattr(
+            "app.modules.system.service.user_role_assignment_service."
+            "user_role_assignment_service.ensure_import_permissions",
+            AsyncMock(),
+        )
+
+        result = await user_import_preview(
+            ctx,
+            file_id="9001",
+            reason="validate import",
+        )
+
+        assert result.ok is False
+        assert result.error_code == "AI_IMPORT_FIELD_ERRORS"
+        assert "row 2" in result.error_msg
+        assert "user_email" in result.error_msg
+        assert "AI_IMPORT_EMAIL_INVALID" in result.error_msg
+        assert secret_value not in result.error_msg
+
     async def test_same_arguments_create_distinct_preview_artifacts(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

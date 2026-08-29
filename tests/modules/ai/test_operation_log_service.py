@@ -8,6 +8,8 @@
 
 # ruff: noqa: ARG001, PLC0415
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from app.core.exceptions import BusinessRuleException
@@ -107,6 +109,47 @@ class TestStartOperation:
 
 
 class TestStateMachine:
+    async def test_timestamps_never_precede_database_queued_time(
+        self, db_session
+    ) -> None:
+        log_id = await _start(db_session)
+        log = await db_session.get(AiOperationLog, log_id)
+        future_queued_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=5)
+        log.queued_at = future_queued_at
+        await db_session.flush()
+
+        running = await operation_log_service.mark_running(db_session, log_id)
+        assert running.started_at is not None
+        assert running.started_at >= future_queued_at
+
+        succeeded = await operation_log_service.mark_success(
+            db_session,
+            log_id,
+            result_summary="ok",
+            duration_ms=1,
+        )
+        assert succeeded.finished_at is not None
+        assert succeeded.finished_at >= succeeded.started_at
+
+    async def test_pending_terminal_timestamp_never_precedes_queued_time(
+        self, db_session
+    ) -> None:
+        log_id = await _start(db_session, tool_call_id="tc_future_rejected")
+        log = await db_session.get(AiOperationLog, log_id)
+        future_queued_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=5)
+        log.queued_at = future_queued_at
+        await db_session.flush()
+
+        rejected = await operation_log_service.mark_rejected_if_pending(
+            db_session,
+            log_id,
+            approved_by=9001,
+        )
+
+        assert rejected is not None
+        assert rejected.finished_at is not None
+        assert rejected.finished_at >= future_queued_at
+
     async def test_pending_to_running(self, db_session) -> None:
         log_id = await _start(db_session)
 
@@ -168,10 +211,15 @@ class TestStateMachine:
         """修订 S-14 配套：pending_confirmation 状态下迁移到 expired"""
         log_id = await _start(db_session)
 
-        result = await operation_log_service.mark_expired_if_pending(db_session, log_id)
+        result = await operation_log_service.mark_expired_if_pending(
+            db_session,
+            log_id,
+            error_code="AI_CHAT_PERMISSION_DENIED",
+        )
         assert result is not None
         log = await db_session.get(AiOperationLog, log_id)
         assert log.status == "expired"
+        assert log.error_code == "AI_CHAT_PERMISSION_DENIED"
 
     async def test_mark_expired_if_pending_skips_when_running(self, db_session) -> None:
         """修订 S-14 配套：running 状态（已被 wake + mark_running）下不迁移

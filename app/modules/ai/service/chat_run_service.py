@@ -41,6 +41,10 @@ _MANAGEMENT_AGENT_CODES = frozenset({"dept_mgmt", "role_mgmt", "user_mgmt"})
 _SAFE_UNVERIFIED_WRITE_MESSAGE = (
     "本轮未产生可验证的写工具结果，因此没有确认任何业务变更。请重新发起操作。"
 )
+_SAFE_IMPORT_FIELD_ERROR_MESSAGE = (
+    "导入文件字段校验失败。请根据工具错误中的行号、字段、原因和错误码修正文件；"
+    "为保护数据，原始单元格值与整行内容未显示。"
+)
 _WRITE_CLAIM_PATTERN = re.compile(
     r"(?:已|已经)成功(?:地)?(?:创建|新增|更新|修改|移动|调整|设置|绑定|授权|分配|禁用|启用|删除|重置|导入)"
     r"|(?:创建|新增|更新|修改|移动|调整|设置|绑定|授权|分配|禁用|启用|删除|重置|导入)(?:已)?(?:成功|完成)"
@@ -78,6 +82,20 @@ def enforce_grounded_management_write_claim(
         if is_write_tool(registered.meta):
             return content, False
     return _SAFE_UNVERIFIED_WRITE_MESSAGE, True
+
+
+def enforce_import_error_output_redaction(
+    content: str,
+    *,
+    tool_calls: list[dict[str, Any]] | None,
+) -> tuple[str, bool]:
+    """Replace Provider prose after field errors with a deterministic safe summary."""
+    if any(
+        call.get("ok") is False and call.get("error_code") == "AI_IMPORT_FIELD_ERRORS"
+        for call in tool_calls or ()
+    ):
+        return _SAFE_IMPORT_FIELD_ERROR_MESSAGE, True
+    return content, False
 
 
 class ToolCallCollector:

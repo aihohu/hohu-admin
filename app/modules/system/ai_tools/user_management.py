@@ -1103,10 +1103,7 @@ async def _dry_run_user_update(
             reason="至少提供一个待更新字段",
         )
 
-    try:
-        await ensure_targets_in_scope(ctx, user_ids=[user_id])
-    except AuthorizationException as e:
-        return DryRunResult(ok=False, count=0, reason=e.message)
+    await ensure_targets_in_scope(ctx, user_ids=[user_id])
 
     stmt = select(User).where(User.user_id == user_id, *ctx.data_scope.filters)
     user = (await ctx.db.execute(stmt)).scalars().first()
