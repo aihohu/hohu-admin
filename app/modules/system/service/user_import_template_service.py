@@ -112,7 +112,7 @@ _INSTRUCTION_ROWS: tuple[tuple[str, str, str, str], ...] = (
     (
         "status",
         "否（默认 1）",
-        "0 禁用 / 1 启用",
+        "1 启用 / 2 禁用",
         "—",
     ),
 )

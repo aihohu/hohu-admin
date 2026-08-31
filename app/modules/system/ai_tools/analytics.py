@@ -23,6 +23,7 @@ from app.modules.system.service.dept_selector import department_selector
 
 from .common import (
     _result_projection,
+    _validate_enable_status_filter,
 )
 
 # ============ user.count ============
@@ -50,13 +51,14 @@ async def user_count(
     """统计满足条件的用户数量，仅返回数字
 
     filters:
-        status: '1' (启用) / '0' (禁用)
+        status: '1' (启用) / '2' (禁用)
         user_gender: '0' (未知) / '1' (男) / '2' (女)
 
-    注意：LLM 经常以 JSON int 传值（filters={"status": 1}），sys_user 字段是
-    varchar，asyncpg 严格类型检查会抛 ProgrammingError。这里强制 stringify。
+    状态码必须使用字符串，避免数字强制转换造成机器契约歧义。
     """
-    filters = validate_filters_in_whitelist(ctx.tool_meta, filters)
+    filters = _validate_enable_status_filter(
+        validate_filters_in_whitelist(ctx.tool_meta, filters)
+    )
 
     # data_scope 已收敛到调用者可见的用户范围。
     stmt = select(func.count(User.user_id)).where(*ctx.data_scope.filters)
@@ -109,12 +111,14 @@ async def user_stats(
 
     group_by:
         user_gender: 男 / 女 / 未知（值 '1'/'2'/'0'）
-        status: 启用 / 禁用（值 '1'/'0'）
+        status: 启用 / 禁用（值 '1'/'2'）
 
     返回值按 count 降序，最多 max_groups 组（默认 20）。
     """
     group_by = validate_group_by_in_whitelist(ctx.tool_meta, group_by)
-    filters = validate_filters_in_whitelist(ctx.tool_meta, filters)
+    filters = _validate_enable_status_filter(
+        validate_filters_in_whitelist(ctx.tool_meta, filters)
+    )
 
     col = getattr(User, group_by)
     stmt = (
@@ -220,7 +224,9 @@ async def role_count(
     filters:
         status: '1' (启用) / '2' (禁用)
     """
-    filters = validate_filters_in_whitelist(ctx.tool_meta, filters)
+    filters = _validate_enable_status_filter(
+        validate_filters_in_whitelist(ctx.tool_meta, filters)
+    )
 
     stmt = select(func.count(Role.role_id))
     for key, value in filters.items():
@@ -263,9 +269,11 @@ async def dept_count(
     """统计部门数量，仅返回数字
 
     filters:
-        status: '1' (启用) / '0' (禁用)
+        status: '1' (启用) / '2' (禁用)
     """
-    filters = validate_filters_in_whitelist(ctx.tool_meta, filters)
+    filters = _validate_enable_status_filter(
+        validate_filters_in_whitelist(ctx.tool_meta, filters)
+    )
 
     scoped_filters = []
     for key, value in filters.items():

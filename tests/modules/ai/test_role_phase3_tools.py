@@ -122,6 +122,29 @@ def test_role_data_scope_model_contract_uses_named_values() -> None:
     assert "AiRoleDataScope" in str(update_scope)
 
 
+async def test_role_update_dry_run_rejects_noncanonical_status(
+    db_session: AsyncSession,
+) -> None:
+    tool = system_ai_tools.role_update
+    ctx = AiToolContext(
+        user=MagicMock(user_id=next_id()),
+        perms=set(tool.__ai_tool_meta__.required_perms),
+        db=db_session,
+        data_scope=DataScopeContext(None, None, []),
+        trace_id="tr_role_invalid_status",
+        tool_meta=tool.__ai_tool_meta__,
+    )
+
+    with pytest.raises(BusinessRuleException) as exc_info:
+        await system_ai_tools._dry_run_role_update(
+            ctx,
+            role_id=next_id(),
+            status="0",
+        )
+
+    assert exc_info.value.error_code == "AI_ENABLE_STATUS_INVALID"
+
+
 async def test_role_create_dry_run_freezes_canonical_data_scope_code(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,

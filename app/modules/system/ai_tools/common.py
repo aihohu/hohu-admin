@@ -2,7 +2,46 @@
 
 from typing import Any
 
+from pydantic import BaseModel, ValidationError
+
+from app.constants import EnableStatus
+from app.core.exceptions import BusinessRuleException
 from app.modules.ai.agents.gateway.result import ResultProjection
+from app.utils.validators import STATUS_ERROR_MSG
+
+
+def _validate_enable_status(value: object) -> str:
+    """Reject aliases and numeric coercion for the shared 1/2 status contract."""
+    try:
+        return str(EnableStatus(value))
+    except (TypeError, ValueError):
+        raise BusinessRuleException(
+            STATUS_ERROR_MSG,
+            error_code="AI_ENABLE_STATUS_INVALID",
+        ) from None
+
+
+def _validate_enable_status_filter(filters: dict[str, Any]) -> dict[str, Any]:
+    """Validate an optional System-domain enable-status filter."""
+    if "status" not in filters:
+        return filters
+    normalized = dict(filters)
+    normalized["status"] = _validate_enable_status(filters["status"])
+    return normalized
+
+
+def _model_validate_for_ai[ModelT: BaseModel](
+    model: type[ModelT],
+    values: dict[str, Any],
+    *,
+    message: str,
+    error_code: str,
+) -> ModelT:
+    """Map domain-schema validation to a stable Tool error without input echo."""
+    try:
+        return model.model_validate(values)
+    except ValidationError:
+        raise BusinessRuleException(message, error_code=error_code) from None
 
 
 def _result_projection(

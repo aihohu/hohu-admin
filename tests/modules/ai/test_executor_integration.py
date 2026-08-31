@@ -1020,6 +1020,7 @@ class TestHitlFlow:
             ToolCallStartedEvent,
             ToolCallResultEvent,
         ]
+        assert events[-1].projection == ResultProjection()
 
         from app.db.session import AsyncSessionLocal
 

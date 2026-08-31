@@ -8,15 +8,19 @@ db_session fixture 用 SAVEPOINT 回滚模式，所有写入不真正落库。
 
 # ruff: noqa: ARG001, PLC0415  test 函数 ctx / kwargs 是与生产签名一致的占位
 
+import inspect
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants import STATUS_DISABLED, STATUS_ENABLED, EnableStatus
 from app.core.exceptions import BusinessRuleException
 from app.core.id_generator import next_id
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.core.context import AiToolContext, DataScopeContext
+from app.modules.system import ai_tools as system_ai_tools
 from app.modules.system.ai_tools import (
     role_count,
     user_count,
@@ -26,6 +30,7 @@ from app.modules.system.ai_tools import (
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
+from app.utils.validators import STATUS_ALLOWED
 
 # ============ fixture ============
 
@@ -123,7 +128,7 @@ class TestUserCount:
         await _add_user(db_session, user_id=1001, user_name="u1", status="1")
         await _add_user(db_session, user_id=1002, user_name="u2", status="1")
         await _add_user(db_session, user_id=1003, user_name="u3", status="1")
-        await _add_user(db_session, user_id=1004, user_name="u4", status="0")
+        await _add_user(db_session, user_id=1004, user_name="u4", status="2")
         await db_session.flush()
 
         ctx = _make_ctx(db_session, visible_user_ids={1001, 1002, 1003, 1004})
@@ -187,14 +192,14 @@ class TestUserStats:
     async def test_stats_by_status(self, db_session: AsyncSession) -> None:
         await _add_user(db_session, user_id=1001, user_name="u1", status="1")
         await _add_user(db_session, user_id=1002, user_name="u2", status="1")
-        await _add_user(db_session, user_id=1003, user_name="u3", status="0")
+        await _add_user(db_session, user_id=1003, user_name="u3", status="2")
         await db_session.flush()
 
         ctx = _make_ctx(db_session, visible_user_ids={1001, 1002, 1003})
         result = await user_stats(ctx, group_by="status", filters=None)
         assert result.data["groups"] == [
             {"group": "1", "count": 2},
-            {"group": "0", "count": 1},
+            {"group": "2", "count": 1},
         ]
         assert result.ui.view_type == "stats_chart"
 
@@ -207,7 +212,7 @@ class TestUserStats:
             db_session, user_id=1002, user_name="u2", user_gender="2", status="1"
         )
         await _add_user(
-            db_session, user_id=1003, user_name="u3", user_gender="1", status="0"
+            db_session, user_id=1003, user_name="u3", user_gender="1", status="2"
         )
         await db_session.flush()
 
@@ -236,7 +241,7 @@ class TestUserStats:
     async def test_stats_max_groups_truncation(self, db_session: AsyncSession) -> None:
         """max_groups 应截断分组结果。"""
         await _add_user(db_session, user_id=1001, user_name="u1", status="1")
-        await _add_user(db_session, user_id=1002, user_name="u2", status="0")
+        await _add_user(db_session, user_id=1002, user_name="u2", status="2")
         await db_session.flush()
 
         # max_groups=1 截断
@@ -261,14 +266,14 @@ class TestUserStats:
 class TestUserDistinct:
     async def test_distinct_status(self, db_session: AsyncSession) -> None:
         await _add_user(db_session, user_id=1001, user_name="u1", status="1")
-        await _add_user(db_session, user_id=1002, user_name="u2", status="0")
+        await _add_user(db_session, user_id=1002, user_name="u2", status="2")
         await _add_user(db_session, user_id=1003, user_name="u3", status="1")
         await db_session.flush()
 
         ctx = _make_ctx(db_session, visible_user_ids={1001, 1002, 1003})
         result = await user_distinct(ctx, field="status")
         # distinct 值不保证顺序，转 set 对比
-        assert set(result.data["values"]) == {"0", "1"}
+        assert set(result.data["values"]) == {"1", "2"}
         assert result.ui is not None
         assert result.ui.view_type == "plain_json"
         assert result.ui.audit["count"] == 2
@@ -478,7 +483,7 @@ class TestDeptCount:
         from app.modules.system.ai_tools import dept_count
 
         await _add_dept(db_session, dept_id=3001, dept_name="d_on", status="1")
-        await _add_dept(db_session, dept_id=3002, dept_name="d_off", status="0")
+        await _add_dept(db_session, dept_id=3002, dept_name="d_off", status="2")
         await db_session.flush()
 
         ctx = _make_dept_ctx(db_session)
@@ -594,25 +599,25 @@ class TestRoleList:
             role_id=4001,
             role_name="r1",
             role_code="R_R1",
-            status="9",
+            status="2",
         )
         await _add_role(
             db_session,
             role_id=4002,
             role_name="r2",
             role_code="R_R2",
-            status="9",
+            status="2",
         )
         await db_session.flush()
 
         ctx = await _make_role_list_ctx(db_session)
         result = await role_list(
             ctx,
-            filters={"status": "9"},
+            filters={"status": "2"},
         )
         # LLM 层
         assert result.data["limit"] == 20  # 默认
-        assert result.data["total"] == 2
+        assert result.data["total"] >= 2
         assert len(result.data["sample"]) == min(3, result.data["total"])
         # rows 是全量 limit 范围；sample 只取前 3，可能漏掉本次新建（残留干扰），
         # 故用 rows 验证新建项命中。
@@ -781,11 +786,11 @@ class TestDeptList:
         from app.modules.system.ai_tools import dept_list
 
         await _add_dept(db_session, dept_id=5011, dept_name="dept_on_uniq", status="1")
-        await _add_dept(db_session, dept_id=5012, dept_name="dept_off_uniq", status="0")
+        await _add_dept(db_session, dept_id=5012, dept_name="dept_off_uniq", status="2")
         await db_session.flush()
 
         ctx = _make_dept_list_ctx(db_session)
-        result = await dept_list(ctx, filters={"status": "0"})
+        result = await dept_list(ctx, filters={"status": "2"})
         # rows 全量（受 filter 约束）；sample 截断可能漏，故断言 rows
         names = [r["name"] for r in result.ui.view_data["rows"]]
         assert "dept_off_uniq" in names
@@ -798,3 +803,72 @@ class TestDeptList:
         result = await dept_list(ctx, filters=None, limit=100)
         assert result.data["limit"] == 50
         assert len(result.ui.view_data["rows"]) <= 50
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "user_create",
+        "user_update",
+        "dept_create",
+        "dept_update",
+        "role_create",
+        "role_update",
+    ],
+)
+def test_management_status_model_contract_only_accepts_canonical_codes(
+    tool_name: str,
+) -> None:
+    annotation = (
+        inspect.signature(getattr(system_ai_tools, tool_name))
+        .parameters["status"]
+        .annotation
+    )
+    adapter = TypeAdapter(annotation)
+
+    assert adapter.validate_python("1") == "1"
+    assert adapter.validate_python("2") == "2"
+    with pytest.raises(ValidationError):
+        adapter.validate_python("0")
+    with pytest.raises(ValidationError):
+        adapter.validate_python(1)
+
+
+def test_enable_status_constants_and_validator_share_one_contract() -> None:
+    assert {status.value for status in EnableStatus} == {
+        STATUS_ENABLED,
+        STATUS_DISABLED,
+    }
+    assert set(STATUS_ALLOWED) == {STATUS_ENABLED, STATUS_DISABLED}
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["user_count", "user_stats", "dept_count", "dept_list", "user_export"],
+)
+def test_ai_tool_docs_never_describe_zero_as_disabled(tool_name: str) -> None:
+    doc = inspect.getdoc(getattr(system_ai_tools, tool_name)) or ""
+
+    assert "'0' (禁用)" not in doc
+    assert '``"0"`` for disabled' not in doc
+
+
+@pytest.mark.parametrize(
+    ("tool", "context_factory"),
+    [
+        (user_count, _make_ctx),
+        (role_count, _make_role_ctx),
+        (system_ai_tools.dept_count, _make_dept_ctx),
+    ],
+)
+async def test_management_filters_reject_noncanonical_status(
+    db_session: AsyncSession,
+    tool,
+    context_factory,
+) -> None:
+    ctx = context_factory(db_session)
+
+    with pytest.raises(BusinessRuleException) as exc_info:
+        await tool(ctx, filters={"status": "0"})
+
+    assert exc_info.value.error_code == "AI_ENABLE_STATUS_INVALID"

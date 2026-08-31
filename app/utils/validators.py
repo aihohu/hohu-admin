@@ -2,6 +2,8 @@
 
 from re import match
 
+from app.constants import EnableStatus
+
 # ============ 密码 ============
 PWD_PATTERN = r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{6,20}$"
 PWD_ERROR_CODE = "INVALID_PASSWORD_FORMAT"
@@ -65,7 +67,7 @@ def empty_to_none(v: str | None) -> str | None:
 
 
 # ============ 状态 ============
-STATUS_ALLOWED = ("1", "2")
+STATUS_ALLOWED = tuple(status.value for status in EnableStatus)
 STATUS_ERROR_MSG = "状态必须是 1(启用) 或 2(禁用)"
 
 

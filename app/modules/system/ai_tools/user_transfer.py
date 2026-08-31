@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from sqlalchemy import func, select
 
+from app.constants import EnableStatus
 from app.core.exceptions import (
     AuthorizationException,
     BusinessRuleException,
@@ -26,6 +27,7 @@ from app.modules.system.models.user import User
 
 from .common import (
     _result_projection,
+    _validate_enable_status,
 )
 
 # ============ user.import_preview / user.import_execute ============
@@ -463,7 +465,7 @@ async def user_export(
     nickname: str | None = None,
     user_email: str | None = None,
     user_phone: str | None = None,
-    status: Literal["1", "2"] | None = None,
+    status: EnableStatus | None = None,
 ) -> ToolResult:
     """导出用户列表到 Excel。
 
@@ -474,7 +476,7 @@ async def user_export(
     Args:
         reason: 业务理由（必填，1-256 字符）
         user_name / nickname / user_email / user_phone: filter（可选）
-        status: '1' (启用) / '0' (禁用)，None=不过滤
+        status: '1' (启用) / '2' (禁用)，None=不过滤
     """
     from app.modules.ai.service.result_projection_service import (  # noqa: PLC0415
         result_projection_service,
@@ -488,12 +490,13 @@ async def user_export(
         get_file_storage,
     )
 
+    canonical_status = None if status is None else _validate_enable_status(status)
     filter_ = UserExportFilter(
         user_name=user_name,
         nickname=nickname,
         user_email=user_email,
         user_phone=user_phone,
-        status=status,
+        status=canonical_status,
     )
 
     # Authorize before creating the database task or writing an external file.
@@ -589,7 +592,7 @@ async def user_export(
                     "nickname": nickname,
                     "user_email": user_email,
                     "user_phone": user_phone,
-                    "status": status,
+                    "status": canonical_status,
                 },
             },
             label_key="ai.tool.user.export.result",
@@ -606,7 +609,7 @@ async def _dry_run_user_export(
     nickname: str | None = None,
     user_email: str | None = None,
     user_phone: str | None = None,
-    status: Literal["1", "2"] | None = None,
+    status: EnableStatus | None = None,
 ) -> Any:
     """预估导出行数供确认界面展示。
 
@@ -615,6 +618,7 @@ async def _dry_run_user_export(
     """
     from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
 
+    canonical_status = None if status is None else _validate_enable_status(status)
     base = select(User).where(*ctx.data_scope.filters)
     if user_name:
         base = base.where(User.user_name.ilike(f"%{user_name}%"))
@@ -624,8 +628,8 @@ async def _dry_run_user_export(
         base = base.where(User.user_email == user_email)
     if user_phone:
         base = base.where(User.user_phone == user_phone)
-    if status is not None:
-        base = base.where(User.status == status)
+    if canonical_status is not None:
+        base = base.where(User.status == canonical_status)
 
     estimated = int(
         await ctx.db.scalar(select(func.count()).select_from(base.subquery())) or 0
@@ -657,6 +661,6 @@ async def _dry_run_user_export(
         count=estimated,
         reason=f"将导出约 {estimated} 行用户数据到 xlsx 文件（30 天后过期清理）",
         examples=[
-            f"filter: user_name={user_name or '*'}, status={status or '*'}",
+            f"filter: user_name={user_name or '*'}, status={canonical_status or '*'}",
         ],
     )

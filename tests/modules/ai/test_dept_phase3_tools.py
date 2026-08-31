@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import STATUS_DISABLED, STATUS_ENABLED
+from app.core.exceptions import BusinessRuleException
 from app.core.id_generator import next_id
 from app.modules.ai.agents.gateway.executor import _build_direct_confirmation_fields
 from app.modules.ai.agents.hitl.events import DryRunSummary
@@ -343,3 +344,19 @@ async def test_department_update_preserves_explicit_null_for_nullable_fields(
     assert captured.leader is None
     assert captured.phone is None
     assert captured.email is None
+
+
+async def test_department_update_dry_run_rejects_noncanonical_status(
+    db_session: AsyncSession,
+) -> None:
+    tool = system_ai_tools.dept_update
+    ctx = _context(db_session, tool=tool, accessible_dept_ids=None)
+
+    with pytest.raises(BusinessRuleException) as exc_info:
+        await system_ai_tools._dry_run_dept_update(
+            ctx,
+            dept_id=next_id(),
+            status="0",
+        )
+
+    assert exc_info.value.error_code == "AI_ENABLE_STATUS_INVALID"

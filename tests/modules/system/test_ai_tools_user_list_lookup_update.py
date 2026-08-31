@@ -340,6 +340,26 @@ class TestUserUpdate:
 
         assert set(result.ui.audit["fields"]) == {"nickname", "status"}
 
+    async def test_update_rejects_noncanonical_status_without_mutation(
+        self, db_session: AsyncSession
+    ) -> None:
+        await _add_user(db_session, user_id=4004, user_name="statusinvalid", status="1")
+        await db_session.flush()
+        ctx = _make_ctx(
+            db_session,
+            visible_user_ids={4004},
+            tool_name="user.update",
+            required_perms=("system:user:edit",),
+        )
+
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await user_update(ctx, user_id=4004, status="0")
+
+        assert exc_info.value.error_code == "AI_ENABLE_STATUS_INVALID"
+        user = await db_session.get(User, 4004)
+        assert user is not None
+        assert user.status == "1"
+
     async def test_update_data_scope_blocks_outsider(
         self, db_session: AsyncSession
     ) -> None:

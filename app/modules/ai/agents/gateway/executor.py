@@ -509,6 +509,7 @@ async def _execute_tool(
                 duration_ms=duration_ms,
                 error_code=failure.error_code,
                 error_msg=failure.error_msg,
+                projection=failure.projection,
             ),
         )
         _rec("failed")

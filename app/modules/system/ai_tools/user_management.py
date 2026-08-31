@@ -4,7 +4,7 @@ from typing import Any
 
 from sqlalchemy import func, select
 
-from app.constants import IS_PRIMARY_YES, STATUS_ENABLED
+from app.constants import IS_PRIMARY_YES, STATUS_ENABLED, EnableStatus
 from app.core.exceptions import (
     AuthorizationException,
     BusinessException,
@@ -31,6 +31,8 @@ from app.modules.system.models.user import User
 from .common import (
     _coerce_list_limit,
     _result_projection,
+    _validate_enable_status,
+    _validate_enable_status_filter,
 )
 
 
@@ -107,7 +109,7 @@ def _build_ai_user_create_schema(
     user_email: str | None,
     user_phone: str | None,
     user_gender: str | None,
-    status: str,
+    status: EnableStatus,
     primary_dept_id: int,
     default_password: str,
 ) -> Any:
@@ -119,6 +121,7 @@ def _build_ai_user_create_schema(
         UserDeptItem,
     )
 
+    canonical_status = _validate_enable_status(status)
     try:
         return UserCreate(
             user_name=user_name,
@@ -126,7 +129,7 @@ def _build_ai_user_create_schema(
             user_email=user_email,
             user_phone=user_phone,
             user_gender=user_gender,
-            status=status,
+            status=canonical_status,
             dept_ids=[UserDeptItem(dept_id=str(primary_dept_id), is_primary=True)],
             password=default_password,
         )
@@ -164,7 +167,7 @@ async def user_create(
     user_email: str | None = None,
     user_phone: str | None = None,
     user_gender: str | None = "0",
-    status: str = "1",
+    status: EnableStatus = EnableStatus.ENABLED,
 ) -> ToolResult:
     """创建单个用户；密码与角色完全由后端策略决定。"""
     from app.constants import USER_ROLE_CODE  # noqa: PLC0415
@@ -278,7 +281,7 @@ async def _dry_run_user_create(
     user_email: str | None = None,
     user_phone: str | None = None,
     user_gender: str | None = "0",
-    status: str = "1",
+    status: EnableStatus = EnableStatus.ENABLED,
 ) -> Any:
     """预检创建目标、唯一性与后端默认策略，不写业务数据。"""
     from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
@@ -708,7 +711,9 @@ async def user_list(
     limit:
         None / 0 / 负数 = 默认 20；正整数按 min(limit, 50) 截断
     """
-    filters = validate_filters_in_whitelist(ctx.tool_meta, filters)
+    filters = _validate_enable_status_filter(
+        validate_filters_in_whitelist(ctx.tool_meta, filters)
+    )
     safe_limit = _coerce_list_limit(limit)
 
     base = select(User)
@@ -1003,7 +1008,7 @@ async def user_update(
     user_email: str | None = None,
     user_phone: str | None = None,
     user_gender: str | None = None,
-    status: str | None = None,
+    status: EnableStatus | None = None,
 ) -> ToolResult:
     """更新用户资料。
 
@@ -1026,12 +1031,13 @@ async def user_update(
     )
 
     # 至少一个可更新字段
+    canonical_status = None if status is None else _validate_enable_status(status)
     update_payload = {
         "nickname": nickname,
         "user_email": user_email,
         "user_phone": user_phone,
         "user_gender": user_gender,
-        "status": status,
+        "status": canonical_status,
     }
     provided = {k: v for k, v in update_payload.items() if v is not None}
     if not provided:
@@ -1083,17 +1089,18 @@ async def _dry_run_user_update(
     user_email: str | None = None,
     user_phone: str | None = None,
     user_gender: str | None = None,
-    status: str | None = None,
+    status: EnableStatus | None = None,
 ) -> Any:
     """列出待更新字段和当前值，供确认界面展示。"""
     from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
 
+    canonical_status = None if status is None else _validate_enable_status(status)
     update_payload = {
         "nickname": nickname,
         "user_email": user_email,
         "user_phone": user_phone,
         "user_gender": user_gender,
-        "status": status,
+        "status": canonical_status,
     }
     provided = {k: v for k, v in update_payload.items() if v is not None}
     if not provided:

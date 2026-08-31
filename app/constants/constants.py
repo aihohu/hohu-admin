@@ -1,5 +1,7 @@
 """应用级别常量"""
 
+from enum import StrEnum
+
 # 用户名常量
 ADMIN_USERNAME = "admin"
 SUPER_ADMIN_USERNAME = "super_admin"
@@ -17,6 +19,14 @@ MENU_TYPE_BUTTON = "F"  # 按钮
 # 状态常量
 STATUS_ENABLED = "1"
 STATUS_DISABLED = "2"
+
+
+class EnableStatus(StrEnum):
+    """Canonical binary business-resource status values."""
+
+    ENABLED = STATUS_ENABLED
+    DISABLED = STATUS_DISABLED
+
 
 # 默认值常量
 DEFAULT_PAGE_SIZE = 10

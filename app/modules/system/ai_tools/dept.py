@@ -6,7 +6,7 @@ from pydantic import Field
 from pydantic.experimental.missing_sentinel import MISSING
 from sqlalchemy import Select
 
-from app.constants import STATUS_ENABLED
+from app.constants import EnableStatus
 from app.core.exceptions import (
     BusinessException,
     BusinessRuleException,
@@ -31,7 +31,10 @@ from .common import (
     _bound_confirmation_fields,
     _coerce_list_limit,
     _confirmation_display,
+    _model_validate_for_ai,
     _result_projection,
+    _validate_enable_status,
+    _validate_enable_status_filter,
 )
 
 
@@ -63,11 +66,13 @@ async def dept_list(
     The UI receives all bounded rows in ``ui.view_data.{columns, rows}``.
 
     Filters:
-        status: ``"1"`` for enabled or ``"0"`` for disabled.
+        status: ``"1"`` for enabled or ``"2"`` for disabled.
     Limit:
         Missing or non-positive values use 20; positive values are capped at 50.
     """
-    filters = validate_filters_in_whitelist(ctx.tool_meta, filters)
+    filters = _validate_enable_status_filter(
+        validate_filters_in_whitelist(ctx.tool_meta, filters)
+    )
     safe_limit = _coerce_list_limit(limit)
 
     scoped_filters = []
@@ -361,18 +366,24 @@ async def dept_create(
     leader: str | None = None,
     phone: str | None = None,
     email: str | None = None,
-    status: str = STATUS_ENABLED,
+    status: EnableStatus = EnableStatus.ENABLED,
 ) -> ToolResult:
     """Execute an approved department create through the shared service."""
     snapshot = _require_department_snapshot(ctx)
-    payload = DeptCreate(
-        parent_id=parent_id,
-        dept_name=dept_name,
-        order_num=order_num,
-        leader=leader,
-        phone=phone,
-        email=email,
-        status=status,
+    canonical_status = _validate_enable_status(status)
+    payload = _model_validate_for_ai(
+        DeptCreate,
+        {
+            "parent_id": parent_id,
+            "dept_name": dept_name,
+            "order_num": order_num,
+            "leader": leader,
+            "phone": phone,
+            "email": email,
+            "status": canonical_status,
+        },
+        message="部门参数格式不合法",
+        error_code="AI_DEPT_INPUT_INVALID",
     )
     try:
         await ensure_targets_in_scope(
@@ -402,19 +413,25 @@ async def _dry_run_dept_create(
     leader: str | None = None,
     phone: str | None = None,
     email: str | None = None,
-    status: str = STATUS_ENABLED,
+    status: EnableStatus = EnableStatus.ENABLED,
 ) -> Any:
     """Freeze a normalized department create and its authorization facts."""
     from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
 
-    payload = DeptCreate(
-        parent_id=parent_id,
-        dept_name=dept_name,
-        order_num=order_num,
-        leader=leader,
-        phone=phone,
-        email=email,
-        status=status,
+    canonical_status = _validate_enable_status(status)
+    payload = _model_validate_for_ai(
+        DeptCreate,
+        {
+            "parent_id": parent_id,
+            "dept_name": dept_name,
+            "order_num": order_num,
+            "leader": leader,
+            "phone": phone,
+            "email": email,
+            "status": canonical_status,
+        },
+        message="部门参数格式不合法",
+        error_code="AI_DEPT_INPUT_INVALID",
     )
     preview = await dept_service.preview_create(
         ctx.db,
@@ -428,7 +445,7 @@ async def _dry_run_dept_create(
         "leader": leader,
         "phone": phone,
         "email": email,
-        "status": status,
+        "status": canonical_status,
     }
     confirmation_fields = _bound_confirmation_fields(
         execution_args,
@@ -483,10 +500,11 @@ async def dept_update(
     leader: str | None | MISSING = MISSING,
     phone: str | None | MISSING = MISSING,
     email: str | None | MISSING = MISSING,
-    status: str | MISSING = MISSING,
+    status: EnableStatus | MISSING = MISSING,
 ) -> ToolResult:
     """Execute an approved department update through the shared service."""
     snapshot = _require_department_snapshot(ctx)
+    canonical_status = MISSING if status is MISSING else _validate_enable_status(status)
     values = {
         key: value
         for key, value in {
@@ -495,11 +513,16 @@ async def dept_update(
             "leader": leader,
             "phone": phone,
             "email": email,
-            "status": status,
+            "status": canonical_status,
         }.items()
         if value is not MISSING
     }
-    payload = DeptUpdate.model_validate(values)
+    payload = _model_validate_for_ai(
+        DeptUpdate,
+        values,
+        message="部门参数格式不合法",
+        error_code="AI_DEPT_INPUT_INVALID",
+    )
     try:
         await ensure_targets_in_scope(ctx, dept_ids=[dept_id])
         department = await dept_service.update(
@@ -535,11 +558,12 @@ async def _dry_run_dept_update(
     leader: str | None | MISSING = MISSING,
     phone: str | None | MISSING = MISSING,
     email: str | None | MISSING = MISSING,
-    status: str | MISSING = MISSING,
+    status: EnableStatus | MISSING = MISSING,
 ) -> Any:
     """Freeze a normalized department update and its authorization facts."""
     from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
 
+    canonical_status = MISSING if status is MISSING else _validate_enable_status(status)
     execution_args = {
         key: value
         for key, value in {
@@ -549,12 +573,15 @@ async def _dry_run_dept_update(
             "leader": leader,
             "phone": phone,
             "email": email,
-            "status": status,
+            "status": canonical_status,
         }.items()
         if key == "dept_id" or value is not MISSING
     }
-    payload = DeptUpdate.model_validate(
-        {key: value for key, value in execution_args.items() if key != "dept_id"}
+    payload = _model_validate_for_ai(
+        DeptUpdate,
+        {key: value for key, value in execution_args.items() if key != "dept_id"},
+        message="部门参数格式不合法",
+        error_code="AI_DEPT_INPUT_INVALID",
     )
     preview = await dept_service.preview_update(
         ctx.db,

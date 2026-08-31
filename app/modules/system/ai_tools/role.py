@@ -12,6 +12,7 @@ from app.constants import (
     DATA_SCOPE_DEPT,
     DATA_SCOPE_DEPT_AND_SUB,
     DATA_SCOPE_SELF,
+    EnableStatus,
 )
 from app.core.exceptions import (
     BusinessException,
@@ -36,7 +37,10 @@ from .common import (
     _bound_confirmation_fields,
     _coerce_list_limit,
     _confirmation_display,
+    _model_validate_for_ai,
     _result_projection,
+    _validate_enable_status,
+    _validate_enable_status_filter,
 )
 
 
@@ -129,7 +133,9 @@ async def role_list(
     limit:
         None / 0 / 负数 = 默认 20；正整数按 min(limit, 50) 截断
     """
-    filters = validate_filters_in_whitelist(ctx.tool_meta, filters)
+    filters = _validate_enable_status_filter(
+        validate_filters_in_whitelist(ctx.tool_meta, filters)
+    )
     safe_limit = _coerce_list_limit(limit)
 
     summaries, total, contributor_ids = await role_management_service.summarize_roles(
@@ -338,25 +344,32 @@ async def role_create(
     role_name: str,
     role_code: str,
     data_scope: AiRoleDataScope,
-    status: str,
+    status: EnableStatus,
     role_desc: str | None = None,
     dept_ids: AiRoleRelatedIds | None = None,
 ) -> ToolResult:
     """Execute an approved Role create through the shared policy."""
     snapshot = _require_role_snapshot(ctx)
     data_scope_code = _role_data_scope_code(data_scope)
+    canonical_status = _validate_enable_status(status)
+    payload = _model_validate_for_ai(
+        RoleCreate,
+        {
+            "role_name": role_name,
+            "role_code": role_code,
+            "role_desc": role_desc,
+            "data_scope": data_scope_code,
+            "status": canonical_status,
+            "dept_ids": dept_ids,
+        },
+        message="角色参数格式不合法",
+        error_code="AI_ROLE_INPUT_INVALID",
+    )
     try:
         await ensure_targets_in_scope(ctx, dept_ids=dept_ids or [])
         role = await role_management_service.create(
             ctx.db,
-            RoleCreate(
-                role_name=role_name,
-                role_code=role_code,
-                role_desc=role_desc,
-                data_scope=data_scope_code,
-                status=status,
-                dept_ids=dept_ids,
-            ),
+            payload,
             actor_user_id=ctx.user.user_id,
             expected_snapshot=snapshot,
         )
@@ -374,7 +387,7 @@ async def _dry_run_role_create(
     role_name: str,
     role_code: str,
     data_scope: AiRoleDataScope,
-    status: str,
+    status: EnableStatus,
     role_desc: str | None = None,
     dept_ids: AiRoleRelatedIds | None = None,
 ) -> Any:
@@ -382,13 +395,19 @@ async def _dry_run_role_create(
     from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
 
     data_scope_code = _role_data_scope_code(data_scope)
-    payload = RoleCreate(
-        role_name=role_name,
-        role_code=role_code,
-        role_desc=role_desc,
-        data_scope=data_scope_code,
-        status=status,
-        dept_ids=dept_ids,
+    canonical_status = _validate_enable_status(status)
+    payload = _model_validate_for_ai(
+        RoleCreate,
+        {
+            "role_name": role_name,
+            "role_code": role_code,
+            "role_desc": role_desc,
+            "data_scope": data_scope_code,
+            "status": canonical_status,
+            "dept_ids": dept_ids,
+        },
+        message="角色参数格式不合法",
+        error_code="AI_ROLE_INPUT_INVALID",
     )
     preview = await role_management_service.preview_create(
         ctx.db,
@@ -411,7 +430,7 @@ async def _dry_run_role_create(
             "role_code": role_code,
             "role_desc": role_desc,
             "data_scope": data_scope_code,
-            "status": status,
+            "status": canonical_status,
             "dept_ids": dept_ids,
         },
         business_snapshot=preview.snapshot,
@@ -447,7 +466,7 @@ async def role_update(
     role_name: str | MISSING = MISSING,
     role_desc: str | None | MISSING = MISSING,
     data_scope: AiRoleDataScope | MISSING = MISSING,
-    status: str | MISSING = MISSING,
+    status: EnableStatus | MISSING = MISSING,
     dept_ids: AiRoleRelatedIds | MISSING = MISSING,
 ) -> ToolResult:
     """Execute an approved Role definition update through the shared policy."""
@@ -455,17 +474,24 @@ async def role_update(
     data_scope_code = (
         MISSING if data_scope is MISSING else _role_data_scope_code(data_scope)
     )
+    canonical_status = MISSING if status is MISSING else _validate_enable_status(status)
     values = {
         key: value
         for key, value in {
             "role_name": role_name,
             "role_desc": role_desc,
             "data_scope": data_scope_code,
-            "status": status,
+            "status": canonical_status,
             "dept_ids": dept_ids,
         }.items()
         if value is not MISSING
     }
+    payload = _model_validate_for_ai(
+        RoleUpdate,
+        values,
+        message="角色参数格式不合法",
+        error_code="AI_ROLE_INPUT_INVALID",
+    )
     try:
         await ensure_targets_in_scope(
             ctx,
@@ -474,7 +500,7 @@ async def role_update(
         role = await role_management_service.update(
             ctx.db,
             role_id,
-            RoleUpdate.model_validate(values),
+            payload,
             actor_user_id=ctx.user.user_id,
             expected_snapshot=snapshot,
         )
@@ -493,7 +519,7 @@ async def _dry_run_role_update(
     role_name: str | MISSING = MISSING,
     role_desc: str | None | MISSING = MISSING,
     data_scope: AiRoleDataScope | MISSING = MISSING,
-    status: str | MISSING = MISSING,
+    status: EnableStatus | MISSING = MISSING,
     dept_ids: AiRoleRelatedIds | MISSING = MISSING,
 ) -> Any:
     """Freeze a normalized Role definition update and all member impacts."""
@@ -502,6 +528,7 @@ async def _dry_run_role_update(
     data_scope_code = (
         MISSING if data_scope is MISSING else _role_data_scope_code(data_scope)
     )
+    canonical_status = MISSING if status is MISSING else _validate_enable_status(status)
     execution_args = {
         key: value
         for key, value in {
@@ -509,13 +536,16 @@ async def _dry_run_role_update(
             "role_name": role_name,
             "role_desc": role_desc,
             "data_scope": data_scope_code,
-            "status": status,
+            "status": canonical_status,
             "dept_ids": dept_ids,
         }.items()
         if key == "role_id" or value is not MISSING
     }
-    payload = RoleUpdate.model_validate(
-        {key: value for key, value in execution_args.items() if key != "role_id"}
+    payload = _model_validate_for_ai(
+        RoleUpdate,
+        {key: value for key, value in execution_args.items() if key != "role_id"},
+        message="角色参数格式不合法",
+        error_code="AI_ROLE_INPUT_INVALID",
     )
     preview = await role_management_service.preview_update(
         ctx.db,

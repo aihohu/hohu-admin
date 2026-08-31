@@ -26,6 +26,7 @@ from app.constants.constants import (
     SUPER_ADMIN_ROLE_CODE,
     SUPER_ADMIN_USERNAME,
     USER_ROLE_CODE,
+    EnableStatus,
 )
 from app.constants.static_routes import CONSTANT_ROUTES
 
@@ -42,6 +43,7 @@ __all__ = [
     "DEFAULT_PAGE_SIZE",
     "DEFAULT_REFRESH_TOKEN_EXPIRE_DAYS",
     "DEPT_MAX_LEVEL",
+    "EnableStatus",
     "IS_PRIMARY_NO",
     "IS_PRIMARY_YES",
     "MENU_TYPE_BUTTON",
