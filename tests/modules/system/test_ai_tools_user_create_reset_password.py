@@ -393,15 +393,22 @@ class TestUserCreate:
         assert dept_link == (dept.dept_id, "Y")
         assert result.data == {
             "created": 1,
-            "userId": str(created.user_id),
             "userName": "aitooluser",
-            "roleCode": USER_ROLE_CODE,
-            "primaryDeptId": str(dept.dept_id),
+            "roleName": created.roles[0].role_name,
+            "primaryDeptName": dept.dept_name,
+            "status": "enabled",
             "passwordPolicy": "system_default",
         }
         assert result.ui.view_type == "detail_card"
         assert result.ui.view_data["title"] == "aitooluser"
         assert len(result.ui.view_data["fields"]) == 4
+        assert result.ui.view_data["fields"][-1]["value"] == (
+            "page.system.common.status.enable"
+        )
+        assert str(created.user_id) not in repr(result.data)
+        assert str(dept.dept_id) not in repr(result.data)
+        assert str(created.user_id) not in repr(result.ui.view_data)
+        assert str(dept.dept_id) not in repr(result.ui.view_data)
         assert DEFAULT_PASSWORD not in repr(result)
         assert "hashed_password" not in repr(result)
 
@@ -580,11 +587,11 @@ class TestUserResetPassword:
         assert verify_password(DEFAULT_PASSWORD, target.hashed_password)
         assert result.data == {
             "updated": 1,
-            "userId": str(target.user_id),
             "userName": target.user_name,
             "passwordPolicy": "system_default",
         }
         assert result.ui.view_type == "rows_affected"
+        assert result.ui.view_data == {"count": 1}
         assert DEFAULT_PASSWORD not in repr(result)
 
     async def test_reset_rejects_current_user(self, db_session: AsyncSession) -> None:

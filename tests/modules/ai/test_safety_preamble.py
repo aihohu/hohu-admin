@@ -53,9 +53,9 @@ class TestSafetyPreambleContent:
         """必须以 SAFETY PREAMBLE 优先级声明开头。"""
         assert SAFETY_PREAMBLE.startswith("[SAFETY PREAMBLE")
 
-    def test_contains_eight_rules(self) -> None:
+    def test_contains_nine_rules(self) -> None:
         """固定安全规则必须完整。"""
-        for i in range(1, 9):
+        for i in range(1, 10):
             assert f"\n{i}. " in SAFETY_PREAMBLE, f"Rule {i} missing"
 
     def test_rule_1_permission_boundary(self) -> None:
@@ -90,6 +90,14 @@ class TestSafetyPreambleContent:
     def test_rule_8_forbids_ungrounded_write_success_claims(self) -> None:
         assert "Never claim that a business write succeeded" in SAFETY_PREAMBLE
         assert "Never invent business object IDs" in SAFETY_PREAMBLE
+
+    def test_rule_9_keeps_machine_values_out_of_ordinary_replies(self) -> None:
+        assert "Business-facing response" in SAFETY_PREAMBLE
+        assert "Do not expose internal IDs" in SAFETY_PREAMBLE
+        assert "status=1/2" in SAFETY_PREAMBLE
+        assert "unless the user explicitly asks for technical or audit details" in (
+            SAFETY_PREAMBLE
+        )
 
 
 # ============ _perm_prefix ============

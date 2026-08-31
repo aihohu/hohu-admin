@@ -9,6 +9,15 @@ from app.core.exceptions import BusinessRuleException
 from app.modules.ai.agents.gateway.result import ResultProjection
 from app.utils.validators import STATUS_ERROR_MSG
 
+_ENABLE_STATUS_SEMANTIC = {
+    EnableStatus.ENABLED.value: "enabled",
+    EnableStatus.DISABLED.value: "disabled",
+}
+_ENABLE_STATUS_LABEL_KEYS = {
+    EnableStatus.ENABLED.value: "page.system.common.status.enable",
+    EnableStatus.DISABLED.value: "page.system.common.status.disable",
+}
+
 
 def _validate_enable_status(value: object) -> str:
     """Reject aliases and numeric coercion for the shared 1/2 status contract."""
@@ -28,6 +37,16 @@ def _validate_enable_status_filter(filters: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(filters)
     normalized["status"] = _validate_enable_status(filters["status"])
     return normalized
+
+
+def _enable_status_semantic(value: object) -> str:
+    """Return a stable model-facing meaning without exposing the storage code."""
+    return _ENABLE_STATUS_SEMANTIC[_validate_enable_status(value)]
+
+
+def _enable_status_label_key(value: object) -> str:
+    """Return a locale key for user-visible Tool result projections."""
+    return _ENABLE_STATUS_LABEL_KEYS[_validate_enable_status(value)]
 
 
 def _model_validate_for_ai[ModelT: BaseModel](

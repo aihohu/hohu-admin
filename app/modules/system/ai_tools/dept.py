@@ -31,6 +31,8 @@ from .common import (
     _bound_confirmation_fields,
     _coerce_list_limit,
     _confirmation_display,
+    _enable_status_label_key,
+    _enable_status_semantic,
     _model_validate_for_ai,
     _result_projection,
     _validate_enable_status,
@@ -299,12 +301,8 @@ def _department_result(
     return ToolResult.success(
         data={
             "action": action,
-            "deptId": str(dept_id),
             "deptName": department.dept_name,
-            "parentId": (
-                str(department.parent_id) if department.parent_id is not None else None
-            ),
-            "status": department.status,
+            "status": _enable_status_semantic(department.status),
             "affectedUserCount": len(affected_user_ids),
         },
         projection=_result_projection("dept", [dept_id], scope_bound=True),
@@ -313,8 +311,10 @@ def _department_result(
             view_data={
                 "title": department.dept_name,
                 "fields": [
-                    {"label": "ai.tool.field.deptId", "value": str(dept_id)},
-                    {"label": "ai.tool.field.action", "value": action},
+                    {
+                        "label": "ai.tool.field.status",
+                        "value": _enable_status_label_key(department.status),
+                    },
                     {
                         "label": "ai.tool.field.affectedUserCount",
                         "value": len(affected_user_ids),
@@ -323,6 +323,12 @@ def _department_result(
             },
             audit={
                 "dept_id": str(dept_id),
+                "parent_id": (
+                    str(department.parent_id)
+                    if department.parent_id is not None
+                    else None
+                ),
+                "status": department.status,
                 "action": action,
                 "affected_user_ids": [str(value) for value in affected_user_ids],
             },

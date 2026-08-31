@@ -88,7 +88,7 @@ def _format_ai_dept_assignments(
     for dept_id, is_primary in assignments:
         identifier = str(dept_id)
         name = names.get(identifier)
-        descriptor = f"{name} ({identifier})" if name else identifier
+        descriptor = name or "—"
         values.append(f"★ {descriptor}" if is_primary else descriptor)
     return "; ".join(values) or "—"
 
@@ -174,10 +174,9 @@ async def user_update_dept(
     return ToolResult.success(
         data={
             "updated": 1,
-            "userId": str(user_id),
             "userName": user_name,
-            "oldDeptAssignments": old_items,
-            "newDeptAssignments": new_items,
+            "previousDepartments": old_display,
+            "newDepartments": new_display,
         },
         projection=ResultProjection(
             subject_refs=(
@@ -315,18 +314,17 @@ def _format_ai_roles(
     raw_facts = snapshot.get("roleFacts")
     facts = raw_facts if isinstance(raw_facts, list) else []
     role_map = {
-        item["roleId"]: (item["roleName"], item["roleCode"])
+        item["roleId"]: item["roleName"]
         for item in facts
         if isinstance(item, dict)
         and isinstance(item.get("roleId"), str)
         and isinstance(item.get("roleName"), str)
-        and isinstance(item.get("roleCode"), str)
     }
     values: list[str] = []
     for role_id in role_ids:
         identifier = str(role_id)
         role = role_map.get(identifier)
-        values.append(f"{role[0]} ({role[1]} / {identifier})" if role else identifier)
+        values.append(role or "—")
     return "; ".join(values) or "—"
 
 
@@ -474,10 +472,9 @@ async def user_update_roles(
     return ToolResult.success(
         data={
             "updated": 1,
-            "userId": str(user_id),
             "userName": user_name,
-            "oldRoleIds": [str(role_id) for role_id in result.old_role_ids],
-            "newRoleIds": [str(role_id) for role_id in result.new_role_ids],
+            "previousRoles": old_display,
+            "newRoles": new_display,
         },
         projection=ResultProjection(
             subject_refs=(

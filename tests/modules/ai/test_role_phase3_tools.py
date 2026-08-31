@@ -74,27 +74,43 @@ def test_static_inventory_contains_the_complete_role_slice() -> None:
     } <= EXPECTED_BUILTIN_TOOL_NAMES
 
 
-def test_role_write_result_uses_translatable_field_labels() -> None:
+def test_role_write_result_separates_business_and_audit_values() -> None:
     role = Role(
         role_id=next_id(),
         role_name="Phase 3 result role",
         role_code=f"R_PHASE3_RESULT_{next_id()}",
         data_scope="5",
-        status="1",
+        status="2",
     )
 
     result = system_ai_tools._role_result(action="update", role=role)
 
+    assert result.data == {
+        "action": "update",
+        "roleCode": role.role_code,
+        "roleName": role.role_name,
+        "status": "disabled",
+        "dataScope": "SELF",
+    }
     assert [field["label"] for field in result.ui.view_data["fields"]] == [
-        "ai.tool.field.roleId",
         "ai.tool.field.roleCode",
-        "ai.tool.field.action",
+        "ai.tool.field.status",
+        "page.system.role.dataScope.label",
     ]
+    assert [field["value"] for field in result.ui.view_data["fields"]] == [
+        role.role_code,
+        "page.system.common.status.disable",
+        "page.system.role.dataScope.self",
+    ]
+    assert result.ui.audit == {
+        "role_id": str(role.role_id),
+        "status": "2",
+        "data_scope": "5",
+        "action": "update",
+    }
     assert result.projection.subject_refs == (
         {"type": "managed_role", "id": str(role.role_id)},
     )
-    assert result.data["dataScope"] == "SELF"
-    assert result.data["dataScopeCode"] == "5"
 
 
 def test_role_data_scope_model_contract_uses_named_values() -> None:

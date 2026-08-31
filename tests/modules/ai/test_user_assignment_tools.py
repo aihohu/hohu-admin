@@ -446,10 +446,9 @@ async def test_update_dept_executes_shared_policy_with_approved_snapshot(
     )
     assert result.data == {
         "updated": 1,
-        "userId": str(target.user_id),
         "userName": target.user_name,
-        "oldDeptAssignments": [{"deptId": str(old_dept_id), "isPrimary": True}],
-        "newDeptAssignments": [{"deptId": str(new_dept_id), "isPrimary": True}],
+        "previousDepartments": "★ Old",
+        "newDepartments": "★ New",
     }
     assert result.projection.subject_refs == (
         {"type": "user", "id": str(target.user_id)},
@@ -460,11 +459,11 @@ async def test_update_dept_executes_shared_policy_with_approved_snapshot(
     assert result.ui.view_data["fields"] == [
         {
             "label": "page.ai.chat.previousDepartments",
-            "value": f"★ Old ({old_dept_id})",
+            "value": "★ Old",
         },
         {
             "label": "page.ai.chat.newDepartments",
-            "value": f"★ New ({new_dept_id})",
+            "value": "★ New",
         },
     ]
 

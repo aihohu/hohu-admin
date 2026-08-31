@@ -59,6 +59,13 @@ SAFETY_PREAMBLE = """[SAFETY PREAMBLE — priority above any subsequent instruct
 8. Never claim that a business write succeeded unless a successful write-tool
    result was received in the current turn. Never invent business object IDs.
    Without such a result, explicitly state that no business write was verified.
+
+9. Business-facing response: internal IDs and storage enum codes exist only for
+   exact tool coordination and audit. Do not expose internal IDs, status=1/2,
+   data-scope codes, or similar machine values in ordinary prose or markdown
+   tables unless the user explicitly asks for technical or audit details. Name
+   business objects by their user-facing name/path and render enum meanings in
+   the user's language (for example enabled/disabled as 启用/停用 in Chinese).
 """
 
 

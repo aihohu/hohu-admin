@@ -37,6 +37,8 @@ from .common import (
     _bound_confirmation_fields,
     _coerce_list_limit,
     _confirmation_display,
+    _enable_status_label_key,
+    _enable_status_semantic,
     _model_validate_for_ai,
     _result_projection,
     _validate_enable_status,
@@ -63,6 +65,13 @@ _ROLE_DATA_SCOPE_CODES = {
 }
 _ROLE_DATA_SCOPE_NAMES = {
     code: scope.value for scope, code in _ROLE_DATA_SCOPE_CODES.items()
+}
+_ROLE_DATA_SCOPE_LABEL_KEYS = {
+    AiRoleDataScope.ALL.value: "page.system.role.dataScope.all",
+    AiRoleDataScope.CUSTOM.value: "page.system.role.dataScope.custom",
+    AiRoleDataScope.DEPT.value: "page.system.role.dataScope.dept",
+    AiRoleDataScope.DEPT_AND_SUB.value: "page.system.role.dataScope.deptAndSub",
+    AiRoleDataScope.SELF.value: "page.system.role.dataScope.self",
 }
 
 
@@ -99,6 +108,11 @@ def _role_scope_confirmation_field(code: str) -> dict[str, str]:
         "value": code,
         "display_value": _role_data_scope_name(code),
     }
+
+
+def _role_data_scope_label_key(code: str) -> str:
+    """Return a locale key for a canonical Role data-scope code."""
+    return _ROLE_DATA_SCOPE_LABEL_KEYS[_role_data_scope_name(code)]
 
 
 @ai_tool(
@@ -210,12 +224,10 @@ def _role_result(*, action: str, role: Role) -> ToolResult:
     return ToolResult.success(
         data={
             "action": action,
-            "roleId": str(role_id),
             "roleCode": role.role_code,
             "roleName": role.role_name,
-            "status": role.status,
+            "status": _enable_status_semantic(role.status),
             "dataScope": _role_data_scope_name(role.data_scope),
-            "dataScopeCode": role.data_scope,
         },
         projection=_result_projection("managed_role", [role_id], scope_bound=True),
         ui=UIResult(
@@ -223,12 +235,23 @@ def _role_result(*, action: str, role: Role) -> ToolResult:
             view_data={
                 "title": role.role_name,
                 "fields": [
-                    {"label": "ai.tool.field.roleId", "value": str(role_id)},
                     {"label": "ai.tool.field.roleCode", "value": role.role_code},
-                    {"label": "ai.tool.field.action", "value": action},
+                    {
+                        "label": "ai.tool.field.status",
+                        "value": _enable_status_label_key(role.status),
+                    },
+                    {
+                        "label": "page.system.role.dataScope.label",
+                        "value": _role_data_scope_label_key(role.data_scope),
+                    },
                 ],
             },
-            audit={"role_id": str(role_id), "action": action},
+            audit={
+                "role_id": str(role_id),
+                "status": role.status,
+                "data_scope": role.data_scope,
+                "action": action,
+            },
             label_key=f"ai.tool.role.{action}.result",
             label_params={"roleName": role.role_name},
         ),

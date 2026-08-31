@@ -143,20 +143,38 @@ def test_static_inventory_contains_the_complete_department_slice() -> None:
     } <= EXPECTED_BUILTIN_TOOL_NAMES
 
 
-def test_department_write_result_uses_translatable_field_labels() -> None:
+def test_department_write_result_separates_business_and_audit_values() -> None:
     department = _department("phase3-result-label")
+    department.parent_id = next_id()
+    department.status = STATUS_DISABLED
+    affected_user_id = next_id()
 
     result = system_ai_tools._department_result(
-        action="move",
+        action="update",
         department=department,
-        affected_user_ids=(next_id(),),
+        affected_user_ids=(affected_user_id,),
     )
 
+    assert result.data == {
+        "action": "update",
+        "deptName": department.dept_name,
+        "status": "disabled",
+        "affectedUserCount": 1,
+    }
     assert [field["label"] for field in result.ui.view_data["fields"]] == [
-        "ai.tool.field.deptId",
-        "ai.tool.field.action",
+        "ai.tool.field.status",
         "ai.tool.field.affectedUserCount",
     ]
+    assert result.ui.view_data["fields"][0]["value"] == (
+        "page.system.common.status.disable"
+    )
+    assert result.ui.audit == {
+        "dept_id": str(department.dept_id),
+        "parent_id": str(department.parent_id),
+        "status": STATUS_DISABLED,
+        "action": "update",
+        "affected_user_ids": [str(affected_user_id)],
+    }
 
 
 async def test_department_lookup_uses_only_visible_nodes_for_path_and_ambiguity(

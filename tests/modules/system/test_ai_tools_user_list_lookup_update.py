@@ -319,7 +319,8 @@ class TestUserUpdate:
         assert result.data == {"updated": 1, "userName": "iris"}
         assert result.ui.view_type == "rows_affected"
         assert result.ui.view_data["count"] == 1
-        assert result.ui.view_data["ids"] == ["4002"]
+        assert "ids" not in result.ui.view_data
+        assert result.ui.audit["affected_user_ids"] == ["4002"]
 
         # 验证 DB 状态
         user = await db_session.get(User, 4002)

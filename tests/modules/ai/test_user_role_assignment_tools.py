@@ -540,10 +540,9 @@ async def test_update_roles_executes_shared_policy_with_approved_snapshot(
     )
     assert result.data == {
         "updated": 1,
-        "userId": str(target.user_id),
         "userName": target.user_name,
-        "oldRoleIds": ["801"],
-        "newRoleIds": ["901"],
+        "previousRoles": "Old",
+        "newRoles": "New",
     }
     assert result.projection.subject_refs == (
         {"type": "user", "id": str(target.user_id)},

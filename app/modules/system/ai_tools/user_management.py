@@ -30,6 +30,8 @@ from app.modules.system.models.user import User
 
 from .common import (
     _coerce_list_limit,
+    _enable_status_label_key,
+    _enable_status_semantic,
     _result_projection,
     _validate_enable_status,
     _validate_enable_status_filter,
@@ -170,7 +172,6 @@ async def user_create(
     status: EnableStatus = EnableStatus.ENABLED,
 ) -> ToolResult:
     """创建单个用户；密码与角色完全由后端策略决定。"""
-    from app.constants import USER_ROLE_CODE  # noqa: PLC0415
     from app.modules.system.service.user_department_assignment_service import (  # noqa: PLC0415
         user_department_assignment_service,
     )
@@ -225,10 +226,10 @@ async def user_create(
     return ToolResult.success(
         data={
             "created": 1,
-            "userId": user_id,
             "userName": new_user.user_name,
-            "roleCode": USER_ROLE_CODE,
-            "primaryDeptId": dept_id,
+            "roleName": role.role_name,
+            "primaryDeptName": dept.dept_name,
+            "status": _enable_status_semantic(new_user.status),
             "passwordPolicy": "system_default",
         },
         projection=ResultProjection(
@@ -252,18 +253,20 @@ async def user_create(
                     },
                     {
                         "label": "page.system.user.userRole",
-                        "value": role.role_code,
+                        "value": role.role_name,
                     },
                     {
                         "label": "page.system.user.userStatus",
-                        "value": new_user.status,
+                        "value": _enable_status_label_key(new_user.status),
                     },
                 ],
             },
             audit={
                 "affected_user_ids": [user_id],
+                "role_id": str(role.role_id),
                 "role_code": role.role_code,
                 "primary_dept_id": dept_id,
+                "status": new_user.status,
                 "password_policy": "system_default",
             },
             label_key="ai.tool.user.create.result",
@@ -440,14 +443,13 @@ async def user_reset_password(ctx: AiToolContext, *, user_id: int) -> ToolResult
     return ToolResult.success(
         data={
             "updated": 1,
-            "userId": str_user_id,
             "userName": target.user_name,
             "passwordPolicy": "system_default",
         },
         projection=_result_projection("user", [str_user_id]),
         ui=UIResult(
             view_type="rows_affected",
-            view_data={"count": 1, "ids": [str_user_id]},
+            view_data={"count": 1},
             audit={
                 "affected_user_ids": [str_user_id],
                 "password_policy": "system_default",
@@ -1070,7 +1072,7 @@ async def user_update(
         projection=_result_projection("user", [user.user_id]),
         ui=UIResult(
             view_type="rows_affected",
-            view_data={"count": 1, "ids": [str(user.user_id)]},
+            view_data={"count": 1},
             audit={
                 "affected_user_ids": [str(user.user_id)],
                 "fields": list(provided.keys()),
