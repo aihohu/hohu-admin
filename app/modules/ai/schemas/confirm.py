@@ -65,11 +65,17 @@ class ConfirmationPresentationField(BaseModel):
 
     label: str = Field(..., min_length=1, max_length=64)
     value: StrictStr | StrictInt | StrictFloat
+    raw_value: StrictStr | StrictInt | StrictFloat | None = Field(
+        default=None,
+        alias="rawValue",
+    )
     tone: Literal["default", "info", "success", "warning", "danger"] | None = None
 
-    @field_validator("value")
+    @field_validator("value", "raw_value")
     @classmethod
     def validate_value_length(cls, value):  # noqa: ANN001
+        if value is None:
+            return value
         if len(str(value)) > 256:
             raise ValueError("confirmation field value is too long")
         return value
@@ -82,14 +88,14 @@ class ConfirmationPresentationField(BaseModel):
             raise ValueError("confirmation field label is sensitive")
         return value
 
-    @field_validator("value")
+    @field_validator("value", "raw_value")
     @classmethod
     def reject_sensitive_value(cls, value):  # noqa: ANN001
         if isinstance(value, str):
             _reject_sensitive_text(value, field_name="field value")
         return value
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
 
 class ConfirmationPresentation(BaseModel):

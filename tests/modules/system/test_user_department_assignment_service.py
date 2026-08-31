@@ -188,8 +188,8 @@ async def test_preview_departments_freezes_complete_authorization_snapshot(
 
     assert preview.old_assignments == ((old_dept.dept_id, True),)
     assert preview.new_assignments == ((new_dept.dept_id, False),)
-    assert preview.old_display == (f"★ {old_dept.dept_name} ({old_dept.dept_id})",)
-    assert preview.new_display == (f"{new_dept.dept_name} ({new_dept.dept_id})",)
+    assert preview.old_display == (f"★ {old_dept.dept_name}",)
+    assert preview.new_display == (new_dept.dept_name,)
     assert preview.snapshot["target"] == {
         "userId": str(target.user_id),
         "userName": target.user_name,

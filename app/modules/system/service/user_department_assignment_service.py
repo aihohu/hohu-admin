@@ -216,7 +216,7 @@ class UserDepartmentAssignmentService:
         dept_map: dict[int, Dept],
     ) -> tuple[str, ...]:
         return tuple(
-            f"{'★ ' if is_primary else ''}{dept_map[dept_id].dept_name} ({dept_id})"
+            f"{'★ ' if is_primary else ''}{dept_map[dept_id].dept_name}"
             for dept_id, is_primary in assignments
         )
 

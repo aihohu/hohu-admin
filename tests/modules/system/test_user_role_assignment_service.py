@@ -625,12 +625,8 @@ async def test_preview_roles_freezes_complete_authorization_snapshot(
 
     assert preview.old_role_ids == (old_role.role_id,)
     assert preview.new_role_ids == (new_role.role_id,)
-    assert preview.old_display == (
-        f"{old_role.role_name} ({old_role.role_code} / {old_role.role_id})",
-    )
-    assert preview.new_display == (
-        f"{new_role.role_name} ({new_role.role_code} / {new_role.role_id})",
-    )
+    assert preview.old_display == (old_role.role_name,)
+    assert preview.new_display == (new_role.role_name,)
     assert preview.snapshot["target"]["roleIds"] == [str(old_role.role_id)]
     assert preview.snapshot["oldRoleIds"] == [str(old_role.role_id)]
     assert preview.snapshot["newRoleIds"] == [str(new_role.role_id)]

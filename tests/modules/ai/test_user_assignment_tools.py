@@ -356,8 +356,8 @@ async def test_update_dept_dry_run_freezes_normalized_execution_and_snapshot() -
         user_name="task12-target",
         old_assignments=((8001, True),),
         new_assignments=((901, True), (902, False)),
-        old_display=("★ Old (8001)",),
-        new_display=("★ New A (901)", "New B (902)"),
+        old_display=("★ Old",),
+        new_display=("★ New A", "New B"),
         snapshot={"version": "task12-snapshot"},
     )
     ctx = MagicMock(user=MagicMock(user_id=6001))
@@ -388,12 +388,12 @@ async def test_update_dept_dry_run_freezes_normalized_execution_and_snapshot() -
         {
             "label": "user_id",
             "value": 7001,
-            "display_value": "task12-target（7001）",
+            "display_value": "task12-target",
         },
         {
             "label": "dept_assignments",
             "value": original_assignments,
-            "display_value": "★ Old (8001) → ★ New A (901); New B (902)",
+            "display_value": "★ Old → ★ New A; New B",
         },
     ]
 

@@ -120,8 +120,7 @@ class UserRoleAssignmentService:
     @staticmethod
     def _role_display(roles: list[Role]) -> tuple[str, ...]:
         return tuple(
-            f"{role.role_name} ({role.role_code} / {role.role_id})"
-            for role in sorted(roles, key=lambda item: int(item.role_id))
+            role.role_name for role in sorted(roles, key=lambda item: int(item.role_id))
         )
 
     async def _load_department_assignment_snapshot(

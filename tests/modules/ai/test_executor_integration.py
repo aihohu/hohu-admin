@@ -1103,7 +1103,7 @@ class TestHitlFlow:
             event for event in events if isinstance(event, ConfirmationRequiredEvent)
         )
         assert confirmation.presentation["fields"] == [
-            {"label": "scope", "value": "SELF (5)"},
+            {"label": "scope", "value": "SELF (5)", "rawValue": "5"},
             {"label": "affectedCount", "value": 1, "tone": "warning"},
         ]
 

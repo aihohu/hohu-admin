@@ -30,6 +30,30 @@ def test_confirmation_presentation_normalizes_i18n_metadata_to_camel_case():
     assert "summary_key" not in presentation
 
 
+def test_confirmation_presentation_preserves_safe_raw_machine_value():
+    presentation = prepared_action_service.validate_presentation(
+        {
+            "title": "dept.update",
+            "fields": [
+                {
+                    "label": "dept_id",
+                    "value": "华东-客服组",
+                    "rawValue": "800000004",
+                }
+            ],
+            "warnings": [],
+        }
+    )
+
+    assert presentation["fields"] == [
+        {
+            "label": "dept_id",
+            "value": "华东-客服组",
+            "rawValue": "800000004",
+        }
+    ]
+
+
 def test_dry_run_result_accepts_structured_summary_metadata():
     result = DryRunResult(
         ok=True,

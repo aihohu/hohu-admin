@@ -312,7 +312,7 @@ class TestUserCreate:
                 {
                     "label": "primary_dept_id",
                     "value": dept_id,
-                    "display_value": f"总部（{dept_id}）",
+                    "display_value": "总部",
                 }
             ],
         )
@@ -323,7 +323,11 @@ class TestUserCreate:
 
         assert fields == [
             {"label": "user_name", "value": "圣诞"},
-            {"label": "primary_dept_id", "value": f"总部（{dept_id}）"},
+            {
+                "label": "primary_dept_id",
+                "value": "总部",
+                "rawValue": dept_id,
+            },
             {"label": "affectedCount", "value": 1, "tone": "warning"},
         ]
         assert frozen_args["primary_dept_id"] == dept_id
@@ -500,7 +504,7 @@ class TestUserCreate:
             {
                 "label": "primary_dept_id",
                 "value": dept.dept_id,
-                "display_value": f"{dept.dept_name}（{dept.dept_id}）",
+                "display_value": dept.dept_name,
             }
         ]
         assert DEFAULT_PASSWORD not in repr(result)
@@ -536,7 +540,7 @@ class TestUserCreate:
             {
                 "label": "primary_dept_id",
                 "value": dept.dept_id,
-                "display_value": f"{dept.dept_name}（{dept.dept_id}）",
+                "display_value": dept.dept_name,
             }
         ]
 
@@ -551,7 +555,8 @@ class TestUserCreate:
         )
         assert fields[1] == {
             "label": "primary_dept_id",
-            "value": f"{dept.dept_name}（{dept.dept_id}）",
+            "value": dept.dept_name,
+            "rawValue": dept.dept_id,
         }
 
 
@@ -685,7 +690,7 @@ class TestUserResetPassword:
             {
                 "label": "user_id",
                 "value": target.user_id,
-                "display_value": f"{target.user_name}（{target.user_id}）",
+                "display_value": target.user_name,
             }
         ]
         assert DEFAULT_PASSWORD not in repr(result)

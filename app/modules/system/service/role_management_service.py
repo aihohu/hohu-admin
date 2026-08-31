@@ -52,6 +52,7 @@ class RoleManagementPreview:
     role_id: int | None
     member_user_ids: tuple[int, ...]
     snapshot: dict[str, Any]
+    target_role_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -560,6 +561,7 @@ class RoleManagementService:
                 role_id=role_id,
                 member_user_ids=tuple(sorted(int(value.user_id) for value in members)),
                 snapshot=snapshot,
+                target_role_name=role.role_name if role is not None else None,
             ),
             role_ids=tuple(sorted(role_ids)),
             dept_ids=tuple(sorted(dept_ids)),
@@ -779,11 +781,13 @@ class RoleManagementService:
             for value in snapshot.get("members", [])
             if isinstance(value, dict) and "userId" in value
         )
+        role = await self._load_role(db, role_id)
         return RoleManagementPreview(
             action="update_agents",
             role_id=role_id,
             member_user_ids=member_ids,
             snapshot=snapshot,
+            target_role_name=role.role_name,
         )
 
     async def update_agents(

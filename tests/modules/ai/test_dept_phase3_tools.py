@@ -267,7 +267,12 @@ async def test_department_write_dry_runs_build_scalar_gateway_presentations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def preview(*_args, **_kwargs):
-        return SimpleNamespace(affected_user_ids=(), snapshot={"version": "test"})
+        return SimpleNamespace(
+            affected_user_ids=(),
+            snapshot={"version": "test"},
+            target_dept_name="华东-客服组",
+            parent_dept_name="总公司",
+        )
 
     monkeypatch.setattr(system_ai_tools.dept_service, "preview_create", preview)
     monkeypatch.setattr(system_ai_tools.dept_service, "preview_update", preview)
@@ -285,7 +290,7 @@ async def test_department_write_dry_runs_build_scalar_gateway_presentations(
         (
             system_ai_tools.dept_update,
             system_ai_tools._dry_run_dept_update,
-            {"dept_id": next_id(), "leader": None},
+            {"dept_id": next_id(), "leader": None, "status": STATUS_DISABLED},
         ),
         (
             system_ai_tools.dept_move,
@@ -312,6 +317,15 @@ async def test_department_write_dry_runs_build_scalar_gateway_presentations(
         presentation = ConfirmationPresentation(title="Confirm", fields=fields)
 
         assert presentation.fields
+        if tool is system_ai_tools.dept_update:
+            assert result.summary_params == {"deptName": "华东-客服组"}
+            assert fields[0] == {
+                "label": "dept_id",
+                "value": "华东-客服组",
+                "rawValue": frozen_args["dept_id"],
+            }
+            assert {"label": "leader", "value": "—"} in fields
+            assert {"label": "status", "value": STATUS_DISABLED} in fields
 
 
 async def test_department_update_preserves_explicit_null_for_nullable_fields(

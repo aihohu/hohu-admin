@@ -418,7 +418,7 @@ class TestDryRunUserUpdate:
             {
                 "label": "user_id",
                 "value": 4100,
-                "display_value": "kate（4100）",
+                "display_value": "kate",
             },
             {"label": "nickname", "value": "kate-new"},
             {"label": "status", "value": "2"},
@@ -434,7 +434,7 @@ class TestDryRunUserUpdate:
             ),
         )
         assert fields == [
-            {"label": "user_id", "value": "kate（4100）"},
+            {"label": "user_id", "value": "kate", "rawValue": 4100},
             {"label": "nickname", "value": "kate-new"},
             {"label": "status", "value": "2"},
             {"label": "affectedCount", "value": 1, "tone": "warning"},

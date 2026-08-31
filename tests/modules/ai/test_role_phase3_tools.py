@@ -188,7 +188,7 @@ async def test_role_create_dry_run_freezes_canonical_data_scope_code(
     assert scope_field == {
         "label": "data_scope",
         "value": "5",
-        "display_value": "SELF (5)",
+        "display_value": "SELF",
     }
 
 
@@ -292,7 +292,11 @@ async def test_role_write_dry_runs_build_scalar_gateway_presentations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def preview(*_args, **_kwargs):
-        return SimpleNamespace(member_user_ids=(), snapshot={"version": "test"})
+        return SimpleNamespace(
+            member_user_ids=(),
+            snapshot={"version": "test"},
+            target_role_name="培训观察员",
+        )
 
     for name in ("preview_update", "preview_update_menus", "preview_update_agents"):
         monkeypatch.setattr(system_ai_tools.role_management_service, name, preview)
@@ -302,7 +306,7 @@ async def test_role_write_dry_runs_build_scalar_gateway_presentations(
         (
             system_ai_tools.role_update,
             system_ai_tools._dry_run_role_update,
-            {"role_id": role_id, "role_desc": None},
+            {"role_id": role_id, "role_desc": None, "status": "2"},
         ),
         (
             system_ai_tools.role_update_menus,
@@ -341,6 +345,14 @@ async def test_role_write_dry_runs_build_scalar_gateway_presentations(
         presentation = ConfirmationPresentation(title="Confirm", fields=fields)
 
         assert presentation.fields
+        if tool is system_ai_tools.role_update:
+            assert result.summary_params == {"roleName": "培训观察员"}
+            assert fields[0] == {
+                "label": "role_id",
+                "value": "培训观察员",
+                "rawValue": role_id,
+            }
+            assert {"label": "status", "value": "2"} in fields
 
 
 async def test_role_update_preserves_explicit_null_for_nullable_description(

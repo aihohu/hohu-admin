@@ -317,7 +317,7 @@ async def _dry_run_user_create(
                 {
                     "label": "primary_dept_id",
                     "value": primary_dept_id,
-                    "display_value": f"{dept.dept_name}（{primary_dept_id}）",
+                    "display_value": dept.dept_name,
                 }
             ],
         )
@@ -336,7 +336,7 @@ async def _dry_run_user_create(
             {
                 "label": "primary_dept_id",
                 "value": primary_dept_id,
-                "display_value": f"{dept.dept_name}（{primary_dept_id}）",
+                "display_value": dept.dept_name,
             }
         ],
     )
@@ -486,7 +486,7 @@ async def _dry_run_user_reset_password(
             {
                 "label": "user_id",
                 "value": user_id,
-                "display_value": f"{target.user_name}（{user_id}）",
+                "display_value": target.user_name,
             }
         ],
     )
@@ -1135,7 +1135,7 @@ async def _dry_run_user_update(
             {
                 "label": "user_id",
                 "value": user_id,
-                "display_value": f"{user.user_name}（{user_id}）",
+                "display_value": user.user_name,
             },
             *[{"label": field, "value": value} for field, value in provided.items()],
         ],

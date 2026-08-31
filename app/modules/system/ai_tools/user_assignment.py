@@ -247,7 +247,7 @@ async def _dry_run_user_update_dept(
             {
                 "label": "user_id",
                 "value": user_id,
-                "display_value": f"{preview.user_name}（{user_id}）",
+                "display_value": preview.user_name,
             },
             {
                 "label": "dept_assignments",
@@ -541,7 +541,7 @@ async def _dry_run_user_update_roles(
             {
                 "label": "user_id",
                 "value": user_id,
-                "display_value": f"{preview.user_name}（{user_id}）",
+                "display_value": preview.user_name,
             },
             {
                 "label": "role_ids",

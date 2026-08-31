@@ -93,11 +93,11 @@ def _role_data_scope_name(code: str) -> str:
 
 
 def _role_scope_confirmation_field(code: str) -> dict[str, str]:
-    """Present both the semantic name and its canonical storage code."""
+    """Present the semantic name while retaining the bound storage code."""
     return {
         "label": "data_scope",
         "value": code,
-        "display_value": f"{_role_data_scope_name(code)} ({code})",
+        "display_value": _role_data_scope_name(code),
     }
 
 
@@ -424,6 +424,7 @@ async def _dry_run_role_create(
             {"label": "role_code", "value": role_code},
             {"label": "role_name", "value": role_name},
             _role_scope_confirmation_field(data_scope_code),
+            {"label": "status", "value": canonical_status},
         ],
         execution_args={
             "role_name": role_name,
@@ -553,16 +554,24 @@ async def _dry_run_role_update(
         payload,
         actor_user_id=ctx.user.user_id,
     )
+    target_role_name = getattr(preview, "target_role_name", None)
     return DryRunResult(
         ok=True,
         count=len(preview.member_user_ids),
-        reason=f"将更新角色 {role_id}",
+        reason=f"将更新角色 {target_role_name or role_id}",
         summary_key="page.ai.chat.confirmRoleUpdateSummary",
-        summary_params={"roleId": str(role_id)},
+        summary_params={"roleName": target_role_name or str(role_id)},
         confirmation_fields=[
-            _role_scope_confirmation_field(str(field["value"]))
-            if field["label"] == "data_scope"
-            else field
+            (
+                _role_scope_confirmation_field(str(field["value"]))
+                if field["label"] == "data_scope"
+                else {
+                    **field,
+                    "display_value": target_role_name,
+                }
+                if field["label"] == "role_id" and target_role_name is not None
+                else field
+            )
             for field in _bound_confirmation_fields(
                 execution_args,
                 role_update.__ai_tool_meta__.args_summary_fields,
@@ -627,14 +636,19 @@ async def _dry_run_role_update_menus(
         menu_ids,
         actor_user_id=ctx.user.user_id,
     )
+    target_role_name = getattr(preview, "target_role_name", None)
     return DryRunResult(
         ok=True,
         count=len(preview.member_user_ids),
-        reason=f"将更新角色 {role_id} 的完整菜单集合",
+        reason=f"将更新角色 {target_role_name or role_id} 的完整菜单集合",
         summary_key="page.ai.chat.confirmRoleMenusSummary",
-        summary_params={"roleId": str(role_id)},
+        summary_params={"roleName": target_role_name or str(role_id)},
         confirmation_fields=[
-            {"label": "role_id", "value": role_id},
+            {
+                "label": "role_id",
+                "value": role_id,
+                "display_value": target_role_name or str(role_id),
+            },
             {
                 "label": "menu_ids",
                 "value": menu_ids,
@@ -700,14 +714,19 @@ async def _dry_run_role_update_agents(
         agent_ids,
         actor_user_id=ctx.user.user_id,
     )
+    target_role_name = getattr(preview, "target_role_name", None)
     return DryRunResult(
         ok=True,
         count=len(preview.member_user_ids),
-        reason=f"将更新角色 {role_id} 的完整 Agent 集合",
+        reason=f"将更新角色 {target_role_name or role_id} 的完整 Agent 集合",
         summary_key="page.ai.chat.confirmRoleAgentsSummary",
-        summary_params={"roleId": str(role_id)},
+        summary_params={"roleName": target_role_name or str(role_id)},
         confirmation_fields=[
-            {"label": "role_id", "value": role_id},
+            {
+                "label": "role_id",
+                "value": role_id,
+                "display_value": target_role_name or str(role_id),
+            },
             {
                 "label": "agent_ids",
                 "value": agent_ids,

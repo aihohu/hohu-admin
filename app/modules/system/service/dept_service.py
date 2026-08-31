@@ -59,6 +59,8 @@ class DepartmentWritePreview:
     dept_id: int | None
     affected_user_ids: tuple[int, ...]
     snapshot: dict[str, Any]
+    target_dept_name: str | None = None
+    parent_dept_name: str | None = None
 
 
 class DeptService:
@@ -767,6 +769,8 @@ class DeptService:
                 dept_id=dept_id,
                 affected_user_ids=tuple(sorted(affected_user_ids)),
                 snapshot=snapshot,
+                target_dept_name=target.dept_name if target is not None else None,
+                parent_dept_name=parent.dept_name if parent is not None else None,
             ),
             role_ids,
             dependency_dept_ids,

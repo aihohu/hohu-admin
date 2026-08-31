@@ -469,8 +469,8 @@ async def test_update_roles_dry_run_freezes_sorted_ids_and_snapshot() -> None:
         user_name="task13-target",
         old_role_ids=(801, 802),
         new_role_ids=(901, 902),
-        old_display=("Old A (R_OLD_A / 801)", "Old B (R_OLD_B / 802)"),
-        new_display=("New A (R_NEW_A / 901)", "New B (R_NEW_B / 902)"),
+        old_display=("Old A", "Old B"),
+        new_display=("New A", "New B"),
         snapshot={"version": "task13-snapshot"},
     )
     ctx = MagicMock(user=MagicMock(user_id=6001))
@@ -494,15 +494,12 @@ async def test_update_roles_dry_run_freezes_sorted_ids_and_snapshot() -> None:
         {
             "label": "user_id",
             "value": 7001,
-            "display_value": "task13-target（7001）",
+            "display_value": "task13-target",
         },
         {
             "label": "role_ids",
             "value": [902, 901],
-            "display_value": (
-                "Old A (R_OLD_A / 801); Old B (R_OLD_B / 802) → "
-                "New A (R_NEW_A / 901); New B (R_NEW_B / 902)"
-            ),
+            "display_value": ("Old A; Old B → New A; New B"),
         },
     ]
 

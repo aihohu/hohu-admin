@@ -1482,10 +1482,18 @@ def _build_direct_confirmation_fields(
                 raise ValueError(
                     "confirmation field value does not match frozen argument"
                 )
-            enriched_by_label[label] = {
+            display_value = field.get("display_value", raw_value)
+            presentation_field = {
                 "label": label,
-                "value": field.get("display_value", raw_value),
+                "value": display_value,
             }
+            if (
+                display_value != raw_value
+                and isinstance(raw_value, str | int | float)
+                and not isinstance(raw_value, bool)
+            ):
+                presentation_field["rawValue"] = raw_value
+            enriched_by_label[label] = presentation_field
 
     fields: list[dict[str, Any]] = []
     for field_name in meta.args_summary_fields:

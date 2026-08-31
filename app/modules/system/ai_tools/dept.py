@@ -451,6 +451,11 @@ async def _dry_run_dept_create(
         execution_args,
         dept_create.__ai_tool_meta__.args_summary_fields,
     )
+    parent_dept_name = getattr(preview, "parent_dept_name", None)
+    if parent_dept_name is not None:
+        for field in confirmation_fields:
+            if field["label"] == "parent_id":
+                field["display_value"] = parent_dept_name
     leader_fact = preview.snapshot.get("facts", {}).get("leader")
     if isinstance(leader_fact, dict):
         for field in confirmation_fields:
@@ -593,6 +598,10 @@ async def _dry_run_dept_update(
         execution_args,
         dept_update.__ai_tool_meta__.args_summary_fields,
     )
+    target_dept_name = getattr(preview, "target_dept_name", None)
+    for field in confirmation_fields:
+        if field["label"] == "dept_id" and target_dept_name is not None:
+            field["display_value"] = target_dept_name
     leader_fact = preview.snapshot.get("facts", {}).get("leader")
     if isinstance(leader_fact, dict):
         for field in confirmation_fields:
@@ -601,9 +610,9 @@ async def _dry_run_dept_update(
     return DryRunResult(
         ok=True,
         count=len(preview.affected_user_ids),
-        reason=f"将更新部门 {dept_id}",
+        reason=f"将更新部门 {target_dept_name or dept_id}",
         summary_key="page.ai.chat.confirmDeptUpdateSummary",
-        summary_params={"deptId": str(dept_id)},
+        summary_params={"deptName": target_dept_name or str(dept_id)},
         confirmation_fields=confirmation_fields,
         execution_args=execution_args,
         business_snapshot=preview.snapshot,
@@ -680,18 +689,28 @@ async def _dry_run_dept_move(
         new_parent_id=new_parent_id,
         actor_user_id=ctx.user.user_id,
     )
+    target_dept_name = getattr(preview, "target_dept_name", None)
+    parent_dept_name = getattr(preview, "parent_dept_name", None)
     return DryRunResult(
         ok=True,
         count=len(preview.affected_user_ids),
-        reason=f"将移动部门 {dept_id}",
+        reason=f"将移动部门 {target_dept_name or dept_id}",
         summary_key="page.ai.chat.confirmDeptMoveSummary",
-        summary_params={"deptId": str(dept_id)},
+        summary_params={"deptName": target_dept_name or str(dept_id)},
         confirmation_fields=[
-            {"label": "dept_id", "value": dept_id},
+            {
+                "label": "dept_id",
+                "value": dept_id,
+                "display_value": target_dept_name or str(dept_id),
+            },
             {
                 "label": "new_parent_id",
                 "value": new_parent_id,
-                "display_value": _confirmation_display(new_parent_id),
+                "display_value": (
+                    parent_dept_name
+                    if parent_dept_name is not None
+                    else _confirmation_display(new_parent_id)
+                ),
             },
         ],
         execution_args={
