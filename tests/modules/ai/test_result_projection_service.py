@@ -9,6 +9,7 @@ from jose import JWTError, jwt
 from app.constants import STATUS_ENABLED
 from app.core.config import settings
 from app.core.exceptions import AuthorizationException
+from app.core.tenant import TenantContext
 from app.modules.ai.service.result_projection_service import (
     DATA_SCOPE_RESOLVER_VERSION,
     ProjectionLineage,
@@ -34,6 +35,13 @@ def _user(*permissions: str):
         user_name="alice",
         roles=[role],
         depts=[],
+        _tenant_context=TenantContext(
+            tenant_id=0,
+            tenant_code="default",
+            actor_user_id=101,
+            tenant_version=1,
+            source="access_token",
+        ),
     )
 
 

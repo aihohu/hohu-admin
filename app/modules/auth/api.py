@@ -66,13 +66,22 @@ async def register(
     Note:
         - 本接口应用频率限制：每分钟最多 3 次注册尝试
     """
-    # 检查用户名是否已存在
-    result = await db.execute(select(User).where(User.user_name == user_in.user_name))
+    # Public registration remains a Default Tenant compatibility path in M1.
+    tenant = await auth_service.resolve_login_tenant(LoginCredentials(), db)
+
+    # 检查租户内用户名是否已存在；全局 unique 在 Plan 2 收紧为组合 unique。
+    result = await db.execute(
+        select(User).where(
+            User.tenant_id == tenant.tenant_id,
+            User.user_name == user_in.user_name,
+        )
+    )
     if result.scalars().first():
         raise DuplicateException("用户名", user_in.user_name)
 
     # 创建用户实例
     new_user = User(
+        tenant_id=tenant.tenant_id,
         user_name=user_in.user_name,
         nickname=user_in.nickname,
         hashed_password=get_password_hash(user_in.password),  # 密码加密
@@ -123,14 +132,18 @@ async def login(
     user_agent = request.headers.get("User-Agent")
     try:
         result = await auth_service.authenticate(
-            credentials, db, ip=ip, user_agent=user_agent
+            credentials,
+            db,
+            ip=ip,
+            user_agent=user_agent,
+            host=request.headers.get("Host"),
         )
         return result
     except (AuthenticationException, AuthorizationException):
         # 写入失败日志
         await auth_service._write_login_log(
             user_id=None,
-            username=credentials.user_name,
+            username=credentials.user_name or "",
             ip=ip,
             user_agent=user_agent,
             status="2",
@@ -202,6 +215,7 @@ async def refresh_token(
     description="OAuth2 兼容的登录端点，供 Swagger UI 的 Authorize 按钮使用",
 )
 async def login_for_docs(
+    request: Request,
     form: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db),
 ):
@@ -210,7 +224,11 @@ async def login_for_docs(
         user_name=form.username,
         password=form.password,
     )
-    result = await auth_service.authenticate(credentials, db)
+    result = await auth_service.authenticate(
+        credentials,
+        db,
+        host=request.headers.get("Host"),
+    )
     token = result.data["token"]
     return {"access_token": token, "token_type": "bearer"}
 

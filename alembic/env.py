@@ -22,6 +22,7 @@ from app.modules.system.models.login_log import SysLoginLog  # noqa: F401
 from app.modules.system.models.menu import Menu  # noqa: F401
 from app.modules.system.models.operation_log import SysOperationLog  # noqa: F401
 from app.modules.system.models.role import Role  # noqa: F401
+from app.modules.system.models.tenant import Tenant  # noqa: F401
 from app.modules.system.models.user import User  # noqa: F401
 from app.modules.system.models.user_transfer import (  # noqa: F401
     UserExportTask,

@@ -31,7 +31,18 @@ from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.model_authorization_service import (
     model_authorization_service,
 )
+from app.modules.system.models.user import User
 from app.utils.data_scope import DataScopeResolution
+
+
+def _principal() -> User:
+    return User(
+        user_id=999,
+        tenant_id=0,
+        user_name="chat-service-test",
+        roles=[],
+        depts=[],
+    )
 
 
 def _patch_sticky_manual(agent_code: str = "user_mgmt"):
@@ -109,10 +120,7 @@ class TestBuildChatDeps:
     ) -> None:
         _patch_unbounded_scope(monkeypatch)
 
-        mock_user = MagicMock()
-        mock_user.user_id = 999
-        mock_user.roles = []
-        mock_user.depts = []
+        mock_user = _principal()
 
         with _patch_sticky_manual():
             deps = await chat_service.build_chat_deps(db_session, mock_user)
@@ -130,9 +138,7 @@ class TestBuildChatDeps:
     ) -> None:
         """trace_id 默认格式为 tr_<uuid hex>。"""
         _patch_unbounded_scope(monkeypatch)
-        mock_user = MagicMock()
-        mock_user.roles = []
-        mock_user.depts = []
+        mock_user = _principal()
 
         with _patch_sticky_manual():
             deps = await chat_service.build_chat_deps(db_session, mock_user)
@@ -145,9 +151,7 @@ class TestBuildChatDeps:
     ) -> None:
         """调用方传入 trace_id 时复用（如重试场景）"""
         _patch_unbounded_scope(monkeypatch)
-        mock_user = MagicMock()
-        mock_user.roles = []
-        mock_user.depts = []
+        mock_user = _principal()
 
         with _patch_sticky_manual():
             deps = await chat_service.build_chat_deps(
@@ -160,9 +164,7 @@ class TestBuildChatDeps:
     ) -> None:
         """客户端字段不参与 tenant 解析；ChatDeps 只接收服务端 resolver 结果。"""
         _patch_unbounded_scope(monkeypatch)
-        mock_user = MagicMock()
-        mock_user.roles = []
-        mock_user.depts = []
+        mock_user = _principal()
 
         with (
             _patch_sticky_manual(),
@@ -181,9 +183,7 @@ class TestBuildChatDeps:
     ) -> None:
         """agent_code 必须在 ai_agent 表中存在。"""
         _patch_unbounded_scope(monkeypatch)
-        mock_user = MagicMock()
-        mock_user.roles = []
-        mock_user.depts = []
+        mock_user = _principal()
 
         denied = AuthorizationException(
             "当前用户不可使用该 AI Agent",
@@ -208,9 +208,7 @@ class TestBuildChatDeps:
     ) -> None:
         """默认使用 user_mgmt Agent。"""
         _patch_unbounded_scope(monkeypatch)
-        mock_user = MagicMock()
-        mock_user.roles = []
-        mock_user.depts = []
+        mock_user = _principal()
 
         with _patch_sticky_manual():
             deps = await chat_service.build_chat_deps(db_session, mock_user)

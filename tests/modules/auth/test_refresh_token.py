@@ -20,13 +20,32 @@ from jose import jwt
 from app.core.config import settings
 from app.core.exceptions import AuthenticationException, AuthorizationException
 from app.modules.auth.service import get_current_user, refresh_access_token
+from app.modules.system.models.tenant import Tenant
 from app.modules.system.models.user import User
 
 
-def _make_refresh_token(*, sub: str, expired: bool = False) -> str:
+def _make_refresh_token(*, sub: str, tenant_id: int = 0, expired: bool = False) -> str:
     exp = datetime.now(UTC) + (timedelta(seconds=-10) if expired else timedelta(days=1))
-    payload = {"exp": exp, "sub": sub, "type": "refresh"}
+    payload = {"exp": exp, "sub": sub, "tid": str(tenant_id), "type": "refresh"}
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def _make_user(*, user_id: int, name: str, status: str) -> User:
+    tenant = Tenant(
+        tenant_id=0,
+        tenant_code="default",
+        tenant_name="Default Tenant",
+        status="1",
+        row_version=1,
+    )
+    user = User(
+        user_id=user_id,
+        tenant_id=0,
+        user_name=name,
+        status=status,
+    )
+    user.tenant = tenant
+    return user
 
 
 def _make_session_ctx(user: User | None):
@@ -52,7 +71,7 @@ def _make_redis_mock(*, blacklist_set_succeeds: bool = True):
 
 async def test_refresh_success_when_user_enabled():
     """启用用户 + 抢到黑名单锁 → 成功换取新 token 对。"""
-    user = User(user_id=123, user_name="alice", status="1")
+    user = _make_user(user_id=123, name="alice", status="1")
     refresh = _make_refresh_token(sub="123")
 
     with (
@@ -70,11 +89,12 @@ async def test_refresh_success_when_user_enabled():
     assert access_payload["type"] == "access"
     assert refresh_payload["type"] == "refresh"
     assert access_payload["sub"] == "123"
+    assert access_payload["tid"] == "0"
 
 
 async def test_refresh_fails_when_user_disabled():
     """禁用用户的 refresh token 必须拒绝（与 get_current_user 一样用 403）。"""
-    user = User(user_id=456, user_name="bob", status="2")
+    user = _make_user(user_id=456, name="bob", status="2")
     refresh = _make_refresh_token(sub="456")
 
     with (
@@ -108,7 +128,7 @@ async def test_refresh_fails_on_concurrent_replay():
     旧 refresh 仍在客户端缓存被重放。Redis SET NX 保证只有一次能成功
     设置黑名单 key，另一个失败 → 拒绝。
     """
-    user = User(user_id=123, user_name="alice", status="1")
+    user = _make_user(user_id=123, name="alice", status="1")
     refresh = _make_refresh_token(sub="123")
 
     with (
@@ -127,10 +147,10 @@ async def test_refresh_fails_on_concurrent_replay():
 async def test_refresh_fails_when_token_type_wrong():
     """refresh token 类型字段错误必须拒绝。"""
     exp = datetime.now(UTC) + timedelta(minutes=5)
-    payload = {"exp": exp, "sub": "123", "type": "access"}
+    payload = {"exp": exp, "sub": "123", "tid": "0", "type": "access"}
     wrong = jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
-    user = User(user_id=123, user_name="alice", status="1")
+    user = _make_user(user_id=123, name="alice", status="1")
     with (
         patch("app.modules.auth.service.AsyncSessionLocal", _make_session_ctx(user)),
         patch("app.modules.auth.service.redis_client", _make_redis_mock()),
@@ -151,7 +171,7 @@ async def test_access_auth_rejects_download_token_type_before_database_lookup():
         settings.SECRET_KEY,
         algorithm=settings.ALGORITHM,
     )
-    user = User(user_id=123, user_name="alice", status="1")
+    user = _make_user(user_id=123, name="alice", status="1")
     result = MagicMock()
     result.scalars.return_value.first.return_value = user
     db = AsyncMock()

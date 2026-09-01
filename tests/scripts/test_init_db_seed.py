@@ -27,11 +27,21 @@ from app.modules.system.constants import DEPT_MOVE_PERMISSION, USER_ROLE_AUTH_PE
 from app.utils.validators import validate_password
 from scripts.init_db import (
     bind_fresh_role_permissions,
+    build_default_tenant,
     build_init_roles,
     default_password_seed_value,
     init_configs,
     init_menus,
 )
+
+
+def test_default_tenant_seed_uses_reserved_identity_and_enabled_status():
+    tenant = build_default_tenant()
+
+    assert tenant.tenant_id == 0
+    assert tenant.tenant_code == "default"
+    assert tenant.status == STATUS_ENABLED
+    assert tenant.row_version == 1
 
 
 def _find_menu_by_permission(menus: list, perm: str):

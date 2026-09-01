@@ -8,6 +8,10 @@ class LoginCredentials(BaseModel):
     login_type: str = Field(
         "password", description="登录类型: password, sms, wechat, google"
     )
+    tenant_code: str | None = Field(
+        None,
+        description="Hosted 模式的租户定位代码；认证后不作为授权上下文",
+    )
     user_name: str | None = None
     password: str | None = None
     mobile: str | None = None
@@ -17,6 +21,7 @@ class LoginCredentials(BaseModel):
     model_config = ConfigDict(
         alias_generator=to_camel,  # 自动将所有字段名转为驼峰作为别名
         populate_by_name=True,  # 允许通过字段名或别名进行初始化
+        extra="forbid",  # 登录前只接受显式 locator，拒绝 tenantId 等伪造字段
     )
 
 

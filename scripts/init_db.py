@@ -16,6 +16,7 @@ from app.constants.constants import (
 from app.core.config import settings
 from app.core.id_generator import next_id
 from app.core.security import get_password_hash
+from app.core.tenant import DEFAULT_TENANT_CODE, DEFAULT_TENANT_ID
 from app.modules.ai.constants import (
     AI_AGENT_EDIT_PERMISSION,
     AI_CHAT_USE_PERMISSION,
@@ -33,6 +34,7 @@ from app.modules.system.constants import (
 from app.modules.system.models.config import Config
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
+from app.modules.system.models.tenant import Tenant
 from app.modules.system.models.user import User
 from scripts.seed_ai_agents import seed_ai_agents_in_session
 
@@ -787,7 +789,32 @@ SEED_TABLES = [
     "sys_role",
     "sys_menu",
     "sys_config",
+    "sys_tenant",
 ]
+
+
+def build_default_tenant() -> Tenant:
+    """Build the single-mode compatibility tenant with its reserved ID."""
+    return Tenant(
+        tenant_id=DEFAULT_TENANT_ID,
+        tenant_code=DEFAULT_TENANT_CODE,
+        tenant_name="Default Tenant",
+        status=STATUS_ENABLED,
+        row_version=1,
+    )
+
+
+async def ensure_default_tenant(db: AsyncSession) -> Tenant:
+    """Idempotently provide Default Tenant after migration or seed cleanup."""
+    result = await db.execute(
+        select(Tenant).where(Tenant.tenant_id == DEFAULT_TENANT_ID)
+    )
+    tenant = result.scalars().first()
+    if tenant is None:
+        tenant = build_default_tenant()
+        db.add(tenant)
+        await db.flush()
+    return tenant
 
 
 def build_init_roles() -> list[Role]:
@@ -874,6 +901,8 @@ async def init_db():
 
         password = input("初始化密码 [默认: hohu123456]: ").strip() or "hohu123456"  # noqa: ASYNC250
 
+        default_tenant = await ensure_default_tenant(db)
+
         # 创建初始菜单
         db.add_all(init_menus)
 
@@ -890,6 +919,7 @@ async def init_db():
 
         # 创建初始管理员用户
         admin_user = User(
+            tenant_id=default_tenant.tenant_id,
             user_name="admin",
             nickname=ADMIN_ROLE_CODE,
             hashed_password=get_password_hash(password),

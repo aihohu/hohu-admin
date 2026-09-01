@@ -8,6 +8,7 @@ from .login_log import SysLoginLog
 from .menu import Menu
 from .operation_log import SysOperationLog
 from .role import Role
+from .tenant import Tenant
 from .user import User
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "SysOperationLog",
     "SysLoginLog",
     "DataScopeDemo",
+    "Tenant",
 ]

@@ -2,13 +2,27 @@
 
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from app.core.exceptions import BusinessRuleException
+from app.core.tenant import TenantContext
 from app.modules.ai.api.conversation import delete_conversation
 from app.modules.ai.service.conversation_service import conversation_service
+
+
+def _user(user_id: int = 7001):
+    return SimpleNamespace(
+        user_id=user_id,
+        _tenant_context=TenantContext(
+            tenant_id=0,
+            tenant_code="default",
+            actor_user_id=user_id,
+            tenant_version=1,
+            source="access_token",
+        ),
+    )
 
 
 def _message(
@@ -44,7 +58,7 @@ def _message(
 
 
 async def test_history_keeps_user_order_and_tombstones_denied_assistant() -> None:
-    user = SimpleNamespace(user_id=7001)
+    user = _user()
     messages = [
         _message(message_id=1, role="user", content="show users"),
         _message(message_id=2, role="assistant", content="secret result"),
@@ -74,7 +88,7 @@ async def test_history_keeps_user_order_and_tombstones_denied_assistant() -> Non
 
 
 async def test_authorized_history_refreshes_short_lived_download_url() -> None:
-    user = SimpleNamespace(user_id=7001)
+    user = _user()
     message = _message(
         message_id=2,
         role="assistant",
@@ -114,7 +128,7 @@ async def test_authorized_history_refreshes_short_lived_download_url() -> None:
 
 async def test_delete_conversation_terminalizes_actions_before_delete() -> None:
     db = AsyncMock()
-    current_user = MagicMock(user_id=7001)
+    current_user = _user()
     expired = [SimpleNamespace(confirmation_id="cid-1")]
 
     with (
@@ -147,7 +161,7 @@ async def test_delete_conversation_terminalizes_actions_before_delete() -> None:
 
 async def test_delete_conversation_does_not_commit_when_action_is_running() -> None:
     db = AsyncMock()
-    current_user = MagicMock(user_id=7001)
+    current_user = _user()
     error = BusinessRuleException(
         "action is running",
         error_code="AI_ACTION_RUNNING",

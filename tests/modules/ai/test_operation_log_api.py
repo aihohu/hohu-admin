@@ -8,6 +8,7 @@ import pytest
 
 from app.constants import STATUS_ENABLED
 from app.core.exceptions import NotFoundException
+from app.core.tenant import TenantContext
 from app.modules.ai.api.operation_log import get_operation_log
 
 
@@ -17,7 +18,18 @@ def _user(*permissions: str):
         status=STATUS_ENABLED,
         menus=[SimpleNamespace(permission=value) for value in permissions],
     )
-    return SimpleNamespace(user_id=100, user_name="alice", roles=[role])
+    return SimpleNamespace(
+        user_id=100,
+        user_name="alice",
+        roles=[role],
+        _tenant_context=TenantContext(
+            tenant_id=0,
+            tenant_code="default",
+            actor_user_id=100,
+            tenant_version=1,
+            source="access_token",
+        ),
+    )
 
 
 def _log():

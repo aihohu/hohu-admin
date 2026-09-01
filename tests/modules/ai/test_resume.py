@@ -16,6 +16,7 @@ from app.core.exceptions import (
     BusinessRuleException,
     NotFoundException,
 )
+from app.core.tenant import TenantContext
 from app.modules.ai.agents.hitl.manager import PendingPayload
 from app.modules.ai.api.resume import _load_durable_resume_terminal, resume_chat
 from app.modules.ai.service.result_projection_service import (
@@ -52,6 +53,13 @@ def _make_user(user_id: int = 100, *, can_chat: bool = True):
         user_id=user_id,
         user_name="alice",
         roles=[role],
+        _tenant_context=TenantContext(
+            tenant_id=0,
+            tenant_code="default",
+            actor_user_id=user_id,
+            tenant_version=1,
+            source="access_token",
+        ),
     )
 
 

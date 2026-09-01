@@ -27,6 +27,7 @@ from app.core.exceptions import (
     BusinessRuleException,
     NotFoundException,
 )
+from app.core.tenant import TenantContext
 from app.modules.ai.agents.hitl.constants import ConfirmAction
 from app.modules.ai.agents.hitl.manager import PendingPayload
 from app.modules.ai.api.confirm import _notify_prepared_terminal, confirm_tool
@@ -123,7 +124,18 @@ def _make_user(
     """构造带显式 AI 入口权限的最小 User mock。"""
     menus = [SimpleNamespace(permission="ai:chat:use")] if can_chat else []
     role = SimpleNamespace(role_code="R_USER", status="1", menus=menus)
-    return SimpleNamespace(user_id=user_id, user_name=user_name, roles=[role])
+    return SimpleNamespace(
+        user_id=user_id,
+        user_name=user_name,
+        roles=[role],
+        _tenant_context=TenantContext(
+            tenant_id=0,
+            tenant_code="default",
+            actor_user_id=user_id,
+            tenant_version=1,
+            source="access_token",
+        ),
+    )
 
 
 def _make_prepared_action(

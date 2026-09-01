@@ -41,23 +41,33 @@ def get_password_hash(password: str) -> str:
     return hashed.decode("utf-8")
 
 
-def create_access_token(subject: str | Any) -> str:
+def create_access_token(subject: str | Any, *, tenant_id: int) -> str:
     """生成 JWT Access Token（短期，用于 API 请求鉴权）
 
-    只携带 sub (user_id) + exp + type，避免 username 改名后 token 中陈旧值
-    污染审计日志（参见 audit_middleware._get_user_info 的缓存反查）。
+    ``tid`` 将 token 绑定到认证时的租户。username 等可变展示值仍不进入
+    token，避免改名后污染审计日志。
     """
 
     expire = datetime.now(UTC) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
 
-    # 负载信息：sub 字段通常存放 user_id；type 区分 access/refresh，防混用
-    to_encode: dict[str, Any] = {"exp": expire, "sub": str(subject), "type": "access"}
+    # type 区分 access/refresh，tid 与数据库 User.tenant_id 必须二次匹配。
+    to_encode: dict[str, Any] = {
+        "exp": expire,
+        "sub": str(subject),
+        "tid": str(tenant_id),
+        "type": "access",
+    }
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
-def create_refresh_token(subject: str | Any) -> str:
+def create_refresh_token(subject: str | Any, *, tenant_id: int) -> str:
     """生成 JWT Refresh Token（长期，仅用于换取新的 access token）"""
 
     expire = datetime.now(UTC) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
-    to_encode: dict[str, Any] = {"exp": expire, "sub": str(subject), "type": "refresh"}
+    to_encode: dict[str, Any] = {
+        "exp": expire,
+        "sub": str(subject),
+        "tid": str(tenant_id),
+        "type": "refresh",
+    }
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)

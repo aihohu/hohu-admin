@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from app.constants import STATUS_DISABLED, STATUS_ENABLED
 from app.core.exceptions import AuthorizationException, NotFoundException
+from app.core.tenant import TenantContext
 from app.modules.ai.agents.hitl.constants import AiExecutionMode, AiOperationStatus
 from app.modules.ai.api.operation_log import _ensure_trace_view, list_traces
 from app.modules.ai.models.conversation import AiConversation
@@ -31,6 +32,13 @@ def _user(*permissions: str, role_code: str = "R_AUDITOR", status=STATUS_ENABLED
                 menus=[SimpleNamespace(permission=value) for value in permissions],
             )
         ],
+        _tenant_context=TenantContext(
+            tenant_id=0,
+            tenant_code="default",
+            actor_user_id=7001,
+            tenant_version=1,
+            source="access_token",
+        ),
     )
 
 
