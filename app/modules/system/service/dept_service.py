@@ -23,6 +23,8 @@ from app.core.exceptions import (
     InvalidParameterException,
     NotFoundException,
 )
+from app.core.tenant import TenantContext
+from app.core.tenant_scope import tenant_filter, tenant_select
 from app.db.base import role_depts, user_depts, user_roles
 from app.modules.system.constants import PHASE3_DESTRUCTIVE_PERMISSIONS
 from app.modules.system.models.dept import Dept
@@ -66,7 +68,9 @@ class DepartmentWritePreview:
 class DeptService:
     """部门业务逻辑服务"""
 
-    async def get_list(self, db: AsyncSession, query: DeptQuery):
+    async def get_list(
+        self, db: AsyncSession, query: DeptQuery, *, tenant: TenantContext
+    ):
         """获取分页列表"""
         field_mapping = {
             "dept_name": ("dept_name", "contains"),
@@ -74,6 +78,7 @@ class DeptService:
             "leader": ("leader", "contains"),
         }
         filters = build_filters(Dept, field_mapping, **query.model_dump())
+        filters.insert(0, tenant_filter(Dept, tenant=tenant))
         return await paginate(
             db=db,
             model=Dept,
@@ -82,24 +87,32 @@ class DeptService:
             order_by=Dept.order_num.asc(),
         )
 
-    async def get_all(self, db: AsyncSession) -> list[Dept]:
+    async def get_all(self, db: AsyncSession, *, tenant: TenantContext) -> list[Dept]:
         """获取全量列表（不分页），用于构建树"""
-        stmt = select(Dept).order_by(Dept.order_num.asc())
+        stmt = tenant_select(Dept, tenant=tenant).order_by(Dept.order_num.asc())
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
-    async def get_by_id(self, db: AsyncSession, dept_id: int) -> Dept:
+    async def get_by_id(
+        self, db: AsyncSession, dept_id: int, *, tenant: TenantContext
+    ) -> Dept:
         """根据 ID 获取部门"""
-        dept = await db.get(Dept, dept_id)
+        dept = await db.scalar(
+            tenant_select(Dept, tenant=tenant).where(Dept.dept_id == dept_id)
+        )
         if not dept:
             raise NotFoundException("部门")
         return dept
 
-    async def get_by_ids(self, db: AsyncSession, ids: list[int]) -> list[Dept]:
+    async def get_by_ids(
+        self, db: AsyncSession, ids: list[int], *, tenant: TenantContext
+    ) -> list[Dept]:
         """批量查询部门"""
         if not ids:
             return []
-        result = await db.execute(select(Dept).where(Dept.dept_id.in_(ids)))
+        result = await db.execute(
+            tenant_select(Dept, tenant=tenant).where(Dept.dept_id.in_(ids))
+        )
         return list(result.scalars().all())
 
     @staticmethod
@@ -137,9 +150,11 @@ class DeptService:
         self,
         db: AsyncSession,
         dept_id: int,
+        *,
+        tenant: TenantContext,
     ) -> Dept:
         dept = await db.scalar(
-            select(Dept)
+            tenant_select(Dept, tenant=tenant)
             .where(Dept.dept_id == dept_id)
             .execution_options(populate_existing=True)
         )
@@ -147,13 +162,15 @@ class DeptService:
             raise NotFoundException("部门")
         return dept
 
-    async def _load_users(self, db: AsyncSession, user_ids: set[int]) -> list[User]:
+    async def _load_users(
+        self, db: AsyncSession, user_ids: set[int], *, tenant: TenantContext
+    ) -> list[User]:
         if not user_ids:
             return []
-        return list(
+        users = list(
             (
                 await db.execute(
-                    select(User)
+                    tenant_select(User, tenant=tenant)
                     .where(User.user_id.in_(user_ids))
                     .options(
                         selectinload(User.roles).selectinload(Role.menus),
@@ -167,11 +184,14 @@ class DeptService:
             .scalars()
             .unique()
         )
+        return users
 
     async def _affected_role_ids_for_status(
         self,
         db: AsyncSession,
         dept_id: int,
+        *,
+        tenant: TenantContext,
     ) -> set[int]:
         return {
             int(role_id)
@@ -180,6 +200,8 @@ class DeptService:
                     select(role_depts.c.role_id)
                     .join(Role, Role.role_id == role_depts.c.role_id)
                     .where(
+                        role_depts.c.tenant_id == tenant.tenant_id,
+                        Role.tenant_id == tenant.tenant_id,
                         role_depts.c.dept_id == dept_id,
                         Role.status == STATUS_ENABLED,
                         Role.data_scope == DATA_SCOPE_CUSTOM,
@@ -192,6 +214,8 @@ class DeptService:
         self,
         db: AsyncSession,
         anchor_ids: set[int],
+        *,
+        tenant: TenantContext,
     ) -> set[int]:
         if not anchor_ids:
             return set()
@@ -206,6 +230,9 @@ class DeptService:
                         user_depts.c.user_id == user_roles.c.user_id,
                     )
                     .where(
+                        Role.tenant_id == tenant.tenant_id,
+                        user_roles.c.tenant_id == tenant.tenant_id,
+                        user_depts.c.tenant_id == tenant.tenant_id,
                         Role.status == STATUS_ENABLED,
                         Role.data_scope == DATA_SCOPE_DEPT_AND_SUB,
                         user_depts.c.dept_id.in_(anchor_ids),
@@ -219,6 +246,8 @@ class DeptService:
         self,
         db: AsyncSession,
         role_ids: set[int],
+        *,
+        tenant: TenantContext,
     ) -> set[int]:
         if not role_ids:
             return set()
@@ -227,7 +256,8 @@ class DeptService:
             for user_id in (
                 await db.execute(
                     select(user_roles.c.user_id).where(
-                        user_roles.c.role_id.in_(role_ids)
+                        user_roles.c.tenant_id == tenant.tenant_id,
+                        user_roles.c.role_id.in_(role_ids),
                     )
                 )
             ).scalars()
@@ -245,10 +275,11 @@ class DeptService:
             return None
         normalized = leader.strip().casefold()
         filters = [
+            User.tenant_id == authority.tenant_id,
             or_(
                 func.lower(User.user_name) == normalized,
                 func.lower(User.nickname) == normalized,
-            )
+            ),
         ]
         if authority.accessible_user_scope is not None:
             filters.append(User.user_id.in_(authority.accessible_user_scope))
@@ -279,6 +310,7 @@ class DeptService:
         self,
         db: AsyncSession,
         *,
+        tenant: TenantContext,
         authority: GrantAuthority,
         role_ids: set[int],
         status_override: tuple[int, str],
@@ -291,7 +323,10 @@ class DeptService:
             (
                 await db.execute(
                     select(Role)
-                    .where(Role.role_id.in_(role_ids))
+                    .where(
+                        Role.tenant_id == tenant.tenant_id,
+                        Role.role_id.in_(role_ids),
+                    )
                     .options(selectinload(Role.menus), selectinload(Role.depts))
                     .order_by(Role.role_id)
                     .execution_options(populate_existing=True)
@@ -308,6 +343,7 @@ class DeptService:
             await agent_authorization_service.grantable_agent_ids_by_role_ids(
                 db,
                 role_ids,
+                tenant=tenant,
             )
         )
         changed_dept_id, candidate_status = status_override
@@ -422,6 +458,7 @@ class DeptService:
         self,
         db: AsyncSession,
         *,
+        tenant: TenantContext,
         authority: GrantAuthority,
         affected_users: list[User],
         status_override: tuple[int, str] | None = None,
@@ -429,7 +466,11 @@ class DeptService:
         error_code: str,
     ) -> tuple[dict[str, Any], set[int]]:
         departments = list(
-            (await db.execute(select(Dept).order_by(Dept.dept_id))).scalars()
+            (
+                await db.execute(
+                    tenant_select(Dept, tenant=tenant).order_by(Dept.dept_id)
+                )
+            ).scalars()
         )
         parent_before = {
             int(dept.dept_id): (
@@ -446,7 +487,11 @@ class DeptService:
             status_after[status_override[0]] = status_override[1]
 
         memberships = (
-            await db.execute(select(user_depts.c.dept_id, user_depts.c.user_id))
+            await db.execute(
+                select(user_depts.c.dept_id, user_depts.c.user_id).where(
+                    user_depts.c.tenant_id == tenant.tenant_id
+                )
+            )
         ).all()
         users_by_dept: dict[int, set[int]] = {}
         for dept_id, user_id in memberships:
@@ -520,13 +565,16 @@ class DeptService:
         self,
         db: AsyncSession,
         *,
+        tenant: TenantContext,
         action: Literal["create", "update", "move"],
         actor_user_id: int,
         dept_in: DeptCreate | DeptUpdate | None = None,
         dept_id: int | None = None,
         new_parent_id: int | None = None,
     ) -> tuple[DepartmentWritePreview, set[int], set[int], set[int]]:
-        authority = await grant_authority_service.build(db, actor_user_id)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         required = {
             "create": {"system:dept:add", "system:dept:list"},
             "update": {"system:dept:edit", "system:dept:list"},
@@ -558,7 +606,7 @@ class DeptService:
                     error_code="AI_DEPT_ROOT_CREATE_FORBIDDEN",
                 )
             if parent_id is not None:
-                parent = await self._load_department(db, parent_id)
+                parent = await self._load_department(db, parent_id, tenant=tenant)
                 self._ensure_dept_scope(authority, {parent_id})
                 if parent.status != STATUS_ENABLED:
                     raise BusinessRuleException(
@@ -568,11 +616,13 @@ class DeptService:
                 if self._get_dept_level(parent.ancestors) + 1 > DEPT_MAX_LEVEL:
                     raise BusinessRuleException(f"部门层级不能超过{DEPT_MAX_LEVEL}层")
                 dependency_dept_ids.update({parent_id, *self._ancestor_ids(parent)})
-            await self._check_duplicate_name(db, parent_id, dept_in.dept_name)
+            await self._check_duplicate_name(
+                db, parent_id, dept_in.dept_name, tenant=tenant
+            )
             candidate = dept_in.model_dump(mode="json")
         else:
             assert dept_id is not None
-            target = await self._load_department(db, dept_id)
+            target = await self._load_department(db, dept_id, tenant=tenant)
             self._ensure_dept_scope(authority, {dept_id})
             dependency_dept_ids.update({dept_id, *self._ancestor_ids(target)})
             if action == "update":
@@ -591,17 +641,19 @@ class DeptService:
                         target.parent_id,
                         str(new_name),
                         exclude_id=dept_id,
+                        tenant=tenant,
                     )
                 candidate = update_data
                 if "status" in update_data and update_data["status"] != target.status:
                     affected_role_ids = await self._affected_role_ids_for_status(
-                        db, dept_id
+                        db, dept_id, tenant=tenant
                     )
                     (
                         affected_role_facts,
                         affected_role_depts,
                     ) = await self._affected_role_facts_for_status(
                         db,
+                        tenant=tenant,
                         authority=authority,
                         role_ids=affected_role_ids,
                         status_override=(dept_id, str(update_data["status"])),
@@ -609,11 +661,14 @@ class DeptService:
                     )
                     dependency_dept_ids.update(affected_role_depts)
                     affected_user_ids = await self._member_ids_for_roles(
-                        db, affected_role_ids
+                        db, affected_role_ids, tenant=tenant
                     )
-                    affected_users = await self._load_users(db, affected_user_ids)
+                    affected_users = await self._load_users(
+                        db, affected_user_ids, tenant=tenant
+                    )
                     impact, impact_depts = await self._impact_snapshot(
                         db,
+                        tenant=tenant,
                         authority=authority,
                         affected_users=affected_users,
                         status_override=(dept_id, str(update_data["status"])),
@@ -642,12 +697,16 @@ class DeptService:
                         error_code="AI_DEPT_ROOT_MOVE_FORBIDDEN",
                     )
                 old_parent = (
-                    await self._load_department(db, int(target.parent_id))
+                    await self._load_department(
+                        db, int(target.parent_id), tenant=tenant
+                    )
                     if target.parent_id is not None
                     else None
                 )
                 if new_parent_id is not None:
-                    parent = await self._load_department(db, new_parent_id)
+                    parent = await self._load_department(
+                        db, new_parent_id, tenant=tenant
+                    )
                     if parent.status != STATUS_ENABLED:
                         raise BusinessRuleException(
                             "目标父部门已禁用",
@@ -660,7 +719,9 @@ class DeptService:
                             "不能把部门移动到自己或后代下",
                             error_code="AI_DEPT_MOVE_CYCLE",
                         )
-                    child_depth = await self._get_max_child_depth(db, dept_id)
+                    child_depth = await self._get_max_child_depth(
+                        db, dept_id, tenant=tenant
+                    )
                     if (
                         self._get_dept_level(parent.ancestors) + 1 + child_depth
                         > DEPT_MAX_LEVEL
@@ -682,9 +743,12 @@ class DeptService:
                     for value in (
                         await db.execute(
                             select(Dept.dept_id).where(
+                                Dept.tenant_id == tenant.tenant_id,
                                 (Dept.dept_id == dept_id)
                                 | (Dept.ancestors == f"{target.ancestors},{dept_id}")
-                                | Dept.ancestors.like(f"{target.ancestors},{dept_id},%")
+                                | Dept.ancestors.like(
+                                    f"{target.ancestors},{dept_id},%"
+                                ),
                             )
                         )
                     ).scalars()
@@ -701,13 +765,18 @@ class DeptService:
                     *({int(old_parent.dept_id)} if old_parent else set()),
                     *({int(parent.dept_id)} if parent else set()),
                 }
-                affected_role_ids = await self._affected_role_ids_for_move(db, anchors)
-                affected_user_ids = await self._member_ids_for_roles(
-                    db, affected_role_ids
+                affected_role_ids = await self._affected_role_ids_for_move(
+                    db, anchors, tenant=tenant
                 )
-                affected_users = await self._load_users(db, affected_user_ids)
+                affected_user_ids = await self._member_ids_for_roles(
+                    db, affected_role_ids, tenant=tenant
+                )
+                affected_users = await self._load_users(
+                    db, affected_user_ids, tenant=tenant
+                )
                 impact, impact_depts = await self._impact_snapshot(
                     db,
+                    tenant=tenant,
                     authority=authority,
                     affected_users=affected_users,
                     parent_override=(dept_id, new_parent_id),
@@ -716,7 +785,7 @@ class DeptService:
                 dependency_dept_ids.update(impact_depts)
                 candidate = {"newParentId": new_parent_id}
 
-        affected_users = await self._load_users(db, affected_user_ids)
+        affected_users = await self._load_users(db, affected_user_ids, tenant=tenant)
         role_ids = set(authority.enabled_role_ids)
         role_ids.update(affected_role_ids)
         role_ids.update(
@@ -733,7 +802,9 @@ class DeptService:
                         Dept.parent_id,
                         Dept.ancestors,
                         Dept.status,
-                    ).order_by(Dept.dept_id)
+                    )
+                    .where(Dept.tenant_id == tenant.tenant_id)
+                    .order_by(Dept.dept_id)
                 )
             ).all()
         )
@@ -781,6 +852,7 @@ class DeptService:
         self,
         db: AsyncSession,
         *,
+        tenant: TenantContext,
         action: Literal["create", "update", "move"],
         actor_user_id: int,
         dept_in: DeptCreate | DeptUpdate | None = None,
@@ -790,6 +862,7 @@ class DeptService:
     ) -> DepartmentWritePreview:
         initial, role_ids, dept_ids, user_ids = await self._build_preview(
             db,
+            tenant=tenant,
             action=action,
             actor_user_id=actor_user_id,
             dept_in=dept_in,
@@ -801,6 +874,7 @@ class DeptService:
             role_ids=role_ids,
             dept_ids=dept_ids,
             user_ids=user_ids,
+            tenant=tenant,
         )
         try:
             (
@@ -810,6 +884,7 @@ class DeptService:
                 locked_users,
             ) = await self._build_preview(
                 db,
+                tenant=tenant,
                 action=action,
                 actor_user_id=actor_user_id,
                 dept_in=dept_in,
@@ -844,9 +919,11 @@ class DeptService:
         dept_in: DeptCreate,
         *,
         actor_user_id: int,
+        tenant: TenantContext,
     ) -> DepartmentWritePreview:
         preview, *_ = await self._build_preview(
             db,
+            tenant=tenant,
             action="create",
             actor_user_id=actor_user_id,
             dept_in=dept_in,
@@ -859,11 +936,13 @@ class DeptService:
         dept_in: DeptCreate,
         *,
         actor_user_id: int,
+        tenant: TenantContext,
         expected_snapshot: dict[str, Any] | None = None,
     ) -> Dept:
         """Create a scoped department after global authorization revalidation."""
         await self._authorize_and_lock(
             db,
+            tenant=tenant,
             action="create",
             actor_user_id=actor_user_id,
             dept_in=dept_in,
@@ -871,11 +950,12 @@ class DeptService:
         )
         parent_id = int(dept_in.parent_id) if dept_in.parent_id else None
         parent = (
-            await self._load_department(db, parent_id)
+            await self._load_department(db, parent_id, tenant=tenant)
             if parent_id is not None
             else None
         )
         new_dept = Dept(
+            tenant_id=tenant.tenant_id,
             parent_id=parent_id,
             ancestors=(f"{parent.ancestors},{parent.dept_id}" if parent else "0"),
             dept_name=dept_in.dept_name,
@@ -896,9 +976,11 @@ class DeptService:
         dept_in: DeptUpdate,
         *,
         actor_user_id: int,
+        tenant: TenantContext,
     ) -> DepartmentWritePreview:
         preview, *_ = await self._build_preview(
             db,
+            tenant=tenant,
             action="update",
             actor_user_id=actor_user_id,
             dept_id=dept_id,
@@ -913,18 +995,20 @@ class DeptService:
         dept_in: DeptUpdate,
         *,
         actor_user_id: int,
+        tenant: TenantContext,
         expected_snapshot: dict[str, Any] | None = None,
     ) -> Dept:
         """Update scoped non-structural fields after authorization revalidation."""
         await self._authorize_and_lock(
             db,
+            tenant=tenant,
             action="update",
             actor_user_id=actor_user_id,
             dept_id=dept_id,
             dept_in=dept_in,
             expected_snapshot=expected_snapshot,
         )
-        dept = await self._load_department(db, dept_id)
+        dept = await self._load_department(db, dept_id, tenant=tenant)
         for field, value in dept_in.model_dump(exclude_unset=True).items():
             setattr(dept, field, value)
         return dept
@@ -936,9 +1020,11 @@ class DeptService:
         dept_id: int,
         new_parent_id: int | None,
         actor_user_id: int,
+        tenant: TenantContext,
     ) -> DepartmentWritePreview:
         preview, *_ = await self._build_preview(
             db,
+            tenant=tenant,
             action="move",
             actor_user_id=actor_user_id,
             dept_id=dept_id,
@@ -953,21 +1039,23 @@ class DeptService:
         dept_id: int,
         new_parent_id: int | None,
         actor_user_id: int,
+        tenant: TenantContext,
         expected_snapshot: dict[str, Any] | None = None,
     ) -> Dept:
         """Move one scoped subtree after global authorization revalidation."""
         await self._authorize_and_lock(
             db,
+            tenant=tenant,
             action="move",
             actor_user_id=actor_user_id,
             dept_id=dept_id,
             new_parent_id=new_parent_id,
             expected_snapshot=expected_snapshot,
         )
-        dept = await self._load_department(db, dept_id)
+        dept = await self._load_department(db, dept_id, tenant=tenant)
         old_prefix = str(dept.ancestors)
         parent = (
-            await self._load_department(db, new_parent_id)
+            await self._load_department(db, new_parent_id, tenant=tenant)
             if new_parent_id is not None
             else None
         )
@@ -977,6 +1065,7 @@ class DeptService:
             dept_id,
             old_prefix,
             new_prefix,
+            tenant=tenant,
         )
         dept.parent_id = new_parent_id
         dept.ancestors = new_prefix
@@ -988,6 +1077,7 @@ class DeptService:
         dept_id: int,
         *,
         actor_user_id: int,
+        tenant: TenantContext,
     ) -> None:
         """Delete one unreferenced department through the destructive policy."""
         await self._delete_departments(
@@ -995,19 +1085,25 @@ class DeptService:
             [dept_id],
             actor_user_id=actor_user_id,
             required_permission="system:dept:delete",
+            tenant=tenant,
         )
 
     async def _delete_facts(
         self,
         db: AsyncSession,
         dept_ids: tuple[int, ...],
+        *,
+        tenant: TenantContext,
     ) -> dict[str, tuple[int, ...]]:
         existing = tuple(
             int(value)
             for value in (
                 await db.execute(
                     select(Dept.dept_id)
-                    .where(Dept.dept_id.in_(dept_ids))
+                    .where(
+                        Dept.tenant_id == tenant.tenant_id,
+                        Dept.dept_id.in_(dept_ids),
+                    )
                     .order_by(Dept.dept_id)
                 )
             ).scalars()
@@ -1019,7 +1115,10 @@ class DeptService:
             for value in (
                 await db.execute(
                     select(Dept.dept_id)
-                    .where(Dept.parent_id.in_(dept_ids))
+                    .where(
+                        Dept.tenant_id == tenant.tenant_id,
+                        Dept.parent_id.in_(dept_ids),
+                    )
                     .order_by(Dept.dept_id)
                 )
             ).scalars()
@@ -1030,7 +1129,8 @@ class DeptService:
                 for value in (
                     await db.execute(
                         select(user_depts.c.user_id).where(
-                            user_depts.c.dept_id.in_(dept_ids)
+                            user_depts.c.tenant_id == tenant.tenant_id,
+                            user_depts.c.dept_id.in_(dept_ids),
                         )
                     )
                 ).scalars()
@@ -1042,7 +1142,8 @@ class DeptService:
                 for value in (
                     await db.execute(
                         select(role_depts.c.role_id).where(
-                            role_depts.c.dept_id.in_(dept_ids)
+                            role_depts.c.tenant_id == tenant.tenant_id,
+                            role_depts.c.dept_id.in_(dept_ids),
                         )
                     )
                 ).scalars()
@@ -1054,7 +1155,8 @@ class DeptService:
                 for value in (
                     await db.execute(
                         select(user_roles.c.user_id).where(
-                            user_roles.c.role_id.in_(referenced_roles)
+                            user_roles.c.tenant_id == tenant.tenant_id,
+                            user_roles.c.role_id.in_(referenced_roles),
                         )
                     )
                 ).scalars()
@@ -1076,6 +1178,7 @@ class DeptService:
         ids: list[int],
         *,
         actor_user_id: int,
+        tenant: TenantContext,
     ) -> int:
         """Atomically delete an unreferenced department set as super admin."""
         return await self._delete_departments(
@@ -1083,6 +1186,7 @@ class DeptService:
             ids,
             actor_user_id=actor_user_id,
             required_permission="system:dept:batch-delete",
+            tenant=tenant,
         )
 
     async def _delete_departments(
@@ -1092,6 +1196,7 @@ class DeptService:
         *,
         actor_user_id: int,
         required_permission: str,
+        tenant: TenantContext,
     ) -> int:
         """Enforce the exact destructive permission before one atomic delete."""
         if required_permission not in PHASE3_DESTRUCTIVE_PERMISSIONS:
@@ -1099,7 +1204,9 @@ class DeptService:
         if not ids:
             raise InvalidParameterException("请选择要删除的部门")
         normalized = tuple(sorted({int(value) for value in ids}))
-        authority = await grant_authority_service.build(db, actor_user_id)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         if not authority.super_admin:
             raise AuthorizationException(
                 "仅超级管理员可以删除部门",
@@ -1110,7 +1217,7 @@ class DeptService:
                 "缺少部门删除权限",
                 error_code="MISSING_PERMISSION",
             )
-        initial = await self._delete_facts(db, normalized)
+        initial = await self._delete_facts(db, normalized, tenant=tenant)
         role_ids = {
             *authority.enabled_role_ids,
             *initial["referencedRoles"],
@@ -1126,8 +1233,9 @@ class DeptService:
             role_ids=role_ids,
             dept_ids=dept_ids,
             user_ids=user_ids,
+            tenant=tenant,
         )
-        locked = await self._delete_facts(db, normalized)
+        locked = await self._delete_facts(db, normalized, tenant=tenant)
         if locked != initial:
             raise BusinessRuleException(
                 "部门删除引用事实已变化",
@@ -1138,7 +1246,12 @@ class DeptService:
                 "部门仍被组织、用户或角色授权引用",
                 error_code="DEPT_DELETE_REFERENCED",
             )
-        result = await db.execute(delete(Dept).where(Dept.dept_id.in_(normalized)))
+        result = await db.execute(
+            delete(Dept).where(
+                Dept.tenant_id == tenant.tenant_id,
+                Dept.dept_id.in_(normalized),
+            )
+        )
         return int(result.rowcount or 0)
 
     def _get_dept_level(self, ancestors: str | None) -> int:
@@ -1147,19 +1260,24 @@ class DeptService:
             return 1
         return len(ancestors.split(","))
 
-    async def _get_max_child_depth(self, db: AsyncSession, dept_id: int) -> int:
+    async def _get_max_child_depth(
+        self, db: AsyncSession, dept_id: int, *, tenant: TenantContext
+    ) -> int:
         """获取子树最大深度（相对于当前节点）"""
-        dept = await db.get(Dept, dept_id)
+        dept = await db.scalar(
+            tenant_select(Dept, tenant=tenant).where(Dept.dept_id == dept_id)
+        )
         if not dept:
             return 0
 
         # 查询所有后代
         ancestor_prefix = f"{dept.ancestors},{dept_id}"
         stmt = select(Dept).where(
+            Dept.tenant_id == tenant.tenant_id,
             or_(
                 Dept.ancestors == ancestor_prefix,
                 Dept.ancestors.like(f"{ancestor_prefix},%"),
-            )
+            ),
         )
         result = await db.execute(stmt)
         descendants = result.scalars().all()
@@ -1179,15 +1297,22 @@ class DeptService:
         return max_depth
 
     async def _update_descendants_ancestors(
-        self, db: AsyncSession, dept_id: int, old_prefix: str, new_prefix: str
+        self,
+        db: AsyncSession,
+        dept_id: int,
+        old_prefix: str,
+        new_prefix: str,
+        *,
+        tenant: TenantContext,
     ) -> None:
         """移动部门时更新后代 ancestors"""
         ancestor_pattern = f"{old_prefix},{dept_id}"
         stmt = select(Dept).where(
+            Dept.tenant_id == tenant.tenant_id,
             or_(
                 Dept.ancestors == ancestor_pattern,
                 Dept.ancestors.like(f"{ancestor_pattern},%"),
-            )
+            ),
         )
         result = await db.execute(stmt)
         descendants = result.scalars().all()
@@ -1201,9 +1326,14 @@ class DeptService:
         parent_id: int | None,
         dept_name: str,
         exclude_id: int | None = None,
+        *,
+        tenant: TenantContext,
     ) -> None:
         """校验同级名称唯一性"""
-        stmt = select(Dept).where(Dept.dept_name == dept_name)
+        stmt = select(Dept).where(
+            Dept.tenant_id == tenant.tenant_id,
+            Dept.dept_name == dept_name,
+        )
         if parent_id is not None:
             stmt = stmt.where(Dept.parent_id == parent_id)
         else:

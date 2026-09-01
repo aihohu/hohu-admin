@@ -35,6 +35,7 @@ def _make_deps(
         perms=perms or {"system:user:list"},
         db=MagicMock(),
         data_scope=DataScopeContext(
+            tenant_id=0,
             accessible_dept_ids=accessible_dept_ids,
             accessible_user_scope=accessible_user_scope,
             filters=[],

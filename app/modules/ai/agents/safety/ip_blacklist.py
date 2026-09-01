@@ -22,6 +22,7 @@ from typing import Any
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.tenant import TenantContext
 from app.modules.ai.agents.safety.ai_config import get_ai_config_int, get_ai_config_str
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,7 @@ def _blacklist_key(ip: str) -> str:
     return f"blacklist:{ip_hash}"
 
 
-async def _load_allowlist(db: AsyncSession) -> list[str]:
+async def _load_allowlist(db: AsyncSession, *, tenant: TenantContext) -> list[str]:
     """读 NAT 白名单（60s 缓存）
 
     Returns:
@@ -66,7 +67,7 @@ async def _load_allowlist(db: AsyncSession) -> list[str]:
         if time.time() - fetched_at < _ALLOWLIST_TTL_SEC:
             return cached_list
 
-    raw = await get_ai_config_str(db, _CFG_ALLOWLIST, "[]")
+    raw = await get_ai_config_str(db, _CFG_ALLOWLIST, "[]", tenant=tenant)
     parsed: list[str] = []
     try:
         data = json.loads(raw)
@@ -91,6 +92,7 @@ async def record_perm_denied(
     db: AsyncSession,
     ip: str,
     *,
+    tenant: TenantContext,
     duration_sec: int = DEFAULT_TTL_SEC,
 ) -> bool:
     """记录一次 AI 鉴权拒绝（perm_denied / data_scope_violation）
@@ -112,12 +114,14 @@ async def record_perm_denied(
     if current == 1:
         await redis.expire(key, DEFAULT_TTL_SEC)
 
-    threshold = await get_ai_config_int(db, _CFG_THRESHOLD, DEFAULT_THRESHOLD_PER_HOUR)
+    threshold = await get_ai_config_int(
+        db, _CFG_THRESHOLD, DEFAULT_THRESHOLD_PER_HOUR, tenant=tenant
+    )
     if current < threshold:
         return False
 
     # 到阈值：检查白名单
-    allowlist = await _load_allowlist(db)
+    allowlist = await _load_allowlist(db, tenant=tenant)
     if ip in allowlist:
         logger.warning(
             "ip hit perm_denied threshold but in NAT allowlist, NOT blacklisted",

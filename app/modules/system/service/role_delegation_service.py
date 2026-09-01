@@ -14,7 +14,10 @@ from app.core.exceptions import (
     BusinessRuleException,
     NotFoundException,
 )
+from app.core.tenant import TenantContext
+from app.core.tenant_scope import tenant_select
 from app.db.base import user_roles
+from app.modules.ai.models.role_ai_agent import RoleAiAgent
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.service.authorization_lock import authorization_lock_service
@@ -80,9 +83,11 @@ class RoleDelegationService:
         )
 
     @staticmethod
-    async def _load_user(db: AsyncSession, user_id: int) -> User:
+    async def _load_user(
+        db: AsyncSession, user_id: int, *, tenant: TenantContext
+    ) -> User:
         user = await db.scalar(
-            select(User)
+            tenant_select(User, tenant=tenant)
             .where(User.user_id == user_id)
             .options(
                 selectinload(User.roles).selectinload(Role.menus),
@@ -96,9 +101,11 @@ class RoleDelegationService:
         return user
 
     @staticmethod
-    async def _load_role(db: AsyncSession, role_id: int) -> Role:
+    async def _load_role(
+        db: AsyncSession, role_id: int, *, tenant: TenantContext
+    ) -> Role:
         role = await db.scalar(
-            select(Role)
+            tenant_select(Role, tenant=tenant)
             .where(Role.role_id == role_id)
             .options(selectinload(Role.menus), selectinload(Role.depts))
             .execution_options(populate_existing=True)
@@ -108,13 +115,18 @@ class RoleDelegationService:
         return role
 
     @staticmethod
-    async def _load_members(db: AsyncSession, role_id: int) -> list[User]:
+    async def _load_members(
+        db: AsyncSession, role_id: int, *, tenant: TenantContext
+    ) -> list[User]:
         return list(
             (
                 await db.execute(
-                    select(User)
+                    tenant_select(User, tenant=tenant)
                     .join(user_roles, user_roles.c.user_id == User.user_id)
-                    .where(user_roles.c.role_id == role_id)
+                    .where(
+                        user_roles.c.tenant_id == tenant.tenant_id,
+                        user_roles.c.role_id == role_id,
+                    )
                     .options(
                         selectinload(User.roles).selectinload(Role.menus),
                         selectinload(User.roles).selectinload(Role.depts),
@@ -129,16 +141,23 @@ class RoleDelegationService:
         )
 
     @staticmethod
-    async def _active_agent_ids(db: AsyncSession, role_id: int) -> tuple[int, ...]:
-        from app.modules.ai.service.agent_authorization_service import (  # noqa: PLC0415
-            agent_authorization_service,
+    async def _active_agent_ids(
+        db: AsyncSession, role_id: int, *, tenant: TenantContext
+    ) -> tuple[int, ...]:
+        return tuple(
+            sorted(
+                int(value)
+                for value in (
+                    await db.execute(
+                        select(RoleAiAgent.agent_id).where(
+                            RoleAiAgent.tenant_id == tenant.tenant_id,
+                            RoleAiAgent.role_id == role_id,
+                            RoleAiAgent.enabled.is_(True),
+                        )
+                    )
+                ).scalars()
+            )
         )
-
-        by_role = await agent_authorization_service.grantable_agent_ids_by_role_ids(
-            db,
-            [role_id],
-        )
-        return tuple(sorted(by_role.get(role_id, set())))
 
     @staticmethod
     def _role_ids(users: list[User], target_role_id: int) -> tuple[int, ...]:
@@ -327,12 +346,15 @@ class RoleDelegationService:
         actor_user_id: int,
         role_id: int,
         new_agent_ids: tuple[int, ...],
+        tenant: TenantContext,
     ) -> _RoleAgentEvaluation:
-        actor = await self._load_user(db, actor_user_id)
-        authority = await grant_authority_service.build(db, actor_user_id)
+        actor = await self._load_user(db, actor_user_id, tenant=tenant)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         self._require_entry_permission(authority)
-        role = await self._load_role(db, role_id)
-        old_agent_ids = await self._active_agent_ids(db, role_id)
+        role = await self._load_role(db, role_id, tenant=tenant)
+        old_agent_ids = await self._active_agent_ids(db, role_id, tenant=tenant)
 
         if authority.super_admin:
             return self._build_evaluation(
@@ -346,7 +368,7 @@ class RoleDelegationService:
                 after=[],
             )
 
-        members = await self._load_members(db, role_id)
+        members = await self._load_members(db, role_id, tenant=tenant)
 
         self._ensure_member_protection(
             authority=authority,
@@ -367,10 +389,12 @@ class RoleDelegationService:
         ]
         before = await user_role_assignment_service.materialize_role_set_authorities(
             db,
+            tenant=tenant,
             candidates=candidates,
         )
         after = await user_role_assignment_service.materialize_role_set_authorities(
             db,
+            tenant=tenant,
             candidates=candidates,
             agent_ids_by_role_override={role_id: set(new_agent_ids)},
         )
@@ -398,6 +422,7 @@ class RoleDelegationService:
         actor_user_id: int,
         role_id: int,
         new_agent_ids: list[int] | tuple[int, ...],
+        tenant: TenantContext,
         expected_snapshot: dict[str, Any] | None = None,
     ) -> RoleAgentDelegationPlan:
         """Authorize, lock, and re-evaluate one complete Role-Agent set."""
@@ -407,12 +432,14 @@ class RoleDelegationService:
             actor_user_id=actor_user_id,
             role_id=role_id,
             new_agent_ids=normalized_new_ids,
+            tenant=tenant,
         )
         await authorization_lock_service.lock_targets(
             db,
             role_ids=initial.role_ids,
             dept_ids=initial.dept_ids,
             user_ids=initial.user_ids,
+            tenant=tenant,
         )
         try:
             locked = await self._evaluate_agent_replacement(
@@ -420,6 +447,7 @@ class RoleDelegationService:
                 actor_user_id=actor_user_id,
                 role_id=role_id,
                 new_agent_ids=normalized_new_ids,
+                tenant=tenant,
             )
         except BusinessException as exc:
             raise BusinessRuleException(
@@ -450,6 +478,7 @@ class RoleDelegationService:
         actor_user_id: int,
         role_id: int,
         new_agent_ids: list[int] | tuple[int, ...],
+        tenant: TenantContext,
     ) -> dict[str, Any]:
         """Return the server-owned snapshot without locking or writing."""
         evaluation = await self._evaluate_agent_replacement(
@@ -457,6 +486,7 @@ class RoleDelegationService:
             actor_user_id=actor_user_id,
             role_id=role_id,
             new_agent_ids=tuple(sorted(int(value) for value in new_agent_ids)),
+            tenant=tenant,
         )
         return evaluation.snapshot
 

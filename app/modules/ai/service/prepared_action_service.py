@@ -10,6 +10,7 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessException, BusinessRuleException
+from app.core.tenant import TenantContext
 from app.modules.ai.agents.gateway.failures import compute_args_hash
 from app.modules.ai.agents.hitl.constants import (
     AiOperationStatus,
@@ -1003,9 +1004,15 @@ class PreparedActionService:
             raise _binding_invalid("prepared action 与待确认执行上下文不一致")
 
     async def validate_snapshot(
-        self, db: AsyncSession, action: AiPreparedAction
+        self,
+        db: AsyncSession,
+        action: AiPreparedAction,
+        *,
+        tenant: TenantContext,
     ) -> None:
         """Revalidate business state needed to authorize the frozen execution."""
+        if action.tenant_id != tenant.tenant_id:
+            raise _snapshot_stale("prepared action 租户上下文已变化")
         if action.snapshot is None or action.snapshot_hash != canonical_payload_hash(
             action.snapshot
         ):
@@ -1047,6 +1054,7 @@ class PreparedActionService:
                             (item["dept_id"], item["is_primary"])
                             for item in assignments
                         ],
+                        tenant=tenant,
                     )
                 )
             except BusinessException as exc:
@@ -1090,6 +1098,7 @@ class PreparedActionService:
                     actor_user_id=action.user_id,
                     target_user_id=user_id,
                     role_ids=role_ids,
+                    tenant=tenant,
                 )
             except BusinessException as exc:
                 raise _snapshot_stale(
@@ -1121,7 +1130,7 @@ class PreparedActionService:
             )
 
             current_snapshot = await user_service.get_batch_delete_identity_snapshot(
-                db, user_ids
+                db, user_ids, tenant=tenant
             )
             if current_snapshot != business_snapshot:
                 raise _snapshot_stale("用户批量删除目标身份已变化，请重新确认")
@@ -1144,7 +1153,8 @@ class PreparedActionService:
         batch = (
             await db.execute(
                 select(UserImportBatch).where(
-                    UserImportBatch.batch_id == str(subject_ref["id"])
+                    UserImportBatch.tenant_id == tenant.tenant_id,
+                    UserImportBatch.batch_id == str(subject_ref["id"]),
                 )
             )
         ).scalar_one_or_none()

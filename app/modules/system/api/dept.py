@@ -3,7 +3,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
+from app.core.tenant import TenantContext
 from app.db.session import get_db
+from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.user import User
 from app.modules.system.schemas.dept import (
@@ -118,9 +120,10 @@ async def get_dept_tree(
     query: DeptQuery = Depends(),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """获取部门树形结构（支持筛选）"""
-    scope = await resolve_data_scope(db, current_user)
+    scope = await resolve_data_scope(db, current_user, tenant=tenant)
     depts = await department_selector.rows(
         db,
         scope=scope,
@@ -139,9 +142,10 @@ async def get_dept_tree(
 async def get_dept_tree_option(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """获取部门下拉选项（仅启用状态）"""
-    scope = await resolve_data_scope(db, current_user)
+    scope = await resolve_data_scope(db, current_user, tenant=tenant)
     depts = await department_selector.rows(
         db,
         scope=scope,
@@ -160,9 +164,10 @@ async def get_dept_tree_option(
 async def get_dept_tree_list(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """获取部门树形列表（带伪分页）"""
-    scope = await resolve_data_scope(db, current_user)
+    scope = await resolve_data_scope(db, current_user, tenant=tenant)
     depts = await department_selector.rows(db, scope=scope)
     tree = _build_dept_tree(depts)
     page_data = PageResult(records=tree, total=len(tree), current=1, size=len(tree))
@@ -179,9 +184,10 @@ async def get_dept_list(
     query: DeptQuery = Depends(),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """获取部门分页列表"""
-    scope = await resolve_data_scope(db, current_user)
+    scope = await resolve_data_scope(db, current_user, tenant=tenant)
     page_data = await department_selector.page(
         db,
         scope=scope,
@@ -202,9 +208,10 @@ async def get_dept_detail(
     dept_id: int,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """获取部门详情"""
-    scope = await resolve_data_scope(db, current_user)
+    scope = await resolve_data_scope(db, current_user, tenant=tenant)
     dept = await department_selector.get_by_id(db, scope=scope, dept_id=dept_id)
     return ResponseModel.success(data=dept)
 
@@ -222,12 +229,14 @@ async def add_dept(
     dept_in: DeptCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """创建部门"""
     new_dept = await dept_service.create(
         db,
         dept_in,
         actor_user_id=current_user.user_id,
+        tenant=tenant,
     )
     new_dept.create_by = current_user.user_name
     await db.commit()
@@ -248,6 +257,7 @@ async def update_dept(
     dept_in: DeptUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """更新部门"""
     dept = await dept_service.update(
@@ -255,6 +265,7 @@ async def update_dept(
         dept_id,
         dept_in,
         actor_user_id=current_user.user_id,
+        tenant=tenant,
     )
     dept.update_by = current_user.user_name
     await db.commit()
@@ -275,6 +286,7 @@ async def move_dept(
     move_in: DeptMove,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """Move one department subtree through the shared write policy."""
     dept = await dept_service.move(
@@ -282,6 +294,7 @@ async def move_dept(
         dept_id=dept_id,
         new_parent_id=move_in.new_parent_id,
         actor_user_id=current_user.user_id,
+        tenant=tenant,
     )
     dept.update_by = current_user.user_name
     await db.commit()
@@ -298,12 +311,14 @@ async def delete_dept(
     dept_id: int,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """删除部门"""
     await dept_service.delete(
         db,
         dept_id,
         actor_user_id=current_user.user_id,
+        tenant=tenant,
     )
     await db.commit()
     return ResponseModel.success(msg="部门删除成功")
@@ -319,12 +334,14 @@ async def batch_delete_depts(
     ids: list[int] = Body(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """批量删除部门"""
     deleted_count = await dept_service.batch_delete(
         db,
         ids,
         actor_user_id=current_user.user_id,
+        tenant=tenant,
     )
     await db.commit()
     return ResponseModel.success(msg=f"成功删除 {deleted_count} 个部门")
@@ -348,6 +365,7 @@ async def get_dept_users(
     size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """Return one user-scoped page of membership candidates."""
     page = await user_department_assignment_service.list_department_members(
@@ -357,6 +375,7 @@ async def get_dept_users(
         query=query,
         current=current,
         size=size,
+        tenant=tenant,
     )
     return ResponseModel.success(data=DeptUsersOut.model_validate(page))
 
@@ -376,6 +395,7 @@ async def update_dept_users(
     body: DeptUsersUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """Replace the complete department member set atomically."""
     result = await user_department_assignment_service.replace_department_members(
@@ -383,6 +403,7 @@ async def update_dept_users(
         actor_user_id=current_user.user_id,
         dept_id=dept_id,
         user_ids=body.user_ids,
+        tenant=tenant,
     )
     await db.commit()
     return ResponseModel.success(

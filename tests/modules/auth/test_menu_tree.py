@@ -11,6 +11,7 @@ def _menu(
     component: str,
 ) -> Menu:
     return Menu(
+        tenant_id=0,
         menu_id=next_id(),
         parent_id=parent_id,
         menu_name=route_name,

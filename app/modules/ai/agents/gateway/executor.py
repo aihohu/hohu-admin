@@ -1729,7 +1729,7 @@ async def _record_perm_denied_for_ip(deps: ChatDeps, tool_name: str) -> None:
         )
 
         async with AsyncSessionLocal() as db:
-            await record_perm_denied(redis_client, db, ip)
+            await record_perm_denied(redis_client, db, ip, tenant=deps.tenant)
     except Exception:
         logger.exception(
             "ip_blacklist record_perm_denied failed (ignored)",

@@ -25,6 +25,9 @@ from app.modules.system.service.user_service import (
     INSECURE_DEFAULT_PASSWORD_SENTINELS,
     get_default_password,
 )
+from tests.tenant_helpers import tenant_context
+
+TENANT = tenant_context()
 
 
 @pytest.fixture(autouse=True)
@@ -38,7 +41,10 @@ async def _cleanup_default_password_rows(db_session):
     violation regardless of transaction isolation. DELETE first, then INSERT.
     """
     await db_session.execute(
-        delete(Config).where(Config.config_key == "auth:default_password")
+        delete(Config).where(
+            Config.tenant_id == TENANT.tenant_id,
+            Config.config_key == "auth:default_password",
+        )
     )
     await db_session.flush()
 
@@ -109,6 +115,7 @@ class TestGetDefaultPassword:
         db_session.add(
             Config(
                 config_id=1,
+                tenant_id=TENANT.tenant_id,
                 config_name="默认密码",
                 config_key="auth:default_password",
                 config_value="Welcome@2026",
@@ -118,13 +125,13 @@ class TestGetDefaultPassword:
         )
         await db_session.flush()
 
-        value = await get_default_password(db_session)
+        value = await get_default_password(db_session, tenant=TENANT)
         assert value == "Welcome@2026"
 
     async def test_raises_when_missing(self, db_session):
         """未配置 → 抛 AI_IMPORT_DEFAULT_PASSWORD_NOT_SET（强制 admin 显式配置）。"""
         with pytest.raises(BusinessRuleException) as exc:
-            await get_default_password(db_session)
+            await get_default_password(db_session, tenant=TENANT)
         assert exc.value.error_code == "AI_IMPORT_DEFAULT_PASSWORD_NOT_SET"
 
     async def test_raises_when_disabled(self, db_session):
@@ -132,6 +139,7 @@ class TestGetDefaultPassword:
         db_session.add(
             Config(
                 config_id=2,
+                tenant_id=TENANT.tenant_id,
                 config_name="默认密码",
                 config_key="auth:default_password",
                 config_value="Welcome@2026",
@@ -142,7 +150,7 @@ class TestGetDefaultPassword:
         await db_session.flush()
 
         with pytest.raises(BusinessRuleException) as exc:
-            await get_default_password(db_session)
+            await get_default_password(db_session, tenant=TENANT)
         assert exc.value.error_code == "AI_IMPORT_DEFAULT_PASSWORD_NOT_SET"
 
     async def test_returns_latest_when_multiple_rows(self, db_session):
@@ -150,6 +158,7 @@ class TestGetDefaultPassword:
         db_session.add(
             Config(
                 config_id=3,
+                tenant_id=TENANT.tenant_id,
                 config_name="默认密码",
                 config_key="auth:default_password",
                 config_value="Hohu@Init#2026",
@@ -159,7 +168,7 @@ class TestGetDefaultPassword:
         )
         await db_session.flush()
 
-        value = await get_default_password(db_session)
+        value = await get_default_password(db_session, tenant=TENANT)
         assert value == "Hohu@Init#2026"
 
     async def test_prod_rejects_public_seed_password(
@@ -169,6 +178,7 @@ class TestGetDefaultPassword:
         db_session.add(
             Config(
                 config_id=4,
+                tenant_id=TENANT.tenant_id,
                 config_name="默认密码",
                 config_key="auth:default_password",
                 config_value=public_seed,
@@ -180,6 +190,6 @@ class TestGetDefaultPassword:
         monkeypatch.setattr(settings, "ENV", "prod")
 
         with pytest.raises(BusinessRuleException) as exc:
-            await get_default_password(db_session)
+            await get_default_password(db_session, tenant=TENANT)
 
         assert exc.value.error_code == "AI_IMPORT_DEFAULT_PASSWORD_INVALID"

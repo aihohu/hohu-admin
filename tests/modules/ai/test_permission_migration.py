@@ -4,6 +4,7 @@ from sqlalchemy import select
 
 from app.constants import STATUS_ENABLED, SUPER_ADMIN_ROLE_CODE
 from app.core.id_generator import next_id
+from app.core.tenant import DEFAULT_TENANT_ID
 from app.db.base import role_menus
 from app.modules.ai.constants import (
     AI_AGENT_EDIT_PERMISSION,
@@ -22,12 +23,14 @@ from scripts.migrate_ai_mvp_permissions import migrate_ai_mvp_permissions
 async def test_upgrade_grants_super_and_non_shared_bound_roles_only(db_session) -> None:
     marker = next_id()
     business_role = Role(
+        tenant_id=DEFAULT_TENANT_ID,
         role_id=next_id(),
         role_name=f"AI business {marker}",
         role_code=f"R_AI_BUSINESS_{marker}",
         status=STATUS_ENABLED,
     )
     shared_only_role = Role(
+        tenant_id=DEFAULT_TENANT_ID,
         role_id=next_id(),
         role_name=f"AI shared {marker}",
         role_code=f"R_AI_SHARED_{marker}",
@@ -57,11 +60,13 @@ async def test_upgrade_grants_super_and_non_shared_bound_roles_only(db_session) 
     db_session.add_all(
         [
             RoleAiAgent(
+                tenant_id=DEFAULT_TENANT_ID,
                 role_id=business_role.role_id,
                 agent_id=business_agent.agent_id,
                 enabled=True,
             ),
             RoleAiAgent(
+                tenant_id=DEFAULT_TENANT_ID,
                 role_id=shared_only_role.role_id,
                 agent_id=shared_agent.agent_id,
                 enabled=True,
@@ -74,16 +79,23 @@ async def test_upgrade_grants_super_and_non_shared_bound_roles_only(db_session) 
     second = await migrate_ai_mvp_permissions(db_session)
 
     permission_menu = await db_session.scalar(
-        select(Menu).where(Menu.permission == AI_CHAT_USE_PERMISSION)
+        select(Menu).where(
+            Menu.tenant_id == DEFAULT_TENANT_ID,
+            Menu.permission == AI_CHAT_USE_PERMISSION,
+        )
     )
     super_role_id = await db_session.scalar(
-        select(Role.role_id).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+        select(Role.role_id).where(
+            Role.tenant_id == DEFAULT_TENANT_ID,
+            Role.role_code == SUPER_ADMIN_ROLE_CODE,
+        )
     )
     granted_role_ids = set(
         (
             await db_session.execute(
                 select(role_menus.c.role_id).where(
-                    role_menus.c.menu_id == permission_menu.menu_id
+                    role_menus.c.tenant_id == DEFAULT_TENANT_ID,
+                    role_menus.c.menu_id == permission_menu.menu_id,
                 )
             )
         ).scalars()
@@ -100,7 +112,11 @@ async def test_upgrade_grants_super_and_non_shared_bound_roles_only(db_session) 
             await db_session.execute(
                 select(Menu.permission)
                 .join(role_menus, role_menus.c.menu_id == Menu.menu_id)
-                .where(role_menus.c.role_id == super_role_id)
+                .where(
+                    Menu.tenant_id == DEFAULT_TENANT_ID,
+                    role_menus.c.tenant_id == DEFAULT_TENANT_ID,
+                    role_menus.c.role_id == super_role_id,
+                )
             )
         ).scalars()
     )
@@ -143,6 +159,7 @@ async def test_upgrade_grants_super_and_non_shared_bound_roles_only(db_session) 
         (
             await db_session.execute(
                 select(RoleAiAgent.agent_id).where(
+                    RoleAiAgent.tenant_id == DEFAULT_TENANT_ID,
                     RoleAiAgent.role_id == super_role_id,
                     RoleAiAgent.enabled.is_(True),
                 )
@@ -156,7 +173,10 @@ async def test_upgrade_creates_disabled_enabled_tools_config_without_overwrite(
     db_session,
 ) -> None:
     existing = await db_session.scalar(
-        select(Config).where(Config.config_key == "ai:enabled_tools")
+        select(Config).where(
+            Config.tenant_id == DEFAULT_TENANT_ID,
+            Config.config_key == "ai:enabled_tools",
+        )
     )
     if existing is not None:
         existing.config_value = '["deployment.choice"]'
@@ -165,7 +185,10 @@ async def test_upgrade_creates_disabled_enabled_tools_config_without_overwrite(
     await migrate_ai_mvp_permissions(db_session)
 
     config = await db_session.scalar(
-        select(Config).where(Config.config_key == "ai:enabled_tools")
+        select(Config).where(
+            Config.tenant_id == DEFAULT_TENANT_ID,
+            Config.config_key == "ai:enabled_tools",
+        )
     )
     assert config is not None
     expected = '["deployment.choice"]' if existing is not None else "[]"
@@ -176,7 +199,10 @@ async def test_upgrade_preserves_explicitly_disabled_super_agent_binding(
     db_session,
 ) -> None:
     super_role_id = await db_session.scalar(
-        select(Role.role_id).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+        select(Role.role_id).where(
+            Role.tenant_id == DEFAULT_TENANT_ID,
+            Role.role_code == SUPER_ADMIN_ROLE_CODE,
+        )
     )
     published_agent = await db_session.scalar(
         select(AiAgent).where(AiAgent.code.in_(PUBLISHED_AGENT_CODES))
@@ -189,6 +215,7 @@ async def test_upgrade_preserves_explicitly_disabled_super_agent_binding(
     )
     if binding is None:
         binding = RoleAiAgent(
+            tenant_id=DEFAULT_TENANT_ID,
             role_id=super_role_id,
             agent_id=published_agent.agent_id,
             enabled=False,
@@ -208,7 +235,10 @@ async def test_upgrade_normalizes_legacy_role_agent_authorization_label(
     db_session,
 ) -> None:
     menu = await db_session.scalar(
-        select(Menu).where(Menu.permission == "system:role:ai-agent-auth")
+        select(Menu).where(
+            Menu.tenant_id == DEFAULT_TENANT_ID,
+            Menu.permission == "system:role:ai-agent-auth",
+        )
     )
     assert menu is not None
     menu.menu_name = "Agent 授权"
@@ -223,7 +253,10 @@ async def test_upgrade_preserves_custom_role_agent_authorization_label(
     db_session,
 ) -> None:
     menu = await db_session.scalar(
-        select(Menu).where(Menu.permission == "system:role:ai-agent-auth")
+        select(Menu).where(
+            Menu.tenant_id == DEFAULT_TENANT_ID,
+            Menu.permission == "system:role:ai-agent-auth",
+        )
     )
     assert menu is not None
     menu.menu_name = "自定义 Agent 委派"

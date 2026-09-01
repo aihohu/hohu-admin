@@ -31,17 +31,24 @@ from app.modules.system.service.grant_authority import grant_authority_service
 from app.modules.system.service.user_department_assignment_service import (
     user_department_assignment_service,
 )
+from tests.tenant_helpers import tenant_context
 
 USER_EDIT_PERMISSION = "system:user:edit"
 USER_ADD_PERMISSION = "system:user:add"
 USER_IMPORT_PERMISSION = "system:user:import"
 DEPT_LIST_PERMISSION = "system:dept:list"
+TENANT = tenant_context()
+
+
+def _tenant(actor: User):
+    return tenant_context(actor_user_id=int(actor.user_id))
 
 
 def _menu(permission: str) -> Menu:
     marker = next_id()
     return Menu(
         menu_id=marker,
+        tenant_id=TENANT.tenant_id,
         menu_name=f"phase2-dept-menu-{marker}",
         menu_type="F",
         permission=permission,
@@ -58,6 +65,7 @@ def _role(
     marker = next_id()
     role = Role(
         role_id=marker,
+        tenant_id=TENANT.tenant_id,
         role_name=f"phase2-dept-role-{marker}",
         role_code=code,
         data_scope=data_scope,
@@ -72,6 +80,7 @@ def _dept(name: str, *, parent: Dept | None = None) -> Dept:
     ancestors = "0" if parent is None else f"{parent.ancestors},{parent.dept_id}"
     return Dept(
         dept_id=dept_id,
+        tenant_id=TENANT.tenant_id,
         dept_name=f"{name}-{dept_id}",
         parent_id=parent.dept_id if parent is not None else None,
         ancestors=ancestors,
@@ -83,6 +92,7 @@ def _dept(name: str, *, parent: Dept | None = None) -> Dept:
 def _user(name: str, roles: list[Role]) -> User:
     return User(
         user_id=next_id(),
+        tenant_id=TENANT.tenant_id,
         user_name=name,
         nickname=name,
         hashed_password="x",
@@ -100,6 +110,7 @@ async def _bind_dept(
 ) -> None:
     await db.execute(
         insert(user_depts).values(
+            tenant_id=TENANT.tenant_id,
             user_id=user.user_id,
             dept_id=dept.dept_id,
             is_primary=IS_PRIMARY_YES if primary else IS_PRIMARY_NO,
@@ -114,7 +125,10 @@ async def _assignments(
     rows = (
         await db.execute(
             select(user_depts.c.dept_id, user_depts.c.is_primary)
-            .where(user_depts.c.user_id == user_id)
+            .where(
+                user_depts.c.tenant_id == TENANT.tenant_id,
+                user_depts.c.user_id == user_id,
+            )
             .order_by(user_depts.c.dept_id)
         )
     ).all()
@@ -145,6 +159,7 @@ async def test_replace_departments_applies_one_complete_authorized_set(
     ):
         result = await user_department_assignment_service.replace_departments(
             db_session,
+            tenant=_tenant(actor),
             actor_user_id=actor.user_id,
             target_user_id=target.user_id,
             dept_assignments=[(new_dept.dept_id, False)],
@@ -181,6 +196,7 @@ async def test_preview_departments_freezes_complete_authorization_snapshot(
     ):
         preview = await user_department_assignment_service.preview_departments(
             db_session,
+            tenant=_tenant(actor),
             actor_user_id=actor.user_id,
             target_user_id=target.user_id,
             dept_assignments=[(new_dept.dept_id, False)],
@@ -235,6 +251,7 @@ async def test_replace_departments_rejects_approved_target_status_drift(
     ):
         preview = await user_department_assignment_service.preview_departments(
             db_session,
+            tenant=_tenant(actor),
             actor_user_id=actor.user_id,
             target_user_id=target.user_id,
             dept_assignments=[(new_dept.dept_id, False)],
@@ -245,6 +262,7 @@ async def test_replace_departments_rejects_approved_target_status_drift(
         with pytest.raises(BusinessRuleException) as exc_info:
             await user_department_assignment_service.replace_departments(
                 db_session,
+                tenant=_tenant(actor),
                 actor_user_id=actor.user_id,
                 target_user_id=target.user_id,
                 dept_assignments=[(new_dept.dept_id, False)],
@@ -280,6 +298,7 @@ async def test_assign_created_departments_uses_add_and_department_permissions(
         result = (
             await user_department_assignment_service.assign_created_user_departments(
                 db_session,
+                tenant=_tenant(actor),
                 actor_user_id=actor.user_id,
                 target_user_id=target.user_id,
                 dept_assignments=[(dept.dept_id, True)],
@@ -311,6 +330,7 @@ async def test_created_departments_require_department_list_permission(
     with pytest.raises(AuthorizationException) as exc_info:
         await user_department_assignment_service.assign_created_user_departments(
             db_session,
+            tenant=_tenant(actor),
             actor_user_id=actor.user_id,
             target_user_id=target.user_id,
             dept_assignments=[(dept.dept_id, True)],
@@ -341,11 +361,14 @@ async def test_import_department_validation_cannot_delete_a_hidden_old_assignmen
     await _bind_dept(db_session, actor, visible_dept, primary=True)
     await _bind_dept(db_session, target, visible_dept, primary=True)
     await _bind_dept(db_session, target, hidden_dept, primary=False)
-    authority = await grant_authority_service.build(db_session, actor.user_id)
+    authority = await grant_authority_service.build(
+        db_session, actor.user_id, tenant=_tenant(actor)
+    )
 
     with pytest.raises(AuthorizationException) as exc_info:
         await user_department_assignment_service.validate_import_department_assignment(
             db_session,
+            tenant=_tenant(actor),
             actor_user_id=actor.user_id,
             target_user_id=target.user_id,
             target_user_name=target.user_name,
@@ -375,6 +398,7 @@ async def test_replace_departments_revalidates_both_entry_permissions(
     with pytest.raises(AuthorizationException) as exc_info:
         await user_department_assignment_service.replace_departments(
             db_session,
+            tenant=_tenant(actor),
             actor_user_id=actor.user_id,
             target_user_id=target.user_id,
             dept_assignments=[],
@@ -412,6 +436,7 @@ async def test_replace_departments_rejects_any_direct_scope_violation(
     ):
         await user_department_assignment_service.replace_departments(
             db_session,
+            tenant=_tenant(actor),
             actor_user_id=actor.user_id,
             target_user_id=target.user_id,
             dept_assignments=[(outside_dept.dept_id, True)],
@@ -448,6 +473,7 @@ async def test_replace_departments_cannot_delete_a_hidden_old_assignment(
     with pytest.raises(AuthorizationException) as exc_info:
         await user_department_assignment_service.replace_departments(
             db_session,
+            tenant=_tenant(actor),
             actor_user_id=actor.user_id,
             target_user_id=target.user_id,
             dept_assignments=[(visible_dept.dept_id, True)],
@@ -503,6 +529,7 @@ async def test_replace_departments_rejects_materialized_subtree_impact_atomicall
     ):
         await user_department_assignment_service.replace_departments(
             db_session,
+            tenant=_tenant(actor),
             actor_user_id=actor.user_id,
             target_user_id=target.user_id,
             dept_assignments=[(new_parent.dept_id, True)],
@@ -557,6 +584,7 @@ async def test_replace_departments_also_rejects_existing_out_of_bound_impact(
     ):
         await user_department_assignment_service.replace_departments(
             db_session,
+            tenant=_tenant(actor),
             actor_user_id=actor.user_id,
             target_user_id=target.user_id,
             dept_assignments=[(safe_leaf.dept_id, True)],
@@ -587,6 +615,7 @@ async def test_replace_departments_rejects_disabled_assignment_targets(
     with pytest.raises(BusinessRuleException) as exc_info:
         await user_department_assignment_service.replace_departments(
             db_session,
+            tenant=_tenant(actor),
             actor_user_id=actor.user_id,
             target_user_id=target.user_id,
             dept_assignments=[(disabled_dept.dept_id, True)],
@@ -621,6 +650,7 @@ async def test_replace_departments_enforces_live_primary_department_policy(
     ):
         await user_department_assignment_service.replace_departments(
             db_session,
+            tenant=_tenant(actor),
             actor_user_id=actor.user_id,
             target_user_id=target.user_id,
             dept_assignments=[],
@@ -637,6 +667,7 @@ async def test_replace_departments_enforces_live_primary_department_policy(
     ):
         await user_department_assignment_service.replace_departments(
             db_session,
+            tenant=_tenant(actor),
             actor_user_id=actor.user_id,
             target_user_id=target.user_id,
             dept_assignments=[
@@ -659,10 +690,14 @@ async def test_replace_departments_bypasses_stale_primary_policy_cache(
     actor = _user(f"phase2-dept-actor-{next_id()}", [actor_role])
     target = _user(f"phase2-dept-target-{next_id()}", [target_role])
     policy = await db_session.scalar(
-        select(Config).where(Config.config_key == "user_require_primary_dept")
+        select(Config).where(
+            Config.tenant_id == TENANT.tenant_id,
+            Config.config_key == "user_require_primary_dept",
+        )
     )
     if policy is None:
         policy = Config(
+            tenant_id=TENANT.tenant_id,
             config_name="Primary department policy test fixture",
             config_key="user_require_primary_dept",
             config_value="false",
@@ -687,6 +722,7 @@ async def test_replace_departments_bypasses_stale_primary_policy_cache(
     ):
         await user_department_assignment_service.replace_departments(
             db_session,
+            tenant=_tenant(actor),
             actor_user_id=actor.user_id,
             target_user_id=target.user_id,
             dept_assignments=[],
@@ -705,10 +741,16 @@ async def test_replace_departments_protects_admin_and_super_role_targets(
         menus=[_menu(USER_EDIT_PERMISSION), _menu(DEPT_LIST_PERMISSION)],
     )
     super_role = await db_session.scalar(
-        select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+        select(Role).where(
+            Role.tenant_id == TENANT.tenant_id,
+            Role.role_code == SUPER_ADMIN_ROLE_CODE,
+        )
     )
     admin_target = await db_session.scalar(
-        select(User).where(User.user_name == ADMIN_USERNAME)
+        select(User).where(
+            User.tenant_id == TENANT.tenant_id,
+            User.user_name == ADMIN_USERNAME,
+        )
     )
     assert super_role is not None
     assert admin_target is not None
@@ -721,6 +763,7 @@ async def test_replace_departments_protects_admin_and_super_role_targets(
         with pytest.raises(AuthorizationException) as exc_info:
             await user_department_assignment_service.replace_departments(
                 db_session,
+                tenant=_tenant(actor),
                 actor_user_id=actor.user_id,
                 target_user_id=target.user_id,
                 dept_assignments=[],
@@ -749,6 +792,7 @@ async def test_replace_departments_rejects_a_changed_locked_snapshot(
         await db.execute(
             update(user_depts)
             .where(
+                user_depts.c.tenant_id == TENANT.tenant_id,
                 user_depts.c.user_id == target.user_id,
                 user_depts.c.dept_id == old_dept.dept_id,
             )
@@ -766,6 +810,7 @@ async def test_replace_departments_rejects_a_changed_locked_snapshot(
     ):
         await user_department_assignment_service.replace_departments(
             db_session,
+            tenant=_tenant(actor),
             actor_user_id=actor.user_id,
             target_user_id=target.user_id,
             dept_assignments=[(old_dept.dept_id, True)],
@@ -808,6 +853,7 @@ async def test_replace_departments_rejects_new_scope_dependencies_after_lock(
     ):
         await user_department_assignment_service.replace_departments(
             db_session,
+            tenant=_tenant(actor),
             actor_user_id=actor.user_id,
             target_user_id=target.user_id,
             dept_assignments=[(new_parent.dept_id, True)],

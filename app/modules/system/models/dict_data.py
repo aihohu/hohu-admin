@@ -1,6 +1,15 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, String, func
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.id_generator import next_id
@@ -11,9 +20,25 @@ class DictData(Base):
     """字典数据模型"""
 
     __tablename__ = "sys_dict_data"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "dict_code", name="uq_sys_dict_data_tenant_code"),
+        ForeignKeyConstraint(
+            ("tenant_id", "dict_type"),
+            ("sys_dict_type.tenant_id", "sys_dict_type.dict_type"),
+            name="fk_sys_dict_data_tenant_type",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_sys_dict_data_tenant_type", "tenant_id", "dict_type"),
+    )
 
     dict_code: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, default=next_id, comment="字典编码"
+    )
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("sys_tenant.tenant_id", ondelete="RESTRICT"),
+        nullable=False,
+        comment="租户ID；必须由可信 TenantContext 显式写入",
     )
     dict_sort: Mapped[int] = mapped_column(nullable=False, comment="字典排序")
     dict_label: Mapped[str] = mapped_column(

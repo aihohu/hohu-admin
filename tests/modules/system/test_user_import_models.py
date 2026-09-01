@@ -25,11 +25,30 @@ from app.modules.system.models.user_transfer import (
     UserImportBatchLog,
 )
 
+TENANT_ID = 0
+TEST_OPERATOR_ID = 7_500_000_000_000_000_002
+
+
+@pytest.fixture(autouse=True)
+async def _operator_parent(db_session):
+    db_session.add(
+        User(
+            user_id=TEST_OPERATOR_ID,
+            tenant_id=TENANT_ID,
+            user_name="plan2_transfer_model_operator",
+            nickname="Plan 2 transfer model operator",
+            hashed_password="not-used-by-tests",
+            status="1",
+        )
+    )
+    await db_session.flush()
+
 
 def _sample_batch_kwargs(**overrides):
     base = {
         "batch_id": "b1",
-        "operator_id": 1,
+        "tenant_id": TENANT_ID,
+        "operator_id": TEST_OPERATOR_ID,
         "filename": "users.xlsx",
         "file_sha256": "abc",
         "records_hash": "fake-records-hash",
@@ -90,8 +109,9 @@ class TestUserImportBatchLogOrm:
 
         log = UserImportBatchLog(
             log_id="log-1",
+            tenant_id=TENANT_ID,
             batch_id="b1",
-            operator_id=1,
+            operator_id=TEST_OPERATOR_ID,
             event="CREATED",
             from_status=None,
             to_status=ImportBatchStatus.CREATED,
@@ -113,8 +133,9 @@ class TestUserImportBatchLogOrm:
 
         log = UserImportBatchLog(
             log_id="log-cd",
+            tenant_id=TENANT_ID,
             batch_id="b1",
-            operator_id=1,
+            operator_id=TEST_OPERATOR_ID,
             event="CREATED",
             from_status=None,
             to_status=ImportBatchStatus.CREATED,
@@ -126,7 +147,9 @@ class TestUserImportBatchLogOrm:
         # 删 batch（需要 commit 才能触发 FK CASCADE，但 outer-transaction 模式 commit 不真落库）
         # 用 raw DELETE 验证
         await db_session.execute(
-            text("DELETE FROM sys_user_import_batch WHERE batch_id='b1'")
+            text(
+                "DELETE FROM sys_user_import_batch WHERE tenant_id=0 AND batch_id='b1'"
+            )
         )
         await db_session.flush()
 
@@ -142,7 +165,8 @@ class TestUserExportTaskOrm:
     async def test_insert_and_select_roundtrip(self, db_session):
         task = UserExportTask(
             export_id="e1",
-            operator_id=1,
+            tenant_id=TENANT_ID,
+            operator_id=TEST_OPERATOR_ID,
             filter_snapshot={"dept_id": "1", "status": "1"},
             reason="导出通讯录",
             status=ExportTaskStatus.CREATED,
@@ -159,7 +183,8 @@ class TestUserExportTaskOrm:
         for i, status in enumerate(ExportTaskStatus):
             task = UserExportTask(
                 export_id=f"e-status-{i}",
-                operator_id=1,
+                tenant_id=TENANT_ID,
+                operator_id=TEST_OPERATOR_ID,
                 filter_snapshot={},
                 reason="导出",
                 status=status,
@@ -178,12 +203,14 @@ class TestUserEmployeeNo:
     async def test_employee_no_unique_constraint(self, db_session):
         """两个 user 同 employee_no 应触发 UNIQUE 违反。"""
         u1 = User(
+            tenant_id=TENANT_ID,
             user_name="alice",
             employee_no="E001",
             hashed_password=get_password_hash("x"),
             status="1",
         )
         u2 = User(
+            tenant_id=TENANT_ID,
             user_name="bob",
             employee_no="E001",  # 同 employee_no
             hashed_password=get_password_hash("x"),
@@ -196,12 +223,14 @@ class TestUserEmployeeNo:
     async def test_multiple_null_employee_no_allowed(self, db_session):
         """PostgreSQL UNIQUE 约束允许多个 NULL。"""
         u1 = User(
+            tenant_id=TENANT_ID,
             user_name="charlie",
             employee_no=None,
             hashed_password=get_password_hash("x"),
             status="1",
         )
         u2 = User(
+            tenant_id=TENANT_ID,
             user_name="dave",
             employee_no=None,  # 同 NULL
             hashed_password=get_password_hash("x"),
@@ -211,7 +240,10 @@ class TestUserEmployeeNo:
         await db_session.flush()  # 不应抛 IntegrityError
 
         result = await db_session.execute(
-            select(User).where(User.employee_no.is_(None))
+            select(User).where(
+                User.tenant_id == TENANT_ID,
+                User.employee_no.is_(None),
+            )
         )
         users = result.scalars().all()
         assert {u.user_name for u in users} >= {"charlie", "dave"}

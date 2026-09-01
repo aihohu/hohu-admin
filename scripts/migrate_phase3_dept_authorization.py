@@ -11,6 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from app.constants import STATUS_ENABLED, SUPER_ADMIN_ROLE_CODE
 from app.core.config import settings
 from app.core.id_generator import next_id
+from app.core.tenant import DEFAULT_TENANT_ID
 from app.db.base import role_menus
 from app.modules.system.constants import DEPT_MOVE_PERMISSION
 from app.modules.system.models.menu import Menu
@@ -29,13 +30,24 @@ class Phase3DeptAuthorizationMigrationResult:
 
 
 async def _ensure_move_menu(db: AsyncSession) -> tuple[Menu, bool]:
-    menu = await db.scalar(select(Menu).where(Menu.permission == DEPT_MOVE_PERMISSION))
+    menu = await db.scalar(
+        select(Menu).where(
+            Menu.tenant_id == DEFAULT_TENANT_ID,
+            Menu.permission == DEPT_MOVE_PERMISSION,
+        )
+    )
     if menu is not None:
         return menu, False
-    parent = await db.scalar(select(Menu).where(Menu.route_name == DEPT_PARENT_ROUTE))
+    parent = await db.scalar(
+        select(Menu).where(
+            Menu.tenant_id == DEFAULT_TENANT_ID,
+            Menu.route_name == DEPT_PARENT_ROUTE,
+        )
+    )
     if parent is None:
         raise RuntimeError("system_dept parent menu not found; run menu seed first")
     menu = Menu(
+        tenant_id=DEFAULT_TENANT_ID,
         menu_id=next_id(),
         parent_id=parent.menu_id,
         menu_name="移动",
@@ -53,7 +65,10 @@ async def _grant_super_role(db: AsyncSession, *, menu_id: int) -> int:
         int(role_id)
         for role_id in (
             await db.execute(
-                select(Role.role_id).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                select(Role.role_id).where(
+                    Role.tenant_id == DEFAULT_TENANT_ID,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalars()
     )
@@ -64,6 +79,7 @@ async def _grant_super_role(db: AsyncSession, *, menu_id: int) -> int:
         for role_id in (
             await db.execute(
                 select(role_menus.c.role_id).where(
+                    role_menus.c.tenant_id == DEFAULT_TENANT_ID,
                     role_menus.c.role_id.in_(role_ids),
                     role_menus.c.menu_id == menu_id,
                 )
@@ -74,7 +90,14 @@ async def _grant_super_role(db: AsyncSession, *, menu_id: int) -> int:
     if missing:
         await db.execute(
             insert(role_menus),
-            [{"role_id": role_id, "menu_id": menu_id} for role_id in missing],
+            [
+                {
+                    "tenant_id": DEFAULT_TENANT_ID,
+                    "role_id": role_id,
+                    "menu_id": menu_id,
+                }
+                for role_id in missing
+            ],
         )
     return len(missing)
 

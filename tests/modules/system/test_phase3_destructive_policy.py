@@ -22,11 +22,13 @@ from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.service.dept_service import dept_service
 from app.modules.system.service.role_service import role_service
+from tests.tenant_helpers import tenant_context
 
 
 def _role(code: str) -> Role:
     marker = next_id()
     return Role(
+        tenant_id=0,
         role_id=marker,
         role_name=f"phase3-delete-role-{marker}",
         role_code=code,
@@ -38,6 +40,7 @@ def _role(code: str) -> Role:
 def _user(name: str, role: Role) -> User:
     marker = next_id()
     return User(
+        tenant_id=0,
         user_id=marker,
         user_name=f"{name}-{marker}",
         nickname=name,
@@ -50,6 +53,7 @@ def _user(name: str, role: Role) -> User:
 def _dept(name: str) -> Dept:
     marker = next_id()
     return Dept(
+        tenant_id=0,
         dept_id=marker,
         parent_id=None,
         ancestors="0",
@@ -61,13 +65,20 @@ def _dept(name: str) -> Dept:
 
 async def _super_actor(db: AsyncSession, name: str) -> User:
     super_role = await db.scalar(
-        select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+        select(Role).where(
+            Role.tenant_id == 0,
+            Role.role_code == SUPER_ADMIN_ROLE_CODE,
+        )
     )
     assert super_role is not None
     actor = _user(name, super_role)
     db.add(actor)
     await db.flush()
     return actor
+
+
+def _tenant(actor: User):
+    return tenant_context(tenant_id=0, actor_user_id=actor.user_id)
 
 
 def test_destructive_services_require_actor_context() -> None:
@@ -87,6 +98,7 @@ async def test_normal_admin_cannot_delete_department_or_role(
     normal_role = _role(f"R_PHASE3_NORMAL_{next_id()}")
     normal_role.menus = [
         Menu(
+            tenant_id=0,
             menu_id=next_id(),
             menu_name=f"phase3-destructive-{permission}",
             menu_type="F",
@@ -111,12 +123,14 @@ async def test_normal_admin_cannot_delete_department_or_role(
             db_session,
             department.dept_id,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
         )
     with pytest.raises(BusinessException):
         await role_service.delete_role(
             db_session,
             target_role.role_id,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
         )
 
     assert await db_session.get(Dept, department.dept_id) is department
@@ -133,6 +147,7 @@ async def test_department_delete_rejects_role_scope_reference(
     await db_session.flush()
     await db_session.execute(
         insert(role_depts).values(
+            tenant_id=0,
             role_id=referenced_by.role_id,
             dept_id=target.dept_id,
         )
@@ -143,6 +158,7 @@ async def test_department_delete_rejects_role_scope_reference(
             db_session,
             target.dept_id,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
         )
 
     assert exc_info.value.error_code == "DEPT_DELETE_REFERENCED"
@@ -164,19 +180,23 @@ async def test_role_delete_rejects_member_and_batch_is_atomic(
             db_session,
             [clean.role_id, referenced.role_id, clean.role_id],
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
         )
 
     assert exc_info.value.error_code == "ROLE_DELETE_REFERENCED"
     assert (
         await db_session.scalar(
-            select(Role.role_id).where(Role.role_id == clean.role_id)
+            select(Role.role_id).where(
+                Role.tenant_id == 0,
+                Role.role_id == clean.role_id,
+            )
         )
         == clean.role_id
     )
     assert (
         await db_session.scalar(
             select(user_roles.c.user_id).where(
-                user_roles.c.role_id == referenced.role_id
+                user_roles.c.tenant_id == 0, user_roles.c.role_id == referenced.role_id
             )
         )
         == member.user_id
@@ -203,6 +223,7 @@ async def test_role_delete_removes_agent_binding_before_aggregate(
     await db_session.flush()
     db_session.add(
         RoleAiAgent(
+            tenant_id=0,
             role_id=target.role_id,
             agent_id=agent.agent_id,
             enabled=True,
@@ -214,13 +235,17 @@ async def test_role_delete_removes_agent_binding_before_aggregate(
         db_session,
         [target.role_id],
         actor_user_id=actor.user_id,
+        tenant=_tenant(actor),
     )
 
     assert deleted == 1
     assert await db_session.get(Role, target.role_id) is None
     assert (
         await db_session.scalar(
-            select(RoleAiAgent.role_id).where(RoleAiAgent.role_id == target.role_id)
+            select(RoleAiAgent.role_id).where(
+                RoleAiAgent.tenant_id == 0,
+                RoleAiAgent.role_id == target.role_id,
+            )
         )
         is None
     )
@@ -243,7 +268,7 @@ async def test_super_admin_single_delete_requires_the_original_permission(
         value for value in actor.roles if value.role_code == SUPER_ADMIN_ROLE_CODE
     )
     wrong_menu = await db_session.scalar(
-        select(Menu).where(Menu.permission == wrong_permission)
+        select(Menu).where(Menu.tenant_id == 0, Menu.permission == wrong_permission)
     )
     assert wrong_menu is not None
     role.menus = [wrong_menu]
@@ -255,6 +280,7 @@ async def test_super_admin_single_delete_requires_the_original_permission(
             db_session,
             target.dept_id,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
         )
     else:
         target = _role(f"R_PHASE3_EXACT_{next_id()}")
@@ -264,6 +290,7 @@ async def test_super_admin_single_delete_requires_the_original_permission(
             db_session,
             target.role_id,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
         )
 
     with pytest.raises(BusinessException) as exc_info:
@@ -289,7 +316,7 @@ async def test_super_admin_single_delete_accepts_the_exact_original_permission(
         value for value in actor.roles if value.role_code == SUPER_ADMIN_ROLE_CODE
     )
     permission_menu = await db_session.scalar(
-        select(Menu).where(Menu.permission == permission)
+        select(Menu).where(Menu.tenant_id == 0, Menu.permission == permission)
     )
     assert permission_menu is not None
     role.menus = [permission_menu]
@@ -301,6 +328,7 @@ async def test_super_admin_single_delete_accepts_the_exact_original_permission(
             db_session,
             target.dept_id,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
         )
         assert await db_session.get(Dept, target.dept_id) is None
     else:
@@ -311,6 +339,7 @@ async def test_super_admin_single_delete_accepts_the_exact_original_permission(
             db_session,
             target.role_id,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
         )
         assert await db_session.get(Role, target.role_id) is None
 
@@ -332,7 +361,10 @@ async def test_super_admin_batch_delete_rejects_the_single_delete_permission(
         value for value in actor.roles if value.role_code == SUPER_ADMIN_ROLE_CODE
     )
     permission_menu = await db_session.scalar(
-        select(Menu).where(Menu.permission == single_permission)
+        select(Menu).where(
+            Menu.tenant_id == 0,
+            Menu.permission == single_permission,
+        )
     )
     assert permission_menu is not None
     role.menus = [permission_menu]
@@ -344,6 +376,7 @@ async def test_super_admin_batch_delete_rejects_the_single_delete_permission(
             db_session,
             [target.dept_id],
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
         )
     else:
         target = _role(f"R_PHASE3_BATCH_EXACT_{next_id()}")
@@ -353,6 +386,7 @@ async def test_super_admin_batch_delete_rejects_the_single_delete_permission(
             db_session,
             [target.role_id],
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
         )
 
     with pytest.raises(BusinessException) as exc_info:

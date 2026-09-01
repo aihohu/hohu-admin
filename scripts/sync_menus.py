@@ -19,6 +19,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
 from app.core.id_generator import next_id
+from app.core.tenant import DEFAULT_TENANT_ID
 from app.modules.ai.constants import (
     AI_CHAT_USE_PERMISSION,
     AI_FILE_PARSE_PERMISSION,
@@ -1476,6 +1477,7 @@ async def sync_menus():
                 menu_id = next_id()
                 is_button = d["menu_type"] == "F"
                 menu = Menu(
+                    tenant_id=DEFAULT_TENANT_ID,
                     menu_id=menu_id,
                     parent_id=parent_id,
                     route_name=None if is_button else d["route_name"],

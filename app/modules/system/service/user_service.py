@@ -12,6 +12,8 @@ from app.core.exceptions import (
 )
 from app.core.redis import redis_client
 from app.core.security import get_password_hash, verify_password
+from app.core.tenant import TenantContext
+from app.core.tenant_scope import tenant_cache_key, tenant_filter, tenant_select
 from app.modules.system.models.config import Config
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
@@ -32,7 +34,12 @@ class UserService:
     """用户业务逻辑服务"""
 
     async def get_user_list(
-        self, db: AsyncSession, query: UserQuery, current_user: User | None = None
+        self,
+        db: AsyncSession,
+        query: UserQuery,
+        current_user: User | None = None,
+        *,
+        tenant: TenantContext,
     ):
         """
         获取用户分页列表（含数据权限过滤）
@@ -55,10 +62,15 @@ class UserService:
             "role_code": lambda model, val: model.roles.any(Role.role_code == val),
         }
         filters = build_filters(User, field_mapping, **query.model_dump())
+        filters.insert(0, tenant_filter(User, tenant=tenant))
 
         # 应用数据权限过滤
         if current_user is not None:
-            scope_filters = await get_user_data_scope_filters(db, current_user)
+            scope_filters = await get_user_data_scope_filters(
+                db,
+                current_user,
+                tenant=tenant,
+            )
             filters.extend(scope_filters)
 
         page_data = await paginate(
@@ -72,11 +84,18 @@ class UserService:
 
         return page_data
 
-    async def user_exists(self, db: AsyncSession, user_id: int) -> bool:
+    async def user_exists(
+        self, db: AsyncSession, user_id: int, *, tenant: TenantContext
+    ) -> bool:
         """Return whether a stable user identifier still exists."""
         return (
             await db.scalar(
-                select(User.user_id).where(User.user_id == user_id).limit(1)
+                select(User.user_id)
+                .where(
+                    User.tenant_id == tenant.tenant_id,
+                    User.user_id == user_id,
+                )
+                .limit(1)
             )
         ) is not None
 
@@ -84,6 +103,8 @@ class UserService:
         self,
         db: AsyncSession,
         user_ids: set[int],
+        *,
+        tenant: TenantContext,
     ) -> dict[int, str]:
         """Resolve non-sensitive user names for trusted cross-module audit data."""
         if not user_ids:
@@ -91,13 +112,18 @@ class UserService:
         rows = (
             await db.execute(
                 select(User.user_id, User.user_name)
-                .where(User.user_id.in_(user_ids))
+                .where(
+                    User.tenant_id == tenant.tenant_id,
+                    User.user_id.in_(user_ids),
+                )
                 .order_by(User.user_id)
             )
         ).all()
         return {int(user_id): user_name for user_id, user_name in rows}
 
-    async def create_user(self, db: AsyncSession, user_in: UserCreate) -> User:
+    async def create_user(
+        self, db: AsyncSession, user_in: UserCreate, *, tenant: TenantContext
+    ) -> User:
         """
         创建新用户
 
@@ -113,21 +139,28 @@ class UserService:
         """
         # 检查唯一性
         result = await db.execute(
-            select(User).where(User.user_name == user_in.user_name)
+            tenant_select(User, tenant=tenant).where(
+                User.user_name == user_in.user_name
+            )
         )
         if result.scalars().first():
             raise DuplicateException("用户名", user_in.user_name)
 
         # 准备用户数据
         obj_data = user_in.model_dump(exclude={"role_ids", "password", "dept_ids"})
-        new_user = User(**obj_data)
+        new_user = User(tenant_id=tenant.tenant_id, **obj_data)
         new_user.hashed_password = get_password_hash(user_in.password)
 
         db.add(new_user)
         return new_user
 
     async def update_user(
-        self, db: AsyncSession, user_id: int, user_in: UserUpdate
+        self,
+        db: AsyncSession,
+        user_id: int,
+        user_in: UserUpdate,
+        *,
+        tenant: TenantContext,
     ) -> User:
         """
         更新用户信息
@@ -145,7 +178,7 @@ class UserService:
         """
         # Serialize profile and status changes with authorization writers.
         stmt = (
-            select(User)
+            tenant_select(User, tenant=tenant)
             .where(User.user_id == user_id)
             .options(selectinload(User.roles))
             .with_for_update()
@@ -165,12 +198,19 @@ class UserService:
 
         # 改名后失效审计中间件的 username 缓存，避免 5 分钟内日志记旧名
         if username_changed:
-            await redis_client.delete(f"{REDIS_USER_NAME_PREFIX}{user_id}")
+            await redis_client.delete(
+                tenant_cache_key(tenant, REDIS_USER_NAME_PREFIX.rstrip(":"), user_id)
+            )
 
         return user
 
     async def reset_password(
-        self, db: AsyncSession, user_id: int, reset_in: ResetPassword
+        self,
+        db: AsyncSession,
+        user_id: int,
+        reset_in: ResetPassword,
+        *,
+        tenant: TenantContext,
     ) -> None:
         """
         管理员重置用户密码
@@ -183,12 +223,16 @@ class UserService:
         Raises:
             NotFoundException: 用户不存在
         """
-        user = await db.get(User, user_id)
+        user = await db.scalar(
+            tenant_select(User, tenant=tenant).where(User.user_id == user_id)
+        )
         if not user:
             raise NotFoundException("用户")
         user.hashed_password = get_password_hash(reset_in.new_password)
 
-    async def delete_user(self, db: AsyncSession, user_id: int) -> None:
+    async def delete_user(
+        self, db: AsyncSession, user_id: int, *, tenant: TenantContext
+    ) -> None:
         """
         删除用户
 
@@ -200,7 +244,9 @@ class UserService:
             NotFoundException: 用户不存在
             BusinessRuleException: 不能删除系统管理员
         """
-        user = await db.get(User, user_id)
+        user = await db.scalar(
+            tenant_select(User, tenant=tenant).where(User.user_id == user_id)
+        )
         if not user:
             raise NotFoundException("用户")
         if user.user_name == ADMIN_USERNAME:
@@ -209,7 +255,12 @@ class UserService:
         await db.delete(user)
 
     async def batch_delete_users(
-        self, db: AsyncSession, ids: list[int], current_user_id: int
+        self,
+        db: AsyncSession,
+        ids: list[int],
+        current_user_id: int,
+        *,
+        tenant: TenantContext,
     ) -> int:
         """
         批量删除用户
@@ -232,7 +283,11 @@ class UserService:
 
         # 过滤掉 admin 账号，防止误删
         check_stmt = select(User.user_id).where(
-            and_(User.user_id.in_(ids), User.user_name == ADMIN_USERNAME)
+            and_(
+                User.tenant_id == tenant.tenant_id,
+                User.user_id.in_(ids),
+                User.user_name == ADMIN_USERNAME,
+            )
         )
         admin_result = await db.execute(check_stmt)
         if admin_result.scalars().first():
@@ -243,7 +298,22 @@ class UserService:
             raise BusinessRuleException("不能删除当前登录的账号")
 
         # 执行批量删除
-        stmt = delete(User).where(User.user_id.in_(ids))
+        matched_ids = set(
+            (
+                await db.execute(
+                    select(User.user_id).where(
+                        User.tenant_id == tenant.tenant_id,
+                        User.user_id.in_(set(ids)),
+                    )
+                )
+            ).scalars()
+        )
+        if matched_ids != set(ids):
+            raise NotFoundException("用户")
+        stmt = delete(User).where(
+            User.tenant_id == tenant.tenant_id,
+            User.user_id.in_(matched_ids),
+        )
         result = await db.execute(stmt)
 
         return result.rowcount
@@ -264,10 +334,16 @@ class UserService:
         }
 
     async def get_batch_delete_identity_snapshot(
-        self, db: AsyncSession, user_ids: list[int]
+        self,
+        db: AsyncSession,
+        user_ids: list[int],
+        *,
+        tenant: TenantContext,
     ) -> dict:
         result = await db.execute(
-            select(User).where(User.user_id.in_(user_ids)).order_by(User.user_id.asc())
+            tenant_select(User, tenant=tenant)
+            .where(User.user_id.in_(user_ids))
+            .order_by(User.user_id.asc())
         )
         return self.build_batch_delete_identity_snapshot(list(result.scalars().all()))
 
@@ -313,10 +389,11 @@ INSECURE_DEFAULT_PASSWORD_SENTINELS = frozenset({"Hohu123456"})
 """Public development seeds that must not be used in production."""
 
 
-async def get_default_password(db: AsyncSession) -> str:
+async def get_default_password(db: AsyncSession, *, tenant: TenantContext) -> str:
     """Return the active initial password configured for user creation."""
     result = await db.execute(
         select(Config.config_value).where(
+            Config.tenant_id == tenant.tenant_id,
             Config.config_key == DEFAULT_PASSWORD_CONFIG_KEY,
             Config.status == "1",  # noqa: E712
         )

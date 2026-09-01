@@ -2,6 +2,7 @@
 
 import pytest
 from sqlalchemy import delete, select
+from tenant_helpers import bind_test_user
 
 from app.constants import STATUS_ENABLED, SUPER_ADMIN_ROLE_CODE
 from app.core.exceptions import AuthorizationException
@@ -15,6 +16,10 @@ from app.modules.ai.service.agent_authorization_service import (
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
+from app.modules.system.service.tenant_association_writer import (
+    replace_role_menus,
+    replace_user_roles,
+)
 
 
 async def _principal(
@@ -46,6 +51,7 @@ async def _principal(
         menu = await db.scalar(select(Menu).where(Menu.permission == permission))
         if menu is None:
             menu = Menu(
+                tenant_id=0,
                 menu_name=f"P1B {permission}",
                 menu_type="F",
                 permission=permission,
@@ -55,6 +61,7 @@ async def _principal(
         menus.append(menu)
 
     role = Role(
+        tenant_id=0,
         role_name=f"P1B role {marker}",
         role_code=f"{role_code}_{marker}"
         if role_code != SUPER_ADMIN_ROLE_CODE
@@ -68,19 +75,22 @@ async def _principal(
         if existing is not None:
             role = existing
             role.status = role_status
-    role.menus = menus
     user = User(
+        tenant_id=0,
         user_name=f"p1b_{marker}",
         nickname="P1B",
         hashed_password="test",
         status=STATUS_ENABLED,
     )
-    user.roles = [role]
     db.add_all([role, user])
     await db.flush()
+    tenant = bind_test_user(user)
+    await replace_role_menus(db, role, menus, tenant=tenant)
+    await replace_user_roles(db, user, [role], tenant=tenant)
     if bind_agent:
         db.add(
             RoleAiAgent(
+                tenant_id=tenant.tenant_id,
                 role_id=role.role_id,
                 agent_id=agent.agent_id,
                 enabled=binding_enabled,

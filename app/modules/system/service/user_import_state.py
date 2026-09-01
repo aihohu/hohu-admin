@@ -30,6 +30,7 @@ _batch_table = Table(
     "sys_user_import_batch",
     _batch_metadata,
     Column("batch_id", String(64), primary_key=True),
+    Column("tenant_id", Integer, nullable=False),
     Column(
         "status",
         postgresql.ENUM(
@@ -83,6 +84,8 @@ async def _transition_batch_status(
     batch_id: str,
     from_status: ImportBatchStatus,
     to_status: ImportBatchStatus,
+    *,
+    tenant_id: int,
     **updates: Any,
 ) -> bool:
     """CAS 状态转换，防止并发覆盖。
@@ -101,6 +104,7 @@ async def _transition_batch_status(
     result = await db.execute(
         update(_batch_table)
         .where(
+            _batch_table.c.tenant_id == tenant_id,
             _batch_table.c.batch_id == batch_id,
             _batch_table.c.status == from_status.value,
         )

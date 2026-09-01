@@ -17,6 +17,7 @@ from app.modules.system.models.dept import Dept
 class DepartmentReadScope(Protocol):
     """Minimal materialized scope accepted by every department read path."""
 
+    tenant_id: int
     accessible_dept_ids: Collection[int] | None
 
 
@@ -54,9 +55,10 @@ class DepartmentSelector:
         filters: Sequence[ColumnElement[bool]],
     ) -> tuple[ColumnElement[bool], ...]:
         scope_filter = self._scope_filter(scope)
+        tenant_filter = Dept.tenant_id == scope.tenant_id
         if scope_filter is None:
-            return tuple(filters)
-        return (*filters, scope_filter)
+            return (*filters, tenant_filter)
+        return (*filters, tenant_filter, scope_filter)
 
     async def rows(
         self,
@@ -139,13 +141,14 @@ class DepartmentSelector:
     @staticmethod
     def build_lookup_statement(
         *,
+        tenant_id: int,
         accessible_dept_ids: Collection[int] | None,
         normalized_query: str,
         limit: int,
         enabled_only: bool = True,
     ) -> Select[Any]:
         """Build locally rooted paths without reading hidden ancestors."""
-        filters: list[ColumnElement[bool]] = []
+        filters: list[ColumnElement[bool]] = [Dept.tenant_id == tenant_id]
         if enabled_only:
             filters.append(Dept.status == STATUS_ENABLED)
         if accessible_dept_ids is not None:
@@ -243,6 +246,7 @@ class DepartmentSelector:
             (
                 await db.execute(
                     self.build_lookup_statement(
+                        tenant_id=scope.tenant_id,
                         accessible_dept_ids=scope.accessible_dept_ids,
                         normalized_query=normalized_query,
                         limit=limit,

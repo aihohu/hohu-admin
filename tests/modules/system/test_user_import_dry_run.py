@@ -39,6 +39,14 @@ from app.modules.system.models.user import User
 from app.modules.system.models.user_transfer import UserImportBatch
 from app.modules.system.schemas.user_transfer import UserImportRecord
 from app.modules.system.service.user_import_service import dry_run_import_users
+from tests.tenant_helpers import tenant_context
+
+TENANT = tenant_context()
+
+
+def _tenant(user: User):
+    return tenant_context(actor_user_id=int(user.user_id))
+
 
 # ========== helpers ==========
 
@@ -51,6 +59,7 @@ def _make_dept(
 ) -> Dept:
     return Dept(
         dept_id=dept_id,
+        tenant_id=TENANT.tenant_id,
         parent_id=parent_id,
         ancestors=ancestors,
         dept_name=name,
@@ -68,6 +77,7 @@ def _make_role(
 ) -> Role:
     return Role(
         role_id=role_id,
+        tenant_id=TENANT.tenant_id,
         role_code=code,
         role_name=name,
         data_scope=data_scope,
@@ -84,6 +94,7 @@ def _make_user(
 ) -> User:
     return User(
         user_id=user_id,
+        tenant_id=TENANT.tenant_id,
         user_name=user_name,
         hashed_password="x",
         status=status,
@@ -152,7 +163,10 @@ class TestDryRunClassification:
         dept = _make_dept(7101, "QA-DryRun-Dept")
         super_role = (
             await db_session.execute(
-                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                _select(Role).where(
+                    Role.tenant_id == TENANT.tenant_id,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalar_one()
         operator = _make_user(9201, "QA_DR_Admin", [super_role], [dept])
@@ -164,6 +178,7 @@ class TestDryRunClassification:
             db_session,
             records,
             operator,
+            tenant=_tenant(operator),
             file_bytes=_file_bytes(),
             filename="test.xlsx",
             reason="QA dry_run 全新",
@@ -186,12 +201,16 @@ class TestDryRunClassification:
         dept = _make_dept(7201, "QA-DryRun-Dept-E")
         super_role = (
             await db_session.execute(
-                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                _select(Role).where(
+                    Role.tenant_id == TENANT.tenant_id,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalar_one()
         operator = _make_user(9202, "QA_DR_Admin_E", [super_role], [dept])
         existing_user = User(
             user_id=9210,
+            tenant_id=TENANT.tenant_id,
             user_name="QA_Exists_User",
             hashed_password="x",
             status="1",
@@ -207,6 +226,7 @@ class TestDryRunClassification:
             db_session,
             records,
             operator,
+            tenant=_tenant(operator),
             file_bytes=_file_bytes(),
             filename="test.xlsx",
             reason="QA dry_run 含已存在",
@@ -220,7 +240,10 @@ class TestDryRunClassification:
         """spec 用例 3a：dept_input 反查失败 → conflict（spec line 2061）。"""
         super_role = (
             await db_session.execute(
-                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                _select(Role).where(
+                    Role.tenant_id == TENANT.tenant_id,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalar_one()
         operator = _make_user(9203, "QA_DR_Admin_C", [super_role])
@@ -234,6 +257,7 @@ class TestDryRunClassification:
             db_session,
             records,
             operator,
+            tenant=_tenant(operator),
             file_bytes=_file_bytes(),
             filename="test.xlsx",
             reason="QA dry_run dept 冲突",
@@ -249,7 +273,10 @@ class TestDryRunClassification:
         dept = _make_dept(7301, "QA-DryRun-Dept-R")
         super_role = (
             await db_session.execute(
-                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                _select(Role).where(
+                    Role.tenant_id == TENANT.tenant_id,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalar_one()
         operator = _make_user(9204, "QA_DR_Admin_R", [super_role], [dept])
@@ -268,6 +295,7 @@ class TestDryRunClassification:
             db_session,
             records,
             operator,
+            tenant=_tenant(operator),
             file_bytes=_file_bytes(),
             filename="test.xlsx",
             reason="QA dry_run role 冲突",
@@ -287,6 +315,7 @@ class TestDryRunClassification:
             7403, "QA_R_FORBIDDEN_OOS", "QA-Forbidden-OOS", data_scope=DATA_SCOPE_ALL
         )
         outside_menu = Menu(
+            tenant_id=TENANT.tenant_id,
             menu_id=7407,
             menu_name="QA forbidden permission",
             menu_type="F",
@@ -310,6 +339,7 @@ class TestDryRunClassification:
             db_session,
             records,
             operator,
+            tenant=_tenant(operator),
             file_bytes=_file_bytes(),
             filename="test.xlsx",
             reason="QA dry_run role 越界",
@@ -352,6 +382,7 @@ class TestDryRunClassification:
                 )
             ],
             operator,
+            tenant=_tenant(operator),
             file_bytes=_file_bytes(),
             filename="test.xlsx",
             reason="QA shared role dominance",
@@ -378,6 +409,7 @@ class TestDryRunClassification:
             db_session,
             records,
             operator,
+            tenant=_tenant(operator),
             file_bytes=_file_bytes(),
             filename="test.xlsx",
             reason="QA dry_run dept 越界",
@@ -402,6 +434,7 @@ class TestDryRunClassification:
         )
         actor_role.menus = [
             Menu(
+                tenant_id=TENANT.tenant_id,
                 menu_id=7414,
                 menu_name="QA import",
                 menu_type="F",
@@ -409,6 +442,7 @@ class TestDryRunClassification:
                 status="1",
             ),
             Menu(
+                tenant_id=TENANT.tenant_id,
                 menu_id=7415,
                 menu_name="QA dept list",
                 menu_type="F",
@@ -450,6 +484,7 @@ class TestDryRunClassification:
                 )
             ],
             operator,
+            tenant=_tenant(operator),
             file_bytes=_file_bytes(),
             filename="hidden-old.xlsx",
             reason="QA hidden old department",
@@ -473,7 +508,10 @@ class TestPreviewToken:
         dept = _make_dept(7601, "QA-DryRun-Dept-PV")
         super_role = (
             await db_session.execute(
-                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                _select(Role).where(
+                    Role.tenant_id == TENANT.tenant_id,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalar_one()
         operator = _make_user(9207, "QA_DR_PV", [super_role], [dept])
@@ -485,6 +523,7 @@ class TestPreviewToken:
             db_session,
             records,
             operator,
+            tenant=_tenant(operator),
             file_bytes=_file_bytes(),
             filename="preview-test.xlsx",
             reason="QA preview token",
@@ -494,7 +533,8 @@ class TestPreviewToken:
         db_row = (
             await db_session.execute(
                 _select(UserImportBatch).where(
-                    UserImportBatch.batch_id == batch.batch_id
+                    UserImportBatch.tenant_id == TENANT.tenant_id,
+                    UserImportBatch.batch_id == batch.batch_id,
                 )
             )
         ).scalar_one()
@@ -510,7 +550,10 @@ class TestPreviewToken:
         dept = _make_dept(7602, "QA-DryRun-Dept-RC")
         super_role = (
             await db_session.execute(
-                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                _select(Role).where(
+                    Role.tenant_id == TENANT.tenant_id,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalar_one()
         operator = _make_user(9208, "QA_DR_RC", [super_role], [dept])
@@ -521,12 +564,15 @@ class TestPreviewToken:
             db_session,
             _make_records(1, prefix="QA-DR-RC"),
             operator,
+            tenant=_tenant(operator),
             file_bytes=_file_bytes(),
             filename="redis-cache.xlsx",
             reason="QA redis cache",
         )
 
-        cached = await fake_redis.get(f"user_import:preview:{batch.preview_token}")
+        cached = await fake_redis.get(
+            f"tenant:{TENANT.tenant_id}:user_import:preview:{batch.preview_token}"
+        )
         assert cached is not None
         payload = json.loads(cached)
         assert payload["batch_id"] == batch.batch_id
@@ -539,7 +585,10 @@ class TestPreviewToken:
         dept = _make_dept(7603, "QA-DryRun-Dept-TTL")
         super_role = (
             await db_session.execute(
-                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                _select(Role).where(
+                    Role.tenant_id == TENANT.tenant_id,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalar_one()
         operator = _make_user(9209, "QA_DR_TTL", [super_role], [dept])
@@ -550,12 +599,15 @@ class TestPreviewToken:
             db_session,
             _make_records(1, prefix="QA-DR-TTL"),
             operator,
+            tenant=_tenant(operator),
             file_bytes=_file_bytes(),
             filename="ttl.xlsx",
             reason="QA TTL",
         )
 
-        ttl = await fake_redis.ttl(f"user_import:preview:{batch.preview_token}")
+        ttl = await fake_redis.ttl(
+            f"tenant:{TENANT.tenant_id}:user_import:preview:{batch.preview_token}"
+        )
         # 允许 ±5s 漂移（fakeredis ttl 计时）
         assert 595 <= ttl <= 600
 
@@ -564,7 +616,10 @@ class TestPreviewToken:
         dept = _make_dept(7604, "QA-DryRun-Dept-SHA")
         super_role = (
             await db_session.execute(
-                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                _select(Role).where(
+                    Role.tenant_id == TENANT.tenant_id,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalar_one()
         operator = _make_user(9210, "QA_DR_SHA", [super_role], [dept])
@@ -576,6 +631,7 @@ class TestPreviewToken:
             db_session,
             _make_records(1, prefix="QA-DR-SHA"),
             operator,
+            tenant=_tenant(operator),
             file_bytes=file_bytes,
             filename="sha.xlsx",
             reason="QA sha256",
@@ -589,7 +645,10 @@ class TestPreviewToken:
         dept = _make_dept(7605, "QA-DryRun-Dept-RH")
         super_role = (
             await db_session.execute(
-                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                _select(Role).where(
+                    Role.tenant_id == TENANT.tenant_id,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalar_one()
         operator = _make_user(9211, "QA_DR_RH", [super_role], [dept])
@@ -601,6 +660,7 @@ class TestPreviewToken:
             db_session,
             records,
             operator,
+            tenant=_tenant(operator),
             file_bytes=_file_bytes(),
             filename="rh.xlsx",
             reason="QA records hash",
@@ -621,7 +681,10 @@ class TestStateMachine:
         dept = _make_dept(7701, "QA-DryRun-Dept-SM")
         super_role = (
             await db_session.execute(
-                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                _select(Role).where(
+                    Role.tenant_id == TENANT.tenant_id,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalar_one()
         operator = _make_user(9212, "QA_DR_SM", [super_role], [dept])
@@ -632,6 +695,7 @@ class TestStateMachine:
             db_session,
             _make_records(1, prefix="QA-DR-SM"),
             operator,
+            tenant=_tenant(operator),
             file_bytes=_file_bytes(),
             filename="sm.xlsx",
             reason="QA state machine",
@@ -650,7 +714,10 @@ class TestRecordsTruncation:
         """MAX+1 个 conflict → conflict_records 截断到 MAX + truncated=True。"""
         super_role = (
             await db_session.execute(
-                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                _select(Role).where(
+                    Role.tenant_id == TENANT.tenant_id,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalar_one()
         operator = _make_user(9213, "QA_DR_TRUNC", [super_role])
@@ -670,6 +737,7 @@ class TestRecordsTruncation:
             db_session,
             records,
             operator,
+            tenant=_tenant(operator),
             file_bytes=_file_bytes(),
             filename="trunc.xlsx",
             reason="QA truncation over",
@@ -684,7 +752,10 @@ class TestRecordsTruncation:
         """spec 用例：conflict_count < MAX → conflict_records_truncated=False。"""
         super_role = (
             await db_session.execute(
-                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                _select(Role).where(
+                    Role.tenant_id == TENANT.tenant_id,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalar_one()
         operator = _make_user(9214, "QA_DR_NOTRUNC", [super_role])
@@ -699,6 +770,7 @@ class TestRecordsTruncation:
             db_session,
             records,
             operator,
+            tenant=_tenant(operator),
             file_bytes=_file_bytes(),
             filename="notrunc.xlsx",
             reason="QA no truncation",
@@ -719,7 +791,10 @@ class TestReasonValidation:
         dept = _make_dept(7801, "QA-DryRun-Dept-RSN")
         super_role = (
             await db_session.execute(
-                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                _select(Role).where(
+                    Role.tenant_id == TENANT.tenant_id,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalar_one()
         operator = _make_user(9215, "QA_DR_RSN", [super_role], [dept])
@@ -732,6 +807,7 @@ class TestReasonValidation:
                 db_session,
                 records,
                 operator,
+                tenant=_tenant(operator),
                 file_bytes=_file_bytes(),
                 filename="reason.xlsx",
                 reason="   ",  # 全空白
@@ -743,7 +819,10 @@ class TestReasonValidation:
         dept = _make_dept(7802, "QA-DryRun-Dept-RSL")
         super_role = (
             await db_session.execute(
-                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                _select(Role).where(
+                    Role.tenant_id == TENANT.tenant_id,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalar_one()
         operator = _make_user(9216, "QA_DR_RSL", [super_role], [dept])
@@ -756,6 +835,7 @@ class TestReasonValidation:
                 db_session,
                 records,
                 operator,
+                tenant=_tenant(operator),
                 file_bytes=_file_bytes(),
                 filename="reason-long.xlsx",
                 reason="x" * 257,
@@ -767,7 +847,10 @@ class TestReasonValidation:
         dept = _make_dept(7803, "QA-DryRun-Dept-RSP")
         super_role = (
             await db_session.execute(
-                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                _select(Role).where(
+                    Role.tenant_id == TENANT.tenant_id,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalar_one()
         operator = _make_user(9217, "QA_DR_RSP", [super_role], [dept])
@@ -778,6 +861,7 @@ class TestReasonValidation:
             db_session,
             _make_records(1, prefix="QA-DR-RSP"),
             operator,
+            tenant=_tenant(operator),
             file_bytes=_file_bytes(),
             filename="reason-persist.xlsx",
             reason="2026年8月 HR 入职名单同步",
@@ -798,7 +882,10 @@ class TestSuperAdminBypass:
         # 用 init_db.py seed 的 admin user（避免 user_name UniqueViolation）
         admin_user = (
             await db_session.execute(
-                _select(User).where(User.user_name == ADMIN_USERNAME)
+                _select(User).where(
+                    User.tenant_id == TENANT.tenant_id,
+                    User.user_name == ADMIN_USERNAME,
+                )
             )
         ).scalar_one()
         any_role = _make_role(7902, "QA_R_ANY_DRY", "QA-任意角色-DryRun")
@@ -817,6 +904,7 @@ class TestSuperAdminBypass:
             db_session,
             records,
             admin_user,
+            tenant=_tenant(admin_user),
             file_bytes=_file_bytes(),
             filename="sa.xlsx",
             reason="QA super admin bypass",
@@ -844,7 +932,10 @@ class TestCreatedToFailedTransition:
         dept = _make_dept(7950, "QA-DryRun-Dept-Empty")
         super_role = (
             await db_session.execute(
-                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                _select(Role).where(
+                    Role.tenant_id == TENANT.tenant_id,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalar_one()
         operator = _make_user(9250, "QA_DR_EMPTY", [super_role], [dept])
@@ -856,6 +947,7 @@ class TestCreatedToFailedTransition:
                 db_session,
                 [],  # 0 行
                 operator,
+                tenant=_tenant(operator),
                 file_bytes=_file_bytes(),
                 filename="empty.xlsx",
                 reason="QA zero records",
@@ -880,7 +972,10 @@ class TestCreatedToFailedTransition:
         dept = _make_dept(7951, "QA-DryRun-Dept-CE")
         super_role = (
             await db_session.execute(
-                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                _select(Role).where(
+                    Role.tenant_id == TENANT.tenant_id,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalar_one()
         operator = _make_user(9251, "QA_DR_CE", [super_role], [dept])
@@ -901,6 +996,7 @@ class TestCreatedToFailedTransition:
                 db_session,
                 records,
                 operator,
+                tenant=_tenant(operator),
                 file_bytes=_file_bytes(),
                 filename="classification_error.xlsx",
                 reason="QA classification error",

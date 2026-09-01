@@ -15,9 +15,11 @@ from datetime import datetime
 
 import pytest
 
-from app.modules.job.models.job import SysJobLog
+from app.core.id_generator import next_id
+from app.modules.job.models.job import SysJob, SysJobLog
 from app.modules.job.schemas.job import JobLogQuery
 from app.modules.job.service.job_log_service import job_log_service
+from tests.tenant_helpers import tenant_context
 
 # seed_logs 是 setup fixture，测试不直接引用其返回值（靠 _seed_count 过滤）。
 # 用 usefixtures 自动注入避免 ARG002 误报。
@@ -31,10 +33,23 @@ async def seed_logs(db_session):
     用 unique job_key 隔离测试自清——查 result 时只看含此 key 的行，
     不被库内历史日志干扰（db_session 不隔离读）。
     """
+    job_id = next_id()
+    db_session.add(
+        SysJob(
+            tenant_id=0,
+            job_id=job_id,
+            job_name="t1",
+            job_key=f"K_TEST_JOB_LOG_PARENT_{job_id}",
+            trigger_type="cron",
+            cron_expression="0 * * * *",
+            status="1",
+        )
+    )
     db_session.add_all(
         [
             SysJobLog(
-                job_id=1,
+                tenant_id=0,
+                job_id=job_id,
                 job_name="t1",
                 job_key="K_TEST_JOB_LOG_TIME_RANGE",
                 status="1",
@@ -44,7 +59,8 @@ async def seed_logs(db_session):
                 attempt_count=1,
             ),
             SysJobLog(
-                job_id=1,
+                tenant_id=0,
+                job_id=job_id,
                 job_name="t1",
                 job_key="K_TEST_JOB_LOG_TIME_RANGE",
                 status="1",
@@ -54,7 +70,8 @@ async def seed_logs(db_session):
                 attempt_count=1,
             ),
             SysJobLog(
-                job_id=1,
+                tenant_id=0,
+                job_id=job_id,
                 job_name="t1",
                 job_key="K_TEST_JOB_LOG_TIME_RANGE",
                 status="1",
@@ -120,7 +137,9 @@ class TestJobLogServiceGetListWithTimeRange:
             start_time=datetime(2026, 7, 1, 0, 0, 0),
             end_time=datetime(2026, 7, 1, 23, 59, 59),
         )
-        page = await job_log_service.get_list(db_session, q)
+        page = await job_log_service.get_list(
+            db_session, q, tenant=tenant_context(tenant_id=0)
+        )
         assert _seed_count(page.records) == 2
 
     async def test_ms_timestamp_does_not_500(self, db_session):
@@ -138,7 +157,9 @@ class TestJobLogServiceGetListWithTimeRange:
         )
         assert q.start_time == local_start
         assert q.end_time == local_end
-        page = await job_log_service.get_list(db_session, q)
+        page = await job_log_service.get_list(
+            db_session, q, tenant=tenant_context(tenant_id=0)
+        )
         assert _seed_count(page.records) == 2
 
     async def test_no_time_filter_sees_seed(self, db_session):
@@ -148,5 +169,7 @@ class TestJobLogServiceGetListWithTimeRange:
         历史日志会让总数 > 3（SAVEPOINT 只回滚写入，不阻止读到已 commit 的数据）。
         """
         q = JobLogQuery(current=1, size=100)
-        page = await job_log_service.get_list(db_session, q)
+        page = await job_log_service.get_list(
+            db_session, q, tenant=tenant_context(tenant_id=0)
+        )
         assert _seed_count(page.records) == 3

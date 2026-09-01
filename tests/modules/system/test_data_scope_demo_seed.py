@@ -22,6 +22,7 @@ async def test_partial_legacy_seed_is_reconciled_without_skipping_missing_users(
     new_name = f"old{str(existing_user_id)[-6:]}"
     missing_name = f"new{str(missing_user_id)[-6:]}"
     dept = Dept(
+        tenant_id=0,
         dept_id=dept_id,
         dept_name=f"demo-{dept_id}",
         ancestors="0",
@@ -29,6 +30,7 @@ async def test_partial_legacy_seed_is_reconciled_without_skipping_missing_users(
         status=STATUS_ENABLED,
     )
     role = Role(
+        tenant_id=0,
         role_id=role_id,
         role_name=f"demo-{role_id}",
         role_code=f"R_DEMO_{role_id}",
@@ -36,6 +38,7 @@ async def test_partial_legacy_seed_is_reconciled_without_skipping_missing_users(
         status=STATUS_ENABLED,
     )
     existing = User(
+        tenant_id=0,
         user_id=existing_user_id,
         user_name=old_name,
         nickname="existing",
@@ -64,7 +67,8 @@ async def test_partial_legacy_seed_is_reconciled_without_skipping_missing_users(
         (
             await db_session.execute(
                 select(User).where(
-                    User.user_id.in_([existing_user_id, missing_user_id])
+                    User.tenant_id == 0,
+                    User.user_id.in_([existing_user_id, missing_user_id]),
                 )
             )
         )
@@ -75,14 +79,16 @@ async def test_partial_legacy_seed_is_reconciled_without_skipping_missing_users(
     assert set(
         await db_session.scalars(
             select(user_roles.c.user_id).where(
-                user_roles.c.user_id.in_([existing_user_id, missing_user_id])
+                user_roles.c.tenant_id == 0,
+                user_roles.c.user_id.in_([existing_user_id, missing_user_id]),
             )
         )
     ) == {existing_user_id, missing_user_id}
     assert set(
         await db_session.scalars(
             select(user_depts.c.user_id).where(
-                user_depts.c.user_id.in_([existing_user_id, missing_user_id])
+                user_depts.c.tenant_id == 0,
+                user_depts.c.user_id.in_([existing_user_id, missing_user_id]),
             )
         )
     ) == {existing_user_id, missing_user_id}

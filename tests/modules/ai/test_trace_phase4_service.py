@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import select
+from tenant_helpers import tenant_context
 
 from app.constants import STATUS_DISABLED, STATUS_ENABLED
 from app.core.exceptions import AuthorizationException, NotFoundException
@@ -23,6 +24,7 @@ from app.modules.system.models.user import User
 
 def _user(*permissions: str, role_code: str = "R_AUDITOR", status=STATUS_ENABLED):
     return SimpleNamespace(
+        tenant_id=0,
         user_id=7001,
         user_name="auditor",
         roles=[
@@ -76,7 +78,10 @@ async def test_trace_list_is_grouped_filtered_and_stably_paginated(db_session) -
     actor_id = int(
         (
             await db_session.execute(
-                select(User.user_id).where(User.user_name == "admin")
+                select(User.user_id).where(
+                    User.tenant_id == 0,
+                    User.user_name == "admin",
+                )
             )
         ).scalar_one()
     )
@@ -119,12 +124,12 @@ async def test_trace_list_is_grouped_filtered_and_stably_paginated(db_session) -
 
     page = await trace_service.list_traces(
         db_session,
-        tenant_id=0,
+        tenant=tenant_context(tenant_id=0, actor_user_id=actor_id),
         query=TraceListQuery(current=1, size=1, toolName="phase4.trace"),
     )
     filtered = await trace_service.list_traces(
         db_session,
-        tenant_id=0,
+        tenant=tenant_context(tenant_id=0, actor_user_id=actor_id),
         query=TraceListQuery(agentCode="user_mgmt", toolName="phase4.trace"),
     )
 
@@ -140,7 +145,9 @@ async def test_trace_detail_omits_message_content_and_raw_audit_fields(
     db_session,
 ) -> None:
     actor = (
-        await db_session.execute(select(User).where(User.user_name == "admin"))
+        await db_session.execute(
+            select(User).where(User.tenant_id == 0, User.user_name == "admin")
+        )
     ).scalar_one()
     conversation = AiConversation(
         conversation_id=81001,
@@ -173,7 +180,7 @@ async def test_trace_detail_omits_message_content_and_raw_audit_fields(
 
     detail = await trace_service.get_trace(
         db_session,
-        tenant_id=0,
+        tenant=tenant_context(tenant_id=0, actor_user_id=actor.user_id),
         trace_id="tr_test_phase4_detail",
     )
     serialized = detail.model_dump_json(by_alias=True)
@@ -190,7 +197,10 @@ async def test_trace_detail_cross_tenant_matches_not_found(db_session) -> None:
     actor_id = int(
         (
             await db_session.execute(
-                select(User.user_id).where(User.user_name == "admin")
+                select(User.user_id).where(
+                    User.tenant_id == 0,
+                    User.user_name == "admin",
+                )
             )
         ).scalar_one()
     )
@@ -205,7 +215,7 @@ async def test_trace_detail_cross_tenant_matches_not_found(db_session) -> None:
     with pytest.raises(NotFoundException) as exc_info:
         await trace_service.get_trace(
             db_session,
-            tenant_id=8,
+            tenant=tenant_context(tenant_id=8, actor_user_id=actor_id),
             trace_id="tr_test_phase4_hidden",
         )
 
@@ -236,7 +246,8 @@ async def test_trace_list_api_uses_authenticated_tenant() -> None:
             query=TraceListQuery(),
             db=MagicMock(),
             current_user=_user("ai:trace:view"),
+            tenant=tenant_context(tenant_id=0, actor_user_id=7001),
         )
 
     assert response.data is page
-    assert lookup.await_args.kwargs["tenant_id"] == 0
+    assert lookup.await_args.kwargs["tenant"].tenant_id == 0

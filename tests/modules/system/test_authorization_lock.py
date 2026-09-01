@@ -14,6 +14,7 @@ from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.service.authorization_lock import authorization_lock_service
+from tests.tenant_helpers import tenant_context
 
 
 async def test_lock_targets_are_deduplicated_and_returned_in_global_order(
@@ -22,6 +23,7 @@ async def test_lock_targets_are_deduplicated_and_returned_in_global_order(
     marker = next_id()
     roles = [
         Role(
+            tenant_id=0,
             role_id=next_id(),
             role_name=f"lock-role-{marker}-{index}",
             role_code=f"R_LOCK_{marker}_{index}",
@@ -31,6 +33,7 @@ async def test_lock_targets_are_deduplicated_and_returned_in_global_order(
     ]
     depts = [
         Dept(
+            tenant_id=0,
             dept_id=next_id(),
             dept_name=f"lock-dept-{marker}-{index}",
             ancestors="0",
@@ -41,6 +44,7 @@ async def test_lock_targets_are_deduplicated_and_returned_in_global_order(
     ]
     users = [
         User(
+            tenant_id=0,
             user_id=next_id(),
             user_name=f"lock-user-{marker}-{index}",
             nickname="lock user",
@@ -57,6 +61,7 @@ async def test_lock_targets_are_deduplicated_and_returned_in_global_order(
         role_ids=[roles[1].role_id, roles[0].role_id, roles[1].role_id],
         dept_ids=[depts[1].dept_id, depts[0].dept_id],
         user_ids=[users[1].user_id, users[0].user_id, users[0].user_id],
+        tenant=tenant_context(tenant_id=0),
     )
 
     assert locked.role_ids == tuple(sorted(role.role_id for role in roles))
@@ -71,6 +76,7 @@ async def test_missing_lock_target_fails_closed(db_session: AsyncSession) -> Non
             role_ids=[next_id()],
             dept_ids=[],
             user_ids=[],
+            tenant=tenant_context(tenant_id=0),
         )
 
     assert exc_info.value.error_code == "AUTHORIZATION_SNAPSHOT_STALE"

@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.redis import redis_client
+from app.core.tenant import TenantContext
 from app.modules.ai.agents.safety.ai_config import get_ai_config_int
 
 
@@ -25,26 +26,30 @@ class QuotaResult:
     reason: str = ""
 
 
-async def get_daily_count(r, user_id: int) -> int:
+async def get_daily_count(r, user_id: int, *, tenant: TenantContext) -> int:
     """读当日已用次数."""
-    key = f"ai:supervisor:quota:{user_id}:{_utc_date()}"
+    key = f"tenant:{tenant.tenant_id}:ai:supervisor:quota:{user_id}:{_utc_date()}"
     raw = await r.get(key)
     return int(raw) if raw else 0
 
 
-async def increment_daily_count(r, user_id: int) -> int:
+async def increment_daily_count(r, user_id: int, *, tenant: TenantContext) -> int:
     """原子 +1 并设 TTL，返回 increment 后的值."""
-    key = f"ai:supervisor:quota:{user_id}:{_utc_date()}"
+    key = f"tenant:{tenant.tenant_id}:ai:supervisor:quota:{user_id}:{_utc_date()}"
     new_count = await r.incr(key)
     if new_count == 1:
         await r.expire(key, 25 * 3600)
     return new_count
 
 
-async def check_supervisor_quota(db: AsyncSession, *, user_id: int) -> QuotaResult:
+async def check_supervisor_quota(
+    db: AsyncSession, *, user_id: int, tenant: TenantContext
+) -> QuotaResult:
     """检查 Supervisor 日配额是否超限。"""
-    daily_limit = await get_ai_config_int(db, "ai:supervisor_daily_limit", default=100)
-    current = await get_daily_count(redis_client, user_id)
+    daily_limit = await get_ai_config_int(
+        db, "ai:supervisor_daily_limit", default=100, tenant=tenant
+    )
+    current = await get_daily_count(redis_client, user_id, tenant=tenant)
     if current >= daily_limit:
         return QuotaResult(
             allowed=False,

@@ -15,8 +15,10 @@ from app.core.exceptions import (
     UnprocessableEntityException,
 )
 from app.core.rbac import is_super_admin
+from app.core.tenant import TenantContext
 from app.db.base import user_depts
 from app.db.session import get_db
+from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.constants import EmployeeNoSyncMode
 from app.modules.system.models.user import User
 from app.modules.system.schemas.user import (
@@ -94,6 +96,7 @@ async def get_user_list(
     query: UserQuery = Depends(),
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     获取用户分页列表
@@ -117,7 +120,9 @@ async def get_user_list(
         - status: 用户状态（1-启用，2-禁用）
     """
     # 调用 Service 层获取分页数据（含数据权限过滤）
-    page_data = await user_service.get_user_list(db, query, current_user=_current_user)
+    page_data = await user_service.get_user_list(
+        db, query, current_user=_current_user, tenant=tenant
+    )
 
     # 批量查询当前页用户的部门关联（含 is_primary 标记）
     user_ids = [u.user_id for u in page_data.records]
@@ -127,7 +132,10 @@ async def get_user_list(
             user_depts.c.user_id,
             user_depts.c.dept_id,
             user_depts.c.is_primary,
-        ).where(user_depts.c.user_id.in_(user_ids))
+        ).where(
+            user_depts.c.tenant_id == tenant.tenant_id,
+            user_depts.c.user_id.in_(user_ids),
+        )
         result = await db.execute(stmt)
         for uid, did, is_primary in result.all():
             user_depts_map.setdefault(uid, []).append(
@@ -182,6 +190,7 @@ async def add_user(
     user_in: UserCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """Create a user with optional explicit role IDs and department bindings."""
     explicit_roles = user_in.role_ids is not None
@@ -189,14 +198,16 @@ async def add_user(
         db,
         actor_user_id=current_user.user_id,
         explicit_roles=explicit_roles,
+        tenant=tenant,
     )
     await user_department_assignment_service.ensure_create_permissions(
         db,
         actor_user_id=current_user.user_id,
         has_departments=bool(user_in.dept_ids),
+        tenant=tenant,
     )
 
-    new_user = await user_service.create_user(db, user_in)
+    new_user = await user_service.create_user(db, user_in, tenant=tenant)
     await db.flush()
     await user_role_assignment_service.assign_created_user_roles(
         db,
@@ -204,6 +215,7 @@ async def add_user(
         target_user_id=new_user.user_id,
         role_ids=user_in.role_ids,
         dept_ids=[int(item.dept_id) for item in user_in.dept_ids],
+        tenant=tenant,
     )
 
     await user_department_assignment_service.assign_created_user_departments(
@@ -213,6 +225,7 @@ async def add_user(
         dept_assignments=[
             (int(item.dept_id), item.is_primary) for item in user_in.dept_ids
         ],
+        tenant=tenant,
     )
 
     await db.commit()
@@ -230,12 +243,14 @@ async def get_assignable_roles(
     limit: Annotated[int, Query(ge=1, le=20)] = 20,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     roles = await user_role_assignment_service.list_assignable_roles(
         db,
         actor_user_id=current_user.user_id,
         query=query,
         limit=limit,
+        tenant=tenant,
     )
     return ResponseModel.success(
         data=[AssignableRoleOut.model_validate(role) for role in roles]
@@ -296,9 +311,10 @@ async def update_user(
     user_id: int,
     user_in: UserUpdate,
     db: AsyncSession = Depends(get_db),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """Update profile fields only; role and department writers are separate."""
-    await user_service.update_user(db, user_id, user_in)
+    await user_service.update_user(db, user_id, user_in, tenant=tenant)
 
     await db.commit()
     return ResponseModel.success(msg="更新成功")
@@ -317,12 +333,14 @@ async def update_user_roles(
     body: UserRoleUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     await user_role_assignment_service.replace_roles(
         db,
         actor_user_id=current_user.user_id,
         target_user_id=user_id,
         role_ids=body.role_ids,
+        tenant=tenant,
     )
     await db.commit()
     return ResponseModel.success(msg="角色更新成功")
@@ -341,6 +359,7 @@ async def update_user_departments(
     body: UserDepartmentUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     await user_department_assignment_service.replace_departments(
         db,
@@ -349,6 +368,7 @@ async def update_user_departments(
         dept_assignments=[
             (int(item.dept_id), item.is_primary) for item in body.dept_assignments
         ],
+        tenant=tenant,
     )
     await db.commit()
     return ResponseModel.success(msg="部门更新成功")
@@ -370,6 +390,7 @@ async def reset_password(
     user_id: int,
     reset_in: ResetPassword,
     db: AsyncSession = Depends(get_db),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     重置用户密码
@@ -382,7 +403,7 @@ async def reset_password(
     Returns:
         ResponseModel: 重置成功的消息
     """
-    await user_service.reset_password(db, user_id, reset_in)
+    await user_service.reset_password(db, user_id, reset_in, tenant=tenant)
     await db.commit()
     return ResponseModel.success(msg="密码重置成功")
 
@@ -402,6 +423,7 @@ async def reset_password(
 async def delete_user(
     user_id: int,
     db: AsyncSession = Depends(get_db),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     删除单个用户
@@ -420,7 +442,7 @@ async def delete_user(
         - 此操作不可逆，请谨慎操作
         - 用户删除后，关联的角色关系也会被清除
     """
-    await user_service.delete_user(db, user_id)
+    await user_service.delete_user(db, user_id, tenant=tenant)
     await db.commit()
     return ResponseModel.success(msg="删除成功")
 
@@ -440,6 +462,7 @@ async def batch_delete_users(
     ids: list[int],
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     批量删除用户
@@ -460,7 +483,9 @@ async def batch_delete_users(
         - 不允许删除当前登录用户
         - 用户删除后，关联的角色关系也会被清除
     """
-    deleted_count = await user_service.batch_delete_users(db, ids, current_user.user_id)
+    deleted_count = await user_service.batch_delete_users(
+        db, ids, current_user.user_id, tenant=tenant
+    )
     await db.commit()
     return ResponseModel.success(msg=f"成功删除 {deleted_count} 个用户")
 
@@ -525,6 +550,7 @@ async def import_users(
     reason: Annotated[str, Form(description="业务理由（1-256 字符）")],
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
     on_conflict: Annotated[
         Literal["skip", "overwrite", "fail_fast"],
         Form(description="冲突处理策略，默认 skip"),
@@ -572,10 +598,12 @@ async def import_users(
         db,
         actor_user_id=current_user.user_id,
         has_role_column=has_role_column,
+        tenant=tenant,
     )
     await user_department_assignment_service.ensure_import_permissions(
         db,
         actor_user_id=current_user.user_id,
+        tenant=tenant,
     )
 
     # 解析文件并校验字段。
@@ -604,6 +632,7 @@ async def import_users(
             reason=reason_clean,
             on_conflict=on_conflict,
             has_role_column=has_role_column,
+            tenant=tenant,
         )
         await db.commit()
 
@@ -644,6 +673,7 @@ async def import_users(
         on_conflict=on_conflict,
         sync_mode=EmployeeNoSyncMode(sync_mode),
         has_role_column=has_role_column,
+        tenant=tenant,
     )
     await db.commit()
 
@@ -668,6 +698,7 @@ async def import_users(
 async def download_import_template(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """下载用户导入模板。
 
@@ -676,7 +707,7 @@ async def download_import_template(
     2. ``Response(content=bytes, media_type=xlsx)`` + Content-Disposition
        使用 Response，避免 StreamingResponse 与审计中间件的时序冲突
     """
-    xlsx_bytes = await generate_import_template(db)
+    xlsx_bytes = await generate_import_template(db, tenant=tenant)
     return Response(
         content=xlsx_bytes,
         media_type=_EXPORT_MIME_TYPE,
@@ -780,6 +811,7 @@ async def list_import_batches(
     query: UserImportBatchQuery = Depends(),
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """分页查询导入批次列表。
 
@@ -788,7 +820,7 @@ async def list_import_batches(
     2. 每个 batch 复用 ``_build_batch_response``（剥离敏感字段 + 动态算 expires_at）
     → PageResult[UserImportBatchResponse]
     """
-    rows, total = await list_batches(db, query)
+    rows, total = await list_batches(db, query, tenant=tenant)
     records = [
         _build_batch_response(batch, operator_name) for batch, operator_name in rows
     ]
@@ -822,6 +854,7 @@ async def get_import_batch_detail(
     batch_id: str,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """按 ``batch_id`` 查询批次详情。
 
@@ -830,7 +863,7 @@ async def get_import_batch_detail(
     2. batch 为 None → 抛 ``AI_IMPORT_BATCH_NOT_FOUND``
     3. 构造响应（含 expires_at 动态计算，剥离敏感字段）
     """
-    batch, operator_name = await get_batch_detail(db, batch_id)
+    batch, operator_name = await get_batch_detail(db, batch_id, tenant=tenant)
     if batch is None:
         raise NotFoundException(
             "用户导入批次",
@@ -867,6 +900,7 @@ async def get_import_batch_logs(
     size: int = Query(10, ge=1, le=100, description="每页数量（1-100）"),
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """查询批次操作日志。
 
@@ -875,7 +909,7 @@ async def get_import_batch_logs(
     2. ``list_batch_logs`` outerjoin sys_user + 按 created_at ASC 排序返回 [(log, operator_name), ...]
     3. 构造 UserImportBatchLogItem 列表 → PageResult
     """
-    batch, _ = await get_batch_detail(db, batch_id)
+    batch, _ = await get_batch_detail(db, batch_id, tenant=tenant)
     if batch is None:
         raise NotFoundException(
             "用户导入批次",
@@ -883,7 +917,12 @@ async def get_import_batch_logs(
         )
 
     rows, total = await list_batch_logs(
-        db, batch_id, event=event, current=current, size=size
+        db,
+        batch_id,
+        event=event,
+        current=current,
+        size=size,
+        tenant=tenant,
     )
     records = [
         UserImportBatchLogItem(
@@ -930,6 +969,7 @@ async def cancel_import_batch(
     body: ReasonSchema,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """取消导入批次。
 
@@ -940,7 +980,13 @@ async def cancel_import_batch(
 
     ``reason`` 必填且长度为 1-256 字符，由 ``ReasonSchema`` 校验。
     """
-    batch = await cancel_batch(db, batch_id, current_user, reason=body.reason)
+    batch = await cancel_batch(
+        db,
+        batch_id,
+        current_user,
+        reason=body.reason,
+        tenant=tenant,
+    )
     await db.commit()
     return ResponseModel.success(
         data=UserImportBatchCancelResponse(
@@ -980,6 +1026,7 @@ async def export_users(
     body: UserExportRequest,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """同步导出用户列表。
 
@@ -1003,6 +1050,7 @@ async def export_users(
         filter_,
         current_user,
         reason=body.reason,
+        tenant=tenant,
     )
     await db.commit()
 
@@ -1038,6 +1086,7 @@ async def list_export_tasks_endpoint(
     query: UserExportTaskQuery = Depends(),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """查询当前用户自己的导出列表；仅超管可跨 operator 查询。
 
@@ -1048,6 +1097,7 @@ async def list_export_tasks_endpoint(
         query,
         operator_id=current_user.user_id,
         allow_cross_owner=is_super_admin(current_user),
+        tenant=tenant,
     )
     records = [UserExportTaskResponse.model_validate(t) for t in page.records]
     return ResponseModel.success(
@@ -1077,6 +1127,7 @@ async def get_export_task_detail(
     export_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """查询导出任务详情。
 
@@ -1087,6 +1138,7 @@ async def get_export_task_detail(
         export_id,
         operator_id=current_user.user_id,
         allow_cross_owner=is_super_admin(current_user),
+        tenant=tenant,
     )
     if task is None:
         raise NotFoundException(
@@ -1117,6 +1169,7 @@ async def download_export_file_endpoint(
     export_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """处理 AI 对话内的导出文件下载。
 
@@ -1131,6 +1184,7 @@ async def download_export_file_endpoint(
         export_id,
         operator_id=current_user.user_id,
         allow_cross_owner=is_super_admin(current_user),
+        tenant=tenant,
     )
     return Response(
         content=xlsx_bytes,

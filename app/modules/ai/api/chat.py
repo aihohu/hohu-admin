@@ -694,7 +694,7 @@ async def chat(
         )
 
     # 用户输入命中项目自定义敏感词时拦截整条消息。
-    blocklist = await load_blocklist(db)
+    blocklist = await load_blocklist(db, tenant=deps.tenant)
     if user_message:
         hits = check_keywords(user_message, blocklist)
         if hits:
@@ -722,7 +722,7 @@ async def chat(
             )
 
     # 主题级黑名单用于拦截政治、宗教、竞品对比等受限主题。
-    topics = await load_forbidden_topics(db)
+    topics = await load_forbidden_topics(db, tenant=deps.tenant)
     if user_message:
         topic_hits = check_topics(user_message, topics)
         if topic_hits:
@@ -748,7 +748,7 @@ async def chat(
             )
 
     # URL 域名黑名单用于拦截竞品或恶意网站。
-    url_blocklist = await load_forbidden_urls(db)
+    url_blocklist = await load_forbidden_urls(db, tenant=deps.tenant)
     if user_message:
         url_hits = check_forbidden_urls(user_message, url_blocklist)
         if url_hits:
@@ -829,7 +829,7 @@ async def chat(
 
     stick_decision = deps.sticky_decision
     supervisor_enabled = await get_ai_config_bool(
-        db, "ai:supervisor_enabled", default=True
+        db, "ai:supervisor_enabled", default=True, tenant=deps.tenant
     )
 
     candidates: list = []
@@ -863,7 +863,9 @@ async def chat(
                 route_reason = "no_candidates"
                 routing_error_code = "AI_AGENT_NOT_AVAILABLE"
             else:
-                quota = await check_supervisor_quota(db, user_id=_current_user.user_id)
+                quota = await check_supervisor_quota(
+                    db, user_id=_current_user.user_id, tenant=deps.tenant
+                )
                 if not quota.allowed:
                     route_reason = "quota_exceeded"
                     clarification_payload = {
@@ -884,7 +886,9 @@ async def chat(
                     # 因为 refund 会引入 race（攻击者故意触发 timeout 反复退额），
                     # 选择"宁错杀不放过"。运维监控 routing_log.reason='llm_call_failed'
                     # 比例异常时调高 sys_config.ai:supervisor_daily_limit.
-                    await increment_daily_count(redis_client, _current_user.user_id)
+                    await increment_daily_count(
+                        redis_client, _current_user.user_id, tenant=deps.tenant
+                    )
                     start = time.monotonic()
                     result = await agent_router.route(
                         db,
@@ -1019,7 +1023,7 @@ async def chat(
         model_name,
         user_perms=deps.perms,
         agent_code=deps.agent.code,
-        tenant_id=deps.tenant_id,
+        tenant=deps.tenant,
         agent_config=deps.agent,
     )
 

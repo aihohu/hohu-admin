@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import STATUS_ENABLED
@@ -10,16 +10,24 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.scheduler import build_trigger, validate_trigger_config
+from app.core.tenant import TenantContext
+from app.core.tenant_scope import tenant_filter, tenant_select
 from app.modules.job.models.job import SysJob, SysJobLog
 from app.modules.job.schemas.job import JobAiUpdate, JobCreate, JobQuery, JobUpdate
-from app.modules.job.task_registry import get_task_function
+from app.modules.job.task_registry import (
+    get_task_function,
+    is_tenant_task,
+    tenant_task_keys,
+)
 from app.utils.pagination import build_filters, paginate
 
 
 class JobService:
     """定时任务配置业务逻辑服务"""
 
-    async def get_list(self, db: AsyncSession, query: JobQuery):
+    async def get_list(
+        self, db: AsyncSession, query: JobQuery, *, tenant: TenantContext
+    ):
         """获取定时任务分页列表。
 
         会为每个启用任务计算 next_run_time（运行时字段，不落库）。
@@ -31,6 +39,8 @@ class JobService:
             "status": ("status", "=="),
         }
         filters = build_filters(SysJob, field_mapping, **query.model_dump())
+        filters.insert(0, tenant_filter(SysJob, tenant=tenant))
+        filters.append(SysJob.job_key.in_(tenant_task_keys()))
         page_data = await paginate(
             db=db,
             model=SysJob,
@@ -56,19 +66,30 @@ class JobService:
             # trigger 配置异常（如 cron 表达式错误），交给具体触发时报错
             return None
 
-    async def get_by_id(self, db: AsyncSession, job_id: int) -> SysJob:
+    async def get_by_id(
+        self, db: AsyncSession, job_id: int, *, tenant: TenantContext
+    ) -> SysJob:
         """根据 ID 获取任务，不存在则抛异常。"""
-        job = await db.get(SysJob, job_id)
+        job = await db.scalar(
+            tenant_select(SysJob, tenant=tenant).where(SysJob.job_id == job_id)
+        )
         if not job:
+            raise NotFoundException("定时任务")
+        if not is_tenant_task(job.job_key):
             raise NotFoundException("定时任务")
         return job
 
     async def create(
-        self, db: AsyncSession, data: JobCreate, current_user: str | None = None
+        self,
+        db: AsyncSession,
+        data: JobCreate,
+        current_user: str | None = None,
+        *,
+        tenant: TenantContext,
     ) -> SysJob:
         """创建定时任务。"""
         # 校验 job_key 在 Registry 中存在
-        if get_task_function(data.job_key) is None:
+        if get_task_function(data.job_key) is None or not is_tenant_task(data.job_key):
             raise BusinessRuleException(f"任务标识 '{data.job_key}' 未注册")
 
         # 校验调度配置合法
@@ -84,7 +105,7 @@ class JobService:
 
         # 校验 job_key 唯一
         existing = await db.execute(
-            select(SysJob).where(SysJob.job_key == data.job_key)
+            tenant_select(SysJob, tenant=tenant).where(SysJob.job_key == data.job_key)
         )
         if existing.scalars().first():
             raise DuplicateException("任务标识", data.job_key)
@@ -94,17 +115,22 @@ class JobService:
             dump["create_by"] = current_user
             dump["update_by"] = current_user
 
-        job = SysJob(**dump)
+        job = SysJob(tenant_id=tenant.tenant_id, **dump)
         db.add(job)
         await db.flush()
 
         return job
 
     async def update(
-        self, db: AsyncSession, data: JobUpdate, current_user: str | None = None
+        self,
+        db: AsyncSession,
+        data: JobUpdate,
+        current_user: str | None = None,
+        *,
+        tenant: TenantContext,
     ) -> SysJob:
         """更新定时任务。"""
-        job = await self.get_by_id(db, data.job_id)
+        job = await self.get_by_id(db, data.job_id, tenant=tenant)
 
         update_data = data.model_dump(exclude_unset=True, exclude={"job_id"})
         if current_user:
@@ -137,14 +163,26 @@ class JobService:
 
         return job
 
-    async def update_status(self, db: AsyncSession, job_id: int, status: str) -> SysJob:
+    async def update_status(
+        self,
+        db: AsyncSession,
+        job_id: int,
+        status: str,
+        *,
+        tenant: TenantContext,
+    ) -> SysJob:
         """启用/停用任务。"""
-        job = await self.get_by_id(db, job_id)
+        job = await self.get_by_id(db, job_id, tenant=tenant)
         job.status = status
         return job
 
     async def update_for_ai(
-        self, db: AsyncSession, data: JobAiUpdate, current_user: str | None = None
+        self,
+        db: AsyncSession,
+        data: JobAiUpdate,
+        current_user: str | None = None,
+        *,
+        tenant: TenantContext,
     ) -> SysJob:
         """AI 入口更新，强制使用 ``JobAiUpdate`` 字段白名单。
 
@@ -158,29 +196,58 @@ class JobService:
         """
         # 把白名单字段映射回 JobUpdate（复用 update 的 trigger 校验逻辑）
         job_update = JobUpdate(**data.model_dump(exclude_unset=True))
-        return await self.update(db, job_update, current_user=current_user)
+        return await self.update(
+            db, job_update, current_user=current_user, tenant=tenant
+        )
 
-    async def delete(self, db: AsyncSession, job_id: int) -> None:
+    async def delete(
+        self, db: AsyncSession, job_id: int, *, tenant: TenantContext
+    ) -> None:
         """删除任务（仅停用状态可删），同时删除关联日志。"""
-        job = await self.get_by_id(db, job_id)
+        job = await self.get_by_id(db, job_id, tenant=tenant)
         if job.status == STATUS_ENABLED:
             raise BusinessRuleException("请先停用任务再删除")
 
-        await db.execute(delete(SysJobLog).where(SysJobLog.job_id == job_id))
+        await db.execute(
+            delete(SysJobLog).where(
+                SysJobLog.tenant_id == tenant.tenant_id,
+                SysJobLog.job_id == job_id,
+            )
+        )
         await db.delete(job)
 
-    async def batch_delete(self, db: AsyncSession, ids: list[int]) -> int:
+    async def batch_delete(
+        self, db: AsyncSession, ids: list[int], *, tenant: TenantContext
+    ) -> int:
         """批量删除任务（仅停用状态可删），同时删除关联日志。"""
-        count = 0
-        for job_id in ids:
-            job = await db.get(SysJob, job_id)
-            if job and job.status != STATUS_ENABLED:
-                await db.execute(delete(SysJobLog).where(SysJobLog.job_id == job_id))
-                await db.delete(job)
-                count += 1
-        return count
+        normalized = set(ids)
+        jobs = list(
+            (
+                await db.execute(
+                    tenant_select(SysJob, tenant=tenant).where(
+                        SysJob.job_id.in_(normalized),
+                        SysJob.job_key.in_(tenant_task_keys()),
+                    )
+                )
+            ).scalars()
+        )
+        if {int(job.job_id) for job in jobs} != normalized:
+            raise NotFoundException("定时任务")
+        if any(job.status == STATUS_ENABLED for job in jobs):
+            raise BusinessRuleException("请先停用任务再删除")
+        await db.execute(
+            delete(SysJobLog).where(
+                SysJobLog.tenant_id == tenant.tenant_id,
+                SysJobLog.job_id.in_(normalized),
+            )
+        )
+        for job in jobs:
+            await db.delete(job)
+        return len(jobs)
 
-    async def run_now(self, db: AsyncSession, job_id: int) -> SysJob:
+    async def run_now(
+        self, db: AsyncSession, job_id: int, *, tenant: TenantContext
+    ) -> SysJob:
         """手动触发任务立即执行。
 
         刻意不做 status 校验：手动触发是调试/应急通道，停用的任务也应能触发。
@@ -188,7 +255,7 @@ class JobService:
         实际触发动作由 API 层在 commit 之后通过 `notify_manual_trigger`
         发送给调度器进程。
         """
-        return await self.get_by_id(db, job_id)
+        return await self.get_by_id(db, job_id, tenant=tenant)
 
 
 job_service = JobService()

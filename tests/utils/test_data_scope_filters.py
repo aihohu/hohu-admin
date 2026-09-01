@@ -32,11 +32,15 @@ from app.utils.data_scope import (
     get_data_scope_filters,
     get_user_data_scope_filters,
 )
+from tests.tenant_helpers import tenant_context
+
+TENANT = tenant_context()
 
 
 def _make_user(*, user_id: int, user_name: str, roles=None, depts=None) -> User:
     """内存构造 User，绕开 hashed_password 等必填约束。"""
     user = User(
+        tenant_id=TENANT.tenant_id,
         user_id=user_id,
         user_name=user_name,
         status=STATUS_ENABLED,
@@ -51,6 +55,7 @@ def _make_role(
     *, role_id: int, role_code: str, data_scope: str, status: str = STATUS_ENABLED
 ) -> Role:
     return Role(
+        tenant_id=TENANT.tenant_id,
         role_id=role_id,
         role_name=role_code,
         role_code=role_code,
@@ -61,6 +66,7 @@ def _make_role(
 
 def _make_dept(*, dept_id: int, name: str, ancestors: str = "0") -> Dept:
     return Dept(
+        tenant_id=TENANT.tenant_id,
         dept_id=dept_id,
         dept_name=name,
         ancestors=ancestors,
@@ -148,7 +154,14 @@ class TestGetUserDataScopeFilters:
         if role_dept_ids:
             await db.execute(
                 insert(role_depts).values(
-                    [{"role_id": role_id, "dept_id": did} for did in role_dept_ids]
+                    [
+                        {
+                            "tenant_id": TENANT.tenant_id,
+                            "role_id": role_id,
+                            "dept_id": did,
+                        }
+                        for did in role_dept_ids
+                    ]
                 )
             )
         return role
@@ -163,6 +176,7 @@ class TestGetUserDataScopeFilters:
         dept_ids: list[int],
     ) -> User:
         user = User(
+            tenant_id=TENANT.tenant_id,
             user_id=user_id,
             user_name=user_name,
             hashed_password="x",
@@ -173,20 +187,37 @@ class TestGetUserDataScopeFilters:
         if role_ids:
             await db.execute(
                 insert(user_roles).values(
-                    [{"user_id": user_id, "role_id": rid} for rid in role_ids]
+                    [
+                        {
+                            "tenant_id": TENANT.tenant_id,
+                            "user_id": user_id,
+                            "role_id": rid,
+                        }
+                        for rid in role_ids
+                    ]
                 )
             )
         if dept_ids:
             await db.execute(
                 insert(user_depts).values(
                     [
-                        {"user_id": user_id, "dept_id": did, "is_primary": "N"}
+                        {
+                            "tenant_id": TENANT.tenant_id,
+                            "user_id": user_id,
+                            "dept_id": did,
+                            "is_primary": "N",
+                        }
                         for did in dept_ids
                     ]
                 )
             )
         # 重新查以加载关系
-        result = await db.execute(select(User).where(User.user_id == user_id))
+        result = await db.execute(
+            select(User).where(
+                User.tenant_id == TENANT.tenant_id,
+                User.user_id == user_id,
+            )
+        )
         return result.scalars().first()
 
     async def test_self_scope_returns_only_self(self, db_session: AsyncSession):
@@ -199,8 +230,8 @@ class TestGetUserDataScopeFilters:
             dept_ids=[],
         )
         user.roles = []  # 无角色 → _get_best_scope 返回 SELF
-        filters = await get_user_data_scope_filters(db_session, user)
-        assert len(filters) == 1
+        filters = await get_user_data_scope_filters(db_session, user, tenant=TENANT)
+        assert len(filters) == 2
         # 应用过滤器，只返回 user 自己
         result = await db_session.execute(select(User).where(*filters))
         ids = {u.user_id for u in result.scalars().all()}
@@ -238,7 +269,9 @@ class TestGetUserDataScopeFilters:
             dept_ids=[base + 2],
         )
 
-        filters = await get_user_data_scope_filters(db_session, self_user)
+        filters = await get_user_data_scope_filters(
+            db_session, self_user, tenant=TENANT
+        )
         result = await db_session.execute(select(User).where(*filters))
         ids = {u.user_id for u in result.scalars().all()}
         assert ids == {1001, 1002}, f"DEPT 应返回本部门所有用户，实际 = {ids}"
@@ -252,8 +285,10 @@ class TestGetUserDataScopeFilters:
             db_session, user_id=1001, user_name="self", role_ids=[2002], dept_ids=[]
         )
 
-        filters = await get_user_data_scope_filters(db_session, self_user)
-        assert len(filters) == 1
+        filters = await get_user_data_scope_filters(
+            db_session, self_user, tenant=TENANT
+        )
+        assert len(filters) == 2
         result = await db_session.execute(select(User).where(*filters))
         ids = {u.user_id for u in result.scalars().all()}
         assert ids == {1001}
@@ -302,7 +337,9 @@ class TestGetUserDataScopeFilters:
             dept_ids=[base + 3],
         )
 
-        filters = await get_user_data_scope_filters(db_session, self_user)
+        filters = await get_user_data_scope_filters(
+            db_session, self_user, tenant=TENANT
+        )
         result = await db_session.execute(select(User).where(*filters))
         ids = {u.user_id for u in result.scalars().all()}
         # 只看 D1, D2 里的用户（含自己也只有当自己在 D1/D2；这里 self 在 D3 不返回）
@@ -319,8 +356,10 @@ class TestGetUserDataScopeFilters:
             db_session, user_id=1001, user_name="self", role_ids=[2004], dept_ids=[]
         )
 
-        filters = await get_user_data_scope_filters(db_session, self_user)
-        assert len(filters) == 1
+        filters = await get_user_data_scope_filters(
+            db_session, self_user, tenant=TENANT
+        )
+        assert len(filters) == 2
         result = await db_session.execute(select(User).where(*filters))
         ids = {u.user_id for u in result.scalars().all()}
         assert ids == {1001}
@@ -333,6 +372,7 @@ class TestGetUserDataScopeFilters:
         """
         base = 940000000
         enabled_dept = Dept(
+            tenant_id=TENANT.tenant_id,
             dept_id=base + 1,
             dept_name="A-enabled",
             ancestors="0",
@@ -340,6 +380,7 @@ class TestGetUserDataScopeFilters:
             status=STATUS_ENABLED,
         )
         disabled_dept = Dept(
+            tenant_id=TENANT.tenant_id,
             dept_id=base + 2,
             dept_name="B-disabled",
             ancestors="0",
@@ -379,7 +420,9 @@ class TestGetUserDataScopeFilters:
             dept_ids=[base + 2],
         )
 
-        filters = await get_user_data_scope_filters(db_session, self_user)
+        filters = await get_user_data_scope_filters(
+            db_session, self_user, tenant=TENANT
+        )
         result = await db_session.execute(select(User).where(*filters))
         ids = {u.user_id for u in result.scalars().all()}
         # 只应看到 A 部门用户，B 部门用户因 dept 被禁用而不可见
@@ -437,7 +480,9 @@ class TestGetUserDataScopeFilters:
             dept_ids=[base + 10],
         )
 
-        filters = await get_user_data_scope_filters(db_session, self_user)
+        filters = await get_user_data_scope_filters(
+            db_session, self_user, tenant=TENANT
+        )
         result = await db_session.execute(select(User).where(*filters))
         ids = {u.user_id for u in result.scalars().all()}
         # 应包含 D1(self), D2, D3，不含 D10
@@ -468,7 +513,9 @@ class TestGetDataScopeFilters:
             user_name="u",
             roles=[_make_role(role_id=1, role_code="R_ALL", data_scope=DATA_SCOPE_ALL)],
         )
-        filters = await get_data_scope_filters(db_session, user, _DummyModel)
+        filters = await get_data_scope_filters(
+            db_session, user, _DummyModel, tenant=TENANT
+        )
         assert filters == []
 
     async def test_self_scope_filters_by_create_by(self, db_session: AsyncSession):
@@ -480,7 +527,9 @@ class TestGetDataScopeFilters:
                 _make_role(role_id=1, role_code="R_SELF", data_scope=DATA_SCOPE_SELF)
             ],
         )
-        filters = await get_data_scope_filters(db_session, user, _DummyModel)
+        filters = await get_data_scope_filters(
+            db_session, user, _DummyModel, tenant=TENANT
+        )
         assert len(filters) == 1
         # 应用到 _DummyModel，应只返回 create_by == 42 的记录
         # （这里只验证过滤器形态，不真的建表测试 SQL）

@@ -19,7 +19,7 @@ from app.constants import (
 )
 from app.core.exceptions import AuthorizationException, NotFoundException
 from app.core.rbac import is_super_admin
-from app.core.tenant import resolve_tenant_id
+from app.core.tenant import TenantContext, bind_tenant_context
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
 from app.modules.auth.permission_collect import collect_user_permission_codes
 from app.modules.system.models.role import Role
@@ -130,14 +130,23 @@ class GrantAuthority:
 class GrantAuthorityService:
     """Build live authority from one reloaded principal without committing."""
 
-    async def build(self, db: AsyncSession, actor_user_id: int) -> GrantAuthority:
+    async def build(
+        self,
+        db: AsyncSession,
+        actor_user_id: int,
+        *,
+        tenant: TenantContext,
+    ) -> GrantAuthority:
         from app.modules.ai.service.agent_authorization_service import (  # noqa: PLC0415
             agent_authorization_service,
         )
 
         actor = await db.scalar(
             select(User)
-            .where(User.user_id == actor_user_id)
+            .where(
+                User.tenant_id == tenant.tenant_id,
+                User.user_id == actor_user_id,
+            )
             .options(
                 selectinload(User.roles).selectinload(Role.menus),
                 selectinload(User.roles).selectinload(Role.depts),
@@ -152,11 +161,12 @@ class GrantAuthorityService:
                 "账号已被禁用",
                 error_code="ACCOUNT_DISABLED",
             )
+        bind_tenant_context(actor, tenant)
 
         roles = [role for role in actor.roles if role.status == STATUS_ENABLED]
         menu_ids = {int(menu.menu_id) for role in roles for menu in role.menus}
         permission_codes = collect_user_permission_codes(actor)
-        resolution = await resolve_data_scope(db, actor)
+        resolution = await resolve_data_scope(db, actor, tenant=tenant)
         visible_agents = await agent_authorization_service.list_agents(db, actor)
         grantable_agent_ids = await agent_authorization_service.grantable_agent_ids(
             db,
@@ -169,7 +179,10 @@ class GrantAuthorityService:
                     RoleAiAgent.agent_id,
                     RoleAiAgent.enabled,
                 )
-                .where(RoleAiAgent.role_id.in_(int(role.role_id) for role in roles))
+                .where(
+                    RoleAiAgent.tenant_id == tenant.tenant_id,
+                    RoleAiAgent.role_id.in_(int(role.role_id) for role in roles),
+                )
                 .order_by(RoleAiAgent.role_id, RoleAiAgent.agent_id)
             )
         ).all()
@@ -186,7 +199,7 @@ class GrantAuthorityService:
         authority = GrantAuthority(
             actor_user_id=int(actor.user_id),
             actor_status=str(actor.status),
-            tenant_id=resolve_tenant_id(actor),
+            tenant_id=tenant.tenant_id,
             super_admin=is_super_admin(actor),
             enabled_role_ids=frozenset(int(role.role_id) for role in roles),
             permission_codes=frozenset(permission_codes),

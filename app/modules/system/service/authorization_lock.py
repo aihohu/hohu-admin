@@ -6,6 +6,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from app.core.exceptions import BusinessRuleException
+from app.core.tenant import TenantContext
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
@@ -42,12 +43,16 @@ class AuthorizationLockService:
         model: type[Role] | type[Dept] | type[User],
         id_column,
         ids: tuple[int, ...],
+        tenant: TenantContext,
     ) -> tuple[int, ...]:
         if not ids:
             return ()
         result = await db.execute(
             select(id_column)
-            .where(id_column.in_(ids))
+            .where(
+                model.tenant_id == tenant.tenant_id,
+                id_column.in_(ids),
+            )
             .order_by(id_column.asc())
             .with_for_update()
         )
@@ -66,6 +71,7 @@ class AuthorizationLockService:
         role_ids: list[int] | tuple[int, ...] | set[int],
         dept_ids: list[int] | tuple[int, ...] | set[int],
         user_ids: list[int] | tuple[int, ...] | set[int],
+        tenant: TenantContext,
     ) -> AuthorizationLockSet:
         """Lock all known targets without starting or committing a transaction."""
         normalized_roles = _normalize_ids(role_ids)
@@ -76,18 +82,21 @@ class AuthorizationLockService:
             model=Role,
             id_column=Role.role_id,
             ids=normalized_roles,
+            tenant=tenant,
         )
         locked_depts = await self._lock_ids(
             db,
             model=Dept,
             id_column=Dept.dept_id,
             ids=normalized_depts,
+            tenant=tenant,
         )
         locked_users = await self._lock_ids(
             db,
             model=User,
             id_column=User.user_id,
             ids=normalized_users,
+            tenant=tenant,
         )
         return AuthorizationLockSet(
             role_ids=locked_roles,

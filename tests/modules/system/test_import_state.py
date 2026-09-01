@@ -22,11 +22,17 @@ from app.modules.system.service.user_import_state import (
 )
 
 
-def _make_batch(batch_id: str, status: S, token: str | None = None) -> UserImportBatch:
+def _make_batch(
+    batch_id: str,
+    status: S,
+    operator_id: int,
+    token: str | None = None,
+) -> UserImportBatch:
     """构造一个完整 batch 实例（满足所有 NOT NULL 字段）。"""
     return UserImportBatch(
+        tenant_id=0,
         batch_id=batch_id,
-        operator_id=1,
+        operator_id=operator_id,
         filename="test.xlsx",
         file_sha256="abc",
         records_hash="fake-records-hash",
@@ -39,7 +45,7 @@ def _make_batch(batch_id: str, status: S, token: str | None = None) -> UserImpor
 
 
 @pytest.fixture
-async def batch_table(db_session) -> str:
+async def batch_table(db_session) -> int:
     """复用 sys_user_import_batch 表及其 batch_log 级联外键。
 
     fixture 仅清空表数据避免测试间残留；outer-transaction fixture 保证
@@ -47,14 +53,21 @@ async def batch_table(db_session) -> str:
     """
     await db_session.execute(text("DELETE FROM sys_user_import_batch"))
     await db_session.flush()
-    yield "sys_user_import_batch"
+    operator_id = await db_session.scalar(
+        text("SELECT user_id FROM sys_user WHERE tenant_id = 0 LIMIT 1")
+    )
+    assert operator_id is not None
+    yield int(operator_id)
     # 不需要清空：outer.rollback() 会撤销本测试所有 INSERT
 
 
 async def _get_status(db_session, batch_id: str) -> str:
     row = (
         await db_session.execute(
-            text("SELECT status FROM sys_user_import_batch WHERE batch_id = :bid"),
+            text(
+                "SELECT status FROM sys_user_import_batch "
+                "WHERE tenant_id = 0 AND batch_id = :bid"
+            ),
             {"bid": batch_id},
         )
     ).fetchone()
@@ -104,36 +117,37 @@ class TestValidateTransition:
 
 class TestTransitionBatchStatus:
     async def test_state_created_to_preview_done(self, db_session, batch_table):
-        assert batch_table == "sys_user_import_batch"  # fixture 副作用：表已建
-        db_session.add(_make_batch("b1", S.CREATED))
+        db_session.add(_make_batch("b1", S.CREATED, batch_table))
         await db_session.flush()
 
-        ok = await _transition_batch_status(db_session, "b1", S.CREATED, S.PREVIEW_DONE)
+        ok = await _transition_batch_status(
+            db_session, "b1", S.CREATED, S.PREVIEW_DONE, tenant_id=0
+        )
 
         assert ok is True
         assert await _get_status(db_session, "b1") == "PREVIEW_DONE"
 
     async def test_state_preview_done_to_running(self, db_session, batch_table):
-        assert batch_table == "sys_user_import_batch"
-        db_session.add(_make_batch("b2", S.PREVIEW_DONE))
+        db_session.add(_make_batch("b2", S.PREVIEW_DONE, batch_table))
         await db_session.flush()
 
-        ok = await _transition_batch_status(db_session, "b2", S.PREVIEW_DONE, S.RUNNING)
+        ok = await _transition_batch_status(
+            db_session, "b2", S.PREVIEW_DONE, S.RUNNING, tenant_id=0
+        )
 
         assert ok is True
         assert await _get_status(db_session, "b2") == "RUNNING"
 
     async def test_state_cas_prevents_race(self, db_session, batch_table):
         """模拟并发：Worker A 先转 PREVIEW_DONE → RUNNING，Worker B 后到 rowcount=0。"""
-        assert batch_table == "sys_user_import_batch"
-        db_session.add(_make_batch("b3", S.PREVIEW_DONE))
+        db_session.add(_make_batch("b3", S.PREVIEW_DONE, batch_table))
         await db_session.flush()
 
         ok_a = await _transition_batch_status(
-            db_session, "b3", S.PREVIEW_DONE, S.RUNNING
+            db_session, "b3", S.PREVIEW_DONE, S.RUNNING, tenant_id=0
         )
         ok_b = await _transition_batch_status(
-            db_session, "b3", S.PREVIEW_DONE, S.RUNNING
+            db_session, "b3", S.PREVIEW_DONE, S.RUNNING, tenant_id=0
         )
 
         assert ok_a is True
@@ -144,19 +158,20 @@ class TestTransitionBatchStatus:
         self, db_session, batch_table
     ):
         """非法转换抛异常，DB 不被改。"""
-        assert batch_table == "sys_user_import_batch"
-        db_session.add(_make_batch("b4", S.SUCCESS))
+        db_session.add(_make_batch("b4", S.SUCCESS, batch_table))
         await db_session.flush()
 
         with pytest.raises(BusinessRuleException) as exc:
-            await _transition_batch_status(db_session, "b4", S.SUCCESS, S.RUNNING)
+            await _transition_batch_status(
+                db_session, "b4", S.SUCCESS, S.RUNNING, tenant_id=0
+            )
         assert exc.value.error_code == "AI_IMPORT_ILLEGAL_TRANSITION"
         assert await _get_status(db_session, "b4") == "SUCCESS"
 
     async def test_missing_batch_returns_false(self, db_session, batch_table):
         """batch_id 不存在时 rowcount=0，返回 False（CAS 失败语义）。"""
-        assert batch_table == "sys_user_import_batch"
+        del batch_table
         ok = await _transition_batch_status(
-            db_session, "nonexistent", S.CREATED, S.PREVIEW_DONE
+            db_session, "nonexistent", S.CREATED, S.PREVIEW_DONE, tenant_id=0
         )
         assert ok is False

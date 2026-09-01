@@ -19,6 +19,7 @@ async def test_upgrade_grants_move_only_to_super_and_is_idempotent(
     migration = importlib.import_module("scripts.migrate_phase3_dept_authorization")
     marker = next_id()
     parent = Menu(
+        tenant_id=0,
         menu_id=next_id(),
         parent_id=0,
         route_name=f"phase3_dept_parent_{marker}",
@@ -27,6 +28,7 @@ async def test_upgrade_grants_move_only_to_super_and_is_idempotent(
         status=STATUS_ENABLED,
     )
     edit_menu = Menu(
+        tenant_id=0,
         menu_id=next_id(),
         parent_id=parent.menu_id,
         menu_name=f"Phase 3 department edit {marker}",
@@ -35,6 +37,7 @@ async def test_upgrade_grants_move_only_to_super_and_is_idempotent(
         status=STATUS_ENABLED,
     )
     super_role = Role(
+        tenant_id=0,
         role_id=next_id(),
         role_name=f"Phase 3 super {marker}",
         role_code=f"R_PHASE3_SUPER_{marker}",
@@ -42,16 +45,28 @@ async def test_upgrade_grants_move_only_to_super_and_is_idempotent(
         status=STATUS_ENABLED,
     )
     editor_role = Role(
+        tenant_id=0,
         role_id=next_id(),
         role_name=f"Phase 3 editor {marker}",
         role_code=f"R_PHASE3_EDITOR_{marker}",
         data_scope=DATA_SCOPE_SELF,
         status=STATUS_ENABLED,
-        menus=[edit_menu],
     )
-    await db_session.execute(delete(Menu).where(Menu.permission == "system:dept:move"))
+    await db_session.execute(
+        delete(Menu).where(
+            Menu.tenant_id == 0,
+            Menu.permission == "system:dept:move",
+        )
+    )
     db_session.add_all([parent, edit_menu, super_role, editor_role])
     await db_session.flush()
+    await db_session.execute(
+        role_menus.insert().values(
+            tenant_id=0,
+            role_id=editor_role.role_id,
+            menu_id=edit_menu.menu_id,
+        )
+    )
 
     with (
         patch.object(migration, "SUPER_ADMIN_ROLE_CODE", super_role.role_code),
@@ -66,7 +81,7 @@ async def test_upgrade_grants_move_only_to_super_and_is_idempotent(
         second = await migration.migrate_phase3_dept_authorization(db_session)
 
     move_menu = await db_session.scalar(
-        select(Menu).where(Menu.permission == "system:dept:move")
+        select(Menu).where(Menu.tenant_id == 0, Menu.permission == "system:dept:move")
     )
     assert move_menu is not None
     assert move_menu.parent_id == parent.menu_id
@@ -74,7 +89,8 @@ async def test_upgrade_grants_move_only_to_super_and_is_idempotent(
         (
             await db_session.execute(
                 select(role_menus.c.role_id).where(
-                    role_menus.c.menu_id == move_menu.menu_id
+                    role_menus.c.tenant_id == 0,
+                    role_menus.c.menu_id == move_menu.menu_id,
                 )
             )
         ).scalars()

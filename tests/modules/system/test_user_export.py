@@ -49,6 +49,9 @@ from app.modules.system.service.user_export_service import (
     get_export_task,
     list_export_tasks,
 )
+from tests.tenant_helpers import tenant_context
+
+TENANT = tenant_context()
 
 # ========== helpers ==========
 
@@ -61,6 +64,7 @@ def _make_dept(
 ) -> Dept:
     return Dept(
         dept_id=dept_id,
+        tenant_id=TENANT.tenant_id,
         parent_id=parent_id,
         ancestors=ancestors,
         dept_name=name,
@@ -78,6 +82,7 @@ def _make_role(
 ) -> Role:
     return Role(
         role_id=role_id,
+        tenant_id=TENANT.tenant_id,
         role_code=code,
         role_name=name,
         data_scope=data_scope,
@@ -100,6 +105,7 @@ def _make_user(
 ) -> User:
     return User(
         user_id=user_id,
+        tenant_id=TENANT.tenant_id,
         user_name=user_name,
         hashed_password=hashed_password,
         nickname=nickname,
@@ -121,7 +127,10 @@ def file_storage() -> MockFileStorage:
 async def _fetch_super_role(db_session) -> Role:
     return (
         await db_session.execute(
-            _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+            _select(Role).where(
+                Role.tenant_id == TENANT.tenant_id,
+                Role.role_code == SUPER_ADMIN_ROLE_CODE,
+            )
         )
     ).scalar_one()
 
@@ -132,6 +141,16 @@ def _read_xlsx(xlsx_bytes: bytes) -> tuple[list[str], list[list]]:
     ws = wb.active
     rows = list(ws.iter_rows(values_only=True))
     return list(rows[0]), [list(r) for r in rows[1:]]
+
+
+async def _add_task_operators(db_session, *operator_ids: int) -> None:
+    db_session.add_all(
+        [
+            _make_user(operator_id, f"QA_EXPORT_OWNER_{operator_id}", [])
+            for operator_id in operator_ids
+        ]
+    )
+    await db_session.flush()
 
 
 # ========== Happy Path ==========
@@ -161,6 +180,7 @@ class TestHappyPath:
             operator,
             reason="QA export happy path",
             file_storage=file_storage,
+            tenant=TENANT,
         )
 
         assert len(result) == 3
@@ -192,6 +212,7 @@ class TestHappyPath:
             operator,
             reason="QA field whitelist",
             file_storage=file_storage,
+            tenant=TENANT,
         )
 
         headers, rows = _read_xlsx(xlsx_bytes)
@@ -214,6 +235,7 @@ class TestHappyPath:
             operator,
             reason="QA all columns",
             file_storage=file_storage,
+            tenant=TENANT,
         )
 
         headers, _rows = _read_xlsx(xlsx_bytes)
@@ -245,6 +267,7 @@ class TestExportTaskAudit:
             operator,
             reason="QA filter snapshot",
             file_storage=file_storage,
+            tenant=TENANT,
         )
 
         task = (
@@ -281,6 +304,7 @@ class TestExportTaskAudit:
             operator,
             reason="QA snapshot freeze",
             file_storage=file_storage,
+            tenant=TENANT,
         )
 
         # 用 export_id 反查（不假设全表只 1 行：dev DB 可能有真实导出残留）
@@ -308,6 +332,7 @@ class TestExportTaskAudit:
             operator,
             reason="QA state transition",
             file_storage=file_storage,
+            tenant=TENANT,
         )
 
         task = (
@@ -335,6 +360,7 @@ class TestExportTaskAudit:
             operator,
             reason="QA file storage",
             file_storage=file_storage,
+            tenant=TENANT,
         )
 
         task = (
@@ -369,6 +395,7 @@ class TestReasonValidation:
                 operator,
                 reason="   ",  # 全空白
                 file_storage=file_storage,
+                tenant=TENANT,
             )
         assert exc.value.error_code == "AI_EXPORT_REASON_REQUIRED"
 
@@ -386,6 +413,7 @@ class TestReasonValidation:
                 operator,
                 reason="x" * 257,
                 file_storage=file_storage,
+                tenant=TENANT,
             )
         assert exc.value.error_code == "AI_EXPORT_REASON_REQUIRED"
 
@@ -425,6 +453,7 @@ class TestExportThreshold:
                 operator,
                 reason="QA threshold",
                 file_storage=file_storage,
+                tenant=TENANT,
             )
         assert exc.value.error_code == "AI_EXPORT_ASYNC_REQUIRED"
         assert "缩窄" in exc.value.message
@@ -456,6 +485,7 @@ class TestDataScope:
             operator,
             reason="QA data scope",
             file_storage=file_storage,
+            tenant=TENANT,
         )
 
         # HR 只看到 own_dept 里的用户（operator 自己 + own_user）
@@ -472,7 +502,10 @@ class TestDataScope:
         dept2 = _make_dept(5902, "QA-Exp-SA-D2")
         admin_user = (
             await db_session.execute(
-                _select(User).where(User.user_name == ADMIN_USERNAME)
+                _select(User).where(
+                    User.tenant_id == TENANT.tenant_id,
+                    User.user_name == ADMIN_USERNAME,
+                )
             )
         ).scalar_one()
         u1 = _make_user(6902, "QA_SA_U1", [], [dept1])
@@ -486,6 +519,7 @@ class TestDataScope:
             admin_user,
             reason="QA super admin export",
             file_storage=file_storage,
+            tenant=TENANT,
         )
 
         # 超管看所有用户（含 init_db seed 的 + dept1/dept2 两个新用户）
@@ -527,6 +561,7 @@ class TestExportFailureRecordsError:
                 operator,
                 reason="QA failure task",
                 file_storage=file_storage,
+                tenant=TENANT,
             )
 
         # 用 reason 反查（不假设全表只 1 行：dev DB 可能有真实导出残留；
@@ -570,6 +605,7 @@ class TestDisplayTranslation:
             operator,
             reason="QA status label",
             file_storage=file_storage,
+            tenant=TENANT,
         )
 
         headers, rows = _read_xlsx(xlsx_bytes)
@@ -596,6 +632,7 @@ class TestDisplayTranslation:
             operator,
             reason="QA gender label",
             file_storage=file_storage,
+            tenant=TENANT,
         )
 
         headers, rows = _read_xlsx(xlsx_bytes)
@@ -623,6 +660,7 @@ class TestDisplayTranslation:
             operator,
             reason="QA dept path",
             file_storage=file_storage,
+            tenant=TENANT,
         )
 
         headers, rows = _read_xlsx(xlsx_bytes)
@@ -647,6 +685,7 @@ class TestDisplayTranslation:
             operator,
             reason="QA role code unchanged",
             file_storage=file_storage,
+            tenant=TENANT,
         )
 
         headers, rows = _read_xlsx(xlsx_bytes)
@@ -681,6 +720,7 @@ class TestDownloadExportFile:
             operator,
             reason="QA download",
             file_storage=file_storage,
+            tenant=TENANT,
         )
 
         got_bytes, filename = await download_export_file(
@@ -688,6 +728,7 @@ class TestDownloadExportFile:
             export_id,
             operator_id=operator.user_id,
             file_storage=file_storage,
+            tenant=TENANT,
         )
         assert got_bytes == xlsx_bytes
         # 决策 30.6 同款：hohu_users_YYYYMMDD_HHmmss.xlsx
@@ -702,6 +743,7 @@ class TestDownloadExportFile:
                 "nonexistent-id",
                 operator_id=1,
                 file_storage=file_storage,
+                tenant=TENANT,
             )
         assert exc.value.error_code == "AI_EXPORT_TASK_NOT_FOUND"
 
@@ -728,6 +770,7 @@ class TestDownloadExportFile:
                 operator,
                 reason="QA download failed",
                 file_storage=file_storage,
+                tenant=TENANT,
             )
 
         task = (
@@ -745,6 +788,7 @@ class TestDownloadExportFile:
                 task.export_id,
                 operator_id=operator.user_id,
                 file_storage=file_storage,
+                tenant=TENANT,
             )
         assert exc.value.error_code == "AI_EXPORT_TASK_NOT_READY"
 
@@ -762,6 +806,7 @@ class TestDownloadExportFile:
             operator,
             reason="QA download expired",
             file_storage=file_storage,
+            tenant=TENANT,
         )
 
         # 手动从 storage 删文件，模拟 30 天 TTL 清理或外部删除
@@ -778,6 +823,7 @@ class TestDownloadExportFile:
                 export_id,
                 operator_id=operator.user_id,
                 file_storage=file_storage,
+                tenant=TENANT,
             )
         assert exc.value.error_code == "AI_EXPORT_FILE_EXPIRED"
 
@@ -789,6 +835,7 @@ class TestExportTaskOwnership:
     def _task(export_id: str, operator_id: int, *, reason: str) -> UserExportTask:
         return UserExportTask(
             export_id=export_id,
+            tenant_id=TENANT.tenant_id,
             operator_id=operator_id,
             filter_snapshot={"user_name": reason},
             reason=reason,
@@ -799,6 +846,7 @@ class TestExportTaskOwnership:
         )
 
     async def test_detail_hides_cross_owner_as_not_found(self, db_session):
+        await _add_task_operators(db_session, 88101, 88102)
         own = self._task("qa-owner-detail-own", 88101, reason="own-filter")
         other = self._task("qa-owner-detail-other", 88102, reason="secret-filter")
         db_session.add_all([own, other])
@@ -809,6 +857,7 @@ class TestExportTaskOwnership:
                 db_session,
                 own.export_id,
                 operator_id=own.operator_id,
+                tenant=TENANT,
             )
             is own
         )
@@ -817,11 +866,13 @@ class TestExportTaskOwnership:
                 db_session,
                 other.export_id,
                 operator_id=own.operator_id,
+                tenant=TENANT,
             )
             is None
         )
 
     async def test_detail_allows_explicit_super_admin_cross_owner(self, db_session):
+        await _add_task_operators(db_session, 88112)
         other = self._task("qa-owner-detail-admin", 88112, reason="admin-visible")
         db_session.add(other)
         await db_session.flush()
@@ -832,11 +883,13 @@ class TestExportTaskOwnership:
                 other.export_id,
                 operator_id=88111,
                 allow_cross_owner=True,
+                tenant=TENANT,
             )
             is other
         )
 
     async def test_list_forces_owner_scope_for_non_super_admin(self, db_session):
+        await _add_task_operators(db_session, 88121, 88122)
         own = self._task("qa-owner-list-own", 88121, reason="own-list")
         other = self._task("qa-owner-list-other", 88122, reason="secret-list")
         db_session.add_all([own, other])
@@ -846,12 +899,14 @@ class TestExportTaskOwnership:
             db_session,
             UserExportTaskQuery(operator_id=other.operator_id, size=100),
             operator_id=own.operator_id,
+            tenant=TENANT,
         )
 
         assert page.total == 0
         assert page.records == []
 
     async def test_list_allows_super_admin_operator_filter(self, db_session):
+        await _add_task_operators(db_session, 88131, 88132)
         own = self._task("qa-owner-list-admin-own", 88131, reason="admin-own")
         other = self._task("qa-owner-list-admin-other", 88132, reason="admin-other")
         db_session.add_all([own, other])
@@ -862,6 +917,7 @@ class TestExportTaskOwnership:
             UserExportTaskQuery(operator_id=other.operator_id, size=100),
             operator_id=own.operator_id,
             allow_cross_owner=True,
+            tenant=TENANT,
         )
 
         assert page.total == 1
@@ -870,6 +926,7 @@ class TestExportTaskOwnership:
     async def test_download_hides_cross_owner_before_reading_file(
         self, db_session, file_storage, monkeypatch
     ):
+        await _add_task_operators(db_session, 88142)
         other = self._task(
             "qa-owner-download-other",
             88142,
@@ -892,6 +949,7 @@ class TestExportTaskOwnership:
                 other.export_id,
                 operator_id=88141,
                 file_storage=file_storage,
+                tenant=TENANT,
             )
 
         assert exc.value.error_code == "AI_EXPORT_TASK_NOT_FOUND"
@@ -936,11 +994,13 @@ class TestAuditChainJoinable:
             operator,
             reason=unique_reason,
             file_storage=file_storage,
+            tenant=TENANT,
         )
 
         # 2. 模拟 AuditLogMiddleware 写 sys_operation_log（HTTP POST /export）
         #    request_params 是 request body 的 JSON 摘要（含 reason）
         operation_log = SysOperationLog(
+            tenant_id=TENANT.tenant_id,
             user_id=operator.user_id,
             username=operator.user_name,
             module="system",
@@ -968,11 +1028,13 @@ class TestAuditChainJoinable:
                 FROM sys_user_export_task t
                 JOIN sys_operation_log l
                   ON l.user_id = t.operator_id
+                 AND l.tenant_id = t.tenant_id
                  AND l.path = '/system/user/export'
                  AND l.request_params LIKE '%' || t.reason || '%'
                 WHERE t.export_id = :export_id
+                  AND t.tenant_id = :tenant_id
             """),
-            {"export_id": export_id},
+            {"export_id": export_id, "tenant_id": TENANT.tenant_id},
         )
         row = result.first()
         assert row is not None, (

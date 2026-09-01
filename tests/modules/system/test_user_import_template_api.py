@@ -81,7 +81,9 @@ async def client(db_session):  # noqa: ARG001 (db_session resets redis)
 async def admin_token(db_session) -> str:
     """admin 用户 JWT（admin 绕过 system:user:import 检查，决策 12.8）。"""
     user = (
-        await db_session.execute(select(User).where(User.user_name == "admin"))
+        await db_session.execute(
+            select(User).where(User.tenant_id == 0, User.user_name == "admin")
+        )
     ).scalar_one()
     exp = datetime.now(UTC) + timedelta(hours=1)
     payload = {
@@ -111,6 +113,7 @@ async def _seed_dept_and_role(db_session) -> tuple[Dept, Role]:
     的稳定数据；这里显式建可读名字避免依赖 init_db seed 细节。
     """
     dept = Dept(
+        tenant_id=0,
         dept_name="模板测试部门",
         parent_id=None,
         ancestors="0",
@@ -119,6 +122,7 @@ async def _seed_dept_and_role(db_session) -> tuple[Dept, Role]:
     )
     db_session.add(dept)
     role = Role(
+        tenant_id=0,
         role_name="模板测试角色",
         role_code="R_TEMPLATE_TEST",
         status="1",

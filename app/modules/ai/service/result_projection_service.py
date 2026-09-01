@@ -15,7 +15,7 @@ from app.core.auth import has_explicit_permission
 from app.core.config import settings
 from app.core.exceptions import BusinessException
 from app.core.rbac import is_super_admin
-from app.core.tenant import resolve_tenant_id
+from app.core.tenant import get_bound_tenant_context, resolve_tenant_id
 from app.modules.ai.agents.safety.ai_config import get_ai_config_str_list
 from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.ai.constants import AI_CHAT_USE_PERMISSION
@@ -595,8 +595,11 @@ class ResultProjectionService:
         except BusinessException:
             return False
         permissions = agent_authorization_service.tool_permissions(user)
+        tenant = get_bound_tenant_context(user)
         enabled_extra = set(
-            await get_ai_config_str_list(db, "ai:enabled_tools", default=[])
+            await get_ai_config_str_list(
+                db, "ai:enabled_tools", default=[], tenant=tenant
+            )
         )
         registry = ToolRegistry.get()
         for tool_code in lineage.tool_codes:
@@ -627,6 +630,9 @@ class ResultProjectionService:
     ) -> bool:
         if not lineage.subject_refs:
             return True
+        tenant = get_bound_tenant_context(user)
+        if tenant.tenant_id != lineage.tenant_id:
+            return False
         delegable_role_ids: list[int] = []
         managed_role_ids: list[int] = []
         complete_role_assignment_user_ids: list[int] = []
@@ -663,6 +669,7 @@ class ResultProjectionService:
                     db,
                     actor_user_id=int(user.user_id),
                     role_ids=delegable_role_ids,
+                    tenant=tenant,
                 )
             ):
                 return False
@@ -671,6 +678,7 @@ class ResultProjectionService:
                     db,
                     actor_user_id=int(user.user_id),
                     role_id=role_id,
+                    tenant=tenant,
                 )
             for target_user_id in complete_role_assignment_user_ids:
                 (
@@ -680,6 +688,7 @@ class ResultProjectionService:
                     db,
                     actor_user_id=int(user.user_id),
                     target_user_id=target_user_id,
+                    tenant=tenant,
                 )
                 if not complete:
                     return False
@@ -688,6 +697,7 @@ class ResultProjectionService:
                     db,
                     actor_user_id=int(user.user_id),
                     target_user_id=target_user_id,
+                    tenant=tenant,
                 )
         except (BusinessException, TypeError, ValueError):
             return False
@@ -722,6 +732,9 @@ class ResultProjectionService:
     ) -> bool:
         subject_type = subject["type"]
         subject_id = subject["id"]
+        tenant = get_bound_tenant_context(user)
+        if tenant.tenant_id != tenant_id:
+            return False
         try:
             if subject_type == "user":
                 user_id = int(subject_id)
@@ -733,26 +746,28 @@ class ResultProjectionService:
                         .limit(1)
                     )
                     return visible is not None
-                return await user_service.user_exists(db, user_id)
+                return await user_service.user_exists(db, user_id, tenant=tenant)
             if subject_type == "dept":
                 dept_id = int(subject_id)
                 if scope.accessible_dept_ids is not None:
                     return dept_id in scope.accessible_dept_ids
-                await dept_service.get_by_id(db, dept_id)
+                await dept_service.get_by_id(db, dept_id, tenant=tenant)
                 return True
             if subject_type == "role":
-                await role_service.get_role_detail(db, int(subject_id))
+                await role_service.get_role_detail(db, int(subject_id), tenant=tenant)
                 return True
             if subject_type == "file":
                 await file_service.get_by_id(
                     db,
                     int(subject_id),
-                    tenant_id=tenant_id,
+                    tenant=tenant,
                     owner_user_id=user.user_id,
                 )
                 return True
             if subject_type == "user_import_batch":
-                batch, _operator_name = await get_batch_detail(db, subject_id)
+                batch, _operator_name = await get_batch_detail(
+                    db, subject_id, tenant=tenant
+                )
                 return batch is not None and batch.operator_id == user.user_id
             if subject_type == "user_export_task":
                 task = await get_export_task(
@@ -760,6 +775,7 @@ class ResultProjectionService:
                     subject_id,
                     operator_id=user.user_id,
                     allow_cross_owner=False,
+                    tenant=tenant,
                 )
                 return task is not None
         except (BusinessException, TypeError, ValueError):

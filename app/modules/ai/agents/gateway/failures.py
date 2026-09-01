@@ -47,10 +47,14 @@ async def _resolve_threshold() -> int:
     from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
         get_ai_config_int,
     )
+    from app.modules.auth.service import get_public_tenant_context  # noqa: PLC0415
 
     try:
         async with AsyncSessionLocal() as db:
-            return await get_ai_config_int(db, _CFG_THRESHOLD, FAILURE_THRESHOLD)
+            tenant = await get_public_tenant_context(db)
+            return await get_ai_config_int(
+                db, _CFG_THRESHOLD, FAILURE_THRESHOLD, tenant=tenant
+            )
     except Exception:
         return FAILURE_THRESHOLD
 
@@ -60,10 +64,12 @@ async def _resolve_ttl() -> int:
     from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
         get_ai_config_int,
     )
+    from app.modules.auth.service import get_public_tenant_context  # noqa: PLC0415
 
     try:
         async with AsyncSessionLocal() as db:
-            return await get_ai_config_int(db, _CFG_TTL, FAILURE_TTL_SEC)
+            tenant = await get_public_tenant_context(db)
+            return await get_ai_config_int(db, _CFG_TTL, FAILURE_TTL_SEC, tenant=tenant)
     except Exception:
         return FAILURE_TTL_SEC
 

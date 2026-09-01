@@ -155,6 +155,7 @@ async def role_list(
     summaries, total, contributor_ids = await role_management_service.summarize_roles(
         ctx.db,
         actor_user_id=ctx.user.user_id,
+        tenant=ctx.tenant,
         status=str(filters["status"]) if "status" in filters else None,
         limit=safe_limit,
     )
@@ -302,6 +303,7 @@ async def role_lookup(
     summaries, total, contributor_ids = await role_management_service.summarize_roles(
         ctx.db,
         actor_user_id=ctx.user.user_id,
+        tenant=ctx.tenant,
         query=normalized,
         limit=limit,
     )
@@ -395,6 +397,7 @@ async def role_create(
             payload,
             actor_user_id=ctx.user.user_id,
             expected_snapshot=snapshot,
+            tenant=ctx.tenant,
         )
     except BusinessException as exc:
         raise BusinessRuleException(
@@ -436,6 +439,7 @@ async def _dry_run_role_create(
         ctx.db,
         payload,
         actor_user_id=ctx.user.user_id,
+        tenant=ctx.tenant,
     )
     return DryRunResult(
         ok=True,
@@ -527,6 +531,7 @@ async def role_update(
             payload,
             actor_user_id=ctx.user.user_id,
             expected_snapshot=snapshot,
+            tenant=ctx.tenant,
         )
     except BusinessException as exc:
         raise BusinessRuleException(
@@ -576,6 +581,7 @@ async def _dry_run_role_update(
         role_id,
         payload,
         actor_user_id=ctx.user.user_id,
+        tenant=ctx.tenant,
     )
     target_role_name = getattr(preview, "target_role_name", None)
     return DryRunResult(
@@ -635,6 +641,7 @@ async def role_update_menus(
             menu_ids,
             actor_user_id=ctx.user.user_id,
             expected_snapshot=snapshot,
+            tenant=ctx.tenant,
         )
     except BusinessException as exc:
         raise BusinessRuleException(
@@ -658,6 +665,7 @@ async def _dry_run_role_update_menus(
         role_id,
         menu_ids,
         actor_user_id=ctx.user.user_id,
+        tenant=ctx.tenant,
     )
     target_role_name = getattr(preview, "target_role_name", None)
     return DryRunResult(
@@ -713,6 +721,7 @@ async def role_update_agents(
             agent_ids,
             actor_user_id=ctx.user.user_id,
             expected_snapshot=snapshot,
+            tenant=ctx.tenant,
         )
     except BusinessException as exc:
         raise BusinessRuleException(
@@ -736,6 +745,7 @@ async def _dry_run_role_update_agents(
         role_id,
         agent_ids,
         actor_user_id=ctx.user.user_id,
+        tenant=ctx.tenant,
     )
     target_role_name = getattr(preview, "target_role_name", None)
     return DryRunResult(

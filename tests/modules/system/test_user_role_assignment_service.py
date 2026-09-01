@@ -32,16 +32,23 @@ from app.modules.system.service.authorization_lock import authorization_lock_ser
 from app.modules.system.service.user_role_assignment_service import (
     user_role_assignment_service,
 )
+from tests.tenant_helpers import tenant_context
 
 USER_ADD_PERMISSION = "system:user:add"
 USER_EDIT_PERMISSION = "system:user:edit"
 USER_IMPORT_PERMISSION = "system:user:import"
+TENANT = tenant_context()
+
+
+def _tenant(actor: User):
+    return tenant_context(actor_user_id=int(actor.user_id))
 
 
 def _menu(permission: str) -> Menu:
     marker = next_id()
     return Menu(
         menu_id=marker,
+        tenant_id=TENANT.tenant_id,
         menu_name=f"phase2-menu-{marker}",
         menu_type="F",
         permission=permission,
@@ -58,6 +65,7 @@ def _role(
     marker = next_id()
     role = Role(
         role_id=marker,
+        tenant_id=TENANT.tenant_id,
         role_name=f"phase2-role-{marker}",
         role_code=code,
         data_scope=data_scope,
@@ -70,6 +78,7 @@ def _role(
 def _user(name: str, roles: list[Role]) -> User:
     return User(
         user_id=next_id(),
+        tenant_id=TENANT.tenant_id,
         user_name=name,
         nickname=name,
         hashed_password="x",
@@ -82,7 +91,7 @@ async def _reload_user(db: AsyncSession, user_id: int) -> User:
     return (
         await db.execute(
             select(User)
-            .where(User.user_id == user_id)
+            .where(User.tenant_id == TENANT.tenant_id, User.user_id == user_id)
             .options(selectinload(User.roles))
             .execution_options(populate_existing=True)
         )
@@ -126,6 +135,7 @@ async def test_bulk_authority_materialization_matches_single_policy(
 ) -> None:
     root = Dept(
         dept_id=next_id(),
+        tenant_id=TENANT.tenant_id,
         dept_name=f"phase2-root-{next_id()}",
         ancestors="0",
         order_num=0,
@@ -133,6 +143,7 @@ async def test_bulk_authority_materialization_matches_single_policy(
     )
     child = Dept(
         dept_id=next_id(),
+        tenant_id=TENANT.tenant_id,
         dept_name=f"phase2-child-{next_id()}",
         ancestors=f"0,{root.dept_id}",
         order_num=0,
@@ -140,6 +151,7 @@ async def test_bulk_authority_materialization_matches_single_policy(
     )
     custom = Dept(
         dept_id=next_id(),
+        tenant_id=TENANT.tenant_id,
         dept_name=f"phase2-custom-{next_id()}",
         ancestors="0",
         order_num=0,
@@ -184,6 +196,7 @@ async def test_bulk_authority_materialization_matches_single_policy(
     await db_session.flush()
     db_session.add(
         RoleAiAgent(
+            tenant_id=TENANT.tenant_id,
             role_id=custom_role.role_id,
             agent_id=agent.agent_id,
             enabled=True,
@@ -192,19 +205,33 @@ async def test_bulk_authority_materialization_matches_single_policy(
     await db_session.execute(
         insert(user_depts),
         [
-            {"user_id": subtree_user.user_id, "dept_id": root.dept_id},
-            {"user_id": child_member.user_id, "dept_id": child.dept_id},
-            {"user_id": custom_member.user_id, "dept_id": custom.dept_id},
+            {
+                "tenant_id": TENANT.tenant_id,
+                "user_id": subtree_user.user_id,
+                "dept_id": root.dept_id,
+            },
+            {
+                "tenant_id": TENANT.tenant_id,
+                "user_id": child_member.user_id,
+                "dept_id": child.dept_id,
+            },
+            {
+                "tenant_id": TENANT.tenant_id,
+                "user_id": custom_member.user_id,
+                "dept_id": custom.dept_id,
+            },
         ],
     )
     await db_session.flush()
     subtree_user = await user_role_assignment_service._load_user(
         db_session,
         subtree_user.user_id,
+        tenant=TENANT,
     )
     custom_user = await user_role_assignment_service._load_user(
         db_session,
         custom_user.user_id,
+        tenant=TENANT,
     )
     candidates = [
         (subtree_user, list(subtree_user.roles), list(subtree_user.depts)),
@@ -214,6 +241,7 @@ async def test_bulk_authority_materialization_matches_single_policy(
     bulk = await user_role_assignment_service.materialize_role_set_authorities(
         db_session,
         candidates=candidates,
+        tenant=TENANT,
     )
     singles = [
         await user_role_assignment_service.materialize_role_set_authority(
@@ -221,6 +249,7 @@ async def test_bulk_authority_materialization_matches_single_policy(
             user=user,
             roles=roles,
             depts=depts,
+            tenant=TENANT,
         )
         for user, roles, depts in candidates
     ]
@@ -234,6 +263,7 @@ async def test_import_lock_includes_descendant_department_dependencies(
 ) -> None:
     root = Dept(
         dept_id=next_id(),
+        tenant_id=TENANT.tenant_id,
         dept_name=f"phase2-import-root-{next_id()}",
         ancestors="0",
         order_num=0,
@@ -241,6 +271,7 @@ async def test_import_lock_includes_descendant_department_dependencies(
     )
     child = Dept(
         dept_id=next_id(),
+        tenant_id=TENANT.tenant_id,
         dept_name=f"phase2-import-child-{next_id()}",
         parent_id=root.dept_id,
         ancestors=f"0,{root.dept_id}",
@@ -263,6 +294,7 @@ async def test_import_lock_includes_descendant_department_dependencies(
         target_user_ids=set(),
         role_ids=set(),
         dept_ids={root.dept_id},
+        tenant=_tenant(actor),
     )
 
     locked_dept_ids = lock_targets.await_args.kwargs["dept_ids"]
@@ -298,6 +330,7 @@ async def test_replace_roles_accepts_a_dominated_complete_set(
     result = await user_role_assignment_service.replace_roles(
         db_session,
         actor_user_id=actor.user_id,
+        tenant=_tenant(actor),
         target_user_id=target.user_id,
         role_ids=[new_role.role_id],
     )
@@ -334,6 +367,7 @@ async def test_replace_roles_rejects_new_or_removed_authority_above_actor(
         await user_role_assignment_service.replace_roles(
             db_session,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
             target_user_id=target.user_id,
             role_ids=[elevated_role.role_id],
         )
@@ -345,6 +379,7 @@ async def test_replace_roles_rejects_new_or_removed_authority_above_actor(
         await user_role_assignment_service.replace_roles(
             db_session,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
             target_user_id=target.user_id,
             role_ids=[safe_role.role_id],
         )
@@ -361,7 +396,10 @@ async def test_replace_roles_rejects_self_and_super_admin_targets(
     )
     safe_role = _role(f"R_SAFE_{next_id()}")
     super_role = await db_session.scalar(
-        select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+        select(Role).where(
+            Role.tenant_id == TENANT.tenant_id,
+            Role.role_code == SUPER_ADMIN_ROLE_CODE,
+        )
     )
     assert super_role is not None
     actor = _user(f"phase2-actor-{next_id()}", [actor_role])
@@ -373,6 +411,7 @@ async def test_replace_roles_rejects_self_and_super_admin_targets(
         await user_role_assignment_service.replace_roles(
             db_session,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
             target_user_id=actor.user_id,
             role_ids=[safe_role.role_id],
         )
@@ -382,6 +421,7 @@ async def test_replace_roles_rejects_self_and_super_admin_targets(
         await user_role_assignment_service.replace_roles(
             db_session,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
             target_user_id=protected_target.user_id,
             role_ids=[safe_role.role_id],
         )
@@ -393,7 +433,10 @@ async def test_created_user_uses_fixed_default_role_without_role_auth(
 ) -> None:
     default_role = await db_session.scalar(
         select(Role)
-        .where(Role.role_code == USER_ROLE_CODE)
+        .where(
+            Role.tenant_id == TENANT.tenant_id,
+            Role.role_code == USER_ROLE_CODE,
+        )
         .options(selectinload(Role.menus))
     )
     assert default_role is not None
@@ -410,6 +453,7 @@ async def test_created_user_uses_fixed_default_role_without_role_auth(
     result = await user_role_assignment_service.assign_created_user_roles(
         db_session,
         actor_user_id=actor.user_id,
+        tenant=_tenant(actor),
         target_user_id=target.user_id,
         role_ids=None,
         dept_ids=[],
@@ -426,7 +470,10 @@ async def test_created_user_default_role_still_requires_dominance(
 ) -> None:
     default_role = await db_session.scalar(
         select(Role)
-        .where(Role.role_code == USER_ROLE_CODE)
+        .where(
+            Role.tenant_id == TENANT.tenant_id,
+            Role.role_code == USER_ROLE_CODE,
+        )
         .options(selectinload(Role.menus))
     )
     assert default_role is not None
@@ -448,6 +495,7 @@ async def test_created_user_default_role_still_requires_dominance(
         await user_role_assignment_service.assign_created_user_roles(
             db_session,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
             target_user_id=target.user_id,
             role_ids=None,
             dept_ids=[],
@@ -473,6 +521,7 @@ async def test_created_user_explicit_roles_require_role_auth_even_when_empty(
         await user_role_assignment_service.assign_created_user_roles(
             db_session,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
             target_user_id=target.user_id,
             role_ids=[],
             dept_ids=[],
@@ -496,12 +545,14 @@ async def test_import_role_column_requires_role_auth_even_when_rows_are_empty(
     await user_role_assignment_service.ensure_import_permissions(
         db_session,
         actor_user_id=actor.user_id,
+        tenant=_tenant(actor),
         has_role_column=False,
     )
     with pytest.raises(AuthorizationException) as exc_info:
         await user_role_assignment_service.ensure_import_permissions(
             db_session,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
             has_role_column=True,
         )
 
@@ -528,6 +579,7 @@ async def test_import_writer_revalidates_role_auth_inside_the_locked_policy(
         await user_role_assignment_service.assign_imported_user_roles(
             db_session,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
             target_user_id=target.user_id,
             role_ids=([delegated_role.role_id] if explicit_role else None),
             dept_ids=[],
@@ -571,6 +623,7 @@ async def test_assignable_roles_returns_only_dominated_minimal_candidates(
     result = await user_role_assignment_service.list_assignable_roles(
         db_session,
         actor_user_id=actor.user_id,
+        tenant=_tenant(actor),
         query="R_ASSIGNABLE_",
         limit=20,
     )
@@ -579,11 +632,13 @@ async def test_assignable_roles_returns_only_dominated_minimal_candidates(
     assert await user_role_assignment_service.roles_are_assignable(
         db_session,
         actor_user_id=actor.user_id,
+        tenant=_tenant(actor),
         role_ids=[assignable.role_id],
     )
     assert not await user_role_assignment_service.roles_are_assignable(
         db_session,
         actor_user_id=actor.user_id,
+        tenant=_tenant(actor),
         role_ids=[outside.role_id],
     )
 
@@ -619,6 +674,7 @@ async def test_preview_roles_freezes_complete_authorization_snapshot(
     preview = await user_role_assignment_service.preview_roles(
         db_session,
         actor_user_id=actor.user_id,
+        tenant=_tenant(actor),
         target_user_id=target.user_id,
         role_ids=[new_role.role_id],
     )
@@ -670,6 +726,7 @@ async def test_replace_roles_rejects_approved_target_status_drift(
     preview = await user_role_assignment_service.preview_roles(
         db_session,
         actor_user_id=actor.user_id,
+        tenant=_tenant(actor),
         target_user_id=target.user_id,
         role_ids=[new_role.role_id],
     )
@@ -680,6 +737,7 @@ async def test_replace_roles_rejects_approved_target_status_drift(
         await user_role_assignment_service.replace_roles(
             db_session,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
             target_user_id=target.user_id,
             role_ids=[new_role.role_id],
             expected_snapshot=preview.snapshot,
@@ -707,6 +765,7 @@ async def test_replace_roles_rejects_approved_candidate_menu_drift(
     preview = await user_role_assignment_service.preview_roles(
         db_session,
         actor_user_id=actor.user_id,
+        tenant=_tenant(actor),
         target_user_id=target.user_id,
         role_ids=[new_role.role_id],
     )
@@ -717,6 +776,7 @@ async def test_replace_roles_rejects_approved_candidate_menu_drift(
         await user_role_assignment_service.replace_roles(
             db_session,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
             target_user_id=target.user_id,
             role_ids=[new_role.role_id],
             expected_snapshot=preview.snapshot,
@@ -740,6 +800,7 @@ async def test_replace_roles_rejects_approved_actor_authority_drift(
     preview = await user_role_assignment_service.preview_roles(
         db_session,
         actor_user_id=actor.user_id,
+        tenant=_tenant(actor),
         target_user_id=target.user_id,
         role_ids=[new_role.role_id],
     )
@@ -750,6 +811,7 @@ async def test_replace_roles_rejects_approved_actor_authority_drift(
         await user_role_assignment_service.replace_roles(
             db_session,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
             target_user_id=target.user_id,
             role_ids=[new_role.role_id],
             expected_snapshot=preview.snapshot,
@@ -772,6 +834,7 @@ async def test_replace_roles_rejects_approved_primary_department_drift(
     ) = await _seed_approved_role_replacement(db_session)
     dept = Dept(
         dept_id=next_id(),
+        tenant_id=TENANT.tenant_id,
         dept_name=f"phase2-role-approved-dept-{next_id()}",
         ancestors="0",
         order_num=0,
@@ -781,6 +844,7 @@ async def test_replace_roles_rejects_approved_primary_department_drift(
     await db_session.flush()
     await db_session.execute(
         insert(user_depts).values(
+            tenant_id=TENANT.tenant_id,
             user_id=target.user_id,
             dept_id=dept.dept_id,
             is_primary=IS_PRIMARY_YES,
@@ -789,12 +853,14 @@ async def test_replace_roles_rejects_approved_primary_department_drift(
     preview = await user_role_assignment_service.preview_roles(
         db_session,
         actor_user_id=actor.user_id,
+        tenant=_tenant(actor),
         target_user_id=target.user_id,
         role_ids=[new_role.role_id],
     )
     await db_session.execute(
         update(user_depts)
         .where(
+            user_depts.c.tenant_id == TENANT.tenant_id,
             user_depts.c.user_id == target.user_id,
             user_depts.c.dept_id == dept.dept_id,
         )
@@ -805,6 +871,7 @@ async def test_replace_roles_rejects_approved_primary_department_drift(
         await user_role_assignment_service.replace_roles(
             db_session,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
             target_user_id=target.user_id,
             role_ids=[new_role.role_id],
             expected_snapshot=preview.snapshot,
@@ -836,6 +903,7 @@ async def test_replace_roles_rejects_approved_role_agent_drift(
     await db_session.flush()
     db_session.add(
         RoleAiAgent(
+            tenant_id=TENANT.tenant_id,
             role_id=actor_role.role_id,
             agent_id=agent.agent_id,
             enabled=True,
@@ -845,11 +913,13 @@ async def test_replace_roles_rejects_approved_role_agent_drift(
     preview = await user_role_assignment_service.preview_roles(
         db_session,
         actor_user_id=actor.user_id,
+        tenant=_tenant(actor),
         target_user_id=target.user_id,
         role_ids=[new_role.role_id],
     )
     db_session.add(
         RoleAiAgent(
+            tenant_id=TENANT.tenant_id,
             role_id=new_role.role_id,
             agent_id=agent.agent_id,
             enabled=True,
@@ -861,6 +931,7 @@ async def test_replace_roles_rejects_approved_role_agent_drift(
         await user_role_assignment_service.replace_roles(
             db_session,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
             target_user_id=target.user_id,
             role_ids=[new_role.role_id],
             expected_snapshot=preview.snapshot,
@@ -876,6 +947,7 @@ async def test_replace_roles_rejects_out_of_scope_custom_role(
 ) -> None:
     own_dept = Dept(
         dept_id=next_id(),
+        tenant_id=TENANT.tenant_id,
         dept_name=f"phase2-own-{next_id()}",
         ancestors="0",
         order_num=0,
@@ -883,6 +955,7 @@ async def test_replace_roles_rejects_out_of_scope_custom_role(
     )
     outside_dept = Dept(
         dept_id=next_id(),
+        tenant_id=TENANT.tenant_id,
         dept_name=f"phase2-outside-{next_id()}",
         ancestors="0",
         order_num=0,
@@ -913,6 +986,7 @@ async def test_replace_roles_rejects_out_of_scope_custom_role(
         await user_role_assignment_service.replace_roles(
             db_session,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
             target_user_id=target.user_id,
             role_ids=[outside_role.role_id],
         )
@@ -925,6 +999,7 @@ async def test_hypothetical_custom_scope_drops_subject_from_removed_department(
 ) -> None:
     old_dept = Dept(
         dept_id=next_id(),
+        tenant_id=TENANT.tenant_id,
         dept_name=f"phase2-custom-old-{next_id()}",
         ancestors="0",
         order_num=0,
@@ -932,6 +1007,7 @@ async def test_hypothetical_custom_scope_drops_subject_from_removed_department(
     )
     new_dept = Dept(
         dept_id=next_id(),
+        tenant_id=TENANT.tenant_id,
         dept_name=f"phase2-custom-new-{next_id()}",
         ancestors="0",
         order_num=0,
@@ -952,6 +1028,7 @@ async def test_hypothetical_custom_scope_drops_subject_from_removed_department(
         user=target,
         roles=[custom_role],
         depts=[new_dept],
+        tenant=TENANT,
     )
 
     assert authority.accessible_dept_ids == frozenset({old_dept.dept_id})
@@ -981,6 +1058,7 @@ async def test_replace_roles_rejects_agent_grant_above_actor(
     await db_session.flush()
     db_session.add(
         RoleAiAgent(
+            tenant_id=TENANT.tenant_id,
             role_id=delegated_role.role_id,
             agent_id=agent.agent_id,
             enabled=True,
@@ -992,6 +1070,7 @@ async def test_replace_roles_rejects_agent_grant_above_actor(
         await user_role_assignment_service.replace_roles(
             db_session,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
             target_user_id=target.user_id,
             role_ids=[delegated_role.role_id],
         )

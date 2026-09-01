@@ -10,6 +10,9 @@ import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from tenant_helpers import tenant_context
+
+TENANT = tenant_context()
 
 
 @pytest.fixture(autouse=True)
@@ -26,7 +29,9 @@ class TestGetAiConfigInt:
     async def test_returns_default_when_key_missing(self, db_session) -> None:
         from app.modules.ai.agents.safety.ai_config import get_ai_config_int
 
-        result = await get_ai_config_int(db_session, "ai:nonexistent:key", 42)
+        result = await get_ai_config_int(
+            db_session, "ai:nonexistent:key", 42, tenant=TENANT
+        )
         assert result == 42
 
     async def test_returns_value_when_key_exists(self, db_session) -> None:
@@ -36,7 +41,9 @@ class TestGetAiConfigInt:
             "app.modules.ai.agents.safety.ai_config.config_service.get_value",
             new=AsyncMock(return_value="100"),
         ):
-            result = await get_ai_config_int(db_session, "ai:test:int", 42)
+            result = await get_ai_config_int(
+                db_session, "ai:test:int", 42, tenant=TENANT
+            )
         assert result == 100
 
     async def test_invalid_int_falls_back_to_default(self, db_session) -> None:
@@ -46,7 +53,9 @@ class TestGetAiConfigInt:
             "app.modules.ai.agents.safety.ai_config.config_service.get_value",
             new=AsyncMock(return_value="not_a_number"),
         ):
-            result = await get_ai_config_int(db_session, "ai:test:bad_int", 99)
+            result = await get_ai_config_int(
+                db_session, "ai:test:bad_int", 99, tenant=TENANT
+            )
         assert result == 99
 
 
@@ -57,7 +66,7 @@ class TestGetAiConfigStrList:
         from app.modules.ai.agents.safety.ai_config import get_ai_config_str_list
 
         result = await get_ai_config_str_list(
-            db_session, "ai:nonexistent:list", ["fallback"]
+            db_session, "ai:nonexistent:list", ["fallback"], tenant=TENANT
         )
         assert result == ["fallback"]
 
@@ -69,7 +78,9 @@ class TestGetAiConfigStrList:
             "app.modules.ai.agents.safety.ai_config.config_service.get_value",
             new=AsyncMock(return_value=raw),
         ):
-            result = await get_ai_config_str_list(db_session, "ai:enabled_tools", [])
+            result = await get_ai_config_str_list(
+                db_session, "ai:enabled_tools", [], tenant=TENANT
+            )
         assert result == ["file.parse", "provider.export"]
 
     async def test_invalid_json_falls_back_to_default(self, db_session) -> None:
@@ -80,7 +91,7 @@ class TestGetAiConfigStrList:
             new=AsyncMock(return_value="not json{"),
         ):
             result = await get_ai_config_str_list(
-                db_session, "ai:enabled_tools", ["default_tool"]
+                db_session, "ai:enabled_tools", ["default_tool"], tenant=TENANT
             )
         assert result == ["default_tool"]
 
@@ -93,7 +104,7 @@ class TestGetAiConfigStrList:
             new=AsyncMock(return_value='{"key": "value"}'),
         ):
             result = await get_ai_config_str_list(
-                db_session, "ai:enabled_tools", ["default"]
+                db_session, "ai:enabled_tools", ["default"], tenant=TENANT
             )
         assert result == ["default"]
 
@@ -106,7 +117,7 @@ class TestGetAiConfigStrList:
             new=AsyncMock(return_value='["ok", 123, null]'),
         ):
             result = await get_ai_config_str_list(
-                db_session, "ai:enabled_tools", ["default"]
+                db_session, "ai:enabled_tools", ["default"], tenant=TENANT
             )
         assert result == ["default"]
 
@@ -119,7 +130,7 @@ class TestGetAiConfigStrList:
             new=AsyncMock(return_value="[]"),
         ):
             result = await get_ai_config_str_list(
-                db_session, "ai:enabled_tools", ["default"]
+                db_session, "ai:enabled_tools", ["default"], tenant=TENANT
             )
         assert result == []
 
@@ -132,8 +143,12 @@ class TestGetAiConfigStrList:
             "app.modules.ai.agents.safety.ai_config.config_service.get_value",
             new=mock_get,
         ):
-            r1 = await get_ai_config_str_list(db_session, "ai:test:cache", [])
-            r2 = await get_ai_config_str_list(db_session, "ai:test:cache", [])
+            r1 = await get_ai_config_str_list(
+                db_session, "ai:test:cache", [], tenant=TENANT
+            )
+            r2 = await get_ai_config_str_list(
+                db_session, "ai:test:cache", [], tenant=TENANT
+            )
         assert r1 == ["cached_tool"]
         assert r2 == ["cached_tool"]
         # 第二次走缓存，DB 只查 1 次
@@ -147,9 +162,13 @@ class TestGetAiConfigStrList:
             "app.modules.ai.agents.safety.ai_config.config_service.get_value",
             new=mock_get,
         ):
-            await get_ai_config_str_list(db_session, "ai:test:force", [])
+            await get_ai_config_str_list(db_session, "ai:test:force", [], tenant=TENANT)
             await get_ai_config_str_list(
-                db_session, "ai:test:force", [], force_refresh=True
+                db_session,
+                "ai:test:force",
+                [],
+                tenant=TENANT,
+                force_refresh=True,
             )
         assert mock_get.call_count == 2
 
@@ -159,29 +178,29 @@ class TestInvalidateCache:
         from app.modules.ai.agents.safety import ai_config
         from app.modules.ai.agents.safety.ai_config import invalidate_ai_config_cache
 
-        ai_config._cache["ai:foo"] = (1, 0.0)
-        ai_config._cache["ai:bar"] = (2, 0.0)
-        ai_config._cache["other:key"] = (3, 0.0)
+        ai_config._cache[(0, "ai:foo")] = (1, 0.0)
+        ai_config._cache[(0, "ai:bar")] = (2, 0.0)
+        ai_config._cache[(0, "other:key")] = (3, 0.0)
 
         invalidate_ai_config_cache("ai:foo")
 
-        assert "ai:foo" not in ai_config._cache
-        assert "ai:bar" in ai_config._cache
-        assert "other:key" in ai_config._cache
+        assert (0, "ai:foo") not in ai_config._cache
+        assert (0, "ai:bar") in ai_config._cache
+        assert (0, "other:key") in ai_config._cache
 
     def test_default_prefix_clears_all_ai(self) -> None:
         from app.modules.ai.agents.safety import ai_config
         from app.modules.ai.agents.safety.ai_config import invalidate_ai_config_cache
 
-        ai_config._cache["ai:foo"] = (1, 0.0)
-        ai_config._cache["ai:bar"] = (2, 0.0)
-        ai_config._cache["other:key"] = (3, 0.0)
+        ai_config._cache[(0, "ai:foo")] = (1, 0.0)
+        ai_config._cache[(0, "ai:bar")] = (2, 0.0)
+        ai_config._cache[(0, "other:key")] = (3, 0.0)
 
         invalidate_ai_config_cache()  # 默认 prefix="ai:"
 
-        assert "ai:foo" not in ai_config._cache
-        assert "ai:bar" not in ai_config._cache
-        assert "other:key" in ai_config._cache
+        assert (0, "ai:foo") not in ai_config._cache
+        assert (0, "ai:bar") not in ai_config._cache
+        assert (0, "other:key") in ai_config._cache
 
 
 @pytest.mark.asyncio
@@ -199,7 +218,7 @@ async def test_supervisor_enabled_default_true(db_session):
         cfg_mod.config_service, "get_value", AsyncMock(return_value=None)
     ):
         result = await get_ai_config_bool(
-            db_session, "ai:supervisor_enabled", default=True
+            db_session, "ai:supervisor_enabled", default=True, tenant=TENANT
         )
     assert result is True
 
@@ -215,7 +234,7 @@ async def test_supervisor_daily_limit_default_100(db_session):
         cfg_mod.config_service, "get_value", AsyncMock(return_value=None)
     ):
         result = await get_ai_config_int(
-            db_session, "ai:supervisor_daily_limit", default=100
+            db_session, "ai:supervisor_daily_limit", default=100, tenant=TENANT
         )
     assert result == 100
 
@@ -231,7 +250,7 @@ async def test_routing_legacy_null_mode_default_false(db_session):
         cfg_mod.config_service, "get_value", AsyncMock(return_value=None)
     ):
         result = await get_ai_config_bool(
-            db_session, "ai:routing_legacy_null_mode", default=False
+            db_session, "ai:routing_legacy_null_mode", default=False, tenant=TENANT
         )
     assert result is False
 
@@ -249,7 +268,7 @@ class TestGetAiConfigBoolParsing:
                 cfg_mod.config_service, "get_value", AsyncMock(return_value=raw)
             ):
                 result = await get_ai_config_bool(
-                    db_session, "ai:test:bool", default=False
+                    db_session, "ai:test:bool", default=False, tenant=TENANT
                 )
             assert result is True, f"raw={raw!r} should parse to True"
 
@@ -263,7 +282,7 @@ class TestGetAiConfigBoolParsing:
                 cfg_mod.config_service, "get_value", AsyncMock(return_value=raw)
             ):
                 result = await get_ai_config_bool(
-                    db_session, "ai:test:bool", default=True
+                    db_session, "ai:test:bool", default=True, tenant=TENANT
                 )
             assert result is False, f"raw={raw!r} should parse to False"
 
@@ -278,7 +297,7 @@ class TestGetAiConfigBoolParsing:
                 cfg_mod.config_service, "get_value", AsyncMock(return_value=raw)
             ):
                 result = await get_ai_config_bool(
-                    db_session, "ai:test:bool", default=True
+                    db_session, "ai:test:bool", default=True, tenant=TENANT
                 )
             assert result is False, (
                 f"raw={raw!r} should return False (not default=True)"
@@ -295,11 +314,11 @@ class TestGetAiConfigBoolParsing:
                 cfg_mod.config_service, "get_value", AsyncMock(return_value=raw)
             ):
                 result_true = await get_ai_config_bool(
-                    db_session, "ai:test:bool_t", default=True
+                    db_session, "ai:test:bool_t", default=True, tenant=TENANT
                 )
                 cfg_mod._cache.clear()
                 result_false = await get_ai_config_bool(
-                    db_session, "ai:test:bool_f", default=False
+                    db_session, "ai:test:bool_f", default=False, tenant=TENANT
                 )
             assert result_true is True, f"raw={raw!r}, default=True should round-trip"
             assert result_false is False, (

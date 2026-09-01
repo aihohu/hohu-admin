@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import inspect
-from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import delete, select
@@ -38,14 +37,21 @@ from scripts.seed_agent_prompts import (
     LEGACY_DEFAULT_PROMPTS,
     should_update_prompt,
 )
+from tests.tenant_helpers import bind_test_user
 
 DEFAULT_PASSWORD = "AiPolicy123"
 
 
 async def _seed_default_password(db: AsyncSession) -> None:
-    await db.execute(delete(Config).where(Config.config_key == "auth:default_password"))
+    await db.execute(
+        delete(Config).where(
+            Config.tenant_id == 0,
+            Config.config_key == "auth:default_password",
+        )
+    )
     db.add(
         Config(
+            tenant_id=0,
             config_name="用户默认密码",
             config_key="auth:default_password",
             config_value=DEFAULT_PASSWORD,
@@ -58,9 +64,12 @@ async def _seed_default_password(db: AsyncSession) -> None:
 
 
 async def _seed_default_role(db: AsyncSession) -> Role:
-    role = await db.scalar(select(Role).where(Role.role_code == USER_ROLE_CODE))
+    role = await db.scalar(
+        select(Role).where(Role.tenant_id == 0, Role.role_code == USER_ROLE_CODE)
+    )
     if role is None:
         role = Role(
+            tenant_id=0,
             role_name="AI 工具默认用户",
             role_code=USER_ROLE_CODE,
             role_desc="default user role",
@@ -82,6 +91,7 @@ async def _add_dept(
     parent_id: int | None = None,
 ) -> Dept:
     dept = Dept(
+        tenant_id=0,
         dept_id=dept_id,
         parent_id=parent_id,
         ancestors="0",
@@ -102,6 +112,7 @@ async def _add_user(
     password_hash: str = "$2b$12$dummy",
 ) -> User:
     user = User(
+        tenant_id=0,
         user_id=user_id,
         user_name=user_name,
         nickname=user_name,
@@ -132,17 +143,27 @@ def _make_ctx(
         required_perms=(permission,),
         risk="high",
     )
+    principal = actor or User(
+        tenant_id=0,
+        user_id=1,
+        user_name="operator",
+        hashed_password="$2b$12$dummy",
+        roles=[],
+    )
+    bind_test_user(principal)
     return AiToolContext(
-        user=actor or MagicMock(user_id=1, user_name="operator", roles=[]),
+        user=principal,
         perms={permission},
         db=db,
         data_scope=DataScopeContext(
+            tenant_id=0,
             accessible_dept_ids=accessible_dept_ids,
             accessible_user_scope=None,
             filters=filters,
         ),
         trace_id="tr_user_management_tools",
         tool_meta=meta,
+        tenant_id=0,
     )
 
 
@@ -359,7 +380,9 @@ class TestUserCreate:
         await _seed_default_password(db_session)
         await _seed_default_role(db_session)
         dept = await _add_dept(db_session, 81001, "AI 产品部")
-        actor = await db_session.scalar(select(User).where(User.user_name == "admin"))
+        actor = await db_session.scalar(
+            select(User).where(User.tenant_id == 0, User.user_name == "admin")
+        )
         assert actor is not None
         ctx = _make_ctx(
             db_session,
@@ -378,7 +401,7 @@ class TestUserCreate:
         )
 
         created = await db_session.scalar(
-            select(User).where(User.user_name == "aitooluser")
+            select(User).where(User.tenant_id == 0, User.user_name == "aitooluser")
         )
         assert created is not None
         assert verify_password(DEFAULT_PASSWORD, created.hashed_password)
@@ -386,7 +409,7 @@ class TestUserCreate:
         dept_link = (
             await db_session.execute(
                 select(user_depts.c.dept_id, user_depts.c.is_primary).where(
-                    user_depts.c.user_id == created.user_id
+                    user_depts.c.tenant_id == 0, user_depts.c.user_id == created.user_id
                 )
             )
         ).one()
@@ -439,7 +462,7 @@ class TestUserCreate:
     ) -> None:
         await _seed_default_password(db_session)
         role = await db_session.scalar(
-            select(Role).where(Role.role_code == USER_ROLE_CODE)
+            select(Role).where(Role.tenant_id == 0, Role.role_code == USER_ROLE_CODE)
         )
         if role is not None:
             role.status = "2"
@@ -466,7 +489,10 @@ class TestUserCreate:
     ) -> None:
         await _seed_default_password(db_session)
         config = await db_session.scalar(
-            select(Config).where(Config.config_key == "auth:default_password")
+            select(Config).where(
+                Config.tenant_id == 0,
+                Config.config_key == "auth:default_password",
+            )
         )
         assert config is not None
         config.config_value = "weakpassword"
@@ -516,7 +542,12 @@ class TestUserCreate:
         ]
         assert DEFAULT_PASSWORD not in repr(result)
         assert (
-            await db_session.scalar(select(User).where(User.user_name == "previewuser"))
+            await db_session.scalar(
+                select(User).where(
+                    User.tenant_id == 0,
+                    User.user_name == "previewuser",
+                )
+            )
             is None
         )
 
@@ -616,7 +647,9 @@ class TestUserResetPassword:
         actor = await _add_user(
             db_session, user_id=82006, user_name="delegatedpasswordadmin"
         )
-        target = await db_session.scalar(select(User).where(User.user_name == "admin"))
+        target = await db_session.scalar(
+            select(User).where(User.tenant_id == 0, User.user_name == "admin")
+        )
         if target is None:
             target = await _add_user(db_session, user_id=82007, user_name="admin")
         ctx = _make_ctx(
@@ -642,10 +675,14 @@ class TestUserResetPassword:
             db_session, user_id=82009, user_name="anotherrootoperator"
         )
         super_role = await db_session.scalar(
-            select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+            select(Role).where(
+                Role.tenant_id == 0,
+                Role.role_code == SUPER_ADMIN_ROLE_CODE,
+            )
         )
         if super_role is None:
             super_role = Role(
+                tenant_id=0,
                 role_name="超级管理员",
                 role_code=SUPER_ADMIN_ROLE_CODE,
                 status=STATUS_ENABLED,
@@ -656,6 +693,7 @@ class TestUserResetPassword:
             super_role.status = STATUS_ENABLED
         await db_session.execute(
             user_roles.insert().values(
+                tenant_id=0,
                 user_id=target.user_id,
                 role_id=super_role.role_id,
             )

@@ -20,6 +20,8 @@ from app.core.exceptions import (
     BusinessRuleException,
     NotFoundException,
 )
+from app.core.tenant import TenantContext
+from app.core.tenant_scope import tenant_select
 from app.modules.ai.agents.tools.meta import SHARED_AGENT_CODE
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
@@ -77,12 +79,16 @@ class RoleAgentService:
                 error_code="AI_AGENT_NOT_FOUND",
             )
 
-    async def _get_role_or_404(self, db: AsyncSession, role_id: int) -> Role:
+    async def _get_role_or_404(
+        self, db: AsyncSession, role_id: int, *, tenant: TenantContext
+    ) -> Role:
         """跨模块校验 role 存在 —— 抛 AI 前缀 errorCode（决策 #18）.
 
         与 agent_admin._get_agent_or_404 同构（决策 #6 公共 fetch + raise）.
         """
-        role = await db.get(Role, role_id)
+        role = await db.scalar(
+            tenant_select(Role, tenant=tenant).where(Role.role_id == role_id)
+        )
         if role is None:
             raise NotFoundException(
                 resource_type="Role", error_code="AI_ROLE_NOT_FOUND"
@@ -95,6 +101,7 @@ class RoleAgentService:
         role_id: int,
         *,
         actor_user_id: int,
+        tenant: TenantContext,
     ) -> RoleAgentBinding:
         """GET：返回 allAgents + boundAgentIds.
 
@@ -102,17 +109,20 @@ class RoleAgentService:
         - boundAgentIds: 该 role 当前 enabled=True 的绑定 agent_id 列表.
         - 不返回 softDisabledAgentIds 段（决策 #19）.
         """
-        authority = await grant_authority_service.build(db, actor_user_id)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         if not authority.allows_permission_codes({"system:role:ai-agent-auth"}):
             raise AuthorizationException(
                 "权限不足",
                 error_code="MISSING_PERMISSION",
             )
-        await self._get_role_or_404(db, role_id)
+        await self._get_role_or_404(db, role_id, tenant=tenant)
         await role_management_service.authorize_role_projection(
             db,
             actor_user_id=actor_user_id,
             role_id=role_id,
+            tenant=tenant,
         )
 
         agents = (
@@ -129,6 +139,7 @@ class RoleAgentService:
             (
                 await db.execute(
                     select(RoleAiAgent.agent_id).where(
+                        RoleAiAgent.tenant_id == tenant.tenant_id,
                         RoleAiAgent.role_id == role_id,
                         RoleAiAgent.enabled.is_(True),
                     )
@@ -168,6 +179,7 @@ class RoleAgentService:
         req: RoleAgentBindReq,
         *,
         actor_user_id: int,
+        tenant: TenantContext,
         expected_snapshot: dict | None = None,
     ) -> None:
         """Replace the complete binding set through the shared delegation policy.
@@ -182,13 +194,26 @@ class RoleAgentService:
             actor_user_id=actor_user_id,
             role_id=role_id,
             new_agent_ids=unique_ids,
+            tenant=tenant,
             expected_snapshot=expected_snapshot,
         )
         await self._ensure_agents_exist(db, unique_ids)
 
-        await db.execute(delete(RoleAiAgent).where(RoleAiAgent.role_id == role_id))
+        await db.execute(
+            delete(RoleAiAgent).where(
+                RoleAiAgent.tenant_id == tenant.tenant_id,
+                RoleAiAgent.role_id == role_id,
+            )
+        )
         for aid in unique_ids:
-            db.add(RoleAiAgent(role_id=role_id, agent_id=aid, enabled=True))
+            db.add(
+                RoleAiAgent(
+                    tenant_id=tenant.tenant_id,
+                    role_id=role_id,
+                    agent_id=aid,
+                    enabled=True,
+                )
+            )
         await db.flush()
 
     async def preview_binding(
@@ -198,6 +223,7 @@ class RoleAgentService:
         agent_ids: list[int],
         *,
         actor_user_id: int,
+        tenant: TenantContext,
     ) -> dict:
         """Preview one complete binding replacement without writing."""
         return await role_delegation_service.preview_agent_replacement(
@@ -205,6 +231,7 @@ class RoleAgentService:
             actor_user_id=actor_user_id,
             role_id=role_id,
             new_agent_ids=agent_ids,
+            tenant=tenant,
         )
 
 

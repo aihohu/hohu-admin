@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import ColumnElement, Select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.tenant import TenantContext, get_bound_tenant_context
 from app.modules.ai.agents.hitl.events import AiStreamEvent
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.system.models.user import User
@@ -44,6 +45,9 @@ class DataScopeContext:
         默认空 list。User 模型 filter 由 build_data_scope_context 填（最常见 stats 目标），
         其它模型 stats tool 在函数内自行调 get_data_scope_filters(db, user, OtherModel)。
     """
+
+    tenant_id: int
+    """Tenant frozen by the shared System data-scope resolver."""
 
     accessible_dept_ids: set[int] | None
     accessible_user_scope: Select[tuple[int]] | None
@@ -126,6 +130,16 @@ class ChatDeps:
     projection_dependency_message_ids: tuple[int, ...] = ()
     """Immutable prior assistant projections that may influence this run."""
 
+    @property
+    def tenant(self) -> TenantContext:
+        """Return the immutable auth-bound tenant and reject context drift."""
+        tenant = get_bound_tenant_context(self.user)
+        if tenant.tenant_id != self.tenant_id:
+            raise RuntimeError(
+                "AI chat tenant context does not match authenticated user"
+            )
+        return tenant
+
 
 @dataclass
 class AiToolContext:
@@ -159,6 +173,16 @@ class AiToolContext:
 
     approved_business_snapshot: dict[str, Any] | None = None
     """Server-owned business snapshot attached only to an approved action."""
+
+    @property
+    def tenant(self) -> TenantContext:
+        """Return the immutable auth-bound tenant and reject context drift."""
+        tenant = get_bound_tenant_context(self.user)
+        if tenant.tenant_id != self.tenant_id:
+            raise RuntimeError(
+                "AI tool tenant context does not match authenticated user"
+            )
+        return tenant
 
 
 def build_tool_context(

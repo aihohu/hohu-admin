@@ -21,6 +21,9 @@ from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.schemas.role import RoleQuery
 from app.modules.system.service.role_service import role_service
+from tests.tenant_helpers import tenant_context
+
+TENANT = tenant_context()
 
 
 def _make_menu(
@@ -32,6 +35,7 @@ def _make_menu(
     route_name: str | None = None,
 ) -> Menu:
     return Menu(
+        tenant_id=TENANT.tenant_id,
         menu_name=name,
         menu_type=menu_type,
         parent_id=parent_id,
@@ -48,7 +52,14 @@ async def db_session_execute_insert(
 ) -> None:
     await db.execute(
         insert(role_menus).values(
-            [{"role_id": role_id, "menu_id": mid} for mid in menu_ids]
+            [
+                {
+                    "tenant_id": TENANT.tenant_id,
+                    "role_id": role_id,
+                    "menu_id": mid,
+                }
+                for mid in menu_ids
+            ]
         )
     )
     await db.flush()
@@ -58,12 +69,14 @@ class TestGetRoleListDataScope:
     async def test_filters_roles_by_exact_data_scope(self, db_session: AsyncSession):
         name_prefix = "QA-data-scope-filter"
         all_role = Role(
+            tenant_id=TENANT.tenant_id,
             role_name=f"{name_prefix}-all",
             role_code="R_TEST_LIST_SCOPE_ALL",
             data_scope=DATA_SCOPE_ALL,
             status=STATUS_ENABLED,
         )
         custom_role = Role(
+            tenant_id=TENANT.tenant_id,
             role_name=f"{name_prefix}-custom",
             role_code="R_TEST_LIST_SCOPE_CUSTOM",
             data_scope=DATA_SCOPE_CUSTOM,
@@ -75,6 +88,7 @@ class TestGetRoleListDataScope:
         page = await role_service.get_role_list(
             db_session,
             RoleQuery(role_name=name_prefix, data_scope=DATA_SCOPE_CUSTOM),
+            tenant=TENANT,
         )
 
         assert page.total == 1
@@ -102,7 +116,12 @@ class TestGetRoleMenusReturnsLeaves:
         db_session.add_all(buttons)
         await db_session.flush()
 
-        role = Role(role_name="R1", role_code="R_TEST_GET_1", status=STATUS_ENABLED)
+        role = Role(
+            tenant_id=TENANT.tenant_id,
+            role_name="R1",
+            role_code="R_TEST_GET_1",
+            status=STATUS_ENABLED,
+        )
         db_session.add(role)
         await db_session.flush()
 
@@ -110,7 +129,9 @@ class TestGetRoleMenusReturnsLeaves:
             db_session, role.role_id, [parent.menu_id, *[b.menu_id for b in buttons]]
         )
 
-        result = await role_service.get_role_menus(db_session, role.role_id)
+        result = await role_service.get_role_menus(
+            db_session, role.role_id, tenant=TENANT
+        )
         result_set = set(result)
 
         # 关键断言：父被排除（否则前端 NTree cascade 会全选所有当前子）
@@ -142,14 +163,21 @@ class TestGetRoleMenusReturnsLeaves:
         db_session.add(unowned_btn)
         await db_session.flush()
 
-        role = Role(role_name="R2", role_code="R_TEST_GET_2", status=STATUS_ENABLED)
+        role = Role(
+            tenant_id=TENANT.tenant_id,
+            role_name="R2",
+            role_code="R_TEST_GET_2",
+            status=STATUS_ENABLED,
+        )
         db_session.add(role)
         await db_session.flush()
 
         # 只关联父，不关联任何子
         await db_session_execute_insert(db_session, role.role_id, [parent.menu_id])
 
-        result = await role_service.get_role_menus(db_session, role.role_id)
+        result = await role_service.get_role_menus(
+            db_session, role.role_id, tenant=TENANT
+        )
 
         # 关键回归断言：孤立父必须被排除
         assert str(parent.menu_id) not in set(result), (
@@ -168,13 +196,20 @@ class TestGetRoleMenusReturnsLeaves:
         db_session.add(root)
         await db_session.flush()
 
-        role = Role(role_name="R3", role_code="R_TEST_GET_3", status=STATUS_ENABLED)
+        role = Role(
+            tenant_id=TENANT.tenant_id,
+            role_name="R3",
+            role_code="R_TEST_GET_3",
+            status=STATUS_ENABLED,
+        )
         db_session.add(role)
         await db_session.flush()
 
         await db_session_execute_insert(db_session, role.role_id, [root.menu_id])
 
-        result = await role_service.get_role_menus(db_session, role.role_id)
+        result = await role_service.get_role_menus(
+            db_session, role.role_id, tenant=TENANT
+        )
 
         # 关键回归断言：parent_id=NULL 不应让查询失效
         assert str(root.menu_id) in set(result), (
@@ -183,11 +218,18 @@ class TestGetRoleMenusReturnsLeaves:
 
     async def test_empty_role_returns_empty(self, db_session: AsyncSession):
         """无任何菜单关联的角色返回空列表。"""
-        role = Role(role_name="R4", role_code="R_TEST_GET_4", status=STATUS_ENABLED)
+        role = Role(
+            tenant_id=TENANT.tenant_id,
+            role_name="R4",
+            role_code="R_TEST_GET_4",
+            status=STATUS_ENABLED,
+        )
         db_session.add(role)
         await db_session.flush()
 
-        result = await role_service.get_role_menus(db_session, role.role_id)
+        result = await role_service.get_role_menus(
+            db_session, role.role_id, tenant=TENANT
+        )
         assert result == []
 
     async def test_parent_without_menu_children_returns_as_leaf(
@@ -202,12 +244,19 @@ class TestGetRoleMenusReturnsLeaves:
         db_session.add(leaf_dir)
         await db_session.flush()
 
-        role = Role(role_name="R5", role_code="R_TEST_GET_5", status=STATUS_ENABLED)
+        role = Role(
+            tenant_id=TENANT.tenant_id,
+            role_name="R5",
+            role_code="R_TEST_GET_5",
+            status=STATUS_ENABLED,
+        )
         db_session.add(role)
         await db_session.flush()
 
         await db_session_execute_insert(db_session, role.role_id, [leaf_dir.menu_id])
 
-        result = await role_service.get_role_menus(db_session, role.role_id)
+        result = await role_service.get_role_menus(
+            db_session, role.role_id, tenant=TENANT
+        )
 
         assert str(leaf_dir.menu_id) in set(result)

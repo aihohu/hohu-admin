@@ -1,7 +1,15 @@
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, DateTime, String, func
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.id_generator import next_id
@@ -15,15 +23,27 @@ if TYPE_CHECKING:
 
 class Role(Base):
     __tablename__ = "sys_role"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "role_id", name="uq_sys_role_tenant_role_id"),
+        UniqueConstraint("tenant_id", "role_name", name="uq_sys_role_tenant_role_name"),
+        UniqueConstraint("tenant_id", "role_code", name="uq_sys_role_tenant_role_code"),
+        Index("ix_sys_role_tenant_status", "tenant_id", "status"),
+    )
 
     role_id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, default=next_id, comment="角色ID"
     )
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("sys_tenant.tenant_id", ondelete="RESTRICT"),
+        nullable=False,
+        comment="租户ID；必须由可信 TenantContext 显式写入",
+    )
     role_name: Mapped[str] = mapped_column(
-        String(50), unique=True, nullable=False, comment="角色名称"
+        String(50), nullable=False, comment="角色名称"
     )
     role_code: Mapped[str] = mapped_column(
-        String(50), unique=True, nullable=False, comment="角色编码"
+        String(50), nullable=False, comment="角色编码"
     )
     role_desc: Mapped[str] = mapped_column(
         String(255), nullable=True, comment="角色描述"

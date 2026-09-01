@@ -1,6 +1,15 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, String, func
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.id_generator import next_id
@@ -11,6 +20,17 @@ class File(Base):
     """文件上传记录模型"""
 
     __tablename__ = "sys_file"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "file_id", name="uq_sys_file_tenant_file_id"),
+        ForeignKeyConstraint(
+            ("tenant_id", "owner_user_id"),
+            ("sys_user.tenant_id", "sys_user.user_id"),
+            name="fk_sys_file_tenant_owner",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_sys_file_tenant_owner", "tenant_id", "owner_user_id"),
+        Index("ix_sys_file_tenant_deleted", "tenant_id", "del_flag"),
+    )
 
     file_id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, default=next_id, comment="文件ID"
@@ -49,10 +69,9 @@ class File(Base):
     )
     tenant_id: Mapped[int] = mapped_column(
         BigInteger,
+        ForeignKey("sys_tenant.tenant_id", ondelete="RESTRICT"),
         nullable=False,
-        default=0,
-        server_default="0",
-        comment="租户ID（当前单租户固定为0）",
+        comment="租户ID；必须由可信 TenantContext 显式写入",
     )
     del_flag: Mapped[str] = mapped_column(
         String(1), default="0", comment="删除标记: 0-正常, 1-已删除"

@@ -3,10 +3,13 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from tenant_helpers import tenant_context
 
 from app.modules.ai.agents.supervisor.stickiness import (
     resolve_sticky_agent_code,
 )
+
+TENANT = tenant_context()
 
 
 @pytest.mark.asyncio
@@ -18,6 +21,7 @@ async def test_explicit_code_overrides_stickiness(db_session):
         conversation_id=10,
         agent_code_param="user_mgmt",
         conv_agent_code="role_mgmt",  # 即使会话上轮是 role_mgmt
+        tenant=TENANT,
     )
     assert decision.agent_code == "user_mgmt"
     assert decision.reason == "manual_override"
@@ -33,6 +37,7 @@ async def test_auto_forces_supervisor(db_session):
         conversation_id=10,
         agent_code_param="auto",
         conv_agent_code="user_mgmt",  # 即使会话上轮是 user_mgmt
+        tenant=TENANT,
     )
     assert decision.run_supervisor is True
     assert decision.reason == "auto_explicit"
@@ -47,6 +52,7 @@ async def test_null_reuses_last_agent(db_session):
         conversation_id=10,
         agent_code_param=None,
         conv_agent_code="user_mgmt",
+        tenant=TENANT,
     )
     assert decision.agent_code == "user_mgmt"
     assert decision.reason == "session_sticky"
@@ -62,6 +68,7 @@ async def test_null_without_conv_agent_falls_back_to_auto(db_session):
         conversation_id=None,  # 新会话
         agent_code_param=None,
         conv_agent_code=None,
+        tenant=TENANT,
     )
     assert decision.run_supervisor is True
     assert decision.reason == "auto_fallback"
@@ -76,6 +83,7 @@ async def test_sticky_value_is_deferred_to_unified_agent_policy(db_session):
         conversation_id=10,
         agent_code_param=None,
         conv_agent_code="user_mgmt",
+        tenant=TENANT,
     )
     assert decision.run_supervisor is False
     assert decision.agent_code == "user_mgmt"
@@ -95,6 +103,7 @@ async def test_legacy_null_mode_uses_default_agent_code(db_session):
             conversation_id=10,
             agent_code_param=None,
             conv_agent_code="user_mgmt",  # 即使有粘滞值也忽略
+            tenant=TENANT,
         )
     assert decision.agent_code == "user_mgmt"  # DEFAULT_AGENT_CODE
     assert decision.reason == "legacy_null_mode"

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, patch
 
 import pytest
+from tenant_helpers import tenant_context
 
 from app.core.exceptions import NotFoundException
 from app.modules.ai.api.download import download_ai_user_export
@@ -47,6 +48,7 @@ async def test_revoked_projection_uses_not_found_surface_without_reading_file() 
                 token="signed",
                 db=AsyncMock(),
                 current_user=_user(),
+                tenant=tenant_context(tenant_id=0, actor_user_id=101),
             )
 
     assert exc_info.value.error_code == "AI_RESULT_DOWNLOAD_NOT_FOUND"
@@ -75,6 +77,7 @@ async def test_authorized_projection_reads_owner_file() -> None:
             token="signed",
             db=AsyncMock(),
             current_user=_user(),
+            tenant=tenant_context(tenant_id=0, actor_user_id=101),
         )
 
     assert response.body == b"xlsx"
@@ -83,4 +86,5 @@ async def test_authorized_projection_reads_owner_file() -> None:
         "exp-1",
         operator_id=101,
         allow_cross_owner=False,
+        tenant=tenant_context(tenant_id=0, actor_user_id=101),
     )

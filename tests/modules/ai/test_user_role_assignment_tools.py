@@ -5,7 +5,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
+from tenant_helpers import bind_test_user, tenant_context
 
 from app.constants import (
     DATA_SCOPE_ALL,
@@ -15,6 +18,7 @@ from app.constants import (
 )
 from app.core.exceptions import BusinessRuleException
 from app.core.id_generator import next_id
+from app.db.base import user_depts
 from app.modules.ai.agents.gateway.executor import _build_direct_confirmation_fields
 from app.modules.ai.agents.hitl.events import DryRunSummary
 from app.modules.ai.agents.tools.pydantic_ai_wrapper import wrap_tool_for_pydantic_ai
@@ -30,6 +34,10 @@ from app.modules.system.models.dept import Dept
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
+from app.modules.system.service.tenant_association_writer import (
+    replace_role_menus,
+    replace_user_roles,
+)
 from app.modules.system.service.user_role_assignment_service import (
     user_role_assignment_service,
 )
@@ -41,6 +49,7 @@ USER_EDIT_PERMISSION = "system:user:edit"
 def _menu(permission: str) -> Menu:
     marker = next_id()
     return Menu(
+        tenant_id=0,
         menu_id=marker,
         menu_name=f"task13-menu-{marker}",
         menu_type="F",
@@ -57,6 +66,7 @@ def _role(
 ) -> Role:
     marker = next_id()
     role = Role(
+        tenant_id=0,
         role_id=marker,
         role_name=f"task13-role-{marker}",
         role_code=code,
@@ -69,6 +79,7 @@ def _role(
 
 def _user(name: str, roles: list[Role]) -> User:
     return User(
+        tenant_id=0,
         user_id=next_id(),
         user_name=name,
         nickname=name,
@@ -84,6 +95,7 @@ def _tool_ctx(
     actor: User,
     perms: set[str] | None = None,
 ) -> AiToolContext:
+    bind_test_user(actor)
     return AiToolContext(
         user=actor,
         perms=(
@@ -93,6 +105,7 @@ def _tool_ctx(
         ),
         db=db,
         data_scope=DataScopeContext(
+            tenant_id=0,
             accessible_dept_ids=None,
             accessible_user_scope=None,
             filters=[],
@@ -100,6 +113,73 @@ def _tool_ctx(
         trace_id="tr_task13_user_role_assignment",
         tool_meta=MagicMock(),
     )
+
+
+async def _persist_graph(
+    db: AsyncSession,
+    *,
+    users: list[User],
+    roles: list[Role],
+    menus: list[Menu],
+    user_departments: dict[int, list[Dept]] | None = None,
+) -> None:
+    """Persist tenant-owned test graphs through explicit association writers."""
+    user_role_links = {user.user_id: list(user.roles) for user in users}
+    role_menu_links = {role.role_id: list(role.menus) for role in roles}
+    department_links = user_departments or {}
+    all_roles = {
+        role.role_id: role
+        for role in [*roles, *(role for user in users for role in user.roles)]
+    }
+    all_menus = {
+        menu.menu_id: menu
+        for menu in [
+            *menus,
+            *(menu for role in all_roles.values() for menu in role.menus),
+        ]
+    }
+    all_depts = {
+        dept.dept_id: dept
+        for departments in department_links.values()
+        for dept in departments
+    }
+    for user in users:
+        set_committed_value(user, "roles", [])
+        set_committed_value(user, "depts", [])
+    for role in all_roles.values():
+        set_committed_value(role, "menus", [])
+    db.add_all([*all_menus.values(), *all_roles.values(), *all_depts.values(), *users])
+    await db.flush()
+    tenant = tenant_context(tenant_id=0, actor_user_id=users[0].user_id)
+    for role in all_roles.values():
+        await replace_role_menus(
+            db,
+            role,
+            role_menu_links.get(role.role_id, []),
+            tenant=tenant,
+        )
+    for user in users:
+        await replace_user_roles(
+            db,
+            user,
+            user_role_links[user.user_id],
+            tenant=tenant,
+        )
+        departments = department_links.get(user.user_id, [])
+        if departments:
+            await db.execute(
+                insert(user_depts),
+                [
+                    {
+                        "tenant_id": 0,
+                        "user_id": user.user_id,
+                        "dept_id": dept.dept_id,
+                        "is_primary": "Y" if index == 0 else "N",
+                    }
+                    for index, dept in enumerate(departments)
+                ],
+            )
+        set_committed_value(user, "depts", departments)
 
 
 def test_role_lookup_and_update_roles_metadata_contracts() -> None:
@@ -166,17 +246,12 @@ async def test_role_lookup_returns_only_assignable_minimal_candidates(
         menus=[outside_permission],
     )
     actor = _user(f"task13-lookup-actor-{next_id()}", [actor_role])
-    db_session.add_all(
-        [
-            delegated_permission,
-            outside_permission,
-            actor_role,
-            assignable,
-            blocked,
-            actor,
-        ]
+    await _persist_graph(
+        db_session,
+        users=[actor],
+        roles=[actor_role, assignable, blocked],
+        menus=[delegated_permission, outside_permission],
     )
-    await db_session.flush()
     ctx = _tool_ctx(db_session, actor=actor)
 
     result = await system_ai_tools.user_role_lookup(
@@ -205,7 +280,7 @@ async def test_role_lookup_returns_only_assignable_minimal_candidates(
 async def test_role_lookup_projection_freezes_every_match_beyond_the_row_limit(
     db_session: AsyncSession,
 ) -> None:
-    actor = MagicMock(user_id=next_id(), user_name="task13-actor", roles=[])
+    actor = _user(f"task13-actor-{next_id()}", [])
     ctx = _tool_ctx(db_session, actor=actor)
     first = SimpleNamespace(
         role_id=901,
@@ -241,7 +316,7 @@ async def test_role_lookup_projection_freezes_every_match_beyond_the_row_limit(
 async def test_role_lookup_returns_an_explicit_zero_match_result(
     db_session: AsyncSession,
 ) -> None:
-    actor = MagicMock(user_id=next_id(), user_name="task13-actor", roles=[])
+    actor = _user(f"task13-actor-{next_id()}", [])
     ctx = _tool_ctx(db_session, actor=actor)
     page = SimpleNamespace(match_count=0, matched_role_ids=(), roles=())
 
@@ -278,7 +353,7 @@ async def test_role_lookup_rejects_invalid_query_or_limit(
     limit: int,
     error_code: str,
 ) -> None:
-    actor = MagicMock(user_id=next_id(), user_name="task13-actor", roles=[])
+    actor = _user(f"task13-actor-{next_id()}", [])
     ctx = _tool_ctx(db_session, actor=actor)
 
     with pytest.raises(BusinessRuleException) as exc_info:
@@ -308,19 +383,12 @@ async def test_user_lookup_returns_roles_only_when_complete_and_assignable(
     visible_target = _user(f"task13-current-visible-{next_id()}", [assignable])
     blocked_target = _user(f"task13-current-blocked-{next_id()}", [blocked])
     actor = _user(f"task13-current-actor-{next_id()}", [actor_role])
-    db_session.add_all(
-        [
-            delegated_permission,
-            outside_permission,
-            actor_role,
-            assignable,
-            blocked,
-            visible_target,
-            blocked_target,
-            actor,
-        ]
+    await _persist_graph(
+        db_session,
+        users=[visible_target, blocked_target, actor],
+        roles=[actor_role, assignable, blocked],
+        menus=[delegated_permission, outside_permission],
     )
-    await db_session.flush()
     ctx = _tool_ctx(db_session, actor=actor)
 
     visible = await system_ai_tools.user_lookup(
@@ -359,7 +427,7 @@ async def test_user_lookup_without_role_auth_keeps_legacy_shape(
     db_session: AsyncSession,
 ) -> None:
     target = _user(f"task13-legacy-lookup-{next_id()}", [])
-    actor = MagicMock(user_id=next_id(), user_name="task13-legacy-actor", roles=[])
+    actor = _user(f"task13-legacy-actor-{next_id()}", [])
     db_session.add(target)
     await db_session.flush()
     ctx = _tool_ctx(
@@ -395,6 +463,7 @@ async def test_user_lookup_hides_template_allowed_roles_when_live_scope_exceeds_
         menus=[delegated_permission],
     )
     actor_dept = Dept(
+        tenant_id=0,
         dept_id=next_id(),
         dept_name=f"task13-live-actor-{next_id()}",
         ancestors="0",
@@ -402,6 +471,7 @@ async def test_user_lookup_hides_template_allowed_roles_when_live_scope_exceeds_
         status=STATUS_ENABLED,
     )
     outside_dept = Dept(
+        tenant_id=0,
         dept_id=next_id(),
         dept_name=f"task13-live-outside-{next_id()}",
         ancestors="0",
@@ -409,21 +479,17 @@ async def test_user_lookup_hides_template_allowed_roles_when_live_scope_exceeds_
         status=STATUS_ENABLED,
     )
     actor = _user(f"task13-live-actor-{next_id()}", [actor_role])
-    actor.depts = [actor_dept]
     target = _user(f"task13-live-target-{next_id()}", [target_role])
-    target.depts = [actor_dept, outside_dept]
-    db_session.add_all(
-        [
-            delegated_permission,
-            actor_role,
-            target_role,
-            actor_dept,
-            outside_dept,
-            actor,
-            target,
-        ]
+    await _persist_graph(
+        db_session,
+        users=[actor, target],
+        roles=[actor_role, target_role],
+        menus=[delegated_permission],
+        user_departments={
+            actor.user_id: [actor_dept],
+            target.user_id: [actor_dept, outside_dept],
+        },
     )
-    await db_session.flush()
     ctx = _tool_ctx(db_session, actor=actor)
 
     result = await system_ai_tools.user_lookup(ctx, user_id=target.user_id)
@@ -445,7 +511,10 @@ async def test_update_roles_dry_run_rejects_invalid_complete_sets(
     role_ids: list[int],
     error_code: str,
 ) -> None:
-    ctx = MagicMock(user=MagicMock(user_id=6001))
+    ctx = MagicMock(
+        user=MagicMock(user_id=6001),
+        tenant=tenant_context(tenant_id=0, actor_user_id=6001),
+    )
 
     with patch.object(
         user_role_assignment_service,
@@ -473,7 +542,10 @@ async def test_update_roles_dry_run_freezes_sorted_ids_and_snapshot() -> None:
         new_display=("New A", "New B"),
         snapshot={"version": "task13-snapshot"},
     )
-    ctx = MagicMock(user=MagicMock(user_id=6001))
+    ctx = MagicMock(
+        user=MagicMock(user_id=6001),
+        tenant=tenant_context(tenant_id=0, actor_user_id=6001),
+    )
 
     with patch.object(
         user_role_assignment_service,
@@ -507,7 +579,7 @@ async def test_update_roles_dry_run_freezes_sorted_ids_and_snapshot() -> None:
 async def test_update_roles_executes_shared_policy_with_approved_snapshot(
     db_session: AsyncSession,
 ) -> None:
-    actor = MagicMock(user_id=next_id(), user_name="task13-actor", roles=[])
+    actor = _user(f"task13-actor-{next_id()}", [])
     target = _user(f"task13-execute-{next_id()}", [])
     db_session.add(target)
     await db_session.flush()
@@ -537,6 +609,7 @@ async def test_update_roles_executes_shared_policy_with_approved_snapshot(
         target_user_id=target.user_id,
         role_ids=[901],
         expected_snapshot=ctx.approved_business_snapshot,
+        tenant=ctx.tenant,
     )
     assert result.data == {
         "updated": 1,
@@ -588,6 +661,7 @@ async def test_update_roles_prepared_snapshot_rejects_business_drift(
         "business": {"version": "approved"},
     }
     action = SimpleNamespace(
+        tenant_id=0,
         execute_tool_name="user.update_roles",
         frozen_args=frozen_args,
         args_hash=canonical_payload_hash(frozen_args),
@@ -604,7 +678,11 @@ async def test_update_roles_prepared_snapshot_rejects_business_drift(
         create=True,
     ):
         with pytest.raises(BusinessRuleException) as exc_info:
-            await prepared_action_service.validate_snapshot(db_session, action)
+            await prepared_action_service.validate_snapshot(
+                db_session,
+                action,
+                tenant=tenant_context(tenant_id=0, actor_user_id=6001),
+            )
 
     assert exc_info.value.error_code == "AI_PREPARED_ACTION_SNAPSHOT_STALE"
 

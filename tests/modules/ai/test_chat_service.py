@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from tenant_helpers import bind_test_user, tenant_context
 
 from app.core.exceptions import AuthorizationException
 from app.modules.ai.agents.tools.registry import ToolRegistry
@@ -36,13 +37,15 @@ from app.utils.data_scope import DataScopeResolution
 
 
 def _principal() -> User:
-    return User(
+    user = User(
         user_id=999,
         tenant_id=0,
         user_name="chat-service-test",
         roles=[],
         depts=[],
     )
+    bind_test_user(user)
+    return user
 
 
 def _patch_sticky_manual(agent_code: str = "user_mgmt"):
@@ -73,6 +76,7 @@ def _patch_unbounded_scope(monkeypatch: pytest.MonkeyPatch) -> None:
         "resolve_data_scope",
         AsyncMock(
             return_value=DataScopeResolution(
+                tenant_id=0,
                 scope_kinds=frozenset({"1"}),
                 accessible_dept_ids=None,
                 accessible_user_scope=None,
@@ -131,7 +135,7 @@ class TestBuildChatDeps:
         # 超管 data_scope 全部可见
         assert deps.data_scope.accessible_dept_ids is None
         assert deps.data_scope.accessible_user_scope is None
-        assert deps.data_scope.filters == []
+        assert len(deps.data_scope.filters) == 1
 
     async def test_trace_id_auto_generated_format(
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
@@ -159,24 +163,18 @@ class TestBuildChatDeps:
             )
         assert deps.trace_id == "tr_custom_abc"
 
-    async def test_tenant_id_comes_from_server_resolver(
+    async def test_tenant_id_comes_from_bound_server_context(
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """客户端字段不参与 tenant 解析；ChatDeps 只接收服务端 resolver 结果。"""
         _patch_unbounded_scope(monkeypatch)
         mock_user = _principal()
 
-        with (
-            _patch_sticky_manual(),
-            patch(
-                "app.modules.ai.service.chat_service.resolve_tenant_id",
-                return_value=37,
-            ) as resolver,
-        ):
+        with _patch_sticky_manual():
             deps = await chat_service.build_chat_deps(db_session, mock_user)
 
-        resolver.assert_called_once_with(mock_user)
-        assert deps.tenant_id == 37
+        assert deps.tenant_id == 0
+        assert deps.tenant is mock_user._tenant_context
 
     async def test_agent_code_not_found_raises(
         self, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
@@ -224,6 +222,7 @@ async def test_revoked_sticky_agent_is_cleared_and_rerouted(
     from app.modules.system.models.user import User
 
     user = await db_session.scalar(select(User).where(User.user_name == "admin"))
+    bind_test_user(user)
     conversation = AiConversation(
         conversation_id=next_id(),
         user_id=user.user_id,
@@ -280,6 +279,7 @@ async def test_create_agent_preserves_explicit_falsy_model_ref() -> None:
             db,
             "",
             user_perms=set(),
+            tenant=tenant_context(),
             agent_config=SimpleNamespace(model_preference="provider:preferred"),
         )
 
@@ -313,6 +313,7 @@ async def _add_user(db: AsyncSession, *, user_id: int, user_name: str) -> None:
     db.add(
         User(
             user_id=user_id,
+            tenant_id=0,
             user_name=user_name,
             nickname=user_name,
             hashed_password="$2b$12$dummy",

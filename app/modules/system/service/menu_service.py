@@ -7,6 +7,8 @@ from app.core.exceptions import (
     InvalidParameterException,
     NotFoundException,
 )
+from app.core.tenant import TenantContext
+from app.core.tenant_scope import tenant_filter, tenant_select
 from app.modules.system.models.menu import Menu
 from app.modules.system.schemas.menu import MenuCreate, MenuQuery, MenuUpdate
 from app.utils.pagination import paginate
@@ -15,7 +17,9 @@ from app.utils.pagination import paginate
 class MenuService:
     """菜单业务逻辑服务"""
 
-    async def get_menu_list(self, db: AsyncSession, query: MenuQuery):
+    async def get_menu_list(
+        self, db: AsyncSession, query: MenuQuery, *, tenant: TenantContext
+    ):
         """
         获取菜单分页列表
 
@@ -31,12 +35,15 @@ class MenuService:
             db=db,
             model=Menu,
             query_params=query,
+            filters=[tenant_filter(Menu, tenant=tenant)],
             order_by=Menu.order.asc(),
         )
 
         return page_data
 
-    async def get_all_menus(self, db: AsyncSession) -> list[Menu]:
+    async def get_all_menus(
+        self, db: AsyncSession, *, tenant: TenantContext
+    ) -> list[Menu]:
         """
         获取所有启用的菜单列表（不分页）
 
@@ -47,12 +54,16 @@ class MenuService:
             菜单列表
         """
         stmt = (
-            select(Menu).where(Menu.status == STATUS_ENABLED).order_by(Menu.order.asc())
+            tenant_select(Menu, tenant=tenant)
+            .where(Menu.status == STATUS_ENABLED)
+            .order_by(Menu.order.asc())
         )
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
-    async def get_all_pages(self, db: AsyncSession) -> list[str]:
+    async def get_all_pages(
+        self, db: AsyncSession, *, tenant: TenantContext
+    ) -> list[str]:
         """
         获取所有页面路由名称
 
@@ -65,6 +76,7 @@ class MenuService:
         stmt = (
             select(Menu.route_name)
             .where(
+                Menu.tenant_id == tenant.tenant_id,
                 Menu.status == STATUS_ENABLED,
                 Menu.menu_type == MENU_TYPE_MENU,
             )
@@ -73,7 +85,9 @@ class MenuService:
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
-    async def create_menu(self, db: AsyncSession, menu_in: MenuCreate) -> Menu:
+    async def create_menu(
+        self, db: AsyncSession, menu_in: MenuCreate, *, tenant: TenantContext
+    ) -> Menu:
         """
         创建新菜单
 
@@ -86,7 +100,7 @@ class MenuService:
         """
         # 排除 buttons 和 query 字段，这些不是 Menu 模型的字段
         menu_data = menu_in.model_dump(exclude={"buttons", "query"})
-        new_menu = Menu(**menu_data)
+        new_menu = Menu(tenant_id=tenant.tenant_id, **menu_data)
         db.add(new_menu)
 
         # 如果有按钮，需要保存到 flush 后获取 menu_id
@@ -97,6 +111,7 @@ class MenuService:
             new_buttons = []
             for btn in menu_in.buttons:
                 button_menu = Menu(
+                    tenant_id=tenant.tenant_id,
                     menu_name=btn.desc,
                     permission=btn.code,
                     menu_type=MENU_TYPE_BUTTON,
@@ -112,7 +127,12 @@ class MenuService:
         return new_menu
 
     async def update_menu(
-        self, db: AsyncSession, menu_id: int, menu_in: MenuUpdate
+        self,
+        db: AsyncSession,
+        menu_id: int,
+        menu_in: MenuUpdate,
+        *,
+        tenant: TenantContext,
     ) -> Menu:
         """
         更新菜单信息
@@ -128,7 +148,9 @@ class MenuService:
         Raises:
             NotFoundException: 菜单不存在
         """
-        menu = await db.get(Menu, menu_id)
+        menu = await db.scalar(
+            tenant_select(Menu, tenant=tenant).where(Menu.menu_id == menu_id)
+        )
         if not menu:
             raise NotFoundException("菜单")
 
@@ -139,7 +161,9 @@ class MenuService:
         # 更新按钮权限：按 permission 业务键增量更新，避免删除-重建破坏 role_menus 关联
         if menu_in.buttons is not None:
             existing_stmt = select(Menu).where(
-                Menu.parent_id == menu_id, Menu.menu_type == MENU_TYPE_BUTTON
+                Menu.tenant_id == tenant.tenant_id,
+                Menu.parent_id == menu_id,
+                Menu.menu_type == MENU_TYPE_BUTTON,
             )
             existing_result = await db.execute(existing_stmt)
             existing_by_code = {
@@ -153,6 +177,7 @@ class MenuService:
             if to_delete:
                 await db.execute(
                     delete(Menu).where(
+                        Menu.tenant_id == tenant.tenant_id,
                         Menu.parent_id == menu_id,
                         Menu.menu_type == MENU_TYPE_BUTTON,
                         Menu.permission.in_(to_delete),
@@ -167,6 +192,7 @@ class MenuService:
                 else:
                     db.add(
                         Menu(
+                            tenant_id=tenant.tenant_id,
                             menu_name=btn.desc,
                             permission=btn.code,
                             menu_type=MENU_TYPE_BUTTON,
@@ -178,7 +204,9 @@ class MenuService:
 
         return menu
 
-    async def delete_menu(self, db: AsyncSession, menu_id: int) -> None:
+    async def delete_menu(
+        self, db: AsyncSession, menu_id: int, *, tenant: TenantContext
+    ) -> None:
         """
         删除菜单
 
@@ -191,18 +219,22 @@ class MenuService:
             BusinessRuleException: 存在子菜单，不能删除
         """
         # 检查是否有子菜单
-        child_stmt = select(Menu).where(Menu.parent_id == menu_id)
+        child_stmt = tenant_select(Menu, tenant=tenant).where(Menu.parent_id == menu_id)
         child = (await db.execute(child_stmt)).first()
         if child:
             raise BusinessRuleException("请先删除子菜单")
 
-        menu = await db.get(Menu, menu_id)
+        menu = await db.scalar(
+            tenant_select(Menu, tenant=tenant).where(Menu.menu_id == menu_id)
+        )
         if not menu:
             raise NotFoundException("菜单")
 
         await db.delete(menu)
 
-    async def batch_delete_menus(self, db: AsyncSession, ids: list[int]) -> int:
+    async def batch_delete_menus(
+        self, db: AsyncSession, ids: list[int], *, tenant: TenantContext
+    ) -> int:
         """
         批量删除菜单
 
@@ -222,13 +254,32 @@ class MenuService:
 
         # 批量检查子菜单逻辑 (简单处理：如果选中的菜单中有任何一个包含不在选中列表里的子菜单，则禁止)
         check_stmt = select(Menu).where(
-            and_(Menu.parent_id.in_(ids), ~Menu.menu_id.in_(ids))
+            and_(
+                Menu.tenant_id == tenant.tenant_id,
+                Menu.parent_id.in_(ids),
+                ~Menu.menu_id.in_(ids),
+            )
         )
         has_child = (await db.execute(check_stmt)).first()
         if has_child:
             raise BusinessRuleException("选中的菜单中包含未选中的子菜单，请先处理")
 
-        stmt = delete(Menu).where(Menu.menu_id.in_(ids))
+        matched = set(
+            (
+                await db.execute(
+                    select(Menu.menu_id).where(
+                        Menu.tenant_id == tenant.tenant_id,
+                        Menu.menu_id.in_(set(ids)),
+                    )
+                )
+            ).scalars()
+        )
+        if matched != set(ids):
+            raise NotFoundException("菜单")
+        stmt = delete(Menu).where(
+            Menu.tenant_id == tenant.tenant_id,
+            Menu.menu_id.in_(matched),
+        )
         result = await db.execute(stmt)
 
         return result.rowcount

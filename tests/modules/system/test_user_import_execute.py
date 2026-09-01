@@ -57,6 +57,14 @@ from app.modules.system.service.user_import_service import (
     batch_create_users_from_records,
     dry_run_import_users,
 )
+from tests.tenant_helpers import tenant_context
+
+TENANT = tenant_context()
+
+
+def _tenant(user: User):
+    return tenant_context(actor_user_id=int(user.user_id))
+
 
 # ========== helpers ==========
 
@@ -69,6 +77,7 @@ def _make_dept(
 ) -> Dept:
     return Dept(
         dept_id=dept_id,
+        tenant_id=TENANT.tenant_id,
         parent_id=parent_id,
         ancestors=ancestors,
         dept_name=name,
@@ -86,6 +95,7 @@ def _make_role(
 ) -> Role:
     return Role(
         role_id=role_id,
+        tenant_id=TENANT.tenant_id,
         role_code=code,
         role_name=name,
         data_scope=data_scope,
@@ -102,6 +112,7 @@ def _make_user(
 ) -> User:
     return User(
         user_id=user_id,
+        tenant_id=TENANT.tenant_id,
         user_name=user_name,
         hashed_password="x",
         status=status,
@@ -166,11 +177,15 @@ async def _seed_default_password(
     transaction isolation; DELETE first to keep the helper idempotent.
     """
     await db_session.execute(
-        _delete(Config).where(Config.config_key == "auth:default_password")
+        _delete(Config).where(
+            Config.tenant_id == TENANT.tenant_id,
+            Config.config_key == "auth:default_password",
+        )
     )
     db_session.add(
         Config(
             config_id=999_001,
+            tenant_id=TENANT.tenant_id,
             config_name="默认密码",
             config_key="auth:default_password",
             config_value=password,
@@ -197,6 +212,7 @@ async def _setup_preview(
         db_session,
         records,
         operator,
+        tenant=_tenant(operator),
         file_bytes=file_bytes,
         filename="test.xlsx",
         reason=reason,
@@ -209,7 +225,10 @@ async def _setup_preview(
 async def _fetch_super_role(db_session) -> Role:
     return (
         await db_session.execute(
-            _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+            _select(Role).where(
+                Role.tenant_id == TENANT.tenant_id,
+                Role.role_code == SUPER_ADMIN_ROLE_CODE,
+            )
         )
     ).scalar_one()
 
@@ -218,7 +237,10 @@ async def _count_users_by_prefix(db_session, prefix: str) -> int:
     rows = (
         (
             await db_session.execute(
-                _select(User).where(User.user_name.like(f"{prefix}%"))
+                _select(User).where(
+                    User.tenant_id == TENANT.tenant_id,
+                    User.user_name.like(f"{prefix}%"),
+                )
             )
         )
         .scalars()
@@ -257,6 +279,7 @@ class TestTripleValidation:
             filename="test.xlsx",
             reason="QA execute test",
             current_user=operator,
+            tenant=_tenant(operator),
             file_storage=file_storage,
         )
 
@@ -285,6 +308,7 @@ class TestTripleValidation:
                 filename="test.xlsx",
                 reason="QA execute test",
                 current_user=operator,
+                tenant=_tenant(operator),
                 file_storage=file_storage,
             )
         assert exc.value.error_code == "AI_IMPORT_PREVIEW_INVALID"
@@ -311,6 +335,7 @@ class TestTripleValidation:
                 filename="test.xlsx",
                 reason="QA execute test",
                 current_user=operator,
+                tenant=_tenant(operator),
                 file_storage=file_storage,
             )
         assert exc.value.error_code == "AI_IMPORT_PREVIEW_INVALID"
@@ -346,6 +371,7 @@ class TestTripleValidation:
                 filename="test.xlsx",
                 reason="QA execute test",
                 current_user=operator,
+                tenant=_tenant(operator),
                 file_storage=file_storage,
             )
         assert exc.value.error_code == "AI_IMPORT_PREVIEW_INVALID"
@@ -373,6 +399,7 @@ class TestTripleValidation:
                 filename="test.xlsx",
                 reason="QA execute test",
                 current_user=operator_b,  # 不同 operator
+                tenant=_tenant(operator_b),
                 file_storage=file_storage,
             )
         assert exc.value.error_code == "AI_IMPORT_PREVIEW_INVALID"
@@ -405,6 +432,7 @@ class TestExecuteIdempotency:
             filename="test.xlsx",
             reason="QA execute test",
             current_user=operator,
+            tenant=_tenant(operator),
             file_storage=file_storage,
         )
         assert first.idempotent_replay is False
@@ -419,6 +447,7 @@ class TestExecuteIdempotency:
             filename="test.xlsx",
             reason="QA execute test",
             current_user=operator,
+            tenant=_tenant(operator),
             file_storage=file_storage,
         )
         assert second.idempotent_replay is True
@@ -451,6 +480,7 @@ class TestExecuteIdempotency:
                 filename="test.xlsx",
                 reason="QA execute test",
                 current_user=operator,
+                tenant=_tenant(operator),
                 file_storage=file_storage,
             )
         assert exc.value.error_code == "AI_IMPORT_ALREADY_EXECUTED"
@@ -478,6 +508,7 @@ class TestExecuteIdempotency:
                 filename="test.xlsx",
                 reason="QA execute test",
                 current_user=operator,
+                tenant=_tenant(operator),
                 file_storage=file_storage,
             )
         assert exc.value.error_code == "AI_IMPORT_ALREADY_EXECUTED"
@@ -505,7 +536,10 @@ class TestChunkSavepoint:
         # 改 sys_config.auth:default_password 为可识别值
         config_row = (
             await db_session.execute(
-                _select(Config).where(Config.config_key == "auth:default_password")
+                _select(Config).where(
+                    Config.tenant_id == TENANT.tenant_id,
+                    Config.config_key == "auth:default_password",
+                )
             )
         ).scalar_one()
         config_row.config_value = "MyInitPwd-999"
@@ -519,11 +553,17 @@ class TestChunkSavepoint:
             filename="test.xlsx",
             reason="QA execute test",
             current_user=operator,
+            tenant=_tenant(operator),
             file_storage=file_storage,
         )
 
         created = (
-            await db_session.execute(_select(User).where(User.user_name == "QA_PWD_U1"))
+            await db_session.execute(
+                _select(User).where(
+                    User.tenant_id == TENANT.tenant_id,
+                    User.user_name == "QA_PWD_U1",
+                )
+            )
         ).scalar_one()
         assert verify_password("MyInitPwd-999", created.hashed_password)
 
@@ -554,6 +594,7 @@ class TestChunkSavepoint:
             filename="test.xlsx",
             reason="QA execute test",
             current_user=operator,
+            tenant=_tenant(operator),
             file_storage=file_storage,
         )
 
@@ -589,6 +630,7 @@ class TestChunkSavepoint:
             filename="test.xlsx",
             reason="QA execute test",
             current_user=operator,
+            tenant=_tenant(operator),
             file_storage=file_storage,
         )
 
@@ -601,7 +643,8 @@ class TestChunkSavepoint:
         db_batch = (
             await db_session.execute(
                 _select(UserImportBatch).where(
-                    UserImportBatch.batch_id == batch.batch_id
+                    UserImportBatch.tenant_id == TENANT.tenant_id,
+                    UserImportBatch.batch_id == batch.batch_id,
                 )
             )
         ).scalar_one()
@@ -632,6 +675,7 @@ class TestChunkSavepoint:
             filename="test.xlsx",
             reason="QA execute test",
             current_user=operator,
+            tenant=_tenant(operator),
             file_storage=file_storage,
         )
 
@@ -652,6 +696,7 @@ class TestOnConflict:
         operator = _make_user(9601, "QA_EXEC_SK", [super_role], [dept])
         existing_user = User(
             user_id=9610,
+            tenant_id=TENANT.tenant_id,
             user_name="QA_SK_EXISTING",
             hashed_password="x",
             status="1",
@@ -673,6 +718,7 @@ class TestOnConflict:
             filename="test.xlsx",
             reason="QA execute test",
             current_user=operator,
+            tenant=_tenant(operator),
             file_storage=file_storage,
             on_conflict="skip",
         )
@@ -690,6 +736,7 @@ class TestOnConflict:
         operator = _make_user(9602, "QA_EXEC_FF_OP", [super_role], [dept])
         existing_user = User(
             user_id=9620,
+            tenant_id=TENANT.tenant_id,
             user_name="QA_FF_EXISTING",
             hashed_password="x",
             status="1",
@@ -713,6 +760,7 @@ class TestOnConflict:
             filename="test.xlsx",
             reason="QA execute test",
             current_user=operator,
+            tenant=_tenant(operator),
             file_storage=file_storage,
             on_conflict="fail_fast",
         )
@@ -752,6 +800,7 @@ class TestBatchLog:
             filename="test.xlsx",
             reason="QA execute test",
             current_user=operator,
+            tenant=_tenant(operator),
             file_storage=file_storage,
         )
 
@@ -759,7 +808,10 @@ class TestBatchLog:
             (
                 await db_session.execute(
                     _select(UserImportBatchLog)
-                    .where(UserImportBatchLog.batch_id == batch.batch_id)
+                    .where(
+                        UserImportBatchLog.tenant_id == TENANT.tenant_id,
+                        UserImportBatchLog.batch_id == batch.batch_id,
+                    )
                     .order_by(UserImportBatchLog.created_at)
                 )
             )
@@ -801,13 +853,15 @@ class TestStatusTransition:
             filename="test.xlsx",
             reason="QA execute test",
             current_user=operator,
+            tenant=_tenant(operator),
             file_storage=file_storage,
         )
 
         db_batch = (
             await db_session.execute(
                 _select(UserImportBatch).where(
-                    UserImportBatch.batch_id == batch.batch_id
+                    UserImportBatch.tenant_id == TENANT.tenant_id,
+                    UserImportBatch.batch_id == batch.batch_id,
                 )
             )
         ).scalar_one()
@@ -839,13 +893,15 @@ class TestStatusTransition:
             filename="test.xlsx",
             reason="QA execute test",
             current_user=operator,
+            tenant=_tenant(operator),
             file_storage=file_storage,
         )
 
         db_batch = (
             await db_session.execute(
                 _select(UserImportBatch).where(
-                    UserImportBatch.batch_id == batch.batch_id
+                    UserImportBatch.tenant_id == TENANT.tenant_id,
+                    UserImportBatch.batch_id == batch.batch_id,
                 )
             )
         ).scalar_one()
@@ -868,7 +924,10 @@ class TestSuperAdminBypass:
         any_role = _make_role(8702, "QA_R_ANY_EXEC", "QA-任意角色-Exec")
         admin_user = (
             await db_session.execute(
-                _select(User).where(User.user_name == ADMIN_USERNAME)
+                _select(User).where(
+                    User.tenant_id == TENANT.tenant_id,
+                    User.user_name == ADMIN_USERNAME,
+                )
             )
         ).scalar_one()
         db_session.add_all([dept, any_role])
@@ -892,6 +951,7 @@ class TestSuperAdminBypass:
             filename="test.xlsx",
             reason="QA execute test",
             current_user=admin_user,
+            tenant=_tenant(admin_user),
             file_storage=file_storage,
         )
 
@@ -900,7 +960,10 @@ class TestSuperAdminBypass:
         # 用户绑定到 any_role
         created = (
             await db_session.execute(
-                _select(User).where(User.user_name == "QA_SA_EXEC_U1")
+                _select(User).where(
+                    User.tenant_id == TENANT.tenant_id,
+                    User.user_name == "QA_SA_EXEC_U1",
+                )
             )
         ).scalar_one()
         assert any(r.role_code == "QA_R_ANY_EXEC" for r in created.roles)
@@ -912,7 +975,12 @@ async def test_execute_without_role_input_assigns_fixed_default_role(
     """A new imported user without an explicit role must receive fixed R_USER."""
     dept = _make_dept(8791, "QA-Exec-Dept-Default-Role")
     admin_user = (
-        await db_session.execute(_select(User).where(User.user_name == ADMIN_USERNAME))
+        await db_session.execute(
+            _select(User).where(
+                User.tenant_id == TENANT.tenant_id,
+                User.user_name == ADMIN_USERNAME,
+            )
+        )
     ).scalar_one()
     db_session.add(dept)
     await db_session.flush()
@@ -934,13 +1002,17 @@ async def test_execute_without_role_input_assigns_fixed_default_role(
         filename="test.xlsx",
         reason="QA execute test",
         current_user=admin_user,
+        tenant=_tenant(admin_user),
         file_storage=file_storage,
     )
 
     created = (
         await db_session.execute(
             _select(User)
-            .where(User.user_name == "QA_DEF_ROLE_U1")
+            .where(
+                User.tenant_id == TENANT.tenant_id,
+                User.user_name == "QA_DEF_ROLE_U1",
+            )
             .options(selectinload(User.roles))
         )
     ).scalar_one()
@@ -954,6 +1026,7 @@ async def test_execute_rejects_the_whole_batch_when_one_role_is_unauthorized(
     dept = _make_dept(next_id(), f"QA-Atomic-Dept-{next_id()}")
     import_menu = Menu(
         menu_id=next_id(),
+        tenant_id=TENANT.tenant_id,
         menu_name=f"QA import {next_id()}",
         menu_type="F",
         permission="system:user:import",
@@ -961,6 +1034,7 @@ async def test_execute_rejects_the_whole_batch_when_one_role_is_unauthorized(
     )
     role_auth_menu = Menu(
         menu_id=next_id(),
+        tenant_id=TENANT.tenant_id,
         menu_name=f"QA role auth {next_id()}",
         menu_type="F",
         permission=USER_ROLE_AUTH_PERMISSION,
@@ -968,6 +1042,7 @@ async def test_execute_rejects_the_whole_batch_when_one_role_is_unauthorized(
     )
     dept_list_menu = Menu(
         menu_id=next_id(),
+        tenant_id=TENANT.tenant_id,
         menu_name=f"QA dept list {next_id()}",
         menu_type="F",
         permission="system:dept:list",
@@ -975,6 +1050,7 @@ async def test_execute_rejects_the_whole_batch_when_one_role_is_unauthorized(
     )
     delegated_menu = Menu(
         menu_id=next_id(),
+        tenant_id=TENANT.tenant_id,
         menu_name=f"QA delegated {next_id()}",
         menu_type="F",
         permission=f"qa:delegated:{next_id()}:read",
@@ -982,6 +1058,7 @@ async def test_execute_rejects_the_whole_batch_when_one_role_is_unauthorized(
     )
     outside_menu = Menu(
         menu_id=next_id(),
+        tenant_id=TENANT.tenant_id,
         menu_name=f"QA outside {next_id()}",
         menu_type="F",
         permission=f"qa:outside:{next_id()}:read",
@@ -1050,6 +1127,7 @@ async def test_execute_rejects_the_whole_batch_when_one_role_is_unauthorized(
         filename="test.xlsx",
         reason="QA execute test",
         current_user=operator,
+        tenant=_tenant(operator),
         file_storage=file_storage,
     )
 
@@ -1057,7 +1135,8 @@ async def test_execute_rejects_the_whole_batch_when_one_role_is_unauthorized(
         (
             await db_session.execute(
                 _select(User).where(
-                    User.user_name.in_(["QA_ATOMIC_OK", "QA_ATOMIC_NO"])
+                    User.tenant_id == TENANT.tenant_id,
+                    User.user_name.in_(["QA_ATOMIC_OK", "QA_ATOMIC_NO"]),
                 )
             )
         ).scalars()
@@ -1122,6 +1201,7 @@ async def test_import_lock_rejects_a_reference_that_resolves_after_prelock(
             [record],
             SimpleNamespace(user_id=42),
             has_role_column=False,
+            tenant=tenant_context(actor_user_id=42),
         )
 
     assert exc_info.value.error_code == "AUTHORIZATION_SNAPSHOT_STALE"
@@ -1174,6 +1254,7 @@ async def test_import_classification_rejects_duplicate_existing_targets(
         SimpleNamespace(user_id=42),
         has_role_column=True,
         resolutions=resolutions,
+        tenant=tenant_context(actor_user_id=42),
     )
 
     assert new == []
@@ -1227,6 +1308,7 @@ class TestConcurrentExecute:
                 filename="test.xlsx",
                 reason="QA execute test",
                 current_user=operator,
+                tenant=_tenant(operator),
                 file_storage=file_storage,
             )
 
@@ -1284,6 +1366,7 @@ class TestConcurrentExecute:
                 filename="test.xlsx",
                 reason="QA execute test",
                 current_user=operator,
+                tenant=_tenant(operator),
                 file_storage=file_storage,
             )
         assert exc.value.error_code == "AI_IMPORT_BATCH_RUNNING"
@@ -1320,6 +1403,7 @@ class TestConcurrentExecute:
                 filename="test.xlsx",
                 reason="QA execute test",
                 current_user=operator,
+                tenant=_tenant(operator),
                 file_storage=file_storage,
             )
         assert exc.value.error_code == "AI_IMPORT_ALREADY_EXECUTED"
@@ -1367,6 +1451,7 @@ class TestRedisCacheFallback:
             filename="test.xlsx",
             reason="QA execute test",
             current_user=operator,
+            tenant=_tenant(operator),
             file_storage=file_storage,
         )
 
@@ -1412,6 +1497,7 @@ class TestRedisCacheFallback:
             filename="test.xlsx",
             reason="QA execute test",
             current_user=operator,
+            tenant=_tenant(operator),
             file_storage=file_storage,
         )
 
@@ -1462,6 +1548,7 @@ class TestBatchLogAdvanced:
             filename="test.xlsx",
             reason="QA execute test",
             current_user=operator,
+            tenant=_tenant(operator),
             file_storage=file_storage,
         )
 
@@ -1469,7 +1556,10 @@ class TestBatchLogAdvanced:
             (
                 await db_session.execute(
                     _select(UserImportBatchLog)
-                    .where(UserImportBatchLog.batch_id == batch.batch_id)
+                    .where(
+                        UserImportBatchLog.tenant_id == TENANT.tenant_id,
+                        UserImportBatchLog.batch_id == batch.batch_id,
+                    )
                     .order_by(UserImportBatchLog.created_at, UserImportBatchLog.log_id)
                 )
             )
@@ -1540,6 +1630,7 @@ class TestBatchLogAdvanced:
             filename="test.xlsx",
             reason="QA execute test",
             current_user=operator,
+            tenant=_tenant(operator),
             file_storage=file_storage,
         )
 
@@ -1553,7 +1644,10 @@ class TestBatchLogAdvanced:
             (
                 await db_session.execute(
                     _select(UserImportBatchLog)
-                    .where(UserImportBatchLog.batch_id == batch.batch_id)
+                    .where(
+                        UserImportBatchLog.tenant_id == TENANT.tenant_id,
+                        UserImportBatchLog.batch_id == batch.batch_id,
+                    )
                     .order_by(UserImportBatchLog.created_at, UserImportBatchLog.log_id)
                 )
             )

@@ -6,6 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import cacheable
 from app.core.exceptions import DuplicateException, NotFoundException
+from app.core.tenant import TenantContext, TenantLocatorContext
+from app.core.tenant_scope import tenant_filter, tenant_select
 from app.modules.system.models.config import Config
 from app.modules.system.schemas.config import (
     ConfigCreate,
@@ -29,7 +31,9 @@ EXCEL_HEADERS = [
 class ConfigService:
     """系统配置业务逻辑服务"""
 
-    async def get_list(self, db: AsyncSession, query: ConfigQuery):
+    async def get_list(
+        self, db: AsyncSession, query: ConfigQuery, *, tenant: TenantContext
+    ):
         """获取系统配置分页列表"""
         field_mapping = {
             "config_name": ("config_name", "contains"),
@@ -38,6 +42,7 @@ class ConfigService:
             "status": ("status", "=="),
         }
         filters = build_filters(Config, field_mapping, **query.model_dump())
+        filters.insert(0, tenant_filter(Config, tenant=tenant))
 
         page_data = await paginate(
             db=db,
@@ -49,36 +54,56 @@ class ConfigService:
 
         return page_data
 
-    @cacheable(key="config:public", ttl=300)
-    async def get_public_configs(self, db: AsyncSession) -> dict[str, str]:
+    @cacheable(key="tenant:{tenant.tenant_id}:config:public", ttl=300)
+    async def get_public_configs(
+        self, db: AsyncSession, *, tenant: TenantLocatorContext
+    ) -> dict[str, str]:
         """获取公开配置（无需鉴权），返回 {key: value} 字典"""
         result = await db.execute(
             select(Config)
-            .where(Config.is_public == True, Config.status == "1")  # noqa: E712
+            .where(
+                Config.tenant_id == tenant.tenant_id,
+                Config.is_public == True,  # noqa: E712
+                Config.status == "1",
+            )
             .order_by(Config.config_group.asc(), Config.config_key.asc())
         )
         return {c.config_key: c.config_value for c in result.scalars().all()}
 
-    @cacheable(key="config:key:{key}", ttl=300)
+    @cacheable(key="tenant:{tenant.tenant_id}:config:key:{key}", ttl=300)
     async def get_value(
-        self, db: AsyncSession, key: str, default: str | None = None
+        self,
+        db: AsyncSession,
+        key: str,
+        default: str | None = None,
+        *,
+        tenant: TenantContext | TenantLocatorContext,
     ) -> str | None:
         """根据 key 获取配置值，支持默认值"""
         result = await db.execute(
             select(Config.config_value).where(
-                Config.config_key == key, Config.status == "1"
+                Config.tenant_id == tenant.tenant_id,
+                Config.config_key == key,
+                Config.status == "1",
             )
         )
         value = result.scalar_one_or_none()
         return value if value is not None else default
 
-    async def get_bool(self, db: AsyncSession, key: str, default: bool = False) -> bool:
+    async def get_bool(
+        self,
+        db: AsyncSession,
+        key: str,
+        default: bool = False,
+        *,
+        tenant: TenantContext | TenantLocatorContext,
+    ) -> bool:
         """读取布尔型配置。
 
         识别的真值：true / 1 / yes / on（大小写不敏感）。
         其他值（包括 None）按 default 处理。
         """
-        value = await self.get_value(db, key)
+        value = await self.get_value(db, key, tenant=tenant)
         if value is None:
             return default
         return value.strip().lower() in ("true", "1", "yes", "on")
@@ -88,18 +113,29 @@ class ConfigService:
         db: AsyncSession,
         key: str,
         default: bool = False,
+        *,
+        tenant: TenantContext,
     ) -> bool:
         """Read and lock a policy boolean without using the shared cache."""
         config = await db.scalar(
-            select(Config).where(Config.config_key == key).with_for_update()
+            tenant_select(Config, tenant=tenant)
+            .where(Config.config_key == key)
+            .with_for_update()
         )
         if config is None or config.status != "1":
             return default
         return config.config_value.strip().lower() in ("true", "1", "yes", "on")
 
-    async def get_int(self, db: AsyncSession, key: str, default: int = 0) -> int:
+    async def get_int(
+        self,
+        db: AsyncSession,
+        key: str,
+        default: int = 0,
+        *,
+        tenant: TenantContext | TenantLocatorContext,
+    ) -> int:
         """读取整型配置。无法解析时返回 default。"""
-        value = await self.get_value(db, key)
+        value = await self.get_value(db, key, tenant=tenant)
         if value is None:
             return default
         try:
@@ -107,34 +143,55 @@ class ConfigService:
         except (ValueError, TypeError):
             return default
 
-    @cacheable(key="config:group:{group}", ttl=300)
-    async def get_values_by_group(self, db: AsyncSession, group: str) -> dict[str, str]:
+    @cacheable(key="tenant:{tenant.tenant_id}:config:group:{group}", ttl=300)
+    async def get_values_by_group(
+        self,
+        db: AsyncSession,
+        group: str,
+        *,
+        tenant: TenantContext | TenantLocatorContext,
+    ) -> dict[str, str]:
         """根据分组获取配置，返回 {key: value} 字典"""
         result = await db.execute(
             select(Config)
-            .where(Config.config_group == group, Config.status == "1")
+            .where(
+                Config.tenant_id == tenant.tenant_id,
+                Config.config_group == group,
+                Config.status == "1",
+            )
             .order_by(Config.config_key.asc())
         )
         return {c.config_key: c.config_value for c in result.scalars().all()}
 
-    async def create(self, db: AsyncSession, config_in: ConfigCreate) -> Config:
+    async def create(
+        self, db: AsyncSession, config_in: ConfigCreate, *, tenant: TenantContext
+    ) -> Config:
         """创建系统配置"""
         # 检查键唯一性
         check = await db.execute(
-            select(Config).where(Config.config_key == config_in.config_key)
+            tenant_select(Config, tenant=tenant).where(
+                Config.config_key == config_in.config_key
+            )
         )
         if check.scalars().first():
             raise DuplicateException("配置键", config_in.config_key)
 
-        new_config = Config(**config_in.model_dump())
+        new_config = Config(tenant_id=tenant.tenant_id, **config_in.model_dump())
         db.add(new_config)
         return new_config
 
     async def update(
-        self, db: AsyncSession, config_id: int, config_in: ConfigUpdate
+        self,
+        db: AsyncSession,
+        config_id: int,
+        config_in: ConfigUpdate,
+        *,
+        tenant: TenantContext,
     ) -> Config:
         """更新系统配置"""
-        config = await db.get(Config, config_id)
+        config = await db.scalar(
+            tenant_select(Config, tenant=tenant).where(Config.config_id == config_id)
+        )
         if not config:
             raise NotFoundException("系统配置")
 
@@ -145,7 +202,9 @@ class ConfigService:
             and update_data["config_key"] != config.config_key
         ):
             check = await db.execute(
-                select(Config).where(Config.config_key == update_data["config_key"])
+                tenant_select(Config, tenant=tenant).where(
+                    Config.config_key == update_data["config_key"]
+                )
             )
             if check.scalars().first():
                 raise DuplicateException("配置键", update_data["config_key"])
@@ -155,25 +214,38 @@ class ConfigService:
 
         return config
 
-    async def delete(self, db: AsyncSession, config_id: int) -> None:
+    async def delete(
+        self, db: AsyncSession, config_id: int, *, tenant: TenantContext
+    ) -> None:
         """删除系统配置"""
-        config = await db.get(Config, config_id)
+        config = await db.scalar(
+            tenant_select(Config, tenant=tenant).where(Config.config_id == config_id)
+        )
         if not config:
             raise NotFoundException("系统配置")
 
         await db.delete(config)
 
-    async def batch_delete(self, db: AsyncSession, ids: list[int]) -> int:
+    async def batch_delete(
+        self, db: AsyncSession, ids: list[int], *, tenant: TenantContext
+    ) -> int:
         """批量删除系统配置"""
-        result = await db.execute(select(Config).where(Config.config_id.in_(ids)))
+        result = await db.execute(
+            tenant_select(Config, tenant=tenant).where(Config.config_id.in_(ids))
+        )
         config_list = result.scalars().all()
+
+        if {int(config.config_id) for config in config_list} != set(ids):
+            raise NotFoundException("系统配置")
 
         for config in config_list:
             await db.delete(config)
 
         return len(config_list)
 
-    async def export_configs(self, db: AsyncSession, query: ConfigQuery) -> BytesIO:
+    async def export_configs(
+        self, db: AsyncSession, query: ConfigQuery, *, tenant: TenantContext
+    ) -> BytesIO:
         """导出系统配置为 Excel"""
         field_mapping = {
             "config_name": ("config_name", "contains"),
@@ -182,6 +254,7 @@ class ConfigService:
             "status": ("status", "=="),
         }
         filters = build_filters(Config, field_mapping, **query.model_dump())
+        filters.insert(0, tenant_filter(Config, tenant=tenant))
         stmt = select(Config).where(*filters) if filters else select(Config)
         result = await db.execute(
             stmt.order_by(Config.config_group.asc(), Config.config_key.asc())
@@ -212,7 +285,11 @@ class ConfigService:
         return buf
 
     async def import_configs(
-        self, db: AsyncSession, file_bytes: bytes
+        self,
+        db: AsyncSession,
+        file_bytes: bytes,
+        *,
+        tenant: TenantContext,
     ) -> dict[str, int]:
         """从 Excel 导入系统配置，返回 {success: n, skipped: n}"""
         wb = load_workbook(filename=BytesIO(file_bytes), read_only=True)
@@ -221,7 +298,9 @@ class ConfigService:
         wb.close()
 
         # 查询已存在的 key
-        existing = await db.execute(select(Config.config_key))
+        existing = await db.execute(
+            select(Config.config_key).where(Config.tenant_id == tenant.tenant_id)
+        )
         existing_keys = set(existing.scalars().all())
 
         success = 0
@@ -235,6 +314,7 @@ class ConfigService:
                 continue
 
             config = Config(
+                tenant_id=tenant.tenant_id,
                 config_name=str(row[0] or ""),
                 config_key=config_key,
                 config_value=str(row[2] or ""),

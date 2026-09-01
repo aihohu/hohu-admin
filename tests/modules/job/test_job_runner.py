@@ -47,6 +47,7 @@ async def _seed_enabled_job(
 ) -> SysJob:
     """seed 一条 status=enabled / concurrent=允许 的 SysJob，让 _do_execute 走主路径。"""
     job = SysJob(
+        tenant_id=0,
         job_id=job_id,
         job_name=f"test_runner_{job_key}",
         job_key=job_key,
@@ -94,11 +95,11 @@ class TestDoExecuteWritesRunnerIdAndPythonNow:
         job_id = 90001
         await _seed_enabled_job(db_session, job_id=job_id, job_key=job_key)
 
-        await _do_execute(job_id)
+        await _do_execute(0, job_id)
 
         stmt = (
             select(SysJobLog)
-            .where(SysJobLog.job_id == job_id)
+            .where(SysJobLog.tenant_id == 0, SysJobLog.job_id == job_id)
             .order_by(SysJobLog.job_log_id.desc())
             .limit(1)
         )
@@ -124,12 +125,12 @@ class TestDoExecuteWritesRunnerIdAndPythonNow:
         await _seed_enabled_job(db_session, job_id=job_id, job_key=job_key)
 
         before = datetime.now()
-        await _do_execute(job_id)
+        await _do_execute(0, job_id)
         after = datetime.now()
 
         stmt = (
             select(SysJobLog)
-            .where(SysJobLog.job_id == job_id)
+            .where(SysJobLog.tenant_id == 0, SysJobLog.job_id == job_id)
             .order_by(SysJobLog.job_log_id.desc())
             .limit(1)
         )

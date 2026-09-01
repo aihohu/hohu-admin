@@ -38,6 +38,9 @@ from app.modules.system.service.user_import_validator import (
     resolve_existing_user,
     resolve_role_input,
 )
+from tests.tenant_helpers import bind_test_user, tenant_context
+
+TENANT = tenant_context()
 
 
 def _make_dept(
@@ -48,6 +51,7 @@ def _make_dept(
 ) -> Dept:
     return Dept(
         dept_id=dept_id,
+        tenant_id=TENANT.tenant_id,
         parent_id=parent_id,
         dept_name=name,
         order_num=0,
@@ -63,7 +67,7 @@ class TestResolveDeptNameMode:
         db_session.add(_make_dept(101, "QA-Name-Unique"))
         await db_session.flush()
 
-        result = await resolve_dept(db_session, "QA-Name-Unique")
+        result = await resolve_dept(db_session, "QA-Name-Unique", tenant=TENANT)
         assert result == 101
 
     async def test_resolve_dept_name_duplicate(self, db_session):
@@ -71,19 +75,22 @@ class TestResolveDeptNameMode:
         db_session.add_all(
             [
                 _make_dept(201, "QA-Dup-Dept", parent_id=None),
+                _make_dept(999, "QA-Dup-Parent", parent_id=None),
                 _make_dept(202, "QA-Dup-Dept", parent_id=999),
             ]
         )
         await db_session.flush()
 
         with pytest.raises(BusinessRuleException) as exc:
-            await resolve_dept(db_session, "QA-Dup-Dept")
+            await resolve_dept(db_session, "QA-Dup-Dept", tenant=TENANT)
         assert exc.value.error_code == "AI_IMPORT_DEPT_DUPLICATE"
 
     async def test_resolve_dept_not_found(self, db_session):
         """spec 用例 4：无匹配 → AI_IMPORT_DEPT_NOT_FOUND。"""
         with pytest.raises(BusinessRuleException) as exc:
-            await resolve_dept(db_session, "QA-Definitely-Not-Exists-12345")
+            await resolve_dept(
+                db_session, "QA-Definitely-Not-Exists-12345", tenant=TENANT
+            )
         assert exc.value.error_code == "AI_IMPORT_DEPT_NOT_FOUND"
 
 
@@ -104,7 +111,11 @@ class TestResolveDeptPathMode:
         )
         await db_session.flush()
 
-        result = await resolve_dept(db_session, "QA-Path-Root/QA-Path-Mid/QA-Path-Leaf")
+        result = await resolve_dept(
+            db_session,
+            "QA-Path-Root/QA-Path-Mid/QA-Path-Leaf",
+            tenant=TENANT,
+        )
         assert result == 303
 
     async def test_resolve_dept_path_segment_missing(self, db_session):
@@ -113,7 +124,11 @@ class TestResolveDeptPathMode:
         await db_session.flush()
 
         with pytest.raises(BusinessRuleException) as exc:
-            await resolve_dept(db_session, "QA-Missing-Root/QA-Not-Exist/QA-Leaf")
+            await resolve_dept(
+                db_session,
+                "QA-Missing-Root/QA-Not-Exist/QA-Leaf",
+                tenant=TENANT,
+            )
         assert exc.value.error_code == "AI_IMPORT_DEPT_PATH_NOT_FOUND"
 
     async def test_resolve_dept_path_with_whitespace_segments(self, db_session):
@@ -126,7 +141,9 @@ class TestResolveDeptPathMode:
         )
         await db_session.flush()
 
-        result = await resolve_dept(db_session, " QA-Ws-Root / QA-Ws-Child ")
+        result = await resolve_dept(
+            db_session, " QA-Ws-Root / QA-Ws-Child ", tenant=TENANT
+        )
         assert result == 502
 
 
@@ -139,7 +156,7 @@ class TestResolveDeptStatusFilter:
         await db_session.flush()
 
         with pytest.raises(BusinessRuleException) as exc:
-            await resolve_dept(db_session, "QA-Disabled-Name")
+            await resolve_dept(db_session, "QA-Disabled-Name", tenant=TENANT)
         assert exc.value.error_code == "AI_IMPORT_DEPT_NOT_FOUND"
 
     async def test_resolve_dept_skips_disabled_path_mode(self, db_session):
@@ -153,7 +170,9 @@ class TestResolveDeptStatusFilter:
         await db_session.flush()
 
         with pytest.raises(BusinessRuleException) as exc:
-            await resolve_dept(db_session, "QA-Disabled-Root/QA-Disabled-Mid")
+            await resolve_dept(
+                db_session, "QA-Disabled-Root/QA-Disabled-Mid", tenant=TENANT
+            )
         assert exc.value.error_code == "AI_IMPORT_DEPT_PATH_NOT_FOUND"
 
 
@@ -166,6 +185,7 @@ def _make_role(
 ) -> Role:
     return Role(
         role_id=role_id,
+        tenant_id=TENANT.tenant_id,
         role_code=code,
         role_name=name,
         data_scope=data_scope,
@@ -181,7 +201,7 @@ class TestResolveRoleInput:
         db_session.add(_make_role(1001, "QA_R_DEV", "QA开发者"))
         await db_session.flush()
 
-        result = await resolve_role_input(db_session, "QA_R_DEV")
+        result = await resolve_role_input(db_session, "QA_R_DEV", tenant=TENANT)
         assert result == [1001]
 
     async def test_resolve_role_input_by_name(self, db_session):
@@ -189,7 +209,7 @@ class TestResolveRoleInput:
         db_session.add(_make_role(1002, "QA_R_PM", "QA产品经理"))
         await db_session.flush()
 
-        result = await resolve_role_input(db_session, "QA产品经理")
+        result = await resolve_role_input(db_session, "QA产品经理", tenant=TENANT)
         assert result == [1002]
 
     async def test_resolve_role_input_mixed_dedup(self, db_session):
@@ -205,13 +225,15 @@ class TestResolveRoleInput:
         )
         await db_session.flush()
 
-        result = await resolve_role_input(db_session, "QA_R_QA, QA测试, QA_R_OPS")
+        result = await resolve_role_input(
+            db_session, "QA_R_QA, QA测试, QA_R_OPS", tenant=TENANT
+        )
         assert sorted(result) == [1010, 1011]
 
     async def test_resolve_role_input_not_found(self, db_session):
         """spec 用例 4：未匹配 → AI_IMPORT_ROLE_NOT_FOUND（含未匹配项）。"""
         with pytest.raises(BusinessRuleException) as exc:
-            await resolve_role_input(db_session, "QA_Not_Exist_Role")
+            await resolve_role_input(db_session, "QA_Not_Exist_Role", tenant=TENANT)
         assert exc.value.error_code == "AI_IMPORT_ROLE_NOT_FOUND"
         assert "QA_Not_Exist_Role" in str(exc.value)
 
@@ -221,7 +243,7 @@ class TestResolveRoleInput:
         await db_session.flush()
 
         with pytest.raises(BusinessRuleException) as exc:
-            await resolve_role_input(db_session, "QA_R_DISABLED")
+            await resolve_role_input(db_session, "QA_R_DISABLED", tenant=TENANT)
         assert exc.value.error_code == "AI_IMPORT_ROLE_NOT_FOUND"
 
     async def test_resolve_role_input_partial_match_reports_unmatched(self, db_session):
@@ -230,7 +252,7 @@ class TestResolveRoleInput:
         await db_session.flush()
 
         with pytest.raises(BusinessRuleException) as exc:
-            await resolve_role_input(db_session, "QA_R_OK,QA_Not_Exist")
+            await resolve_role_input(db_session, "QA_R_OK,QA_Not_Exist", tenant=TENANT)
         assert exc.value.error_code == "AI_IMPORT_ROLE_NOT_FOUND"
         assert "QA_Not_Exist" in str(exc.value)
         # 已匹配的 QA_R_OK 不应进入异常信息
@@ -244,13 +266,16 @@ def _make_user(
     status: str = "1",
 ) -> User:
     """构造用户并关联角色。"""
-    return User(
+    user = User(
         user_id=user_id,
+        tenant_id=TENANT.tenant_id,
         user_name=user_name,
         hashed_password="x",
         status=status,
         roles=roles,
     )
+    bind_test_user(user)
+    return user
 
 
 def _make_record(
@@ -275,6 +300,7 @@ def _make_dept_for_scope(
     """带 ancestors 字段（get_dept_and_sub_ids 用），用于 data_scope 测试。"""
     return Dept(
         dept_id=dept_id,
+        tenant_id=TENANT.tenant_id,
         parent_id=parent_id,
         ancestors=ancestors,
         dept_name=name,
@@ -404,6 +430,7 @@ class TestCheckDeptDataScope:
         await db_session.flush()
         await db_session.execute(
             insert(role_depts).values(
+                tenant_id=TENANT.tenant_id,
                 role_id=custom_role.role_id,
                 dept_id=custom_dept.dept_id,
             )
@@ -435,7 +462,10 @@ class TestCheckDeptDataScope:
         """超管豁免（accessible_dept_ids=None）。"""
         super_role = (
             await db_session.execute(
-                _select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                _select(Role).where(
+                    Role.tenant_id == TENANT.tenant_id,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalar_one()
         any_dept = _make_dept_for_scope(8301, "QA-SA-Dept")
@@ -482,6 +512,7 @@ class TestCheckDeptDataScope:
         db_session.add_all(
             [
                 _make_dept_for_scope(8502, "QA-Dup"),
+                _make_dept_for_scope(9999, "QA-Dup-Parent"),
                 _make_dept_for_scope(
                     8503, "QA-Dup", parent_id=9999, ancestors="0,9999"
                 ),
@@ -505,6 +536,7 @@ def _make_existing_user(
     """构造已存在用户（resolve_existing_user 测试用）。"""
     return User(
         user_id=user_id,
+        tenant_id=TENANT.tenant_id,
         user_name=user_name,
         employee_no=employee_no,
         hashed_password=get_password_hash("x"),
@@ -539,7 +571,7 @@ class TestResolveExistingUser:
         await db_session.flush()
 
         record = _make_record_with_emp(200, "QA_New_Name", "QA_E001")
-        user, matched = await resolve_existing_user(db_session, record)
+        user, matched = await resolve_existing_user(db_session, record, tenant=TENANT)
 
         assert user is not None
         assert user.user_id == 11001
@@ -552,7 +584,7 @@ class TestResolveExistingUser:
         await db_session.flush()
 
         record = _make_record_with_emp(201, "QA_FB_User", None)
-        user, matched = await resolve_existing_user(db_session, record)
+        user, matched = await resolve_existing_user(db_session, record, tenant=TENANT)
 
         assert user is not None
         assert user.user_id == 11002
@@ -569,7 +601,7 @@ class TestResolveExistingUser:
         await db_session.flush()
 
         record = _make_record_with_emp(202, "QA_Shared", "QA_NEW_EMP")
-        user, matched = await resolve_existing_user(db_session, record)
+        user, matched = await resolve_existing_user(db_session, record, tenant=TENANT)
 
         # employee_no 没命中，但 user_name 命中 → 兜底
         assert user is not None
@@ -579,7 +611,7 @@ class TestResolveExistingUser:
     async def test_resolve_existing_user_no_match_returns_none(self, db_session):
         """employee_no 和 user_name 都未命中 → (None, False)。"""
         record = _make_record_with_emp(203, "QA_No_Match", "QA_No_Such")
-        user, matched = await resolve_existing_user(db_session, record)
+        user, matched = await resolve_existing_user(db_session, record, tenant=TENANT)
         assert user is None
         assert matched is False
 

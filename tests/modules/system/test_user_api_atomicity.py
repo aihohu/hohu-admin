@@ -23,6 +23,7 @@ from app.modules.system.schemas.user import (
     UserRoleUpdate,
     UserUpdate,
 )
+from tests.tenant_helpers import tenant_context
 
 
 def _actor() -> SimpleNamespace:
@@ -30,6 +31,7 @@ def _actor() -> SimpleNamespace:
 
 
 async def test_user_create_assigns_roles_after_generated_id_and_departments() -> None:
+    tenant = tenant_context(actor_user_id=42)
     user_in = UserCreate(
         user_name="e2ecreate",
         nickname="E2E Create",
@@ -75,17 +77,24 @@ async def test_user_create_assigns_roles_after_generated_id_and_departments() ->
             new=AsyncMock(side_effect=assign_departments),
         ) as assign_created_departments,
     ):
-        await add_user(user_in=user_in, db=db_mock, current_user=_actor())
+        await add_user(
+            user_in=user_in,
+            db=db_mock,
+            current_user=_actor(),
+            tenant=tenant,
+        )
 
     ensure_permissions.assert_awaited_once_with(
         db_mock,
         actor_user_id=42,
         explicit_roles=False,
+        tenant=tenant,
     )
     ensure_department_permissions.assert_awaited_once_with(
         db_mock,
         actor_user_id=42,
         has_departments=True,
+        tenant=tenant,
     )
     assert calls == ["flush", "roles", "departments"]
     assign_created_roles.assert_awaited_once_with(
@@ -94,17 +103,20 @@ async def test_user_create_assigns_roles_after_generated_id_and_departments() ->
         target_user_id=123,
         role_ids=None,
         dept_ids=[1],
+        tenant=tenant,
     )
     assign_created_departments.assert_awaited_once_with(
         db_mock,
         actor_user_id=42,
         target_user_id=123,
         dept_assignments=[(1, True)],
+        tenant=tenant,
     )
     db_mock.commit.assert_awaited_once()
 
 
 async def test_profile_update_uses_only_the_profile_writer() -> None:
+    tenant = tenant_context(actor_user_id=42)
     user_in = UserUpdate(user_name="alice", status="1")
     db_mock = AsyncMock()
 
@@ -112,13 +124,14 @@ async def test_profile_update_uses_only_the_profile_writer() -> None:
         "app.modules.system.api.user.user_service.update_user",
         new=AsyncMock(),
     ) as update_profile:
-        await update_user(user_id=123, user_in=user_in, db=db_mock)
+        await update_user(user_id=123, user_in=user_in, db=db_mock, tenant=tenant)
 
-    update_profile.assert_awaited_once_with(db_mock, 123, user_in)
+    update_profile.assert_awaited_once_with(db_mock, 123, user_in, tenant=tenant)
     db_mock.commit.assert_awaited_once()
 
 
 async def test_role_update_commits_only_after_shared_policy_succeeds() -> None:
+    tenant = tenant_context(actor_user_id=42)
     body = UserRoleUpdate(role_ids=["11", "12"])
     db_mock = AsyncMock()
 
@@ -131,6 +144,7 @@ async def test_role_update_commits_only_after_shared_policy_succeeds() -> None:
             body=body,
             db=db_mock,
             current_user=_actor(),
+            tenant=tenant,
         )
 
     replace_roles.assert_awaited_once_with(
@@ -138,11 +152,13 @@ async def test_role_update_commits_only_after_shared_policy_succeeds() -> None:
         actor_user_id=42,
         target_user_id=123,
         role_ids=["11", "12"],
+        tenant=tenant,
     )
     db_mock.commit.assert_awaited_once()
 
 
 async def test_department_update_commits_only_after_shared_policy_succeeds() -> None:
+    tenant = tenant_context(actor_user_id=42)
     body = UserDepartmentUpdate(
         dept_assignments=[
             UserDepartmentAssignment(dept_id="21", is_primary=True),
@@ -161,6 +177,7 @@ async def test_department_update_commits_only_after_shared_policy_succeeds() -> 
             body=body,
             db=db_mock,
             current_user=_actor(),
+            tenant=tenant,
         )
 
     replace_departments.assert_awaited_once_with(
@@ -168,6 +185,7 @@ async def test_department_update_commits_only_after_shared_policy_succeeds() -> 
         actor_user_id=42,
         target_user_id=123,
         dept_assignments=[(21, True), (22, False)],
+        tenant=tenant,
     )
     db_mock.commit.assert_awaited_once()
 

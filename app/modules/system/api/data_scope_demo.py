@@ -9,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
+from app.core.tenant import TenantContext
 from app.db.session import get_db
+from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.user import User
 from app.modules.system.schemas.data_scope_demo import (
     DataScopeDemoCreate,
@@ -35,9 +37,12 @@ async def get_data_scope_demo_list(
     query: DataScopeDemoQuery = Depends(),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """演示数据列表（核心：数据权限过滤生效）"""
-    page_data = await data_scope_demo_service.get_list(db, query, current_user)
+    page_data = await data_scope_demo_service.get_list(
+        db, query, current_user, tenant=tenant
+    )
     return ResponseModel.success(data=page_data)
 
 
@@ -52,9 +57,12 @@ async def add_data_scope_demo(
     data_in: DataScopeDemoCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """创建演示数据"""
-    demo = await data_scope_demo_service.create(db, data_in, current_user)
+    demo = await data_scope_demo_service.create(
+        db, data_in, current_user, tenant=tenant
+    )
     await db.commit()
     await db.refresh(demo)
     return ResponseModel.success(data=demo, msg="创建成功")
@@ -70,10 +78,13 @@ async def update_data_scope_demo(
     demo_id: int,
     data_in: DataScopeDemoUpdate,
     db: AsyncSession = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """更新演示数据（不允许改 dept_id/create_by）"""
-    demo = await data_scope_demo_service.update(db, demo_id, data_in)
+    demo = await data_scope_demo_service.update(
+        db, demo_id, data_in, current_user, tenant=tenant
+    )
     await db.commit()
     await db.refresh(demo)
     return ResponseModel.success(data=demo, msg="更新成功")
@@ -88,9 +99,10 @@ async def update_data_scope_demo(
 async def delete_data_scope_demo(
     demo_id: int,
     db: AsyncSession = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """删除演示数据"""
-    await data_scope_demo_service.delete(db, demo_id)
+    await data_scope_demo_service.delete(db, demo_id, current_user, tenant=tenant)
     await db.commit()
     return ResponseModel.success(msg="删除成功")

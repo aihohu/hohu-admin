@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.tenant import TenantContext
 from app.modules.ai.agents.safety.ai_config import get_ai_config_bool
 from app.modules.ai.constants import DEFAULT_AGENT_CODE
 
@@ -38,6 +39,7 @@ async def resolve_sticky_agent_code(
     conversation_id: int | None,  # noqa: ARG001  同上
     agent_code_param: str | None,
     conv_agent_code: str | None,
+    tenant: TenantContext,
 ) -> StickyDecision:
     """解析 agentCode 三种语义并返回 StickyDecision。
 
@@ -64,7 +66,7 @@ async def resolve_sticky_agent_code(
 
     # 3. null / 不传
     legacy_mode = await get_ai_config_bool(
-        db, "ai:routing_legacy_null_mode", default=False
+        db, "ai:routing_legacy_null_mode", default=False, tenant=tenant
     )
     if legacy_mode:
         return StickyDecision(

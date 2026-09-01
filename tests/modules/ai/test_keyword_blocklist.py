@@ -9,6 +9,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from tenant_helpers import tenant_context
 
 from app.modules.ai.agents.safety.keyword_blocklist import (
     CONFIG_KEY,
@@ -16,6 +17,8 @@ from app.modules.ai.agents.safety.keyword_blocklist import (
     invalidate_blocklist_cache,
     load_blocklist,
 )
+
+TENANT = tenant_context()
 
 
 @pytest.fixture(autouse=True)
@@ -72,16 +75,17 @@ class TestLoadBlocklist:
         )
 
         db = MagicMock()
-        blocklist = await load_blocklist(db)
+        blocklist = await load_blocklist(db, tenant=TENANT)
 
         assert set(blocklist) == {"机密", "secret", "internal"}
-        mock_get_value.assert_awaited_once_with(db, CONFIG_KEY)
+        mock_get_value.assert_awaited_once_with(db, CONFIG_KEY, tenant=TENANT)
 
     async def test_load_caches_result(self, monkeypatch) -> None:
         """60s 内不重复查 DB"""
         call_count = 0
 
-        async def fake_get_value(_db, _key):
+        async def fake_get_value(_db, _key, *, tenant):
+            assert tenant == TENANT
             nonlocal call_count
             call_count += 1
             return '["x"]'
@@ -92,15 +96,16 @@ class TestLoadBlocklist:
         )
 
         db = MagicMock()
-        await load_blocklist(db)
-        await load_blocklist(db)
-        await load_blocklist(db)
+        await load_blocklist(db, tenant=TENANT)
+        await load_blocklist(db, tenant=TENANT)
+        await load_blocklist(db, tenant=TENANT)
         assert call_count == 1, "缓存生效，第二次/第三次不应再查 DB"
 
     async def test_load_force_refresh_bypasses_cache(self, monkeypatch) -> None:
         call_count = 0
 
-        async def fake_get_value(_db, _key):
+        async def fake_get_value(_db, _key, *, tenant):
+            assert tenant == TENANT
             nonlocal call_count
             call_count += 1
             return '["x"]'
@@ -111,8 +116,8 @@ class TestLoadBlocklist:
         )
 
         db = MagicMock()
-        await load_blocklist(db)
-        await load_blocklist(db, force_refresh=True)
+        await load_blocklist(db, tenant=TENANT)
+        await load_blocklist(db, tenant=TENANT, force_refresh=True)
         assert call_count == 2
 
     async def test_load_returns_empty_on_missing_config(self, monkeypatch) -> None:
@@ -122,7 +127,7 @@ class TestLoadBlocklist:
             AsyncMock(return_value=None),
         )
         db = MagicMock()
-        assert await load_blocklist(db) == []
+        assert await load_blocklist(db, tenant=TENANT) == []
 
     async def test_load_returns_empty_on_invalid_json(self, monkeypatch) -> None:
         """sys_config 值不是合法 JSON → 返回空（不抛异常）"""
@@ -131,7 +136,7 @@ class TestLoadBlocklist:
             AsyncMock(return_value="not-json{{{"),
         )
         db = MagicMock()
-        assert await load_blocklist(db) == []
+        assert await load_blocklist(db, tenant=TENANT) == []
 
     async def test_load_filters_non_string_items(self, monkeypatch) -> None:
         """blocklist JSON 含非字符串元素（数字 / null）→ 过滤掉"""
@@ -141,7 +146,7 @@ class TestLoadBlocklist:
             AsyncMock(return_value=raw),
         )
         db = MagicMock()
-        blocklist = await load_blocklist(db)
+        blocklist = await load_blocklist(db, tenant=TENANT)
         assert set(blocklist) == {"valid", "another"}
 
     async def test_load_lowercases_keywords(self, monkeypatch) -> None:
@@ -152,7 +157,7 @@ class TestLoadBlocklist:
             AsyncMock(return_value=raw),
         )
         db = MagicMock()
-        blocklist = await load_blocklist(db)
+        blocklist = await load_blocklist(db, tenant=TENANT)
         assert blocklist == ["badword", "upper"]
         # 大小写不敏感匹配
         assert check_keywords("this is BADWORD here", blocklist) == ["badword"]
@@ -162,7 +167,8 @@ class TestInvalidateCache:
     async def test_invalidate_forces_reload(self, monkeypatch) -> None:
         call_count = 0
 
-        async def fake_get_value(_db, _key):
+        async def fake_get_value(_db, _key, *, tenant):
+            assert tenant == TENANT
             nonlocal call_count
             call_count += 1
             return '["x"]'
@@ -173,10 +179,10 @@ class TestInvalidateCache:
         )
 
         db = MagicMock()
-        await load_blocklist(db)
+        await load_blocklist(db, tenant=TENANT)
         assert call_count == 1
         invalidate_blocklist_cache()
-        await load_blocklist(db)
+        await load_blocklist(db, tenant=TENANT)
         assert call_count == 2
 
 

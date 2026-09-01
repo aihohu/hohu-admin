@@ -3,7 +3,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
+from app.core.tenant import TenantContext
 from app.db.session import get_db
+from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.user import User
 from app.modules.system.schemas.dict_type import (
     DictTypeCreate,
@@ -33,6 +35,7 @@ async def get_list(
     query: DictTypeQuery = Depends(),
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     获取字典类型分页列表
@@ -52,7 +55,7 @@ async def get_list(
         - dict_type: 字典类型（支持模糊查询）
         - status: 字典类型状态（1-启用，2-禁用）
     """
-    page_data = await dict_type_service.get_list(db, query)
+    page_data = await dict_type_service.get_list(db, query, tenant=tenant)
     return ResponseModel.success(data=page_data)
 
 
@@ -70,6 +73,7 @@ async def get_list(
 async def get_all(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     获取所有已启用的字典类型列表
@@ -86,7 +90,7 @@ async def get_all(
         - 不分页，返回所有符合条件的字典类型
         - 适合用于前端下拉选择框
     """
-    dict_types = await dict_type_service.get_all_enabled(db)
+    dict_types = await dict_type_service.get_all_enabled(db, tenant=tenant)
     return ResponseModel.success(data=dict_types)
 
 
@@ -106,6 +110,7 @@ async def add(
     type_in: DictTypeCreate,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     创建新字典类型
@@ -124,7 +129,7 @@ async def add(
         - remark: 字典描述（可选，最大500字符）
         - status: 字典类型状态（必填，1-启用，2-禁用）
     """
-    await dict_type_service.create(db, type_in)
+    await dict_type_service.create(db, type_in, tenant=tenant)
     await db.commit()
     return ResponseModel.success(msg="字典类型创建成功")
 
@@ -147,6 +152,7 @@ async def update(
     type_in: DictTypeUpdate,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     更新字典类型信息
@@ -169,7 +175,7 @@ async def update(
         - remark: 字典描述
         - status: 字典类型状态
     """
-    await dict_type_service.update(db, type_id, type_in)
+    await dict_type_service.update(db, type_id, type_in, tenant=tenant)
     await db.commit()
     return ResponseModel.success(msg="字典类型更新成功")
 
@@ -191,6 +197,7 @@ async def delete(
     type_id: int,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     删除指定字典类型
@@ -210,7 +217,7 @@ async def delete(
         - 此操作不可逆，请谨慎操作
         - 如果字典类型下存在数据，则无法删除
     """
-    await dict_type_service.delete(db, type_id)
+    await dict_type_service.delete(db, type_id, tenant=tenant)
     await db.commit()
     return ResponseModel.success(msg="字典类型删除成功")
 
@@ -231,6 +238,7 @@ async def batch_delete(
     ids: list[int],
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     批量删除字典类型
@@ -249,6 +257,6 @@ async def batch_delete(
     Note:
         - 如果任一字典类型下存在数据，则全部删除失败
     """
-    count = await dict_type_service.batch_delete(db, ids)
+    count = await dict_type_service.batch_delete(db, ids, tenant=tenant)
     await db.commit()
     return ResponseModel.success(msg=f"成功删除 {count} 个字典类型")

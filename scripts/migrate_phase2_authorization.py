@@ -11,6 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from app.constants import STATUS_ENABLED, SUPER_ADMIN_ROLE_CODE
 from app.core.config import settings
 from app.core.id_generator import next_id
+from app.core.tenant import DEFAULT_TENANT_ID
 from app.db.base import role_menus
 from app.modules.system.constants import USER_ROLE_AUTH_PERMISSION
 from app.modules.system.models.menu import Menu
@@ -36,14 +37,23 @@ class Phase2AuthorizationMigrationResult:
 
 async def _ensure_role_auth_menu(db: AsyncSession) -> tuple[Menu, bool]:
     existing = await db.scalar(
-        select(Menu).where(Menu.permission == USER_ROLE_AUTH_PERMISSION)
+        select(Menu).where(
+            Menu.tenant_id == DEFAULT_TENANT_ID,
+            Menu.permission == USER_ROLE_AUTH_PERMISSION,
+        )
     )
     if existing is not None:
         return existing, False
-    parent = await db.scalar(select(Menu).where(Menu.route_name == "system_user"))
+    parent = await db.scalar(
+        select(Menu).where(
+            Menu.tenant_id == DEFAULT_TENANT_ID,
+            Menu.route_name == "system_user",
+        )
+    )
     if parent is None:
         raise RuntimeError("system_user parent menu not found; run menu seed first")
     menu = Menu(
+        tenant_id=DEFAULT_TENANT_ID,
         menu_id=next_id(),
         parent_id=parent.menu_id,
         menu_name="角色授权",
@@ -62,8 +72,16 @@ async def _compatible_role_ids(db: AsyncSession) -> set[int]:
         for role_id in (
             await db.execute(
                 select(role_menus.c.role_id)
-                .join(Menu, Menu.menu_id == role_menus.c.menu_id)
-                .where(Menu.permission.in_(HISTORICAL_USER_ROLE_WRITER_PERMISSIONS))
+                .join(
+                    Menu,
+                    (Menu.tenant_id == role_menus.c.tenant_id)
+                    & (Menu.menu_id == role_menus.c.menu_id),
+                )
+                .where(
+                    role_menus.c.tenant_id == DEFAULT_TENANT_ID,
+                    Menu.tenant_id == DEFAULT_TENANT_ID,
+                    Menu.permission.in_(HISTORICAL_USER_ROLE_WRITER_PERMISSIONS),
+                )
                 .distinct()
             )
         ).scalars()
@@ -72,7 +90,10 @@ async def _compatible_role_ids(db: AsyncSession) -> set[int]:
         int(role_id)
         for role_id in (
             await db.execute(
-                select(Role.role_id).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                select(Role.role_id).where(
+                    Role.tenant_id == DEFAULT_TENANT_ID,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalars()
     )
@@ -92,6 +113,7 @@ async def _grant_role_auth(
         for role_id in (
             await db.execute(
                 select(role_menus.c.role_id).where(
+                    role_menus.c.tenant_id == DEFAULT_TENANT_ID,
                     role_menus.c.role_id.in_(role_ids),
                     role_menus.c.menu_id == menu_id,
                 )
@@ -102,7 +124,14 @@ async def _grant_role_auth(
     if missing:
         await db.execute(
             insert(role_menus),
-            [{"role_id": role_id, "menu_id": menu_id} for role_id in sorted(missing)],
+            [
+                {
+                    "tenant_id": DEFAULT_TENANT_ID,
+                    "role_id": role_id,
+                    "menu_id": menu_id,
+                }
+                for role_id in sorted(missing)
+            ],
         )
     return len(missing)
 

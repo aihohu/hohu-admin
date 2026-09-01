@@ -10,7 +10,6 @@ from app.core.auth import is_super_admin
 from app.core.base_response import ResponseModel
 from app.core.exceptions import (
     AuthenticationException,
-    AuthorizationException,
     DuplicateException,
 )
 from app.core.security import get_password_hash
@@ -130,26 +129,13 @@ async def login(
     """
     ip = get_client_ip(request)
     user_agent = request.headers.get("User-Agent")
-    try:
-        result = await auth_service.authenticate(
-            credentials,
-            db,
-            ip=ip,
-            user_agent=user_agent,
-            host=request.headers.get("Host"),
-        )
-        return result
-    except (AuthenticationException, AuthorizationException):
-        # 写入失败日志
-        await auth_service._write_login_log(
-            user_id=None,
-            username=credentials.user_name or "",
-            ip=ip,
-            user_agent=user_agent,
-            status="2",
-            message="密码错误",
-        )
-        raise
+    return await auth_service.authenticate(
+        credentials,
+        db,
+        ip=ip,
+        user_agent=user_agent,
+        host=request.headers.get("Host"),
+    )
 
 
 @router.post(

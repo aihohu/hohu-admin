@@ -40,11 +40,13 @@ async def _resolve_threshold() -> int:
     from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
         get_ai_config_int,
     )
+    from app.modules.auth.service import get_public_tenant_context  # noqa: PLC0415
 
     try:
         async with AsyncSessionLocal() as db:
+            tenant = await get_public_tenant_context(db)
             return await get_ai_config_int(
-                db, _CFG_THRESHOLD, INJECTION_THRESHOLD_PER_HOUR
+                db, _CFG_THRESHOLD, INJECTION_THRESHOLD_PER_HOUR, tenant=tenant
             )
     except Exception:
         return INJECTION_THRESHOLD_PER_HOUR
@@ -55,10 +57,14 @@ async def _resolve_duration() -> int:
     from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
         get_ai_config_int,
     )
+    from app.modules.auth.service import get_public_tenant_context  # noqa: PLC0415
 
     try:
         async with AsyncSessionLocal() as db:
-            return await get_ai_config_int(db, _CFG_DURATION, DISABLE_DURATION_SEC)
+            tenant = await get_public_tenant_context(db)
+            return await get_ai_config_int(
+                db, _CFG_DURATION, DISABLE_DURATION_SEC, tenant=tenant
+            )
     except Exception:
         return DISABLE_DURATION_SEC
 

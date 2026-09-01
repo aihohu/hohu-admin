@@ -4,10 +4,13 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -20,16 +23,25 @@ class SysJob(Base):
     """定时任务配置模型"""
 
     __tablename__ = "sys_job"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "job_id", name="uq_sys_job_tenant_job_id"),
+        UniqueConstraint("tenant_id", "job_key", name="uq_sys_job_tenant_job_key"),
+        Index("ix_sys_job_tenant_status", "tenant_id", "status"),
+    )
 
     job_id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, default=next_id, comment="任务ID"
     )
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("sys_tenant.tenant_id", ondelete="RESTRICT"),
+        nullable=False,
+        comment="租户ID；必须由可信 TenantContext 显式写入",
+    )
     job_name: Mapped[str] = mapped_column(
         String(64), nullable=False, comment="任务名称"
     )
-    job_key: Mapped[str] = mapped_column(
-        String(64), nullable=False, unique=True, comment="任务标识"
-    )
+    job_key: Mapped[str] = mapped_column(String(64), nullable=False, comment="任务标识")
     cron_expression: Mapped[str | None] = mapped_column(
         String(64), nullable=True, comment="cron表达式"
     )
@@ -85,11 +97,31 @@ class SysJobLog(Base):
 
     __tablename__ = "sys_job_log"
     __table_args__ = (
-        Index("ix_sys_job_log_status_start_time", "status", "start_time"),
+        UniqueConstraint(
+            "tenant_id", "job_log_id", name="uq_sys_job_log_tenant_log_id"
+        ),
+        ForeignKeyConstraint(
+            ("tenant_id", "job_id"),
+            ("sys_job.tenant_id", "sys_job.job_id"),
+            name="fk_sys_job_log_tenant_job",
+            ondelete="CASCADE",
+        ),
+        Index(
+            "ix_sys_job_log_tenant_status_start",
+            "tenant_id",
+            "status",
+            "start_time",
+        ),
     )
 
     job_log_id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, default=next_id, comment="日志ID"
+    )
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("sys_tenant.tenant_id", ondelete="RESTRICT"),
+        nullable=False,
+        comment="租户ID；必须由可信 TenantContext 显式写入",
     )
     job_id: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="任务ID")
     job_name: Mapped[str] = mapped_column(

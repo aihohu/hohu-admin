@@ -12,6 +12,7 @@ from app.modules.system.models import User
 async def _create_user(db_session, name: str) -> User:
     """创建 sys_user 行，满足 mk_app_rating.user_id 的外键约束。"""
     user = User(
+        tenant_id=0,
         user_id=next_id(),
         user_name=name,
         hashed_password="x",

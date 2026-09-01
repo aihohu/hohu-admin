@@ -23,6 +23,7 @@ import time
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.tenant import TenantContext
 from app.modules.system.service.config_service import config_service
 
 logger = logging.getLogger(__name__)
@@ -31,11 +32,12 @@ CONFIG_KEY = "ai:guardrail:keyword_blocklist"
 _CACHE_TTL_SEC = 60
 
 # 进程内缓存（模块级单例）
-_cached_blocklist: list[str] | None = None
-_cached_at: float = 0.0
+_cache: dict[int, tuple[list[str], float]] = {}
 
 
-async def load_blocklist(db: AsyncSession, *, force_refresh: bool = False) -> list[str]:
+async def load_blocklist(
+    db: AsyncSession, *, tenant: TenantContext, force_refresh: bool = False
+) -> list[str]:
     """从 sys_config 读 blocklist（缓存 60s）
 
     Args:
@@ -45,13 +47,13 @@ async def load_blocklist(db: AsyncSession, *, force_refresh: bool = False) -> li
     Returns:
         blocklist 字符串列表（空 list 表示无拦截词；查 sys_config 失败也返回空）
     """
-    global _cached_blocklist, _cached_at
+    cached = _cache.get(tenant.tenant_id)
+    if not force_refresh and cached is not None:
+        value, fetched_at = cached
+        if time.time() - fetched_at < _CACHE_TTL_SEC:
+            return value
 
-    if not force_refresh and _cached_blocklist is not None:
-        if time.time() - _cached_at < _CACHE_TTL_SEC:
-            return _cached_blocklist
-
-    raw = await config_service.get_value(db, CONFIG_KEY)
+    raw = await config_service.get_value(db, CONFIG_KEY, tenant=tenant)
     parsed: list[str] = []
     if raw:
         try:
@@ -66,16 +68,13 @@ async def load_blocklist(db: AsyncSession, *, force_refresh: bool = False) -> li
                 extra={"error": str(e)},
             )
 
-    _cached_blocklist = parsed
-    _cached_at = time.time()
+    _cache[tenant.tenant_id] = (parsed, time.time())
     return parsed
 
 
 def invalidate_blocklist_cache() -> None:
     """显式清缓存（ConfigService.update 改 ai:guardrail:* 后调）"""
-    global _cached_blocklist, _cached_at
-    _cached_blocklist = None
-    _cached_at = 0.0
+    _cache.clear()
 
 
 def check_keywords(text: str, blocklist: list[str]) -> list[str]:

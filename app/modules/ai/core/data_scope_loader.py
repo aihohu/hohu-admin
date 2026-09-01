@@ -12,6 +12,7 @@
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.tenant import get_bound_tenant_context
 from app.modules.system.models.user import User
 from app.utils.data_scope import (
     get_user_filters_from_resolution,
@@ -39,9 +40,14 @@ async def build_data_scope_context(
           - filters: User 模型的 data_scope filter（最常见 stats 目标）；
                      其它模型 stats tool 在函数内自行调 get_data_scope_filters
     """
-    resolution = await resolve_data_scope(db, user)
+    resolution = await resolve_data_scope(
+        db,
+        user,
+        tenant=get_bound_tenant_context(user),
+    )
 
     return DataScopeContext(
+        tenant_id=resolution.tenant_id,
         accessible_dept_ids=(
             None
             if resolution.accessible_dept_ids is None

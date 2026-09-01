@@ -3,7 +3,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
+from app.core.tenant import TenantContext
 from app.db.session import get_db
+from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.user import User
 from app.modules.system.schemas.role import (
     RoleCreate,
@@ -34,6 +36,7 @@ async def list_roles(
     query: RoleQuery = Depends(),
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     获取角色分页列表
@@ -57,6 +60,7 @@ async def list_roles(
     summaries, total, _contributors = await role_management_service.summarize_roles(
         db,
         actor_user_id=_current_user.user_id,
+        tenant=tenant,
         role_name=query.role_name,
         role_code=query.role_code,
         data_scope=query.data_scope,
@@ -88,6 +92,7 @@ async def list_roles(
 async def get_all_roles(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     获取所有已启用的角色列表
@@ -107,6 +112,7 @@ async def get_all_roles(
     roles, _total, _contributors = await role_management_service.summarize_roles(
         db,
         actor_user_id=_current_user.user_id,
+        tenant=tenant,
         status="1",
         limit=10_000,
     )
@@ -125,14 +131,16 @@ async def get_menus(
     role_id: int,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """获取角色的菜单ID列表"""
     await role_management_service.authorize_role_projection(
         db,
         actor_user_id=_current_user.user_id,
         role_id=role_id,
+        tenant=tenant,
     )
-    menu_ids = await role_service.get_role_menus(db, role_id)
+    menu_ids = await role_service.get_role_menus(db, role_id, tenant=tenant)
     return ResponseModel.success(data=menu_ids)
 
 
@@ -152,6 +160,7 @@ async def add_role(
     role_in: RoleCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     创建新角色
@@ -174,6 +183,7 @@ async def add_role(
         db,
         role_in,
         actor_user_id=current_user.user_id,
+        tenant=tenant,
     )
     await db.commit()
     return ResponseModel.success(msg="角色创建成功")
@@ -189,6 +199,7 @@ async def update_role(
     role_in: RoleUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """更新角色基本信息"""
     await role_management_service.update(
@@ -196,6 +207,7 @@ async def update_role(
         role_id,
         role_in,
         actor_user_id=current_user.user_id,
+        tenant=tenant,
     )
     await db.commit()
     return ResponseModel.success(msg="角色更新成功")
@@ -211,6 +223,7 @@ async def update_role_menu(
     ids: list[int] = Body(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """更新角色的菜单权限"""
     await role_management_service.update_menus(
@@ -218,6 +231,7 @@ async def update_role_menu(
         role_id,
         ids,
         actor_user_id=current_user.user_id,
+        tenant=tenant,
     )
     await db.commit()
     return ResponseModel.success(msg="角色更新成功")
@@ -239,6 +253,7 @@ async def delete_role(
     role_id: int,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     删除指定角色
@@ -258,6 +273,7 @@ async def delete_role(
         db,
         role_id,
         actor_user_id=current_user.user_id,
+        tenant=tenant,
     )
     await db.commit()
     return ResponseModel.success(msg="角色删除成功")
@@ -272,12 +288,14 @@ async def batch_delete_roles(
     ids: list[int] = Body(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """批量删除角色"""
     deleted_count = await role_service.batch_delete_roles(
         db,
         ids,
         actor_user_id=current_user.user_id,
+        tenant=tenant,
     )
     await db.commit()
     return ResponseModel.success(msg=f"成功删除 {deleted_count} 条数据")
@@ -293,11 +311,13 @@ async def get_role_detail(
     role_id: int,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """获取角色详情"""
     role = await role_management_service.authorize_role_projection(
         db,
         actor_user_id=current_user.user_id,
         role_id=role_id,
+        tenant=tenant,
     )
     return ResponseModel.success(data=role)

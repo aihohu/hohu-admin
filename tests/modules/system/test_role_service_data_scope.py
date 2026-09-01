@@ -25,10 +25,14 @@ from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.schemas.role import RoleCreate, RoleUpdate
 from app.modules.system.service.role_service import role_service
+from tests.tenant_helpers import tenant_context
+
+TENANT = tenant_context()
 
 
 def _make_dept(*, dept_id: int, name: str) -> Dept:
     return Dept(
+        tenant_id=TENANT.tenant_id,
         dept_id=dept_id,
         dept_name=name,
         ancestors="0",
@@ -40,7 +44,10 @@ def _make_dept(*, dept_id: int, name: str) -> Dept:
 async def _role_dept_ids(db: AsyncSession, role_id: int) -> set[int]:
     """直接查 role_depts 关联表，绕开 ORM 缓存。"""
     result = await db.execute(
-        select(role_depts.c.dept_id).where(role_depts.c.role_id == role_id)
+        select(role_depts.c.dept_id).where(
+            role_depts.c.tenant_id == TENANT.tenant_id,
+            role_depts.c.role_id == role_id,
+        )
     )
     return set(result.scalars().all())
 
@@ -58,6 +65,7 @@ class TestUpdateRoleClearsDeptsOnScopeChange:
         await db_session.flush()
 
         role = Role(
+            tenant_id=TENANT.tenant_id,
             role_name="R-CUSTOM",
             role_code="R_TEST_CLEAR_1",
             data_scope=DATA_SCOPE_CUSTOM,
@@ -69,7 +77,7 @@ class TestUpdateRoleClearsDeptsOnScopeChange:
 
         # 关键回归操作：只改 data_scope，前端不传 dept_ids
         update = RoleUpdate(data_scope=DATA_SCOPE_DEPT)
-        await role_service.update_role(db_session, role.role_id, update)
+        await role_service.update_role(db_session, role.role_id, update, tenant=TENANT)
 
         # 强制 flush 让 role_depts 写库，再查关联表
         await db_session.flush()
@@ -86,6 +94,7 @@ class TestUpdateRoleClearsDeptsOnScopeChange:
         await db_session.flush()
 
         role = Role(
+            tenant_id=TENANT.tenant_id,
             role_name="R-CUSTOM-2",
             role_code="R_TEST_CLEAR_2",
             data_scope=DATA_SCOPE_CUSTOM,
@@ -96,7 +105,7 @@ class TestUpdateRoleClearsDeptsOnScopeChange:
         await db_session.flush()
 
         update = RoleUpdate(data_scope=DATA_SCOPE_ALL)
-        await role_service.update_role(db_session, role.role_id, update)
+        await role_service.update_role(db_session, role.role_id, update, tenant=TENANT)
         await db_session.flush()
 
         assert await _role_dept_ids(db_session, role.role_id) == set()
@@ -120,7 +129,7 @@ class TestCreateRoleValidatesDeptIds:
         )
 
         try:
-            await role_service.create_role(db_session, create)
+            await role_service.create_role(db_session, create, tenant=TENANT)
         except InvalidParameterException as e:
             assert "999999999" in str(e) or "部门" in str(e)
             return
@@ -141,7 +150,7 @@ class TestCreateRoleValidatesDeptIds:
             dept_ids=[900000011, 900000012],
         )
 
-        role = await role_service.create_role(db_session, create)
+        role = await role_service.create_role(db_session, create, tenant=TENANT)
         await db_session.flush()
         assert await _role_dept_ids(db_session, role.role_id) == {
             900000011,
@@ -159,6 +168,7 @@ class TestUpdateRoleValidatesDeptIds:
         await db_session.flush()
 
         role = Role(
+            tenant_id=TENANT.tenant_id,
             role_name="R-ORIG",
             role_code="R_TEST_UPDATE_1",
             data_scope=DATA_SCOPE_CUSTOM,
@@ -178,7 +188,9 @@ class TestUpdateRoleValidatesDeptIds:
         )
 
         try:
-            await role_service.update_role(db_session, role.role_id, update)
+            await role_service.update_role(
+                db_session, role.role_id, update, tenant=TENANT
+            )
         except InvalidParameterException:
             return
         raise AssertionError("应抛 InvalidParameterException")

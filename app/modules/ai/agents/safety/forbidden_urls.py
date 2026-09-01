@@ -30,6 +30,7 @@ import time
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.tenant import TenantContext
 from app.modules.system.service.config_service import config_service
 
 logger = logging.getLogger(__name__)
@@ -38,8 +39,7 @@ CONFIG_KEY = "ai:guardrail:forbidden_urls"
 _CACHE_TTL_SEC = 60
 
 # 进程内缓存（模块级单例）
-_cached_urls: list[str] | None = None
-_cached_at: float = 0.0
+_cache: dict[int, tuple[list[str], float]] = {}
 
 # URL 提取 regex：
 # - group 1: https?:// 后的域名（含 port 可选）
@@ -55,20 +55,20 @@ _URL_PATTERN = re.compile(
 
 
 async def load_forbidden_urls(
-    db: AsyncSession, *, force_refresh: bool = False
+    db: AsyncSession, *, tenant: TenantContext, force_refresh: bool = False
 ) -> list[str]:
     """从 sys_config 读 forbidden_urls（缓存 60s）
 
     Returns:
         域名黑名单列表（小写，去 path / 协议），空 list 表示无限制
     """
-    global _cached_urls, _cached_at
+    cached = _cache.get(tenant.tenant_id)
+    if not force_refresh and cached is not None:
+        value, fetched_at = cached
+        if time.time() - fetched_at < _CACHE_TTL_SEC:
+            return value
 
-    if not force_refresh and _cached_urls is not None:
-        if time.time() - _cached_at < _CACHE_TTL_SEC:
-            return _cached_urls
-
-    raw = await config_service.get_value(db, CONFIG_KEY)
+    raw = await config_service.get_value(db, CONFIG_KEY, tenant=tenant)
     parsed: list[str] = []
     if raw:
         try:
@@ -87,16 +87,13 @@ async def load_forbidden_urls(
                 extra={"error": str(e)},
             )
 
-    _cached_urls = parsed
-    _cached_at = time.time()
+    _cache[tenant.tenant_id] = (parsed, time.time())
     return parsed
 
 
 def invalidate_forbidden_urls_cache() -> None:
     """显式清缓存（ConfigService.update 改 ai:guardrail:* 后调）"""
-    global _cached_urls, _cached_at
-    _cached_urls = None
-    _cached_at = 0.0
+    _cache.clear()
 
 
 def _normalize_domain(raw: str) -> str:

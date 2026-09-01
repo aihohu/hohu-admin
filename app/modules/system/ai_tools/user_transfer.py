@@ -163,6 +163,7 @@ async def user_import_preview(
         ctx.db,
         actor_user_id=ctx.user.user_id,
         has_role_column=has_role_column,
+        tenant=ctx.tenant,
     )
     try:
         records = parse_import_excel(file_bytes, mime_type)
@@ -194,6 +195,7 @@ async def user_import_preview(
         reason,
         on_conflict=on_conflict,
         has_role_column=has_role_column,
+        tenant=ctx.tenant,
     )
 
     # 预览阶段持久化文件；执行阶段按 storage key 读取，避免依赖客户端重复上传。
@@ -344,7 +346,7 @@ async def user_import_execute(
     )
 
     # 1. 反查 batch 拿 file 信息
-    batch = await get_batch_by_preview_token(ctx.db, preview_token)
+    batch = await get_batch_by_preview_token(ctx.db, preview_token, tenant=ctx.tenant)
     if batch is None:
         from app.core.exceptions import UnprocessableEntityException  # noqa: PLC0415
 
@@ -388,6 +390,7 @@ async def user_import_execute(
         ctx.db,
         actor_user_id=ctx.user.user_id,
         has_role_column=has_role_column,
+        tenant=ctx.tenant,
     )
     records = parse_import_excel(
         file_bytes,
@@ -405,6 +408,7 @@ async def user_import_execute(
         on_conflict=on_conflict,
         sync_mode=EmployeeNoSyncMode(sync_mode),
         has_role_column=has_role_column,
+        tenant=ctx.tenant,
     )
 
     return ToolResult.success(
@@ -521,6 +525,7 @@ async def user_export(
         filter_,
         ctx.user,
         reason=reason,
+        tenant=ctx.tenant,
     )
 
     # 从持久化任务读取文件元数据和到期时间，避免前端自行推断。
@@ -528,6 +533,7 @@ async def user_export(
         ctx.db,
         export_id,
         operator_id=ctx.user.user_id,
+        tenant=ctx.tenant,
     )
     file_size = task.file_size_bytes if task else None
     expires_at = (task.created_at + timedelta(days=30)).isoformat() if task else None

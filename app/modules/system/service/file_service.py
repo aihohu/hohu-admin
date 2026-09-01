@@ -15,6 +15,8 @@ from app.core.exceptions import (
 )
 from app.core.file_storage import validate_private_storage_roots
 from app.core.id_generator import next_id
+from app.core.tenant import TenantContext
+from app.core.tenant_scope import tenant_select
 from app.modules.system.models.file import File
 from app.modules.system.schemas.file import FileQuery
 from app.utils.pagination import build_filters, paginate
@@ -72,18 +74,13 @@ class FileService:
         business_id: int | None = None,
         *,
         owner_user_id: int,
-        tenant_id: int,
+        tenant: TenantContext,
     ) -> File:
         """上传单个文件"""
         if owner_user_id is None:
             raise AuthorizationException(
                 "无法确定文件所有者",
                 error_code="FILE_OWNER_REQUIRED",
-            )
-        if tenant_id is None:
-            raise AuthorizationException(
-                "无法确定文件所属租户",
-                error_code="FILE_TENANT_REQUIRED",
             )
         if not upload_file.filename:
             raise BusinessRuleException("文件名不能为空")
@@ -113,7 +110,7 @@ class FileService:
             business_type=effective_business_type,
             business_id=business_id,
             owner_user_id=owner_user_id,
-            tenant_id=tenant_id,
+            tenant_id=tenant.tenant_id,
             create_by=current_user_name,
         )
         db.add(file_record)
@@ -142,7 +139,7 @@ class FileService:
         business_id: int | None = None,
         *,
         owner_user_id: int,
-        tenant_id: int,
+        tenant: TenantContext,
     ) -> list[File]:
         """批量上传文件"""
         results = []
@@ -154,7 +151,7 @@ class FileService:
                 business_type=business_type,
                 business_id=business_id,
                 owner_user_id=owner_user_id,
-                tenant_id=tenant_id,
+                tenant=tenant,
             )
             results.append(record)
         return results
@@ -164,10 +161,9 @@ class FileService:
         db: AsyncSession,
         query: FileQuery,
         *,
-        tenant_id: int,
+        tenant: TenantContext,
     ):
         """获取文件分页列表"""
-        self._require_tenant_id(tenant_id)
         field_mapping = {
             "original_name": ("original_name", "contains"),
             "business_type": ("business_type", "=="),
@@ -175,7 +171,7 @@ class FileService:
             "file_ext": ("file_ext", "=="),
         }
         filters = build_filters(File, field_mapping, **query.model_dump())
-        filters.extend((File.tenant_id == tenant_id, File.del_flag == "0"))
+        filters.extend((File.tenant_id == tenant.tenant_id, File.del_flag == "0"))
 
         return await paginate(
             db=db,
@@ -190,12 +186,11 @@ class FileService:
         db: AsyncSession,
         file_id: int,
         *,
-        tenant_id: int,
+        tenant: TenantContext,
         owner_user_id: int | None = None,
         is_admin: bool = False,
     ) -> File:
         """获取单个文件详情"""
-        self._require_tenant_id(tenant_id)
         if not is_admin and owner_user_id is None:
             raise AuthorizationException(
                 "无法确定文件所有者",
@@ -203,7 +198,7 @@ class FileService:
             )
         predicates = [
             File.file_id == file_id,
-            File.tenant_id == tenant_id,
+            File.tenant_id == tenant.tenant_id,
             File.del_flag == "0",
         ]
         if not is_admin:
@@ -222,7 +217,7 @@ class FileService:
         current_user: Any = None,
         is_admin: bool = False,
         *,
-        tenant_id: int,
+        tenant: TenantContext,
     ) -> None:
         """删除文件（数据库记录 + 磁盘文件）。
 
@@ -233,7 +228,7 @@ class FileService:
         file_record = await self.get_by_id(
             db,
             file_id,
-            tenant_id=tenant_id,
+            tenant=tenant,
             owner_user_id=owner_user_id,
             is_admin=is_admin,
         )
@@ -253,44 +248,30 @@ class FileService:
         current_user: Any = None,
         is_admin: bool = False,
         *,
-        tenant_id: int,
+        tenant: TenantContext,
     ) -> int:
-        """批量删除文件。ownership 规则同 delete；越权项跳过不阻塞其他文件。"""
-        self._require_tenant_id(tenant_id)
+        """批量删除文件；任一不可见目标使整批按 404 失败。"""
         owner_user_id = None if is_admin else getattr(current_user, "user_id", None)
         if not is_admin and owner_user_id is None:
             raise AuthorizationException(
                 "无法确定文件所有者",
                 error_code="FILE_OWNER_REQUIRED",
             )
-        count = 0
-        for file_id in ids:
-            predicates = [
-                File.file_id == file_id,
-                File.tenant_id == tenant_id,
-                File.del_flag == "0",
-            ]
-            if not is_admin:
-                predicates.append(File.owner_user_id == owner_user_id)
-            stmt = select(File).where(*predicates)
-            result = await db.execute(stmt)
-            file_record = result.scalars().first()
-            if file_record:
-                if not is_admin and current_user is not None:
-                    if file_record.owner_user_id != current_user.user_id:
-                        continue
-                self._delete_disk_file(file_record.file_path)
-                await db.delete(file_record)
-                count += 1
-        return count
-
-    @staticmethod
-    def _require_tenant_id(tenant_id: int) -> None:
-        if tenant_id is None:
-            raise AuthorizationException(
-                "无法确定文件所属租户",
-                error_code="FILE_TENANT_REQUIRED",
-            )
+        normalized = set(ids)
+        predicates = [File.file_id.in_(normalized), File.del_flag == "0"]
+        if not is_admin:
+            predicates.append(File.owner_user_id == owner_user_id)
+        records = list(
+            (
+                await db.execute(tenant_select(File, tenant=tenant).where(*predicates))
+            ).scalars()
+        )
+        if {int(record.file_id) for record in records} != normalized:
+            raise NotFoundException("文件")
+        for record in records:
+            self._delete_disk_file(record.file_path)
+            await db.delete(record)
+        return len(records)
 
     def _delete_disk_file(self, file_path: str) -> None:
         """删除磁盘文件，文件不存在时静默跳过"""

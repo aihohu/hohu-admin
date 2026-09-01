@@ -30,6 +30,7 @@ from app.core.tenant import (
     DEFAULT_TENANT_CODE,
     DEFAULT_TENANT_ID,
     TenantContext,
+    TenantLocatorContext,
     bind_tenant_context,
     get_bound_tenant_context,
     normalize_tenant_code,
@@ -127,20 +128,38 @@ class AuthService:
         try:
             tenant = await self.resolve_login_tenant(credentials, db, host=host)
         except AuthenticationException:
+            await self._write_login_log(
+                tenant_id=None,
+                audit_scope="unresolved",
+                user_id=None,
+                username=credentials.user_name or "",
+                ip=ip,
+                user_agent=user_agent,
+                status="2",
+                message="凭据无效",
+            )
             self._consume_dummy_password_check(credentials)
             raise
 
-        # 策略分发
-        if credentials.login_type == "password":
-            user = await self._verify_password_login(credentials, db, tenant=tenant)
-        # elif credentials.login_type == "sms":
-        #     user = await self._verify_sms_login(credentials, db)
-        # elif credentials.login_type == "google":
-        #     user = await self._verify_google_login(credentials, db)
-        else:
-            raise BusinessRuleException(
-                "不支持的登录方式", error_code="UNSUPPORTED_LOGIN_TYPE"
+        try:
+            if credentials.login_type == "password":
+                user = await self._verify_password_login(credentials, db, tenant=tenant)
+            else:
+                raise BusinessRuleException(
+                    "不支持的登录方式", error_code="UNSUPPORTED_LOGIN_TYPE"
+                )
+        except (AuthenticationException, AuthorizationException):
+            await self._write_login_log(
+                tenant_id=tenant.tenant_id,
+                audit_scope="tenant",
+                user_id=None,
+                username=credentials.user_name or "",
+                ip=ip,
+                user_agent=user_agent,
+                status="2",
+                message="凭据无效",
             )
+            raise
 
         # 统一签发 Token
         token = create_access_token(
@@ -152,6 +171,8 @@ class AuthService:
 
         # 写入成功日志
         await self._write_login_log(
+            tenant_id=tenant.tenant_id,
+            audit_scope="tenant",
             user_id=user.user_id,
             username=user.user_name,
             ip=ip,
@@ -178,6 +199,8 @@ class AuthService:
 
     async def _write_login_log(
         self,
+        tenant_id: int | None,
+        audit_scope: str,
         user_id: int | None,
         username: str,
         ip: str | None,
@@ -189,6 +212,8 @@ class AuthService:
         try:
             async with AsyncSessionLocal() as session:
                 log = SysLoginLog(
+                    tenant_id=tenant_id,
+                    audit_scope=audit_scope,
                     user_id=user_id,
                     username=username,
                     ip=ip,
@@ -420,13 +445,34 @@ async def get_current_tenant_context(
     return get_bound_tenant_context(current_user)
 
 
+async def get_public_tenant_context(
+    db: AsyncSession = Depends(get_db),
+) -> TenantLocatorContext:
+    """Resolve the only public-read tenant while hosted login remains hard-gated."""
+    tenant = await db.scalar(
+        select(Tenant).where(
+            Tenant.tenant_id == DEFAULT_TENANT_ID,
+            Tenant.tenant_code == DEFAULT_TENANT_CODE,
+            Tenant.status == STATUS_ENABLED,
+        )
+    )
+    if tenant is None:
+        raise AuthenticationException(error_code="INVALID_CREDENTIALS")
+    return TenantLocatorContext(
+        tenant_id=tenant.tenant_id,
+        tenant_code=tenant.tenant_code,
+        tenant_version=tenant.row_version,
+    )
+
+
 def build_menu_tree(menus: list[Menu], parent_id: int = None) -> list[UserRoute]:
     """
     递归构建路由树
     """
     tree = []
     # 过滤出当前层级的子菜单，并按 order 排序
-    current_level_menus = [m for m in menus if m.parent_id == parent_id]
+    effective_parent_id = None if parent_id == 0 else parent_id
+    current_level_menus = [m for m in menus if m.parent_id == effective_parent_id]
     current_level_menus.sort(key=lambda x: x.order or 0)
 
     for menu in current_level_menus:

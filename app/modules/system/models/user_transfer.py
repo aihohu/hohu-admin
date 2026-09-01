@@ -16,8 +16,11 @@ from sqlalchemy import (
     BigInteger,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
+    Index,
     Integer,
     String,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy import (
@@ -41,8 +44,31 @@ class UserImportBatch(Base):
     """
 
     __tablename__ = "sys_user_import_batch"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "batch_id", name="uq_sys_user_import_batch_tenant_batch"
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "preview_token",
+            name="uq_sys_user_import_batch_tenant_preview_token",
+        ),
+        ForeignKeyConstraint(
+            ("tenant_id", "operator_id"),
+            ("sys_user.tenant_id", "sys_user.user_id"),
+            name="fk_sys_user_import_batch_tenant_operator",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_sys_user_import_batch_tenant_status", "tenant_id", "status"),
+    )
 
     batch_id: Mapped[str] = mapped_column(String(64), primary_key=True, comment="UUID")
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("sys_tenant.tenant_id", ondelete="RESTRICT"),
+        nullable=False,
+        comment="租户ID；必须由可信 TenantContext 显式写入",
+    )
     operator_id: Mapped[int] = mapped_column(BigInteger, index=True)
     filename: Mapped[str] = mapped_column(String(256))
     file_sha256: Mapped[str] = mapped_column(String(64))
@@ -55,8 +81,6 @@ class UserImportBatch(Base):
 
     preview_token: Mapped[str] = mapped_column(
         String(64),
-        unique=True,
-        index=True,
         comment="执行时用于反查批次并保证幂等",
     )
     summary_new: Mapped[int] = mapped_column(Integer, default=0)
@@ -116,13 +140,39 @@ class UserImportBatchLog(Base):
     """
 
     __tablename__ = "sys_user_import_batch_log"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "log_id", name="uq_sys_user_import_log_tenant_log"
+        ),
+        ForeignKeyConstraint(
+            ("tenant_id", "batch_id"),
+            ("sys_user_import_batch.tenant_id", "sys_user_import_batch.batch_id"),
+            name="fk_sys_user_import_log_tenant_batch",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ("tenant_id", "operator_id"),
+            ("sys_user.tenant_id", "sys_user.user_id"),
+            name="fk_sys_user_import_log_tenant_operator",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_sys_user_import_log_tenant_batch", "tenant_id", "batch_id"),
+    )
 
     log_id: Mapped[str] = mapped_column(
-        String(64), primary_key=True, default=next_id, comment="Snowflake ID"
+        String(64),
+        primary_key=True,
+        default=lambda: str(next_id()),
+        comment="Snowflake ID",
+    )
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("sys_tenant.tenant_id", ondelete="RESTRICT"),
+        nullable=False,
+        comment="租户ID；必须由可信 TenantContext 显式写入",
     )
     batch_id: Mapped[str] = mapped_column(
         String(64),
-        ForeignKey("sys_user_import_batch.batch_id", ondelete="CASCADE"),
         index=True,
     )
     operator_id: Mapped[int] = mapped_column(BigInteger, index=True)
@@ -169,9 +219,30 @@ class UserExportTask(Base):
     """
 
     __tablename__ = "sys_user_export_task"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "export_id", name="uq_sys_user_export_tenant_export"
+        ),
+        ForeignKeyConstraint(
+            ("tenant_id", "operator_id"),
+            ("sys_user.tenant_id", "sys_user.user_id"),
+            name="fk_sys_user_export_tenant_operator",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_sys_user_export_tenant_status", "tenant_id", "status"),
+    )
 
     export_id: Mapped[str] = mapped_column(
-        String(64), primary_key=True, default=next_id, comment="Snowflake ID"
+        String(64),
+        primary_key=True,
+        default=lambda: str(next_id()),
+        comment="Snowflake ID",
+    )
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("sys_tenant.tenant_id", ondelete="RESTRICT"),
+        nullable=False,
+        comment="租户ID；必须由可信 TenantContext 显式写入",
     )
     operator_id: Mapped[int] = mapped_column(BigInteger, index=True)
     filter_snapshot: Mapped[dict] = mapped_column(

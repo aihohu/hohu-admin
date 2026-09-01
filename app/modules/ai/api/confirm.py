@@ -45,7 +45,7 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.redis import redis_client
-from app.core.tenant import resolve_tenant_id
+from app.core.tenant import get_bound_tenant_context, resolve_tenant_id
 from app.db.session import AsyncSessionLocal, get_db
 from app.modules.ai.agents.gateway.executor import (
     execute_approved_prepared_action,
@@ -368,7 +368,11 @@ async def _confirm_prepared(
         )
 
     try:
-        await prepared_action_service.validate_snapshot(db, action)
+        await prepared_action_service.validate_snapshot(
+            db,
+            action,
+            tenant=get_bound_tenant_context(current_user),
+        )
         deps = await chat_service.build_chat_deps(
             db,
             current_user,

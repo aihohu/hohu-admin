@@ -21,6 +21,8 @@ from app.core.exceptions import (
     DuplicateException,
     NotFoundException,
 )
+from app.core.tenant import TenantContext, bind_tenant_context
+from app.core.tenant_scope import tenant_select
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
 from app.modules.ai.schemas.role_agent import RoleAgentBindReq
 from app.modules.system.models.dept import Dept
@@ -35,6 +37,10 @@ from app.modules.system.service.authorization_snapshot import (
 from app.modules.system.service.grant_authority import (
     GrantAuthority,
     grant_authority_service,
+)
+from app.modules.system.service.tenant_association_writer import (
+    replace_role_depts,
+    replace_role_menus,
 )
 from app.modules.system.service.user_role_assignment_service import (
     RoleSetAuthority,
@@ -118,9 +124,11 @@ class RoleManagementService:
             error_code="ROLE_DEPTS_REQUIRE_CUSTOM_SCOPE",
         )
 
-    async def _load_role(self, db: AsyncSession, role_id: int) -> Role:
+    async def _load_role(
+        self, db: AsyncSession, role_id: int, *, tenant: TenantContext
+    ) -> Role:
         role = await db.scalar(
-            select(Role)
+            tenant_select(Role, tenant=tenant)
             .where(Role.role_id == role_id)
             .options(selectinload(Role.menus), selectinload(Role.depts))
             .execution_options(populate_existing=True)
@@ -133,11 +141,16 @@ class RoleManagementService:
         self,
         db: AsyncSession,
         role_id: int,
+        *,
+        tenant: TenantContext,
     ) -> list[User]:
         users = await db.execute(
-            select(User)
+            tenant_select(User, tenant=tenant)
             .join(User.roles)
-            .where(Role.role_id == role_id)
+            .where(
+                Role.tenant_id == tenant.tenant_id,
+                Role.role_id == role_id,
+            )
             .options(
                 selectinload(User.depts),
                 selectinload(User.roles).selectinload(Role.menus),
@@ -148,9 +161,11 @@ class RoleManagementService:
         )
         return list(users.scalars().unique())
 
-    async def _load_actor(self, db: AsyncSession, actor_user_id: int) -> User:
+    async def _load_actor(
+        self, db: AsyncSession, actor_user_id: int, *, tenant: TenantContext
+    ) -> User:
         actor = await db.scalar(
-            select(User)
+            tenant_select(User, tenant=tenant)
             .where(User.user_id == actor_user_id)
             .options(
                 selectinload(User.roles).selectinload(Role.menus),
@@ -161,6 +176,7 @@ class RoleManagementService:
         )
         if actor is None:
             raise NotFoundException("用户")
+        bind_tenant_context(actor, tenant)
         return actor
 
     @staticmethod
@@ -174,12 +190,15 @@ class RoleManagementService:
         self,
         db: AsyncSession,
         role_ids: set[int],
+        *,
+        tenant: TenantContext,
     ) -> dict[int, set[int]]:
         if not role_ids:
             return {}
         rows = (
             await db.execute(
                 select(RoleAiAgent.role_id, RoleAiAgent.agent_id).where(
+                    RoleAiAgent.tenant_id == tenant.tenant_id,
                     RoleAiAgent.role_id.in_(role_ids),
                     RoleAiAgent.enabled.is_(True),
                 )
@@ -262,6 +281,8 @@ class RoleManagementService:
         self,
         db: AsyncSession,
         dept_ids: list[int] | None,
+        *,
+        tenant: TenantContext,
     ) -> tuple[Dept, ...]:
         normalized = tuple(sorted({int(value) for value in (dept_ids or [])}))
         if not normalized:
@@ -269,7 +290,7 @@ class RoleManagementService:
         depts = tuple(
             (
                 await db.execute(
-                    select(Dept)
+                    tenant_select(Dept, tenant=tenant)
                     .where(Dept.dept_id.in_(normalized))
                     .order_by(Dept.dept_id)
                 )
@@ -286,11 +307,15 @@ class RoleManagementService:
         self,
         db: AsyncSession,
         menu_ids: list[int] | None,
+        *,
+        tenant: TenantContext,
     ) -> tuple[Menu, ...]:
         normalized = {int(value) for value in (menu_ids or [])}
         if not normalized:
             return ()
-        all_menus = list((await db.execute(select(Menu))).scalars())
+        all_menus = list(
+            (await db.execute(tenant_select(Menu, tenant=tenant))).scalars()
+        )
         by_id = {int(menu.menu_id): menu for menu in all_menus}
         if not normalized <= set(by_id):
             raise BusinessRuleException(
@@ -335,6 +360,7 @@ class RoleManagementService:
         *,
         action: Literal["create", "update", "update_menus"],
         actor_user_id: int,
+        tenant: TenantContext,
         role_in: RoleCreate | RoleUpdate | None = None,
         role_id: int | None = None,
         menu_ids: list[int] | None = None,
@@ -344,9 +370,11 @@ class RoleManagementService:
             "update": "system:role:edit",
             "update_menus": "system:role:menu-auth",
         }[action]
-        authority = await grant_authority_service.build(db, actor_user_id)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         self._require_permission(authority, permission)
-        actor = await self._load_actor(db, actor_user_id)
+        actor = await self._load_actor(db, actor_user_id, tenant=tenant)
         role: Role | None = None
         members: list[User] = []
         before: list[RoleSetAuthority] = []
@@ -365,10 +393,11 @@ class RoleManagementService:
                 )
             duplicate = await db.scalar(
                 select(Role.role_id).where(
+                    Role.tenant_id == tenant.tenant_id,
                     or_(
                         Role.role_code == role_in.role_code,
                         Role.role_name == role_in.role_name,
-                    )
+                    ),
                 )
             )
             if duplicate is not None:
@@ -377,7 +406,9 @@ class RoleManagementService:
                 data_scope=role_in.data_scope,
                 dept_ids=role_in.dept_ids,
             )
-            candidate_depts = await self._load_depts(db, role_in.dept_ids)
+            candidate_depts = await self._load_depts(
+                db, role_in.dept_ids, tenant=tenant
+            )
             if not self._definition_dominated(
                 authority,
                 menus=(),
@@ -389,8 +420,8 @@ class RoleManagementService:
             candidate_values = role_in.model_dump(mode="json")
         else:
             assert role_id is not None
-            role = await self._load_role(db, role_id)
-            members = await self._load_role_members(db, role_id)
+            role = await self._load_role(db, role_id, tenant=tenant)
+            members = await self._load_role_members(db, role_id, tenant=tenant)
             self._ensure_member_boundary(
                 authority,
                 actor_user_id=actor_user_id,
@@ -400,6 +431,7 @@ class RoleManagementService:
             agent_ids_by_role = await self._active_agent_ids_by_role(
                 db,
                 {int(role.role_id)},
+                tenant=tenant,
             )
             current_agent_ids = agent_ids_by_role.get(int(role.role_id), set())
             if not self._definition_dominated(
@@ -416,6 +448,7 @@ class RoleManagementService:
                 if "role_name" in candidate_values:
                     duplicate = await db.scalar(
                         select(Role.role_id).where(
+                            Role.tenant_id == tenant.tenant_id,
                             Role.role_name == candidate_values["role_name"],
                             Role.role_id != role_id,
                         )
@@ -437,6 +470,7 @@ class RoleManagementService:
                     candidate_depts = await self._load_depts(
                         db,
                         requested_dept_ids,
+                        tenant=tenant,
                     )
                 elif next_scope == role.data_scope:
                     candidate_depts = tuple(role.depts)
@@ -446,7 +480,7 @@ class RoleManagementService:
             else:
                 candidate_values = {}
                 candidate_depts = tuple(role.depts)
-                candidate_menus = await self._expand_menus(db, menu_ids)
+                candidate_menus = await self._expand_menus(db, menu_ids, tenant=tenant)
             candidate = self._candidate_role(
                 role,
                 values=candidate_values,
@@ -478,11 +512,13 @@ class RoleManagementService:
             before = (
                 await user_role_assignment_service.materialize_role_set_authorities(
                     db,
+                    tenant=tenant,
                     candidates=candidates_before,
                 )
             )
             after = await user_role_assignment_service.materialize_role_set_authorities(
                 db,
+                tenant=tenant,
                 candidates=candidates_after,
                 agent_ids_by_role_override={role_id: current_agent_ids},
             )
@@ -577,6 +613,7 @@ class RoleManagementService:
         *,
         action: Literal["create", "update", "update_menus"],
         actor_user_id: int,
+        tenant: TenantContext,
         role_in: RoleCreate | RoleUpdate | None = None,
         role_id: int | None = None,
         menu_ids: list[int] | None = None,
@@ -586,6 +623,7 @@ class RoleManagementService:
             db,
             action=action,
             actor_user_id=actor_user_id,
+            tenant=tenant,
             role_in=role_in,
             role_id=role_id,
             menu_ids=menu_ids,
@@ -595,12 +633,14 @@ class RoleManagementService:
             role_ids=initial.role_ids,
             dept_ids=initial.dept_ids,
             user_ids=initial.user_ids,
+            tenant=tenant,
         )
         try:
             locked = await self._evaluate(
                 db,
                 action=action,
                 actor_user_id=actor_user_id,
+                tenant=tenant,
                 role_in=role_in,
                 role_id=role_id,
                 menu_ids=menu_ids,
@@ -636,12 +676,14 @@ class RoleManagementService:
         role_in: RoleCreate,
         *,
         actor_user_id: int,
+        tenant: TenantContext,
     ) -> RoleManagementPreview:
         return (
             await self._evaluate(
                 db,
                 action="create",
                 actor_user_id=actor_user_id,
+                tenant=tenant,
                 role_in=role_in,
             )
         ).preview
@@ -652,25 +694,28 @@ class RoleManagementService:
         role_in: RoleCreate,
         *,
         actor_user_id: int,
+        tenant: TenantContext,
         expected_snapshot: dict[str, Any] | None = None,
     ) -> Role:
         evaluation = await self._authorize_and_lock(
             db,
             action="create",
             actor_user_id=actor_user_id,
+            tenant=tenant,
             role_in=role_in,
             expected_snapshot=expected_snapshot,
         )
         role = Role(
+            tenant_id=tenant.tenant_id,
             role_name=role_in.role_name,
             role_code=role_in.role_code,
             role_desc=role_in.role_desc,
             data_scope=role_in.data_scope,
             status=role_in.status,
-            depts=list(evaluation.candidate_depts),
         )
         db.add(role)
         await db.flush()
+        await replace_role_depts(db, role, evaluation.candidate_depts, tenant=tenant)
         return role
 
     async def preview_update(
@@ -680,12 +725,14 @@ class RoleManagementService:
         role_in: RoleUpdate,
         *,
         actor_user_id: int,
+        tenant: TenantContext,
     ) -> RoleManagementPreview:
         return (
             await self._evaluate(
                 db,
                 action="update",
                 actor_user_id=actor_user_id,
+                tenant=tenant,
                 role_id=role_id,
                 role_in=role_in,
             )
@@ -698,12 +745,14 @@ class RoleManagementService:
         role_in: RoleUpdate,
         *,
         actor_user_id: int,
+        tenant: TenantContext,
         expected_snapshot: dict[str, Any] | None = None,
     ) -> Role:
         evaluation = await self._authorize_and_lock(
             db,
             action="update",
             actor_user_id=actor_user_id,
+            tenant=tenant,
             role_id=role_id,
             role_in=role_in,
             expected_snapshot=expected_snapshot,
@@ -716,7 +765,12 @@ class RoleManagementService:
             "dept_ids" in role_in.model_fields_set
             or "data_scope" in role_in.model_fields_set
         ):
-            evaluation.role.depts = list(evaluation.candidate_depts)
+            await replace_role_depts(
+                db,
+                evaluation.role,
+                evaluation.candidate_depts,
+                tenant=tenant,
+            )
         return evaluation.role
 
     async def preview_update_menus(
@@ -726,12 +780,14 @@ class RoleManagementService:
         menu_ids: list[int],
         *,
         actor_user_id: int,
+        tenant: TenantContext,
     ) -> RoleManagementPreview:
         return (
             await self._evaluate(
                 db,
                 action="update_menus",
                 actor_user_id=actor_user_id,
+                tenant=tenant,
                 role_id=role_id,
                 menu_ids=menu_ids,
             )
@@ -744,18 +800,25 @@ class RoleManagementService:
         menu_ids: list[int],
         *,
         actor_user_id: int,
+        tenant: TenantContext,
         expected_snapshot: dict[str, Any] | None = None,
     ) -> Role:
         evaluation = await self._authorize_and_lock(
             db,
             action="update_menus",
             actor_user_id=actor_user_id,
+            tenant=tenant,
             role_id=role_id,
             menu_ids=menu_ids,
             expected_snapshot=expected_snapshot,
         )
         assert evaluation.role is not None
-        evaluation.role.menus = list(evaluation.candidate_menus)
+        await replace_role_menus(
+            db,
+            evaluation.role,
+            evaluation.candidate_menus,
+            tenant=tenant,
+        )
         return evaluation.role
 
     async def preview_update_agents(
@@ -765,6 +828,7 @@ class RoleManagementService:
         agent_ids: list[int],
         *,
         actor_user_id: int,
+        tenant: TenantContext,
     ) -> RoleManagementPreview:
         from app.modules.ai.service.role_agent import (  # noqa: PLC0415
             role_agent_service,
@@ -775,13 +839,14 @@ class RoleManagementService:
             role_id,
             agent_ids,
             actor_user_id=actor_user_id,
+            tenant=tenant,
         )
         member_ids = tuple(
             int(value["userId"])
             for value in snapshot.get("members", [])
             if isinstance(value, dict) and "userId" in value
         )
-        role = await self._load_role(db, role_id)
+        role = await self._load_role(db, role_id, tenant=tenant)
         return RoleManagementPreview(
             action="update_agents",
             role_id=role_id,
@@ -797,6 +862,7 @@ class RoleManagementService:
         agent_ids: list[int],
         *,
         actor_user_id: int,
+        tenant: TenantContext,
         expected_snapshot: dict[str, Any] | None = None,
     ) -> Role:
         from app.modules.ai.service.role_agent import (  # noqa: PLC0415
@@ -808,9 +874,10 @@ class RoleManagementService:
             role_id,
             RoleAgentBindReq(agent_ids=[str(value) for value in agent_ids]),
             actor_user_id=actor_user_id,
+            tenant=tenant,
             expected_snapshot=expected_snapshot,
         )
-        return await self._load_role(db, role_id)
+        return await self._load_role(db, role_id, tenant=tenant)
 
     async def authorize_role_projection(
         self,
@@ -818,20 +885,23 @@ class RoleManagementService:
         *,
         actor_user_id: int,
         role_id: int,
+        tenant: TenantContext,
     ) -> Role:
         """Reauthorize a managed Role result against current delegation facts."""
-        authority = await grant_authority_service.build(db, actor_user_id)
-        role = await self._load_role(db, role_id)
-        members = await self._load_role_members(db, role_id)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
+        role = await self._load_role(db, role_id, tenant=tenant)
+        members = await self._load_role_members(db, role_id, tenant=tenant)
         self._ensure_member_boundary(
             authority,
             actor_user_id=actor_user_id,
             role=role,
             members=members,
         )
-        agent_ids = (await self._active_agent_ids_by_role(db, {int(role.role_id)})).get(
-            int(role.role_id), set()
-        )
+        agent_ids = (
+            await self._active_agent_ids_by_role(db, {int(role.role_id)}, tenant=tenant)
+        ).get(int(role.role_id), set())
         if not self._definition_dominated(
             authority,
             menus=role.menus,
@@ -842,6 +912,7 @@ class RoleManagementService:
             self._raise_authority_exceeded()
         current = await user_role_assignment_service.materialize_role_set_authorities(
             db,
+            tenant=tenant,
             candidates=[
                 (member, list(member.roles), list(member.depts)) for member in members
             ],
@@ -854,6 +925,7 @@ class RoleManagementService:
         db: AsyncSession,
         *,
         actor_user_id: int,
+        tenant: TenantContext,
         query: str | None = None,
         role_name: str | None = None,
         role_code: str | None = None,
@@ -862,7 +934,9 @@ class RoleManagementService:
         limit: int = 20,
         offset: int = 0,
     ) -> tuple[list[RoleSummary], int, tuple[int, ...]]:
-        authority = await grant_authority_service.build(db, actor_user_id)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         self._require_permission(authority, "system:role:list")
         filters = []
         if query:
@@ -896,7 +970,7 @@ class RoleManagementService:
             for value in (
                 await db.execute(
                     select(Role.role_id)
-                    .where(*filters)
+                    .where(Role.tenant_id == tenant.tenant_id, *filters)
                     .order_by(Role.role_code, Role.role_id)
                 )
             ).scalars()
@@ -906,7 +980,7 @@ class RoleManagementService:
             (
                 await db.execute(
                     select(Role)
-                    .where(*filters)
+                    .where(Role.tenant_id == tenant.tenant_id, *filters)
                     .options(
                         selectinload(Role.menus),
                         selectinload(Role.depts),
@@ -929,6 +1003,7 @@ class RoleManagementService:
         agents = await self._active_agent_ids_by_role(
             db,
             {int(role.role_id) for role in roles},
+            tenant=tenant,
         )
         summaries: list[RoleSummary] = []
         for role in roles:
@@ -966,6 +1041,7 @@ class RoleManagementService:
                 current = (
                     await user_role_assignment_service.materialize_role_set_authorities(
                         db,
+                        tenant=tenant,
                         candidates=[
                             (member, list(member.roles), list(member.depts))
                             for member in role.users

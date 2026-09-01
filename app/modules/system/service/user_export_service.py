@@ -21,6 +21,7 @@ from app.core.exceptions import (
 )
 from app.core.file_storage import FileStorage, get_file_storage
 from app.core.id_generator import next_id
+from app.core.tenant import PlatformContext, TenantContext
 from app.db.base import user_depts
 from app.modules.system.constants import (
     EXPORT_ALLOWED_FIELDS,
@@ -101,6 +102,8 @@ async def _query_users_with_data_scope(
     db: AsyncSession,
     filter_: UserExportFilter,
     current_user: User,
+    *,
+    tenant: TenantContext,
 ) -> list[User]:
     """按筛选条件和数据权限查询用户列表。
 
@@ -108,7 +111,7 @@ async def _query_users_with_data_scope(
     - data_scope 自动应用：HR 只能导他可见的部门用户
     - 排序：create_time desc（与 list 接口一致）
     """
-    stmt = select(User)
+    stmt = select(User).where(User.tenant_id == tenant.tenant_id)
 
     if filter_.user_name:
         stmt = stmt.where(User.user_name.contains(filter_.user_name))
@@ -123,11 +126,18 @@ async def _query_users_with_data_scope(
     if filter_.dept_id:
         # 多对多：user 在指定 dept 中（user_depts join）
         dept_id_int = int(filter_.dept_id)
-        subq = select(user_depts.c.user_id).where(user_depts.c.dept_id == dept_id_int)
+        subq = select(user_depts.c.user_id).where(
+            user_depts.c.tenant_id == tenant.tenant_id,
+            user_depts.c.dept_id == dept_id_int,
+        )
         stmt = stmt.where(User.user_id.in_(subq))
 
     # data_scope（HR 只能导他可见的部门用户）
-    scope_filters = await get_user_data_scope_filters(db, current_user)
+    scope_filters = await get_user_data_scope_filters(
+        db,
+        current_user,
+        tenant=tenant,
+    )
     for f in scope_filters:
         stmt = stmt.where(f)
 
@@ -195,7 +205,7 @@ def _build_excel(rows: list[User], dept_lookup: dict[int, Dept]) -> bytes:
 
 
 async def _build_dept_lookup_for_rows(
-    db: AsyncSession, rows: list[User]
+    db: AsyncSession, rows: list[User], *, tenant: TenantContext
 ) -> dict[int, Dept]:
     """预查部门映射，用于生成部门完整路径。
 
@@ -219,7 +229,10 @@ async def _build_dept_lookup_for_rows(
         return {}
 
     # 2. 查叶子 dept（拿 ancestors）
-    leaf_stmt = select(Dept).where(Dept.dept_id.in_(leaf_ids))
+    leaf_stmt = select(Dept).where(
+        Dept.tenant_id == tenant.tenant_id,
+        Dept.dept_id.in_(leaf_ids),
+    )
     leaf_depts = list((await db.execute(leaf_stmt)).scalars().all())
 
     # 3. 解析 ancestors 收集祖先 dept_id
@@ -240,7 +253,10 @@ async def _build_dept_lookup_for_rows(
     missing = ancestor_ids - leaf_ids
     ancestors: list[Dept] = []
     if missing:
-        anc_stmt = select(Dept).where(Dept.dept_id.in_(missing))
+        anc_stmt = select(Dept).where(
+            Dept.tenant_id == tenant.tenant_id,
+            Dept.dept_id.in_(missing),
+        )
         ancestors = list((await db.execute(anc_stmt)).scalars().all())
 
     # 5. 合并构建 dept_lookup
@@ -256,6 +272,7 @@ async def export_users_to_excel(
     *,
     reason: str,
     file_storage: FileStorage | None = None,
+    tenant: TenantContext,
 ) -> tuple[bytes, int, str]:
     """导出用户到 Excel。
 
@@ -283,13 +300,18 @@ async def export_users_to_excel(
     reason_clean = _validate_reason(reason)
 
     # 1. 计算 accessible_dept_ids（filter_snapshot 冻结用）
-    accessible_dept_ids = await _compute_accessible_dept_ids(db, current_user)
+    accessible_dept_ids = await _compute_accessible_dept_ids(
+        db,
+        current_user,
+        tenant=tenant,
+    )
     accessible_dept_ids_snapshot: list[int] | None = (
         None if accessible_dept_ids is None else sorted(accessible_dept_ids)
     )
 
     # 2. 建 task（CREATED）
     task = UserExportTask(
+        tenant_id=tenant.tenant_id,
         export_id=str(next_id()),
         operator_id=current_user.user_id,
         filter_snapshot={
@@ -311,7 +333,9 @@ async def export_users_to_excel(
 
     try:
         # 4. 查询用户
-        rows = await _query_users_with_data_scope(db, filter_, current_user)
+        rows = await _query_users_with_data_scope(
+            db, filter_, current_user, tenant=tenant
+        )
 
         # 5. 同步导出行数限制。
         if len(rows) > USER_EXPORT_ASYNC_THRESHOLD:
@@ -322,14 +346,14 @@ async def export_users_to_excel(
             )
 
         # 6. 预查部门映射并构造 Excel。
-        dept_lookup = await _build_dept_lookup_for_rows(db, rows)
+        dept_lookup = await _build_dept_lookup_for_rows(db, rows, tenant=tenant)
         xlsx_bytes = _build_excel(rows, dept_lookup)
 
         # 7. 写文件（30 天 TTL）
         storage_key = await storage.save(
             xlsx_bytes,
             mime_type=_EXPORT_MIME_TYPE,
-            namespace=_EXPORT_FILE_NAMESPACE,
+            namespace=f"tenant-{tenant.tenant_id}-{_EXPORT_FILE_NAMESPACE}",
             suffix=".xlsx",
             ttl_seconds=_EXPORT_FILE_TTL_SECONDS,
         )
@@ -373,6 +397,7 @@ async def get_export_task(
     *,
     operator_id: int,
     allow_cross_owner: bool = False,
+    tenant: TenantContext,
 ) -> UserExportTask | None:
     """按 export_id 查询当前 operator 可见的导出任务。
 
@@ -386,7 +411,10 @@ async def get_export_task(
         UserExportTask | None：不存在或不属于当前 operator 均返回 None，由 API 层抛
         ``NotFoundException(error_code="AI_EXPORT_TASK_NOT_FOUND")``。
     """
-    stmt = select(UserExportTask).where(UserExportTask.export_id == export_id)
+    stmt = select(UserExportTask).where(
+        UserExportTask.tenant_id == tenant.tenant_id,
+        UserExportTask.export_id == export_id,
+    )
     if not allow_cross_owner:
         stmt = stmt.where(UserExportTask.operator_id == operator_id)
     return (await db.execute(stmt)).scalar_one_or_none()
@@ -398,6 +426,7 @@ async def list_export_tasks(
     *,
     operator_id: int,
     allow_cross_owner: bool = False,
+    tenant: TenantContext,
 ) -> PageResult:
     """分页查询当前 operator 可见的导出任务列表。
 
@@ -416,7 +445,7 @@ async def list_export_tasks(
     Raises:
         BusinessRuleException: ``AI_EXPORT_INVALID_STATUS`` — status 非合法枚举值
     """
-    filters: list = []
+    filters: list = [UserExportTask.tenant_id == tenant.tenant_id]
     if not allow_cross_owner:
         filters.append(UserExportTask.operator_id == operator_id)
     if query.operator_id is not None:
@@ -440,7 +469,9 @@ async def list_export_tasks(
     )
 
 
-async def cleanup_expired_export_tasks(db: AsyncSession) -> int:
+async def cleanup_expired_export_tasks(
+    db: AsyncSession, *, platform: PlatformContext
+) -> int:
     """清理 30 天前的导出任务及关联文件。
 
     每日 02:30 cron 入口（``app.tasks.user_cleanup_tasks.clean_expired_export_tasks``）。
@@ -456,6 +487,8 @@ async def cleanup_expired_export_tasks(db: AsyncSession) -> int:
     - file_storage_key 指向不存在的文件（被外部删了）也不抛错（FileStorage.delete
       返 False 而非 raise；MockFileStorage 同款）
     """
+    if not platform.reason or not platform.correlation_id:
+        raise BusinessRuleException("平台清理上下文无效")
     cutoff = datetime.now() - timedelta(days=30)
     fs = get_file_storage()
 
@@ -483,6 +516,7 @@ async def download_export_file(
     operator_id: int,
     allow_cross_owner: bool = False,
     file_storage: FileStorage | None = None,
+    tenant: TenantContext,
 ) -> tuple[bytes, str]:
     """按 ``export_id`` 下载已导出的文件。
 
@@ -516,6 +550,7 @@ async def download_export_file(
         export_id,
         operator_id=operator_id,
         allow_cross_owner=allow_cross_owner,
+        tenant=tenant,
     )
     if task is None:
         raise NotFoundException(

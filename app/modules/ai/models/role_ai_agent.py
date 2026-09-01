@@ -1,6 +1,15 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    PrimaryKeyConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -18,17 +27,30 @@ class RoleAiAgent(Base):
     """
 
     __tablename__ = "role_ai_agent"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "role_id", "agent_id"),
+        ForeignKeyConstraint(
+            ("tenant_id", "role_id"),
+            ("sys_role.tenant_id", "sys_role.role_id"),
+            name="fk_role_ai_agent_tenant_role",
+            ondelete="CASCADE",
+        ),
+        Index("ix_role_ai_agent_tenant_agent", "tenant_id", "agent_id"),
+    )
+
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        comment="租户ID；Agent 本身保持 platform-global",
+    )
 
     role_id: Mapped[int] = mapped_column(
         BigInteger,
-        ForeignKey("sys_role.role_id"),
-        primary_key=True,
         comment="角色ID",
     )
     agent_id: Mapped[int] = mapped_column(
         BigInteger,
-        ForeignKey("ai_agent.agent_id"),
-        primary_key=True,
+        ForeignKey("ai_agent.agent_id", ondelete="CASCADE"),
         comment="AgentID",
     )
     enabled: Mapped[bool] = mapped_column(

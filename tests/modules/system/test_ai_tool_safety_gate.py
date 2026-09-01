@@ -27,8 +27,18 @@ from app.modules.system.ai_tools import (
 )
 from app.modules.system.schemas.user_transfer import FailedRow
 from app.modules.system.service.user_import_parser import ImportErrorCollection
+from tests.tenant_helpers import tenant_context
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _mock_tool_ctx(db: object) -> SimpleNamespace:
+    return SimpleNamespace(
+        user=SimpleNamespace(user_id=11),
+        db=db,
+        tenant_id=0,
+        tenant=tenant_context(tenant_id=0, actor_user_id=11),
+    )
 
 
 def _xlsx_bytes() -> bytes:
@@ -169,10 +179,7 @@ class TestImportPreviewArtifacts:
                 ]
             )
         )
-        ctx = SimpleNamespace(
-            user=SimpleNamespace(user_id=11),
-            db=SimpleNamespace(),
-        )
+        ctx = _mock_tool_ctx(SimpleNamespace())
 
         monkeypatch.setattr(
             "app.modules.system.ai_tools.user_transfer._load_file_bytes",
@@ -236,7 +243,7 @@ class TestImportPreviewArtifacts:
         )
         storage = SimpleNamespace(save=AsyncMock(side_effect=["key-1", "key-2"]))
         db = SimpleNamespace(flush=AsyncMock())
-        ctx = SimpleNamespace(user=SimpleNamespace(user_id=11), db=db)
+        ctx = _mock_tool_ctx(db)
         ensure_import_permissions = AsyncMock()
 
         monkeypatch.setattr(
@@ -284,7 +291,12 @@ class TestImportPreviewArtifacts:
         assert dry_run.await_count == 2
         assert ensure_import_permissions.await_count == 2
         assert all(
-            awaited.kwargs == {"actor_user_id": 11, "has_role_column": False}
+            awaited.kwargs
+            == {
+                "actor_user_id": 11,
+                "has_role_column": False,
+                "tenant": ctx.tenant,
+            }
             for awaited in ensure_import_permissions.await_args_list
         )
         assert storage.save.await_count == 2
@@ -315,7 +327,7 @@ class TestImportPreviewArtifacts:
             read=AsyncMock(return_value=csv_bytes),
         )
         db = SimpleNamespace(flush=AsyncMock())
-        ctx = SimpleNamespace(user=SimpleNamespace(user_id=11), db=db)
+        ctx = _mock_tool_ctx(db)
         execute_result = SimpleNamespace(
             success_count=1,
             skipped_count=0,
@@ -378,7 +390,12 @@ class TestImportPreviewArtifacts:
         ]
         assert ensure_import_permissions.await_count == 2
         assert all(
-            awaited.kwargs == {"actor_user_id": 11, "has_role_column": False}
+            awaited.kwargs
+            == {
+                "actor_user_id": 11,
+                "has_role_column": False,
+                "tenant": ctx.tenant,
+            }
             for awaited in ensure_import_permissions.await_args_list
         )
 

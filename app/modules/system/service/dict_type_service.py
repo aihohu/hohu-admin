@@ -7,6 +7,8 @@ from app.core.exceptions import (
     DuplicateException,
     NotFoundException,
 )
+from app.core.tenant import TenantContext
+from app.core.tenant_scope import tenant_filter, tenant_select
 from app.modules.system.models.dict_data import DictData
 from app.modules.system.models.dict_type import DictType
 from app.modules.system.schemas.dict_type import (
@@ -20,7 +22,9 @@ from app.utils.pagination import build_filters, paginate
 class DictTypeService:
     """字典类型业务逻辑服务"""
 
-    async def get_list(self, db: AsyncSession, query: DictTypeQuery):
+    async def get_list(
+        self, db: AsyncSession, query: DictTypeQuery, *, tenant: TenantContext
+    ):
         """
         获取字典类型分页列表
 
@@ -38,6 +42,7 @@ class DictTypeService:
             "status": ("status", "=="),
         }
         filters = build_filters(DictType, field_mapping, **query.model_dump())
+        filters.insert(0, tenant_filter(DictType, tenant=tenant))
 
         # 使用通用分页查询
         page_data = await paginate(
@@ -50,7 +55,9 @@ class DictTypeService:
 
         return page_data
 
-    async def create(self, db: AsyncSession, type_in: DictTypeCreate) -> DictType:
+    async def create(
+        self, db: AsyncSession, type_in: DictTypeCreate, *, tenant: TenantContext
+    ) -> DictType:
         """
         创建字典类型
 
@@ -66,24 +73,33 @@ class DictTypeService:
         """
         # 检查编码唯一性
         check = await db.execute(
-            select(DictType).where(DictType.dict_type == type_in.dict_type)
+            tenant_select(DictType, tenant=tenant).where(
+                DictType.dict_type == type_in.dict_type
+            )
         )
         if check.scalars().first():
             raise DuplicateException("字典类型", type_in.dict_type)
 
         # 检查名称唯一性
         check_name = await db.execute(
-            select(DictType).where(DictType.dict_name == type_in.dict_name)
+            tenant_select(DictType, tenant=tenant).where(
+                DictType.dict_name == type_in.dict_name
+            )
         )
         if check_name.scalars().first():
             raise DuplicateException("字典类型", type_in.dict_name)
 
-        new_type = DictType(**type_in.model_dump())
+        new_type = DictType(tenant_id=tenant.tenant_id, **type_in.model_dump())
         db.add(new_type)
         return new_type
 
     async def update(
-        self, db: AsyncSession, type_id: int, type_in: DictTypeUpdate
+        self,
+        db: AsyncSession,
+        type_id: int,
+        type_in: DictTypeUpdate,
+        *,
+        tenant: TenantContext,
     ) -> DictType:
         """
         更新字典类型信息
@@ -99,7 +115,11 @@ class DictTypeService:
         Raises:
             NotFoundException: 字典类型不存在
         """
-        dict_type = await db.get(DictType, type_id)
+        dict_type = await db.scalar(
+            tenant_select(DictType, tenant=tenant).where(
+                DictType.dict_type_id == type_id
+            )
+        )
         if not dict_type:
             raise NotFoundException("字典类型")
 
@@ -109,7 +129,9 @@ class DictTypeService:
 
         return dict_type
 
-    async def delete(self, db: AsyncSession, type_id: int) -> None:
+    async def delete(
+        self, db: AsyncSession, type_id: int, *, tenant: TenantContext
+    ) -> None:
         """
         删除字典类型
 
@@ -121,13 +143,20 @@ class DictTypeService:
             NotFoundException: 字典类型不存在
             BusinessRuleException: 字典类型下有数据
         """
-        dict_type = await db.get(DictType, type_id)
+        dict_type = await db.scalar(
+            tenant_select(DictType, tenant=tenant).where(
+                DictType.dict_type_id == type_id
+            )
+        )
         if not dict_type:
             raise NotFoundException("字典类型")
 
         # 检查是否有关联的字典数据
         check_stmt = select(DictData).where(
-            and_(DictData.dict_type == dict_type.dict_type)
+            and_(
+                DictData.tenant_id == tenant.tenant_id,
+                DictData.dict_type == dict_type.dict_type,
+            )
         )
         result = await db.execute(check_stmt)
         if result.scalars().first():
@@ -135,7 +164,9 @@ class DictTypeService:
 
         await db.delete(dict_type)
 
-    async def get_all_enabled(self, db: AsyncSession) -> list[DictType]:
+    async def get_all_enabled(
+        self, db: AsyncSession, *, tenant: TenantContext
+    ) -> list[DictType]:
         """
         获取所有启用的字典类型列表（不分页）
 
@@ -146,14 +177,16 @@ class DictTypeService:
             字典类型列表
         """
         stmt = (
-            select(DictType)
+            tenant_select(DictType, tenant=tenant)
             .where(DictType.status == STATUS_ENABLED)
             .order_by(DictType.create_time.asc())
         )
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
-    async def batch_delete(self, db: AsyncSession, ids: list[int]) -> int:
+    async def batch_delete(
+        self, db: AsyncSession, ids: list[int], *, tenant: TenantContext
+    ) -> int:
         """
         批量删除字典类型
 
@@ -169,13 +202,16 @@ class DictTypeService:
         """
         # 检查是否有字典类型下存在数据
         dict_types = await db.execute(
-            select(DictType).where(DictType.dict_type_id.in_(ids))
+            tenant_select(DictType, tenant=tenant).where(DictType.dict_type_id.in_(ids))
         )
         dict_type_list = dict_types.scalars().all()
+        if {int(item.dict_type_id) for item in dict_type_list} != set(ids):
+            raise NotFoundException("字典类型")
 
         for dict_type in dict_type_list:
             check_stmt = select(DictData).where(
-                DictData.dict_type == dict_type.dict_type
+                DictData.tenant_id == tenant.tenant_id,
+                DictData.dict_type == dict_type.dict_type,
             )
             result = await db.execute(check_stmt)
             if result.scalars().first():

@@ -14,6 +14,7 @@ from app.modules.system.service.user_department_assignment_service import (
     DepartmentMembershipResult,
     user_department_assignment_service,
 )
+from tests.tenant_helpers import tenant_context
 
 
 def test_department_member_ids_are_canonical_strings() -> None:
@@ -97,6 +98,7 @@ async def test_department_member_api_delegates_to_shared_policy(
     )
     db = AsyncMock()
     actor = SimpleNamespace(user_id=7)
+    tenant = tenant_context(tenant_id=0, actor_user_id=7)
 
     response = await get_dept_users(
         5,
@@ -105,12 +107,14 @@ async def test_department_member_api_delegates_to_shared_policy(
         size=20,
         db=db,
         current_user=actor,
+        tenant=tenant,
     )
     await update_dept_users(
         5,
         DeptUsersUpdate(userIds=["11"]),
         db=db,
         current_user=actor,
+        tenant=tenant,
     )
 
     assert response.data.records[0].user_id == 11
@@ -121,11 +125,13 @@ async def test_department_member_api_delegates_to_shared_policy(
         query="ali",
         current=2,
         size=20,
+        tenant=tenant,
     )
     replace_mock.assert_awaited_once_with(
         db,
         actor_user_id=7,
         dept_id=5,
         user_ids=["11"],
+        tenant=tenant,
     )
     db.commit.assert_awaited_once()

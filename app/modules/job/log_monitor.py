@@ -18,6 +18,8 @@ from datetime import datetime
 
 from sqlalchemy import select, update
 
+from app.constants import STATUS_ENABLED
+from app.core.tenant import PlatformContext
 from app.db.session import AsyncSessionLocal
 from app.modules.job.job_runner import (
     LOG_STATUS_FAILED,
@@ -25,6 +27,7 @@ from app.modules.job.job_runner import (
     RUNNER_ID,
 )
 from app.modules.job.models.job import SysJob, SysJobLog
+from app.modules.system.models.tenant import Tenant
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +43,12 @@ class JobLogMonitor:
     DEFAULT_TIMEOUT = 1800  # 任务未设 timeout 时的兜底 grace（30min）
     MAX_BACKOFF = 600  # 异常退避上限（10min）
 
-    def __init__(self, runner_id: str = RUNNER_ID) -> None:
+    def __init__(
+        self, *, platform: PlatformContext, runner_id: str = RUNNER_ID
+    ) -> None:
+        if not isinstance(platform, PlatformContext):
+            raise TypeError("platform context is required")
+        self._platform = platform
         self._runner_id = runner_id
         self._task: asyncio.Task[None] | None = None
 
@@ -99,41 +107,60 @@ class JobLogMonitor:
         now = datetime.now()
 
         async with AsyncSessionLocal() as db:
-            # 粗筛：拿所有 RUNNING log（status 索引前缀命中）
-            stmt = select(SysJobLog).where(SysJobLog.status == LOG_STATUS_RUNNING)
-            candidates = (await db.execute(stmt)).scalars().all()
-            if not candidates:
-                return 0
-
-            # 一次 SELECT job 配置，避免 N+1
-            job_ids = {c.job_id for c in candidates}
-            jobs = {
-                j.job_id: j
-                for j in (
-                    await db.execute(select(SysJob).where(SysJob.job_id.in_(job_ids)))
-                )
-                .scalars()
-                .all()
-            }
-
             to_reclaim: list[SysJobLog] = []
-            for log in candidates:
-                # 不动本进程的 log（长任务保护，决策 1）
-                if log.runner_id == self._runner_id:
-                    continue
-
-                # 按 job 实际 timeout 二次过滤（决策 3）
-                job = jobs.get(log.job_id)
-                timeout_sec = (
-                    job.timeout_seconds
-                    if job and job.timeout_seconds
-                    else self.DEFAULT_TIMEOUT
+            tenant_ids = (
+                await db.execute(
+                    select(Tenant.tenant_id).where(Tenant.status == STATUS_ENABLED)
                 )
-                grace = timeout_sec * 2
-                if (now - log.start_time).total_seconds() < grace:
+            ).scalars()
+            for tenant_id in tenant_ids:
+                candidates = (
+                    (
+                        await db.execute(
+                            select(SysJobLog).where(
+                                SysJobLog.tenant_id == tenant_id,
+                                SysJobLog.status == LOG_STATUS_RUNNING,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                if not candidates:
                     continue
 
-                to_reclaim.append(log)
+                job_ids = {candidate.job_id for candidate in candidates}
+                jobs = {
+                    job.job_id: job
+                    for job in (
+                        await db.execute(
+                            select(SysJob).where(
+                                SysJob.tenant_id == tenant_id,
+                                SysJob.job_id.in_(job_ids),
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                }
+
+                for log in candidates:
+                    # 不动本进程的 log（长任务保护，决策 1）
+                    if log.runner_id == self._runner_id:
+                        continue
+
+                    # 按 job 实际 timeout 二次过滤（决策 3）
+                    job = jobs.get(log.job_id)
+                    timeout_sec = (
+                        job.timeout_seconds
+                        if job and job.timeout_seconds
+                        else self.DEFAULT_TIMEOUT
+                    )
+                    grace = timeout_sec * 2
+                    if (now - log.start_time).total_seconds() < grace:
+                        continue
+
+                    to_reclaim.append(log)
 
             for log in to_reclaim:
                 runner_desc = (
@@ -145,6 +172,7 @@ class JobLogMonitor:
                 # 影响 0 行，不覆盖 audit 字段
                 await db.execute(
                     update(SysJobLog)
+                    .where(SysJobLog.tenant_id == log.tenant_id)
                     .where(SysJobLog.job_log_id == log.job_log_id)
                     .where(SysJobLog.status == LOG_STATUS_RUNNING)
                     .values(

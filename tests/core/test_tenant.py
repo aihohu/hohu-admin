@@ -46,10 +46,13 @@ def test_resolver_rejects_an_unbound_server_principal_during_m1():
     assert exc_info.value.error_code == "TENANT_CONTEXT_REQUIRED"
 
 
-def test_resolver_m1_adapter_accepts_only_an_unbound_default_tenant_user():
+def test_resolver_rejects_unbound_default_tenant_user_after_plan2():
     principal = User(user_id=101, tenant_id=0, user_name="alice", status="1")
 
-    assert resolve_tenant_id(principal) == 0
+    with pytest.raises(AuthenticationException) as exc_info:
+        resolve_tenant_id(principal)
+
+    assert exc_info.value.error_code == "TENANT_CONTEXT_REQUIRED"
 
 
 def test_binding_rejects_actor_mismatch_and_accepts_matching_principal():

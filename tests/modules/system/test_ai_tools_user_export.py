@@ -5,7 +5,7 @@ download URL only through UI data. The LLM-facing payload must never contain a
 bearer download token.
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import func, select
@@ -20,7 +20,9 @@ from app.modules.ai.service.result_projection_service import (
 )
 from app.modules.system.ai_tools import user_export
 from app.modules.system.constants import ExportTaskStatus
+from app.modules.system.models.user import User
 from app.modules.system.models.user_transfer import UserExportTask
+from tests.tenant_helpers import bind_test_user
 
 
 def test_user_export_always_requires_hitl() -> None:
@@ -32,9 +34,15 @@ def test_user_export_always_requires_hitl() -> None:
     assert meta.hitl_always is True
 
 
-def _make_ctx(db: AsyncSession) -> AiToolContext:
+async def _make_ctx(db: AsyncSession) -> AiToolContext:
     """Build the minimum unrestricted data-scope context for export tests."""
+    actor = await db.scalar(
+        select(User).where(User.tenant_id == 0, User.user_name == "admin")
+    )
+    assert actor is not None
+    bind_test_user(actor)
     data_scope = DataScopeContext(
+        tenant_id=0,
         accessible_dept_ids=None,
         accessible_user_scope=None,
         filters=[],
@@ -48,12 +56,13 @@ def _make_ctx(db: AsyncSession) -> AiToolContext:
         allowed_filters=("status",),
     )
     return AiToolContext(
-        user=MagicMock(user_id=1),
+        user=actor,
         perms={"system:user:export"},
         db=db,
         data_scope=data_scope,
         trace_id="tr_export_test",
         tool_meta=meta,
+        tenant_id=0,
         data_scope_hash="scope-hash",
     )
 
@@ -90,7 +99,7 @@ class TestUserExportDetailCard:
             "app.modules.system.service.user_export_service.get_file_storage",
             lambda: file_storage,
         )
-        ctx = _make_ctx(db_session)
+        ctx = await _make_ctx(db_session)
         result = await user_export(ctx, reason="QA export detail card")
 
         assert result.ui is not None
@@ -104,7 +113,7 @@ class TestUserExportDetailCard:
             "app.modules.system.service.user_export_service.get_file_storage",
             lambda: file_storage,
         )
-        ctx = _make_ctx(db_session)
+        ctx = await _make_ctx(db_session)
         result = await user_export(ctx, reason="QA export download url")
 
         view_data = result.ui.view_data
@@ -122,7 +131,7 @@ class TestUserExportDetailCard:
             "app.modules.system.service.user_export_service.get_file_storage",
             lambda: file_storage,
         )
-        ctx = _make_ctx(db_session)
+        ctx = await _make_ctx(db_session)
         result = await user_export(ctx, reason="QA export metadata")
 
         view_data = result.ui.view_data
@@ -142,7 +151,7 @@ class TestUserExportDetailCard:
             "app.modules.system.service.user_export_service.get_file_storage",
             lambda: file_storage,
         )
-        ctx = _make_ctx(db_session)
+        ctx = await _make_ctx(db_session)
         result = await user_export(ctx, reason="QA export data")
 
         assert "exportId" in result.data
@@ -172,8 +181,9 @@ class TestUserExportDetailCard:
             issue,
         )
 
+        ctx = await _make_ctx(db_session)
         with pytest.raises(AuthorizationException) as exc_info:
-            await user_export(_make_ctx(db_session), reason="QA denied projection")
+            await user_export(ctx, reason="QA denied projection")
 
         assert getattr(exc_info.value, "error_code", None) == (
             "AI_RESULT_PROJECTION_FORBIDDEN"
@@ -182,7 +192,8 @@ class TestUserExportDetailCard:
         issue.assert_not_awaited()
         task_count = await db_session.scalar(
             select(func.count(UserExportTask.export_id)).where(
-                UserExportTask.operator_id == 1,
+                UserExportTask.tenant_id == 0,
+                UserExportTask.operator_id == ctx.user.user_id,
                 UserExportTask.reason == "QA denied projection",
             )
         )
@@ -202,8 +213,9 @@ class TestUserExportDetailCard:
             AsyncMock(return_value=None),
         )
 
+        ctx = await _make_ctx(db_session)
         with pytest.raises(AuthorizationException) as exc_info:
-            await user_export(_make_ctx(db_session), reason="QA denied projection")
+            await user_export(ctx, reason="QA denied projection")
 
         assert getattr(exc_info.value, "error_code", None) == (
             "AI_RESULT_PROJECTION_FORBIDDEN"
@@ -232,7 +244,7 @@ class TestAlwaysCreatesTask:
             "app.modules.system.service.user_export_service.get_file_storage",
             lambda: file_storage,
         )
-        ctx = _make_ctx(db_session)
+        ctx = await _make_ctx(db_session)
         result = await user_export(ctx, reason="QA always creates task")
 
         export_id = result.data["exportId"]
@@ -249,7 +261,7 @@ class TestAlwaysCreatesTask:
         assert task.status == ExportTaskStatus.SUCCESS
         assert task.row_count == row_count
         assert task.reason == "QA always creates task"
-        assert task.operator_id == 1  # _make_ctx 的 MagicMock user_id=1
+        assert task.operator_id == ctx.user.user_id
         assert task.file_storage_key is not None
         assert task.file_size_bytes is not None
         assert task.file_size_bytes > 0

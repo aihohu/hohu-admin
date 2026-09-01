@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
+from tenant_helpers import tenant_context
 
 from app.core.config import settings
 from app.core.exceptions import BusinessRuleException
@@ -25,6 +26,8 @@ from app.modules.ai.agents.tools.meta import SHARED_AGENT_CODE, AiToolMeta
 from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.ai.core.context import AiToolContext, DataScopeContext
 from app.modules.system.models.file import File
+from app.modules.system.models.tenant import Tenant
+from app.modules.system.models.user import User
 
 # ============ fixture ============
 
@@ -39,12 +42,15 @@ def _make_ctx(db: AsyncSession, *, meta: AiToolMeta | None = None) -> AiToolCont
         assert reg is not None, "file.parse 未注册，先调 load_builtin_tools()"
         meta = reg.meta
     data_scope = DataScopeContext(
+        tenant_id=0,
         accessible_dept_ids=None,
         accessible_user_scope=None,
         filters=[],
     )
+    user = MagicMock(user_id=1, tenant_id=0)
+    user._tenant_context = tenant_context(actor_user_id=1)
     return AiToolContext(
-        user=MagicMock(user_id=1),
+        user=user,
         perms=set(),
         db=db,
         data_scope=data_scope,
@@ -60,7 +66,32 @@ async def _add_file_record(
     file_id: int = _FILE_ID,
     file_path: str,
     mime_type: str,
+    owner_user_id: int | None = 1,
+    tenant_id: int = 0,
 ) -> File:
+    if tenant_id != 0 and await db.get(Tenant, tenant_id) is None:
+        db.add(
+            Tenant(
+                tenant_id=tenant_id,
+                tenant_code=f"tenant-{tenant_id}",
+                tenant_name=f"Tenant {tenant_id}",
+                status="1",
+                row_version=1,
+            )
+        )
+        await db.flush()
+    if owner_user_id is not None and await db.get(User, owner_user_id) is None:
+        db.add(
+            User(
+                user_id=owner_user_id,
+                tenant_id=tenant_id,
+                user_name=f"file-owner-{owner_user_id}",
+                nickname="File owner",
+                hashed_password="$2b$12$dummy",
+                status="1",
+            )
+        )
+        await db.flush()
     path = Path(file_path)
     file_size = (await asyncio.to_thread(path.stat)).st_size
     file_record = File(
@@ -73,8 +104,8 @@ async def _add_file_record(
         file_ext=path.suffix,
         mime_type=mime_type,
         business_type="ai-chat",
-        owner_user_id=1,
-        tenant_id=0,
+        owner_user_id=owner_user_id,
+        tenant_id=tenant_id,
         del_flag="0",
     )
     db.add(file_record)
@@ -230,21 +261,12 @@ class TestFileParseFunction:
         """del_flag='1' 的文件视为不存在"""
         path = tmp_path / "deleted.csv"
         _make_csv(path, [["a"], ["1"]])
-        file_record = File(
-            file_id=_FILE_ID,
-            original_name="deleted.csv",
-            file_name=str(_FILE_ID),
+        file_record = await _add_file_record(
+            db_session,
             file_path=str(path),
-            file_url=f"/uploads/{_FILE_ID}",
-            file_size=10,
-            file_ext=".csv",
             mime_type="text/csv",
-            business_type="ai-chat",
-            owner_user_id=1,
-            tenant_id=0,
-            del_flag="1",
         )
-        db_session.add(file_record)
+        file_record.del_flag = "1"
         await db_session.flush()
         ctx = _make_ctx(db_session)
         with pytest.raises(BusinessRuleException) as exc_info:
@@ -253,7 +275,7 @@ class TestFileParseFunction:
 
     @pytest.mark.parametrize(
         ("owner_user_id", "tenant_id"),
-        [(2, 0), (1, 9), (None, 0)],
+        [(2, 0), (9, 9), (None, 0)],
     )
     async def test_parse_cross_owner_tenant_and_legacy_owner_are_hidden(
         self,
@@ -264,14 +286,13 @@ class TestFileParseFunction:
     ) -> None:
         path = tmp_path / f"scope-{owner_user_id}-{tenant_id}.csv"
         _make_csv(path, [["a"], ["1"]])
-        record = await _add_file_record(
+        await _add_file_record(
             db_session,
             file_path=str(path),
             mime_type="text/csv",
+            owner_user_id=owner_user_id,
+            tenant_id=tenant_id,
         )
-        record.owner_user_id = owner_user_id
-        record.tenant_id = tenant_id
-        await db_session.flush()
 
         with pytest.raises(BusinessRuleException) as exc_info:
             await file_parse(_make_ctx(db_session), file_id=str(_FILE_ID))

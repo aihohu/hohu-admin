@@ -11,6 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from app.constants import STATUS_ENABLED, SUPER_ADMIN_ROLE_CODE
 from app.core.config import settings
 from app.core.id_generator import next_id
+from app.core.tenant import DEFAULT_TENANT_ID
 from app.db.base import role_menus
 from app.modules.ai.constants import (
     AI_AGENT_EDIT_PERMISSION,
@@ -35,13 +36,24 @@ class PermissionMigrationResult:
 
 
 async def _ensure_ai_agent_parent(db: AsyncSession) -> Menu:
-    parent = await db.scalar(select(Menu).where(Menu.route_name == "ai_agent"))
+    parent = await db.scalar(
+        select(Menu).where(
+            Menu.tenant_id == DEFAULT_TENANT_ID,
+            Menu.route_name == "ai_agent",
+        )
+    )
     if parent is not None:
         return parent
-    ai_root = await db.scalar(select(Menu).where(Menu.route_name == "ai"))
+    ai_root = await db.scalar(
+        select(Menu).where(
+            Menu.tenant_id == DEFAULT_TENANT_ID,
+            Menu.route_name == "ai",
+        )
+    )
     if ai_root is None:
         raise RuntimeError("ai parent menu not found; run menu seed first")
     parent = Menu(
+        tenant_id=DEFAULT_TENANT_ID,
         menu_id=next_id(),
         parent_id=ai_root.menu_id,
         menu_name="AI 助手管理",
@@ -73,12 +85,18 @@ async def _ensure_permission_menu(
     name: str,
     legacy_names: tuple[str, ...] = (),
 ) -> tuple[Menu, bool]:
-    menu = await db.scalar(select(Menu).where(Menu.permission == permission))
+    menu = await db.scalar(
+        select(Menu).where(
+            Menu.tenant_id == DEFAULT_TENANT_ID,
+            Menu.permission == permission,
+        )
+    )
     if menu is not None:
         if menu.menu_name in legacy_names:
             menu.menu_name = name
         return menu, False
     menu = Menu(
+        tenant_id=DEFAULT_TENANT_ID,
         menu_id=next_id(),
         parent_id=parent.menu_id,
         menu_name=name,
@@ -103,6 +121,7 @@ async def _grant_menu(
         (
             await db.execute(
                 select(role_menus.c.role_id).where(
+                    role_menus.c.tenant_id == DEFAULT_TENANT_ID,
                     role_menus.c.role_id.in_(role_ids),
                     role_menus.c.menu_id == menu_id,
                 )
@@ -113,7 +132,14 @@ async def _grant_menu(
     if missing:
         await db.execute(
             insert(role_menus),
-            [{"role_id": role_id, "menu_id": menu_id} for role_id in sorted(missing)],
+            [
+                {
+                    "tenant_id": DEFAULT_TENANT_ID,
+                    "role_id": role_id,
+                    "menu_id": menu_id,
+                }
+                for role_id in sorted(missing)
+            ],
         )
     return len(missing)
 
@@ -137,6 +163,7 @@ async def _bind_published_agents_to_super(
     rows = (
         await db.execute(
             select(RoleAiAgent).where(
+                RoleAiAgent.tenant_id == DEFAULT_TENANT_ID,
                 RoleAiAgent.role_id.in_(super_role_ids),
                 RoleAiAgent.agent_id.in_(agent_ids),
             )
@@ -153,6 +180,7 @@ async def _bind_published_agents_to_super(
                 continue
             db.add(
                 RoleAiAgent(
+                    tenant_id=DEFAULT_TENANT_ID,
                     role_id=role_id,
                     agent_id=agent_id,
                     enabled=True,
@@ -165,12 +193,16 @@ async def _bind_published_agents_to_super(
 
 async def _ensure_upgrade_enabled_tools_config(db: AsyncSession) -> None:
     existing = await db.scalar(
-        select(Config).where(Config.config_key == "ai:enabled_tools")
+        select(Config).where(
+            Config.tenant_id == DEFAULT_TENANT_ID,
+            Config.config_key == "ai:enabled_tools",
+        )
     )
     if existing is not None:
         return
     db.add(
         Config(
+            tenant_id=DEFAULT_TENANT_ID,
             config_id=next_id(),
             config_name="AI 额外启用工具",
             config_key="ai:enabled_tools",
@@ -189,7 +221,12 @@ async def migrate_ai_mvp_permissions(
     db: AsyncSession,
 ) -> PermissionMigrationResult:
     """执行可事务回滚的 upgrade 数据迁移；调用方负责 commit。"""
-    chat_parent = await db.scalar(select(Menu).where(Menu.route_name == "ai_chat"))
+    chat_parent = await db.scalar(
+        select(Menu).where(
+            Menu.tenant_id == DEFAULT_TENANT_ID,
+            Menu.route_name == "ai_chat",
+        )
+    )
     if chat_parent is None:
         raise RuntimeError("ai_chat parent menu not found; run menu seed first")
     agent_parent = await _ensure_ai_agent_parent(db)
@@ -244,7 +281,10 @@ async def migrate_ai_mvp_permissions(
     ):
         prefix, action = permission.rsplit(":", 1)
         parent = await db.scalar(
-            select(Menu).where(Menu.route_name == parent_routes[prefix])
+            select(Menu).where(
+                Menu.tenant_id == DEFAULT_TENANT_ID,
+                Menu.route_name == parent_routes[prefix],
+            )
         )
         if parent is None:
             raise RuntimeError(
@@ -262,7 +302,10 @@ async def migrate_ai_mvp_permissions(
     super_role_ids = set(
         (
             await db.execute(
-                select(Role.role_id).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+                select(Role.role_id).where(
+                    Role.tenant_id == DEFAULT_TENANT_ID,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                )
             )
         ).scalars()
     )
@@ -272,7 +315,10 @@ async def migrate_ai_mvp_permissions(
             await db.execute(
                 select(RoleAiAgent.role_id)
                 .join(AiAgent, AiAgent.agent_id == RoleAiAgent.agent_id)
-                .where(AiAgent.code != "shared")
+                .where(
+                    RoleAiAgent.tenant_id == DEFAULT_TENANT_ID,
+                    AiAgent.code != "shared",
+                )
                 .distinct()
             )
         ).scalars()

@@ -21,7 +21,7 @@ from sqlalchemy.orm import selectinload, sessionmaker
 
 from app.constants import STATUS_ENABLED
 from app.core.config import settings
-from app.core.tenant import DEFAULT_TENANT_ID
+from app.core.tenant import DEFAULT_TENANT_CODE, DEFAULT_TENANT_ID, TenantContext
 from app.db.base import role_depts, user_depts, user_roles
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
@@ -92,7 +92,9 @@ def _materialize_dept_ids(
     return resolution.accessible_dept_ids or frozenset()
 
 
-async def _authorization_versions(db: AsyncSession) -> dict[str, str]:
+async def _authorization_versions(
+    db: AsyncSession, *, tenant: TenantContext
+) -> dict[str, str]:
     role_rows = (
         await db.execute(
             select(
@@ -100,26 +102,30 @@ async def _authorization_versions(db: AsyncSession) -> dict[str, str]:
                 Role.role_code,
                 Role.status,
                 Role.data_scope,
-            ).order_by(Role.role_id)
+            )
+            .where(Role.tenant_id == tenant.tenant_id)
+            .order_by(Role.role_id)
         )
     ).all()
     role_dept_rows = (
         await db.execute(
-            select(role_depts.c.role_id, role_depts.c.dept_id).order_by(
-                role_depts.c.role_id,
-                role_depts.c.dept_id,
-            )
+            select(role_depts.c.role_id, role_depts.c.dept_id)
+            .where(role_depts.c.tenant_id == tenant.tenant_id)
+            .order_by(role_depts.c.role_id, role_depts.c.dept_id)
         )
     ).all()
     user_rows = (
-        await db.execute(select(User.user_id, User.status).order_by(User.user_id))
+        await db.execute(
+            select(User.user_id, User.status)
+            .where(User.tenant_id == tenant.tenant_id)
+            .order_by(User.user_id)
+        )
     ).all()
     user_role_rows = (
         await db.execute(
-            select(user_roles.c.user_id, user_roles.c.role_id).order_by(
-                user_roles.c.user_id,
-                user_roles.c.role_id,
-            )
+            select(user_roles.c.user_id, user_roles.c.role_id)
+            .where(user_roles.c.tenant_id == tenant.tenant_id)
+            .order_by(user_roles.c.user_id, user_roles.c.role_id)
         )
     ).all()
     user_dept_rows = (
@@ -128,10 +134,9 @@ async def _authorization_versions(db: AsyncSession) -> dict[str, str]:
                 user_depts.c.user_id,
                 user_depts.c.dept_id,
                 user_depts.c.is_primary,
-            ).order_by(
-                user_depts.c.user_id,
-                user_depts.c.dept_id,
             )
+            .where(user_depts.c.tenant_id == tenant.tenant_id)
+            .order_by(user_depts.c.user_id, user_depts.c.dept_id)
         )
     ).all()
     dept_rows = (
@@ -141,7 +146,9 @@ async def _authorization_versions(db: AsyncSession) -> dict[str, str]:
                 Dept.parent_id,
                 Dept.ancestors,
                 Dept.status,
-            ).order_by(Dept.dept_id)
+            )
+            .where(Dept.tenant_id == tenant.tenant_id)
+            .order_by(Dept.dept_id)
         )
     ).all()
     return {
@@ -181,13 +188,17 @@ async def build_scope_union_report(
     db: AsyncSession,
     *,
     build_sha: str,
+    tenant: TenantContext,
 ) -> ScopeUnionAuditReport:
     """Build a canonical report from the caller's consistent read snapshot."""
     users = (
         (
             await db.execute(
                 select(User)
-                .where(User.status == STATUS_ENABLED)
+                .where(
+                    User.tenant_id == tenant.tenant_id,
+                    User.status == STATUS_ENABLED,
+                )
                 .options(selectinload(User.roles), selectinload(User.depts))
                 .order_by(User.user_id)
             )
@@ -202,18 +213,28 @@ async def build_scope_union_report(
         if len([role for role in user.roles if role.status == STATUS_ENABLED]) >= 2
     ]
     all_user_ids = frozenset(
-        int(user_id) for user_id in (await db.execute(select(User.user_id))).scalars()
+        int(user_id)
+        for user_id in (
+            await db.execute(
+                select(User.user_id).where(User.tenant_id == tenant.tenant_id)
+            )
+        ).scalars()
     )
     all_dept_ids = frozenset(
-        int(dept_id) for dept_id in (await db.execute(select(Dept.dept_id))).scalars()
+        int(dept_id)
+        for dept_id in (
+            await db.execute(
+                select(Dept.dept_id).where(Dept.tenant_id == tenant.tenant_id)
+            )
+        ).scalars()
     )
 
     principal_reports: list[dict[str, Any]] = []
     expansion_count = 0
     for principal in principals:
-        legacy_api = await resolve_legacy_data_scope(db, principal)
-        legacy_ai = await resolve_legacy_ai_data_scope(db, principal)
-        union_scope = await resolve_data_scope(db, principal)
+        legacy_api = await resolve_legacy_data_scope(db, principal, tenant=tenant)
+        legacy_ai = await resolve_legacy_ai_data_scope(db, principal, tenant=tenant)
+        union_scope = await resolve_data_scope(db, principal, tenant=tenant)
         legacy_api_dept_ids = _materialize_dept_ids(legacy_api, all_dept_ids)
         legacy_ai_dept_ids = _materialize_dept_ids(legacy_ai, all_dept_ids)
         union_dept_ids = _materialize_dept_ids(union_scope, all_dept_ids)
@@ -275,10 +296,10 @@ async def build_scope_union_report(
 
     payload: dict[str, Any] = {
         "schemaVersion": REPORT_SCHEMA_VERSION,
-        "tenantId": str(DEFAULT_TENANT_ID),
+        "tenantId": str(tenant.tenant_id),
         "resolverVersion": DATA_SCOPE_UNION_RESOLVER_VERSION,
         "buildSha": build_sha,
-        "versions": await _authorization_versions(db),
+        "versions": await _authorization_versions(db, tenant=tenant),
         "principalCount": len(principal_reports),
         "expansionCount": expansion_count,
         "principals": principal_reports,
@@ -405,6 +426,13 @@ async def _run_locked_release(
 
 
 async def _run_audit(args: argparse.Namespace) -> int:
+    audit_tenant = TenantContext(
+        tenant_id=DEFAULT_TENANT_ID,
+        tenant_code=DEFAULT_TENANT_CODE,
+        actor_user_id=1,
+        tenant_version=1,
+        source="worker_envelope",
+    )
     engine = create_async_engine(
         settings.DATABASE_URL,
         isolation_level="REPEATABLE READ",
@@ -422,6 +450,7 @@ async def _run_audit(args: argparse.Namespace) -> int:
                 current_report = await build_scope_union_report(
                     db,
                     build_sha=_current_build_sha(),
+                    tenant=audit_tenant,
                 )
                 write_protected_report(args.output, current_report)
                 current_exit_code = (

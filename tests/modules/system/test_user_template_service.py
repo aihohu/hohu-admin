@@ -18,8 +18,16 @@ from openpyxl import load_workbook
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.service.user_import_template_service import (
-    generate_import_template,
+    generate_import_template as _generate_import_template,
 )
+from tests.tenant_helpers import tenant_context
+
+TENANT = tenant_context()
+
+
+async def generate_import_template(db_session):
+    return await _generate_import_template(db_session, tenant=TENANT)
+
 
 #: 四个 sheet 名称。
 _EXPECTED_SHEET_NAMES: tuple[str, ...] = (
@@ -56,6 +64,7 @@ async def seed_dept_tree(db_session) -> tuple[Dept, Dept, Dept]:
            └─ 前端部 (ancestors='0,{总公司.id},{研发中心.id}')
     """
     root = Dept(
+        tenant_id=TENANT.tenant_id,
         dept_name="模板总公司",
         parent_id=None,
         ancestors="0",
@@ -66,6 +75,7 @@ async def seed_dept_tree(db_session) -> tuple[Dept, Dept, Dept]:
     await db_session.flush()
 
     mid = Dept(
+        tenant_id=TENANT.tenant_id,
         dept_name="模板研发中心",
         parent_id=root.dept_id,
         ancestors=f"0,{root.dept_id}",
@@ -76,6 +86,7 @@ async def seed_dept_tree(db_session) -> tuple[Dept, Dept, Dept]:
     await db_session.flush()
 
     leaf = Dept(
+        tenant_id=TENANT.tenant_id,
         dept_name="模板前端部",
         parent_id=mid.dept_id,
         ancestors=f"0,{root.dept_id},{mid.dept_id}",
@@ -91,6 +102,7 @@ async def seed_dept_tree(db_session) -> tuple[Dept, Dept, Dept]:
 async def seed_disabled_dept_and_role(db_session) -> tuple[Dept, Role]:
     """建 1 个禁用 dept + 1 个禁用 role，验证 status='2' 不进字典。"""
     disabled_dept = Dept(
+        tenant_id=TENANT.tenant_id,
         dept_name="模板禁用部门",
         parent_id=None,
         ancestors="0",
@@ -99,6 +111,7 @@ async def seed_disabled_dept_and_role(db_session) -> tuple[Dept, Role]:
     )
     db_session.add(disabled_dept)
     disabled_role = Role(
+        tenant_id=TENANT.tenant_id,
         role_name="模板禁用角色",
         role_code="R_TEMPLATE_DISABLED",
         status="2",  # 禁用
@@ -113,6 +126,7 @@ async def seed_disabled_dept_and_role(db_session) -> tuple[Dept, Role]:
 async def seed_role(db_session) -> Role:
     """建 1 个启用 role 验证出现在字典 sheet。"""
     role = Role(
+        tenant_id=TENANT.tenant_id,
         role_name="模板启用角色",
         role_code="R_TEMPLATE_ENABLED",
         status="1",

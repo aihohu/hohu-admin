@@ -13,6 +13,7 @@ from app.core.file_storage import validate_private_storage_roots
 from app.core.public_uploads import PublicUploadStaticFiles
 from app.core.redis import close_redis
 from app.core.scheduler import scheduler_manager
+from app.core.tenant import PlatformContext
 from app.db.session import AsyncSessionLocal
 from app.middleware.audit_middleware import AuditLogMiddleware
 from app.middleware.rate_limit_middleware import RateLimitMiddleware
@@ -106,12 +107,20 @@ async def lifespan(_app: FastAPI):
     # 生产模式下调度器由独立的 `app.scheduler_worker` 进程承担，
     # 通过 Redis pub/sub 与本进程通信。
     if settings.APP_ROLE == "all":
+        scheduler_platform = PlatformContext(
+            actor_user_id=0,
+            reason="embedded scheduler tenant enumeration",
+            correlation_id=f"scheduler:{RUNNER_ID}",
+        )
         async with AsyncSessionLocal() as db:
-            await scheduler_manager.reload_jobs(db)
-        await scheduler_manager.start_with_pubsub()
+            await scheduler_manager.reload_jobs(db, platform=scheduler_platform)
+        await scheduler_manager.start_with_pubsub(platform=scheduler_platform)
 
         # 启动时扫描一次孤儿任务日志，随后进入周期监控。
-        job_log_monitor = JobLogMonitor(runner_id=RUNNER_ID)
+        job_log_monitor = JobLogMonitor(
+            platform=scheduler_platform,
+            runner_id=RUNNER_ID,
+        )
         await job_log_monitor.start()
 
     yield

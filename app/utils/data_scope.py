@@ -33,6 +33,7 @@ from app.constants import (
     SUPER_ADMIN_ROLE_CODE,
 )
 from app.core.rbac import is_super_admin
+from app.core.tenant import TenantContext
 from app.db.base import role_depts, user_depts
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
@@ -55,6 +56,7 @@ KNOWN_DATA_SCOPES = frozenset(
 class DataScopeResolution:
     """One canonical materialized authorization view for a principal."""
 
+    tenant_id: int
     scope_kinds: frozenset[str]
     accessible_dept_ids: frozenset[int] | None
     accessible_user_scope: Select[tuple[int]] | None
@@ -69,6 +71,8 @@ def _enabled_roles(user: User) -> list[Role]:
 async def _custom_dept_ids_by_role(
     db: AsyncSession,
     role_ids: set[int],
+    *,
+    tenant: TenantContext,
 ) -> dict[int, set[int]]:
     result = {role_id: set() for role_id in role_ids}
     if not role_ids:
@@ -78,6 +82,8 @@ async def _custom_dept_ids_by_role(
             select(role_depts.c.role_id, role_depts.c.dept_id)
             .join(Dept, Dept.dept_id == role_depts.c.dept_id)
             .where(
+                role_depts.c.tenant_id == tenant.tenant_id,
+                Dept.tenant_id == tenant.tenant_id,
                 role_depts.c.role_id.in_(role_ids),
                 Dept.status == STATUS_ENABLED,
             )
@@ -91,23 +97,30 @@ async def _custom_dept_ids_by_role(
 def _build_user_scope(
     *,
     user_id: int,
+    tenant_id: int,
     dept_ids: frozenset[int],
     include_self: bool,
 ) -> Select[tuple[int]]:
     statements: list[Select[tuple[int]]] = []
     if include_self:
         statements.append(
-            select(User.user_id.label("user_id")).where(User.user_id == user_id)
+            select(User.user_id.label("user_id")).where(
+                User.tenant_id == tenant_id,
+                User.user_id == user_id,
+            )
         )
     if dept_ids:
         statements.append(
             select(user_depts.c.user_id.label("user_id")).where(
-                user_depts.c.dept_id.in_(dept_ids)
+                user_depts.c.tenant_id == tenant_id, user_depts.c.dept_id.in_(dept_ids)
             )
         )
     if not statements:
         statements.append(
-            select(User.user_id.label("user_id")).where(User.user_id == user_id)
+            select(User.user_id.label("user_id")).where(
+                User.tenant_id == tenant_id,
+                User.user_id == user_id,
+            )
         )
     if len(statements) == 1:
         return statements[0]
@@ -117,9 +130,16 @@ def _build_user_scope(
 async def resolve_data_scope(
     db: AsyncSession,
     user: User,
+    *,
+    tenant: TenantContext,
 ) -> DataScopeResolution:
     """Resolve the union of every enabled role's concrete data scope."""
-    return await resolve_data_scope_for_roles(db, user=user, roles=user.roles or [])
+    return await resolve_data_scope_for_roles(
+        db,
+        user=user,
+        roles=user.roles or [],
+        tenant=tenant,
+    )
 
 
 async def resolve_data_scope_for_roles(
@@ -128,13 +148,19 @@ async def resolve_data_scope_for_roles(
     user: User,
     roles: list[Role],
     depts: list[Dept] | None = None,
+    tenant: TenantContext,
 ) -> DataScopeResolution:
     """Resolve a principal against an explicit role set without mutating ORM state."""
+    if int(user.tenant_id) != tenant.tenant_id or any(
+        int(value.tenant_id) != tenant.tenant_id for value in [*roles, *(depts or [])]
+    ):
+        raise RuntimeError("data-scope resources cross tenant boundary")
     enabled_roles = [role for role in roles if role.status == STATUS_ENABLED]
     if user.user_name == ADMIN_USERNAME or any(
         role.role_code == SUPER_ADMIN_ROLE_CODE for role in enabled_roles
     ):
         return DataScopeResolution(
+            tenant_id=tenant.tenant_id,
             scope_kinds=frozenset({DATA_SCOPE_ALL}),
             accessible_dept_ids=None,
             accessible_user_scope=None,
@@ -151,6 +177,7 @@ async def resolve_data_scope_for_roles(
         scope_kinds = frozenset({DATA_SCOPE_SELF})
     if DATA_SCOPE_ALL in scope_kinds:
         return DataScopeResolution(
+            tenant_id=tenant.tenant_id,
             scope_kinds=scope_kinds,
             accessible_dept_ids=None,
             accessible_user_scope=None,
@@ -170,7 +197,9 @@ async def resolve_data_scope_for_roles(
         include_self = include_self or not own_dept_ids
 
     if DATA_SCOPE_DEPT_AND_SUB in scope_kinds:
-        subtree_ids = set(await get_dept_and_sub_ids(db, list(own_dept_ids)))
+        subtree_ids = set(
+            await get_dept_and_sub_ids(db, list(own_dept_ids), tenant=tenant)
+        )
         accessible_dept_ids.update(subtree_ids)
         include_self = include_self or not subtree_ids
 
@@ -179,17 +208,19 @@ async def resolve_data_scope_for_roles(
         for role in enabled_roles
         if role.data_scope == DATA_SCOPE_CUSTOM
     }
-    custom_by_role = await _custom_dept_ids_by_role(db, custom_role_ids)
+    custom_by_role = await _custom_dept_ids_by_role(db, custom_role_ids, tenant=tenant)
     for dept_ids in custom_by_role.values():
         accessible_dept_ids.update(dept_ids)
         include_self = include_self or not dept_ids
 
     frozen_dept_ids = frozenset(accessible_dept_ids)
     return DataScopeResolution(
+        tenant_id=tenant.tenant_id,
         scope_kinds=scope_kinds,
         accessible_dept_ids=frozen_dept_ids,
         accessible_user_scope=_build_user_scope(
             user_id=int(user.user_id),
+            tenant_id=tenant.tenant_id,
             dept_ids=frozen_dept_ids,
             include_self=include_self,
         ),
@@ -202,10 +233,12 @@ def get_user_filters_from_resolution(
     resolution: DataScopeResolution,
 ) -> list:
     """Build the canonical User filter without resolving authorization twice."""
+    filters = [User.tenant_id == resolution.tenant_id]
     if resolution.unbounded:
-        return []
+        return filters
     assert resolution.accessible_user_scope is not None
-    return [User.user_id.in_(resolution.accessible_user_scope)]
+    filters.append(User.user_id.in_(resolution.accessible_user_scope))
+    return filters
 
 
 def get_best_scope(user: User) -> str:
@@ -229,10 +262,15 @@ def get_best_scope(user: User) -> str:
 async def resolve_legacy_data_scope(
     db: AsyncSession,
     user: User,
+    *,
+    tenant: TenantContext,
 ) -> DataScopeResolution:
     """Reproduce the pre-Phase 2 traditional API scope for upgrade audits."""
+    if int(user.tenant_id) != tenant.tenant_id:
+        raise RuntimeError("legacy data-scope user crosses tenant boundary")
     if is_super_admin(user):
         return DataScopeResolution(
+            tenant_id=tenant.tenant_id,
             scope_kinds=frozenset({DATA_SCOPE_ALL}),
             accessible_dept_ids=None,
             accessible_user_scope=None,
@@ -243,6 +281,7 @@ async def resolve_legacy_data_scope(
     scope = get_best_scope(user)
     if scope == DATA_SCOPE_ALL:
         return DataScopeResolution(
+            tenant_id=tenant.tenant_id,
             scope_kinds=frozenset({scope}),
             accessible_dept_ids=None,
             accessible_user_scope=None,
@@ -254,13 +293,15 @@ async def resolve_legacy_data_scope(
     accessible_dept_ids: set[int]
     include_self = scope == DATA_SCOPE_SELF
     if scope == DATA_SCOPE_CUSTOM:
-        accessible_dept_ids = set(await get_custom_dept_ids(db, user))
+        accessible_dept_ids = set(await get_custom_dept_ids(db, user, tenant=tenant))
         include_self = not accessible_dept_ids
     elif scope == DATA_SCOPE_DEPT:
         accessible_dept_ids = own_dept_ids
         include_self = not accessible_dept_ids
     elif scope == DATA_SCOPE_DEPT_AND_SUB:
-        accessible_dept_ids = set(await get_dept_and_sub_ids(db, list(own_dept_ids)))
+        accessible_dept_ids = set(
+            await get_dept_and_sub_ids(db, list(own_dept_ids), tenant=tenant)
+        )
         include_self = not accessible_dept_ids
     else:
         accessible_dept_ids = set()
@@ -268,10 +309,12 @@ async def resolve_legacy_data_scope(
 
     frozen_dept_ids = frozenset(accessible_dept_ids)
     return DataScopeResolution(
+        tenant_id=tenant.tenant_id,
         scope_kinds=frozenset({scope}),
         accessible_dept_ids=frozen_dept_ids,
         accessible_user_scope=_build_user_scope(
             user_id=int(user.user_id),
+            tenant_id=tenant.tenant_id,
             dept_ids=frozen_dept_ids,
             include_self=include_self,
         ),
@@ -283,10 +326,15 @@ async def resolve_legacy_data_scope(
 async def resolve_legacy_ai_data_scope(
     db: AsyncSession,
     user: User,
+    *,
+    tenant: TenantContext,
 ) -> DataScopeResolution:
     """Reproduce the pre-Phase 2 AI DataScopeContext semantics."""
+    if int(user.tenant_id) != tenant.tenant_id:
+        raise RuntimeError("legacy AI data-scope user crosses tenant boundary")
     if is_super_admin(user):
         return DataScopeResolution(
+            tenant_id=tenant.tenant_id,
             scope_kinds=frozenset({DATA_SCOPE_ALL}),
             accessible_dept_ids=None,
             accessible_user_scope=None,
@@ -297,6 +345,7 @@ async def resolve_legacy_ai_data_scope(
     scope = get_best_scope(user)
     if scope == DATA_SCOPE_ALL:
         return DataScopeResolution(
+            tenant_id=tenant.tenant_id,
             scope_kinds=frozenset({scope}),
             accessible_dept_ids=None,
             accessible_user_scope=None,
@@ -306,20 +355,24 @@ async def resolve_legacy_ai_data_scope(
 
     own_dept_ids = {int(dept.dept_id) for dept in (user.depts or [])}
     if scope == DATA_SCOPE_CUSTOM:
-        accessible_dept_ids = set(await get_custom_dept_ids(db, user))
+        accessible_dept_ids = set(await get_custom_dept_ids(db, user, tenant=tenant))
     elif scope == DATA_SCOPE_DEPT:
         accessible_dept_ids = own_dept_ids
     elif scope == DATA_SCOPE_DEPT_AND_SUB:
-        accessible_dept_ids = set(await get_dept_and_sub_ids(db, list(own_dept_ids)))
+        accessible_dept_ids = set(
+            await get_dept_and_sub_ids(db, list(own_dept_ids), tenant=tenant)
+        )
     else:
         accessible_dept_ids = own_dept_ids
 
     frozen_dept_ids = frozenset(accessible_dept_ids)
     return DataScopeResolution(
+        tenant_id=tenant.tenant_id,
         scope_kinds=frozenset({scope}),
         accessible_dept_ids=frozen_dept_ids,
         accessible_user_scope=_build_user_scope(
             user_id=int(user.user_id),
+            tenant_id=tenant.tenant_id,
             dept_ids=frozen_dept_ids,
             include_self=True,
         ),
@@ -336,6 +389,8 @@ async def get_data_scope_filters(
     db: AsyncSession,
     user: User,
     model: type,
+    *,
+    tenant: TenantContext,
     dept_field: str = "dept_id",
     user_field: str = "create_by",
 ) -> list:
@@ -354,7 +409,7 @@ async def get_data_scope_filters(
     Returns:
         SQLAlchemy 过滤条件列表，为空列表表示不过滤。
     """
-    resolution = await resolve_data_scope(db, user)
+    resolution = await resolve_data_scope(db, user, tenant=tenant)
     if resolution.unbounded:
         return []
     dept_col = getattr(model, dept_field)
@@ -372,6 +427,8 @@ async def get_data_scope_filters(
 async def get_user_data_scope_filters(
     db: AsyncSession,
     current_user: User,
+    *,
+    tenant: TenantContext,
 ) -> list:
     """
     专用于 User 模型的数据权限过滤。
@@ -385,10 +442,17 @@ async def get_user_data_scope_filters(
     Returns:
         SQLAlchemy 过滤条件列表。
     """
-    return get_user_filters_from_resolution(await resolve_data_scope(db, current_user))
+    return get_user_filters_from_resolution(
+        await resolve_data_scope(db, current_user, tenant=tenant)
+    )
 
 
-async def get_custom_dept_ids(db: AsyncSession, user: User) -> list[int]:
+async def get_custom_dept_ids(
+    db: AsyncSession,
+    user: User,
+    *,
+    tenant: TenantContext,
+) -> list[int]:
     """获取用户角色通过 role_depts 关联的自定义部门 ID。
 
     过滤禁用部门（Dept.status != 1）—— admin 禁用部门 = 撤销 CUSTOM 授权。
@@ -396,12 +460,16 @@ async def get_custom_dept_ids(db: AsyncSession, user: User) -> list[int]:
     因为用户的组织归属不应被部门禁用剥夺（用户还在那个部门里管理）。
     """
     role_ids = [r.role_id for r in user.roles if r.status == STATUS_ENABLED]
+    if int(user.tenant_id) != tenant.tenant_id:
+        raise RuntimeError("custom data-scope user crosses tenant boundary")
     if not role_ids:
         return []
     stmt = (
         select(role_depts.c.dept_id)
         .join(Dept, Dept.dept_id == role_depts.c.dept_id)
         .where(
+            role_depts.c.tenant_id == tenant.tenant_id,
+            Dept.tenant_id == tenant.tenant_id,
             role_depts.c.role_id.in_(role_ids),
             Dept.status == STATUS_ENABLED,
         )
@@ -410,7 +478,9 @@ async def get_custom_dept_ids(db: AsyncSession, user: User) -> list[int]:
     return list(set(result.scalars().all()))
 
 
-async def get_dept_and_sub_ids(db: AsyncSession, dept_ids: list[int]) -> list[int]:
+async def get_dept_and_sub_ids(
+    db: AsyncSession, dept_ids: list[int], *, tenant: TenantContext
+) -> list[int]:
     """获取指定部门及其所有子部门 ID（利用 ancestors 字段）。
 
     ancestors 字段是逗号分隔的父链（如 "0,12,123"）。用两端补逗号后 like
@@ -424,7 +494,10 @@ async def get_dept_and_sub_ids(db: AsyncSession, dept_ids: list[int]) -> list[in
         func.concat(",", Dept.ancestors, ",").like(f"%,{int(did)},%")
         for did in dept_ids
     ]
-    stmt = select(Dept.dept_id).where(or_(*conditions))
+    stmt = select(Dept.dept_id).where(
+        Dept.tenant_id == tenant.tenant_id,
+        or_(*conditions),
+    )
     result = await db.execute(stmt)
     return list({*dept_ids, *result.scalars().all()})
 

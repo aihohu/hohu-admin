@@ -25,6 +25,8 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.id_generator import next_id
+from app.core.tenant import TenantContext
+from app.core.tenant_scope import tenant_select
 from app.db.base import user_depts
 from app.modules.system.constants import USER_ROLE_AUTH_PERMISSION
 from app.modules.system.models.dept import Dept
@@ -38,6 +40,7 @@ from app.modules.system.service.grant_authority import (
     GrantAuthority,
     grant_authority_service,
 )
+from app.modules.system.service.tenant_association_writer import replace_user_roles
 from app.utils.data_scope import get_dept_and_sub_ids, resolve_data_scope_for_roles
 
 USER_ADD_PERMISSION = "system:user:add"
@@ -127,11 +130,16 @@ class UserRoleAssignmentService:
         self,
         db: AsyncSession,
         user_id: int,
+        *,
+        tenant: TenantContext,
     ) -> list[dict[str, Any]]:
         rows = (
             await db.execute(
                 select(user_depts.c.dept_id, user_depts.c.is_primary)
-                .where(user_depts.c.user_id == user_id)
+                .where(
+                    user_depts.c.tenant_id == tenant.tenant_id,
+                    user_depts.c.user_id == user_id,
+                )
                 .order_by(user_depts.c.dept_id)
             )
         ).all()
@@ -206,9 +214,12 @@ class UserRoleAssignmentService:
         *,
         actor_user_id: int,
         explicit_roles: bool,
+        tenant: TenantContext,
     ) -> GrantAuthority:
         """Fail before user creation when the selected entry permissions are absent."""
-        authority = await grant_authority_service.build(db, actor_user_id)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         required = {USER_ADD_PERMISSION}
         if explicit_roles:
             required.add(USER_ROLE_AUTH_PERMISSION)
@@ -221,18 +232,23 @@ class UserRoleAssignmentService:
         *,
         actor_user_id: int,
         has_role_column: bool,
+        tenant: TenantContext,
     ) -> GrantAuthority:
         """Require role delegation before an import with an explicit role column."""
-        authority = await grant_authority_service.build(db, actor_user_id)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         required = {USER_IMPORT_PERMISSION}
         if has_role_column:
             required.add(USER_ROLE_AUTH_PERMISSION)
         self._require_permissions(authority, frozenset(required))
         return authority
 
-    async def _load_user(self, db: AsyncSession, user_id: int) -> User:
+    async def _load_user(
+        self, db: AsyncSession, user_id: int, *, tenant: TenantContext
+    ) -> User:
         user = await db.scalar(
-            select(User)
+            tenant_select(User, tenant=tenant)
             .where(User.user_id == user_id)
             .options(
                 selectinload(User.roles).selectinload(Role.menus),
@@ -249,6 +265,8 @@ class UserRoleAssignmentService:
         self,
         db: AsyncSession,
         role_ids: list[int | str],
+        *,
+        tenant: TenantContext,
     ) -> list[Role]:
         normalized = [int(role_id) for role_id in role_ids]
         if not normalized:
@@ -269,7 +287,7 @@ class UserRoleAssignmentService:
         roles = (
             (
                 await db.execute(
-                    select(Role)
+                    tenant_select(Role, tenant=tenant)
                     .where(Role.role_id.in_(normalized))
                     .options(selectinload(Role.menus), selectinload(Role.depts))
                     .order_by(Role.role_id)
@@ -289,9 +307,9 @@ class UserRoleAssignmentService:
             )
         return list(roles)
 
-    async def _default_role(self, db: AsyncSession) -> Role:
+    async def _default_role(self, db: AsyncSession, *, tenant: TenantContext) -> Role:
         role = await db.scalar(
-            select(Role)
+            tenant_select(Role, tenant=tenant)
             .where(
                 Role.role_code == USER_ROLE_CODE,
                 Role.status == STATUS_ENABLED,
@@ -310,6 +328,8 @@ class UserRoleAssignmentService:
         self,
         db: AsyncSession,
         dept_ids: list[int],
+        *,
+        tenant: TenantContext,
     ) -> list[Dept]:
         normalized = [int(dept_id) for dept_id in dept_ids]
         if len(set(normalized)) != len(normalized) or any(
@@ -324,7 +344,7 @@ class UserRoleAssignmentService:
         depts = list(
             (
                 await db.execute(
-                    select(Dept)
+                    tenant_select(Dept, tenant=tenant)
                     .where(Dept.dept_id.in_(normalized))
                     .order_by(Dept.dept_id)
                     .execution_options(populate_existing=True)
@@ -347,6 +367,7 @@ class UserRoleAssignmentService:
         user: User,
         roles: list[Role],
         depts: list[Dept] | None = None,
+        tenant: TenantContext,
     ) -> RoleSetAuthority:
         from app.modules.ai.service.agent_authorization_service import (  # noqa: PLC0415
             agent_authorization_service,
@@ -366,6 +387,7 @@ class UserRoleAssignmentService:
             await agent_authorization_service.grantable_agent_ids_by_role_ids(
                 db,
                 [int(role.role_id) for role in roles],
+                tenant=tenant,
             )
         )
         agent_ids = frozenset(
@@ -379,6 +401,7 @@ class UserRoleAssignmentService:
             user=user,
             roles=enabled_roles,
             depts=depts,
+            tenant=tenant,
         )
         if resolution.accessible_user_scope is None:
             accessible_user_ids = None
@@ -450,6 +473,7 @@ class UserRoleAssignmentService:
         *,
         candidates: list[tuple[User, list[Role], list[Dept]]],
         agent_ids_by_role_override: dict[int, set[int]] | None = None,
+        tenant: TenantContext,
     ) -> list[RoleSetAuthority]:
         """Materialize many role sets with a bounded number of bulk queries."""
         from app.modules.ai.service.agent_authorization_service import (  # noqa: PLC0415
@@ -467,6 +491,7 @@ class UserRoleAssignmentService:
             await agent_authorization_service.grantable_agent_ids_by_role_ids(
                 db,
                 all_role_ids,
+                tenant=tenant,
             )
         )
         if agent_ids_by_role_override:
@@ -486,6 +511,7 @@ class UserRoleAssignmentService:
                 for dept_id, ancestors in (
                     await db.execute(
                         select(Dept.dept_id, Dept.ancestors).where(
+                            Dept.tenant_id == tenant.tenant_id,
                             or_(
                                 Dept.dept_id.in_(all_own_dept_ids),
                                 *(
@@ -494,7 +520,7 @@ class UserRoleAssignmentService:
                                     )
                                     for dept_id in sorted(all_own_dept_ids)
                                 ),
-                            )
+                            ),
                         )
                     )
                 ).all()
@@ -580,7 +606,8 @@ class UserRoleAssignmentService:
             rows = (
                 await db.execute(
                     select(user_depts.c.dept_id, user_depts.c.user_id).where(
-                        user_depts.c.dept_id.in_(bounded_dept_ids)
+                        user_depts.c.tenant_id == tenant.tenant_id,
+                        user_depts.c.dept_id.in_(bounded_dept_ids),
                     )
                 )
             ).all()
@@ -748,6 +775,7 @@ class UserRoleAssignmentService:
         allow_empty_old_roles: bool,
         created_target: bool,
         ignored_user_ids: frozenset[int] = frozenset(),
+        tenant: TenantContext,
     ) -> tuple[RoleSetAuthority | None, RoleSetAuthority]:
         old_roles = list(target.roles or [])
         self._ensure_target_protection(
@@ -774,6 +802,7 @@ class UserRoleAssignmentService:
                 user=target,
                 roles=old_roles,
                 depts=list(target.depts or []),
+                tenant=tenant,
             )
             self.ensure_role_set_dominated(
                 actor,
@@ -785,6 +814,7 @@ class UserRoleAssignmentService:
             user=target,
             roles=requested_roles,
             depts=prospective_depts,
+            tenant=tenant,
         )
         self.ensure_role_set_dominated(
             actor,
@@ -800,15 +830,18 @@ class UserRoleAssignmentService:
         actor_user_id: int,
         target_user_id: int,
         role_ids: list[int | str],
+        tenant: TenantContext,
     ) -> UserRoleAssignmentPreview:
         """Validate and freeze one complete role replacement without writing it."""
-        requested_roles = await self._load_requested_roles(db, role_ids)
-        authority = await grant_authority_service.build(db, actor_user_id)
+        requested_roles = await self._load_requested_roles(db, role_ids, tenant=tenant)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         self._require_permissions(
             authority,
             frozenset({USER_EDIT_PERMISSION, USER_ROLE_AUTH_PERMISSION}),
         )
-        target = await self._load_user(db, target_user_id)
+        target = await self._load_user(db, target_user_id, tenant=tenant)
         old_roles = list(target.roles or [])
         old_authority, new_authority = await self._authorize_role_set(
             db,
@@ -819,6 +852,7 @@ class UserRoleAssignmentService:
             prospective_depts=None,
             allow_empty_old_roles=False,
             created_target=False,
+            tenant=tenant,
         )
         if old_authority is None:
             raise BusinessRuleException(
@@ -828,6 +862,7 @@ class UserRoleAssignmentService:
         department_assignments = await self._load_department_assignment_snapshot(
             db,
             target_user_id,
+            tenant=tenant,
         )
         return UserRoleAssignmentPreview(
             user_id=int(target.user_id),
@@ -859,11 +894,12 @@ class UserRoleAssignmentService:
         prospective_dept_ids: list[int] | None = None,
         ignored_user_ids: frozenset[int] = frozenset(),
         expected_snapshot: dict[str, Any] | None = None,
+        tenant: TenantContext,
     ) -> UserRoleAssignmentResult:
-        actor_before = await self._load_user(db, actor_user_id)
-        target_before = await self._load_user(db, target_user_id)
+        actor_before = await self._load_user(db, actor_user_id, tenant=tenant)
+        target_before = await self._load_user(db, target_user_id, tenant=tenant)
         prospective_depts = (
-            await self._load_prospective_depts(db, prospective_dept_ids)
+            await self._load_prospective_depts(db, prospective_dept_ids, tenant=tenant)
             if prospective_dept_ids is not None
             else None
         )
@@ -893,10 +929,11 @@ class UserRoleAssignmentService:
             | {int(dept.dept_id) for dept in target_before.depts}
             | {int(dept.dept_id) for dept in (prospective_depts or [])},
             user_ids={actor_user_id, target_user_id},
+            tenant=tenant,
         )
 
-        actor_user = await self._load_user(db, actor_user_id)
-        target_user = await self._load_user(db, target_user_id)
+        actor_user = await self._load_user(db, actor_user_id, tenant=tenant)
+        target_user = await self._load_user(db, target_user_id, tenant=tenant)
         if (
             _role_ids(actor_user.roles) != actor_role_snapshot
             or _role_ids(target_user.roles) != target_role_snapshot
@@ -913,8 +950,11 @@ class UserRoleAssignmentService:
         live_requested_roles = await self._load_requested_roles(
             db,
             list(_role_ids(requested_roles)),
+            tenant=tenant,
         )
-        authority = await grant_authority_service.build(db, actor_user_id)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         self._require_permissions(authority, required_permissions)
         old_authority, new_authority = await self._authorize_role_set(
             db,
@@ -926,6 +966,7 @@ class UserRoleAssignmentService:
             allow_empty_old_roles=allow_empty_old_roles,
             created_target=allow_empty_old_roles,
             ignored_user_ids=ignored_user_ids,
+            tenant=tenant,
         )
 
         if expected_snapshot is not None:
@@ -945,6 +986,7 @@ class UserRoleAssignmentService:
                     await self._load_department_assignment_snapshot(
                         db,
                         target_user_id,
+                        tenant=tenant,
                     )
                 ),
             )
@@ -955,7 +997,7 @@ class UserRoleAssignmentService:
                 )
 
         old_role_ids = _role_ids(target_user.roles)
-        target_user.roles = live_requested_roles
+        await replace_user_roles(db, target_user, live_requested_roles, tenant=tenant)
         await db.flush()
         return UserRoleAssignmentResult(
             user_id=target_user_id,
@@ -971,9 +1013,10 @@ class UserRoleAssignmentService:
         target_user_id: int,
         role_ids: list[int | str],
         expected_snapshot: dict[str, Any] | None = None,
+        tenant: TenantContext,
     ) -> UserRoleAssignmentResult:
         """Replace one existing user's complete role set without committing."""
-        requested_roles = await self._load_requested_roles(db, role_ids)
+        requested_roles = await self._load_requested_roles(db, role_ids, tenant=tenant)
         return await self._replace_roles(
             db,
             actor_user_id=actor_user_id,
@@ -984,6 +1027,7 @@ class UserRoleAssignmentService:
             ),
             allow_empty_old_roles=False,
             expected_snapshot=expected_snapshot,
+            tenant=tenant,
         )
 
     async def assign_created_user_roles(
@@ -994,6 +1038,7 @@ class UserRoleAssignmentService:
         target_user_id: int,
         role_ids: list[int | str] | None,
         dept_ids: list[int],
+        tenant: TenantContext,
     ) -> UserRoleAssignmentResult:
         """Assign explicit roles or the fixed default role to a newly created user."""
         explicit_roles = role_ids is not None
@@ -1001,11 +1046,12 @@ class UserRoleAssignmentService:
             db,
             actor_user_id=actor_user_id,
             explicit_roles=explicit_roles,
+            tenant=tenant,
         )
         requested_roles = (
-            await self._load_requested_roles(db, role_ids or [])
+            await self._load_requested_roles(db, role_ids or [], tenant=tenant)
             if explicit_roles
-            else [await self._default_role(db)]
+            else [await self._default_role(db, tenant=tenant)]
         )
         required = {USER_ADD_PERMISSION}
         if explicit_roles:
@@ -1018,6 +1064,7 @@ class UserRoleAssignmentService:
             required_permissions=frozenset(required),
             allow_empty_old_roles=True,
             prospective_dept_ids=dept_ids,
+            tenant=tenant,
         )
 
     async def validate_import_role_assignment(
@@ -1033,13 +1080,17 @@ class UserRoleAssignmentService:
         authority: GrantAuthority | None = None,
         ignored_user_ids: frozenset[int] = frozenset(),
         prospective_user_id: int | None = None,
+        tenant: TenantContext,
     ) -> tuple[int, ...]:
         """Validate one resolved import target without writing associations."""
-        requested_roles = await self._load_requested_roles(db, role_ids)
-        prospective_depts = await self._load_prospective_depts(db, dept_ids)
+        requested_roles = await self._load_requested_roles(db, role_ids, tenant=tenant)
+        prospective_depts = await self._load_prospective_depts(
+            db, dept_ids, tenant=tenant
+        )
         created_target = target_user_id is None
         if created_target:
             target = User(
+                tenant_id=tenant.tenant_id,
                 user_id=prospective_user_id or next_id(),
                 user_name=target_user_name,
                 nickname=target_user_name,
@@ -1049,10 +1100,11 @@ class UserRoleAssignmentService:
                 depts=[],
             )
         else:
-            target = await self._load_user(db, target_user_id)
+            target = await self._load_user(db, target_user_id, tenant=tenant)
         live_authority = authority or await grant_authority_service.build(
             db,
             actor_user_id,
+            tenant=tenant,
         )
         await self._authorize_role_set(
             db,
@@ -1064,6 +1116,7 @@ class UserRoleAssignmentService:
             allow_empty_old_roles=created_target,
             created_target=created_target,
             ignored_user_ids=ignored_user_ids,
+            tenant=tenant,
         )
         return _role_ids(requested_roles)
 
@@ -1077,12 +1130,13 @@ class UserRoleAssignmentService:
         dept_ids: list[int],
         has_role_column: bool,
         ignored_user_ids: frozenset[int] = frozenset(),
+        tenant: TenantContext,
     ) -> UserRoleAssignmentResult:
         """Assign imported roles after revalidating the locked import authority."""
         requested_roles = (
-            await self._load_requested_roles(db, role_ids)
+            await self._load_requested_roles(db, role_ids, tenant=tenant)
             if role_ids is not None
-            else [await self._default_role(db)]
+            else [await self._default_role(db, tenant=tenant)]
         )
         required = {USER_IMPORT_PERMISSION}
         if has_role_column:
@@ -1096,6 +1150,7 @@ class UserRoleAssignmentService:
             allow_empty_old_roles=True,
             prospective_dept_ids=dept_ids,
             ignored_user_ids=ignored_user_ids,
+            tenant=tenant,
         )
 
     async def apply_locked_import_roles(
@@ -1104,12 +1159,13 @@ class UserRoleAssignmentService:
         *,
         target_user_id: int,
         role_ids: list[int | str],
+        tenant: TenantContext,
     ) -> UserRoleAssignmentResult:
         """Apply a set already validated under the import batch authorization lock."""
-        requested_roles = await self._load_requested_roles(db, role_ids)
-        target = await self._load_user(db, target_user_id)
+        requested_roles = await self._load_requested_roles(db, role_ids, tenant=tenant)
+        target = await self._load_user(db, target_user_id, tenant=tenant)
         old_role_ids = _role_ids(list(target.roles or []))
-        target.roles = requested_roles
+        await replace_user_roles(db, target, requested_roles, tenant=tenant)
         await db.flush()
         return UserRoleAssignmentResult(
             user_id=target_user_id,
@@ -1125,15 +1181,18 @@ class UserRoleAssignmentService:
         target_user_ids: set[int],
         role_ids: set[int],
         dept_ids: set[int],
+        tenant: TenantContext,
     ) -> User:
         """Prelock one import batch before any authorization association is written."""
-        actor_before = await self._load_user(db, actor_user_id)
+        actor_before = await self._load_user(db, actor_user_id, tenant=tenant)
         targets_before = [
-            await self._load_user(db, target_user_id)
+            await self._load_user(db, target_user_id, tenant=tenant)
             for target_user_id in sorted(target_user_ids)
         ]
         requested_roles = (
-            await self._load_requested_roles(db, sorted(role_ids)) if role_ids else []
+            await self._load_requested_roles(db, sorted(role_ids), tenant=tenant)
+            if role_ids
+            else []
         )
         actor_role_snapshot = _role_ids(actor_before.roles)
         actor_dept_snapshot = tuple(
@@ -1160,15 +1219,18 @@ class UserRoleAssignmentService:
             role.status == STATUS_ENABLED and role.data_scope == DATA_SCOPE_DEPT_AND_SUB
             for role in all_roles
         ):
-            all_dept_ids.update(await get_dept_and_sub_ids(db, sorted(all_dept_ids)))
+            all_dept_ids.update(
+                await get_dept_and_sub_ids(db, sorted(all_dept_ids), tenant=tenant)
+            )
         await authorization_lock_service.lock_targets(
             db,
             role_ids=set(_role_ids(all_roles)),
             dept_ids=all_dept_ids,
             user_ids={actor_user_id, *target_user_ids},
+            tenant=tenant,
         )
 
-        actor = await self._load_user(db, actor_user_id)
+        actor = await self._load_user(db, actor_user_id, tenant=tenant)
         if (
             _role_ids(actor.roles) != actor_role_snapshot
             or tuple(sorted(int(dept.dept_id) for dept in actor.depts))
@@ -1182,7 +1244,7 @@ class UserRoleAssignmentService:
             expected_roles,
             expected_depts,
         ) in target_snapshots.items():
-            target = await self._load_user(db, target_user_id)
+            target = await self._load_user(db, target_user_id, tenant=tenant)
             if (
                 _role_ids(target.roles) != expected_roles
                 or tuple(sorted(int(dept.dept_id) for dept in target.depts))
@@ -1201,6 +1263,7 @@ class UserRoleAssignmentService:
         actor_user_id: int,
         query: str | None,
         limit: int,
+        tenant: TenantContext,
     ) -> list[Role]:
         """Return minimal role candidates dominated by the actor's role template."""
         page = await self.lookup_assignable_roles(
@@ -1208,6 +1271,7 @@ class UserRoleAssignmentService:
             actor_user_id=actor_user_id,
             query=query,
             limit=limit,
+            tenant=tenant,
         )
         return list(page.roles)
 
@@ -1217,6 +1281,7 @@ class UserRoleAssignmentService:
         *,
         authority: GrantAuthority,
         roles: list[Role],
+        tenant: TenantContext,
     ) -> list[Role]:
         """Filter enabled roles through the shared delegation ceiling."""
         from app.modules.ai.service.agent_authorization_service import (  # noqa: PLC0415
@@ -1229,6 +1294,7 @@ class UserRoleAssignmentService:
         bindings = await agent_authorization_service.grantable_agent_ids_by_role_ids(
             db,
             role_ids,
+            tenant=tenant,
         )
         result: list[Role] = []
         for role in roles:
@@ -1258,12 +1324,15 @@ class UserRoleAssignmentService:
         actor_user_id: int,
         query: str | None,
         limit: int,
+        tenant: TenantContext,
     ) -> AssignableRolePage:
         """Return a bounded role lookup plus its complete assignable match count."""
-        authority = await grant_authority_service.build(db, actor_user_id)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         self._require_permissions(authority, frozenset({USER_ROLE_AUTH_PERMISSION}))
         statement = (
-            select(Role)
+            tenant_select(Role, tenant=tenant)
             .where(Role.status == STATUS_ENABLED)
             .options(selectinload(Role.menus), selectinload(Role.depts))
             .order_by(Role.role_code, Role.role_id)
@@ -1281,6 +1350,7 @@ class UserRoleAssignmentService:
             db,
             authority=authority,
             roles=roles,
+            tenant=tenant,
         )
         return AssignableRolePage(
             match_count=len(assignable),
@@ -1294,15 +1364,19 @@ class UserRoleAssignmentService:
         *,
         actor_user_id: int,
         role_ids: list[int | str],
+        tenant: TenantContext,
     ) -> bool:
         """Re-authorize a complete finite role reference set."""
-        requested_roles = await self._load_requested_roles(db, role_ids)
-        authority = await grant_authority_service.build(db, actor_user_id)
+        requested_roles = await self._load_requested_roles(db, role_ids, tenant=tenant)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         self._require_permissions(authority, frozenset({USER_ROLE_AUTH_PERMISSION}))
         assignable = await self._filter_assignable_roles(
             db,
             authority=authority,
             roles=requested_roles,
+            tenant=tenant,
         )
         return _role_ids(assignable) == _role_ids(requested_roles)
 
@@ -1312,12 +1386,15 @@ class UserRoleAssignmentService:
         *,
         actor_user_id: int,
         target_user_id: int,
+        tenant: TenantContext,
     ) -> None:
         """Re-authorize conditional access to one user's role assignments."""
-        authority = await grant_authority_service.build(db, actor_user_id)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         self._require_permissions(authority, frozenset({USER_ROLE_AUTH_PERMISSION}))
         self._ensure_target_visible(authority, target_user_id)
-        await self._load_user(db, target_user_id)
+        await self._load_user(db, target_user_id, tenant=tenant)
 
     async def get_complete_assignable_roles(
         self,
@@ -1325,12 +1402,15 @@ class UserRoleAssignmentService:
         *,
         actor_user_id: int,
         target_user_id: int,
+        tenant: TenantContext,
     ) -> tuple[list[Role], bool]:
         """Return a target's roles only when the complete set is delegable."""
-        authority = await grant_authority_service.build(db, actor_user_id)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         self._require_permissions(authority, frozenset({USER_ROLE_AUTH_PERMISSION}))
         self._ensure_target_visible(authority, target_user_id)
-        target = await self._load_user(db, target_user_id)
+        target = await self._load_user(db, target_user_id, tenant=tenant)
         current_roles = sorted(
             target.roles or [],
             key=lambda role: int(role.role_id),
@@ -1341,6 +1421,7 @@ class UserRoleAssignmentService:
             db,
             authority=authority,
             roles=current_roles,
+            tenant=tenant,
         )
         if _role_ids(assignable) != _role_ids(current_roles):
             return [], False
@@ -1349,6 +1430,7 @@ class UserRoleAssignmentService:
             user=target,
             roles=current_roles,
             depts=list(target.depts or []),
+            tenant=tenant,
         )
         try:
             self.ensure_role_set_dominated(authority, current_authority)

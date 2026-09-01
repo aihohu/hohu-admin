@@ -11,7 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.constants import STATUS_ENABLED
 from app.db.session import AsyncSessionLocal
 from app.modules.job.models.job import SysJob, SysJobLog
-from app.modules.job.task_registry import get_task_function
+from app.modules.job.task_registry import get_task_function, is_tenant_task
+from app.modules.system.models.tenant import Tenant
 
 logger = logging.getLogger(__name__)
 
@@ -26,30 +27,59 @@ LOG_STATUS_FAILED = "2"
 RUNNER_ID = uuid4().hex
 
 
-async def execute_job(job_id: int) -> None:
+async def execute_job(tenant_id: int, job_id: int) -> None:
     """由 APScheduler 调度的入口函数，负责执行任务并记录日志。"""
-    await _do_execute(job_id)
+    await _do_execute(tenant_id, job_id)
 
 
-async def run_job_manual(job_id: int) -> None:
+async def run_job_manual(tenant_id: int, job_id: int) -> None:
     """手动触发执行，跳过状态检查。"""
-    await _do_execute(job_id, skip_status_check=True)
+    await _do_execute(tenant_id, job_id, skip_status_check=True)
 
 
-async def _do_execute(job_id: int, *, skip_status_check: bool = False) -> None:
+async def _do_execute(
+    tenant_id: int, job_id: int, *, skip_status_check: bool = False
+) -> None:
     """执行任务并记录日志。"""
     log: SysJobLog | None = None
     async with AsyncSessionLocal() as db:
         try:
-            job: SysJob | None = await db.get(SysJob, job_id)
+            live_tenant = await db.scalar(
+                select(Tenant).where(
+                    Tenant.tenant_id == tenant_id,
+                    Tenant.status == STATUS_ENABLED,
+                )
+            )
+            if live_tenant is None:
+                logger.warning(
+                    "任务租户不存在或已禁用，拒绝执行: tenant_id=%s, job_id=%s",
+                    tenant_id,
+                    job_id,
+                )
+                return
+            job: SysJob | None = await db.scalar(
+                select(SysJob).where(
+                    SysJob.tenant_id == tenant_id,
+                    SysJob.job_id == job_id,
+                )
+            )
             if not job:
                 return
             if not skip_status_check and job.status != STATUS_ENABLED:
+                return
+            if not is_tenant_task(job.job_key):
+                logger.warning(
+                    "租户调度器拒绝平台任务: tenant_id=%s, job_id=%s, job_key=%s",
+                    tenant_id,
+                    job_id,
+                    job.job_key,
+                )
                 return
 
             # 并发检查：如果不允许并发且当前有执行中的记录，则跳过
             if job.concurrent == "2":
                 running_stmt = select(SysJobLog).where(
+                    SysJobLog.tenant_id == tenant_id,
                     SysJobLog.job_id == job_id,
                     SysJobLog.status == LOG_STATUS_RUNNING,
                 )
@@ -62,6 +92,7 @@ async def _do_execute(job_id: int, *, skip_status_check: bool = False) -> None:
             # start_time 强制用 Python now（决策 9：与 monitor 算 grace 同基准，
             # 避免 Python ↔ DB 时钟漂移导致 grace 误判）
             log = SysJobLog(
+                tenant_id=tenant_id,
                 job_id=job.job_id,
                 job_name=job.job_name,
                 job_key=job.job_key,
@@ -105,7 +136,7 @@ async def _run_task(db: AsyncSession, job: SysJob, log: SysJobLog) -> None:
     2. 指数退避 sleep（1s, 2s, 4s, ..., 上限 30s），避免对外部服务形成重试风暴
     成功任一次即标 SUCCESS；所有重试均失败才标 FAILED，错误信息含最后一次异常。
     """
-    func = get_task_function(job.job_key)
+    func = get_task_function(job.job_key) if is_tenant_task(job.job_key) else None
     if func is None:
         log.status = LOG_STATUS_FAILED
         log.error_msg = f"任务函数 '{job.job_key}' 未注册"

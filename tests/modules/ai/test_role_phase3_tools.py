@@ -2,11 +2,11 @@
 
 import inspect
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
+from tenant_helpers import bind_test_user
 
 from app.core.exceptions import AuthorizationException, BusinessRuleException
 from app.core.id_generator import next_id
@@ -16,7 +16,21 @@ from app.modules.ai.core.context import AiToolContext, DataScopeContext
 from app.modules.ai.schemas.confirm import ConfirmationPresentation
 from app.modules.system import ai_tools as system_ai_tools
 from app.modules.system.models.role import Role
+from app.modules.system.models.user import User
 from scripts.check_ai_tools import EXPECTED_BUILTIN_TOOL_NAMES
+
+
+def _actor() -> User:
+    actor = User(
+        tenant_id=0,
+        user_id=next_id(),
+        user_name=f"role-tool-actor-{next_id()}",
+        nickname="Role tool actor",
+        hashed_password="x",
+        status="1",
+    )
+    bind_test_user(actor)
+    return actor
 
 
 @pytest.mark.parametrize(
@@ -76,6 +90,7 @@ def test_static_inventory_contains_the_complete_role_slice() -> None:
 
 def test_role_write_result_separates_business_and_audit_values() -> None:
     role = Role(
+        tenant_id=0,
         role_id=next_id(),
         role_name="Phase 3 result role",
         role_code=f"R_PHASE3_RESULT_{next_id()}",
@@ -143,10 +158,10 @@ async def test_role_update_dry_run_rejects_noncanonical_status(
 ) -> None:
     tool = system_ai_tools.role_update
     ctx = AiToolContext(
-        user=MagicMock(user_id=next_id()),
+        user=_actor(),
         perms=set(tool.__ai_tool_meta__.required_perms),
         db=db_session,
-        data_scope=DataScopeContext(None, None, []),
+        data_scope=DataScopeContext(0, None, None, []),
         trace_id="tr_role_invalid_status",
         tool_meta=tool.__ai_tool_meta__,
     )
@@ -179,10 +194,10 @@ async def test_role_create_dry_run_freezes_canonical_data_scope_code(
     )
     tool = system_ai_tools.role_create
     ctx = AiToolContext(
-        user=MagicMock(user_id=next_id()),
+        user=_actor(),
         perms=set(tool.__ai_tool_meta__.required_perms),
         db=db_session,
-        data_scope=DataScopeContext(None, None, []),
+        data_scope=DataScopeContext(0, None, None, []),
         trace_id="tr_role_named_scope",
         tool_meta=tool.__ai_tool_meta__,
     )
@@ -231,10 +246,11 @@ async def test_approved_role_drift_maps_to_prepared_snapshot_stale(
     )
     tool = system_ai_tools.role_create
     ctx = AiToolContext(
-        user=type("Actor", (), {"user_id": next_id()})(),
+        user=_actor(),
         perms=set(tool.__ai_tool_meta__.required_perms),
         db=db_session,
         data_scope=DataScopeContext(
+            tenant_id=0,
             accessible_dept_ids=None,
             accessible_user_scope=None,
             filters=[],
@@ -286,10 +302,10 @@ async def test_role_menu_dry_run_counts_indirectly_affected_members(
         preview,
     )
     ctx = AiToolContext(
-        user=MagicMock(user_id=next_id()),
+        user=_actor(),
         perms={"system:role:menu-auth"},
         db=db_session,
-        data_scope=DataScopeContext(None, None, []),
+        data_scope=DataScopeContext(0, None, None, []),
         trace_id="tr_phase3_role_impact",
         tool_meta=system_ai_tools.role_update_menus.__ai_tool_meta__,
     )
@@ -337,10 +353,10 @@ async def test_role_write_dry_runs_build_scalar_gateway_presentations(
     ]
     for tool, dry_run, args in cases:
         ctx = AiToolContext(
-            user=MagicMock(user_id=next_id()),
+            user=_actor(),
             perms=set(tool.__ai_tool_meta__.required_perms),
             db=db_session,
-            data_scope=DataScopeContext(None, None, []),
+            data_scope=DataScopeContext(0, None, None, []),
             trace_id=f"tr_{tool.__ai_tool_meta__.name}",
             tool_meta=tool.__ai_tool_meta__,
         )
@@ -377,6 +393,7 @@ async def test_role_update_preserves_explicit_null_for_nullable_description(
 ) -> None:
     captured = None
     role = Role(
+        tenant_id=0,
         role_id=next_id(),
         role_name="Nullable role",
         role_code=f"R_NULLABLE_{next_id()}",
@@ -392,10 +409,10 @@ async def test_role_update_preserves_explicit_null_for_nullable_description(
     monkeypatch.setattr(system_ai_tools.role_management_service, "update", update)
     tool = system_ai_tools.role_update
     ctx = AiToolContext(
-        user=MagicMock(user_id=next_id()),
+        user=_actor(),
         perms=set(tool.__ai_tool_meta__.required_perms),
         db=db_session,
-        data_scope=DataScopeContext(None, None, []),
+        data_scope=DataScopeContext(0, None, None, []),
         trace_id="tr_role_nullable_clear",
         tool_meta=tool.__ai_tool_meta__,
         approved_business_snapshot={"version": "test"},

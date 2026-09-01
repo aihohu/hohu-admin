@@ -59,10 +59,14 @@ async def _resolve_l1_limit() -> int:
     from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
         get_ai_config_int,
     )
+    from app.modules.auth.service import get_public_tenant_context  # noqa: PLC0415
 
     try:
         async with AsyncSessionLocal() as db:
-            return await get_ai_config_int(db, _CFG_L1_RATE, DEFAULT_L1_RATE_PER_MIN)
+            tenant = await get_public_tenant_context(db)
+            return await get_ai_config_int(
+                db, _CFG_L1_RATE, DEFAULT_L1_RATE_PER_MIN, tenant=tenant
+            )
     except Exception:
         return DEFAULT_L1_RATE_PER_MIN
 
@@ -72,10 +76,14 @@ async def _resolve_l2_limit() -> int:
     from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
         get_ai_config_int,
     )
+    from app.modules.auth.service import get_public_tenant_context  # noqa: PLC0415
 
     try:
         async with AsyncSessionLocal() as db:
-            return await get_ai_config_int(db, _CFG_L2_QUOTA, DEFAULT_L2_DAILY_QUOTA)
+            tenant = await get_public_tenant_context(db)
+            return await get_ai_config_int(
+                db, _CFG_L2_QUOTA, DEFAULT_L2_DAILY_QUOTA, tenant=tenant
+            )
     except Exception:
         return DEFAULT_L2_DAILY_QUOTA
 
@@ -85,10 +93,14 @@ async def _resolve_l3_timeout() -> int:
     from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
         get_ai_config_int,
     )
+    from app.modules.auth.service import get_public_tenant_context  # noqa: PLC0415
 
     try:
         async with AsyncSessionLocal() as db:
-            return await get_ai_config_int(db, _CFG_L3_TIMEOUT, DEFAULT_L3_TIMEOUT_SEC)
+            tenant = await get_public_tenant_context(db)
+            return await get_ai_config_int(
+                db, _CFG_L3_TIMEOUT, DEFAULT_L3_TIMEOUT_SEC, tenant=tenant
+            )
     except Exception:
         return DEFAULT_L3_TIMEOUT_SEC
 
@@ -99,11 +111,16 @@ async def _resolve_l1_global_limit() -> int:
     from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
         get_ai_config_int,
     )
+    from app.modules.auth.service import get_public_tenant_context  # noqa: PLC0415
 
     try:
         async with AsyncSessionLocal() as db:
+            tenant = await get_public_tenant_context(db)
             return await get_ai_config_int(
-                db, _CFG_L1_GLOBAL_RATE, DEFAULT_L1_GLOBAL_RATE_PER_MIN
+                db,
+                _CFG_L1_GLOBAL_RATE,
+                DEFAULT_L1_GLOBAL_RATE_PER_MIN,
+                tenant=tenant,
             )
     except Exception:
         return DEFAULT_L1_GLOBAL_RATE_PER_MIN
@@ -115,10 +132,14 @@ async def _resolve_l4_conv_budget() -> int:
     from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
         get_ai_config_int,
     )
+    from app.modules.auth.service import get_public_tenant_context  # noqa: PLC0415
 
     try:
         async with AsyncSessionLocal() as db:
-            return await get_ai_config_int(db, _CFG_L4_CONV, DEFAULT_L4_CONV_BUDGET)
+            tenant = await get_public_tenant_context(db)
+            return await get_ai_config_int(
+                db, _CFG_L4_CONV, DEFAULT_L4_CONV_BUDGET, tenant=tenant
+            )
     except Exception:
         return DEFAULT_L4_CONV_BUDGET
 

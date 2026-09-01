@@ -71,6 +71,7 @@ def _make_ctx(
 ) -> AiToolContext:
     """构造测试用 AiToolContext。visible_count 模拟 SQL count(*) 返回的可见目标数。"""
     data_scope = DataScopeContext(
+        tenant_id=0,
         accessible_dept_ids=accessible_dept_ids,
         accessible_user_scope=accessible_user_scope,
         filters=[],
@@ -173,7 +174,7 @@ def _make_deps(
         user=MagicMock(user_id=1),
         perms=perms if perms is not None else {"system:user:list"},
         db=db or MagicMock(),
-        data_scope=DataScopeContext(None, None, []),
+        data_scope=DataScopeContext(0, None, None, []),
         agent=agent,
         trace_id="tr_test",
     )

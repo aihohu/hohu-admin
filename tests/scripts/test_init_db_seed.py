@@ -26,10 +26,10 @@ from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.system.constants import DEPT_MOVE_PERMISSION, USER_ROLE_AUTH_PERMISSION
 from app.utils.validators import validate_password
 from scripts.init_db import (
-    bind_fresh_role_permissions,
     build_default_tenant,
     build_init_roles,
     default_password_seed_value,
+    fresh_role_permission_menus,
     init_configs,
     init_menus,
 )
@@ -191,7 +191,7 @@ class TestRoleSeed:
     def test_super_admin_gets_all_published_agent_permissions(self):
         admin_role, _ = build_init_roles()
 
-        bind_fresh_role_permissions(admin_role, init_menus)
+        admin_role.menus = fresh_role_permission_menus(init_menus)
 
         assert {menu.permission for menu in admin_role.menus} == {
             "ai:agent:edit",

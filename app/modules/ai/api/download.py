@@ -6,10 +6,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
 from app.core.exceptions import NotFoundException
+from app.core.tenant import TenantContext
 from app.db.session import get_db
 from app.modules.ai.service.result_projection_service import (
     result_projection_service,
 )
+from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.user import User
 from app.modules.system.service.user_export_service import download_export_file
 
@@ -31,6 +33,7 @@ async def download_ai_user_export(
     token: str = Query(..., min_length=1),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """Re-authorize the signed projection before every file read."""
     lineage = result_projection_service.read_download_token(
@@ -55,6 +58,7 @@ async def download_ai_user_export(
             export_id,
             operator_id=current_user.user_id,
             allow_cross_owner=False,
+            tenant=tenant,
         )
     except NotFoundException as exc:
         raise _download_not_found() from exc

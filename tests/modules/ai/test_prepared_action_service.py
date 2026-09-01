@@ -5,6 +5,7 @@ from hashlib import sha256
 
 import pytest
 from sqlalchemy import select
+from tenant_helpers import tenant_context
 
 from app.core.exceptions import BusinessRuleException
 from app.core.file_storage import MockFileStorage, reset_file_storage_for_test
@@ -537,7 +538,18 @@ async def test_user_import_snapshot_stale_is_rejected_before_execute(
     )
     reset_file_storage_for_test(storage)
     try:
+        operator = User(
+            tenant_id=0,
+            user_id=9001,
+            user_name="prepared-import-operator",
+            nickname="Prepared import operator",
+            hashed_password="$2b$12$dummy",
+            status="1",
+        )
+        db_session.add(operator)
+        await db_session.flush()
         batch = UserImportBatch(
+            tenant_id=0,
             batch_id="batch-prepared-1",
             operator_id=9001,
             filename="users.xlsx",
@@ -557,6 +569,7 @@ async def test_user_import_snapshot_stale_is_rejected_before_execute(
         db_session.add(batch)
         await db_session.flush()
         kwargs = _create_kwargs()
+        kwargs["tenant_id"] = 0
         snapshot = _snapshot(file_sha256=file_sha256)
         kwargs.update(
             snapshot=snapshot,
@@ -564,12 +577,21 @@ async def test_user_import_snapshot_stale_is_rejected_before_execute(
         )
         action = await prepared_action_service.create_pending(db_session, **kwargs)
 
-        await prepared_action_service.validate_snapshot(db_session, action)
+        tenant = tenant_context(tenant_id=0, actor_user_id=9001)
+        await prepared_action_service.validate_snapshot(
+            db_session,
+            action,
+            tenant=tenant,
+        )
         batch.records_hash = "records-changed-after-preview"
         await db_session.flush()
 
         with pytest.raises(BusinessRuleException) as exc_info:
-            await prepared_action_service.validate_snapshot(db_session, action)
+            await prepared_action_service.validate_snapshot(
+                db_session,
+                action,
+                tenant=tenant,
+            )
 
         assert exc_info.value.error_code == "AI_PREPARED_ACTION_SNAPSHOT_STALE"
     finally:
@@ -578,6 +600,7 @@ async def test_user_import_snapshot_stale_is_rejected_before_execute(
 
 async def test_batch_delete_snapshot_rejects_identity_drift(db_session) -> None:
     target = User(
+        tenant_id=0,
         user_id=91001,
         user_name="approved-target",
         nickname="Approved target",
@@ -589,6 +612,7 @@ async def test_batch_delete_snapshot_rejects_identity_drift(db_session) -> None:
     await db_session.flush()
 
     kwargs = _create_kwargs()
+    kwargs["tenant_id"] = 0
     snapshot = {
         "tool": "user.batch_delete",
         "argsHash": canonical_payload_hash(
@@ -624,12 +648,21 @@ async def test_batch_delete_snapshot_rejects_identity_drift(db_session) -> None:
     )
     action = await prepared_action_service.create_pending(db_session, **kwargs)
 
-    await prepared_action_service.validate_snapshot(db_session, action)
+    tenant = tenant_context(tenant_id=0, actor_user_id=9001)
+    await prepared_action_service.validate_snapshot(
+        db_session,
+        action,
+        tenant=tenant,
+    )
     target.user_phone = "13900000999"
     await db_session.flush()
 
     with pytest.raises(BusinessRuleException) as exc_info:
-        await prepared_action_service.validate_snapshot(db_session, action)
+        await prepared_action_service.validate_snapshot(
+            db_session,
+            action,
+            tenant=tenant,
+        )
 
     assert exc_info.value.error_code == "AI_PREPARED_ACTION_SNAPSHOT_STALE"
 

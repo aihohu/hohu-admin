@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from sqlalchemy import func, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.constants import (
     DATA_SCOPE_CUSTOM,
@@ -28,11 +29,18 @@ from app.modules.system.models.user import User
 from app.modules.system.schemas.dept import DeptCreate, DeptUpdate
 from app.modules.system.service.authorization_lock import authorization_lock_service
 from app.modules.system.service.dept_service import dept_service
+from app.modules.system.service.tenant_association_writer import (
+    replace_role_depts,
+    replace_role_menus,
+    replace_user_roles,
+)
+from tests.tenant_helpers import tenant_context
 
 
 def _menu(permission: str) -> Menu:
     marker = next_id()
     return Menu(
+        tenant_id=0,
         menu_id=marker,
         menu_name=f"phase3-dept-menu-{marker}",
         menu_type="F",
@@ -49,6 +57,7 @@ def _role(
 ) -> Role:
     marker = next_id()
     role = Role(
+        tenant_id=0,
         role_id=marker,
         role_name=f"phase3-dept-role-{marker}",
         role_code=code,
@@ -67,6 +76,7 @@ def _department(
 ) -> Dept:
     dept_id = next_id()
     return Dept(
+        tenant_id=0,
         dept_id=dept_id,
         parent_id=parent.dept_id if parent is not None else None,
         ancestors=("0" if parent is None else f"{parent.ancestors},{parent.dept_id}"),
@@ -79,6 +89,7 @@ def _department(
 def _user(name: str, roles: list[Role]) -> User:
     marker = next_id()
     return User(
+        tenant_id=0,
         user_id=marker,
         user_name=f"{name}-{marker}",
         nickname=name,
@@ -97,11 +108,45 @@ async def _bind_department(
 ) -> None:
     await db.execute(
         insert(user_depts).values(
+            tenant_id=0,
             user_id=user.user_id,
             dept_id=department.dept_id,
             is_primary=IS_PRIMARY_YES if primary else IS_PRIMARY_NO,
         )
     )
+
+
+def _tenant(actor: User):
+    return tenant_context(tenant_id=0, actor_user_id=actor.user_id)
+
+
+async def _persist_graph(db: AsyncSession, *objects: object) -> None:
+    users = [value for value in objects if isinstance(value, User)]
+    roles = [value for value in objects if isinstance(value, Role)]
+    user_links = [(user, list(user.roles)) for user in users]
+    role_menu_links = [(role, list(role.menus)) for role in roles]
+    role_dept_links = [(role, list(role.depts)) for role in roles]
+    related = [
+        *[item for _owner, items in user_links for item in items],
+        *[item for _owner, items in role_menu_links for item in items],
+        *[item for _owner, items in role_dept_links for item in items],
+    ]
+    for user, _items in user_links:
+        set_committed_value(user, "roles", [])
+    for role, _items in role_menu_links:
+        set_committed_value(role, "menus", [])
+    for role, _items in role_dept_links:
+        set_committed_value(role, "depts", [])
+    db.add_all([*objects, *related])
+    await db.flush()
+    tenant = tenant_context(tenant_id=0)
+    for user, roles_for_user in user_links:
+        await replace_user_roles(db, user, roles_for_user, tenant=tenant)
+    for role, menus in role_menu_links:
+        await replace_role_menus(db, role, menus, tenant=tenant)
+    for role, depts in role_dept_links:
+        await replace_role_depts(db, role, depts, tenant=tenant)
+    await db.flush()
 
 
 def test_shared_department_service_exposes_preview_and_snapshot_execution() -> None:
@@ -129,8 +174,7 @@ async def test_create_allows_a_scoped_child_and_rejects_hidden_parent_atomically
         permissions=("system:dept:add", "system:dept:list"),
     )
     actor = _user("phase3-create-actor", [actor_role])
-    db_session.add_all([visible_parent, hidden_parent, actor_role, actor])
-    await db_session.flush()
+    await _persist_graph(db_session, visible_parent, hidden_parent, actor_role, actor)
     await _bind_department(db_session, actor, visible_parent, primary=True)
 
     created = await dept_service.create(
@@ -143,6 +187,7 @@ async def test_create_allows_a_scoped_child_and_rejects_hidden_parent_atomically
         ),
         actor_user_id=actor.user_id,
         expected_snapshot=None,
+        tenant=_tenant(actor),
     )
 
     assert created.parent_id == visible_parent.dept_id
@@ -158,12 +203,16 @@ async def test_create_allows_a_scoped_child_and_rejects_hidden_parent_atomically
             ),
             actor_user_id=actor.user_id,
             expected_snapshot=None,
+            tenant=_tenant(actor),
         )
 
     assert exc_info.value.error_code == "AI_DATA_SCOPE_VIOLATION"
     assert (
         await db_session.scalar(
-            select(func.count(Dept.dept_id)).where(Dept.dept_name == hidden_name)
+            select(func.count(Dept.dept_id)).where(
+                Dept.tenant_id == 0,
+                Dept.dept_name == hidden_name,
+            )
         )
         == 0
     )
@@ -179,8 +228,7 @@ async def test_non_super_admin_cannot_create_a_tenant_root(
         permissions=("system:dept:add", "system:dept:list"),
     )
     actor = _user("phase3-root-actor", [actor_role])
-    db_session.add_all([actor_dept, actor_role, actor])
-    await db_session.flush()
+    await _persist_graph(db_session, actor_dept, actor_role, actor)
     await _bind_department(db_session, actor, actor_dept, primary=True)
 
     with pytest.raises(BusinessException):
@@ -194,6 +242,7 @@ async def test_non_super_admin_cannot_create_a_tenant_root(
             ),
             actor_user_id=actor.user_id,
             expected_snapshot=None,
+            tenant=_tenant(actor),
         )
 
 
@@ -210,8 +259,9 @@ async def test_department_leader_resolves_only_inside_actor_user_scope(
     )
     actor = _user("phase3-leader-actor", [actor_role])
     hidden = _user("phase3-leader-hidden-user", [])
-    db_session.add_all([actor_root, hidden_root, target, actor_role, actor, hidden])
-    await db_session.flush()
+    await _persist_graph(
+        db_session, actor_root, hidden_root, target, actor_role, actor, hidden
+    )
     await _bind_department(db_session, actor, actor_root, primary=True)
     await _bind_department(db_session, hidden, hidden_root, primary=True)
 
@@ -221,6 +271,7 @@ async def test_department_leader_resolves_only_inside_actor_user_scope(
             target.dept_id,
             DeptUpdate(leader=hidden.user_name),
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
         )
 
     assert exc_info.value.error_code == "AI_DEPT_LEADER_NOT_FOUND"
@@ -230,6 +281,7 @@ async def test_department_leader_resolves_only_inside_actor_user_scope(
         target.dept_id,
         DeptUpdate(leader=actor.user_name),
         actor_user_id=actor.user_id,
+        tenant=_tenant(actor),
     )
     assert preview.snapshot["facts"]["leader"]["userId"] == str(actor.user_id)
     assert actor.user_id in preview.snapshot["facts"]["userIds"]
@@ -251,8 +303,7 @@ async def test_update_and_move_reject_direct_out_of_scope_targets(
         ),
     )
     actor = _user("phase3-direct-actor", [actor_role])
-    db_session.add_all([actor_root, source, hidden, actor_role, actor])
-    await db_session.flush()
+    await _persist_graph(db_session, actor_root, source, hidden, actor_role, actor)
     await _bind_department(db_session, actor, actor_root, primary=True)
 
     original_name = hidden.dept_name
@@ -263,6 +314,7 @@ async def test_update_and_move_reject_direct_out_of_scope_targets(
             DeptUpdate(deptName=f"phase3-forbidden-update-{next_id()}"),
             actor_user_id=actor.user_id,
             expected_snapshot=None,
+            tenant=_tenant(actor),
         )
     assert update_error.value.error_code == "AI_DATA_SCOPE_VIOLATION"
     assert hidden.dept_name == original_name
@@ -276,6 +328,7 @@ async def test_update_and_move_reject_direct_out_of_scope_targets(
             new_parent_id=hidden.dept_id,
             actor_user_id=actor.user_id,
             expected_snapshot=None,
+            tenant=_tenant(actor),
         )
     assert move_error.value.error_code == "AI_DATA_SCOPE_VIOLATION"
     assert source.parent_id == actor_root.dept_id
@@ -294,8 +347,9 @@ async def test_non_super_admin_cannot_move_a_delegated_scope_root(
     )
     actor_role.depts = [scope_root, new_parent]
     actor = _user("phase3-scope-root-actor", [actor_role])
-    db_session.add_all([hidden_parent, scope_root, new_parent, actor_role, actor])
-    await db_session.flush()
+    await _persist_graph(
+        db_session, hidden_parent, scope_root, new_parent, actor_role, actor
+    )
 
     with pytest.raises(BusinessException) as exc_info:
         await dept_service.move(
@@ -303,6 +357,7 @@ async def test_non_super_admin_cannot_move_a_delegated_scope_root(
             dept_id=scope_root.dept_id,
             new_parent_id=new_parent.dept_id,
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
         )
 
     assert exc_info.value.error_code == "AI_DEPT_SCOPE_ROOT_MOVE_FORBIDDEN"
@@ -326,8 +381,9 @@ async def test_status_change_rejects_an_out_of_scope_affected_principal(
     affected_role.depts = [target]
     actor = _user("phase3-status-actor", [actor_role])
     affected = _user("phase3-status-affected", [affected_role])
-    db_session.add_all([target, outside, actor_role, affected_role, actor, affected])
-    await db_session.flush()
+    await _persist_graph(
+        db_session, target, outside, actor_role, affected_role, actor, affected
+    )
     await _bind_department(db_session, actor, target, primary=True)
     await _bind_department(db_session, affected, outside, primary=True)
 
@@ -338,6 +394,7 @@ async def test_status_change_rejects_an_out_of_scope_affected_principal(
             DeptUpdate(status=STATUS_ENABLED),
             actor_user_id=actor.user_id,
             expected_snapshot=None,
+            tenant=_tenant(actor),
         )
 
     assert exc_info.value.error_code == "AI_DEPT_STATUS_AUTHZ_IMPACT_OUT_OF_SCOPE"
@@ -361,8 +418,7 @@ async def test_status_change_checks_affected_role_without_members(
     affected_role.depts = [target]
     affected_role.menus = [hidden_permission]
     actor = _user("phase3-status-role-actor", [actor_role])
-    db_session.add_all([target, actor_role, affected_role, actor])
-    await db_session.flush()
+    await _persist_graph(db_session, target, actor_role, affected_role, actor)
     await _bind_department(db_session, actor, target, primary=True)
 
     with pytest.raises(BusinessException) as exc_info:
@@ -371,6 +427,7 @@ async def test_status_change_checks_affected_role_without_members(
             target.dept_id,
             DeptUpdate(status=STATUS_ENABLED),
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
         )
 
     assert exc_info.value.error_code == "AI_DEPT_STATUS_AUTHZ_IMPACT_OUT_OF_SCOPE"
@@ -396,20 +453,18 @@ async def test_move_rejects_materialized_scope_outside_actor_authority(
     )
     actor = _user("phase3-move-actor", [actor_role])
     affected = _user("phase3-move-affected", [affected_role])
-    db_session.add_all(
-        [
-            actor_root,
-            old_parent,
-            new_parent,
-            source,
-            outside,
-            actor_role,
-            affected_role,
-            actor,
-            affected,
-        ]
+    await _persist_graph(
+        db_session,
+        actor_root,
+        old_parent,
+        new_parent,
+        source,
+        outside,
+        actor_role,
+        affected_role,
+        actor,
+        affected,
     )
-    await db_session.flush()
     await _bind_department(db_session, actor, actor_root, primary=True)
     await _bind_department(db_session, affected, old_parent, primary=True)
     await _bind_department(db_session, affected, outside, primary=False)
@@ -423,6 +478,7 @@ async def test_move_rejects_materialized_scope_outside_actor_authority(
             new_parent_id=new_parent.dept_id,
             actor_user_id=actor.user_id,
             expected_snapshot=None,
+            tenant=_tenant(actor),
         )
 
     assert exc_info.value.error_code == "AI_DEPT_MOVE_AUTHZ_IMPACT_OUT_OF_SCOPE"
@@ -448,20 +504,18 @@ async def test_move_locks_complete_role_department_user_dependencies_in_order(
     )
     actor = _user("phase3-lock-actor", [actor_role])
     affected = _user("phase3-lock-affected", [affected_role])
-    db_session.add_all(
-        [
-            actor_root,
-            old_parent,
-            new_parent,
-            source,
-            child,
-            actor_role,
-            affected_role,
-            actor,
-            affected,
-        ]
+    await _persist_graph(
+        db_session,
+        actor_root,
+        old_parent,
+        new_parent,
+        source,
+        child,
+        actor_role,
+        affected_role,
+        actor,
+        affected,
     )
-    await db_session.flush()
     await _bind_department(db_session, actor, actor_root, primary=True)
     await _bind_department(db_session, affected, old_parent, primary=True)
     lock_spy = AsyncMock(wraps=authorization_lock_service.lock_targets)
@@ -475,6 +529,7 @@ async def test_move_locks_complete_role_department_user_dependencies_in_order(
             new_parent_id=new_parent.dept_id,
             actor_user_id=actor.user_id,
             expected_snapshot=None,
+            tenant=_tenant(actor),
         )
 
     assert lock_spy.await_count == 1
@@ -497,7 +552,10 @@ async def test_move_does_not_match_unrelated_ancestor_id_prefix(
     db_session: AsyncSession,
 ) -> None:
     super_role = await db_session.scalar(
-        select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+        select(Role).where(
+            Role.tenant_id == 0,
+            Role.role_code == SUPER_ADMIN_ROLE_CODE,
+        )
     )
     assert super_role is not None
     actor = _user("phase3-prefix-super", [super_role])
@@ -505,6 +563,7 @@ async def test_move_does_not_match_unrelated_ancestor_id_prefix(
     unrelated_id = 12_000_000_000_000_123
     destination = _department("phase3-prefix-destination")
     source = Dept(
+        tenant_id=0,
         dept_id=source_id,
         parent_id=None,
         ancestors="0",
@@ -513,6 +572,7 @@ async def test_move_does_not_match_unrelated_ancestor_id_prefix(
         status=STATUS_ENABLED,
     )
     source_child = Dept(
+        tenant_id=0,
         dept_id=next_id(),
         parent_id=source_id,
         ancestors=f"0,{source_id}",
@@ -521,6 +581,7 @@ async def test_move_does_not_match_unrelated_ancestor_id_prefix(
         status=STATUS_ENABLED,
     )
     unrelated = Dept(
+        tenant_id=0,
         dept_id=unrelated_id,
         parent_id=None,
         ancestors="0",
@@ -529,6 +590,7 @@ async def test_move_does_not_match_unrelated_ancestor_id_prefix(
         status=STATUS_ENABLED,
     )
     unrelated_child = Dept(
+        tenant_id=0,
         dept_id=next_id(),
         parent_id=unrelated_id,
         ancestors=f"0,{unrelated_id}",
@@ -536,16 +598,16 @@ async def test_move_does_not_match_unrelated_ancestor_id_prefix(
         order_num=0,
         status=STATUS_ENABLED,
     )
-    db_session.add_all(
-        [actor, destination, source, source_child, unrelated, unrelated_child]
+    await _persist_graph(
+        db_session, actor, destination, source, source_child, unrelated, unrelated_child
     )
-    await db_session.flush()
 
     await dept_service.move(
         db_session,
         dept_id=source_id,
         new_parent_id=destination.dept_id,
         actor_user_id=actor.user_id,
+        tenant=_tenant(actor),
     )
 
     assert source_child.ancestors == f"0,{destination.dept_id},{source_id}"
@@ -571,20 +633,18 @@ async def test_move_rejects_member_phantom_discovered_after_global_lock(
     actor = _user("phase3-stale-actor", [actor_role])
     existing_member = _user("phase3-stale-existing", [affected_role])
     late_member = _user("phase3-stale-late", [])
-    db_session.add_all(
-        [
-            actor_root,
-            old_parent,
-            new_parent,
-            source,
-            actor_role,
-            affected_role,
-            actor,
-            existing_member,
-            late_member,
-        ]
+    await _persist_graph(
+        db_session,
+        actor_root,
+        old_parent,
+        new_parent,
+        source,
+        actor_role,
+        affected_role,
+        actor,
+        existing_member,
+        late_member,
     )
-    await db_session.flush()
     await _bind_department(db_session, actor, actor_root, primary=True)
     await _bind_department(db_session, existing_member, old_parent, primary=True)
     original_lock = authorization_lock_service.lock_targets
@@ -593,6 +653,7 @@ async def test_move_rejects_member_phantom_discovered_after_global_lock(
         locked = await original_lock(*args, **kwargs)
         await db_session.execute(
             insert(user_roles).values(
+                tenant_id=0,
                 user_id=late_member.user_id,
                 role_id=affected_role.role_id,
             )
@@ -615,6 +676,7 @@ async def test_move_rejects_member_phantom_discovered_after_global_lock(
             new_parent_id=new_parent.dept_id,
             actor_user_id=actor.user_id,
             expected_snapshot=None,
+            tenant=_tenant(actor),
         )
 
     assert exc_info.value.error_code == "AUTHORIZATION_SNAPSHOT_STALE"

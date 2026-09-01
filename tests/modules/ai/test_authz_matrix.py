@@ -307,6 +307,7 @@ def _build_deps(
     user.user_id = 9001
 
     data_scope = DataScopeContext(
+        tenant_id=0,
         accessible_dept_ids=None,
         accessible_user_scope=accessible_user_scope,
         filters=[],

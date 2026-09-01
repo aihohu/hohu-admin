@@ -51,8 +51,8 @@ EXCLUDED_PATHS = (
 )
 
 
-def _parse_user_id_from_token(request) -> int | None:
-    """从请求头解析 JWT 拿 user_id（username 不再放 token，独立反查）。"""
+def _parse_identity_from_token(request) -> tuple[int, int] | None:
+    """从请求头解析 JWT 拿服务端签发的 tenant/user identity。"""
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         return None
@@ -63,25 +63,42 @@ def _parse_user_id_from_token(request) -> int | None:
         )
         if payload.get("type") != "access":
             return None
-        return int(payload.get("sub"))
-    except (JWTError, ValueError):
+        user_id = payload.get("sub")
+        tenant_id = payload.get("tid")
+        if (
+            not isinstance(user_id, str)
+            or not user_id.isascii()
+            or not user_id.isdigit()
+        ):
+            return None
+        if (
+            not isinstance(tenant_id, str)
+            or not tenant_id.isascii()
+            or not tenant_id.isdigit()
+        ):
+            return None
+        return int(tenant_id), int(user_id)
+    except (JWTError, ValueError, TypeError):
         return None
 
 
-async def _resolve_username(user_id: int) -> str | None:
+async def _resolve_username(tenant_id: int, user_id: int) -> str | None:
     """user_id → username 反查，先读 Redis 缓存，未命中读 DB 后回写。
 
     改名时 user_service.update_user 主动失效缓存，保证审计日志记录的是当前用户名，
     避免 token 里携带 username 在改名后产生陈旧日志的问题。
     """
-    cache_key = f"{REDIS_USER_NAME_PREFIX}{user_id}"
+    cache_key = f"tenant:{tenant_id}:{REDIS_USER_NAME_PREFIX}{user_id}"
     cached = await redis_client.get(cache_key)
     if cached:
         return cached
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-            select(User.user_name).where(User.user_id == user_id)
+            select(User.user_name).where(
+                User.tenant_id == tenant_id,
+                User.user_id == user_id,
+            )
         )
         user_name = result.scalars().first()
 
@@ -91,15 +108,16 @@ async def _resolve_username(user_id: int) -> str | None:
     return user_name
 
 
-async def _get_user_info(request) -> tuple[int, str] | None:
+async def _get_user_info(request) -> tuple[int, int, str] | None:
     """解析 token → user_id，再反查当前 username（缓存）。"""
-    user_id = _parse_user_id_from_token(request)
-    if user_id is None:
+    identity = _parse_identity_from_token(request)
+    if identity is None:
         return None
-    username = await _resolve_username(user_id)
+    tenant_id, user_id = identity
+    username = await _resolve_username(tenant_id, user_id)
     if not username:
         return None
-    return user_id, username
+    return tenant_id, user_id, username
 
 
 def _extract_module(path: str) -> str:
@@ -150,7 +168,7 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
         if not user_info:
             return await call_next(request)
 
-        user_id, username = user_info
+        tenant_id, user_id, username = user_info
 
         # 读取并缓存 request body
         request_params = None
@@ -194,6 +212,8 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
         try:
             async with AsyncSessionLocal() as session:
                 log = SysOperationLog(
+                    tenant_id=tenant_id,
+                    audit_scope="tenant",
                     user_id=user_id,
                     username=username,
                     module=_extract_module(path),

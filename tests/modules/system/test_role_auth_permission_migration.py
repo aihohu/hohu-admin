@@ -26,9 +26,12 @@ async def _permission_menu(
     *,
     status: str = STATUS_ENABLED,
 ) -> Menu:
-    menu = await db.scalar(select(Menu).where(Menu.permission == permission))
+    menu = await db.scalar(
+        select(Menu).where(Menu.tenant_id == 0, Menu.permission == permission)
+    )
     if menu is None:
         menu = Menu(
+            tenant_id=0,
             menu_id=next_id(),
             menu_name=f"P2 {permission}",
             menu_type="F",
@@ -57,6 +60,7 @@ async def test_upgrade_grants_each_historical_writer_without_expanding_entry(
     roles: list[Role] = []
     for index, menu in enumerate(writer_menus):
         role = Role(
+            tenant_id=0,
             role_id=next_id(),
             role_name=f"P2 writer {marker} {index}",
             role_code=f"R_P2_WRITER_{marker}_{index}",
@@ -65,6 +69,7 @@ async def test_upgrade_grants_each_historical_writer_without_expanding_entry(
         role.menus = [menu]
         roles.append(role)
     unrelated = Role(
+        tenant_id=0,
         role_id=next_id(),
         role_name=f"P2 unrelated {marker}",
         role_code=f"R_P2_UNRELATED_{marker}",
@@ -83,20 +88,27 @@ async def test_upgrade_grants_each_historical_writer_without_expanding_entry(
     assert migration_lock.await_count == 2
 
     role_auth_menu = await db_session.scalar(
-        select(Menu).where(Menu.permission == USER_ROLE_AUTH_PERMISSION)
+        select(Menu).where(
+            Menu.tenant_id == 0,
+            Menu.permission == USER_ROLE_AUTH_PERMISSION,
+        )
     )
     assert role_auth_menu is not None
     granted_role_ids = set(
         (
             await db_session.execute(
                 select(role_menus.c.role_id).where(
-                    role_menus.c.menu_id == role_auth_menu.menu_id
+                    role_menus.c.tenant_id == 0,
+                    role_menus.c.menu_id == role_auth_menu.menu_id,
                 )
             )
         ).scalars()
     )
     super_role_id = await db_session.scalar(
-        select(Role.role_id).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+        select(Role.role_id).where(
+            Role.tenant_id == 0,
+            Role.role_code == SUPER_ADMIN_ROLE_CODE,
+        )
     )
     assert {role.role_id for role in roles} <= granted_role_ids
     assert super_role_id in granted_role_ids
@@ -109,8 +121,15 @@ async def test_upgrade_grants_each_historical_writer_without_expanding_entry(
             (
                 await db_session.execute(
                     select(Menu.permission)
-                    .join(role_menus, role_menus.c.menu_id == Menu.menu_id)
-                    .where(role_menus.c.role_id == role.role_id)
+                    .join(
+                        role_menus,
+                        (role_menus.c.tenant_id == Menu.tenant_id)
+                        & (role_menus.c.menu_id == Menu.menu_id),
+                    )
+                    .where(
+                        role_menus.c.tenant_id == 0,
+                        role_menus.c.role_id == role.role_id,
+                    )
                 )
             ).scalars()
         )
@@ -125,7 +144,10 @@ async def test_upgrade_creates_permission_under_user_menu(
     await migrate_phase2_authorization(db_session)
 
     permission_menu = await db_session.scalar(
-        select(Menu).where(Menu.permission == USER_ROLE_AUTH_PERMISSION)
+        select(Menu).where(
+            Menu.tenant_id == 0,
+            Menu.permission == USER_ROLE_AUTH_PERMISSION,
+        )
     )
     assert permission_menu is not None
     parent = await db_session.get(Menu, permission_menu.parent_id)

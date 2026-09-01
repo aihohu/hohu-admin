@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
+from tenant_helpers import tenant_context
 
 from app.constants import STATUS_DISABLED, STATUS_ENABLED
 from app.core.exceptions import BusinessRuleException
@@ -25,11 +26,20 @@ def _context(
     tool,
     accessible_dept_ids: set[int] | None,
 ) -> AiToolContext:
+    user_id = next_id()
+    user = MagicMock(
+        user_id=user_id,
+        tenant_id=0,
+        user_name="phase3-dept-actor",
+        roles=[],
+    )
+    user._tenant_context = tenant_context(actor_user_id=user_id)
     return AiToolContext(
-        user=MagicMock(user_id=next_id(), user_name="phase3-dept-actor", roles=[]),
+        user=user,
         perms=set(tool.__ai_tool_meta__.required_perms),
         db=db,
         data_scope=DataScopeContext(
+            tenant_id=0,
             accessible_dept_ids=accessible_dept_ids,
             accessible_user_scope=None,
             filters=[],
@@ -47,6 +57,7 @@ def _department(
     dept_id = next_id()
     return Dept(
         dept_id=dept_id,
+        tenant_id=0,
         parent_id=parent.dept_id if parent is not None else None,
         ancestors=("0" if parent is None else f"{parent.ancestors},{parent.dept_id}"),
         dept_name=f"{name}-{dept_id}",

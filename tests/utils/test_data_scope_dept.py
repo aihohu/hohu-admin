@@ -11,10 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.system.models.dept import Dept
 from app.utils.data_scope import _get_dept_and_sub_ids
+from tests.tenant_helpers import tenant_context
+
+TENANT = tenant_context()
 
 
 def _make_dept(*, dept_id: int, name: str, ancestors: str) -> Dept:
     return Dept(
+        tenant_id=TENANT.tenant_id,
         dept_id=dept_id,
         dept_name=name,
         ancestors=ancestors,
@@ -41,7 +45,7 @@ async def test_no_substring_mismatch_d12_vs_d123(db_session: AsyncSession):
     )
     await db_session.flush()
 
-    result = set(await _get_dept_and_sub_ids(db_session, [base + 12]))
+    result = set(await _get_dept_and_sub_ids(db_session, [base + 12], tenant=TENANT))
 
     assert base + 12 in result
     # 关键回归断言：含 "...12" 子串但不是 (base+12) 子部门的，不应被返回
@@ -72,7 +76,7 @@ async def test_returns_real_children_and_skips_lookalikes(
     )
     await db_session.flush()
 
-    result = set(await _get_dept_and_sub_ids(db_session, [base + 1]))
+    result = set(await _get_dept_and_sub_ids(db_session, [base + 1], tenant=TENANT))
 
     # 真实子链：base+1 → base+2 → base+3
     assert {base + 1, base + 2, base + 3}.issubset(result)
@@ -106,7 +110,13 @@ async def test_multiple_input_depts_returns_all_subtrees(db_session: AsyncSessio
     )
     await db_session.flush()
 
-    result = set(await _get_dept_and_sub_ids(db_session, [base + 1, base + 10]))
+    result = set(
+        await _get_dept_and_sub_ids(
+            db_session,
+            [base + 1, base + 10],
+            tenant=TENANT,
+        )
+    )
 
     # A 子树：base+1, base+2
     # B 子树：base+10, base+20, base+30, base+100

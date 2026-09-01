@@ -21,6 +21,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.tenant import TenantContext
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 
@@ -144,24 +145,38 @@ _DEPT_DV_FORMULA = "部门字典!$B$3:$B$1000"
 _ROLE_DV_FORMULA = "角色字典!$A$3:$A$50"
 
 
-async def _fetch_depts(db: AsyncSession) -> list[Dept]:
+async def _fetch_depts(db: AsyncSession, *, tenant: TenantContext) -> list[Dept]:
     """实时查询启用部门。
 
     - 仅 status='1' 启用部门（决策：禁用部门不展示给用户选）
     - 按 dept_id 升序（稳定输出，便于测试 + 用户对比）
     """
-    stmt = select(Dept).where(Dept.status == "1").order_by(Dept.dept_id.asc())
+    stmt = (
+        select(Dept)
+        .where(
+            Dept.tenant_id == tenant.tenant_id,
+            Dept.status == "1",
+        )
+        .order_by(Dept.dept_id.asc())
+    )
     result = await db.execute(stmt)
     return list(result.scalars().all())
 
 
-async def _fetch_roles(db: AsyncSession) -> list[Role]:
+async def _fetch_roles(db: AsyncSession, *, tenant: TenantContext) -> list[Role]:
     """实时查询启用角色。
 
     - 仅 status='1' 启用角色
     - 按 role_id 升序
     """
-    stmt = select(Role).where(Role.status == "1").order_by(Role.role_id.asc())
+    stmt = (
+        select(Role)
+        .where(
+            Role.tenant_id == tenant.tenant_id,
+            Role.status == "1",
+        )
+        .order_by(Role.role_id.asc())
+    )
     result = await db.execute(stmt)
     return list(result.scalars().all())
 
@@ -292,7 +307,7 @@ def _build_role_dict_sheet(ws, roles: list[Role]) -> None:
         )
 
 
-async def generate_import_template(db: AsyncSession) -> bytes:
+async def generate_import_template(db: AsyncSession, *, tenant: TenantContext) -> bytes:
     """生成用户导入模板 xlsx。
 
     流程：
@@ -308,8 +323,8 @@ async def generate_import_template(db: AsyncSession) -> bytes:
     Returns:
         xlsx bytes（API 层用 ``Response(content=bytes)`` 包装）
     """
-    depts = await _fetch_depts(db)
-    roles = await _fetch_roles(db)
+    depts = await _fetch_depts(db, tenant=tenant)
+    roles = await _fetch_roles(db, tenant=tenant)
     dept_lookup: dict[int, Dept] = {d.dept_id: d for d in depts}
 
     wb = Workbook()

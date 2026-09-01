@@ -139,12 +139,14 @@ _DEPT_LOOKUP_MAX_MATCHES = 20
 
 def _build_scoped_dept_lookup_stmt(
     *,
+    tenant_id: int,
     accessible_dept_ids: set[int] | None,
     normalized_query: str,
     limit: int,
 ) -> Select[Any]:
     """Compatibility wrapper around the shared department selector."""
     return department_selector.build_lookup_statement(
+        tenant_id=tenant_id,
         accessible_dept_ids=accessible_dept_ids,
         normalized_query=normalized_query,
         limit=limit,
@@ -401,6 +403,7 @@ async def dept_create(
             payload,
             actor_user_id=ctx.user.user_id,
             expected_snapshot=snapshot,
+            tenant=ctx.tenant,
         )
     except BusinessException as exc:
         raise BusinessRuleException(
@@ -443,6 +446,7 @@ async def _dry_run_dept_create(
         ctx.db,
         payload,
         actor_user_id=ctx.user.user_id,
+        tenant=ctx.tenant,
     )
     execution_args = {
         "parent_id": parent_id,
@@ -542,6 +546,7 @@ async def dept_update(
             payload,
             actor_user_id=ctx.user.user_id,
             expected_snapshot=snapshot,
+            tenant=ctx.tenant,
         )
     except BusinessException as exc:
         raise BusinessRuleException(
@@ -599,6 +604,7 @@ async def _dry_run_dept_update(
         dept_id,
         payload,
         actor_user_id=ctx.user.user_id,
+        tenant=ctx.tenant,
     )
     confirmation_fields = _bound_confirmation_fields(
         execution_args,
@@ -662,6 +668,7 @@ async def dept_move(
             new_parent_id=new_parent_id,
             actor_user_id=ctx.user.user_id,
             expected_snapshot=snapshot,
+            tenant=ctx.tenant,
         )
     except BusinessException as exc:
         raise BusinessRuleException(
@@ -694,6 +701,7 @@ async def _dry_run_dept_move(
         dept_id=dept_id,
         new_parent_id=new_parent_id,
         actor_user_id=ctx.user.user_id,
+        tenant=ctx.tenant,
     )
     target_dept_name = getattr(preview, "target_dept_name", None)
     parent_dept_name = getattr(preview, "parent_dept_name", None)

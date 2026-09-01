@@ -80,6 +80,7 @@ async def seed_feedback():
         user_id = next_id()
         s.add(
             User(
+                tenant_id=0,
                 user_id=user_id,
                 user_name=f"{g}user",
                 nickname=f"{g}user",

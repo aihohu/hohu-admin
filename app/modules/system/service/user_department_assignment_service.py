@@ -21,6 +21,8 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.id_generator import next_id
+from app.core.tenant import TenantContext
+from app.core.tenant_scope import tenant_select
 from app.db.base import user_depts
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
@@ -138,9 +140,12 @@ class UserDepartmentAssignmentService:
         *,
         actor_user_id: int,
         has_departments: bool,
+        tenant: TenantContext,
     ) -> GrantAuthority:
         """Fail before user creation when department assignment is unauthorized."""
-        authority = await grant_authority_service.build(db, actor_user_id)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         required = {USER_ADD_PERMISSION}
         if has_departments:
             required.add(DEPT_LIST_PERMISSION)
@@ -152,9 +157,12 @@ class UserDepartmentAssignmentService:
         db: AsyncSession,
         *,
         actor_user_id: int,
+        tenant: TenantContext,
     ) -> GrantAuthority:
         """Require import and department-list permissions for department input."""
-        authority = await grant_authority_service.build(db, actor_user_id)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         self._require_permissions(
             authority,
             frozenset({USER_IMPORT_PERMISSION, DEPT_LIST_PERMISSION}),
@@ -265,9 +273,11 @@ class UserDepartmentAssignmentService:
             "after": materialized_role_set_snapshot(new_authority),
         }
 
-    async def _load_user(self, db: AsyncSession, user_id: int) -> User:
+    async def _load_user(
+        self, db: AsyncSession, user_id: int, *, tenant: TenantContext
+    ) -> User:
         user = await db.scalar(
-            select(User)
+            tenant_select(User, tenant=tenant)
             .where(User.user_id == user_id)
             .options(
                 selectinload(User.roles).selectinload(Role.menus),
@@ -284,13 +294,15 @@ class UserDepartmentAssignmentService:
         self,
         db: AsyncSession,
         user_ids: set[int],
+        *,
+        tenant: TenantContext,
     ) -> dict[int, User]:
         if not user_ids:
             return {}
         users = list(
             (
                 await db.execute(
-                    select(User)
+                    tenant_select(User, tenant=tenant)
                     .where(User.user_id.in_(user_ids))
                     .options(
                         selectinload(User.roles).selectinload(Role.menus),
@@ -310,6 +322,8 @@ class UserDepartmentAssignmentService:
         self,
         db: AsyncSession,
         role_ids: list[int],
+        *,
+        tenant: TenantContext,
     ) -> list[Role]:
         normalized = sorted({int(role_id) for role_id in role_ids})
         if len(normalized) != len(role_ids) or any(
@@ -322,7 +336,7 @@ class UserDepartmentAssignmentService:
         roles = list(
             (
                 await db.execute(
-                    select(Role)
+                    tenant_select(Role, tenant=tenant)
                     .where(Role.role_id.in_(normalized))
                     .options(selectinload(Role.menus), selectinload(Role.depts))
                     .order_by(Role.role_id)
@@ -345,11 +359,16 @@ class UserDepartmentAssignmentService:
         self,
         db: AsyncSession,
         user_id: int,
+        *,
+        tenant: TenantContext,
     ) -> tuple[tuple[int, bool], ...]:
         rows = (
             await db.execute(
                 select(user_depts.c.dept_id, user_depts.c.is_primary)
-                .where(user_depts.c.user_id == user_id)
+                .where(
+                    user_depts.c.tenant_id == tenant.tenant_id,
+                    user_depts.c.user_id == user_id,
+                )
                 .order_by(user_depts.c.dept_id)
             )
         ).all()
@@ -362,6 +381,8 @@ class UserDepartmentAssignmentService:
         self,
         db: AsyncSession,
         user_ids: set[int],
+        *,
+        tenant: TenantContext,
     ) -> dict[int, tuple[tuple[int, bool], ...]]:
         result: dict[int, list[tuple[int, bool]]] = {
             user_id: [] for user_id in user_ids
@@ -375,7 +396,10 @@ class UserDepartmentAssignmentService:
                     user_depts.c.dept_id,
                     user_depts.c.is_primary,
                 )
-                .where(user_depts.c.user_id.in_(user_ids))
+                .where(
+                    user_depts.c.tenant_id == tenant.tenant_id,
+                    user_depts.c.user_id.in_(user_ids),
+                )
                 .order_by(user_depts.c.user_id, user_depts.c.dept_id)
             )
         ).all()
@@ -389,6 +413,8 @@ class UserDepartmentAssignmentService:
         self,
         db: AsyncSession,
         assignment_sets: list[tuple[tuple[int, bool], ...]],
+        *,
+        tenant: TenantContext,
     ) -> dict[int, Dept]:
         dept_ids = {
             dept_id for assignments in assignment_sets for dept_id, _ in assignments
@@ -398,7 +424,7 @@ class UserDepartmentAssignmentService:
         depts = list(
             (
                 await db.execute(
-                    select(Dept)
+                    tenant_select(Dept, tenant=tenant)
                     .where(Dept.dept_id.in_(dept_ids))
                     .order_by(Dept.dept_id)
                     .execution_options(populate_existing=True)
@@ -425,6 +451,8 @@ class UserDepartmentAssignmentService:
         self,
         db: AsyncSession,
         assignments: tuple[tuple[int, bool], ...],
+        *,
+        tenant: TenantContext,
     ) -> list[Dept]:
         dept_ids = [dept_id for dept_id, _is_primary in assignments]
         if not dept_ids:
@@ -432,7 +460,7 @@ class UserDepartmentAssignmentService:
         depts = list(
             (
                 await db.execute(
-                    select(Dept)
+                    tenant_select(Dept, tenant=tenant)
                     .where(Dept.dept_id.in_(dept_ids))
                     .order_by(Dept.dept_id)
                     .execution_options(populate_existing=True)
@@ -454,15 +482,20 @@ class UserDepartmentAssignmentService:
         *,
         target_user_id: int,
         assignments: tuple[tuple[int, bool], ...],
+        tenant: TenantContext,
     ) -> None:
         await db.execute(
-            delete(user_depts).where(user_depts.c.user_id == target_user_id)
+            delete(user_depts).where(
+                user_depts.c.tenant_id == tenant.tenant_id,
+                user_depts.c.user_id == target_user_id,
+            )
         )
         if assignments:
             await db.execute(
                 insert(user_depts),
                 [
                     {
+                        "tenant_id": tenant.tenant_id,
                         "user_id": target_user_id,
                         "dept_id": dept_id,
                         "is_primary": (IS_PRIMARY_YES if is_primary else IS_PRIMARY_NO),
@@ -477,12 +510,14 @@ class UserDepartmentAssignmentService:
         *,
         user: User,
         depts: list[Dept],
+        tenant: TenantContext,
     ) -> set[int]:
         resolution = await resolve_data_scope_for_roles(
             db,
             user=user,
             roles=list(user.roles or []),
             depts=depts,
+            tenant=tenant,
         )
         return (
             set()
@@ -498,16 +533,19 @@ class UserDepartmentAssignmentService:
         target: User,
         requested_depts: list[Dept],
         actor_authority: GrantAuthority,
+        tenant: TenantContext,
     ):
         old_scope_depts = await self._materialized_dept_dependencies(
             db,
             user=target,
             depts=list(target.depts or []),
+            tenant=tenant,
         )
         new_scope_depts = await self._materialized_dept_dependencies(
             db,
             user=target,
             depts=requested_depts,
+            tenant=tenant,
         )
         actor_scope_depts = (
             set()
@@ -528,6 +566,7 @@ class UserDepartmentAssignmentService:
             role_ids={*_role_ids(actor), *_role_ids(target)},
             dept_ids=dept_ids,
             user_ids={int(actor.user_id), int(target.user_id)},
+            tenant=tenant,
         )
 
     @staticmethod
@@ -663,6 +702,7 @@ class UserDepartmentAssignmentService:
         require_primary: bool | None = None,
         old_authority: RoleSetAuthority | None = None,
         new_authority: RoleSetAuthority | None = None,
+        tenant: TenantContext,
     ) -> tuple[RoleSetAuthority, RoleSetAuthority]:
         """Validate one complete old/new assignment set without writing it."""
         self._ensure_direct_scope(
@@ -684,6 +724,7 @@ class UserDepartmentAssignmentService:
             require_primary = await config_service.get_bool_for_update(
                 db,
                 "user_require_primary_dept",
+                tenant=tenant,
             )
         self._ensure_primary_policy(new_assignments, require_primary=require_primary)
         if old_authority is None:
@@ -693,6 +734,7 @@ class UserDepartmentAssignmentService:
                     user=target,
                     roles=list(target.roles or []),
                     depts=list(target.depts or []),
+                    tenant=tenant,
                 )
             )
         if new_authority is None:
@@ -702,6 +744,7 @@ class UserDepartmentAssignmentService:
                     user=target,
                     roles=final_roles,
                     depts=requested_depts,
+                    tenant=tenant,
                 )
             )
         effective_ignored_ids = ignored_user_ids
@@ -729,20 +772,28 @@ class UserDepartmentAssignmentService:
         actor_user_id: int,
         target_user_id: int,
         dept_assignments: list[tuple[int | str, bool]],
+        tenant: TenantContext,
     ) -> UserDepartmentAssignmentPreview:
         """Validate and freeze one complete replacement without writing it."""
         normalized = self._normalize_assignments(dept_assignments)
-        authority = await grant_authority_service.build(db, actor_user_id)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         self._require_permissions(
             authority,
             frozenset({USER_EDIT_PERMISSION, DEPT_LIST_PERMISSION}),
         )
-        target = await self._load_user(db, target_user_id)
-        old_assignments = await self._load_assignments(db, target_user_id)
-        requested_depts = await self._load_requested_depts(db, normalized)
+        target = await self._load_user(db, target_user_id, tenant=tenant)
+        old_assignments = await self._load_assignments(
+            db, target_user_id, tenant=tenant
+        )
+        requested_depts = await self._load_requested_depts(
+            db, normalized, tenant=tenant
+        )
         require_primary = await config_service.get_bool_for_update(
             db,
             "user_require_primary_dept",
+            tenant=tenant,
         )
         old_authority, new_authority = await self._authorize_assignment_change(
             db,
@@ -752,6 +803,7 @@ class UserDepartmentAssignmentService:
             new_assignments=normalized,
             requested_depts=requested_depts,
             require_primary=require_primary,
+            tenant=tenant,
         )
         dept_map = {
             int(dept.dept_id): dept
@@ -787,18 +839,22 @@ class UserDepartmentAssignmentService:
         created_target: bool,
         ignored_user_ids: frozenset[int] = frozenset(),
         expected_snapshot: dict[str, Any] | None = None,
+        tenant: TenantContext,
     ) -> UserDepartmentAssignmentResult:
         normalized = self._normalize_assignments(dept_assignments)
-        actor_before = await self._load_user(db, actor_user_id)
-        authority_before = await grant_authority_service.build(db, actor_user_id)
+        actor_before = await self._load_user(db, actor_user_id, tenant=tenant)
+        authority_before = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         self._require_permissions(authority_before, required_permissions)
-        target_before = await self._load_user(db, target_user_id)
+        target_before = await self._load_user(db, target_user_id, tenant=tenant)
         actor_role_snapshot = _role_ids(actor_before)
         actor_dept_snapshot = _user_dept_ids(actor_before)
         target_role_snapshot = _role_ids(target_before)
         target_assignment_snapshot = await self._load_assignments(
             db,
             target_user_id,
+            tenant=tenant,
         )
         if created_target and target_assignment_snapshot:
             raise BusinessRuleException(
@@ -813,18 +869,23 @@ class UserDepartmentAssignmentService:
             created_target=created_target,
         )
         self._ensure_target_protection(authority_before, target_before)
-        requested_before = await self._load_requested_depts(db, normalized)
+        requested_before = await self._load_requested_depts(
+            db, normalized, tenant=tenant
+        )
         locked = await self._lock_dependencies(
             db,
             actor=actor_before,
             target=target_before,
             requested_depts=requested_before,
             actor_authority=authority_before,
+            tenant=tenant,
         )
 
-        actor = await self._load_user(db, actor_user_id)
-        target = await self._load_user(db, target_user_id)
-        current_assignments = await self._load_assignments(db, target_user_id)
+        actor = await self._load_user(db, actor_user_id, tenant=tenant)
+        target = await self._load_user(db, target_user_id, tenant=tenant)
+        current_assignments = await self._load_assignments(
+            db, target_user_id, tenant=tenant
+        )
         if (
             _role_ids(actor) != actor_role_snapshot
             or _user_dept_ids(actor) != actor_dept_snapshot
@@ -836,12 +897,17 @@ class UserDepartmentAssignmentService:
                 error_code="AUTHORIZATION_SNAPSHOT_STALE",
             )
 
-        authority = await grant_authority_service.build(db, actor_user_id)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         self._require_permissions(authority, required_permissions)
-        requested_depts = await self._load_requested_depts(db, normalized)
+        requested_depts = await self._load_requested_depts(
+            db, normalized, tenant=tenant
+        )
         require_primary = await config_service.get_bool_for_update(
             db,
             "user_require_primary_dept",
+            tenant=tenant,
         )
         old_authority, new_authority = await self._authorize_assignment_change(
             db,
@@ -853,6 +919,7 @@ class UserDepartmentAssignmentService:
             created_target=created_target,
             ignored_user_ids=ignored_user_ids,
             require_primary=require_primary,
+            tenant=tenant,
         )
         live_dependency_ids = self._live_dependency_ids(
             actor=actor,
@@ -893,6 +960,7 @@ class UserDepartmentAssignmentService:
             db,
             target_user_id=target_user_id,
             assignments=normalized,
+            tenant=tenant,
         )
         return UserDepartmentAssignmentResult(
             user_id=target_user_id,
@@ -908,6 +976,7 @@ class UserDepartmentAssignmentService:
         target_user_id: int,
         dept_assignments: list[tuple[int | str, bool]],
         expected_snapshot: dict[str, Any] | None = None,
+        tenant: TenantContext,
     ) -> UserDepartmentAssignmentResult:
         """Replace one existing user's complete department set without committing."""
         return await self._replace_departments(
@@ -920,6 +989,7 @@ class UserDepartmentAssignmentService:
             ),
             created_target=False,
             expected_snapshot=expected_snapshot,
+            tenant=tenant,
         )
 
     async def assign_created_user_departments(
@@ -929,6 +999,7 @@ class UserDepartmentAssignmentService:
         actor_user_id: int,
         target_user_id: int,
         dept_assignments: list[tuple[int | str, bool]],
+        tenant: TenantContext,
     ) -> UserDepartmentAssignmentResult:
         """Assign a newly created user's complete department set."""
         required = {USER_ADD_PERMISSION}
@@ -941,6 +1012,7 @@ class UserDepartmentAssignmentService:
             dept_assignments=dept_assignments,
             required_permissions=frozenset(required),
             created_target=True,
+            tenant=tenant,
         )
 
     async def replace_imported_user_departments(
@@ -952,6 +1024,7 @@ class UserDepartmentAssignmentService:
         dept_assignments: list[tuple[int | str, bool]],
         created_target: bool,
         ignored_user_ids: frozenset[int] = frozenset(),
+        tenant: TenantContext,
     ) -> UserDepartmentAssignmentResult:
         """Apply an imported user's complete department set under import policy."""
         return await self._replace_departments(
@@ -964,6 +1037,7 @@ class UserDepartmentAssignmentService:
             ),
             created_target=created_target,
             ignored_user_ids=ignored_user_ids,
+            tenant=tenant,
         )
 
     async def validate_import_department_assignment(
@@ -979,14 +1053,18 @@ class UserDepartmentAssignmentService:
         authority: GrantAuthority | None = None,
         prospective_user_id: int | None = None,
         ignored_user_ids: frozenset[int] = frozenset(),
+        tenant: TenantContext,
     ) -> None:
         """Validate one frozen import target without writing associations."""
         normalized = self._normalize_assignments(dept_assignments)
-        requested_depts = await self._load_requested_depts(db, normalized)
-        prospective_roles = await self._load_roles(db, role_ids)
+        requested_depts = await self._load_requested_depts(
+            db, normalized, tenant=tenant
+        )
+        prospective_roles = await self._load_roles(db, role_ids, tenant=tenant)
         created_target = target_user_id is None
         if created_target:
             target = User(
+                tenant_id=tenant.tenant_id,
                 user_id=prospective_user_id or next_id(),
                 user_name=target_user_name,
                 nickname=target_user_name,
@@ -997,11 +1075,14 @@ class UserDepartmentAssignmentService:
             )
             old_assignments: tuple[tuple[int, bool], ...] = ()
         else:
-            target = await self._load_user(db, target_user_id)
-            old_assignments = await self._load_assignments(db, target_user_id)
+            target = await self._load_user(db, target_user_id, tenant=tenant)
+            old_assignments = await self._load_assignments(
+                db, target_user_id, tenant=tenant
+            )
         live_authority = authority or await grant_authority_service.build(
             db,
             actor_user_id,
+            tenant=tenant,
         )
         await self._authorize_assignment_change(
             db,
@@ -1013,6 +1094,7 @@ class UserDepartmentAssignmentService:
             prospective_roles=prospective_roles,
             created_target=created_target,
             ignored_user_ids=ignored_user_ids,
+            tenant=tenant,
         )
 
     async def apply_locked_import_departments(
@@ -1021,14 +1103,18 @@ class UserDepartmentAssignmentService:
         *,
         target_user_id: int,
         dept_assignments: list[tuple[int | str, bool]],
+        tenant: TenantContext,
     ) -> UserDepartmentAssignmentResult:
         """Apply a set already validated under the import batch authorization lock."""
         normalized = self._normalize_assignments(dept_assignments)
-        old_assignments = await self._load_assignments(db, target_user_id)
+        old_assignments = await self._load_assignments(
+            db, target_user_id, tenant=tenant
+        )
         await self._write_assignments(
             db,
             target_user_id=target_user_id,
             assignments=normalized,
+            tenant=tenant,
         )
         return UserDepartmentAssignmentResult(
             user_id=target_user_id,
@@ -1052,9 +1138,11 @@ class UserDepartmentAssignmentService:
             error_code="AI_DATA_SCOPE_VIOLATION",
         )
 
-    async def _load_department(self, db: AsyncSession, dept_id: int) -> Dept:
+    async def _load_department(
+        self, db: AsyncSession, dept_id: int, *, tenant: TenantContext
+    ) -> Dept:
         dept = await db.scalar(
-            select(Dept)
+            tenant_select(Dept, tenant=tenant)
             .where(Dept.dept_id == dept_id)
             .execution_options(populate_existing=True)
         )
@@ -1066,6 +1154,8 @@ class UserDepartmentAssignmentService:
         self,
         db: AsyncSession,
         dept_ids: set[int],
+        *,
+        tenant: TenantContext,
     ) -> tuple[tuple[int, int | None, str | None, str], ...]:
         """Return stable structural facts for every department dependency."""
         if not dept_ids:
@@ -1078,7 +1168,10 @@ class UserDepartmentAssignmentService:
                     Dept.ancestors,
                     Dept.status,
                 )
-                .where(Dept.dept_id.in_(dept_ids))
+                .where(
+                    Dept.tenant_id == tenant.tenant_id,
+                    Dept.dept_id.in_(dept_ids),
+                )
                 .order_by(Dept.dept_id)
             )
         ).all()
@@ -1101,11 +1194,14 @@ class UserDepartmentAssignmentService:
         self,
         db: AsyncSession,
         dept_id: int,
+        *,
+        tenant: TenantContext,
     ) -> dict[int, bool]:
         rows = (
             await db.execute(
                 select(user_depts.c.user_id, user_depts.c.is_primary).where(
-                    user_depts.c.dept_id == dept_id
+                    user_depts.c.tenant_id == tenant.tenant_id,
+                    user_depts.c.dept_id == dept_id,
                 )
             )
         ).all()
@@ -1139,22 +1235,26 @@ class UserDepartmentAssignmentService:
         query: str | None,
         current: int,
         size: int,
+        tenant: TenantContext,
     ) -> DepartmentMemberPage:
         """Return one minimal, user-scoped candidate page without leaking members."""
-        authority = await grant_authority_service.build(db, actor_user_id)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         self._require_permissions(
             authority,
             frozenset(
                 {DEPT_LIST_PERMISSION, DEPT_EDIT_PERMISSION, USER_LIST_PERMISSION}
             ),
         )
-        await self._load_department(db, dept_id)
+        await self._load_department(db, dept_id, tenant=tenant)
         self._ensure_department_scope(authority, dept_id)
-        member_map = await self._load_member_map(db, dept_id)
+        member_map = await self._load_member_map(db, dept_id, tenant=tenant)
         self._ensure_member_scope(authority, set(member_map))
 
         filters = [
-            or_(User.status == STATUS_ENABLED, User.user_id.in_(set(member_map)))
+            User.tenant_id == tenant.tenant_id,
+            or_(User.status == STATUS_ENABLED, User.user_id.in_(set(member_map))),
         ]
         if authority.accessible_user_scope is not None:
             filters.append(User.user_id.in_(authority.accessible_user_scope))
@@ -1202,6 +1302,7 @@ class UserDepartmentAssignmentService:
         actor_user_id: int,
         dept_id: int,
         user_ids: list[int | str],
+        tenant: TenantContext,
     ) -> DepartmentMembershipResult:
         """Replace a department's complete member set atomically without committing."""
         normalized_user_ids: list[int] = []
@@ -1227,15 +1328,17 @@ class UserDepartmentAssignmentService:
                 error_code="USER_DEPT_MEMBER_NOT_AVAILABLE",
             )
 
-        actor_before = await self._load_user(db, actor_user_id)
-        authority_before = await grant_authority_service.build(db, actor_user_id)
+        actor_before = await self._load_user(db, actor_user_id, tenant=tenant)
+        authority_before = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         required_permissions = frozenset(
             {DEPT_LIST_PERMISSION, DEPT_EDIT_PERMISSION, USER_EDIT_PERMISSION}
         )
         self._require_permissions(authority_before, required_permissions)
-        dept_before = await self._load_department(db, dept_id)
+        dept_before = await self._load_department(db, dept_id, tenant=tenant)
         self._ensure_department_scope(authority_before, dept_id)
-        member_map_before = await self._load_member_map(db, dept_id)
+        member_map_before = await self._load_member_map(db, dept_id, tenant=tenant)
         current_ids = set(member_map_before)
         requested_ids = set(normalized_user_ids)
         self._ensure_member_scope(
@@ -1252,7 +1355,7 @@ class UserDepartmentAssignmentService:
 
         affected_id_set = to_add | to_remove
         affected_ids = sorted(affected_id_set)
-        affected_by_id = await self._load_users(db, affected_id_set)
+        affected_by_id = await self._load_users(db, affected_id_set, tenant=tenant)
         if set(affected_by_id) != affected_id_set:
             raise BusinessRuleException(
                 "用户不存在或不可分配",
@@ -1274,6 +1377,7 @@ class UserDepartmentAssignmentService:
         assignments_before = await self._load_assignments_by_user(
             db,
             affected_id_set,
+            tenant=tenant,
         )
         target_snapshots = {
             user_id: (
@@ -1298,6 +1402,7 @@ class UserDepartmentAssignmentService:
         requested_dept_map_before = await self._load_requested_dept_map(
             db,
             list(prospective_assignments.values()),
+            tenant=tenant,
         )
         requested_depts_before = {
             user_id: self._depts_for_assignments(
@@ -1326,6 +1431,7 @@ class UserDepartmentAssignmentService:
             await user_role_assignment_service.materialize_role_set_authorities(
                 db,
                 candidates=authority_candidates_before,
+                tenant=tenant,
             )
         )
         authorities_before = {
@@ -1365,6 +1471,7 @@ class UserDepartmentAssignmentService:
         dependency_dept_snapshot = await self._load_department_snapshot(
             db,
             dependency_dept_ids,
+            tenant=tenant,
         )
 
         locked = await authorization_lock_service.lock_targets(
@@ -1379,18 +1486,23 @@ class UserDepartmentAssignmentService:
             },
             dept_ids=dependency_dept_ids,
             user_ids={actor_user_id, *current_ids, *requested_ids},
+            tenant=tenant,
         )
-        actor = await self._load_user(db, actor_user_id)
-        authority = await grant_authority_service.build(db, actor_user_id)
-        dept = await self._load_department(db, dept_id)
-        member_map = await self._load_member_map(db, dept_id)
+        actor = await self._load_user(db, actor_user_id, tenant=tenant)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
+        dept = await self._load_department(db, dept_id, tenant=tenant)
+        member_map = await self._load_member_map(db, dept_id, tenant=tenant)
         if (
             _role_ids(actor) != actor_role_snapshot
             or _user_dept_ids(actor) != actor_dept_snapshot
             or authority.version_summary != authority_before.version_summary
             or dept.status != dept_before.status
             or member_map != member_map_before
-            or await self._load_department_snapshot(db, dependency_dept_ids)
+            or await self._load_department_snapshot(
+                db, dependency_dept_ids, tenant=tenant
+            )
             != dependency_dept_snapshot
         ):
             raise BusinessRuleException(
@@ -1401,10 +1513,11 @@ class UserDepartmentAssignmentService:
         self._ensure_department_scope(authority, dept_id)
         self._ensure_member_scope(authority, current_ids | requested_ids)
 
-        affected = await self._load_users(db, affected_id_set)
+        affected = await self._load_users(db, affected_id_set, tenant=tenant)
         current_assignments_by_user = await self._load_assignments_by_user(
             db,
             affected_id_set,
+            tenant=tenant,
         )
         for user_id in affected_ids:
             target = affected[user_id]
@@ -1425,6 +1538,7 @@ class UserDepartmentAssignmentService:
         requested_dept_map = await self._load_requested_dept_map(
             db,
             list(prospective_assignments.values()),
+            tenant=tenant,
         )
         requested_depts_by_user = {
             user_id: self._depts_for_assignments(
@@ -1453,6 +1567,7 @@ class UserDepartmentAssignmentService:
             await user_role_assignment_service.materialize_role_set_authorities(
                 db,
                 candidates=authority_candidates,
+                tenant=tenant,
             )
         )
         if materialized != materialized_before:
@@ -1463,6 +1578,7 @@ class UserDepartmentAssignmentService:
         require_primary = await config_service.get_bool_for_update(
             db,
             "user_require_primary_dept",
+            tenant=tenant,
         )
         for index, user_id in enumerate(affected_ids):
             target = affected[user_id]
@@ -1477,6 +1593,7 @@ class UserDepartmentAssignmentService:
                 require_primary=require_primary,
                 old_authority=materialized[index * 2],
                 new_authority=materialized[index * 2 + 1],
+                tenant=tenant,
             )
             live_dependencies = self._live_dependency_ids(
                 actor=actor,
@@ -1495,6 +1612,7 @@ class UserDepartmentAssignmentService:
         if to_remove:
             await db.execute(
                 delete(user_depts).where(
+                    user_depts.c.tenant_id == tenant.tenant_id,
                     user_depts.c.dept_id == dept_id,
                     user_depts.c.user_id.in_(to_remove),
                 )
@@ -1504,6 +1622,7 @@ class UserDepartmentAssignmentService:
                 insert(user_depts),
                 [
                     {
+                        "tenant_id": tenant.tenant_id,
                         "user_id": user_id,
                         "dept_id": dept_id,
                         "is_primary": IS_PRIMARY_NO,

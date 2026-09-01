@@ -3,11 +3,14 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from tenant_helpers import tenant_context
 
 from app.modules.ai.agents.supervisor.quota import (
     check_supervisor_quota,
     increment_daily_count,
 )
+
+TENANT = tenant_context()
 
 
 @pytest.mark.asyncio
@@ -24,7 +27,7 @@ async def test_quota_allows_under_limit():
             AsyncMock(return_value=100),
         ),
     ):
-        result = await check_supervisor_quota(AsyncMock(), user_id=1)
+        result = await check_supervisor_quota(AsyncMock(), user_id=1, tenant=TENANT)
     assert result.allowed is True
 
 
@@ -41,7 +44,7 @@ async def test_quota_blocks_at_limit():
             AsyncMock(return_value=100),
         ),
     ):
-        result = await check_supervisor_quota(AsyncMock(), user_id=1)
+        result = await check_supervisor_quota(AsyncMock(), user_id=1, tenant=TENANT)
     assert result.allowed is False
     assert result.reason == "quota_exceeded"
 
@@ -58,7 +61,9 @@ async def test_quota_increment_after_check():
         "app.modules.ai.agents.supervisor.quota._utc_date",
         return_value="2026-07-25",
     ):
-        count = await increment_daily_count(fake_redis, user_id=1)
+        count = await increment_daily_count(fake_redis, user_id=1, tenant=TENANT)
 
     assert count == 51
-    fake_redis.incr.assert_awaited_once_with("ai:supervisor:quota:1:2026-07-25")
+    fake_redis.incr.assert_awaited_once_with(
+        "tenant:0:ai:supervisor:quota:1:2026-07-25"
+    )

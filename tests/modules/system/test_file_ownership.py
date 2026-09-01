@@ -26,6 +26,7 @@ from app.modules.system.api import file as file_api
 from app.modules.system.models.file import File
 from app.modules.system.schemas.file import FileOut, FileQuery
 from app.modules.system.service.file_service import FileService
+from tests.tenant_helpers import tenant_context
 
 
 def _upload_file(name: str, content: bytes) -> UploadFile:
@@ -49,13 +50,12 @@ class TestFileOwnershipModel:
         assert isinstance(column.type, BigInteger)
         assert column.nullable is True
 
-    def test_tenant_is_non_nullable_with_single_tenant_default(self) -> None:
+    def test_tenant_is_non_nullable_without_runtime_default(self) -> None:
         column = File.__table__.columns["tenant_id"]
 
         assert isinstance(column.type, BigInteger)
         assert column.nullable is False
-        assert column.server_default is not None
-        assert str(column.server_default.arg) == "0"
+        assert column.server_default is None
 
 
 class TestFileUploadOwnership:
@@ -93,7 +93,7 @@ class TestFileUploadOwnership:
                 upload,
                 current_user_name="alice-renamed",
                 owner_user_id=1001,
-                tenant_id=0,
+                tenant=tenant_context(tenant_id=0),
                 business_type="user-import",
             )
 
@@ -120,7 +120,7 @@ class TestFileUploadOwnership:
                 _upload_file("users.xlsx", b"xlsx-content"),
                 current_user_name="alice",
                 owner_user_id=1001,
-                tenant_id=0,
+                tenant=tenant_context(tenant_id=0),
                 business_type="user-import",
             )
 
@@ -152,7 +152,7 @@ class TestFileUploadOwnership:
                 _upload_file("users.xlsx", b"xlsx-content"),
                 current_user_name="alice",
                 owner_user_id=1001,
-                tenant_id=0,
+                tenant=tenant_context(tenant_id=0),
                 business_type="ai-chat",
             )
 
@@ -183,7 +183,7 @@ class TestFileUploadOwnership:
                 upload,
                 current_user_name="alice",
                 owner_user_id=1001,
-                tenant_id=0,
+                tenant=tenant_context(tenant_id=0),
                 business_type="ai-chat",
             )
 
@@ -207,7 +207,7 @@ class TestFileUploadOwnership:
                 _upload_file("avatar.xlsx", b"xlsx-content"),
                 current_user_name="alice",
                 owner_user_id=1001,
-                tenant_id=0,
+                tenant=tenant_context(tenant_id=0),
                 business_type="avatar",
             )
 
@@ -266,7 +266,7 @@ class TestFileUploadOwnership:
                 _upload_file("users.xlsx", b"xlsx-content"),
                 current_user_name="legacy-only",
                 owner_user_id=None,  # type: ignore[arg-type]
-                tenant_id=0,
+                tenant=tenant_context(tenant_id=0),
                 business_type="user-import",
             )
 
@@ -288,14 +288,14 @@ class TestFileUploadOwnership:
             [first, second],
             current_user_name="alice",
             owner_user_id=1001,
-            tenant_id=0,
+            tenant=tenant_context(tenant_id=0),
             business_type="user-import",
         )
 
         assert service.upload.await_count == 2
         for call in service.upload.await_args_list:
             assert call.kwargs["owner_user_id"] == 1001
-            assert call.kwargs["tenant_id"] == 0
+            assert call.kwargs["tenant"].tenant_id == 0
             assert call.kwargs["business_type"] == "user-import"
 
     async def test_api_derives_tenant_from_authenticated_principal_only(self) -> None:
@@ -305,12 +305,10 @@ class TestFileUploadOwnership:
         current_user = MagicMock(user_id=1001, user_name="alice")
         record = MagicMock(spec=File)
 
-        with (
-            patch.object(
-                file_api.file_service, "upload", new_callable=AsyncMock
-            ) as save,
-            patch.object(file_api, "resolve_tenant_id", return_value=0) as resolve,
-        ):
+        tenant = tenant_context(tenant_id=0, actor_user_id=1001)
+        with patch.object(
+            file_api.file_service, "upload", new_callable=AsyncMock
+        ) as save:
             save.return_value = record
             await file_api.upload(
                 file=_upload_file("users.xlsx", b"xlsx-content"),
@@ -318,11 +316,11 @@ class TestFileUploadOwnership:
                 business_id=None,
                 db=db,
                 _current_user=current_user,
+                tenant=tenant,
             )
 
-        resolve.assert_called_once_with(current_user)
         assert save.await_args.kwargs["owner_user_id"] == 1001
-        assert save.await_args.kwargs["tenant_id"] == 0
+        assert save.await_args.kwargs["tenant"] is tenant
         assert save.await_args.kwargs["business_type"] == "user-import"
 
     async def test_batch_api_derives_tenant_for_all_files(self) -> None:
@@ -330,12 +328,10 @@ class TestFileUploadOwnership:
         db.commit = AsyncMock()
         current_user = MagicMock(user_id=1001, user_name="alice")
 
-        with (
-            patch.object(
-                file_api.file_service, "batch_upload", new_callable=AsyncMock
-            ) as save,
-            patch.object(file_api, "resolve_tenant_id", return_value=0) as resolve,
-        ):
+        tenant = tenant_context(tenant_id=0, actor_user_id=1001)
+        with patch.object(
+            file_api.file_service, "batch_upload", new_callable=AsyncMock
+        ) as save:
             save.return_value = []
             await file_api.batch_upload(
                 files=[_upload_file("users.xlsx", b"xlsx-content")],
@@ -343,11 +339,11 @@ class TestFileUploadOwnership:
                 business_id=None,
                 db=db,
                 _current_user=current_user,
+                tenant=tenant,
             )
 
-        resolve.assert_called_once_with(current_user)
         assert save.await_args.kwargs["owner_user_id"] == 1001
-        assert save.await_args.kwargs["tenant_id"] == 0
+        assert save.await_args.kwargs["tenant"] is tenant
         assert save.await_args.kwargs["business_type"] == "user-import"
 
 
@@ -366,7 +362,12 @@ class TestFileDeleteOwnership:
         service._delete_disk_file = MagicMock()  # type: ignore[method-assign]
         current_user = MagicMock(user_id=1001, user_name="alice-after-rename")
 
-        await service.delete(db, 99, current_user=current_user, tenant_id=0)
+        await service.delete(
+            db,
+            99,
+            current_user=current_user,
+            tenant=tenant_context(tenant_id=0),
+        )
 
         db.delete.assert_awaited_once_with(record)
 
@@ -383,7 +384,12 @@ class TestFileDeleteOwnership:
         current_user = MagicMock(user_id=1001, user_name="alice")
 
         with pytest.raises(AuthorizationException) as exc_info:
-            await service.delete(db, 99, current_user=current_user, tenant_id=0)
+            await service.delete(
+                db,
+                99,
+                current_user=current_user,
+                tenant=tenant_context(tenant_id=0),
+            )
 
         assert exc_info.value.error_code == "FILE_OWNERSHIP_REQUIRED"
 
@@ -418,7 +424,7 @@ class TestFileTenantScope:
             "app.modules.system.service.file_service.paginate",
             new_callable=AsyncMock,
         ) as paginate:
-            await service.get_list(db, FileQuery(), tenant_id=7)
+            await service.get_list(db, FileQuery(), tenant=tenant_context(tenant_id=7))
 
         filters = paginate.await_args.kwargs["filters"]
         values_by_column = {
@@ -441,7 +447,7 @@ class TestFileTenantScope:
         await service.get_by_id(
             db,
             99,
-            tenant_id=7,
+            tenant=tenant_context(tenant_id=7),
             owner_user_id=1001,
             is_admin=False,
         )
@@ -461,7 +467,9 @@ class TestFileTenantScope:
         db = MagicMock(spec=AsyncSession)
         db.execute = AsyncMock(return_value=scalar_result)
 
-        await service.get_by_id(db, 99, tenant_id=7, is_admin=True)
+        await service.get_by_id(
+            db, 99, tenant=tenant_context(tenant_id=7), is_admin=True
+        )
 
         statement = db.execute.await_args.args[0]
         sql = str(statement.compile(compile_kwargs={"literal_binds": True}))
@@ -477,7 +485,9 @@ class TestFileTenantScope:
         service._delete_disk_file = MagicMock()  # type: ignore[method-assign]
 
         with pytest.raises(NotFoundException):
-            await service.delete(db, 99, is_admin=True, tenant_id=7)
+            await service.delete(
+                db, 99, is_admin=True, tenant=tenant_context(tenant_id=7)
+            )
 
         statement = db.execute.await_args.args[0]
         sql = str(statement.compile(compile_kwargs={"literal_binds": True}))
@@ -489,8 +499,8 @@ class TestFileTenantScope:
         db.commit = AsyncMock()
         current_user = MagicMock(user_id=1001, user_name="alice")
 
+        tenant = tenant_context(tenant_id=7, actor_user_id=1001)
         with (
-            patch.object(file_api, "resolve_tenant_id", return_value=7),
             patch.object(
                 file_api.file_service, "get_list", new_callable=AsyncMock
             ) as get_list,
@@ -505,20 +515,20 @@ class TestFileTenantScope:
             ) as batch_delete,
             patch.object(file_api, "is_super_admin", return_value=False),
         ):
-            await file_api.get_list(FileQuery(), db, current_user)
-            await file_api.get_by_id(99, db, current_user)
-            await file_api.delete(99, db, current_user)
+            await file_api.get_list(FileQuery(), db, current_user, tenant)
+            await file_api.get_by_id(99, db, current_user, tenant)
+            await file_api.delete(99, db, current_user, tenant)
             batch_delete.return_value = 0
-            await file_api.batch_delete([99], db, current_user)
+            await file_api.batch_delete([99], db, current_user, tenant)
 
-        assert get_list.await_args.kwargs["tenant_id"] == 7
+        assert get_list.await_args.kwargs["tenant"] is tenant
         assert get_by_id.await_args.kwargs == {
-            "tenant_id": 7,
+            "tenant": tenant,
             "owner_user_id": 1001,
             "is_admin": False,
         }
-        assert delete.await_args.kwargs["tenant_id"] == 7
-        assert batch_delete.await_args.kwargs["tenant_id"] == 7
+        assert delete.await_args.kwargs["tenant"] is tenant
+        assert batch_delete.await_args.kwargs["tenant"] is tenant
 
 
 class TestFileOwnershipMigration:

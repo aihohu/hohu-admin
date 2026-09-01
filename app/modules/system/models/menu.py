@@ -1,8 +1,20 @@
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Integer, String, func
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from app.core.id_generator import next_id
 from app.db.base import Base, role_menus
@@ -13,9 +25,26 @@ if TYPE_CHECKING:
 
 class Menu(Base):
     __tablename__ = "sys_menu"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "menu_id", name="uq_sys_menu_tenant_menu_id"),
+        ForeignKeyConstraint(
+            ("tenant_id", "parent_id"),
+            ("sys_menu.tenant_id", "sys_menu.menu_id"),
+            name="fk_sys_menu_tenant_parent",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_sys_menu_tenant_parent", "tenant_id", "parent_id"),
+        Index("ix_sys_menu_tenant_status", "tenant_id", "status"),
+    )
 
     menu_id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, default=next_id, comment="菜单ID"
+    )
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("sys_tenant.tenant_id", ondelete="RESTRICT"),
+        nullable=False,
+        comment="租户ID；必须由可信 TenantContext 显式写入",
     )
     parent_id: Mapped[int] = mapped_column(
         BigInteger, nullable=True, comment="父菜单ID"
@@ -83,3 +112,8 @@ class Menu(Base):
     roles: Mapped[list["Role"]] = relationship(
         "Role", secondary=role_menus, back_populates="menus"
     )
+
+    @validates("parent_id")
+    def normalize_root_parent(self, _key: str, value: int | None) -> int | None:
+        """Normalize the legacy root sentinel before the same-tenant FK runs."""
+        return None if value == 0 else value

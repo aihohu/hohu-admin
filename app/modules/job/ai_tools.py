@@ -50,12 +50,12 @@ async def job_update_cron(
         渲染（title + 任务 ID/新 cron 两个字段 + before/after 审计用于合规追溯）。
     """
     # 先读旧 cron，做 before/after 审计（cron 变更必须留合规轨迹）
-    old_job = await job_service.get_by_id(ctx.db, job_id)
+    old_job = await job_service.get_by_id(ctx.db, job_id, tenant=ctx.tenant)
     old_cron = old_job.cron_expression or ""
 
     data = JobAiUpdate(job_id=job_id, cron_expression=cron_expression)
     job = await job_service.update_for_ai(
-        ctx.db, data, current_user=str(ctx.user.user_id)
+        ctx.db, data, current_user=str(ctx.user.user_id), tenant=ctx.tenant
     )
     new_cron = job.cron_expression or ""
     job_id_str = str(job.job_id)
@@ -88,7 +88,7 @@ async def _dry_run_job_update_cron(
     """
     from app.modules.ai.agents.hitl.constants import DryRunResult
 
-    job = await job_service.get_by_id(ctx.db, job_id)
+    job = await job_service.get_by_id(ctx.db, job_id, tenant=ctx.tenant)
     old_cron = job.cron_expression or "(none)"
     return DryRunResult(
         ok=True,

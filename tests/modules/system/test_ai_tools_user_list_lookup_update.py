@@ -31,6 +31,7 @@ from app.modules.system.ai_tools import (
     user_update,
 )
 from app.modules.system.models.user import User
+from tests.tenant_helpers import tenant_context
 
 # ============ fixture ============
 
@@ -49,6 +50,7 @@ async def _add_user(
     """建用户（绕过 ORM 关系，直接 insert）"""
     db.add(
         User(
+            tenant_id=0,
             user_id=user_id,
             user_name=user_name,
             nickname=nickname or user_name,
@@ -81,6 +83,7 @@ def _make_ctx(
         else:
             filters = []
         data_scope = DataScopeContext(
+            tenant_id=0,
             accessible_dept_ids=None,
             accessible_user_scope=None,
             filters=filters,
@@ -93,13 +96,16 @@ def _make_ctx(
         risk="low",
         allowed_filters=allowed_filters,
     )
+    actor = MagicMock(user_id=1, tenant_id=0)
+    actor._tenant_context = tenant_context(tenant_id=0, actor_user_id=1)
     return AiToolContext(
-        user=MagicMock(user_id=1),
+        user=actor,
         perms=set(required_perms),
         db=db,
         data_scope=data_scope,
         trace_id="tr_test",
         tool_meta=meta,
+        tenant_id=0,
     )
 
 
@@ -472,6 +478,7 @@ class TestDryRunUserUpdate:
         """An out-of-scope target must fail before Gateway confirmation."""
         await _add_user(db_session, user_id=4300, user_name="scope-outsider")
         data_scope = DataScopeContext(
+            tenant_id=0,
             accessible_dept_ids=set(),
             accessible_user_scope=select(User.user_id).where(User.user_id == -1),
             filters=[User.user_id == -1],

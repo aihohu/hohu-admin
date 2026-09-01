@@ -893,7 +893,9 @@ class TestAuthorizationExceptionRollback:
             perms={"p"},
             db=None,  # type: ignore[arg-type]
             data_scope=DataScopeContext(
-                accessible_dept_ids=None, accessible_user_scope=None
+                tenant_id=0,
+                accessible_dept_ids=None,
+                accessible_user_scope=None,
             ),
             agent=None,  # type: ignore[arg-type]
             trace_id="tr_test_authz",
@@ -965,7 +967,9 @@ class TestAuthorizationExceptionRollback:
             perms={"p"},
             db=None,  # type: ignore[arg-type]
             data_scope=DataScopeContext(
-                accessible_dept_ids=None, accessible_user_scope=None
+                tenant_id=0,
+                accessible_dept_ids=None,
+                accessible_user_scope=None,
             ),
             agent=None,  # type: ignore[arg-type]
             trace_id="tr_test_biz",

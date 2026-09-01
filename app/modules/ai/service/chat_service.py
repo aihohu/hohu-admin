@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AuthorizationException, BusinessRuleException
-from app.core.tenant import resolve_tenant_id
+from app.core.tenant import TenantContext, get_bound_tenant_context
 from app.modules.ai.agents.chat_agent import create_chat_agent
 
 # 从 constants.py 导入，避免 service 与 agents.supervisor 循环依赖。
@@ -153,7 +153,7 @@ class ChatService:
         *,
         user_perms: set[str],
         agent_code: str = "user_mgmt",
-        tenant_id: int = 0,
+        tenant: TenantContext,
         agent_config: AiAgent | None = None,
     ):
         """创建配置好的 Agent
@@ -173,9 +173,11 @@ class ChatService:
         model = await model_authorization_service.resolve_model_instance(
             db,
             model_ref,
-            tenant_id=tenant_id,
+            tenant_id=tenant.tenant_id,
         )
-        enabled_extra = await get_ai_config_str_list(db, "ai:enabled_tools", default=[])
+        enabled_extra = await get_ai_config_str_list(
+            db, "ai:enabled_tools", default=[], tenant=tenant
+        )
         return create_chat_agent(
             model,
             user_perms=user_perms,
@@ -219,6 +221,7 @@ class ChatService:
             resolve_sticky_agent_code,
         )
 
+        tenant = get_bound_tenant_context(user)
         perms = agent_authorization_service.tool_permissions(user)
         data_scope = await build_data_scope_context(db, user)
         data_scope_hash = await result_projection_service.compute_data_scope_hash(
@@ -244,6 +247,7 @@ class ChatService:
             conversation_id=conversation_id,
             agent_code_param=agent_code,
             conv_agent_code=conv_agent_code,
+            tenant=tenant,
         )
 
         agent: AiAgent | None = None
@@ -274,7 +278,7 @@ class ChatService:
         else:
             # run_supervisor=True：检查 supervisor_enabled（决定 deps.agent 是否预加载）
             supervisor_on = await get_ai_config_bool(
-                db, "ai:supervisor_enabled", default=True
+                db, "ai:supervisor_enabled", default=True, tenant=tenant
             )
             if not supervisor_on:
                 agent = await agent_authorization_service.authorize_agent_access(
@@ -291,7 +295,7 @@ class ChatService:
             data_scope=data_scope,
             agent=agent,
             trace_id=trace_id or f"tr_{uuid.uuid4().hex[:16]}",
-            tenant_id=resolve_tenant_id(user),
+            tenant_id=tenant.tenant_id,
             sticky_decision=decision,
             data_scope_hash=data_scope_hash,
         )

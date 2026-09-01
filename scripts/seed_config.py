@@ -18,6 +18,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
 from app.core.id_generator import next_id
+from app.core.tenant import DEFAULT_TENANT_ID
 from app.modules.system.models.config import Config
 
 CONFIG_SEED_DATA = [
@@ -154,6 +155,7 @@ async def seed_config():
 
             config = Config(
                 config_id=next_id(),
+                tenant_id=DEFAULT_TENANT_ID,
                 **item,
             )
             db.add(config)

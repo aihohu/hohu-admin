@@ -10,12 +10,14 @@ from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.schemas.menu import ButtonCreate, MenuUpdate
 from app.modules.system.service.menu_service import menu_service
+from tests.tenant_helpers import tenant_context
 
 
 @pytest.fixture
 async def parent_menu(db_session: AsyncSession) -> Menu:
     """创建一个目录菜单作为父。"""
     menu = Menu(
+        tenant_id=0,
         menu_name="测试目录",
         menu_type=MENU_TYPE_DIRECTORY,
         parent_id=0,
@@ -38,12 +40,18 @@ async def role_with_buttons(
     返回 (role, buttons)，buttons 是已关联的按钮列表。
     直接 INSERT role_menus 关联表，绕开 ORM 反向同步触发的 async lazy load。
     """
-    role = Role(role_name="测试角色", role_code="R_TEST_PERM", status=STATUS_ENABLED)
+    role = Role(
+        tenant_id=0,
+        role_name="测试角色",
+        role_code="R_TEST_PERM",
+        status=STATUS_ENABLED,
+    )
     db_session.add(role)
 
     buttons = []
     for code in ["test:p1", "test:p2", "test:p3"]:
         btn = Menu(
+            tenant_id=0,
             menu_name=f"按钮 {code}",
             permission=code,
             menu_type=MENU_TYPE_BUTTON,
@@ -58,8 +66,15 @@ async def role_with_buttons(
     await db_session.execute(
         insert(role_menus).values(
             [
-                {"role_id": role.role_id, "menu_id": parent_menu.menu_id},
-                *[{"role_id": role.role_id, "menu_id": b.menu_id} for b in buttons],
+                {
+                    "tenant_id": 0,
+                    "role_id": role.role_id,
+                    "menu_id": parent_menu.menu_id,
+                },
+                *[
+                    {"tenant_id": 0, "role_id": role.role_id, "menu_id": b.menu_id}
+                    for b in buttons
+                ],
             ]
         )
     )
@@ -97,11 +112,17 @@ class TestUpdateMenuButtonsPreserveAssociation:
             ],
         )
 
-        await menu_service.update_menu(db_session, parent_menu.menu_id, menu_in)
+        await menu_service.update_menu(
+            db_session,
+            parent_menu.menu_id,
+            menu_in,
+            tenant=tenant_context(tenant_id=0),
+        )
         await db_session.flush()
 
         result = await db_session.execute(
             select(Menu).where(
+                Menu.tenant_id == 0,
                 Menu.parent_id == parent_menu.menu_id,
                 Menu.menu_type == MENU_TYPE_BUTTON,
             )
@@ -139,12 +160,20 @@ class TestUpdateMenuButtonsPreserveAssociation:
             ],
         )
 
-        await menu_service.update_menu(db_session, parent_menu.menu_id, menu_in)
+        await menu_service.update_menu(
+            db_session,
+            parent_menu.menu_id,
+            menu_in,
+            tenant=tenant_context(tenant_id=0),
+        )
         await db_session.flush()
 
         # 关键断言：3 个旧按钮在 role_menus 中依然存在
         result = await db_session.execute(
-            select(role_menus.c.menu_id).where(role_menus.c.role_id == role.role_id)
+            select(role_menus.c.menu_id).where(
+                role_menus.c.tenant_id == 0,
+                role_menus.c.role_id == role.role_id,
+            )
         )
         associated_ids = set(result.scalars().all())
 
@@ -172,11 +201,19 @@ class TestUpdateMenuButtonsPreserveAssociation:
             buttons=[_button("test:p2"), _button("test:p3")],
         )
 
-        await menu_service.update_menu(db_session, parent_menu.menu_id, menu_in)
+        await menu_service.update_menu(
+            db_session,
+            parent_menu.menu_id,
+            menu_in,
+            tenant=tenant_context(tenant_id=0),
+        )
         await db_session.flush()
 
         result = await db_session.execute(
-            select(role_menus.c.menu_id).where(role_menus.c.role_id == role.role_id)
+            select(role_menus.c.menu_id).where(
+                role_menus.c.tenant_id == 0,
+                role_menus.c.role_id == role.role_id,
+            )
         )
         associated_ids = set(result.scalars().all())
 
@@ -206,11 +243,17 @@ class TestUpdateMenuButtonsPreserveAssociation:
             ],
         )
 
-        await menu_service.update_menu(db_session, parent_menu.menu_id, menu_in)
+        await menu_service.update_menu(
+            db_session,
+            parent_menu.menu_id,
+            menu_in,
+            tenant=tenant_context(tenant_id=0),
+        )
         await db_session.flush()
 
         result = await db_session.execute(
             select(Menu).where(
+                Menu.tenant_id == 0,
                 Menu.parent_id == parent_menu.menu_id,
                 Menu.menu_type == MENU_TYPE_BUTTON,
                 Menu.permission == "test:p1",

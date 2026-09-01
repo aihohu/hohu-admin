@@ -25,13 +25,29 @@ from scripts.audit_data_scope_union import (
     ScopeUnionAuditReport,
     _parse_args,
     audit_exit_code,
-    build_scope_union_report,
     release_gate_exit_code,
     verify_scope_union_ack,
     write_protected_report,
 )
+from scripts.audit_data_scope_union import (
+    build_scope_union_report as _build_scope_union_report,
+)
+from tests.tenant_helpers import tenant_context
 
 pytest_plugins = ("tests.modules.system.conftest",)
+TENANT = tenant_context()
+
+
+async def build_scope_union_report(
+    db: AsyncSession,
+    *,
+    build_sha: str,
+) -> ScopeUnionAuditReport:
+    return await _build_scope_union_report(
+        db,
+        build_sha=build_sha,
+        tenant=TENANT,
+    )
 
 
 async def _row_counts(db: AsyncSession) -> tuple[int, int, int]:
@@ -47,6 +63,7 @@ async def test_report_is_canonical_read_only_and_detects_union_expansion(
 ) -> None:
     marker = next_id()
     own_dept = Dept(
+        tenant_id=TENANT.tenant_id,
         dept_id=next_id(),
         dept_name=f"audit-own-{marker}",
         ancestors="0",
@@ -54,6 +71,7 @@ async def test_report_is_canonical_read_only_and_detects_union_expansion(
         status=STATUS_ENABLED,
     )
     custom_dept = Dept(
+        tenant_id=TENANT.tenant_id,
         dept_id=next_id(),
         dept_name=f"audit-custom-{marker}",
         ancestors="0",
@@ -61,6 +79,7 @@ async def test_report_is_canonical_read_only_and_detects_union_expansion(
         status=STATUS_ENABLED,
     )
     dept_role = Role(
+        tenant_id=TENANT.tenant_id,
         role_id=next_id(),
         role_name=f"audit-dept-role-{marker}",
         role_code=f"R_AUDIT_DEPT_{marker}",
@@ -68,6 +87,7 @@ async def test_report_is_canonical_read_only_and_detects_union_expansion(
         status=STATUS_ENABLED,
     )
     custom_role = Role(
+        tenant_id=TENANT.tenant_id,
         role_id=next_id(),
         role_name=f"audit-custom-role-{marker}",
         role_code=f"R_AUDIT_CUSTOM_{marker}",
@@ -75,6 +95,7 @@ async def test_report_is_canonical_read_only_and_detects_union_expansion(
         status=STATUS_ENABLED,
     )
     actor = User(
+        tenant_id=TENANT.tenant_id,
         user_id=next_id(),
         user_name=f"audit-actor-{marker}",
         nickname="audit actor",
@@ -84,6 +105,7 @@ async def test_report_is_canonical_read_only_and_detects_union_expansion(
     actor.roles = [dept_role, custom_role]
     actor.depts = [own_dept]
     custom_user = User(
+        tenant_id=TENANT.tenant_id,
         user_id=next_id(),
         user_name=f"audit-custom-user-{marker}",
         nickname="audit custom user",
@@ -96,12 +118,14 @@ async def test_report_is_canonical_read_only_and_detects_union_expansion(
     await db_session.flush()
     await db_session.execute(
         insert(role_depts).values(
+            tenant_id=TENANT.tenant_id,
             role_id=custom_role.role_id,
             dept_id=custom_dept.dept_id,
         )
     )
     await db_session.execute(
         insert(user_depts).values(
+            tenant_id=TENANT.tenant_id,
             user_id=custom_user.user_id,
             dept_id=custom_dept.dept_id,
             is_primary="N",
@@ -154,6 +178,7 @@ async def test_report_hash_changes_when_authorization_facts_drift(
     marker = next_id()
     db_session.add(
         Dept(
+            tenant_id=TENANT.tenant_id,
             dept_id=next_id(),
             dept_name=f"audit-drift-{marker}",
             ancestors="0",
@@ -176,6 +201,7 @@ async def test_report_hash_changes_when_authorization_facts_drift(
 
     db_session.add(
         Role(
+            tenant_id=TENANT.tenant_id,
             role_id=next_id(),
             role_name=f"audit-drift-role-{marker}",
             role_code=f"R_AUDIT_DRIFT_{marker}",
@@ -192,6 +218,7 @@ async def test_report_hash_changes_when_authorization_facts_drift(
 
     db_session.add(
         User(
+            tenant_id=TENANT.tenant_id,
             user_id=next_id(),
             user_name=f"audit-drift-user-{marker}",
             nickname="audit drift user",
@@ -243,6 +270,7 @@ async def test_report_separates_legacy_api_and_ai_self_semantics(
 ) -> None:
     marker = next_id()
     custom_dept = Dept(
+        tenant_id=TENANT.tenant_id,
         dept_id=next_id(),
         dept_name=f"audit-legacy-custom-{marker}",
         ancestors="0",
@@ -250,6 +278,7 @@ async def test_report_separates_legacy_api_and_ai_self_semantics(
         status=STATUS_ENABLED,
     )
     custom_role = Role(
+        tenant_id=TENANT.tenant_id,
         role_id=next_id(),
         role_name=f"audit-legacy-custom-role-{marker}",
         role_code=f"R_AUDIT_LEGACY_CUSTOM_{marker}",
@@ -257,6 +286,7 @@ async def test_report_separates_legacy_api_and_ai_self_semantics(
         status=STATUS_ENABLED,
     )
     self_role = Role(
+        tenant_id=TENANT.tenant_id,
         role_id=next_id(),
         role_name=f"audit-legacy-self-role-{marker}",
         role_code=f"R_AUDIT_LEGACY_SELF_{marker}",
@@ -264,6 +294,7 @@ async def test_report_separates_legacy_api_and_ai_self_semantics(
         status=STATUS_ENABLED,
     )
     actor = User(
+        tenant_id=TENANT.tenant_id,
         user_id=next_id(),
         user_name=f"audit-legacy-actor-{marker}",
         nickname="audit legacy actor",
@@ -272,6 +303,7 @@ async def test_report_separates_legacy_api_and_ai_self_semantics(
     )
     actor.roles = [custom_role, self_role]
     custom_user = User(
+        tenant_id=TENANT.tenant_id,
         user_id=next_id(),
         user_name=f"audit-legacy-user-{marker}",
         nickname="audit legacy user",
@@ -282,12 +314,14 @@ async def test_report_separates_legacy_api_and_ai_self_semantics(
     await db_session.flush()
     await db_session.execute(
         insert(role_depts).values(
+            tenant_id=TENANT.tenant_id,
             role_id=custom_role.role_id,
             dept_id=custom_dept.dept_id,
         )
     )
     await db_session.execute(
         insert(user_depts).values(
+            tenant_id=TENANT.tenant_id,
             user_id=custom_user.user_id,
             dept_id=custom_dept.dept_id,
             is_primary="N",

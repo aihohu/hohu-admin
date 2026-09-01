@@ -22,6 +22,7 @@ def _department(
 ) -> Dept:
     dept_id = next_id()
     return Dept(
+        tenant_id=0,
         dept_id=dept_id,
         parent_id=parent.dept_id if parent is not None else None,
         ancestors=("0" if parent is None else f"{parent.ancestors},{parent.dept_id}"),
@@ -33,6 +34,7 @@ def _department(
 
 def _resolution(*dept_ids: int) -> DataScopeResolution:
     return DataScopeResolution(
+        tenant_id=0,
         scope_kinds=frozenset({DATA_SCOPE_CUSTOM}),
         accessible_dept_ids=frozenset(dept_ids),
         accessible_user_scope=None,

@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import STATUS_ENABLED
 from app.core.exceptions import AuthorizationException
+from app.core.tenant import TenantContext, get_bound_tenant_context
 from app.modules.ai.agents.safety.ai_config import get_ai_config_str_list
 from app.modules.ai.agents.tools.registry import compute_available_tools
 from app.modules.ai.models.agent import AiAgent
@@ -32,13 +33,18 @@ class AgentAuthorizationService:
         an explicitly bound disabled Agent can still be removed safely.
         """
         role_ids = self._enabled_role_ids(user)
-        by_role = await self.grantable_agent_ids_by_role_ids(db, role_ids)
+        tenant = get_bound_tenant_context(user)
+        by_role = await self.grantable_agent_ids_by_role_ids(
+            db, role_ids, tenant=tenant
+        )
         return {agent_id for agent_ids in by_role.values() for agent_id in agent_ids}
 
     async def grantable_agent_ids_by_role_ids(
         self,
         db: AsyncSession,
         role_ids: list[int] | tuple[int, ...] | set[int],
+        *,
+        tenant: TenantContext,
     ) -> dict[int, set[int]]:
         """Return active Role-Agent grants grouped by explicit role identifier."""
         normalized_role_ids = {int(role_id) for role_id in role_ids}
@@ -50,6 +56,7 @@ class AgentAuthorizationService:
         rows = (
             await db.execute(
                 select(RoleAiAgent.role_id, RoleAiAgent.agent_id).where(
+                    RoleAiAgent.tenant_id == tenant.tenant_id,
                     RoleAiAgent.role_id.in_(normalized_role_ids),
                     RoleAiAgent.enabled.is_(True),
                 )
@@ -63,9 +70,13 @@ class AgentAuthorizationService:
         self,
         db: AsyncSession,
         role_ids: list[int] | tuple[int, ...] | set[int],
+        *,
+        tenant: TenantContext,
     ) -> set[int]:
         """Return the active Role-Agent union for an explicit role set."""
-        by_role = await self.grantable_agent_ids_by_role_ids(db, role_ids)
+        by_role = await self.grantable_agent_ids_by_role_ids(
+            db, role_ids, tenant=tenant
+        )
         return {agent_id for agent_ids in by_role.values() for agent_id in agent_ids}
 
     @staticmethod
@@ -80,6 +91,7 @@ class AgentAuthorizationService:
         user: User,
     ) -> list[AiAgent]:
         role_ids = self._enabled_role_ids(user)
+        tenant = get_bound_tenant_context(user)
         if not role_ids:
             return []
         result = await db.execute(
@@ -87,6 +99,7 @@ class AgentAuthorizationService:
             .join(RoleAiAgent, RoleAiAgent.agent_id == AiAgent.agent_id)
             .where(
                 AiAgent.enabled.is_(True),
+                RoleAiAgent.tenant_id == tenant.tenant_id,
                 RoleAiAgent.enabled.is_(True),
                 RoleAiAgent.role_id.in_(role_ids),
             )
@@ -106,11 +119,13 @@ class AgentAuthorizationService:
         user: User,
     ) -> list[AiAgent]:
         """列出通过完整 Agent Policy 的候选 Agent。"""
+        tenant = get_bound_tenant_context(user)
         perms = self.tool_permissions(user)
         enabled_extra = await get_ai_config_str_list(
             db,
             "ai:enabled_tools",
             default=[],
+            tenant=tenant,
         )
         return [
             agent

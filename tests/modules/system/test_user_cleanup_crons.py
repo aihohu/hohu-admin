@@ -18,10 +18,12 @@ from sqlalchemy import delete as _delete
 from sqlalchemy import select
 
 from app.core.file_storage import MockFileStorage, reset_file_storage_for_test
+from app.core.tenant import PlatformContext
 from app.modules.system.constants import (
     ExportTaskStatus,
     ImportBatchStatus,
 )
+from app.modules.system.models.user import User
 from app.modules.system.models.user_transfer import (
     UserExportTask,
     UserImportBatch,
@@ -39,6 +41,12 @@ BATCH_RETENTION_DAYS = 90
 PREVIEW_TTL_MINUTES = 10
 #: 导出文件保留 30 天。
 EXPORT_RETENTION_DAYS = 30
+TEST_OPERATOR_ID = 7_500_000_000_000_000_001
+PLATFORM = PlatformContext(
+    actor_user_id=0,
+    reason="tenant-aware retention test",
+    correlation_id="plan2-system-cleanup",
+)
 
 
 def _make_batch(
@@ -49,10 +57,11 @@ def _make_batch(
     file_storage_key: str | None = None,
     failed_rows_file: str | None = None,
     created_at: datetime | None = None,
-    operator_id: int = 1,
+    operator_id: int = TEST_OPERATOR_ID,
 ) -> UserImportBatch:
     """构造 UserImportBatch 行（created_at 显式传，便于测试时间窗）。"""
     return UserImportBatch(
+        tenant_id=0,
         batch_id=batch_id,
         operator_id=operator_id,
         filename=f"{batch_id}.xlsx",
@@ -78,8 +87,9 @@ def _make_export_task(
 ) -> UserExportTask:
     """构造 UserExportTask 测试行。"""
     return UserExportTask(
+        tenant_id=0,
         export_id=export_id,
-        operator_id=1,
+        operator_id=TEST_OPERATOR_ID,
         filter_snapshot={"user_name": None},
         reason="批量导出审计",
         file_storage_key=file_storage_key,
@@ -102,6 +112,16 @@ async def _cleanup_persisted_batches(db_session):
     """
     await db_session.execute(_delete(UserImportBatch))
     await db_session.execute(_delete(UserExportTask))
+    db_session.add(
+        User(
+            user_id=TEST_OPERATOR_ID,
+            tenant_id=0,
+            user_name="plan2_cleanup_operator",
+            nickname="Plan 2 cleanup operator",
+            hashed_password="not-used-by-tests",
+            status="1",
+        )
+    )
     await db_session.flush()
 
 
@@ -142,7 +162,7 @@ class TestCleanupExpiredBatches:
         db_session.add(batch)
         await db_session.flush()
 
-        count = await cleanup_expired_batches(db_session)
+        count = await cleanup_expired_batches(db_session, platform=PLATFORM)
 
         assert count == 1
         # DB 行已删（CASCADE 自动删 batch_log，这里没 log 直接查 batch）
@@ -162,7 +182,7 @@ class TestCleanupExpiredBatches:
         db_session.add(batch)
         await db_session.flush()
 
-        count = await cleanup_expired_batches(db_session)
+        count = await cleanup_expired_batches(db_session, platform=PLATFORM)
 
         assert count == 0
         assert await db_session.get(UserImportBatch, "b-recent-1") is not None
@@ -178,7 +198,7 @@ class TestCleanupExpiredBatches:
         db_session.add(batch)
         await db_session.flush()
 
-        count = await cleanup_expired_batches(db_session)
+        count = await cleanup_expired_batches(db_session, platform=PLATFORM)
 
         assert count == 0
         assert await db_session.get(UserImportBatch, "b-running-old") is not None
@@ -194,7 +214,7 @@ class TestCleanupExpiredBatches:
         db_session.add(batch)
         await db_session.flush()
 
-        count = await cleanup_expired_batches(db_session)
+        count = await cleanup_expired_batches(db_session, platform=PLATFORM)
 
         assert count == 0
         assert await db_session.get(UserImportBatch, "b-preview-old") is not None
@@ -220,7 +240,7 @@ class TestCleanupExpiredBatches:
         db_session.add(batch)
         await db_session.flush()
 
-        count = await cleanup_expired_batches(db_session)
+        count = await cleanup_expired_batches(db_session, platform=PLATFORM)
 
         assert count == 1
         assert await db_session.get(UserImportBatch, f"b-term-{status.value}") is None
@@ -236,7 +256,7 @@ class TestCleanupExpiredBatches:
         db_session.add(batch)
         await db_session.flush()
 
-        count = await cleanup_expired_batches(db_session)
+        count = await cleanup_expired_batches(db_session, platform=PLATFORM)
 
         assert count == 1
         assert await db_session.get(UserImportBatch, "b-no-files") is None
@@ -254,7 +274,7 @@ class TestCleanupExpiredBatches:
         await db_session.flush()
 
         # 不抛错（FileStorage.delete 返 False 而非 raise；MockFileStorage 同款）
-        count = await cleanup_expired_batches(db_session)
+        count = await cleanup_expired_batches(db_session, platform=PLATFORM)
 
         assert count == 1
         assert await db_session.get(UserImportBatch, "b-dangling-file") is None
@@ -271,16 +291,17 @@ class TestCleanupExpiredBatches:
         await db_session.flush()
         db_session.add(
             UserImportBatchLog(
+                tenant_id=0,
                 log_id="log-1",
                 batch_id="b-with-log",
-                operator_id=1,
+                operator_id=TEST_OPERATOR_ID,
                 event="CREATED",
                 detail={"k": "v"},
             )
         )
         await db_session.flush()
 
-        await cleanup_expired_batches(db_session)
+        await cleanup_expired_batches(db_session, platform=PLATFORM)
 
         # batch_log CASCADE 删除
         log_rows = (
@@ -314,7 +335,7 @@ class TestCleanupExpiredPreviews:
         db_session.add(batch)
         await db_session.flush()
 
-        count = await cleanup_expired_previews(db_session)
+        count = await cleanup_expired_previews(db_session, platform=PLATFORM)
 
         assert count == 1
         await db_session.refresh(batch)
@@ -332,7 +353,7 @@ class TestCleanupExpiredPreviews:
         db_session.add(batch)
         await db_session.flush()
 
-        count = await cleanup_expired_previews(db_session)
+        count = await cleanup_expired_previews(db_session, platform=PLATFORM)
 
         assert count == 0
         await db_session.refresh(batch)
@@ -353,7 +374,7 @@ class TestCleanupExpiredPreviews:
         db_session.add(batch)
         await db_session.flush()
 
-        await cleanup_expired_previews(db_session)
+        await cleanup_expired_previews(db_session, platform=PLATFORM)
 
         assert not await mock_fs.exists(preview_key)
 
@@ -368,7 +389,7 @@ class TestCleanupExpiredPreviews:
         db_session.add(batch)
         await db_session.flush()
 
-        await cleanup_expired_previews(db_session)
+        await cleanup_expired_previews(db_session, platform=PLATFORM)
 
         logs = (
             (
@@ -402,7 +423,7 @@ class TestCleanupExpiredPreviews:
         db_session.add(batch)
         await db_session.flush()
 
-        count = await cleanup_expired_previews(db_session)
+        count = await cleanup_expired_previews(db_session, platform=PLATFORM)
 
         # CAS 不匹配，跳过；count=0；文件保留（cancel 流程自己负责）
         assert count == 0
@@ -419,7 +440,7 @@ class TestCleanupExpiredPreviews:
         db_session.add(batch)
         await db_session.flush()
 
-        count = await cleanup_expired_previews(db_session)
+        count = await cleanup_expired_previews(db_session, platform=PLATFORM)
 
         assert count == 0
         await db_session.refresh(batch)
@@ -446,7 +467,7 @@ class TestCleanupExpiredExportTasks:
         db_session.add(task)
         await db_session.flush()
 
-        count = await cleanup_expired_export_tasks(db_session)
+        count = await cleanup_expired_export_tasks(db_session, platform=PLATFORM)
 
         assert count == 1
         assert await db_session.get(UserExportTask, "exp-old-1") is None
@@ -462,7 +483,7 @@ class TestCleanupExpiredExportTasks:
         db_session.add(task)
         await db_session.flush()
 
-        count = await cleanup_expired_export_tasks(db_session)
+        count = await cleanup_expired_export_tasks(db_session, platform=PLATFORM)
 
         assert count == 0
         assert await db_session.get(UserExportTask, "exp-recent-1") is not None
@@ -479,7 +500,7 @@ class TestCleanupExpiredExportTasks:
         db_session.add(task)
         await db_session.flush()
 
-        count = await cleanup_expired_export_tasks(db_session)
+        count = await cleanup_expired_export_tasks(db_session, platform=PLATFORM)
 
         assert count == 1
         assert await db_session.get(UserExportTask, "exp-no-file") is None
@@ -495,7 +516,7 @@ class TestCleanupExpiredExportTasks:
         db_session.add(task)
         await db_session.flush()
 
-        count = await cleanup_expired_export_tasks(db_session)
+        count = await cleanup_expired_export_tasks(db_session, platform=PLATFORM)
 
         assert count == 1
         assert await db_session.get(UserExportTask, "exp-dangling") is None

@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.constants import (
     DATA_SCOPE_ALL,
@@ -21,6 +22,11 @@ from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.service.grant_authority import grant_authority_service
+from app.modules.system.service.tenant_association_writer import (
+    replace_role_menus,
+    replace_user_roles,
+)
+from tests.tenant_helpers import tenant_context
 
 
 async def test_build_freezes_explicit_authority_and_materialized_scope(
@@ -28,6 +34,7 @@ async def test_build_freezes_explicit_authority_and_materialized_scope(
 ) -> None:
     marker = next_id()
     own_dept = Dept(
+        tenant_id=0,
         dept_id=next_id(),
         dept_name=f"grant-own-{marker}",
         ancestors="0",
@@ -35,6 +42,7 @@ async def test_build_freezes_explicit_authority_and_materialized_scope(
         status=STATUS_ENABLED,
     )
     visible_menu = Menu(
+        tenant_id=0,
         menu_id=next_id(),
         menu_name=f"grant-visible-{marker}",
         menu_type="F",
@@ -42,6 +50,7 @@ async def test_build_freezes_explicit_authority_and_materialized_scope(
         status=STATUS_ENABLED,
     )
     disabled_menu = Menu(
+        tenant_id=0,
         menu_id=next_id(),
         menu_name=f"grant-disabled-{marker}",
         menu_type="F",
@@ -49,6 +58,7 @@ async def test_build_freezes_explicit_authority_and_materialized_scope(
         status=STATUS_DISABLED,
     )
     role = Role(
+        tenant_id=0,
         role_id=next_id(),
         role_name=f"grant-role-{marker}",
         role_code=f"R_GRANT_{marker}",
@@ -57,6 +67,7 @@ async def test_build_freezes_explicit_authority_and_materialized_scope(
     )
     role.menus = [visible_menu, disabled_menu]
     actor = User(
+        tenant_id=0,
         user_id=next_id(),
         user_name=f"grant-actor-{marker}",
         nickname="grant actor",
@@ -66,6 +77,7 @@ async def test_build_freezes_explicit_authority_and_materialized_scope(
     actor.roles = [role]
     actor.depts = [own_dept]
     coworker = User(
+        tenant_id=0,
         user_id=next_id(),
         user_name=f"grant-coworker-{marker}",
         nickname="grant coworker",
@@ -86,6 +98,9 @@ async def test_build_freezes_explicit_authority_and_materialized_scope(
         description="Latent grant agent",
         enabled=False,
     )
+    set_committed_value(role, "menus", [])
+    set_committed_value(actor, "roles", [])
+    set_committed_value(actor, "depts", [])
     db_session.add_all(
         [
             own_dept,
@@ -99,14 +114,21 @@ async def test_build_freezes_explicit_authority_and_materialized_scope(
         ]
     )
     await db_session.flush()
+    tenant = tenant_context(tenant_id=0, actor_user_id=actor.user_id)
+    await replace_role_menus(
+        db_session, role, [visible_menu, disabled_menu], tenant=tenant
+    )
+    await replace_user_roles(db_session, actor, [role], tenant=tenant)
     await db_session.execute(
         insert(user_depts).values(
+            tenant_id=0,
             user_id=coworker.user_id,
             dept_id=own_dept.dept_id,
             is_primary="N",
         )
     )
     active_binding = RoleAiAgent(
+        tenant_id=0,
         role_id=role.role_id,
         agent_id=agent.agent_id,
         enabled=True,
@@ -115,6 +137,7 @@ async def test_build_freezes_explicit_authority_and_materialized_scope(
         [
             active_binding,
             RoleAiAgent(
+                tenant_id=0,
                 role_id=role.role_id,
                 agent_id=latent_agent.agent_id,
                 enabled=False,
@@ -128,11 +151,17 @@ async def test_build_freezes_explicit_authority_and_materialized_scope(
         "agent_authorization_service.list_agents",
         AsyncMock(return_value=[agent]),
     ):
-        first = await grant_authority_service.build(db_session, actor.user_id)
-        second = await grant_authority_service.build(db_session, actor.user_id)
+        first = await grant_authority_service.build(
+            db_session, actor.user_id, tenant=tenant
+        )
+        second = await grant_authority_service.build(
+            db_session, actor.user_id, tenant=tenant
+        )
         active_binding.enabled = False
         await db_session.flush()
-        changed = await grant_authority_service.build(db_session, actor.user_id)
+        changed = await grant_authority_service.build(
+            db_session, actor.user_id, tenant=tenant
+        )
 
     assert first.actor_user_id == actor.user_id
     assert first.tenant_id == 0
@@ -158,6 +187,7 @@ async def test_collection_and_scope_dominance_use_subset_semantics(
 ) -> None:
     marker = next_id()
     own_dept = Dept(
+        tenant_id=0,
         dept_id=next_id(),
         dept_name=f"dominance-own-{marker}",
         ancestors="0",
@@ -165,6 +195,7 @@ async def test_collection_and_scope_dominance_use_subset_semantics(
         status=STATUS_ENABLED,
     )
     role = Role(
+        tenant_id=0,
         role_id=next_id(),
         role_name=f"dominance-role-{marker}",
         role_code=f"R_DOMINANCE_{marker}",
@@ -172,6 +203,7 @@ async def test_collection_and_scope_dominance_use_subset_semantics(
         status=STATUS_ENABLED,
     )
     permission = Menu(
+        tenant_id=0,
         menu_id=next_id(),
         menu_name=f"dominance-menu-{marker}",
         menu_type="F",
@@ -180,6 +212,7 @@ async def test_collection_and_scope_dominance_use_subset_semantics(
     )
     role.menus = [permission]
     actor = User(
+        tenant_id=0,
         user_id=next_id(),
         user_name=f"dominance-actor-{marker}",
         nickname="dominance actor",
@@ -188,15 +221,23 @@ async def test_collection_and_scope_dominance_use_subset_semantics(
     )
     actor.roles = [role]
     actor.depts = [own_dept]
+    set_committed_value(role, "menus", [])
+    set_committed_value(actor, "roles", [])
+    set_committed_value(actor, "depts", [])
     db_session.add_all([own_dept, role, permission, actor])
     await db_session.flush()
+    tenant = tenant_context(tenant_id=0, actor_user_id=actor.user_id)
+    await replace_role_menus(db_session, role, [permission], tenant=tenant)
+    await replace_user_roles(db_session, actor, [role], tenant=tenant)
 
     with patch(
         "app.modules.ai.service.agent_authorization_service."
         "agent_authorization_service.list_agents",
         AsyncMock(return_value=[]),
     ):
-        authority = await grant_authority_service.build(db_session, actor.user_id)
+        authority = await grant_authority_service.build(
+            db_session, actor.user_id, tenant=tenant
+        )
 
     assert authority.allows_permission_codes({permission.permission}) is True
     assert authority.allows_permission_codes({"qa:outside:permission"}) is False

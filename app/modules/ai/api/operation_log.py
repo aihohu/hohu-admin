@@ -18,7 +18,7 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.rbac import is_super_admin
-from app.core.tenant import resolve_tenant_id
+from app.core.tenant import TenantContext, resolve_tenant_id
 from app.db.session import get_db
 from app.modules.ai.constants import AI_CHAT_USE_PERMISSION
 from app.modules.ai.schemas.operation_log import (
@@ -33,7 +33,7 @@ from app.modules.ai.service.result_projection_service import (
     result_projection_service,
 )
 from app.modules.ai.service.trace_service import trace_service
-from app.modules.auth.service import get_current_user
+from app.modules.auth.service import get_current_tenant_context, get_current_user
 from app.modules.system.models.user import User
 
 AI_TRACE_VIEW_PERM = "ai:trace:view"
@@ -62,11 +62,12 @@ async def list_traces(
     query: TraceListQuery = Depends(),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ) -> ResponseModel[PageResult[TraceSummaryOut]]:
     _ensure_trace_view(current_user)
     page = await trace_service.list_traces(
         db,
-        tenant_id=resolve_tenant_id(current_user),
+        tenant=tenant,
         query=query,
     )
     return ResponseModel.success(data=page)
@@ -81,11 +82,12 @@ async def get_trace(
     trace_id: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ) -> ResponseModel[TraceDetailOut]:
     _ensure_trace_view(current_user)
     detail = await trace_service.get_trace(
         db,
-        tenant_id=resolve_tenant_id(current_user),
+        tenant=tenant,
         trace_id=trace_id,
     )
     return ResponseModel.success(data=detail)

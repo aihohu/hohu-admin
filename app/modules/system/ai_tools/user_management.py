@@ -46,7 +46,7 @@ async def _get_ai_default_password(ctx: AiToolContext) -> str:
     from app.utils.validators import validate_password  # noqa: PLC0415
 
     try:
-        default_password = await get_default_password(ctx.db)
+        default_password = await get_default_password(ctx.db, tenant=ctx.tenant)
     except BusinessRuleException as exc:
         if exc.error_code == "AI_IMPORT_DEFAULT_PASSWORD_INVALID":
             raise BusinessRuleException(
@@ -79,6 +79,7 @@ async def _load_ai_create_policy(
 
     dept = await ctx.db.scalar(
         select(Dept).where(
+            Dept.tenant_id == ctx.tenant_id,
             Dept.dept_id == primary_dept_id,
             Dept.status == STATUS_ENABLED,
         )
@@ -91,6 +92,7 @@ async def _load_ai_create_policy(
 
     role = await ctx.db.scalar(
         select(Role).where(
+            Role.tenant_id == ctx.tenant_id,
             Role.role_code == USER_ROLE_CODE,
             Role.status == STATUS_ENABLED,
         )
@@ -202,9 +204,10 @@ async def user_create(
         ctx.db,
         actor_user_id=ctx.user.user_id,
         has_departments=True,
+        tenant=ctx.tenant,
     )
 
-    new_user = await user_service.create_user(ctx.db, user_in)
+    new_user = await user_service.create_user(ctx.db, user_in, tenant=ctx.tenant)
     await ctx.db.flush()
     await user_role_assignment_service.assign_created_user_roles(
         ctx.db,
@@ -212,12 +215,14 @@ async def user_create(
         target_user_id=new_user.user_id,
         role_ids=None,
         dept_ids=[primary_dept_id],
+        tenant=ctx.tenant,
     )
     await user_department_assignment_service.assign_created_user_departments(
         ctx.db,
         actor_user_id=ctx.user.user_id,
         target_user_id=new_user.user_id,
         dept_assignments=[(primary_dept_id, True)],
+        tenant=ctx.tenant,
     )
     await ctx.db.flush()
 
@@ -376,7 +381,9 @@ async def _load_ai_reset_target(ctx: AiToolContext, *, user_id: int) -> User:
             select(func.count())
             .select_from(user_roles.join(Role, user_roles.c.role_id == Role.role_id))
             .where(
+                user_roles.c.tenant_id == ctx.tenant_id,
                 user_roles.c.user_id == target.user_id,
+                Role.tenant_id == ctx.tenant_id,
                 Role.role_code == SUPER_ADMIN_ROLE_CODE,
                 Role.status == STATUS_ENABLED,
             )
@@ -392,7 +399,9 @@ async def _load_ai_reset_target(ctx: AiToolContext, *, user_id: int) -> User:
                         user_roles.join(Role, user_roles.c.role_id == Role.role_id)
                     )
                     .where(
+                        user_roles.c.tenant_id == ctx.tenant_id,
                         user_roles.c.user_id == ctx.user.user_id,
+                        Role.tenant_id == ctx.tenant_id,
                         Role.role_code == SUPER_ADMIN_ROLE_CODE,
                         Role.status == STATUS_ENABLED,
                     )
@@ -437,6 +446,7 @@ async def user_reset_password(ctx: AiToolContext, *, user_id: int) -> ToolResult
         ctx.db,
         user_id,
         ResetPassword(new_password=default_password),
+        tenant=ctx.tenant,
     )
 
     str_user_id = str(user_id)
@@ -595,7 +605,10 @@ async def user_batch_delete(
     from app.modules.system.service.user_service import user_service  # noqa: PLC0415
 
     count = await user_service.batch_delete_users(
-        ctx.db, resolved_ids, current_user_id=ctx.user.user_id
+        ctx.db,
+        resolved_ids,
+        current_user_id=ctx.user.user_id,
+        tenant=ctx.tenant,
     )
     # 模型只接收删除数量；用户 ID 仅进入结构化 UI 和审计数据。
     str_ids = [str(i) for i in resolved_ids]
@@ -777,7 +790,10 @@ async def _load_ai_user_department_assignments(
     assignment_rows = (
         await ctx.db.execute(
             select(user_depts.c.dept_id, user_depts.c.is_primary)
-            .where(user_depts.c.user_id == user_id)
+            .where(
+                user_depts.c.tenant_id == ctx.tenant_id,
+                user_depts.c.user_id == user_id,
+            )
             .order_by(user_depts.c.dept_id)
         )
     ).all()
@@ -791,7 +807,12 @@ async def _load_ai_user_department_assignments(
     depts = list(
         (
             await ctx.db.execute(
-                select(Dept).where(Dept.dept_id.in_(dept_ids)).order_by(Dept.dept_id)
+                select(Dept)
+                .where(
+                    Dept.tenant_id == ctx.tenant_id,
+                    Dept.dept_id.in_(dept_ids),
+                )
+                .order_by(Dept.dept_id)
             )
         ).scalars()
     )
@@ -912,6 +933,7 @@ async def user_lookup(
             ctx.db,
             actor_user_id=ctx.user.user_id,
             target_user_id=int(u.user_id),
+            tenant=ctx.tenant,
         )
         result_data["roleAssignmentsComplete"] = roles_complete
         result_data["roleAssignments"] = [

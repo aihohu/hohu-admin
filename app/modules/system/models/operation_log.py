@@ -1,6 +1,17 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Index, Integer, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.id_generator import next_id
@@ -14,6 +25,15 @@ class SysOperationLog(Base):
 
     operation_log_id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, default=next_id, comment="日志ID"
+    )
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("sys_tenant.tenant_id", ondelete="RESTRICT"),
+        nullable=False,
+        comment="租户审计归属",
+    )
+    audit_scope: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="tenant", comment="审计作用域"
     )
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, comment="操作人ID")
     username: Mapped[str] = mapped_column(
@@ -40,6 +60,15 @@ class SysOperationLog(Base):
     )
 
     __table_args__ = (
-        Index("ix_operation_log_create_time", "create_time"),
-        Index("ix_operation_log_user_id", "user_id"),
+        UniqueConstraint(
+            "tenant_id",
+            "operation_log_id",
+            name="uq_sys_operation_log_tenant_log_id",
+        ),
+        CheckConstraint(
+            "audit_scope IN ('tenant', 'platform')",
+            name="ck_sys_operation_log_audit_scope",
+        ),
+        Index("ix_operation_log_tenant_time", "tenant_id", "create_time"),
+        Index("ix_operation_log_tenant_user", "tenant_id", "user_id"),
     )

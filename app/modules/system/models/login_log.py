@@ -1,6 +1,15 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Index, String, func
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.id_generator import next_id
@@ -14,6 +23,18 @@ class SysLoginLog(Base):
 
     login_log_id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, default=next_id, comment="日志ID"
+    )
+    tenant_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("sys_tenant.tenant_id", ondelete="RESTRICT"),
+        nullable=True,
+        comment="已定位租户；unresolved 登录失败保持 NULL",
+    )
+    audit_scope: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        server_default="unresolved",
+        comment="tenant/platform/unresolved",
     )
     user_id: Mapped[int | None] = mapped_column(
         BigInteger, nullable=True, comment="登录用户ID"
@@ -35,4 +56,16 @@ class SysLoginLog(Base):
         DateTime, server_default=func.now(), comment="登录时间"
     )
 
-    __table_args__ = (Index("ix_login_log_login_time", "login_time"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "login_log_id", name="uq_sys_login_log_tenant_log_id"
+        ),
+        CheckConstraint(
+            "(audit_scope = 'tenant' AND tenant_id IS NOT NULL) "
+            "OR (audit_scope = 'unresolved' AND tenant_id IS NULL) "
+            "OR audit_scope = 'platform'",
+            name="ck_sys_login_log_audit_scope",
+        ),
+        Index("ix_login_log_tenant_time", "tenant_id", "login_time"),
+        Index("ix_login_log_scope_time", "audit_scope", "login_time"),
+    )

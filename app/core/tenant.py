@@ -45,6 +45,27 @@ class TenantContext:
 
 
 @dataclass(frozen=True, slots=True)
+class TenantLocatorContext:
+    """Database-verified locator used only for unauthenticated public reads."""
+
+    tenant_id: int
+    tenant_code: str
+    tenant_version: int
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.tenant_id, bool)
+            or not isinstance(self.tenant_id, int)
+            or self.tenant_id < 0
+        ):
+            raise ValueError("tenant_id must be a non-negative integer")
+        if not _TENANT_CODE_RE.fullmatch(self.tenant_code):
+            raise ValueError("tenant_code must be a normalized 2-32 character code")
+        if self.tenant_version < 1:
+            raise ValueError("tenant_version must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class PlatformContext:
     """Separate authority type for the future platform control plane."""
 
@@ -71,12 +92,6 @@ class LiveTenantRecord(Protocol):
     tenant_code: str
     status: str
     row_version: int
-
-
-class TrustedTenantPrincipal:
-    """Marker for the Default Tenant-only M1 ORM compatibility adapter."""
-
-    __slots__ = ()
 
 
 def normalize_tenant_code(value: str | None) -> str | None:
@@ -112,18 +127,7 @@ def get_bound_tenant_context(principal: Any) -> TenantContext:
 
 
 def resolve_tenant_id(principal: Any) -> int:
-    """Resolve bound context, plus the hard-gated Default Tenant M1 adapter."""
-    if isinstance(principal, TenantContext) or isinstance(
-        getattr(principal, "_tenant_context", None), TenantContext
-    ):
-        return get_bound_tenant_context(principal).tenant_id
-    if (
-        isinstance(principal, TrustedTenantPrincipal)
-        and getattr(principal, "tenant_id", None) == DEFAULT_TENANT_ID
-    ):
-        # Temporary compatibility for legacy service paths while M1 is hard-gated
-        # to Default Tenant. Plan 2 removes this branch as services accept context.
-        return DEFAULT_TENANT_ID
+    """Resolve only an immutable context bound by authentication or a worker."""
     return get_bound_tenant_context(principal).tenant_id
 
 

@@ -7,7 +7,9 @@ from app.constants import STATUS_ENABLED
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.core.scheduler import notify_job_changed, notify_manual_trigger
+from app.core.tenant import TenantContext
 from app.db.session import get_db
+from app.modules.auth.service import get_current_tenant_context
 from app.modules.job.schemas.job import (
     JobCreate,
     JobOut,
@@ -15,7 +17,7 @@ from app.modules.job.schemas.job import (
     JobUpdate,
 )
 from app.modules.job.service.job_service import job_service
-from app.modules.job.task_registry import list_registered_tasks
+from app.modules.job.task_registry import TaskScope, list_registered_tasks
 from app.modules.system.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -45,8 +47,9 @@ async def get_list(
     query: JobQuery = Depends(),
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    page_data = await job_service.get_list(db, query)
+    page_data = await job_service.get_list(db, query, tenant=tenant)
     return ResponseModel.success(data=page_data)
 
 
@@ -59,7 +62,7 @@ async def get_list(
 async def get_registered(
     _current_user: User = Depends(get_current_user),
 ):
-    tasks = list_registered_tasks()
+    tasks = list_registered_tasks(scope=TaskScope.TENANT)
     return ResponseModel.success(data=tasks)
 
 
@@ -72,13 +75,14 @@ async def add(
     data: JobCreate,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    job = await job_service.create(db, data, _current_user.user_name)
+    job = await job_service.create(db, data, _current_user.user_name, tenant=tenant)
     await db.commit()
     await _safe_publish(notify_job_changed(), "job_changed")
     # 创建即启用且要求立即执行：额外发一条 manual_trigger
     if data.status == STATUS_ENABLED and data.run_on_enable:
-        await _safe_publish(notify_manual_trigger(job.job_id), "manual_trigger")
+        await _safe_publish(notify_manual_trigger(tenant, job.job_id), "manual_trigger")
     return ResponseModel.success(msg="创建成功")
 
 
@@ -91,8 +95,9 @@ async def update(
     data: JobUpdate,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    await job_service.update(db, data, _current_user.user_name)
+    await job_service.update(db, data, _current_user.user_name, tenant=tenant)
     await db.commit()
     await _safe_publish(notify_job_changed(), "job_changed")
     return ResponseModel.success(msg="更新成功")
@@ -108,13 +113,14 @@ async def update_status(
     status: str,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    job = await job_service.update_status(db, jobId, status)
+    job = await job_service.update_status(db, jobId, status, tenant=tenant)
     await db.commit()
     await _safe_publish(notify_job_changed(), "job_changed")
     # 启用动作 + run_on_enable：额外触发一次立即执行
     if status == STATUS_ENABLED and job.run_on_enable:
-        await _safe_publish(notify_manual_trigger(job.job_id), "manual_trigger")
+        await _safe_publish(notify_manual_trigger(tenant, job.job_id), "manual_trigger")
     return ResponseModel.success(msg="状态更新成功")
 
 
@@ -127,8 +133,9 @@ async def delete(
     jobId: int,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    await job_service.delete(db, jobId)
+    await job_service.delete(db, jobId, tenant=tenant)
     await db.commit()
     await _safe_publish(notify_job_changed(), "job_changed")
     return ResponseModel.success(msg="删除成功")
@@ -143,8 +150,9 @@ async def batch_delete(
     ids: list[int] = Body(...),
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    count = await job_service.batch_delete(db, ids)
+    count = await job_service.batch_delete(db, ids, tenant=tenant)
     await db.commit()
     await _safe_publish(notify_job_changed(), "job_changed")
     return ResponseModel.success(msg=f"已删除 {count} 个任务")
@@ -159,7 +167,8 @@ async def run_now(
     jobId: int,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    await job_service.run_now(db, jobId)
-    await _safe_publish(notify_manual_trigger(jobId), "manual_trigger")
+    await job_service.run_now(db, jobId, tenant=tenant)
+    await _safe_publish(notify_manual_trigger(tenant, jobId), "manual_trigger")
     return ResponseModel.success(msg="已触发执行")

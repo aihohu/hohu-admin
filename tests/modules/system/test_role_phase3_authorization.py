@@ -21,11 +21,13 @@ from app.modules.system.models.user import User
 from app.modules.system.schemas.role import RoleCreate, RoleUpdate
 from app.modules.system.service.authorization_lock import authorization_lock_service
 from app.modules.system.service.role_management_service import role_management_service
+from tests.tenant_helpers import tenant_context
 
 
 def _menu(permission: str, *, parent_id: int | None = None) -> Menu:
     marker = next_id()
     return Menu(
+        tenant_id=0,
         menu_id=marker,
         parent_id=parent_id,
         menu_name=f"phase3-role-menu-{marker}",
@@ -43,6 +45,7 @@ def _role(
 ) -> Role:
     marker = next_id()
     role = Role(
+        tenant_id=0,
         role_id=marker,
         role_name=f"phase3-role-{marker}",
         role_code=code,
@@ -55,6 +58,7 @@ def _role(
 
 def _user(name: str, roles: list[Role]) -> User:
     return User(
+        tenant_id=0,
         user_id=next_id(),
         user_name=name,
         nickname=name,
@@ -62,6 +66,10 @@ def _user(name: str, roles: list[Role]) -> User:
         status=STATUS_ENABLED,
         roles=roles,
     )
+
+
+def _tenant(actor: User):
+    return tenant_context(tenant_id=0, actor_user_id=actor.user_id)
 
 
 async def _actor(
@@ -97,6 +105,7 @@ async def test_delegated_actor_can_create_role_below_authority_ceiling(
             status=STATUS_ENABLED,
         ),
         actor_user_id=actor.user_id,
+        tenant=_tenant(actor),
     )
 
     assert created.role_id is not None
@@ -108,6 +117,7 @@ async def test_role_create_rejects_latent_custom_departments_for_self_scope(
 ) -> None:
     actor = await _actor(db_session, "system:role:add")
     hidden_dept = Dept(
+        tenant_id=0,
         dept_id=next_id(),
         parent_id=None,
         ancestors="0",
@@ -129,6 +139,7 @@ async def test_role_create_rejects_latent_custom_departments_for_self_scope(
                 dept_ids=[hidden_dept.dept_id],
             ),
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
         )
 
     assert exc_info.value.error_code == "ROLE_DEPTS_REQUIRE_CUSTOM_SCOPE"
@@ -140,6 +151,7 @@ async def test_role_update_rejects_latent_custom_departments_for_self_scope(
     actor = await _actor(db_session, "system:role:edit")
     target = _role(f"R_PHASE3_NO_LATENT_{next_id()}")
     hidden_dept = Dept(
+        tenant_id=0,
         dept_id=next_id(),
         parent_id=None,
         ancestors="0",
@@ -156,6 +168,7 @@ async def test_role_update_rejects_latent_custom_departments_for_self_scope(
             target.role_id,
             RoleUpdate(dept_ids=[hidden_dept.dept_id]),
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
         )
 
     assert exc_info.value.error_code == "ROLE_DEPTS_REQUIRE_CUSTOM_SCOPE"
@@ -180,6 +193,7 @@ async def test_role_update_rejects_member_outside_actor_user_scope(
             target.role_id,
             RoleUpdate(role_name=f"Updated {next_id()}"),
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
         )
 
     assert exc_info.value.error_code == "AI_ROLE_GLOBAL_IMPACT_OUT_OF_SCOPE"
@@ -205,6 +219,7 @@ async def test_role_update_rejects_self_membership(
             target.role_id,
             RoleUpdate(status="2"),
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
         )
 
     assert exc_info.value.error_code == "AI_ROLE_SELF_MUTATION_FORBIDDEN"
@@ -234,6 +249,7 @@ async def test_role_menu_replacement_derives_ancestors_and_uses_global_lock_orde
             target.role_id,
             [child.menu_id],
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
         )
 
     assert {menu.menu_id for menu in updated.menus} == {parent.menu_id, child.menu_id}
@@ -249,6 +265,7 @@ async def test_role_update_locks_materialized_descendant_departments(
     db_session: AsyncSession,
 ) -> None:
     root = Dept(
+        tenant_id=0,
         dept_id=next_id(),
         parent_id=None,
         ancestors="0",
@@ -257,6 +274,7 @@ async def test_role_update_locks_materialized_descendant_departments(
         status=STATUS_ENABLED,
     )
     child = Dept(
+        tenant_id=0,
         dept_id=next_id(),
         parent_id=root.dept_id,
         ancestors=f"0,{root.dept_id}",
@@ -284,6 +302,7 @@ async def test_role_update_locks_materialized_descendant_departments(
             target.role_id,
             RoleUpdate(role_name=f"Updated {next_id()}"),
             actor_user_id=actor.user_id,
+            tenant=_tenant(actor),
         )
 
     assert {root.dept_id, child.dept_id} <= set(
@@ -304,6 +323,7 @@ async def test_role_execute_rejects_approved_snapshot_drift(
         target.role_id,
         request,
         actor_user_id=actor.user_id,
+        tenant=_tenant(actor),
     )
     target.role_desc = "concurrent change"
     await db_session.flush()
@@ -315,6 +335,7 @@ async def test_role_execute_rejects_approved_snapshot_drift(
             request,
             actor_user_id=actor.user_id,
             expected_snapshot=preview.snapshot,
+            tenant=_tenant(actor),
         )
 
     assert exc_info.value.error_code == "AI_PREPARED_ACTION_SNAPSHOT_STALE"
@@ -326,7 +347,10 @@ async def test_role_summary_blocks_target_with_protected_member(
     actor = await _actor(db_session, "system:role:list")
     target = _role(f"R_PHASE3_PROTECTED_MEMBER_{next_id()}")
     super_role = await db_session.scalar(
-        select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+        select(Role).where(
+            Role.tenant_id == 0,
+            Role.role_code == SUPER_ADMIN_ROLE_CODE,
+        )
     )
     assert super_role is not None
     member = _user(f"phase3-role-protected-{next_id()}", [target, super_role])
@@ -337,6 +361,7 @@ async def test_role_summary_blocks_target_with_protected_member(
         db_session,
         actor_user_id=actor.user_id,
         query=target.role_code,
+        tenant=_tenant(actor),
     )
 
     assert total == 1

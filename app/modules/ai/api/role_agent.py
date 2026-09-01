@@ -13,10 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_permissions
 from app.core.base_response import ResponseModel
+from app.core.tenant import TenantContext
 from app.db.session import get_db
 from app.modules.ai.schemas.role_agent import RoleAgentBinding, RoleAgentBindReq
 from app.modules.ai.service.role_agent import role_agent_service
-from app.modules.auth.service import get_current_user
+from app.modules.auth.service import get_current_tenant_context, get_current_user
 from app.modules.system.models.user import User
 
 router = APIRouter()
@@ -32,6 +33,7 @@ async def get_role_agent_binding(
     role_id: int,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ) -> ResponseModel[RoleAgentBinding]:
     """返回 allAgents（全量）和 boundAgentIds（绑定列表）。
 
@@ -42,6 +44,7 @@ async def get_role_agent_binding(
         db,
         role_id,
         actor_user_id=current_user.user_id,
+        tenant=tenant,
     )
     return ResponseModel.success(data=binding)
 
@@ -57,6 +60,7 @@ async def put_role_agent_binding(
     req: RoleAgentBindReq,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ) -> ResponseModel[None]:
     """决策 #15：全量覆盖（DELETE + INSERT），normalize 软禁用态为 enabled=True.
 
@@ -67,6 +71,7 @@ async def put_role_agent_binding(
         role_id,
         req,
         actor_user_id=current_user.user_id,
+        tenant=tenant,
     )
     await db.commit()
     return ResponseModel.success(data=None)

@@ -3,7 +3,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
+from app.core.tenant import TenantContext
 from app.db.session import get_db
+from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.user import User
 from app.modules.system.schemas.dict_data import (
     DictDataCreate,
@@ -32,6 +34,7 @@ async def get_list(
     query: DictDataQuery = Depends(),
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     获取字典数据分页列表
@@ -52,7 +55,7 @@ async def get_list(
         - dict_type: 字典类型（支持模糊查询）
         - status: 字典数据状态（1-启用，2-禁用）
     """
-    page_data = await dict_data_service.get_list(db, query)
+    page_data = await dict_data_service.get_list(db, query, tenant=tenant)
     return ResponseModel.success(data=page_data)
 
 
@@ -72,6 +75,7 @@ async def get_by_type(
     dict_type: str,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     根据字典类型获取字典数据
@@ -91,7 +95,7 @@ async def get_by_type(
         - 仅返回状态为启用的字典数据
         - 按 dict_sort 字段排序
     """
-    dict_data_list = await dict_data_service.get_by_type(db, dict_type)
+    dict_data_list = await dict_data_service.get_by_type(db, dict_type, tenant=tenant)
     return ResponseModel.success(data=dict_data_list)
 
 
@@ -111,6 +115,7 @@ async def add(
     data_in: DictDataCreate,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     创建新字典数据
@@ -133,7 +138,7 @@ async def add(
         - is_default: 是否默认（必填，Y-是，N-否）
         - status: 字典数据状态（必填，1-启用，2-禁用）
     """
-    await dict_data_service.create(db, data_in)
+    await dict_data_service.create(db, data_in, tenant=tenant)
     await db.commit()
     return ResponseModel.success(msg="字典数据创建成功")
 
@@ -156,6 +161,7 @@ async def update(
     data_in: DictDataUpdate,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     更新字典数据信息
@@ -182,7 +188,7 @@ async def update(
         - is_default: 是否默认
         - status: 字典数据状态
     """
-    await dict_data_service.update(db, data_id, data_in)
+    await dict_data_service.update(db, data_id, data_in, tenant=tenant)
     await db.commit()
     return ResponseModel.success(msg="字典数据更新成功")
 
@@ -203,6 +209,7 @@ async def delete(
     data_id: int,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     删除指定字典数据
@@ -221,7 +228,7 @@ async def delete(
     Note:
         - 此操作不可逆，请谨慎操作
     """
-    await dict_data_service.delete(db, data_id)
+    await dict_data_service.delete(db, data_id, tenant=tenant)
     await db.commit()
     return ResponseModel.success(msg="字典数据删除成功")
 
@@ -241,6 +248,7 @@ async def batch_delete(
     ids: list[int],
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     批量删除字典数据
@@ -259,6 +267,6 @@ async def batch_delete(
     Note:
         - 此操作不可逆，请谨慎操作
     """
-    deleted_count = await dict_data_service.batch_delete(db, ids)
+    deleted_count = await dict_data_service.batch_delete(db, ids, tenant=tenant)
     await db.commit()
     return ResponseModel.success(msg=f"成功删除 {deleted_count} 条数据")

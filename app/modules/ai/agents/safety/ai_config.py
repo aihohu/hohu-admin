@@ -29,12 +29,13 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.tenant import TenantContext, TenantLocatorContext
 from app.modules.system.service.config_service import config_service
 
 logger = logging.getLogger(__name__)
 
 _CACHE_TTL_SEC = 60
-_cache: dict[str, tuple[Any, float]] = {}
+_cache: dict[tuple[int, str], tuple[Any, float]] = {}
 
 
 async def get_ai_config_int(
@@ -42,6 +43,7 @@ async def get_ai_config_int(
     key: str,
     default: int,
     *,
+    tenant: TenantContext | TenantLocatorContext,
     force_refresh: bool = False,
 ) -> int:
     """读 int 配置（缓存 60s）
@@ -55,13 +57,14 @@ async def get_ai_config_int(
     Returns:
         int 配置值
     """
-    cached = _cache.get(key)
+    cache_key = (tenant.tenant_id, key)
+    cached = _cache.get(cache_key)
     if not force_refresh and cached is not None:
         value, fetched_at = cached
         if time.time() - fetched_at < _CACHE_TTL_SEC:
             return value  # type: ignore[return-value]
 
-    raw = await config_service.get_value(db, key)
+    raw = await config_service.get_value(db, key, tenant=tenant)
     if raw is None or raw == "":
         value = default
     else:
@@ -74,7 +77,7 @@ async def get_ai_config_int(
             )
             value = default
 
-    _cache[key] = (value, time.time())
+    _cache[cache_key] = (value, time.time())
     return value
 
 
@@ -83,19 +86,21 @@ async def get_ai_config_str(
     key: str,
     default: str,
     *,
+    tenant: TenantContext | TenantLocatorContext,
     force_refresh: bool = False,
 ) -> str:
     """读 str 配置（缓存 60s）"""
-    cached = _cache.get(key)
+    cache_key = (tenant.tenant_id, key)
+    cached = _cache.get(cache_key)
     if not force_refresh and cached is not None:
         value, fetched_at = cached
         if time.time() - fetched_at < _CACHE_TTL_SEC:
             return value  # type: ignore[return-value]
 
-    raw = await config_service.get_value(db, key)
+    raw = await config_service.get_value(db, key, tenant=tenant)
     value = raw if raw else default
 
-    _cache[key] = (value, time.time())
+    _cache[cache_key] = (value, time.time())
     return value
 
 
@@ -104,6 +109,7 @@ async def get_ai_config_str_list(
     key: str,
     default: list[str],
     *,
+    tenant: TenantContext | TenantLocatorContext,
     force_refresh: bool = False,
 ) -> list[str]:
     """读取 JSON 数组配置并缓存 60 秒，供 ``ai:enabled_tools`` 等配置使用。
@@ -111,7 +117,8 @@ async def get_ai_config_str_list(
     sys_config 存的是 JSON 字符串（如 '["file.parse", "provider.export"]'）。
     解析失败 / 非 list / 元素非 str 时回退到 default（容错优先，不抛异常）。
     """
-    cached = _cache.get(key)
+    cache_key = (tenant.tenant_id, key)
+    cached = _cache.get(cache_key)
     if not force_refresh and cached is not None:
         value, fetched_at = cached
         if time.time() - fetched_at < _CACHE_TTL_SEC:
@@ -119,7 +126,7 @@ async def get_ai_config_str_list(
 
     import json  # noqa: PLC0415
 
-    raw = await config_service.get_value(db, key)
+    raw = await config_service.get_value(db, key, tenant=tenant)
     value = default
     if raw:
         try:
@@ -137,7 +144,7 @@ async def get_ai_config_str_list(
                 extra={"key": key, "raw": raw},
             )
 
-    _cache[key] = (value, time.time())
+    _cache[cache_key] = (value, time.time())
     return value
 
 
@@ -146,6 +153,7 @@ async def get_ai_config_bool(
     key: str,
     default: bool,
     *,
+    tenant: TenantContext | TenantLocatorContext,
     force_refresh: bool = False,
 ) -> bool:
     """读 bool 配置（缓存 60s）.
@@ -158,7 +166,11 @@ async def get_ai_config_bool(
     （feature flag 安全侧倒：垃圾值 → 关闭功能）.
     """
     raw = await get_ai_config_str(
-        db, key, default=str(default).lower(), force_refresh=force_refresh
+        db,
+        key,
+        default=str(default).lower(),
+        tenant=tenant,
+        force_refresh=force_refresh,
     )
     return raw.strip().lower() in ("true", "1", "yes")
 
@@ -169,6 +181,8 @@ def invalidate_ai_config_cache(prefix: str = "ai:") -> None:
     Args:
         prefix: 清除以 prefix 开头的 key（默认所有 ai: 配置）
     """
-    keys_to_remove = [k for k in _cache if k.startswith(prefix)]
+    keys_to_remove = [
+        cache_key for cache_key in _cache if cache_key[1].startswith(prefix)
+    ]
     for k in keys_to_remove:
         _cache.pop(k, None)

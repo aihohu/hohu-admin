@@ -7,6 +7,7 @@ from scripts.sync_menus import _reconcile_menu_partitions
 
 def _menu(*, route_name: str, parent_id: int, component: str) -> Menu:
     return Menu(
+        tenant_id=0,
         menu_id=next_id(),
         parent_id=parent_id,
         menu_name=route_name,
@@ -74,4 +75,4 @@ async def test_reconciliation_is_noop_when_partition_roots_are_missing(
     )
 
     assert changed is False
-    assert child.parent_id == 0
+    assert child.parent_id is None

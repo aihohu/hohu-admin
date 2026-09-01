@@ -2,7 +2,7 @@
 
 import asyncio
 
-from sqlalchemy import select, text
+from sqlalchemy import insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -17,6 +17,7 @@ from app.core.config import settings
 from app.core.id_generator import next_id
 from app.core.security import get_password_hash
 from app.core.tenant import DEFAULT_TENANT_CODE, DEFAULT_TENANT_ID
+from app.db.base import role_menus, user_roles
 from app.modules.ai.constants import (
     AI_AGENT_EDIT_PERMISSION,
     AI_CHAT_USE_PERMISSION,
@@ -821,11 +822,13 @@ def build_init_roles() -> list[Role]:
     """构造与既有角色编码契约一致的 fresh-install 角色种子。"""
     return [
         Role(
+            tenant_id=DEFAULT_TENANT_ID,
             role_name="超级管理员",
             role_code=SUPER_ADMIN_ROLE_CODE,
             status=STATUS_ENABLED,
         ),
         Role(
+            tenant_id=DEFAULT_TENANT_ID,
             role_name="普通用户",
             role_code=USER_ROLE_CODE,
             role_desc="AI user.create 与普通账号使用的后端默认角色",
@@ -835,8 +838,8 @@ def build_init_roles() -> list[Role]:
     ]
 
 
-def bind_fresh_role_permissions(admin_role: Role, menus: list[Menu]) -> None:
-    """Bind every published Agent permission explicitly for fresh R_SUPER."""
+def fresh_role_permission_menus(menus: list[Menu]) -> list[Menu]:
+    """Return every published permission menu for fresh R_SUPER."""
     permissions = {
         AI_CHAT_USE_PERMISSION,
         AI_FILE_PARSE_PERMISSION,
@@ -845,7 +848,7 @@ def bind_fresh_role_permissions(admin_role: Role, menus: list[Menu]) -> None:
         *PUBLISHED_AGENT_TOOL_PERMISSIONS,
         *PHASE3_DESTRUCTIVE_PERMISSIONS,
     }
-    admin_role.menus = [menu for menu in menus if menu.permission in permissions]
+    return [menu for menu in menus if menu.permission in permissions]
 
 
 async def bind_fresh_role_agents(db: AsyncSession, admin_role: Role) -> None:
@@ -865,6 +868,7 @@ async def bind_fresh_role_agents(db: AsyncSession, admin_role: Role) -> None:
     db.add_all(
         [
             RoleAiAgent(
+                tenant_id=DEFAULT_TENANT_ID,
                 role_id=admin_role.role_id,
                 agent_id=agent.agent_id,
                 enabled=True,
@@ -904,16 +908,31 @@ async def init_db():
         default_tenant = await ensure_default_tenant(db)
 
         # 创建初始菜单
+        for menu in init_menus:
+            menu.tenant_id = default_tenant.tenant_id
         db.add_all(init_menus)
 
         # 创建初始 sys_config，包括用户导入默认密码。
+        for config in init_configs:
+            config.tenant_id = default_tenant.tenant_id
         db.add_all(init_configs)
 
         # 创建与既有 R_* 编码契约一致的初始角色
         admin_role, default_user_role = build_init_roles()
-        bind_fresh_role_permissions(admin_role, init_menus)
+        permission_menus = fresh_role_permission_menus(init_menus)
         db.add_all([admin_role, default_user_role])
         await db.flush()
+        await db.execute(
+            insert(role_menus),
+            [
+                {
+                    "tenant_id": default_tenant.tenant_id,
+                    "role_id": admin_role.role_id,
+                    "menu_id": menu.menu_id,
+                }
+                for menu in permission_menus
+            ],
+        )
         await seed_ai_agents_in_session(db)
         await bind_fresh_role_agents(db, admin_role)
 
@@ -925,8 +944,15 @@ async def init_db():
             hashed_password=get_password_hash(password),
             status="1",
         )
-        admin_user.roles = [admin_role]
         db.add(admin_user)
+        await db.flush()
+        await db.execute(
+            insert(user_roles).values(
+                tenant_id=default_tenant.tenant_id,
+                user_id=admin_user.user_id,
+                role_id=admin_role.role_id,
+            )
+        )
 
         await db.commit()
         print("✅ 数据库初始化完成：管理员账号 admin 密码 " + password)

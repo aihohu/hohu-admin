@@ -11,6 +11,7 @@ super_admin / DATA_SCOPE_ALL 路径不依赖 db，做纯单元测试。
 from unittest.mock import MagicMock
 
 import pytest
+from tenant_helpers import tenant_context
 
 from app.modules.ai.core import data_scope_loader as loader_mod
 from app.modules.ai.core.context import DataScopeContext
@@ -23,6 +24,8 @@ def mock_super_admin() -> MagicMock:
     """构造 is_super_admin(user) → True 的 mock user"""
     user = MagicMock()
     user.user_id = 1
+    user.tenant_id = 0
+    user._tenant_context = tenant_context(tenant_id=0, actor_user_id=1)
     user.roles = []
     user.depts = []
     return user
@@ -33,6 +36,8 @@ def mock_normal_user() -> MagicMock:
     """构造 is_super_admin(user) → False 的 mock user（具体 scope 由测试设置）"""
     user = MagicMock()
     user.user_id = 100
+    user.tenant_id = 0
+    user._tenant_context = tenant_context(tenant_id=0, actor_user_id=100)
     user.roles = []
     user.depts = []
     return user
@@ -43,6 +48,7 @@ def _patch(monkeypatch: pytest.MonkeyPatch, **overrides: object) -> None:
     defaults: dict[str, object] = {
         "resolve_data_scope": _async_return(
             DataScopeResolution(
+                tenant_id=0,
                 scope_kinds=frozenset({"1"}),
                 accessible_dept_ids=None,
                 accessible_user_scope=None,
@@ -67,7 +73,7 @@ class TestBuildDataScopeContextSuperAdmin:
     async def test_super_admin_returns_all_visible(
         self, mock_super_admin: MagicMock, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """超级管理员返回无限制 ID 和空过滤器。"""
+        """超级管理员仍保留 tenant 过滤器。"""
         _patch(monkeypatch)
 
         ctx = await build_data_scope_context(MagicMock(), mock_super_admin)
@@ -75,19 +81,23 @@ class TestBuildDataScopeContextSuperAdmin:
         assert isinstance(ctx, DataScopeContext)
         assert ctx.accessible_dept_ids is None
         assert ctx.accessible_user_scope is None
-        assert ctx.filters == []
+        assert len(ctx.filters) == 1
+        assert str(ctx.filters[0].left) == "sys_user.tenant_id"
+        assert ctx.filters[0].right.value == 0
 
     async def test_data_scope_all_returns_all_visible(
         self, mock_normal_user: MagicMock, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """DATA_SCOPE_ALL 返回无限制 ID 和空过滤器。"""
+        """DATA_SCOPE_ALL 只放开 tenant 内数据。"""
         _patch(monkeypatch)
 
         ctx = await build_data_scope_context(MagicMock(), mock_normal_user)
 
         assert ctx.accessible_dept_ids is None
         assert ctx.accessible_user_scope is None
-        assert ctx.filters == []
+        assert len(ctx.filters) == 1
+        assert str(ctx.filters[0].left) == "sys_user.tenant_id"
+        assert ctx.filters[0].right.value == 0
 
 
 class TestBuildDataScopeContextStructure:

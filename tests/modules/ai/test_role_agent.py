@@ -29,6 +29,7 @@ async def seed_role_agents():
     from sqlalchemy import delete, select
 
     from app.core.id_generator import next_id
+    from app.core.tenant import DEFAULT_TENANT_ID
     from app.db.session import AsyncSessionLocal, engine
     from app.modules.ai.models.agent import AiAgent
     from app.modules.ai.models.role_ai_agent import RoleAiAgent
@@ -94,6 +95,7 @@ async def seed_role_agents():
         role_code = f"test_role_agent_{role_id}"
         s.add(
             Role(
+                tenant_id=DEFAULT_TENANT_ID,
                 role_id=role_id,
                 role_code=role_code,
                 role_name=f"Test Role Agent {role_id}",
@@ -107,6 +109,7 @@ async def seed_role_agents():
         # Bind only user_mgmt so the fixture proves shared is not implicit.
         s.add(
             RoleAiAgent(
+                tenant_id=DEFAULT_TENANT_ID,
                 role_id=role_id,
                 agent_id=resolved_agent_ids["user_mgmt"],
                 enabled=True,
@@ -124,9 +127,19 @@ async def seed_role_agents():
     # teardown：精准清理新增 Role + 绑定（按 role_id），还原 / 删除 Agent 行
     async with AsyncSessionLocal() as s:
         # 绑定：role 删了绑定也会随之没意义，显式 DELETE 更稳
-        await s.execute(delete(RoleAiAgent).where(RoleAiAgent.role_id == role_id))
+        await s.execute(
+            delete(RoleAiAgent).where(
+                RoleAiAgent.tenant_id == DEFAULT_TENANT_ID,
+                RoleAiAgent.role_id == role_id,
+            )
+        )
         # Role 永远是新建的，直接删
-        await s.execute(delete(Role).where(Role.role_id == role_id))
+        await s.execute(
+            delete(Role).where(
+                Role.tenant_id == DEFAULT_TENANT_ID,
+                Role.role_id == role_id,
+            )
+        )
         # Agent：还原已存在 / 删除新增（mirror seed_agents）
         for _code, snap in originals.items():
             agent = await s.get(AiAgent, snap["agent_id"])
@@ -281,6 +294,7 @@ async def test_put_normalizes_soft_disabled_to_enabled(
         row = (
             await s.execute(
                 select(RoleAiAgent).where(
+                    RoleAiAgent.tenant_id == 0,
                     RoleAiAgent.role_id == role_id,
                     RoleAiAgent.agent_id == user_id,
                 )
@@ -376,7 +390,10 @@ async def test_put_triggers_audit_middleware(
         before = (
             (
                 await s.execute(
-                    select(SysOperationLog).where(SysOperationLog.path == audit_path)
+                    select(SysOperationLog).where(
+                        SysOperationLog.tenant_id == 0,
+                        SysOperationLog.path == audit_path,
+                    )
                 )
             )
             .scalars()
@@ -396,7 +413,10 @@ async def test_put_triggers_audit_middleware(
         after = (
             (
                 await s.execute(
-                    select(SysOperationLog).where(SysOperationLog.path == audit_path)
+                    select(SysOperationLog).where(
+                        SysOperationLog.tenant_id == 0,
+                        SysOperationLog.path == audit_path,
+                    )
                 )
             )
             .scalars()
@@ -417,7 +437,10 @@ async def test_put_triggers_audit_middleware(
         finally:
             # teardown：清理本测试产生的审计日志，避免污染后续审计相关测试
             await s.execute(
-                delete(SysOperationLog).where(SysOperationLog.path == audit_path)
+                delete(SysOperationLog).where(
+                    SysOperationLog.tenant_id == 0,
+                    SysOperationLog.path == audit_path,
+                )
             )
             await s.commit()
 

@@ -5,7 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.constants import MENU_TYPE_BUTTON
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
+from app.core.tenant import TenantContext
 from app.db.session import get_db
+from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.user import User
 from app.modules.system.schemas.menu import (
@@ -18,7 +20,6 @@ from app.modules.system.schemas.menu import (
     MenuUpdate,
 )
 from app.modules.system.service.menu_service import menu_service
-from app.utils.pagination import paginate
 
 router = APIRouter()
 
@@ -35,7 +36,10 @@ router = APIRouter()
     },
     dependencies=[Depends(require_permissions("system:menu:list"))],
 )
-async def get_menu_tree(db: AsyncSession = Depends(get_db)):
+async def get_menu_tree(
+    db: AsyncSession = Depends(get_db),
+    tenant: TenantContext = Depends(get_current_tenant_context),
+):
     """
     获取菜单树形列表
 
@@ -50,7 +54,11 @@ async def get_menu_tree(db: AsyncSession = Depends(get_db)):
         - 自动构建树形结构供前端使用
         - 用于菜单管理页面的展示和编辑
     """
-    stmt = select(Menu).order_by(Menu.order.asc())
+    stmt = (
+        select(Menu)
+        .where(Menu.tenant_id == tenant.tenant_id)
+        .order_by(Menu.order.asc())
+    )
     result = await db.execute(stmt)
     menus = result.scalars().all()
 
@@ -74,9 +82,16 @@ async def get_menu_tree(db: AsyncSession = Depends(get_db)):
     response_model=ResponseModel[list[MenuTreeOptionOut]],
     summary="获取菜单树形列表(前端option结构)",
 )
-async def get_menu_tree_option(db: AsyncSession = Depends(get_db)):
+async def get_menu_tree_option(
+    db: AsyncSession = Depends(get_db),
+    tenant: TenantContext = Depends(get_current_tenant_context),
+):
     """获取菜单树形列表（用于前端下拉选择）"""
-    stmt = select(Menu).where(Menu.status == "1").order_by(Menu.order.asc())
+    stmt = (
+        select(Menu)
+        .where(Menu.tenant_id == tenant.tenant_id, Menu.status == "1")
+        .order_by(Menu.order.asc())
+    )
     result = await db.execute(stmt)
     menus = result.scalars().all()
 
@@ -109,9 +124,16 @@ async def get_menu_tree_option(db: AsyncSession = Depends(get_db)):
     summary="获取菜单树形列表(带伪分页数据-适配前端)",
     dependencies=[Depends(require_permissions("system:menu:list"))],
 )
-async def get_menu_tree_list(db: AsyncSession = Depends(get_db)):
+async def get_menu_tree_list(
+    db: AsyncSession = Depends(get_db),
+    tenant: TenantContext = Depends(get_current_tenant_context),
+):
     """获取菜单树形列表（带伪分页数据）"""
-    stmt = select(Menu).order_by(Menu.order.asc())
+    stmt = (
+        select(Menu)
+        .where(Menu.tenant_id == tenant.tenant_id)
+        .order_by(Menu.order.asc())
+    )
     result = await db.execute(stmt)
     menus = result.scalars().all()
 
@@ -161,14 +183,10 @@ async def get_menu_tree_list(db: AsyncSession = Depends(get_db)):
 async def list_menus(
     query: MenuQuery = Depends(),
     db: AsyncSession = Depends(get_db),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """获取菜单分页列表"""
-    page_data = await paginate(
-        db=db,
-        model=Menu,
-        query_params=query,
-        order_by=Menu.order.asc(),
-    )
+    page_data = await menu_service.get_menu_list(db, query, tenant=tenant)
     return ResponseModel.success(data=page_data)
 
 
@@ -180,9 +198,10 @@ async def list_menus(
 async def get_all_menu(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """获取所有已启用的菜单列表"""
-    menus = await menu_service.get_all_menus(db)
+    menus = await menu_service.get_all_menus(db, tenant=tenant)
     return ResponseModel.success(data=menus)
 
 
@@ -194,9 +213,10 @@ async def get_all_menu(
 async def get_all_pages(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """获取所有页面路由名称"""
-    pages = await menu_service.get_all_pages(db)
+    pages = await menu_service.get_all_pages(db, tenant=tenant)
     return ResponseModel.success(data=pages)
 
 
@@ -216,6 +236,7 @@ async def add_menu(
     menu_in: MenuCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     新增菜单
@@ -238,7 +259,7 @@ async def add_menu(
         - status: 菜单状态（必填，1-启用，2-禁用）
         - buttons: 按钮列表（可选，最多20个）
     """
-    new_menu = await menu_service.create_menu(db, menu_in)
+    new_menu = await menu_service.create_menu(db, menu_in, tenant=tenant)
     new_menu.create_by = current_user.user_name
     await db.commit()
     return ResponseModel.success(msg="菜单创建成功")
@@ -262,6 +283,7 @@ async def update_menu(
     menu_in: MenuUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     修改菜单
@@ -286,7 +308,7 @@ async def update_menu(
         - status: 菜单状态
         - buttons: 按钮列表
     """
-    menu = await menu_service.update_menu(db, menu_id, menu_in)
+    menu = await menu_service.update_menu(db, menu_id, menu_in, tenant=tenant)
     menu.update_by = current_user.user_name
     await db.commit()
     return ResponseModel.success(msg="菜单更新成功")
@@ -307,6 +329,7 @@ async def update_menu(
 async def delete_menu(
     menu_id: int,
     db: AsyncSession = Depends(get_db),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     删除单个菜单
@@ -326,7 +349,7 @@ async def delete_menu(
         - 如果删除的是目录，其子菜单也会被删除
         - 菜单删除后，关联的角色关系也会被清除
     """
-    await menu_service.delete_menu(db, menu_id)
+    await menu_service.delete_menu(db, menu_id, tenant=tenant)
     await db.commit()
     return ResponseModel.success(msg="菜单删除成功")
 
@@ -345,6 +368,7 @@ async def delete_menu(
 async def batch_delete_menus(
     ids: list[int] = Body(...),
     db: AsyncSession = Depends(get_db),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """
     批量删除菜单
@@ -364,6 +388,6 @@ async def batch_delete_menus(
         - 如果删除的菜单是目录，其子菜单也会被删除
         - 菜单删除后，关联的角色关系也会被清除
     """
-    deleted_count = await menu_service.batch_delete_menus(db, ids)
+    deleted_count = await menu_service.batch_delete_menus(db, ids, tenant=tenant)
     await db.commit()
     return ResponseModel.success(msg=f"成功删除 {deleted_count} 个菜单")

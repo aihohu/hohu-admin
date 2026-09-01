@@ -18,6 +18,11 @@ from app.modules.ai.models.prepared_action import AiPreparedAction  # noqa: F401
 from app.modules.ai.models.provider import AiProvider  # noqa: F401
 from app.modules.job.models.job import SysJob, SysJobLog  # noqa: F401
 from app.modules.system.models.dept import Dept  # noqa: F401
+from app.modules.system.models.config import Config  # noqa: F401
+from app.modules.system.models.data_scope_demo import DataScopeDemo  # noqa: F401
+from app.modules.system.models.dict_data import DictData  # noqa: F401
+from app.modules.system.models.dict_type import DictType  # noqa: F401
+from app.modules.system.models.file import File  # noqa: F401
 from app.modules.system.models.login_log import SysLoginLog  # noqa: F401
 from app.modules.system.models.menu import Menu  # noqa: F401
 from app.modules.system.models.operation_log import SysOperationLog  # noqa: F401
@@ -29,6 +34,7 @@ from app.modules.system.models.user_transfer import (  # noqa: F401
     UserImportBatch,
     UserImportBatchLog,
 )
+from app.modules.ai.models.role_ai_agent import RoleAiAgent  # noqa: F401
 
 load_dotenv()
 config = context.config

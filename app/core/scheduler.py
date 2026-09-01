@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -9,9 +10,11 @@ from sqlalchemy import select
 
 from app.constants import STATUS_ENABLED
 from app.core.redis import redis_client
+from app.core.tenant import PlatformContext, TenantContext
 from app.db.session import AsyncSessionLocal
 from app.modules.job.job_runner import execute_job, run_job_manual
 from app.modules.job.models.job import SysJob
+from app.modules.job.task_registry import is_tenant_task
 
 logger = logging.getLogger(__name__)
 
@@ -107,11 +110,13 @@ class SchedulerManager:
             self._scheduler.start()
             logger.info("APScheduler 已启动")
 
-    async def start_with_pubsub(self) -> None:
+    async def start_with_pubsub(self, *, platform: PlatformContext) -> None:
         """启动调度器并订阅 Redis 控制频道（prod 独立进程模式使用）。"""
+        if not isinstance(platform, PlatformContext):
+            raise TypeError("platform context is required")
         self.start()
         if self._pubsub_task is None:
-            self._pubsub_task = asyncio.create_task(self._listen_events())
+            self._pubsub_task = asyncio.create_task(self._listen_events(platform))
 
     def shutdown(self, wait: bool = True) -> None:
         """关闭调度器。"""
@@ -122,7 +127,7 @@ class SchedulerManager:
             self._scheduler.shutdown(wait=wait)
             logger.info("APScheduler 已关闭")
 
-    async def _listen_events(self) -> None:
+    async def _listen_events(self, platform: PlatformContext) -> None:
         """订阅 Redis 频道，处理任务变更和手动触发事件。
 
         频道：
@@ -145,16 +150,24 @@ class SchedulerManager:
                     try:
                         if channel == CHANNEL_JOB_CHANGED:
                             async with AsyncSessionLocal() as db:
-                                await self.reload_jobs(db)
+                                await self.reload_jobs(db, platform=platform)
                         elif channel == CHANNEL_MANUAL_TRIGGER:
                             try:
-                                job_id = int(data)
-                            except (TypeError, ValueError):
+                                envelope = json.loads(data)
+                                tenant_id = int(envelope["tenantId"])
+                                job_id = int(envelope["jobId"])
+                            except (
+                                KeyError,
+                                TypeError,
+                                ValueError,
+                                json.JSONDecodeError,
+                            ):
                                 logger.warning(
-                                    "manual_trigger 收到非法 job_id: %s", data
+                                    "manual_trigger 收到非法 tenant/job envelope: %s",
+                                    data,
                                 )
                                 continue
-                            self.run_now(job_id)
+                            self.run_now(tenant_id, job_id)
                     except Exception:
                         logger.exception("处理调度器事件失败 channel=%s", channel)
             except asyncio.CancelledError:
@@ -181,21 +194,24 @@ class SchedulerManager:
         self._scheduler.add_job(
             execute_job,
             trigger=trigger,
-            args=[job.job_id],
-            id=f"job_{job.job_id}",
+            args=[job.tenant_id, job.job_id],
+            id=f"job_{job.tenant_id}_{job.job_id}",
             replace_existing=True,
         )
         logger.info("已注册调度任务: %s (type=%s)", job.job_key, job.trigger_type)
 
     def remove_job(self, job_id: int) -> None:
         """从调度器移除一个任务。"""
-        job_id_str = f"job_{job_id}"
-        existing = self._scheduler.get_job(job_id_str)
-        if existing:
-            self._scheduler.remove_job(job_id_str)
+        matching = [
+            item
+            for item in self._scheduler.get_jobs()
+            if item.id.endswith(f"_{job_id}") and item.id.startswith("job_")
+        ]
+        for existing in matching:
+            self._scheduler.remove_job(existing.id)
             logger.info("已移除调度任务: job_id=%s", job_id)
 
-    async def reload_jobs(self, db) -> None:
+    async def reload_jobs(self, db, *, platform: PlatformContext) -> None:
         """与 DB 当前状态对齐：移除已删除/停用的任务，新增或更新启用任务。
 
         用于两种场景：
@@ -205,10 +221,14 @@ class SchedulerManager:
         优化：对 trigger 字符串未变的已注册任务直接跳过，避免 APScheduler
         在 replace_existing 时重置 next_run_time（这会让无关字段编辑也扰动调度）。
         """
+        if not isinstance(platform, PlatformContext):
+            raise TypeError("platform context is required")
         stmt = select(SysJob).where(SysJob.status == STATUS_ENABLED)
         result = await db.execute(stmt)
-        enabled_jobs = result.scalars().all()
-        enabled_ids = {j.job_id for j in enabled_jobs}
+        enabled_jobs = [
+            job for job in result.scalars().all() if is_tenant_task(job.job_key)
+        ]
+        enabled_ids = {(j.tenant_id, j.job_id) for j in enabled_jobs}
 
         # 快照当前调度器中的 job_* 任务，用于差异比对
         existing: dict[str, object] = {
@@ -217,8 +237,14 @@ class SchedulerManager:
 
         # 移除已不存在或已停用的任务
         for job_id_str in existing:
-            scheduled_job_id = int(job_id_str[4:])
-            if scheduled_job_id not in enabled_ids:
+            try:
+                scheduled_tenant_id, scheduled_job_id = map(
+                    int, job_id_str.removeprefix("job_").split("_", maxsplit=1)
+                )
+            except ValueError:
+                self._scheduler.remove_job(job_id_str)
+                continue
+            if (scheduled_tenant_id, scheduled_job_id) not in enabled_ids:
                 self._scheduler.remove_job(job_id_str)
                 logger.info("已移除失效调度任务: job_id=%s", scheduled_job_id)
 
@@ -239,14 +265,14 @@ class SchedulerManager:
                     exc_info=True,
                 )
                 continue
-            job_id_str = f"job_{job.job_id}"
+            job_id_str = f"job_{job.tenant_id}_{job.job_id}"
             current = existing.get(job_id_str)
             if current is not None and str(current.trigger) == str(trigger):
                 continue
             self._scheduler.add_job(
                 execute_job,
                 trigger=trigger,
-                args=[job.job_id],
+                args=[job.tenant_id, job.job_id],
                 id=job_id_str,
                 replace_existing=True,
             )
@@ -267,12 +293,12 @@ class SchedulerManager:
             skipped,
         )
 
-    def run_now(self, job_id: int) -> None:
+    def run_now(self, tenant_id: int, job_id: int) -> None:
         """立即执行一次指定任务（不等待调度）。"""
         self._scheduler.add_job(
             run_job_manual,
-            args=[job_id],
-            id=f"manual_{job_id}",
+            args=[tenant_id, job_id],
+            id=f"manual_{tenant_id}_{job_id}",
             replace_existing=True,
         )
         logger.info("手动触发任务: job_id=%s", job_id)
@@ -291,7 +317,13 @@ async def notify_job_changed(redis: Redis | None = None) -> None:
     await client.publish(CHANNEL_JOB_CHANGED, "")
 
 
-async def notify_manual_trigger(job_id: int, redis: Redis | None = None) -> None:
+async def notify_manual_trigger(
+    tenant: TenantContext, job_id: int, redis: Redis | None = None
+) -> None:
     """通知调度器立即执行一次指定任务。"""
     client = redis or redis_client
-    await client.publish(CHANNEL_MANUAL_TRIGGER, str(job_id))
+    payload = json.dumps(
+        {"tenantId": tenant.tenant_id, "jobId": job_id},
+        separators=(",", ":"),
+    )
+    await client.publish(CHANNEL_MANUAL_TRIGGER, payload)

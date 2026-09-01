@@ -9,11 +9,11 @@ db_session fixture 用 SAVEPOINT 回滚模式，所有写入不真正落库。
 # ruff: noqa: ARG001, PLC0415  test 函数 ctx / kwargs 是与生产签名一致的占位
 
 import inspect
-from unittest.mock import MagicMock
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
+from tenant_helpers import bind_test_user, tenant_context
 
 from app.constants import STATUS_DISABLED, STATUS_ENABLED, EnableStatus
 from app.core.exceptions import BusinessRuleException
@@ -30,6 +30,10 @@ from app.modules.system.ai_tools import (
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
+from app.modules.system.service.tenant_association_writer import (
+    replace_role_menus,
+    replace_user_roles,
+)
 from app.utils.validators import STATUS_ALLOWED
 
 # ============ fixture ============
@@ -46,6 +50,7 @@ async def _add_user(
     """建用户（绕过 ORM 关系，直接 insert）"""
     db.add(
         User(
+            tenant_id=0,
             user_id=user_id,
             user_name=user_name,
             nickname=user_name,
@@ -80,6 +85,7 @@ def _make_ctx(
         else:
             filters = []
         data_scope = DataScopeContext(
+            tenant_id=0,
             accessible_dept_ids=None,
             accessible_user_scope=None,
             filters=filters,
@@ -95,8 +101,17 @@ def _make_ctx(
         allowed_group_by=("user_gender", "status"),
         max_groups=max_groups,
     )
+    actor = User(
+        tenant_id=0,
+        user_id=1,
+        user_name="system-ai-tool-actor",
+        nickname="System AI tool actor",
+        hashed_password="x",
+        status="1",
+    )
+    bind_test_user(actor)
     return AiToolContext(
-        user=MagicMock(user_id=1),
+        user=actor,
         perms={"system:user:list"},
         db=db,
         data_scope=data_scope,
@@ -316,6 +331,7 @@ class TestDataScopeFilter:
         from sqlalchemy import literal_column, select
 
         data_scope = DataScopeContext(
+            tenant_id=0,
             accessible_dept_ids={100},  # 不重要，本测试只验证 filters
             accessible_user_scope=select(literal_column("0").label("user_id")),
             filters=[User.user_id == 1001],
@@ -340,6 +356,7 @@ async def _add_role(
     """建角色"""
     db.add(
         Role(
+            tenant_id=0,
             role_id=role_id,
             role_name=role_name,
             role_code=role_code or role_name.lower(),
@@ -362,12 +379,24 @@ def _make_role_ctx(db: AsyncSession) -> AiToolContext:
         allowed_filters=("status",),
         query_cache_module="system/role",
     )
+    actor = User(
+        tenant_id=0,
+        user_id=1,
+        user_name="role-count-actor",
+        nickname="Role count actor",
+        hashed_password="x",
+        status="1",
+    )
+    bind_test_user(actor)
     return AiToolContext(
-        user=MagicMock(user_id=1),
+        user=actor,
         perms={"system:role:list"},
         db=db,
         data_scope=DataScopeContext(
-            accessible_dept_ids=None, accessible_user_scope=None, filters=[]
+            tenant_id=0,
+            accessible_dept_ids=None,
+            accessible_user_scope=None,
+            filters=[],
         ),
         trace_id="tr_test",
         tool_meta=meta,
@@ -429,6 +458,7 @@ async def _add_dept(
 
     db.add(
         Dept(
+            tenant_id=0,
             dept_id=dept_id,
             dept_name=dept_name,
             order_num=0,
@@ -452,12 +482,24 @@ def _make_dept_ctx(db: AsyncSession) -> AiToolContext:
         allowed_filters=("status",),
         query_cache_module="system/dept",
     )
+    actor = User(
+        tenant_id=0,
+        user_id=1,
+        user_name="dept-count-actor",
+        nickname="Dept count actor",
+        hashed_password="x",
+        status="1",
+    )
+    bind_test_user(actor)
     return AiToolContext(
-        user=MagicMock(user_id=1),
+        user=actor,
         perms={"system:dept:list"},
         db=db,
         data_scope=DataScopeContext(
-            accessible_dept_ids=None, accessible_user_scope=None, filters=[]
+            tenant_id=0,
+            accessible_dept_ids=None,
+            accessible_user_scope=None,
+            filters=[],
         ),
         trace_id="tr_test",
         tool_meta=meta,
@@ -511,6 +553,7 @@ async def _make_role_list_ctx(db: AsyncSession) -> AiToolContext:
 
     marker = next_id()
     permission = Menu(
+        tenant_id=0,
         menu_id=next_id(),
         menu_name=f"role-list-permission-{marker}",
         menu_type="F",
@@ -518,23 +561,27 @@ async def _make_role_list_ctx(db: AsyncSession) -> AiToolContext:
         status="1",
     )
     actor_role = Role(
+        tenant_id=0,
         role_id=next_id(),
         role_name=f"role-list-actor-{marker}",
         role_code=f"R_ROLE_LIST_ACTOR_{marker}",
         data_scope="1",
         status="1",
-        menus=[permission],
     )
     actor = User(
+        tenant_id=0,
         user_id=next_id(),
         user_name=f"role-list-actor-{marker}",
         nickname="Role list actor",
         hashed_password="x",
         status="1",
-        roles=[actor_role],
     )
-    db.add(actor)
+    db.add_all([permission, actor_role, actor])
     await db.flush()
+    tenant = tenant_context(tenant_id=0, actor_user_id=actor.user_id)
+    await replace_role_menus(db, actor_role, [permission], tenant=tenant)
+    await replace_user_roles(db, actor, [actor_role], tenant=tenant)
+    bind_test_user(actor)
     meta = AiToolMeta(
         name="role.list",
         agent="role_mgmt",
@@ -550,7 +597,7 @@ async def _make_role_list_ctx(db: AsyncSession) -> AiToolContext:
         perms={"system:role:list"},
         db=db,
         data_scope=DataScopeContext(
-            accessible_dept_ids=None, accessible_user_scope=None
+            tenant_id=0, accessible_dept_ids=None, accessible_user_scope=None
         ),
         trace_id="tr_role_list",
         tool_meta=meta,
@@ -571,12 +618,21 @@ def _make_dept_list_ctx(db: AsyncSession) -> AiToolContext:
         allowed_filters=("status",),
         query_cache_module="system/dept",
     )
+    actor = User(
+        tenant_id=0,
+        user_id=1,
+        user_name="dept-list-actor",
+        nickname="Dept list actor",
+        hashed_password="x",
+        status="1",
+    )
+    bind_test_user(actor)
     return AiToolContext(
-        user=MagicMock(user_id=1),
+        user=actor,
         perms={"system:dept:list"},
         db=db,
         data_scope=DataScopeContext(
-            accessible_dept_ids=None, accessible_user_scope=None
+            tenant_id=0, accessible_dept_ids=None, accessible_user_scope=None
         ),
         trace_id="tr_dept_list",
         tool_meta=meta,

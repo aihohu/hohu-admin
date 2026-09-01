@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from app.modules.system.api.role import get_menus, list_roles, router
 from app.modules.system.schemas.role import RoleQuery, RoleUpdate
 from app.modules.system.service import role_management_service as role_policy_module
+from tests.tenant_helpers import tenant_context
 
 
 def _route(path: str, method: str) -> APIRoute:
@@ -140,10 +141,12 @@ async def test_role_menu_read_rechecks_current_delegation_policy() -> None:
             role_id=101,
             db=AsyncMock(),
             _current_user=current_user,
+            tenant=tenant_context(actor_user_id=current_user.user_id),
         )
 
     authorize.assert_awaited_once_with(
         ANY,
         actor_user_id=current_user.user_id,
         role_id=101,
+        tenant=tenant_context(actor_user_id=current_user.user_id),
     )

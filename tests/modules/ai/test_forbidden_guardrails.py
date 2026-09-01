@@ -9,6 +9,7 @@ import json
 from unittest.mock import AsyncMock
 
 import pytest
+from tenant_helpers import tenant_context
 
 from app.modules.ai.agents.safety.forbidden_topics import (
     CONFIG_KEY as TOPICS_CONFIG_KEY,
@@ -26,6 +27,8 @@ from app.modules.ai.agents.safety.forbidden_urls import (
     invalidate_forbidden_urls_cache,
     load_forbidden_urls,
 )
+
+TENANT = tenant_context()
 
 
 @pytest.fixture(autouse=True)
@@ -73,7 +76,7 @@ class TestLoadForbiddenTopics:
                 "app.modules.ai.agents.safety.forbidden_topics.config_service.get_value",
                 AsyncMock(return_value=raw),
             )
-            result = await load_forbidden_topics(db_session)
+            result = await load_forbidden_topics(db_session, tenant=TENANT)
         assert "politics" in result
         assert "政治" in result
 
@@ -84,8 +87,8 @@ class TestLoadForbiddenTopics:
                 "app.modules.ai.agents.safety.forbidden_topics.config_service.get_value",
                 mock_get,
             )
-            r1 = await load_forbidden_topics(db_session)
-            r2 = await load_forbidden_topics(db_session)
+            r1 = await load_forbidden_topics(db_session, tenant=TENANT)
+            r2 = await load_forbidden_topics(db_session, tenant=TENANT)
         assert r1 == r2 == ["topic1"]
         assert mock_get.call_count == 1  # 第二次走缓存
 
@@ -96,8 +99,8 @@ class TestLoadForbiddenTopics:
                 "app.modules.ai.agents.safety.forbidden_topics.config_service.get_value",
                 mock_get,
             )
-            await load_forbidden_topics(db_session)
-            await load_forbidden_topics(db_session, force_refresh=True)
+            await load_forbidden_topics(db_session, tenant=TENANT)
+            await load_forbidden_topics(db_session, tenant=TENANT, force_refresh=True)
         assert mock_get.call_count == 2
 
     async def test_load_invalid_json_returns_empty(self, db_session) -> None:
@@ -106,7 +109,7 @@ class TestLoadForbiddenTopics:
                 "app.modules.ai.agents.safety.forbidden_topics.config_service.get_value",
                 AsyncMock(return_value="not json{"),
             )
-            result = await load_forbidden_topics(db_session)
+            result = await load_forbidden_topics(db_session, tenant=TENANT)
         assert result == []
 
     async def test_load_non_string_elements_filtered(self, db_session) -> None:
@@ -116,7 +119,7 @@ class TestLoadForbiddenTopics:
                 "app.modules.ai.agents.safety.forbidden_topics.config_service.get_value",
                 AsyncMock(return_value=raw),
             )
-            result = await load_forbidden_topics(db_session)
+            result = await load_forbidden_topics(db_session, tenant=TENANT)
         assert result == ["ok", "good"]
 
 
@@ -199,7 +202,7 @@ class TestLoadForbiddenUrls:
                 "app.modules.ai.agents.safety.forbidden_urls.config_service.get_value",
                 AsyncMock(return_value=raw),
             )
-            result = await load_forbidden_urls(db_session)
+            result = await load_forbidden_urls(db_session, tenant=TENANT)
         assert "evil.com" in result
         assert "bad.org" in result
         assert "competitor.net" in result
@@ -211,7 +214,7 @@ class TestLoadForbiddenUrls:
                 "app.modules.ai.agents.safety.forbidden_urls.config_service.get_value",
                 AsyncMock(return_value=raw),
             )
-            result = await load_forbidden_urls(db_session)
+            result = await load_forbidden_urls(db_session, tenant=TENANT)
         assert result == ["evil.com"]
 
     async def test_load_caches_within_ttl(self, db_session) -> None:
@@ -221,8 +224,8 @@ class TestLoadForbiddenUrls:
                 "app.modules.ai.agents.safety.forbidden_urls.config_service.get_value",
                 mock_get,
             )
-            await load_forbidden_urls(db_session)
-            await load_forbidden_urls(db_session)
+            await load_forbidden_urls(db_session, tenant=TENANT)
+            await load_forbidden_urls(db_session, tenant=TENANT)
         assert mock_get.call_count == 1
 
     async def test_load_invalid_json_returns_empty(self, db_session) -> None:
@@ -231,7 +234,7 @@ class TestLoadForbiddenUrls:
                 "app.modules.ai.agents.safety.forbidden_urls.config_service.get_value",
                 AsyncMock(return_value="not json"),
             )
-            result = await load_forbidden_urls(db_session)
+            result = await load_forbidden_urls(db_session, tenant=TENANT)
         assert result == []
 
 

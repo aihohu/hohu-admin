@@ -35,6 +35,7 @@ from app.core.exceptions import (
 from app.core.file_storage import FileStorage, get_file_storage
 from app.core.id_generator import next_id
 from app.core.security import get_password_hash
+from app.core.tenant import PlatformContext, TenantContext
 from app.modules.system.constants import (
     FAILED_ROWS_PREVIEW_LIMIT,
     MAX_PREVIEW_RECORDS,
@@ -168,11 +169,13 @@ async def _resolve_import_authorization_targets(
     *,
     has_role_column: bool,
     prospective_user_ids: dict[int, int] | None = None,
+    tenant: TenantContext,
 ) -> list[ImportAuthorizationResolution]:
     """Resolve every authorization reference into one comparable batch snapshot."""
     stable_user_ids = prospective_user_ids if prospective_user_ids is not None else {}
     default_role_id = await db.scalar(
         select(Role.role_id).where(
+            Role.tenant_id == tenant.tenant_id,
             Role.role_code == USER_ROLE_CODE,
             Role.status == STATUS_ENABLED,
         )
@@ -182,11 +185,13 @@ async def _resolve_import_authorization_targets(
         dept_id: int | None = None
         dept_error: tuple[str, str] | None = None
         try:
-            dept_id = int(await resolve_dept(db, record.dept_input))
+            dept_id = int(await resolve_dept(db, record.dept_input, tenant=tenant))
         except BusinessRuleException as exc:
             dept_error = (exc.error_code, str(exc))
 
-        existing, matched_by_employee_no = await resolve_existing_user(db, record)
+        existing, matched_by_employee_no = await resolve_existing_user(
+            db, record, tenant=tenant
+        )
         role_ids: tuple[int, ...] | None = None
         role_error: tuple[str, str] | None = None
         if record.role_input:
@@ -197,6 +202,7 @@ async def _resolve_import_authorization_targets(
                         for role_id in await resolve_role_input(
                             db,
                             record.role_input,
+                            tenant=tenant,
                         )
                     )
                 )
@@ -273,6 +279,7 @@ async def _classify_records(
     *,
     has_role_column: bool,
     resolutions: list[ImportAuthorizationResolution] | None = None,
+    tenant: TenantContext,
 ) -> tuple[
     list[UserImportRecord],
     list[UserImportRecord],
@@ -285,6 +292,7 @@ async def _classify_records(
             db,
             records,
             has_role_column=has_role_column,
+            tenant=tenant,
         )
     by_row = {resolution.row_num: resolution for resolution in resolutions}
     target_counts = Counter(
@@ -295,7 +303,9 @@ async def _classify_records(
     duplicate_target_ids = {
         target_user_id for target_user_id, count in target_counts.items() if count > 1
     }
-    authority = await grant_authority_service.build(db, int(current_user.user_id))
+    authority = await grant_authority_service.build(
+        db, int(current_user.user_id), tenant=tenant
+    )
     ignored_user_ids = frozenset(
         resolution.prospective_user_id
         for resolution in resolutions
@@ -366,6 +376,7 @@ async def _classify_records(
                     authority=authority,
                     ignored_user_ids=ignored_user_ids,
                     prospective_user_id=resolution.prospective_user_id,
+                    tenant=tenant,
                 )
             except AuthorizationException as exc:
                 out_of_scope_records.append(
@@ -416,6 +427,7 @@ async def _classify_records(
                 authority=authority,
                 ignored_user_ids=ignored_user_ids,
                 prospective_user_id=resolution.prospective_user_id,
+                tenant=tenant,
             )
         except AuthorizationException as exc:
             out_of_scope_records.append(
@@ -454,6 +466,7 @@ async def _lock_import_authorization_targets(
     current_user: User,
     *,
     has_role_column: bool,
+    tenant: TenantContext,
 ) -> tuple[User, list[ImportAuthorizationResolution]]:
     """Lock a complete import snapshot and reject reference-set drift."""
     prospective_user_ids: dict[int, int] = {}
@@ -462,6 +475,7 @@ async def _lock_import_authorization_targets(
         records,
         has_role_column=has_role_column,
         prospective_user_ids=prospective_user_ids,
+        tenant=tenant,
     )
     role_ids = {
         role_id
@@ -488,6 +502,7 @@ async def _lock_import_authorization_targets(
             target_user_ids=target_user_ids,
             role_ids=role_ids,
             dept_ids=dept_ids,
+            tenant=tenant,
         )
     except (BusinessRuleException, NotFoundException) as exc:
         raise BusinessRuleException(
@@ -500,6 +515,7 @@ async def _lock_import_authorization_targets(
         records,
         has_role_column=has_role_column,
         prospective_user_ids=prospective_user_ids,
+        tenant=tenant,
     )
     if after != before:
         raise BusinessRuleException(
@@ -510,10 +526,12 @@ async def _lock_import_authorization_targets(
         db,
         actor_user_id=int(current_user.user_id),
         has_role_column=has_role_column,
+        tenant=tenant,
     )
     await user_department_assignment_service.ensure_import_permissions(
         db,
         actor_user_id=int(current_user.user_id),
+        tenant=tenant,
     )
     return actor, after
 
@@ -528,6 +546,7 @@ async def dry_run_import_users(
     *,
     on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
     has_role_column: bool | None = None,
+    tenant: TenantContext,
 ) -> tuple[ImportDryRunResult, UserImportBatch]:
     """预检导入内容并生成 preview_token。
 
@@ -562,6 +581,7 @@ async def dry_run_import_users(
 
     # 1. INSERT batch（CREATED）
     batch = UserImportBatch(
+        tenant_id=tenant.tenant_id,
         batch_id=batch_id,
         operator_id=current_user.user_id,
         filename=filename,
@@ -584,6 +604,7 @@ async def dry_run_import_users(
             batch_id,
             ImportBatchStatus.CREATED,
             ImportBatchStatus.FAILED,
+            tenant_id=tenant.tenant_id,
         )
         raise BusinessRuleException(
             "文件解析后 0 行有效记录",
@@ -602,6 +623,7 @@ async def dry_run_import_users(
             records,
             current_user,
             has_role_column=effective_has_role_column,
+            tenant=tenant,
         )
 
         # 3. 截断预览记录。
@@ -622,7 +644,7 @@ async def dry_run_import_users(
         # 5. Redis 只缓存 batch_id。
         cache_payload = json.dumps({"batch_id": batch_id})
         await redis_module.redis_client.setex(
-            f"{_PREVIEW_REDIS_PREFIX}{preview_token}",
+            f"tenant:{tenant.tenant_id}:{_PREVIEW_REDIS_PREFIX}{preview_token}",
             _PREVIEW_REDIS_TTL_SECONDS,
             cache_payload,
         )
@@ -634,6 +656,7 @@ async def dry_run_import_users(
             batch_id,
             ImportBatchStatus.CREATED,
             ImportBatchStatus.FAILED,
+            tenant_id=tenant.tenant_id,
         )
         raise
 
@@ -655,18 +678,23 @@ async def dry_run_import_users(
 async def get_batch_by_preview_token(
     db: AsyncSession,
     preview_token: str,
+    *,
+    tenant: TenantContext,
 ) -> UserImportBatch | None:
     """凭 preview_token 反查批次，先查 Redis，未命中时回退数据库。"""
     # 1. Redis 加速
     cached = await redis_module.redis_client.get(
-        f"{_PREVIEW_REDIS_PREFIX}{preview_token}"
+        f"tenant:{tenant.tenant_id}:{_PREVIEW_REDIS_PREFIX}{preview_token}"
     )
     if cached:
         batch_id = json.loads(cached).get("batch_id")
         if batch_id:
             row = (
                 await db.execute(
-                    select(UserImportBatch).where(UserImportBatch.batch_id == batch_id)
+                    select(UserImportBatch).where(
+                        UserImportBatch.tenant_id == tenant.tenant_id,
+                        UserImportBatch.batch_id == batch_id,
+                    )
                 )
             ).scalar_one_or_none()
             if row is not None:
@@ -677,7 +705,8 @@ async def get_batch_by_preview_token(
     return (
         await db.execute(
             select(UserImportBatch).where(
-                UserImportBatch.preview_token == preview_token
+                UserImportBatch.tenant_id == tenant.tenant_id,
+                UserImportBatch.preview_token == preview_token,
             )
         )
     ).scalar_one_or_none()
@@ -742,6 +771,7 @@ async def _write_batch_log(
     """
     db.add(
         UserImportBatchLog(
+            tenant_id=batch.tenant_id,
             log_id=str(next_id()),
             batch_id=batch.batch_id,
             operator_id=operator.user_id,
@@ -798,6 +828,7 @@ async def _process_create_row(
     *,
     has_role_column: bool,
     ignored_user_ids: frozenset[int],
+    tenant: TenantContext,
 ) -> None:
     """新建用户行级处理（INSERT user + bind roles + bind dept）。
 
@@ -808,6 +839,7 @@ async def _process_create_row(
     assert resolution.prospective_user_id is not None
 
     new_user = User(
+        tenant_id=tenant.tenant_id,
         user_id=resolution.prospective_user_id,
         user_name=record.user_name,
         employee_no=record.employee_no or None,
@@ -820,7 +852,6 @@ async def _process_create_row(
     )
     db.add(new_user)
     await db.flush()  # 触发 INSERT，捕获 UNIQUE IntegrityError
-
     await user_role_assignment_service.assign_imported_user_roles(
         db,
         actor_user_id=current_user.user_id,
@@ -829,6 +860,7 @@ async def _process_create_row(
         dept_ids=[resolution.dept_id],
         has_role_column=has_role_column,
         ignored_user_ids=ignored_user_ids,
+        tenant=tenant,
     )
     await user_department_assignment_service.replace_imported_user_departments(
         db,
@@ -837,6 +869,7 @@ async def _process_create_row(
         dept_assignments=[(resolution.dept_id, True)],
         created_target=True,
         ignored_user_ids=ignored_user_ids,
+        tenant=tenant,
     )
     await db.flush()
 
@@ -846,6 +879,8 @@ async def _process_overwrite_row(
     record: UserImportRecord,
     existing: User,
     resolution: ImportAuthorizationResolution,
+    *,
+    tenant: TenantContext,
 ) -> None:
     """覆盖已有用户时只更新 OVERWRITE_ALLOWED 字段。
 
@@ -875,12 +910,14 @@ async def _process_overwrite_row(
             db,
             target_user_id=existing.user_id,
             role_ids=list(resolution.role_ids),
+            tenant=tenant,
         )
 
     await user_department_assignment_service.apply_locked_import_departments(
         db,
         target_user_id=existing.user_id,
         dept_assignments=[(resolution.dept_id, True)],
+        tenant=tenant,
     )
     await db.flush()
 
@@ -888,6 +925,8 @@ async def _process_overwrite_row(
 async def _handle_idempotent_replay(
     db: AsyncSession,
     batch_id: str,
+    *,
+    tenant: TenantContext,
 ) -> ImportResult:
     """CAS 失败后读取最新批次，按当前状态返回幂等响应或抛错。
 
@@ -897,7 +936,10 @@ async def _handle_idempotent_replay(
     fresh = (
         await db.execute(
             select(UserImportBatch)
-            .where(UserImportBatch.batch_id == batch_id)
+            .where(
+                UserImportBatch.tenant_id == tenant.tenant_id,
+                UserImportBatch.batch_id == batch_id,
+            )
             .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
@@ -943,6 +985,7 @@ async def batch_create_users_from_records(
     sync_mode: EmployeeNoSyncMode = EmployeeNoSyncMode.CREATE_ONLY,
     file_storage: FileStorage | None = None,
     has_role_column: bool | None = None,
+    tenant: TenantContext,
 ) -> ImportResult:
     """执行批量新建或更新。
 
@@ -981,7 +1024,7 @@ async def batch_create_users_from_records(
     )
 
     # 1. 反查 batch
-    batch = await get_batch_by_preview_token(db, preview_token)
+    batch = await get_batch_by_preview_token(db, preview_token, tenant=tenant)
     if batch is None:
         raise UnprocessableEntityException(
             "preview_token 无效或已过期",
@@ -1012,9 +1055,10 @@ async def batch_create_users_from_records(
         ImportBatchStatus.PREVIEW_DONE,
         ImportBatchStatus.RUNNING,
         started_at=started_at,
+        tenant_id=tenant.tenant_id,
     )
     if not cas_ok:
-        return await _handle_idempotent_replay(db, batch.batch_id)
+        return await _handle_idempotent_replay(db, batch.batch_id, tenant=tenant)
     # raw UPDATE 不更新 ORM session 实例；refresh 让后续读取 / 测试断言看到新状态
     await db.refresh(batch)
 
@@ -1044,6 +1088,7 @@ async def batch_create_users_from_records(
         records,
         current_user,
         has_role_column=effective_has_role_column,
+        tenant=tenant,
     )
     resolutions_by_row = {
         resolution.row_num: resolution for resolution in authorization_resolutions
@@ -1066,6 +1111,7 @@ async def batch_create_users_from_records(
         authorization_actor,
         has_role_column=effective_has_role_column,
         resolutions=authorization_resolutions,
+        tenant=tenant,
     )
     failed_rows: list[FailedRow] = list(conflict_records) + list(out_of_scope_records)
     skipped_count = 0
@@ -1080,7 +1126,10 @@ async def batch_create_users_from_records(
         resolution = resolutions_by_row[record.row_num]
         assert resolution.target_user_id is not None
         existing = await db.scalar(
-            select(User).where(User.user_id == resolution.target_user_id)
+            select(User).where(
+                User.tenant_id == tenant.tenant_id,
+                User.user_id == resolution.target_user_id,
+            )
         )
         if existing is None:
             raise BusinessRuleException(
@@ -1135,7 +1184,7 @@ async def batch_create_users_from_records(
     # 8. 读取系统默认密码。
     hashed_password = ""
     if rows_to_create:
-        default_password = await get_default_password(db)
+        default_password = await get_default_password(db, tenant=tenant)
         hashed_password = get_password_hash(default_password)
 
     # 9. 分块并按行 savepoint 落库。
@@ -1171,6 +1220,7 @@ async def batch_create_users_from_records(
                                     resolutions_by_row[record.row_num],
                                     has_role_column=effective_has_role_column,
                                     ignored_user_ids=ignored_user_ids,
+                                    tenant=tenant,
                                 )
                                 success_count += 1
                             else:  # overwrite
@@ -1179,6 +1229,7 @@ async def batch_create_users_from_records(
                                     record,
                                     existing,
                                     resolutions_by_row[record.row_num],
+                                    tenant=tenant,
                                 )
                                 overwritten_count += 1
                         chunk_success += 1
@@ -1249,7 +1300,7 @@ async def batch_create_users_from_records(
         failed_rows_file = await storage.save(
             xlsx_bytes,
             mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            namespace="import-error",
+            namespace=f"tenant-{tenant.tenant_id}-import-error",
             suffix=".xlsx",
         )
 
@@ -1272,6 +1323,7 @@ async def batch_create_users_from_records(
         failed_count=len(failed_rows),
         failed_rows_file=failed_rows_file,
         finished_at=finished_at,
+        tenant_id=tenant.tenant_id,
     )
     await db.refresh(batch)  # 同步 ORM 实例（failed_rows_file / status 等）
 
@@ -1351,6 +1403,8 @@ def _make_failed_row_from_exc(
 async def get_batch_detail(
     db: AsyncSession,
     batch_id: str,
+    *,
+    tenant: TenantContext,
 ) -> tuple[UserImportBatch | None, str | None]:
     """按 batch_id 查询批次详情和操作人 user_name。
 
@@ -1369,8 +1423,15 @@ async def get_batch_detail(
 
     stmt = (
         select(UserImportBatch, User.user_name)
-        .outerjoin(User, User.user_id == UserImportBatch.operator_id)
-        .where(UserImportBatch.batch_id == batch_id)
+        .outerjoin(
+            User,
+            (User.tenant_id == UserImportBatch.tenant_id)
+            & (User.user_id == UserImportBatch.operator_id),
+        )
+        .where(
+            UserImportBatch.tenant_id == tenant.tenant_id,
+            UserImportBatch.batch_id == batch_id,
+        )
     )
     row = (await db.execute(stmt)).first()
     if row is None:
@@ -1386,6 +1447,7 @@ async def list_batch_logs(
     event: str | None = None,
     current: int = 1,
     size: int = 10,
+    tenant: TenantContext,
 ) -> tuple[list[tuple[UserImportBatchLog, str | None]], int]:
     """按 batch_id 分页查询批次日志。
 
@@ -1412,7 +1474,10 @@ async def list_batch_logs(
     """
     from app.modules.system.models.user import User  # noqa: PLC0415
 
-    filters: list = [UserImportBatchLog.batch_id == batch_id]
+    filters: list = [
+        UserImportBatchLog.tenant_id == tenant.tenant_id,
+        UserImportBatchLog.batch_id == batch_id,
+    ]
     if event:
         filters.append(UserImportBatchLog.event == event)
 
@@ -1421,7 +1486,11 @@ async def list_batch_logs(
 
     stmt = (
         select(UserImportBatchLog, User.user_name)
-        .outerjoin(User, User.user_id == UserImportBatchLog.operator_id)
+        .outerjoin(
+            User,
+            (User.tenant_id == UserImportBatchLog.tenant_id)
+            & (User.user_id == UserImportBatchLog.operator_id),
+        )
         .where(*filters)
         .order_by(
             UserImportBatchLog.created_at.asc(),
@@ -1438,6 +1507,8 @@ async def list_batch_logs(
 async def list_batches(
     db: AsyncSession,
     query: UserImportBatchQuery,
+    *,
+    tenant: TenantContext,
 ) -> tuple[list[tuple[UserImportBatch, str | None]], int]:
     """分页查询导入批次列表。
 
@@ -1462,7 +1533,7 @@ async def list_batches(
     """
     from app.modules.system.models.user import User  # noqa: PLC0415
 
-    filters: list = []
+    filters: list = [UserImportBatch.tenant_id == tenant.tenant_id]
     if query.operator_id is not None:
         filters.append(UserImportBatch.operator_id == query.operator_id)
     if query.status:
@@ -1484,7 +1555,11 @@ async def list_batches(
 
     stmt = (
         select(UserImportBatch, User.user_name)
-        .outerjoin(User, User.user_id == UserImportBatch.operator_id)
+        .outerjoin(
+            User,
+            (User.tenant_id == UserImportBatch.tenant_id)
+            & (User.user_id == UserImportBatch.operator_id),
+        )
         .where(*filters)
         .order_by(
             UserImportBatch.created_at.desc(),
@@ -1512,6 +1587,7 @@ async def cancel_batch(
     reason: str,
     *,
     file_storage: FileStorage | None = None,
+    tenant: TenantContext,
 ) -> UserImportBatch:
     """取消导入批次。
 
@@ -1548,7 +1624,12 @@ async def cancel_batch(
     """
     reason = _validate_reason(reason)
 
-    batch = await db.get(UserImportBatch, batch_id)
+    batch = await db.scalar(
+        select(UserImportBatch).where(
+            UserImportBatch.tenant_id == tenant.tenant_id,
+            UserImportBatch.batch_id == batch_id,
+        )
+    )
     if batch is None:
         raise NotFoundException(
             "用户导入批次",
@@ -1571,6 +1652,7 @@ async def cancel_batch(
             ImportBatchStatus.PREVIEW_DONE,
             ImportBatchStatus.CANCELLED,
             finished_at=now,
+            tenant_id=tenant.tenant_id,
         )
         if not ok:
             # CAS 失败：并发 execute 已把 status 改成 RUNNING，或并发 cancel 已抢
@@ -1607,7 +1689,7 @@ async def cancel_batch(
             # 文件已被 cleanup cron 清理 / never existed — 不影响 cancel 主流程
             pass
         await redis_module.redis_client.delete(
-            f"{_PREVIEW_REDIS_PREFIX}{batch.preview_token}"
+            f"tenant:{tenant.tenant_id}:{_PREVIEW_REDIS_PREFIX}{batch.preview_token}"
         )
 
         return batch
@@ -1632,7 +1714,9 @@ async def cancel_batch(
     )
 
 
-async def cleanup_expired_batches(db: AsyncSession) -> int:
+async def cleanup_expired_batches(
+    db: AsyncSession, *, platform: PlatformContext
+) -> int:
     """清理 90 天前终态批次及其失败清单和预览文件。
 
     每日 02:00 cron 入口（``app.tasks.user_cleanup_tasks.clean_expired_import_batches``）。
@@ -1650,6 +1734,8 @@ async def cleanup_expired_batches(db: AsyncSession) -> int:
     - failed_rows_file / file_storage_key 缺失（None 或文件已被外部删）不抛错，
       继续删 DB 行（防 dangling file 阻塞 cleanup）
     """
+    if not platform.reason or not platform.correlation_id:
+        raise AuthorizationException("平台清理上下文无效")
     cutoff = datetime.now() - timedelta(days=90)
     fs = get_file_storage()
     terminal_values = [s.value for s in TERMINAL_STATUSES]
@@ -1681,7 +1767,9 @@ async def cleanup_expired_batches(db: AsyncSession) -> int:
     return len(batches)
 
 
-async def cleanup_expired_previews(db: AsyncSession) -> int:
+async def cleanup_expired_previews(
+    db: AsyncSession, *, platform: PlatformContext
+) -> int:
     """将超过 10 分钟的 PREVIEW_DONE 批次标记为 EXPIRED 并清理文件。
 
     每小时 cron 入口（``app.tasks.user_cleanup_tasks.clean_expired_import_previews``）。
@@ -1698,6 +1786,8 @@ async def cleanup_expired_previews(db: AsyncSession) -> int:
     - 写入 EXPIRED 批次日志，
       operator_id 用 batch.operator_id（系统触发但归属原操作人，便于审计反查）
     """
+    if not platform.reason or not platform.correlation_id:
+        raise AuthorizationException("平台清理上下文无效")
     cutoff = datetime.now() - timedelta(minutes=10)
     fs = get_file_storage()
 
@@ -1715,6 +1805,7 @@ async def cleanup_expired_previews(db: AsyncSession) -> int:
             ImportBatchStatus.PREVIEW_DONE,
             ImportBatchStatus.EXPIRED,
             finished_at=datetime.now(),
+            tenant_id=int(batch.tenant_id),
         )
         if not success:
             continue
@@ -1727,6 +1818,7 @@ async def cleanup_expired_previews(db: AsyncSession) -> int:
 
         db.add(
             UserImportBatchLog(
+                tenant_id=batch.tenant_id,
                 log_id=str(next_id()),
                 batch_id=batch.batch_id,
                 operator_id=batch.operator_id,

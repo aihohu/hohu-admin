@@ -15,6 +15,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessRuleException
+from app.core.tenant import (
+    TenantContext,
+    get_bound_tenant_context,
+)
 from app.modules.system.constants import EmployeeNoSyncMode
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
@@ -41,7 +45,9 @@ class SyncAction(enum.Enum):
     UPDATE_FULL = "UPDATE_FULL"
 
 
-async def resolve_dept(db: AsyncSession, dept_input: str) -> int:
+async def resolve_dept(
+    db: AsyncSession, dept_input: str, *, tenant: TenantContext
+) -> int:
     """将 dept_input 解析为唯一 dept_id。
 
     dept_input 不含 ``/`` → 名称模式：唯一性校验，重名抛 DUPLICATE。
@@ -63,16 +69,19 @@ async def resolve_dept(db: AsyncSession, dept_input: str) -> int:
         )
 
     if "/" in dept_input:
-        return await _resolve_dept_by_path(db, dept_input)
-    return await _resolve_dept_by_name(db, dept_input)
+        return await _resolve_dept_by_path(db, dept_input, tenant=tenant)
+    return await _resolve_dept_by_name(db, dept_input, tenant=tenant)
 
 
-async def _resolve_dept_by_name(db: AsyncSession, name: str) -> int:
+async def _resolve_dept_by_name(
+    db: AsyncSession, name: str, *, tenant: TenantContext
+) -> int:
     """名称模式：dept_name == name + status='1'，唯一性校验。"""
     depts = (
         (
             await db.execute(
                 select(Dept.dept_id).where(
+                    Dept.tenant_id == tenant.tenant_id,
                     Dept.dept_name == name,
                     Dept.status == "1",  # noqa: E712
                 )
@@ -95,7 +104,9 @@ async def _resolve_dept_by_name(db: AsyncSession, name: str) -> int:
     return depts[0]
 
 
-async def _resolve_dept_by_path(db: AsyncSession, path: str) -> int:
+async def _resolve_dept_by_path(
+    db: AsyncSession, path: str, *, tenant: TenantContext
+) -> int:
     """路径模式：按 / 拆段，逐级走 parent_id 链。"""
     parts = [p.strip() for p in path.split("/") if p.strip()]
     if not parts:
@@ -108,6 +119,7 @@ async def _resolve_dept_by_path(db: AsyncSession, path: str) -> int:
     current_id: int | None = None
     for name in parts:
         stmt = select(Dept.dept_id).where(
+            Dept.tenant_id == tenant.tenant_id,
             Dept.dept_name == name,
             Dept.status == "1",  # noqa: E712
         )
@@ -129,7 +141,9 @@ async def _resolve_dept_by_path(db: AsyncSession, path: str) -> int:
     return current_id
 
 
-async def resolve_role_input(db: AsyncSession, role_input_str: str) -> list[int]:
+async def resolve_role_input(
+    db: AsyncSession, role_input_str: str, *, tenant: TenantContext
+) -> list[int]:
     """将 role_input 解析为 role_id 列表。
 
     支持逗号分隔的 code/name 混合输入（如 ``"R_DEV,开发者,R_QA"``）。
@@ -151,6 +165,7 @@ async def resolve_role_input(db: AsyncSession, role_input_str: str) -> list[int]
     by_code = (
         await db.execute(
             select(Role.role_id, Role.role_code).where(
+                Role.tenant_id == tenant.tenant_id,
                 Role.role_code.in_(parts),
                 Role.status == "1",  # noqa: E712
             )
@@ -165,6 +180,7 @@ async def resolve_role_input(db: AsyncSession, role_input_str: str) -> list[int]
         by_name = (
             await db.execute(
                 select(Role.role_id, Role.role_name).where(
+                    Role.tenant_id == tenant.tenant_id,
                     Role.role_name.in_(remaining),
                     Role.status == "1",  # noqa: E712
                 )
@@ -183,14 +199,19 @@ async def resolve_role_input(db: AsyncSession, role_input_str: str) -> list[int]
     return list(set(role_ids))
 
 
-async def _compute_accessible_dept_ids(db: AsyncSession, user: User) -> set[int] | None:
+async def _compute_accessible_dept_ids(
+    db: AsyncSession,
+    user: User,
+    *,
+    tenant: TenantContext,
+) -> set[int] | None:
     """Return the shared union resolver's accessible department IDs.
 
     Returns:
         ``None`` means unbounded. An empty set means the principal cannot
         assign an imported user to any department.
     """
-    resolution = await resolve_data_scope(db, user)
+    resolution = await resolve_data_scope(db, user, tenant=tenant)
     if resolution.unbounded:
         return None
     return set(resolution.accessible_dept_ids or ())
@@ -211,14 +232,19 @@ async def check_dept_data_scope(
        - resolve 失败 → FailedRow(对应 error_code)
        - 不在 accessible_dept_ids → FailedRow(AI_IMPORT_DEPT_OUT_OF_SCOPE)
     """
-    accessible_dept_ids = await _compute_accessible_dept_ids(db, current_user)
+    tenant = get_bound_tenant_context(current_user)
+    accessible_dept_ids = await _compute_accessible_dept_ids(
+        db,
+        current_user,
+        tenant=tenant,
+    )
     if accessible_dept_ids is None:
         return []
 
     failed_rows: list[FailedRow] = []
     for record in records:
         try:
-            requested_dept_id = await resolve_dept(db, record.dept_input)
+            requested_dept_id = await resolve_dept(db, record.dept_input, tenant=tenant)
         except BusinessRuleException as exc:
             failed_rows.append(
                 FailedRow(
@@ -246,7 +272,7 @@ async def check_dept_data_scope(
 
 
 async def resolve_existing_user(
-    db: AsyncSession, record: UserImportRecord
+    db: AsyncSession, record: UserImportRecord, *, tenant: TenantContext
 ) -> tuple[User | None, bool]:
     """按 employee_no 优先、user_name 兜底反查已有用户。
 
@@ -262,13 +288,23 @@ async def resolve_existing_user(
     """
     if record.employee_no:
         existing = (
-            await db.execute(select(User).where(User.employee_no == record.employee_no))
+            await db.execute(
+                select(User).where(
+                    User.tenant_id == tenant.tenant_id,
+                    User.employee_no == record.employee_no,
+                )
+            )
         ).scalar_one_or_none()
         if existing is not None:
             return existing, True
 
     existing = (
-        await db.execute(select(User).where(User.user_name == record.user_name))
+        await db.execute(
+            select(User).where(
+                User.tenant_id == tenant.tenant_id,
+                User.user_name == record.user_name,
+            )
+        )
     ).scalar_one_or_none()
     return existing, False
 

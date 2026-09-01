@@ -9,6 +9,8 @@ from app.core.exceptions import (
     InvalidParameterException,
     NotFoundException,
 )
+from app.core.tenant import TenantContext
+from app.core.tenant_scope import tenant_filter, tenant_select
 from app.db.base import role_depts, role_menus, user_roles
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
 from app.modules.system.constants import PHASE3_DESTRUCTIVE_PERMISSIONS
@@ -18,13 +20,19 @@ from app.modules.system.models.role import Role
 from app.modules.system.schemas.role import RoleCreate, RoleQuery, RoleUpdate
 from app.modules.system.service.authorization_lock import authorization_lock_service
 from app.modules.system.service.grant_authority import grant_authority_service
+from app.modules.system.service.tenant_association_writer import (
+    replace_role_depts,
+    replace_role_menus,
+)
 from app.utils.pagination import build_filters, paginate
 
 
 class RoleService:
     """角色业务逻辑服务"""
 
-    async def get_role_list(self, db: AsyncSession, query: RoleQuery):
+    async def get_role_list(
+        self, db: AsyncSession, query: RoleQuery, *, tenant: TenantContext
+    ):
         """获取角色分页列表"""
         field_mapping = {
             "role_name": ("role_name", "contains"),
@@ -33,6 +41,7 @@ class RoleService:
             "status": ("status", "=="),
         }
         filters = build_filters(Role, field_mapping, **query.model_dump())
+        filters.insert(0, tenant_filter(Role, tenant=tenant))
 
         page_data = await paginate(
             db=db,
@@ -44,17 +53,21 @@ class RoleService:
 
         return page_data
 
-    async def get_all_roles(self, db: AsyncSession) -> list[Role]:
+    async def get_all_roles(
+        self, db: AsyncSession, *, tenant: TenantContext
+    ) -> list[Role]:
         """获取所有启用的角色列表（不分页）"""
         stmt = (
-            select(Role)
+            tenant_select(Role, tenant=tenant)
             .where(Role.status == STATUS_ENABLED)
             .order_by(Role.create_time.asc())
         )
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
-    async def get_role_menus(self, db: AsyncSession, role_id: int) -> list[str]:
+    async def get_role_menus(
+        self, db: AsyncSession, role_id: int, *, tenant: TenantContext
+    ) -> list[str]:
         """返回角色拥有的「真叶子」菜单 ID（前端 NTree cascade 据此推导父子状态）。
 
         设计权衡：
@@ -69,12 +82,17 @@ class RoleService:
           menu_service.update_menu 按 permission 增量更新），存量孤立父
           需管理员重新配置权限。
         """
-        all_parents_sq = select(Menu.parent_id).where(Menu.parent_id.is_not(None))
+        all_parents_sq = select(Menu.parent_id).where(
+            Menu.tenant_id == tenant.tenant_id,
+            Menu.parent_id.is_not(None),
+        )
 
         stmt = (
             select(Menu.menu_id)
             .join(role_menus, Menu.menu_id == role_menus.c.menu_id)
             .where(
+                Menu.tenant_id == tenant.tenant_id,
+                role_menus.c.tenant_id == tenant.tenant_id,
                 role_menus.c.role_id == role_id,
                 Menu.menu_id.not_in(all_parents_sq),
             )
@@ -84,29 +102,44 @@ class RoleService:
         result = await db.execute(stmt)
         return [str(menu_id) for menu_id in result.scalars().all()]
 
-    async def create_role(self, db: AsyncSession, role_in: RoleCreate) -> Role:
+    async def create_role(
+        self, db: AsyncSession, role_in: RoleCreate, *, tenant: TenantContext
+    ) -> Role:
         """创建新角色"""
         check = await db.execute(
-            select(Role).where(Role.role_code == role_in.role_code)
+            tenant_select(Role, tenant=tenant).where(
+                Role.role_code == role_in.role_code
+            )
         )
         if check.scalars().first():
             raise DuplicateException("角色编码", role_in.role_code)
 
         role_data = role_in.model_dump(exclude={"dept_ids"})
-        new_role = Role(**role_data)
+        new_role = Role(tenant_id=tenant.tenant_id, **role_data)
+        db.add(new_role)
+        await db.flush()
 
         # 仅 CUSTOM scope 下 dept_ids 才生效；其他 scope 下传 dept_ids 无意义
+        depts: list[Dept] = []
         if role_in.data_scope == DATA_SCOPE_CUSTOM and role_in.dept_ids:
-            new_role.depts = await self._validate_depts_exist(db, role_in.dept_ids)
-
-        db.add(new_role)
+            depts = await self._validate_depts_exist(
+                db, role_in.dept_ids, tenant=tenant
+            )
+        await replace_role_depts(db, new_role, depts, tenant=tenant)
         return new_role
 
     async def update_role(
-        self, db: AsyncSession, role_id: int, role_in: RoleUpdate
+        self,
+        db: AsyncSession,
+        role_id: int,
+        role_in: RoleUpdate,
+        *,
+        tenant: TenantContext,
     ) -> Role:
         """更新角色信息"""
-        role = await db.get(Role, role_id)
+        role = await db.scalar(
+            tenant_select(Role, tenant=tenant).where(Role.role_id == role_id)
+        )
         if not role:
             raise NotFoundException("角色")
 
@@ -123,21 +156,28 @@ class RoleService:
         if dept_ids_provided:
             dept_ids = role_in.dept_ids
             if new_scope_is_custom and dept_ids:
-                role.depts = await self._validate_depts_exist(db, dept_ids)
+                depts = await self._validate_depts_exist(db, dept_ids, tenant=tenant)
             else:
                 # 显式清空：scope 非 CUSTOM 或 dept_ids=[]
-                role.depts = []
+                depts = []
+            await replace_role_depts(db, role, depts, tenant=tenant)
         elif old_scope_is_custom and not new_scope_is_custom:
             # 离开 CUSTOM 但未传 dept_ids：清空残留，避免下次回 CUSTOM 时旧 depts 复活
-            role.depts = []
+            await replace_role_depts(db, role, [], tenant=tenant)
 
         return role
 
     async def _validate_depts_exist(
-        self, db: AsyncSession, dept_ids: list[int]
+        self,
+        db: AsyncSession,
+        dept_ids: list[int],
+        *,
+        tenant: TenantContext,
     ) -> list[Dept]:
         """校验所有 dept_ids 都存在，否则抛 InvalidParameterException。"""
-        result = await db.execute(select(Dept).where(Dept.dept_id.in_(dept_ids)))
+        result = await db.execute(
+            tenant_select(Dept, tenant=tenant).where(Dept.dept_id.in_(dept_ids))
+        )
         depts = list(result.scalars().all())
         if len(depts) != len(dept_ids):
             missing = sorted(set(dept_ids) - {d.dept_id for d in depts})
@@ -148,20 +188,31 @@ class RoleService:
         return depts
 
     async def update_role_menu(
-        self, db: AsyncSession, role_id: int, menu_ids: list[int]
+        self,
+        db: AsyncSession,
+        role_id: int,
+        menu_ids: list[int],
+        *,
+        tenant: TenantContext,
     ) -> Role:
         """更新角色的菜单权限"""
-        role = await db.get(Role, role_id)
+        role = await db.scalar(
+            tenant_select(Role, tenant=tenant).where(Role.role_id == role_id)
+        )
         if not role:
             raise NotFoundException("角色")
 
         if menu_ids:
             menu_result = await db.execute(
-                select(Menu).where(Menu.menu_id.in_(menu_ids))
+                tenant_select(Menu, tenant=tenant).where(Menu.menu_id.in_(menu_ids))
             )
-            role.menus = menu_result.scalars().all()
+            menus = list(menu_result.scalars().all())
+            if {int(menu.menu_id) for menu in menus} != set(menu_ids):
+                raise NotFoundException("菜单")
         else:
-            role.menus = []
+            menus = []
+
+        await replace_role_menus(db, role, menus, tenant=tenant)
 
         return role
 
@@ -171,12 +222,14 @@ class RoleService:
         role_id: int,
         *,
         actor_user_id: int,
+        tenant: TenantContext,
     ) -> None:
         """Delete one unreferenced Role through the destructive policy."""
         await self._delete_roles(
             db,
             [role_id],
             actor_user_id=actor_user_id,
+            tenant=tenant,
             required_permission="system:role:delete",
         )
 
@@ -184,12 +237,17 @@ class RoleService:
         self,
         db: AsyncSession,
         role_ids: tuple[int, ...],
+        *,
+        tenant: TenantContext,
     ) -> dict[str, tuple]:
         roles = tuple(
             (
                 await db.execute(
                     select(Role.role_id, Role.role_code)
-                    .where(Role.role_id.in_(role_ids))
+                    .where(
+                        Role.tenant_id == tenant.tenant_id,
+                        Role.role_id.in_(role_ids),
+                    )
                     .order_by(Role.role_id)
                 )
             ).all()
@@ -202,7 +260,8 @@ class RoleService:
                 for role_id, user_id in (
                     await db.execute(
                         select(user_roles.c.role_id, user_roles.c.user_id).where(
-                            user_roles.c.role_id.in_(role_ids)
+                            user_roles.c.tenant_id == tenant.tenant_id,
+                            user_roles.c.role_id.in_(role_ids),
                         )
                     )
                 ).all()
@@ -214,7 +273,8 @@ class RoleService:
                 for role_id, dept_id in (
                     await db.execute(
                         select(role_depts.c.role_id, role_depts.c.dept_id).where(
-                            role_depts.c.role_id.in_(role_ids)
+                            role_depts.c.tenant_id == tenant.tenant_id,
+                            role_depts.c.role_id.in_(role_ids),
                         )
                     )
                 ).all()
@@ -232,12 +292,14 @@ class RoleService:
         ids: list[int],
         *,
         actor_user_id: int,
+        tenant: TenantContext,
     ) -> int:
         """Atomically delete unreferenced non-protected Roles as super admin."""
         return await self._delete_roles(
             db,
             ids,
             actor_user_id=actor_user_id,
+            tenant=tenant,
             required_permission="system:role:batch-delete",
         )
 
@@ -248,6 +310,7 @@ class RoleService:
         *,
         actor_user_id: int,
         required_permission: str,
+        tenant: TenantContext,
     ) -> int:
         """Enforce the exact destructive permission before one atomic delete."""
         if required_permission not in PHASE3_DESTRUCTIVE_PERMISSIONS:
@@ -255,7 +318,9 @@ class RoleService:
         if not ids:
             raise InvalidParameterException("未选择要删除的角色")
         normalized = tuple(sorted({int(value) for value in ids}))
-        authority = await grant_authority_service.build(db, actor_user_id)
+        authority = await grant_authority_service.build(
+            db, actor_user_id, tenant=tenant
+        )
         if not authority.super_admin:
             raise AuthorizationException(
                 "仅超级管理员可以删除角色",
@@ -266,7 +331,7 @@ class RoleService:
                 "缺少角色删除权限",
                 error_code="MISSING_PERMISSION",
             )
-        initial = await self._delete_role_facts(db, normalized)
+        initial = await self._delete_role_facts(db, normalized, tenant=tenant)
         if any(
             role_code == SUPER_ADMIN_ROLE_CODE
             for _role_id, role_code in initial["roles"]
@@ -282,8 +347,9 @@ class RoleService:
             role_ids={*authority.enabled_role_ids, *normalized},
             dept_ids=dept_ids,
             user_ids={actor_user_id, *member_ids},
+            tenant=tenant,
         )
-        locked = await self._delete_role_facts(db, normalized)
+        locked = await self._delete_role_facts(db, normalized, tenant=tenant)
         if locked != initial:
             raise BusinessRuleException(
                 "角色删除引用事实已变化",
@@ -294,15 +360,39 @@ class RoleService:
                 "角色仍有关联成员",
                 error_code="ROLE_DELETE_REFERENCED",
             )
-        await db.execute(delete(RoleAiAgent).where(RoleAiAgent.role_id.in_(normalized)))
-        await db.execute(delete(role_menus).where(role_menus.c.role_id.in_(normalized)))
-        await db.execute(delete(role_depts).where(role_depts.c.role_id.in_(normalized)))
-        result = await db.execute(delete(Role).where(Role.role_id.in_(normalized)))
+        await db.execute(
+            delete(RoleAiAgent).where(
+                RoleAiAgent.tenant_id == tenant.tenant_id,
+                RoleAiAgent.role_id.in_(normalized),
+            )
+        )
+        await db.execute(
+            delete(role_menus).where(
+                role_menus.c.tenant_id == tenant.tenant_id,
+                role_menus.c.role_id.in_(normalized),
+            )
+        )
+        await db.execute(
+            delete(role_depts).where(
+                role_depts.c.tenant_id == tenant.tenant_id,
+                role_depts.c.role_id.in_(normalized),
+            )
+        )
+        result = await db.execute(
+            delete(Role).where(
+                Role.tenant_id == tenant.tenant_id,
+                Role.role_id.in_(normalized),
+            )
+        )
         return int(result.rowcount or 0)
 
-    async def get_role_detail(self, db: AsyncSession, role_id: int) -> Role:
+    async def get_role_detail(
+        self, db: AsyncSession, role_id: int, *, tenant: TenantContext
+    ) -> Role:
         """获取角色详情（包含 dept_ids）"""
-        role = await db.get(Role, role_id)
+        role = await db.scalar(
+            tenant_select(Role, tenant=tenant).where(Role.role_id == role_id)
+        )
         if not role:
             raise NotFoundException("角色")
         return role

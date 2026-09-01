@@ -1,11 +1,18 @@
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, String, func, text
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.id_generator import next_id
-from app.core.tenant import TrustedTenantPrincipal
 from app.db.base import Base, user_depts, user_roles
 
 if TYPE_CHECKING:
@@ -14,9 +21,16 @@ if TYPE_CHECKING:
     from .tenant import Tenant
 
 
-class User(TrustedTenantPrincipal, Base):
+class User(Base):
     __tablename__ = "sys_user"
-    __table_args__ = (Index("ix_sys_user_tenant_user_name", "tenant_id", "user_name"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "user_id", name="uq_sys_user_tenant_user_id"),
+        UniqueConstraint("tenant_id", "user_name", name="uq_sys_user_tenant_user_name"),
+        UniqueConstraint(
+            "tenant_id", "employee_no", name="uq_sys_user_tenant_employee_no"
+        ),
+        Index("ix_sys_user_tenant_status", "tenant_id", "status"),
+    )
 
     user_id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, default=next_id, comment="用户ID"
@@ -25,17 +39,12 @@ class User(TrustedTenantPrincipal, Base):
         BigInteger,
         ForeignKey("sys_tenant.tenant_id", ondelete="RESTRICT"),
         nullable=False,
-        default=0,
-        server_default=text("0"),
         index=True,
-        comment="租户ID；M1 兼容期由服务端 Default Tenant 回填",
+        comment="租户ID；必须由可信 TenantContext 显式写入",
     )
-    user_name: Mapped[str] = mapped_column(
-        String(50), unique=True, index=True, nullable=False, comment="账号"
-    )
+    user_name: Mapped[str] = mapped_column(String(50), nullable=False, comment="账号")
     employee_no: Mapped[str | None] = mapped_column(
         String(64),
-        unique=True,
         nullable=True,
         comment="员工工号，用于企业同步、LDAP 或 ERP 对接；UNIQUE 但允许多个 NULL",
     )

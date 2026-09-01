@@ -1,6 +1,15 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.id_generator import next_id
@@ -11,15 +20,30 @@ class Config(Base):
     """系统配置模型"""
 
     __tablename__ = "sys_config"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "config_id", name="uq_sys_config_tenant_config_id"
+        ),
+        UniqueConstraint(
+            "tenant_id", "config_key", name="uq_sys_config_tenant_config_key"
+        ),
+        Index("ix_sys_config_tenant_group", "tenant_id", "config_group"),
+    )
 
     config_id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, default=next_id, comment="配置ID"
+    )
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("sys_tenant.tenant_id", ondelete="RESTRICT"),
+        nullable=False,
+        comment="租户ID；必须由可信 TenantContext 显式写入",
     )
     config_name: Mapped[str] = mapped_column(
         String(100), nullable=False, comment="配置名称"
     )
     config_key: Mapped[str] = mapped_column(
-        String(100), nullable=False, unique=True, comment="配置键"
+        String(100), nullable=False, comment="配置键"
     )
     config_value: Mapped[str] = mapped_column(Text, nullable=False, comment="配置值")
     config_type: Mapped[str] = mapped_column(

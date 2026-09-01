@@ -34,6 +34,7 @@ def _make_meta(name: str = "user.lookup") -> AiToolMeta:
 
 def _make_data_scope() -> DataScopeContext:
     return DataScopeContext(
+        tenant_id=0,
         accessible_dept_ids={100, 200},
         accessible_user_scope=select(literal_column("0").label("user_id")),
         filters=[],
@@ -63,14 +64,18 @@ def _make_deps(
 class TestDataScopeContext:
     def test_default_filters_empty_list(self) -> None:
         """filters 默认空 list（不是 None），与 accessible_*.None 语义区分"""
-        scope = DataScopeContext(accessible_dept_ids=None, accessible_user_scope=None)
+        scope = DataScopeContext(
+            tenant_id=0, accessible_dept_ids=None, accessible_user_scope=None
+        )
         assert scope.filters == []
         assert scope.accessible_dept_ids is None
         assert scope.accessible_user_scope is None
 
     def test_all_visible_means_none(self) -> None:
         """None 表示全部可见（超管 / DATA_SCOPE_ALL），不是无可见"""
-        scope = DataScopeContext(accessible_dept_ids=None, accessible_user_scope=None)
+        scope = DataScopeContext(
+            tenant_id=0, accessible_dept_ids=None, accessible_user_scope=None
+        )
         assert scope.accessible_dept_ids is None
 
 

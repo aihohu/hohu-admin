@@ -32,6 +32,7 @@ from app.modules.system.schemas.data_scope_demo import (
 from app.modules.system.service.data_scope_demo_service import (
     data_scope_demo_service,
 )
+from tests.tenant_helpers import bind_test_user, tenant_context
 
 # ---------------------------------------------------------------------------
 # 数据准备 helpers
@@ -42,6 +43,7 @@ DEMO_PASSWORD_HASH = "$2b$12$dummyhash"  # 测试不验证密码，hash 占位�
 
 def _make_dept(*, dept_id: int, name: str, ancestors: str = "0", status="1") -> Dept:
     return Dept(
+        tenant_id=0,
         dept_id=dept_id,
         dept_name=name,
         ancestors=ancestors,
@@ -54,6 +56,7 @@ def _make_role(
     *, role_id: int, role_code: str, data_scope: str, status: str = STATUS_ENABLED
 ) -> Role:
     return Role(
+        tenant_id=0,
         role_id=role_id,
         role_name=role_code,
         role_code=role_code,
@@ -73,6 +76,7 @@ async def _add_user(
 ) -> User:
     """建用户并挂角色 + 部门（用关联表直接 insert 绕过 ORM 缓存）。"""
     user = User(
+        tenant_id=0,
         user_id=user_id,
         user_name=user_name,
         nickname=user_name,
@@ -85,7 +89,10 @@ async def _add_user(
     if role_ids:
         await db.execute(
             insert(user_roles).values(
-                [{"user_id": user_id, "role_id": rid} for rid in role_ids]
+                [
+                    {"tenant_id": 0, "user_id": user_id, "role_id": rid}
+                    for rid in role_ids
+                ]
             )
         )
     if dept_ids:
@@ -94,6 +101,7 @@ async def _add_user(
             insert(user_depts).values(
                 [
                     {
+                        "tenant_id": 0,
                         "user_id": user_id,
                         "dept_id": did,
                         "is_primary": "Y" if did == primary else "N",
@@ -103,8 +111,13 @@ async def _add_user(
             )
         )
     # 重新查以加载 roles/depts 关系（lazy="selectin" 会自动加载）
-    result = await db.execute(select(User).where(User.user_id == user_id))
-    return result.scalars().first()
+    result = await db.execute(
+        select(User).where(User.tenant_id == 0, User.user_id == user_id)
+    )
+    loaded = result.scalars().first()
+    assert loaded is not None
+    bind_test_user(loaded)
+    return loaded
 
 
 async def _add_demo(
@@ -117,6 +130,7 @@ async def _add_demo(
 ) -> DataScopeDemo:
     """直接用 ORM 加 demo 数据。"""
     demo = DataScopeDemo(
+        tenant_id=0,
         demo_id=demo_id,
         title=title,
         dept_id=dept_id,
@@ -130,7 +144,12 @@ async def _add_demo(
 async def _visible_ids(db: AsyncSession, current_user: User) -> set[int]:
     """跑 service.get_list 并提取可见 demo_id 集合。"""
     query = DataScopeDemoQuery(current=1, size=100)
-    page = await data_scope_demo_service.get_list(db, query, current_user)
+    page = await data_scope_demo_service.get_list(
+        db,
+        query,
+        current_user,
+        tenant=tenant_context(tenant_id=0, actor_user_id=current_user.user_id),
+    )
     return {d.demo_id for d in page.records}
 
 
@@ -249,13 +268,11 @@ class TestListWithSuperAdmin:
         is_super_admin 只读 user_name 属性，不需要 user 在 DB 里。
         这样测试在干净 CI 库（无 init_db.py 种子）也能跑。
         """
-        admin = User(
-            user_id=9999,
-            user_name="admin",  # 触发 is_super_admin 短路
-            nickname="admin",
-            hashed_password=DEMO_PASSWORD_HASH,
-            status=STATUS_ENABLED,
+        admin = await db_session.scalar(
+            select(User).where(User.tenant_id == 0, User.user_name == "admin")
         )
+        assert admin is not None
+        bind_test_user(admin)
 
         for i in range(5):
             await _add_demo(
@@ -263,7 +280,7 @@ class TestListWithSuperAdmin:
                 demo_id=8000 + i,
                 title=f"T{i}",
                 dept_id=TEAM_A1_ID,
-                create_by=9001,
+                create_by=admin.user_id,
             )
         await db_session.flush()
 
@@ -286,6 +303,13 @@ class TestListWithSelfScope:
             role_ids=[ROLE_SELF_ID],
             dept_ids=[TEAM_A1_ID],
         )
+        other = await _add_user(
+            db_session,
+            user_id=9999,
+            user_name="test_demo_other",
+            role_ids=[],
+            dept_ids=[],
+        )
         # 9002 自己创建 2 条
         await _add_demo(
             db_session, demo_id=8101, title="mine-1", dept_id=TEAM_A1_ID, create_by=9002
@@ -299,7 +323,7 @@ class TestListWithSelfScope:
             demo_id=8103,
             title="other",
             dept_id=TEAM_A1_ID,
-            create_by=9999,
+            create_by=other.user_id,
         )
         await db_session.flush()
 
@@ -414,8 +438,8 @@ class TestListWithCustomScope:
         await db_session.execute(
             insert(role_depts).values(
                 [
-                    {"role_id": ROLE_CUSTOM_ID, "dept_id": TEAM_A1_ID},
-                    {"role_id": ROLE_CUSTOM_ID, "dept_id": TEAM_B1_ID},
+                    {"tenant_id": 0, "role_id": ROLE_CUSTOM_ID, "dept_id": TEAM_A1_ID},
+                    {"tenant_id": 0, "role_id": ROLE_CUSTOM_ID, "dept_id": TEAM_B1_ID},
                 ]
             )
         )
@@ -459,8 +483,12 @@ class TestListWithCustomScope:
         await db_session.execute(
             insert(role_depts).values(
                 [
-                    {"role_id": ROLE_CUSTOM_ID, "dept_id": TEAM_A1_ID},
-                    {"role_id": ROLE_CUSTOM_ID, "dept_id": disabled_dept_id},
+                    {"tenant_id": 0, "role_id": ROLE_CUSTOM_ID, "dept_id": TEAM_A1_ID},
+                    {
+                        "tenant_id": 0,
+                        "role_id": ROLE_CUSTOM_ID,
+                        "dept_id": disabled_dept_id,
+                    },
                 ]
             )
         )
@@ -542,7 +570,12 @@ class TestCreateInjectsCurrentUserContext:
             status=STATUS_ENABLED,
         )
         # Pydantic 默认禁止额外字段；如果 schema 设计正确，title/content/status 之外的字段无法传
-        demo = await data_scope_demo_service.create(db_session, create_in, me)
+        demo = await data_scope_demo_service.create(
+            db_session,
+            create_in,
+            me,
+            tenant=tenant_context(tenant_id=0, actor_user_id=me.user_id),
+        )
         await db_session.flush()
 
         assert demo.create_by == 9008

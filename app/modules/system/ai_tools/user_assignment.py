@@ -137,6 +137,7 @@ async def user_update_dept(
             target_user_id=user_id,
             dept_assignments=parsed,
             expected_snapshot=ctx.approved_business_snapshot,
+            tenant=ctx.tenant,
         )
     except BusinessException as exc:
         raise BusinessRuleException(
@@ -144,7 +145,12 @@ async def user_update_dept(
             error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
         ) from exc
 
-    target = await ctx.db.scalar(select(User).where(User.user_id == user_id))
+    target = await ctx.db.scalar(
+        select(User).where(
+            User.tenant_id == ctx.tenant_id,
+            User.user_id == user_id,
+        )
+    )
     user_name = target.user_name if target is not None else str(user_id)
     old_items = [
         {"deptId": str(dept_id), "isPrimary": is_primary}
@@ -228,6 +234,7 @@ async def _dry_run_user_update_dept(
         actor_user_id=ctx.user.user_id,
         target_user_id=user_id,
         dept_assignments=parsed,
+        tenant=ctx.tenant,
     )
     canonical_assignments = [
         {"dept_id": dept_id, "is_primary": is_primary}
@@ -369,6 +376,7 @@ async def user_role_lookup(
         actor_user_id=ctx.user.user_id,
         query=normalized_query,
         limit=limit,
+        tenant=ctx.tenant,
     )
     matches = [
         {
@@ -451,6 +459,7 @@ async def user_update_roles(
             target_user_id=user_id,
             role_ids=parsed,
             expected_snapshot=ctx.approved_business_snapshot,
+            tenant=ctx.tenant,
         )
     except BusinessException as exc:
         raise BusinessRuleException(
@@ -458,7 +467,12 @@ async def user_update_roles(
             error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
         ) from exc
 
-    target = await ctx.db.scalar(select(User).where(User.user_id == user_id))
+    target = await ctx.db.scalar(
+        select(User).where(
+            User.tenant_id == ctx.tenant_id,
+            User.user_id == user_id,
+        )
+    )
     user_name = target.user_name if target is not None else str(user_id)
     old_display = _format_ai_roles(
         result.old_role_ids,
@@ -524,6 +538,7 @@ async def _dry_run_user_update_roles(
         actor_user_id=ctx.user.user_id,
         target_user_id=user_id,
         role_ids=parsed,
+        tenant=ctx.tenant,
     )
     old_display = "; ".join(preview.old_display) or "—"
     new_display = "; ".join(preview.new_display) or "—"

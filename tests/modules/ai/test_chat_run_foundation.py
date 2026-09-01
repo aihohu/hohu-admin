@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from pydantic.experimental.missing_sentinel import MISSING
+from tenant_helpers import bind_test_user
 
 from app.core.id_generator import next_id
 from app.modules.ai.agents.hitl.events import (
@@ -41,6 +42,7 @@ async def _create_conversation(db_session, *, suffix: str) -> AiConversation:
     user_id = next_id()
     user = User(
         user_id=user_id,
+        tenant_id=0,
         user_name=f"chat_foundation_{suffix}_{user_id}",
         nickname=f"chat foundation {suffix}",
         hashed_password="$2b$12$dummy",
@@ -48,6 +50,7 @@ async def _create_conversation(db_session, *, suffix: str) -> AiConversation:
     )
     db_session.add(user)
     await db_session.flush()
+    bind_test_user(user)
     conversation = AiConversation(
         conversation_id=next_id(),
         user_id=user_id,

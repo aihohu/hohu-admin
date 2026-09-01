@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessRuleException, NotFoundException
+from app.core.tenant import TenantContext
 from app.db.base import user_depts
 from app.modules.system.models.data_scope_demo import DataScopeDemo
 from app.modules.system.models.user import User
@@ -27,7 +28,12 @@ class DataScopeDemoService:
     """数据权限演示业务服务"""
 
     async def get_list(
-        self, db: AsyncSession, query: DataScopeDemoQuery, current_user: User
+        self,
+        db: AsyncSession,
+        query: DataScopeDemoQuery,
+        current_user: User,
+        *,
+        tenant: TenantContext,
     ):
         """获取分页列表（含数据权限过滤）。
 
@@ -39,11 +45,13 @@ class DataScopeDemoService:
             "status": ("status", "=="),
         }
         filters = build_filters(DataScopeDemo, field_mapping, **query.model_dump())
+        filters.insert(0, DataScopeDemo.tenant_id == tenant.tenant_id)
 
         scope_filters = await get_data_scope_filters(
             db,
             current_user,
             DataScopeDemo,
+            tenant=tenant,
             dept_field="dept_id",
             user_field="create_by",
         )
@@ -62,6 +70,8 @@ class DataScopeDemoService:
         db: AsyncSession,
         data_in: DataScopeDemoCreate,
         current_user: User,
+        *,
+        tenant: TenantContext,
     ) -> DataScopeDemo:
         """创建演示数据。
 
@@ -69,7 +79,9 @@ class DataScopeDemoService:
         create_by 取 current_user.user_id。前端无法在 schema 中传这两个字段，
         service 强制注入，防止伪造。
         """
-        primary_dept_id = await self._get_primary_dept_id(db, current_user.user_id)
+        primary_dept_id = await self._get_primary_dept_id(
+            db, current_user.user_id, tenant=tenant
+        )
         if primary_dept_id is None:
             raise BusinessRuleException(
                 "当前用户未配置主部门，无法创建数据",
@@ -77,6 +89,7 @@ class DataScopeDemoService:
             )
 
         demo = DataScopeDemo(
+            tenant_id=tenant.tenant_id,
             title=data_in.title,
             content=data_in.content,
             status=data_in.status,
@@ -87,10 +100,16 @@ class DataScopeDemoService:
         return demo
 
     async def update(
-        self, db: AsyncSession, demo_id: int, data_in: DataScopeDemoUpdate
+        self,
+        db: AsyncSession,
+        demo_id: int,
+        data_in: DataScopeDemoUpdate,
+        current_user: User,
+        *,
+        tenant: TenantContext,
     ) -> DataScopeDemo:
         """更新演示数据（不允许改 dept_id/create_by）。"""
-        demo = await db.get(DataScopeDemo, demo_id)
+        demo = await self._get_visible(db, demo_id, current_user, tenant=tenant)
         if not demo:
             raise NotFoundException("演示数据")
 
@@ -99,16 +118,55 @@ class DataScopeDemoService:
             setattr(demo, field, value)
         return demo
 
-    async def delete(self, db: AsyncSession, demo_id: int) -> None:
+    async def delete(
+        self,
+        db: AsyncSession,
+        demo_id: int,
+        current_user: User,
+        *,
+        tenant: TenantContext,
+    ) -> None:
         """删除演示数据"""
-        demo = await db.get(DataScopeDemo, demo_id)
+        demo = await self._get_visible(db, demo_id, current_user, tenant=tenant)
         if not demo:
             raise NotFoundException("演示数据")
         await db.delete(demo)
 
-    async def _get_primary_dept_id(self, db: AsyncSession, user_id: int) -> int | None:
+    async def _get_visible(
+        self,
+        db: AsyncSession,
+        demo_id: int,
+        current_user: User,
+        *,
+        tenant: TenantContext,
+    ) -> DataScopeDemo:
+        filters = [
+            DataScopeDemo.tenant_id == tenant.tenant_id,
+            DataScopeDemo.demo_id == demo_id,
+            *await get_data_scope_filters(
+                db,
+                current_user,
+                DataScopeDemo,
+                tenant=tenant,
+                dept_field="dept_id",
+                user_field="create_by",
+            ),
+        ]
+        demo = await db.scalar(select(DataScopeDemo).where(*filters))
+        if demo is None:
+            raise NotFoundException("演示数据")
+        return demo
+
+    async def _get_primary_dept_id(
+        self,
+        db: AsyncSession,
+        user_id: int,
+        *,
+        tenant: TenantContext,
+    ) -> int | None:
         """取用户主部门 ID（user_depts.is_primary='Y'）。无主部门返回 None。"""
         stmt = select(user_depts.c.dept_id).where(
+            user_depts.c.tenant_id == tenant.tenant_id,
             user_depts.c.user_id == user_id,
             user_depts.c.is_primary == "Y",
         )

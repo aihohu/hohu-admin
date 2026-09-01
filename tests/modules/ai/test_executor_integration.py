@@ -353,7 +353,10 @@ def _build_deps(
     user.user_id = 9001
 
     data_scope = DataScopeContext(
-        accessible_dept_ids=None, accessible_user_scope=None, filters=[]
+        tenant_id=0,
+        accessible_dept_ids=None,
+        accessible_user_scope=None,
+        filters=[],
     )
     agent = MagicMock()
     agent.code = agent_code
@@ -1479,7 +1482,10 @@ class TestPerAgentQuota:
             perms={"*"},
             db=MagicMock(),
             data_scope=DataScopeContext(
-                accessible_dept_ids=None, accessible_user_scope=None, filters=[]
+                tenant_id=0,
+                accessible_dept_ids=None,
+                accessible_user_scope=None,
+                filters=[],
             ),
             agent=agent,
             trace_id="tr_test_agent_pass",
@@ -1534,7 +1540,10 @@ class TestPerAgentQuota:
             perms={"*"},
             db=MagicMock(),
             data_scope=DataScopeContext(
-                accessible_dept_ids=None, accessible_user_scope=None, filters=[]
+                tenant_id=0,
+                accessible_dept_ids=None,
+                accessible_user_scope=None,
+                filters=[],
             ),
             agent=agent,
             trace_id="tr_test_agent_full",

@@ -39,6 +39,7 @@ from app.constants import (
 from app.core.config import settings
 from app.core.id_generator import next_id
 from app.core.security import get_password_hash
+from app.core.tenant import DEFAULT_TENANT_ID
 from app.db.base import role_depts, role_menus, user_depts, user_roles
 from app.modules.system.models.data_scope_demo import DataScopeDemo
 from app.modules.system.models.dept import Dept
@@ -128,7 +129,10 @@ async def _seed_depts(db: AsyncSession) -> None:
     existing = (
         (
             await db.execute(
-                select(Dept.dept_id).where(Dept.dept_id.in_([d[0] for d in DEPTS]))
+                select(Dept.dept_id).where(
+                    Dept.tenant_id == DEFAULT_TENANT_ID,
+                    Dept.dept_id.in_([d[0] for d in DEPTS]),
+                )
             )
         )
         .scalars()
@@ -140,6 +144,7 @@ async def _seed_depts(db: AsyncSession) -> None:
     db.add_all(
         [
             Dept(
+                tenant_id=DEFAULT_TENANT_ID,
                 dept_id=did,
                 dept_name=name,
                 ancestors=anc,
@@ -157,7 +162,10 @@ async def _seed_roles(db: AsyncSession) -> None:
     existing_codes = (
         (
             await db.execute(
-                select(Role.role_code).where(Role.role_code.in_([r[2] for r in ROLES]))
+                select(Role.role_code).where(
+                    Role.tenant_id == DEFAULT_TENANT_ID,
+                    Role.role_code.in_([r[2] for r in ROLES]),
+                )
             )
         )
         .scalars()
@@ -169,6 +177,7 @@ async def _seed_roles(db: AsyncSession) -> None:
     db.add_all(
         [
             Role(
+                tenant_id=DEFAULT_TENANT_ID,
                 role_id=rid,
                 role_name=name,
                 role_code=code,
@@ -185,8 +194,16 @@ async def _seed_roles(db: AsyncSession) -> None:
     await db.execute(
         insert(role_depts).values(
             [
-                {"role_id": ROLE_CUSTOM_ID, "dept_id": TEAM_A1_ID},
-                {"role_id": ROLE_CUSTOM_ID, "dept_id": TEAM_B1_ID},
+                {
+                    "tenant_id": DEFAULT_TENANT_ID,
+                    "role_id": ROLE_CUSTOM_ID,
+                    "dept_id": TEAM_A1_ID,
+                },
+                {
+                    "tenant_id": DEFAULT_TENANT_ID,
+                    "role_id": ROLE_CUSTOM_ID,
+                    "dept_id": TEAM_B1_ID,
+                },
             ]
         )
     )
@@ -198,14 +215,21 @@ async def _seed_users(db: AsyncSession) -> None:
     for user_id, legacy_name in LEGACY_USER_NAMES.items():
         await db.execute(
             update(User)
-            .where(User.user_id == user_id, User.user_name == legacy_name)
+            .where(
+                User.tenant_id == DEFAULT_TENANT_ID,
+                User.user_id == user_id,
+                User.user_name == legacy_name,
+            )
             .values(user_name=desired_names[user_id])
         )
 
     existing_ids = set(
         (
             await db.execute(
-                select(User.user_id).where(User.user_id.in_([u[0] for u in USERS]))
+                select(User.user_id).where(
+                    User.tenant_id == DEFAULT_TENANT_ID,
+                    User.user_id.in_([u[0] for u in USERS]),
+                )
             )
         )
         .scalars()
@@ -223,6 +247,7 @@ async def _seed_users(db: AsyncSession) -> None:
     ) in missing_users:
         db.add(
             User(
+                tenant_id=DEFAULT_TENANT_ID,
                 user_id=user_id,
                 user_name=user_name,
                 nickname=nickname,
@@ -232,21 +257,29 @@ async def _seed_users(db: AsyncSession) -> None:
         )
     await db.flush()
 
-    user_role_rows = [{"user_id": u[0], "role_id": u[3]} for u in USERS]
+    user_role_rows = [
+        {"tenant_id": DEFAULT_TENANT_ID, "user_id": u[0], "role_id": u[3]}
+        for u in USERS
+    ]
     user_dept_rows = [
-        {"user_id": u[0], "dept_id": did, "is_primary": "Y" if did == u[4] else "N"}
+        {
+            "tenant_id": DEFAULT_TENANT_ID,
+            "user_id": u[0],
+            "dept_id": did,
+            "is_primary": "Y" if did == u[4] else "N",
+        }
         for u in USERS
         for did in u[5]
     ]
     await db.execute(
         pg_insert(user_roles)
         .values(user_role_rows)
-        .on_conflict_do_nothing(index_elements=["user_id", "role_id"])
+        .on_conflict_do_nothing(index_elements=["tenant_id", "user_id", "role_id"])
     )
     await db.execute(
         pg_insert(user_depts)
         .values(user_dept_rows)
-        .on_conflict_do_nothing(index_elements=["user_id", "dept_id"])
+        .on_conflict_do_nothing(index_elements=["tenant_id", "user_id", "dept_id"])
     )
     print(
         f"  users: created {len(missing_users)}, reconciled {len(existing_ids)} "
@@ -260,7 +293,8 @@ async def _seed_demo_data(db: AsyncSession) -> None:
         (
             await db.execute(
                 select(DataScopeDemo.demo_id).where(
-                    DataScopeDemo.title.like("演示数据-%")
+                    DataScopeDemo.tenant_id == DEFAULT_TENANT_ID,
+                    DataScopeDemo.title.like("演示数据-%"),
                 )
             )
         )
@@ -284,6 +318,7 @@ async def _seed_demo_data(db: AsyncSession) -> None:
     for i in range(30):
         rows.append(
             DataScopeDemo(
+                tenant_id=DEFAULT_TENANT_ID,
                 demo_id=next_id(),
                 title=f"演示数据-{i + 1:02d}",
                 content=f"这是第 {i + 1} 条数据，用于演示数据权限。",
@@ -310,7 +345,10 @@ async def _assign_role_menus(db: AsyncSession) -> None:
     demo_menu = (
         (
             await db.execute(
-                select(Menu.menu_id).where(Menu.route_name == "system_data-scope-demo")
+                select(Menu.menu_id).where(
+                    Menu.tenant_id == DEFAULT_TENANT_ID,
+                    Menu.route_name == "system_data-scope-demo",
+                )
             )
         )
         .scalars()
@@ -326,8 +364,9 @@ async def _assign_role_menus(db: AsyncSession) -> None:
         (
             await db.execute(
                 select(Menu.menu_id).where(
+                    Menu.tenant_id == DEFAULT_TENANT_ID,
                     (Menu.route_name.in_(target_routes))
-                    | ((Menu.parent_id == demo_menu) & (Menu.menu_type == "F"))
+                    | ((Menu.parent_id == demo_menu) & (Menu.menu_type == "F")),
                 )
             )
         )
@@ -342,11 +381,15 @@ async def _assign_role_menus(db: AsyncSession) -> None:
     role_ids = [r[0] for r in ROLES]
 
     # 3. ON CONFLICT DO NOTHING 批量插入 role_menus（复合主键 role_id+menu_id）
-    rows = [{"role_id": rid, "menu_id": mid} for rid in role_ids for mid in menu_rows]
+    rows = [
+        {"tenant_id": DEFAULT_TENANT_ID, "role_id": rid, "menu_id": mid}
+        for rid in role_ids
+        for mid in menu_rows
+    ]
     stmt = (
         pg_insert(role_menus)
         .values(rows)
-        .on_conflict_do_nothing(index_elements=["role_id", "menu_id"])
+        .on_conflict_do_nothing(index_elements=["tenant_id", "role_id", "menu_id"])
     )
     result = await db.execute(stmt)
     print(

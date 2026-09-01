@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from app.modules.system import constants as system_constants
 from app.modules.system.api.dept import router
 from app.modules.system.schemas import dept as dept_schemas
-from scripts.init_db import bind_fresh_role_permissions
+from scripts.init_db import fresh_role_permission_menus
 from scripts.sync_menus import MENU_DEFINITIONS
 
 
@@ -61,9 +61,7 @@ def test_fresh_super_role_receives_explicit_department_tool_permissions() -> Non
         "system:dept:move",
     }
     menus = [SimpleNamespace(permission=permission) for permission in permissions]
-    role = SimpleNamespace(menus=[])
-
-    bind_fresh_role_permissions(role, menus)
+    role = SimpleNamespace(menus=fresh_role_permission_menus(menus))
 
     assert permissions <= {menu.permission for menu in role.menus}
 

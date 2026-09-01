@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_response import PageResult
 from app.core.exceptions import NotFoundException
+from app.core.tenant import TenantContext
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.schemas.operation_log import (
@@ -38,8 +39,8 @@ class TraceService:
     """Build strict audit DTOs without loading message or argument content."""
 
     @staticmethod
-    def _filters(query: TraceListQuery, tenant_id: int) -> list[Any]:
-        filters: list[Any] = [AiOperationLog.tenant_id == tenant_id]
+    def _filters(query: TraceListQuery, tenant: TenantContext) -> list[Any]:
+        filters: list[Any] = [AiOperationLog.tenant_id == tenant.tenant_id]
         if query.trace_id is not None:
             filters.append(AiOperationLog.trace_id == query.trace_id)
         if query.actor_id is not None:
@@ -60,10 +61,10 @@ class TraceService:
         self,
         db: AsyncSession,
         *,
-        tenant_id: int,
+        tenant: TenantContext,
         query: TraceListQuery,
     ) -> PageResult[TraceSummaryOut]:
-        filters = self._filters(query, tenant_id)
+        filters = self._filters(query, tenant)
         grouped = (
             select(
                 AiOperationLog.trace_id.label("trace_id"),
@@ -102,7 +103,7 @@ class TraceService:
                 await db.execute(
                     select(AiOperationLog)
                     .where(
-                        AiOperationLog.tenant_id == tenant_id,
+                        AiOperationLog.tenant_id == tenant.tenant_id,
                         AiOperationLog.trace_id.in_(trace_ids),
                     )
                     .order_by(AiOperationLog.queued_at, AiOperationLog.log_id)
@@ -114,6 +115,7 @@ class TraceService:
         actor_names = await user_service.get_user_names_by_ids(
             db,
             {operation.user_id for operation in rows},
+            tenant=tenant,
         )
         by_trace: dict[str, list[AiOperationLog]] = defaultdict(list)
         for operation in rows:
@@ -154,7 +156,7 @@ class TraceService:
         self,
         db: AsyncSession,
         *,
-        tenant_id: int,
+        tenant: TenantContext,
         trace_id: str,
     ) -> TraceDetailOut:
         rows = (
@@ -169,7 +171,7 @@ class TraceService:
                     AiMessage.message_id == AiOperationLog.source_user_message_id,
                 )
                 .where(
-                    AiOperationLog.tenant_id == tenant_id,
+                    AiOperationLog.tenant_id == tenant.tenant_id,
                     AiOperationLog.trace_id == trace_id,
                 )
                 .order_by(AiOperationLog.queued_at, AiOperationLog.log_id)
@@ -183,6 +185,7 @@ class TraceService:
         actor_names = await user_service.get_user_names_by_ids(
             db,
             {operation.user_id for operation, _source_role, _source_at in rows},
+            tenant=tenant,
         )
 
         operations = [

@@ -27,6 +27,7 @@ from app.modules.system.ai_tools import (
     user_batch_delete,
 )
 from app.modules.system.models.user import User
+from tests.tenant_helpers import tenant_context
 
 
 def _make_ctx(
@@ -35,12 +36,15 @@ def _make_ctx(
     """构造 super_admin 视角的 AiToolContext（filters 空，全可见）"""
     user = MagicMock()
     user.user_id = 1
+    user.tenant_id = 0
     user.user_name = "admin"
+    user._tenant_context = tenant_context(tenant_id=0, actor_user_id=1)
     return AiToolContext(
         user=user,
         perms=set(),
         db=db,
         data_scope=DataScopeContext(
+            tenant_id=0,
             accessible_dept_ids=None,
             accessible_user_scope=accessible_user_scope,
             filters=[],
@@ -53,6 +57,7 @@ def _make_ctx(
             required_perms=("system:user:delete",),
             risk="destructive",
         ),
+        tenant_id=0,
     )
 
 
@@ -161,6 +166,7 @@ async def _add_user(
     """建用户（绕过 ORM 关系，直接 insert）"""
     db.add(
         User(
+            tenant_id=0,
             user_id=user_id,
             user_name=user_name,
             nickname=user_name,

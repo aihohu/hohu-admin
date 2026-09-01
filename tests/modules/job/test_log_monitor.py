@@ -25,12 +25,23 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.tenant import PlatformContext
 from app.modules.job.job_runner import LOG_STATUS_FAILED, RUNNER_ID
-from app.modules.job.log_monitor import JobLogMonitor
+from app.modules.job.log_monitor import JobLogMonitor as _JobLogMonitor
 from app.modules.job.models.job import SysJob, SysJobLog
 
 # unique job_key 前缀，避免 db_session 不隔离读时撞到历史日志
 _TEST_KEY_PREFIX = "K_TEST_LOG_MONITOR"
+_PLATFORM = PlatformContext(
+    actor_user_id=0,
+    reason="job monitor test",
+    correlation_id="test-job-monitor",
+)
+
+
+class JobLogMonitor(_JobLogMonitor):
+    def __init__(self, runner_id: str = RUNNER_ID) -> None:
+        super().__init__(platform=_PLATFORM, runner_id=runner_id)
 
 
 class _FakeSessionFactory:
@@ -79,6 +90,7 @@ async def _seed_log(
     job.timeout_seconds 计算 grace。
     """
     job = SysJob(
+        tenant_id=0,
         job_id=job_id,
         job_name=job_name,
         job_key=job_key,
@@ -89,6 +101,7 @@ async def _seed_log(
         timeout_seconds=timeout_seconds,
     )
     log = SysJobLog(
+        tenant_id=0,
         job_log_id=job_id * 1000,  # 测试用稳定 ID
         job_id=job_id,
         job_name=job_name,
@@ -112,7 +125,10 @@ async def _fetch_log(db: AsyncSession, job_log_id: int) -> SysJobLog:
     """
     # expire_all 让所有已缓存实例失效，下次访问时重新 SELECT
     db.expire_all()
-    stmt = select(SysJobLog).where(SysJobLog.job_log_id == job_log_id)
+    stmt = select(SysJobLog).where(
+        SysJobLog.tenant_id == 0,
+        SysJobLog.job_log_id == job_log_id,
+    )
     return (await db.execute(stmt)).scalar_one()
 
 

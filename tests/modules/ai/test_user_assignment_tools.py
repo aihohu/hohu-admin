@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from tenant_helpers import bind_test_user, tenant_context
 
 from app.constants import (
     IS_PRIMARY_NO,
@@ -44,13 +45,23 @@ def _tool_ctx(
     accessible_dept_ids: set[int] | None,
     perms: set[str] | None = None,
 ) -> AiToolContext:
+    actor = User(
+        tenant_id=0,
+        user_id=next_id(),
+        user_name=f"task12-actor-{next_id()}",
+        nickname="Task 12 actor",
+        hashed_password="x",
+        status=STATUS_ENABLED,
+    )
+    bind_test_user(actor)
     return AiToolContext(
-        user=MagicMock(user_id=next_id(), user_name="task12-actor", roles=[]),
+        user=actor,
         perms=(
             perms if perms is not None else {"system:user:edit", "system:dept:list"}
         ),
         db=db,
         data_scope=DataScopeContext(
+            tenant_id=0,
             accessible_dept_ids=accessible_dept_ids,
             accessible_user_scope=None,
             filters=[],
@@ -68,6 +79,7 @@ def _dept(
     status: str = STATUS_ENABLED,
 ) -> Dept:
     return Dept(
+        tenant_id=0,
         dept_id=next_id(),
         parent_id=parent_id,
         ancestors=ancestors,
@@ -235,6 +247,7 @@ async def test_user_lookup_returns_only_a_complete_visible_department_set(
     db_session: AsyncSession,
 ) -> None:
     target = User(
+        tenant_id=0,
         user_id=next_id(),
         user_name=f"task12-lookup-{next_id()}",
         nickname="Task 12 Lookup",
@@ -249,11 +262,13 @@ async def test_user_lookup_returns_only_a_complete_visible_department_set(
         insert(user_depts),
         [
             {
+                "tenant_id": 0,
                 "user_id": target.user_id,
                 "dept_id": primary.dept_id,
                 "is_primary": IS_PRIMARY_YES,
             },
             {
+                "tenant_id": 0,
                 "user_id": target.user_id,
                 "dept_id": secondary.dept_id,
                 "is_primary": IS_PRIMARY_NO,
@@ -313,6 +328,7 @@ async def test_user_lookup_preserves_legacy_data_without_department_permission(
     db_session: AsyncSession,
 ) -> None:
     target = User(
+        tenant_id=0,
         user_id=next_id(),
         user_name=f"task12-lookup-legacy-{next_id()}",
         nickname="Task 12 Lookup Legacy",
@@ -335,6 +351,7 @@ async def test_user_lookup_preserves_legacy_data_without_department_permission(
 
 def test_dept_lookup_statement_applies_limit_before_result_materialization() -> None:
     stmt = system_ai_tools._build_scoped_dept_lookup_stmt(
+        tenant_id=0,
         accessible_dept_ids={701, 702},
         normalized_query="Region / Sales",
         limit=7,
@@ -360,7 +377,10 @@ async def test_update_dept_dry_run_freezes_normalized_execution_and_snapshot() -
         new_display=("★ New A", "New B"),
         snapshot={"version": "task12-snapshot"},
     )
-    ctx = MagicMock(user=MagicMock(user_id=6001))
+    ctx = MagicMock(
+        user=MagicMock(user_id=6001),
+        tenant=tenant_context(tenant_id=0, actor_user_id=6001),
+    )
 
     with patch.object(
         user_department_assignment_service,
@@ -403,6 +423,7 @@ async def test_update_dept_executes_shared_policy_with_approved_snapshot(
 ) -> None:
     tool = system_ai_tools.user_update_dept
     target = User(
+        tenant_id=0,
         user_id=next_id(),
         user_name=f"task12-execute-{next_id()}",
         nickname="Task 12 Execute",
@@ -443,6 +464,7 @@ async def test_update_dept_executes_shared_policy_with_approved_snapshot(
         target_user_id=target.user_id,
         dept_assignments=[(new_dept_id, True)],
         expected_snapshot=approved_snapshot,
+        tenant=ctx.tenant,
     )
     assert result.data == {
         "updated": 1,
@@ -535,6 +557,7 @@ async def test_approved_execution_injects_server_business_snapshot() -> None:
     registered = MagicMock()
     deps = MagicMock()
     action = SimpleNamespace(
+        tenant_id=0,
         snapshot={"business": {"version": "approved"}},
         frozen_args={"user_id": 7001, "dept_assignments": []},
         args_hash="task12-args-hash",
@@ -582,6 +605,7 @@ async def test_update_dept_prepared_snapshot_rejects_business_drift(
         "business": {"version": "approved"},
     }
     action = SimpleNamespace(
+        tenant_id=0,
         execute_tool_name="user.update_dept",
         frozen_args=frozen_args,
         args_hash=canonical_payload_hash(frozen_args),
@@ -598,7 +622,11 @@ async def test_update_dept_prepared_snapshot_rejects_business_drift(
         create=True,
     ):
         with pytest.raises(BusinessRuleException) as exc_info:
-            await prepared_action_service.validate_snapshot(db_session, action)
+            await prepared_action_service.validate_snapshot(
+                db_session,
+                action,
+                tenant=tenant_context(tenant_id=0, actor_user_id=6001),
+            )
 
     assert exc_info.value.error_code == "AI_PREPARED_ACTION_SNAPSHOT_STALE"
 

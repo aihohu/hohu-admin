@@ -176,6 +176,7 @@ async def test_role_assignment_projection_rechecks_conditional_role_permission()
         ANY,
         actor_user_id=user.user_id,
         target_user_id=202,
+        tenant=user._tenant_context,
     )
 
 
@@ -207,6 +208,7 @@ async def test_delegable_role_projection_rechecks_every_count_contributor() -> N
         ANY,
         actor_user_id=user.user_id,
         role_ids=[901, 902],
+        tenant=user._tenant_context,
     )
 
 
@@ -241,6 +243,7 @@ async def test_managed_role_projection_rechecks_current_delegation_policy() -> N
         ANY,
         actor_user_id=user.user_id,
         role_id=901,
+        tenant=user._tenant_context,
     )
 
 
@@ -271,6 +274,7 @@ async def test_complete_role_assignment_projection_rechecks_live_role_set() -> N
         ANY,
         actor_user_id=user.user_id,
         target_user_id=202,
+        tenant=user._tenant_context,
     )
 
 
