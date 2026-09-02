@@ -1,7 +1,7 @@
 """AI 写工具的分层容量鉴权。
 
-L1 用户写速率：Redis `ai:write:{user_id}` Sorted Set 滑动窗口（默认 20/min）
-L2 用户日配额：Redis `ai:quota:{user_id}:{date}` UTC 日（默认 2000/day）
+L1 用户写速率：Redis tenant-scoped Sorted Set 滑动窗口（默认 20/min）
+L2 用户日配额：Redis tenant-scoped UTC 日计数（默认 2000/day）
 L3 单 tool 超时：asyncio.wait_for（默认 10s）
 
 "写"判定：tool.meta.risk in ("high", "destructive") 或 hitl_always=True
@@ -27,6 +27,7 @@ from datetime import UTC, datetime, timedelta
 from redis.asyncio import Redis
 
 from app.core.exceptions import BusinessRuleException
+from app.core.tenant import TenantContext
 from app.modules.ai.agents.tools.meta import AiToolMeta
 
 logger = logging.getLogger(__name__)
@@ -53,17 +54,15 @@ _CFG_L3_TIMEOUT = "ai:limit:tool_timeout_sec"
 _CFG_L4_CONV = "ai:budget:conv_per_day"
 
 
-async def _resolve_l1_limit() -> int:
+async def _resolve_l1_limit(tenant: TenantContext) -> int:
     """从 sys_config 读 L1 速率上限（60s 缓存兜底，DB down 用 default）"""
     from app.db.session import AsyncSessionLocal  # noqa: PLC0415
     from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
         get_ai_config_int,
     )
-    from app.modules.auth.service import get_public_tenant_context  # noqa: PLC0415
 
     try:
         async with AsyncSessionLocal() as db:
-            tenant = await get_public_tenant_context(db)
             return await get_ai_config_int(
                 db, _CFG_L1_RATE, DEFAULT_L1_RATE_PER_MIN, tenant=tenant
             )
@@ -71,16 +70,14 @@ async def _resolve_l1_limit() -> int:
         return DEFAULT_L1_RATE_PER_MIN
 
 
-async def _resolve_l2_limit() -> int:
+async def _resolve_l2_limit(tenant: TenantContext) -> int:
     from app.db.session import AsyncSessionLocal  # noqa: PLC0415
     from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
         get_ai_config_int,
     )
-    from app.modules.auth.service import get_public_tenant_context  # noqa: PLC0415
 
     try:
         async with AsyncSessionLocal() as db:
-            tenant = await get_public_tenant_context(db)
             return await get_ai_config_int(
                 db, _CFG_L2_QUOTA, DEFAULT_L2_DAILY_QUOTA, tenant=tenant
             )
@@ -88,16 +85,14 @@ async def _resolve_l2_limit() -> int:
         return DEFAULT_L2_DAILY_QUOTA
 
 
-async def _resolve_l3_timeout() -> int:
+async def _resolve_l3_timeout(tenant: TenantContext) -> int:
     from app.db.session import AsyncSessionLocal  # noqa: PLC0415
     from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
         get_ai_config_int,
     )
-    from app.modules.auth.service import get_public_tenant_context  # noqa: PLC0415
 
     try:
         async with AsyncSessionLocal() as db:
-            tenant = await get_public_tenant_context(db)
             return await get_ai_config_int(
                 db, _CFG_L3_TIMEOUT, DEFAULT_L3_TIMEOUT_SEC, tenant=tenant
             )
@@ -105,17 +100,15 @@ async def _resolve_l3_timeout() -> int:
         return DEFAULT_L3_TIMEOUT_SEC
 
 
-async def _resolve_l1_global_limit() -> int:
+async def _resolve_l1_global_limit(tenant: TenantContext) -> int:
     """从 sys_config 读取全局写速率上限，0 表示不限。"""
     from app.db.session import AsyncSessionLocal  # noqa: PLC0415
     from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
         get_ai_config_int,
     )
-    from app.modules.auth.service import get_public_tenant_context  # noqa: PLC0415
 
     try:
         async with AsyncSessionLocal() as db:
-            tenant = await get_public_tenant_context(db)
             return await get_ai_config_int(
                 db,
                 _CFG_L1_GLOBAL_RATE,
@@ -126,17 +119,15 @@ async def _resolve_l1_global_limit() -> int:
         return DEFAULT_L1_GLOBAL_RATE_PER_MIN
 
 
-async def _resolve_l4_conv_budget() -> int:
+async def _resolve_l4_conv_budget(tenant: TenantContext) -> int:
     """从 sys_config 读取会话写预算，0 表示不限。"""
     from app.db.session import AsyncSessionLocal  # noqa: PLC0415
     from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
         get_ai_config_int,
     )
-    from app.modules.auth.service import get_public_tenant_context  # noqa: PLC0415
 
     try:
         async with AsyncSessionLocal() as db:
-            tenant = await get_public_tenant_context(db)
             return await get_ai_config_int(
                 db, _CFG_L4_CONV, DEFAULT_L4_CONV_BUDGET, tenant=tenant
             )
@@ -145,11 +136,11 @@ async def _resolve_l4_conv_budget() -> int:
 
 
 # ============ Redis key 命名 ============
-_KEY_L1 = "ai:write:{user_id}"  # Sorted Set：member=call_uid, score=ts
-_KEY_L1_GLOBAL = "ai:rate:global"  # 全局速率，不区分用户。
-_KEY_L2 = "ai:quota:{user_id}:{date}"  # UTC 日，TTL 到当日 UTC 结束
-_KEY_L2_AGENT = "ai:quota:{user_id}:{agent_code}:{date}"
-_KEY_L4_CONV = "ai:budget:conv:{conversation_id}"  # 24 小时滚动窗口。
+_KEY_L1 = "ai:tenant:{tenant_id}:write:{user_id}"
+_KEY_L1_GLOBAL = "ai:tenant:{tenant_id}:rate:global"
+_KEY_L2 = "ai:tenant:{tenant_id}:quota:{user_id}:{date}"
+_KEY_L2_AGENT = "ai:tenant:{tenant_id}:quota:{user_id}:{agent_code}:{date}"
+_KEY_L4_CONV = "ai:tenant:{tenant_id}:budget:conv:{conversation_id}"
 
 
 # Lua 脚本保证滑动窗口更新与计数原子化。
@@ -180,6 +171,7 @@ async def check_l1_rate_limit(
     redis: Redis,
     user_id: int,
     *,
+    tenant: TenantContext,
     limit: int | None = None,
 ) -> tuple[int, str]:
     """L1 用户写速率：滑动 60 秒窗口。
@@ -200,8 +192,8 @@ async def check_l1_rate_limit(
     超限时先删除本次成员再抛错，拒绝请求不占用户额度。
     """
     if limit is None:
-        limit = await _resolve_l1_limit()
-    key = _KEY_L1.format(user_id=user_id)
+        limit = await _resolve_l1_limit(tenant)
+    key = _KEY_L1.format(tenant_id=tenant.tenant_id, user_id=user_id)
     now = time.time()
     window_start = now - L1_WINDOW_SEC
     member = f"{now:.6f}:{uuid.uuid4().hex}"
@@ -230,6 +222,7 @@ async def check_l1_rate_limit(
 async def check_l1_global_rate_limit(
     redis: Redis,
     *,
+    tenant: TenantContext,
     limit: int | None = None,
 ) -> tuple[int, str] | None:
     """L1 全局速率：全系统每分钟写操作上限。
@@ -246,11 +239,11 @@ async def check_l1_global_rate_limit(
         BusinessRuleException(AI_RATE_LIMIT_GLOBAL) — 全局计数超 limit
     """
     if limit is None:
-        limit = await _resolve_l1_global_limit()
+        limit = await _resolve_l1_global_limit(tenant)
     if limit <= 0:
         return None  # 未配置全局限制
 
-    key = _KEY_L1_GLOBAL
+    key = _KEY_L1_GLOBAL.format(tenant_id=tenant.tenant_id)
     now = time.time()
     window_start = now - L1_WINDOW_SEC
     member = f"{now:.6f}:{uuid.uuid4().hex}"
@@ -280,6 +273,7 @@ async def check_l2_daily_quota(
     redis: Redis,
     user_id: int,
     *,
+    tenant: TenantContext,
     limit: int | None = None,
 ) -> int:
     """L2 用户日配额，按 UTC 自然日计算。
@@ -298,21 +292,17 @@ async def check_l2_daily_quota(
     超限时先回滚本次自增，拒绝请求不占额度。
     """
     if limit is None:
-        limit = await _resolve_l2_limit()
+        limit = await _resolve_l2_limit(tenant)
     now = datetime.now(UTC)
     date_str = now.strftime("%Y%m%d")
-    key = _KEY_L2.format(user_id=user_id, date=date_str)
+    key = _KEY_L2.format(tenant_id=tenant.tenant_id, user_id=user_id, date=date_str)
 
-    # pipeline 保证 INCR + 条件 EXPIRE 同连接顺序执行
-    pipe = redis.pipeline()
+    seconds_to_midnight = 86400 - (now.hour * 3600 + now.minute * 60 + now.second)
+    # MULTI makes increment and first-TTL attachment indivisible.
+    pipe = redis.pipeline(transaction=True)
     pipe.incr(key)
-    pipe.ttl(key)
-    incr_result, ttl = await pipe.execute()
-
-    if incr_result == 1 or ttl is None or ttl < 0:
-        # 第一次写入 OR 防御性（key 已过期但 INCR 又生效的极端 race）
-        seconds_to_midnight = 86400 - (now.hour * 3600 + now.minute * 60 + now.second)
-        await redis.expire(key, seconds_to_midnight)
+    pipe.expire(key, seconds_to_midnight, nx=True)
+    incr_result, _ = await pipe.execute()
 
     if incr_result > limit:
         # 拒绝前回滚本次自增。
@@ -337,6 +327,7 @@ async def check_l2_agent_quota(
     user_id: int,
     agent_code: str,
     *,
+    tenant: TenantContext,
     limit: int | None,
 ) -> int | None:
     """L2 Agent 维度：防止单个 Agent 独占用户日配额。
@@ -357,16 +348,18 @@ async def check_l2_agent_quota(
 
     now = datetime.now(UTC)
     date_str = now.strftime("%Y%m%d")
-    key = _KEY_L2_AGENT.format(user_id=user_id, agent_code=agent_code, date=date_str)
+    key = _KEY_L2_AGENT.format(
+        tenant_id=tenant.tenant_id,
+        user_id=user_id,
+        agent_code=agent_code,
+        date=date_str,
+    )
 
-    pipe = redis.pipeline()
+    seconds_to_midnight = 86400 - (now.hour * 3600 + now.minute * 60 + now.second)
+    pipe = redis.pipeline(transaction=True)
     pipe.incr(key)
-    pipe.ttl(key)
-    incr_result, ttl = await pipe.execute()
-
-    if incr_result == 1 or ttl is None or ttl < 0:
-        seconds_to_midnight = 86400 - (now.hour * 3600 + now.minute * 60 + now.second)
-        await redis.expire(key, seconds_to_midnight)
+    pipe.expire(key, seconds_to_midnight, nx=True)
+    incr_result, _ = await pipe.execute()
 
     if incr_result > limit:
         await redis.decr(key)
@@ -394,6 +387,7 @@ async def check_l4_conv_budget(
     redis: Redis,
     conversation_id: int,
     *,
+    tenant: TenantContext,
     limit: int | None = None,
 ) -> tuple[int, str] | None:
     """L4 会话预算：单个会话 24 小时内的写操作上限。
@@ -419,19 +413,17 @@ async def check_l4_conv_budget(
     if conversation_id == 0:
         return None  # 无会话上下文时跳过会话预算。
     if limit is None:
-        limit = await _resolve_l4_conv_budget()
+        limit = await _resolve_l4_conv_budget(tenant)
     if limit <= 0:
         return None  # 未配置会话预算
 
-    conv_key = _KEY_L4_CONV.format(conversation_id=conversation_id)
-    pipe = redis.pipeline()
+    conv_key = _KEY_L4_CONV.format(
+        tenant_id=tenant.tenant_id, conversation_id=conversation_id
+    )
+    pipe = redis.pipeline(transaction=True)
     pipe.incr(conv_key)
-    pipe.ttl(conv_key)
-    incr_result, ttl = await pipe.execute()
-
-    # 首次 INCR 或防御性 TTL 重设（与 L2 同模式）
-    if incr_result == 1 or ttl is None or ttl < 0:
-        await redis.expire(conv_key, L4_CONV_TTL_SEC)
+    pipe.expire(conv_key, L4_CONV_TTL_SEC, nx=True)
+    incr_result, _ = await pipe.execute()
 
     if incr_result > limit:
         # 拒绝前回滚本次自增。
@@ -459,6 +451,7 @@ async def decr_quota(
     redis: Redis,
     user_id: int,
     *,
+    tenant: TenantContext,
     agent_code: str | None = None,
     l1_member: str | None = None,
     l1_global_member: str | None = None,
@@ -488,24 +481,29 @@ async def decr_quota(
         l1_global_member: check_l1_global_rate_limit 返回的 member；None=不回滚全局 L1。
         l4_conv_key: check_l4_conv_budget 返回的 conv_key；None=不回滚 L4 会话预算。
     """
-    l1_key = _KEY_L1.format(user_id=user_id)
+    l1_key = _KEY_L1.format(tenant_id=tenant.tenant_id, user_id=user_id)
     if l1_member is not None:
         await redis.zrem(l1_key, l1_member)
 
     # 仅在本次写入了全局速率成员时回滚。
     if l1_global_member is not None:
-        await redis.zrem(_KEY_L1_GLOBAL, l1_global_member)
+        await redis.zrem(
+            _KEY_L1_GLOBAL.format(tenant_id=tenant.tenant_id), l1_global_member
+        )
 
     # L2 全局：DECR
     now = datetime.now(UTC)
     date_str = now.strftime("%Y%m%d")
-    l2_key = _KEY_L2.format(user_id=user_id, date=date_str)
+    l2_key = _KEY_L2.format(tenant_id=tenant.tenant_id, user_id=user_id, date=date_str)
     await redis.decr(l2_key)
 
     # L2 per-agent：仅当 agent_code 非 None 时回滚（与 executor 配对）
     if agent_code is not None:
         l2_agent_key = _KEY_L2_AGENT.format(
-            user_id=user_id, agent_code=agent_code, date=date_str
+            tenant_id=tenant.tenant_id,
+            user_id=user_id,
+            agent_code=agent_code,
+            date=date_str,
         )
         await redis.decr(l2_agent_key)
 
@@ -522,13 +520,15 @@ def get_l3_timeout(
     return timedelta(seconds=timeout_sec)
 
 
-async def with_l3_timeout(coro, *, timeout_sec: int | None = None):
+async def with_l3_timeout(
+    coro, *, tenant: TenantContext, timeout_sec: int | None = None
+):
     """L3 单 tool 超时包装
 
     超时抛 BusinessRuleException(AI_TOOL_TIMEOUT)，由 Gateway 转为工具失败结果。
     """
     if timeout_sec is None:
-        timeout_sec = await _resolve_l3_timeout()
+        timeout_sec = await _resolve_l3_timeout(tenant)
     try:
         return await asyncio.wait_for(coro, timeout=timeout_sec)
     except TimeoutError as e:

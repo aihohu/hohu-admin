@@ -8,8 +8,8 @@ import pytest
 from app.core.config import settings
 from app.core.exceptions import BusinessException
 from app.modules.marketplace.exceptions import AppErrorCode, AppInvalidManifestException
-from app.modules.marketplace.service.upload_service import upload_service
 from app.utils.storage import read_file
+from modules.marketplace import default_upload_service as upload_service
 
 
 def _make_zip(payload: str = "app") -> bytes:

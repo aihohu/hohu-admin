@@ -45,7 +45,7 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.redis import redis_client
-from app.core.tenant import get_bound_tenant_context, resolve_tenant_id
+from app.core.tenant import TenantContext, get_bound_tenant_context
 from app.db.session import AsyncSessionLocal, get_db
 from app.modules.ai.agents.gateway.executor import (
     execute_approved_prepared_action,
@@ -101,6 +101,7 @@ def _is_expired(value: datetime) -> bool:
 async def _keep_execution_lease_alive(
     action_id: int,
     execution_owner: str,
+    tenant: TenantContext,
 ) -> None:
     """Renew the durable RUNNING lease while this worker owns execution."""
     while True:
@@ -113,6 +114,7 @@ async def _keep_execution_lease_alive(
                         action_id=action_id,
                         execution_owner=execution_owner,
                         lease_expires_at=datetime.now(UTC) + _EXECUTION_LEASE_TTL,
+                        tenant=tenant,
                     )
             if not renewed:
                 return
@@ -124,11 +126,15 @@ async def _keep_execution_lease_alive(
             )
 
 
-async def _notify_prepared_terminal(action, decision: ConfirmAction) -> None:  # noqa: ANN001
+async def _notify_prepared_terminal(
+    action, decision: ConfirmAction, *, tenant: TenantContext
+) -> None:  # noqa: ANN001
     """Notify an online waiter; only clean guard/cache when no stream owns them."""
     waiter_woken = False
     try:
-        waiter_woken = await hitl_manager.wake(action.confirmation_id, decision)
+        waiter_woken = await hitl_manager.wake(
+            action.confirmation_id, decision, tenant=tenant
+        )
     except Exception:
         logger.info(
             "prepared terminal waiter notification unavailable confirmation_id=%s",
@@ -147,6 +153,7 @@ async def _notify_prepared_terminal(action, decision: ConfirmAction) -> None:  #
                 redis_client,
                 conversation_id=action.conversation_id,
                 owner_token=action.guard_owner_token,
+                tenant=tenant,
             )
         except Exception:
             logger.info(
@@ -155,7 +162,9 @@ async def _notify_prepared_terminal(action, decision: ConfirmAction) -> None:  #
                 exc_info=True,
             )
     try:
-        await hitl_manager.delete_pending(redis_client, action.confirmation_id)
+        await hitl_manager.delete_pending(
+            redis_client, action.confirmation_id, tenant=tenant
+        )
     except Exception:
         logger.info(
             "prepared terminal cache cleanup unavailable action_id=%s",
@@ -172,19 +181,21 @@ async def _terminalize_legacy_execution_denied(
     current_user: User,
     error_code: str,
     error_msg: str,
+    tenant: TenantContext,
 ) -> None:  # noqa: ANN001
     """收口 rolling-upgrade 遗留的 Redis-only approve，不执行 Tool。"""
     log = await operation_log_service.get_by_tool_call_id(
         db,
         pending.tool_call_id,
         user_id=current_user.user_id,
-        tenant_id=pending.tenant_id,
+        tenant=tenant,
     )
     if log is not None:
         transitioned = await operation_log_service.mark_expired_if_pending(
             db,
             log.log_id,
             error_code=error_code,
+            tenant=tenant,
         )
         if transitioned is not None:
             await chat_run_finalizer.finalize_pending_turn(
@@ -193,10 +204,13 @@ async def _terminalize_legacy_execution_denied(
                 ok=False,
                 error_code=error_code,
                 error_msg=error_msg,
+                tenant=tenant,
             )
         await db.commit()
 
-    waiter_woken = await hitl_manager.wake(confirmation_id, ConfirmAction.REJECTED)
+    waiter_woken = await hitl_manager.wake(
+        confirmation_id, ConfirmAction.REJECTED, tenant=tenant
+    )
     if waiter_woken:
         return
     if pending.guard_owner_token:
@@ -204,8 +218,9 @@ async def _terminalize_legacy_execution_denied(
             redis_client,
             conversation_id=pending.conversation_id,
             owner_token=pending.guard_owner_token,
+            tenant=tenant,
         )
-    await hitl_manager.delete_pending(redis_client, confirmation_id)
+    await hitl_manager.delete_pending(redis_client, confirmation_id, tenant=tenant)
 
 
 async def _terminalize_before_execution(
@@ -217,6 +232,7 @@ async def _terminalize_before_execution(
     error_code: str,
     error_msg: str,
     approved_by: int | None = None,
+    tenant: TenantContext,
 ):  # noqa: ANN001
     terminal = await prepared_action_service.transition_status(
         db,
@@ -226,19 +242,24 @@ async def _terminalize_before_execution(
         target_status=status,
         approved_by=approved_by,
         error_code=error_code,
+        tenant=tenant,
     )
     if terminal is None:
         return action
     if log is not None:
         if status == PreparedActionStatus.REJECTED:
             await operation_log_service.mark_rejected_if_pending(
-                db, log.log_id, approved_by=approved_by or action.user_id
+                db,
+                log.log_id,
+                approved_by=approved_by or action.user_id,
+                tenant=tenant,
             )
         else:
             await operation_log_service.mark_expired_if_pending(
                 db,
                 log.log_id,
                 error_code=error_code,
+                tenant=tenant,
             )
     await chat_run_finalizer.finalize_prepared_action(
         db,
@@ -246,6 +267,7 @@ async def _terminalize_before_execution(
         ok=False,
         error_code=error_code,
         error_msg=error_msg,
+        tenant=tenant,
     )
     return terminal
 
@@ -255,20 +277,20 @@ async def _confirm_prepared(
     *,
     db: AsyncSession,
     current_user: User,
-    current_tenant_id: int,
+    tenant: TenantContext,
     action_ref,
 ) -> ResponseModel[ConfirmResponse]:  # noqa: ANN001
     """PostgreSQL-authoritative prepared confirmation and inline execution."""
     current_user_id = int(current_user.user_id)
     if (
         action_ref.user_id != current_user_id
-        or action_ref.tenant_id != current_tenant_id
+        or action_ref.tenant_id != tenant.tenant_id
     ):
         raise NotFoundException(
             "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
         )
     context = await prepared_action_service.lock_confirmation_context(
-        db, confirmation_id=req.confirmation_id
+        db, confirmation_id=req.confirmation_id, tenant=tenant
     )
     if context is None:
         raise NotFoundException(
@@ -277,7 +299,7 @@ async def _confirm_prepared(
     action = context.action
     if (
         action.user_id != current_user_id
-        or action.tenant_id != current_tenant_id
+        or action.tenant_id != tenant.tenant_id
         or context.conversation.user_id != current_user_id
     ):
         raise NotFoundException(
@@ -287,7 +309,7 @@ async def _confirm_prepared(
     if status != PreparedActionStatus.PENDING_CONFIRMATION:
         if req.action == "approve":
             ensure_ai_chat_use(current_user)
-            if await check_user_disabled(redis_client, current_user_id):
+            if await check_user_disabled(redis_client, current_user_id, tenant=tenant):
                 raise AuthorizationException(
                     "AI 已被禁用，无法确认操作",
                     error_code="AI_USER_DISABLED",
@@ -298,7 +320,7 @@ async def _confirm_prepared(
         db,
         action.execute_tool_call_id,
         user_id=current_user_id,
-        tenant_id=current_tenant_id,
+        tenant=tenant,
     )
     source_active = (
         context.source_message.conversation_id == action.conversation_id
@@ -318,9 +340,10 @@ async def _confirm_prepared(
             status=PreparedActionStatus.EXPIRED,
             error_code=error_code,
             error_msg="确认已过期，请重新发起预览",
+            tenant=tenant,
         )
         await db.commit()
-        await _notify_prepared_terminal(terminal, ConfirmAction.REJECTED)
+        await _notify_prepared_terminal(terminal, ConfirmAction.REJECTED, tenant=tenant)
         return ResponseModel.success(data=_prepared_response(terminal))
 
     if req.action == "reject":
@@ -332,9 +355,10 @@ async def _confirm_prepared(
             error_code="USER_REJECTED",
             error_msg="用户已取消此操作",
             approved_by=current_user_id,
+            tenant=tenant,
         )
         await db.commit()
-        await _notify_prepared_terminal(terminal, ConfirmAction.REJECTED)
+        await _notify_prepared_terminal(terminal, ConfirmAction.REJECTED, tenant=tenant)
         return ResponseModel.success(data=_prepared_response(terminal))
 
     try:
@@ -347,12 +371,13 @@ async def _confirm_prepared(
             status=PreparedActionStatus.EXPIRED,
             error_code="AI_CHAT_PERMISSION_DENIED",
             error_msg="AI 入口权限已撤销，操作未执行",
+            tenant=tenant,
         )
         await db.commit()
-        await _notify_prepared_terminal(terminal, ConfirmAction.REJECTED)
+        await _notify_prepared_terminal(terminal, ConfirmAction.REJECTED, tenant=tenant)
         raise
 
-    if await check_user_disabled(redis_client, current_user_id):
+    if await check_user_disabled(redis_client, current_user_id, tenant=tenant):
         terminal = await _terminalize_before_execution(
             db,
             action=action,
@@ -360,9 +385,10 @@ async def _confirm_prepared(
             status=PreparedActionStatus.EXPIRED,
             error_code="AI_USER_DISABLED",
             error_msg="AI 已被禁用，操作未执行",
+            tenant=tenant,
         )
         await db.commit()
-        await _notify_prepared_terminal(terminal, ConfirmAction.REJECTED)
+        await _notify_prepared_terminal(terminal, ConfirmAction.REJECTED, tenant=tenant)
         raise AuthorizationException(
             "AI 已被禁用，无法确认操作", error_code="AI_USER_DISABLED"
         )
@@ -398,9 +424,10 @@ async def _confirm_prepared(
             status=PreparedActionStatus.EXPIRED,
             error_code=exc.error_code or "AI_PREPARED_ACTION_REVALIDATION_FAILED",
             error_msg=exc.message,
+            tenant=tenant,
         )
         await db.commit()
-        await _notify_prepared_terminal(terminal, ConfirmAction.REJECTED)
+        await _notify_prepared_terminal(terminal, ConfirmAction.REJECTED, tenant=tenant)
         raise
 
     approved = await prepared_action_service.transition_status(
@@ -410,11 +437,12 @@ async def _confirm_prepared(
         expected_version=action.row_version,
         target_status=PreparedActionStatus.APPROVED,
         approved_by=current_user_id,
+        tenant=tenant,
     )
     if approved is None:
         await db.rollback()
         latest = await prepared_action_service.get_by_confirmation_id(
-            db, req.confirmation_id
+            db, req.confirmation_id, tenant=tenant
         )
         if latest is None:
             raise NotFoundException(
@@ -430,23 +458,24 @@ async def _confirm_prepared(
         target_status=PreparedActionStatus.RUNNING,
         execution_owner=execution_owner,
         execution_lease_expires_at=datetime.now(UTC) + _EXECUTION_LEASE_TTL,
+        tenant=tenant,
     )
     if running is None:
         await db.rollback()
         latest = await prepared_action_service.get_by_confirmation_id(
-            db, req.confirmation_id
+            db, req.confirmation_id, tenant=tenant
         )
         return ResponseModel.success(data=_prepared_response(latest or approved))
     if log is not None:
         await operation_log_service.mark_approved(
-            db, log.log_id, approved_by=current_user_id
+            db, log.log_id, approved_by=current_user_id, tenant=tenant
         )
-        await operation_log_service.mark_running(db, log.log_id)
+        await operation_log_service.mark_running(db, log.log_id, tenant=tenant)
     await db.commit()
 
     started_at = time.monotonic()
     lease_task = asyncio.create_task(
-        _keep_execution_lease_alive(running.action_id, execution_owner)
+        _keep_execution_lease_alive(running.action_id, execution_owner, tenant)
     )
     try:
         try:
@@ -471,7 +500,7 @@ async def _confirm_prepared(
     if not result.ok:
         await db.rollback()
     current = await prepared_action_service.get_by_confirmation_id(
-        db, req.confirmation_id
+        db, req.confirmation_id, tenant=tenant
     )
     if current is None:
         raise NotFoundException(
@@ -489,7 +518,7 @@ async def _confirm_prepared(
                 )
             )
         result_lineage = result_projection_service.freeze_lineage(
-            tenant_id=current.tenant_id,
+            tenant=tenant,
             agent_code=current.agent_code,
             tool_codes=current.tool_codes or [current.execute_tool_name],
             subject_refs=result.projection.subject_refs,
@@ -507,6 +536,7 @@ async def _confirm_prepared(
         duration_ms=duration_ms,
         result_lineage=result_lineage,
         replace_result_lineage=result.ok,
+        tenant=tenant,
     )
     if terminal is None:
         terminal = current
@@ -514,7 +544,7 @@ async def _confirm_prepared(
         db,
         terminal.execute_tool_call_id,
         user_id=current_user_id,
-        tenant_id=current_tenant_id,
+        tenant=tenant,
     )
     if terminal_log is not None and was_running:
         if result.ok:
@@ -523,6 +553,7 @@ async def _confirm_prepared(
                 terminal_log.log_id,
                 result_summary="prepared action succeeded",
                 duration_ms=duration_ms,
+                tenant=tenant,
             )
         else:
             await operation_log_service.mark_failed(
@@ -530,6 +561,7 @@ async def _confirm_prepared(
                 terminal_log.log_id,
                 error_code=result.error_code or "AI_INTERNAL_ERROR",
                 duration_ms=duration_ms,
+                tenant=tenant,
             )
     await chat_run_finalizer.finalize_prepared_action(
         db,
@@ -540,10 +572,11 @@ async def _confirm_prepared(
         result_ui=_ui_to_dict(result.ui) if result.ok else None,
         error_code=result.error_code or None,
         error_msg=result.error_msg or None,
+        tenant=tenant,
     )
     await db.commit()
 
-    await _notify_prepared_terminal(terminal, ConfirmAction.APPROVED)
+    await _notify_prepared_terminal(terminal, ConfirmAction.APPROVED, tenant=tenant)
     return ResponseModel.success(data=_prepared_response(terminal))
 
 
@@ -562,21 +595,23 @@ async def confirm_tool(
       - 修订 S-13：必须查 check_user_disabled
       - 修订 S-14：wake 失败时返回 status="stream_gone"
     """
-    current_tenant_id = resolve_tenant_id(current_user)
+    tenant = get_bound_tenant_context(current_user)
     prepared_action = await prepared_action_service.get_by_confirmation_id(
-        db, req.confirmation_id
+        db, req.confirmation_id, tenant=tenant
     )
     if prepared_action is not None:
         return await _confirm_prepared(
             req,
             db=db,
             current_user=current_user,
-            current_tenant_id=current_tenant_id,
+            tenant=tenant,
             action_ref=prepared_action,
         )
 
     # 1. legacy direct HITL 继续从 Redis pending 恢复
-    pending = await hitl_manager.get_pending(redis_client, req.confirmation_id)
+    pending = await hitl_manager.get_pending(
+        redis_client, req.confirmation_id, tenant=tenant
+    )
     if pending is None:
         # 不存在 / 已过期 / 服务重启清扫后
         raise NotFoundException(
@@ -593,13 +628,13 @@ async def confirm_tool(
             current_user.user_id,
         )
         raise AuthorizationException(error_code="NOT_CONFIRMATION_OWNER")
-    if pending.tenant_id != current_tenant_id:
+    if pending.tenant_id != tenant.tenant_id:
         logger.warning(
             "HITL confirm tenant mismatch: confirmation_id=%s "
             "pending_tenant=%d current_tenant=%d",
             req.confirmation_id,
             pending.tenant_id,
-            current_tenant_id,
+            tenant.tenant_id,
         )
         # 与 owner mismatch 共用拒绝语义，避免泄露其它租户的 pending。
         raise AuthorizationException(error_code="NOT_CONFIRMATION_OWNER")
@@ -616,9 +651,10 @@ async def confirm_tool(
                 current_user=current_user,
                 error_code="AI_CHAT_PERMISSION_DENIED",
                 error_msg="AI 入口权限已撤销，操作未执行",
+                tenant=tenant,
             )
             raise
-        if await check_user_disabled(redis_client, current_user.user_id):
+        if await check_user_disabled(redis_client, current_user.user_id, tenant=tenant):
             logger.warning(
                 "HITL confirm blocked: user auto-disabled "
                 "confirmation_id=%s user_id=%d",
@@ -632,6 +668,7 @@ async def confirm_tool(
                 current_user=current_user,
                 error_code="AI_USER_DISABLED",
                 error_msg="AI 已被禁用，操作未执行",
+                tenant=tenant,
             )
             raise AuthorizationException(
                 "AI 已被禁用，无法确认操作",
@@ -644,11 +681,11 @@ async def confirm_tool(
         db,
         pending.tool_call_id,
         user_id=current_user.user_id,
-        tenant_id=current_tenant_id,
+        tenant=tenant,
     )
     if log is not None:
         await operation_log_service.mark_approved(
-            db, log.log_id, approved_by=current_user.user_id
+            db, log.log_id, approved_by=current_user.user_id, tenant=tenant
         )
         await db.commit()
 
@@ -656,7 +693,7 @@ async def confirm_tool(
     action = (
         ConfirmAction.APPROVED if req.action == "approve" else ConfirmAction.REJECTED
     )
-    woken = await hitl_manager.wake(req.confirmation_id, action)
+    woken = await hitl_manager.wake(req.confirmation_id, action, tenant=tenant)
 
     if not woken:
         # 修订 S-14：wake 返回 False = 流已断（服务重启 / 单 worker 切换 /
@@ -681,12 +718,13 @@ async def confirm_tool(
                                     cleanup_db,
                                     log.log_id,
                                     approved_by=current_user.user_id,
+                                    tenant=tenant,
                                 )
                             )
                         else:
                             transitioned = (
                                 await operation_log_service.mark_expired_if_pending(
-                                    cleanup_db, log.log_id
+                                    cleanup_db, log.log_id, tenant=tenant
                                 )
                             )
                         terminalized = transitioned is not None
@@ -705,6 +743,7 @@ async def confirm_tool(
                                 if action == ConfirmAction.REJECTED
                                 else "原对话流已断开，请重新发起"
                             ),
+                            tenant=tenant,
                         )
             if terminalized:
                 if pending.guard_owner_token:
@@ -712,8 +751,11 @@ async def confirm_tool(
                         redis_client,
                         conversation_id=pending.conversation_id,
                         owner_token=pending.guard_owner_token,
+                        tenant=tenant,
                     )
-                await hitl_manager.delete_pending(redis_client, req.confirmation_id)
+                await hitl_manager.delete_pending(
+                    redis_client, req.confirmation_id, tenant=tenant
+                )
         except Exception:
             # terminal commit 失败不释放 guard；lease 仅作为最后防死锁兜底。
             logger.exception(

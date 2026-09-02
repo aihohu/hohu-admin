@@ -15,7 +15,7 @@ from app.core.auth import has_explicit_permission
 from app.core.config import settings
 from app.core.exceptions import BusinessException
 from app.core.rbac import is_super_admin
-from app.core.tenant import get_bound_tenant_context, resolve_tenant_id
+from app.core.tenant import TenantContext, get_bound_tenant_context
 from app.modules.ai.agents.safety.ai_config import get_ai_config_str_list
 from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.ai.constants import AI_CHAT_USE_PERMISSION
@@ -119,7 +119,7 @@ class ResultProjectionService:
     def freeze_lineage(
         self,
         *,
-        tenant_id: int,
+        tenant: TenantContext,
         agent_code: str,
         tool_codes: list[str] | tuple[str, ...],
         subject_refs: list[dict[str, Any]] | tuple[dict[str, Any], ...],
@@ -129,7 +129,7 @@ class ResultProjectionService:
     ) -> ProjectionLineage:
         normalized_refs = self.normalize_subject_refs(subject_refs)
         return ProjectionLineage(
-            tenant_id=int(tenant_id),
+            tenant_id=tenant.tenant_id,
             agent_code=str(agent_code),
             tool_codes=self._normalize_tool_codes(tool_codes),
             subject_refs=normalized_refs,
@@ -253,11 +253,14 @@ class ResultProjectionService:
         db: AsyncSession,
         user: Any,
         *,
+        tenant: TenantContext,
         resource_type: str,
         resource_id: str,
         lineage: ProjectionLineage,
     ) -> str | None:
         """Issue a short-lived owner-bound token only after live authorization."""
+        if lineage.tenant_id != tenant.tenant_id:
+            return None
         allowed = await self.authorize_result_projection(
             db,
             user,
@@ -297,6 +300,7 @@ class ResultProjectionService:
         token: str,
         user: Any,
         *,
+        tenant: TenantContext,
         resource_type: str,
         resource_id: str,
     ) -> ProjectionLineage | None:
@@ -311,7 +315,7 @@ class ResultProjectionService:
                 return None
             if int(payload.get("sub")) != int(user.user_id):
                 return None
-            if int(payload.get("tenantId")) != resolve_tenant_id(user):
+            if int(payload.get("tenantId")) != tenant.tenant_id:
                 return None
             if payload.get("resourceType") != resource_type:
                 return None
@@ -319,7 +323,7 @@ class ResultProjectionService:
                 return None
             projection = payload["projection"]
             lineage = self.freeze_lineage(
-                tenant_id=int(payload["tenantId"]),
+                tenant=tenant,
                 agent_code=projection["agentCode"],
                 tool_codes=projection["toolCodes"],
                 subject_refs=projection["subjectRefs"],
@@ -342,11 +346,14 @@ class ResultProjectionService:
         db: AsyncSession,
         user: Any,
         *,
+        tenant: TenantContext,
         lineage: ProjectionLineage,
         value: Any,
         resource_ids: list[str] | None = None,
     ) -> Any:
         """Replace persisted AI export URLs with newly authorized short tokens."""
+        if lineage.tenant_id != tenant.tenant_id:
+            return value
         export_ids = {
             subject["id"]
             for subject in lineage.subject_refs
@@ -359,7 +366,7 @@ class ResultProjectionService:
         urls: dict[str, str] = {}
         for export_id in sorted(export_ids):
             token_lineage = self.freeze_lineage(
-                tenant_id=lineage.tenant_id,
+                tenant=tenant,
                 agent_code=lineage.agent_code,
                 tool_codes=lineage.tool_codes,
                 subject_refs=[
@@ -375,6 +382,7 @@ class ResultProjectionService:
             token = await self.issue_download_token(
                 db,
                 user,
+                tenant=tenant,
                 resource_type="user_export",
                 resource_id=export_id,
                 lineage=token_lineage,
@@ -407,7 +415,7 @@ class ResultProjectionService:
             return False
         if int(owner_user_id) != int(user.user_id):
             return False
-        if lineage.tenant_id != resolve_tenant_id(user):
+        if lineage.tenant_id != get_bound_tenant_context(user).tenant_id:
             return False
         if not has_explicit_permission(user, AI_CHAT_USE_PERMISSION):
             return False
@@ -455,6 +463,7 @@ class ResultProjectionService:
 
         root_id = int(message.message_id)
         conversation_id = int(message.conversation_id)
+        tenant = get_bound_tenant_context(user)
         if root_id in dependencies:
             return False
 
@@ -468,6 +477,7 @@ class ResultProjectionService:
                 (
                     await db.execute(
                         select(AiMessage).where(
+                            AiMessage.tenant_id == tenant.tenant_id,
                             AiMessage.conversation_id == conversation_id,
                             AiMessage.message_id.in_(batch),
                         )
@@ -504,12 +514,14 @@ class ResultProjectionService:
         db: AsyncSession,
         *,
         conversation_id: int,
+        tenant: TenantContext,
     ) -> list[int]:
         """Freeze every prior active assistant projection as a transitive dependency."""
         messages = (
             (
                 await db.execute(
                     select(AiMessage).where(
+                        AiMessage.tenant_id == tenant.tenant_id,
                         AiMessage.conversation_id == conversation_id,
                         AiMessage.role != "user",
                         AiMessage.is_active.is_(True),
@@ -537,6 +549,7 @@ class ResultProjectionService:
     ) -> bool:
         visited: set[int] = set()
         pending = set(dependency_message_ids)
+        tenant = get_bound_tenant_context(user)
         while pending:
             batch = pending - visited
             if not batch:
@@ -547,9 +560,14 @@ class ResultProjectionService:
                         select(AiMessage)
                         .join(
                             AiConversation,
-                            AiConversation.conversation_id == AiMessage.conversation_id,
+                            (AiConversation.tenant_id == AiMessage.tenant_id)
+                            & (
+                                AiConversation.conversation_id
+                                == AiMessage.conversation_id
+                            ),
                         )
                         .where(
+                            AiMessage.tenant_id == tenant.tenant_id,
                             AiMessage.message_id.in_(batch),
                             AiConversation.user_id == owner_user_id,
                             AiConversation.deleted_at.is_(None),
@@ -790,7 +808,8 @@ class ResultProjectionService:
         action = (
             await db.execute(
                 select(AiPreparedAction).where(
-                    AiPreparedAction.execute_tool_call_id == log.tool_call_id
+                    AiPreparedAction.tenant_id == log.tenant_id,
+                    AiPreparedAction.execute_tool_call_id == log.tool_call_id,
                 )
             )
         ).scalar_one_or_none()
@@ -799,6 +818,7 @@ class ResultProjectionService:
         messages = (
             await db.execute(
                 select(AiMessage).where(
+                    AiMessage.tenant_id == log.tenant_id,
                     AiMessage.conversation_id == log.conversation_id,
                     AiMessage.trace_id == log.trace_id,
                     AiMessage.role == "assistant",

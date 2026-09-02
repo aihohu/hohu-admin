@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from pydantic.experimental.missing_sentinel import MISSING
-from tenant_helpers import bind_test_user
+from tenant_helpers import bind_test_user, tenant_context
 
 from app.core.id_generator import next_id
 from app.modules.ai.agents.hitl.events import (
@@ -50,9 +50,10 @@ async def _create_conversation(db_session, *, suffix: str) -> AiConversation:
     )
     db_session.add(user)
     await db_session.flush()
-    bind_test_user(user)
+    tenant = bind_test_user(user)
     conversation = AiConversation(
         conversation_id=next_id(),
+        tenant_id=tenant.tenant_id,
         user_id=user_id,
         title=f"foundation {suffix}",
     )
@@ -96,6 +97,7 @@ async def test_user_message_flushes_source_and_exposes_trace(db_session) -> None
         "hello",
         agent_code="user_mgmt",
         trace_id=trace_id,
+        tenant=tenant_context(actor_user_id=conversation.user_id),
     )
 
     assert message.message_id is not None
@@ -117,6 +119,7 @@ async def test_tool_only_turn_finalizes_once_and_keeps_started_order(
         "run tools",
         agent_code="user_mgmt",
         trace_id=trace_id,
+        tenant=tenant_context(actor_user_id=conversation.user_id),
     )
     tool_calls = [
         {"tool": "user.first", "tool_call_id": "tc_first", "ok": True},
@@ -132,6 +135,7 @@ async def test_tool_only_turn_finalizes_once_and_keeps_started_order(
         tool_calls=tool_calls,
         agent_code="user_mgmt",
         projection_dependency_message_ids=[11, 12],
+        tenant=tenant_context(actor_user_id=conversation.user_id),
     )
     second = await chat_run_finalizer.finalize_assistant_turn(
         db_session,
@@ -142,6 +146,7 @@ async def test_tool_only_turn_finalizes_once_and_keeps_started_order(
         tool_calls=[tool_calls[1]],
         agent_code="user_mgmt",
         projection_dependency_message_ids=[99],
+        tenant=tenant_context(actor_user_id=conversation.user_id),
     )
 
     assert first is second
@@ -166,6 +171,7 @@ async def test_terminal_finalizer_omits_missing_sentinel_tool_args(db_session) -
         "update role",
         agent_code="role_mgmt",
         trace_id=trace_id,
+        tenant=tenant_context(actor_user_id=conversation.user_id),
     )
 
     message = await chat_run_finalizer.finalize_assistant_turn(
@@ -183,6 +189,7 @@ async def test_terminal_finalizer_omits_missing_sentinel_tool_args(db_session) -
             }
         ],
         agent_code="role_mgmt",
+        tenant=tenant_context(actor_user_id=conversation.user_id),
     )
 
     assert message is not None
@@ -199,6 +206,7 @@ async def test_terminal_finalizer_skips_missing_source_binding(db_session) -> No
         content="",
         tool_calls=[{"tool": "test.missing", "tool_call_id": "tc_missing"}],
         agent_code="shared",
+        tenant=tenant_context(),
     )
 
     assert result is None
@@ -213,6 +221,7 @@ async def test_terminal_finalizer_skips_inactive_source_binding(db_session) -> N
         conversation.user_id,
         "superseded command",
         trace_id="tr_inactive_source_00000000000000",
+        tenant=tenant_context(actor_user_id=conversation.user_id),
     )
     source.is_active = False
     await db_session.flush()
@@ -225,6 +234,7 @@ async def test_terminal_finalizer_skips_inactive_source_binding(db_session) -> N
         content="",
         tool_calls=[{"tool": "test.inactive", "tool_call_id": "tc_inactive"}],
         agent_code="shared",
+        tenant=tenant_context(actor_user_id=conversation.user_id),
     )
 
     assert result is None
@@ -240,9 +250,11 @@ async def test_active_history_filters_and_orders_stably(db_session) -> None:
         conversation.user_id,
         "first",
         trace_id=trace_id,
+        tenant=tenant_context(actor_user_id=conversation.user_id),
     )
     inactive = AiMessage(
         message_id=next_id(),
+        tenant_id=0,
         conversation_id=conversation.conversation_id,
         role="assistant",
         content="inactive",
@@ -251,6 +263,7 @@ async def test_active_history_filters_and_orders_stably(db_session) -> None:
     )
     last = AiMessage(
         message_id=next_id(),
+        tenant_id=0,
         conversation_id=conversation.conversation_id,
         role="assistant",
         content="last",
@@ -262,6 +275,7 @@ async def test_active_history_filters_and_orders_stably(db_session) -> None:
 
     current_user = await db_session.get(User, conversation.user_id)
     assert current_user is not None
+    bind_test_user(current_user)
     messages = await chat_service.load_history(
         db_session,
         conversation.conversation_id,
@@ -284,6 +298,7 @@ async def test_reused_trace_is_rejected_before_new_run(db_session) -> None:
         conversation.user_id,
         "first",
         trace_id=trace_id,
+        tenant=tenant_context(actor_user_id=conversation.user_id),
     )
 
     with pytest.raises(Exception) as exc_info:
@@ -291,6 +306,7 @@ async def test_reused_trace_is_rejected_before_new_run(db_session) -> None:
             db_session,
             conversation_id=conversation.conversation_id,
             trace_id=trace_id,
+            tenant=tenant_context(actor_user_id=conversation.user_id),
         )
 
     assert getattr(exc_info.value, "error_code", None) == "AI_CHAT_TRACE_CONFLICT"
@@ -381,6 +397,7 @@ async def test_stream_finalizer_commits_before_building_done_ack() -> None:
             tool_calls=[{"tool_call_id": "tc_1", "ok": True}],
             agent_code="user_mgmt",
             stream_error_code=None,
+            tenant=tenant_context(),
         )
 
     assert order == ["finalize", "commit"]
@@ -417,6 +434,7 @@ async def test_stream_finalizer_replaces_ungrounded_management_write_claim() -> 
             tool_calls=None,
             agent_code="dept_mgmt",
             stream_error_code=None,
+            tenant=tenant_context(),
         )
 
     assert captured["content"] == (
@@ -467,6 +485,7 @@ async def test_stream_finalizer_redacts_provider_text_after_import_field_errors(
             ],
             agent_code="user_mgmt",
             stream_error_code=None,
+            tenant=tenant_context(),
         )
 
     persisted = str(captured["content"])
@@ -543,28 +562,33 @@ class TestConversationRunGuard:
             conversation_id=123,
             owner_token="owner-a",
             ttl_sec=60,
+            tenant=tenant_context(),
         )
         renewed = await chat_run_guard.renew(
             redis,
             conversation_id=123,
             owner_token="owner-a",
             ttl_sec=60,
+            tenant=tenant_context(),
         )
         wrong_renew = await chat_run_guard.renew(
             redis,
             conversation_id=123,
             owner_token="owner-b",
             ttl_sec=60,
+            tenant=tenant_context(),
         )
         wrong_release = await chat_run_guard.release(
             redis,
             conversation_id=123,
             owner_token="owner-b",
+            tenant=tenant_context(),
         )
         released = await chat_run_guard.release(
             redis,
             conversation_id=123,
             owner_token="owner-a",
+            tenant=tenant_context(),
         )
 
         assert acquired is True
@@ -583,6 +607,7 @@ class TestConversationRunGuard:
             conversation_id=123,
             owner_token="owner-a",
             confirmation_ttl_sec=300,
+            tenant=tenant_context(),
         )
 
         assert extended is True
@@ -645,6 +670,7 @@ async def test_startup_cleanup_commits_before_owned_guard_release() -> None:
             confirmation_id="conf-startup",
             pending=pending,
             operation_log=operation_log,
+            tenant=tenant_context(),
         )
 
     assert order == ["operation", "finalizer", "commit", "release", "delete"]
@@ -698,6 +724,7 @@ async def test_startup_cleanup_does_not_overwrite_committed_terminal_message() -
             confirmation_id="conf-terminal",
             pending=pending,
             operation_log=operation_log,
+            tenant=tenant_context(),
         )
 
     finalize.assert_not_awaited()
@@ -748,6 +775,7 @@ async def test_resume_terminal_commits_before_guard_release_and_pending_delete()
             confirmation_id="conf-resume",
             pending=pending,
             ok=True,
+            tenant=tenant_context(),
         )
 
     assert order == ["finalizer", "commit", "release", "delete"]

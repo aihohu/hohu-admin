@@ -225,6 +225,7 @@ async def test_revoked_sticky_agent_is_cleared_and_rerouted(
     bind_test_user(user)
     conversation = AiConversation(
         conversation_id=next_id(),
+        tenant_id=0,
         user_id=user.user_id,
         title="sticky revoked",
         agent_code="role_mgmt",
@@ -284,7 +285,7 @@ async def test_create_agent_preserves_explicit_falsy_model_ref() -> None:
         )
 
     assert result is built_agent
-    selector.assert_awaited_once_with(db, "", tenant_id=0)
+    selector.assert_awaited_once_with(db, "", tenant=tenant_context())
 
 
 class TestAttachTraceToConversation:
@@ -293,7 +294,11 @@ class TestAttachTraceToConversation:
     async def test_none_conversation_id_skips(self, db_session: AsyncSession) -> None:
         """conversation_id=None 时跳过（不报错）"""
         await chat_service.attach_trace_to_conversation(
-            db_session, None, "user_mgmt", "tr_abc"
+            db_session,
+            None,
+            "user_mgmt",
+            "tr_abc",
+            tenant=tenant_context(),
         )
         # 无异常即通过
 
@@ -302,7 +307,11 @@ class TestAttachTraceToConversation:
     ) -> None:
         """conversation_id 不存在时不报错（防御性）"""
         await chat_service.attach_trace_to_conversation(
-            db_session, 99999999, "user_mgmt", "tr_abc"
+            db_session,
+            99999999,
+            "user_mgmt",
+            "tr_abc",
+            tenant=tenant_context(),
         )
 
 
@@ -336,6 +345,7 @@ async def test_save_user_message_writes_agent_code(db_session):
     await _add_user(db_session, user_id=9001, user_name="ai_test_u1")
     conv = AiConversation(
         conversation_id=next_id(),
+        tenant_id=0,
         user_id=9001,
         title="test",
     )
@@ -348,6 +358,7 @@ async def test_save_user_message_writes_agent_code(db_session):
         9001,
         "hello",
         agent_code="user_mgmt",
+        tenant=tenant_context(actor_user_id=9001),
     )
     await db_session.flush()
 
@@ -373,7 +384,9 @@ async def test_save_assistant_message_writes_agent_code(db_session):
     from app.modules.ai.service.chat_service import chat_service
 
     await _add_user(db_session, user_id=9002, user_name="ai_test_u2")
-    conv = AiConversation(conversation_id=next_id(), user_id=9002, title="t")
+    conv = AiConversation(
+        conversation_id=next_id(), tenant_id=0, user_id=9002, title="t"
+    )
     db_session.add(conv)
     await db_session.flush()
 
@@ -382,6 +395,7 @@ async def test_save_assistant_message_writes_agent_code(db_session):
         conv.conversation_id,
         content="hi",
         agent_code="role_mgmt",
+        tenant=tenant_context(actor_user_id=9002),
     )
     await db_session.flush()
 

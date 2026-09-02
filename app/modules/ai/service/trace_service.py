@@ -168,7 +168,8 @@ class TraceService:
                 )
                 .outerjoin(
                     AiMessage,
-                    AiMessage.message_id == AiOperationLog.source_user_message_id,
+                    (AiMessage.tenant_id == AiOperationLog.tenant_id)
+                    & (AiMessage.message_id == AiOperationLog.source_user_message_id),
                 )
                 .where(
                     AiOperationLog.tenant_id == tenant.tenant_id,

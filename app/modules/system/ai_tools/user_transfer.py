@@ -505,7 +505,7 @@ async def user_export(
 
     # Authorize before creating the database task or writing an external file.
     preflight_lineage = result_projection_service.freeze_lineage(
-        tenant_id=ctx.tenant_id,
+        tenant=ctx.tenant,
         agent_code=ctx.tool_meta.agent,
         tool_codes=[ctx.tool_meta.name],
         subject_refs=[],
@@ -540,7 +540,7 @@ async def user_export(
     projection = _result_projection("user_export_task", [export_id], scope_bound=True)
 
     lineage = result_projection_service.freeze_lineage(
-        tenant_id=ctx.tenant_id,
+        tenant=ctx.tenant,
         agent_code=ctx.tool_meta.agent,
         tool_codes=[ctx.tool_meta.name],
         subject_refs=projection.subject_refs,
@@ -550,6 +550,7 @@ async def user_export(
     download_token = await result_projection_service.issue_download_token(
         ctx.db,
         ctx.user,
+        tenant=ctx.tenant,
         resource_type="user_export",
         resource_id=export_id,
         lineage=lineage,

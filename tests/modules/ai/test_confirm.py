@@ -79,9 +79,13 @@ class TestPreparedTerminalCleanupOwnership:
                 "app.modules.ai.api.confirm.hitl_manager.delete_pending", AsyncMock()
             ) as delete_pending,
         ):
-            await _notify_prepared_terminal(action, ConfirmAction.APPROVED)
+            await _notify_prepared_terminal(
+                action,
+                ConfirmAction.APPROVED,
+                tenant=_make_user()._tenant_context,
+            )
 
-        wake.assert_awaited_once_with("cid_live", ConfirmAction.APPROVED)
+        wake.assert_awaited_once_with("cid_live", ConfirmAction.APPROVED, tenant=ANY)
         release.assert_not_awaited()
         delete_pending.assert_not_awaited()
 
@@ -105,14 +109,19 @@ class TestPreparedTerminalCleanupOwnership:
                 "app.modules.ai.api.confirm.hitl_manager.delete_pending", AsyncMock()
             ) as delete_pending,
         ):
-            await _notify_prepared_terminal(action, ConfirmAction.REJECTED)
+            await _notify_prepared_terminal(
+                action,
+                ConfirmAction.REJECTED,
+                tenant=_make_user()._tenant_context,
+            )
 
         release.assert_awaited_once_with(
             ANY,
             conversation_id=904,
             owner_token="owner-offline",
+            tenant=ANY,
         )
-        delete_pending.assert_awaited_once_with(ANY, "cid_offline")
+        delete_pending.assert_awaited_once_with(ANY, "cid_offline", tenant=ANY)
 
 
 def _make_user(
@@ -324,10 +333,13 @@ class TestConfirmSuccess:
             db,
             77,
             error_code="AI_CHAT_PERMISSION_DENIED",
+            tenant=ANY,
         )
         finalize.assert_awaited_once()
         db.commit.assert_awaited_once()
-        wake.assert_awaited_once_with("cid_test_123", ConfirmAction.REJECTED)
+        wake.assert_awaited_once_with(
+            "cid_test_123", ConfirmAction.REJECTED, tenant=ANY
+        )
         release.assert_awaited_once()
         delete_pending.assert_awaited_once()
 
@@ -451,6 +463,7 @@ class TestPreparedConfirmation:
             db,
             log.log_id,
             error_code="AI_CHAT_PERMISSION_DENIED",
+            tenant=ANY,
         )
         db.commit.assert_awaited_once()
         notify.assert_awaited_once()
@@ -650,7 +663,11 @@ class TestPreparedConfirmation:
             ) as get_pending,
             patch(
                 "app.modules.ai.api.confirm.hitl_manager.wake",
-                AsyncMock(side_effect=lambda *_args: lifecycle.append("wake") or False),
+                AsyncMock(
+                    side_effect=lambda *_args, **_kwargs: (
+                        lifecycle.append("wake") or False
+                    )
+                ),
             ),
             patch(
                 "app.modules.ai.api.confirm.hitl_manager.delete_pending",
@@ -1035,6 +1052,7 @@ class TestUserDisabled:
             db,
             fake_log.log_id,
             error_code="AI_USER_DISABLED",
+            tenant=ANY,
         )
         finalize.assert_awaited_once_with(
             db,
@@ -1042,15 +1060,19 @@ class TestUserDisabled:
             ok=False,
             error_code="AI_USER_DISABLED",
             error_msg="AI 已被禁用，操作未执行",
+            tenant=ANY,
         )
         db.commit.assert_awaited_once()
-        wake.assert_awaited_once_with("cid_test_0123", ConfirmAction.REJECTED)
+        wake.assert_awaited_once_with(
+            "cid_test_0123", ConfirmAction.REJECTED, tenant=ANY
+        )
         release.assert_awaited_once_with(
             ANY,
             conversation_id=pending.conversation_id,
             owner_token="owner-token",
+            tenant=ANY,
         )
-        delete_pending.assert_awaited_once_with(ANY, "cid_test_0123")
+        delete_pending.assert_awaited_once_with(ANY, "cid_test_0123", tenant=ANY)
 
     async def test_disabled_check_runs_after_owner_check(self) -> None:
         """S-13：owner 校验先于 disabled 校验（owner 不匹配时不应触发 disabled 查询）"""
@@ -1186,6 +1208,7 @@ class TestWakeStreamGone:
         assert release.await_args.kwargs == {
             "conversation_id": 1,
             "owner_token": "owner-token",
+            "tenant": ANY,
         }
         delete_pending.assert_awaited_once()
 

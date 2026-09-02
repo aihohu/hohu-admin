@@ -38,13 +38,14 @@ def _make_ctx(
     user.user_id = 1
     user.tenant_id = 0
     user.user_name = "admin"
-    user._tenant_context = tenant_context(tenant_id=0, actor_user_id=1)
+    tenant = tenant_context(tenant_id=0, actor_user_id=1)
+    user._tenant_context = tenant
     return AiToolContext(
         user=user,
         perms=set(),
         db=db,
         data_scope=DataScopeContext(
-            tenant_id=0,
+            tenant=tenant,
             accessible_dept_ids=None,
             accessible_user_scope=accessible_user_scope,
             filters=[],
@@ -57,7 +58,7 @@ def _make_ctx(
             required_perms=("system:user:delete",),
             risk="destructive",
         ),
-        tenant_id=0,
+        tenant=tenant,
     )
 
 

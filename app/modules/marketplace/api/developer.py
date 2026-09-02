@@ -13,14 +13,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_permissions
 from app.core.base_response import ResponseModel
+from app.core.tenant import TenantContext
 from app.db.session import get_db
-from app.modules.auth.service import get_current_user
+from app.modules.auth.service import get_current_tenant_context, get_current_user
+from app.modules.marketplace.capability import require_marketplace_http_capability
 from app.modules.marketplace.models import App
 from app.modules.marketplace.schemas.app import AppOut, VersionOut, VersionUploadOut
 from app.modules.marketplace.service.developer_service import developer_service
 from app.modules.system.models.user import User
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_marketplace_http_capability)])
 
 
 @router.post(
@@ -34,6 +36,7 @@ async def upload_app(
     manifest_json: str = Form(...),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     content = await file.read()
     version, review_id = await developer_service.submit_version(
@@ -43,6 +46,7 @@ async def upload_app(
         filename=file.filename or "upload.zip",
         user_id=current_user.user_id,
         username=current_user.user_name,
+        tenant=tenant,
     )
     await db.commit()
     data = VersionOut.model_validate(version).model_dump()
@@ -59,10 +63,14 @@ async def upload_app(
 async def my_apps(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     stmt = (
         select(App)
-        .where(App.author_id == current_user.user_id)
+        .where(
+            App.tenant_id == tenant.tenant_id,
+            App.author_id == current_user.user_id,
+        )
         .order_by(App.created_at.desc())
     )
     result = await db.execute(stmt)

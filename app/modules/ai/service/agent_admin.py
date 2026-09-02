@@ -11,32 +11,40 @@ import re
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants import STATUS_ENABLED, SUPER_ADMIN_ROLE_CODE
-from app.core.auth import has_explicit_permission
 from app.core.exceptions import (
-    AuthorizationException,
     BusinessRuleException,
     NotFoundException,
 )
+from app.core.tenant import PlatformContext
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.schemas.agent_admin import (
     AgentAdminDetailItem,
     AgentAdminListItem,
     AgentAdminUpdateReq,
 )
-from app.modules.system.models.user import User
+
+
+def _require_platform(platform: PlatformContext) -> None:
+    if not isinstance(platform, PlatformContext):
+        raise TypeError("platform context is required")
 
 
 class AgentAdminService:
-    async def list_agents(self, db: AsyncSession) -> list[AgentAdminListItem]:
+    async def list_agents(
+        self, db: AsyncSession, *, platform: PlatformContext
+    ) -> list[AgentAdminListItem]:
+        _require_platform(platform)
         result = await db.execute(
             select(AiAgent).order_by(AiAgent.display_order, AiAgent.agent_id)
         )
         agents = result.scalars().all()
         return [AgentAdminListItem.model_validate(a) for a in agents]
 
-    async def _get_agent_or_404(self, db: AsyncSession, agent_id: int) -> AiAgent:
+    async def _get_agent_or_404(
+        self, db: AsyncSession, agent_id: int, *, platform: PlatformContext
+    ) -> AiAgent:
         """决策 #6: 公共 fetch + raise，被 get_agent / update_agent 复用 (DRY)."""
+        _require_platform(platform)
         agent = await db.get(AiAgent, agent_id)
         if agent is None:
             raise NotFoundException(
@@ -45,8 +53,11 @@ class AgentAdminService:
             )
         return agent
 
-    async def get_agent(self, db: AsyncSession, agent_id: int) -> AgentAdminDetailItem:
-        agent = await self._get_agent_or_404(db, agent_id)
+    async def get_agent(
+        self, db: AsyncSession, agent_id: int, *, platform: PlatformContext
+    ) -> AgentAdminDetailItem:
+        _require_platform(platform)
+        agent = await self._get_agent_or_404(db, agent_id, platform=platform)
         return AgentAdminDetailItem.model_validate(agent)
 
     async def update_agent(
@@ -55,20 +66,9 @@ class AgentAdminService:
         agent_id: int,
         req: AgentAdminUpdateReq,
         *,
-        current_user: User,
+        platform: PlatformContext,
     ) -> AgentAdminDetailItem:
-        is_enabled_super = any(
-            role.role_code == SUPER_ADMIN_ROLE_CODE and role.status == STATUS_ENABLED
-            for role in current_user.roles
-        )
-        if not is_enabled_super or not has_explicit_permission(
-            current_user,
-            "ai:agent:edit",
-        ):
-            raise AuthorizationException(
-                "仅显式获权的启用超级管理员可修改 AI Agent",
-                error_code="AI_AGENT_ADMIN_REQUIRED",
-            )
+        _require_platform(platform)
 
         immutable_fields = {"agent_id", "code", "is_builtin"}
         if immutable_fields & req.model_fields_set:
@@ -77,7 +77,7 @@ class AgentAdminService:
                 error_code="AI_AGENT_IMMUTABLE_FIELD",
             )
 
-        agent = await self._get_agent_or_404(db, agent_id)
+        agent = await self._get_agent_or_404(db, agent_id, platform=platform)
         data = req.model_dump(exclude_unset=True)
 
         # 显式 description 长度校验（决策 #20）—— Schema field_validator 也会捕，

@@ -1,6 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.id_generator import next_id
+from app.core.tenant import TenantContext
 from app.modules.marketplace.models import App
 from app.modules.marketplace.service.base import MarketplaceBaseService
 
@@ -10,9 +11,9 @@ class TestMarketplaceBaseService:
         """_scoped 必须自动加 WHERE tenant_id = ?"""
         app1 = App(
             id=next_id(),
-            tenant_id=42,
+            tenant_id=0,
             name="A",
-            slug="a-tenant42",
+            slug="a-default",
             type="lowcode",
             category="business",
             status="published",
@@ -30,14 +31,20 @@ class TestMarketplaceBaseService:
         db_session.add(app2)
         await db_session.flush()
 
-        service = MarketplaceBaseService(tenant_id=42)
-        stmt = service.scoped(App)
+        tenant = TenantContext(
+            tenant_id=0,
+            tenant_code="default",
+            actor_user_id=1,
+            tenant_version=1,
+            source="access_token",
+        )
+        service = MarketplaceBaseService()
+        stmt = service.scoped(App, tenant=tenant)
         result = await db_session.execute(stmt)
         apps = result.scalars().all()
         assert len(apps) == 1
-        assert apps[0].tenant_id == 42
+        assert apps[0].tenant_id == 0
 
-    async def test_default_tenant_is_zero(self):
-        """单租户模式默认 tenant_id=0。"""
+    async def test_service_does_not_keep_mutable_tenant_state(self):
         service = MarketplaceBaseService()
-        assert service.tenant_id == 0
+        assert not hasattr(service, "tenant_id")

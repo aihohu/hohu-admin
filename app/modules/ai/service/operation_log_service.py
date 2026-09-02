@@ -30,6 +30,7 @@ from sqlalchemy import case, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessRuleException
+from app.core.tenant import TenantContext
 from app.modules.ai.agents.hitl.constants import AiOperationStatus
 from app.modules.ai.models.operation_log import AiOperationLog
 
@@ -84,7 +85,7 @@ class OperationLogService:
         *,
         trace_id: str,
         conversation_id: int,
-        tenant_id: int,
+        tenant: TenantContext,
         source_user_message_id: int | None = None,
         readonly_snapshot: bool = False,
         agent_code: str | None = None,
@@ -118,7 +119,7 @@ class OperationLogService:
         log = AiOperationLog(
             trace_id=trace_id,
             conversation_id=conversation_id,
-            tenant_id=tenant_id,
+            tenant_id=tenant.tenant_id,
             source_user_message_id=source_user_message_id,
             readonly_snapshot=readonly_snapshot,
             agent_code=agent_code,
@@ -147,13 +148,15 @@ class OperationLogService:
             log.hitl_wait_ms = 0
         return log.log_id
 
-    async def mark_running(self, db: AsyncSession, log_id: int) -> AiOperationLog:
+    async def mark_running(
+        self, db: AsyncSession, log_id: int, *, tenant: TenantContext
+    ) -> AiOperationLog:
         """状态迁移：pending_confirmation → running（用户 approve 后）
 
         修订 S-3：HITL 流真正进入"业务执行"状态，写 started_at + hitl_wait_ms。
         hitl_wait_ms = started_at - queued_at（pending 等待时间）。
         """
-        log = await self._get(db, log_id)
+        log = await self._get(db, log_id, tenant=tenant)
         if log.status != AiOperationStatus.PENDING_CONFIRMATION.value:
             if AiOperationStatus(log.status).is_terminal:
                 self._transition(log, AiOperationStatus.RUNNING)
@@ -174,6 +177,7 @@ class OperationLogService:
             status=AiOperationStatus.RUNNING.value,
             started_at=now,
             hitl_wait_ms=hitl_wait_ms,
+            tenant=tenant,
         )
         if transitioned is not None:
             return transitioned
@@ -193,9 +197,10 @@ class OperationLogService:
         result_summary: str,
         duration_ms: int,
         target_summary: str | None = None,
+        tenant: TenantContext,
     ) -> AiOperationLog:
         """状态迁移：running → success（终态）"""
-        log = await self._get(db, log_id)
+        log = await self._get(db, log_id, tenant=tenant)
         self._transition(log, AiOperationStatus.SUCCESS)
         log.result_summary = result_summary
         if target_summary is not None:
@@ -211,9 +216,10 @@ class OperationLogService:
         *,
         error_code: str,
         duration_ms: int,
+        tenant: TenantContext,
     ) -> AiOperationLog:
         """状态迁移：running → failed（终态）"""
-        log = await self._get(db, log_id)
+        log = await self._get(db, log_id, tenant=tenant)
         self._transition(log, AiOperationStatus.FAILED)
         log.error_code = error_code
         log.duration_ms = duration_ms
@@ -226,12 +232,13 @@ class OperationLogService:
         log_id: int,
         *,
         approved_by: int,
+        tenant: TenantContext,
     ) -> AiOperationLog:
         """状态迁移：pending_confirmation → rejected（终态，用户主动拒绝）
 
         ``approved_by`` 同时记录批准者或拒绝者。
         """
-        log = await self._get(db, log_id)
+        log = await self._get(db, log_id, tenant=tenant)
         self._transition(log, AiOperationStatus.REJECTED)
         log.approved_by = approved_by
         log.finished_at = _now_not_before(log.queued_at, log.started_at)
@@ -243,6 +250,7 @@ class OperationLogService:
         log_id: int,
         *,
         approved_by: int,
+        tenant: TenantContext,
     ) -> AiOperationLog | None:
         """Reject only an orphaned pending operation; never overwrite a live run."""
         return await self._update_if_pending(
@@ -251,6 +259,7 @@ class OperationLogService:
             status=AiOperationStatus.REJECTED.value,
             approved_by=approved_by,
             finished_at=datetime.now(UTC).replace(tzinfo=None),
+            tenant=tenant,
         )
 
     async def mark_expired(
@@ -259,6 +268,7 @@ class OperationLogService:
         log_id: int,
         *,
         error_code: str | None = None,
+        tenant: TenantContext,
     ) -> AiOperationLog:
         """状态迁移：pending_confirmation → expired（终态）
 
@@ -269,7 +279,7 @@ class OperationLogService:
         （例如唤醒失败时日志可能已进入 running），
         请用幂等版本 `mark_expired_if_pending`。
         """
-        log = await self._get(db, log_id)
+        log = await self._get(db, log_id, tenant=tenant)
         self._transition(log, AiOperationStatus.EXPIRED)
         log.error_code = error_code
         log.finished_at = _now_not_before(log.queued_at, log.started_at)
@@ -281,6 +291,7 @@ class OperationLogService:
         log_id: int,
         *,
         error_code: str | None = None,
+        tenant: TenantContext,
     ) -> AiOperationLog | None:
         """幂等版本（修订 S-14 配套）：仅当 status=pending_confirmation 时迁移到 expired
 
@@ -297,6 +308,7 @@ class OperationLogService:
             status=AiOperationStatus.EXPIRED.value,
             error_code=error_code,
             finished_at=datetime.now(UTC).replace(tzinfo=None),
+            tenant=tenant,
         )
 
     async def attach_confirmation(
@@ -304,9 +316,11 @@ class OperationLogService:
         db: AsyncSession,
         log_id: int,
         confirmation_id: str,
+        *,
+        tenant: TenantContext,
     ) -> AiOperationLog:
         """回填 confirmation_id（HITL Manager 创建 pending 后调用）"""
-        log = await self._get(db, log_id)
+        log = await self._get(db, log_id, tenant=tenant)
         if log.confirmation_id is not None:
             raise BusinessRuleException(
                 "ai_operation_log.confirmation_id 已存在，不可重复设置",
@@ -320,9 +334,11 @@ class OperationLogService:
         db: AsyncSession,
         log_id: int,
         subject_refs: Any,
+        *,
+        tenant: TenantContext,
     ) -> AiOperationLog:
         """Freeze an allowlisted target summary without exposing action arguments."""
-        log = await self._get(db, log_id)
+        log = await self._get(db, log_id, tenant=tenant)
         summary = build_target_summary(subject_refs)
         if summary is not None:
             log.target_summary = summary
@@ -334,6 +350,7 @@ class OperationLogService:
         log_id: int,
         *,
         approved_by: int,
+        tenant: TenantContext,
     ) -> AiOperationLog:
         """记录 approved_by（status 不变，由 mark_running 单独迁移）
 
@@ -344,7 +361,7 @@ class OperationLogService:
         ``/ai/confirm`` 用此方法记录 approved_by，Gateway Executor
         接到唤醒后调用 ``mark_running``。
         """
-        log = await self._get(db, log_id)
+        log = await self._get(db, log_id, tenant=tenant)
         log.approved_by = approved_by
         return log
 
@@ -353,7 +370,7 @@ class OperationLogService:
         db: AsyncSession,
         tool_call_id: str,
         *,
-        tenant_id: int,
+        tenant: TenantContext,
         user_id: int | None = None,
     ) -> AiOperationLog | None:
         """按 tool_call_id 查询，供 SSE 断流后的兜底轮询使用。
@@ -365,7 +382,7 @@ class OperationLogService:
         result = await db.execute(
             select(AiOperationLog).where(
                 AiOperationLog.tool_call_id == tool_call_id,
-                AiOperationLog.tenant_id == tenant_id,
+                AiOperationLog.tenant_id == tenant.tenant_id,
             )
         )
         log = result.scalars().first()
@@ -378,9 +395,14 @@ class OperationLogService:
             )
         return log
 
-    async def _get(self, db: AsyncSession, log_id: int) -> AiOperationLog:
+    async def _get(
+        self, db: AsyncSession, log_id: int, *, tenant: TenantContext
+    ) -> AiOperationLog:
         result = await db.execute(
-            select(AiOperationLog).where(AiOperationLog.log_id == log_id)
+            select(AiOperationLog).where(
+                AiOperationLog.tenant_id == tenant.tenant_id,
+                AiOperationLog.log_id == log_id,
+            )
         )
         log = result.scalars().first()
         if log is None:
@@ -394,6 +416,8 @@ class OperationLogService:
         self,
         db: AsyncSession,
         log_id: int,
+        *,
+        tenant: TenantContext,
         **values,
     ) -> AiOperationLog | None:
         """CAS pending transition so wake/cleanup races cannot overwrite each other."""
@@ -414,6 +438,7 @@ class OperationLogService:
             update(AiOperationLog)
             .where(
                 AiOperationLog.log_id == log_id,
+                AiOperationLog.tenant_id == tenant.tenant_id,
                 AiOperationLog.status == AiOperationStatus.PENDING_CONFIRMATION.value,
             )
             .values(**values)

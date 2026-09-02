@@ -11,12 +11,15 @@
 """
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_permissions
 from app.core.base_response import PageResult, ResponseModel
+from app.core.tenant import TenantContext
 from app.db.session import get_db
-from app.modules.auth.service import get_current_user
+from app.modules.auth.service import get_current_tenant_context, get_current_user
+from app.modules.marketplace.capability import require_marketplace_http_capability
 from app.modules.marketplace.exceptions import AppNotFoundException
 from app.modules.marketplace.models import AppVersion
 from app.modules.marketplace.schemas.app import AppDetailOut, AppOut, AppQuery
@@ -35,7 +38,7 @@ from app.modules.marketplace.service.install_service import install_service
 from app.modules.marketplace.service.rating_service import rating_service
 from app.modules.system.models.user import User
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_marketplace_http_capability)])
 
 
 @router.get(
@@ -47,9 +50,10 @@ async def list_apps(
     query: AppQuery = Depends(),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),  # noqa: ARG001
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """浏览市场：分页 + 分类筛选 + 排序（需登录）"""
-    result = await app_service.list(db, query)
+    result = await app_service.list(db, query, tenant=tenant)
     return ResponseModel.success(
         data=PageResult(
             records=[AppOut.model_validate(r) for r in result.records],
@@ -71,9 +75,12 @@ async def search_apps(
     size: int = Query(10, ge=1, le=50),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),  # noqa: ARG001
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """关键词搜索；全文索引不可用时使用 ILIKE。"""
-    result = await app_service.search(db, keyword=keyword, current=current, size=size)
+    result = await app_service.search(
+        db, keyword=keyword, current=current, size=size, tenant=tenant
+    )
     return ResponseModel.success(
         data=PageResult(
             records=[AppOut.model_validate(r) for r in result.records],
@@ -93,8 +100,9 @@ async def get_app_detail(
     slug: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),  # noqa: ARG001
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    app = await app_service.get_by_slug(db, slug=slug)
+    app = await app_service.get_by_slug(db, slug=slug, tenant=tenant)
     data = AppDetailOut.model_validate(app)
     # tags_text 是空格拼接字符串，detail 接口返回数组形式
     if app.tags_text:
@@ -111,12 +119,18 @@ async def get_app_manifest(
     slug: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),  # noqa: ARG001
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """前端 LowcodeRenderer 用：返回 current_version 的完整 manifest"""
-    app = await app_service.get_by_slug(db, slug=slug)
+    app = await app_service.get_by_slug(db, slug=slug, tenant=tenant)
     if app.current_version_id is None:
         raise AppNotFoundException(slug=f"{slug} (no published version)")
-    version = await db.get(AppVersion, app.current_version_id)
+    version = await db.scalar(
+        select(AppVersion).where(
+            AppVersion.id == app.current_version_id,
+            AppVersion.app_id == app.id,
+        )
+    )
     if version is None:
         raise AppNotFoundException(slug=slug)
     return ResponseModel.success(data=version.manifest)
@@ -132,8 +146,11 @@ async def install_app(
     req: InstallCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    record = await install_service.install(db, req, user_id=current_user.user_id)
+    record = await install_service.install(
+        db, req, user_id=current_user.user_id, tenant=tenant
+    )
     await db.commit()
     return ResponseModel.success(data=InstallOut.model_validate(record))
 
@@ -148,10 +165,13 @@ async def uninstall_app(
     slug: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     # 统一用 slug 路径，保持与 install 一致；先查 app 拿 id
-    app = await app_service.get_by_slug(db, slug=slug)
-    await install_service.uninstall(db, app_id=app.id, user_id=current_user.user_id)
+    app = await app_service.get_by_slug(db, slug=slug, tenant=tenant)
+    await install_service.uninstall(
+        db, app_id=app.id, user_id=current_user.user_id, tenant=tenant
+    )
     await db.commit()
     return ResponseModel.success()
 
@@ -166,9 +186,10 @@ async def enable_app(
     slug: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),  # noqa: ARG001
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    app = await app_service.get_by_slug(db, slug=slug)
-    record = await install_service.enable(db, app_id=app.id)
+    app = await app_service.get_by_slug(db, slug=slug, tenant=tenant)
+    record = await install_service.enable(db, app_id=app.id, tenant=tenant)
     await db.commit()
     return ResponseModel.success(data=InstallOut.model_validate(record))
 
@@ -183,9 +204,10 @@ async def disable_app(
     slug: str,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),  # noqa: ARG001
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    app = await app_service.get_by_slug(db, slug=slug)
-    record = await install_service.disable(db, app_id=app.id)
+    app = await app_service.get_by_slug(db, slug=slug, tenant=tenant)
+    record = await install_service.disable(db, app_id=app.id, tenant=tenant)
     await db.commit()
     return ResponseModel.success(data=InstallOut.model_validate(record))
 
@@ -199,8 +221,9 @@ async def list_installed(
     query: InstallQuery = Depends(),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),  # noqa: ARG001
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    result = await install_service.list_installed(db, query)
+    result = await install_service.list_installed(db, query, tenant=tenant)
     return ResponseModel.success(
         data=PageResult(
             records=[InstallOut.model_validate(r) for r in result.records],
@@ -220,8 +243,11 @@ async def create_rating(
     req: RatingCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    rating = await rating_service.create(db, req, user_id=current_user.user_id)
+    rating = await rating_service.create(
+        db, req, user_id=current_user.user_id, tenant=tenant
+    )
     await db.commit()
     return ResponseModel.success(data=RatingOut.model_validate(rating))
 
@@ -236,6 +262,7 @@ async def update_rating(
     req: RatingUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     rating = await rating_service.update(
         db,
@@ -243,6 +270,7 @@ async def update_rating(
         user_id=current_user.user_id,
         rating=req.rating,
         comment=req.comment,
+        tenant=tenant,
     )
     await db.commit()
     return ResponseModel.success(data=RatingOut.model_validate(rating))
@@ -257,7 +285,10 @@ async def delete_rating(
     app_id: int,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    await rating_service.delete(db, app_id=app_id, user_id=current_user.user_id)
+    await rating_service.delete(
+        db, app_id=app_id, user_id=current_user.user_id, tenant=tenant
+    )
     await db.commit()
     return ResponseModel.success()

@@ -8,6 +8,7 @@ from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.tenant import PlatformContext, TenantContext
 from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.hitl.constants import (
     AI_CONFIRM_REDIS_PREFIX,
@@ -24,14 +25,44 @@ from app.modules.ai.service.chat_run_service import (
 )
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.ai.service.prepared_action_service import prepared_action_service
+from app.modules.system.models.tenant import Tenant
 
 logger = logging.getLogger(__name__)
 
 
-async def cleanup_prepared_actions_on_startup(redis: Redis) -> int:
+def _require_platform(platform: PlatformContext) -> None:
+    if not isinstance(platform, PlatformContext):
+        raise TypeError("platform context is required")
+
+
+async def _tenant_context(
+    db: AsyncSession,
+    *,
+    tenant_id: int,
+    actor_user_id: int,
+    platform: PlatformContext,
+) -> TenantContext:
+    _require_platform(platform)
+    tenant = await db.get(Tenant, tenant_id)
+    if tenant is None:
+        raise RuntimeError(f"tenant {tenant_id} no longer exists")
+    return TenantContext(
+        tenant_id=tenant.tenant_id,
+        tenant_code=tenant.tenant_code,
+        actor_user_id=actor_user_id,
+        tenant_version=tenant.row_version,
+        source="platform_control",
+    )
+
+
+async def cleanup_prepared_actions_on_startup(
+    redis: Redis, *, platform: PlatformContext
+) -> int:
     """Recover durable prepared actions; Redis loss never expires a valid pending."""
+    _require_platform(platform)
     cleaned = 0
     pending_source_validity: dict[int, bool] = {}
+    tenant_contexts: dict[int, TenantContext] = {}
     async with AsyncSessionLocal() as db:
         actions = list(
             (
@@ -51,6 +82,13 @@ async def cleanup_prepared_actions_on_startup(redis: Redis) -> int:
             .all()
         )
         for action in actions:
+            tenant = await _tenant_context(
+                db,
+                tenant_id=action.tenant_id,
+                actor_user_id=action.user_id,
+                platform=platform,
+            )
+            tenant_contexts[action.action_id] = tenant
             action_expires = action.expires_at
             if action_expires.tzinfo is None:
                 action_expires = action_expires.replace(tzinfo=UTC)
@@ -60,8 +98,11 @@ async def cleanup_prepared_actions_on_startup(redis: Redis) -> int:
             ):
                 pending_source_validity[
                     action.action_id
-                ] = await prepared_action_service.pending_source_is_valid(db, action)
+                ] = await prepared_action_service.pending_source_is_valid(
+                    db, action, tenant=tenant
+                )
     for candidate in actions:
+        tenant = tenant_contexts[candidate.action_id]
         candidate_expires = candidate.expires_at
         if candidate_expires.tzinfo is None:
             candidate_expires = candidate_expires.replace(tzinfo=UTC)
@@ -84,6 +125,7 @@ async def cleanup_prepared_actions_on_startup(redis: Redis) -> int:
                         redis,
                         conversation_id=candidate.conversation_id,
                         owner_token=candidate.guard_owner_token,
+                        tenant=tenant,
                     )
                     if acquired:
                         await chat_run_guard.handoff_pending(
@@ -98,6 +140,7 @@ async def cleanup_prepared_actions_on_startup(redis: Redis) -> int:
                                     ).total_seconds()
                                 ),
                             ),
+                            tenant=tenant,
                         )
                 except RedisError:
                     logger.warning(
@@ -110,7 +153,7 @@ async def cleanup_prepared_actions_on_startup(redis: Redis) -> int:
         async with AsyncSessionLocal() as cleanup_db:
             async with cleanup_db.begin():
                 current = await prepared_action_service.get_by_confirmation_id(
-                    cleanup_db, candidate.confirmation_id
+                    cleanup_db, candidate.confirmation_id, tenant=tenant
                 )
                 if current is None:
                     continue
@@ -149,6 +192,7 @@ async def cleanup_prepared_actions_on_startup(redis: Redis) -> int:
                         if current_status == PreparedActionStatus.RUNNING
                         else None
                     ),
+                    tenant=tenant,
                 )
                 if terminal is None:
                     continue
@@ -156,13 +200,13 @@ async def cleanup_prepared_actions_on_startup(redis: Redis) -> int:
                     cleanup_db,
                     terminal.execute_tool_call_id,
                     user_id=terminal.user_id,
-                    tenant_id=terminal.tenant_id,
+                    tenant=tenant,
                 )
                 if operation is not None:
                     operation_status = AiOperationStatus(operation.status)
                     if operation_status == AiOperationStatus.PENDING_CONFIRMATION:
                         await operation_log_service.mark_expired_if_pending(
-                            cleanup_db, operation.log_id
+                            cleanup_db, operation.log_id, tenant=tenant
                         )
                     elif operation_status == AiOperationStatus.RUNNING:
                         await operation_log_service.mark_failed(
@@ -170,6 +214,7 @@ async def cleanup_prepared_actions_on_startup(redis: Redis) -> int:
                             operation.log_id,
                             error_code=error_code,
                             duration_ms=operation.duration_ms or 0,
+                            tenant=tenant,
                         )
                 await chat_run_finalizer.finalize_prepared_action(
                     cleanup_db,
@@ -177,6 +222,7 @@ async def cleanup_prepared_actions_on_startup(redis: Redis) -> int:
                     ok=False,
                     error_code=error_code,
                     error_msg="确认已过期或执行被服务重启中断，请重新发起",
+                    tenant=tenant,
                 )
         try:
             if candidate.guard_owner_token:
@@ -184,8 +230,11 @@ async def cleanup_prepared_actions_on_startup(redis: Redis) -> int:
                     redis,
                     conversation_id=candidate.conversation_id,
                     owner_token=candidate.guard_owner_token,
+                    tenant=tenant,
                 )
-            await hitl_manager.delete_pending(redis, candidate.confirmation_id)
+            await hitl_manager.delete_pending(
+                redis, candidate.confirmation_id, tenant=tenant
+            )
         except RedisError:
             logger.warning(
                 "prepared terminal cache cleanup skipped action_id=%s",
@@ -203,6 +252,7 @@ async def finalize_orphaned_pending(
     confirmation_id: str,
     pending: PendingPayload,
     operation_log: AiOperationLog | None,
+    tenant: TenantContext,
 ) -> None:
     """先 commit terminal operation/projection，再由原 owner 释放 guard。"""
     try:
@@ -215,7 +265,7 @@ async def finalize_orphaned_pending(
             status = AiOperationStatus(operation_log.status)
             if status == AiOperationStatus.PENDING_CONFIRMATION:
                 await operation_log_service.mark_expired_if_pending(
-                    db, operation_log.log_id
+                    db, operation_log.log_id, tenant=tenant
                 )
                 error_code = "AI_HITL_EXPIRED"
                 error_msg = "确认等待因服务重启而过期，请重新发起"
@@ -225,11 +275,13 @@ async def finalize_orphaned_pending(
                     operation_log.log_id,
                     error_code=error_code,
                     duration_ms=operation_log.duration_ms or 0,
+                    tenant=tenant,
                 )
             else:
                 existing_message_id = await db.scalar(
                     select(AiMessage.message_id)
                     .where(
+                        AiMessage.tenant_id == tenant.tenant_id,
                         AiMessage.conversation_id == pending.conversation_id,
                         AiMessage.role == "assistant",
                         AiMessage.trace_id == pending.trace_id,
@@ -263,6 +315,7 @@ async def finalize_orphaned_pending(
                 result=result,
                 error_code=error_code,
                 error_msg=error_msg,
+                tenant=tenant,
             )
         await db.commit()
     except Exception:
@@ -274,27 +327,47 @@ async def finalize_orphaned_pending(
             redis,
             conversation_id=pending.conversation_id,
             owner_token=pending.guard_owner_token,
+            tenant=tenant,
         )
-    await hitl_manager.delete_pending(redis, confirmation_id)
+    await hitl_manager.delete_pending(redis, confirmation_id, tenant=tenant)
 
 
-async def cleanup_orphaned_pending_on_startup() -> int:
+async def cleanup_orphaned_pending_on_startup(*, platform: PlatformContext) -> int:
     """收口 memory-mode 重启遗留；失败项保留到 Redis TTL，不伪装已清理。"""
     from app.core.redis import redis_client  # noqa: PLC0415
 
-    cleaned = await cleanup_prepared_actions_on_startup(redis_client)
-    pattern = f"{AI_CONFIRM_REDIS_PREFIX}:*"
+    _require_platform(platform)
+    cleaned = await cleanup_prepared_actions_on_startup(redis_client, platform=platform)
+    pattern = f"{AI_CONFIRM_REDIS_PREFIX}:tenant:*"
     try:
         async for key in redis_client.scan_iter(match=pattern, count=100):
             key_text = key.decode() if isinstance(key, bytes) else str(key)
-            confirmation_id = key_text.rsplit(":", 1)[-1]
-            pending = await hitl_manager.get_pending(redis_client, confirmation_id)
+            try:
+                confirmation_id = key_text.rsplit(":", 1)[-1]
+                tenant_id = int(key_text.rsplit(":", 2)[-2])
+                if tenant_id < 0:
+                    raise ValueError("negative tenant ID")
+            except (IndexError, ValueError):
+                logger.warning("startup lifecycle skipped malformed HITL key")
+                continue
+            pending = await hitl_manager.get_pending_for_platform(
+                redis_client,
+                confirmation_id,
+                tenant_id=tenant_id,
+                platform=platform,
+            )
             if pending is None:
                 continue
             try:
                 async with AsyncSessionLocal() as db:
+                    tenant = await _tenant_context(
+                        db,
+                        tenant_id=pending.tenant_id,
+                        actor_user_id=pending.user_id,
+                        platform=platform,
+                    )
                     prepared = await prepared_action_service.get_by_confirmation_id(
-                        db, confirmation_id
+                        db, confirmation_id, tenant=tenant
                     )
                     if (
                         prepared is not None
@@ -309,13 +382,15 @@ async def cleanup_orphaned_pending_on_startup() -> int:
                     ):
                         continue
                     if prepared is not None:
-                        await hitl_manager.delete_pending(redis_client, confirmation_id)
+                        await hitl_manager.delete_pending(
+                            redis_client, confirmation_id, tenant=tenant
+                        )
                         continue
                     log = await operation_log_service.get_by_tool_call_id(
                         db,
                         pending.tool_call_id,
                         user_id=pending.user_id,
-                        tenant_id=pending.tenant_id,
+                        tenant=tenant,
                     )
                     await finalize_orphaned_pending(
                         db,
@@ -323,6 +398,7 @@ async def cleanup_orphaned_pending_on_startup() -> int:
                         confirmation_id=confirmation_id,
                         pending=pending,
                         operation_log=log,
+                        tenant=tenant,
                     )
                 cleaned += 1
             except Exception:
@@ -338,8 +414,10 @@ async def cleanup_orphaned_pending_on_startup() -> int:
     return cleaned
 
 
-async def cleanup_durable_prepared_actions_on_startup() -> int:
+async def cleanup_durable_prepared_actions_on_startup(
+    *, platform: PlatformContext
+) -> int:
     """Recover durable state in every HITL mode without scanning legacy cache."""
     from app.core.redis import redis_client  # noqa: PLC0415
 
-    return await cleanup_prepared_actions_on_startup(redis_client)
+    return await cleanup_prepared_actions_on_startup(redis_client, platform=platform)

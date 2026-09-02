@@ -17,6 +17,7 @@ import json
 
 import pytest
 import redis.asyncio as aioredis
+from tenant_helpers import tenant_context
 
 from app.core import redis as redis_module
 from app.core.config import settings
@@ -27,6 +28,9 @@ from app.modules.ai.agents.hitl.manager import (
     PendingPayload,
     hitl_manager,
 )
+
+TENANT = tenant_context(actor_user_id=1)
+TENANT_37 = tenant_context(tenant_id=37, actor_user_id=9001)
 
 
 @pytest.fixture(autouse=True)
@@ -128,7 +132,7 @@ class TestCreatePending:
             redis_module.redis_client,
             confirmation_id=cid,
             user_id=9001,
-            tenant_id=37,
+            tenant=TENANT_37,
             conversation_id=100,
             tool_call_id="tc_1",
             trace_id="tr_1",
@@ -144,7 +148,9 @@ class TestCreatePending:
         assert payload.expires_at.endswith("Z")
 
         # Redis 已写
-        body = await redis_module.redis_client.get(f"{AI_CONFIRM_REDIS_PREFIX}:{cid}")
+        body = await redis_module.redis_client.get(
+            f"{AI_CONFIRM_REDIS_PREFIX}:tenant:37:{cid}"
+        )
         assert body is not None
         data = json.loads(body)
         assert data["user_id"] == 9001
@@ -160,7 +166,7 @@ class TestCreatePending:
             redis_module.redis_client,
             confirmation_id=cid,
             user_id=9001,
-            tenant_id=37,
+            tenant=TENANT_37,
             conversation_id=100,
             tool_call_id="tc_bound",
             trace_id="tr_bound",
@@ -169,9 +175,14 @@ class TestCreatePending:
         )
 
         bound = await hitl_manager.bind_durable_action(
-            redis_module.redis_client, cid, 7483433649145122816
+            redis_module.redis_client,
+            cid,
+            7483433649145122816,
+            tenant=TENANT_37,
         )
-        restored = await hitl_manager.get_pending(redis_module.redis_client, cid)
+        restored = await hitl_manager.get_pending(
+            redis_module.redis_client, cid, tenant=TENANT_37
+        )
 
         assert bound.action_id == 7483433649145122816
         assert restored is not None
@@ -186,6 +197,7 @@ class TestCreatePending:
                 redis_module.redis_client,
                 confirmation_id=cid,
                 user_id=1,
+                tenant=TENANT,
                 conversation_id=1,
                 tool_call_id="tc_big",
                 trace_id="tr",
@@ -201,6 +213,66 @@ class TestCreatePending:
 
 
 class TestHangWake:
+    async def test_same_confirmation_id_is_isolated_between_tenants(self) -> None:
+        """Hot waiter identity is (tenant, confirmation), not confirmation alone."""
+        cid = hitl_manager.generate_confirmation_id()
+        await hitl_manager.create_pending(
+            redis_module.redis_client,
+            confirmation_id=cid,
+            user_id=1,
+            tenant=TENANT,
+            conversation_id=1,
+            tool_call_id="tc_tenant_0",
+            trace_id="tr_tenant_0",
+            tool_name="x",
+            args={},
+        )
+        await hitl_manager.create_pending(
+            redis_module.redis_client,
+            confirmation_id=cid,
+            user_id=9001,
+            tenant=TENANT_37,
+            conversation_id=1,
+            tool_call_id="tc_tenant_37",
+            trace_id="tr_tenant_37",
+            tool_name="x",
+            args={},
+        )
+
+        wait_default = asyncio.create_task(
+            hitl_manager.hang(cid, tenant=TENANT, timeout_sec=2)
+        )
+        wait_37 = asyncio.create_task(
+            hitl_manager.hang(cid, tenant=TENANT_37, timeout_sec=2)
+        )
+        await asyncio.sleep(0)
+
+        assert await hitl_manager.wake(cid, ConfirmAction.APPROVED, tenant=TENANT)
+        assert await hitl_manager.wake(cid, ConfirmAction.REJECTED, tenant=TENANT_37)
+        assert await wait_default == ConfirmAction.APPROVED
+        assert await wait_37 == ConfirmAction.REJECTED
+
+    async def test_memory_wake_before_hang_is_not_lost(self) -> None:
+        """A fast confirmation may arrive after create but before hang awaits."""
+        cid = hitl_manager.generate_confirmation_id()
+        await hitl_manager.create_pending(
+            redis_module.redis_client,
+            confirmation_id=cid,
+            user_id=1,
+            tenant=TENANT,
+            conversation_id=1,
+            tool_call_id="tc_fast_confirm",
+            trace_id="tr_fast_confirm",
+            tool_name="x",
+            args={},
+        )
+
+        assert await hitl_manager.wake(cid, ConfirmAction.APPROVED, tenant=TENANT)
+        assert (
+            await hitl_manager.hang(cid, tenant=TENANT, timeout_sec=1)
+            == ConfirmAction.APPROVED
+        )
+
     async def test_wake_with_approved(self) -> None:
         """hang 被 wake 唤醒后返回 APPROVED。"""
         cid = hitl_manager.generate_confirmation_id()
@@ -208,6 +280,7 @@ class TestHangWake:
             redis_module.redis_client,
             confirmation_id=cid,
             user_id=1,
+            tenant=TENANT,
             conversation_id=1,
             tool_call_id="tc_a",
             trace_id="tr",
@@ -218,11 +291,11 @@ class TestHangWake:
         # 并发：先启 hang task，再 wake
         async def wake_later():
             await asyncio.sleep(0.05)  # 让 hang 先 await event.wait()
-            ok = await hitl_manager.wake(cid, ConfirmAction.APPROVED)
+            ok = await hitl_manager.wake(cid, ConfirmAction.APPROVED, tenant=TENANT)
             assert ok
 
         async def hang():
-            return await hitl_manager.hang(cid, timeout_sec=2)
+            return await hitl_manager.hang(cid, tenant=TENANT, timeout_sec=2)
 
         wake_task = asyncio.create_task(wake_later())
         result = await hang()
@@ -238,6 +311,7 @@ class TestHangWake:
             redis_module.redis_client,
             confirmation_id=cid,
             user_id=1,
+            tenant=TENANT,
             conversation_id=1,
             tool_call_id="tc_r",
             trace_id="tr",
@@ -247,10 +321,10 @@ class TestHangWake:
 
         async def wake_later():
             await asyncio.sleep(0.05)
-            await hitl_manager.wake(cid, ConfirmAction.REJECTED)
+            await hitl_manager.wake(cid, ConfirmAction.REJECTED, tenant=TENANT)
 
         wake_task = asyncio.create_task(wake_later())
-        result = await hitl_manager.hang(cid, timeout_sec=2)
+        result = await hitl_manager.hang(cid, tenant=TENANT, timeout_sec=2)
         await wake_task
 
         assert result == ConfirmAction.REJECTED
@@ -262,6 +336,7 @@ class TestHangWake:
             redis_module.redis_client,
             confirmation_id=cid,
             user_id=1,
+            tenant=TENANT,
             conversation_id=1,
             tool_call_id="tc_t",
             trace_id="tr",
@@ -270,30 +345,33 @@ class TestHangWake:
         )
 
         with pytest.raises(asyncio.TimeoutError):
-            await hitl_manager.hang(cid, timeout_sec=0.1)
+            await hitl_manager.hang(cid, tenant=TENANT, timeout_sec=0.1)
 
         # 超时后应清理 entry
         assert not hitl_manager._has_pending(cid)
 
     async def test_wake_unknown_returns_false(self) -> None:
         """不存在的 confirmation_id → False（stream 已断 / 跨进程）"""
-        ok = await hitl_manager.wake("nonexistent", ConfirmAction.APPROVED)
+        ok = await hitl_manager.wake(
+            "nonexistent", ConfirmAction.APPROVED, tenant=TENANT
+        )
         assert ok is False
 
     async def test_wake_double_tap_returns_false_on_second(self) -> None:
-        """修订 S-14：防双击 race — 第一次 wake 成功 pop，第二次找不到 entry 返回 False
+        """修订 S-14：防双击 race — 第一次决定获胜，第二次返回 False
 
         场景：用户双击 / 双标签确认同一 confirmation_id。
         修订前：第二次 wake 仍能 get entry（已设 action + event.set() 幂等），
         但端点会返回 200+queued 误导前端。
-        修订后：第一次 wake 立即 pop entry，第二次 wake 找不到返回 False →
-        端点返回 status="stream_gone"。
+        修订后：第一次 wake 设置不可变决定，第二次不能覆盖并返回 False。
+        entry 保留到 hang 消费，以覆盖 wake-before-hang 窗口。
         """
         cid = hitl_manager.generate_confirmation_id()
         await hitl_manager.create_pending(
             redis_module.redis_client,
             confirmation_id=cid,
             user_id=1,
+            tenant=TENANT,
             conversation_id=1,
             tool_call_id="tc_double",
             trace_id="tr",
@@ -301,15 +379,19 @@ class TestHangWake:
             args={},
         )
 
-        # 第一次 wake（无 hang 等待，但 pop 应成功）
-        ok1 = await hitl_manager.wake(cid, ConfirmAction.APPROVED)
+        # 第一次 wake（无 hang 等待，也必须保留给稍后启动的 hang）
+        ok1 = await hitl_manager.wake(cid, ConfirmAction.APPROVED, tenant=TENANT)
         assert ok1 is True
 
-        # 第二次 wake：entry 已被 pop，找不到 → False（防双击）
-        ok2 = await hitl_manager.wake(cid, ConfirmAction.APPROVED)
+        # 第二次 wake：决定已存在 → False（防双击）
+        ok2 = await hitl_manager.wake(cid, ConfirmAction.APPROVED, tenant=TENANT)
         assert ok2 is False
 
-        # entry 已不在 _pending
+        assert hitl_manager._has_pending(cid)
+        assert (
+            await hitl_manager.hang(cid, tenant=TENANT, timeout_sec=1)
+            == ConfirmAction.APPROVED
+        )
         assert not hitl_manager._has_pending(cid)
 
     async def test_wake_does_not_block_hang(self) -> None:
@@ -323,6 +405,7 @@ class TestHangWake:
             redis_module.redis_client,
             confirmation_id=cid,
             user_id=1,
+            tenant=TENANT,
             conversation_id=1,
             tool_call_id="tc_wake_hang",
             trace_id="tr",
@@ -332,11 +415,11 @@ class TestHangWake:
 
         async def wake_later():
             await asyncio.sleep(0.05)
-            ok = await hitl_manager.wake(cid, ConfirmAction.APPROVED)
+            ok = await hitl_manager.wake(cid, ConfirmAction.APPROVED, tenant=TENANT)
             assert ok
 
         async def hang():
-            return await hitl_manager.hang(cid, timeout_sec=2)
+            return await hitl_manager.hang(cid, tenant=TENANT, timeout_sec=2)
 
         wake_task = asyncio.create_task(wake_later())
         result = await hang()
@@ -348,7 +431,7 @@ class TestHangWake:
     async def test_hang_unregistered_raises(self) -> None:
         """hang 一个未 create_pending 的 confirmation_id → 调用方错误"""
         with pytest.raises(BusinessRuleException) as exc_info:
-            await hitl_manager.hang("never_created")
+            await hitl_manager.hang("never_created", tenant=TENANT)
         assert exc_info.value.error_code == "AI_HITL_PENDING_NOT_FOUND"
 
 
@@ -362,6 +445,7 @@ class TestRedisPayload:
             redis_module.redis_client,
             confirmation_id=cid,
             user_id=1,
+            tenant=TENANT,
             conversation_id=1,
             tool_call_id="tc_g",
             trace_id="tr",
@@ -369,15 +453,17 @@ class TestRedisPayload:
             args={"k": "v"},
         )
 
-        pending = await hitl_manager.get_pending(redis_module.redis_client, cid)
+        pending = await hitl_manager.get_pending(
+            redis_module.redis_client, cid, tenant=TENANT
+        )
         assert pending is not None
         assert pending.user_id == 1
         assert pending.args == {"k": "v"}
 
-    async def test_legacy_payload_without_tenant_defaults_to_single_tenant(
+    async def test_legacy_unscoped_payload_is_not_visible_to_tenant(
         self,
     ) -> None:
-        """升级前仍在 Redis 的 pending 只能恢复为当前单租户 0。"""
+        """升级前的无租户 key 不得进入任何租户确认流。"""
         cid = hitl_manager.generate_confirmation_id()
         legacy = {
             "user_id": 1,
@@ -394,14 +480,15 @@ class TestRedisPayload:
             f"{AI_CONFIRM_REDIS_PREFIX}:{cid}", json.dumps(legacy)
         )
 
-        pending = await hitl_manager.get_pending(redis_module.redis_client, cid)
+        pending = await hitl_manager.get_pending(
+            redis_module.redis_client, cid, tenant=TENANT
+        )
 
-        assert pending is not None
-        assert pending.tenant_id == 0
+        assert pending is None
 
     async def test_get_pending_not_found(self) -> None:
         pending = await hitl_manager.get_pending(
-            redis_module.redis_client, "never_existed"
+            redis_module.redis_client, "never_existed", tenant=TENANT
         )
         assert pending is None
 
@@ -410,12 +497,14 @@ class TestRedisPayload:
         cid = hitl_manager.generate_confirmation_id()
         # 写入 1 秒 TTL
         await redis_module.redis_client.set(
-            f"{AI_CONFIRM_REDIS_PREFIX}:{cid}",
+            f"{AI_CONFIRM_REDIS_PREFIX}:tenant:0:{cid}",
             b"{}",
             ex=1,
         )
         await asyncio.sleep(1.1)
-        pending = await hitl_manager.get_pending(redis_module.redis_client, cid)
+        pending = await hitl_manager.get_pending(
+            redis_module.redis_client, cid, tenant=TENANT
+        )
         assert pending is None
 
     async def test_delete_pending(self) -> None:
@@ -424,14 +513,17 @@ class TestRedisPayload:
             redis_module.redis_client,
             confirmation_id=cid,
             user_id=1,
+            tenant=TENANT,
             conversation_id=1,
             tool_call_id="tc_d",
             trace_id="tr",
             tool_name="x",
             args={},
         )
-        await hitl_manager.delete_pending(redis_module.redis_client, cid)
-        pending = await hitl_manager.get_pending(redis_module.redis_client, cid)
+        await hitl_manager.delete_pending(redis_module.redis_client, cid, tenant=TENANT)
+        pending = await hitl_manager.get_pending(
+            redis_module.redis_client, cid, tenant=TENANT
+        )
         assert pending is None
 
 
@@ -444,7 +536,7 @@ class TestCleanupOnStartup:
         # 模拟 3 个孤儿 pending（写 Redis 但不创建 Event，等同 stream 已断）
         for i in range(3):
             await redis_module.redis_client.set(
-                f"{AI_CONFIRM_REDIS_PREFIX}:stale_{i}",
+                f"{AI_CONFIRM_REDIS_PREFIX}:tenant:0:stale_{i}",
                 b'{"user_id": 1}',
                 ex=300,
             )
@@ -519,6 +611,7 @@ class TestPubSubMode:
             redis_module.redis_client,
             confirmation_id=cid,
             user_id=1,
+            tenant=TENANT,
             conversation_id=1,
             tool_call_id="tc_xw",
             trace_id="tr",
@@ -527,13 +620,13 @@ class TestPubSubMode:
         )
 
         async def hang() -> ConfirmAction:
-            return await manager_a.hang(cid, timeout_sec=3)
+            return await manager_a.hang(cid, tenant=TENANT, timeout_sec=3)
 
         hang_task = asyncio.create_task(hang())
         await asyncio.sleep(0.15)  # 等 subscribe 完成
 
         # worker B wake（不同实例，模拟不同 worker）
-        woken = await manager_b.wake(cid, ConfirmAction.APPROVED)
+        woken = await manager_b.wake(cid, ConfirmAction.APPROVED, tenant=TENANT)
         assert woken is True
 
         # worker A 的 hang 应被唤醒
@@ -557,6 +650,7 @@ class TestPubSubMode:
             redis_module.redis_client,
             confirmation_id=cid,
             user_id=1,
+            tenant=TENANT,
             conversation_id=1,
             tool_call_id="tc_race",
             trace_id="tr",
@@ -565,18 +659,22 @@ class TestPubSubMode:
         )
 
         # B wake 在 A hang 之前
-        woken = await manager_b.wake(cid, ConfirmAction.REJECTED)
+        woken = await manager_b.wake(cid, ConfirmAction.REJECTED, tenant=TENANT)
         # 没有在线订阅者时返回 False，让 confirm 端负责 durable 收口；
         # wake_action 仍保留，因此稍后订阅不会丢失决定。
         assert woken is False
 
         # 验证 wake_action 已写入 Redis
-        pending = await manager_a.get_pending(redis_module.redis_client, cid)
+        pending = await manager_a.get_pending(
+            redis_module.redis_client, cid, tenant=TENANT
+        )
         assert pending is not None
         assert pending.wake_action == "rejected"
 
         # A 开始 hang — 应该立即拿到 wake_action，不等 PUBLISH
-        result = await asyncio.wait_for(manager_a.hang(cid, timeout_sec=3), timeout=2)
+        result = await asyncio.wait_for(
+            manager_a.hang(cid, tenant=TENANT, timeout_sec=3), timeout=2
+        )
         assert result == ConfirmAction.REJECTED
 
     async def test_wake_not_found_returns_false(self, pubsub_mode) -> None:
@@ -584,7 +682,7 @@ class TestPubSubMode:
         from app.modules.ai.agents.hitl.manager import HitlManager
 
         manager = HitlManager()
-        woken = await manager.wake("nonexistent", ConfirmAction.APPROVED)
+        woken = await manager.wake("nonexistent", ConfirmAction.APPROVED, tenant=TENANT)
         assert woken is False
 
     async def test_wake_without_subscriber_reports_no_live_waiter(
@@ -599,6 +697,7 @@ class TestPubSubMode:
             redis_module.redis_client,
             confirmation_id=cid,
             user_id=1,
+            tenant=TENANT,
             conversation_id=1,
             tool_call_id="tc_offline",
             trace_id="tr_offline",
@@ -606,8 +705,70 @@ class TestPubSubMode:
             args={},
         )
 
-        assert await manager.wake(cid, ConfirmAction.APPROVED) is False
-        pending = await manager.get_pending(redis_module.redis_client, cid)
+        assert await manager.wake(cid, ConfirmAction.APPROVED, tenant=TENANT) is False
+        pending = await manager.get_pending(
+            redis_module.redis_client, cid, tenant=TENANT
+        )
+        assert pending is not None
+        assert pending.wake_action == "approved"
+
+    async def test_first_pubsub_decision_cannot_be_overwritten(
+        self, pubsub_mode
+    ) -> None:
+        """Approve/reject races use first-writer-wins even without a subscriber."""
+        from app.modules.ai.agents.hitl.manager import HitlManager
+
+        manager = HitlManager()
+        cid = manager.generate_confirmation_id()
+        await manager.create_pending(
+            redis_module.redis_client,
+            confirmation_id=cid,
+            user_id=1,
+            tenant=TENANT,
+            conversation_id=1,
+            tool_call_id="tc_decision_cas",
+            trace_id="tr_decision_cas",
+            tool_name="x",
+            args={},
+        )
+
+        assert await manager.wake(cid, ConfirmAction.APPROVED, tenant=TENANT) is False
+        # An already accepted decision is reachable/idempotent, but immutable.
+        assert await manager.wake(cid, ConfirmAction.REJECTED, tenant=TENANT) is True
+        pending = await manager.get_pending(
+            redis_module.redis_client, cid, tenant=TENANT
+        )
+        assert pending is not None
+        assert pending.wake_action == "approved"
+
+    async def test_pubsub_cas_respects_a_rolling_upgrade_payload(
+        self, pubsub_mode
+    ) -> None:
+        """The new side-state protocol must not overwrite an old embedded wake."""
+        from app.modules.ai.agents.hitl.manager import HitlManager
+
+        manager = HitlManager()
+        cid = manager.generate_confirmation_id()
+        await manager.create_pending(
+            redis_module.redis_client,
+            confirmation_id=cid,
+            user_id=1,
+            tenant=TENANT,
+            conversation_id=1,
+            tool_call_id="tc_rolling_wake",
+            trace_id="tr_rolling_wake",
+            tool_name="x",
+            args={},
+        )
+        key = f"{AI_CONFIRM_REDIS_PREFIX}:tenant:0:{cid}"
+        raw = json.loads(await redis_module.redis_client.get(key))
+        raw["wake_action"] = "approved"
+        await redis_module.redis_client.set(key, json.dumps(raw), keepttl=True)
+
+        assert await manager.wake(cid, ConfirmAction.REJECTED, tenant=TENANT) is True
+        pending = await manager.get_pending(
+            redis_module.redis_client, cid, tenant=TENANT
+        )
         assert pending is not None
         assert pending.wake_action == "approved"
 
@@ -621,6 +782,7 @@ class TestPubSubMode:
             redis_module.redis_client,
             confirmation_id=cid,
             user_id=1,
+            tenant=TENANT,
             conversation_id=1,
             tool_call_id="tc_to",
             trace_id="tr",
@@ -629,7 +791,7 @@ class TestPubSubMode:
         )
 
         with pytest.raises(asyncio.TimeoutError):
-            await manager.hang(cid, timeout_sec=0.5)
+            await manager.hang(cid, tenant=TENANT, timeout_sec=0.5)
 
     async def test_pending_payload_wake_action_default_none(self) -> None:
         """PendingPayload 默认 wake_action=None，向后兼容旧 payload"""
@@ -637,6 +799,7 @@ class TestPubSubMode:
 
         payload = PendingPayload(
             user_id=1,
+            tenant_id=0,
             conversation_id=1,
             tool_call_id="tc",
             trace_id="tr",

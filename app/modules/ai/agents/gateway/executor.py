@@ -32,6 +32,7 @@ from app.core.config import settings
 from app.core.exceptions import AuthorizationException, BusinessException
 from app.core.rbac import is_super_admin
 from app.core.redis import redis_client
+from app.core.tenant import TenantContext
 from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.gateway.failures import (
     check_repeated_failure,
@@ -372,12 +373,16 @@ async def _execute_tool(
     agent_code_for_rollback: str | None = None
     if is_write_tool(meta):
         try:
-            _, l1_member = await check_l1_rate_limit(redis_client, user_id)
+            _, l1_member = await check_l1_rate_limit(
+                redis_client, user_id, tenant=deps.tenant
+            )
             # 仅在部署方配置全局每分钟限制时启用。
-            global_result = await check_l1_global_rate_limit(redis_client)
+            global_result = await check_l1_global_rate_limit(
+                redis_client, tenant=deps.tenant
+            )
             if global_result is not None:
                 _, l1_global_member = global_result
-            await check_l2_daily_quota(redis_client, user_id)
+            await check_l2_daily_quota(redis_client, user_id, tenant=deps.tenant)
             # 仅在当前 Agent 配置专属日额度时启用。
             agent_quota_limit = (
                 getattr(deps.agent, "daily_quota_per_user", None)
@@ -389,13 +394,16 @@ async def _execute_tool(
                     redis_client,
                     user_id,
                     deps.agent.code,
+                    tenant=deps.tenant,
                     limit=agent_quota_limit,
                 )
                 # 标记：AuthorizationException 时需要回滚 per-agent key
                 agent_code_for_rollback = deps.agent.code
             # 仅在已有会话且部署方配置会话预算时启用。
             conv_id = deps.conversation_id or 0
-            l4_result = await check_l4_conv_budget(redis_client, conv_id)
+            l4_result = await check_l4_conv_budget(
+                redis_client, conv_id, tenant=deps.tenant
+            )
             if l4_result is not None:
                 _, l4_conv_key_for_rollback = l4_result
         except BusinessException as e:
@@ -485,6 +493,7 @@ async def _execute_tool(
                     await decr_quota(
                         redis_client,
                         user_id,
+                        tenant=deps.tenant,
                         agent_code=agent_code_for_rollback,
                         l1_member=l1_member,
                         l1_global_member=l1_global_member,
@@ -497,8 +506,10 @@ async def _execute_tool(
                     )
             await _record_perm_denied_for_ip(deps, meta.name)
         else:
-            await record_failure(redis_client, user_id, meta.name, args_hash)
-        await _finish_log_final(log_id, failure, started_at)
+            await record_failure(
+                redis_client, user_id, meta.name, args_hash, tenant=deps.tenant
+            )
+        await _finish_log_final(log_id, failure, started_at, tenant=deps.tenant)
         duration_ms = int((time.monotonic() - started_at) * 1000)
         await _emit(
             deps,
@@ -517,7 +528,9 @@ async def _execute_tool(
 
     # 5. 相同参数连续失败时短路，避免重复消耗资源。
     try:
-        await check_repeated_failure(redis_client, user_id, name, args_hash)
+        await check_repeated_failure(
+            redis_client, user_id, name, args_hash, tenant=deps.tenant
+        )
     except BusinessException as e:
         # 连续失败短路前已经写入起始日志，因此必须补齐终态。
         # 写入终态失败，确保审计日志与用户看到的短路结果一致。
@@ -529,6 +542,7 @@ async def _execute_tool(
                 error_msg=USER_FACING_MSG.get(e.error_code, e.message),
             ),
             started_at,
+            tenant=deps.tenant,
         )
         _rec("repeated_failure")
         return ToolResult.failure(
@@ -548,6 +562,7 @@ async def _execute_tool(
                 error_msg="AI 服务暂时不可用（安全检查失败），请稍后重试",
             ),
             started_at,
+            tenant=deps.tenant,
         )
         _rec("redis_down")
         return ToolResult.failure(
@@ -557,7 +572,7 @@ async def _execute_tool(
 
     # 非超管用户一小时内多次命中注入检测后自动禁用 24 小时。
     if deps.injection_hit:
-        await record_injection(redis_client, deps.user)
+        await record_injection(redis_client, deps.user, tenant=deps.tenant)
 
     # 7. HITL 分支
     if mode == AiExecutionMode.HITL:
@@ -583,7 +598,7 @@ async def _execute_tool(
                 error_msg=USER_FACING_MSG["AI_HITL_EXPIRED"],
             )
         action_result, action_duration = await _load_prepared_terminal_result(
-            resolution.confirmation_id
+            resolution.confirmation_id, tenant=deps.tenant
         )
         await _emit(
             deps,
@@ -655,7 +670,7 @@ async def _execute_tool(
             error_msg=result.error_msg if not result.ok else None,
         ),
     )
-    await _finish_log_final(log_id, result, started_at)
+    await _finish_log_final(log_id, result, started_at, tenant=deps.tenant)
 
     metric_status = "success" if result.ok else "failed"
     _rec(metric_status)
@@ -776,9 +791,13 @@ async def execute_approved_prepared_action(
 
 async def _get_prepared_action_by_confirmation(
     confirmation_id: str,
+    *,
+    tenant: TenantContext,
 ) -> AiPreparedAction | None:
     async with AsyncSessionLocal() as db:
-        return await prepared_action_service.get_by_confirmation_id(db, confirmation_id)
+        return await prepared_action_service.get_by_confirmation_id(
+            db, confirmation_id, tenant=tenant
+        )
 
 
 def _ui_from_dict(value: dict[str, Any] | None) -> UIResult | None:
@@ -795,8 +814,10 @@ def _ui_from_dict(value: dict[str, Any] | None) -> UIResult | None:
 
 async def _load_prepared_terminal_result(
     confirmation_id: str,
+    *,
+    tenant: TenantContext,
 ) -> tuple[ToolResult, int]:
-    action = await _get_prepared_action_by_confirmation(confirmation_id)
+    action = await _get_prepared_action_by_confirmation(confirmation_id, tenant=tenant)
     if action is None:
         return (
             ToolResult.failure(
@@ -854,7 +875,7 @@ async def _run_dry_run(
             async with dry_db.begin():
                 dry_ctx = build_tool_context(deps, dry_db, registered.meta)
                 dr: DryRunResult = await with_l3_timeout(
-                    registered.dry_run_fn(dry_ctx, **args)
+                    registered.dry_run_fn(dry_ctx, **args), tenant=deps.tenant
                 )
         return _DryRunOutcome(
             count=dr.count,
@@ -924,7 +945,7 @@ async def _start_log(
             log_db,
             trace_id=deps.trace_id,
             conversation_id=deps.conversation_id or 0,
-            tenant_id=deps.tenant_id,
+            tenant=deps.tenant,
             source_user_message_id=deps.source_user_message_id,
             readonly_snapshot=registered.meta.readonly,
             agent_code=deps.agent.code if deps.agent else registered.meta.agent,
@@ -943,27 +964,37 @@ async def _start_log(
     return await _with_log_retry("start_operation", log_id=None, op=_op)
 
 
-async def _finish_log_running(log_id: int) -> None:
+async def _finish_log_running(log_id: int, *, tenant: TenantContext) -> None:
     """HITL approved → status pending_confirmation → running，失败最多重试三次。"""
 
     async def _op(log_db: AsyncSession) -> None:
-        await operation_log_service.mark_running(log_db, log_id)
+        await operation_log_service.mark_running(log_db, log_id, tenant=tenant)
 
     await _with_log_retry("mark_running", log_id=log_id, op=_op, raise_on_failure=False)
 
 
-async def _finish_log_rejected(log_id: int, user_id: int) -> None:
+async def _finish_log_rejected(
+    log_id: int, user_id: int, *, tenant: TenantContext
+) -> None:
     """HITL rejected → status pending_confirmation → rejected，失败最多重试三次。"""
 
     async def _op(log_db: AsyncSession) -> None:
-        await operation_log_service.mark_rejected(log_db, log_id, approved_by=user_id)
+        await operation_log_service.mark_rejected(
+            log_db, log_id, approved_by=user_id, tenant=tenant
+        )
 
     await _with_log_retry(
         "mark_rejected", log_id=log_id, op=_op, raise_on_failure=False
     )
 
 
-async def _finish_log_final(log_id: int, result: ToolResult, started_at: float) -> None:
+async def _finish_log_final(
+    log_id: int,
+    result: ToolResult,
+    started_at: float,
+    *,
+    tenant: TenantContext,
+) -> None:
     """业务执行结束后写入日志终态，失败最多重试三次且不向业务传播。
 
     业务事务已先于本函数提交或回滚，因此终态日志失败不能反向回滚业务；
@@ -988,6 +1019,7 @@ async def _finish_log_final(log_id: int, result: ToolResult, started_at: float) 
                 target_summary=build_target_summary(
                     result.projection.subject_refs if result.projection else None
                 ),
+                tenant=tenant,
             )
         else:
             await operation_log_service.mark_failed(
@@ -995,6 +1027,7 @@ async def _finish_log_final(log_id: int, result: ToolResult, started_at: float) 
                 log_id,
                 error_code=result.error_code or "AI_INTERNAL_ERROR",
                 duration_ms=duration_ms,
+                tenant=tenant,
             )
 
     status_label = "success" if result.ok else "failed"
@@ -1101,7 +1134,9 @@ async def _rollback_failed_confirmation_setup(
 ) -> None:
     """Best-effort rollback for a notification published before DB persistence."""
     try:
-        await hitl_manager.delete_pending(redis_client, confirmation_id)
+        await hitl_manager.delete_pending(
+            redis_client, confirmation_id, tenant=deps.tenant
+        )
     except RedisError:
         logger.exception(
             "failed to delete pending after durable action setup failure",
@@ -1118,6 +1153,7 @@ async def _rollback_failed_confirmation_setup(
                 redis_client,
                 conversation_id=deps.conversation_id,
                 owner_token=deps.guard_owner_token,
+                tenant=deps.tenant,
             )
         except RedisError:
             logger.exception(
@@ -1132,7 +1168,9 @@ async def _rollback_failed_confirmation_setup(
     try:
         async with AsyncSessionLocal() as log_db:
             async with log_db.begin():
-                await operation_log_service.mark_expired_if_pending(log_db, log_id)
+                await operation_log_service.mark_expired_if_pending(
+                    log_db, log_id, tenant=deps.tenant
+                )
     except Exception:
         logger.exception(
             "failed to terminalize operation after durable action setup failure",
@@ -1144,6 +1182,7 @@ async def _rollback_failed_confirmation_setup(
             await decr_quota(
                 redis_client,
                 deps.user.user_id,
+                tenant=deps.tenant,
                 agent_code=agent_code_for_rollback,
                 l1_member=l1_member,
                 l1_global_member=l1_global_member,
@@ -1190,7 +1229,7 @@ async def _hang_for_confirmation(
         redis_client,
         confirmation_id=confirmation_id,
         user_id=deps.user.user_id,
-        tenant_id=deps.tenant_id,
+        tenant=deps.tenant,
         conversation_id=deps.conversation_id or 0,
         tool_call_id=tool_call_id,
         trace_id=deps.trace_id,
@@ -1215,6 +1254,7 @@ async def _hang_for_confirmation(
             conversation_id=deps.conversation_id,
             owner_token=deps.guard_owner_token,
             confirmation_ttl_sec=settings.AI_HITL_PENDING_TTL_SEC,
+            tenant=deps.tenant,
         )
         if not handed_off:
             await _rollback_failed_confirmation_setup(
@@ -1236,7 +1276,7 @@ async def _hang_for_confirmation(
         async with AsyncSessionLocal() as log_db:
             async with log_db.begin():
                 await operation_log_service.attach_confirmation(
-                    log_db, log_id, confirmation_id
+                    log_db, log_id, confirmation_id, tenant=deps.tenant
                 )
                 pending_expires_at = datetime.fromisoformat(
                     payload.expires_at.replace("Z", "+00:00")
@@ -1261,7 +1301,7 @@ async def _hang_for_confirmation(
                         subject_ref=proposal.subject_ref,
                         presentation=proposal.presentation,
                         user_id=deps.user.user_id,
-                        tenant_id=deps.tenant_id,
+                        tenant=deps.tenant,
                         conversation_id=deps.conversation_id or 0,
                         source_user_message_id=deps.source_user_message_id or 0,
                         trace_id=deps.trace_id,
@@ -1337,7 +1377,7 @@ async def _hang_for_confirmation(
                         interaction_flow="direct",
                         requested_outcome="direct",
                         user_id=deps.user.user_id,
-                        tenant_id=deps.tenant_id,
+                        tenant=deps.tenant,
                         conversation_id=deps.conversation_id or 0,
                         source_user_message_id=deps.source_user_message_id or 0,
                         trace_id=deps.trace_id,
@@ -1365,11 +1405,13 @@ async def _hang_for_confirmation(
                         log_db,
                         log_id,
                         durable_action.subject_refs,
+                        tenant=deps.tenant,
                     )
                     payload = await hitl_manager.bind_durable_action(
                         redis_client,
                         confirmation_id,
                         durable_action.action_id,
+                        tenant=deps.tenant,
                     )
     except BaseException:
         await _rollback_failed_confirmation_setup(
@@ -1410,9 +1452,11 @@ async def _hang_for_confirmation(
 
     # 阻塞等待批准、拒绝或超时唤醒。
     try:
-        action = await hitl_manager.hang(confirmation_id)
+        action = await hitl_manager.hang(confirmation_id, tenant=deps.tenant)
     except TimeoutError:
-        terminal = await _get_prepared_action_by_confirmation(confirmation_id)
+        terminal = await _get_prepared_action_by_confirmation(
+            confirmation_id, tenant=deps.tenant
+        )
         if terminal is not None and PreparedActionStatus(terminal.status).is_terminal:
             deps.guard_handoff = False
             return _ConfirmationResolution(
@@ -1433,9 +1477,12 @@ async def _hang_for_confirmation(
                     expected_version=durable_action.row_version,
                     target_status=PreparedActionStatus.EXPIRED,
                     error_code="AI_HITL_EXPIRED",
+                    tenant=deps.tenant,
                 )
                 if transitioned is not None:
-                    await operation_log_service.mark_expired_if_pending(log_db, log_id)
+                    await operation_log_service.mark_expired_if_pending(
+                        log_db, log_id, tenant=deps.tenant
+                    )
                     from app.modules.ai.service.chat_run_service import (  # noqa: PLC0415
                         chat_run_finalizer,
                     )
@@ -1446,15 +1493,18 @@ async def _hang_for_confirmation(
                         ok=False,
                         error_code="AI_HITL_EXPIRED",
                         error_msg="确认已过期，请重新发起",
+                        tenant=deps.tenant,
                     )
-        await hitl_manager.delete_pending(redis_client, confirmation_id)
+        await hitl_manager.delete_pending(
+            redis_client, confirmation_id, tenant=deps.tenant
+        )
         deps.guard_handoff = False
         return None
     else:
         deps.guard_handoff = False
 
     # 用户确认后清 Redis pending
-    await hitl_manager.delete_pending(redis_client, confirmation_id)
+    await hitl_manager.delete_pending(redis_client, confirmation_id, tenant=deps.tenant)
     return _ConfirmationResolution(
         confirmation_id=confirmation_id,
         decision=action,
@@ -1564,7 +1614,9 @@ async def _invoke_tool_fn(
                     approved_business_snapshot=approved_business_snapshot,
                 )
                 # L3 单 tool 超时包装
-                raw = await with_l3_timeout(tool_fn(tool_ctx, **args))
+                raw = await with_l3_timeout(
+                    tool_fn(tool_ctx, **args), tenant=deps.tenant
+                )
                 # 同时兼容完整 ToolResult 和第三方工具返回的裸值。
                 if isinstance(raw, ToolResult):
                     # 业务方已构造完整 ToolResult（builtin tool 新风格）
@@ -1582,7 +1634,13 @@ async def _invoke_tool_fn(
                         scope_bound=meta.projection_kind == "scope_bound"
                     )
                 # 成功后清零相同参数的连续失败计数。
-                await clear_failures(redis_client, user_id, meta.name, args_hash)
+                await clear_failures(
+                    redis_client,
+                    user_id,
+                    meta.name,
+                    args_hash,
+                    tenant=deps.tenant,
+                )
                 # 只读工具缓存白名单筛选条件，供结果卡跳转后恢复页面查询。
                 cache_module = meta.chip_target or meta.query_cache_module
                 if meta.readonly and cache_module and deps.trace_id:
@@ -1602,6 +1660,7 @@ async def _invoke_tool_fn(
                 await decr_quota(
                     redis_client,
                     user_id,
+                    tenant=deps.tenant,
                     agent_code=agent_code_for_rollback,
                     l1_member=l1_member,
                     l1_global_member=l1_global_member,
@@ -1625,7 +1684,9 @@ async def _invoke_tool_fn(
             error_msg=e.message if hasattr(e, "message") else str(e),
         )
     except BusinessException as e:
-        await record_failure(redis_client, user_id, meta.name, args_hash)
+        await record_failure(
+            redis_client, user_id, meta.name, args_hash, tenant=deps.tenant
+        )
         logger.info(
             "tool business exception",
             extra={"user_id": user_id, "tool": meta.name, "error_code": e.error_code},
@@ -1635,7 +1696,9 @@ async def _invoke_tool_fn(
             error_msg=e.message if hasattr(e, "message") else str(e),
         )
     except Exception as e:
-        await record_failure(redis_client, user_id, meta.name, args_hash)
+        await record_failure(
+            redis_client, user_id, meta.name, args_hash, tenant=deps.tenant
+        )
         logger.exception(
             "tool unexpected error",
             extra={"user_id": user_id, "tool": meta.name},
@@ -1687,7 +1750,7 @@ def _safe_write_query_cache(
                 module=cache_module,
                 filters=safe_filters,
                 user_id=user_id,
-                tenant_id=deps.tenant_id,
+                tenant=deps.tenant,
                 agent_code=deps.agent.code if deps.agent else meta.agent,
                 projection=projection,
                 data_scope_hash=deps.data_scope_hash,
@@ -1813,5 +1876,5 @@ async def resume_tool_execution(
         registered, pending.args, deps, args_hash, l1_member=None
     )
     duration_ms = int((time.monotonic() - started_at) * 1000)
-    await _finish_log_final(log_id, result, started_at)
+    await _finish_log_final(log_id, result, started_at, tenant=deps.tenant)
     return result, duration_ms

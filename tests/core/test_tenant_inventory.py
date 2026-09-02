@@ -7,7 +7,14 @@ from app.core.tenant_inventory import (
     load_inventory_table,
 )
 
-EXPECTED_PLAN2_TABLES = {
+EXPECTED_TENANT_TABLES = {
+    "ai_conversation",
+    "ai_message",
+    "ai_prepared_action",
+    "ai_operation_log",
+    "ai_routing_log",
+    "ai_routing_feedback",
+    "tenant_ai_model_policy",
     "sys_user",
     "sys_role",
     "sys_dept",
@@ -43,8 +50,8 @@ def _tenant_leading_keys(table) -> set[tuple[str, ...]]:
     return {key for key in keys if key and key[0] == "tenant_id"}
 
 
-def test_plan2_inventory_is_complete_and_has_no_ambiguous_classification():
-    assert set(TENANT_MODEL_INVENTORY) == EXPECTED_PLAN2_TABLES
+def test_tenant_inventory_is_complete_and_has_no_ambiguous_classification():
+    assert set(TENANT_MODEL_INVENTORY) == EXPECTED_TENANT_TABLES
     assert not (set(TENANT_MODEL_INVENTORY) & set(PLATFORM_GLOBAL_TABLES))
 
 

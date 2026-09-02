@@ -47,6 +47,7 @@ def _log():
 
 
 async def test_owner_without_chat_permission_receives_minimal_status_only() -> None:
+    user = _user()
     with patch(
         "app.modules.ai.api.operation_log.operation_log_service.get_by_tool_call_id",
         AsyncMock(return_value=_log()),
@@ -54,7 +55,8 @@ async def test_owner_without_chat_permission_receives_minimal_status_only() -> N
         result = await get_operation_log(
             tool_call_id="tc_status",
             db=MagicMock(),
-            current_user=_user(),
+            current_user=user,
+            tenant=user._tenant_context,
         )
 
     assert result.data.model_dump(by_alias=True) == {
@@ -66,6 +68,7 @@ async def test_owner_without_chat_permission_receives_minimal_status_only() -> N
 
 
 async def test_trace_auditor_without_chat_permission_keeps_audit_dto() -> None:
+    user = _user("ai:trace:view")
     with patch(
         "app.modules.ai.api.operation_log.operation_log_service.get_by_tool_call_id",
         AsyncMock(return_value=_log()),
@@ -73,7 +76,8 @@ async def test_trace_auditor_without_chat_permission_keeps_audit_dto() -> None:
         result = await get_operation_log(
             tool_call_id="tc_status",
             db=MagicMock(),
-            current_user=_user("ai:trace:view"),
+            current_user=user,
+            tenant=user._tenant_context,
         )
 
     assert result.data.tool_name == "user.update"
@@ -81,6 +85,7 @@ async def test_trace_auditor_without_chat_permission_keeps_audit_dto() -> None:
 
 
 async def test_owner_with_chat_permission_still_needs_projection_lineage() -> None:
+    user = _user("ai:chat:use")
     with (
         patch(
             "app.modules.ai.api.operation_log.operation_log_service.get_by_tool_call_id",
@@ -94,7 +99,8 @@ async def test_owner_with_chat_permission_still_needs_projection_lineage() -> No
         result = await get_operation_log(
             tool_call_id="tc_status",
             db=MagicMock(),
-            current_user=_user("ai:chat:use"),
+            current_user=user,
+            tenant=user._tenant_context,
         )
 
     assert result.data.error_code == "AI_RESULT_PROJECTION_FORBIDDEN"
@@ -102,6 +108,7 @@ async def test_owner_with_chat_permission_still_needs_projection_lineage() -> No
 
 async def test_operation_log_lookup_is_scoped_to_authenticated_tenant() -> None:
     lookup = AsyncMock(return_value=None)
+    user = _user("ai:trace:view")
     with patch(
         "app.modules.ai.api.operation_log.operation_log_service.get_by_tool_call_id",
         lookup,
@@ -110,7 +117,8 @@ async def test_operation_log_lookup_is_scoped_to_authenticated_tenant() -> None:
             await get_operation_log(
                 tool_call_id="tc_status",
                 db=MagicMock(),
-                current_user=_user("ai:trace:view"),
+                current_user=user,
+                tenant=user._tenant_context,
             )
 
-    assert lookup.await_args.kwargs["tenant_id"] == 0
+    assert lookup.await_args.kwargs["tenant"].tenant_id == 0

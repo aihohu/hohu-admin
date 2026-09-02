@@ -11,14 +11,16 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_response import ResponseModel
+from app.core.tenant import TenantContext
 from app.db.session import get_db
-from app.modules.auth.service import get_current_user
+from app.modules.auth.service import get_current_tenant_context, get_current_user
+from app.modules.marketplace.capability import require_marketplace_http_capability
 from app.modules.marketplace.service.contributes_service import (
     contributes_service,
 )
 from app.modules.system.models.user import User
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_marketplace_http_capability)])
 
 
 @router.get(
@@ -29,9 +31,10 @@ router = APIRouter()
 async def get_contributes(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),  # noqa: ARG001
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """读 Redis 缓存，miss 时 aggregate 后写缓存"""
-    cached = await contributes_service.get_cached(tenant_id=0)
+    cached = await contributes_service.get_cached(tenant=tenant)
     if cached is None:
-        cached = await contributes_service.refresh_cache(db, tenant_id=0)
+        cached = await contributes_service.refresh_cache(db, tenant=tenant)
     return ResponseModel.success(data=cached)

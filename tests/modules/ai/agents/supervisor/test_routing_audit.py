@@ -5,8 +5,13 @@ import hashlib
 import pytest
 from sqlalchemy import select
 
+from app.core.tenant import TenantContext
 from app.modules.ai.models.routing_log import AiRoutingLog
 from app.modules.ai.service.routing_log_service import routing_log_service
+
+
+def _tenant(actor_user_id: int) -> TenantContext:
+    return TenantContext(0, "default", actor_user_id, 1, "access_token")
 
 
 @pytest.mark.asyncio
@@ -23,6 +28,7 @@ async def test_log_contains_llm_decision(db_session):
         final_agent="user_mgmt",
         reason="llm_resolved",
         latency_ms=120,
+        tenant=_tenant(1),
     )
     await db_session.commit()
 
@@ -52,6 +58,7 @@ async def test_hash_is_hmac_not_plain(db_session):
         final_agent="shared",
         reason="manual_override",
         latency_ms=0,
+        tenant=_tenant(42),
     )
     await db_session.commit()
 
@@ -98,6 +105,7 @@ async def test_all_request_types_logged(db_session):
             ),
             reason=reason,
             latency_ms=10,
+            tenant=_tenant(1),
         )
     await db_session.commit()
 

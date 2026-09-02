@@ -77,16 +77,27 @@ def _make_ctx(
     allowed_filters: tuple[str, ...] = ("status", "user_gender"),
 ) -> AiToolContext:
     """构造 AiToolContext（参考 test_system_ai_tools.py 同款 fixture）"""
+    actor = MagicMock(user_id=1, tenant_id=0)
+    tenant = tenant_context(tenant_id=0, actor_user_id=1)
+    actor._tenant_context = tenant
     if data_scope is None:
         if visible_user_ids is not None:
             filters = [User.user_id.in_(visible_user_ids)]
         else:
             filters = []
         data_scope = DataScopeContext(
-            tenant_id=0,
+            tenant=tenant,
             accessible_dept_ids=None,
             accessible_user_scope=None,
             filters=filters,
+        )
+    else:
+        data_scope = DataScopeContext(
+            tenant=tenant,
+            accessible_dept_ids=data_scope.accessible_dept_ids,
+            accessible_user_scope=data_scope.accessible_user_scope,
+            filters=data_scope.filters,
+            scope_kinds=data_scope.scope_kinds,
         )
     meta = AiToolMeta(
         name=tool_name,
@@ -96,8 +107,6 @@ def _make_ctx(
         risk="low",
         allowed_filters=allowed_filters,
     )
-    actor = MagicMock(user_id=1, tenant_id=0)
-    actor._tenant_context = tenant_context(tenant_id=0, actor_user_id=1)
     return AiToolContext(
         user=actor,
         perms=set(required_perms),
@@ -105,7 +114,7 @@ def _make_ctx(
         data_scope=data_scope,
         trace_id="tr_test",
         tool_meta=meta,
-        tenant_id=0,
+        tenant=tenant,
     )
 
 
@@ -478,7 +487,7 @@ class TestDryRunUserUpdate:
         """An out-of-scope target must fail before Gateway confirmation."""
         await _add_user(db_session, user_id=4300, user_name="scope-outsider")
         data_scope = DataScopeContext(
-            tenant_id=0,
+            tenant=tenant_context(tenant_id=0, actor_user_id=1),
             accessible_dept_ids=set(),
             accessible_user_scope=select(User.user_id).where(User.user_id == -1),
             filters=[User.user_id == -1],

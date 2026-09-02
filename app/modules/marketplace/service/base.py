@@ -15,17 +15,17 @@ from typing import TypeVar
 from sqlalchemy import select
 from sqlalchemy.sql import Select
 
+from app.core.tenant import TenantContext
 from app.db.base import Base
+from app.modules.marketplace.capability import require_marketplace_capability
 
 ModelT = TypeVar("ModelT", bound=Base)
 
 
 class MarketplaceBaseService:
-    """市场 Service 基类，自动注入 tenant_id 过滤"""
+    """无状态市场 Service 基类，使用可信上下文注入 tenant scope。"""
 
-    def __init__(self, tenant_id: int = 0):
-        self.tenant_id = tenant_id
-
-    def scoped(self, model: type[ModelT]) -> Select:
+    def scoped(self, model: type[ModelT], *, tenant: TenantContext) -> Select:
         """所有 select 必须包一层，强制 tenant_id 过滤"""
-        return select(model).where(model.tenant_id == self.tenant_id)
+        require_marketplace_capability(tenant)
+        return select(model).where(model.tenant_id == tenant.tenant_id)

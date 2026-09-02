@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.tenant import TenantContext
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.routing_feedback import AiRoutingFeedback
 from app.modules.ai.schemas.routing_feedback import (
@@ -21,7 +22,9 @@ from app.modules.system.models.user import User
 
 
 class RoutingFeedbackQueryService:
-    async def summary(self, db: AsyncSession, days: int) -> FeedbackSummary:
+    async def summary(
+        self, db: AsyncSession, days: int, *, tenant: TenantContext
+    ) -> FeedbackSummary:
         """汇总 total、correct、wrong、wrongRate 和 topWrongAgents。
 
         决策 #21：topCorrected 并列时按 corrected_agent code ASC 取首.
@@ -29,7 +32,10 @@ class RoutingFeedbackQueryService:
         """
         cutoff = datetime.now() - timedelta(days=days)
 
-        base = select(AiRoutingFeedback).where(AiRoutingFeedback.create_time >= cutoff)
+        base = select(AiRoutingFeedback).where(
+            AiRoutingFeedback.tenant_id == tenant.tenant_id,
+            AiRoutingFeedback.create_time >= cutoff,
+        )
 
         # total / correct / wrong
         rows = (await db.execute(base)).scalars().all()
@@ -112,11 +118,15 @@ class RoutingFeedbackQueryService:
         feedback: str,
         original_agent: str | None,
         corrected_agent: str | None,
+        tenant: TenantContext,
     ) -> tuple[list[FeedbackListItem], int]:
         """分页查询反馈明细，feedback 支持 wrong 或 all，默认 wrong。"""
         cutoff = datetime.now() - timedelta(days=days)
 
-        conditions = [AiRoutingFeedback.create_time >= cutoff]
+        conditions = [
+            AiRoutingFeedback.tenant_id == tenant.tenant_id,
+            AiRoutingFeedback.create_time >= cutoff,
+        ]
         if feedback != "all":
             conditions.append(AiRoutingFeedback.feedback == feedback)
         if original_agent:
@@ -127,7 +137,11 @@ class RoutingFeedbackQueryService:
         # join sys_user 取 user_name
         stmt = (
             select(AiRoutingFeedback, User.user_name)
-            .outerjoin(User, User.user_id == AiRoutingFeedback.user_id)
+            .outerjoin(
+                User,
+                (User.tenant_id == AiRoutingFeedback.tenant_id)
+                & (User.user_id == AiRoutingFeedback.user_id),
+            )
             .where(*conditions)
             .order_by(desc(AiRoutingFeedback.feedback_id))
             .offset((current - 1) * size)

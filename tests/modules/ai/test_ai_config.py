@@ -6,6 +6,7 @@ Redis 用 db_session fixture 提供的真实 DB（清 ai:* sys_config 行隔离�
 
 # ruff: noqa: ARG001, PLC0415
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, patch
 
@@ -154,6 +155,23 @@ class TestGetAiConfigStrList:
         # 第二次走缓存，DB 只查 1 次
         assert mock_get.call_count == 1
 
+    async def test_cached_list_is_not_mutable_shared_state(self, db_session) -> None:
+        from app.modules.ai.agents.safety.ai_config import get_ai_config_str_list
+
+        with patch(
+            "app.modules.ai.agents.safety.ai_config.config_service.get_value",
+            new=AsyncMock(return_value='["safe_tool"]'),
+        ):
+            first = await get_ai_config_str_list(
+                db_session, "ai:test:list_copy", [], tenant=TENANT
+            )
+            first.append("injected_tool")
+            second = await get_ai_config_str_list(
+                db_session, "ai:test:list_copy", [], tenant=TENANT
+            )
+
+        assert second == ["safe_tool"]
+
     async def test_force_refresh_bypasses_cache(self, db_session) -> None:
         from app.modules.ai.agents.safety.ai_config import get_ai_config_str_list
 
@@ -174,6 +192,34 @@ class TestGetAiConfigStrList:
 
 
 class TestInvalidateCache:
+    async def test_invalidation_prevents_stale_inflight_repopulation(
+        self, db_session
+    ) -> None:
+        from app.modules.ai.agents.safety import ai_config
+        from app.modules.ai.agents.safety.ai_config import (
+            get_ai_config_int,
+            invalidate_ai_config_cache,
+        )
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_get(*_args, **_kwargs):
+            started.set()
+            await release.wait()
+            return "7"
+
+        with patch.object(ai_config.config_service, "get_value", side_effect=slow_get):
+            pending = asyncio.create_task(
+                get_ai_config_int(db_session, "ai:race", 1, tenant=TENANT)
+            )
+            await started.wait()
+            invalidate_ai_config_cache("ai:race")
+            release.set()
+            assert await pending == 7
+
+        assert (TENANT.tenant_id, "ai:race") not in ai_config._cache
+
     def test_clears_only_matching_prefix(self) -> None:
         from app.modules.ai.agents.safety import ai_config
         from app.modules.ai.agents.safety.ai_config import invalidate_ai_config_cache

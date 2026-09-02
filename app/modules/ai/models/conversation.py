@@ -4,10 +4,12 @@ from typing import TYPE_CHECKING
 from sqlalchemy import (
     BigInteger,
     DateTime,
-    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
     SmallInteger,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -21,13 +23,37 @@ if TYPE_CHECKING:
 
 class AiConversation(Base):
     __tablename__ = "ai_conversation"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "conversation_id",
+            name="uq_ai_conversation_tenant_conversation_id",
+        ),
+        ForeignKeyConstraint(
+            ("tenant_id", "user_id"),
+            ("sys_user.tenant_id", "sys_user.user_id"),
+            name="fk_ai_conversation_tenant_user",
+            ondelete="CASCADE",
+        ),
+        Index(
+            "ix_ai_conversation_tenant_user_updated",
+            "tenant_id",
+            "user_id",
+            "update_time",
+            "conversation_id",
+        ),
+    )
 
     conversation_id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, default=next_id, comment="会话ID"
     )
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        comment="租户ID；必须由可信 TenantContext 显式写入",
+    )
     user_id: Mapped[int] = mapped_column(
         BigInteger,
-        ForeignKey("sys_user.user_id", ondelete="CASCADE"),
         nullable=False,
         comment="所属用户",
     )

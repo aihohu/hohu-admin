@@ -3,10 +3,10 @@ from sqlalchemy.exc import IntegrityError
 
 from app.core.exceptions import DuplicateException, NotFoundException
 from app.core.id_generator import next_id
-from app.modules.marketplace.models import App
+from app.modules.marketplace.models import App, AppRating
 from app.modules.marketplace.schemas.rating import RatingCreate
-from app.modules.marketplace.service.rating_service import rating_service
 from app.modules.system.models import User
+from modules.marketplace import default_rating_service as rating_service
 
 
 async def _create_user(db_session, name: str) -> User:
@@ -130,12 +130,11 @@ class TestRatingService:
 
         # 让预检 scalar_one_or_none 返回 None（模拟并发场景下两请求都通过预检）
         original_execute = db_session.execute
-        call_count = [0]
 
         async def patched_execute(stmt):
-            call_count[0] += 1
-            # 第一次 execute 是预检 select(AppRating)
-            if call_count[0] == 1:
+            # 父应用租户校验会先查询 App；只拦截评分预检查询。
+            entity = stmt.column_descriptions[0].get("entity")
+            if entity is AppRating:
 
                 class MockResult:
                     def scalar_one_or_none(self):

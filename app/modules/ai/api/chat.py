@@ -34,7 +34,7 @@ from app.core.base_response import ResponseModel
 from app.core.config import settings
 from app.core.exceptions import AuthorizationException, BusinessRuleException
 from app.core.redis import redis_client
-from app.core.tenant import resolve_tenant_id
+from app.core.tenant import TenantContext, get_bound_tenant_context
 from app.db.session import get_db
 from app.modules.ai.agents.hitl.events import (
     AiErrorEvent,
@@ -282,6 +282,7 @@ async def _finalize_stream_turn(
     stream_error_code: str | None,
     lineage: ProjectionLineage | None = None,
     projection_dependency_message_ids: list[int] | tuple[int, ...] = (),
+    tenant: TenantContext,
 ) -> list[AiStreamEvent]:
     """建立 durability barrier：assistant/terminal commit 完成后才构造 done。"""
     if stream_error_code is not None:
@@ -313,6 +314,7 @@ async def _finalize_stream_turn(
             agent_code=agent_code,
             lineage=lineage,
             projection_dependency_message_ids=projection_dependency_message_ids,
+            tenant=tenant,
         )
         await db.commit()
     except Exception:
@@ -361,6 +363,7 @@ async def _emit_safety_blocked(
     error_code: str,
     error_msg: str,
     accept: str = SSE_CONTENT_TYPE,
+    tenant: TenantContext,
 ) -> StreamingResponse:
     """安全检查短路时统一写路由日志并发送 ``AiErrorEvent``。
 
@@ -382,6 +385,7 @@ async def _emit_safety_blocked(
         final_agent=None,
         reason="safety_blocked",
         latency_ms=0,
+        tenant=tenant,
     )
     await db.commit()
 
@@ -416,7 +420,7 @@ async def list_chat_models(
 ) -> ResponseModel[list[ModelOption]]:
     items = await model_authorization_service.list_model_options(
         db,
-        tenant_id=resolve_tenant_id(current_user),
+        tenant=get_bound_tenant_context(current_user),
     )
     return ResponseModel.success(data=items)
 
@@ -438,6 +442,7 @@ async def chat(
     """
     # 读取原始 body（只能读一次）
     raw_body = await request.body()
+    tenant = get_bound_tenant_context(_current_user)
 
     # 解析 JSON
     body = json.loads(raw_body) if raw_body else {}
@@ -528,18 +533,23 @@ async def chat(
     projection_dependency_message_ids: list[int] = []
     if conversation_id:
         conv = await conversation_service.get_by_id(
-            db, int(conversation_id), _current_user.user_id
+            db,
+            int(conversation_id),
+            _current_user.user_id,
+            tenant=tenant,
         )
         projection_dependency_message_ids = (
             await result_projection_service.collect_message_projection_dependencies(
                 db,
                 conversation_id=int(conversation_id),
+                tenant=tenant,
             )
         )
         await chat_service.ensure_trace_available(
             db,
             conversation_id=conversation_id,
             trace_id=trace_id,
+            tenant=tenant,
         )
 
     model_was_supplied = "modelId" in body or "model_id" in body
@@ -563,7 +573,7 @@ async def chat(
         selected_model = await model_authorization_service.authorize_chat_model(
             db,
             model_name,
-            tenant_id=resolve_tenant_id(_current_user),
+            tenant=tenant,
         )
         model_name = str(selected_model.model.model_id)
 
@@ -600,6 +610,7 @@ async def chat(
             final_agent=None,
             reason="agent_load_failed",
             latency_ms=0,
+            tenant=tenant,
         )
         await db.commit()
 
@@ -662,7 +673,9 @@ async def chat(
             )
 
     # 用户被自动禁用时发送 ai_error 和 done，并结束流。
-    if await check_user_disabled(redis_client, _current_user.user_id):
+    if await check_user_disabled(
+        redis_client, _current_user.user_id, tenant=deps.tenant
+    ):
         logger.warning(
             "user auto-disabled blocked chat",
             extra={
@@ -719,6 +732,7 @@ async def chat(
                 user_message=user_message,
                 error_code="AI_KEYWORD_BLOCKED",
                 error_msg="消息含敏感词，已被管理员配置拦截，请修改后再试",
+                tenant=deps.tenant,
             )
 
     # 主题级黑名单用于拦截政治、宗教、竞品对比等受限主题。
@@ -745,6 +759,7 @@ async def chat(
                 user_message=user_message,
                 error_code="AI_FORBIDDEN_TOPIC",
                 error_msg="消息涉及禁讨论主题，请修改后再试",
+                tenant=deps.tenant,
             )
 
     # URL 域名黑名单用于拦截竞品或恶意网站。
@@ -771,19 +786,24 @@ async def chat(
                 user_message=user_message,
                 error_code="AI_FORBIDDEN_URL",
                 error_msg="消息含禁访问的链接，请删除后重试",
+                tenant=deps.tenant,
             )
 
     # Prompt injection 检测结果持久化到会话级，跨轮次生效。
     # 流程：
     #   1. 本轮 detect_injection（仅扫当前 user message）
-    #   2. 命中 → 写 Redis ai:injection_hit:{conversation_id} TTL 1h
+    #   2. 命中 → 写 tenant-scoped conversation flag，TTL 1h
     #   3. is_injection_hit_conversation 读历史 → deps.injection_hit = 本轮 OR 历史
     # 这样攻击者拆分注入到多轮（每轮只触发 1 个 pattern）也会被 conversation
     # 级 flag 兜住，后续轮次 tool 调用强制 HITL。
     current_hit = detect_injection(user_message)
     if current_hit and conversation_id is not None:
-        await record_injection_hit_conversation(redis_client, conversation_id)
-    history_hit = await is_injection_hit_conversation(redis_client, conversation_id)
+        await record_injection_hit_conversation(
+            redis_client, conversation_id, tenant=deps.tenant
+        )
+    history_hit = await is_injection_hit_conversation(
+        redis_client, conversation_id, tenant=deps.tenant
+    )
     deps.injection_hit = current_hit or history_hit
 
     if deps.injection_hit:
@@ -894,7 +914,7 @@ async def chat(
                         db,
                         user_message,
                         candidates,
-                        tenant_id=deps.tenant_id,
+                        tenant=deps.tenant,
                     )
                     routing_latency_ms = int((time.monotonic() - start) * 1000)
 
@@ -941,7 +961,7 @@ async def chat(
             selected_model = await model_authorization_service.authorize_chat_model(
                 db,
                 model_ref,
-                tenant_id=deps.tenant_id,
+                tenant=deps.tenant,
             )
         model_name = str(selected_model.model.model_id)
         if conv is not None and conv.model_name != model_name:
@@ -963,6 +983,7 @@ async def chat(
         final_agent=final_agent_code,
         reason=route_reason,
         latency_ms=routing_latency_ms,
+        tenant=deps.tenant,
     )
     # success path 立即提交，避免后续 attach_trace_to_conversation 失败时丢日志
     if not routing_failed and clarification_payload is None:
@@ -1040,7 +1061,7 @@ async def chat(
                 db,
                 conversation_id=conversation_id,
                 user_id=_current_user.user_id,
-                tenant_id=deps.tenant_id,
+                tenant=deps.tenant,
             )
         )
         if action_in_progress:
@@ -1055,6 +1076,7 @@ async def chat(
             redis_client,
             conversation_id=conversation_id,
             owner_token=guard_owner_token,
+            tenant=deps.tenant,
         )
         if not acquired:
             exc = BusinessRuleException(
@@ -1069,7 +1091,7 @@ async def chat(
                 db,
                 conversation_id=conversation_id,
                 user_id=_current_user.user_id,
-                tenant_id=deps.tenant_id,
+                tenant=deps.tenant,
             )
         )
         if action_in_progress:
@@ -1077,6 +1099,7 @@ async def chat(
                 redis_client,
                 conversation_id=conversation_id,
                 owner_token=guard_owner_token,
+                tenant=deps.tenant,
             )
             exc = BusinessRuleException(
                 "该会话仍有待确认或正在执行的操作",
@@ -1101,13 +1124,17 @@ async def chat(
                 parts=persist_parts,
                 agent_code=deps.agent.code,
                 trace_id=deps.trace_id,
-                tenant_id=deps.tenant_id,
+                tenant=deps.tenant,
             )
             deps.source_user_message_id = source_message.message_id
 
         # 将 trace_id 和 agent_code 写入会话，供追踪和粘滞路由使用。
         await chat_service.attach_trace_to_conversation(
-            db, conversation_id, deps.agent.code, deps.trace_id
+            db,
+            conversation_id,
+            deps.agent.code,
+            deps.trace_id,
+            tenant=deps.tenant,
         )
         await db.commit()
     except Exception:
@@ -1117,6 +1144,7 @@ async def chat(
                 redis_client,
                 conversation_id=conversation_id,
                 owner_token=guard_owner_token,
+                tenant=deps.tenant,
             )
         raise
 
@@ -1258,6 +1286,7 @@ async def chat(
                         ttl_sec=_run_guard_heartbeat_ttl(
                             pending_handoff=deps.guard_handoff
                         ),
+                        tenant=deps.tenant,
                     )
                 except Exception:
                     logger.exception(
@@ -1324,6 +1353,7 @@ async def chat(
                         redis_client,
                         conversation_id=saved_conversation_id,
                         owner_token=guard_owner_token,
+                        tenant=deps.tenant,
                     )
                 except Exception:
                     logger.exception(
@@ -1346,7 +1376,7 @@ async def chat(
                     stream_error_code=stream_error_code,
                     lineage=(
                         result_projection_service.freeze_lineage(
-                            tenant_id=deps.tenant_id,
+                            tenant=deps.tenant,
                             agent_code=deps.agent.code,
                             tool_codes=projection_snapshot[0],
                             subject_refs=projection_snapshot[1],
@@ -1363,6 +1393,7 @@ async def chat(
                     projection_dependency_message_ids=(
                         projection_dependency_message_ids
                     ),
+                    tenant=deps.tenant,
                 )
             else:
                 terminal_events = [
@@ -1387,6 +1418,7 @@ async def chat(
                         redis_client,
                         conversation_id=saved_conversation_id,
                         owner_token=guard_owner_token,
+                        tenant=deps.tenant,
                     )
                 except Exception:
                     logger.exception(

@@ -8,10 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessRuleException
 from app.core.security import decrypt_value
-from app.core.tenant import DEFAULT_TENANT_ID
+from app.core.tenant import TenantContext
 from app.modules.ai.core.provider_egress import provider_egress
 from app.modules.ai.core.provider_registry import create_model
 from app.modules.ai.models.model import AiModel
+from app.modules.ai.models.model_policy import TenantAiModelPolicy
 from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.schemas.model import ModelOption
 
@@ -36,20 +37,27 @@ class ModelAuthorizationService:
         self,
         db: AsyncSession,
         *,
-        tenant_id: int,
+        tenant: TenantContext,
     ) -> list[tuple[AiModel, AiProvider]]:
-        # 当前认证域为单租户；拒绝客户端或非可信上下文注入其它租户。
-        if tenant_id != DEFAULT_TENANT_ID:
-            return []
         rows = (
             await db.execute(
                 select(AiModel, AiProvider)
+                .join(
+                    TenantAiModelPolicy,
+                    TenantAiModelPolicy.model_id == AiModel.model_id,
+                )
                 .join(AiProvider, AiModel.provider_id == AiProvider.provider_id)
                 .where(
+                    TenantAiModelPolicy.tenant_id == tenant.tenant_id,
+                    TenantAiModelPolicy.enabled.is_(True),
                     AiModel.is_enabled.is_(True),
                     AiProvider.is_enabled.is_(True),
                 )
-                .order_by(AiModel.sort_order, AiModel.model_id)
+                .order_by(
+                    TenantAiModelPolicy.is_default.desc(),
+                    AiModel.sort_order,
+                    AiModel.model_id,
+                )
             )
         ).all()
         text_rows = [
@@ -80,10 +88,10 @@ class ModelAuthorizationService:
         db: AsyncSession,
         model_ref: str | None,
         *,
-        tenant_id: int,
+        tenant: TenantContext,
     ) -> AuthorizedChatModel:
         """选择启用且具 text 能力的模型；显式无效值绝不降级。"""
-        rows = await self._available_rows(db, tenant_id=tenant_id)
+        rows = await self._available_rows(db, tenant=tenant)
         if model_ref is None:
             if not rows:
                 raise self._not_available()
@@ -103,9 +111,9 @@ class ModelAuthorizationService:
         self,
         db: AsyncSession,
         *,
-        tenant_id: int,
+        tenant: TenantContext,
     ) -> list[ModelOption]:
-        rows = await self._available_rows(db, tenant_id=tenant_id)
+        rows = await self._available_rows(db, tenant=tenant)
         return [
             ModelOption(
                 model_id=model.model_id,
@@ -131,12 +139,12 @@ class ModelAuthorizationService:
         db: AsyncSession,
         model_ref: str | None,
         *,
-        tenant_id: int,
+        tenant: TenantContext,
     ):
         selected = await self.authorize_chat_model(
             db,
             model_ref,
-            tenant_id=tenant_id,
+            tenant=tenant,
         )
         return self.create_model_instance(selected)
 

@@ -7,11 +7,12 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
-    ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -27,12 +28,24 @@ if TYPE_CHECKING:
 class AiMessage(Base):
     __tablename__ = "ai_message"
     __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "message_id",
+            name="uq_ai_message_tenant_message_id",
+        ),
+        ForeignKeyConstraint(
+            ("tenant_id", "conversation_id"),
+            ("ai_conversation.tenant_id", "ai_conversation.conversation_id"),
+            name="fk_ai_message_tenant_conversation",
+            ondelete="CASCADE",
+        ),
         CheckConstraint(
             "routing_feedback IS NULL OR routing_feedback IN ('correct', 'wrong')",
             name="ck_ai_message_routing_feedback",
         ),
         Index(
             "ix_ai_message_active_history",
+            "tenant_id",
             "conversation_id",
             "create_time",
             "message_id",
@@ -40,12 +53,17 @@ class AiMessage(Base):
         ),
         Index(
             "uq_ai_message_assistant_run",
+            "tenant_id",
             "conversation_id",
             "trace_id",
             unique=True,
             postgresql_where=text("role = 'assistant' AND trace_id IS NOT NULL"),
         ),
-        Index("ix_ai_message_supersedes_message_id", "supersedes_message_id"),
+        Index(
+            "ix_ai_message_tenant_supersedes",
+            "tenant_id",
+            "supersedes_message_id",
+        ),
     )
 
     message_id: Mapped[int] = mapped_column(
@@ -53,7 +71,6 @@ class AiMessage(Base):
     )
     conversation_id: Mapped[int] = mapped_column(
         BigInteger,
-        ForeignKey("ai_conversation.conversation_id", ondelete="CASCADE"),
         nullable=False,
         comment="所属会话",
     )
@@ -102,7 +119,11 @@ class AiMessage(Base):
         nullable=True,
         comment="本条消息实际处理的 Agent code，用于按消息粒度还原 Agent",
     )
-    tenant_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        comment="租户ID；必须与所属会话一致",
+    )
     tool_codes: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     subject_refs: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
     subject_refs_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)

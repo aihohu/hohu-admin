@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import redis.asyncio as aioredis
 from sqlalchemy import select, text
+from tenant_helpers import tenant_context
 
 from app.core import redis as redis_module
 from app.core.config import settings
@@ -69,6 +70,7 @@ async def clean_env(monkeypatch):
         "ai:quota:*",
         "ai:failures:*",
         "ai:query_cache:*",
+        "ai:tenant:*",
     ]:
         keys = await redis_module.redis_client.keys(pattern)
         if keys:
@@ -103,6 +105,7 @@ async def clean_env(monkeypatch):
         "ai:quota:*",
         "ai:failures:*",
         "ai:query_cache:*",
+        "ai:tenant:*",
     ]:
         keys = await redis_module.redis_client.keys(pattern)
         if keys:
@@ -351,9 +354,10 @@ def _build_deps(
     """构造测试 ChatDeps（mock user + 空 data_scope）"""
     user = MagicMock()
     user.user_id = 9001
+    tenant = tenant_context(tenant_id=77, actor_user_id=user.user_id)
 
     data_scope = DataScopeContext(
-        tenant_id=0,
+        tenant=tenant,
         accessible_dept_ids=None,
         accessible_user_scope=None,
         filters=[],
@@ -369,7 +373,7 @@ def _build_deps(
         data_scope=data_scope,
         agent=agent,
         trace_id="tr_test_001",
-        tenant_id=77,
+        tenant=tenant,
         conversation_id=100,
         source_user_message_id=101,
         signal_event=signal_event,
@@ -739,10 +743,10 @@ class TestPreparedPreviewOnlyFlow:
         assert not direct_execute.ok
         assert direct_execute.error_code == "AI_PREPARED_ACTION_REQUIRED"
 
-        async def fake_hang(confirmation_id, *, timeout_sec=None):
+        async def fake_hang(confirmation_id, *, tenant, timeout_sec=None):
             return ConfirmAction.REJECTED
 
-        async def fake_terminal_result(confirmation_id):
+        async def fake_terminal_result(confirmation_id, *, tenant):
             return ToolResult.failure("USER_REJECTED", "cancelled"), 0
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
@@ -825,6 +829,7 @@ class TestHitlFlow:
         delete_pending.assert_awaited_once()
         release.assert_awaited_once_with(
             redis_module.redis_client,
+            tenant=deps.tenant,
             conversation_id=100,
             owner_token="guard-owner-test",
         )
@@ -873,10 +878,10 @@ class TestHitlFlow:
         """一次明确的执行意图即可进入 HITL。"""
         _register_test_tools()
 
-        async def fake_hang(confirmation_id, *, timeout_sec=None):
+        async def fake_hang(confirmation_id, *, tenant, timeout_sec=None):
             return ConfirmAction.APPROVED
 
-        async def fake_terminal_result(confirmation_id):
+        async def fake_terminal_result(confirmation_id, *, tenant):
             return ToolResult.success({"successCount": 2}), 1
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
@@ -968,10 +973,10 @@ class TestHitlFlow:
         """high risk + count=None（无 dry_run_fn）→ HITL，mock hang 立即 APPROVED"""
         _register_test_tools()
 
-        async def fake_hang(confirmation_id, *, timeout_sec=None):
+        async def fake_hang(confirmation_id, *, tenant, timeout_sec=None):
             return ConfirmAction.APPROVED
 
-        async def fake_terminal_result(confirmation_id):
+        async def fake_terminal_result(confirmation_id, *, tenant):
             return ToolResult.success({"echo": {"x": 1}}), 1
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
@@ -1048,7 +1053,7 @@ class TestHitlFlow:
     ) -> None:
         _register_test_tools()
 
-        async def fake_hang(confirmation_id, *, timeout_sec=None):
+        async def fake_hang(confirmation_id, *, tenant, timeout_sec=None):
             return ConfirmAction.REJECTED
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
@@ -1085,7 +1090,7 @@ class TestHitlFlow:
     ) -> None:
         _register_test_tools()
 
-        async def fake_hang(confirmation_id, *, timeout_sec=None):
+        async def fake_hang(confirmation_id, *, tenant, timeout_sec=None):
             return ConfirmAction.REJECTED
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
@@ -1130,10 +1135,10 @@ class TestHitlFlow:
         """HITL reject → USER_REJECTED + log status=rejected"""
         _register_test_tools()
 
-        async def fake_hang(confirmation_id, *, timeout_sec=None):
+        async def fake_hang(confirmation_id, *, tenant, timeout_sec=None):
             return ConfirmAction.REJECTED
 
-        async def fake_terminal_result(confirmation_id):
+        async def fake_terminal_result(confirmation_id, *, tenant):
             return ToolResult.failure("USER_REJECTED", "cancelled"), 0
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
@@ -1152,7 +1157,7 @@ class TestHitlFlow:
         """HITL 超时 → AI_HITL_EXPIRED + log status=expired"""
         _register_test_tools()
 
-        async def fake_hang(confirmation_id, *, timeout_sec=None):
+        async def fake_hang(confirmation_id, *, tenant, timeout_sec=None):
             raise TimeoutError("test timeout")
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
@@ -1187,7 +1192,7 @@ class TestHitlFlow:
         """confirmation_required exposes an action and safe DTO, never raw args."""
         _register_test_tools()
 
-        async def fake_hang(confirmation_id, *, timeout_sec=None):
+        async def fake_hang(confirmation_id, *, tenant, timeout_sec=None):
             return ConfirmAction.REJECTED
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
@@ -1241,7 +1246,9 @@ class TestQueryCacheWrite:
 
         from app.modules.ai.agents.hitl.query_cache import get_query_cache
 
-        entry = await get_query_cache(redis_module.redis_client, deps.trace_id)
+        entry = await get_query_cache(
+            redis_module.redis_client, deps.trace_id, tenant=deps.tenant
+        )
         assert entry is not None
         assert entry.tool_name == _TEST_TOOL_READONLY
         assert entry.module == "system/user"
@@ -1264,7 +1271,9 @@ class TestQueryCacheWrite:
 
         from app.modules.ai.agents.hitl.query_cache import get_query_cache
 
-        entry = await get_query_cache(redis_module.redis_client, deps.trace_id)
+        entry = await get_query_cache(
+            redis_module.redis_client, deps.trace_id, tenant=deps.tenant
+        )
         assert entry is None  # 没写
 
 
@@ -1462,7 +1471,7 @@ class TestPerAgentQuota:
 
         date_str = datetime.now(UTC).strftime("%Y%m%d")
         exists = await redis_module.redis_client.exists(
-            f"ai:quota:9001:shared:{date_str}"
+            f"ai:tenant:77:quota:9001:shared:{date_str}"
         )
         assert exists == 0  # per-agent key 未写
 
@@ -1476,19 +1485,21 @@ class TestPerAgentQuota:
         agent.code = "shared"
         agent.enabled = True
         agent.daily_quota_per_user = 5
+        tenant = tenant_context(actor_user_id=user.user_id)
 
         deps = ChatDeps(
             user=user,
             perms={"*"},
             db=MagicMock(),
             data_scope=DataScopeContext(
-                tenant_id=0,
+                tenant=tenant,
                 accessible_dept_ids=None,
                 accessible_user_scope=None,
                 filters=[],
             ),
             agent=agent,
             trace_id="tr_test_agent_pass",
+            tenant=tenant,
             conversation_id=400,
             source_user_message_id=401,
             resolved_model_id=7001,
@@ -1500,7 +1511,7 @@ class TestPerAgentQuota:
         # 但 high risk + dry_run_count=None → HITL 路径，等 confirm → expired。
         # 解决：换用 _TEST_TOOL_HIGH 但工具内部已 self-contained，HITL expired 是预期。
         # 这里只验证 per-agent key 在 quota check 阶段已被写入（即使最终 HITL expired）。
-        async def expire_immediately(confirmation_id, *, timeout_sec=None):
+        async def expire_immediately(confirmation_id, *, tenant, timeout_sec=None):
             raise TimeoutError("quota test does not wait for human input")
 
         monkeypatch.setattr(hitl_manager, "hang", expire_immediately)
@@ -1516,7 +1527,10 @@ class TestPerAgentQuota:
 
         date_str = datetime.now(UTC).strftime("%Y%m%d")
         agent_count = int(
-            await redis_module.redis_client.get(f"ai:quota:9004:shared:{date_str}") or 0
+            await redis_module.redis_client.get(
+                f"ai:tenant:0:quota:9004:shared:{date_str}"
+            )
+            or 0
         )
         assert agent_count == 1, f"per-agent L2 应 INCR 1 次，got {agent_count}"
 
@@ -1534,19 +1548,21 @@ class TestPerAgentQuota:
         agent.code = "shared"
         agent.enabled = True
         agent.daily_quota_per_user = 1
+        tenant = tenant_context(actor_user_id=user.user_id)
 
         deps = ChatDeps(
             user=user,
             perms={"*"},
             db=MagicMock(),
             data_scope=DataScopeContext(
-                tenant_id=0,
+                tenant=tenant,
                 accessible_dept_ids=None,
                 accessible_user_scope=None,
                 filters=[],
             ),
             agent=agent,
             trace_id="tr_test_agent_full",
+            tenant=tenant,
             conversation_id=500,
         )
 
@@ -1554,7 +1570,13 @@ class TestPerAgentQuota:
         from app.core import redis as redis_module
         from app.modules.ai.agents.gateway import check_l2_agent_quota
 
-        await check_l2_agent_quota(redis_module.redis_client, 9005, "shared", limit=1)
+        await check_l2_agent_quota(
+            redis_module.redis_client,
+            9005,
+            "shared",
+            tenant=tenant,
+            limit=1,
+        )
 
         # 现在 per-agent 已满，high-risk tool 应被拦
         result = await execute_tool(_TEST_TOOL_HIGH, {"x": 1}, deps)

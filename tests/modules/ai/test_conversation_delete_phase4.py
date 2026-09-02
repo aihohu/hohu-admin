@@ -3,6 +3,7 @@
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
+from tenant_helpers import bind_test_user
 
 from app.core.exceptions import NotFoundException
 from app.modules.ai.models.conversation import AiConversation
@@ -23,7 +24,12 @@ async def test_conversation_delete_is_soft_and_hidden_from_owner_reads(
     owner = (
         await db_session.execute(select(User).where(User.user_name == "admin"))
     ).scalar_one()
-    conversation = AiConversation(user_id=owner.user_id, title="phase4 soft delete")
+    tenant = bind_test_user(owner)
+    conversation = AiConversation(
+        tenant_id=tenant.tenant_id,
+        user_id=owner.user_id,
+        title="phase4 soft delete",
+    )
     db_session.add(conversation)
     await db_session.flush()
 
@@ -31,6 +37,7 @@ async def test_conversation_delete_is_soft_and_hidden_from_owner_reads(
         db_session,
         conversation.conversation_id,
         owner.user_id,
+        tenant=tenant,
     )
     await db_session.flush()
 
@@ -43,6 +50,7 @@ async def test_conversation_delete_is_soft_and_hidden_from_owner_reads(
             db_session,
             conversation.conversation_id,
             owner.user_id,
+            tenant=tenant,
         )
     except NotFoundException as exc:
         assert exc.error_code == "AI_CONVERSATION_NOT_FOUND"
@@ -58,10 +66,16 @@ async def test_confirmation_context_ignores_soft_deleted_conversation(
     owner = (
         await db_session.execute(select(User).where(User.user_name == "admin"))
     ).scalar_one()
-    conversation = AiConversation(user_id=owner.user_id, title="phase4 confirm fence")
+    tenant = bind_test_user(owner)
+    conversation = AiConversation(
+        tenant_id=tenant.tenant_id,
+        user_id=owner.user_id,
+        title="phase4 confirm fence",
+    )
     db_session.add(conversation)
     await db_session.flush()
     source = AiMessage(
+        tenant_id=tenant.tenant_id,
         conversation_id=conversation.conversation_id,
         role="user",
         message_type="text",
@@ -85,7 +99,7 @@ async def test_confirmation_context_ignores_soft_deleted_conversation(
         interaction_flow="direct",
         requested_outcome="direct",
         user_id=owner.user_id,
-        tenant_id=0,
+        tenant=tenant,
         conversation_id=conversation.conversation_id,
         source_user_message_id=source.message_id,
         trace_id="tr_phase4_soft_delete",
@@ -100,6 +114,7 @@ async def test_confirmation_context_ignores_soft_deleted_conversation(
     context = await prepared_action_service.lock_confirmation_context(
         db_session,
         confirmation_id=action.confirmation_id,
+        tenant=tenant,
     )
 
     assert context is None

@@ -7,7 +7,7 @@ from app.modules.marketplace.exceptions import (
 )
 from app.modules.marketplace.models import App
 from app.modules.marketplace.schemas.app import AppQuery
-from app.modules.marketplace.service.app_service import app_service
+from modules.marketplace import default_app_service as app_service
 
 
 class TestAppService:

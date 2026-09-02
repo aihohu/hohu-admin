@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 import pytest
 
@@ -148,14 +148,14 @@ async def test_delete_conversation_terminalizes_actions_before_delete() -> None:
         response = await delete_conversation(8001, db, current_user)
 
     assert response.code == 200
-    lock_for_delete.assert_awaited_once_with(db, 8001, 7001)
+    lock_for_delete.assert_awaited_once_with(db, 8001, 7001, tenant=ANY)
     expire.assert_awaited_once_with(
         db,
         conversation_id=8001,
         user_id=7001,
-        tenant_id=0,
+        tenant=ANY,
     )
-    delete.assert_awaited_once_with(db, 8001, 7001)
+    delete.assert_awaited_once_with(db, 8001, 7001, tenant=ANY)
     db.commit.assert_awaited_once()
 
 

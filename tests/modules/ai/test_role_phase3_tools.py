@@ -33,6 +33,28 @@ def _actor() -> User:
     return actor
 
 
+def _tool_context(
+    db: AsyncSession,
+    tool,
+    *,
+    trace_id: str,
+    perms: set[str] | None = None,
+    approved_business_snapshot: dict | None = None,
+) -> AiToolContext:
+    actor = _actor()
+    tenant = actor._tenant_context
+    return AiToolContext(
+        user=actor,
+        perms=perms or set(tool.__ai_tool_meta__.required_perms),
+        db=db,
+        data_scope=DataScopeContext(tenant, None, None, []),
+        trace_id=trace_id,
+        tool_meta=tool.__ai_tool_meta__,
+        tenant=tenant,
+        approved_business_snapshot=approved_business_snapshot,
+    )
+
+
 @pytest.mark.parametrize(
     ("attribute", "tool_name", "permissions", "readonly"),
     [
@@ -157,13 +179,10 @@ async def test_role_update_dry_run_rejects_noncanonical_status(
     db_session: AsyncSession,
 ) -> None:
     tool = system_ai_tools.role_update
-    ctx = AiToolContext(
-        user=_actor(),
-        perms=set(tool.__ai_tool_meta__.required_perms),
-        db=db_session,
-        data_scope=DataScopeContext(0, None, None, []),
+    ctx = _tool_context(
+        db_session,
+        tool,
         trace_id="tr_role_invalid_status",
-        tool_meta=tool.__ai_tool_meta__,
     )
 
     with pytest.raises(BusinessRuleException) as exc_info:
@@ -193,13 +212,10 @@ async def test_role_create_dry_run_freezes_canonical_data_scope_code(
         preview,
     )
     tool = system_ai_tools.role_create
-    ctx = AiToolContext(
-        user=_actor(),
-        perms=set(tool.__ai_tool_meta__.required_perms),
-        db=db_session,
-        data_scope=DataScopeContext(0, None, None, []),
+    ctx = _tool_context(
+        db_session,
+        tool,
         trace_id="tr_role_named_scope",
-        tool_meta=tool.__ai_tool_meta__,
     )
 
     result = await system_ai_tools._dry_run_role_create(
@@ -245,18 +261,10 @@ async def test_approved_role_drift_maps_to_prepared_snapshot_stale(
         reject_create,
     )
     tool = system_ai_tools.role_create
-    ctx = AiToolContext(
-        user=_actor(),
-        perms=set(tool.__ai_tool_meta__.required_perms),
-        db=db_session,
-        data_scope=DataScopeContext(
-            tenant_id=0,
-            accessible_dept_ids=None,
-            accessible_user_scope=None,
-            filters=[],
-        ),
+    ctx = _tool_context(
+        db_session,
+        tool,
         trace_id="tr_phase3_role_stale",
-        tool_meta=tool.__ai_tool_meta__,
         approved_business_snapshot={"version": "old"},
     )
 
@@ -301,13 +309,11 @@ async def test_role_menu_dry_run_counts_indirectly_affected_members(
         "preview_update_menus",
         preview,
     )
-    ctx = AiToolContext(
-        user=_actor(),
+    ctx = _tool_context(
+        db_session,
+        system_ai_tools.role_update_menus,
         perms={"system:role:menu-auth"},
-        db=db_session,
-        data_scope=DataScopeContext(0, None, None, []),
         trace_id="tr_phase3_role_impact",
-        tool_meta=system_ai_tools.role_update_menus.__ai_tool_meta__,
     )
 
     result = await system_ai_tools._dry_run_role_update_menus(
@@ -352,13 +358,10 @@ async def test_role_write_dry_runs_build_scalar_gateway_presentations(
         ),
     ]
     for tool, dry_run, args in cases:
-        ctx = AiToolContext(
-            user=_actor(),
-            perms=set(tool.__ai_tool_meta__.required_perms),
-            db=db_session,
-            data_scope=DataScopeContext(0, None, None, []),
+        ctx = _tool_context(
+            db_session,
+            tool,
             trace_id=f"tr_{tool.__ai_tool_meta__.name}",
-            tool_meta=tool.__ai_tool_meta__,
         )
         result = await dry_run(ctx, **args)
         frozen_args = result.execution_args
@@ -408,13 +411,10 @@ async def test_role_update_preserves_explicit_null_for_nullable_description(
 
     monkeypatch.setattr(system_ai_tools.role_management_service, "update", update)
     tool = system_ai_tools.role_update
-    ctx = AiToolContext(
-        user=_actor(),
-        perms=set(tool.__ai_tool_meta__.required_perms),
-        db=db_session,
-        data_scope=DataScopeContext(0, None, None, []),
+    ctx = _tool_context(
+        db_session,
+        tool,
         trace_id="tr_role_nullable_clear",
-        tool_meta=tool.__ai_tool_meta__,
         approved_business_snapshot={"version": "test"},
     )
 

@@ -11,6 +11,7 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from tenant_helpers import tenant_context
 
 from app.core.exceptions import BusinessRuleException
 from app.modules.ai.agents.hitl.constants import (
@@ -21,6 +22,10 @@ from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.service.operation_log_service import (
     operation_log_service,
 )
+
+
+def _tenant(*, tenant_id: int = 0, actor_user_id: int = 9001):
+    return tenant_context(tenant_id=tenant_id, actor_user_id=actor_user_id)
 
 
 async def _start(
@@ -37,7 +42,7 @@ async def _start(
         db,
         trace_id="tr_test",
         conversation_id=100,
-        tenant_id=tenant_id,
+        tenant=_tenant(tenant_id=tenant_id, actor_user_id=user_id),
         user_id=user_id,
         tool_name="user.test",
         tool_call_id=tool_call_id,
@@ -68,7 +73,7 @@ class TestStartOperation:
             db_session,
             trace_id="tr_a",
             conversation_id=1,
-            tenant_id=0,
+            tenant=_tenant(actor_user_id=1),
             user_id=1,
             tool_name="user.count",
             tool_call_id="tc_auto",
@@ -90,7 +95,7 @@ class TestStartOperation:
             db_session,
             trace_id="tr_test_causality",
             conversation_id=123,
-            tenant_id=0,
+            tenant=_tenant(),
             source_user_message_id=456,
             readonly_snapshot=True,
             user_id=9001,
@@ -118,7 +123,9 @@ class TestStateMachine:
         log.queued_at = future_queued_at
         await db_session.flush()
 
-        running = await operation_log_service.mark_running(db_session, log_id)
+        running = await operation_log_service.mark_running(
+            db_session, log_id, tenant=_tenant()
+        )
         assert running.started_at is not None
         assert running.started_at >= future_queued_at
 
@@ -127,6 +134,7 @@ class TestStateMachine:
             log_id,
             result_summary="ok",
             duration_ms=1,
+            tenant=_tenant(),
         )
         assert succeeded.finished_at is not None
         assert succeeded.finished_at >= succeeded.started_at
@@ -144,6 +152,7 @@ class TestStateMachine:
             db_session,
             log_id,
             approved_by=9001,
+            tenant=_tenant(),
         )
 
         assert rejected is not None
@@ -153,7 +162,7 @@ class TestStateMachine:
     async def test_pending_to_running(self, db_session) -> None:
         log_id = await _start(db_session)
 
-        await operation_log_service.mark_running(db_session, log_id)
+        await operation_log_service.mark_running(db_session, log_id, tenant=_tenant())
 
         log = await db_session.get(AiOperationLog, log_id)
         assert log.status == "running"
@@ -161,9 +170,13 @@ class TestStateMachine:
     async def test_running_to_success(self, db_session) -> None:
         log_id = await _start(db_session)
 
-        await operation_log_service.mark_running(db_session, log_id)
+        await operation_log_service.mark_running(db_session, log_id, tenant=_tenant())
         await operation_log_service.mark_success(
-            db_session, log_id, result_summary="ok", duration_ms=42
+            db_session,
+            log_id,
+            result_summary="ok",
+            duration_ms=42,
+            tenant=_tenant(),
         )
 
         log = await db_session.get(AiOperationLog, log_id)
@@ -175,12 +188,13 @@ class TestStateMachine:
     async def test_running_to_failed(self, db_session) -> None:
         log_id = await _start(db_session)
 
-        await operation_log_service.mark_running(db_session, log_id)
+        await operation_log_service.mark_running(db_session, log_id, tenant=_tenant())
         await operation_log_service.mark_failed(
             db_session,
             log_id,
             error_code="AI_INTERNAL_ERROR",
             duration_ms=10,
+            tenant=_tenant(),
         )
 
         log = await db_session.get(AiOperationLog, log_id)
@@ -190,7 +204,9 @@ class TestStateMachine:
     async def test_pending_to_rejected(self, db_session) -> None:
         log_id = await _start(db_session)
 
-        await operation_log_service.mark_rejected(db_session, log_id, approved_by=9001)
+        await operation_log_service.mark_rejected(
+            db_session, log_id, approved_by=9001, tenant=_tenant()
+        )
 
         log = await db_session.get(AiOperationLog, log_id)
         assert log.status == "rejected"
@@ -200,7 +216,7 @@ class TestStateMachine:
     async def test_pending_to_expired(self, db_session) -> None:
         log_id = await _start(db_session)
 
-        await operation_log_service.mark_expired(db_session, log_id)
+        await operation_log_service.mark_expired(db_session, log_id, tenant=_tenant())
 
         log = await db_session.get(AiOperationLog, log_id)
         assert log.status == "expired"
@@ -215,6 +231,7 @@ class TestStateMachine:
             db_session,
             log_id,
             error_code="AI_CHAT_PERMISSION_DENIED",
+            tenant=_tenant(),
         )
         assert result is not None
         log = await db_session.get(AiOperationLog, log_id)
@@ -228,9 +245,11 @@ class TestStateMachine:
         mark_expired_if_pending 应跳过（返回 None），不抛 TERMINAL_STATE。
         """
         log_id = await _start(db_session)
-        await operation_log_service.mark_running(db_session, log_id)
+        await operation_log_service.mark_running(db_session, log_id, tenant=_tenant())
 
-        result = await operation_log_service.mark_expired_if_pending(db_session, log_id)
+        result = await operation_log_service.mark_expired_if_pending(
+            db_session, log_id, tenant=_tenant()
+        )
         assert result is None  # 没迁移
         log = await db_session.get(AiOperationLog, log_id)
         assert log.status == "running"  # 状态不变
@@ -244,6 +263,7 @@ class TestStateMachine:
             db_session,
             log_id,
             approved_by=9001,
+            tenant=_tenant(),
         )
 
         assert result is not None
@@ -255,12 +275,13 @@ class TestStateMachine:
         self, db_session
     ) -> None:
         log_id = await _start(db_session)
-        await operation_log_service.mark_running(db_session, log_id)
+        await operation_log_service.mark_running(db_session, log_id, tenant=_tenant())
 
         result = await operation_log_service.mark_rejected_if_pending(
             db_session,
             log_id,
             approved_by=9001,
+            tenant=_tenant(),
         )
 
         assert result is None
@@ -272,15 +293,18 @@ class TestStateMachine:
     ) -> None:
         """修订 S-14 配套：已终态（success / rejected 等）下不迁移"""
         log_id = await _start(db_session)
-        await operation_log_service.mark_running(db_session, log_id)
+        await operation_log_service.mark_running(db_session, log_id, tenant=_tenant())
         await operation_log_service.mark_success(
             db_session,
             log_id,
             result_summary="ok",
             duration_ms=100,
+            tenant=_tenant(),
         )
 
-        result = await operation_log_service.mark_expired_if_pending(db_session, log_id)
+        result = await operation_log_service.mark_expired_if_pending(
+            db_session, log_id, tenant=_tenant()
+        )
         assert result is None
         log = await db_session.get(AiOperationLog, log_id)
         assert log.status == "success"
@@ -289,10 +313,12 @@ class TestStateMachine:
 class TestTransitionGuard:
     async def test_second_mark_running_is_rejected(self, db_session) -> None:
         log_id = await _start(db_session)
-        await operation_log_service.mark_running(db_session, log_id)
+        await operation_log_service.mark_running(db_session, log_id, tenant=_tenant())
 
         with pytest.raises(BusinessRuleException) as exc_info:
-            await operation_log_service.mark_running(db_session, log_id)
+            await operation_log_service.mark_running(
+                db_session, log_id, tenant=_tenant()
+            )
 
         assert exc_info.value.error_code == "AI_OPERATION_LOG_ALREADY_RUNNING"
 
@@ -300,10 +326,14 @@ class TestTransitionGuard:
         """终态后不能再迁移"""
         log_id = await _start(db_session)
 
-        await operation_log_service.mark_rejected(db_session, log_id, approved_by=9001)
+        await operation_log_service.mark_rejected(
+            db_session, log_id, approved_by=9001, tenant=_tenant()
+        )
 
         with pytest.raises(BusinessRuleException) as exc_info:
-            await operation_log_service.mark_running(db_session, log_id)
+            await operation_log_service.mark_running(
+                db_session, log_id, tenant=_tenant()
+            )
         assert exc_info.value.error_code == "AI_OPERATION_LOG_TERMINAL_STATE"
 
 
@@ -311,7 +341,9 @@ class TestAttachConfirmation:
     async def test_attach_confirmation(self, db_session) -> None:
         log_id = await _start(db_session, confirmation_id=None, tool_call_id="tc_att")
 
-        await operation_log_service.attach_confirmation(db_session, log_id, "conf_xxx")
+        await operation_log_service.attach_confirmation(
+            db_session, log_id, "conf_xxx", tenant=_tenant()
+        )
 
         log = await db_session.get(AiOperationLog, log_id)
         assert log.confirmation_id == "conf_xxx"
@@ -321,7 +353,7 @@ class TestAttachConfirmation:
 
         with pytest.raises(BusinessRuleException) as exc_info:
             await operation_log_service.attach_confirmation(
-                db_session, log_id, "conf_2"
+                db_session, log_id, "conf_2", tenant=_tenant()
             )
         assert exc_info.value.error_code == "AI_OPERATION_LOG_CONFIRMATION_ALREADY_SET"
 
@@ -331,7 +363,9 @@ class TestMarkApproved:
         """approved_by 与 status.running 是两个事实，mark_approved 不改 status"""
         log_id = await _start(db_session)
 
-        await operation_log_service.mark_approved(db_session, log_id, approved_by=9001)
+        await operation_log_service.mark_approved(
+            db_session, log_id, approved_by=9001, tenant=_tenant()
+        )
 
         log = await db_session.get(AiOperationLog, log_id)
         assert log.approved_by == 9001
@@ -346,7 +380,7 @@ class TestGetByToolCallId:
         log = await operation_log_service.get_by_tool_call_id(
             db_session,
             "tc_lookup",
-            tenant_id=0,
+            tenant=_tenant(),
         )
         assert log is not None
         assert log.log_id == log_id
@@ -355,7 +389,7 @@ class TestGetByToolCallId:
         log = await operation_log_service.get_by_tool_call_id(
             db_session,
             "tc_nonexistent",
-            tenant_id=0,
+            tenant=_tenant(),
         )
         assert log is None
 
@@ -365,7 +399,7 @@ class TestGetByToolCallId:
         log = await operation_log_service.get_by_tool_call_id(
             db_session,
             "tc_owner",
-            tenant_id=0,
+            tenant=_tenant(),
             user_id=9001,
         )
         assert log is not None
@@ -377,7 +411,7 @@ class TestGetByToolCallId:
             await operation_log_service.get_by_tool_call_id(
                 db_session,
                 "tc_owner2",
-                tenant_id=0,
+                tenant=_tenant(),
                 user_id=9999,
             )
         assert exc_info.value.error_code == "AI_OPERATION_LOG_FORBIDDEN"
@@ -394,7 +428,7 @@ class TestGetByToolCallId:
         log = await operation_log_service.get_by_tool_call_id(
             db_session,
             "tc_other_tenant",
-            tenant_id=8,
+            tenant=_tenant(tenant_id=8),
         )
 
         assert log is None
@@ -404,5 +438,7 @@ class TestGetNotFoundById:
     async def test_get_log_by_id_not_found(self, db_session) -> None:
         """不存在的 log_id 抛 AI_OPERATION_LOG_NOT_FOUND"""
         with pytest.raises(BusinessRuleException) as exc_info:
-            await operation_log_service.mark_running(db_session, 99999999)
+            await operation_log_service.mark_running(
+                db_session, 99999999, tenant=_tenant()
+            )
         assert exc_info.value.error_code == "AI_OPERATION_LOG_NOT_FOUND"

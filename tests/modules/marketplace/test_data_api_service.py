@@ -5,6 +5,7 @@ from app.core.exceptions import InvalidParameterException, NotFoundException
 from app.modules.marketplace.lowcode.data_api_service import DataApiService
 from app.modules.marketplace.lowcode.migration_runner import MigrationRunner
 from app.modules.marketplace.lowcode.type_mapping import make_table_name
+from modules.marketplace import DEFAULT_TENANT
 
 
 @pytest.fixture
@@ -24,6 +25,7 @@ async def setup_app_table(db_session):
             },
             "required": ["name", "level"],
         },
+        tenant=DEFAULT_TENANT,
     )
     await db_session.flush()
     try:
@@ -39,7 +41,7 @@ class TestDataApiServiceCreate:
             db_session,
             table_name=setup_app_table,
             data={"name": "客户A", "level": "A"},
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
             user_id=1,
         )
         await db_session.flush()
@@ -55,7 +57,7 @@ class TestDataApiServiceCreate:
                 db_session,
                 table_name=setup_app_table,
                 data={"name": "X"},  # 缺 level
-                tenant_id=0,
+                tenant=DEFAULT_TENANT,
                 user_id=1,
                 data_schema={
                     "type": "object",
@@ -76,7 +78,7 @@ class TestDataApiServiceList:
                 db_session,
                 table_name=setup_app_table,
                 data={"name": f"客户{i}", "level": "A"},
-                tenant_id=0,
+                tenant=DEFAULT_TENANT,
                 user_id=1,
             )
         await db_session.flush()
@@ -87,7 +89,7 @@ class TestDataApiServiceList:
             current=1,
             size=10,
             filters=None,
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
         )
         assert len(result.records) == 10
         assert result.total == 15
@@ -99,15 +101,15 @@ class TestDataApiServiceList:
                 db_session,
                 table_name=setup_app_table,
                 data={"name": f"t0-{i}", "level": "A"},
-                tenant_id=0,
+                tenant=DEFAULT_TENANT,
                 user_id=1,
             )
-            await svc.create(
-                db_session,
-                table_name=setup_app_table,
-                data={"name": f"t99-{i}", "level": "A"},
-                tenant_id=99,
-                user_id=1,
+            await db_session.execute(
+                text(
+                    f"INSERT INTO {setup_app_table} "
+                    "(tenant_id, name, level) VALUES (99, :name, 'A')"
+                ),
+                {"name": f"t99-{i}"},
             )
         await db_session.flush()
 
@@ -117,7 +119,7 @@ class TestDataApiServiceList:
             current=1,
             size=100,
             filters=None,
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
         )
         assert result.total == 5
         assert all("t0" in r["name"] for r in result.records)
@@ -130,7 +132,7 @@ class TestDataApiServiceGet:
             db_session,
             table_name=setup_app_table,
             data={"name": "X", "level": "A"},
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
             user_id=1,
         )
         await db_session.flush()
@@ -139,7 +141,7 @@ class TestDataApiServiceGet:
             db_session,
             table_name=setup_app_table,
             record_id=record["id"],
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
         )
         assert fetched["name"] == "X"
 
@@ -150,7 +152,7 @@ class TestDataApiServiceGet:
                 db_session,
                 table_name=setup_app_table,
                 record_id=99999,
-                tenant_id=0,
+                tenant=DEFAULT_TENANT,
             )
 
 
@@ -161,7 +163,7 @@ class TestDataApiServiceUpdate:
             db_session,
             table_name=setup_app_table,
             data={"name": "原", "level": "A"},
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
             user_id=1,
         )
         await db_session.flush()
@@ -171,7 +173,7 @@ class TestDataApiServiceUpdate:
             table_name=setup_app_table,
             record_id=record["id"],
             data={"name": "改"},
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
             user_id=1,
         )
         await db_session.flush()
@@ -183,7 +185,7 @@ class TestDataApiServiceUpdate:
             db_session,
             table_name=setup_app_table,
             data={"name": "X", "level": "A"},
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
             user_id=1,
         )
         await db_session.flush()
@@ -194,7 +196,7 @@ class TestDataApiServiceUpdate:
             table_name=setup_app_table,
             record_id=record["id"],
             data={"name": "Y", "tenant_id": 999},
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
             user_id=1,
         )
         await db_session.flush()
@@ -208,7 +210,7 @@ class TestDataApiServiceDelete:
             db_session,
             table_name=setup_app_table,
             data={"name": "X", "level": "A"},
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
             user_id=1,
         )
         await db_session.flush()
@@ -217,7 +219,7 @@ class TestDataApiServiceDelete:
             db_session,
             table_name=setup_app_table,
             record_id=record["id"],
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
         )
         await db_session.flush()
 
@@ -226,7 +228,7 @@ class TestDataApiServiceDelete:
                 db_session,
                 table_name=setup_app_table,
                 record_id=record["id"],
-                tenant_id=0,
+                tenant=DEFAULT_TENANT,
             )
 
 
@@ -249,6 +251,7 @@ async def setup_filter_table(db_session):
             },
             "required": ["name"],
         },
+        tenant=DEFAULT_TENANT,
     )
     await db_session.flush()
     try:
@@ -271,7 +274,7 @@ async def _seed_filter_data(svc, db_session, table_name):
             db_session,
             table_name=table_name,
             data=s,
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
             user_id=1,
         )
     await db_session.flush()
@@ -289,7 +292,7 @@ class TestDataApiFilters:
             current=1,
             size=100,
             filters={"name__contains": "abc"},
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
         )
         names = {r["name"] for r in result.records}
         assert names == {"david abc"}
@@ -303,7 +306,7 @@ class TestDataApiFilters:
             current=1,
             size=100,
             filters={"name__contains": "li"},
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
         )
         # alice / charlie 都含 'li'，bob/david abc/eve 不含
         names = {r["name"] for r in result.records}
@@ -318,7 +321,7 @@ class TestDataApiFilters:
             current=1,
             size=100,
             filters={"status__in": "active,pending"},
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
         )
         names = {r["name"] for r in result.records}
         assert names == {"alice", "bob", "charlie", "david abc"}
@@ -332,7 +335,7 @@ class TestDataApiFilters:
             current=1,
             size=100,
             filters={"age__gte": 30},
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
         )
         ages = {r["age"] for r in result.records}
         assert ages == {30, 50, 66}
@@ -346,7 +349,7 @@ class TestDataApiFilters:
             current=1,
             size=100,
             filters={"age__lte": 30},
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
         )
         ages = {r["age"] for r in result.records}
         assert ages == {18, 30, 17}
@@ -360,7 +363,7 @@ class TestDataApiFilters:
             current=1,
             size=100,
             filters={"tags__has": "vip"},
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
         )
         names = {r["name"] for r in result.records}
         assert names == {"alice", "charlie"}
@@ -374,7 +377,7 @@ class TestDataApiFilters:
             current=1,
             size=100,
             filters={"status": "active"},
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
         )
         names = {r["name"] for r in result.records}
         assert names == {"alice", "bob"}
@@ -392,7 +395,7 @@ class TestDataApiFilters:
                 "age__gte": 30,
                 "tags__has": "vip",
             },
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
         )
         # 仅 charlie 同时满足：status∈{active,pending} + age>=30 + tags has vip
         names = {r["name"] for r in result.records}
@@ -409,7 +412,7 @@ class TestDataApiFilters:
             current=1,
             size=100,
             filters={"age__gte": "30"},  # string, not int
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
         )
         ages = {r["age"] for r in result.records}
         assert ages == {30, 50, 66}
@@ -423,7 +426,7 @@ class TestDataApiFilters:
                 current=1,
                 size=10,
                 filters={"unknown__contains": "x"},
-                tenant_id=0,
+                tenant=DEFAULT_TENANT,
             )
 
     async def test_type_mismatch_contains_on_integer(
@@ -437,7 +440,7 @@ class TestDataApiFilters:
                 current=1,
                 size=10,
                 filters={"age__contains": "x"},
-                tenant_id=0,
+                tenant=DEFAULT_TENANT,
             )
 
     async def test_type_mismatch_has_on_text(self, db_session, setup_filter_table):
@@ -449,7 +452,7 @@ class TestDataApiFilters:
                 current=1,
                 size=10,
                 filters={"name__has": "x"},
-                tenant_id=0,
+                tenant=DEFAULT_TENANT,
             )
 
     async def test_system_field_rejected(self, db_session, setup_filter_table):
@@ -461,7 +464,7 @@ class TestDataApiFilters:
                 current=1,
                 size=10,
                 filters={"tenant_id__gte": 0},
-                tenant_id=0,
+                tenant=DEFAULT_TENANT,
             )
 
     async def test_invalid_operator_rejected(self, db_session, setup_filter_table):
@@ -473,7 +476,7 @@ class TestDataApiFilters:
                 current=1,
                 size=10,
                 filters={"name__bogus": "x"},
-                tenant_id=0,
+                tenant=DEFAULT_TENANT,
             )
 
 
@@ -489,7 +492,7 @@ class TestDataApiOrderBy:
             current=1,
             size=100,
             filters=None,
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
             order_by="-age",
         )
         ages = [r["age"] for r in result.records]
@@ -504,7 +507,7 @@ class TestDataApiOrderBy:
             current=1,
             size=100,
             filters=None,
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
             order_by="status,age",
         )
         # 按 status asc，同 status 内按 age asc
@@ -524,7 +527,7 @@ class TestDataApiOrderBy:
                 current=1,
                 size=10,
                 filters=None,
-                tenant_id=0,
+                tenant=DEFAULT_TENANT,
                 order_by="unknown_field",
             )
 
@@ -554,6 +557,7 @@ async def setup_belongs_to_tables(db_session):
             },
             "required": ["name"],
         },
+        tenant=DEFAULT_TENANT,
     )
     await runner.create_table(
         db_session,
@@ -571,6 +575,7 @@ async def setup_belongs_to_tables(db_session):
             },
             "required": ["amount"],
         },
+        tenant=DEFAULT_TENANT,
     )
     await db_session.flush()
 
@@ -579,14 +584,14 @@ async def setup_belongs_to_tables(db_session):
         db_session,
         table_name=customer_table,
         data={"name": "腾讯", "level": "A"},
-        tenant_id=0,
+        tenant=DEFAULT_TENANT,
         user_id=1,
     )
     cust2 = await svc.create(
         db_session,
         table_name=customer_table,
         data={"name": "阿里", "level": "A"},
-        tenant_id=0,
+        tenant=DEFAULT_TENANT,
         user_id=1,
     )
     await db_session.flush()
@@ -597,7 +602,7 @@ async def setup_belongs_to_tables(db_session):
             db_session,
             table_name=order_table,
             data={"customer_id": cid, "amount": 100},
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
             user_id=1,
         )
     await db_session.flush()
@@ -648,7 +653,7 @@ class TestDataApiBelongsTo:
             current=1,
             size=100,
             filters=None,
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
             slug="rel_test",
             models=env["models"],
         )
@@ -685,7 +690,7 @@ class TestDataApiBelongsTo:
             current=1,
             size=100,
             filters=None,
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
             slug="rel_test",
             models=env["models"],
         )
@@ -703,7 +708,7 @@ class TestDataApiBelongsTo:
             current=1,
             size=100,
             filters=None,
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
             slug="rel_test",
             models=env["models"],
         )
@@ -742,7 +747,7 @@ class TestDataApiBelongsTo:
             current=1,
             size=100,
             filters=None,
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
             slug="rel_test",
             models=models_override,
         )
@@ -766,7 +771,7 @@ class TestDataApiBelongsTo:
             current=1,
             size=100,
             filters=None,
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
             # slug, models intentionally omitted
         )
         # No _label field should exist on records
@@ -782,7 +787,7 @@ class TestDataApiBelongsTo:
             current=1,
             size=100,
             filters=None,
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
             slug="rel_test",
             models=env["models"],
             order_by="customer_id_label",
@@ -805,7 +810,7 @@ class TestDataApiBelongsTo:
             current=1,
             size=100,
             filters=None,
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
             slug="rel_test",
             models=env["models"],
             order_by="-customer_id_label",
@@ -829,7 +834,7 @@ class TestDataApiBelongsTo:
             current=1,
             size=100,
             filters=None,
-            tenant_id=0,
+            tenant=DEFAULT_TENANT,
             slug="rel_test",
             models=env["models"],
             order_by="customer_id_label,amount",

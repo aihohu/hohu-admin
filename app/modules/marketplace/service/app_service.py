@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_response import PageResult
+from app.core.tenant import TenantContext
 from app.modules.marketplace.exceptions import (
     AppDuplicateSlugException,
     AppNotFoundException,
@@ -27,16 +28,20 @@ from app.utils.pagination import build_filters, paginate
 class AppService(MarketplaceBaseService):
     """应用主表 service"""
 
-    async def get_by_slug(self, db: AsyncSession, *, slug: str) -> App:
-        stmt = self.scoped(App).where(App.slug == slug)
+    async def get_by_slug(
+        self, db: AsyncSession, *, slug: str, tenant: TenantContext
+    ) -> App:
+        stmt = self.scoped(App, tenant=tenant).where(App.slug == slug)
         result = await db.execute(stmt)
         app = result.scalar_one_or_none()
         if app is None:
             raise AppNotFoundException(slug=slug)
         return app
 
-    async def get_by_id(self, db: AsyncSession, *, app_id: int) -> App:
-        stmt = self.scoped(App).where(App.id == app_id)
+    async def get_by_id(
+        self, db: AsyncSession, *, app_id: int, tenant: TenantContext
+    ) -> App:
+        stmt = self.scoped(App, tenant=tenant).where(App.id == app_id)
         result = await db.execute(stmt)
         app = result.scalar_one_or_none()
         if app is None:
@@ -57,14 +62,17 @@ class AppService(MarketplaceBaseService):
         homepage: str | None = None,
         license: str | None = None,
         status: str = "draft",
+        tenant: TenantContext,
     ) -> App:
         # slug 唯一性预检（friendly fast-path；并发兜底靠 DB UNIQUE + IntegrityError 翻译）
-        existing = await db.execute(self.scoped(App).where(App.slug == slug))
+        existing = await db.execute(
+            self.scoped(App, tenant=tenant).where(App.slug == slug)
+        )
         if existing.scalar_one_or_none() is not None:
             raise AppDuplicateSlugException(slug)
 
         app = App(
-            tenant_id=self.tenant_id,
+            tenant_id=tenant.tenant_id,
             name=name,
             slug=slug,
             type=type,
@@ -86,7 +94,9 @@ class AppService(MarketplaceBaseService):
             raise  # 其他 IntegrityError 重新抛出
         return app
 
-    async def list(self, db: AsyncSession, query: AppQuery) -> PageResult:
+    async def list(
+        self, db: AsyncSession, query: AppQuery, *, tenant: TenantContext
+    ) -> PageResult:
         """分页列表 + 筛选（category/status）。
 
         注意：paginate 不会自动加 tenant_id 过滤，这里手动补上。
@@ -101,7 +111,8 @@ class AppService(MarketplaceBaseService):
         )
         filters = build_filters(App, field_mapping, **kwargs)
         # 强制 tenant_id 过滤（与 MarketplaceBaseService 决策一致）
-        filters.append(App.tenant_id == self.tenant_id)
+        self.scoped(App, tenant=tenant)
+        filters.append(App.tenant_id == tenant.tenant_id)
         order_by = self._resolve_sort(query.sort)
         return await paginate(db, App, query, filters=filters, order_by=order_by)
 
@@ -112,6 +123,7 @@ class AppService(MarketplaceBaseService):
         keyword: str,
         current: int = 1,
         size: int = 10,
+        tenant: TenantContext,
     ) -> PageResult:
         """在 zhparser 不可用时使用 ILIKE 搜索。
 
@@ -119,7 +131,7 @@ class AppService(MarketplaceBaseService):
         """
         pattern = f"%{keyword}%"
         base_filters = [
-            App.tenant_id == self.tenant_id,
+            App.tenant_id == tenant.tenant_id,
             App.status == "published",
             or_(
                 App.name.ilike(pattern),
@@ -127,6 +139,7 @@ class AppService(MarketplaceBaseService):
                 App.tags_text.ilike(pattern),
             ),
         ]
+        self.scoped(App, tenant=tenant)
         # 计数
         count_stmt = select(func.count()).select_from(App).where(*base_filters)
         total = (await db.execute(count_stmt)).scalar() or 0

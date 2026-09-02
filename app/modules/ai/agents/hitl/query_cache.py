@@ -26,6 +26,7 @@ from typing import Any
 from redis.asyncio import Redis
 
 from app.core.config import settings
+from app.core.tenant import TenantContext
 from app.modules.ai.agents.gateway.result import ResultProjection
 from app.modules.ai.service.result_projection_service import (
     DATA_SCOPE_RESOLVER_VERSION,
@@ -35,6 +36,14 @@ from app.modules.ai.service.result_projection_service import (
 AI_QUERY_CACHE_PREFIX = "ai:query_cache:v3"
 AI_QUERY_CACHE_TTL_SEC = 300
 AI_QUERY_CACHE_SCHEMA_VERSION = 3
+AI_QUERY_CACHE_LATEST_FIELD = "__latest_tool__"
+
+_SET_QUERY_CACHE_LUA = """
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+redis.call('HSET', KEYS[1], ARGV[3], ARGV[1])
+redis.call('EXPIRE', KEYS[1], ARGV[4])
+return 1
+"""
 
 
 @dataclass(frozen=True)
@@ -70,7 +79,7 @@ async def set_query_cache(
     module: str,
     filters: dict[str, Any],
     user_id: int,
-    tenant_id: int,
+    tenant: TenantContext,
     agent_code: str,
     projection: ResultProjection | None,
     data_scope_hash: str | None,
@@ -84,7 +93,7 @@ async def set_query_cache(
     if projection is None:
         raise ValueError("query cache requires complete trusted projection metadata")
     lineage = result_projection_service.freeze_lineage(
-        tenant_id=tenant_id,
+        tenant=tenant,
         agent_code=agent_code,
         tool_codes=[tool_name],
         subject_refs=projection.subject_refs,
@@ -109,15 +118,25 @@ async def set_query_cache(
         schema_version=AI_QUERY_CACHE_SCHEMA_VERSION,
         created_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
-    key = _key(trace_id)
-    await redis.hset(key, tool_name, entry.to_json_bytes())
-    await redis.expire(key, ttl_sec)
+    if tool_name == AI_QUERY_CACHE_LATEST_FIELD:
+        raise ValueError("tool_name collides with query-cache metadata")
+    key = _key(trace_id, tenant=tenant)
+    await redis.eval(
+        _SET_QUERY_CACHE_LUA,
+        1,
+        key,
+        tool_name,
+        entry.to_json_bytes(),
+        AI_QUERY_CACHE_LATEST_FIELD,
+        ttl_sec,
+    )
 
 
 async def get_query_cache(
     redis: Redis,
     trace_id: str,
     *,
+    tenant: TenantContext,
     tool_name: str | None = None,
 ) -> QueryCacheEntry | None:
     """取最新写入（按 created_at 降序）或指定 tool_name 的 entry
@@ -127,22 +146,30 @@ async def get_query_cache(
       - tool_name 给定：直接 HGET
       - hash 不存在 / field 不存在：返回 None
     """
-    key = _key(trace_id)
+    key = _key(trace_id, tenant=tenant)
 
     if tool_name is not None:
         body = await redis.hget(key, tool_name)
         if body is None:
             return None
-        return _parse(body)
+        return _parse(body, tenant=tenant)
 
-    # 全 hash 取所有 field，按 created_at 降序选最新
+    # New writes publish the entry and latest pointer in one Lua transaction.
+    latest = await redis.hget(key, AI_QUERY_CACHE_LATEST_FIELD)
+    if latest is not None:
+        if isinstance(latest, bytes):
+            latest = latest.decode("utf-8")
+        body = await redis.hget(key, latest)
+        return _parse(body, tenant=tenant) if body is not None else None
+
+    # Rolling-upgrade fallback for v3 entries written before the latest marker.
     all_entries = await redis.hgetall(key)
     if not all_entries:
         return None
 
     parsed: list[QueryCacheEntry] = []
     for raw in all_entries.values():
-        entry = _parse(raw)
+        entry = _parse(raw, tenant=tenant)
         if entry is not None:
             parsed.append(entry)
 
@@ -153,16 +180,18 @@ async def get_query_cache(
     return parsed[0]
 
 
-async def delete_query_cache(redis: Redis, trace_id: str) -> None:
+async def delete_query_cache(
+    redis: Redis, trace_id: str, *, tenant: TenantContext
+) -> None:
     """显式删除（spec 没要求，调试用）"""
-    await redis.delete(_key(trace_id))
+    await redis.delete(_key(trace_id, tenant=tenant))
 
 
-def _key(trace_id: str) -> str:
-    return f"{AI_QUERY_CACHE_PREFIX}:{trace_id}"
+def _key(trace_id: str, *, tenant: TenantContext) -> str:
+    return f"{AI_QUERY_CACHE_PREFIX}:tenant:{tenant.tenant_id}:{trace_id}"
 
 
-def _parse(raw: Any) -> QueryCacheEntry | None:
+def _parse(raw: Any, *, tenant: TenantContext) -> QueryCacheEntry | None:
     """Redis 返回的 bytes/str 解析为 QueryCacheEntry"""
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8")
@@ -175,6 +204,8 @@ def _parse(raw: Any) -> QueryCacheEntry | None:
     except (TypeError, ValueError):
         return None
     if entry.schema_version != AI_QUERY_CACHE_SCHEMA_VERSION:
+        return None
+    if entry.tenant_id != tenant.tenant_id:
         return None
     if entry.resolver_version != DATA_SCOPE_RESOLVER_VERSION:
         return None

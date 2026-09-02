@@ -17,7 +17,10 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.marketplace.models import AppPermission
+from app.core.tenant import TenantContext
+from app.modules.marketplace.capability import require_marketplace_capability
+from app.modules.marketplace.models import App, AppPermission
+from app.modules.marketplace.service.app_service import app_service
 from app.utils.permission_hash import compute_detail_hash
 
 
@@ -38,6 +41,7 @@ class PermissionService:
         *,
         app_id: int,
         permissions: list[dict],
+        tenant: TenantContext,
     ) -> int:
         """批量插入权限声明，重复（按 detail_hash）跳过。
 
@@ -49,6 +53,8 @@ class PermissionService:
         Returns:
             实际新增的权限数量
         """
+        require_marketplace_capability(tenant)
+        await app_service.get_by_id(db, app_id=app_id, tenant=tenant)
         if not permissions:
             return 0
 
@@ -79,12 +85,16 @@ class PermissionService:
         return len(inserted)
 
     async def list_by_app(
-        self, db: AsyncSession, *, app_id: int
+        self, db: AsyncSession, *, app_id: int, tenant: TenantContext
     ) -> list[AppPermission]:
         """列出应用的全部权限声明，按 type、detail_hash 排序（稳定展示）。"""
+        require_marketplace_capability(tenant)
+        await app_service.get_by_id(db, app_id=app_id, tenant=tenant)
         stmt = (
             select(AppPermission)
+            .join(App, App.id == AppPermission.app_id)
             .where(AppPermission.app_id == app_id)
+            .where(App.tenant_id == tenant.tenant_id)
             .order_by(AppPermission.type, AppPermission.detail_hash)
         )
         result = await db.execute(stmt)

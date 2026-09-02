@@ -18,11 +18,15 @@ review 三阶段（spec 14.3）：
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundException
+from app.core.tenant import TenantContext
+from app.modules.marketplace.capability import require_marketplace_capability
+from app.modules.marketplace.exceptions import AppNotFoundException
 from app.modules.marketplace.models import App, AppReview, AppVersion
+from app.modules.marketplace.service.app_service import app_service
 from app.modules.marketplace.service.base import MarketplaceBaseService
 
 
@@ -43,6 +47,7 @@ class ReviewService(MarketplaceBaseService):
         size: int = 10,
         status: str = "pending",
         app_slug: str | None = None,
+        tenant: TenantContext,
     ) -> dict[str, Any]:
         """分页查询审核列表，联表 App + AppVersion。
 
@@ -55,7 +60,8 @@ class ReviewService(MarketplaceBaseService):
         Returns:
             {records: list[Row], total: int, current, size}
         """
-        conditions = []
+        require_marketplace_capability(tenant)
+        conditions = [App.tenant_id == tenant.tenant_id]
         if status != "all":
             conditions.append(AppReview.final_status == status)
         if app_slug:
@@ -64,7 +70,13 @@ class ReviewService(MarketplaceBaseService):
         base_stmt = (
             select(AppReview, App, AppVersion)
             .join(App, App.id == AppReview.app_id)
-            .join(AppVersion, AppVersion.id == AppReview.version_id)
+            .join(
+                AppVersion,
+                and_(
+                    AppVersion.id == AppReview.version_id,
+                    AppVersion.app_id == App.id,
+                ),
+            )
         )
         if conditions:
             base_stmt = base_stmt.where(*conditions)
@@ -74,7 +86,13 @@ class ReviewService(MarketplaceBaseService):
             select(func.count())
             .select_from(AppReview)
             .join(App, App.id == AppReview.app_id)
-            .join(AppVersion, AppVersion.id == AppReview.version_id)
+            .join(
+                AppVersion,
+                and_(
+                    AppVersion.id == AppReview.version_id,
+                    AppVersion.app_id == App.id,
+                ),
+            )
         )
         if conditions:
             count_stmt = count_stmt.where(*conditions)
@@ -113,17 +131,29 @@ class ReviewService(MarketplaceBaseService):
             "size": size,
         }
 
-    async def get_detail(self, db: AsyncSession, *, review_id: int) -> dict[str, Any]:
+    async def get_detail(
+        self, db: AsyncSession, *, review_id: int, tenant: TenantContext
+    ) -> dict[str, Any]:
         """获取审核详情（联表 manifest）。
 
         Raises:
             NotFoundException: review_id 不存在
         """
+        require_marketplace_capability(tenant)
         stmt = (
             select(AppReview, App, AppVersion)
             .join(App, App.id == AppReview.app_id)
-            .join(AppVersion, AppVersion.id == AppReview.version_id)
-            .where(AppReview.id == review_id)
+            .join(
+                AppVersion,
+                and_(
+                    AppVersion.id == AppReview.version_id,
+                    AppVersion.app_id == App.id,
+                ),
+            )
+            .where(
+                AppReview.id == review_id,
+                App.tenant_id == tenant.tenant_id,
+            )
         )
         row = (await db.execute(stmt)).first()
         if row is None:
@@ -159,6 +189,7 @@ class ReviewService(MarketplaceBaseService):
         app_id: int,
         version_id: int,
         rule_check_result: dict[str, Any],
+        tenant: TenantContext,
     ) -> AppReview:
         """版本提交时创建 pending 审核记录。
 
@@ -174,6 +205,16 @@ class ReviewService(MarketplaceBaseService):
         Returns:
             已 flush 拿到 id 的 AppReview 实例
         """
+        require_marketplace_capability(tenant)
+        await app_service.get_by_id(db, app_id=app_id, tenant=tenant)
+        version_exists = await db.scalar(
+            select(AppVersion.id).where(
+                AppVersion.id == version_id,
+                AppVersion.app_id == app_id,
+            )
+        )
+        if version_exists is None:
+            raise AppNotFoundException(app_id=app_id)
         review = AppReview(
             app_id=app_id,
             version_id=version_id,
@@ -195,6 +236,7 @@ class ReviewService(MarketplaceBaseService):
         reviewer_id: int,
         approved: bool,
         comment: str | None = None,
+        tenant: TenantContext,
     ) -> AppReview:
         """人工审核：通过/拒绝 + 同步 final_status。
 
@@ -211,7 +253,24 @@ class ReviewService(MarketplaceBaseService):
         Raises:
             NotFoundException: 审核记录不存在
         """
-        review = await db.get(AppReview, review_id)
+        require_marketplace_capability(tenant)
+        review = (
+            await db.execute(
+                select(AppReview)
+                .join(App, App.id == AppReview.app_id)
+                .join(
+                    AppVersion,
+                    and_(
+                        AppVersion.id == AppReview.version_id,
+                        AppVersion.app_id == App.id,
+                    ),
+                )
+                .where(
+                    AppReview.id == review_id,
+                    App.tenant_id == tenant.tenant_id,
+                )
+            )
+        ).scalar_one_or_none()
         if review is None:
             raise NotFoundException(
                 resource_type="审核记录",

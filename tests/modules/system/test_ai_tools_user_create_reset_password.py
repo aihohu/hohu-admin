@@ -150,20 +150,20 @@ def _make_ctx(
         hashed_password="$2b$12$dummy",
         roles=[],
     )
-    bind_test_user(principal)
+    tenant = bind_test_user(principal)
     return AiToolContext(
         user=principal,
         perms={permission},
         db=db,
         data_scope=DataScopeContext(
-            tenant_id=0,
+            tenant=tenant,
             accessible_dept_ids=accessible_dept_ids,
             accessible_user_scope=None,
             filters=filters,
         ),
         trace_id="tr_user_management_tools",
         tool_meta=meta,
-        tenant_id=0,
+        tenant=tenant,
     )
 
 

@@ -12,7 +12,7 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.security import decrypt_value, encrypt_value
-from app.core.tenant import DEFAULT_TENANT_ID
+from app.core.tenant import PlatformContext, TenantContext
 from app.modules.ai.core.provider_egress import (
     provider_egress,
     provider_upstream_error,
@@ -31,10 +31,16 @@ from app.utils.pagination import build_filters, paginate
 logger = logging.getLogger(__name__)
 
 
+def _require_platform(platform: PlatformContext) -> None:
+    if not isinstance(platform, PlatformContext):
+        raise TypeError("platform context is required")
+
+
 class ProviderService:
     """AI 提供商管理服务"""
 
-    async def get_list(self, db: AsyncSession, query):
+    async def get_list(self, db: AsyncSession, query, *, platform: PlatformContext):
+        _require_platform(platform)
         field_mapping = {
             "provider_code": "provider_code",
             "name": ("name", "contains"),
@@ -64,12 +70,22 @@ class ProviderService:
         page.records = records
         return page
 
-    async def get_all_enabled(self, db: AsyncSession) -> list[AiProvider]:
+    async def get_all_enabled(
+        self, db: AsyncSession, *, platform: PlatformContext
+    ) -> list[AiProvider]:
+        _require_platform(platform)
         stmt = select(AiProvider).where(AiProvider.is_enabled.is_(True))
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
-    async def get_by_id(self, db: AsyncSession, provider_id: int) -> AiProvider:
+    async def get_by_id(
+        self,
+        db: AsyncSession,
+        provider_id: int,
+        *,
+        platform: PlatformContext,
+    ) -> AiProvider:
+        _require_platform(platform)
         obj = await db.get(AiProvider, provider_id)
         if not obj:
             raise NotFoundException(
@@ -77,7 +93,10 @@ class ProviderService:
             )
         return obj
 
-    async def create(self, db: AsyncSession, data: ProviderCreate) -> AiProvider:
+    async def create(
+        self, db: AsyncSession, data: ProviderCreate, *, platform: PlatformContext
+    ) -> AiProvider:
+        _require_platform(platform)
         existing = await db.execute(
             select(AiProvider).where(AiProvider.provider_code == data.provider_code)
         )
@@ -93,9 +112,15 @@ class ProviderService:
         return obj
 
     async def update(
-        self, db: AsyncSession, provider_id: int, data: ProviderUpdate
+        self,
+        db: AsyncSession,
+        provider_id: int,
+        data: ProviderUpdate,
+        *,
+        platform: PlatformContext,
     ) -> AiProvider:
-        obj = await self.get_by_id(db, provider_id)
+        _require_platform(platform)
+        obj = await self.get_by_id(db, provider_id, platform=platform)
         update_data = data.model_dump(exclude_unset=True)
 
         if "provider_code" in update_data:
@@ -130,8 +155,11 @@ class ProviderService:
             setattr(obj, field, value)
         return obj
 
-    async def delete(self, db: AsyncSession, provider_id: int) -> None:
-        obj = await self.get_by_id(db, provider_id)
+    async def delete(
+        self, db: AsyncSession, provider_id: int, *, platform: PlatformContext
+    ) -> None:
+        _require_platform(platform)
+        obj = await self.get_by_id(db, provider_id, platform=platform)
         await db.delete(obj)
 
     @staticmethod
@@ -145,15 +173,10 @@ class ProviderService:
         provider_id: int,
         model_id: int,
         *,
-        tenant_id: int,
+        platform: PlatformContext,
     ) -> ProviderTestResult:
-        if tenant_id != DEFAULT_TENANT_ID:
-            raise BusinessException(
-                code=404,
-                message="AI提供商不存在",
-                error_code="AI_PROVIDER_NOT_FOUND",
-            )
-        provider = await self.get_by_id(db, provider_id)
+        _require_platform(platform)
+        provider = await self.get_by_id(db, provider_id, platform=platform)
         model = await db.get(AiModel, model_id)
         if model is None:
             raise BusinessException(
@@ -197,7 +220,13 @@ class ProviderService:
             model_id=model.model_id,
         )
 
-    async def resolve_model(self, db: AsyncSession, model_id: str | None = None):
+    async def resolve_model(
+        self,
+        db: AsyncSession,
+        model_id: str | None = None,
+        *,
+        tenant: TenantContext,
+    ):
         """兼容入口也委托统一 selector，不保留未隔离的旧 fallback。"""
         from app.modules.ai.service.model_authorization_service import (  # noqa: PLC0415
             model_authorization_service,
@@ -206,7 +235,7 @@ class ProviderService:
         return await model_authorization_service.resolve_model_instance(
             db,
             model_id,
-            tenant_id=DEFAULT_TENANT_ID,
+            tenant=tenant,
         )
 
 

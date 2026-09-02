@@ -53,7 +53,7 @@ def _tool_ctx(
         hashed_password="x",
         status=STATUS_ENABLED,
     )
-    bind_test_user(actor)
+    tenant = bind_test_user(actor)
     return AiToolContext(
         user=actor,
         perms=(
@@ -61,13 +61,14 @@ def _tool_ctx(
         ),
         db=db,
         data_scope=DataScopeContext(
-            tenant_id=0,
+            tenant=tenant,
             accessible_dept_ids=accessible_dept_ids,
             accessible_user_scope=None,
             filters=[],
         ),
         trace_id="tr_task12_user_assignment",
         tool_meta=system_ai_tools.user_dept_lookup.__ai_tool_meta__,
+        tenant=tenant,
     )
 
 

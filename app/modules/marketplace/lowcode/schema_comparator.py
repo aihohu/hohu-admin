@@ -65,7 +65,7 @@ class SchemaDiff:
 # 所有 app_data_* 表的固定系统字段：(col_def, nullable, default)
 _SYSTEM_COLUMNS: dict[str, tuple[ColumnDef, bool, object]] = {
     "id": (ColumnDef(pg_type=PgType.INTEGER), False, None),
-    "tenant_id": (ColumnDef(pg_type=PgType.INTEGER), False, 0),
+    "tenant_id": (ColumnDef(pg_type=PgType.INTEGER), False, None),
     "created_at": (ColumnDef(pg_type=PgType.TIMESTAMPTZ), False, None),
     "updated_at": (ColumnDef(pg_type=PgType.TIMESTAMPTZ), False, None),
     "created_by": (ColumnDef(pg_type=PgType.INTEGER), True, None),

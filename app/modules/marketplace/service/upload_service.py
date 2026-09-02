@@ -14,6 +14,8 @@
 from typing import Any
 
 from app.core.exceptions import BusinessException
+from app.core.tenant import TenantContext
+from app.modules.marketplace.capability import require_marketplace_capability
 from app.modules.marketplace.exceptions import (
     AppErrorCode,
     AppInvalidManifestException,
@@ -34,6 +36,7 @@ class UploadService:
         filename: str,
         slug: str,
         version: str,
+        tenant: TenantContext,
     ) -> dict:
         """保存应用包。
 
@@ -50,6 +53,7 @@ class UploadService:
             BusinessException: 文件大小超过限制（FILE_TOO_LARGE）
             AppInvalidManifestException: 文件不是有效 zip（必须含至少一个 entry）
         """
+        require_marketplace_capability(tenant)
         content = file_obj.read()
 
         # 文件大小限制（DoS 防护）

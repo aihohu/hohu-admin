@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_ai_chat_use
 from app.core.base_response import PageResult, ResponseModel
-from app.core.tenant import resolve_tenant_id
+from app.core.tenant import get_bound_tenant_context
 from app.db.session import get_db
 from app.modules.ai.schemas.conversation import (
     ConversationCreate,
@@ -28,7 +28,10 @@ async def get_conversation_list(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(require_ai_chat_use),
 ):
-    page_data = await conversation_service.get_list(db, query, _current_user.user_id)
+    tenant = get_bound_tenant_context(_current_user)
+    page_data = await conversation_service.get_list(
+        db, query, _current_user.user_id, tenant=tenant
+    )
     return ResponseModel.success(data=page_data)
 
 
@@ -38,8 +41,9 @@ async def get_conversation_detail(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(require_ai_chat_use),
 ):
+    tenant = get_bound_tenant_context(_current_user)
     conversation = await conversation_service.get_by_id(
-        db, conversation_id, _current_user.user_id
+        db, conversation_id, _current_user.user_id, tenant=tenant
     )
     messages = await conversation_service.project_messages(
         db,
@@ -51,7 +55,7 @@ async def get_conversation_detail(
         db,
         conversation_id=conversation_id,
         user_id=_current_user.user_id,
-        tenant_id=resolve_tenant_id(_current_user),
+        tenant=tenant,
     )
     pending_actions = [
         await prepared_action_service.project_pending_out(
@@ -76,11 +80,12 @@ async def create_conversation(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(require_ai_chat_use),
 ):
+    tenant = get_bound_tenant_context(_current_user)
     conversation = await conversation_service.create(
         db,
         data,
         _current_user.user_id,
-        tenant_id=resolve_tenant_id(_current_user),
+        tenant=tenant,
     )
     await db.commit()
     await db.refresh(conversation)
@@ -94,12 +99,13 @@ async def update_conversation(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(require_ai_chat_use),
 ):
+    tenant = get_bound_tenant_context(_current_user)
     await conversation_service.update(
         db,
         conversation_id,
         data,
         _current_user.user_id,
-        tenant_id=resolve_tenant_id(_current_user),
+        tenant=tenant,
     )
     await db.commit()
     return ResponseModel.success(msg="更新成功")
@@ -111,15 +117,18 @@ async def delete_conversation(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(require_ai_chat_use),
 ):
+    tenant = get_bound_tenant_context(_current_user)
     await conversation_service.lock_for_delete(
-        db, conversation_id, _current_user.user_id
+        db, conversation_id, _current_user.user_id, tenant=tenant
     )
     await prepared_action_service.expire_for_conversation_delete(
         db,
         conversation_id=conversation_id,
         user_id=_current_user.user_id,
-        tenant_id=resolve_tenant_id(_current_user),
+        tenant=tenant,
     )
-    await conversation_service.delete(db, conversation_id, _current_user.user_id)
+    await conversation_service.delete(
+        db, conversation_id, _current_user.user_id, tenant=tenant
+    )
     await db.commit()
     return ResponseModel.success(msg="删除成功")

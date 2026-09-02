@@ -9,16 +9,46 @@
 
 import pytest
 import redis.asyncio as aioredis
+from tenant_helpers import tenant_context
 
 from app.core import redis as redis_module
 from app.core.config import settings
 from app.modules.ai.agents.safety.injection_detector import (
-    clear_injection_hit_conversation,
-    detect_injection,
-    is_injection_hit_conversation,
-    matched_patterns,
-    record_injection_hit_conversation,
+    clear_injection_hit_conversation as _clear_injection_hit_conversation,
 )
+from app.modules.ai.agents.safety.injection_detector import (
+    detect_injection,
+    matched_patterns,
+)
+from app.modules.ai.agents.safety.injection_detector import (
+    is_injection_hit_conversation as _is_injection_hit_conversation,
+)
+from app.modules.ai.agents.safety.injection_detector import (
+    record_injection_hit_conversation as _record_injection_hit_conversation,
+)
+
+TENANT = tenant_context()
+TENANT_B = tenant_context(tenant_id=37)
+
+
+def _conversation_key(conversation_id: int, *, tenant=TENANT) -> str:
+    return f"ai:tenant:{tenant.tenant_id}:injection_hit:{conversation_id}"
+
+
+async def record_injection_hit_conversation(redis, conversation_id, *, tenant=TENANT):
+    return await _record_injection_hit_conversation(
+        redis, conversation_id, tenant=tenant
+    )
+
+
+async def is_injection_hit_conversation(redis, conversation_id, *, tenant=TENANT):
+    return await _is_injection_hit_conversation(redis, conversation_id, tenant=tenant)
+
+
+async def clear_injection_hit_conversation(redis, conversation_id, *, tenant=TENANT):
+    return await _clear_injection_hit_conversation(
+        redis, conversation_id, tenant=tenant
+    )
 
 
 class TestInjectionAttackHits:
@@ -208,7 +238,7 @@ async def _clean_injection_redis():
     redis_module.redis_client = aioredis.Redis(connection_pool=redis_module.redis_pool)
 
     async def _purge() -> None:
-        keys = await redis_module.redis_client.keys("ai:injection_hit:*")
+        keys = await redis_module.redis_client.keys("ai:tenant:*:injection_hit:*")
         if keys:
             await redis_module.redis_client.delete(*keys)
 
@@ -249,7 +279,7 @@ class TestConversationInjectionHit:
         await record_injection_hit_conversation(redis_module.redis_client, None)
 
         # Redis 应无任何 conversation 级 key
-        keys = await redis_module.redis_client.keys("ai:injection_hit:*")
+        keys = await redis_module.redis_client.keys("ai:tenant:*:injection_hit:*")
         assert keys == []
         # is_injection_hit_conversation(None) 也返回 False
         assert (
@@ -262,7 +292,7 @@ class TestConversationInjectionHit:
         conv_id = 90003
         await record_injection_hit_conversation(redis_module.redis_client, conv_id)
 
-        ttl = await redis_module.redis_client.ttl(f"ai:injection_hit:{conv_id}")
+        ttl = await redis_module.redis_client.ttl(_conversation_key(conv_id))
         # 允许 5s 偏差（redis 处理耗时）
         assert 3595 <= ttl <= 3600
 
@@ -270,20 +300,18 @@ class TestConversationInjectionHit:
         """多次命中刷新 TTL（用户活跃对话内持续触发，1h 不重置）"""
         conv_id = 90004
         await record_injection_hit_conversation(redis_module.redis_client, conv_id)
-        ttl1 = await redis_module.redis_client.ttl(f"ai:injection_hit:{conv_id}")
+        ttl1 = await redis_module.redis_client.ttl(_conversation_key(conv_id))
 
         # 模拟时间过去 30 分钟（直接改 TTL）
-        await redis_module.redis_client.expire(
-            f"ai:injection_hit:{conv_id}", 1800
-        )  # 30min
+        await redis_module.redis_client.expire(_conversation_key(conv_id), 1800)
         ttl_after_shorten = await redis_module.redis_client.ttl(
-            f"ai:injection_hit:{conv_id}"
+            _conversation_key(conv_id)
         )
         assert ttl_after_shorten < ttl1
 
         # 再次命中 → 刷新回 1h
         await record_injection_hit_conversation(redis_module.redis_client, conv_id)
-        ttl2 = await redis_module.redis_client.ttl(f"ai:injection_hit:{conv_id}")
+        ttl2 = await redis_module.redis_client.ttl(_conversation_key(conv_id))
         assert ttl2 > ttl_after_shorten
 
     async def test_different_conversations_isolated(self) -> None:
@@ -292,6 +320,25 @@ class TestConversationInjectionHit:
         # 另一个 conversation 不受影响
         assert (
             await is_injection_hit_conversation(redis_module.redis_client, 90006)
+            is False
+        )
+
+    async def test_same_conversation_id_is_isolated_between_tenants(self) -> None:
+        conv_id = 90008
+        await record_injection_hit_conversation(
+            redis_module.redis_client, conv_id, tenant=TENANT
+        )
+
+        assert (
+            await is_injection_hit_conversation(
+                redis_module.redis_client, conv_id, tenant=TENANT
+            )
+            is True
+        )
+        assert (
+            await is_injection_hit_conversation(
+                redis_module.redis_client, conv_id, tenant=TENANT_B
+            )
             is False
         )
 

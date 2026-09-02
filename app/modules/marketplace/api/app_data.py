@@ -8,11 +8,14 @@
 """
 
 from fastapi import APIRouter, Depends, Query, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_response import PageResult, ResponseModel
+from app.core.tenant import TenantContext
 from app.db.session import get_db
-from app.modules.auth.service import get_current_user
+from app.modules.auth.service import get_current_tenant_context, get_current_user
+from app.modules.marketplace.capability import require_marketplace_http_capability
 from app.modules.marketplace.exceptions import AppNotFoundException
 from app.modules.marketplace.lowcode.data_api_service import DataApiService
 from app.modules.marketplace.lowcode.schema_introspection import table_exists
@@ -21,7 +24,7 @@ from app.modules.marketplace.models import AppVersion
 from app.modules.marketplace.service.app_service import app_service
 from app.modules.system.models.user import User
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_marketplace_http_capability)])
 _data_api = DataApiService()
 
 # query_params 中保留给框架/分页/排序的键，不进入 filters dict
@@ -29,17 +32,22 @@ _RESERVED_QUERY_KEYS = {"current", "size", "order_by"}
 
 
 async def _resolve_table_and_schema(
-    db: AsyncSession, *, slug: str, model: str
+    db: AsyncSession, *, slug: str, model: str, tenant: TenantContext
 ) -> tuple[str, dict | None, dict]:
     """解析表名 + 该 model 的 data_schema + 全量 manifest
 
     Manifest returned so callers (e.g. list endpoint) can read sibling models
     + relations for belongs_to expansion (decision #79).
     """
-    app_obj = await app_service.get_by_slug(db, slug=slug)
+    app_obj = await app_service.get_by_slug(db, slug=slug, tenant=tenant)
     if app_obj.current_version_id is None:
         raise AppNotFoundException(slug=f"{slug} (no published version)")
-    version = await db.get(AppVersion, app_obj.current_version_id)
+    version = await db.scalar(
+        select(AppVersion).where(
+            AppVersion.id == app_obj.current_version_id,
+            AppVersion.app_id == app_obj.id,
+        )
+    )
     if version is None:
         raise AppNotFoundException(slug=slug)
     manifest = version.manifest or {}
@@ -78,9 +86,10 @@ async def create_record(
     data: dict,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     table_name, schema, _manifest = await _resolve_table_and_schema(
-        db, slug=slug, model=model
+        db, slug=slug, model=model, tenant=tenant
     )
     if not await table_exists(db, table_name):
         raise AppNotFoundException(slug=f"table {table_name}")
@@ -88,8 +97,8 @@ async def create_record(
         db,
         table_name=table_name,
         data=data,
-        tenant_id=0,
         user_id=current_user.user_id,
+        tenant=tenant,
         data_schema=schema,
     )
     await db.commit()
@@ -109,9 +118,10 @@ async def list_records(
     size: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),  # noqa: ARG001
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     table_name, data_schema, manifest = await _resolve_table_and_schema(
-        db, slug=slug, model=model
+        db, slug=slug, model=model, tenant=tenant
     )
     if not await table_exists(db, table_name):
         raise AppNotFoundException(slug=f"table {table_name}")
@@ -122,7 +132,7 @@ async def list_records(
         current=current,
         size=size,
         filters=filters,
-        tenant_id=0,
+        tenant=tenant,
         order_by=order_by,
         slug=slug,
         data_schema=data_schema,
@@ -142,12 +152,13 @@ async def get_record(
     record_id: int,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),  # noqa: ARG001
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     table_name, _schema, _manifest = await _resolve_table_and_schema(
-        db, slug=slug, model=model
+        db, slug=slug, model=model, tenant=tenant
     )
     record = await _data_api.get(
-        db, table_name=table_name, record_id=record_id, tenant_id=0
+        db, table_name=table_name, record_id=record_id, tenant=tenant
     )
     return ResponseModel.success(data=record)
 
@@ -164,17 +175,18 @@ async def update_record(
     data: dict,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     table_name, _schema, _manifest = await _resolve_table_and_schema(
-        db, slug=slug, model=model
+        db, slug=slug, model=model, tenant=tenant
     )
     record = await _data_api.update(
         db,
         table_name=table_name,
         record_id=record_id,
         data=data,
-        tenant_id=0,
         user_id=current_user.user_id,
+        tenant=tenant,
     )
     await db.commit()
     return ResponseModel.success(data=record)
@@ -191,10 +203,13 @@ async def delete_record(
     record_id: int,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),  # noqa: ARG001
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     table_name, _schema, _manifest = await _resolve_table_and_schema(
-        db, slug=slug, model=model
+        db, slug=slug, model=model, tenant=tenant
     )
-    await _data_api.delete(db, table_name=table_name, record_id=record_id, tenant_id=0)
+    await _data_api.delete(
+        db, table_name=table_name, record_id=record_id, tenant=tenant
+    )
     await db.commit()
     return ResponseModel.success()

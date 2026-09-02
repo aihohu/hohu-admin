@@ -12,12 +12,16 @@ from app.modules.ai.service.result_projection_service import result_projection_s
 
 
 def _user():
-    return SimpleNamespace(user_id=101, user_name="alice")
+    return SimpleNamespace(
+        user_id=101,
+        user_name="alice",
+        _tenant_context=tenant_context(actor_user_id=101),
+    )
 
 
 def _lineage():
     return result_projection_service.freeze_lineage(
-        tenant_id=0,
+        tenant=tenant_context(tenant_id=0, actor_user_id=101),
         agent_code="user_mgmt",
         tool_codes=["user.export"],
         subject_refs=[{"type": "user_export_task", "id": "exp-1"}],

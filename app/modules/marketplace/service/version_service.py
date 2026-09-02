@@ -21,11 +21,14 @@ import re
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.tenant import TenantContext
+from app.modules.marketplace.capability import require_marketplace_capability
 from app.modules.marketplace.exceptions import (
     AppInvalidManifestException,
     AppNotFoundException,
 )
-from app.modules.marketplace.models import AppVersion
+from app.modules.marketplace.models import App, AppVersion
+from app.modules.marketplace.service.app_service import app_service
 
 # spec 7.1：slug 必须匹配（首字符字母，末字符非连字符）
 SLUG_PATTERN = re.compile(r"^[a-z][a-z0-9-]{2,148}[a-z0-9]$")
@@ -283,6 +286,7 @@ class VersionService:
         file_hash: str,
         file_size: int | None = None,
         changelog: str | None = None,
+        tenant: TenantContext,
     ) -> AppVersion:
         """创建版本记录。
 
@@ -302,6 +306,8 @@ class VersionService:
         Returns:
             已 flush 拿到 id 的 AppVersion 实例
         """
+        require_marketplace_capability(tenant)
+        await app_service.get_by_id(db, app_id=app_id, tenant=tenant)
         version_record = AppVersion(
             app_id=app_id,
             version=version,
@@ -317,16 +323,26 @@ class VersionService:
         return version_record
 
     async def get_by_version(
-        self, db: AsyncSession, *, app_id: int, version: str
+        self,
+        db: AsyncSession,
+        *,
+        app_id: int,
+        version: str,
+        tenant: TenantContext,
     ) -> AppVersion:
         """按 (app_id, version) 唯一查询版本记录。
 
         Raises:
             AppNotFoundException: 该版本不存在
         """
+        require_marketplace_capability(tenant)
         stmt = (
             select(AppVersion)
-            .where(AppVersion.app_id == app_id)
+            .join(App, App.id == AppVersion.app_id)
+            .where(
+                AppVersion.app_id == app_id,
+                App.tenant_id == tenant.tenant_id,
+            )
             .where(AppVersion.version == version)
         )
         result = await db.execute(stmt)
@@ -338,16 +354,21 @@ class VersionService:
         return record
 
     async def get_latest_approved(
-        self, db: AsyncSession, *, app_id: int
+        self, db: AsyncSession, *, app_id: int, tenant: TenantContext
     ) -> AppVersion | None:
         """查最新 approved 版本（用于"安装最新版"接口）。
 
         Returns:
             最新 approved 的 AppVersion，或 None（无 approved 版本）
         """
+        require_marketplace_capability(tenant)
         stmt = (
             select(AppVersion)
-            .where(AppVersion.app_id == app_id)
+            .join(App, App.id == AppVersion.app_id)
+            .where(
+                AppVersion.app_id == app_id,
+                App.tenant_id == tenant.tenant_id,
+            )
             .where(AppVersion.review_status == "approved")
             .order_by(AppVersion.created_at.desc())
             .limit(1)

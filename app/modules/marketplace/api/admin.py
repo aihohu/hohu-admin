@@ -12,14 +12,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_permissions
 from app.core.base_response import PageResult, ResponseModel
+from app.core.tenant import TenantContext
 from app.db.session import get_db
-from app.modules.auth.service import get_current_user
+from app.modules.auth.service import get_current_tenant_context, get_current_user
+from app.modules.marketplace.capability import require_marketplace_http_capability
 from app.modules.marketplace.models import App, AppVersion
 from app.modules.marketplace.schemas.review import ReviewDetail, ReviewListItem
 from app.modules.marketplace.service.review_service import review_service
 from app.modules.system.models.user import User
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_marketplace_http_capability)])
 
 
 @router.get(
@@ -35,9 +37,15 @@ async def list_reviews(
     app_slug: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     data = await review_service.list_reviews(
-        db, current=current, size=size, status=status, app_slug=app_slug
+        db,
+        current=current,
+        size=size,
+        status=status,
+        app_slug=app_slug,
+        tenant=tenant,
     )
     return ResponseModel.success(
         data=PageResult(
@@ -59,8 +67,9 @@ async def get_review(
     review_id: int,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    data = await review_service.get_detail(db, review_id=review_id)
+    data = await review_service.get_detail(db, review_id=review_id, tenant=tenant)
     return ResponseModel.success(data=ReviewDetail.model_validate(data))
 
 
@@ -75,6 +84,7 @@ async def approve_review(
     comment: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     review = await review_service.human_review(
         db,
@@ -82,6 +92,7 @@ async def approve_review(
         reviewer_id=current_user.user_id,
         approved=True,
         comment=comment,
+        tenant=tenant,
     )
     # 把对应 app_version.review_status 改为 approved
     version = await db.get(AppVersion, review.version_id)
@@ -110,6 +121,7 @@ async def reject_review(
     comment: str = Form(""),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     review = await review_service.human_review(
         db,
@@ -117,6 +129,7 @@ async def reject_review(
         reviewer_id=current_user.user_id,
         approved=False,
         comment=comment,
+        tenant=tenant,
     )
     version = await db.get(AppVersion, review.version_id)
     if version is not None:

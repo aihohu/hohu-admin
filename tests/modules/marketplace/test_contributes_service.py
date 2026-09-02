@@ -7,6 +7,7 @@ from app.modules.marketplace.service.contributes_service import (
     CACHE_KEY_PATTERN,
     contributes_service,
 )
+from modules.marketplace import DEFAULT_TENANT
 
 
 @pytest.fixture
@@ -68,7 +69,9 @@ class TestContributesAggregator:
         db_session,
         installed_app_with_menu,  # noqa: ARG002
     ):
-        result = await contributes_service.aggregate_for_tenant(db_session, tenant_id=0)
+        result = await contributes_service.aggregate_for_tenant(
+            db_session, tenant=DEFAULT_TENANT
+        )
         assert any(m["app_slug"] == "contributes_test" for m in result["menus"])
         page_keys = {
             p["key"] for p in result["pages"] if p["app_slug"] == "contributes_test"
@@ -84,7 +87,9 @@ class TestContributesAggregator:
             .values(status="disabled")
         )
         await db_session.flush()
-        result = await contributes_service.aggregate_for_tenant(db_session, tenant_id=0)
+        result = await contributes_service.aggregate_for_tenant(
+            db_session, tenant=DEFAULT_TENANT
+        )
         assert all(m["app_slug"] != "contributes_test" for m in result["menus"])
 
     async def test_aggregate_menu_has_correct_fields(
@@ -92,7 +97,9 @@ class TestContributesAggregator:
         db_session,
         installed_app_with_menu,  # noqa: ARG002
     ):
-        result = await contributes_service.aggregate_for_tenant(db_session, tenant_id=0)
+        result = await contributes_service.aggregate_for_tenant(
+            db_session, tenant=DEFAULT_TENANT
+        )
         menu = next(m for m in result["menus"] if m["app_slug"] == "contributes_test")
         assert menu["title"] == "测试 CRM"
         assert menu["icon"] == "PeopleOutline"
@@ -118,7 +125,9 @@ class TestContributesAggregator:
         }
         version.manifest = manifest
         await db_session.flush()
-        result = await contributes_service.aggregate_for_tenant(db_session, tenant_id=0)
+        result = await contributes_service.aggregate_for_tenant(
+            db_session, tenant=DEFAULT_TENANT
+        )
         menu = next(m for m in result["menus"] if m["app_slug"] == "contributes_test")
         assert menu["page_key"] is None
 
@@ -151,7 +160,9 @@ class TestContributesAggregator:
         version.manifest = manifest
         await db_session.flush()
 
-        result = await contributes_service.aggregate_for_tenant(db_session, tenant_id=0)
+        result = await contributes_service.aggregate_for_tenant(
+            db_session, tenant=DEFAULT_TENANT
+        )
         app_menus = [m for m in result["menus"] if m["app_slug"] == "contributes_test"]
         assert len(app_menus) == 2
         titles = {m["title"] for m in app_menus}
@@ -174,7 +185,9 @@ class TestContributesAggregator:
         version.manifest = manifest
         await db_session.flush()
 
-        result = await contributes_service.aggregate_for_tenant(db_session, tenant_id=0)
+        result = await contributes_service.aggregate_for_tenant(
+            db_session, tenant=DEFAULT_TENANT
+        )
         app_menus = [m for m in result["menus"] if m["app_slug"] == "contributes_test"]
         assert len(app_menus) == 1
         assert app_menus[0]["title"] == "应当胜出"
@@ -186,8 +199,8 @@ class TestContributesAggregator:
         redis_ready,  # noqa: ARG002
     ):
         # 写缓存
-        await contributes_service.refresh_cache(db_session, tenant_id=0)
-        cached = await contributes_service.get_cached(tenant_id=0)
+        await contributes_service.refresh_cache(db_session, tenant=DEFAULT_TENANT)
+        cached = await contributes_service.get_cached(tenant=DEFAULT_TENANT)
         assert cached is not None
         assert any(m["app_slug"] == "contributes_test" for m in cached["menus"])
 
@@ -197,11 +210,11 @@ class TestContributesAggregator:
         installed_app_with_menu,  # noqa: ARG002
         redis_ready,  # noqa: ARG002
     ):
-        await contributes_service.refresh_cache(db_session, tenant_id=0)
-        assert await contributes_service.get_cached(tenant_id=0) is not None
+        await contributes_service.refresh_cache(db_session, tenant=DEFAULT_TENANT)
+        assert await contributes_service.get_cached(tenant=DEFAULT_TENANT) is not None
 
-        await contributes_service.invalidate(tenant_id=0)
-        assert await contributes_service.get_cached(tenant_id=0) is None
+        await contributes_service.invalidate(tenant=DEFAULT_TENANT)
+        assert await contributes_service.get_cached(tenant=DEFAULT_TENANT) is None
 
     async def test_get_cached_returns_none_if_missing(
         self,
@@ -209,6 +222,6 @@ class TestContributesAggregator:
     ):
         # 清理可能残留的 key
         redis = await get_redis()
-        await redis.delete(CACHE_KEY_PATTERN.format(tenant_id=99999))
-        result = await contributes_service.get_cached(tenant_id=99999)
+        await redis.delete(CACHE_KEY_PATTERN.format(tenant_id=0))
+        result = await contributes_service.get_cached(tenant=DEFAULT_TENANT)
         assert result is None

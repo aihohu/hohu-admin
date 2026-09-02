@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_ai_chat_use, require_permissions
 from app.core.base_response import PageResult, ResponseModel
+from app.core.tenant import get_bound_tenant_context
 from app.db.session import get_db
 from app.modules.ai.schemas.routing_feedback import (
     FeedbackListItem,
@@ -47,6 +48,7 @@ async def submit_routing_feedback(
         message_id=message_id,
         request=request,
         user=current_user,
+        tenant=get_bound_tenant_context(current_user),
     )
     await db.commit()
     return ResponseModel.success(data=None)
@@ -56,14 +58,16 @@ async def submit_routing_feedback(
     "/summary",
     summary="路由反馈 KPI + Agent 排行",
     response_model=ResponseModel[FeedbackSummary],
-    dependencies=[Depends(require_permissions("ai:routing-feedback:list"))],
 )
 async def get_routing_feedback_summary(
     days: int = Query(7, ge=1, le=365),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permissions("ai:routing-feedback:list")),
 ) -> ResponseModel[FeedbackSummary]:
     """返回近 N 天路由反馈 KPI 和错误率最高的 Agent。"""
-    summary = await routing_feedback_query_service.summary(db, days=days)
+    summary = await routing_feedback_query_service.summary(
+        db, days=days, tenant=get_bound_tenant_context(current_user)
+    )
     return ResponseModel.success(data=summary)
 
 
@@ -71,11 +75,11 @@ async def get_routing_feedback_summary(
     "/list",
     summary="路由反馈明细分页",
     response_model=ResponseModel[PageResult[FeedbackListItem]],
-    dependencies=[Depends(require_permissions("ai:routing-feedback:list"))],
 )
 async def get_routing_feedback_list(
     query: FeedbackListQuery = Depends(),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permissions("ai:routing-feedback:list")),
 ) -> ResponseModel[PageResult[FeedbackListItem]]:
     """分页查询路由反馈明细，默认只返回 wrong。"""
     items, total = await routing_feedback_query_service.list_items(
@@ -86,6 +90,7 @@ async def get_routing_feedback_list(
         feedback=query.feedback,
         original_agent=query.original_agent,
         corrected_agent=query.corrected_agent,
+        tenant=get_bound_tenant_context(current_user),
     )
     return ResponseModel.success(
         data=PageResult[FeedbackListItem](

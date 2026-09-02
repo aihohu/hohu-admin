@@ -24,6 +24,7 @@ from app.modules.ai.api.resume import router as resume_router
 from app.modules.ai.api.role_agent import router as role_agent_router
 from app.modules.ai.api.routing_feedback import query_router as feedback_query_router
 from app.modules.ai.api.routing_feedback import router as feedback_router
+from app.modules.auth.service import require_platform_context
 
 
 def _user(*permissions: str, role_code: str = "R_USER"):
@@ -119,14 +120,15 @@ def _permission_codes(route: APIRoute) -> set[str]:
     return codes
 
 
-def test_provider_model_management_endpoint_requires_provider_list() -> None:
+def test_provider_model_management_endpoint_requires_platform_context() -> None:
     route = _route(provider_router, "/models", "GET")
-    assert "ai:provider:list" in _permission_codes(route)
+    assert require_platform_context in _dependency_calls(route)
+    assert not _permission_codes(route)
 
 
-def test_saved_provider_test_endpoint_requires_test_permission() -> None:
+def test_saved_provider_test_endpoint_requires_platform_context() -> None:
     route = _route(provider_router, "/{provider_id}/test", "POST")
-    assert "ai:provider:test-model" in _permission_codes(route)
+    assert require_platform_context in _dependency_calls(route)
     assert not any(
         isinstance(candidate, APIRoute)
         and candidate.path == "/test-model"
@@ -135,9 +137,9 @@ def test_saved_provider_test_endpoint_requires_test_permission() -> None:
     )
 
 
-def test_agent_model_options_endpoint_requires_agent_list() -> None:
+def test_agent_model_options_endpoint_requires_platform_context() -> None:
     route = _route(agent_admin_router, "/model-options", "GET")
-    assert "ai:agent:list" in _permission_codes(route)
+    assert require_platform_context in _dependency_calls(route)
 
 
 def test_ai_chat_permission_has_stable_denial_code() -> None:

@@ -4,13 +4,18 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from tenant_helpers import tenant_context
 
 from app.core.exceptions import NotFoundException
 from app.modules.ai.api.query_cache import get_query_cache_endpoint
 
 
 def _user():
-    return SimpleNamespace(user_id=101, user_name="alice")
+    return SimpleNamespace(
+        user_id=101,
+        user_name="alice",
+        _tenant_context=tenant_context(actor_user_id=101),
+    )
 
 
 def _entry(*, user_id: int = 101):

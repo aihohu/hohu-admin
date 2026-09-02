@@ -125,7 +125,7 @@ class PreparedActionService:
         interaction_flow: str = "prepared",
         requested_outcome: str = "execute_if_approved",
         user_id: int,
-        tenant_id: int,
+        tenant: TenantContext,
         conversation_id: int,
         source_user_message_id: int,
         trace_id: str,
@@ -163,6 +163,7 @@ class PreparedActionService:
             conversation_id=conversation_id,
             source_user_message_id=source_user_message_id,
             user_id=user_id,
+            tenant=tenant,
         ):
             raise _binding_invalid("prepared action 的会话或源消息已失效")
         normalized_presentation = self.validate_presentation(presentation)
@@ -190,7 +191,7 @@ class PreparedActionService:
         if projection_kind == "scope_bound" and data_scope_hash is None:
             raise _binding_invalid("aggregate prepared action 缺少 data scope hash")
         lineage = result_projection_service.freeze_lineage(
-            tenant_id=tenant_id,
+            tenant=tenant,
             agent_code=agent_code,
             tool_codes=tool_codes,
             subject_refs=subject_refs,
@@ -239,7 +240,7 @@ class PreparedActionService:
             ],
             presentation=normalized_presentation,
             user_id=user_id,
-            tenant_id=tenant_id,
+            tenant_id=tenant.tenant_id,
             conversation_id=conversation_id,
             source_user_message_id=source_user_message_id,
             trace_id=trace_id,
@@ -514,12 +515,14 @@ class PreparedActionService:
         conversation_id: int,
         source_user_message_id: int,
         user_id: int,
+        tenant: TenantContext,
     ) -> bool:
         """Serialize action creation with conversation deletion."""
         conversation = (
             await db.execute(
                 select(AiConversation)
                 .where(
+                    AiConversation.tenant_id == tenant.tenant_id,
                     AiConversation.conversation_id == conversation_id,
                     AiConversation.user_id == user_id,
                     AiConversation.deleted_at.is_(None),
@@ -533,6 +536,7 @@ class PreparedActionService:
             await db.execute(
                 select(AiMessage)
                 .where(
+                    AiMessage.tenant_id == tenant.tenant_id,
                     AiMessage.message_id == source_user_message_id,
                     AiMessage.conversation_id == conversation_id,
                     AiMessage.role == "user",
@@ -544,23 +548,33 @@ class PreparedActionService:
         return source is not None
 
     async def get_by_confirmation_id(
-        self, db: AsyncSession, confirmation_id: str
+        self,
+        db: AsyncSession,
+        confirmation_id: str,
+        *,
+        tenant: TenantContext,
     ) -> AiPreparedAction | None:
         return (
             await db.execute(
                 select(AiPreparedAction).where(
-                    AiPreparedAction.confirmation_id == confirmation_id
+                    AiPreparedAction.tenant_id == tenant.tenant_id,
+                    AiPreparedAction.confirmation_id == confirmation_id,
                 )
             )
         ).scalar_one_or_none()
 
     async def get_by_execute_tool_call_id(
-        self, db: AsyncSession, tool_call_id: str
+        self,
+        db: AsyncSession,
+        tool_call_id: str,
+        *,
+        tenant: TenantContext,
     ) -> AiPreparedAction | None:
         return (
             await db.execute(
                 select(AiPreparedAction).where(
-                    AiPreparedAction.execute_tool_call_id == tool_call_id
+                    AiPreparedAction.tenant_id == tenant.tenant_id,
+                    AiPreparedAction.execute_tool_call_id == tool_call_id,
                 )
             )
         ).scalar_one_or_none()
@@ -570,15 +584,19 @@ class PreparedActionService:
         db: AsyncSession,
         *,
         confirmation_id: str,
+        tenant: TenantContext,
     ) -> PreparedConfirmationContext | None:
         """Lock conversation -> source message -> action in the canonical order."""
-        action_ref = await self.get_by_confirmation_id(db, confirmation_id)
+        action_ref = await self.get_by_confirmation_id(
+            db, confirmation_id, tenant=tenant
+        )
         if action_ref is None:
             return None
         conversation = (
             await db.execute(
                 select(AiConversation)
                 .where(
+                    AiConversation.tenant_id == tenant.tenant_id,
                     AiConversation.conversation_id == action_ref.conversation_id,
                     AiConversation.deleted_at.is_(None),
                 )
@@ -588,14 +606,20 @@ class PreparedActionService:
         source = (
             await db.execute(
                 select(AiMessage)
-                .where(AiMessage.message_id == action_ref.source_user_message_id)
+                .where(
+                    AiMessage.tenant_id == tenant.tenant_id,
+                    AiMessage.message_id == action_ref.source_user_message_id,
+                )
                 .with_for_update()
             )
         ).scalar_one_or_none()
         action = (
             await db.execute(
                 select(AiPreparedAction)
-                .where(AiPreparedAction.confirmation_id == confirmation_id)
+                .where(
+                    AiPreparedAction.tenant_id == tenant.tenant_id,
+                    AiPreparedAction.confirmation_id == confirmation_id,
+                )
                 .with_for_update()
                 .execution_options(populate_existing=True)
             )
@@ -622,6 +646,7 @@ class PreparedActionService:
         execution_lease_not_after: datetime | None = None,
         result_lineage: ProjectionLineage | None = None,
         replace_result_lineage: bool = False,
+        tenant: TenantContext,
     ) -> AiPreparedAction | None:
         """CAS one legal action transition; zero rows means another winner."""
         if target_status not in _ALLOWED_TRANSITIONS.get(expected_status, set()):
@@ -629,6 +654,8 @@ class PreparedActionService:
                 f"prepared action 非法状态迁移 {expected_status} -> {target_status}",
                 error_code="AI_PREPARED_ACTION_STATE_INVALID",
             )
+        if result_lineage is not None and result_lineage.tenant_id != tenant.tenant_id:
+            raise _binding_invalid("prepared action 结果 lineage 租户不一致")
 
         now = datetime.now(UTC)
         values: dict[str, Any] = {
@@ -680,6 +707,7 @@ class PreparedActionService:
 
         conditions = [
             AiPreparedAction.action_id == action_id,
+            AiPreparedAction.tenant_id == tenant.tenant_id,
             AiPreparedAction.status == expected_status.value,
             AiPreparedAction.row_version == expected_version,
         ]
@@ -707,12 +735,14 @@ class PreparedActionService:
         action_id: int,
         execution_owner: str,
         lease_expires_at: datetime,
+        tenant: TenantContext,
     ) -> bool:
         """Extend a RUNNING action lease only for its current executor."""
         stmt = (
             update(AiPreparedAction)
             .where(
                 AiPreparedAction.action_id == action_id,
+                AiPreparedAction.tenant_id == tenant.tenant_id,
                 AiPreparedAction.status == PreparedActionStatus.RUNNING.value,
                 AiPreparedAction.execution_owner == execution_owner,
             )
@@ -727,23 +757,25 @@ class PreparedActionService:
         *,
         conversation_id: int,
         user_id: int,
-        tenant_id: int,
+        tenant: TenantContext,
     ) -> list[AiPreparedAction]:
         """Return only live actions whose conversation and source remain owned/active."""
         stmt = (
             select(AiPreparedAction)
             .join(
                 AiConversation,
-                AiConversation.conversation_id == AiPreparedAction.conversation_id,
+                (AiConversation.tenant_id == AiPreparedAction.tenant_id)
+                & (AiConversation.conversation_id == AiPreparedAction.conversation_id),
             )
             .join(
                 AiMessage,
-                AiMessage.message_id == AiPreparedAction.source_user_message_id,
+                (AiMessage.tenant_id == AiPreparedAction.tenant_id)
+                & (AiMessage.message_id == AiPreparedAction.source_user_message_id),
             )
             .where(
                 AiPreparedAction.conversation_id == conversation_id,
                 AiPreparedAction.user_id == user_id,
-                AiPreparedAction.tenant_id == tenant_id,
+                AiPreparedAction.tenant_id == tenant.tenant_id,
                 AiPreparedAction.status
                 == PreparedActionStatus.PENDING_CONFIRMATION.value,
                 AiPreparedAction.expires_at > datetime.now(UTC),
@@ -765,7 +797,7 @@ class PreparedActionService:
         *,
         conversation_id: int,
         user_id: int,
-        tenant_id: int,
+        tenant: TenantContext,
     ) -> bool:
         statuses = (
             PreparedActionStatus.PREPARED.value,
@@ -778,7 +810,7 @@ class PreparedActionService:
             .where(
                 AiPreparedAction.conversation_id == conversation_id,
                 AiPreparedAction.user_id == user_id,
-                AiPreparedAction.tenant_id == tenant_id,
+                AiPreparedAction.tenant_id == tenant.tenant_id,
                 AiPreparedAction.status.in_(statuses),
                 or_(
                     AiPreparedAction.status
@@ -796,7 +828,7 @@ class PreparedActionService:
         *,
         conversation_id: int,
         user_id: int,
-        tenant_id: int,
+        tenant: TenantContext,
     ) -> list[AiPreparedAction]:
         """Lock and terminalize deletable actions after the conversation lock."""
         nonterminal = (
@@ -812,7 +844,7 @@ class PreparedActionService:
                     .where(
                         AiPreparedAction.conversation_id == conversation_id,
                         AiPreparedAction.user_id == user_id,
-                        AiPreparedAction.tenant_id == tenant_id,
+                        AiPreparedAction.tenant_id == tenant.tenant_id,
                         AiPreparedAction.status.in_(nonterminal),
                     )
                     .order_by(AiPreparedAction.action_id.asc())
@@ -862,7 +894,7 @@ class PreparedActionService:
                     await db.execute(
                         select(AiOperationLog)
                         .where(
-                            AiOperationLog.tenant_id == tenant_id,
+                            AiOperationLog.tenant_id == tenant.tenant_id,
                             AiOperationLog.user_id == user_id,
                             AiOperationLog.conversation_id == conversation_id,
                             AiOperationLog.tool_call_id.in_(tool_call_ids),
@@ -892,16 +924,23 @@ class PreparedActionService:
         return actions
 
     async def pending_source_is_valid(
-        self, db: AsyncSession, action: AiPreparedAction
+        self,
+        db: AsyncSession,
+        action: AiPreparedAction,
+        *,
+        tenant: TenantContext,
     ) -> bool:
         """Check that a recoverable action still has its owned active source."""
         value = await db.scalar(
             select(AiMessage.message_id)
             .join(
                 AiConversation,
-                AiConversation.conversation_id == AiMessage.conversation_id,
+                (AiConversation.tenant_id == AiMessage.tenant_id)
+                & (AiConversation.conversation_id == AiMessage.conversation_id),
             )
             .where(
+                AiMessage.tenant_id == tenant.tenant_id,
+                AiMessage.tenant_id == action.tenant_id,
                 AiMessage.message_id == action.source_user_message_id,
                 AiMessage.conversation_id == action.conversation_id,
                 AiMessage.role == "user",

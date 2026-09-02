@@ -15,8 +15,8 @@
   - memory（默认）：进程内 asyncio.Event 唤醒；强制单 worker。
     Redis pending payload 仍写（用于 owner 校验 + 重启清扫），但 wake 只走进程内 dict。
   - redis_pubsub：Redis pub/sub 跨 worker 唤醒；允许多 worker / k8s 多 pod。
-    wake 时 SET pending.wake_action + PUBLISH channel；hang 时 SUBSCRIBE channel +
-    防丢失检查 wake_action（subscribe 前到达的 wake 不丢）。
+    wake 时用 tenant-scoped side-state Lua CAS 原子认领决定并 PUBLISH channel；
+    hang 时 SUBSCRIBE channel + 防丢失检查 side-state（subscribe 前到达的 wake 不丢）。
 
 为什么进程内 dict + Redis 双存（memory 模式）：
   - asyncio.Event 是进程内对象，多 worker 下其它进程拿不到
@@ -24,10 +24,11 @@
       a) 服务重启后能清扫
       b) /ai/confirm endpoint 跨请求取 pending 信息
 
-为什么 pub/sub + wake_action 字段双写（redis_pubsub 模式，防丢失）：
+为什么 pub/sub + tenant-scoped side-state 双写（redis_pubsub 模式，防丢失）：
   - 纯 pub/sub fire-and-forget，subscribe 前到达的 wake 消息丢失
-  - wake 总是先 SET pending.wake_action 再 PUBLISH；hang subscribe 完成后
-    立即 GET pending 检查 wake_action，已设则直接返回（race-safe）
+  - wake 用同一段 Lua first-writer-wins 地写 side-state 并发布；hang subscribe 完成后
+    立即读取 side-state，已设则直接返回（race-safe）
+  - rolling upgrade 期间仍识别旧 pending payload 内嵌的 wake_action
   - 替代方案 LIST+BRPOP 在 SSE 取消时需 LREM 清理 LIST 残留，复杂度高
 
 Args 4KB 限制：
@@ -47,6 +48,7 @@ from redis.asyncio import Redis
 
 from app.core.config import settings
 from app.core.exceptions import BusinessRuleException
+from app.core.tenant import PlatformContext, TenantContext
 from app.modules.ai.agents.hitl.constants import (
     AI_CONFIRM_REDIS_PREFIX,
     AI_HITL_WAKE_CHANNEL_PREFIX,
@@ -54,6 +56,44 @@ from app.modules.ai.agents.hitl.constants import (
 )
 
 logger = logging.getLogger(__name__)
+
+AI_HITL_WAKE_STATE_PREFIX = "ai:hitl:wake-state:v1"
+
+_CREATE_PENDING_LUA = """
+if redis.call('EXISTS', KEYS[1]) == 1 then
+    return 0
+end
+redis.call('DEL', KEYS[2])
+redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+return 1
+"""
+
+_CLAIM_AND_PUBLISH_WAKE_LUA = """
+if redis.call('EXISTS', KEYS[1]) == 0 then
+    return 0
+end
+local ttl_ms = redis.call('PTTL', KEYS[1])
+if ttl_ms <= 0 then
+    return 0
+end
+local payload = redis.call('GET', KEYS[1])
+if string.find(payload, '"wake_action"%s*:%s*"approved"')
+    or string.find(payload, '"wake_action"%s*:%s*"rejected"') then
+    return 2
+end
+if redis.call('EXISTS', KEYS[2]) == 1 then
+    return 2
+end
+local claimed = redis.call('SET', KEYS[2], ARGV[1], 'PX', ttl_ms, 'NX')
+if not claimed then
+    return 2
+end
+local subscribers = redis.call('PUBLISH', KEYS[3], ARGV[2])
+if subscribers > 0 then
+    return 1
+end
+return -1
+"""
 
 
 @dataclass
@@ -81,6 +121,7 @@ class PendingPayload:
     """
 
     user_id: int
+    tenant_id: int
     conversation_id: int
     tool_call_id: str
     trace_id: str
@@ -88,8 +129,7 @@ class PendingPayload:
     args: dict[str, Any]
     dry_run_result: dict[str, Any] | None
     expires_at: str  # ISO 8601 UTC
-    tenant_id: int = 0
-    """创建 pending 时的可信租户；0 默认仅兼容升级前的单租户 payload。"""
+    """创建 pending 时的可信租户快照。"""
     source_user_message_id: int | None = None
     guard_owner_token: str | None = None
     command_action: str = "send"
@@ -111,8 +151,8 @@ class HitlManager:
     """
 
     def __init__(self) -> None:
-        # confirmation_id → _PendingEntry（仅本进程的挂起流）
-        self._pending: dict[str, _PendingEntry] = {}
+        # (tenant_id, confirmation_id) → _PendingEntry（仅本进程的挂起流）
+        self._pending: dict[tuple[int, str], _PendingEntry] = {}
 
     # ============ ID 生成 ============
 
@@ -153,7 +193,7 @@ class HitlManager:
         *,
         confirmation_id: str,
         user_id: int,
-        tenant_id: int = 0,
+        tenant: TenantContext,
         conversation_id: int,
         tool_call_id: str,
         trace_id: str,
@@ -189,7 +229,7 @@ class HitlManager:
         )
         payload = PendingPayload(
             user_id=user_id,
-            tenant_id=tenant_id,
+            tenant_id=tenant.tenant_id,
             conversation_id=conversation_id,
             tool_call_id=tool_call_id,
             trace_id=trace_id,
@@ -205,8 +245,9 @@ class HitlManager:
             chip_target=chip_target,
         )
 
-        # 3. confirmation_id 不应重复（防御性，仅 memory 模式检查进程内 dict）
-        if settings.AI_HITL_MODE == "memory" and confirmation_id in self._pending:
+        memory_key = self._memory_key(confirmation_id, tenant=tenant)
+        # 3. confirmation_id 在同一租户内不应重复；不同租户必须相互独立。
+        if settings.AI_HITL_MODE == "memory" and memory_key in self._pending:
             logger.error(
                 "confirmation_id collision (extremely unlikely): %s",
                 confirmation_id,
@@ -216,14 +257,27 @@ class HitlManager:
                 error_code="AI_HITL_CONFIRMATION_ID_COLLISION",
             )
 
-        # 4. 写 Redis（带 TTL，过期自动清掉）
-        key = self._redis_key(confirmation_id)
+        # 4. 原子创建 Redis pending 并清掉同 business key 的旧 wake state。
+        # SET-if-absent protects pub/sub workers from a generated-ID collision.
+        key = self._redis_key(confirmation_id, tenant=tenant)
         body = payload.to_json_bytes()
-        await redis.set(key, body, ex=settings.AI_HITL_PENDING_TTL_SEC)
+        created = await redis.eval(
+            _CREATE_PENDING_LUA,
+            2,
+            key,
+            self._wake_state_key(confirmation_id, tenant=tenant),
+            body,
+            settings.AI_HITL_PENDING_TTL_SEC,
+        )
+        if not created:
+            raise BusinessRuleException(
+                "confirmation_id 已存在",
+                error_code="AI_HITL_CONFIRMATION_ID_COLLISION",
+            )
 
         # 5. 注册进程内 Event（仅 memory 模式；redis_pubsub 模式 dict 不用）
         if settings.AI_HITL_MODE == "memory":
-            self._pending[confirmation_id] = _PendingEntry()
+            self._pending[memory_key] = _PendingEntry()
 
         return payload
 
@@ -233,6 +287,7 @@ class HitlManager:
         self,
         confirmation_id: str,
         *,
+        tenant: TenantContext,
         timeout_sec: int | None = None,
     ) -> ConfirmAction:
         """按当前模式挂起协程，直到 wake 或超时。
@@ -257,18 +312,21 @@ class HitlManager:
             timeout_sec = settings.AI_HITL_PENDING_TTL_SEC
 
         if settings.AI_HITL_MODE == "redis_pubsub":
-            return await self._hang_pubsub(confirmation_id, timeout_sec)
-        return await self._hang_memory(confirmation_id, timeout_sec)
+            return await self._hang_pubsub(confirmation_id, timeout_sec, tenant=tenant)
+        return await self._hang_memory(confirmation_id, timeout_sec, tenant=tenant)
 
     async def _hang_memory(
         self,
         confirmation_id: str,
         timeout_sec: int,
+        *,
+        tenant: TenantContext,
     ) -> ConfirmAction:
         """memory 模式：等待进程内 asyncio.Event。"""
         from app.modules.ai.metrics import record_hitl_timeout  # noqa: PLC0415
 
-        entry = self._pending.get(confirmation_id)
+        memory_key = self._memory_key(confirmation_id, tenant=tenant)
+        entry = self._pending.get(memory_key)
         if entry is None:
             # 没有 create_pending 就 hang？调用方错误
             raise BusinessRuleException(
@@ -280,13 +338,15 @@ class HitlManager:
             await asyncio.wait_for(entry.event.wait(), timeout=timeout_sec)
         except TimeoutError:
             # 5min 无人确认 → EXPIRED
-            self._pending.pop(confirmation_id, None)
+            if self._pending.get(memory_key) is entry:
+                self._pending.pop(memory_key, None)
             record_hitl_timeout("memory")
             raise
 
         # 被 wake 唤醒
         action = entry.action
-        self._pending.pop(confirmation_id, None)
+        if self._pending.get(memory_key) is entry:
+            self._pending.pop(memory_key, None)
         if action is None:
             # 不该发生（wake 一定先写 action 再 set），防御性兜底
             logger.error(
@@ -303,6 +363,8 @@ class HitlManager:
         self,
         confirmation_id: str,
         timeout_sec: int,
+        *,
+        tenant: TenantContext,
     ) -> ConfirmAction:
         """redis_pubsub 模式：使用 pub/sub，并用 wake_action 防止订阅前消息丢失。
 
@@ -322,12 +384,14 @@ class HitlManager:
             record_hitl_timeout,
         )
 
-        channel = f"{AI_HITL_WAKE_CHANNEL_PREFIX}:{confirmation_id}"
+        channel = self._wake_channel(confirmation_id, tenant=tenant)
         pubsub = redis_client.pubsub()
         await pubsub.subscribe(channel)
         try:
             # 防丢失：subscribe 后立即检查 wake_action（race-safe）
-            pending = await self.get_pending(redis_client, confirmation_id)
+            pending = await self.get_pending(
+                redis_client, confirmation_id, tenant=tenant
+            )
             if pending is not None and pending.wake_action is not None:
                 # 记录订阅前已写入 wake_action 的防丢失分支。
                 # 到达，靠 wake_action 兜底）。redis_pubsub 模式健康度核心指标。
@@ -364,6 +428,8 @@ class HitlManager:
         self,
         confirmation_id: str,
         action: ConfirmAction,
+        *,
+        tenant: TenantContext,
     ) -> bool:
         """按当前模式唤醒挂起协程。
 
@@ -377,39 +443,39 @@ class HitlManager:
                    create_pending / 已被另一个并发 wake 唤醒过）
 
         mode 分支：
-          - memory：先从进程内字典移除，再 Event.set，防止双击重复唤醒
-          - redis_pubsub：SET pending.wake_action + PUBLISH channel
+          - memory：原子写入首个 action 并 Event.set，由 hang 消费后移除
+          - redis_pubsub：Lua CAS side-state + PUBLISH channel
         """
         if settings.AI_HITL_MODE == "redis_pubsub":
-            return await self._wake_pubsub(confirmation_id, action)
-        return await self._wake_memory(confirmation_id, action)
+            return await self._wake_pubsub(confirmation_id, action, tenant=tenant)
+        return await self._wake_memory(confirmation_id, action, tenant=tenant)
 
     async def _wake_memory(
         self,
         confirmation_id: str,
         action: ConfirmAction,
+        *,
+        tenant: TenantContext,
     ) -> bool:
-        """memory 模式：原子移除挂起项后设置 Event，防止双击竞争。
+        """memory 模式：原子认领决定后设置 Event，防止双击竞争。
 
-        立即 pop entry（其它 wake 看不到）→ set action → event.set() → True。
-        第二次 wake（双击 / 双标签）：pop 返回 None → False。
+        entry remains reachable until hang consumes it, so a confirmation that
+        arrives between create_pending and hang cannot be lost.  There is no
+        await between the action check and assignment, so one event-loop worker
+        observes a first-writer-wins transition.
 
         memory 模式下 Redis 只保存跨请求所需 payload，无需写回 wake 状态。
         进程内 Event 是同步唤醒机制。
         """
         from app.modules.ai.metrics import record_hitl_wake  # noqa: PLC0415
 
-        # 立即移除，确保同一确认只能被唤醒一次。
-        entry = self._pending.pop(confirmation_id, None)
+        memory_key = self._memory_key(confirmation_id, tenant=tenant)
+        entry = self._pending.get(memory_key)
         if entry is None:
             record_hitl_wake("memory", "not_found")
             return False
-        # 防御性：极端 race 下 entry 已有 action（不该发生，pop 已原子）
+        # Double taps and conflicting decisions cannot overwrite the winner.
         if entry.action is not None:
-            logger.warning(
-                "wake: entry already has action (extreme race) confirmation_id=%s",
-                confirmation_id,
-            )
             record_hitl_wake("memory", "not_found")
             return False
         entry.action = action
@@ -421,53 +487,47 @@ class HitlManager:
         self,
         confirmation_id: str,
         action: ConfirmAction,
+        *,
+        tenant: TenantContext,
     ) -> bool:
-        """redis_pubsub 模式：先写 wake_action，再发布唤醒消息。
+        """redis_pubsub 模式：原子认领 wake_action，再发布唤醒消息。
 
         流程：
-          1. GET Redis pending；不存在 → False（已 expired / 未 create_pending）
-          2. dataclasses.replace 重写 wake_action（frozen 兼容）
-          3. SET Redis payload（保留 TTL）
-          4. PUBLISH channel: {"action": "...", "confirmation_id": "...", "ts": ...}
+          1. Lua 检查 tenant-scoped pending 存在且仍有 TTL
+          2. 兼容检查旧 payload 内嵌 wake_action
+          3. 以 pending 剩余 TTL 对 side-state 执行 SET NX
+          4. 首次认领者在同一 Lua 内 PUBLISH channel
 
         防双击 / 防丢失：
-          - 第二次 wake 同 confirmation_id：step 1 检查到 wake_action 已设，
-            但仍覆盖 SET + PUBLISH（无害，hang 端只读一次）。考虑过在这里 short
-            -circuit 返回 False，但实际场景下：第二次 wake 通常意味着第一次没
-            成功送达（如 SSE 流已断 + 用户重试），保守返回 True 让 confirm.py
-            走"等 stream 自然处理"路径更安全。
+          - 第二次 wake 不能覆盖首个决定；作为幂等重试返回 True，但不会重复发布。
           - 防丢失：见 _hang_pubsub 注释。
         """
         from app.core.redis import redis_client  # noqa: PLC0415
         from app.modules.ai.metrics import record_hitl_wake  # noqa: PLC0415
 
-        pending = await self.get_pending(redis_client, confirmation_id)
-        if pending is None:
-            record_hitl_wake("redis_pubsub", "not_found")
-            return False
-
-        # 用 dataclasses.replace 重写 wake_action（PendingPayload frozen=True）
-        updated = replace(pending, wake_action=action.value)
-        await redis_client.set(
-            self._redis_key(confirmation_id),
-            updated.to_json_bytes(),
-            ex=settings.AI_HITL_PENDING_TTL_SEC,
+        channel = self._wake_channel(confirmation_id, tenant=tenant)
+        message = json.dumps(
+            {
+                "action": action.value,
+                "confirmation_id": confirmation_id,
+                "ts": time.time(),
+            }
         )
-
-        channel = f"{AI_HITL_WAKE_CHANNEL_PREFIX}:{confirmation_id}"
-        subscribers = await redis_client.publish(
-            channel,
-            json.dumps(
-                {
-                    "action": action.value,
-                    "confirmation_id": confirmation_id,
-                    "ts": time.time(),
-                }
-            ),
+        result = int(
+            await redis_client.eval(
+                _CLAIM_AND_PUBLISH_WAKE_LUA,
+                3,
+                self._redis_key(confirmation_id, tenant=tenant),
+                self._wake_state_key(confirmation_id, tenant=tenant),
+                channel,
+                action.value,
+                message,
+            )
         )
-        result = "success" if subscribers > 0 else "not_found"
-        record_hitl_wake("redis_pubsub", result)
-        return subscribers > 0
+        # 1: claimed with a live subscriber; 2: already resolved (idempotent).
+        reachable = result in {1, 2}
+        record_hitl_wake("redis_pubsub", "success" if reachable else "not_found")
+        return reachable
 
     # ============ Redis 查询（/ai/confirm endpoint 用） ============
 
@@ -475,44 +535,98 @@ class HitlManager:
     async def get_pending(
         redis: Redis,
         confirmation_id: str,
+        *,
+        tenant: TenantContext,
     ) -> PendingPayload | None:
         """从 Redis 取 pending payload，不存在返回 None
 
         /ai/confirm endpoint 用：
           - 取 pending → 校验 owner + conversation_id → wake
         """
-        key = HitlManager._redis_key(confirmation_id)
+        key = HitlManager._redis_key(confirmation_id, tenant=tenant)
         body = await redis.get(key)
         if body is None:
             return None
         if isinstance(body, bytes):
             body = body.decode("utf-8")
-        data = json.loads(body)
-        return PendingPayload(**data)
+        try:
+            data = json.loads(body)
+            pending = PendingPayload(**data)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning(
+                "invalid HITL pending payload confirmation_id=%s",
+                confirmation_id,
+            )
+            return None
+        if pending.tenant_id != tenant.tenant_id:
+            return None
+        if settings.AI_HITL_MODE == "redis_pubsub":
+            wake_action = await redis.get(
+                HitlManager._wake_state_key(confirmation_id, tenant=tenant)
+            )
+            if isinstance(wake_action, bytes):
+                wake_action = wake_action.decode("utf-8")
+            if wake_action is not None:
+                if wake_action not in {item.value for item in ConfirmAction}:
+                    return None
+                pending = replace(pending, wake_action=wake_action)
+        return pending
 
     @staticmethod
-    async def ttl(redis: Redis, confirmation_id: str) -> int:
+    async def get_pending_for_platform(
+        redis: Redis,
+        confirmation_id: str,
+        *,
+        tenant_id: int,
+        platform: PlatformContext,
+    ) -> PendingPayload | None:
+        """Read one tenant envelope only for platform lifecycle recovery."""
+        if not isinstance(platform, PlatformContext):
+            raise TypeError("platform context is required")
+        body = await redis.get(
+            HitlManager._redis_key_for_id(confirmation_id, tenant_id=tenant_id)
+        )
+        if body is None:
+            return None
+        if isinstance(body, bytes):
+            body = body.decode("utf-8")
+        try:
+            pending = PendingPayload(**json.loads(body))
+        except (json.JSONDecodeError, TypeError):
+            logger.warning(
+                "invalid platform HITL pending payload confirmation_id=%s",
+                confirmation_id,
+            )
+            return None
+        return pending if pending.tenant_id == tenant_id else None
+
+    @staticmethod
+    async def ttl(redis: Redis, confirmation_id: str, *, tenant: TenantContext) -> int:
         """返回 pending 剩余 TTL；续传接口会拒绝剩余不足 60 秒的确认。
 
         /ai/chat/resume endpoint 用：剩余 < 60s → 422 AI_RESUME_TTL_TOO_SHORT。
         Redis key 不存在时返回 -2（Redis 标准）。
         """
-        return await redis.ttl(HitlManager._redis_key(confirmation_id))
+        return await redis.ttl(HitlManager._redis_key(confirmation_id, tenant=tenant))
 
     @staticmethod
     async def bind_durable_action(
         redis: Redis,
         confirmation_id: str,
         action_id: int,
+        *,
+        tenant: TenantContext,
     ) -> PendingPayload:
         """Bind a newly committed action before its confirmation is exposed."""
-        pending = await HitlManager.get_pending(redis, confirmation_id)
+        pending = await HitlManager.get_pending(redis, confirmation_id, tenant=tenant)
         if pending is None:
             raise BusinessRuleException(
                 "HITL pending 在绑定 action 前已丢失",
                 error_code="AI_PREPARED_ACTION_BINDING_INVALID",
             )
-        ttl_sec = await redis.ttl(HitlManager._redis_key(confirmation_id))
+        ttl_sec = await redis.ttl(
+            HitlManager._redis_key(confirmation_id, tenant=tenant)
+        )
         if ttl_sec <= 0:
             raise BusinessRuleException(
                 "HITL pending 在绑定 action 前已过期",
@@ -520,7 +634,7 @@ class HitlManager:
             )
         bound = replace(pending, action_id=action_id)
         updated = await redis.set(
-            HitlManager._redis_key(confirmation_id),
+            HitlManager._redis_key(confirmation_id, tenant=tenant),
             bound.to_json_bytes(),
             ex=ttl_sec,
             xx=True,
@@ -536,9 +650,14 @@ class HitlManager:
     async def delete_pending(
         redis: Redis,
         confirmation_id: str,
+        *,
+        tenant: TenantContext,
     ) -> None:
         """显式删 Redis pending（mark_rejected / mark_expired 时调）"""
-        await redis.delete(HitlManager._redis_key(confirmation_id))
+        await redis.delete(
+            HitlManager._redis_key(confirmation_id, tenant=tenant),
+            HitlManager._wake_state_key(confirmation_id, tenant=tenant),
+        )
 
     # ============ 服务重启清扫 ============
 
@@ -570,11 +689,23 @@ class HitlManager:
         from app.core.redis import redis_client  # noqa: PLC0415
 
         cleaned = 0
-        pattern = f"{AI_CONFIRM_REDIS_PREFIX}:*"
+        pattern = f"{AI_CONFIRM_REDIS_PREFIX}:tenant:*"
         try:
             async for key in redis_client.scan_iter(match=pattern, count=100):
                 cleaned += 1
+                key_text = key.decode() if isinstance(key, bytes) else str(key)
                 await redis_client.delete(key)
+                try:
+                    confirmation_id = key_text.rsplit(":", 1)[-1]
+                    tenant_id = int(key_text.rsplit(":", 2)[-2])
+                    if tenant_id < 0:
+                        raise ValueError("negative tenant ID")
+                except (IndexError, ValueError):
+                    logger.warning("startup cleanup skipped malformed HITL key")
+                    continue
+                await redis_client.delete(
+                    self._wake_state_key_for_id(confirmation_id, tenant_id=tenant_id)
+                )
             if cleaned:
                 logger.warning(
                     "startup cleanup: removed %d stale HITL pending entries from Redis",
@@ -595,15 +726,48 @@ class HitlManager:
         """测试间清空进程内挂起表（生产代码不要调）"""
         self._pending.clear()
 
-    def _has_pending(self, confirmation_id: str) -> bool:
+    def _has_pending(
+        self,
+        confirmation_id: str,
+        *,
+        tenant: TenantContext | None = None,
+    ) -> bool:
         """测试断言用"""
-        return confirmation_id in self._pending
+        if tenant is not None:
+            return self._memory_key(confirmation_id, tenant=tenant) in self._pending
+        return any(key[1] == confirmation_id for key in self._pending)
 
     # ============ 私有 ============
 
     @staticmethod
-    def _redis_key(confirmation_id: str) -> str:
-        return f"{AI_CONFIRM_REDIS_PREFIX}:{confirmation_id}"
+    def _redis_key(confirmation_id: str, *, tenant: TenantContext) -> str:
+        return HitlManager._redis_key_for_id(
+            confirmation_id, tenant_id=tenant.tenant_id
+        )
+
+    @staticmethod
+    def _redis_key_for_id(confirmation_id: str, *, tenant_id: int) -> str:
+        return f"{AI_CONFIRM_REDIS_PREFIX}:tenant:{tenant_id}:{confirmation_id}"
+
+    @staticmethod
+    def _memory_key(confirmation_id: str, *, tenant: TenantContext) -> tuple[int, str]:
+        return tenant.tenant_id, confirmation_id
+
+    @staticmethod
+    def _wake_state_key(confirmation_id: str, *, tenant: TenantContext) -> str:
+        return HitlManager._wake_state_key_for_id(
+            confirmation_id, tenant_id=tenant.tenant_id
+        )
+
+    @staticmethod
+    def _wake_state_key_for_id(confirmation_id: str, *, tenant_id: int) -> str:
+        return f"{AI_HITL_WAKE_STATE_PREFIX}:tenant:{tenant_id}:{confirmation_id}"
+
+    @staticmethod
+    def _wake_channel(confirmation_id: str, *, tenant: TenantContext) -> str:
+        return (
+            f"{AI_HITL_WAKE_CHANNEL_PREFIX}:tenant:{tenant.tenant_id}:{confirmation_id}"
+        )
 
 
 hitl_manager = HitlManager()

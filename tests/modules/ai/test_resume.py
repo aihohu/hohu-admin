@@ -23,6 +23,14 @@ from app.modules.ai.service.result_projection_service import (
     result_projection_service,
 )
 
+TENANT = TenantContext(
+    tenant_id=0,
+    tenant_code="default",
+    actor_user_id=100,
+    tenant_version=1,
+    source="access_token",
+)
+
 
 def _make_pending(
     user_id: int = 100,
@@ -65,7 +73,7 @@ def _make_user(user_id: int = 100, *, can_chat: bool = True):
 
 def _make_durable_action(**overrides):
     lineage = result_projection_service.freeze_lineage(
-        tenant_id=0,
+        tenant=TENANT,
         agent_code="user_mgmt",
         tool_codes=["user.update"],
         subject_refs=[{"type": "user", "id": "42"}],
@@ -419,7 +427,7 @@ class TestResumeMinimalStatus:
 
         assert any("confirmation_resumed" in chunk for chunk in chunks)
         load_terminal.assert_awaited_once()
-        cleanup.assert_awaited_once_with(durable_action)
+        cleanup.assert_awaited_once_with(durable_action, tenant=TENANT)
 
     async def test_revoked_chat_permission_returns_only_minimal_status(
         self, _resume_enabled, _redis_pubsub_mode
@@ -948,7 +956,7 @@ class TestDurableTerminalProjection:
                 confirmation_id="cid",
                 pending=_make_pending(action_id=None),
                 user_id=100,
-                tenant_id=0,
+                tenant=TENANT,
                 current_user=_make_user(),
             )
 
@@ -995,7 +1003,7 @@ class TestDurableTerminalProjection:
                 confirmation_id="cid",
                 pending=_make_pending(action_id=9001),
                 user_id=100,
-                tenant_id=0,
+                tenant=TENANT,
                 current_user=_make_user(),
             )
 

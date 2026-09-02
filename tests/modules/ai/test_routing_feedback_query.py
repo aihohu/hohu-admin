@@ -94,6 +94,7 @@ async def seed_feedback():
         feedback_rows = [
             AiRoutingFeedback(
                 feedback_id=next_id(),
+                tenant_id=0,
                 message_id=next_id(),
                 user_id=user_id,
                 original_agent=f"{g}role_mgmt",
@@ -104,6 +105,7 @@ async def seed_feedback():
             ),
             AiRoutingFeedback(
                 feedback_id=next_id(),
+                tenant_id=0,
                 message_id=next_id(),
                 user_id=user_id,
                 original_agent=f"{g}role_mgmt",
@@ -114,6 +116,7 @@ async def seed_feedback():
             ),
             AiRoutingFeedback(
                 feedback_id=next_id(),
+                tenant_id=0,
                 message_id=next_id(),
                 user_id=user_id,
                 original_agent=f"{g}config_mgmt",
@@ -124,6 +127,7 @@ async def seed_feedback():
             ),
             AiRoutingFeedback(
                 feedback_id=next_id(),
+                tenant_id=0,
                 message_id=next_id(),
                 user_id=user_id,
                 original_agent=f"{g}user_mgmt",
@@ -134,6 +138,7 @@ async def seed_feedback():
             ),
             AiRoutingFeedback(
                 feedback_id=next_id(),
+                tenant_id=0,
                 message_id=next_id(),
                 user_id=user_id,
                 original_agent=f"{g}shared",
@@ -333,6 +338,7 @@ async def test_top_corrected_tie_breaker(
         s.add(
             AiRoutingFeedback(
                 feedback_id=extra_id,
+                tenant_id=0,
                 message_id=next_id(),
                 user_id=user_id,
                 original_agent=config_code,
@@ -548,6 +554,7 @@ async def test_list_user_deleted_returns_empty_username(
         s.add(
             AiRoutingFeedback(
                 feedback_id=next_id(),
+                tenant_id=0,
                 message_id=next_id(),
                 user_id=ghost_user_id,
                 original_agent=role_code,

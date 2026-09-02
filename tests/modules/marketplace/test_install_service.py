@@ -5,7 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from app.modules.marketplace.exceptions import AppNotFoundException
 from app.modules.marketplace.models import App, AppVersion, TenantApp
 from app.modules.marketplace.schemas.install import InstallCreate, InstallQuery
-from app.modules.marketplace.service.install_service import install_service
+from modules.marketplace import default_install_service as install_service
 
 
 @pytest.fixture

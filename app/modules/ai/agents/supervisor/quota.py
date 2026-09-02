@@ -1,6 +1,6 @@
 """Supervisor LLM 路由日配额，独立于 PydanticAI UsageLimits。
 
-Redis key: ai:supervisor:quota:{user_id}:{YYYY-MM-DD}，TTL 25h（跨时区兜底）.
+Redis key: tenant:{tenant_id}:ai:supervisor:quota:{user_id}:{YYYY-MM-DD}，TTL 25h.
 超限时跳过 LLM 路由直接 emit clarification_required.
 """
 
@@ -36,10 +36,11 @@ async def get_daily_count(r, user_id: int, *, tenant: TenantContext) -> int:
 async def increment_daily_count(r, user_id: int, *, tenant: TenantContext) -> int:
     """原子 +1 并设 TTL，返回 increment 后的值."""
     key = f"tenant:{tenant.tenant_id}:ai:supervisor:quota:{user_id}:{_utc_date()}"
-    new_count = await r.incr(key)
-    if new_count == 1:
-        await r.expire(key, 25 * 3600)
-    return new_count
+    pipe = r.pipeline(transaction=True)
+    pipe.incr(key)
+    pipe.expire(key, 25 * 3600, nx=True)
+    new_count, _ = await pipe.execute()
+    return int(new_count)
 
 
 async def check_supervisor_quota(

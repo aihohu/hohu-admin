@@ -43,9 +43,7 @@ class TenantApp(Base):
     tenant_id: Mapped[int] = mapped_column(
         BigInteger,
         nullable=False,
-        default=0,
-        server_default="0",
-        comment="租户 ID；单租户模式默认 0",
+        comment="租户 ID；必须由可信 TenantContext 显式写入",
     )
     app_id: Mapped[int] = mapped_column(
         BigInteger,

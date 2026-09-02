@@ -7,6 +7,7 @@
 3. correctedAgentCode 可见性复用 list_visible_agents，避免重复维护查询逻辑
 """
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import is_super_admin
@@ -15,6 +16,7 @@ from app.core.exceptions import (
     BusinessRuleException,
     NotFoundException,
 )
+from app.core.tenant import TenantContext
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.routing_feedback import AiRoutingFeedback
@@ -30,9 +32,17 @@ class RoutingFeedbackService:
         message_id: int,
         request,
         user: User,
+        tenant: TenantContext,
     ) -> None:
         """更新 ai_message.routing_feedback 并追加 ai_routing_feedback。"""
-        msg = await db.get(AiMessage, message_id)
+        msg = (
+            await db.execute(
+                select(AiMessage).where(
+                    AiMessage.tenant_id == tenant.tenant_id,
+                    AiMessage.message_id == message_id,
+                )
+            )
+        ).scalar_one_or_none()
         if msg is None or not msg.is_active:
             raise NotFoundException(
                 resource_type="AI消息",
@@ -40,7 +50,14 @@ class RoutingFeedbackService:
             )
 
         # AiMessage 没有 user_id，通过 AiConversation 校验 owner。
-        conv = await db.get(AiConversation, msg.conversation_id)
+        conv = (
+            await db.execute(
+                select(AiConversation).where(
+                    AiConversation.tenant_id == tenant.tenant_id,
+                    AiConversation.conversation_id == msg.conversation_id,
+                )
+            )
+        ).scalar_one_or_none()
         if conv is None or conv.deleted_at is not None:
             raise NotFoundException(
                 resource_type="AI消息",
@@ -76,6 +93,7 @@ class RoutingFeedbackService:
 
         # 追加历史（append-only）
         feedback_row = AiRoutingFeedback(
+            tenant_id=tenant.tenant_id,
             message_id=message_id,
             user_id=user.user_id,
             original_agent=msg.agent_code or "unknown",

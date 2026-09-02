@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_response import PageResult
+from app.core.tenant import TenantContext
 from app.modules.marketplace.exceptions import (
     AppInstallLockedException,
     AppNotFoundException,
@@ -41,8 +42,7 @@ from app.modules.marketplace.service.version_service import version_service
 class InstallService(MarketplaceBaseService):
     """安装/卸载/重装 service（spec 14.4 + 6.4）"""
 
-    def __init__(self, tenant_id: int = 0):
-        super().__init__(tenant_id=tenant_id)
+    def __init__(self) -> None:
         self.migration_runner = MigrationRunner()
 
     async def install(
@@ -51,6 +51,7 @@ class InstallService(MarketplaceBaseService):
         req: InstallCreate,
         *,
         user_id: int,  # noqa: ARG002 - 预留审计字段
+        tenant: TenantContext,
     ) -> TenantApp:
         """安装或重装应用。
 
@@ -74,31 +75,33 @@ class InstallService(MarketplaceBaseService):
             AppInstallLockedException: 并发冲突且重查仍无行可 UPDATE
         """
         # 查应用
-        app = await app_service.get_by_slug(db, slug=req.app_slug)
+        app = await app_service.get_by_slug(db, slug=req.app_slug, tenant=tenant)
         # 查版本（默认最新 approved）
         if req.version:
             version = await version_service.get_by_version(
-                db, app_id=app.id, version=req.version
+                db, app_id=app.id, version=req.version, tenant=tenant
             )
         else:
-            version = await version_service.get_latest_approved(db, app_id=app.id)
+            version = await version_service.get_latest_approved(
+                db, app_id=app.id, tenant=tenant
+            )
             if version is None:
                 raise AppNotFoundException(slug=f"{req.app_slug} (no approved version)")
 
         # 查 tenant_app（可能存在历史 uninstalled 记录）
-        stmt = self.scoped(TenantApp).where(TenantApp.app_id == app.id)
+        stmt = self.scoped(TenantApp, tenant=tenant).where(TenantApp.app_id == app.id)
         existing = (await db.execute(stmt)).scalar_one_or_none()
 
         if existing is not None:
             # 重装：UPDATE 同行（spec 6.4 决策）
             record = await self._do_reinstall(db, existing, version, req)
-            await self._create_app_tables(db, app=app, version=version)
-            await contributes_service.invalidate(tenant_id=self.tenant_id)
+            await self._create_app_tables(db, app=app, version=version, tenant=tenant)
+            await contributes_service.invalidate(tenant=tenant)
             return record
 
         # 新装：INSERT — 并发兜底：catch UNIQUE 冲突退化为 UPDATE
         record = TenantApp(
-            tenant_id=self.tenant_id,
+            tenant_id=tenant.tenant_id,
             app_id=app.id,
             installed_version=version.version,
             status="installed",  # spec 决策 #10：默认 installed
@@ -118,15 +121,20 @@ class InstallService(MarketplaceBaseService):
                 # 极少见：rollback 后另一行也消失了（理论不该发生，防御性抛错）
                 raise AppInstallLockedException(app.id) from e
             record = await self._do_reinstall(db, existing, version, req)
-            await self._create_app_tables(db, app=app, version=version)
-            await contributes_service.invalidate(tenant_id=self.tenant_id)
+            await self._create_app_tables(db, app=app, version=version, tenant=tenant)
+            await contributes_service.invalidate(tenant=tenant)
             return record
-        await self._create_app_tables(db, app=app, version=version)
-        await contributes_service.invalidate(tenant_id=self.tenant_id)
+        await self._create_app_tables(db, app=app, version=version, tenant=tenant)
+        await contributes_service.invalidate(tenant=tenant)
         return record
 
     async def _create_app_tables(
-        self, db: AsyncSession, *, app: App, version: Any
+        self,
+        db: AsyncSession,
+        *,
+        app: App,
+        version: Any,
+        tenant: TenantContext,
     ) -> None:
         """根据 manifest 创建或升级 app_data_* 表（spec 6.2 + 6.4）
 
@@ -154,7 +162,10 @@ class InstallService(MarketplaceBaseService):
                     continue
                 table_name = make_table_name(app.slug, model_key)
                 await self.migration_runner.apply_upgrade(
-                    db, table_name=table_name, new_data_schema=data_schema
+                    db,
+                    table_name=table_name,
+                    new_data_schema=data_schema,
+                    tenant=tenant,
                 )
             return
 
@@ -163,7 +174,10 @@ class InstallService(MarketplaceBaseService):
         if self._has_user_fields(data_schema):
             table_name = make_table_name(app.slug)
             await self.migration_runner.apply_upgrade(
-                db, table_name=table_name, new_data_schema=data_schema
+                db,
+                table_name=table_name,
+                new_data_schema=data_schema,
+                tenant=tenant,
             )
 
     @staticmethod
@@ -198,6 +212,7 @@ class InstallService(MarketplaceBaseService):
         *,
         app_id: int,
         user_id: int,  # noqa: ARG002 - 预留审计字段
+        tenant: TenantContext,
     ) -> None:
         """卸载：status='uninstalled'，DROP app_data_* 表并记录 retained_table_names。
 
@@ -212,42 +227,54 @@ class InstallService(MarketplaceBaseService):
         Raises:
             AppNotFoundException: 该应用未安装
         """
-        stmt = self.scoped(TenantApp).where(TenantApp.app_id == app_id)
+        stmt = self.scoped(TenantApp, tenant=tenant).where(TenantApp.app_id == app_id)
         record = (await db.execute(stmt)).scalar_one_or_none()
         if record is None:
             raise AppNotFoundException(app_id=app_id)
 
         # 查 app.slug 用于定位应用建的表
-        app = await db.get(App, app_id)
+        app = await app_service.get_by_id(db, app_id=app_id, tenant=tenant)
         table_names: list[str] = []
-        if app is not None:
-            table_names = await self.migration_runner.get_table_names_for_app(
-                db, app_slug=app.slug
-            )
-            for tn in table_names:
-                await self.migration_runner.drop_table(db, table_name=tn)
+        table_names = await self.migration_runner.get_table_names_for_app(
+            db, app_slug=app.slug, tenant=tenant
+        )
+        for tn in table_names:
+            await self.migration_runner.drop_table(db, table_name=tn, tenant=tenant)
 
         record.status = "uninstalled"
         # 记录曾存在的表（即使为空也写空 list，便于重装时清空）
         record.retained_table_names = table_names
         record.has_data = len(table_names) > 0
         await db.flush()
-        await contributes_service.invalidate(tenant_id=self.tenant_id)
+        await contributes_service.invalidate(tenant=tenant)
 
-    async def enable(self, db: AsyncSession, *, app_id: int) -> TenantApp:
-        record = await self._update_status(db, app_id=app_id, status="enabled")
-        await contributes_service.invalidate(tenant_id=self.tenant_id)
+    async def enable(
+        self, db: AsyncSession, *, app_id: int, tenant: TenantContext
+    ) -> TenantApp:
+        record = await self._update_status(
+            db, app_id=app_id, status="enabled", tenant=tenant
+        )
+        await contributes_service.invalidate(tenant=tenant)
         return record
 
-    async def disable(self, db: AsyncSession, *, app_id: int) -> TenantApp:
-        record = await self._update_status(db, app_id=app_id, status="disabled")
-        await contributes_service.invalidate(tenant_id=self.tenant_id)
+    async def disable(
+        self, db: AsyncSession, *, app_id: int, tenant: TenantContext
+    ) -> TenantApp:
+        record = await self._update_status(
+            db, app_id=app_id, status="disabled", tenant=tenant
+        )
+        await contributes_service.invalidate(tenant=tenant)
         return record
 
     async def _update_status(
-        self, db: AsyncSession, *, app_id: int, status: str
+        self,
+        db: AsyncSession,
+        *,
+        app_id: int,
+        status: str,
+        tenant: TenantContext,
     ) -> TenantApp:
-        stmt = self.scoped(TenantApp).where(TenantApp.app_id == app_id)
+        stmt = self.scoped(TenantApp, tenant=tenant).where(TenantApp.app_id == app_id)
         record = (await db.execute(stmt)).scalar_one_or_none()
         if record is None:
             raise AppNotFoundException(app_id=app_id)
@@ -259,15 +286,21 @@ class InstallService(MarketplaceBaseService):
         await db.refresh(record)
         return record
 
-    async def list_installed(self, db: AsyncSession, query: InstallQuery) -> PageResult:
+    async def list_installed(
+        self, db: AsyncSession, query: InstallQuery, *, tenant: TenantContext
+    ) -> PageResult:
         """分页查询已安装应用，联表 App 返回 app_slug / app_name。
 
         支持 status 和 app_slug 过滤。
         """
+        self.scoped(TenantApp, tenant=tenant)
         stmt = (
             select(TenantApp, App)
             .join(App, App.id == TenantApp.app_id)
-            .where(TenantApp.tenant_id == self.tenant_id)
+            .where(
+                TenantApp.tenant_id == tenant.tenant_id,
+                App.tenant_id == tenant.tenant_id,
+            )
         )
         if query.status:
             stmt = stmt.where(TenantApp.status == query.status)
@@ -279,7 +312,10 @@ class InstallService(MarketplaceBaseService):
             select(func.count())
             .select_from(TenantApp)
             .join(App, App.id == TenantApp.app_id)
-            .where(TenantApp.tenant_id == self.tenant_id)
+            .where(
+                TenantApp.tenant_id == tenant.tenant_id,
+                App.tenant_id == tenant.tenant_id,
+            )
         )
         if query.status:
             count_stmt = count_stmt.where(TenantApp.status == query.status)

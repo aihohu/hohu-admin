@@ -2,6 +2,7 @@ from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.model import AiModel
+from app.modules.ai.models.model_policy import TenantAiModelPolicy
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.models.provider import AiProvider
@@ -14,6 +15,7 @@ __all__ = [
     "AiConversation",
     "AiMessage",
     "AiModel",
+    "TenantAiModelPolicy",
     "AiOperationLog",
     "AiPreparedAction",
     "AiProvider",

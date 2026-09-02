@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 _CACHE_TTL_SEC = 60
 _cache: dict[tuple[int, str], tuple[Any, float]] = {}
+_cache_generation = 0
 
 
 async def get_ai_config_int(
@@ -64,6 +65,7 @@ async def get_ai_config_int(
         if time.time() - fetched_at < _CACHE_TTL_SEC:
             return value  # type: ignore[return-value]
 
+    generation = _cache_generation
     raw = await config_service.get_value(db, key, tenant=tenant)
     if raw is None or raw == "":
         value = default
@@ -77,7 +79,8 @@ async def get_ai_config_int(
             )
             value = default
 
-    _cache[cache_key] = (value, time.time())
+    if generation == _cache_generation:
+        _cache[cache_key] = (value, time.time())
     return value
 
 
@@ -97,10 +100,12 @@ async def get_ai_config_str(
         if time.time() - fetched_at < _CACHE_TTL_SEC:
             return value  # type: ignore[return-value]
 
+    generation = _cache_generation
     raw = await config_service.get_value(db, key, tenant=tenant)
     value = raw if raw else default
 
-    _cache[cache_key] = (value, time.time())
+    if generation == _cache_generation:
+        _cache[cache_key] = (value, time.time())
     return value
 
 
@@ -122,10 +127,11 @@ async def get_ai_config_str_list(
     if not force_refresh and cached is not None:
         value, fetched_at = cached
         if time.time() - fetched_at < _CACHE_TTL_SEC:
-            return value  # type: ignore[return-value]
+            return list(value)  # type: ignore[arg-type]
 
     import json  # noqa: PLC0415
 
+    generation = _cache_generation
     raw = await config_service.get_value(db, key, tenant=tenant)
     value = default
     if raw:
@@ -144,8 +150,9 @@ async def get_ai_config_str_list(
                 extra={"key": key, "raw": raw},
             )
 
-    _cache[cache_key] = (value, time.time())
-    return value
+    if generation == _cache_generation:
+        _cache[cache_key] = (list(value), time.time())
+    return list(value)
 
 
 async def get_ai_config_bool(
@@ -181,6 +188,9 @@ def invalidate_ai_config_cache(prefix: str = "ai:") -> None:
     Args:
         prefix: 清除以 prefix 开头的 key（默认所有 ai: 配置）
     """
+    global _cache_generation
+
+    _cache_generation += 1
     keys_to_remove = [
         cache_key for cache_key in _cache if cache_key[1].startswith(prefix)
     ]

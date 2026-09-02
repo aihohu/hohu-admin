@@ -11,6 +11,7 @@ from app.core.auth import require_ai_chat_use
 from app.core.base_response import ResponseModel
 from app.core.exceptions import NotFoundException
 from app.core.redis import redis_client
+from app.core.tenant import get_bound_tenant_context
 from app.db.session import get_db
 from app.modules.ai.agents.hitl.query_cache import get_query_cache
 from app.modules.ai.schemas.query_cache import QueryCacheOut
@@ -38,7 +39,12 @@ async def get_query_cache_endpoint(
     _current_user: User = Depends(require_ai_chat_use),
 ) -> ResponseModel[QueryCacheOut]:
     """Return a cache entry only after owner, tenant, and lineage reauthorization."""
-    entry = await get_query_cache(redis_client, trace_id, tool_name=tool_name)
+    entry = await get_query_cache(
+        redis_client,
+        trace_id,
+        tool_name=tool_name,
+        tenant=get_bound_tenant_context(_current_user),
+    )
     allowed = False
     if entry is not None and entry.user_id == _current_user.user_id:
         allowed = await result_projection_service.authorize_result_projection(

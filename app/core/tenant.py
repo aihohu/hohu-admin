@@ -23,7 +23,7 @@ class TenantContext:
     tenant_code: str
     actor_user_id: int
     tenant_version: int
-    source: Literal["access_token", "worker_envelope"]
+    source: Literal["access_token", "worker_envelope", "platform_control"]
 
     def __post_init__(self) -> None:
         if (
@@ -42,6 +42,12 @@ class TenantContext:
             raise ValueError("actor_user_id must be a positive integer")
         if self.tenant_version < 1:
             raise ValueError("tenant_version must be positive")
+        if self.source not in {
+            "access_token",
+            "worker_envelope",
+            "platform_control",
+        }:
+            raise ValueError("tenant source is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +78,28 @@ class PlatformContext:
     actor_user_id: int
     reason: str
     correlation_id: str
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.actor_user_id, bool)
+            or not isinstance(self.actor_user_id, int)
+            or self.actor_user_id < 0
+        ):
+            raise ValueError("platform actor_user_id must be a non-negative integer")
+        if (
+            not isinstance(self.reason, str)
+            or not self.reason.strip()
+            or len(self.reason) > 256
+            or any(ord(char) < 32 for char in self.reason)
+        ):
+            raise ValueError("platform reason is required")
+        if (
+            not isinstance(self.correlation_id, str)
+            or not self.correlation_id.strip()
+            or len(self.correlation_id) > 128
+            or any(ord(char) < 32 for char in self.correlation_id)
+        ):
+            raise ValueError("platform correlation_id is required")
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +133,8 @@ def normalize_tenant_code(value: str | None) -> str | None:
 def bind_tenant_context(principal: Any, tenant: TenantContext) -> None:
     """Attach server-built context to an ORM principal after DB verification."""
     if (
-        getattr(principal, "tenant_id", None) != tenant.tenant_id
+        tenant.source != "access_token"
+        or getattr(principal, "tenant_id", None) != tenant.tenant_id
         or getattr(principal, "user_id", None) != tenant.actor_user_id
     ):
         raise AuthenticationException(
@@ -152,6 +181,10 @@ def create_worker_envelope(
     """Freeze and sign tenant authority for a future background execution."""
     if not job_id or not scope_hash:
         raise ValueError("job_id and scope_hash are required")
+    if tenant.source == "platform_control":
+        raise ValueError(
+            "platform-derived tenant scope cannot become tenant worker authority"
+        )
     unsigned = TenantWorkerEnvelope(
         tenant_id=tenant.tenant_id,
         tenant_code=tenant.tenant_code,

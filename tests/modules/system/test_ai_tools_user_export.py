@@ -40,9 +40,9 @@ async def _make_ctx(db: AsyncSession) -> AiToolContext:
         select(User).where(User.tenant_id == 0, User.user_name == "admin")
     )
     assert actor is not None
-    bind_test_user(actor)
+    tenant = bind_test_user(actor)
     data_scope = DataScopeContext(
-        tenant_id=0,
+        tenant=tenant,
         accessible_dept_ids=None,
         accessible_user_scope=None,
         filters=[],
@@ -62,7 +62,7 @@ async def _make_ctx(db: AsyncSession) -> AiToolContext:
         data_scope=data_scope,
         trace_id="tr_export_test",
         tool_meta=meta,
-        tenant_id=0,
+        tenant=tenant,
         data_scope_hash="scope-hash",
     )
 

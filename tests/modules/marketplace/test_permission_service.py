@@ -2,7 +2,7 @@ import pytest
 from sqlalchemy import select
 
 from app.modules.marketplace.models import App, AppPermission
-from app.modules.marketplace.service.permission_service import permission_service
+from modules.marketplace import default_permission_service as permission_service
 
 
 @pytest.fixture

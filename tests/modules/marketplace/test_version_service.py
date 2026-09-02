@@ -5,7 +5,7 @@ from app.modules.marketplace.exceptions import (
     AppNotFoundException,
 )
 from app.modules.marketplace.models import App
-from app.modules.marketplace.service.version_service import version_service
+from modules.marketplace import default_version_service as version_service
 
 
 class TestVersionServiceValidateManifest:

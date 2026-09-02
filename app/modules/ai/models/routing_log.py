@@ -5,6 +5,7 @@ from datetime import datetime
 from sqlalchemy import (
     BigInteger,
     DateTime,
+    Index,
     Integer,
     String,
     func,
@@ -20,10 +21,25 @@ class AiRoutingLog(Base):
     """覆盖所有 ``/ai/chat`` 请求类型的路由决策日志。"""
 
     __tablename__ = "ai_routing_log"
+    __table_args__ = (
+        Index("ix_ai_routing_log_tenant_trace", "tenant_id", "trace_id"),
+        Index(
+            "ix_ai_routing_log_tenant_user_created",
+            "tenant_id",
+            "user_id",
+            "create_time",
+        ),
+        {"comment": "Supervisor 路由决策审计日志"},
+    )
 
     log_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, default=next_id)
-    trace_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    tenant_id: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        comment="租户ID；必须由可信 TenantContext 显式写入",
+    )
+    trace_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     conversation_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     input_message_hash: Mapped[str] = mapped_column(
         String(128),
@@ -55,6 +71,4 @@ class AiRoutingLog(Base):
         nullable=True,
         comment="为多 Agent 协作预留；当前始终为 NULL",
     )
-    create_time: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), index=True
-    )
+    create_time: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

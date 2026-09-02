@@ -59,7 +59,7 @@ async def _start(
         db,
         trace_id=trace_id,
         conversation_id=81001,
-        tenant_id=tenant_id,
+        tenant=tenant_context(tenant_id=tenant_id, actor_user_id=user_id),
         source_user_message_id=source_user_message_id,
         agent_code=agent_code,
         user_id=user_id,
@@ -151,12 +151,14 @@ async def test_trace_detail_omits_message_content_and_raw_audit_fields(
     ).scalar_one()
     conversation = AiConversation(
         conversation_id=81001,
+        tenant_id=0,
         user_id=actor.user_id,
         title="Phase 4 Trace",
         model_name="1",
     )
     message = AiMessage(
         message_id=81002,
+        tenant_id=0,
         conversation_id=conversation.conversation_id,
         role="user",
         message_type="text",
@@ -175,6 +177,7 @@ async def test_trace_detail_omits_message_content_and_raw_audit_fields(
         db_session,
         operation.log_id,
         [{"type": "user", "id": str(actor.user_id), "email": "secret@example.com"}],
+        tenant=tenant_context(tenant_id=0, actor_user_id=actor.user_id),
     )
     await db_session.flush()
 

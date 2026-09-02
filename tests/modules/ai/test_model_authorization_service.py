@@ -7,9 +7,11 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessRuleException
+from app.core.tenant import TenantContext
 from app.db.session import AsyncSessionLocal, engine
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.model import AiModel
+from app.modules.ai.models.model_policy import TenantAiModelPolicy
 from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.schemas.conversation import ConversationCreate, ConversationUpdate
 from app.modules.ai.service.conversation_service import conversation_service
@@ -17,6 +19,10 @@ from app.modules.ai.service.model_authorization_service import (
     model_authorization_service,
 )
 from app.modules.system.models.user import User
+
+
+def _tenant(actor_user_id: int = 1) -> TenantContext:
+    return TenantContext(0, "default", actor_user_id, 1, "access_token")
 
 
 @pytest.fixture(autouse=True)
@@ -78,6 +84,15 @@ async def _seed_model(
     model.provider_id = provider.provider_id
     db.add(model)
     await db.flush()
+    db.add(
+        TenantAiModelPolicy(
+            tenant_id=0,
+            model_id=model.model_id,
+            enabled=True,
+            is_default=False,
+        )
+    )
+    await db.flush()
     return provider, model
 
 
@@ -87,7 +102,7 @@ async def test_selector_accepts_only_enabled_text_model(db_session) -> None:
     selected = await model_authorization_service.authorize_chat_model(
         db_session,
         str(model.model_id),
-        tenant_id=0,
+        tenant=_tenant(),
     )
 
     assert selected.model.model_id == model.model_id
@@ -119,7 +134,7 @@ async def test_selector_rejects_non_chat_safe_model(
         await model_authorization_service.authorize_chat_model(
             db_session,
             str(model.model_id),
-            tenant_id=0,
+            tenant=_tenant(),
         )
 
     assert exc_info.value.error_code == "AI_MODEL_NOT_AVAILABLE"
@@ -130,7 +145,7 @@ async def test_model_options_expose_only_safe_allowlist_fields(db_session) -> No
 
     options = await model_authorization_service.list_model_options(
         db_session,
-        tenant_id=0,
+        tenant=_tenant(),
     )
     option = next(item for item in options if item.model_id == model.model_id)
     payload = option.model_dump(by_alias=True)
@@ -145,7 +160,7 @@ async def test_model_options_expose_only_safe_allowlist_fields(db_session) -> No
     assert "providerId" not in payload
 
 
-async def test_chat_and_agent_model_option_endpoints_are_split(
+async def test_chat_model_options_are_tenant_scoped_and_agent_admin_is_platform_only(
     authed_client,
     committed_model_id: int,
 ) -> None:
@@ -155,14 +170,14 @@ async def test_chat_and_agent_model_option_endpoints_are_split(
     agent_response = await client.get("/ai/admin/agents/model-options")
 
     assert chat_response.status_code == 200
-    assert agent_response.status_code == 200
-    for response in (chat_response, agent_response):
-        row = next(
-            item
-            for item in response.json()["data"]
-            if item["modelId"] == str(committed_model_id)
-        )
-        assert set(row) == {"modelId", "label", "providerCode", "capabilities"}
+    assert agent_response.status_code == 403
+    assert agent_response.json()["errorCode"] == "PLATFORM_ADMIN_REQUIRED"
+    row = next(
+        item
+        for item in chat_response.json()["data"]
+        if item["modelId"] == str(committed_model_id)
+    )
+    assert set(row) == {"modelId", "label", "providerCode", "capabilities"}
 
 
 async def test_conversation_create_rejects_unavailable_model_before_persist(
@@ -173,13 +188,14 @@ async def test_conversation_create_rejects_unavailable_model_before_persist(
         select(User.user_id).where(User.user_name == "admin")
     )
     before = await db_session.scalar(select(func.count(AiConversation.conversation_id)))
+    tenant = _tenant(user_id)
 
     with pytest.raises(BusinessRuleException) as exc_info:
         await conversation_service.create(
             db_session,
             ConversationCreate(model_name=str(model.model_id)),
             user_id,
-            tenant_id=0,
+            tenant=tenant,
         )
 
     after = await db_session.scalar(select(func.count(AiConversation.conversation_id)))
@@ -195,12 +211,14 @@ async def test_conversation_update_rejects_unavailable_model_atomically(
         select(User.user_id).where(User.user_name == "admin")
     )
     conversation = AiConversation(
+        tenant_id=0,
         user_id=user_id,
         title="unchanged",
         model_name="legacy-model",
     )
     db_session.add(conversation)
     await db_session.flush()
+    tenant = _tenant(user_id)
 
     with pytest.raises(BusinessRuleException) as exc_info:
         await conversation_service.update(
@@ -211,7 +229,7 @@ async def test_conversation_update_rejects_unavailable_model_atomically(
                 model_name=str(model.model_id),
             ),
             user_id,
-            tenant_id=0,
+            tenant=tenant,
         )
 
     assert exc_info.value.error_code == "AI_MODEL_NOT_AVAILABLE"

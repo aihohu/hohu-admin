@@ -1,6 +1,16 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -10,6 +20,15 @@ from app.db.base import Base
 
 class AiModel(Base):
     __tablename__ = "ai_model"
+    __table_args__ = (
+        UniqueConstraint("provider_id", "name", name="uq_ai_model_provider_name"),
+        Index(
+            "ix_ai_model_capabilities",
+            "capabilities",
+            postgresql_using="gin",
+            postgresql_ops={"capabilities": "jsonb_path_ops"},
+        ),
+    )
 
     model_id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, default=next_id, comment="模型ID"

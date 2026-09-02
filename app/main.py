@@ -98,10 +98,17 @@ async def lifespan(_app: FastAPI):
             logging.getLogger("app.ai").error("AI Tool Registry 启动校验失败: %s", e)
 
         # 重启后进程内事件已丢失；清理或恢复持久化确认。
+        ai_lifecycle_platform = PlatformContext(
+            actor_user_id=0,
+            reason="AI HITL tenant lifecycle recovery",
+            correlation_id=f"ai-lifecycle:{RUNNER_ID}",
+        )
         if settings.AI_HITL_MODE == "memory":
-            await cleanup_orphaned_pending_on_startup()
+            await cleanup_orphaned_pending_on_startup(platform=ai_lifecycle_platform)
         else:
-            await cleanup_durable_prepared_actions_on_startup()
+            await cleanup_durable_prepared_actions_on_startup(
+                platform=ai_lifecycle_platform
+            )
 
     # 仅在嵌入式（开发）模式下随 API 启停调度器。
     # 生产模式下调度器由独立的 `app.scheduler_worker` 进程承担，

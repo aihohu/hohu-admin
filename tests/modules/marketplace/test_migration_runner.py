@@ -6,6 +6,7 @@ from app.modules.marketplace.lowcode.schema_introspection import (
     introspect_table,
     table_exists,
 )
+from modules.marketplace import DEFAULT_TENANT
 
 
 @pytest.fixture
@@ -31,7 +32,10 @@ class TestCreateTable:
                 "required": [],
             }
             await runner.create_table(
-                db_session, table_name=table_name, data_schema=schema
+                db_session,
+                table_name=table_name,
+                data_schema=schema,
+                tenant=DEFAULT_TENANT,
             )
 
             assert await table_exists(db_session, table_name)
@@ -47,6 +51,10 @@ class TestCreateTable:
                 "created_by",
                 "updated_by",
             }.issubset(col_names)
+            tenant_column = next(
+                column for column in result.columns if column.column_name == "tenant_id"
+            )
+            assert tenant_column.column_default is None
             # 用户字段
             assert {"name", "age"}.issubset(col_names)
         finally:
@@ -62,7 +70,10 @@ class TestCreateTable:
                 "required": ["level"],
             }
             await runner.create_table(
-                db_session, table_name=table_name, data_schema=schema
+                db_session,
+                table_name=table_name,
+                data_schema=schema,
+                tenant=DEFAULT_TENANT,
             )
 
             result = await introspect_table(db_session, table_name)
@@ -85,7 +96,10 @@ class TestApplyUpgrade:
                 "required": [],
             }
             await runner.create_table(
-                db_session, table_name=table_name, data_schema=initial
+                db_session,
+                table_name=table_name,
+                data_schema=initial,
+                tenant=DEFAULT_TENANT,
             )
 
             # 升级：增加 email 字段
@@ -97,7 +111,10 @@ class TestApplyUpgrade:
                 "required": [],
             }
             await runner.apply_upgrade(
-                db_session, table_name=table_name, new_data_schema=upgraded
+                db_session,
+                table_name=table_name,
+                new_data_schema=upgraded,
+                tenant=DEFAULT_TENANT,
             )
 
             result = await introspect_table(db_session, table_name)
@@ -116,7 +133,10 @@ class TestApplyUpgrade:
                 "required": [],
             }
             await runner.create_table(
-                db_session, table_name=table_name, data_schema=initial
+                db_session,
+                table_name=table_name,
+                data_schema=initial,
+                tenant=DEFAULT_TENANT,
             )
 
             # 升级到 VARCHAR(200)
@@ -125,7 +145,10 @@ class TestApplyUpgrade:
                 "required": [],
             }
             await runner.apply_upgrade(
-                db_session, table_name=table_name, new_data_schema=upgraded
+                db_session,
+                table_name=table_name,
+                new_data_schema=upgraded,
+                tenant=DEFAULT_TENANT,
             )
 
             result = await introspect_table(db_session, table_name)
@@ -143,7 +166,10 @@ class TestApplyUpgrade:
                 "required": [],
             }
             await runner.apply_upgrade(
-                db_session, table_name=table_name, new_data_schema=schema
+                db_session,
+                table_name=table_name,
+                new_data_schema=schema,
+                tenant=DEFAULT_TENANT,
             )
             assert await table_exists(db_session, table_name)
         finally:
@@ -156,11 +182,16 @@ class TestDropTable:
         try:
             schema = {"properties": {"x": {"type": "string"}}, "required": []}
             await runner.create_table(
-                db_session, table_name=table_name, data_schema=schema
+                db_session,
+                table_name=table_name,
+                data_schema=schema,
+                tenant=DEFAULT_TENANT,
             )
             assert await table_exists(db_session, table_name)
 
-            await runner.drop_table(db_session, table_name=table_name)
+            await runner.drop_table(
+                db_session, table_name=table_name, tenant=DEFAULT_TENANT
+            )
             assert not await table_exists(db_session, table_name)
         finally:
             await db_session.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
@@ -168,7 +199,9 @@ class TestDropTable:
     async def test_drop_nonexistent_is_noop(self, db_session, runner, table_name):
         await db_session.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
         # 不应抛异常
-        await runner.drop_table(db_session, table_name=table_name)
+        await runner.drop_table(
+            db_session, table_name=table_name, tenant=DEFAULT_TENANT
+        )
         assert not await table_exists(db_session, table_name)
 
 
@@ -181,10 +214,22 @@ class TestGetTableNamesForApp:
         await db_session.execute(text(f"DROP TABLE IF EXISTS {t2}"))
         try:
             schema = {"properties": {"x": {"type": "string"}}, "required": []}
-            await runner.create_table(db_session, table_name=t1, data_schema=schema)
-            await runner.create_table(db_session, table_name=t2, data_schema=schema)
+            await runner.create_table(
+                db_session,
+                table_name=t1,
+                data_schema=schema,
+                tenant=DEFAULT_TENANT,
+            )
+            await runner.create_table(
+                db_session,
+                table_name=t2,
+                data_schema=schema,
+                tenant=DEFAULT_TENANT,
+            )
 
-            names = await runner.get_table_names_for_app(db_session, app_slug=slug)
+            names = await runner.get_table_names_for_app(
+                db_session, app_slug=slug, tenant=DEFAULT_TENANT
+            )
             assert t1 in names
             assert t2 in names
         finally:

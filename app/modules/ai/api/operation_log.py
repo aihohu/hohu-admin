@@ -18,7 +18,7 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.rbac import is_super_admin
-from app.core.tenant import TenantContext, resolve_tenant_id
+from app.core.tenant import TenantContext
 from app.db.session import get_db
 from app.modules.ai.constants import AI_CHAT_USE_PERMISSION
 from app.modules.ai.schemas.operation_log import (
@@ -98,6 +98,7 @@ async def get_operation_log(
     tool_call_id: str = Query(..., min_length=3, description="tool_call_id"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ) -> ResponseModel[OperationLogOut | OperationLogStatusOut]:
     """SSE 断流后的兜底查询端点。
 
@@ -106,11 +107,10 @@ async def get_operation_log(
              started_at / finished_at / duration_ms
     """
     # 直接用 service 查（不做 owner 校验，下面统一做）
-    tenant_id = resolve_tenant_id(current_user)
     log = await operation_log_service.get_by_tool_call_id(
         db,
         tool_call_id,
-        tenant_id=tenant_id,
+        tenant=tenant,
     )
     if log is None:
         raise NotFoundException("AI 操作日志", error_code="AI_OPERATION_LOG_NOT_FOUND")

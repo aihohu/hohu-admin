@@ -3,7 +3,8 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import NotFoundException
+from app.core.exceptions import AuthenticationException, NotFoundException
+from app.core.tenant import TenantContext, get_bound_tenant_context
 from app.modules.ai.agents.gateway.redact import redact_secrets
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
@@ -23,7 +24,14 @@ from app.utils.pagination import build_filters, paginate
 class ConversationService:
     """AI 会话管理服务"""
 
-    async def get_list(self, db: AsyncSession, query, user_id: int):
+    async def get_list(
+        self,
+        db: AsyncSession,
+        query,
+        user_id: int,
+        *,
+        tenant: TenantContext,
+    ):
         field_mapping = {
             "title": ("title", "contains"),
             "status": "status",
@@ -32,6 +40,7 @@ class ConversationService:
             AiConversation, field_mapping, **query.model_dump(exclude_unset=True)
         )
         # 只看自己的会话
+        filters.append(AiConversation.tenant_id == tenant.tenant_id)
         filters.append(AiConversation.user_id == user_id)
         filters.append(AiConversation.deleted_at.is_(None))
         return await paginate(
@@ -43,9 +52,21 @@ class ConversationService:
         )
 
     async def get_by_id(
-        self, db: AsyncSession, conversation_id: int, user_id: int | None = None
+        self,
+        db: AsyncSession,
+        conversation_id: int,
+        user_id: int | None = None,
+        *,
+        tenant: TenantContext,
     ) -> AiConversation:
-        obj = await db.get(AiConversation, conversation_id)
+        obj = (
+            await db.execute(
+                select(AiConversation).where(
+                    AiConversation.tenant_id == tenant.tenant_id,
+                    AiConversation.conversation_id == conversation_id,
+                )
+            )
+        ).scalar_one_or_none()
         if not obj or obj.deleted_at is not None:
             raise NotFoundException(
                 resource_type="AI会话", error_code="AI_CONVERSATION_NOT_FOUND"
@@ -62,14 +83,16 @@ class ConversationService:
         data: ConversationCreate,
         user_id: int,
         *,
-        tenant_id: int,
+        tenant: TenantContext,
     ) -> AiConversation:
+        self._require_actor(tenant, user_id)
         selected = await model_authorization_service.authorize_chat_model(
             db,
             data.model_name,
-            tenant_id=tenant_id,
+            tenant=tenant,
         )
         obj = AiConversation(
+            tenant_id=tenant.tenant_id,
             user_id=user_id,
             title=data.title or "新对话",
             system_prompt=data.system_prompt,
@@ -85,15 +108,16 @@ class ConversationService:
         data: ConversationUpdate,
         user_id: int,
         *,
-        tenant_id: int,
+        tenant: TenantContext,
     ) -> AiConversation:
-        obj = await self.get_by_id(db, conversation_id, user_id)
+        self._require_actor(tenant, user_id)
+        obj = await self.get_by_id(db, conversation_id, user_id, tenant=tenant)
         update_data = data.model_dump(exclude_unset=True)
         if "model_name" in update_data:
             selected = await model_authorization_service.authorize_chat_model(
                 db,
                 update_data["model_name"],
-                tenant_id=tenant_id,
+                tenant=tenant,
             )
             update_data["model_name"] = str(selected.model.model_id)
         for field, value in update_data.items():
@@ -101,19 +125,31 @@ class ConversationService:
         return obj
 
     async def delete(
-        self, db: AsyncSession, conversation_id: int, user_id: int
+        self,
+        db: AsyncSession,
+        conversation_id: int,
+        user_id: int,
+        *,
+        tenant: TenantContext,
     ) -> None:
-        obj = await self.get_by_id(db, conversation_id, user_id)
+        self._require_actor(tenant, user_id)
+        obj = await self.get_by_id(db, conversation_id, user_id, tenant=tenant)
         obj.deleted_at = datetime.now(UTC)
 
     async def lock_for_delete(
-        self, db: AsyncSession, conversation_id: int, user_id: int
+        self,
+        db: AsyncSession,
+        conversation_id: int,
+        user_id: int,
+        *,
+        tenant: TenantContext,
     ) -> AiConversation:
         """Lock the conversation before checking durable action blockers."""
         obj = (
             await db.execute(
                 select(AiConversation)
                 .where(
+                    AiConversation.tenant_id == tenant.tenant_id,
                     AiConversation.conversation_id == conversation_id,
                     AiConversation.user_id == user_id,
                     AiConversation.deleted_at.is_(None),
@@ -128,16 +164,22 @@ class ConversationService:
         return obj
 
     async def get_messages(
-        self, db: AsyncSession, conversation_id: int, user_id: int
+        self,
+        db: AsyncSession,
+        conversation_id: int,
+        user_id: int,
+        *,
+        tenant: TenantContext,
     ) -> list[AiMessage]:
         """获取会话的所有历史消息
 
         加载时再次脱敏，防止历史未脱敏数据回灌模型上下文。
         """
-        await self.get_by_id(db, conversation_id, user_id)  # 验证权限
+        await self.get_by_id(db, conversation_id, user_id, tenant=tenant)  # 验证权限
         stmt = (
             select(AiMessage)
             .where(
+                AiMessage.tenant_id == tenant.tenant_id,
                 AiMessage.conversation_id == conversation_id,
                 AiMessage.is_active.is_(True),
             )
@@ -167,9 +209,10 @@ class ConversationService:
         trace_id: str | None = None,
         is_active: bool = True,
         supersedes_message_id: int | None = None,
-        tenant_id: int | None = None,
         lineage: ProjectionLineage | None = None,
         projection_dependency_message_ids: list[int] | tuple[int, ...] = (),
+        *,
+        tenant: TenantContext,
     ) -> AiMessage:
         """保存一条消息
 
@@ -180,6 +223,12 @@ class ConversationService:
         """
         if role == "user" and content:
             content = redact_secrets(content)
+
+        await self.get_by_id(db, conversation_id, tenant=tenant)
+        if lineage is not None and lineage.tenant_id != tenant.tenant_id:
+            raise AuthenticationException(
+                "租户上下文无效", error_code="TENANT_CONTEXT_INVALID"
+            )
 
         msg = AiMessage(
             conversation_id=conversation_id,
@@ -195,7 +244,7 @@ class ConversationService:
             trace_id=trace_id,
             is_active=is_active,
             supersedes_message_id=supersedes_message_id,
-            tenant_id=lineage.tenant_id if lineage else tenant_id,
+            tenant_id=tenant.tenant_id,
             tool_codes=list(lineage.tool_codes) if lineage else None,
             subject_refs=list(lineage.subject_refs) if lineage else None,
             subject_refs_hash=lineage.subject_refs_hash if lineage else None,
@@ -216,7 +265,13 @@ class ConversationService:
         current_user: User,
     ) -> list[MessageOut | MessageTombstoneOut]:
         """Project each sensitive message through the current authorization policy."""
-        messages = await self.get_messages(db, conversation_id, current_user.user_id)
+        tenant = get_bound_tenant_context(current_user)
+        messages = await self.get_messages(
+            db,
+            conversation_id,
+            current_user.user_id,
+            tenant=tenant,
+        )
         projected: list[MessageOut | MessageTombstoneOut] = []
         for message in messages:
             if message.role == "user":
@@ -236,6 +291,7 @@ class ConversationService:
                         await result_projection_service.refresh_download_urls(
                             db,
                             current_user,
+                            tenant=tenant,
                             lineage=lineage,
                             value=output.tool_calls,
                         )
@@ -249,6 +305,13 @@ class ConversationService:
                     )
                 )
         return projected
+
+    @staticmethod
+    def _require_actor(tenant: TenantContext, user_id: int) -> None:
+        if tenant.actor_user_id != user_id:
+            raise AuthenticationException(
+                "租户上下文无效", error_code="TENANT_CONTEXT_INVALID"
+            )
 
 
 conversation_service = ConversationService()

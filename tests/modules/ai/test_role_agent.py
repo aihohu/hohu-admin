@@ -228,17 +228,17 @@ async def test_role_not_found_error_code_prefix(
 # ============ PUT 全量覆盖与边界测试 ============
 
 
-async def _get_agent_id_by_code(client: AsyncClient, code: str) -> str:
-    """通过 GET /ai/admin/agents 按 code 查 agent_id（str，Snowflake 已序列化）.
+async def _get_agent_id_by_code(db_session, code: str) -> str:
+    """Resolve a global agent without crossing the platform admin boundary."""
+    from sqlalchemy import select
 
-    Plan 硬编码 agent_id（9101/9102/9103）无法落地 —— seed_ai_agents.py 用
-    next_id() 生成 Snowflake ID 不可预测. 复用 test_agent_admin._get_agent_id_by_code
-    同构逻辑（不 import 跨文件测试函数，保持模块自包含）.
-    """
-    resp = await client.get("/ai/admin/agents")
-    assert resp.status_code == 200, f"list agents failed: {resp.status_code}"
-    row = next(r for r in resp.json()["data"] if r["code"] == code)
-    return row["agentId"]
+    from app.modules.ai.models.agent import AiAgent
+
+    agent_id = await db_session.scalar(
+        select(AiAgent.agent_id).where(AiAgent.code == code)
+    )
+    assert agent_id is not None, f"agent not seeded: {code}"
+    return str(agent_id)
 
 
 async def test_put_full_replace_semantics(
@@ -252,7 +252,7 @@ async def test_put_full_replace_semantics(
     """
     client, _ = authed_client
     role_id = seed_role_agents["role_id"]
-    role_mgmt_id = await _get_agent_id_by_code(client, "role_mgmt")
+    role_mgmt_id = await _get_agent_id_by_code(db_session, "role_mgmt")
     user_id_str = str(seed_role_agents["user_id"])
 
     resp = await client.put(

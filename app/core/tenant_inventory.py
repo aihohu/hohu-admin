@@ -47,6 +47,42 @@ def _resource(
 
 
 TENANT_MODEL_INVENTORY: dict[str, TenantResource] = {
+    "ai_conversation": _resource(
+        "ai_conversation",
+        "app.modules.ai.models.conversation:AiConversation",
+        relationship_keys=(("tenant_id", "user_id"),),
+    ),
+    "ai_message": _resource(
+        "ai_message",
+        "app.modules.ai.models.message:AiMessage",
+        relationship_keys=(("tenant_id", "conversation_id"),),
+    ),
+    "ai_prepared_action": _resource(
+        "ai_prepared_action",
+        "app.modules.ai.models.prepared_action:AiPreparedAction",
+        unique_keys=(
+            ("tenant_id", "confirmation_id"),
+            ("tenant_id", "execute_tool_call_id"),
+        ),
+    ),
+    "ai_operation_log": _resource(
+        "ai_operation_log",
+        "app.modules.ai.models.operation_log:AiOperationLog",
+        unique_keys=(("tenant_id", "tool_call_id"),),
+    ),
+    "ai_routing_log": _resource(
+        "ai_routing_log", "app.modules.ai.models.routing_log:AiRoutingLog"
+    ),
+    "ai_routing_feedback": _resource(
+        "ai_routing_feedback",
+        "app.modules.ai.models.routing_feedback:AiRoutingFeedback",
+        relationship_keys=(("tenant_id", "message_id"),),
+    ),
+    "tenant_ai_model_policy": _resource(
+        "tenant_ai_model_policy",
+        "app.modules.ai.models.model_policy:TenantAiModelPolicy",
+        unique_keys=(("tenant_id", "model_id"),),
+    ),
     "sys_user": _resource(
         "sys_user",
         "app.modules.system.models.user:User",

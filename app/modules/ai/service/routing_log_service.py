@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.tenant import TenantContext
 from app.modules.ai.models.routing_log import AiRoutingLog
 
 if TYPE_CHECKING:
@@ -46,6 +47,7 @@ class RoutingLogService:
         latency_ms: int,
         parent_log_id: int | None = None,
         plan_step_index: int | None = None,
+        tenant: TenantContext,
     ) -> AiRoutingLog:
         """写一条 routing_log. 调用方负责 db.commit()."""
         # candidates 可能是 AiAgent 对象列表或 code 字符串列表
@@ -55,6 +57,7 @@ class RoutingLogService:
             candidates_codes = list(candidates)  # type: ignore[arg-type]
 
         log = AiRoutingLog(
+            tenant_id=tenant.tenant_id,
             trace_id=trace_id,
             user_id=user_id,
             conversation_id=conversation_id,

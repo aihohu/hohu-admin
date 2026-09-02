@@ -20,24 +20,97 @@ from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
+from tenant_helpers import tenant_context
 
 from app.core import redis as redis_module
 from app.core.exceptions import AuthorizationException, BusinessRuleException
 from app.modules.ai.agents.gateway import (
-    check_l1_global_rate_limit,
-    check_l1_rate_limit,
-    check_l2_agent_quota,
-    check_l2_daily_quota,
-    check_l4_conv_budget,
-    check_repeated_failure,
-    clear_failures,
+    check_l1_global_rate_limit as _check_l1_global_rate_limit,
+)
+from app.modules.ai.agents.gateway import (
+    check_l1_rate_limit as _check_l1_rate_limit,
+)
+from app.modules.ai.agents.gateway import (
+    check_l2_agent_quota as _check_l2_agent_quota,
+)
+from app.modules.ai.agents.gateway import (
+    check_l2_daily_quota as _check_l2_daily_quota,
+)
+from app.modules.ai.agents.gateway import (
+    check_l4_conv_budget as _check_l4_conv_budget,
+)
+from app.modules.ai.agents.gateway import (
+    check_repeated_failure as _check_repeated_failure,
+)
+from app.modules.ai.agents.gateway import (
+    clear_failures as _clear_failures,
+)
+from app.modules.ai.agents.gateway import (
     compute_args_hash,
-    decr_quota,
     is_write_tool,
-    record_failure,
-    with_l3_timeout,
+)
+from app.modules.ai.agents.gateway import (
+    decr_quota as _decr_quota,
+)
+from app.modules.ai.agents.gateway import (
+    record_failure as _record_failure,
+)
+from app.modules.ai.agents.gateway import (
+    with_l3_timeout as _with_l3_timeout,
 )
 from app.modules.ai.agents.tools import AiToolMeta
+
+TENANT = tenant_context()
+
+
+async def _tenant_call(function, *args, **kwargs):
+    kwargs.setdefault("tenant", TENANT)
+    return await function(*args, **kwargs)
+
+
+async def check_l1_global_rate_limit(*args, **kwargs):
+    return await _tenant_call(_check_l1_global_rate_limit, *args, **kwargs)
+
+
+async def check_l1_rate_limit(*args, **kwargs):
+    return await _tenant_call(_check_l1_rate_limit, *args, **kwargs)
+
+
+async def check_l2_agent_quota(*args, **kwargs):
+    return await _tenant_call(_check_l2_agent_quota, *args, **kwargs)
+
+
+async def check_l2_daily_quota(*args, **kwargs):
+    return await _tenant_call(_check_l2_daily_quota, *args, **kwargs)
+
+
+async def check_l4_conv_budget(*args, **kwargs):
+    return await _tenant_call(_check_l4_conv_budget, *args, **kwargs)
+
+
+async def check_repeated_failure(*args, **kwargs):
+    return await _tenant_call(_check_repeated_failure, *args, **kwargs)
+
+
+async def clear_failures(*args, **kwargs):
+    return await _tenant_call(_clear_failures, *args, **kwargs)
+
+
+async def decr_quota(*args, **kwargs):
+    return await _tenant_call(_decr_quota, *args, **kwargs)
+
+
+async def record_failure(*args, **kwargs):
+    return await _tenant_call(_record_failure, *args, **kwargs)
+
+
+async def with_l3_timeout(*args, **kwargs):
+    return await _tenant_call(_with_l3_timeout, *args, **kwargs)
+
+
+def _tenant_key(suffix: str) -> str:
+    return f"ai:tenant:0:{suffix}"
+
 
 # ============ is_write_tool ============
 
@@ -106,7 +179,8 @@ async def clean_redis_rate_keys():
     exec_mod.redis_client = redis_module.redis_client
 
     async def _purge() -> None:
-        keys = await redis_module.redis_client.keys("ai:write:*")
+        keys = await redis_module.redis_client.keys("ai:tenant:*")
+        keys += await redis_module.redis_client.keys("ai:write:*")
         keys += await redis_module.redis_client.keys("ai:quota:*")
         keys += await redis_module.redis_client.keys("ai:failures:*")
         keys += await redis_module.redis_client.keys("ai:rate:*")  # 全局 L1。
@@ -148,7 +222,7 @@ class TestL1RateLimit:
         """第一次 ZADD 应设 60s EXPIRE"""
         user_id = 99997
         await check_l1_rate_limit(redis_module.redis_client, user_id)
-        ttl = await redis_module.redis_client.ttl(f"ai:write:{user_id}")
+        ttl = await redis_module.redis_client.ttl(_tenant_key(f"write:{user_id}"))
         # TTL 应该接近 60（刚设置）
         assert 50 <= ttl <= 60
 
@@ -158,7 +232,9 @@ class TestL1RateLimit:
         _, member = await check_l1_rate_limit(redis_module.redis_client, user_id)
         assert isinstance(member, str)
         # member 应在 zset 里
-        score = await redis_module.redis_client.zscore(f"ai:write:{user_id}", member)
+        score = await redis_module.redis_client.zscore(
+            _tenant_key(f"write:{user_id}"), member
+        )
         assert score is not None
 
     async def test_over_limit_rolls_back_self(self) -> None:
@@ -170,7 +246,7 @@ class TestL1RateLimit:
         with pytest.raises(BusinessRuleException):
             await check_l1_rate_limit(redis_module.redis_client, user_id, limit=3)
         # zset 应该回到 limit (3)，不是 4
-        count = await redis_module.redis_client.zcard(f"ai:write:{user_id}")
+        count = await redis_module.redis_client.zcard(_tenant_key(f"write:{user_id}"))
         assert count == 3
 
     async def test_sliding_window_drops_expired(self) -> None:
@@ -180,7 +256,7 @@ class TestL1RateLimit:
         新调用应该看不到老成员（窗口内只有自己 1 个）。
         """
         user_id = 99994
-        key = f"ai:write:{user_id}"
+        key = _tenant_key(f"write:{user_id}")
         # 手动塞 5 个老成员（score 在窗口外）
         old_ts = asyncio.get_event_loop().time() - 120  # 120s 前
         await redis_module.redis_client.zadd(
@@ -208,7 +284,7 @@ class TestL1GlobalRateLimit:
         """limit=0（默认）→ 跳过，返回 None，不写 zset"""
         result = await check_l1_global_rate_limit(redis_module.redis_client, limit=0)
         assert result is None
-        exists = await redis_module.redis_client.exists("ai:rate:global")
+        exists = await redis_module.redis_client.exists(_tenant_key("rate:global"))
         assert exists == 0  # 未写 key
 
     async def test_under_limit_passes(self) -> None:
@@ -233,7 +309,7 @@ class TestL1GlobalRateLimit:
         with pytest.raises(BusinessRuleException):
             await check_l1_global_rate_limit(redis_module.redis_client, limit=2)
 
-        count = await redis_module.redis_client.zcard("ai:rate:global")
+        count = await redis_module.redis_client.zcard(_tenant_key("rate:global"))
         assert count == 2  # 回到 limit
 
     async def test_returns_member_for_rollback(self) -> None:
@@ -242,7 +318,9 @@ class TestL1GlobalRateLimit:
         assert r is not None
         _, member = r
         assert isinstance(member, str)
-        score = await redis_module.redis_client.zscore("ai:rate:global", member)
+        score = await redis_module.redis_client.zscore(
+            _tenant_key("rate:global"), member
+        )
         assert score is not None
 
     async def test_shared_across_calls(self) -> None:
@@ -286,7 +364,10 @@ class TestL2DailyQuota:
         # 当前 UTC date key 计数应该回到 limit (2)，不是 3
         date_str = datetime.now(UTC).strftime("%Y%m%d")
         count = int(
-            await redis_module.redis_client.get(f"ai:quota:{user_id}:{date_str}") or 0
+            await redis_module.redis_client.get(
+                _tenant_key(f"quota:{user_id}:{date_str}")
+            )
+            or 0
         )
         assert count == 2
 
@@ -297,7 +378,7 @@ class TestL2DailyQuota:
         utc_date_str = datetime.now(UTC).strftime("%Y%m%d")
         # 验证 UTC date key 存在
         exists = await redis_module.redis_client.exists(
-            f"ai:quota:{user_id}:{utc_date_str}"
+            _tenant_key(f"quota:{user_id}:{utc_date_str}")
         )
         assert exists == 1
 
@@ -320,7 +401,9 @@ class TestL2DailyQuota:
 
             await check_l2_daily_quota(redis_module.redis_client, user_id, limit=100)
 
-            ttl = await redis_module.redis_client.ttl(f"ai:quota:{user_id}:{date_str}")
+            ttl = await redis_module.redis_client.ttl(
+                _tenant_key(f"quota:{user_id}:{date_str}")
+            )
             # 23:59:00 → 00:00:00 还有 60s
             assert 50 <= ttl <= 60
 
@@ -340,7 +423,7 @@ class TestL2AgentQuota:
         assert result is None
         date_str = datetime.now(UTC).strftime("%Y%m%d")
         exists = await redis_module.redis_client.exists(
-            f"ai:quota:{user_id}:user_mgmt:{date_str}"
+            _tenant_key(f"quota:{user_id}:user_mgmt:{date_str}")
         )
         assert exists == 0  # 未写 key
 
@@ -381,7 +464,7 @@ class TestL2AgentQuota:
         date_str = datetime.now(UTC).strftime("%Y%m%d")
         count = int(
             await redis_module.redis_client.get(
-                f"ai:quota:{user_id}:user_mgmt:{date_str}"
+                _tenant_key(f"quota:{user_id}:user_mgmt:{date_str}")
             )
             or 0
         )
@@ -447,14 +530,16 @@ class TestL4ConvBudget:
         """limit=0（默认）→ 跳过，返回 None，不写 key"""
         result = await check_l4_conv_budget(redis_module.redis_client, 12345, limit=0)
         assert result is None
-        exists = await redis_module.redis_client.exists("ai:budget:conv:12345")
+        exists = await redis_module.redis_client.exists(
+            _tenant_key("budget:conv:12345")
+        )
         assert exists == 0
 
     async def test_conversation_id_zero_skips_check(self) -> None:
         """conversation_id=0（无 conversation 上下文）→ 跳过"""
         result = await check_l4_conv_budget(redis_module.redis_client, 0, limit=100)
         assert result is None
-        exists = await redis_module.redis_client.exists("ai:budget:conv:0")
+        exists = await redis_module.redis_client.exists(_tenant_key("budget:conv:0"))
         assert exists == 0
 
     async def test_under_limit_passes(self) -> None:
@@ -479,27 +564,29 @@ class TestL4ConvBudget:
         with pytest.raises(BusinessRuleException):
             await check_l4_conv_budget(redis_module.redis_client, 12348, limit=2)
 
-        count = int(await redis_module.redis_client.get("ai:budget:conv:12348") or 0)
+        count = int(
+            await redis_module.redis_client.get(_tenant_key("budget:conv:12348")) or 0
+        )
         assert count == 2  # 回到 limit
 
     async def test_first_call_sets_ttl_24h(self) -> None:
         """首次递增时设置 24 小时滚动窗口。"""
         await check_l4_conv_budget(redis_module.redis_client, 12349, limit=100)
-        ttl = await redis_module.redis_client.ttl("ai:budget:conv:12349")
+        ttl = await redis_module.redis_client.ttl(_tenant_key("budget:conv:12349"))
         # 24h = 86400s，允许 ±60s 误差（测试执行耗时）
         assert 86340 <= ttl <= 86400
 
     async def test_ttl_not_reset_on_subsequent_calls(self) -> None:
         """后续递增不重置首次设置的 TTL。"""
         await check_l4_conv_budget(redis_module.redis_client, 12350, limit=100)
-        ttl1 = await redis_module.redis_client.ttl("ai:budget:conv:12350")
+        ttl1 = await redis_module.redis_client.ttl(_tenant_key("budget:conv:12350"))
 
         # 等 1s 后再调，TTL 应该减少而非重置
         import asyncio
 
         await asyncio.sleep(1.0)
         await check_l4_conv_budget(redis_module.redis_client, 12350, limit=100)
-        ttl2 = await redis_module.redis_client.ttl("ai:budget:conv:12350")
+        ttl2 = await redis_module.redis_client.ttl(_tenant_key("budget:conv:12350"))
 
         # TTL 应减少（接近 1s），而非重置到 86400
         assert ttl2 < ttl1
@@ -531,7 +618,10 @@ class TestDecrQuota:
 
         date_str = datetime.now(UTC).strftime("%Y%m%d")
         count = int(
-            await redis_module.redis_client.get(f"ai:quota:{user_id}:{date_str}") or 0
+            await redis_module.redis_client.get(
+                _tenant_key(f"quota:{user_id}:{date_str}")
+            )
+            or 0
         )
         assert count == 2  # 3 - 1 = 2
 
@@ -539,26 +629,36 @@ class TestDecrQuota:
         """修订 S-11：传 member 时精确 ZREM 该 member"""
         user_id = 99987
         _, member = await check_l1_rate_limit(redis_module.redis_client, user_id)
-        count_before = await redis_module.redis_client.zcard(f"ai:write:{user_id}")
+        count_before = await redis_module.redis_client.zcard(
+            _tenant_key(f"write:{user_id}")
+        )
         assert count_before == 1
 
         await decr_quota(redis_module.redis_client, user_id, l1_member=member)
 
-        count_after = await redis_module.redis_client.zcard(f"ai:write:{user_id}")
+        count_after = await redis_module.redis_client.zcard(
+            _tenant_key(f"write:{user_id}")
+        )
         assert count_after == 0
         # member 应该不存在了
-        score = await redis_module.redis_client.zscore(f"ai:write:{user_id}", member)
+        score = await redis_module.redis_client.zscore(
+            _tenant_key(f"write:{user_id}"), member
+        )
         assert score is None
 
     async def test_decr_l1_without_member_no_op(self) -> None:
         """修订 S-11：l1_member=None 时不回滚 L1（保守：宁可多算不漏算）"""
         user_id = 99986
         _, _ = await check_l1_rate_limit(redis_module.redis_client, user_id)
-        count_before = await redis_module.redis_client.zcard(f"ai:write:{user_id}")
+        count_before = await redis_module.redis_client.zcard(
+            _tenant_key(f"write:{user_id}")
+        )
 
         await decr_quota(redis_module.redis_client, user_id, l1_member=None)
 
-        count_after = await redis_module.redis_client.zcard(f"ai:write:{user_id}")
+        count_after = await redis_module.redis_client.zcard(
+            _tenant_key(f"write:{user_id}")
+        )
         assert count_after == count_before  # 没动
 
     async def test_decr_agent_quota_with_agent_code(self) -> None:
@@ -584,12 +684,15 @@ class TestDecrQuota:
         date_str = datetime.now(UTC).strftime("%Y%m%d")
         agent_count = int(
             await redis_module.redis_client.get(
-                f"ai:quota:{user_id}:user_mgmt:{date_str}"
+                _tenant_key(f"quota:{user_id}:user_mgmt:{date_str}")
             )
             or 0
         )
         global_count = int(
-            await redis_module.redis_client.get(f"ai:quota:{user_id}:{date_str}") or 0
+            await redis_module.redis_client.get(
+                _tenant_key(f"quota:{user_id}:{date_str}")
+            )
+            or 0
         )
         assert agent_count == 2  # 3 - 1 = 2
         assert global_count == 2  # 3 - 1 = 2
@@ -609,7 +712,7 @@ class TestDecrQuota:
         date_str = datetime.now(UTC).strftime("%Y%m%d")
         agent_count = int(
             await redis_module.redis_client.get(
-                f"ai:quota:{user_id}:user_mgmt:{date_str}"
+                _tenant_key(f"quota:{user_id}:user_mgmt:{date_str}")
             )
             or 0
         )
@@ -631,7 +734,7 @@ class TestDecrQuota:
             l1_global_member=members[-1],
         )
 
-        count = await redis_module.redis_client.zcard("ai:rate:global")
+        count = await redis_module.redis_client.zcard(_tenant_key("rate:global"))
         assert count == 2  # 3 - 1 = 2
 
     async def test_decr_without_global_member_skips_global_l1(self) -> None:
@@ -645,7 +748,7 @@ class TestDecrQuota:
             l1_global_member=None,
         )
 
-        count = await redis_module.redis_client.zcard("ai:rate:global")
+        count = await redis_module.redis_client.zcard(_tenant_key("rate:global"))
         assert count == 3  # 没 ZREM
 
     async def test_decr_l4_conv_with_key(self) -> None:
@@ -657,10 +760,12 @@ class TestDecrQuota:
         await decr_quota(
             redis_module.redis_client,
             99967,
-            l4_conv_key="ai:budget:conv:77701",
+            l4_conv_key=_tenant_key("budget:conv:77701"),
         )
 
-        count = int(await redis_module.redis_client.get("ai:budget:conv:77701") or 0)
+        count = int(
+            await redis_module.redis_client.get(_tenant_key("budget:conv:77701")) or 0
+        )
         assert count == 2  # 3 - 1 = 2
 
     async def test_decr_without_l4_conv_key_skips_l4(self) -> None:
@@ -674,7 +779,9 @@ class TestDecrQuota:
             l4_conv_key=None,
         )
 
-        count = int(await redis_module.redis_client.get("ai:budget:conv:77702") or 0)
+        count = int(
+            await redis_module.redis_client.get(_tenant_key("budget:conv:77702")) or 0
+        )
         assert count == 3  # 没 DECR
 
 
@@ -757,7 +864,7 @@ class TestRepeatedFailure:
         # 第一次失败
         await record_failure(redis_module.redis_client, user_id, tool, args_hash)
         ttl1 = await redis_module.redis_client.ttl(
-            f"ai:failures:{user_id}:{tool}:{args_hash}"
+            _tenant_key(f"failures:{user_id}:{tool}:{args_hash}")
         )
         assert 590 <= ttl1 <= 600  # 第一次 TTL ~600
 
@@ -765,7 +872,7 @@ class TestRepeatedFailure:
         # 实际只能验证：第二次调用后 TTL 应该比第一次小（不重置）
         await record_failure(redis_module.redis_client, user_id, tool, args_hash)
         ttl2 = await redis_module.redis_client.ttl(
-            f"ai:failures:{user_id}:{tool}:{args_hash}"
+            _tenant_key(f"failures:{user_id}:{tool}:{args_hash}")
         )
         # TTL2 应该 ≤ TTL1（理想是相同；只要不增加就证明没重置）
         assert ttl2 <= ttl1
@@ -875,10 +982,15 @@ class TestAuthorizationExceptionRollback:
         user_id = 99980
         _, member = await check_l1_rate_limit(redis_module.redis_client, user_id)
         await check_l2_daily_quota(redis_module.redis_client, user_id)
-        l1_before = await redis_module.redis_client.zcard(f"ai:write:{user_id}")
+        l1_before = await redis_module.redis_client.zcard(
+            _tenant_key(f"write:{user_id}")
+        )
         date_str = datetime.now(UTC).strftime("%Y%m%d")
         l2_before = int(
-            await redis_module.redis_client.get(f"ai:quota:{user_id}:{date_str}") or 0
+            await redis_module.redis_client.get(
+                _tenant_key(f"quota:{user_id}:{date_str}")
+            )
+            or 0
         )
 
         # 构造最小 ChatDeps（用 SimpleNamespace 避免类 scope 引用问题）
@@ -887,18 +999,20 @@ class TestAuthorizationExceptionRollback:
         from app.modules.ai.core.context import ChatDeps, DataScopeContext
 
         fake_user = SimpleNamespace(user_id=user_id, user_name="tester")
+        tenant = tenant_context(actor_user_id=user_id)
 
         deps = ChatDeps(
             user=fake_user,  # type: ignore[arg-type]
             perms={"p"},
             db=None,  # type: ignore[arg-type]
             data_scope=DataScopeContext(
-                tenant_id=0,
+                tenant=tenant,
                 accessible_dept_ids=None,
                 accessible_user_scope=None,
             ),
             agent=None,  # type: ignore[arg-type]
             trace_id="tr_test_authz",
+            tenant=tenant,
         )
 
         # 调 _invoke_tool_fn
@@ -916,9 +1030,14 @@ class TestAuthorizationExceptionRollback:
         assert result.error_code == "AI_DATA_SCOPE_VIOLATION"
 
         # 验证 L1/L2 都被回滚
-        l1_after = await redis_module.redis_client.zcard(f"ai:write:{user_id}")
+        l1_after = await redis_module.redis_client.zcard(
+            _tenant_key(f"write:{user_id}")
+        )
         l2_after = int(
-            await redis_module.redis_client.get(f"ai:quota:{user_id}:{date_str}") or 0
+            await redis_module.redis_client.get(
+                _tenant_key(f"quota:{user_id}:{date_str}")
+            )
+            or 0
         )
         assert l1_after == l1_before - 1  # 精确 ZREM member
         assert l2_after == l2_before - 1  # DECR
@@ -953,7 +1072,10 @@ class TestAuthorizationExceptionRollback:
         await check_l2_daily_quota(redis_module.redis_client, user_id)
         date_str = datetime.now(UTC).strftime("%Y%m%d")
         l2_before = int(
-            await redis_module.redis_client.get(f"ai:quota:{user_id}:{date_str}") or 0
+            await redis_module.redis_client.get(
+                _tenant_key(f"quota:{user_id}:{date_str}")
+            )
+            or 0
         )
 
         from types import SimpleNamespace
@@ -961,18 +1083,20 @@ class TestAuthorizationExceptionRollback:
         from app.modules.ai.core.context import ChatDeps, DataScopeContext
 
         fake_user = SimpleNamespace(user_id=user_id, user_name="tester")
+        tenant = tenant_context(actor_user_id=user_id)
 
         deps = ChatDeps(
             user=fake_user,  # type: ignore[arg-type]
             perms={"p"},
             db=None,  # type: ignore[arg-type]
             data_scope=DataScopeContext(
-                tenant_id=0,
+                tenant=tenant,
                 accessible_dept_ids=None,
                 accessible_user_scope=None,
             ),
             agent=None,  # type: ignore[arg-type]
             trace_id="tr_test_biz",
+            tenant=tenant,
         )
 
         await exec_mod._invoke_tool_fn(
@@ -985,6 +1109,9 @@ class TestAuthorizationExceptionRollback:
 
         # 业务异常不回滚 L2，保留本次计数。
         l2_after = int(
-            await redis_module.redis_client.get(f"ai:quota:{user_id}:{date_str}") or 0
+            await redis_module.redis_client.get(
+                _tenant_key(f"quota:{user_id}:{date_str}")
+            )
+            or 0
         )
         assert l2_after == l2_before  # 没变

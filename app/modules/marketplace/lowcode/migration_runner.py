@@ -3,6 +3,8 @@
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.tenant import TenantContext
+from app.modules.marketplace.capability import require_marketplace_capability
 from app.modules.marketplace.lowcode.schema_comparator import compare_schemas
 from app.modules.marketplace.lowcode.schema_introspection import (
     introspect_table,
@@ -19,12 +21,18 @@ class MigrationRunner:
     """执行低代码 app_data_* 表的 DDL 迁移"""
 
     async def create_table(
-        self, db: AsyncSession, *, table_name: str, data_schema: dict
+        self,
+        db: AsyncSession,
+        *,
+        table_name: str,
+        data_schema: dict,
+        tenant: TenantContext,
     ) -> None:
         """CREATE TABLE：系统字段 + 用户字段 + 索引"""
+        require_marketplace_capability(tenant)
         sys_columns = [
             "id BIGSERIAL PRIMARY KEY",
-            "tenant_id BIGINT NOT NULL DEFAULT 0",
+            "tenant_id BIGINT NOT NULL",
             "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
             "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
             "created_by BIGINT",
@@ -72,13 +80,22 @@ class MigrationRunner:
         )
 
     async def apply_upgrade(
-        self, db: AsyncSession, *, table_name: str, new_data_schema: dict
+        self,
+        db: AsyncSession,
+        *,
+        table_name: str,
+        new_data_schema: dict,
+        tenant: TenantContext,
     ) -> None:
         """升级表结构：表不存在则建；存在则 introspect + compare + apply diff"""
+        require_marketplace_capability(tenant)
         actual = await introspect_table(db, table_name)
         if actual is None:
             await self.create_table(
-                db, table_name=table_name, data_schema=new_data_schema
+                db,
+                table_name=table_name,
+                data_schema=new_data_schema,
+                tenant=tenant,
             )
             return
 
@@ -90,18 +107,22 @@ class MigrationRunner:
         for op in diff.alter_columns:
             await db.execute(text(op.to_sql(table_name)))
 
-    async def drop_table(self, db: AsyncSession, *, table_name: str) -> None:
+    async def drop_table(
+        self, db: AsyncSession, *, table_name: str, tenant: TenantContext
+    ) -> None:
         """DROP TABLE IF EXISTS"""
+        require_marketplace_capability(tenant)
         if await table_exists(db, table_name):
             await db.execute(text(f"DROP TABLE {table_name}"))
 
     async def get_table_names_for_app(
-        self, db: AsyncSession, *, app_slug: str
+        self, db: AsyncSession, *, app_slug: str, tenant: TenantContext
     ) -> list[str]:
         """列出某 app 的所有物理表（前缀 app_data_{slug}）
 
         slug 中的连字符/点已规范化为下划线（与 make_table_name 保持一致）。
         """
+        require_marketplace_capability(tenant)
         prefix = slug_to_table_prefix(app_slug)
         pattern = f"app_data_{prefix}%"
         stmt = text(

@@ -95,7 +95,7 @@ def _tool_ctx(
     actor: User,
     perms: set[str] | None = None,
 ) -> AiToolContext:
-    bind_test_user(actor)
+    tenant = bind_test_user(actor)
     return AiToolContext(
         user=actor,
         perms=(
@@ -105,13 +105,14 @@ def _tool_ctx(
         ),
         db=db,
         data_scope=DataScopeContext(
-            tenant_id=0,
+            tenant=tenant,
             accessible_dept_ids=None,
             accessible_user_scope=None,
             filters=[],
         ),
         trace_id="tr_task13_user_role_assignment",
         tool_meta=MagicMock(),
+        tenant=tenant,
     )
 
 

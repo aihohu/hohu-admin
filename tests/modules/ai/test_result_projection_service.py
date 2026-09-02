@@ -5,11 +5,11 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from jose import JWTError, jwt
+from tenant_helpers import tenant_context
 
 from app.constants import STATUS_ENABLED
 from app.core.config import settings
 from app.core.exceptions import AuthorizationException
-from app.core.tenant import TenantContext
 from app.modules.ai.service.result_projection_service import (
     DATA_SCOPE_RESOLVER_VERSION,
     ProjectionLineage,
@@ -20,8 +20,10 @@ from app.modules.system.service.user_role_assignment_service import (
     user_role_assignment_service,
 )
 
+TENANT = tenant_context(actor_user_id=101)
 
-def _user(*permissions: str):
+
+def _user(*permissions: str, user_id: int = 101):
     role = SimpleNamespace(
         role_id=11,
         role_code="R_USER",
@@ -31,23 +33,17 @@ def _user(*permissions: str):
         menus=[SimpleNamespace(permission=value) for value in permissions],
     )
     return SimpleNamespace(
-        user_id=101,
+        user_id=user_id,
         user_name="alice",
         roles=[role],
         depts=[],
-        _tenant_context=TenantContext(
-            tenant_id=0,
-            tenant_code="default",
-            actor_user_id=101,
-            tenant_version=1,
-            source="access_token",
-        ),
+        _tenant_context=tenant_context(actor_user_id=user_id),
     )
 
 
 def test_freeze_lineage_normalizes_sets_and_hashes_subjects() -> None:
     lineage = result_projection_service.freeze_lineage(
-        tenant_id=0,
+        tenant=TENANT,
         agent_code="user_mgmt",
         tool_codes=["user.lookup", "user.lookup"],
         subject_refs=[
@@ -96,7 +92,7 @@ async def test_projection_rejects_tampered_subject_hash_before_domain_queries() 
 
 async def test_projection_requires_owner_tenant_and_current_chat_permission() -> None:
     lineage = result_projection_service.freeze_lineage(
-        tenant_id=0,
+        tenant=TENANT,
         agent_code="user_mgmt",
         tool_codes=[],
         subject_refs=[],
@@ -121,7 +117,7 @@ async def test_projection_accepts_complete_empty_lineage_for_plain_assistant_tex
 ):
     user = _user("ai:chat:use")
     lineage = result_projection_service.freeze_lineage(
-        tenant_id=0,
+        tenant=TENANT,
         agent_code="shared",
         tool_codes=[],
         subject_refs=[],
@@ -147,7 +143,7 @@ async def test_role_assignment_projection_rechecks_conditional_role_permission()
 ):
     user = _user("ai:chat:use", "system:user:list")
     lineage = result_projection_service.freeze_lineage(
-        tenant_id=0,
+        tenant=TENANT,
         agent_code="user_mgmt",
         tool_codes=["user.lookup"],
         subject_refs=[
@@ -183,7 +179,7 @@ async def test_role_assignment_projection_rechecks_conditional_role_permission()
 async def test_delegable_role_projection_rechecks_every_count_contributor() -> None:
     user = _user("ai:chat:use", "system:user:role-auth")
     lineage = result_projection_service.freeze_lineage(
-        tenant_id=0,
+        tenant=TENANT,
         agent_code="user_mgmt",
         tool_codes=["user.role_lookup"],
         subject_refs=[
@@ -215,7 +211,7 @@ async def test_delegable_role_projection_rechecks_every_count_contributor() -> N
 async def test_managed_role_projection_rechecks_current_delegation_policy() -> None:
     user = _user("ai:chat:use", "system:role:edit")
     lineage = result_projection_service.freeze_lineage(
-        tenant_id=0,
+        tenant=TENANT,
         agent_code="role_mgmt",
         tool_codes=["role.update"],
         subject_refs=[{"type": "managed_role", "id": "901"}],
@@ -250,7 +246,7 @@ async def test_managed_role_projection_rechecks_current_delegation_policy() -> N
 async def test_complete_role_assignment_projection_rechecks_live_role_set() -> None:
     user = _user("ai:chat:use", "system:user:role-auth")
     lineage = result_projection_service.freeze_lineage(
-        tenant_id=0,
+        tenant=TENANT,
         agent_code="user_mgmt",
         tool_codes=["user.update_roles"],
         subject_refs=[
@@ -351,6 +347,7 @@ async def test_dependency_freeze_keeps_revoked_prior_assistant_projection() -> N
         await result_projection_service.collect_message_projection_dependencies(
             db,
             conversation_id=300,
+            tenant=TENANT,
         )
     )
 
@@ -377,7 +374,7 @@ async def test_generic_projection_reauthorizes_message_dependencies() -> None:
     db = AsyncMock()
     db.execute.return_value = rows
     lineage = result_projection_service.freeze_lineage(
-        tenant_id=0,
+        tenant=TENANT,
         agent_code="user_mgmt",
         tool_codes=[],
         subject_refs=[],
@@ -412,7 +409,7 @@ async def test_scope_bound_projection_requires_exact_hash_and_resolver_version()
 ):
     user = _user("ai:chat:use")
     lineage = result_projection_service.freeze_lineage(
-        tenant_id=0,
+        tenant=TENANT,
         agent_code="user_mgmt",
         tool_codes=["user.count"],
         subject_refs=[],
@@ -503,10 +500,9 @@ async def test_data_scope_hash_tracks_every_enabled_scope_kind() -> None:
 
 async def test_download_token_is_owner_resource_and_projection_bound() -> None:
     user = _user("ai:chat:use")
-    other_user = _user("ai:chat:use")
-    other_user.user_id = 999
+    other_user = _user("ai:chat:use", user_id=999)
     lineage = result_projection_service.freeze_lineage(
-        tenant_id=0,
+        tenant=TENANT,
         agent_code="user_mgmt",
         tool_codes=["user.export"],
         subject_refs=[{"type": "user_export_task", "id": "exp-1"}],
@@ -522,6 +518,7 @@ async def test_download_token_is_owner_resource_and_projection_bound() -> None:
         token = await result_projection_service.issue_download_token(
             AsyncMock(),
             user,
+            tenant=user._tenant_context,
             resource_type="user_export",
             resource_id="exp-1",
             lineage=lineage,
@@ -538,6 +535,7 @@ async def test_download_token_is_owner_resource_and_projection_bound() -> None:
         result_projection_service.read_download_token(
             token,
             user,
+            tenant=user._tenant_context,
             resource_type="user_export",
             resource_id="exp-1",
         )
@@ -547,6 +545,7 @@ async def test_download_token_is_owner_resource_and_projection_bound() -> None:
         result_projection_service.read_download_token(
             token,
             other_user,
+            tenant=other_user._tenant_context,
             resource_type="user_export",
             resource_id="exp-1",
         )
@@ -556,6 +555,7 @@ async def test_download_token_is_owner_resource_and_projection_bound() -> None:
         result_projection_service.read_download_token(
             token,
             user,
+            tenant=user._tenant_context,
             resource_type="user_export",
             resource_id="exp-2",
         )
@@ -566,7 +566,7 @@ async def test_download_token_is_owner_resource_and_projection_bound() -> None:
 async def test_refresh_download_urls_replaces_persisted_token() -> None:
     user = _user("ai:chat:use")
     lineage = result_projection_service.freeze_lineage(
-        tenant_id=0,
+        tenant=TENANT,
         agent_code="user_mgmt",
         tool_codes=["user.export"],
         subject_refs=[{"type": "user_export_task", "id": "exp-1"}],
@@ -580,6 +580,7 @@ async def test_refresh_download_urls_replaces_persisted_token() -> None:
         refreshed = await result_projection_service.refresh_download_urls(
             AsyncMock(),
             user,
+            tenant=user._tenant_context,
             lineage=lineage,
             value={
                 "downloadUrl": ("/ai/download/user-export/exp-1?token=expired-token")

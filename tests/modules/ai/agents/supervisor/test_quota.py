@@ -1,6 +1,6 @@
 """supervisor_daily_limit Redis 计数器测试。"""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from tenant_helpers import tenant_context
@@ -52,9 +52,10 @@ async def test_quota_blocks_at_limit():
 @pytest.mark.asyncio
 async def test_quota_increment_after_check():
     """路由 LLM 调用前先递增计数，确保并发安全。"""
-    fake_redis = AsyncMock()
-    fake_redis.incr = AsyncMock(return_value=51)
-    fake_redis.expire = AsyncMock()
+    fake_redis = MagicMock()
+    pipe = MagicMock()
+    pipe.execute = AsyncMock(return_value=[51, True])
+    fake_redis.pipeline.return_value = pipe
 
     # _utc_date 是函数，patch 必须给 return_value（不能直接 patch 成字符串）
     with patch(
@@ -64,6 +65,11 @@ async def test_quota_increment_after_check():
         count = await increment_daily_count(fake_redis, user_id=1, tenant=TENANT)
 
     assert count == 51
-    fake_redis.incr.assert_awaited_once_with(
-        "tenant:0:ai:supervisor:quota:1:2026-07-25"
+    key = "tenant:0:ai:supervisor:quota:1:2026-07-25"
+    fake_redis.pipeline.assert_called_once_with(transaction=True)
+    pipe.incr.assert_called_once_with(key)
+    pipe.expire.assert_called_once_with(
+        key,
+        25 * 3600,
+        nx=True,
     )

@@ -4,7 +4,15 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from tenant_helpers import tenant_context
+
+from app.core.tenant import PlatformContext
 from app.modules.ai.lifecycle import cleanup_prepared_actions_on_startup
+
+PLATFORM = PlatformContext(
+    actor_user_id=1, reason="startup recovery test", correlation_id="plan3"
+)
+TENANT = tenant_context(actor_user_id=103)
 
 
 async def test_startup_keeps_unexpired_pending_when_redis_was_flushed() -> None:
@@ -15,6 +23,8 @@ async def test_startup_keeps_unexpired_pending_when_redis_was_flushed() -> None:
         expires_at=datetime.now(UTC) + timedelta(minutes=5),
         guard_owner_token=None,
         conversation_id=100,
+        tenant_id=0,
+        user_id=103,
     )
     db = MagicMock()
     result = MagicMock()
@@ -34,8 +44,13 @@ async def test_startup_keeps_unexpired_pending_when_redis_was_flushed() -> None:
             "app.modules.ai.lifecycle.prepared_action_service.pending_source_is_valid",
             AsyncMock(return_value=True),
         ),
+        patch(
+            "app.modules.ai.lifecycle._tenant_context", AsyncMock(return_value=TENANT)
+        ),
     ):
-        cleaned = await cleanup_prepared_actions_on_startup(MagicMock())
+        cleaned = await cleanup_prepared_actions_on_startup(
+            MagicMock(), platform=PLATFORM
+        )
 
     assert cleaned == 0
     transition.assert_not_awaited()
@@ -51,6 +66,8 @@ async def test_startup_keeps_running_action_with_live_execution_lease() -> None:
         execution_lease_expires_at=datetime.now(UTC) + timedelta(seconds=45),
         guard_owner_token="guard-live",
         conversation_id=102,
+        tenant_id=0,
+        user_id=103,
     )
     db = MagicMock()
     result = MagicMock()
@@ -66,8 +83,13 @@ async def test_startup_keeps_running_action_with_live_execution_lease() -> None:
             "app.modules.ai.lifecycle.prepared_action_service.transition_status",
             AsyncMock(),
         ) as transition,
+        patch(
+            "app.modules.ai.lifecycle._tenant_context", AsyncMock(return_value=TENANT)
+        ),
     ):
-        cleaned = await cleanup_prepared_actions_on_startup(MagicMock())
+        cleaned = await cleanup_prepared_actions_on_startup(
+            MagicMock(), platform=PLATFORM
+        )
 
     assert cleaned == 0
     transition.assert_not_awaited()
@@ -130,8 +152,13 @@ async def test_startup_expires_unexpired_pending_when_source_is_orphaned() -> No
             "app.modules.ai.lifecycle.hitl_manager.delete_pending",
             AsyncMock(return_value=None),
         ),
+        patch(
+            "app.modules.ai.lifecycle._tenant_context", AsyncMock(return_value=TENANT)
+        ),
     ):
-        cleaned = await cleanup_prepared_actions_on_startup(MagicMock())
+        cleaned = await cleanup_prepared_actions_on_startup(
+            MagicMock(), platform=PLATFORM
+        )
 
     assert cleaned == 1
     assert transition.await_args.kwargs["target_status"].value == "expired"

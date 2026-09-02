@@ -11,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_response import PageResult
 from app.core.exceptions import InvalidParameterException, NotFoundException
+from app.core.tenant import TenantContext
+from app.modules.marketplace.capability import require_marketplace_capability
 from app.modules.marketplace.exceptions import AppErrorCode
 from app.modules.marketplace.lowcode.schema_introspection import (
     introspect_table,
@@ -227,10 +229,11 @@ class DataApiService:
         *,
         table_name: str,
         data: dict,
-        tenant_id: int,
         user_id: int,
+        tenant: TenantContext,
         data_schema: dict | None = None,
     ) -> dict:
+        require_marketplace_capability(tenant)
         # 校验 required
         if data_schema:
             required = data_schema.get("required", [])
@@ -241,7 +244,7 @@ class DataApiService:
         now = datetime.now(UTC)
         full_data = {
             **data,
-            "tenant_id": tenant_id,
+            "tenant_id": tenant.tenant_id,
             "created_by": user_id,
             "updated_by": user_id,
             "created_at": now,
@@ -272,12 +275,13 @@ class DataApiService:
         current: int,
         size: int,
         filters: dict[str, Any] | None,
-        tenant_id: int,
+        tenant: TenantContext,
         order_by: str | None = None,
         slug: str | None = None,
         data_schema: dict | None = None,
         models: list | None = None,
     ) -> PageResult:
+        require_marketplace_capability(tenant)
         # 拿列类型 map（决策 #76：列存在性 + 类型匹配校验）
         table_info = await introspect_table(db, table_name)
         if table_info is None:
@@ -285,7 +289,7 @@ class DataApiService:
         column_types = {c.column_name: c.data_type for c in table_info.columns}
 
         where_clauses = ["tenant_id = :tenant_id"]
-        params: dict[str, Any] = {"tenant_id": tenant_id}
+        params: dict[str, Any] = {"tenant_id": tenant.tenant_id}
 
         if filters:
             for key, value in filters.items():
@@ -352,7 +356,8 @@ class DataApiService:
                         alias = f"sort_{fk_field}"
                         join_clauses.append(
                             f"LEFT JOIN {target_table} {alias} "
-                            f"ON {table_name}.{fk_field} = {alias}.id"
+                            f"ON {table_name}.{fk_field} = {alias}.id "
+                            f"AND {table_name}.tenant_id = {alias}.tenant_id"
                         )
                         sort_clauses.append(
                             f"{alias}.{label_field} {direction} NULLS LAST"
@@ -409,6 +414,7 @@ class DataApiService:
                 slug=slug,
                 data_schema=data_schema,
                 models=models,
+                tenant=tenant,
             )
 
         return PageResult(records=records, total=total, current=current, size=size)
@@ -421,6 +427,7 @@ class DataApiService:
         slug: str,
         data_schema: dict | None,
         models: list | None,
+        tenant: TenantContext,
     ) -> None:
         """Merge related label field onto each record (mutates in place).
 
@@ -465,8 +472,10 @@ class DataApiService:
                 params[pk] = v
             select_sql = text(
                 f"SELECT id, {label_field} FROM {target_table} "
-                f"WHERE id IN ({', '.join(placeholders)})"
+                f"WHERE tenant_id = :tenant_id "
+                f"AND id IN ({', '.join(placeholders)})"
             )
+            params["tenant_id"] = tenant.tenant_id
             rows = (await db.execute(select_sql, params)).fetchall()
             label_map = {row.id: getattr(row, label_field) for row in rows}
 
@@ -544,12 +553,13 @@ class DataApiService:
         *,
         table_name: str,
         record_id: int,
-        tenant_id: int,
+        tenant: TenantContext,
     ) -> dict:
+        require_marketplace_capability(tenant)
         sql = text(
             f"SELECT * FROM {table_name} WHERE id = :id AND tenant_id = :tenant_id"
         )
-        result = await db.execute(sql, {"id": record_id, "tenant_id": tenant_id})
+        result = await db.execute(sql, {"id": record_id, "tenant_id": tenant.tenant_id})
         row = result.fetchone()
         if row is None:
             raise NotFoundException(resource_type="记录")
@@ -562,9 +572,10 @@ class DataApiService:
         table_name: str,
         record_id: int,
         data: dict,
-        tenant_id: int,
         user_id: int,
+        tenant: TenantContext,
     ) -> dict:
+        require_marketplace_capability(tenant)
         # 移除系统字段
         clean_data = {k: v for k, v in data.items() if k not in SYSTEM_FIELDS}
         clean_data["updated_at"] = datetime.now(UTC)
@@ -586,7 +597,11 @@ class DataApiService:
             f"UPDATE {table_name} SET {set_sql} "
             f"WHERE id = :record_id AND tenant_id = :tenant_id RETURNING *"
         )
-        params = {**bound_data, "record_id": record_id, "tenant_id": tenant_id}
+        params = {
+            **bound_data,
+            "record_id": record_id,
+            "tenant_id": tenant.tenant_id,
+        }
         result = await db.execute(sql, params)
         row = result.fetchone()
         if row is None:
@@ -599,12 +614,13 @@ class DataApiService:
         *,
         table_name: str,
         record_id: int,
-        tenant_id: int,
+        tenant: TenantContext,
     ) -> None:
+        require_marketplace_capability(tenant)
         sql = text(
             f"DELETE FROM {table_name} WHERE id = :id AND tenant_id = :tenant_id"
         )
-        result = await db.execute(sql, {"id": record_id, "tenant_id": tenant_id})
+        result = await db.execute(sql, {"id": record_id, "tenant_id": tenant.tenant_id})
         if result.rowcount == 0:
             raise NotFoundException(resource_type="记录")
 

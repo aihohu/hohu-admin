@@ -10,17 +10,45 @@ from unittest.mock import MagicMock
 
 import pytest
 from fakeredis import aioredis as fakeredis_async
+from tenant_helpers import tenant_context
 
 from app.modules.ai.agents.safety.auto_disable import (
     DISABLE_DURATION_SEC,
     INJECTION_COUNT_TTL_SEC,
     INJECTION_THRESHOLD_PER_HOUR,
-    _count_key,
-    _disabled_key,
     _hour_bucket,
-    check_user_disabled,
-    record_injection,
 )
+from app.modules.ai.agents.safety.auto_disable import (
+    _count_key as _tenant_count_key,
+)
+from app.modules.ai.agents.safety.auto_disable import (
+    _disabled_key as _tenant_disabled_key,
+)
+from app.modules.ai.agents.safety.auto_disable import (
+    check_user_disabled as _check_user_disabled,
+)
+from app.modules.ai.agents.safety.auto_disable import (
+    record_injection as _record_injection,
+)
+
+TENANT = tenant_context(actor_user_id=9001)
+TENANT_B = tenant_context(tenant_id=37, actor_user_id=9001)
+
+
+def _count_key(user_id: int, hour_bucket: str) -> str:
+    return _tenant_count_key(user_id, hour_bucket, tenant_id=TENANT.tenant_id)
+
+
+def _disabled_key(user_id: int) -> str:
+    return _tenant_disabled_key(user_id, tenant_id=TENANT.tenant_id)
+
+
+async def record_injection(redis, user, *, tenant=TENANT):
+    return await _record_injection(redis, user, tenant=tenant)
+
+
+async def check_user_disabled(redis, user_id: int, *, tenant=TENANT):
+    return await _check_user_disabled(redis, user_id, tenant=tenant)
 
 
 @pytest.fixture
@@ -160,6 +188,19 @@ class TestKeyIsolation:
         # user_a 已禁用，user_b 仍可用
         assert await check_user_disabled(fake_redis, user_a.user_id) is True
         assert await check_user_disabled(fake_redis, user_b.user_id) is False
+
+    async def test_same_user_id_is_isolated_between_tenants(self, fake_redis) -> None:
+        user = _mock_user(9001)
+        for _ in range(INJECTION_THRESHOLD_PER_HOUR):
+            await record_injection(fake_redis, user, tenant=TENANT)
+
+        assert (
+            await check_user_disabled(fake_redis, user.user_id, tenant=TENANT) is True
+        )
+        assert (
+            await check_user_disabled(fake_redis, user.user_id, tenant=TENANT_B)
+            is False
+        )
 
     async def test_count_key_isolates_hour_bucket(self, fake_redis) -> None:
         """hour_bucket 不同时计数独立（key 含 bucket 后缀）"""

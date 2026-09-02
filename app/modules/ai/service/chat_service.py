@@ -57,11 +57,13 @@ class ChatService:
         *,
         conversation_id: int,
         trace_id: str,
+        tenant: TenantContext,
     ) -> None:
         """同一 conversation 内 message/operation 已占用的 run key 不得复用。"""
         message_id = await db.scalar(
             select(AiMessage.message_id)
             .where(
+                AiMessage.tenant_id == tenant.tenant_id,
                 AiMessage.conversation_id == conversation_id,
                 AiMessage.trace_id == trace_id,
             )
@@ -70,6 +72,7 @@ class ChatService:
         operation_id = await db.scalar(
             select(AiOperationLog.log_id)
             .where(
+                AiOperationLog.tenant_id == tenant.tenant_id,
                 AiOperationLog.conversation_id == conversation_id,
                 AiOperationLog.trace_id == trace_id,
             )
@@ -90,7 +93,8 @@ class ChatService:
         parts: list[dict] | None = None,
         agent_code: str | None = None,
         trace_id: str | None = None,
-        tenant_id: int | None = None,
+        *,
+        tenant: TenantContext,
     ):
         """保存用户消息并透传 ``agent_code``。"""
         message = await conversation_service.save_message(
@@ -101,7 +105,7 @@ class ChatService:
             parts=parts,
             agent_code=agent_code,
             trace_id=trace_id,
-            tenant_id=tenant_id,
+            tenant=tenant,
         )
         await db.flush()
         return message
@@ -119,6 +123,8 @@ class ChatService:
         source_user_message_id: int | None = None,
         lineage: ProjectionLineage | None = None,
         projection_dependency_message_ids: list[int] | tuple[int, ...] = (),
+        *,
+        tenant: TenantContext,
     ):
         """保存 AI 响应消息
 
@@ -142,6 +148,7 @@ class ChatService:
             parent_message_id=source_user_message_id,
             lineage=lineage,
             projection_dependency_message_ids=projection_dependency_message_ids,
+            tenant=tenant,
         )
         await db.flush()
         return message
@@ -173,7 +180,7 @@ class ChatService:
         model = await model_authorization_service.resolve_model_instance(
             db,
             model_ref,
-            tenant_id=tenant.tenant_id,
+            tenant=tenant,
         )
         enabled_extra = await get_ai_config_str_list(
             db, "ai:enabled_tools", default=[], tenant=tenant
@@ -234,7 +241,15 @@ class ChatService:
         conv_agent_code: str | None = None
         conv: AiConversation | None = None
         if conversation_id:
-            conv = await db.get(AiConversation, int(conversation_id))
+            conv = (
+                await db.execute(
+                    select(AiConversation).where(
+                        AiConversation.tenant_id == tenant.tenant_id,
+                        AiConversation.conversation_id == int(conversation_id),
+                        AiConversation.user_id == user.user_id,
+                    )
+                )
+            ).scalar_one_or_none()
             if conv and conv.deleted_at is None:
                 conv_agent_code = conv.agent_code
             else:
@@ -295,7 +310,7 @@ class ChatService:
             data_scope=data_scope,
             agent=agent,
             trace_id=trace_id or f"tr_{uuid.uuid4().hex[:16]}",
-            tenant_id=tenant.tenant_id,
+            tenant=tenant,
             sticky_decision=decision,
             data_scope_hash=data_scope_hash,
         )
@@ -319,6 +334,8 @@ class ChatService:
         conversation_id: int | None,
         agent_code: str,
         trace_id: str,
+        *,
+        tenant: TenantContext,
     ) -> None:
         """将 trace_id 和 agent_code 写入 ai_conversation。
 
@@ -327,7 +344,14 @@ class ChatService:
         """
         if conversation_id is None:
             return
-        conv = await db.get(AiConversation, int(conversation_id))
+        conv = (
+            await db.execute(
+                select(AiConversation).where(
+                    AiConversation.tenant_id == tenant.tenant_id,
+                    AiConversation.conversation_id == int(conversation_id),
+                )
+            )
+        ).scalar_one_or_none()
         if conv is None or conv.deleted_at is not None:
             return
         conv.trace_id = trace_id

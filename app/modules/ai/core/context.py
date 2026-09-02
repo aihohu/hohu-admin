@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import ColumnElement, Select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.tenant import TenantContext, get_bound_tenant_context
+from app.core.tenant import TenantContext
 from app.modules.ai.agents.hitl.events import AiStreamEvent
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.system.models.user import User
@@ -46,14 +46,18 @@ class DataScopeContext:
         其它模型 stats tool 在函数内自行调 get_data_scope_filters(db, user, OtherModel)。
     """
 
-    tenant_id: int
-    """Tenant frozen by the shared System data-scope resolver."""
+    tenant: TenantContext
+    """Same immutable tenant authority used by auth and the Tool Gateway."""
 
     accessible_dept_ids: set[int] | None
     accessible_user_scope: Select[tuple[int]] | None
     filters: list[ColumnElement[bool]] = field(default_factory=list)
     scope_kinds: frozenset[str] = field(default_factory=frozenset)
     """Exact enabled-role scope kinds supplied by the shared resolver."""
+
+    @property
+    def tenant_id(self) -> int:
+        return self.tenant.tenant_id
 
 
 @dataclass
@@ -77,8 +81,8 @@ class ChatDeps:
     trace_id: str
     """必填非空，build_tool_context 时断言校验，防 "" 漏到 DB 索引"""
 
-    tenant_id: int = 0
-    """服务端 tenant resolver 注入的可信租户；禁止从 Chat body/tool args 读取。"""
+    tenant: TenantContext
+    """服务端 auth dependency 注入的可信租户；禁止从请求或 tool args 读取。"""
 
     conversation_id: int | None = None
     """当前会话 ID，用于关联会话和工具操作日志。
@@ -130,15 +134,17 @@ class ChatDeps:
     projection_dependency_message_ids: tuple[int, ...] = ()
     """Immutable prior assistant projections that may influence this run."""
 
-    @property
-    def tenant(self) -> TenantContext:
-        """Return the immutable auth-bound tenant and reject context drift."""
-        tenant = get_bound_tenant_context(self.user)
-        if tenant.tenant_id != self.tenant_id:
+    def __post_init__(self) -> None:
+        if self.tenant.actor_user_id != self.user.user_id:
             raise RuntimeError(
                 "AI chat tenant context does not match authenticated user"
             )
-        return tenant
+        if self.data_scope.tenant is not self.tenant:
+            raise RuntimeError("AI chat and data-scope tenant contexts differ")
+
+    @property
+    def tenant_id(self) -> int:
+        return self.tenant.tenant_id
 
 
 @dataclass
@@ -159,8 +165,8 @@ class AiToolContext:
     tool_meta: AiToolMeta
     """工具运行时元数据，例如聚合分组上限和过滤白名单。"""
 
-    tenant_id: int = 0
-    """继承自 ChatDeps 的可信租户，用于 file/resource ACL。"""
+    tenant: TenantContext
+    """与 ChatDeps/DataScopeContext 复用同一可信 TenantContext 实例。"""
 
     data_scope_hash: str | None = None
     """Canonical resolver state used by scope-bound result projections."""
@@ -174,15 +180,17 @@ class AiToolContext:
     approved_business_snapshot: dict[str, Any] | None = None
     """Server-owned business snapshot attached only to an approved action."""
 
-    @property
-    def tenant(self) -> TenantContext:
-        """Return the immutable auth-bound tenant and reject context drift."""
-        tenant = get_bound_tenant_context(self.user)
-        if tenant.tenant_id != self.tenant_id:
+    def __post_init__(self) -> None:
+        if self.tenant.actor_user_id != self.user.user_id:
             raise RuntimeError(
                 "AI tool tenant context does not match authenticated user"
             )
-        return tenant
+        if self.data_scope.tenant is not self.tenant:
+            raise RuntimeError("AI tool and data-scope tenant contexts differ")
+
+    @property
+    def tenant_id(self) -> int:
+        return self.tenant.tenant_id
 
 
 def build_tool_context(
@@ -209,7 +217,7 @@ def build_tool_context(
         data_scope=deps.data_scope,
         trace_id=deps.trace_id,
         tool_meta=tool_meta,
-        tenant_id=deps.tenant_id,
+        tenant=deps.tenant,
         data_scope_hash=deps.data_scope_hash,
         projection_dependency_message_ids=(deps.projection_dependency_message_ids),
         secrets={},

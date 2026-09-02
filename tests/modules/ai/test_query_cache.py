@@ -15,6 +15,7 @@ import asyncio
 
 import pytest
 import redis.asyncio as aioredis
+from tenant_helpers import tenant_context
 
 from app.core import redis as redis_module
 from app.core.config import settings
@@ -29,13 +30,19 @@ from app.modules.ai.agents.hitl.query_cache import (
     set_query_cache as _set_query_cache,
 )
 
+TENANT = tenant_context()
+
+
+def _cache_key(trace_id: str) -> str:
+    return f"{AI_QUERY_CACHE_PREFIX}:tenant:0:{trace_id}"
+
 
 async def set_query_cache(redis, **kwargs) -> None:
     """Write a complete P1-D cache entry for helper-level tests."""
     await _set_query_cache(
         redis,
         **kwargs,
-        tenant_id=0,
+        tenant=TENANT,
         agent_code="user_mgmt",
         projection=ResultProjection(),
         data_scope_hash=None,
@@ -82,7 +89,7 @@ class TestSetGet:
             user_id=100,
         )
 
-        entry = await get_query_cache(redis_module.redis_client, "tr_1")
+        entry = await get_query_cache(redis_module.redis_client, "tr_1", tenant=TENANT)
         assert entry is not None
         assert entry.tool_name == "user.list"
         assert entry.module == "system/user"
@@ -104,10 +111,15 @@ class TestSetGet:
             '{"tool_name":"user.list","user_id":100}',
         )
 
-        assert await get_query_cache(redis_module.redis_client, "tr_legacy") is None
+        assert (
+            await get_query_cache(redis_module.redis_client, "tr_legacy", tenant=TENANT)
+            is None
+        )
 
     async def test_get_not_found(self) -> None:
-        entry = await get_query_cache(redis_module.redis_client, "tr_nonexistent")
+        entry = await get_query_cache(
+            redis_module.redis_client, "tr_nonexistent", tenant=TENANT
+        )
         assert entry is None
 
     async def test_get_with_tool_name(self) -> None:
@@ -122,19 +134,59 @@ class TestSetGet:
         )
 
         entry = await get_query_cache(
-            redis_module.redis_client, "tr_2", tool_name="user.stats"
+            redis_module.redis_client,
+            "tr_2",
+            tenant=TENANT,
+            tool_name="user.stats",
         )
         assert entry is not None
         assert entry.tool_name == "user.stats"
 
         # 不存在的 field
         entry = await get_query_cache(
-            redis_module.redis_client, "tr_2", tool_name="user.list"
+            redis_module.redis_client,
+            "tr_2",
+            tenant=TENANT,
+            tool_name="user.list",
         )
         assert entry is None
 
 
 class TestMultipleTools:
+    async def test_concurrent_writes_publish_one_atomic_latest_marker(self) -> None:
+        """Entry, latest pointer, and TTL must commit as one Redis operation."""
+        await asyncio.gather(
+            set_query_cache(
+                redis_module.redis_client,
+                trace_id="tr_concurrent",
+                tool_name="user.list",
+                module="system/user",
+                filters={"kind": "list"},
+                user_id=300,
+            ),
+            set_query_cache(
+                redis_module.redis_client,
+                trace_id="tr_concurrent",
+                tool_name="user.stats",
+                module="system/user",
+                filters={"kind": "stats"},
+                user_id=300,
+            ),
+        )
+
+        marker = await redis_module.redis_client.hget(
+            _cache_key("tr_concurrent"), "__latest_tool__"
+        )
+        entry = await get_query_cache(
+            redis_module.redis_client, "tr_concurrent", tenant=TENANT
+        )
+        ttl = await redis_module.redis_client.ttl(_cache_key("tr_concurrent"))
+
+        assert marker in {"user.list", "user.stats"}
+        assert entry is not None
+        assert entry.tool_name == marker
+        assert ttl > 0
+
     async def test_latest_wins(self) -> None:
         """同 trace_id 多 tool，取 created_at 最新"""
         # 故意按时间顺序写两个
@@ -156,7 +208,7 @@ class TestMultipleTools:
             user_id=300,
         )
 
-        entry = await get_query_cache(redis_module.redis_client, "tr_3")
+        entry = await get_query_cache(redis_module.redis_client, "tr_3", tenant=TENANT)
         # user.stats 后写，应返回它
         assert entry is not None
         assert entry.tool_name == "user.stats"
@@ -183,7 +235,10 @@ class TestMultipleTools:
 
         # 显式取较早的 user.list
         entry = await get_query_cache(
-            redis_module.redis_client, "tr_4", tool_name="user.list"
+            redis_module.redis_client,
+            "tr_4",
+            tenant=TENANT,
+            tool_name="user.list",
         )
         assert entry is not None
         assert entry.tool_name == "user.list"
@@ -203,8 +258,8 @@ class TestTtl:
             user_id=500,
         )
         # 直接模拟过期：删除 key
-        await redis_module.redis_client.delete(f"{AI_QUERY_CACHE_PREFIX}:tr_5")
-        entry = await get_query_cache(redis_module.redis_client, "tr_5")
+        await redis_module.redis_client.delete(_cache_key("tr_5"))
+        entry = await get_query_cache(redis_module.redis_client, "tr_5", tenant=TENANT)
         assert entry is None
 
     async def test_ttl_value_is_300(self) -> None:
@@ -217,7 +272,7 @@ class TestTtl:
             filters={},
             user_id=600,
         )
-        ttl = await redis_module.redis_client.ttl(f"{AI_QUERY_CACHE_PREFIX}:tr_6")
+        ttl = await redis_module.redis_client.ttl(_cache_key("tr_6"))
         # 容忍 5s 抖动
         assert AI_QUERY_CACHE_TTL_SEC - 5 <= ttl <= AI_QUERY_CACHE_TTL_SEC
 
@@ -240,9 +295,9 @@ class TestDelete:
             filters={},
             user_id=700,
         )
-        await delete_query_cache(redis_module.redis_client, "tr_7")
+        await delete_query_cache(redis_module.redis_client, "tr_7", tenant=TENANT)
 
-        entry = await get_query_cache(redis_module.redis_client, "tr_7")
+        entry = await get_query_cache(redis_module.redis_client, "tr_7", tenant=TENANT)
         assert entry is None
 
 
@@ -259,9 +314,7 @@ class TestHsetResetsTtl:
         )
         # 等几秒让 TTL 减少
         await asyncio.sleep(3)
-        ttl_before = await redis_module.redis_client.ttl(
-            f"{AI_QUERY_CACHE_PREFIX}:tr_8"
-        )
+        ttl_before = await redis_module.redis_client.ttl(_cache_key("tr_8"))
         assert ttl_before < AI_QUERY_CACHE_TTL_SEC  # 已减少
 
         # 第二次写入应重置 TTL
@@ -273,5 +326,5 @@ class TestHsetResetsTtl:
             filters={},
             user_id=800,
         )
-        ttl_after = await redis_module.redis_client.ttl(f"{AI_QUERY_CACHE_PREFIX}:tr_8")
+        ttl_after = await redis_module.redis_client.ttl(_cache_key("tr_8"))
         assert ttl_after > ttl_before  # 重置后变大

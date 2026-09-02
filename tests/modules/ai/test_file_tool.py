@@ -41,14 +41,15 @@ def _make_ctx(db: AsyncSession, *, meta: AiToolMeta | None = None) -> AiToolCont
         reg = ToolRegistry.get().find("file.parse")
         assert reg is not None, "file.parse 未注册，先调 load_builtin_tools()"
         meta = reg.meta
+    tenant = tenant_context(actor_user_id=1)
     data_scope = DataScopeContext(
-        tenant_id=0,
+        tenant=tenant,
         accessible_dept_ids=None,
         accessible_user_scope=None,
         filters=[],
     )
     user = MagicMock(user_id=1, tenant_id=0)
-    user._tenant_context = tenant_context(actor_user_id=1)
+    user._tenant_context = tenant
     return AiToolContext(
         user=user,
         perms=set(),
@@ -56,7 +57,7 @@ def _make_ctx(db: AsyncSession, *, meta: AiToolMeta | None = None) -> AiToolCont
         data_scope=data_scope,
         trace_id="tr_test_file",
         tool_meta=meta,
-        tenant_id=0,
+        tenant=tenant,
     )
 
 

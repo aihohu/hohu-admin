@@ -18,6 +18,7 @@ import httpx
 import pytest
 
 from app.core.exceptions import BusinessRuleException
+from app.core.tenant import TenantContext
 from app.modules.ai.agents.supervisor import router as router_mod
 from app.modules.ai.agents.supervisor.router import (
     AgentRouter,
@@ -26,6 +27,8 @@ from app.modules.ai.agents.supervisor.router import (
     parse_agent_code_robustly,
 )
 from app.modules.ai.core.provider_egress import ProviderTransportError
+
+TENANT = TenantContext(0, "default", 1, 1, "access_token")
 
 
 def _make_agent(code: str, name: str = "", description: str = ""):
@@ -121,7 +124,7 @@ async def test_route_llm_resolved(db_session):
         AsyncMock(return_value='{"agent_code": "user_mgmt"}'),
     ):
         result = await router.route(
-            db_session, "重置密码", candidates, model=fake_model
+            db_session, "重置密码", candidates, model=fake_model, tenant=TENANT
         )
 
     assert isinstance(result, RouteResult)
@@ -141,7 +144,9 @@ async def test_route_no_provider_falls_back_to_clarification(db_session):
         "app.modules.ai.agents.supervisor.router.model_authorization_service.resolve_model_instance",
         AsyncMock(side_effect=Exception("AI_MODEL_NOT_CONFIGURED")),
     ):
-        result = await router.route(db_session, "重置密码", candidates, model=None)
+        result = await router.route(
+            db_session, "重置密码", candidates, model=None, tenant=TENANT
+        )
 
     assert result.clarification is True
     assert result.reason == "no_provider"
@@ -163,7 +168,9 @@ async def test_route_propagates_model_authorization_failure(db_session):
         AsyncMock(side_effect=denied),
     ):
         with pytest.raises(BusinessRuleException) as exc_info:
-            await router.route(db_session, "重置密码", candidates, model=None)
+            await router.route(
+                db_session, "重置密码", candidates, model=None, tenant=TENANT
+            )
 
     assert exc_info.value.error_code == "AI_MODEL_NOT_AVAILABLE"
 
@@ -180,7 +187,7 @@ async def test_route_llm_call_failed_falls_back_to_clarification(db_session):
         AsyncMock(side_effect=Exception("network error")),
     ):
         result = await router.route(
-            db_session, "重置密码", candidates, model=fake_model
+            db_session, "重置密码", candidates, model=fake_model, tenant=TENANT
         )
 
     assert result.clarification is True
@@ -202,6 +209,7 @@ async def test_route_propagates_sanitized_provider_transport_failure(db_session)
                 "list users",
                 candidates,
                 model=object(),
+                tenant=TENANT,
             )
 
     assert exc_info.value.code == 502
@@ -220,7 +228,7 @@ async def test_route_llm_unparsable_falls_back_to_clarification(db_session):
         AsyncMock(return_value="I think user_mgmt"),
     ):
         result = await router.route(
-            db_session, "重置密码", candidates, model=fake_model
+            db_session, "重置密码", candidates, model=fake_model, tenant=TENANT
         )
 
     assert result.clarification is True
@@ -231,7 +239,7 @@ async def test_route_llm_unparsable_falls_back_to_clarification(db_session):
 async def test_route_no_candidates_returns_failed(db_session):
     """候选集为空时返回 failed 和 no_candidates。"""
     router = AgentRouter()
-    result = await router.route(db_session, "any", [], model=None)
+    result = await router.route(db_session, "any", [], model=None, tenant=TENANT)
 
     assert result.failed is True
     assert result.reason == "no_candidates"
@@ -251,7 +259,7 @@ async def test_route_shared_selected_when_no_match(db_session):
         AsyncMock(return_value='{"agent_code": "shared"}'),
     ):
         result = await router.route(
-            db_session, "解析文件", candidates, model=AsyncMock()
+            db_session, "解析文件", candidates, model=AsyncMock(), tenant=TENANT
         )
 
     assert result.agent_code == "shared"

@@ -39,6 +39,7 @@ async def download_ai_user_export(
     lineage = result_projection_service.read_download_token(
         token,
         current_user,
+        tenant=tenant,
         resource_type="user_export",
         resource_id=export_id,
     )

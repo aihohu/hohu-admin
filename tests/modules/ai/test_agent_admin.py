@@ -5,10 +5,25 @@
 import pytest
 from httpx import AsyncClient
 
-from app.constants import STATUS_ENABLED, SUPER_ADMIN_ROLE_CODE
-from app.core.exceptions import AuthorizationException, BusinessRuleException
+from app.core.exceptions import BusinessRuleException
+from app.core.tenant import PlatformContext
+from app.main import app
 from app.modules.ai.schemas.agent_admin import AgentAdminUpdateReq
 from app.modules.ai.service.agent_admin import agent_admin_service
+from app.modules.auth.service import require_platform_context
+
+PLATFORM = PlatformContext(
+    actor_user_id=1,
+    reason="test AI platform management",
+    correlation_id="test-agent-admin",
+)
+
+
+@pytest.fixture(autouse=True)
+def platform_dependency_override():
+    app.dependency_overrides[require_platform_context] = lambda: PLATFORM
+    yield
+    app.dependency_overrides.pop(require_platform_context, None)
 
 
 @pytest.fixture
@@ -132,28 +147,7 @@ async def _get_agent_id_by_code(client: AsyncClient, code: str) -> str:
     return row["agentId"]
 
 
-def _admin_principal(*, super_role: bool, edit_permission: bool):
-    from types import SimpleNamespace
-
-    menus = [SimpleNamespace(permission="ai:agent:edit")] if edit_permission else []
-    role = SimpleNamespace(
-        role_code=SUPER_ADMIN_ROLE_CODE if super_role else "R_AGENT_EDITOR",
-        status=STATUS_ENABLED,
-        menus=menus,
-    )
-    return SimpleNamespace(user_name="p1b_agent_admin", roles=[role])
-
-
-@pytest.mark.parametrize(
-    ("super_role", "edit_permission"),
-    [(False, True), (True, False)],
-)
-async def test_update_requires_enabled_super_role_and_explicit_edit_permission(
-    db_session,
-    seed_agents,
-    super_role: bool,
-    edit_permission: bool,
-) -> None:
+async def test_update_requires_platform_context(db_session, seed_agents) -> None:
     from sqlalchemy import select
 
     from app.modules.ai.models.agent import AiAgent
@@ -161,18 +155,13 @@ async def test_update_requires_enabled_super_role_and_explicit_edit_permission(
     agent = await db_session.scalar(select(AiAgent).where(AiAgent.code == "shared"))
     assert agent is not None
 
-    with pytest.raises(AuthorizationException) as exc_info:
+    with pytest.raises(TypeError, match="platform context is required"):
         await agent_admin_service.update_agent(
             db_session,
             agent.agent_id,
             AgentAdminUpdateReq(name="Blocked"),
-            current_user=_admin_principal(
-                super_role=super_role,
-                edit_permission=edit_permission,
-            ),
+            platform=object(),  # type: ignore[arg-type]
         )
-
-    assert exc_info.value.error_code == "AI_AGENT_ADMIN_REQUIRED"
 
 
 async def test_update_rejects_immutable_identity_field(
@@ -192,10 +181,22 @@ async def test_update_rejects_immutable_identity_field(
             db_session,
             agent.agent_id,
             req,
-            current_user=_admin_principal(super_role=True, edit_permission=True),
+            platform=PLATFORM,
         )
 
     assert exc_info.value.error_code == "AI_AGENT_IMMUTABLE_FIELD"
+
+
+async def test_tenant_super_admin_cannot_call_platform_agent_api(
+    authed_client: tuple[AsyncClient, str],
+) -> None:
+    client, _ = authed_client
+    app.dependency_overrides.pop(require_platform_context, None)
+
+    response = await client.get("/ai/admin/agents")
+
+    assert response.status_code == 403
+    assert response.json()["errorCode"] == "PLATFORM_ADMIN_REQUIRED"
 
 
 async def test_list_returns_all_agents_without_query_params(

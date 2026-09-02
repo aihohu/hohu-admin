@@ -13,6 +13,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AuthorizationException
+from app.core.tenant import TenantContext
+from app.modules.marketplace.capability import require_marketplace_capability
 from app.modules.marketplace.exceptions import AppInvalidManifestException
 from app.modules.marketplace.models import App, AppVersion
 from app.modules.marketplace.service.app_service import app_service
@@ -37,6 +39,7 @@ class DeveloperService:
         filename: str,
         user_id: int,
         username: str,
+        tenant: TenantContext,
     ) -> tuple[AppVersion, int]:
         """提交新版本：manifest 校验 → 上传 → app upsert → version create → permission sync → review create
 
@@ -44,6 +47,7 @@ class DeveloperService:
             AppInvalidManifestException: manifest JSON 解析失败或校验不通过
             AuthorizationException: 上传到他人应用
         """
+        require_marketplace_capability(tenant)
         # 1. 解析 manifest
         try:
             manifest = json.loads(manifest_json)
@@ -59,10 +63,16 @@ class DeveloperService:
             filename=filename,
             slug=manifest["slug"],
             version=manifest["version"],
+            tenant=tenant,
         )
 
         # 4. 查或建 app 记录
-        existing = await db.execute(select(App).where(App.slug == manifest["slug"]))
+        existing = await db.execute(
+            select(App).where(
+                App.tenant_id == tenant.tenant_id,
+                App.slug == manifest["slug"],
+            )
+        )
         app = existing.scalar_one_or_none()
         if app is None:
             # 首次上传：新建 app
@@ -78,6 +88,7 @@ class DeveloperService:
                 homepage=manifest.get("homepage"),
                 license=manifest.get("license"),
                 status="reviewing",
+                tenant=tenant,
             )
         else:
             # 已有 app：检查权限（必须是 owner）
@@ -98,13 +109,17 @@ class DeveloperService:
             file_hash=upload_result["file_hash"],
             file_size=upload_result["file_size"],
             changelog=manifest.get("marketplace", {}).get("changelog"),
+            tenant=tenant,
         )
 
         # 7. 同步权限声明
         permissions = manifest.get("permissions", [])
         if permissions:
             await permission_service.bulk_insert(
-                db, app_id=app.id, permissions=permissions
+                db,
+                app_id=app.id,
+                permissions=permissions,
+                tenant=tenant,
             )
 
         # 8. 创建 review 记录（pending）
@@ -116,6 +131,7 @@ class DeveloperService:
                 "manifest_valid": True,
                 "file_size": upload_result["file_size"],
             },
+            tenant=tenant,
         )
 
         return version, review.id

@@ -1,7 +1,7 @@
 """连续失败兜底。
 
 Redis 跨 /ai/chat 流持久化失败计数：
-  - key: ai:failures:{user_id}:{tool_name}:{args_hash}
+  - key: ai:tenant:{tenant_id}:failures:{user_id}:{tool_name}:{args_hash}
   - TTL: 600s（10min）
   - 同 (tool, args_hash) 连续失败 2 次 → 第 3 次直接抛 AI_REPEATED_FAILURE
 
@@ -31,6 +31,7 @@ from typing import Any
 from redis.asyncio import Redis
 
 from app.core.exceptions import BusinessRuleException
+from app.core.tenant import TenantContext
 
 logger = logging.getLogger(__name__)
 
@@ -42,16 +43,14 @@ _CFG_THRESHOLD = "ai:failures:threshold"
 _CFG_TTL = "ai:failures:ttl_sec"
 
 
-async def _resolve_threshold() -> int:
+async def _resolve_threshold(tenant: TenantContext) -> int:
     from app.db.session import AsyncSessionLocal  # noqa: PLC0415
     from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
         get_ai_config_int,
     )
-    from app.modules.auth.service import get_public_tenant_context  # noqa: PLC0415
 
     try:
         async with AsyncSessionLocal() as db:
-            tenant = await get_public_tenant_context(db)
             return await get_ai_config_int(
                 db, _CFG_THRESHOLD, FAILURE_THRESHOLD, tenant=tenant
             )
@@ -59,23 +58,21 @@ async def _resolve_threshold() -> int:
         return FAILURE_THRESHOLD
 
 
-async def _resolve_ttl() -> int:
+async def _resolve_ttl(tenant: TenantContext) -> int:
     from app.db.session import AsyncSessionLocal  # noqa: PLC0415
     from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
         get_ai_config_int,
     )
-    from app.modules.auth.service import get_public_tenant_context  # noqa: PLC0415
 
     try:
         async with AsyncSessionLocal() as db:
-            tenant = await get_public_tenant_context(db)
             return await get_ai_config_int(db, _CFG_TTL, FAILURE_TTL_SEC, tenant=tenant)
     except Exception:
         return FAILURE_TTL_SEC
 
 
 # 连续失败计数的 Redis key 前缀。
-_KEY = "ai:failures:{user_id}:{tool_name}:{args_hash}"
+_KEY = "ai:tenant:{tenant_id}:failures:{user_id}:{tool_name}:{args_hash}"
 
 
 def _type_aware_default(o: Any) -> str:
@@ -106,17 +103,24 @@ async def check_repeated_failure(
     user_id: int,
     tool_name: str,
     args_hash: str,
+    *,
+    tenant: TenantContext,
 ) -> None:
     """检查是否触发 ``AI_REPEATED_FAILURE``。
 
     在 execute_tool 入口处调用：若 Redis 已记录失败 >= FAILURE_THRESHOLD，
     抛 BusinessRuleException(AI_REPEATED_FAILURE)，Gateway 转 ToolResult 给 LLM
     """
-    key = _KEY.format(user_id=user_id, tool_name=tool_name, args_hash=args_hash)
+    key = _KEY.format(
+        tenant_id=tenant.tenant_id,
+        user_id=user_id,
+        tool_name=tool_name,
+        args_hash=args_hash,
+    )
     failures_str = await redis.get(key)
     failures = int(failures_str or 0)
 
-    threshold = await _resolve_threshold()
+    threshold = await _resolve_threshold(tenant)
     if failures >= threshold:
         logger.info(
             "repeated failure threshold hit",
@@ -138,18 +142,26 @@ async def record_failure(
     user_id: int,
     tool_name: str,
     args_hash: str,
+    *,
+    tenant: TenantContext,
 ) -> None:
     """记录一次失败（INCR + 条件 EXPIRE，修订 S-12）
 
     仅在 INCR 返回 1（第一次失败）时设 EXPIRE，避免每次失败都重置 TTL
     导致缓慢累积的失败永不过期（用户被永久锁死该 (tool, args) 对）。
     """
-    key = _KEY.format(user_id=user_id, tool_name=tool_name, args_hash=args_hash)
-    failures = await redis.incr(key)
-    if failures == 1:
-        # 仅第一次失败设 TTL，后续失败沿用原 TTL 倒计时
-        ttl = await _resolve_ttl()
-        await redis.expire(key, ttl)
+    key = _KEY.format(
+        tenant_id=tenant.tenant_id,
+        user_id=user_id,
+        tool_name=tool_name,
+        args_hash=args_hash,
+    )
+    ttl = await _resolve_ttl(tenant)
+    pipe = redis.pipeline(transaction=True)
+    pipe.incr(key)
+    pipe.expire(key, ttl, nx=True)
+    failures, _ = await pipe.execute()
+    failures = int(failures)
     logger.debug(
         "failure recorded",
         extra={
@@ -166,7 +178,14 @@ async def clear_failures(
     user_id: int,
     tool_name: str,
     args_hash: str,
+    *,
+    tenant: TenantContext,
 ) -> None:
     """成功后清零对应参数的失败计数。"""
-    key = _KEY.format(user_id=user_id, tool_name=tool_name, args_hash=args_hash)
+    key = _KEY.format(
+        tenant_id=tenant.tenant_id,
+        user_id=user_id,
+        tool_name=tool_name,
+        args_hash=args_hash,
+    )
     await redis.delete(key)

@@ -29,6 +29,7 @@ from app.core.security import create_access_token, create_refresh_token, verify_
 from app.core.tenant import (
     DEFAULT_TENANT_CODE,
     DEFAULT_TENANT_ID,
+    PlatformContext,
     TenantContext,
     TenantLocatorContext,
     bind_tenant_context,
@@ -443,6 +444,16 @@ async def get_current_tenant_context(
 ) -> TenantContext:
     """Canonical HTTP dependency for tenant-owned service calls."""
     return get_bound_tenant_context(current_user)
+
+
+async def require_platform_context(
+    _current_user: User = Depends(get_current_user),
+) -> PlatformContext:
+    """Reject tenant principals until Plan 5 provides a platform authenticator."""
+    raise AuthorizationException(
+        "当前身份不是平台管理员",
+        error_code="PLATFORM_ADMIN_REQUIRED",
+    )
 
 
 async def get_public_tenant_context(

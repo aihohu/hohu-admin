@@ -8,6 +8,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -29,8 +30,14 @@ class AiOperationLog(Base):
 
     __tablename__ = "ai_operation_log"
     __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "tool_call_id",
+            name="uq_ai_operation_log_tenant_tool_call_id",
+        ),
         Index(
-            "ix_ai_operation_source_status",
+            "ix_ai_operation_tenant_source_status",
+            "tenant_id",
             "conversation_id",
             "source_user_message_id",
             "status",
@@ -42,6 +49,15 @@ class AiOperationLog(Base):
             "queued_at",
             "log_id",
         ),
+        Index("idx_ai_op_log_conversation", "conversation_id"),
+        Index("idx_ai_op_log_user_queued", "user_id", "queued_at"),
+        Index("idx_ai_op_log_trace", "trace_id", "queued_at"),
+        Index(
+            "idx_ai_op_log_security",
+            "queued_at",
+            postgresql_where=text("is_security_event = true"),
+        ),
+        {"comment": "AI 操作日志 + 安全事件（合并表）"},
     )
 
     log_id: Mapped[int] = mapped_column(
@@ -81,7 +97,7 @@ class AiOperationLog(Base):
     user_id: Mapped[int] = mapped_column(BigInteger, comment="调用用户ID")
     tool_name: Mapped[str] = mapped_column(String(128), comment="tool 全限定名")
     tool_call_id: Mapped[str] = mapped_column(
-        String(64), unique=True, comment="单次工具调用 ID，供兜底轮询使用"
+        String(64), comment="单次工具调用 ID，供兜底轮询使用"
     )
     args_hash: Mapped[str] = mapped_column(
         String(64), comment="SHA256 完整 64 字符，不截断"

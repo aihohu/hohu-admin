@@ -14,9 +14,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DuplicateException, NotFoundException
+from app.core.tenant import TenantContext
+from app.modules.marketplace.capability import require_marketplace_capability
 from app.modules.marketplace.exceptions import AppErrorCode
 from app.modules.marketplace.models import App, AppRating
 from app.modules.marketplace.schemas.rating import RatingCreate
+from app.modules.marketplace.service.app_service import app_service
 
 
 class RatingService:
@@ -27,7 +30,12 @@ class RatingService:
     """
 
     async def create(
-        self, db: AsyncSession, req: RatingCreate, *, user_id: int
+        self,
+        db: AsyncSession,
+        req: RatingCreate,
+        *,
+        user_id: int,
+        tenant: TenantContext,
     ) -> AppRating:
         """创建评分（一人一评，重复抛 DuplicateException）。
 
@@ -39,7 +47,9 @@ class RatingService:
         Raises:
             DuplicateException: 该用户已对当前应用评过分
         """
+        require_marketplace_capability(tenant)
         app_id = int(req.app_id)
+        await app_service.get_by_id(db, app_id=app_id, tenant=tenant)
         # 预检（friendly fast-path，并发兜底靠 DB UNIQUE）
         existing = await db.execute(
             select(AppRating).where(
@@ -72,7 +82,7 @@ class RatingService:
                     error_code=AppErrorCode.RATING_DUPLICATE,
                 ) from e
             raise
-        await self._recompute_app_rating(db, app_id=app_id)
+        await self._recompute_app_rating(db, app_id=app_id, tenant=tenant)
         return rating
 
     async def update(
@@ -83,38 +93,66 @@ class RatingService:
         user_id: int,
         rating: int,
         comment: str | None = None,
+        tenant: TenantContext,
     ) -> AppRating:
         """更新评分（评分值必传，comment 可选）。
 
         Raises:
             NotFoundException: 该用户未对当前应用评分
         """
-        record = await self._get_user_rating(db, app_id=app_id, user_id=user_id)
+        require_marketplace_capability(tenant)
+        record = await self._get_user_rating(
+            db,
+            app_id=app_id,
+            user_id=user_id,
+            tenant=tenant,
+        )
         record.rating = rating
         if comment is not None:
             record.comment = comment
         await db.flush()
-        await self._recompute_app_rating(db, app_id=app_id)
+        await self._recompute_app_rating(db, app_id=app_id, tenant=tenant)
         return record
 
-    async def delete(self, db: AsyncSession, *, app_id: int, user_id: int) -> None:
+    async def delete(
+        self,
+        db: AsyncSession,
+        *,
+        app_id: int,
+        user_id: int,
+        tenant: TenantContext,
+    ) -> None:
         """删除评分。
 
         Raises:
             NotFoundException: 该用户未对当前应用评分
         """
-        record = await self._get_user_rating(db, app_id=app_id, user_id=user_id)
+        require_marketplace_capability(tenant)
+        record = await self._get_user_rating(
+            db,
+            app_id=app_id,
+            user_id=user_id,
+            tenant=tenant,
+        )
         await db.delete(record)
         await db.flush()
-        await self._recompute_app_rating(db, app_id=app_id)
+        await self._recompute_app_rating(db, app_id=app_id, tenant=tenant)
 
     async def _get_user_rating(
-        self, db: AsyncSession, *, app_id: int, user_id: int
+        self,
+        db: AsyncSession,
+        *,
+        app_id: int,
+        user_id: int,
+        tenant: TenantContext,
     ) -> AppRating:
         result = await db.execute(
-            select(AppRating).where(
+            select(AppRating)
+            .join(App, App.id == AppRating.app_id)
+            .where(
                 AppRating.app_id == app_id,
                 AppRating.user_id == user_id,
+                App.tenant_id == tenant.tenant_id,
             )
         )
         record = result.scalar_one_or_none()
@@ -125,7 +163,13 @@ class RatingService:
             )
         return record
 
-    async def _recompute_app_rating(self, db: AsyncSession, *, app_id: int) -> None:
+    async def _recompute_app_rating(
+        self,
+        db: AsyncSession,
+        *,
+        app_id: int,
+        tenant: TenantContext,
+    ) -> None:
         """重算 app.avg_rating / rating_count（spec 14.6 重算 SQL）
 
         使用 func.coalesce(avg, 0) 防止无评分时 avg 为 NULL；
@@ -135,16 +179,15 @@ class RatingService:
         然后 ORM 层 set rating_count/avg_rating 触发 UPDATE，
         保证内存对象与 DB 同步（Core update 会旁路 ORM 身份映射）。
         """
+        app = await app_service.get_by_id(db, app_id=app_id, tenant=tenant)
         stmt = select(
             func.count(AppRating.id),
             func.coalesce(func.avg(AppRating.rating), 0),
         ).where(AppRating.app_id == app_id)
         result = await db.execute(stmt)
         count, avg = result.one()
-        app = await db.get(App, app_id)
-        if app is not None:
-            app.rating_count = count
-            app.avg_rating = round(float(avg), 1)
+        app.rating_count = count
+        app.avg_rating = round(float(avg), 1)
 
 
 rating_service = RatingService()

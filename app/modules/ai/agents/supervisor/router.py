@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessException
+from app.core.tenant import TenantContext
 from app.modules.ai.core.provider_egress import (
     is_provider_failure,
     provider_upstream_error,
@@ -126,7 +127,7 @@ class AgentRouter:
         candidates: list["AiAgent"],
         *,
         model=None,
-        tenant_id: int = 0,
+        tenant: TenantContext,
     ) -> RouteResult:
         if not candidates:
             return RouteResult(failed=True, reason="no_candidates")
@@ -136,7 +137,7 @@ class AgentRouter:
                 model = await model_authorization_service.resolve_model_instance(
                     db,
                     None,
-                    tenant_id=tenant_id,
+                    tenant=tenant,
                 )
             except BusinessException:
                 raise

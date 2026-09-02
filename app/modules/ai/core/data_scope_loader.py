@@ -40,14 +40,15 @@ async def build_data_scope_context(
           - filters: User 模型的 data_scope filter（最常见 stats 目标）；
                      其它模型 stats tool 在函数内自行调 get_data_scope_filters
     """
+    tenant = get_bound_tenant_context(user)
     resolution = await resolve_data_scope(
         db,
         user,
-        tenant=get_bound_tenant_context(user),
+        tenant=tenant,
     )
 
     return DataScopeContext(
-        tenant_id=resolution.tenant_id,
+        tenant=tenant,
         accessible_dept_ids=(
             None
             if resolution.accessible_dept_ids is None

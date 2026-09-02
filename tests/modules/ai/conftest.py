@@ -267,6 +267,7 @@ async def seed_test_message(auth_token) -> int:
         s.add(
             AiConversation(
                 conversation_id=conv_id,
+                tenant_id=user.tenant_id,
                 user_id=user.user_id,
                 title="test",
                 agent_code=agent.code,
@@ -275,6 +276,7 @@ async def seed_test_message(auth_token) -> int:
         s.add(
             AiMessage(
                 message_id=msg_id,
+                tenant_id=user.tenant_id,
                 conversation_id=conv_id,
                 role="assistant",
                 message_type="text",
@@ -331,6 +333,7 @@ async def seed_test_message_other_user(auth_token) -> int:
 
             other = User(
                 user_id=next_id(),
+                tenant_id=0,
                 user_name=f"other_{next_id()}",
                 hashed_password=get_password_hash("x"),
                 status="1",
@@ -347,6 +350,7 @@ async def seed_test_message_other_user(auth_token) -> int:
         s.add(
             AiConversation(
                 conversation_id=conv_id,
+                tenant_id=other.tenant_id,
                 user_id=other.user_id,
                 title="other",
                 agent_code=agent.code,
@@ -355,6 +359,7 @@ async def seed_test_message_other_user(auth_token) -> int:
         s.add(
             AiMessage(
                 message_id=msg_id,
+                tenant_id=other.tenant_id,
                 conversation_id=conv_id,
                 role="assistant",
                 message_type="text",

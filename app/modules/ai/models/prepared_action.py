@@ -32,19 +32,25 @@ class AiPreparedAction(Base):
             name="ck_ai_prepared_action_status",
         ),
         UniqueConstraint(
-            "confirmation_id", name="uq_ai_prepared_action_confirmation_id"
+            "tenant_id",
+            "confirmation_id",
+            name="uq_ai_prepared_action_tenant_confirmation_id",
         ),
         UniqueConstraint(
-            "execute_tool_call_id", name="uq_ai_prepared_action_execute_tool_call_id"
+            "tenant_id",
+            "execute_tool_call_id",
+            name="uq_ai_prepared_action_tenant_execute_tool_call_id",
         ),
         Index(
-            "ix_ai_prepared_action_conversation_status_expires",
+            "ix_ai_prepared_action_tenant_conversation_status_expires",
+            "tenant_id",
             "conversation_id",
             "status",
             "expires_at",
         ),
         Index(
-            "ix_ai_prepared_action_source_status",
+            "ix_ai_prepared_action_tenant_source_status",
+            "tenant_id",
             "source_user_message_id",
             "status",
         ),

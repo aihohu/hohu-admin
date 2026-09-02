@@ -17,6 +17,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.redis import get_redis
+from app.core.tenant import TenantContext
+from app.modules.marketplace.capability import require_marketplace_capability
 from app.modules.marketplace.models import App, AppVersion, TenantApp
 
 CACHE_KEY_PATTERN = "contributes:tenant:{tenant_id}"
@@ -26,15 +28,20 @@ CACHE_TTL_SECONDS = 3600
 class ContributesService:
     """聚合租户所有 enabled 应用的 contributes，写入 Redis。"""
 
-    async def aggregate_for_tenant(self, db: AsyncSession, *, tenant_id: int) -> dict:
+    async def aggregate_for_tenant(
+        self, db: AsyncSession, *, tenant: TenantContext
+    ) -> dict:
         """聚合某租户的所有 enabled 应用的 contributes"""
+        require_marketplace_capability(tenant)
         stmt = (
             select(App, AppVersion)
             .join(TenantApp, TenantApp.app_id == App.id)
             .join(AppVersion, AppVersion.id == App.current_version_id)
             .where(
-                TenantApp.tenant_id == tenant_id,
+                TenantApp.tenant_id == tenant.tenant_id,
+                App.tenant_id == tenant.tenant_id,
                 TenantApp.status == "enabled",
+                AppVersion.app_id == App.id,
             )
             .order_by(TenantApp.installed_at)
         )
@@ -80,26 +87,28 @@ class ContributesService:
 
         return {"menus": menus, "pages": pages}
 
-    async def refresh_cache(self, db: AsyncSession, *, tenant_id: int) -> dict:
+    async def refresh_cache(self, db: AsyncSession, *, tenant: TenantContext) -> dict:
         """重新聚合并写 Redis 缓存"""
-        data = await self.aggregate_for_tenant(db, tenant_id=tenant_id)
+        data = await self.aggregate_for_tenant(db, tenant=tenant)
         redis = await get_redis()
         await redis.set(
-            CACHE_KEY_PATTERN.format(tenant_id=tenant_id),
+            CACHE_KEY_PATTERN.format(tenant_id=tenant.tenant_id),
             json.dumps(data, ensure_ascii=False),
             ex=CACHE_TTL_SECONDS,
         )
         return data
 
-    async def invalidate(self, *, tenant_id: int) -> None:
+    async def invalidate(self, *, tenant: TenantContext) -> None:
         """删除缓存"""
+        require_marketplace_capability(tenant)
         redis = await get_redis()
-        await redis.delete(CACHE_KEY_PATTERN.format(tenant_id=tenant_id))
+        await redis.delete(CACHE_KEY_PATTERN.format(tenant_id=tenant.tenant_id))
 
-    async def get_cached(self, *, tenant_id: int) -> dict | None:
+    async def get_cached(self, *, tenant: TenantContext) -> dict | None:
         """读缓存，不存在返回 None"""
+        require_marketplace_capability(tenant)
         redis = await get_redis()
-        cached = await redis.get(CACHE_KEY_PATTERN.format(tenant_id=tenant_id))
+        cached = await redis.get(CACHE_KEY_PATTERN.format(tenant_id=tenant.tenant_id))
         if cached is None:
             return None
         if isinstance(cached, bytes):

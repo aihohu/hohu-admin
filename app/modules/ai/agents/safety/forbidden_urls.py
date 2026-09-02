@@ -40,6 +40,7 @@ _CACHE_TTL_SEC = 60
 
 # 进程内缓存（模块级单例）
 _cache: dict[int, tuple[list[str], float]] = {}
+_cache_generation = 0
 
 # URL 提取 regex：
 # - group 1: https?:// 后的域名（含 port 可选）
@@ -68,6 +69,7 @@ async def load_forbidden_urls(
         if time.time() - fetched_at < _CACHE_TTL_SEC:
             return value
 
+    generation = _cache_generation
     raw = await config_service.get_value(db, CONFIG_KEY, tenant=tenant)
     parsed: list[str] = []
     if raw:
@@ -87,12 +89,16 @@ async def load_forbidden_urls(
                 extra={"error": str(e)},
             )
 
-    _cache[tenant.tenant_id] = (parsed, time.time())
+    if generation == _cache_generation:
+        _cache[tenant.tenant_id] = (parsed, time.time())
     return parsed
 
 
 def invalidate_forbidden_urls_cache() -> None:
     """显式清缓存（ConfigService.update 改 ai:guardrail:* 后调）"""
+    global _cache_generation
+
+    _cache_generation += 1
     _cache.clear()
 
 

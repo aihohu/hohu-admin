@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy.exc import OperationalError
+from tenant_helpers import tenant_context
 
 from app.modules.ai.agents.gateway.executor import (
     LogWriteError,
@@ -299,12 +300,13 @@ class TestStartLogFailureAbortsExecute:
         ):
             mock_get.return_value.find.return_value = registered
 
+            tenant = tenant_context(actor_user_id=100)
             deps = ChatDeps(
                 user=SimpleNamespace(user_id=100, user_name="alice"),
                 perms={"p"},
                 db=None,
                 data_scope=DataScopeContext(
-                    tenant_id=0,
+                    tenant=tenant,
                     accessible_dept_ids=None,
                     accessible_user_scope=None,
                 ),
@@ -314,6 +316,7 @@ class TestStartLogFailureAbortsExecute:
                     daily_quota_per_user=None,
                 ),
                 trace_id="tr_test_log_fail",
+                tenant=tenant,
                 conversation_id=1,
             )
 

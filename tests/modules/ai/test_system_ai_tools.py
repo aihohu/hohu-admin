@@ -79,16 +79,33 @@ def _make_ctx(
     tool_meta 用真实 AiToolMeta（含白名单），让 validate_filters_in_whitelist 等
     helper 能正常读取 allowed_filters / allowed_group_by / max_groups。
     """
+    actor = User(
+        tenant_id=0,
+        user_id=1,
+        user_name="system-ai-tool-actor",
+        nickname="System AI tool actor",
+        hashed_password="x",
+        status="1",
+    )
+    tenant = bind_test_user(actor)
     if data_scope is None:
         if visible_user_ids is not None:
             filters = [User.user_id.in_(visible_user_ids)]
         else:
             filters = []
         data_scope = DataScopeContext(
-            tenant_id=0,
+            tenant=tenant,
             accessible_dept_ids=None,
             accessible_user_scope=None,
             filters=filters,
+        )
+    else:
+        data_scope = DataScopeContext(
+            tenant=tenant,
+            accessible_dept_ids=data_scope.accessible_dept_ids,
+            accessible_user_scope=data_scope.accessible_user_scope,
+            filters=data_scope.filters,
+            scope_kinds=data_scope.scope_kinds,
         )
     meta = AiToolMeta(
         name="user.test",
@@ -101,15 +118,6 @@ def _make_ctx(
         allowed_group_by=("user_gender", "status"),
         max_groups=max_groups,
     )
-    actor = User(
-        tenant_id=0,
-        user_id=1,
-        user_name="system-ai-tool-actor",
-        nickname="System AI tool actor",
-        hashed_password="x",
-        status="1",
-    )
-    bind_test_user(actor)
     return AiToolContext(
         user=actor,
         perms={"system:user:list"},
@@ -117,6 +125,7 @@ def _make_ctx(
         data_scope=data_scope,
         trace_id="tr_test",
         tool_meta=meta,
+        tenant=tenant,
     )
 
 
@@ -331,7 +340,7 @@ class TestDataScopeFilter:
         from sqlalchemy import literal_column, select
 
         data_scope = DataScopeContext(
-            tenant_id=0,
+            tenant=tenant_context(actor_user_id=1),
             accessible_dept_ids={100},  # 不重要，本测试只验证 filters
             accessible_user_scope=select(literal_column("0").label("user_id")),
             filters=[User.user_id == 1001],
@@ -387,19 +396,20 @@ def _make_role_ctx(db: AsyncSession) -> AiToolContext:
         hashed_password="x",
         status="1",
     )
-    bind_test_user(actor)
+    tenant = bind_test_user(actor)
     return AiToolContext(
         user=actor,
         perms={"system:role:list"},
         db=db,
         data_scope=DataScopeContext(
-            tenant_id=0,
+            tenant=tenant,
             accessible_dept_ids=None,
             accessible_user_scope=None,
             filters=[],
         ),
         trace_id="tr_test",
         tool_meta=meta,
+        tenant=tenant,
     )
 
 
@@ -490,19 +500,20 @@ def _make_dept_ctx(db: AsyncSession) -> AiToolContext:
         hashed_password="x",
         status="1",
     )
-    bind_test_user(actor)
+    tenant = bind_test_user(actor)
     return AiToolContext(
         user=actor,
         perms={"system:dept:list"},
         db=db,
         data_scope=DataScopeContext(
-            tenant_id=0,
+            tenant=tenant,
             accessible_dept_ids=None,
             accessible_user_scope=None,
             filters=[],
         ),
         trace_id="tr_test",
         tool_meta=meta,
+        tenant=tenant,
     )
 
 
@@ -581,7 +592,7 @@ async def _make_role_list_ctx(db: AsyncSession) -> AiToolContext:
     tenant = tenant_context(tenant_id=0, actor_user_id=actor.user_id)
     await replace_role_menus(db, actor_role, [permission], tenant=tenant)
     await replace_user_roles(db, actor, [actor_role], tenant=tenant)
-    bind_test_user(actor)
+    tenant = bind_test_user(actor)
     meta = AiToolMeta(
         name="role.list",
         agent="role_mgmt",
@@ -597,10 +608,11 @@ async def _make_role_list_ctx(db: AsyncSession) -> AiToolContext:
         perms={"system:role:list"},
         db=db,
         data_scope=DataScopeContext(
-            tenant_id=0, accessible_dept_ids=None, accessible_user_scope=None
+            tenant=tenant, accessible_dept_ids=None, accessible_user_scope=None
         ),
         trace_id="tr_role_list",
         tool_meta=meta,
+        tenant=tenant,
     )
 
 
@@ -626,16 +638,17 @@ def _make_dept_list_ctx(db: AsyncSession) -> AiToolContext:
         hashed_password="x",
         status="1",
     )
-    bind_test_user(actor)
+    tenant = bind_test_user(actor)
     return AiToolContext(
         user=actor,
         perms={"system:dept:list"},
         db=db,
         data_scope=DataScopeContext(
-            tenant_id=0, accessible_dept_ids=None, accessible_user_scope=None
+            tenant=tenant, accessible_dept_ids=None, accessible_user_scope=None
         ),
         trace_id="tr_dept_list",
         tool_meta=meta,
+        tenant=tenant,
     )
 
 

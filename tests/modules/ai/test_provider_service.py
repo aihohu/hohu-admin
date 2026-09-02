@@ -6,9 +6,11 @@ from uuid import uuid4
 
 import pytest
 from fastapi.routing import APIRoute
+from tenant_helpers import tenant_context
 
 from app.core.exceptions import BusinessException
 from app.core.security import encrypt_value
+from app.core.tenant import PlatformContext
 from app.modules.ai.api.provider import router as provider_router
 from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.provider import AiProvider
@@ -23,6 +25,11 @@ from app.modules.ai.service.model_authorization_service import (
 )
 from app.modules.ai.service.model_service import model_service
 from app.modules.ai.service.provider_service import provider_service
+
+PLATFORM = PlatformContext(
+    actor_user_id=1, reason="provider service test", correlation_id="plan3"
+)
+TENANT = tenant_context()
 
 
 @pytest.fixture(autouse=True)
@@ -100,7 +107,7 @@ async def test_test_connection_rejects_cross_provider_model_without_probe(
             db_session,
             provider.provider_id,
             other_model.model_id,
-            tenant_id=0,
+            platform=PLATFORM,
         )
 
     assert provider.provider_id != other_provider.provider_id
@@ -121,7 +128,7 @@ async def test_test_connection_returns_ids_and_never_upstream_output(
         db_session,
         provider.provider_id,
         model.model_id,
-        tenant_id=0,
+        platform=PLATFORM,
     )
 
     assert result.model_dump(by_alias=True) == {
@@ -146,7 +153,7 @@ async def test_test_connection_redacts_arbitrary_upstream_failure(
             db_session,
             provider.provider_id,
             model.model_id,
-            tenant_id=0,
+            platform=PLATFORM,
         )
 
     assert exc_info.value.code == 502
@@ -167,6 +174,7 @@ async def test_provider_and_model_save_reject_disallowed_destination(
                 api_key="secret",
                 base_url="http://169.254.169.254/latest/meta-data",
             ),
+            platform=PLATFORM,
         )
     assert provider_exc.value.error_code == "AI_PROVIDER_URL_FORBIDDEN"
 
@@ -180,6 +188,7 @@ async def test_provider_and_model_save_reject_disallowed_destination(
                 capabilities=["text"],
                 base_url="http://127.0.0.1:11434/v1",
             ),
+            platform=PLATFORM,
         )
     assert model_exc.value.error_code == "AI_PROVIDER_URL_FORBIDDEN"
 
@@ -199,7 +208,7 @@ async def test_runtime_quarantine_removes_model_from_options(
 
     options = await model_authorization_service.list_model_options(
         db_session,
-        tenant_id=0,
+        tenant=TENANT,
     )
 
     assert model.model_id not in {item.model_id for item in options}
@@ -220,6 +229,7 @@ async def test_provider_list_projects_stable_quarantine_status(
     page = await provider_service.get_list(
         db_session,
         ProviderQuery(provider_code=provider.provider_code),
+        platform=PLATFORM,
     )
 
     assert len(page.records) == 1

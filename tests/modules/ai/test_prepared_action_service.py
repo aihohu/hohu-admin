@@ -30,6 +30,10 @@ from app.modules.system.models.user import User
 from app.modules.system.models.user_transfer import UserImportBatch
 
 
+def _tenant(*, tenant_id: int = 77, actor_user_id: int = 9001):
+    return tenant_context(tenant_id=tenant_id, actor_user_id=actor_user_id)
+
+
 def _snapshot(*, records_hash: str = "records-1", file_sha256: str = "file-1") -> dict:
     return {
         "batch_id": "batch-prepared-1",
@@ -72,7 +76,7 @@ def _create_kwargs() -> dict:
             "warnings": [],
         },
         "user_id": 9001,
-        "tenant_id": 77,
+        "tenant": _tenant(),
         "conversation_id": 100,
         "source_user_message_id": 101,
         "trace_id": "tr_test_prepared_001",
@@ -275,7 +279,7 @@ async def test_conversation_delete_expires_non_running_actions_and_logs(
         db_session,
         trace_id=action.trace_id,
         conversation_id=action.conversation_id,
-        tenant_id=action.tenant_id,
+        tenant=_tenant(tenant_id=action.tenant_id, actor_user_id=action.user_id),
         source_user_message_id=action.source_user_message_id,
         agent_code=action.agent_code,
         user_id=action.user_id,
@@ -293,7 +297,7 @@ async def test_conversation_delete_expires_non_running_actions_and_logs(
         db_session,
         conversation_id=action.conversation_id,
         user_id=action.user_id,
-        tenant_id=action.tenant_id,
+        tenant=_tenant(tenant_id=action.tenant_id, actor_user_id=action.user_id),
     )
     await db_session.flush()
     log = await db_session.get(AiOperationLog, log_id)
@@ -332,7 +336,7 @@ async def test_conversation_delete_rejects_running_action_without_partial_expiry
             db_session,
             conversation_id=pending.conversation_id,
             user_id=pending.user_id,
-            tenant_id=pending.tenant_id,
+            tenant=_tenant(tenant_id=pending.tenant_id, actor_user_id=pending.user_id),
         )
 
     assert exc_info.value.error_code == "AI_ACTION_RUNNING"
@@ -355,7 +359,7 @@ async def test_conversation_delete_recovers_expired_running_lease(
         db_session,
         trace_id=action.trace_id,
         conversation_id=action.conversation_id,
-        tenant_id=action.tenant_id,
+        tenant=_tenant(tenant_id=action.tenant_id, actor_user_id=action.user_id),
         source_user_message_id=action.source_user_message_id,
         agent_code=action.agent_code,
         user_id=action.user_id,
@@ -373,7 +377,7 @@ async def test_conversation_delete_recovers_expired_running_lease(
         db_session,
         conversation_id=action.conversation_id,
         user_id=action.user_id,
-        tenant_id=action.tenant_id,
+        tenant=_tenant(tenant_id=action.tenant_id, actor_user_id=action.user_id),
     )
     await db_session.flush()
     log = await db_session.get(AiOperationLog, log_id)
@@ -569,7 +573,7 @@ async def test_user_import_snapshot_stale_is_rejected_before_execute(
         db_session.add(batch)
         await db_session.flush()
         kwargs = _create_kwargs()
-        kwargs["tenant_id"] = 0
+        kwargs["tenant"] = _tenant(tenant_id=0)
         snapshot = _snapshot(file_sha256=file_sha256)
         kwargs.update(
             snapshot=snapshot,
@@ -612,7 +616,7 @@ async def test_batch_delete_snapshot_rejects_identity_drift(db_session) -> None:
     await db_session.flush()
 
     kwargs = _create_kwargs()
-    kwargs["tenant_id"] = 0
+    kwargs["tenant"] = _tenant(tenant_id=0)
     snapshot = {
         "tool": "user.batch_delete",
         "argsHash": canonical_payload_hash(
@@ -679,6 +683,7 @@ async def test_action_status_cas_allows_only_one_execution_claim(db_session) -> 
         expected_version=1,
         target_status=PreparedActionStatus.APPROVED,
         approved_by=9001,
+        tenant=_tenant(),
     )
     duplicate = await prepared_action_service.transition_status(
         db_session,
@@ -687,6 +692,7 @@ async def test_action_status_cas_allows_only_one_execution_claim(db_session) -> 
         expected_version=1,
         target_status=PreparedActionStatus.APPROVED,
         approved_by=9001,
+        tenant=_tenant(),
     )
 
     assert approved is not None
@@ -705,6 +711,7 @@ async def test_action_status_cas_allows_only_one_execution_claim(db_session) -> 
         target_status=PreparedActionStatus.RUNNING,
         execution_owner="test-executor",
         execution_lease_expires_at=lease_expires_at,
+        tenant=_tenant(),
     )
     assert running is not None
     renewed = await prepared_action_service.renew_execution_lease(
@@ -712,15 +719,17 @@ async def test_action_status_cas_allows_only_one_execution_claim(db_session) -> 
         action_id=action.action_id,
         execution_owner="test-executor",
         lease_expires_at=lease_expires_at + timedelta(minutes=1),
+        tenant=_tenant(),
     )
     wrong_owner_renewed = await prepared_action_service.renew_execution_lease(
         db_session,
         action_id=action.action_id,
         execution_owner="other-executor",
         lease_expires_at=lease_expires_at + timedelta(minutes=2),
+        tenant=_tenant(),
     )
     result_lineage = result_projection_service.freeze_lineage(
-        tenant_id=0,
+        tenant=_tenant(),
         agent_code="user_mgmt",
         tool_codes=["user.reset_password"],
         subject_refs=[{"type": "user", "id": "99002"}],
@@ -736,6 +745,7 @@ async def test_action_status_cas_allows_only_one_execution_claim(db_session) -> 
         duration_ms=12,
         result_lineage=result_lineage,
         replace_result_lineage=True,
+        tenant=_tenant(),
     )
 
     assert renewed is True
@@ -755,10 +765,13 @@ async def test_pending_query_is_scoped_and_requires_active_source(db_session) ->
     owner = (
         await db_session.execute(select(User).where(User.user_name == "admin"))
     ).scalar_one()
-    conversation = AiConversation(user_id=owner.user_id, title="prepared pending")
+    conversation = AiConversation(
+        tenant_id=0, user_id=owner.user_id, title="prepared pending"
+    )
     db_session.add(conversation)
     await db_session.flush()
     source = AiMessage(
+        tenant_id=0,
         conversation_id=conversation.conversation_id,
         role="user",
         content="import users",
@@ -771,7 +784,7 @@ async def test_pending_query_is_scoped_and_requires_active_source(db_session) ->
     kwargs = _create_kwargs()
     kwargs.update(
         user_id=owner.user_id,
-        tenant_id=0,
+        tenant=_tenant(tenant_id=0, actor_user_id=owner.user_id),
         conversation_id=conversation.conversation_id,
         source_user_message_id=source.message_id,
         trace_id="tr_test_pending_query",
@@ -782,13 +795,13 @@ async def test_pending_query_is_scoped_and_requires_active_source(db_session) ->
         db_session,
         conversation_id=conversation.conversation_id,
         user_id=owner.user_id,
-        tenant_id=0,
+        tenant=_tenant(tenant_id=0, actor_user_id=owner.user_id),
     )
     other_tenant = await prepared_action_service.list_pending_for_conversation(
         db_session,
         conversation_id=conversation.conversation_id,
         user_id=owner.user_id,
-        tenant_id=999,
+        tenant=_tenant(tenant_id=999, actor_user_id=owner.user_id),
     )
 
     assert [item.action_id for item in owned] == [action.action_id]
@@ -809,6 +822,6 @@ async def test_pending_query_is_scoped_and_requires_active_source(db_session) ->
         db_session,
         conversation_id=conversation.conversation_id,
         user_id=owner.user_id,
-        tenant_id=0,
+        tenant=_tenant(tenant_id=0, actor_user_id=owner.user_id),
     )
     assert inactive == []

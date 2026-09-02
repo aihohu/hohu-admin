@@ -34,6 +34,7 @@ from sqlalchemy import Select, literal, select, text
 
 from app.core import redis as redis_module
 from app.core.config import settings
+from app.core.tenant import TenantContext
 from app.modules.ai.agents.gateway.executor import execute_tool
 from app.modules.ai.agents.gateway.quota import _KEY_L2, DEFAULT_L2_DAILY_QUOTA
 from app.modules.ai.agents.gateway.result import ToolResult
@@ -75,6 +76,7 @@ async def clean_env(monkeypatch):
         "ai:quota:*",
         "ai:failures:*",
         "ai:query_cache:*",
+        "ai:tenant:*",
     ]:
         keys = await redis_module.redis_client.keys(pattern)
         if keys:
@@ -109,6 +111,7 @@ async def clean_env(monkeypatch):
         "ai:quota:*",
         "ai:failures:*",
         "ai:query_cache:*",
+        "ai:tenant:*",
     ]:
         keys = await redis_module.redis_client.keys(pattern)
         if keys:
@@ -305,9 +308,10 @@ def _build_deps(
     """构造测试 ChatDeps"""
     user = MagicMock()
     user.user_id = 9001
+    tenant = TenantContext(0, "default", user.user_id, 1, "access_token")
 
     data_scope = DataScopeContext(
-        tenant_id=0,
+        tenant=tenant,
         accessible_dept_ids=None,
         accessible_user_scope=accessible_user_scope,
         filters=[],
@@ -325,6 +329,7 @@ def _build_deps(
         trace_id="tr_authz_test",
         conversation_id=200,
         source_user_message_id=201,
+        tenant=tenant,
         signal_event=signal_event,
         resolved_model_id=7001,
         resolved_provider_id=8001,
@@ -332,7 +337,7 @@ def _build_deps(
 
 
 def _mock_durable_success(monkeypatch) -> None:  # noqa: ANN001
-    async def fake_terminal_result(confirmation_id):  # noqa: ARG001
+    async def fake_terminal_result(confirmation_id, *, tenant):  # noqa: ARG001
         return ToolResult.success({"approved": True}), 1
 
     monkeypatch.setattr(
@@ -413,7 +418,7 @@ class TestCase3HighRiskMultiRowHitl:
         _register_test_tools()
 
         # mock hitl_manager.hang 立即 APPROVED（避免真的等 5 分钟）
-        async def fake_hang(confirmation_id, *, timeout_sec=None):
+        async def fake_hang(confirmation_id, *, tenant, timeout_sec=None):
             return ConfirmAction.APPROVED
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
@@ -437,7 +442,7 @@ class TestCase4DestructiveHitl:
     async def test_destructive_always_triggers_hitl(self, monkeypatch) -> None:
         _register_test_tools()
 
-        async def fake_hang(confirmation_id, *, timeout_sec=None):
+        async def fake_hang(confirmation_id, *, tenant, timeout_sec=None):
             return ConfirmAction.APPROVED
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
@@ -559,7 +564,7 @@ class TestCase8HitlAlwaysForcesHitl:
     async def test_hitl_always_forces_hitl(self, monkeypatch) -> None:
         _register_test_tools()
 
-        async def fake_hang(confirmation_id, *, timeout_sec=None):
+        async def fake_hang(confirmation_id, *, tenant, timeout_sec=None):
             return ConfirmAction.APPROVED
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
@@ -589,7 +594,7 @@ class TestCase9DailyQuotaExhausted:
         # 预填 Redis 配额到 limit（执行前 INCR 即超限）
         # 修订 S-8：L2 date key 用 UTC compact 格式 YYYYMMDD（不再是 ISO YYYY-MM-DD）
         today = datetime.now(UTC).strftime("%Y%m%d")
-        key = _KEY_L2.format(user_id=9001, date=today)
+        key = _KEY_L2.format(tenant_id=0, user_id=9001, date=today)
         await redis_module.redis_client.set(key, DEFAULT_L2_DAILY_QUOTA)
 
         deps = _build_deps()
@@ -616,7 +621,7 @@ class TestCase10InjectionDetector:
         _register_test_tools()
 
         # mock hitl_manager.hang 立即 APPROVED
-        async def fake_hang(confirmation_id, *, timeout_sec=None):
+        async def fake_hang(confirmation_id, *, tenant, timeout_sec=None):
             return ConfirmAction.APPROVED
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)

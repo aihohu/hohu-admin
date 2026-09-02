@@ -29,6 +29,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
 from app.core.id_generator import next_id
+from app.core.tenant import DEFAULT_TENANT_CODE, DEFAULT_TENANT_ID, TenantContext
 from app.modules.marketplace.lowcode.migration_runner import MigrationRunner
 from app.modules.marketplace.lowcode.type_mapping import make_table_name
 from app.modules.marketplace.models import App, AppVersion, TenantApp
@@ -40,6 +41,13 @@ from app.modules.system.models.user import (
 SLUG = "demo-crm"
 CUSTOMER_TABLE = make_table_name(SLUG, "customer")  # → app_data_demo_crm_customer
 ORDER_TABLE = make_table_name(SLUG, "order")  # → app_data_demo_crm_order
+DEFAULT_TENANT = TenantContext(
+    tenant_id=DEFAULT_TENANT_ID,
+    tenant_code=DEFAULT_TENANT_CODE,
+    actor_user_id=1,
+    tenant_version=1,
+    source="platform_control",
+)
 
 MANIFEST = {
     "name": "客户管理 Demo",
@@ -191,7 +199,12 @@ async def _cleanup_existing(db: AsyncSession) -> None:
     await db.execute(text(f"DROP TABLE IF EXISTS {ORDER_TABLE}"))
     await db.execute(text(f"DROP TABLE IF EXISTS {CUSTOMER_TABLE}"))
     existing = (
-        await db.execute(select(App).where(App.slug == SLUG))
+        await db.execute(
+            select(App).where(
+                App.tenant_id == DEFAULT_TENANT.tenant_id,
+                App.slug == SLUG,
+            )
+        )
     ).scalar_one_or_none()
     if existing:
         await db.execute(delete(TenantApp).where(TenantApp.app_id == existing.id))
@@ -202,7 +215,7 @@ async def _cleanup_existing(db: AsyncSession) -> None:
 async def _create_app_and_version(db: AsyncSession) -> App:
     app = App(
         id=next_id(),
-        tenant_id=0,
+        tenant_id=DEFAULT_TENANT.tenant_id,
         name=MANIFEST["name"],
         slug=SLUG,
         type="lowcode",
@@ -234,7 +247,7 @@ async def _install_and_enable(db: AsyncSession, app: App) -> None:
     """Create tenant_app (status=enabled) + physical tables for each model."""
     tenant_app = TenantApp(
         id=next_id(),
-        tenant_id=0,
+        tenant_id=DEFAULT_TENANT.tenant_id,
         app_id=app.id,
         installed_version="1.0.0",
         status="enabled",
@@ -264,11 +277,12 @@ async def _seed_customers(db: AsyncSession) -> list[int]:
                 f"INSERT INTO {CUSTOMER_TABLE} "
                 "(id, tenant_id, created_at, updated_at, created_by, updated_by, "
                 "name, level, contact, age, tags) "
-                "VALUES (:id, 0, :now, :now, 1, 1, "
+                "VALUES (:id, :tenant_id, :now, :now, 1, 1, "
                 ":name, :level, :contact, :age, CAST(:tags AS JSONB))"
             ),
             {
                 "id": db_id,
+                "tenant_id": DEFAULT_TENANT.tenant_id,
                 "now": now,
                 "name": c["name"],
                 "level": c["level"],
@@ -289,10 +303,12 @@ async def _seed_orders(db: AsyncSession, customer_ids: list[int]) -> None:
                 f"INSERT INTO {ORDER_TABLE} "
                 "(id, tenant_id, created_at, updated_at, created_by, updated_by, "
                 "customer_id, amount, status) "
-                "VALUES (:id, 0, :now, :now, 1, 1, :cid, :amount, :status)"
+                "VALUES (:id, :tenant_id, :now, :now, 1, 1, "
+                ":cid, :amount, :status)"
             ),
             {
                 "id": db_id,
+                "tenant_id": DEFAULT_TENANT.tenant_id,
                 "now": now,
                 "cid": customer_ids[cust_idx],
                 "amount": amount,
@@ -311,7 +327,7 @@ async def main() -> None:
         print(f"🧹 Cleaning up existing '{SLUG}' if present...")
         await _cleanup_existing(db)
         await db.commit()
-        await contributes_service.invalidate(tenant_id=0)
+        await contributes_service.invalidate(tenant=DEFAULT_TENANT)
 
         if remove_only:
             print()
@@ -335,7 +351,7 @@ async def main() -> None:
         await db.commit()
 
         print("🔄 Refreshing contributes cache...")
-        await contributes_service.refresh_cache(db, tenant_id=0)
+        await contributes_service.refresh_cache(db, tenant=DEFAULT_TENANT)
 
     print()
     print("✅ Demo CRM ready (multi-model with belongs_to).")

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.id_generator import next_id
+from app.core.tenant import TenantContext
 from app.modules.ai.agents.gateway.quota import is_write_tool
 from app.modules.ai.agents.hitl.events import (
     AiStreamEvent,
@@ -181,8 +182,8 @@ class ChatRunGuard:
         return secrets.token_urlsafe(24)
 
     @classmethod
-    def key(cls, conversation_id: int) -> str:
-        return f"{cls.prefix}:{conversation_id}"
+    def key(cls, conversation_id: int, *, tenant: TenantContext) -> str:
+        return f"{cls.prefix}:tenant:{tenant.tenant_id}:{conversation_id}"
 
     async def acquire(
         self,
@@ -190,12 +191,13 @@ class ChatRunGuard:
         *,
         conversation_id: int,
         owner_token: str,
+        tenant: TenantContext,
         ttl_sec: int | None = None,
     ) -> bool:
         ttl = ttl_sec or settings.AI_CHAT_RUN_GUARD_TTL_SEC
         return bool(
             await redis.set(
-                self.key(conversation_id),
+                self.key(conversation_id, tenant=tenant),
                 owner_token,
                 nx=True,
                 ex=ttl,
@@ -208,13 +210,14 @@ class ChatRunGuard:
         *,
         conversation_id: int,
         owner_token: str,
+        tenant: TenantContext,
         ttl_sec: int | None = None,
     ) -> bool:
         ttl = ttl_sec or settings.AI_CHAT_RUN_GUARD_TTL_SEC
         result = await redis.eval(
             _RENEW_GUARD_LUA,
             1,
-            self.key(conversation_id),
+            self.key(conversation_id, tenant=tenant),
             owner_token,
             ttl,
         )
@@ -227,6 +230,7 @@ class ChatRunGuard:
         conversation_id: int,
         owner_token: str,
         confirmation_ttl_sec: int,
+        tenant: TenantContext,
     ) -> bool:
         ttl = confirmation_ttl_sec + settings.AI_CHAT_RUN_GUARD_PENDING_GRACE_SEC
         return await self.renew(
@@ -234,6 +238,7 @@ class ChatRunGuard:
             conversation_id=conversation_id,
             owner_token=owner_token,
             ttl_sec=ttl,
+            tenant=tenant,
         )
 
     async def release(
@@ -242,11 +247,12 @@ class ChatRunGuard:
         *,
         conversation_id: int,
         owner_token: str,
+        tenant: TenantContext,
     ) -> bool:
         result = await redis.eval(
             _RELEASE_GUARD_LUA,
             1,
-            self.key(conversation_id),
+            self.key(conversation_id, tenant=tenant),
             owner_token,
         )
         return bool(result)
@@ -267,10 +273,14 @@ class ChatRunFinalizer:
         agent_code: str | None,
         lineage: ProjectionLineage | None = None,
         projection_dependency_message_ids: list[int] | tuple[int, ...] = (),
+        tenant: TenantContext,
     ) -> AiMessage | None:
+        if lineage is not None and lineage.tenant_id != tenant.tenant_id:
+            raise RuntimeError("projection lineage tenant mismatch")
         tool_calls = stringify_large_ints(tool_calls)
         source_is_active = await db.scalar(
             select(AiMessage.message_id).where(
+                AiMessage.tenant_id == tenant.tenant_id,
                 AiMessage.message_id == source_user_message_id,
                 AiMessage.conversation_id == conversation_id,
                 AiMessage.role == "user",
@@ -284,6 +294,7 @@ class ChatRunFinalizer:
         stmt = (
             select(AiMessage)
             .where(
+                AiMessage.tenant_id == tenant.tenant_id,
                 AiMessage.conversation_id == conversation_id,
                 AiMessage.role == "assistant",
                 AiMessage.trace_id == trace_id,
@@ -299,6 +310,7 @@ class ChatRunFinalizer:
                 insert(AiMessage)
                 .values(
                     message_id=candidate_id,
+                    tenant_id=tenant.tenant_id,
                     conversation_id=conversation_id,
                     parent_message_id=source_user_message_id,
                     role="assistant",
@@ -307,7 +319,6 @@ class ChatRunFinalizer:
                     tool_calls=tool_calls or None,
                     trace_id=trace_id,
                     agent_code=agent_code,
-                    tenant_id=lineage.tenant_id if lineage else None,
                     tool_codes=list(lineage.tool_codes) if lineage else None,
                     subject_refs=list(lineage.subject_refs) if lineage else None,
                     subject_refs_hash=lineage.subject_refs_hash if lineage else None,
@@ -319,7 +330,7 @@ class ChatRunFinalizer:
                     is_active=True,
                 )
                 .on_conflict_do_nothing(
-                    index_elements=["conversation_id", "trace_id"],
+                    index_elements=["tenant_id", "conversation_id", "trace_id"],
                     index_where=text("role = 'assistant' AND trace_id IS NOT NULL"),
                 )
             )
@@ -329,6 +340,7 @@ class ChatRunFinalizer:
                     await db.execute(
                         select(AiMessage)
                         .where(
+                            AiMessage.tenant_id == tenant.tenant_id,
                             AiMessage.conversation_id == conversation_id,
                             AiMessage.role == "assistant",
                             AiMessage.trace_id == trace_id,
@@ -373,6 +385,7 @@ class ChatRunFinalizer:
         result: Any = None,
         error_code: str | None = None,
         error_msg: str | None = None,
+        tenant: TenantContext,
     ) -> AiMessage | None:
         """离线/续传终态用 pending context 重建同一 tool-only assistant。"""
         if pending.source_user_message_id is None:
@@ -401,6 +414,7 @@ class ChatRunFinalizer:
             content="",
             tool_calls=[tool_call],
             agent_code=pending.agent_code,
+            tenant=tenant,
         )
 
     async def finalize_prepared_action(
@@ -414,6 +428,7 @@ class ChatRunFinalizer:
         result_ui: dict[str, Any] | None = None,
         error_code: str | None = None,
         error_msg: str | None = None,
+        tenant: TenantContext,
     ) -> AiMessage | None:
         """Project one durable authorization without exposing frozen capability data."""
         from app.modules.ai.agents.tools.registry import ToolRegistry  # noqa: PLC0415
@@ -468,6 +483,7 @@ class ChatRunFinalizer:
             tool_calls=cards,
             agent_code=action.agent_code,
             lineage=result_projection_service.lineage_from_record(action),
+            tenant=tenant,
         )
 
     @staticmethod

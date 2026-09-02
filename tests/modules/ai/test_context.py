@@ -12,7 +12,9 @@ from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import literal_column, select
+from tenant_helpers import tenant_context
 
+from app.core.tenant import TenantContext
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.core.context import (
     AiToolContext,
@@ -32,9 +34,10 @@ def _make_meta(name: str = "user.lookup") -> AiToolMeta:
     )
 
 
-def _make_data_scope() -> DataScopeContext:
+def _make_data_scope(tenant: TenantContext | None = None) -> DataScopeContext:
+    tenant = tenant or tenant_context()
     return DataScopeContext(
-        tenant_id=0,
+        tenant=tenant,
         accessible_dept_ids={100, 200},
         accessible_user_scope=select(literal_column("0").label("user_id")),
         filters=[],
@@ -47,14 +50,17 @@ def _make_deps(
     perms: set[str] | None = None,
     tenant_id: int = 0,
 ) -> ChatDeps:
+    principal = user or MagicMock()
+    principal.user_id = 1
+    tenant = tenant_context(tenant_id=tenant_id, actor_user_id=principal.user_id)
     return ChatDeps(
-        user=user or MagicMock(user_id=1, __str__=lambda self: "u"),
+        user=principal,
         perms=perms or {"system:user:list"},
         db=MagicMock(),
-        data_scope=_make_data_scope(),
+        data_scope=_make_data_scope(tenant),
         agent=MagicMock(),
         trace_id=trace_id,
-        tenant_id=tenant_id,
+        tenant=tenant,
     )
 
 
@@ -65,7 +71,9 @@ class TestDataScopeContext:
     def test_default_filters_empty_list(self) -> None:
         """filters 默认空 list（不是 None），与 accessible_*.None 语义区分"""
         scope = DataScopeContext(
-            tenant_id=0, accessible_dept_ids=None, accessible_user_scope=None
+            tenant=tenant_context(),
+            accessible_dept_ids=None,
+            accessible_user_scope=None,
         )
         assert scope.filters == []
         assert scope.accessible_dept_ids is None
@@ -74,7 +82,9 @@ class TestDataScopeContext:
     def test_all_visible_means_none(self) -> None:
         """None 表示全部可见（超管 / DATA_SCOPE_ALL），不是无可见"""
         scope = DataScopeContext(
-            tenant_id=0, accessible_dept_ids=None, accessible_user_scope=None
+            tenant=tenant_context(),
+            accessible_dept_ids=None,
+            accessible_user_scope=None,
         )
         assert scope.accessible_dept_ids is None
 
@@ -101,13 +111,17 @@ class TestChatDeps:
 
 class TestAiToolContext:
     def test_secrets_default_empty(self) -> None:
+        user = MagicMock()
+        user.user_id = 1
+        tenant = tenant_context()
         ctx = AiToolContext(
-            user=MagicMock(),
+            user=user,
             perms=set(),
             db=MagicMock(),
-            data_scope=_make_data_scope(),
+            data_scope=_make_data_scope(tenant),
             trace_id="tr_x",
             tool_meta=_make_meta(),
+            tenant=tenant,
         )
         assert ctx.secrets == {}  # 当前默认不注入 secrets。
         assert ctx.tenant_id == 0
@@ -125,13 +139,17 @@ class TestAiToolContext:
             allowed_group_by=("user_gender", "status"),
             max_groups=15,
         )
+        user = MagicMock()
+        user.user_id = 1
+        tenant = tenant_context()
         ctx = AiToolContext(
-            user=MagicMock(),
+            user=user,
             perms=set(),
             db=MagicMock(),
-            data_scope=_make_data_scope(),
+            data_scope=_make_data_scope(tenant),
             trace_id="tr_x",
             tool_meta=meta_with_aggregation,
+            tenant=tenant,
         )
         assert ctx.tool_meta.max_groups == 15
         assert ctx.tool_meta.allowed_group_by == ("user_gender", "status")

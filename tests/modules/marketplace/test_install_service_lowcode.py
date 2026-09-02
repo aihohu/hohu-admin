@@ -9,7 +9,8 @@ from app.modules.marketplace.lowcode.schema_introspection import (
 )
 from app.modules.marketplace.models import App, AppVersion, TenantApp
 from app.modules.marketplace.schemas.install import InstallCreate
-from app.modules.marketplace.service.install_service import install_service
+from modules.marketplace import DEFAULT_TENANT
+from modules.marketplace import default_install_service as install_service
 
 
 @pytest.fixture
@@ -352,7 +353,11 @@ class TestReinstallSchemaEvolution:
 
         # 写入一条数据
         await db_session.execute(
-            text(f"INSERT INTO {table_name} (name, level) VALUES ('Alice', 'A')")
+            text(
+                f"INSERT INTO {table_name} (tenant_id, name, level) "
+                "VALUES (:tenant_id, 'Alice', 'A')"
+            ),
+            {"tenant_id": DEFAULT_TENANT.tenant_id},
         )
         await db_session.flush()
 

@@ -31,6 +31,8 @@ import re
 
 from redis.asyncio import Redis
 
+from app.core.tenant import TenantContext
+
 # 大小写不敏感 + 多行；命中即触发 HITL
 _PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE | re.MULTILINE)
@@ -72,7 +74,7 @@ _PATTERNS: tuple[re.Pattern[str], ...] = tuple(
 # ============ 跨轮持久化 Redis key（修订 S-16） ============
 
 _INJECTION_HIT_TTL_SEC = 3600  # 1h
-_KEY_CONV = "ai:injection_hit:{conversation_id}"
+_KEY_CONV = "ai:tenant:{tenant_id}:injection_hit:{conversation_id}"
 
 
 def detect_injection(text: str) -> bool:
@@ -110,6 +112,8 @@ def matched_patterns(text: str) -> list[str]:
 async def record_injection_hit_conversation(
     redis: Redis,
     conversation_id: int | None,
+    *,
+    tenant: TenantContext,
 ) -> None:
     """本轮 pattern 命中 → 写 conversation 级 Redis flag（TTL 1h）
 
@@ -128,7 +132,7 @@ async def record_injection_hit_conversation(
     """
     if conversation_id is None:
         return
-    key = _KEY_CONV.format(conversation_id=conversation_id)
+    key = _KEY_CONV.format(tenant_id=tenant.tenant_id, conversation_id=conversation_id)
     await redis.set(key, "1", ex=_INJECTION_HIT_TTL_SEC)
 
     # 记录安全事件指标。
@@ -140,6 +144,8 @@ async def record_injection_hit_conversation(
 async def is_injection_hit_conversation(
     redis: Redis,
     conversation_id: int | None,
+    *,
+    tenant: TenantContext,
 ) -> bool:
     """检查 conversation 级是否已触发过注入（修订 S-16）
 
@@ -156,13 +162,15 @@ async def is_injection_hit_conversation(
     """
     if conversation_id is None:
         return False
-    key = _KEY_CONV.format(conversation_id=conversation_id)
+    key = _KEY_CONV.format(tenant_id=tenant.tenant_id, conversation_id=conversation_id)
     return bool(await redis.exists(key))
 
 
 async def clear_injection_hit_conversation(
     redis: Redis,
     conversation_id: int,
+    *,
+    tenant: TenantContext,
 ) -> None:
     """显式清除 conversation 级注入状态（测试 / 管理员手动恢复用）
 
@@ -170,5 +178,5 @@ async def clear_injection_hit_conversation(
       - 单元测试间清理
       - 管理 API 可显式清除会话注入标记
     """
-    key = _KEY_CONV.format(conversation_id=conversation_id)
+    key = _KEY_CONV.format(tenant_id=tenant.tenant_id, conversation_id=conversation_id)
     await redis.delete(key)

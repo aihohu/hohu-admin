@@ -9,6 +9,7 @@ import re
 from unittest.mock import MagicMock
 
 from sqlalchemy import Select
+from tenant_helpers import tenant_context
 
 from app.constants import DATA_SCOPE_DEPT, DATA_SCOPE_SELF
 from app.modules.ai.agents.safety_preamble import (
@@ -30,12 +31,13 @@ def _make_deps(
     user_name: str = "testuser",
     user_id: int = 100,
 ) -> ChatDeps:
+    tenant = tenant_context(actor_user_id=user_id)
     return ChatDeps(
         user=MagicMock(user_id=user_id, user_name=user_name),
         perms=perms or {"system:user:list"},
         db=MagicMock(),
         data_scope=DataScopeContext(
-            tenant_id=0,
+            tenant=tenant,
             accessible_dept_ids=accessible_dept_ids,
             accessible_user_scope=accessible_user_scope,
             filters=[],
@@ -43,6 +45,7 @@ def _make_deps(
         ),
         agent=MagicMock(),
         trace_id=trace_id,
+        tenant=tenant,
     )
 
 

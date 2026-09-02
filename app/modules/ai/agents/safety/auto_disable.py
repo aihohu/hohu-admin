@@ -11,8 +11,8 @@
   - Prometheus 告警集成（ai_super_admin_injection_alert）
 
 Redis key 设计：
-  - `ai:injection:cnt:{user_id}:{hour_bucket}` — 1h 计数器，TTL 2h
-  - `ai:user_disabled:{user_id}` — 禁用 flag，TTL 24h
+  - `ai:tenant:{tenant_id}:injection:cnt:{user_id}:{hour_bucket}` — 1h 计数器
+  - `ai:tenant:{tenant_id}:user_disabled:{user_id}` — 禁用 flag，TTL 24h
 """
 
 import logging
@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from redis.asyncio import Redis
 
 from app.core.rbac import is_super_admin
+from app.core.tenant import TenantContext
 from app.modules.system.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -35,16 +36,14 @@ _CFG_THRESHOLD = "ai:auto_disable:injection_per_hour"
 _CFG_DURATION = "ai:auto_disable:duration_sec"
 
 
-async def _resolve_threshold() -> int:
+async def _resolve_threshold(tenant: TenantContext) -> int:
     from app.db.session import AsyncSessionLocal  # noqa: PLC0415
     from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
         get_ai_config_int,
     )
-    from app.modules.auth.service import get_public_tenant_context  # noqa: PLC0415
 
     try:
         async with AsyncSessionLocal() as db:
-            tenant = await get_public_tenant_context(db)
             return await get_ai_config_int(
                 db, _CFG_THRESHOLD, INJECTION_THRESHOLD_PER_HOUR, tenant=tenant
             )
@@ -52,16 +51,14 @@ async def _resolve_threshold() -> int:
         return INJECTION_THRESHOLD_PER_HOUR
 
 
-async def _resolve_duration() -> int:
+async def _resolve_duration(tenant: TenantContext) -> int:
     from app.db.session import AsyncSessionLocal  # noqa: PLC0415
     from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
         get_ai_config_int,
     )
-    from app.modules.auth.service import get_public_tenant_context  # noqa: PLC0415
 
     try:
         async with AsyncSessionLocal() as db:
-            tenant = await get_public_tenant_context(db)
             return await get_ai_config_int(
                 db, _CFG_DURATION, DISABLE_DURATION_SEC, tenant=tenant
             )
@@ -75,15 +72,15 @@ def _hour_bucket(now: datetime | None = None) -> str:
     return dt.strftime("%Y%m%d%H")
 
 
-def _count_key(user_id: int, hour_bucket: str) -> str:
-    return f"ai:injection:cnt:{user_id}:{hour_bucket}"
+def _count_key(user_id: int, hour_bucket: str, *, tenant_id: int) -> str:
+    return f"ai:tenant:{tenant_id}:injection:cnt:{user_id}:{hour_bucket}"
 
 
-def _disabled_key(user_id: int) -> str:
-    return f"ai:user_disabled:{user_id}"
+def _disabled_key(user_id: int, *, tenant_id: int) -> str:
+    return f"ai:tenant:{tenant_id}:user_disabled:{user_id}"
 
 
-async def record_injection(redis: Redis, user: User) -> int:
+async def record_injection(redis: Redis, user: User, *, tenant: TenantContext) -> int:
     """记录一次 injection 命中，返回当前小时桶计数；超阈值且非超管 → 自动禁用 24h
 
     Args:
@@ -94,12 +91,14 @@ async def record_injection(redis: Redis, user: User) -> int:
         当前小时桶的累计计数（用于日志 / 告警）
     """
     hour_bucket = _hour_bucket()
-    count_key = _count_key(user.user_id, hour_bucket)
-    current = await redis.incr(count_key)
-    if current == 1:
-        await redis.expire(count_key, INJECTION_COUNT_TTL_SEC)
+    count_key = _count_key(user.user_id, hour_bucket, tenant_id=tenant.tenant_id)
+    pipe = redis.pipeline(transaction=True)
+    pipe.incr(count_key)
+    pipe.expire(count_key, INJECTION_COUNT_TTL_SEC, nx=True)
+    current, _ = await pipe.execute()
+    current = int(current)
 
-    if current >= await _resolve_threshold():
+    if current >= await _resolve_threshold(tenant):
         if is_super_admin(user):
             logger.warning(
                 "super_admin injection threshold hit (NOT disabling)",
@@ -111,18 +110,19 @@ async def record_injection(redis: Redis, user: User) -> int:
             )
             # 超级管理员只告警，不自动禁用。
         else:
-            disabled_key = _disabled_key(user.user_id)
-            already_disabled = await redis.get(disabled_key)
-            duration = await _resolve_duration()
-            await redis.set(disabled_key, "1", ex=duration)
-            if not already_disabled:
+            disabled_key = _disabled_key(user.user_id, tenant_id=tenant.tenant_id)
+            duration = await _resolve_duration(tenant)
+            first_disable = await redis.set(disabled_key, "1", ex=duration, nx=True)
+            if not first_disable:
+                await redis.expire(disabled_key, duration)
+            else:
                 logger.warning(
                     "user auto-disabled for injection threshold",
                     extra={
                         "user_id": user.user_id,
                         "user_name": user.user_name,
                         "count": current,
-                        "duration_sec": DISABLE_DURATION_SEC,
+                        "duration_sec": duration,
                     },
                 )
                 # 仅首次禁用时记录指标，避免重复统计 already_disabled。
@@ -134,12 +134,14 @@ async def record_injection(redis: Redis, user: User) -> int:
     return current
 
 
-async def check_user_disabled(redis: Redis, user_id: int) -> bool:
+async def check_user_disabled(
+    redis: Redis, user_id: int, *, tenant: TenantContext
+) -> bool:
     """检查用户是否被自动禁用（用于 chat.py 入口短路）
 
     Returns:
         True = 用户被禁用，应短路返回 AI_USER_AUTO_DISABLED
         False = 正常
     """
-    disabled_key = _disabled_key(user_id)
+    disabled_key = _disabled_key(user_id, tenant_id=tenant.tenant_id)
     return bool(await redis.exists(disabled_key))

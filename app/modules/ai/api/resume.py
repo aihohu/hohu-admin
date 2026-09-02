@@ -44,7 +44,7 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.redis import redis_client
-from app.core.tenant import resolve_tenant_id
+from app.core.tenant import TenantContext, get_bound_tenant_context
 from app.db.session import AsyncSessionLocal, get_db
 from app.modules.ai.agents.gateway.executor import resume_tool_execution
 from app.modules.ai.agents.gateway.result import UIResult
@@ -175,13 +175,13 @@ def _durable_binding_valid(
     *,
     pending: PendingPayload,
     user_id: int,
-    tenant_id: int,
+    tenant: TenantContext,
 ) -> bool:
     return bool(
         action is not None
         and (pending.action_id is None or action.action_id == pending.action_id)
         and action.user_id == user_id
-        and action.tenant_id == tenant_id
+        and action.tenant_id == tenant.tenant_id
         and action.conversation_id == pending.conversation_id
         and action.execute_tool_call_id == pending.tool_call_id
         and action.trace_id == pending.trace_id
@@ -267,20 +267,20 @@ async def _load_durable_resume_terminal(
     confirmation_id: str,
     pending: PendingPayload,
     user_id: int,
-    tenant_id: int,
+    tenant: TenantContext,
     current_user: User | None = None,
 ) -> list[ToolCallResultEvent | AiErrorEvent | DoneEvent]:
     """Read a confirm-owned terminal fact without ever re-executing its tool."""
     try:
         async with AsyncSessionLocal() as terminal_db:
             action = await prepared_action_service.get_by_confirmation_id(
-                terminal_db, confirmation_id
+                terminal_db, confirmation_id, tenant=tenant
             )
             if not _durable_binding_valid(
                 action,
                 pending=pending,
                 user_id=user_id,
-                tenant_id=tenant_id,
+                tenant=tenant,
             ):
                 raise BusinessRuleException(
                     "续传 action 绑定无效",
@@ -294,6 +294,7 @@ async def _load_durable_resume_terminal(
                 )
             message_id = await terminal_db.scalar(
                 select(AiMessage.message_id).where(
+                    AiMessage.tenant_id == tenant.tenant_id,
                     AiMessage.conversation_id == action.conversation_id,
                     AiMessage.role == "assistant",
                     AiMessage.trace_id == action.trace_id,
@@ -340,6 +341,7 @@ async def _load_durable_resume_terminal(
                 result_data = await result_projection_service.refresh_download_urls(
                     terminal_db,
                     current_user,
+                    tenant=tenant,
                     lineage=lineage,
                     value=result_data,
                     resource_ids=export_ids,
@@ -347,6 +349,7 @@ async def _load_durable_resume_terminal(
                 result_ui = await result_projection_service.refresh_download_urls(
                     terminal_db,
                     current_user,
+                    tenant=tenant,
                     lineage=lineage,
                     value=result_ui,
                     resource_ids=export_ids,
@@ -400,13 +403,13 @@ async def _load_durable_resume_terminal(
         ]
 
 
-async def _cleanup_durable_resume(action) -> None:  # noqa: ANN001
+async def _cleanup_durable_resume(action, *, tenant: TenantContext) -> None:  # noqa: ANN001
     """Best-effort cleanup after PostgreSQL has become the terminal authority."""
     try:
         if not PreparedActionStatus(action.status).is_terminal:
             async with AsyncSessionLocal() as cleanup_db:
                 latest = await prepared_action_service.get_by_confirmation_id(
-                    cleanup_db, action.confirmation_id
+                    cleanup_db, action.confirmation_id, tenant=tenant
                 )
             if latest is None or not PreparedActionStatus(latest.status).is_terminal:
                 return
@@ -420,11 +423,14 @@ async def _cleanup_durable_resume(action) -> None:  # noqa: ANN001
                 redis_client,
                 conversation_id=action.conversation_id,
                 owner_token=action.guard_owner_token,
+                tenant=tenant,
             )
         except Exception:
             logger.exception("resume durable conversation guard cleanup failed")
     try:
-        await hitl_manager.delete_pending(redis_client, action.confirmation_id)
+        await hitl_manager.delete_pending(
+            redis_client, action.confirmation_id, tenant=tenant
+        )
     except Exception:
         logger.exception("resume durable pending cleanup failed")
 
@@ -434,7 +440,7 @@ async def _terminalize_durable_resume_failure(
     confirmation_id: str,
     pending: PendingPayload,
     user_id: int,
-    tenant_id: int,
+    tenant: TenantContext,
     error_code: str,
     error_msg: str,
 ) -> list[ToolCallResultEvent | AiErrorEvent | DoneEvent]:
@@ -444,13 +450,13 @@ async def _terminalize_durable_resume_failure(
         async with AsyncSessionLocal() as terminal_db:
             async with terminal_db.begin():
                 action = await prepared_action_service.get_by_confirmation_id(
-                    terminal_db, confirmation_id
+                    terminal_db, confirmation_id, tenant=tenant
                 )
                 if not _durable_binding_valid(
                     action,
                     pending=pending,
                     user_id=user_id,
-                    tenant_id=tenant_id,
+                    tenant=tenant,
                 ):
                     raise BusinessRuleException(
                         "续传 action 绑定无效",
@@ -466,6 +472,7 @@ async def _terminalize_durable_resume_failure(
                         expected_version=action.row_version,
                         target_status=PreparedActionStatus.EXPIRED,
                         error_code=error_code,
+                        tenant=tenant,
                     )
                     if transitioned is not None:
                         terminal_action = transitioned
@@ -473,11 +480,11 @@ async def _terminalize_durable_resume_failure(
                             terminal_db,
                             transitioned.execute_tool_call_id,
                             user_id=user_id,
-                            tenant_id=tenant_id,
+                            tenant=tenant,
                         )
                         if log is not None:
                             await operation_log_service.mark_expired_if_pending(
-                                terminal_db, log.log_id
+                                terminal_db, log.log_id, tenant=tenant
                             )
                         await chat_run_finalizer.finalize_prepared_action(
                             terminal_db,
@@ -485,17 +492,18 @@ async def _terminalize_durable_resume_failure(
                             ok=False,
                             error_code=error_code,
                             error_msg=error_msg,
+                            tenant=tenant,
                         )
         if (
             terminal_action is not None
             and PreparedActionStatus(terminal_action.status).is_terminal
         ):
-            await _cleanup_durable_resume(terminal_action)
+            await _cleanup_durable_resume(terminal_action, tenant=tenant)
         return await _load_durable_resume_terminal(
             confirmation_id=confirmation_id,
             pending=pending,
             user_id=user_id,
-            tenant_id=tenant_id,
+            tenant=tenant,
         )
     except Exception:
         logger.exception(
@@ -525,12 +533,15 @@ async def _finalize_resume_terminal(
     result=None,  # noqa: ANN001
     error_code: str | None = None,
     error_msg: str | None = None,
+    tenant: TenantContext,
 ) -> list[AiErrorEvent | DoneEvent]:
     """续传/离线 terminal projection 的 durability barrier。"""
     if pending.source_user_message_id is None:
         # 升级前 PendingPayload 无 durable source，不能猜测 parent；保留旧协议。
         try:
-            await hitl_manager.delete_pending(redis_client, confirmation_id)
+            await hitl_manager.delete_pending(
+                redis_client, confirmation_id, tenant=tenant
+            )
         except Exception:
             logger.exception("resume terminal legacy pending cleanup failed")
         return [DoneEvent()]
@@ -543,6 +554,7 @@ async def _finalize_resume_terminal(
             result=result,
             error_code=error_code,
             error_msg=error_msg,
+            tenant=tenant,
         )
         await db.commit()
     except Exception:
@@ -568,11 +580,12 @@ async def _finalize_resume_terminal(
                 redis_client,
                 conversation_id=pending.conversation_id,
                 owner_token=pending.guard_owner_token,
+                tenant=tenant,
             )
         except Exception:
             logger.exception("resume terminal conversation guard cleanup failed")
     try:
-        await hitl_manager.delete_pending(redis_client, confirmation_id)
+        await hitl_manager.delete_pending(redis_client, confirmation_id, tenant=tenant)
     except Exception:
         logger.exception("resume terminal pending cleanup failed")
     return [
@@ -590,7 +603,7 @@ async def _mark_legacy_resume_expired(
     *,
     pending: PendingPayload,
     user_id: int,
-    tenant_id: int,
+    tenant: TenantContext,
 ) -> None:
     """Keep the legacy operation-log audit transition in the guarded stream."""
     try:
@@ -598,10 +611,12 @@ async def _mark_legacy_resume_expired(
             db,
             pending.tool_call_id,
             user_id=user_id,
-            tenant_id=tenant_id,
+            tenant=tenant,
         )
         if log is not None:
-            await operation_log_service.mark_expired_if_pending(db, log.log_id)
+            await operation_log_service.mark_expired_if_pending(
+                db, log.log_id, tenant=tenant
+            )
     except Exception:
         logger.exception("resume: legacy mark_expired_if_pending failed")
 
@@ -641,17 +656,19 @@ async def resume_chat(
         )
 
     # 3. PostgreSQL 是 durable action/终态权威；Redis 仅承担活跃 handoff。
-    current_tenant_id = resolve_tenant_id(current_user)
+    tenant = get_bound_tenant_context(current_user)
     durable_action = await prepared_action_service.get_by_confirmation_id(
-        db, confirmation_id
+        db, confirmation_id, tenant=tenant
     )
     if durable_action is not None and (
         durable_action.user_id != current_user.user_id
-        or durable_action.tenant_id != current_tenant_id
+        or durable_action.tenant_id != tenant.tenant_id
     ):
         raise AuthorizationException(error_code="AI_RESUME_FORBIDDEN")
 
-    pending = await hitl_manager.get_pending(redis_client, confirmation_id)
+    pending = await hitl_manager.get_pending(
+        redis_client, confirmation_id, tenant=tenant
+    )
     if pending is None and durable_action is None:
         raise NotFoundException("HITL confirmation", error_code="AI_RESUME_NOT_FOUND")
     if pending is not None and pending.user_id != current_user.user_id:
@@ -662,12 +679,12 @@ async def resume_chat(
             current_user.user_id,
         )
         raise AuthorizationException(error_code="AI_RESUME_FORBIDDEN")
-    if pending is not None and pending.tenant_id != current_tenant_id:
+    if pending is not None and pending.tenant_id != tenant.tenant_id:
         logger.warning(
             "resume tenant mismatch: confirmation_id=%s pending_tenant=%d current_tenant=%d",
             confirmation_id,
             pending.tenant_id,
-            current_tenant_id,
+            tenant.tenant_id,
         )
         # 与 owner mismatch 共用拒绝语义，避免泄露 pending 是否属于其它租户。
         raise AuthorizationException(error_code="AI_RESUME_FORBIDDEN")
@@ -682,7 +699,7 @@ async def resume_chat(
             durable_action,
             pending=pending,
             user_id=current_user.user_id,
-            tenant_id=current_tenant_id,
+            tenant=tenant,
         )
     ):
         raise BusinessRuleException(
@@ -737,10 +754,10 @@ async def resume_chat(
                 confirmation_id=confirmation_id,
                 pending=replay_pending,
                 user_id=current_user.user_id,
-                tenant_id=current_tenant_id,
+                tenant=tenant,
                 current_user=current_user,
             )
-            await _cleanup_durable_resume(durable_action)
+            await _cleanup_durable_resume(durable_action, tenant=tenant)
             for terminal_event in terminal_events:
                 yield _format_sse_chunk(terminal_event)
 
@@ -769,7 +786,7 @@ async def resume_chat(
             410,
         )
 
-    ttl_sec = await hitl_manager.ttl(redis_client, confirmation_id)
+    ttl_sec = await hitl_manager.ttl(redis_client, confirmation_id, tenant=tenant)
     if ttl_sec < 60:
         raise _set_exc_code(
             BusinessRuleException(
@@ -781,7 +798,9 @@ async def resume_chat(
 
     # 4. 获取 owner 锁，防止旧 worker 取消较慢时新 worker 重复执行。
     worker_token = secrets.token_urlsafe(16)
-    lock_key = f"{AI_HITL_OWNER_LOCK_PREFIX}:{confirmation_id}"
+    lock_key = (
+        f"{AI_HITL_OWNER_LOCK_PREFIX}:tenant:{tenant.tenant_id}:{confirmation_id}"
+    )
     lock_ok = await redis_client.set(
         lock_key, worker_token, nx=True, ex=AI_HITL_OWNER_LOCK_TTL_SEC
     )
@@ -812,7 +831,7 @@ async def resume_chat(
 
             # 6.2 hang 等 wake
             try:
-                action = await hitl_manager.hang(confirmation_id)
+                action = await hitl_manager.hang(confirmation_id, tenant=tenant)
             except TimeoutError:
                 yield _format_sse_chunk(
                     AiErrorEvent(
@@ -825,7 +844,7 @@ async def resume_chat(
                         confirmation_id=confirmation_id,
                         pending=pending,
                         user_id=current_user.user_id,
-                        tenant_id=current_tenant_id,
+                        tenant=tenant,
                         error_code="AI_HITL_TIMEOUT",
                         error_msg="HITL 确认超时（5min 无人确认）",
                     )
@@ -834,7 +853,7 @@ async def resume_chat(
                         db,
                         pending=pending,
                         user_id=current_user.user_id,
-                        tenant_id=current_tenant_id,
+                        tenant=tenant,
                     )
                     terminal_events = await _finalize_resume_terminal(
                         db,
@@ -843,6 +862,7 @@ async def resume_chat(
                         ok=False,
                         error_code="AI_HITL_TIMEOUT",
                         error_msg="HITL 确认超时（5min 无人确认）",
+                        tenant=tenant,
                     )
                 for terminal_event in terminal_events:
                     yield _format_sse_chunk(terminal_event)
@@ -861,7 +881,7 @@ async def resume_chat(
                         confirmation_id=confirmation_id,
                         pending=pending,
                         user_id=current_user.user_id,
-                        tenant_id=current_tenant_id,
+                        tenant=tenant,
                         error_code="AI_INTERNAL_ERROR",
                         error_msg="续传异常，请重新发起",
                     )
@@ -870,7 +890,7 @@ async def resume_chat(
                         db,
                         pending=pending,
                         user_id=current_user.user_id,
-                        tenant_id=current_tenant_id,
+                        tenant=tenant,
                     )
                     terminal_events = await _finalize_resume_terminal(
                         db,
@@ -879,6 +899,7 @@ async def resume_chat(
                         ok=False,
                         error_code="AI_INTERNAL_ERROR",
                         error_msg="续传异常，请重新发起",
+                        tenant=tenant,
                     )
                 for terminal_event in terminal_events:
                     yield _format_sse_chunk(terminal_event)
@@ -892,10 +913,10 @@ async def resume_chat(
                     confirmation_id=confirmation_id,
                     pending=pending,
                     user_id=current_user.user_id,
-                    tenant_id=current_tenant_id,
+                    tenant=tenant,
                     current_user=current_user,
                 )
-                await _cleanup_durable_resume(durable_action)
+                await _cleanup_durable_resume(durable_action, tenant=tenant)
                 for terminal_event in terminal_events:
                     yield _format_sse_chunk(terminal_event)
                 return
@@ -905,7 +926,7 @@ async def resume_chat(
                     db,
                     pending.tool_call_id,
                     user_id=current_user.user_id,
-                    tenant_id=current_tenant_id,
+                    tenant=tenant,
                 )
                 log_id = log.log_id if log else None
             except Exception:
@@ -923,6 +944,7 @@ async def resume_chat(
                     ok=False,
                     error_code="AI_INTERNAL_ERROR",
                     error_msg="续传初始化失败，请重新发起",
+                    tenant=tenant,
                 )
                 for terminal_event in terminal_events:
                     yield _format_sse_chunk(terminal_event)
@@ -935,7 +957,10 @@ async def resume_chat(
                         async with AsyncSessionLocal() as rej_db:
                             async with rej_db.begin():
                                 await operation_log_service.mark_rejected(
-                                    rej_db, log_id, approved_by=current_user.user_id
+                                    rej_db,
+                                    log_id,
+                                    approved_by=current_user.user_id,
+                                    tenant=tenant,
                                 )
                     except Exception:
                         logger.exception("resume: mark_rejected failed")
@@ -956,6 +981,7 @@ async def resume_chat(
                     ok=False,
                     error_code="USER_REJECTED",
                     error_msg="用户已取消此操作",
+                    tenant=tenant,
                 )
                 for terminal_event in terminal_events:
                     yield _format_sse_chunk(terminal_event)
@@ -976,6 +1002,7 @@ async def resume_chat(
                     ok=False,
                     error_code="AI_OPERATION_LOG_NOT_FOUND",
                     error_msg="续传找不到原 log，请重新发起",
+                    tenant=tenant,
                 )
                 for terminal_event in terminal_events:
                     yield _format_sse_chunk(terminal_event)
@@ -1012,6 +1039,7 @@ async def resume_chat(
                     ok=False,
                     error_code=exc.error_code or "AI_AGENT_FORBIDDEN",
                     error_msg=exc.message,
+                    tenant=tenant,
                 )
                 for terminal_event in terminal_events:
                     yield _format_sse_chunk(terminal_event)
@@ -1031,6 +1059,7 @@ async def resume_chat(
                     ok=False,
                     error_code="AI_INTERNAL_ERROR",
                     error_msg="续传初始化失败，请重新发起",
+                    tenant=tenant,
                 )
                 for terminal_event in terminal_events:
                     yield _format_sse_chunk(terminal_event)
@@ -1053,6 +1082,7 @@ async def resume_chat(
                     ok=False,
                     error_code="AI_INTERNAL_ERROR",
                     error_msg="续传 tool 执行失败，请重新发起",
+                    tenant=tenant,
                 )
                 for terminal_event in terminal_events:
                     yield _format_sse_chunk(terminal_event)
@@ -1078,6 +1108,7 @@ async def resume_chat(
                 result=result.data if result.ok else None,
                 error_code=result.error_code if not result.ok else None,
                 error_msg=result.error_msg if not result.ok else None,
+                tenant=tenant,
             )
             for terminal_event in terminal_events:
                 yield _format_sse_chunk(terminal_event)

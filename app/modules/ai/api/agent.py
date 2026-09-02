@@ -13,8 +13,9 @@ GET /ai/agents 返回当前用户可见的 Agent 列表：
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import require_ai_chat_use, require_permissions
+from app.core.auth import require_ai_chat_use
 from app.core.base_response import ResponseModel
+from app.core.tenant import PlatformContext
 from app.db.session import get_db
 from app.modules.ai.schemas.agent_admin import (
     AgentAdminDetailItem,
@@ -24,10 +25,8 @@ from app.modules.ai.schemas.agent_admin import (
 from app.modules.ai.schemas.model import ModelOption
 from app.modules.ai.service.agent_admin import agent_admin_service
 from app.modules.ai.service.agent_visibility import list_visible_agents
-from app.modules.ai.service.model_authorization_service import (
-    model_authorization_service,
-)
-from app.modules.auth.service import get_current_user
+from app.modules.ai.service.model_service import model_service
+from app.modules.auth.service import require_platform_context
 from app.modules.system.models.user import User
 
 router = APIRouter()
@@ -72,13 +71,13 @@ admin_router = APIRouter()
     "",
     summary="管理端：列出所有 AI Agent（含禁用）",
     response_model=ResponseModel[list[AgentAdminListItem]],
-    dependencies=[Depends(require_permissions("ai:agent:list"))],
 )
 async def admin_list_agents(
     db: AsyncSession = Depends(get_db),
+    platform: PlatformContext = Depends(require_platform_context),
 ) -> ResponseModel[list[AgentAdminListItem]]:
     """决策 #23：无 query 参数、无分页，返回全量列表."""
-    items = await agent_admin_service.list_agents(db)
+    items = await agent_admin_service.list_agents(db, platform=platform)
     return ResponseModel.success(data=items)
 
 
@@ -86,12 +85,12 @@ async def admin_list_agents(
     "/model-options",
     summary="管理端：列出 Agent 可选对话模型",
     response_model=ResponseModel[list[ModelOption]],
-    dependencies=[Depends(require_permissions("ai:agent:list"))],
 )
 async def admin_list_model_options(
     db: AsyncSession = Depends(get_db),
+    platform: PlatformContext = Depends(require_platform_context),
 ) -> ResponseModel[list[ModelOption]]:
-    items = await model_authorization_service.list_model_options(db, tenant_id=0)
+    items = await model_service.list_options(db, platform=platform)
     return ResponseModel.success(data=items)
 
 
@@ -99,14 +98,14 @@ async def admin_list_model_options(
     "/{agent_id}",
     summary="管理端：Agent 详情",
     response_model=ResponseModel[AgentAdminDetailItem],
-    dependencies=[Depends(require_permissions("ai:agent:list"))],
 )
 async def admin_get_agent(
     agent_id: int,
     db: AsyncSession = Depends(get_db),
+    platform: PlatformContext = Depends(require_platform_context),
 ) -> ResponseModel[AgentAdminDetailItem]:
     """决策 #5：detail 返回含 systemPrompt，list 不返回."""
-    item = await agent_admin_service.get_agent(db, agent_id)
+    item = await agent_admin_service.get_agent(db, agent_id, platform=platform)
     return ResponseModel.success(data=item)
 
 
@@ -119,7 +118,7 @@ async def admin_update_agent(
     agent_id: int,
     req: AgentAdminUpdateReq,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    platform: PlatformContext = Depends(require_platform_context),
 ) -> ResponseModel[AgentAdminDetailItem]:
     """code / is_builtin / agent_id 任一出现即原子拒绝；
     决策 #20：partial update，未传字段保持原值.
@@ -128,7 +127,7 @@ async def admin_update_agent(
         db,
         agent_id,
         req,
-        current_user=current_user,
+        platform=platform,
     )
     await db.commit()
     return ResponseModel.success(data=item)

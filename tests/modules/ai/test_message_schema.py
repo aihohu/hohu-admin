@@ -157,8 +157,7 @@ def test_ai_message_routing_feedback_check_constraint():
 
 
 def test_ai_message_has_nullable_authorization_lineage_columns() -> None:
-    expected = {
-        "tenant_id",
+    nullable_lineage = {
         "tool_codes",
         "subject_refs",
         "subject_refs_hash",
@@ -167,8 +166,9 @@ def test_ai_message_has_nullable_authorization_lineage_columns() -> None:
         "projection_dependency_message_ids",
     }
 
-    assert expected <= set(AiMessage.__table__.columns.keys())
-    assert all(AiMessage.__table__.columns[name].nullable for name in expected)
+    assert {"tenant_id", *nullable_lineage} <= set(AiMessage.__table__.columns.keys())
+    assert AiMessage.__table__.columns["tenant_id"].nullable is False
+    assert all(AiMessage.__table__.columns[name].nullable for name in nullable_lineage)
 
 
 def test_message_tombstone_contains_no_business_payload() -> None:

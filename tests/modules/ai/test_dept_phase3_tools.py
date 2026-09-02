@@ -33,19 +33,21 @@ def _context(
         user_name="phase3-dept-actor",
         roles=[],
     )
-    user._tenant_context = tenant_context(actor_user_id=user_id)
+    tenant = tenant_context(actor_user_id=user_id)
+    user._tenant_context = tenant
     return AiToolContext(
         user=user,
         perms=set(tool.__ai_tool_meta__.required_perms),
         db=db,
         data_scope=DataScopeContext(
-            tenant_id=0,
+            tenant=tenant,
             accessible_dept_ids=accessible_dept_ids,
             accessible_user_scope=None,
             filters=[],
         ),
         trace_id="tr_phase3_dept_tools",
         tool_meta=tool.__ai_tool_meta__,
+        tenant=tenant,
     )
 
 
