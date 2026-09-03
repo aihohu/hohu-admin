@@ -191,6 +191,16 @@ TENANT_MODEL_INVENTORY: dict[str, TenantResource] = {
 
 
 PLATFORM_GLOBAL_TABLES: dict[str, PlatformGlobalResource] = {
+    "sys_platform_principal": PlatformGlobalResource(
+        "sys_platform_principal",
+        "app.modules.platform.models:PlatformPrincipal",
+        "principal_id",
+    ),
+    "sys_platform_audit_log": PlatformGlobalResource(
+        "sys_platform_audit_log",
+        "app.modules.platform.models:PlatformAuditLog",
+        "audit_id",
+    ),
     "sys_tenant": PlatformGlobalResource(
         "sys_tenant", "app.modules.system.models.tenant:Tenant", "tenant_id"
     ),

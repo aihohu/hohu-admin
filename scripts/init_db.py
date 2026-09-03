@@ -801,6 +801,7 @@ def build_default_tenant() -> Tenant:
         tenant_code=DEFAULT_TENANT_CODE,
         tenant_name="Default Tenant",
         status=STATUS_ENABLED,
+        lifecycle_state="active",
         row_version=1,
     )
 

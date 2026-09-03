@@ -73,3 +73,8 @@ def test_platform_global_models_do_not_reuse_tenant_zero_as_global_scope():
             assert table.c.tenant_id.primary_key, resource.table_name
         else:
             assert "tenant_id" not in table.c, resource.table_name
+
+
+def test_platform_identity_and_audit_are_explicit_global_resources():
+    assert "sys_platform_principal" in PLATFORM_GLOBAL_TABLES
+    assert "sys_platform_audit_log" in PLATFORM_GLOBAL_TABLES

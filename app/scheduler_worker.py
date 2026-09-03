@@ -32,8 +32,12 @@ logger = logging.getLogger("scheduler_worker")
 
 async def _run() -> None:
     platform = PlatformContext(
-        actor_user_id=0,
+        actor_principal_id=0,
+        actor_name="scheduler-worker",
+        principal_type="service",
+        permissions=frozenset({"platform:job:operate"}),
         reason="scheduler worker tenant enumeration",
+        ticket_id="SYSTEM-SCHEDULER",
         correlation_id=f"scheduler:{RUNNER_ID}",
     )
     async with AsyncSessionLocal() as db:

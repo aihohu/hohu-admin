@@ -4,10 +4,14 @@ import re
 import time
 from typing import Any
 
-from fastapi import Depends
-from fastapi.security import OAuth2PasswordBearer
+from fastapi import Depends, Request
+from fastapi.security import (
+    HTTPAuthorizationCredentials,
+    HTTPBearer,
+    OAuth2PasswordBearer,
+)
 from jose import JWTError, jwt
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
@@ -24,6 +28,7 @@ from app.core.exceptions import (
     AuthorizationException,
     BusinessRuleException,
 )
+from app.core.id_generator import next_id
 from app.core.redis import redis_client
 from app.core.security import create_access_token, create_refresh_token, verify_password
 from app.core.tenant import (
@@ -38,6 +43,12 @@ from app.core.tenant import (
 )
 from app.db.session import AsyncSessionLocal, get_db
 from app.modules.auth.schemas.auth import LoginCredentials, RouteMeta, UserRoute
+from app.modules.platform.audit import (
+    authorize_platform_request,
+    persist_platform_audit,
+)
+from app.modules.platform.auth import authenticate_platform_token
+from app.modules.platform.constants import platform_permission_for_request
 from app.modules.system.models.login_log import SysLoginLog
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
@@ -115,6 +126,7 @@ async def _try_blacklist_token(token: str, expire_at: int | None = None) -> bool
 
 # 定义 OAuth2 方案，指定获取 Token 的 URL
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
+platform_bearer_scheme = HTTPBearer(auto_error=False)
 
 
 class AuthService:
@@ -447,13 +459,71 @@ async def get_current_tenant_context(
 
 
 async def require_platform_context(
-    _current_user: User = Depends(get_current_user),
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(platform_bearer_scheme),
+    db: AsyncSession = Depends(get_db),
 ) -> PlatformContext:
-    """Reject tenant principals until Plan 5 provides a platform authenticator."""
-    raise AuthorizationException(
-        "当前身份不是平台管理员",
-        error_code="PLATFORM_ADMIN_REQUIRED",
+    """Build platform authority only from an independent, live DB principal."""
+    if credentials is None:
+        raise AuthenticationException(
+            "缺少平台 Token", error_code="PLATFORM_TOKEN_REQUIRED"
+        )
+    token = credentials.credentials
+    principal = await authenticate_platform_token(token, db)
+    route = request.scope.get("route")
+    audit_path = getattr(route, "path", request.url.path)
+    permission = platform_permission_for_request(request.method, audit_path)
+    target_tenant_id = None
+    if audit_path == "/platform/tenants" and request.method.upper() == "POST":
+        idempotency_key = request.headers.get("Idempotency-Key")
+        replay_tenant_id = None
+        if idempotency_key:
+            key_hash = hashlib.sha256(idempotency_key.encode()).hexdigest()
+            # Serialize target allocation with the business transaction. Without
+            # this lock, two first-seen retries could authorize different targets
+            # before either tenant row becomes visible.
+            await db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": f"platform-tenant-key:{key_hash}"},
+            )
+            replay_tenant_id = await db.scalar(
+                select(Tenant.tenant_id).where(Tenant.provisioning_key_hash == key_hash)
+            )
+        target_tenant_id = replay_tenant_id or next_id()
+        request.state.platform_proposed_tenant_id = target_tenant_id
+    elif "{tenant_id}" in audit_path:
+        raw_target = request.path_params.get("tenant_id")
+        if isinstance(raw_target, str) and _NON_NEGATIVE_ID_RE.fullmatch(raw_target):
+            target_tenant_id = int(raw_target)
+        elif (
+            isinstance(raw_target, int)
+            and not isinstance(raw_target, bool)
+            and raw_target >= 0
+        ):
+            target_tenant_id = raw_target
+        else:
+            raise BusinessRuleException(
+                "平台目标租户无效",
+                error_code="PLATFORM_TARGET_TENANT_INVALID",
+            )
+    ip = request.client.host if request.client else None
+    authorization = await authorize_platform_request(
+        principal=principal,
+        permission=permission,
+        method=request.method,
+        path=audit_path,
+        reason=request.headers.get("X-Platform-Reason"),
+        ticket_id=request.headers.get("X-Platform-Ticket"),
+        correlation_id=request.headers.get("X-Correlation-ID"),
+        ip=ip,
+        request_summary={"queryKeyCount": len(set(request.query_params.keys()))},
+        target_tenant_id=target_tenant_id,
+        persist=persist_platform_audit,
     )
+    request.state.platform_authorization = authorization
+    request.state.platform_permission = permission
+    request.state.platform_ip = ip
+    return authorization.context
 
 
 async def get_public_tenant_context(

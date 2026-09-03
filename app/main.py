@@ -16,6 +16,7 @@ from app.core.scheduler import scheduler_manager
 from app.core.tenant import PlatformContext
 from app.db.session import AsyncSessionLocal
 from app.middleware.audit_middleware import AuditLogMiddleware
+from app.middleware.platform_audit_middleware import PlatformAuditMiddleware
 from app.middleware.rate_limit_middleware import RateLimitMiddleware
 from app.modules.auth.api import router as auth_router
 from app.modules.job.api.job import router as job_router
@@ -31,6 +32,8 @@ from app.modules.marketplace.api.developer import (
     router as marketplace_developer_router,
 )
 from app.modules.marketplace.api.marketplace import router as marketplace_router
+from app.modules.platform.api import control_router as platform_control_router
+from app.modules.platform.api import router as platform_auth_router
 from app.modules.system.api.config import router as config_router
 from app.modules.system.api.data_scope_demo import router as data_scope_demo_router
 from app.modules.system.api.dept import router as dept_router
@@ -99,8 +102,12 @@ async def lifespan(_app: FastAPI):
 
         # 重启后进程内事件已丢失；清理或恢复持久化确认。
         ai_lifecycle_platform = PlatformContext(
-            actor_user_id=0,
+            actor_principal_id=0,
+            actor_name="ai-lifecycle",
+            principal_type="service",
+            permissions=frozenset({"platform:ai:lifecycle"}),
             reason="AI HITL tenant lifecycle recovery",
+            ticket_id="SYSTEM-LIFECYCLE",
             correlation_id=f"ai-lifecycle:{RUNNER_ID}",
         )
         if settings.AI_HITL_MODE == "memory":
@@ -115,8 +122,12 @@ async def lifespan(_app: FastAPI):
     # 通过 Redis pub/sub 与本进程通信。
     if settings.APP_ROLE == "all":
         scheduler_platform = PlatformContext(
-            actor_user_id=0,
+            actor_principal_id=0,
+            actor_name="scheduler",
+            principal_type="service",
+            permissions=frozenset({"platform:job:operate"}),
             reason="embedded scheduler tenant enumeration",
+            ticket_id="SYSTEM-SCHEDULER",
             correlation_id=f"scheduler:{RUNNER_ID}",
         )
         async with AsyncSessionLocal() as db:
@@ -211,11 +222,16 @@ else:
 # 添加频率限制中间件
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(AuditLogMiddleware)
+app.add_middleware(PlatformAuditMiddleware)
 
 # 注册异常处理器
 setup_exception_handlers(app)
 
 app.include_router(auth_router, prefix="/auth", tags=["认证模块"])
+app.include_router(
+    platform_auth_router, prefix="/platform/auth", tags=["平台控制面认证"]
+)
+app.include_router(platform_control_router, prefix="/platform", tags=["平台租户控制面"])
 app.include_router(user_router, prefix="/system/user", tags=["用户管理"])
 app.include_router(
     data_scope_demo_router,

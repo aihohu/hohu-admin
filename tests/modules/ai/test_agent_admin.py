@@ -13,8 +13,12 @@ from app.modules.ai.service.agent_admin import agent_admin_service
 from app.modules.auth.service import require_platform_context
 
 PLATFORM = PlatformContext(
-    actor_user_id=1,
+    actor_principal_id=1,
+    actor_name="test-platform-admin",
+    principal_type="human",
+    permissions=frozenset({"platform:ai:read", "platform:ai:write"}),
     reason="test AI platform management",
+    ticket_id="TEST-AI-ADMIN",
     correlation_id="test-agent-admin",
 )
 

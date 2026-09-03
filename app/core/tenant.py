@@ -13,6 +13,9 @@ from app.core.exceptions import AuthenticationException, AuthorizationException
 DEFAULT_TENANT_ID = 0
 DEFAULT_TENANT_CODE = "default"
 _TENANT_CODE_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])$")
+_PLATFORM_PERMISSION_RE = re.compile(
+    r"^platform:[a-z][a-z0-9_-]{0,31}:[a-z][a-z0-9_-]{0,31}$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,19 +76,45 @@ class TenantLocatorContext:
 
 @dataclass(frozen=True, slots=True)
 class PlatformContext:
-    """Separate authority type for the future platform control plane."""
+    """Immutable authority for a human or service platform principal."""
 
-    actor_user_id: int
+    actor_principal_id: int
+    actor_name: str
+    principal_type: Literal["human", "service"]
+    permissions: frozenset[str]
     reason: str
+    ticket_id: str
     correlation_id: str
+    target_tenant_id: int | None = None
 
     def __post_init__(self) -> None:
         if (
-            isinstance(self.actor_user_id, bool)
-            or not isinstance(self.actor_user_id, int)
-            or self.actor_user_id < 0
+            isinstance(self.actor_principal_id, bool)
+            or not isinstance(self.actor_principal_id, int)
+            or self.actor_principal_id < 0
         ):
-            raise ValueError("platform actor_user_id must be a non-negative integer")
+            raise ValueError("platform actor_principal_id must be non-negative")
+        if self.principal_type == "human" and self.actor_principal_id == 0:
+            raise ValueError("human platform principals require a positive id")
+        if self.principal_type not in {"human", "service"}:
+            raise ValueError("platform principal_type is invalid")
+        if (
+            not isinstance(self.actor_name, str)
+            or not self.actor_name.strip()
+            or len(self.actor_name) > 64
+            or any(ord(char) < 32 for char in self.actor_name)
+        ):
+            raise ValueError("platform actor_name is required")
+        if (
+            not isinstance(self.permissions, frozenset)
+            or not self.permissions
+            or any(
+                not isinstance(permission, str)
+                or _PLATFORM_PERMISSION_RE.fullmatch(permission) is None
+                for permission in self.permissions
+            )
+        ):
+            raise ValueError("platform permissions are invalid")
         if (
             not isinstance(self.reason, str)
             or not self.reason.strip()
@@ -94,12 +123,37 @@ class PlatformContext:
         ):
             raise ValueError("platform reason is required")
         if (
+            not isinstance(self.ticket_id, str)
+            or not self.ticket_id.strip()
+            or len(self.ticket_id) > 128
+            or any(ord(char) < 32 for char in self.ticket_id)
+        ):
+            raise ValueError("platform ticket_id is required")
+        if (
             not isinstance(self.correlation_id, str)
             or not self.correlation_id.strip()
             or len(self.correlation_id) > 128
             or any(ord(char) < 32 for char in self.correlation_id)
         ):
             raise ValueError("platform correlation_id is required")
+        if self.target_tenant_id is not None and (
+            isinstance(self.target_tenant_id, bool)
+            or not isinstance(self.target_tenant_id, int)
+            or self.target_tenant_id < 0
+        ):
+            raise ValueError("platform target_tenant_id must be non-negative")
+
+
+def require_platform_permission(platform: PlatformContext, permission: str) -> None:
+    """Enforce an exact platform permission at the business boundary."""
+    if not isinstance(platform, PlatformContext):
+        raise TypeError("platform context is required")
+    if _PLATFORM_PERMISSION_RE.fullmatch(permission) is None:
+        raise ValueError("required platform permission is invalid")
+    if permission not in platform.permissions:
+        raise AuthorizationException(
+            "平台权限不足", error_code="PLATFORM_PERMISSION_DENIED"
+        )
 
 
 @dataclass(frozen=True, slots=True)

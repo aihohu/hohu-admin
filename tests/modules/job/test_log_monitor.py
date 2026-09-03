@@ -33,8 +33,12 @@ from app.modules.job.models.job import SysJob, SysJobLog
 # unique job_key 前缀，避免 db_session 不隔离读时撞到历史日志
 _TEST_KEY_PREFIX = "K_TEST_LOG_MONITOR"
 _PLATFORM = PlatformContext(
-    actor_user_id=0,
+    actor_principal_id=0,
+    actor_name="test-log-monitor",
+    principal_type="service",
+    permissions=frozenset({"platform:job:operate"}),
     reason="job monitor test",
+    ticket_id="TEST-JOB-MONITOR",
     correlation_id="test-job-monitor",
 )
 

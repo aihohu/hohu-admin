@@ -35,6 +35,7 @@ def _tenant(*, tenant_id: int, code: str, status: str = "1") -> Tenant:
         tenant_code=code,
         tenant_name=code.title(),
         status=status,
+        lifecycle_state="active" if status == "1" else "disabled",
         row_version=1,
     )
 

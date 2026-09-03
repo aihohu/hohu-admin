@@ -15,36 +15,29 @@ from app.core.exceptions import (
     BusinessRuleException,
     NotFoundException,
 )
-from app.core.tenant import PlatformContext
+from app.core.tenant import PlatformContext, require_platform_permission
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.schemas.agent_admin import (
     AgentAdminDetailItem,
     AgentAdminListItem,
     AgentAdminUpdateReq,
 )
-
-
-def _require_platform(platform: PlatformContext) -> None:
-    if not isinstance(platform, PlatformContext):
-        raise TypeError("platform context is required")
+from app.modules.platform.constants import PLATFORM_AI_READ, PLATFORM_AI_WRITE
 
 
 class AgentAdminService:
     async def list_agents(
         self, db: AsyncSession, *, platform: PlatformContext
     ) -> list[AgentAdminListItem]:
-        _require_platform(platform)
+        require_platform_permission(platform, PLATFORM_AI_READ)
         result = await db.execute(
             select(AiAgent).order_by(AiAgent.display_order, AiAgent.agent_id)
         )
         agents = result.scalars().all()
         return [AgentAdminListItem.model_validate(a) for a in agents]
 
-    async def _get_agent_or_404(
-        self, db: AsyncSession, agent_id: int, *, platform: PlatformContext
-    ) -> AiAgent:
+    async def _get_agent_or_404(self, db: AsyncSession, agent_id: int) -> AiAgent:
         """决策 #6: 公共 fetch + raise，被 get_agent / update_agent 复用 (DRY)."""
-        _require_platform(platform)
         agent = await db.get(AiAgent, agent_id)
         if agent is None:
             raise NotFoundException(
@@ -56,8 +49,8 @@ class AgentAdminService:
     async def get_agent(
         self, db: AsyncSession, agent_id: int, *, platform: PlatformContext
     ) -> AgentAdminDetailItem:
-        _require_platform(platform)
-        agent = await self._get_agent_or_404(db, agent_id, platform=platform)
+        require_platform_permission(platform, PLATFORM_AI_READ)
+        agent = await self._get_agent_or_404(db, agent_id)
         return AgentAdminDetailItem.model_validate(agent)
 
     async def update_agent(
@@ -68,7 +61,7 @@ class AgentAdminService:
         *,
         platform: PlatformContext,
     ) -> AgentAdminDetailItem:
-        _require_platform(platform)
+        require_platform_permission(platform, PLATFORM_AI_WRITE)
 
         immutable_fields = {"agent_id", "code", "is_builtin"}
         if immutable_fields & req.model_fields_set:
@@ -77,7 +70,7 @@ class AgentAdminService:
                 error_code="AI_AGENT_IMMUTABLE_FIELD",
             )
 
-        agent = await self._get_agent_or_404(db, agent_id, platform=platform)
+        agent = await self._get_agent_or_404(db, agent_id)
         data = req.model_dump(exclude_unset=True)
 
         # 显式 description 长度校验（决策 #20）—— Schema field_validator 也会捕，

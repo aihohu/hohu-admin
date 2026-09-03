@@ -57,6 +57,7 @@ async def test_job_lookup_is_scoped_and_disabled_tenant_worker_fails_closed(
             )
 
         tenant_b.status = "2"
+        tenant_b.lifecycle_state = "disabled"
         await db_session.flush()
         monkeypatch.setattr(
             "app.modules.job.job_runner.AsyncSessionLocal",

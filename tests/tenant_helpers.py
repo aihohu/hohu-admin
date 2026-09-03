@@ -33,6 +33,7 @@ async def create_test_tenant(db, *, prefix: str) -> Tenant:
         tenant_code=f"{prefix}-{marker}",
         tenant_name=f"{prefix} {marker}",
         status="1",
+        lifecycle_state="active",
         row_version=1,
     )
     db.add(tenant)

@@ -26,8 +26,12 @@ logger = logging.getLogger(__name__)
 
 def _retention_context(reason: str) -> PlatformContext:
     return PlatformContext(
-        actor_user_id=0,
+        actor_principal_id=0,
+        actor_name="retention-worker",
+        principal_type="service",
+        permissions=frozenset({"platform:data:retention"}),
         reason=reason,
+        ticket_id="SYSTEM-RETENTION",
         correlation_id=uuid4().hex,
     )
 

@@ -43,8 +43,12 @@ PREVIEW_TTL_MINUTES = 10
 EXPORT_RETENTION_DAYS = 30
 TEST_OPERATOR_ID = 7_500_000_000_000_000_001
 PLATFORM = PlatformContext(
-    actor_user_id=0,
+    actor_principal_id=0,
+    actor_name="test-retention",
+    principal_type="service",
+    permissions=frozenset({"platform:data:retention"}),
     reason="tenant-aware retention test",
+    ticket_id="TEST-RETENTION",
     correlation_id="plan2-system-cleanup",
 )
 

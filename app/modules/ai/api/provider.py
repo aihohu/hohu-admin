@@ -1,13 +1,10 @@
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_response import PageResult, ResponseModel
 from app.core.tenant import PlatformContext
 from app.db.session import get_db
 from app.modules.ai.core.provider_egress import provider_egress
-from app.modules.ai.models.model import AiModel
-from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.schemas.model import ModelCreate, ModelOut, ModelUpdate
 from app.modules.ai.schemas.provider import (
     ProviderCreate,
@@ -30,27 +27,20 @@ router = APIRouter()
 async def get_available_models(
     capability: str | None = None,
     db: AsyncSession = Depends(get_db),
-    _platform: PlatformContext = Depends(require_platform_context),
+    platform: PlatformContext = Depends(require_platform_context),
 ):
     """返回所有启用的模型列表，供对话选择
 
     查询参数:
     - capability: 可选，按能力过滤（text / vision / image-gen）
     """
-    stmt = (
-        select(AiModel, AiProvider)
-        .join(AiProvider, AiModel.provider_id == AiProvider.provider_id)
-        .where(AiModel.is_enabled.is_(True), AiProvider.is_enabled.is_(True))
-        .order_by(AiModel.sort_order, AiModel.model_id)
+    rows = await model_service.list_available_with_provider(
+        db, capability, platform=platform
     )
-    result = await db.execute(stmt)
-    rows = result.all()
 
     models = []
     for model, provider in rows:
         caps = model.capabilities or []
-        if capability and capability not in caps:
-            continue
         allowed = await provider_egress.is_configuration_allowed(
             provider.provider_code,
             provider.base_url,
@@ -169,12 +159,11 @@ async def add_model(
     db: AsyncSession = Depends(get_db),
     platform: PlatformContext = Depends(require_platform_context),
 ):
-    await provider_service.get_by_id(db, provider_id, platform=platform)
     await model_service.create(
         db,
         provider_id,
         data,
-        create_by=f"platform:{platform.actor_user_id}",
+        create_by=f"platform:{platform.actor_principal_id}",
         platform=platform,
     )
     await db.commit()
@@ -192,7 +181,7 @@ async def update_model(
     db: AsyncSession = Depends(get_db),
     platform: PlatformContext = Depends(require_platform_context),
 ):
-    model = await model_service.get_by_id(db, model_id, platform=platform)
+    model = await model_service.get_by_id_for_write(db, model_id, platform=platform)
     if model.provider_id != provider_id:
         return ResponseModel.error(msg="模型不属于该提供商", code=400)
     await model_service.update(db, model_id, data, platform=platform)
@@ -210,7 +199,7 @@ async def delete_model(
     db: AsyncSession = Depends(get_db),
     platform: PlatformContext = Depends(require_platform_context),
 ):
-    model = await model_service.get_by_id(db, model_id, platform=platform)
+    model = await model_service.get_by_id_for_write(db, model_id, platform=platform)
     if model.provider_id != provider_id:
         return ResponseModel.error(msg="模型不属于该提供商", code=400)
     await model_service.delete(db, model_id, platform=platform)

@@ -77,6 +77,7 @@ async def _add_file_record(
                 tenant_code=f"tenant-{tenant_id}",
                 tenant_name=f"Tenant {tenant_id}",
                 status="1",
+                lifecycle_state="active",
                 row_version=1,
             )
         )

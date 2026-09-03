@@ -17,6 +17,10 @@ from app.modules.ai.models.message import AiMessage  # noqa: F401
 from app.modules.ai.models.prepared_action import AiPreparedAction  # noqa: F401
 from app.modules.ai.models.provider import AiProvider  # noqa: F401
 from app.modules.job.models.job import SysJob, SysJobLog  # noqa: F401
+from app.modules.platform.models import (  # noqa: F401
+    PlatformAuditLog,
+    PlatformPrincipal,
+)
 from app.modules.system.models.dept import Dept  # noqa: F401
 from app.modules.system.models.config import Config  # noqa: F401
 from app.modules.system.models.data_scope_demo import DataScopeDemo  # noqa: F401

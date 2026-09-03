@@ -12,7 +12,11 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.security import decrypt_value, encrypt_value
-from app.core.tenant import PlatformContext, TenantContext
+from app.core.tenant import (
+    PlatformContext,
+    TenantContext,
+    require_platform_permission,
+)
 from app.modules.ai.core.provider_egress import (
     provider_egress,
     provider_upstream_error,
@@ -26,21 +30,17 @@ from app.modules.ai.schemas.provider import (
     ProviderTestResult,
     ProviderUpdate,
 )
+from app.modules.platform.constants import PLATFORM_AI_READ, PLATFORM_AI_WRITE
 from app.utils.pagination import build_filters, paginate
 
 logger = logging.getLogger(__name__)
-
-
-def _require_platform(platform: PlatformContext) -> None:
-    if not isinstance(platform, PlatformContext):
-        raise TypeError("platform context is required")
 
 
 class ProviderService:
     """AI 提供商管理服务"""
 
     async def get_list(self, db: AsyncSession, query, *, platform: PlatformContext):
-        _require_platform(platform)
+        require_platform_permission(platform, PLATFORM_AI_READ)
         field_mapping = {
             "provider_code": "provider_code",
             "name": ("name", "contains"),
@@ -73,7 +73,7 @@ class ProviderService:
     async def get_all_enabled(
         self, db: AsyncSession, *, platform: PlatformContext
     ) -> list[AiProvider]:
-        _require_platform(platform)
+        require_platform_permission(platform, PLATFORM_AI_READ)
         stmt = select(AiProvider).where(AiProvider.is_enabled.is_(True))
         result = await db.execute(stmt)
         return list(result.scalars().all())
@@ -85,7 +85,11 @@ class ProviderService:
         *,
         platform: PlatformContext,
     ) -> AiProvider:
-        _require_platform(platform)
+        require_platform_permission(platform, PLATFORM_AI_READ)
+        return await self._get_by_id(db, provider_id)
+
+    @staticmethod
+    async def _get_by_id(db: AsyncSession, provider_id: int) -> AiProvider:
         obj = await db.get(AiProvider, provider_id)
         if not obj:
             raise NotFoundException(
@@ -96,7 +100,7 @@ class ProviderService:
     async def create(
         self, db: AsyncSession, data: ProviderCreate, *, platform: PlatformContext
     ) -> AiProvider:
-        _require_platform(platform)
+        require_platform_permission(platform, PLATFORM_AI_WRITE)
         existing = await db.execute(
             select(AiProvider).where(AiProvider.provider_code == data.provider_code)
         )
@@ -119,8 +123,8 @@ class ProviderService:
         *,
         platform: PlatformContext,
     ) -> AiProvider:
-        _require_platform(platform)
-        obj = await self.get_by_id(db, provider_id, platform=platform)
+        require_platform_permission(platform, PLATFORM_AI_WRITE)
+        obj = await self._get_by_id(db, provider_id)
         update_data = data.model_dump(exclude_unset=True)
 
         if "provider_code" in update_data:
@@ -158,8 +162,8 @@ class ProviderService:
     async def delete(
         self, db: AsyncSession, provider_id: int, *, platform: PlatformContext
     ) -> None:
-        _require_platform(platform)
-        obj = await self.get_by_id(db, provider_id, platform=platform)
+        require_platform_permission(platform, PLATFORM_AI_WRITE)
+        obj = await self._get_by_id(db, provider_id)
         await db.delete(obj)
 
     @staticmethod
@@ -175,8 +179,8 @@ class ProviderService:
         *,
         platform: PlatformContext,
     ) -> ProviderTestResult:
-        _require_platform(platform)
-        provider = await self.get_by_id(db, provider_id, platform=platform)
+        require_platform_permission(platform, PLATFORM_AI_WRITE)
+        provider = await self._get_by_id(db, provider_id)
         model = await db.get(AiModel, model_id)
         if model is None:
             raise BusinessException(

@@ -10,7 +10,13 @@ from app.core.tenant import PlatformContext
 from app.modules.ai.lifecycle import cleanup_prepared_actions_on_startup
 
 PLATFORM = PlatformContext(
-    actor_user_id=1, reason="startup recovery test", correlation_id="plan3"
+    actor_principal_id=0,
+    actor_name="test-ai-lifecycle",
+    principal_type="service",
+    permissions=frozenset({"platform:ai:lifecycle"}),
+    reason="startup recovery test",
+    ticket_id="TEST-LIFECYCLE",
+    correlation_id="plan3",
 )
 TENANT = tenant_context(actor_user_id=103)
 

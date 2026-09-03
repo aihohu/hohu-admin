@@ -2,25 +2,32 @@ from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import DuplicateException, NotFoundException
-from app.core.tenant import PlatformContext
+from app.core.tenant import PlatformContext, require_platform_permission
 from app.modules.ai.core.provider_egress import provider_egress
 from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.schemas.model import ModelCreate, ModelOption, ModelUpdate
+from app.modules.platform.constants import PLATFORM_AI_READ, PLATFORM_AI_WRITE
 
 
 class ModelService:
     """AI 模型管理服务"""
 
-    @staticmethod
-    def _require_platform(platform: PlatformContext) -> None:
-        if not isinstance(platform, PlatformContext):
-            raise TypeError("platform context is required")
-
     async def get_by_id(
         self, db: AsyncSession, model_id: int, *, platform: PlatformContext
     ) -> AiModel:
-        self._require_platform(platform)
+        require_platform_permission(platform, PLATFORM_AI_READ)
+        return await self._get_by_id(db, model_id)
+
+    async def get_by_id_for_write(
+        self, db: AsyncSession, model_id: int, *, platform: PlatformContext
+    ) -> AiModel:
+        """Resolve a mutation target without requiring a second read permission."""
+        require_platform_permission(platform, PLATFORM_AI_WRITE)
+        return await self._get_by_id(db, model_id)
+
+    @staticmethod
+    async def _get_by_id(db: AsyncSession, model_id: int) -> AiModel:
         obj = await db.get(AiModel, model_id)
         if not obj:
             raise NotFoundException(
@@ -31,7 +38,7 @@ class ModelService:
     async def get_by_provider(
         self, db: AsyncSession, provider_id: int, *, platform: PlatformContext
     ) -> list[AiModel]:
-        self._require_platform(platform)
+        require_platform_permission(platform, PLATFORM_AI_READ)
         stmt = (
             select(AiModel)
             .where(AiModel.provider_id == provider_id)
@@ -44,7 +51,7 @@ class ModelService:
         self, db: AsyncSession, capability: str, *, platform: PlatformContext
     ) -> list[AiModel]:
         """获取所有启用且包含指定能力的模型"""
-        self._require_platform(platform)
+        require_platform_permission(platform, PLATFORM_AI_READ)
         stmt = (
             select(AiModel)
             .join(AiProvider, AiModel.provider_id == AiProvider.provider_id)
@@ -58,11 +65,34 @@ class ModelService:
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_available_with_provider(
+        self,
+        db: AsyncSession,
+        capability: str | None,
+        *,
+        platform: PlatformContext,
+    ) -> list[tuple[AiModel, AiProvider]]:
+        """Load the platform catalog behind the same read permission boundary."""
+        require_platform_permission(platform, PLATFORM_AI_READ)
+        rows = (
+            await db.execute(
+                select(AiModel, AiProvider)
+                .join(AiProvider, AiModel.provider_id == AiProvider.provider_id)
+                .where(AiModel.is_enabled.is_(True), AiProvider.is_enabled.is_(True))
+                .order_by(AiModel.sort_order, AiModel.model_id)
+            )
+        ).all()
+        return [
+            (model, provider)
+            for model, provider in rows
+            if capability is None or capability in (model.capabilities or [])
+        ]
+
     async def list_options(
         self, db: AsyncSession, *, platform: PlatformContext
     ) -> list[ModelOption]:
         """Return the platform-global model catalog without a tenant policy view."""
-        self._require_platform(platform)
+        require_platform_permission(platform, PLATFORM_AI_READ)
         rows = (
             await db.execute(
                 select(AiModel, AiProvider)
@@ -90,7 +120,7 @@ class ModelService:
         *,
         platform: PlatformContext,
     ) -> AiModel:
-        self._require_platform(platform)
+        require_platform_permission(platform, PLATFORM_AI_WRITE)
         provider = await db.get(AiProvider, provider_id)
         if provider is None:
             raise NotFoundException(
@@ -121,8 +151,8 @@ class ModelService:
         *,
         platform: PlatformContext,
     ) -> AiModel:
-        self._require_platform(platform)
-        obj = await self.get_by_id(db, model_id, platform=platform)
+        require_platform_permission(platform, PLATFORM_AI_WRITE)
+        obj = await self._get_by_id(db, model_id)
         update_data = data.model_dump(exclude_unset=True)
         provider = await db.get(AiProvider, obj.provider_id)
         if provider is None:
@@ -152,8 +182,8 @@ class ModelService:
     async def delete(
         self, db: AsyncSession, model_id: int, *, platform: PlatformContext
     ) -> None:
-        self._require_platform(platform)
-        obj = await self.get_by_id(db, model_id, platform=platform)
+        require_platform_permission(platform, PLATFORM_AI_WRITE)
+        obj = await self._get_by_id(db, model_id)
         await db.delete(obj)
 
     async def _check_duplicate_name(

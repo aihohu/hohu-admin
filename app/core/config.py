@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    PLATFORM_ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=15, ge=1, le=60)
+    PLATFORM_AUDIT_MIN_RETENTION_DAYS: int = Field(default=90, ge=30, le=3650)
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # Tenant M1 remains single. The hosted locator contract is implemented for

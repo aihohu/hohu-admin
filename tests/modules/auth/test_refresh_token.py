@@ -36,6 +36,7 @@ def _make_user(*, user_id: int, name: str, status: str) -> User:
         tenant_code="default",
         tenant_name="Default Tenant",
         status="1",
+        lifecycle_state="active",
         row_version=1,
     )
     user = User(

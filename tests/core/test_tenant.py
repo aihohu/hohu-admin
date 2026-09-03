@@ -10,6 +10,7 @@ from app.core.tenant import (
     TenantContext,
     bind_tenant_context,
     create_worker_envelope,
+    require_platform_permission,
     resolve_tenant_id,
     revalidate_worker_envelope,
 )
@@ -43,29 +44,57 @@ def test_tenant_context_rejects_an_unknown_authority_source():
 
 
 @pytest.mark.parametrize(
-    ("actor_user_id", "reason", "correlation_id"),
+    ("actor_principal_id", "principal_type", "reason", "ticket_id", "correlation_id"),
     [
-        (True, "maintenance", "run-1"),
-        (-1, "maintenance", "run-1"),
-        (0, "   ", "run-1"),
-        (0, "maintenance", "   "),
+        (True, "human", "maintenance", "OPS-1", "run-1"),
+        (0, "human", "maintenance", "OPS-1", "run-1"),
+        (-1, "service", "maintenance", "OPS-1", "run-1"),
+        (1, "human", "   ", "OPS-1", "run-1"),
+        (1, "human", "maintenance", "   ", "run-1"),
+        (1, "human", "maintenance", "OPS-1", "   "),
     ],
 )
 def test_platform_context_rejects_invalid_audit_identity(
-    actor_user_id, reason, correlation_id
+    actor_principal_id, principal_type, reason, ticket_id, correlation_id
 ):
     with pytest.raises(ValueError):
         PlatformContext(
-            actor_user_id=actor_user_id,
+            actor_principal_id=actor_principal_id,
+            actor_name="platform-operator",
+            principal_type=principal_type,
+            permissions=frozenset({"platform:ai:read"}),
             reason=reason,
+            ticket_id=ticket_id,
             correlation_id=correlation_id,
         )
 
 
+def test_platform_context_enforces_exact_permissions():
+    platform = PlatformContext(
+        actor_principal_id=9,
+        actor_name="platform-auditor",
+        principal_type="human",
+        permissions=frozenset({"platform:ai:read"}),
+        reason="Review AI configuration",
+        ticket_id="SEC-42",
+        correlation_id="review-42",
+    )
+
+    require_platform_permission(platform, "platform:ai:read")
+    with pytest.raises(AuthorizationException) as exc_info:
+        require_platform_permission(platform, "platform:ai:write")
+
+    assert exc_info.value.error_code == "PLATFORM_PERMISSION_DENIED"
+
+
 async def test_platform_lifecycle_derives_an_explicit_control_plane_scope():
     platform = PlatformContext(
-        actor_user_id=0,
+        actor_principal_id=0,
+        actor_name="ai-lifecycle",
+        principal_type="service",
+        permissions=frozenset({"platform:ai:lifecycle"}),
         reason="AI lifecycle recovery",
+        ticket_id="SYSTEM-LIFECYCLE",
         correlation_id="lifecycle-1",
     )
     db = SimpleNamespace(

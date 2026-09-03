@@ -27,7 +27,13 @@ from app.modules.ai.service.model_service import model_service
 from app.modules.ai.service.provider_service import provider_service
 
 PLATFORM = PlatformContext(
-    actor_user_id=1, reason="provider service test", correlation_id="plan3"
+    actor_principal_id=1,
+    actor_name="test-platform-admin",
+    principal_type="human",
+    permissions=frozenset({"platform:ai:read", "platform:ai:write"}),
+    reason="provider service test",
+    ticket_id="TEST-PROVIDER",
+    correlation_id="plan3",
 )
 TENANT = tenant_context()
 

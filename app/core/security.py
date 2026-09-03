@@ -71,3 +71,17 @@ def create_refresh_token(subject: str | Any, *, tenant_id: int) -> str:
         "type": "refresh",
     }
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def create_platform_access_token(subject: str | Any, *, principal_version: int) -> str:
+    """Issue a short-lived platform token with no tenant authority claim."""
+    expire = datetime.now(UTC) + timedelta(
+        minutes=settings.PLATFORM_ACCESS_TOKEN_EXPIRE_MINUTES
+    )
+    to_encode: dict[str, Any] = {
+        "exp": expire,
+        "sub": str(subject),
+        "pver": str(principal_version),
+        "type": "platform_access",
+    }
+    return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
