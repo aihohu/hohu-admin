@@ -21,6 +21,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
+# AI 模型的复合外键指向 sys_user/sys_role/sys_tenant，mapper 配置期强制解析
+# 目标表；独立运行脚本必须先注册这些模型，否则 NoReferencedTableError。
+import app.modules.system.models  # noqa: E402, F401
 from app.core.config import settings
 from app.core.id_generator import next_id
 from app.modules.ai.constants import PUBLISHED_AGENT_CODES
