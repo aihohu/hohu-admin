@@ -802,6 +802,7 @@ def build_default_tenant() -> Tenant:
         tenant_name="Default Tenant",
         status=STATUS_ENABLED,
         lifecycle_state="active",
+        bootstrap_version=1,
         row_version=1,
     )
 

@@ -313,6 +313,7 @@ async def get_user_routes(
     if is_super_admin(current_user):
         result = await db.execute(
             select(Menu).where(
+                Menu.tenant_id == current_user.tenant_id,
                 Menu.menu_type.in_([MENU_TYPE_DIRECTORY, MENU_TYPE_MENU]),
                 Menu.status == STATUS_ENABLED,
             )
@@ -359,6 +360,7 @@ async def get_constant_routes():
 )
 async def is_route_exist(
     route_name: str = Query(..., description="前端路由名称", examples=["system"]),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -379,7 +381,10 @@ async def is_route_exist(
             "data": true
         }
     """
-    stmt = select(Menu).where(Menu.route_name == route_name)
+    stmt = select(Menu).where(
+        Menu.tenant_id == current_user.tenant_id,
+        Menu.route_name == route_name,
+    )
     result = await db.execute(stmt)
     exists = result.scalars().first() is not None
     return ResponseModel.success(data=exists)

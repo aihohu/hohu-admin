@@ -15,6 +15,8 @@ from app.modules.platform.schemas import (
     PlatformSupportAuditOut,
     PlatformSupportAuditPage,
     PlatformSupportAuditQuery,
+    PlatformTenantBootstrapOut,
+    PlatformTenantBootstrapRequest,
     PlatformTenantCreate,
     PlatformTenantOut,
     PlatformTenantPage,
@@ -22,6 +24,7 @@ from app.modules.platform.schemas import (
     PlatformTokenResponse,
 )
 from app.modules.platform.service import platform_auth_service
+from app.modules.platform.tenant_bootstrap_service import tenant_bootstrap_service
 from app.modules.system.service.tenant_lifecycle_service import (
     tenant_lifecycle_service,
 )
@@ -29,7 +32,7 @@ from app.modules.system.service.tenant_support_service import tenant_support_ser
 
 router = APIRouter()
 control_router = APIRouter()
-TenantId = Annotated[int, Path(ge=0)]
+TenantId = Annotated[int, Path(ge=0, le=9_223_372_036_854_775_807)]
 IdempotencyKey = Annotated[
     str,
     Header(
@@ -141,6 +144,32 @@ async def disable_tenant(
     await db.commit()
     request.state.platform_result_summary = {"recordCount": 1}
     return ResponseModel.success(data=PlatformTenantOut.from_record(tenant))
+
+
+@control_router.post(
+    "/tenants/{tenant_id}/bootstrap",
+    response_model=ResponseModel[PlatformTenantBootstrapOut],
+    summary="原子引导 prepared tenant",
+)
+async def bootstrap_tenant(
+    tenant_id: TenantId,
+    payload: PlatformTenantBootstrapRequest,
+    idempotency_key: IdempotencyKey,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    platform: PlatformContext = Depends(require_platform_context),
+):
+    result = await tenant_bootstrap_service.bootstrap(
+        db,
+        tenant_id=tenant_id,
+        default_model_id=int(payload.default_model_id),
+        admin_password=payload.admin_password.get_secret_value(),
+        idempotency_key=idempotency_key,
+        platform=platform,
+    )
+    await db.commit()
+    request.state.platform_result_summary = {"recordCount": 1}
+    return ResponseModel.success(data=PlatformTenantBootstrapOut.from_result(result))
 
 
 def _support_page(page) -> PlatformSupportAuditPage:

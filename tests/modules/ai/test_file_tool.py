@@ -10,6 +10,7 @@ tmp_path 写真实 .csv / .xlsx 文件，测完自动清理。
 
 import asyncio
 import csv
+import hashlib
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -78,6 +79,13 @@ async def _add_file_record(
                 tenant_name=f"Tenant {tenant_id}",
                 status="1",
                 lifecycle_state="active",
+                bootstrap_version=1,
+                bootstrap_key_hash=hashlib.sha256(
+                    f"file-tool-key:{tenant_id}".encode()
+                ).hexdigest(),
+                bootstrap_fingerprint=hashlib.sha256(
+                    f"file-tool-fingerprint:{tenant_id}".encode()
+                ).hexdigest(),
                 row_version=1,
             )
         )

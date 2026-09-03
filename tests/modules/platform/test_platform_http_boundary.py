@@ -15,9 +15,14 @@ from app.modules.auth import service as auth_service
 from app.modules.platform.constants import (
     PLATFORM_AI_READ,
     PLATFORM_SUPPORT_READ,
+    PLATFORM_TENANT_BOOTSTRAP,
     PLATFORM_TENANT_WRITE,
 )
 from app.modules.platform.service import platform_auth_service
+from app.modules.platform.tenant_bootstrap_service import (
+    TenantBootstrapResult,
+    tenant_bootstrap_service,
+)
 from app.modules.system.service.tenant_lifecycle_service import (
     tenant_lifecycle_service,
 )
@@ -398,3 +403,116 @@ async def test_platform_support_reader_cannot_prepare_tenant(client, monkeypatch
     business.assert_not_awaited()
     assert denied.await_args.kwargs["event_type"] == "denied"
     assert denied.await_args.kwargs["target_tenant_id"] == 991003
+
+
+async def test_bootstrap_http_keeps_secret_and_machine_ids_out_of_projection(
+    client, monkeypatch
+):
+    tenant_id = 991004
+    principal = SimpleNamespace(
+        principal_id=87,
+        principal_name="tenant-bootstrapper",
+        status="1",
+        row_version=1,
+        permissions=[PLATFORM_TENANT_BOOTSTRAP],
+    )
+    db = AsyncMock()
+    db.scalar.return_value = principal
+    bootstrap = AsyncMock(
+        return_value=TenantBootstrapResult(
+            tenant_code="tenant-gamma",
+            lifecycle_state="prepared",
+            admin_username="admin",
+            model_label="Safe Provider / Chat Model",
+            menu_count=47,
+            role_count=2,
+            model_policy_count=1,
+            agent_binding_count=4,
+            replayed=False,
+        )
+    )
+    authorized = AsyncMock(return_value=5401)
+    completed = AsyncMock(return_value=5402)
+    monkeypatch.setattr(tenant_bootstrap_service, "bootstrap", bootstrap)
+    monkeypatch.setattr(auth_service, "persist_platform_audit", authorized)
+    monkeypatch.setattr(
+        platform_audit_middleware, "persist_platform_completion", completed
+    )
+    app.dependency_overrides[get_db] = lambda: db
+    token = create_platform_access_token(subject="87", principal_version=1)
+    raw_password = "TenantAdmin123"
+    raw_key = "tenant-bootstrap-http-secret-key"
+
+    try:
+        response = await client.post(
+            f"/platform/tenants/{tenant_id}/bootstrap",
+            headers=_platform_headers(token) | {"Idempotency-Key": raw_key},
+            json={
+                "defaultModelId": "88001",
+                "adminPassword": raw_password,
+            },
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert set(data) == {
+        "tenantCode",
+        "lifecycleState",
+        "bootstrapStatus",
+        "adminUsername",
+        "modelLabel",
+        "menuCount",
+        "roleCount",
+        "modelPolicyCount",
+        "agentBindingCount",
+        "replayed",
+    }
+    assert raw_password not in response.text
+    assert raw_key not in response.text
+    assert "88001" not in response.text
+    assert authorized.await_args.kwargs["target_tenant_id"] == tenant_id
+    assert authorized.await_args.kwargs["request_summary"] == {"queryKeyCount": 0}
+    assert completed.await_args.kwargs["result_summary"] == {
+        "statusCode": 200,
+        "recordCount": 1,
+    }
+
+
+async def test_tenant_writer_cannot_reach_bootstrap_endpoint(client, monkeypatch):
+    tenant_id = 991005
+    principal = SimpleNamespace(
+        principal_id=88,
+        principal_name="tenant-writer",
+        status="1",
+        row_version=1,
+        permissions=[PLATFORM_TENANT_WRITE],
+    )
+    db = AsyncMock()
+    db.scalar.return_value = principal
+    business = AsyncMock()
+    denied = AsyncMock(return_value=5501)
+    monkeypatch.setattr(tenant_bootstrap_service, "bootstrap", business)
+    monkeypatch.setattr(auth_service, "persist_platform_audit", denied)
+    app.dependency_overrides[get_db] = lambda: db
+    token = create_platform_access_token(subject="88", principal_version=1)
+
+    try:
+        response = await client.post(
+            f"/platform/tenants/{tenant_id}/bootstrap",
+            headers=_platform_headers(token)
+            | {"Idempotency-Key": "tenant-bootstrap-http-denied"},
+            json={
+                "defaultModelId": "88002",
+                "adminPassword": "TenantAdmin123",
+            },
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 403
+    assert response.json()["errorCode"] == "PLATFORM_PERMISSION_DENIED"
+    business.assert_not_awaited()
+    assert denied.await_args.kwargs["permission"] == PLATFORM_TENANT_BOOTSTRAP
+    assert denied.await_args.kwargs["target_tenant_id"] == tenant_id

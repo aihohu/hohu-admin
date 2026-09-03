@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
@@ -88,12 +89,20 @@ async def test_plan5b_constraints_and_platform_audit_target_have_expected_shape(
 
 
 async def test_tenant_lifecycle_changes_bump_version_and_code_is_immutable(db_session):
+    tenant_id = next_id()
     tenant = Tenant(
-        tenant_id=next_id(),
+        tenant_id=tenant_id,
         tenant_code=f"lifecycle-{next_id()}",
         tenant_name="Lifecycle Tenant",
         status="1",
         lifecycle_state="active",
+        bootstrap_version=1,
+        bootstrap_key_hash=hashlib.sha256(
+            f"plan5b-key:{tenant_id}".encode()
+        ).hexdigest(),
+        bootstrap_fingerprint=hashlib.sha256(
+            f"plan5b-fingerprint:{tenant_id}".encode()
+        ).hexdigest(),
         row_version=1,
     )
     db_session.add(tenant)

@@ -1,3 +1,4 @@
+import hashlib
 from unittest.mock import AsyncMock
 
 import pytest
@@ -112,6 +113,13 @@ async def test_disable_tenant_is_idempotent_and_database_bumps_security_version(
         tenant_name="Active Tenant",
         status="1",
         lifecycle_state="active",
+        bootstrap_version=1,
+        bootstrap_key_hash=hashlib.sha256(
+            f"tenant-admin-key:{tenant_id}".encode()
+        ).hexdigest(),
+        bootstrap_fingerprint=hashlib.sha256(
+            f"tenant-admin-fingerprint:{tenant_id}".encode()
+        ).hexdigest(),
         row_version=1,
     )
     db_session.add(tenant)

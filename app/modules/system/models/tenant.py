@@ -49,10 +49,27 @@ class Tenant(Base):
             "AND provisioning_fingerprint ~ '^[0-9a-f]{64}$')",
             name="ck_sys_tenant_provisioning_hashes",
         ),
+        CheckConstraint(
+            "(tenant_id = 0 AND bootstrap_version = 1 "
+            "AND bootstrap_key_hash IS NULL AND bootstrap_fingerprint IS NULL) OR "
+            "(tenant_id <> 0 AND bootstrap_version = 0 "
+            "AND bootstrap_key_hash IS NULL AND bootstrap_fingerprint IS NULL) OR "
+            "(tenant_id <> 0 AND bootstrap_version = 1 "
+            "AND bootstrap_key_hash IS NOT NULL "
+            "AND bootstrap_fingerprint IS NOT NULL "
+            "AND bootstrap_key_hash ~ '^[0-9a-f]{64}$' "
+            "AND bootstrap_fingerprint ~ '^[0-9a-f]{64}$')",
+            name="ck_sys_tenant_bootstrap_state",
+        ),
+        CheckConstraint(
+            "lifecycle_state <> 'active' OR bootstrap_version >= 1",
+            name="ck_sys_tenant_active_bootstrapped",
+        ),
         UniqueConstraint("tenant_code", name="uq_sys_tenant_tenant_code"),
         UniqueConstraint(
             "provisioning_key_hash", name="uq_sys_tenant_provisioning_key_hash"
         ),
+        UniqueConstraint("bootstrap_key_hash", name="uq_sys_tenant_bootstrap_key_hash"),
     )
 
     tenant_id: Mapped[int] = mapped_column(
@@ -75,6 +92,21 @@ class Tenant(Base):
     )
     provisioning_fingerprint: Mapped[str | None] = mapped_column(
         String(64), nullable=True, comment="tenant prepare 规范化请求 SHA-256"
+    )
+    bootstrap_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+        comment="租户原子引导版本；0=未引导，1=Plan 5-B-B 完成",
+    )
+    bootstrap_key_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, comment="tenant bootstrap 幂等键 SHA-256"
+    )
+    bootstrap_fingerprint: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        comment="tenant bootstrap 请求 keyed-HMAC fingerprint",
     )
     row_version: Mapped[int] = mapped_column(
         Integer,

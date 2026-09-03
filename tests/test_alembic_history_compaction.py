@@ -35,6 +35,7 @@ ACTIVE_REVISIONS = {
     "1c2d3e4f5a6b": "f0a1b2c3d4e5",
     "2d3e4f5a6b7c": "1c2d3e4f5a6b",
     "3e4f5a6b7c8d": "2d3e4f5a6b7c",
+    "4f5a6b7c8d9e": "3e4f5a6b7c8d",
 }
 REMOVED_REVISIONS = {
     "3b03d2eccf39",
@@ -114,7 +115,7 @@ def test_history_preserves_the_release_boundary_and_has_one_compacted_head() -> 
     assert set(revisions) == (
         PUBLISHED_REVISIONS | set(COMPACTED_REVISIONS) | set(ACTIVE_REVISIONS)
     )
-    assert scripts.get_heads() == ["3e4f5a6b7c8d"]
+    assert scripts.get_heads() == ["4f5a6b7c8d9e"]
     for revision, down_revision in (COMPACTED_REVISIONS | ACTIVE_REVISIONS).items():
         assert revisions[revision].down_revision == down_revision
 

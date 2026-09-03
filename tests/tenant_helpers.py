@@ -1,5 +1,7 @@
 """Explicit trusted tenant fixtures shared by tenant-aware tests."""
 
+import hashlib
+
 from app.core.id_generator import next_id
 from app.core.tenant import TenantContext, bind_tenant_context
 from app.modules.system.models.tenant import Tenant
@@ -34,6 +36,13 @@ async def create_test_tenant(db, *, prefix: str) -> Tenant:
         tenant_name=f"{prefix} {marker}",
         status="1",
         lifecycle_state="active",
+        bootstrap_version=1,
+        bootstrap_key_hash=hashlib.sha256(
+            f"test-bootstrap-key:{marker}".encode()
+        ).hexdigest(),
+        bootstrap_fingerprint=hashlib.sha256(
+            f"test-bootstrap-fingerprint:{marker}".encode()
+        ).hexdigest(),
         row_version=1,
     )
     db.add(tenant)

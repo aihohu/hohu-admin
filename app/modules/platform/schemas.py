@@ -1,12 +1,21 @@
+import re
 from datetime import UTC, datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_serializer,
+    field_validator,
+)
 from pydantic.alias_generators import to_camel
 
 from app.core.base_response import PageResult
 from app.core.tenant import normalize_tenant_code
 from app.modules.platform.constants import PLATFORM_PRINCIPAL_NAME_RE
 from app.schemas.types import LocalNaiveDatetime
+from app.utils.validators import validate_password
 
 
 class PlatformLoginCredentials(BaseModel):
@@ -72,6 +81,7 @@ class PlatformTenantOut(BaseModel):
     tenant_name: str
     enabled: bool
     lifecycle_state: str
+    bootstrap_status: str
     row_version: int
     created_at: datetime
     updated_at: datetime
@@ -86,6 +96,9 @@ class PlatformTenantOut(BaseModel):
             tenant_name=tenant.tenant_name,
             enabled=tenant.status == "1",
             lifecycle_state=tenant.lifecycle_state,
+            bootstrap_status=(
+                "ready" if getattr(tenant, "bootstrap_version", 0) >= 1 else "pending"
+            ),
             row_version=tenant.row_version,
             created_at=tenant.created_at,
             updated_at=tenant.updated_at,
@@ -104,6 +117,65 @@ class PlatformTenantOut(BaseModel):
 
 class PlatformTenantPage(PageResult[PlatformTenantOut]):
     pass
+
+
+class PlatformTenantBootstrapRequest(BaseModel):
+    default_model_id: str
+    admin_password: SecretStr = Field(min_length=6, max_length=20)
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    @field_validator("default_model_id", mode="before")
+    @classmethod
+    def validate_model_id(cls, value: object) -> str:
+        if (
+            not isinstance(value, str)
+            or re.fullmatch(r"[1-9][0-9]*", value) is None
+            or int(value) > 9_223_372_036_854_775_807
+        ):
+            raise ValueError("defaultModelId must be a positive Snowflake ID string")
+        return value
+
+    @field_validator("admin_password", mode="before")
+    @classmethod
+    def validate_admin_password(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise ValueError("adminPassword must be a string")
+        return validate_password(value)
+
+
+class PlatformTenantBootstrapOut(BaseModel):
+    tenant_code: str
+    lifecycle_state: str
+    bootstrap_status: str
+    admin_username: str
+    model_label: str
+    menu_count: int = Field(ge=0)
+    role_count: int = Field(ge=0)
+    model_policy_count: int = Field(ge=0)
+    agent_binding_count: int = Field(ge=0)
+    replayed: bool
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    @classmethod
+    def from_result(cls, result) -> "PlatformTenantBootstrapOut":
+        return cls(
+            tenant_code=result.tenant_code,
+            lifecycle_state=result.lifecycle_state,
+            bootstrap_status="ready",
+            admin_username=result.admin_username,
+            model_label=result.model_label,
+            menu_count=result.menu_count,
+            role_count=result.role_count,
+            model_policy_count=result.model_policy_count,
+            agent_binding_count=result.agent_binding_count,
+            replayed=result.replayed,
+        )
 
 
 class PlatformSupportAuditQuery(BaseModel):

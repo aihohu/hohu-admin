@@ -24,6 +24,11 @@ from app.constants import (
 from app.modules.ai.agents.tools import load_builtin_tools
 from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.system.constants import DEPT_MOVE_PERMISSION, USER_ROLE_AUTH_PERMISSION
+from app.modules.system.hosted_menu_seed import (
+    HOSTED_MENU_BLUEPRINTS,
+    HOSTED_PERMISSION_CODES,
+    HOSTED_ROUTE_NAMES,
+)
 from app.utils.validators import validate_password
 from scripts.init_db import (
     build_default_tenant,
@@ -42,6 +47,74 @@ def test_default_tenant_seed_uses_reserved_identity_and_enabled_status():
     assert tenant.tenant_code == "default"
     assert tenant.status == STATUS_ENABLED
     assert tenant.row_version == 1
+
+
+def test_hosted_manifest_is_immutable_subset_of_fresh_seed():
+    fresh_routes = {menu.route_name for menu in init_menus if menu.route_name}
+    fresh_permissions = {menu.permission for menu in init_menus if menu.permission}
+    assert HOSTED_ROUTE_NAMES <= fresh_routes
+    assert HOSTED_PERMISSION_CODES <= fresh_permissions
+
+    keys = {blueprint.key for blueprint in HOSTED_MENU_BLUEPRINTS}
+    assert len(keys) == len(HOSTED_MENU_BLUEPRINTS)
+    assert all(
+        blueprint.parent_key is None or blueprint.parent_key in keys
+        for blueprint in HOSTED_MENU_BLUEPRINTS
+    )
+    assert HOSTED_ROUTE_NAMES.isdisjoint({"ai_provider", "ai_agent"})
+    assert HOSTED_PERMISSION_CODES.isdisjoint(
+        {
+            "ai:agent:list",
+            "ai:agent:edit",
+            "monitor:operation-log:delete",
+            "monitor:operation-log:clean",
+            "monitor:login-log:delete",
+            "monitor:login-log:clean",
+        }
+    )
+
+    fresh_by_route = {
+        menu.route_name: menu for menu in init_menus if menu.route_name is not None
+    }
+    fresh_by_permission = {
+        menu.permission: menu for menu in init_menus if menu.permission is not None
+    }
+    fresh_by_id = {menu.menu_id: menu for menu in init_menus}
+    for blueprint in HOSTED_MENU_BLUEPRINTS:
+        source = (
+            fresh_by_route[blueprint.route_name]
+            if blueprint.route_name is not None
+            else fresh_by_permission[blueprint.permission]
+        )
+        source_parent = fresh_by_id.get(source.parent_id)
+        assert (
+            source_parent.route_name if source_parent else None
+        ) == blueprint.parent_key
+        for field in (
+            "menu_name",
+            "menu_type",
+            "route_name",
+            "route_path",
+            "component",
+            "page",
+            "layout",
+            "i18n_key",
+            "icon",
+            "icon_type",
+            "order",
+            "hide_in_menu",
+            "keep_alive",
+            "constant",
+            "multi_tab",
+            "permission",
+        ):
+            source_value = getattr(source, field)
+            if field == "order" and source_value is None:
+                source_value = 0
+            assert source_value == getattr(blueprint, field), (
+                blueprint.key,
+                field,
+            )
 
 
 def _find_menu_by_permission(menus: list, perm: str):
