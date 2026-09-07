@@ -294,6 +294,15 @@ class AuthService:
             raise AuthenticationException(error_code="INVALID_CREDENTIALS")
         if settings.TENANT_MODE == "single" and tenant.tenant_id != DEFAULT_TENANT_ID:
             raise AuthenticationException(error_code="INVALID_CREDENTIALS")
+        if settings.TENANT_MODE == "hosted":
+            try:
+                require_tenant_runtime_enabled(tenant.tenant_id, surface="login")
+            except AuthenticationException:
+                # Public login must not reveal whether a valid tenant was selected
+                # for the production canary.
+                raise AuthenticationException(
+                    error_code="INVALID_CREDENTIALS"
+                ) from None
         return tenant
 
     async def _verify_password_login(self, cred, db, *, tenant: Tenant):
@@ -371,7 +380,7 @@ async def refresh_access_token(refresh_token: str) -> tuple[str, str]:
 
     # 查 DB 校验用户存在且启用，防止禁用/删除用户用旧 refresh token 持续换新
     user_id, tenant_id, tenant_version = _parse_token_identity(payload)
-    require_tenant_runtime_enabled(tenant_id)
+    require_tenant_runtime_enabled(tenant_id, surface="refresh")
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(User)
@@ -426,7 +435,7 @@ async def get_current_user(
         if payload.get("type") != "access":
             raise AuthenticationException("Token 类型错误", error_code="TOKEN_EXPIRED")
         user_id, tenant_id, tenant_version = _parse_token_identity(payload)
-        require_tenant_runtime_enabled(tenant_id)
+        require_tenant_runtime_enabled(tenant_id, surface="access")
     except JWTError:
         raise AuthenticationException("Token 无效或已过期", error_code="TOKEN_EXPIRED")
 

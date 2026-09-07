@@ -207,6 +207,9 @@ class TestMetricsEndpoint:
         assert "ai_tool_calls_total" in body
         assert "ai_hitl_pending_count" in body
         assert "ai_security_events_total" in body
+        assert "tenant_hosted_gate_decisions_total" in body
+        assert "tenant_hosted_rollout_info" in body
+        assert "hohu_build_info" in body
 
     def test_metrics_endpoint_not_in_openapi(self) -> None:
         """/metrics 用 include_in_schema=False 不进 OpenAPI（内部接口）"""

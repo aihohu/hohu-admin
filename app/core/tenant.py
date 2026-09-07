@@ -10,12 +10,24 @@ from typing import Any, Literal, Protocol
 from app.constants import STATUS_ENABLED
 from app.core.config import settings
 from app.core.exceptions import AuthenticationException, AuthorizationException
+from app.core.tenant_rollout_metrics import (
+    HostedGateSurface,
+    configure_hosted_rollout_info,
+    record_hosted_gate_decision,
+)
 
 DEFAULT_TENANT_ID = 0
 DEFAULT_TENANT_CODE = "default"
 _TENANT_CODE_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])$")
 _PLATFORM_PERMISSION_RE = re.compile(
     r"^platform:[a-z][a-z0-9_-]{0,31}:[a-z][a-z0-9_-]{0,31}$"
+)
+
+configure_hosted_rollout_info(
+    mode=settings.TENANT_MODE,
+    login_gate=settings.TENANT_HOSTED_LOGIN_ENABLED,
+    target_configured=settings.TENANT_HOSTED_CANARY_TENANT_ID is not None,
+    build_sha=settings.RELEASE_BUILD_SHA,
 )
 
 
@@ -185,11 +197,33 @@ def normalize_tenant_code(value: str | None) -> str | None:
     return normalized if _TENANT_CODE_RE.fullmatch(normalized) else None
 
 
-def require_tenant_runtime_enabled(tenant_id: int) -> None:
-    """Reject non-default tenant authority when the hosted release gate is closed."""
+def is_tenant_runtime_enabled(tenant_id: int) -> bool:
+    """Return whether one canonical tenant id is inside the runtime rollout."""
+    if isinstance(tenant_id, bool) or not isinstance(tenant_id, int) or tenant_id < 0:
+        raise ValueError("tenant_id must be a non-negative integer")
     if tenant_id == DEFAULT_TENANT_ID:
-        return
-    if settings.TENANT_MODE != "hosted" or not settings.TENANT_HOSTED_LOGIN_ENABLED:
+        return True
+    return (
+        settings.TENANT_MODE == "hosted"
+        and settings.TENANT_HOSTED_LOGIN_ENABLED
+        and settings.TENANT_HOSTED_CANARY_TENANT_ID == tenant_id
+    )
+
+
+def require_tenant_runtime_enabled(
+    tenant_id: int, *, surface: HostedGateSurface
+) -> None:
+    """Reject authority outside the single configured hosted canary target."""
+    allowed = is_tenant_runtime_enabled(tenant_id)
+    result = (
+        "default"
+        if tenant_id == DEFAULT_TENANT_ID
+        else "allowed"
+        if allowed
+        else "blocked"
+    )
+    record_hosted_gate_decision(surface=surface, result=result)
+    if not allowed:
         raise AuthenticationException(
             "Hosted Tenant 访问已关闭",
             error_code="TENANT_HOSTED_ACCESS_DISABLED",
@@ -275,7 +309,7 @@ def revalidate_worker_envelope(
         raise AuthenticationException(
             "租户上下文无效", error_code="TENANT_CONTEXT_INVALID"
         )
-    require_tenant_runtime_enabled(envelope.tenant_id)
+    require_tenant_runtime_enabled(envelope.tenant_id, surface="worker")
 
     persisted_facts = (
         live_tenant.tenant_id,

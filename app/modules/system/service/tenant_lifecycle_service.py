@@ -22,6 +22,7 @@ from app.core.tenant import (
     normalize_tenant_code,
     require_platform_permission,
 )
+from app.core.tenant_rollout_metrics import record_hosted_gate_decision
 from app.modules.platform.constants import (
     PLATFORM_AI_READ,
     PLATFORM_AI_WRITE,
@@ -231,10 +232,18 @@ class TenantLifecycleService:
                 error_code="PLATFORM_TENANT_ACTIVATION_DISABLED",
             )
         if tenant_id == DEFAULT_TENANT_ID:
+            record_hosted_gate_decision(surface="activation", result="default")
             raise BusinessRuleException(
                 "Default Tenant 不能通过平台 API 激活",
                 error_code="PLATFORM_DEFAULT_TENANT_IMMUTABLE",
             )
+        if settings.TENANT_HOSTED_CANARY_TENANT_ID != tenant_id:
+            record_hosted_gate_decision(surface="activation", result="blocked")
+            raise BusinessRuleException(
+                "目标租户未进入 Hosted canary",
+                error_code="PLATFORM_TENANT_CANARY_NOT_ALLOWED",
+            )
+        record_hosted_gate_decision(surface="activation", result="allowed")
         tenant = await db.scalar(
             select(Tenant).where(Tenant.tenant_id == tenant_id).with_for_update()
         )

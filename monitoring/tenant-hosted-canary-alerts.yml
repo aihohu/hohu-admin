@@ -1,0 +1,60 @@
+# Plan 7-B controlled production canary rules.
+#
+# Enable this rule file only while the Prometheus scrape job is named
+# hohu-admin-hosted-canary. All queries use frozen low-cardinality labels and
+# never attach tenant, user, URL, or token identity.
+
+groups:
+  - name: tenant_hosted_canary
+    interval: 15s
+    rules:
+      - alert: HostedCanaryConfigurationMissing
+        expr: |
+          absent(tenant_hosted_rollout_info{job="hohu-admin-hosted-canary",mode="hosted",login_gate="enabled",target="configured"})
+          or max(tenant_hosted_rollout_info{job="hohu-admin-hosted-canary",mode!="hosted"}) > 0
+          or max(tenant_hosted_rollout_info{job="hohu-admin-hosted-canary",login_gate!="enabled"}) > 0
+          or max(tenant_hosted_rollout_info{job="hohu-admin-hosted-canary",target!="configured"}) > 0
+          or max(hohu_build_info{job="hohu-admin-hosted-canary",sha="unbound"}) > 0
+          or absent(hohu_build_info{job="hohu-admin-hosted-canary",sha!="unbound"})
+          or count(count by (sha) (hohu_build_info{job="hohu-admin-hosted-canary",sha!="unbound"})) != 1
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Hosted canary configuration or build identity is invalid"
+          description: |
+            Stop canary traffic and let the trusted deployment orchestrator
+            switch to single mode. Verify mode, gate, target, and build SHA.
+
+      - alert: HostedCanaryUnexpectedActivationAttempt
+        expr: |
+          increase(tenant_hosted_gate_decisions_total{job="hohu-admin-hosted-canary",surface="activation",result="blocked"}[5m]) > 0
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "A non-target tenant activation was attempted"
+          description: "Stop activation and inspect the platform audit trail."
+
+      - alert: HostedCanaryNonTargetAuthorityObserved
+        expr: |
+          sum(increase(tenant_hosted_gate_decisions_total{job="hohu-admin-hosted-canary",surface=~"access|refresh|worker",result="blocked"}[5m])) > 0
+        for: 1m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Non-target hosted authority was rejected"
+          description: "Inspect stale access, refresh, and worker credentials."
+
+      - alert: HostedCanaryLoginDenialsHigh
+        expr: |
+          sum(rate(tenant_hosted_gate_decisions_total{job="hohu-admin-hosted-canary",surface="login",result="blocked"}[5m])) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Non-target hosted login denials remain elevated"
+          description: "Inspect tenant locator configuration and login sources."

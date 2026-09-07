@@ -163,6 +163,7 @@ async def test_bootstrapped_prepared_tenant_can_be_activated_once(
     monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
     monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
     tenant_id = next_id()
+    monkeypatch.setattr(settings, "TENANT_HOSTED_CANARY_TENANT_ID", tenant_id)
     tenant = Tenant(
         tenant_id=tenant_id,
         tenant_code=f"activate-{tenant_id}",
@@ -214,6 +215,26 @@ async def test_activation_gate_fails_before_database_access(monkeypatch):
     db.execute.assert_not_awaited()
 
 
+async def test_activation_rejects_non_canary_target_before_database_access(
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
+    monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
+    monkeypatch.setattr(settings, "TENANT_HOSTED_CANARY_TENANT_ID", 22)
+    db = AsyncMock()
+
+    with pytest.raises(BusinessException) as exc_info:
+        await tenant_lifecycle_service.activate_tenant(
+            db,
+            tenant_id=23,
+            platform=_platform(PLATFORM_TENANT_ACTIVATE, 23),
+        )
+
+    assert exc_info.value.error_code == "PLATFORM_TENANT_CANARY_NOT_ALLOWED"
+    db.scalar.assert_not_awaited()
+    db.execute.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     ("bootstrap_version", "lifecycle_state", "expected_error"),
     [
@@ -231,6 +252,7 @@ async def test_activation_rejects_unready_or_previously_disabled_tenant(
     monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
     monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
     tenant_id = next_id()
+    monkeypatch.setattr(settings, "TENANT_HOSTED_CANARY_TENANT_ID", tenant_id)
     bootstrapped = bootstrap_version == 1
     tenant = Tenant(
         tenant_id=tenant_id,

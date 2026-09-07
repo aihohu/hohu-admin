@@ -12,11 +12,17 @@ from app.core.tenant import (
     bind_tenant_context,
     create_worker_envelope,
     require_platform_permission,
+    require_tenant_runtime_enabled,
     resolve_tenant_id,
     revalidate_worker_envelope,
 )
 from app.modules.ai.lifecycle import _tenant_context
 from app.modules.system.models.user import User
+
+
+@pytest.fixture(autouse=True)
+def _hosted_canary_target(monkeypatch):
+    monkeypatch.setattr(settings, "TENANT_HOSTED_CANARY_TENANT_ID", 7)
 
 
 def test_tenant_context_is_frozen_and_is_the_primary_tenant_source():
@@ -303,6 +309,55 @@ def test_worker_envelope_rejects_non_default_tenant_after_hosted_rollback(
             live_tenant=SimpleNamespace(
                 tenant_id=7,
                 tenant_code="acme",
+                status="1",
+                row_version=3,
+            ),
+            secret="test-secret",
+        )
+
+    assert exc_info.value.error_code == "TENANT_HOSTED_ACCESS_DISABLED"
+
+
+def test_hosted_runtime_allows_only_the_configured_canary_tenant(monkeypatch):
+    monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
+    monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
+    monkeypatch.setattr(settings, "TENANT_HOSTED_CANARY_TENANT_ID", 7)
+
+    require_tenant_runtime_enabled(0, surface="access")
+    require_tenant_runtime_enabled(7, surface="access")
+
+    with pytest.raises(AuthenticationException) as exc_info:
+        require_tenant_runtime_enabled(8, surface="access")
+
+    assert exc_info.value.error_code == "TENANT_HOSTED_ACCESS_DISABLED"
+
+
+def test_worker_envelope_rejects_a_non_target_tenant_before_live_state_use(
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
+    monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
+    monkeypatch.setattr(settings, "TENANT_HOSTED_CANARY_TENANT_ID", 7)
+    tenant = TenantContext(
+        tenant_id=8,
+        tenant_code="other",
+        actor_user_id=101,
+        tenant_version=3,
+        source="access_token",
+    )
+    envelope = create_worker_envelope(
+        tenant,
+        job_id="job-non-target",
+        scope_hash="scope-v1",
+        secret="test-secret",
+    )
+
+    with pytest.raises(AuthenticationException) as exc_info:
+        revalidate_worker_envelope(
+            envelope,
+            live_tenant=SimpleNamespace(
+                tenant_id=8,
+                tenant_code="other",
                 status="1",
                 row_version=3,
             ),

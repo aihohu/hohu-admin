@@ -23,6 +23,11 @@ from app.modules.system.models.tenant import Tenant
 from app.modules.system.models.user import User
 
 
+@pytest.fixture(autouse=True)
+def _hosted_canary_target(monkeypatch):
+    monkeypatch.setattr(settings, "TENANT_HOSTED_CANARY_TENANT_ID", 22)
+
+
 def _scalar_result(value):
     result = MagicMock()
     result.scalars.return_value.first.return_value = value
@@ -246,17 +251,97 @@ def test_hosted_login_requires_explicit_release_gate_from_settings():
         SECRET_KEY=settings.SECRET_KEY,
         TENANT_MODE="hosted",
         TENANT_HOSTED_LOGIN_ENABLED=True,
+        TENANT_HOSTED_CANARY_TENANT_ID=22,
     )
 
     assert enabled.TENANT_MODE == "hosted"
     assert enabled.TENANT_HOSTED_LOGIN_ENABLED is True
+    assert enabled.TENANT_HOSTED_CANARY_TENANT_ID == 22
 
     with pytest.raises(ValidationError):
         Settings(
             DATABASE_URL=settings.DATABASE_URL,
             SECRET_KEY=settings.SECRET_KEY,
             TENANT_MODE="hosted",
+            TENANT_HOSTED_CANARY_TENANT_ID=22,
         )
+
+    with pytest.raises(ValidationError):
+        Settings(
+            DATABASE_URL=settings.DATABASE_URL,
+            SECRET_KEY=settings.SECRET_KEY,
+            TENANT_MODE="hosted",
+            TENANT_HOSTED_LOGIN_ENABLED=True,
+        )
+
+    with pytest.raises(ValidationError):
+        Settings(
+            DATABASE_URL=settings.DATABASE_URL,
+            SECRET_KEY=settings.SECRET_KEY,
+            TENANT_MODE="hosted",
+            TENANT_HOSTED_LOGIN_ENABLED=True,
+            TENANT_HOSTED_CANARY_TENANT_ID=0,
+        )
+
+
+def test_production_hosted_mode_requires_an_exact_release_build_sha():
+    arguments = {
+        "DATABASE_URL": settings.DATABASE_URL,
+        "SECRET_KEY": settings.SECRET_KEY,
+        "ENV": "prod",
+        "TENANT_MODE": "hosted",
+        "TENANT_HOSTED_LOGIN_ENABLED": True,
+        "TENANT_HOSTED_CANARY_TENANT_ID": 22,
+    }
+
+    with pytest.raises(ValidationError):
+        Settings(**arguments)
+    with pytest.raises(ValidationError):
+        Settings(**arguments, RELEASE_BUILD_SHA="a" * 12)
+
+    configured = Settings(**arguments, RELEASE_BUILD_SHA="A" * 40)
+    assert configured.RELEASE_BUILD_SHA == "a" * 40
+
+
+def test_runtime_configuration_errors_do_not_echo_sensitive_inputs():
+    sentinel = "plan7b-secret-must-not-leak"
+
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(
+            DATABASE_URL=settings.DATABASE_URL,
+            SECRET_KEY=sentinel,
+            TENANT_MODE="hosted",
+            TENANT_HOSTED_LOGIN_ENABLED=True,
+        )
+
+    assert sentinel not in str(exc_info.value)
+
+
+async def test_hosted_login_rejects_a_non_target_before_user_lookup(monkeypatch):
+    monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
+    monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
+    monkeypatch.setattr(settings, "TENANT_HOSTED_CANARY_TENANT_ID", 22)
+    non_target = _tenant(tenant_id=23, code="tenant-c")
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_scalar_result(non_target))
+
+    with (
+        patch("app.modules.auth.service.verify_password", return_value=True) as verify,
+        patch.object(auth_service, "_write_login_log", AsyncMock()),
+        pytest.raises(AuthenticationException) as exc_info,
+    ):
+        await auth_service.authenticate(
+            LoginCredentials(
+                tenant_code="tenant-c",
+                user_name="alice",
+                password="secret",
+            ),
+            db,
+        )
+
+    assert exc_info.value.error_code == "INVALID_CREDENTIALS"
+    assert db.execute.await_count == 1
+    verify.assert_called_once()
 
 
 async def test_docs_login_forwards_host_locator_to_authentication():
@@ -307,6 +392,7 @@ async def test_password_login_rejects_missing_password_without_server_error(
 async def test_current_user_rejects_tid_mismatch_and_old_token_without_tid(monkeypatch):
     monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
     monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
+    monkeypatch.setattr(settings, "TENANT_HOSTED_CANARY_TENANT_ID", 9)
     tenant = _tenant(tenant_id=0, code="default")
     user = _user(user_id=101, tenant=tenant)
     db = AsyncMock()
@@ -435,6 +521,7 @@ async def test_current_user_binds_the_canonical_tenant_context(monkeypatch):
 async def test_refresh_rejects_tid_mismatch(monkeypatch):
     monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
     monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
+    monkeypatch.setattr(settings, "TENANT_HOSTED_CANARY_TENANT_ID", 9)
     tenant = _tenant(tenant_id=0, code="default")
     user = _user(user_id=101, tenant=tenant)
     token = create_refresh_token(subject="101", tenant_id=9, tenant_version=1)

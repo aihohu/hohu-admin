@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Literal
 
 from pydantic import Field, model_validator
@@ -22,6 +23,16 @@ class Settings(BaseSettings):
             self.APP_ROLE = "all" if self.ENV == "dev" else "api"
         if self.TENANT_MODE == "hosted" and not self.TENANT_HOSTED_LOGIN_ENABLED:
             raise ValueError("hosted tenant mode requires the explicit release gate")
+        if self.TENANT_MODE == "hosted" and self.TENANT_HOSTED_CANARY_TENANT_ID is None:
+            raise ValueError("hosted tenant mode requires one explicit canary tenant")
+        if self.TENANT_MODE == "single" and self.TENANT_HOSTED_LOGIN_ENABLED:
+            raise ValueError("hosted tenant login gate requires hosted tenant mode")
+        build_sha = self.RELEASE_BUILD_SHA.strip().lower()
+        if build_sha and re.fullmatch(r"[0-9a-f]{40}", build_sha) is None:
+            raise ValueError("release build SHA must be a full 40-character Git SHA")
+        if self.ENV == "prod" and self.TENANT_MODE == "hosted" and not build_sha:
+            raise ValueError("production hosted mode requires a release build SHA")
+        self.RELEASE_BUILD_SHA = build_sha
         return self
 
     DATABASE_URL: str
@@ -36,6 +47,14 @@ class Settings(BaseSettings):
     # must also set the independent release gate after completing Plan 6 checks.
     TENANT_MODE: Literal["single", "hosted"] = "single"
     TENANT_HOSTED_LOGIN_ENABLED: bool = False
+    TENANT_HOSTED_CANARY_TENANT_ID: int | None = Field(
+        default=None,
+        gt=0,
+        le=9_223_372_036_854_775_807,
+    )
+    # Full immutable source identity exposed only through the internal metrics
+    # endpoint. It is mandatory before a production hosted process may start.
+    RELEASE_BUILD_SHA: str = ""
     # Optional hosted-mode suffix, e.g. "example.com" for acme.example.com.
     TENANT_HOST_SUFFIX: str = ""
 
