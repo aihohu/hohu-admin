@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 from datetime import UTC, datetime
 from pathlib import Path
@@ -5,15 +6,19 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from jose import jwt
 from sqlalchemy import delete, insert, update
 from sqlalchemy.exc import DBAPIError
 
+from app.core.config import settings
 from app.core.exceptions import BusinessException
 from app.core.security import create_platform_access_token, get_password_hash
-from app.modules.platform.audit import add_platform_completion
+from app.modules.platform.audit import add_platform_audit, add_platform_completion
 from app.modules.platform.auth import authenticate_platform_token
 from app.modules.platform.constants import PLATFORM_AI_READ, PLATFORM_AI_WRITE
 from app.modules.platform.models import PlatformAuditLog, PlatformPrincipal
+from app.modules.platform.schemas import PlatformLoginCredentials
+from app.modules.platform.service import platform_auth_service
 
 
 def _load_plan5a_migration():
@@ -105,6 +110,67 @@ async def test_platform_security_changes_automatically_revoke_old_versions(db_se
     )
     await db_session.refresh(principal)
     assert principal.row_version == 5
+
+
+async def test_platform_login_refreshes_server_managed_version_before_token_issue(
+    db_session,
+):
+    password = "a-long-test-password"
+    principal = PlatformPrincipal(
+        principal_name="test_platform_login_refresh",
+        display_name="Test Platform Login Refresh",
+        hashed_password=get_password_hash(password),
+        permissions=[PLATFORM_AI_READ],
+    )
+    db_session.add(principal)
+    await db_session.flush()
+
+    token = await platform_auth_service.authenticate(
+        db_session,
+        PlatformLoginCredentials(
+            principal_name=principal.principal_name,
+            password=password,
+        ),
+    )
+    payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+
+    assert payload["sub"] == str(principal.principal_id)
+    assert payload["pver"] == "1"
+    assert principal.row_version == 1
+    assert principal.last_login_at is not None
+
+
+async def test_platform_authorization_persists_sql_null_for_missing_result_summary(
+    db_session,
+):
+    principal = PlatformPrincipal(
+        principal_name="test_platform_summary_null",
+        display_name="Test Platform Summary Null",
+        hashed_password=get_password_hash("a-long-test-password"),
+        permissions=[PLATFORM_AI_READ],
+    )
+    db_session.add(principal)
+    await db_session.flush()
+
+    audit_id = await add_platform_audit(
+        db_session,
+        actor_principal_id=principal.principal_id,
+        actor_name=principal.principal_name,
+        permission=PLATFORM_AI_READ,
+        event_type="authorized",
+        method="GET",
+        path="/platform/ai/agents",
+        reason="Review agent configuration",
+        ticket_id="PLAN6-AUDIT-NULL",
+        correlation_id="plan6-audit-null",
+        ip="127.0.0.1",
+        request_summary={"queryKeyCount": 0},
+    )
+    event = await db_session.get(PlatformAuditLog, audit_id)
+
+    assert event is not None
+    assert event.request_summary == {"queryKeyCount": 0}
+    assert event.result_summary is None
 
 
 async def test_platform_audit_rows_reject_update_and_delete(db_session):
@@ -255,3 +321,52 @@ async def test_platform_completion_replay_is_idempotent_but_status_conflict_fail
             **(values | {"status_code": 500, "result_summary": {"statusCode": 500}}),
         )
     assert exc_info.value.error_code == "PLATFORM_AUDIT_COMPLETION_CONFLICT"
+
+
+async def test_platform_completion_timestamp_follows_authorization(db_session):
+    principal = PlatformPrincipal(
+        principal_name="test_platform_audit_chronology",
+        display_name="Test Platform Audit Chronology",
+        hashed_password=get_password_hash("a-long-test-password1"),
+        permissions=[PLATFORM_AI_READ],
+    )
+    db_session.add(principal)
+    await db_session.flush()
+    authorization_id = await add_platform_audit(
+        db_session,
+        actor_principal_id=principal.principal_id,
+        actor_name=principal.principal_name,
+        permission=PLATFORM_AI_READ,
+        event_type="authorized",
+        method="GET",
+        path="/platform/ai/agents",
+        reason="Verify audit event chronology",
+        ticket_id="PLAN6-AUDIT-CHRONOLOGY",
+        correlation_id="plan6-audit-chronology",
+        ip="127.0.0.1",
+    )
+    authorization = await db_session.get(PlatformAuditLog, authorization_id)
+    assert authorization is not None
+
+    await asyncio.sleep(0.01)
+    completion_id = await add_platform_completion(
+        db_session,
+        authorization_audit_id=authorization_id,
+        actor_principal_id=principal.principal_id,
+        actor_name=principal.principal_name,
+        permission=PLATFORM_AI_READ,
+        method="GET",
+        path="/platform/ai/agents",
+        reason="Verify audit event chronology",
+        ticket_id="PLAN6-AUDIT-CHRONOLOGY",
+        correlation_id="plan6-audit-chronology",
+        ip="127.0.0.1",
+        target_tenant_id=None,
+        status_code=200,
+        duration_ms=10,
+        result_summary={"statusCode": 200},
+    )
+    completion = await db_session.get(PlatformAuditLog, completion_id)
+
+    assert completion is not None
+    assert completion.created_at > authorization.created_at

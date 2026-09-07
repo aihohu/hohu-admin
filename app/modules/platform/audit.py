@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from ipaddress import ip_address
 from typing import Any, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -145,6 +145,7 @@ async def add_platform_audit(
         status_code=status_code,
         duration_ms=duration_ms,
         denial_code=denial_code,
+        created_at=func.clock_timestamp(),
     )
     db.add(event)
     await db.flush()
@@ -205,6 +206,7 @@ async def add_platform_completion(
             status_code=status_code,
             duration_ms=duration_ms,
             result_summary=safe_result_summary,
+            created_at=func.clock_timestamp(),
         )
         .on_conflict_do_nothing(
             index_elements=[PlatformAuditLog.authorization_audit_id],

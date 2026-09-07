@@ -240,13 +240,16 @@ def test_login_schema_rejects_forged_tenant_fields():
         )
 
 
-def test_hosted_login_release_gate_cannot_be_enabled_from_settings():
-    with pytest.raises(ValidationError):
-        Settings(
-            DATABASE_URL=settings.DATABASE_URL,
-            SECRET_KEY=settings.SECRET_KEY,
-            TENANT_HOSTED_LOGIN_ENABLED=True,  # type: ignore[arg-type]
-        )
+def test_hosted_login_requires_explicit_release_gate_from_settings():
+    enabled = Settings(
+        DATABASE_URL=settings.DATABASE_URL,
+        SECRET_KEY=settings.SECRET_KEY,
+        TENANT_MODE="hosted",
+        TENANT_HOSTED_LOGIN_ENABLED=True,
+    )
+
+    assert enabled.TENANT_MODE == "hosted"
+    assert enabled.TENANT_HOSTED_LOGIN_ENABLED is True
 
     with pytest.raises(ValidationError):
         Settings(

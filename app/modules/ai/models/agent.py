@@ -23,6 +23,7 @@ class AiAgent(Base):
     """
 
     __tablename__ = "ai_agent"
+    __table_args__ = {"comment": "AI Agent 注册中心"}
 
     agent_id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, default=next_id, comment="AgentID"

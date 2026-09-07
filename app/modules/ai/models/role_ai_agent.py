@@ -36,6 +36,7 @@ class RoleAiAgent(Base):
             ondelete="CASCADE",
         ),
         Index("ix_role_ai_agent_tenant_agent", "tenant_id", "agent_id"),
+        {"comment": "角色 ↔ Agent RBAC 关联表"},
     )
 
     tenant_id: Mapped[int] = mapped_column(

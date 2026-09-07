@@ -4,10 +4,12 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import func, select
 
+from app.core.config import settings
 from app.core.exceptions import AuthorizationException, BusinessException
 from app.core.id_generator import next_id
 from app.core.tenant import DEFAULT_TENANT_ID, PlatformContext
 from app.modules.platform.constants import (
+    PLATFORM_TENANT_ACTIVATE,
     PLATFORM_TENANT_READ,
     PLATFORM_TENANT_WRITE,
 )
@@ -153,6 +155,117 @@ async def test_default_tenant_cannot_be_disabled(db_session):
         )
 
     assert exc_info.value.error_code == "PLATFORM_DEFAULT_TENANT_IMMUTABLE"
+
+
+async def test_bootstrapped_prepared_tenant_can_be_activated_once(
+    db_session, monkeypatch
+):
+    monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
+    monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
+    tenant_id = next_id()
+    tenant = Tenant(
+        tenant_id=tenant_id,
+        tenant_code=f"activate-{tenant_id}",
+        tenant_name="Activation Candidate",
+        status="2",
+        lifecycle_state="prepared",
+        bootstrap_version=1,
+        bootstrap_key_hash=hashlib.sha256(
+            f"activation-key:{tenant_id}".encode()
+        ).hexdigest(),
+        bootstrap_fingerprint=hashlib.sha256(
+            f"activation-fingerprint:{tenant_id}".encode()
+        ).hexdigest(),
+        row_version=1,
+    )
+    db_session.add(tenant)
+    await db_session.flush()
+    platform = _platform(PLATFORM_TENANT_ACTIVATE, tenant_id)
+
+    activated = await tenant_lifecycle_service.activate_tenant(
+        db_session, tenant_id=tenant_id, platform=platform
+    )
+    first_version = activated.row_version
+    replay = await tenant_lifecycle_service.activate_tenant(
+        db_session, tenant_id=tenant_id, platform=platform
+    )
+
+    assert activated.status == "1"
+    assert activated.lifecycle_state == "active"
+    assert first_version == 2
+    assert replay.row_version == first_version
+
+
+async def test_activation_gate_fails_before_database_access(monkeypatch):
+    monkeypatch.setattr(settings, "TENANT_MODE", "single")
+    monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", False)
+    tenant_id = next_id()
+    db = AsyncMock()
+
+    with pytest.raises(BusinessException) as exc_info:
+        await tenant_lifecycle_service.activate_tenant(
+            db,
+            tenant_id=tenant_id,
+            platform=_platform(PLATFORM_TENANT_ACTIVATE, tenant_id),
+        )
+
+    assert exc_info.value.error_code == "PLATFORM_TENANT_ACTIVATION_DISABLED"
+    db.scalar.assert_not_awaited()
+    db.execute.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("bootstrap_version", "lifecycle_state", "expected_error"),
+    [
+        (0, "prepared", "PLATFORM_TENANT_NOT_BOOTSTRAPPED"),
+        (1, "disabled", "PLATFORM_TENANT_REACTIVATION_UNSUPPORTED"),
+    ],
+)
+async def test_activation_rejects_unready_or_previously_disabled_tenant(
+    db_session,
+    monkeypatch,
+    bootstrap_version,
+    lifecycle_state,
+    expected_error,
+):
+    monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
+    monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
+    tenant_id = next_id()
+    bootstrapped = bootstrap_version == 1
+    tenant = Tenant(
+        tenant_id=tenant_id,
+        tenant_code=f"reject-{tenant_id}",
+        tenant_name="Rejected Activation",
+        status="2",
+        lifecycle_state=lifecycle_state,
+        bootstrap_version=bootstrap_version,
+        bootstrap_key_hash=(
+            hashlib.sha256(f"reject-key:{tenant_id}".encode()).hexdigest()
+            if bootstrapped
+            else None
+        ),
+        bootstrap_fingerprint=(
+            hashlib.sha256(f"reject-fingerprint:{tenant_id}".encode()).hexdigest()
+            if bootstrapped
+            else None
+        ),
+        row_version=1,
+    )
+    db_session.add(tenant)
+    await db_session.flush()
+
+    with pytest.raises(BusinessException) as exc_info:
+        await tenant_lifecycle_service.activate_tenant(
+            db_session,
+            tenant_id=tenant_id,
+            platform=_platform(PLATFORM_TENANT_ACTIVATE, tenant_id),
+        )
+
+    assert exc_info.value.error_code == expected_error
+    await db_session.refresh(tenant)
+    assert tenant.status == "2"
+    assert tenant.lifecycle_state == lifecycle_state
+    assert tenant.row_version == 1
 
 
 async def test_tenant_service_rechecks_permission_before_database_access():

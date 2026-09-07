@@ -127,6 +127,24 @@ async def get_tenant(
 
 
 @control_router.post(
+    "/tenants/{tenant_id}/activate",
+    response_model=ResponseModel[PlatformTenantOut],
+    summary="激活已完成引导的 prepared tenant",
+)
+async def activate_tenant(
+    tenant_id: TenantId,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    platform: PlatformContext = Depends(require_platform_context),
+):
+    tenant = await tenant_lifecycle_service.activate_tenant(
+        db, tenant_id=tenant_id, platform=platform
+    )
+    request.state.platform_result_summary = {"recordCount": 1}
+    return ResponseModel.success(data=PlatformTenantOut.from_record(tenant))
+
+
+@control_router.post(
     "/tenants/{tenant_id}/disable",
     response_model=ResponseModel[PlatformTenantOut],
     summary="禁用非默认租户",

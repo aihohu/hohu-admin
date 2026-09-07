@@ -159,8 +159,12 @@ class PlatformAuditLog(Base):
     reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
     ticket_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     correlation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    request_summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    result_summary: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    request_summary: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    result_summary: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     ip: Mapped[str | None] = mapped_column(String(50), nullable=True)

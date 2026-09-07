@@ -40,6 +40,7 @@ class PlatformAuthService:
             )
         principal.last_login_at = datetime.now(UTC)
         await db.flush()
+        await db.refresh(principal, attribute_names=["row_version"])
         return create_platform_access_token(
             subject=str(principal.principal_id),
             principal_version=principal.row_version,

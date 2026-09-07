@@ -9,6 +9,7 @@ PLATFORM_AI_WRITE = "platform:ai:write"
 PLATFORM_TENANT_READ = "platform:tenant:read"
 PLATFORM_TENANT_WRITE = "platform:tenant:write"
 PLATFORM_TENANT_BOOTSTRAP = "platform:tenant:bootstrap"
+PLATFORM_TENANT_ACTIVATE = "platform:tenant:activate"
 PLATFORM_SUPPORT_READ = "platform:support:read"
 PLATFORM_AUDIT_RETENTION = "platform:audit:retention"
 # Offline maintenance action recorded in platform audit. It is deliberately not
@@ -23,6 +24,7 @@ ASSIGNABLE_PLATFORM_PERMISSIONS = frozenset(
         PLATFORM_TENANT_READ,
         PLATFORM_TENANT_WRITE,
         PLATFORM_TENANT_BOOTSTRAP,
+        PLATFORM_TENANT_ACTIVATE,
         PLATFORM_SUPPORT_READ,
         PLATFORM_AUDIT_RETENTION,
     }
@@ -47,6 +49,9 @@ def platform_permission_for_request(method: str, path: str) -> str:
     if path == "/platform/tenants/{tenant_id}/bootstrap":
         if normalized_method == "POST":
             return PLATFORM_TENANT_BOOTSTRAP
+    if path == "/platform/tenants/{tenant_id}/activate":
+        if normalized_method == "POST":
+            return PLATFORM_TENANT_ACTIVATE
     if path in {
         "/platform/tenants/{tenant_id}/support/operation-logs",
         "/platform/tenants/{tenant_id}/support/login-logs",

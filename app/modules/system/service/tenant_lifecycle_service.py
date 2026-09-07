@@ -8,6 +8,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_response import PageResult
+from app.core.config import settings
 from app.core.exceptions import (
     AuthorizationException,
     BusinessException,
@@ -24,6 +25,7 @@ from app.core.tenant import (
 from app.modules.platform.constants import (
     PLATFORM_AI_READ,
     PLATFORM_AI_WRITE,
+    PLATFORM_TENANT_ACTIVATE,
     PLATFORM_TENANT_READ,
     PLATFORM_TENANT_WRITE,
 )
@@ -211,6 +213,54 @@ class TenantLifecycleService:
         )
         db.add(tenant)
         await db.flush()
+        return tenant
+
+    async def activate_tenant(
+        self,
+        db: AsyncSession,
+        *,
+        tenant_id: int,
+        platform: PlatformContext,
+    ) -> Tenant:
+        """Activate one fully bootstrapped prepared tenant behind the release gate."""
+        require_platform_permission(platform, PLATFORM_TENANT_ACTIVATE)
+        _require_target(platform, tenant_id)
+        if settings.TENANT_MODE != "hosted" or not settings.TENANT_HOSTED_LOGIN_ENABLED:
+            raise BusinessRuleException(
+                "Hosted Tenant 激活发布闸未开启",
+                error_code="PLATFORM_TENANT_ACTIVATION_DISABLED",
+            )
+        if tenant_id == DEFAULT_TENANT_ID:
+            raise BusinessRuleException(
+                "Default Tenant 不能通过平台 API 激活",
+                error_code="PLATFORM_DEFAULT_TENANT_IMMUTABLE",
+            )
+        tenant = await db.scalar(
+            select(Tenant).where(Tenant.tenant_id == tenant_id).with_for_update()
+        )
+        if tenant is None:
+            raise NotFoundException("租户", error_code="PLATFORM_TENANT_NOT_FOUND")
+        if tenant.lifecycle_state == "active" and tenant.status == "1":
+            return tenant
+        if tenant.lifecycle_state == "disabled":
+            raise BusinessRuleException(
+                "已禁用租户不能通过 activation 重新启用",
+                error_code="PLATFORM_TENANT_REACTIVATION_UNSUPPORTED",
+            )
+        if tenant.lifecycle_state != "prepared" or tenant.status != "2":
+            raise BusinessRuleException(
+                "租户状态不能激活",
+                error_code="PLATFORM_TENANT_STATE_INVALID",
+            )
+        if tenant.bootstrap_version < 1:
+            raise BusinessRuleException(
+                "租户尚未完成引导",
+                error_code="PLATFORM_TENANT_NOT_BOOTSTRAPPED",
+            )
+        tenant.status = "1"
+        tenant.lifecycle_state = "active"
+        await db.flush()
+        await db.refresh(tenant)
         return tenant
 
     async def disable_tenant(

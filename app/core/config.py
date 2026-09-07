@@ -21,7 +21,7 @@ class Settings(BaseSettings):
         if self.APP_ROLE is None:
             self.APP_ROLE = "all" if self.ENV == "dev" else "api"
         if self.TENANT_MODE == "hosted" and not self.TENANT_HOSTED_LOGIN_ENABLED:
-            raise ValueError("hosted tenant login remains disabled until Plan 6")
+            raise ValueError("hosted tenant mode requires the explicit release gate")
         return self
 
     DATABASE_URL: str
@@ -32,11 +32,10 @@ class Settings(BaseSettings):
     PLATFORM_AUDIT_MIN_RETENTION_DAYS: int = Field(default=90, ge=30, le=3650)
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
-    # Tenant M1 remains single. The hosted locator contract is implemented for
-    # forward compatibility, but the release gate is intentionally impossible
-    # to enable through environment configuration before Plan 6.
+    # Hosted deployments are opt-in. The mode alone is insufficient: operators
+    # must also set the independent release gate after completing Plan 6 checks.
     TENANT_MODE: Literal["single", "hosted"] = "single"
-    TENANT_HOSTED_LOGIN_ENABLED: Literal[False] = False
+    TENANT_HOSTED_LOGIN_ENABLED: bool = False
     # Optional hosted-mode suffix, e.g. "example.com" for acme.example.com.
     TENANT_HOST_SUFFIX: str = ""
 

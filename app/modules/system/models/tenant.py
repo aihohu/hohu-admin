@@ -70,6 +70,7 @@ class Tenant(Base):
             "provisioning_key_hash", name="uq_sys_tenant_provisioning_key_hash"
         ),
         UniqueConstraint("bootstrap_key_hash", name="uq_sys_tenant_bootstrap_key_hash"),
+        {"comment": "平台全局租户注册表"},
     )
 
     tenant_id: Mapped[int] = mapped_column(

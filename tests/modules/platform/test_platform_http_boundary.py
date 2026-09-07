@@ -18,6 +18,7 @@ from app.modules.auth import service as auth_service
 from app.modules.platform.constants import (
     PLATFORM_AI_READ,
     PLATFORM_SUPPORT_READ,
+    PLATFORM_TENANT_ACTIVATE,
     PLATFORM_TENANT_BOOTSTRAP,
     PLATFORM_TENANT_WRITE,
 )
@@ -496,6 +497,63 @@ async def test_bootstrap_http_keeps_secret_and_machine_ids_out_of_projection(
     assert "88001" not in response.text
     assert authorized.await_args.kwargs["target_tenant_id"] == tenant_id
     assert authorized.await_args.kwargs["request_summary"] == {"queryKeyCount": 0}
+    assert completed.await_args.kwargs["result_summary"] == {
+        "statusCode": 200,
+        "recordCount": 1,
+    }
+
+
+async def test_activate_http_uses_dedicated_permission_and_bound_target(
+    client, monkeypatch
+):
+    tenant_id = 991006
+    principal = SimpleNamespace(
+        principal_id=89,
+        principal_name="tenant-activator",
+        status="1",
+        row_version=1,
+        permissions=[PLATFORM_TENANT_ACTIVATE],
+    )
+    db = AsyncMock()
+    db.scalar.return_value = principal
+    now = datetime.now(UTC)
+    activated = SimpleNamespace(
+        tenant_id=tenant_id,
+        tenant_code="tenant-active",
+        tenant_name="Active Tenant",
+        status="1",
+        lifecycle_state="active",
+        bootstrap_version=1,
+        row_version=2,
+        created_at=now,
+        updated_at=now,
+    )
+    activate = AsyncMock(return_value=activated)
+    authorized = AsyncMock(return_value=5451)
+    completed = AsyncMock(return_value=5452)
+    monkeypatch.setattr(tenant_lifecycle_service, "activate_tenant", activate)
+    monkeypatch.setattr(auth_service, "persist_platform_audit", authorized)
+    monkeypatch.setattr(
+        platform_audit_middleware, "persist_platform_completion", completed
+    )
+    app.dependency_overrides[get_db] = lambda: db
+    token = create_platform_access_token(subject="89", principal_version=1)
+
+    try:
+        response = await client.post(
+            f"/platform/tenants/{tenant_id}/activate",
+            headers=_platform_headers(token),
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 200
+    assert response.json()["data"]["enabled"] is True
+    assert response.json()["data"]["lifecycleState"] == "active"
+    assert response.json()["data"]["bootstrapStatus"] == "ready"
+    assert authorized.await_args.kwargs["permission"] == PLATFORM_TENANT_ACTIVATE
+    assert authorized.await_args.kwargs["target_tenant_id"] == tenant_id
+    assert activate.await_args.kwargs["platform"].target_tenant_id == tenant_id
     assert completed.await_args.kwargs["result_summary"] == {
         "statusCode": 200,
         "recordCount": 1,
