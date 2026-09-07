@@ -1,6 +1,7 @@
 from sqlalchemy import Index, PrimaryKeyConstraint, UniqueConstraint
 
 from app.core.tenant_inventory import (
+    HOSTED_CONTAINED_TABLES,
     PLATFORM_GLOBAL_TABLES,
     TENANT_MODEL_INVENTORY,
     TenantNullability,
@@ -78,3 +79,25 @@ def test_platform_global_models_do_not_reuse_tenant_zero_as_global_scope():
 def test_platform_identity_and_audit_are_explicit_global_resources():
     assert "sys_platform_principal" in PLATFORM_GLOBAL_TABLES
     assert "sys_platform_audit_log" in PLATFORM_GLOBAL_TABLES
+
+
+def test_marketplace_tables_are_explicitly_hosted_contained() -> None:
+    assert set(HOSTED_CONTAINED_TABLES) == {
+        "mk_app",
+        "mk_app_permission",
+        "mk_app_rating",
+        "mk_app_review",
+        "mk_app_version",
+        "mk_tenant_app",
+    }
+    assert not (set(HOSTED_CONTAINED_TABLES) & set(TENANT_MODEL_INVENTORY))
+    assert not (set(HOSTED_CONTAINED_TABLES) & set(PLATFORM_GLOBAL_TABLES))
+    for resource in HOSTED_CONTAINED_TABLES.values():
+        table = load_inventory_table(resource)
+        if resource.tenant_column is None:
+            assert "tenant_id" not in table.c
+            assert resource.parent_table == "mk_app"
+            assert resource.parent_column == "app_id"
+        else:
+            assert resource.tenant_column in table.c
+        assert resource.allowed_tenant_ids == (0,)

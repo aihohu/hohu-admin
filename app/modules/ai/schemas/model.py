@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from pydantic.alias_generators import to_camel
 
 from app.core.config import settings
+from app.modules.ai.schemas.config_projection import redact_config, redact_url
 
 
 class ModelCreate(BaseModel):
@@ -18,20 +19,24 @@ class ModelCreate(BaseModel):
     sort_order: int = Field(0, description="排序")
     config: dict | None = Field(None, description="扩展配置")
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid"
+    )
 
 
 class ModelUpdate(BaseModel):
     """模型更新请求"""
 
-    name: str | None = Field(None, max_length=100, description="模型名称")
+    name: str | None = Field(None, min_length=1, max_length=100, description="模型名称")
     capabilities: list[str] | None = Field(None, description="能力标签")
     base_url: str | None = Field(None, max_length=500, description="模型级 API 地址")
     is_enabled: bool | None = Field(None, description="是否启用")
     sort_order: int | None = Field(None, description="排序")
     config: dict | None = Field(None, description="扩展配置")
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid"
+    )
 
 
 class ModelOut(BaseModel):
@@ -56,6 +61,14 @@ class ModelOut(BaseModel):
     @field_serializer("create_time")
     def serialize_create_time(self, dt: datetime) -> str:
         return dt.strftime(settings.DATETIME_FORMAT)
+
+    @field_serializer("base_url")
+    def serialize_base_url(self, value: str | None) -> str | None:
+        return redact_url(value)
+
+    @field_serializer("config")
+    def serialize_config(self, value: dict | None) -> dict | None:
+        return redact_config(value)
 
     model_config = ConfigDict(
         from_attributes=True, populate_by_name=True, alias_generator=to_camel

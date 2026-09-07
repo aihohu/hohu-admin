@@ -645,7 +645,7 @@ async def chat(
 
     # 单个 IP 一小时内鉴权拒绝达到阈值后封禁两小时。
     if deps.client_ip:
-        if await is_ip_blacklisted(redis_client, deps.client_ip):
+        if await is_ip_blacklisted(redis_client, deps.client_ip, tenant=deps.tenant):
             logger.warning(
                 "ip blacklisted blocked chat",
                 extra={"ip": deps.client_ip, "user_id": _current_user.user_id},

@@ -11,6 +11,9 @@ from app.db.session import get_db
 from app.main import app
 from app.middleware import platform_audit_middleware
 from app.modules.ai.service.agent_admin import agent_admin_service
+from app.modules.ai.service.tenant_model_policy_admin_service import (
+    tenant_model_policy_admin_service,
+)
 from app.modules.auth import service as auth_service
 from app.modules.platform.constants import (
     PLATFORM_AI_READ,
@@ -55,7 +58,7 @@ async def test_platform_dependency_audits_route_template_not_raw_dynamic_path(
     db.scalar.return_value = principal
     persisted = AsyncMock(return_value=4001)
     monkeypatch.setattr(auth_service, "persist_platform_audit", persisted)
-    raw_path = "/ai/provider/token=abcdefghijklmnop123456"
+    raw_path = "/platform/ai/providers/token=abcdefghijklmnop123456"
     request = Request(
         {
             "type": "http",
@@ -73,7 +76,7 @@ async def test_platform_dependency_audits_route_template_not_raw_dynamic_path(
             ],
             "client": ("127.0.0.1", 12345),
             "server": ("testserver", 80),
-            "route": SimpleNamespace(path="/ai/provider/{provider_id}"),
+            "route": SimpleNamespace(path="/platform/ai/providers/{provider_id}"),
         }
     )
     token = create_platform_access_token(subject="80", principal_version=1)
@@ -85,7 +88,7 @@ async def test_platform_dependency_audits_route_template_not_raw_dynamic_path(
     )
 
     stored = persisted.await_args.kwargs
-    assert stored["path"] == "/ai/provider/{provider_id}"
+    assert stored["path"] == "/platform/ai/providers/{provider_id}"
     assert stored["request_summary"] == {"queryKeyCount": 1}
     assert stored["ip"] == "127.0.0.1"
     assert "abcdefghijklmnop123456" not in str(stored)
@@ -144,7 +147,7 @@ async def test_platform_http_authorizes_before_service_and_appends_completion(
 
     try:
         response = await client.get(
-            "/ai/admin/agents", headers=_platform_headers(token)
+            "/platform/ai/agents", headers=_platform_headers(token)
         )
     finally:
         app.dependency_overrides.pop(get_db, None)
@@ -180,7 +183,7 @@ async def test_missing_platform_audit_header_has_zero_business_side_effect(
     headers.pop("X-Platform-Reason")
 
     try:
-        response = await client.get("/ai/admin/agents", headers=headers)
+        response = await client.get("/platform/ai/agents", headers=headers)
     finally:
         app.dependency_overrides.pop(get_db, None)
 
@@ -216,12 +219,13 @@ async def test_platform_completion_failure_log_does_not_render_exception_secrets
 
     try:
         response = await client.get(
-            "/ai/admin/agents", headers=_platform_headers(token)
+            "/platform/ai/agents", headers=_platform_headers(token)
         )
     finally:
         app.dependency_overrides.pop(get_db, None)
 
-    assert response.status_code == 200
+    assert response.status_code == 503
+    assert response.json()["errorCode"] == "PLATFORM_AUDIT_UNAVAILABLE"
     assert completion.await_count == 2
     assert "abcdefghijklmnop123456" not in caplog.text
     assert "RuntimeError" in caplog.text
@@ -358,11 +362,29 @@ async def test_tenant_access_token_cannot_reach_platform_tenant_registry(
 ):
     business = AsyncMock()
     monkeypatch.setattr(tenant_lifecycle_service, "list_tenants", business)
-    token = create_access_token(subject="1", tenant_id=0)
+    token = create_access_token(subject="1", tenant_id=0, tenant_version=1)
 
     response = await client.get(
         "/platform/tenants",
         headers=_platform_headers(token),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["errorCode"] == "PLATFORM_ADMIN_REQUIRED"
+    business.assert_not_awaited()
+
+
+async def test_tenant_access_token_cannot_mutate_tenant_model_policy(
+    client, monkeypatch
+):
+    business = AsyncMock()
+    monkeypatch.setattr(tenant_model_policy_admin_service, "put", business)
+    token = create_access_token(subject="1", tenant_id=0, tenant_version=1)
+
+    response = await client.put(
+        "/platform/tenants/9001/ai/model-policies/8001",
+        headers=_platform_headers(token),
+        json={"enabled": True, "isDefault": True},
     )
 
     assert response.status_code == 403

@@ -1,10 +1,15 @@
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import DuplicateException, NotFoundException
+from app.core.exceptions import (
+    BusinessRuleException,
+    DuplicateException,
+    NotFoundException,
+)
 from app.core.tenant import PlatformContext, require_platform_permission
 from app.modules.ai.core.provider_egress import provider_egress
 from app.modules.ai.models.model import AiModel
+from app.modules.ai.models.model_policy import TenantAiModelPolicy
 from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.schemas.model import ModelCreate, ModelOption, ModelUpdate
 from app.modules.platform.constants import PLATFORM_AI_READ, PLATFORM_AI_WRITE
@@ -183,7 +188,23 @@ class ModelService:
         self, db: AsyncSession, model_id: int, *, platform: PlatformContext
     ) -> None:
         require_platform_permission(platform, PLATFORM_AI_WRITE)
-        obj = await self._get_by_id(db, model_id)
+        obj = await db.scalar(
+            select(AiModel).where(AiModel.model_id == model_id).with_for_update()
+        )
+        if obj is None:
+            raise NotFoundException(
+                resource_type="AI模型", error_code="AI_MODEL_NOT_FOUND"
+            )
+        referenced = await db.scalar(
+            select(TenantAiModelPolicy.model_id)
+            .where(TenantAiModelPolicy.model_id == model_id)
+            .limit(1)
+        )
+        if referenced is not None:
+            raise BusinessRuleException(
+                "模型已被租户策略引用，请先移除租户授权",
+                error_code="AI_MODEL_IN_USE_BY_TENANT_POLICY",
+            )
         await db.delete(obj)
 
     async def _check_duplicate_name(

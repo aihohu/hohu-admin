@@ -44,6 +44,7 @@ EXCLUDED_PATHS = (
     "/redoc",
     "/openapi.json",
     "/health",
+    "/platform",  # 独立平台身份与审计链，禁止写入租户操作日志。
     "/system/operation-log",
     "/system/login-log",
     "/ai/chat",

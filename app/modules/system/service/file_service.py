@@ -45,7 +45,12 @@ class FileService:
         return content
 
     def _generate_file_path(
-        self, file_name: str, ext: str, *, private: bool = False
+        self,
+        file_name: str,
+        ext: str,
+        *,
+        tenant_id: int,
+        private: bool = False,
     ) -> tuple[str, str, Path]:
         """生成文件存储路径
 
@@ -55,11 +60,18 @@ class FileService:
         if private:
             validate_private_storage_roots()
         now = datetime.now()
-        date_dir = f"{now.year}/{now.month:02d}/{now.day:02d}"
+        tenant_dir = f"tenant-{tenant_id}"
+        date_dir = f"{tenant_dir}/{now.year}/{now.month:02d}/{now.day:02d}"
         storage_root = Path(
             settings.PRIVATE_UPLOAD_DIR if private else settings.UPLOAD_DIR
         )
-        abs_dir = storage_root / str(now.year) / f"{now.month:02d}" / f"{now.day:02d}"
+        abs_dir = (
+            storage_root
+            / tenant_dir
+            / str(now.year)
+            / f"{now.month:02d}"
+            / f"{now.day:02d}"
+        )
         abs_dir.mkdir(parents=True, exist_ok=True)
         relative_path = str(abs_dir / f"{file_name}{ext}")
         file_url = "" if private else f"/uploads/{date_dir}/{file_name}{ext}"
@@ -93,6 +105,7 @@ class FileService:
         relative_path, file_url, abs_dir = self._generate_file_path(
             file_name,
             ext,
+            tenant_id=tenant.tenant_id,
             private=effective_business_type in {"ai-chat-private", "user-import"},
         )
 

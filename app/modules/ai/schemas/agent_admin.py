@@ -9,10 +9,13 @@ from app.modules.ai.models.agent import RiskAppetite
 
 
 class AgentAdminListItem(BaseModel):
-    """GET /ai/admin/agents list item（不含 systemPrompt，spec 决策 #5）."""
+    """GET /platform/ai/agents list item（不含 systemPrompt）."""
 
     model_config = ConfigDict(
-        alias_generator=to_camel, populate_by_name=True, from_attributes=True
+        alias_generator=to_camel,
+        populate_by_name=True,
+        from_attributes=True,
+        extra="forbid",
     )
 
     agent_id: int
@@ -35,13 +38,13 @@ class AgentAdminListItem(BaseModel):
 
 
 class AgentAdminDetailItem(AgentAdminListItem):
-    """GET /ai/admin/agents/{id} detail（含 systemPrompt）."""
+    """GET /platform/ai/agents/{id} detail（含 systemPrompt）."""
 
     system_prompt: str
 
 
 class AgentAdminUpdateReq(BaseModel):
-    """``PUT /ai/admin/agents/{id}`` 的部分更新请求。
+    """``PUT /platform/ai/agents/{id}`` 的部分更新请求。
 
     校验分层说明：description 长度 + model_preference 格式 + daily_quota_per_user
     取值由 Service 层抛 BusinessRuleException 处理，目的是产出精确 errorCode
@@ -51,7 +54,10 @@ class AgentAdminUpdateReq(BaseModel):
     """
 
     model_config = ConfigDict(
-        alias_generator=to_camel, populate_by_name=True, from_attributes=True
+        alias_generator=to_camel,
+        populate_by_name=True,
+        from_attributes=True,
+        extra="forbid",
     )
 
     # 仅用于识别并拒绝 identity 字段；Service 绝不会把它们写回 ORM。

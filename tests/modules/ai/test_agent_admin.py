@@ -143,9 +143,9 @@ async def _get_agent_id_by_code(client: AsyncClient, code: str) -> str:
 
     Plan 原始版本硬编码 `agent_id=9001`，但实际 agent_id 由 seed_ai_agents.py
     的 next_id() 生成（Snowflake），无法预测。所有 detail/update 测试都先
-    GET /ai/admin/agents 拿列表再按 code 过滤，保证断言与具体 ID 解耦.
+    GET /platform/ai/agents 拿列表再按 code 过滤，保证断言与具体 ID 解耦.
     """
-    resp = await client.get("/ai/admin/agents")
+    resp = await client.get("/platform/ai/agents")
     assert resp.status_code == 200, f"list agents failed: {resp.status_code}"
     row = next(r for r in resp.json()["data"] if r["code"] == code)
     return row["agentId"]
@@ -197,7 +197,7 @@ async def test_tenant_super_admin_cannot_call_platform_agent_api(
     client, _ = authed_client
     app.dependency_overrides.pop(require_platform_context, None)
 
-    response = await client.get("/ai/admin/agents")
+    response = await client.get("/platform/ai/agents")
 
     assert response.status_code == 403
     assert response.json()["errorCode"] == "PLATFORM_ADMIN_REQUIRED"
@@ -206,9 +206,9 @@ async def test_tenant_super_admin_cannot_call_platform_agent_api(
 async def test_list_returns_all_agents_without_query_params(
     authed_client: tuple[AsyncClient, str], db_session, seed_agents
 ):
-    """决策 #23：GET /ai/admin/agents 无 query 参数、无分页，返回全量列表."""
+    """GET /platform/ai/agents 无 query 参数、无分页，返回全量列表."""
     client, _ = authed_client
-    resp = await client.get("/ai/admin/agents")
+    resp = await client.get("/platform/ai/agents")
     assert resp.status_code == 200
     body = resp.json()
     assert body["code"] == 200
@@ -225,7 +225,7 @@ async def test_list_excludes_system_prompt(
 ):
     """决策 #5：list 不返回 systemPrompt."""
     client, _ = authed_client
-    resp = await client.get("/ai/admin/agents")
+    resp = await client.get("/platform/ai/agents")
     data = resp.json()["data"]
     for row in data:
         assert "systemPrompt" not in row
@@ -238,7 +238,7 @@ async def test_detail_returns_system_prompt(
     client, _ = authed_client
     # 通过 code 查 agent_id —— Snowflake ID 不可预测，硬编码会失效
     shared_id = await _get_agent_id_by_code(client, "shared")
-    resp = await client.get(f"/ai/admin/agents/{shared_id}")
+    resp = await client.get(f"/platform/ai/agents/{shared_id}")
     assert resp.status_code == 200
     body = resp.json()
     assert body["code"] == 200
@@ -256,7 +256,7 @@ async def test_detail_not_found(authed_client: tuple[AsyncClient, str], db_sessi
     # 理论上可能产生较小的 ID；2**40 既不会触发 FastAPI path 校验 (422)，
     # 又远超任何被测试覆盖的 seed 行的 agent_id，安全且稳定.
     nonexistent_id = 2**40
-    resp = await client.get(f"/ai/admin/agents/{nonexistent_id}")
+    resp = await client.get(f"/platform/ai/agents/{nonexistent_id}")
     assert resp.status_code == 404
     body = resp.json()
     assert body["code"] == 404
@@ -271,7 +271,7 @@ async def test_update_partial_skips_unsent_fields(
     shared_id = await _get_agent_id_by_code(client, "shared")
     # 仅传 enabled，不传 description
     resp = await client.put(
-        f"/ai/admin/agents/{shared_id}",
+        f"/platform/ai/agents/{shared_id}",
         json={"enabled": False},
     )
     assert resp.status_code == 200
@@ -288,12 +288,12 @@ async def test_update_code_field_rejected_atomically(
     client, _ = authed_client
     shared_id = await _get_agent_id_by_code(client, "shared")
     resp = await client.put(
-        f"/ai/admin/agents/{shared_id}",
+        f"/platform/ai/agents/{shared_id}",
         json={"code": "hacked_code", "name": "Renamed"},
     )
     assert resp.status_code == 400
     assert resp.json()["errorCode"] == "AI_AGENT_IMMUTABLE_FIELD"
-    detail = await client.get(f"/ai/admin/agents/{shared_id}")
+    detail = await client.get(f"/platform/ai/agents/{shared_id}")
     data = detail.json()["data"]
     assert data["code"] == "shared"
     assert data["name"] == "Shared Agent"
@@ -313,7 +313,7 @@ async def test_update_description_too_short(
     client, _ = authed_client
     shared_id = await _get_agent_id_by_code(client, "shared")
     resp = await client.put(
-        f"/ai/admin/agents/{shared_id}",
+        f"/platform/ai/agents/{shared_id}",
         json={"description": "x" * 49},
     )
     assert resp.status_code == 400
@@ -327,7 +327,7 @@ async def test_update_description_too_long(
     client, _ = authed_client
     shared_id = await _get_agent_id_by_code(client, "shared")
     resp = await client.put(
-        f"/ai/admin/agents/{shared_id}",
+        f"/platform/ai/agents/{shared_id}",
         json={"description": "x" * 201},
     )
     assert resp.status_code == 400
@@ -346,7 +346,7 @@ async def test_description_length_algorithm_uses_code_points(
     client, _ = authed_client
     shared_id = await _get_agent_id_by_code(client, "shared")
     resp = await client.put(
-        f"/ai/admin/agents/{shared_id}",
+        f"/platform/ai/agents/{shared_id}",
         json={"description": "中" * 100},
     )
     assert resp.status_code == 200
@@ -361,7 +361,7 @@ async def test_model_preference_format_only_no_existence_check(
     shared_id = await _get_agent_id_by_code(client, "shared")
     # 假 provider/model，但格式合法（小写字母+冒号+小写字母）
     resp = await client.put(
-        f"/ai/admin/agents/{shared_id}",
+        f"/platform/ai/agents/{shared_id}",
         json={"modelPreference": "xxx:yyy"},
     )
     assert resp.status_code == 200
@@ -376,7 +376,7 @@ async def test_model_preference_accepts_safe_option_model_id(
     shared_id = await _get_agent_id_by_code(client, "shared")
 
     resp = await client.put(
-        f"/ai/admin/agents/{shared_id}",
+        f"/platform/ai/agents/{shared_id}",
         json={"modelPreference": "9007199254740993"},
     )
 
@@ -391,7 +391,7 @@ async def test_model_preference_invalid_format(
     client, _ = authed_client
     shared_id = await _get_agent_id_by_code(client, "shared")
     resp = await client.put(
-        f"/ai/admin/agents/{shared_id}",
+        f"/platform/ai/agents/{shared_id}",
         json={"modelPreference": "invalid_no_colon"},
     )
     assert resp.status_code == 400
@@ -405,7 +405,7 @@ async def test_update_daily_quota_zero_returns_400(
     client, _ = authed_client
     shared_id = await _get_agent_id_by_code(client, "shared")
     resp = await client.put(
-        f"/ai/admin/agents/{shared_id}",
+        f"/platform/ai/agents/{shared_id}",
         json={"dailyQuotaPerUser": 0},
     )
     assert resp.status_code == 400
@@ -419,106 +419,8 @@ async def test_update_daily_quota_negative_returns_400(
     client, _ = authed_client
     shared_id = await _get_agent_id_by_code(client, "shared")
     resp = await client.put(
-        f"/ai/admin/agents/{shared_id}",
+        f"/platform/ai/agents/{shared_id}",
         json={"dailyQuotaPerUser": -5},
     )
     assert resp.status_code == 400
     assert resp.json().get("errorCode") == "AI_AGENT_QUOTA_INVALID"
-
-
-# ============ 审计 middleware 回归测试 ============
-
-
-async def test_put_triggers_audit_middleware(
-    authed_client: tuple[AsyncClient, str], db_session, seed_agents
-):
-    """决策 #27：PUT /ai/admin/agents/{id} 由 AuditLogMiddleware 自动审计，无需端点内审计代码.
-
-    Plan 假设：现有 ``app/middleware/audit_middleware.py`` 的 ``AuditLogMiddleware``
-    会拦截所有 PUT/POST/DELETE/PATCH 写操作并写入 ``sys_operation_log``. 本测试验证
-    该假设对 ``/ai/admin/agents/{id}`` 路径成立 —— PUT 成功后日志表多一行，
-    module/ action / path / request_params 与预期一致.
-
-    实施要点：
-    1. **动态 agent_id** —— Plan 原文硬编码 ``9001``，但实际 agent_id 由 Snowflake
-       ``next_id()`` 生成，无法预测. 用 ``_get_agent_id_by_code`` 解耦 ID.
-    2. **不查 db_session** —— middleware 用自己的 ``AsyncSessionLocal()`` 独立 session
-       写日志并 commit；``db_session`` fixture 绑定 outer transaction + rollback，
-       看不到这层写入. 必须用独立 ``AsyncSessionLocal()`` session 查询.
-    3. **model 类名修正** —— Plan 写 ``OperationLog``，实际类名是
-       ``SysOperationLog``（``app/modules/system/models/operation_log.py``）.
-    4. **审计日志 teardown** —— middleware 写入的日志行会落库（不归 db_session 管控），
-       必须显式按 ``path LIKE`` 清理，避免污染后续审计相关测试.
-    """
-    from sqlalchemy import delete, select
-
-    from app.db.session import AsyncSessionLocal
-    from app.modules.system.models.operation_log import SysOperationLog
-
-    client, _ = authed_client
-    shared_id = await _get_agent_id_by_code(client, "shared")
-    audit_path = f"/ai/admin/agents/{shared_id}"
-
-    # 触发 PUT —— middleware 会在响应返回后用独立 session 异步写审计日志
-    resp = await client.put(
-        audit_path,
-        json={"enabled": False, "name": "Audit Test"},
-    )
-    assert resp.status_code == 200, f"PUT failed: {resp.status_code} {resp.text}"
-
-    # 重新开 session 读取 —— middleware commit 后立即可见.
-    # 注意: 其他 update 测试 (test_update_partial_skips_unsent_fields /
-    # test_update_description_too_long 等) 也 PUT 到同一 shared agent 路径,
-    # 审计 middleware 异步写入会落库; 不能简单地 after[-1] 取最后一条 ——
-    # 在并发场景下 after[-1] 可能是其他测试的 PUT body (before_count 捕获后,
-    # 其他测试的 middleware write 才异步落库). 必须按 request_params 含
-    # "Audit Test" 轮询过滤, 才能稳定定位本测试的日志.
-    import asyncio
-    import time
-
-    new_log = None
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
-        async with AsyncSessionLocal() as s:
-            candidates = [
-                log
-                for log in (
-                    (
-                        await s.execute(
-                            select(SysOperationLog).where(
-                                SysOperationLog.path == audit_path
-                            )
-                        )
-                    )
-                    .scalars()
-                    .all()
-                )
-                if "Audit Test" in (log.request_params or "")
-            ]
-        if candidates:
-            new_log = candidates[-1]
-            break
-        await asyncio.sleep(0.1)
-
-    assert new_log is not None, (
-        "5s 内未在审计日志中找到 request_params 含 'Audit Test' 的记录 "
-        "(middleware 异步写入可能延迟)"
-    )
-    # 用 try/finally 包裹断言：任一断言失败时仍清理本测试产生的审计日志，
-    # 避免污染后续审计相关测试（middleware 写入不归 db_session outer-rollback 管控）.
-    try:
-        assert new_log.module == "ai"
-        assert new_log.action == "update"
-        assert new_log.method == "PUT"
-        assert audit_path in new_log.path
-        # request_params 应含 PUT body 全量（middleware 不脱敏 name/enabled）
-        params = new_log.request_params or ""
-        assert "Audit Test" in params
-        assert "enabled" in params
-    finally:
-        # teardown：按精确 path 删除本测试产生的审计日志.
-        async with AsyncSessionLocal() as s:
-            await s.execute(
-                delete(SysOperationLog).where(SysOperationLog.path == audit_path)
-            )
-            await s.commit()

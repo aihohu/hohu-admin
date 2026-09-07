@@ -21,7 +21,7 @@ from app.main import app
 
 FORBIDDEN_MODULES = {
     "app.modules.ai.api.chat",
-    "app.modules.ai.api.provider",
+    "app.modules.platform.ai_api",
     "app.modules.ai.agents.tools.registry",
     "app.modules.ai.agents.gateway.executor",
     "app.modules.ai.core.provider_registry",
@@ -39,7 +39,7 @@ async def verify() -> None:
             for method, path in (
                 ("GET", "/ai"),
                 ("POST", "/ai/chat"),
-                ("GET", "/ai/provider/models"),
+                ("GET", "/platform/ai/providers/models"),
                 ("PATCH", "/ai/anything/deep"),
                 ("DELETE", "/ai/conversation/1"),
                 ("OPTIONS", "/ai/chat"),

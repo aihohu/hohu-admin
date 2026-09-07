@@ -23,6 +23,7 @@ from app.modules.ai.core.provider_egress import (
 )
 from app.modules.ai.core.provider_registry import create_model
 from app.modules.ai.models.model import AiModel
+from app.modules.ai.models.model_policy import TenantAiModelPolicy
 from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.schemas.provider import (
     ProviderCreate,
@@ -63,7 +64,7 @@ class ProviderService:
         checks = await asyncio.gather(*(check(provider) for provider in page.records))
         records: list[ProviderOut] = []
         for provider, allowed in zip(page.records, checks, strict=True):
-            payload = ProviderOut.model_validate(provider).model_copy(
+            payload = ProviderOut.from_record(provider).model_copy(
                 update={"egress_status": None if allowed else "EGRESS_POLICY_BLOCKED"}
             )
             records.append(payload)
@@ -163,7 +164,36 @@ class ProviderService:
         self, db: AsyncSession, provider_id: int, *, platform: PlatformContext
     ) -> None:
         require_platform_permission(platform, PLATFORM_AI_WRITE)
-        obj = await self._get_by_id(db, provider_id)
+        obj = await db.scalar(
+            select(AiProvider)
+            .where(AiProvider.provider_id == provider_id)
+            .with_for_update()
+        )
+        if obj is None:
+            raise NotFoundException(
+                resource_type="AI提供商", error_code="AI_PROVIDER_NOT_FOUND"
+            )
+        model_ids = list(
+            (
+                await db.scalars(
+                    select(AiModel.model_id)
+                    .where(AiModel.provider_id == provider_id)
+                    .with_for_update()
+                )
+            ).all()
+        )
+        referenced = None
+        if model_ids:
+            referenced = await db.scalar(
+                select(TenantAiModelPolicy.model_id)
+                .where(TenantAiModelPolicy.model_id.in_(model_ids))
+                .limit(1)
+            )
+        if referenced is not None:
+            raise BusinessRuleException(
+                "Provider 已被租户模型策略引用，请先移除租户授权",
+                error_code="AI_PROVIDER_IN_USE_BY_TENANT_POLICY",
+            )
         await db.delete(obj)
 
     @staticmethod

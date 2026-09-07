@@ -66,18 +66,21 @@ def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def _parse_token_identity(payload: dict[str, Any]) -> tuple[int, int]:
+def _parse_token_identity(payload: dict[str, Any]) -> tuple[int, int, int]:
     """Parse only canonical string identities emitted by this service."""
     user_id_claim = payload.get("sub")
     tenant_id_claim = payload.get("tid")
+    tenant_version_claim = payload.get("tver")
     if (
         not isinstance(user_id_claim, str)
         or _POSITIVE_ID_RE.fullmatch(user_id_claim) is None
         or not isinstance(tenant_id_claim, str)
         or _NON_NEGATIVE_ID_RE.fullmatch(tenant_id_claim) is None
+        or not isinstance(tenant_version_claim, str)
+        or _POSITIVE_ID_RE.fullmatch(tenant_version_claim) is None
     ):
         raise AuthenticationException("Token 无效或已过期", error_code="TOKEN_EXPIRED")
-    return int(user_id_claim), int(tenant_id_claim)
+    return int(user_id_claim), int(tenant_id_claim), int(tenant_version_claim)
 
 
 async def _is_blacklisted(token: str) -> bool:
@@ -176,10 +179,14 @@ class AuthService:
 
         # 统一签发 Token
         token = create_access_token(
-            subject=str(user.user_id), tenant_id=tenant.tenant_id
+            subject=str(user.user_id),
+            tenant_id=tenant.tenant_id,
+            tenant_version=tenant.row_version,
         )
         refresh_token = create_refresh_token(
-            subject=str(user.user_id), tenant_id=tenant.tenant_id
+            subject=str(user.user_id),
+            tenant_id=tenant.tenant_id,
+            tenant_version=tenant.row_version,
         )
 
         # 写入成功日志
@@ -362,7 +369,7 @@ async def refresh_access_token(refresh_token: str) -> tuple[str, str]:
         ) from e
 
     # 查 DB 校验用户存在且启用，防止禁用/删除用户用旧 refresh token 持续换新
-    user_id, tenant_id = _parse_token_identity(payload)
+    user_id, tenant_id, tenant_version = _parse_token_identity(payload)
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(User)
@@ -372,6 +379,8 @@ async def refresh_access_token(refresh_token: str) -> tuple[str, str]:
         user = result.scalars().first()
 
     if user is None or user.tenant_id != tenant_id or user.tenant is None:
+        raise AuthenticationException("Token 无效或已过期", error_code="TOKEN_EXPIRED")
+    if user.tenant.row_version != tenant_version:
         raise AuthenticationException("Token 无效或已过期", error_code="TOKEN_EXPIRED")
     if user.tenant.status != STATUS_ENABLED:
         raise AuthorizationException("租户已被禁用", error_code="TENANT_DISABLED")
@@ -387,8 +396,16 @@ async def refresh_access_token(refresh_token: str) -> tuple[str, str]:
             "Token 已失效，请重新登录", error_code="TOKEN_EXPIRED"
         )
 
-    new_access = create_access_token(subject=str(user_id), tenant_id=tenant_id)
-    new_refresh = create_refresh_token(subject=str(user_id), tenant_id=tenant_id)
+    new_access = create_access_token(
+        subject=str(user_id),
+        tenant_id=tenant_id,
+        tenant_version=user.tenant.row_version,
+    )
+    new_refresh = create_refresh_token(
+        subject=str(user_id),
+        tenant_id=tenant_id,
+        tenant_version=user.tenant.row_version,
+    )
     return new_access, new_refresh
 
 
@@ -412,7 +429,7 @@ async def get_current_user(
         # Only access tokens may authenticate API requests.
         if payload.get("type") != "access":
             raise AuthenticationException("Token 类型错误", error_code="TOKEN_EXPIRED")
-        user_id, tenant_id = _parse_token_identity(payload)
+        user_id, tenant_id, tenant_version = _parse_token_identity(payload)
     except JWTError:
         raise AuthenticationException("Token 无效或已过期", error_code="TOKEN_EXPIRED")
 
@@ -429,6 +446,9 @@ async def get_current_user(
     user = result.scalars().first()
 
     if user is None or user.tenant_id != tenant_id or user.tenant is None:
+        raise AuthenticationException("Token 无效或已过期", error_code="TOKEN_EXPIRED")
+
+    if user.tenant.row_version != tenant_version:
         raise AuthenticationException("Token 无效或已过期", error_code="TOKEN_EXPIRED")
 
     if user.tenant.status != STATUS_ENABLED:
@@ -464,6 +484,7 @@ async def require_platform_context(
     db: AsyncSession = Depends(get_db),
 ) -> PlatformContext:
     """Build platform authority only from an independent, live DB principal."""
+    request.state.platform_started_at = time.perf_counter()
     if credentials is None:
         raise AuthenticationException(
             "缺少平台 Token", error_code="PLATFORM_TOKEN_REQUIRED"

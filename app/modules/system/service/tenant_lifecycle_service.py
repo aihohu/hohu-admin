@@ -21,7 +21,12 @@ from app.core.tenant import (
     normalize_tenant_code,
     require_platform_permission,
 )
-from app.modules.platform.constants import PLATFORM_TENANT_READ, PLATFORM_TENANT_WRITE
+from app.modules.platform.constants import (
+    PLATFORM_AI_READ,
+    PLATFORM_AI_WRITE,
+    PLATFORM_TENANT_READ,
+    PLATFORM_TENANT_WRITE,
+)
 from app.modules.system.models.tenant import Tenant
 
 _IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$")
@@ -66,6 +71,32 @@ async def _lock_prepare_keys(
 
 
 class TenantLifecycleService:
+    async def require_ai_policy_target(
+        self,
+        db: AsyncSession,
+        *,
+        tenant_id: int,
+        write: bool,
+        platform: PlatformContext,
+    ) -> Tenant:
+        """Resolve a bootstrapped tenant for platform AI policy administration."""
+        require_platform_permission(
+            platform, PLATFORM_AI_WRITE if write else PLATFORM_AI_READ
+        )
+        _require_target(platform, tenant_id)
+        statement = select(Tenant).where(Tenant.tenant_id == tenant_id)
+        if write:
+            statement = statement.with_for_update()
+        tenant = await db.scalar(statement)
+        if tenant is None:
+            raise NotFoundException("租户", error_code="PLATFORM_TENANT_NOT_FOUND")
+        if tenant.bootstrap_version < 1:
+            raise BusinessRuleException(
+                "租户尚未完成引导",
+                error_code="PLATFORM_TENANT_NOT_BOOTSTRAPPED",
+            )
+        return tenant
+
     async def list_tenants(
         self,
         db: AsyncSession,

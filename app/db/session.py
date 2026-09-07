@@ -1,5 +1,6 @@
 from collections.abc import AsyncGenerator
 
+from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -35,14 +36,25 @@ class Base(DeclarativeBase):
 
 # 4. 数据库依赖注入函数 (Dependency Injection)
 # 这个函数用于 FastAPI 的 Depends()
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
+async def get_db(request: Request) -> AsyncGenerator[AsyncSession, None]:
     """
     每个请求创建一个新的异步 Session，并在请求结束时自动关闭。
     """
     async with AsyncSessionLocal() as session:
         try:
             yield session
-            await session.commit()  # 也可以在业务代码中手动 commit
+            is_platform_request = (
+                getattr(request.state, "platform_authorization", None) is not None
+            )
+            if is_platform_request:
+                from app.modules.platform.audit import (  # noqa: PLC0415
+                    stage_platform_success_completion,
+                )
+
+                await stage_platform_success_completion(session, request=request)
+            await session.commit()
+            if is_platform_request:
+                request.state.platform_completion_committed = True
         except Exception:
             await session.rollback()
             raise

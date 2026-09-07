@@ -12,19 +12,18 @@ from app.core.auth import (
     require_ai_chat_use,
 )
 from app.core.exceptions import AuthorizationException
-from app.modules.ai.api.agent import admin_router as agent_admin_router
 from app.modules.ai.api.agent import router as agent_router
 from app.modules.ai.api.chat import router as chat_router
 from app.modules.ai.api.confirm import router as confirm_router
 from app.modules.ai.api.conversation import router as conversation_router
 from app.modules.ai.api.operation_log import router as operation_log_router
-from app.modules.ai.api.provider import router as provider_router
 from app.modules.ai.api.query_cache import router as query_cache_router
 from app.modules.ai.api.resume import router as resume_router
 from app.modules.ai.api.role_agent import router as role_agent_router
 from app.modules.ai.api.routing_feedback import query_router as feedback_query_router
 from app.modules.ai.api.routing_feedback import router as feedback_router
 from app.modules.auth.service import require_platform_context
+from app.modules.platform.ai_api import router as platform_ai_router
 
 
 def _user(*permissions: str, role_code: str = "R_USER"):
@@ -91,12 +90,12 @@ def test_user_business_endpoints_require_ai_chat_use(
         (confirm_router, "", "POST"),
         (resume_router, "/resume", "GET"),
         (operation_log_router, "", "GET"),
-        (agent_admin_router, "", "GET"),
-        (agent_admin_router, "/model-options", "GET"),
+        (platform_ai_router, "/ai/agents", "GET"),
+        (platform_ai_router, "/ai/agents/model-options", "GET"),
         (feedback_query_router, "/summary", "GET"),
         (feedback_query_router, "/list", "GET"),
-        (provider_router, "/models", "GET"),
-        (provider_router, "/list", "GET"),
+        (platform_ai_router, "/ai/providers/models", "GET"),
+        (platform_ai_router, "/ai/providers", "GET"),
         (role_agent_router, "/{role_id}", "GET"),
         (role_agent_router, "/{role_id}", "PUT"),
     ],
@@ -121,24 +120,24 @@ def _permission_codes(route: APIRoute) -> set[str]:
 
 
 def test_provider_model_management_endpoint_requires_platform_context() -> None:
-    route = _route(provider_router, "/models", "GET")
+    route = _route(platform_ai_router, "/ai/providers/models", "GET")
     assert require_platform_context in _dependency_calls(route)
     assert not _permission_codes(route)
 
 
 def test_saved_provider_test_endpoint_requires_platform_context() -> None:
-    route = _route(provider_router, "/{provider_id}/test", "POST")
+    route = _route(platform_ai_router, "/ai/providers/{provider_id}/test", "POST")
     assert require_platform_context in _dependency_calls(route)
     assert not any(
         isinstance(candidate, APIRoute)
         and candidate.path == "/test-model"
         and "POST" in candidate.methods
-        for candidate in provider_router.routes
+        for candidate in platform_ai_router.routes
     )
 
 
 def test_agent_model_options_endpoint_requires_platform_context() -> None:
-    route = _route(agent_admin_router, "/model-options", "GET")
+    route = _route(platform_ai_router, "/ai/agents/model-options", "GET")
     assert require_platform_context in _dependency_calls(route)
 
 

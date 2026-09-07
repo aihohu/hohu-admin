@@ -49,14 +49,12 @@ from app.modules.system.api.user import router as user_router
 if settings.AI_MODULE_ENABLED:
     from app.modules.ai.agents.tools import load_builtin_tools
     from app.modules.ai.agents.tools.registry import ToolRegistry, ToolRegistryError
-    from app.modules.ai.api.agent import admin_router as ai_agent_admin_router
     from app.modules.ai.api.agent import router as ai_agent_router
     from app.modules.ai.api.chat import router as ai_chat_router
     from app.modules.ai.api.confirm import router as ai_confirm_router
     from app.modules.ai.api.conversation import router as ai_conversation_router
     from app.modules.ai.api.download import router as ai_download_router
     from app.modules.ai.api.operation_log import router as ai_operation_log_router
-    from app.modules.ai.api.provider import router as ai_provider_router
     from app.modules.ai.api.query_cache import router as ai_query_cache_router
     from app.modules.ai.api.resume import router as ai_resume_router
     from app.modules.ai.api.role_agent import router as ai_role_agent_router
@@ -71,6 +69,7 @@ if settings.AI_MODULE_ENABLED:
         cleanup_durable_prepared_actions_on_startup,
         cleanup_orphaned_pending_on_startup,
     )
+    from app.modules.platform.ai_api import router as platform_ai_router
 
 
 @asynccontextmanager
@@ -255,9 +254,7 @@ app.include_router(login_log_router, prefix="/system/login-log", tags=["登录�
 # 关闭 AI 模块时不注册任何 AI 路由。
 if settings.AI_MODULE_ENABLED:
     app.include_router(ai_agent_router, prefix="/ai/agents", tags=["AI Agent"])
-    app.include_router(
-        ai_agent_admin_router, prefix="/ai/admin/agents", tags=["AI Agent 管理"]
-    )
+    app.include_router(platform_ai_router, prefix="/platform", tags=["平台 AI 控制面"])
     app.include_router(ai_chat_router, prefix="/ai/chat", tags=["AI对话"])
     app.include_router(ai_resume_router, prefix="/ai/chat", tags=["AI对话"])
     app.include_router(ai_download_router, prefix="/ai/download", tags=["AI结果下载"])
@@ -265,7 +262,6 @@ if settings.AI_MODULE_ENABLED:
     app.include_router(
         ai_conversation_router, prefix="/ai/conversation", tags=["AI会话"]
     )
-    app.include_router(ai_provider_router, prefix="/ai/provider", tags=["AI提供商"])
     app.include_router(
         ai_operation_log_router, prefix="/ai/operation-log", tags=["AI 操作日志"]
     )
@@ -307,6 +303,16 @@ else:
     )
     @app.api_route(
         "/ai/{path:path}",
+        methods=_AI_DISABLED_METHODS,
+        include_in_schema=False,
+    )
+    @app.api_route(
+        "/platform/ai",
+        methods=_AI_DISABLED_METHODS,
+        include_in_schema=False,
+    )
+    @app.api_route(
+        "/platform/ai/{path:path}",
         methods=_AI_DISABLED_METHODS,
         include_in_schema=False,
     )

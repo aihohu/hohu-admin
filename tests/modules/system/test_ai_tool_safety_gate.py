@@ -381,7 +381,7 @@ class TestImportPreviewArtifacts:
         storage.save.assert_awaited_once_with(
             csv_bytes,
             mime_type="text/csv",
-            namespace="import-preview",
+            namespace="tenant-0-import-preview",
             suffix=".csv",
         )
         assert [call.args for call in parser.call_args_list] == [

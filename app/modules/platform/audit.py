@@ -1,6 +1,7 @@
 """Platform authorization envelope and independent append-only persistence."""
 
 import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from ipaddress import ip_address
@@ -249,6 +250,56 @@ async def persist_platform_completion(**values: Any) -> int:
         audit_id = await add_platform_completion(session, **values)
         await session.commit()
         return audit_id
+
+
+async def stage_platform_success_completion(db: AsyncSession, *, request: Any) -> int:
+    """Stage the success event in the same transaction as platform business data."""
+    authorization = getattr(request.state, "platform_authorization", None)
+    if authorization is None:
+        raise BusinessException(
+            code=503,
+            message="平台完成审计暂不可用",
+            error_code="PLATFORM_AUDIT_UNAVAILABLE",
+        )
+    context = authorization.context
+    route = request.scope.get("route")
+    status_code = getattr(route, "status_code", None) or 200
+    result_summary = {"statusCode": status_code}
+    extra_summary = getattr(request.state, "platform_result_summary", None)
+    if isinstance(extra_summary, dict):
+        result_summary.update(extra_summary)
+    started_at = getattr(request.state, "platform_started_at", None)
+    duration_ms = (
+        max(0, int((time.perf_counter() - started_at) * 1000))
+        if isinstance(started_at, float)
+        else 0
+    )
+    try:
+        return await add_platform_completion(
+            db,
+            actor_principal_id=context.actor_principal_id,
+            actor_name=context.actor_name,
+            permission=request.state.platform_permission,
+            method=request.method,
+            path=authorization.audit_path,
+            reason=context.reason,
+            ticket_id=context.ticket_id,
+            correlation_id=context.correlation_id,
+            ip=getattr(request.state, "platform_ip", None),
+            target_tenant_id=context.target_tenant_id,
+            authorization_audit_id=authorization.authorization_audit_id,
+            status_code=status_code,
+            duration_ms=duration_ms,
+            result_summary=result_summary,
+        )
+    except BusinessException:
+        raise
+    except Exception as exc:
+        raise BusinessException(
+            code=503,
+            message="平台完成审计暂不可用",
+            error_code="PLATFORM_AUDIT_UNAVAILABLE",
+        ) from exc
 
 
 async def _persist_or_fail(persist: AuditPersist, **values: Any) -> int:

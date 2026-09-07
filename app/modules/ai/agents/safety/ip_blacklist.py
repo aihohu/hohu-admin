@@ -34,7 +34,7 @@ _CFG_THRESHOLD = "ai:auto_disable:perm_denied_per_hour"
 _CFG_ALLOWLIST = "ai:ip_allowlist"
 
 # 白名单缓存（避免每次 AI 鉴权都查 DB）
-_allowlist_cache: tuple[list[str], float] | None = None
+_allowlist_cache: dict[tuple[int, int], tuple[list[str], float]] = {}
 _ALLOWLIST_TTL_SEC = 60
 
 
@@ -43,14 +43,17 @@ def _hour_bucket(now: datetime | None = None) -> str:
     return dt.strftime("%Y%m%d%H")
 
 
-def _count_key(ip: str, hour_bucket: str) -> str:
-    return f"ai:perm_denied:ip:{ip}:{hour_bucket}"
+def _count_key(ip: str, hour_bucket: str, *, tenant: TenantContext) -> str:
+    return (
+        f"tenant:{tenant.tenant_id}:v:{tenant.tenant_version}:"
+        f"ai:perm_denied:ip:{ip}:{hour_bucket}"
+    )
 
 
-def _blacklist_key(ip: str) -> str:
+def _blacklist_key(ip: str, *, tenant: TenantContext) -> str:
     """复用现有 IP 黑名单 key 命名（与 auth 模块的 IP 黑名单一致）"""
     ip_hash = hashlib.sha256(ip.encode("utf-8")).hexdigest()
-    return f"blacklist:{ip_hash}"
+    return f"tenant:{tenant.tenant_id}:v:{tenant.tenant_version}:blacklist:{ip_hash}"
 
 
 async def _load_allowlist(db: AsyncSession, *, tenant: TenantContext) -> list[str]:
@@ -59,9 +62,10 @@ async def _load_allowlist(db: AsyncSession, *, tenant: TenantContext) -> list[st
     Returns:
         IP 字符串列表（精确匹配，不做 CIDR）
     """
-    global _allowlist_cache
-    if _allowlist_cache is not None:
-        cached_list, fetched_at = _allowlist_cache
+    cache_key = (tenant.tenant_id, tenant.tenant_version)
+    cached = _allowlist_cache.get(cache_key)
+    if cached is not None:
+        cached_list, fetched_at = cached
         import time  # noqa: PLC0415
 
         if time.time() - fetched_at < _ALLOWLIST_TTL_SEC:
@@ -78,13 +82,15 @@ async def _load_allowlist(db: AsyncSession, *, tenant: TenantContext) -> list[st
 
     import time  # noqa: PLC0415
 
-    _allowlist_cache = (parsed, time.time())
+    _allowlist_cache[cache_key] = (parsed, time.time())
     return parsed
 
 
-def _invalidate_allowlist_cache() -> None:
-    global _allowlist_cache
-    _allowlist_cache = None
+def _invalidate_allowlist_cache(*, tenant: TenantContext | None = None) -> None:
+    if tenant is None:
+        _allowlist_cache.clear()
+        return
+    _allowlist_cache.pop((tenant.tenant_id, tenant.tenant_version), None)
 
 
 async def record_perm_denied(
@@ -109,7 +115,7 @@ async def record_perm_denied(
         return False
 
     bucket = _hour_bucket()
-    key = _count_key(ip, bucket)
+    key = _count_key(ip, bucket, tenant=tenant)
     current = await redis.incr(key)
     if current == 1:
         await redis.expire(key, DEFAULT_TTL_SEC)
@@ -130,7 +136,7 @@ async def record_perm_denied(
         return False
 
     # 拉黑：写 blacklist:{ip_hash}，TTL 与现有 IP 黑名单约定一致（这里复用 2h）
-    bl_key = _blacklist_key(ip)
+    bl_key = _blacklist_key(ip, tenant=tenant)
     await redis.set(bl_key, "1", ex=duration_sec)
     logger.warning(
         "ip auto-blacklisted for mass permission denial",
@@ -149,20 +155,23 @@ async def record_perm_denied(
     return True
 
 
-async def is_ip_blacklisted(redis: Redis, ip: str) -> bool:
+async def is_ip_blacklisted(redis: Redis, ip: str, *, tenant: TenantContext) -> bool:
     """检查 IP 是否在黑名单（auth 中间件调用）"""
     if not ip:
         return False
-    return bool(await redis.exists(_blacklist_key(ip)))
+    return bool(await redis.exists(_blacklist_key(ip, tenant=tenant)))
 
 
-async def unblacklist_ip(redis: Redis, ip: str) -> None:
+async def unblacklist_ip(redis: Redis, ip: str, *, tenant: TenantContext) -> None:
     """管理员手动解除（运维 API 用）"""
     if not ip:
         return
-    await redis.delete(_blacklist_key(ip))
+    await redis.delete(_blacklist_key(ip, tenant=tenant))
     # 同步清所有 hour_bucket 计数器（best effort，SCAN 找）
-    async for key in redis.scan_iter(match=f"ai:perm_denied:ip:{ip}:*", count=100):
+    pattern = (
+        f"tenant:{tenant.tenant_id}:v:{tenant.tenant_version}:ai:perm_denied:ip:{ip}:*"
+    )
+    async for key in redis.scan_iter(match=pattern, count=100):
         await redis.delete(key)
 
 

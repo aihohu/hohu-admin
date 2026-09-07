@@ -498,6 +498,7 @@ class _DummyModel(Base):
     """模拟带 dept_id 字段的业务模型。"""
 
     __tablename__ = "test_dummy_business"
+    __table_args__ = {"info": {"tenant_isolation_audit_exempt": "test-only"}}
 
     id: Mapped[int] = mapped_column(primary_key=True)
     dept_id: Mapped[int] = mapped_column(default=0)

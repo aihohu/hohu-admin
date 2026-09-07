@@ -11,7 +11,6 @@ from tenant_helpers import tenant_context
 from app.core.exceptions import BusinessException
 from app.core.security import encrypt_value
 from app.core.tenant import PlatformContext
-from app.modules.ai.api.provider import router as provider_router
 from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.schemas.model import ModelCreate
@@ -25,6 +24,7 @@ from app.modules.ai.service.model_authorization_service import (
 )
 from app.modules.ai.service.model_service import model_service
 from app.modules.ai.service.provider_service import provider_service
+from app.modules.platform.ai_api import router as platform_ai_router
 
 PLATFORM = PlatformContext(
     actor_principal_id=1,
@@ -52,7 +52,7 @@ def _public_provider_dns(monkeypatch):
 def _routes(path: str, method: str) -> list[APIRoute]:
     return [
         route
-        for route in provider_router.routes
+        for route in platform_ai_router.routes
         if isinstance(route, APIRoute)
         and route.path == path
         and method in route.methods
@@ -61,7 +61,7 @@ def _routes(path: str, method: str) -> list[APIRoute]:
 
 def test_provider_test_endpoint_references_only_saved_objects() -> None:
     assert _routes("/test-model", "POST") == []
-    assert len(_routes("/{provider_id}/test", "POST")) == 1
+    assert len(_routes("/ai/providers/{provider_id}/test", "POST")) == 1
 
     request = ProviderTestRequest.model_validate({"modelId": "123"})
     assert request.model_id == "123"

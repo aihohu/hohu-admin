@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from pydantic.alias_generators import to_camel
 
 from app.core.config import settings
-from app.core.security import decrypt_value
+from app.modules.ai.schemas.config_projection import redact_config, redact_url
 
 
 class ProviderCreate(BaseModel):
@@ -19,20 +19,26 @@ class ProviderCreate(BaseModel):
     is_enabled: bool = Field(True, description="是否启用")
     config: dict | None = Field(None, description="扩展配置")
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid"
+    )
 
 
 class ProviderUpdate(BaseModel):
     """提供商更新请求"""
 
-    provider_code: str | None = Field(None, max_length=50, description="提供商标识")
-    name: str | None = Field(None, max_length=100, description="显示名称")
+    provider_code: str | None = Field(
+        None, min_length=1, max_length=50, description="提供商标识"
+    )
+    name: str | None = Field(None, min_length=1, max_length=100, description="显示名称")
     api_key: str | None = Field(None, max_length=500, description="API Key")
     base_url: str | None = Field(None, max_length=500, description="API 地址")
     is_enabled: bool | None = Field(None, description="是否启用")
     config: dict | None = Field(None, description="扩展配置")
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid"
+    )
 
 
 class ProviderOut(BaseModel):
@@ -41,7 +47,7 @@ class ProviderOut(BaseModel):
     provider_id: int
     provider_code: str
     name: str
-    api_key: str
+    credential_configured: bool
     base_url: str | None
     is_enabled: bool
     config: dict | None
@@ -56,12 +62,18 @@ class ProviderOut(BaseModel):
     def serialize_create_time(self, dt: datetime) -> str:
         return dt.strftime(settings.DATETIME_FORMAT)
 
-    @field_serializer("api_key")
-    def mask_api_key(self, v: str, _info) -> str:
-        plaintext = decrypt_value(v)
-        if len(plaintext) <= 8:
-            return "****"
-        return plaintext[:4] + "****" + plaintext[-4:]
+    @classmethod
+    def from_record(cls, provider) -> "ProviderOut":
+        return cls(
+            provider_id=provider.provider_id,
+            provider_code=provider.provider_code,
+            name=provider.name,
+            credential_configured=bool(provider.api_key),
+            base_url=redact_url(provider.base_url),
+            is_enabled=provider.is_enabled,
+            config=redact_config(provider.config),
+            create_time=provider.create_time,
+        )
 
     model_config = ConfigDict(
         from_attributes=True, populate_by_name=True, alias_generator=to_camel

@@ -60,8 +60,16 @@ def platform_permission_for_request(method: str, path: str) -> str:
         if normalized_method == "POST":
             return PLATFORM_AUDIT_RETENTION
 
-    governed = path == "/ai/admin/agents" or path.startswith("/ai/admin/agents/")
-    governed = governed or path == "/ai/provider" or path.startswith("/ai/provider/")
+    governed = path == "/platform/ai/agents" or path.startswith("/platform/ai/agents/")
+    governed = (
+        governed
+        or path == "/platform/ai/providers"
+        or path.startswith("/platform/ai/providers/")
+    )
+    governed = governed or path == "/platform/tenants/{tenant_id}/ai/model-policies"
+    governed = governed or path.startswith(
+        "/platform/tenants/{tenant_id}/ai/model-policies/"
+    )
     if not governed:
         raise AuthorizationException(
             "平台入口尚未映射权限",

@@ -89,6 +89,8 @@ async def test_single_mode_uses_default_tenant_and_issues_tid(monkeypatch):
     )
     assert access["tid"] == "0"
     assert refresh["tid"] == "0"
+    assert access["tver"] == "1"
+    assert refresh["tver"] == "1"
 
 
 async def test_hosted_mode_normalizes_body_locator_and_supports_same_user_name(
@@ -305,7 +307,7 @@ async def test_current_user_rejects_tid_mismatch_and_old_token_without_tid():
     db = AsyncMock()
     db.execute = AsyncMock(return_value=_scalar_result(user))
 
-    mismatch = create_access_token(subject="101", tenant_id=9)
+    mismatch = create_access_token(subject="101", tenant_id=9, tenant_version=1)
     with patch(
         "app.modules.auth.service._is_blacklisted", AsyncMock(return_value=False)
     ):
@@ -334,6 +336,7 @@ async def test_current_user_rejects_non_scalar_signed_identity_claims():
         "exp": datetime.now(UTC) + timedelta(minutes=5),
         "sub": "101",
         "tid": [0],
+        "tver": "1",
         "type": "access",
     }
     token = jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
@@ -354,7 +357,7 @@ async def test_current_user_rejects_disabled_tenant():
     user = _user(user_id=202, tenant=tenant)
     db = AsyncMock()
     db.execute = AsyncMock(return_value=_scalar_result(user))
-    token = create_access_token(subject="202", tenant_id=22)
+    token = create_access_token(subject="202", tenant_id=22, tenant_version=1)
 
     with patch(
         "app.modules.auth.service._is_blacklisted", AsyncMock(return_value=False)
@@ -370,7 +373,7 @@ async def test_current_user_binds_the_canonical_tenant_context():
     user = _user(user_id=202, tenant=tenant)
     db = AsyncMock()
     db.execute = AsyncMock(return_value=_scalar_result(user))
-    token = create_access_token(subject="202", tenant_id=22)
+    token = create_access_token(subject="202", tenant_id=22, tenant_version=1)
 
     with patch(
         "app.modules.auth.service._is_blacklisted", AsyncMock(return_value=False)
@@ -387,7 +390,7 @@ async def test_current_user_binds_the_canonical_tenant_context():
 async def test_refresh_rejects_tid_mismatch(monkeypatch):
     tenant = _tenant(tenant_id=0, code="default")
     user = _user(user_id=101, tenant=tenant)
-    token = create_refresh_token(subject="101", tenant_id=9)
+    token = create_refresh_token(subject="101", tenant_id=9, tenant_version=1)
     session = AsyncMock()
     session.execute = AsyncMock(return_value=_scalar_result(user))
 
@@ -406,3 +409,48 @@ async def test_refresh_rejects_tid_mismatch(monkeypatch):
         await refresh_access_token(token)
 
     assert exc_info.value.error_code == "TOKEN_EXPIRED"
+
+
+async def test_current_user_rejects_stale_tenant_security_version() -> None:
+    tenant = _tenant(tenant_id=22, code="tenant-b")
+    tenant.row_version = 2
+    user = _user(user_id=202, tenant=tenant)
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_scalar_result(user))
+    token = create_access_token(subject="202", tenant_id=22, tenant_version=1)
+
+    with patch(
+        "app.modules.auth.service._is_blacklisted", AsyncMock(return_value=False)
+    ):
+        with pytest.raises(AuthenticationException) as exc_info:
+            await get_current_user(token=token, db=db)
+
+    assert exc_info.value.error_code == "TOKEN_EXPIRED"
+
+
+async def test_refresh_rejects_stale_tenant_security_version(monkeypatch) -> None:
+    tenant = _tenant(tenant_id=22, code="tenant-b")
+    tenant.row_version = 3
+    user = _user(user_id=202, tenant=tenant)
+    token = create_refresh_token(subject="202", tenant_id=22, tenant_version=2)
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_scalar_result(user))
+
+    class _SessionContext:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        "app.modules.auth.service.AsyncSessionLocal", lambda: _SessionContext()
+    )
+    blacklist = AsyncMock(return_value=True)
+    monkeypatch.setattr("app.modules.auth.service._try_blacklist_token", blacklist)
+
+    with pytest.raises(AuthenticationException) as exc_info:
+        await refresh_access_token(token)
+
+    assert exc_info.value.error_code == "TOKEN_EXPIRED"
+    blacklist.assert_not_awaited()

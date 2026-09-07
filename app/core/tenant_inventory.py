@@ -29,6 +29,17 @@ class PlatformGlobalResource:
     identity_column: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class HostedContainedResource:
+    table_name: str
+    object_path: str
+    allowed_tenant_ids: tuple[int, ...] = (0,)
+    tenant_column: str | None = "tenant_id"
+    parent_table: str | None = None
+    parent_column: str | None = None
+    user_columns: tuple[str, ...] = ()
+
+
 def _resource(
     table_name: str,
     object_path: str,
@@ -214,6 +225,56 @@ PLATFORM_GLOBAL_TABLES: dict[str, PlatformGlobalResource] = {
         "ai_model", "app.modules.ai.models.model:AiModel"
     ),
 }
+
+
+HOSTED_CONTAINED_TABLES: dict[str, HostedContainedResource] = {
+    "mk_app": HostedContainedResource(
+        "mk_app",
+        "app.modules.marketplace.models.app:App",
+        user_columns=("author_id",),
+    ),
+    "mk_app_version": HostedContainedResource(
+        "mk_app_version",
+        "app.modules.marketplace.models.app:AppVersion",
+        tenant_column=None,
+        parent_table="mk_app",
+        parent_column="app_id",
+    ),
+    "mk_app_permission": HostedContainedResource(
+        "mk_app_permission",
+        "app.modules.marketplace.models.permission:AppPermission",
+        tenant_column=None,
+        parent_table="mk_app",
+        parent_column="app_id",
+    ),
+    "mk_app_rating": HostedContainedResource(
+        "mk_app_rating",
+        "app.modules.marketplace.models.rating:AppRating",
+        tenant_column=None,
+        parent_table="mk_app",
+        parent_column="app_id",
+        user_columns=("user_id",),
+    ),
+    "mk_app_review": HostedContainedResource(
+        "mk_app_review",
+        "app.modules.marketplace.models.review:AppReview",
+        tenant_column=None,
+        parent_table="mk_app",
+        parent_column="app_id",
+        user_columns=("human_reviewer_id",),
+    ),
+    "mk_tenant_app": HostedContainedResource(
+        "mk_tenant_app",
+        "app.modules.marketplace.models.install:TenantApp",
+        parent_table="mk_app",
+        parent_column="app_id",
+    ),
+}
+
+
+# Tables owned by the migration/runtime infrastructure rather than a product domain.
+# Any other physical table must be explicitly classified above before release.
+INFRASTRUCTURE_TABLES = frozenset({"alembic_version"})
 
 
 def load_inventory_table(resource: Any) -> Table:

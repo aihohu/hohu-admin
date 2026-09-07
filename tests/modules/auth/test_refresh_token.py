@@ -26,7 +26,13 @@ from app.modules.system.models.user import User
 
 def _make_refresh_token(*, sub: str, tenant_id: int = 0, expired: bool = False) -> str:
     exp = datetime.now(UTC) + (timedelta(seconds=-10) if expired else timedelta(days=1))
-    payload = {"exp": exp, "sub": sub, "tid": str(tenant_id), "type": "refresh"}
+    payload = {
+        "exp": exp,
+        "sub": sub,
+        "tid": str(tenant_id),
+        "tver": "1",
+        "type": "refresh",
+    }
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
@@ -148,7 +154,13 @@ async def test_refresh_fails_on_concurrent_replay():
 async def test_refresh_fails_when_token_type_wrong():
     """refresh token 类型字段错误必须拒绝。"""
     exp = datetime.now(UTC) + timedelta(minutes=5)
-    payload = {"exp": exp, "sub": "123", "tid": "0", "type": "access"}
+    payload = {
+        "exp": exp,
+        "sub": "123",
+        "tid": "0",
+        "tver": "1",
+        "type": "access",
+    }
     wrong = jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
     user = _make_user(user_id=123, name="alice", status="1")

@@ -206,7 +206,7 @@ async def user_import_preview(
     storage_key = await storage.save(
         file_bytes,
         mime_type=mime_type,
-        namespace="import-preview",
+        namespace=f"tenant-{ctx.tenant.tenant_id}-import-preview",
         suffix=storage_suffix,
     )
     batch.file_storage_key = storage_key

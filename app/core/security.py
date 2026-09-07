@@ -41,26 +41,41 @@ def get_password_hash(password: str) -> str:
     return hashed.decode("utf-8")
 
 
-def create_access_token(subject: str | Any, *, tenant_id: int) -> str:
+def _validated_tenant_version(tenant_version: int) -> str:
+    if (
+        isinstance(tenant_version, bool)
+        or not isinstance(tenant_version, int)
+        or tenant_version < 1
+    ):
+        raise ValueError("tenant_version must be a positive integer")
+    return str(tenant_version)
+
+
+def create_access_token(
+    subject: str | Any, *, tenant_id: int, tenant_version: int
+) -> str:
     """生成 JWT Access Token（短期，用于 API 请求鉴权）
 
-    ``tid`` 将 token 绑定到认证时的租户。username 等可变展示值仍不进入
-    token，避免改名后污染审计日志。
+    ``tid`` 将 token 绑定到认证时的租户，``tver`` 绑定数据库安全版本。
+    username 等可变展示值仍不进入 token，避免改名后污染审计日志。
     """
 
     expire = datetime.now(UTC) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
 
-    # type 区分 access/refresh，tid 与数据库 User.tenant_id 必须二次匹配。
+    # type 区分 access/refresh；tid/tver 必须与数据库当前租户二次匹配。
     to_encode: dict[str, Any] = {
         "exp": expire,
         "sub": str(subject),
         "tid": str(tenant_id),
+        "tver": _validated_tenant_version(tenant_version),
         "type": "access",
     }
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
-def create_refresh_token(subject: str | Any, *, tenant_id: int) -> str:
+def create_refresh_token(
+    subject: str | Any, *, tenant_id: int, tenant_version: int
+) -> str:
     """生成 JWT Refresh Token（长期，仅用于换取新的 access token）"""
 
     expire = datetime.now(UTC) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
@@ -68,6 +83,7 @@ def create_refresh_token(subject: str | Any, *, tenant_id: int) -> str:
         "exp": expire,
         "sub": str(subject),
         "tid": str(tenant_id),
+        "tver": _validated_tenant_version(tenant_version),
         "type": "refresh",
     }
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)

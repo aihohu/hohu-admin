@@ -1,4 +1,8 @@
+import importlib.util
 from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import delete, insert, update
@@ -10,6 +14,38 @@ from app.modules.platform.audit import add_platform_completion
 from app.modules.platform.auth import authenticate_platform_token
 from app.modules.platform.constants import PLATFORM_AI_READ, PLATFORM_AI_WRITE
 from app.modules.platform.models import PlatformAuditLog, PlatformPrincipal
+
+
+def _load_plan5a_migration():
+    path = (
+        Path(__file__).resolve().parents[3]
+        / "alembic"
+        / "versions"
+        / "2d3e4f5a6b7c_add_platform_identity_and_audit.py"
+    )
+    spec = importlib.util.spec_from_file_location("plan5a_migration", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_plan5a_downgrade_refuses_to_erase_platform_security_history() -> None:
+    migration = _load_plan5a_migration()
+    result = MagicMock()
+    result.scalar_one.return_value = True
+    connection = MagicMock()
+    connection.execute.return_value = result
+    migration.op = SimpleNamespace(get_bind=lambda: connection)
+
+    with pytest.raises(RuntimeError, match="PLAN5A_DOWNGRADE_PLATFORM_DATA_PRESENT"):
+        migration._assert_downgrade_safe()
+
+    assert connection.execute.call_count == 2
+    lock_sql = str(connection.execute.call_args_list[0].args[0])
+    assert "ACCESS EXCLUSIVE" in lock_sql
+    assert "sys_platform_principal" in lock_sql
+    assert "sys_platform_audit_log" in lock_sql
 
 
 async def test_platform_security_changes_automatically_revoke_old_versions(db_session):

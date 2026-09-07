@@ -77,7 +77,6 @@ async def prepare_tenant(
         idempotency_key=idempotency_key,
         platform=platform,
     )
-    await db.commit()
     request.state.platform_result_summary = {"recordCount": 1}
     return ResponseModel.success(data=PlatformTenantOut.from_record(tenant))
 
@@ -141,7 +140,6 @@ async def disable_tenant(
     tenant = await tenant_lifecycle_service.disable_tenant(
         db, tenant_id=tenant_id, platform=platform
     )
-    await db.commit()
     request.state.platform_result_summary = {"recordCount": 1}
     return ResponseModel.success(data=PlatformTenantOut.from_record(tenant))
 
@@ -167,7 +165,6 @@ async def bootstrap_tenant(
         idempotency_key=idempotency_key,
         platform=platform,
     )
-    await db.commit()
     request.state.platform_result_summary = {"recordCount": 1}
     return ResponseModel.success(data=PlatformTenantBootstrapOut.from_result(result))
 
@@ -273,6 +270,5 @@ async def purge_tenant_audit_retention(
         expected_login_count=payload.expected_login_count,
         platform=platform,
     )
-    await db.commit()
     request.state.platform_result_summary = {"affectedCount": result.affected_count}
     return ResponseModel.success(data=PlatformRetentionOut.from_result(result))

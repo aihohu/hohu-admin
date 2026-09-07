@@ -58,6 +58,7 @@ async def admin_token(db_session) -> str:
         "exp": exp,
         "sub": str(user.user_id),
         "tid": str(user.tenant_id),
+        "tver": "1",
         "type": "access",
         "user_id": user.user_id,
         "user_name": user.user_name,

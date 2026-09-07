@@ -43,6 +43,14 @@ _FORBIDDEN_CONFIG_KEY_PARTS = (
     "retries",
     "verify",
     "certificate",
+    "authorization",
+    "bearertoken",
+    "credential",
+    "password",
+    "secret",
+    "apikey",
+    "cookie",
+    "headers",
 )
 _SANITIZED_UPSTREAM_BODY = json.dumps(
     {"error": {"message": "provider request failed"}}, separators=(",", ":")

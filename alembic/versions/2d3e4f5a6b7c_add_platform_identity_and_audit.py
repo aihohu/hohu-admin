@@ -29,6 +29,34 @@ _CREATE_APPEND_ONLY_FUNCTION = sa.text(
     """
 )
 
+
+def _assert_downgrade_safe() -> None:
+    """Never silently erase platform identities or append-only evidence."""
+    connection = op.get_bind()
+    connection.execute(
+        sa.text(
+            "LOCK TABLE sys_platform_principal, sys_platform_audit_log "
+            "IN ACCESS EXCLUSIVE MODE"
+        )
+    )
+    has_platform_data = (
+        connection.execute(
+            sa.text(
+                """
+            SELECT EXISTS (SELECT 1 FROM sys_platform_principal)
+                OR EXISTS (SELECT 1 FROM sys_platform_audit_log)
+            """
+            )
+        )
+        .scalar_one()
+    )
+    if has_platform_data:
+        raise RuntimeError(
+            "PLAN5A_DOWNGRADE_PLATFORM_DATA_PRESENT: export and explicitly purge "
+            "platform principals and audit history before downgrade"
+        )
+
+
 _CREATE_APPEND_ONLY_TRIGGER = sa.text(
     """
     CREATE TRIGGER trg_platform_audit_append_only
@@ -106,9 +134,7 @@ _CREATE_LINEAGE_TRIGGER = sa.text(
 def upgrade() -> None:
     op.create_table(
         "sys_platform_principal",
-        sa.Column(
-            "principal_id", sa.BigInteger(), autoincrement=False, nullable=False
-        ),
+        sa.Column("principal_id", sa.BigInteger(), autoincrement=False, nullable=False),
         sa.Column("principal_name", sa.String(length=64), nullable=False),
         sa.Column("display_name", sa.String(length=100), nullable=False),
         sa.Column("hashed_password", sa.String(length=255), nullable=False),
@@ -119,9 +145,7 @@ def upgrade() -> None:
             server_default=sa.text("'[]'::jsonb"),
             nullable=False,
         ),
-        sa.Column(
-            "row_version", sa.Integer(), server_default="1", nullable=False
-        ),
+        sa.Column("row_version", sa.Integer(), server_default="1", nullable=False),
         sa.Column("last_login_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
             "created_at",
@@ -135,9 +159,7 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
-        sa.CheckConstraint(
-            "status IN ('1', '2')", name="ck_platform_principal_status"
-        ),
+        sa.CheckConstraint("status IN ('1', '2')", name="ck_platform_principal_status"),
         sa.CheckConstraint(
             "row_version >= 1", name="ck_platform_principal_row_version"
         ),
@@ -287,6 +309,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    _assert_downgrade_safe()
     op.execute("DROP TRIGGER trg_platform_audit_append_only ON sys_platform_audit_log")
     op.execute(
         "DROP TRIGGER IF EXISTS trg_platform_audit_validate_lineage "
@@ -294,15 +317,9 @@ def downgrade() -> None:
     )
     op.execute("DROP FUNCTION IF EXISTS validate_platform_audit_lineage()")
     op.execute("DROP INDEX IF EXISTS uq_platform_audit_one_completion")
-    op.drop_index(
-        "ix_platform_audit_target_time", table_name="sys_platform_audit_log"
-    )
-    op.drop_index(
-        "ix_platform_audit_actor_time", table_name="sys_platform_audit_log"
-    )
-    op.drop_index(
-        "ix_platform_audit_correlation", table_name="sys_platform_audit_log"
-    )
+    op.drop_index("ix_platform_audit_target_time", table_name="sys_platform_audit_log")
+    op.drop_index("ix_platform_audit_actor_time", table_name="sys_platform_audit_log")
+    op.drop_index("ix_platform_audit_correlation", table_name="sys_platform_audit_log")
     op.drop_table("sys_platform_audit_log")
     op.execute("DROP FUNCTION reject_platform_audit_mutation()")
     op.execute(
@@ -310,7 +327,5 @@ def downgrade() -> None:
         "ON sys_platform_principal"
     )
     op.execute("DROP FUNCTION IF EXISTS bump_platform_principal_security_version()")
-    op.drop_index(
-        "ix_platform_principal_status", table_name="sys_platform_principal"
-    )
+    op.drop_index("ix_platform_principal_status", table_name="sys_platform_principal")
     op.drop_table("sys_platform_principal")

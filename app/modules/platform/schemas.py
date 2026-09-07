@@ -8,6 +8,7 @@ from pydantic import (
     SecretStr,
     field_serializer,
     field_validator,
+    model_validator,
 )
 from pydantic.alias_generators import to_camel
 
@@ -176,6 +177,56 @@ class PlatformTenantBootstrapOut(BaseModel):
             agent_binding_count=result.agent_binding_count,
             replayed=result.replayed,
         )
+
+
+class PlatformTenantModelPolicyPut(BaseModel):
+    enabled: bool
+    is_default: bool
+    daily_quota_per_user: int | None = Field(default=None, ge=1)
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    @model_validator(mode="after")
+    def default_requires_enabled(self) -> "PlatformTenantModelPolicyPut":
+        if self.is_default and not self.enabled:
+            raise ValueError("default model policy must be enabled")
+        return self
+
+
+class PlatformTenantModelPolicyOut(BaseModel):
+    model_id: int
+    provider_id: int
+    provider_name: str
+    model_name: str
+    capabilities: list[str]
+    enabled: bool
+    is_default: bool
+    daily_quota_per_user: int | None
+    model_available: bool
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    @classmethod
+    def from_projection(cls, projection) -> "PlatformTenantModelPolicyOut":
+        return cls(
+            model_id=projection.model_id,
+            provider_id=projection.provider_id,
+            provider_name=projection.provider_name,
+            model_name=projection.model_name,
+            capabilities=list(projection.capabilities),
+            enabled=projection.enabled,
+            is_default=projection.is_default,
+            daily_quota_per_user=projection.daily_quota_per_user,
+            model_available=projection.model_available,
+        )
+
+    @field_serializer("model_id", "provider_id")
+    def serialize_ids(self, value: int, _info) -> str:
+        return str(value)
 
 
 class PlatformSupportAuditQuery(BaseModel):

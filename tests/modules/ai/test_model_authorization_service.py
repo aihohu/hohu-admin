@@ -167,7 +167,7 @@ async def test_chat_model_options_are_tenant_scoped_and_agent_admin_is_platform_
     client, _token = authed_client
 
     chat_response = await client.get("/ai/chat/models")
-    agent_response = await client.get("/ai/admin/agents/model-options")
+    agent_response = await client.get("/platform/ai/agents/model-options")
 
     assert chat_response.status_code == 200
     assert agent_response.status_code == 403
