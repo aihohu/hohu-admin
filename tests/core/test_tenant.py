@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.core.config import settings
 from app.core.exceptions import AuthenticationException, AuthorizationException
 from app.core.tenant import (
     PlatformContext,
@@ -195,7 +196,9 @@ def test_platform_derived_scope_cannot_be_laundered_into_user_or_worker_authorit
         )
 
 
-def test_worker_envelope_is_signed_and_revalidated_against_live_tenant():
+def test_worker_envelope_is_signed_and_revalidated_against_live_tenant(monkeypatch):
+    monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
+    monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
     tenant = TenantContext(
         tenant_id=7,
         tenant_code="acme",
@@ -231,7 +234,9 @@ def test_worker_envelope_is_signed_and_revalidated_against_live_tenant():
     )
 
 
-def test_worker_envelope_rejects_tampering_and_disabled_tenant():
+def test_worker_envelope_rejects_tampering_and_disabled_tenant(monkeypatch):
+    monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
+    monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
     tenant = TenantContext(
         tenant_id=7,
         tenant_code="acme",
@@ -271,3 +276,37 @@ def test_worker_envelope_rejects_tampering_and_disabled_tenant():
             secret="test-secret",
         )
     assert disabled.value.error_code == "TENANT_DISABLED"
+
+
+def test_worker_envelope_rejects_non_default_tenant_after_hosted_rollback(
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "TENANT_MODE", "single")
+    monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", False)
+    tenant = TenantContext(
+        tenant_id=7,
+        tenant_code="acme",
+        actor_user_id=101,
+        tenant_version=3,
+        source="access_token",
+    )
+    envelope = create_worker_envelope(
+        tenant,
+        job_id="job-rollback",
+        scope_hash="scope-v1",
+        secret="test-secret",
+    )
+
+    with pytest.raises(AuthenticationException) as exc_info:
+        revalidate_worker_envelope(
+            envelope,
+            live_tenant=SimpleNamespace(
+                tenant_id=7,
+                tenant_code="acme",
+                status="1",
+                row_version=3,
+            ),
+            secret="test-secret",
+        )
+
+    assert exc_info.value.error_code == "TENANT_HOSTED_ACCESS_DISABLED"

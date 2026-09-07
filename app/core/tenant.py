@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, replace
 from typing import Any, Literal, Protocol
 
 from app.constants import STATUS_ENABLED
+from app.core.config import settings
 from app.core.exceptions import AuthenticationException, AuthorizationException
 
 DEFAULT_TENANT_ID = 0
@@ -184,6 +185,17 @@ def normalize_tenant_code(value: str | None) -> str | None:
     return normalized if _TENANT_CODE_RE.fullmatch(normalized) else None
 
 
+def require_tenant_runtime_enabled(tenant_id: int) -> None:
+    """Reject non-default tenant authority when the hosted release gate is closed."""
+    if tenant_id == DEFAULT_TENANT_ID:
+        return
+    if settings.TENANT_MODE != "hosted" or not settings.TENANT_HOSTED_LOGIN_ENABLED:
+        raise AuthenticationException(
+            "Hosted Tenant 访问已关闭",
+            error_code="TENANT_HOSTED_ACCESS_DISABLED",
+        )
+
+
 def bind_tenant_context(principal: Any, tenant: TenantContext) -> None:
     """Attach server-built context to an ORM principal after DB verification."""
     if (
@@ -263,6 +275,7 @@ def revalidate_worker_envelope(
         raise AuthenticationException(
             "租户上下文无效", error_code="TENANT_CONTEXT_INVALID"
         )
+    require_tenant_runtime_enabled(envelope.tenant_id)
 
     persisted_facts = (
         live_tenant.tenant_id,

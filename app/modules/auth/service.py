@@ -40,6 +40,7 @@ from app.core.tenant import (
     bind_tenant_context,
     get_bound_tenant_context,
     normalize_tenant_code,
+    require_tenant_runtime_enabled,
 )
 from app.db.session import AsyncSessionLocal, get_db
 from app.modules.auth.schemas.auth import LoginCredentials, RouteMeta, UserRoute
@@ -370,6 +371,7 @@ async def refresh_access_token(refresh_token: str) -> tuple[str, str]:
 
     # 查 DB 校验用户存在且启用，防止禁用/删除用户用旧 refresh token 持续换新
     user_id, tenant_id, tenant_version = _parse_token_identity(payload)
+    require_tenant_runtime_enabled(tenant_id)
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(User)
@@ -415,14 +417,8 @@ async def get_current_user(
     """
     JWT Token 验证依赖项
     """
-    # 0. 黑名单校验（用户已退出登录后 token 立即失效）
-    if await _is_blacklisted(token):
-        raise AuthenticationException(
-            "Token 已失效，请重新登录", error_code="TOKEN_EXPIRED"
-        )
-
     try:
-        # 1. 解码 Token
+        # 0. 解码 Token，并在任何 Redis/DB 访问前应用 hosted runtime gate。
         payload = jwt.decode(
             token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
         )
@@ -430,8 +426,15 @@ async def get_current_user(
         if payload.get("type") != "access":
             raise AuthenticationException("Token 类型错误", error_code="TOKEN_EXPIRED")
         user_id, tenant_id, tenant_version = _parse_token_identity(payload)
+        require_tenant_runtime_enabled(tenant_id)
     except JWTError:
         raise AuthenticationException("Token 无效或已过期", error_code="TOKEN_EXPIRED")
+
+    # 1. 黑名单校验（用户已退出登录后 token 立即失效）
+    if await _is_blacklisted(token):
+        raise AuthenticationException(
+            "Token 已失效，请重新登录", error_code="TOKEN_EXPIRED"
+        )
 
     # 2. 查询用户并预加载角色和菜单 (RBAC 核心)
     # 使用 selectinload 解决异步环境下的关联查询

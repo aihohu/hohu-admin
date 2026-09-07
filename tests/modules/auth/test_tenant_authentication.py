@@ -304,7 +304,9 @@ async def test_password_login_rejects_missing_password_without_server_error(
     assert exc_info.value.error_code == "INVALID_CREDENTIALS"
 
 
-async def test_current_user_rejects_tid_mismatch_and_old_token_without_tid():
+async def test_current_user_rejects_tid_mismatch_and_old_token_without_tid(monkeypatch):
+    monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
+    monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
     tenant = _tenant(tenant_id=0, code="default")
     user = _user(user_id=101, tenant=tenant)
     db = AsyncMock()
@@ -355,7 +357,45 @@ async def test_current_user_rejects_non_scalar_signed_identity_claims():
     db.execute.assert_not_awaited()
 
 
-async def test_current_user_rejects_disabled_tenant():
+async def test_current_user_rejects_non_default_token_after_hosted_rollback(
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "TENANT_MODE", "single")
+    monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", False)
+    token = create_access_token(subject="202", tenant_id=22, tenant_version=1)
+    db = AsyncMock()
+
+    with patch(
+        "app.modules.auth.service._is_blacklisted", AsyncMock(return_value=False)
+    ) as blacklist:
+        with pytest.raises(AuthenticationException) as exc_info:
+            await get_current_user(token=token, db=db)
+
+    assert exc_info.value.error_code == "TENANT_HOSTED_ACCESS_DISABLED"
+    blacklist.assert_not_awaited()
+    db.execute.assert_not_awaited()
+
+
+async def test_refresh_rejects_non_default_token_after_hosted_rollback(monkeypatch):
+    monkeypatch.setattr(settings, "TENANT_MODE", "single")
+    monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", False)
+    token = create_refresh_token(subject="202", tenant_id=22, tenant_version=1)
+    session_factory = MagicMock()
+    blacklist = AsyncMock(return_value=True)
+    monkeypatch.setattr("app.modules.auth.service.AsyncSessionLocal", session_factory)
+    monkeypatch.setattr("app.modules.auth.service._try_blacklist_token", blacklist)
+
+    with pytest.raises(AuthenticationException) as exc_info:
+        await refresh_access_token(token)
+
+    assert exc_info.value.error_code == "TENANT_HOSTED_ACCESS_DISABLED"
+    session_factory.assert_not_called()
+    blacklist.assert_not_awaited()
+
+
+async def test_current_user_rejects_disabled_tenant(monkeypatch):
+    monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
+    monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
     tenant = _tenant(tenant_id=22, code="tenant-b", status="2")
     user = _user(user_id=202, tenant=tenant)
     db = AsyncMock()
@@ -371,7 +411,9 @@ async def test_current_user_rejects_disabled_tenant():
     assert exc_info.value.error_code == "TENANT_DISABLED"
 
 
-async def test_current_user_binds_the_canonical_tenant_context():
+async def test_current_user_binds_the_canonical_tenant_context(monkeypatch):
+    monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
+    monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
     tenant = _tenant(tenant_id=22, code="tenant-b")
     user = _user(user_id=202, tenant=tenant)
     db = AsyncMock()
@@ -391,6 +433,8 @@ async def test_current_user_binds_the_canonical_tenant_context():
 
 
 async def test_refresh_rejects_tid_mismatch(monkeypatch):
+    monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
+    monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
     tenant = _tenant(tenant_id=0, code="default")
     user = _user(user_id=101, tenant=tenant)
     token = create_refresh_token(subject="101", tenant_id=9, tenant_version=1)
@@ -414,7 +458,9 @@ async def test_refresh_rejects_tid_mismatch(monkeypatch):
     assert exc_info.value.error_code == "TOKEN_EXPIRED"
 
 
-async def test_current_user_rejects_stale_tenant_security_version() -> None:
+async def test_current_user_rejects_stale_tenant_security_version(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
+    monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
     tenant = _tenant(tenant_id=22, code="tenant-b")
     tenant.row_version = 2
     user = _user(user_id=202, tenant=tenant)
@@ -432,6 +478,8 @@ async def test_current_user_rejects_stale_tenant_security_version() -> None:
 
 
 async def test_refresh_rejects_stale_tenant_security_version(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
+    monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
     tenant = _tenant(tenant_id=22, code="tenant-b")
     tenant.row_version = 3
     user = _user(user_id=202, tenant=tenant)
