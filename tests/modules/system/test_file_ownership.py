@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import io
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import UploadFile
+from fastapi.routing import APIRoute
 from sqlalchemy import BigInteger
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import Headers
@@ -43,6 +45,31 @@ def _upload_file(name: str, content: bytes) -> UploadFile:
     )
 
 
+def _route_permission_codes(path: str, method: str) -> set[str]:
+    matches = [
+        route
+        for route in file_api.router.routes
+        if isinstance(route, APIRoute)
+        and route.path == path
+        and method in route.methods
+    ]
+    assert len(matches) == 1, (path, method, matches)
+    codes: set[str] = set()
+
+    def collect(dependant) -> None:  # noqa: ANN001
+        for dependency in dependant.dependencies:
+            if inspect.isfunction(dependency.call) or inspect.ismethod(dependency.call):
+                permission = inspect.getclosurevars(dependency.call).nonlocals.get(
+                    "perm_code"
+                )
+                if isinstance(permission, str):
+                    codes.add(permission)
+            collect(dependency)
+
+    collect(matches[0].dependant)
+    return codes
+
+
 class TestFileOwnershipModel:
     def test_owner_is_nullable_only_for_legacy_compatibility(self) -> None:
         column = File.__table__.columns["owner_user_id"]
@@ -59,6 +86,12 @@ class TestFileOwnershipModel:
 
 
 class TestFileUploadOwnership:
+    def test_upload_routes_require_explicit_capabilities(self) -> None:
+        assert _route_permission_codes("/upload", "POST") == {"system:file:upload"}
+        assert _route_permission_codes("/batch-upload", "POST") == {
+            "system:file:upload"
+        }
+
     async def test_upload_size_check_uses_a_bounded_read(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

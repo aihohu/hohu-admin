@@ -20,6 +20,7 @@ router = APIRouter()
     response_model=ResponseModel[FileOut],
     summary="单文件上传",
     description="上传单个文件，可选关联业务类型和业务ID",
+    dependencies=[Depends(require_permissions("system:file:upload"))],
 )
 async def upload(
     file: Annotated[UploadFile, File(description="上传的文件")],
@@ -49,6 +50,7 @@ async def upload(
     response_model=ResponseModel[list[FileOut]],
     summary="多文件上传",
     description="批量上传多个文件, 可选关联业务类型和业务ID",
+    dependencies=[Depends(require_permissions("system:file:upload"))],
 )
 async def batch_upload(
     files: Annotated[list[UploadFile], File(description="上传的文件列表")],

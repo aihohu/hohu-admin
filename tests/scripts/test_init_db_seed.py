@@ -170,6 +170,20 @@ class TestUserButtonPermissionSeed:
         assert perms.count("system:user:export") == 1
 
 
+def test_file_permissions_are_seeded_under_file_menu():
+    parent = _find_menu_by_route_name(init_menus, "system_file")
+
+    for permission in (
+        "system:file:list",
+        "system:file:upload",
+        "system:file:delete",
+    ):
+        button = _find_menu_by_permission(init_menus, permission)
+        assert button.menu_type == "F"
+        assert button.status == STATUS_ENABLED
+        assert button.parent_id == parent.menu_id
+
+
 class TestConfigSeed:
     """验证 sys_config.auth:default_password 种子。
 

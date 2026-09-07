@@ -205,6 +205,11 @@ async def test_bootstrap_prepared_tenant_seeds_only_hosted_capabilities(db_sessi
         ).scalars()
     )
     assert assigned_permissions == HOSTED_PERMISSION_CODES
+    assert {
+        "system:file:list",
+        "system:file:upload",
+        "system:file:delete",
+    } <= assigned_permissions
     enabled_published_agents = await db_session.scalar(
         select(func.count()).select_from(AiAgent).where(AiAgent.enabled.is_(True))
     )
