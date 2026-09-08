@@ -94,3 +94,74 @@ jobs:
 
       - name: Run Tests
         run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=70
+
+  qualification:
+    name: Hosted release qualification (CI profile)
+    needs: [ruff, pytest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: qualification
+          POSTGRES_PASSWORD: qualification
+          POSTGRES_DB: hohu_release_qualification
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U qualification -d hohu_release_qualification"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ENV: test
+      TENANT_MODE: single
+      TENANT_HOSTED_LOGIN_ENABLED: "false"
+      DATABASE_URL: postgresql+asyncpg://qualification:qualification@localhost:5432/hohu_release_qualification
+      SECRET_KEY: plan7c-ci-qualification-secret-key-only
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+      REDIS_DB: 9
+      HOHU_RELEASE_QUALIFICATION_EPHEMERAL: "true"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.10.11"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --locked --all-extras --dev
+
+      - name: Run automated hosted release qualification
+        run: |
+          mkdir -p "${RUNNER_TEMP}/tenant-release-qualification"
+          uv run python scripts/qualify_tenant_hosted_release.py \
+            --build-sha "$(git rev-parse HEAD)" \
+            --profile ci \
+            --output "${RUNNER_TEMP}/tenant-release-qualification/qualification.json"
+
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tenant-release-qualification-ci-${{ github.sha }}
+          path: ${{ runner.temp }}/tenant-release-qualification/
+          if-no-files-found: error
+          retention-days: 14
