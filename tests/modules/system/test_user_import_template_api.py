@@ -18,16 +18,14 @@ service 层完整业务逻辑（部门字典实时查询 / 角色字典实时查
 """
 
 import re
-from datetime import UTC, datetime, timedelta
 from io import BytesIO
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from jose import jwt
 from openpyxl import load_workbook
 from sqlalchemy import select
 
-from app.core.config import settings
+from app.core.security import create_access_token
 from app.main import app
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
@@ -85,17 +83,12 @@ async def admin_token(db_session) -> str:
             select(User).where(User.tenant_id == 0, User.user_name == "admin")
         )
     ).scalar_one()
-    exp = datetime.now(UTC) + timedelta(hours=1)
-    payload = {
-        "exp": exp,
-        "sub": str(user.user_id),
-        "tid": str(user.tenant_id),
-        "tver": "1",
-        "type": "access",
-        "user_id": user.user_id,
-        "user_name": user.user_name,
-    }
-    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    return create_access_token(
+        subject=str(user.user_id),
+        tenant_id=user.tenant_id,
+        tenant_version=1,
+        user_version=user.auth_version,
+    )
 
 
 # ========== Helpers ==========

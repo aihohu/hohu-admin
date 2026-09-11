@@ -3,9 +3,11 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     UniqueConstraint,
     func,
@@ -30,6 +32,7 @@ class User(Base):
             "tenant_id", "employee_no", name="uq_sys_user_tenant_employee_no"
         ),
         Index("ix_sys_user_tenant_status", "tenant_id", "status"),
+        CheckConstraint("auth_version >= 1", name="ck_sys_user_auth_version_positive"),
     )
 
     user_id: Mapped[int] = mapped_column(
@@ -53,6 +56,13 @@ class User(Base):
         String(255), nullable=False, comment="加密密码"
     )
     status: Mapped[str] = mapped_column(String(10), default="1", comment="状态")
+    auth_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+        comment="认证版本；安全敏感变更后递增以撤销既有会话",
+    )
 
     user_avatar: Mapped[str] = mapped_column(
         String(255), nullable=True, comment="头像地址"

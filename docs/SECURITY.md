@@ -14,8 +14,9 @@
 
 | 项 | 值 | 备注 |
 |---|---|---|
-| Token 类型 | JWT | HS256 |
-| 有效期 | 7 天 | refresh token Phase 2+ |
+| Token 类型 | JWT access + refresh | HS256；issuer/audience 按 token 用途隔离 |
+| Access 有效期 | 默认 60 分钟 | 通过 `ACCESS_TOKEN_EXPIRE_MINUTES` 配置 |
+| Refresh 有效期 | 默认 7 天 | 单次 refresh 后旧 token 进入黑名单 |
 | 携带方式 | `Authorization: Bearer <token>` | |
 | 密码哈希 | bcrypt | cost factor = 12 |
 | 密码策略 | 最少 8 位，含字母 + 数字 | spec 决策可收紧 |
@@ -56,7 +57,12 @@ hashlib.md5(plain.encode()).hexdigest()  # 禁用
 from jose import jwt
 
 def create_access_token(data: dict) -> str:
-    payload = {**data, "exp": datetime.utcnow() + timedelta(days=7)}
+    payload = {
+        **data,
+        "exp": datetime.now(UTC) + timedelta(
+            minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
+        ),
+    }
     return jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
 ```
 
@@ -64,7 +70,8 @@ def create_access_token(data: dict) -> str:
 - `SECRET_KEY` 必须从环境变量读，**禁止**写死代码
 - `SECRET_KEY` 至少 32 字符随机串
 - 生产环境定期轮换（建议 90 天）
-- token 撤销走黑名单（Redis）或版本号（user.token_version）
+- token 撤销同时使用 refresh token 黑名单与数据库安全版本（tenant row version、user `auth_version`）
+- 引入 issuer/audience/安全版本后，缺少新 claim 的历史 token 会被拒绝；升级后用户需要重新登录
 
 ---
 

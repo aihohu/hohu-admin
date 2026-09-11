@@ -21,7 +21,14 @@ from jose import jwt
 
 from app.constants import REDIS_USER_NAME_PREFIX
 from app.core.config import settings
+from app.core.security import (
+    TENANT_ACCESS_AUDIENCE,
+    TOKEN_ISSUER,
+    create_access_token,
+    create_refresh_token,
+)
 from app.middleware.audit_middleware import (
+    AuditLogMiddleware,
     _parse_identity_from_token,
     _resolve_username,
 )
@@ -125,10 +132,27 @@ async def test_resolve_username_db_miss_no_cache_write():
 def _make_token(
     *, sub: str, tid: str = "0", token_type: str = "access", expired: bool = False
 ):
+    if not expired and token_type == "access":
+        return create_access_token(
+            subject=sub, tenant_id=int(tid), tenant_version=1, user_version=1
+        )
+    if not expired and token_type == "refresh":
+        return create_refresh_token(
+            subject=sub, tenant_id=int(tid), tenant_version=1, user_version=1
+        )
     exp = datetime.now(UTC) + (
         timedelta(seconds=-10) if expired else timedelta(minutes=5)
     )
-    payload = {"exp": exp, "sub": sub, "tid": tid, "type": token_type}
+    payload = {
+        "exp": exp,
+        "iss": TOKEN_ISSUER,
+        "aud": TENANT_ACCESS_AUDIENCE,
+        "sub": sub,
+        "tid": tid,
+        "tver": "1",
+        "uver": "1",
+        "type": token_type,
+    }
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
@@ -154,3 +178,38 @@ def test_parse_user_id_rejects_expired_token(fake_request_factory):
 
 def test_parse_user_id_missing_auth_header(fake_request_factory):
     assert _parse_identity_from_token(fake_request_factory(None)) is None
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    ["multipart/form-data; boundary=test", "application/octet-stream"],
+)
+async def test_non_json_request_body_is_never_read_for_audit(content_type: str) -> None:
+    request = MagicMock()
+    request.method = "POST"
+    request.url.path = "/system/file/upload"
+    request.headers = {"content-type": content_type}
+    request.body = AsyncMock(side_effect=AssertionError("body must stay streaming"))
+    response = MagicMock(status_code=200)
+    call_next = AsyncMock(return_value=response)
+    session = MagicMock()
+    session.commit = AsyncMock()
+
+    @asynccontextmanager
+    async def session_context():
+        yield session
+
+    with (
+        patch(
+            "app.middleware.audit_middleware._get_user_info",
+            AsyncMock(return_value=(0, 123, "alice")),
+        ),
+        patch("app.middleware.audit_middleware.AsyncSessionLocal", session_context),
+        patch(
+            "app.middleware.audit_middleware.get_client_ip", return_value="127.0.0.1"
+        ),
+    ):
+        result = await AuditLogMiddleware(AsyncMock()).dispatch(request, call_next)
+
+    assert result is response
+    request.body.assert_not_awaited()

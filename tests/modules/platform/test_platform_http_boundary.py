@@ -363,7 +363,9 @@ async def test_tenant_access_token_cannot_reach_platform_tenant_registry(
 ):
     business = AsyncMock()
     monkeypatch.setattr(tenant_lifecycle_service, "list_tenants", business)
-    token = create_access_token(subject="1", tenant_id=0, tenant_version=1)
+    token = create_access_token(
+        subject="1", tenant_id=0, tenant_version=1, user_version=1
+    )
 
     response = await client.get(
         "/platform/tenants",
@@ -380,7 +382,9 @@ async def test_tenant_access_token_cannot_mutate_tenant_model_policy(
 ):
     business = AsyncMock()
     monkeypatch.setattr(tenant_model_policy_admin_service, "put", business)
-    token = create_access_token(subject="1", tenant_id=0, tenant_version=1)
+    token = create_access_token(
+        subject="1", tenant_id=0, tenant_version=1, user_version=1
+    )
 
     response = await client.put(
         "/platform/tenants/9001/ai/model-policies/8001",

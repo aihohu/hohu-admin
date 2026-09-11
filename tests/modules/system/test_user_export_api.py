@@ -18,21 +18,20 @@ service 层（export_users_to_excel / get_export_task / list_export_tasks）
 """
 
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from jose import jwt
 from sqlalchemy import select
 
 from app.core.base_response import PageResult
-from app.core.config import settings
 from app.core.exceptions import (
     BusinessRuleException,
     NotFoundException,
     UnprocessableEntityException,
 )
+from app.core.security import create_access_token
 from app.main import app
 from app.modules.system.constants import ExportTaskStatus
 from app.modules.system.models.user import User
@@ -74,17 +73,12 @@ async def admin_token(db_session) -> str:
     user = (
         await db_session.execute(select(User).where(User.user_name == "admin"))
     ).scalar_one()
-    exp = datetime.now(UTC) + timedelta(hours=1)
-    payload = {
-        "exp": exp,
-        "sub": str(user.user_id),
-        "tid": str(user.tenant_id),
-        "tver": "1",
-        "type": "access",
-        "user_id": user.user_id,
-        "user_name": user.user_name,
-    }
-    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    return create_access_token(
+        subject=str(user.user_id),
+        tenant_id=user.tenant_id,
+        tenant_version=1,
+        user_version=user.auth_version,
+    )
 
 
 # ========== Helpers ==========

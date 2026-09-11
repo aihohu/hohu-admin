@@ -130,35 +130,27 @@ async def db_session() -> AsyncSession:
 
 @pytest.fixture
 async def auth_token(db_session) -> str:
-    """构造一个合法 JWT（不通过 /auth/login，直接 jwt.encode，参考 test_refresh_token.py:26）.
+    """构造一个合法 JWT（不通过 /auth/login）.
 
     使用 init_db.py 创建的 admin 用户（user_name='admin'，超管）。fresh/upgrade
     seed 必须为其 R_SUPER 角色显式关联 ``ai:chat:use``，测试不保留权限旁路。
     CI 在 pytest 前跑 `python scripts/init_db.py`（.github/workflows/ci.yml:92），
     本地 dev 同样假设已 init（README 标准步骤）.
     """
-    from datetime import datetime, timedelta, timezone
-
-    from jose import jwt
     from sqlalchemy import select
 
-    from app.core.config import settings
+    from app.core.security import create_access_token
     from app.modules.system.models.user import User
 
     user = (
         await db_session.execute(select(User).where(User.user_name == "admin"))
     ).scalar_one()
-    exp = datetime.now(timezone.utc) + timedelta(hours=1)
-    payload = {
-        "exp": exp,
-        "sub": str(user.user_id),
-        "tid": str(user.tenant_id),
-        "tver": "1",
-        "type": "access",
-        "user_id": user.user_id,
-        "user_name": user.user_name,
-    }
-    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    return create_access_token(
+        subject=str(user.user_id),
+        tenant_id=user.tenant_id,
+        tenant_version=1,
+        user_version=user.auth_version,
+    )
 
 
 def _make_agent(code: str, name: str, description: str = "", display_order: int = 0):

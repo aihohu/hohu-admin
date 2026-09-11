@@ -547,6 +547,7 @@ def _issue_token(
     tenant_id: int,
     user_id: int,
     tenant_version: int,
+    user_version: int,
     environment: dict[str, str],
 ) -> str:
     completed = _run_checked(
@@ -560,6 +561,8 @@ def _issue_token(
             str(user_id),
             "--tenant-version",
             str(tenant_version),
+            "--user-version",
+            str(user_version),
         ],
         environment=environment,
         failure_code="TOKEN_ISSUE_FAILED",
@@ -1045,6 +1048,7 @@ def run(arguments: argparse.Namespace) -> int:
                     tenant_id=control_id,
                     user_id=int(control["userId"]),
                     tenant_version=int(control["tenantVersion"]),
+                    user_version=int(control["userVersion"]),
                     environment=hosted_environment,
                 )
                 control_access = client.get(

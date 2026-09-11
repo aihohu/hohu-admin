@@ -8,6 +8,8 @@ from fastapi.routing import APIRoute
 
 from app.modules.system.api.user import (
     add_user,
+    change_password,
+    revoke_user_sessions,
     update_user,
     update_user_departments,
     update_user_roles,
@@ -16,6 +18,7 @@ from app.modules.system.api.user import (
     router as user_router,
 )
 from app.modules.system.schemas.user import (
+    ChangePassword,
     UserCreate,
     UserDepartmentAssignment,
     UserDepartmentUpdate,
@@ -127,6 +130,40 @@ async def test_profile_update_uses_only_the_profile_writer() -> None:
         await update_user(user_id=123, user_in=user_in, db=db_mock, tenant=tenant)
 
     update_profile.assert_awaited_once_with(db_mock, 123, user_in, tenant=tenant)
+    db_mock.commit.assert_awaited_once()
+
+
+async def test_change_password_commits_after_locked_service_mutation() -> None:
+    tenant = tenant_context(actor_user_id=42)
+    body = ChangePassword(old_password="old-password", new_password="NewPass123")
+    db_mock = AsyncMock()
+
+    with patch(
+        "app.modules.system.api.user.user_service.change_password",
+        new=AsyncMock(),
+    ) as mutate:
+        await change_password(
+            body=body,
+            current_user=_actor(),
+            db=db_mock,
+            tenant=tenant,
+        )
+
+    mutate.assert_awaited_once_with(db_mock, 42, body, tenant=tenant)
+    db_mock.commit.assert_awaited_once()
+
+
+async def test_explicit_session_revoke_commits_after_version_bump() -> None:
+    tenant = tenant_context(actor_user_id=42)
+    db_mock = AsyncMock()
+
+    with patch(
+        "app.modules.system.api.user.user_service.revoke_sessions",
+        new=AsyncMock(),
+    ) as revoke:
+        await revoke_user_sessions(user_id=123, db=db_mock, tenant=tenant)
+
+    revoke.assert_awaited_once_with(db_mock, 123, tenant=tenant)
     db_mock.commit.assert_awaited_once()
 
 

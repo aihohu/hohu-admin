@@ -190,11 +190,16 @@ class UserService:
 
         # Update profile fields only; roles and departments use dedicated writers.
         update_data = user_in.model_dump(exclude={"password"}, exclude_unset=True)
+        status_changed = (
+            "status" in update_data and update_data["status"] != user.status
+        )
         username_changed = (
             "user_name" in update_data and update_data["user_name"] != user.user_name
         )
         for field, value in update_data.items():
             setattr(user, field, value)
+        if status_changed:
+            user.auth_version += 1
 
         # 改名后失效审计中间件的 username 缓存，避免 5 分钟内日志记旧名
         if username_changed:
@@ -224,11 +229,31 @@ class UserService:
             NotFoundException: 用户不存在
         """
         user = await db.scalar(
-            tenant_select(User, tenant=tenant).where(User.user_id == user_id)
+            tenant_select(User, tenant=tenant)
+            .where(User.user_id == user_id)
+            .with_for_update()
         )
         if not user:
             raise NotFoundException("用户")
         user.hashed_password = get_password_hash(reset_in.new_password)
+        user.auth_version += 1
+
+    async def revoke_sessions(
+        self,
+        db: AsyncSession,
+        user_id: int,
+        *,
+        tenant: TenantContext,
+    ) -> None:
+        """Atomically invalidate every tenant token previously issued to a user."""
+        user = await db.scalar(
+            tenant_select(User, tenant=tenant)
+            .where(User.user_id == user_id)
+            .with_for_update()
+        )
+        if not user:
+            raise NotFoundException("用户")
+        user.auth_version += 1
 
     async def delete_user(
         self, db: AsyncSession, user_id: int, *, tenant: TenantContext
@@ -373,13 +398,28 @@ class UserService:
         for field, value in update_data.items():
             setattr(current_user, field, value)
 
-    def change_password(self, current_user: User, body: ChangePassword) -> None:
-        """修改当前用户密码"""
-        if not verify_password(body.old_password, current_user.hashed_password):
+    async def change_password(
+        self,
+        db: AsyncSession,
+        user_id: int,
+        body: ChangePassword,
+        *,
+        tenant: TenantContext,
+    ) -> None:
+        """Serialize password verification and revoke all older user sessions."""
+        user = await db.scalar(
+            tenant_select(User, tenant=tenant)
+            .where(User.user_id == user_id)
+            .with_for_update()
+        )
+        if not user:
+            raise NotFoundException("用户")
+        if not verify_password(body.old_password, user.hashed_password):
             raise BusinessRuleException(
                 "当前密码不正确", error_code="INCORRECT_OLD_PASSWORD"
             )
-        current_user.hashed_password = get_password_hash(body.new_password)
+        user.hashed_password = get_password_hash(body.new_password)
+        user.auth_version += 1
 
 
 DEFAULT_PASSWORD_CONFIG_KEY = "auth:default_password"

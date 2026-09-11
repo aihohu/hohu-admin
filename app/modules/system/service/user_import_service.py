@@ -897,8 +897,11 @@ async def _process_overwrite_row(
         existing.user_phone = record.user_phone
     if "user_gender" in OVERWRITE_ALLOWED:
         existing.user_gender = record.user_gender
+    status_changed = "status" in OVERWRITE_ALLOWED and existing.status != record.status
     if "status" in OVERWRITE_ALLOWED:
         existing.status = record.status
+    if status_changed:
+        existing.auth_version += 1
     if "employee_no" in OVERWRITE_ALLOWED and record.employee_no:
         existing.employee_no = record.employee_no
 

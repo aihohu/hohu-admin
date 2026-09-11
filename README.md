@@ -141,7 +141,7 @@ The interactive API docs will be available at `http://127.0.0.1:8000/docs`.
 docker compose up -d
 ```
 
-Configure via `.env` file and `UVICORN_WORKERS` environment variable (default: 4).
+Configure via `.env`. API and Scheduler processes must use distinct Snowflake worker IDs.
 
 ## API Modules
 

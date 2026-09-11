@@ -19,6 +19,12 @@ from jose import jwt
 
 from app.core.config import settings
 from app.core.exceptions import AuthenticationException, AuthorizationException
+from app.core.security import (
+    TENANT_REFRESH_AUDIENCE,
+    TOKEN_ISSUER,
+    decode_access_token,
+    decode_refresh_token,
+)
 from app.modules.auth.service import get_current_user, refresh_access_token
 from app.modules.system.models.tenant import Tenant
 from app.modules.system.models.user import User
@@ -28,9 +34,12 @@ def _make_refresh_token(*, sub: str, tenant_id: int = 0, expired: bool = False) 
     exp = datetime.now(UTC) + (timedelta(seconds=-10) if expired else timedelta(days=1))
     payload = {
         "exp": exp,
+        "iss": TOKEN_ISSUER,
+        "aud": TENANT_REFRESH_AUDIENCE,
         "sub": sub,
         "tid": str(tenant_id),
         "tver": "1",
+        "uver": "1",
         "type": "refresh",
     }
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
@@ -50,6 +59,7 @@ def _make_user(*, user_id: int, name: str, status: str) -> User:
         tenant_id=0,
         user_name=name,
         status=status,
+        auth_version=1,
     )
     user.tenant = tenant
     return user
@@ -87,12 +97,8 @@ async def test_refresh_success_when_user_enabled():
     ):
         new_access, new_refresh = await refresh_access_token(refresh)
 
-    access_payload = jwt.decode(
-        new_access, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
-    )
-    refresh_payload = jwt.decode(
-        new_refresh, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
-    )
+    access_payload = decode_access_token(new_access)
+    refresh_payload = decode_refresh_token(new_refresh)
     assert access_payload["type"] == "access"
     assert refresh_payload["type"] == "refresh"
     assert access_payload["sub"] == "123"
@@ -120,6 +126,22 @@ async def test_refresh_fails_when_user_deleted():
 
     with (
         patch("app.modules.auth.service.AsyncSessionLocal", _make_session_ctx(None)),
+        patch("app.modules.auth.service.redis_client", _make_redis_mock()),
+    ):
+        with pytest.raises(AuthenticationException) as exc_info:
+            await refresh_access_token(refresh)
+
+    assert exc_info.value.error_code == "TOKEN_EXPIRED"
+
+
+async def test_refresh_fails_when_user_auth_version_is_stale():
+    """Password/status changes must invalidate an otherwise valid refresh token."""
+    user = _make_user(user_id=123, name="alice", status="1")
+    user.auth_version = 2
+    refresh = _make_refresh_token(sub="123")
+
+    with (
+        patch("app.modules.auth.service.AsyncSessionLocal", _make_session_ctx(user)),
         patch("app.modules.auth.service.redis_client", _make_redis_mock()),
     ):
         with pytest.raises(AuthenticationException) as exc_info:

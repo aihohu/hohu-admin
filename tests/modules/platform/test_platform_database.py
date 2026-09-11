@@ -6,13 +6,15 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from jose import jwt
 from sqlalchemy import delete, insert, update
 from sqlalchemy.exc import DBAPIError
 
-from app.core.config import settings
 from app.core.exceptions import BusinessException
-from app.core.security import create_platform_access_token, get_password_hash
+from app.core.security import (
+    create_platform_access_token,
+    decode_platform_access_token,
+    get_password_hash,
+)
 from app.modules.platform.audit import add_platform_audit, add_platform_completion
 from app.modules.platform.auth import authenticate_platform_token
 from app.modules.platform.constants import PLATFORM_AI_READ, PLATFORM_AI_WRITE
@@ -132,7 +134,7 @@ async def test_platform_login_refreshes_server_managed_version_before_token_issu
             password=password,
         ),
     )
-    payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+    payload = decode_platform_access_token(token)
 
     assert payload["sub"] == str(principal.principal_id)
     assert payload["pver"] == "1"

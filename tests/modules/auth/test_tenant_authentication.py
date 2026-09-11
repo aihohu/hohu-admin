@@ -10,7 +10,12 @@ from starlette.requests import Request
 from app.core.base_response import ResponseModel
 from app.core.config import Settings, settings
 from app.core.exceptions import AuthenticationException, AuthorizationException
-from app.core.security import create_access_token, create_refresh_token
+from app.core.security import (
+    create_access_token,
+    create_refresh_token,
+    decode_access_token,
+    decode_refresh_token,
+)
 from app.modules.auth.api import login_for_docs
 from app.modules.auth.schemas.auth import LoginCredentials
 from app.modules.auth.service import (
@@ -52,6 +57,7 @@ def _user(*, user_id: int, tenant: Tenant, name: str = "alice") -> User:
         user_name=name,
         hashed_password="hashed",
         status="1",
+        auth_version=1,
     )
     user.tenant = tenant
     return user
@@ -84,14 +90,8 @@ async def test_single_mode_uses_default_tenant_and_issues_tid(monkeypatch):
         credentials=LoginCredentials(user_name="alice", password="secret"),
     )
 
-    access = jwt.decode(
-        response.data["token"], settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
-    )
-    refresh = jwt.decode(
-        response.data["refreshToken"],
-        settings.SECRET_KEY,
-        algorithms=[settings.ALGORITHM],
-    )
+    access = decode_access_token(response.data["token"])
+    refresh = decode_refresh_token(response.data["refreshToken"])
     assert access["tid"] == "0"
     assert refresh["tid"] == "0"
     assert access["tver"] == "1"
@@ -114,9 +114,7 @@ async def test_hosted_mode_normalizes_body_locator_and_supports_same_user_name(
         ),
     )
 
-    payload = jwt.decode(
-        response.data["token"], settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
-    )
+    payload = decode_access_token(response.data["token"])
     assert payload["sub"] == "202"
     assert payload["tid"] == "22"
 
@@ -140,9 +138,7 @@ async def test_hosted_mode_can_resolve_a_validated_subdomain(monkeypatch):
             host="tenant-b.example.test:443",
         )
 
-    payload = jwt.decode(
-        response.data["token"], settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
-    )
+    payload = decode_access_token(response.data["token"])
     assert payload["tid"] == "22"
 
 
@@ -398,7 +394,9 @@ async def test_current_user_rejects_tid_mismatch_and_old_token_without_tid(monke
     db = AsyncMock()
     db.execute = AsyncMock(return_value=_scalar_result(user))
 
-    mismatch = create_access_token(subject="101", tenant_id=9, tenant_version=1)
+    mismatch = create_access_token(
+        subject="101", tenant_id=9, tenant_version=1, user_version=1
+    )
     with patch(
         "app.modules.auth.service._is_blacklisted", AsyncMock(return_value=False)
     ):
@@ -448,7 +446,9 @@ async def test_current_user_rejects_non_default_token_after_hosted_rollback(
 ):
     monkeypatch.setattr(settings, "TENANT_MODE", "single")
     monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", False)
-    token = create_access_token(subject="202", tenant_id=22, tenant_version=1)
+    token = create_access_token(
+        subject="202", tenant_id=22, tenant_version=1, user_version=1
+    )
     db = AsyncMock()
 
     with patch(
@@ -465,7 +465,9 @@ async def test_current_user_rejects_non_default_token_after_hosted_rollback(
 async def test_refresh_rejects_non_default_token_after_hosted_rollback(monkeypatch):
     monkeypatch.setattr(settings, "TENANT_MODE", "single")
     monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", False)
-    token = create_refresh_token(subject="202", tenant_id=22, tenant_version=1)
+    token = create_refresh_token(
+        subject="202", tenant_id=22, tenant_version=1, user_version=1
+    )
     session_factory = MagicMock()
     blacklist = AsyncMock(return_value=True)
     monkeypatch.setattr("app.modules.auth.service.AsyncSessionLocal", session_factory)
@@ -486,7 +488,9 @@ async def test_current_user_rejects_disabled_tenant(monkeypatch):
     user = _user(user_id=202, tenant=tenant)
     db = AsyncMock()
     db.execute = AsyncMock(return_value=_scalar_result(user))
-    token = create_access_token(subject="202", tenant_id=22, tenant_version=1)
+    token = create_access_token(
+        subject="202", tenant_id=22, tenant_version=1, user_version=1
+    )
 
     with patch(
         "app.modules.auth.service._is_blacklisted", AsyncMock(return_value=False)
@@ -504,7 +508,9 @@ async def test_current_user_binds_the_canonical_tenant_context(monkeypatch):
     user = _user(user_id=202, tenant=tenant)
     db = AsyncMock()
     db.execute = AsyncMock(return_value=_scalar_result(user))
-    token = create_access_token(subject="202", tenant_id=22, tenant_version=1)
+    token = create_access_token(
+        subject="202", tenant_id=22, tenant_version=1, user_version=1
+    )
 
     with patch(
         "app.modules.auth.service._is_blacklisted", AsyncMock(return_value=False)
@@ -524,7 +530,9 @@ async def test_refresh_rejects_tid_mismatch(monkeypatch):
     monkeypatch.setattr(settings, "TENANT_HOSTED_CANARY_TENANT_ID", 9)
     tenant = _tenant(tenant_id=0, code="default")
     user = _user(user_id=101, tenant=tenant)
-    token = create_refresh_token(subject="101", tenant_id=9, tenant_version=1)
+    token = create_refresh_token(
+        subject="101", tenant_id=9, tenant_version=1, user_version=1
+    )
     session = AsyncMock()
     session.execute = AsyncMock(return_value=_scalar_result(user))
 
@@ -553,7 +561,9 @@ async def test_current_user_rejects_stale_tenant_security_version(monkeypatch) -
     user = _user(user_id=202, tenant=tenant)
     db = AsyncMock()
     db.execute = AsyncMock(return_value=_scalar_result(user))
-    token = create_access_token(subject="202", tenant_id=22, tenant_version=1)
+    token = create_access_token(
+        subject="202", tenant_id=22, tenant_version=1, user_version=1
+    )
 
     with patch(
         "app.modules.auth.service._is_blacklisted", AsyncMock(return_value=False)
@@ -570,7 +580,9 @@ async def test_refresh_rejects_stale_tenant_security_version(monkeypatch) -> Non
     tenant = _tenant(tenant_id=22, code="tenant-b")
     tenant.row_version = 3
     user = _user(user_id=202, tenant=tenant)
-    token = create_refresh_token(subject="202", tenant_id=22, tenant_version=2)
+    token = create_refresh_token(
+        subject="202", tenant_id=22, tenant_version=2, user_version=1
+    )
     session = AsyncMock()
     session.execute = AsyncMock(return_value=_scalar_result(user))
 

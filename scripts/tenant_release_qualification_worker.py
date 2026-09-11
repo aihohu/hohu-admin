@@ -52,6 +52,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--tenant-id", type=int)
     parser.add_argument("--user-id", type=int)
     parser.add_argument("--tenant-version", type=int)
+    parser.add_argument("--user-version", type=int)
     return parser.parse_args()
 
 
@@ -223,6 +224,11 @@ async def _seed(output: Path | None) -> None:
                             if user.tenant_id == tenants[0].tenant_id
                         )
                     ),
+                    "userVersion": next(
+                        user.auth_version
+                        for user in users
+                        if user.tenant_id == tenants[0].tenant_id
+                    ),
                 },
                 "control": {
                     "tenantId": str(tenants[1].tenant_id),
@@ -234,6 +240,11 @@ async def _seed(output: Path | None) -> None:
                             for user in users
                             if user.tenant_id == tenants[1].tenant_id
                         )
+                    ),
+                    "userVersion": next(
+                        user.auth_version
+                        for user in users
+                        if user.tenant_id == tenants[1].tenant_id
                     ),
                 },
             },
@@ -323,15 +334,24 @@ async def _snapshot(
 
 
 async def _token(
-    tenant_id: int | None, user_id: int | None, tenant_version: int | None
+    tenant_id: int | None,
+    user_id: int | None,
+    tenant_version: int | None,
+    user_version: int | None,
 ) -> None:
-    if tenant_id is None or user_id is None or tenant_version is None:
+    if (
+        tenant_id is None
+        or user_id is None
+        or tenant_version is None
+        or user_version is None
+    ):
         raise ValueError("token identity is required")
     print(
         create_access_token(
             subject=str(user_id),
             tenant_id=tenant_id,
             tenant_version=tenant_version,
+            user_version=user_version,
         )
     )
 
@@ -354,6 +374,7 @@ async def _main() -> None:
                 arguments.tenant_id,
                 arguments.user_id,
                 arguments.tenant_version,
+                arguments.user_version,
             )
     finally:
         await redis_client.aclose()

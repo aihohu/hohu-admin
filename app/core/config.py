@@ -1,6 +1,7 @@
 import os
 import re
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
@@ -33,11 +34,40 @@ class Settings(BaseSettings):
         if self.ENV == "prod" and self.TENANT_MODE == "hosted" and not build_sha:
             raise ValueError("production hosted mode requires a release build SHA")
         self.RELEASE_BUILD_SHA = build_sha
+        if self.ENV == "prod":
+            secret = self.SECRET_KEY
+            normalized_secret = secret.strip()
+            public_sentinels = {
+                "change_me_in_production",
+                "<your_secret_key>",
+                "<your_super_secret_key_here>",
+            }
+            if (
+                secret != normalized_secret
+                or len(normalized_secret) < 32
+                or normalized_secret.lower() in public_sentinels
+            ):
+                raise ValueError("production secret key is not safe")
+
+            server_url = self.SERVER_URL.strip()
+            if server_url:
+                parsed = urlsplit(server_url)
+                if (
+                    parsed.scheme != "https"
+                    or not parsed.hostname
+                    or parsed.username is not None
+                    or parsed.password is not None
+                    or parsed.path not in {"", "/"}
+                    or parsed.query
+                    or parsed.fragment
+                ):
+                    raise ValueError("production server URL must be an HTTPS origin")
+            self.SERVER_URL = server_url.rstrip("/")
         return self
 
     DATABASE_URL: str
     SECRET_KEY: str
-    ALGORITHM: str = "HS256"
+    ALGORITHM: Literal["HS256"] = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     PLATFORM_ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=15, ge=1, le=60)
     PLATFORM_AUDIT_MIN_RETENTION_DAYS: int = Field(default=90, ge=30, le=3650)
@@ -65,7 +95,7 @@ class Settings(BaseSettings):
     REDIS_DB: int = 0
 
     # 服务器访问地址 (用于拼接文件 URL)
-    SERVER_URL: str = "http://127.0.0.1:8000"
+    SERVER_URL: str = ""
 
     # Snowflake ID 配置
     # 每个实例应该有唯一的 worker_id（1-1023）

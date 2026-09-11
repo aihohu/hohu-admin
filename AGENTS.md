@@ -103,7 +103,7 @@ app/modules/<module>/
 
 - 响应包装：`{code, msg, data}`，成功业务码为 `200`。
 - 分页数据：`data: {records, total, current, size}`。
-- 认证：`Authorization: Bearer <jwt>`，JWT 使用 HS256，默认有效期 7 天。
+- 认证：`Authorization: Bearer <jwt>`，JWT 使用 HS256；access token 默认 60 分钟，refresh token 默认 7 天。
 - 后端字段使用 `snake_case`；通过 Pydantic alias 对外输出 `camelCase`。
 - Snowflake ID 在 JSON 中必须是字符串，不能输出为 JavaScript number。
 - 新建或已完成迁移的时间列使用 `TIMESTAMP WITH TIME ZONE`，应用内部使用 UTC，API 输出 ISO 8601 UTC。

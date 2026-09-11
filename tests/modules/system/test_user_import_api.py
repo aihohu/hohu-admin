@@ -22,21 +22,20 @@ service 层（dry_run_import_users / batch_create_users_from_records）用 patch
 """
 
 import io
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from jose import jwt
 from openpyxl import Workbook
 from sqlalchemy import select
 
-from app.core.config import settings
 from app.core.exceptions import (
     BusinessRuleException,
     UnprocessableEntityException,
 )
+from app.core.security import create_access_token
 from app.main import app
 from app.modules.system.api.user import import_users
 from app.modules.system.constants import ImportBatchStatus
@@ -94,17 +93,12 @@ async def admin_token(db_session) -> str:
     user = (
         await db_session.execute(select(User).where(User.user_name == "admin"))
     ).scalar_one()
-    exp = datetime.now(UTC) + timedelta(hours=1)
-    payload = {
-        "exp": exp,
-        "sub": str(user.user_id),
-        "tid": str(user.tenant_id),
-        "tver": "1",
-        "type": "access",
-        "user_id": user.user_id,
-        "user_name": user.user_name,
-    }
-    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    return create_access_token(
+        subject=str(user.user_id),
+        tenant_id=user.tenant_id,
+        tenant_version=1,
+        user_version=user.auth_version,
+    )
 
 
 # ========== Helpers ==========

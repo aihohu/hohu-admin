@@ -136,7 +136,7 @@ declare namespace Api {
 
 ### 4.2 认证
 
-- `Authorization: Bearer <jwt>`（HS256，7 天有效期）
+- `Authorization: Bearer <jwt>`（HS256；access token 默认 60 分钟，refresh token 默认 7 天）
 - super_admin bypass：`user_name == "admin"` 或 role 含 `R_SUPER`
 - 权限码：`<module>:<resource>:<action>`（如 `sys:user:list`）
 

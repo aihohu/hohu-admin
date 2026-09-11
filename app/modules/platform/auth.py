@@ -8,8 +8,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import STATUS_ENABLED
-from app.core.config import settings
 from app.core.exceptions import AuthenticationException, AuthorizationException
+from app.core.security import decode_platform_access_token, decode_tenant_token
 from app.modules.platform.constants import ASSIGNABLE_PLATFORM_PERMISSIONS
 from app.modules.platform.models import PlatformPrincipal
 
@@ -34,18 +34,22 @@ async def authenticate_platform_token(
 ) -> AuthenticatedPlatformPrincipal:
     """Authenticate only a platform token; tenant tokens never imply platform power."""
     try:
-        payload = jwt.decode(
-            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
-        )
+        token_type = jwt.get_unverified_claims(token).get("type")
     except JWTError as exc:
         raise _invalid_platform_token() from exc
-
-    token_type = payload.get("type")
     if token_type in {"access", "refresh"}:
+        try:
+            decode_tenant_token(token)
+        except (JWTError, TypeError, ValueError) as exc:
+            raise _invalid_platform_token() from exc
         raise AuthorizationException(
             "当前身份不是平台管理员",
             error_code="PLATFORM_ADMIN_REQUIRED",
         )
+    try:
+        payload = decode_platform_access_token(token)
+    except JWTError as exc:
+        raise _invalid_platform_token() from exc
     principal_id_claim = payload.get("sub")
     version_claim = payload.get("pver")
     if (

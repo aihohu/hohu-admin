@@ -3,13 +3,13 @@ import json
 import logging
 import time
 
-from jose import JWTError, jwt
+from jose import JWTError
 from sqlalchemy import select
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.constants import REDIS_USER_NAME_PREFIX, REDIS_USER_NAME_TTL
-from app.core.config import settings
 from app.core.redis import redis_client
+from app.core.security import decode_access_token
 from app.db.session import AsyncSessionLocal
 from app.modules.system.models.operation_log import SysOperationLog
 from app.modules.system.models.user import User
@@ -59,9 +59,7 @@ def _parse_identity_from_token(request) -> tuple[int, int] | None:
         return None
     token = auth_header[7:]
     try:
-        payload = jwt.decode(
-            token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
-        )
+        payload = decode_access_token(token)
         if payload.get("type") != "access":
             return None
         user_id = payload.get("sub")
@@ -176,29 +174,29 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
         if request.method in ("POST", "PUT", "PATCH"):
             content_type = request.headers.get("content-type", "")
             is_json = "application/json" in content_type
-            try:
-                body = await request.body()
-                if body:
-                    # 缓存回 request，使后续处理器可读
-                    async def receive():
-                        return {"type": "http.request", "body": body}
+            if is_json:
+                try:
+                    body = await request.body()
+                    if body:
+                        # 缓存回 request，使后续处理器可读
+                        async def receive():
+                            return {"type": "http.request", "body": body}
 
-                    request._receive = receive
+                        request._receive = receive
 
-                    if is_json:
                         parsed = json.loads(body)
                         if isinstance(parsed, dict):
                             parsed = _mask_sensitive(parsed)
                         request_params = _truncate_params(
                             json.dumps(parsed, ensure_ascii=False)
                         )
-            except json.JSONDecodeError:
-                request_params = None
-            except Exception:
-                logger.warning(
-                    "Failed to read request body for audit log", exc_info=True
-                )
-                request_params = None
+                except json.JSONDecodeError:
+                    request_params = None
+                except Exception:
+                    logger.warning(
+                        "Failed to read request body for audit log", exc_info=True
+                    )
+                    request_params = None
 
         # 记录开始时间
         start_time = time.perf_counter()

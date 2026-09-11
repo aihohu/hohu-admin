@@ -3,12 +3,16 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from jose import jwt
 from sqlalchemy.dialects import postgresql
 
 from app.core.config import settings
 from app.core.exceptions import AuthenticationException, AuthorizationException
-from app.core.security import create_platform_access_token, get_password_hash
+from app.core.security import (
+    create_access_token,
+    create_platform_access_token,
+    decode_platform_access_token,
+    get_password_hash,
+)
 from app.modules.platform.auth import authenticate_platform_token
 from app.modules.platform.constants import PLATFORM_AI_READ, PLATFORM_AI_WRITE
 from app.modules.platform.schemas import PlatformLoginCredentials
@@ -17,7 +21,7 @@ from app.modules.platform.service import platform_auth_service
 
 def test_platform_token_has_an_independent_claim_shape():
     token = create_platform_access_token(subject="91", principal_version=3)
-    payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+    payload = decode_platform_access_token(token)
 
     assert payload["type"] == "platform_access"
     assert payload["sub"] == "91"
@@ -33,7 +37,7 @@ def test_platform_token_uses_an_independent_bounded_ttl(monkeypatch):
     issued_at = datetime.now(UTC)
 
     token = create_platform_access_token(subject="91", principal_version=3)
-    payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+    payload = decode_platform_access_token(token)
 
     expires_at = datetime.fromtimestamp(payload["exp"], UTC)
     assert timedelta(minutes=16, seconds=55) <= expires_at - issued_at
@@ -41,13 +45,9 @@ def test_platform_token_uses_an_independent_bounded_ttl(monkeypatch):
 
 
 async def test_tenant_access_token_cannot_become_a_platform_principal():
-    payload = {
-        "exp": datetime.now(UTC) + timedelta(minutes=5),
-        "sub": "1",
-        "tid": "0",
-        "type": "access",
-    }
-    token = jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    token = create_access_token(
+        subject="1", tenant_id=0, tenant_version=1, user_version=1
+    )
 
     with pytest.raises(AuthorizationException) as exc_info:
         await authenticate_platform_token(token, AsyncMock())
@@ -100,7 +100,7 @@ async def test_platform_login_issues_no_tenant_or_refresh_authority():
             password="a-long-test-password",
         ),
     )
-    payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+    payload = decode_platform_access_token(token)
 
     assert payload["type"] == "platform_access"
     assert "tid" not in payload

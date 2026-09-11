@@ -288,8 +288,9 @@ async def change_password(
     body: ChangePassword,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    user_service.change_password(current_user, body)
+    await user_service.change_password(db, current_user.user_id, body, tenant=tenant)
     await db.commit()
     return ResponseModel.success(msg="密码修改成功")
 
@@ -406,6 +407,22 @@ async def reset_password(
     await user_service.reset_password(db, user_id, reset_in, tenant=tenant)
     await db.commit()
     return ResponseModel.success(msg="密码重置成功")
+
+
+@router.put(
+    "/{user_id}/revoke-sessions",
+    summary="撤销用户全部会话",
+    description="递增用户认证版本，使已签发的 access/refresh token 全部失效",
+    dependencies=[Depends(require_permissions("system:user:reset-password"))],
+)
+async def revoke_user_sessions(
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+    tenant: TenantContext = Depends(get_current_tenant_context),
+):
+    await user_service.revoke_sessions(db, user_id, tenant=tenant)
+    await db.commit()
+    return ResponseModel.success(msg="会话已全部撤销")
 
 
 @router.delete(
