@@ -14,21 +14,16 @@ from app.core.exceptions import InvalidParameterException, NotFoundException
 from app.core.tenant import TenantContext
 from app.modules.marketplace.capability import require_marketplace_capability
 from app.modules.marketplace.exceptions import AppErrorCode
+from app.modules.marketplace.lowcode.identifiers import (
+    SYSTEM_FIELDS,
+    quote_identifier,
+    quote_table_name,
+    validate_manifest_identifier,
+)
 from app.modules.marketplace.lowcode.schema_introspection import (
     introspect_table,
-    table_exists,
 )
 from app.modules.marketplace.lowcode.type_mapping import make_table_name
-
-# 系统字段（不允许用户修改或过滤）
-SYSTEM_FIELDS = {
-    "id",
-    "tenant_id",
-    "created_at",
-    "updated_at",
-    "created_by",
-    "updated_by",
-}
 
 # Filter operator → 适用 PG data_type 集合（spec 6.2 / 决策 #75）
 # information_schema.columns.data_type 是小写：'text' / 'integer' / 'jsonb' ...
@@ -108,7 +103,9 @@ def _cast_for_range_op(data_type: str) -> str:
     return ""
 
 
-def _collect_belongs_to(data_schema: dict | None, models: list | None) -> list[dict]:
+def _collect_belongs_to(
+    data_schema: dict | None, models: list | None, model_key: str | None = None
+) -> list[dict]:
     """Parse ``belongs_to`` relations from the manifest.
 
     Priority: explicit model.relations[] takes precedence over field-level x-ref.
@@ -121,7 +118,7 @@ def _collect_belongs_to(data_schema: dict | None, models: list | None) -> list[d
     schemas_to_check: list[tuple[dict, list]] = []
     if models:
         for m in models:
-            if isinstance(m, dict):
+            if isinstance(m, dict) and (model_key is None or m.get("key") == model_key):
                 schemas_to_check.append(
                     (m.get("data_schema") or {}, m.get("relations") or [])
                 )
@@ -152,7 +149,7 @@ def _collect_belongs_to(data_schema: dict | None, models: list | None) -> list[d
     field_schemas: list[dict] = []
     if models:
         for m in models:
-            if isinstance(m, dict):
+            if isinstance(m, dict) and (model_key is None or m.get("key") == model_key):
                 field_schemas.append(m.get("data_schema") or {})
     elif data_schema:
         field_schemas.append(data_schema)
@@ -176,18 +173,31 @@ def _collect_belongs_to(data_schema: dict | None, models: list | None) -> list[d
     return out
 
 
-async def _first_string_field(db: AsyncSession, table_name: str) -> str | None:
-    """Return first text-typed column name on table, or None if no string cols.
+def _resolve_relation_label_field(
+    column_types: dict[str, str], requested: object, *, table_name: str
+) -> str | None:
+    """Resolve a relation label only from columns that physically exist."""
+    if requested is not None:
+        label_field = validate_manifest_identifier(
+            requested, label="relation label field", reject_system=True
+        )
+        data_type = column_types.get(label_field)
+        if data_type is None:
+            raise InvalidParameterException(
+                f"关联表 {table_name} 不存在 label 字段：{label_field}",
+                error_code=AppErrorCode.FILTER_UNKNOWN_FIELD,
+            )
+        if data_type not in _TEXT_TYPES:
+            raise InvalidParameterException(
+                f"关联字段 {table_name}.{label_field} 不是字符串列",
+                error_code=AppErrorCode.FILTER_OP_TYPE_MISMATCH,
+            )
+        return label_field
 
-    Used as fallback when ``relation.label_field`` is missing.
-    """
-    info = await introspect_table(db, table_name)
-    if info is None:
-        return None
-    for col in info.columns:
-        if col.data_type in _TEXT_TYPES:
-            return col.column_name
-    return None
+    return next(
+        (name for name, data_type in column_types.items() if data_type in _TEXT_TYPES),
+        None,
+    )
 
 
 async def _column_types(db: AsyncSession, table_name: str) -> dict[str, str]:
@@ -196,6 +206,46 @@ async def _column_types(db: AsyncSession, table_name: str) -> dict[str, str]:
     if info is None:
         return {}
     return {c.column_name: c.data_type for c in info.columns}
+
+
+async def _validate_payload_fields(
+    db: AsyncSession,
+    *,
+    table_name: str,
+    data: dict,
+    data_schema: dict | None,
+) -> dict[str, str]:
+    """Require body keys in the manifest/physical-column intersection."""
+    quote_table_name(table_name)
+    column_types = await _column_types(db, table_name)
+    if not column_types:
+        raise NotFoundException(resource_type=f"表 {table_name}")
+    if data_schema is None:
+        # Internal callers may rely on introspection only. HTTP runtime always
+        # supplies the validated installed manifest schema.
+        manifest_fields = set(column_types) - SYSTEM_FIELDS
+    else:
+        properties = data_schema.get("properties")
+        if not isinstance(properties, dict):
+            raise InvalidParameterException("data_schema.properties 无效")
+        manifest_fields = {
+            validate_manifest_identifier(
+                name, label="data_schema field", reject_system=True
+            )
+            for name in properties
+        }
+
+    requested = set(data)
+    system_fields = requested & SYSTEM_FIELDS
+    if system_fields:
+        raise InvalidParameterException(
+            f"系统字段不允许由客户端写入：{sorted(system_fields)}"
+        )
+    allowed = manifest_fields & set(column_types)
+    unknown = requested - allowed
+    if unknown:
+        raise InvalidParameterException(f"未知或未授权字段：{sorted(unknown)}")
+    return column_types
 
 
 def _coerce_numeric_strings(data: dict, column_types: dict[str, str]) -> dict:
@@ -234,6 +284,13 @@ class DataApiService:
         data_schema: dict | None = None,
     ) -> dict:
         require_marketplace_capability(tenant)
+        quoted_table = quote_table_name(table_name)
+        column_types = await _validate_payload_fields(
+            db,
+            table_name=table_name,
+            data=data,
+            data_schema=data_schema,
+        )
         # 校验 required
         if data_schema:
             required = data_schema.get("required", [])
@@ -253,14 +310,16 @@ class DataApiService:
         # Coerce string IDs → int for numeric columns (Snowflake IDs arrive as
         # strings from frontend to dodge JS BigInt precision loss; asyncpg
         # rejects str→BIGINT auto-bind). Then JSONB-serialize dict/list.
-        column_types = await _column_types(db, table_name)
         coerced = _coerce_numeric_strings(full_data, column_types)
         bound_data = {k: _serialize_for_bind(v) for k, v in coerced.items()}
 
         columns = list(bound_data.keys())
-        placeholders = [f":{c}" for c in columns]
+        quoted_columns = [
+            quote_identifier(column, label="insert column") for column in columns
+        ]
+        placeholders = [f":{column}" for column in columns]
         sql = text(
-            f"INSERT INTO {table_name} ({', '.join(columns)}) "
+            f"INSERT INTO {quoted_table} ({', '.join(quoted_columns)}) "
             f"VALUES ({', '.join(placeholders)}) RETURNING *"
         )
         result = await db.execute(sql, bound_data)
@@ -280,15 +339,17 @@ class DataApiService:
         slug: str | None = None,
         data_schema: dict | None = None,
         models: list | None = None,
+        model_key: str | None = None,
     ) -> PageResult:
         require_marketplace_capability(tenant)
+        quoted_table = quote_table_name(table_name)
         # 拿列类型 map（决策 #76：列存在性 + 类型匹配校验）
         table_info = await introspect_table(db, table_name)
         if table_info is None:
             raise NotFoundException(resource_type=f"表 {table_name}")
         column_types = {c.column_name: c.data_type for c in table_info.columns}
 
-        where_clauses = ["tenant_id = :tenant_id"]
+        where_clauses = [f'{quoted_table}."tenant_id" = :tenant_id']
         params: dict[str, Any] = {"tenant_id": tenant.tenant_id}
 
         if filters:
@@ -296,12 +357,18 @@ class DataApiService:
                 field, op = _parse_filter_key(key)
                 _validate_field_op(field, op, column_types)
                 self._apply_filter(
-                    field, op, value, where_clauses, params, column_types
+                    field,
+                    op,
+                    value,
+                    where_clauses,
+                    params,
+                    column_types,
+                    qualifier=quoted_table,
                 )
 
         where_sql = " AND ".join(where_clauses)
 
-        count_sql = text(f"SELECT COUNT(*) FROM {table_name} WHERE {where_sql}")
+        count_sql = text(f"SELECT COUNT(*) FROM {quoted_table} WHERE {where_sql}")
         total = (await db.execute(count_sql, params)).scalar() or 0
 
         # Parse order tokens. Detects <fk>_label tokens (belongs_to JOIN sort,
@@ -310,7 +377,7 @@ class DataApiService:
         # entry point but didn't have relations context, so the logic moved
         # inline here.
         relations = (
-            _collect_belongs_to(data_schema, models)
+            _collect_belongs_to(data_schema, models, model_key)
             if slug and (data_schema or models)
             else []
         )
@@ -328,7 +395,7 @@ class DataApiService:
         }
 
         if order_by:
-            for raw in order_by.split(","):
+            for sort_index, raw in enumerate(order_by.split(",")):
                 token = raw.strip()
                 if not token:
                     continue
@@ -338,29 +405,50 @@ class DataApiService:
                 if field.endswith(label_suffix):
                     fk_field = field[: -len(label_suffix)]
                     if fk_field in fk_to_rel:
+                        if fk_field not in column_types:
+                            raise InvalidParameterException(
+                                f"关联外键字段不存在：{fk_field}",
+                                error_code=AppErrorCode.FILTER_UNKNOWN_FIELD,
+                            )
                         rel = fk_to_rel[fk_field]
                         target_table = make_table_name(slug, rel["model"])
-                        if not await table_exists(db, target_table):
+                        quoted_target = quote_table_name(target_table)
+                        target_info = await introspect_table(db, target_table)
+                        if target_info is None:
                             raise InvalidParameterException(
                                 f"关联表不存在：{target_table}",
                                 error_code=AppErrorCode.FILTER_UNKNOWN_FIELD,
                             )
-                        label_field = rel.get(
-                            "label_field"
-                        ) or await _first_string_field(db, target_table)
+                        target_column_types = {
+                            column.column_name: column.data_type
+                            for column in target_info.columns
+                        }
+                        label_field = _resolve_relation_label_field(
+                            target_column_types,
+                            rel.get("label_field"),
+                            table_name=target_table,
+                        )
                         if not label_field:
                             raise InvalidParameterException(
                                 f"关联表 {target_table} 无字符串列，无法按 label 排序",
                                 error_code=AppErrorCode.FILTER_OP_TYPE_MISMATCH,
                             )
-                        alias = f"sort_{fk_field}"
+                        alias = f"sort_{sort_index}"
+                        quoted_alias = quote_identifier(alias, label="sort alias")
+                        quoted_fk = quote_identifier(
+                            fk_field, label="relation foreign key"
+                        )
+                        quoted_label = quote_identifier(
+                            label_field, label="relation label field"
+                        )
                         join_clauses.append(
-                            f"LEFT JOIN {target_table} {alias} "
-                            f"ON {table_name}.{fk_field} = {alias}.id "
-                            f"AND {table_name}.tenant_id = {alias}.tenant_id"
+                            f"LEFT JOIN {quoted_target} {quoted_alias} "
+                            f'ON {quoted_table}.{quoted_fk} = {quoted_alias}."id" '
+                            f'AND {quoted_table}."tenant_id" = '
+                            f'{quoted_alias}."tenant_id"'
                         )
                         sort_clauses.append(
-                            f"{alias}.{label_field} {direction} NULLS LAST"
+                            f"{quoted_alias}.{quoted_label} {direction} NULLS LAST"
                         )
                         continue
 
@@ -374,30 +462,21 @@ class DataApiService:
                         f"未知排序字段：{field}",
                         error_code=AppErrorCode.FILTER_UNKNOWN_FIELD,
                     )
-                sort_clauses.append(f"{field} {direction}")
+                quoted_field = quote_identifier(field, label="order field")
+                sort_clauses.append(f"{quoted_table}.{quoted_field} {direction}")
 
         if not sort_clauses:
-            sort_clauses = ["created_at DESC"]
+            sort_clauses = [f'{quoted_table}."created_at" DESC']
         order_clause = ", ".join(sort_clauses)
         joins_sql = " ".join(join_clauses)
-
-        # When JOINs are present, qualify WHERE column refs with the main
-        # table name to avoid "column reference is ambiguous" (both tables
-        # share system columns like tenant_id, created_at, ...).
-        if joins_sql:
-            qualified_where = where_sql.replace(
-                "tenant_id = :tenant_id", f"{table_name}.tenant_id = :tenant_id"
-            )
-        else:
-            qualified_where = where_sql
 
         offset = (current - 1) * size
         # SELECT table_name.* (not *) when JOINs present — avoid ambiguous
         # column errors (e.g., both tables have `id`).
-        select_clause = f"{table_name}.*" if joins_sql else "*"
+        select_clause = f"{quoted_table}.*" if joins_sql else "*"
         list_sql = text(
-            f"SELECT {select_clause} FROM {table_name} {joins_sql} "
-            f"WHERE {qualified_where} ORDER BY {order_clause} "
+            f"SELECT {select_clause} FROM {quoted_table} {joins_sql} "
+            f"WHERE {where_sql} ORDER BY {order_clause} "
             f"LIMIT :limit OFFSET :offset"
         )
         params["limit"] = size
@@ -414,6 +493,7 @@ class DataApiService:
                 slug=slug,
                 data_schema=data_schema,
                 models=models,
+                model_key=model_key,
                 tenant=tenant,
             )
 
@@ -427,6 +507,7 @@ class DataApiService:
         slug: str,
         data_schema: dict | None,
         models: list | None,
+        model_key: str | None,
         tenant: TenantContext,
     ) -> None:
         """Merge related label field onto each record (mutates in place).
@@ -441,7 +522,7 @@ class DataApiService:
         if not records:
             return
 
-        relations = _collect_belongs_to(data_schema, models)
+        relations = _collect_belongs_to(data_schema, models, model_key)
         if not relations:
             return
 
@@ -455,13 +536,30 @@ class DataApiService:
                 continue
 
             target_table = make_table_name(slug, rel["model"])
-            if not await table_exists(db, target_table):
+            quoted_target = quote_table_name(target_table)
+            target_info = await introspect_table(db, target_table)
+            if target_info is None:
                 continue
 
             # Resolve label_field: explicit > first string column on target > '#<id>'
-            label_field = rel.get("label_field")
+            target_column_types = {
+                column.column_name: column.data_type for column in target_info.columns
+            }
+            label_field = _resolve_relation_label_field(
+                target_column_types,
+                rel.get("label_field"),
+                table_name=target_table,
+            )
             if not label_field:
-                label_field = await _first_string_field(db, target_table)
+                for record in records:
+                    fk = record.get(rel["foreign_key"])
+                    record[f"{rel['foreign_key']}_label"] = (
+                        f"#{fk}" if fk is not None else ""
+                    )
+                continue
+            quoted_label = quote_identifier(
+                label_field, label="relation label field", reject_system=True
+            )
 
             # Batch SELECT id, label_field FROM target WHERE id IN (...)
             placeholders: list[str] = []
@@ -471,9 +569,9 @@ class DataApiService:
                 placeholders.append(f":{pk}")
                 params[pk] = v
             select_sql = text(
-                f"SELECT id, {label_field} FROM {target_table} "
-                f"WHERE tenant_id = :tenant_id "
-                f"AND id IN ({', '.join(placeholders)})"
+                f'SELECT "id", {quoted_label} FROM {quoted_target} '
+                f'WHERE "tenant_id" = :tenant_id '
+                f'AND "id" IN ({", ".join(placeholders)})'
             )
             params["tenant_id"] = tenant.tenant_id
             rows = (await db.execute(select_sql, params)).fetchall()
@@ -501,6 +599,8 @@ class DataApiService:
         where_clauses: list[str],
         params: dict[str, Any],
         column_types: dict[str, str] | None = None,
+        *,
+        qualifier: str | None = None,
     ) -> None:
         """把单个 filter 追加到 where + params（参数化，禁 raw f-string 值）
 
@@ -510,12 +610,14 @@ class DataApiService:
         param_key = f"filter_{field}_{op}"
         col_type = (column_types or {}).get(field, "")
         cast_sql = _cast_for_range_op(col_type)
+        quoted_field = quote_identifier(field, label="filter field")
+        column_sql = f"{qualifier}.{quoted_field}" if qualifier else quoted_field
 
         if op == "eq":
-            where_clauses.append(f"{field} = :{param_key}")
+            where_clauses.append(f"{column_sql} = :{param_key}")
             params[param_key] = value
         elif op == "contains":
-            where_clauses.append(f"{field} ILIKE :{param_key}")
+            where_clauses.append(f"{column_sql} ILIKE :{param_key}")
             params[param_key] = f"%{value}%"
         elif op == "in":
             items = [v.strip() for v in str(value).split(",") if v.strip()]
@@ -529,22 +631,24 @@ class DataApiService:
                 pk = f"{param_key}_{i}"
                 placeholders.append(f":{pk}")
                 params[pk] = item
-            where_clauses.append(f"{field} IN ({', '.join(placeholders)})")
+            where_clauses.append(f"{column_sql} IN ({', '.join(placeholders)})")
         elif op == "gte":
             placeholder = (
                 f"CAST(:{param_key} AS {cast_sql})" if cast_sql else f":{param_key}"
             )
-            where_clauses.append(f"{field} >= {placeholder}")
+            where_clauses.append(f"{column_sql} >= {placeholder}")
             params[param_key] = value
         elif op == "lte":
             placeholder = (
                 f"CAST(:{param_key} AS {cast_sql})" if cast_sql else f":{param_key}"
             )
-            where_clauses.append(f"{field} <= {placeholder}")
+            where_clauses.append(f"{column_sql} <= {placeholder}")
             params[param_key] = value
         elif op == "has":
             # JSONB array contains: column ? value (PG jsonb ? operator)
-            where_clauses.append(f"cast({field} as jsonb) ? cast(:{param_key} as text)")
+            where_clauses.append(
+                f"cast({column_sql} as jsonb) ? cast(:{param_key} as text)"
+            )
             params[param_key] = str(value)
 
     async def get(
@@ -556,8 +660,10 @@ class DataApiService:
         tenant: TenantContext,
     ) -> dict:
         require_marketplace_capability(tenant)
+        quoted_table = quote_table_name(table_name)
         sql = text(
-            f"SELECT * FROM {table_name} WHERE id = :id AND tenant_id = :tenant_id"
+            f'SELECT * FROM {quoted_table} WHERE "id" = :id '
+            f'AND "tenant_id" = :tenant_id'
         )
         result = await db.execute(sql, {"id": record_id, "tenant_id": tenant.tenant_id})
         row = result.fetchone()
@@ -574,10 +680,17 @@ class DataApiService:
         data: dict,
         user_id: int,
         tenant: TenantContext,
+        data_schema: dict | None = None,
     ) -> dict:
         require_marketplace_capability(tenant)
-        # 移除系统字段
-        clean_data = {k: v for k, v in data.items() if k not in SYSTEM_FIELDS}
+        quoted_table = quote_table_name(table_name)
+        column_types = await _validate_payload_fields(
+            db,
+            table_name=table_name,
+            data=data,
+            data_schema=data_schema,
+        )
+        clean_data = dict(data)
         clean_data["updated_at"] = datetime.now(UTC)
         clean_data["updated_by"] = user_id
 
@@ -585,17 +698,19 @@ class DataApiService:
             raise InvalidParameterException("没有可更新的字段")
 
         # Coerce numeric strings (e.g., Snowflake FK IDs from frontend) → int
-        column_types = await _column_types(db, table_name)
         coerced = _coerce_numeric_strings(clean_data, column_types)
         # JSONB 列需 json.dumps
         bound_data = {k: _serialize_for_bind(v) for k, v in coerced.items()}
 
-        set_parts = [f"{k} = :{k}" for k in bound_data.keys()]
+        set_parts = [
+            f"{quote_identifier(key, label='update column')} = :{key}"
+            for key in bound_data
+        ]
         set_sql = ", ".join(set_parts)
 
         sql = text(
-            f"UPDATE {table_name} SET {set_sql} "
-            f"WHERE id = :record_id AND tenant_id = :tenant_id RETURNING *"
+            f"UPDATE {quoted_table} SET {set_sql} "
+            f'WHERE "id" = :record_id AND "tenant_id" = :tenant_id RETURNING *'
         )
         params = {
             **bound_data,
@@ -617,8 +732,9 @@ class DataApiService:
         tenant: TenantContext,
     ) -> None:
         require_marketplace_capability(tenant)
+        quoted_table = quote_table_name(table_name)
         sql = text(
-            f"DELETE FROM {table_name} WHERE id = :id AND tenant_id = :tenant_id"
+            f'DELETE FROM {quoted_table} WHERE "id" = :id AND "tenant_id" = :tenant_id'
         )
         result = await db.execute(sql, {"id": record_id, "tenant_id": tenant.tenant_id})
         if result.rowcount == 0:

@@ -5,6 +5,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.tenant import TenantContext
 from app.modules.marketplace.capability import require_marketplace_capability
+from app.modules.marketplace.lowcode.identifiers import (
+    make_index_name,
+    quote_identifier,
+    quote_table_name,
+    render_sql_literal,
+)
 from app.modules.marketplace.lowcode.schema_comparator import compare_schemas
 from app.modules.marketplace.lowcode.schema_introspection import (
     introspect_table,
@@ -30,13 +36,14 @@ class MigrationRunner:
     ) -> None:
         """CREATE TABLE：系统字段 + 用户字段 + 索引"""
         require_marketplace_capability(tenant)
+        quoted_table = quote_table_name(table_name)
         sys_columns = [
-            "id BIGSERIAL PRIMARY KEY",
-            "tenant_id BIGINT NOT NULL",
-            "created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
-            "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
-            "created_by BIGINT",
-            "updated_by BIGINT",
+            '"id" BIGSERIAL PRIMARY KEY',
+            '"tenant_id" BIGINT NOT NULL',
+            '"created_at" TIMESTAMPTZ NOT NULL DEFAULT NOW()',
+            '"updated_at" TIMESTAMPTZ NOT NULL DEFAULT NOW()',
+            '"created_by" BIGINT',
+            '"updated_by" BIGINT',
         ]
 
         properties = data_schema.get("properties", {})
@@ -44,17 +51,14 @@ class MigrationRunner:
 
         user_columns = []
         for field_name, field_def in properties.items():
-            # x-ref fields are FKs to another model's `id` (BIGSERIAL) → must
-            # be BIGINT, even if manifest declares "type": "integer" (which
-            # would map to 32-bit INTEGER and truncate Snowflake IDs).
-            if isinstance(field_def, dict) and field_def.get("x-ref"):
-                type_sql = "BIGINT"
-            else:
-                col_def = json_schema_to_pg_type(field_def)
-                type_sql = pg_type_to_sql(col_def)
+            quoted_field = quote_identifier(
+                field_name, label="data_schema field", reject_system=True
+            )
+            col_def = json_schema_to_pg_type(field_def)
+            type_sql = pg_type_to_sql(col_def)
             nullable_sql = "NOT NULL" if field_name in required else "NULL"
             default_sql = _format_default(field_def.get("default"))
-            column_def = f"{field_name} {type_sql} {nullable_sql}".strip()
+            column_def = f"{quoted_field} {type_sql} {nullable_sql}".strip()
             if default_sql:
                 column_def = f"{column_def} {default_sql}"
             user_columns.append(column_def)
@@ -62,20 +66,26 @@ class MigrationRunner:
         all_columns = sys_columns + user_columns
         columns_sql = ",\n  ".join(all_columns)
 
-        create_sql = f"CREATE TABLE IF NOT EXISTS {table_name} (\n  {columns_sql}\n)"
+        create_sql = f"CREATE TABLE IF NOT EXISTS {quoted_table} (\n  {columns_sql}\n)"
         await db.execute(text(create_sql))
 
         # 索引（PG 不支持 CREATE TABLE 内联 INDEX 语法）
+        tenant_index = quote_identifier(
+            make_index_name(table_name, "tenant_id"), label="index name"
+        )
+        created_index = quote_identifier(
+            make_index_name(table_name, "created_at"), label="index name"
+        )
         await db.execute(
             text(
-                f"CREATE INDEX IF NOT EXISTS ix_{table_name}_tenant_id "
-                f"ON {table_name} (tenant_id)"
+                f"CREATE INDEX IF NOT EXISTS {tenant_index} "
+                f'ON {quoted_table} ("tenant_id")'
             )
         )
         await db.execute(
             text(
-                f"CREATE INDEX IF NOT EXISTS ix_{table_name}_created_at "
-                f"ON {table_name} (created_at)"
+                f"CREATE INDEX IF NOT EXISTS {created_index} "
+                f'ON {quoted_table} ("created_at")'
             )
         )
 
@@ -89,6 +99,7 @@ class MigrationRunner:
     ) -> None:
         """升级表结构：表不存在则建；存在则 introspect + compare + apply diff"""
         require_marketplace_capability(tenant)
+        quote_table_name(table_name)
         actual = await introspect_table(db, table_name)
         if actual is None:
             await self.create_table(
@@ -112,8 +123,9 @@ class MigrationRunner:
     ) -> None:
         """DROP TABLE IF EXISTS"""
         require_marketplace_capability(tenant)
+        quoted_table = quote_table_name(table_name)
         if await table_exists(db, table_name):
-            await db.execute(text(f"DROP TABLE {table_name}"))
+            await db.execute(text(f"DROP TABLE {quoted_table}"))
 
     async def get_table_names_for_app(
         self, db: AsyncSession, *, app_slug: str, tenant: TenantContext
@@ -124,14 +136,18 @@ class MigrationRunner:
         """
         require_marketplace_capability(tenant)
         prefix = slug_to_table_prefix(app_slug)
-        pattern = f"app_data_{prefix}%"
+        base_name = f"app_data_{prefix}"
+        quote_table_name(base_name)
+        escaped = base_name.replace("\\", "\\\\").replace("_", "\\_")
+        pattern = f"{escaped}\\_%"
         stmt = text(
             """
             SELECT table_name FROM information_schema.tables
-            WHERE table_schema = 'public' AND table_name LIKE :pattern
+            WHERE table_schema = 'public'
+              AND (table_name = :base_name OR table_name LIKE :pattern ESCAPE '\\')
         """
         )
-        result = await db.execute(stmt, {"pattern": pattern})
+        result = await db.execute(stmt, {"base_name": base_name, "pattern": pattern})
         return [r[0] for r in result]
 
 
@@ -140,7 +156,5 @@ def _format_default(default: object | None) -> str:
     if default is None:
         return ""
     if isinstance(default, bool):
-        return f"DEFAULT {str(default).upper()}"
-    if isinstance(default, str):
-        return f"DEFAULT '{default}'"
-    return f"DEFAULT {default}"
+        return f"DEFAULT {render_sql_literal(default)}"
+    return f"DEFAULT {render_sql_literal(default)}"

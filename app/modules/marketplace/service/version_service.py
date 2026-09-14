@@ -27,6 +27,15 @@ from app.modules.marketplace.exceptions import (
     AppInvalidManifestException,
     AppNotFoundException,
 )
+from app.modules.marketplace.lowcode.identifiers import (
+    render_sql_literal,
+    validate_manifest_identifier,
+    validate_slug,
+)
+from app.modules.marketplace.lowcode.type_mapping import (
+    json_schema_to_pg_type,
+    make_table_name,
+)
 from app.modules.marketplace.models import App, AppVersion
 from app.modules.marketplace.service.app_service import app_service
 
@@ -56,7 +65,7 @@ VALID_CATEGORIES = {
 }
 
 # semver 简单校验：x.y.z 起步（允许预发布后缀，如 1.0.0-rc.1）
-SEMVER_PATTERN = re.compile(r"^\d+\.\d+\.\d+")
+SEMVER_PATTERN = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
 
 
 class VersionService:
@@ -83,11 +92,12 @@ class VersionService:
 
         # slug 正则（spec 7.1）
         slug = manifest["slug"]
-        if not SLUG_PATTERN.match(slug):
+        if not isinstance(slug, str) or not SLUG_PATTERN.fullmatch(slug):
             raise AppInvalidManifestException(
                 f"slug '{slug}' 不匹配 {SLUG_PATTERN.pattern}"
                 "（首字符必须字母，末字符不能是连字符）"
             )
+        validate_slug(slug)
 
         # type / category 合法值
         if manifest["type"] not in VALID_TYPES:
@@ -101,15 +111,18 @@ class VersionService:
             )
 
         # version semver 简单校验
-        if not SEMVER_PATTERN.match(manifest["version"]):
+        if not isinstance(manifest["version"], str) or not SEMVER_PATTERN.fullmatch(
+            manifest["version"]
+        ):
             raise AppInvalidManifestException(
                 f"version '{manifest['version']}' 不是合法 semver"
             )
 
         # data_schema 校验：required 字段必须有字面常量 default（spec 6.3 + 决策 #69）
-        data_schema = manifest.get("data_schema") or {}
-        if isinstance(data_schema, dict):
-            self._validate_data_schema_defaults(data_schema)
+        data_schema = manifest.get("data_schema")
+        if data_schema is not None:
+            self._validate_data_schema(data_schema, label="data_schema")
+            make_table_name(slug)
 
         # permissions 形状校验：每项必须是 {type, detail}（spec 14.5）
         permissions = manifest.get("permissions") or []
@@ -121,6 +134,52 @@ class VersionService:
         # 且 page.model 必须与声明的模式匹配——否则 install 建表名
         # 与 API 期望表名不一致，导致 404。
         self._validate_pages_models_coherence(manifest)
+        self._validate_relations(manifest)
+
+    def _validate_data_schema(self, data_schema: object, *, label: str) -> None:
+        """Validate the complete DDL-bearing part of a JSON schema."""
+        if not isinstance(data_schema, dict):
+            raise AppInvalidManifestException(f"{label} 必须是对象")
+        if data_schema.get("type", "object") != "object":
+            raise AppInvalidManifestException(f"{label}.type 必须是 object")
+
+        properties = data_schema.get("properties", {})
+        required = data_schema.get("required", [])
+        if not isinstance(properties, dict):
+            raise AppInvalidManifestException(f"{label}.properties 必须是对象")
+        if not isinstance(required, list) or any(
+            not isinstance(name, str) for name in required
+        ):
+            raise AppInvalidManifestException(f"{label}.required 必须是字符串数组")
+        if len(required) != len(set(required)):
+            raise AppInvalidManifestException(f"{label}.required 不能重复")
+
+        for field_name, field_def in properties.items():
+            validate_manifest_identifier(
+                field_name,
+                label=f"{label}.properties field",
+                reject_system=True,
+            )
+            if not isinstance(field_def, dict):
+                raise AppInvalidManifestException(
+                    f"{label}.properties.{field_name} 必须是对象"
+                )
+            json_schema_to_pg_type(field_def)
+            if "default" in field_def:
+                render_sql_literal(field_def["default"])
+
+        for field_name in required:
+            validate_manifest_identifier(
+                field_name,
+                label=f"{label}.required field",
+                reject_system=True,
+            )
+            if field_name not in properties:
+                raise AppInvalidManifestException(
+                    f"required 字段 '{field_name}' 未在 properties 声明"
+                )
+
+        self._validate_data_schema_defaults(data_schema)
 
     def _validate_data_schema_defaults(self, data_schema: dict) -> None:
         """spec 6.3：新增 required 字段必须有字面常量 default（防 PG 全表重写）。
@@ -209,8 +268,19 @@ class VersionService:
             AppInvalidManifestException: 模式混用，或 page.model 与声明不符
         """
         data_schema = manifest.get("data_schema")
-        models = manifest.get("models") or []
-        pages = manifest.get("pages") or []
+        models_value = manifest.get("models")
+        pages_value = manifest.get("pages")
+        models = models_value or []
+        pages = pages_value or []
+
+        if models_value is not None and not isinstance(models_value, list):
+            raise AppInvalidManifestException(
+                f"models 必须是数组，当前类型：{type(models_value).__name__}"
+            )
+        if pages_value is not None and not isinstance(pages_value, list):
+            raise AppInvalidManifestException(
+                f"pages 必须是数组，当前类型：{type(pages_value).__name__}"
+            )
 
         # 1. 互斥：data_schema 与 models 不能同时存在
         if data_schema and models:
@@ -222,10 +292,6 @@ class VersionService:
         # 2. 校验 models[] 形状（如果声明）
         declared_keys: set[str] = set()
         if models:
-            if not isinstance(models, list):
-                raise AppInvalidManifestException(
-                    f"models 必须是数组，当前类型：{type(models).__name__}"
-                )
             for i, m in enumerate(models):
                 if not isinstance(m, dict):
                     raise AppInvalidManifestException(
@@ -236,18 +302,19 @@ class VersionService:
                     raise AppInvalidManifestException(
                         f"models[{i}] 缺少有效的 key 字段（非空字符串）"
                     )
+                validate_manifest_identifier(key, label=f"models[{i}].key")
+                make_table_name(manifest["slug"], key)
                 if key in declared_keys:
                     raise AppInvalidManifestException(
                         f"models[{i}].key='{key}' 重复声明"
                     )
                 declared_keys.add(key)
+                self._validate_data_schema(
+                    m.get("data_schema"), label=f"models[{i}].data_schema"
+                )
 
         # 3. 校验 pages[] 形状与 model 一致性
         if pages:
-            if not isinstance(pages, list):
-                raise AppInvalidManifestException(
-                    f"pages 必须是数组，当前类型：{type(pages).__name__}"
-                )
             for i, page in enumerate(pages):
                 if not isinstance(page, dict):
                     raise AppInvalidManifestException(
@@ -274,6 +341,115 @@ class VersionService:
                             " 单表模式下 page.model 必须省略或为 '_'，"
                             "若要多 model 请在顶层声明 models[] 数组。"
                         )
+
+    def _validate_relations(self, manifest: dict) -> None:
+        """Resolve every relation against declared model schemas before SQL use."""
+        models = manifest.get("models") or []
+        if not models:
+            data_schema = manifest.get("data_schema") or {}
+            if data_schema.get("relations"):
+                raise AppInvalidManifestException("单表模式不能声明跨 model relations")
+            for field_name, field_def in (data_schema.get("properties") or {}).items():
+                if isinstance(field_def, dict) and field_def.get("x-ref"):
+                    raise AppInvalidManifestException(
+                        f"字段 '{field_name}' 的 x-ref 在单表模式无法解析"
+                    )
+            return
+
+        model_properties = {
+            model["key"]: (model.get("data_schema") or {}).get("properties", {})
+            for model in models
+        }
+        for index, model in enumerate(models):
+            source_key = model["key"]
+            source_properties = model_properties[source_key]
+            relations = model.get("relations") or []
+            if not isinstance(relations, list):
+                raise AppInvalidManifestException(
+                    f"models[{index}].relations 必须是数组"
+                )
+            seen_foreign_keys: set[str] = set()
+            for rel_index, relation in enumerate(relations):
+                label = f"models[{index}].relations[{rel_index}]"
+                if not isinstance(relation, dict):
+                    raise AppInvalidManifestException(f"{label} 必须是对象")
+                if relation.get("type") != "belongs_to":
+                    raise AppInvalidManifestException(f"{label}.type 仅支持 belongs_to")
+                target = validate_manifest_identifier(
+                    relation.get("model"), label=f"{label}.model"
+                )
+                foreign_key = validate_manifest_identifier(
+                    relation.get("foreign_key"),
+                    label=f"{label}.foreign_key",
+                    reject_system=True,
+                )
+                if target not in model_properties:
+                    raise AppInvalidManifestException(
+                        f"{label}.model='{target}' 未声明"
+                    )
+                if foreign_key not in source_properties:
+                    raise AppInvalidManifestException(
+                        f"{label}.foreign_key='{foreign_key}' 未在源 model 声明"
+                    )
+                foreign_field = source_properties[foreign_key]
+                if (
+                    not isinstance(foreign_field, dict)
+                    or foreign_field.get("x-ref") != target
+                ):
+                    raise AppInvalidManifestException(
+                        f"{label}.foreign_key='{foreign_key}' 必须声明 x-ref='{target}'"
+                    )
+                if foreign_key in seen_foreign_keys:
+                    raise AppInvalidManifestException(
+                        f"{label}.foreign_key='{foreign_key}' 重复"
+                    )
+                seen_foreign_keys.add(foreign_key)
+                self._validate_relation_label(
+                    relation.get("label_field"),
+                    target=target,
+                    model_properties=model_properties,
+                    label=label,
+                )
+
+            for field_name, field_def in source_properties.items():
+                if not isinstance(field_def, dict) or not field_def.get("x-ref"):
+                    continue
+                target = validate_manifest_identifier(
+                    field_def["x-ref"], label=f"field {field_name}.x-ref"
+                )
+                if target not in model_properties:
+                    raise AppInvalidManifestException(
+                        f"field {field_name}.x-ref='{target}' 未声明"
+                    )
+                self._validate_relation_label(
+                    field_def.get("x-ref-label"),
+                    target=target,
+                    model_properties=model_properties,
+                    label=f"field {field_name}",
+                )
+
+    @staticmethod
+    def _validate_relation_label(
+        value: object,
+        *,
+        target: str,
+        model_properties: dict[str, dict],
+        label: str,
+    ) -> None:
+        if value is None:
+            return
+        label_field = validate_manifest_identifier(
+            value, label=f"{label}.label_field", reject_system=True
+        )
+        target_field = model_properties[target].get(label_field)
+        if not isinstance(target_field, dict):
+            raise AppInvalidManifestException(
+                f"{label}.label_field='{label_field}' 未在目标 model 声明"
+            )
+        if target_field.get("type") != "string":
+            raise AppInvalidManifestException(
+                f"{label}.label_field 必须引用 string 字段"
+            )
 
     async def create(
         self,

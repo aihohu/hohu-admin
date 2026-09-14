@@ -17,7 +17,7 @@ uninstall 时 DROP 表并把表名回填 retained_table_names。
 
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,11 +25,13 @@ from app.core.base_response import PageResult
 from app.core.tenant import TenantContext
 from app.modules.marketplace.exceptions import (
     AppInstallLockedException,
+    AppInvalidManifestException,
     AppNotFoundException,
 )
 from app.modules.marketplace.lowcode.migration_runner import MigrationRunner
+from app.modules.marketplace.lowcode.schema_introspection import table_exists
 from app.modules.marketplace.lowcode.type_mapping import make_table_name
-from app.modules.marketplace.models import App, TenantApp
+from app.modules.marketplace.models import App, AppVersion, TenantApp
 from app.modules.marketplace.schemas.install import InstallCreate, InstallQuery
 from app.modules.marketplace.service.app_service import app_service
 from app.modules.marketplace.service.base import MarketplaceBaseService
@@ -76,17 +78,29 @@ class InstallService(MarketplaceBaseService):
         """
         # 查应用
         app = await app_service.get_by_slug(db, slug=req.app_slug, tenant=tenant)
+        if app.status != "published":
+            raise AppNotFoundException(slug=req.app_slug)
         # 查版本（默认最新 approved）
         if req.version:
             version = await version_service.get_by_version(
                 db, app_id=app.id, version=req.version, tenant=tenant
             )
+            if version.review_status != "approved":
+                raise AppNotFoundException(
+                    slug=f"{req.app_slug}@{req.version} (not approved)"
+                )
         else:
             version = await version_service.get_latest_approved(
                 db, app_id=app.id, tenant=tenant
             )
             if version is None:
                 raise AppNotFoundException(slug=f"{req.app_slug} (no approved version)")
+        version_service.validate_manifest(version.manifest or {})
+        await self._ensure_physical_table_ownership(
+            db,
+            app=app,
+            manifest=version.manifest or {},
+        )
 
         # 查 tenant_app（可能存在历史 uninstalled 记录）
         stmt = self.scoped(TenantApp, tenant=tenant).where(TenantApp.app_id == app.id)
@@ -149,6 +163,7 @@ class InstallService(MarketplaceBaseService):
           VARCHAR 会被 ALTER COLUMN TYPE，避免 v1→v2 升级时丢字段。
         """
         manifest = version.manifest or {}
+        version_service.validate_manifest(manifest)
 
         models = manifest.get("models")
         if models:
@@ -234,10 +249,19 @@ class InstallService(MarketplaceBaseService):
 
         # 查 app.slug 用于定位应用建的表
         app = await app_service.get_by_id(db, app_id=app_id, tenant=tenant)
-        table_names: list[str] = []
-        table_names = await self.migration_runner.get_table_names_for_app(
-            db, app_slug=app.slug, tenant=tenant
+        version = await version_service.get_by_version(
+            db,
+            app_id=app_id,
+            version=record.installed_version,
+            tenant=tenant,
         )
+        manifest = version.manifest or {}
+        version_service.validate_manifest(manifest)
+        table_names = [
+            table_name
+            for table_name in self._table_names_for_manifest(app.slug, manifest)
+            if await table_exists(db, table_name)
+        ]
         for tn in table_names:
             await self.migration_runner.drop_table(db, table_name=tn, tenant=tenant)
 
@@ -247,6 +271,73 @@ class InstallService(MarketplaceBaseService):
         record.has_data = len(table_names) > 0
         await db.flush()
         await contributes_service.invalidate(tenant=tenant)
+
+    @staticmethod
+    def _table_names_for_manifest(slug: str, manifest: dict) -> list[str]:
+        """Resolve only explicitly declared tables; never prefix-scan/drop."""
+        models = manifest.get("models") or []
+        if models:
+            return [
+                make_table_name(slug, model["key"])
+                for model in models
+                if InstallService._has_user_fields(model.get("data_schema"))
+            ]
+        if InstallService._has_user_fields(manifest.get("data_schema")):
+            return [make_table_name(slug)]
+        return []
+
+    async def _ensure_physical_table_ownership(
+        self,
+        db: AsyncSession,
+        *,
+        app: App,
+        manifest: dict,
+    ) -> None:
+        """Reject normalization collisions before install state or DDL changes.
+
+        Lowcode tables share one PostgreSQL schema across tenants. The check is
+        therefore intentionally global rather than tenant-scoped. Transaction
+        advisory locks close the race between two concurrent colliding installs.
+        """
+        requested = set(self._table_names_for_manifest(app.slug, manifest))
+        if not requested:
+            return
+
+        for table_name in sorted(requested):
+            await db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:table_name, 0))"),
+                {"table_name": table_name},
+            )
+
+        result = await db.execute(
+            select(App, AppVersion)
+            .join(TenantApp, TenantApp.app_id == App.id)
+            .join(
+                AppVersion,
+                and_(
+                    AppVersion.app_id == App.id,
+                    AppVersion.version == TenantApp.installed_version,
+                ),
+            )
+            .where(
+                TenantApp.status != "uninstalled",
+                TenantApp.app_id != app.id,
+            )
+        )
+        for installed_app, installed_version in result:
+            installed_manifest = installed_version.manifest or {}
+            version_service.validate_manifest(installed_manifest)
+            overlap = requested.intersection(
+                self._table_names_for_manifest(
+                    installed_app.slug,
+                    installed_manifest,
+                )
+            )
+            if overlap:
+                table_name = sorted(overlap)[0]
+                raise AppInvalidManifestException(
+                    f"物理表名 {table_name!r} 与已安装应用 {installed_app.slug!r} 冲突"
+                )
 
     async def enable(
         self, db: AsyncSession, *, app_id: int, tenant: TenantContext

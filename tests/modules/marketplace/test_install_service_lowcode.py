@@ -3,6 +3,7 @@
 import pytest
 from sqlalchemy import select, text
 
+from app.modules.marketplace.exceptions import AppInvalidManifestException
 from app.modules.marketplace.lowcode.schema_introspection import (
     introspect_table,
     table_exists,
@@ -19,7 +20,7 @@ async def lowcode_app_with_schema(db_session):
     app = App(
         tenant_id=0,
         name="低代码 CRM",
-        slug="lowcode_test_crm",
+        slug="lowcode-test-crm",
         type="lowcode",
         category="business",
         status="published",
@@ -29,7 +30,7 @@ async def lowcode_app_with_schema(db_session):
 
     manifest = {
         "name": "低代码 CRM",
-        "slug": "lowcode_test_crm",
+        "slug": "lowcode-test-crm",
         "version": "1.0.0",
         "type": "lowcode",
         "category": "business",
@@ -95,6 +96,92 @@ class TestInstallCreatesTables:
         assert "tenant_id" in col_names
         assert "created_at" in col_names
 
+    async def test_install_rejects_cross_app_normalization_collision_before_ddl(
+        self, db_session
+    ) -> None:
+        existing_app = App(
+            tenant_id=0,
+            name="Existing",
+            slug="collision-target",
+            type="lowcode",
+            category="business",
+            status="published",
+        )
+        candidate_app = App(
+            tenant_id=0,
+            name="Candidate",
+            slug="collision",
+            type="lowcode",
+            category="business",
+            status="published",
+        )
+        db_session.add_all([existing_app, candidate_app])
+        await db_session.flush()
+
+        single_schema = {
+            "type": "object",
+            "properties": {"name": {"type": "string", "default": ""}},
+            "required": ["name"],
+        }
+        existing_version = AppVersion(
+            app_id=existing_app.id,
+            version="1.0.0",
+            manifest={
+                "name": "Existing",
+                "slug": "collision-target",
+                "version": "1.0.0",
+                "type": "lowcode",
+                "category": "business",
+                "data_schema": single_schema,
+            },
+            file_url="/uploads/existing.zip",
+            file_hash="1" * 64,
+            review_status="approved",
+        )
+        candidate_version = AppVersion(
+            app_id=candidate_app.id,
+            version="1.0.0",
+            manifest={
+                "name": "Candidate",
+                "slug": "collision",
+                "version": "1.0.0",
+                "type": "lowcode",
+                "category": "business",
+                "models": [
+                    {
+                        "key": "target",
+                        "data_schema": single_schema,
+                    }
+                ],
+            },
+            file_url="/uploads/candidate.zip",
+            file_hash="2" * 64,
+            review_status="approved",
+        )
+        db_session.add_all([existing_version, candidate_version])
+        await db_session.flush()
+        db_session.add(
+            TenantApp(
+                tenant_id=0,
+                app_id=existing_app.id,
+                installed_version="1.0.0",
+                status="enabled",
+            )
+        )
+        await db_session.flush()
+
+        with pytest.raises(AppInvalidManifestException, match="物理表名"):
+            await install_service.install(
+                db_session,
+                InstallCreate(app_slug="collision"),
+                user_id=1,
+            )
+
+        candidate_install = await db_session.scalar(
+            select(TenantApp).where(TenantApp.app_id == candidate_app.id)
+        )
+        assert candidate_install is None
+
 
 class TestUninstallDropsTables:
     async def test_uninstall_drops_table_and_records_retained(
@@ -135,7 +222,7 @@ class TestInstallNoDataSchema:
         app = App(
             tenant_id=0,
             name="纯展示",
-            slug="lowcode_no_schema",
+            slug="lowcode-no-schema",
             type="lowcode",
             category="business",
             status="published",
@@ -147,7 +234,7 @@ class TestInstallNoDataSchema:
             version="1.0.0",
             manifest={
                 "name": "X",
-                "slug": "lowcode_no_schema",
+                "slug": "lowcode-no-schema",
                 "version": "1.0.0",
                 "type": "lowcode",
                 "category": "business",
@@ -161,7 +248,7 @@ class TestInstallNoDataSchema:
         await db_session.flush()
         app.current_version_id = version.id
 
-        req = InstallCreate(app_slug="lowcode_no_schema")
+        req = InstallCreate(app_slug="lowcode-no-schema")
         await install_service.install(db_session, req, user_id=1)
         await db_session.flush()
 
@@ -174,7 +261,7 @@ class TestMultiModelInstall:
         app = App(
             tenant_id=0,
             name="多表 CRM",
-            slug="lowcode_multi_model",
+            slug="lowcode-multi-model",
             type="lowcode",
             category="business",
             status="published",
@@ -186,7 +273,7 @@ class TestMultiModelInstall:
             version="1.0.0",
             manifest={
                 "name": "X",
-                "slug": "lowcode_multi_model",
+                "slug": "lowcode-multi-model",
                 "version": "1.0.0",
                 "type": "lowcode",
                 "category": "business",
@@ -226,7 +313,7 @@ class TestMultiModelInstall:
             text("DROP TABLE IF EXISTS app_data_lowcode_multi_model_order")
         )
 
-        req = InstallCreate(app_slug="lowcode_multi_model")
+        req = InstallCreate(app_slug="lowcode-multi-model")
         await install_service.install(db_session, req, user_id=1)
         await db_session.flush()
 
@@ -306,7 +393,7 @@ class TestReinstallSchemaEvolution:
         app = App(
             tenant_id=0,
             name="演进 CRM",
-            slug="lowcode_evo",
+            slug="lowcode-evo",
             type="lowcode",
             category="business",
             status="published",
@@ -316,7 +403,7 @@ class TestReinstallSchemaEvolution:
 
         v1_manifest = {
             "name": "演进 CRM",
-            "slug": "lowcode_evo",
+            "slug": "lowcode-evo",
             "version": "1.0.0",
             "type": "lowcode",
             "category": "business",
@@ -346,7 +433,7 @@ class TestReinstallSchemaEvolution:
         # 安装 v1
         await install_service.install(
             db_session,
-            InstallCreate(app_slug="lowcode_evo", version="1.0.0"),
+            InstallCreate(app_slug="lowcode-evo", version="1.0.0"),
             user_id=1,
         )
         await db_session.flush()
@@ -364,7 +451,7 @@ class TestReinstallSchemaEvolution:
         # --- v2: name + level + email(新) ---
         v2_manifest = {
             "name": "演进 CRM",
-            "slug": "lowcode_evo",
+            "slug": "lowcode-evo",
             "version": "2.0.0",
             "type": "lowcode",
             "category": "business",
@@ -395,7 +482,7 @@ class TestReinstallSchemaEvolution:
         # 重装（显式指定 v2，避免 created_at DESC 排序歧义）
         await install_service.install(
             db_session,
-            InstallCreate(app_slug="lowcode_evo", version="2.0.0"),
+            InstallCreate(app_slug="lowcode-evo", version="2.0.0"),
             user_id=1,
         )
         await db_session.flush()
@@ -431,7 +518,7 @@ class TestReinstallSchemaEvolution:
         app = App(
             tenant_id=0,
             name="Widen CRM",
-            slug="lowcode_widen",
+            slug="lowcode-widen",
             type="lowcode",
             category="business",
             status="published",
@@ -444,7 +531,7 @@ class TestReinstallSchemaEvolution:
             version="1.0.0",
             manifest={
                 "name": "X",
-                "slug": "lowcode_widen",
+                "slug": "lowcode-widen",
                 "version": "1.0.0",
                 "type": "lowcode",
                 "category": "business",
@@ -468,7 +555,7 @@ class TestReinstallSchemaEvolution:
 
         await install_service.install(
             db_session,
-            InstallCreate(app_slug="lowcode_widen", version="1.0.0"),
+            InstallCreate(app_slug="lowcode-widen", version="1.0.0"),
             user_id=1,
         )
         await db_session.flush()
@@ -485,7 +572,7 @@ class TestReinstallSchemaEvolution:
             version="2.0.0",
             manifest={
                 "name": "X",
-                "slug": "lowcode_widen",
+                "slug": "lowcode-widen",
                 "version": "2.0.0",
                 "type": "lowcode",
                 "category": "business",
@@ -509,7 +596,7 @@ class TestReinstallSchemaEvolution:
 
         await install_service.install(
             db_session,
-            InstallCreate(app_slug="lowcode_widen", version="2.0.0"),
+            InstallCreate(app_slug="lowcode-widen", version="2.0.0"),
             user_id=1,
         )
         await db_session.flush()

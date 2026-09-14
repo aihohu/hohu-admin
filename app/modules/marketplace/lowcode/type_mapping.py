@@ -14,12 +14,18 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from app.modules.marketplace.exceptions import AppInvalidManifestException
+from app.modules.marketplace.lowcode.identifiers import (
+    validate_manifest_identifier,
+    validate_slug,
+    validate_table_name,
+)
 
 
 class PgType(StrEnum):
     VARCHAR = "VARCHAR"
     TEXT = "TEXT"
     INTEGER = "INTEGER"
+    BIGINT = "BIGINT"
     NUMERIC = "NUMERIC"
     BOOLEAN = "BOOLEAN"
     DATE = "DATE"
@@ -49,6 +55,11 @@ def json_schema_to_pg_type(field_def: dict) -> ColumnDef:
     if json_type is None:
         raise AppInvalidManifestException("字段定义缺少 type")
 
+    # Relations point to BIGSERIAL/Snowflake identifiers. Their storage width
+    # is a physical invariant independent of the JSON transport type.
+    if field_def.get("x-ref"):
+        return ColumnDef(pg_type=PgType.BIGINT)
+
     if json_type == "string":
         fmt = field_def.get("format")
         if fmt == "date":
@@ -58,6 +69,12 @@ def json_schema_to_pg_type(field_def: dict) -> ColumnDef:
         max_length = field_def.get("maxLength")
         if max_length is None:
             return ColumnDef(pg_type=PgType.VARCHAR, length=DEFAULT_VARCHAR_LENGTH)
+        if (
+            isinstance(max_length, bool)
+            or not isinstance(max_length, int)
+            or max_length < 1
+        ):
+            raise AppInvalidManifestException("string.maxLength 必须是正整数")
         if max_length > TEXT_THRESHOLD:
             return ColumnDef(pg_type=PgType.TEXT)
         return ColumnDef(pg_type=PgType.VARCHAR, length=max_length)
@@ -100,7 +117,7 @@ def slug_to_table_prefix(slug: str) -> str:
 
     Example: 'zhangsan-crm' → 'zhangsan_crm'
     """
-    return slug.replace("-", "_").replace(".", "_")
+    return validate_slug(slug).replace("-", "_")
 
 
 def make_table_name(slug: str, model_key: str | None = None) -> str:
@@ -112,5 +129,6 @@ def make_table_name(slug: str, model_key: str | None = None) -> str:
     """
     prefix = slug_to_table_prefix(slug)
     if model_key:
-        return f"app_data_{prefix}_{model_key}"
-    return f"app_data_{prefix}"
+        model = validate_manifest_identifier(model_key, label="model key")
+        return validate_table_name(f"app_data_{prefix}_{model}")
+    return validate_table_name(f"app_data_{prefix}")

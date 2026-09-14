@@ -2,10 +2,31 @@ import pytest
 from sqlalchemy import text
 
 from app.core.exceptions import InvalidParameterException, NotFoundException
+from app.modules.marketplace.exceptions import AppInvalidManifestException
 from app.modules.marketplace.lowcode.data_api_service import DataApiService
 from app.modules.marketplace.lowcode.migration_runner import MigrationRunner
 from app.modules.marketplace.lowcode.type_mapping import make_table_name
 from modules.marketplace import DEFAULT_TENANT
+
+DATA_API_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string", "maxLength": 100, "default": ""},
+        "level": {"type": "string", "default": "C"},
+    },
+    "required": ["name", "level"],
+}
+
+FILTER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string", "maxLength": 100},
+        "status": {"type": "string"},
+        "age": {"type": "integer"},
+        "tags": {"type": "array"},
+    },
+    "required": ["name"],
+}
 
 
 @pytest.fixture
@@ -17,14 +38,7 @@ async def setup_app_table(db_session):
     await runner.create_table(
         db_session,
         table_name=table_name,
-        data_schema={
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "maxLength": 100, "default": ""},
-                "level": {"type": "string", "default": "C"},
-            },
-            "required": ["name", "level"],
-        },
+        data_schema=DATA_API_SCHEMA,
         tenant=DEFAULT_TENANT,
     )
     await db_session.flush()
@@ -67,6 +81,37 @@ class TestDataApiServiceCreate:
                     },
                     "required": ["name", "level"],
                 },
+            )
+
+    @pytest.mark.parametrize("field", ["unknown", "name) VALUES ('x'); --"])
+    async def test_create_rejects_fields_outside_manifest_and_table_without_writes(
+        self, db_session, setup_app_table, field
+    ):
+        svc = DataApiService()
+        with pytest.raises(InvalidParameterException):
+            await svc.create(
+                db_session,
+                table_name=setup_app_table,
+                data={field: "attacker"},
+                tenant=DEFAULT_TENANT,
+                user_id=1,
+                data_schema=DATA_API_SCHEMA,
+            )
+        count = await db_session.scalar(text(f"SELECT count(*) FROM {setup_app_table}"))
+        assert count == 0
+
+    async def test_create_rejects_untrusted_table_identifier_before_sql(
+        self, db_session
+    ):
+        svc = DataApiService()
+        with pytest.raises(AppInvalidManifestException):
+            await svc.create(
+                db_session,
+                table_name="app_data_safe; DROP TABLE sys_user",
+                data={"name": "x"},
+                tenant=DEFAULT_TENANT,
+                user_id=1,
+                data_schema=DATA_API_SCHEMA,
             )
 
 
@@ -179,7 +224,7 @@ class TestDataApiServiceUpdate:
         await db_session.flush()
         assert updated["name"] == "改"
 
-    async def test_update_strips_system_fields(self, db_session, setup_app_table):
+    async def test_update_rejects_system_fields(self, db_session, setup_app_table):
         svc = DataApiService()
         record = await svc.create(
             db_session,
@@ -190,17 +235,15 @@ class TestDataApiServiceUpdate:
         )
         await db_session.flush()
 
-        # 尝试改 tenant_id（应被忽略）
-        updated = await svc.update(
-            db_session,
-            table_name=setup_app_table,
-            record_id=record["id"],
-            data={"name": "Y", "tenant_id": 999},
-            tenant=DEFAULT_TENANT,
-            user_id=1,
-        )
-        await db_session.flush()
-        assert updated["tenant_id"] == 0  # 没被改
+        with pytest.raises(InvalidParameterException):
+            await svc.update(
+                db_session,
+                table_name=setup_app_table,
+                record_id=record["id"],
+                data={"name": "Y", "tenant_id": 999},
+                tenant=DEFAULT_TENANT,
+                user_id=1,
+            )
 
 
 class TestDataApiServiceDelete:
@@ -241,16 +284,7 @@ async def setup_filter_table(db_session):
     await runner.create_table(
         db_session,
         table_name=table_name,
-        data_schema={
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "maxLength": 100},
-                "status": {"type": "string"},
-                "age": {"type": "integer"},
-                "tags": {"type": "array"},
-            },
-            "required": ["name"],
-        },
+        data_schema=FILTER_SCHEMA,
         tenant=DEFAULT_TENANT,
     )
     await db_session.flush()
@@ -541,8 +575,8 @@ class TestDataApiOrderBy:
 async def setup_belongs_to_tables(db_session):
     """两张表：customer + order。order.customer_id 通过 x-ref 指向 customer。"""
     runner = MigrationRunner()
-    customer_table = make_table_name("rel_test", "customer")
-    order_table = make_table_name("rel_test", "order")
+    customer_table = make_table_name("rel-test", "customer")
+    order_table = make_table_name("rel-test", "order")
     await db_session.execute(text(f"DROP TABLE IF EXISTS {customer_table}"))
     await db_session.execute(text(f"DROP TABLE IF EXISTS {order_table}"))
 
@@ -654,7 +688,7 @@ class TestDataApiBelongsTo:
             size=100,
             filters=None,
             tenant=DEFAULT_TENANT,
-            slug="rel_test",
+            slug="rel-test",
             models=env["models"],
         )
         labels = [r.get("customer_id_label") for r in result.records]
@@ -678,7 +712,7 @@ class TestDataApiBelongsTo:
             if (
                 "customer_id IN" in sql
                 or ("WHERE id IN" in sql and env["customer_table"] in sql)
-                or (env["customer_table"] in sql and "SELECT id" in sql)
+                or (env["customer_table"] in sql and 'SELECT "id"' in sql)
             ):
                 call_count["n"] += 1
             return await original_execute(*args, **kwargs)
@@ -691,7 +725,7 @@ class TestDataApiBelongsTo:
             size=100,
             filters=None,
             tenant=DEFAULT_TENANT,
-            slug="rel_test",
+            slug="rel-test",
             models=env["models"],
         )
         # 1 relation → at most 1 batch SELECT against target table
@@ -709,7 +743,7 @@ class TestDataApiBelongsTo:
             size=100,
             filters=None,
             tenant=DEFAULT_TENANT,
-            slug="rel_test",
+            slug="rel-test",
             models=env["models"],
         )
         # 1 record references customer_id=99999999 (no match) → label is ""
@@ -748,7 +782,7 @@ class TestDataApiBelongsTo:
             size=100,
             filters=None,
             tenant=DEFAULT_TENANT,
-            slug="rel_test",
+            slug="rel-test",
             models=models_override,
         )
         # All customers are level A, so label should be "A" (not "腾讯"/"阿里")
@@ -788,7 +822,7 @@ class TestDataApiBelongsTo:
             size=100,
             filters=None,
             tenant=DEFAULT_TENANT,
-            slug="rel_test",
+            slug="rel-test",
             models=env["models"],
             order_by="customer_id_label",
         )
@@ -811,7 +845,7 @@ class TestDataApiBelongsTo:
             size=100,
             filters=None,
             tenant=DEFAULT_TENANT,
-            slug="rel_test",
+            slug="rel-test",
             models=env["models"],
             order_by="-customer_id_label",
         )
@@ -835,9 +869,42 @@ class TestDataApiBelongsTo:
             size=100,
             filters=None,
             tenant=DEFAULT_TENANT,
-            slug="rel_test",
+            slug="rel-test",
             models=env["models"],
             order_by="customer_id_label,amount",
         )
         # No assertion on exact order — verify no exception + records returned
         assert len(result.records) > 0
+
+    async def test_explicit_label_missing_from_physical_table_fails_cleanly(
+        self, db_session, setup_belongs_to_tables
+    ):
+        svc = DataApiService()
+        env = setup_belongs_to_tables
+        models_with_stale_label = [
+            env["models"][0],
+            {
+                "key": "order",
+                "data_schema": env["models"][1]["data_schema"],
+                "relations": [
+                    {
+                        "type": "belongs_to",
+                        "model": "customer",
+                        "foreign_key": "customer_id",
+                        "label_field": "removed_label",
+                    }
+                ],
+            },
+        ]
+
+        with pytest.raises(InvalidParameterException, match="removed_label"):
+            await svc.list(
+                db_session,
+                table_name=env["order_table"],
+                current=1,
+                size=100,
+                filters=None,
+                tenant=DEFAULT_TENANT,
+                slug="rel-test",
+                models=models_with_stale_label,
+            )

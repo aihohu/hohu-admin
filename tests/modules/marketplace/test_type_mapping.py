@@ -29,6 +29,10 @@ class TestJsonSchemaToPgType:
         col_def = json_schema_to_pg_type({"type": "integer"})
         assert col_def.pg_type == PgType.INTEGER
 
+    def test_relation_reference_maps_to_bigint(self):
+        col_def = json_schema_to_pg_type({"type": "integer", "x-ref": "customer"})
+        assert col_def.pg_type == PgType.BIGINT
+
     def test_number(self):
         col_def = json_schema_to_pg_type({"type": "number"})
         assert col_def.pg_type == PgType.NUMERIC
@@ -68,6 +72,9 @@ class TestJsonSchemaToPgType:
 
         col = ColumnDef(pg_type=PgType.INTEGER)
         assert pg_type_to_sql(col) == "INTEGER"
+
+        col = ColumnDef(pg_type=PgType.BIGINT)
+        assert pg_type_to_sql(col) == "BIGINT"
 
         col = ColumnDef(pg_type=PgType.NUMERIC, precision=10, scale=2)
         assert pg_type_to_sql(col) == "NUMERIC(10,2)"

@@ -1,3 +1,5 @@
+import hashlib
+
 import pytest
 from sqlalchemy import text
 
@@ -17,7 +19,8 @@ def runner():
 @pytest.fixture
 def table_name(request):
     """每个测试独立表名，避免冲突"""
-    return f"app_data_test_{request.node.name}"
+    digest = hashlib.sha256(request.node.nodeid.encode()).hexdigest()[:16]
+    return f"app_data_test_{digest}"
 
 
 class TestCreateTable:

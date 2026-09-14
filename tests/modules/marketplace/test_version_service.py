@@ -649,6 +649,168 @@ class TestVersionServiceValidateManifest:
         }
         version_service.validate_manifest(manifest)
 
+    @pytest.mark.parametrize(
+        "field_name",
+        ["tenant_id", "name;drop_table", "混淆", "UpperCase"],
+    )
+    def test_validate_manifest_rejects_unsafe_or_system_property_names(
+        self, field_name
+    ):
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "data_schema": {
+                "type": "object",
+                "properties": {field_name: {"type": "string"}},
+            },
+        }
+        with pytest.raises(AppInvalidManifestException):
+            version_service.validate_manifest(manifest)
+
+    def test_validate_manifest_rejects_required_name_not_in_properties(self):
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "data_schema": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["missing"],
+            },
+        }
+        with pytest.raises(AppInvalidManifestException):
+            version_service.validate_manifest(manifest)
+
+    def test_validate_manifest_validates_each_model_schema_and_physical_budget(self):
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "models": [
+                {
+                    "key": "m" * 40,
+                    "data_schema": {
+                        "type": "object",
+                        "properties": {"unsafe;field": {"type": "string"}},
+                    },
+                }
+            ],
+        }
+        with pytest.raises(AppInvalidManifestException):
+            version_service.validate_manifest(manifest)
+
+    def test_validate_manifest_relation_must_resolve_declared_models_and_fields(self):
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "models": [
+                {
+                    "key": "order",
+                    "data_schema": {
+                        "type": "object",
+                        "properties": {"customer_id": {"type": "integer"}},
+                    },
+                    "relations": [
+                        {
+                            "type": "belongs_to",
+                            "model": "missing",
+                            "foreign_key": "customer_id",
+                            "label_field": "name",
+                        }
+                    ],
+                }
+            ],
+        }
+        with pytest.raises(AppInvalidManifestException):
+            version_service.validate_manifest(manifest)
+
+    def test_validate_manifest_explicit_relation_requires_matching_x_ref(self):
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "models": [
+                {
+                    "key": "customer",
+                    "data_schema": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}},
+                    },
+                },
+                {
+                    "key": "order",
+                    "data_schema": {
+                        "type": "object",
+                        "properties": {"customer_id": {"type": "integer"}},
+                    },
+                    "relations": [
+                        {
+                            "type": "belongs_to",
+                            "model": "customer",
+                            "foreign_key": "customer_id",
+                            "label_field": "name",
+                        }
+                    ],
+                },
+            ],
+        }
+
+        with pytest.raises(AppInvalidManifestException, match="x-ref"):
+            version_service.validate_manifest(manifest)
+
+    def test_validate_manifest_accepts_consistent_relation_metadata(self):
+        manifest = {
+            "name": "X",
+            "slug": "valid-slug",
+            "version": "1.0.0",
+            "type": "lowcode",
+            "category": "business",
+            "models": [
+                {
+                    "key": "customer",
+                    "data_schema": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}},
+                    },
+                },
+                {
+                    "key": "order",
+                    "data_schema": {
+                        "type": "object",
+                        "properties": {
+                            "customer_id": {
+                                "type": "integer",
+                                "x-ref": "customer",
+                                "x-ref-label": "name",
+                            }
+                        },
+                    },
+                    "relations": [
+                        {
+                            "type": "belongs_to",
+                            "model": "customer",
+                            "foreign_key": "customer_id",
+                            "label_field": "name",
+                        }
+                    ],
+                },
+            ],
+        }
+
+        version_service.validate_manifest(manifest)
+
 
 @pytest.fixture
 async def sample_app(db_session):

@@ -44,6 +44,45 @@ async def published_app(db_session):
 
 
 class TestInstallService:
+    async def test_install_rejects_unpublished_app(self, db_session, published_app):
+        published_app.status = "draft"
+        await db_session.flush()
+
+        with pytest.raises(AppNotFoundException):
+            await install_service.install(
+                db_session,
+                InstallCreate(app_slug=published_app.slug),
+                user_id=1,
+            )
+
+    async def test_install_rejects_explicit_unapproved_version(
+        self, db_session, published_app
+    ):
+        pending = AppVersion(
+            app_id=published_app.id,
+            version="1.1.0",
+            manifest={
+                "name": "X",
+                "slug": published_app.slug,
+                "version": "1.1.0",
+                "type": "lowcode",
+                "category": "business",
+            },
+            file_url="/uploads/pending.zip",
+            file_hash="1" * 64,
+            file_size=1024,
+            review_status="pending",
+        )
+        db_session.add(pending)
+        await db_session.flush()
+
+        with pytest.raises(AppNotFoundException):
+            await install_service.install(
+                db_session,
+                InstallCreate(app_slug=published_app.slug, version="1.1.0"),
+                user_id=1,
+            )
+
     async def test_install_new_app_creates_tenant_app(self, db_session, published_app):
         """新装：INSERT tenant_app"""
         req = InstallCreate(app_slug=published_app.slug)

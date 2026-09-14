@@ -13,7 +13,6 @@ from app.modules.auth.service import get_current_tenant_context
 from app.modules.marketplace.capability import (
     MARKETPLACE_HOSTED_UNAVAILABLE,
     require_marketplace_capability,
-    require_marketplace_http_capability,
 )
 from app.modules.marketplace.exceptions import AppNotFoundException
 from app.modules.marketplace.lowcode.data_api_service import data_api_service
@@ -75,20 +74,15 @@ def test_marketplace_models_have_no_implicit_tenant_default():
         assert tenant_column.server_default is None
 
 
-def test_every_marketplace_http_route_runs_the_containment_guard_first():
+def test_runtime_does_not_mount_marketplace_or_lowcode_routes():
     prefixes = ("/marketplace", "/api/v1/contributes", "/api/v1/app-data")
-    protected_routes = [
+    mounted_routes = [
         route
         for route in app.routes
         if isinstance(route, APIRoute) and route.path.startswith(prefixes)
     ]
 
-    assert protected_routes
-    for route in protected_routes:
-        assert route.dependant.dependencies
-        assert (
-            route.dependant.dependencies[0].call is require_marketplace_http_capability
-        ), route.path
+    assert mounted_routes == []
 
 
 @pytest.mark.parametrize(
@@ -97,20 +91,11 @@ def test_every_marketplace_http_route_runs_the_containment_guard_first():
         ("get", "/marketplace/list", {}),
         ("get", "/marketplace/detail/known-app", {}),
         ("post", "/marketplace/install", {"json": {"appSlug": "known-app"}}),
-        ("get", "/marketplace/admin/reviews", {}),
-        (
-            "post",
-            "/marketplace/developer/upload",
-            {
-                "data": {"manifest_json": "{}"},
-                "files": {"file": ("app.zip", b"content", "application/zip")},
-            },
-        ),
         ("get", "/api/v1/contributes/", {}),
         ("post", "/api/v1/app-data/demo/_", {"json": {"name": "blocked"}}),
     ],
 )
-async def test_tenant_b_endpoints_fail_before_business_side_effects(
+async def test_deferred_endpoints_are_absent_before_business_side_effects(
     client, monkeypatch, method, path, kwargs
 ):
     monkeypatch.setattr(settings, "TENANT_MODE", "single")
@@ -128,38 +113,25 @@ async def test_tenant_b_endpoints_fail_before_business_side_effects(
         AsyncMock(),
         AsyncMock(),
         AsyncMock(),
-        AsyncMock(),
-        AsyncMock(),
     ]
     try:
         with (
             patch.object(app_service, "list", business_calls[0]),
             patch.object(app_service, "get_by_slug", business_calls[1]),
             patch.object(install_service, "install", business_calls[2]),
-            patch(
-                "app.modules.marketplace.api.admin.review_service.list_reviews",
-                business_calls[3],
-            ),
-            patch(
-                "app.modules.marketplace.api.developer.developer_service.submit_version",
-                business_calls[4],
-            ),
-            patch.object(contributes_service, "get_cached", business_calls[5]),
+            patch.object(contributes_service, "get_cached", business_calls[3]),
         ):
             response = await getattr(client, method)(path, **kwargs)
     finally:
         app.dependency_overrides.pop(get_current_tenant_context, None)
         app.dependency_overrides.pop(get_db, None)
 
-    assert response.status_code == 403
-    assert response.json()["errorCode"] == MARKETPLACE_HOSTED_UNAVAILABLE
+    assert response.status_code == 404
     assert db_calls == 0
     assert all(call.await_count == 0 for call in business_calls)
 
 
-async def test_hosted_default_tenant_endpoint_is_unreachable_without_db(
-    client, monkeypatch
-):
+async def test_hosted_mode_cannot_restore_deferred_endpoint(client, monkeypatch):
     monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
     app.dependency_overrides[get_current_tenant_context] = lambda: DEFAULT_TENANT
     forbidden_db = AsyncMock()
@@ -172,8 +144,7 @@ async def test_hosted_default_tenant_endpoint_is_unreachable_without_db(
         app.dependency_overrides.pop(get_current_tenant_context, None)
         app.dependency_overrides.pop(get_db, None)
 
-    assert response.status_code == 403
-    assert response.json()["errorCode"] == MARKETPLACE_HOSTED_UNAVAILABLE
+    assert response.status_code == 404
     forbidden_db.assert_not_awaited()
     business_call.assert_not_awaited()
 

@@ -115,6 +115,26 @@ class TestCompareSchemasExistingTable:
         all_ops = diff.add_columns + diff.alter_columns
         assert all(op.column_name != "legacy" for op in all_ops)
 
+    def test_existing_bigint_relation_reference_is_compatible(self):
+        actual = self._make_actual([{"name": "customer_id", "type": "bigint"}])
+        expected = {"customer_id": {"type": "integer", "x-ref": "customer"}}
+
+        diff = compare_schemas(actual, expected)
+
+        assert diff.add_columns == []
+        assert diff.alter_columns == []
+
+    def test_new_relation_reference_uses_bigint(self):
+        actual = self._make_actual([])
+        expected = {"customer_id": {"type": "integer", "x-ref": "customer"}}
+
+        diff = compare_schemas(actual, expected)
+        customer_id = next(
+            op for op in diff.add_columns if op.column_name == "customer_id"
+        )
+
+        assert customer_id.col_def.pg_type == PgType.BIGINT
+
 
 class TestSchemaDiffDDL:
     def test_add_column_sql(self):
@@ -136,14 +156,14 @@ class TestSchemaDiffDDL:
             nullable=False,
             default="C",
         )
-        sql = op.to_sql(table_name="t")
+        sql = op.to_sql(table_name="app_data_t")
         assert "NOT NULL" in sql
-        assert "DEFAULT 'C'" in sql
+        assert "DEFAULT E'C'" in sql
 
     def test_alter_varchar_length_sql(self):
         op = AlterColumnOp(
             column_name="name",
             col_def=ColumnDef(pg_type=PgType.VARCHAR, length=500),
         )
-        sql = op.to_sql(table_name="t")
-        assert "ALTER COLUMN name TYPE VARCHAR(500)" in sql
+        sql = op.to_sql(table_name="app_data_t")
+        assert 'ALTER COLUMN "name" TYPE VARCHAR(500)' in sql

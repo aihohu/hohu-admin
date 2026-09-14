@@ -20,8 +20,9 @@ from app.modules.marketplace.exceptions import AppNotFoundException
 from app.modules.marketplace.lowcode.data_api_service import DataApiService
 from app.modules.marketplace.lowcode.schema_introspection import table_exists
 from app.modules.marketplace.lowcode.type_mapping import make_table_name
-from app.modules.marketplace.models import AppVersion
+from app.modules.marketplace.models import AppVersion, TenantApp
 from app.modules.marketplace.service.app_service import app_service
+from app.modules.marketplace.service.version_service import version_service
 from app.modules.system.models.user import User
 
 router = APIRouter(dependencies=[Depends(require_marketplace_http_capability)])
@@ -40,25 +41,40 @@ async def _resolve_table_and_schema(
     + relations for belongs_to expansion (decision #79).
     """
     app_obj = await app_service.get_by_slug(db, slug=slug, tenant=tenant)
-    if app_obj.current_version_id is None:
-        raise AppNotFoundException(slug=f"{slug} (no published version)")
+    if app_obj.status != "published":
+        raise AppNotFoundException(slug=f"{slug} (not published)")
+
+    tenant_app = await db.scalar(
+        select(TenantApp).where(
+            TenantApp.tenant_id == tenant.tenant_id,
+            TenantApp.app_id == app_obj.id,
+            TenantApp.status == "enabled",
+        )
+    )
+    if tenant_app is None:
+        raise AppNotFoundException(slug=f"{slug} (not enabled)")
+
     version = await db.scalar(
         select(AppVersion).where(
-            AppVersion.id == app_obj.current_version_id,
             AppVersion.app_id == app_obj.id,
+            AppVersion.version == tenant_app.installed_version,
+            AppVersion.review_status == "approved",
         )
     )
     if version is None:
-        raise AppNotFoundException(slug=slug)
+        raise AppNotFoundException(slug=f"{slug} (installed version unavailable)")
     manifest = version.manifest or {}
+    version_service.validate_manifest(manifest)
 
     if model and model != "_":
-        table_name = make_table_name(slug, model)
         models_arr = manifest.get("models") or []
         for m in models_arr:
             if m.get("key") == model:
+                table_name = make_table_name(slug, model)
                 return table_name, m.get("data_schema"), manifest
-        return table_name, None, manifest
+        raise AppNotFoundException(slug=f"{slug} model={model}")
+    if manifest.get("models"):
+        raise AppNotFoundException(slug=f"{slug} model=_")
     table_name = make_table_name(slug)
     return table_name, manifest.get("data_schema"), manifest
 
@@ -137,6 +153,7 @@ async def list_records(
         slug=slug,
         data_schema=data_schema,
         models=manifest.get("models"),
+        model_key=model if model != "_" else None,
     )
     return ResponseModel.success(data=result)
 
@@ -177,7 +194,7 @@ async def update_record(
     current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    table_name, _schema, _manifest = await _resolve_table_and_schema(
+    table_name, schema, _manifest = await _resolve_table_and_schema(
         db, slug=slug, model=model, tenant=tenant
     )
     record = await _data_api.update(
@@ -187,6 +204,7 @@ async def update_record(
         data=data,
         user_id=current_user.user_id,
         tenant=tenant,
+        data_schema=schema,
     )
     await db.commit()
     return ResponseModel.success(data=record)

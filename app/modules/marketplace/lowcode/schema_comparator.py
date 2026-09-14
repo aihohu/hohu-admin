@@ -3,6 +3,11 @@
 from dataclasses import dataclass, field
 
 from app.modules.marketplace.exceptions import AppInvalidManifestException
+from app.modules.marketplace.lowcode.identifiers import (
+    quote_identifier,
+    quote_table_name,
+    render_sql_literal,
+)
 from app.modules.marketplace.lowcode.schema_introspection import (
     ColumnInfo,
     TableExistsResult,
@@ -26,16 +31,15 @@ class AddColumnOp:
 
     def to_sql(self, table_name: str) -> str:
         type_sql = pg_type_to_sql(self.col_def)
-        parts = [f"ALTER TABLE {table_name} ADD COLUMN {self.column_name} {type_sql}"]
+        quoted_table = quote_table_name(table_name)
+        quoted_column = quote_identifier(
+            self.column_name, label="column name", reject_system=True
+        )
+        parts = [f"ALTER TABLE {quoted_table} ADD COLUMN {quoted_column} {type_sql}"]
         if not self.nullable:
             parts.append("NOT NULL")
         if self.default is not None:
-            if isinstance(self.default, str):
-                parts.append(f"DEFAULT '{self.default}'")
-            elif isinstance(self.default, bool):
-                parts.append(f"DEFAULT {str(self.default).upper()}")
-            else:
-                parts.append(f"DEFAULT {self.default}")
+            parts.append(f"DEFAULT {render_sql_literal(self.default)}")
         return " ".join(parts)
 
 
@@ -49,8 +53,12 @@ class AlterColumnOp:
 
     def to_sql(self, table_name: str) -> str:
         type_sql = pg_type_to_sql(self.col_def)
+        quoted_table = quote_table_name(table_name)
+        quoted_column = quote_identifier(
+            self.column_name, label="column name", reject_system=True
+        )
         return (
-            f"ALTER TABLE {table_name} ALTER COLUMN {self.column_name} TYPE {type_sql}"
+            f"ALTER TABLE {quoted_table} ALTER COLUMN {quoted_column} TYPE {type_sql}"
         )
 
 
@@ -64,12 +72,12 @@ class SchemaDiff:
 
 # 所有 app_data_* 表的固定系统字段：(col_def, nullable, default)
 _SYSTEM_COLUMNS: dict[str, tuple[ColumnDef, bool, object]] = {
-    "id": (ColumnDef(pg_type=PgType.INTEGER), False, None),
-    "tenant_id": (ColumnDef(pg_type=PgType.INTEGER), False, None),
+    "id": (ColumnDef(pg_type=PgType.BIGINT), False, None),
+    "tenant_id": (ColumnDef(pg_type=PgType.BIGINT), False, None),
     "created_at": (ColumnDef(pg_type=PgType.TIMESTAMPTZ), False, None),
     "updated_at": (ColumnDef(pg_type=PgType.TIMESTAMPTZ), False, None),
-    "created_by": (ColumnDef(pg_type=PgType.INTEGER), True, None),
-    "updated_by": (ColumnDef(pg_type=PgType.INTEGER), True, None),
+    "created_by": (ColumnDef(pg_type=PgType.BIGINT), True, None),
+    "updated_by": (ColumnDef(pg_type=PgType.BIGINT), True, None),
 }
 
 
@@ -192,7 +200,7 @@ def _infer_pg_type(col: ColumnInfo) -> PgType:
     if dt in ("integer", "int", "int4"):
         return PgType.INTEGER
     if dt in ("bigint", "int8"):
-        return PgType.INTEGER
+        return PgType.BIGINT
     if dt == "numeric":
         return PgType.NUMERIC
     if dt == "boolean":

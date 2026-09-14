@@ -28,6 +28,7 @@ from app.modules.marketplace.exceptions import AppNotFoundException
 from app.modules.marketplace.models import App, AppReview, AppVersion
 from app.modules.marketplace.service.app_service import app_service
 from app.modules.marketplace.service.base import MarketplaceBaseService
+from app.modules.marketplace.service.version_service import version_service
 
 
 class ReviewService(MarketplaceBaseService):
@@ -276,6 +277,14 @@ class ReviewService(MarketplaceBaseService):
                 resource_type="审核记录",
                 error_code="APP_REVIEW_NOT_FOUND",
             )
+        if approved:
+            version = await db.get(AppVersion, review.version_id)
+            if version is None:
+                raise NotFoundException(
+                    resource_type="应用版本",
+                    error_code="APP_VERSION_NOT_FOUND",
+                )
+            version_service.validate_manifest(version.manifest or {})
         review.human_status = "approved" if approved else "rejected"
         review.human_reviewer_id = reviewer_id
         review.human_comment = comment
