@@ -1,9 +1,12 @@
 import os
+import warnings
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 from fastapi import UploadFile
+from PIL import Image, UnidentifiedImageError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +23,14 @@ from app.core.tenant_scope import tenant_select
 from app.modules.system.models.file import File
 from app.modules.system.schemas.file import FileQuery
 from app.utils.pagination import build_filters, paginate
+
+PUBLIC_IMAGE_TYPES = {
+    ".jpg": ("JPEG", "image/jpeg"),
+    ".jpeg": ("JPEG", "image/jpeg"),
+    ".png": ("PNG", "image/png"),
+}
+MAX_PUBLIC_IMAGE_PIXELS = 40_000_000
+PRIVATE_BUSINESS_TYPES = frozenset({"ai-chat-private", "user-import"})
 
 
 class FileService:
@@ -43,6 +54,58 @@ class FileService:
             max_mb = settings.UPLOAD_MAX_SIZE / (1024 * 1024)
             raise BusinessRuleException(f"文件大小超过限制，最大允许 {max_mb:.0f}MB")
         return content
+
+    @staticmethod
+    def _validate_public_image(
+        content: bytes,
+        *,
+        ext: str,
+        declared_mime: str | None,
+    ) -> str:
+        """Decode a bounded public image and return its canonical MIME type."""
+        policy = PUBLIC_IMAGE_TYPES.get(ext)
+        if policy is None:
+            raise BusinessRuleException(
+                "公开上传仅支持 JPEG 或 PNG 图片",
+                error_code="PUBLIC_IMAGE_INVALID",
+            )
+        expected_format, expected_mime = policy
+        if (declared_mime or "").strip().lower() != expected_mime:
+            raise BusinessRuleException(
+                "图片扩展名与声明类型不一致",
+                error_code="PUBLIC_IMAGE_INVALID",
+            )
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                with Image.open(BytesIO(content)) as image:
+                    if image.format != expected_format:
+                        raise ValueError("image format mismatch")
+                    width, height = image.size
+                    if (
+                        width <= 0
+                        or height <= 0
+                        or width * height > MAX_PUBLIC_IMAGE_PIXELS
+                    ):
+                        raise ValueError("image dimensions exceed policy")
+                    image.verify()
+                # verify() checks container integrity; load() additionally forces
+                # pixel decoding so truncated image data cannot be published.
+                with Image.open(BytesIO(content)) as image:
+                    image.load()
+        except (
+            Image.DecompressionBombError,
+            Image.DecompressionBombWarning,
+            OSError,
+            UnidentifiedImageError,
+            ValueError,
+        ) as exc:
+            raise BusinessRuleException(
+                "图片内容无效或不完整",
+                error_code="PUBLIC_IMAGE_INVALID",
+            ) from exc
+        return expected_mime
 
     def _generate_file_path(
         self,
@@ -100,13 +163,21 @@ class FileService:
         ext = self._validate_extension(upload_file.filename)
         content = await self._validate_size(upload_file)
         effective_business_type = self._normalize_business_type(ext, business_type)
+        private = effective_business_type in PRIVATE_BUSINESS_TYPES
+        mime_type = upload_file.content_type
+        if not private:
+            mime_type = self._validate_public_image(
+                content,
+                ext=ext,
+                declared_mime=upload_file.content_type,
+            )
 
         file_name = str(next_id())
         relative_path, file_url, abs_dir = self._generate_file_path(
             file_name,
             ext,
             tenant_id=tenant.tenant_id,
-            private=effective_business_type in {"ai-chat-private", "user-import"},
+            private=private,
         )
 
         abs_file_path = abs_dir / f"{file_name}{ext}"
@@ -119,7 +190,7 @@ class FileService:
             file_url=file_url,
             file_size=len(content),
             file_ext=ext,
-            mime_type=upload_file.content_type,
+            mime_type=mime_type,
             business_type=effective_business_type,
             business_id=business_id,
             owner_user_id=owner_user_id,

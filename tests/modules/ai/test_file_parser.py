@@ -63,12 +63,17 @@ def _make_csv(path: Path, rows: list[list[str]], *, encoding: str = "utf-8") -> 
 def _replace_zip_member(data: bytes, name: str, replacement: bytes) -> bytes:
     source = zipfile.ZipFile(io.BytesIO(data))
     output = io.BytesIO()
+    replaced = False
     with source, zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as target:
         for info in source.infolist():
+            if info.filename == name:
+                replaced = True
             target.writestr(
                 info,
                 replacement if info.filename == name else source.read(info.filename),
             )
+        if not replaced:
+            target.writestr(name, replacement)
     return output.getvalue()
 
 
@@ -175,6 +180,34 @@ class TestExcelParser:
         data = _replace_zip_member(
             path.read_bytes(), "xl/worksheets/sheet1.xml", b"<broken"
         )
+
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await ExcelParser().parse_bytes(data)
+
+        assert exc_info.value.error_code == "AI_FILE_TYPE_NOT_ALLOWED"
+
+    @pytest.mark.parametrize(
+        "part_name",
+        [
+            "[Content_Types].xml",
+            "_rels/.rels",
+            "xl/workbook.xml",
+            "xl/_rels/workbook.xml.rels",
+            "xl/sharedStrings.xml",
+            "xl/worksheets/sheet1.xml",
+        ],
+    )
+    async def test_dtd_or_entity_in_any_critical_xml_part_is_rejected(
+        self, tmp_path: Path, part_name: str
+    ) -> None:
+        path = tmp_path / "entity.xlsx"
+        _make_xlsx(path, [["name"], ["alice"]])
+        malicious_xml = (
+            b'<?xml version="1.0"?>'
+            b'<!DOCTYPE workbook [<!ENTITY secret "expanded">]>'
+            b"<workbook>&secret;</workbook>"
+        )
+        data = _replace_zip_member(path.read_bytes(), part_name, malicious_xml)
 
         with pytest.raises(BusinessRuleException) as exc_info:
             await ExcelParser().parse_bytes(data)

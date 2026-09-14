@@ -11,7 +11,6 @@ import zipfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from xml.etree import ElementTree
 
 from sqlalchemy import select
 
@@ -19,6 +18,11 @@ from app.core.config import settings
 from app.core.exceptions import BusinessRuleException
 from app.modules.ai.core.context import AiToolContext
 from app.modules.system.models.file import File
+from app.utils.safe_xlsx import (
+    UnsafeXlsxError,
+    parse_untrusted_xml,
+    validate_untrusted_xlsx_xml,
+)
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 CSV_MIME = "text/csv"
@@ -180,16 +184,16 @@ def _is_symlink(info: zipfile.ZipInfo) -> bool:
 
 def _xml_root_matches(data: bytes, namespace: str, local_name: str) -> bool:
     try:
-        root = ElementTree.fromstring(data)
-    except ElementTree.ParseError:
+        root = parse_untrusted_xml(data)
+    except UnsafeXlsxError:
         return False
     return root.tag == f"{{{namespace}}}{local_name}"
 
 
 def _content_types_declares_xlsx(data: bytes) -> bool:
     try:
-        root = ElementTree.fromstring(data)
-    except ElementTree.ParseError:
+        root = parse_untrusted_xml(data)
+    except UnsafeXlsxError:
         return False
     if root.tag != f"{{{_CONTENT_TYPES_NAMESPACE}}}Types":
         return False
@@ -244,6 +248,11 @@ def _declared_zip_entry_count(data: bytes, max_bytes: int) -> int:
 
 def validate_xlsx_archive(data: bytes, max_bytes: int) -> None:
     """Validate OOXML structure and expansion budgets before any parser runs."""
+    try:
+        validate_untrusted_xlsx_xml(data)
+    except UnsafeXlsxError:
+        raise _type_not_allowed()
+
     if not data.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
         raise _type_not_allowed()
 

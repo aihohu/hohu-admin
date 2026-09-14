@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import io
+from base64 import b64decode
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -30,18 +31,20 @@ from app.modules.system.schemas.file import FileOut, FileQuery
 from app.modules.system.service.file_service import FileService
 from tests.tenant_helpers import tenant_context
 
+_ONE_PIXEL_PNG = b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
-def _upload_file(name: str, content: bytes) -> UploadFile:
+
+def _upload_file(
+    name: str,
+    content: bytes,
+    content_type: str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+) -> UploadFile:
     return UploadFile(
         file=io.BytesIO(content),
         filename=name,
-        headers=Headers(
-            {
-                "content-type": (
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            }
-        ),
+        headers=Headers({"content-type": content_type}),
     )
 
 
@@ -237,7 +240,7 @@ class TestFileUploadOwnership:
         with patch("app.modules.system.service.file_service.next_id", return_value=789):
             record = await service.upload(
                 db,
-                _upload_file("avatar.xlsx", b"xlsx-content"),
+                _upload_file("avatar.png", _ONE_PIXEL_PNG, "image/png"),
                 current_user_name="alice",
                 owner_user_id=1001,
                 tenant=tenant_context(tenant_id=0),
@@ -248,6 +251,42 @@ class TestFileUploadOwnership:
         assert stored_path.is_relative_to(public_root.resolve())
         assert not stored_path.is_relative_to(private_root.resolve())
         assert record.file_url.startswith("/uploads/")
+        assert record.mime_type == "image/png"
+
+    @pytest.mark.parametrize(
+        ("filename", "content_type", "content"),
+        [
+            ("avatar.png", "image/png", b"not-an-image"),
+            ("avatar.jpg", "image/jpeg", _ONE_PIXEL_PNG),
+            ("avatar.png", "application/octet-stream", _ONE_PIXEL_PNG),
+            ("avatar.png", "image/png", _ONE_PIXEL_PNG[:20]),
+            ("document.pdf", "application/pdf", b"%PDF-1.7"),
+        ],
+    )
+    async def test_public_upload_rejects_non_image_or_mismatched_content_before_io(
+        self,
+        filename: str,
+        content_type: str,
+        content: bytes,
+    ) -> None:
+        service = FileService()
+        database = MagicMock(spec=AsyncSession)
+        generate_path = MagicMock()
+        service._generate_file_path = generate_path  # type: ignore[method-assign]
+
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await service.upload(
+                database,
+                _upload_file(filename, content, content_type),
+                current_user_name="alice",
+                owner_user_id=1001,
+                tenant=tenant_context(tenant_id=0),
+                business_type="avatar",
+            )
+
+        assert exc_info.value.error_code == "PUBLIC_IMAGE_INVALID"
+        generate_path.assert_not_called()
+        database.add.assert_not_called()
 
     def test_private_file_empty_url_is_not_rewritten_to_server_root(self) -> None:
         schema = FileOut(

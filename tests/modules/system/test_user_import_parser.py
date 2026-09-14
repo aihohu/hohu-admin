@@ -81,12 +81,17 @@ def _csv_bytes(rows: list[list[str]], headers: list[str] | None = None) -> bytes
 def _replace_zip_member(data: bytes, name: str, replacement: bytes) -> bytes:
     source = zipfile.ZipFile(io.BytesIO(data))
     output = io.BytesIO()
+    replaced = False
     with source, zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as target:
         for info in source.infolist():
+            if info.filename == name:
+                replaced = True
             target.writestr(
                 info,
                 replacement if info.filename == name else source.read(info.filename),
             )
+        if not replaced:
+            target.writestr(name, replacement)
     return output.getvalue()
 
 
@@ -157,6 +162,32 @@ class TestFileSizeLimit:
         )
         with pytest.raises(BusinessRuleException) as exc:
             parse_import_excel(malformed, MIME_XLSX)
+        assert exc.value.error_code == "AI_IMPORT_INVALID_MIME"
+
+    @pytest.mark.parametrize(
+        "part_name",
+        [
+            "[Content_Types].xml",
+            "_rels/.rels",
+            "xl/workbook.xml",
+            "xl/_rels/workbook.xml.rels",
+            "xl/sharedStrings.xml",
+            "xl/worksheets/sheet1.xml",
+        ],
+    )
+    def test_dtd_or_entity_in_any_critical_xml_part_is_rejected(
+        self, part_name: str
+    ) -> None:
+        malicious_xml = (
+            b'<?xml version="1.0"?>'
+            b'<!DOCTYPE workbook [<!ENTITY secret "expanded">]>'
+            b"<workbook>&secret;</workbook>"
+        )
+        malicious = _replace_zip_member(_xlsx_bytes([]), part_name, malicious_xml)
+
+        with pytest.raises(BusinessRuleException) as exc:
+            parse_import_excel(malicious, MIME_XLSX)
+
         assert exc.value.error_code == "AI_IMPORT_INVALID_MIME"
 
     def test_xlsx_expansion_budget_is_enforced(

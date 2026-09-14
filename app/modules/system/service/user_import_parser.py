@@ -31,6 +31,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 from app.core.exceptions import BusinessRuleException
 from app.modules.system.constants import USER_IMPORT_MAX_ROWS
 from app.modules.system.schemas.user_transfer import FailedRow, UserImportRecord
+from app.utils.safe_xlsx import UnsafeXlsxError, validate_untrusted_xlsx_xml
 
 #: 允许导入的 MIME 类型。
 MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -413,6 +414,11 @@ def _declared_zip_entry_count(file_bytes: bytes) -> int:
 
 def _validate_xlsx_archive(file_bytes: bytes) -> None:
     """Bound ZIP expansion before openpyxl sees attacker-controlled OOXML."""
+    try:
+        validate_untrusted_xlsx_xml(file_bytes)
+    except UnsafeXlsxError:
+        _raise_invalid_xlsx()
+
     if not file_bytes.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
         _raise_invalid_xlsx()
     declared_entries = _declared_zip_entry_count(file_bytes)

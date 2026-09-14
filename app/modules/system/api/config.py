@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.core.cache import cache_delete
+from app.core.exceptions import BusinessRuleException
 from app.core.tenant import TenantContext, TenantLocatorContext
 from app.db.session import get_db
 from app.modules.auth.service import (
@@ -23,6 +24,7 @@ from app.modules.system.schemas.config import (
 from app.modules.system.service.config_service import config_service
 
 router = APIRouter()
+CONFIG_IMPORT_MAX_SIZE_BYTES = 10 * 1024 * 1024
 
 
 @router.get("/public", summary="获取公开配置（无需鉴权）")
@@ -84,7 +86,12 @@ async def import_configs(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """从 Excel 文件导入系统配置"""
-    file_bytes = await file.read()
+    file_bytes = await file.read(CONFIG_IMPORT_MAX_SIZE_BYTES + 1)
+    if len(file_bytes) > CONFIG_IMPORT_MAX_SIZE_BYTES:
+        raise BusinessRuleException(
+            "配置导入文件不能超过 10MB",
+            error_code="CONFIG_IMPORT_FILE_TOO_LARGE",
+        )
     result = await config_service.import_configs(db, file_bytes, tenant=tenant)
     await db.commit()
     await cache_delete(pattern=f"tenant:{tenant.tenant_id}:config:*")

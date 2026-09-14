@@ -1,11 +1,16 @@
 from io import BytesIO
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import cacheable
-from app.core.exceptions import DuplicateException, NotFoundException
+from app.core.exceptions import (
+    BusinessRuleException,
+    DuplicateException,
+    NotFoundException,
+)
 from app.core.tenant import TenantContext, TenantLocatorContext
 from app.core.tenant_scope import tenant_filter, tenant_select
 from app.modules.system.models.config import Config
@@ -15,6 +20,7 @@ from app.modules.system.schemas.config import (
     ConfigUpdate,
 )
 from app.utils.pagination import build_filters, paginate
+from app.utils.safe_xlsx import UnsafeXlsxError, validate_untrusted_xlsx_xml
 
 EXCEL_HEADERS = [
     "config_name",
@@ -292,10 +298,40 @@ class ConfigService:
         tenant: TenantContext,
     ) -> dict[str, int]:
         """从 Excel 导入系统配置，返回 {success: n, skipped: n}"""
-        wb = load_workbook(filename=BytesIO(file_bytes), read_only=True)
-        ws = wb.active
-        rows = list(ws.iter_rows(min_row=2, values_only=True))
-        wb.close()
+        try:
+            validate_untrusted_xlsx_xml(file_bytes)
+            wb = load_workbook(
+                filename=BytesIO(file_bytes),
+                read_only=True,
+                data_only=True,
+                keep_links=False,
+            )
+        except (
+            EOFError,
+            IndexError,
+            InvalidFileException,
+            KeyError,
+            OSError,
+            RuntimeError,
+            SyntaxError,
+            TypeError,
+            UnsafeXlsxError,
+            ValueError,
+        ) as exc:
+            raise BusinessRuleException(
+                "配置导入文件不是安全有效的 XLSX 工作簿",
+                error_code="CONFIG_IMPORT_INVALID_XLSX",
+            ) from exc
+        try:
+            ws = wb.active
+            if ws is None:
+                raise BusinessRuleException(
+                    "配置导入文件没有工作表",
+                    error_code="CONFIG_IMPORT_INVALID_XLSX",
+                )
+            rows = list(ws.iter_rows(min_row=2, values_only=True))
+        finally:
+            wb.close()
 
         # 查询已存在的 key
         existing = await db.execute(
