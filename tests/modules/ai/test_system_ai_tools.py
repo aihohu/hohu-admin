@@ -693,32 +693,24 @@ class TestRoleList:
         rows = result.ui.view_data["rows"]
         rows_names = [r["name"] for r in rows]
         assert "r1" in rows_names and "r2" in rows_names
-        # Phase 3 adds delegation state without exposing aggregate internals.
+        # UI 只显示本地化业务字段；模型数据仍保留后续编排事实。
         rec0 = rows[0]
         assert set(rec0.keys()) == {
-            "id",
             "name",
-            "code",
             "status",
             "dataScope",
-            "dataScopeCode",
-            "delegable",
-            "blockedReasonCode",
         }
-        # id 字符串化（防 JS BigInt）
-        assert isinstance(rec0["id"], str)
+        assert "id" not in rec0
+        assert "code" not in rec0
         # UI 层：data_list
         assert result.ui is not None
         assert result.ui.view_type == "data_list"
         assert result.ui.view_data["columns"] == [
-            {"key": "id", "label": "ID"},
             {"key": "name", "label": "ai.tool.field.name"},
-            {"key": "code", "label": "ai.tool.field.code"},
             {"key": "status", "label": "ai.tool.field.status"},
-            {"key": "delegable", "label": "ai.tool.field.delegable"},
             {
-                "key": "blockedReasonCode",
-                "label": "ai.tool.field.blockedReasonCode",
+                "key": "dataScope",
+                "label": "page.system.role.dataScope.label",
             },
         ]
         assert len(rows) >= 2
@@ -826,10 +818,10 @@ class TestDeptList:
         rows_names = [r["name"] for r in result.ui.view_data["rows"]]
         assert "dept_list_d1_unique" in rows_names
         assert "dept_list_d2_unique" in rows_names
-        # 精简字段：含 id/name/parent_id/status（dept 无 code 字段）
+        # UI 只展示业务字段；内部 ID 仅保留在模型数据中。
         rec0 = result.ui.view_data["rows"][0]
-        assert set(rec0.keys()) == {"id", "name", "parent_id", "status"}
-        assert isinstance(rec0["id"], str)
+        assert set(rec0.keys()) == {"name", "path", "status"}
+        assert "id" not in rec0
         # sample 至少 1 条且 ≤3，字段结构与 rows 一致
         assert 1 <= len(result.data["sample"]) <= 3
         if result.data["sample"]:
@@ -837,15 +829,15 @@ class TestDeptList:
                 "id",
                 "name",
                 "parent_id",
+                "path",
                 "status",
             }
-        # UI 层：data_list with parent_id 列
+        # UI 层：只展示可理解的本地组织路径，不展示内部 ID。
         assert result.ui is not None
         assert result.ui.view_type == "data_list"
         assert result.ui.view_data["columns"] == [
-            {"key": "id", "label": "ID"},
             {"key": "name", "label": "ai.tool.field.name"},
-            {"key": "parent_id", "label": "ai.tool.field.parentDeptId"},
+            {"key": "path", "label": "page.ai.chat.departmentPath"},
             {"key": "status", "label": "ai.tool.field.status"},
         ]
         assert len(rows_names) >= 2

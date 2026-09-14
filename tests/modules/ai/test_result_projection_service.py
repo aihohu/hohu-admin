@@ -15,6 +15,7 @@ from app.modules.ai.service.result_projection_service import (
     ProjectionLineage,
     result_projection_service,
 )
+from app.modules.system.service.grant_authority import grant_authority_service
 from app.modules.system.service.role_management_service import role_management_service
 from app.modules.system.service.user_role_assignment_service import (
     user_role_assignment_service,
@@ -239,6 +240,49 @@ async def test_managed_role_projection_rechecks_current_delegation_policy() -> N
         ANY,
         actor_user_id=user.user_id,
         role_id=901,
+        tenant=user._tenant_context,
+    )
+
+
+async def test_grantable_authorization_projection_rechecks_live_ceiling() -> None:
+    user = _user("ai:chat:use", "system:role:menu-auth")
+    lineage = result_projection_service.freeze_lineage(
+        tenant=TENANT,
+        agent_code="role_mgmt",
+        tool_codes=["role.menu_lookup"],
+        subject_refs=[
+            {"type": "managed_role", "id": "901"},
+            {"type": "grantable_menu", "id": "301"},
+            {"type": "grantable_menu", "id": "302"},
+        ],
+    )
+    authority = SimpleNamespace(
+        allows_menu_ids=lambda values: values <= {301},
+        allows_agent_ids=lambda _values: True,
+    )
+
+    with (
+        patch.object(
+            role_management_service,
+            "authorize_role_projection",
+            AsyncMock(),
+        ),
+        patch.object(
+            grant_authority_service,
+            "build",
+            AsyncMock(return_value=authority),
+        ) as build_authority,
+    ):
+        allowed = await result_projection_service._authorize_subjects(
+            AsyncMock(),
+            user,
+            lineage,
+        )
+
+    assert allowed is False
+    build_authority.assert_awaited_once_with(
+        ANY,
+        user.user_id,
         tenant=user._tenant_context,
     )
 

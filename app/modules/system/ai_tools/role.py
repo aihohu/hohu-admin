@@ -20,6 +20,7 @@ from app.core.exceptions import (
 )
 from app.modules.ai.agents.gateway import ensure_targets_in_scope
 from app.modules.ai.agents.gateway.result import (
+    ResultProjection,
     ToolResult,
     UIResult,
 )
@@ -161,12 +162,9 @@ async def role_list(
     )
 
     columns = [
-        {"key": "id", "label": "ID"},
         {"key": "name", "label": "ai.tool.field.name"},
-        {"key": "code", "label": "ai.tool.field.code"},
         {"key": "status", "label": "ai.tool.field.status"},
-        {"key": "delegable", "label": "ai.tool.field.delegable"},
-        {"key": "blockedReasonCode", "label": "ai.tool.field.blockedReasonCode"},
+        {"key": "dataScope", "label": "page.system.role.dataScope.label"},
     ]
     records = [
         {
@@ -178,6 +176,14 @@ async def role_list(
             "dataScopeCode": role.data_scope,
             "delegable": role.delegable,
             "blockedReasonCode": role.blocked_reason_code,
+        }
+        for role in summaries
+    ]
+    ui_rows = [
+        {
+            "name": role.role_name,
+            "status": _enable_status_label_key(role.status),
+            "dataScope": _role_data_scope_label_key(role.data_scope),
         }
         for role in summaries
     ]
@@ -194,7 +200,7 @@ async def role_list(
         ),
         ui=UIResult(
             view_type="data_list",
-            view_data={"columns": columns, "rows": records},
+            view_data={"columns": columns, "rows": ui_rows},
             audit={"total": total},
             label_key="ai.tool.role.list.result",
             label_params={"count": total},
@@ -269,6 +275,45 @@ def _require_role_snapshot(ctx: AiToolContext) -> dict[str, Any]:
     return ctx.approved_business_snapshot
 
 
+def _normalize_authorization_lookup(
+    query: str,
+    limit: int,
+    *,
+    query_error_code: str,
+    limit_error_code: str,
+) -> tuple[str, int]:
+    normalized = query.strip()
+    if not normalized:
+        raise BusinessRuleException(
+            "查询名称不能为空",
+            error_code=query_error_code,
+        )
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+        raise BusinessRuleException(
+            "查询数量必须在 1 到 20 之间",
+            error_code=limit_error_code,
+        )
+    return normalized, limit
+
+
+def _authorization_lookup_projection(
+    *,
+    role_id: int,
+    subject_type: str,
+    subject_ids: tuple[int, ...],
+) -> ResultProjection:
+    return ResultProjection(
+        subject_refs=(
+            {"type": "managed_role", "id": str(role_id)},
+            *(
+                {"type": subject_type, "id": str(subject_id)}
+                for subject_id in subject_ids
+            ),
+        ),
+        scope_bound=True,
+    )
+
+
 @ai_tool(
     AiToolMeta(
         name="role.lookup",
@@ -320,6 +365,14 @@ async def role_lookup(
         }
         for role in summaries
     ]
+    ui_rows = [
+        {
+            "roleName": role.role_name,
+            "status": _enable_status_label_key(role.status),
+            "dataScope": _role_data_scope_label_key(role.data_scope),
+        }
+        for role in summaries
+    ]
     return ToolResult.success(
         data={"query": normalized, "matchCount": total, "matches": rows},
         projection=_result_projection(
@@ -331,19 +384,203 @@ async def role_lookup(
             view_type="data_list",
             view_data={
                 "columns": [
-                    {"key": "roleCode", "label": "ai.tool.field.code"},
                     {"key": "roleName", "label": "ai.tool.field.name"},
-                    {"key": "delegable", "label": "ai.tool.field.delegable"},
                     {
-                        "key": "blockedReasonCode",
-                        "label": "ai.tool.field.blockedReasonCode",
+                        "key": "status",
+                        "label": "ai.tool.field.status",
+                    },
+                    {
+                        "key": "dataScope",
+                        "label": "page.system.role.dataScope.label",
                     },
                 ],
-                "rows": rows,
+                "rows": ui_rows,
             },
             audit={"query": normalized, "match_count": total},
             label_key="ai.tool.role.lookup.result",
             label_params={"count": total},
+        ),
+    )
+
+
+@ai_tool(
+    AiToolMeta(
+        name="role.menu_lookup",
+        agent="role_mgmt",
+        summary="Find grantable menus by business name and return the Role's current complete set.",
+        required_perms=("system:role:menu-auth",),
+        risk="low",
+        readonly=True,
+        idempotent=True,
+        result_view="data_list",
+        args_summary_fields=("role_id", "query", "limit"),
+    )
+)
+async def role_menu_lookup(
+    ctx: AiToolContext,
+    *,
+    role_id: AiRoleId,
+    query: str,
+    limit: int = 20,
+) -> ToolResult:
+    """Resolve menu names while keeping complete replacement IDs model-only."""
+    normalized, safe_limit = _normalize_authorization_lookup(
+        query,
+        limit,
+        query_error_code="AI_ROLE_MENU_QUERY_REQUIRED",
+        limit_error_code="AI_ROLE_MENU_LOOKUP_LIMIT_INVALID",
+    )
+    lookup = await role_management_service.lookup_menu_options(
+        ctx.db,
+        role_id,
+        normalized,
+        limit=safe_limit,
+        actor_user_id=ctx.user.user_id,
+        tenant=ctx.tenant,
+    )
+    matches = [
+        {
+            "menuId": str(item.menu_id),
+            "menuName": item.menu_name,
+            "path": item.path,
+            "status": _enable_status_semantic(item.status),
+            "selected": item.selected,
+        }
+        for item in lookup.matches
+    ]
+    ui_rows = [
+        {
+            "name": item.menu_name,
+            "path": item.path,
+            "status": _enable_status_label_key(item.status),
+            "selected": item.selected,
+        }
+        for item in lookup.matches
+    ]
+    return ToolResult.success(
+        data={
+            "roleName": lookup.role_name,
+            "currentMenuIds": [str(value) for value in lookup.current_ids],
+            "matchCount": lookup.match_count,
+            "matches": matches,
+        },
+        projection=_authorization_lookup_projection(
+            role_id=lookup.role_id,
+            subject_type="grantable_menu",
+            subject_ids=lookup.contributor_ids,
+        ),
+        ui=UIResult(
+            view_type="data_list",
+            view_data={
+                "columns": [
+                    {"key": "path", "label": "page.ai.chat.authorizationPath"},
+                    {"key": "name", "label": "ai.tool.field.name"},
+                    {"key": "status", "label": "ai.tool.field.status"},
+                    {"key": "selected", "label": "page.ai.chat.selected"},
+                ],
+                "rows": ui_rows,
+            },
+            audit={
+                "role_id": str(lookup.role_id),
+                "match_count": lookup.match_count,
+            },
+            label_key="ai.tool.role.menu_lookup.result",
+            label_params={"count": lookup.match_count},
+        ),
+    )
+
+
+@ai_tool(
+    AiToolMeta(
+        name="role.agent_lookup",
+        agent="role_mgmt",
+        summary="Find grantable Agents by business name and return the Role's current complete set.",
+        required_perms=("system:role:ai-agent-auth",),
+        risk="low",
+        readonly=True,
+        idempotent=True,
+        result_view="data_list",
+        args_summary_fields=("role_id", "query", "limit"),
+    )
+)
+async def role_agent_lookup(
+    ctx: AiToolContext,
+    *,
+    role_id: AiRoleId,
+    query: str,
+    limit: int = 20,
+) -> ToolResult:
+    """Resolve Agent names while keeping complete replacement IDs model-only."""
+    normalized, safe_limit = _normalize_authorization_lookup(
+        query,
+        limit,
+        query_error_code="AI_ROLE_AGENT_QUERY_REQUIRED",
+        limit_error_code="AI_ROLE_AGENT_LOOKUP_LIMIT_INVALID",
+    )
+    lookup = await role_management_service.lookup_agent_options(
+        ctx.db,
+        role_id,
+        normalized,
+        limit=safe_limit,
+        actor_user_id=ctx.user.user_id,
+        tenant=ctx.tenant,
+    )
+    matches = [
+        {
+            "agentId": str(item.agent_id),
+            "agentCode": item.agent_code,
+            "agentName": item.agent_name,
+            "description": item.description,
+            "enabled": item.enabled,
+            "selected": item.selected,
+        }
+        for item in lookup.matches
+    ]
+    ui_rows = [
+        {
+            "name": item.agent_name,
+            "description": item.description,
+            "status": (
+                "page.system.common.status.enable"
+                if item.enabled
+                else "page.system.common.status.disable"
+            ),
+            "selected": item.selected,
+        }
+        for item in lookup.matches
+    ]
+    return ToolResult.success(
+        data={
+            "roleName": lookup.role_name,
+            "currentAgentIds": [str(value) for value in lookup.current_ids],
+            "matchCount": lookup.match_count,
+            "matches": matches,
+        },
+        projection=_authorization_lookup_projection(
+            role_id=lookup.role_id,
+            subject_type="grantable_agent",
+            subject_ids=lookup.contributor_ids,
+        ),
+        ui=UIResult(
+            view_type="data_list",
+            view_data={
+                "columns": [
+                    {"key": "name", "label": "ai.tool.field.name"},
+                    {
+                        "key": "description",
+                        "label": "page.ai.chat.description",
+                    },
+                    {"key": "status", "label": "ai.tool.field.status"},
+                    {"key": "selected", "label": "page.ai.chat.selected"},
+                ],
+                "rows": ui_rows,
+            },
+            audit={
+                "role_id": str(lookup.role_id),
+                "match_count": lookup.match_count,
+            },
+            label_key="ai.tool.role.agent_lookup.result",
+            label_params={"count": lookup.match_count},
         ),
     )
 

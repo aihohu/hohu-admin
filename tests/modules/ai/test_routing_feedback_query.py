@@ -396,6 +396,66 @@ def _sentinel_records(records: list, prefix: str) -> list:
     ]
 
 
+async def test_summary_and_list_are_strictly_isolated_by_tenant(
+    db_session,
+) -> None:
+    from app.core.id_generator import next_id
+    from app.modules.ai.models.routing_feedback import AiRoutingFeedback
+    from app.modules.ai.service.routing_feedback_query import (
+        routing_feedback_query_service,
+    )
+    from tests.tenant_helpers import tenant_context
+
+    tenant_a = tenant_context(tenant_id=next_id(), actor_user_id=next_id())
+    tenant_b = tenant_context(tenant_id=next_id(), actor_user_id=next_id())
+    row_a = AiRoutingFeedback(
+        tenant_id=tenant_a.tenant_id,
+        message_id=next_id(),
+        user_id=tenant_a.actor_user_id,
+        original_agent="tenant_a_agent",
+        feedback="correct",
+        corrected_agent=None,
+        trace_id="tr_tenant_a_only",
+        create_time=datetime.now(),
+    )
+    row_b = AiRoutingFeedback(
+        tenant_id=tenant_b.tenant_id,
+        message_id=next_id(),
+        user_id=tenant_b.actor_user_id,
+        original_agent="tenant_b_agent",
+        feedback="wrong",
+        corrected_agent="tenant_b_correction",
+        trace_id="tr_tenant_b_forbidden",
+        create_time=datetime.now(),
+    )
+    db_session.add_all([row_a, row_b])
+    await db_session.flush()
+
+    summary = await routing_feedback_query_service.summary(
+        db_session,
+        7,
+        tenant=tenant_a,
+    )
+    items, total = await routing_feedback_query_service.list_items(
+        db_session,
+        days=7,
+        current=1,
+        size=20,
+        feedback="all",
+        original_agent=None,
+        corrected_agent=None,
+        tenant=tenant_a,
+    )
+
+    assert summary.total == 1
+    assert summary.correct == 1
+    assert summary.wrong == 0
+    assert total == 1
+    assert [item.trace_id for item in items] == ["tr_tenant_a_only"]
+    assert "tenant_b" not in repr(summary)
+    assert "tenant_b" not in repr(items)
+
+
 async def test_list_default_filter_wrong_only(
     authed_client: tuple[AsyncClient, str], db_session, seed_feedback
 ):

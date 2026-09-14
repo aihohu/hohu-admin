@@ -104,6 +104,8 @@ class TestBuiltinToolEffectMetadata:
             "dept.count": (True, True),
             "role.list": (True, True),
             "role.lookup": (True, True),
+            "role.menu_lookup": (True, True),
+            "role.agent_lookup": (True, True),
             "dept.list": (True, True),
             "dept.lookup": (True, True),
             "user.dept_lookup": (True, True),

@@ -75,6 +75,41 @@ class RoleSummary:
 
 
 @dataclass(frozen=True)
+class RoleMenuLookupMatch:
+    """One grantable menu option with a locally visible hierarchy path."""
+
+    menu_id: int
+    menu_name: str
+    path: str
+    status: str
+    selected: bool
+
+
+@dataclass(frozen=True)
+class RoleAgentLookupMatch:
+    """One grantable Agent option safe for Role authorization lookup."""
+
+    agent_id: int
+    agent_code: str
+    agent_name: str
+    description: str
+    enabled: bool
+    selected: bool
+
+
+@dataclass(frozen=True)
+class RoleAuthorizationLookup:
+    """Current complete binding IDs plus bounded grantable name matches."""
+
+    role_id: int
+    role_name: str
+    current_ids: tuple[int, ...]
+    matches: tuple[RoleMenuLookupMatch | RoleAgentLookupMatch, ...]
+    match_count: int
+    contributor_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class _RoleEvaluation:
     preview: RoleManagementPreview
     role_ids: tuple[int, ...]
@@ -878,6 +913,147 @@ class RoleManagementService:
             expected_snapshot=expected_snapshot,
         )
         return await self._load_role(db, role_id, tenant=tenant)
+
+    @staticmethod
+    def _menu_path(menu: Menu, by_id: dict[int, Menu]) -> str:
+        """Build a path without traversing outside the actor's menu ceiling."""
+        names = [menu.menu_name]
+        visited = {int(menu.menu_id)}
+        parent_id = int(menu.parent_id) if menu.parent_id is not None else None
+        while parent_id is not None and parent_id not in visited:
+            parent = by_id.get(parent_id)
+            if parent is None:
+                break
+            visited.add(parent_id)
+            names.append(parent.menu_name)
+            parent_id = int(parent.parent_id) if parent.parent_id is not None else None
+        return " / ".join(reversed(names))
+
+    async def lookup_menu_options(
+        self,
+        db: AsyncSession,
+        role_id: int,
+        query: str,
+        *,
+        limit: int,
+        actor_user_id: int,
+        tenant: TenantContext,
+    ) -> RoleAuthorizationLookup:
+        """Return a Role's full menu set and grantable business-name matches."""
+        role = await self.authorize_role_projection(
+            db,
+            actor_user_id=actor_user_id,
+            role_id=role_id,
+            tenant=tenant,
+        )
+        authority = await grant_authority_service.build(
+            db,
+            actor_user_id,
+            tenant=tenant,
+        )
+        self._require_permission(authority, "system:role:menu-auth")
+        menus = list(
+            (
+                await db.execute(
+                    tenant_select(Menu, tenant=tenant).order_by(
+                        Menu.order,
+                        Menu.menu_id,
+                    )
+                )
+            ).scalars()
+        )
+        grantable = [
+            menu
+            for menu in menus
+            if authority.super_admin or int(menu.menu_id) in authority.menu_ids
+        ]
+        by_id = {int(menu.menu_id): menu for menu in grantable}
+        current_ids = tuple(sorted(int(menu.menu_id) for menu in role.menus))
+        current_id_set = set(current_ids)
+        normalized = query.casefold()
+        matches = []
+        for menu in grantable:
+            path = self._menu_path(menu, by_id)
+            searchable = " ".join(
+                value
+                for value in (
+                    path,
+                    menu.route_name,
+                    menu.route_path,
+                    menu.permission,
+                    menu.i18n_key,
+                )
+                if value
+            ).casefold()
+            if normalized not in searchable:
+                continue
+            matches.append(
+                RoleMenuLookupMatch(
+                    menu_id=int(menu.menu_id),
+                    menu_name=menu.menu_name,
+                    path=path,
+                    status=str(menu.status),
+                    selected=int(menu.menu_id) in current_id_set,
+                )
+            )
+        matches.sort(key=lambda item: (item.path.casefold(), item.menu_id))
+        contributor_ids = tuple(item.menu_id for item in matches)
+        return RoleAuthorizationLookup(
+            role_id=int(role.role_id),
+            role_name=role.role_name,
+            current_ids=current_ids,
+            matches=tuple(matches[:limit]),
+            match_count=len(matches),
+            contributor_ids=contributor_ids,
+        )
+
+    async def lookup_agent_options(
+        self,
+        db: AsyncSession,
+        role_id: int,
+        query: str,
+        *,
+        limit: int,
+        actor_user_id: int,
+        tenant: TenantContext,
+    ) -> RoleAuthorizationLookup:
+        """Return a Role's full Agent set and grantable business-name matches."""
+        from app.modules.ai.service.role_agent import (  # noqa: PLC0415
+            role_agent_service,
+        )
+
+        binding = await role_agent_service.get_binding(
+            db,
+            role_id,
+            actor_user_id=actor_user_id,
+            tenant=tenant,
+        )
+        role = await self._load_role(db, role_id, tenant=tenant)
+        current_ids = tuple(sorted(int(value) for value in binding.bound_agent_ids))
+        current_id_set = set(current_ids)
+        normalized = query.casefold()
+        matches = [
+            RoleAgentLookupMatch(
+                agent_id=int(agent.agent_id),
+                agent_code=agent.code,
+                agent_name=agent.name,
+                description=agent.description,
+                enabled=bool(agent.enabled),
+                selected=int(agent.agent_id) in current_id_set,
+            )
+            for agent in binding.all_agents
+            if normalized in f"{agent.name} {agent.code} {agent.description}".casefold()
+        ]
+        matches.sort(key=lambda item: (item.agent_name.casefold(), item.agent_id))
+        contributor_ids = tuple(item.agent_id for item in matches)
+        return RoleAuthorizationLookup(
+            role_id=int(role.role_id),
+            role_name=role.role_name,
+            current_ids=current_ids,
+            matches=tuple(matches[:limit]),
+            match_count=len(matches),
+            contributor_ids=contributor_ids,
+        )
 
     async def authorize_role_projection(
         self,

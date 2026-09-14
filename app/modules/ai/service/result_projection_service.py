@@ -653,6 +653,8 @@ class ResultProjectionService:
             return False
         delegable_role_ids: list[int] = []
         managed_role_ids: list[int] = []
+        grantable_menu_ids: list[int] = []
+        grantable_agent_ids: list[int] = []
         complete_role_assignment_user_ids: list[int] = []
         role_assignment_access_user_ids: list[int] = []
         try:
@@ -662,6 +664,10 @@ class ResultProjectionService:
                     delegable_role_ids.append(int(subject["id"]))
                 elif subject_type == "managed_role":
                     managed_role_ids.append(int(subject["id"]))
+                elif subject_type == "grantable_menu":
+                    grantable_menu_ids.append(int(subject["id"]))
+                elif subject_type == "grantable_agent":
+                    grantable_agent_ids.append(int(subject["id"]))
                 elif subject_type == "complete_user_role_assignment":
                     complete_role_assignment_user_ids.append(int(subject["id"]))
                 elif subject_type == "user_role_assignment_access":
@@ -681,6 +687,25 @@ class ResultProjectionService:
                 from app.modules.system.service.role_management_service import (  # noqa: PLC0415
                     role_management_service,
                 )
+
+            if grantable_menu_ids or grantable_agent_ids:
+                from app.modules.system.service.grant_authority import (  # noqa: PLC0415
+                    grant_authority_service,
+                )
+
+                authority = await grant_authority_service.build(
+                    db,
+                    int(user.user_id),
+                    tenant=tenant,
+                )
+                if grantable_menu_ids and not authority.allows_menu_ids(
+                    set(grantable_menu_ids)
+                ):
+                    return False
+                if grantable_agent_ids and not authority.allows_agent_ids(
+                    set(grantable_agent_ids)
+                ):
+                    return False
 
             if delegable_role_ids and not (
                 await user_role_assignment_service.roles_are_assignable(
@@ -725,6 +750,8 @@ class ResultProjectionService:
             if subject["type"] in {
                 "delegable_role",
                 "managed_role",
+                "grantable_menu",
+                "grantable_agent",
                 "complete_user_role_assignment",
                 "user_role_assignment_access",
             }:

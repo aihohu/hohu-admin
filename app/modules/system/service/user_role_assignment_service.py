@@ -947,10 +947,14 @@ class UserRoleAssignmentService:
                 error_code="AUTHORIZATION_SNAPSHOT_STALE",
             )
 
-        live_requested_roles = await self._load_requested_roles(
-            db,
-            list(_role_ids(requested_roles)),
-            tenant=tenant,
+        live_requested_roles = (
+            []
+            if allow_empty_old_roles and not requested_roles
+            else await self._load_requested_roles(
+                db,
+                list(_role_ids(requested_roles)),
+                tenant=tenant,
+            )
         )
         authority = await grant_authority_service.build(
             db, actor_user_id, tenant=tenant
@@ -1049,7 +1053,11 @@ class UserRoleAssignmentService:
             tenant=tenant,
         )
         requested_roles = (
-            await self._load_requested_roles(db, role_ids or [], tenant=tenant)
+            (
+                await self._load_requested_roles(db, role_ids, tenant=tenant)
+                if role_ids
+                else []
+            )
             if explicit_roles
             else [await self._default_role(db, tenant=tenant)]
         )

@@ -26,6 +26,14 @@ from .common import (
     _result_projection,
 )
 
+_ROLE_SCOPE_LABEL_KEYS = {
+    "1": "page.system.role.dataScope.all",
+    "2": "page.system.role.dataScope.custom",
+    "3": "page.system.role.dataScope.dept",
+    "4": "page.system.role.dataScope.deptAndSub",
+    "5": "page.system.role.dataScope.self",
+}
+
 
 class AiUserDepartmentAssignment(TypedDict):
     """Strict complete-set item exposed in the model-facing tool schema."""
@@ -387,6 +395,16 @@ async def user_role_lookup(
         }
         for role in page.roles
     ]
+    ui_matches = [
+        {
+            "roleName": role.role_name,
+            "dataScope": _ROLE_SCOPE_LABEL_KEYS.get(
+                role.data_scope,
+                "page.system.role.dataScope.self",
+            ),
+        }
+        for role in page.roles
+    ]
     return ToolResult.success(
         data={
             "query": normalized_query,
@@ -398,15 +416,13 @@ async def user_role_lookup(
             view_type="data_list",
             view_data={
                 "columns": [
-                    {"key": "roleId", "label": "ID"},
-                    {"key": "roleCode", "label": "page.system.role.roleCode"},
                     {"key": "roleName", "label": "page.system.role.roleName"},
                     {
                         "key": "dataScope",
                         "label": "page.system.role.dataScope.label",
                     },
                 ],
-                "rows": matches,
+                "rows": ui_matches,
             },
             audit={
                 "query": normalized_query,

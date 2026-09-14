@@ -95,6 +95,33 @@ async def test_department_count_and_list_treat_empty_scope_as_no_rows(
     assert list_result.ui.view_data["rows"] == []
 
 
+async def test_department_list_uses_locally_rooted_paths_and_hides_ids_from_ui(
+    db_session: AsyncSession,
+) -> None:
+    hidden_root = _department("phase3-hidden-root")
+    visible_parent = _department("phase3-visible-parent", parent=hidden_root)
+    visible_child = _department("phase3-visible-child", parent=visible_parent)
+    db_session.add_all([hidden_root, visible_parent, visible_child])
+    await db_session.flush()
+
+    result = await system_ai_tools.dept_list(
+        _context(
+            db_session,
+            tool=system_ai_tools.dept_list,
+            accessible_dept_ids={visible_parent.dept_id, visible_child.dept_id},
+        )
+    )
+
+    child = next(
+        row for row in result.data["sample"] if row["id"] == str(visible_child.dept_id)
+    )
+    assert child["path"] == f"{visible_parent.dept_name} / {visible_child.dept_name}"
+    ui_columns = {column["key"] for column in result.ui.view_data["columns"]}
+    assert ui_columns == {"name", "path", "status"}
+    assert all("id" not in row for row in result.ui.view_data["rows"])
+    assert str(hidden_root.dept_id) not in repr(result)
+
+
 @pytest.mark.parametrize(
     ("attribute", "tool_name", "permissions", "readonly"),
     [

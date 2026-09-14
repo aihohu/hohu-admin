@@ -90,11 +90,15 @@ async def dept_list(
     )
     total = page.total
     rows = page.records
+    paths = await department_selector.paths_for(
+        ctx.db,
+        scope=ctx.data_scope,
+        departments=rows,
+    )
 
     columns = [
-        {"key": "id", "label": "ID"},
         {"key": "name", "label": "ai.tool.field.name"},
-        {"key": "parent_id", "label": "ai.tool.field.parentDeptId"},
+        {"key": "path", "label": "page.ai.chat.departmentPath"},
         {"key": "status", "label": "ai.tool.field.status"},
     ]
     accessible_dept_ids = ctx.data_scope.accessible_dept_ids
@@ -111,7 +115,16 @@ async def dept_list(
                 )
                 else None
             ),
+            "path": paths[int(d.dept_id)],
             "status": d.status,
+        }
+        for d in rows
+    ]
+    ui_rows = [
+        {
+            "name": d.dept_name,
+            "path": paths[int(d.dept_id)],
+            "status": _enable_status_label_key(d.status),
         }
         for d in rows
     ]
@@ -124,7 +137,7 @@ async def dept_list(
         projection=_result_projection(scope_bound=True),
         ui=UIResult(
             view_type="data_list",
-            view_data={"columns": columns, "rows": records},
+            view_data={"columns": columns, "rows": ui_rows},
             audit={"total": total},
             label_key="ai.tool.dept.list.result",
             label_params={"count": total},
@@ -193,6 +206,13 @@ async def _lookup_departments(
         }
         for match in result.matches
     ]
+    ui_matches = [
+        {
+            "deptName": match.dept_name,
+            "path": match.path,
+        }
+        for match in result.matches
+    ]
     return ToolResult.success(
         data={
             "query": normalized_query,
@@ -208,11 +228,10 @@ async def _lookup_departments(
             view_type="data_list",
             view_data={
                 "columns": [
-                    {"key": "deptId", "label": "ID"},
                     {"key": "deptName", "label": "page.system.dept.deptName"},
                     {"key": "path", "label": "page.ai.chat.departmentPath"},
                 ],
-                "rows": matches,
+                "rows": ui_matches,
             },
             audit={
                 "query": normalized_query,

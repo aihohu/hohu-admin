@@ -9,6 +9,7 @@ from __future__ import annotations
 import inspect
 
 import pytest
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +23,7 @@ from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.agents.tools.registry import ToolRegistry, compute_available_tools
 from app.modules.ai.core.context import AiToolContext, DataScopeContext
 from app.modules.system.ai_tools import (
+    AiUserRoleAssignment,
     _dry_run_user_create,
     _dry_run_user_reset_password,
     user_create,
@@ -267,7 +269,12 @@ class TestUserDeptLookup:
             ],
         }
         assert result.ui.view_type == "data_list"
-        assert result.ui.view_data["rows"] == result.data["matches"]
+        assert result.ui.view_data["rows"] == [
+            {
+                "deptName": visible.dept_name,
+                "path": visible.dept_name,
+            }
+        ]
 
     async def test_duplicate_visible_names_return_all_candidates(
         self, db_session: AsyncSession
@@ -320,6 +327,15 @@ class TestUserDeptLookup:
 
 
 class TestUserCreate:
+    def test_role_assignment_contract_only_accepts_default_or_none(self) -> None:
+        annotation = (
+            inspect.signature(user_create).parameters["role_assignment"].annotation
+        )
+        assert annotation is AiUserRoleAssignment
+        assert set(TypeAdapter(annotation).json_schema()["enum"]) == {"DEFAULT", "NONE"}
+        with pytest.raises(ValidationError):
+            TypeAdapter(annotation).validate_python("R_SUPER")
+
     def test_confirmation_uses_dept_name_without_changing_frozen_id(self) -> None:
         dept_id = 7455072815813758976
         frozen_args = {
@@ -417,6 +433,7 @@ class TestUserCreate:
         assert result.data == {
             "created": 1,
             "userName": "aitooluser",
+            "roleAssignment": "default",
             "roleName": created.roles[0].role_name,
             "primaryDeptName": dept.dept_name,
             "status": "enabled",
@@ -483,6 +500,52 @@ class TestUserCreate:
             )
 
         assert exc_info.value.error_code == "AI_USER_DEFAULT_ROLE_NOT_FOUND"
+
+    async def test_create_respects_explicit_no_role_without_loading_default_role(
+        self, db_session: AsyncSession
+    ) -> None:
+        await _seed_default_password(db_session)
+        default_role = await _seed_default_role(db_session)
+        default_role.status = "2"
+        dept = await _add_dept(db_session, 81008, "无角色用户部门")
+        actor = await db_session.scalar(
+            select(User).where(User.tenant_id == 0, User.user_name == "admin")
+        )
+        assert actor is not None
+        ctx = _make_ctx(
+            db_session,
+            tool_name="user.create",
+            permission="system:user:add",
+            actor=actor,
+            accessible_dept_ids={dept.dept_id},
+        )
+
+        preview = await _dry_run_user_create(
+            ctx,
+            user_name="norolepreview",
+            primary_dept_id=dept.dept_id,
+            role_assignment=AiUserRoleAssignment.NONE,
+        )
+        result = await user_create(
+            ctx,
+            user_name="noroleuser",
+            primary_dept_id=dept.dept_id,
+            role_assignment=AiUserRoleAssignment.NONE,
+        )
+
+        created = await db_session.scalar(
+            select(User).where(
+                User.tenant_id == 0,
+                User.user_name == "noroleuser",
+            )
+        )
+        assert created is not None
+        assert created.roles == []
+        assert preview.ok is True
+        assert "不分配角色" in preview.examples
+        assert result.data["roleAssignment"] == "none"
+        assert result.data["roleName"] is None
+        assert result.ui.view_data["fields"][2]["value"] == "page.ai.chat.noRole"
 
     async def test_create_rejects_weak_default_password_configuration(
         self, db_session: AsyncSession

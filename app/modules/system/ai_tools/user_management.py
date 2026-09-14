@@ -1,5 +1,6 @@
 """User lifecycle and profile management AI tools."""
 
+import enum
 from typing import Any
 
 from sqlalchemy import func, select
@@ -38,6 +39,25 @@ from .common import (
 )
 
 
+class AiUserRoleAssignment(enum.StrEnum):
+    """Model-facing role policy for creating one user."""
+
+    DEFAULT = "DEFAULT"
+    NONE = "NONE"
+
+
+def _normalize_user_role_assignment(
+    value: AiUserRoleAssignment | str,
+) -> AiUserRoleAssignment:
+    try:
+        return AiUserRoleAssignment(value)
+    except (TypeError, ValueError):
+        raise BusinessRuleException(
+            "用户角色策略只能是 DEFAULT 或 NONE",
+            error_code="AI_USER_ROLE_ASSIGNMENT_INVALID",
+        ) from None
+
+
 async def _get_ai_default_password(ctx: AiToolContext) -> str:
     """读取并校验仅后端可见的默认密码策略。"""
     from app.modules.system.service.user_service import (  # noqa: PLC0415
@@ -72,8 +92,9 @@ async def _load_ai_create_policy(
     ctx: AiToolContext,
     *,
     primary_dept_id: int,
-) -> tuple[Dept, Role, str]:
-    """校验新用户的部门、默认角色与默认密码策略。"""
+    role_assignment: AiUserRoleAssignment | str = AiUserRoleAssignment.DEFAULT,
+) -> tuple[Dept, Role | None, str]:
+    """校验新用户的部门、角色选择与默认密码策略。"""
     from app.constants import USER_ROLE_CODE  # noqa: PLC0415
     from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
 
@@ -90,18 +111,32 @@ async def _load_ai_create_policy(
             error_code="AI_USER_PRIMARY_DEPT_NOT_FOUND",
         )
 
-    role = await ctx.db.scalar(
-        select(Role).where(
-            Role.tenant_id == ctx.tenant_id,
-            Role.role_code == USER_ROLE_CODE,
-            Role.status == STATUS_ENABLED,
+    normalized_assignment = _normalize_user_role_assignment(role_assignment)
+    role: Role | None = None
+    if normalized_assignment is AiUserRoleAssignment.NONE:
+        from app.modules.system.service.user_role_assignment_service import (  # noqa: PLC0415
+            user_role_assignment_service,
         )
-    )
-    if role is None:
-        raise BusinessRuleException(
-            f"默认角色 {USER_ROLE_CODE} 不存在或已禁用",
-            error_code="AI_USER_DEFAULT_ROLE_NOT_FOUND",
+
+        await user_role_assignment_service.ensure_create_permissions(
+            ctx.db,
+            actor_user_id=ctx.user.user_id,
+            explicit_roles=True,
+            tenant=ctx.tenant,
         )
+    else:
+        role = await ctx.db.scalar(
+            select(Role).where(
+                Role.tenant_id == ctx.tenant_id,
+                Role.role_code == USER_ROLE_CODE,
+                Role.status == STATUS_ENABLED,
+            )
+        )
+        if role is None:
+            raise BusinessRuleException(
+                f"默认角色 {USER_ROLE_CODE} 不存在或已禁用",
+                error_code="AI_USER_DEFAULT_ROLE_NOT_FOUND",
+            )
 
     return dept, role, await _get_ai_default_password(ctx)
 
@@ -149,7 +184,7 @@ def _build_ai_user_create_schema(
     AiToolMeta(
         name="user.create",
         agent="user_mgmt",
-        summary="Create one user in a primary dept with backend password/default role; HITL confirms.",
+        summary="Create one user with a primary dept and explicit DEFAULT/NONE role policy.",
         required_perms=("system:user:add", "system:dept:list"),
         risk="high",
         readonly=False,
@@ -159,7 +194,7 @@ def _build_ai_user_create_schema(
         sensitive_input=("password", "initial_role_ids"),
         sensitive_output=("hashed_password",),
         result_view="detail_card",
-        args_summary_fields=("user_name", "primary_dept_id"),
+        args_summary_fields=("user_name", "primary_dept_id", "role_assignment"),
     )
 )
 async def user_create(
@@ -172,8 +207,9 @@ async def user_create(
     user_phone: str | None = None,
     user_gender: str | None = "0",
     status: EnableStatus = EnableStatus.ENABLED,
+    role_assignment: AiUserRoleAssignment = AiUserRoleAssignment.DEFAULT,
 ) -> ToolResult:
-    """创建单个用户；密码与角色完全由后端策略决定。"""
+    """创建单个用户；密码后端生成，角色只允许默认或明确为空。"""
     from app.modules.system.service.user_department_assignment_service import (  # noqa: PLC0415
         user_department_assignment_service,
     )
@@ -189,6 +225,7 @@ async def user_create(
     dept, role, default_password = await _load_ai_create_policy(
         ctx,
         primary_dept_id=primary_dept_id,
+        role_assignment=role_assignment,
     )
     user_in = _build_ai_user_create_schema(
         user_name=user_name,
@@ -213,7 +250,12 @@ async def user_create(
         ctx.db,
         actor_user_id=ctx.user.user_id,
         target_user_id=new_user.user_id,
-        role_ids=None,
+        role_ids=(
+            None
+            if _normalize_user_role_assignment(role_assignment)
+            is AiUserRoleAssignment.DEFAULT
+            else []
+        ),
         dept_ids=[primary_dept_id],
         tenant=ctx.tenant,
     )
@@ -232,7 +274,8 @@ async def user_create(
         data={
             "created": 1,
             "userName": new_user.user_name,
-            "roleName": role.role_name,
+            "roleAssignment": "default" if role is not None else "none",
+            "roleName": role.role_name if role is not None else None,
             "primaryDeptName": dept.dept_name,
             "status": _enable_status_semantic(new_user.status),
             "passwordPolicy": "system_default",
@@ -258,7 +301,11 @@ async def user_create(
                     },
                     {
                         "label": "page.system.user.userRole",
-                        "value": role.role_name,
+                        "value": (
+                            role.role_name
+                            if role is not None
+                            else "page.ai.chat.noRole"
+                        ),
                     },
                     {
                         "label": "page.system.user.userStatus",
@@ -268,8 +315,9 @@ async def user_create(
             },
             audit={
                 "affected_user_ids": [user_id],
-                "role_id": str(role.role_id),
-                "role_code": role.role_code,
+                "role_id": str(role.role_id) if role is not None else None,
+                "role_code": role.role_code if role is not None else None,
+                "role_assignment": "DEFAULT" if role is not None else "NONE",
                 "primary_dept_id": dept_id,
                 "status": new_user.status,
                 "password_policy": "system_default",
@@ -290,6 +338,7 @@ async def _dry_run_user_create(
     user_phone: str | None = None,
     user_gender: str | None = "0",
     status: EnableStatus = EnableStatus.ENABLED,
+    role_assignment: AiUserRoleAssignment = AiUserRoleAssignment.DEFAULT,
 ) -> Any:
     """预检创建目标、唯一性与后端默认策略，不写业务数据。"""
     from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
@@ -299,6 +348,7 @@ async def _dry_run_user_create(
         dept, role, default_password = await _load_ai_create_policy(
             ctx,
             primary_dept_id=primary_dept_id,
+            role_assignment=role_assignment,
         )
         _build_ai_user_create_schema(
             user_name=user_name,
@@ -330,6 +380,7 @@ async def _dry_run_user_create(
             ],
         )
 
+    role_example = f"默认角色：{role.role_name}" if role is not None else "不分配角色"
     return DryRunResult(
         ok=True,
         count=1,
@@ -337,7 +388,7 @@ async def _dry_run_user_create(
         examples=[
             f"账号：{user_name}",
             f"主部门：{dept.dept_name}",
-            f"默认角色：{role.role_code}",
+            role_example,
             "密码策略：系统默认密码（不展示明文）",
         ],
         confirmation_fields=[
@@ -750,7 +801,6 @@ async def user_list(
     )
 
     columns = [
-        {"key": "id", "label": "ID"},
         {"key": "user_name", "label": "ai.tool.field.userName"},
         {"key": "nickname", "label": "ai.tool.field.nickname"},
         {"key": "status", "label": "ai.tool.field.status"},
@@ -764,6 +814,14 @@ async def user_list(
         }
         for u in rows
     ]
+    ui_rows = [
+        {
+            "user_name": u.user_name,
+            "nickname": u.nickname or "",
+            "status": _enable_status_label_key(u.status),
+        }
+        for u in rows
+    ]
     return ToolResult.success(
         data={
             "total": total,
@@ -773,7 +831,7 @@ async def user_list(
         projection=_result_projection(scope_bound=True),
         ui=UIResult(
             view_type="data_list",
-            view_data={"columns": columns, "rows": records},
+            view_data={"columns": columns, "rows": ui_rows},
             audit={"total": total},
             label_key="ai.tool.user.list.result",
             label_params={"count": total},
@@ -966,13 +1024,37 @@ async def user_lookup(
         ui=UIResult(
             view_type="detail_card",
             view_data={
-                "id": str(u.user_id),
-                "user_name": u.user_name,
-                "nickname": u.nickname or "",
-                "user_phone": u.user_phone or "",
-                "user_email": u.user_email or "",
-                "user_gender": u.user_gender or "0",
-                "status": u.status,
+                "title": u.nickname or u.user_name,
+                "fields": [
+                    {
+                        "label": "page.system.user.userName",
+                        "value": u.user_name,
+                    },
+                    {
+                        "label": "page.system.user.nickname",
+                        "value": u.nickname or "",
+                    },
+                    {
+                        "label": "page.system.user.userPhone",
+                        "value": u.user_phone or "",
+                    },
+                    {
+                        "label": "page.system.user.userEmail",
+                        "value": u.user_email or "",
+                    },
+                    {
+                        "label": "page.system.user.userGender",
+                        "value": {
+                            "0": "page.system.user.gender.unknown",
+                            "1": "page.system.user.gender.male",
+                            "2": "page.system.user.gender.female",
+                        }.get(u.user_gender or "0", "page.system.user.gender.unknown"),
+                    },
+                    {
+                        "label": "page.system.user.userStatus",
+                        "value": _enable_status_label_key(u.status),
+                    },
+                ],
             },
             audit={"user_id": str(u.user_id), "user_name": u.user_name},
             label_key="ai.tool.user.lookup.result",

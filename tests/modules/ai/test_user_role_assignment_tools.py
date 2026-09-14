@@ -276,6 +276,13 @@ async def test_role_lookup_returns_only_assignable_minimal_candidates(
     assert result.projection.subject_refs == (
         {"type": "delegable_role", "id": str(assignable.role_id)},
     )
+    assert result.ui.view_data["rows"] == [
+        {
+            "roleName": assignable.role_name,
+            "dataScope": "page.system.role.dataScope.self",
+        }
+    ]
+    assert assignable.role_code not in repr(result.ui.view_data)
 
 
 async def test_role_lookup_projection_freezes_every_match_beyond_the_row_limit(

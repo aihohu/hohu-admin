@@ -18,6 +18,7 @@ from app.modules.system import ai_tools as system_ai_tools
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from scripts.check_ai_tools import EXPECTED_BUILTIN_TOOL_NAMES
+from scripts.seed_agent_prompts import DEFAULT_PROMPTS
 
 
 def _actor() -> User:
@@ -59,6 +60,18 @@ def _tool_context(
     ("attribute", "tool_name", "permissions", "readonly"),
     [
         ("role_lookup", "role.lookup", ("system:role:list",), True),
+        (
+            "role_menu_lookup",
+            "role.menu_lookup",
+            ("system:role:menu-auth",),
+            True,
+        ),
+        (
+            "role_agent_lookup",
+            "role.agent_lookup",
+            ("system:role:ai-agent-auth",),
+            True,
+        ),
         ("role_create", "role.create", ("system:role:add",), False),
         ("role_update", "role.update", ("system:role:edit",), False),
         (
@@ -103,11 +116,184 @@ def test_static_inventory_contains_the_complete_role_slice() -> None:
         "role.count",
         "role.list",
         "role.lookup",
+        "role.menu_lookup",
+        "role.agent_lookup",
         "role.create",
         "role.update",
         "role.update_menus",
         "role.update_agents",
     } <= EXPECTED_BUILTIN_TOOL_NAMES
+
+
+async def test_role_read_views_keep_internal_identifiers_model_only(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    role_id = next_id()
+    role_code = f"R_INTERNAL_{next_id()}"
+    summary = SimpleNamespace(
+        role_id=role_id,
+        role_code=role_code,
+        role_name="华东审计员",
+        status="1",
+        data_scope="5",
+        delegable=True,
+        blocked_reason_code=None,
+    )
+
+    async def summarize_roles(*_args, **_kwargs):
+        return [summary], 1, (role_id,)
+
+    monkeypatch.setattr(
+        system_ai_tools.role_management_service,
+        "summarize_roles",
+        summarize_roles,
+    )
+    list_result = await system_ai_tools.role_list(
+        _tool_context(db_session, system_ai_tools.role_list, trace_id="tr_role_list")
+    )
+    lookup_result = await system_ai_tools.role_lookup(
+        _tool_context(
+            db_session,
+            system_ai_tools.role_lookup,
+            trace_id="tr_role_lookup",
+        ),
+        query="华东",
+    )
+
+    assert list_result.data["sample"][0]["id"] == str(role_id)
+    assert lookup_result.data["matches"][0]["roleCode"] == role_code
+    for result in (list_result, lookup_result):
+        ui_repr = repr(result.ui.view_data)
+        assert str(role_id) not in ui_repr
+        assert role_code not in ui_repr
+        assert "blockedReasonCode" not in ui_repr
+
+
+async def test_role_authorization_lookups_keep_ids_model_only(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    role_id = next_id()
+    menu_id = next_id()
+    agent_id = next_id()
+
+    async def lookup_menu_options(*_args, **_kwargs):
+        return SimpleNamespace(
+            role_id=role_id,
+            role_name="华东审计员",
+            current_ids=(menu_id,),
+            match_count=1,
+            contributor_ids=(menu_id,),
+            matches=(
+                SimpleNamespace(
+                    menu_id=menu_id,
+                    menu_name="用户管理",
+                    path="权限管理 / 用户管理",
+                    status="1",
+                    selected=True,
+                ),
+            ),
+        )
+
+    async def lookup_agent_options(*_args, **_kwargs):
+        return SimpleNamespace(
+            role_id=role_id,
+            role_name="华东审计员",
+            current_ids=(agent_id,),
+            match_count=1,
+            contributor_ids=(agent_id,),
+            matches=(
+                SimpleNamespace(
+                    agent_id=agent_id,
+                    agent_code="user_mgmt",
+                    agent_name="用户管理助手",
+                    description="管理租户内用户",
+                    enabled=True,
+                    selected=True,
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(
+        system_ai_tools.role_management_service,
+        "lookup_menu_options",
+        lookup_menu_options,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        system_ai_tools.role_management_service,
+        "lookup_agent_options",
+        lookup_agent_options,
+        raising=False,
+    )
+
+    menu_tool = system_ai_tools.role_menu_lookup
+    menu_result = await menu_tool(
+        _tool_context(db_session, menu_tool, trace_id="tr_role_menu_lookup"),
+        role_id=role_id,
+        query="用户",
+    )
+    agent_tool = system_ai_tools.role_agent_lookup
+    agent_result = await agent_tool(
+        _tool_context(db_session, agent_tool, trace_id="tr_role_agent_lookup"),
+        role_id=role_id,
+        query="用户管理",
+    )
+
+    assert menu_result.data == {
+        "roleName": "华东审计员",
+        "currentMenuIds": [str(menu_id)],
+        "matchCount": 1,
+        "matches": [
+            {
+                "menuId": str(menu_id),
+                "menuName": "用户管理",
+                "path": "权限管理 / 用户管理",
+                "status": "enabled",
+                "selected": True,
+            }
+        ],
+    }
+    assert agent_result.data == {
+        "roleName": "华东审计员",
+        "currentAgentIds": [str(agent_id)],
+        "matchCount": 1,
+        "matches": [
+            {
+                "agentId": str(agent_id),
+                "agentCode": "user_mgmt",
+                "agentName": "用户管理助手",
+                "description": "管理租户内用户",
+                "enabled": True,
+                "selected": True,
+            }
+        ],
+    }
+    assert "menuId" not in {
+        column["key"] for column in menu_result.ui.view_data["columns"]
+    }
+    assert "agentId" not in {
+        column["key"] for column in agent_result.ui.view_data["columns"]
+    }
+    assert str(menu_id) not in repr(menu_result.ui.view_data)
+    assert str(agent_id) not in repr(agent_result.ui.view_data)
+    assert {tuple(item.values()) for item in menu_result.projection.subject_refs} == {
+        ("managed_role", str(role_id)),
+        ("grantable_menu", str(menu_id)),
+    }
+    assert {tuple(item.values()) for item in agent_result.projection.subject_refs} == {
+        ("managed_role", str(role_id)),
+        ("grantable_agent", str(agent_id)),
+    }
+
+
+def test_role_prompt_resolves_business_names_without_asking_for_internal_ids() -> None:
+    prompt = DEFAULT_PROMPTS["role_mgmt"]
+
+    assert "role.menu_lookup" in prompt
+    assert "role.agent_lookup" in prompt
+    assert "不要要求用户输入菜单或 Agent ID" in prompt
 
 
 def test_role_write_result_separates_business_and_audit_values() -> None:

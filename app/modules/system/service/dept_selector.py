@@ -138,6 +138,45 @@ class DepartmentSelector:
             raise NotFoundException("部门")
         return dept
 
+    async def paths_for(
+        self,
+        db: AsyncSession,
+        *,
+        scope: DepartmentReadScope,
+        departments: Sequence[Dept],
+    ) -> dict[int, str]:
+        """Build paths from visible ancestors only, rooted at the local scope."""
+        if not departments:
+            return {}
+        related_ids = {int(dept.dept_id) for dept in departments}
+        for dept in departments:
+            related_ids.update(
+                int(value)
+                for value in (dept.ancestors or "").split(",")
+                if value.isdigit() and int(value) > 0
+            )
+        visible_rows = await self.rows(
+            db,
+            scope=scope,
+            filters=(Dept.dept_id.in_(tuple(sorted(related_ids))),),
+        )
+        visible_by_id = {int(dept.dept_id): dept for dept in visible_rows}
+        paths: dict[int, str] = {}
+        for department in departments:
+            current: Dept | None = visible_by_id.get(int(department.dept_id))
+            names: list[str] = []
+            visited: set[int] = set()
+            while current is not None and int(current.dept_id) not in visited:
+                visited.add(int(current.dept_id))
+                names.append(current.dept_name)
+                current = (
+                    visible_by_id.get(int(current.parent_id))
+                    if current.parent_id is not None
+                    else None
+                )
+            paths[int(department.dept_id)] = " / ".join(reversed(names))
+        return paths
+
     @staticmethod
     def build_lookup_statement(
         *,

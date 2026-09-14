@@ -157,7 +157,7 @@ class TestUserList:
 
         assert result.data["total"] == 3
         statuses = {r["status"] for r in result.ui.view_data["rows"]}
-        assert statuses == {"1"}
+        assert statuses == {"page.system.common.status.enable"}
 
     async def test_list_limit_truncation(self, db_session: AsyncSession) -> None:
         """limit > 50 → 截断到 50"""
@@ -204,8 +204,12 @@ class TestUserLookup:
         assert result.data["user_name"] == "david"
         assert result.data["id"] == "3001"
         assert result.ui.view_type == "detail_card"
-        assert result.ui.view_data["user_email"] == "david@example.com"
-        assert result.ui.view_data["user_phone"] == "13800003001"
+        fields = {
+            field["label"]: field["value"] for field in result.ui.view_data["fields"]
+        }
+        assert fields["page.system.user.userEmail"] == "david@example.com"
+        assert fields["page.system.user.userPhone"] == "13800003001"
+        assert all(field["label"] != "ID" for field in result.ui.view_data["fields"])
 
     async def test_lookup_by_user_name(self, db_session: AsyncSession) -> None:
         """user_name selector → 单条返回"""
