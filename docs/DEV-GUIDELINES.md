@@ -373,7 +373,7 @@ git commit -m "..." --trailer "Co-Authored-By: Claude ..."  # 禁用
 
 ### 7.3 DCO（Developer Certificate of Origin）
 
-每个 commit 必含 `Signed-off-by`：
+外部贡献的 commit 须包含 `Signed-off-by`；维护者提交自己拥有版权的代码时可不添加该尾注：
 
 ```bash
 git commit -s -m "..."
@@ -392,6 +392,10 @@ git add tests/modules/marketplace/test_install_service_lowcode.py
 # ❌ 错误：git add -A 会扫进 .env / 编译产物
 git add -A
 ```
+
+### 7.4.1 Markdown 提交范围
+
+仅提交对外维护的正式文档和必要 ADR。开发过程中的 `docs/specs/`、`docs/plans/`、`docs/reports/`、验收提示词及临时文件保留本地，不因它们与代码同时修改就整批暂存。提交前逐项审阅 Markdown，并清理正式文档中指向未提交过程记录的新增链接。
 
 ### 7.5 不允许的操作
 

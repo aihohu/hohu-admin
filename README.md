@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="license" />
+  <img src="https://img.shields.io/badge/license-Apache--2.0-green.svg" alt="license" />
   <img src="https://img.shields.io/badge/python-%E2%89%A53.12-3776AB.svg" alt="Python" />
   <img src="https://img.shields.io/badge/FastAPI-0.127-009688.svg" alt="FastAPI" />
   <img src="https://img.shields.io/badge/SQLAlchemy-2.0-D71F00.svg" alt="SQLAlchemy" />
@@ -196,4 +196,8 @@ pytest                           # Run tests
 
 ## License
 
-[MIT](./LICENSE) &copy; HoHux
+[Apache License 2.0](./LICENSE) &copy; HoHux
+
+Starting with v0.1.5, this project is licensed under Apache-2.0, except where otherwise noted. Previously released versions through v0.1.4 remain under their original MIT license. The original MIT notice for inherited code is preserved in [LICENSE-MIT](./LICENSE-MIT); it does not offer all new code under MIT. Third-party dependencies retain their own licenses.
+
+See [NOTICE](./NOTICE) and the [license transition policy](./docs/LICENSE-POLICY.md) for scope and distribution details.

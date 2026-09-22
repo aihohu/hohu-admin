@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.5] (Unreleased)
+
+### Licensing
+
+- Adopt Apache-2.0 as the project license starting with v0.1.5, except where otherwise noted. Previously released versions through v0.1.4 retain their original MIT license.
+- Preserve the original MIT notice for inherited code in `LICENSE-MIT`; include `LICENSE`, `LICENSE-MIT`, and `NOTICE` in Python distributions.
+- Update contribution guidance and document the transition in `docs/LICENSE-POLICY.md`. Third-party dependencies retain their own licenses.
+
 ## [v0.1.4] (2026-07-03)
 
 ### Features

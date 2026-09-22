@@ -35,7 +35,7 @@
 
 ### 1.4 开源 vs 商业版
 
-- **开源（MIT/Apache）**：核心 + 系统模块 + 低代码引擎 + 应用市场后端
+- **开源**：核心 + 系统模块 + 低代码引擎 + 应用市场后端。官方开源仓库默认采用 Apache-2.0，另有声明的代码除外；历史 MIT 与第三方许可声明保留。admin / Web 从 v0.1.5 切换，其他未正式发布项目直接切换当前开发版本，详见 [`LICENSE-POLICY.md`](./LICENSE-POLICY.md)。
 - **商业版（远期）**：云市场托管 / SaaS 多租户 / SLA 支持
 
 新功能默认进开源版，除非 spec 显式标注「Enterprise only」。
@@ -406,7 +406,7 @@ fastapi dev app/main.py
 
 ## License
 
-MIT
+[Apache License 2.0](./LICENSE)（具体切换范围、历史及第三方许可见各仓库声明）。
 ```
 
 **反例**：README 一上来就讲目录结构、依赖列表、内部架构 —— 那是开发文档，不是 README。

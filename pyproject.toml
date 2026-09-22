@@ -1,14 +1,15 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
 name = "hohu-admin"
-version = "0.1.4"
+version = "0.1.5"
 description = "A front-end and back-end separated permission management system based on FastAPI, JWT, Vue 3, and Naive UI."
 readme = "README.md"
 requires-python = ">=3.12"
-license = {file = "LICENSE"}
+license = "Apache-2.0"
+license-files = ["LICENSE", "LICENSE-MIT", "NOTICE"]
 authors = [
     {name = "HoHux", email = "jack@hohux.com"},
 ]

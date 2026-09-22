@@ -31,13 +31,15 @@
 
 ### 3.1 License
 
-本仓库代码默认采用 **MIT License** 发布（各子项目 `LICENSE` 文件为准）。
+hohu 官方开源仓库默认采用 **Apache License 2.0**，另有声明的代码除外。`hohu-admin` 和 `hohu-admin-web` 从 **v0.1.5** 切换，已按 MIT 发布的 v0.1.4 及此前版本继续适用原授权；app / desktop / docs / CLI 在当前开发版本直接切换，不额外升版本。各仓库历史 MIT 快照及第三方授权继续保留，以各自许可文件为准。
 
-贡献的代码默认在 MIT 下发布，你保留版权。
+向切换后的版本提交新贡献，默认按 Apache-2.0 授权，你保留版权。继承代码及第三方组件保留适用的原许可证和版权声明；Web 的 SoybeanAdmin、移动端的 unibest 上游 MIT 原文分别见各仓库 `THIRD_PARTY_NOTICES.md`。请勿删除原有声明，也不要把 DCO 视为版权转让或上游作者的额外专利授权。
+
+版本边界与分发要求见 [`LICENSE-POLICY.md`](./LICENSE-POLICY.md)。
 
 ### 3.2 DCO（Developer Certificate of Origin）
 
-每个 commit 必须包含 `Signed-off-by` 行，表示你确认你有权以本仓库 License 贡献这段代码：
+外部贡献的 commit 须包含 `Signed-off-by` 行，表示贡献者确认有权以本仓库 License 提交代码。维护者提交自己拥有版权的代码时可不添加该尾注：
 
 ```bash
 git commit -s -m "..."
@@ -51,7 +53,7 @@ DCO 是 Linux 内核、Git 等大型开源项目采用的标准轻量贡献者�
 
 ### 3.3 PR 检查
 
-- PR 缺 `Signed-off-by` → CI fail，阻塞合并
+- 外部贡献的 PR 需检查 DCO `Signed-off-by`；维护者自有代码提交可不添加
 - 用 `git rebase --signoff` 批量补 sign（仅 PR 未合并前）
 
 ---
@@ -177,7 +179,7 @@ Closes #<issue-number>
 - [ ] 测试遵循 [TESTING-GUIDELINES.md](./docs/TESTING-GUIDELINES.md)
 - [ ] 如适用，spec 已回写决策记录
 - [ ] commit msg 英文一句话
-- [ ] 每个 commit 含 `Signed-off-by`（DCO）
+- [ ] 外部贡献的 commit 含 `Signed-off-by`（DCO）；维护者自有代码提交可不添加
 - [ ] 不含敏感数据（.env / 密钥）
 ```
 

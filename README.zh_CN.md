@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="license" />
+  <img src="https://img.shields.io/badge/license-Apache--2.0-green.svg" alt="license" />
   <img src="https://img.shields.io/badge/python-%E2%89%A53.12-3776AB.svg" alt="Python" />
   <img src="https://img.shields.io/badge/FastAPI-0.127-009688.svg" alt="FastAPI" />
   <img src="https://img.shields.io/badge/SQLAlchemy-2.0-D71F00.svg" alt="SQLAlchemy" />
@@ -482,3 +482,11 @@ async def get_user_list(
 3. 定义 `schemas.py` (Pydantic 模型，建议开启 `alias_generator=to_camel`)。
 4. 在 `api.py` 编写接口并使用 `get_current_user` 进行权限保护。
 5. 在 `app/main.py` 挂载路由。
+
+## 许可证
+
+[Apache License 2.0](./LICENSE) &copy; HoHux
+
+自 v0.1.5 起，本项目默认采用 Apache-2.0，另有声明的代码除外。v0.1.4 及此前已发布版本继续适用原有 MIT 授权。继承代码的原 MIT 声明保存在 [LICENSE-MIT](./LICENSE-MIT)，不表示全部新增代码可任选 MIT；第三方依赖保留各自许可证。
+
+授权范围和分发要求见 [NOTICE](./NOTICE) 与[许可证切换政策](./docs/LICENSE-POLICY.md)。
