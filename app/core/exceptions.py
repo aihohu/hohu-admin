@@ -173,7 +173,12 @@ def setup_exception_handlers(app: FastAPI):
         field_name = first_error["loc"][-1]
         msg = f"参数错误: {field_name} {first_error['msg']}"
 
-        content = ResponseModel(code=422, msg=msg).model_dump()
+        field_errors = [
+            {"field": error["loc"][-1], "message": error["msg"]} for error in errors
+        ]
+        content = ResponseModel(
+            code=422, msg=msg, data={"fieldErrors": field_errors}
+        ).model_dump()
 
         # 密码格式错误附加 errorCode
         if PWD_ERROR_MSG in first_error.get("msg", ""):

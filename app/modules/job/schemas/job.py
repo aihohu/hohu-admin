@@ -1,5 +1,6 @@
 from datetime import datetime
 
+from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from pydantic.alias_generators import to_camel
 
@@ -7,19 +8,31 @@ from app.constants import STATUS_DISABLED, STATUS_ENABLED
 from app.core.config import settings
 from app.schemas.types import LocalNaiveDatetime
 
+INTERVAL_UNITS = ("seconds", "minutes", "hours", "days")
+
 
 class JobCreate(BaseModel):
     """定时任务创建请求"""
 
     job_name: str = Field(..., min_length=1, max_length=64, description="任务名称")
     job_key: str = Field(..., min_length=1, max_length=64, description="任务标识")
-    cron_expression: str | None = Field(
-        None, min_length=1, max_length=64, description="cron表达式"
-    )
+    # trigger_type must be declared before cron_expression/interval_*:
+    # their field validators read it from info.data (declaration order).
     trigger_type: str = Field("cron", description="调度类型：cron/interval")
-    interval_value: int | None = Field(None, ge=1, description="间隔值")
+    cron_expression: str | None = Field(
+        None,
+        min_length=1,
+        max_length=64,
+        validate_default=True,
+        description="cron表达式",
+    )
+    # validate_default=True: pydantic skips validators on unprovided optional
+    # fields, so interval-mode omissions would never reach validate_interval.
+    interval_value: int | None = Field(
+        None, ge=1, validate_default=True, description="间隔值"
+    )
     interval_unit: str | None = Field(
-        None, description="间隔单位：seconds/minutes/hours/days"
+        None, validate_default=True, description="间隔单位：seconds/minutes/hours/days"
     )
     job_args: str | None = Field(None, description="任务参数JSON")
     status: str = Field(STATUS_DISABLED, description="状态：1-启用，2-停用")
@@ -45,6 +58,43 @@ class JobCreate(BaseModel):
     def validate_concurrent(cls, v: str) -> str:
         if v not in ["1", "2"]:
             raise ValueError("并发策略必须是 1(允许) 或 2(不允许)")
+        return v
+
+    @field_validator("cron_expression")
+    @classmethod
+    def validate_cron_expression(cls, v: str | None, info) -> str | None:  # noqa: ANN001
+        if info.data.get("trigger_type", "cron") != "cron":
+            return v
+        if not v:
+            raise ValueError("cron 模式必须提供 cron 表达式")
+        parts = v.strip().split()
+        if len(parts) not in (5, 6):
+            raise ValueError(
+                f"cron 表达式字段数不合法（期望 5 或 6，实际 {len(parts)}）: {v}"
+            )
+        if len(parts) == 5:
+            CronTrigger.from_crontab(v)
+        else:
+            CronTrigger(
+                second=parts[0],
+                minute=parts[1],
+                hour=parts[2],
+                day=parts[3],
+                month=parts[4],
+                day_of_week=parts[5],
+            )
+        return v
+
+    @field_validator("interval_value", "interval_unit")
+    @classmethod
+    def validate_interval(cls, v, info) -> object:  # noqa: ANN001
+        if info.data.get("trigger_type") != "interval":
+            return v
+        is_unit = info.field_name == "interval_unit"
+        if v is None:
+            raise ValueError("interval 模式必须提供间隔值和间隔单位")
+        if is_unit and v not in INTERVAL_UNITS:
+            raise ValueError(f"间隔单位不合法: {v}")
         return v
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
