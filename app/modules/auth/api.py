@@ -12,13 +12,14 @@ from app.core.exceptions import (
     AuthenticationException,
     DuplicateException,
 )
+from app.core.rbac import is_system_admin
 from app.core.security import get_password_hash
 from app.db.session import get_db
 from app.modules.auth.permission_collect import (
     collect_user_buttons,
     collect_user_menus,
 )
-from app.modules.auth.schemas.auth import LoginCredentials
+from app.modules.auth.schemas.auth import LoginCredentials, RouteMeta, UserRoute
 from app.modules.auth.service import (
     auth_service,
     build_menu_tree,
@@ -26,6 +27,7 @@ from app.modules.auth.service import (
     refresh_access_token,
 )
 from app.modules.auth.service import logout as do_logout
+from app.modules.system.constants import PLATFORM_ONLY_TENANT_ROUTE_NAMES
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.user import User
 from app.modules.system.schemas.user import UserCreate, UserOut
@@ -265,6 +267,7 @@ async def get_user_info(current_user: User = Depends(get_current_user)):
                 "userId": str(current_user.user_id),
                 "userName": current_user.user_name,
                 "userAvatar": current_user.user_avatar or "",
+                "isSystemAdmin": is_system_admin(current_user),
                 "roles": roles,
                 "buttons": ["*", *permissions],
             }
@@ -275,6 +278,7 @@ async def get_user_info(current_user: User = Depends(get_current_user)):
             "userId": str(current_user.user_id),
             "userName": current_user.user_name,
             "userAvatar": current_user.user_avatar or "",
+            "isSystemAdmin": is_system_admin(current_user),
             "roles": roles,
             "buttons": permissions,
         }
@@ -322,11 +326,37 @@ async def get_user_routes(
     else:
         menu_list = collect_user_menus(current_user)
 
+    menu_list = [
+        menu
+        for menu in menu_list
+        if menu.route_name not in PLATFORM_ONLY_TENANT_ROUTE_NAMES
+    ]
+
     route_tree = build_menu_tree(menu_list, 0)
+    if is_system_admin(current_user):
+        agent_route = UserRoute(
+            name="ai_agent",
+            path="/ai/agent",
+            component="view.ai_agent",
+            meta=RouteMeta(
+                title="Agent 管理", i18n_key="route.ai_agent", icon="ph:robot", order=2
+            ),
+        )
+        ai_route = next((route for route in route_tree if route.name == "ai"), None)
+        if ai_route is None:
+            ai_route = UserRoute(
+                name="ai",
+                path="/ai",
+                component="layout.base",
+                meta=RouteMeta(title="AI 管理", i18n_key="route.ai", icon="ph:robot"),
+                children=[],
+            )
+            route_tree.append(ai_route)
+        ai_route.children = [*(ai_route.children or []), agent_route]
 
     return ResponseModel.success(
         data={
-            "home": "home",
+            "home": "ai_chat",
             "routes": route_tree,
         }
     )
@@ -381,6 +411,11 @@ async def is_route_exist(
             "data": true
         }
     """
+    if route_name == "ai_agent":
+        return ResponseModel.success(data=is_system_admin(current_user))
+    if route_name in PLATFORM_ONLY_TENANT_ROUTE_NAMES:
+        return ResponseModel.success(data=False)
+
     stmt = select(Menu).where(
         Menu.tenant_id == current_user.tenant_id,
         Menu.route_name == route_name,

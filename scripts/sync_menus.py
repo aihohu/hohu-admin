@@ -13,18 +13,23 @@ Usage:
 
 import asyncio
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
 from app.core.id_generator import next_id
 from app.core.tenant import DEFAULT_TENANT_ID
+from app.db.base import role_menus
 from app.modules.ai.constants import (
     AI_CHAT_USE_PERMISSION,
     AI_FILE_PARSE_PERMISSION,
 )
-from app.modules.system.constants import DEPT_MOVE_PERMISSION, USER_ROLE_AUTH_PERMISSION
+from app.modules.system.constants import (
+    DEPT_MOVE_PERMISSION,
+    PLATFORM_ONLY_TENANT_ROUTE_NAMES,
+    USER_ROLE_AUTH_PERMISSION,
+)
 from app.modules.system.models.menu import Menu
 
 # 菜单定义：每条记录用 parent_route 替代 parent_id，运行时自动解析。
@@ -37,19 +42,19 @@ from app.modules.system.models.menu import Menu
 # 新增菜单只需在末尾追加，不要修改已有条目。
 
 MENU_DEFINITIONS = [
-    # ============ 首页 ============
+    # ============ AI 助手 ============
     {
-        "route_name": "home",
+        "route_name": "ai_chat",
         "parent_route": "0",
-        "menu_name": "首页",
+        "menu_name": "AI 助手",
         "menu_type": "C",
-        "icon": "carbon:home",
+        "icon": "carbon:chat-bot",
         "icon_type": "1",
-        "component": "layout.base$view.home",
+        "component": "layout.base$view.ai_chat",
         "layout": "base",
-        "page": "home",
-        "route_path": "/home",
-        "i18n_key": "route.home",
+        "page": "ai_chat",
+        "route_path": "/ai/chat",
+        "i18n_key": "route.ai_chat",
         "order": 0,
         "status": "1",
         "hide_in_menu": False,
@@ -57,36 +62,18 @@ MENU_DEFINITIONS = [
         "constant": False,
         "multi_tab": False,
     },
-    # ============ AI 助手 ============
+    # ============ AI 管理 ============
     {
         "route_name": "ai",
         "parent_route": "0",
-        "menu_name": "AI 助手",
+        "menu_name": "AI 管理",
         "menu_type": "M",
-        "icon": "carbon:chat-bot",
+        "icon": "ri:robot-2-line",
         "icon_type": "1",
         "component": "layout.base",
         "layout": "base",
         "route_path": "/ai",
         "i18n_key": "route.ai",
-        "order": 1,
-        "status": "1",
-        "hide_in_menu": False,
-        "keep_alive": False,
-        "constant": False,
-        "multi_tab": False,
-    },
-    {
-        "route_name": "ai_chat",
-        "parent_route": "ai",
-        "menu_name": "AI 对话",
-        "menu_type": "C",
-        "icon": "carbon:chat",
-        "icon_type": "1",
-        "component": "view.ai_chat",
-        "page": "ai_chat",
-        "route_path": "/ai/chat",
-        "i18n_key": "route.ai_chat",
         "order": 1,
         "status": "1",
         "hide_in_menu": False,
@@ -109,70 +96,6 @@ MENU_DEFINITIONS = [
         "menu_name": "解析聊天文件",
         "menu_type": "F",
         "permission": AI_FILE_PARSE_PERMISSION,
-        "route_path": "",
-        "status": "1",
-    },
-    {
-        "route_name": "ai_provider",
-        "parent_route": "ai",
-        "menu_name": "模型管理",
-        "menu_type": "C",
-        "icon": "carbon:settings-adjust",
-        "icon_type": "1",
-        "component": "view.ai_provider",
-        "page": "ai_provider",
-        "route_path": "/ai/provider",
-        "i18n_key": "route.ai_provider",
-        "order": 2,
-        "status": "1",
-        "hide_in_menu": False,
-        "keep_alive": False,
-        "constant": False,
-        "multi_tab": False,
-    },
-    # ---- AI 模型管理按钮权限 ----
-    {
-        "key": "ai_provider_list",
-        "parent_route": "ai_provider",
-        "menu_name": "查询",
-        "menu_type": "F",
-        "permission": "ai:provider:list",
-        "route_path": "",
-        "status": "1",
-    },
-    {
-        "key": "ai_provider_add",
-        "parent_route": "ai_provider",
-        "menu_name": "新增",
-        "menu_type": "F",
-        "permission": "ai:provider:add",
-        "route_path": "",
-        "status": "1",
-    },
-    {
-        "key": "ai_provider_edit",
-        "parent_route": "ai_provider",
-        "menu_name": "修改",
-        "menu_type": "F",
-        "permission": "ai:provider:edit",
-        "route_path": "",
-        "status": "1",
-    },
-    {
-        "key": "ai_provider_delete",
-        "parent_route": "ai_provider",
-        "menu_name": "删除",
-        "menu_type": "F",
-        "permission": "ai:provider:delete",
-        "route_path": "",
-        "status": "1",
-    },
-    {
-        "key": "ai_provider_test-model",
-        "parent_route": "ai_provider",
-        "menu_name": "连通性测试",
-        "menu_type": "F",
-        "permission": "ai:provider:test-model",
         "route_path": "",
         "status": "1",
     },
@@ -521,6 +444,24 @@ MENU_DEFINITIONS = [
         "route_path": "/system",
         "i18n_key": "route.system",
         "order": 99,
+        "status": "1",
+        "hide_in_menu": False,
+        "keep_alive": False,
+        "constant": False,
+        "multi_tab": False,
+    },
+    {
+        "route_name": "dashboard",
+        "parent_route": "system",
+        "menu_name": "仪表盘",
+        "menu_type": "C",
+        "icon": "carbon:dashboard",
+        "icon_type": "1",
+        "component": "view.dashboard",
+        "page": "dashboard",
+        "route_path": "/dashboard",
+        "i18n_key": "route.dashboard",
+        "order": 0,
         "status": "1",
         "hide_in_menu": False,
         "keep_alive": False,
@@ -1228,63 +1169,6 @@ MENU_DEFINITIONS = [
         "route_path": "",
         "status": "1",
     },
-    # ============ AI 助手管理 ============
-    {
-        "route_name": "ai_agent",
-        "parent_route": "ai",
-        "menu_name": "AI 助手管理",
-        "menu_type": "C",
-        "icon": "carbon:bot",
-        "icon_type": "1",
-        "component": "view.ai_agent",
-        "page": "ai_agent",
-        "route_path": "/ai/agent",
-        "i18n_key": "route.ai_agent",
-        "order": 3,
-        "status": "1",
-        # 前端管理页面已实现，菜单可见。
-        "hide_in_menu": False,
-        "keep_alive": False,
-        "constant": False,
-        "multi_tab": False,
-    },
-    # ---- AI Agent 管理按钮权限 ----
-    {
-        "key": "ai_agent_list",
-        "parent_route": "ai_agent",
-        "menu_name": "查询",
-        "menu_type": "F",
-        "permission": "ai:agent:list",
-        "route_path": "",
-        "status": "1",
-    },
-    {
-        "key": "ai_agent_add",
-        "parent_route": "ai_agent",
-        "menu_name": "新增",
-        "menu_type": "F",
-        "permission": "ai:agent:add",
-        "route_path": "",
-        "status": "1",
-    },
-    {
-        "key": "ai_agent_edit",
-        "parent_route": "ai_agent",
-        "menu_name": "修改",
-        "menu_type": "F",
-        "permission": "ai:agent:edit",
-        "route_path": "",
-        "status": "1",
-    },
-    {
-        "key": "ai_agent_delete",
-        "parent_route": "ai_agent",
-        "menu_name": "删除",
-        "menu_type": "F",
-        "permission": "ai:agent:delete",
-        "route_path": "",
-        "status": "1",
-    },
     # ---- AI Trace audit page, independent from ai:agent:* ----
     {
         "route_name": "ai_trace",
@@ -1383,7 +1267,14 @@ async def _reconcile_menu_partitions(
         for child_routes in partitions.values()
         for child_route in child_routes
     )
-    result = await db.execute(select(Menu).where(Menu.route_name.in_(route_names)))
+    # tenant 0 only: route_names repeat across tenants, and a foreign tenant's
+    # row would reparent tenant-0 children onto a cross-tenant parent (FK error).
+    result = await db.execute(
+        select(Menu).where(
+            Menu.tenant_id == DEFAULT_TENANT_ID,
+            Menu.route_name.in_(route_names),
+        )
+    )
     menus = {menu.route_name: menu for menu in result.scalars().all()}
     changed = False
     for root_route, child_routes in partitions.items():
@@ -1402,9 +1293,172 @@ async def _reconcile_menu_partitions(
     return changed
 
 
+async def _retire_platform_only_tenant_menus(db: AsyncSession) -> int:
+    """Delete obsolete tenant menu roots and their button permissions."""
+    roots = (
+        (
+            await db.execute(
+                select(Menu.menu_id).where(
+                    Menu.tenant_id == DEFAULT_TENANT_ID,
+                    Menu.route_name.in_(PLATFORM_ONLY_TENANT_ROUTE_NAMES),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not roots:
+        return 0
+
+    children = (
+        (
+            await db.execute(
+                select(Menu.menu_id).where(
+                    Menu.tenant_id == DEFAULT_TENANT_ID,
+                    Menu.parent_id.in_(roots),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    retired_ids = [*children, *roots]
+    await db.execute(
+        delete(role_menus).where(
+            role_menus.c.tenant_id == DEFAULT_TENANT_ID,
+            role_menus.c.menu_id.in_(retired_ids),
+        )
+    )
+    if children:
+        await db.execute(
+            delete(Menu).where(
+                Menu.tenant_id == DEFAULT_TENANT_ID,
+                Menu.menu_id.in_(children),
+            )
+        )
+    await db.execute(
+        delete(Menu).where(
+            Menu.tenant_id == DEFAULT_TENANT_ID,
+            Menu.menu_id.in_(roots),
+        )
+    )
+    return len(retired_ids)
+
+
 def _get_def_key(d: dict) -> str:
     """获取菜单定义的唯一标识：F 类型用 key，其他用 route_name"""
     return d.get("key") or d["route_name"]
+
+
+async def _refactor_ai_first_home(db: AsyncSession) -> str | None:
+    """One-shot AI-first home refactor (idempotent, tenant 0 only).
+
+    Runs only while the legacy home menu exists: remove it, promote ai_chat
+    to the top-level "AI 助手" page, rename the ai group to "AI 管理", and
+    add the dashboard menu under system. Fresh init_db databases have no
+    home menu, making this a no-op.
+    """
+    home_menu = (
+        (
+            await db.execute(
+                select(Menu).where(
+                    Menu.tenant_id == DEFAULT_TENANT_ID, Menu.route_name == "home"
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if home_menu is None:
+        return None
+
+    await db.execute(
+        delete(role_menus).where(role_menus.c.menu_id == home_menu.menu_id)
+    )
+    await db.delete(home_menu)
+
+    ai_chat_menu = (
+        (
+            await db.execute(
+                select(Menu).where(
+                    Menu.tenant_id == DEFAULT_TENANT_ID, Menu.route_name == "ai_chat"
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if ai_chat_menu is not None:
+        ai_chat_menu.parent_id = 0
+        ai_chat_menu.menu_name = "AI 助手"
+        ai_chat_menu.icon = "carbon:chat-bot"
+        ai_chat_menu.component = "layout.base$view.ai_chat"
+        ai_chat_menu.layout = "base"
+        ai_chat_menu.order = 0
+
+    ai_group = (
+        (
+            await db.execute(
+                select(Menu).where(
+                    Menu.tenant_id == DEFAULT_TENANT_ID, Menu.route_name == "ai"
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if ai_group is not None:
+        ai_group.menu_name = "AI 管理"
+
+    dashboard_exists = (
+        (
+            await db.execute(
+                select(Menu.route_name).where(
+                    Menu.tenant_id == DEFAULT_TENANT_ID, Menu.route_name == "dashboard"
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if dashboard_exists is None:
+        system_menu = (
+            (
+                await db.execute(
+                    select(Menu).where(
+                        Menu.tenant_id == DEFAULT_TENANT_ID, Menu.route_name == "system"
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if system_menu is not None:
+            db.add(
+                Menu(
+                    tenant_id=DEFAULT_TENANT_ID,
+                    menu_id=next_id(),
+                    parent_id=system_menu.menu_id,
+                    menu_name="仪表盘",
+                    menu_type="C",
+                    icon="carbon:dashboard",
+                    icon_type="1",
+                    component="view.dashboard",
+                    page="dashboard",
+                    route_name="dashboard",
+                    route_path="/dashboard",
+                    i18n_key="route.dashboard",
+                    order=0,
+                    status="1",
+                    hide_in_menu=False,
+                    keep_alive=False,
+                    constant=False,
+                    multi_tab=False,
+                )
+            )
+
+    await db.flush()
+    return "ai-first home refactor applied (home removed, ai_chat promoted, ai renamed, dashboard added)"
 
 
 async def sync_menus():
@@ -1412,6 +1466,11 @@ async def sync_menus():
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async with async_session() as db:
+        retired = await _retire_platform_only_tenant_menus(db)
+        refactor_note = await _refactor_ai_first_home(db)
+        if refactor_note:
+            print(refactor_note)
+
         # 1. 查询所有已存在的 route_name 和 permission
         result = await db.execute(select(Menu.route_name))
         existing_routes = set(result.scalars().all())
@@ -1433,9 +1492,12 @@ async def sync_menus():
 
         if not new_defs:
             reconciled = await _reconcile_menu_partitions(db)
-            if reconciled:
+            if retired or reconciled or refactor_note:
                 await db.commit()
-                print("Reconciled menu domain partitions.")
+                if retired:
+                    print(f"Retired {retired} platform-only tenant menu records.")
+                if reconciled:
+                    print("Reconciled menu domain partitions.")
             else:
                 print("All menus already exist, nothing to sync.")
             await engine.dispose()
@@ -1518,17 +1580,10 @@ async def sync_menus():
 
         reconciled = await _reconcile_menu_partitions(db)
         await db.commit()
+        if retired:
+            print(f"Retired {retired} platform-only tenant menu records.")
         if reconciled:
             print("Reconciled menu domain partitions.")
-
-        # 一次性兜底：把 ai_agent 菜单的 hide_in_menu 从 True 改 False
-        # 前端管理页面已实现，旧库需要将菜单更新为可见。
-        result = await db.execute(select(Menu).where(Menu.route_name == "ai_agent"))
-        ai_agent_menu = result.scalars().first()
-        if ai_agent_menu and ai_agent_menu.hide_in_menu:
-            ai_agent_menu.hide_in_menu = False
-            await db.commit()
-            print("Updated ai_agent menu: hide_in_menu -> False")
 
         # 一次性兜底：把 ai_routing_feedback (underscore) 改为 ai_routing-feedback (mixed)
         # 匹配前端 @elegant-router kebab-case 命名约定，避免动态路由模式下 view component

@@ -63,11 +63,11 @@ async def fake_redis():
 
 
 def _mock_user(user_id: int = 9001, is_super: bool = False) -> Any:
-    """构造 mock user；is_super=True 触发 is_super_admin 第一条规则"""
+    """构造拥有启用管理员角色的用户。"""
     user = MagicMock()
     user.user_id = user_id
     user.user_name = "admin" if is_super else f"user_{user_id}"
-    user.roles = []
+    user.roles = [MagicMock(role_code="R_SUPER", status="1")] if is_super else []
     return user
 
 

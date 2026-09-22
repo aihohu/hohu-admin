@@ -10,7 +10,7 @@ from app.core.tenant import PlatformContext
 from app.main import app
 from app.modules.ai.schemas.agent_admin import AgentAdminUpdateReq
 from app.modules.ai.service.agent_admin import agent_admin_service
-from app.modules.auth.service import require_platform_context
+from app.modules.platform.system_agent_auth import require_system_agent_context
 
 PLATFORM = PlatformContext(
     actor_principal_id=1,
@@ -25,9 +25,9 @@ PLATFORM = PlatformContext(
 
 @pytest.fixture(autouse=True)
 def platform_dependency_override():
-    app.dependency_overrides[require_platform_context] = lambda: PLATFORM
+    app.dependency_overrides[require_system_agent_context] = lambda: PLATFORM
     yield
-    app.dependency_overrides.pop(require_platform_context, None)
+    app.dependency_overrides.pop(require_system_agent_context, None)
 
 
 @pytest.fixture
@@ -191,16 +191,16 @@ async def test_update_rejects_immutable_identity_field(
     assert exc_info.value.error_code == "AI_AGENT_IMMUTABLE_FIELD"
 
 
-async def test_tenant_super_admin_cannot_call_platform_agent_api(
+async def test_system_super_role_requires_audit_context_for_agent_api(
     authed_client: tuple[AsyncClient, str],
 ) -> None:
     client, _ = authed_client
-    app.dependency_overrides.pop(require_platform_context, None)
+    app.dependency_overrides.pop(require_system_agent_context, None)
 
     response = await client.get("/platform/ai/agents")
 
-    assert response.status_code == 403
-    assert response.json()["errorCode"] == "PLATFORM_ADMIN_REQUIRED"
+    assert response.status_code == 400
+    assert response.json()["errorCode"] == "PLATFORM_AUDIT_CONTEXT_REQUIRED"
 
 
 async def test_list_returns_all_agents_without_query_params(

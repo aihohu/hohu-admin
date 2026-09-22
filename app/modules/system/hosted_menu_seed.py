@@ -114,15 +114,15 @@ def _permission(parent_key: str, permission: str, name: str) -> HostedMenuBluepr
 
 HOSTED_MENU_BLUEPRINTS = (
     _page(
-        "home",
+        "ai_chat",
         None,
-        "首页",
-        "/home",
-        icon="carbon:home",
+        "AI 助手",
+        "/ai/chat",
+        icon="carbon:chat-bot",
         order=0,
         home=True,
     ),
-    _directory("ai", "AI 助手", "/ai", icon="carbon:chat-bot", order=1),
+    _directory("ai", "AI 管理", "/ai", icon="ri:robot-2-line", order=1),
     _directory("auth", "权限管理", "/auth", icon="carbon:security", order=98),
     _directory(
         "system",
@@ -133,12 +133,12 @@ HOSTED_MENU_BLUEPRINTS = (
     ),
     _directory("task", "任务中心", "/task", icon="carbon:task", order=100),
     _page(
-        "ai_chat",
-        "ai",
-        "AI 对话",
-        "/ai/chat",
-        icon="carbon:chat",
-        order=1,
+        "dashboard",
+        "system",
+        "仪表盘",
+        "/dashboard",
+        icon="carbon:dashboard",
+        order=0,
     ),
     _page(
         "ai_trace",

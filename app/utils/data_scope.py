@@ -23,7 +23,6 @@ from sqlalchemy import Select, func, or_, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import (
-    ADMIN_USERNAME,
     DATA_SCOPE_ALL,
     DATA_SCOPE_CUSTOM,
     DATA_SCOPE_DEPT,
@@ -156,9 +155,7 @@ async def resolve_data_scope_for_roles(
     ):
         raise RuntimeError("data-scope resources cross tenant boundary")
     enabled_roles = [role for role in roles if role.status == STATUS_ENABLED]
-    if user.user_name == ADMIN_USERNAME or any(
-        role.role_code == SUPER_ADMIN_ROLE_CODE for role in enabled_roles
-    ):
+    if any(role.role_code == SUPER_ADMIN_ROLE_CODE for role in enabled_roles):
         return DataScopeResolution(
             tenant_id=tenant.tenant_id,
             scope_kinds=frozenset({DATA_SCOPE_ALL}),

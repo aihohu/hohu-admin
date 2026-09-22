@@ -528,14 +528,12 @@ class UserRoleAssignmentService:
 
         resolved_dept_ids: list[frozenset[int] | None] = []
         include_self_values: list[bool] = []
-        for (user, _roles, depts), enabled_roles in zip(
+        for (_user, _roles, depts), enabled_roles in zip(
             candidates,
             enabled_role_sets,
             strict=True,
         ):
-            if user.user_name == ADMIN_USERNAME or any(
-                role.role_code == SUPER_ADMIN_ROLE_CODE for role in enabled_roles
-            ):
+            if any(role.role_code == SUPER_ADMIN_ROLE_CODE for role in enabled_roles):
                 resolved_dept_ids.append(None)
                 include_self_values.append(True)
                 continue

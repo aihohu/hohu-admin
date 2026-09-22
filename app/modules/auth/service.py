@@ -53,6 +53,7 @@ from app.db.session import AsyncSessionLocal, get_db
 from app.modules.auth.schemas.auth import LoginCredentials, RouteMeta, UserRoute
 from app.modules.platform.audit import (
     authorize_platform_request,
+    decode_platform_reason,
     persist_platform_audit,
 )
 from app.modules.platform.auth import authenticate_platform_token
@@ -437,6 +438,33 @@ async def refresh_access_token(refresh_token: str) -> tuple[str, str]:
     return new_access, new_refresh
 
 
+async def load_live_user_authority(db: AsyncSession, *, tenant: TenantContext) -> User:
+    """Reload authorization facts at a long-running operation's commit boundary."""
+    user = await db.scalar(
+        select(User)
+        .where(User.user_id == tenant.actor_user_id, User.tenant_id == tenant.tenant_id)
+        .options(
+            joinedload(User.tenant),
+            selectinload(User.roles).selectinload(Role.menus),
+            selectinload(User.roles).selectinload(Role.depts),
+            selectinload(User.depts),
+        )
+        .execution_options(populate_existing=True)
+    )
+    if (
+        user is None
+        or user.tenant is None
+        or user.tenant.row_version != tenant.tenant_version
+        or user.tenant.status != STATUS_ENABLED
+        or user.status != STATUS_ENABLED
+    ):
+        raise AuthorizationException(
+            "当前账号或租户已不可用", error_code="AI_TOOL_PERM_DENIED"
+        )
+    bind_tenant_context(user, tenant)
+    return user
+
+
 async def get_current_user(
     token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)
 ) -> User:
@@ -565,7 +593,10 @@ async def require_platform_context(
         permission=permission,
         method=request.method,
         path=audit_path,
-        reason=request.headers.get("X-Platform-Reason"),
+        reason=decode_platform_reason(
+            request.headers.get("X-Platform-Reason"),
+            request.headers.get("X-Platform-Reason-Encoding"),
+        ),
         ticket_id=request.headers.get("X-Platform-Ticket"),
         correlation_id=request.headers.get("X-Correlation-ID"),
         ip=ip,

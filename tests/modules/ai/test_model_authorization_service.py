@@ -160,7 +160,7 @@ async def test_model_options_expose_only_safe_allowlist_fields(db_session) -> No
     assert "providerId" not in payload
 
 
-async def test_chat_model_options_are_tenant_scoped_and_agent_admin_is_platform_only(
+async def test_chat_model_options_are_tenant_scoped_and_global_options_require_audit(
     authed_client,
     committed_model_id: int,
 ) -> None:
@@ -170,8 +170,8 @@ async def test_chat_model_options_are_tenant_scoped_and_agent_admin_is_platform_
     agent_response = await client.get("/platform/ai/agents/model-options")
 
     assert chat_response.status_code == 200
-    assert agent_response.status_code == 403
-    assert agent_response.json()["errorCode"] == "PLATFORM_ADMIN_REQUIRED"
+    assert agent_response.status_code == 400
+    assert agent_response.json()["errorCode"] == "PLATFORM_AUDIT_CONTEXT_REQUIRED"
     row = next(
         item
         for item in chat_response.json()["data"]
@@ -185,7 +185,7 @@ async def test_conversation_create_rejects_unavailable_model_before_persist(
 ) -> None:
     _provider, model = await _seed_model(db_session, model_enabled=False)
     user_id = await db_session.scalar(
-        select(User.user_id).where(User.user_name == "admin")
+        select(User.user_id).where(User.tenant_id == 0, User.user_name == "admin")
     )
     before = await db_session.scalar(select(func.count(AiConversation.conversation_id)))
     tenant = _tenant(user_id)
@@ -208,7 +208,7 @@ async def test_conversation_update_rejects_unavailable_model_atomically(
 ) -> None:
     _provider, model = await _seed_model(db_session, model_enabled=False)
     user_id = await db_session.scalar(
-        select(User.user_id).where(User.user_name == "admin")
+        select(User.user_id).where(User.tenant_id == 0, User.user_name == "admin")
     )
     conversation = AiConversation(
         tenant_id=0,

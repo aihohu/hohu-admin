@@ -1,5 +1,6 @@
 """Dedicated platform control-plane APIs for global AI configuration."""
 
+import hashlib
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Request
@@ -35,6 +36,7 @@ from app.modules.platform.schemas import (
     PlatformTenantModelPolicyOut,
     PlatformTenantModelPolicyPut,
 )
+from app.modules.platform.system_agent_auth import require_system_agent_context
 
 router = APIRouter()
 PositiveId = Annotated[int, Path(gt=0, le=9_223_372_036_854_775_807)]
@@ -53,7 +55,7 @@ def _record_count(request: Request, count: int) -> None:
 async def list_agents(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_platform_context),
+    platform: PlatformContext = Depends(require_system_agent_context),
 ):
     items = await agent_admin_service.list_agents(db, platform=platform)
     _record_count(request, len(items))
@@ -68,7 +70,7 @@ async def list_agents(
 async def list_agent_model_options(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_platform_context),
+    platform: PlatformContext = Depends(require_system_agent_context),
 ):
     items = await model_service.list_options(db, platform=platform)
     _record_count(request, len(items))
@@ -84,7 +86,7 @@ async def get_agent(
     agent_id: PositiveId,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_platform_context),
+    platform: PlatformContext = Depends(require_system_agent_context),
 ):
     item = await agent_admin_service.get_agent(db, agent_id, platform=platform)
     _record_count(request, 1)
@@ -101,11 +103,28 @@ async def update_agent(
     payload: AgentAdminUpdateReq,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_platform_context),
+    platform: PlatformContext = Depends(require_system_agent_context),
 ):
+    before = await agent_admin_service.get_agent(db, agent_id, platform=platform)
     item = await agent_admin_service.update_agent(
         db, agent_id, payload, platform=platform
     )
+
+    def audit_value(value):
+        # Keep scalar switches/quota; fingerprint free text, which may contain secrets.
+        return (
+            {"sha256": hashlib.sha256(value.encode()).hexdigest()}
+            if isinstance(value, str)
+            else value
+        )
+
+    request.state.system_agent_changes = {
+        key: {
+            "before": audit_value(getattr(before, key)),
+            "after": audit_value(getattr(item, key)),
+        }
+        for key in payload.model_fields_set
+    }
     _record_count(request, 1)
     return ResponseModel.success(data=item)
 

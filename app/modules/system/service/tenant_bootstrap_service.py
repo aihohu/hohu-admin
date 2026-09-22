@@ -172,7 +172,7 @@ class SystemTenantBootstrapService:
 
         super_role = Role(
             tenant_id=tenant.tenant_id,
-            role_name="超级管理员",
+            role_name="租户管理员",
             role_code=SUPER_ADMIN_ROLE_CODE,
             status=STATUS_ENABLED,
         )

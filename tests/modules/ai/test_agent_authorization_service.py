@@ -48,7 +48,9 @@ async def _principal(
 
     menus: list[Menu] = []
     for permission in permissions:
-        menu = await db.scalar(select(Menu).where(Menu.permission == permission))
+        menu = await db.scalar(
+            select(Menu).where(Menu.tenant_id == 0, Menu.permission == permission)
+        )
         if menu is None:
             menu = Menu(
                 tenant_id=0,
@@ -70,7 +72,9 @@ async def _principal(
     )
     if role_code == SUPER_ADMIN_ROLE_CODE:
         existing = await db.scalar(
-            select(Role).where(Role.role_code == SUPER_ADMIN_ROLE_CODE)
+            select(Role).where(
+                Role.tenant_id == 0, Role.role_code == SUPER_ADMIN_ROLE_CODE
+            )
         )
         if existing is not None:
             role = existing

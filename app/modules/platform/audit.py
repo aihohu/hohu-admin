@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from ipaddress import ip_address
 from typing import Any, Protocol
+from urllib.parse import unquote
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
@@ -25,6 +26,19 @@ class PlatformPrincipalLike(Protocol):
 
 
 AuditPersist = Callable[..., Awaitable[int]]
+
+
+def decode_platform_reason(value: str | None, encoding: str | None) -> str | None:
+    """Decode browser UTF-8 headers before existing audit validation/redaction."""
+    if encoding is None:
+        return value
+    if encoding != "uri-component" or not isinstance(value, str) or len(value) > 3072:
+        return None
+    try:
+        return unquote(value, encoding="utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+
 
 _AUDIT_SECRET_PATTERNS = (
     re.compile(r"sk-[A-Za-z0-9]{20,}"),

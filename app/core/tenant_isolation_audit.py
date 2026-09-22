@@ -27,6 +27,7 @@ _APP_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_TENANT_REFERENCE_ALLOWLIST = frozenset(
     {
         "core/tenant.py",
+        "core/rbac.py",  # System-role scope is explicitly rooted in the default system.
         "modules/auth/service.py",
         "modules/marketplace/capability.py",
         "modules/system/service/tenant_bootstrap_service.py",

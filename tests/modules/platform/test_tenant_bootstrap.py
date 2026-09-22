@@ -86,7 +86,7 @@ async def test_bootstrap_prepared_tenant_seeds_only_hosted_capabilities(db_sessi
     model = await _text_model(db_session)
     raw_password = "TenantAdmin123"
     mutable_default_home = await db_session.scalar(
-        select(Menu).where(Menu.tenant_id == 0, Menu.route_name == "home")
+        select(Menu).where(Menu.tenant_id == 0, Menu.route_name == "ai_chat")
     )
     assert mutable_default_home is not None
     mutable_default_home.component = "view.compromised_default_tenant"
@@ -163,8 +163,8 @@ async def test_bootstrap_prepared_tenant_seeds_only_hosted_capabilities(db_sessi
             "monitor:login-log:clean",
         }
     )
-    hosted_home = next(menu for menu in menus if menu.route_name == "home")
-    assert hosted_home.component == "layout.base$view.home"
+    hosted_home = next(menu for menu in menus if menu.route_name == "ai_chat")
+    assert hosted_home.component == "layout.base$view.ai_chat"
     assert hosted_home.href is None
     assert (
         await db_session.scalar(

@@ -8,6 +8,9 @@ DEPT_MOVE_PERMISSION = "system:dept:move"
 USER_ROLE_AUTH_PERMISSION = "system:user:role-auth"
 """Independent permission required to delegate user role membership."""
 
+PLATFORM_ONLY_TENANT_ROUTE_NAMES = frozenset({"ai_provider", "ai_agent"})
+"""Legacy tenant routes whose management APIs now live on the platform plane."""
+
 PHASE3_DESTRUCTIVE_PERMISSIONS = frozenset(
     {
         "system:dept:batch-delete",

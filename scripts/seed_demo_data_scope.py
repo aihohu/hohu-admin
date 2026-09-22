@@ -5,7 +5,8 @@
 权限演示」页面，看到同一份数据的不同子集。
 
 幂等：所有 ID 固定常量；用户按固定 ID 对账并迁移旧用户名，缺失用户及关联
-单独补齐；其余实体按稳定业务键检查。重跑安全，也可修复部分执行后的数据。
+单独补齐；演示角色菜单采用精确集合对账；其余实体按稳定业务键检查。重跑
+安全，也可修复部分执行后的数据。
 
 Usage:
     cd hohu-admin
@@ -13,17 +14,17 @@ Usage:
 
 演示账号（密码统一 demo@12345）：
     demoall      ALL          看全部 30 条
-    demodeptsub  DEPT_AND_SUB 看主部门 BRANCH_A 及子（约 20 条）
-    demodept     DEPT         仅看主部门 BRANCH_A（约 10 条）
-    democustom   CUSTOM       看 role_depts 配置的 TEAM_A1+TEAM_B1（约 10 条）
-    demoself     SELF         仅看自己创建的（约 5 条）
+    demodeptsub  DEPT_AND_SUB 看主部门 BRANCH_A 及子（15 条）
+    demodept     DEPT         仅看主部门 BRANCH_A（5 条）
+    democustom   CUSTOM       看 role_depts 配置的 TEAM_A1+TEAM_B1（10 条）
+    demoself     SELF         仅看自己创建的（6 条）
 """
 
 # ruff: noqa: T201
 
 import asyncio
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -69,13 +70,17 @@ USER_SELF_ID = 800000205
 
 PASSWORD = "demo@12345"
 
+DEMO_MENU_ROUTE_NAMES = frozenset({"home", "system", "system_data-scope-demo"})
+"""Routes required to keep the demo page reachable in the dynamic menu tree."""
+
+# (dept_id, dept_name, ancestors, parent_id)
 DEPTS = [
-    (ROOT_ID, "总公司", "0"),
-    (BRANCH_A_ID, "华东分公司", f"0,{ROOT_ID}"),
-    (TEAM_A1_ID, "华东-销售组", f"0,{ROOT_ID},{BRANCH_A_ID}"),
-    (TEAM_A2_ID, "华东-客服组", f"0,{ROOT_ID},{BRANCH_A_ID}"),
-    (BRANCH_B_ID, "华南分公司", f"0,{ROOT_ID}"),
-    (TEAM_B1_ID, "华南-销售组", f"0,{ROOT_ID},{BRANCH_B_ID}"),
+    (ROOT_ID, "总公司", "0", None),
+    (BRANCH_A_ID, "华东分公司", f"0,{ROOT_ID}", ROOT_ID),
+    (TEAM_A1_ID, "华东-销售组", f"0,{ROOT_ID},{BRANCH_A_ID}", BRANCH_A_ID),
+    (TEAM_A2_ID, "华东-客服组", f"0,{ROOT_ID},{BRANCH_A_ID}", BRANCH_A_ID),
+    (BRANCH_B_ID, "华南分公司", f"0,{ROOT_ID}", ROOT_ID),
+    (TEAM_B1_ID, "华南-销售组", f"0,{ROOT_ID},{BRANCH_B_ID}", BRANCH_B_ID),
 ]
 
 ROLES = [
@@ -146,12 +151,13 @@ async def _seed_depts(db: AsyncSession) -> None:
             Dept(
                 tenant_id=DEFAULT_TENANT_ID,
                 dept_id=did,
+                parent_id=parent,
                 dept_name=name,
                 ancestors=anc,
                 order_num=i,
                 status=STATUS_ENABLED,
             )
-            for i, (did, name, anc) in enumerate(DEPTS)
+            for i, (did, name, anc, parent) in enumerate(DEPTS)
         ]
     )
     await db.flush()
@@ -341,7 +347,7 @@ async def _assign_role_menus(db: AsyncSession) -> None:
     #    - home（首页）
     #    - system_data-scope-demo（演示页菜单本身）
     #    - parent_id == system_data-scope-demo 的所有 F 类型按钮（list/add/edit/delete）
-    target_routes = ["home", "system_data-scope-demo"]
+    target_routes = list(DEMO_MENU_ROUTE_NAMES)
     demo_menu = (
         (
             await db.execute(
@@ -380,7 +386,15 @@ async def _assign_role_menus(db: AsyncSession) -> None:
     # 2. 5 个演示角色的 role_id
     role_ids = [r[0] for r in ROLES]
 
-    # 3. ON CONFLICT DO NOTHING 批量插入 role_menus（复合主键 role_id+menu_id）
+    # 3. 专用演示角色采用精确权限集合：先清旧授权，再批量写入目标集合。
+    # 这些固定角色只用于演示，精确对账可清除 E2E 或人工操作留下的越权菜单。
+    delete_result = await db.execute(
+        delete(role_menus).where(
+            role_menus.c.tenant_id == DEFAULT_TENANT_ID,
+            role_menus.c.role_id.in_(role_ids),
+        )
+    )
+
     rows = [
         {"tenant_id": DEFAULT_TENANT_ID, "role_id": rid, "menu_id": mid}
         for rid in role_ids
@@ -393,7 +407,8 @@ async def _assign_role_menus(db: AsyncSession) -> None:
     )
     result = await db.execute(stmt)
     print(
-        f"  role_menus: {len(menu_rows)} menus/buttons × {len(role_ids)} roles "
+        f"  role_menus: removed {delete_result.rowcount} stale/current grants; "
+        f"applied {len(menu_rows)} menus/buttons × {len(role_ids)} roles "
         f"= {len(rows)} planned, {result.rowcount} new"
     )
 

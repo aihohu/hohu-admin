@@ -544,11 +544,11 @@ class TestCase7SuperAdminGate:
         assert result.error_code == "AI_SUPER_ADMIN_REQUIRED"
 
     async def test_super_admin_passes(self) -> None:
-        """超管（user_name='admin'）可调用 super_admin_only tool"""
+        """启用的超管角色可调用 super_admin_only tool，用户名不授予权限。"""
         _register_test_tools()
-        # 构造 super admin user：user_name='admin' 触发 is_super_admin 第一条规则
         deps = _build_deps()
         deps.user.user_name = "admin"
+        deps.user.roles = [MagicMock(role_code="R_SUPER", status="1")]
         result, events = await _execute_and_collect(_T_SUPER_ADMIN, {}, deps)
         assert result.ok is True
         # 走完整流程，emit started + result

@@ -143,7 +143,9 @@ async def auth_token(db_session) -> str:
     from app.modules.system.models.user import User
 
     user = (
-        await db_session.execute(select(User).where(User.user_name == "admin"))
+        await db_session.execute(
+            select(User).where(User.tenant_id == 0, User.user_name == "admin")
+        )
     ).scalar_one()
     return create_access_token(
         subject=str(user.user_id),
@@ -249,7 +251,9 @@ async def seed_test_message(auth_token) -> int:
 
     async with AsyncSessionLocal() as s:
         user = (
-            await s.execute(select(User).where(User.user_name == "admin"))
+            await s.execute(
+                select(User).where(User.tenant_id == 0, User.user_name == "admin")
+            )
         ).scalar_one()
         agent = (
             await s.execute(select(AiAgent).where(AiAgent.code == "user_mgmt"))

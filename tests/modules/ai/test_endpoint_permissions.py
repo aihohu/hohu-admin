@@ -24,6 +24,7 @@ from app.modules.ai.api.routing_feedback import query_router as feedback_query_r
 from app.modules.ai.api.routing_feedback import router as feedback_router
 from app.modules.auth.service import require_platform_context
 from app.modules.platform.ai_api import router as platform_ai_router
+from app.modules.platform.system_agent_auth import require_system_agent_context
 
 
 def _user(*permissions: str, role_code: str = "R_USER"):
@@ -136,9 +137,9 @@ def test_saved_provider_test_endpoint_requires_platform_context() -> None:
     )
 
 
-def test_agent_model_options_endpoint_requires_platform_context() -> None:
+def test_agent_model_options_endpoint_requires_system_role_context() -> None:
     route = _route(platform_ai_router, "/ai/agents/model-options", "GET")
-    assert require_platform_context in _dependency_calls(route)
+    assert require_system_agent_context in _dependency_calls(route)
 
 
 def test_ai_chat_permission_has_stable_denial_code() -> None:

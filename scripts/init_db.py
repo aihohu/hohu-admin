@@ -19,7 +19,6 @@ from app.core.security import get_password_hash
 from app.core.tenant import DEFAULT_TENANT_CODE, DEFAULT_TENANT_ID
 from app.db.base import role_menus, user_roles
 from app.modules.ai.constants import (
-    AI_AGENT_EDIT_PERMISSION,
     AI_CHAT_USE_PERMISSION,
     AI_FILE_PARSE_PERMISSION,
     PUBLISHED_AGENT_CODES,
@@ -53,29 +52,8 @@ _system_role_menu_id = next_id()
 _system_file_menu_id = next_id()
 _system_job_menu_id = next_id()
 _ai_chat_menu_id = next_id()
-_ai_agent_menu_id = next_id()
 
 init_menus = [
-    Menu(
-        parent_id=0,
-        menu_name="首页",
-        menu_type="C",
-        icon="carbon:home",
-        icon_type="1",
-        component="layout.base$view.home",
-        layout="base",
-        page="home",
-        route_name="home",
-        route_path="/home",
-        i18n_key="route.home",
-        order=0,
-        status="1",
-        hide_in_menu=False,
-        keep_alive=False,
-        constant=False,
-        multi_tab=False,
-        menu_id=next_id(),
-    ),
     Menu(
         parent_id=0,
         menu_name="权限管理",
@@ -381,6 +359,25 @@ init_menus = [
     ),
     Menu(
         parent_id=system_id,
+        menu_name="仪表盘",
+        menu_type="C",
+        icon="carbon:dashboard",
+        icon_type="1",
+        component="view.dashboard",
+        page="dashboard",
+        route_name="dashboard",
+        route_path="/dashboard",
+        i18n_key="route.dashboard",
+        order=0,
+        status="1",
+        hide_in_menu=False,
+        keep_alive=False,
+        constant=False,
+        multi_tab=False,
+        menu_id=next_id(),
+    ),
+    Menu(
+        parent_id=system_id,
         menu_name="字典管理",
         menu_type="C",
         icon="fluent-mdl2:dictionary",
@@ -628,8 +625,28 @@ init_menus.extend(
         Menu(
             parent_id=0,
             menu_name="AI 助手",
-            menu_type="M",
+            menu_type="C",
             icon="carbon:chat-bot",
+            icon_type="1",
+            component="layout.base$view.ai_chat",
+            layout="base",
+            page="ai_chat",
+            route_name="ai_chat",
+            route_path="/ai/chat",
+            i18n_key="route.ai_chat",
+            order=0,
+            status="1",
+            hide_in_menu=False,
+            keep_alive=False,
+            constant=False,
+            multi_tab=False,
+            menu_id=_ai_chat_menu_id,
+        ),
+        Menu(
+            parent_id=0,
+            menu_name="AI 管理",
+            menu_type="M",
+            icon="ri:robot-2-line",
             icon_type="1",
             component="layout.base",
             layout="base",
@@ -645,25 +662,6 @@ init_menus.extend(
             menu_id=ai_id,
         ),
         Menu(
-            parent_id=ai_id,
-            menu_name="AI 对话",
-            menu_type="C",
-            icon="carbon:chat",
-            icon_type="1",
-            component="view.ai_chat",
-            page="ai_chat",
-            route_name="ai_chat",
-            route_path="/ai/chat",
-            i18n_key="route.ai_chat",
-            order=1,
-            status="1",
-            hide_in_menu=False,
-            keep_alive=False,
-            constant=False,
-            multi_tab=False,
-            menu_id=_ai_chat_menu_id,
-        ),
-        Menu(
             parent_id=_ai_chat_menu_id,
             menu_name="使用 AI 对话",
             menu_type="F",
@@ -676,60 +674,6 @@ init_menus.extend(
             menu_name="解析聊天文件",
             menu_type="F",
             permission=AI_FILE_PARSE_PERMISSION,
-            status=STATUS_ENABLED,
-            menu_id=next_id(),
-        ),
-        Menu(
-            parent_id=ai_id,
-            menu_name="模型管理",
-            menu_type="C",
-            icon="carbon:settings-adjust",
-            icon_type="1",
-            component="view.ai_provider",
-            page="ai_provider",
-            route_name="ai_provider",
-            route_path="/ai/provider",
-            i18n_key="route.ai_provider",
-            order=2,
-            status="1",
-            hide_in_menu=False,
-            keep_alive=False,
-            constant=False,
-            multi_tab=False,
-            menu_id=next_id(),
-        ),
-        Menu(
-            parent_id=ai_id,
-            menu_name="AI 助手管理",
-            menu_type="C",
-            icon="carbon:bot",
-            icon_type="1",
-            component="view.ai_agent",
-            page="ai_agent",
-            route_name="ai_agent",
-            route_path="/ai/agent",
-            i18n_key="route.ai_agent",
-            order=3,
-            status=STATUS_ENABLED,
-            hide_in_menu=False,
-            keep_alive=False,
-            constant=False,
-            multi_tab=False,
-            menu_id=_ai_agent_menu_id,
-        ),
-        Menu(
-            parent_id=_ai_agent_menu_id,
-            menu_name="查询",
-            menu_type="F",
-            permission="ai:agent:list",
-            status=STATUS_ENABLED,
-            menu_id=next_id(),
-        ),
-        Menu(
-            parent_id=_ai_agent_menu_id,
-            menu_name="修改",
-            menu_type="F",
-            permission=AI_AGENT_EDIT_PERMISSION,
             status=STATUS_ENABLED,
             menu_id=next_id(),
         ),
@@ -850,7 +794,7 @@ def build_init_roles() -> list[Role]:
     return [
         Role(
             tenant_id=DEFAULT_TENANT_ID,
-            role_name="超级管理员",
+            role_name="系统超级管理员",
             role_code=SUPER_ADMIN_ROLE_CODE,
             status=STATUS_ENABLED,
         ),
@@ -870,8 +814,6 @@ def fresh_role_permission_menus(menus: list[Menu]) -> list[Menu]:
     permissions = {
         AI_CHAT_USE_PERMISSION,
         AI_FILE_PARSE_PERMISSION,
-        "ai:agent:list",
-        AI_AGENT_EDIT_PERMISSION,
         *PUBLISHED_AGENT_TOOL_PERMISSIONS,
         *PHASE3_DESTRUCTIVE_PERMISSIONS,
     }
@@ -914,7 +856,7 @@ async def clear_seed_data(db: AsyncSession):
     for table in SEED_TABLES:
         await db.execute(text(f"TRUNCATE TABLE {table} CASCADE"))
     await db.commit()
-    print("✅ 已清空所有种子数据。")
+    print("[OK] 已清空所有种子数据。")
 
 
 async def init_db():
@@ -923,10 +865,10 @@ async def init_db():
 
     async with async_session() as db:
         if await check_data_exists(db):
-            print("⚠️ 检测到数据库中已存在数据。")
+            print("[WARN] 检测到数据库中已存在数据。")
             choice = input("是否清空后重新初始化? (y/n): ").lower()  # noqa: ASYNC250
             if choice != "y":
-                print("⏭️ 跳过数据初始化。")
+                print("[SKIP] 跳过数据初始化。")
                 return
             await clear_seed_data(db)
 
@@ -982,7 +924,7 @@ async def init_db():
         )
 
         await db.commit()
-        print("✅ 数据库初始化完成：管理员账号 admin 密码 " + password)
+        print("[OK] 数据库初始化完成：管理员账号 admin 密码 " + password)
 
 
 if __name__ == "__main__":

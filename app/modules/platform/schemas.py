@@ -19,6 +19,14 @@ from app.schemas.types import LocalNaiveDatetime
 from app.utils.validators import validate_password
 
 
+class PlatformIdentityOut(BaseModel):
+    principal_id: str
+    principal_name: str
+    permissions: list[str]
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+
 class PlatformLoginCredentials(BaseModel):
     principal_name: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=128)

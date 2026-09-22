@@ -281,8 +281,6 @@ class TestRoleSeed:
         admin_role.menus = fresh_role_permission_menus(init_menus)
 
         assert {menu.permission for menu in admin_role.menus} == {
-            "ai:agent:edit",
-            "ai:agent:list",
             "ai:chat:use",
             "ai:file:parse",
             "system:dept:add",
@@ -397,11 +395,22 @@ class TestAiChatPermissionSeed:
         assert button.status == STATUS_ENABLED
         assert button.parent_id == parent.menu_id
 
-    def test_agent_permissions_are_seeded_under_agent_menu(self):
-        parent = _find_menu_by_route_name(init_menus, "ai_agent")
-        for permission in ("ai:agent:list", "ai:agent:edit"):
-            button = _find_menu_by_permission(init_menus, permission)
-            assert button.parent_id == parent.menu_id
+    def test_platform_only_ai_management_is_not_seeded_for_tenants(self):
+        routes = {menu.route_name for menu in init_menus if menu.route_name}
+        permissions = {menu.permission for menu in init_menus if menu.permission}
+
+        assert routes.isdisjoint({"ai_provider", "ai_agent"})
+        assert permissions.isdisjoint(
+            {
+                "ai:provider:list",
+                "ai:provider:add",
+                "ai:provider:edit",
+                "ai:provider:delete",
+                "ai:provider:test-model",
+                "ai:agent:list",
+                "ai:agent:edit",
+            }
+        )
 
     def test_trace_permission_is_seeded_as_an_independent_page(self):
         page = _find_menu_by_permission(init_menus, "ai:trace:view")

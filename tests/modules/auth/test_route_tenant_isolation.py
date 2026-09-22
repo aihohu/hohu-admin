@@ -69,9 +69,20 @@ async def test_super_admin_routes_and_existence_are_tenant_scoped(db_session):
         status="1",
         menu_id=next_id(),
     )
+    stale_platform_only = Menu(
+        tenant_id=tenant_id,
+        parent_id=None,
+        menu_name="Legacy tenant AI Agent management",
+        menu_type="C",
+        component="layout.base$view.ai_agent",
+        route_name="ai_agent",
+        route_path="/ai/agent",
+        status="1",
+        menu_id=next_id(),
+    )
     db_session.add(tenant)
     await db_session.flush()
-    db_session.add_all([default_only, tenant_only])
+    db_session.add_all([default_only, tenant_only, stale_platform_only])
     await db_session.flush()
     current_user = SimpleNamespace(
         tenant_id=tenant_id,
@@ -83,6 +94,7 @@ async def test_super_admin_routes_and_existence_are_tenant_scoped(db_session):
     names = _route_names(response.data["routes"])
     assert tenant_only.route_name in names
     assert default_only.route_name not in names
+    assert stale_platform_only.route_name not in names
     assert (
         await is_route_exist(
             route_name=tenant_only.route_name,
@@ -93,6 +105,13 @@ async def test_super_admin_routes_and_existence_are_tenant_scoped(db_session):
     assert (
         await is_route_exist(
             route_name=default_only.route_name,
+            current_user=current_user,
+            db=db_session,
+        )
+    ).data is False
+    assert (
+        await is_route_exist(
+            route_name=stale_platform_only.route_name,
             current_user=current_user,
             db=db_session,
         )

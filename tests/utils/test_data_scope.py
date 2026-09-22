@@ -1,13 +1,11 @@
 """data_scope 权限工具测试。
 
 is_super_admin 必须与 app.core.auth.is_super_admin 行为一致：
-- user_name == "admin" 视为超管（即使未挂 R_SUPER 角色）
-- 含 R_SUPER 角色的用户视为超管
+- user_name == "admin" 本身不提供权限
+- 含启用 R_SUPER 角色的用户视为所在范围的管理员
 - 否则不是超管
 
-回归场景：data_scope 旧实现只判 role_code，漏判 admin 用户名，导致
-admin 账号在 require_permissions 处跳过校验但在 data_scope 处被当成
-普通用户过滤数据，行为自相矛盾。
+2026-09-18：权限与数据范围统一按启用角色授权，移除用户名特权。
 """
 
 from app.constants import ADMIN_USERNAME, STATUS_ENABLED, SUPER_ADMIN_ROLE_CODE
@@ -22,10 +20,10 @@ def _make_user(name: str, roles: list[Role]) -> User:
     return user
 
 
-def test_admin_username_is_super_admin_without_role():
-    """user_name == 'admin' 的用户即使无 R_SUPER 角色也应是超管。"""
+def test_admin_username_is_not_super_admin_without_role():
+    """用户名不授予权限，必须拥有启用的管理员角色。"""
     user = _make_user(ADMIN_USERNAME, roles=[])
-    assert is_super_admin(user) is True
+    assert is_super_admin(user) is False
 
 
 def test_super_role_is_super_admin():

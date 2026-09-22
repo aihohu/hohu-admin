@@ -1,13 +1,17 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, Path, Request
+from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_response import ResponseModel
+from app.core.exceptions import AuthenticationException
 from app.core.tenant import PlatformContext
 from app.db.session import get_db
-from app.modules.auth.service import require_platform_context
+from app.modules.auth.service import platform_bearer_scheme, require_platform_context
+from app.modules.platform.auth import authenticate_platform_token
 from app.modules.platform.schemas import (
+    PlatformIdentityOut,
     PlatformLoginCredentials,
     PlatformRetentionOut,
     PlatformRetentionPreviewRequest,
@@ -52,6 +56,25 @@ async def platform_login(
     token = await platform_auth_service.authenticate(db, credentials)
     await db.commit()
     return ResponseModel.success(data=PlatformTokenResponse(token=token))
+
+
+@router.get("/me", summary="读取当前平台身份与实时权限")
+async def platform_identity(
+    credentials: HTTPAuthorizationCredentials | None = Depends(platform_bearer_scheme),
+    db: AsyncSession = Depends(get_db),
+) -> ResponseModel[PlatformIdentityOut]:
+    if credentials is None:
+        raise AuthenticationException(
+            "缺少平台 Token", error_code="PLATFORM_TOKEN_REQUIRED"
+        )
+    principal = await authenticate_platform_token(credentials.credentials, db)
+    return ResponseModel.success(
+        data=PlatformIdentityOut(
+            principal_id=str(principal.principal_id),
+            principal_name=principal.principal_name,
+            permissions=sorted(principal.permissions),
+        )
+    )
 
 
 @control_router.post(

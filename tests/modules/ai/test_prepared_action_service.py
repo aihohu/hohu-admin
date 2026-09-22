@@ -763,7 +763,9 @@ async def test_action_status_cas_allows_only_one_execution_claim(db_session) -> 
 
 async def test_pending_query_is_scoped_and_requires_active_source(db_session) -> None:
     owner = (
-        await db_session.execute(select(User).where(User.user_name == "admin"))
+        await db_session.execute(
+            select(User).where(User.tenant_id == 0, User.user_name == "admin")
+        )
     ).scalar_one()
     conversation = AiConversation(
         tenant_id=0, user_id=owner.user_id, title="prepared pending"

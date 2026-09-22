@@ -10,7 +10,7 @@ from app.core.security import create_access_token, create_platform_access_token
 from app.db.session import get_db
 from app.main import app
 from app.middleware import platform_audit_middleware
-from app.modules.ai.service.agent_admin import agent_admin_service
+from app.modules.ai.service.model_service import model_service
 from app.modules.ai.service.tenant_model_policy_admin_service import (
     tenant_model_policy_admin_service,
 )
@@ -138,7 +138,7 @@ async def test_platform_http_authorizes_before_service_and_appends_completion(
     business = AsyncMock(return_value=[])
     authorized = AsyncMock(return_value=5001)
     completed = AsyncMock(return_value=5002)
-    monkeypatch.setattr(agent_admin_service, "list_agents", business)
+    monkeypatch.setattr(model_service, "list_available_with_provider", business)
     monkeypatch.setattr(auth_service, "persist_platform_audit", authorized)
     monkeypatch.setattr(
         platform_audit_middleware, "persist_platform_completion", completed
@@ -148,7 +148,7 @@ async def test_platform_http_authorizes_before_service_and_appends_completion(
 
     try:
         response = await client.get(
-            "/platform/ai/agents", headers=_platform_headers(token)
+            "/platform/ai/providers/models", headers=_platform_headers(token)
         )
     finally:
         app.dependency_overrides.pop(get_db, None)
@@ -176,7 +176,7 @@ async def test_missing_platform_audit_header_has_zero_business_side_effect(
     db.scalar.return_value = principal
     business = AsyncMock(return_value=[])
     denied = AsyncMock(return_value=5003)
-    monkeypatch.setattr(agent_admin_service, "list_agents", business)
+    monkeypatch.setattr(model_service, "list_available_with_provider", business)
     monkeypatch.setattr(auth_service, "persist_platform_audit", denied)
     app.dependency_overrides[get_db] = lambda: db
     token = create_platform_access_token(subject="82", principal_version=1)
@@ -184,7 +184,7 @@ async def test_missing_platform_audit_header_has_zero_business_side_effect(
     headers.pop("X-Platform-Reason")
 
     try:
-        response = await client.get("/platform/ai/agents", headers=headers)
+        response = await client.get("/platform/ai/providers/models", headers=headers)
     finally:
         app.dependency_overrides.pop(get_db, None)
 
@@ -207,7 +207,9 @@ async def test_platform_completion_failure_log_does_not_render_exception_secrets
     )
     db = AsyncMock()
     db.scalar.return_value = principal
-    monkeypatch.setattr(agent_admin_service, "list_agents", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        model_service, "list_available_with_provider", AsyncMock(return_value=[])
+    )
     monkeypatch.setattr(
         auth_service, "persist_platform_audit", AsyncMock(return_value=9)
     )
@@ -220,7 +222,7 @@ async def test_platform_completion_failure_log_does_not_render_exception_secrets
 
     try:
         response = await client.get(
-            "/platform/ai/agents", headers=_platform_headers(token)
+            "/platform/ai/providers/models", headers=_platform_headers(token)
         )
     finally:
         app.dependency_overrides.pop(get_db, None)

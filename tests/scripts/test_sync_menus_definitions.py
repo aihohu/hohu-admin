@@ -9,10 +9,63 @@ MENU_DEFINITIONS，形状正确（``menu_type=F`` / ``parent_route=system_user``
 ``python scripts/sync_menus.py`` 后会落到 sys_menu 表。
 """
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from app.modules.system.constants import USER_ROLE_AUTH_PERMISSION
-from scripts.sync_menus import MENU_DEFINITIONS
+from scripts.sync_menus import MENU_DEFINITIONS, _retire_platform_only_tenant_menus
+
+
+class _ScalarResult:
+    def __init__(self, values=()) -> None:
+        self.values = list(values)
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self.values
+
+
+def test_platform_only_ai_management_is_not_tenant_menu_definition() -> None:
+    routes = {item.get("route_name") for item in MENU_DEFINITIONS}
+    permissions = {item.get("permission") for item in MENU_DEFINITIONS}
+
+    assert routes.isdisjoint({"ai_provider", "ai_agent"})
+    assert permissions.isdisjoint(
+        {
+            "ai:provider:list",
+            "ai:provider:add",
+            "ai:provider:edit",
+            "ai:provider:delete",
+            "ai:provider:test-model",
+            "ai:agent:list",
+            "ai:agent:add",
+            "ai:agent:edit",
+            "ai:agent:delete",
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_platform_menu_retirement_is_tenant_scoped() -> None:
+    db = AsyncMock()
+    db.execute = AsyncMock(
+        side_effect=[
+            _ScalarResult([1001]),
+            _ScalarResult([1002]),
+            _ScalarResult(),
+            _ScalarResult(),
+            _ScalarResult(),
+        ]
+    )
+
+    await _retire_platform_only_tenant_menus(db)
+
+    statements = [str(call.args[0]) for call in db.execute.await_args_list]
+    assert len(statements) == 5
+    assert all("tenant_id" in statement for statement in statements)
 
 
 def _find_by_permission(perm: str) -> dict:

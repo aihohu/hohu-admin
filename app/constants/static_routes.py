@@ -11,6 +11,17 @@ CONSTANT_ROUTES = [
         },
     },
     {
+        "name": "empty",
+        "path": "/empty",
+        "component": "layout.blank$view.empty",
+        "meta": {
+            "title": "empty",
+            "i18nKey": "route.empty",
+            "constant": True,
+            "hideInMenu": True,
+        },
+    },
+    {
         "name": "404",
         "path": "/404",
         "component": "layout.blank$view.404",
