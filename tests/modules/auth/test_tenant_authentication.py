@@ -283,7 +283,9 @@ def test_hosted_login_requires_explicit_release_gate_from_settings():
 def test_production_hosted_mode_requires_an_exact_release_build_sha():
     arguments = {
         "DATABASE_URL": settings.DATABASE_URL,
-        "SECRET_KEY": settings.SECRET_KEY,
+        # 环境无关的强密钥：settings.SECRET_KEY 在 ENV=test 下是 .env.test
+        # 的公开占位符，会被 prod 哨兵校验拒绝，导致测试依赖运行环境。
+        "SECRET_KEY": "a-unique-production-secret-with-at-least-32-characters",
         "ENV": "prod",
         "TENANT_MODE": "hosted",
         "TENANT_HOSTED_LOGIN_ENABLED": True,
