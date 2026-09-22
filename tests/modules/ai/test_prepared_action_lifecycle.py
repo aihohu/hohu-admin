@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from tenant_helpers import tenant_context
 
 from app.core.tenant import PlatformContext
@@ -19,6 +20,71 @@ PLATFORM = PlatformContext(
     correlation_id="plan3",
 )
 TENANT = tenant_context(actor_user_id=103)
+
+
+@pytest.mark.parametrize(
+    "current_status", ["pending_confirmation", "approved", "running"]
+)
+async def test_periodic_expiry_rechecks_status_before_finalizing(current_status):
+    candidate = SimpleNamespace(
+        action_id=9100,
+        confirmation_id="cid_expiry",
+        status="pending_confirmation",
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        guard_owner_token=None,
+        conversation_id=100,
+        tenant_id=0,
+        user_id=103,
+        execute_tool_call_id="tc_expiry",
+        row_version=1,
+    )
+    current = SimpleNamespace(**vars(candidate))
+    current.status = current_status
+    scan_db, cleanup_db = MagicMock(), MagicMock()
+    scan_result = MagicMock()
+    scan_result.scalars.return_value.all.return_value = [candidate]
+    scan_db.execute = AsyncMock(return_value=scan_result)
+    cleanup_db.begin.return_value.__aenter__ = AsyncMock()
+    cleanup_db.begin.return_value.__aexit__ = AsyncMock()
+    factory = MagicMock()
+    factory.return_value.__aenter__ = AsyncMock(side_effect=[scan_db, cleanup_db])
+    factory.return_value.__aexit__ = AsyncMock()
+    with (
+        patch("app.modules.ai.lifecycle.AsyncSessionLocal", factory),
+        patch(
+            "app.modules.ai.lifecycle._tenant_context", AsyncMock(return_value=TENANT)
+        ),
+        patch(
+            "app.modules.ai.lifecycle.prepared_action_service.get_by_confirmation_id",
+            AsyncMock(return_value=current),
+        ),
+        patch(
+            "app.modules.ai.lifecycle.prepared_action_service.transition_status",
+            AsyncMock(return_value=current),
+        ) as transition,
+        patch(
+            "app.modules.ai.lifecycle.operation_log_service.get_by_tool_call_id",
+            AsyncMock(return_value=None),
+        ),
+        patch(
+            "app.modules.ai.lifecycle.chat_run_finalizer.finalize_prepared_action",
+            AsyncMock(),
+        ) as finalize,
+        patch("app.modules.ai.lifecycle.hitl_manager.delete_pending", AsyncMock()),
+    ):
+        cleaned = await cleanup_prepared_actions_on_startup(
+            MagicMock(), platform=PLATFORM, expired_only=True
+        )
+    compiled = scan_db.execute.await_args.args[0].compile()
+    assert "expires_at <=" in str(compiled)
+    assert "approved" not in compiled.params.values()
+    assert cleaned == (1 if current_status == "pending_confirmation" else 0)
+    if cleaned:
+        assert transition.await_args.kwargs["target_status"].value == "expired"
+        finalize.assert_awaited_once()
+    else:
+        transition.assert_not_awaited()
+        finalize.assert_not_awaited()
 
 
 async def test_startup_keeps_unexpired_pending_when_redis_was_flushed() -> None:

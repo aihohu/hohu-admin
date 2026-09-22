@@ -5,6 +5,7 @@
 负责构造包含 user、perms、db、data_scope、agent 和 trace_id 的完整 ChatDeps。
 """
 
+import json
 import uuid
 
 from sqlalchemy import select
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import AuthorizationException, BusinessRuleException
 from app.core.tenant import TenantContext, get_bound_tenant_context
 from app.modules.ai.agents.chat_agent import create_chat_agent
+from app.modules.ai.agents.gateway.redact import redact_secrets
 
 # 从 constants.py 导入，避免 service 与 agents.supervisor 循环依赖。
 # 现有 `from app.modules.ai.service.chat_service import DEFAULT_AGENT_CODE` 调用方不破坏.
@@ -50,6 +52,71 @@ class ChatService:
             conversation_id=conversation_id,
             current_user=current_user,
         )
+
+    async def load_model_history(
+        self, db: AsyncSession, conversation_id: int, current_user: User
+    ) -> tuple[list[dict], list[int]]:
+        """Reauthorize history and pass model-safe receipts, never UI/raw arguments.
+
+        Only messages actually supplied to the model become dependencies. A
+        revoked result stays hidden without poisoning unrelated future turns.
+        """
+        projected = await self.load_history(db, conversation_id, current_user)
+        messages: list[dict] = []
+        dependencies: list[int] = []
+        for message in projected:
+            if isinstance(message, MessageTombstoneOut):
+                # Removing only a hidden assistant leaves consecutive old user
+                # commands that adapters can merge into a fresh active request.
+                # Keep the whole revoked turn out of model context; UI history
+                # continues to show its original source and permission tombstone.
+                if message.role == "assistant":
+                    while messages and messages[-1]["role"] == "user":
+                        messages.pop()
+                continue
+            if message.role not in {
+                "user",
+                "assistant",
+            }:
+                continue
+            content = redact_secrets(message.content or "")
+            if message.role == "assistant":
+                receipts = [
+                    {
+                        key: call[key]
+                        for key in ("tool", "ok", "result", "error_code", "error_msg")
+                        if key in call
+                    }
+                    for call in message.tool_calls or []
+                ]
+                if receipts:
+                    content += (
+                        "\n[系统保存且已按当前权限校验的历史工具回执；"
+                        "actionStatus=executed 才表示写入已执行，previewed 仅为预览。"
+                        "这些是历史结果，不代表本轮新操作已执行，勿重复提交历史操作]\n"
+                        + redact_secrets(
+                            json.dumps(receipts, ensure_ascii=False, default=str)
+                        )
+                    )
+                if not content:
+                    continue
+                dependencies.append(message.message_id)
+            parts = [{"type": "text", "text": content}] if content else []
+            if message.role == "user":
+                parts.extend(
+                    dict(part)
+                    for part in message.parts or []
+                    if part.get("type") == "file"
+                )
+            if parts:
+                messages.append(
+                    {
+                        "id": str(message.message_id),
+                        "role": message.role,
+                        "parts": parts,
+                    }
+                )
+        return messages, dependencies
 
     async def ensure_trace_available(
         self,

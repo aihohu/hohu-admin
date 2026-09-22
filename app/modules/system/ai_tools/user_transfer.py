@@ -1,9 +1,8 @@
 """User import and export AI tools."""
 
 from datetime import timedelta
+from pathlib import PurePosixPath
 from typing import Any, Literal
-
-from sqlalchemy import func, select
 
 from app.constants import EnableStatus
 from app.core.exceptions import (
@@ -23,7 +22,7 @@ from app.modules.ai.agents.tools.file_access import (
 )
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.core.context import AiToolContext
-from app.modules.system.models.user import User
+from app.utils.attachment_filename import attachment_display_name
 
 from .common import (
     _result_projection,
@@ -83,10 +82,16 @@ async def _load_file_bytes(ctx: AiToolContext, file_id: str) -> tuple[bytes, str
         file_id,
         policy=_USER_IMPORT_FILE_POLICY,
     )
-    # Use the resolved on-disk name: its suffix has already been checked against
-    # the trusted DB extension and MIME.  ``record.file_name`` is a bare
-    # Snowflake ID, so persisting it would lose the CSV/XLSX parser contract.
-    return protected.data, protected.path.name, protected.mime_type
+    # Display the original label only after ACL/content validation. A matching
+    # suffix preserves the parser contract for the later preview-token replay.
+    original = attachment_display_name(protected.record.original_name)
+    filename = (
+        original
+        if original
+        and PurePosixPath(original).suffix.lower() == protected.path.suffix.lower()
+        else protected.path.name
+    )
+    return protected.data, filename, protected.mime_type
 
 
 @ai_tool(
@@ -168,21 +173,32 @@ async def user_import_preview(
     try:
         records = parse_import_excel(file_bytes, mime_type)
     except ImportErrorCollection as exc:
+        field_labels = {
+            "user_name": "用户名",
+            "employee_no": "工号",
+            "nickname": "昵称",
+            "user_email": "邮箱",
+            "user_phone": "手机号",
+            "dept_input": "部门",
+            "role_input": "角色",
+            "user_gender": "性别",
+            "status": "状态",
+        }
         visible_errors = exc.errors[:20]
         details = "; ".join(
             (
-                f"row {error.row_num}, {error.field}: "
-                f"{' '.join(error.reason.split())[:160]} "
+                f"第 {error.row_num} 行，{field_labels.get(error.field, error.field)}："
+                f"{' '.join(error.reason.replace(error.field, field_labels.get(error.field, error.field)).split())[:160]} "
                 f"[{error.error_code}]"
             )
             for error in visible_errors
         )
         remaining = len(exc.errors) - len(visible_errors)
         if remaining > 0:
-            details = f"{details}; {remaining} more field errors"
+            details = f"{details}；另有 {remaining} 个字段错误"
         return ToolResult.failure(
             "AI_IMPORT_FIELD_ERRORS",
-            f"Import validation failed: {details}",
+            f"导入校验失败：{details}。请修改这些单元格后重新上传；本次未导入任何用户。",
             validation_error_count=len(exc.errors),
         )
 
@@ -218,11 +234,56 @@ async def user_import_preview(
         "conflict": dry_run_result.conflict_count,
         "outOfScope": dry_run_result.out_of_scope_count,
     }
+    problem_rows = [
+        *getattr(dry_run_result, "conflict_records", []),
+        *getattr(dry_run_result, "out_of_scope_records", []),
+    ]
+    issues = []
+    for row in problem_rows[:20]:
+        safe_reason = str(row.reason)
+        if row.value:
+            safe_reason = safe_reason.replace(str(row.value), "[已隐藏]")
+        issues.append(
+            {
+                "rowNum": row.row_num,
+                "field": row.field,
+                "reason": safe_reason[:160],
+                "errorCode": row.error_code,
+            }
+        )
+    fields = [
+        {"label": "总行数", "value": str(dry_run_result.total)},
+        {"label": "可新增", "value": str(dry_run_result.new_count)},
+        {"label": "已存在", "value": str(dry_run_result.exists_count)},
+        {"label": "冲突", "value": str(dry_run_result.conflict_count)},
+        {"label": "超出数据范围", "value": str(dry_run_result.out_of_scope_count)},
+    ]
+    field_names = {
+        "dept_input": "部门",
+        "role_input": "角色",
+        "user_name": "用户名",
+        "employee_no": "工号",
+    }
+    fields.extend(
+        {
+            "label": f"第 {issue['rowNum']} 行 · {field_names.get(issue['field'], issue['field'])}",
+            "value": f"{issue['reason']} [{issue['errorCode']}]",
+        }
+        for issue in issues
+    )
+    if len(problem_rows) > len(issues):
+        fields.append(
+            {
+                "label": "其他问题",
+                "value": f"另有 {len(problem_rows) - len(issues)} 条，请在导入历史查看",
+            }
+        )
     return ToolResult.success(
         data={
             "batchId": batch.batch_id,
             "total": dry_run_result.total,
             "summary": summary,
+            "issues": issues,
             "policy": {
                 "onConflict": on_conflict,
                 "syncMode": sync_mode,
@@ -232,6 +293,8 @@ async def user_import_preview(
         ui=UIResult(
             view_type="detail_card",
             view_data={
+                "title": "导入预览（尚未导入）",
+                "fields": fields,
                 "batchId": batch.batch_id,
                 "total": dry_run_result.total,
                 "summary": summary,
@@ -240,7 +303,9 @@ async def user_import_preview(
                     "syncMode": sync_mode,
                 },
                 "expiresAt": (
-                    batch.created_at.isoformat() if batch.created_at else None
+                    (batch.created_at + timedelta(minutes=10)).isoformat()
+                    if batch.created_at
+                    else None
                 ),
             },
             audit={
@@ -445,8 +510,7 @@ async def user_import_execute(
         name="user.export",
         agent="user_mgmt",
         summary=(
-            "Export xlsx → {exportId,rowCount,downloadReady}. "
-            "Reason required; filters: name/email/status."
+            "导出一个 Excel 文件。多人精确名单用 user_names，不用公共前缀；必填 reason，支持其他筛选。"
         ),
         required_perms=("system:user:export",),
         risk="high",
@@ -458,7 +522,7 @@ async def user_import_execute(
         dry_run_supported=True,
         # 导出结果使用详情卡，并提供鉴权下载地址。
         result_view="detail_card",
-        args_summary_fields=("reason",),
+        args_summary_fields=("reason", "user_names", "user_name", "status"),
     )
 )
 async def user_export(
@@ -466,6 +530,7 @@ async def user_export(
     *,
     reason: str,
     user_name: str | None = None,
+    user_names: list[str] | None = None,
     nickname: str | None = None,
     user_email: str | None = None,
     user_phone: str | None = None,
@@ -480,6 +545,7 @@ async def user_export(
     Args:
         reason: 业务理由（必填，1-256 字符）
         user_name / nickname / user_email / user_phone: filter（可选）
+        user_names: 精确账号名单（1-100 项），多人合并成一个文件；不要用公共前缀替代
         status: '1' (启用) / '2' (禁用)，None=不过滤
     """
     from app.modules.ai.service.result_projection_service import (  # noqa: PLC0415
@@ -497,6 +563,7 @@ async def user_export(
     canonical_status = None if status is None else _validate_enable_status(status)
     filter_ = UserExportFilter(
         user_name=user_name,
+        user_names=user_names,
         nickname=nickname,
         user_email=user_email,
         user_phone=user_phone,
@@ -596,6 +663,7 @@ async def user_export(
                 "row_count": row_count,
                 "filter": {
                     "user_name": user_name,
+                    "user_names": filter_.user_names,
                     "nickname": nickname,
                     "user_email": user_email,
                     "user_phone": user_phone,
@@ -613,6 +681,7 @@ async def _dry_run_user_export(
     *,
     reason: str,  # noqa: ARG001  与 execute 签名对齐；dry_run 阶段不重复校验 reason
     user_name: str | None = None,
+    user_names: list[str] | None = None,
     nickname: str | None = None,
     user_email: str | None = None,
     user_phone: str | None = None,
@@ -620,27 +689,30 @@ async def _dry_run_user_export(
 ) -> Any:
     """预估导出行数供确认界面展示。
 
-    用 User.count(*) + filter 估算行数，不实际跑导出（避免重复建 task）。
+    与执行复用授权查询和精确名单校验，不创建任务或文件。
     行数 > USER_EXPORT_ASYNC_THRESHOLD → 提示用户缩窄 filter；行数为 0 → 警告。
     """
     from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
+    from app.modules.system.schemas.user_transfer import (  # noqa: PLC0415
+        UserExportFilter,
+    )
+    from app.modules.system.service.user_export_service import (  # noqa: PLC0415
+        _query_users_with_data_scope,
+    )
 
     canonical_status = None if status is None else _validate_enable_status(status)
-    base = select(User).where(*ctx.data_scope.filters)
-    if user_name:
-        base = base.where(User.user_name.ilike(f"%{user_name}%"))
-    if nickname:
-        base = base.where(User.nickname.ilike(f"%{nickname}%"))
-    if user_email:
-        base = base.where(User.user_email == user_email)
-    if user_phone:
-        base = base.where(User.user_phone == user_phone)
-    if canonical_status is not None:
-        base = base.where(User.status == canonical_status)
-
-    estimated = int(
-        await ctx.db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    filter_ = UserExportFilter(
+        user_name=user_name,
+        user_names=user_names,
+        nickname=nickname,
+        user_email=user_email,
+        user_phone=user_phone,
+        status=canonical_status,
     )
+    rows = await _query_users_with_data_scope(
+        ctx.db, filter_, ctx.user, tenant=ctx.tenant
+    )
+    estimated = len(rows)
 
     if estimated == 0:
         return DryRunResult(
@@ -667,7 +739,16 @@ async def _dry_run_user_export(
         ok=True,
         count=estimated,
         reason=f"将导出约 {estimated} 行用户数据到 xlsx 文件（30 天后过期清理）",
-        examples=[
-            f"filter: user_name={user_name or '*'}, status={canonical_status or '*'}",
-        ],
+        examples=[row.user_name for row in rows[:5]],
+        confirmation_fields=(
+            [
+                {
+                    "label": "user_names",
+                    "value": user_names,
+                    "display_value": "、".join(filter_.user_names),
+                }
+            ]
+            if filter_.user_names
+            else None
+        ),
     )

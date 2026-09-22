@@ -796,10 +796,49 @@ class TestPreparedPreviewOnlyFlow:
 
 
 class TestHitlFlow:
+    async def test_lost_confirmation_guard_returns_its_domain_error(self, monkeypatch):
+        from app.modules.ai.service.chat_run_service import chat_run_guard
+
+        _register_test_tools()
+        deps = _build_deps()
+        deps.guard_owner_token = "lost-owner"
+        monkeypatch.setattr(
+            chat_run_guard, "handoff_pending", AsyncMock(return_value=False)
+        )
+        result = await execute_tool(_TEST_TOOL_HIGH, {"x": 1}, deps)
+        assert result.error_code == "AI_CHAT_GUARD_LOST"
+        assert not await redis_module.redis_client.keys("ai:confirm:*")
+
+    async def test_negative_dry_run_never_requests_approval(self, monkeypatch):
+        _register_test_tools()
+        registered = ToolRegistry.get().find(_TEST_TOOL_DRY_RUN_DENIED)
+        monkeypatch.setattr(
+            registered,
+            "dry_run_fn",
+            AsyncMock(
+                return_value=DryRunResult(
+                    ok=False,
+                    count=0,
+                    reason="不能通过 AI 重置自己的密码",
+                )
+            ),
+        )
+        events = []
+        deps = _build_deps()
+
+        async def capture(event):
+            events.append(event)
+
+        deps.signal_event = capture
+        result = await execute_tool(_TEST_TOOL_DRY_RUN_DENIED, {}, deps)
+        assert not result.ok
+        assert result.error_code == "AI_PREVIEW_REJECTED"
+        assert not any(isinstance(event, ConfirmationRequiredEvent) for event in events)
+
     async def test_action_persistence_failure_rolls_back_pending_handoff(
         self, monkeypatch
     ) -> None:
-        """没有持久化动作时，不创建 Redis pending 或 handed-off guard。"""
+        """失败准备清理 pending，但活跃会话保留租约供后续步骤使用。"""
         from app.modules.ai.service.chat_run_service import chat_run_guard
         from app.modules.ai.service.prepared_action_service import (
             prepared_action_service,
@@ -811,23 +850,28 @@ class TestHitlFlow:
 
         handoff = AsyncMock(return_value=True)
         release = AsyncMock(return_value=True)
+        renew = AsyncMock(return_value=True)
         delete_pending = AsyncMock()
         rollback_quota = AsyncMock()
         persist = AsyncMock(side_effect=RuntimeError("action persistence failed"))
         monkeypatch.setattr(chat_run_guard, "handoff_pending", handoff)
         monkeypatch.setattr(chat_run_guard, "release", release)
+        monkeypatch.setattr(chat_run_guard, "renew", renew)
         monkeypatch.setattr(hitl_manager, "delete_pending", delete_pending)
         monkeypatch.setattr(prepared_action_service, "create_pending", persist)
         monkeypatch.setattr(
             "app.modules.ai.agents.gateway.executor.decr_quota", rollback_quota
         )
 
-        with pytest.raises(RuntimeError, match="action persistence failed"):
-            await execute_tool(_TEST_TOOL_HIGH, {"x": 1}, deps)
+        result = await execute_tool(_TEST_TOOL_HIGH, {"x": 1}, deps)
+        assert result.ok is False
+        assert result.error_code == "AI_CONFIRMATION_SETUP_FAILED"
+        assert result.projection is not None
 
         handoff.assert_awaited_once()
         delete_pending.assert_awaited_once()
-        release.assert_awaited_once_with(
+        release.assert_not_awaited()
+        renew.assert_awaited_once_with(
             redis_module.redis_client,
             tenant=deps.tenant,
             conversation_id=100,
@@ -848,7 +892,8 @@ class TestHitlFlow:
                     )
                 )
             ).scalar_one()
-        assert log.status == "expired"
+        assert log.status == "failed"
+        assert log.error_code == "AI_CONFIRMATION_SETUP_FAILED"
 
     def test_direct_action_revalidates_current_gateway_binding(self) -> None:
         from types import SimpleNamespace

@@ -526,6 +526,66 @@ async def test_list_supports_original_agent_filter(
     assert len(sentinel_rows) >= 2
 
 
+@pytest.mark.parametrize("filter_kind", ["name", "code", "mixed"])
+async def test_agent_name_filters_preserve_tenant_scope_and_pagination(
+    db_session, filter_kind
+):
+    from app.core.id_generator import next_id
+    from app.modules.ai.models.agent import AiAgent
+    from app.modules.ai.models.routing_feedback import AiRoutingFeedback
+    from app.modules.ai.service.routing_feedback_query import (
+        routing_feedback_query_service,
+    )
+    from tests.tenant_helpers import tenant_context
+
+    marker = str(next_id())
+    original_code, corrected_code = f"orig_{marker}", f"corr_{marker}"
+    original_name, corrected_name = f"原助手{marker}", f"纠正助手{marker}"
+    for code, name in [
+        (original_code, original_name),
+        (corrected_code, corrected_name),
+    ]:
+        db_session.add(
+            AiAgent(code=code, name=name, description="验收名称筛选", enabled=True)
+        )
+    tenant = tenant_context(tenant_id=next_id(), actor_user_id=next_id())
+    foreign_tenant_id = next_id()
+    for tenant_id in [tenant.tenant_id, tenant.tenant_id, foreign_tenant_id]:
+        db_session.add(
+            AiRoutingFeedback(
+                tenant_id=tenant_id,
+                message_id=next_id(),
+                user_id=tenant.actor_user_id,
+                original_agent=original_code,
+                corrected_agent=corrected_code,
+                feedback="wrong",
+                create_time=datetime.now(),
+            )
+        )
+    await db_session.flush()
+    filters = {
+        "original_agent": original_code if filter_kind == "code" else original_name,
+        "corrected_agent": corrected_name if filter_kind == "name" else corrected_code,
+    }
+    seen = []
+    for page in [1, 2, 3]:
+        items, total = await routing_feedback_query_service.list_items(
+            db_session,
+            days=7,
+            current=page,
+            size=1,
+            feedback="wrong",
+            tenant=tenant,
+            **filters,
+        )
+        assert total == 2
+        seen.extend(item.feedback_id for item in items)
+        assert all(item.original_agent_name == original_name for item in items)
+        assert all(item.corrected_agent_name == corrected_name for item in items)
+    assert len(set(seen)) == 2
+    assert seen == sorted(seen, reverse=True)
+
+
 async def test_list_no_message_content_leak(
     authed_client: tuple[AsyncClient, str], db_session, seed_feedback
 ):

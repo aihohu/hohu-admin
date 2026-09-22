@@ -1,8 +1,27 @@
 """Public upload mount must never expose private/legacy AI artifacts."""
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from app.core.public_uploads import PublicUploadStaticFiles
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+@pytest.mark.parametrize("suffix", ["", ".", "::$DATA"])
+async def test_chat_image_public_reference_is_denied(tmp_path, method, suffix):
+    image = tmp_path / "tenant-0" / "secret.png"
+    image.parent.mkdir()
+    image.write_bytes(b"private-image")
+    classify = AsyncMock(return_value=False)
+    static = PublicUploadStaticFiles(directory=tmp_path, is_public=classify)
+    response = await static.get_response(
+        f"tenant-0/secret.png{suffix}",
+        {"type": "http", "method": method, "headers": []},
+    )
+    assert response.status_code == 404
+    assert response.headers["cache-control"] == "no-store"
+    classify.assert_awaited_once_with("/uploads/tenant-0/secret.png")
 
 
 @pytest.mark.parametrize("method", ["GET", "HEAD"])

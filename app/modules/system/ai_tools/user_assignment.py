@@ -23,6 +23,7 @@ from app.modules.system.constants import USER_ROLE_AUTH_PERMISSION
 from app.modules.system.models.user import User
 
 from .common import (
+    LookupLimit,
     _result_projection,
 )
 
@@ -265,7 +266,7 @@ async def _dry_run_user_update_dept(
             },
             {
                 "label": "dept_assignments",
-                "value": dept_assignments,
+                "value": canonical_assignments,
                 "display_value": f"{old_display} → {new_display}",
             },
         ],
@@ -360,7 +361,7 @@ async def user_role_lookup(
     ctx: AiToolContext,
     *,
     query: str,
-    limit: int = _ROLE_LOOKUP_MAX_MATCHES,
+    limit: LookupLimit = _ROLE_LOOKUP_MAX_MATCHES,
 ) -> ToolResult:
     """Return only enabled role candidates within the delegation ceiling."""
     from app.modules.system.service.user_role_assignment_service import (  # noqa: PLC0415
@@ -573,7 +574,7 @@ async def _dry_run_user_update_roles(
             },
             {
                 "label": "role_ids",
-                "value": role_ids,
+                "value": list(preview.new_role_ids),
                 "display_value": f"{old_display} → {new_display}",
             },
         ],

@@ -52,9 +52,13 @@ class TraceService:
         if query.status is not None:
             filters.append(AiOperationLog.status == query.status)
         if query.queued_from is not None:
-            filters.append(AiOperationLog.queued_at >= query.queued_from)
+            filters.append(
+                AiOperationLog.queued_at >= query.queued_from.replace(tzinfo=None)
+            )
         if query.queued_to is not None:
-            filters.append(AiOperationLog.queued_at <= query.queued_to)
+            filters.append(
+                AiOperationLog.queued_at <= query.queued_to.replace(tzinfo=None)
+            )
         return filters
 
     async def list_traces(

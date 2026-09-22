@@ -28,11 +28,14 @@ from app.modules.system.service.dept_selector import department_selector
 from app.modules.system.service.dept_service import dept_service
 
 from .common import (
+    EnableStatusFilters,
+    LookupLimit,
     _bound_confirmation_fields,
     _coerce_list_limit,
     _confirmation_display,
     _enable_status_label_key,
     _enable_status_semantic,
+    _model_list_data,
     _model_validate_for_ai,
     _result_projection,
     _validate_enable_status,
@@ -44,10 +47,7 @@ from .common import (
     AiToolMeta(
         name="dept.list",
         agent="dept_mgmt",
-        summary=(
-            "List depts → {total, limit, sample[3]}. Frontend renders data_list. "
-            "Use dept.count for count-only."
-        ),
+        summary="List scoped records (max 50). Answer from records; use hasMore and listUrl for remaining rows.",
         required_perms=("system:dept:list",),
         risk="low",
         readonly=True,
@@ -59,12 +59,12 @@ from .common import (
 )
 async def dept_list(
     ctx: AiToolContext,
-    filters: dict[str, Any] | None = None,
+    filters: EnableStatusFilters | None = None,
     limit: int | None = None,
 ) -> ToolResult:
     """List departments and return a bounded compact projection.
 
-    The LLM receives ``data.{total, limit, sample[3]}`` for prompt caching.
+    The LLM receives ``data.{total, limit, records, hasMore, listUrl}`` for prompt caching.
     The UI receives all bounded rows in ``ui.view_data.{columns, rows}``.
 
     Filters:
@@ -129,11 +129,7 @@ async def dept_list(
         for d in rows
     ]
     return ToolResult.success(
-        data={
-            "total": total,
-            "limit": safe_limit,
-            "sample": records[:3],
-        },
+        data=_model_list_data(records, total, safe_limit, "dept", ctx.trace_id),
         projection=_result_projection(scope_bound=True),
         ui=UIResult(
             view_type="data_list",
@@ -263,7 +259,7 @@ async def user_dept_lookup(
     ctx: AiToolContext,
     *,
     query: str,
-    limit: int = _DEPT_LOOKUP_MAX_MATCHES,
+    limit: LookupLimit = _DEPT_LOOKUP_MAX_MATCHES,
 ) -> ToolResult:
     """Return enabled scoped department candidates without leaking ancestors."""
     return await _lookup_departments(
@@ -294,7 +290,7 @@ async def dept_lookup(
     ctx: AiToolContext,
     *,
     query: str,
-    limit: int = _DEPT_LOOKUP_MAX_MATCHES,
+    limit: LookupLimit = _DEPT_LOOKUP_MAX_MATCHES,
 ) -> ToolResult:
     """Return visible Department Agent management targets in any status."""
     return await _lookup_departments(
@@ -640,7 +636,8 @@ async def _dry_run_dept_update(
                 field["display_value"] = leader_fact["display"]
     return DryRunResult(
         ok=True,
-        count=len(preview.affected_user_ids),
+        count=max(1, len(preview.affected_user_ids)),
+        examples=[f"变更部门：1 个；关联用户：{len(preview.affected_user_ids)} 人"],
         reason=f"将更新部门 {target_dept_name or dept_id}",
         summary_key="page.ai.chat.confirmDeptUpdateSummary",
         summary_params={"deptName": target_dept_name or str(dept_id)},
@@ -726,7 +723,8 @@ async def _dry_run_dept_move(
     parent_dept_name = getattr(preview, "parent_dept_name", None)
     return DryRunResult(
         ok=True,
-        count=len(preview.affected_user_ids),
+        count=max(1, len(preview.affected_user_ids)),
+        examples=[f"变更部门：1 个；受影响用户：{len(preview.affected_user_ids)} 人"],
         reason=f"将移动部门 {target_dept_name or dept_id}",
         summary_key="page.ai.chat.confirmDeptMoveSummary",
         summary_params={"deptName": target_dept_name or str(dept_id)},

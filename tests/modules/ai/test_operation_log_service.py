@@ -56,6 +56,27 @@ async def _start(
 
 
 class TestStartOperation:
+    @pytest.mark.parametrize("idempotent", [False, True])
+    async def test_expired_always_has_diagnostic_code(self, db_session, idempotent):
+        log_id = await _start(db_session)
+        expire = (
+            operation_log_service.mark_expired_if_pending
+            if idempotent
+            else operation_log_service.mark_expired
+        )
+        log = await expire(db_session, log_id, tenant=_tenant())
+        assert log.error_code == "AI_HITL_EXPIRED"
+
+    async def test_expired_preserves_specific_failure_reason(self, db_session):
+        log_id = await _start(db_session)
+        log = await operation_log_service.mark_expired_if_pending(
+            db_session,
+            log_id,
+            tenant=_tenant(),
+            error_code="AI_PREPARED_ACTION_SOURCE_STALE",
+        )
+        assert log.error_code == "AI_PREPARED_ACTION_SOURCE_STALE"
+
     async def test_start_pending(self, db_session) -> None:
         log_id = await _start(db_session)
         assert log_id > 0

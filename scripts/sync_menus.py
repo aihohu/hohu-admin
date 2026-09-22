@@ -1471,11 +1471,15 @@ async def sync_menus():
         if refactor_note:
             print(refactor_note)
 
-        # 1. 查询所有已存在的 route_name 和 permission
-        result = await db.execute(select(Menu.route_name))
+        # 1. 只用默认租户的菜单判断缺失项和父节点。
+        result = await db.execute(
+            select(Menu.route_name).where(Menu.tenant_id == DEFAULT_TENANT_ID)
+        )
         existing_routes = set(result.scalars().all())
 
-        result2 = await db.execute(select(Menu.permission))
+        result2 = await db.execute(
+            select(Menu.permission).where(Menu.tenant_id == DEFAULT_TENANT_ID)
+        )
         existing_perms = {p for p in result2.scalars().all() if p is not None}
 
         # 2. 过滤出需要新增的菜单（F 类型按 permission 去重，其他按 route_name 去重）
@@ -1510,7 +1514,8 @@ async def sync_menus():
         }
         result = await db.execute(
             select(Menu.menu_id, Menu.route_name).where(
-                Menu.route_name.in_(parent_routes_needed)
+                Menu.tenant_id == DEFAULT_TENANT_ID,
+                Menu.route_name.in_(parent_routes_needed),
             )
         )
         route_to_id = {name: mid for mid, name in result.all()}
@@ -1589,7 +1594,10 @@ async def sync_menus():
         # 匹配前端 @elegant-router kebab-case 命名约定，避免动态路由模式下 view component
         # 查找失败（transformElegantRouteToVueRoute 会抛 "View component not found" 静默丢弃路由）
         result = await db.execute(
-            select(Menu).where(Menu.route_name == "ai_routing_feedback")
+            select(Menu).where(
+                Menu.tenant_id == DEFAULT_TENANT_ID,
+                Menu.route_name == "ai_routing_feedback",
+            )
         )
         old_feedback_menu = result.scalars().first()
         if old_feedback_menu:

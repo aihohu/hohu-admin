@@ -123,6 +123,7 @@ class ChatDeps:
     """进入 HITL pending 后为 True；原 SSE 断开不得释放 guard。"""
 
     resolved_model_id: int | None = None
+    has_image_input: bool = False
     """Stable model selected for this run and frozen into new prepared actions."""
 
     resolved_provider_id: int | None = None

@@ -16,10 +16,11 @@ import ipaddress
 import json
 import logging
 import re
+from copy import deepcopy
 from http import HTTPStatus
-from pathlib import Path
 from urllib.parse import urlparse
 
+from anyio import CancelScope
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import ValidationError
@@ -35,7 +36,7 @@ from app.core.config import settings
 from app.core.exceptions import AuthorizationException, BusinessRuleException
 from app.core.redis import redis_client
 from app.core.tenant import TenantContext, get_bound_tenant_context
-from app.db.session import get_db
+from app.db.session import AsyncSessionLocal, get_db
 from app.modules.ai.agents.hitl.events import (
     AiErrorEvent,
     AiStreamEvent,
@@ -83,6 +84,8 @@ from app.modules.ai.service.result_projection_service import (
     result_projection_service,
 )
 from app.modules.system.models.user import User
+from app.modules.system.service.file_service import file_service
+from app.utils.attachment_filename import attachment_display_name
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +102,7 @@ def _protected_file_id(value: object) -> str | None:
 
 
 def _prepare_messages_for_llm(messages: list[dict]) -> list[dict]:
-    """Replace protected non-image file parts with stable opaque references."""
+    """Keep protected references and bounded, untrusted display labels."""
     prepared: list[dict] = []
     for message in messages:
         new_message = dict(message)
@@ -135,11 +138,17 @@ def _prepare_messages_for_llm(messages: list[dict]) -> list[dict]:
             has_exact_reference = file_id is not None and re.search(
                 rf"(?<!\d)file_id={re.escape(file_id)}(?!\d)", existing_text
             )
-            if file_id is not None and has_exact_reference is None:
+            filename = attachment_display_name(part.get("filename"))
+            if file_id is not None and (filename or has_exact_reference is None):
+                label = (
+                    f"; untrusted filename={json.dumps(filename, ensure_ascii=False)}"
+                    if filename
+                    else ""
+                )
                 filtered.append(
                     {
                         "type": "text",
-                        "text": f"[Attached file reference: file_id={file_id}]",
+                        "text": f"[Attached file reference: file_id={file_id}{label}]",
                     }
                 )
 
@@ -166,35 +175,46 @@ def _is_private_url(url: str) -> bool:
         return False
 
 
-def _convert_local_images_to_data_uri_sync(body: dict) -> dict:
-    """将 body 中内网图片 URL 替换为 base64 data URI（同步，在线程池中调用）"""
-    upload_dir = Path(settings.UPLOAD_DIR).resolve()
-    for msg in body.get("messages", []):
+async def _convert_local_images_to_data_uri(
+    body: dict, *, db: AsyncSession, tenant: TenantContext
+) -> dict:
+    """Inline authorized local uploads in a model-only copy, including history."""
+    prepared = deepcopy(body)
+    images: dict[str, str] = {}
+    for msg in prepared.get("messages", []):
         parts = msg.get("parts", [])
         for part in parts:
-            if part.get("type") != "file":
+            if part.get("type") != "file" or not str(
+                part.get("mediaType", "")
+            ).startswith("image/"):
                 continue
             url = part.get("url", "")
-            if not _is_private_url(url):
-                continue
             parsed = urlparse(url)
-            file_path = Path(parsed.path.lstrip("/")).resolve()
-            if not file_path.is_relative_to(upload_dir):
-                logger.warning("Image path outside upload dir: %s", file_path)
+            if parsed.scheme == "data" or (
+                parsed.scheme in {"http", "https"} and not _is_private_url(url)
+            ):
                 continue
-            if not file_path.exists():
-                logger.warning("Image file not found: %s", file_path)
-                continue
-            media_type = part.get("mediaType", "image/jpeg")
-            with open(file_path, "rb") as f:
-                b64 = base64.b64encode(f.read()).decode()
-            part["url"] = f"data:{media_type};base64,{b64}"
-    return body
-
-
-async def _convert_local_images_to_data_uri(body: dict) -> dict:
-    """将同步图片转换放到线程池，避免阻塞事件循环"""
-    return await asyncio.to_thread(_convert_local_images_to_data_uri_sync, body)
+            path = parsed.path
+            if (
+                not path.startswith("/uploads/")
+                or "%" in path
+                or "\\" in path
+                or any(segment in {".", ".."} for segment in path.split("/"))
+                or (parsed.netloc and not _is_private_url(url))
+            ):
+                raise BusinessRuleException(
+                    "图片引用无效，请重新上传图片",
+                    error_code="AI_IMAGE_NOT_AVAILABLE",
+                )
+            if path not in images:
+                content, media_type = await file_service.read_chat_image(
+                    db, path, tenant=tenant
+                )
+                images[path] = (
+                    f"data:{media_type};base64,{base64.b64encode(content).decode()}"
+                )
+            part["url"] = images[path]
+    return prepared
 
 
 def _format_sse_chunk(event: AiStreamEvent) -> str:
@@ -229,6 +249,9 @@ def _collect_text_delta(sse_frame: str, collected: list[str]) -> None:
     try:
         ev = json.loads(payload)
     except (json.JSONDecodeError, ValueError):
+        return
+    if isinstance(ev, dict) and ev.get("type") == "start-step":
+        collected.clear()
         return
     if (
         isinstance(ev, dict)
@@ -286,14 +309,28 @@ async def _finalize_stream_turn(
 ) -> list[AiStreamEvent]:
     """建立 durability barrier：assistant/terminal commit 完成后才构造 done。"""
     if stream_error_code is not None:
-        await db.rollback()
-        return [
-            DoneEvent(
-                trace_id=trace_id,
-                persistence="failed",
-                projection="updated",
+        failure_messages = {
+            "AI_CHAT_STOPPED": "本次回复已停止。已完成的操作以工具回执为准，可以继续提问。",
+            "AI_PROVIDER_UPSTREAM_ERROR": "模型服务暂时不可用，可以稍后重新提问。已完成的操作以工具回执为准。",
+            "AI_USAGE_LIMIT_EXCEEDED": "本次处理达到调用上限。已完成的操作以工具回执为准；其余任务可以继续办理。",
+        }
+        content = (
+            failure_messages.get(
+                stream_error_code,
+                "本次回复未完成，可以重新提问。已完成的操作以工具回执为准。",
             )
-        ]
+            + f"（{stream_error_code}）"
+        )
+        if lineage is None and agent_code is not None:
+            # This deterministic diagnostic contains no business facts. Do not
+            # expose incomplete tool events with unknown authorization lineage.
+            tool_calls = None
+            lineage = result_projection_service.freeze_lineage(
+                tenant=tenant,
+                agent_code=agent_code,
+                tool_codes=[],
+                subject_refs=[],
+            )
     content, unverified_write_claim = enforce_grounded_management_write_claim(
         content,
         agent_code=agent_code,
@@ -461,6 +498,10 @@ async def chat(
     user_message = ""
     user_parts = None
     messages = body.get("messages", [])
+    if not messages or messages[-1].get("role") != "user":
+        raise BusinessRuleException(
+            "请发送一个新问题", error_code="AI_CHAT_COMMAND_INVALID"
+        )
     if messages:
         last_msg = messages[-1]
         if last_msg.get("role") == "user":
@@ -488,8 +529,18 @@ async def chat(
         if not display_parts:
             display_parts = None
 
+    # The browser owns only the newly submitted question. Past prose, receipts
+    # and their authorization dependencies must come from the server together.
+    projection_dependency_message_ids: list[int] = []
+    if conversation_id is not None:
+        (
+            history,
+            projection_dependency_message_ids,
+        ) = await chat_service.load_model_history(db, conversation_id, _current_user)
+        body["messages"] = [*history, messages[-1]]
+
     # 将内网图片 URL 转为 base64 data URI（LLM 提供商无法访问内网）
-    body = await _convert_local_images_to_data_uri(body)
+    body = await _convert_local_images_to_data_uri(body, db=db, tenant=tenant)
 
     # 给 PydanticAI 的请求体移除非 image 文件 part + 剥 fileSize（PydanticAI FileUIPart.url
     # 必须合法 http(s) URL 且不允许 extra 字段；Excel/CSV 等业务文件无预览 URL，通过 file_id
@@ -497,6 +548,12 @@ async def chat(
     # user_parts（持久化用）已在前面提取，保留完整文件元数据用于 UI chip 渲染。
     body_for_llm = dict(body)
     body_for_llm["messages"] = _prepare_messages_for_llm(body.get("messages", []))
+    has_images = any(
+        part.get("type") == "file"
+        and str(part.get("mediaType", "")).startswith("image/")
+        for message in body_for_llm["messages"]
+        for part in message.get("parts", [])
+    )
 
     # 解析前端请求
     try:
@@ -530,20 +587,12 @@ async def chat(
 
     # 解析模型选择
     conv = None
-    projection_dependency_message_ids: list[int] = []
     if conversation_id:
         conv = await conversation_service.get_by_id(
             db,
             int(conversation_id),
             _current_user.user_id,
             tenant=tenant,
-        )
-        projection_dependency_message_ids = (
-            await result_projection_service.collect_message_projection_dependencies(
-                db,
-                conversation_id=int(conversation_id),
-                tenant=tenant,
-            )
         )
         await chat_service.ensure_trace_available(
             db,
@@ -576,6 +625,9 @@ async def chat(
             tenant=tenant,
         )
         model_name = str(selected_model.model.model_id)
+        model_authorization_service.ensure_image_support(
+            selected_model, has_images=has_images
+        )
 
     # 构造包含数据权限和粘滞路由信息的完整 ChatDeps。
     # agent_code 不存在时转换为稳定的 AI_ROUTING_FAILED 事件并记录路由日志，
@@ -872,8 +924,8 @@ async def chat(
             # 命中注入检测后不调用 Supervisor LLM，避免跨模型污染。
             route_reason = "injection_blocked_from_supervisor"
             final_agent_code = DEFAULT_AGENT_CODE
-        elif not user_message or not user_message.strip():
-            # 兜底：空消息不进 supervisor（防 LLM 乱选）
+        elif not user_message.strip() and not has_images:
+            # 无文字且无图片才是空消息；图片输入仍按授权候选路由。
             route_reason = "empty_message"
             final_agent_code = DEFAULT_AGENT_CODE
         else:
@@ -909,12 +961,26 @@ async def chat(
                     await increment_daily_count(
                         redis_client, _current_user.user_id, tenant=deps.tenant
                     )
+                    # Client history is not authoritative. Only bounded user
+                    # questions from this actor's persisted conversation inform
+                    # ellipsis; assistant/tool results never enter the router.
+                    routing_history = (
+                        await conversation_service.get_routing_history(
+                            db,
+                            conversation_id,
+                            _current_user.user_id,
+                            tenant=deps.tenant,
+                        )
+                        if conversation_id is not None
+                        else []
+                    )
                     start = time.monotonic()
                     result = await agent_router.route(
                         db,
-                        user_message,
+                        user_message or ("请描述这张图片" if has_images else ""),
                         candidates,
                         tenant=deps.tenant,
+                        history=routing_history,
                     )
                     routing_latency_ms = int((time.monotonic() - start) * 1000)
 
@@ -923,6 +989,20 @@ async def chat(
                         route_reason = result.reason
                         if result.reason == "no_candidates":
                             routing_error_code = "AI_AGENT_NOT_AVAILABLE"
+                    elif (
+                        result.clarification
+                        and has_images
+                        and result.reason == "llm_unparsable_or_out_of_scope"
+                    ):
+                        # Native vision is not a business tool category. Keep
+                        # the normal authorization checks below; never widen
+                        # the candidate set or bypass routing failures/quota.
+                        image_agent = next(
+                            (c for c in candidates if c.code == "shared"),
+                            candidates[0],
+                        )
+                        final_agent_code = image_agent.code
+                        route_reason = "native_image_authorized_candidate"
                     elif result.clarification:
                         clarification_payload = {
                             "candidates": tuple(
@@ -967,6 +1047,10 @@ async def chat(
         if conv is not None and conv.model_name != model_name:
             conv.model_name = model_name
         deps.resolved_model_id = selected_model.model.model_id
+        model_authorization_service.ensure_image_support(
+            selected_model, has_images=has_images
+        )
+        deps.has_image_input = has_images
         deps.resolved_provider_id = selected_model.provider.provider_id
 
     # 所有路由路径都写入审计日志。
@@ -1155,8 +1239,8 @@ async def chat(
     event_stream = adapter.run_stream(
         deps=deps,
         usage_limits=UsageLimits(
-            request_limit=10,  # 总 LLM 请求数上限（含初始 + 每个 tool 后续）
-            tool_calls_limit=5,  # 单轮 tool 调用上限（防 LLM 失控循环调相同 tool）
+            request_limit=20,  # Bounded allowance for lookup + approval per target.
+            tool_calls_limit=16,  # Multi-target work; repeated-failure guard stays active.
         ),
     )
 
@@ -1210,6 +1294,24 @@ async def chat(
             nonlocal stream_error_code
             try:
                 async for chunk in adapter.encode_stream(event_stream):
+                    if chunk.startswith("data: {"):
+                        try:
+                            frame = json.loads(chunk[6:].strip())
+                        except ValueError:
+                            frame = {}
+                        if frame.get("type") == "error":
+                            # Adapter errors can arrive as frames rather than
+                            # exceptions. Never expose provider/internal text.
+                            stream_error_code = "AI_PROVIDER_UPSTREAM_ERROR"
+                            await unified_queue.put(
+                                _format_sse_chunk(
+                                    AiErrorEvent(
+                                        error_code=stream_error_code,
+                                        message="本次回复未完成，请稍后重新提问",
+                                    )
+                                )
+                            )
+                            continue
                     chunk = _filter_provider_output_frame(
                         chunk,
                         suppress_content=suppress_provider_output.is_set(),
@@ -1349,12 +1451,31 @@ async def chat(
                 and not deps.guard_handoff
             ):
                 try:
-                    await chat_run_guard.release(
-                        redis_client,
-                        conversation_id=saved_conversation_id,
-                        owner_token=guard_owner_token,
-                        tenant=deps.tenant,
-                    )
+                    # Starlette cancels the response task on disconnect. Finish
+                    # the accepted source using a separate session before the
+                    # guard is released, independent of the request session.
+                    async def save_interrupted_turn() -> None:
+                        async with AsyncSessionLocal() as terminal_db:
+                            await _finalize_stream_turn(
+                                terminal_db,
+                                conversation_id=saved_conversation_id,
+                                trace_id=deps.trace_id,
+                                source_user_message_id=deps.source_user_message_id,
+                                content="",
+                                tool_calls=None,
+                                agent_code=deps.agent.code if deps.agent else None,
+                                stream_error_code="AI_CHAT_STOPPED",
+                                tenant=deps.tenant,
+                            )
+
+                    with CancelScope(shield=True):
+                        await save_interrupted_turn()
+                        await chat_run_guard.release(
+                            redis_client,
+                            conversation_id=saved_conversation_id,
+                            owner_token=guard_owner_token,
+                            tenant=deps.tenant,
+                        )
                 except Exception:
                     logger.exception(
                         "chat run guard release after disconnect failed",

@@ -1,13 +1,26 @@
 """Shared presentation helpers for System AI tools."""
 
-from typing import Any
+from typing import Annotated, Any, Literal, TypedDict
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from app.constants import EnableStatus
 from app.core.exceptions import BusinessRuleException
 from app.modules.ai.agents.gateway.result import ResultProjection
 from app.utils.validators import STATUS_ERROR_MSG
+
+
+class EnableStatusFilters(TypedDict, total=False):
+    """Omit status to include both enabled and disabled records."""
+
+    status: Annotated[
+        EnableStatus, Field(description="1=enabled, 2=disabled. Omit for all statuses.")
+    ]
+
+
+class UserListFilters(EnableStatusFilters, total=False):
+    user_gender: Literal["0", "1", "2"]
+
 
 _ENABLE_STATUS_SEMANTIC = {
     EnableStatus.ENABLED.value: "enabled",
@@ -107,6 +120,24 @@ def _bound_confirmation_fields(
 
 _LIST_MAX_LIMIT = 50
 _LIST_DEFAULT_LIMIT = 20
+LookupLimit = Annotated[
+    int, Field(ge=1, le=20, description="Maximum matches, 1 to 20; default 20.")
+]
+
+
+def _model_list_data(
+    records: list[dict], total: int, limit: int, module: str, trace_id: str
+) -> dict:
+    """Give the model the same bounded, authorized rows as the UI."""
+    return {
+        "total": total,
+        "limit": limit,
+        "sample": records[:3],
+        "records": records,
+        "returned": len(records),
+        "hasMore": total > len(records),
+        "listUrl": f"/system/{module}?ai_query_id={trace_id}",
+    }
 
 
 def _coerce_list_limit(limit: int | None) -> int:

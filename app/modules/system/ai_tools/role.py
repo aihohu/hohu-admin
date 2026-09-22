@@ -5,6 +5,7 @@ from typing import Annotated, Any
 
 from pydantic import AfterValidator, Field
 from pydantic.experimental.missing_sentinel import MISSING
+from sqlalchemy import select
 
 from app.constants import (
     DATA_SCOPE_ALL,
@@ -30,16 +31,21 @@ from app.modules.ai.agents.tools.stats_validator import (
     validate_filters_in_whitelist,
 )
 from app.modules.ai.core.context import AiToolContext
+from app.modules.ai.models.agent import AiAgent
+from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.schemas.role import RoleCreate, RoleUpdate
 from app.modules.system.service.role_management_service import role_management_service
 
 from .common import (
+    EnableStatusFilters,
+    LookupLimit,
     _bound_confirmation_fields,
     _coerce_list_limit,
     _confirmation_display,
     _enable_status_label_key,
     _enable_status_semantic,
+    _model_list_data,
     _model_validate_for_ai,
     _result_projection,
     _validate_enable_status,
@@ -120,10 +126,7 @@ def _role_data_scope_label_key(code: str) -> str:
     AiToolMeta(
         name="role.list",
         agent="role_mgmt",
-        summary=(
-            "List roles → {total, limit, sample[3]}. Frontend renders data_list. "
-            "Use role.count for count-only."
-        ),
+        summary="List scoped records (max 50). Answer from records; use hasMore and listUrl for remaining rows.",
         required_perms=("system:role:list",),
         risk="low",
         readonly=True,
@@ -135,12 +138,12 @@ def _role_data_scope_label_key(code: str) -> str:
 )
 async def role_list(
     ctx: AiToolContext,
-    filters: dict[str, Any] | None = None,
+    filters: EnableStatusFilters | None = None,
     limit: int | None = None,
 ) -> ToolResult:
     """列出角色，返回前 N 条精简字段
 
-    LLM 看 data.{total, limit, sample[3]}（精简，进 prompt cache）；
+    LLM 看 data.{total, limit, records, hasMore, listUrl}（精简，进 prompt cache）；
     前端看 ui.view_data.{columns, rows}（全量 limit 条，渲染 table）。
 
     filters:
@@ -188,11 +191,7 @@ async def role_list(
         for role in summaries
     ]
     return ToolResult.success(
-        data={
-            "total": total,
-            "limit": safe_limit,
-            "sample": records[:3],  # 给 LLM 看前 3 条（prompt cache 友好）
-        },
+        data=_model_list_data(records, total, safe_limit, "role", ctx.trace_id),
         projection=_result_projection(
             "role",
             contributor_ids,
@@ -331,7 +330,7 @@ async def role_lookup(
     ctx: AiToolContext,
     *,
     query: str,
-    limit: int = 20,
+    limit: LookupLimit = 20,
 ) -> ToolResult:
     """Return minimal Role matches without treating read state as authority."""
     normalized = query.strip()
@@ -421,7 +420,7 @@ async def role_menu_lookup(
     *,
     role_id: AiRoleId,
     query: str,
-    limit: int = 20,
+    limit: LookupLimit = 20,
 ) -> ToolResult:
     """Resolve menu names while keeping complete replacement IDs model-only."""
     normalized, safe_limit = _normalize_authorization_lookup(
@@ -508,7 +507,7 @@ async def role_agent_lookup(
     *,
     role_id: AiRoleId,
     query: str,
-    limit: int = 20,
+    limit: LookupLimit = 20,
 ) -> ToolResult:
     """Resolve Agent names while keeping complete replacement IDs model-only."""
     normalized, safe_limit = _normalize_authorization_lookup(
@@ -597,7 +596,13 @@ async def role_agent_lookup(
         hitl_always=True,
         dry_run_supported=True,
         result_view="detail_card",
-        args_summary_fields=("role_code", "role_name", "data_scope"),
+        args_summary_fields=(
+            "role_code",
+            "role_name",
+            "data_scope",
+            "status",
+            "dept_ids",
+        ),
     )
 )
 async def role_create(
@@ -905,6 +910,19 @@ async def _dry_run_role_update_menus(
         tenant=ctx.tenant,
     )
     target_role_name = getattr(preview, "target_role_name", None)
+    menu_names = (
+        list(
+            (
+                await ctx.db.scalars(
+                    select(Menu.menu_name)
+                    .where(Menu.menu_id.in_(menu_ids))
+                    .order_by(Menu.menu_id)
+                )
+            ).all()
+        )
+        if menu_ids
+        else []
+    )
     return DryRunResult(
         ok=True,
         count=len(preview.member_user_ids),
@@ -920,7 +938,7 @@ async def _dry_run_role_update_menus(
             {
                 "label": "menu_ids",
                 "value": menu_ids,
-                "display_value": _confirmation_display(menu_ids),
+                "display_value": _confirmation_display(menu_names),
             },
         ],
         execution_args={"role_id": role_id, "menu_ids": menu_ids},
@@ -985,6 +1003,19 @@ async def _dry_run_role_update_agents(
         tenant=ctx.tenant,
     )
     target_role_name = getattr(preview, "target_role_name", None)
+    agent_names = (
+        list(
+            (
+                await ctx.db.scalars(
+                    select(AiAgent.name)
+                    .where(AiAgent.agent_id.in_(agent_ids))
+                    .order_by(AiAgent.agent_id)
+                )
+            ).all()
+        )
+        if agent_ids
+        else []
+    )
     return DryRunResult(
         ok=True,
         count=len(preview.member_user_ids),
@@ -1000,7 +1031,7 @@ async def _dry_run_role_update_agents(
             {
                 "label": "agent_ids",
                 "value": agent_ids,
-                "display_value": _confirmation_display(agent_ids),
+                "display_value": _confirmation_display(agent_names),
             },
         ],
         execution_args={"role_id": role_id, "agent_ids": agent_ids},

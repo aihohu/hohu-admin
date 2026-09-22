@@ -13,7 +13,7 @@ import inspect
 import pytest
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
-from tenant_helpers import bind_test_user, tenant_context
+from tenant_helpers import bind_test_user, create_test_tenant, tenant_context
 
 from app.constants import STATUS_DISABLED, STATUS_ENABLED, EnableStatus
 from app.core.exceptions import BusinessRuleException
@@ -194,6 +194,25 @@ class TestUserCount:
 
 
 class TestUserStats:
+    async def test_labels_preserve_codes_and_scope(
+        self, db_session: AsyncSession
+    ) -> None:
+        await _add_user(
+            db_session, user_id=1001, user_name="u1", user_gender="0", status="2"
+        )
+        await _add_user(
+            db_session, user_id=1002, user_name="hidden", user_gender="1", status="1"
+        )
+        await db_session.flush()
+        ctx = _make_ctx(db_session, visible_user_ids={1001})
+        result = await user_stats(ctx, group_by="user_gender")
+        assert result.data["groups"] == [{"group": "0", "count": 1}]
+        assert result.data["labels"]["0"] == "未知"
+        assert result.ui.view_data["rows"] == [{"group": "未知", "count": 1}]
+        result = await user_stats(ctx, group_by="status")
+        assert result.data["labels"]["2"] == "禁用"
+        assert result.ui.view_data["rows"] == [{"group": "禁用", "count": 1}]
+
     async def test_stats_by_gender(self, db_session: AsyncSession) -> None:
         await _add_user(db_session, user_id=1001, user_name="u1", user_gender="1")
         await _add_user(db_session, user_id=1002, user_name="u2", user_gender="1")
@@ -210,7 +229,10 @@ class TestUserStats:
         assert result.data["groups"] == expected
         assert result.ui is not None
         assert result.ui.view_type == "stats_chart"
-        assert result.ui.view_data["rows"] == expected
+        assert result.ui.view_data["rows"] == [
+            {"group": "男", "count": 2},
+            {"group": "女", "count": 1},
+        ]
         assert result.ui.audit["total"] == 3
 
     async def test_stats_by_status(self, db_session: AsyncSession) -> None:
@@ -361,11 +383,12 @@ async def _add_role(
     role_name: str,
     role_code: str | None = None,
     status: str = "1",
+    tenant_id: int = 0,
 ) -> None:
     """建角色"""
     db.add(
         Role(
-            tenant_id=0,
+            tenant_id=tenant_id,
             role_id=role_id,
             role_name=role_name,
             role_code=role_code or role_name.lower(),
@@ -377,7 +400,7 @@ async def _add_role(
 
 
 def _make_role_ctx(db: AsyncSession) -> AiToolContext:
-    """构造 role.count 的 ctx（role 不走 data_scope，全表计数）"""
+    """构造 role.count 的 ctx（role 不走 data_scope，按租户计数）"""
     meta = AiToolMeta(
         name="role.count",
         agent="role_mgmt",
@@ -451,6 +474,27 @@ class TestRoleCount:
         ctx = _make_role_ctx(db_session)
         result = await role_count(ctx, filters=None)
         assert result.data["count"] >= 0
+
+    async def test_count_excludes_other_tenants(self, db_session: AsyncSession) -> None:
+        """role.count 只统计当前租户，跨租户角色不可见（tenant 隔离）。"""
+        ctx = _make_role_ctx(db_session)
+        before = (await role_count(ctx, filters=None)).data["count"]
+
+        other_tenant = await create_test_tenant(db_session, prefix="rc-iso")
+        for i in range(3):
+            await _add_role(
+                db_session,
+                role_id=next_id(),
+                role_name=f"other_tenant_role_{i}",
+                tenant_id=other_tenant.tenant_id,
+            )
+
+        after_other = (await role_count(ctx, filters=None)).data["count"]
+        assert after_other == before, "跨租户角色泄漏进 role.count"
+
+        await _add_role(db_session, role_id=next_id(), role_name="own_tenant_role")
+        after_own = (await role_count(ctx, filters=None)).data["count"]
+        assert after_own == before + 1
 
 
 # ============ dept.count 与 chip 回放 ============

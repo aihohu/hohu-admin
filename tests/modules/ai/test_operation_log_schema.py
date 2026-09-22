@@ -6,7 +6,7 @@ started_at 在 pending_confirmation / expired / rejected 状态下可能为 NULL
 
 # ruff: noqa: ARG001, PLC0415
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.schemas.operation_log import OperationLogOut
@@ -61,11 +61,11 @@ class TestOperationLogOutStartedAtNullable:
         now = datetime(2026, 7, 17, 12, 0, 0)
         log = _make_log(started_at=now, status="running")
         out = OperationLogOut.model_validate(log)
-        assert out.started_at == now
+        assert out.started_at == now.replace(tzinfo=UTC)
 
     def test_started_at_set_success(self) -> None:
         """finished → started_at 必有值"""
         now = datetime(2026, 7, 17, 12, 0, 0)
         log = _make_log(started_at=now, status="success")
         out = OperationLogOut.model_validate(log)
-        assert out.started_at == now
+        assert out.started_at == now.replace(tzinfo=UTC)

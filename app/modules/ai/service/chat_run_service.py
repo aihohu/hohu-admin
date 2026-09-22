@@ -91,11 +91,20 @@ def enforce_import_error_output_redaction(
     tool_calls: list[dict[str, Any]] | None,
 ) -> tuple[str, bool]:
     """Replace Provider prose after field errors with a deterministic safe summary."""
-    if any(
-        call.get("ok") is False and call.get("error_code") == "AI_IMPORT_FIELD_ERRORS"
+    failures = [
+        call
         for call in tool_calls or ()
-    ):
-        return _SAFE_IMPORT_FIELD_ERROR_MESSAGE, True
+        if (
+            call.get("ok") is False
+            and call.get("error_code") == "AI_IMPORT_FIELD_ERRORS"
+        )
+    ]
+    if failures:
+        # Only deterministic parser diagnostics, never provider prose/cell values.
+        details = "\n\n".join(
+            str(call.get("error_msg") or "")[:6000] for call in failures
+        )
+        return _SAFE_IMPORT_FIELD_ERROR_MESSAGE + "\n\n" + details, True
     return content, False
 
 
@@ -351,6 +360,36 @@ class ChatRunFinalizer:
                 .scalars()
                 .one()
             )
+        if lineage is not None:
+            existing_lineage = result_projection_service.lineage_from_record(message)
+            if existing_lineage is not None:
+                if (
+                    existing_lineage.agent_code != lineage.agent_code
+                    or existing_lineage.resolver_version != lineage.resolver_version
+                    or (
+                        existing_lineage.data_scope_hash is not None
+                        and lineage.data_scope_hash is not None
+                        and existing_lineage.data_scope_hash != lineage.data_scope_hash
+                    )
+                ):
+                    raise RuntimeError("incompatible incremental projection lineage")
+                lineage = result_projection_service.freeze_lineage(
+                    tenant=tenant,
+                    agent_code=lineage.agent_code,
+                    tool_codes=(*existing_lineage.tool_codes, *lineage.tool_codes),
+                    subject_refs=(
+                        *existing_lineage.subject_refs,
+                        *lineage.subject_refs,
+                    ),
+                    data_scope_hash=(
+                        existing_lineage.data_scope_hash or lineage.data_scope_hash
+                    ),
+                    resolver_version=lineage.resolver_version,
+                    projection_dependency_message_ids=(
+                        *existing_lineage.projection_dependency_message_ids,
+                        *lineage.projection_dependency_message_ids,
+                    ),
+                )
         if not message.content and content:
             message.content = content
         message.tool_calls = self._merge_tool_calls(
@@ -361,13 +400,16 @@ class ChatRunFinalizer:
             message.parent_message_id = source_user_message_id
         if message.agent_code is None:
             message.agent_code = agent_code
-        if lineage is not None and message.subject_refs_hash is None:
+        if lineage is not None:
             message.tenant_id = lineage.tenant_id
             message.tool_codes = list(lineage.tool_codes)
             message.subject_refs = list(lineage.subject_refs)
             message.subject_refs_hash = lineage.subject_refs_hash
             message.data_scope_hash = lineage.data_scope_hash
             message.resolver_version = lineage.resolver_version
+            message.projection_dependency_message_ids = [
+                str(value) for value in lineage.projection_dependency_message_ids
+            ]
         if message.projection_dependency_message_ids is None:
             message.projection_dependency_message_ids = [
                 str(value) for value in projection_dependency_message_ids

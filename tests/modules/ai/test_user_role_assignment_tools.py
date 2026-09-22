@@ -578,7 +578,7 @@ async def test_update_roles_dry_run_freezes_sorted_ids_and_snapshot() -> None:
         },
         {
             "label": "role_ids",
-            "value": [902, 901],
+            "value": [901, 902],
             "display_value": ("Old A; Old B → New A; New B"),
         },
     ]

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
@@ -1009,7 +1009,7 @@ async def cancel_import_batch(
         data=UserImportBatchCancelResponse(
             batch_id=batch.batch_id,
             status=batch.status.value,
-            cancelled_at=batch.finished_at or datetime.now(),
+            cancelled_at=batch.finished_at or datetime.now(UTC),
         )
     )
 
@@ -1056,6 +1056,7 @@ async def export_users(
     """
     filter_ = UserExportFilter(
         user_name=body.user_name,
+        user_names=body.user_names,
         nickname=body.nickname,
         user_email=body.user_email,
         user_phone=body.user_phone,

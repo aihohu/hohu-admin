@@ -27,6 +27,16 @@ class ModelAuthorizationService:
     """所有新 LLM 运行共用的模型选择器。"""
 
     @staticmethod
+    def ensure_image_support(
+        selected: AuthorizedChatModel, *, has_images: bool
+    ) -> None:
+        if has_images and "vision" not in (selected.model.capabilities or []):
+            raise BusinessRuleException(
+                "当前模型不支持图片理解，请选择支持图片的模型后重试",
+                error_code="AI_MODEL_VISION_REQUIRED",
+            )
+
+    @staticmethod
     def _not_available() -> BusinessRuleException:
         return BusinessRuleException(
             "所选 AI 模型当前不可用",

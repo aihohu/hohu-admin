@@ -413,7 +413,10 @@ async def test_update_dept_dry_run_freezes_normalized_execution_and_snapshot() -
         },
         {
             "label": "dept_assignments",
-            "value": original_assignments,
+            "value": [
+                {"dept_id": 901, "is_primary": True},
+                {"dept_id": 902, "is_primary": False},
+            ],
             "display_value": "★ Old → ★ New A; New B",
         },
     ]

@@ -209,8 +209,8 @@ class TestImportPreviewArtifacts:
 
         assert result.ok is False
         assert result.error_code == "AI_IMPORT_FIELD_ERRORS"
-        assert "row 2" in result.error_msg
-        assert "user_email" in result.error_msg
+        assert "第 2 行" in result.error_msg
+        assert "邮箱" in result.error_msg
         assert "AI_IMPORT_EMAIL_INVALID" in result.error_msg
         assert secret_value not in result.error_msg
 
@@ -222,9 +222,18 @@ class TestImportPreviewArtifacts:
         dry_result = SimpleNamespace(
             new_count=1,
             exists_count=0,
-            conflict_count=0,
+            conflict_count=1,
             out_of_scope_count=0,
-            total=1,
+            total=2,
+            conflict_records=[
+                FailedRow(
+                    row_num=3,
+                    field="dept_input",
+                    value="private-dept-name",
+                    reason="部门 private-dept-name 已停用",
+                    error_code="AI_IMPORT_DEPT_DISABLED",
+                )
+            ],
         )
         batches = [
             SimpleNamespace(
@@ -282,6 +291,10 @@ class TestImportPreviewArtifacts:
         )
 
         assert first.data["batchId"] == "batch-1"
+        assert first.data["issues"][0]["rowNum"] == 3
+        assert "private-dept-name" not in repr(first.data["issues"])
+        assert first.ui.view_data["fields"]
+        assert first.ui.view_data["expiresAt"] == "2026-08-07T10:10:00"
         assert second.data["batchId"] == "batch-2"
         assert "previewToken" not in first.data
         assert first.prepared_action is not None
@@ -440,6 +453,26 @@ def upload_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 class TestLoadImportFileBoundary:
+    @pytest.mark.parametrize(
+        ("original", "expected"),
+        [
+            ("员工名单.xlsx", "员工名单.xlsx"),
+            ("C:\\fakepath\\员工名单.xlsx", "员工名单.xlsx"),
+            ("", "9001.xlsx"),
+            ("错类型.csv", "9001.xlsx"),
+        ],
+    )
+    async def test_display_name_preserves_original_without_changing_parser(
+        self, upload_root: Path, original: str, expected: str
+    ) -> None:
+        content = _xlsx_bytes()
+        path = upload_root / "9001.xlsx"
+        path.write_bytes(content)
+        loaded = await _load_file_bytes(
+            _ctx_for(_record(path, content, original_name=original)), "9001"
+        )
+        assert loaded == (content, expected, XLSX_MIME)
+
     async def test_valid_owned_tenant_scoped_xlsx_is_loaded(
         self, upload_root: Path
     ) -> None:

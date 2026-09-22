@@ -1,6 +1,7 @@
+import asyncio
 import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -36,6 +37,7 @@ from app.modules.system.api.menu import router as menu_router
 from app.modules.system.api.operation_log import router as operation_log_router
 from app.modules.system.api.role import router as role_router
 from app.modules.system.api.user import router as user_router
+from app.modules.system.service.file_service import file_service
 
 if settings.AI_MODULE_ENABLED:
     from app.modules.ai.agents.tools import load_builtin_tools
@@ -59,6 +61,7 @@ if settings.AI_MODULE_ENABLED:
     from app.modules.ai.lifecycle import (
         cleanup_durable_prepared_actions_on_startup,
         cleanup_orphaned_pending_on_startup,
+        run_pending_expiry_loop,
     )
     from app.modules.platform.ai_api import router as platform_ai_router
 
@@ -131,7 +134,18 @@ async def lifespan(_app: FastAPI):
         )
         await job_log_monitor.start()
 
-    yield
+    expiry_task = (
+        asyncio.create_task(run_pending_expiry_loop(platform=ai_lifecycle_platform))
+        if settings.AI_MODULE_ENABLED
+        else None
+    )
+    try:
+        yield
+    finally:
+        if expiry_task is not None:
+            expiry_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await expiry_task
 
     if job_log_monitor is not None:
         await job_log_monitor.stop()
@@ -327,9 +341,16 @@ else:
 validate_private_storage_roots()
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 os.makedirs(settings.PRIVATE_UPLOAD_DIR, exist_ok=True)
+
+
+async def is_public_upload(file_url: str) -> bool:
+    async with AsyncSessionLocal() as db:
+        return await file_service.is_public_upload(db, file_url)
+
+
 app.mount(
     "/uploads",
-    PublicUploadStaticFiles(directory=settings.UPLOAD_DIR),
+    PublicUploadStaticFiles(directory=settings.UPLOAD_DIR, is_public=is_public_upload),
     name="uploads",
 )
 

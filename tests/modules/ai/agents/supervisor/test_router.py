@@ -65,7 +65,43 @@ def test_build_router_prompt_includes_shared_catchall_instruction():
     prompt = build_router_prompt(candidates, "any query")
     # shared 的 description 由 seed_ai_agents.py 维护为 fallback 角色，
     # 但 router 也会在 prompt 顶部统一加 catch-all 提示
-    assert "JSON" in prompt  # 强调 JSON-only 输出
+    assert "JSON" in prompt
+    assert "纯问候" in prompt
+    assert "shared（仅当它在候选中）" in prompt
+
+
+@pytest.mark.parametrize(
+    ("history", "current"),
+    [
+        (["你好"], "当前有多少用户"),
+        (["你好", "当前有多少用户"], "都是哪些"),
+        (["当前有多少用户", "都是哪些"], "当前有多少角色"),
+    ],
+)
+async def test_auto_router_receives_history_and_current_task_separately(
+    history, current
+):
+    candidates = [_make_agent("shared"), _make_agent("user_mgmt")]
+    with patch.object(
+        router_mod,
+        "call_llm_text",
+        AsyncMock(return_value='{"agent_code":"user_mgmt"}'),
+    ) as llm:
+        await AgentRouter().route(
+            AsyncMock(),
+            current,
+            candidates,
+            model=object(),
+            tenant=TENANT,
+            history=history,
+        )
+
+    prompt = llm.await_args.args[1]
+    assert all(text in prompt for text in history)
+    assert current in prompt
+    assert "当前问题优先" in prompt
+    assert "省略" in prompt
+    assert "不可信" in prompt
 
 
 # ---------- parse_agent_code_robustly ----------

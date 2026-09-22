@@ -206,6 +206,75 @@ class TestWrapTool:
 
 
 class TestBuildPydanticAiTools:
+    @pytest.mark.parametrize("permitted", [True, False])
+    async def test_capability_guidance_matches_filtered_tools(
+        self, monkeypatch, permitted
+    ):
+        from types import SimpleNamespace
+
+        _register_sample_tool(name="sample.read")
+        _register_sample_tool(name="other.read", agent="dept_mgmt")
+        monkeypatch.setattr(
+            "app.modules.ai.agents.chat_agent.build_system_prompt",
+            lambda *_: "Account permissions are not agent capabilities.",
+        )
+        captured = []
+
+        def respond(_messages, info):
+            captured.append(info.instructions)
+            return ModelResponse(parts=[TextPart("ok")])
+
+        agent = create_chat_agent(
+            FunctionModel(respond),
+            user_perms={"system:user:list"} if permitted else set(),
+        )
+        await agent.run("你能做什么？", deps=SimpleNamespace(agent=None))
+        instructions = captured[0]
+        assert "[当前助手实际工具]" in instructions
+        assert ("sample_read" in instructions) is permitted
+        assert "other_read" not in instructions
+        assert "不代表当前助手具有同名能力" in instructions
+        assert "不得推荐未证实可选的助手" in instructions
+        if not permitted:
+            assert "无业务工具" in instructions
+
+    async def test_lookup_then_future_plan_continues_to_the_requested_write(
+        self, monkeypatch
+    ):
+        from types import SimpleNamespace
+
+        _register_sample_tool(name="sample.read")
+        _register_sample_tool(name="sample.write", risk="high", readonly=False)
+        calls = []
+
+        async def execute(name, _args, _deps):
+            calls.append(name)
+            return ToolResult.success(data={"updated": 1})
+
+        monkeypatch.setattr(
+            "app.modules.ai.agents.tools.pydantic_ai_wrapper.execute_tool", execute
+        )
+        monkeypatch.setattr(
+            "app.modules.ai.agents.chat_agent.build_system_prompt",
+            lambda *_: "Complete the requested task.",
+        )
+        replies = iter(
+            [
+                ModelResponse(parts=[ToolCallPart("sample_read", {"foo": "target"})]),
+                ModelResponse(parts=[TextPart("已找到目标，现在提交修改。")]),
+                ModelResponse(parts=[ToolCallPart("sample_write", {"foo": "target"})]),
+                ModelResponse(parts=[TextPart("修改已完成。")]),
+            ]
+        )
+        agent = create_chat_agent(
+            FunctionModel(lambda *_: next(replies)), user_perms={"system:user:list"}
+        )
+        result = await agent.run(
+            "请修改这个测试对象。", deps=SimpleNamespace(agent=None)
+        )
+        assert calls == ["sample.read", "sample.write"]
+        assert result.output == "修改已完成。"
+
     def test_chat_agent_disables_provider_parallel_tool_calls(self) -> None:
         agent = create_chat_agent(
             FunctionModel(

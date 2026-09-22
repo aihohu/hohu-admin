@@ -23,13 +23,18 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from typing import Any
 
 from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.exceptions import AuthorizationException, BusinessException
+from app.core.exceptions import (
+    AuthorizationException,
+    BusinessException,
+    BusinessRuleException,
+)
 from app.core.rbac import is_super_admin
 from app.core.redis import redis_client
 from app.core.tenant import TenantContext
@@ -78,6 +83,9 @@ from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.agents.tools.registry import RegisteredTool, ToolRegistry
 from app.modules.ai.core.context import ChatDeps, build_tool_context
 from app.modules.ai.models.prepared_action import AiPreparedAction
+from app.modules.ai.service.execution_authorization_service import (
+    ensure_current_write_authority,
+)
 from app.modules.ai.service.operation_log_service import (
     build_target_summary,
     operation_log_service,
@@ -576,20 +584,69 @@ async def _execute_tool(
 
     # 7. HITL 分支
     if mode == AiExecutionMode.HITL:
-        resolution = await _hang_for_confirmation(
-            deps,
-            registered,
-            log_id,
-            tool_call_id,
-            business_args,
-            summary,
-            dry_run_summary,
-            prepared_action_context=_prepared_action_context,
-            agent_code_for_rollback=agent_code_for_rollback,
-            l1_member=l1_member,
-            l1_global_member=l1_global_member,
-            l4_conv_key_for_rollback=l4_conv_key_for_rollback,
-        )
+        try:
+            resolution = await _hang_for_confirmation(
+                deps,
+                registered,
+                log_id,
+                tool_call_id,
+                business_args,
+                summary,
+                dry_run_summary,
+                prepared_action_context=_prepared_action_context,
+                agent_code_for_rollback=agent_code_for_rollback,
+                l1_member=l1_member,
+                l1_global_member=l1_global_member,
+                l4_conv_key_for_rollback=l4_conv_key_for_rollback,
+            )
+        except asyncio.CancelledError:
+            if not deps.guard_handoff:
+                await _finish_log_final(
+                    log_id,
+                    ToolResult.failure(
+                        error_code="AI_CONFIRMATION_SETUP_INTERRUPTED",
+                        error_msg="确认准备已中断，操作没有执行。",
+                    ),
+                    started_at,
+                    tenant=deps.tenant,
+                )
+            raise
+        except Exception as exc:
+            logger.exception(
+                "confirmation setup failed",
+                extra={"trace_id": deps.trace_id, "tool": name},
+            )
+            guard_lost = (
+                isinstance(exc, BusinessException)
+                and exc.error_code == "AI_CHAT_GUARD_LOST"
+            )
+            failure = ToolResult.failure(
+                error_code=(
+                    "AI_CHAT_GUARD_LOST"
+                    if guard_lost
+                    else "AI_CONFIRMATION_SETUP_FAILED"
+                ),
+                error_msg=(
+                    "会话执行锁已失效，操作没有执行。请刷新后重试。"
+                    if guard_lost
+                    else "未能生成确认内容，操作没有执行。请重试；如仍失败，请提供本次追踪编号给管理员。"
+                ),
+            )
+            await _finish_log_final(log_id, failure, started_at, tenant=deps.tenant)
+            await _emit(
+                deps,
+                ToolCallResultEvent(
+                    tool=meta.name,
+                    tool_call_id=tool_call_id,
+                    ok=False,
+                    duration_ms=int((time.monotonic() - started_at) * 1000),
+                    error_code=failure.error_code,
+                    error_msg=failure.error_msg,
+                    projection=failure.projection,
+                ),
+            )
+            _rec("failed")
+            return failure
         if resolution is None:
             # 5min TTL 超时 → mark_expired（_hang_for_confirmation 内已迁移）
             _rec("hitl_expired")
@@ -877,6 +934,13 @@ async def _run_dry_run(
                 dr: DryRunResult = await with_l3_timeout(
                     registered.dry_run_fn(dry_ctx, **args), tenant=deps.tenant
                 )
+        if not dr.ok:
+            return _DryRunOutcome(
+                failure=ToolResult.failure(
+                    "AI_PREVIEW_REJECTED",
+                    dr.reason or "预检未通过，操作未执行。",
+                )
+            )
         return _DryRunOutcome(
             count=dr.count,
             summary=DryRunSummary(
@@ -1125,7 +1189,7 @@ async def _rollback_failed_confirmation_setup(
     deps: ChatDeps,
     registered: RegisteredTool,
     confirmation_id: str,
-    log_id: int,
+    _log_id: int,
     *,
     agent_code_for_rollback: str | None,
     l1_member: str | None,
@@ -1149,7 +1213,10 @@ async def _rollback_failed_confirmation_setup(
         )
 
         try:
-            await chat_run_guard.release(
+            # The current request is still running and may try the next step.
+            # Return the lease to its normal TTL; its finalizer releases it.
+            # renew is owner-checked and never re-acquires a lost lease.
+            await chat_run_guard.renew(
                 redis_client,
                 conversation_id=deps.conversation_id,
                 owner_token=deps.guard_owner_token,
@@ -1157,25 +1224,13 @@ async def _rollback_failed_confirmation_setup(
             )
         except RedisError:
             logger.exception(
-                "failed to release guard after durable action setup failure",
+                "failed to renew guard after durable action setup failure",
                 extra={
                     "confirmation_id": confirmation_id,
                     "conversation_id": deps.conversation_id,
                 },
             )
     deps.guard_handoff = False
-
-    try:
-        async with AsyncSessionLocal() as log_db:
-            async with log_db.begin():
-                await operation_log_service.mark_expired_if_pending(
-                    log_db, log_id, tenant=deps.tenant
-                )
-    except Exception:
-        logger.exception(
-            "failed to terminalize operation after durable action setup failure",
-            extra={"confirmation_id": confirmation_id, "log_id": log_id},
-        )
 
     if is_write_tool(registered.meta):
         try:
@@ -1267,7 +1322,9 @@ async def _hang_for_confirmation(
                 l1_global_member=l1_global_member,
                 l4_conv_key_for_rollback=l4_conv_key_for_rollback,
             )
-            return None
+            raise BusinessRuleException(
+                "会话执行锁已失效", error_code="AI_CHAT_GUARD_LOST"
+            )
     deps.guard_handoff = True
 
     # 回填 confirmation_id 到 log 行，并让所有新 HITL 共用 PostgreSQL action。
@@ -1528,6 +1585,13 @@ def _build_direct_confirmation_fields(
                 raise ValueError("confirmation field label must be unique")
             raw_value = field.get("value")
             frozen_value = args.get(label)
+            # Pydantic passes enum members; PostgreSQL/JSON keep their scalar
+            # values. Compare the same wire representation without permitting
+            # coercions such as True == 1 or "1" == 1.
+            if isinstance(raw_value, Enum):
+                raw_value = raw_value.value
+            if isinstance(frozen_value, Enum):
+                frozen_value = frozen_value.value
             if type(raw_value) is not type(frozen_value) or raw_value != frozen_value:
                 raise ValueError(
                     "confirmation field value does not match frozen argument"
@@ -1652,6 +1716,11 @@ async def _invoke_tool_fn(
                         projection=result.projection,
                         module=cache_module,
                     )
+                if is_write_tool(meta):
+                    # Flush can wait on a business row lock. Re-read authority
+                    # AFTER that wait; an entry-time snapshot is no longer enough.
+                    await tool_db.flush()
+                    await ensure_current_write_authority(tool_db, deps=deps, meta=meta)
                 return result
     except AuthorizationException as e:
         # 授权失败不消耗额度，回滚此前成功写入的所有配额层级。

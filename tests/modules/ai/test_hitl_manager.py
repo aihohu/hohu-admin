@@ -75,6 +75,32 @@ async def clean_redis_hitl(monkeypatch):
 # ============ ID 生成 ============
 
 
+async def test_cancelled_browser_waiter_cannot_claim_to_be_alive() -> None:
+    cid = hitl_manager.generate_confirmation_id()
+    await hitl_manager.create_pending(
+        redis_module.redis_client,
+        confirmation_id=cid,
+        user_id=1,
+        tenant=TENANT,
+        conversation_id=123,
+        tool_call_id="tc_disconnect",
+        trace_id="tr_disconnect",
+        tool_name="role.create",
+        args={},
+    )
+    waiter = asyncio.create_task(hitl_manager.hang(cid, tenant=TENANT))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert await hitl_manager.wake(cid, ConfirmAction.APPROVED, tenant=TENANT) is False
+    # Disconnect removes only the dead waiter; durable approval stays available.
+    assert (
+        await hitl_manager.get_pending(redis_module.redis_client, cid, tenant=TENANT)
+        is not None
+    )
+
+
 class TestGenerateIds:
     def test_confirmation_id_format(self) -> None:
         """secrets.token_urlsafe(32) ~43 字符 URL-safe base64"""

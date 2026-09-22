@@ -1,7 +1,7 @@
 """Fail-closed authorization for persisted AI business-result projections."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any
@@ -437,6 +437,63 @@ class ResultProjectionService:
             owner_user_id=owner_user_id,
             dependency_message_ids=lineage.projection_dependency_message_ids,
         )
+
+    async def deletion_receipt(
+        self,
+        db: AsyncSession,
+        user: Any,
+        *,
+        owner_user_id: int,
+        message: AiMessage | Any,
+    ) -> str | None:
+        """Expose only an actor's audited success, never deleted business data."""
+        if message.role != "assistant" or not message.trace_id:
+            return None
+        lineage = self.lineage_from_record(message)
+        if (
+            lineage is None
+            or "user.batch_delete" not in lineage.tool_codes
+            or self.subject_refs_hash(lineage.subject_refs) != lineage.subject_refs_hash
+        ):
+            return None
+        # This new fixed-text receipt contains no entity data or prior answer.
+        # Original messages and their dependencies remain subject-authorized.
+        receipt_lineage = replace(
+            lineage,
+            subject_refs=(),
+            subject_refs_hash=self.subject_refs_hash(()),
+            projection_dependency_message_ids=(),
+        )
+        if not await self.authorize_result_projection(
+            db, user, owner_user_id=owner_user_id, lineage=receipt_lineage
+        ):
+            return None
+        call_ids = [
+            call["tool_call_id"]
+            for call in message.tool_calls or ()
+            if isinstance(call, dict)
+            and call.get("tool") == "user.batch_delete"
+            and isinstance(call.get("tool_call_id"), str)
+        ]
+        if not call_ids:
+            return None
+        success = await db.scalar(
+            select(AiOperationLog.log_id)
+            .where(
+                AiOperationLog.tenant_id == lineage.tenant_id,
+                AiOperationLog.user_id == owner_user_id,
+                AiOperationLog.conversation_id == message.conversation_id,
+                AiOperationLog.trace_id == message.trace_id,
+                AiOperationLog.agent_code == lineage.agent_code,
+                AiOperationLog.tool_name == "user.batch_delete",
+                AiOperationLog.tool_call_id.in_(call_ids),
+                AiOperationLog.status == "success",
+            )
+            .limit(1)
+        )
+        if success is None:
+            return None
+        return "本轮删除操作已成功完成。目标数据已删除，历史详情不再展示。"
 
     async def authorize_message_projection(
         self,

@@ -193,6 +193,34 @@ class ConversationService:
                 msg.content = redact_secrets(msg.content)
         return messages
 
+    async def get_routing_history(
+        self,
+        db: AsyncSession,
+        conversation_id: int,
+        user_id: int,
+        *,
+        tenant: TenantContext,
+    ) -> list[str]:
+        """Read bounded user intent for routing without exposing historic results."""
+        await self.get_by_id(db, conversation_id, user_id, tenant=tenant)
+        contents = list(
+            await db.scalars(
+                select(AiMessage.content)
+                .where(
+                    AiMessage.tenant_id == tenant.tenant_id,
+                    AiMessage.conversation_id == conversation_id,
+                    AiMessage.is_active.is_(True),
+                    AiMessage.role == "user",
+                    AiMessage.content.is_not(None),
+                    AiMessage.content != "",
+                )
+                .order_by(AiMessage.message_id.desc())
+                .limit(6)
+            )
+        )
+        # Select scalar strings so sanitizing cannot modify persisted messages.
+        return [redact_secrets(content)[:1000] for content in reversed(contents)]
+
     async def save_message(
         self,
         db: AsyncSession,
@@ -298,6 +326,32 @@ class ConversationService:
                     )
                 projected.append(output)
             else:
+                receipt = await result_projection_service.deletion_receipt(
+                    db,
+                    current_user,
+                    owner_user_id=current_user.user_id,
+                    message=message,
+                )
+                if receipt is not None:
+                    projected.append(
+                        MessageOut(
+                            message_id=message.message_id,
+                            conversation_id=message.conversation_id,
+                            parent_message_id=message.parent_message_id,
+                            role="assistant",
+                            message_type="text",
+                            content=receipt,
+                            parts=None,
+                            tokens_input=None,
+                            tokens_output=None,
+                            tool_calls=None,
+                            trace_id=message.trace_id,
+                            is_active=message.is_active,
+                            supersedes_message_id=message.supersedes_message_id,
+                            create_time=message.create_time,
+                        )
+                    )
+                    continue
                 projected.append(
                     MessageTombstoneOut(
                         messageId=message.message_id,

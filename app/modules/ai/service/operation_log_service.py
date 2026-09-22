@@ -281,7 +281,7 @@ class OperationLogService:
         """
         log = await self._get(db, log_id, tenant=tenant)
         self._transition(log, AiOperationStatus.EXPIRED)
-        log.error_code = error_code
+        log.error_code = error_code or "AI_HITL_EXPIRED"
         log.finished_at = _now_not_before(log.queued_at, log.started_at)
         return log
 
@@ -306,7 +306,7 @@ class OperationLogService:
             db,
             log_id,
             status=AiOperationStatus.EXPIRED.value,
-            error_code=error_code,
+            error_code=error_code or "AI_HITL_EXPIRED",
             finished_at=datetime.now(UTC).replace(tzinfo=None),
             tenant=tenant,
         )

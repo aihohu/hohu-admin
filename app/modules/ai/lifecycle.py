@@ -1,5 +1,6 @@
 """AI lifecycle terminal cleanup orchestration."""
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 
@@ -56,7 +57,7 @@ async def _tenant_context(
 
 
 async def cleanup_prepared_actions_on_startup(
-    redis: Redis, *, platform: PlatformContext
+    redis: Redis, *, platform: PlatformContext, expired_only: bool = False
 ) -> int:
     """Recover durable prepared actions; Redis loss never expires a valid pending."""
     _require_platform(platform)
@@ -64,23 +65,24 @@ async def cleanup_prepared_actions_on_startup(
     pending_source_validity: dict[int, bool] = {}
     tenant_contexts: dict[int, TenantContext] = {}
     async with AsyncSessionLocal() as db:
-        actions = list(
-            (
-                await db.execute(
-                    select(AiPreparedAction).where(
-                        AiPreparedAction.status.in_(
-                            (
-                                PreparedActionStatus.PENDING_CONFIRMATION.value,
-                                PreparedActionStatus.APPROVED.value,
-                                PreparedActionStatus.RUNNING.value,
-                            )
-                        )
+        query = select(AiPreparedAction)
+        if expired_only:
+            query = query.where(
+                AiPreparedAction.status
+                == PreparedActionStatus.PENDING_CONFIRMATION.value,
+                AiPreparedAction.expires_at <= datetime.now(UTC),
+            )
+        else:
+            query = query.where(
+                AiPreparedAction.status.in_(
+                    (
+                        PreparedActionStatus.PENDING_CONFIRMATION.value,
+                        PreparedActionStatus.APPROVED.value,
+                        PreparedActionStatus.RUNNING.value,
                     )
                 )
             )
-            .scalars()
-            .all()
-        )
+        actions = list((await db.execute(query)).scalars().all())
         for action in actions:
             tenant = await _tenant_context(
                 db,
@@ -158,6 +160,15 @@ async def cleanup_prepared_actions_on_startup(
                 if current is None:
                     continue
                 current_status = PreparedActionStatus(current.status)
+                if expired_only:
+                    current_expires = current.expires_at
+                    if current_expires.tzinfo is None:
+                        current_expires = current_expires.replace(tzinfo=UTC)
+                    if (
+                        current_status != PreparedActionStatus.PENDING_CONFIRMATION
+                        or current_expires > datetime.now(UTC)
+                    ):
+                        continue
                 if current_status == PreparedActionStatus.PENDING_CONFIRMATION:
                     target = PreparedActionStatus.EXPIRED
                     if candidate_expires > datetime.now(
@@ -206,7 +217,10 @@ async def cleanup_prepared_actions_on_startup(
                     operation_status = AiOperationStatus(operation.status)
                     if operation_status == AiOperationStatus.PENDING_CONFIRMATION:
                         await operation_log_service.mark_expired_if_pending(
-                            cleanup_db, operation.log_id, tenant=tenant
+                            cleanup_db,
+                            operation.log_id,
+                            error_code=error_code,
+                            tenant=tenant,
                         )
                     elif operation_status == AiOperationStatus.RUNNING:
                         await operation_log_service.mark_failed(
@@ -243,6 +257,21 @@ async def cleanup_prepared_actions_on_startup(
             )
         cleaned += 1
     return cleaned
+
+
+async def run_pending_expiry_loop(*, platform: PlatformContext) -> None:
+    """Close offline approvals after their deadline without touching execution."""
+    from app.core.redis import redis_client  # noqa: PLC0415
+
+    _require_platform(platform)
+    while True:
+        await asyncio.sleep(30)
+        try:
+            await cleanup_prepared_actions_on_startup(
+                redis_client, platform=platform, expired_only=True
+            )
+        except Exception:
+            logger.exception("pending confirmation expiry sweep failed; will retry")
 
 
 async def finalize_orphaned_pending(

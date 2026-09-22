@@ -53,6 +53,13 @@ def _make_deps(
 
 
 class TestSafetyPreambleContent:
+    def test_native_image_context_does_not_depend_on_tool_inventory(self) -> None:
+        deps = _make_deps()
+        deps.has_image_input = True
+        prompt = build_system_prompt("只提供表格工具", deps)
+        assert "当前模型具备原生图片理解能力" in prompt
+        assert "不需要图片识别工具" in prompt
+
     def test_starts_with_priority_marker(self) -> None:
         """必须以 SAFETY PREAMBLE 优先级声明开头。"""
         assert SAFETY_PREAMBLE.startswith("[SAFETY PREAMBLE")
@@ -186,17 +193,17 @@ class TestBuildDynamicBlock:
         assert "限定部门" in block
         assert "3 个部门" in block
 
-    def test_perm_prefixes_collapsed(self) -> None:
-        """权限按前缀折叠，不暴露完整权限列表。"""
+    def test_permissions_do_not_imply_ungranted_actions(self) -> None:
+        """List access must not imply edit/delete/export access."""
         deps = _make_deps(
             perms={"system:user:add", "system:user:delete", "system:role:list"}
         )
         block = build_dynamic_block(deps)
-        # 折叠后只有 system:user:* / system:role:*
-        assert "system:user:*" in block
-        assert "system:role:*" in block
-        # 不应出现完整权限码
-        assert "system:user:add" not in block
+        assert "system:user:*" not in block
+        assert "system:role:*" not in block
+        assert "system:user:add" in block
+        assert "system:role:list" in block
+        assert "system:role:delete" not in block
 
 
 # ============ build_system_prompt ============

@@ -106,6 +106,7 @@ class _PendingEntry:
     event: asyncio.Event = field(default_factory=asyncio.Event)
     action: ConfirmAction | None = None
     created_at: float = field(default_factory=time.monotonic)
+    waiters: int = 0
 
 
 @dataclass(frozen=True)
@@ -334,14 +335,23 @@ class HitlManager:
                 error_code="AI_HITL_PENDING_NOT_FOUND",
             )
 
+        entry.waiters += 1
         try:
             await asyncio.wait_for(entry.event.wait(), timeout=timeout_sec)
+        except asyncio.CancelledError:
+            # A refresh/disconnect leaves the durable action intact, but must
+            # not make confirm believe a dead stream will release its guard.
+            if entry.waiters == 1 and self._pending.get(memory_key) is entry:
+                self._pending.pop(memory_key, None)
+            raise
         except TimeoutError:
             # 5min 无人确认 → EXPIRED
             if self._pending.get(memory_key) is entry:
                 self._pending.pop(memory_key, None)
             record_hitl_timeout("memory")
             raise
+        finally:
+            entry.waiters -= 1
 
         # 被 wake 唤醒
         action = entry.action

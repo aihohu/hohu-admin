@@ -30,9 +30,11 @@ from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 
 from .common import (
+    UserListFilters,
     _coerce_list_limit,
     _enable_status_label_key,
     _enable_status_semantic,
+    _model_list_data,
     _result_projection,
     _validate_enable_status,
     _validate_enable_status_filter,
@@ -441,23 +443,21 @@ async def _load_ai_reset_target(ctx: AiToolContext, *, user_id: int) -> User:
         )
     )
     if target.user_name == ADMIN_USERNAME or target_has_super_role:
-        actor_is_super_admin = ctx.user.user_name == ADMIN_USERNAME
-        if not actor_is_super_admin:
-            actor_is_super_admin = bool(
-                await ctx.db.scalar(
-                    select(func.count())
-                    .select_from(
-                        user_roles.join(Role, user_roles.c.role_id == Role.role_id)
-                    )
-                    .where(
-                        user_roles.c.tenant_id == ctx.tenant_id,
-                        user_roles.c.user_id == ctx.user.user_id,
-                        Role.tenant_id == ctx.tenant_id,
-                        Role.role_code == SUPER_ADMIN_ROLE_CODE,
-                        Role.status == STATUS_ENABLED,
-                    )
+        actor_is_super_admin = bool(
+            await ctx.db.scalar(
+                select(func.count())
+                .select_from(
+                    user_roles.join(Role, user_roles.c.role_id == Role.role_id)
+                )
+                .where(
+                    user_roles.c.tenant_id == ctx.tenant_id,
+                    user_roles.c.user_id == ctx.user.user_id,
+                    Role.tenant_id == ctx.tenant_id,
+                    Role.role_code == SUPER_ADMIN_ROLE_CODE,
+                    Role.status == STATUS_ENABLED,
                 )
             )
+        )
         if not actor_is_super_admin:
             raise AuthorizationException(
                 "只有超级管理员可以重置系统管理员密码",
@@ -662,7 +662,7 @@ async def user_batch_delete(
         tenant=ctx.tenant,
     )
     # 模型只接收删除数量；用户 ID 仅进入结构化 UI 和审计数据。
-    str_ids = [str(i) for i in resolved_ids]
+    str_ids = [str(i) for i in sorted(resolved_ids)]
     return ToolResult.success(
         data={"deleted": count},
         projection=_result_projection("user", str_ids),
@@ -748,10 +748,7 @@ async def _dry_run_user_batch_delete(
     AiToolMeta(
         name="user.list",
         agent="user_mgmt",
-        summary=(
-            "List users → {total, limit, sample[3]}. Frontend renders data_list. "
-            "Use user.count for count-only."
-        ),
+        summary="List scoped records (max 50). Answer from records; use hasMore and listUrl for remaining rows.",
         required_perms=("system:user:list",),
         risk="low",
         readonly=True,
@@ -763,12 +760,12 @@ async def _dry_run_user_batch_delete(
 )
 async def user_list(
     ctx: AiToolContext,
-    filters: dict[str, Any] | None = None,
+    filters: UserListFilters | None = None,
     limit: int | None = None,
 ) -> ToolResult:
     """列出用户，返回前 N 条精简字段。
 
-    LLM 看 data.{total, limit, sample[3]}（精简，进 prompt cache）；
+    LLM 看 data.{total, limit, records, hasMore, listUrl}（精简，进 prompt cache）；
     前端看 ui.view_data.{columns, rows}（全量 limit 条，渲染 table）。
 
     filters:
@@ -823,11 +820,7 @@ async def user_list(
         for u in rows
     ]
     return ToolResult.success(
-        data={
-            "total": total,
-            "limit": safe_limit,
-            "sample": records[:3],  # 给 LLM 看前 3 条
-        },
+        data=_model_list_data(records, total, safe_limit, "user", ctx.trace_id),
         projection=_result_projection(scope_bound=True),
         ui=UIResult(
             view_type="data_list",
@@ -896,8 +889,7 @@ async def _load_ai_user_department_assignments(
         name="user.lookup",
         agent="user_mgmt",
         summary=(
-            "Lookup single user by id/name/phone/email → detail_card. "
-            "NOT for listing — use user.list."
+            "Find one user by exact account, nickname, id, phone or email. Ambiguous names need more details."
         ),
         required_perms=("system:user:list",),
         risk="low",
@@ -911,6 +903,7 @@ async def user_lookup(
     *,
     user_id: int | None = None,
     user_name: str | None = None,
+    nickname: str | None = None,
     phone: str | None = None,
     email: str | None = None,
 ) -> ToolResult:
@@ -927,9 +920,9 @@ async def user_lookup(
         email: 邮箱精确匹配
     """
 
-    if not user_id and not user_name and not phone and not email:
+    if not user_id and not user_name and not nickname and not phone and not email:
         raise BusinessRuleException(
-            "至少提供 user_id / user_name / phone / email 中的一个",
+            "请提供账号、昵称、手机号或邮箱以查找用户",
             error_code="AI_LOOKUP_NO_TARGET",
         )
 
@@ -942,6 +935,8 @@ async def user_lookup(
         stmt = stmt.where(User.user_id == user_id)
     if user_name is not None:
         stmt = stmt.where(User.user_name == user_name)
+    if nickname is not None:
+        stmt = stmt.where(User.nickname == nickname)
     if phone is not None:
         stmt = stmt.where(User.user_phone == phone)
     if email is not None:

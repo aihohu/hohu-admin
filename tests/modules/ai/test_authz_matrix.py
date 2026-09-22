@@ -397,12 +397,20 @@ class TestCase1LowRiskAutonomous:
 class TestCase2HighRiskSingleRowAutonomous:
     """#2: risk=high 且 dry_run_count=1 时 autonomous。"""
 
-    async def test_high_risk_single_row_is_autonomous(self) -> None:
+    async def test_high_risk_single_row_is_autonomous(self, monkeypatch) -> None:
         _register_test_tools()
         deps = _build_deps()
+        # This matrix isolates execution mode with a non-persisted actor. The
+        # real live-authority/rollback contract is covered by execution_revocation.
+        current_authority = AsyncMock()
+        monkeypatch.setattr(
+            "app.modules.ai.agents.gateway.executor.ensure_current_write_authority",
+            current_authority,
+        )
         result, events = await _execute_and_collect(_T_HIGH_SINGLE, {}, deps)
 
         assert not _has_confirmation(events), "high + dry_run=1 不应触发 HITL"
+        current_authority.assert_awaited_once()
         result_events = [e for e in events if isinstance(e, ToolCallResultEvent)]
         assert result_events[0].ok is True
         assert result.ok is True

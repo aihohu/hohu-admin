@@ -1,9 +1,9 @@
 """Routing feedback 请求和查询 schema。"""
 
-from datetime import datetime
-
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 from pydantic.alias_generators import to_camel
+
+from app.modules.ai.schemas.time import AiUtcDatetime
 
 
 class RoutingFeedbackRequest(BaseModel):
@@ -38,8 +38,12 @@ class FeedbackListQuery(BaseModel):
     current: int = Field(1, ge=1)
     size: int = Field(20, ge=1, le=100)
     feedback: str = Field("wrong", pattern="^(wrong|all)$")
-    original_agent: str | None = None
-    corrected_agent: str | None = None
+    original_agent: str | None = Field(
+        None, description="原助手完整名称或编码，精确匹配"
+    )
+    corrected_agent: str | None = Field(
+        None, description="纠正助手完整名称或编码，精确匹配"
+    )
 
 
 class TopCorrected(BaseModel):
@@ -99,7 +103,7 @@ class FeedbackListItem(BaseModel):
     corrected_agent: str | None = None
     corrected_agent_name: str | None = None
     trace_id: str | None = None
-    create_time: datetime
+    create_time: AiUtcDatetime
 
     @field_serializer("feedback_id", "message_id", "user_id")
     def _serialize_ids(self, v: int) -> str:

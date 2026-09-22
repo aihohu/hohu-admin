@@ -5,9 +5,12 @@ download URL only through UI data. The LLM-facing payload must never contain a
 bearer download token.
 """
 
+import io
 from unittest.mock import AsyncMock
 
 import pytest
+from openpyxl import load_workbook
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,10 +21,11 @@ from app.modules.ai.core.context import AiToolContext, DataScopeContext
 from app.modules.ai.service.result_projection_service import (
     result_projection_service,
 )
-from app.modules.system.ai_tools import user_export
+from app.modules.system.ai_tools import _dry_run_user_export, user_export
 from app.modules.system.constants import ExportTaskStatus
 from app.modules.system.models.user import User
 from app.modules.system.models.user_transfer import UserExportTask
+from app.modules.system.schemas.user_transfer import UserExportFilter
 from tests.tenant_helpers import bind_test_user
 
 
@@ -32,6 +36,12 @@ def test_user_export_always_requires_hitl() -> None:
     assert meta.risk == "high"
     assert meta.dry_run_supported is True
     assert meta.hitl_always is True
+
+
+@pytest.mark.parametrize("names", [[], [""], ["  "], ["x"] * 101])
+def test_empty_or_unbounded_exact_export_list_is_rejected(names):
+    with pytest.raises(ValidationError):
+        UserExportFilter(user_names=names)
 
 
 async def _make_ctx(db: AsyncSession) -> AiToolContext:
@@ -89,6 +99,41 @@ def authorized_download_token(monkeypatch) -> None:
 
 class TestUserExportDetailCard:
     """user_export 返回 detail_card 和 downloadUrl。"""
+
+    async def test_exact_multiple_names_preview_matches_one_download(
+        self, db_session, file_storage, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "app.modules.system.service.user_export_service.get_file_storage",
+            lambda: file_storage,
+        )
+        names = ["merge_0916a", "merge_0916b"]
+        for name in [*names, "merge_0916ax"]:
+            db_session.add(User(tenant_id=0, user_name=name, hashed_password="test"))
+        await db_session.flush()
+        ctx = await _make_ctx(db_session)
+        args = {"reason": "合并指定名单", "user_names": [*names, names[0]]}
+        preview = await _dry_run_user_export(ctx, **args)
+        assert preview.ok and preview.count == 2
+        assert all(name in str(preview.examples) for name in names)
+        assert preview.confirmation_fields == [
+            {
+                "label": "user_names",
+                "value": args["user_names"],
+                "display_value": "、".join(names),
+            }
+        ]
+        result = await user_export(ctx, **args)
+        assert result.data["rowCount"] == 2
+        task = await db_session.scalar(
+            select(UserExportTask).where(
+                UserExportTask.export_id == result.data["exportId"]
+            )
+        )
+        content = await file_storage.read(task.file_storage_key)
+        rows = list(load_workbook(io.BytesIO(content), read_only=True).active.values)
+        assert {row[0] for row in rows[1:]} == set(names)
+        assert task.filter_snapshot["filter"]["user_names"] == names
 
     async def test_result_view_is_detail_card(
         self, db_session: AsyncSession, file_storage: MockFileStorage, monkeypatch

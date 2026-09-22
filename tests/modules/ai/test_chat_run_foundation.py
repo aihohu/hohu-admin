@@ -18,6 +18,7 @@ from app.modules.ai.agents.hitl.events import (
 from app.modules.ai.agents.hitl.manager import PendingPayload, hitl_manager
 from app.modules.ai.agents.tools import load_builtin_tools
 from app.modules.ai.api.chat import (
+    _collect_text_delta,
     _finalize_stream_turn,
     _run_guard_heartbeat_ttl,
 )
@@ -35,6 +36,7 @@ from app.modules.ai.service.chat_run_service import (
 )
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.operation_log_service import operation_log_service
+from app.modules.ai.service.result_projection_service import result_projection_service
 from app.modules.system.models.user import User
 
 
@@ -158,6 +160,75 @@ async def test_tool_only_turn_finalizes_once_and_keeps_started_order(
         "tc_first",
         "tc_second",
     ]
+
+
+async def test_incremental_receipts_keep_all_authorization_dependencies(db_session):
+    conversation = await _create_conversation(db_session, suffix="lineage_union")
+    tenant = tenant_context(actor_user_id=conversation.user_id)
+    source = await chat_service.save_user_message(
+        db_session,
+        conversation.conversation_id,
+        conversation.user_id,
+        "export twice",
+        agent_code="user_mgmt",
+        trace_id="tr_test_lineage_union",
+        tenant=tenant,
+    )
+    for identifier in (10, 20):
+        lineage = result_projection_service.freeze_lineage(
+            tenant=tenant,
+            agent_code="user_mgmt",
+            tool_codes=[f"user.step{identifier}"],
+            subject_refs=[{"type": "user_export_task", "id": str(identifier)}],
+            data_scope_hash="same-scope",
+            projection_dependency_message_ids=[identifier],
+        )
+        message = await chat_run_finalizer.finalize_assistant_turn(
+            db_session,
+            conversation_id=conversation.conversation_id,
+            source_user_message_id=source.message_id,
+            trace_id="tr_test_lineage_union",
+            content="",
+            tool_calls=[
+                {
+                    "tool": f"user.step{identifier}",
+                    "tool_call_id": str(identifier),
+                    "ok": True,
+                }
+            ],
+            agent_code="user_mgmt",
+            lineage=lineage,
+            tenant=tenant,
+        )
+    restored = result_projection_service.lineage_from_record(message)
+    assert restored.tool_codes == ("user.step10", "user.step20")
+    assert restored.subject_refs == (
+        {"type": "user_export_task", "id": "10"},
+        {"type": "user_export_task", "id": "20"},
+    )
+    assert restored.projection_dependency_message_ids == (10, 20)
+    assert restored.data_scope_hash == "same-scope"
+
+    incompatible = result_projection_service.freeze_lineage(
+        tenant=tenant,
+        agent_code="user_mgmt",
+        tool_codes=["user.step30"],
+        subject_refs=[],
+        data_scope_hash="other-scope",
+    )
+    with pytest.raises(RuntimeError, match="incompatible"):
+        await chat_run_finalizer.finalize_assistant_turn(
+            db_session,
+            conversation_id=conversation.conversation_id,
+            source_user_message_id=source.message_id,
+            trace_id="tr_test_lineage_union",
+            content="",
+            tool_calls=[{"tool_call_id": "30"}],
+            agent_code="user_mgmt",
+            lineage=incompatible,
+            tenant=tenant,
+        )
+    assert [call["tool_call_id"] for call in message.tool_calls] == ["10", "20"]
 
 
 @pytest.mark.asyncio
@@ -374,6 +445,32 @@ def test_tool_calls_are_collected_in_started_order() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_failure_persists_a_safe_terminal_answer() -> None:
+    db = AsyncMock()
+    with patch.object(
+        chat_run_finalizer,
+        "finalize_assistant_turn",
+        AsyncMock(return_value=SimpleNamespace(message_id=99)),
+    ) as finalize:
+        events = await _finalize_stream_turn(
+            db,
+            conversation_id=123,
+            trace_id="tr_failure",
+            source_user_message_id=456,
+            content="unsafe partial upstream text",
+            tool_calls=None,
+            agent_code="user_mgmt",
+            stream_error_code="AI_PROVIDER_UPSTREAM_ERROR",
+            tenant=tenant_context(),
+        )
+    db.commit.assert_awaited_once()
+    assert "unsafe partial" not in finalize.await_args.kwargs["content"]
+    assert "AI_PROVIDER_UPSTREAM_ERROR" in finalize.await_args.kwargs["content"]
+    assert finalize.await_args.kwargs["lineage"] is not None
+    assert events[-1].persistence == "committed"
+
+
+@pytest.mark.asyncio
 async def test_stream_finalizer_commits_before_building_done_ack() -> None:
     order: list[str] = []
     db = AsyncMock()
@@ -490,6 +587,8 @@ async def test_stream_finalizer_redacts_provider_text_after_import_field_errors(
 
     persisted = str(captured["content"])
     assert "行号、字段、原因和错误码" in persisted
+    assert "row 2, user_email" in persisted
+    assert "AI_IMPORT_EMAIL_INVALID" in persisted
     assert secret_value not in persisted
     assert raw_row not in persisted
 
@@ -787,3 +886,16 @@ async def test_resume_terminal_commits_before_guard_release_and_pending_delete()
             projection="updated",
         )
     ]
+
+
+def test_final_answer_does_not_retain_intermediate_tool_plans():
+    collected = []
+    for frame in [
+        'data: {"type":"start-step"}\n\n',
+        'data: {"type":"text-delta","delta":"I will look it up."}\n\n',
+        'data: {"type":"finish-step"}\n\n',
+        'data: {"type":"start-step"}\n\n',
+        'data: {"type":"text-delta","delta":"已完成修改。"}\n\n',
+    ]:
+        _collect_text_delta(frame, collected)
+    assert "".join(collected) == "已完成修改。"

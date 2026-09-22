@@ -1,10 +1,13 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import is_super_admin, require_permissions
+from app.core.auth import is_super_admin, require_ai_chat_use, require_permissions
 from app.core.base_response import PageResult, ResponseModel
+from app.core.config import settings
+from app.core.exceptions import BusinessRuleException
 from app.core.tenant import TenantContext
 from app.db.session import get_db
 from app.modules.auth.service import get_current_tenant_context, get_current_user
@@ -13,6 +16,23 @@ from app.modules.system.schemas.file import FileOut, FileQuery
 from app.modules.system.service.file_service import file_service
 
 router = APIRouter()
+
+
+@router.get("/chat-image", summary="读取当前上传者的 AI 聊天图片")
+async def read_chat_image(
+    file_url: str = Query(alias="fileUrl", max_length=2048),
+    db: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(require_ai_chat_use),
+    tenant: TenantContext = Depends(get_current_tenant_context),
+):
+    if not settings.AI_MODULE_ENABLED:
+        raise BusinessRuleException("AI 助手已关闭", error_code="AI_MODULE_DISABLED")
+    content, mime = await file_service.read_chat_image(db, file_url, tenant=tenant)
+    return Response(
+        content=content,
+        media_type=mime,
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.post(

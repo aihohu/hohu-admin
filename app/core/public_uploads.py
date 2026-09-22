@@ -1,5 +1,6 @@
 """Static-file boundary for genuinely public uploads."""
 
+from collections.abc import Awaitable, Callable
 from pathlib import PurePosixPath
 
 from fastapi.responses import Response
@@ -20,6 +21,12 @@ class PublicUploadStaticFiles(StaticFiles):
     upgrade, but GET/HEAD through the public mount must always look absent.
     """
 
+    def __init__(
+        self, *, is_public: Callable[[str], Awaitable[bool]] | None = None, **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.is_public = is_public
+
     async def get_response(self, path: str, scope: dict) -> Response:
         parts = tuple(
             _normalize_windows_component(part)
@@ -34,5 +41,9 @@ class PublicUploadStaticFiles(StaticFiles):
         if (parts and parts[0] == "file_storage") or (
             suffix in _PRIVATE_DOCUMENT_EXTENSIONS
         ):
-            return Response(status_code=404)
+            return Response(status_code=404, headers={"Cache-Control": "no-store"})
+        if self.is_public is not None and not await self.is_public(
+            "/uploads/" + "/".join(parts)
+        ):
+            return Response(status_code=404, headers={"Cache-Control": "no-store"})
         return await super().get_response(path, scope)

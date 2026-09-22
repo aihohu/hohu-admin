@@ -122,6 +122,43 @@ def _make_ctx(
 
 
 class TestUserList:
+    async def test_nickname_lookup_is_scoped_and_requires_disambiguation(
+        self, db_session
+    ):
+        await _add_user(
+            db_session, user_id=7810, user_name="nickone", nickname="新同事"
+        )
+        await _add_user(
+            db_session, user_id=7811, user_name="nicktwo", nickname="新同事"
+        )
+        visible = _make_ctx(
+            db_session, visible_user_ids={7810}, tool_name="user.lookup"
+        )
+        result = await user_lookup(visible, nickname="新同事")
+        assert result.data["user_name"] == "nickone"
+        with pytest.raises(BusinessRuleException) as exc:
+            await user_lookup(
+                _make_ctx(db_session, visible_user_ids={7810, 7811}), nickname="新同事"
+            )
+        assert exc.value.error_code == "AI_LOOKUP_AMBIGUOUS"
+
+    async def test_model_receives_every_returned_row_without_outsiders(
+        self, db_session
+    ):
+        for index in range(6):
+            await _add_user(
+                db_session, user_id=7800 + index, user_name=f"bounded{index}"
+            )
+        ctx = _make_ctx(db_session, visible_user_ids=set(range(7800, 7805)))
+        result = await user_list(ctx, limit=4)
+        assert len(result.data["records"]) == 4
+        assert result.data["total"] == 5
+        assert result.data["hasMore"] is True
+        assert {row["user_name"] for row in result.data["records"]} == {
+            row["user_name"] for row in result.ui.view_data["rows"]
+        }
+        assert "bounded5" not in str(result.data)
+
     async def test_list_returns_users_in_data_scope(
         self, db_session: AsyncSession
     ) -> None:

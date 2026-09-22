@@ -1,3 +1,4 @@
+import asyncio
 import os
 import warnings
 from datetime import datetime
@@ -30,11 +31,70 @@ PUBLIC_IMAGE_TYPES = {
     ".png": ("PNG", "image/png"),
 }
 MAX_PUBLIC_IMAGE_PIXELS = 40_000_000
-PRIVATE_BUSINESS_TYPES = frozenset({"ai-chat-private", "user-import"})
+PRIVATE_BUSINESS_TYPES = frozenset({"ai-chat-private", "ai-chat-image", "user-import"})
 
 
 class FileService:
     """文件上传业务逻辑服务"""
+
+    async def is_public_upload(self, db: AsyncSession, file_url: str) -> bool:
+        """Cross-tenant public classification; never return file metadata."""
+        records = (
+            await db.scalars(select(File).where(File.file_url == file_url))
+        ).all()
+        return bool(records) and all(
+            record.del_flag == "0"
+            and record.business_type not in PRIVATE_BUSINESS_TYPES | {"ai-chat"}
+            for record in records
+        )
+
+    async def read_chat_image(
+        self, db: AsyncSession, file_url: str, *, tenant: TenantContext
+    ) -> tuple[bytes, str]:
+        """Resolve an uploaded image by the current tenant and immutable owner."""
+        record = await db.scalar(
+            select(File).where(
+                File.file_url == file_url,
+                File.tenant_id == tenant.tenant_id,
+                File.owner_user_id == tenant.actor_user_id,
+                File.del_flag == "0",
+            )
+        )
+        if record is None:
+            raise BusinessRuleException(
+                "图片已失效或无权访问，请重新上传图片",
+                error_code="AI_IMAGE_NOT_AVAILABLE",
+            )
+
+        def read() -> tuple[bytes, str]:
+            root = Path(
+                settings.PRIVATE_UPLOAD_DIR
+                if record.business_type == "ai-chat-image"
+                else settings.UPLOAD_DIR
+            ).resolve()
+            path = Path(record.file_path).resolve()
+            if (
+                not path.is_relative_to(root)
+                or record.file_ext not in PUBLIC_IMAGE_TYPES
+                or record.business_type in PRIVATE_BUSINESS_TYPES - {"ai-chat-image"}
+            ):
+                raise ValueError("invalid uploaded image")
+            with path.open("rb") as stream:
+                content = stream.read(settings.UPLOAD_MAX_SIZE + 1)
+            if len(content) > settings.UPLOAD_MAX_SIZE:
+                raise ValueError("oversized uploaded image")
+            mime = self._validate_public_image(
+                content, ext=record.file_ext, declared_mime=record.mime_type
+            )
+            return content, mime
+
+        try:
+            return await asyncio.to_thread(read)
+        except (OSError, ValueError, BusinessRuleException) as exc:
+            raise BusinessRuleException(
+                "图片已失效或无法读取，请重新上传图片",
+                error_code="AI_IMAGE_NOT_AVAILABLE",
+            ) from exc
 
     def _validate_extension(self, filename: str) -> str:
         """验证文件扩展名"""
@@ -165,7 +225,7 @@ class FileService:
         effective_business_type = self._normalize_business_type(ext, business_type)
         private = effective_business_type in PRIVATE_BUSINESS_TYPES
         mime_type = upload_file.content_type
-        if not private:
+        if not private or effective_business_type == "ai-chat-image":
             mime_type = self._validate_public_image(
                 content,
                 ext=ext,
@@ -179,6 +239,12 @@ class FileService:
             tenant_id=tenant.tenant_id,
             private=private,
         )
+        if effective_business_type == "ai-chat-image":
+            # Stable reference only: this object is outside the public mount.
+            relative = Path(relative_path).relative_to(
+                Path(settings.PRIVATE_UPLOAD_DIR)
+            )
+            file_url = f"/uploads/{relative.as_posix()}"
 
         abs_file_path = abs_dir / f"{file_name}{ext}"
         abs_file_path.write_bytes(content)
@@ -212,6 +278,8 @@ class FileService:
             return "user-import"
         if business_type == "ai-chat" and ext == ".txt":
             return "ai-chat-private"
+        if business_type == "ai-chat" and ext in PUBLIC_IMAGE_TYPES:
+            return "ai-chat-image"
         return business_type
 
     async def batch_upload(

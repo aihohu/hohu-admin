@@ -1,6 +1,6 @@
 """Bounded aggregate tools for System domains."""
 
-from typing import Any
+from typing import Literal
 
 from sqlalchemy import func, select
 
@@ -22,6 +22,8 @@ from app.modules.system.models.user import User
 from app.modules.system.service.dept_selector import department_selector
 
 from .common import (
+    EnableStatusFilters,
+    UserListFilters,
     _result_projection,
     _validate_enable_status_filter,
 )
@@ -46,7 +48,7 @@ from .common import (
     )
 )
 async def user_count(
-    ctx: AiToolContext, filters: dict[str, Any] | None = None
+    ctx: AiToolContext, filters: UserListFilters | None = None
 ) -> ToolResult:
     """统计满足条件的用户数量，仅返回数字
 
@@ -104,8 +106,8 @@ async def user_count(
 )
 async def user_stats(
     ctx: AiToolContext,
-    group_by: str | None = None,
-    filters: dict[str, Any] | None = None,
+    group_by: Literal["user_gender", "status"],
+    filters: UserListFilters | None = None,
 ) -> ToolResult:
     """按维度分组统计用户数量，返回 [{group, count}]
 
@@ -136,12 +138,20 @@ async def user_stats(
     groups = [
         {"group": str(g) if g is not None else "null", "count": c} for g, c in rows
     ]
+    labels = {
+        "user_gender": {"0": "未知", "1": "男", "2": "女"},
+        "status": {"1": "启用", "2": "禁用"},
+    }[group_by]
+    display_groups = [
+        {"group": labels.get(g["group"], g["group"]), "count": g["count"]}
+        for g in groups
+    ]
     return ToolResult.success(
-        data={"groups": groups},
+        data={"groups": groups, "labels": labels},
         projection=_result_projection(scope_bound=True),
         ui=UIResult(
             view_type="stats_chart",
-            view_data={"rows": groups},
+            view_data={"rows": display_groups},
             audit={"total": sum(g["count"] for g in groups)},
             label_key="ai.tool.user.stats.result",
         ),
@@ -168,7 +178,9 @@ async def user_stats(
         chip_target="/system/user",
     )
 )
-async def user_distinct(ctx: AiToolContext, field: str) -> ToolResult:
+async def user_distinct(
+    ctx: AiToolContext, field: Literal["user_gender", "status"]
+) -> ToolResult:
     """枚举用户某字段的去重值
 
     field: user_gender / status（复用 allowed_group_by 作白名单，语义一致）
@@ -217,7 +229,7 @@ async def user_distinct(ctx: AiToolContext, field: str) -> ToolResult:
     )
 )
 async def role_count(
-    ctx: AiToolContext, filters: dict[str, Any] | None = None
+    ctx: AiToolContext, filters: EnableStatusFilters | None = None
 ) -> ToolResult:
     """统计角色数量，仅返回数字
 
@@ -228,7 +240,9 @@ async def role_count(
         validate_filters_in_whitelist(ctx.tool_meta, filters)
     )
 
-    stmt = select(func.count(Role.role_id))
+    stmt = select(func.count(Role.role_id)).where(
+        Role.tenant_id == ctx.tenant.tenant_id
+    )
     for key, value in filters.items():
         # sys_role 表字段都是 varchar，强制 stringify 防类型错
         stmt = stmt.where(getattr(Role, key) == str(value))
@@ -264,7 +278,7 @@ async def role_count(
     )
 )
 async def dept_count(
-    ctx: AiToolContext, filters: dict[str, Any] | None = None
+    ctx: AiToolContext, filters: EnableStatusFilters | None = None
 ) -> ToolResult:
     """统计部门数量，仅返回数字
 

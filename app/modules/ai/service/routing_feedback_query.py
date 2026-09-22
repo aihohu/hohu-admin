@@ -4,9 +4,9 @@
 本 service 是复杂聚合查询，职责正交。
 """
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.tenant import TenantContext
@@ -30,7 +30,7 @@ class RoutingFeedbackQueryService:
         决策 #21：topCorrected 并列时按 corrected_agent code ASC 取首.
         total=0 时 wrongRate=0，避免除零。
         """
-        cutoff = datetime.now() - timedelta(days=days)
+        cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=days)
 
         base = select(AiRoutingFeedback).where(
             AiRoutingFeedback.tenant_id == tenant.tenant_id,
@@ -121,7 +121,7 @@ class RoutingFeedbackQueryService:
         tenant: TenantContext,
     ) -> tuple[list[FeedbackListItem], int]:
         """分页查询反馈明细，feedback 支持 wrong 或 all，默认 wrong。"""
-        cutoff = datetime.now() - timedelta(days=days)
+        cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=days)
 
         conditions = [
             AiRoutingFeedback.tenant_id == tenant.tenant_id,
@@ -130,9 +130,23 @@ class RoutingFeedbackQueryService:
         if feedback != "all":
             conditions.append(AiRoutingFeedback.feedback == feedback)
         if original_agent:
-            conditions.append(AiRoutingFeedback.original_agent == original_agent)
+            conditions.append(
+                or_(
+                    AiRoutingFeedback.original_agent == original_agent,
+                    AiRoutingFeedback.original_agent.in_(
+                        select(AiAgent.code).where(AiAgent.name == original_agent)
+                    ),
+                )
+            )
         if corrected_agent:
-            conditions.append(AiRoutingFeedback.corrected_agent == corrected_agent)
+            conditions.append(
+                or_(
+                    AiRoutingFeedback.corrected_agent == corrected_agent,
+                    AiRoutingFeedback.corrected_agent.in_(
+                        select(AiAgent.code).where(AiAgent.name == corrected_agent)
+                    ),
+                )
+            )
 
         # join sys_user 取 user_name
         stmt = (

@@ -1,11 +1,9 @@
 """Safe owner status and tenant-scoped AI Trace response schemas."""
 
-from datetime import datetime
-
 from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from pydantic.alias_generators import to_camel
 
-from app.schemas.types import LocalNaiveDatetime
+from app.modules.ai.schemas.time import AiUtcDatetime
 
 
 class TraceListQuery(BaseModel):
@@ -18,8 +16,8 @@ class TraceListQuery(BaseModel):
     agent_code: str | None = Field(None, min_length=1, max_length=64)
     tool_name: str | None = Field(None, min_length=1, max_length=128)
     status: str | None = Field(None, min_length=1, max_length=32)
-    queued_from: LocalNaiveDatetime | None = None
-    queued_to: LocalNaiveDatetime | None = None
+    queued_from: AiUtcDatetime | None = None
+    queued_to: AiUtcDatetime | None = None
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
@@ -43,8 +41,8 @@ class TraceSummaryOut(BaseModel):
     tool_names: list[str]
     statuses: list[str]
     operation_count: int
-    queued_at: datetime
-    finished_at: datetime | None = None
+    queued_at: AiUtcDatetime
+    finished_at: AiUtcDatetime | None = None
 
     @field_serializer("actor_id")
     def _serialize_actor_id(self, value: int) -> str:
@@ -68,7 +66,7 @@ class TraceOperationOut(BaseModel):
     actor_name: str | None = None
     source_message_id: int | None = None
     source_message_role: str | None = None
-    source_message_at: datetime | None = None
+    source_message_at: AiUtcDatetime | None = None
     target_summary: list[TraceTargetOut] = Field(default_factory=list)
     execution_mode: str
     risk_level: str
@@ -76,9 +74,9 @@ class TraceOperationOut(BaseModel):
     error_code: str | None = None
     confirmation_id: str | None = None
     approved_by: int | None = None
-    queued_at: datetime
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
+    queued_at: AiUtcDatetime
+    started_at: AiUtcDatetime | None = None
+    finished_at: AiUtcDatetime | None = None
     duration_ms: int | None = None
     hitl_wait_ms: int | None = None
 
@@ -133,8 +131,8 @@ class OperationLogOut(BaseModel):
     # started_at 在 pending_confirmation / expired / rejected 状态下可能为 NULL：
     # 业务还没真正开始执行（HITL 等待 / 未 approve / 超时未操作）。与
     # AiOperationLog.started_at: Mapped[datetime | None] 一致。
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
+    started_at: AiUtcDatetime | None = None
+    finished_at: AiUtcDatetime | None = None
     duration_ms: int | None = None
 
     model_config = ConfigDict(
@@ -150,7 +148,7 @@ class OperationLogStatusOut(BaseModel):
     tool_call_id: str
     status: str
     error_code: str | None = None
-    finished_at: datetime | None = None
+    finished_at: AiUtcDatetime | None = None
 
     model_config = ConfigDict(
         alias_generator=to_camel,

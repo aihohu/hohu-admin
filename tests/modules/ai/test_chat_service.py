@@ -221,7 +221,9 @@ async def test_revoked_sticky_agent_is_cleared_and_rerouted(
     from app.core.id_generator import next_id
     from app.modules.system.models.user import User
 
-    user = await db_session.scalar(select(User).where(User.user_name == "admin"))
+    user = await db_session.scalar(
+        select(User).where(User.tenant_id == 0, User.user_name == "admin")
+    )
     bind_test_user(user)
     conversation = AiConversation(
         conversation_id=next_id(),

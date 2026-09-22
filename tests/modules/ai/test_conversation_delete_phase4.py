@@ -22,7 +22,9 @@ async def test_conversation_delete_is_soft_and_hidden_from_owner_reads(
 ) -> None:
     assert auth_token
     owner = (
-        await db_session.execute(select(User).where(User.user_name == "admin"))
+        await db_session.execute(
+            select(User).where(User.tenant_id == 0, User.user_name == "admin")
+        )
     ).scalar_one()
     tenant = bind_test_user(owner)
     conversation = AiConversation(
@@ -64,7 +66,9 @@ async def test_confirmation_context_ignores_soft_deleted_conversation(
 ) -> None:
     assert auth_token
     owner = (
-        await db_session.execute(select(User).where(User.user_name == "admin"))
+        await db_session.execute(
+            select(User).where(User.tenant_id == 0, User.user_name == "admin")
+        )
     ).scalar_one()
     tenant = bind_test_user(owner)
     conversation = AiConversation(
