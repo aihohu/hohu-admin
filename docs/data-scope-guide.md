@@ -373,8 +373,8 @@ cd hohu-admin
 uv run python scripts/seed_demo_data_scope.py    # 幂等：6 部门 + 5 角色 + 5 用户 + 30 数据
 ```
 
-演示账号（密码统一 `demo@12345`）：`demo_all` / `demo_dept_sub` / `demo_dept` /
-`demo_custom` / `demo_self`。
+演示账号（密码统一 `demo@12345`）：`demoall` / `demodeptsub` / `demodept` /
+`democustom` / `demoself`。
 
 ---
 

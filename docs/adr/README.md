@@ -41,6 +41,7 @@
 |---|---|---|---|
 | ADR-0001 | [AI 延迟执行前先完成安全与一致性闭环](./0001-ai-safety-consistency-before-deferred-execution.md) | Accepted | 2026-08-06 |
 | ADR-0002 | [AI 操作确认编排由 Gateway 统一负责](./0002-gateway-owned-confirmation-flow.md) | Accepted | 2026-08-07 |
+| ADR-0003 | [可信租户上下文与隔离边界](./0003-trusted-tenant-context-and-isolation-boundaries.md) | Accepted | 2026-08-31 |
 
 ## 模板
 

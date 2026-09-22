@@ -456,6 +456,16 @@ MaskUtil.mask_id_card("110101199001011234")  # "110***********1234"
 - 权限：`<module>:data:export_sensitive`
 - 审计：导出操作必留日志（who / what / when）
 
+### 8.4 敏感系统配置值脱敏（2026-09-19）
+
+`sys_config` 中键名（不区分大小写）包含 `password` / `secret` / `token` / `api_key` / `apikey` / `private_key` 任一 token 的配置项视为敏感（如 `auth:default_password`）：
+
+- **列表 / Excel 导出 / 公开端点**：`config_value` 一律以哨兵 `******` 返回（`config_service.MASKED_CONFIG_VALUE`），实现位于 service 层游离副本，不污染 session。
+- **更新语义**：`update` 收到 `config_value == "******"` 视为「不修改原值」（前端编辑抽屉预填掩码、原样提交即保持不变；修改请清空后输入新值）。
+- **内部读取不受影响**：`get_value` / `get_values_by_group` / `get_bool` / `get_int` 仍返回原文，供导入流程与业务逻辑消费。
+
+**反例**: 列表直接回传 `auth:default_password` 明文 —— 任何持有 `system:config:list` 的管理员都能读到批量导入初始密码，与「导入接口不返回此值」的安全意图直接冲突。**回归**: `tests/modules/system/test_config_value_masking.py`（列表/导出脱敏 + 哨兵更新不变）。
+
 ---
 
 ## 9. 审计日志（Audit Log）
