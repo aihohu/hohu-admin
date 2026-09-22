@@ -33,6 +33,35 @@ EXCEL_HEADERS = [
     "remark",
 ]
 
+MASKED_CONFIG_VALUE = "******"
+"""Masked value returned for sensitive configs; update treats it as unchanged."""
+
+SENSITIVE_CONFIG_KEY_TOKENS = (
+    "password",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "private_key",
+)
+"""A key containing any token (case-insensitive) is masked in list/export/public."""
+
+
+def _is_sensitive_config_key(key: str | None) -> bool:
+    if not key:
+        return False
+    lowered = key.lower()
+    return any(token in lowered for token in SENSITIVE_CONFIG_KEY_TOKENS)
+
+
+def _masked_copy(config: Config) -> Config:
+    """Detached copy; never added to the session so the mask cannot be flushed."""
+    clone = Config()
+    for column in Config.__table__.columns:
+        setattr(clone, column.name, getattr(config, column.name))
+    clone.config_value = MASKED_CONFIG_VALUE
+    return clone
+
 
 class ConfigService:
     """系统配置业务逻辑服务"""
@@ -57,6 +86,10 @@ class ConfigService:
             filters=filters,
             order_by=Config.config_group.asc().nulls_last(),
         )
+        page_data.records = [
+            _masked_copy(c) if _is_sensitive_config_key(c.config_key) else c
+            for c in page_data.records
+        ]
 
         return page_data
 
@@ -74,7 +107,12 @@ class ConfigService:
             )
             .order_by(Config.config_group.asc(), Config.config_key.asc())
         )
-        return {c.config_key: c.config_value for c in result.scalars().all()}
+        return {
+            c.config_key: MASKED_CONFIG_VALUE
+            if _is_sensitive_config_key(c.config_key)
+            else c.config_value
+            for c in result.scalars().all()
+        }
 
     @cacheable(key="tenant:{tenant.tenant_id}:config:key:{key}", ttl=300)
     async def get_value(
@@ -203,6 +241,9 @@ class ConfigService:
 
         # 如果修改了 config_key，检查唯一性
         update_data = config_in.model_dump(exclude_unset=True)
+        if update_data.get("config_value") == MASKED_CONFIG_VALUE:
+            # Masked value echoed back from the masked list: keep the stored value.
+            update_data.pop("config_value")
         if (
             "config_key" in update_data
             and update_data["config_key"] != config.config_key
@@ -276,7 +317,9 @@ class ConfigService:
                 [
                     c.config_name,
                     c.config_key,
-                    c.config_value,
+                    MASKED_CONFIG_VALUE
+                    if _is_sensitive_config_key(c.config_key)
+                    else c.config_value,
                     c.config_type,
                     c.config_group,
                     c.status,
