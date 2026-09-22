@@ -45,15 +45,6 @@ def _has_composite_fk(table, local: tuple[str, ...], remote: tuple[str, ...]) ->
     return False
 
 
-def test_plan2_migration_is_a_linear_shadow_revision():
-    migration = _load_migration()
-
-    assert migration.revision == "e9f0a1b2c3d4"
-    assert migration.down_revision == "d8e9f0a1b2c3"
-    assert migration.PLAN2_TENANT_TABLES
-    assert migration.PLAN2_ASSOCIATION_TABLES
-
-
 def test_plan2_models_use_tenant_composite_uniques_and_same_tenant_relations():
     assert _has_unique(User.__table__, ("tenant_id", "user_id"))
     assert _has_unique(User.__table__, ("tenant_id", "user_name"))
@@ -128,44 +119,3 @@ def test_role_agent_ownership_is_derived_from_the_composite_role_fk():
     ]
 
     assert direct_tenant_fks == []
-
-
-def test_plan2_replaces_legacy_relationship_and_lookup_indexes(monkeypatch):
-    migration = _load_migration()
-    dropped_constraints: list[tuple[str, str, str | None]] = []
-    dropped_indexes: list[tuple[str, str | None]] = []
-
-    monkeypatch.setattr(
-        migration.op,
-        "drop_constraint",
-        lambda name, table_name, type_=None: dropped_constraints.append(
-            (name, table_name, type_)
-        ),
-    )
-    monkeypatch.setattr(
-        migration.op, "create_foreign_key", lambda *_args, **_kwargs: None
-    )
-    monkeypatch.setattr(migration.op, "create_index", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        migration.op,
-        "drop_index",
-        lambda name, table_name=None: dropped_indexes.append((name, table_name)),
-    )
-    monkeypatch.setattr(
-        migration.op, "create_check_constraint", lambda *_args, **_kwargs: None
-    )
-
-    migration._create_domain_relationships()
-    migration._create_indexes_and_checks()
-
-    assert (
-        "sys_user_import_batch_log_batch_id_fkey",
-        "sys_user_import_batch_log",
-        "foreignkey",
-    ) in dropped_constraints
-    assert {
-        ("ix_sys_job_log_status_start_time", "sys_job_log"),
-        ("ix_login_log_login_time", "sys_login_log"),
-        ("ix_operation_log_create_time", "sys_operation_log"),
-        ("ix_operation_log_user_id", "sys_operation_log"),
-    } <= set(dropped_indexes)

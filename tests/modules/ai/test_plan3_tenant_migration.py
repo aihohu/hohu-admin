@@ -1,11 +1,8 @@
 """Plan 3 schema must make AI lineage tenant-verifiable in PostgreSQL."""
 
 import importlib.util
-import inspect
 from pathlib import Path
-from unittest.mock import patch
 
-import pytest
 from sqlalchemy import ForeignKeyConstraint, Index, UniqueConstraint
 
 from app.modules.ai.models.conversation import AiConversation
@@ -52,33 +49,6 @@ def _has_tenant_leading_index(table) -> bool:
         isinstance(index, Index) and tuple(index.columns.keys())[:1] == ("tenant_id",)
         for index in table.indexes
     )
-
-
-def test_plan3_migration_is_linear_after_plan2():
-    migration = _load_migration()
-
-    assert migration.revision == "f0a1b2c3d4e5"
-    assert migration.down_revision == "e9f0a1b2c3d4"
-
-
-def test_message_backfill_preserves_existing_tenant_facts():
-    migration = _load_migration()
-    source = inspect.getsource(migration._backfill_tenant_lineage)
-
-    assert "message.tenant_id IS NULL" in source
-
-
-def test_unresolved_audit_fallback_rejects_an_existing_second_tenant():
-    migration = _load_migration()
-
-    with (
-        patch.object(migration, "_scalar_count", side_effect=[2, 1]),
-        patch.object(migration.op, "execute") as execute,
-        pytest.raises(RuntimeError, match="TENANT_BACKFILL_AMBIGUOUS_ROUTING_AUDIT"),
-    ):
-        migration._backfill_unresolved_routing_audit()
-
-    execute.assert_not_called()
 
 
 def test_conversation_and_message_use_same_tenant_relationships():

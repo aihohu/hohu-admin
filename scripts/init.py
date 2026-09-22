@@ -33,11 +33,11 @@ SECRET_KEY_PLACEHOLDER = "<YOUR_SUPER_SECRET_KEY_HERE>"
 
 def init_env_file():
     if os.path.exists(".env"):
-        print("✅ 已存在 .env 文件，跳过配置。")
+        print("[OK] 已存在 .env 文件，跳过配置。")
         return
 
     if not os.path.exists(".env.example"):
-        print("⚠️ 警告：未找到 .env.example，跳过 .env 配置。")
+        print("[WARN] 警告：未找到 .env.example，跳过 .env 配置。")
         return
 
     # 复制 .env.example 为 .env
@@ -54,7 +54,7 @@ def init_env_file():
     with open(".env", "w", encoding="utf-8") as f:
         f.write(content)
 
-    print("⚠️ 请检查 .env 中的数据库、Redis 等配置是否正确。\n")
+    print("[WARN] 请检查 .env 中的数据库、Redis 等配置是否正确。\n")
 
 
 def init_project():
@@ -70,15 +70,11 @@ def init_project():
                 [sys.executable, "-m", "alembic", "upgrade", "head"], check=True
             )
         except subprocess.CalledProcessError:
-            print("⚠️ 数据库迁移失败（可能表已存在），尝试标记迁移版本...")
-            try:
-                subprocess.run(
-                    [sys.executable, "-m", "alembic", "stamp", "head"], check=True
-                )
-                print("✅ 已标记所有迁移为已应用。")
-            except subprocess.CalledProcessError:
-                print("❌ 标记迁移版本失败，请手动检查数据库。")
-                sys.exit(1)
+            print(
+                "[ERROR] 数据库迁移失败，初始化已停止。请检查迁移日志和 "
+                "docs/DATABASE-MIGRATIONS.md；修复前不要标记迁移版本或初始化数据。"
+            )
+            sys.exit(1)
 
     # 3. 初始化种子数据
     seed_script = "scripts/init_db.py"
@@ -88,7 +84,7 @@ def init_project():
         else:
             print(f"❌ 种子脚本 {seed_script} 不存在，跳过。")
 
-    print("\n✅ HoHu Admin 初始化完成！")
+    print("\n[OK] HoHu Admin 初始化完成！")
 
 
 if __name__ == "__main__":

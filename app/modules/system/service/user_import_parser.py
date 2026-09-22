@@ -27,6 +27,7 @@ from xml.etree.ElementTree import ParseError
 
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
+from pydantic import EmailStr, TypeAdapter, ValidationError
 
 from app.core.exceptions import BusinessRuleException
 from app.modules.system.constants import USER_IMPORT_MAX_ROWS
@@ -69,7 +70,36 @@ EXCEL_HEADERS: tuple[str, ...] = (
 )
 
 #: 邮箱格式（简单 RFC 5322 子集，足够滤掉常见错字）
-_EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
+_EMAIL_VALIDATOR = TypeAdapter(EmailStr)
+_HEADER_ALIASES = {
+    "用户名": "user_name",
+    "账号": "user_name",
+    "工号": "employee_no",
+    "昵称": "nickname",
+    "姓名": "nickname",
+    "邮箱": "user_email",
+    "手机号": "user_phone",
+    "手机号码": "user_phone",
+    "部门": "dept_input",
+    "角色": "role_input",
+    "性别": "user_gender",
+    "状态": "status",
+}
+
+
+def _normalize_header(value: object) -> str:
+    text = str(value).strip().lower()
+    return _HEADER_ALIASES.get(text, text)
+
+
+def _valid_email(value: str) -> bool:
+    try:
+        _EMAIL_VALIDATOR.validate_python(value)
+    except ValidationError:
+        return False
+    return True
+
+
 #: 中国大陆手机号格式（11 位，1 开头，第二位 3-9）
 _PHONE_RE = re.compile(r"^1[3-9]\d{9}$")
 
@@ -81,7 +111,7 @@ _STATUS_VALUES: frozenset[str] = frozenset({"1", "2"})
 #: 中文标签反查表，使导出的中文值可再次导入。
 #: 反向与 export_service._STATUS_LABELS / _GENDER_LABELS 一一对应。
 #: 反查失败 fallback 到字面值继续走 _STATUS_VALUES / _GENDER_VALUES 校验。
-_STATUS_LABELS_INV: dict[str, str] = {"启用": "1", "禁用": "2"}
+_STATUS_LABELS_INV: dict[str, str] = {"启用": "1", "禁用": "2", "停用": "2"}
 _GENDER_LABELS_INV: dict[str, str] = {"未知": "0", "男": "1", "女": "2"}
 
 
@@ -179,7 +209,7 @@ def import_file_has_column(
     if mime_type == MIME_CSV:
         text = file_bytes.decode("utf-8-sig", errors="strict")
         header = next(csv.reader(io.StringIO(text)), [])
-        return any(str(value).strip().lower() == expected for value in header)
+        return _resolve_header_indices(header).get(expected) is not None
 
     _validate_xlsx_archive(file_bytes)
     try:
@@ -208,10 +238,7 @@ def import_file_has_column(
         if worksheet is None:
             _raise_invalid_xlsx()
         header = next(worksheet.iter_rows(values_only=True), ())
-        return any(
-            value is not None and str(value).strip().lower() == expected
-            for value in header
-        )
+        return _resolve_header_indices(header).get(expected) is not None
     finally:
         workbook.close()
 
@@ -493,14 +520,20 @@ def _resolve_header_indices(header_row) -> dict[str, int | None]:
     for i, c in enumerate(header_row):
         if c is None:
             continue
-        lowered.setdefault(str(c).strip().lower(), i)
+        canonical = _normalize_header(c)
+        if canonical in EXCEL_HEADERS and canonical in lowered:
+            raise BusinessRuleException(
+                "表头重复：同一字段只能保留一列，请删除重复列后重试。",
+                error_code="AI_IMPORT_DUPLICATE_HEADER",
+            )
+        lowered.setdefault(canonical, i)
     return {fname: lowered.get(fname.lower()) for fname in EXCEL_HEADERS}
 
 
 def _find_csv_key_for_field(fieldnames: list[str], fname: str) -> str | None:
     """DictReader 用原始 key 取值，需要大小写不敏感回查。"""
     for fn in fieldnames:
-        if fn and fn.strip().lower() == fname.lower():
+        if fn and _normalize_header(fn) == fname.lower():
             return fn
     return None
 
@@ -584,7 +617,7 @@ def _validate_row(
                     error_code="AI_IMPORT_EMAIL_INVALID",
                 )
             )
-        elif not _EMAIL_RE.match(email):
+        elif not _valid_email(email):
             errors.append(
                 FailedRow(
                     row_num=row_num,

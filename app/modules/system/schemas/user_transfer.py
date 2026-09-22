@@ -8,13 +8,14 @@ Pydantic v2 惯例（与 app/modules/system/schemas/user.py 对齐）：
 本模块只定义 API 请求、响应和审计理由校验；ORM 位于 models/user_transfer.py。
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    TypeAdapter,
     field_serializer,
     field_validator,
 )
@@ -164,11 +165,27 @@ class UserExportFilter(_CamelBase):
     """用户导出的 POST body 筛选条件。"""
 
     user_name: str | None = None
+    user_names: list[str] | None = Field(
+        None,
+        min_length=1,
+        max_length=100,
+        description="精确账号名单，合并到一个文件；与其他筛选条件取交集",
+    )
     nickname: str | None = None
     user_email: str | None = None
     user_phone: str | None = None
     dept_id: str | None = Field(None, description="部门 ID（Snowflake 字符串）")
     status: Literal["1", "2"] | None = None
+
+    @field_validator("user_names")
+    @classmethod
+    def normalize_user_names(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        names = [name.strip() for name in value]
+        if any(not name or len(name) > 64 for name in names):
+            raise ValueError("账号名单中每个账号必须为 1-64 个字符")
+        return list(dict.fromkeys(names))
 
 
 class UserExportRequest(UserExportFilter):
@@ -218,8 +235,8 @@ class UserImportBatchQuery(_CamelBase):
     支持 current / size 分页 + operator_id / status / created_at 时间窗过滤。
     status 用 str（与 UserExportTaskQuery 对称），service 层抛
     ``BusinessRuleException(AI_IMPORT_INVALID_STATUS)``。
-    created_at 用 ``LocalNaiveDatetime``（CLAUDE.md pitfall 12：DB 列 naive，
-    前端 NDatePicker ms timestamp 必须本地时区化）。
+    created_at 已迁移为 TIMESTAMPTZ；毫秒时间戳、带偏移 ISO 与旧本地 naive
+    查询均归一化为 UTC aware datetime。
     """
 
     current: int = Field(1, ge=1, description="页码（1-based）")
@@ -229,14 +246,22 @@ class UserImportBatchQuery(_CamelBase):
         None,
         description="按状态过滤：CREATED/PREVIEW_DONE/RUNNING/SUCCESS/PARTIAL_SUCCESS/FAILED/EXPIRED/CANCELLED",
     )
-    start_time: LocalNaiveDatetime | None = Field(
+    start_time: datetime | None = Field(
         None,
         description="created_at（起），接受 ms timestamp / ISO / datetime",
     )
-    end_time: LocalNaiveDatetime | None = Field(
+    end_time: datetime | None = Field(
         None,
         description="created_at（止），接受 ms timestamp / ISO / datetime",
     )
+
+    @field_validator("start_time", "end_time", mode="before")
+    @classmethod
+    def parse_query_time(cls, value):
+        if value is None:
+            return None
+        # Preserve legacy local-naive query input, then return an aware UTC instant.
+        return TypeAdapter(LocalNaiveDatetime).validate_python(value).astimezone(UTC)
 
 
 class UserImportBatchResponse(_CamelBase):

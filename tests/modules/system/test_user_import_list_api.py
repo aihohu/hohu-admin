@@ -48,7 +48,9 @@ async def client(db_session):  # noqa: ARG001 (db_session resets redis)
 async def admin_token(db_session) -> str:
     """admin 用户 JWT（admin 绕过 system:user:list 检查 + is_super_admin）。"""
     user = (
-        await db_session.execute(select(User).where(User.user_name == "admin"))
+        await db_session.execute(
+            select(User).where(User.tenant_id == 0, User.user_name == "admin")
+        )
     ).scalar_one()
     return create_access_token(
         subject=str(user.user_id),
@@ -247,7 +249,7 @@ class TestListBatchesFilters:
         assert query_arg.operator_id == 1
 
     async def test_passes_created_at_range_to_service(self, client, admin_token):
-        """startTime / endTime（ms timestamp）→ LocalNaiveDatetime → service。"""
+        """毫秒查询边界保持原瞬间，转换为 TIMESTAMPTZ 所需的 aware UTC。"""
         # 2026-08-01 00:00:00 local = ms timestamp
         start_ms = int(datetime(2026, 8, 1, 0, 0, 0).timestamp() * 1000)
         end_ms = int(datetime(2026, 8, 31, 23, 59, 59).timestamp() * 1000)
@@ -261,12 +263,13 @@ class TestListBatchesFilters:
             )
 
         query_arg = mock_list.call_args.args[1]
-        # LocalNaiveDatetime 已转 naive datetime（CLAUDE.md pitfall 12）
+        # 不再按 naive 的日历日断言：UTC 下该本地午夜属于前一天。
         assert query_arg.start_time is not None
         assert query_arg.end_time is not None
-        assert query_arg.start_time.year == 2026
-        assert query_arg.start_time.month == 8
-        assert query_arg.start_time.day == 1
+        assert query_arg.start_time.tzinfo is not None
+        assert query_arg.end_time.tzinfo is not None
+        assert int(query_arg.start_time.timestamp() * 1000) == start_ms
+        assert int(query_arg.end_time.timestamp() * 1000) == end_ms
 
 
 # ========== 非法 status → 400 ==========

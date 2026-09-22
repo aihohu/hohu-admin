@@ -91,7 +91,9 @@ async def admin_token(db_session) -> str:
     使用 db_session 读取 admin user_id（init_db.py 已 seed）。
     """
     user = (
-        await db_session.execute(select(User).where(User.user_name == "admin"))
+        await db_session.execute(
+            select(User).where(User.tenant_id == 0, User.user_name == "admin")
+        )
     ).scalar_one()
     return create_access_token(
         subject=str(user.user_id),

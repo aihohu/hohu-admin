@@ -496,6 +496,20 @@ class TestDataScope:
         assert "QA_IN_OWN" in exported_names
         assert "QA_IN_OTHER" not in exported_names
 
+        # An explicit mixed-scope list must never be reported as a complete export.
+        saved_files = len(file_storage._store)
+        with pytest.raises(BusinessRuleException) as error:
+            await export_users_to_excel(
+                db_session,
+                UserExportFilter(user_names=["QA_IN_OWN", "QA_IN_OTHER"]),
+                operator,
+                reason="QA exact list scope boundary",
+                file_storage=file_storage,
+                tenant=TENANT,
+            )
+        assert error.value.error_code == "AI_EXPORT_TARGETS_UNAVAILABLE"
+        assert len(file_storage._store) == saved_files
+
     async def test_export_super_admin_sees_all(self, db_session, file_storage):
         """spec line 2662：超管豁免 data_scope，看所有用户。"""
         dept1 = _make_dept(5901, "QA-Exp-SA-D1")

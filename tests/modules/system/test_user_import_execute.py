@@ -41,6 +41,7 @@ from app.modules.system.constants import (
     FAILED_ROWS_PREVIEW_LIMIT,
     USER_IMPORT_CHUNK_SIZE,
     USER_ROLE_AUTH_PERMISSION,
+    EmployeeNoSyncMode,
     ImportBatchStatus,
 )
 from app.modules.system.models.config import Config
@@ -50,6 +51,7 @@ from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.models.user_transfer import UserImportBatch, UserImportBatchLog
 from app.modules.system.schemas.user_transfer import ImportResult, UserImportRecord
+from app.modules.system.service import user_import_service as imports
 from app.modules.system.service.user_import_service import (
     ImportAuthorizationResolution,
     _classify_records,
@@ -765,8 +767,12 @@ class TestOnConflict:
             on_conflict="fail_fast",
         )
 
-        assert result.success_count == 1
-        assert result.failed_count == 1
+        assert result.success_count == 0
+        assert result.failed_count == 2
+        assert (
+            await db_session.scalar(_select(User).where(User.user_name == "QA_FF_NEW"))
+            is None
+        )
         assert (
             result.failed_rows_preview[0].error_code == "AI_IMPORT_USERNAME_DUPLICATE"
         )
@@ -1665,3 +1671,158 @@ class TestBatchLogAdvanced:
             fr for fr in result.failed_rows_preview if "RuntimeError" in fr.reason
         ]
         assert len(aborted_failed_rows) >= 1
+
+
+@pytest.mark.parametrize(
+    "mode, expected_name, expected_updates",
+    [
+        (EmployeeNoSyncMode.CREATE_ONLY, "QA_SYNC_OLD", 0),
+        (EmployeeNoSyncMode.UPDATE_PROFILE, "QA_SYNC_OLD", 1),
+        (EmployeeNoSyncMode.FULL_SYNC, "QA_SYNC_NEW", 1),
+    ],
+)
+async def test_employee_sync_preserves_identity_and_applies_selected_fields(
+    db_session, file_storage, mode, expected_name, expected_updates
+):
+    dept = _make_dept(18801, "QA-Sync-Dept")
+    operator = _make_user(
+        18802, "QA_SYNC_OP", [await _fetch_super_role(db_session)], [dept]
+    )
+    existing = _make_user(18803, "QA_SYNC_OLD", [], [dept])
+    existing.employee_no = "QA-SYNC-001"
+    existing.nickname = "Before"
+    db_session.add_all([dept, operator, existing])
+    await db_session.flush()
+    original_auth = existing.auth_version
+    original_created = existing.create_time
+    records = [
+        _make_record(
+            2,
+            "QA_SYNC_NEW",
+            employee_no="QA-SYNC-001",
+            nickname="After",
+            dept_input=dept.dept_name,
+        )
+    ]
+    batch = await _setup_preview(db_session, records, operator, on_conflict="overwrite")
+    result = await batch_create_users_from_records(
+        db_session,
+        records,
+        preview_token=batch.preview_token,
+        file_bytes=_FILE_BYTES,
+        filename="test.xlsx",
+        reason="QA execute test",
+        current_user=operator,
+        tenant=_tenant(operator),
+        file_storage=file_storage,
+        on_conflict="overwrite",
+        sync_mode=mode,
+    )
+    await db_session.refresh(existing)
+    assert result.overwritten_count == expected_updates
+    assert result.success_count == 0
+    assert existing.user_name == expected_name
+    assert existing.nickname == ("After" if expected_updates else "Before")
+    assert existing.hashed_password == "x"
+    assert existing.user_id == 18803
+    assert existing.create_time == original_created
+    assert existing.auth_version == original_auth + (
+        mode == EmployeeNoSyncMode.FULL_SYNC
+    )
+
+
+async def test_fail_fast_rolls_back_previous_chunks_on_execution_conflict(
+    db_session, file_storage, monkeypatch
+):
+
+    monkeypatch.setattr(imports, "USER_IMPORT_CHUNK_SIZE", 1)
+    dept = _make_dept(18811, "QA-Strict-Dept")
+    operator = _make_user(
+        18812, "QA_STRICT_OP", [await _fetch_super_role(db_session)], [dept]
+    )
+    db_session.add_all([dept, operator])
+    await db_session.flush()
+    records = [
+        _make_record(2, "QA_STRICT_ONE", dept_input=dept.dept_name),
+        _make_record(3, "QA_STRICT_TWO", dept_input=dept.dept_name),
+    ]
+    batch = await _setup_preview(db_session, records, operator, on_conflict="fail_fast")
+    batch_token = batch.preview_token
+    process = imports._process_create_row
+
+    async def collide(db, record, *args, **kwargs):
+        if record.row_num == 3:
+            raise BusinessRuleException(
+                "Concurrent username conflict",
+                error_code="AI_IMPORT_USERNAME_DUPLICATE",
+            )
+        await process(db, record, *args, **kwargs)
+
+    monkeypatch.setattr(imports, "_process_create_row", collide)
+    result = await batch_create_users_from_records(
+        db_session,
+        records,
+        preview_token=batch_token,
+        file_bytes=_FILE_BYTES,
+        filename="test.xlsx",
+        reason="QA execute test",
+        current_user=operator,
+        tenant=_tenant(operator),
+        file_storage=file_storage,
+        on_conflict="fail_fast",
+    )
+    assert result.success_count == result.overwritten_count == 0
+    assert result.failed_count == 2
+    assert result.status == "FAILED"
+    assert (
+        await db_session.scalar(_select(User).where(User.user_name == "QA_STRICT_ONE"))
+        is None
+    )
+    assert {row.row_num: row.error_code for row in result.failed_rows_preview} == {
+        2: "AI_IMPORT_BATCH_ABORTED",
+        3: "AI_IMPORT_USERNAME_DUPLICATE",
+    }
+
+
+@pytest.mark.parametrize("new_name", ["admin", "QA_SYNC_TAKEN"])
+async def test_full_sync_rejects_reserved_or_taken_username_without_partial_profile_update(
+    db_session, file_storage, new_name
+):
+    dept = _make_dept(18821, "QA-Sync-Guard")
+    operator = _make_user(
+        18822, "QA_SYNC_GUARD", [await _fetch_super_role(db_session)], [dept]
+    )
+    existing = _make_user(18823, "QA_SYNC_SOURCE", [], [dept])
+    existing.employee_no = "QA-GUARD-001"
+    existing.nickname = "Before"
+    taken = _make_user(18824, "QA_SYNC_TAKEN", [], [dept])
+    db_session.add_all([dept, operator, existing, taken])
+    await db_session.flush()
+    records = [
+        _make_record(
+            2,
+            new_name,
+            employee_no="QA-GUARD-001",
+            nickname="After",
+            dept_input=dept.dept_name,
+        )
+    ]
+    batch = await _setup_preview(db_session, records, operator, on_conflict="overwrite")
+    result = await batch_create_users_from_records(
+        db_session,
+        records,
+        preview_token=batch.preview_token,
+        file_bytes=_FILE_BYTES,
+        filename="test.xlsx",
+        reason="QA execute test",
+        current_user=operator,
+        tenant=_tenant(operator),
+        file_storage=file_storage,
+        on_conflict="overwrite",
+        sync_mode=EmployeeNoSyncMode.FULL_SYNC,
+    )
+    assert result.overwritten_count == 0
+    assert result.failed_count == 1
+    await db_session.refresh(existing)
+    assert existing.user_name == "QA_SYNC_SOURCE"
+    assert existing.nickname == "Before"

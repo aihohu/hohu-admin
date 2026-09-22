@@ -1,28 +1,31 @@
 """Static migration contract for Phase 4 conversation soft deletion."""
 
-import importlib.util
-import inspect
+import ast
 from pathlib import Path
 
-MIGRATION = Path("alembic/versions/c7d8e9f0a1b2_add_governed_ai_management_schema.py")
+MIGRATION = Path("alembic/versions/e7cc9aa08769_squash_to_head.py")
 
 
-def _load_migration():
-    spec = importlib.util.spec_from_file_location("governed_ai_migration", MIGRATION)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def _deleted_at_column_calls(source: str) -> list[str]:
+    tree = ast.parse(source)
+    calls = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr in ("add_column", "drop_column"):
+                calls.append(ast.unparse(node))
+    return calls
 
 
 def test_migration_adds_and_removes_deleted_at() -> None:
-    migration = _load_migration()
-    upgrade_source = inspect.getsource(migration._upgrade_conversation_soft_delete)
-    downgrade_source = inspect.getsource(migration._downgrade_conversation_soft_delete)
+    source = MIGRATION.read_text(encoding="utf-8")
+    calls = _deleted_at_column_calls(source)
 
-    assert '"ai_conversation"' in upgrade_source
-    assert (
-        'sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True)'
-        in upgrade_source
+    added = [c for c in calls if "add_column" in c and "deleted_at" in c]
+    assert added, "ai_conversation.deleted_at add_column missing"
+    assert any("DateTime(timezone=True), nullable=True" in c for c in added), (
+        "deleted_at must stay timezone-aware and nullable"
     )
-    assert 'op.drop_column("ai_conversation", "deleted_at")' in downgrade_source
+
+    assert any("drop_column" in c and "deleted_at" in c for c in calls), (
+        "downgrade must drop deleted_at"
+    )

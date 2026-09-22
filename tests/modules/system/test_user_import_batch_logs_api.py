@@ -50,7 +50,9 @@ async def client(db_session):  # noqa: ARG001 (db_session resets redis)
 async def admin_token(db_session) -> str:
     """admin 用户 JWT（admin 绕过 system:user:list 检查）。"""
     user = (
-        await db_session.execute(select(User).where(User.user_name == "admin"))
+        await db_session.execute(
+            select(User).where(User.tenant_id == 0, User.user_name == "admin")
+        )
     ).scalar_one()
     return create_access_token(
         subject=str(user.user_id),

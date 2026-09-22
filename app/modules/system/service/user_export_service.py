@@ -107,12 +107,15 @@ async def _query_users_with_data_scope(
 ) -> list[User]:
     """按筛选条件和数据权限查询用户列表。
 
+    - user_names 精确名单与其余筛选取交集，未完整匹配时拒绝生成文件
     - filter 字段：user_name / nickname / user_email / user_phone / status / dept_id
     - data_scope 自动应用：HR 只能导他可见的部门用户
-    - 排序：create_time desc（与 list 接口一致）
+    - 排序：user_id，保证相同创建时刻的用户也有稳定顺序
     """
     stmt = select(User).where(User.tenant_id == tenant.tenant_id)
 
+    if filter_.user_names is not None:
+        stmt = stmt.where(User.user_name.in_(filter_.user_names))
     if filter_.user_name:
         stmt = stmt.where(User.user_name.contains(filter_.user_name))
     if filter_.nickname:
@@ -141,9 +144,17 @@ async def _query_users_with_data_scope(
     for f in scope_filters:
         stmt = stmt.where(f)
 
-    stmt = stmt.order_by(User.create_time.desc())
+    stmt = stmt.order_by(User.user_id)
     result = await db.execute(stmt)
-    return list(result.scalars().all())
+    rows = list(result.scalars().all())
+    if filter_.user_names is not None and {row.user_name for row in rows} != set(
+        filter_.user_names
+    ):
+        raise BusinessRuleException(
+            "指定账号未全部匹配当前可见范围或筛选条件，请核对名单；未生成导出文件",
+            error_code="AI_EXPORT_TARGETS_UNAVAILABLE",
+        )
+    return rows
 
 
 def _build_excel(rows: list[User], dept_lookup: dict[int, Dept]) -> bytes:

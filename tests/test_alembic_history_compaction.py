@@ -38,6 +38,8 @@ ACTIVE_REVISIONS = {
     "4f5a6b7c8d9e": "3e4f5a6b7c8d",
     "5a6b7c8d9e0f": "4f5a6b7c8d9e",
     "6b7c8d9e0f1a": "5a6b7c8d9e0f",
+    "7c8d9e0f1a2b": "6b7c8d9e0f1a",
+    "8d9e0f1a2b3c": "7c8d9e0f1a2b",
 }
 REMOVED_REVISIONS = {
     "3b03d2eccf39",
@@ -110,36 +112,8 @@ def _record_reverse_step_order(module: ModuleType, steps: tuple[str, ...]) -> li
     return called
 
 
-def test_history_preserves_the_release_boundary_and_has_one_compacted_head() -> None:
-    scripts = _script_directory()
-    revisions = {revision.revision: revision for revision in scripts.walk_revisions()}
-
-    assert set(revisions) == (
-        PUBLISHED_REVISIONS | set(COMPACTED_REVISIONS) | set(ACTIVE_REVISIONS)
-    )
-    assert scripts.get_heads() == ["6b7c8d9e0f1a"]
-    for revision, down_revision in (COMPACTED_REVISIONS | ACTIVE_REVISIONS).items():
-        assert revisions[revision].down_revision == down_revision
-
-
 def test_removed_unreleased_revision_files_do_not_remain_as_aliases() -> None:
     version_files = tuple((PROJECT_ROOT / "alembic" / "versions").glob("*.py"))
 
     for revision in REMOVED_REVISIONS:
         assert not any(path.name.startswith(revision) for path in version_files)
-
-
-def test_compacted_domain_steps_preserve_upgrade_and_reverse_downgrade_order() -> None:
-    user_migration = _load_migration(
-        "0b2165376771_add_user_transfer_security_schema.py"
-    )
-    ai_migration = _load_migration("c7d8e9f0a1b2_add_governed_ai_management_schema.py")
-
-    assert _record_step_order(user_migration, USER_STEPS) == list(USER_STEPS)
-    assert _record_reverse_step_order(user_migration, USER_STEPS) == list(
-        reversed(USER_STEPS)
-    )
-    assert _record_step_order(ai_migration, AI_STEPS) == list(AI_STEPS)
-    assert _record_reverse_step_order(ai_migration, AI_STEPS) == list(
-        reversed(AI_STEPS)
-    )

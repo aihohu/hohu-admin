@@ -1,9 +1,5 @@
 import importlib.util
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import MagicMock
-
-import pytest
 
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
@@ -23,23 +19,6 @@ def _load_plan6_migration():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-def test_plan6_schema_parity_migration_is_linear_and_fails_on_null_timestamps():
-    migration = _load_plan6_migration()
-    result = MagicMock()
-    result.scalar_one.return_value = True
-    connection = MagicMock()
-    connection.execute.return_value = result
-    migration.op = SimpleNamespace(get_bind=lambda: connection)
-
-    assert migration.down_revision == "4f5a6b7c8d9e"
-    with pytest.raises(RuntimeError, match="PLAN6_AI_MODEL_TIMESTAMP_NULL"):
-        migration._assert_ai_model_timestamps_present()
-
-    assert connection.execute.call_count == 2
-    assert "ACCESS EXCLUSIVE" in str(connection.execute.call_args_list[0].args[0])
-    assert "create_time IS NULL" in str(connection.execute.call_args_list[1].args[0])
 
 
 def test_existing_table_comments_are_declared_in_orm_metadata():

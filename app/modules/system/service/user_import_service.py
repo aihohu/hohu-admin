@@ -15,7 +15,7 @@ import json
 import secrets
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from openpyxl import Workbook
@@ -23,7 +23,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants import STATUS_ENABLED, USER_ROLE_CODE
+from app.constants import ADMIN_USERNAME, STATUS_ENABLED, USER_ROLE_CODE
 from app.core import redis as redis_module
 from app.core.exceptions import (
     AuthorizationException,
@@ -880,13 +880,24 @@ async def _process_overwrite_row(
     existing: User,
     resolution: ImportAuthorizationResolution,
     *,
+    sync_mode: EmployeeNoSyncMode = EmployeeNoSyncMode.UPDATE_PROFILE,
     tenant: TenantContext,
 ) -> None:
     """覆盖已有用户时只更新 OVERWRITE_ALLOWED 字段。
 
-    user_name / hashed_password / user_id / create_time 永不覆盖。
+    仅工号命中的 FULL_SYNC 允许改名；密码、ID、创建时间永不覆盖。
     """
     assert resolution.dept_id is not None
+
+    renamed = (
+        resolution.matched_by_employee_no
+        and sync_mode == EmployeeNoSyncMode.FULL_SYNC
+        and existing.user_name != record.user_name
+    )
+    if renamed:
+        if ADMIN_USERNAME in (existing.user_name, record.user_name):
+            raise BusinessRuleException("不能通过导入修改系统管理员用户名")
+        existing.user_name = record.user_name
 
     # 应用 OVERWRITE_ALLOWED 字段
     if "nickname" in OVERWRITE_ALLOWED and record.nickname is not None:
@@ -900,7 +911,7 @@ async def _process_overwrite_row(
     status_changed = "status" in OVERWRITE_ALLOWED and existing.status != record.status
     if "status" in OVERWRITE_ALLOWED:
         existing.status = record.status
-    if status_changed:
+    if status_changed or renamed:
         existing.auth_version += 1
     if "employee_no" in OVERWRITE_ALLOWED and record.employee_no:
         existing.employee_no = record.employee_no
@@ -1051,7 +1062,7 @@ async def batch_create_users_from_records(
         )
 
     # 4. CAS 进入 RUNNING，保证并发与幂等。
-    started_at = datetime.now()
+    started_at = datetime.now(UTC)
     cas_ok = await _transition_batch_status(
         db,
         batch.batch_id,
@@ -1180,7 +1191,23 @@ async def batch_create_users_from_records(
         else:  # overwrite
             rows_to_overwrite.append((record, existing))
 
-    if out_of_scope_records:
+    if on_conflict == "fail_fast" and failed_rows:
+        failed_row_numbers = {row.row_num for row in failed_rows}
+        failed_rows.extend(
+            FailedRow(
+                row_num=record.row_num,
+                field="_batch",
+                value="",
+                reason="严格冲突策略已终止整批，本行未执行",
+                error_code="AI_IMPORT_BATCH_ABORTED",
+            )
+            for record in records
+            if record.row_num not in failed_row_numbers
+        )
+        rows_to_create = []
+        rows_to_overwrite = []
+        skipped_count = 0
+    elif out_of_scope_records:
         rows_to_create = []
         rows_to_overwrite = []
 
@@ -1201,7 +1228,10 @@ async def batch_create_users_from_records(
     )
 
     aborted_error: Exception | None = None
+    strict_failed_row: int | None = None
     remaining_after_abort: list[tuple[str, UserImportRecord, User | None]] = []
+
+    strict_savepoint = await db.begin_nested() if on_conflict == "fail_fast" else None
 
     for chunk_start in range(0, len(rows_to_process), USER_IMPORT_CHUNK_SIZE):
         chunk = rows_to_process[chunk_start : chunk_start + USER_IMPORT_CHUNK_SIZE]
@@ -1232,13 +1262,18 @@ async def batch_create_users_from_records(
                                     record,
                                     existing,
                                     resolutions_by_row[record.row_num],
+                                    sync_mode=sync_mode,
                                     tenant=tenant,
                                 )
                                 overwritten_count += 1
                         chunk_success += 1
                     except (BusinessException, IntegrityError) as e:
                         code = _extract_error_code(e)
-                        if code not in RECOVERABLE_ERROR_CODES:
+                        if (
+                            on_conflict == "fail_fast"
+                            or code not in RECOVERABLE_ERROR_CODES
+                        ):
+                            strict_failed_row = record.row_num
                             # 致命 → 让 chunk savepoint 自动 ROLLBACK
                             raise
                         failed_rows.append(_make_failed_row_from_exc(record, e, code))
@@ -1296,6 +1331,28 @@ async def batch_create_users_from_records(
             },
         )
 
+    if strict_savepoint is not None:
+        if aborted_error is not None:
+            await strict_savepoint.rollback()
+            # Earlier chunks are also rolled back; report every row as uncommitted.
+            success_count = overwritten_count = skipped_count = 0
+            failed_rows = [
+                _make_failed_row_from_exc(
+                    record, aborted_error, _extract_error_code(aborted_error)
+                )
+                if record.row_num == strict_failed_row
+                else FailedRow(
+                    row_num=record.row_num,
+                    field="_batch",
+                    value="",
+                    reason="严格冲突策略已回滚整批，本行未写入",
+                    error_code="AI_IMPORT_BATCH_ABORTED",
+                )
+                for _kind, record, _existing in rows_to_process
+            ]
+        else:
+            await strict_savepoint.commit()
+
     # 10. 写失败行文件。
     failed_rows_file: str | None = None
     if failed_rows:
@@ -1312,7 +1369,7 @@ async def batch_create_users_from_records(
         success_count + overwritten_count,
         len(failed_rows),
     )
-    finished_at = datetime.now()
+    finished_at = datetime.now(UTC)
 
     # CAS RUNNING → end_status
     await _transition_batch_status(
@@ -1645,7 +1702,7 @@ async def cancel_batch(
     if batch.operator_id != operator.user_id and not is_super_admin(operator):
         raise AuthorizationException("无权取消此批次")
 
-    now = datetime.now()
+    now = datetime.now(UTC)
 
     if batch.status == ImportBatchStatus.PREVIEW_DONE:
         # PREVIEW_DONE 直接转 CANCELLED；CAS 防止 execute 与 cancel 并发覆盖。
@@ -1739,7 +1796,7 @@ async def cleanup_expired_batches(
     """
     if not platform.reason or not platform.correlation_id:
         raise AuthorizationException("平台清理上下文无效")
-    cutoff = datetime.now() - timedelta(days=90)
+    cutoff = datetime.now(UTC) - timedelta(days=90)
     fs = get_file_storage()
     terminal_values = [s.value for s in TERMINAL_STATUSES]
 
@@ -1791,7 +1848,7 @@ async def cleanup_expired_previews(
     """
     if not platform.reason or not platform.correlation_id:
         raise AuthorizationException("平台清理上下文无效")
-    cutoff = datetime.now() - timedelta(minutes=10)
+    cutoff = datetime.now(UTC) - timedelta(minutes=10)
     fs = get_file_storage()
 
     stmt = select(UserImportBatch).where(
@@ -1807,7 +1864,7 @@ async def cleanup_expired_previews(
             batch.batch_id,
             ImportBatchStatus.PREVIEW_DONE,
             ImportBatchStatus.EXPIRED,
-            finished_at=datetime.now(),
+            finished_at=datetime.now(UTC),
             tenant_id=int(batch.tenant_id),
         )
         if not success:

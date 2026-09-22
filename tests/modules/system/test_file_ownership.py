@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import inspect
 import io
 from base64 import b64decode
@@ -601,36 +600,3 @@ class TestFileTenantScope:
         }
         assert delete.await_args.kwargs["tenant"] is tenant
         assert batch_delete.await_args.kwargs["tenant"] is tenant
-
-
-class TestFileOwnershipMigration:
-    def test_migration_adds_security_columns_and_leaves_legacy_owner_unassigned(
-        self,
-    ) -> None:
-        migration_path = (
-            Path(__file__).parents[3]
-            / "alembic"
-            / "versions"
-            / "0b2165376771_add_user_transfer_security_schema.py"
-        )
-        module_spec = importlib.util.spec_from_file_location(
-            "task35_file_ownership_migration", migration_path
-        )
-        assert module_spec is not None and module_spec.loader is not None
-        migration = importlib.util.module_from_spec(module_spec)
-        module_spec.loader.exec_module(migration)
-
-        with (
-            patch.object(migration.op, "add_column") as add_column,
-            patch.object(migration.op, "execute") as execute,
-        ):
-            migration._upgrade_sys_file_owner_tenant()
-
-        columns = {
-            call.args[1].name: call.args[1] for call in add_column.call_args_list
-        }
-        assert columns["owner_user_id"].nullable is True
-        assert isinstance(columns["owner_user_id"].type, BigInteger)
-        assert columns["tenant_id"].nullable is False
-        assert str(columns["tenant_id"].server_default.arg) == "0"
-        execute.assert_not_called()

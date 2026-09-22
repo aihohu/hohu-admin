@@ -57,8 +57,8 @@ _batch_table = Table(
     Column("overwritten_count", Integer),
     Column("failed_count", Integer),
     Column("failed_rows_file", String(512)),
-    Column("started_at", DateTime),
-    Column("finished_at", DateTime),
+    Column("started_at", DateTime(timezone=True)),
+    Column("finished_at", DateTime(timezone=True)),
     extend_existing=True,
 )
 
