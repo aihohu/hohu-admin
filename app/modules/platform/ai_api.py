@@ -377,7 +377,7 @@ async def list_tenant_model_policies(
     tenant_id: TenantId,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_platform_context),
+    platform: PlatformContext = Depends(require_system_agent_context),
 ):
     rows = await tenant_model_policy_admin_service.list(
         db, tenant_id=tenant_id, platform=platform
@@ -398,7 +398,7 @@ async def put_tenant_model_policy(
     payload: PlatformTenantModelPolicyPut,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_platform_context),
+    platform: PlatformContext = Depends(require_system_agent_context),
 ):
     row = await tenant_model_policy_admin_service.put(
         db,
@@ -421,7 +421,7 @@ async def delete_tenant_model_policy(
     model_id: PositiveId,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_platform_context),
+    platform: PlatformContext = Depends(require_system_agent_context),
 ):
     await tenant_model_policy_admin_service.delete(
         db, tenant_id=tenant_id, model_id=model_id, platform=platform

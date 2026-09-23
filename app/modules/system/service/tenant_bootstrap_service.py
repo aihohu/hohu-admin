@@ -32,6 +32,7 @@ from app.modules.system.hosted_menu_seed import (
     HOSTED_PERMISSION_CODES,
     build_hosted_tenant_menus,
 )
+from app.modules.system.models.config import Config
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.tenant import Tenant
@@ -139,7 +140,7 @@ class SystemTenantBootstrapService:
     @staticmethod
     async def _assert_clean(db: AsyncSession, *, tenant_id: int) -> None:
         counts = []
-        for model in (Menu, Role, User):
+        for model in (Menu, Role, User, Config):
             counts.append(
                 await db.scalar(
                     select(func.count())
@@ -168,6 +169,19 @@ class SystemTenantBootstrapService:
         validate_password(admin_password)
         menus = build_hosted_tenant_menus(tenant.tenant_id)
         db.add_all(menus)
+        db.add(
+            Config(
+                tenant_id=tenant.tenant_id,
+                config_name="AI 额外启用工具",
+                config_key="ai:enabled_tools",
+                config_value='["file.parse"]',
+                config_type="text",
+                config_group="ai",
+                status=STATUS_ENABLED,
+                is_public=False,
+                remark="新租户初始化显式启用文件解析；既有租户保留原配置",
+            )
+        )
         await db.flush()
 
         super_role = Role(

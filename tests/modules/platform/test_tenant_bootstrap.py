@@ -24,6 +24,7 @@ from app.modules.platform.constants import (
 from app.modules.platform.schemas import PlatformTenantBootstrapRequest
 from app.modules.platform.tenant_bootstrap_service import tenant_bootstrap_service
 from app.modules.system.hosted_menu_seed import HOSTED_PERMISSION_CODES
+from app.modules.system.models.config import Config
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.tenant import Tenant
@@ -103,6 +104,14 @@ async def test_bootstrap_prepared_tenant_seeds_only_hosted_capabilities(db_sessi
     )
 
     await db_session.refresh(tenant)
+    tools_config = await db_session.scalar(
+        select(Config).where(
+            Config.tenant_id == tenant.tenant_id,
+            Config.config_key == "ai:enabled_tools",
+        )
+    )
+    assert tools_config is not None
+    assert tools_config.config_value == '["file.parse"]'
     assert result.replayed is False
     assert result.admin_username == "admin"
     assert result.tenant_code == tenant.tenant_code
@@ -495,6 +504,7 @@ async def test_concurrent_same_key_bootstrap_converges_to_one_seed():
             await cleanup.execute(delete(User).where(User.tenant_id == tenant_id))
             await cleanup.execute(delete(Role).where(Role.tenant_id == tenant_id))
             await cleanup.execute(delete(Menu).where(Menu.tenant_id == tenant_id))
+            await cleanup.execute(delete(Config).where(Config.tenant_id == tenant_id))
             await cleanup.execute(delete(Tenant).where(Tenant.tenant_id == tenant_id))
             if model_id is not None:
                 await cleanup.execute(

@@ -203,17 +203,13 @@ def is_tenant_runtime_enabled(tenant_id: int) -> bool:
         raise ValueError("tenant_id must be a non-negative integer")
     if tenant_id == DEFAULT_TENANT_ID:
         return True
-    return (
-        settings.TENANT_MODE == "hosted"
-        and settings.TENANT_HOSTED_LOGIN_ENABLED
-        and settings.TENANT_HOSTED_CANARY_TENANT_ID == tenant_id
-    )
+    return settings.TENANT_MODE == "hosted" and settings.TENANT_HOSTED_LOGIN_ENABLED
 
 
 def require_tenant_runtime_enabled(
     tenant_id: int, *, surface: HostedGateSurface
 ) -> None:
-    """Reject authority outside the single configured hosted canary target."""
+    """Reject authority outside the configured deployment boundary."""
     allowed = is_tenant_runtime_enabled(tenant_id)
     result = (
         "default"

@@ -318,7 +318,7 @@ def test_worker_envelope_rejects_non_default_tenant_after_hosted_rollback(
     assert exc_info.value.error_code == "TENANT_HOSTED_ACCESS_DISABLED"
 
 
-def test_hosted_runtime_allows_only_the_configured_canary_tenant(monkeypatch):
+def test_hosted_runtime_allows_multiple_tenants_with_legacy_canary_setting(monkeypatch):
     monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
     monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
     monkeypatch.setattr(settings, "TENANT_HOSTED_CANARY_TENANT_ID", 7)
@@ -326,13 +326,10 @@ def test_hosted_runtime_allows_only_the_configured_canary_tenant(monkeypatch):
     require_tenant_runtime_enabled(0, surface="access")
     require_tenant_runtime_enabled(7, surface="access")
 
-    with pytest.raises(AuthenticationException) as exc_info:
-        require_tenant_runtime_enabled(8, surface="access")
-
-    assert exc_info.value.error_code == "TENANT_HOSTED_ACCESS_DISABLED"
+    require_tenant_runtime_enabled(8, surface="access")
 
 
-def test_worker_envelope_rejects_a_non_target_tenant_before_live_state_use(
+def test_worker_envelope_checks_live_version_for_second_tenant(
     monkeypatch,
 ):
     monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
@@ -359,9 +356,9 @@ def test_worker_envelope_rejects_a_non_target_tenant_before_live_state_use(
                 tenant_id=8,
                 tenant_code="other",
                 status="1",
-                row_version=3,
+                row_version=4,
             ),
             secret="test-secret",
         )
 
-    assert exc_info.value.error_code == "TENANT_HOSTED_ACCESS_DISABLED"
+    assert exc_info.value.error_code == "TENANT_CONTEXT_INVALID"

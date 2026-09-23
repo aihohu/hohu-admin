@@ -22,10 +22,6 @@ class Settings(BaseSettings):
     def _validate_runtime_modes(self) -> "Settings":
         if self.APP_ROLE is None:
             self.APP_ROLE = "all" if self.ENV == "dev" else "api"
-        if self.TENANT_MODE == "hosted" and not self.TENANT_HOSTED_LOGIN_ENABLED:
-            raise ValueError("hosted tenant mode requires the explicit release gate")
-        if self.TENANT_MODE == "hosted" and self.TENANT_HOSTED_CANARY_TENANT_ID is None:
-            raise ValueError("hosted tenant mode requires one explicit canary tenant")
         if self.TENANT_MODE == "single" and self.TENANT_HOSTED_LOGIN_ENABLED:
             raise ValueError("hosted tenant login gate requires hosted tenant mode")
         build_sha = self.RELEASE_BUILD_SHA.strip().lower()

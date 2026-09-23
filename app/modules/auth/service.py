@@ -293,8 +293,6 @@ class AuthService:
                 raise AuthenticationException(error_code="INVALID_CREDENTIALS")
             locator = DEFAULT_TENANT_CODE
         else:
-            if not settings.TENANT_HOSTED_LOGIN_ENABLED:
-                raise AuthenticationException(error_code="INVALID_CREDENTIALS")
             host_code = self._host_tenant_code(host)
             if (
                 body_code is not None
@@ -302,8 +300,11 @@ class AuthService:
                 and body_code != host_code
             ):
                 raise AuthenticationException(error_code="INVALID_CREDENTIALS")
-            locator = body_code or host_code
-            if locator is None:
+            locator = body_code or host_code or DEFAULT_TENANT_CODE
+            if (
+                locator != DEFAULT_TENANT_CODE
+                and not settings.TENANT_HOSTED_LOGIN_ENABLED
+            ):
                 raise AuthenticationException(error_code="INVALID_CREDENTIALS")
 
         result = await db.execute(select(Tenant).where(Tenant.tenant_code == locator))
@@ -554,39 +555,7 @@ async def require_platform_context(
     route = request.scope.get("route")
     audit_path = getattr(route, "path", request.url.path)
     permission = platform_permission_for_request(request.method, audit_path)
-    target_tenant_id = None
-    if audit_path == "/platform/tenants" and request.method.upper() == "POST":
-        idempotency_key = request.headers.get("Idempotency-Key")
-        replay_tenant_id = None
-        if idempotency_key:
-            key_hash = hashlib.sha256(idempotency_key.encode()).hexdigest()
-            # Serialize target allocation with the business transaction. Without
-            # this lock, two first-seen retries could authorize different targets
-            # before either tenant row becomes visible.
-            await db.execute(
-                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
-                {"lock_key": f"platform-tenant-key:{key_hash}"},
-            )
-            replay_tenant_id = await db.scalar(
-                select(Tenant.tenant_id).where(Tenant.provisioning_key_hash == key_hash)
-            )
-        target_tenant_id = replay_tenant_id or next_id()
-        request.state.platform_proposed_tenant_id = target_tenant_id
-    elif "{tenant_id}" in audit_path:
-        raw_target = request.path_params.get("tenant_id")
-        if isinstance(raw_target, str) and _NON_NEGATIVE_ID_RE.fullmatch(raw_target):
-            target_tenant_id = int(raw_target)
-        elif (
-            isinstance(raw_target, int)
-            and not isinstance(raw_target, bool)
-            and raw_target >= 0
-        ):
-            target_tenant_id = raw_target
-        else:
-            raise BusinessRuleException(
-                "平台目标租户无效",
-                error_code="PLATFORM_TARGET_TENANT_INVALID",
-            )
+    target_tenant_id = await resolve_platform_target(request, db, audit_path)
     ip = request.client.host if request.client else None
     authorization = await authorize_platform_request(
         principal=principal,
@@ -673,3 +642,42 @@ def build_menu_tree(menus: list[Menu], parent_id: int = None) -> list[UserRoute]
 
         tree.append(route)
     return tree
+
+
+async def resolve_platform_target(
+    request: Request, db: AsyncSession, audit_path: str
+) -> int | None:
+    target_tenant_id = None
+    if audit_path == "/platform/tenants" and request.method.upper() == "POST":
+        idempotency_key = request.headers.get("Idempotency-Key")
+        replay_tenant_id = None
+        if idempotency_key:
+            key_hash = hashlib.sha256(idempotency_key.encode()).hexdigest()
+            # Serialize target allocation with the business transaction. Without
+            # this lock, two first-seen retries could authorize different targets
+            # before either tenant row becomes visible.
+            await db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": f"platform-tenant-key:{key_hash}"},
+            )
+            replay_tenant_id = await db.scalar(
+                select(Tenant.tenant_id).where(Tenant.provisioning_key_hash == key_hash)
+            )
+        target_tenant_id = replay_tenant_id or next_id()
+        request.state.platform_proposed_tenant_id = target_tenant_id
+    elif "{tenant_id}" in audit_path:
+        raw_target = request.path_params.get("tenant_id")
+        if isinstance(raw_target, str) and _NON_NEGATIVE_ID_RE.fullmatch(raw_target):
+            target_tenant_id = int(raw_target)
+        elif (
+            isinstance(raw_target, int)
+            and not isinstance(raw_target, bool)
+            and raw_target >= 0
+        ):
+            target_tenant_id = raw_target
+        else:
+            raise BusinessRuleException(
+                "平台目标租户无效",
+                error_code="PLATFORM_TARGET_TENANT_INVALID",
+            )
+    return target_tenant_id

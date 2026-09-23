@@ -28,6 +28,7 @@ from app.modules.platform.schemas import (
     PlatformTokenResponse,
 )
 from app.modules.platform.service import platform_auth_service
+from app.modules.platform.system_agent_auth import require_system_agent_context
 from app.modules.platform.tenant_bootstrap_service import tenant_bootstrap_service
 from app.modules.system.service.tenant_lifecycle_service import (
     tenant_lifecycle_service,
@@ -87,7 +88,7 @@ async def prepare_tenant(
     idempotency_key: IdempotencyKey,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_platform_context),
+    platform: PlatformContext = Depends(require_system_agent_context),
 ):
     tenant_id = platform.target_tenant_id
     if tenant_id is None:  # defensive: dependency always preallocates this target
@@ -113,7 +114,7 @@ async def list_tenants(
     request: Request,
     query: PlatformTenantQuery = Depends(),
     db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_platform_context),
+    platform: PlatformContext = Depends(require_system_agent_context),
 ):
     page = await tenant_lifecycle_service.list_tenants(
         db,
@@ -140,7 +141,7 @@ async def get_tenant(
     tenant_id: TenantId,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_platform_context),
+    platform: PlatformContext = Depends(require_system_agent_context),
 ):
     tenant = await tenant_lifecycle_service.get_tenant(
         db, tenant_id=tenant_id, platform=platform
@@ -158,7 +159,7 @@ async def activate_tenant(
     tenant_id: TenantId,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_platform_context),
+    platform: PlatformContext = Depends(require_system_agent_context),
 ):
     tenant = await tenant_lifecycle_service.activate_tenant(
         db, tenant_id=tenant_id, platform=platform
@@ -176,7 +177,7 @@ async def disable_tenant(
     tenant_id: TenantId,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_platform_context),
+    platform: PlatformContext = Depends(require_system_agent_context),
 ):
     tenant = await tenant_lifecycle_service.disable_tenant(
         db, tenant_id=tenant_id, platform=platform
@@ -196,7 +197,7 @@ async def bootstrap_tenant(
     idempotency_key: IdempotencyKey,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_platform_context),
+    platform: PlatformContext = Depends(require_system_agent_context),
 ):
     result = await tenant_bootstrap_service.bootstrap(
         db,

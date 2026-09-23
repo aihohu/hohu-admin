@@ -1,6 +1,7 @@
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from fastapi.security import HTTPAuthorizationCredentials
 from starlette.requests import Request
@@ -15,6 +16,8 @@ from app.modules.ai.service.tenant_model_policy_admin_service import (
     tenant_model_policy_admin_service,
 )
 from app.modules.auth import service as auth_service
+from app.modules.auth.service import get_current_user
+from app.modules.platform import system_agent_auth
 from app.modules.platform.constants import (
     PLATFORM_AI_READ,
     PLATFORM_SUPPORT_READ,
@@ -237,15 +240,17 @@ async def test_platform_completion_failure_log_does_not_render_exception_secrets
 async def test_prepare_tenant_preallocates_and_audits_server_bound_target(
     client, monkeypatch
 ):
-    principal = SimpleNamespace(
-        principal_id=84,
-        principal_name="tenant-operator",
+    actor = SimpleNamespace(
+        user_id=12,
+        tenant_id=0,
+        user_name="renamed-system-admin",
         status="1",
-        row_version=1,
-        permissions=[PLATFORM_TENANT_WRITE],
+        roles=[SimpleNamespace(tenant_id=0, role_code="R_SUPER", status="1")],
     )
+    app.dependency_overrides[get_current_user] = lambda: actor
     db = AsyncMock()
-    db.scalar.side_effect = [principal, None]
+    db.add = Mock()
+    db.scalar.return_value = None
     now = datetime.now(UTC)
     prepared = SimpleNamespace(
         tenant_id=991001,
@@ -262,7 +267,7 @@ async def test_prepare_tenant_preallocates_and_audits_server_bound_target(
     completed = AsyncMock(return_value=5102)
     monkeypatch.setattr(auth_service, "next_id", lambda: 991001)
     monkeypatch.setattr(tenant_lifecycle_service, "prepare_tenant", prepare)
-    monkeypatch.setattr(auth_service, "persist_platform_audit", authorized)
+    monkeypatch.setattr(system_agent_auth, "persist_system_agent_audit", authorized)
     monkeypatch.setattr(
         platform_audit_middleware, "persist_platform_completion", completed
     )
@@ -278,6 +283,7 @@ async def test_prepare_tenant_preallocates_and_audits_server_bound_target(
         )
     finally:
         app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(get_current_user, None)
 
     assert response.status_code == 200
     target_id = authorized.await_args.kwargs["target_tenant_id"]
@@ -288,9 +294,11 @@ async def test_prepare_tenant_preallocates_and_audits_server_bound_target(
     assert body["enabled"] is False
     assert body["lifecycleState"] == "prepared"
     assert "status" not in body
-    assert completed.await_args.kwargs["target_tenant_id"] == target_id
-    assert completed.await_args.kwargs["result_summary"] == {
-        "statusCode": 200,
+    assert (
+        json.loads(db.add.call_args.args[0].request_params)["target_tenant_id"]
+        == target_id
+    )
+    assert json.loads(db.add.call_args.args[0].request_params)["result_summary"] == {
         "recordCount": 1,
     }
 
@@ -363,39 +371,61 @@ async def test_support_http_binds_route_target_and_returns_no_private_fields(
 async def test_tenant_access_token_cannot_reach_platform_tenant_registry(
     client, monkeypatch
 ):
+    actor = SimpleNamespace(
+        user_id=123,
+        tenant_id=7,
+        user_name="admin",
+        status="1",
+        roles=[SimpleNamespace(tenant_id=7, role_code="R_SUPER", status="1")],
+    )
+    app.dependency_overrides[get_current_user] = lambda: actor
     business = AsyncMock()
     monkeypatch.setattr(tenant_lifecycle_service, "list_tenants", business)
     token = create_access_token(
         subject="1", tenant_id=0, tenant_version=1, user_version=1
     )
 
-    response = await client.get(
-        "/platform/tenants",
-        headers=_platform_headers(token),
-    )
+    try:
+        response = await client.get(
+            "/platform/tenants",
+            headers=_platform_headers(token),
+        )
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
 
     assert response.status_code == 403
-    assert response.json()["errorCode"] == "PLATFORM_ADMIN_REQUIRED"
+    assert response.json()["errorCode"] == "SYSTEM_ADMIN_ONLY"
     business.assert_not_awaited()
 
 
 async def test_tenant_access_token_cannot_mutate_tenant_model_policy(
     client, monkeypatch
 ):
+    actor = SimpleNamespace(
+        user_id=123,
+        tenant_id=7,
+        user_name="admin",
+        status="1",
+        roles=[SimpleNamespace(tenant_id=7, role_code="R_SUPER", status="1")],
+    )
+    app.dependency_overrides[get_current_user] = lambda: actor
     business = AsyncMock()
     monkeypatch.setattr(tenant_model_policy_admin_service, "put", business)
     token = create_access_token(
         subject="1", tenant_id=0, tenant_version=1, user_version=1
     )
 
-    response = await client.put(
-        "/platform/tenants/9001/ai/model-policies/8001",
-        headers=_platform_headers(token),
-        json={"enabled": True, "isDefault": True},
-    )
+    try:
+        response = await client.put(
+            "/platform/tenants/9001/ai/model-policies/8001",
+            headers=_platform_headers(token),
+            json={"enabled": True, "isDefault": True},
+        )
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
 
     assert response.status_code == 403
-    assert response.json()["errorCode"] == "PLATFORM_ADMIN_REQUIRED"
+    assert response.json()["errorCode"] == "SYSTEM_ADMIN_ONLY"
     business.assert_not_awaited()
 
 
@@ -427,11 +457,11 @@ async def test_platform_support_reader_cannot_prepare_tenant(client, monkeypatch
     finally:
         app.dependency_overrides.pop(get_db, None)
 
-    assert response.status_code == 403
-    assert response.json()["errorCode"] == "PLATFORM_PERMISSION_DENIED"
+    assert response.status_code == 401
+    assert response.json()["errorCode"] == "TOKEN_EXPIRED"
     business.assert_not_awaited()
-    assert denied.await_args.kwargs["event_type"] == "denied"
-    assert denied.await_args.kwargs["target_tenant_id"] == 991003
+
+    denied.assert_not_awaited()
 
 
 async def test_bootstrap_http_keeps_secret_and_machine_ids_out_of_projection(
@@ -445,7 +475,16 @@ async def test_bootstrap_http_keeps_secret_and_machine_ids_out_of_projection(
         row_version=1,
         permissions=[PLATFORM_TENANT_BOOTSTRAP],
     )
+    actor = SimpleNamespace(
+        user_id=12,
+        tenant_id=0,
+        user_name="renamed-system-admin",
+        status="1",
+        roles=[SimpleNamespace(tenant_id=0, role_code="R_SUPER", status="1")],
+    )
+    app.dependency_overrides[get_current_user] = lambda: actor
     db = AsyncMock()
+    db.add = Mock()
     db.scalar.return_value = principal
     bootstrap = AsyncMock(
         return_value=TenantBootstrapResult(
@@ -463,7 +502,7 @@ async def test_bootstrap_http_keeps_secret_and_machine_ids_out_of_projection(
     authorized = AsyncMock(return_value=5401)
     completed = AsyncMock(return_value=5402)
     monkeypatch.setattr(tenant_bootstrap_service, "bootstrap", bootstrap)
-    monkeypatch.setattr(auth_service, "persist_platform_audit", authorized)
+    monkeypatch.setattr(system_agent_auth, "persist_system_agent_audit", authorized)
     monkeypatch.setattr(
         platform_audit_middleware, "persist_platform_completion", completed
     )
@@ -483,6 +522,7 @@ async def test_bootstrap_http_keeps_secret_and_machine_ids_out_of_projection(
         )
     finally:
         app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(get_current_user, None)
 
     assert response.status_code == 200
     data = response.json()["data"]
@@ -503,8 +543,7 @@ async def test_bootstrap_http_keeps_secret_and_machine_ids_out_of_projection(
     assert "88001" not in response.text
     assert authorized.await_args.kwargs["target_tenant_id"] == tenant_id
     assert authorized.await_args.kwargs["request_summary"] == {"queryKeyCount": 0}
-    assert completed.await_args.kwargs["result_summary"] == {
-        "statusCode": 200,
+    assert json.loads(db.add.call_args.args[0].request_params)["result_summary"] == {
         "recordCount": 1,
     }
 
@@ -520,7 +559,16 @@ async def test_activate_http_uses_dedicated_permission_and_bound_target(
         row_version=1,
         permissions=[PLATFORM_TENANT_ACTIVATE],
     )
+    actor = SimpleNamespace(
+        user_id=12,
+        tenant_id=0,
+        user_name="renamed-system-admin",
+        status="1",
+        roles=[SimpleNamespace(tenant_id=0, role_code="R_SUPER", status="1")],
+    )
+    app.dependency_overrides[get_current_user] = lambda: actor
     db = AsyncMock()
+    db.add = Mock()
     db.scalar.return_value = principal
     now = datetime.now(UTC)
     activated = SimpleNamespace(
@@ -538,7 +586,7 @@ async def test_activate_http_uses_dedicated_permission_and_bound_target(
     authorized = AsyncMock(return_value=5451)
     completed = AsyncMock(return_value=5452)
     monkeypatch.setattr(tenant_lifecycle_service, "activate_tenant", activate)
-    monkeypatch.setattr(auth_service, "persist_platform_audit", authorized)
+    monkeypatch.setattr(system_agent_auth, "persist_system_agent_audit", authorized)
     monkeypatch.setattr(
         platform_audit_middleware, "persist_platform_completion", completed
     )
@@ -552,6 +600,7 @@ async def test_activate_http_uses_dedicated_permission_and_bound_target(
         )
     finally:
         app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(get_current_user, None)
 
     assert response.status_code == 200
     assert response.json()["data"]["enabled"] is True
@@ -560,8 +609,7 @@ async def test_activate_http_uses_dedicated_permission_and_bound_target(
     assert authorized.await_args.kwargs["permission"] == PLATFORM_TENANT_ACTIVATE
     assert authorized.await_args.kwargs["target_tenant_id"] == tenant_id
     assert activate.await_args.kwargs["platform"].target_tenant_id == tenant_id
-    assert completed.await_args.kwargs["result_summary"] == {
-        "statusCode": 200,
+    assert json.loads(db.add.call_args.args[0].request_params)["result_summary"] == {
         "recordCount": 1,
     }
 
@@ -597,8 +645,8 @@ async def test_tenant_writer_cannot_reach_bootstrap_endpoint(client, monkeypatch
     finally:
         app.dependency_overrides.pop(get_db, None)
 
-    assert response.status_code == 403
-    assert response.json()["errorCode"] == "PLATFORM_PERMISSION_DENIED"
+    assert response.status_code == 401
+    assert response.json()["errorCode"] == "TOKEN_EXPIRED"
     business.assert_not_awaited()
-    assert denied.await_args.kwargs["permission"] == PLATFORM_TENANT_BOOTSTRAP
-    assert denied.await_args.kwargs["target_tenant_id"] == tenant_id
+
+    denied.assert_not_awaited()

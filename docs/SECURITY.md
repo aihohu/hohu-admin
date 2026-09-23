@@ -107,9 +107,10 @@ async def install(...): ...
 
 ### 2.3 super_admin bypass
 
-满足任一即 bypass 所有权限检查：
-- `user.user_name == "admin"`
-- `user.roles` 含 `R_SUPER` role code
+启用的本租户 `R_SUPER` 角色可在本租户范围内 bypass 通用权限检查；用户名不授予权限。
+默认租户内启用的系统超级管理员角色通过普通登录会话管理全局 Agent 和租户生命周期/模型授权。
+AI 使用入口仍要求显式权限。独立平台维护身份用于 Provider/模型目录维护、支持与审计 retention，
+不能代替普通系统管理员会话。详见 [核心多租户管理](MULTI-TENANCY.md)。
 
 **铁律**：
 - `R_SUPER` 角色只给真正的运维负责人

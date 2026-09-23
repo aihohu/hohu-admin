@@ -254,26 +254,18 @@ def test_hosted_login_requires_explicit_release_gate_from_settings():
     assert enabled.TENANT_HOSTED_LOGIN_ENABLED is True
     assert enabled.TENANT_HOSTED_CANARY_TENANT_ID == 22
 
+    disabled = Settings(
+        DATABASE_URL="postgresql+asyncpg://localhost/test",
+        SECRET_KEY="test-only",
+        TENANT_MODE="hosted",
+        TENANT_HOSTED_LOGIN_ENABLED=False,
+        TENANT_HOSTED_CANARY_TENANT_ID=None,
+    )
+    assert not disabled.TENANT_HOSTED_LOGIN_ENABLED
     with pytest.raises(ValidationError):
         Settings(
-            DATABASE_URL=settings.DATABASE_URL,
-            SECRET_KEY=settings.SECRET_KEY,
-            TENANT_MODE="hosted",
-            TENANT_HOSTED_CANARY_TENANT_ID=22,
-        )
-
-    with pytest.raises(ValidationError):
-        Settings(
-            DATABASE_URL=settings.DATABASE_URL,
-            SECRET_KEY=settings.SECRET_KEY,
-            TENANT_MODE="hosted",
-            TENANT_HOSTED_LOGIN_ENABLED=True,
-        )
-
-    with pytest.raises(ValidationError):
-        Settings(
-            DATABASE_URL=settings.DATABASE_URL,
-            SECRET_KEY=settings.SECRET_KEY,
+            DATABASE_URL="postgresql+asyncpg://localhost/test",
+            SECRET_KEY="test-only",
             TENANT_MODE="hosted",
             TENANT_HOSTED_LOGIN_ENABLED=True,
             TENANT_HOSTED_CANARY_TENANT_ID=0,
@@ -308,18 +300,21 @@ def test_runtime_configuration_errors_do_not_echo_sensitive_inputs():
         Settings(
             DATABASE_URL=settings.DATABASE_URL,
             SECRET_KEY=sentinel,
-            TENANT_MODE="hosted",
+            TENANT_MODE="invalid",
             TENANT_HOSTED_LOGIN_ENABLED=True,
         )
 
     assert sentinel not in str(exc_info.value)
 
 
-async def test_hosted_login_rejects_a_non_target_before_user_lookup(monkeypatch):
+async def test_hosted_login_rejects_disabled_second_tenant_before_user_lookup(
+    monkeypatch,
+):
     monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
     monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
     monkeypatch.setattr(settings, "TENANT_HOSTED_CANARY_TENANT_ID", 22)
     non_target = _tenant(tenant_id=23, code="tenant-c")
+    non_target.status = "2"
     db = AsyncMock()
     db.execute = AsyncMock(return_value=_scalar_result(non_target))
 

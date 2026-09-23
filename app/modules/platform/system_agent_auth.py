@@ -1,4 +1,4 @@
-"""Agent-only system role authorization using the ordinary login session."""
+"""System role authorization using the ordinary login session."""
 
 import json
 import time
@@ -12,7 +12,7 @@ from app.core.exceptions import AuthorizationException, BusinessException
 from app.core.rbac import is_system_admin
 from app.core.tenant import PlatformContext
 from app.db.session import AsyncSessionLocal, get_db
-from app.modules.auth.service import get_current_user
+from app.modules.auth.service import get_current_user, resolve_platform_target
 from app.modules.platform.audit import (
     authorize_platform_request,
     decode_platform_reason,
@@ -20,6 +20,10 @@ from app.modules.platform.audit import (
 from app.modules.platform.constants import (
     PLATFORM_AI_READ,
     PLATFORM_AI_WRITE,
+    PLATFORM_TENANT_ACTIVATE,
+    PLATFORM_TENANT_BOOTSTRAP,
+    PLATFORM_TENANT_READ,
+    PLATFORM_TENANT_WRITE,
     platform_permission_for_request,
 )
 from app.modules.system.models.operation_log import SysOperationLog
@@ -35,7 +39,7 @@ def system_agent_audit_record(
         audit_scope="platform",
         user_id=user_id,
         username=values["actor_name"],
-        module="Agent管理",
+        module="租户管理" if "/tenants" in values["path"] else "Agent管理",
         action=values["event_type"],
         method=values["method"],
         path=values["path"],
@@ -53,6 +57,8 @@ def system_agent_audit_record(
                     "denial_code",
                     "authorization_audit_id",
                     "changes",
+                    "target_tenant_id",
+                    "result_summary",
                 )
             },
             ensure_ascii=False,
@@ -76,16 +82,27 @@ async def require_system_agent_context(
 ) -> AsyncGenerator[PlatformContext]:
     if not is_system_admin(user):
         raise AuthorizationException(
-            "仅系统超级管理员可管理全局 Agent", error_code="SYSTEM_ADMIN_ONLY"
+            "仅系统超级管理员可执行全局管理", error_code="SYSTEM_ADMIN_ONLY"
         )
     started = time.perf_counter()
     route = request.scope.get("route")
     path = getattr(route, "path", request.url.path)
     permission = platform_permission_for_request(request.method, path)
+    target_tenant_id = await resolve_platform_target(request, db, path)
+    permissions = {PLATFORM_AI_READ, PLATFORM_AI_WRITE}
+    if path.startswith("/platform/tenants"):
+        permissions.update(
+            {
+                PLATFORM_TENANT_READ,
+                PLATFORM_TENANT_WRITE,
+                PLATFORM_TENANT_BOOTSTRAP,
+                PLATFORM_TENANT_ACTIVATE,
+            }
+        )
     principal = SimpleNamespace(
         principal_id=user.user_id,
         principal_name=user.user_name,
-        permissions=frozenset({PLATFORM_AI_READ, PLATFORM_AI_WRITE}),
+        permissions=frozenset(permissions),
     )
 
     async def persist(**values):
@@ -107,6 +124,7 @@ async def require_system_agent_context(
         ip=request.client.host if request.client else None,
         request_summary={"queryKeyCount": len(request.query_params)},
         persist=persist,
+        target_tenant_id=target_tenant_id,
     )
     context = authorization.context
     completion = {
@@ -121,6 +139,7 @@ async def require_system_agent_context(
         "correlation_id": context.correlation_id,
         "authorization_audit_id": authorization.authorization_audit_id,
         "event_type": "completed",
+        "target_tenant_id": context.target_tenant_id,
     }
     try:
         yield context
@@ -138,6 +157,9 @@ async def require_system_agent_context(
                 system_agent_audit_record(
                     **completion,
                     changes=getattr(request.state, "system_agent_changes", None),
+                    result_summary=getattr(
+                        request.state, "platform_result_summary", None
+                    ),
                     status_code=200,
                     duration_ms=int((time.perf_counter() - started) * 1000),
                 )

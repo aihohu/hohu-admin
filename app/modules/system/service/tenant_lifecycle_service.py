@@ -237,12 +237,6 @@ class TenantLifecycleService:
                 "Default Tenant 不能通过平台 API 激活",
                 error_code="PLATFORM_DEFAULT_TENANT_IMMUTABLE",
             )
-        if settings.TENANT_HOSTED_CANARY_TENANT_ID != tenant_id:
-            record_hosted_gate_decision(surface="activation", result="blocked")
-            raise BusinessRuleException(
-                "目标租户未进入 Hosted canary",
-                error_code="PLATFORM_TENANT_CANARY_NOT_ALLOWED",
-            )
         record_hosted_gate_decision(surface="activation", result="allowed")
         tenant = await db.scalar(
             select(Tenant).where(Tenant.tenant_id == tenant_id).with_for_update()
@@ -251,12 +245,10 @@ class TenantLifecycleService:
             raise NotFoundException("租户", error_code="PLATFORM_TENANT_NOT_FOUND")
         if tenant.lifecycle_state == "active" and tenant.status == "1":
             return tenant
-        if tenant.lifecycle_state == "disabled":
-            raise BusinessRuleException(
-                "已禁用租户不能通过 activation 重新启用",
-                error_code="PLATFORM_TENANT_REACTIVATION_UNSUPPORTED",
-            )
-        if tenant.lifecycle_state != "prepared" or tenant.status != "2":
+        if (
+            tenant.lifecycle_state not in {"prepared", "disabled"}
+            or tenant.status != "2"
+        ):
             raise BusinessRuleException(
                 "租户状态不能激活",
                 error_code="PLATFORM_TENANT_STATE_INVALID",

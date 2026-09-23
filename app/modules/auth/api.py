@@ -8,6 +8,7 @@ from app.constants import MENU_TYPE_DIRECTORY, MENU_TYPE_MENU, STATUS_ENABLED
 from app.constants.static_routes import CONSTANT_ROUTES
 from app.core.auth import is_super_admin
 from app.core.base_response import ResponseModel
+from app.core.config import settings
 from app.core.exceptions import (
     AuthenticationException,
     DuplicateException,
@@ -334,6 +335,19 @@ async def get_user_routes(
 
     route_tree = build_menu_tree(menu_list, 0)
     if is_system_admin(current_user):
+        route_tree.append(
+            UserRoute(
+                name="tenant",
+                path="/tenant",
+                component="layout.base$view.tenant",
+                meta=RouteMeta(
+                    title="租户管理",
+                    i18n_key="route.tenant",
+                    icon="ph:buildings",
+                    order=3,
+                ),
+            )
+        )
         agent_route = UserRoute(
             name="ai_agent",
             path="/ai/agent",
@@ -411,7 +425,7 @@ async def is_route_exist(
             "data": true
         }
     """
-    if route_name == "ai_agent":
+    if route_name in {"ai_agent", "tenant"}:
         return ResponseModel.success(data=is_system_admin(current_user))
     if route_name in PLATFORM_ONLY_TENANT_ROUTE_NAMES:
         return ResponseModel.success(data=False)
@@ -423,3 +437,13 @@ async def is_route_exist(
     result = await db.execute(stmt)
     exists = result.scalars().first() is not None
     return ResponseModel.success(data=exists)
+
+
+@router.get("/login-options", summary="读取公开登录定位方式")
+async def login_options():
+    return ResponseModel.success(
+        data={
+            "tenantMode": settings.TENANT_MODE,
+            "tenantLocator": "host" if settings.TENANT_HOST_SUFFIX else "code",
+        }
+    )

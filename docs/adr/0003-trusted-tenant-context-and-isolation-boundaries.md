@@ -73,10 +73,10 @@ HoHu 同时是开源项目。默认本地部署不应因多租户能力增加额
 
 ### 5. 系统超级管理员与租户管理员分离
 
-- 用户名不授予权限。启用的 `R_SUPER` 角色授予本租户管理权限；仅默认租户中启用的系统超级管理员可通过普通登录会话管理全局 Agent。
-- AiAgent、AiProvider、AiModel 等平台运行配置首期保持 platform-global，通过显式授权的控制面修改（Agent 使用系统角色，其余平台维护 API 使用独立平台身份）；租户是否可使用模型由显式 tenant-model policy 决定。
-- 跨租户查询、迁移、支持和审计使用 `/platform/**` 或离线管理命令，要求独立平台
-  身份、显式目标租户、reason/ticket 和 append-only 审计。普通业务 API 不接受
+- 用户名不授予权限。启用的 `R_SUPER` 角色授予本租户管理权限；仅默认租户中启用的系统超级管理员可通过普通登录会话管理全局 Agent、租户生命周期和租户模型授权。
+- AiAgent、AiProvider、AiModel 等平台运行配置首期保持 platform-global，通过显式授权的控制面修改（Agent 和租户管理使用系统角色；Provider/模型目录等平台维护 API 使用独立平台身份）；租户是否可使用模型由显式 tenant-model policy 决定。
+- 跨租户管理使用 `/platform/**` 或离线管理命令，按具体入口要求系统角色或独立平台
+  维护身份，显式绑定目标租户，并记录 reason/ticket 和 append-only 审计。普通业务 API 不接受
   `tenantId` 来切换作用域。
 
 ### 6. 结果投影、审计、异步和缓存继承同一租户
@@ -139,7 +139,7 @@ HoHu 同时是开源项目。默认本地部署不应因多租户能力增加额
 
 1. **默认租户菜单同步显式限定作用域** — `scripts/sync_menus.py` 的去重、父节点解析和旧路由改名只查询默认租户。**反例**: 其他租户的同名菜单导致默认租户漏补菜单或引用跨租户父节点。**回归**: `tests/scripts/test_sync_menus_tenant_scope.py`。
 
-Hosted 登录仍受显式发布开关和 canary 租户限制。Marketplace/Lowcode 不提供 hosted 多租户能力；多租户 membership、租户在线切换、BYOK 和 RLS 需要独立设计。
+Hosted 登录受部署模式、全局登录开关、数据库租户状态及安全版本共同控制，不再受单个 canary ID 限制。详见 [核心多租户管理](../MULTI-TENANCY.md)。Marketplace/Lowcode 不提供 hosted 多租户能力；多租户 membership、租户在线切换、BYOK 和 RLS 需要独立设计。
 
 - [安全规范](../SECURITY.md)
 - [AI 安全指南](../AI-SECURITY.md)

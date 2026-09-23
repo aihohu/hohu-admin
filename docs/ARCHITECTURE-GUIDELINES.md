@@ -137,7 +137,7 @@ declare namespace Api {
 ### 4.2 认证
 
 - `Authorization: Bearer <jwt>`（HS256；access token 默认 60 分钟，refresh token 默认 7 天）
-- super_admin bypass：`user_name == "admin"` 或 role 含 `R_SUPER`
+- super_admin bypass：启用的本租户 `R_SUPER` 角色；全局租户管理另要求默认租户中启用的系统超级管理员身份，账号名称不授予权限。
 - 权限码：`<module>:<resource>:<action>`（如 `sys:user:list`）
 
 ### 4.3 ID 与序列化

@@ -215,31 +215,25 @@ async def test_activation_gate_fails_before_database_access(monkeypatch):
     db.execute.assert_not_awaited()
 
 
-async def test_activation_rejects_non_canary_target_before_database_access(
-    monkeypatch,
-):
+async def test_activation_of_second_tenant_still_requires_database_record(monkeypatch):
     monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
     monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
     monkeypatch.setattr(settings, "TENANT_HOSTED_CANARY_TENANT_ID", 22)
     db = AsyncMock()
-
+    db.scalar.return_value = None
     with pytest.raises(BusinessException) as exc_info:
         await tenant_lifecycle_service.activate_tenant(
-            db,
-            tenant_id=23,
-            platform=_platform(PLATFORM_TENANT_ACTIVATE, 23),
+            db, tenant_id=23, platform=_platform(PLATFORM_TENANT_ACTIVATE, 23)
         )
-
-    assert exc_info.value.error_code == "PLATFORM_TENANT_CANARY_NOT_ALLOWED"
-    db.scalar.assert_not_awaited()
-    db.execute.assert_not_awaited()
+    assert exc_info.value.error_code == "PLATFORM_TENANT_NOT_FOUND"
+    db.scalar.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
     ("bootstrap_version", "lifecycle_state", "expected_error"),
     [
         (0, "prepared", "PLATFORM_TENANT_NOT_BOOTSTRAPPED"),
-        (1, "disabled", "PLATFORM_TENANT_REACTIVATION_UNSUPPORTED"),
+        (0, "disabled", "PLATFORM_TENANT_NOT_BOOTSTRAPPED"),
     ],
 )
 async def test_activation_rejects_unready_or_previously_disabled_tenant(
@@ -314,3 +308,37 @@ async def test_get_tenant_rejects_context_for_a_different_target(db_session):
         )
 
     assert exc_info.value.error_code == "PLATFORM_TARGET_TENANT_MISMATCH"
+
+
+async def test_reactivation_bumps_version_and_cannot_revive_old_authority(
+    db_session, monkeypatch
+):
+    monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
+    monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
+    tenant_id = next_id()
+    tenant = Tenant(
+        tenant_id=tenant_id,
+        tenant_code=f"resume-{tenant_id}",
+        tenant_name="Resume",
+        status="1",
+        lifecycle_state="active",
+        bootstrap_version=1,
+        bootstrap_key_hash="a" * 64,
+        bootstrap_fingerprint="b" * 64,
+        row_version=1,
+    )
+    db_session.add(tenant)
+    await db_session.flush()
+    await tenant_lifecycle_service.disable_tenant(
+        db_session,
+        tenant_id=tenant_id,
+        platform=_platform(PLATFORM_TENANT_WRITE, tenant_id),
+    )
+    assert tenant.row_version == 2
+    await tenant_lifecycle_service.activate_tenant(
+        db_session,
+        tenant_id=tenant_id,
+        platform=_platform(PLATFORM_TENANT_ACTIVATE, tenant_id),
+    )
+    assert tenant.row_version == 3
+    assert tenant.status == "1"
