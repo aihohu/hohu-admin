@@ -4,7 +4,7 @@
 
 ### 贡献许可
 
-自 v0.1.5 起，新贡献默认按 [Apache License 2.0](./LICENSE) 授权，贡献者保留版权。v0.1.4 及此前已发布版本和继承代码的原 MIT 声明见 [LICENSE-MIT](./LICENSE-MIT)。请保留第三方代码的版权及许可声明。
+自 v0.1.5 起，新贡献默认按 [Apache License 2.0](./LICENSE) 授权，贡献者保留版权。v0.1.4 及此前版本曾以 MIT 发布，该授权对已分发副本继续有效。请保留第三方代码的版权及许可声明。
 
 外部贡献使用 `git commit -s` 添加 DCO `Signed-off-by`；维护者提交自己拥有版权的代码时可不添加该尾注。DCO 不等于版权转让；完整规范见 [License 与 DCO](./docs/CONTRIBUTING.md#3-license-与-dco) 和[许可证切换政策](./docs/LICENSE-POLICY.md)。
 

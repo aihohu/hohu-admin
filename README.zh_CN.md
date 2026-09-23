@@ -485,8 +485,6 @@ async def get_user_list(
 
 ## 许可证
 
-[Apache License 2.0](./LICENSE) &copy; HoHux
+[Apache License 2.0](./LICENSE) &copy; HoHu
 
-自 v0.1.5 起，本项目默认采用 Apache-2.0，另有声明的代码除外。v0.1.4 及此前已发布版本继续适用原有 MIT 授权。继承代码的原 MIT 声明保存在 [LICENSE-MIT](./LICENSE-MIT)，不表示全部新增代码可任选 MIT；第三方依赖保留各自许可证。
-
-授权范围和分发要求见 [NOTICE](./NOTICE) 与[许可证切换政策](./docs/LICENSE-POLICY.md)。
+授权范围和分发要求见 [NOTICE](./NOTICE) 与[许可证政策](./docs/LICENSE-POLICY.md)。

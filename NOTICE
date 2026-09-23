@@ -1,12 +1,11 @@
 hohu-admin
-Copyright (c) 2025-2026 HoHux
+Copyright (c) 2025-2026 HoHu
 
 Starting with v0.1.5, this project is licensed under Apache License 2.0,
 except where otherwise noted. See LICENSE for the complete terms.
 
-Previously released hohu-admin versions through v0.1.4 remain under
-their original MIT license. LICENSE-MIT preserves the original notice for
-inherited code and does not license all new code under MIT. Existing MIT
-permissions are not revoked by this transition.
+Versions through v0.1.4 were previously released under the MIT license.
+That grant remains effective for copies already distributed and is not
+revoked by this transition.
 
 Third-party components retain their own licenses and copyright notices.

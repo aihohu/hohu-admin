@@ -6,7 +6,7 @@ hohu 官方开源项目采用 Apache License 2.0 作为默认许可政策，另�
 
 `hohu-admin` 与 `hohu-admin-web` 自 v0.1.5 起默认采用 Apache-2.0。v0.1.4 及此前已按 MIT 发布的版本继续适用原授权，历史提交、标签和发布包不改写。CHANGELOG 中的 Unreleased 条目不表示版本已经发布。
 
-继承代码的原 MIT 文本保存在 `LICENSE-MIT`。保留该文件不表示所有新增代码都可任选 MIT 或 Apache-2.0；已经授出的 MIT 权利继续有效。
+版本边界在 `NOTICE` 中以一句话说明：v0.1.4 及此前已按 MIT 发布，已授出的权利对已分发副本继续有效；仓库不保留单独的 MIT 存档文件。
 
 ## 版权与第三方代码
 
@@ -21,13 +21,12 @@ Web 基于 SoybeanAdmin 开发。上游 MIT 原文及适用范围见 Web 仓库�
 | 文件 | 用途 |
 |---|---|
 | `LICENSE` | 完整 Apache-2.0 标准文本 |
-| `LICENSE-MIT` | 继承代码的原 MIT 许可及版权声明 |
-| `NOTICE` | 项目归属与授权范围说明 |
+| `NOTICE` | 项目归属、授权范围与版本边界说明 |
 | Web `THIRD_PARTY_NOTICES.md` | SoybeanAdmin 许可原文、来源和适用范围 |
 
-后端 wheel 和 sdist 必须包含 `LICENSE`、`LICENSE-MIT` 和 `NOTICE`，由 `pyproject.toml` 中的 `license-files` 指定。
+后端 wheel 和 sdist 必须包含 `LICENSE` 和 `NOTICE`，由 `pyproject.toml` 中的 `license-files` 指定。
 
-Web 根目录的四个许可文件是维护来源，`public/licenses/` 中保存对应发布副本。变更时须同步副本并保持内容一致；Vite 将它们复制到 `dist/licenses/`，分发构建产物时保留该目录。
+Web 根目录的三个许可文件是维护来源，`public/licenses/` 中保存对应发布副本。变更时须同步副本并保持内容一致；Vite 将它们复制到 `dist/licenses/`，分发构建产物时保留该目录。
 
 ## 贡献与提交
 
@@ -40,6 +39,7 @@ Web 根目录的四个许可文件是维护来源，`public/licenses/` 中保存
 1. **采用 Apache-2.0 宽松许可** — 支持企业采用、二次开发及商业扩展，并明确贡献者专利授权条款。**反例**: 将许可证误解为禁止第三方商业托管或闭源扩展。**回归**: 核对 LICENSE 标准文本、README 和包许可元数据一致。
 2. **保留历史与上游 MIT 声明** — 新的默认政策不撤销既有权利，也不覆盖第三方归属。**反例**: 替换根 LICENSE 后删除 SoybeanAdmin 的版权声明。**回归**: 对照历史 MIT 文本和固定上游许可来源检查继承声明。
 3. **许可随构建产物分发** — 使用者在获取源码、Python 包或 Web 构建产物时均能取得适用许可。**反例**: 仅在 README 链接上游仓库，发布包没有 MIT 原文。**回归**: 检查 wheel / sdist 及 Web dist/licenses 的文件内容与根目录一致。
+4. **单文件许可结构** — 项目无外部使用者与贡献者，删除 `LICENSE-MIT` 存档文件，历史边界改为 `NOTICE` 一句话说明；已授出的 MIT 权利不因删除文件而撤销，第三方（SoybeanAdmin）声明不受影响。**反例**: 认为删除存档文件等于否认 v0.1.4 及此前版本曾以 MIT 发布。**回归**: NOTICE 含版本边界说明，wheel / sdist 仅携带 LICENSE 与 NOTICE。
 
 ## 参考
 

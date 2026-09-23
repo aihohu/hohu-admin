@@ -196,8 +196,6 @@ pytest                           # Run tests
 
 ## License
 
-[Apache License 2.0](./LICENSE) &copy; HoHux
+[Apache License 2.0](./LICENSE) &copy; HoHu
 
-Starting with v0.1.5, this project is licensed under Apache-2.0, except where otherwise noted. Previously released versions through v0.1.4 remain under their original MIT license. The original MIT notice for inherited code is preserved in [LICENSE-MIT](./LICENSE-MIT); it does not offer all new code under MIT. Third-party dependencies retain their own licenses.
-
-See [NOTICE](./NOTICE) and the [license transition policy](./docs/LICENSE-POLICY.md) for scope and distribution details.
+See [NOTICE](./NOTICE) and the [license policy](./docs/LICENSE-POLICY.md) for scope and distribution details.
