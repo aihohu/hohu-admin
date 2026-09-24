@@ -22,6 +22,11 @@ from app.modules.ai.agents.hitl.events import DryRunSummary
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.agents.tools.registry import ToolRegistry, compute_available_tools
 from app.modules.ai.core.context import AiToolContext, DataScopeContext
+from app.modules.ai.seed_prompts import (
+    DEFAULT_PROMPTS,
+    LEGACY_DEFAULT_PROMPTS,
+    should_update_prompt,
+)
 from app.modules.system.ai_tools import (
     AiUserRoleAssignment,
     _dry_run_user_create,
@@ -34,11 +39,6 @@ from app.modules.system.models.config import Config
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
-from scripts.seed_agent_prompts import (
-    DEFAULT_PROMPTS,
-    LEGACY_DEFAULT_PROMPTS,
-    should_update_prompt,
-)
 from tests.tenant_helpers import bind_test_user
 
 DEFAULT_PASSWORD = "AiPolicy123"

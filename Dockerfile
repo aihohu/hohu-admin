@@ -35,6 +35,8 @@ COPY --from=builder --chown=appuser:appuser /app/app /app/app
 COPY --from=builder --chown=appuser:appuser /app/alembic /app/alembic
 COPY --from=builder --chown=appuser:appuser /app/alembic.ini /app/alembic.ini
 COPY --from=builder --chown=appuser:appuser /app/scripts /app/scripts
+COPY --from=builder --chown=appuser:appuser /app/tools/__init__.py /app/tools/__init__.py
+COPY --from=builder --chown=appuser:appuser /app/tools/ops /app/tools/ops
 
 RUN mkdir -p /app/uploads /app/private_uploads && \
     chown appuser:appuser /app/uploads /app/private_uploads

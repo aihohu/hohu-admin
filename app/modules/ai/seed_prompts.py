@@ -2,24 +2,13 @@
 
 管理员可在后台覆盖。默认写入空 prompt，也会把已知旧版默认
 prompt 升级到当前版本；无法识别的部署方自定义 prompt 始终保留。
-加 `--force` 强制覆盖所有内置 Agent（用于刷新默认 prompt 模板）。
-
-用法：
-    uv run python scripts/seed_agent_prompts.py            # 填空 + 升级已知旧默认值
-    uv run python scripts/seed_agent_prompts.py --force    # 覆盖所有内置
+由部署初始化统一调用，不提供覆盖自定义内容的部署开关。
 """
 
-import argparse
-import asyncio
-import logging
-
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.session import AsyncSessionLocal
 from app.modules.ai.models.agent import AiAgent
-
-logging.basicConfig(level=logging.INFO, format="%(message)s")
-logger = logging.getLogger(__name__)
 
 _USER_MGMT_PROMPT_V1 = (
     "你是用户管理助手，能调用以下工具：\n\n"
@@ -221,46 +210,13 @@ def should_update_prompt(agent_code: str, current: str | None, *, force: bool) -
     return current in LEGACY_DEFAULT_PROMPTS.get(agent_code, frozenset())
 
 
-async def main(force: bool = False) -> None:
-    """写入空值并升级已知旧默认值；force=True 时覆盖所有内置 Agent。"""
-    async with AsyncSessionLocal() as db:
-        async with db.begin():
-            result = await db.execute(select(AiAgent))
-            agents = result.scalars().all()
-
-            updated = 0
-            skipped_has_prompt = 0
-            skipped_no_default = 0
-            for agent in agents:
-                default = DEFAULT_PROMPTS.get(agent.code)
-                if not default:
-                    skipped_no_default += 1
-                    continue
-                if not should_update_prompt(
-                    agent.code,
-                    agent.system_prompt,
-                    force=force,
-                ):
-                    skipped_has_prompt += 1
-                    continue
-                agent.system_prompt = default
-                updated += 1
-                logger.info("  updated: %s (%s)", agent.code, agent.name)
-
-    logger.info(
-        "done: %d updated, %d already configured (skipped), %d no default",
-        updated,
-        skipped_has_prompt,
-        skipped_no_default,
-    )
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="强制覆盖所有内置 Agent 的 system_prompt（覆盖管理员自定义）",
-    )
-    args = parser.parse_args()
-    asyncio.run(main(force=args.force))
+async def seed_agent_prompts_in_session(db: AsyncSession) -> None:
+    for agent in (await db.scalars(select(AiAgent))).all():
+        default = DEFAULT_PROMPTS.get(agent.code)
+        if (
+            agent.is_builtin
+            and default
+            and should_update_prompt(agent.code, agent.system_prompt, force=False)
+        ):
+            agent.system_prompt = default
+    await db.flush()

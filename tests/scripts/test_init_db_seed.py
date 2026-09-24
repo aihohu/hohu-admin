@@ -9,8 +9,7 @@
    导入使用全局默认密码；helper 缺失时抛
    ``AI_IMPORT_DEFAULT_PASSWORD_NOT_SET``，所以 fresh install 必须先种好）
 
-不调用 ``init_db()``：那需要 input() 交互 + DROP TABLE，跑它会清库。
-直接检查 ``init_menus`` / ``init_configs`` 列表即可。
+通过共享目录的工厂创建新对象检查定义；数据库行为由 test_deployment_seed.py 覆盖。
 """
 
 import pytest
@@ -33,11 +32,13 @@ from app.utils.validators import validate_password
 from scripts.init_db import (
     build_default_tenant,
     build_init_roles,
-    default_password_seed_value,
     fresh_role_permission_menus,
-    init_configs,
-    init_menus,
 )
+from scripts.seed_config import build_initial_configs, default_password_seed_value
+from scripts.sync_menus import build_initial_menus
+
+init_menus = build_initial_menus(tenant_id=0)
+init_configs = build_initial_configs(tenant_id=0, fresh=True)
 
 
 def test_default_tenant_seed_uses_reserved_identity_and_enabled_status():

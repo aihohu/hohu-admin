@@ -14,11 +14,11 @@ from app.modules.ai.agents.gateway.executor import _build_direct_confirmation_fi
 from app.modules.ai.agents.hitl.events import DryRunSummary
 from app.modules.ai.core.context import AiToolContext, DataScopeContext
 from app.modules.ai.schemas.confirm import ConfirmationPresentation
+from app.modules.ai.seed_prompts import DEFAULT_PROMPTS
 from app.modules.system import ai_tools as system_ai_tools
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
-from scripts.check_ai_tools import EXPECTED_BUILTIN_TOOL_NAMES
-from scripts.seed_agent_prompts import DEFAULT_PROMPTS
+from tools.checks.check_ai_tools import EXPECTED_BUILTIN_TOOL_NAMES
 
 
 def _actor() -> User:

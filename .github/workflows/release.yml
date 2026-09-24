@@ -68,7 +68,7 @@ jobs:
       - name: Run complete hosted release qualification
         run: |
           mkdir -p "${RUNNER_TEMP}/tenant-release-qualification"
-          uv run python scripts/qualify_tenant_hosted_release.py \
+          uv run python -m tests.release.qualify_tenant_hosted_release \
             --build-sha "$(git rev-parse HEAD)" \
             --profile release \
             --output "${RUNNER_TEMP}/tenant-release-qualification/qualification.json"

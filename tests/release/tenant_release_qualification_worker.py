@@ -7,6 +7,7 @@ without mutating process-global configuration.
 
 from __future__ import annotations
 
+# ruff: noqa: T201
 import argparse
 import asyncio
 import json

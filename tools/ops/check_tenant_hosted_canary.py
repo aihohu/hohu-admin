@@ -18,7 +18,7 @@ from app.core.tenant_canary import build_canary_preflight_report
 from app.db.session import engine
 
 RISK_EXIT_CODE = 2
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _BUILD_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 

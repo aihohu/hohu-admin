@@ -11,7 +11,7 @@ from app.core.tenant_isolation_audit import (
     TenantIsolationAuditReport,
     scan_source_boundaries,
 )
-from scripts import audit_tenant_isolation as cli
+from tools.ops import audit_tenant_isolation as cli
 
 
 def test_source_scan_detects_hardcoded_tenant_and_unscoped_storage(tmp_path) -> None:

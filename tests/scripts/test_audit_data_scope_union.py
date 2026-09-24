@@ -20,8 +20,9 @@ from app.db.base import role_depts, user_depts
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
-from scripts import audit_data_scope_union
-from scripts.audit_data_scope_union import (
+from tests.tenant_helpers import tenant_context
+from tools.ops import audit_data_scope_union
+from tools.ops.audit_data_scope_union import (
     ScopeUnionAuditReport,
     _parse_args,
     audit_exit_code,
@@ -29,10 +30,9 @@ from scripts.audit_data_scope_union import (
     verify_scope_union_ack,
     write_protected_report,
 )
-from scripts.audit_data_scope_union import (
+from tools.ops.audit_data_scope_union import (
     build_scope_union_report as _build_scope_union_report,
 )
-from tests.tenant_helpers import tenant_context
 
 pytest_plugins = ("tests.modules.system.conftest",)
 TENANT = tenant_context()

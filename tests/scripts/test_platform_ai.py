@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-import scripts.platform_ai as cli
+import tools.ops.platform_ai as cli
 
 
 def test_cli_reads_token_from_environment_and_builds_fixed_policy_route(

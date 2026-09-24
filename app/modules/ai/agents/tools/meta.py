@@ -145,7 +145,7 @@ class AiToolMeta:
 SHARED_AGENT_CODE = "shared"
 
 # 工具参数命中此黑名单时，Lint 强制要求声明 sensitive_input。
-# 命中但未声明 → 阻断合并（scripts/check_ai_tools.py 的 blocklist_field_must_be_sensitive）
+# 命中但未声明 → 阻断合并（tools/checks/check_ai_tools.py 的 blocklist_field_must_be_sensitive）
 SENSITIVE_INPUT_BLOCKLIST = (
     "password",
     "password_hash",

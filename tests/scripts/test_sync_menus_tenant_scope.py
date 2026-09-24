@@ -1,7 +1,5 @@
 """Default-tenant menu synchronization must ignore other tenants' definitions."""
 
-from contextlib import asynccontextmanager
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from sqlalchemy import select
@@ -73,19 +71,8 @@ async def test_sync_uses_default_tenant_routes_permissions_and_parents(
         "_reconcile_menu_partitions",
     ):
         monkeypatch.setattr(module, name, AsyncMock(return_value=0))
-    monkeypatch.setattr(
-        module,
-        "create_async_engine",
-        lambda *_args: SimpleNamespace(dispose=AsyncMock()),
-    )
+    await module.sync_menus_in_session(db_session)
 
-    @asynccontextmanager
-    async def session():
-        yield db_session
-
-    monkeypatch.setattr(module, "sessionmaker", lambda *_args, **_kwargs: session)
-    monkeypatch.setattr(db_session, "commit", AsyncMock(side_effect=db_session.flush))
-    await module.sync_menus()
     child = await db_session.scalar(
         select(Menu).where(Menu.tenant_id == 0, Menu.route_name == "test_scope_child")
     )

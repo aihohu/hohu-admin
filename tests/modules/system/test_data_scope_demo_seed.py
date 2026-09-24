@@ -8,7 +8,7 @@ from app.db.base import user_depts, user_roles
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
-from scripts import seed_demo_data_scope
+from tools.demo import seed_demo_data_scope
 
 
 async def test_partial_legacy_seed_is_reconciled_without_skipping_missing_users(

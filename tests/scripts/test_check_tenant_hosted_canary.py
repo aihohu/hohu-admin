@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.core.tenant_canary import build_canary_preflight_report
-from scripts import check_tenant_hosted_canary
+from tools.ops import check_tenant_hosted_canary
 
 
 def _mapping_result(value):

@@ -112,7 +112,7 @@ SECRET_KEY=<strong-random>      # JWT 签名，必须强随机
 - [ ] 数据库账号最小权限（不用 superuser）
 - [ ] Redis 启用 AUTH + 网络隔离
 - [ ] LLM API Key 加密存储（Fernet，已实现）
-- [ ] `python scripts/audit_ai_provider_egress.py` 无未处置 finding；存量 `EGRESS_POLICY_BLOCKED` 未被自动放行或翻转 `enabled`
+- [ ] `python -m tools.ops.audit_ai_provider_egress` 无未处置 finding；存量 `EGRESS_POLICY_BLOCKED` 未被自动放行或翻转 `enabled`
 - [ ] 已配置六个 `AI_E2E_*` 变量并通过真实 Provider 的 `pnpm e2e:provider`；不得用确定性 route fixture 或缺凭据 skip 代替
 - [ ] HTTPS 全链路（Nginx / Caddy TLS 终止）
 - [ ] 速率限制中间件启用（`RATE_LIMIT_API`）
@@ -134,40 +134,25 @@ alembic upgrade head
 
 `v0.1.4` 的不可变迁移边界为 `bf244f9a8b76`。升级前必须检查 `alembic current`：生产数据库只允许从该 revision 或其祖先升级；若测试数据库记录了已压缩移除的 revision，必须清理重建，禁止直接 `stamp` 到新 head。
 
-### 3.2 seed 内置 Agent + 权限码
+### 3.2 CLI 自动初始化与升级
+
+用户执行 `hohu deploy`（源码更新使用 `hohu deploy upgrade`），CLI 的 migrator
+在 Alembic 成功后统一调用 `python -m scripts.init_db`，自动判断首次安装或已有部署。
+不再分别执行菜单、配置、Agent 与 Prompt 脚本，也不再使用 `--init`。
+
+首次管理员密码由 CLI 生成并保存在部署 `.env` 的 `HOHU_ADMIN_PASSWORD`。
+种子在一个事务中执行，失败回滚；重复执行保留密码、角色授权、自定义配置与 Prompt，
+不会清库。菜单定义共用 System 模块的静态目录，hosted 租户仅同步既定能力集合。
+
+维护人员可单独执行只读部署检查：
 
 ```bash
-# fresh install：初始化菜单、权限码、角色、管理员和 7 个内置 Agent
-uv run python scripts/init_db.py
-
-# 写入空 prompt，并把已知旧版内置默认 prompt 安全升级到当前版本；自定义 prompt 不覆盖
-uv run python scripts/seed_agent_prompts.py
-```
-
-存量升级不要运行 `init_db.py`；在 `alembic upgrade head` 后执行：
-
-```bash
-# 幂等补齐 7 个内置 Agent，不覆盖部署方配置
-uv run python scripts/seed_ai_agents.py
-
-# 幂等升级内置 prompt，不覆盖部署方自定义 prompt
-uv run python scripts/seed_agent_prompts.py
-
-# 幂等补齐 ai:chat:use 菜单和兼容角色授权
-uv run python scripts/migrate_ai_mvp_permissions.py
-
-# 只读审计存量 Provider/Model；发现 blocked 时返回非零且不改写 enabled
-uv run python scripts/audit_ai_provider_egress.py
-
-# 幂等补齐 system:user:role-auth 及历史 writer 兼容授权
-uv run python scripts/migrate_phase2_authorization.py
-
-# DataScope 只读预检；报告 tenant 固定为服务端可信值 0
-BUILD_SHA=<new-build-sha> uv run python scripts/audit_data_scope_union.py \
+uv run python -m tools.ops.audit_ai_provider_egress
+BUILD_SHA=<new-build-sha> uv run python -m tools.ops.audit_data_scope_union \
   --output /protected/phase2-scope-preflight.json
 ```
 
-升级脚本保留部署方显式配置的 Agent、Role-Agent 和 Tool 状态，不会自动启用未授权能力。
+完整目录与契约见 [SCRIPTS-DEPLOYMENT.md](SCRIPTS-DEPLOYMENT.md)。
 
 ### 3.3 验证
 
@@ -228,7 +213,7 @@ Agent、Provider、Model 是 platform-global 配置。Agent 管理由默认租�
 安全提示读取，不进入命令历史：
 
 ```bash
-python scripts/bootstrap_platform_principal.py \
+python -m tools.ops.platform_principal create \
   --principal-name platform_admin \
   --display-name "Platform Administrator" \
   --permission platform:ai:read \
@@ -261,7 +246,7 @@ canonical source IP 和固定结果摘要；completion 使用 conflict-first 幂
 **完整目标权限集合**逐项列出（未列出的既有权限会被撤销）：
 
 ```bash
-python scripts/replace_platform_principal_permissions.py \
+python -m tools.ops.platform_principal replace-permissions \
   --principal-name platform_admin \
   --permission platform:ai:read \
   --permission platform:ai:write \
@@ -293,11 +278,11 @@ retention 必须先调用 `/platform/tenants/{tenant_id}/audit-retention/preview
 #### 5.0.2 平台 AI CLI 与隔离报告
 
 Agent 使用管理后台的「AI 助手 → Agent 管理」页面。Provider/Model 的平台运维先把短期 token 放入
-`HOHU_PLATFORM_ACCESS_TOKEN`，再使用 `scripts/platform_ai.py` 的固定资源/动作命令；reason、
+`HOHU_PLATFORM_ACCESS_TOKEN`，再使用 `tools/ops/platform_ai.py` 的固定资源/动作命令；reason、
 ticket、correlation 必填，包含 API key 的 Provider payload 只从权限受控的 JSON 文件读取，
 不要放入命令行参数。CLI 禁止任意 path、redirect 和环境代理。独立平台 token 不适用于 Agent 接口，不再使用 CLI 的 Agent 子命令维护 Agent。
 
-切换版本前运行 `scripts/audit_tenant_isolation.py --build-sha <当前提交> --output <报告路径>`。
+切换版本前运行 `tools/ops/audit_tenant_isolation.py --build-sha <当前提交> --output <报告路径>`。
 脚本会先拒绝 dirty worktree，再复验参数与 checkout HEAD；一致后在 PostgreSQL
 repeatable-read/read-only 快照中生成
 确定性报告；任一 tenant NULL/orphan/cross-link、unique 冲突、未登记模型/namespace、hosted
@@ -464,25 +449,22 @@ alembic upgrade head
 
 # projection dependency 列的 legacy NULL 不可可靠回填，读取时按设计 fail closed
 
-# 3. 幂等补齐 AI 聊天入口权限（存量升级）
-uv run python scripts/migrate_ai_mvp_permissions.py
+# 3. 幂等补齐新增菜单与权限码（存量升级）
+hohu migrate
 
 # 4. 只读审计存量 Provider/Model；非零表示需修改 URL/allowlist，脚本不改 enabled
-uv run python scripts/audit_ai_provider_egress.py
+uv run python -m tools.ops.audit_ai_provider_egress
 
-# 5. 幂等补齐角色委派权限兼容数据
-uv run python scripts/migrate_phase2_authorization.py
-
-# 6. 在旧服务仍运行时生成只读 scope-diff；退出码 2 表示存在待确认扩大项
-BUILD_SHA=<new-build-sha> uv run python scripts/audit_data_scope_union.py \
+# 5. 在旧服务仍运行时生成只读 scope-diff；退出码 2 表示存在待确认扩大项
+BUILD_SHA=<new-build-sha> uv run python -m tools.ops.audit_data_scope_union \
   --output /protected/phase2-scope-preflight.json
 
-# 7. 授权管理员复核报告后，把当前完整 report hash 写入受控部署变量
+# 6. 授权管理员复核报告后，把当前完整 report hash 写入受控部署变量
 export DATA_SCOPE_UNION_ACK_SHA256=<reviewed-report-sha256>
 
-# 8. 原子切换门禁：同一数据库 session lock 内停止 writer、重跑审计、
+# 7. 原子切换门禁：同一数据库 session lock 内停止 writer、重跑审计、
 #    精确校验 ACK，并调用只接受同一 build SHA 的部署方切换/健康验证脚本
-BUILD_SHA=<new-build-sha> uv run python scripts/audit_data_scope_union.py \
+BUILD_SHA=<new-build-sha> uv run python -m tools.ops.audit_data_scope_union \
   --output /protected/phase2-scope-release.json \
   --verify-ack \
   --maintenance-command '["systemctl","stop","hohu-admin"]' \
@@ -604,18 +586,18 @@ systemctl restart hohu-admin
 - spec：`docs/specs/2026-07-02-ai-tool-gateway-design.md`（§1-21 完整设计）
 - 安全策略：`docs/AI-SECURITY.md`（紧急停用 / 漏洞报告 / 部署 checklist）
 - 原型：`docs/prototype/12-ai-chat-tool-call.html` / `13-ai-hitl-drawer.html` / `14-ai-clarification.html`
-- 静态检查：`scripts/check_ai_tools.py`（pre-commit + CI 双跑）
+- 静态检查：`tools/checks/check_ai_tools.py`（pre-commit + CI 双跑）
 - seed 脚本：`scripts/seed_ai_agents.py`（7 个内置 Agent）
-- prompt 升级：`scripts/seed_agent_prompts.py`（空值/已知旧默认值安全升级）
+- prompt 升级：`app/modules/ai/seed_prompts.py`（空值/已知旧默认值安全升级）
 - 初始化：`scripts/init_db.py`（菜单 + 权限码 + 管理员）
-- AI 权限升级：`scripts/migrate_ai_mvp_permissions.py`（幂等补入口权限与 R_SUPER 绑定，不覆盖显式状态或扩张普通角色）
-- 角色权限兼容：`scripts/migrate_phase2_authorization.py`（幂等补 `system:user:role-auth`，只覆盖历史用户角色 writer 与 R_SUPER）
-- DataScope 切换检查：`scripts/audit_data_scope_union.py`（旧 API/旧 AI/新 resolver 报告、精确 ACK、跨切换 session 维护锁）
+- 菜单增量同步：`scripts/sync_menus.py`（按 route_name / permission 去重，幂等补新增菜单与权限码）
+- DataScope 切换检查：`tools/ops/audit_data_scope_union.py`（旧 API/旧 AI/新 resolver 报告、精确 ACK、跨切换 session 维护锁）
 
 ---
 
 ## Changelog
 
+- **2026-09-23**：`bootstrap_platform_principal.py` 与 `replace_platform_principal_permissions.py` 合并为 `platform_principal.py`（`create` / `replace-permissions` 子命令）；移除已废弃的存量权限迁移脚本（`migrate_ai_mvp_permissions` / `migrate_phase2_authorization`），存量升级统一走 `sync_menus.py` 菜单增量同步。
 - **2026-09-22**：明确 Agent 管理普通会话与平台维护身份的边界，补充压缩迁移的支持范围和升级指南。
 - **2026-09-02**：增加独立平台身份 bootstrap、短期 token、AI read/write 权限和
   append-only 请求审计；tenant `R_SUPER` 不再代表平台权限。

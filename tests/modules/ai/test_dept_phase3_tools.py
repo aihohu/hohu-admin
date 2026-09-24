@@ -17,7 +17,7 @@ from app.modules.ai.core.context import AiToolContext, DataScopeContext
 from app.modules.ai.schemas.confirm import ConfirmationPresentation
 from app.modules.system import ai_tools as system_ai_tools
 from app.modules.system.models.dept import Dept
-from scripts.check_ai_tools import EXPECTED_BUILTIN_TOOL_NAMES
+from tools.checks.check_ai_tools import EXPECTED_BUILTIN_TOOL_NAMES
 
 
 def _context(

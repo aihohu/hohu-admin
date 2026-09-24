@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from scripts import qualify_tenant_hosted_release as qualification
+from tests.release import qualify_tenant_hosted_release as qualification
 
 BUILD_SHA = "a" * 40
 
@@ -503,9 +503,9 @@ def test_workflows_gate_ci_and_release_image_on_qualification() -> None:
         encoding="utf-8"
     )
 
-    assert "qualify_tenant_hosted_release.py" in ci
+    assert "python -m tests.release.qualify_tenant_hosted_release" in ci
     assert "--profile ci" in ci
-    assert "qualify_tenant_hosted_release.py" in release
+    assert "python -m tests.release.qualify_tenant_hosted_release" in release
     assert "--profile release" in release
     assert "needs: qualification" in release
     assert "actions/upload-artifact" in release

@@ -15,7 +15,9 @@ def test_initialization_stops_without_stamping_or_seeding(monkeypatch):
     spec.loader.exec_module(module)
     monkeypatch.setattr(module, "init_env_file", lambda: None)
     monkeypatch.setattr("builtins.input", lambda _prompt: "y")
-    monkeypatch.setattr(module.os.path, "exists", lambda _path: True)
+    monkeypatch.setattr(
+        module, "dotenv_values", lambda _path: {"HOHU_ADMIN_PASSWORD": "TestSeed123"}
+    )
     commands = []
 
     def run(command, **_kwargs):
@@ -30,5 +32,5 @@ def test_initialization_stops_without_stamping_or_seeding(monkeypatch):
     assert exc.value.code == 1
     assert not any("stamp" in command for command in commands)
     assert not any(
-        any("init_db.py" in part for part in command) for command in commands
+        any("scripts.init_db" in part for part in command) for command in commands
     )

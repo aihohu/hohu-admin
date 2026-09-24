@@ -80,6 +80,7 @@ unfixable = []
 [tool.ruff.lint.per-file-ignores]
 # Scripts are CLI tools that use print() for user-facing output (init_db.py precedent)
 "scripts/*" = ["T201"]
+"tools/*" = ["T201"]
 # 测试可 import 具体存储实现（MockFileStorage 等）
 # file_storage 模块自身实现可引用具体类；Protocol 实现要求签名一致，未用参数是契约
 "tests/*" = ["TID251"]

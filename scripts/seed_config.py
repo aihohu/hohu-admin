@@ -138,40 +138,56 @@ CONFIG_SEED_DATA = [
 ]
 
 
+def default_password_seed_value(env: str) -> str:
+    return "" if env == "prod" else "Hohu123456"
+
+
+def build_initial_configs(*, tenant_id: int, fresh: bool = False) -> list[Config]:
+    definitions = [dict(item) for item in CONFIG_SEED_DATA]
+    definitions.append(
+        {
+            "config_name": "导入用户默认密码",
+            "config_key": "auth:default_password",
+            "config_value": default_password_seed_value(settings.ENV),
+            "config_type": "text",
+            "config_group": "auth",
+            "status": "1",
+            "is_public": False,
+            "remark": "安全提示：上线前修改导入用户默认密码；生产环境必须显式配置。",
+        }
+    )
+    for item in definitions:
+        if item["config_key"] == "ai:enabled_tools" and fresh:
+            item["config_value"] = '["file.parse"]'
+    return [
+        Config(config_id=next_id(), tenant_id=tenant_id, **item) for item in definitions
+    ]
+
+
+async def seed_config_in_session(
+    db: AsyncSession, *, tenant_id: int, fresh: bool = False
+):
+    existing = set(
+        (
+            await db.scalars(
+                select(Config.config_key).where(Config.tenant_id == tenant_id)
+            )
+        ).all()
+    )
+    for config in build_initial_configs(tenant_id=tenant_id, fresh=fresh):
+        if config.config_key not in existing:
+            db.add(config)
+    await db.flush()
+
+
 async def seed_config():
     engine = create_async_engine(settings.DATABASE_URL)
-    async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    async with async_session() as db:
-        # 查询已存在的 config_key
-        result = await db.execute(select(Config.config_key))
-        existing_keys = set(result.scalars().all())
-
-        inserted = 0
-        for item in CONFIG_SEED_DATA:
-            if item["config_key"] in existing_keys:
-                print(f"  skip: {item['config_key']} ({item['config_name']})")
-                continue
-
-            config = Config(
-                config_id=next_id(),
-                tenant_id=DEFAULT_TENANT_ID,
-                **item,
-            )
-            db.add(config)
-            inserted += 1
-            pub = "public" if item["is_public"] else "private"
-            print(
-                f"  + {item['config_key']} ({item['config_name']}) [{item['config_type']}] [{pub}]"
-            )
-
-        if inserted:
-            await db.commit()
-            print(f"\nInserted {inserted} config items.")
-        else:
-            print("\nAll config items already exist.")
-
-    await engine.dispose()
+    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        async with factory() as db, db.begin():
+            await seed_config_in_session(db, tenant_id=DEFAULT_TENANT_ID)
+    finally:
+        await engine.dispose()
 
 
 if __name__ == "__main__":

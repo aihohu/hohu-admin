@@ -17,14 +17,7 @@ repos:
 
       - id: ai-tools-static-check
         name: AI tools static compliance check
-        entry: uv run python scripts/check_ai_tools.py
-        language: system
-        pass_filenames: false
-        always_run: true
-
-      - id: check-ai-tools-ui
-        name: Builtin ai_tool functions must return ui=
-        entry: uv run python scripts/check_ai_tools_ui.py
+        entry: uv run python -m tools.checks.check_ai_tools
         language: system
         pass_filenames: false
         always_run: true

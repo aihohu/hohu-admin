@@ -20,7 +20,7 @@ import httpx
 from jose import JWTError, jwt
 
 ROLLBACK_EXIT_CODE = 2
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _BUILD_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 

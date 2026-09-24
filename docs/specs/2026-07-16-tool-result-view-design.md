@@ -14,7 +14,7 @@
 - 后端 9 commit（Task 1-9）+ 前端 5 commit（Task 10-14）
 - 测试：Task 1-9 加 ~25 个新单测；全量 1150+ pytest 绿；前端 typecheck 绿
 - 10 个 builtin tool 全部迁移到 ToolResult.success(data=..., ui=...)
-- 新增 lint `scripts/check_ai_tools_ui.py`（pre-commit 集成）强制 builtin tool 带 ui=
+- 新增 lint 强制 builtin tool 带 ui=（2026-09-23 起并入 `scripts/check_ai_tools.py` 规则 13 `tool_result_success_requires_ui`，原独立脚本 `check_ai_tools_ui.py` 已移除）
 
 ### Ship-time 决策记录
 
@@ -30,11 +30,11 @@
 
 7. **`ToolResult.success(data, *, ui: UIResult | None = None)` ui 可选 + lint 强制 builtin tool 函数带 ui=**（决策 3 修正）。
    **反例**: ui 必填 → break `executor.py:818` fallback `ToolResult.success(data=safe_data)`（业务方返回 dict 走兼容路径）+ `test_events.py:356/367/377` 现有 fixture + 第三方 tool 无法预期 UIResult 结构。
-   **回归**: `scripts/check_ai_tools_ui.py` lint（AST 静态分析，pre-commit 集成）扫描 `@ai_tool` 装饰函数内所有 `ToolResult.success(...)` 调用，缺 `ui=` 报错（Task 9）；executor isinstance 双路径保留 dict 返回值的 fallback 包装。
+   **回归**: `scripts/check_ai_tools.py` 规则 13 `tool_result_success_requires_ui` lint（AST 静态分析，pre-commit 集成）扫描 builtin tool 函数内所有 `ToolResult.success(...)` 调用，缺 `ui=` 报错（Task 9，2026-09-23 并入）；executor isinstance 双路径保留 dict 返回值的 fallback 包装。
 
 8. **一次性全迁移 10 个 builtin tool**（user.count/stats/distinct + role.count/list + dept.count/list + user.batch_delete + job.update_cron + file.parse）。
    **反例**: 渐进迁移（spec §3 Phase 1-3）导致 tool 视觉不一致（一半新 view 一半 plain_json）+ 长期 fallback 没压力，业务方拖延迁移。
-   **回归**: `scripts/check_ai_tools_ui.py` pre-commit hook 锁死回退路径（任何 builtin tool 重构掉 ui= 立即报错）；Task 4-8 测试断言全部要求 `result.ui.view_type` 字段。
+   **回归**: `scripts/check_ai_tools.py` 规则 13 pre-commit hook 锁死回退路径（任何 builtin tool 重构掉 ui= 立即报错，2026-09-23 并入）；Task 4-8 测试断言全部要求 `result.ui.view_type` 字段。
 
 9. **`affected_rows` 优先级**：`dry_run_count` > `ui.audit.affected_count` > `_infer_affected_rows` 推断。
    **反例**: 双源不一致（dry_run_count vs ui.audit vs result_data dict 推断）→ 卡片显示两个不同数字，用户困惑。

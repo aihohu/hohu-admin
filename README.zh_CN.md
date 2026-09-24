@@ -96,83 +96,29 @@ hohu-admin/
 ## 🚀 快速开始
 
 
-### 使用HoHu CLI (推荐)
-**[HoHu CLI](https://github.com/aihohu/hohu-cli)** 是为 `hohu-admin` 生态量身打造的现代化命令行工具。它集成了项目脚手架生成、自动化环境初始化和多语言切换等功能，旨在提升HoHu Admin开发者的生产力。
+### 使用 HoHu CLI
 
-1. 安装CLI 
-	使用 `uv` (推荐) 或 `pip` 进行全局安装：
-	```bash
-	# 使用 uv
-	uv tool install hohu
-	
-	# 或使用 pip
-	pip install hohu
-	```
-2. 创建新项目
-	```bash
-	hohu admin create my-project
-	```
-3. 初始化环境
-	```bash
-	hohu admin init
-	```
-4. 运行项目
-	```
-	hohu admin dev
-	```
-
-
-
-### 手动配置项目
-
-#### 1. 环境准备
-
-确保已安装 uv, Python 3.10+, PostgreSQL, Redis。
-
-#### 2. 安装依赖
-
-使用以下命令激活虚拟环境：
+项目统一使用 [HoHu CLI](https://github.com/aihohu/hohu-cli) 完成初始化、部署和升级，
+无需手动逐个执行后端脚本。
 
 ```bash
-source .venv/bin/activate
+uv tool install hohu
+hohu create my-project
+cd my-project
+hohu init
+hohu dev
 ```
 
-安装所有依赖项：
+Docker 部署：
 
 ```bash
-uv sync
+hohu deploy init
+hohu deploy
 ```
 
-
-#### 3. 配置环境变量
-
-拷贝 `.env.example` 并更名为 `.env`，配置你的数据库和 Redis 连接：
-
-```env
-DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/hohu_admin
-REDIS_URL=redis://localhost:6379/0
-SECRET_KEY=your-super-secret-key
-```
-
-#### 4. 数据库迁移与初始化
-
-```bash
-# 执行迁移
-alembic upgrade head
-
-# 运行初始化脚本
-python scripts/init_db.py
-```
-
-#### 5. 启动服务
-
-```bash
-fastapi dev app/main.py
-```
-
-访问：[http://127.0.0.1:8000/docs](https://www.google.com/search?q=http://127.0.0.1:8000/docs) 查看交互式文档。
-
-
+CLI 自动生成初始管理员密码，保存在 `.hohu/deploy/.env` 的 `HOHU_ADMIN_PASSWORD`；
+本地开发对应后端 `.env`。部署自动完成迁移和基础数据同步，重复执行不清库、不重置密码。
+开发维护者可查阅 [部署内部契约](docs/SCRIPTS-DEPLOYMENT.md)。
 
 ## 📝 接口规范
 

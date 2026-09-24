@@ -89,8 +89,7 @@ jobs:
 
       - name: Seed test data
         run: |
-          printf '\n' | uv run python scripts/init_db.py
-          uv run python scripts/seed_ai_agents.py
+          HOHU_ADMIN_PASSWORD=CiSeed123456 uv run python -m scripts.init_db
 
       - name: Run Tests
         run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=70
@@ -152,7 +151,7 @@ jobs:
       - name: Run automated hosted release qualification
         run: |
           mkdir -p "${RUNNER_TEMP}/tenant-release-qualification"
-          uv run python scripts/qualify_tenant_hosted_release.py \
+          uv run python -m tests.release.qualify_tenant_hosted_release \
             --build-sha "$(git rev-parse HEAD)" \
             --profile ci \
             --output "${RUNNER_TEMP}/tenant-release-qualification/qualification.json"

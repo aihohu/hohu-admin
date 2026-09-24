@@ -1,4 +1,4 @@
-from scripts.seed_agent_prompts import DEFAULT_PROMPTS, LEGACY_DEFAULT_PROMPTS
+from app.modules.ai.seed_prompts import DEFAULT_PROMPTS, LEGACY_DEFAULT_PROMPTS
 
 
 def test_role_agent_prompt_covers_complete_phase3_workflow() -> None:

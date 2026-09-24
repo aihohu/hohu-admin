@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy.sql.dml import Delete, Insert
 
 from app.utils.validators import validate_user_name
-from scripts.seed_demo_data_scope import (
+from tools.demo.seed_demo_data_scope import (
     DEMO_MENU_ROUTE_NAMES,
     USERS,
     _assign_role_menus,

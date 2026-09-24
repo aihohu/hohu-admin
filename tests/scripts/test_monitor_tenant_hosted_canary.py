@@ -4,7 +4,7 @@ import time
 import pytest
 from jose import jwt
 
-from scripts.monitor_tenant_hosted_canary import (
+from tools.ops.monitor_tenant_hosted_canary import (
     CanaryObservation,
     CanaryThresholds,
     _validated_base_url,

@@ -1,8 +1,8 @@
 """Seed a demo CRM lowcode app for end-to-end testing (multi-model with belongs_to).
 
 Run:
-  python scripts/seed_demo_crm.py            # seed (idempotent)
-  python scripts/seed_demo_crm.py --remove   # remove all demo data
+  python -m tools.demo.seed_demo_crm            # seed (idempotent)
+  python -m tools.demo.seed_demo_crm --remove   # remove all demo data
 
 Creates:
   - mk_app        slug=demo-crm, status=published
@@ -366,7 +366,7 @@ async def main() -> None:
     print("     populated from /app-data/demo-crm/customer")
     print("  5. Select customer + amount → save → returns to list with label")
     print()
-    print("Cleanup when done:  python scripts/seed_demo_crm.py --remove")
+    print("Cleanup when done:  python -m tools.demo.seed_demo_crm --remove")
 
 
 if __name__ == "__main__":

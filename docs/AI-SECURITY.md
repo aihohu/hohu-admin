@@ -62,7 +62,7 @@ AI_MODULE_ENABLED=false
 | Agent loop 上限 | LLM 单次会话最多 10 次请求 / 5 次 tool 调用 | `UsageLimits` | ✅ |
 | Provider egress | 精确 origin + 全部 DNS/IP + 连接固定 + 禁 redirect/环境代理 + timeout/size/concurrency/retry | `app/modules/ai/core/provider_egress.py` | ✅ |
 | super_admin gate | `super_admin_only=True` 的 tool 仅超管调用 | `AiToolMeta` 声明 | ✅ |
-| 静态检查 | `scripts/check_ai_tools.py` pre-commit + CI | `.pre-commit-config.yaml` | ✅ |
+| 静态检查 | `tools/checks/check_ai_tools.py` pre-commit + CI | `.pre-commit-config.yaml` | ✅ |
 
 ### 未实现 / 留 v2+
 
@@ -81,14 +81,8 @@ AI 模块默认开启，但 Agent 能力必须通过显式权限和角色绑定�
 
 ### 步骤
 
-1. **数据库迁移**：`alembic upgrade head`（创建 `ai_agent` / `role_ai_agent` / `ai_operation_log` 表）
-2. **seed 内置 Agent、prompt、菜单与权限码**：
-   ```bash
-   uv run python scripts/seed_ai_agents.py
-   uv run python scripts/seed_agent_prompts.py  # 安全升级内置默认 prompt，保留自定义值
-   uv run python scripts/init_db.py  # 含菜单 + 权限码同步
-   ```
-   存量升级另执行 `uv run python scripts/migrate_ai_mvp_permissions.py`，幂等补入口权限与 R_SUPER 绑定，并保留已有 Agent、Role-Agent 和工具启用状态；不会给 shared-only 普通角色扩权。
+1. **执行 CLI 部署**：`hohu deploy` 自动执行迁移。
+2. **统一种子同步**：CLI 自动调用 `scripts.init_db`，一次完成菜单、配置、Agent、默认 Prompt 和首次管理员授权。重复执行保留密码、自定义 Prompt、已有角色授权及工具启用状态，不需要单独执行脚本。
 3. **配置 LLM Provider**（管理后台 → 模型管理）：保存并启用至少一个模型。
 4. **显式授权**：按唯一基线配置 AI 入口权限、Role-Agent 绑定和 Tool 权限。
 5. **重启服务**：`AI_MODULE_ENABLED=true`（默认）。
@@ -208,7 +202,7 @@ curl -X POST http://127.0.0.1:8000/ai/chat \
 | `app/modules/ai/agents/gateway/sensitive.py` | L4 输出脱敏 |
 | `app/modules/ai/agents/gateway/redact.py` | L4 历史脱敏 |
 | `app/modules/ai/agents/gateway/targets.py` | L3 数据鉴权 helper |
-| `scripts/check_ai_tools.py` | tool 接入合规静态检查 |
+| `tools/checks/check_ai_tools.py` | tool 接入合规静态检查 |
 
 ---
 

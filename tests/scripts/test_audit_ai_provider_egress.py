@@ -7,7 +7,7 @@ from uuid import uuid4
 from app.core.security import encrypt_value
 from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.provider import AiProvider
-from scripts.audit_ai_provider_egress import audit_ai_provider_egress
+from tools.ops.audit_ai_provider_egress import audit_ai_provider_egress
 
 pytest_plugins = ("tests.modules.ai.conftest",)
 
@@ -43,7 +43,7 @@ async def test_audit_reports_provider_and_model_without_disabling_rows(
         return True
 
     monkeypatch.setattr(
-        "scripts.audit_ai_provider_egress.provider_egress.is_destination_allowed",
+        "tools.ops.audit_ai_provider_egress.provider_egress.is_destination_allowed",
         blocked,
     )
     report = await audit_ai_provider_egress(db_session)

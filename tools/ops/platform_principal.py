@@ -1,4 +1,11 @@
-"""Audited offline replacement of one platform principal's permissions."""
+"""Offline CLI for the platform principal lifecycle.
+
+Subcommands:
+  create               Bootstrap the first independent platform principal.
+  replace-permissions  Audited replacement of one principal's permissions.
+"""
+
+from __future__ import annotations
 
 import argparse
 import asyncio
@@ -12,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import STATUS_ENABLED
 from app.core.exceptions import AuthenticationException, BusinessException
-from app.core.security import verify_password
+from app.core.security import get_password_hash, verify_password
 from app.db.session import AsyncSessionLocal
 from app.modules.platform.audit import (
     AuthorizedPlatformRequest,
@@ -27,8 +34,114 @@ from app.modules.platform.constants import (
 from app.modules.platform.models import PlatformPrincipal
 from app.modules.system.models.tenant import Tenant  # noqa: F401
 
-_SCRIPT_PATH = "scripts/replace_platform_principal_permissions.py"
+_BOOTSTRAP_ADVISORY_LOCK_ID = 0x504C41543541
+_SCRIPT_PATH = "tools/ops/platform_principal.py"
 _PERMISSION_LOCK_NAMESPACE = "platform-principal-permissions"
+
+
+def _arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Offline platform principal lifecycle CLI."
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    create = subparsers.add_parser(
+        "create",
+        help="Create the first platform-global principal after migration.",
+    )
+    create.add_argument("--principal-name", required=True)
+    create.add_argument("--display-name", required=True)
+    create.add_argument(
+        "--permission",
+        action="append",
+        choices=sorted(ASSIGNABLE_PLATFORM_PERMISSIONS),
+        dest="permissions",
+        required=True,
+        help="Explicit platform permission; repeat for multiple permissions.",
+    )
+
+    replace = subparsers.add_parser(
+        "replace-permissions",
+        help="Replace a platform principal's permissions with audit lineage.",
+    )
+    replace.add_argument("--principal-name", required=True)
+    replace.add_argument(
+        "--permission",
+        action="append",
+        choices=sorted(ASSIGNABLE_PLATFORM_PERMISSIONS),
+        dest="permissions",
+        required=True,
+        help="Complete desired permission set; repeat for each permission.",
+    )
+    replace.add_argument("--reason", required=True)
+    replace.add_argument("--ticket-id", required=True)
+    replace.add_argument("--correlation-id", required=True)
+    return parser.parse_args()
+
+
+# ============ create：首个平台主体 bootstrap ============
+
+
+def _read_password() -> str:
+    password = getpass("Platform password: ")
+    confirmation = getpass("Confirm platform password: ")
+    if password != confirmation:
+        raise ValueError("password confirmation does not match")
+    if len(password) < 12 or len(password.encode("utf-8")) > 72:
+        raise ValueError("password must be at least 12 characters and at most 72 bytes")
+    if not any(character.isalpha() for character in password) or not any(
+        character.isdigit() for character in password
+    ):
+        raise ValueError("password must contain at least one letter and digit")
+    return password
+
+
+async def _create_first_principal(
+    session: AsyncSession, arguments: argparse.Namespace, password: str
+) -> PlatformPrincipal:
+    principal_name = arguments.principal_name.strip().lower()
+    if PLATFORM_PRINCIPAL_NAME_RE.fullmatch(principal_name) is None:
+        raise ValueError("principal name format is invalid")
+    display_name = arguments.display_name.strip()
+    if (
+        not display_name
+        or len(display_name) > 100
+        or any(not character.isprintable() for character in display_name)
+    ):
+        raise ValueError("display name must contain 1-100 characters")
+    permissions = sorted(set(arguments.permissions or []))
+    if not permissions or any(
+        permission not in ASSIGNABLE_PLATFORM_PERMISSIONS for permission in permissions
+    ):
+        raise ValueError("at least one explicit platform permission is required")
+
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_id)"),
+        {"lock_id": _BOOTSTRAP_ADVISORY_LOCK_ID},
+    )
+    existing = await session.scalar(select(PlatformPrincipal.principal_id).limit(1))
+    if existing is not None:
+        raise ValueError("a platform principal already exists")
+
+    principal = PlatformPrincipal(
+        principal_name=principal_name,
+        display_name=display_name,
+        hashed_password=get_password_hash(password),
+        permissions=permissions,
+    )
+    session.add(principal)
+    await session.flush()
+    return principal
+
+
+async def _bootstrap(arguments: argparse.Namespace, password: str) -> None:
+    async with AsyncSessionLocal() as session:
+        principal = await _create_first_principal(session, arguments, password)
+        await session.commit()
+        print(f"Created platform principal: {principal.principal_name}")
+
+
+# ============ replace-permissions：权限替换 ============
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,25 +154,6 @@ class PrincipalSnapshot:
     def permissions(self) -> frozenset[str]:
         """Expose only the offline action to the shared audit authorizer."""
         return frozenset({PLATFORM_PRINCIPAL_PERMISSION_REPLACE})
-
-
-def _arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Replace a platform principal's permissions with audit lineage."
-    )
-    parser.add_argument("--principal-name", required=True)
-    parser.add_argument(
-        "--permission",
-        action="append",
-        choices=sorted(ASSIGNABLE_PLATFORM_PERMISSIONS),
-        dest="permissions",
-        required=True,
-        help="Complete desired permission set; repeat for each permission.",
-    )
-    parser.add_argument("--reason", required=True)
-    parser.add_argument("--ticket-id", required=True)
-    parser.add_argument("--correlation-id", required=True)
-    return parser.parse_args()
 
 
 def _read_current_password() -> str:
@@ -268,8 +362,11 @@ async def _replace(arguments: argparse.Namespace, current_password: str) -> bool
 
 
 def main() -> None:
+    arguments = _arguments()
+    if arguments.command == "create":
+        asyncio.run(_bootstrap(arguments, _read_password()))
+        return
     try:
-        arguments = _arguments()
         changed = asyncio.run(_replace(arguments, _read_current_password()))
     except BusinessException as exc:
         print(f"Permission replacement failed: {exc.error_code}", file=sys.stderr)

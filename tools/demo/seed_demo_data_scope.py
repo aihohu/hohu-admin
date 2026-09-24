@@ -10,7 +10,7 @@
 
 Usage:
     cd hohu-admin
-    python scripts/seed_demo_data_scope.py
+    python -m tools.demo.seed_demo_data_scope
 
 演示账号（密码统一 demo@12345）：
     demoall      ALL          看全部 30 条

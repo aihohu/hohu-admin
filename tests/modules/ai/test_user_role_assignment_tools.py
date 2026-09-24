@@ -24,6 +24,7 @@ from app.modules.ai.agents.hitl.events import DryRunSummary
 from app.modules.ai.agents.tools.pydantic_ai_wrapper import wrap_tool_for_pydantic_ai
 from app.modules.ai.agents.tools.registry import RegisteredTool
 from app.modules.ai.core.context import AiToolContext, DataScopeContext
+from app.modules.ai.seed_prompts import DEFAULT_PROMPTS
 from app.modules.ai.service.prepared_action_service import (
     canonical_payload_hash,
     prepared_action_service,
@@ -41,7 +42,6 @@ from app.modules.system.service.tenant_association_writer import (
 from app.modules.system.service.user_role_assignment_service import (
     user_role_assignment_service,
 )
-from scripts.seed_agent_prompts import DEFAULT_PROMPTS
 
 USER_EDIT_PERMISSION = "system:user:edit"
 

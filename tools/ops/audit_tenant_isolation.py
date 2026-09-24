@@ -15,7 +15,7 @@ from app.core.tenant_isolation_audit import build_tenant_isolation_report
 from app.db.session import engine
 
 RISK_EXIT_CODE = 2
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _arguments() -> argparse.Namespace:

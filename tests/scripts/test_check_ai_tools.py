@@ -1,4 +1,4 @@
-"""``scripts/check_ai_tools.py`` 静态检查测试。
+"""``tools/checks/check_ai_tools.py`` 静态检查测试。
 
 构造违规 meta + 函数签名，验证 check_xxx 函数能正确检出。
 不依赖 Registry（直接构造 RegisteredTool dataclass）。
@@ -12,7 +12,7 @@ import pytest
 
 from app.modules.ai.agents.tools.meta import SENSITIVE_INPUT_BLOCKLIST, AiToolMeta
 from app.modules.ai.agents.tools.registry import RegisteredTool
-from scripts.check_ai_tools import (
+from tools.checks.check_ai_tools import (
     EXPECTED_BUILTIN_TOOL_NAMES,
     SUMMARY_MAX_UNICODE_CHARS,
     check_accepts_file_mime_valid,
@@ -27,6 +27,7 @@ from scripts.check_ai_tools import (
     check_scope_param_requires_check,
     check_sensitive_input_not_in_signature,
     check_summary_length_limit,
+    check_tool_result_success_requires_ui,
     load_all_tools,
 )
 
@@ -388,7 +389,7 @@ class TestBuiltinScanSurface:
             return real_import(name)
 
         monkeypatch.setattr(
-            "scripts.check_ai_tools.importlib.import_module",
+            "tools.checks.check_ai_tools.importlib.import_module",
             fail_job_module,
         )
 
@@ -519,3 +520,68 @@ class TestArgsSummaryFieldsNotSensitive:
     def test_not_supported_no_check(self) -> None:
         reg = _make_reg(dry_run_supported=False, dry_run_fn=None)
         assert check_dry_run_tool_must_implement_hook(reg) == []
+
+
+class TestToolResultSuccessRequiresUi:
+    """ToolResult.success 必须显式传 ui=（决策 3，并入自 check_ai_tools_ui）。"""
+
+    def test_detects_success_without_ui(self) -> None:
+        reg = _make_reg()
+        fn_src = (
+            'async def _tool(ctx):\n    return ToolResult.success(data={"count": 5})\n'
+        )
+        violations = check_tool_result_success_requires_ui(reg, fn_src)
+        assert len(violations) == 1
+        assert violations[0].check == "tool_result_success_requires_ui"
+        assert "ui" in violations[0].detail
+
+    def test_passes_success_with_ui(self) -> None:
+        reg = _make_reg()
+        fn_src = """
+async def _tool(ctx):
+    return ToolResult.success(
+        data={"count": 5},
+        ui=UIResult(view_type="plain_json", view_data={"count": 5}),
+    )
+"""
+        assert check_tool_result_success_requires_ui(reg, fn_src) == []
+
+    def test_ignores_failure_return(self) -> None:
+        reg = _make_reg()
+        fn_src = 'async def _tool(ctx):\n    return ToolResult.failure("AI_X", "msg")\n'
+        assert check_tool_result_success_requires_ui(reg, fn_src) == []
+
+    def test_ignores_dict_return(self) -> None:
+        reg = _make_reg()
+        fn_src = 'async def _tool(ctx):\n    return {"count": 5}\n'
+        assert check_tool_result_success_requires_ui(reg, fn_src) == []
+
+    def test_ignores_nested_helper_return(self) -> None:
+        """嵌套 helper（如重试时返回精简 data）的 return 不查 ui。"""
+        reg = _make_reg()
+        fn_src = """
+async def _tool(ctx):
+    async def _retry_without_ui():
+        return ToolResult.success(data={"count": 0})
+    result = await _retry_without_ui()
+    return ToolResult.success(
+        data={"count": 5},
+        ui=UIResult(view_type="plain_json", view_data={"count": 5}),
+    )
+"""
+        assert check_tool_result_success_requires_ui(reg, fn_src) == []
+
+    def test_multiple_missing_ui_violations(self) -> None:
+        reg = _make_reg()
+        fn_src = """
+async def _tool(ctx):
+    if ctx.flag:
+        return ToolResult.success(data={"a": 1})
+    return ToolResult.success(data={"b": 2})
+"""
+        violations = check_tool_result_success_requires_ui(reg, fn_src)
+        assert len(violations) == 2
+
+    def test_none_source_skipped(self) -> None:
+        reg = _make_reg()
+        assert check_tool_result_success_requires_ui(reg, None) == []

@@ -22,13 +22,13 @@ from typing import Any
 import httpx
 
 RISK_EXIT_CODE = 2
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _BUILD_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
-_WORKER = _PROJECT_ROOT / "scripts" / "tenant_release_qualification_worker.py"
-_PREFLIGHT = _PROJECT_ROOT / "scripts" / "check_tenant_hosted_canary.py"
-_MONITOR = _PROJECT_ROOT / "scripts" / "monitor_tenant_hosted_canary.py"
-_ISOLATION_AUDIT = _PROJECT_ROOT / "scripts" / "audit_tenant_isolation.py"
+_WORKER = _PROJECT_ROOT / "tests" / "release" / "tenant_release_qualification_worker.py"
+_PREFLIGHT = _PROJECT_ROOT / "tools" / "ops" / "check_tenant_hosted_canary.py"
+_MONITOR = _PROJECT_ROOT / "tools" / "ops" / "monitor_tenant_hosted_canary.py"
+_ISOLATION_AUDIT = _PROJECT_ROOT / "tools" / "ops" / "audit_tenant_isolation.py"
 _EXPECTED_EVIDENCE = (
     "isolation",
     "preActivation",
@@ -954,9 +954,8 @@ def run(arguments: argparse.Namespace) -> int:
                 raise QualificationFailure("DATABASE_NOT_FRESH")
             _run_checked(
                 [sys.executable, str(_PROJECT_ROOT / "scripts" / "init_db.py")],
-                environment=environment,
+                environment=environment | {"HOHU_ADMIN_PASSWORD": tenant_password},
                 failure_code="DEFAULT_SEED_FAILED",
-                input_text=f"{tenant_password}\n",
             )
             fixture = _worker_json(
                 "seed",

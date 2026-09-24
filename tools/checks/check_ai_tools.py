@@ -14,12 +14,15 @@ pre-commit + CI 双跑。零 DB 依赖（启动时不调 validate_on_startup）�
     8. summary_length_limit
     9. dry_run_tool_must_implement_hook
     10. file_param_requires_protected_loader
+    11. args_summary_fields_not_sensitive
+    12. accepts_file_mime_valid
+    13. tool_result_success_requires_ui（并入自 check_ai_tools_ui.py）
   ⏭️ startup-only（validate_on_startup 已覆盖，本脚本跳过）：
-    11. agent_must_exist_in_registry
-    12. perms_must_exist_in_menu
+    - agent_must_exist_in_registry
+    - perms_must_exist_in_menu
 
 用法：
-  uv run python scripts/check_ai_tools.py
+  uv run python -m tools.checks.check_ai_tools
   # 退出码：0 全过 / 1 有违规
 """
 
@@ -36,7 +39,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 # 项目根
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from app.modules.ai.agents.tools import (  # noqa: E402
@@ -129,7 +132,7 @@ class Violation:
         )
 
 
-# ============ 12 项检查 ============
+# ============ 13 项检查 ============
 
 
 def check_sensitive_input_not_in_signature(
@@ -533,6 +536,69 @@ def check_dry_run_tool_must_implement_hook(reg: RegisteredTool) -> list[Violatio
     return []
 
 
+def _is_tool_result_success_return(node: ast.AST) -> bool:
+    """检测 return ToolResult.success(...) 语句"""
+    if not isinstance(node, ast.Return) or not isinstance(node.value, ast.Call):
+        return False
+    func = node.value.func
+    if isinstance(func, ast.Attribute) and func.attr == "success":
+        if isinstance(func.value, ast.Name) and func.value.id == "ToolResult":
+            return True
+    return False
+
+
+def _walk_excluding_nested_funcs(node: ast.AST):
+    """Walk an AST node's subtree but don't descend into nested function defs.
+
+    ast.walk 会下钻到嵌套 def/async def，可能误报 builtin tool 内部
+    辅助函数（如 "重试时返回精简 data" helper）的合法 return。
+    """
+    yield node
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            continue  # don't recurse into nested def
+        yield from _walk_excluding_nested_funcs(child)
+
+
+def check_tool_result_success_requires_ui(
+    reg: RegisteredTool, fn_src: str | None
+) -> list[Violation]:
+    """builtin tool 函数内 ToolResult.success(...) 必须显式传 ui=。
+
+    spec 2026-07-16 决策 3：data 给 LLM、ui 给前端，业务方应当都填。
+    ToolResult.failure / 裸 dict 返回不查（错误结果与 executor 兼容路径无 ui）。
+    fn_src 是业务函数自身的源码（含装饰器），只查最外层函数体的 return。
+    """
+    if fn_src is None:
+        return []
+    try:
+        tree = ast.parse(fn_src)
+    except SyntaxError:
+        return []
+    violations: list[Violation] = []
+    for top_def in tree.body:
+        if not isinstance(top_def, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for child in ast.iter_child_nodes(top_def):
+            if isinstance(child, (ast.AsyncFunctionDef, ast.FunctionDef)):
+                continue  # skip nested helper defs
+            for node in _walk_excluding_nested_funcs(child):
+                if not _is_tool_result_success_return(node):
+                    continue
+                call: ast.Call = node.value  # type: ignore[assignment]
+                kw_names = {kw.arg for kw in call.keywords if kw.arg is not None}
+                if "ui" not in kw_names:
+                    violations.append(
+                        Violation(
+                            reg.meta.name,
+                            "tool_result_success_requires_ui",
+                            f"line {node.lineno}: ToolResult.success missing ui=，"
+                            f"决策 3 要求 builtin tool 同时填 data + ui",
+                        )
+                    )
+    return violations
+
+
 # ============ 主流程 ============
 
 
@@ -592,6 +658,7 @@ def run_all_checks() -> list[Violation]:
         violations.extend(check_args_summary_fields_not_sensitive(reg))
         violations.extend(check_accepts_file_mime_valid(reg))
         violations.extend(check_dry_run_tool_must_implement_hook(reg))
+        violations.extend(check_tool_result_success_requires_ui(reg, fn_src))
 
     return violations
 
@@ -602,7 +669,7 @@ def main() -> int:
     warnings = [v for v in violations if v.severity == "warning"]
 
     if not violations:
-        print(f"✅ All {len(ToolRegistry.get().all())} tools passed 12 static checks")
+        print(f"✅ All {len(ToolRegistry.get().all())} tools passed 13 static checks")
         return 0
 
     for v in violations:

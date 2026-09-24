@@ -4,24 +4,14 @@ import os
 import secrets
 import subprocess
 import sys
+from pathlib import Path
+
+from dotenv import dotenv_values
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
-
-
-def run_command(args):
-    cmd_str = " ".join(args)
-    print(f"执行中: {cmd_str}")
-    try:
-        subprocess.run(args, check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"❌ 命令执行失败: {cmd_str} (退出码: {e.returncode})")
-        sys.exit(1)
-    except FileNotFoundError:
-        print(f"❌ 命令未找到: {args[0]}，请确保已安装相关工具")
-        sys.exit(1)
 
 
 def generate_secret_key():
@@ -58,33 +48,29 @@ def init_env_file():
 
 
 def init_project():
-    print("🥳 欢迎使用 HoHu Admin 后端初始化工具")
-
-    # 1. 检查 .env 文件
     init_env_file()
-
-    # 2. 数据库迁移
-    if input("是否执行数据库迁移 (Alembic)? (y/n): ").lower() == "y":
-        try:
-            subprocess.run(
-                [sys.executable, "-m", "alembic", "upgrade", "head"], check=True
-            )
-        except subprocess.CalledProcessError:
-            print(
-                "[ERROR] 数据库迁移失败，初始化已停止。请检查迁移日志和 "
-                "docs/DATABASE-MIGRATIONS.md；修复前不要标记迁移版本或初始化数据。"
-            )
-            sys.exit(1)
-
-    # 3. 初始化种子数据
-    seed_script = "scripts/init_db.py"
-    if input("是否初始化数据? (y/n): ").lower() == "y":
-        if os.path.exists(seed_script):
-            run_command([sys.executable, seed_script])
-        else:
-            print(f"❌ 种子脚本 {seed_script} 不存在，跳过。")
-
-    print("\n[OK] HoHu Admin 初始化完成！")
+    values = dotenv_values(".env")
+    if not values.get("HOHU_ADMIN_PASSWORD") and not os.environ.get(
+        "HOHU_ADMIN_PASSWORD"
+    ):
+        password = "Aa1" + secrets.token_hex(8)[:15]
+        with Path(".env").open("a", encoding="utf-8") as stream:
+            stream.write(f"\nHOHU_ADMIN_PASSWORD={password}\n")
+        values["HOHU_ADMIN_PASSWORD"] = password
+    environment = {**{k: v for k, v in values.items() if v is not None}, **os.environ}
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            check=True,
+            env=environment,
+        )
+        subprocess.run(
+            [sys.executable, "-m", "scripts.init_db"], check=True, env=environment
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("初始化失败，请修复错误后重新运行 hohu init。", file=sys.stderr)
+        raise SystemExit(1) from None
+    print("初始化完成。管理员凭据位于 .env 的 HOHU_ADMIN_PASSWORD。")
 
 
 if __name__ == "__main__":

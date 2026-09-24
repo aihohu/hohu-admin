@@ -8,7 +8,8 @@ enabled / system_prompt / model_preference），不存在则 INSERT 完整行。
 集中定义内置 Agent 的初始配置。
 
 新插入行按发布状态设置 enabled；已存在行保留部署方 enabled 值。
-system_prompt="" 留给部署方填业务领域知识，model_preference=None 用统一模型 selector。
+空白或已知旧版 system_prompt 同步为内置默认值，自定义内容保持不变；
+model_preference=None 使用统一模型 selector。
 
 Usage:
     cd hohu-admin
@@ -28,6 +29,7 @@ from app.core.config import settings
 from app.core.id_generator import next_id
 from app.modules.ai.constants import PUBLISHED_AGENT_CODES
 from app.modules.ai.models.agent import AiAgent
+from app.modules.ai.seed_prompts import seed_agent_prompts_in_session
 
 # 内置 Agent 定义。
 # display_order 决定 UI 列表顺序；shared 必须存在（file.parse 等 tool 归属它）
@@ -140,6 +142,7 @@ async def seed_ai_agents_in_session(db: AsyncSession) -> tuple[int, int]:
         inserted += 1
         print(f"  insert: {item['code']} ({item['name']})")
     await db.flush()
+    await seed_agent_prompts_in_session(db)
     return inserted, updated
 
 

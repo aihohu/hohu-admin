@@ -98,50 +98,30 @@ hohu-admin/
 - Redis
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 
-### Option 1: Using HoHu CLI (Recommended)
+### Using HoHu CLI
+
+HoHu CLI is the supported setup, deployment and upgrade entry point.
 
 ```bash
-# Install CLI
 uv tool install hohu
-
-# Create and set up project
-hohu admin create my-project
-cd my-project/hohu-admin
-hohu admin init
-hohu admin dev
+hohu create my-project
+cd my-project
+hohu init
+hohu dev
 ```
 
-### Option 2: Manual Setup
+For Docker deployment:
 
 ```bash
-# Clone the repository
-git clone https://github.com/aihohu/hohu-admin.git
-cd hohu-admin
-
-# Install dependencies
-uv sync
-
-# Configure environment
-cp .env.example .env
-# Edit .env with your database, Redis, and secret key settings
-
-# Run migrations and seed data
-alembic upgrade head
-python scripts/init_db.py
-
-# Start dev server
-fastapi dev app/main.py
+hohu deploy init
+hohu deploy
 ```
 
-The interactive API docs will be available at `http://127.0.0.1:8000/docs`.
-
-### Option 3: Docker
-
-```bash
-docker compose up -d
-```
-
-Configure via `.env`. API and Scheduler processes must use distinct Snowflake worker IDs.
+CLI generates the initial admin password in `.hohu/deploy/.env` as
+`HOHU_ADMIN_PASSWORD` (local development uses the backend `.env`). Migrations
+and built-in data synchronization run automatically before application startup;
+repeated deployments preserve existing passwords, custom settings and grants.
+See [deployment internals](docs/SCRIPTS-DEPLOYMENT.md) for contributor details.
 
 ## API Modules
 
