@@ -10,6 +10,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.id_generator import next_id
@@ -39,6 +40,10 @@ class Role(Base):
         nullable=False,
         comment="租户ID；必须由可信 TenantContext 显式写入",
     )
+    i18n_keys: Mapped[dict[str, str] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+
     role_name: Mapped[str] = mapped_column(
         String(50), nullable=False, comment="角色名称"
     )

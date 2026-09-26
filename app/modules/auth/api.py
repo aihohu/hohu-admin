@@ -11,6 +11,7 @@ from app.core.base_response import ResponseModel
 from app.core.config import settings
 from app.core.exceptions import (
     AuthenticationException,
+    BusinessRuleException,
     DuplicateException,
 )
 from app.core.rbac import is_system_admin
@@ -32,6 +33,7 @@ from app.modules.system.constants import PLATFORM_ONLY_TENANT_ROUTE_NAMES
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.user import User
 from app.modules.system.schemas.user import UserCreate, UserOut
+from app.modules.system.service.settings_service import settings_service
 from app.utils.ip_util import get_client_ip
 
 router = APIRouter()
@@ -70,6 +72,12 @@ async def register(
     """
     # Public registration remains a Default Tenant compatibility path in M1.
     tenant = await auth_service.resolve_login_tenant(LoginCredentials(), db)
+
+    account_settings = await settings_service.values(db, tenant_id=tenant.tenant_id)
+    if not account_settings["register_enabled"]:
+        raise BusinessRuleException(
+            "Registration is disabled", error_code="REGISTRATION_DISABLED"
+        )
 
     # 检查租户内用户名是否已存在；全局 unique 在 Plan 2 收紧为组合 unique。
     result = await db.execute(
@@ -443,6 +451,7 @@ async def is_route_exist(
 async def login_options():
     return ResponseModel.success(
         data={
+            "defaultLocale": settings.DEFAULT_LOCALE,
             "tenantMode": settings.TENANT_MODE,
             "tenantLocator": "host" if settings.TENANT_HOST_SUFFIX else "code",
         }

@@ -31,7 +31,7 @@ import time
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.tenant import TenantContext
-from app.modules.system.service.config_service import config_service
+from app.modules.system.service.settings_service import settings_service
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ _URL_PATTERN = re.compile(
 async def load_forbidden_urls(
     db: AsyncSession, *, tenant: TenantContext, force_refresh: bool = False
 ) -> list[str]:
-    """从 sys_config 读 forbidden_urls（缓存 60s）
+    """从 sys_setting 读 forbidden_urls（缓存 60s）
 
     Returns:
         域名黑名单列表（小写，去 path / 协议），空 list 表示无限制
@@ -70,7 +70,7 @@ async def load_forbidden_urls(
             return value
 
     generation = _cache_generation
-    raw = await config_service.get_value(db, CONFIG_KEY, tenant=tenant)
+    raw = await settings_service.get_value(db, CONFIG_KEY, tenant=tenant)
     parsed: list[str] = []
     if raw:
         try:

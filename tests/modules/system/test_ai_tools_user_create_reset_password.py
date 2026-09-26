@@ -35,9 +35,9 @@ from app.modules.system.ai_tools import (
     user_dept_lookup,
     user_reset_password,
 )
-from app.modules.system.models.config import Config
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
+from app.modules.system.models.setting import SystemSetting
 from app.modules.system.models.user import User
 from tests.tenant_helpers import bind_test_user
 
@@ -46,20 +46,17 @@ DEFAULT_PASSWORD = "AiPolicy123"
 
 async def _seed_default_password(db: AsyncSession) -> None:
     await db.execute(
-        delete(Config).where(
-            Config.tenant_id == 0,
-            Config.config_key == "auth:default_password",
+        delete(SystemSetting).where(
+            SystemSetting.tenant_id == 0,
+            SystemSetting.setting_key == "auth:default_password",
         )
     )
     db.add(
-        Config(
+        SystemSetting(
             tenant_id=0,
-            config_name="用户默认密码",
-            config_key="auth:default_password",
-            config_value=DEFAULT_PASSWORD,
-            config_group="auth",
+            setting_key="auth:default_password",
+            setting_value=DEFAULT_PASSWORD,
             status=STATUS_ENABLED,
-            is_public=False,
         )
     )
     await db.flush()
@@ -552,13 +549,13 @@ class TestUserCreate:
     ) -> None:
         await _seed_default_password(db_session)
         config = await db_session.scalar(
-            select(Config).where(
-                Config.tenant_id == 0,
-                Config.config_key == "auth:default_password",
+            select(SystemSetting).where(
+                SystemSetting.tenant_id == 0,
+                SystemSetting.setting_key == "auth:default_password",
             )
         )
         assert config is not None
-        config.config_value = "weakpassword"
+        config.setting_value = "weakpassword"
         await _seed_default_role(db_session)
         dept = await _add_dept(db_session, 81005, "弱密码策略部门")
         ctx = _make_ctx(

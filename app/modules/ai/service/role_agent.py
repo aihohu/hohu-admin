@@ -162,6 +162,7 @@ class RoleAgentService:
                     agent_id=a.agent_id,
                     code=a.code,
                     name=a.name,
+                    i18n_keys=a.i18n_keys,
                     description=a.description,
                     enabled=a.enabled,
                     is_builtin=a.is_builtin,

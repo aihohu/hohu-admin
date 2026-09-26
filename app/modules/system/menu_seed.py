@@ -606,11 +606,48 @@ MENU_DEFINITIONS = [
         "route_path": "",
         "status": "1",
     },
+    # ---- 系统设置：固定表单与独立权限 ----
+    {
+        "route_name": "system_setting",
+        "parent_route": "system",
+        "menu_name": "系统设置",
+        "menu_type": "C",
+        "icon": "carbon:settings",
+        "icon_type": "1",
+        "component": "view.system_setting",
+        "page": "system_setting",
+        "route_path": "/system/setting",
+        "i18n_key": "route.system_setting",
+        "order": 4,
+        "status": "1",
+        "hide_in_menu": False,
+        "keep_alive": False,
+        "constant": False,
+        "multi_tab": False,
+    },
+    {
+        "key": "system_setting_list",
+        "parent_route": "system_setting",
+        "menu_name": "查询",
+        "menu_type": "F",
+        "permission": "system:setting:list",
+        "route_path": "",
+        "status": "1",
+    },
+    {
+        "key": "system_setting_edit",
+        "parent_route": "system_setting",
+        "menu_name": "修改",
+        "menu_type": "F",
+        "permission": "system:setting:edit",
+        "route_path": "",
+        "status": "1",
+    },
     # ---- 系统设置 ----
     {
         "route_name": "system_config",
         "parent_route": "system",
-        "menu_name": "系统设置",
+        "menu_name": "自定义参数",
         "menu_type": "C",
         "icon": "carbon:settings",
         "icon_type": "1",
@@ -618,7 +655,7 @@ MENU_DEFINITIONS = [
         "page": "system_config",
         "route_path": "/system/config",
         "i18n_key": "route.system_config",
-        "order": 4,
+        "order": 5,
         "status": "1",
         "hide_in_menu": False,
         "keep_alive": False,
@@ -1207,6 +1244,9 @@ def menu_values(definition: dict) -> dict:
     }
     if values["menu_type"] == "F":
         values["route_name"] = None
+        values["i18n_key"] = "builtin.permission." + values["permission"].replace(
+            ":", "_"
+        ).replace("-", "_")
     for key in ("hide_in_menu", "keep_alive", "constant", "multi_tab"):
         values.setdefault(key, False)
     values.setdefault("order", 0)

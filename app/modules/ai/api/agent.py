@@ -38,6 +38,7 @@ async def list_agents(
             {
                 "code": a.code,
                 "name": a.name,
+                "i18nKeys": a.i18n_keys,
                 "description": a.description,
                 "modelPreference": a.model_preference,
                 "displayOrder": a.display_order,

@@ -28,6 +28,8 @@ from app.modules.system.api import file as file_api
 from app.modules.system.models.file import File
 from app.modules.system.schemas.file import FileOut, FileQuery
 from app.modules.system.service.file_service import FileService
+from app.modules.system.service.settings_service import _decode, settings_service
+from app.modules.system.settings_catalog import SETTINGS
 from tests.tenant_helpers import tenant_context
 
 _ONE_PIXEL_PNG = b64decode(
@@ -99,7 +101,7 @@ class TestFileUploadOwnership:
     ) -> None:
         """超大请求不能在校验前被完整读入进程内存。"""
         service = FileService()
-        monkeypatch.setattr(settings, "UPLOAD_MAX_SIZE", 8)
+        monkeypatch.setattr(settings, "UPLOAD_HARD_MAX_BYTES", 8)
         upload = MagicMock(spec=UploadFile)
         upload.read = AsyncMock(return_value=b"x" * 9)
 
@@ -225,6 +227,53 @@ class TestFileUploadOwnership:
         assert record.business_type == "ai-chat-private"
         assert Path(record.file_path).resolve().is_relative_to(private_root.resolve())
         assert record.file_url == ""
+
+    @pytest.mark.parametrize(
+        ("filename", "content_type", "expected_mime"),
+        [
+            ("notes.md", "text/markdown", "text/markdown"),
+            ("notes.md", "application/octet-stream", "text/markdown"),
+            ("notes.md", "", "text/markdown"),
+            ("data.json", "application/json", "application/json"),
+            ("data.json", "application/octet-stream", "application/json"),
+        ],
+    )
+    async def test_server_keeps_chat_markdown_json_attachments_private(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        filename: str,
+        content_type: str,
+        expected_mime: str,
+    ) -> None:
+        """Browsers often send no usable MIME for .md; the server must stamp one."""
+        public_root = tmp_path / "public-uploads"
+        private_root = tmp_path / "private-uploads"
+        monkeypatch.setattr(settings, "UPLOAD_DIR", str(public_root))
+        monkeypatch.setattr(settings, "PRIVATE_UPLOAD_DIR", str(private_root))
+        monkeypatch.setattr(
+            settings,
+            "LOCAL_FILE_STORAGE_ROOT",
+            str(private_root / "file_storage"),
+        )
+        service = FileService()
+        db = MagicMock(spec=AsyncSession)
+        upload = _upload_file(filename, b"# private notes", content_type)
+
+        with patch("app.modules.system.service.file_service.next_id", return_value=467):
+            record = await service.upload(
+                db,
+                upload,
+                current_user_name="alice",
+                owner_user_id=1001,
+                tenant=tenant_context(tenant_id=0),
+                business_type="ai-chat",
+            )
+
+        assert record.business_type == "ai-chat-private"
+        assert Path(record.file_path).resolve().is_relative_to(private_root.resolve())
+        assert record.file_url == ""
+        assert record.mime_type == expected_mime
 
     async def test_non_import_upload_remains_in_public_static_root(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -600,3 +649,16 @@ class TestFileTenantScope:
         }
         assert delete.await_args.kwargs["tenant"] is tenant
         assert batch_delete.await_args.kwargs["tenant"] is tenant
+
+
+@pytest.fixture(autouse=True)
+def default_upload_preferences(monkeypatch):
+    monkeypatch.setattr(
+        settings_service,
+        "values",
+        AsyncMock(
+            return_value={
+                key: _decode(value, value.default) for key, value in SETTINGS.items()
+            }
+        ),
+    )

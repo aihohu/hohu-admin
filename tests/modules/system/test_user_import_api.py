@@ -50,6 +50,7 @@ from app.modules.system.service.user_import_parser import (
     MAX_FILE_SIZE_BYTES,
     ImportErrorCollection,
 )
+from tests.tenant_helpers import tenant_context
 
 # ========== Constants ==========
 
@@ -244,7 +245,7 @@ def _make_field_errors_xlsx() -> bytes:
 # ========== Auth ==========
 
 
-async def test_endpoint_reads_upload_with_hard_size_bound() -> None:
+async def test_endpoint_reads_upload_with_hard_size_bound(db_session) -> None:
     upload = MagicMock()
     upload.read = AsyncMock(return_value=b"x" * (MAX_FILE_SIZE_BYTES + 1))
     upload.content_type = MIME_XLSX
@@ -254,8 +255,9 @@ async def test_endpoint_reads_upload_with_hard_size_bound() -> None:
         await import_users(
             file=upload,
             reason="QA bounded upload",
-            db=MagicMock(),
+            db=db_session,
             current_user=MagicMock(),
+            tenant=tenant_context(tenant_id=0, actor_user_id=1),
         )
 
     assert exc_info.value.error_code == "AI_IMPORT_FILE_TOO_LARGE"

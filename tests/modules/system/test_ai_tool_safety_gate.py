@@ -26,7 +26,9 @@ from app.modules.system.ai_tools import (
     user_import_preview,
 )
 from app.modules.system.schemas.user_transfer import FailedRow
+from app.modules.system.service.settings_service import _decode, settings_service
 from app.modules.system.service.user_import_parser import ImportErrorCollection
+from app.modules.system.settings_catalog import SETTINGS
 from tests.tenant_helpers import tenant_context
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -422,6 +424,7 @@ def _ctx_for(record: object, *, user_id: int = 11, tenant_id: int = 7) -> object
     return SimpleNamespace(
         user=SimpleNamespace(user_id=user_id),
         tenant_id=tenant_id,
+        tenant=tenant_context(tenant_id=tenant_id, actor_user_id=user_id),
         db=db,
     )
 
@@ -640,7 +643,7 @@ class TestLoadImportFileBoundary:
     async def test_db_declared_size_is_checked_before_io(
         self, upload_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(settings, "UPLOAD_MAX_SIZE", 8)
+        monkeypatch.setattr(settings, "UPLOAD_HARD_MAX_BYTES", 8)
         record = _record(
             upload_root / "missing.xlsx",
             b"PK\x03\x04",
@@ -655,7 +658,7 @@ class TestLoadImportFileBoundary:
     async def test_actual_size_is_bounded_even_if_db_size_is_forged(
         self, upload_root: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(settings, "UPLOAD_MAX_SIZE", 8)
+        monkeypatch.setattr(settings, "UPLOAD_HARD_MAX_BYTES", 8)
         content = b"PK\x03\x04too-large"
         path = upload_root / "users.xlsx"
         path.write_bytes(content)
@@ -810,3 +813,16 @@ class TestFileParseProtectedBoundary:
         )
 
         assert protected.path == path.resolve()
+
+
+@pytest.fixture(autouse=True)
+def default_upload_preferences(monkeypatch):
+    monkeypatch.setattr(
+        settings_service,
+        "values",
+        AsyncMock(
+            return_value={
+                key: _decode(value, value.default) for key, value in SETTINGS.items()
+            }
+        ),
+    )

@@ -52,7 +52,8 @@ _MENU_PARTITIONS = {
         "system_dict": 1,
         "system_dict_data": 2,
         "system_file": 3,
-        "system_config": 4,
+        "system_setting": 4,
+        "system_config": 5,
         "system_data-scope-demo": 8,
         "system_monitor": 10,
     },
@@ -272,6 +273,18 @@ async def sync_menus_in_session(
     by_route = {m.route_name: m for m in existing if m.route_name}
     by_permission = {m.permission: m for m in existing if m.permission}
     definitions = HOSTED_MENU_DEFINITIONS if hosted else MENU_DEFINITIONS
+    for definition in definitions:
+        menu = (
+            by_permission.get(definition.get("permission"))
+            if definition["menu_type"] == "F"
+            else by_route.get(definition["route_name"])
+        )
+        if (
+            menu is not None
+            and menu.i18n_key is None
+            and menu.menu_name == definition["menu_name"]
+        ):
+            menu.i18n_key = menu_values(definition).get("i18n_key")
     pending = [
         d
         for d in definitions

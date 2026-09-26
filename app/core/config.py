@@ -107,36 +107,24 @@ class Settings(BaseSettings):
     # 可通过环境变量 DATETIME_FORMAT 自定义
     DATETIME_FORMAT: str = "%Y-%m-%d %H:%M:%S"
 
+    DEFAULT_LOCALE: str = "zh-CN"
+    UPLOAD_HARD_MAX_BYTES: int = Field(
+        default=100 * 1024 * 1024, ge=1024, le=1024 * 1024 * 1024
+    )
+
     # 文件上传配置
     UPLOAD_DIR: str = "uploads"
     # 私有上传根目录：不得通过 StaticFiles 或反向代理静态映射直接暴露
     PRIVATE_UPLOAD_DIR: str = "private_uploads"
-    UPLOAD_MAX_SIZE: int = 10 * 1024 * 1024  # 10MB
     # 数据库配置
     DB_ECHO: bool = False
-
-    UPLOAD_ALLOWED_EXTENSIONS: str = (
-        ".jpg,.jpeg,.png,.gif,.webp,.pdf,.doc,.docx,.xls,.xlsx,.zip,.rar,.txt,.csv"
-    )
 
     # 业务代码通过文件存储工厂访问后端，切换 local/s3 不应改变调用方。
     FILE_STORAGE_BACKEND: Literal["local", "s3"] = "local"
     # 导入预检、失败清单和导出文件含业务数据，必须位于未静态挂载的私有根。
     LOCAL_FILE_STORAGE_ROOT: str = "private_uploads/file_storage"
 
-    # 频率限制配置
-    # 登录接口：每分钟最多登录尝试次数
-    RATE_LIMIT_LOGIN: str = "5/minute"
-    # 注册接口：每分钟最多注册尝试次数
-    RATE_LIMIT_REGISTER: str = "3/minute"
-    # 普通 API 接口：每分钟最多请求数
-    RATE_LIMIT_API: str = "100/minute"
-
     # AI 配置
-    AI_DEFAULT_MODEL: str = "openai:gpt-4o"
-    AI_OPENAI_API_KEY: str = ""
-    AI_OPENAI_BASE_URL: str = ""
-    AI_ANTHROPIC_API_KEY: str = ""
     # Provider 出站只允许官方 canonical origin 与部署方显式加入的精确 origin。
     # 私网/本地模型还必须同时命中显式 CIDR；API payload 无权修改这些值。
     AI_PROVIDER_EGRESS_ALLOWED_ORIGINS: str = ""
@@ -148,8 +136,6 @@ class Settings(BaseSettings):
     AI_PROVIDER_EGRESS_MAX_RESPONSE_BYTES: int = Field(2 * 1024 * 1024, ge=1024)
     AI_PROVIDER_EGRESS_MAX_CONCURRENCY: int = Field(20, ge=1)
     AI_PROVIDER_EGRESS_MAX_RETRIES: int = Field(1, ge=0, le=5)
-    AI_MAX_TOKENS: int = 4096
-    AI_TEMPERATURE: float = 0.7
     # 关闭后不注册任何 AI 路由，用于安全降级和无 AI 部署。
     # 默认开启；false 仅作紧急熔断，/ai/** 统一返回 503。
     AI_MODULE_ENABLED: bool = True

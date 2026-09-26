@@ -367,13 +367,82 @@ class CsvParser:
         )
 
 
+# ============ Text 解析器 ============
+
+TEXT_PREVIEW_CHAR_LIMIT = 2000
+"""preview 单行截断长度：防单行超长文本（如压缩过的 JSON）撑爆摘要"""
+
+
+class TextParser:
+    """Markdown / JSON 纯文本摘要
+
+    rows=行数，columns=['text']，preview=前 3 行（每行截断到
+    TEXT_PREVIEW_CHAR_LIMIT）。不解析 Markdown 语法 / JSON 结构——
+    摘要语义与 CSV 一致：只给 LLM 有界预览，raw 内容不进 context。
+    """
+
+    mime_types = (
+        "text/markdown",
+        "text/x-markdown",
+        "application/json",
+    )
+    max_bytes = 10 * 1024 * 1024
+
+    async def parse(self, file_path: Path) -> FileParseResult:
+        return await asyncio.to_thread(self._check_and_parse, file_path)
+
+    async def parse_bytes(self, data: bytes) -> FileParseResult:
+        return await asyncio.to_thread(self._parse_bytes_sync, data)
+
+    def _check_and_parse(self, file_path: Path) -> FileParseResult:
+        size = file_path.stat().st_size
+        if size > self.max_bytes:
+            raise BusinessRuleException(
+                f"文本文件过大（{_mb(size)}MB），上限 {_mb(self.max_bytes)}MB",
+                error_code="AI_FILE_TOO_LARGE",
+            )
+        return self._summarize(_decode_text_with_fallback(file_path.read_bytes()), size)
+
+    def _parse_bytes_sync(self, data: bytes) -> FileParseResult:
+        size = len(data)
+        if size > self.max_bytes:
+            raise BusinessRuleException(
+                f"文本文件过大（{_mb(size)}MB），上限 {_mb(self.max_bytes)}MB",
+                error_code="AI_FILE_TOO_LARGE",
+            )
+        return self._summarize(_decode_text_with_fallback(data), size)
+
+    def _summarize(self, text: str, size: int) -> FileParseResult:
+        lines = text.splitlines()
+        _check_dimensions(rows=len(lines), columns=1 if lines else 0, cells=len(lines))
+        if not lines:
+            return FileParseResult(
+                rows=0,
+                columns=[],
+                preview=[],
+                parser="TextParser",
+                file_size=size,
+            )
+        preview = [
+            {"text": line[:TEXT_PREVIEW_CHAR_LIMIT]}
+            for line in lines[:PREVIEW_ROW_LIMIT]
+        ]
+        return FileParseResult(
+            rows=len(lines),
+            columns=["text"],
+            preview=preview,
+            parser="TextParser",
+            file_size=size,
+        )
+
+
 # ============ PARSERS 注册表 ============
 
 
 def _build_parsers() -> dict[str, FileParser]:
     """构建 MIME → parser 映射，重复 MIME 启动即报错（防配置漂移）"""
     registry: dict[str, FileParser] = {}
-    for parser_cls in (ExcelParser, CsvParser):
+    for parser_cls in (ExcelParser, CsvParser, TextParser):
         instance = parser_cls()
         for mime in instance.mime_types:
             if mime in registry:

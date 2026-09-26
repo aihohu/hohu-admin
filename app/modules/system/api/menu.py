@@ -101,6 +101,7 @@ async def get_menu_tree_option(
         menu_out = MenuTreeOptionOut(
             id=m.menu_id,
             label=m.menu_name,
+            i18n_key=m.i18n_key,
             p_id=str(m.parent_id) if m.parent_id else "",
             children=[],
         )

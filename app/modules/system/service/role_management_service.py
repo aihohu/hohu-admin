@@ -14,6 +14,7 @@ from app.constants import (
     STATUS_ENABLED,
     SUPER_ADMIN_ROLE_CODE,
 )
+from app.core.builtin_i18n import clear_changed_translations
 from app.core.exceptions import (
     AuthorizationException,
     BusinessException,
@@ -72,6 +73,7 @@ class RoleSummary:
     data_scope: str
     delegable: bool
     blocked_reason_code: str | None
+    i18n_keys: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -794,6 +796,7 @@ class RoleManagementService:
         )
         assert evaluation.role is not None
         values = role_in.model_dump(exclude_unset=True, exclude={"dept_ids"})
+        clear_changed_translations(evaluation.role, values)
         for field, value in values.items():
             setattr(evaluation.role, field, value)
         if (
@@ -1233,6 +1236,7 @@ class RoleManagementService:
                     role_id=int(role.role_id),
                     role_code=role.role_code,
                     role_name=role.role_name,
+                    i18n_keys=role.i18n_keys,
                     status=role.status,
                     data_scope=role.data_scope,
                     delegable=reason is None,

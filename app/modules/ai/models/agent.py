@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Literal
 
 from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.id_generator import next_id
@@ -34,6 +35,10 @@ class AiAgent(Base):
         nullable=False,
         comment="Agent code，如 'user_mgmt' / 'shared'，与 @ai_tool(agent=...) 对应",
     )
+    i18n_keys: Mapped[dict[str, str] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+
     name: Mapped[str] = mapped_column(String(128), nullable=False, comment="显示名")
     description: Mapped[str] = mapped_column(Text, nullable=False, comment="描述")
     enabled: Mapped[bool] = mapped_column(

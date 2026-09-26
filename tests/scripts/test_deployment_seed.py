@@ -6,10 +6,10 @@ from sqlalchemy import select
 from app.core.id_generator import next_id
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.seed_prompts import DEFAULT_PROMPTS
-from app.modules.system.models.config import Config
 from app.modules.system.models.menu import Menu
+from app.modules.system.models.setting import SystemSetting
 from app.modules.system.models.user import User
-from scripts import init_db, seed_config, sync_menus
+from scripts import init_db, seed_settings, sync_menus
 from scripts.seed_ai_agents import seed_ai_agents_in_session
 from tests.tenant_helpers import create_test_tenant
 
@@ -60,35 +60,36 @@ async def test_config_seed_is_tenant_scoped_and_preserves_custom_values(db_sessi
     first = await create_test_tenant(db_session, prefix="seedca")
     second = await create_test_tenant(db_session, prefix="seedcb")
     db_session.add(
-        Config(
-            config_id=next_id(),
+        SystemSetting(
+            setting_id=next_id(),
             tenant_id=first.tenant_id,
-            config_key="site_name",
-            config_name="Site",
-            config_value="Custom",
-            config_type="text",
-            config_group="basic",
+            setting_key="site_name",
+            setting_value="Custom",
             status="1",
-            is_public=True,
         )
     )
     await db_session.flush()
     for _ in range(2):
-        await seed_config.seed_config_in_session(db_session, tenant_id=first.tenant_id)
-        await seed_config.seed_config_in_session(db_session, tenant_id=second.tenant_id)
+        await seed_settings.seed_settings_in_session(
+            db_session, tenant_id=first.tenant_id
+        )
+        await seed_settings.seed_settings_in_session(
+            db_session, tenant_id=second.tenant_id
+        )
     rows = list(
         (
             await db_session.scalars(
-                select(Config).where(
-                    Config.tenant_id.in_([first.tenant_id, second.tenant_id]),
-                    Config.config_key == "site_name",
+                select(SystemSetting).where(
+                    SystemSetting.tenant_id.in_([first.tenant_id, second.tenant_id]),
+                    SystemSetting.setting_key == "site_name",
                 )
             )
         ).all()
     )
     assert len(rows) == 2
     assert (
-        next(c for c in rows if c.tenant_id == first.tenant_id).config_value == "Custom"
+        next(c for c in rows if c.tenant_id == first.tenant_id).setting_value
+        == "Custom"
     )
 
 
@@ -118,10 +119,10 @@ async def test_fresh_seed_and_rerun_do_not_reset_password(db_session, monkeypatc
     )
     assert len(menus) == len(sync_menus.MENU_DEFINITIONS)
     configs = {
-        c.config_key: c.config_value
+        c.setting_key: c.setting_value
         for c in (
             await db_session.scalars(
-                select(Config).where(Config.tenant_id == tenant.tenant_id)
+                select(SystemSetting).where(SystemSetting.tenant_id == tenant.tenant_id)
             )
         ).all()
     }
@@ -157,7 +158,7 @@ async def test_failed_seed_rolls_back_menu_and_config_writes(db_session, monkeyp
     )
     assert (
         await db_session.scalar(
-            select(Config).where(Config.tenant_id == tenant.tenant_id)
+            select(SystemSetting).where(SystemSetting.tenant_id == tenant.tenant_id)
         )
         is None
     )

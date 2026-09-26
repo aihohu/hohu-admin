@@ -2,6 +2,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import DATA_SCOPE_CUSTOM, STATUS_ENABLED, SUPER_ADMIN_ROLE_CODE
+from app.core.builtin_i18n import clear_changed_translations
 from app.core.exceptions import (
     AuthorizationException,
     BusinessRuleException,
@@ -146,6 +147,7 @@ class RoleService:
         old_scope_is_custom = role.data_scope == DATA_SCOPE_CUSTOM
 
         update_data = role_in.model_dump(exclude_unset=True, exclude={"dept_ids"})
+        clear_changed_translations(role, update_data)
         for field, value in update_data.items():
             setattr(role, field, value)
 

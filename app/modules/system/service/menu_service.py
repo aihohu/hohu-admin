@@ -155,6 +155,12 @@ class MenuService:
             raise NotFoundException("菜单")
 
         update_data = menu_in.model_dump(exclude_unset=True)
+        if (
+            "menu_name" in update_data
+            and update_data["menu_name"] != menu.menu_name
+            and update_data.get("i18n_key", menu.i18n_key) == menu.i18n_key
+        ):
+            update_data["i18n_key"] = ""
         for field, value in update_data.items():
             setattr(menu, field, value)
 
@@ -188,6 +194,8 @@ class MenuService:
             for btn in menu_in.buttons:
                 existing = existing_by_code.get(btn.code)
                 if existing is not None:
+                    if existing.menu_name != btn.desc:
+                        existing.i18n_key = ""
                     existing.menu_name = btn.desc
                 else:
                     db.add(

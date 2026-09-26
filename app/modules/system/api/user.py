@@ -46,6 +46,7 @@ from app.modules.system.schemas.user_transfer import (
     UserImportBatchQuery,
     UserImportBatchResponse,
 )
+from app.modules.system.service.file_policy_service import file_policy_service
 from app.modules.system.service.user_department_assignment_service import (
     user_department_assignment_service,
 )
@@ -56,7 +57,6 @@ from app.modules.system.service.user_export_service import (
     list_export_tasks,
 )
 from app.modules.system.service.user_import_parser import (
-    MAX_FILE_SIZE_BYTES,
     ImportErrorCollection,
     import_file_has_column,
     parse_import_excel,
@@ -148,6 +148,7 @@ async def get_user_list(
         item = UserItemOut.model_validate(u)
         item.roles = [r.role_code for r in u.roles]
         item.role_names = [r.role_name for r in u.roles]
+        item.role_name_keys = [(r.i18n_keys or {}).get("roleName") for r in u.roles]
         # 部门信息解析
         if u.depts:
             item.dept_ids = [str(d.dept_id) for d in u.depts]
@@ -604,7 +605,16 @@ async def import_users(
     # Read at most one byte beyond the hard parser cap.  Calling read() without
     # a bound would let an oversized multipart body exhaust worker memory before
     # the parser can return AI_IMPORT_FILE_TOO_LARGE.
-    file_bytes = await file.read(MAX_FILE_SIZE_BYTES + 1)
+    policy = await file_policy_service.resolve(db, "import", tenant=tenant)
+    file_bytes = await file.read(policy.max_bytes + 1)
+    if len(file_bytes) > policy.max_bytes:
+        raise BusinessRuleException(
+            "File exceeds the import limit", error_code="AI_IMPORT_FILE_TOO_LARGE"
+        )
+    if "." + (file.filename or "").rsplit(".", 1)[-1].lower() not in policy.extensions:
+        raise BusinessRuleException(
+            "File type is not allowed", error_code="AI_IMPORT_INVALID_MIME"
+        )
     mime_type = file.content_type or ""
     has_role_column = import_file_has_column(
         file_bytes,

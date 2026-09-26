@@ -52,6 +52,8 @@ HOSTED_ROUTE_NAMES = frozenset(
         "system_dict",
         "system_dict_data",
         "system_file",
+        "system_setting",
+        "system_config",
         "system_monitor",
         "system_job",
         "system_job-log",
@@ -61,6 +63,15 @@ HOSTED_ROUTE_NAMES = frozenset(
 )
 HOSTED_BUTTON_PERMISSIONS = frozenset(
     (
+        "system:setting:list",
+        "system:setting:edit",
+        "system:config:list",
+        "system:config:add",
+        "system:config:edit",
+        "system:config:delete",
+        "system:config:batch-delete",
+        "system:config:export",
+        "system:config:import",
         "ai:chat:use",
         "ai:file:parse",
         "system:dept:list",

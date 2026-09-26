@@ -3,8 +3,8 @@
 """
 AI Agent 内置数据填充
 
-按 code upsert：已存在则 UPDATE name/description/display_order（保留部署方自定义的
-enabled / system_prompt / model_preference），不存在则 INSERT 完整行。
+按 code upsert：已存在只更新 display_order、补充未初始化的翻译元数据；
+保留 name / description / enabled / system_prompt / model_preference，缺失则 INSERT。
 集中定义内置 Agent 的初始配置。
 
 新插入行按发布状态设置 enabled；已存在行保留部署方 enabled 值。
@@ -25,6 +25,7 @@ from sqlalchemy.orm import sessionmaker
 # AI 模型的复合外键指向 sys_user/sys_role/sys_tenant，mapper 配置期强制解析
 # 目标表；独立运行脚本必须先注册这些模型，否则 NoReferencedTableError。
 import app.modules.system.models  # noqa: E402, F401
+from app.core.builtin_i18n import initialize_translations
 from app.core.config import settings
 from app.core.id_generator import next_id
 from app.modules.ai.constants import PUBLISHED_AGENT_CODES
@@ -119,8 +120,11 @@ async def seed_ai_agents_in_session(db: AsyncSession) -> tuple[int, int]:
             existing = (
                 await db.execute(select(AiAgent).where(AiAgent.code == item["code"]))
             ).scalar_one()
-            existing.name = item["name"]
-            existing.description = item["description"]
+            initialize_translations(
+                existing,
+                f"builtin.agent.{item['code']}",
+                {"name": item["name"], "description": item["description"]},
+            )
             existing.display_order = item["display_order"]
             updated += 1
             print(f"  update: {item['code']} ({item['name']})")
@@ -131,6 +135,10 @@ async def seed_ai_agents_in_session(db: AsyncSession) -> tuple[int, int]:
                 agent_id=next_id(),
                 code=item["code"],
                 name=item["name"],
+                i18n_keys={
+                    field: f"builtin.agent.{item['code']}.{field}"
+                    for field in ("name", "description")
+                },
                 description=item["description"],
                 display_order=item["display_order"],
                 enabled=item["code"] in PUBLISHED_AGENT_CODES,

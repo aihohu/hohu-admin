@@ -1,6 +1,6 @@
 """Keyword Blocklist Guardrail 测试。
 
-测试 check_keywords 函数 + load_blocklist 缓存逻辑（monkeypatch config_service）。
+测试 check_keywords 函数 + load_blocklist 缓存逻辑（monkeypatch settings_service）。
 """
 
 # ruff: noqa: PLC0415
@@ -64,13 +64,13 @@ class TestCheckKeywords:
 
 
 class TestLoadBlocklist:
-    """从 sys_config 加载 + 60s 缓存"""
+    """从 sys_setting 加载 + 60s 缓存"""
 
     async def test_load_returns_list_from_config(self, monkeypatch) -> None:
         raw = json.dumps(["机密", "secret", "internal"])
         mock_get_value = AsyncMock(return_value=raw)
         monkeypatch.setattr(
-            "app.modules.ai.agents.safety.keyword_blocklist.config_service.get_value",
+            "app.modules.ai.agents.safety.keyword_blocklist.settings_service.get_value",
             mock_get_value,
         )
 
@@ -91,7 +91,7 @@ class TestLoadBlocklist:
             return '["x"]'
 
         monkeypatch.setattr(
-            "app.modules.ai.agents.safety.keyword_blocklist.config_service.get_value",
+            "app.modules.ai.agents.safety.keyword_blocklist.settings_service.get_value",
             fake_get_value,
         )
 
@@ -111,7 +111,7 @@ class TestLoadBlocklist:
             return '["x"]'
 
         monkeypatch.setattr(
-            "app.modules.ai.agents.safety.keyword_blocklist.config_service.get_value",
+            "app.modules.ai.agents.safety.keyword_blocklist.settings_service.get_value",
             fake_get_value,
         )
 
@@ -121,18 +121,18 @@ class TestLoadBlocklist:
         assert call_count == 2
 
     async def test_load_returns_empty_on_missing_config(self, monkeypatch) -> None:
-        """sys_config 无此 key（get_value 返回 None）→ 空列表"""
+        """sys_setting 无此 key（get_value 返回 None）→ 空列表"""
         monkeypatch.setattr(
-            "app.modules.ai.agents.safety.keyword_blocklist.config_service.get_value",
+            "app.modules.ai.agents.safety.keyword_blocklist.settings_service.get_value",
             AsyncMock(return_value=None),
         )
         db = MagicMock()
         assert await load_blocklist(db, tenant=TENANT) == []
 
     async def test_load_returns_empty_on_invalid_json(self, monkeypatch) -> None:
-        """sys_config 值不是合法 JSON → 返回空（不抛异常）"""
+        """sys_setting 值不是合法 JSON → 返回空（不抛异常）"""
         monkeypatch.setattr(
-            "app.modules.ai.agents.safety.keyword_blocklist.config_service.get_value",
+            "app.modules.ai.agents.safety.keyword_blocklist.settings_service.get_value",
             AsyncMock(return_value="not-json{{{"),
         )
         db = MagicMock()
@@ -142,7 +142,7 @@ class TestLoadBlocklist:
         """blocklist JSON 含非字符串元素（数字 / null）→ 过滤掉"""
         raw = json.dumps(["valid", 123, None, "", "another"])
         monkeypatch.setattr(
-            "app.modules.ai.agents.safety.keyword_blocklist.config_service.get_value",
+            "app.modules.ai.agents.safety.keyword_blocklist.settings_service.get_value",
             AsyncMock(return_value=raw),
         )
         db = MagicMock()
@@ -153,7 +153,7 @@ class TestLoadBlocklist:
         """存进缓存前转小写，匹配时大小写不敏感"""
         raw = json.dumps(["BadWord", "UPPER"])
         monkeypatch.setattr(
-            "app.modules.ai.agents.safety.keyword_blocklist.config_service.get_value",
+            "app.modules.ai.agents.safety.keyword_blocklist.settings_service.get_value",
             AsyncMock(return_value=raw),
         )
         db = MagicMock()
@@ -174,7 +174,7 @@ class TestInvalidateCache:
             return '["x"]'
 
         monkeypatch.setattr(
-            "app.modules.ai.agents.safety.keyword_blocklist.config_service.get_value",
+            "app.modules.ai.agents.safety.keyword_blocklist.settings_service.get_value",
             fake_get_value,
         )
 

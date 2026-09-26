@@ -139,6 +139,8 @@ class RoleUpdate(BaseModel):
 
 
 class RoleOut(RoleBase):
+    i18n_keys: dict[str, str] | None = None
+
     """角色输出"""
 
     role_id: int
@@ -183,6 +185,8 @@ class RoleOut(RoleBase):
 
 
 class RoleSummaryOut(BaseModel):
+    i18n_keys: dict[str, str] | None = None
+
     """Minimal tenant-wide Role metadata with a live delegation assessment."""
 
     role_id: int
@@ -236,6 +240,8 @@ class RoleQuery(BaseModel):
 
 
 class RoleSimpleOut(BaseModel):
+    i18n_keys: dict[str, str] | None = None
+
     """角色简单输出（用于下拉选择）"""
 
     role_id: int

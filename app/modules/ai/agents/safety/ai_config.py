@@ -1,6 +1,6 @@
 """AI 安全、配额与路由配置读取。
 
-把硬编码常量改读 sys_config 表，60s 进程内缓存（参考 keyword_blocklist.py 模式）。
+把硬编码常量改读 sys_setting 表，60s 进程内缓存（参考 keyword_blocklist.py 模式）。
 
 支持的 key：
   - ai:rate_limit:user_write_per_min      (int, default 20)        L1 用户写速率
@@ -19,7 +19,7 @@
 设计：
   - 模块级缓存（key → (value, fetched_at)），60s 自然过期
   - force_refresh=True 跳过缓存（管理员改配置后调）
-  - sys_config 查询失败 / key 不存在 → 返回 default，不抛异常
+  - sys_setting 查询失败 / key 不存在 → 返回 default，不抛异常
   - invalidate_ai_config_cache() 清所有缓存（ConfigService.update 时调）
 """
 
@@ -30,7 +30,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.tenant import TenantContext, TenantLocatorContext
-from app.modules.system.service.config_service import config_service
+from app.modules.system.service.settings_service import settings_service
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +50,8 @@ async def get_ai_config_int(
     """读 int 配置（缓存 60s）
 
     Args:
-        db: 用于查 sys_config 的 session
-        key: sys_config.config_key
+        db: 用于查 sys_setting 的 session
+        key: sys_setting.config_key
         default: key 不存在 / 解析失败时返回的默认值
         force_refresh: True 跳过缓存
 
@@ -66,7 +66,7 @@ async def get_ai_config_int(
             return value  # type: ignore[return-value]
 
     generation = _cache_generation
-    raw = await config_service.get_value(db, key, tenant=tenant)
+    raw = await settings_service.get_value(db, key, tenant=tenant)
     if raw is None or raw == "":
         value = default
     else:
@@ -101,7 +101,7 @@ async def get_ai_config_str(
             return value  # type: ignore[return-value]
 
     generation = _cache_generation
-    raw = await config_service.get_value(db, key, tenant=tenant)
+    raw = await settings_service.get_value(db, key, tenant=tenant)
     value = raw if raw else default
 
     if generation == _cache_generation:
@@ -119,7 +119,7 @@ async def get_ai_config_str_list(
 ) -> list[str]:
     """读取 JSON 数组配置并缓存 60 秒，供 ``ai:enabled_tools`` 等配置使用。
 
-    sys_config 存的是 JSON 字符串（如 '["file.parse", "provider.export"]'）。
+    sys_setting 存的是 JSON 字符串（如 '["file.parse", "provider.export"]'）。
     解析失败 / 非 list / 元素非 str 时回退到 default（容错优先，不抛异常）。
     """
     cache_key = (tenant.tenant_id, key)
@@ -132,7 +132,7 @@ async def get_ai_config_str_list(
     import json  # noqa: PLC0415
 
     generation = _cache_generation
-    raw = await config_service.get_value(db, key, tenant=tenant)
+    raw = await settings_service.get_value(db, key, tenant=tenant)
     value = default
     if raw:
         try:
@@ -167,7 +167,7 @@ async def get_ai_config_bool(
 
     接受 'true' / '1' / 'yes'（大小写不敏感、自动 strip）→ True.
     其它值（含 'false' / '0' / 'no' / 非法字符串）→ False.
-    sys_config 无值时 fallback default（通过 str(default).lower() 往返）.
+    sys_setting 无值时 fallback default（通过 str(default).lower() 往返）.
 
     注意：与 get_ai_config_int 不同，非法值不 fallback default，而是返回 False
     （feature flag 安全侧倒：垃圾值 → 关闭功能）.

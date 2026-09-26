@@ -35,6 +35,7 @@ from app.modules.system.hosted_menu_seed import (
 from app.modules.system.models.config import Config
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
+from app.modules.system.models.setting import SystemSetting
 from app.modules.system.models.tenant import Tenant
 from app.modules.system.models.user import User
 from app.utils.validators import validate_password
@@ -140,7 +141,7 @@ class SystemTenantBootstrapService:
     @staticmethod
     async def _assert_clean(db: AsyncSession, *, tenant_id: int) -> None:
         counts = []
-        for model in (Menu, Role, User, Config):
+        for model in (Menu, Role, User, Config, SystemSetting):
             counts.append(
                 await db.scalar(
                     select(func.count())
@@ -170,16 +171,11 @@ class SystemTenantBootstrapService:
         menus = build_hosted_tenant_menus(tenant.tenant_id)
         db.add_all(menus)
         db.add(
-            Config(
+            SystemSetting(
                 tenant_id=tenant.tenant_id,
-                config_name="AI 额外启用工具",
-                config_key="ai:enabled_tools",
-                config_value='["file.parse"]',
-                config_type="text",
-                config_group="ai",
+                setting_key="ai:enabled_tools",
+                setting_value='["file.parse"]',
                 status=STATUS_ENABLED,
-                is_public=False,
-                remark="新租户初始化显式启用文件解析；既有租户保留原配置",
             )
         )
         await db.flush()
@@ -188,12 +184,17 @@ class SystemTenantBootstrapService:
             tenant_id=tenant.tenant_id,
             role_name="租户管理员",
             role_code=SUPER_ADMIN_ROLE_CODE,
+            i18n_keys={"roleName": "builtin.role.tenantAdmin.roleName"},
             status=STATUS_ENABLED,
         )
         user_role = Role(
             tenant_id=tenant.tenant_id,
             role_name="普通用户",
             role_code=USER_ROLE_CODE,
+            i18n_keys={
+                "roleName": "builtin.role.user.roleName",
+                "roleDesc": "builtin.role.user.roleDesc",
+            },
             role_desc="租户内新用户默认角色",
             data_scope=DATA_SCOPE_SELF,
             status=STATUS_ENABLED,

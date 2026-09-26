@@ -21,10 +21,10 @@ from app.constants import (
 from app.core.exceptions import AuthorizationException, BusinessRuleException
 from app.core.id_generator import next_id
 from app.db.base import user_depts
-from app.modules.system.models.config import Config
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
+from app.modules.system.models.setting import SystemSetting
 from app.modules.system.models.user import User
 from app.modules.system.service.authorization_lock import authorization_lock_service
 from app.modules.system.service.grant_authority import grant_authority_service
@@ -154,7 +154,7 @@ async def test_replace_departments_applies_one_complete_authorized_set(
 
     with patch(
         "app.modules.system.service.user_department_assignment_service."
-        "config_service.get_bool_for_update",
+        "settings_service.get_bool_for_update",
         AsyncMock(return_value=False),
     ):
         result = await user_department_assignment_service.replace_departments(
@@ -191,7 +191,7 @@ async def test_preview_departments_freezes_complete_authorization_snapshot(
 
     with patch(
         "app.modules.system.service.user_department_assignment_service."
-        "config_service.get_bool_for_update",
+        "settings_service.get_bool_for_update",
         AsyncMock(return_value=False),
     ):
         preview = await user_department_assignment_service.preview_departments(
@@ -246,7 +246,7 @@ async def test_replace_departments_rejects_approved_target_status_drift(
 
     with patch(
         "app.modules.system.service.user_department_assignment_service."
-        "config_service.get_bool_for_update",
+        "settings_service.get_bool_for_update",
         AsyncMock(return_value=False),
     ):
         preview = await user_department_assignment_service.preview_departments(
@@ -292,7 +292,7 @@ async def test_assign_created_departments_uses_add_and_department_permissions(
 
     with patch(
         "app.modules.system.service.user_department_assignment_service."
-        "config_service.get_bool_for_update",
+        "settings_service.get_bool_for_update",
         AsyncMock(return_value=False),
     ):
         result = (
@@ -429,7 +429,7 @@ async def test_replace_departments_rejects_any_direct_scope_violation(
     with (
         patch(
             "app.modules.system.service.user_department_assignment_service."
-            "config_service.get_bool_for_update",
+            "settings_service.get_bool_for_update",
             AsyncMock(return_value=False),
         ),
         pytest.raises(AuthorizationException) as exc_info,
@@ -522,7 +522,7 @@ async def test_replace_departments_rejects_materialized_subtree_impact_atomicall
     with (
         patch(
             "app.modules.system.service.user_department_assignment_service."
-            "config_service.get_bool_for_update",
+            "settings_service.get_bool_for_update",
             AsyncMock(return_value=False),
         ),
         pytest.raises(AuthorizationException) as exc_info,
@@ -577,7 +577,7 @@ async def test_replace_departments_also_rejects_existing_out_of_bound_impact(
     with (
         patch(
             "app.modules.system.service.user_department_assignment_service."
-            "config_service.get_bool_for_update",
+            "settings_service.get_bool_for_update",
             AsyncMock(return_value=False),
         ),
         pytest.raises(AuthorizationException) as exc_info,
@@ -643,7 +643,7 @@ async def test_replace_departments_enforces_live_primary_department_policy(
     with (
         patch(
             "app.modules.system.service.user_department_assignment_service."
-            "config_service.get_bool_for_update",
+            "settings_service.get_bool_for_update",
             AsyncMock(return_value=True),
         ),
         pytest.raises(BusinessRuleException) as required_exc,
@@ -660,7 +660,7 @@ async def test_replace_departments_enforces_live_primary_department_policy(
     with (
         patch(
             "app.modules.system.service.user_department_assignment_service."
-            "config_service.get_bool_for_update",
+            "settings_service.get_bool_for_update",
             AsyncMock(return_value=False),
         ),
         pytest.raises(BusinessRuleException) as multiple_exc,
@@ -690,24 +690,20 @@ async def test_replace_departments_bypasses_stale_primary_policy_cache(
     actor = _user(f"phase2-dept-actor-{next_id()}", [actor_role])
     target = _user(f"phase2-dept-target-{next_id()}", [target_role])
     policy = await db_session.scalar(
-        select(Config).where(
-            Config.tenant_id == TENANT.tenant_id,
-            Config.config_key == "user_require_primary_dept",
+        select(SystemSetting).where(
+            SystemSetting.tenant_id == TENANT.tenant_id,
+            SystemSetting.setting_key == "user_require_primary_dept",
         )
     )
     if policy is None:
-        policy = Config(
+        policy = SystemSetting(
             tenant_id=TENANT.tenant_id,
-            config_name="Primary department policy test fixture",
-            config_key="user_require_primary_dept",
-            config_value="false",
-            config_type="text",
-            config_group="feature",
+            setting_key="user_require_primary_dept",
+            setting_value="false",
             status=STATUS_ENABLED,
-            is_public=False,
         )
         db_session.add(policy)
-    policy.config_value = "true"
+    policy.setting_value = "true"
     policy.status = STATUS_ENABLED
     db_session.add_all([actor_role, target_role, actor, target])
     await db_session.flush()
@@ -715,7 +711,7 @@ async def test_replace_departments_bypasses_stale_primary_policy_cache(
     with (
         patch(
             "app.modules.system.service.user_department_assignment_service."
-            "config_service.get_bool",
+            "settings_service.get_value",
             AsyncMock(return_value=False),
         ) as cached_get_bool,
         pytest.raises(BusinessRuleException) as exc_info,

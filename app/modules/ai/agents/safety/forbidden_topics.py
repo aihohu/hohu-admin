@@ -23,7 +23,7 @@ import time
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.tenant import TenantContext
-from app.modules.system.service.config_service import config_service
+from app.modules.system.service.settings_service import settings_service
 
 logger = logging.getLogger(__name__)
 
@@ -38,14 +38,14 @@ _cache_generation = 0
 async def load_forbidden_topics(
     db: AsyncSession, *, tenant: TenantContext, force_refresh: bool = False
 ) -> list[str]:
-    """从 sys_config 读 forbidden_topics（缓存 60s）
+    """从 sys_setting 读 forbidden_topics（缓存 60s）
 
     Args:
-        db: 用于查 sys_config 的 session
+        db: 用于查 sys_setting 的 session
         force_refresh: True 跳过缓存（管理员改配置后调）
 
     Returns:
-        topics 字符串列表（空 list 表示无禁话题；查 sys_config 失败也返回空）
+        topics 字符串列表（空 list 表示无禁话题；查 sys_setting 失败也返回空）
     """
     cached = _cache.get(tenant.tenant_id)
     if not force_refresh and cached is not None:
@@ -54,7 +54,7 @@ async def load_forbidden_topics(
             return value
 
     generation = _cache_generation
-    raw = await config_service.get_value(db, CONFIG_KEY, tenant=tenant)
+    raw = await settings_service.get_value(db, CONFIG_KEY, tenant=tenant)
     parsed: list[str] = []
     if raw:
         try:

@@ -9,6 +9,8 @@ from app.modules.ai.models.agent import RiskAppetite
 
 
 class AgentAdminListItem(BaseModel):
+    i18n_keys: dict[str, str] | None = None
+
     """GET /platform/ai/agents list item（不含 systemPrompt）."""
 
     model_config = ConfigDict(

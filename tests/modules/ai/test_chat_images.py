@@ -30,6 +30,7 @@ from app.modules.auth.service import get_current_tenant_context, get_current_use
 from app.modules.system.api.file import router as file_router
 from app.modules.system.models.file import File
 from app.modules.system.models.user import User
+from app.modules.system.service.file_policy_service import SCENARIO_CAPS
 from app.modules.system.service.file_service import file_service
 from tests.tenant_helpers import tenant_context
 
@@ -213,7 +214,7 @@ async def test_unreadable_image_fails_safely(
     elif failure == "missing":
         record.file_path += ".missing"
     elif failure == "too-large":
-        monkeypatch.setattr(settings, "UPLOAD_MAX_SIZE", 8)
+        monkeypatch.setitem(SCENARIO_CAPS, "image", 8)
     else:
         record.file_ext = ".xlsx"
     await db_session.flush()

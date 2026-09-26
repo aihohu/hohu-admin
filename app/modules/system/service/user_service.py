@@ -14,7 +14,6 @@ from app.core.redis import redis_client
 from app.core.security import get_password_hash, verify_password
 from app.core.tenant import TenantContext
 from app.core.tenant_scope import tenant_cache_key, tenant_filter, tenant_select
-from app.modules.system.models.config import Config
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.schemas.user import (
@@ -26,6 +25,7 @@ from app.modules.system.schemas.user import (
     UserQuery,
     UserUpdate,
 )
+from app.modules.system.service.settings_service import settings_service
 from app.utils.data_scope import get_user_data_scope_filters
 from app.utils.pagination import build_filters, paginate
 
@@ -431,17 +431,12 @@ INSECURE_DEFAULT_PASSWORD_SENTINELS = frozenset({"Hohu123456"})
 
 async def get_default_password(db: AsyncSession, *, tenant: TenantContext) -> str:
     """Return the active initial password configured for user creation."""
-    result = await db.execute(
-        select(Config.config_value).where(
-            Config.tenant_id == tenant.tenant_id,
-            Config.config_key == DEFAULT_PASSWORD_CONFIG_KEY,
-            Config.status == "1",  # noqa: E712
-        )
+    value = await settings_service.get_value(
+        db, DEFAULT_PASSWORD_CONFIG_KEY, tenant=tenant
     )
-    value = result.scalar_one_or_none()
     if value is None or not value.strip():
         raise BusinessRuleException(
-            "默认密码未配置（sys_config.auth:default_password），无法导入新用户",
+            "默认密码未配置（sys_setting.auth:default_password），无法导入新用户",
             error_code="AI_IMPORT_DEFAULT_PASSWORD_NOT_SET",
         )
     if settings.ENV == "prod" and value in INSECURE_DEFAULT_PASSWORD_SENTINELS:

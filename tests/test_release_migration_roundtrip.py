@@ -22,6 +22,8 @@ def release_chain():
         "bf244f9a8b76",
         "e7cc9aa08769",
         "8946c48f5315",
+        "b728ae092401",
+        "c926ae092601",
     ]
     return [item.module for item in revisions]
 
@@ -99,6 +101,97 @@ async def test_empty_release_upgrade_downgrade_roundtrip(migration_connection):
         )
         == "default"
     )
+
+
+async def test_setting_split_preserves_tenant_values_and_custom_parameters(
+    migration_connection,
+):
+    connection = migration_connection
+    chain = release_chain()
+    await connection.run_sync(apply_steps, chain[:-1], "upgrade")
+    await connection.execute(
+        sa.text(
+            "INSERT INTO sys_tenant (tenant_id, tenant_code, tenant_name, status, lifecycle_state) "
+            "VALUES (42, 'setting-test', 'Settings test', '2', 'prepared')"
+        )
+    )
+    original = [
+        {
+            "id": 501,
+            "tenant": 0,
+            "key": "site_name",
+            "value": "Existing brand",
+            "status": "1",
+        },
+        {
+            "id": 502,
+            "tenant": 42,
+            "key": "site_name",
+            "value": "Tenant brand",
+            "status": "1",
+        },
+        {
+            "id": 503,
+            "tenant": 42,
+            "key": "ai:enabled_tools",
+            "value": '["custom.tool"]',
+            "status": "2",
+        },
+        {
+            "id": 504,
+            "tenant": 42,
+            "key": "business:region",
+            "value": "west",
+            "status": "1",
+        },
+    ]
+    await connection.execute(
+        sa.text(
+            "INSERT INTO sys_config (config_id, tenant_id, config_name, config_key, config_value, config_type, config_group, status, is_public) "
+            "VALUES (:id, :tenant, :key, :key, :value, 'text', 'basic', :status, false)"
+        ),
+        original,
+    )
+    await connection.run_sync(apply_steps, chain[-1:], "upgrade")
+    rows = (
+        await connection.execute(
+            sa.text(
+                "SELECT setting_id, tenant_id, setting_key, setting_value, status FROM sys_setting ORDER BY setting_id"
+            )
+        )
+    ).all()
+    assert [tuple(row) for row in rows] == [tuple(row.values()) for row in original[:3]]
+    assert (
+        await connection.execute(
+            sa.text("SELECT config_key, config_value FROM sys_config")
+        )
+    ).all() == [("business:region", "west")]
+    # Rollback must preserve edits made after the split, not resurrect the old value.
+    await connection.execute(
+        sa.text("UPDATE sys_setting SET setting_value=:value WHERE setting_id=501"),
+        {"value": "Updated brand"},
+    )
+    await connection.run_sync(apply_steps, chain[-1:], "downgrade")
+    assert (
+        await connection.scalar(
+            sa.text("SELECT config_value FROM sys_config WHERE config_id=501")
+        )
+        == "Updated brand"
+    )
+    assert (
+        await connection.scalar(
+            sa.text("SELECT is_public FROM sys_config WHERE config_id=501")
+        )
+        is True
+    )
+    await connection.run_sync(apply_steps, chain[-1:], "upgrade")
+    assert (
+        await connection.scalar(
+            sa.text("SELECT setting_value FROM sys_setting WHERE setting_id=501")
+        )
+        == "Updated brand"
+    )
+    assert await connection.scalar(sa.text("SELECT count(*) FROM sys_setting")) == 3
 
 
 async def test_release_boundary_data_survives_upgrade(migration_connection):

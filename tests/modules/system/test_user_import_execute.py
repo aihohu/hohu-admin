@@ -44,10 +44,10 @@ from app.modules.system.constants import (
     EmployeeNoSyncMode,
     ImportBatchStatus,
 )
-from app.modules.system.models.config import Config
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
+from app.modules.system.models.setting import SystemSetting
 from app.modules.system.models.user import User
 from app.modules.system.models.user_transfer import UserImportBatch, UserImportBatchLog
 from app.modules.system.schemas.user_transfer import ImportResult, UserImportRecord
@@ -171,7 +171,7 @@ async def _seed_default_password(
     db_session,
     password: str = "QA-Default-Pwd-123",
 ) -> None:
-    """设置 ``sys_config.auth:default_password``。
+    """设置 ``sys_setting.auth:default_password``。
 
     Why DELETE-first: db_session is outer-transaction rollback, but the dev DB
     itself may already hold a seeded auth:default_password row (init_db.py or
@@ -179,20 +179,17 @@ async def _seed_default_password(
     transaction isolation; DELETE first to keep the helper idempotent.
     """
     await db_session.execute(
-        _delete(Config).where(
-            Config.tenant_id == TENANT.tenant_id,
-            Config.config_key == "auth:default_password",
+        _delete(SystemSetting).where(
+            SystemSetting.tenant_id == TENANT.tenant_id,
+            SystemSetting.setting_key == "auth:default_password",
         )
     )
     db_session.add(
-        Config(
-            config_id=999_001,
+        SystemSetting(
+            setting_id=999_001,
             tenant_id=TENANT.tenant_id,
-            config_name="默认密码",
-            config_key="auth:default_password",
-            config_value=password,
-            config_type="text",
-            config_group="auth",
+            setting_key="auth:default_password",
+            setting_value=password,
             status="1",
         )
     )
@@ -535,16 +532,16 @@ class TestChunkSavepoint:
         records = [_make_record(2, "QA_PWD_U1", dept_input="QA-Exec-Dept-PWD")]
         batch = await _setup_preview(db_session, records, operator)
 
-        # 改 sys_config.auth:default_password 为可识别值
+        # 改 sys_setting.auth:default_password 为可识别值
         config_row = (
             await db_session.execute(
-                _select(Config).where(
-                    Config.tenant_id == TENANT.tenant_id,
-                    Config.config_key == "auth:default_password",
+                _select(SystemSetting).where(
+                    SystemSetting.tenant_id == TENANT.tenant_id,
+                    SystemSetting.setting_key == "auth:default_password",
                 )
             )
         ).scalar_one()
-        config_row.config_value = "MyInitPwd-999"
+        config_row.setting_value = "MyInitPwd-999"
         await db_session.flush()
 
         await batch_create_users_from_records(

@@ -16,6 +16,8 @@ from app.modules.system.api.config import (
     import_configs as import_configs_api,
 )
 from app.modules.system.service.config_service import config_service
+from app.modules.system.service.settings_service import _decode, settings_service
+from app.modules.system.settings_catalog import SETTINGS
 
 
 def _malicious_xlsx() -> bytes:
@@ -70,3 +72,16 @@ async def test_config_import_upload_uses_bounded_read_before_service() -> None:
     assert exc_info.value.error_code == "CONFIG_IMPORT_FILE_TOO_LARGE"
     upload.read.assert_awaited_once_with(CONFIG_IMPORT_MAX_SIZE_BYTES + 1)
     database.commit.assert_not_awaited()
+
+
+@pytest.fixture(autouse=True)
+def default_upload_preferences(monkeypatch):
+    monkeypatch.setattr(
+        settings_service,
+        "values",
+        AsyncMock(
+            return_value={
+                key: _decode(value, value.default) for key, value in SETTINGS.items()
+            }
+        ),
+    )

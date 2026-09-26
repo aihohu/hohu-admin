@@ -177,7 +177,7 @@ curl -X POST http://127.0.0.1:8000/ai/chat \
 - [ ] tenant isolation 报告绑定 checkout HEAD、source/schema digest，并在 read-only 快照中得到
       `riskCount=0`；报告不含业务行、PII、token/password/API key
 - [ ] HTTPS 全链路（Nginx / Caddy TLS 终止）
-- [ ] 速率限制中间件启用（`RATE_LIMIT_API`）
+- [ ] Redis 共享请求限流可用，阈值在「系统设置 → 访问保护」配置
 - [ ] 审计日志保留 ≥ 90 天（`ai_operation_log` / `sys_login_log` / `sys_operation_log`）
 - [ ] 监控告警接入（至少 ERROR 日志告警）
 

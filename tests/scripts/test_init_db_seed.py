@@ -5,7 +5,7 @@
    （fresh install 立刻有，无需后续 sync_menus）
 2. 两个按钮的 ``parent_id`` 指向 ``system_user`` 菜单的 ``menu_id``
    （防 orphan button：parent_id=0 时前端菜单树挂不上去）
-3. ``sys_config.auth:default_password`` 种子 Config 对象
+3. ``sys_setting.auth:default_password`` 种子 Config 对象
    导入使用全局默认密码；helper 缺失时抛
    ``AI_IMPORT_DEFAULT_PASSWORD_NOT_SET``，所以 fresh install 必须先种好）
 
@@ -28,17 +28,18 @@ from app.modules.system.hosted_menu_seed import (
     HOSTED_PERMISSION_CODES,
     HOSTED_ROUTE_NAMES,
 )
+from app.modules.system.settings_catalog import SETTINGS
 from app.utils.validators import validate_password
 from scripts.init_db import (
     build_default_tenant,
     build_init_roles,
     fresh_role_permission_menus,
 )
-from scripts.seed_config import build_initial_configs, default_password_seed_value
+from scripts.seed_settings import build_initial_settings, default_password_seed_value
 from scripts.sync_menus import build_initial_menus
 
 init_menus = build_initial_menus(tenant_id=0)
-init_configs = build_initial_configs(tenant_id=0, fresh=True)
+init_configs = build_initial_settings(tenant_id=0, fresh=True)
 
 
 def test_default_tenant_seed_uses_reserved_identity_and_enabled_status():
@@ -186,54 +187,39 @@ def test_file_permissions_are_seeded_under_file_menu():
 
 
 class TestConfigSeed:
-    """验证 sys_config.auth:default_password 种子。
+    """验证 sys_setting.auth:default_password 种子。
 
     helper ``get_default_password`` 缺失抛 AI_IMPORT_DEFAULT_PASSWORD_NOT_SET，
     所以 fresh install 必须有种；否则首次导入直接报错，UX 差。
     """
 
     def test_default_password_config_seeded(self):
-        """init_configs 含 config_key='auth:default_password' 一条。"""
-        matches = [c for c in init_configs if c.config_key == "auth:default_password"]
+        """init_configs 含 setting_key='auth:default_password' 一条。"""
+        matches = [c for c in init_configs if c.setting_key == "auth:default_password"]
         assert matches, "auth:default_password not in init_configs"
         assert len(matches) == 1, f"duplicated: {matches}"
         cfg = matches[0]
 
-        # config_value 非空（否则 helper 仍会抛 NOT_SET）
-        assert cfg.config_value, "default_password value must be non-empty"
-        assert validate_password(cfg.config_value) == cfg.config_value
+        # setting_value 非空（否则 helper 仍会抛 NOT_SET）
+        assert cfg.setting_value, "default_password value must be non-empty"
+        assert validate_password(cfg.setting_value) == cfg.setting_value
         # status='1' 启用（helper WHERE status='1' 过滤）
         assert cfg.status == "1", f"status must be '1', got {cfg.status!r}"
-        # config_group 非空（模型 NOT NULL）
-        assert cfg.config_group
-        # config_name 非空
-        assert cfg.config_name
 
     def test_prod_does_not_seed_a_usable_public_password(self):
         assert default_password_seed_value("prod") == ""
         assert validate_password(default_password_seed_value("dev"))
 
-    def test_default_password_config_remark_warns_to_change(self):
-        """remark 包含修改默认密码的安全提示。"""
-        matches = [c for c in init_configs if c.config_key == "auth:default_password"]
-        assert matches
-        cfg = matches[0]
-        assert cfg.remark, "remark must be non-empty (security warning)"
-        # remark 至少含一个安全相关关键词
-        remark_lower = cfg.remark.lower()
-        safety_keywords = ["修改", "change", "安全", "security", "production", "上线"]
-        assert any(kw.lower() in remark_lower for kw in safety_keywords), (
-            f"remark lacks safety keyword: {cfg.remark!r}"
-        )
+    def test_default_password_is_a_secret_account_field(self):
+        definition = SETTINGS["auth:default_password"]
+        assert definition.kind == "secret"
+        assert definition.group == "account"
 
     def test_default_password_not_marked_public(self):
         """is_public=False（防未授权读取默认密码）。"""
-        matches = [c for c in init_configs if c.config_key == "auth:default_password"]
+        matches = [c for c in init_configs if c.setting_key == "auth:default_password"]
         assert matches
-        cfg = matches[0]
-        assert cfg.is_public is False, (
-            f"is_public must be False (sensitive config), got {cfg.is_public}"
-        )
+        assert SETTINGS["auth:default_password"].public is False
 
     @pytest.mark.parametrize(
         "key",
@@ -241,9 +227,9 @@ class TestConfigSeed:
             "auth:default_password",
         ],
     )
-    def test_config_key_unique_in_seed(self, key):
+    def test_setting_key_unique_in_seed(self, key):
         """同一 key 不能在 init_configs 出现两次（防 seed 漂移导致 UniqueViolation）。"""
-        matches = [c for c in init_configs if c.config_key == key]
+        matches = [c for c in init_configs if c.setting_key == key]
         assert len(matches) == 1
 
     def test_primary_department_policy_has_a_safe_fresh_default(self):
@@ -251,14 +237,14 @@ class TestConfigSeed:
         matches = [
             config
             for config in init_configs
-            if config.config_key == "user_require_primary_dept"
+            if config.setting_key == "user_require_primary_dept"
         ]
 
         assert len(matches) == 1
         config = matches[0]
-        assert config.config_value == "false"
+        assert config.setting_value == "false"
         assert config.status == STATUS_ENABLED
-        assert config.is_public is False
+        assert SETTINGS["user_require_primary_dept"].public is False
 
 
 class TestRoleSeed:
@@ -423,5 +409,5 @@ class TestAiChatPermissionSeed:
         assert page.route_path == "/ai/trace"
 
     def test_file_parse_is_enabled_for_fresh_install(self):
-        config = next(c for c in init_configs if c.config_key == "ai:enabled_tools")
-        assert config.config_value == '["file.parse"]'
+        config = next(c for c in init_configs if c.setting_key == "ai:enabled_tools")
+        assert config.setting_value == '["file.parse"]'

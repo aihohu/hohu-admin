@@ -13,6 +13,7 @@ from app.constants.constants import (
     SUPER_ADMIN_ROLE_CODE,
     USER_ROLE_CODE,
 )
+from app.core.builtin_i18n import initialize_translations
 from app.core.config import settings
 from app.core.security import get_password_hash
 from app.core.tenant import DEFAULT_TENANT_CODE, DEFAULT_TENANT_ID
@@ -34,7 +35,7 @@ from app.modules.system.models.tenant import Tenant
 from app.modules.system.models.user import User
 from app.utils.validators import validate_password
 from scripts.seed_ai_agents import seed_ai_agents_in_session
-from scripts.seed_config import seed_config_in_session
+from scripts.seed_settings import seed_settings_in_session
 from scripts.sync_menus import sync_menus_in_session
 
 
@@ -71,12 +72,17 @@ def build_init_roles() -> list[Role]:
             tenant_id=DEFAULT_TENANT_ID,
             role_name="系统超级管理员",
             role_code=SUPER_ADMIN_ROLE_CODE,
+            i18n_keys={"roleName": "builtin.role.systemAdmin.roleName"},
             status=STATUS_ENABLED,
         ),
         Role(
             tenant_id=DEFAULT_TENANT_ID,
             role_name="普通用户",
             role_code=USER_ROLE_CODE,
+            i18n_keys={
+                "roleName": "builtin.role.user.roleName",
+                "roleDesc": "builtin.role.user.roleDesc",
+            },
             role_desc="AI user.create 与普通账号使用的后端默认角色",
             data_scope=DATA_SCOPE_SELF,
             status=STATUS_ENABLED,
@@ -137,8 +143,28 @@ async def seed_database(db: AsyncSession, *, admin_password: str | None = None) 
         validate_password(admin_password)
 
     await ensure_default_tenant(db)
+    for role in (
+        await db.scalars(
+            select(Role).where(
+                Role.role_code.in_([SUPER_ADMIN_ROLE_CODE, USER_ROLE_CODE])
+            )
+        )
+    ).all():
+        if role.role_code == SUPER_ADMIN_ROLE_CODE:
+            prefix = (
+                "builtin.role.systemAdmin"
+                if role.tenant_id == 0
+                else "builtin.role.tenantAdmin"
+            )
+            name = "系统超级管理员" if role.tenant_id == 0 else "租户管理员"
+            initialize_translations(role, prefix, {"role_name": name})
+        else:
+            initialize_translations(
+                role, "builtin.role.user", {"role_name": "普通用户"}
+            )
+
     menus = await sync_menus_in_session(db, tenant_id=DEFAULT_TENANT_ID)
-    await seed_config_in_session(db, tenant_id=DEFAULT_TENANT_ID, fresh=fresh)
+    await seed_settings_in_session(db, tenant_id=DEFAULT_TENANT_ID, fresh=fresh)
     await seed_ai_agents_in_session(db)
     if fresh:
         admin_role, default_role = build_init_roles()

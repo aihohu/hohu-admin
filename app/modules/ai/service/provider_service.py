@@ -17,6 +17,7 @@ from app.core.tenant import (
     TenantContext,
     require_platform_permission,
 )
+from app.modules.ai.core.generation_settings import generation_settings
 from app.modules.ai.core.provider_egress import (
     provider_egress,
     provider_upstream_error,
@@ -238,6 +239,7 @@ class ProviderService:
                 model.name,
                 decrypt_value(provider.api_key),
                 model.base_url or provider.base_url,
+                model_settings=generation_settings(model.config),
             )
             await self._probe_model(instance)
         except BusinessException:

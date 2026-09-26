@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import BusinessRuleException
 from app.core.security import decrypt_value
 from app.core.tenant import TenantContext
+from app.modules.ai.core.generation_settings import generation_settings
 from app.modules.ai.core.provider_egress import provider_egress
 from app.modules.ai.core.provider_registry import create_model
 from app.modules.ai.models.model import AiModel
@@ -142,6 +143,7 @@ class ModelAuthorizationService:
             model.name,
             decrypt_value(provider.api_key),
             model.base_url or provider.base_url,
+            model_settings=generation_settings(model.config),
         )
 
     async def resolve_model_instance(

@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.core.exceptions import BusinessRuleException
 from app.modules.ai.core.context import AiToolContext
 from app.modules.system.models.file import File
+from app.modules.system.service.file_policy_service import file_policy_service
 from app.utils.safe_xlsx import (
     UnsafeXlsxError,
     parse_untrusted_xml,
@@ -28,6 +29,8 @@ XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 CSV_MIME = "text/csv"
 APPLICATION_CSV_MIME = "application/csv"
 TEXT_MIME = "text/plain"
+MARKDOWN_MIME = "text/markdown"
+JSON_MIME = "application/json"
 
 XLSX_MAX_ZIP_ENTRIES = 2048
 XLSX_MAX_ENTRY_UNCOMPRESSED_BYTES = 32 * 1024 * 1024
@@ -62,6 +65,8 @@ AI_CHAT_MIME_TYPES_BY_EXTENSION: Mapping[str, frozenset[str]] = {
     ".xlsx": frozenset({XLSX_MIME}),
     ".csv": frozenset({CSV_MIME, APPLICATION_CSV_MIME, TEXT_MIME}),
     ".txt": frozenset({TEXT_MIME}),
+    ".md": frozenset({MARKDOWN_MIME, "text/x-markdown", TEXT_MIME}),
+    ".json": frozenset({JSON_MIME, TEXT_MIME}),
 }
 
 
@@ -162,7 +167,7 @@ def _looks_like_text(data: bytes) -> bool:
 
 
 def _magic_matches(extension: str, data: bytes) -> bool:
-    if extension in {".csv", ".txt"}:
+    if extension in {".csv", ".txt", ".md", ".json"}:
         return _looks_like_text(data)
     return False
 
@@ -378,7 +383,12 @@ async def load_protected_file(
         raise _type_not_allowed()
 
     # Deployment settings may lower the tool limit but can never raise it.
-    max_bytes = min(policy.max_bytes, settings.UPLOAD_MAX_SIZE)
+    tenant_policy = await file_policy_service.resolve(
+        ctx.db, "ai_file", tenant=ctx.tenant
+    )
+    if extension not in tenant_policy.extensions:
+        raise _type_not_allowed()
+    max_bytes = min(policy.max_bytes, tenant_policy.max_bytes)
     if record.file_size < 0 or record.file_size > max_bytes:
         raise _too_large(max_bytes)
 

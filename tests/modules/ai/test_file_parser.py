@@ -29,6 +29,7 @@ from app.modules.ai.agents.tools.file_parser import (
     SUPPORTED_MIME_TYPES,
     CsvParser,
     ExcelParser,
+    TextParser,
     parse_file,
     parse_file_bytes,
 )
@@ -341,6 +342,64 @@ class TestCsvParser:
         assert CsvParser.max_bytes == 10 * 1024 * 1024
 
 
+# ============ TextParser ============
+
+
+class TestTextParser:
+    """TextParser: Markdown / JSON 纯文本摘要（rows=行数，preview=前3行，长行截断）"""
+
+    async def test_parse_markdown_bytes(self) -> None:
+        result = await parse_file_bytes(b"# Title\n\n- item\n", "text/markdown")
+        assert result.parser == "TextParser"
+        assert result.rows == 3
+        assert result.columns == ["text"]
+        assert result.preview[0] == {"text": "# Title"}
+        assert result.preview[1] == {"text": ""}
+
+    async def test_parse_json_bytes(self) -> None:
+        result = await parse_file_bytes(b'{"a": 1}\n{"b": 2}\n', "application/json")
+        assert result.parser == "TextParser"
+        assert result.rows == 2
+        assert result.preview[0] == {"text": '{"a": 1}'}
+
+    async def test_parse_file_routes_by_path(self, tmp_path: Path) -> None:
+        path = tmp_path / "notes.md"
+        path.write_text("# hi\nbody\n", encoding="utf-8")
+        result = await parse_file(path, "text/x-markdown")
+        assert result.parser == "TextParser"
+        assert result.rows == 2
+
+    async def test_long_line_truncated_in_preview(self) -> None:
+        result = await parse_file_bytes(b"x" * 5000, "text/markdown")
+        assert len(result.preview[0]["text"]) <= 2000
+
+    async def test_preview_truncated_to_3_lines(self) -> None:
+        result = await parse_file_bytes(b"l1\nl2\nl3\nl4\nl5\n", "text/markdown")
+        assert result.rows == 5
+        assert len(result.preview) == PREVIEW_ROW_LIMIT
+
+    async def test_empty_file_returns_empty_result(self) -> None:
+        result = await parse_file_bytes(b"", "application/json")
+        assert result.rows == 0
+        assert result.columns == []
+        assert result.preview == []
+
+    async def test_row_budget_stops_text_parse(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("app.modules.ai.agents.tools.file_parser.MAX_PARSE_ROWS", 2)
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await parse_file_bytes(b"a\nb\nc\n", "text/markdown")
+        assert exc_info.value.error_code == "AI_FILE_TOO_LARGE"
+
+    def test_mimes_registered(self) -> None:
+        for mime_type in TextParser.mime_types:
+            assert mime_type in PARSERS
+
+    def test_max_bytes_is_10mb(self) -> None:
+        assert TextParser.max_bytes == 10 * 1024 * 1024
+
+
 # ============ parse_file 入口 ============
 
 
@@ -423,10 +482,12 @@ class TestParsersRegistry:
         for mt in CsvParser.mime_types:
             assert mt in PARSERS
 
-    def test_no_mime_overlap_between_excel_and_csv(self) -> None:
-        """ExcelParser / CsvParser 的 MIME 集合不应重叠（启动会 RuntimeError）"""
-        excel_set = set(ExcelParser.mime_types)
-        csv_set = set(CsvParser.mime_types)
-        assert not (excel_set & csv_set), (
-            f"MIME 重叠 {excel_set & csv_set}，启动 _build_parsers 会 RuntimeError"
-        )
+    def test_no_mime_overlap_between_parsers(self) -> None:
+        """ExcelParser / CsvParser / TextParser 的 MIME 集合不应重叠（启动会 RuntimeError）"""
+        seen: set[str] = set()
+        for parser_cls in (ExcelParser, CsvParser, TextParser):
+            current = set(parser_cls.mime_types)
+            assert not (seen & current), (
+                f"MIME 重叠 {seen & current}，启动 _build_parsers 会 RuntimeError"
+            )
+            seen |= current

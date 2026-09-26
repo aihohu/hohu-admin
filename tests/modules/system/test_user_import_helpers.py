@@ -20,7 +20,7 @@ from app.modules.system.constants import (
     OVERWRITE_ALLOWED,
     OVERWRITE_NEVER,
 )
-from app.modules.system.models.config import Config
+from app.modules.system.models.setting import SystemSetting
 from app.modules.system.service.user_service import (
     INSECURE_DEFAULT_PASSWORD_SENTINELS,
     get_default_password,
@@ -32,18 +32,18 @@ TENANT = tenant_context()
 
 @pytest.fixture(autouse=True)
 async def _cleanup_default_password_rows(db_session):
-    """Clear any persisted sys_config.auth:default_password rows so the test's
+    """Clear any persisted sys_setting.auth:default_password rows so the test's
     INSERT does not collide with the unique key.
 
     Why: db_session is outer-transaction rollback (no test pollution), but the
     dev DB itself may already hold a seeded auth:default_password row (init_db.py
-    leaves one). A test INSERT of the same config_key triggers a unique-key
+    leaves one). A test INSERT of the same setting_key triggers a unique-key
     violation regardless of transaction isolation. DELETE first, then INSERT.
     """
     await db_session.execute(
-        delete(Config).where(
-            Config.tenant_id == TENANT.tenant_id,
-            Config.config_key == "auth:default_password",
+        delete(SystemSetting).where(
+            SystemSetting.tenant_id == TENANT.tenant_id,
+            SystemSetting.setting_key == "auth:default_password",
         )
     )
     await db_session.flush()
@@ -107,19 +107,17 @@ class TestExportAllowedFields:
 class TestGetDefaultPassword:
     """get_default_password helper 行为测试。
 
-    所有导入用户用 sys_config.auth:default_password 哈希入库。
+    所有导入用户用 sys_setting.auth:default_password 哈希入库。
     缺失时抛 AI_IMPORT_DEFAULT_PASSWORD_NOT_SET（防硬编码默认密码安全风险）。
     """
 
     async def test_returns_value_when_configured(self, db_session):
         db_session.add(
-            Config(
-                config_id=1,
+            SystemSetting(
+                setting_id=1,
                 tenant_id=TENANT.tenant_id,
-                config_name="默认密码",
-                config_key="auth:default_password",
-                config_value="Welcome@2026",
-                config_group="auth",
+                setting_key="auth:default_password",
+                setting_value="Welcome@2026",
                 status="1",
             )
         )
@@ -137,13 +135,11 @@ class TestGetDefaultPassword:
     async def test_raises_when_disabled(self, db_session):
         """status='2'（禁用）等价于未配置（防 admin 关掉默认密码但忘了清配置）。"""
         db_session.add(
-            Config(
-                config_id=2,
+            SystemSetting(
+                setting_id=2,
                 tenant_id=TENANT.tenant_id,
-                config_name="默认密码",
-                config_key="auth:default_password",
-                config_value="Welcome@2026",
-                config_group="auth",
+                setting_key="auth:default_password",
+                setting_value="Welcome@2026",
                 status="2",  # 禁用
             )
         )
@@ -154,15 +150,13 @@ class TestGetDefaultPassword:
         assert exc.value.error_code == "AI_IMPORT_DEFAULT_PASSWORD_NOT_SET"
 
     async def test_returns_latest_when_multiple_rows(self, db_session):
-        """config_key UNIQUE 约束保证只有一行，但 helper 行为不应受重复影响。"""
+        """setting_key UNIQUE 约束保证只有一行，但 helper 行为不应受重复影响。"""
         db_session.add(
-            Config(
-                config_id=3,
+            SystemSetting(
+                setting_id=3,
                 tenant_id=TENANT.tenant_id,
-                config_name="默认密码",
-                config_key="auth:default_password",
-                config_value="Hohu@Init#2026",
-                config_group="auth",
+                setting_key="auth:default_password",
+                setting_value="Hohu@Init#2026",
                 status="1",
             )
         )
@@ -176,13 +170,11 @@ class TestGetDefaultPassword:
     ) -> None:
         public_seed = next(iter(INSECURE_DEFAULT_PASSWORD_SENTINELS))
         db_session.add(
-            Config(
-                config_id=4,
+            SystemSetting(
+                setting_id=4,
                 tenant_id=TENANT.tenant_id,
-                config_name="默认密码",
-                config_key="auth:default_password",
-                config_value=public_seed,
-                config_group="auth",
+                setting_key="auth:default_password",
+                setting_value=public_seed,
                 status="1",
             )
         )

@@ -17,6 +17,7 @@ from app.core.scheduler import scheduler_manager
 from app.core.tenant import PlatformContext
 from app.db.session import AsyncSessionLocal
 from app.middleware.audit_middleware import AuditLogMiddleware
+from app.middleware.body_size_middleware import BodySizeLimitMiddleware
 from app.middleware.platform_audit_middleware import PlatformAuditMiddleware
 from app.middleware.rate_limit_middleware import RateLimitMiddleware
 from app.modules.auth.api import router as auth_router
@@ -36,6 +37,7 @@ from app.modules.system.api.login_log import router as login_log_router
 from app.modules.system.api.menu import router as menu_router
 from app.modules.system.api.operation_log import router as operation_log_router
 from app.modules.system.api.role import router as role_router
+from app.modules.system.api.settings import router as settings_router
 from app.modules.system.api.user import router as user_router
 from app.modules.system.service.file_service import file_service
 
@@ -227,6 +229,7 @@ else:
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(AuditLogMiddleware)
 app.add_middleware(PlatformAuditMiddleware)
+app.add_middleware(BodySizeLimitMiddleware)
 
 # 注册异常处理器
 setup_exception_handlers(app)
@@ -242,7 +245,8 @@ app.include_router(
     prefix="/system/data-scope-demo",
     tags=["数据权限演示"],
 )
-app.include_router(config_router, prefix="/system/config", tags=["系统配置管理"])
+app.include_router(settings_router, prefix="/system/setting", tags=["系统设置"])
+app.include_router(config_router, prefix="/system/config", tags=["自定义参数"])
 app.include_router(role_router, prefix="/system/role", tags=["角色管理"])
 app.include_router(dept_router, prefix="/system/dept", tags=["部门管理"])
 app.include_router(menu_router, prefix="/system/menu", tags=["菜单管理"])

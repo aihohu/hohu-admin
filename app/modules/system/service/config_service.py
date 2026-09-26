@@ -19,6 +19,7 @@ from app.modules.system.schemas.config import (
     ConfigQuery,
     ConfigUpdate,
 )
+from app.modules.system.settings_catalog import BUILTIN_KEYS, is_builtin_key
 from app.utils.pagination import build_filters, paginate
 from app.utils.safe_xlsx import UnsafeXlsxError, validate_untrusted_xlsx_xml
 
@@ -63,6 +64,14 @@ def _masked_copy(config: Config) -> Config:
     return clone
 
 
+def _require_custom_key(key: str) -> None:
+    if is_builtin_key(key):
+        raise BusinessRuleException(
+            "Use the settings page for built-in keys",
+            error_code="BUILTIN_SETTING_PROTECTED",
+        )
+
+
 class ConfigService:
     """系统配置业务逻辑服务"""
 
@@ -78,6 +87,14 @@ class ConfigService:
         }
         filters = build_filters(Config, field_mapping, **query.model_dump())
         filters.insert(0, tenant_filter(Config, tenant=tenant))
+        filters.extend(
+            [
+                Config.config_key.not_in(BUILTIN_KEYS),
+                ~Config.config_key.startswith("ai:"),
+                ~Config.config_key.startswith("security:"),
+                ~Config.config_key.startswith("upload:"),
+            ]
+        )
 
         page_data = await paginate(
             db=db,
@@ -93,7 +110,7 @@ class ConfigService:
 
         return page_data
 
-    @cacheable(key="tenant:{tenant.tenant_id}:config:public", ttl=300)
+    @cacheable(key="tenant:{tenant.tenant_id}:config:custom:public", ttl=300)
     async def get_public_configs(
         self, db: AsyncSession, *, tenant: TenantLocatorContext
     ) -> dict[str, str]:
@@ -112,9 +129,10 @@ class ConfigService:
             if _is_sensitive_config_key(c.config_key)
             else c.config_value
             for c in result.scalars().all()
+            if not is_builtin_key(c.config_key)
         }
 
-    @cacheable(key="tenant:{tenant.tenant_id}:config:key:{key}", ttl=300)
+    @cacheable(key="tenant:{tenant.tenant_id}:config:custom:key:{key}", ttl=300)
     async def get_value(
         self,
         db: AsyncSession,
@@ -187,7 +205,7 @@ class ConfigService:
         except (ValueError, TypeError):
             return default
 
-    @cacheable(key="tenant:{tenant.tenant_id}:config:group:{group}", ttl=300)
+    @cacheable(key="tenant:{tenant.tenant_id}:config:custom:group:{group}", ttl=300)
     async def get_values_by_group(
         self,
         db: AsyncSession,
@@ -211,6 +229,7 @@ class ConfigService:
         self, db: AsyncSession, config_in: ConfigCreate, *, tenant: TenantContext
     ) -> Config:
         """创建系统配置"""
+        _require_custom_key(config_in.config_key)
         # 检查键唯一性
         check = await db.execute(
             tenant_select(Config, tenant=tenant).where(
@@ -239,6 +258,9 @@ class ConfigService:
         if not config:
             raise NotFoundException("系统配置")
 
+        _require_custom_key(config.config_key)
+        if config_in.config_key:
+            _require_custom_key(config_in.config_key)
         # 如果修改了 config_key，检查唯一性
         update_data = config_in.model_dump(exclude_unset=True)
         if update_data.get("config_value") == MASKED_CONFIG_VALUE:
@@ -271,6 +293,7 @@ class ConfigService:
         if not config:
             raise NotFoundException("系统配置")
 
+        _require_custom_key(config.config_key)
         await db.delete(config)
 
     async def batch_delete(
@@ -285,6 +308,8 @@ class ConfigService:
         if {int(config.config_id) for config in config_list} != set(ids):
             raise NotFoundException("系统配置")
 
+        for config in config_list:
+            _require_custom_key(config.config_key)
         for config in config_list:
             await db.delete(config)
 
@@ -302,6 +327,14 @@ class ConfigService:
         }
         filters = build_filters(Config, field_mapping, **query.model_dump())
         filters.insert(0, tenant_filter(Config, tenant=tenant))
+        filters.extend(
+            [
+                Config.config_key.not_in(BUILTIN_KEYS),
+                ~Config.config_key.startswith("ai:"),
+                ~Config.config_key.startswith("security:"),
+                ~Config.config_key.startswith("upload:"),
+            ]
+        )
         stmt = select(Config).where(*filters) if filters else select(Config)
         result = await db.execute(
             stmt.order_by(Config.config_group.asc(), Config.config_key.asc())
@@ -388,7 +421,7 @@ class ConfigService:
             if not row or len(row) < 2 or not row[1]:
                 continue
             config_key = str(row[1]).strip()
-            if config_key in existing_keys:
+            if config_key in existing_keys or is_builtin_key(config_key):
                 skipped += 1
                 continue
 

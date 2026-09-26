@@ -11,7 +11,7 @@ v0.1.5 以 hohu-cli 为用户配置、部署、升级入口，CLI 与后端同�
 - `scripts/init.py` 负责本地环境准备、迁移和调用统一数据入口；`scripts/init_db.py` 在一个种子事务中完成默认租户、菜单、配置、内置 Agent/Prompt 和首次管理员授权。后者无 input、不清库、不打印密码。
 - `sync_menus.py` 负责菜单同步，`init_db.py` 不再维护菜单定义。System 模块保存唯一静态菜单目录，默认安装与 hosted 开通使用显式能力集合，禁止从可编辑的租户 0 数据复制到新租户。
 - 首次默认租户初始化需要 HOHU_ADMIN_PASSWORD；已有默认用户时不再创建管理员，允许管理员改名。部署重复运行保留密码、自定义配置、角色授权及禁用状态。
-- 配置按 tenant_id/config_key 补缺；fresh 显式启用 file.parse，upgrade 补缺保持为空。Agent 及 Prompt 统一编排，保留部署方自定义内容。
+- 内置设置由 `seed_settings.py` 按 sys_setting 的 tenant_id/setting_key 补缺；自定义参数保存在独立 sys_config 表，不由种子生成。fresh 显式启用 file.parse，upgrade 补缺保持为空。Agent 及 Prompt 统一编排，保留部署方自定义内容。拆表迁移和独立菜单见 [SYSTEM-SETTINGS.md](SYSTEM-SETTINGS.md)。
 - 已 bootstrap 的其他租户同步其 hosted 菜单；prepared 且未 bootstrap 的租户不自动开通。数据库结构仍由 Alembic 负责，种子不能 stamp 或替代迁移。
 - 平台管理和发布审计移至 tools/ops；静态检查移至 tools/checks；demo 移至 tools/demo；隔离发布验收及 worker 移至 tests/release。所有调用、测试、镜像和维护文档同步更新。
 - CLI Compose 使用失败即停的单次 migrator，迁移成功后始终运行统一种子，再启动应用；自动生成初始管理员密码写入部署 .env，日志只提示存储位置。无需 --init 选择首次安装。

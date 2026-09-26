@@ -5,7 +5,7 @@
   - required_perms=("ai:file:parse",)，必须显式授权
   - risk=low（纯读解析，无副作用）
   - default_enabled=False，由部署方通过 ai:enabled_tools 显式启用
-  - accepts_file=Excel/CSV MIME 列表
+  - accepts_file=Excel/CSV/Markdown/JSON MIME 列表
 
 返回值仅含结构化摘要（rows/columns/preview/parser/file_size），raw bytes 永不进 LLM。
 """
@@ -56,8 +56,8 @@ _FILE_PARSE_ACCESS_POLICY = FileAccessPolicy(
         default_enabled=False,
         accepts_file=_accepted_mime_types(),
         summary=(
-            "Parse uploaded Excel/CSV → {rows, columns, preview[3]}. "
-            "Pass file_id. Raw bytes never enter LLM."
+            "Parse Excel/CSV/MD/JSON → {rows, columns, preview[3]}. "
+            "Raw bytes never enter LLM."
         ),
         readonly=True,
         idempotent=True,

@@ -1,7 +1,7 @@
 """ai_config helper 单元测试。
 
 覆盖 get_ai_config_int / get_ai_config_str / get_ai_config_str_list 三个 helper。
-Redis 用 db_session fixture 提供的真实 DB（清 ai:* sys_config 行隔离）。
+Redis 用 db_session fixture 提供的真实 DB（清 ai:* sys_setting 行隔离）。
 """
 
 # ruff: noqa: ARG001, PLC0415
@@ -39,7 +39,7 @@ class TestGetAiConfigInt:
         from app.modules.ai.agents.safety.ai_config import get_ai_config_int
 
         with patch(
-            "app.modules.ai.agents.safety.ai_config.config_service.get_value",
+            "app.modules.ai.agents.safety.ai_config.settings_service.get_value",
             new=AsyncMock(return_value="100"),
         ):
             result = await get_ai_config_int(
@@ -51,7 +51,7 @@ class TestGetAiConfigInt:
         from app.modules.ai.agents.safety.ai_config import get_ai_config_int
 
         with patch(
-            "app.modules.ai.agents.safety.ai_config.config_service.get_value",
+            "app.modules.ai.agents.safety.ai_config.settings_service.get_value",
             new=AsyncMock(return_value="not_a_number"),
         ):
             result = await get_ai_config_int(
@@ -76,7 +76,7 @@ class TestGetAiConfigStrList:
 
         raw = json.dumps(["file.parse", "provider.export"])
         with patch(
-            "app.modules.ai.agents.safety.ai_config.config_service.get_value",
+            "app.modules.ai.agents.safety.ai_config.settings_service.get_value",
             new=AsyncMock(return_value=raw),
         ):
             result = await get_ai_config_str_list(
@@ -88,7 +88,7 @@ class TestGetAiConfigStrList:
         from app.modules.ai.agents.safety.ai_config import get_ai_config_str_list
 
         with patch(
-            "app.modules.ai.agents.safety.ai_config.config_service.get_value",
+            "app.modules.ai.agents.safety.ai_config.settings_service.get_value",
             new=AsyncMock(return_value="not json{"),
         ):
             result = await get_ai_config_str_list(
@@ -101,7 +101,7 @@ class TestGetAiConfigStrList:
         from app.modules.ai.agents.safety.ai_config import get_ai_config_str_list
 
         with patch(
-            "app.modules.ai.agents.safety.ai_config.config_service.get_value",
+            "app.modules.ai.agents.safety.ai_config.settings_service.get_value",
             new=AsyncMock(return_value='{"key": "value"}'),
         ):
             result = await get_ai_config_str_list(
@@ -114,7 +114,7 @@ class TestGetAiConfigStrList:
         from app.modules.ai.agents.safety.ai_config import get_ai_config_str_list
 
         with patch(
-            "app.modules.ai.agents.safety.ai_config.config_service.get_value",
+            "app.modules.ai.agents.safety.ai_config.settings_service.get_value",
             new=AsyncMock(return_value='["ok", 123, null]'),
         ):
             result = await get_ai_config_str_list(
@@ -127,7 +127,7 @@ class TestGetAiConfigStrList:
         from app.modules.ai.agents.safety.ai_config import get_ai_config_str_list
 
         with patch(
-            "app.modules.ai.agents.safety.ai_config.config_service.get_value",
+            "app.modules.ai.agents.safety.ai_config.settings_service.get_value",
             new=AsyncMock(return_value="[]"),
         ):
             result = await get_ai_config_str_list(
@@ -141,7 +141,7 @@ class TestGetAiConfigStrList:
 
         mock_get = AsyncMock(return_value='["cached_tool"]')
         with patch(
-            "app.modules.ai.agents.safety.ai_config.config_service.get_value",
+            "app.modules.ai.agents.safety.ai_config.settings_service.get_value",
             new=mock_get,
         ):
             r1 = await get_ai_config_str_list(
@@ -159,7 +159,7 @@ class TestGetAiConfigStrList:
         from app.modules.ai.agents.safety.ai_config import get_ai_config_str_list
 
         with patch(
-            "app.modules.ai.agents.safety.ai_config.config_service.get_value",
+            "app.modules.ai.agents.safety.ai_config.settings_service.get_value",
             new=AsyncMock(return_value='["safe_tool"]'),
         ):
             first = await get_ai_config_str_list(
@@ -177,7 +177,7 @@ class TestGetAiConfigStrList:
 
         mock_get = AsyncMock(return_value='["fresh"]')
         with patch(
-            "app.modules.ai.agents.safety.ai_config.config_service.get_value",
+            "app.modules.ai.agents.safety.ai_config.settings_service.get_value",
             new=mock_get,
         ):
             await get_ai_config_str_list(db_session, "ai:test:force", [], tenant=TENANT)
@@ -209,7 +209,9 @@ class TestInvalidateCache:
             await release.wait()
             return "7"
 
-        with patch.object(ai_config.config_service, "get_value", side_effect=slow_get):
+        with patch.object(
+            ai_config.settings_service, "get_value", side_effect=slow_get
+        ):
             pending = asyncio.create_task(
                 get_ai_config_int(db_session, "ai:race", 1, tenant=TENANT)
             )
@@ -259,9 +261,9 @@ async def test_supervisor_enabled_default_true(db_session):
     from app.modules.ai.agents.safety.ai_config import get_ai_config_bool
 
     cfg_mod._cache.clear()
-    # 让 config_service.get_value 返回 None → fallback default=True
+    # 让 settings_service.get_value 返回 None → fallback default=True
     with patch.object(
-        cfg_mod.config_service, "get_value", AsyncMock(return_value=None)
+        cfg_mod.settings_service, "get_value", AsyncMock(return_value=None)
     ):
         result = await get_ai_config_bool(
             db_session, "ai:supervisor_enabled", default=True, tenant=TENANT
@@ -277,7 +279,7 @@ async def test_supervisor_daily_limit_default_100(db_session):
 
     cfg_mod._cache.clear()
     with patch.object(
-        cfg_mod.config_service, "get_value", AsyncMock(return_value=None)
+        cfg_mod.settings_service, "get_value", AsyncMock(return_value=None)
     ):
         result = await get_ai_config_int(
             db_session, "ai:supervisor_daily_limit", default=100, tenant=TENANT
@@ -293,7 +295,7 @@ async def test_routing_legacy_null_mode_default_false(db_session):
 
     cfg_mod._cache.clear()
     with patch.object(
-        cfg_mod.config_service, "get_value", AsyncMock(return_value=None)
+        cfg_mod.settings_service, "get_value", AsyncMock(return_value=None)
     ):
         result = await get_ai_config_bool(
             db_session, "ai:routing_legacy_null_mode", default=False, tenant=TENANT
@@ -311,7 +313,7 @@ class TestGetAiConfigBoolParsing:
         for raw in ("true", "True", "TRUE", "tRuE", "1", "yes", "YES", "  true  "):
             cfg_mod._cache.clear()
             with patch.object(
-                cfg_mod.config_service, "get_value", AsyncMock(return_value=raw)
+                cfg_mod.settings_service, "get_value", AsyncMock(return_value=raw)
             ):
                 result = await get_ai_config_bool(
                     db_session, "ai:test:bool", default=False, tenant=TENANT
@@ -325,7 +327,7 @@ class TestGetAiConfigBoolParsing:
         for raw in ("false", "False", "0", "no", "NO", "off"):
             cfg_mod._cache.clear()
             with patch.object(
-                cfg_mod.config_service, "get_value", AsyncMock(return_value=raw)
+                cfg_mod.settings_service, "get_value", AsyncMock(return_value=raw)
             ):
                 result = await get_ai_config_bool(
                     db_session, "ai:test:bool", default=True, tenant=TENANT
@@ -340,7 +342,7 @@ class TestGetAiConfigBoolParsing:
         for raw in ("maybe", "2", "yep", "null", "{", '"'):
             cfg_mod._cache.clear()
             with patch.object(
-                cfg_mod.config_service, "get_value", AsyncMock(return_value=raw)
+                cfg_mod.settings_service, "get_value", AsyncMock(return_value=raw)
             ):
                 result = await get_ai_config_bool(
                     db_session, "ai:test:bool", default=True, tenant=TENANT
@@ -349,15 +351,15 @@ class TestGetAiConfigBoolParsing:
                 f"raw={raw!r} should return False (not default=True)"
             )
 
-    async def test_sys_config_missing_falls_back_to_default(self, db_session) -> None:
-        """sys_config 返回 None / 空字符串 → 走 default（通过 str round-trip）"""
+    async def test_sys_setting_missing_falls_back_to_default(self, db_session) -> None:
+        """sys_setting 返回 None / 空字符串 → 走 default（通过 str round-trip）"""
         from app.modules.ai.agents.safety import ai_config as cfg_mod
         from app.modules.ai.agents.safety.ai_config import get_ai_config_bool
 
         for raw in (None, ""):
             cfg_mod._cache.clear()
             with patch.object(
-                cfg_mod.config_service, "get_value", AsyncMock(return_value=raw)
+                cfg_mod.settings_service, "get_value", AsyncMock(return_value=raw)
             ):
                 result_true = await get_ai_config_bool(
                     db_session, "ai:test:bool_t", default=True, tenant=TENANT

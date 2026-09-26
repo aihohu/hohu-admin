@@ -11,6 +11,8 @@ from pydantic.alias_generators import to_camel
 
 
 class AgentRow(BaseModel):
+    i18n_keys: dict[str, str] | None = None
+
     """GET /ai/role-agent/{roleId} 响应内 allAgents 的单个 Agent 行.
 
     决策 #19：不暴露软禁用态，故无 enabled_role_level / softDisabled 字段.

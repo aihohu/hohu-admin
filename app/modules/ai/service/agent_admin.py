@@ -11,6 +11,7 @@ import re
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.builtin_i18n import clear_changed_translations
 from app.core.exceptions import (
     BusinessRuleException,
     NotFoundException,
@@ -110,6 +111,7 @@ class AgentAdminService:
                     error_code="AI_AGENT_QUOTA_INVALID",
                 )
 
+        clear_changed_translations(agent, data)
         for k, v in data.items():
             setattr(agent, k, v)
         await db.flush()

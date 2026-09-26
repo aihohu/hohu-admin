@@ -28,6 +28,7 @@ _DEFAULT_TENANT_REFERENCE_ALLOWLIST = frozenset(
     {
         "core/tenant.py",
         "core/rbac.py",  # System-role scope is explicitly rooted in the default system.
+        "middleware/rate_limit_middleware.py",  # Global protection is configured only by the default system administrator.
         "modules/auth/service.py",
         "modules/marketplace/capability.py",
         "modules/system/service/tenant_bootstrap_service.py",
@@ -43,6 +44,8 @@ _NAMESPACE_REGISTRY: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "core/scheduler.py": ("cache", "infrastructure", ()),
     "core/tenant_scope.py": ("cache", "tenant", ("tenant_id",)),
     "middleware/audit_middleware.py": ("cache", "tenant", ("tenant_id",)),
+    "middleware/rate_limit_middleware.py": ("cache", "global", ()),
+    "modules/system/api/settings.py": ("cache", "tenant", ("tenant_id",)),
     "modules/auth/service.py": ("cache", "global", ()),
     "modules/ai/lifecycle.py": ("cache", "tenant", ("tenant_id",)),
     "modules/ai/api/chat.py": ("cache", "tenant", ("tenant",)),

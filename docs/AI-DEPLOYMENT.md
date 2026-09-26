@@ -93,8 +93,8 @@ AI_PROVIDER_EGRESS_MAX_CONCURRENCY=20
 AI_PROVIDER_EGRESS_MAX_RETRIES=1
 
 # ===== LLM 调用参数 =====
-AI_MAX_TOKENS=4096
-AI_TEMPERATURE=0.7
+# Generation options are configured per model in the Provider page.
+# Omitted options use the model/provider defaults.
 
 # ===== Redis / DB（继承项目主配置）=====
 REDIS_URL=redis://127.0.0.1:6379/0
@@ -115,7 +115,7 @@ SECRET_KEY=<strong-random>      # JWT 签名，必须强随机
 - [ ] `python -m tools.ops.audit_ai_provider_egress` 无未处置 finding；存量 `EGRESS_POLICY_BLOCKED` 未被自动放行或翻转 `enabled`
 - [ ] 已配置六个 `AI_E2E_*` 变量并通过真实 Provider 的 `pnpm e2e:provider`；不得用确定性 route fixture 或缺凭据 skip 代替
 - [ ] HTTPS 全链路（Nginx / Caddy TLS 终止）
-- [ ] 速率限制中间件启用（`RATE_LIMIT_API`）
+- [ ] Redis 共享请求限流可用，阈值在「系统设置 → 访问保护」配置
 - [ ] 审计日志保留 ≥ 90 天（`ai_operation_log` / `sys_login_log` / `sys_operation_log`）
 - [ ] ERROR 日志告警接入
 

@@ -31,11 +31,11 @@ from app.modules.system.service.authorization_lock import authorization_lock_ser
 from app.modules.system.service.authorization_snapshot import (
     materialized_role_set_snapshot,
 )
-from app.modules.system.service.config_service import config_service
 from app.modules.system.service.grant_authority import (
     GrantAuthority,
     grant_authority_service,
 )
+from app.modules.system.service.settings_service import settings_service
 from app.modules.system.service.user_role_assignment_service import (
     RoleSetAuthority,
     user_role_assignment_service,
@@ -721,7 +721,7 @@ class UserDepartmentAssignmentService:
             prospective_roles=final_roles,
         )
         if require_primary is None:
-            require_primary = await config_service.get_bool_for_update(
+            require_primary = await settings_service.get_bool_for_update(
                 db,
                 "user_require_primary_dept",
                 tenant=tenant,
@@ -790,7 +790,7 @@ class UserDepartmentAssignmentService:
         requested_depts = await self._load_requested_depts(
             db, normalized, tenant=tenant
         )
-        require_primary = await config_service.get_bool_for_update(
+        require_primary = await settings_service.get_bool_for_update(
             db,
             "user_require_primary_dept",
             tenant=tenant,
@@ -904,7 +904,7 @@ class UserDepartmentAssignmentService:
         requested_depts = await self._load_requested_depts(
             db, normalized, tenant=tenant
         )
-        require_primary = await config_service.get_bool_for_update(
+        require_primary = await settings_service.get_bool_for_update(
             db,
             "user_require_primary_dept",
             tenant=tenant,
@@ -1575,7 +1575,7 @@ class UserDepartmentAssignmentService:
                 "授权事实已变化，请重试",
                 error_code="AUTHORIZATION_SNAPSHOT_STALE",
             )
-        require_primary = await config_service.get_bool_for_update(
+        require_primary = await settings_service.get_bool_for_update(
             db,
             "user_require_primary_dept",
             tenant=tenant,

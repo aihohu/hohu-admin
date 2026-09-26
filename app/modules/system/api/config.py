@@ -22,6 +22,7 @@ from app.modules.system.schemas.config import (
     ConfigUpdate,
 )
 from app.modules.system.service.config_service import config_service
+from app.modules.system.service.file_policy_service import file_policy_service
 
 router = APIRouter()
 CONFIG_IMPORT_MAX_SIZE_BYTES = 10 * 1024 * 1024
@@ -86,12 +87,14 @@ async def import_configs(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """从 Excel 文件导入系统配置"""
-    file_bytes = await file.read(CONFIG_IMPORT_MAX_SIZE_BYTES + 1)
-    if len(file_bytes) > CONFIG_IMPORT_MAX_SIZE_BYTES:
+    policy = await file_policy_service.resolve(db, "import", tenant=tenant)
+    file_bytes = await file.read(policy.max_bytes + 1)
+    if len(file_bytes) > policy.max_bytes:
         raise BusinessRuleException(
-            "配置导入文件不能超过 10MB",
+            "File exceeds the configured import limit",
             error_code="CONFIG_IMPORT_FILE_TOO_LARGE",
         )
+    policy.validate_extension(file.filename or "")
     result = await config_service.import_configs(db, file_bytes, tenant=tenant)
     await db.commit()
     await cache_delete(pattern=f"tenant:{tenant.tenant_id}:config:*")

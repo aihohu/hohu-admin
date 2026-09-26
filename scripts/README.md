@@ -7,7 +7,7 @@
 | init.py | `hohu init` 的本地环境准备、迁移和种子编排 |
 | init_db.py | 部署统一种子入口：单个事务、安全补齐、首次管理员 |
 | sync_menus.py | 默认租户与已初始化 hosted 租户的菜单同步 |
-| seed_config.py | 租户范围内的基础配置补缺 |
+| seed_settings.py | 独立 sys_setting 表的租户设置补缺，自定义参数不播种 |
 | seed_ai_agents.py | 内置 Agent 与默认 Prompt 同步，保留部署方自定义 |
 
 数据库结构由 Alembic 管理。统一数据入口为 `python -m scripts.init_db`，
@@ -20,3 +20,5 @@
 `python -m tests.release.qualify_tenant_hosted_release`，参数保持各工具的 `--help` 契约。
 
 详细行为与验证记录见 [SCRIPTS-DEPLOYMENT.md](../docs/SCRIPTS-DEPLOYMENT.md)。
+
+系统设置与自定义参数分别使用 `sys_setting` 和 `sys_config`。拆表由 Alembic 自动搬迁旧值，再由初始化补齐两个菜单；见 [SYSTEM-SETTINGS.md](../docs/SYSTEM-SETTINGS.md)。

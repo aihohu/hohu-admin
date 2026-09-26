@@ -38,7 +38,7 @@ async def _setup(db_session: AsyncSession, *, keys: list[tuple[str, str]]):
 async def test_list_masks_sensitive_values_only(db_session: AsyncSession) -> None:
     tenant, _ = await _setup(
         db_session,
-        keys=[("auth:default_password", "Hohu123456"), ("feature:toggle", "true")],
+        keys=[("integration:password", "Hohu123456"), ("feature:toggle", "true")],
     )
 
     page = await config_service.get_list(
@@ -48,7 +48,7 @@ async def test_list_masks_sensitive_values_only(db_session: AsyncSession) -> Non
     outs = [ConfigOut.model_validate(c) for c in page.records]
     by_key = {o.config_key: o.config_value for o in outs}
 
-    assert by_key["auth:default_password"] == MASKED_CONFIG_VALUE
+    assert by_key["integration:password"] == MASKED_CONFIG_VALUE
     assert by_key["feature:toggle"] == "true"
 
 
@@ -56,7 +56,7 @@ async def test_update_with_mask_sentinel_keeps_original_value(
     db_session: AsyncSession,
 ) -> None:
     tenant, configs = await _setup(
-        db_session, keys=[("auth:default_password", "S3cret!")]
+        db_session, keys=[("integration:password", "S3cret!")]
     )
     config = configs[0]
 
@@ -84,7 +84,7 @@ async def test_update_with_mask_sentinel_keeps_original_value(
 async def test_export_masks_sensitive_values(db_session: AsyncSession) -> None:
     tenant, _ = await _setup(
         db_session,
-        keys=[("auth:default_password", "Hohu123456"), ("feature:toggle", "true")],
+        keys=[("integration:password", "Hohu123456"), ("feature:toggle", "true")],
     )
 
     buf = await config_service.export_configs(
@@ -97,5 +97,5 @@ async def test_export_masks_sensitive_values(db_session: AsyncSession) -> None:
         )
         if row[1] not in (None, "config_key")
     }
-    assert rows["auth:default_password"] == MASKED_CONFIG_VALUE
+    assert rows["integration:password"] == MASKED_CONFIG_VALUE
     assert rows["feature:toggle"] == "true"

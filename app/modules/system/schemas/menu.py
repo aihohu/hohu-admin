@@ -202,6 +202,7 @@ class MenuTreeOptionOut(BaseModel):
 
     id: int
     label: str
+    i18n_key: str | None = Field(None, alias="i18nKey")
     p_id: str
     children: list["MenuTreeOptionOut"] = []
 

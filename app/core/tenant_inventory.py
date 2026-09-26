@@ -139,6 +139,11 @@ TENANT_MODEL_INVENTORY: dict[str, TenantResource] = {
         "app.modules.ai.models.role_ai_agent:RoleAiAgent",
         relationship_keys=(("tenant_id", "role_id"),),
     ),
+    "sys_setting": _resource(
+        "sys_setting",
+        "app.modules.system.models.setting:SystemSetting",
+        unique_keys=(("tenant_id", "setting_key"),),
+    ),
     "sys_config": _resource(
         "sys_config",
         "app.modules.system.models.config:Config",

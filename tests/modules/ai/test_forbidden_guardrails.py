@@ -1,6 +1,6 @@
 """Forbidden Topics 与 Forbidden URLs Guardrails 测试。
 
-测试 check_topics / check_forbidden_urls 函数 + load_* 缓存逻辑（monkeypatch config_service）。
+测试 check_topics / check_forbidden_urls 函数 + load_* 缓存逻辑（monkeypatch settings_service）。
 """
 
 # ruff: noqa: PLC0415
@@ -73,7 +73,7 @@ class TestLoadForbiddenTopics:
             pytest.MonkeyPatch().context() as mp,
         ):
             mp.setattr(
-                "app.modules.ai.agents.safety.forbidden_topics.config_service.get_value",
+                "app.modules.ai.agents.safety.forbidden_topics.settings_service.get_value",
                 AsyncMock(return_value=raw),
             )
             result = await load_forbidden_topics(db_session, tenant=TENANT)
@@ -84,7 +84,7 @@ class TestLoadForbiddenTopics:
         mock_get = AsyncMock(return_value='["topic1"]')
         with pytest.MonkeyPatch().context() as mp:
             mp.setattr(
-                "app.modules.ai.agents.safety.forbidden_topics.config_service.get_value",
+                "app.modules.ai.agents.safety.forbidden_topics.settings_service.get_value",
                 mock_get,
             )
             r1 = await load_forbidden_topics(db_session, tenant=TENANT)
@@ -96,7 +96,7 @@ class TestLoadForbiddenTopics:
         mock_get = AsyncMock(return_value='["fresh"]')
         with pytest.MonkeyPatch().context() as mp:
             mp.setattr(
-                "app.modules.ai.agents.safety.forbidden_topics.config_service.get_value",
+                "app.modules.ai.agents.safety.forbidden_topics.settings_service.get_value",
                 mock_get,
             )
             await load_forbidden_topics(db_session, tenant=TENANT)
@@ -106,7 +106,7 @@ class TestLoadForbiddenTopics:
     async def test_load_invalid_json_returns_empty(self, db_session) -> None:
         with pytest.MonkeyPatch().context() as mp:
             mp.setattr(
-                "app.modules.ai.agents.safety.forbidden_topics.config_service.get_value",
+                "app.modules.ai.agents.safety.forbidden_topics.settings_service.get_value",
                 AsyncMock(return_value="not json{"),
             )
             result = await load_forbidden_topics(db_session, tenant=TENANT)
@@ -116,7 +116,7 @@ class TestLoadForbiddenTopics:
         raw = json.dumps(["ok", 123, None, "", "good"])
         with pytest.MonkeyPatch().context() as mp:
             mp.setattr(
-                "app.modules.ai.agents.safety.forbidden_topics.config_service.get_value",
+                "app.modules.ai.agents.safety.forbidden_topics.settings_service.get_value",
                 AsyncMock(return_value=raw),
             )
             result = await load_forbidden_topics(db_session, tenant=TENANT)
@@ -199,7 +199,7 @@ class TestLoadForbiddenUrls:
         raw = json.dumps(["https://evil.com/path", "http://bad.org", "competitor.net"])
         with pytest.MonkeyPatch().context() as mp:
             mp.setattr(
-                "app.modules.ai.agents.safety.forbidden_urls.config_service.get_value",
+                "app.modules.ai.agents.safety.forbidden_urls.settings_service.get_value",
                 AsyncMock(return_value=raw),
             )
             result = await load_forbidden_urls(db_session, tenant=TENANT)
@@ -211,7 +211,7 @@ class TestLoadForbiddenUrls:
         raw = json.dumps(["evil.com:8080"])
         with pytest.MonkeyPatch().context() as mp:
             mp.setattr(
-                "app.modules.ai.agents.safety.forbidden_urls.config_service.get_value",
+                "app.modules.ai.agents.safety.forbidden_urls.settings_service.get_value",
                 AsyncMock(return_value=raw),
             )
             result = await load_forbidden_urls(db_session, tenant=TENANT)
@@ -221,7 +221,7 @@ class TestLoadForbiddenUrls:
         mock_get = AsyncMock(return_value='["x.com"]')
         with pytest.MonkeyPatch().context() as mp:
             mp.setattr(
-                "app.modules.ai.agents.safety.forbidden_urls.config_service.get_value",
+                "app.modules.ai.agents.safety.forbidden_urls.settings_service.get_value",
                 mock_get,
             )
             await load_forbidden_urls(db_session, tenant=TENANT)
@@ -231,7 +231,7 @@ class TestLoadForbiddenUrls:
     async def test_load_invalid_json_returns_empty(self, db_session) -> None:
         with pytest.MonkeyPatch().context() as mp:
             mp.setattr(
-                "app.modules.ai.agents.safety.forbidden_urls.config_service.get_value",
+                "app.modules.ai.agents.safety.forbidden_urls.settings_service.get_value",
                 AsyncMock(return_value="not json"),
             )
             result = await load_forbidden_urls(db_session, tenant=TENANT)

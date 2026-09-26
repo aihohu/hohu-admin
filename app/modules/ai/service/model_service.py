@@ -7,6 +7,7 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.tenant import PlatformContext, require_platform_permission
+from app.modules.ai.core.generation_settings import generation_settings
 from app.modules.ai.core.provider_egress import provider_egress
 from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.model_policy import TenantAiModelPolicy
@@ -132,6 +133,7 @@ class ModelService:
                 resource_type="AI提供商", error_code="AI_PROVIDER_NOT_FOUND"
             )
         provider_egress.validate_adapter_config(data.config)
+        generation_settings(data.config)
         await provider_egress.validate_destination(
             provider.provider_code, provider.base_url
         )
@@ -166,6 +168,7 @@ class ModelService:
             )
         if "config" in update_data:
             provider_egress.validate_adapter_config(update_data["config"])
+            generation_settings(update_data["config"])
         effective_override = (
             update_data["base_url"] if "base_url" in update_data else obj.base_url
         )

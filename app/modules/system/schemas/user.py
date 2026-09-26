@@ -188,6 +188,7 @@ class AssignableRoleOut(BaseModel):
 
     role_id: int
     role_code: str
+    i18n_keys: dict[str, str] | None = None
     role_name: str
     data_scope: str
 
@@ -332,6 +333,7 @@ class UserItemOut(BaseModel):
     create_time: datetime
     roles: list[str] = []
     role_names: list[str] = []
+    role_name_keys: list[str | None] = []
     dept_ids: list[str] = []
     dept_names: str = ""
     primary_dept: str | None = None

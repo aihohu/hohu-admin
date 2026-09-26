@@ -28,6 +28,7 @@ SENSITIVE_FIELDS = {
     "refreshtoken",
     "secret",
     "apikey",
+    "auth:defaultpassword",
 }
 
 # HTTP 方法到操作类型的映射

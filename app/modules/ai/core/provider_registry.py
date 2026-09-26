@@ -15,7 +15,12 @@ from app.modules.ai.core.provider_egress import (
 
 
 def create_model(
-    provider_code: str, model_name: str, api_key: str, base_url: str | None = None
+    provider_code: str,
+    model_name: str,
+    api_key: str,
+    base_url: str | None = None,
+    *,
+    model_settings: dict | None = None,
 ):
     """根据提供商配置创建 Pydantic AI Model 实例
 
@@ -41,6 +46,7 @@ def create_model(
         )
         return OpenAIChatModel(
             model_name,
+            settings=model_settings,
             provider=OpenAIProvider(openai_client=openai_client),
         )
     elif provider_code == "anthropic":
@@ -56,6 +62,7 @@ def create_model(
         )
         return AnthropicModel(
             model_name,
+            settings=model_settings,
             provider=AnthropicProvider(anthropic_client=anthropic_client),
         )
     else:
@@ -68,33 +75,6 @@ def create_model(
         )
         return OpenAIChatModel(
             model_name,
+            settings=model_settings,
             provider=OpenAIProvider(openai_client=openai_client),
         )
-
-
-def get_default_model():
-    """获取默认模型（从 .env 配置）
-
-    Returns:
-        Pydantic AI Model 实例，如果未配置 API Key 则返回 None
-    """
-    model_str = settings.AI_DEFAULT_MODEL
-    parts = model_str.split(":", 1)
-    provider_code = parts[0] if len(parts) > 1 else "openai"
-    model_name = parts[1] if len(parts) > 1 else model_str
-
-    if provider_code == "openai" and settings.AI_OPENAI_API_KEY:
-        return create_model(
-            provider_code,
-            model_name,
-            api_key=settings.AI_OPENAI_API_KEY,
-            base_url=settings.AI_OPENAI_BASE_URL or None,
-        )
-    elif provider_code == "anthropic" and settings.AI_ANTHROPIC_API_KEY:
-        return create_model(
-            provider_code,
-            model_name,
-            api_key=settings.AI_ANTHROPIC_API_KEY,
-        )
-
-    return None

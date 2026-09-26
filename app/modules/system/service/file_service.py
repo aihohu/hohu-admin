@@ -23,6 +23,11 @@ from app.core.tenant import TenantContext
 from app.core.tenant_scope import tenant_select
 from app.modules.system.models.file import File
 from app.modules.system.schemas.file import FileQuery
+from app.modules.system.service.file_policy_service import (
+    SCENARIO_CAPS,
+    file_policy_service,
+)
+from app.modules.system.settings_catalog import ALLOWED_UPLOAD_EXTENSIONS
 from app.utils.pagination import build_filters, paginate
 
 PUBLIC_IMAGE_TYPES = {
@@ -32,6 +37,15 @@ PUBLIC_IMAGE_TYPES = {
 }
 MAX_PUBLIC_IMAGE_PIXELS = 40_000_000
 PRIVATE_BUSINESS_TYPES = frozenset({"ai-chat-private", "ai-chat-image", "user-import"})
+# Browsers frequently send no usable MIME for .md (and curl users send none at
+# all); the chat parser dispatches by MIME, so private text attachments get a
+# canonical type stamped at upload time.
+PRIVATE_TEXT_MIME_BY_EXT = {
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".json": "application/json",
+}
+OPAQUE_MIME_TYPES = frozenset({None, "", "application/octet-stream"})
 
 
 class FileService:
@@ -80,8 +94,8 @@ class FileService:
             ):
                 raise ValueError("invalid uploaded image")
             with path.open("rb") as stream:
-                content = stream.read(settings.UPLOAD_MAX_SIZE + 1)
-            if len(content) > settings.UPLOAD_MAX_SIZE:
+                content = stream.read(SCENARIO_CAPS["image"] + 1)
+            if len(content) > SCENARIO_CAPS["image"]:
                 raise ValueError("oversized uploaded image")
             mime = self._validate_public_image(
                 content, ext=record.file_ext, declared_mime=record.mime_type
@@ -96,22 +110,31 @@ class FileService:
                 error_code="AI_IMAGE_NOT_AVAILABLE",
             ) from exc
 
-    def _validate_extension(self, filename: str) -> str:
+    def _validate_extension(
+        self, filename: str, allowed: frozenset[str] | None = None
+    ) -> str:
         """验证文件扩展名"""
         ext = os.path.splitext(filename)[1].lower()
-        allowed = settings.UPLOAD_ALLOWED_EXTENSIONS.split(",")
+        allowed = allowed if allowed is not None else ALLOWED_UPLOAD_EXTENSIONS
         if ext not in allowed:
             raise BusinessRuleException(
-                f"不支持的文件类型: {ext}，允许的类型: {settings.UPLOAD_ALLOWED_EXTENSIONS}"
+                f"不支持的文件类型: {ext}，允许的类型: {sorted(allowed)}"
             )
         return ext
 
-    async def _validate_size(self, upload_file: UploadFile) -> bytes:
+    async def _validate_size(
+        self, upload_file: UploadFile, max_bytes: int | None = None
+    ) -> bytes:
         """读取文件内容并验证大小"""
+        max_bytes = (
+            max_bytes
+            if max_bytes is not None
+            else min(10 * 1024 * 1024, settings.UPLOAD_HARD_MAX_BYTES)
+        )
         # 只多读 1 byte 用于判定越界，避免先把攻击者控制的超大请求完整载入内存。
-        content = await upload_file.read(settings.UPLOAD_MAX_SIZE + 1)
-        if len(content) > settings.UPLOAD_MAX_SIZE:
-            max_mb = settings.UPLOAD_MAX_SIZE / (1024 * 1024)
+        content = await upload_file.read(max_bytes + 1)
+        if len(content) > max_bytes:
+            max_mb = max_bytes / (1024 * 1024)
             raise BusinessRuleException(f"文件大小超过限制，最大允许 {max_mb:.0f}MB")
         return content
 
@@ -220,8 +243,19 @@ class FileService:
         if not upload_file.filename:
             raise BusinessRuleException("文件名不能为空")
 
-        ext = self._validate_extension(upload_file.filename)
-        content = await self._validate_size(upload_file)
+        extension = os.path.splitext(upload_file.filename or "")[1].lower()
+        scenario = (
+            "image"
+            if extension in PUBLIC_IMAGE_TYPES
+            else "ai_file"
+            if business_type == "ai-chat"
+            else "import"
+            if business_type == "user-import"
+            else "general"
+        )
+        policy = await file_policy_service.resolve(db, scenario, tenant=tenant)
+        ext = self._validate_extension(upload_file.filename, policy.extensions)
+        content = await self._validate_size(upload_file, policy.max_bytes)
         effective_business_type = self._normalize_business_type(ext, business_type)
         private = effective_business_type in PRIVATE_BUSINESS_TYPES
         mime_type = upload_file.content_type
@@ -231,6 +265,11 @@ class FileService:
                 ext=ext,
                 declared_mime=upload_file.content_type,
             )
+        elif (
+            effective_business_type == "ai-chat-private"
+            and mime_type in OPAQUE_MIME_TYPES
+        ):
+            mime_type = PRIVATE_TEXT_MIME_BY_EXT.get(ext, mime_type)
 
         file_name = str(next_id())
         relative_path, file_url, abs_dir = self._generate_file_path(
@@ -276,7 +315,7 @@ class FileService:
         """
         if business_type == "ai-chat" and ext in {".csv", ".xls", ".xlsx"}:
             return "user-import"
-        if business_type == "ai-chat" and ext == ".txt":
+        if business_type == "ai-chat" and ext in {".txt", ".md", ".json"}:
             return "ai-chat-private"
         if business_type == "ai-chat" and ext in PUBLIC_IMAGE_TYPES:
             return "ai-chat-image"
