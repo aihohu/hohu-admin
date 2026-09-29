@@ -1,0 +1,20 @@
+name: Documentation
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  public-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Check documentation publication and links
+        run: python -m tools.checks.check_docs
+      - name: Verify documentation guardrails
+        run: python -m unittest discover -s tests/tools -p test_check_docs.py

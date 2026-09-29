@@ -18,3 +18,7 @@ Dockerfile
 release.yml
 .pytest_cache/
 .mypy_cache/
+
+# Local working notes and documentation archives
+.local/
+.tmp/

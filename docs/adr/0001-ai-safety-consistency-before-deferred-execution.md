@@ -94,29 +94,6 @@ HoHu 已经形成以声明式 `@ai_tool`、Tool Registry、Gateway Executor、RB
 - 未来触发 deferred 后仍需新增任务持久化、Worker 运维、幂等/重试/取消及迁移方案；本决策只是延后，不是消除该成本。
 - 为判断触发器，需要持续保存可按逻辑请求去重的 canonical terminal event，并由其派生错误码、终态和耗时等低基数指标；缺少观测数据时不得以主观感觉宣布“必须异步化”。
 
-### 后续行动
+## 当前维护参考
 
-- [x] 修订用户导入导出 spec：冻结当前同步安全边界，并把完整异步 Phase 3 指向本 ADR 的触发条件。
-- [x] 修订工具卡嵌入 spec：落实 execution fact、持久消息投影与 streaming 临时态的职责边界。
-- [x] 修订消息编辑 spec：以 `ai_operation_log` 和来源消息关联实施 edit/regenerate 的统一副作用防线。
-- [x] ✅ 2026-08-07：完成 16 个内置 tool 的 `readonly/idempotent` 精确审计；`user.import_preview` 与 `user.export` 均为 write/non-idempotent，未知 metadata 保守降级，静态门禁 fail-closed 扫描 16/16。
-- [x] ✅ 2026-08-07：完成 AI 文件引用边界：`sys_file` 新上传绑定认证 owner/tenant，历史 owner 不按可复用 username 回填；trusted tenant 贯穿 context/HITL；受保护 loader、私有存储根、XLSX 解压预算、静态历史文件隔离和文件/导出 ownership scope 已收口。
-- [ ] 先完成稳定 run trace、source/parent 因果键、conversation guard、action/outcome finalizer 和 durability/projection handoff，再开放 edit/regenerate。
-- [ ] 在实现收尾时补充按 request key 去重的 canonical terminal observation event，由其派生错误码、耗时和终态统计，确保滚动 7/30 天窗口可查询。
-- [ ] 任一触发条件满足后，为对应能力新建 v1.5+ spec；不得直接把本 ADR 当作实现设计。
-
-## References（参考）
-
-- 核心 Gateway: [`2026-07-02-ai-tool-gateway-design.md`](../specs/2026-07-02-ai-tool-gateway-design.md) §1、§2、§6、§8、§14
-- 用户导入导出: [`2026-08-01-user-import-export-design.md`](../specs/2026-08-01-user-import-export-design.md) §2.6、§2.8、§2.10、§7、§10 Phase 3
-- 工具卡片归属: [`2026-08-05-chat-tool-card-embed-in-message.md`](../specs/2026-08-05-chat-tool-card-embed-in-message.md) §2-§3
-- 消息编辑副作用: [`2026-08-06-ai-message-edit-semantics.md`](../specs/2026-08-06-ai-message-edit-semantics.md) §2-§7
-
----
-
-## 决策记录（事后追加，原文不动）
-
-- 2026-08-07：Safety Gate + Task 35 已实施。前端 edit/regenerate 入口保持关闭，直到稳定 trace/source、conversation guard、统一 finalizer 与 durability/projection handoff 完成；本次实现不构成开放编辑功能的授权。
-- 2026-08-07：历史文件采用 fail-closed 升级策略：无法由不可变 ID 证明 owner 的 `sys_file` 不回填；旧 `uploads/file_storage` 只作认证读取 fallback，公共静态挂载拒绝 artifact namespace 与历史文档后缀。反向代理必须同步 deny，不能把 storage key 当秘密。
-- 2026-08-07：`.xls` 因当前解析栈没有受维护的 BIFF parser，从导入/AI/UI 契约移除；通用上传扩展名兼容不代表 AI 可解析。重新支持必须先有独立 parser、安全预算和正反样本。
-- 2026-08-07：部署边缘同步实施历史 artifact deny：内置/外部 Nginx 对 legacy namespace 与敏感文档后缀返回 404；API/Scheduler 共享持久化私有卷，禁止把短期 artifact 留在容器 writable layer。该部署闭环属于 Task 35，不触发 deferred/Worker Phase 3。
+本 ADR 保留作出决策时的背景、取舍和约束；其中的阶段编号是历史上下文，不代表当前交付状态。实现进度与逐日测试记录不再在 ADR 中维护。当前行为见 [AI 部署](../AI-DEPLOYMENT.md)、[AI 安全](../AI-SECURITY.md) 与 [架构决策索引](README.md)。

@@ -25,3 +25,12 @@ wheels/
 .pytest_cache
 .ruff_cache
 
+# Local working notes and documentation archives
+.local/
+.tmp/
+docs/specs/
+docs/plans/
+docs/reports/
+docs/prototype/
+docs/superpowers/
+docs/e2e-browser-test-prompt.md

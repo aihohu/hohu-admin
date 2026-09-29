@@ -18,7 +18,8 @@ app/
 ├── tasks/      # 后台任务
 └── utils/      # 无业务状态的通用工具
 tests/          # pytest 测试，结构尽量与 app/ 对齐
-docs/           # spec、计划、架构与治理文档
+docs/           # 对外维护的正式文档与 ADR
+.local/docs/    # 本地草案、计划、报告和原型（不提交）
 ```
 
 应用入口是 `app/main.py`。API 文档默认位于 `http://127.0.0.1:8000/docs`。
@@ -26,10 +27,11 @@ docs/           # spec、计划、架构与治理文档
 ## 开始工作前
 
 1. 先判断改动属于 trivial、bug fix、单模块功能还是跨模块功能。
-2. 新功能、重构、数据模型变化或跨模块改动必须先创建或更新 `docs/<feature>.md`；草案放在 `docs/specs/YYYY-MM-DD-<feature>.md`。
-3. 影响多个阶段的实现计划放在 `docs/plans/YYYY-MM-DD-<feature>.md`。
+2. 新功能、重构、数据模型变化或跨模块改动必须先编写设计；草案放在 `.local/docs/specs/YYYY-MM-DD-<feature>.md`，已落地的契约同步到 `docs/<feature>.md` 正式手册。
+3. 影响多个阶段的实现计划放在 `.local/docs/plans/YYYY-MM-DD-<feature>.md`。
 4. 开始实现前阅读与改动相关的既有 spec；架构、安全、测试细则分别见 `docs/ARCHITECTURE-GUIDELINES.md`、`docs/SECURITY.md`、`docs/TESTING-GUIDELINES.md`。
-5. 不要顺手修改任务无关文件，不要覆盖用户已有改动。
+5. 文档公开遵循 `docs/DOCUMENTATION.md`；禁止提交本地过程资料，正式手册不依赖本地文件。
+6. 不要顺手修改任务无关文件，不要覆盖用户已有改动。
 
 文档拼写修正和纯测试补充可以直接实现。根因明确的 bug fix 可以直接进入 TDD，但仍需在相关 spec 中补决策与回归记录。数据模型、状态机和跨模块功能不得跳过 spec。
 
@@ -116,7 +118,7 @@ app/modules/<module>/
 
 - Service 不提交事务；测试也不要通过隐式 commit 规避事务设计。
 - 系统表 schema 变化使用 Alembic migration。
-- 新业务表和字段演化按相关 spec 选择 `MigrationRunner.create_table` 或 `apply_upgrade`；不能用 `CREATE TABLE IF NOT EXISTS` 代替字段演化。
+- 核心业务表和字段演化使用 Alembic；不能用 `CREATE TABLE IF NOT EXISTS` 代替字段演化。Marketplace/Lowcode 当前未注册到主应用，不将其 MigrationRunner 当作通用模块开发入口。
 - 所有 SQL 使用 ORM 或参数化 `text()`；禁止 raw SQL f-string。
 - DDL 标识符无法参数化时，必须先通过严格白名单或正则校验。
 - 任何新增业务数据表必须评估 `tenant_id`、索引、唯一约束、UTC 时间列和删除策略。

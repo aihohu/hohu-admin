@@ -2,7 +2,7 @@
 
 ## 支持范围
 
-当前迁移链为 `bf244f9a8b76 → e7cc9aa08769 → 8946c48f5315`。
+当前 head 以本版本 `alembic heads` 输出为准，完整链见 [迁移目录](../alembic/versions)。手册不固定最终 head，避免后续迁移加入后误导升级。
 
 - 空数据库从基线安装；已有数据库只支持从 `v0.1.4` 的发布边界 `bf244f9a8b76` 升级。
 - 早于该边界的已发布数据库，应先使用相应旧版本代码升级到 `bf244f9a8b76`，再切换到当前版本。
@@ -11,8 +11,11 @@
 
 ## 安装与升级
 
+用户使用 hohu-cli 自动编排迁移与初始化。以下命令供维护人员在已备份、已核对目标数据库的环境中诊断，不是用户额外必做的手工步骤。
+
 ```bash
 alembic current
+alembic heads
 alembic upgrade head
 alembic current
 ```

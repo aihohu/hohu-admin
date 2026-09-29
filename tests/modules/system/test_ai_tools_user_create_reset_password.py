@@ -1,6 +1,6 @@
 """AI user.create / user.reset_password 回归测试。
 
-按 docs/specs/2026-08-11-ai-user-management-tools.md：敏感密码只由后端
+按 docs/AI-SECURITY.md：敏感密码只由后端
 私有配置生成，不进入 tool schema、ToolResult 或确认摘要。
 """
 

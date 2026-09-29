@@ -1,36 +1,32 @@
-# 部署脚本与基础数据统一
+# 初始化与部署脚本
 
-状态：✅ Plan scripts-deployment 已完成（2026-09-24）。
+用户统一使用 hohu-cli 的 `hohu init`、`hohu deploy init` 和 `hohu deploy`。本目录是 CLI 调用的内部实现，不要求用户逐个执行脚本。
 
-## 目标与边界
+## 执行顺序
 
-v0.1.5 以 hohu-cli 为用户配置、部署、升级入口，CLI 与后端同步更新，不保留旧脚本兼容包装。保留已完成的核心多租户行为（见 MULTI-TENANCY.md），不扩大 Marketplace/Lowcode hosted 能力。
+本地初始化入口为 `scripts/init.py`；部署先运行 `alembic upgrade head`，成功后调用 `python -m scripts.init_db`，再启动应用。任一步失败即停止，不能通过清库或 `stamp head` 跳过错误。
 
-## 设计
+统一种子在一个事务内补齐默认租户、菜单、设置、内置 Agent/Prompt 以及首次管理员。首次默认租户安装需要 `HOHU_ADMIN_PASSWORD`，由 CLI 生成并写入部署配置；初始化不交互、不清库、不打印密码。
 
-- `scripts/init.py` 负责本地环境准备、迁移和调用统一数据入口；`scripts/init_db.py` 在一个种子事务中完成默认租户、菜单、配置、内置 Agent/Prompt 和首次管理员授权。后者无 input、不清库、不打印密码。
-- `sync_menus.py` 负责菜单同步，`init_db.py` 不再维护菜单定义。System 模块保存唯一静态菜单目录，默认安装与 hosted 开通使用显式能力集合，禁止从可编辑的租户 0 数据复制到新租户。
-- 首次默认租户初始化需要 HOHU_ADMIN_PASSWORD；已有默认用户时不再创建管理员，允许管理员改名。部署重复运行保留密码、自定义配置、角色授权及禁用状态。
-- 内置设置由 `seed_settings.py` 按 sys_setting 的 tenant_id/setting_key 补缺；自定义参数保存在独立 sys_config 表，不由种子生成。fresh 显式启用 file.parse，upgrade 补缺保持为空。Agent 及 Prompt 统一编排，保留部署方自定义内容。拆表迁移和独立菜单见 [SYSTEM-SETTINGS.md](SYSTEM-SETTINGS.md)。
-- 已 bootstrap 的其他租户同步其 hosted 菜单；prepared 且未 bootstrap 的租户不自动开通。数据库结构仍由 Alembic 负责，种子不能 stamp 或替代迁移。
-- 平台管理和发布审计移至 tools/ops；静态检查移至 tools/checks；demo 移至 tools/demo；隔离发布验收及 worker 移至 tests/release。所有调用、测试、镜像和维护文档同步更新。
-- CLI Compose 使用失败即停的单次 migrator，迁移成功后始终运行统一种子，再启动应用；自动生成初始管理员密码写入部署 .env，日志只提示存储位置。无需 --init 选择首次安装。
+## 重复执行与职责
+
+- 重跑保留已有密码、改名的管理员、自定义设置和 Prompt、角色授权及禁用状态，只按规则补缺。
+- 菜单定义唯一来源为 [menu_seed.py](../app/modules/system/menu_seed.py)，由 `sync_menus.py` 同步；不从默认租户可编辑的数据复制到新租户。
+- hosted 菜单按显式能力集合同步，只处理已 bootstrap 的租户，不自动开通 prepared 租户。
+- `seed_settings.py` 补齐 `sys_setting` 的内置设置；`sys_config` 自定义参数不由种子生成。
+- `seed_ai_agents.py` 同步内置 Agent 与默认 Prompt，保留部署方自定义内容。工具启用的 fresh/upgrade 默认值有区别，不覆盖显式禁用状态。
+- 数据库结构由 Alembic 负责，迁移和数据初始化不能互相代替。
+
+脚本清单见 [scripts/README.md](../scripts/README.md)，设置行为见 [系统设置](SYSTEM-SETTINGS.md)，支持的升级路径见 [数据库迁移](DATABASE-MIGRATIONS.md)。
+
+## 维护与验证
+
+平台运维在 `tools/ops`，静态检查在 `tools/checks`，可选演示在 `tools/demo`，测试与发布验收在 `tests/`。部署不会自动执行演示或测试数据脚本。
+
+修改初始化时验证首次安装、幂等重跑、失败回滚、密码保护、自定义内容保留以及租户隔离。回归入口：[tests/scripts](../tests/scripts)。CLI 与后端需同步升级，不维护多份旧初始化逻辑。
 
 ## 决策记录
 
-1. **唯一菜单目录与显式 hosted 集合** — 消除 fresh、sync、hosted 三份定义漂移，同时保持既有租户能力边界。**反例**: 新租户从默认租户可编辑菜单复制，或把 Marketplace 权限直接发给 hosted。**回归**: tests/scripts/test_deployment_seed.py、tests/scripts/test_init_db_seed.py。
-2. **无交互且无清库的统一种子事务** — CLI 只需处理退出码，重跑不会丢失数据或重置密码。**反例**: input 在容器中 EOF，或 TRUNCATE 后下一阶段失败。**回归**: tests/scripts/test_deployment_seed.py、tests/scripts/test_init_migration_failure.py。
-3. **CLI 与后端同步升级** — 当前没有真实用户，无需旧路径兼容层；保留明确的内部入口即可。**反例**: 同一逻辑继续保留多个独立实现。**回归**: hohu-cli/tests/test_deployment_bootstrap.py。
-
-## 验收
-
-- 首次安装具备全部基础配置与内置 Prompt；重复执行不重复写入、不扩大已有角色授权。
-- 跨租户同名菜单/配置不互相影响，hosted bootstrap 仍使用相同不可变定义。
-- 迁移或种子失败阻断服务启动；密码不进入参数和日志。
-- 后端及 CLI Ruff、定向测试与全量测试；后端覆盖率至少 70%。
-
-### 验证记录（2026-09-24）
-
-- 后端全量测试：2861 passed，覆盖率 79.76%；CLI 全量测试：40 passed。
-- 后端及 CLI Ruff 检查与格式检查通过；33 个 AI 工具通过 13 项静态检查；git diff --check 通过。
-- 已验证初始化幂等、事务回滚、租户隔离和部署失败阻断；未执行实际 Docker 部署及独立环境发布验收。
+1. **唯一菜单目录** — fresh、同步与 hosted 初始化使用同一维护来源和显式能力集合。**反例**: 从可编辑的默认租户菜单复制权限。**回归**: tests/scripts/test_deployment_seed.py。
+2. **无交互且无清库的统一事务** — CLI 根据退出码可靠阻断失败，重复运行不重置用户数据。**反例**: 容器中的 input 阻塞，或清库后初始化中途失败。**回归**: tests/scripts/test_init_db_seed.py、tests/scripts/test_init_migration_failure.py。
+3. **空环境变量的注释独占一行** — dotenv 必须把无密码 Redis 配置解析为空字符串。**反例**: `REDIS_PASSWORD=  # comment` 将注释解析为密码，破坏连接 URL。**回归**: tests/tools/test_env_example.py；CLI 独立项目初始化与登录验收。✅ Plan redis-template 已完成（2026-09-29）。

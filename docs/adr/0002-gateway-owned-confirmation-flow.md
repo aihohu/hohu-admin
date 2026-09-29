@@ -116,32 +116,6 @@ Gateway 在 action 进入 `pending_confirmation` 后发出结构化 `confirmatio
 - LLM 仍负责区分用户要“只看”还是“准备执行”；误判可能多弹一次确认或少进入一次确认，但不会越过用户批准产生执行。
 - 该协议只解决 action 级 yes/no，不满足逐行或多级业务审核。
 
-### 后续行动
+## 当前维护参考
 
-- [x] 修订 Gateway spec：定义 metadata、`PreparedAction` schema、状态机、事件、API、权限复验、幂等和兼容策略（2026-08-07）。
-- [x] 修订用户导入导出 spec：删除 Prompt 驱动 transition，冻结导入参数，并将 `user.import_execute` 改为 Gateway-only（2026-08-07）。
-- [x] 修订工具卡嵌入 spec：定义 preview/pending presentation 与 reload 恢复（2026-08-07）。
-- [x] 修订消息编辑 spec：定义 source message/revision 绑定及失效规则（2026-08-07）。
-- [x] 以用户导入完成首个 `prepared + hitl + inline` 纵向切片和安全/E2E 回归，再迁移其他适用 tool（2026-08-11）。
-- [x] 完成 2026-08-11 代码纠偏：所有新 direct HITL 也持久化同一 action；`requested_outcome` 保持必填；ConfirmationPresentation 统一为有序 fields DTO；后端 867 个 AI pytest 与前端 43 Vitest/typecheck/build 通过。
-- [x] 在本地 dev stack 使用真实 Chrome 实跑确定性 Playwright 4/4：真实登录和页面交互覆盖自动确认、reload pending 恢复、preview-only 无 action 与用户导出确认国际化；AI chat/detail/confirm 使用受控 route fixture，真实模型/provider smoke 仍独立验收（2026-08-11）。
-- [x] 纠正 prepared-action E2E 终态 fixture：持久 assistant 必须同时覆盖 `sourceToolCallId` 与执行 `toolCallId`，成功断言使用唯一消息类型定位；全套浏览器测试复用一次登录状态，避免认证波动伪装成多个 AI 场景失败（2026-08-12）。
-- [ ] Task 36 容量观测继续后移；本决策不授权 ARQ/Worker、第二实时通道或行级 HITL。
-
-## References（参考）
-
-- 相关 ADR: [ADR-0001](./0001-ai-safety-consistency-before-deferred-execution.md)
-- Gateway: [`2026-07-02-ai-tool-gateway-design.md`](../specs/2026-07-02-ai-tool-gateway-design.md) §5.3、§8
-- 用户导入导出: [`2026-08-01-user-import-export-design.md`](../specs/2026-08-01-user-import-export-design.md) §2.14、§2.19、Task 26a、Task 29
-- 工具卡片: [`2026-08-05-chat-tool-card-embed-in-message.md`](../specs/2026-08-05-chat-tool-card-embed-in-message.md) §2.7-§2.10
-- 消息编辑: [`2026-08-06-ai-message-edit-semantics.md`](../specs/2026-08-06-ai-message-edit-semantics.md) D.1-D.4
-
----
-
-## 决策记录（事后追加，原文不动）
-
-- **2026-08-07**: ADR 初稿建立，状态为 Proposed；待四份关联 spec 完成协议收敛和评审后再转 Accepted。
-- **2026-08-07**: 四份关联 spec 已完成协议收敛；ADR 继续保持 Proposed，待架构评审确认后转 Accepted。
-- **2026-08-07**: 架构评审确认，状态转为 Accepted；后续实现按 Task 35a 分阶段落地。
-- **2026-08-11**: 真实 Chrome 确定性 Playwright 4/4 通过，关闭 Task 35a 浏览器验收 gap；真实模型/provider 纵向 smoke 仍作为独立发布验收，不由 fixture E2E 冒充。
-- **2026-08-12**: 确定性 E2E fixture 与当前逐消息工具卡契约重新对齐：prepared 终态同时持久 preview/execute 两个 tool call；测试不得用笼统 `.n-message` 选择器或逐用例重复 UI 登录。**反例**: 只伪造 execute 终态会让前端正确报告投影未同步，却被测试误判为执行失败；每个用例重新登录会把一次认证抖动放大成多个业务失败。**回归**: `tests/e2e/prepared-action-confirmation.spec.ts` 全部通过且成功场景无持久化同步警告。
+本 ADR 保留作出决策时的背景、取舍和约束；其中的阶段编号是历史上下文，不代表当前交付状态。实现进度与逐日测试记录不再在 ADR 中维护。当前行为见 [AI 部署](../AI-DEPLOYMENT.md)、[AI 安全](../AI-SECURITY.md) 与 [架构决策索引](README.md)。

@@ -1,5 +1,7 @@
 # HoHu Admin
 
+Project documentation: [maintained guides](docs/README.md).
+
 <p align="center">
   <b>AI-driven modern full-stack admin platform · Backend</b>
 </p>
@@ -159,13 +161,10 @@ All API responses follow a unified envelope:
 
 ### Adding a New Module
 
-1. Create `app/modules/<name>/` with `api/`, `service/`, `models/`, `schemas/`
-2. Define SQLAlchemy model with `Mapped[T]` and Snowflake PK (`default=next_id`)
-3. Create Pydantic schemas with `alias_generator=to_camel`
-4. Implement service logic (raise domain exceptions, never commit)
-5. Wire API endpoints (call service, `await db.commit()`, return `ResponseModel`)
-6. Register router in `app/main.py`
-7. Run `alembic revision --autogenerate -m "add <name>" && alembic upgrade head`
+Follow the [module development guide](docs/MODULE-DEVELOPMENT-GUIDE.md) and
+[architecture contracts](docs/ARCHITECTURE-GUIDELINES.md). New endpoints need
+explicit permissions, trusted tenant scope and regression coverage; authentication
+alone does not authorize access to every record.
 
 ### Code Quality
 
