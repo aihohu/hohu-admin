@@ -1,11 +1,14 @@
 import json
 from argparse import Namespace
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from tests.release import qualify_tenant_hosted_release as qualification
+from tests.release import tenant_release_qualification_worker as worker
 
 BUILD_SHA = "a" * 40
 
@@ -100,24 +103,218 @@ def _reports(profile: str = "ci") -> dict[str, dict]:
 
 def _boundary() -> dict:
     return {
-        "nonTargetActivationStatus": 400,
-        "nonTargetActivationErrorCode": "PLATFORM_TENANT_CANARY_NOT_ALLOWED",
-        "nonTargetAccessStatus": 401,
-        "nonTargetAccessErrorCode": "TENANT_HOSTED_ACCESS_DISABLED",
+        "controlActivationStatus": 200,
+        "nonTargetActivationStatus": 403,
+        "nonTargetActivationErrorCode": "SYSTEM_ADMIN_ONLY",
+        "nonTargetAccessStatus": 200,
+        "controlDisabledAccessStatus": 401,
+        "controlDisabledAccessErrorCode": "TOKEN_EXPIRED",
         "nonTargetStateUnchanged": True,
         "rollbackAccessStatus": 401,
         "rollbackAccessErrorCode": "TENANT_HOSTED_ACCESS_DISABLED",
         "rollbackStateUnchanged": True,
-        "platformAuditPairCount": 3,
+        "platformAuditPairCount": 4,
         "finalActiveNonDefaultCount": 0,
         "targetFinalLifecycleState": "disabled",
-        "nonTargetFinalLifecycleState": "prepared",
+        "nonTargetFinalLifecycleState": "disabled",
         "redisDbSize": 0,
     }
 
 
 def _hashes() -> dict[str, str]:
     return {name: f"{index:x}" * 64 for index, name in enumerate(_reports(), 1)}
+
+
+def test_management_login_uses_default_tenant_user_session() -> None:
+    requests = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path != "/auth/login":
+            return httpx.Response(401, json={"code": 401})
+        return httpx.Response(200, json={"code": 200, "data": {"token": "session"}})
+
+    with httpx.Client(
+        base_url="http://test", transport=httpx.MockTransport(handle)
+    ) as client:
+        token = qualification._tenant_login(
+            client,
+            username="renamed-admin",
+            password="test-only-password",
+            failure_code="SYSTEM_ADMIN_LOGIN_FAILED",
+        )
+
+    assert token == "session"
+    assert json.loads(requests[0].content) == {
+        "loginType": "password",
+        "userName": "renamed-admin",
+        "password": "test-only-password",
+    }
+
+
+def test_http_failure_logs_status_and_code_without_response_secrets(caplog) -> None:
+    response = httpx.Response(
+        401,
+        json={
+            "code": 401,
+            "errorCode": "TOKEN_EXPIRED",
+            "msg": "private-host:secret",
+            "data": {"token": "private-token"},
+        },
+    )
+    with pytest.raises(qualification.QualificationFailure, match="ACTIVATION_FAILED"):
+        qualification._require_success(response, failure_code="ACTIVATION_FAILED")
+    assert "401" in caplog.text
+    assert "TOKEN_EXPIRED" in caplog.text
+    assert "private" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "updates,expected",
+    [
+        ({"nonTargetActivationStatus": 200}, "NON_TARGET_ACTIVATION_NOT_BLOCKED"),
+        ({"controlActivationStatus": 400}, "CONTROL_ACTIVATION_FAILED"),
+        ({"nonTargetAccessStatus": 403}, "CONTROL_ACCESS_FAILED"),
+        ({"controlDisabledAccessStatus": 200}, "CONTROL_DISABLE_ACCESS_NOT_REVOKED"),
+    ],
+)
+def test_current_tenant_authority_boundaries_fail_closed(updates, expected) -> None:
+    boundary = _boundary() | updates
+    result = qualification.build_qualification_report(
+        build_sha=BUILD_SHA,
+        profile="ci",
+        reports=_reports(),
+        evidence_hashes=_hashes(),
+        boundary=boundary,
+    )
+    assert result["qualified"] is False
+    assert expected in result["failureCodes"]
+
+
+def _audit_events() -> list[dict]:
+    events = []
+    for index, (suffix, target) in enumerate(
+        [
+            ("activate-target", "target"),
+            ("activate-control", "control"),
+            ("disable-control", "control"),
+            ("disable-target", "target"),
+        ],
+        start=1,
+    ):
+        common = {
+            "correlationId": f"plan7c-qualification-{suffix}",
+            "targetKind": target,
+            "auditScope": "platform",
+            "method": "POST",
+        }
+        events.extend(
+            [
+                common | {"eventType": "authorized", "auditId": str(index)},
+                common
+                | {
+                    "eventType": "completed",
+                    "statusCode": 200,
+                    "authorizationAuditId": str(index),
+                },
+            ]
+        )
+    return events
+
+
+def test_system_audit_requires_exact_authorization_completion_lineage() -> None:
+    events = _audit_events()
+    assert qualification._audit_pair_count({"auditEvents": events}) == 4
+    events[1]["authorizationAuditId"] = "wrong-authorization"
+    assert qualification._audit_pair_count({"auditEvents": events}) == 3
+    events = _audit_events()
+    events.append(events[1].copy())
+    assert qualification._audit_pair_count({"auditEvents": events}) == 3
+    events = _audit_events()
+    events[1]["auditScope"] = "tenant"
+    assert qualification._audit_pair_count({"auditEvents": events}) == 3
+
+
+def test_worker_projects_system_audit_without_identity_or_request_payload() -> None:
+    event = SimpleNamespace(
+        operation_log_id=17,
+        audit_scope="platform",
+        action="completed",
+        status_code=200,
+        method="POST",
+        request_params=json.dumps(
+            {
+                "correlation_id": "plan7c-qualification-activate-target",
+                "authorization_audit_id": 16,
+                "target_tenant_id": 22,
+                "reason": "private reason",
+                "changes": {"secret": "private-value"},
+            }
+        ),
+    )
+    result = worker._project_system_audit(
+        event, target_tenant_id=22, control_tenant_id=33
+    )
+    assert result["authorizationAuditId"] == "16"
+    assert result["auditId"] == "17"
+    assert result["targetKind"] == "target"
+    assert "private" not in json.dumps(result)
+    event.request_params = "invalid json"
+    assert (
+        worker._project_system_audit(event, target_tenant_id=22, control_tenant_id=33)
+        is None
+    )
+
+
+async def test_cache_cleanup_preserves_unknown_and_persistent_keys(
+    monkeypatch, tmp_path: Path
+) -> None:
+    throttle = "request-limit:api:" + "a" * 64
+    settings_key = "cache:tenant:0:setting:request_limits"
+    persistent = "request-limit:login:" + "b" * 64
+    unknown = "tenant:22:unexpected-state"
+
+    async def scan_iter():
+        for key in (throttle, settings_key, persistent, unknown):
+            yield key
+
+    client = MagicMock()
+    client.scan_iter.side_effect = scan_iter
+    client.ttl = AsyncMock(side_effect=[45, 25, -1])
+    client.delete = AsyncMock(return_value=1)
+    client.dbsize = AsyncMock(return_value=2)
+    monkeypatch.setattr(worker, "redis_client", client)
+    monkeypatch.setenv("HOHU_RELEASE_QUALIFICATION_EPHEMERAL", "true")
+    monkeypatch.setattr(worker.settings, "ENV", "test")
+    monkeypatch.setattr(worker.settings, "REDIS_DB", 9)
+    output = tmp_path / "cleanup.json"
+    await worker._cleanup_cache(output)
+    assert [call.args[0] for call in client.delete.await_args_list] == [
+        throttle,
+        settings_key,
+    ]
+    assert json.loads(output.read_text(encoding="utf-8"))["redisDbSize"] == 2
+
+
+@pytest.mark.parametrize(
+    "ephemeral,env,redis_db",
+    [
+        ("false", "test", 9),
+        ("true", "prod", 9),
+        ("true", "test", 0),
+    ],
+)
+async def test_cache_cleanup_refuses_non_disposable_environment(
+    monkeypatch, tmp_path: Path, ephemeral, env, redis_db
+) -> None:
+    client = MagicMock()
+    monkeypatch.setattr(worker, "redis_client", client)
+    monkeypatch.setenv("HOHU_RELEASE_QUALIFICATION_EPHEMERAL", ephemeral)
+    monkeypatch.setattr(worker.settings, "ENV", env)
+    monkeypatch.setattr(worker.settings, "REDIS_DB", redis_db)
+    with pytest.raises(ValueError, match="ephemeral"):
+        await worker._cleanup_cache(tmp_path / "cleanup.json")
+    client.scan_iter.assert_not_called()
 
 
 def test_healthy_ci_evidence_qualifies_without_identity_or_secret_projection() -> None:
@@ -480,6 +677,11 @@ def test_final_snapshot_runs_only_after_api_shutdown(
     runtime.stop.side_effect = lambda: events.append("api-stop")
     monkeypatch.setattr(
         qualification,
+        "_worker_json",
+        lambda *_args, **_kwargs: events.append("cache-cleanup") or {},
+    )
+    monkeypatch.setattr(
+        qualification,
         "_snapshot",
         lambda **_kwargs: events.append("snapshot") or {"redisDbSize": 0},
     )
@@ -492,7 +694,7 @@ def test_final_snapshot_runs_only_after_api_shutdown(
         environment={},
     )
 
-    assert events == ["api-stop", "snapshot"]
+    assert events == ["api-stop", "cache-cleanup", "snapshot"]
     assert result == {"redisDbSize": 0}
 
 

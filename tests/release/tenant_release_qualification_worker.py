@@ -12,13 +12,17 @@ import argparse
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 
+from app.core.config import settings
 from app.core.id_generator import next_id
+from app.core.rbac import is_system_admin
 from app.core.redis import redis_client
-from app.core.security import create_access_token, get_password_hash
+from app.core.security import create_access_token
 from app.core.tenant import PlatformContext
 from app.db.session import AsyncSessionLocal, engine
 from app.modules.ai.models.model import AiModel
@@ -26,9 +30,7 @@ from app.modules.ai.models.model_policy import TenantAiModelPolicy
 from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
 from app.modules.platform.constants import (
-    PLATFORM_TENANT_ACTIVATE,
     PLATFORM_TENANT_BOOTSTRAP,
-    PLATFORM_TENANT_READ,
     PLATFORM_TENANT_WRITE,
 )
 from app.modules.platform.models import PlatformAuditLog, PlatformPrincipal
@@ -46,7 +48,9 @@ _CORRELATION_PREFIX = "plan7c-qualification-"
 
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("stage", choices=("fresh", "seed", "snapshot", "token"))
+    parser.add_argument(
+        "stage", choices=("fresh", "seed", "snapshot", "token", "cleanup-cache")
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--target-tenant-id", type=int)
     parser.add_argument("--control-tenant-id", type=int)
@@ -121,28 +125,18 @@ async def _fresh(output: Path | None) -> None:
 
 
 async def _seed(output: Path | None) -> None:
-    platform_password = os.environ.get(
-        "HOHU_RELEASE_QUALIFICATION_PLATFORM_PASSWORD", ""
-    )
     tenant_password = os.environ.get("HOHU_RELEASE_QUALIFICATION_TENANT_PASSWORD", "")
-    if len(platform_password) < 12 or len(tenant_password) < 8:
+    if len(tenant_password) < 8:
         raise ValueError("qualification passwords are missing")
 
     async with AsyncSessionLocal() as session:
-        principal = PlatformPrincipal(
-            principal_name="release_qualification",
-            display_name="Automated Release Qualification",
-            hashed_password=get_password_hash(platform_password),
-            permissions=sorted(
-                {
-                    PLATFORM_TENANT_READ,
-                    PLATFORM_TENANT_WRITE,
-                    PLATFORM_TENANT_BOOTSTRAP,
-                    PLATFORM_TENANT_ACTIVATE,
-                }
-            ),
+        system_admin = await session.scalar(
+            select(User)
+            .where(User.tenant_id == 0, User.user_name == "admin")
+            .options(selectinload(User.roles))
         )
-        session.add(principal)
+        if system_admin is None or not is_system_admin(system_admin):
+            raise ValueError("seeded system administrator is missing")
         provider = AiProvider(
             provider_code="release_qualification",
             name="Release Qualification Provider",
@@ -179,7 +173,7 @@ async def _seed(output: Path | None) -> None:
                 tenant_name=name,
                 idempotency_key=f"plan7c-prepare-idempotency-000{index}",
                 platform=_platform(
-                    principal_id=principal.principal_id,
+                    principal_id=system_admin.user_id,
                     permission=PLATFORM_TENANT_WRITE,
                     tenant_id=tenant_id,
                 ),
@@ -191,7 +185,7 @@ async def _seed(output: Path | None) -> None:
                 admin_password=tenant_password,
                 idempotency_key=f"plan7c-bootstrap-idempotency-000{index}",
                 platform=_platform(
-                    principal_id=principal.principal_id,
+                    principal_id=system_admin.user_id,
                     permission=PLATFORM_TENANT_BOOTSTRAP,
                     tenant_id=tenant_id,
                 ),
@@ -213,7 +207,7 @@ async def _seed(output: Path | None) -> None:
         _write_json(
             output,
             {
-                "principalName": principal.principal_name,
+                "systemAdminUsername": system_admin.user_name,
                 "target": {
                     "tenantId": str(tenants[0].tenant_id),
                     "tenantCode": tenants[0].tenant_code,
@@ -297,30 +291,29 @@ async def _snapshot(
         events = (
             (
                 await session.execute(
-                    select(PlatformAuditLog)
+                    select(SysOperationLog)
                     .where(
-                        PlatformAuditLog.correlation_id.startswith(_CORRELATION_PREFIX)
+                        SysOperationLog.tenant_id == 0,
+                        SysOperationLog.audit_scope == "platform",
+                        SysOperationLog.path.startswith("/platform/tenants/"),
                     )
-                    .order_by(PlatformAuditLog.created_at, PlatformAuditLog.audit_id)
+                    .order_by(SysOperationLog.operation_log_id)
                 )
             )
             .scalars()
             .all()
         )
     audit_events = [
-        {
-            "eventType": event.event_type,
-            "statusCode": event.status_code,
-            "correlationId": event.correlation_id,
-            "targetKind": (
-                "target"
-                if event.target_tenant_id == target_tenant_id
-                else "control"
-                if event.target_tenant_id == control_tenant_id
-                else "other"
-            ),
-        }
+        projection
         for event in events
+        if (
+            projection := _project_system_audit(
+                event,
+                target_tenant_id=target_tenant_id,
+                control_tenant_id=control_tenant_id,
+            )
+        )
+        is not None
     ]
     _write_json(
         output,
@@ -331,6 +324,61 @@ async def _snapshot(
             "redisDbSize": int(await redis_client.dbsize()),
             "auditEvents": audit_events,
         },
+    )
+
+
+def _project_system_audit(
+    event, *, target_tenant_id: int, control_tenant_id: int
+) -> dict | None:
+    try:
+        summary = json.loads(event.request_params or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(summary, dict):
+        return None
+    correlation = summary.get("correlation_id")
+    if not isinstance(correlation, str) or not correlation.startswith(
+        _CORRELATION_PREFIX
+    ):
+        return None
+    target = summary.get("target_tenant_id")
+    authorization_id = summary.get("authorization_audit_id")
+    return {
+        "auditScope": event.audit_scope,
+        "auditId": str(event.operation_log_id),
+        "authorizationAuditId": str(authorization_id)
+        if type(authorization_id) is int
+        else None,
+        "eventType": event.action,
+        "statusCode": event.status_code,
+        "method": event.method,
+        "correlationId": correlation,
+        "targetKind": "target"
+        if target == target_tenant_id
+        else "control"
+        if target == control_tenant_id
+        else "other",
+    }
+
+
+async def _cleanup_cache(output: Path | None) -> None:
+    """Remove only expiring runtime caches from the declared disposable Redis DB."""
+    if (
+        os.environ.get("HOHU_RELEASE_QUALIFICATION_EPHEMERAL", "").lower() != "true"
+        or settings.ENV != "test"
+        or settings.REDIS_DB <= 0
+    ):
+        raise ValueError("cache cleanup requires an ephemeral test environment")
+    deleted = 0
+    async for key in redis_client.scan_iter():
+        if (
+            key == "cache:tenant:0:setting:request_limits"
+            or re.fullmatch(r"request-limit:(?:api|login|register):[0-9a-f]{64}", key)
+        ) and await redis_client.ttl(key) > 0:
+            deleted += int(await redis_client.delete(key))
+    _write_json(
+        output,
+        {"deletedKeyCount": deleted, "redisDbSize": int(await redis_client.dbsize())},
     )
 
 
@@ -370,6 +418,8 @@ async def _main() -> None:
                 arguments.target_tenant_id,
                 arguments.control_tenant_id,
             )
+        elif arguments.stage == "cleanup-cache":
+            await _cleanup_cache(arguments.output)
         else:
             await _token(
                 arguments.tenant_id,

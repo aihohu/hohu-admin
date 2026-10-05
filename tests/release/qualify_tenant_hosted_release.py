@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -20,6 +21,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 RISK_EXIT_CODE = 2
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -326,17 +329,26 @@ def build_qualification_report(
     )
 
     check(
+        "control_activation",
+        boundary.get("controlActivationStatus") == 200,
+        "CONTROL_ACTIVATION_FAILED",
+    )
+    check(
         "non_target_activation",
-        boundary.get("nonTargetActivationStatus") == 400
-        and boundary.get("nonTargetActivationErrorCode")
-        == "PLATFORM_TENANT_CANARY_NOT_ALLOWED",
+        boundary.get("nonTargetActivationStatus") == 403
+        and boundary.get("nonTargetActivationErrorCode") == "SYSTEM_ADMIN_ONLY",
         "NON_TARGET_ACTIVATION_NOT_BLOCKED",
     )
     check(
-        "non_target_access",
-        boundary.get("nonTargetAccessStatus") == 401
-        and boundary.get("nonTargetAccessErrorCode") == "TENANT_HOSTED_ACCESS_DISABLED",
-        "NON_TARGET_ACCESS_NOT_BLOCKED",
+        "control_access",
+        boundary.get("nonTargetAccessStatus") == 200,
+        "CONTROL_ACCESS_FAILED",
+    )
+    check(
+        "control_disable_access",
+        boundary.get("controlDisabledAccessStatus") == 401
+        and boundary.get("controlDisabledAccessErrorCode") == "TOKEN_EXPIRED",
+        "CONTROL_DISABLE_ACCESS_NOT_REVOKED",
     )
     check(
         "non_target_side_effects",
@@ -352,14 +364,14 @@ def build_qualification_report(
     )
     check(
         "platform_audit_lineage",
-        boundary.get("platformAuditPairCount") == 3,
+        boundary.get("platformAuditPairCount") == 4,
         "PLATFORM_AUDIT_LINEAGE_INCOMPLETE",
     )
     check(
         "final_state",
         boundary.get("finalActiveNonDefaultCount") == 0
         and boundary.get("targetFinalLifecycleState") == "disabled"
-        and boundary.get("nonTargetFinalLifecycleState") == "prepared"
+        and boundary.get("nonTargetFinalLifecycleState") == "disabled"
         and boundary.get("redisDbSize") == 0,
         "FINAL_STATE_UNSAFE",
     )
@@ -393,8 +405,12 @@ def build_qualification_report(
         },
         "boundary": {
             "nonTargetActivationBlocked": boundary.get("nonTargetActivationStatus")
-            == 400,
-            "nonTargetAccessBlocked": boundary.get("nonTargetAccessStatus") == 401,
+            == 403,
+            "controlActivationSucceeded": boundary.get("controlActivationStatus")
+            == 200,
+            "controlAccessSucceeded": boundary.get("nonTargetAccessStatus") == 200,
+            "controlDisableAccessRevoked": boundary.get("controlDisabledAccessStatus")
+            == 401,
             "nonTargetStateUnchanged": boundary.get("nonTargetStateUnchanged"),
             "rollbackAccessRevoked": boundary.get("rollbackAccessStatus") == 401,
             "rollbackStateUnchanged": boundary.get("rollbackStateUnchanged"),
@@ -705,6 +721,16 @@ def _final_snapshot_after_shutdown(
 ) -> dict:
     """Evaluate zero-residue state only after graceful API shutdown."""
     runtime.stop()
+    _worker_json(
+        "cleanup-cache",
+        output=output.with_name("cache-cleanup.json"),
+        environment=environment
+        | {
+            "ENV": "test",
+            "TENANT_MODE": "single",
+            "TENANT_HOSTED_LOGIN_ENABLED": "false",
+        },
+    )
     return _snapshot(
         output=output,
         target_tenant_id=target_tenant_id,
@@ -723,23 +749,53 @@ def _response_json(response: httpx.Response) -> dict:
     return body
 
 
-def _platform_login(client: httpx.Client, *, principal_name: str, password: str) -> str:
-    response = client.post(
-        "/platform/auth/login",
-        json={"principalName": principal_name, "password": password},
-    )
+def _require_success(response: httpx.Response, *, failure_code: str) -> dict:
     body = _response_json(response)
+    if response.status_code != 200 or body.get("code") != 200:
+        error_code = body.get("errorCode")
+        safe_error_code = (
+            error_code
+            if isinstance(error_code, str)
+            and re.fullmatch(r"[A-Z][A-Z0-9_]{0,79}", error_code)
+            else "UNSPECIFIED"
+        )
+        logger.error(
+            "Hosted qualification HTTP check failed: %s (HTTP %s, errorCode=%s)",
+            failure_code,
+            response.status_code,
+            safe_error_code,
+        )
+        raise QualificationFailure(failure_code)
+    return body
+
+
+def _tenant_login(
+    client: httpx.Client,
+    *,
+    username: str,
+    password: str,
+    failure_code: str,
+    tenant_code: str | None = None,
+) -> str:
+    credentials = {
+        "loginType": "password",
+        "userName": username,
+        "password": password,
+    }
+    if tenant_code is not None:
+        credentials["tenantCode"] = tenant_code
+    response = client.post(
+        "/auth/login",
+        json=credentials,
+    )
+    body = _require_success(response, failure_code=failure_code)
     value = (
         body.get("data", {}).get("token")
         if isinstance(body.get("data"), dict)
         else None
     )
-    if (
-        response.status_code != 200
-        or body.get("code") != 200
-        or not isinstance(value, str)
-    ):
-        raise QualificationFailure("PLATFORM_LOGIN_FAILED")
+    if not isinstance(value, str) or not value:
+        raise QualificationFailure(failure_code)
     return value
 
 
@@ -818,27 +874,42 @@ def _run_monitor(
 
 def _audit_pair_count(snapshot: dict) -> int:
     expected = {
-        "plan7c-qualification-activate-control": 400,
-        "plan7c-qualification-activate-target": 200,
-        "plan7c-qualification-disable-target": 200,
+        "plan7c-qualification-activate-control": "control",
+        "plan7c-qualification-activate-target": "target",
+        "plan7c-qualification-disable-control": "control",
+        "plan7c-qualification-disable-target": "target",
     }
     pairs = 0
     events = snapshot.get("auditEvents", [])
-    for correlation_id, completion_status in expected.items():
+    for correlation_id, target_kind in expected.items():
         matching = [
             event for event in events if event.get("correlationId") == correlation_id
         ]
         if len(matching) != 2:
             continue
         event_types = {event.get("eventType") for event in matching}
+        authorized = next(
+            (event for event in matching if event.get("eventType") == "authorized"),
+            None,
+        )
         completed = next(
             (event for event in matching if event.get("eventType") == "completed"),
             None,
         )
         if (
-            event_types == {"authorized", "completed"}
+            len(matching) == 2
+            and event_types == {"authorized", "completed"}
+            and authorized is not None
             and completed is not None
-            and completed.get("statusCode") == completion_status
+            and completed.get("statusCode") == 200
+            and isinstance(authorized.get("auditId"), str)
+            and completed.get("authorizationAuditId") == authorized["auditId"]
+            and all(
+                event.get("auditScope") == "platform"
+                and event.get("method") == "POST"
+                and event.get("targetKind") == target_kind
+                for event in matching
+            )
         ):
             pairs += 1
     return pairs
@@ -933,10 +1004,8 @@ def run(arguments: argparse.Namespace) -> int:
 
         with _temporary_runtime() as (temporary_root, runtime):
             environment = _base_environment(build_sha, temporary_root)
-            platform_password = f"Qp1-{secrets.token_urlsafe(9)}"
             tenant_password = f"Qt1-{secrets.token_urlsafe(9)}"
             secret_environment = environment | {
-                "HOHU_RELEASE_QUALIFICATION_PLATFORM_PASSWORD": platform_password,
                 "HOHU_RELEASE_QUALIFICATION_TENANT_PASSWORD": tenant_password,
             }
 
@@ -1004,32 +1073,22 @@ def run(arguments: argparse.Namespace) -> int:
             )
             _wait_for_api(runtime.process, base_url)
             with httpx.Client(base_url=base_url, timeout=10, trust_env=False) as client:
-                platform_token = _platform_login(
+                system_token = _tenant_login(
                     client,
-                    principal_name=fixture["principalName"],
-                    password=platform_password,
+                    username=fixture["systemAdminUsername"],
+                    password=tenant_password,
+                    failure_code="SYSTEM_ADMIN_LOGIN_FAILED",
                 )
-                control_activation = client.post(
-                    f"/platform/tenants/{control_id}/activate",
-                    headers=_platform_headers(
-                        platform_token,
-                        "plan7c-qualification-activate-control",
-                    ),
-                )
-                control_activation_body = _response_json(control_activation)
                 target_activation = client.post(
                     f"/platform/tenants/{target_id}/activate",
                     headers=_platform_headers(
-                        platform_token,
+                        system_token,
                         "plan7c-qualification-activate-target",
                     ),
                 )
-                target_activation_body = _response_json(target_activation)
-                if (
-                    target_activation.status_code != 200
-                    or target_activation_body.get("code") != 200
-                ):
-                    raise QualificationFailure("TARGET_ACTIVATION_FAILED")
+                _require_success(
+                    target_activation, failure_code="TARGET_ACTIVATION_FAILED"
+                )
 
                 reports["postActivation"] = _run_preflight(
                     phase="post_activation",
@@ -1037,51 +1096,68 @@ def run(arguments: argparse.Namespace) -> int:
                     build_sha=build_sha,
                     environment=hosted_environment,
                 )
+                control_activation = client.post(
+                    f"/platform/tenants/{control_id}/activate",
+                    headers=_platform_headers(
+                        system_token,
+                        "plan7c-qualification-activate-control",
+                    ),
+                )
+                _require_success(
+                    control_activation, failure_code="CONTROL_ACTIVATION_FAILED"
+                )
+                control_access_token = _tenant_login(
+                    client,
+                    username="admin",
+                    password=tenant_password,
+                    tenant_code=control["tenantCode"],
+                    failure_code="CONTROL_LOGIN_FAILED",
+                )
                 before_control = _snapshot(
                     output=temporary_root / "before-control.json",
                     target_tenant_id=target_id,
                     control_tenant_id=control_id,
                     environment=hosted_environment,
                 )
-                control_access_token = _issue_token(
-                    tenant_id=control_id,
-                    user_id=int(control["userId"]),
-                    tenant_version=int(control["tenantVersion"]),
-                    user_version=int(control["userVersion"]),
-                    environment=hosted_environment,
+                control_admin_activation = client.post(
+                    f"/platform/tenants/{target_id}/activate",
+                    headers=_platform_headers(
+                        control_access_token,
+                        "plan7c-qualification-deny-tenant-admin",
+                    ),
                 )
+                control_admin_activation_body = _response_json(control_admin_activation)
                 control_access = client.get(
                     "/auth/getUserInfo",
                     headers={"Authorization": f"Bearer {control_access_token}"},
                 )
-                control_access_body = _response_json(control_access)
+                _require_success(control_access, failure_code="CONTROL_ACCESS_FAILED")
                 after_control = _snapshot(
                     output=temporary_root / "after-control.json",
                     target_tenant_id=target_id,
                     control_tenant_id=control_id,
                     environment=hosted_environment,
                 )
-                tenant_login = client.post(
-                    "/auth/login",
-                    json={
-                        "loginType": "password",
-                        "tenantCode": target["tenantCode"],
-                        "userName": "admin",
-                        "password": tenant_password,
-                    },
+                control_disable = client.post(
+                    f"/platform/tenants/{control_id}/disable",
+                    headers=_platform_headers(
+                        system_token,
+                        "plan7c-qualification-disable-control",
+                    ),
                 )
-                tenant_login_body = _response_json(tenant_login)
-                tenant_access_token = (
-                    tenant_login_body.get("data", {}).get("token")
-                    if isinstance(tenant_login_body.get("data"), dict)
-                    else None
+                _require_success(control_disable, failure_code="CONTROL_DISABLE_FAILED")
+                control_disabled_access = client.get(
+                    "/auth/getUserInfo",
+                    headers={"Authorization": f"Bearer {control_access_token}"},
                 )
-                if (
-                    tenant_login.status_code != 200
-                    or tenant_login_body.get("code") != 200
-                    or not isinstance(tenant_access_token, str)
-                ):
-                    raise QualificationFailure("TARGET_LOGIN_FAILED")
+                control_disabled_body = _response_json(control_disabled_access)
+                tenant_access_token = _tenant_login(
+                    client,
+                    username="admin",
+                    password=tenant_password,
+                    tenant_code=target["tenantCode"],
+                    failure_code="TARGET_LOGIN_FAILED",
+                )
 
             reports["shortObservation"] = _run_monitor(
                 path=evidence_paths["shortObservation"],
@@ -1152,24 +1228,20 @@ def run(arguments: argparse.Namespace) -> int:
                 environment=single_environment,
             )
             with httpx.Client(base_url=base_url, timeout=10, trust_env=False) as client:
-                platform_token = _platform_login(
+                system_token = _tenant_login(
                     client,
-                    principal_name=fixture["principalName"],
-                    password=platform_password,
+                    username=fixture["systemAdminUsername"],
+                    password=tenant_password,
+                    failure_code="SYSTEM_ADMIN_LOGIN_FAILED",
                 )
                 disable_response = client.post(
                     f"/platform/tenants/{target_id}/disable",
                     headers=_platform_headers(
-                        platform_token,
+                        system_token,
                         "plan7c-qualification-disable-target",
                     ),
                 )
-                disable_body = _response_json(disable_response)
-                if (
-                    disable_response.status_code != 200
-                    or disable_body.get("code") != 200
-                ):
-                    raise QualificationFailure("TARGET_DISABLE_FAILED")
+                _require_success(disable_response, failure_code="TARGET_DISABLE_FAILED")
             final_state = _final_snapshot_after_shutdown(
                 runtime=runtime,
                 output=temporary_root / "final-state.json",
@@ -1179,16 +1251,19 @@ def run(arguments: argparse.Namespace) -> int:
             )
 
             boundary = {
-                "nonTargetActivationStatus": control_activation.status_code,
-                "nonTargetActivationErrorCode": control_activation_body.get(
+                "controlActivationStatus": control_activation.status_code,
+                "nonTargetActivationStatus": control_admin_activation.status_code,
+                "nonTargetActivationErrorCode": control_admin_activation_body.get(
                     "errorCode"
                 ),
                 "nonTargetAccessStatus": control_access.status_code,
-                "nonTargetAccessErrorCode": control_access_body.get("errorCode"),
                 "nonTargetStateUnchanged": before_control.get("control")
                 == after_control.get("control")
-                and before_control.get("redisDbSize")
-                == after_control.get("redisDbSize"),
+                and before_control.get("target") == after_control.get("target"),
+                "controlDisabledAccessStatus": control_disabled_access.status_code,
+                "controlDisabledAccessErrorCode": control_disabled_body.get(
+                    "errorCode"
+                ),
                 "rollbackAccessStatus": rollback_access.status_code,
                 "rollbackAccessErrorCode": rollback_access_body.get("errorCode"),
                 "rollbackStateUnchanged": rollback_before.get("target")
@@ -1218,6 +1293,11 @@ def run(arguments: argparse.Namespace) -> int:
                 boundary=boundary,
             )
             _write_report(output, report)
+            if not report["qualified"]:
+                logger.error(
+                    "Hosted release qualification failed: %s",
+                    ", ".join(report["failureCodes"]),
+                )
             return 0 if report["qualified"] else RISK_EXIT_CODE
     except (QualificationFailure, ValueError, KeyError) as error:
         code = (
@@ -1231,6 +1311,7 @@ def run(arguments: argparse.Namespace) -> int:
             profile=arguments.profile,
             code=code,
         )
+        logger.error("Hosted release qualification failed: %s", code)
         return RISK_EXIT_CODE
     except Exception:
         _write_failure_report(
@@ -1238,6 +1319,9 @@ def run(arguments: argparse.Namespace) -> int:
             build_sha=build_sha,
             profile=arguments.profile,
             code="QUALIFICATION_UNEXPECTED_FAILURE",
+        )
+        logger.error(
+            "Hosted release qualification failed: QUALIFICATION_UNEXPECTED_FAILURE"
         )
         return RISK_EXIT_CODE
 
