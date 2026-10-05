@@ -1,0 +1,87 @@
+name: Sync Gitee mirror
+
+on:
+  push:
+  create:
+  delete:
+  workflow_dispatch:
+  schedule:
+    # 04:17 Asia/Shanghai; daily compensation, not the primary trigger.
+    - cron: '17 20 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-gitee-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    if: github.repository == 'aihohu/hohu-admin' && vars.GITEE_MIRROR_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}
+      GITEE_KNOWN_HOSTS: ${{ vars.GITEE_KNOWN_HOSTS }}
+      GITEE_SSH_PRIVATE_KEY: ${{ secrets.GITEE_SSH_PRIVATE_KEY }}
+      GITHUB_TOKEN: ${{ github.token }}
+      GIT_TERMINAL_PROMPT: '0'
+      MIRROR_PRIVATE_DIR: ${{ github.workspace }}/.local/private/gitee-mirror
+      MIRROR_WORK_DIR: ${{ github.workspace }}/.local/tmp/gitee-mirror
+      SOURCE_URL: https://github.com/${{ github.repository }}.git
+    steps:
+      - name: Check out trusted mirror tooling
+        uses: actions/checkout@v6
+        with:
+          # Branch/tag events must never select that branch's executable code.
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Configure source and target authentication
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$GITEE_REPOSITORY" =~ ^[A-Za-z0-9_-]+/hohu-admin$ ]]; then
+            echo '::error::GITEE_REPOSITORY must be namespace/hohu-admin.'
+            exit 1
+          fi
+          if [[ -z "$GITEE_SSH_PRIVATE_KEY" || -z "$GITEE_KNOWN_HOSTS" ]]; then
+            echo '::error::Configure GITEE_SSH_PRIVATE_KEY and verified GITEE_KNOWN_HOSTS before enabling the mirror.'
+            exit 1
+          fi
+          umask 077
+          mkdir -p "$MIRROR_PRIVATE_DIR"
+          printf '%s\n' "$GITEE_SSH_PRIVATE_KEY" | tr -d '\r' > "$MIRROR_PRIVATE_DIR/id_ed25519"
+          ssh-keygen -y -P '' -f "$MIRROR_PRIVATE_DIR/id_ed25519" > /dev/null
+          printf '%s\n' "$GITEE_KNOWN_HOSTS" > "$MIRROR_PRIVATE_DIR/known_hosts"
+          ssh-keygen -F gitee.com -f "$MIRROR_PRIVATE_DIR/known_hosts" > /dev/null
+          cat > "$MIRROR_PRIVATE_DIR/askpass" <<'ASKPASS'
+          #!/usr/bin/env bash
+          case "$1" in
+            *Username*) printf '%s\n' 'x-access-token' ;;
+            *Password*) printf '%s\n' "$GITHUB_TOKEN" ;;
+            *) exit 1 ;;
+          esac
+          ASKPASS
+          chmod 700 "$MIRROR_PRIVATE_DIR/askpass"
+          {
+            printf 'GIT_ASKPASS=%s/askpass\n' "$MIRROR_PRIVATE_DIR"
+            printf 'GIT_SSH_COMMAND=ssh -i "%s/id_ed25519" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="%s/known_hosts" -o ConnectTimeout=20\n' "$MIRROR_PRIVATE_DIR" "$MIRROR_PRIVATE_DIR"
+          } >> "$GITHUB_ENV"
+
+      - name: Mirror and verify branches and tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/ops/sync_git_mirror.py \
+            --source "$SOURCE_URL" \
+            --target "git@gitee.com:$GITEE_REPOSITORY.git" \
+            --work-dir "$MIRROR_WORK_DIR"
+          printf '### Gitee mirror verified\n\nSource: `%s`\n\nTarget: `%s`\n\nAll branch and tag object IDs match the fetched source snapshot. See the step log for each verified SHA.\n' "$SOURCE_URL" "$GITEE_REPOSITORY" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove temporary authentication files
+        if: always()
+        shell: bash
+        run: |
+          rm -f -- "$MIRROR_PRIVATE_DIR/id_ed25519" "$MIRROR_PRIVATE_DIR/known_hosts" "$MIRROR_PRIVATE_DIR/askpass"

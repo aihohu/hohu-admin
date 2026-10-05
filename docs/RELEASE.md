@@ -26,3 +26,25 @@
 代码回滚不自动恢复数据库或私有文件。破坏性 downgrade 不能代替数据恢复；采用验证过的备份和匹配应用版本恢复，并在恢复后核查认证、租户状态、审计和后台任务。
 
 生产 hosted 配置使用准确的 `RELEASE_BUILD_SHA`。监控、凭据、外部代理和备份恢复属于部署方的运行职责，工作流通过不表示这些环境条件已经完成。
+
+## Gitee 源码镜像
+
+[sync-gitee.yml](../.github/workflows/sync-gitee.yml) 将官方 GitHub 仓库的全部分支、标签和提交历史单向同步到 Gitee，跟随强推和删除。GitHub 为唯一维护入口，Gitee 仅供 clone/pull。支持事件触发、手动运行和每日补偿；不包含 Git LFS 对象、Release 附件和平台设置。
+
+在 GitHub Settings → Secrets and variables → Actions 配置：
+
+| 类型 | 名称 | 内容 |
+| --- | --- | --- |
+| Secret | `GITEE_SSH_PRIVATE_KEY` | 专用同步账号的完整 SSH 私钥，无口令 |
+| Variable | `GITEE_REPOSITORY` | `<namespace>/hohu-admin` |
+| Variable | `GITEE_KNOWN_HOSTS` | 已核验的 `gitee.com` SSH 主机公钥记录 |
+| Variable | `GITEE_MIRROR_ENABLED` | 配置完成后设为 `true`，默认关闭 |
+
+对应公钥添加到有目标仓库写权限的 Gitee 账号的**账户 SSH 公钥**。工作流发布到 GitHub 默认分支后，手动运行 **Sync Gitee mirror**，确认两端引用 SHA 一致并实际 clone。失败时查看 Actions 日志，修正配置后重跑；停用时将启用变量设为 `false`，正在运行的任务需另行取消。
+
+实现见 [sync_git_mirror.py](../tools/ops/sync_git_mirror.py)，隔离 Git 回归见 [test_sync_git_mirror.py](../tests/tools/test_sync_git_mirror.py)。
+
+状态：✅ Plan mirror-code 已完成（2026-10-05）；⚠️ Plan mirror-live gap — 维护者配置密钥、工作流发布及线上 clone 验收待完成。
+
+1. **单向且限定引用范围** — 保持 GitHub 为事实来源，只同步 heads/tags。**反例**: 双向写入或镜像平台内部引用。**回归**: `tests/tools/test_sync_git_mirror.py` 的强推、删除及额外引用排除测试。
+2. **默认关闭、串行同步并核验快照** — 配置就绪后启用，重试读取最新来源，推送后核验全部引用。**反例**: 用户 fork 写入官方镜像，或旧事件覆盖新提交。**回归**: 工作流官方仓库条件与并发配置、重试及 SHA 核验测试。

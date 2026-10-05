@@ -9,14 +9,16 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 def test_disabled_module_returns_503_without_loading_ai_business_modules() -> None:
-    """fresh process 下 false 只留下统一 503 guard，不加载 AI 执行链。"""
+    """fresh process 无外部服务也返回统一 503，不加载 AI 执行链。"""
     script = r"""
 import asyncio
 import sys
+from unittest.mock import AsyncMock, patch
 
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
+from app.middleware import rate_limit_middleware
 
 
 FORBIDDEN_MODULES = {
@@ -58,7 +60,25 @@ async def verify() -> None:
     assert imported == [], imported
 
 
-asyncio.run(verify())
+# Parent pytest fixtures are not inherited by this fresh process.
+with (
+    patch.object(
+        rate_limit_middleware,
+        "request_limits",
+        AsyncMock(return_value={"login": 5, "register": 3, "api": 100}),
+    ),
+    patch.object(
+        rate_limit_middleware,
+        "consume_rate_limit",
+        AsyncMock(return_value=True),
+    ),
+    patch(
+        "asyncio.BaseEventLoop.create_connection",
+        side_effect=AssertionError("Disabled-module test must not open network connections"),
+    ) as network_connect,
+):
+    asyncio.run(verify())
+    network_connect.assert_not_called()
 """
     env = os.environ.copy()
     env.update(
@@ -66,6 +86,10 @@ asyncio.run(verify())
             "AI_MODULE_ENABLED": "false",
             "APP_ROLE": "api",
             "ENV": "test",
+            "DATABASE_URL": "postgresql+asyncpg://isolated:isolated@127.0.0.1:1/isolated",
+            "REDIS_HOST": "127.0.0.1",
+            "REDIS_PORT": "1",
+            "REDIS_PASSWORD": "",
         }
     )
     result = subprocess.run(
