@@ -31,6 +31,14 @@ def _git(arguments: list[str], *, cwd: Path | None = None, timeout: float = 120)
         if error.stderr:
             logger.error("%s", error.stderr.strip())
         raise
+    except subprocess.TimeoutExpired as error:
+        logger.error("Git %s timed out after %s seconds", arguments[0], timeout)
+        if error.stderr:
+            diagnostic = error.stderr
+            if isinstance(diagnostic, bytes):
+                diagnostic = diagnostic.decode("utf-8", errors="replace")
+            logger.error("%s", diagnostic.strip())
+        raise
     return result.stdout.strip()
 
 
@@ -46,6 +54,7 @@ def sync_mirror(
     attempts: int = 3,
     retry_delay: float = 5,
     command_timeout: float = 120,
+    push_timeout: float = 600,
 ) -> dict[str, str]:
     """Force/prune only heads and tags, then verify their exact object IDs.
 
@@ -53,7 +62,7 @@ def sync_mirror(
     reaches the push. Scratch repositories are isolated and always cleaned up.
     Authentication is supplied by Git/SSH environment, never embedded in URLs.
     """
-    if attempts < 1 or retry_delay < 0 or command_timeout <= 0:
+    if attempts < 1 or retry_delay < 0 or command_timeout <= 0 or push_timeout <= 0:
         raise ValueError("Invalid attempt, retry delay, or command timeout limit")
 
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -61,7 +70,18 @@ def sync_mirror(
         repository = Path(temporary)
         _git(["init", "--bare", str(repository)], timeout=command_timeout)
         for attempt in range(1, attempts + 1):
+            stage = "target connection check"
             try:
+                logger.info(
+                    "Attempt %d/%d: checking target connection", attempt, attempts
+                )
+                _git(
+                    ["ls-remote", "--refs", "--heads", "--tags", target],
+                    cwd=repository,
+                    timeout=command_timeout,
+                )
+                stage = "source fetch"
+                logger.info("Fetching current source snapshot")
                 _git(
                     [
                         "fetch",
@@ -74,6 +94,7 @@ def sync_mirror(
                     cwd=repository,
                     timeout=command_timeout,
                 )
+                stage = "source snapshot read"
                 snapshot = _refs(
                     _git(
                         [
@@ -88,6 +109,10 @@ def sync_mirror(
                 )
                 if not any(ref.startswith("refs/heads/") for ref in snapshot):
                     raise MirrorError("Source has no branches; refusing to push")
+                stage = "target push"
+                logger.info(
+                    "Pushing %d refs (timeout %s seconds)", len(snapshot), push_timeout
+                )
                 _git(
                     [
                         "push",
@@ -97,8 +122,10 @@ def sync_mirror(
                         "+refs/tags/*:refs/tags/*",
                     ],
                     cwd=repository,
-                    timeout=command_timeout,
+                    timeout=push_timeout,
                 )
+                stage = "target verification"
+                logger.info("Verifying target branches and tags")
                 actual = _refs(
                     _git(
                         ["ls-remote", "--refs", "--heads", "--tags", target],
@@ -121,10 +148,13 @@ def sync_mirror(
             ) as error:
                 if attempt == attempts:
                     raise MirrorError(
-                        f"Mirror failed after {attempts} attempts: {error}"
+                        f"Mirror failed after {attempts} attempts during {stage}: {error}"
                     ) from error
                 logger.warning(
-                    "Attempt %d failed; fetching again before retry", attempt
+                    "Attempt %d failed during %s: %s; retrying with a fresh source",
+                    attempt,
+                    stage,
+                    error,
                 )
                 time.sleep(retry_delay)
     raise AssertionError("Mirror attempts exhausted without a result")
@@ -137,6 +167,8 @@ def main() -> int:
     parser.add_argument("--work-dir", required=True, type=Path)
     parser.add_argument("--attempts", type=int, default=3)
     parser.add_argument("--retry-delay", type=float, default=5)
+    parser.add_argument("--command-timeout", type=float, default=120)
+    parser.add_argument("--push-timeout", type=float, default=600)
     arguments = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     try:
@@ -146,6 +178,8 @@ def main() -> int:
             arguments.work_dir,
             attempts=arguments.attempts,
             retry_delay=arguments.retry_delay,
+            command_timeout=arguments.command_timeout,
+            push_timeout=arguments.push_timeout,
         )
     except (MirrorError, OSError, ValueError) as error:
         logger.error("%s", error)

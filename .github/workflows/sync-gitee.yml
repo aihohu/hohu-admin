@@ -20,7 +20,7 @@ jobs:
   mirror:
     if: github.repository == 'aihohu/hohu-admin' && vars.GITEE_MIRROR_ENABLED == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}
       GITEE_KNOWN_HOSTS: ${{ vars.GITEE_KNOWN_HOSTS }}
@@ -67,7 +67,7 @@ jobs:
           chmod 700 "$MIRROR_PRIVATE_DIR/askpass"
           {
             printf 'GIT_ASKPASS=%s/askpass\n' "$MIRROR_PRIVATE_DIR"
-            printf 'GIT_SSH_COMMAND=ssh -i "%s/id_ed25519" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="%s/known_hosts" -o ConnectTimeout=20\n' "$MIRROR_PRIVATE_DIR" "$MIRROR_PRIVATE_DIR"
+            printf 'GIT_SSH_COMMAND=ssh -i "%s/id_ed25519" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="%s/known_hosts" -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3\n' "$MIRROR_PRIVATE_DIR" "$MIRROR_PRIVATE_DIR"
           } >> "$GITHUB_ENV"
 
       - name: Mirror and verify branches and tags
@@ -77,7 +77,10 @@ jobs:
           python3 tools/ops/sync_git_mirror.py \
             --source "$SOURCE_URL" \
             --target "git@gitee.com:$GITEE_REPOSITORY.git" \
-            --work-dir "$MIRROR_WORK_DIR"
+            --work-dir "$MIRROR_WORK_DIR" \
+            --command-timeout 120 \
+            --push-timeout 600 \
+            --retry-delay 15
           printf '### Gitee mirror verified\n\nSource: `%s`\n\nTarget: `%s`\n\nAll branch and tag object IDs match the fetched source snapshot. See the step log for each verified SHA.\n' "$SOURCE_URL" "$GITEE_REPOSITORY" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remove temporary authentication files

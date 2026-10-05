@@ -219,8 +219,86 @@ def test_failed_push_stops_after_configured_attempts(repositories, monkeypatch):
     assert list(scratch.iterdir()) == []
 
 
+def test_target_probe_failure_retries_without_fetching_or_pushing(
+    repositories, monkeypatch, caplog
+):
+    source, target, _, scratch = repositories
+    original_git = mirror._git
+    operations = []
+
+    def unreachable_target(arguments, **options):
+        operations.append(arguments[0])
+        if arguments[0] == "ls-remote":
+            raise subprocess.TimeoutExpired(arguments, options["timeout"])
+        return original_git(arguments, **options)
+
+    monkeypatch.setattr(mirror, "_git", unreachable_target)
+
+    with pytest.raises(mirror.MirrorError, match="failed after 2 attempts"):
+        mirror.sync_mirror(str(source), str(target), scratch, attempts=2, retry_delay=0)
+
+    assert operations == ["init", "ls-remote", "ls-remote"]
+    assert "target connection check" in caplog.text
+    assert list(scratch.iterdir()) == []
+
+
+def test_slow_push_has_separate_deadline_and_probe_precedes_transfer(
+    repositories, monkeypatch
+):
+    source, target, _, scratch = repositories
+    original_git = mirror._git
+    operations = []
+
+    def observed_git(arguments, **options):
+        operations.append((arguments[0], options["timeout"]))
+        return original_git(arguments, **options)
+
+    monkeypatch.setattr(mirror, "_git", observed_git)
+
+    snapshot = mirror.sync_mirror(
+        str(source),
+        str(target),
+        scratch,
+        attempts=1,
+        command_timeout=30,
+        push_timeout=600,
+    )
+
+    assert operations == [
+        ("init", 30),
+        ("ls-remote", 30),
+        ("fetch", 30),
+        ("for-each-ref", 30),
+        ("push", 600),
+        ("ls-remote", 30),
+    ]
+    assert snapshot == refs(source) == refs(target)
+
+
 @pytest.mark.parametrize(
-    "options", [{"attempts": 0}, {"retry_delay": -1}, {"command_timeout": 0}]
+    "stderr", [b"SSH connection stalled", "SSH connection stalled"]
+)
+def test_git_timeout_preserves_transport_diagnostic(monkeypatch, caplog, stderr):
+    def stalled_git(command, **options):
+        raise subprocess.TimeoutExpired(command, options["timeout"], stderr=stderr)
+
+    monkeypatch.setattr(mirror.subprocess, "run", stalled_git)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        mirror._git(["push", "git@gitee.com:example/mirror.git"], timeout=12)
+
+    assert "Git push timed out after 12 seconds" in caplog.text
+    assert "SSH connection stalled" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"attempts": 0},
+        {"retry_delay": -1},
+        {"command_timeout": 0},
+        {"push_timeout": 0},
+    ],
 )
 def test_invalid_limits_are_rejected_before_git_runs(repositories, options):
     source, target, _, scratch = repositories
@@ -250,6 +328,10 @@ def test_workflow_cli_exit_status_reflects_verified_result(repositories, source_
             "1",
             "--retry-delay",
             "0",
+            "--command-timeout",
+            "30",
+            "--push-timeout",
+            "60",
         ],
         capture_output=True,
         text=True,
