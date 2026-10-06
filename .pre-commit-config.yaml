@@ -28,13 +28,3 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
-
-      - id: pytest
-        name: Pytest
-        entry: uv run pytest
-        language: system
-        pass_filenames: false
-        always_run: true
-        stages: [pre-commit]
-        env:
-          ENV: test

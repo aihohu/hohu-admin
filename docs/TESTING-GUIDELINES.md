@@ -15,6 +15,17 @@ uv run python -m tools.checks.check_ai_tools
 uv run python -m tools.checks.check_docs
 ```
 
+## 执行时机
+
+| 阶段 | 检查要求 |
+| --- | --- |
+| 开发过程中 | 按 TDD 运行新增或修改行为的相关回归测试 |
+| 每次 commit | pre-commit 执行 Ruff lint、格式检查、AI 工具静态检查、公开文档检查 |
+| 功能完成、交付验收 | 在隔离环境执行全量 pytest，覆盖率至少 70% |
+| CI | 执行全量测试、Python 版本矩阵、覆盖率门禁和发布资格验收 |
+
+[pre-commit 配置](../.pre-commit-config.yaml) 不自动运行 pytest，也不将全量测试转移到 pre-push。保留的四项检查无需启动 PostgreSQL 或 Redis；相关测试和全量验收仍须遵守测试环境隔离要求。纯文档修正按 [开发指南](DEV-GUIDELINES.md) 验证。
+
 ## 回归设计
 
 - 纯业务规则优先单元测试；SQL 查询、约束和事务行为使用真实 PostgreSQL 集成测试。
@@ -23,6 +34,8 @@ uv run python -m tools.checks.check_docs
 - API 同时覆盖成功、参数拒绝、无权限、跨租户、禁用状态及异常回滚。
 - 涉及撤权、幂等或并发时测试实际竞态；涉及迁移时验证空库、支持的升级边界和数据保留。
 - Mock Provider 测试只能证明受控输入下的行为，不能代替真实 Provider、浏览器或 Docker 部署验证。
+
+1. **子进程独立隔离** — 新进程不继承 pytest 的 monkeypatch；AI 停用入口测试在子进程内模拟限流依赖，并禁止异步网络连接，无需启动 PostgreSQL 或 Redis。**反例**: 仅在父进程模拟限流，或依靠本机服务让单元测试通过。**回归**: [AI 停用测试](../tests/modules/ai/test_module_disabled.py)，仍校验 `AI_MODULE_DISABLED` 和 AI 业务模块未加载。
 
 ## CI 与发布验证
 

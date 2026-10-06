@@ -15,7 +15,7 @@
 1. 为行为变化添加失败回归，确认失败原因。
 2. 实现最小改动，遵守 [架构与契约](ARCHITECTURE-GUIDELINES.md)。
 3. 执行 `uv run ruff check .` 和 `uv run ruff format --check .`，必要时先格式化。
-4. 在隔离环境执行相关测试及全量 `uv run pytest --cov=app --cov-fail-under=70`。
+4. 开发过程中在隔离环境执行相关测试；功能完成、交付验收时执行全量 `uv run pytest --cov=app --cov-fail-under=70`。CI 独立执行全量测试和覆盖率门禁。
 5. 检查迁移、权限拒绝、并发冲突和敏感数据处理；运行 `uv run python -m tools.checks.check_docs`。
 6. 回写正式手册，在 PR 中记录实际验证范围；未运行的浏览器、真实 Provider 或部署验证不得写成已通过。
 
@@ -23,6 +23,7 @@
 
 ## 提交前
 
+- pre-commit 执行 Ruff lint、格式检查、AI 工具静态检查和公开文档检查；全量 pytest 在功能验收和 CI 执行，不在每次 commit 或 pre-push 中强制运行。检查配置见 [.pre-commit-config.yaml](../.pre-commit-config.yaml)，执行时机见 [测试指南](TESTING-GUIDELINES.md)。
 - 使用 `git diff` 和 `git diff --check` 检查改动，按文件名暂存。
 - 提交标题使用英文 Conventional Commits；DCO 与署名规则见 [贡献指南](CONTRIBUTING.md)。
 - 不提交 `.env`、数据库转储、本机路径、测试账号、运行日志和开发过程资料。

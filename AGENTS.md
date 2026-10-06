@@ -61,7 +61,7 @@ python scripts/init_db.py
 2. 运行最小测试范围，确认失败原因符合预期。
 3. 写最小实现使测试通过，避免同时进行无关重构。
 4. 运行 `ruff check . && ruff format .`。
-5. 运行相关测试，再运行全量 `pytest`。
+5. 开发过程中运行相关测试；功能完成、交付验收时在隔离环境运行全量 `pytest`。每次 commit 的 pre-commit 只执行 Ruff lint、格式检查、AI 工具静态检查和公开文档检查，不强制执行全量 pytest，也不将其转移到 pre-push；CI 独立执行全量测试。
 6. 覆盖率不得低于 70%。
 7. 回写本地 spec，将 `⚠️ Plan X gap` 更新为 `✅ Plan X 已完成（YYYY-MM-DD）`，并补充决策与回归测试路径；正式手册只同步稳定行为与契约，不粘贴阶段计划或一次性测试成绩。
 
