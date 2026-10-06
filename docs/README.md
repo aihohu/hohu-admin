@@ -8,7 +8,7 @@
 | --- | --- |
 | [贡献指南](CONTRIBUTING.md) / [开发流程](DEV-GUIDELINES.md) | 参与方式、提交与验证要求 |
 | [测试指南](TESTING-GUIDELINES.md) | 隔离环境、回归与覆盖率 |
-| [架构与契约](ARCHITECTURE-GUIDELINES.md) / [ADR](adr/README.md) | 分层、可信租户边界与技术取舍 |
+| [架构与契约](ARCHITECTURE-GUIDELINES.md) | 分层、可信租户边界与演进约束 |
 | [安全政策](SECURITY.md) / [AI 安全](AI-SECURITY.md) | 安全边界和漏洞报告 |
 | [数据库迁移](DATABASE-MIGRATIONS.md) | 受支持升级路径、结构与数据保护 |
 | [初始化内部职责](SCRIPTS-DEPLOYMENT.md) | CLI 所调用脚本的事务、幂等与权限约束 |
@@ -21,4 +21,4 @@
 
 [系统设置](SYSTEM-SETTINGS.md)、[多租户](MULTI-TENANCY.md)、[AI 部署](AI-DEPLOYMENT.md)、[模块开发](MODULE-DEVELOPMENT-GUIDE.md)、[按钮权限](button-permission-guide.md)、[数据范围](data-scope-guide.md)与[分页](pagination-guide.md)仅保留链接入口，正文不在两个仓库重复维护。
 
-本仓库维护文档随代码版本保存；必要架构决策、安全契约与贡献资料继续公开。个人过程资料不作为团队唯一知识来源。
+本仓库维护文档随代码版本保存，公开当前架构约束、安全契约与贡献资料。ADR 默认内部维护，正式手册不依赖内部记录；个人过程资料不作为团队唯一知识来源。保存规则见 [文档维护](DOCUMENTATION.md)。

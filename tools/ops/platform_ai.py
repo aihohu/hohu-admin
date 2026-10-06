@@ -1,4 +1,4 @@
-"""Audited CLI client for the dedicated platform AI control plane."""
+"""Audited CLI client using the system administrator's ordinary session."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-_TOKEN_ENV = "HOHU_PLATFORM_ACCESS_TOKEN"
+_TOKEN_ENV = "HOHU_SYSTEM_ACCESS_TOKEN"
 _ID_RE = re.compile(r"^[1-9][0-9]{0,18}$")
 _TENANT_ID_RE = re.compile(r"^(?:0|[1-9][0-9]{0,18})$")
 _MAX_PAYLOAD_BYTES = 64 * 1024
@@ -56,7 +56,7 @@ def _payload_path(parser: argparse.ArgumentParser) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Call the audited HoHu platform AI control plane."
+        description="Manage HoHu AI with the current system administrator access token."
     )
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--reason", required=True)

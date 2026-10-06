@@ -364,6 +364,17 @@ async def get_user_routes(
                 title="Agent 管理", i18n_key="route.ai_agent", icon="ph:robot", order=2
             ),
         )
+        provider_route = UserRoute(
+            name="ai_provider",
+            path="/ai/provider",
+            component="view.ai_provider",
+            meta=RouteMeta(
+                title="模型管理",
+                i18n_key="route.ai_provider",
+                icon="carbon:settings-adjust",
+                order=1,
+            ),
+        )
         ai_route = next((route for route in route_tree if route.name == "ai"), None)
         if ai_route is None:
             ai_route = UserRoute(
@@ -374,7 +385,7 @@ async def get_user_routes(
                 children=[],
             )
             route_tree.append(ai_route)
-        ai_route.children = [*(ai_route.children or []), agent_route]
+        ai_route.children = [*(ai_route.children or []), provider_route, agent_route]
 
     return ResponseModel.success(
         data={
@@ -433,7 +444,7 @@ async def is_route_exist(
             "data": true
         }
     """
-    if route_name in {"ai_agent", "tenant"}:
+    if route_name in {"ai_provider", "ai_agent", "tenant"}:
         return ResponseModel.success(data=is_system_admin(current_user))
     if route_name in PLATFORM_ONLY_TENANT_ROUTE_NAMES:
         return ResponseModel.success(data=False)

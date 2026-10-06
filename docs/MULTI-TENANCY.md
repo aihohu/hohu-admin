@@ -6,4 +6,4 @@
 
 源码：[文档站仓库](https://github.com/aihohu/hohu-admin-docs)。
 
-隔离设计与长期约束保留在 [ADR-0003](adr/0003-trusted-tenant-context-and-isolation-boundaries.md)。
+贡献者需要遵守的租户隔离约束见 [后端架构与契约](ARCHITECTURE-GUIDELINES.md) 和 [安全说明](SECURITY.md)。

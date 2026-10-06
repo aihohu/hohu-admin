@@ -18,8 +18,8 @@ app/
 ├── tasks/      # 后台任务
 └── utils/      # 无业务状态的通用工具
 tests/          # pytest 测试，结构尽量与 app/ 对齐
-docs/           # 对外维护的正式文档与 ADR
-.local/docs/    # 本地草案、计划、报告和原型（不提交）
+docs/           # 对外维护的正式手册与契约
+.local/docs/    # 本地草案、计划、报告、ADR 和原型（不提交）
 ```
 
 应用入口是 `app/main.py`。API 文档默认位于 `http://127.0.0.1:8000/docs`。
@@ -30,7 +30,7 @@ docs/           # 对外维护的正式文档与 ADR
 2. 新功能、重构、数据模型变化或跨模块改动必须先编写设计；草案放在 `.local/docs/specs/YYYY-MM-DD-<feature>.md`，已落地的契约同步到 `docs/<feature>.md` 正式手册。
 3. 影响多个阶段的实现计划放在 `.local/docs/plans/YYYY-MM-DD-<feature>.md`。
 4. 开始实现前阅读与改动相关的既有 spec；架构、安全、测试细则分别见 `docs/ARCHITECTURE-GUIDELINES.md`、`docs/SECURITY.md`、`docs/TESTING-GUIDELINES.md`。
-5. 文档公开遵循 `docs/DOCUMENTATION.md`；禁止提交本地过程资料，正式手册不依赖本地文件。
+5. 文档公开遵循 `docs/DOCUMENTATION.md`；ADR 默认内部维护，禁止提交本地过程资料，正式手册不依赖内部或本地文件。长期协作记录由团队私有仓库或受控文档空间保存。
 6. 不要顺手修改任务无关文件，不要覆盖用户已有改动。
 
 文档拼写修正和纯测试补充可以直接实现。根因明确的 bug fix 可以直接进入 TDD，但仍需在相关 spec 中补决策与回归记录。数据模型、状态机和跨模块功能不得跳过 spec。
@@ -63,7 +63,7 @@ python scripts/init_db.py
 4. 运行 `ruff check . && ruff format .`。
 5. 运行相关测试，再运行全量 `pytest`。
 6. 覆盖率不得低于 70%。
-7. 回写 spec，将 `⚠️ Plan X gap` 更新为 `✅ Plan X 已完成（YYYY-MM-DD）`，并补充决策与回归测试路径。
+7. 回写本地 spec，将 `⚠️ Plan X gap` 更新为 `✅ Plan X 已完成（YYYY-MM-DD）`，并补充决策与回归测试路径；正式手册只同步稳定行为与契约，不粘贴阶段计划或一次性测试成绩。
 
 决策记录格式：
 

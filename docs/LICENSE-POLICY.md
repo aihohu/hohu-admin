@@ -32,7 +32,7 @@ Web 根目录的三个许可文件是维护来源，`public/licenses/` 中保存
 
 新贡献默认按 Apache-2.0 提交，另有声明的代码除外。外部贡献使用 DCO `Signed-off-by`；维护者提交自己拥有版权的代码时可不添加该尾注。DCO 不等于版权转让。
 
-提交消息使用一句英文，采用 `type(scope): description` 格式，不附加版权或 `Co-Authored-By` 信息。仅提交正式维护文档和必要 ADR；开发过程中的 specs、plans、reports、验收提示词及临时文件保留本地。正式文档不得依赖未提交的过程记录。
+提交消息使用一句英文，采用 `type(scope): description` 格式，不附加版权或 `Co-Authored-By` 信息。公开文档只提交正式维护手册；ADR 默认内部维护，开发过程中的 specs、plans、reports、验收提示词及临时文件保留本地。正式文档不得依赖内部或未提交的过程记录。
 
 ## 决策记录
 

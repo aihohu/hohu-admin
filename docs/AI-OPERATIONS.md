@@ -14,7 +14,7 @@ uv run python -m tools.ops.audit_ai_provider_egress --help
 uv run python -m tools.ops.audit_data_scope_union --help
 ```
 
-`platform_principal` 管理独立平台主体；`platform_ai` 调用平台维护接口。全局管理操作需要 reason、ticket 和 correlation；权限替换不是普通租户管理入口。
+`platform_principal` 管理其余运维接口使用的独立平台主体；`platform_ai` 使用 `HOHU_SYSTEM_ACCESS_TOKEN` 中的普通系统超级管理员 access token 管理 Agent、Provider/模型和租户模型授权。模型配置网页入口为「AI 管理 → 模型管理」，不创建独立模型维护账号。全局管理操作需要 reason、ticket 和 correlation；权限替换不是普通租户管理入口。
 
 隔离审计报告需绑定准确构建 SHA，检查租户归属、引用、唯一约束和 namespace。DataScope 切换审计比较旧/新范围：先停止 writer、复核报告并确认精确 hash，切换过程持有维护锁；报告变化必须重新复核。切换失败时工具不会替部署者安全恢复 writer，须先验证旧构建再恢复流量。具体参数及校验以 [审计工具](../tools/ops/audit_data_scope_union.py) 为准，不能将报告当作无条件放行依据。
 

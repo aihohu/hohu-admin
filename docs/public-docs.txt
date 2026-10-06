@@ -17,11 +17,6 @@ docs/SCRIPTS-DEPLOYMENT.md
 docs/SECURITY.md
 docs/SYSTEM-SETTINGS.md
 docs/TESTING-GUIDELINES.md
-docs/adr/0000-template.md
-docs/adr/0001-ai-safety-consistency-before-deferred-execution.md
-docs/adr/0002-gateway-owned-confirmation-flow.md
-docs/adr/0003-trusted-tenant-context-and-isolation-boundaries.md
-docs/adr/README.md
 docs/button-permission-guide.md
 docs/data-scope-guide.md
 docs/monitoring/alerts.yml

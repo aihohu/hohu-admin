@@ -39,7 +39,13 @@ def system_agent_audit_record(
         audit_scope="platform",
         user_id=user_id,
         username=values["actor_name"],
-        module="租户管理" if "/tenants" in values["path"] else "Agent管理",
+        module=(
+            "租户管理"
+            if "/tenants" in values["path"]
+            else "模型管理"
+            if "/ai/providers" in values["path"]
+            else "Agent管理"
+        ),
         action=values["event_type"],
         method=values["method"],
         path=values["path"],

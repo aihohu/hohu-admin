@@ -33,8 +33,16 @@ Schema 使用 Pydantic 校验，Model 使用 SQLAlchemy `Mapped[T]`。遵循既�
 
 租户模型查询、计数、更新、删除、关联以及缓存键都必须带租户范围。使用 [tenant_scope](../app/core/tenant_scope.py) 辅助函数；再叠加功能权限、数据范围与 owner 校验。超级管理员权限也有租户边界，见 [多租户](MULTI-TENANCY.md) 和 [数据权限](data-scope-guide.md)。
 
+默认租户 `tenant_id=0` 是真实租户，不表示平台全局。平台全局配置与租户数据分别建模，不得用 `0` 或 `NULL` 隐含全局作用域。系统超级管理员可操作的全局 AI 配置及审计要求见 [AI 安全](AI-SECURITY.md)；普通业务 API 不接受客户端租户参数来切换作用域。
+
+Host、子域名和登录时的租户代码只用于定位候选租户；账号归属、租户状态和凭据验证成功后才能建立可信上下文。认证冻结用户与租户身份，并复验当前状态及安全版本；停用后重新启用不能恢复旧 token。请求头、查询参数、文件或工具参数不得覆盖认证得到的租户。
+
+租户 Service 显式接收上下文，不使用默认 `tenant_id=0` 或模块单例的可变租户状态。直接 ID、列表、count、JOIN、关联加载、写入和删除使用同一 scope；跨租户目标按当前接口的不可见资源语义拒绝，避免暴露其他租户的对象。
+
+租户资源持有非空 `tenant_id`，同租户关联及唯一约束由数据库约束兜底；迁移中的约束不能只靠应用过滤替代。后台任务、缓存、锁、幂等键、文件路径、消息及结果投影继承可信租户，缺少上下文时不得回退为默认租户。当前不提供跨租户 membership、在线租户切换、BYOK 或 PostgreSQL RLS 隔离。
+
 ## 演进
 
 数据结构由 Alembic 维护，种子只补齐数据；发布后的迁移不可重写。跨客户端或 CLI 的契约变更需配套交付并说明升级顺序。当前应用市场未注册到主应用，不承诺云市场或任意 Python 插件热加载，见 [能力状态](APP-MARKETPLACE.md)。
 
-长期取舍见 [ADR](adr/README.md)，新增模块见 [开发指南](MODULE-DEVELOPMENT-GUIDE.md)，部署与升级见 [迁移指南](DATABASE-MIGRATIONS.md)。
+架构背景和备选方案默认内部维护，公开手册说明当前契约、兼容性和限制，保存规则见 [文档维护](DOCUMENTATION.md)。新增模块见 [开发指南](MODULE-DEVELOPMENT-GUIDE.md)，部署与升级见 [迁移指南](DATABASE-MIGRATIONS.md)。

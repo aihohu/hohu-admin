@@ -8,13 +8,27 @@ AI 入口使用显式权限；Agent 使用 Role-Agent 绑定，模型使用租�
 
 Gateway 在执行前检查 tenant、owner、当前授权和工具声明。历史消息、工具结果、文件及跨轮引用也需按当前权限重新投影，不能因为曾经显示过就永久可访问。后端拒绝是授权依据，Prompt 或前端隐藏不能替代授权。
 
-系统 Agent 管理复用默认租户的系统超级管理员会话；Provider/模型目录等平台维护 API 仍使用独立平台身份。管理操作记录真实操作者、原因、工单与关联 ID，避免将提示词正文或密钥写入审计。
+## 系统级 AI 管理
+
+系统 Agent、Provider/模型目录和租户模型策略管理统一使用普通用户登录会话。系统超级管理员必须是默认租户中启用的账号，并绑定默认租户中启用的 `R_SUPER` 角色；用户名不授予权限。其他租户的管理员不得操作这些全局资源。
+
+「AI 管理 → 模型管理」（`/ai/provider`）的动态菜单和路由按同一系统角色生成，后端仍在每次请求重新认证和授权。`/platform/ai/providers` 及其模型、连通性测试子路径接受普通系统超级管理员 access token；`/platform` 路径前缀不表示需要第二次登录。独立平台 token 对这些接口无效，其他独立平台运维接口按各自认证边界处理。
+
+全局配置管理权不自动授予模型使用权或 Agent/Tool 执行权。Provider 和模型目录保持全局作用域，租户可使用哪些模型仍由租户模型策略决定；Agent 与工具使用授权继续遵循上节规则。
+
+系统级管理请求必须提供 `X-Platform-Reason`、`X-Platform-Ticket` 和 `X-Correlation-ID`。已认证但没有系统管理权时返回 HTTP 403 和 `SYSTEM_ADMIN_ONLY`；缺少审计上下文时返回 HTTP 400 和 `PLATFORM_AUDIT_CONTEXT_REQUIRED`，不执行相应业务。授权意图独立持久化，成功操作的完成审计与配置写入使用同一事务；审计持久化失败时拒绝操作。审计记录真实用户及其租户、操作原因、工单和关联 ID，不记录提示词正文或密钥。维护客户端约束见 [AI 运维](AI-OPERATIONS.md)。
 
 ## 执行与人工确认
 
 破坏性操作、声明必须确认的工具和相应风险检测结果进入人工确认。Gateway 绑定确认对象、参数、执行身份与业务快照，并在批准后复验授权和有效状态，防止换参、重复执行和撤权后继续执行。
 
-确认编排与具体模型生成的话术分离；两阶段工具的执行入口由 Gateway 控制。原理见 [ADR-0002](adr/0002-gateway-owned-confirmation-flow.md)。人工确认只代表批准，不承诺后台任务持久执行；相关边界见 [ADR-0001](adr/0001-ai-safety-consistency-before-deferred-execution.md)。
+确认编排由 Gateway 控制。直接调用和预览后确认使用持久化的 `PreparedAction`；两阶段工具的执行入口不向模型开放。模型可以表达预览或执行意图，但模型话术、Markdown 和提示词不构成批准。批准只能来自经认证客户端的确认请求，不能在批准时替换执行工具、业务参数或预览快照。
+
+同一个 action 最多进入一次执行，拒绝、过期或已结束的动作不能恢复执行。批准及真正执行前重新检查 owner、可信租户、用户状态、当前权限、数据范围和业务快照，避免撤权后执行或重复副作用。确认只针对一次完整工具操作，不提供逐行勾选、多级审批或通用工作流。
+
+当前工具使用请求内执行路径；人工确认只代表批准，不承诺后台任务在客户端断线或服务重启后继续执行。超过同步上限的请求显式拒绝，使用者需分批处理。未来的队列、持久任务及进度协议需要独立交付，不能从确认成功推断已经具备这些能力。
+
+`ai_operation_log` 记录工具执行事实；历史消息卡片和流式事件是展示投影，不能代替授权或副作用判断。创建批次、文件等持久资源的预览不能仅因名称为“预览”而声明只读；自动重放必须符合经审计的幂等契约。
 
 工具开发需区分只读、幂等和实际副作用；输出经统一脱敏，面向客户端的展示数据不应无条件塞入模型上下文。运行 `uv run python -m tools.checks.check_ai_tools` 检查内置工具接入规则。
 
@@ -23,6 +37,8 @@ Gateway 在执行前检查 tenant、owner、当前授权和工具声明。历史
 私有附件及导出结果按 tenant/owner 鉴权。扩展名、MIME、解析资源预算、路径和所有权共同约束文件访问；上传成功不表示可以公开读取或被任意工具使用。
 
 Provider 连接走统一 [出站控制](../app/modules/ai/core/provider_egress.py)，包括允许列表、DNS/IP 验证、超时、响应大小、并发与重试边界。恶意输入检测不能证明 Prompt 注入已被完全解决；权限、数据范围和执行确认始终需要独立生效。
+
+Provider 密钥只通过创建或更新入参接收，响应以 `credentialConfigured` 表示配置状态，不返回原始或加密密钥。连通性测试使用已保存的 Provider 和所属模型配置，仍需系统管理权限、审计上下文和出站校验；持有管理角色不能绕过连接限制。
 
 ## 紧急停用
 
@@ -33,6 +49,8 @@ Provider 连接走统一 [出站控制](../app/modules/ai/core/provider_egress.p
 ## 核验入口
 
 - [认证与入口权限](../app/core/auth.py)
+- [系统角色判定](../app/core/rbac.py) / [系统管理认证与审计](../app/modules/platform/system_agent_auth.py)
+- [Provider/模型管理接口](../app/modules/platform/ai_api.py) / [权限与密钥回归](../tests/modules/platform/test_system_provider_access.py)
 - [Gateway](../app/modules/ai/agents/gateway)
 - [静态检查](../tools/checks/check_ai_tools.py)
 - [AI 回归测试](../tests/modules/ai)

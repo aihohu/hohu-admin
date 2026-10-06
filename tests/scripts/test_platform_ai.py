@@ -13,7 +13,7 @@ import tools.ops.platform_ai as cli
 def test_cli_reads_token_from_environment_and_builds_fixed_policy_route(
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv("HOHU_PLATFORM_ACCESS_TOKEN", "platform-secret-token")
+    monkeypatch.setenv("HOHU_SYSTEM_ACCESS_TOKEN", "system-access-token")
     monkeypatch.setattr(
         sys,
         "argv",
@@ -38,12 +38,12 @@ def test_cli_reads_token_from_environment_and_builds_fixed_policy_route(
 
     assert request.method == "GET"
     assert request.path == "/platform/tenants/9001/ai/model-policies"
-    assert request.headers["Authorization"] == "Bearer platform-secret-token"
-    assert "platform-secret-token" not in repr(request)
+    assert request.headers["Authorization"] == "Bearer system-access-token"
+    assert "system-access-token" not in repr(request)
 
 
 def test_cli_rejects_missing_environment_token(monkeypatch) -> None:
-    monkeypatch.delenv("HOHU_PLATFORM_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("HOHU_SYSTEM_ACCESS_TOKEN", raising=False)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -62,7 +62,7 @@ def test_cli_rejects_missing_environment_token(monkeypatch) -> None:
         ],
     )
 
-    with pytest.raises(ValueError, match="HOHU_PLATFORM_ACCESS_TOKEN"):
+    with pytest.raises(ValueError, match="HOHU_SYSTEM_ACCESS_TOKEN"):
         cli.build_request(cli.parse_arguments())
 
 

@@ -154,4 +154,4 @@ Cross-module reusable Pydantic types live in `app/schemas/types.py` (e.g., `Loca
 
 ## Documentation publication
 
-Follow [documentation policy](./docs/DOCUMENTATION.md). Keep draft specs, plans, reports and prototypes under ignored `.local/docs/`; publish maintained guides and necessary ADRs only. Run `uv run python -m tools.checks.check_docs` before submitting documentation.
+Follow [documentation policy](./docs/DOCUMENTATION.md). ADRs are internal by default; keep personal drafts, specs, plans, reports, ADR archives and prototypes under ignored `.local/docs/`. Maintain long-lived team decisions in a private repository or controlled document space. Publish current behavior, contracts, compatibility and limitations in maintained guides without links to internal records. Run `uv run python -m tools.checks.check_docs` before submitting documentation.

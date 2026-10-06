@@ -22,7 +22,6 @@ from app.modules.ai.api.resume import router as resume_router
 from app.modules.ai.api.role_agent import router as role_agent_router
 from app.modules.ai.api.routing_feedback import query_router as feedback_query_router
 from app.modules.ai.api.routing_feedback import router as feedback_router
-from app.modules.auth.service import require_platform_context
 from app.modules.platform.ai_api import router as platform_ai_router
 from app.modules.platform.system_agent_auth import require_system_agent_context
 
@@ -120,15 +119,15 @@ def _permission_codes(route: APIRoute) -> set[str]:
     return codes
 
 
-def test_provider_model_management_endpoint_requires_platform_context() -> None:
+def test_provider_model_management_endpoint_requires_system_role_context() -> None:
     route = _route(platform_ai_router, "/ai/providers/models", "GET")
-    assert require_platform_context in _dependency_calls(route)
+    assert require_system_agent_context in _dependency_calls(route)
     assert not _permission_codes(route)
 
 
-def test_saved_provider_test_endpoint_requires_platform_context() -> None:
+def test_saved_provider_test_endpoint_requires_system_role_context() -> None:
     route = _route(platform_ai_router, "/ai/providers/{provider_id}/test", "POST")
-    assert require_platform_context in _dependency_calls(route)
+    assert require_system_agent_context in _dependency_calls(route)
     assert not any(
         isinstance(candidate, APIRoute)
         and candidate.path == "/test-model"
