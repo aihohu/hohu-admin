@@ -195,7 +195,10 @@ jobs:
   acr:
     name: Sync and anonymously verify ACR image
     needs: docker
-    if: github.repository == 'aihohu/hohu-admin' && vars.ACR_MIRROR_ENABLED == 'true'
+    # Manual builds skip qualification; only the direct build must succeed.
+    if: >-
+      ${{ !cancelled() && needs.docker.result == 'success' &&
+          github.repository == 'aihohu/hohu-admin' && vars.ACR_MIRROR_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     environment: docker

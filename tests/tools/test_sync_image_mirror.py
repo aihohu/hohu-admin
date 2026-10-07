@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 TOOL = Path(__file__).resolve().parents[2] / "tools/ops/sync_image_mirror.py"
@@ -42,6 +44,59 @@ DIGEST = "sha256:" + hashlib.sha256(RAW).hexdigest()
 
 
 class ImageMirrorTests(unittest.TestCase):
+    def test_acr_job_allows_skipped_ancestor_only_after_successful_build(self):
+        workflow = (TOOL.parents[2] / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        match = re.search(
+            r"^  acr:\n.*?^    if: (.*?)(?=^    runs-on:)",
+            workflow,
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        expression = match[1].strip().removeprefix(">-").strip()
+        expression = expression.removeprefix("${{").removesuffix("}}").strip()
+        has_status_check = re.search(
+            r"\b(?:always|cancelled|success|failure)\(\)", expression
+        )
+        expression = expression.replace("&&", " and ").replace("||", " or ")
+        expression = re.sub(r"!(?!=)", "not ", expression)
+        expression = " ".join(expression.split())
+        repository = f"aihohu/{TOOL.parents[2].name}"
+        cases = (
+            ("skipped", "success", False, "true", repository, True),
+            ("success", "success", False, "true", repository, True),
+            ("skipped", "failure", False, "true", repository, False),
+            ("skipped", "skipped", False, "true", repository, False),
+            ("skipped", "success", True, "true", repository, False),
+            ("success", "success", False, "false", repository, False),
+            ("success", "success", False, "true", "fork/hohu-admin", False),
+        )
+        for ancestor, build, cancelled, enabled, repo, expected in cases:
+            with self.subTest(
+                ancestor=ancestor,
+                build=build,
+                cancelled=cancelled,
+                enabled=enabled,
+                repository=repo,
+            ):
+                success = ancestor == build == "success" and not cancelled
+                # GitHub implicitly adds success() unless if uses a status function.
+                actual = bool(has_status_check or success) and eval(
+                    expression,
+                    {"__builtins__": {}},
+                    {
+                        "always": lambda: True,
+                        "cancelled": lambda value=cancelled: value,
+                        "success": lambda value=success: value,
+                        "failure": lambda states=(ancestor, build): "failure" in states,
+                        "github": SimpleNamespace(repository=repo),
+                        "vars": SimpleNamespace(ACR_MIRROR_ENABLED=enabled),
+                        "needs": SimpleNamespace(docker=SimpleNamespace(result=build)),
+                    },
+                )
+                self.assertEqual(actual, expected)
+
     def setUp(self):
         parent = TOOL.parents[2] / ".local/tests/image-mirror"
         parent.mkdir(parents=True, exist_ok=True)
