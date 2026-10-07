@@ -3,6 +3,14 @@ name: Release
 on:
   release:
     types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-publish-${{ github.repository }}
+  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
@@ -11,6 +19,7 @@ env:
 jobs:
   qualification:
     name: Hosted release qualification (release profile)
+    if: github.repository == 'aihohu/hohu-admin' && github.event_name == 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -85,14 +94,66 @@ jobs:
   docker:
     name: Build and Push Docker Image
     needs: qualification
+    # A skipped release qualification must not skip the manual test build.
+    if: >-
+      ${{ always() && !cancelled() && github.repository == 'aihohu/hohu-admin' &&
+          ((github.event_name == 'release' && needs.qualification.result == 'success') ||
+           (github.event_name == 'workflow_dispatch' &&
+            github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) }}
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     environment: docker
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      tags: ${{ steps.meta.outputs.tags || steps.test_tag.outputs.tags }}
+      commit: ${{ steps.source.outputs.sha }}
     permissions:
       contents: read
       packages: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Record source commit
+        id: source
+        shell: bash
+        run: printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify standalone image mirror tooling
+        run: python3 -B -m unittest discover -s tests/tools -p test_sync_image_mirror.py -v
+
+      - name: Validate manual ACR test configuration
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          ACR_MIRROR_ENABLED: ${{ vars.ACR_MIRROR_ENABLED }}
+          ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
+          ACR_REPOSITORY: ${{ vars.ACR_REPOSITORY }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ "$ACR_MIRROR_ENABLED" != 'true' || -z "$ACR_USERNAME" || -z "$ACR_PASSWORD" ]]; then
+            echo '::error::Configure ACR_USERNAME, ACR_PASSWORD and set ACR_MIRROR_ENABLED=true before running a manual mirror test.'
+            exit 1
+          fi
+          python3 tools/ops/sync_image_mirror.py validate \
+            --source "$REGISTRY/$IMAGE_NAME" --registry "$ACR_REGISTRY" --repository "$ACR_REPOSITORY"
+
+      - name: Generate isolated test image tag
+        id: test_tag
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          tag="$(python3 tools/ops/sync_image_mirror.py test-tag --sha "$SOURCE_SHA" --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT")"
+          printf 'tags=%s/%s:%s\n' "$REGISTRY" "$IMAGE_NAME" "$tag" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -109,6 +170,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
+        if: github.event_name == 'release'
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
@@ -119,12 +181,92 @@ jobs:
             latest=true
 
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ steps.meta.outputs.tags || steps.test_tag.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  acr:
+    name: Sync and anonymously verify ACR image
+    needs: docker
+    if: github.repository == 'aihohu/hohu-admin' && vars.ACR_MIRROR_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: docker
+    permissions:
+      contents: read
+      packages: read
+    env:
+      SOURCE_IMAGE: ghcr.io/${{ github.repository }}
+      IMAGE_DIGEST: ${{ needs.docker.outputs.digest }}
+      IMAGE_TAGS: ${{ needs.docker.outputs.tags }}
+      ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
+      ACR_REPOSITORY: ${{ vars.ACR_REPOSITORY }}
+      REGISTRY_AUTH_FILE: ${{ github.workspace }}/.local/private/acr-mirror/auth.json
+      MIRROR_WORK_DIR: ${{ github.workspace }}/.local/tmp/acr-mirror
+      MIRROR_REPORT: ${{ github.workspace }}/.local/reports/acr-mirror.json
+    steps:
+      - name: Check out the built source's mirror tooling
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.docker.outputs.commit }}
+          persist-credentials: false
+
+      - name: Install Skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes skopeo
+
+      - name: Validate and authenticate registries
+        shell: bash
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_PASSWORD: ${{ github.token }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          set -euo pipefail
+          python3 tools/ops/sync_image_mirror.py validate \
+            --source "$SOURCE_IMAGE" --registry "$ACR_REGISTRY" --repository "$ACR_REPOSITORY"
+          if [[ -z "$ACR_USERNAME" || -z "$ACR_PASSWORD" ]]; then
+            echo '::error::Configure ACR_USERNAME and ACR_PASSWORD.'
+            exit 1
+          fi
+          umask 077
+          mkdir -p "$(dirname "$REGISTRY_AUTH_FILE")"
+          printf '%s' "$GHCR_PASSWORD" | skopeo login --tls-verify=true --authfile "$REGISTRY_AUTH_FILE" --username "$GHCR_USERNAME" --password-stdin ghcr.io
+          printf '%s' "$ACR_PASSWORD" | skopeo login --tls-verify=true --authfile "$REGISTRY_AUTH_FILE" --username "$ACR_USERNAME" --password-stdin "$ACR_REGISTRY"
+
+      - name: Copy pinned image and verify anonymous downloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$MIRROR_WORK_DIR"
+          printf '%s\n' "$IMAGE_TAGS" > "$MIRROR_WORK_DIR/tags.txt"
+          python3 tools/ops/sync_image_mirror.py sync \
+            --source "$SOURCE_IMAGE" --registry "$ACR_REGISTRY" --repository "$ACR_REPOSITORY" \
+            --digest "$IMAGE_DIGEST" --tags-file "$MIRROR_WORK_DIR/tags.txt" \
+            --work-dir "$MIRROR_WORK_DIR" --report "$MIRROR_REPORT"
+          printf '### ACR image mirror\n\n```json\n' >> "$GITHUB_STEP_SUMMARY"
+          cat "$MIRROR_REPORT" >> "$GITHUB_STEP_SUMMARY"
+          printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload mirror verification report
+        uses: actions/upload-artifact@v4
+        with:
+          name: acr-mirror-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .local/reports/acr-mirror.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove temporary registry credentials
+        if: always()
+        shell: bash
+        run: rm -f -- "$REGISTRY_AUTH_FILE"
