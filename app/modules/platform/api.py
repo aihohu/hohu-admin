@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.base_response import ResponseModel
 from app.core.exceptions import AuthenticationException
 from app.core.tenant import PlatformContext
-from app.db.session import get_db
+from app.db.session import get_platform_db
 from app.modules.auth.service import platform_bearer_scheme, require_platform_context
 from app.modules.platform.auth import authenticate_platform_token
 from app.modules.platform.schemas import (
@@ -52,17 +52,16 @@ IdempotencyKey = Annotated[
 @router.post("/login", summary="平台控制面登录")
 async def platform_login(
     credentials: PlatformLoginCredentials,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
 ) -> ResponseModel[PlatformTokenResponse]:
     token = await platform_auth_service.authenticate(db, credentials)
-    await db.commit()
     return ResponseModel.success(data=PlatformTokenResponse(token=token))
 
 
 @router.get("/me", summary="读取当前平台身份与实时权限")
 async def platform_identity(
     credentials: HTTPAuthorizationCredentials | None = Depends(platform_bearer_scheme),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
 ) -> ResponseModel[PlatformIdentityOut]:
     if credentials is None:
         raise AuthenticationException(
@@ -87,8 +86,8 @@ async def prepare_tenant(
     payload: PlatformTenantCreate,
     idempotency_key: IdempotencyKey,
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     tenant_id = platform.target_tenant_id
     if tenant_id is None:  # defensive: dependency always preallocates this target
@@ -113,8 +112,8 @@ async def prepare_tenant(
 async def list_tenants(
     request: Request,
     query: PlatformTenantQuery = Depends(),
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     page = await tenant_lifecycle_service.list_tenants(
         db,
@@ -140,8 +139,8 @@ async def list_tenants(
 async def get_tenant(
     tenant_id: TenantId,
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     tenant = await tenant_lifecycle_service.get_tenant(
         db, tenant_id=tenant_id, platform=platform
@@ -158,8 +157,8 @@ async def get_tenant(
 async def activate_tenant(
     tenant_id: TenantId,
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     tenant = await tenant_lifecycle_service.activate_tenant(
         db, tenant_id=tenant_id, platform=platform
@@ -176,8 +175,8 @@ async def activate_tenant(
 async def disable_tenant(
     tenant_id: TenantId,
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     tenant = await tenant_lifecycle_service.disable_tenant(
         db, tenant_id=tenant_id, platform=platform
@@ -196,8 +195,8 @@ async def bootstrap_tenant(
     payload: PlatformTenantBootstrapRequest,
     idempotency_key: IdempotencyKey,
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     result = await tenant_bootstrap_service.bootstrap(
         db,
@@ -231,7 +230,7 @@ async def list_tenant_operation_logs(
     tenant_id: TenantId,
     request: Request,
     query: PlatformSupportAuditQuery = Depends(),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
     platform: PlatformContext = Depends(require_platform_context),
 ):
     page = await tenant_support_service.list_operation_logs(
@@ -255,7 +254,7 @@ async def list_tenant_login_logs(
     tenant_id: TenantId,
     request: Request,
     query: PlatformSupportAuditQuery = Depends(),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
     platform: PlatformContext = Depends(require_platform_context),
 ):
     page = await tenant_support_service.list_login_logs(
@@ -279,7 +278,7 @@ async def preview_tenant_audit_retention(
     tenant_id: TenantId,
     payload: PlatformRetentionPreviewRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
     platform: PlatformContext = Depends(require_platform_context),
 ):
     result = await tenant_support_service.preview_retention(
@@ -301,7 +300,7 @@ async def purge_tenant_audit_retention(
     tenant_id: TenantId,
     payload: PlatformRetentionPurgeRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
     platform: PlatformContext = Depends(require_platform_context),
 ):
     result = await tenant_support_service.purge_retention(

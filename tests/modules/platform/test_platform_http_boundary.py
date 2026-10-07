@@ -16,6 +16,7 @@ from app.modules.ai.service.tenant_model_policy_admin_service import (
 )
 from app.modules.auth import service as auth_service
 from app.modules.auth.service import get_current_user
+from app.modules.platform import audit as platform_audit
 from app.modules.platform import system_agent_auth
 from app.modules.platform.constants import (
     PLATFORM_AI_READ,
@@ -142,10 +143,12 @@ async def test_platform_http_authorizes_before_service_and_appends_completion(
     )
     authorized = AsyncMock(return_value=5001)
     completed = AsyncMock(return_value=5002)
+    fallback = AsyncMock()
     monkeypatch.setattr(tenant_support_service, "list_operation_logs", business)
     monkeypatch.setattr(auth_service, "persist_platform_audit", authorized)
+    monkeypatch.setattr(platform_audit, "add_platform_completion", completed)
     monkeypatch.setattr(
-        platform_audit_middleware, "persist_platform_completion", completed
+        platform_audit_middleware, "persist_platform_completion", fallback
     )
     app.dependency_overrides[get_db] = lambda: db
     token = create_platform_access_token(subject="81", principal_version=2)
@@ -163,6 +166,9 @@ async def test_platform_http_authorizes_before_service_and_appends_completion(
     authorized.assert_awaited_once()
     assert authorized.await_args.kwargs["event_type"] == "authorized"
     completed.assert_awaited_once()
+    assert completed.await_args.args == (db,)
+    db.commit.assert_awaited_once()
+    fallback.assert_not_awaited()
     assert completed.await_args.kwargs["authorization_audit_id"] == 5001
     assert authorized.await_args.kwargs["request_summary"] == {"queryKeyCount": 0}
 
@@ -225,6 +231,8 @@ async def test_platform_completion_failure_log_does_not_render_exception_secrets
         auth_service, "persist_platform_audit", AsyncMock(return_value=9)
     )
     completion = AsyncMock(side_effect=RuntimeError("password=abcdefghijklmnop123456"))
+    staged = AsyncMock(side_effect=RuntimeError("password=abcdefghijklmnop123456"))
+    monkeypatch.setattr(platform_audit, "add_platform_completion", staged)
     monkeypatch.setattr(
         platform_audit_middleware, "persist_platform_completion", completion
     )
@@ -242,6 +250,10 @@ async def test_platform_completion_failure_log_does_not_render_exception_secrets
     assert response.status_code == 503
     assert response.json()["errorCode"] == "PLATFORM_AUDIT_UNAVAILABLE"
     assert completion.await_count == 2
+    staged.assert_awaited_once()
+    assert staged.await_args.args == (db,)
+    db.commit.assert_not_awaited()
+    db.rollback.assert_awaited_once()
     assert "abcdefghijklmnop123456" not in caplog.text
     assert "RuntimeError" in caplog.text
 
@@ -345,9 +357,7 @@ async def test_support_http_binds_route_target_and_returns_no_private_fields(
     completed = AsyncMock(return_value=5202)
     monkeypatch.setattr(tenant_support_service, "list_operation_logs", query)
     monkeypatch.setattr(auth_service, "persist_platform_audit", authorized)
-    monkeypatch.setattr(
-        platform_audit_middleware, "persist_platform_completion", completed
-    )
+    monkeypatch.setattr(platform_audit, "add_platform_completion", completed)
     app.dependency_overrides[get_db] = lambda: db
     token = create_platform_access_token(subject="85", principal_version=1)
 

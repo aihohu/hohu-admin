@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.base_response import PageResult, ResponseModel
 from app.core.exceptions import BusinessRuleException
 from app.core.tenant import PlatformContext
-from app.db.session import get_db
+from app.db.session import get_platform_db
 from app.modules.ai.core.provider_egress import provider_egress
 from app.modules.ai.schemas.agent_admin import (
     AgentAdminDetailItem,
@@ -53,8 +53,8 @@ def _record_count(request: Request, count: int) -> None:
 )
 async def list_agents(
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     items = await agent_admin_service.list_agents(db, platform=platform)
     _record_count(request, len(items))
@@ -68,8 +68,8 @@ async def list_agents(
 )
 async def list_agent_model_options(
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     items = await model_service.list_options(db, platform=platform)
     _record_count(request, len(items))
@@ -84,8 +84,8 @@ async def list_agent_model_options(
 async def get_agent(
     agent_id: PositiveId,
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     item = await agent_admin_service.get_agent(db, agent_id, platform=platform)
     _record_count(request, 1)
@@ -101,8 +101,8 @@ async def update_agent(
     agent_id: PositiveId,
     payload: AgentAdminUpdateReq,
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     before = await agent_admin_service.get_agent(db, agent_id, platform=platform)
     item = await agent_admin_service.update_agent(
@@ -135,8 +135,8 @@ async def update_agent(
 async def list_available_models(
     request: Request,
     capability: str | None = None,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     rows = await model_service.list_available_with_provider(
         db, capability, platform=platform
@@ -173,8 +173,8 @@ async def list_available_models(
 async def list_providers(
     request: Request,
     query: ProviderQuery = Depends(),
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     page = await provider_service.get_list(db, query, platform=platform)
     _record_count(request, len(page.records))
@@ -189,8 +189,8 @@ async def list_providers(
 async def create_provider(
     payload: ProviderCreate,
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     provider = await provider_service.create(db, payload, platform=platform)
     await db.flush()
@@ -209,8 +209,8 @@ async def update_provider(
     provider_id: PositiveId,
     payload: ProviderUpdate,
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     provider = await provider_service.update(
         db, provider_id, payload, platform=platform
@@ -226,8 +226,8 @@ async def update_provider(
 async def delete_provider(
     provider_id: PositiveId,
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     await provider_service.delete(db, provider_id, platform=platform)
     _record_count(request, 1)
@@ -242,8 +242,8 @@ async def delete_provider(
 async def list_provider_models(
     provider_id: PositiveId,
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     provider = await provider_service.get_by_id(db, provider_id, platform=platform)
     models = await model_service.get_by_provider(db, provider_id, platform=platform)
@@ -273,8 +273,8 @@ async def create_model(
     provider_id: PositiveId,
     payload: ModelCreate,
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     model = await model_service.create(
         db,
@@ -316,8 +316,8 @@ async def update_model(
     model_id: PositiveId,
     payload: ModelUpdate,
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     await _require_provider_model(
         db, provider_id=provider_id, model_id=model_id, platform=platform
@@ -338,8 +338,8 @@ async def delete_model(
     provider_id: PositiveId,
     model_id: PositiveId,
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     await _require_provider_model(
         db, provider_id=provider_id, model_id=model_id, platform=platform
@@ -357,8 +357,8 @@ async def test_provider_model(
     provider_id: PositiveId,
     payload: ProviderTestRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     result = await provider_service.test_connection(
         db, provider_id, int(payload.model_id), platform=platform
@@ -375,8 +375,8 @@ async def test_provider_model(
 async def list_tenant_model_policies(
     tenant_id: TenantId,
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     rows = await tenant_model_policy_admin_service.list(
         db, tenant_id=tenant_id, platform=platform
@@ -396,8 +396,8 @@ async def put_tenant_model_policy(
     model_id: PositiveId,
     payload: PlatformTenantModelPolicyPut,
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     row = await tenant_model_policy_admin_service.put(
         db,
@@ -419,8 +419,8 @@ async def delete_tenant_model_policy(
     tenant_id: TenantId,
     model_id: PositiveId,
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    platform: PlatformContext = Depends(require_system_agent_context),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
 ):
     await tenant_model_policy_admin_service.delete(
         db, tenant_id=tenant_id, model_id=model_id, platform=platform

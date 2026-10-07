@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import AuthorizationException, BusinessException
 from app.core.rbac import is_system_admin
 from app.core.tenant import PlatformContext
-from app.db.session import AsyncSessionLocal, get_db
+from app.db.session import AsyncSessionLocal, get_platform_db
 from app.modules.auth.service import get_current_user, resolve_platform_target
 from app.modules.platform.audit import (
     authorize_platform_request,
@@ -84,7 +84,7 @@ async def persist_system_agent_audit(**values) -> int:
 async def require_system_agent_context(
     request: Request,
     user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
 ) -> AsyncGenerator[PlatformContext]:
     if not is_system_admin(user):
         raise AuthorizationException(
@@ -157,7 +157,7 @@ async def require_system_agent_context(
         )
         raise
     else:
-        # get_db commits this completion atomically with the Agent update.
+        # get_platform_db commits this audit with business data before responding.
         try:
             db.add(
                 system_agent_audit_record(
