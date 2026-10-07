@@ -44,6 +44,20 @@ DIGEST = "sha256:" + hashlib.sha256(RAW).hexdigest()
 
 
 class ImageMirrorTests(unittest.TestCase):
+    def test_shared_build_disables_attestations_and_keeps_both_architectures(self):
+        workflow = (TOOL.parents[2] / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        build_step = workflow.split("- name: Build and push Docker image\n", 1)[1]
+        build_step = build_step.split("\n  acr:", 1)[0]
+        inputs = dict(re.findall(r"^          ([a-z-]+): (.*)$", build_step, re.M))
+        # BuildKit adds provenance by default; ACR rejects its OCI empty config.
+        self.assertEqual(inputs.get("provenance"), "false")
+        self.assertEqual(inputs.get("sbom"), "false")
+        self.assertEqual(inputs["platforms"], "linux/amd64,linux/arm64")
+        self.assertEqual(inputs["push"], "true")
+        self.assertIn("steps.build.outputs.digest", workflow)
+
     def test_acr_job_allows_skipped_ancestor_only_after_successful_build(self):
         workflow = (TOOL.parents[2] / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
