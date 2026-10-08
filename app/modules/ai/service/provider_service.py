@@ -28,6 +28,8 @@ from app.modules.ai.models.model_policy import TenantAiModelPolicy
 from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.schemas.provider import (
     ProviderCreate,
+    ProviderModelTestDraftRequest,
+    ProviderModelTestDraftResult,
     ProviderOut,
     ProviderTestResult,
     ProviderUpdate,
@@ -202,6 +204,76 @@ class ProviderService:
         agent = Agent(model_instance, instructions="Reply with OK")
         await agent.run("Say OK")
 
+    async def _probe_connection(
+        self,
+        *,
+        provider_code: str,
+        provider_base_url: str | None,
+        provider_config: dict | None,
+        model_name: str,
+        model_base_url: str | None,
+        model_config: dict | None,
+        api_key: str,
+        provider_id: int | None = None,
+        model_id: int | None = None,
+    ) -> None:
+        provider_egress.validate_adapter_config(provider_config)
+        provider_egress.validate_adapter_config(model_config)
+        await provider_egress.validate_destination(provider_code, provider_base_url)
+        if model_base_url:
+            await provider_egress.validate_destination(provider_code, model_base_url)
+        try:
+            instance = create_model(
+                provider_code,
+                model_name,
+                api_key,
+                model_base_url or provider_base_url,
+                model_settings=generation_settings(model_config),
+            )
+            await self._probe_model(instance)
+        except BusinessException:
+            raise
+        except Exception:
+            logger.warning(
+                "AI Provider test failed provider_id=%s model_id=%s category=upstream",
+                provider_id,
+                model_id,
+            )
+            raise provider_upstream_error() from None
+
+    async def test_draft_connection(
+        self,
+        db: AsyncSession,
+        data: ProviderModelTestDraftRequest,
+        *,
+        platform: PlatformContext,
+    ) -> ProviderModelTestDraftResult:
+        require_platform_permission(platform, PLATFORM_AI_WRITE)
+        provider = (
+            await self._get_by_id(db, int(data.provider_id))
+            if data.provider_id is not None
+            else None
+        )
+        api_key = data.api_key or (
+            decrypt_value(provider.api_key) if provider and provider.api_key else None
+        )
+        if not api_key:
+            raise BusinessRuleException(
+                "请先填写 API Key 再测试模型",
+                error_code="AI_PROVIDER_TEST_KEY_REQUIRED",
+            )
+        await self._probe_connection(
+            provider_code=data.provider_code,
+            provider_base_url=data.base_url,
+            provider_config=data.config,
+            model_name=data.model.name,
+            model_base_url=data.model.base_url,
+            model_config=data.model.config,
+            api_key=api_key,
+            provider_id=provider.provider_id if provider else None,
+        )
+        return ProviderModelTestDraftResult()
+
     async def test_connection(
         self,
         db: AsyncSession,
@@ -224,33 +296,17 @@ class ProviderService:
                 "模型不属于指定 Provider",
                 error_code="AI_PROVIDER_MODEL_MISMATCH",
             )
-        provider_egress.validate_adapter_config(provider.config)
-        provider_egress.validate_adapter_config(model.config)
-        await provider_egress.validate_destination(
-            provider.provider_code, provider.base_url
+        await self._probe_connection(
+            provider_code=provider.provider_code,
+            provider_base_url=provider.base_url,
+            provider_config=provider.config,
+            model_name=model.name,
+            model_base_url=model.base_url,
+            model_config=model.config,
+            api_key=decrypt_value(provider.api_key),
+            provider_id=provider.provider_id,
+            model_id=model.model_id,
         )
-        if model.base_url:
-            await provider_egress.validate_destination(
-                provider.provider_code, model.base_url
-            )
-        try:
-            instance = create_model(
-                provider.provider_code,
-                model.name,
-                decrypt_value(provider.api_key),
-                model.base_url or provider.base_url,
-                model_settings=generation_settings(model.config),
-            )
-            await self._probe_model(instance)
-        except BusinessException:
-            raise
-        except Exception:
-            logger.warning(
-                "AI Provider test failed provider_id=%s model_id=%s category=upstream",
-                provider.provider_id,
-                model.model_id,
-            )
-            raise provider_upstream_error() from None
         return ProviderTestResult(
             provider_id=provider.provider_id,
             model_id=model.model_id,

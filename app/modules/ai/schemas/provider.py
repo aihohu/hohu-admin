@@ -1,10 +1,12 @@
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from pydantic.alias_generators import to_camel
 
 from app.core.config import settings
 from app.modules.ai.schemas.config_projection import redact_config, redact_url
+from app.modules.ai.schemas.model import ModelCreate
 
 
 class ProviderCreate(BaseModel):
@@ -107,6 +109,39 @@ class ProviderTestRequest(BaseModel):
         populate_by_name=True,
         extra="forbid",
     )
+
+
+class ProviderModelTestDraftRequest(BaseModel):
+    """测试当前 Provider 和模型表单，不写入配置。"""
+
+    provider_id: str | None = Field(
+        None,
+        strict=True,
+        pattern=r"^[1-9][0-9]*$",
+        max_length=32,
+    )
+    provider_code: str = Field(..., min_length=1, max_length=50)
+    api_key: str | None = Field(None, max_length=500)
+    base_url: str | None = Field(None, max_length=500)
+    config: dict | None = None
+    model: ModelCreate
+
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    @field_validator("provider_id")
+    @classmethod
+    def validate_provider_id(cls, value: str | None) -> str | None:
+        if value is not None and int(value) > 9_223_372_036_854_775_807:
+            raise ValueError("provider ID is out of range")
+        return value
+
+
+class ProviderModelTestDraftResult(BaseModel):
+    status: Literal["ok"] = "ok"
 
 
 class ProviderTestResult(BaseModel):

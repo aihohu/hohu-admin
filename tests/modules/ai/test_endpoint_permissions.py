@@ -128,6 +128,8 @@ def test_provider_model_management_endpoint_requires_system_role_context() -> No
 def test_saved_provider_test_endpoint_requires_system_role_context() -> None:
     route = _route(platform_ai_router, "/ai/providers/{provider_id}/test", "POST")
     assert require_system_agent_context in _dependency_calls(route)
+    draft_route = _route(platform_ai_router, "/ai/providers/test", "POST")
+    assert require_system_agent_context in _dependency_calls(draft_route)
     assert not any(
         isinstance(candidate, APIRoute)
         and candidate.path == "/test-model"

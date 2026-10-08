@@ -20,6 +20,8 @@ from app.modules.ai.schemas.config_projection import redact_url
 from app.modules.ai.schemas.model import ModelCreate, ModelOption, ModelOut, ModelUpdate
 from app.modules.ai.schemas.provider import (
     ProviderCreate,
+    ProviderModelTestDraftRequest,
+    ProviderModelTestDraftResult,
     ProviderOut,
     ProviderQuery,
     ProviderTestRequest,
@@ -349,6 +351,24 @@ async def delete_model(
     await model_service.delete(db, model_id, platform=platform)
     _record_count(request, 1)
     return ResponseModel.success()
+
+
+@router.post(
+    "/ai/providers/test",
+    response_model=ResponseModel[ProviderModelTestDraftResult],
+    summary="平台：测试当前 Provider 与模型表单",
+)
+async def test_provider_model_draft(
+    payload: ProviderModelTestDraftRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+):
+    result = await provider_service.test_draft_connection(
+        db, payload, platform=platform
+    )
+    _record_count(request, 1)
+    return ResponseModel.success(data=result)
 
 
 @router.post(

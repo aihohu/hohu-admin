@@ -16,6 +16,7 @@ from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.schemas.model import ModelCreate
 from app.modules.ai.schemas.provider import (
     ProviderCreate,
+    ProviderModelTestDraftRequest,
     ProviderQuery,
     ProviderTestRequest,
 )
@@ -59,9 +60,10 @@ def _routes(path: str, method: str) -> list[APIRoute]:
     ]
 
 
-def test_provider_test_endpoint_references_only_saved_objects() -> None:
+def test_provider_test_endpoints_validate_saved_ids_and_current_form() -> None:
     assert _routes("/test-model", "POST") == []
     assert len(_routes("/ai/providers/{provider_id}/test", "POST")) == 1
+    assert len(_routes("/ai/providers/test", "POST")) == 1
 
     request = ProviderTestRequest.model_validate({"modelId": "123"})
     assert request.model_id == "123"
@@ -71,6 +73,217 @@ def test_provider_test_endpoint_references_only_saved_objects() -> None:
         ProviderTestRequest.model_validate(
             {"modelId": "123", "baseUrl": "https://evil.example"}
         )
+
+    draft = ProviderModelTestDraftRequest.model_validate(
+        {
+            "providerCode": "openai",
+            "apiKey": "draft-key",
+            "baseUrl": "https://api.openai.com/v1",
+            "model": {"name": "draft-model", "capabilities": ["text"]},
+        }
+    )
+    assert draft.provider_id is None
+    assert draft.model.name == "draft-model"
+    with pytest.raises(ValueError):
+        ProviderModelTestDraftRequest.model_validate(
+            {
+                "providerId": 123,
+                "providerCode": "openai",
+                "model": {"name": "draft-model", "capabilities": ["text"]},
+            }
+        )
+    with pytest.raises(ValueError):
+        ProviderModelTestDraftRequest.model_validate(
+            {
+                "providerId": "9223372036854775808",
+                "providerCode": "openai",
+                "model": {"name": "draft-model", "capabilities": ["text"]},
+            }
+        )
+
+
+async def test_current_form_probe_uses_unsaved_provider_and_model_without_writing(
+    db_session, monkeypatch
+) -> None:
+    captured = {}
+    marker = object()
+
+    def build_model(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return marker
+
+    async def probe(model_instance):
+        assert model_instance is marker
+
+    monkeypatch.setattr(
+        "app.modules.ai.service.provider_service.create_model", build_model
+    )
+    monkeypatch.setattr(provider_service, "_probe_model", probe)
+    request = ProviderModelTestDraftRequest.model_validate(
+        {
+            "providerCode": "openai",
+            "apiKey": "draft-key",
+            "baseUrl": "https://api.openai.com/v1",
+            "model": {
+                "name": "unsaved-model",
+                "capabilities": ["text"],
+                "baseUrl": "https://api.openai.com/v1",
+                "config": {"generation": {"temperature": 0.4}},
+            },
+        }
+    )
+
+    result = await provider_service.test_draft_connection(
+        db_session, request, platform=PLATFORM
+    )
+
+    assert result.model_dump(by_alias=True) == {"status": "ok"}
+    assert captured["args"] == (
+        "openai",
+        "unsaved-model",
+        "draft-key",
+        "https://api.openai.com/v1",
+    )
+    assert captured["kwargs"]["model_settings"] is not None
+    assert not db_session.new
+
+
+async def test_current_form_probe_reuses_saved_key_but_tests_unsaved_values(
+    db_session, monkeypatch
+) -> None:
+    provider, _model = await _seed_provider_and_model(db_session)
+    captured = {}
+
+    def build_model(*args, **_kwargs):
+        captured["args"] = args
+        return object()
+
+    async def probe(_model_instance):
+        return None
+
+    monkeypatch.setattr(
+        "app.modules.ai.service.provider_service.create_model", build_model
+    )
+    monkeypatch.setattr(provider_service, "_probe_model", probe)
+    request = ProviderModelTestDraftRequest.model_validate(
+        {
+            "providerId": str(provider.provider_id),
+            "providerCode": "deepseek",
+            "apiKey": "",
+            "baseUrl": "https://api.deepseek.com/v1",
+            "model": {"name": "edited-model", "capabilities": ["text"]},
+        }
+    )
+
+    await provider_service.test_draft_connection(db_session, request, platform=PLATFORM)
+
+    assert captured["args"] == (
+        "deepseek",
+        "edited-model",
+        "test-key",
+        "https://api.deepseek.com/v1",
+    )
+
+
+async def test_current_form_probe_requires_key_and_rejects_private_draft_url(
+    db_session, monkeypatch
+) -> None:
+    called = False
+
+    async def probe(_model_instance):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(provider_service, "_probe_model", probe)
+    base = {
+        "providerCode": "openai",
+        "model": {"name": "draft-model", "capabilities": ["text"]},
+    }
+    with pytest.raises(BusinessException) as no_key:
+        await provider_service.test_draft_connection(
+            db_session,
+            ProviderModelTestDraftRequest.model_validate(base),
+            platform=PLATFORM,
+        )
+    assert no_key.value.error_code == "AI_PROVIDER_TEST_KEY_REQUIRED"
+
+    with pytest.raises(BusinessException) as blocked:
+        await provider_service.test_draft_connection(
+            db_session,
+            ProviderModelTestDraftRequest.model_validate(
+                {**base, "apiKey": "draft-key", "baseUrl": "http://127.0.0.1:11434"}
+            ),
+            platform=PLATFORM,
+        )
+    assert blocked.value.error_code == "AI_PROVIDER_URL_FORBIDDEN"
+    assert called is False
+
+
+async def test_current_form_probe_checks_model_url_and_adapter_config(
+    db_session, monkeypatch
+) -> None:
+    called = False
+
+    async def probe(_model_instance):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(provider_service, "_probe_model", probe)
+    base = {
+        "providerCode": "openai",
+        "apiKey": "draft-key",
+        "model": {"name": "draft-model", "capabilities": ["text"]},
+    }
+    for draft in (
+        {**base, "model": {**base["model"], "baseUrl": "http://169.254.169.254"}},
+        {**base, "config": {"headers": {"Authorization": "Bearer secret"}}},
+    ):
+        with pytest.raises(BusinessException) as blocked:
+            await provider_service.test_draft_connection(
+                db_session,
+                ProviderModelTestDraftRequest.model_validate(draft),
+                platform=PLATFORM,
+            )
+        assert blocked.value.error_code == "AI_PROVIDER_URL_FORBIDDEN"
+    assert called is False
+
+
+async def test_current_form_probe_requires_write_permission_and_redacts_upstream_failure(
+    db_session, monkeypatch
+) -> None:
+    request = ProviderModelTestDraftRequest.model_validate(
+        {
+            "providerCode": "openai",
+            "apiKey": "draft-key",
+            "model": {"name": "draft-model", "capabilities": ["text"]},
+        }
+    )
+    read_only = PlatformContext(
+        actor_principal_id=1,
+        actor_name="read-only",
+        principal_type="human",
+        permissions=frozenset({"platform:ai:read"}),
+        reason="test",
+        ticket_id="TEST-PROVIDER",
+        correlation_id="draft-test",
+    )
+    with pytest.raises(BusinessException) as denied:
+        await provider_service.test_draft_connection(
+            db_session, request, platform=read_only
+        )
+    assert denied.value.error_code == "PLATFORM_PERMISSION_DENIED"
+
+    async def probe(_model_instance):
+        raise RuntimeError("upstream leaked sk-secret")
+
+    monkeypatch.setattr(provider_service, "_probe_model", probe)
+    with pytest.raises(BusinessException) as failed:
+        await provider_service.test_draft_connection(
+            db_session, request, platform=PLATFORM
+        )
+    assert failed.value.error_code == "AI_PROVIDER_UPSTREAM_ERROR"
+    assert "secret" not in failed.value.message
 
 
 async def _seed_provider_and_model(db_session) -> tuple[AiProvider, AiModel]:

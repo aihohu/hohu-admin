@@ -60,6 +60,15 @@ def _headers():
         ("PUT", "/platform/ai/providers/101/models/201", {"name": "changed"}),
         ("DELETE", "/platform/ai/providers/101/models/201", None),
         ("POST", "/platform/ai/providers/101/test", {"modelId": "201"}),
+        (
+            "POST",
+            "/platform/ai/providers/test",
+            {
+                "providerCode": "openai",
+                "apiKey": "draft-key",
+                "model": {"name": "draft-model", "capabilities": ["text"]},
+            },
+        ),
     ],
 )
 async def test_provider_routes_reject_non_system_roles(
