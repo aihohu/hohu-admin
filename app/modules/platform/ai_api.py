@@ -32,6 +32,8 @@ from app.modules.ai.service.tenant_model_policy_admin_service import (
     tenant_model_policy_admin_service,
 )
 from app.modules.platform.schemas import (
+    PlatformTenantModelCatalogOut,
+    PlatformTenantModelPoliciesPut,
     PlatformTenantModelPolicyOut,
     PlatformTenantModelPolicyPut,
 )
@@ -384,6 +386,47 @@ async def list_tenant_model_policies(
     data = [PlatformTenantModelPolicyOut.from_projection(row) for row in rows]
     _record_count(request, len(data))
     return ResponseModel.success(data=data)
+
+
+@router.get(
+    "/tenants/{tenant_id}/ai/model-policies/catalog",
+    response_model=ResponseModel[PlatformTenantModelCatalogOut],
+    summary="平台：租户 AI 授权模型目录",
+)
+async def tenant_model_catalog(
+    tenant_id: TenantId,
+    request: Request,
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+):
+    result = await tenant_model_policy_admin_service.catalog(
+        db, tenant_id=tenant_id, platform=platform
+    )
+    _record_count(request, len(result.models))
+    return ResponseModel.success(
+        data=PlatformTenantModelCatalogOut.from_projection(result)
+    )
+
+
+@router.put(
+    "/tenants/{tenant_id}/ai/model-policies",
+    response_model=ResponseModel[PlatformTenantModelCatalogOut],
+    summary="平台：原子保存租户 AI 模型授权",
+)
+async def put_tenant_model_policies(
+    tenant_id: TenantId,
+    payload: PlatformTenantModelPoliciesPut,
+    request: Request,
+    db: AsyncSession = Depends(get_platform_db, scope="function"),
+    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+):
+    result = await tenant_model_policy_admin_service.put_many(
+        db, tenant_id=tenant_id, data=payload, platform=platform
+    )
+    _record_count(request, len(payload.policies))
+    return ResponseModel.success(
+        data=PlatformTenantModelCatalogOut.from_projection(result)
+    )
 
 
 @router.put(

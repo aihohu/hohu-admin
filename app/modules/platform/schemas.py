@@ -190,7 +190,7 @@ class PlatformTenantBootstrapOut(BaseModel):
 class PlatformTenantModelPolicyPut(BaseModel):
     enabled: bool
     is_default: bool
-    daily_quota_per_user: int | None = Field(default=None, ge=1)
+    daily_quota_per_user: int | None = Field(default=None, ge=1, le=2_147_483_647)
 
     model_config = ConfigDict(
         alias_generator=to_camel,
@@ -235,6 +235,63 @@ class PlatformTenantModelPolicyOut(BaseModel):
     @field_serializer("model_id", "provider_id")
     def serialize_ids(self, value: int, _info) -> str:
         return str(value)
+
+
+class PlatformTenantModelPolicyItem(PlatformTenantModelPolicyPut):
+    model_id: int = Field(gt=0, le=9_223_372_036_854_775_807)
+
+    @field_validator("model_id", mode="before", json_schema_input_type=str)
+    @classmethod
+    def string_model_id(cls, value):
+        if not isinstance(value, str) or not value.isascii() or not value.isdecimal():
+            raise ValueError("modelId must be a decimal string")
+        return value
+
+    @field_serializer("model_id")
+    def serialize_id(self, value: int) -> str:
+        return str(value)
+
+
+class PlatformTenantModelPoliciesPut(BaseModel):
+    revision: str = Field(pattern=r"^[a-f0-9]{64}$")
+    policies: list[PlatformTenantModelPolicyItem] = Field(max_length=10000)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "PlatformTenantModelPoliciesPut":
+        if len({item.model_id for item in self.policies}) != len(self.policies):
+            raise ValueError("duplicate model IDs")
+        defaults = sum(item.is_default for item in self.policies)
+        if defaults != int(any(item.enabled for item in self.policies)):
+            raise ValueError("enabled models require exactly one default")
+        return self
+
+
+class PlatformTenantModelCatalogItem(PlatformTenantModelPolicyOut):
+    unavailable_reason: str | None
+
+    @classmethod
+    def from_projection(cls, projection) -> "PlatformTenantModelCatalogItem":
+        policy = PlatformTenantModelPolicyOut.from_projection(projection)
+        return cls(
+            **policy.model_dump(), unavailable_reason=projection.unavailable_reason
+        )
+
+
+class PlatformTenantModelCatalogOut(BaseModel):
+    models: list[PlatformTenantModelCatalogItem]
+    revision: str
+
+    @classmethod
+    def from_projection(cls, projection) -> "PlatformTenantModelCatalogOut":
+        return cls(
+            models=[
+                PlatformTenantModelCatalogItem.from_projection(row)
+                for row in projection.models
+            ],
+            revision=projection.revision,
+        )
 
 
 class PlatformSupportAuditQuery(BaseModel):
