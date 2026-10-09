@@ -10,6 +10,23 @@ from pydantic import BaseModel, ConfigDict, StrictStr, field_serializer
 from pydantic.alias_generators import to_camel
 
 
+class ToolRequiredPermission(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    code: str
+    granted: bool
+
+
+class AgentToolRow(BaseModel):
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    name: str
+    summary: str
+    readonly: bool
+    enabled: bool
+    required_permissions: list[ToolRequiredPermission]
+
+
 class AgentRow(BaseModel):
     i18n_keys: dict[str, str] | None = None
 
@@ -35,6 +52,7 @@ class AgentRow(BaseModel):
     enabled: bool
     is_builtin: bool
     is_shared: bool
+    tools: list[AgentToolRow]
 
 
 class RoleAgentBinding(BaseModel):
@@ -52,6 +70,7 @@ class RoleAgentBinding(BaseModel):
 
     all_agents: list[AgentRow]
     bound_agent_ids: list[str]
+    ai_chat_entry_granted: bool
 
 
 class RoleAgentBindReq(BaseModel):

@@ -195,6 +195,72 @@ async def test_get_returns_all_agents_and_bound_ids(
     assert shared_id_str not in data["boundAgentIds"]
 
 
+async def test_get_projects_role_tool_permissions_without_granting_them(
+    authed_client: tuple[AsyncClient, str], db_session, seed_role_agents
+):
+    """Show tool requirements from the registry and this role's own menu grants."""
+    from sqlalchemy import select
+
+    from app.db.base import role_menus
+    from app.db.session import AsyncSessionLocal
+    from app.modules.ai.agents.tools import load_builtin_tools
+    from app.modules.system.models.menu import Menu
+
+    load_builtin_tools()
+    client, _ = authed_client
+    role_id = seed_role_agents["role_id"]
+
+    async def get_projection():
+        response = await client.get(f"/ai/role-agent/{role_id}")
+        assert response.status_code == 200
+        return response.json()["data"]
+
+    before = await get_projection()
+    assert before["aiChatEntryGranted"] is False
+    user_agent = next(a for a in before["allAgents"] if a["code"] == "user_mgmt")
+    list_tool = next(t for t in user_agent["tools"] if t["name"] == "user.list")
+    assert list_tool["readonly"] is True
+    assert list_tool["enabled"] is True
+    assert {p["code"]: p["granted"] for p in list_tool["requiredPermissions"]} == {
+        "system:user:list": False
+    }
+
+    async with AsyncSessionLocal() as session:
+        menus = (
+            (
+                await session.execute(
+                    select(Menu).where(
+                        Menu.tenant_id == 0,
+                        Menu.permission.in_(("system:user:list", "ai:chat:use")),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert {menu.permission for menu in menus} == {
+            "system:user:list",
+            "ai:chat:use",
+        }
+        for menu in menus:
+            await session.execute(
+                role_menus.insert().values(
+                    tenant_id=0, role_id=role_id, menu_id=menu.menu_id
+                )
+            )
+        await session.commit()
+
+    after = await get_projection()
+    assert after["aiChatEntryGranted"] is True
+    user_agent = next(a for a in after["allAgents"] if a["code"] == "user_mgmt")
+    list_tool = next(t for t in user_agent["tools"] if t["name"] == "user.list")
+    assert {p["code"]: p["granted"] for p in list_tool["requiredPermissions"]} == {
+        "system:user:list": True
+    }
+    create_tool = next(t for t in user_agent["tools"] if t["name"] == "user.create")
+    assert any(not item["granted"] for item in create_tool["requiredPermissions"])
+
+
 async def test_get_excludes_soft_disabled_segment(
     authed_client: tuple[AsyncClient, str], db_session, seed_role_agents
 ):

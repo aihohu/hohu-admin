@@ -22,13 +22,18 @@ from app.core.exceptions import (
 )
 from app.core.tenant import TenantContext
 from app.core.tenant_scope import tenant_select
+from app.modules.ai.agents.safety.ai_config import get_ai_config_str_list
 from app.modules.ai.agents.tools.meta import SHARED_AGENT_CODE
+from app.modules.ai.agents.tools.registry import ToolRegistry
+from app.modules.ai.constants import AI_CHAT_USE_PERMISSION
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
 from app.modules.ai.schemas.role_agent import (
     AgentRow,
+    AgentToolRow,
     RoleAgentBinding,
     RoleAgentBindReq,
+    ToolRequiredPermission,
 )
 from app.modules.system.models.role import Role
 from app.modules.system.service.grant_authority import grant_authority_service
@@ -117,7 +122,7 @@ class RoleAgentService:
                 "权限不足",
                 error_code="MISSING_PERMISSION",
             )
-        await self._get_role_or_404(db, role_id, tenant=tenant)
+        role = await self._get_role_or_404(db, role_id, tenant=tenant)
         await role_management_service.authorize_role_projection(
             db,
             actor_user_id=actor_user_id,
@@ -155,6 +160,13 @@ class RoleAgentService:
             if authority.super_admin
             or int(agent.agent_id) in authority.grantable_agent_ids
         ]
+        role_permissions = {menu.permission for menu in role.menus if menu.permission}
+        enabled_extra = set(
+            await get_ai_config_str_list(
+                db, "ai:enabled_tools", default=[], tenant=tenant
+            )
+        )
+        registry = ToolRegistry.get()
         return RoleAgentBinding(
             role_id=role_id,
             all_agents=[
@@ -167,10 +179,33 @@ class RoleAgentService:
                     enabled=a.enabled,
                     is_builtin=a.is_builtin,
                     is_shared=(a.code == SHARED_AGENT_CODE),
+                    tools=[
+                        AgentToolRow(
+                            name=tool.meta.name,
+                            summary=tool.meta.summary,
+                            readonly=tool.meta.readonly,
+                            enabled=(
+                                tool.meta.default_enabled
+                                or tool.meta.name in enabled_extra
+                            ),
+                            required_permissions=[
+                                ToolRequiredPermission(
+                                    code=permission,
+                                    granted=permission in role_permissions,
+                                )
+                                for permission in tool.meta.required_perms
+                            ],
+                        )
+                        for tool in sorted(
+                            registry.by_agent(a.code), key=lambda item: item.meta.name
+                        )
+                        if tool.meta.llm_visible
+                    ],
                 )
                 for a in visible_agents
             ],
             bound_agent_ids=[str(aid) for aid in bound_rows],
+            ai_chat_entry_granted=AI_CHAT_USE_PERMISSION in role_permissions,
         )
 
     async def put_binding(
