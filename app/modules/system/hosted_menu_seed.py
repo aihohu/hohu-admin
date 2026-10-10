@@ -55,6 +55,7 @@ HOSTED_ROUTE_NAMES = frozenset(
         "system_setting",
         "system_config",
         "system_monitor",
+        "system_demo",
         "system_job",
         "system_job-log",
         "system_operation-log",

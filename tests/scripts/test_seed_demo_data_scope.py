@@ -35,7 +35,7 @@ def test_seeded_demo_usernames_match_the_login_contract() -> None:
 
 def test_demo_roles_receive_the_page_and_its_ancestor_directory() -> None:
     assert DEMO_MENU_ROUTE_NAMES == frozenset(
-        {"home", "system", "system_data-scope-demo"}
+        {"home", "system", "system_demo", "system_data-scope-demo"}
     )
 
 

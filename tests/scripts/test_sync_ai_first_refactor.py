@@ -29,7 +29,7 @@ def test_definitions_drop_home_and_promote_ai_chat() -> None:
     assert ai_group["menu_name"] == "AI 管理"
 
     dashboard = _def_by_route("dashboard")
-    assert dashboard["parent_route"] == "system"
+    assert dashboard["parent_route"] == "system_demo"
     assert dashboard["component"] == "view.dashboard"
 
 

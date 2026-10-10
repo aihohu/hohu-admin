@@ -178,3 +178,37 @@ def test_management_routes_preserve_separate_domain_roots() -> None:
         assert routes[route_name]["parent_route"] == "auth"
     for route_name in ("system_job", "system_job-log"):
         assert routes[route_name]["parent_route"] == "task"
+
+
+def test_default_catalog_excludes_marketplace_and_its_permissions() -> None:
+    for entry in MENU_DEFINITIONS:
+        for key in ("route_name", "parent_route", "permission"):
+            value = entry.get(key, "")
+            assert not value.startswith("marketplace")
+            assert value != "app-management"
+
+
+def test_default_system_menu_groups_and_order() -> None:
+    def children(parent):
+        return [
+            item["route_name"]
+            for item in sorted(MENU_DEFINITIONS, key=lambda item: item.get("order", 0))
+            if item["parent_route"] == parent
+            and item["menu_type"] != "F"
+            and not item.get("hide_in_menu", False)
+        ]
+
+    assert children("system") == [
+        "system_setting",
+        "system_dict",
+        "system_config",
+        "system_file",
+        "system_monitor",
+        "system_demo",
+    ]
+    assert children("system_monitor") == ["system_operation-log", "system_login-log"]
+    assert children("system_demo") == ["dashboard", "system_data-scope-demo"]
+    hidden = next(
+        d for d in MENU_DEFINITIONS if d.get("route_name") == "system_dict_data"
+    )
+    assert hidden["hide_in_menu"] is True

@@ -70,7 +70,9 @@ USER_SELF_ID = 800000205
 
 PASSWORD = "demo@12345"
 
-DEMO_MENU_ROUTE_NAMES = frozenset({"home", "system", "system_data-scope-demo"})
+DEMO_MENU_ROUTE_NAMES = frozenset(
+    {"home", "system", "system_demo", "system_data-scope-demo"}
+)
 """Routes required to keep the demo page reachable in the dynamic menu tree."""
 
 # (dept_id, dept_name, ancestors, parent_id)

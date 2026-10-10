@@ -56,6 +56,132 @@ def test_fresh_menus_use_the_complete_sync_catalog():
     assert {m.menu_id for m in menus}.isdisjoint(m.menu_id for m in second)
 
 
+@pytest.mark.parametrize("hosted", [False, True])
+async def test_sync_keeps_new_system_groups_on_rerun(db_session, monkeypatch, hosted):
+    tenant = await create_test_tenant(db_session, prefix="seedgroups")
+    monkeypatch.setattr(sync_menus, "DEFAULT_TENANT_ID", tenant.tenant_id)
+    for _ in range(2):
+        menus = await sync_menus.sync_menus_in_session(
+            db_session, tenant_id=tenant.tenant_id, hosted=hosted
+        )
+        routes = {m.route_name: m for m in menus if m.route_name}
+        system = routes["system"]
+        visible = sorted(
+            (m for m in menus if m.parent_id == system.menu_id and not m.hide_in_menu),
+            key=lambda m: m.order,
+        )
+        assert [m.route_name for m in visible] == [
+            "system_setting",
+            "system_dict",
+            "system_config",
+            "system_file",
+            "system_monitor",
+            "system_demo",
+        ]
+        assert routes["dashboard"].parent_id == routes["system_demo"].menu_id
+        for name in ("system_operation-log", "system_login-log"):
+            assert routes[name].parent_id == routes["system_monitor"].menu_id
+        if not hosted:
+            assert (
+                routes["system_data-scope-demo"].parent_id
+                == routes["system_demo"].menu_id
+            )
+        assert not any(name.startswith("marketplace") for name in routes)
+        assert "app-management" not in routes
+
+
+async def test_sync_preserves_existing_marketplace_and_system_records(
+    db_session, monkeypatch
+):
+    from app.db.base import role_menus  # noqa: PLC0415
+    from app.modules.system.models.role import Role  # noqa: PLC0415
+
+    tenant = await create_test_tenant(db_session, prefix="seedlegacy")
+    monkeypatch.setattr(sync_menus, "DEFAULT_TENANT_ID", tenant.tenant_id)
+    existing = [
+        Menu(
+            menu_id=next_id(),
+            tenant_id=tenant.tenant_id,
+            route_name=name,
+            menu_name=f"Custom {name}",
+            menu_type="M",
+            order=42,
+            status="2",
+        )
+        for name in ("marketplace", "marketplace-detail", "app-management", "system")
+    ]
+    for name, parent in (
+        ("marketplace_installed", existing[2]),
+        ("system_setting", existing[3]),
+    ):
+        existing.append(
+            Menu(
+                menu_id=next_id(),
+                tenant_id=tenant.tenant_id,
+                route_name=name,
+                menu_name=f"Custom {name}",
+                menu_type="C",
+                parent_id=parent.menu_id,
+                order=37,
+                status="2",
+            )
+        )
+    existing.append(
+        Menu(
+            menu_id=next_id(),
+            tenant_id=tenant.tenant_id,
+            menu_name="Custom install",
+            menu_type="F",
+            permission="marketplace:install",
+            parent_id=existing[4].menu_id,
+            order=9,
+            status="2",
+        )
+    )
+    role = Role(
+        role_id=next_id(),
+        tenant_id=tenant.tenant_id,
+        role_name="Legacy",
+        role_code="legacy",
+        status="1",
+    )
+    db_session.add_all([*existing, role])
+    await db_session.flush()
+    await db_session.execute(
+        role_menus.insert().values(
+            tenant_id=tenant.tenant_id,
+            role_id=role.role_id,
+            menu_id=existing[-1].menu_id,
+        )
+    )
+
+    def snapshot(menu):
+        return (
+            menu.menu_id,
+            menu.menu_name,
+            menu.parent_id,
+            menu.order,
+            menu.status,
+            menu.permission,
+        )
+
+    before = [snapshot(m) for m in existing]
+    for _ in range(2):
+        await sync_menus.sync_menus_in_session(db_session, tenant_id=tenant.tenant_id)
+        for menu in existing:
+            await db_session.refresh(menu)
+        assert [snapshot(m) for m in existing] == before
+        assert (
+            await db_session.scalar(
+                select(role_menus.c.menu_id).where(
+                    role_menus.c.tenant_id == tenant.tenant_id,
+                    role_menus.c.role_id == role.role_id,
+                )
+            )
+            == existing[-1].menu_id
+        )
+
+
 async def test_config_seed_is_tenant_scoped_and_preserves_custom_values(db_session):
     first = await create_test_tenant(db_session, prefix="seedca")
     second = await create_test_tenant(db_session, prefix="seedcb")

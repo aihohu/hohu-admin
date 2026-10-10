@@ -41,21 +41,13 @@ from app.modules.system.menu_seed import (
 from app.modules.system.menu_seed import build_initial_menus as build_initial_menus
 from app.modules.system.models.menu import Menu
 
+# System menu grouping comes from the seed only; preserve existing installations.
 _MENU_PARTITIONS = {
     "auth": {
         "system_dept": 1,
         "system_user": 2,
         "system_role": 3,
         "system_menu": 4,
-    },
-    "system": {
-        "system_dict": 1,
-        "system_dict_data": 2,
-        "system_file": 3,
-        "system_setting": 4,
-        "system_config": 5,
-        "system_data-scope-demo": 8,
-        "system_monitor": 10,
     },
     "task": {
         "system_job": 1,
