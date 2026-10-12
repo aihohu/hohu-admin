@@ -3,7 +3,7 @@
 import ast
 from pathlib import Path
 
-MIGRATION = Path("alembic/versions/e7cc9aa08769_squash_to_head.py")
+MIGRATION = Path("alembic/versions/d01010100101_squash_to_head.py")
 
 
 def _deleted_at_column_calls(source: str) -> list[str]:

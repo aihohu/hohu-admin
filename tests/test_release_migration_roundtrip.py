@@ -1,5 +1,6 @@
 """Execute release migrations in a disposable, transaction-isolated schema."""
 
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -20,13 +21,27 @@ def release_chain():
     revisions = list(reversed(list(scripts.walk_revisions())))
     assert [item.revision for item in revisions] == [
         "bf244f9a8b76",
-        "e7cc9aa08769",
-        "8946c48f5315",
-        "b728ae092401",
-        "c926ae092601",
         "d01010100101",
     ]
     return [item.module for item in revisions]
+
+
+def release_steps():
+    """Expose internal boundaries for data fixtures without adding revisions."""
+    baseline, consolidated = release_chain()
+    return [baseline] + [
+        SimpleNamespace(
+            upgrade=getattr(consolidated, f"_upgrade_{step}"),
+            downgrade=getattr(consolidated, f"_downgrade_{step}"),
+        )
+        for step in (
+            "schema",
+            "data_fixes",
+            "builtin_translation",
+            "system_settings",
+            "account_self_service",
+        )
+    ]
 
 
 @pytest.fixture
@@ -109,7 +124,7 @@ async def test_setting_split_preserves_tenant_values_and_custom_parameters(
     migration_connection,
 ):
     connection = migration_connection
-    chain = release_chain()[:-1]  # Exercise the setting split at its own revision.
+    chain = release_steps()[:-1]  # Seed values immediately before the setting split.
     await connection.run_sync(apply_steps, chain[:-1], "upgrade")
     await connection.execute(
         sa.text(
@@ -207,6 +222,10 @@ async def test_release_boundary_data_survives_upgrade(migration_connection):
         )
     )
     for statement in (
+        "INSERT INTO sys_config (config_id, config_name, config_key, config_value, config_type, config_group, status) "
+        "VALUES (1, 'Registration', 'register_enabled', 'true', 'text', 'basic', '1'), "
+        "(2, 'Brand', 'site_name', 'Existing brand', 'text', 'basic', '1'), "
+        "(3, 'Region', 'business:region', 'west', 'text', 'basic', '1')",
         "INSERT INTO ai_provider "
         "(provider_id, provider_code, name, api_key, is_enabled) "
         "VALUES (1, 'openai', 'Existing provider', 'test-only', true)",
@@ -225,6 +244,18 @@ async def test_release_boundary_data_survives_upgrade(migration_connection):
     ):
         await connection.execute(sa.text(statement))
     await connection.run_sync(apply_steps, chain[1:], "upgrade")
+    assert (
+        await connection.execute(
+            sa.text(
+                "SELECT setting_key, setting_value FROM sys_setting ORDER BY setting_id"
+            )
+        )
+    ).all() == [("register_enabled", "false"), ("site_name", "Existing brand")]
+    assert (
+        await connection.execute(
+            sa.text("SELECT config_key, config_value FROM sys_config")
+        )
+    ).all() == [("business:region", "west")]
     assert (
         await connection.scalar(
             sa.text("SELECT parent_id FROM sys_menu WHERE menu_id=1")
@@ -272,7 +303,7 @@ async def test_account_upgrade_closes_registration_and_preserves_credentials(
     migration_connection,
 ):
     connection = migration_connection
-    chain = release_chain()
+    chain = release_steps()
     await connection.run_sync(apply_steps, chain[:-1], "upgrade")
     await connection.execute(
         sa.text(
@@ -305,3 +336,58 @@ async def test_account_upgrade_closes_registration_and_preserves_credentials(
         )
         == 1
     )
+    await connection.execute(
+        sa.text("UPDATE sys_user SET email_verified_at=now() WHERE user_id=77")
+    )
+    await connection.execute(
+        sa.text("UPDATE sys_user SET nickname='Changed nickname' WHERE user_id=77")
+    )
+    assert await connection.scalar(
+        sa.text("SELECT email_verified_at IS NOT NULL FROM sys_user WHERE user_id=77")
+    )
+    await connection.execute(
+        sa.text("UPDATE sys_user SET user_email='new@example.com' WHERE user_id=77")
+    )
+    assert await connection.scalar(
+        sa.text("SELECT email_verified_at IS NULL FROM sys_user WHERE user_id=77")
+    )
+
+
+async def test_data_fixes_preserve_custom_roles_and_existing_diagnostics(
+    migration_connection,
+):
+    connection = migration_connection
+    chain = release_steps()
+    await connection.run_sync(apply_steps, chain[:2], "upgrade")
+    await connection.execute(
+        sa.text(
+            "INSERT INTO sys_role (role_id, tenant_id, role_name, role_code, status) "
+            "VALUES (1, 0, 'Custom admin', 'R_SUPER', '1')"
+        )
+    )
+    await connection.execute(
+        sa.text(
+            "INSERT INTO ai_operation_log (log_id, trace_id, conversation_id, tenant_id, "
+            "user_id, tool_name, tool_call_id, args_hash, args_summary, risk_level, "
+            "execution_mode, status, error_code, is_security_event) "
+            "VALUES (:id, 'migration-test', 1, 0, 1, 'user.list', :call, 'hash', '{}', "
+            "'low', 'hitl', :status, :error, false)"
+        ),
+        [
+            {"id": 1, "call": "expired", "status": "expired", "error": None},
+            {"id": 2, "call": "known", "status": "expired", "error": "KNOWN_ERROR"},
+            {"id": 3, "call": "success", "status": "success", "error": None},
+        ],
+    )
+    await connection.run_sync(apply_steps, chain[2:], "upgrade")
+    assert (
+        await connection.scalar(
+            sa.text("SELECT role_name FROM sys_role WHERE role_id=1")
+        )
+        == "Custom admin"
+    )
+    assert (
+        await connection.execute(
+            sa.text("SELECT error_code FROM ai_operation_log ORDER BY log_id")
+        )
+    ).all() == [("AI_HITL_EXPIRED",), ("KNOWN_ERROR",), (None,)]
