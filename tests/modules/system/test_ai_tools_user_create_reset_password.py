@@ -44,6 +44,22 @@ from tests.tenant_helpers import bind_test_user
 DEFAULT_PASSWORD = "AiPolicy123"
 
 
+async def _set_primary_policy(db: AsyncSession, required: bool) -> None:
+    row = await db.scalar(
+        select(SystemSetting).where(
+            SystemSetting.tenant_id == 0,
+            SystemSetting.setting_key == "user_require_primary_dept",
+        )
+    )
+    if row is None:
+        row = SystemSetting(
+            tenant_id=0, setting_key="user_require_primary_dept", status="1"
+        )
+        db.add(row)
+    row.setting_value = "true" if required else "false"
+    await db.flush()
+
+
 async def _seed_default_password(db: AsyncSession) -> None:
     await db.execute(
         delete(SystemSetting).where(
@@ -152,7 +168,7 @@ def _make_ctx(
     tenant = bind_test_user(principal)
     return AiToolContext(
         user=principal,
-        perms={permission},
+        perms={permission, "system:dept:list"},
         db=db,
         data_scope=DataScopeContext(
             tenant=tenant,
@@ -186,10 +202,7 @@ class TestUserToolMetadata:
         } & set(signature.parameters)
 
     def test_tools_use_expected_permissions(self) -> None:
-        assert user_create.__ai_tool_meta__.required_perms == (
-            "system:user:add",
-            "system:dept:list",
-        )
+        assert user_create.__ai_tool_meta__.required_perms == ("system:user:add",)
         assert user_dept_lookup.__ai_tool_meta__.required_perms == ("system:dept:list",)
         assert user_reset_password.__ai_tool_meta__.required_perms == (
             "system:user:reset-password",
@@ -223,7 +236,7 @@ class TestUserToolMetadata:
             tool.meta.name
             for tool in compute_available_tools({"system:user:add"}, "user_mgmt")
         }
-        assert "user.create" not in add_only
+        assert "user.create" in add_only
         assert "user.dept_lookup" not in add_only
 
 
@@ -324,6 +337,158 @@ class TestUserDeptLookup:
 
 
 class TestUserCreate:
+    def test_department_is_optional_in_model_schema(self, monkeypatch) -> None:
+        from app.modules.ai.agents.tools.pydantic_ai_wrapper import (  # noqa: PLC0415
+            build_pydantic_ai_tools,
+        )
+
+        registry = ToolRegistry()
+        monkeypatch.setattr(ToolRegistry, "_instance", registry)
+        registry.register(user_create.__ai_tool_meta__, user_create)
+        tool = build_pydantic_ai_tools(
+            {"system:user:add", "system:dept:list"}, "user_mgmt"
+        )[0]
+        schema = tool.function_schema.json_schema
+        assert "primary_dept_id" not in schema.get("required", [])
+        assert {
+            item["type"] for item in schema["properties"]["primary_dept_id"]["anyOf"]
+        } == {"integer", "null"}
+
+    def test_prompt_allows_omitted_department_and_upgrades_previous_default(
+        self,
+    ) -> None:
+        from app.modules.ai.seed_prompts import _USER_MGMT_PROMPT_V4  # noqa: PLC0415
+
+        previous = _USER_MGMT_PROMPT_V4 + (
+            "\n\n创建用户时，仅当用户明确要求不分配角色，才传 "
+            "role_assignment=NONE；其他情况省略该参数并使用默认角色。"
+        )
+        assert should_update_prompt("user_mgmt", previous, force=False)
+        assert not should_update_prompt("user_mgmt", "自定义业务规则", force=False)
+        assert "省略 primary_dept_id" in DEFAULT_PROMPTS["user_mgmt"]
+        assert "用户必须分配主部门" in DEFAULT_PROMPTS["user_mgmt"]
+
+    @pytest.mark.parametrize("explicit_null", [False, True])
+    async def test_create_without_department_when_policy_off(
+        self, db_session, explicit_null
+    ) -> None:
+        from tests.tenant_helpers import create_test_tenant  # noqa: PLC0415
+
+        await _seed_default_password(db_session)
+        await _seed_default_role(db_session)
+        await _set_primary_policy(db_session, False)
+        other = await create_test_tenant(db_session, prefix="dept-policy")
+        db_session.add(
+            SystemSetting(
+                tenant_id=other.tenant_id,
+                setting_key="user_require_primary_dept",
+                setting_value="true",
+                status="1",
+            )
+        )
+        await db_session.flush()
+        actor = await db_session.scalar(
+            select(User).where(User.tenant_id == 0, User.user_name == "admin")
+        )
+        ctx = _make_ctx(
+            db_session,
+            tool_name="user.create",
+            permission="system:user:add",
+            actor=actor,
+        )
+        ctx.perms.discard("system:dept:list")
+        args = {"primary_dept_id": None} if explicit_null else {}
+        preview = await _dry_run_user_create(ctx, user_name="nodeptuser", **args)
+        assert preview.ok is True
+        assert "不分配部门" in preview.reason
+        assert preview.confirmation_fields == []
+        result = await user_create(ctx, user_name="nodeptuser", **args)
+        created = await db_session.scalar(
+            select(User).where(User.tenant_id == 0, User.user_name == "nodeptuser")
+        )
+        assert created is not None
+        assert created.depts == []
+        assert [role.role_code for role in created.roles] == [USER_ROLE_CODE]
+        assert verify_password(DEFAULT_PASSWORD, created.hashed_password)
+        assert result.data["primaryDeptName"] is None
+        assert result.ui.audit["primary_dept_id"] is None
+        assert all(ref["type"] != "dept" for ref in result.projection.subject_refs)
+        assert DEFAULT_PASSWORD not in repr(result)
+
+    async def test_missing_department_rejected_when_policy_enabled_after_preview(
+        self, db_session
+    ) -> None:
+        await _seed_default_password(db_session)
+        await _seed_default_role(db_session)
+        await _set_primary_policy(db_session, False)
+        actor = await db_session.scalar(
+            select(User).where(User.tenant_id == 0, User.user_name == "admin")
+        )
+        ctx = _make_ctx(
+            db_session,
+            tool_name="user.create",
+            permission="system:user:add",
+            actor=actor,
+        )
+        assert (await _dry_run_user_create(ctx, user_name="policychange")).ok
+        await _set_primary_policy(db_session, True)
+        rejected = await _dry_run_user_create(ctx, user_name="policychange")
+        assert rejected.ok is False
+        assert "主部门" in rejected.reason
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await user_create(ctx, user_name="policychange")
+        assert exc_info.value.error_code == "USER_PRIMARY_DEPT_REQUIRED"
+        assert (
+            await db_session.scalar(
+                select(User).where(
+                    User.tenant_id == 0, User.user_name == "policychange"
+                )
+            )
+            is None
+        )
+
+    async def test_supplied_department_still_requires_query_permission(
+        self, db_session
+    ) -> None:
+        ctx = _make_ctx(
+            db_session, tool_name="user.create", permission="system:user:add"
+        )
+        ctx.perms.discard("system:dept:list")
+        assert not (
+            await _dry_run_user_create(
+                ctx, user_name="denieddept", primary_dept_id=987654
+            )
+        ).ok
+        with pytest.raises(AuthorizationException) as exc_info:
+            await user_create(ctx, user_name="denieddept", primary_dept_id=987654)
+        assert exc_info.value.error_code == "MISSING_PERMISSION"
+
+    @pytest.mark.parametrize("department_state", ["missing", "disabled", "foreign"])
+    async def test_optional_department_still_rejects_invalid_supplied_target(
+        self, db_session, department_state
+    ) -> None:
+        from tests.tenant_helpers import create_test_tenant  # noqa: PLC0415
+
+        dept_id = 81999
+        if department_state != "missing":
+            dept = await _add_dept(db_session, dept_id, "无效目标部门")
+            if department_state == "disabled":
+                dept.status = "2"
+            else:
+                tenant = await create_test_tenant(db_session, prefix="foreign-dept")
+                dept.tenant_id = tenant.tenant_id
+            await db_session.flush()
+        ctx = _make_ctx(
+            db_session, tool_name="user.create", permission="system:user:add"
+        )
+        preview = await _dry_run_user_create(
+            ctx, user_name="invaliddept", primary_dept_id=dept_id
+        )
+        assert preview.ok is False
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await user_create(ctx, user_name="invaliddept", primary_dept_id=dept_id)
+        assert exc_info.value.error_code == "AI_USER_PRIMARY_DEPT_NOT_FOUND"
+
     def test_role_assignment_contract_only_accepts_default_or_none(self) -> None:
         annotation = (
             inspect.signature(user_create).parameters["role_assignment"].annotation
@@ -387,9 +552,11 @@ class TestUserCreate:
                 summary,
             )
 
+    @pytest.mark.parametrize("require_primary", [True, False])
     async def test_create_uses_default_password_role_and_primary_dept(
-        self, db_session: AsyncSession
+        self, db_session: AsyncSession, require_primary: bool
     ) -> None:
+        await _set_primary_policy(db_session, require_primary)
         await _seed_default_password(db_session)
         await _seed_default_role(db_session)
         dept = await _add_dept(db_session, 81001, "AI 产品部")
@@ -462,6 +629,10 @@ class TestUserCreate:
             accessible_dept_ids=set(),
         )
 
+        preview = await _dry_run_user_create(
+            ctx, user_name="outscopeuser", primary_dept_id=dept.dept_id
+        )
+        assert preview.ok is False
         with pytest.raises(Exception) as exc_info:
             await user_create(
                 ctx,

@@ -98,6 +98,19 @@ _USER_MGMT_PROMPT_V4 = (
     '注意：不需要用 user.distinct 回答"有多少个"这类问题，user.distinct 只回答"列出字段取值"。'
 )
 
+_USER_MGMT_PROMPT_V5 = _USER_MGMT_PROMPT_V4 + (
+    "\n\n创建用户时，仅当用户明确要求不分配角色，才传 "
+    "role_assignment=NONE；其他情况省略该参数并使用默认角色。"
+)
+
+_USER_MGMT_PROMPT_V6 = _USER_MGMT_PROMPT_V5.replace(
+    "- 创建用户 → 用户只需说部门名称；先调 user.dept_lookup，再调 user.create；密码与默认角色由后端策略生成\n",
+    "- 创建用户 → 部门是否必填由当前租户的“用户必须分配主部门”设置决定，不能断言所有用户都必须挂部门。\n"
+    "  · 用户未指定部门或明确不分配部门 → 省略 primary_dept_id 调 user.create，由预检校验；"
+    "只有工具返回要求主部门时才追问部门，不要自行填默认部门或要求先建部门。\n"
+    "  · 用户指定了部门名称 → 先调 user.dept_lookup，唯一命中后再调 user.create；密码与默认角色由后端策略生成\n",
+)
+
 _ROLE_MGMT_PROMPT_V1 = (
     "你是角色权限助手，能调用以下工具：\n\n"
     '- 数量类（"有多少角色"/"角色总数"） → 调 role.count，返回 {"count": N}\n'
@@ -144,6 +157,7 @@ LEGACY_DEFAULT_PROMPTS: dict[str, frozenset[str]] = {
             _USER_MGMT_PROMPT_V2,
             _USER_MGMT_PROMPT_V3,
             _USER_MGMT_PROMPT_V4,
+            _USER_MGMT_PROMPT_V5,
         }
     ),
     "role_mgmt": frozenset(
@@ -156,11 +170,7 @@ LEGACY_DEFAULT_PROMPTS: dict[str, frozenset[str]] = {
 # 默认 system_prompt：模仿 user_mgmt 详细格式（中文 + 工具映射 + 示例），
 # 指引 LLM 优先调本 agent 的 tool，避免 doubao 模型幻觉吐 <function> 文本
 DEFAULT_PROMPTS: dict[str, str] = {
-    "user_mgmt": _USER_MGMT_PROMPT_V4
-    + (
-        "\n\n创建用户时，仅当用户明确要求不分配角色，才传 "
-        "role_assignment=NONE；其他情况省略该参数并使用默认角色。"
-    ),
+    "user_mgmt": _USER_MGMT_PROMPT_V6,
     "role_mgmt": _ROLE_MGMT_PROMPT_V3
     + (
         "\n\n菜单授权先调用 role.menu_lookup，Agent 授权先调用 "

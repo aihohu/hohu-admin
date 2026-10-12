@@ -95,6 +95,15 @@ def create_chat_agent(
             "不要附加一份无关模块的能力列表。shared 助手仅负责文件解析和"
             "普通交流，不具备用户、角色、部门业务工具，不能承诺直接执行这些操作。"
         )
+        if any(tool.name == "user_create" for tool in tools):
+            prompt += (
+                "\n[单个用户创建约定]\n主部门是否必填由当前租户的"
+                "“用户必须分配主部门”设置决定，以 user.create 的预检结果为准。"
+                "用户未指定部门或明确不要部门时，省略 primary_dept_id 调用创建工具；"
+                "只有预检要求主部门时才追问。不得猜测部门 ID、自动选部门，"
+                "也不得因没有部门就断言无法创建用户。指定部门仍需查询权限和可见范围校验。"
+                "文件导入的部门列约定不适用于单个用户创建。"
+            )
         if any(tool.name == "user_import_preview" for tool in tools):
             prompt += (
                 "\n[导入文件约定]\n支持 CSV/XLSX，最多 10MB、2000 行。"

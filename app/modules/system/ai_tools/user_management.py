@@ -93,25 +93,45 @@ async def _get_ai_default_password(ctx: AiToolContext) -> str:
 async def _load_ai_create_policy(
     ctx: AiToolContext,
     *,
-    primary_dept_id: int,
+    primary_dept_id: int | None = None,
     role_assignment: AiUserRoleAssignment | str = AiUserRoleAssignment.DEFAULT,
-) -> tuple[Dept, Role | None, str]:
+) -> tuple[Dept | None, Role | None, str]:
     """校验新用户的部门、角色选择与默认密码策略。"""
     from app.constants import USER_ROLE_CODE  # noqa: PLC0415
     from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
-
-    dept = await ctx.db.scalar(
-        select(Dept).where(
-            Dept.tenant_id == ctx.tenant_id,
-            Dept.dept_id == primary_dept_id,
-            Dept.status == STATUS_ENABLED,
-        )
+    from app.modules.system.service.settings_service import (  # noqa: PLC0415
+        settings_service,
     )
-    if dept is None:
-        raise BusinessRuleException(
-            "主部门不存在或已禁用",
-            error_code="AI_USER_PRIMARY_DEPT_NOT_FOUND",
+
+    dept = None
+    if primary_dept_id is None:
+        # Read the tenant's live setting; the shared assignment service rechecks
+        # it under lock before writing, including changes after confirmation.
+        required = await settings_service.get_value(
+            ctx.db, "user_require_primary_dept", "false", tenant=ctx.tenant
         )
+        if str(required).strip().lower() in {"true", "1", "yes", "on"}:
+            raise BusinessRuleException(
+                "系统已开启“用户必须分配主部门”，请选择一个有效的主部门",
+                error_code="USER_PRIMARY_DEPT_REQUIRED",
+            )
+    else:
+        if "system:dept:list" not in ctx.perms:
+            raise AuthorizationException(
+                "指定部门需要部门查询权限", error_code="MISSING_PERMISSION"
+            )
+        dept = await ctx.db.scalar(
+            select(Dept).where(
+                Dept.tenant_id == ctx.tenant_id,
+                Dept.dept_id == primary_dept_id,
+                Dept.status == STATUS_ENABLED,
+            )
+        )
+        if dept is None:
+            raise BusinessRuleException(
+                "主部门不存在或已禁用",
+                error_code="AI_USER_PRIMARY_DEPT_NOT_FOUND",
+            )
 
     normalized_assignment = _normalize_user_role_assignment(role_assignment)
     role: Role | None = None
@@ -151,7 +171,7 @@ def _build_ai_user_create_schema(
     user_phone: str | None,
     user_gender: str | None,
     status: EnableStatus,
-    primary_dept_id: int,
+    primary_dept_id: int | None = None,
     default_password: str,
 ) -> Any:
     """用 HTTP 同款 schema 校验 AI 创建参数，不回显敏感值。"""
@@ -171,7 +191,11 @@ def _build_ai_user_create_schema(
             user_phone=user_phone,
             user_gender=user_gender,
             status=canonical_status,
-            dept_ids=[UserDeptItem(dept_id=str(primary_dept_id), is_primary=True)],
+            dept_ids=(
+                [UserDeptItem(dept_id=str(primary_dept_id), is_primary=True)]
+                if primary_dept_id is not None
+                else []
+            ),
             password=default_password,
         )
     except ValidationError:
@@ -186,8 +210,8 @@ def _build_ai_user_create_schema(
     AiToolMeta(
         name="user.create",
         agent="user_mgmt",
-        summary="Create one user with a primary dept and explicit DEFAULT/NONE role policy.",
-        required_perms=("system:user:add", "system:dept:list"),
+        summary="Create one user; department optional per tenant policy; DEFAULT/NONE role policy.",
+        required_perms=("system:user:add",),
         risk="high",
         readonly=False,
         idempotent=False,
@@ -203,7 +227,7 @@ async def user_create(
     ctx: AiToolContext,
     *,
     user_name: str,
-    primary_dept_id: int,
+    primary_dept_id: int | None = None,
     nickname: str | None = None,
     user_email: str | None = None,
     user_phone: str | None = None,
@@ -222,8 +246,8 @@ async def user_create(
         user_service,
     )
 
-    # 创建目标部门必须在调用者的数据权限范围内。
-    await ensure_targets_in_scope(ctx, dept_ids=[primary_dept_id])
+    if primary_dept_id is not None:
+        await ensure_targets_in_scope(ctx, dept_ids=[primary_dept_id])
     dept, role, default_password = await _load_ai_create_policy(
         ctx,
         primary_dept_id=primary_dept_id,
@@ -242,7 +266,7 @@ async def user_create(
     await user_department_assignment_service.ensure_create_permissions(
         ctx.db,
         actor_user_id=ctx.user.user_id,
-        has_departments=True,
+        has_departments=primary_dept_id is not None,
         tenant=ctx.tenant,
     )
 
@@ -258,35 +282,35 @@ async def user_create(
             is AiUserRoleAssignment.DEFAULT
             else []
         ),
-        dept_ids=[primary_dept_id],
+        dept_ids=[primary_dept_id] if primary_dept_id is not None else [],
         tenant=ctx.tenant,
     )
     await user_department_assignment_service.assign_created_user_departments(
         ctx.db,
         actor_user_id=ctx.user.user_id,
         target_user_id=new_user.user_id,
-        dept_assignments=[(primary_dept_id, True)],
+        dept_assignments=[(primary_dept_id, True)]
+        if primary_dept_id is not None
+        else [],
         tenant=ctx.tenant,
     )
     await ctx.db.flush()
 
     user_id = str(new_user.user_id)
-    dept_id = str(primary_dept_id)
+    dept_id = str(primary_dept_id) if primary_dept_id is not None else None
     return ToolResult.success(
         data={
             "created": 1,
             "userName": new_user.user_name,
             "roleAssignment": "default" if role is not None else "none",
             "roleName": role.role_name if role is not None else None,
-            "primaryDeptName": dept.dept_name,
+            "primaryDeptName": dept.dept_name if dept is not None else None,
             "status": _enable_status_semantic(new_user.status),
             "passwordPolicy": "system_default",
         },
         projection=ResultProjection(
-            subject_refs=(
-                {"type": "user", "id": user_id},
-                {"type": "dept", "id": dept_id},
-            )
+            subject_refs=({"type": "user", "id": user_id},)
+            + (({"type": "dept", "id": dept_id},) if dept_id is not None else ())
         ),
         ui=UIResult(
             view_type="detail_card",
@@ -299,7 +323,7 @@ async def user_create(
                     },
                     {
                         "label": "page.system.user.primaryDept",
-                        "value": dept.dept_name,
+                        "value": dept.dept_name if dept is not None else None,
                     },
                     {
                         "label": "page.system.user.userRole",
@@ -334,7 +358,7 @@ async def _dry_run_user_create(
     ctx: AiToolContext,
     *,
     user_name: str,
-    primary_dept_id: int,
+    primary_dept_id: int | None = None,
     nickname: str | None = None,
     user_email: str | None = None,
     user_phone: str | None = None,
@@ -346,7 +370,8 @@ async def _dry_run_user_create(
     from app.modules.ai.agents.hitl.constants import DryRunResult  # noqa: PLC0415
 
     try:
-        await ensure_targets_in_scope(ctx, dept_ids=[primary_dept_id])
+        if primary_dept_id is not None:
+            await ensure_targets_in_scope(ctx, dept_ids=[primary_dept_id])
         dept, role, default_password = await _load_ai_create_policy(
             ctx,
             primary_dept_id=primary_dept_id,
@@ -365,6 +390,18 @@ async def _dry_run_user_create(
     except BusinessException as exc:
         return DryRunResult(ok=False, count=0, reason=exc.message)
 
+    dept_display = dept.dept_name if dept is not None else "不分配部门"
+    confirmation_fields = (
+        [
+            {
+                "label": "primary_dept_id",
+                "value": primary_dept_id,
+                "display_value": dept.dept_name,
+            }
+        ]
+        if dept is not None
+        else []
+    )
     exists = await ctx.db.scalar(
         select(func.count(User.user_id)).where(User.user_name == user_name)
     )
@@ -373,33 +410,21 @@ async def _dry_run_user_create(
             ok=False,
             count=0,
             reason="用户名已存在，请更换账号",
-            confirmation_fields=[
-                {
-                    "label": "primary_dept_id",
-                    "value": primary_dept_id,
-                    "display_value": dept.dept_name,
-                }
-            ],
+            confirmation_fields=confirmation_fields,
         )
 
     role_example = f"默认角色：{role.role_name}" if role is not None else "不分配角色"
     return DryRunResult(
         ok=True,
         count=1,
-        reason=f"将创建用户 {user_name} 并加入主部门 {dept.dept_name}",
+        reason=f"将创建用户 {user_name}（主部门：{dept_display}）",
         examples=[
             f"账号：{user_name}",
-            f"主部门：{dept.dept_name}",
+            f"主部门：{dept_display}",
             role_example,
             "密码策略：系统默认密码（不展示明文）",
         ],
-        confirmation_fields=[
-            {
-                "label": "primary_dept_id",
-                "value": primary_dept_id,
-                "display_value": dept.dept_name,
-            }
-        ],
+        confirmation_fields=confirmation_fields,
     )
 
 

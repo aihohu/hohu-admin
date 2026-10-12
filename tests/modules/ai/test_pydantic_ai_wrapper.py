@@ -207,6 +207,38 @@ class TestWrapTool:
 
 class TestBuildPydanticAiTools:
     @pytest.mark.parametrize("permitted", [True, False])
+    async def test_user_create_guidance_defers_department_requirement_to_preflight(
+        self, monkeypatch, permitted
+    ):
+        from types import SimpleNamespace
+
+        from app.modules.system.ai_tools.user_management import user_create
+
+        registry = ToolRegistry.get()
+        registry.register(user_create.__ai_tool_meta__, user_create)
+        monkeypatch.setattr(
+            "app.modules.ai.agents.chat_agent.build_system_prompt",
+            lambda *_: "创建用户必须先查部门。",
+        )
+        captured = []
+
+        def respond(_messages, info):
+            captured.append(info.instructions)
+            return ModelResponse(parts=[TextPart("ok")])
+
+        agent = create_chat_agent(
+            FunctionModel(respond),
+            user_perms={"system:user:add"} if permitted else set(),
+        )
+        await agent.run(
+            "创建普通用户 hohu，不分配部门", deps=SimpleNamespace(agent=None)
+        )
+        assert ("[单个用户创建约定]" in captured[0]) is permitted
+        if permitted:
+            assert "省略 primary_dept_id" in captured[0]
+            assert "只有预检要求主部门时才追问" in captured[0]
+
+    @pytest.mark.parametrize("permitted", [True, False])
     async def test_capability_guidance_matches_filtered_tools(
         self, monkeypatch, permitted
     ):
