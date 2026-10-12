@@ -80,7 +80,7 @@ CONSTANT_ROUTES = [
     },
     {
         "name": "login",
-        "path": "/login/:module(pwd-login|code-login|register|reset-pwd|bind-wechat)?",
+        "path": "/login/:module(pwd-login|register|reset-pwd|bind-wechat)?",
         "component": "layout.blank$view.login",
         "props": True,
         "meta": {

@@ -64,7 +64,10 @@ SETTINGS = {
         Setting("user_agreement", "agreements", public=True),
         Setting("privacy_policy", "agreements", public=True),
         Setting("default_avatar", "account"),
-        Setting("register_enabled", "account", "boolean", "true"),
+        Setting("register_enabled", "account", "boolean", "false"),
+        Setting("password_reset_enabled", "account", "boolean", "false"),
+        Setting("email_code_minutes", "account", "integer", 5, minimum=5, maximum=30),
+        Setting("registration_role_id", "account"),
         Setting("user_require_primary_dept", "account", "boolean", "false"),
     )
 }

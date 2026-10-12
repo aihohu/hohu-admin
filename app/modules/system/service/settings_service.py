@@ -12,6 +12,8 @@ from app.core.exceptions import BusinessRuleException
 from app.core.tenant import TenantContext, TenantLocatorContext
 from app.modules.system.models.setting import SystemSetting
 from app.modules.system.models.tenant import Tenant
+from app.modules.system.service.account_service import account_service
+from app.modules.system.service.mail_service import mail_service, ready
 from app.modules.system.settings_catalog import (
     ALLOWED_UPLOAD_EXTENSIONS,
     SETTING_GROUPS,
@@ -165,7 +167,14 @@ class SettingsService:
         configured_secrets = [key for key in secrets if group_values[key]]
         for key in secrets:
             group_values[key] = ""
+        extra = {}
+        if group == "account":
+            extra = {
+                "mailReady": ready(await mail_service.config(db)),
+                "roleOptions": await account_service.role_options(db, tenant.tenant_id),
+            }
         return {
+            **extra,
             "group": group,
             "values": group_values,
             "revision": revision,
@@ -213,6 +222,25 @@ class SettingsService:
             )
             error.code = 409
             raise error
+        if group == "account":
+            merged = {
+                **current["values"],
+                **{
+                    key: _decode(definitions[key], value)
+                    for key, value in normalized.items()
+                },
+            }
+            if (
+                merged["register_enabled"] or merged["password_reset_enabled"]
+            ) and not current["mailReady"]:
+                raise BusinessRuleException(
+                    "Configure mail before enabling account services",
+                    error_code="MAIL_NOT_CONFIGURED",
+                )
+
+            await account_service.registration_role(
+                db, tenant.tenant_id, merged["registration_role_id"]
+            )
         rows = (
             await db.scalars(
                 select(SystemSetting).where(

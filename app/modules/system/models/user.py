@@ -68,6 +68,9 @@ class User(Base):
         String(255), nullable=True, comment="头像地址"
     )
     user_email: Mapped[str] = mapped_column(String(100), nullable=True, comment="邮箱")
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     user_phone: Mapped[str] = mapped_column(String(20), nullable=True, comment="手机号")
     user_gender: Mapped[str] = mapped_column(
         String(1), nullable=True, comment="用户性别: 0:未知,1:男,2:女"

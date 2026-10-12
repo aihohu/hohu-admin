@@ -207,6 +207,11 @@ TENANT_MODEL_INVENTORY: dict[str, TenantResource] = {
 
 
 PLATFORM_GLOBAL_TABLES: dict[str, PlatformGlobalResource] = {
+    "sys_mail_config": PlatformGlobalResource(
+        "sys_mail_config",
+        "app.modules.system.models.mail_config:MailConfig",
+        "config_id",
+    ),
     "sys_platform_principal": PlatformGlobalResource(
         "sys_platform_principal",
         "app.modules.platform.models:PlatformPrincipal",

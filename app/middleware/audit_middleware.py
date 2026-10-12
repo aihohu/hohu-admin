@@ -29,6 +29,10 @@ SENSITIVE_FIELDS = {
     "secret",
     "apikey",
     "auth:defaultpassword",
+    "code",
+    "email",
+    "useremail",
+    "recipient",
 }
 
 # HTTP 方法到操作类型的映射

@@ -196,6 +196,8 @@ class UserService:
         username_changed = (
             "user_name" in update_data and update_data["user_name"] != user.user_name
         )
+        if "user_email" in update_data and update_data["user_email"] != user.user_email:
+            user.email_verified_at = None
         for field, value in update_data.items():
             setattr(user, field, value)
         if status_changed:
@@ -395,6 +397,11 @@ class UserService:
     def update_profile(self, current_user: User, body: UpdateProfile) -> None:
         """更新当前用户个人信息"""
         update_data = body.model_dump(exclude_unset=True)
+        if (
+            "user_email" in update_data
+            and update_data["user_email"] != current_user.user_email
+        ):
+            current_user.email_verified_at = None
         for field, value in update_data.items():
             setattr(current_user, field, value)
 

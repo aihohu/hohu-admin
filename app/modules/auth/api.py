@@ -11,17 +11,15 @@ from app.core.base_response import ResponseModel
 from app.core.config import settings
 from app.core.exceptions import (
     AuthenticationException,
-    BusinessRuleException,
-    DuplicateException,
 )
 from app.core.rbac import is_system_admin
-from app.core.security import get_password_hash
 from app.db.session import get_db
 from app.modules.auth.permission_collect import (
     collect_user_buttons,
     collect_user_menus,
 )
 from app.modules.auth.schemas.auth import LoginCredentials, RouteMeta, UserRoute
+from app.modules.auth.self_service_api import router as self_service_router
 from app.modules.auth.service import (
     auth_service,
     build_menu_tree,
@@ -32,76 +30,10 @@ from app.modules.auth.service import logout as do_logout
 from app.modules.system.constants import PLATFORM_ONLY_TENANT_ROUTE_NAMES
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.user import User
-from app.modules.system.schemas.user import UserCreate, UserOut
-from app.modules.system.service.settings_service import settings_service
 from app.utils.ip_util import get_client_ip
 
 router = APIRouter()
-
-
-@router.post(
-    "/register",
-    response_model=UserOut,
-    summary="用户注册",
-    description="注册新用户账号，系统会校验用户名唯一性并加密存储密码",
-    responses={
-        200: {"description": "注册成功"},
-        400: {"description": "用户名已存在或参数验证失败"},
-        429: {"description": "请求过于频繁，请稍后再试"},
-    },
-)
-async def register(
-    user_in: UserCreate,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    注册新用户
-
-    Args:
-        user_in: 用户注册信息，包含用户名、昵称、邮箱、手机号和密码
-        db: 异步数据库会话
-
-    Returns:
-        UserOut: 注册成功的用户信息（包含生成的 user_id）
-
-    Raises:
-        DuplicateException: 当用户名已存在时抛出
-
-    Note:
-        - 本接口应用频率限制：每分钟最多 3 次注册尝试
-    """
-    # Public registration remains a Default Tenant compatibility path in M1.
-    tenant = await auth_service.resolve_login_tenant(LoginCredentials(), db)
-
-    account_settings = await settings_service.values(db, tenant_id=tenant.tenant_id)
-    if not account_settings["register_enabled"]:
-        raise BusinessRuleException(
-            "Registration is disabled", error_code="REGISTRATION_DISABLED"
-        )
-
-    # 检查租户内用户名是否已存在；全局 unique 在 Plan 2 收紧为组合 unique。
-    result = await db.execute(
-        select(User).where(
-            User.tenant_id == tenant.tenant_id,
-            User.user_name == user_in.user_name,
-        )
-    )
-    if result.scalars().first():
-        raise DuplicateException("用户名", user_in.user_name)
-
-    # 创建用户实例
-    new_user = User(
-        tenant_id=tenant.tenant_id,
-        user_name=user_in.user_name,
-        nickname=user_in.nickname,
-        hashed_password=get_password_hash(user_in.password),  # 密码加密
-        status="1",
-    )
-
-    db.add(new_user)
-    await db.flush()  # 刷新以获取自增ID
-    await db.refresh(new_user)
-    return new_user
+router.include_router(self_service_router)
 
 
 @router.post(

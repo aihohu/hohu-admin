@@ -1,13 +1,14 @@
 """Fixed setting groups, separate from custom parameter CRUD."""
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import is_super_admin, require_permissions
 from app.core.base_response import ResponseModel
 from app.core.cache import cache_delete
 from app.core.exceptions import AuthorizationException
+from app.core.rbac import is_system_admin
 from app.core.tenant import TenantContext, TenantLocatorContext
 from app.db.session import get_db
 from app.modules.auth.service import (
@@ -16,10 +17,55 @@ from app.modules.auth.service import (
 )
 from app.modules.system.models.user import User
 from app.modules.system.service.file_policy_service import file_policy_service
+from app.modules.system.service.mail_service import MailWrite, mail_service
 from app.modules.system.service.settings_service import settings_service
 from app.modules.system.settings_catalog import SETTING_GROUPS
 
 router = APIRouter()
+
+
+def _mail_admin(user):
+    if not is_system_admin(user):
+        raise AuthorizationException(
+            "System administrator required", error_code="SUPER_ADMIN_ONLY"
+        )
+
+
+class MailTest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    recipient: EmailStr
+
+
+@router.get("/mail")
+async def read_mail(
+    db=Depends(get_db), user=Depends(require_permissions("system:setting:list"))
+):
+    _mail_admin(user)
+    return ResponseModel.success(data=await mail_service.describe(db))
+
+
+@router.put("/mail")
+async def write_mail(
+    payload: MailWrite,
+    db=Depends(get_db),
+    user=Depends(require_permissions("system:setting:edit")),
+):
+    _mail_admin(user)
+    result = await mail_service.save(db, payload)
+    await db.commit()
+    return ResponseModel.success(data=result)
+
+
+@router.post("/mail/test")
+async def test_mail(
+    payload: MailTest,
+    db=Depends(get_db),
+    user=Depends(require_permissions("system:setting:edit")),
+):
+    _mail_admin(user)
+    result = await mail_service.test(db, str(payload.recipient))
+    await db.commit()
+    return ResponseModel.success(data=result)
 
 
 class SettingsWrite(BaseModel):
@@ -87,6 +133,7 @@ async def groups(
             for g in SETTING_GROUPS
             if g != "security" or (tenant.tenant_id == 0 and is_super_admin(user))
         ]
+        + (["mail"] if is_system_admin(user) else [])
     )
 
 

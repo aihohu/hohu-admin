@@ -36,6 +36,7 @@ _DEFAULT_TENANT_REFERENCE_ALLOWLIST = frozenset(
     }
 )
 _NAMESPACE_REGISTRY: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    "modules/auth/email_verification.py": ("cache", "tenant", ("tenant_id",)),
     "main.py": ("cache_storage", "infrastructure", ()),
     "scheduler_worker.py": ("cache", "infrastructure", ()),
     "core/cache.py": ("cache", "infrastructure", ()),

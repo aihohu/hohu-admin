@@ -65,7 +65,9 @@ def test_settings_endpoints_require_separate_permissions():
                     inspect.getclosurevars(dependency.call).nonlocals.get("perm_code")
                 )
         expected = (
-            "system:setting:edit" if "PUT" in route.methods else "system:setting:list"
+            "system:setting:edit"
+            if route.methods & {"PUT", "POST", "DELETE"}
+            else "system:setting:list"
         )
         assert expected in codes
         assert "system:config:edit" not in codes

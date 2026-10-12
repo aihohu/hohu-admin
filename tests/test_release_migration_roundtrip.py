@@ -24,6 +24,7 @@ def release_chain():
         "8946c48f5315",
         "b728ae092401",
         "c926ae092601",
+        "d01010100101",
     ]
     return [item.module for item in revisions]
 
@@ -68,6 +69,7 @@ async def test_fresh_install_preserves_security_triggers(migration_connection):
         "trg_platform_audit_validate_lineage",
         "trg_platform_principal_security_version",
         "trg_sys_tenant_security_version",
+        "trg_user_email_trust",
     } <= triggers
     await connection.execute(
         sa.text(
@@ -107,7 +109,7 @@ async def test_setting_split_preserves_tenant_values_and_custom_parameters(
     migration_connection,
 ):
     connection = migration_connection
-    chain = release_chain()
+    chain = release_chain()[:-1]  # Exercise the setting split at its own revision.
     await connection.run_sync(apply_steps, chain[:-1], "upgrade")
     await connection.execute(
         sa.text(
@@ -263,4 +265,43 @@ async def test_release_boundary_data_survives_upgrade(migration_connection):
             sa.text("SELECT row_version FROM sys_tenant WHERE tenant_id=0")
         )
         == 2
+    )
+
+
+async def test_account_upgrade_closes_registration_and_preserves_credentials(
+    migration_connection,
+):
+    connection = migration_connection
+    chain = release_chain()
+    await connection.run_sync(apply_steps, chain[:-1], "upgrade")
+    await connection.execute(
+        sa.text(
+            "INSERT INTO sys_setting (setting_id, tenant_id, setting_key, setting_value, status) VALUES (77, 0, 'register_enabled', 'true', '1')"
+        )
+    )
+    await connection.execute(
+        sa.text(
+            "INSERT INTO sys_user (user_id, tenant_id, user_name, hashed_password, user_email, status) VALUES (77, 0, 'existing', 'keep-hash', 'old@example.com', '1')"
+        )
+    )
+    await connection.run_sync(apply_steps, chain[-1:], "upgrade")
+    assert (
+        await connection.scalar(
+            sa.text("SELECT setting_value FROM sys_setting WHERE setting_id=77")
+        )
+        == "false"
+    )
+    row = (
+        await connection.execute(
+            sa.text(
+                "SELECT hashed_password, user_email, email_verified_at FROM sys_user WHERE user_id=77"
+            )
+        )
+    ).one()
+    assert tuple(row) == ("keep-hash", "old@example.com", None)
+    assert (
+        await connection.scalar(
+            sa.text("SELECT version FROM sys_mail_config WHERE config_id=1")
+        )
+        == 1
     )
