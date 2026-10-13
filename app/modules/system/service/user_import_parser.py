@@ -33,6 +33,7 @@ from app.core.exceptions import BusinessRuleException
 from app.modules.system.constants import USER_IMPORT_MAX_ROWS
 from app.modules.system.schemas.user_transfer import FailedRow, UserImportRecord
 from app.utils.safe_xlsx import UnsafeXlsxError, validate_untrusted_xlsx_xml
+from app.utils.validators import validate_user_name
 
 #: 允许导入的 MIME 类型。
 MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -552,7 +553,7 @@ def _validate_row(
         v = raw.get(name)
         return "" if v is None else str(v).strip()
 
-    # user_name 必填 + 长度 2-16（统一用 AI_IMPORT_USERNAME_INVALID）
+    # Reuse creation/registration rules while retaining row-level import errors.
     user_name = _get("user_name")
     if not user_name:
         errors.append(
@@ -564,16 +565,19 @@ def _validate_row(
                 error_code="AI_IMPORT_USERNAME_INVALID",
             )
         )
-    elif len(user_name) < 2 or len(user_name) > 16:
-        errors.append(
-            FailedRow(
-                row_num=row_num,
-                field="user_name",
-                value=user_name,
-                reason="user_name 长度需 2-16 字符",
-                error_code="AI_IMPORT_USERNAME_INVALID",
+    else:
+        try:
+            validate_user_name(user_name)
+        except ValueError as exc:
+            errors.append(
+                FailedRow(
+                    row_num=row_num,
+                    field="user_name",
+                    value=user_name,
+                    reason=str(exc),
+                    error_code="AI_IMPORT_USERNAME_INVALID",
+                )
             )
-        )
 
     # employee_no 可选，最长 64；空串规范化为 None。
     employee_no_raw = _get("employee_no")

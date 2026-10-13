@@ -431,6 +431,36 @@ class TestOptionalFieldsDefaults:
 class TestFieldValidationCollectsErrors:
     """失败行应汇总到一个 ImportErrorCollection。"""
 
+    @pytest.mark.parametrize(
+        "encode,mime", [(_csv_bytes, MIME_CSV), (_xlsx_bytes, MIME_XLSX)]
+    )
+    @pytest.mark.parametrize(
+        "user_name", ["qa_user", "qa-user", "qa.user", "qa user", "qa😀", "a", "a" * 17]
+    )
+    def test_username_matches_account_creation_rules(self, encode, mime, user_name):
+        rows = [[user_name, "", "", "", "", "QA-Dept", "", "0", "1"]]
+        with pytest.raises(ImportErrorCollection) as exc_info:
+            parse_import_excel(encode(rows), mime)
+        assert len(exc_info.value.errors) == 1
+        error = exc_info.value.errors[0]
+        assert error.row_num == 2
+        assert error.field == "user_name"
+        assert error.value == user_name
+        assert error.error_code == "AI_IMPORT_USERNAME_INVALID"
+
+    @pytest.mark.parametrize(
+        "encode,mime", [(_csv_bytes, MIME_CSV), (_xlsx_bytes, MIME_XLSX)]
+    )
+    @pytest.mark.parametrize(
+        "user_name", ["ab", "a" * 16, "测试1", "用户１２", "équipe2", "  alice  "]
+    )
+    def test_valid_usernames_preserve_import_normalization(
+        self, encode, mime, user_name
+    ):
+        rows = [[user_name, "", "", "", "", "QA-Dept", "", "0", "1"]]
+        records = parse_import_excel(encode(rows), mime)
+        assert [record.user_name for record in records] == [user_name.strip()]
+
     def test_missing_required_user_name_collected(self):
         rows = [
             ["", "", "NoName", "", "", "QA-Dept", "", "0", "1"],

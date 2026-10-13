@@ -17,6 +17,7 @@ pre-commit + CI 双跑。零 DB 依赖（启动时不调 validate_on_startup）�
     11. args_summary_fields_not_sensitive
     12. accepts_file_mime_valid
     13. tool_result_success_requires_ui（并入自 check_ai_tools_ui.py）
+    14. direct_confirmation_fields_declared（warning）
   ⏭️ startup-only（validate_on_startup 已覆盖，本脚本跳过）：
     - agent_must_exist_in_registry
     - perms_must_exist_in_menu
@@ -478,6 +479,50 @@ def check_args_summary_fields_not_sensitive(reg: RegisteredTool) -> list[Violati
     return violations
 
 
+def check_direct_confirmation_fields_declared(reg: RegisteredTool) -> list[Violation]:
+    """Warn when a parameterized direct action cannot display its arguments.
+
+    Prepared flows own their presentation separately. This diagnostic does not
+    execute hooks or claim that a nonempty allowlist is semantically complete.
+    """
+    meta = reg.meta
+    if (
+        meta.readonly
+        or not meta.llm_visible
+        or meta.interaction_flow != "direct"
+        or not (meta.hitl_always or meta.risk in {"high", "destructive"})
+        or meta.args_summary_fields
+    ):
+        return []
+    try:
+        parameters = inspect.signature(reg.fn).parameters.values()
+    except (TypeError, ValueError):
+        return []
+    business_params = [
+        param.name
+        for param in parameters
+        if param.name != "ctx"
+        and param.kind
+        in {
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        }
+    ]
+    if not business_params:
+        return []
+    return [
+        Violation(
+            meta.name,
+            "direct_confirmation_fields_declared",
+            "直接确认工具含业务参数但 args_summary_fields 为空；"
+            "确认卡可能仅显示影响行数。请显式选择安全的目标/参数字段，"
+            "需要展示名称时用 confirmation_fields 绑定冻结参数，并核对实际确认卡。",
+            severity="warning",
+        )
+    ]
+
+
 def check_accepts_file_mime_valid(reg: RegisteredTool) -> list[Violation]:
     """accepts_file 声明的 MIME 必须在解析器覆盖范围内。
 
@@ -656,6 +701,7 @@ def run_all_checks() -> list[Violation]:
         violations.extend(check_file_param_requires_protected_loader(reg, fn_src))
         violations.extend(check_summary_length_limit(reg))
         violations.extend(check_args_summary_fields_not_sensitive(reg))
+        violations.extend(check_direct_confirmation_fields_declared(reg))
         violations.extend(check_accepts_file_mime_valid(reg))
         violations.extend(check_dry_run_tool_must_implement_hook(reg))
         violations.extend(check_tool_result_success_requires_ui(reg, fn_src))
@@ -669,7 +715,7 @@ def main() -> int:
     warnings = [v for v in violations if v.severity == "warning"]
 
     if not violations:
-        print(f"✅ All {len(ToolRegistry.get().all())} tools passed 13 static checks")
+        print(f"✅ All {len(ToolRegistry.get().all())} tools passed 14 static checks")
         return 0
 
     for v in violations:
