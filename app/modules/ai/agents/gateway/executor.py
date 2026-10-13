@@ -1606,7 +1606,13 @@ def _build_direct_confirmation_fields(
                 and isinstance(raw_value, str | int | float)
                 and not isinstance(raw_value, bool)
             ):
-                presentation_field["rawValue"] = raw_value
+                # Preserve large integer identifiers across JavaScript JSON
+                # decoding; binding is checked above against the original type.
+                presentation_field["rawValue"] = (
+                    str(raw_value)
+                    if isinstance(raw_value, int) and abs(raw_value) > 2**53 - 1
+                    else raw_value
+                )
             enriched_by_label[label] = presentation_field
 
     fields: list[dict[str, Any]] = []

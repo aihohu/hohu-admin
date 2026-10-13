@@ -380,8 +380,9 @@ async def test_department_write_dry_runs_build_scalar_gateway_presentations(
             assert fields[0] == {
                 "label": "dept_id",
                 "value": "华东-客服组",
-                "rawValue": frozen_args["dept_id"],
+                "rawValue": str(frozen_args["dept_id"]),
             }
+            assert isinstance(frozen_args["dept_id"], int)
             assert {"label": "leader", "value": "—"} in fields
             assert {"label": "status", "value": STATUS_DISABLED} in fields
 

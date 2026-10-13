@@ -525,7 +525,7 @@ class TestUserCreate:
             {
                 "label": "primary_dept_id",
                 "value": "总部",
-                "rawValue": dept_id,
+                "rawValue": str(dept_id),
             },
             {"label": "affectedCount", "value": 1, "tone": "warning"},
         ]

@@ -571,8 +571,10 @@ async def test_role_write_dry_runs_build_scalar_gateway_presentations(
             assert fields[0] == {
                 "label": "role_id",
                 "value": "培训观察员",
-                "rawValue": role_id,
+                "rawValue": str(role_id),
             }
+            assert frozen_args["role_id"] == role_id
+            assert isinstance(frozen_args["role_id"], int)
             assert {"label": "status", "value": "2"} in fields
 
 

@@ -632,6 +632,7 @@ async def _resolve_users(
         hitl_always=True,
         dry_run_supported=True,
         result_view="rows_affected",
+        args_summary_fields=("user_ids",),
     )
 )
 async def user_batch_delete(
@@ -735,6 +736,15 @@ async def _dry_run_user_batch_delete(
 
     from app.modules.system.service.user_service import user_service  # noqa: PLC0415
 
+    target_list = "; ".join(f"{u.user_name} (ID: {u.user_id})" for u in users)
+    # Respect the confirmation DTO limit without approving hidden targets.
+    if len(target_list) > 256:
+        return DryRunResult(
+            ok=False,
+            count=0,
+            reason="完整删除名单超过确认展示上限，请缩小范围后分批删除。",
+        )
+
     examples = [
         f"{u.user_name}（ID: {u.user_id}, phone: {u.user_phone or '-'}）"
         for u in users[:10]
@@ -763,6 +773,9 @@ async def _dry_run_user_batch_delete(
             "phones": None,
         },
         business_snapshot=user_service.build_batch_delete_identity_snapshot(users),
+        confirmation_fields=[
+            {"label": "user_ids", "value": resolved_ids, "display_value": target_list}
+        ],
     )
 
 

@@ -33,6 +33,7 @@ from app.modules.job.service.job_service import job_service
         hitl_always=True,
         dry_run_supported=True,
         result_view="detail_card",
+        args_summary_fields=("job_id", "cron_expression"),
     )
 )
 async def job_update_cron(
@@ -96,4 +97,9 @@ async def _dry_run_job_update_cron(
         reason=f"将 cron 从 '{old_cron}' 改为 '{cron_expression}'",
         summary_key="page.ai.chat.confirmUpdateCronSummary",
         summary_params={"oldCron": old_cron, "newCron": cron_expression},
+        execution_args={"job_id": job_id, "cron_expression": cron_expression},
+        confirmation_fields=[
+            {"label": "job_id", "value": job_id, "display_value": job.job_name},
+            {"label": "cron_expression", "value": cron_expression},
+        ],
     )
