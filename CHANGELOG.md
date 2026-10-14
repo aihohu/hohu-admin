@@ -2,13 +2,55 @@
 
 All notable changes to this project will be documented in this file.
 
-## [v0.1.5] (Unreleased)
+## [v0.1.5]
+
+### Features
+
+- **Hosted multi-tenancy** — Add tenant creation, atomic initialization, enable/disable lifecycle, trusted login resolution, and tenant-scoped users, roles, departments, files, settings, jobs, and AI resources. Single-tenant mode remains the default; hosted mode supports multiple initialized, active tenants.
+- **System administration** — Manage tenants, system Agents, Providers, and tenant model policies through ordinary system-administrator sessions. Global administration requires an enabled `R_SUPER` role in the default tenant and records authorization and completion audit context.
+- **AI Agents and routing** — Add domain-agent administration, Role-Agent grants, supervisor routing, routing feedback, and tenant-scoped trace and operation-log queries. Role-Agent configuration exposes tool permission requirements and grant status.
+- **Governed AI business tools** — Add user import/export and user, department, role, membership, and job-schedule tools. Tool execution shares application authorization and data-scope services rather than granting an independent AI bypass.
+- **Durable confirmations** — Persist prepared actions, frozen arguments, target identities, and confirmation presentation. Approvals recheck current authorization and prevent repeated execution; restored confirmation streams observe persisted outcomes without approving or replaying tools.
+- **Model administration** — Restore model management for system administrators, add batch tenant-model authorization, and support connectivity tests for saved configurations and unsaved Provider/model forms without persisting draft settings.
+- **Grouped system settings** — Separate tenant settings in `sys_setting` from custom parameters in `sys_config`; add grouped validation, revision conflict checks, safe secret projections, and shared runtime policies for branding, language, accounts, uploads, and access controls.
+- **Email account services** — Add system-level SMTP configuration and testing, configurable registration with email verification, password recovery, and authenticated recovery-email binding. Verification codes are tenant- and purpose-bound, expire, and are consumed once; successful password resets revoke old sessions.
+- **Monitoring** — Add AI and tenant-rollout metrics, monitoring rules, and orphan job-log recovery, with deployment and maintenance guidance.
+
+### Security and Bug Fixes
+
+- **Current authorization checks** — Enforce tenant, ownership, Agent/model grants, explicit tool permissions, and business data scope during execution, confirmation approval, history projection, and downloads. Tenant rollback and security-version changes invalidate affected authority.
+- **Confirmation targets** — Show complete batch-delete targets and refuse lists that exceed confirmation-field limits; bind cron confirmations and historical results to the same authorized tenant job. Keep Snowflake IDs as strings in client presentation.
+- **AI result and stream recovery** — Preserve safe deletion receipts after target removal, recover durable confirmations in memory mode without extending expiry, and clean up database connections when AI streams disconnect or are cancelled.
+- **User creation and imports** — Respect the tenant's optional-primary-department policy in AI creation, retain role-delegation checks, and apply shared username validation to CSV/Excel imports with original row errors. Flush new users before department assignment.
+- **Private files and uploads** — Protect import/export artifacts with tenant and owner checks; validate public image content and untrusted spreadsheets, limit parsing and upload resources, and prevent path traversal and unsafe legacy public access.
+- **Provider and secret handling** — Restrict Provider egress by allowed origins/IP ranges, timeouts, response limits, concurrency, and retries. Mask sensitive settings and Provider credentials and keep passwords out of model context and tool results.
+- **Transactions and validation** — Commit tenant changes and completion audit records before sending successful responses; preserve authorization aggregates during role/menu changes and return field errors for invalid job schedules.
+
+### Database, Deployment, and Maintenance
+
+- Consolidate unreleased Alembic history while preserving the v0.1.4 release boundary and the current head. Retain default-tenant model grants, menu-parent and login-audit conversion, settings migration, data repairs, and database audit/security-version triggers.
+- Unify initialization under `scripts.init_db`, with migration failure stopping seed execution, one seed transaction, safe incremental updates, and explicit first-install administrator credentials. Move development checks and operations tools out of deployment initialization.
+- Reorganize menus for fresh installations and remove Marketplace defaults. Preserve existing customized menu structure and grants during incremental synchronization.
+- Add hosted release qualification tied to a clean source commit and isolated PostgreSQL/Redis evidence. Keep fast pre-commit checks separate from full acceptance and CI tests.
+- Add GitHub-to-Gitee source mirroring, default-branch manual test-image builds, and optional ACR synchronization with matching multi-architecture digests and anonymous full-layer verification. Disable shared-build provenance/SBOM attestation manifests for ACR compatibility.
+- Curate public maintenance documents and centralize user, deployment, and extension tutorials in the documentation site. Keep raw ADRs, plans, and acceptance reports outside public manuals.
 
 ### Licensing
 
 - Adopt Apache-2.0 as the project license starting with v0.1.5, except where otherwise noted. Previously released versions through v0.1.4 retain their original MIT license.
 - Note the MIT history for versions through v0.1.4 in `NOTICE`; include `LICENSE` and `NOTICE` in Python distributions.
 - Update contribution guidance and document the transition in `docs/LICENSE-POLICY.md`. Third-party dependencies retain their own licenses.
+
+### Upgrade Notes
+
+- Back up the database, public/private files, deployment configuration, and original encryption keys. Automatic migrations support empty databases and the v0.1.4 boundary `bf244f9a8b76`; older releases must first reach that boundary using their matching code. Squashed development revisions require a separately reviewed conversion or rebuild, not `stamp head`.
+- Built-in settings move from `sys_config` to `sys_setting`; custom parameters stay in `sys_config`. Account-service migration disables public registration. Configure and test SMTP before explicitly enabling registration or password recovery; existing email addresses are not automatically trusted recovery addresses.
+- Deploy a compatible Web build for tenant administration, model management, grouped settings, account services, and durable confirmations. Components version independently; do not assume that matching numbers or all latest builds establish compatibility.
+- System-level tenant/Agent/Provider/model-policy management uses an ordinary default-tenant system-administrator access token plus required audit headers. Legacy platform tokens do not authorize those management APIs; other platform operations retain their own authentication requirements.
+- Keep private artifacts outside `UPLOAD_DIR`, using `PRIVATE_UPLOAD_DIR` and `LOCAL_FILE_STORAGE_ROOT`. Review existing files and deny legacy `/uploads/file_storage/**` and public spreadsheet/text download paths at reverse proxies.
+- Hosted login remains opt-in through `TENANT_MODE=hosted` and `TENANT_HOSTED_LOGIN_ENABLED`; production hosted deployments require an exact `RELEASE_BUILD_SHA`. Confirm tenant initialization, current grants, and revocation behavior before reopening traffic.
+- Marketplace, Contributes, and Lowcode data routes are not registered in the main application. Existing market menus are not automatically deleted; retained code and old menu entries do not mean the capability is available.
+- AI write tools still execute through request-time paths. A persisted approval or restored stream does not provide a background queue or guarantee completion after disconnects or restarts. Code rollback does not restore databases or files.
 
 ## [v0.1.4] (2026-07-03)
 

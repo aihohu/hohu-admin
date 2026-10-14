@@ -6,7 +6,39 @@
 
 后端版本维护在 [pyproject.toml](../pyproject.toml)，变更说明维护在 [CHANGELOG.md](../CHANGELOG.md)。`Unreleased` 是待发布内容，不等于发布记录。各子项目独立版本，但跨项目契约变更必须给出配套版本及升级顺序。
 
-当前 [release.yml](../.github/workflows/release.yml) 在 GitHub Release 发布时运行：先执行 hosted 发布验证，通过后构建并推送 GHCR 的 linux/amd64、linux/arm64 镜像。不要把本地能构建 wheel 或前端包等同于已配置 PyPI/npm 自动发布。
+当前 [release.yml](../.github/workflows/release.yml) 在 GitHub Release 发布时运行：先执行 hosted 发布验证，通过后构建并推送 GHCR 的 linux/amd64、linux/arm64 镜像；启用 ACR 镜像后由独立任务复制并核验。默认分支也支持手动构建测试镜像。不要把本地能构建 wheel 或前端包等同于已配置 PyPI/npm 自动发布。
+
+## v0.1.5 发布核对
+
+完整变更维护在 [CHANGELOG](../CHANGELOG.md)。发布时复核下列兼容边界，并在 Release 说明中记录实际配套的 Web、CLI 和构建提交：
+
+- 数据库从空库或 `v0.1.4` 支持边界升级；内置设置拆表、模型授权回填和安全触发器必须随迁移落地。兼容范围和数据处理以 [数据库迁移](DATABASE-MIGRATIONS.md) 为准。
+- 账号自助服务迁移关闭注册，邮件配置初始为空。部署方需验证 SMTP 和邮件送达，再显式启用所需租户的注册或找回密码；已有邮箱不能仅凭历史字段作为已验证的恢复地址。
+- 管理端必须配套支持系统角色、租户设置、模型策略和持久确认。系统管理使用默认租户系统超级管理员的普通会话和必需审计上下文，不沿用旧平台 Token 访问这些管理接口；具体边界见 [AI 安全](AI-SECURITY.md)。
+- 私有文件与公开上传分别持久保存，核查旧公开路径的代理拒绝规则；使用原加密密钥恢复 Provider 和邮件凭据。
+- 主应用未开放 Marketplace、Contributes 或 Lowcode 数据路由，不能用历史代码或存量菜单作为发布能力证明；见 [应用市场状态](APP-MARKETPLACE.md)。
+
+## ACR 应用镜像与手动验收
+
+后端和 Web 各自的 `Release` 工作流复用真实应用构建。手动运行仅接受默认分支，标签为 `test-<提交前 12 位 SHA>-<run_id>-<run_attempt>`，不创建 GitHub Release，也不更新正式版本和 `latest`。后端手动模式不执行 release profile 资格验证，镜像链路验收不能替代正式发布验证。
+
+GHCR 与 ACR 使用同一次构建的运行镜像。为兼容 ACR，构建显式关闭附加的 provenance/SBOM 证明清单，保留 `linux/amd64`、`linux/arm64` 两种运行架构及跨仓库摘要一致性。若旧镜像同步报 `unknown manifest class for application/vnd.oci.empty.v1+json`，需发布修复后的工作流并重新构建；重试旧 digest 无法消除不兼容的清单。
+
+在两个 GitHub 仓库的 Settings → Secrets and variables → Actions 分别配置：
+
+| 类型 | 名称 | 内容 |
+| --- | --- | --- |
+| Secret | `ACR_USERNAME` | 有目标仓库推送权限的 ACR 登录用户名 |
+| Secret | `ACR_PASSWORD` | ACR 镜像仓库登录密码 |
+| Variable | `ACR_REGISTRY` | 控制台给出的公网域名，不含协议和路径 |
+| Variable | `ACR_REPOSITORY` | `命名空间/hohu-admin`；Web 为 `命名空间/hohu-admin-web` |
+| Repository variable | `ACR_MIRROR_ENABLED` | 配置完成后设为 `true`；未启用时正式发布仍只推 GHCR；任务启动前判断，不能只配置为 Environment variable |
+
+将工作流和工具提交到默认分支后，在 Actions → Release → Run workflow 选择默认分支。手动模式会在构建前检查 ACR 配置；沿用现有 `docker` Environment 的访问规则。发布资格验证在手动模式中跳过，GHCR 构建成功后仍执行启用的 ACR 同步；构建失败、跳过或运行取消时不执行同步。同步失败可重跑失败任务，不必重新构建应用；修改工作流后应重新 Run workflow，旧运行的 Re-run 不使用新工作流。
+
+[sync_image_mirror.py](../tools/ops/sync_image_mirror.py) 按构建 digest 完整复制多架构镜像，检查两种架构、目标标签 digest，并使用无凭据的完整 OCI 拉取验证镜像层公开可读。已移动到其他 digest 的来源标签跳过，避免延迟任务覆盖新别名；不降级单架构或转换 digest。成功报告显示 `verified_tags`、`skipped_tags`、`platforms` 和 `anonymous_pull`，保存在工作流摘要及 `acr-mirror-*` Artifact 中。隔离回归无需应用服务：`python -B -m unittest discover -s tests/tools -p test_sync_image_mirror.py -v`。
+
+配置公开仓库后，使用报告中的测试标签执行 `docker pull <ACR_REGISTRY>/<ACR_REPOSITORY>:<test-tag>`，再在隔离环境验收应用启动。镜像复制与公开拉取通过不表示业务部署验收完成。本节应用镜像同步覆盖后端和 Web；基础设施镜像同步与部署来源选择由 [hohu-cli](https://github.com/aihohu/hohu-cli) 维护，按所用 CLI 版本的说明配置。
 
 ## 发布前验证
 
@@ -18,6 +50,12 @@
 6. 复核源码、文档和构建产物，排除本地草案、凭据、业务数据及临时附件。
 
 发布验证代码位于 [tests/release](../tests/release)。报告绑定构建 SHA，CI 和 release profile 的证据作为工作流产物保存；不能复用其他提交的通过记录，也不能在生产数据库运行这些测试。
+
+正式验收要求干净 Git 工作区。本地未提交代码的演练不能替代绑定提交的发布证明。
+
+资格验证通过默认租户系统超级管理员的普通登录会话管理租户，覆盖多个租户独立启停、租户管理员拒绝全局管理，以及切回 single 模式时撤销非默认租户访问；同时核对系统操作日志中的授权与完成关联。验证入口为 [qualify_tenant_hosted_release](../tests/release/qualify_tenant_hosted_release.py)。
+
+API 完全关闭后，验证工具只在显式声明的临时测试 Redis 非默认数据库清理带过期时间的限流桶和限流配置缓存。未知或持久键仍导致验收失败，不能使用 `FLUSHDB` 掩盖残留。失败输出失败码，HTTP 失败补充状态与脱敏错误码，日志不得包含凭据。
 
 ## 升级与恢复
 
@@ -44,7 +82,8 @@
 
 实现见 [sync_git_mirror.py](../tools/ops/sync_git_mirror.py)，隔离 Git 回归见 [test_sync_git_mirror.py](../tests/tools/test_sync_git_mirror.py)。
 
-状态：✅ Plan mirror-code 已完成（2026-10-05）；⚠️ Plan mirror-live gap — 维护者配置密钥、工作流发布及线上 clone 验收待完成。
+工作流只接受官方仓库事件，执行默认分支中的受信任工具；启用开关默认关闭，同一仓库串行同步。每次重试重新获取来源快照，推送后核验所有分支与标签，防止延迟事件回写旧引用。
 
-1. **单向且限定引用范围** — 保持 GitHub 为事实来源，只同步 heads/tags。**反例**: 双向写入或镜像平台内部引用。**回归**: `tests/tools/test_sync_git_mirror.py` 的强推、删除及额外引用排除测试。
-2. **默认关闭、串行同步并核验快照** — 配置就绪后启用，重试读取最新来源，推送后核验全部引用。**反例**: 用户 fork 写入官方镜像，或旧事件覆盖新提交。**回归**: 工作流官方仓库条件与并发配置、重试及 SHA 核验测试。
+同步前先验证目标仓库可读取，再获取最新来源并推送；SSH 保活用于检测失联，单次推送限时 600 秒，总任务限时 30 分钟。连接检查失败不推送，失败日志保留阶段和超时前的诊断。
+
+其他组件由各自仓库独立维护镜像工作流、工具、密钥和目标仓库变量。客户端镜像任务必须限定自身官方仓库，不能沿用后端仓库白名单或依赖后端 checkout。配置完成后逐仓库核验引用一致性和实际 HTTPS clone，不把代码检查作为线上同步已成功的证据。
