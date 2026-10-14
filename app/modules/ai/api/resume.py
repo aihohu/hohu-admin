@@ -30,6 +30,8 @@ import secrets
 import time
 from datetime import UTC, datetime
 
+from anyio import CancelScope
+from anyio.lowlevel import checkpoint_if_cancelled
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic_ai.ui import SSE_CONTENT_TYPE
@@ -275,27 +277,31 @@ async def _wait_durable_resume_terminal(
     """Observe confirm-owned state after a memory waiter disconnects."""
     deadline = time.monotonic() + timeout_sec
     while True:
-        # A fresh short transaction observes commits from POST /ai/confirm.
-        async with AsyncSessionLocal() as poll_db:
-            action = await prepared_action_service.get_by_confirmation_id(
-                poll_db, confirmation_id, tenant=tenant
-            )
-            if not _durable_binding_valid(
-                action, pending=pending, user_id=user_id, tenant=tenant
-            ):
-                raise BusinessRuleException(
-                    "续传 action 绑定无效",
-                    error_code="AI_PREPARED_ACTION_BINDING_INVALID",
+        # Finish each short read and return its connection before honoring a
+        # disconnect. Cancellation during checkout/close can orphan a connection.
+        await checkpoint_if_cancelled()
+        with CancelScope(shield=True):
+            async with AsyncSessionLocal() as poll_db:
+                action = await prepared_action_service.get_by_confirmation_id(
+                    poll_db, confirmation_id, tenant=tenant
                 )
-            if PreparedActionStatus(action.status).is_terminal:
-                return
-            expires_at = action.expires_at
-            if expires_at.tzinfo is None:
-                expires_at = expires_at.replace(tzinfo=UTC)
-            remaining = min(
-                deadline - time.monotonic(),
-                (expires_at - datetime.now(UTC)).total_seconds(),
+        await checkpoint_if_cancelled()
+        if not _durable_binding_valid(
+            action, pending=pending, user_id=user_id, tenant=tenant
+        ):
+            raise BusinessRuleException(
+                "续传 action 绑定无效",
+                error_code="AI_PREPARED_ACTION_BINDING_INVALID",
             )
+        if PreparedActionStatus(action.status).is_terminal:
+            return
+        expires_at = action.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        remaining = min(
+            deadline - time.monotonic(),
+            (expires_at - datetime.now(UTC)).total_seconds(),
+        )
         if remaining <= 0:
             raise TimeoutError()
         await asyncio.sleep(min(0.5, remaining))

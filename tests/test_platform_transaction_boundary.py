@@ -31,23 +31,10 @@ def _request() -> Request:
     return request
 
 
-class _SessionContext:
-    def __init__(self, db) -> None:
-        self.db = db
-
-    async def __aenter__(self):
-        return self.db
-
-    async def __aexit__(self, *_args):
-        return False
-
-
 async def test_get_db_commits_platform_completion_with_business(monkeypatch) -> None:
     db = AsyncMock()
     stage = AsyncMock(return_value=7001)
-    monkeypatch.setattr(
-        session_module, "AsyncSessionLocal", lambda: _SessionContext(db)
-    )
+    monkeypatch.setattr(session_module, "AsyncSessionLocal", lambda: db)
     monkeypatch.setattr(platform_audit, "stage_platform_success_completion", stage)
     request = _request()
     dependency = session_module.get_db(request)
@@ -72,9 +59,7 @@ async def test_get_db_rolls_back_when_platform_completion_cannot_stage(
             error_code="PLATFORM_AUDIT_UNAVAILABLE",
         )
     )
-    monkeypatch.setattr(
-        session_module, "AsyncSessionLocal", lambda: _SessionContext(db)
-    )
+    monkeypatch.setattr(session_module, "AsyncSessionLocal", lambda: db)
     monkeypatch.setattr(platform_audit, "stage_platform_success_completion", stage)
     dependency = session_module.get_db(_request())
 
@@ -105,9 +90,7 @@ async def test_platform_response_waits_for_business_and_audit_commit(
     db.commit.side_effect = commit
     if failure == "audit":
         db.flush.side_effect = RuntimeError("audit storage unavailable")
-    monkeypatch.setattr(
-        session_module, "AsyncSessionLocal", lambda: _SessionContext(db)
-    )
+    monkeypatch.setattr(session_module, "AsyncSessionLocal", lambda: db)
     monkeypatch.setattr(
         system_agent_auth, "persist_system_agent_audit", AsyncMock(return_value=100)
     )

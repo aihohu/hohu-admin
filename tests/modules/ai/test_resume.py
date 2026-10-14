@@ -216,6 +216,52 @@ async def test_memory_resume_after_original_waiter_disconnects(
     assert not manager._pending
 
 
+@pytest.mark.parametrize("terminal", [False, True])
+async def test_durable_poll_disconnect_returns_postgres_connection(
+    monkeypatch, terminal
+):
+    import anyio
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db.session import settings
+    from app.modules.ai.api import resume as resume_module
+
+    engine = create_async_engine(settings.DATABASE_URL, pool_size=1, max_overflow=0)
+    monkeypatch.setattr(resume_module, "AsyncSessionLocal", async_sessionmaker(engine))
+    completed_reads = []
+    try:
+        for _ in range(3):
+            with anyio.CancelScope() as scope:
+
+                async def interrupted_read(db, *args, **kwargs):
+                    await db.execute(select(1))
+                    scope.cancel()
+                    await anyio.lowlevel.checkpoint()
+                    completed_reads.append(True)
+                    return _make_durable_action(
+                        status="succeeded" if terminal else "pending_confirmation"
+                    )
+
+                monkeypatch.setattr(
+                    resume_module.prepared_action_service,
+                    "get_by_confirmation_id",
+                    interrupted_read,
+                )
+                with pytest.raises(asyncio.CancelledError):
+                    await resume_module._wait_durable_resume_terminal(
+                        confirmation_id="cid",
+                        pending=_make_pending(action_id=9001),
+                        user_id=100,
+                        tenant=TENANT,
+                        timeout_sec=240,
+                    )
+            assert engine.pool.checkedout() == 0
+        assert len(completed_reads) == 3
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.parametrize(
     "boundary", ["tenant", "owner", "binding", "expired", "cancel"]
 )

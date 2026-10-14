@@ -1,5 +1,6 @@
 from collections.abc import AsyncGenerator
 
+from anyio import CancelScope
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
@@ -40,16 +41,20 @@ async def get_db(request: Request) -> AsyncGenerator[AsyncSession, None]:
     """
     每个请求创建一个新的异步 Session，并在请求结束时自动关闭。
     """
-    async with AsyncSessionLocal() as session:
-        try:
-            yield session
-            if not getattr(request.state, "platform_transaction_managed", False):
-                await _commit_request_session(session, request)
-        except Exception:
-            if not getattr(request.state, "platform_transaction_managed", False):
+    session = AsyncSessionLocal()
+    try:
+        yield session
+        if not getattr(request.state, "platform_transaction_managed", False):
+            await _commit_request_session(session, request)
+    except BaseException:
+        if not getattr(request.state, "platform_transaction_managed", False):
+            # A disconnected ASGI request remains in a cancelled AnyIO scope.
+            # Protect cleanup checkpoints, never the request or its commit.
+            with CancelScope(shield=True):
                 await session.rollback()
-            raise
-        finally:
+        raise
+    finally:
+        with CancelScope(shield=True):
             await session.close()
 
 
@@ -81,6 +86,7 @@ async def get_platform_db(
     try:
         yield db
         await _commit_request_session(db, request)
-    except Exception:
-        await db.rollback()
+    except BaseException:
+        with CancelScope(shield=True):
+            await db.rollback()
         raise
