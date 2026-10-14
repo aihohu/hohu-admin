@@ -27,6 +27,7 @@ from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.agent_authorization_service import (
     agent_authorization_service,
 )
+from app.modules.job.service.job_service import job_service
 from app.modules.system.service.dept_service import dept_service
 from app.modules.system.service.file_service import file_service
 from app.modules.system.service.role_service import role_service
@@ -857,6 +858,9 @@ class ResultProjectionService:
                 return True
             if subject_type == "role":
                 await role_service.get_role_detail(db, int(subject_id), tenant=tenant)
+                return True
+            if subject_type == "job":
+                await job_service.get_by_id(db, int(subject_id), tenant=tenant)
                 return True
             if subject_type == "file":
                 await file_service.get_by_id(

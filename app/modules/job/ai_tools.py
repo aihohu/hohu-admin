@@ -13,7 +13,7 @@ max_retries / concurrent — JobAiUpdate schema 在 update_for_ai 入口兜底�
 
 from typing import Any
 
-from app.modules.ai.agents.gateway.result import ToolResult, UIResult
+from app.modules.ai.agents.gateway.result import ResultProjection, ToolResult, UIResult
 from app.modules.ai.agents.tools.decorator import ai_tool
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.core.context import AiToolContext
@@ -62,6 +62,7 @@ async def job_update_cron(
     job_id_str = str(job.job_id)
     return ToolResult.success(
         data={"ok": True, "job_id": job_id_str, "new_cron": new_cron},
+        projection=ResultProjection(subject_refs=({"type": "job", "id": job_id_str},)),
         ui=UIResult(
             view_type="detail_card",
             view_data={

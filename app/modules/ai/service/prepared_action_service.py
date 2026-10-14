@@ -490,6 +490,9 @@ class PreparedActionService:
                     for role_id in sorted(role_ids, key=int)
                 ),
             ]
+        if execute_tool_name == "job.update_cron":
+            job_id = _stable_positive_id(frozen_args.get("job_id"), field="job_id")
+            return [{"type": "job", "id": job_id}]
         scalar_fields = {
             "user.reset_password": ("user_id", "user"),
             "user.update": ("user_id", "user"),
