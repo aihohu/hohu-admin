@@ -8,7 +8,10 @@ import pytest
 
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.service.conversation_service import conversation_service
-from app.modules.ai.service.result_projection_service import result_projection_service
+from app.modules.ai.service.result_projection_service import (
+    DeletionReceipt,
+    result_projection_service,
+)
 from tests.modules.ai.test_conversation_api import _message
 from tests.modules.ai.test_result_projection_service import TENANT, _user
 
@@ -33,7 +36,11 @@ async def test_projected_receipt_excludes_original_sensitive_payload():
         patch.object(
             result_projection_service,
             "deletion_receipt",
-            AsyncMock(return_value="本轮删除操作已成功完成。"),
+            AsyncMock(
+                return_value=DeletionReceipt(
+                    "本轮删除操作已成功完成。", ("receipt-call",)
+                )
+            ),
             create=True,
         ),
     ):
@@ -43,6 +50,7 @@ async def test_projected_receipt_excludes_original_sensitive_payload():
     assert result[0].content == "本轮删除操作已成功完成。"
     assert result[0].parts is None
     assert result[0].tool_calls is None
+    assert result[0].completed_tool_call_ids == ["receipt-call"]
     assert "private" not in result[0].model_dump_json()
     assert message.content == "private name and phone"
 
@@ -75,7 +83,12 @@ async def test_receipt_requires_matching_success_audit(db_session, change, allow
         conversation_id=8001,
         trace_id="receipt-trace",
         tool_calls=[
-            {"tool": "user.batch_delete", "tool_call_id": "receipt-call", "ok": True}
+            {"tool": "user.batch_delete", "tool_call_id": "receipt-call", "ok": True},
+            {
+                "tool": "user.batch_delete",
+                "tool_call_id": "unverified-call",
+                "ok": True,
+            },
         ],
     )
     values = {
@@ -113,7 +126,11 @@ async def test_receipt_requires_matching_success_audit(db_session, change, allow
         )
     assert bool(result) is allowed
     if result:
-        assert result == "本轮删除操作已成功完成。目标数据已删除，历史详情不再展示。"
+        assert (
+            result.content
+            == "本轮删除操作已成功完成。目标数据已删除，历史详情不再展示。"
+        )
+        assert result.completed_tool_call_ids == ("receipt-call",)
 
 
 @pytest.mark.parametrize("reason", ["owner", "tenant", "chat", "tool", "hash", "scope"])
@@ -161,4 +178,4 @@ async def test_receipt_preserves_live_authority_checks(reason):
             message=message,
         )
     assert result is None
-    db.scalar.assert_not_awaited()
+    db.scalars.assert_not_awaited()

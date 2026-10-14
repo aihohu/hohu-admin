@@ -340,7 +340,10 @@ class ConversationService:
                             parent_message_id=message.parent_message_id,
                             role="assistant",
                             message_type="text",
-                            content=receipt,
+                            content=receipt.content,
+                            completed_tool_call_ids=list(
+                                receipt.completed_tool_call_ids
+                            ),
                             parts=None,
                             tokens_input=None,
                             tokens_output=None,

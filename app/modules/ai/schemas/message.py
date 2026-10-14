@@ -20,6 +20,10 @@ class MessageOut(BaseModel):
     tokens_input: int | None
     tokens_output: int | None
     tool_calls: list[dict] | None
+    completed_tool_call_ids: list[str] = Field(
+        default_factory=list,
+        description="Audited completion IDs for safe receipts without target details",
+    )
     trace_id: str | None
     is_active: bool
     supersedes_message_id: int | None

@@ -8,8 +8,8 @@ GET /ai/chat/resume
   - finally 释放 owner 锁（Lua 脚本防误删）
 
 模式说明（不再硬校验）：
-  - memory 模式：单 worker 本地开发可用。_hang_memory + _wake_memory 跨请求
-    同进程工作，Event 在 confirm 端点被 set 后 hang 协程返回 action。
+  - memory 模式：durable 恢复流观察数据库终态，旧流断开后不依赖进程内 Event。
+    legacy 确认仍使用 _hang_memory + _wake_memory。
   - Redis Pub/Sub 模式支持多 worker 跨进程唤醒
     走 pubsub + SETNX owner 锁兜底。多 worker 部署用 memory 会双执行 race，
     由部署文档约束，不在端点强校验（避免本地开发被锁死）。
@@ -24,8 +24,10 @@ GET /ai/chat/resume
   409 AI_RESUME_IN_PROGRESS      — owner 锁被其它 worker 持有（双执行兜底）
 """
 
+import asyncio
 import logging
 import secrets
+import time
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -260,6 +262,43 @@ def _ui_result_from_dict(value: dict | None) -> UIResult | None:
         label_key=str(value.get("labelKey") or value.get("label_key") or ""),
         label_params=value.get("labelParams") or value.get("label_params") or {},
     )
+
+
+async def _wait_durable_resume_terminal(
+    *,
+    confirmation_id: str,
+    pending: PendingPayload,
+    user_id: int,
+    tenant: TenantContext,
+    timeout_sec: int,
+) -> None:
+    """Observe confirm-owned state after a memory waiter disconnects."""
+    deadline = time.monotonic() + timeout_sec
+    while True:
+        # A fresh short transaction observes commits from POST /ai/confirm.
+        async with AsyncSessionLocal() as poll_db:
+            action = await prepared_action_service.get_by_confirmation_id(
+                poll_db, confirmation_id, tenant=tenant
+            )
+            if not _durable_binding_valid(
+                action, pending=pending, user_id=user_id, tenant=tenant
+            ):
+                raise BusinessRuleException(
+                    "续传 action 绑定无效",
+                    error_code="AI_PREPARED_ACTION_BINDING_INVALID",
+                )
+            if PreparedActionStatus(action.status).is_terminal:
+                return
+            expires_at = action.expires_at
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=UTC)
+            remaining = min(
+                deadline - time.monotonic(),
+                (expires_at - datetime.now(UTC)).total_seconds(),
+            )
+        if remaining <= 0:
+            raise TimeoutError()
+        await asyncio.sleep(min(0.5, remaining))
 
 
 async def _load_durable_resume_terminal(
@@ -831,7 +870,17 @@ async def resume_chat(
 
             # 6.2 hang 等 wake
             try:
-                action = await hitl_manager.hang(confirmation_id, tenant=tenant)
+                if durable_action is not None and settings.AI_HITL_MODE == "memory":
+                    await _wait_durable_resume_terminal(
+                        confirmation_id=confirmation_id,
+                        pending=pending,
+                        user_id=current_user.user_id,
+                        tenant=tenant,
+                        timeout_sec=ttl_sec,
+                    )
+                    action = None  # Durable tools execute only in POST /ai/confirm.
+                else:
+                    action = await hitl_manager.hang(confirmation_id, tenant=tenant)
             except TimeoutError:
                 yield _format_sse_chunk(
                     AiErrorEvent(

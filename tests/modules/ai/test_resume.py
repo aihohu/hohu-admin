@@ -5,6 +5,8 @@
 
 # ruff: noqa: ARG001, PLC0415
 
+import asyncio
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -117,6 +119,143 @@ def _make_request(last_event_id: str | None = None):
     req = MagicMock()
     req.headers = {"last-event-id": last_event_id} if last_event_id else {}
     return req
+
+
+@pytest.mark.parametrize("terminal_status", ["succeeded", "rejected"])
+async def test_memory_resume_after_original_waiter_disconnects(
+    monkeypatch, terminal_status
+):
+    from app.modules.ai.agents.hitl.events import DoneEvent
+    from app.modules.ai.agents.hitl.manager import HitlManager
+
+    manager = HitlManager()
+    monkeypatch.setattr("app.modules.ai.api.resume.hitl_manager", manager)
+    monkeypatch.setattr("app.modules.ai.api.resume.settings.AI_HITL_MODE", "memory")
+    monkeypatch.setattr(
+        "app.modules.ai.api.resume.settings.AI_SSE_RESUME_ENABLED", True
+    )
+    await manager.create_pending(
+        AsyncMock(),
+        confirmation_id="cid",
+        user_id=100,
+        tenant=TENANT,
+        conversation_id=1,
+        tool_call_id="tc_test",
+        trace_id="tr_test",
+        tool_name="user.update",
+        args={"user_id": 42},
+    )
+    original = asyncio.create_task(manager.hang("cid", tenant=TENANT))
+    await asyncio.sleep(0)
+    original.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await original
+    assert not manager._pending
+    terminal = _make_durable_action(status=terminal_status)
+    load_terminal = AsyncMock(
+        return_value=[
+            DoneEvent(
+                trace_id="tr_test",
+                message_id=123,
+                persistence="committed",
+                projection="updated",
+            )
+        ]
+    )
+    terminalize = AsyncMock(return_value=[])
+    execute = AsyncMock()
+    with (
+        patch.object(
+            manager,
+            "get_pending",
+            AsyncMock(return_value=_make_pending(action_id=9001)),
+        ),
+        patch.object(manager, "ttl", AsyncMock(return_value=240)),
+        patch(
+            "app.modules.ai.api.resume.redis_client.set", AsyncMock(return_value=True)
+        ),
+        patch("app.modules.ai.api.resume.redis_client.eval", AsyncMock(return_value=1)),
+        patch("app.modules.ai.api.resume.AsyncSessionLocal") as sessions,
+        patch(
+            "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
+            AsyncMock(
+                side_effect=[
+                    _make_durable_action(),
+                    _make_durable_action(status="running"),
+                    terminal,
+                ]
+            ),
+        ),
+        patch("app.modules.ai.api.resume._load_durable_resume_terminal", load_terminal),
+        patch("app.modules.ai.api.resume._cleanup_durable_resume", AsyncMock()),
+        patch(
+            "app.modules.ai.api.resume._terminalize_durable_resume_failure", terminalize
+        ),
+        patch("app.modules.ai.api.resume.resume_tool_execution", execute),
+    ):
+        sessions.return_value.__aenter__.return_value = AsyncMock()
+        response = await resume_chat(
+            request=_make_request("cid"),
+            confirmation_id_query="cid",
+            db=MagicMock(),
+            current_user=_make_user(),
+        )
+
+        async def consume():
+            return "".join([chunk async for chunk in response.body_iterator])
+
+        body = await asyncio.wait_for(consume(), timeout=3)
+    assert "AI_INTERNAL_ERROR" not in body
+    events = [
+        json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: ")
+    ]
+    assert events[-1]["persistence"] == "committed"
+    load_terminal.assert_awaited_once()
+    terminalize.assert_not_awaited()
+    execute.assert_not_awaited()
+    assert not manager._pending
+
+
+@pytest.mark.parametrize(
+    "boundary", ["tenant", "owner", "binding", "expired", "cancel"]
+)
+async def test_memory_durable_wait_respects_boundaries(boundary):
+    from app.modules.ai.api.resume import _wait_durable_resume_terminal
+
+    changes = {
+        "tenant": {"tenant_id": 99},
+        "owner": {"user_id": 99},
+        "binding": {"execute_tool_call_id": "wrong-call"},
+        "expired": {"expires_at": datetime(2000, 1, 1, tzinfo=UTC)},
+        "cancel": {},
+    }
+    expected = (
+        TimeoutError
+        if boundary == "expired"
+        else (asyncio.CancelledError if boundary == "cancel" else BusinessRuleException)
+    )
+    with (
+        patch("app.modules.ai.api.resume.AsyncSessionLocal") as sessions,
+        patch(
+            "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
+            AsyncMock(return_value=_make_durable_action(**changes[boundary])),
+        ),
+        patch(
+            "app.modules.ai.api.resume.asyncio.sleep",
+            AsyncMock(side_effect=asyncio.CancelledError),
+        ) as sleep,
+    ):
+        sessions.return_value.__aenter__.return_value = AsyncMock()
+        with pytest.raises(expected):
+            await _wait_durable_resume_terminal(
+                confirmation_id="cid",
+                pending=_make_pending(action_id=9001),
+                user_id=100,
+                tenant=TENANT,
+                timeout_sec=240,
+            )
+        if boundary != "cancel":
+            sleep.assert_not_awaited()
 
 
 @pytest.fixture

@@ -61,6 +61,14 @@ def _download_signing_key() -> bytes:
 
 
 @dataclass(frozen=True)
+class DeletionReceipt:
+    """Safe completion facts, with no deleted targets or original payload."""
+
+    content: str
+    completed_tool_call_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ProjectionLineage:
     """Immutable authorization facts used by every persisted-result reader."""
 
@@ -446,7 +454,7 @@ class ResultProjectionService:
         *,
         owner_user_id: int,
         message: AiMessage | Any,
-    ) -> str | None:
+    ) -> DeletionReceipt | None:
         """Expose only an actor's audited success, never deleted business data."""
         if message.role != "assistant" or not message.trace_id:
             return None
@@ -478,9 +486,8 @@ class ResultProjectionService:
         ]
         if not call_ids:
             return None
-        success = await db.scalar(
-            select(AiOperationLog.log_id)
-            .where(
+        successes = await db.scalars(
+            select(AiOperationLog.tool_call_id).where(
                 AiOperationLog.tenant_id == lineage.tenant_id,
                 AiOperationLog.user_id == owner_user_id,
                 AiOperationLog.conversation_id == message.conversation_id,
@@ -490,11 +497,14 @@ class ResultProjectionService:
                 AiOperationLog.tool_call_id.in_(call_ids),
                 AiOperationLog.status == "success",
             )
-            .limit(1)
         )
-        if success is None:
+        completed = tuple(sorted(set(successes.all())))
+        if not completed:
             return None
-        return "本轮删除操作已成功完成。目标数据已删除，历史详情不再展示。"
+        return DeletionReceipt(
+            content="本轮删除操作已成功完成。目标数据已删除，历史详情不再展示。",
+            completed_tool_call_ids=completed,
+        )
 
     async def authorize_message_projection(
         self,
