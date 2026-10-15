@@ -6,7 +6,35 @@
 
 后端版本维护在 [pyproject.toml](../pyproject.toml)，变更说明维护在 [CHANGELOG.md](../CHANGELOG.md)。`Unreleased` 是待发布内容，不等于发布记录。各子项目独立版本，但跨项目契约变更必须给出配套版本及升级顺序。
 
-当前 [release.yml](../.github/workflows/release.yml) 在 GitHub Release 发布时运行：先执行 hosted 发布验证，通过后构建并推送 GHCR 的 linux/amd64、linux/arm64 镜像；启用 ACR 镜像后由独立任务复制并核验。默认分支也支持手动构建测试镜像。不要把本地能构建 wheel 或前端包等同于已配置 PyPI/npm 自动发布。
+当前 [release.yml](../.github/workflows/release.yml) 在官方仓库推送 `vMAJOR.MINOR.PATCH` Tag 时运行：校验发布元数据，调用完整 CI，再执行 hosted 发布验证，构建并推送 GHCR 的 linux/amd64、linux/arm64 镜像；启用 ACR 镜像后复制并核验，最后自动创建 GitHub Release。默认分支也支持手动构建测试镜像。后端正式产物是容器镜像，此流程不发布 PyPI 包。
+
+## Tag 自动发布
+
+正式发布仅支持稳定的三段版本，例如 `v0.1.5`；预发布、构建后缀和无 `v` 前缀的标签不支持。工作流必须包含在待发布提交内，该提交必须已合入仓库默认分支。手动在 GitHub 页面发布 Release 不会启动本流程。
+
+1. 更新 `pyproject.toml` 中的版本，执行 `uv lock` 同步根包版本，并完成 `CHANGELOG.md` 对应条目。
+2. CHANGELOG 使用唯一的 `## [v0.1.5]` 标题，也可附加 `(YYYY-MM-DD)` 或 `- YYYY-MM-DD` 日期；必须是文件中首个版本条目，正文不能为空，标题不能保留 `Unreleased`。配套客户端、CLI 版本和升级注意事项应写入该条目。
+3. 完成发布前验证，将变更提交并合入默认分支，确认本地检出的待发布提交正确。
+4. 为该提交创建并推送一个尚未发布的 Tag。以下以首次发布 `v0.1.5` 为例；其他版本应替换版本号，已有标签不要强制移动：
+
+   ```bash
+   git tag -a v0.1.5 -m "Release v0.1.5"
+   git push origin v0.1.5
+   ```
+
+5. 在 Actions → Release 查看运行结果。全部发布任务成功后，Release 正文自动取自该提交 CHANGELOG 的对应版本内容，无需再复制到 GitHub 页面。
+
+[prepare_release.py](../tools/ops/prepare_release.py) 校验 Tag、`pyproject.toml` 和 `uv.lock` 根包版本一致，并提取发布说明。可在推送前本地检查：
+
+```bash
+uv run python -B tools/ops/prepare_release.py --tag v0.1.5 --notes-file .local/artifacts/release-notes.md
+```
+
+CI 通过可复用工作流检查同一提交的 Ruff、全量测试、至少 70% 覆盖率和 hosted CI profile；正式镜像还必须通过 release profile。版本校验或任何必需验证失败时不开始镜像发布。镜像版本标签与 OCI 元数据从已校验 Tag 生成，ACR 复制同一次构建的 digest。源码 checkout 固定提交 SHA，创建公告前再次核对远端 Tag 未被移动。
+
+发布使用仓库自带的 `GITHUB_TOKEN`，无需新增 PAT。默认仅授予 `contents: read`，镜像任务授予 `packages: write`，最后创建公告的任务授予 `contents: write`；沿用 `docker` Environment 的保护规则，需允许正式 Tag 使用该环境。测试、构建和公告在同一流程中显式串联，不依赖自动创建 Release 后再次触发 Actions。
+
+失败时在原运行中选择 **Re-run failed jobs**。GHCR 成功、ACR 失败时不会创建公告，重跑失败任务可继续同步已有 digest；ACR 未启用时允许跳过同步并创建公告。已存在的正式 Release 保留正文；同名草稿在发布链路成功后使用 CHANGELOG 正文发布。镜像仓库与 GitHub Release 之间没有原子事务，失败不会自动回滚已经推送的镜像或 `latest`。修改代码或工作流后，应准备新的版本和 Tag，旧运行的重试仍使用旧提交。
 
 ## v0.1.5 发布核对
 
