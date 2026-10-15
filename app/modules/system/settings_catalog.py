@@ -56,7 +56,7 @@ SETTINGS = {
     definition.key: definition
     for definition in (
         Setting("ai:enabled_tools", "ai", default="[]"),
-        Setting("site_name", "brand", default="后台管理系统", public=True),
+        Setting("site_name", "brand", default="HoHu Admin", public=True),
         Setting("site_logo", "brand", public=True),
         Setting("site_description", "brand", default="通用后台管理系统", public=True),
         Setting("site_icp", "brand", public=True),

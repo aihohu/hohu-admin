@@ -1,180 +1,158 @@
 # HoHu Admin
 
-Project documentation: [maintained guides](docs/README.md).
-
 <p align="center">
-  <b>AI-driven modern full-stack admin platform · Backend</b>
+  <b>AI-native enterprise application platform · Backend</b>
 </p>
 
 <p align="center">
-  <a href="https://show.hohu.org">Demo</a> ·
-  <a href="https://github.com/aihohu/hohu-admin-web">Frontend</a> ·
-  <a href="https://github.com/aihohu/hohu-admin-app">Mobile</a> ·
-  <a href="https://hohu.org/guide/introduction.html">Docs</a>
+  <a href="https://hohu.org/">Website</a> ·
+  <a href="https://show.hohu.org">Live demo</a> ·
+  <a href="https://hohu.org/guide/user/">User guide</a> ·
+  <a href="https://hohu.org/guide/development/">Developer guide</a>
 </p>
 
 <p align="center">
-  <a href="./README.zh_CN.md">简体中文</a>
+  English · <a href="./README.zh_CN.md">简体中文</a>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/license-Apache--2.0-green.svg" alt="license" />
-  <img src="https://img.shields.io/badge/python-%E2%89%A53.12-3776AB.svg" alt="Python" />
-  <img src="https://img.shields.io/badge/FastAPI-0.127-009688.svg" alt="FastAPI" />
-  <img src="https://img.shields.io/badge/SQLAlchemy-2.0-D71F00.svg" alt="SQLAlchemy" />
-  <img src="https://img.shields.io/badge/PostgreSQL-17-4169E1.svg" alt="PostgreSQL" />
-  <img src="https://img.shields.io/badge/Redis-7-DC382D.svg" alt="Redis" />
+  <img src="https://img.shields.io/badge/license-Apache--2.0-green.svg" alt="Apache License 2.0" />
+  <img src="https://img.shields.io/badge/python-%E2%89%A53.12-3776AB.svg" alt="Python 3.12+" />
+  <img src="https://img.shields.io/badge/FastAPI-009688.svg" alt="FastAPI" />
+  <img src="https://img.shields.io/badge/SQLAlchemy-2.0-D71F00.svg" alt="SQLAlchemy 2.0" />
+  <img src="https://img.shields.io/badge/PostgreSQL-4169E1.svg" alt="PostgreSQL" />
+  <img src="https://img.shields.io/badge/Redis-DC382D.svg" alt="Redis" />
   <img src="https://img.shields.io/github/stars/aihohu/hohu-admin" alt="GitHub stars" />
-  <img src="https://img.shields.io/github/forks/aihohu/hohu-admin" alt="GitHub forks" />
 </p>
 
----
+**HoHu is an AI-native enterprise application platform for building business applications and completing work through application interfaces and AI assistants.**
 
-HoHu Admin is a modular backend management platform for decoupled frontend-backend architectures. It provides out-of-the-box infrastructure — authentication, RBAC, Snowflake IDs, scheduled jobs, file management, AI integration, and more — so you can focus on building features, not scaffolding.
+This repository contains HoHu's FastAPI backend, including authentication, permissions and data access controls, organization management, files, scheduled jobs, AI conversations, business tool calls, and operation confirmations. It works with the Web, mobile, and desktop clients.
 
-## Features
+## Core capabilities
 
-- **Fully Async** — FastAPI + SQLAlchemy 2.0 async ORM end-to-end
-- **Snowflake IDs** — Distributed-safe primary keys, auto-serialized as strings for JavaScript
-- **RBAC** — User → Role → Menu permission model with button-level access control
-- **Dual Login** — OAuth2 form (Swagger UI) + JSON body (SPA) authentication
-- **Built-in AI** — Streaming chat via OpenAI-compatible providers with multi-provider management
-- **Job Scheduler** — APScheduler-based task management with log tracking
-- **File Management** — Upload, storage, and serving with extension/size validation
-- **Auto CamelCase** — `snake_case` backend ↔ `camelCase` frontend via Pydantic alias generation
-- **Unified Response** — All endpoints follow `{code, msg, data}` envelope with i18n-ready error codes
-- **Docker Ready** — Multi-stage Dockerfile with health checks; full-stack orchestration via `hohu deploy`
+- **Application AI assistants**: Streaming conversations, message history, model and assistant configuration, and permission-controlled business tool calls with operation confirmations.
+- **AI-assisted development**: HoHu Skills guide coding assistants through project creation, business module development, and verification using project conventions.
+- **Identity and access**: JWT authentication and session management, role and menu permissions, data scopes, and tenant boundaries. Registration and password recovery require account settings and mail configuration.
+- **Administration**: Users, departments, dictionaries, system settings, custom parameters, and file handling with format, size, and access checks.
+- **Jobs and operations**: Scheduled jobs and execution logs, a separate scheduler process, and Docker Compose deployment through the CLI.
+- **Backend foundations**: FastAPI, SQLAlchemy 2.0 async sessions, Pydantic validation, Alembic migrations, and shared error handling.
 
-## Tech Stack
+## Quick start
 
-| Layer | Technologies |
-|-------|-------------|
-| **Framework** | FastAPI, Pydantic v2, Uvicorn |
-| **ORM** | SQLAlchemy 2.0 (async), Alembic migrations |
-| **Database** | PostgreSQL |
-| **Cache** | Redis |
-| **Auth** | JWT (HS256), bcrypt, OAuth2 |
-| **AI** | OpenAI SDK, pydantic-ai |
-| **Tasks** | APScheduler |
-| **Linting** | Ruff |
+The following paths create and run Backend and Web locally. Prepare Git, Python 3.12+, uv, Node.js, pnpm, and reachable PostgreSQL and Redis services for development. See the [development setup guide](https://hohu.org/guide/quick-start.html) for versions and connection configuration.
 
-## Ecosystem
-
-HoHu Admin is part of a monorepo with dedicated frontend, mobile, desktop, docs, and CLI projects:
-
-| Project | Description |
-|---------|-------------|
-| [hohu-admin-web](https://github.com/aihohu/hohu-admin-web) | Vue 3 + Naive UI + TypeScript admin dashboard |
-| [hohu-admin-app](https://github.com/aihohu/hohu-admin-app) | Cross-platform mobile app (uni-app + Vue 3) |
-| [hohu-admin-desktop](https://github.com/aihohu/hohu-admin-desktop) | Electron desktop application |
-| [hohu-admin-docs](https://github.com/aihohu/hohu-admin-docs) | VitePress documentation site |
-| [hohu-cli](https://github.com/aihohu/hohu-cli) | CLI scaffolding tool for project setup |
-
-## Project Structure
-
-```
-hohu-admin/
-├── app/
-│   ├── core/                # Config, security, exceptions, response models
-│   ├── db/                  # Async engine & session factory
-│   ├── middleware/           # Rate limiting
-│   ├── modules/
-│   │   ├── auth/            # Login, register, JWT, user info, routes
-│   │   ├── system/          # User, Role, Menu, Dept, Dict, File
-│   │   ├── job/             # Scheduled tasks & execution logs
-│   │   └── ai/              # Chat, conversations, providers, agents
-│   ├── utils/               # Pagination, masking, helpers
-│   └── main.py              # App entry point
-├── alembic/                 # Database migrations
-├── scripts/                 # Seed & setup scripts
-├── tests/                   # Pytest test suite
-└── Dockerfile               # Multi-stage production build
-```
-
-## Getting Started
-
-### Prerequisites
-
-- Python >= 3.12
-- PostgreSQL
-- Redis
-- [uv](https://docs.astral.sh/uv/) (recommended) or pip
-
-### Using HoHu CLI
-
-HoHu CLI is the supported setup, deployment and upgrade entry point.
+Install HoHu CLI:
 
 ```bash
 uv tool install hohu
+hohu --version
+```
+
+### Create and develop with AI
+
+Run this in the parent workspace where you plan to create the project:
+
+```bash
+npx skills@latest add aihohu/hohu-skills
+```
+
+Select `hohu-project`, `hohu-business-module`, and your coding assistant, such as Claude Code, Cursor, or Codex. Reopen the assistant in that workspace, confirm it recognizes the Skills, and ask:
+
+> Use hohu-project to create my-project with Backend and Web only. Check the development environment and database configuration, initialize and start the project, then report the URLs and verification results.
+
+For an existing project, install and use Skills from the common Backend/Web project root. Once the project is running, describe a business feature, for example:
+
+> Use hohu-business-module to build an equipment lending module with an equipment list, borrowing, returns, and loan records. Ordinary users may only view and return their own loans, and equipment cannot be borrowed twice at the same time. Provide Web pages, AI queries, and borrowing with confirmation, and verify permissions and business constraints.
+
+Equipment lending is a development example to implement in your project. Skills provide workflows; they do not replace CLI, database, or development environment installation. Application AI models are configured separately from the coding assistant. See [install Skills](https://hohu.org/guide/cli/skills.html) and [AI-assisted development](https://hohu.org/guide/ai-coding.html).
+
+### Create a project with CLI
+
+You can also run the commands directly. Select **Backend** and **Frontend** in the creation wizard:
+
+```bash
 hohu create my-project
 cd my-project
 hohu init
 hohu dev
 ```
 
-For Docker deployment:
+`hohu init` installs dependencies, prepares the backend `.env`, runs migrations, and synchronizes built-in data. If the first run fails to connect, update PostgreSQL and Redis settings in `hohu-admin/.env` and run `hohu init` again. Keep the generated `SECRET_KEY` and `HOHU_ADMIN_PASSWORD`; repeating initialization preserves existing configuration and user passwords.
+
+### Access the running application
+
+| Entry | Default address |
+| --- | --- |
+| Web application | <http://localhost:9527> |
+| Backend API | <http://127.0.0.1:8000> |
+| Development OpenAPI | <http://127.0.0.1:8000/docs> |
+
+Use the terminal output if ports differ. For first sign-in, use `admin` and the backend `.env` value of `HOHU_ADMIN_PASSWORD`. If you have already changed it, use the updated password. Change the initial password after signing in.
+
+Application AI requires a provider, model, and appropriate authorization. See [AI configuration and operations](https://hohu.org/guide/operations/ai.html).
+
+## Deployment
+
+Server deployment uses HoHu CLI and Docker Compose. With Docker and Compose ready, initialize image deployment in a dedicated empty directory without creating a source project first:
 
 ```bash
+mkdir my-hohu-deploy
+cd my-hohu-deploy
 hohu deploy init
+```
+
+Edit `.hohu/deploy/.env` to select compatible images and configure PostgreSQL, Redis, access ports, and persistent storage. Web/API ports are not published by default. Keep the generated secrets and initial administrator password, configure access, then run:
+
+```bash
 hohu deploy
 ```
 
-CLI generates the initial admin password in `.hohu/deploy/.env` as
-`HOHU_ADMIN_PASSWORD` (local development uses the backend `.env`). Migrations
-and built-in data synchronization run automatically before application startup;
-repeated deployments preserve existing passwords, custom settings and grants.
-See [deployment internals](docs/SCRIPTS-DEPLOYMENT.md) for contributor details.
+Deployment runs migrations and synchronizes built-in data. Configure the domain and HTTPS and verify application behavior before launch. See the [deployment guide](https://hohu.org/guide/deploy.html) for new installations and [upgrade, backup, and recovery](https://hohu.org/guide/operations/upgrade.html) for existing instances.
 
-## API Modules
+## Technology and related projects
 
-| Module | Prefix | Features |
-|--------|--------|----------|
-| **Auth** | `/auth` | Login, register, user info, dynamic routes |
-| **User** | `/system/user` | CRUD, batch delete, role assignment |
-| **Role** | `/system/role` | CRUD, menu permissions |
-| **Menu** | `/system/menu` | Tree CRUD, route management |
-| **Department** | `/system/dept` | Tree CRUD |
-| **Dict** | `/system/dict-type`, `/system/dict-data` | Type/data CRUD |
-| **File** | `/system/file` | Upload, batch upload, CRUD |
-| **Job** | `/system/job` | CRUD, enable/disable, manual trigger |
-| **Job Log** | `/system/job-log` | Paginated logs, cleanup |
-| **AI Chat** | `/ai/chat` | Streaming (SSE) & sync chat |
-| **AI Conversation** | `/ai/conversation` | CRUD, message history |
-| **AI Provider** | `/ai/provider` | Multi-provider management, model list, connectivity test |
+| Layer | Technologies |
+| --- | --- |
+| Runtime and API | Python 3.12+, FastAPI, Pydantic v2, Uvicorn |
+| Data and migrations | PostgreSQL, SQLAlchemy 2.0 async, Alembic |
+| Cache and authentication | Redis, JWT, bcrypt |
+| AI | OpenAI SDK, pydantic-ai |
+| Jobs | APScheduler |
+| Tooling and tests | uv, Ruff, pytest |
 
-## Response Format
+Components are maintained in separate repositories:
 
-All API responses follow a unified envelope:
+| Project | Purpose |
+| --- | --- |
+| [hohu-admin-web](https://github.com/aihohu/hohu-admin-web) | Vue 3, Naive UI, and TypeScript Web administration UI |
+| [hohu-admin-app](https://github.com/aihohu/hohu-admin-app) | Mobile application and mini-program built with uni-app and Vue 3 |
+| [hohu-admin-desktop](https://github.com/aihohu/hohu-admin-desktop) | Electron desktop client |
+| [hohu-cli](https://github.com/aihohu/hohu-cli) | Project creation, initialization, development, and deployment |
+| [hohu-skills](https://github.com/aihohu/hohu-skills) | Skills for project creation and business module development |
+| [hohu-admin-docs](https://github.com/aihohu/hohu-admin-docs) | Website and bilingual documentation |
 
-```json
-// Success
-{"code": 200, "msg": "success", "data": {...}}
+## Development and contributions
 
-// Paginated
-{"code": 200, "msg": "success", "data": {"records": [...], "total": 100, "current": 1, "size": 10}}
+Start with the [developer guide](https://hohu.org/guide/development/). Follow [add a module](https://hohu.org/guide/development/module.html) to implement models, migrations, APIs, permissions, and pages, then connect [business tools](https://hohu.org/guide/development/ai-tools.html) when the module needs application AI.
 
-// Error (with i18n-ready errorCode)
-{"code": 401, "msg": "Token 无效或已过期", "data": null, "errorCode": "TOKEN_EXPIRED"}
-```
+Ordinary JSON endpoints use `{code, msg, data}` with success code `200`. Snowflake IDs are strings, and Schema aliases expose camelCase fields. SSE, downloads, health checks, and metrics use their own response formats. See [API reference](https://hohu.org/guide/reference/api.html) for conventions and the target release's OpenAPI for the endpoint inventory. Built-in OpenAPI pages are disabled with `ENV=prod`.
 
-## Development
+Before changing core code, read the [contribution guide](docs/CONTRIBUTING.md), [architecture contracts](docs/ARCHITECTURE-GUIDELINES.md), and [testing guide](docs/TESTING-GUIDELINES.md). The full index is in [architecture and maintenance documentation](docs/README.md).
 
-### Adding a New Module
-
-Follow the [module development guide](docs/MODULE-DEVELOPMENT-GUIDE.md) and
-[architecture contracts](docs/ARCHITECTURE-GUIDELINES.md). New endpoints need
-explicit permissions, trusted tenant scope and regression coverage; authentication
-alone does not authorize access to every record.
-
-### Code Quality
+Run checks from the backend directory after preparing the test environment described in the testing guide:
 
 ```bash
-ruff check . && ruff format .   # Lint + format
-pytest                           # Run tests
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest --basetemp=.local/tests/pytest
+uv run python -m tools.checks.check_docs
 ```
+
+Issue reports should include versions, reproduction steps, and redacted logs. Report vulnerabilities according to the [security policy](docs/SECURITY.md).
 
 ## License
 
 [Apache License 2.0](./LICENSE) &copy; HoHu
 
-See [NOTICE](./NOTICE) and the [license policy](./docs/LICENSE-POLICY.md) for scope and distribution details.
+See [NOTICE](./NOTICE) and the [license policy](docs/LICENSE-POLICY.md) for scope and distribution requirements.
