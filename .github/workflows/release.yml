@@ -1,9 +1,21 @@
 name: Release
 
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      mode:
+        description: '发布模式：test 测试镜像 / release 正式发布'
+        type: choice
+        required: true
+        default: test
+        options:
+          - test
+          - release
+      version:
+        description: '正式发布版本（例如 v0.1.5）；测试镜像请留空'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -18,35 +30,50 @@ env:
 
 jobs:
   prepare:
-    name: Validate release tag and metadata
-    if: github.repository == 'aihohu/hohu-admin' && github.event_name == 'push' && github.event.deleted == false
+    name: Validate web release request
+    if: github.repository == 'aihohu/hohu-admin' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      mode: ${{ steps.request.outputs.mode }}
+      tag: ${{ steps.request.outputs.tag }}
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 0
           persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
 
-      - name: Verify tag commit belongs to the default branch
+      - name: Require the default branch
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
-          SOURCE_SHA: ${{ github.sha }}
+          SELECTED_REF: ${{ github.ref }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$SOURCE_SHA"
-          git merge-base --is-ancestor "$SOURCE_SHA" "refs/remotes/origin/$DEFAULT_BRANCH"
+          if [[ "$SELECTED_REF" != "refs/heads/$DEFAULT_BRANCH" ]]; then
+            echo '::error::Run this workflow from the default branch.'
+            exit 1
+          fi
 
       - name: Validate versions and reviewed release notes
+        id: request
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: python3 -B tools/ops/prepare_release.py --tag "$RELEASE_TAG" --notes-file .local/artifacts/release-notes.md
+          RELEASE_MODE: ${{ inputs.mode }}
+          RELEASE_TAG: ${{ inputs.version }}
+        run: |
+          python3 -B tools/ops/prepare_release.py --mode "$RELEASE_MODE" --tag "$RELEASE_TAG" \
+            --notes-file .local/artifacts/release-notes.md --github-output "$GITHUB_OUTPUT"
+
+      - name: Reject an existing version from another run
+        if: steps.request.outputs.mode == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.request.outputs.tag }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: python3 -B -m tools.ops.release_tag check
 
       - name: Run standalone release tooling tests
         run: |
@@ -54,8 +81,9 @@ jobs:
           TMPDIR="$PWD/.local/tmp" python3 -B -m unittest discover -s tests/tools -p 'test_*release*.py' -v
 
   ci:
-    name: Verify tagged source
+    name: Verify release source
     needs: prepare
+    if: needs.prepare.outputs.mode == 'release'
     uses: ./.github/workflows/ci.yml
 
   qualification:
@@ -135,15 +163,42 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  tag:
+    name: Create release tag after qualification
+    needs: qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: docker
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Create or verify the tag owned by this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.version }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: python3 -B -m tools.ops.release_tag create
+
   docker:
     name: Build and Push Docker Image
-    needs: qualification
+    needs: [prepare, qualification, tag]
     # A skipped release qualification must not skip the manual test build.
     if: >-
       ${{ always() && !cancelled() && github.repository == 'aihohu/hohu-admin' &&
-          ((github.event_name == 'push' && needs.qualification.result == 'success') ||
-           (github.event_name == 'workflow_dispatch' &&
-            github.ref == format('refs/heads/{0}', github.event.repository.default_branch))) }}
+          github.event_name == 'workflow_dispatch' && needs.prepare.result == 'success' &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+          (needs.prepare.outputs.mode == 'test' ||
+           (needs.prepare.outputs.mode == 'release' &&
+            needs.qualification.result == 'success' && needs.tag.result == 'success')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     environment: docker
@@ -170,7 +225,7 @@ jobs:
         run: python3 -B -m unittest discover -s tests/tools -p test_sync_image_mirror.py -v
 
       - name: Validate manual ACR test configuration
-        if: github.event_name == 'workflow_dispatch'
+        if: needs.prepare.outputs.mode == 'test'
         shell: bash
         env:
           ACR_MIRROR_ENABLED: ${{ vars.ACR_MIRROR_ENABLED }}
@@ -189,7 +244,7 @@ jobs:
 
       - name: Generate isolated test image tag
         id: test_tag
-        if: github.event_name == 'workflow_dispatch'
+        if: needs.prepare.outputs.mode == 'test'
         shell: bash
         env:
           SOURCE_SHA: ${{ steps.source.outputs.sha }}
@@ -215,13 +270,13 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        if: github.event_name == 'push'
+        if: needs.prepare.outputs.mode == 'release'
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{version}},value=${{ needs.prepare.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.prepare.outputs.tag }}
           flavor: |
             latest=true
 
@@ -324,10 +379,11 @@ jobs:
 
   github-release:
     name: Publish GitHub Release after image delivery
-    needs: [docker, acr]
+    needs: [prepare, docker, acr]
     if: >-
       ${{ !cancelled() && github.repository == 'aihohu/hohu-admin' &&
-          github.event_name == 'push' && needs.docker.result == 'success' &&
+          github.event_name == 'workflow_dispatch' && needs.prepare.outputs.mode == 'release' &&
+          needs.docker.result == 'success' &&
           (needs.acr.result == 'success' ||
            (needs.acr.result == 'skipped' && vars.ACR_MIRROR_ENABLED != 'true')) }}
     runs-on: ubuntu-latest
@@ -346,19 +402,18 @@ jobs:
 
       - name: Extract release notes from the built source
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: python3 -B tools/ops/prepare_release.py --tag "$RELEASE_TAG" --notes-file .local/artifacts/release-notes.md
 
       - name: Publish release without overwriting an existing announcement
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           SOURCE_SHA: ${{ needs.docker.outputs.commit }}
         run: |
           set -euo pipefail
-          git fetch --no-tags origin "refs/tags/$RELEASE_TAG"
-          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$SOURCE_SHA"
+          python3 -B -m tools.ops.release_tag verify
           if draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')"; then
             if [[ "$draft" == 'true' ]]; then
               gh release edit "$RELEASE_TAG" --draft=false --notes-file .local/artifacts/release-notes.md

@@ -6,35 +6,29 @@
 
 后端版本维护在 [pyproject.toml](../pyproject.toml)，变更说明维护在 [CHANGELOG.md](../CHANGELOG.md)。`Unreleased` 是待发布内容，不等于发布记录。各子项目独立版本，但跨项目契约变更必须给出配套版本及升级顺序。
 
-当前 [release.yml](../.github/workflows/release.yml) 在官方仓库推送 `vMAJOR.MINOR.PATCH` Tag 时运行：校验发布元数据，调用完整 CI，再执行 hosted 发布验证，构建并推送 GHCR 的 linux/amd64、linux/arm64 镜像；启用 ACR 镜像后复制并核验，最后自动创建 GitHub Release。默认分支也支持手动构建测试镜像。后端正式产物是容器镜像，此流程不发布 PyPI 包。
+当前 [release.yml](../.github/workflows/release.yml) 通过官方仓库的 Actions → Release → Run workflow 启动，可选择测试镜像或正式发布。正式发布依次校验元数据、运行完整 CI 与 hosted 发布验证、创建 Tag、推送 GHCR 的 linux/amd64、linux/arm64 镜像；启用 ACR 后复制并核验，最后创建 GitHub Release。后端正式产物是容器镜像，此流程不发布 PyPI 包。
 
-## Tag 自动发布
+## 网页正式发布
 
-正式发布仅支持稳定的三段版本，例如 `v0.1.5`；预发布、构建后缀和无 `v` 前缀的标签不支持。工作流必须包含在待发布提交内，该提交必须已合入仓库默认分支。手动在 GitHub 页面发布 Release 不会启动本流程。
+发布入口仅监听 `workflow_dispatch`，本地推送 Tag 或直接在 Releases 页面发布公告均不会启动工作流。两种模式都只接受官方仓库默认分支，运行使用点击 Run workflow 时绑定的提交 SHA，后续默认分支的新提交不会混入本次构建。
 
-1. 更新 `pyproject.toml` 中的版本，执行 `uv lock` 同步根包版本，并完成 `CHANGELOG.md` 对应条目。
+1. 更新 `pyproject.toml` 中的版本，执行 `uv lock` 同步根包版本，并完成 `CHANGELOG.md` 对应条目；工作流不会自动修改版本号或编写升级说明。
 2. CHANGELOG 使用唯一的 `## [v0.1.5]` 标题，也可附加 `(YYYY-MM-DD)` 或 `- YYYY-MM-DD` 日期；必须是文件中首个版本条目，正文不能为空，标题不能保留 `Unreleased`。配套客户端、CLI 版本和升级注意事项应写入该条目。
-3. 完成发布前验证，将变更提交并合入默认分支，确认本地检出的待发布提交正确。
-4. 为该提交创建并推送一个尚未发布的 Tag。以下以首次发布 `v0.1.5` 为例；其他版本应替换版本号，已有标签不要强制移动：
+3. 完成发布前验证，将代码、工作流及文档合入默认分支。
+4. 打开 GitHub 仓库 **Actions → Release → Run workflow**，分支选择默认分支（当前为 `main`），`mode` 选择 **release**，在 `version` 填写例如 **v0.1.5**，然后点击 **Run workflow**。
+5. 查看运行进度，按仓库配置完成 `docker` Environment 的审批。全部发布任务成功后，Release 正文自动取自该提交 CHANGELOG 的对应版本内容，无需在 Releases 页面手动创建。
 
-   ```bash
-   git tag -a v0.1.5 -m "Release v0.1.5"
-   git push origin v0.1.5
-   ```
+`mode` 默认值是 **test**，用于测试镜像，此时 `version` 必须留空；正式发布必须显式选择 **release** 并填写版本。版本仅支持 `vMAJOR.MINOR.PATCH`，不接受预发布、构建后缀或无 `v` 前缀的格式。
 
-5. 在 Actions → Release 查看运行结果。全部发布任务成功后，Release 正文自动取自该提交 CHANGELOG 的对应版本内容，无需再复制到 GitHub 页面。
+[prepare_release.py](../tools/ops/prepare_release.py) 校验输入版本、`pyproject.toml` 和 `uv.lock` 根包版本一致，并提取发布说明。初始检查拒绝已存在的版本 Tag，原运行重试除外。CI 通过可复用工作流检查同一提交的 Ruff、全量测试、至少 70% 覆盖率和 hosted CI profile；再通过 release profile 后，由 [release_tag.py](../tools/ops/release_tag.py) 创建指向该 SHA 的附注 Tag。校验或验收失败不会创建新 Tag 或推送正式镜像。
 
-[prepare_release.py](../tools/ops/prepare_release.py) 校验 Tag、`pyproject.toml` 和 `uv.lock` 根包版本一致，并提取发布说明。可在推送前本地检查：
+镜像版本标签与 OCI 元数据显式使用校验过的输入版本，不从运行分支名推断；ACR 复制同一次构建的 digest。Tag 注释记录创建它的 Actions 运行编号；创建公告前再次校验其运行编号与提交 SHA，拒绝被移动或替换的标签。
 
-```bash
-uv run python -B tools/ops/prepare_release.py --tag v0.1.5 --notes-file .local/artifacts/release-notes.md
-```
+发布使用仓库自带的 `GITHUB_TOKEN`，无需新增 PAT。默认仅授予 `contents: read`，镜像任务授予 `packages: write`，创建 Tag 和公告的任务授予 `contents: write`。沿用 `docker` Environment 的保护规则，需允许默认分支使用该环境，并允许发布任务创建版本 Tag。各阶段在同一工作流内衔接，不依赖创建 Tag 或 Release 后再次触发 Actions。
 
-CI 通过可复用工作流检查同一提交的 Ruff、全量测试、至少 70% 覆盖率和 hosted CI profile；正式镜像还必须通过 release profile。版本校验或任何必需验证失败时不开始镜像发布。镜像版本标签与 OCI 元数据从已校验 Tag 生成，ACR 复制同一次构建的 digest。源码 checkout 固定提交 SHA，创建公告前再次核对远端 Tag 未被移动。
+失败时在**原运行**中选择 **Re-run failed jobs**。同一运行可以复用自身创建且仍指向原提交的 Tag；重新点击 Run workflow 会生成不同的运行编号，已有版本将被拒绝，即使提交 SHA 相同也不覆盖。GHCR 成功、ACR 失败时不会创建公告，重跑失败任务可继续同步已有 digest；ACR 未启用时允许跳过同步并创建公告。重跑保留已有正式 Release 正文；同名草稿在发布链路成功后使用 CHANGELOG 正文发布。
 
-发布使用仓库自带的 `GITHUB_TOKEN`，无需新增 PAT。默认仅授予 `contents: read`，镜像任务授予 `packages: write`，最后创建公告的任务授予 `contents: write`；沿用 `docker` Environment 的保护规则，需允许正式 Tag 使用该环境。测试、构建和公告在同一流程中显式串联，不依赖自动创建 Release 后再次触发 Actions。
-
-失败时在原运行中选择 **Re-run failed jobs**。GHCR 成功、ACR 失败时不会创建公告，重跑失败任务可继续同步已有 digest；ACR 未启用时允许跳过同步并创建公告。已存在的正式 Release 保留正文；同名草稿在发布链路成功后使用 CHANGELOG 正文发布。镜像仓库与 GitHub Release 之间没有原子事务，失败不会自动回滚已经推送的镜像或 `latest`。修改代码或工作流后，应准备新的版本和 Tag，旧运行的重试仍使用旧提交。
+Tag、镜像仓库和 GitHub Release 之间没有原子事务，失败不会自动删除 Tag 或回滚镜像及 `latest`。Tag 已创建后，如需修改代码，应准备新的版本重新发版；原运行的重试始终使用原提交。使用 `GITHUB_TOKEN` 创建 Tag 不会触发其他 `push` 工作流，Gitee 标签镜像可通过既有定时或手动同步补齐。
 
 ## v0.1.5 发布核对
 
@@ -48,7 +42,7 @@ CI 通过可复用工作流检查同一提交的 Ruff、全量测试、至少 70
 
 ## ACR 应用镜像与手动验收
 
-后端和 Web 各自的 `Release` 工作流复用真实应用构建。手动运行仅接受默认分支，标签为 `test-<提交前 12 位 SHA>-<run_id>-<run_attempt>`，不创建 GitHub Release，也不更新正式版本和 `latest`。后端手动模式不执行 release profile 资格验证，镜像链路验收不能替代正式发布验证。
+后端和 Web 各自的 `Release` 工作流复用真实应用构建。测试镜像仅接受默认分支，标签为 `test-<提交前 12 位 SHA>-<run_id>-<run_attempt>`，不创建 GitHub Release，也不更新正式版本和 `latest`。后端选择 `mode=test`、版本留空；Web 使用其现有手动测试入口。后端测试镜像模式不执行 release profile 资格验证，镜像链路验收不能替代正式发布验证。
 
 GHCR 与 ACR 使用同一次构建的运行镜像。为兼容 ACR，构建显式关闭附加的 provenance/SBOM 证明清单，保留 `linux/amd64`、`linux/arm64` 两种运行架构及跨仓库摘要一致性。若旧镜像同步报 `unknown manifest class for application/vnd.oci.empty.v1+json`，需发布修复后的工作流并重新构建；重试旧 digest 无法消除不兼容的清单。
 
@@ -62,7 +56,7 @@ GHCR 与 ACR 使用同一次构建的运行镜像。为兼容 ACR，构建显式
 | Variable | `ACR_REPOSITORY` | `命名空间/hohu-admin`；Web 为 `命名空间/hohu-admin-web` |
 | Repository variable | `ACR_MIRROR_ENABLED` | 配置完成后设为 `true`；未启用时正式发布仍只推 GHCR；任务启动前判断，不能只配置为 Environment variable |
 
-将工作流和工具提交到默认分支后，在 Actions → Release → Run workflow 选择默认分支。手动模式会在构建前检查 ACR 配置；沿用现有 `docker` Environment 的访问规则。发布资格验证在手动模式中跳过，GHCR 构建成功后仍执行启用的 ACR 同步；构建失败、跳过或运行取消时不执行同步。同步失败可重跑失败任务，不必重新构建应用；修改工作流后应重新 Run workflow，旧运行的 Re-run 不使用新工作流。
+将工作流和工具提交到默认分支后，在 Actions → Release → Run workflow 选择默认分支；后端保留默认的 `mode=test`，`version` 留空。测试镜像模式会在构建前检查 ACR 配置，沿用现有 `docker` Environment 的访问规则。发布资格验证在测试镜像模式中跳过，GHCR 构建成功后仍执行启用的 ACR 同步；构建失败、跳过或运行取消时不执行同步。同步失败可重跑失败任务，不必重新构建应用；修改工作流后应重新 Run workflow，旧运行的 Re-run 不使用新工作流。
 
 [sync_image_mirror.py](../tools/ops/sync_image_mirror.py) 按构建 digest 完整复制多架构镜像，检查两种架构、目标标签 digest，并使用无凭据的完整 OCI 拉取验证镜像层公开可读。已移动到其他 digest 的来源标签跳过，避免延迟任务覆盖新别名；不降级单架构或转换 digest。成功报告显示 `verified_tags`、`skipped_tags`、`platforms` 和 `anonymous_pull`，保存在工作流摘要及 `acr-mirror-*` Artifact 中。隔离回归无需应用服务：`python -B -m unittest discover -s tests/tools -p test_sync_image_mirror.py -v`。
 

@@ -33,7 +33,7 @@ class PrepareReleaseTests(unittest.TestCase):
         )
         self.notes = self.root / "output/notes.md"
 
-    def run_tool(self, tag="v0.1.5"):
+    def run_tool(self, tag="v0.1.5", *extra):
         return subprocess.run(
             [
                 sys.executable,
@@ -45,6 +45,7 @@ class PrepareReleaseTests(unittest.TestCase):
                 tag,
                 "--notes-file",
                 str(self.notes),
+                *extra,
             ],
             capture_output=True,
             text=True,
@@ -52,6 +53,25 @@ class PrepareReleaseTests(unittest.TestCase):
             env={**os.environ, "PYTHONUTF8": "1"},
             check=False,
         )
+
+    def test_web_release_emits_validated_outputs(self):
+        output = self.root / "github-output"
+        result = self.run_tool(
+            "v0.1.5", "--mode", "release", "--github-output", str(output)
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output.read_text(), "mode=release\ntag=v0.1.5\n")
+
+    def test_test_mode_needs_no_version_and_cannot_accept_one(self):
+        output = self.root / "github-output"
+        result = self.run_tool("", "--mode", "test", "--github-output", str(output))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output.read_text(), "mode=test\ntag=\n")
+        self.assertFalse(self.notes.exists())
+        self.assertEqual(self.run_tool("v0.1.5", "--mode", "test").returncode, 1)
+
+    def test_release_mode_requires_version(self):
+        self.assertEqual(self.run_tool("", "--mode", "release").returncode, 1)
 
     def test_extracts_only_current_release_and_preserves_unicode(self):
         result = self.run_tool()

@@ -73,13 +73,24 @@ def main() -> None:
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--tag", required=True)
     parser.add_argument("--notes-file", type=Path, required=True)
+    parser.add_argument("--mode", choices=("test", "release"), default="release")
+    parser.add_argument("--github-output", type=Path)
     args = parser.parse_args()
     try:
-        notes = prepare(args.root, args.tag)
+        if args.mode == "test":
+            if args.tag:
+                raise ValueError("Test mode must not specify a release version")
+            notes = None
+        else:
+            notes = prepare(args.root, args.tag)
     except (OSError, KeyError, ValueError) as error:
         parser.exit(1, f"Release validation failed: {error}\n")
-    args.notes_file.parent.mkdir(parents=True, exist_ok=True)
-    args.notes_file.write_text(notes, encoding="utf-8")
+    if notes is not None:
+        args.notes_file.parent.mkdir(parents=True, exist_ok=True)
+        args.notes_file.write_text(notes, encoding="utf-8")
+    if args.github_output:
+        with args.github_output.open("a", encoding="utf-8") as output:
+            output.write(f"mode={args.mode}\ntag={args.tag}\n")
 
 
 if __name__ == "__main__":

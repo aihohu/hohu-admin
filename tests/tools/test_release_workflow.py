@@ -21,9 +21,12 @@ def job(name):
 def enabled(
     name,
     *,
-    event="push",
+    event="workflow_dispatch",
     repository="aihohu/hohu-admin",
-    ref="refs/tags/v0.1.5",
+    ref="refs/heads/main",
+    mode="release",
+    prepare="success",
+    tag="success",
     qualification="success",
     docker="success",
     acr="success",
@@ -49,6 +52,8 @@ def enabled(
             event=ns(repository=ns(default_branch="main")),
         ),
         "needs": ns(
+            prepare=ns(result=prepare, outputs=ns(mode=mode)),
+            tag=ns(result=tag),
             qualification=ns(result=qualification),
             docker=ns(result=docker),
             acr=ns(result=acr),
@@ -62,20 +67,30 @@ def enabled(
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
-    def test_tag_release_requires_ci_and_release_qualification(self):
+    def test_web_release_requires_ci_and_release_qualification(self):
         self.assertNotIn("\n  release:", WORKFLOW)
-        self.assertIn("tags: ['v*']", WORKFLOW)
+        self.assertNotIn("\n  push:", WORKFLOW)
+        self.assertIn("default: test", WORKFLOW)
         self.assertIn("needs: prepare", job("ci"))
         self.assertIn("uses: ./.github/workflows/ci.yml", job("ci"))
         self.assertIn("needs: ci", job("qualification"))
         self.assertIn("--profile release", job("qualification"))
-        self.assertIn("needs: qualification", job("docker"))
-        self.assertIn("needs: [docker, acr]", job("github-release"))
+        self.assertIn("needs: qualification", job("tag"))
+        self.assertIn("needs: [prepare, qualification, tag]", job("docker"))
+        self.assertIn("needs: [prepare, docker, acr]", job("github-release"))
         for status in ("failure", "cancelled", "skipped"):
             self.assertFalse(enabled("docker", qualification=status))
+            self.assertFalse(enabled("docker", tag=status))
+            self.assertFalse(enabled("docker", prepare=status))
         self.assertTrue(enabled("docker"))
         self.assertFalse(enabled("docker", cancelled=True))
         self.assertFalse(enabled("docker", repository="someone/fork"))
+        self.assertFalse(enabled("docker", event="push"))
+        self.assertFalse(enabled("docker", mode="unknown"))
+        for ref in ("refs/heads/feature", "refs/tags/v0.1.5"):
+            self.assertFalse(enabled("docker", ref=ref))
+        self.assertEqual(WORKFLOW.count("value=${{ inputs.version }}"), 0)
+        self.assertEqual(WORKFLOW.count("value=${{ needs.prepare.outputs.tag }}"), 2)
 
     def test_manual_test_build_only_accepts_default_branch_and_never_announces(self):
         self.assertTrue(
@@ -84,6 +99,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 event="workflow_dispatch",
                 ref="refs/heads/main",
                 qualification="skipped",
+                tag="skipped",
+                mode="test",
             )
         )
         for ref in ("refs/heads/feature", "refs/tags/v0.1.5"):
@@ -93,9 +110,12 @@ class ReleaseWorkflowTests(unittest.TestCase):
                     event="workflow_dispatch",
                     ref=ref,
                     qualification="skipped",
+                    tag="skipped",
+                    mode="test",
                 )
             )
-        self.assertFalse(enabled("github-release", event="workflow_dispatch"))
+        self.assertFalse(enabled("github-release", mode="test"))
+        self.assertFalse(enabled("docker", mode="test", prepare="failure"))
 
     def test_announcement_waits_for_enabled_mirror_and_successful_build(self):
         self.assertTrue(enabled("github-release"))
@@ -106,6 +126,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertFalse(enabled("github-release", mirror="false", acr="failure"))
         self.assertFalse(enabled("github-release", cancelled=True))
         self.assertFalse(enabled("github-release", repository="someone/fork"))
+        self.assertFalse(enabled("github-release", event="push"))
 
     def test_publication_retries_preserve_announcements_and_reject_moved_tags(self):
         bash = (
@@ -117,10 +138,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.skipTest("Bash is required for shell workflow regression")
         script = textwrap.dedent(job("github-release").rsplit("        run: |\n", 1)[1])
         mocks = """
-git() {
-  if [[ "$1" == 'rev-parse' ]]; then
-    echo "$MOCK_SHA"
-  fi
+python3() {
+  test "$MOCK_SHA" = "$SOURCE_SHA"
 }
 gh() {
   echo "$*" >> "$CALLS"
