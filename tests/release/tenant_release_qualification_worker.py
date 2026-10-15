@@ -10,6 +10,7 @@ from __future__ import annotations
 # ruff: noqa: T201
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -322,9 +323,39 @@ async def _snapshot(
             "control": control,
             "activeNonDefaultCount": int(active_non_default),
             "redisDbSize": int(await redis_client.dbsize()),
+            "redisStateDigests": await _redis_state_digests(),
             "auditEvents": audit_events,
         },
     )
+
+
+async def _redis_state_digests() -> list[str]:
+    """Fingerprint state without persisting Redis identities or secret values.
+
+    Rejected requests still traverse the shared throttle middleware. Its bounded
+    counters/config cache may expire or be recreated independently of tenant
+    authorization. All other keys, including persistent throttle keys, count.
+    Read TTL and value atomically so expiry cannot produce a partial entry.
+    """
+    script = """
+local payload = redis.call('DUMP', KEYS[1])
+if not payload then return {-2, ''} end
+return {redis.call('PTTL', KEYS[1]), redis.sha1hex(payload)}
+"""
+    digests = set()
+    async for key in redis_client.scan_iter():
+        ttl, value_digest = await redis_client.eval(script, 1, key)
+        if ttl == -2:
+            continue
+        limit = 0
+        if key == "cache:tenant:0:setting:request_limits":
+            limit = 30_000
+        elif re.fullmatch(r"request-limit:(?:api|login|register):[0-9a-f]{64}", key):
+            limit = 60_000
+        if limit and 0 <= ttl <= limit:
+            continue
+        digests.add(hashlib.sha256(f"{key}\0{value_digest}".encode()).hexdigest())
+    return sorted(digests)
 
 
 def _project_system_audit(

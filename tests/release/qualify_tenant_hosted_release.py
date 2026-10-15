@@ -358,9 +358,13 @@ def build_qualification_report(
     check(
         "rollback_access",
         boundary.get("rollbackAccessStatus") == 401
-        and boundary.get("rollbackAccessErrorCode") == "TENANT_HOSTED_ACCESS_DISABLED"
-        and boundary.get("rollbackStateUnchanged") is True,
+        and boundary.get("rollbackAccessErrorCode") == "TENANT_HOSTED_ACCESS_DISABLED",
         "ROLLBACK_ACCESS_NOT_REVOKED",
+    )
+    check(
+        "rollback_side_effects",
+        boundary.get("rollbackStateUnchanged") is True,
+        "ROLLBACK_SIDE_EFFECT_DETECTED",
     )
     check(
         "platform_audit_lineage",
@@ -413,7 +417,14 @@ def build_qualification_report(
             == 401,
             "nonTargetStateUnchanged": boundary.get("nonTargetStateUnchanged"),
             "rollbackAccessRevoked": boundary.get("rollbackAccessStatus") == 401,
+            "rollbackAccessStatus": boundary.get("rollbackAccessStatus"),
+            "rollbackAccessErrorCode": _safe_error_code(
+                boundary.get("rollbackAccessErrorCode")
+            ),
             "rollbackStateUnchanged": boundary.get("rollbackStateUnchanged"),
+            "rollbackDatabaseUnchanged": boundary.get("rollbackDatabaseUnchanged"),
+            "rollbackCacheUnchanged": boundary.get("rollbackCacheUnchanged"),
+            "rollbackRedisKeyCounts": boundary.get("rollbackRedisKeyCounts"),
             "platformAuditPairCount": boundary.get("platformAuditPairCount"),
             "activeNonDefaultCount": boundary.get("finalActiveNonDefaultCount"),
             "cacheEntryCount": boundary.get("redisDbSize"),
@@ -749,21 +760,48 @@ def _response_json(response: httpx.Response) -> dict:
     return body
 
 
+def _safe_error_code(value: Any) -> str:
+    return (
+        value
+        if isinstance(value, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,79}", value)
+        else "UNSPECIFIED"
+    )
+
+
+def _rollback_boundary(
+    response: httpx.Response, before: dict, after_access: dict, after_monitor: dict
+) -> dict:
+    snapshots = (before, after_access, after_monitor)
+    database_unchanged = all(isinstance(s.get("target"), dict) for s in snapshots) and (
+        before["target"] == after_access["target"] == after_monitor["target"]
+    )
+    cache_unchanged = all(
+        isinstance(s.get("redisStateDigests"), list) for s in snapshots
+    ) and (
+        before["redisStateDigests"]
+        == after_access["redisStateDigests"]
+        == after_monitor["redisStateDigests"]
+    )
+    return {
+        "rollbackAccessStatus": response.status_code,
+        "rollbackAccessErrorCode": _safe_error_code(
+            _response_json(response).get("errorCode")
+        ),
+        "rollbackStateUnchanged": database_unchanged and cache_unchanged,
+        "rollbackDatabaseUnchanged": database_unchanged,
+        "rollbackCacheUnchanged": cache_unchanged,
+        "rollbackRedisKeyCounts": [s.get("redisDbSize") for s in snapshots],
+    }
+
+
 def _require_success(response: httpx.Response, *, failure_code: str) -> dict:
     body = _response_json(response)
     if response.status_code != 200 or body.get("code") != 200:
-        error_code = body.get("errorCode")
-        safe_error_code = (
-            error_code
-            if isinstance(error_code, str)
-            and re.fullmatch(r"[A-Z][A-Z0-9_]{0,79}", error_code)
-            else "UNSPECIFIED"
-        )
         logger.error(
             "Hosted qualification HTTP check failed: %s (HTTP %s, errorCode=%s)",
             failure_code,
             response.status_code,
-            safe_error_code,
+            _safe_error_code(body.get("errorCode")),
         )
         raise QualificationFailure(failure_code)
     return body
@@ -1203,7 +1241,6 @@ def run(arguments: argparse.Namespace) -> int:
                     "/auth/getUserInfo",
                     headers={"Authorization": f"Bearer {tenant_access_token}"},
                 )
-                rollback_access_body = _response_json(rollback_access)
             rollback_after_access = _snapshot(
                 output=temporary_root / "rollback-after-access.json",
                 target_tenant_id=target_id,
@@ -1264,14 +1301,12 @@ def run(arguments: argparse.Namespace) -> int:
                 "controlDisabledAccessErrorCode": control_disabled_body.get(
                     "errorCode"
                 ),
-                "rollbackAccessStatus": rollback_access.status_code,
-                "rollbackAccessErrorCode": rollback_access_body.get("errorCode"),
-                "rollbackStateUnchanged": rollback_before.get("target")
-                == rollback_after_access.get("target")
-                == rollback_after_monitor.get("target")
-                and rollback_before.get("redisDbSize")
-                == rollback_after_access.get("redisDbSize")
-                == rollback_after_monitor.get("redisDbSize"),
+                **_rollback_boundary(
+                    rollback_access,
+                    rollback_before,
+                    rollback_after_access,
+                    rollback_after_monitor,
+                ),
                 "platformAuditPairCount": _audit_pair_count(final_state),
                 "finalActiveNonDefaultCount": final_state.get("activeNonDefaultCount"),
                 "targetFinalLifecycleState": final_state.get("target", {}).get(
@@ -1297,6 +1332,15 @@ def run(arguments: argparse.Namespace) -> int:
                 logger.error(
                     "Hosted release qualification failed: %s",
                     ", ".join(report["failureCodes"]),
+                )
+                logger.error(
+                    "Rollback boundary: HTTP %s, errorCode=%s, "
+                    "databaseUnchanged=%s, cacheUnchanged=%s, redisKeyCounts=%s",
+                    boundary["rollbackAccessStatus"],
+                    boundary["rollbackAccessErrorCode"],
+                    boundary["rollbackDatabaseUnchanged"],
+                    boundary["rollbackCacheUnchanged"],
+                    boundary["rollbackRedisKeyCounts"],
                 )
             return 0 if report["qualified"] else RISK_EXIT_CODE
     except (QualificationFailure, ValueError, KeyError) as error:

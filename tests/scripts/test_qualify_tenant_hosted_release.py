@@ -176,6 +176,9 @@ def test_http_failure_logs_status_and_code_without_response_secrets(caplog) -> N
         ({"controlActivationStatus": 400}, "CONTROL_ACTIVATION_FAILED"),
         ({"nonTargetAccessStatus": 403}, "CONTROL_ACCESS_FAILED"),
         ({"controlDisabledAccessStatus": 200}, "CONTROL_DISABLE_ACCESS_NOT_REVOKED"),
+        ({"rollbackAccessStatus": 200}, "ROLLBACK_ACCESS_NOT_REVOKED"),
+        ({"rollbackAccessErrorCode": "TOKEN_EXPIRED"}, "ROLLBACK_ACCESS_NOT_REVOKED"),
+        ({"rollbackStateUnchanged": False}, "ROLLBACK_SIDE_EFFECT_DETECTED"),
     ],
 )
 def test_current_tenant_authority_boundaries_fail_closed(updates, expected) -> None:
@@ -189,6 +192,110 @@ def test_current_tenant_authority_boundaries_fail_closed(updates, expected) -> N
     )
     assert result["qualified"] is False
     assert expected in result["failureCodes"]
+    if expected == "ROLLBACK_SIDE_EFFECT_DETECTED":
+        assert "ROLLBACK_ACCESS_NOT_REVOKED" not in result["failureCodes"]
+
+
+def test_rollback_boundary_ignores_throttle_count_changes_but_checks_content():
+    before = {
+        "target": {"rowVersion": 3},
+        "redisStateDigests": ["a" * 64],
+        "redisDbSize": 3,
+    }
+    expired = before | {"redisDbSize": 1}
+    rebuilt = before | {"redisDbSize": 2}
+    response = httpx.Response(401, json={"errorCode": "TENANT_HOSTED_ACCESS_DISABLED"})
+    boundary = qualification._rollback_boundary(response, before, expired, rebuilt)
+    assert boundary["rollbackStateUnchanged"] is True
+    assert boundary["rollbackRedisKeyCounts"] == [3, 1, 2]
+    changed = rebuilt | {"redisStateDigests": ["b" * 64]}
+    assert (
+        qualification._rollback_boundary(response, before, expired, changed)[
+            "rollbackStateUnchanged"
+        ]
+        is False
+    )
+    changed = rebuilt | {"target": {"rowVersion": 4}}
+    assert (
+        qualification._rollback_boundary(response, before, expired, changed)[
+            "rollbackStateUnchanged"
+        ]
+        is False
+    )
+
+
+def test_rollback_boundary_missing_state_fails_closed_and_redacts_error():
+    response = httpx.Response(
+        401, json={"errorCode": "private:credential", "data": {"token": "secret"}}
+    )
+    boundary = qualification._rollback_boundary(response, {}, {}, {})
+    assert boundary["rollbackStateUnchanged"] is False
+    assert boundary["rollbackAccessErrorCode"] == "UNSPECIFIED"
+    assert "private" not in json.dumps(boundary)
+    assert "secret" not in json.dumps(boundary)
+
+
+async def test_redis_state_fingerprints_exclude_only_bounded_runtime_caches(
+    monkeypatch,
+):
+    settings_key = "cache:tenant:0:setting:request_limits"
+    throttle = "request-limit:api:" + "a" * 64
+    persistent = "request-limit:login:" + "b" * 64
+    excessive = "request-limit:register:" + "c" * 64
+    unknown = "tenant:22:private-key"
+    entries = {
+        settings_key: [30000, "cache"],
+        throttle: [60000, "counter"],
+        persistent: [-1, "persistent"],
+        excessive: [60001, "counter"],
+        unknown: [5000, "private-value"],
+        "expired": [-2, ""],
+    }
+
+    async def scan_iter():
+        for key in entries:
+            yield key
+
+    client = MagicMock()
+    client.scan_iter.side_effect = scan_iter
+    client.eval = AsyncMock(side_effect=lambda _script, _count, key: entries[key])
+    monkeypatch.setattr(worker, "redis_client", client)
+    first = await worker._redis_state_digests()
+    assert len(first) == 3
+    entries[settings_key] = [-2, ""]
+    entries[throttle] = [60000, "new-counter"]
+    assert await worker._redis_state_digests() == first
+    entries[unknown] = [4000, "changed-value"]
+    assert await worker._redis_state_digests() != first
+    entries[unknown] = [4000, "private-value"]
+    entries["tenant:33:private-key"] = entries.pop(unknown)
+    assert await worker._redis_state_digests() != first
+    assert "private" not in json.dumps(first)
+    assert all(len(value) == 64 for value in first)
+
+
+def test_rollback_report_exposes_safe_diagnostics():
+    boundary = _boundary() | {
+        "rollbackStateUnchanged": False,
+        "rollbackDatabaseUnchanged": True,
+        "rollbackCacheUnchanged": False,
+        "rollbackRedisKeyCounts": [3, 3, 3],
+    }
+    result = qualification.build_qualification_report(
+        build_sha=BUILD_SHA,
+        profile="ci",
+        reports=_reports(),
+        evidence_hashes=_hashes(),
+        boundary=boundary,
+    )
+    assert result["failureCodes"] == ["ROLLBACK_SIDE_EFFECT_DETECTED"]
+    assert result["boundary"]["rollbackAccessStatus"] == 401
+    assert (
+        result["boundary"]["rollbackAccessErrorCode"] == "TENANT_HOSTED_ACCESS_DISABLED"
+    )
+    assert result["boundary"]["rollbackDatabaseUnchanged"] is True
+    assert result["boundary"]["rollbackCacheUnchanged"] is False
+    assert result["boundary"]["rollbackRedisKeyCounts"] == [3, 3, 3]
 
 
 def _audit_events() -> list[dict]:

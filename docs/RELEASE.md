@@ -77,6 +77,8 @@ GHCR 与 ACR 使用同一次构建的运行镜像。为兼容 ACR，构建显式
 
 资格验证通过默认租户系统超级管理员的普通登录会话管理租户，覆盖多个租户独立启停、租户管理员拒绝全局管理，以及切回 single 模式时撤销非默认租户访问；同时核对系统操作日志中的授权与完成关联。验证入口为 [qualify_tenant_hosted_release](../tests/release/qualify_tenant_hosted_release.py)。
 
+回滚验收分别检查访问拒绝和业务状态不变：前者必须返回 `401 / TENANT_HOSTED_ACCESS_DISABLED`，失败码为 `ROLLBACK_ACCESS_NOT_REVOKED`；后者比较租户数据库快照和 Redis 键值摘要，失败码为 `ROLLBACK_SIDE_EFFECT_DETECTED`。Redis 比较只排除名称匹配且剩余 TTL 不超过运行上限的限流桶（60 秒）和限流配置缓存（30 秒），允许其正常过期、重建及计数变化；其他键的变化仍阻断发布。报告记录数据库与缓存比较结果、前后键数量、HTTP 状态及脱敏错误码，不公开 Redis 键名或内容。
+
 API 完全关闭后，验证工具只在显式声明的临时测试 Redis 非默认数据库清理带过期时间的限流桶和限流配置缓存。未知或持久键仍导致验收失败，不能使用 `FLUSHDB` 掩盖残留。失败输出失败码，HTTP 失败补充状态与脱敏错误码，日志不得包含凭据。
 
 ## 升级与恢复
