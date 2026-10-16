@@ -60,7 +60,9 @@ SETTINGS = {
         Setting("site_logo", "brand", public=True),
         Setting("site_description", "brand", default="通用后台管理系统", public=True),
         Setting("site_icp", "brand", public=True),
-        Setting("site_copyright", "brand", default="Copyright © 2026", public=True),
+        Setting(
+            "site_copyright", "brand", default="Copyright © 2026 HoHu", public=True
+        ),
         Setting("user_agreement", "agreements", public=True),
         Setting("privacy_policy", "agreements", public=True),
         Setting("default_avatar", "account"),
