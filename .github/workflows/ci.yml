@@ -3,9 +3,12 @@ name: CI
 on:
   workflow_call:
   push:
-    branches: [main, master]
+    branches: [main, master, 'release/*']
   pull_request:
-    branches: [main, master]
+    branches: [main, master, 'release/*']
+
+permissions:
+  contents: read
 
 jobs:
   ruff:
@@ -34,6 +37,14 @@ jobs:
 
       - name: Check Formatting
         run: uv run ruff format --check .
+
+      - name: Check AI tools
+        env:
+          ENV: test
+        run: uv run python -m tools.checks.check_ai_tools
+
+      - name: Check public documentation
+        run: uv run python -m tools.checks.check_docs
 
   pytest:
     name: Pytest (Python ${{ matrix.python-version }})

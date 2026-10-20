@@ -17,6 +17,7 @@ docs/SCRIPTS-DEPLOYMENT.md
 docs/SECURITY.md
 docs/SYSTEM-SETTINGS.md
 docs/TESTING-GUIDELINES.md
+docs/VERSIONING.md
 docs/button-permission-guide.md
 docs/data-scope-guide.md
 docs/monitoring/alerts.yml
