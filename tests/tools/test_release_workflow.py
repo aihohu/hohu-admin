@@ -67,6 +67,35 @@ def enabled(
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
+    def test_release_branch_ci_cannot_publish_even_with_successful_checks(self):
+        for event in ("push", "pull_request", "workflow_call", "workflow_dispatch"):
+            for mode in ("test", "release"):
+                with self.subTest(event=event, mode=mode):
+                    self.assertFalse(
+                        enabled(
+                            "docker",
+                            event=event,
+                            mode=mode,
+                            ref="refs/heads/release/0.1.6",
+                        )
+                    )
+        for event in ("push", "pull_request", "workflow_call", "pull_request_target"):
+            docker_status = "success" if enabled("docker", event=event) else "skipped"
+            for name in ("docker", "acr", "github-release"):
+                with self.subTest(event=event, job=name):
+                    self.assertFalse(enabled(name, event=event, docker=docker_status))
+        self.assertIn("SELECTED_REF: ${{ github.ref }}", job("prepare"))
+        self.assertIn(
+            "DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}",
+            job("prepare"),
+        )
+        self.assertIn(
+            'if [[ "$SELECTED_REF" != "refs/heads/$DEFAULT_BRANCH" ]]', job("prepare")
+        )
+        for name in ("tag", "docker", "acr"):
+            self.assertIn("environment: docker", job(name))
+        self.assertNotIn("secrets:", job("ci"))
+
     def test_web_release_requires_ci_and_release_qualification(self):
         self.assertNotIn("\n  release:", WORKFLOW)
         self.assertNotIn("\n  push:", WORKFLOW)

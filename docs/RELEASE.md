@@ -4,7 +4,9 @@
 
 ## 版本与产物
 
-后端版本维护在 [pyproject.toml](../pyproject.toml)，变更说明维护在 [CHANGELOG.md](../CHANGELOG.md)。`Unreleased` 是待发布内容，不等于发布记录。各子项目独立版本，但跨项目契约变更必须给出配套版本及升级顺序。
+后端版本维护在 [pyproject.toml](../pyproject.toml)，变更说明维护在 [CHANGELOG.md](../CHANGELOG.md)。`Unreleased` 是待发布内容，不等于发布记录。遵循 [版本与兼容规范](VERSIONING.md)：Backend/Web 完整同号，App/Desktop 同兼容系列并独立递增补丁，CLI 独立版本，Docs 按产品系列维护。版本分支完成验收后合入默认分支，再使用本文的正式发布入口。
+
+本文描述后端现有发布工具；两仓分别成功不代表产品组合已经验收。正式产品发布还需最终 Backend/Web 组合验证和主规范要求的 `release.json` 配套附件。现有流水线尚未自动生成或校验该清单，维护者需补齐；两仓 `latest` 独立更新，生产升级以已验收清单的固定版本和摘要为准。
 
 当前 [release.yml](../.github/workflows/release.yml) 通过官方仓库的 Actions → Release → Run workflow 启动，可选择测试镜像或正式发布。正式发布依次校验元数据、运行完整 CI 与 hosted 发布验证、创建 Tag、推送 GHCR 的 linux/amd64、linux/arm64 镜像；启用 ACR 后复制并核验，最后创建 GitHub Release。后端正式产物是容器镜像，此流程不发布 PyPI 包。
 
@@ -14,7 +16,7 @@
 
 1. 更新 `pyproject.toml` 中的版本，执行 `uv lock` 同步根包版本，并完成 `CHANGELOG.md` 对应条目；工作流不会自动修改版本号或编写升级说明。
 2. CHANGELOG 使用唯一的 `## [v0.1.5]` 标题，也可附加 `(YYYY-MM-DD)` 或 `- YYYY-MM-DD` 日期；必须是文件中首个版本条目，正文不能为空，标题不能保留 `Unreleased`。配套客户端、CLI 版本和升级注意事项应写入该条目。
-3. 完成发布前验证，将代码、工作流及文档合入默认分支。
+3. 完成发布前验证，将代码、工作流及文档合入默认分支；若合入下一系列，先验证当前稳定系列的独立热修复发布路径，见 [版本规范](VERSIONING.md#8-热修复支持与恢复)。
 4. 打开 GitHub 仓库 **Actions → Release → Run workflow**，分支选择默认分支（当前为 `main`），`mode` 选择 **release**，在 `version` 填写例如 **v0.1.5**，然后点击 **Run workflow**。
 5. 查看运行进度，按仓库配置完成 `docker` Environment 的审批。全部发布任务成功后，Release 正文自动取自该提交 CHANGELOG 的对应版本内容，无需在 Releases 页面手动创建。
 
@@ -26,7 +28,14 @@
 
 发布使用仓库自带的 `GITHUB_TOKEN`，无需新增 PAT。默认仅授予 `contents: read`，镜像任务授予 `packages: write`，创建 Tag 和公告的任务授予 `contents: write`。沿用 `docker` Environment 的保护规则，需允许默认分支使用该环境，并允许发布任务创建版本 Tag。各阶段在同一工作流内衔接，不依赖创建 Tag 或 Release 后再次触发 Actions。
 
-失败时在**原运行**中选择 **Re-run failed jobs**。同一运行可以复用自身创建且仍指向原提交的 Tag；重新点击 Run workflow 会生成不同的运行编号，已有版本将被拒绝，即使提交 SHA 相同也不覆盖。GHCR 成功、ACR 失败时不会创建公告，重跑失败任务可继续同步已有 digest；ACR 未启用时允许跳过同步并创建公告。重跑保留已有正式 Release 正文；同名草稿在发布链路成功后使用 CHANGELOG 正文发布。
+失败或取消后，先按 [版本规范中的恢复规则](VERSIONING.md#4-从候选版本到产品发布) 核对远端状态，不能直接选择 **Re-run failed jobs**。Git Tag 的提交与运行编号校验不保护镜像 digest；当前构建任务重跑会重新 build/push 同号标签，没有自动恢复原镜像的逻辑。
+
+- 确认推送任务已终止且未发布完整版本镜像引用时，可以在**原运行**重试失败任务。查询失败或任务仍可能写入，不属于确认未发布。
+- 构建任务成功、仅 ACR 同步或公告失败时，核对原 digest、正式版本引用及任务输出一致，再在原运行重试下游失败任务；不得选择 **Re-run all jobs** 重建已发布镜像。ACR 复制同一个 digest，不需要重建。
+- 构建任务失败但镜像已存在时，不得直接重跑构建。只有经过验证、无需重建的原 digest 恢复路径才可继续交付；当前工作流不提供这个失败构建恢复入口，无可用路径则 Backend/Web 共同换新产品版本。
+- 远端结果未知、原 digest 无法确认或必须修改代码/重建时，保留原版本与失败证据，Backend/Web 共同换新版本。不能删除已有标签再重试以规避不可变约束。
+
+同一运行可复用自身创建且仍指向原提交的 Git Tag；重新点击 Run workflow 会生成不同运行编号，已有 Tag 将被拒绝，即使提交 SHA 相同。这只是 Git Tag 的恢复规则，不替代上面的镜像状态判定。ACR 未启用时允许跳过同步并创建公告；重试下游保留已有正式 Release 正文，同名草稿在发布链路成功后使用 CHANGELOG 正文发布。
 
 Tag、镜像仓库和 GitHub Release 之间没有原子事务，失败不会自动删除 Tag 或回滚镜像及 `latest`。Tag 已创建后，如需修改代码，应准备新的版本重新发版；原运行的重试始终使用原提交。使用 `GITHUB_TOKEN` 创建 Tag 不会触发其他 `push` 工作流，Gitee 标签镜像可通过既有定时或手动同步补齐。
 
@@ -64,12 +73,13 @@ GHCR 与 ACR 使用同一次构建的运行镜像。为兼容 ACR，构建显式
 
 ## 发布前验证
 
-1. 明确待发布提交、版本号、Release 说明和配套 CLI/客户端。
+1. 明确待发布提交、同号 Backend/Web 版本、Release 说明和配套 CLI/客户端，按 [版本与兼容规范](VERSIONING.md) 准备配套清单；记录实际支持范围，不从版本号推断兼容。
 2. 通过 [CI](../.github/workflows/ci.yml)：Ruff、测试、至少 70% 覆盖率、hosted 隔离验证；通过文档检查。
 3. 对迁移验证空库安装、支持的旧版本升级及关键数据保留。数据库安全触发器也属于验收范围。
 4. 在专用环境验证实际部署、初始化重复运行、登录、关键业务、上传和权限拒绝。真实 Provider 或浏览器未验证时如实列明。
 5. 准备数据库和持久文件备份、恢复演练、旧构建与回滚窗口。
 6. 复核源码、文档和构建产物，排除本地草案、凭据、业务数据及临时附件。
+7. 组件产物生成后，用最终 Backend/Web 摘要完成组合验收，补齐并发布配套清单，再宣布产品发布；一端失败时按主规范保持产品未完成状态。
 
 发布验证代码位于 [tests/release](../tests/release)。报告绑定构建 SHA，CI 和 release profile 的证据作为工作流产物保存；不能复用其他提交的通过记录，也不能在生产数据库运行这些测试。
 

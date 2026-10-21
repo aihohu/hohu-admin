@@ -7,6 +7,7 @@
 | 文档 | 职责 |
 | --- | --- |
 | [贡献指南](CONTRIBUTING.md) / [开发流程](DEV-GUIDELINES.md) | 参与方式、提交与验证要求 |
+| [版本与兼容规范](VERSIONING.md) | 产品与组件版本、分支、配套发布及兼容门禁 |
 | [测试指南](TESTING-GUIDELINES.md) | 隔离环境、回归与覆盖率 |
 | [架构与契约](ARCHITECTURE-GUIDELINES.md) | 分层、可信租户边界与演进约束 |
 | [安全政策](SECURITY.md) / [AI 安全](AI-SECURITY.md) | 安全边界和漏洞报告 |

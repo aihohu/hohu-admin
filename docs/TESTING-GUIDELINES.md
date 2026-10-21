@@ -45,4 +45,6 @@ AI 工具静态检查包含 `direct_confirmation_fields_declared` 警告：模�
 
 当前 CI 在 Python 3.12、3.13、3.14 上运行测试，服务使用 PostgreSQL 15 和 Redis 7，覆盖率门槛为 70%。具体命令以工作流为准；不要在手册维护易过期的“最新测试通过数量”。
 
+CI 保留 `main`、`master` 和 `workflow_call`，并检查向 `release/*` 的 push 及以其为目标的 PR；公开文档工作流覆盖相同分支范围。普通检查仅使用只读 token，不取得正式发布权限。维护者须在版本分支承接功能 PR 前核验真实检查名称、required checks 与分支保护，并验证必需检查失败会阻止合并；本地触发回归不能替代这项远端验收，见 [版本规范](VERSIONING.md#9-合并与发布门禁)。
+
 hosted 发布验证由 [tests/release](../tests/release) 提供，使用专用临时环境和绑定构建 SHA 的证据。不得在生产数据库上试跑发布验证。PR 中注明执行的测试范围、结果以及尚未验证的部分。
