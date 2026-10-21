@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any
+from uuid import UUID
 
 from pydantic import ValidationError
 from sqlalchemy import or_, select, update
@@ -604,6 +605,7 @@ class PreparedActionService:
                     AiConversation.deleted_at.is_(None),
                 )
                 .with_for_update()
+                .execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
         source = (
@@ -614,6 +616,7 @@ class PreparedActionService:
                     AiMessage.message_id == action_ref.source_user_message_id,
                 )
                 .with_for_update()
+                .execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
         action = (
@@ -645,6 +648,8 @@ class PreparedActionService:
         result_ui: dict[str, Any] | None = None,
         duration_ms: int | None = None,
         execution_owner: str | None = None,
+        expected_execution_owner: str | None = None,
+        retain_failed_owner: bool = False,
         execution_lease_expires_at: datetime | None = None,
         execution_lease_not_after: datetime | None = None,
         result_lineage: ProjectionLineage | None = None,
@@ -659,6 +664,28 @@ class PreparedActionService:
             )
         if result_lineage is not None and result_lineage.tenant_id != tenant.tenant_id:
             raise _binding_invalid("prepared action 结果 lineage 租户不一致")
+        if retain_failed_owner:
+            valid_owner = False
+            if expected_execution_owner and expected_execution_owner.startswith(
+                "v0162-db:"
+            ):
+                owner_id = expected_execution_owner.removeprefix("v0162-db:")
+                try:
+                    valid_owner = str(UUID(owner_id)) == owner_id
+                except ValueError:
+                    pass
+            if (
+                not valid_owner
+                or expected_status != PreparedActionStatus.RUNNING
+                or target_status != PreparedActionStatus.FAILED
+            ):
+                raise _binding_invalid("仅已确认回滚的新协议 DB 失败可保留 owner")
+        elif (
+            expected_execution_owner
+            and expected_execution_owner.startswith("v0162-")
+            and target_status == PreparedActionStatus.FAILED
+        ):
+            raise _binding_invalid("新协议失败必须保留原 owner 来源证明")
 
         now = datetime.now(UTC)
         values: dict[str, Any] = {
@@ -686,7 +713,9 @@ class PreparedActionService:
                 result_data=result_data,
                 result_ui=result_ui,
                 duration_ms=duration_ms,
-                execution_owner=None,
+                execution_owner=(
+                    expected_execution_owner if retain_failed_owner else None
+                ),
                 execution_lease_expires_at=None,
             )
             if replace_result_lineage:
@@ -714,6 +743,18 @@ class PreparedActionService:
             AiPreparedAction.status == expected_status.value,
             AiPreparedAction.row_version == expected_version,
         ]
+        if expected_execution_owner is not None:
+            conditions.append(
+                AiPreparedAction.execution_owner == expected_execution_owner
+            )
+        elif expected_status == PreparedActionStatus.RUNNING:
+            # Legacy timeout/cleanup callers cannot terminalize a protocol claim.
+            conditions.append(
+                or_(
+                    AiPreparedAction.execution_owner.is_(None),
+                    ~AiPreparedAction.execution_owner.startswith("v0162-"),
+                )
+            )
         if execution_lease_not_after is not None:
             cutoff = _as_utc(execution_lease_not_after)
             conditions.append(
@@ -863,8 +904,13 @@ class PreparedActionService:
             action
             for action in actions
             if action.status == PreparedActionStatus.RUNNING.value
-            and action.execution_lease_expires_at is not None
-            and _as_utc(action.execution_lease_expires_at) > now
+            and (
+                (action.execution_owner or "").startswith("v0162-")
+                or (
+                    action.execution_lease_expires_at is not None
+                    and _as_utc(action.execution_lease_expires_at) > now
+                )
+            )
         ]
         if live_running:
             error = BusinessRuleException(

@@ -57,6 +57,7 @@ _NAMESPACE_REGISTRY: dict[str, tuple[str, str, tuple[str, ...]]] = {
         ("get_bound_tenant_context",),
     ),
     "modules/ai/api/resume.py": ("cache", "tenant", ("tenant_id",)),
+    "modules/ai/agents/gateway/atomic_execution.py": ("cache", "tenant", ("tenant",)),
     "modules/ai/agents/gateway/executor.py": ("cache", "tenant", ("tenant",)),
     "modules/ai/agents/gateway/failures.py": ("cache", "tenant", ("tenant_id",)),
     "modules/ai/agents/gateway/quota.py": ("cache", "tenant", ("tenant_id",)),

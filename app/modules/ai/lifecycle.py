@@ -20,6 +20,7 @@ from app.modules.ai.agents.hitl.manager import PendingPayload, hitl_manager
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
+from app.modules.ai.service.atomic_completion_service import has_protocol_marker
 from app.modules.ai.service.chat_run_service import (
     chat_run_finalizer,
     chat_run_guard,
@@ -29,6 +30,12 @@ from app.modules.ai.service.prepared_action_service import prepared_action_servi
 from app.modules.system.models.tenant import Tenant
 
 logger = logging.getLogger(__name__)
+
+
+def _protocol_running(action: AiPreparedAction) -> bool:
+    return action.status == PreparedActionStatus.RUNNING.value and has_protocol_marker(
+        getattr(action, "execution_owner", None)
+    )
 
 
 def _require_platform(platform: PlatformContext) -> None:
@@ -110,6 +117,8 @@ async def cleanup_prepared_actions_on_startup(
             candidate_expires = candidate_expires.replace(tzinfo=UTC)
         status = PreparedActionStatus(candidate.status)
         if status == PreparedActionStatus.RUNNING:
+            if _protocol_running(candidate):
+                continue
             candidate_lease = candidate.execution_lease_expires_at
             if candidate_lease is not None:
                 if candidate_lease.tzinfo is None:
@@ -181,6 +190,8 @@ async def cleanup_prepared_actions_on_startup(
                     target = PreparedActionStatus.FAILED
                     error_code = "AI_PREPARED_ACTION_EXECUTION_INTERRUPTED"
                 elif current_status == PreparedActionStatus.RUNNING:
+                    if _protocol_running(current):
+                        continue
                     lease_expires = current.execution_lease_expires_at
                     if lease_expires is not None:
                         if lease_expires.tzinfo is None:
@@ -285,6 +296,10 @@ async def finalize_orphaned_pending(
 ) -> None:
     """先 commit terminal operation/projection，再由原 owner 释放 guard。"""
     try:
+        if pending.action_id is not None:
+            # A durable confirmation owns its log and projection. The legacy
+            # Redis-only finalizer must never infer its outcome from a lease.
+            return
         should_finalize = True
         ok = False
         result = None
@@ -411,6 +426,8 @@ async def cleanup_orphaned_pending_on_startup(*, platform: PlatformContext) -> i
                     ):
                         continue
                     if prepared is not None:
+                        if _protocol_running(prepared):
+                            continue
                         await hitl_manager.delete_pending(
                             redis_client, confirmation_id, tenant=tenant
                         )

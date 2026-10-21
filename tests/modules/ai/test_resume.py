@@ -1289,7 +1289,7 @@ class TestResumeTimeoutPath:
     async def test_hang_timeout_emits_ai_error(
         self, _resume_enabled, _redis_pubsub_mode
     ) -> None:
-        from app.modules.ai.agents.hitl.events import DoneEvent
+        from app.modules.ai.agents.hitl.events import AiErrorEvent, DoneEvent
 
         # AsyncSessionLocal 必须也 mock：resume.py 在 TimeoutError 分支会开真实 DB
         # session 做 mark_expired_if_pending，未 mock 会 checkout 真连接，下个测试
@@ -1324,11 +1324,14 @@ class TestResumeTimeoutPath:
                 "app.modules.ai.api.resume._terminalize_durable_resume_failure",
                 AsyncMock(
                     return_value=[
+                        AiErrorEvent(
+                            error_code="AI_HITL_TIMEOUT", message="确认已过期"
+                        ),
                         DoneEvent(
                             trace_id="tr_test",
                             persistence="committed",
                             projection="updated",
-                        )
+                        ),
                     ]
                 ),
             ),
@@ -1364,7 +1367,7 @@ class TestResumeTimeoutPath:
     async def test_durable_timeout_uses_action_terminalizer_not_legacy_finalizer(
         self, _resume_enabled, _redis_pubsub_mode
     ) -> None:
-        from app.modules.ai.agents.hitl.events import DoneEvent
+        from app.modules.ai.agents.hitl.events import AiErrorEvent, DoneEvent
 
         durable_action = SimpleNamespace(
             action_id=9001,
@@ -1383,11 +1386,12 @@ class TestResumeTimeoutPath:
         )
         durable_terminalizer = AsyncMock(
             return_value=[
+                AiErrorEvent(error_code="AI_HITL_TIMEOUT", message="确认已过期"),
                 DoneEvent(
                     trace_id="tr_test",
                     persistence="committed",
                     projection="updated",
-                )
+                ),
             ]
         )
         legacy_terminalizer = AsyncMock()

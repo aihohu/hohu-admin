@@ -24,9 +24,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from redis.exceptions import RedisError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -70,6 +71,7 @@ from app.modules.ai.agents.hitl.constants import (
     PreparedActionStatus,
 )
 from app.modules.ai.agents.hitl.events import (
+    AiErrorEvent,
     AiStreamEvent,
     ConfirmationRequiredEvent,
     DryRunSummary,
@@ -82,6 +84,7 @@ from app.modules.ai.agents.safety.auto_disable import record_injection
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.agents.tools.registry import RegisteredTool, ToolRegistry
 from app.modules.ai.core.context import ChatDeps, build_tool_context
+from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.execution_authorization_service import (
     ensure_current_write_authority,
@@ -93,6 +96,9 @@ from app.modules.ai.service.operation_log_service import (
 from app.modules.ai.service.prepared_action_service import prepared_action_service
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from app.modules.ai.service.atomic_completion_service import ClaimBinding
 
 
 @dataclass(frozen=True)
@@ -106,6 +112,24 @@ class _PreparedExecutionContext:
 class _ConfirmationResolution:
     confirmation_id: str
     decision: ConfirmAction
+
+
+def _raise_if_outcome_unknown(action: AiPreparedAction | None) -> None:
+    from app.modules.ai.service.atomic_completion_service import (  # noqa: PLC0415
+        has_protocol_marker,
+    )
+
+    if action is None or (
+        action.status == PreparedActionStatus.RUNNING.value
+        and has_protocol_marker(
+            getattr(action, "execution_owner", None),
+        )
+    ):
+        from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+            PreparedExecutionOutcomeUnknown,
+        )
+
+        raise PreparedExecutionOutcomeUnknown()
 
 
 @dataclass(frozen=True)
@@ -584,6 +608,10 @@ async def _execute_tool(
 
     # 7. HITL 分支
     if mode == AiExecutionMode.HITL:
+        from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+            PreparedExecutionOutcomeUnknown,
+        )
+
         try:
             resolution = await _hang_for_confirmation(
                 deps,
@@ -599,6 +627,12 @@ async def _execute_tool(
                 l1_global_member=l1_global_member,
                 l4_conv_key_for_rollback=l4_conv_key_for_rollback,
             )
+        except PreparedExecutionOutcomeUnknown as exc:
+            deps.guard_handoff = True
+            await _emit(
+                deps, AiErrorEvent(error_code=exc.error_code, message=exc.message)
+            )
+            raise
         except asyncio.CancelledError:
             if not deps.guard_handoff:
                 await _finish_log_final(
@@ -654,9 +688,16 @@ async def _execute_tool(
                 error_code="AI_HITL_EXPIRED",
                 error_msg=USER_FACING_MSG["AI_HITL_EXPIRED"],
             )
-        action_result, action_duration = await _load_prepared_terminal_result(
-            resolution.confirmation_id, tenant=deps.tenant
-        )
+        try:
+            action_result, action_duration = await _load_prepared_terminal_result(
+                resolution.confirmation_id, tenant=deps.tenant
+            )
+        except PreparedExecutionOutcomeUnknown as exc:
+            deps.guard_handoff = True
+            await _emit(
+                deps, AiErrorEvent(error_code=exc.error_code, message=exc.message)
+            )
+            raise
         await _emit(
             deps,
             ToolCallResultEvent(
@@ -826,11 +867,27 @@ def validate_prepared_execution(
 
 
 async def execute_approved_prepared_action(
-    action: AiPreparedAction,
+    action: "AiPreparedAction | ClaimBinding",
     deps: ChatDeps,
 ) -> ToolResult:
     """Execute any CAS-claimed durable action without a second log/HITL cycle."""
+    from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+        execute_claim,
+    )
+    from app.modules.ai.service.atomic_completion_service import (  # noqa: PLC0415
+        ClaimBinding,
+    )
+
+    if isinstance(action, ClaimBinding):
+        return await execute_claim(
+            action, deps, validate_execution=validate_prepared_execution
+        )
     registered = validate_prepared_execution(action, deps)
+    if not registered.meta.readonly:
+        raise BusinessRuleException(
+            "Write execution requires an immutable server claim",
+            error_code="AI_PREPARED_ACTION_BINDING_INVALID",
+        )
     business_snapshot = (
         action.snapshot.get("business")
         if isinstance(action.snapshot, dict)
@@ -851,10 +908,17 @@ async def _get_prepared_action_by_confirmation(
     *,
     tenant: TenantContext,
 ) -> AiPreparedAction | None:
-    async with AsyncSessionLocal() as db:
-        return await prepared_action_service.get_by_confirmation_id(
-            db, confirmation_id, tenant=tenant
+    try:
+        async with AsyncSessionLocal() as db:
+            return await prepared_action_service.get_by_confirmation_id(
+                db, confirmation_id, tenant=tenant
+            )
+    except Exception as exc:
+        from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+            PreparedExecutionOutcomeUnknown,
         )
+
+        raise PreparedExecutionOutcomeUnknown() from exc
 
 
 def _ui_from_dict(value: dict[str, Any] | None) -> UIResult | None:
@@ -874,16 +938,37 @@ async def _load_prepared_terminal_result(
     *,
     tenant: TenantContext,
 ) -> tuple[ToolResult, int]:
+    from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+        PreparedExecutionOutcomeUnknown,
+        _owned_session,
+    )
+    from app.modules.ai.service.atomic_completion_service import (  # noqa: PLC0415
+        DB_TOOLS,
+        FILE_TOOLS,
+        atomic_completion_service,
+        has_protocol_marker,
+    )
+
     action = await _get_prepared_action_by_confirmation(confirmation_id, tenant=tenant)
-    if action is None:
-        return (
-            ToolResult.failure(
-                "AI_PREPARED_ACTION_NOT_FOUND",
-                "Prepared action no longer exists",
-            ),
-            0,
-        )
+    _raise_if_outcome_unknown(action)
     status = PreparedActionStatus(action.status)
+    if (
+        status == PreparedActionStatus.SUCCEEDED
+        and getattr(action, "execute_tool_name", None) in DB_TOOLS | FILE_TOOLS
+    ) or (
+        status == PreparedActionStatus.FAILED
+        and has_protocol_marker(getattr(action, "execution_owner", None))
+    ):
+        try:
+            async with asyncio.timeout(8), _owned_session() as db:
+                await db.begin()
+                completion = await atomic_completion_service.lock_terminal(
+                    db, confirmation_id, tenant=tenant
+                )
+                action = completion.action
+                status = PreparedActionStatus(action.status)
+        except (Exception, asyncio.CancelledError) as exc:
+            raise PreparedExecutionOutcomeUnknown() from exc
     if status == PreparedActionStatus.SUCCEEDED:
         return (
             ToolResult.success(
@@ -1069,6 +1154,8 @@ async def _finish_log_final(
     duration_ms = int((time.monotonic() - started_at) * 1000)
 
     async def _op(log_db: AsyncSession) -> None:
+        if await _log_has_durable_owner(log_db, log_id, tenant=tenant):
+            return
         if result.ok:
             summary = (
                 f"ok, keys={sorted(result.data.keys())}"
@@ -1101,6 +1188,51 @@ async def _finish_log_final(
         op=_op,
         raise_on_failure=False,
     )
+
+
+async def _log_has_durable_owner(
+    db: AsyncSession, log_id: int, *, tenant: TenantContext
+) -> bool:
+    """Serialize fallback writes behind confirmation ownership and log state.
+
+    Confirm owns every PA-bound log, including success after its execution
+    owner is cleared. Never lock a log before its C/source/PA context.
+    """
+    lookup = (
+        select(AiPreparedAction)
+        .join(
+            AiOperationLog,
+            (AiOperationLog.tenant_id == AiPreparedAction.tenant_id)
+            & (AiOperationLog.tool_call_id == AiPreparedAction.execute_tool_call_id),
+        )
+        .where(
+            AiOperationLog.tenant_id == tenant.tenant_id,
+            AiOperationLog.log_id == log_id,
+        )
+    )
+    action = await db.scalar(lookup)
+    if action is not None:
+        context = await prepared_action_service.lock_confirmation_context(
+            db, confirmation_id=action.confirmation_id, tenant=tenant
+        )
+        if context is None:
+            return True
+    log = await db.scalar(
+        select(AiOperationLog)
+        .where(
+            AiOperationLog.tenant_id == tenant.tenant_id,
+            AiOperationLog.log_id == log_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if action is not None or (
+        log is not None and AiOperationStatus(log.status).is_terminal
+    ):
+        return True
+    # If PA creation raced the initial discovery, fail closed without taking
+    # context locks after the log lock. Its owning confirm will finalize it.
+    return await db.scalar(lookup) is not None
 
 
 # ============ 日志写入重试 ============
@@ -1514,6 +1646,7 @@ async def _hang_for_confirmation(
         terminal = await _get_prepared_action_by_confirmation(
             confirmation_id, tenant=deps.tenant
         )
+        _raise_if_outcome_unknown(terminal)
         if terminal is not None and PreparedActionStatus(terminal.status).is_terminal:
             deps.guard_handoff = False
             return _ConfirmationResolution(
@@ -1552,6 +1685,21 @@ async def _hang_for_confirmation(
                         error_msg="确认已过期，请重新发起",
                         tenant=deps.tenant,
                     )
+        if transitioned is None:
+            latest = await _get_prepared_action_by_confirmation(
+                confirmation_id, tenant=deps.tenant
+            )
+            _raise_if_outcome_unknown(latest)
+            if latest is not None and PreparedActionStatus(latest.status).is_terminal:
+                deps.guard_handoff = False
+                return _ConfirmationResolution(
+                    confirmation_id=confirmation_id,
+                    decision=(
+                        ConfirmAction.REJECTED
+                        if latest.status == PreparedActionStatus.REJECTED.value
+                        else ConfirmAction.APPROVED
+                    ),
+                )
         await hitl_manager.delete_pending(
             redis_client, confirmation_id, tenant=deps.tenant
         )
@@ -1900,6 +2048,13 @@ async def resume_tool_execution(
         (ToolResult, duration_ms) — resume 端点据此 emit tool_call_result，
         duration_ms 是业务执行墙钟耗时（毫秒）。
     """
+    if pending.action_id is not None:
+        from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+            PreparedExecutionOutcomeUnknown,
+        )
+
+        deps.guard_handoff = True
+        raise PreparedExecutionOutcomeUnknown()
     registry = ToolRegistry.get()
     registered = registry.find(pending.tool_name)
     if registered is None:

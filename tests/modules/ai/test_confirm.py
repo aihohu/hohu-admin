@@ -22,16 +22,24 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
+from app.core.base_response import ResponseModel
 from app.core.exceptions import (
     AuthorizationException,
     BusinessRuleException,
     NotFoundException,
 )
 from app.core.tenant import TenantContext
+from app.modules.ai.agents.gateway.atomic_execution import (
+    PreparedExecutionOutcomeUnknown,
+)
+from app.modules.ai.agents.gateway.result import ToolResult
 from app.modules.ai.agents.hitl.constants import ConfirmAction
 from app.modules.ai.agents.hitl.manager import PendingPayload
+from app.modules.ai.agents.tools.meta import AiToolMeta
+from app.modules.ai.agents.tools.registry import RegisteredTool
 from app.modules.ai.api.confirm import _notify_prepared_terminal, confirm_tool
-from app.modules.ai.schemas.confirm import ConfirmRequest
+from app.modules.ai.schemas.confirm import ConfirmRequest, ConfirmResponse
+from app.modules.ai.service.atomic_completion_service import ClaimBinding
 
 
 def _make_pending(
@@ -177,6 +185,11 @@ def _make_prepared_action(
         ),
         status=status,
         row_version=versions[status],
+        execution_owner=(
+            "v0162-file:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+            if status == "running"
+            else None
+        ),
         expires_at=datetime.now(UTC) + timedelta(minutes=5),
         guard_owner_token=None,
         trace_id="tr_test",
@@ -186,7 +199,9 @@ def _make_prepared_action(
         risk_level="high",
         chip_target=None,
         frozen_args={"preview_token": "server-secret"},
-        args_hash="hash",
+        args_hash="a" * 64,
+        snapshot_hash="b" * 64,
+        snapshot={},
         presentation={
             "title": "Import users",
             "fields": [{"label": "new", "value": 2}],
@@ -206,6 +221,41 @@ def _make_prepared_context(action):  # noqa: ANN001
         conversation=SimpleNamespace(user_id=100),
         source_message=SimpleNamespace(conversation_id=1, role="user", is_active=True),
     )
+
+
+def _make_registered_write_tool(action) -> RegisteredTool:  # noqa: ANN001
+    return RegisteredTool(
+        meta=AiToolMeta(
+            name=action.execute_tool_name,
+            agent=action.agent_code,
+            summary="Confirm transaction contract fixture",
+            required_perms=("system:user:add",),
+            risk="high",
+            readonly=False,
+        ),
+        fn=AsyncMock(),
+    )
+
+
+def _completion_response(action):  # noqa: ANN001
+    return ResponseModel.success(
+        data=ConfirmResponse(
+            actionId=action.action_id,
+            toolCallId=action.execute_tool_call_id,
+            status=action.status,
+        )
+    )
+
+
+def _make_db():
+    """Request-session IO stays awaitable when entry guards issue real SQL."""
+    db = MagicMock()
+    db.execute = AsyncMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    db.invalidate = AsyncMock()
+    db.close = AsyncMock()
+    return db
 
 
 def test_confirm_request_rejects_policy_override_fields() -> None:
@@ -235,7 +285,7 @@ def _mock_external():
         mock_redis.exists = AsyncMock(return_value=False)
 
         # AsyncSessionLocal() async with → yield mock session
-        mock_session_ctx = MagicMock()
+        mock_session_ctx = _make_db()
         mock_session_local.return_value.__aenter__ = AsyncMock(
             return_value=mock_session_ctx
         )
@@ -273,7 +323,7 @@ class TestConfirmSuccess:
             ),
         ):
             req = ConfirmRequest(confirmationId="cid_test_123", action="approve")
-            db_mock = MagicMock()
+            db_mock = _make_db()
             db_mock.commit = AsyncMock()
 
             result = await confirm_tool(req, db=db_mock, current_user=_make_user(100))
@@ -316,7 +366,7 @@ class TestConfirmSuccess:
                 AsyncMock(),
             ) as delete_pending,
         ):
-            db = MagicMock()
+            db = _make_db()
             db.commit = AsyncMock()
             with pytest.raises(AuthorizationException) as exc_info:
                 await confirm_tool(
@@ -381,7 +431,7 @@ class TestPreparedConfirmation:
                 AsyncMock(),
             ),
         ):
-            db = MagicMock()
+            db = _make_db()
             db.commit = AsyncMock()
             result = await confirm_tool(
                 ConfirmRequest(
@@ -442,7 +492,7 @@ class TestPreparedConfirmation:
                 AsyncMock(),
             ) as execute,
         ):
-            db = MagicMock()
+            db = _make_db()
             db.commit = AsyncMock()
             with pytest.raises(AuthorizationException) as exc_info:
                 await confirm_tool(
@@ -519,7 +569,7 @@ class TestPreparedConfirmation:
             ),
         ):
             req = ConfirmRequest(confirmationId="cid_test_0123", action="approve")
-            db = MagicMock()
+            db = _make_db()
             db.commit = AsyncMock()
             with pytest.raises(BusinessRuleException) as exc_info:
                 await confirm_tool(
@@ -578,7 +628,7 @@ class TestPreparedConfirmation:
                 AsyncMock(),
             ),
         ):
-            db = MagicMock()
+            db = _make_db()
             db.commit = AsyncMock()
             result = await confirm_tool(
                 ConfirmRequest(
@@ -596,8 +646,6 @@ class TestPreparedConfirmation:
     async def test_approve_executes_inline_without_redis_pending(
         self, interaction_flow: str
     ) -> None:
-        from app.modules.ai.agents.gateway.result import ToolResult
-
         pending = _make_prepared_action(interaction_flow=interaction_flow)
         approved = _make_prepared_action(
             status="approved", interaction_flow=interaction_flow
@@ -608,9 +656,10 @@ class TestPreparedConfirmation:
         terminal = _make_prepared_action(
             status="succeeded", interaction_flow=interaction_flow
         )
-        db = MagicMock()
+        db = _make_db()
         lifecycle: list[str] = []
-        db.commit = AsyncMock(side_effect=lambda: lifecycle.append("commit"))
+        db.commit = AsyncMock(side_effect=lambda: lifecycle.append("claim_committed"))
+        db.expunge_all = MagicMock(side_effect=lambda: lifecycle.append("detached"))
         db.rollback = AsyncMock()
         deps = SimpleNamespace(data_scope_hash="current-scope")
         validate_scope = MagicMock()
@@ -633,8 +682,8 @@ class TestPreparedConfirmation:
             ),
             patch(
                 "app.modules.ai.api.confirm.prepared_action_service.transition_status",
-                AsyncMock(side_effect=[approved, running, terminal]),
-            ),
+                AsyncMock(side_effect=[approved, running]),
+            ) as transition,
             patch(
                 "app.modules.ai.api.confirm.operation_log_service.get_by_tool_call_id",
                 AsyncMock(return_value=None),
@@ -643,7 +692,22 @@ class TestPreparedConfirmation:
                 "app.modules.ai.api.confirm.chat_service.build_chat_deps",
                 AsyncMock(return_value=deps),
             ),
-            patch("app.modules.ai.api.confirm.validate_prepared_execution"),
+            patch(
+                "app.modules.ai.api.confirm.validate_prepared_execution",
+                return_value=_make_registered_write_tool(pending),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.atomic_completion_service.lock_action_log",
+                AsyncMock(return_value=SimpleNamespace(log_id=77)),
+            ) as lock_log,
+            patch(
+                "app.modules.ai.api.confirm.operation_log_service.mark_approved",
+                AsyncMock(),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.operation_log_service.mark_running",
+                AsyncMock(),
+            ),
             patch(
                 "app.modules.ai.api.confirm.execute_approved_prepared_action",
                 AsyncMock(
@@ -654,9 +718,14 @@ class TestPreparedConfirmation:
                 ),
             ) as execute,
             patch(
-                "app.modules.ai.api.confirm.chat_run_finalizer.finalize_prepared_action",
-                AsyncMock(),
-            ) as finalize,
+                "app.modules.ai.api.confirm._project_prepared_completion",
+                AsyncMock(
+                    side_effect=lambda *_args, **_kwargs: (
+                        lifecycle.append("project_committed_result")
+                        or _completion_response(terminal)
+                    )
+                ),
+            ) as project,
             patch(
                 "app.modules.ai.api.confirm.hitl_manager.get_pending",
                 AsyncMock(),
@@ -689,127 +758,40 @@ class TestPreparedConfirmation:
 
         assert result.data.status == "succeeded"
         assert result.data.action_id == 9001
-        assert db.commit.await_count == 2
-        assert lifecycle == ["commit", "execute", "commit", "wake"]
+        assert lifecycle == [
+            "claim_committed",
+            "detached",
+            "execute",
+            "project_committed_result",
+        ]
+        assert [
+            call.kwargs["target_status"].value for call in transition.await_args_list
+        ] == ["approved", "running"]
+        lock_log.assert_awaited_once_with(
+            db, pending, tenant=ANY, expected_status="pending_confirmation"
+        )
         validate_scope.assert_called_once_with(
             pending,
             current_data_scope_hash="current-scope",
         )
-        execute.assert_awaited_once_with(running, deps)
-        finalize.assert_awaited_once()
+        execute.assert_awaited_once_with(
+            ClaimBinding.from_action(running, log_id=77), deps
+        )
+        project.assert_awaited_once_with(
+            pending.confirmation_id,
+            current_user_id=100,
+            tenant=ANY,
+            action_ref=ClaimBinding.from_action(running, log_id=77),
+        )
         get_pending.assert_not_awaited()
 
-    async def test_scope_bound_result_freezes_post_write_scope_hash(
-        self,
-        _mock_external,
-    ) -> None:
-        from app.modules.ai.agents.gateway.result import ResultProjection, ToolResult
-
-        pending = _make_prepared_action(data_scope_hash="pre-write-scope")
-        approved = _make_prepared_action(
-            status="approved", data_scope_hash="pre-write-scope"
-        )
-        running = _make_prepared_action(
-            status="running", data_scope_hash="pre-write-scope"
-        )
-        running.tool_codes = ["dept.create"]
-        terminal = _make_prepared_action(
-            status="succeeded", data_scope_hash="pre-write-scope"
-        )
-        transition = AsyncMock(side_effect=[approved, running, terminal])
-        post_write_hash = AsyncMock(return_value="post-write-scope")
-        deps = SimpleNamespace(data_scope_hash="pre-write-scope")
-        current_user = _make_user()
-
-        with (
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.get_by_confirmation_id",
-                AsyncMock(side_effect=[pending, running]),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.lock_confirmation_context",
-                AsyncMock(return_value=_make_prepared_context(pending)),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.validate_snapshot",
-                AsyncMock(),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.validate_data_scope_snapshot"
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.transition_status",
-                transition,
-            ),
-            patch(
-                "app.modules.ai.api.confirm.operation_log_service.get_by_tool_call_id",
-                AsyncMock(return_value=None),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.chat_service.build_chat_deps",
-                AsyncMock(return_value=deps),
-            ),
-            patch("app.modules.ai.api.confirm.validate_prepared_execution"),
-            patch(
-                "app.modules.ai.api.confirm.execute_approved_prepared_action",
-                AsyncMock(
-                    return_value=ToolResult.success(
-                        {"deptId": "42"},
-                        projection=ResultProjection(
-                            subject_refs=({"type": "dept", "id": "42"},),
-                            scope_bound=True,
-                        ),
-                    )
-                ),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.result_projection_service.compute_data_scope_hash",
-                post_write_hash,
-            ),
-            patch(
-                "app.modules.ai.api.confirm.chat_run_finalizer.finalize_prepared_action",
-                AsyncMock(),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.hitl_manager.wake",
-                AsyncMock(return_value=False),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.hitl_manager.delete_pending",
-                AsyncMock(),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.check_user_disabled",
-                AsyncMock(return_value=False),
-            ),
-        ):
-            db = MagicMock()
-            db.commit = AsyncMock()
-            db.rollback = AsyncMock()
-            result = await confirm_tool(
-                ConfirmRequest(
-                    confirmationId="cid_test_0123",
-                    action="approve",
-                ),
-                db=db,
-                current_user=current_user,
-            )
-
-        post_write_hash.assert_awaited_once_with(db, current_user)
-        assert db.commit.await_count == 2
-        result_lineage = transition.await_args_list[2].kwargs["result_lineage"]
-        assert result_lineage.data_scope_hash == "post-write-scope"
-        assert result.data.status == "succeeded"
-
-    async def test_unexpected_inline_execution_error_is_finalized_as_failed(
+    async def test_unknown_inline_execution_does_not_publish_failure(
         self,
     ) -> None:
         pending = _make_prepared_action()
         approved = _make_prepared_action(status="approved")
         running = _make_prepared_action(status="running")
-        terminal = _make_prepared_action(status="failed")
-        terminal.error_code = "AI_INTERNAL_ERROR"
-        db = MagicMock()
+        db = _make_db()
         db.commit = AsyncMock()
         db.rollback = AsyncMock()
         deps = SimpleNamespace()
@@ -828,8 +810,8 @@ class TestPreparedConfirmation:
             ),
             patch(
                 "app.modules.ai.api.confirm.prepared_action_service.transition_status",
-                AsyncMock(side_effect=[approved, running, terminal]),
-            ),
+                AsyncMock(side_effect=[approved, running]),
+            ) as transition,
             patch(
                 "app.modules.ai.api.confirm.operation_log_service.get_by_tool_call_id",
                 AsyncMock(return_value=None),
@@ -838,17 +820,33 @@ class TestPreparedConfirmation:
                 "app.modules.ai.api.confirm.chat_service.build_chat_deps",
                 AsyncMock(return_value=deps),
             ),
-            patch("app.modules.ai.api.confirm.validate_prepared_execution"),
+            patch(
+                "app.modules.ai.api.confirm.validate_prepared_execution",
+                return_value=_make_registered_write_tool(pending),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.atomic_completion_service.lock_action_log",
+                AsyncMock(return_value=SimpleNamespace(log_id=77)),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.operation_log_service.mark_approved",
+                AsyncMock(),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.operation_log_service.mark_running",
+                AsyncMock(),
+            ),
             patch(
                 "app.modules.ai.api.confirm.execute_approved_prepared_action",
-                AsyncMock(
-                    side_effect=RuntimeError("redis failure after tool rollback")
-                ),
+                AsyncMock(side_effect=PreparedExecutionOutcomeUnknown()),
             ),
             patch(
                 "app.modules.ai.api.confirm.chat_run_finalizer.finalize_prepared_action",
                 AsyncMock(),
             ) as finalize,
+            patch(
+                "app.modules.ai.api.confirm._project_prepared_completion", AsyncMock()
+            ) as project,
             patch(
                 "app.modules.ai.api.confirm.hitl_manager.wake",
                 AsyncMock(return_value=False),
@@ -871,10 +869,12 @@ class TestPreparedConfirmation:
                 current_user=_make_user(),
             )
 
-        assert result.data.status == "failed"
-        finalize.assert_awaited_once()
-        assert finalize.await_args.kwargs["ok"] is False
-        assert finalize.await_args.kwargs["error_code"] == "AI_INTERNAL_ERROR"
+        assert result.data.status == "running"
+        finalize.assert_not_awaited()
+        project.assert_not_awaited()
+        assert [
+            call.kwargs["target_status"].value for call in transition.await_args_list
+        ] == ["approved", "running"]
 
     async def test_duplicate_approve_returns_terminal_without_execution(self) -> None:
         terminal = _make_prepared_action(status="succeeded")
@@ -896,22 +896,36 @@ class TestPreparedConfirmation:
                 AsyncMock(),
             ) as get_pending,
             patch(
+                "app.modules.ai.api.confirm._project_prepared_completion",
+                AsyncMock(return_value=_completion_response(terminal)),
+            ) as project,
+            patch(
                 "app.modules.ai.api.confirm.check_user_disabled",
                 AsyncMock(return_value=False),
             ),
         ):
+            db = _make_db()
+            db.rollback = AsyncMock()
             result = await confirm_tool(
                 ConfirmRequest(
                     confirmationId="cid_test_0123",
                     action="approve",
                 ),
-                db=MagicMock(),
+                db=db,
                 current_user=_make_user(),
             )
 
         assert result.data.status == "succeeded"
         execute.assert_not_awaited()
         get_pending.assert_not_awaited()
+        db.expunge_all.assert_called_once()
+        db.rollback.assert_awaited_once()
+        project.assert_awaited_once_with(
+            terminal.confirmation_id,
+            current_user_id=100,
+            tenant=ANY,
+            action_ref=terminal,
+        )
 
     async def test_reject_wakes_stream_returns_queued(self) -> None:
         """reject + wake 成功 → status=queued（reject 也是 wake 成功）"""
@@ -934,7 +948,7 @@ class TestPreparedConfirmation:
             ),
         ):
             req = ConfirmRequest(confirmationId="cid_test_123", action="reject")
-            db_mock = MagicMock()
+            db_mock = _make_db()
             db_mock.commit = AsyncMock()
 
             result = await confirm_tool(req, db=db_mock, current_user=_make_user(100))
@@ -953,7 +967,7 @@ class TestPendingMissing:
         ):
             req = ConfirmRequest(confirmationId="cid_unknown_0123", action="approve")
             with pytest.raises(NotFoundException) as exc_info:
-                await confirm_tool(req, db=MagicMock(), current_user=_make_user(100))
+                await confirm_tool(req, db=_make_db(), current_user=_make_user(100))
             assert exc_info.value.error_code == "CONFIRMATION_EXPIRED_OR_NOT_FOUND"
 
 
@@ -970,7 +984,7 @@ class TestOwnerMismatch:
             req = ConfirmRequest(confirmationId="cid_test_0123", action="approve")
             with pytest.raises(AuthorizationException) as exc_info:
                 # attacker user_id=999
-                await confirm_tool(req, db=MagicMock(), current_user=_make_user(999))
+                await confirm_tool(req, db=_make_db(), current_user=_make_user(999))
             assert exc_info.value.error_code == "NOT_CONFIRMATION_OWNER"
 
     async def test_tenant_mismatch_is_rejected_before_wake(self) -> None:
@@ -987,7 +1001,7 @@ class TestOwnerMismatch:
         ):
             req = ConfirmRequest(confirmationId="cid_test_0123", action="approve")
             with pytest.raises(AuthorizationException) as exc_info:
-                await confirm_tool(req, db=MagicMock(), current_user=_make_user(100))
+                await confirm_tool(req, db=_make_db(), current_user=_make_user(100))
 
         assert exc_info.value.error_code == "NOT_CONFIRMATION_OWNER"
         wake.assert_not_awaited()
@@ -1007,7 +1021,7 @@ class TestUserDisabled:
             guard_owner_token="owner-token",
         )
         fake_log = SimpleNamespace(log_id=12345)
-        db = MagicMock()
+        db = _make_db()
         db.commit = AsyncMock()
         with (
             patch(
@@ -1090,7 +1104,7 @@ class TestUserDisabled:
             with pytest.raises(AuthorizationException) as exc_info:
                 await confirm_tool(
                     req,
-                    db=MagicMock(),
+                    db=_make_db(),
                     current_user=_make_user(999),  # 非 owner
                 )
             # owner mismatch 优先
@@ -1136,7 +1150,7 @@ class TestWakeStreamGone:
         ):
             req = ConfirmRequest(confirmationId="cid_test_0123", action="approve")
             result = await confirm_tool(
-                req, db=MagicMock(), current_user=_make_user(100)
+                req, db=_make_db(), current_user=_make_user(100)
             )
 
         # 端点不抛，返回特殊 status
@@ -1195,7 +1209,7 @@ class TestWakeStreamGone:
             ) as delete_pending,
         ):
             req = ConfirmRequest(confirmationId="cid_test_0123", action="approve")
-            db_mock = MagicMock()
+            db_mock = _make_db()
             db_mock.commit = AsyncMock()
 
             result = await confirm_tool(req, db=db_mock, current_user=_make_user(100))
@@ -1263,7 +1277,7 @@ class TestWakeStreamGone:
             ) as delete_pending,
         ):
             req = ConfirmRequest(confirmationId="cid_test_0123", action="approve")
-            db_mock = MagicMock()
+            db_mock = _make_db()
             db_mock.commit = AsyncMock()
 
             result = await confirm_tool(req, db=db_mock, current_user=_make_user(100))
@@ -1308,7 +1322,7 @@ class TestWakeStreamGone:
             ),
         ):
             req = ConfirmRequest(confirmationId="cid_test_0123", action="approve")
-            db_mock = MagicMock()
+            db_mock = _make_db()
             db_mock.commit = AsyncMock()
             result = await confirm_tool(req, db=db_mock, current_user=_make_user(100))
 

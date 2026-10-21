@@ -69,6 +69,7 @@ from app.modules.ai.agents.hitl.manager import PendingPayload, hitl_manager
 from app.modules.ai.api.chat import _format_sse_chunk
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.schemas.resume import ResumeStatusOut
+from app.modules.ai.service.atomic_completion_service import has_protocol_marker
 from app.modules.ai.service.chat_run_service import (
     chat_run_finalizer,
     chat_run_guard,
@@ -91,6 +92,27 @@ _RELEASE_LOCK_LUA = (
     "if redis.call('get', KEYS[1]) == ARGV[1] then "
     "return redis.call('del', KEYS[1]) else return 0 end"
 )
+
+
+def _protocol_running(action) -> bool:  # noqa: ANN001
+    return action.status == PreparedActionStatus.RUNNING.value and has_protocol_marker(
+        getattr(action, "execution_owner", None)
+    )
+
+
+def _unknown_resume_events(trace_id: str) -> list[AiErrorEvent | DoneEvent]:
+    from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+        OUTCOME_UNKNOWN_MESSAGE,
+    )
+
+    return [
+        AiErrorEvent(
+            error_code="AI_EXECUTION_OUTCOME_UNKNOWN", message=OUTCOME_UNKNOWN_MESSAGE
+        ),
+        DoneEvent(
+            trace_id=trace_id, persistence="not_applicable", projection="unchanged"
+        ),
+    ]
 
 
 def _set_exc_code(exc: BusinessRuleException, code: int) -> BusinessRuleException:
@@ -332,6 +354,8 @@ async def _load_durable_resume_terminal(
                     error_code="AI_PREPARED_ACTION_BINDING_INVALID",
                 )
             status = PreparedActionStatus(action.status)
+            if _protocol_running(action):
+                return _unknown_resume_events(pending.trace_id)
             if not status.is_terminal:
                 raise BusinessRuleException(
                     "续传收到唤醒但 action 尚未进入终态",
@@ -429,23 +453,12 @@ async def _load_durable_resume_terminal(
                 projection="updated",
             )
             return [result_event, done_event]
-    except Exception as exc:
+    except Exception:
         logger.exception(
             "resume durable terminal projection failed",
             extra={"confirmation_id": confirmation_id, "action_id": pending.action_id},
         )
-        error_code = getattr(exc, "error_code", "AI_PREPARED_ACTION_TERMINAL_MISSING")
-        return [
-            AiErrorEvent(
-                error_code=error_code,
-                message="操作终态读取失败，请刷新会话确认结果",
-            ),
-            DoneEvent(
-                trace_id=pending.trace_id,
-                persistence="failed",
-                projection="updated",
-            ),
-        ]
+        return _unknown_resume_events(pending.trace_id)
 
 
 async def _cleanup_durable_resume(action, *, tenant: TenantContext) -> None:  # noqa: ANN001
@@ -509,6 +522,8 @@ async def _terminalize_durable_resume_failure(
                     )
                 status = PreparedActionStatus(action.status)
                 terminal_action = action
+                if _protocol_running(action):
+                    return _unknown_resume_events(pending.trace_id)
                 if status == PreparedActionStatus.PENDING_CONFIRMATION:
                     transitioned = await prepared_action_service.transition_status(
                         terminal_db,
@@ -555,17 +570,7 @@ async def _terminalize_durable_resume_failure(
             "resume durable failure terminalization failed",
             extra={"confirmation_id": confirmation_id},
         )
-        return [
-            AiErrorEvent(
-                error_code="AI_PREPARED_ACTION_TERMINAL_MISSING",
-                message="操作状态暂不可用，请刷新会话确认结果",
-            ),
-            DoneEvent(
-                trace_id=pending.trace_id,
-                persistence="failed",
-                projection="updated",
-            ),
-        ]
+        return _unknown_resume_events(pending.trace_id)
 
 
 async def _finalize_resume_terminal(
@@ -870,6 +875,10 @@ async def resume_chat(
     )
 
     async def resume_stream():
+        from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+            PreparedExecutionOutcomeUnknown,
+        )
+
         try:
             # 6.1 emit confirmation_resumed
             yield _format_sse_chunk(resumed_event)
@@ -888,12 +897,6 @@ async def resume_chat(
                 else:
                     action = await hitl_manager.hang(confirmation_id, tenant=tenant)
             except TimeoutError:
-                yield _format_sse_chunk(
-                    AiErrorEvent(
-                        error_code="AI_HITL_TIMEOUT",
-                        message="HITL 确认超时（5min 无人确认），请重新发起",
-                    )
-                )
                 if durable_action is not None:
                     terminal_events = await _terminalize_durable_resume_failure(
                         confirmation_id=confirmation_id,
@@ -904,6 +907,12 @@ async def resume_chat(
                         error_msg="HITL 确认超时（5min 无人确认）",
                     )
                 else:
+                    yield _format_sse_chunk(
+                        AiErrorEvent(
+                            error_code="AI_HITL_TIMEOUT",
+                            message="HITL 确认超时（5min 无人确认），请重新发起",
+                        )
+                    )
                     await _mark_legacy_resume_expired(
                         db,
                         pending=pending,
@@ -925,12 +934,6 @@ async def resume_chat(
             except Exception:
                 # hang 抛非 Timeout 异常（如 Redis down）→ 先收口事实再 done
                 logger.exception("resume: hang unexpected error")
-                yield _format_sse_chunk(
-                    AiErrorEvent(
-                        error_code="AI_INTERNAL_ERROR",
-                        message="续传异常，请重新发起",
-                    )
-                )
                 if durable_action is not None:
                     terminal_events = await _terminalize_durable_resume_failure(
                         confirmation_id=confirmation_id,
@@ -941,6 +944,12 @@ async def resume_chat(
                         error_msg="续传异常，请重新发起",
                     )
                 else:
+                    yield _format_sse_chunk(
+                        AiErrorEvent(
+                            error_code="AI_INTERNAL_ERROR",
+                            message="续传异常，请重新发起",
+                        )
+                    )
                     await _mark_legacy_resume_expired(
                         db,
                         pending=pending,
@@ -1122,6 +1131,10 @@ async def resume_chat(
 
             try:
                 result, duration_ms = await resume_tool_execution(pending, deps, log_id)
+            except PreparedExecutionOutcomeUnknown:
+                for terminal_event in _unknown_resume_events(pending.trace_id):
+                    yield _format_sse_chunk(terminal_event)
+                return
             except Exception:
                 logger.exception("resume: resume_tool_execution failed")
                 yield _format_sse_chunk(
