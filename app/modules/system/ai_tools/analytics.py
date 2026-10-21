@@ -20,6 +20,7 @@ from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.service.dept_selector import department_selector
+from app.modules.system.service.user_operations_service import user_operations_service
 
 from .common import (
     EnableStatusFilters,
@@ -62,13 +63,13 @@ async def user_count(
         validate_filters_in_whitelist(ctx.tool_meta, filters)
     )
 
-    # data_scope 已收敛到调用者可见的用户范围。
-    stmt = select(func.count(User.user_id)).where(*ctx.data_scope.filters)
-    for key, value in filters.items():
-        # sys_user 表的 allowed_filters 字段都是 varchar，强制 stringify 防类型错
-        stmt = stmt.where(getattr(User, key) == str(value))
-
-    count = int(await ctx.db.scalar(stmt) or 0)
+    count = await user_operations_service.count_users(
+        ctx.db,
+        tenant=ctx.tenant,
+        scope_filters=ctx.data_scope.filters,
+        status=str(filters["status"]) if "status" in filters else None,
+        user_gender=str(filters["user_gender"]) if "user_gender" in filters else None,
+    )
     return ToolResult.success(
         data={"count": count},
         projection=_result_projection(scope_bound=True),

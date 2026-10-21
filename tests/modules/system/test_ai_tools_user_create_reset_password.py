@@ -14,7 +14,11 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import STATUS_ENABLED, SUPER_ADMIN_ROLE_CODE, USER_ROLE_CODE
-from app.core.exceptions import AuthorizationException, BusinessRuleException
+from app.core.exceptions import (
+    AuthorizationException,
+    BusinessRuleException,
+    DuplicateException,
+)
 from app.core.security import verify_password
 from app.db.base import user_depts, user_roles
 from app.modules.ai.agents.gateway.executor import _build_direct_confirmation_fields
@@ -337,6 +341,54 @@ class TestUserDeptLookup:
 
 
 class TestUserCreate:
+    @pytest.mark.parametrize("duplicate_in_current_tenant", [False, True])
+    async def test_preflight_and_create_share_tenant_username_uniqueness(
+        self, db_session: AsyncSession, duplicate_in_current_tenant: bool
+    ) -> None:
+        from tests.tenant_helpers import create_test_tenant  # noqa: PLC0415
+
+        await _seed_default_password(db_session)
+        await _seed_default_role(db_session)
+        await _set_primary_policy(db_session, False)
+        other_tenant = await create_test_tenant(db_session, prefix="s0user")
+        duplicate = User(
+            tenant_id=0 if duplicate_in_current_tenant else other_tenant.tenant_id,
+            user_name="tenantduplicate",
+            hashed_password="$2b$12$dummy",
+            status=STATUS_ENABLED,
+        )
+        db_session.add(duplicate)
+        await db_session.flush()
+        actor = await db_session.scalar(
+            select(User).where(User.tenant_id == 0, User.user_name == "admin")
+        )
+        assert actor is not None
+        ctx = _make_ctx(
+            db_session,
+            tool_name="user.create",
+            permission="system:user:add",
+            actor=actor,
+        )
+
+        preview = await _dry_run_user_create(ctx, user_name=duplicate.user_name)
+
+        assert preview.ok is not duplicate_in_current_tenant
+        if duplicate_in_current_tenant:
+            with pytest.raises(DuplicateException):
+                await user_create(ctx, user_name=duplicate.user_name)
+        else:
+            result = await user_create(ctx, user_name=duplicate.user_name)
+            assert result.ok is True
+            created = await db_session.scalar(
+                select(User).where(
+                    User.tenant_id == ctx.tenant_id,
+                    User.user_name == duplicate.user_name,
+                )
+            )
+            assert created is not None
+            assert created.user_id != duplicate.user_id
+            assert duplicate.tenant_id == other_tenant.tenant_id
+
     def test_department_is_optional_in_model_schema(self, monkeypatch) -> None:
         from app.modules.ai.agents.tools.pydantic_ai_wrapper import (  # noqa: PLC0415
             build_pydantic_ai_tools,
