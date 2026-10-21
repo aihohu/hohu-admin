@@ -27,7 +27,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from redis.exceptions import RedisError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -115,16 +115,10 @@ class _ConfirmationResolution:
 
 
 def _raise_if_outcome_unknown(action: AiPreparedAction | None) -> None:
-    from app.modules.ai.service.atomic_completion_service import (  # noqa: PLC0415
-        has_protocol_marker,
-    )
-
-    if action is None or (
-        action.status == PreparedActionStatus.RUNNING.value
-        and has_protocol_marker(
-            getattr(action, "execution_owner", None),
-        )
-    ):
+    if action is None or action.status in {
+        PreparedActionStatus.RUNNING.value,
+        PreparedActionStatus.APPROVED.value,
+    }:
         from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
             PreparedExecutionOutcomeUnknown,
         )
@@ -947,24 +941,45 @@ async def _load_prepared_terminal_result(
         FILE_TOOLS,
         atomic_completion_service,
         has_protocol_marker,
+        is_registered_readonly_action,
     )
 
     action = await _get_prepared_action_by_confirmation(confirmation_id, tenant=tenant)
     _raise_if_outcome_unknown(action)
     status = PreparedActionStatus(action.status)
+    cancelled_write = status in {
+        PreparedActionStatus.REJECTED,
+        PreparedActionStatus.EXPIRED,
+    } and not is_registered_readonly_action(action)
     if (
-        status == PreparedActionStatus.SUCCEEDED
-        and getattr(action, "execute_tool_name", None) in DB_TOOLS | FILE_TOOLS
-    ) or (
         status == PreparedActionStatus.FAILED
-        and has_protocol_marker(getattr(action, "execution_owner", None))
+        and not is_registered_readonly_action(action)
+        and (
+            getattr(action, "execute_tool_name", None) not in DB_TOOLS
+            or not has_protocol_marker(getattr(action, "execution_owner", None))
+        )
+    ):
+        raise PreparedExecutionOutcomeUnknown()
+    if (
+        cancelled_write
+        or (
+            status == PreparedActionStatus.SUCCEEDED
+            and getattr(action, "execute_tool_name", None) in DB_TOOLS | FILE_TOOLS
+        )
+        or (
+            status == PreparedActionStatus.FAILED
+            and has_protocol_marker(getattr(action, "execution_owner", None))
+        )
     ):
         try:
             async with asyncio.timeout(8), _owned_session() as db:
                 await db.begin()
-                completion = await atomic_completion_service.lock_terminal(
-                    db, confirmation_id, tenant=tenant
+                lock_terminal = (
+                    atomic_completion_service.lock_unexecuted_terminal
+                    if cancelled_write
+                    else atomic_completion_service.lock_terminal
                 )
+                completion = await lock_terminal(db, confirmation_id, tenant=tenant)
                 action = completion.action
                 status = PreparedActionStatus(action.status)
         except (Exception, asyncio.CancelledError) as exc:
@@ -1090,6 +1105,35 @@ async def _start_log(
     )
 
     async def _op(log_db: AsyncSession) -> int:
+        from app.modules.ai.models.message import AiMessage  # noqa: PLC0415
+
+        if (
+            any(
+                isinstance(value, bool) or not isinstance(value, int) or value <= 0
+                for value in (
+                    deps.conversation_id,
+                    deps.source_user_message_id,
+                    deps.user.user_id,
+                )
+            )
+            or deps.user.user_id != deps.tenant.actor_user_id
+            or not deps.trace_id
+        ):
+            raise LogWriteError("operation log requires a bound live conversation")
+        await log_db.execute(select(func.set_config("lock_timeout", "2s", True)))
+        if not await prepared_action_service.lock_source_binding(
+            log_db,
+            conversation_id=deps.conversation_id,
+            source_user_message_id=deps.source_user_message_id,
+            user_id=deps.user.user_id,
+            tenant=deps.tenant,
+        ) or deps.trace_id != await log_db.scalar(
+            select(AiMessage.trace_id).where(
+                AiMessage.tenant_id == deps.tenant.tenant_id,
+                AiMessage.message_id == deps.source_user_message_id,
+            )
+        ):
+            raise LogWriteError("operation log source is missing or no longer active")
         return await operation_log_service.start_operation(
             log_db,
             trace_id=deps.trace_id,
@@ -1464,9 +1508,47 @@ async def _hang_for_confirmation(
     try:
         async with AsyncSessionLocal() as log_db:
             async with log_db.begin():
-                await operation_log_service.attach_confirmation(
-                    log_db, log_id, confirmation_id, tenant=deps.tenant
+                from app.modules.ai.models.message import AiMessage  # noqa: PLC0415
+
+                bound_log_query = select(AiOperationLog.log_id).where(
+                    AiOperationLog.tenant_id == deps.tenant.tenant_id,
+                    AiOperationLog.log_id == log_id,
+                    AiOperationLog.user_id == deps.user.user_id,
+                    AiOperationLog.conversation_id == deps.conversation_id,
+                    AiOperationLog.source_user_message_id
+                    == deps.source_user_message_id,
+                    AiOperationLog.trace_id == deps.trace_id,
+                    AiOperationLog.tool_call_id == tool_call_id,
+                    AiOperationLog.tool_name == meta.name,
+                    AiOperationLog.readonly_snapshot.is_(meta.readonly),
+                    AiOperationLog.status
+                    == AiOperationStatus.PENDING_CONFIRMATION.value,
+                    AiOperationLog.confirmation_id.is_(None),
                 )
+                if await log_db.scalar(bound_log_query) is None:
+                    raise BusinessRuleException(
+                        "确认日志与当前操作的上下文绑定无效",
+                        error_code="AI_PREPARED_ACTION_BINDING_INVALID",
+                    )
+                await log_db.execute(
+                    select(func.set_config("lock_timeout", "2s", True))
+                )
+                if not await prepared_action_service.lock_source_binding(
+                    log_db,
+                    conversation_id=deps.conversation_id or 0,
+                    source_user_message_id=deps.source_user_message_id or 0,
+                    user_id=deps.user.user_id,
+                    tenant=deps.tenant,
+                ) or deps.trace_id != await log_db.scalar(
+                    select(AiMessage.trace_id).where(
+                        AiMessage.tenant_id == deps.tenant.tenant_id,
+                        AiMessage.message_id == deps.source_user_message_id,
+                    )
+                ):
+                    raise BusinessRuleException(
+                        "确认操作的会话或源消息已失效",
+                        error_code="AI_PREPARED_ACTION_BINDING_INVALID",
+                    )
                 pending_expires_at = datetime.fromisoformat(
                     payload.expires_at.replace("Z", "+00:00")
                 )
@@ -1590,6 +1672,16 @@ async def _hang_for_confirmation(
                         require_live_source=True,
                     )
                 if durable_action is not None:
+                    # The new PA is created under C/source locks before any log
+                    # lock; deletion cannot race a no-FK action/log insertion.
+                    if await log_db.scalar(bound_log_query.with_for_update()) is None:
+                        raise BusinessRuleException(
+                            "确认日志的上下文绑定在锁定期间发生变化",
+                            error_code="AI_PREPARED_ACTION_BINDING_INVALID",
+                        )
+                    await operation_log_service.attach_confirmation(
+                        log_db, log_id, confirmation_id, tenant=deps.tenant
+                    )
                     await operation_log_service.attach_target_summary(
                         log_db,
                         log_id,

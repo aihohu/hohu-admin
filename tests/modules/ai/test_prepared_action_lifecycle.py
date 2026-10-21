@@ -46,6 +46,7 @@ async def test_periodic_expiry_rechecks_status_before_finalizing(current_status)
     scan_db.execute = AsyncMock(return_value=scan_result)
     cleanup_db.begin.return_value.__aenter__ = AsyncMock()
     cleanup_db.begin.return_value.__aexit__ = AsyncMock()
+    cleanup_db.execute = AsyncMock()
     factory = MagicMock()
     factory.return_value.__aenter__ = AsyncMock(side_effect=[scan_db, cleanup_db])
     factory.return_value.__aexit__ = AsyncMock()
@@ -55,8 +56,8 @@ async def test_periodic_expiry_rechecks_status_before_finalizing(current_status)
             "app.modules.ai.lifecycle._tenant_context", AsyncMock(return_value=TENANT)
         ),
         patch(
-            "app.modules.ai.lifecycle.prepared_action_service.get_by_confirmation_id",
-            AsyncMock(return_value=current),
+            "app.modules.ai.lifecycle.prepared_action_service.lock_confirmation_context",
+            AsyncMock(return_value=SimpleNamespace(action=current)),
         ),
         patch(
             "app.modules.ai.lifecycle.prepared_action_service.transition_status",
@@ -187,6 +188,7 @@ async def test_startup_expires_unexpired_pending_when_source_is_orphaned() -> No
     scan_db.execute = AsyncMock(return_value=scan_result)
 
     cleanup_db = MagicMock()
+    cleanup_db.execute = AsyncMock()
     cleanup_db.begin = MagicMock()
     cleanup_db.begin.return_value.__aenter__ = AsyncMock(return_value=None)
     cleanup_db.begin.return_value.__aexit__ = AsyncMock(return_value=None)
@@ -205,8 +207,8 @@ async def test_startup_expires_unexpired_pending_when_source_is_orphaned() -> No
             AsyncMock(return_value=False),
         ),
         patch(
-            "app.modules.ai.lifecycle.prepared_action_service.get_by_confirmation_id",
-            AsyncMock(return_value=action),
+            "app.modules.ai.lifecycle.prepared_action_service.lock_confirmation_context",
+            AsyncMock(return_value=SimpleNamespace(action=action)),
         ),
         patch(
             "app.modules.ai.lifecycle.prepared_action_service.transition_status",

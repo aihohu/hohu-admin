@@ -85,6 +85,19 @@ def has_protocol_marker(owner: str | None) -> bool:
     return isinstance(owner, str) and owner.startswith("v0162-")
 
 
+def is_registered_readonly_action(action: AiPreparedAction) -> bool:
+    """Only a registered read without a write marker keeps legacy HITL semantics."""
+    from app.modules.ai.agents.tools.registry import ToolRegistry  # noqa: PLC0415
+
+    tool_name = action.execute_tool_name
+    if tool_name in DB_TOOLS | FILE_TOOLS or has_protocol_marker(
+        action.execution_owner
+    ):
+        return False
+    registered = ToolRegistry.get().find(tool_name)
+    return registered is not None and registered.meta.readonly is True
+
+
 def new_execution_owner(tool_name: str) -> str:
     """Create a server-only owner; unclassified tools cannot fall back to DB."""
     prefix = _owner_prefix(tool_name)
@@ -298,6 +311,43 @@ class AtomicCompletionService:
         self, db: AsyncSession, confirmation_id: str, *, tenant: TenantContext
     ) -> LockedCompletion:
         """Read a fully bound terminal after restart without inventing a claim."""
+        action, conversation, source = await self._lock_terminal_context(
+            db, confirmation_id, tenant=tenant
+        )
+        log_status = "success" if action.status == "succeeded" else action.status
+        log = await self.lock_action_log(
+            db, action, tenant=tenant, expected_status=log_status
+        )
+        return self.validate_locked_terminal(
+            action, log, tenant=tenant, conversation=conversation, source=source
+        )
+
+    async def lock_unexecuted_terminal(
+        self, db: AsyncSession, confirmation_id: str, *, tenant: TenantContext
+    ) -> LockedCompletion:
+        """Lock and prove a cancelled proposal without granting execution."""
+        action, conversation, source = await self._lock_terminal_context(
+            db, confirmation_id, tenant=tenant
+        )
+        log = await db.scalar(
+            select(AiOperationLog)
+            .where(
+                AiOperationLog.tenant_id == tenant.tenant_id,
+                AiOperationLog.tool_call_id == action.execute_tool_call_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if log is None:
+            raise _invalid("未执行终态缺少必需日志")
+        return self.validate_locked_unexecuted_terminal(
+            action, log, tenant=tenant, conversation=conversation, source=source
+        )
+
+    async def _lock_terminal_context(
+        self, db: AsyncSession, confirmation_id: str, *, tenant: TenantContext
+    ) -> tuple[AiPreparedAction, AiConversation, AiMessage]:
+        """Read fresh C/source/PA facts in order, including inactive context."""
         await db.execute(select(func.set_config("lock_timeout", "2s", True)))
         reference = (
             await db.execute(
@@ -354,6 +404,36 @@ class AtomicCompletionService:
             or source.role != "user"
         ):
             raise _invalid("完成事实的会话或源消息绑定无效")
+        return action, conversation, source
+
+    @staticmethod
+    def validate_locked_terminal(
+        action: AiPreparedAction,
+        log: AiOperationLog,
+        *,
+        tenant: TenantContext,
+        conversation: AiConversation | None,
+        source: AiMessage | None,
+    ) -> LockedCompletion:
+        """Validate prelocked facts without acquiring locks in an earlier tier.
+
+        Multi-context callers must lock their full plan before invoking this
+        pure validator. Missing or inactive context is never synthesized;
+        inactive/soft-deleted records can still carry a complete factual bind.
+        """
+        if (
+            conversation is None
+            or source is None
+            or conversation.tenant_id != tenant.tenant_id
+            or source.tenant_id != tenant.tenant_id
+            or conversation.conversation_id != action.conversation_id
+            or conversation.user_id != tenant.actor_user_id
+            or source.message_id != action.source_user_message_id
+            or source.conversation_id != action.conversation_id
+            or source.trace_id != action.trace_id
+            or source.role != "user"
+        ):
+            raise _invalid("完成事实的会话或源消息绑定无效")
         _check_principal(action, tenant)
         if (
             action.status not in {"succeeded", "failed"}
@@ -383,9 +463,96 @@ class AtomicCompletionService:
             ):
                 raise _invalid("失败事实缺少可信来源或错误码")
             log_status = "failed"
-        log = await self.lock_action_log(
-            db, action, tenant=tenant, expected_status=log_status
-        )
+        _check_log(action, log, log_status)
+        return LockedCompletion(action=action, log=log)
+
+    @staticmethod
+    def validate_locked_unexecuted_terminal(
+        action: AiPreparedAction,
+        log: AiOperationLog | None,
+        *,
+        tenant: TenantContext,
+        conversation: AiConversation | None,
+        source: AiMessage | None,
+    ) -> LockedCompletion:
+        """Prove the sole pending(1) -> reject/expire(2) transition.
+
+        An orphaned legacy log cannot provide this proof: its best-effort start
+        write could have failed before business execution. Never infer this
+        state from a raw cancelled label or from missing business data.
+        """
+        if (
+            log is None
+            or conversation is None
+            or source is None
+            or conversation.tenant_id != tenant.tenant_id
+            or source.tenant_id != tenant.tenant_id
+            or conversation.conversation_id != action.conversation_id
+            or conversation.user_id != tenant.actor_user_id
+            or source.message_id != action.source_user_message_id
+            or source.conversation_id != action.conversation_id
+            or source.role != "user"
+            or source.trace_id != action.trace_id
+            or action.tenant_id != tenant.tenant_id
+            or action.user_id != tenant.actor_user_id
+            or action.status not in {"rejected", "expired"}
+            or action.row_version != 2
+            or action.approval_mode != "hitl"
+            or action.dispatch_mode != "inline"
+            or action.finished_at is None
+            or action.execution_owner is not None
+            or action.execution_lease_expires_at is not None
+            or action.duration_ms not in (None, 0)
+            or action.result_data is not None
+            or action.result_ui is not None
+            or not action.confirmation_id
+            or not action.execute_tool_call_id
+            or not action.trace_id
+            or not action.agent_code
+            or not isinstance(action.frozen_args, dict)
+            or not isinstance(action.snapshot, dict)
+            or compute_args_hash(action.frozen_args) != action.args_hash
+            or compute_args_hash(action.snapshot) != action.snapshot_hash
+            or "__v0162_reconciliation_v1" in (log.result_summary or "")
+            or log.started_at is not None
+            or log.finished_at is None
+            or log.duration_ms not in (None, 0)
+            or log.hitl_wait_ms not in (None, 0)
+        ):
+            raise _invalid("未执行终态的完整绑定无效")
+        expected = {
+            "tenant_id": action.tenant_id,
+            "user_id": action.user_id,
+            "conversation_id": action.conversation_id,
+            "source_user_message_id": action.source_user_message_id,
+            "trace_id": action.trace_id,
+            "agent_code": action.agent_code,
+            "tool_name": action.execute_tool_name,
+            "tool_call_id": action.execute_tool_call_id,
+            "confirmation_id": action.confirmation_id,
+            "args_hash": action.args_hash,
+            "execution_mode": "hitl",
+            "status": action.status,
+            "approved_by": action.approved_by,
+        }
+        if any(getattr(log, field) != value for field, value in expected.items()):
+            raise _invalid("未执行终态的完整绑定无效")
+        if action.status == "rejected":
+            valid = (
+                action.approved_by == action.user_id
+                and action.approved_at is not None
+                and action.error_code == "USER_REJECTED"
+                and log.error_code in (None, "USER_REJECTED")
+            )
+        else:
+            valid = (
+                action.approved_by is None
+                and action.approved_at is None
+                and bool(action.error_code)
+                and log.error_code == action.error_code
+            )
+        if not valid:
+            raise _invalid("未执行终态的批准或错误事实无效")
         return LockedCompletion(action=action, log=log)
 
     async def lock_action_log(

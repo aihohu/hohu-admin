@@ -33,6 +33,9 @@ from app.db.session import AsyncSessionLocal, get_db
 from app.modules.ai.agents.gateway.atomic_execution import (
     OUTCOME_UNKNOWN_MESSAGE,
     PreparedExecutionOutcomeUnknown,
+    _discard_uncertain_session,
+    _owned_session,
+    reconcile_prepared_completion,
 )
 from app.modules.ai.agents.gateway.executor import (
     execute_approved_prepared_action,
@@ -54,6 +57,7 @@ from app.modules.ai.service.atomic_completion_service import (
     ClaimBinding,
     atomic_completion_service,
     has_protocol_marker,
+    is_registered_readonly_action,
     new_execution_owner,
 )
 from app.modules.ai.service.chat_run_service import (
@@ -102,6 +106,23 @@ def _unknown_response(claim: ClaimBinding) -> ResponseModel[ConfirmResponse]:
     )
 
 
+async def _read_unexecuted_response(action_ref, *, tenant: TenantContext):  # noqa: ANN001
+    """A cancelled label is terminal only when its never-started proof binds."""
+    try:
+        async with asyncio.timeout(8), _owned_session() as db:
+            try:
+                await db.begin()
+                completed = await atomic_completion_service.lock_unexecuted_terminal(
+                    db, action_ref.confirmation_id, tenant=tenant
+                )
+                return ResponseModel.success(data=_prepared_response(completed.action))
+            except (Exception, asyncio.CancelledError):
+                await _discard_uncertain_session(db)
+                raise
+    except (Exception, asyncio.CancelledError):
+        return _unknown_response(action_ref)
+
+
 async def _project_prepared_completion(
     confirmation_id: str,
     *,
@@ -113,8 +134,9 @@ async def _project_prepared_completion(
     response = None
     terminal = None
     try:
-        async with AsyncSessionLocal() as projection_db:
-            async with projection_db.begin():
+        async with asyncio.timeout(1), _owned_session() as projection_db:
+            try:
+                await projection_db.begin()
                 await projection_db.execute(
                     select(func.set_config("lock_timeout", "2s", True))
                 )
@@ -141,6 +163,11 @@ async def _project_prepared_completion(
                     PreparedActionStatus.FAILED,
                 }:
                     return ResponseModel.success(data=_prepared_response(terminal))
+                if (
+                    status == PreparedActionStatus.FAILED
+                    and terminal.execute_tool_name not in DB_TOOLS
+                ):
+                    return _unknown_response(terminal)
                 response = _prepared_response(terminal)
                 actor = await load_live_user_authority(projection_db, tenant=tenant)
                 ensure_ai_chat_use(actor)
@@ -165,7 +192,12 @@ async def _project_prepared_completion(
                     error_code=terminal.error_code if not ok else None,
                     error_msg="操作未完成，业务修改已回滚。" if not ok else None,
                     tenant=tenant,
+                    locked_completion=completed,
                 )
+                await projection_db.commit()
+            except (Exception, asyncio.CancelledError):
+                await _discard_uncertain_session(projection_db)
+                raise
     except Exception:
         if response is None:
             if action_ref is not None:
@@ -180,7 +212,11 @@ async def _project_prepared_completion(
             msg="操作结果已保存，显示同步暂未完成，请刷新会话。", data=response
         )
     if terminal is not None:
-        await _notify_prepared_terminal(terminal, ConfirmAction.APPROVED, tenant=tenant)
+        with suppress(Exception):
+            async with asyncio.timeout(0.25):
+                await _notify_prepared_terminal(
+                    terminal, ConfirmAction.APPROVED, tenant=tenant
+                )
     return ResponseModel.success(data=response)
 
 
@@ -381,6 +417,33 @@ async def _confirm_prepared(
         raise NotFoundException(
             "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
         )
+    readonly = is_registered_readonly_action(action_ref)
+    if not readonly and action_ref.status in {"rejected", "expired"}:
+        db.expunge_all()
+        await db.rollback()
+        return await _read_unexecuted_response(action_ref, tenant=tenant)
+    if not readonly and action_ref.status in {
+        "approved",
+        "running",
+        "succeeded",
+        "failed",
+    }:
+        # An execution result survives soft deletion/inactivation. Reconcile
+        # existing facts without granting a second execution or requiring the
+        # live-source admission check used only by a pending confirmation.
+        db.expunge_all()
+        await db.rollback()
+        outcome = await reconcile_prepared_completion(
+            req.confirmation_id, tenant=tenant
+        )
+        if outcome.disposition == "unknown":
+            return _unknown_response(action_ref)
+        return await _project_prepared_completion(
+            req.confirmation_id,
+            current_user_id=current_user_id,
+            tenant=tenant,
+            action_ref=outcome.action,
+        )
     try:
         async with asyncio.timeout(8):
             await db.execute(select(func.set_config("lock_timeout", "2s", True)))
@@ -389,10 +452,30 @@ async def _confirm_prepared(
             )
     except (TimeoutError, DBAPIError):
         response = _unknown_response(action_ref)
-        with suppress(Exception, asyncio.CancelledError):
-            await db.invalidate()
+        await _discard_uncertain_session(db)
         return response
     if context is None:
+        # A concurrent confirmation may have started after our initial read and
+        # released the live context before this lock attempt finished.
+        if not is_registered_readonly_action(action_ref) and action_ref.status in {
+            "approved",
+            "running",
+            "succeeded",
+            "failed",
+        }:
+            db.expunge_all()
+            await db.rollback()
+            outcome = await reconcile_prepared_completion(
+                req.confirmation_id, tenant=tenant
+            )
+            if outcome.disposition == "unknown":
+                return _unknown_response(action_ref)
+            return await _project_prepared_completion(
+                req.confirmation_id,
+                current_user_id=current_user_id,
+                tenant=tenant,
+                action_ref=outcome.action,
+            )
         raise NotFoundException(
             "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
         )
@@ -407,6 +490,29 @@ async def _confirm_prepared(
         )
     status = PreparedActionStatus(action.status)
     if status != PreparedActionStatus.PENDING_CONFIRMATION:
+        if not is_registered_readonly_action(action) and status in {
+            PreparedActionStatus.REJECTED,
+            PreparedActionStatus.EXPIRED,
+        }:
+            db.expunge_all()
+            await db.rollback()
+            return await _read_unexecuted_response(action, tenant=tenant)
+        if status == PreparedActionStatus.RUNNING and has_protocol_marker(
+            action.execution_owner
+        ):
+            db.expunge_all()
+            await db.rollback()
+            outcome = await reconcile_prepared_completion(
+                req.confirmation_id, tenant=tenant
+            )
+            if outcome.disposition == "unknown":
+                return _unknown_response(action)
+            return await _project_prepared_completion(
+                req.confirmation_id,
+                current_user_id=current_user_id,
+                tenant=tenant,
+                action_ref=outcome.action,
+            )
         if req.action == "approve":
             ensure_ai_chat_use(current_user)
             if await check_user_disabled(redis_client, current_user_id, tenant=tenant):
@@ -604,9 +710,21 @@ async def _confirm_prepared(
     except (Exception, asyncio.CancelledError):
         if claim is None:
             raise
-        with suppress(Exception, asyncio.CancelledError):
-            await db.invalidate()
-        return _unknown_response(claim)
+        await _discard_uncertain_session(db)
+        outcome = await reconcile_prepared_completion(
+            req.confirmation_id,
+            tenant=tenant,
+            expected_claim=claim,
+            allow_fence=True,
+        )
+        if outcome.disposition == "unknown":
+            return _unknown_response(claim)
+        return await _project_prepared_completion(
+            req.confirmation_id,
+            current_user_id=current_user_id,
+            tenant=tenant,
+            action_ref=claim,
+        )
 
     if claim is not None:
         # No request-session ORM instance may later write back an old RUNNING

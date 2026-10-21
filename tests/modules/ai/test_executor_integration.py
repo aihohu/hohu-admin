@@ -9,6 +9,7 @@
 # ruff: noqa: ARG001, PLC0415
 
 import inspect
+import sys
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -16,12 +17,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import redis.asyncio as aioredis
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from tenant_helpers import tenant_context
 
 from app.core import redis as redis_module
 from app.core.config import settings
 from app.core.exceptions import AuthorizationException
+from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.gateway.executor import execute_tool
 from app.modules.ai.agents.gateway.result import (
     PreparedActionProposal,
@@ -39,10 +41,96 @@ from app.modules.ai.agents.tools.decorator import ai_tool
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.ai.core.context import ChatDeps, DataScopeContext
+from app.modules.ai.models.conversation import AiConversation
+from app.modules.ai.models.message import AiMessage
+from app.modules.system.models.tenant import Tenant
+from app.modules.system.models.user import User
+
+
+@pytest.fixture
+async def executor_contexts(db_session):
+    """Give the integration's fixed protocol identities real owned FK rows."""
+    assert db_session.bind is not None
+    contexts = (
+        (9001, 77, 100, 101, "tr_test_001"),
+        (9004, 0, 400, 401, "tr_test_agent_pass"),
+        (9005, 0, 500, 501, "tr_test_agent_full"),
+    )
+    async with AsyncSessionLocal() as db, db.begin():
+        assert await db.get(Tenant, 77) is None
+        db.add(
+            Tenant(
+                tenant_id=77,
+                tenant_code="executor-fixture-77",
+                tenant_name="Owned executor fixture",
+                status="1",
+                lifecycle_state="active",
+                bootstrap_version=1,
+                bootstrap_key_hash="e" * 64,
+                bootstrap_fingerprint="f" * 64,
+                row_version=1,
+            )
+        )
+        await db.flush()
+        for user_id, tenant_id, conversation_id, source_id, _trace_id in contexts:
+            assert await db.get(User, user_id) is None
+            assert await db.get(AiConversation, conversation_id) is None
+            assert await db.get(AiMessage, source_id) is None
+            db.add(
+                User(
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                    user_name=f"executor_fixture_{user_id}",
+                    nickname="Owned executor fixture",
+                    hashed_password="not-a-login-hash",
+                )
+            )
+        await db.flush()
+        for user_id, tenant_id, conversation_id, _source_id, trace_id in contexts:
+            db.add(
+                AiConversation(
+                    conversation_id=conversation_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    title="Owned executor fixture",
+                    trace_id=trace_id,
+                )
+            )
+        await db.flush()
+        for _user_id, tenant_id, conversation_id, source_id, trace_id in contexts:
+            db.add(
+                AiMessage(
+                    message_id=source_id,
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                    trace_id=trace_id,
+                    role="user",
+                    content="Execute the test tool",
+                    is_active=True,
+                )
+            )
+    try:
+        yield
+    finally:
+        async with AsyncSessionLocal() as db, db.begin():
+            for user_id, tenant_id, _conversation_id, _source_id, _trace_id in contexts:
+                await db.execute(
+                    delete(User).where(
+                        User.user_id == user_id,
+                        User.tenant_id == tenant_id,
+                        User.user_name == f"executor_fixture_{user_id}",
+                    )
+                )
+            await db.execute(
+                delete(Tenant).where(
+                    Tenant.tenant_id == 77,
+                    Tenant.tenant_code == "executor-fixture-77",
+                )
+            )
 
 
 @pytest.fixture(autouse=True)
-async def clean_env(monkeypatch):
+async def clean_env(monkeypatch, executor_contexts):
     """每个测试前：重建 redis_client + 清 Redis + reset hitl_manager + 清本轮测试日志。
 
     ai_operation_log 不能用 TRUNCATE（会清掉生产 AI 审计日志）。所有测试代码
@@ -51,6 +139,8 @@ async def clean_env(monkeypatch):
     """
     original_pool = redis_module.redis_pool
     original_client = redis_module.redis_client
+    monkeypatch.setattr(ToolRegistry, "_instance", ToolRegistry())
+    monkeypatch.setattr(sys.modules[__name__], "_TOOLS_REGISTERED", False)
 
     redis_module.redis_pool = aioredis.ConnectionPool.from_url(
         settings.REDIS_URL,
@@ -77,14 +167,6 @@ async def clean_env(monkeypatch):
             await redis_module.redis_client.delete(*keys)
 
     hitl_manager._reset_for_test()
-
-    from app.modules.ai.service.prepared_action_service import prepared_action_service
-
-    monkeypatch.setattr(
-        prepared_action_service,
-        "lock_source_binding",
-        AsyncMock(return_value=True),
-    )
 
     from app.db.session import AsyncSessionLocal
 

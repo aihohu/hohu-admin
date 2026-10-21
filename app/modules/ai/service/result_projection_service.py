@@ -454,6 +454,7 @@ class ResultProjectionService:
         *,
         owner_user_id: int,
         message: AiMessage | Any,
+        completion_states: dict | None = None,
     ) -> DeletionReceipt | None:
         """Expose only an actor's audited success, never deleted business data."""
         if message.role != "assistant" or not message.trace_id:
@@ -498,7 +499,23 @@ class ResultProjectionService:
                 AiOperationLog.status == "success",
             )
         )
-        completed = tuple(sorted(set(successes.all())))
+        from app.modules.ai.service.completion_read_state_service import (  # noqa: PLC0415
+            completion_read_state_service,
+        )
+
+        if completion_states is None:
+            completion_states = await completion_read_state_service.read(
+                tenant=get_bound_tenant_context(user), tool_call_ids=call_ids
+            )
+        completed = tuple(
+            sorted(
+                call_id
+                for call_id in set(successes.all())
+                if (state := completion_states.get(call_id))
+                and state.verified
+                and state.status == "success"
+            )
+        )
         if not completed:
             return None
         return DeletionReceipt(

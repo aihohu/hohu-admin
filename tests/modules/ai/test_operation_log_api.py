@@ -10,6 +10,28 @@ from app.constants import STATUS_ENABLED
 from app.core.exceptions import NotFoundException
 from app.core.tenant import TenantContext
 from app.modules.ai.api.operation_log import get_operation_log
+from app.modules.ai.service.completion_read_state_service import EffectiveCompletion
+
+
+@pytest.fixture(autouse=True)
+def verified_completion_snapshot(monkeypatch):
+    # These unit tests isolate authorization; real PA/log proof is covered by
+    # test_completion_read_projection against committed PostgreSQL records.
+    log = _log()
+    monkeypatch.setattr(
+        "app.modules.ai.api.operation_log.completion_read_state_service.read",
+        AsyncMock(
+            return_value={
+                log.tool_call_id: EffectiveCompletion(
+                    log.status,
+                    log.error_code,
+                    log.finished_at,
+                    log.duration_ms,
+                    verified=True,
+                )
+            }
+        ),
+    )
 
 
 def _user(*permissions: str):
@@ -109,9 +131,16 @@ async def test_owner_with_chat_permission_still_needs_projection_lineage() -> No
 async def test_operation_log_lookup_is_scoped_to_authenticated_tenant() -> None:
     lookup = AsyncMock(return_value=None)
     user = _user("ai:trace:view")
-    with patch(
-        "app.modules.ai.api.operation_log.operation_log_service.get_by_tool_call_id",
-        lookup,
+    missing_action = AsyncMock(return_value=None)
+    with (
+        patch(
+            "app.modules.ai.api.operation_log.operation_log_service.get_by_tool_call_id",
+            lookup,
+        ),
+        patch(
+            "app.modules.ai.api.operation_log.prepared_action_service.get_by_execute_tool_call_id",
+            missing_action,
+        ),
     ):
         with pytest.raises(NotFoundException):
             await get_operation_log(
@@ -122,3 +151,4 @@ async def test_operation_log_lookup_is_scoped_to_authenticated_tenant() -> None:
             )
 
     assert lookup.await_args.kwargs["tenant"].tenant_id == 0
+    assert missing_action.await_args.kwargs["tenant"].tenant_id == 0

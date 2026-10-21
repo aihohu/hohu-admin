@@ -1,4 +1,4 @@
-from sqlalchemy import and_, delete, select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -271,15 +271,8 @@ class UserService:
             NotFoundException: 用户不存在
             BusinessRuleException: 不能删除系统管理员
         """
-        user = await db.scalar(
-            tenant_select(User, tenant=tenant).where(User.user_id == user_id)
-        )
-        if not user:
-            raise NotFoundException("用户")
-        if user.user_name == ADMIN_USERNAME:
-            raise BusinessRuleException("不能删除系统管理员")
-
-        await db.delete(user)
+        users = await self.prepare_delete_dependencies(db, [user_id], tenant=tenant)
+        await db.delete(users[0])
 
     async def batch_delete_users(
         self,
@@ -308,35 +301,12 @@ class UserService:
         if not ids:
             raise InvalidParameterException("未选择要删除的用户")
 
-        # 过滤掉 admin 账号，防止误删
-        check_stmt = select(User.user_id).where(
-            and_(
-                User.tenant_id == tenant.tenant_id,
-                User.user_id.in_(ids),
-                User.user_name == ADMIN_USERNAME,
-            )
-        )
-        admin_result = await db.execute(check_stmt)
-        if admin_result.scalars().first():
-            raise BusinessRuleException("不能删除系统管理员")
-
         # 检查是否包含当前用户自己 (防止误删当前登录账号)
         if current_user_id in ids:
             raise BusinessRuleException("不能删除当前登录的账号")
 
-        # 执行批量删除
-        matched_ids = set(
-            (
-                await db.execute(
-                    select(User.user_id).where(
-                        User.tenant_id == tenant.tenant_id,
-                        User.user_id.in_(set(ids)),
-                    )
-                )
-            ).scalars()
-        )
-        if matched_ids != set(ids):
-            raise NotFoundException("用户")
+        users = await self.prepare_delete_dependencies(db, ids, tenant=tenant)
+        matched_ids = {user.user_id for user in users}
         stmt = delete(User).where(
             User.tenant_id == tenant.tenant_id,
             User.user_id.in_(matched_ids),
@@ -344,6 +314,56 @@ class UserService:
         result = await db.execute(stmt)
 
         return result.rowcount
+
+    async def prepare_delete_dependencies(
+        self, db: AsyncSession, ids: list[int], *, tenant: TenantContext
+    ) -> list[User]:
+        """Lock/recheck deletion dependencies before invoking an AI handler.
+
+        A Gateway preflight may retry a changed plan in a fresh transaction;
+        once this returns, the handler reuses these locks without retrying.
+        """
+        from app.modules.ai.service.user_delete_dependency_service import (  # noqa: PLC0415
+            user_delete_dependency_service,
+        )
+
+        target_ids = set(ids)
+        stmt = tenant_select(User, tenant=tenant).where(
+            User.user_id.in_(sorted(target_ids))
+        )
+        # Preserve the existing tenant-scoped not-found/admin boundary before
+        # discovering any AI facts. This read grants no deletion authority.
+        users = list((await db.scalars(stmt)).all())
+        if {user.user_id for user in users} != target_ids:
+            raise NotFoundException("用户")
+        if any(user.user_name == ADMIN_USERNAME for user in users):
+            raise BusinessRuleException("不能删除系统管理员")
+        plan = user_delete_dependency_service.locked_plan(
+            db, target_user_ids=ids, tenant=tenant
+        )
+        if plan is None:
+            plan = await user_delete_dependency_service.plan(
+                db, target_user_ids=ids, tenant=tenant
+            )
+            await user_delete_dependency_service.lock_plan(db, plan, tenant=tenant)
+        # FOR UPDATE (not NO KEY UPDATE) also fences new FK conversations.
+        users = list(
+            (
+                await db.scalars(
+                    stmt.order_by(User.user_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
+        )
+        if {user.user_id for user in users} != target_ids:
+            raise NotFoundException("用户")
+        if any(user.user_name == ADMIN_USERNAME for user in users):
+            raise BusinessRuleException("不能删除系统管理员")
+        await user_delete_dependency_service.recheck_after_user_locks(
+            db, plan, tenant=tenant
+        )
+        return users
 
     @staticmethod
     def build_batch_delete_identity_snapshot(users: list[User]) -> dict:

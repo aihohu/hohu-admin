@@ -714,7 +714,8 @@ class TestConversationRunGuard:
 
 
 @pytest.mark.asyncio
-async def test_startup_cleanup_commits_before_owned_guard_release() -> None:
+@pytest.mark.parametrize("readonly", [False, True])
+async def test_startup_cleanup_commits_before_owned_guard_release(readonly) -> None:
     order: list[str] = []
     db = AsyncMock()
     redis = AsyncMock()
@@ -735,6 +736,7 @@ async def test_startup_cleanup_commits_before_owned_guard_release() -> None:
     operation_log = SimpleNamespace(
         log_id=789,
         status="pending_confirmation",
+        readonly_snapshot=readonly,
         duration_ms=None,
         result_summary=None,
         error_code=None,
@@ -772,11 +774,16 @@ async def test_startup_cleanup_commits_before_owned_guard_release() -> None:
             tenant=tenant_context(),
         )
 
-    assert order == ["operation", "finalizer", "commit", "release", "delete"]
+    assert order == (
+        ["operation", "finalizer", "commit", "release", "delete"] if readonly else []
+    )
 
 
 @pytest.mark.asyncio
-async def test_startup_cleanup_does_not_overwrite_committed_terminal_message() -> None:
+@pytest.mark.parametrize("readonly", [False, True])
+async def test_startup_cleanup_does_not_overwrite_committed_terminal_message(
+    readonly,
+) -> None:
     order: list[str] = []
     db = AsyncMock()
     redis = AsyncMock()
@@ -798,6 +805,7 @@ async def test_startup_cleanup_does_not_overwrite_committed_terminal_message() -
     operation_log = SimpleNamespace(
         log_id=789,
         status="success",
+        readonly_snapshot=readonly,
         duration_ms=10,
         result_summary="ok",
         error_code=None,
@@ -827,7 +835,7 @@ async def test_startup_cleanup_does_not_overwrite_committed_terminal_message() -
         )
 
     finalize.assert_not_awaited()
-    assert order == ["commit", "release", "delete"]
+    assert order == (["commit", "release", "delete"] if readonly else [])
 
 
 @pytest.mark.asyncio

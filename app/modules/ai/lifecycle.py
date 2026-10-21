@@ -6,9 +6,10 @@ from datetime import UTC, datetime
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import BusinessException
 from app.core.tenant import PlatformContext, TenantContext
 from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.hitl.constants import (
@@ -20,22 +21,24 @@ from app.modules.ai.agents.hitl.manager import PendingPayload, hitl_manager
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
-from app.modules.ai.service.atomic_completion_service import has_protocol_marker
+from app.modules.ai.service.atomic_completion_service import (
+    DB_TOOLS,
+    FILE_TOOLS,
+    atomic_completion_service,
+    is_protocol_owner,
+    is_registered_readonly_action,
+)
 from app.modules.ai.service.chat_run_service import (
     chat_run_finalizer,
     chat_run_guard,
 )
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.ai.service.prepared_action_service import prepared_action_service
+from app.modules.ai.service.result_projection_service import result_projection_service
+from app.modules.auth.service import load_live_user_authority
 from app.modules.system.models.tenant import Tenant
 
 logger = logging.getLogger(__name__)
-
-
-def _protocol_running(action: AiPreparedAction) -> bool:
-    return action.status == PreparedActionStatus.RUNNING.value and has_protocol_marker(
-        getattr(action, "execution_owner", None)
-    )
 
 
 def _require_platform(platform: PlatformContext) -> None:
@@ -75,9 +78,14 @@ async def cleanup_prepared_actions_on_startup(
         query = select(AiPreparedAction)
         if expired_only:
             query = query.where(
-                AiPreparedAction.status
-                == PreparedActionStatus.PENDING_CONFIRMATION.value,
-                AiPreparedAction.expires_at <= datetime.now(UTC),
+                or_(
+                    and_(
+                        AiPreparedAction.status
+                        == PreparedActionStatus.PENDING_CONFIRMATION.value,
+                        AiPreparedAction.expires_at <= datetime.now(UTC),
+                    ),
+                    AiPreparedAction.status == PreparedActionStatus.RUNNING.value,
+                )
             )
         else:
             query = query.where(
@@ -116,15 +124,45 @@ async def cleanup_prepared_actions_on_startup(
         if candidate_expires.tzinfo is None:
             candidate_expires = candidate_expires.replace(tzinfo=UTC)
         status = PreparedActionStatus(candidate.status)
+        readonly = bool(
+            getattr(candidate, "execute_tool_name", None)
+        ) and is_registered_readonly_action(candidate)
         if status == PreparedActionStatus.RUNNING:
-            if _protocol_running(candidate):
+            if getattr(
+                candidate, "execute_tool_name", None
+            ) in DB_TOOLS and is_protocol_owner(
+                candidate.execution_owner, candidate.execute_tool_name
+            ):
+                from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+                    reconcile_prepared_completion,
+                )
+
+                outcome = await reconcile_prepared_completion(
+                    candidate.confirmation_id, tenant=tenant, allow_fence=True
+                )
+                if outcome.disposition != "unknown":
+                    await _project_recovered_completion(outcome.action, tenant=tenant)
+                    try:
+                        if candidate.guard_owner_token:
+                            await chat_run_guard.release(
+                                redis,
+                                conversation_id=candidate.conversation_id,
+                                owner_token=candidate.guard_owner_token,
+                                tenant=tenant,
+                            )
+                        await hitl_manager.delete_pending(
+                            redis, candidate.confirmation_id, tenant=tenant
+                        )
+                    except RedisError:
+                        logger.warning(
+                            "recovered completion cache cleanup unavailable",
+                            exc_info=True,
+                        )
+                    cleaned += int(outcome.changed)
+            # Registered reads keep their lease-based transport recovery. FILE,
+            # legacy writes and malformed markers provide no DB rollback proof.
+            if not readonly:
                 continue
-            candidate_lease = candidate.execution_lease_expires_at
-            if candidate_lease is not None:
-                if candidate_lease.tzinfo is None:
-                    candidate_lease = candidate_lease.replace(tzinfo=UTC)
-                if candidate_lease > datetime.now(UTC):
-                    continue
         if (
             status == PreparedActionStatus.PENDING_CONFIRMATION
             and candidate_expires > datetime.now(UTC)
@@ -163,19 +201,36 @@ async def cleanup_prepared_actions_on_startup(
 
         async with AsyncSessionLocal() as cleanup_db:
             async with cleanup_db.begin():
-                current = await prepared_action_service.get_by_confirmation_id(
-                    cleanup_db, candidate.confirmation_id, tenant=tenant
+                await cleanup_db.execute(
+                    select(func.set_config("lock_timeout", "2s", True))
                 )
-                if current is None:
+                context = await prepared_action_service.lock_confirmation_context(
+                    cleanup_db, confirmation_id=candidate.confirmation_id, tenant=tenant
+                )
+                if context is None:
                     continue
+                current = context.action
                 current_status = PreparedActionStatus(current.status)
+                readonly = bool(
+                    getattr(current, "execute_tool_name", None)
+                ) and is_registered_readonly_action(current)
+                lease_expires = getattr(current, "execution_lease_expires_at", None)
+                if lease_expires is not None and lease_expires.tzinfo is None:
+                    lease_expires = lease_expires.replace(tzinfo=UTC)
+                readonly_lease_expired = readonly and (
+                    lease_expires is None or lease_expires <= datetime.now(UTC)
+                )
                 if expired_only:
                     current_expires = current.expires_at
                     if current_expires.tzinfo is None:
                         current_expires = current_expires.replace(tzinfo=UTC)
-                    if (
-                        current_status != PreparedActionStatus.PENDING_CONFIRMATION
-                        or current_expires > datetime.now(UTC)
+                    pending_expired = (
+                        current_status == PreparedActionStatus.PENDING_CONFIRMATION
+                        and current_expires <= datetime.now(UTC)
+                    )
+                    if not pending_expired and not (
+                        current_status == PreparedActionStatus.RUNNING
+                        and readonly_lease_expired
                     ):
                         continue
                 if current_status == PreparedActionStatus.PENDING_CONFIRMATION:
@@ -187,17 +242,17 @@ async def cleanup_prepared_actions_on_startup(
                     else:
                         error_code = "AI_HITL_EXPIRED"
                 elif current_status == PreparedActionStatus.APPROVED:
+                    # An old approved label carries no new DB claim/rollback
+                    # proof. Preserve it for reconciliation rather than fail it.
+                    if not readonly:
+                        continue
                     target = PreparedActionStatus.FAILED
                     error_code = "AI_PREPARED_ACTION_EXECUTION_INTERRUPTED"
                 elif current_status == PreparedActionStatus.RUNNING:
-                    if _protocol_running(current):
+                    # A concurrent claim will be reconciled on the next scan,
+                    # after these locks have been released.
+                    if not readonly_lease_expired:
                         continue
-                    lease_expires = current.execution_lease_expires_at
-                    if lease_expires is not None:
-                        if lease_expires.tzinfo is None:
-                            lease_expires = lease_expires.replace(tzinfo=UTC)
-                        if lease_expires > datetime.now(UTC):
-                            continue
                     target = PreparedActionStatus.FAILED
                     error_code = "AI_PREPARED_ACTION_EXECUTION_INTERRUPTED"
                 else:
@@ -270,6 +325,39 @@ async def cleanup_prepared_actions_on_startup(
     return cleaned
 
 
+async def _project_recovered_completion(action, *, tenant: TenantContext) -> None:  # noqa: ANN001
+    """Repair display from committed facts; optional display cannot change them."""
+    try:
+        async with asyncio.timeout(8), AsyncSessionLocal() as db, db.begin():
+            completed = await atomic_completion_service.lock_terminal(
+                db, action.confirmation_id, tenant=tenant
+            )
+            actor = await load_live_user_authority(db, tenant=tenant)
+            current = completed.action
+            if not await result_projection_service.authorize_result_projection(
+                db,
+                actor,
+                owner_user_id=current.user_id,
+                lineage=result_projection_service.lineage_from_record(current),
+            ):
+                return
+            ok = current.status == "succeeded"
+            await chat_run_finalizer.finalize_prepared_action(
+                db,
+                action=current,
+                ok=ok,
+                duration_ms=current.duration_ms or 0,
+                result=current.result_data if ok else None,
+                result_ui=current.result_ui if ok else None,
+                error_code=None if ok else current.error_code,
+                error_msg=None if ok else "操作未完成，业务修改已回滚。",
+                tenant=tenant,
+                locked_completion=completed,
+            )
+    except Exception:
+        logger.warning("recovered completion display unavailable", exc_info=True)
+
+
 async def run_pending_expiry_loop(*, platform: PlatformContext) -> None:
     """Close offline approvals after their deadline without touching execution."""
     from app.core.redis import redis_client  # noqa: PLC0415
@@ -299,6 +387,12 @@ async def finalize_orphaned_pending(
         if pending.action_id is not None:
             # A durable confirmation owns its log and projection. The legacy
             # Redis-only finalizer must never infer its outcome from a lease.
+            return
+        if (operation_log is None and pending.tool_name in DB_TOOLS | FILE_TOOLS) or (
+            operation_log is not None
+            and not getattr(operation_log, "readonly_snapshot", False)
+        ):
+            # A best-effort legacy write log cannot prove completion on its own.
             return
         should_finalize = True
         ok = False
@@ -376,6 +470,33 @@ async def finalize_orphaned_pending(
     await hitl_manager.delete_pending(redis, confirmation_id, tenant=tenant)
 
 
+async def _cache_terminal_is_verified(
+    db: AsyncSession, prepared: AiPreparedAction, *, tenant: TenantContext
+) -> bool:
+    """Only complete, currently locked facts permit terminal cache cleanup."""
+    try:
+        if is_registered_readonly_action(prepared):
+            return PreparedActionStatus(prepared.status).is_terminal
+        if prepared.status in {"succeeded", "failed"}:
+            if prepared.execute_tool_name not in DB_TOOLS | FILE_TOOLS:
+                return False
+            completed = await atomic_completion_service.lock_terminal(
+                db, prepared.confirmation_id, tenant=tenant
+            )
+            return completed.action.status == "succeeded" or (
+                completed.action.status == "failed"
+                and completed.action.execute_tool_name in DB_TOOLS
+            )
+        if prepared.status not in {"rejected", "expired"}:
+            return False
+        await atomic_completion_service.lock_unexecuted_terminal(
+            db, prepared.confirmation_id, tenant=tenant
+        )
+        return True
+    except BusinessException:
+        return False
+
+
 async def cleanup_orphaned_pending_on_startup(*, platform: PlatformContext) -> int:
     """收口 memory-mode 重启遗留；失败项保留到 Redis TTL，不伪装已清理。"""
     from app.core.redis import redis_client  # noqa: PLC0415
@@ -426,7 +547,9 @@ async def cleanup_orphaned_pending_on_startup(*, platform: PlatformContext) -> i
                     ):
                         continue
                     if prepared is not None:
-                        if _protocol_running(prepared):
+                        if not await _cache_terminal_is_verified(
+                            db, prepared, tenant=tenant
+                        ):
                             continue
                         await hitl_manager.delete_pending(
                             redis_client, confirmation_id, tenant=tenant
@@ -438,6 +561,10 @@ async def cleanup_orphaned_pending_on_startup(*, platform: PlatformContext) -> i
                         user_id=pending.user_id,
                         tenant=tenant,
                     )
+                    if (log is None and pending.tool_name in DB_TOOLS | FILE_TOOLS) or (
+                        log is not None and not log.readonly_snapshot
+                    ):
+                        continue
                     await finalize_orphaned_pending(
                         db,
                         redis_client,

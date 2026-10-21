@@ -7,6 +7,7 @@
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -19,6 +20,7 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.tenant import TenantContext
+from app.modules.ai.agents.hitl.events import ToolCallResultEvent
 from app.modules.ai.agents.hitl.manager import PendingPayload
 from app.modules.ai.api.resume import _load_durable_resume_terminal, resume_chat
 from app.modules.ai.service.result_projection_service import (
@@ -121,6 +123,12 @@ def _make_request(last_event_id: str | None = None):
     return req
 
 
+def _request_db():
+    db = MagicMock()
+    db.rollback = AsyncMock()
+    return db
+
+
 @pytest.mark.parametrize("terminal_status", ["succeeded", "rejected"])
 async def test_memory_resume_after_original_waiter_disconnects(
     monkeypatch, terminal_status
@@ -197,7 +205,7 @@ async def test_memory_resume_after_original_waiter_disconnects(
         response = await resume_chat(
             request=_make_request("cid"),
             confirmation_id_query="cid",
-            db=MagicMock(),
+            db=_request_db(),
             current_user=_make_user(),
         )
 
@@ -243,12 +251,14 @@ async def test_durable_poll_disconnect_returns_postgres_connection(
                         status="succeeded" if terminal else "pending_confirmation"
                     )
 
-                monkeypatch.setattr(
-                    resume_module.prepared_action_service,
-                    "get_by_confirmation_id",
-                    interrupted_read,
-                )
-                with pytest.raises(asyncio.CancelledError):
+                with (
+                    patch.object(
+                        resume_module.prepared_action_service,
+                        "get_by_confirmation_id",
+                        interrupted_read,
+                    ),
+                    pytest.raises(asyncio.CancelledError),
+                ):
                     await resume_module._wait_durable_resume_terminal(
                         confirmation_id="cid",
                         pending=_make_pending(action_id=9001),
@@ -346,6 +356,52 @@ def _allow_result_projection():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _mock_verified_completion_boundary():
+    """Transport unit tests receive verified facts; real proof tests are separate."""
+    from app.modules.ai.api import resume
+
+    @asynccontextmanager
+    async def owned_session():
+        async with resume.AsyncSessionLocal() as db:
+            yield db
+
+    async def locked(db, confirmation_id, *, tenant):
+        action = await resume.prepared_action_service.get_by_confirmation_id(
+            db, confirmation_id, tenant=tenant
+        )
+        return SimpleNamespace(action=action)
+
+    async def reconcile(confirmation_id, *, tenant, **_kwargs):
+        completed = await locked(None, confirmation_id, tenant=tenant)
+        return SimpleNamespace(
+            action=completed.action,
+            changed=False,
+            disposition=completed.action.status
+            if completed.action.status in {"succeeded", "failed"}
+            else "unknown",
+        )
+
+    with (
+        patch(
+            "app.modules.ai.agents.gateway.atomic_execution.reconcile_prepared_completion",
+            reconcile,
+        ),
+        patch.object(resume.atomic_completion_service, "lock_terminal", locked),
+        patch.object(
+            resume.atomic_completion_service, "lock_unexecuted_terminal", locked
+        ),
+        patch(
+            "app.modules.ai.agents.gateway.atomic_execution._owned_session",
+            owned_session,
+        ),
+        patch.object(
+            resume, "load_live_user_authority", AsyncMock(return_value=_make_user())
+        ),
+    ):
+        yield
+
+
 # ============ 410 AI_RESUME_DISABLED ============
 
 
@@ -356,7 +412,7 @@ class TestResumeDisabled:
                 await resume_chat(
                     request=_make_request("cid"),
                     confirmation_id_query="cid",
-                    db=MagicMock(),
+                    db=_request_db(),
                     current_user=_make_user(),
                 )
         assert exc_info.value.error_code == "AI_RESUME_DISABLED"
@@ -388,7 +444,7 @@ class TestResumeDisabled:
                     await resume_chat(
                         request=_make_request("cid"),
                         confirmation_id_query="cid",
-                        db=MagicMock(),
+                        db=_request_db(),
                         current_user=_make_user(),
                     )
         # 走到 NOT_FOUND 而非 DISABLED，证明 memory 模式限制已放开
@@ -406,7 +462,7 @@ class TestResumeMissingId:
             await resume_chat(
                 request=_make_request(last_event_id=None),
                 confirmation_id_query=None,
-                db=MagicMock(),
+                db=_request_db(),
                 current_user=_make_user(),
             )
         assert exc_info.value.error_code == "AI_RESUME_MISSING_ID"
@@ -434,7 +490,7 @@ class TestResumeNotFound:
                 await resume_chat(
                     request=_make_request("cid_unknown"),
                     confirmation_id_query="cid_unknown",
-                    db=MagicMock(),
+                    db=_request_db(),
                     current_user=_make_user(),
                 )
         assert exc_info.value.error_code == "AI_RESUME_NOT_FOUND"
@@ -455,7 +511,7 @@ class TestResumeForbidden:
                 await resume_chat(
                     request=_make_request("cid"),
                     confirmation_id_query="cid",
-                    db=MagicMock(),
+                    db=_request_db(),
                     current_user=_make_user(user_id=999),  # 非 owner
                 )
         assert exc_info.value.error_code == "AI_RESUME_FORBIDDEN"
@@ -478,7 +534,7 @@ class TestResumeMinimalStatus:
             result = await resume_chat(
                 request=_make_request("cid"),
                 confirmation_id_query="cid",
-                db=MagicMock(),
+                db=_request_db(),
                 current_user=_make_user(can_chat=True),
             )
 
@@ -511,7 +567,7 @@ class TestResumeMinimalStatus:
             result = await resume_chat(
                 request=_make_request("cid"),
                 confirmation_id_query="cid",
-                db=MagicMock(),
+                db=_request_db(),
                 current_user=_make_user(can_chat=True),
             )
 
@@ -522,7 +578,7 @@ class TestResumeMinimalStatus:
     ) -> None:
         """PostgreSQL 是终态权威；confirm 清 Redis 后仍须返回最小状态。"""
         finished_at = datetime(2026, 8, 14, 8, 0, tzinfo=UTC)
-        durable_action = SimpleNamespace(
+        durable_action = _make_durable_action(
             action_id=9001,
             confirmation_id="cid",
             user_id=100,
@@ -547,7 +603,7 @@ class TestResumeMinimalStatus:
             result = await resume_chat(
                 request=_make_request("cid"),
                 confirmation_id_query="cid",
-                db=MagicMock(),
+                db=_request_db(),
                 current_user=_make_user(can_chat=False),
             )
 
@@ -561,7 +617,7 @@ class TestResumeMinimalStatus:
     async def test_authorized_terminal_replays_without_redis_pending(
         self, _resume_enabled, _redis_pubsub_mode
     ) -> None:
-        durable_action = SimpleNamespace(
+        durable_action = _make_durable_action(
             action_id=9001,
             confirmation_id="cid",
             user_id=100,
@@ -585,7 +641,16 @@ class TestResumeMinimalStatus:
             presentation={"title": "更新用户", "summary": "更新 1 个用户"},
             interaction_flow="direct",
         )
-        load_terminal = AsyncMock(return_value=[])
+        load_terminal = AsyncMock(
+            return_value=[
+                ToolCallResultEvent(
+                    tool=durable_action.execute_tool_name,
+                    tool_call_id=durable_action.execute_tool_call_id,
+                    ok=True,
+                    duration_ms=0,
+                )
+            ]
+        )
         cleanup = AsyncMock()
         with (
             patch(
@@ -605,21 +670,21 @@ class TestResumeMinimalStatus:
             response = await resume_chat(
                 request=_make_request("cid"),
                 confirmation_id_query="cid",
-                db=MagicMock(),
+                db=_request_db(),
                 current_user=_make_user(can_chat=True),
             )
             chunks = [chunk async for chunk in response.body_iterator]
 
         assert any("confirmation_resumed" in chunk for chunk in chunks)
         load_terminal.assert_awaited_once()
-        cleanup.assert_awaited_once_with(durable_action, tenant=TENANT)
+        cleanup.assert_awaited_once_with(durable_action, tenant=TENANT, verified=True)
 
     async def test_revoked_chat_permission_returns_only_minimal_status(
         self, _resume_enabled, _redis_pubsub_mode
     ) -> None:
         finished_at = datetime(2026, 8, 14, 8, 0, tzinfo=UTC)
         pending = _make_pending(action_id=9001)
-        durable_action = SimpleNamespace(
+        durable_action = _make_durable_action(
             action_id=9001,
             confirmation_id="cid",
             user_id=100,
@@ -652,7 +717,7 @@ class TestResumeMinimalStatus:
             result = await resume_chat(
                 request=_make_request("cid"),
                 confirmation_id_query="cid",
-                db=MagicMock(),
+                db=_request_db(),
                 current_user=_make_user(can_chat=False),
             )
 
@@ -683,7 +748,7 @@ class TestResumeMinimalStatus:
                 await resume_chat(
                     request=_make_request("cid"),
                     confirmation_id_query="cid",
-                    db=MagicMock(),
+                    db=_request_db(),
                     current_user=_make_user(),
                 )
 
@@ -706,7 +771,7 @@ class TestResumeAlreadyResolved:
                 await resume_chat(
                     request=_make_request("cid"),
                     confirmation_id_query="cid",
-                    db=MagicMock(),
+                    db=_request_db(),
                     current_user=_make_user(),
                 )
         assert exc_info.value.error_code == "AI_RESUME_ALREADY_RESOLVED"
@@ -734,7 +799,7 @@ class TestResumeTtlTooShort:
                 await resume_chat(
                     request=_make_request("cid"),
                     confirmation_id_query="cid",
-                    db=MagicMock(),
+                    db=_request_db(),
                     current_user=_make_user(),
                 )
         assert exc_info.value.error_code == "AI_RESUME_TTL_TOO_SHORT"
@@ -766,7 +831,7 @@ class TestResumeInProgress:
                 await resume_chat(
                     request=_make_request("cid"),
                     confirmation_id_query="cid",
-                    db=MagicMock(),
+                    db=_request_db(),
                     current_user=_make_user(),
                 )
         assert exc_info.value.error_code == "AI_RESUME_IN_PROGRESS"
@@ -795,7 +860,7 @@ class TestLastEventIdHeaderPriority:
                 await resume_chat(
                     request=_make_request(last_event_id="cid_from_header"),
                     confirmation_id_query="cid_from_query",
-                    db=MagicMock(),
+                    db=_request_db(),
                     current_user=_make_user(),
                 )
         args = mock_get.await_args.args
@@ -818,7 +883,7 @@ class TestLastEventIdHeaderPriority:
                 await resume_chat(
                     request=_make_request(last_event_id=None),
                     confirmation_id_query="cid_from_query",
-                    db=MagicMock(),
+                    db=_request_db(),
                     current_user=_make_user(),
                 )
         args = mock_get.await_args.args
@@ -898,7 +963,7 @@ class TestResumeSuccessPath:
         result = await resume_chat(
             request=_make_request("cid"),
             confirmation_id_query="cid",
-            db=MagicMock(),
+            db=_request_db(),
             current_user=_make_user(),
         )
         assert isinstance(result, StreamingResponse)
@@ -915,7 +980,7 @@ class TestResumeSuccessPath:
         result = await resume_chat(
             request=_make_request("cid"),
             confirmation_id_query="cid",
-            db=MagicMock(),
+            db=_request_db(),
             current_user=_make_user(),
         )
         chunks: list[str] = []
@@ -940,7 +1005,7 @@ class TestResumeSuccessPath:
         from app.modules.ai.agents.hitl.events import DoneEvent, ToolCallResultEvent
 
         execute = AsyncMock()
-        durable_action = SimpleNamespace(
+        durable_action = _make_durable_action(
             action_id=9001,
             confirmation_id="cid",
             user_id=100,
@@ -1008,7 +1073,7 @@ class TestResumeSuccessPath:
             result = await resume_chat(
                 request=_make_request("cid"),
                 confirmation_id_query="cid",
-                db=MagicMock(),
+                db=_request_db(),
                 current_user=_make_user(),
             )
             body = ""
@@ -1033,7 +1098,7 @@ class TestResumeSuccessPath:
         from app.modules.ai.agents.hitl.constants import ConfirmAction
         from app.modules.ai.agents.hitl.events import DoneEvent
 
-        durable_action = SimpleNamespace(
+        durable_action = _make_durable_action(
             action_id=9001,
             confirmation_id="cid",
             user_id=100,
@@ -1092,7 +1157,7 @@ class TestResumeSuccessPath:
             result = await resume_chat(
                 request=_make_request("cid"),
                 confirmation_id_query="cid",
-                db=MagicMock(),
+                db=_request_db(),
                 current_user=_make_user(),
             )
             body = "".join([chunk async for chunk in result.body_iterator])
@@ -1271,7 +1336,7 @@ class TestDurableTerminalProjection:
             result = await resume_chat(
                 request=_make_request("cid"),
                 confirmation_id_query="cid",
-                db=MagicMock(),
+                db=_request_db(),
                 current_user=_make_user(),
             )
             body = ""
@@ -1355,7 +1420,7 @@ class TestResumeTimeoutPath:
             result = await resume_chat(
                 request=_make_request("cid"),
                 confirmation_id_query="cid",
-                db=MagicMock(),
+                db=_request_db(),
                 current_user=_make_user(),
             )
             body = ""
@@ -1369,7 +1434,7 @@ class TestResumeTimeoutPath:
     ) -> None:
         from app.modules.ai.agents.hitl.events import AiErrorEvent, DoneEvent
 
-        durable_action = SimpleNamespace(
+        durable_action = _make_durable_action(
             action_id=9001,
             confirmation_id="cid",
             user_id=100,
@@ -1432,7 +1497,7 @@ class TestResumeTimeoutPath:
             result = await resume_chat(
                 request=_make_request("cid"),
                 confirmation_id_query="cid",
-                db=MagicMock(),
+                db=_request_db(),
                 current_user=_make_user(),
             )
             body = "".join([chunk async for chunk in result.body_iterator])
@@ -1496,7 +1561,7 @@ class TestOwnerLockRelease:
             result = await resume_chat(
                 request=_make_request("cid"),
                 confirmation_id_query="cid",
-                db=MagicMock(),
+                db=_request_db(),
                 current_user=_make_user(),
             )
             async for _ in result.body_iterator:
@@ -1555,7 +1620,7 @@ class TestOwnerLockRelease:
             result = await resume_chat(
                 request=_make_request("cid"),
                 confirmation_id_query="cid",
-                db=MagicMock(),
+                db=_request_db(),
                 current_user=_make_user(),
             )
             # body_iterator 内部的 try/except 会消化 RuntimeError 并 emit ai_error

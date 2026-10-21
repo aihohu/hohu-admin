@@ -40,6 +40,7 @@ from app.modules.ai.agents.tools.registry import RegisteredTool
 from app.modules.ai.api.confirm import _notify_prepared_terminal, confirm_tool
 from app.modules.ai.schemas.confirm import ConfirmRequest, ConfirmResponse
 from app.modules.ai.service.atomic_completion_service import ClaimBinding
+from app.modules.ai.service.completion_recovery_service import RecoveryOutcome
 
 
 def _make_pending(
@@ -395,6 +396,73 @@ class TestConfirmSuccess:
 
 
 class TestPreparedConfirmation:
+    @pytest.mark.parametrize("state", ["succeeded", "failed", "rejected", "expired"])
+    async def test_readonly_injection_confirmation_preserves_terminal_state(
+        self, state
+    ) -> None:
+        """An injection-triggered HITL read never acquires a write protocol marker."""
+        action = _make_prepared_action(status=state)
+        action.execute_tool_name = "user.count"
+        action.execution_owner = None
+        registered = SimpleNamespace(meta=SimpleNamespace(readonly=True))
+        with (
+            patch(
+                "app.modules.ai.agents.tools.registry.ToolRegistry.get",
+                return_value=SimpleNamespace(find=lambda _name: registered),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.prepared_action_service.get_by_confirmation_id",
+                AsyncMock(return_value=action),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.prepared_action_service.lock_confirmation_context",
+                AsyncMock(return_value=_make_prepared_context(action)),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.check_user_disabled",
+                AsyncMock(return_value=False),
+            ),
+            patch(
+                "app.modules.ai.api.confirm.execute_approved_prepared_action",
+                AsyncMock(),
+            ) as execute,
+        ):
+            response = await confirm_tool(
+                ConfirmRequest(confirmationId=action.confirmation_id, action="approve"),
+                db=_make_db(),
+                current_user=_make_user(),
+            )
+        assert response.data.status == state
+        execute.assert_not_awaited()
+
+    async def test_readonly_failed_waiter_preserves_tool_failure(self) -> None:
+        from app.modules.ai.agents.gateway import executor
+
+        action = _make_prepared_action(status="failed")
+        action.execute_tool_name = "user.count"
+        action.execution_owner = None
+        action.error_code = "AI_TOOL_TIMEOUT"
+        with (
+            patch(
+                "app.modules.ai.agents.tools.registry.ToolRegistry.get",
+                return_value=SimpleNamespace(
+                    find=lambda _name: SimpleNamespace(
+                        meta=SimpleNamespace(readonly=True)
+                    )
+                ),
+            ),
+            patch.object(
+                executor,
+                "_get_prepared_action_by_confirmation",
+                AsyncMock(return_value=action),
+            ),
+        ):
+            result, _ = await executor._load_prepared_terminal_result(
+                action.confirmation_id, tenant=_make_user()._tenant_context
+            )
+        assert result.ok is False
+        assert result.error_code == "AI_TOOL_TIMEOUT"
+
     async def test_reject_bypasses_revoked_chat_permission_and_disabled_state(
         self,
     ) -> None:
@@ -880,6 +948,12 @@ class TestPreparedConfirmation:
         terminal = _make_prepared_action(status="succeeded")
         with (
             patch(
+                "app.modules.ai.api.confirm.reconcile_prepared_completion",
+                AsyncMock(
+                    return_value=RecoveryOutcome(terminal, disposition="succeeded")
+                ),
+            ) as reconcile,
+            patch(
                 "app.modules.ai.api.confirm.prepared_action_service.get_by_confirmation_id",
                 AsyncMock(return_value=terminal),
             ),
@@ -916,6 +990,7 @@ class TestPreparedConfirmation:
             )
 
         assert result.data.status == "succeeded"
+        reconcile.assert_awaited_once_with(terminal.confirmation_id, tenant=ANY)
         execute.assert_not_awaited()
         get_pending.assert_not_awaited()
         db.expunge_all.assert_called_once()

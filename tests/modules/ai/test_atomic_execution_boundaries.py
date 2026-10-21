@@ -60,9 +60,11 @@ async def test_commit_boundary_exception_never_invents_business_failure(
     if stage == "claim":
         assert case.calls == []
         assert state["user_ids"] == []
-        assert response.data.status == "running"
+        assert response.data.status == (
+            "running" if boundary == "before_commit" else "failed"
+        )
         assert state["action_status"] == (
-            "pending_confirmation" if boundary == "before_commit" else "running"
+            "pending_confirmation" if boundary == "before_commit" else "failed"
         )
     elif boundary == "after_commit" and stage == "execution":
         assert response.data.status == "succeeded"
@@ -76,11 +78,11 @@ async def test_commit_boundary_exception_never_invents_business_failure(
             assert action.execution_owner.startswith("v0162-db:")
             assert action.execution_lease_expires_at is None
     else:
-        assert response.data.status == "running"
-        assert "请勿重新办理" in response.msg
+        # Stage B locks and fences the original DB owner after the uncertain
+        # session is discarded; durable absence is now a proved rollback.
+        assert response.data.status == "failed"
         assert state["user_ids"] == []
-        assert state["action_status"] == state["operation_status"] == "running"
-        assert state["history"] == []
+        assert state["action_status"] == state["operation_status"] == "failed"
     if stage != "claim":
         assert len(case.calls) == 1
 

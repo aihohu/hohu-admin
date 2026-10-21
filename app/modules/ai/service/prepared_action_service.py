@@ -864,7 +864,16 @@ class PreparedActionService:
             )
             .limit(1)
         )
-        return value is not None
+        if value is not None:
+            return True
+        from app.modules.ai.service.completion_read_state_service import (  # noqa: PLC0415
+            completion_read_state_service,
+        )
+
+        states = await completion_read_state_service.read(
+            tenant=tenant, conversation_id=conversation_id, user_id=user_id
+        )
+        return any(state.unknown for state in states.values())
 
     async def expire_for_conversation_delete(
         self,
@@ -875,6 +884,48 @@ class PreparedActionService:
         tenant: TenantContext,
     ) -> list[AiPreparedAction]:
         """Lock and terminalize deletable actions after the conversation lock."""
+        from app.modules.ai.service.atomic_completion_service import (  # noqa: PLC0415
+            DB_TOOLS,
+            FILE_TOOLS,
+            atomic_completion_service,
+        )
+
+        # The conversation lock excludes new compliant claims. Locate source
+        # IDs without locking PA rows, then take all sources before any PA/log.
+        references = list(
+            (
+                await db.scalars(
+                    select(AiPreparedAction.source_user_message_id).where(
+                        AiPreparedAction.tenant_id == tenant.tenant_id,
+                        AiPreparedAction.conversation_id == conversation_id,
+                    )
+                )
+            ).all()
+        )
+        references.extend(
+            (
+                await db.scalars(
+                    select(AiOperationLog.source_user_message_id).where(
+                        AiOperationLog.tenant_id == tenant.tenant_id,
+                        AiOperationLog.conversation_id == conversation_id,
+                        AiOperationLog.source_user_message_id.is_not(None),
+                    )
+                )
+            ).all()
+        )
+        sources = {
+            source.message_id: source
+            for source in await db.scalars(
+                select(AiMessage)
+                .where(
+                    AiMessage.tenant_id == tenant.tenant_id,
+                    AiMessage.message_id.in_(set(references)),
+                )
+                .order_by(AiMessage.message_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        }
         nonterminal = (
             PreparedActionStatus.PREPARED.value,
             PreparedActionStatus.PENDING_CONFIRMATION.value,
@@ -889,7 +940,6 @@ class PreparedActionService:
                         AiPreparedAction.conversation_id == conversation_id,
                         AiPreparedAction.user_id == user_id,
                         AiPreparedAction.tenant_id == tenant.tenant_id,
-                        AiPreparedAction.status.in_(nonterminal),
                     )
                     .order_by(AiPreparedAction.action_id.asc())
                     .with_for_update()
@@ -899,6 +949,69 @@ class PreparedActionService:
             .scalars()
             .all()
         )
+        logs = {
+            log.tool_call_id: log
+            for log in await db.scalars(
+                select(AiOperationLog)
+                .where(
+                    AiOperationLog.tenant_id == tenant.tenant_id,
+                    AiOperationLog.conversation_id == conversation_id,
+                )
+                .order_by(AiOperationLog.log_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        }
+        conversation = await db.get(AiConversation, conversation_id)
+        bound_calls = {action.execute_tool_call_id for action in actions}
+        unresolved = any(
+            not log.readonly_snapshot and log.tool_call_id not in bound_calls
+            for log in logs.values()
+        )
+        for action in actions:
+            if action.status in {"running", "approved"}:
+                unresolved = True
+            elif action.status in {"succeeded", "failed"} and (
+                action.execute_tool_name in DB_TOOLS | FILE_TOOLS
+            ):
+                operation = logs.get(action.execute_tool_call_id)
+                try:
+                    if operation is None or (
+                        action.status == "failed"
+                        and action.execute_tool_name in FILE_TOOLS
+                    ):
+                        raise _binding_invalid("操作缺少可信完成事实")
+                    atomic_completion_service.validate_locked_terminal(
+                        action,
+                        operation,
+                        tenant=tenant,
+                        conversation=conversation,
+                        source=sources.get(action.source_user_message_id),
+                    )
+                except BusinessRuleException:
+                    unresolved = True
+            elif action.status in {"rejected", "expired"} and (
+                action.execute_tool_name in DB_TOOLS | FILE_TOOLS
+            ):
+                operation = logs.get(action.execute_tool_call_id)
+                try:
+                    atomic_completion_service.validate_locked_unexecuted_terminal(
+                        action,
+                        operation,
+                        tenant=tenant,
+                        conversation=conversation,
+                        source=sources.get(action.source_user_message_id),
+                    )
+                except BusinessRuleException:
+                    unresolved = True
+        if unresolved:
+            error = BusinessRuleException(
+                "会话仍有执行结果待核对的操作，请核对完成后再删除",
+                error_code="AI_ACTION_RUNNING",
+            )
+            error.code = 409
+            raise error
+        actions = [action for action in actions if action.status in nonterminal]
         now = datetime.now(UTC)
         live_running = [
             action
@@ -956,6 +1069,7 @@ class PreparedActionService:
                         )
                         .order_by(AiOperationLog.log_id.asc())
                         .with_for_update()
+                        .execution_options(populate_existing=True)
                     )
                 )
                 .scalars()

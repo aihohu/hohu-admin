@@ -11,7 +11,7 @@ from app.core import redis as redis_module
 from app.core.exceptions import BusinessRuleException
 from app.core.tenant import PlatformContext
 from app.modules.ai import lifecycle
-from app.modules.ai.agents.gateway import executor
+from app.modules.ai.agents.gateway import atomic_execution, executor
 from app.modules.ai.agents.hitl.events import AiErrorEvent, DoneEvent
 from app.modules.ai.api import chat, resume
 
@@ -92,9 +92,18 @@ async def test_startup_preserves_protocol_running_without_live_lease(
     monkeypatch.setattr(lifecycle, "AsyncSessionLocal", _session_factory(db))
     monkeypatch.setattr(lifecycle, "_tenant_context", AsyncMock(return_value=TENANT))
     monkeypatch.setattr(
+        atomic_execution,
+        "reconcile_prepared_completion",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                action=action, changed=False, disposition="unknown"
+            )
+        ),
+    )
+    monkeypatch.setattr(
         lifecycle.prepared_action_service,
-        "get_by_confirmation_id",
-        AsyncMock(return_value=action),
+        "lock_confirmation_context",
+        AsyncMock(return_value=SimpleNamespace(action=action)),
     )
     transition = AsyncMock(return_value=action)
     monkeypatch.setattr(
