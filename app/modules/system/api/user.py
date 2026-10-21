@@ -72,6 +72,7 @@ from app.modules.system.service.user_import_service import (
 from app.modules.system.service.user_import_template_service import (
     generate_import_template,
 )
+from app.modules.system.service.user_operations_service import user_operations_service
 from app.modules.system.service.user_role_assignment_service import (
     user_role_assignment_service,
 )
@@ -194,38 +195,10 @@ async def add_user(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """Create a user with optional explicit role IDs and department bindings."""
-    explicit_roles = user_in.role_ids is not None
-    await user_role_assignment_service.ensure_create_permissions(
+    await user_operations_service.create_user(
         db,
+        user_in,
         actor_user_id=current_user.user_id,
-        explicit_roles=explicit_roles,
-        tenant=tenant,
-    )
-    await user_department_assignment_service.ensure_create_permissions(
-        db,
-        actor_user_id=current_user.user_id,
-        has_departments=bool(user_in.dept_ids),
-        tenant=tenant,
-    )
-
-    new_user = await user_service.create_user(db, user_in, tenant=tenant)
-    await db.flush()
-    await user_role_assignment_service.assign_created_user_roles(
-        db,
-        actor_user_id=current_user.user_id,
-        target_user_id=new_user.user_id,
-        role_ids=user_in.role_ids,
-        dept_ids=[int(item.dept_id) for item in user_in.dept_ids],
-        tenant=tenant,
-    )
-
-    await user_department_assignment_service.assign_created_user_departments(
-        db,
-        actor_user_id=current_user.user_id,
-        target_user_id=new_user.user_id,
-        dept_assignments=[
-            (int(item.dept_id), item.is_primary) for item in user_in.dept_ids
-        ],
         tenant=tenant,
     )
 

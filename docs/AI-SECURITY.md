@@ -10,7 +10,7 @@ AI 入口使用显式权限；Agent 使用 Role-Agent 绑定，模型使用租�
 
 Gateway 在执行前检查 tenant、owner、当前授权和工具声明。历史消息、工具结果、文件及跨轮引用也需按当前权限重新投影，不能因为曾经显示过就永久可访问。后端拒绝是授权依据，Prompt 或前端隐藏不能替代授权。
 
-`user.create` 要求 `system:user:add`；仅在指定部门时额外要求 `system:dept:list`，并校验部门属于当前租户、处于启用状态且在操作者数据范围内。`primary_dept_id` 可省略或为 `null`：当前租户关闭 `user_require_primary_dept` 时允许不分配部门，开启时返回 `USER_PRIMARY_DEPT_REQUIRED`。预检和确认后的执行均检查设置，最终写入复用用户管理页面的角色与部门授权服务；不分配部门不跳过默认角色的授权上界校验。创建仍需人工确认，密码不进入模型或结果。
+`user.create` 要求 `system:user:add`；仅在指定部门时额外要求 `system:dept:list`，并校验部门属于当前租户、处于启用状态且在操作者数据范围内。`primary_dept_id` 可省略或为 `null`：当前租户关闭 `user_require_primary_dept` 时允许不分配部门，开启时返回 `USER_PRIMARY_DEPT_REQUIRED`。预检和确认后的执行均检查设置，最终写入复用用户管理页面的角色与部门授权服务；不分配部门不跳过默认角色的授权上界校验。用户名预检与实际创建均在当前租户内查重，其他租户的同名用户不构成冲突。`user.count` 同时限定可信租户和当前操作者的行范围。创建仍需人工确认，密码不进入模型或结果。
 
 ## 系统级 AI 管理
 
