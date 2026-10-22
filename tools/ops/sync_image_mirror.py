@@ -13,6 +13,11 @@ import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+if __name__ == "__main__" and not __package__:
+    from release_registry import probe_digest
+else:
+    from tools.ops.release_registry import probe_digest
+
 logger = logging.getLogger(__name__)
 SOURCES = {"ghcr.io/aihohu/hohu-admin", "ghcr.io/aihohu/hohu-admin-web"}
 REQUIRED_PLATFORMS = {"linux/amd64", "linux/arm64"}
@@ -20,6 +25,10 @@ REQUIRED_PLATFORMS = {"linux/amd64", "linux/arm64"}
 
 class ImageMirrorError(RuntimeError):
     """A pinned image could not be copied and anonymously verified."""
+
+
+class ImageConflictError(ImageMirrorError):
+    """An immutable reference conflicts; retrying must not write over it."""
 
 
 def test_tag(sha: str, run_id: str, run_attempt: str) -> str:
@@ -139,6 +148,10 @@ def _sync_tag(
     source: str, target: str, tag: str, state: dict, work_dir: Path, limits: dict
 ) -> bool:
     digest = state["digest"]
+    immutable = (
+        re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", tag)
+        is not None
+    )
     for attempt in range(1, limits["attempts"] + 1):
         stage = "source inspection"
         try:
@@ -150,26 +163,34 @@ def _sync_tag(
                 _digest(_inspect(f"{source}:{tag}", limits["command_timeout"]))
                 != digest
             ):
+                if immutable:
+                    raise ImageConflictError("Complete source version has drifted")
                 logger.warning(
                     "Skipped %s: source tag has moved to a different digest", tag
                 )
                 return False
             stage = "target copy"
+            existing = probe_digest(target, tag) if immutable else None
+            if existing is not None and existing != digest:
+                raise ImageConflictError(
+                    "Complete target version has a different digest"
+                )
             logger.info(
                 "Copying %s to %s:%s (attempt %d)", digest, target, tag, attempt
             )
-            _run(
-                [
-                    "copy",
-                    "--all",
-                    "--preserve-digests",
-                    "--src-tls-verify=true",
-                    "--dest-tls-verify=true",
-                    f"docker://{source}@{digest}",
-                    f"docker://{target}:{tag}",
-                ],
-                timeout=limits["copy_timeout"],
-            )
+            if existing is None:
+                _run(
+                    [
+                        "copy",
+                        "--all",
+                        "--preserve-digests",
+                        "--src-tls-verify=true",
+                        "--dest-tls-verify=true",
+                        f"docker://{source}@{digest}",
+                        f"docker://{target}:{tag}",
+                    ],
+                    timeout=limits["copy_timeout"],
+                )
             stage = "anonymous manifest verification"
             _verify_index(
                 _inspect(f"{target}:{tag}", limits["command_timeout"], anonymous=True),
@@ -179,8 +200,18 @@ def _sync_tag(
                 stage = "anonymous blob pull"
                 _anonymous_pull(target, digest, work_dir, limits["copy_timeout"])
                 state["anonymous_pull"] = True
+            if (
+                immutable
+                and _digest(_inspect(f"{source}:{tag}", limits["command_timeout"]))
+                != digest
+            ):
+                raise ImageConflictError(
+                    "Complete source version drifted during delivery"
+                )
             logger.info("Verified %s:%s @%s", target, tag, digest)
             return True
+        except ImageConflictError:
+            raise
         except (
             subprocess.CalledProcessError,
             subprocess.TimeoutExpired,
