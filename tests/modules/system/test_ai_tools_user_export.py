@@ -244,10 +244,10 @@ class TestUserExportDetailCard:
         )
         assert task_count == 0
 
-    async def test_late_projection_revocation_removes_the_uncommitted_export_file(
+    async def test_late_projection_revocation_retains_private_artifact_for_reconciliation(
         self, db_session: AsyncSession, file_storage: MockFileStorage, monkeypatch
     ) -> None:
-        """Compensate the file write when authorization changes during export."""
+        """A denied download must not guess that a written file is safe to delete."""
         monkeypatch.setattr(
             "app.modules.system.service.user_export_service.get_file_storage",
             lambda: file_storage,
@@ -265,7 +265,15 @@ class TestUserExportDetailCard:
         assert getattr(exc_info.value, "error_code", None) == (
             "AI_RESULT_PROJECTION_FORBIDDEN"
         )
-        assert file_storage._store == {}
+        assert len(file_storage._store) == 1
+        task = await db_session.scalar(
+            select(UserExportTask).where(
+                UserExportTask.tenant_id == 0,
+                UserExportTask.operator_id == ctx.user.user_id,
+                UserExportTask.reason == "QA denied projection",
+            )
+        )
+        assert task.file_storage_key in file_storage._store
 
 
 class TestAlwaysCreatesTask:

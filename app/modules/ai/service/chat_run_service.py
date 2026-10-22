@@ -5,11 +5,12 @@ import secrets
 from typing import Any
 
 from redis.asyncio import Redis
-from sqlalchemy import select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.exceptions import BusinessRuleException
 from app.core.id_generator import next_id
 from app.core.tenant import TenantContext
 from app.modules.ai.agents.gateway.quota import is_write_tool
@@ -22,12 +23,28 @@ from app.modules.ai.agents.hitl.events import (
 )
 from app.modules.ai.agents.hitl.manager import PendingPayload
 from app.modules.ai.agents.tools.registry import ToolRegistry
+from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
+from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
+from app.modules.ai.service.atomic_completion_service import (
+    DB_TOOLS,
+    FILE_TOOLS,
+    LockedClaim,
+    LockedCompletion,
+    atomic_completion_service,
+    has_protocol_marker,
+)
+from app.modules.ai.service.preflight_completion_service import has_preflight_marker
+from app.modules.ai.service.reconciliation_annotation import (
+    has_annotation,
+    reconciliation_notice,
+)
 from app.modules.ai.service.result_projection_service import (
     ProjectionLineage,
     result_projection_service,
 )
+from app.modules.auth.service import load_live_user_authority
 
 _RENEW_GUARD_LUA = (
     "if redis.call('get', KEYS[1]) == ARGV[1] then "
@@ -270,6 +287,241 @@ class ChatRunGuard:
 class ChatRunFinalizer:
     """按 (conversation, trace) 幂等创建或合并 terminal assistant projection。"""
 
+    async def _lock_projection_facts(
+        self,
+        db: AsyncSession,
+        *,
+        conversation_id: int,
+        source_user_message_id: int,
+        trace_id: str,
+        tenant: TenantContext,
+    ) -> tuple[AiConversation | None, AiMessage | None, list[AiPreparedAction], dict]:
+        """Lock every source fact before taking any assistant lock."""
+        await db.execute(select(func.set_config("lock_timeout", "2s", True)))
+        conversation = await db.scalar(
+            select(AiConversation)
+            .where(
+                AiConversation.tenant_id == tenant.tenant_id,
+                AiConversation.conversation_id == conversation_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        source = await db.scalar(
+            select(AiMessage)
+            .where(
+                AiMessage.tenant_id == tenant.tenant_id,
+                AiMessage.message_id == source_user_message_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        actions = list(
+            (
+                await db.scalars(
+                    select(AiPreparedAction)
+                    .where(
+                        AiPreparedAction.tenant_id == tenant.tenant_id,
+                        AiPreparedAction.conversation_id == conversation_id,
+                        AiPreparedAction.source_user_message_id
+                        == source_user_message_id,
+                        AiPreparedAction.trace_id == trace_id,
+                    )
+                    .order_by(AiPreparedAction.action_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
+        )
+        logs = {
+            log.tool_call_id: log
+            for log in await db.scalars(
+                select(AiOperationLog)
+                .where(
+                    AiOperationLog.tenant_id == tenant.tenant_id,
+                    or_(
+                        AiOperationLog.tool_call_id.in_(
+                            [action.execute_tool_call_id for action in actions]
+                        ),
+                        and_(
+                            AiOperationLog.conversation_id == conversation_id,
+                            AiOperationLog.trace_id == trace_id,
+                            AiOperationLog.user_id == tenant.actor_user_id,
+                        ),
+                    ),
+                )
+                .order_by(AiOperationLog.log_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        }
+        return conversation, source, actions, logs
+
+    async def _protected_cards(
+        self,
+        db: AsyncSession,
+        *,
+        conversation: AiConversation,
+        source: AiMessage,
+        actions: list[AiPreparedAction],
+        logs: dict,
+        tenant: TenantContext,
+    ) -> tuple[dict[str, dict | None], bool, list[ProjectionLineage]]:
+        protected: dict[str, dict | None] = {}
+        unknown = False
+        lineages = []
+        actor = None
+        for action in actions:
+            bound_log = logs.get(action.execute_tool_call_id)
+            if not (
+                has_protocol_marker(action.execution_owner)
+                or (bound_log is not None and has_annotation(bound_log.result_summary))
+                or (
+                    action.status
+                    in {
+                        "approved",
+                        "running",
+                        "succeeded",
+                        "failed",
+                        "rejected",
+                        "expired",
+                    }
+                    and action.execute_tool_name in DB_TOOLS | FILE_TOOLS
+                )
+            ):
+                continue
+            tool_call_id = action.execute_tool_call_id
+            card = {"tool": action.execute_tool_name, "tool_call_id": tool_call_id}
+            protected[tool_call_id] = card
+            log = logs.get(tool_call_id)
+            try:
+                if log is None or (
+                    action.execute_tool_name in FILE_TOOLS
+                    and action.status in {"running", "failed"}
+                ):
+                    raise BusinessRuleException("缺少可信完成事实")
+                validator = (
+                    atomic_completion_service.validate_locked_unexecuted_terminal
+                    if action.status in {"rejected", "expired"}
+                    else atomic_completion_service.validate_locked_terminal
+                )
+                validator(
+                    action, log, tenant=tenant, conversation=conversation, source=source
+                )
+            except BusinessRuleException:
+                unknown = True
+                continue
+            if actor is None:
+                actor = await load_live_user_authority(db, tenant=tenant)
+            lineage = result_projection_service.lineage_from_record(action)
+            if not await result_projection_service.authorize_result_projection(
+                db, actor, owner_user_id=action.user_id, lineage=lineage
+            ):
+                protected[tool_call_id] = None
+                continue
+            ok = action.status == "succeeded"
+            card.update(
+                ok=ok,
+                result=stringify_large_ints(action.result_data) if ok else None,
+                ui=stringify_large_ints(action.result_ui) if ok else None,
+                error_code=None if ok else action.error_code,
+                error_msg=(
+                    None
+                    if ok
+                    else {
+                        "rejected": "用户已取消此操作",
+                        "expired": "确认已过期，请重新发起",
+                    }.get(action.status, "操作未完成，业务修改已回滚。")
+                ),
+                duration_ms=action.duration_ms or 0,
+                summary=str(
+                    action.presentation.get("title") or action.execute_tool_name
+                ),
+                args=stringify_large_ints(action.presentation),
+                trace_id=action.trace_id,
+                risk=action.risk_level,
+                chip_target=action.chip_target,
+            )
+            if lineage is not None:
+                lineages.append(lineage)
+        bound_tool_calls = {action.execute_tool_call_id for action in actions}
+        for tool_call_id, log in logs.items():
+            if tool_call_id not in bound_tool_calls and (
+                not log.readonly_snapshot or has_preflight_marker(log.result_summary)
+            ):
+                protected[tool_call_id] = {
+                    "tool": log.tool_name,
+                    "tool_call_id": tool_call_id,
+                }
+                from app.modules.ai.service.preflight_completion_service import (  # noqa: PLC0415
+                    is_verified_preflight,
+                )
+
+                if await is_verified_preflight(
+                    db,
+                    log,
+                    conversation,
+                    source,
+                    tenant_id=tenant.tenant_id,
+                    user_id=tenant.actor_user_id,
+                ):
+                    protected[tool_call_id].update(
+                        ok=False,
+                        error_code=log.error_code,
+                        duration_ms=log.duration_ms,
+                    )
+                    continue
+                from app.modules.ai.service.preview_completion_service import (  # noqa: PLC0415
+                    preview_lineage,
+                    verify_historical_preview,
+                )
+
+                try:
+                    audit = await verify_historical_preview(
+                        db,
+                        log,
+                        conversation,
+                        source,
+                        tenant_id=tenant.tenant_id,
+                        user_id=tenant.actor_user_id,
+                    )
+                except (BusinessRuleException, TypeError, ValueError):
+                    unknown = True
+                    continue
+                if actor is None:
+                    actor = await load_live_user_authority(db, tenant=tenant)
+                lineage = preview_lineage(log, audit, tenant)
+                if not await result_projection_service.authorize_result_projection(
+                    db,
+                    actor,
+                    owner_user_id=log.user_id,
+                    lineage=lineage,
+                ):
+                    protected[tool_call_id] = None
+                    continue
+                protected[tool_call_id].update(
+                    ok=True,
+                    error_code=None,
+                    duration_ms=log.duration_ms,
+                    result=stringify_large_ints(audit["preview_data"]),
+                    ui=stringify_large_ints(audit["preview_ui"]),
+                )
+                lineages.append(lineage)
+        return protected, unknown, lineages
+
+    @staticmethod
+    def _replace_protected_cards(cards, protected):  # noqa: ANN001
+        result = []
+        for card in cards or []:
+            tool_call_id = card.get("tool_call_id")
+            if tool_call_id in protected:
+                replacement = protected[tool_call_id]
+                if replacement is not None:
+                    result.append(dict(replacement))
+            else:
+                result.append(card)
+        return result or None
+
     async def finalize_assistant_turn(
         self,
         db: AsyncSession,
@@ -283,22 +535,94 @@ class ChatRunFinalizer:
         lineage: ProjectionLineage | None = None,
         projection_dependency_message_ids: list[int] | tuple[int, ...] = (),
         tenant: TenantContext,
+        _prepared_action: AiPreparedAction | None = None,
+        _locked_completion: LockedCompletion | LockedClaim | None = None,
     ) -> AiMessage | None:
         if lineage is not None and lineage.tenant_id != tenant.tenant_id:
             raise RuntimeError("projection lineage tenant mismatch")
         tool_calls = stringify_large_ints(tool_calls)
-        source_is_active = await db.scalar(
-            select(AiMessage.message_id).where(
-                AiMessage.tenant_id == tenant.tenant_id,
-                AiMessage.message_id == source_user_message_id,
-                AiMessage.conversation_id == conversation_id,
-                AiMessage.role == "user",
-                AiMessage.trace_id == trace_id,
-                AiMessage.is_active.is_(True),
+        if _prepared_action is None:
+            conversation, source, actions, logs = await self._lock_projection_facts(
+                db,
+                conversation_id=conversation_id,
+                source_user_message_id=source_user_message_id,
+                trace_id=trace_id,
+                tenant=tenant,
             )
-        )
-        if source_is_active is None:
+        else:
+            # This caller owns one complete C/source/PA/log plan. Appending
+            # another action now would invert the global lock order.
+            conversation = await db.get(AiConversation, conversation_id)
+            source = await db.get(AiMessage, source_user_message_id)
+            actions = []
+            logs = {}
+            if _locked_completion is not None:
+                if _locked_completion.action is not _prepared_action:
+                    raise BusinessRuleException("完成投影的锁定身份不一致")
+                actions = [_prepared_action]
+                logs = {_prepared_action.execute_tool_call_id: _locked_completion.log}
+            elif has_protocol_marker(_prepared_action.execution_owner) or (
+                _prepared_action.status in {"succeeded", "failed"}
+                and _prepared_action.execute_tool_name in DB_TOOLS | FILE_TOOLS
+            ):
+                raise BusinessRuleException("完成投影缺少锁定事实")
+        if (
+            conversation is None
+            or conversation.tenant_id != tenant.tenant_id
+            or conversation.user_id != tenant.actor_user_id
+            or conversation.deleted_at is not None
+            or source is None
+            or source.tenant_id != tenant.tenant_id
+            or source.conversation_id != conversation_id
+            or source.role != "user"
+            or source.trace_id != trace_id
+            or not source.is_active
+        ):
             return None
+        protected, unknown, factual_lineages = await self._protected_cards(
+            db,
+            conversation=conversation,
+            source=source,
+            actions=actions,
+            logs=logs,
+            tenant=tenant,
+        )
+        from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+            OUTCOME_UNKNOWN_MESSAGE,
+        )
+
+        if unknown:
+            content = reconciliation_notice(
+                content,
+                [
+                    key
+                    for key, card in protected.items()
+                    if card is not None and "ok" not in card
+                ],
+            )
+        elif protected and not unknown and OUTCOME_UNKNOWN_MESSAGE in content:
+            content = (
+                content.replace(OUTCOME_UNKNOWN_MESSAGE, "")
+                .replace("（AI_EXECUTION_OUTCOME_UNKNOWN）", "")
+                .strip()
+            )
+        tool_calls = self._replace_protected_cards(tool_calls, protected)
+        for factual_lineage in factual_lineages:
+            if lineage is None:
+                lineage = factual_lineage
+            elif lineage.agent_code == factual_lineage.agent_code:
+                lineage = result_projection_service.freeze_lineage(
+                    tenant=tenant,
+                    agent_code=lineage.agent_code,
+                    tool_codes=(*lineage.tool_codes, *factual_lineage.tool_codes),
+                    subject_refs=(*lineage.subject_refs, *factual_lineage.subject_refs),
+                    data_scope_hash=lineage.data_scope_hash
+                    or factual_lineage.data_scope_hash,
+                    projection_dependency_message_ids=(
+                        *lineage.projection_dependency_message_ids,
+                        *factual_lineage.projection_dependency_message_ids,
+                    ),
+                )
 
         stmt = (
             select(AiMessage)
@@ -309,6 +633,7 @@ class ChatRunFinalizer:
                 AiMessage.trace_id == trace_id,
             )
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
         message = (await db.execute(stmt)).scalars().first()
         if message is None:
@@ -355,6 +680,7 @@ class ChatRunFinalizer:
                             AiMessage.trace_id == trace_id,
                         )
                         .with_for_update()
+                        .execution_options(populate_existing=True)
                     )
                 )
                 .scalars()
@@ -390,10 +716,29 @@ class ChatRunFinalizer:
                         *lineage.projection_dependency_message_ids,
                     ),
                 )
+        if (
+            protected
+            and not unknown
+            and OUTCOME_UNKNOWN_MESSAGE in (message.content or "")
+        ):
+            message.content = (
+                message.content.replace(OUTCOME_UNKNOWN_MESSAGE, "")
+                .replace("（AI_EXECUTION_OUTCOME_UNKNOWN）", "")
+                .strip()
+            )
         if not message.content and content:
             message.content = content
+        elif unknown:
+            message.content = reconciliation_notice(
+                message.content,
+                [
+                    key
+                    for key, card in protected.items()
+                    if card is not None and "ok" not in card
+                ],
+            )
         message.tool_calls = self._merge_tool_calls(
-            message.tool_calls,
+            self._replace_protected_cards(message.tool_calls, protected),
             tool_calls,
         )
         if message.parent_message_id is None:
@@ -471,6 +816,7 @@ class ChatRunFinalizer:
         error_code: str | None = None,
         error_msg: str | None = None,
         tenant: TenantContext,
+        locked_completion: LockedCompletion | LockedClaim | None = None,
     ) -> AiMessage | None:
         """Project one durable authorization without exposing frozen capability data."""
         from app.modules.ai.agents.tools.registry import ToolRegistry  # noqa: PLC0415
@@ -526,6 +872,8 @@ class ChatRunFinalizer:
             agent_code=action.agent_code,
             lineage=result_projection_service.lineage_from_record(action),
             tenant=tenant,
+            _prepared_action=action,
+            _locked_completion=locked_completion,
         )
 
     @staticmethod

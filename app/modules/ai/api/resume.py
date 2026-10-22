@@ -69,6 +69,12 @@ from app.modules.ai.agents.hitl.manager import PendingPayload, hitl_manager
 from app.modules.ai.api.chat import _format_sse_chunk
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.schemas.resume import ResumeStatusOut
+from app.modules.ai.service.atomic_completion_service import (
+    DB_TOOLS,
+    FILE_TOOLS,
+    atomic_completion_service,
+    has_protocol_marker,
+)
 from app.modules.ai.service.chat_run_service import (
     chat_run_finalizer,
     chat_run_guard,
@@ -79,7 +85,7 @@ from app.modules.ai.service.prepared_action_service import prepared_action_servi
 from app.modules.ai.service.result_projection_service import (
     result_projection_service,
 )
-from app.modules.auth.service import get_current_user
+from app.modules.auth.service import get_current_user, load_live_user_authority
 from app.modules.system.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -91,6 +97,99 @@ _RELEASE_LOCK_LUA = (
     "if redis.call('get', KEYS[1]) == ARGV[1] then "
     "return redis.call('del', KEYS[1]) else return 0 end"
 )
+
+
+def _protocol_running(action) -> bool:  # noqa: ANN001
+    return action.status == PreparedActionStatus.RUNNING.value and has_protocol_marker(
+        getattr(action, "execution_owner", None)
+    )
+
+
+def _requires_completion_proof(action) -> bool:  # noqa: ANN001
+    return action is not None and (
+        has_protocol_marker(getattr(action, "execution_owner", None))
+        or (
+            action.status in {"running", "approved", "succeeded", "failed"}
+            and action.execute_tool_name in DB_TOOLS | FILE_TOOLS
+        )
+    )
+
+
+def _requires_unexecuted_proof(action) -> bool:  # noqa: ANN001
+    return (
+        action is not None
+        and action.status in {"rejected", "expired"}
+        and action.execute_tool_name in DB_TOOLS | FILE_TOOLS
+    )
+
+
+def _unknown_resume_events(trace_id: str) -> list[AiErrorEvent | DoneEvent]:
+    from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+        OUTCOME_UNKNOWN_MESSAGE,
+    )
+
+    return [
+        AiErrorEvent(
+            error_code="AI_EXECUTION_OUTCOME_UNKNOWN", message=OUTCOME_UNKNOWN_MESSAGE
+        ),
+        DoneEvent(
+            trace_id=trace_id, persistence="not_applicable", projection="unchanged"
+        ),
+    ]
+
+
+async def _persist_unknown_resume_notice(
+    pending: PendingPayload, *, tenant: TenantContext
+) -> list[AiErrorEvent | DoneEvent]:
+    from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+        OUTCOME_UNKNOWN_MESSAGE,
+        _discard_uncertain_session,
+        _owned_session,
+    )
+
+    events = _unknown_resume_events(pending.trace_id)
+    try:
+        # Reconciliation and its cleanup own at most 8.5 seconds. Optional
+        # display plus bounded cleanup must fit in the remaining 1.5 seconds.
+        async with asyncio.timeout(1), _owned_session() as notice_db:
+            try:
+                await notice_db.begin()
+                message = await chat_run_finalizer.finalize_assistant_turn(
+                    notice_db,
+                    conversation_id=pending.conversation_id,
+                    trace_id=pending.trace_id,
+                    source_user_message_id=pending.source_user_message_id,
+                    content=OUTCOME_UNKNOWN_MESSAGE,
+                    tool_calls=None,
+                    agent_code=pending.agent_code,
+                    lineage=(
+                        result_projection_service.freeze_lineage(
+                            tenant=tenant,
+                            agent_code=pending.agent_code,
+                            tool_codes=[],
+                            subject_refs=[],
+                        )
+                        if pending.agent_code
+                        else None
+                    ),
+                    tenant=tenant,
+                )
+                await notice_db.commit()
+            except (Exception, asyncio.CancelledError):
+                await _discard_uncertain_session(notice_db)
+                raise
+            if message is not None:
+                events[-1] = DoneEvent(
+                    trace_id=pending.trace_id,
+                    message_id=message.message_id,
+                    persistence="committed",
+                    projection="updated",
+                )
+    except (Exception, asyncio.CancelledError):
+        logger.warning(
+            "unknown completion notice could not be confirmed", exc_info=True
+        )
+    return events
 
 
 def _set_exc_code(exc: BusinessRuleException, code: int) -> BusinessRuleException:
@@ -225,6 +324,7 @@ def _minimal_resume_status(
     durable_action=None,  # noqa: ANN001
     pending: PendingPayload | None = None,
     error_code: str = "AI_CHAT_PERMISSION_DENIED",
+    status_override: str | None = None,
 ) -> ResponseModel[ResumeStatusOut]:
     status = (
         durable_action.status
@@ -240,6 +340,8 @@ def _minimal_resume_status(
         PreparedActionStatus.RUNNING.value,
     }:
         status = PreparedActionStatus.RUNNING.value
+    if status_override is not None:
+        status = status_override
     return ResponseModel.success(
         data=ResumeStatusOut(
             confirmationId=confirmation_id,
@@ -247,7 +349,7 @@ def _minimal_resume_status(
             errorCode=error_code,
             finishedAt=(
                 getattr(durable_action, "finished_at", None)
-                if durable_action is not None
+                if durable_action is not None and status_override is None
                 else None
             ),
         )
@@ -263,6 +365,41 @@ def _ui_result_from_dict(value: dict | None) -> UIResult | None:
         audit=value.get("audit") or {},
         label_key=str(value.get("labelKey") or value.get("label_key") or ""),
         label_params=value.get("labelParams") or value.get("label_params") or {},
+    )
+
+
+async def _verified_minimal_resume_status(
+    db: AsyncSession,
+    confirmation_id: str,
+    *,
+    tenant: TenantContext,
+    durable_action=None,  # noqa: ANN001
+    pending: PendingPayload | None = None,
+    error_code: str = "AI_CHAT_PERMISSION_DENIED",
+) -> ResponseModel[ResumeStatusOut]:
+    """A permission denial never makes an unverified cancellation factual."""
+    status_override = None
+    if _requires_unexecuted_proof(durable_action):
+        from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+            _owned_session,
+        )
+
+        db.expunge_all()
+        await db.rollback()
+        try:
+            async with asyncio.timeout(1), _owned_session() as proof_db:
+                completed = await atomic_completion_service.lock_unexecuted_terminal(
+                    proof_db, confirmation_id, tenant=tenant
+                )
+                durable_action = completed.action
+        except (Exception, asyncio.CancelledError):
+            status_override = "running"
+    return _minimal_resume_status(
+        confirmation_id,
+        durable_action=durable_action,
+        pending=pending,
+        error_code=error_code,
+        status_override=status_override,
     )
 
 
@@ -316,8 +453,12 @@ async def _load_durable_resume_terminal(
     current_user: User | None = None,
 ) -> list[ToolCallResultEvent | AiErrorEvent | DoneEvent]:
     """Read a confirm-owned terminal fact without ever re-executing its tool."""
+    from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+        _owned_session,
+    )
+
     try:
-        async with AsyncSessionLocal() as terminal_db:
+        async with asyncio.timeout(1), _owned_session() as terminal_db:
             action = await prepared_action_service.get_by_confirmation_id(
                 terminal_db, confirmation_id, tenant=tenant
             )
@@ -331,7 +472,25 @@ async def _load_durable_resume_terminal(
                     "续传 action 绑定无效",
                     error_code="AI_PREPARED_ACTION_BINDING_INVALID",
                 )
+            if _requires_completion_proof(action) or _requires_unexecuted_proof(action):
+                if _protocol_running(action):
+                    return _unknown_resume_events(pending.trace_id)
+                loader = (
+                    atomic_completion_service.lock_unexecuted_terminal
+                    if _requires_unexecuted_proof(action)
+                    else atomic_completion_service.lock_terminal
+                )
+                completed = await loader(terminal_db, confirmation_id, tenant=tenant)
+                action = completed.action
+                if action.execute_tool_name in FILE_TOOLS and action.status == "failed":
+                    return _unknown_resume_events(pending.trace_id)
+                if current_user is not None:
+                    current_user = await load_live_user_authority(
+                        terminal_db, tenant=tenant
+                    )
             status = PreparedActionStatus(action.status)
+            if _protocol_running(action):
+                return _unknown_resume_events(pending.trace_id)
             if not status.is_terminal:
                 raise BusinessRuleException(
                     "续传收到唤醒但 action 尚未进入终态",
@@ -367,8 +526,8 @@ async def _load_durable_resume_terminal(
                         DoneEvent(
                             trace_id=action.trace_id,
                             message_id=message_id,
-                            persistence="committed",
-                            projection="updated",
+                            persistence="committed" if message_id else "not_applicable",
+                            projection="updated" if message_id else "unchanged",
                         ),
                     ]
             result_data = action.result_data if ok else None
@@ -425,58 +584,74 @@ async def _load_durable_resume_terminal(
             done_event = DoneEvent(
                 trace_id=action.trace_id,
                 message_id=message_id,
-                persistence="committed",
-                projection="updated",
+                persistence="committed" if message_id else "not_applicable",
+                projection="updated" if message_id else "unchanged",
             )
             return [result_event, done_event]
-    except Exception as exc:
+    except (Exception, asyncio.CancelledError):
         logger.exception(
             "resume durable terminal projection failed",
             extra={"confirmation_id": confirmation_id, "action_id": pending.action_id},
         )
-        error_code = getattr(exc, "error_code", "AI_PREPARED_ACTION_TERMINAL_MISSING")
-        return [
-            AiErrorEvent(
-                error_code=error_code,
-                message="操作终态读取失败，请刷新会话确认结果",
-            ),
-            DoneEvent(
-                trace_id=pending.trace_id,
-                persistence="failed",
-                projection="updated",
-            ),
-        ]
+        return _unknown_resume_events(pending.trace_id)
 
 
-async def _cleanup_durable_resume(action, *, tenant: TenantContext) -> None:  # noqa: ANN001
+async def _cleanup_durable_resume(
+    action,
+    *,
+    tenant: TenantContext,
+    verified: bool = False,  # noqa: ANN001
+) -> None:
     """Best-effort cleanup after PostgreSQL has become the terminal authority."""
+    from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+        _owned_session,
+    )
+
     try:
-        if not PreparedActionStatus(action.status).is_terminal:
-            async with AsyncSessionLocal() as cleanup_db:
+        if not verified:
+            async with asyncio.timeout(1), _owned_session() as cleanup_db:
                 latest = await prepared_action_service.get_by_confirmation_id(
                     cleanup_db, action.confirmation_id, tenant=tenant
                 )
-            if latest is None or not PreparedActionStatus(latest.status).is_terminal:
-                return
-            action = latest
-    except Exception:
+                if (
+                    latest is None
+                    or not PreparedActionStatus(latest.status).is_terminal
+                ):
+                    return
+                action = latest
+                if _requires_completion_proof(action) or _requires_unexecuted_proof(
+                    action
+                ):
+                    loader = (
+                        atomic_completion_service.lock_unexecuted_terminal
+                        if _requires_unexecuted_proof(action)
+                        else atomic_completion_service.lock_terminal
+                    )
+                    completed = await loader(
+                        cleanup_db, action.confirmation_id, tenant=tenant
+                    )
+                    action = completed.action
+                    if (
+                        action.execute_tool_name in FILE_TOOLS
+                        and action.status == "failed"
+                    ):
+                        return
+    except (Exception, asyncio.CancelledError):
         logger.exception("resume durable cleanup terminal check failed")
         return
-    if action.guard_owner_token:
-        try:
-            await chat_run_guard.release(
-                redis_client,
-                conversation_id=action.conversation_id,
-                owner_token=action.guard_owner_token,
-                tenant=tenant,
-            )
-        except Exception:
-            logger.exception("resume durable conversation guard cleanup failed")
     try:
-        await hitl_manager.delete_pending(
-            redis_client, action.confirmation_id, tenant=tenant
-        )
-    except Exception:
+        async with asyncio.timeout(0.25):
+            if action.guard_owner_token:
+                await chat_run_guard.release(
+                    redis_client,
+                    conversation_id=action.conversation_id,
+                    owner_token=action.guard_owner_token,
+                    tenant=tenant,
+                )
+            await hitl_manager.delete_pending(
+                redis_client, action.confirmation_id, tenant=tenant
+            )
+    except (Exception, asyncio.CancelledError):
         logger.exception("resume durable pending cleanup failed")
 
 
@@ -494,9 +669,10 @@ async def _terminalize_durable_resume_failure(
     try:
         async with AsyncSessionLocal() as terminal_db:
             async with terminal_db.begin():
-                action = await prepared_action_service.get_by_confirmation_id(
-                    terminal_db, confirmation_id, tenant=tenant
+                context = await prepared_action_service.lock_confirmation_context(
+                    terminal_db, confirmation_id=confirmation_id, tenant=tenant
                 )
+                action = context.action if context is not None else None
                 if not _durable_binding_valid(
                     action,
                     pending=pending,
@@ -509,6 +685,8 @@ async def _terminalize_durable_resume_failure(
                     )
                 status = PreparedActionStatus(action.status)
                 terminal_action = action
+                if _protocol_running(action):
+                    return _unknown_resume_events(pending.trace_id)
                 if status == PreparedActionStatus.PENDING_CONFIRMATION:
                     transitioned = await prepared_action_service.transition_status(
                         terminal_db,
@@ -555,17 +733,7 @@ async def _terminalize_durable_resume_failure(
             "resume durable failure terminalization failed",
             extra={"confirmation_id": confirmation_id},
         )
-        return [
-            AiErrorEvent(
-                error_code="AI_PREPARED_ACTION_TERMINAL_MISSING",
-                message="操作状态暂不可用，请刷新会话确认结果",
-            ),
-            DoneEvent(
-                trace_id=pending.trace_id,
-                persistence="failed",
-                projection="updated",
-            ),
-        ]
+        return _unknown_resume_events(pending.trace_id)
 
 
 async def _finalize_resume_terminal(
@@ -711,6 +879,88 @@ async def resume_chat(
     ):
         raise AuthorizationException(error_code="AI_RESUME_FORBIDDEN")
 
+    if durable_action is not None:
+        annotated = await operation_log_service.has_reconciliation_annotation(
+            db,
+            durable_action.execute_tool_call_id,
+            user_id=current_user.user_id,
+            tenant=tenant,
+        )
+        if annotated:
+
+            async def reconciliation_stream():
+                for event in _unknown_resume_events(durable_action.trace_id):
+                    yield _format_sse_chunk(event)
+
+            return StreamingResponse(
+                reconciliation_stream(), media_type="text/event-stream"
+            )
+
+    if _requires_completion_proof(durable_action):
+        # A transport cache cannot grant, expire or erase durable execution.
+        from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+            reconcile_prepared_completion,
+        )
+
+        replay_pending = _pending_from_durable_action(durable_action)
+        can_chat = has_explicit_permission(current_user, AI_CHAT_USE_PERMISSION)
+        can_project = (
+            can_chat
+            and await result_projection_service.authorize_result_projection(
+                db,
+                current_user,
+                owner_user_id=durable_action.user_id,
+                lineage=result_projection_service.lineage_from_record(durable_action),
+            )
+        )
+        db.expunge_all()
+        await db.rollback()
+        outcome = await reconcile_prepared_completion(
+            confirmation_id, tenant=tenant, allow_fence=True
+        )
+        if not can_project:
+            return _minimal_resume_status(
+                confirmation_id,
+                durable_action=outcome.action or durable_action,
+                error_code=(
+                    "AI_CHAT_PERMISSION_DENIED"
+                    if not can_chat
+                    else "AI_RESULT_PROJECTION_FORBIDDEN"
+                ),
+                status_override="running" if outcome.disposition == "unknown" else None,
+            )
+
+        async def observe_completion_stream():
+            if outcome.disposition == "unknown":
+                events = await _persist_unknown_resume_notice(
+                    replay_pending, tenant=tenant
+                )
+            else:
+                yield _format_sse_chunk(
+                    _build_resumed_event(
+                        confirmation_id, replay_pending, durable_action=outcome.action
+                    )
+                )
+                events = await _load_durable_resume_terminal(
+                    confirmation_id=confirmation_id,
+                    pending=replay_pending,
+                    user_id=current_user.user_id,
+                    tenant=tenant,
+                    current_user=current_user,
+                )
+                if any(isinstance(event, ToolCallResultEvent) for event in events):
+                    await _cleanup_durable_resume(
+                        outcome.action, tenant=tenant, verified=True
+                    )
+            for event in events:
+                yield _format_sse_chunk(event)
+
+        return StreamingResponse(
+            observe_completion_stream(),
+            media_type=SSE_CONTENT_TYPE,
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     pending = await hitl_manager.get_pending(
         redis_client, confirmation_id, tenant=tenant
     )
@@ -758,8 +1008,10 @@ async def resume_chat(
         )
 
     if not has_explicit_permission(current_user, AI_CHAT_USE_PERMISSION):
-        return _minimal_resume_status(
+        return await _verified_minimal_resume_status(
+            db,
             confirmation_id,
+            tenant=tenant,
             durable_action=durable_action,
             pending=pending,
         )
@@ -775,8 +1027,10 @@ async def resume_chat(
             )
         )
     if not projection_allowed:
-        return _minimal_resume_status(
+        return await _verified_minimal_resume_status(
+            db,
             confirmation_id,
+            tenant=tenant,
             durable_action=durable_action,
             pending=pending,
             error_code="AI_RESULT_PROJECTION_FORBIDDEN",
@@ -870,6 +1124,10 @@ async def resume_chat(
     )
 
     async def resume_stream():
+        from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+            PreparedExecutionOutcomeUnknown,
+        )
+
         try:
             # 6.1 emit confirmation_resumed
             yield _format_sse_chunk(resumed_event)
@@ -888,12 +1146,6 @@ async def resume_chat(
                 else:
                     action = await hitl_manager.hang(confirmation_id, tenant=tenant)
             except TimeoutError:
-                yield _format_sse_chunk(
-                    AiErrorEvent(
-                        error_code="AI_HITL_TIMEOUT",
-                        message="HITL 确认超时（5min 无人确认），请重新发起",
-                    )
-                )
                 if durable_action is not None:
                     terminal_events = await _terminalize_durable_resume_failure(
                         confirmation_id=confirmation_id,
@@ -904,6 +1156,12 @@ async def resume_chat(
                         error_msg="HITL 确认超时（5min 无人确认）",
                     )
                 else:
+                    yield _format_sse_chunk(
+                        AiErrorEvent(
+                            error_code="AI_HITL_TIMEOUT",
+                            message="HITL 确认超时（5min 无人确认），请重新发起",
+                        )
+                    )
                     await _mark_legacy_resume_expired(
                         db,
                         pending=pending,
@@ -925,12 +1183,6 @@ async def resume_chat(
             except Exception:
                 # hang 抛非 Timeout 异常（如 Redis down）→ 先收口事实再 done
                 logger.exception("resume: hang unexpected error")
-                yield _format_sse_chunk(
-                    AiErrorEvent(
-                        error_code="AI_INTERNAL_ERROR",
-                        message="续传异常，请重新发起",
-                    )
-                )
                 if durable_action is not None:
                     terminal_events = await _terminalize_durable_resume_failure(
                         confirmation_id=confirmation_id,
@@ -941,6 +1193,12 @@ async def resume_chat(
                         error_msg="续传异常，请重新发起",
                     )
                 else:
+                    yield _format_sse_chunk(
+                        AiErrorEvent(
+                            error_code="AI_INTERNAL_ERROR",
+                            message="续传异常，请重新发起",
+                        )
+                    )
                     await _mark_legacy_resume_expired(
                         db,
                         pending=pending,
@@ -1122,6 +1380,10 @@ async def resume_chat(
 
             try:
                 result, duration_ms = await resume_tool_execution(pending, deps, log_id)
+            except PreparedExecutionOutcomeUnknown:
+                for terminal_event in _unknown_resume_events(pending.trace_id):
+                    yield _format_sse_chunk(terminal_event)
+                return
             except Exception:
                 logger.exception("resume: resume_tool_execution failed")
                 yield _format_sse_chunk(

@@ -7,6 +7,18 @@ from sqlalchemy.orm import DeclarativeBase
 
 from app.core.config import settings
 
+# The caller setting this marker owns invalidation and retains the session until
+# it completes. Request teardown must never reuse or ordinarily close it.
+SESSION_QUARANTINED_KEY = "transaction_session_quarantined"
+
+
+def is_session_quarantined(session: AsyncSession) -> bool:
+    return (
+        isinstance(session.info, dict)
+        and session.info.get(SESSION_QUARANTINED_KEY) is True
+    )
+
+
 # 1. 创建异步数据库引擎
 # echo=True 会在终端打印 SQL 语句，开发环境下很有用
 engine = create_async_engine(
@@ -44,21 +56,28 @@ async def get_db(request: Request) -> AsyncGenerator[AsyncSession, None]:
     session = AsyncSessionLocal()
     try:
         yield session
-        if not getattr(request.state, "platform_transaction_managed", False):
+        if not getattr(
+            request.state, "platform_transaction_managed", False
+        ) and not is_session_quarantined(session):
             await _commit_request_session(session, request)
     except BaseException:
-        if not getattr(request.state, "platform_transaction_managed", False):
+        if not getattr(
+            request.state, "platform_transaction_managed", False
+        ) and not is_session_quarantined(session):
             # A disconnected ASGI request remains in a cancelled AnyIO scope.
             # Protect cleanup checkpoints, never the request or its commit.
             with CancelScope(shield=True):
                 await session.rollback()
         raise
     finally:
-        with CancelScope(shield=True):
-            await session.close()
+        if not is_session_quarantined(session):
+            with CancelScope(shield=True):
+                await session.close()
 
 
 async def _commit_request_session(session: AsyncSession, request: Request) -> None:
+    if is_session_quarantined(session):
+        return
     is_platform_request = (
         getattr(request.state, "platform_authorization", None) is not None
     )
@@ -87,6 +106,7 @@ async def get_platform_db(
         yield db
         await _commit_request_session(db, request)
     except BaseException:
-        with CancelScope(shield=True):
-            await db.rollback()
+        if not is_session_quarantined(db):
+            with CancelScope(shield=True):
+                await db.rollback()
         raise

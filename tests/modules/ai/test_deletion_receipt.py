@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.modules.ai.models.operation_log import AiOperationLog
+from app.modules.ai.service.completion_read_state_service import EffectiveCompletion
 from app.modules.ai.service.conversation_service import conversation_service
 from app.modules.ai.service.result_projection_service import (
     DeletionReceipt,
@@ -69,7 +70,10 @@ async def test_projected_receipt_excludes_original_sensitive_payload():
         ({"tool_name": "user.update"}, False),
     ],
 )
-async def test_receipt_requires_matching_success_audit(db_session, change, allowed):
+@pytest.mark.parametrize("verified", [False, True])
+async def test_receipt_requires_matching_success_audit_and_proof(
+    db_session, change, allowed, verified
+):
     user = _user("ai:chat:use", "system:user:delete")
     lineage = result_projection_service.freeze_lineage(
         tenant=TENANT,
@@ -123,8 +127,15 @@ async def test_receipt_requires_matching_success_audit(db_session, change, allow
             user,
             owner_user_id=101,
             message=message,
+            completion_states={
+                "receipt-call": EffectiveCompletion(
+                    "success", None, None, None, verified=True
+                )
+            }
+            if verified
+            else {},
         )
-    assert bool(result) is allowed
+    assert bool(result) is (allowed and verified)
     if result:
         assert (
             result.content

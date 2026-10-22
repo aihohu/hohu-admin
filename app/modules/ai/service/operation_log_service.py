@@ -32,10 +32,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import BusinessRuleException
 from app.core.tenant import TenantContext
 from app.modules.ai.agents.hitl.constants import AiOperationStatus
+from app.modules.ai.models.conversation import AiConversation
+from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
+from app.modules.ai.models.prepared_action import AiPreparedAction
+from app.modules.ai.service.reconciliation_annotation import (
+    has_annotation,
+    require_unannotated,
+)
 
 _TARGET_TYPE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _TARGET_ID_RE = re.compile(r"^[1-9][0-9]*$")
+_BATCH_ID_RE = re.compile(r"^[A-Za-z0-9_-]{32}$")
 
 
 def _now_not_before(*timestamps: datetime | None) -> datetime:
@@ -58,7 +66,8 @@ def build_target_summary(subject_refs: Any) -> str | None:
             subject_type
         ):
             return None
-        if not isinstance(subject_id, str) or not _TARGET_ID_RE.fullmatch(subject_id):
+        pattern = _BATCH_ID_RE if subject_type == "user_import_batch" else _TARGET_ID_RE
+        if not isinstance(subject_id, str) or not pattern.fullmatch(subject_id):
             return None
         normalized.add((subject_type, subject_id))
     if not normalized:
@@ -67,7 +76,11 @@ def build_target_summary(subject_refs: Any) -> str | None:
         {"id": subject_id, "type": subject_type}
         for subject_type, subject_id in sorted(
             normalized,
-            key=lambda item: (int(item[1]), item[0]),
+            key=lambda item: (
+                (1, item[0], item[1])
+                if item[0] == "user_import_batch"
+                else (0, int(item[1]), item[0])
+            ),
         )
     ]
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -146,6 +159,7 @@ class OperationLogService:
         if status == AiOperationStatus.RUNNING:
             log.started_at = log.queued_at
             log.hitl_wait_ms = 0
+            await db.flush()
         return log.log_id
 
     async def mark_running(
@@ -201,12 +215,14 @@ class OperationLogService:
     ) -> AiOperationLog:
         """状态迁移：running → success（终态）"""
         log = await self._get(db, log_id, tenant=tenant)
+        await self._require_generic_completion(db, log, tenant=tenant)
         self._transition(log, AiOperationStatus.SUCCESS)
         log.result_summary = result_summary
         if target_summary is not None:
             log.target_summary = target_summary
         log.duration_ms = duration_ms
         log.finished_at = _now_not_before(log.queued_at, log.started_at)
+        await db.flush()
         return log
 
     async def mark_failed(
@@ -220,10 +236,12 @@ class OperationLogService:
     ) -> AiOperationLog:
         """状态迁移：running → failed（终态）"""
         log = await self._get(db, log_id, tenant=tenant)
+        await self._require_generic_completion(db, log, tenant=tenant)
         self._transition(log, AiOperationStatus.FAILED)
         log.error_code = error_code
         log.duration_ms = duration_ms
         log.finished_at = _now_not_before(log.queued_at, log.started_at)
+        await db.flush()
         return log
 
     async def mark_rejected(
@@ -242,6 +260,7 @@ class OperationLogService:
         self._transition(log, AiOperationStatus.REJECTED)
         log.approved_by = approved_by
         log.finished_at = _now_not_before(log.queued_at, log.started_at)
+        await db.flush()
         return log
 
     async def mark_rejected_if_pending(
@@ -283,6 +302,7 @@ class OperationLogService:
         self._transition(log, AiOperationStatus.EXPIRED)
         log.error_code = error_code or "AI_HITL_EXPIRED"
         log.finished_at = _now_not_before(log.queued_at, log.started_at)
+        await db.flush()
         return log
 
     async def mark_expired_if_pending(
@@ -327,6 +347,7 @@ class OperationLogService:
                 error_code="AI_OPERATION_LOG_CONFIRMATION_ALREADY_SET",
             )
         log.confirmation_id = confirmation_id
+        await db.flush()
         return log
 
     async def attach_target_summary(
@@ -342,6 +363,7 @@ class OperationLogService:
         summary = build_target_summary(subject_refs)
         if summary is not None:
             log.target_summary = summary
+            await db.flush()
         return log
 
     async def mark_approved(
@@ -362,8 +384,22 @@ class OperationLogService:
         接到唤醒后调用 ``mark_running``。
         """
         log = await self._get(db, log_id, tenant=tenant)
+        require_unannotated(log.result_summary)
         log.approved_by = approved_by
+        await db.flush()
         return log
+
+    async def has_reconciliation_annotation(self, db, tool_call_id, *, user_id, tenant):
+        summary = (
+            await db.execute(
+                select(AiOperationLog.result_summary).where(
+                    AiOperationLog.tenant_id == tenant.tenant_id,
+                    AiOperationLog.user_id == user_id,
+                    AiOperationLog.tool_call_id == tool_call_id,
+                )
+            )
+        ).scalar_one_or_none()
+        return has_annotation(summary)
 
     async def get_by_tool_call_id(
         self,
@@ -398,11 +434,55 @@ class OperationLogService:
     async def _get(
         self, db: AsyncSession, log_id: int, *, tenant: TenantContext
     ) -> AiOperationLog:
+        reference = (
+            await db.execute(
+                select(
+                    AiOperationLog.conversation_id,
+                    AiOperationLog.source_user_message_id,
+                    AiOperationLog.tool_call_id,
+                ).where(
+                    AiOperationLog.tenant_id == tenant.tenant_id,
+                    AiOperationLog.log_id == log_id,
+                )
+            )
+        ).one_or_none()
+        if reference is not None:
+            await db.execute(
+                select(AiConversation)
+                .where(
+                    AiConversation.tenant_id == tenant.tenant_id,
+                    AiConversation.conversation_id == reference.conversation_id,
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if reference.source_user_message_id is not None:
+                await db.execute(
+                    select(AiMessage)
+                    .where(
+                        AiMessage.tenant_id == tenant.tenant_id,
+                        AiMessage.message_id == reference.source_user_message_id,
+                    )
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            await db.execute(
+                select(AiPreparedAction)
+                .where(
+                    AiPreparedAction.tenant_id == tenant.tenant_id,
+                    AiPreparedAction.execute_tool_call_id == reference.tool_call_id,
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
         result = await db.execute(
-            select(AiOperationLog).where(
+            select(AiOperationLog)
+            .where(
                 AiOperationLog.tenant_id == tenant.tenant_id,
                 AiOperationLog.log_id == log_id,
             )
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         log = result.scalars().first()
         if log is None:
@@ -410,7 +490,36 @@ class OperationLogService:
                 f"ai_operation_log log_id={log_id} 不存在",
                 error_code="AI_OPERATION_LOG_NOT_FOUND",
             )
+        if reference is None or (
+            log.conversation_id != reference.conversation_id
+            or log.source_user_message_id != reference.source_user_message_id
+            or log.tool_call_id != reference.tool_call_id
+        ):
+            raise BusinessRuleException(
+                "操作日志的上下文绑定在锁定期间发生变化",
+                error_code="AI_OPERATION_LOG_BINDING_INVALID",
+            )
         return log
+
+    async def _require_generic_completion(
+        self, db: AsyncSession, log: AiOperationLog, *, tenant: TenantContext
+    ) -> None:
+        """Prepared writes complete only through the bound atomic transaction."""
+
+        require_unannotated(log.result_summary)
+        if log.readonly_snapshot:
+            return
+        action_id = await db.scalar(
+            select(AiPreparedAction.action_id).where(
+                AiPreparedAction.tenant_id == tenant.tenant_id,
+                AiPreparedAction.execute_tool_call_id == log.tool_call_id,
+            )
+        )
+        if action_id is not None:
+            raise BusinessRuleException(
+                "持久确认的日志只能随业务完成事实更新",
+                error_code="AI_OPERATION_LOG_PREPARED_COMPLETION_REQUIRED",
+            )
 
     async def _update_if_pending(
         self,
@@ -421,6 +530,10 @@ class OperationLogService:
         **values,
     ) -> AiOperationLog | None:
         """CAS pending transition so wake/cleanup races cannot overwrite each other."""
+        log = await self._get(db, log_id, tenant=tenant)
+        require_unannotated(log.result_summary)
+        if log.status != AiOperationStatus.PENDING_CONFIRMATION.value:
+            return None
         finished_at = values.get("finished_at")
         if isinstance(finished_at, datetime):
             terminal_floor = case(
@@ -453,6 +566,8 @@ class OperationLogService:
           - 已终态（success/failed/rejected/expired）不可再迁移
           - 其它状态可迁到任意非终态（pending_confirmation ↔ running 允许双向？不允许：只能向前）
         """
+
+        require_unannotated(log.result_summary)
         current = AiOperationStatus(log.status)
         if current.is_terminal:
             raise BusinessRuleException(

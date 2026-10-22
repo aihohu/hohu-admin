@@ -15,11 +15,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_response import PageResult
 from app.core.exceptions import (
+    AuthorizationException,
     BusinessRuleException,
     NotFoundException,
     UnprocessableEntityException,
 )
-from app.core.file_storage import FileStorage, get_file_storage
+from app.core.file_storage import (
+    ArtifactExecution,
+    FileStorage,
+    get_file_storage,
+    is_owned_artifact,
+)
 from app.core.id_generator import next_id
 from app.core.tenant import PlatformContext, TenantContext
 from app.db.base import user_depts
@@ -34,6 +40,11 @@ from app.modules.system.models.user_transfer import UserExportTask
 from app.modules.system.schemas.user_transfer import (
     UserExportFilter,
     UserExportTaskQuery,
+)
+from app.modules.system.service.transfer_cleanup_service import (
+    guard_cleanup_rows,
+    lock_cleanup_row,
+    stage_cleanup,
 )
 from app.modules.system.service.user_import_template_service import (
     _build_dept_full_path,
@@ -283,6 +294,7 @@ async def export_users_to_excel(
     *,
     reason: str,
     file_storage: FileStorage | None = None,
+    artifact_execution: ArtifactExecution | None = None,
     tenant: TenantContext,
 ) -> tuple[bytes, int, str]:
     """导出用户到 Excel。
@@ -361,13 +373,21 @@ async def export_users_to_excel(
         xlsx_bytes = _build_excel(rows, dept_lookup)
 
         # 7. 写文件（30 天 TTL）
-        storage_key = await storage.save(
-            xlsx_bytes,
-            mime_type=_EXPORT_MIME_TYPE,
-            namespace=f"tenant-{tenant.tenant_id}-{_EXPORT_FILE_NAMESPACE}",
-            suffix=".xlsx",
-            ttl_seconds=_EXPORT_FILE_TTL_SECONDS,
-        )
+        if artifact_execution is not None:
+            if artifact_execution.tenant_id != tenant.tenant_id:
+                raise AuthorizationException("文件执行租户不匹配")
+            storage_key = await storage.save_artifact(
+                xlsx_bytes,
+                identity=artifact_execution.identity("export", task.export_id),
+            )
+        else:
+            storage_key = await storage.save(
+                xlsx_bytes,
+                mime_type=_EXPORT_MIME_TYPE,
+                namespace=f"tenant-{tenant.tenant_id}-{_EXPORT_FILE_NAMESPACE}",
+                suffix=".xlsx",
+                ttl_seconds=_EXPORT_FILE_TTL_SECONDS,
+            )
 
         # 8. UPDATE → SUCCESS
         finished_at = datetime.now()
@@ -492,32 +512,43 @@ async def cleanup_expired_export_tasks(
         删除的 task 行数
 
     设计要点：
-    - 不分 status 全删（CREATED 30 天前说明异步任务挂了；RUNNING 30 天前是 zombie；
-      SUCCESS / FAILED 是终态正常清理）。ExportTask 无状态机 CAS 需求，直接删。
-    - file_storage_key 缺失（FAILED task 没生成文件）不抛错
-    - file_storage_key 指向不存在的文件（被外部删了）也不抛错（FileStorage.delete
-      返 False 而非 raise；MockFileStorage 同款）
+    - 只处理终态 SUCCESS / FAILED；CREATED / RUNNING 不按年龄判定完成。
+    - 按上下文、确认、审计和任务锁序核对，未决或归属不明保留任务和文件。
+    - 服务层只暂存清理意图；task wrapper 提交成功后重新核对并清理私有产物。
     """
     if not platform.reason or not platform.correlation_id:
         raise BusinessRuleException("平台清理上下文无效")
     cutoff = datetime.now() - timedelta(days=30)
-    fs = get_file_storage()
-
-    stmt = select(UserExportTask).where(UserExportTask.created_at < cutoff)
-    tasks = (await db.execute(stmt)).scalars().all()
-
-    for task in tasks:
-        if task.file_storage_key:
-            try:
-                await fs.delete(task.file_storage_key)
-            except FileNotFoundError:
-                pass
+    tasks = list(
+        await db.scalars(
+            select(UserExportTask)
+            .where(
+                UserExportTask.created_at < cutoff,
+                UserExportTask.status.in_(
+                    [ExportTaskStatus.SUCCESS, ExportTaskStatus.FAILED]
+                ),
+            )
+            .order_by(UserExportTask.export_id)
+        )
+    )
+    intentions = await guard_cleanup_rows(db, tasks)
+    deleted = 0
+    for candidate in tasks:
+        intent = intentions.get(candidate.export_id)
+        if intent is None:
+            continue
+        task = await lock_cleanup_row(db, candidate, intent)
+        if (
+            task is None
+            or task.created_at >= cutoff
+            or task.status not in {ExportTaskStatus.SUCCESS, ExportTaskStatus.FAILED}
+        ):
+            continue
         await db.delete(task)
-
-    if tasks:
-        await db.flush()
-
-    return len(tasks)
+        stage_cleanup(db, intent)
+        deleted += 1
+    await db.flush()
+    return deleted
 
 
 async def download_export_file(
@@ -583,6 +614,16 @@ async def download_export_file(
 
     storage = file_storage or get_file_storage()
     try:
+        if is_owned_artifact(task.file_storage_key):
+            identity = await storage.artifact_identity(task.file_storage_key)
+            if (
+                identity.tenant_id != tenant.tenant_id
+                or identity.resource_id != task.export_id
+                or identity.role != "export"
+            ):
+                raise BusinessRuleException(
+                    "导出产物绑定无效", error_code="AI_ARTIFACT_UNVERIFIED"
+                )
         xlsx_bytes = await storage.read(task.file_storage_key)
     except FileNotFoundError as e:
         raise BusinessRuleException(

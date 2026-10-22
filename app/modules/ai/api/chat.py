@@ -309,10 +309,15 @@ async def _finalize_stream_turn(
 ) -> list[AiStreamEvent]:
     """建立 durability barrier：assistant/terminal commit 完成后才构造 done。"""
     if stream_error_code is not None:
+        from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+            OUTCOME_UNKNOWN_MESSAGE,
+        )
+
         failure_messages = {
             "AI_CHAT_STOPPED": "本次回复已停止。已完成的操作以工具回执为准，可以继续提问。",
             "AI_PROVIDER_UPSTREAM_ERROR": "模型服务暂时不可用，可以稍后重新提问。已完成的操作以工具回执为准。",
             "AI_USAGE_LIMIT_EXCEEDED": "本次处理达到调用上限。已完成的操作以工具回执为准；其余任务可以继续办理。",
+            "AI_EXECUTION_OUTCOME_UNKNOWN": OUTCOME_UNKNOWN_MESSAGE,
         }
         content = (
             failure_messages.get(
@@ -1247,8 +1252,15 @@ async def chat(
     # 注入 signal_event：execute_tool emit 事件 → push 到 queue
     custom_event_queue: asyncio.Queue[AiStreamEvent] = asyncio.Queue()
     suppress_provider_output = asyncio.Event()
+    execution_outcome_unknown = asyncio.Event()
 
     async def _signal_event(event: AiStreamEvent) -> None:
+        if (
+            isinstance(event, AiErrorEvent)
+            and event.error_code == "AI_EXECUTION_OUTCOME_UNKNOWN"
+        ):
+            execution_outcome_unknown.set()
+            suppress_provider_output.set()
         if (
             isinstance(event, ToolCallResultEvent)
             and not event.ok
@@ -1291,6 +1303,11 @@ async def chat(
                 await unified_queue.put(_format_sse_chunk(ev))
 
         async def produce_pydantic():
+            from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+                OUTCOME_UNKNOWN_MESSAGE,
+                PreparedExecutionOutcomeUnknown,
+            )
+
             nonlocal stream_error_code
             try:
                 async for chunk in adapter.encode_stream(event_stream):
@@ -1302,12 +1319,20 @@ async def chat(
                         if frame.get("type") == "error":
                             # Adapter errors can arrive as frames rather than
                             # exceptions. Never expose provider/internal text.
-                            stream_error_code = "AI_PROVIDER_UPSTREAM_ERROR"
+                            stream_error_code = (
+                                "AI_EXECUTION_OUTCOME_UNKNOWN"
+                                if execution_outcome_unknown.is_set()
+                                else "AI_PROVIDER_UPSTREAM_ERROR"
+                            )
                             await unified_queue.put(
                                 _format_sse_chunk(
                                     AiErrorEvent(
                                         error_code=stream_error_code,
-                                        message="本次回复未完成，请稍后重新提问",
+                                        message=(
+                                            OUTCOME_UNKNOWN_MESSAGE
+                                            if execution_outcome_unknown.is_set()
+                                            else "本次回复未完成，请稍后重新提问"
+                                        ),
                                     )
                                 )
                             )
@@ -1322,6 +1347,16 @@ async def chat(
                     # `data: {"type":"text-delta","delta":"..."}\n\n`）
                     _collect_text_delta(chunk, collected)
                     await unified_queue.put(chunk)
+            except PreparedExecutionOutcomeUnknown as exc:
+                execution_outcome_unknown.set()
+                suppress_provider_output.set()
+                deps.guard_handoff = True
+                stream_error_code = exc.error_code
+                await unified_queue.put(
+                    _format_sse_chunk(
+                        AiErrorEvent(error_code=exc.error_code, message=exc.message)
+                    )
+                )
             except UsageLimitExceeded as e:
                 # Agent 循环超过工具调用或请求次数限制。
                 # 显式 emit AiErrorEvent(AI_USAGE_LIMIT_EXCEEDED)，前端弹 $message.error
@@ -1339,7 +1374,10 @@ async def chat(
                     )
                 )
             except Exception as exc:
-                if is_provider_failure(exc):
+                if execution_outcome_unknown.is_set():
+                    stream_error_code = "AI_EXECUTION_OUTCOME_UNKNOWN"
+                    error_message = OUTCOME_UNKNOWN_MESSAGE
+                elif is_provider_failure(exc):
                     # 不记录上游异常文本，避免 body、URL 或密钥进入日志。
                     logger.warning(
                         "PydanticAI Provider stream failed",
@@ -1361,6 +1399,8 @@ async def chat(
                     )
                 )
             finally:
+                if execution_outcome_unknown.is_set():
+                    stream_error_code = "AI_EXECUTION_OUTCOME_UNKNOWN"
                 # The model stream may finish while tool events are still queued.
                 # Close and fully drain that queue before publishing the terminal
                 # sentinel; otherwise the consumer can stop before the final

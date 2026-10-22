@@ -39,6 +39,7 @@ def _mock_tool_ctx(db: object) -> SimpleNamespace:
         user=SimpleNamespace(user_id=11),
         db=db,
         tenant_id=0,
+        artifact_execution=None,
         tenant=tenant_context(tenant_id=0, actor_user_id=11),
     )
 

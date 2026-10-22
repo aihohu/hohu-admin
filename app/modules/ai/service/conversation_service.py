@@ -13,6 +13,7 @@ from app.modules.ai.schemas.message import MessageOut, MessageTombstoneOut
 from app.modules.ai.service.model_authorization_service import (
     model_authorization_service,
 )
+from app.modules.ai.service.reconciliation_annotation import reconciliation_notice
 from app.modules.ai.service.result_projection_service import (
     ProjectionLineage,
     result_projection_service,
@@ -155,6 +156,7 @@ class ConversationService:
                     AiConversation.deleted_at.is_(None),
                 )
                 .with_for_update()
+                .execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
         if obj is None:
@@ -300,6 +302,23 @@ class ConversationService:
             current_user.user_id,
             tenant=tenant,
         )
+        # Completion services depend on conversation/result projection services.
+        from app.modules.ai.service.completion_read_state_service import (  # noqa: PLC0415
+            completion_read_state_service,
+            effective_call_state,
+            project_verified_call,
+            project_verified_content,
+        )
+
+        completion_states = await completion_read_state_service.read(
+            tenant=tenant,
+            tool_call_ids=(
+                call["tool_call_id"]
+                for message in messages
+                for call in message.tool_calls or ()
+                if isinstance(call, dict) and isinstance(call.get("tool_call_id"), str)
+            ),
+        )
         projected: list[MessageOut | MessageTombstoneOut] = []
         for message in messages:
             if message.role == "user":
@@ -311,8 +330,52 @@ class ConversationService:
                 owner_user_id=current_user.user_id,
                 message=message,
             )
+            unknown_ids = {
+                call["tool_call_id"]
+                for call in message.tool_calls or ()
+                if isinstance(call, dict)
+                and isinstance(call.get("tool_call_id"), str)
+                and (state := effective_call_state(call, completion_states))
+                and state.unknown
+            }
+            if unknown_ids:
+                output = MessageOut.model_validate(message)
+                # Work on DTO copies: reading history never repairs persisted cards.
+                output.tool_calls = [
+                    {key: call[key] for key in ("tool", "tool_call_id") if key in call}
+                    if call.get("tool_call_id") in unknown_ids or not allowed
+                    else project_verified_call(call, completion_states)
+                    for call in output.tool_calls or ()
+                ]
+                output.parts = None
+                output.completed_tool_call_ids = []
+                content = (output.content or "") if allowed else ""
+                if any(
+                    completion_states[key].error_code
+                    == "AI_EXECUTION_RECONCILIATION_REQUIRED"
+                    for key in unknown_ids
+                    if key in completion_states
+                ):
+                    # Historic success/failure prose is not an authoritative outcome.
+                    content = ""
+                output.content = reconciliation_notice(
+                    project_verified_content(
+                        content, output.tool_calls, completion_states
+                    ),
+                    unknown_ids,
+                )
+                projected.append(output)
+                continue
             if allowed:
                 output = MessageOut.model_validate(message)
+                output.content = project_verified_content(
+                    output.content, output.tool_calls, completion_states
+                )
+                if output.tool_calls:
+                    output.tool_calls = [
+                        project_verified_call(call, completion_states)
+                        for call in output.tool_calls
+                    ]
                 lineage = result_projection_service.lineage_from_record(message)
                 if lineage is not None and output.tool_calls:
                     output.tool_calls = (
@@ -331,6 +394,7 @@ class ConversationService:
                     current_user,
                     owner_user_id=current_user.user_id,
                     message=message,
+                    completion_states=completion_states,
                 )
                 if receipt is not None:
                     projected.append(

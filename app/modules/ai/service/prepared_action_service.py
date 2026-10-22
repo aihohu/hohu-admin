@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any
+from uuid import UUID
 
 from pydantic import ValidationError
 from sqlalchemy import or_, select, update
@@ -604,6 +605,7 @@ class PreparedActionService:
                     AiConversation.deleted_at.is_(None),
                 )
                 .with_for_update()
+                .execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
         source = (
@@ -614,6 +616,7 @@ class PreparedActionService:
                     AiMessage.message_id == action_ref.source_user_message_id,
                 )
                 .with_for_update()
+                .execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
         action = (
@@ -645,6 +648,8 @@ class PreparedActionService:
         result_ui: dict[str, Any] | None = None,
         duration_ms: int | None = None,
         execution_owner: str | None = None,
+        expected_execution_owner: str | None = None,
+        retain_failed_owner: bool = False,
         execution_lease_expires_at: datetime | None = None,
         execution_lease_not_after: datetime | None = None,
         result_lineage: ProjectionLineage | None = None,
@@ -659,6 +664,28 @@ class PreparedActionService:
             )
         if result_lineage is not None and result_lineage.tenant_id != tenant.tenant_id:
             raise _binding_invalid("prepared action 结果 lineage 租户不一致")
+        if retain_failed_owner:
+            valid_owner = False
+            if expected_execution_owner and expected_execution_owner.startswith(
+                "v0162-db:"
+            ):
+                owner_id = expected_execution_owner.removeprefix("v0162-db:")
+                try:
+                    valid_owner = str(UUID(owner_id)) == owner_id
+                except ValueError:
+                    pass
+            if (
+                not valid_owner
+                or expected_status != PreparedActionStatus.RUNNING
+                or target_status != PreparedActionStatus.FAILED
+            ):
+                raise _binding_invalid("仅已确认回滚的新协议 DB 失败可保留 owner")
+        elif (
+            expected_execution_owner
+            and expected_execution_owner.startswith("v0162-")
+            and target_status == PreparedActionStatus.FAILED
+        ):
+            raise _binding_invalid("新协议失败必须保留原 owner 来源证明")
 
         now = datetime.now(UTC)
         values: dict[str, Any] = {
@@ -686,7 +713,9 @@ class PreparedActionService:
                 result_data=result_data,
                 result_ui=result_ui,
                 duration_ms=duration_ms,
-                execution_owner=None,
+                execution_owner=(
+                    expected_execution_owner if retain_failed_owner else None
+                ),
                 execution_lease_expires_at=None,
             )
             if replace_result_lineage:
@@ -710,10 +739,31 @@ class PreparedActionService:
 
         conditions = [
             AiPreparedAction.action_id == action_id,
+            ~select(AiOperationLog.log_id)
+            .where(
+                AiOperationLog.tenant_id == AiPreparedAction.tenant_id,
+                AiOperationLog.tool_call_id == AiPreparedAction.execute_tool_call_id,
+                AiOperationLog.result_summary.contains(
+                    "__v0162_reconciliation_v1", autoescape=True
+                ),
+            )
+            .exists(),
             AiPreparedAction.tenant_id == tenant.tenant_id,
             AiPreparedAction.status == expected_status.value,
             AiPreparedAction.row_version == expected_version,
         ]
+        if expected_execution_owner is not None:
+            conditions.append(
+                AiPreparedAction.execution_owner == expected_execution_owner
+            )
+        elif expected_status == PreparedActionStatus.RUNNING:
+            # Legacy timeout/cleanup callers cannot terminalize a protocol claim.
+            conditions.append(
+                or_(
+                    AiPreparedAction.execution_owner.is_(None),
+                    ~AiPreparedAction.execution_owner.startswith("v0162-"),
+                )
+            )
         if execution_lease_not_after is not None:
             cutoff = _as_utc(execution_lease_not_after)
             conditions.append(
@@ -763,6 +813,20 @@ class PreparedActionService:
         tenant: TenantContext,
     ) -> list[AiPreparedAction]:
         """Return only live actions whose conversation and source remain owned/active."""
+        unresolved_log = (
+            select(AiOperationLog.log_id)
+            .where(
+                AiOperationLog.tenant_id == AiPreparedAction.tenant_id,
+                AiOperationLog.tool_call_id == AiPreparedAction.execute_tool_call_id,
+                or_(
+                    AiOperationLog.status != "pending_confirmation",
+                    AiOperationLog.result_summary.contains(
+                        "__v0162_reconciliation_v1", autoescape=True
+                    ),
+                ),
+            )
+            .exists()
+        )
         stmt = (
             select(AiPreparedAction)
             .join(
@@ -782,6 +846,7 @@ class PreparedActionService:
                 AiPreparedAction.status
                 == PreparedActionStatus.PENDING_CONFIRMATION.value,
                 AiPreparedAction.expires_at > datetime.now(UTC),
+                ~unresolved_log,
                 AiConversation.user_id == user_id,
                 AiConversation.deleted_at.is_(None),
                 AiMessage.conversation_id == conversation_id,
@@ -823,7 +888,16 @@ class PreparedActionService:
             )
             .limit(1)
         )
-        return value is not None
+        if value is not None:
+            return True
+        from app.modules.ai.service.completion_read_state_service import (  # noqa: PLC0415
+            completion_read_state_service,
+        )
+
+        states = await completion_read_state_service.read(
+            tenant=tenant, conversation_id=conversation_id, user_id=user_id
+        )
+        return any(state.unknown for state in states.values())
 
     async def expire_for_conversation_delete(
         self,
@@ -834,6 +908,48 @@ class PreparedActionService:
         tenant: TenantContext,
     ) -> list[AiPreparedAction]:
         """Lock and terminalize deletable actions after the conversation lock."""
+        from app.modules.ai.service.atomic_completion_service import (  # noqa: PLC0415
+            DB_TOOLS,
+            FILE_TOOLS,
+            atomic_completion_service,
+        )
+
+        # The conversation lock excludes new compliant claims. Locate source
+        # IDs without locking PA rows, then take all sources before any PA/log.
+        references = list(
+            (
+                await db.scalars(
+                    select(AiPreparedAction.source_user_message_id).where(
+                        AiPreparedAction.tenant_id == tenant.tenant_id,
+                        AiPreparedAction.conversation_id == conversation_id,
+                    )
+                )
+            ).all()
+        )
+        references.extend(
+            (
+                await db.scalars(
+                    select(AiOperationLog.source_user_message_id).where(
+                        AiOperationLog.tenant_id == tenant.tenant_id,
+                        AiOperationLog.conversation_id == conversation_id,
+                        AiOperationLog.source_user_message_id.is_not(None),
+                    )
+                )
+            ).all()
+        )
+        sources = {
+            source.message_id: source
+            for source in await db.scalars(
+                select(AiMessage)
+                .where(
+                    AiMessage.tenant_id == tenant.tenant_id,
+                    AiMessage.message_id.in_(set(references)),
+                )
+                .order_by(AiMessage.message_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        }
         nonterminal = (
             PreparedActionStatus.PREPARED.value,
             PreparedActionStatus.PENDING_CONFIRMATION.value,
@@ -848,7 +964,6 @@ class PreparedActionService:
                         AiPreparedAction.conversation_id == conversation_id,
                         AiPreparedAction.user_id == user_id,
                         AiPreparedAction.tenant_id == tenant.tenant_id,
-                        AiPreparedAction.status.in_(nonterminal),
                     )
                     .order_by(AiPreparedAction.action_id.asc())
                     .with_for_update()
@@ -858,13 +973,113 @@ class PreparedActionService:
             .scalars()
             .all()
         )
+        logs = {
+            log.tool_call_id: log
+            for log in await db.scalars(
+                select(AiOperationLog)
+                .where(
+                    AiOperationLog.tenant_id == tenant.tenant_id,
+                    AiOperationLog.conversation_id == conversation_id,
+                )
+                .order_by(AiOperationLog.log_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        }
+        conversation = await db.get(AiConversation, conversation_id)
+        bound_calls = {action.execute_tool_call_id for action in actions}
+        unresolved = False
+        for log in logs.values():
+            from app.modules.ai.service.preflight_completion_service import (  # noqa: PLC0415
+                has_preflight_marker,
+                is_verified_preflight,
+            )
+
+            if (
+                log.readonly_snapshot and not has_preflight_marker(log.result_summary)
+            ) or log.tool_call_id in bound_calls:
+                continue
+
+            if await is_verified_preflight(
+                db,
+                log,
+                conversation,
+                sources.get(log.source_user_message_id),
+                tenant_id=tenant.tenant_id,
+                user_id=user_id,
+            ):
+                continue
+            from app.modules.ai.service.preview_completion_service import (  # noqa: PLC0415
+                verify_historical_preview,
+            )
+
+            try:
+                await verify_historical_preview(
+                    db,
+                    log,
+                    conversation,
+                    sources.get(log.source_user_message_id),
+                    tenant_id=tenant.tenant_id,
+                    user_id=log.user_id,
+                )
+            except (BusinessRuleException, TypeError, ValueError):
+                unresolved = True
+        for action in actions:
+            if action.status in {"running", "approved"}:
+                unresolved = True
+            elif action.status in {"succeeded", "failed"} and (
+                action.execute_tool_name in DB_TOOLS | FILE_TOOLS
+            ):
+                operation = logs.get(action.execute_tool_call_id)
+                try:
+                    if operation is None or (
+                        action.status == "failed"
+                        and action.execute_tool_name in FILE_TOOLS
+                    ):
+                        raise _binding_invalid("操作缺少可信完成事实")
+                    atomic_completion_service.validate_locked_terminal(
+                        action,
+                        operation,
+                        tenant=tenant,
+                        conversation=conversation,
+                        source=sources.get(action.source_user_message_id),
+                    )
+                except BusinessRuleException:
+                    unresolved = True
+            elif action.status in {"rejected", "expired"} and (
+                action.execute_tool_name in DB_TOOLS | FILE_TOOLS
+            ):
+                operation = logs.get(action.execute_tool_call_id)
+                try:
+                    atomic_completion_service.validate_locked_unexecuted_terminal(
+                        action,
+                        operation,
+                        tenant=tenant,
+                        conversation=conversation,
+                        source=sources.get(action.source_user_message_id),
+                    )
+                except BusinessRuleException:
+                    unresolved = True
+        if unresolved:
+            error = BusinessRuleException(
+                "会话仍有执行结果待核对的操作，请核对完成后再删除",
+                error_code="AI_ACTION_RUNNING",
+            )
+            error.code = 409
+            raise error
+        actions = [action for action in actions if action.status in nonterminal]
         now = datetime.now(UTC)
         live_running = [
             action
             for action in actions
             if action.status == PreparedActionStatus.RUNNING.value
-            and action.execution_lease_expires_at is not None
-            and _as_utc(action.execution_lease_expires_at) > now
+            and (
+                (action.execution_owner or "").startswith("v0162-")
+                or (
+                    action.execution_lease_expires_at is not None
+                    and _as_utc(action.execution_lease_expires_at) > now
+                )
+            )
         ]
         if live_running:
             error = BusinessRuleException(
@@ -910,6 +1125,7 @@ class PreparedActionService:
                         )
                         .order_by(AiOperationLog.log_id.asc())
                         .with_for_update()
+                        .execution_options(populate_existing=True)
                     )
                 )
                 .scalars()
