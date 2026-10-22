@@ -1,11 +1,6 @@
 """Exercise release failure gates and retry behavior without publishing anything."""
 
-import os
 import re
-import shutil
-import subprocess
-import tempfile
-import textwrap
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -119,7 +114,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         for ref in ("refs/heads/feature", "refs/tags/v0.1.5"):
             self.assertFalse(enabled("docker", ref=ref))
         self.assertEqual(WORKFLOW.count("value=${{ inputs.version }}"), 0)
-        self.assertEqual(WORKFLOW.count("value=${{ needs.prepare.outputs.tag }}"), 2)
+        self.assertEqual(WORKFLOW.count("value=${{ needs.prepare.outputs.tag }}"), 1)
 
     def test_manual_test_build_only_accepts_default_branch_and_never_announces(self):
         self.assertTrue(
@@ -157,69 +152,15 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertFalse(enabled("github-release", repository="someone/fork"))
         self.assertFalse(enabled("github-release", event="push"))
 
-    def test_publication_retries_preserve_announcements_and_reject_moved_tags(self):
-        bash = (
-            shutil.which("bash")
-            if os.name != "nt"
-            else "C:/Program Files/Git/bin/bash.exe"
-        )
-        if not bash or not Path(bash).is_file():
-            self.skipTest("Bash is required for shell workflow regression")
-        script = textwrap.dedent(job("github-release").rsplit("        run: |\n", 1)[1])
-        mocks = """
-python3() {
-  test "$MOCK_SHA" = "$SOURCE_SHA"
-}
-gh() {
-  echo "$*" >> "$CALLS"
-  if [[ "$2" == 'view' ]]; then
-    case "$MODE" in
-      new) return 1 ;;
-      draft) echo true ;;
-      existing) echo false ;;
-    esac
-  fi
-}
-"""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            path = root / "publish.sh"
-            path.write_text(mocks + script, encoding="utf-8", newline="\n")
-            for mode, sha, expected in (
-                ("new", "a" * 40, "release create"),
-                ("draft", "a" * 40, "release edit"),
-                ("existing", "a" * 40, None),
-                ("new", "b" * 40, None),
-            ):
-                with self.subTest(mode=mode, sha=sha):
-                    calls = root / f"{mode}-{sha}.txt"
-                    env = {
-                        **os.environ,
-                        "MODE": mode,
-                        "MOCK_SHA": sha,
-                        "SOURCE_SHA": "a" * 40,
-                        "RELEASE_TAG": "v0.1.5",
-                        "CALLS": calls.as_posix(),
-                    }
-                    result = subprocess.run(
-                        [bash, path.as_posix()],
-                        env=env,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-                    self.assertEqual(
-                        result.returncode, 0 if sha == "a" * 40 else 1, result.stderr
-                    )
-                    commands = calls.read_text() if calls.exists() else ""
-                    if expected:
-                        self.assertIn(expected, commands)
-                        self.assertIn(
-                            "--notes-file .local/artifacts/release-notes.md", commands
-                        )
-                    else:
-                        self.assertNotIn("release create", commands)
-                        self.assertNotIn("release edit", commands)
+    def test_announcement_uses_verified_record_and_keeps_private_auth_scoped(self):
+        publication = job("github-release")
+        self.assertIn("run: python3 -B -m tools.ops.release_build publish", publication)
+        self.assertIn("actions: read", publication)
+        self.assertIn("environment: docker", publication)
+        self.assertNotIn("--clobber", publication)
+        self.assertNotIn("gh release create", publication)
+        self.assertIn("release_build restore", job("acr"))
+        self.assertIn("actions: read", job("acr"))
 
 
 if __name__ == "__main__":

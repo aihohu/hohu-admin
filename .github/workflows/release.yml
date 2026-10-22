@@ -27,6 +27,12 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+  RELEASE_TAG: ${{ inputs.version }}
+  ACR_MIRROR_ENABLED: ${{ vars.ACR_MIRROR_ENABLED }}
+  ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
+  ACR_REPOSITORY: ${{ vars.ACR_REPOSITORY }}
+  RELEASE_EXCLUSIVE_WRITER_CONFIRMED: ${{ vars.RELEASE_EXCLUSIVE_WRITER_CONFIRMED }}
 
 jobs:
   prepare:
@@ -202,6 +208,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     environment: docker
+    env:
+      REGISTRY_AUTH_FILE: ${{ github.workspace }}/.local/private/release-auth.json
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       tags: ${{ steps.meta.outputs.tags || steps.test_tag.outputs.tags }}
@@ -215,6 +223,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+
+      - name: Refuse formal build reruns before any build preparation
+        env:
+          RELEASE_MODE: ${{ needs.prepare.outputs.mode }}
+        run: python3 -B -m tools.ops.release_build guard --mode "$RELEASE_MODE"
 
       - name: Record source commit
         id: source
@@ -239,7 +252,7 @@ jobs:
             echo '::error::Configure ACR_USERNAME, ACR_PASSWORD and set ACR_MIRROR_ENABLED=true before running a manual mirror test.'
             exit 1
           fi
-          python3 tools/ops/sync_image_mirror.py validate \
+          python3 -B -m tools.ops.sync_image_mirror validate \
             --source "$REGISTRY/$IMAGE_NAME" --registry "$ACR_REGISTRY" --repository "$ACR_REPOSITORY"
 
       - name: Generate isolated test image tag
@@ -252,8 +265,24 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          tag="$(python3 tools/ops/sync_image_mirror.py test-tag --sha "$SOURCE_SHA" --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT")"
+          tag="$(python3 -B -m tools.ops.sync_image_mirror test-tag --sha "$SOURCE_SHA" --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT")"
           printf 'tags=%s/%s:%s\n' "$REGISTRY" "$IMAGE_NAME" "$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Install release registry tooling
+        if: needs.prepare.outputs.mode == 'release'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes skopeo
+
+      - name: Prove complete versions absent before the first formal build
+        if: needs.prepare.outputs.mode == 'release'
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_PASSWORD: ${{ github.token }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+          RELEASE_EXCLUSIVE_WRITER_CONFIRMED: ${{ vars.RELEASE_EXCLUSIVE_WRITER_CONFIRMED }}
+        run: python3 -B -m tools.ops.release_build preflight
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -276,9 +305,8 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=semver,pattern={{version}},value=${{ needs.prepare.outputs.tag }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ needs.prepare.outputs.tag }}
           flavor: |
-            latest=true
+            latest=false
 
       - name: Build and push Docker image
         id: build
@@ -295,6 +323,34 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Freeze the original build digest and platform evidence
+        if: needs.prepare.outputs.mode == 'release'
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_PASSWORD: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$(dirname "$REGISTRY_AUTH_FILE")"
+          printf '%s' "$GHCR_PASSWORD" | skopeo login --tls-verify=true --authfile "$REGISTRY_AUTH_FILE" --username "$GHCR_USERNAME" --password-stdin ghcr.io
+          python3 -B -m tools.ops.release_build record
+
+      - name: Save the unique original build record
+        if: needs.prepare.outputs.mode == 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: component-build-${{ github.run_id }}-1
+          path: .local/artifacts/component-build.json
+          include-hidden-files: true
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+
+      - name: Remove build verification credentials
+        if: always()
+        run: rm -f -- "$REGISTRY_AUTH_FILE"
+
   acr:
     name: Sync and anonymously verify ACR image
     needs: docker
@@ -307,6 +363,7 @@ jobs:
     environment: docker
     permissions:
       contents: read
+      actions: read
       packages: read
     env:
       SOURCE_IMAGE: ghcr.io/${{ github.repository }}
@@ -338,7 +395,7 @@ jobs:
           ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
         run: |
           set -euo pipefail
-          python3 tools/ops/sync_image_mirror.py validate \
+          python3 -B -m tools.ops.sync_image_mirror validate \
             --source "$SOURCE_IMAGE" --registry "$ACR_REGISTRY" --repository "$ACR_REPOSITORY"
           if [[ -z "$ACR_USERNAME" || -z "$ACR_PASSWORD" ]]; then
             echo '::error::Configure ACR_USERNAME and ACR_PASSWORD.'
@@ -349,13 +406,19 @@ jobs:
           printf '%s' "$GHCR_PASSWORD" | skopeo login --tls-verify=true --authfile "$REGISTRY_AUTH_FILE" --username "$GHCR_USERNAME" --password-stdin ghcr.io
           printf '%s' "$ACR_PASSWORD" | skopeo login --tls-verify=true --authfile "$REGISTRY_AUTH_FILE" --username "$ACR_USERNAME" --password-stdin "$ACR_REGISTRY"
 
+      - name: Restore only the first successful build from this run
+        if: inputs.mode == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B -m tools.ops.release_build restore
+
       - name: Copy pinned image and verify anonymous downloads
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$MIRROR_WORK_DIR"
           printf '%s\n' "$IMAGE_TAGS" > "$MIRROR_WORK_DIR/tags.txt"
-          python3 tools/ops/sync_image_mirror.py sync \
+          python3 -B -m tools.ops.sync_image_mirror sync \
             --source "$SOURCE_IMAGE" --registry "$ACR_REGISTRY" --repository "$ACR_REPOSITORY" \
             --digest "$IMAGE_DIGEST" --tags-file "$MIRROR_WORK_DIR/tags.txt" \
             --work-dir "$MIRROR_WORK_DIR" --report "$MIRROR_REPORT"
@@ -387,9 +450,14 @@ jobs:
           (needs.acr.result == 'success' ||
            (needs.acr.result == 'skipped' && vars.ACR_MIRROR_ENABLED != 'true')) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 60
+    environment: docker
+    env:
+      REGISTRY_AUTH_FILE: ${{ github.workspace }}/.local/private/release-auth.json
     permissions:
       contents: write
+      actions: read
+      packages: read
     steps:
       - uses: actions/checkout@v6
         with:
@@ -400,6 +468,27 @@ jobs:
         with:
           python-version: '3.13'
 
+      - name: Install delivery verification tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes skopeo
+
+      - name: Authenticate delivery readers
+        env:
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_PASSWORD: ${{ github.token }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$(dirname "$REGISTRY_AUTH_FILE")"
+          printf '%s' "$GHCR_PASSWORD" | skopeo login --tls-verify=true --authfile "$REGISTRY_AUTH_FILE" --username "$GHCR_USERNAME" --password-stdin ghcr.io
+          if [[ "$ACR_MIRROR_ENABLED" == 'true' ]]; then
+            test -n "$ACR_USERNAME" && test -n "$ACR_PASSWORD"
+            printf '%s' "$ACR_PASSWORD" | skopeo login --tls-verify=true --authfile "$REGISTRY_AUTH_FILE" --username "$ACR_USERNAME" --password-stdin "$ACR_REGISTRY"
+          fi
+
       - name: Extract release notes from the built source
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
@@ -408,19 +497,8 @@ jobs:
       - name: Publish release without overwriting an existing announcement
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
-          SOURCE_SHA: ${{ needs.docker.outputs.commit }}
-        run: |
-          set -euo pipefail
-          python3 -B -m tools.ops.release_tag verify
-          if draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')"; then
-            if [[ "$draft" == 'true' ]]; then
-              gh release edit "$RELEASE_TAG" --draft=false --notes-file .local/artifacts/release-notes.md
-            else
-              echo "Release $RELEASE_TAG already published; keeping its existing notes."
-            fi
-          else
-            gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" \
-              --notes-file .local/artifacts/release-notes.md
-          fi
+        run: python3 -B -m tools.ops.release_build publish
+
+      - name: Remove delivery verification credentials
+        if: always()
+        run: rm -f -- "$REGISTRY_AUTH_FILE"

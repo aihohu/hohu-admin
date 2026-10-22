@@ -44,6 +44,30 @@ DIGEST = "sha256:" + hashlib.sha256(RAW).hexdigest()
 
 
 class ImageMirrorTests(unittest.TestCase):
+    def test_standalone_script_keeps_working_without_installed_application(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-E",
+                "-S",
+                str(TOOL),
+                "test-tag",
+                "--sha",
+                "a" * 40,
+                "--run-id",
+                "123",
+                "--run-attempt",
+                "1",
+            ],
+            cwd=TOOL.parent,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "test-aaaaaaaaaaaa-123-1")
+
     def test_shared_build_disables_attestations_and_keeps_both_architectures(self):
         workflow = (TOOL.parents[2] / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
@@ -118,6 +142,9 @@ class ImageMirrorTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.calls = []
+        probe = patch.object(mirror, "probe_digest", return_value=None)
+        probe.start()
+        self.addCleanup(probe.stop)
 
     def transport(self, arguments, *, timeout):
         self.calls.append((arguments, timeout))
