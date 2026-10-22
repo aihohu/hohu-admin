@@ -32,7 +32,7 @@ from app.core.exceptions import (
     NotFoundException,
     UnprocessableEntityException,
 )
-from app.core.file_storage import FileStorage, get_file_storage
+from app.core.file_storage import ArtifactExecution, FileStorage, get_file_storage
 from app.core.id_generator import next_id
 from app.core.security import get_password_hash
 from app.core.tenant import PlatformContext, TenantContext
@@ -57,6 +57,11 @@ from app.modules.system.schemas.user_transfer import (
     UserImportRecord,
 )
 from app.modules.system.service.grant_authority import grant_authority_service
+from app.modules.system.service.transfer_cleanup_service import (
+    guard_cleanup_rows,
+    lock_cleanup_row,
+    stage_cleanup,
+)
 from app.modules.system.service.user_department_assignment_service import (
     user_department_assignment_service,
 )
@@ -998,6 +1003,7 @@ async def batch_create_users_from_records(
     on_conflict: Literal["skip", "overwrite", "fail_fast"] = "skip",
     sync_mode: EmployeeNoSyncMode = EmployeeNoSyncMode.CREATE_ONLY,
     file_storage: FileStorage | None = None,
+    artifact_execution: ArtifactExecution | None = None,
     has_role_column: bool | None = None,
     tenant: TenantContext,
 ) -> ImportResult:
@@ -1357,12 +1363,20 @@ async def batch_create_users_from_records(
     failed_rows_file: str | None = None
     if failed_rows:
         xlsx_bytes = _failed_rows_to_xlsx_bytes(failed_rows)
-        failed_rows_file = await storage.save(
-            xlsx_bytes,
-            mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            namespace=f"tenant-{tenant.tenant_id}-import-error",
-            suffix=".xlsx",
-        )
+        if artifact_execution is not None:
+            if artifact_execution.tenant_id != tenant.tenant_id:
+                raise AuthorizationException("文件执行租户不匹配")
+            failed_rows_file = await storage.save_artifact(
+                xlsx_bytes,
+                identity=artifact_execution.identity("import_errors", batch.batch_id),
+            )
+        else:
+            failed_rows_file = await storage.save(
+                xlsx_bytes,
+                mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                namespace=f"tenant-{tenant.tenant_id}-import-error",
+                suffix=".xlsx",
+            )
 
     # 11. 根据执行结果进入终态。
     end_status = _determine_end_status(
@@ -1702,6 +1716,22 @@ async def cancel_batch(
     if batch.operator_id != operator.user_id and not is_super_admin(operator):
         raise AuthorizationException("无权取消此批次")
 
+    storage = file_storage or get_file_storage()
+    intentions = await guard_cleanup_rows(db, [batch], storage=storage)
+    intent = intentions.get(batch_id)
+    if intent is None:
+        raise BusinessRuleException(
+            "批次关联操作或文件归属待核对，暂不能取消",
+            error_code="AI_EXECUTION_OUTCOME_UNKNOWN",
+        )
+    # The ordinary HTTP chunk worker keeps its cooperative cancellation signal.
+    # An AI running/unknown dependency was rejected by the context guard above.
+    if batch.status != ImportBatchStatus.RUNNING:
+        batch = await lock_cleanup_row(db, batch, intent)
+        if batch is None:
+            raise BusinessRuleException(
+                "批次绑定已变化", error_code="AI_EXECUTION_OUTCOME_UNKNOWN"
+            )
     now = datetime.now(UTC)
 
     if batch.status == ImportBatchStatus.PREVIEW_DONE:
@@ -1741,16 +1771,8 @@ async def cancel_batch(
             },
         )
 
-        # 清理预览文件和 Redis 缓存。
-        storage = file_storage or get_file_storage()
-        try:
-            await storage.delete(batch.file_storage_key)
-        except FileNotFoundError:
-            # 文件已被 cleanup cron 清理 / never existed — 不影响 cancel 主流程
-            pass
-        await redis_module.redis_client.delete(
-            f"tenant:{tenant.tenant_id}:{_PREVIEW_REDIS_PREFIX}{batch.preview_token}"
-        )
+        # The API owner commits cancellation before any irreversible deletion.
+        stage_cleanup(db, intent)
 
         return batch
 
@@ -1791,40 +1813,41 @@ async def cleanup_expired_batches(
         - CREATED 90 天前不可能存在（dry_run 即时转入 PREVIEW_DONE）
         - PREVIEW_DONE 应由 ``cleanup_expired_previews`` 处理
         - RUNNING 90 天前是 zombie，归 ``JobLogMonitor`` 类孤儿监控
-    - failed_rows_file / file_storage_key 缺失（None 或文件已被外部删）不抛错，
-      继续删 DB 行（防 dangling file 阻塞 cleanup）
+    - 无文件引用可在依赖核对后删除；引用缺失/归属不明保留证据。
+    - 本函数仅暂存物理清理意图，事务提交成功后由 task wrapper 核对清理。
     """
     if not platform.reason or not platform.correlation_id:
         raise AuthorizationException("平台清理上下文无效")
     cutoff = datetime.now(UTC) - timedelta(days=90)
-    fs = get_file_storage()
     terminal_values = [s.value for s in TERMINAL_STATUSES]
-
-    stmt = select(UserImportBatch).where(
-        UserImportBatch.created_at < cutoff,
-        UserImportBatch.status.in_(terminal_values),
+    batches = list(
+        await db.scalars(
+            select(UserImportBatch)
+            .where(
+                UserImportBatch.created_at < cutoff,
+                UserImportBatch.status.in_(terminal_values),
+            )
+            .order_by(UserImportBatch.batch_id)
+        )
     )
-    batches = (await db.execute(stmt)).scalars().all()
-
-    for batch in batches:
-        if batch.failed_rows_file:
-            try:
-                await fs.delete(batch.failed_rows_file)
-            except FileNotFoundError:
-                pass
-        if batch.file_storage_key:
-            try:
-                await fs.delete(batch.file_storage_key)
-            except FileNotFoundError:
-                pass
+    intentions = await guard_cleanup_rows(db, batches)
+    deleted = 0
+    for candidate in batches:
+        intent = intentions.get(candidate.batch_id)
+        if intent is None:
+            continue
+        batch = await lock_cleanup_row(db, candidate, intent)
+        if (
+            batch is None
+            or batch.created_at >= cutoff
+            or batch.status not in TERMINAL_STATUSES
+        ):
+            continue
         await db.delete(batch)
-        # batch_log FK ondelete=CASCADE 自动跟着删（DB 层触发，flush 后生效）
-
-    if batches:
-        # 触发 DELETE SQL + CASCADE，让调用方查询时数据一致
-        await db.flush()
-
-    return len(batches)
+        stage_cleanup(db, intent)
+        deleted += 1
+    await db.flush()
+    return deleted
 
 
 async def cleanup_expired_previews(
@@ -1841,24 +1864,34 @@ async def cleanup_expired_previews(
     设计要点：
     - 用 CAS ``_transition_batch_status(PREVIEW_DONE → EXPIRED)`` 防并发覆盖：
       用户在 10min 边界刚 cancel / 刚 execute 时，CAS rowcount=0，本函数跳过不报错
-    - 删 file_storage_key 用 ``try/except FileNotFoundError`` 兜底（cancel 流程
-      可能已删过；双重删除不抛错）
+    - 未决关联操作、缺失或无归属文件不按 TTL 自动清理；物理删除在提交后核对。
     - 写入 EXPIRED 批次日志，
       operator_id 用 batch.operator_id（系统触发但归属原操作人，便于审计反查）
     """
     if not platform.reason or not platform.correlation_id:
         raise AuthorizationException("平台清理上下文无效")
     cutoff = datetime.now(UTC) - timedelta(minutes=10)
-    fs = get_file_storage()
-
     stmt = select(UserImportBatch).where(
         UserImportBatch.status == ImportBatchStatus.PREVIEW_DONE,
         UserImportBatch.created_at < cutoff,
     )
-    batches = (await db.execute(stmt)).scalars().all()
+    batches = (
+        (await db.execute(stmt.order_by(UserImportBatch.batch_id))).scalars().all()
+    )
+    intentions = await guard_cleanup_rows(db, batches)
 
     expired_count = 0
-    for batch in batches:
+    for candidate in batches:
+        intent = intentions.get(candidate.batch_id)
+        if intent is None:
+            continue
+        batch = await lock_cleanup_row(db, candidate, intent)
+        if (
+            batch is None
+            or batch.created_at >= cutoff
+            or batch.status != ImportBatchStatus.PREVIEW_DONE
+        ):
+            continue
         success = await _transition_batch_status(
             db,
             batch.batch_id,
@@ -1870,11 +1903,7 @@ async def cleanup_expired_previews(
         if not success:
             continue
 
-        if batch.file_storage_key:
-            try:
-                await fs.delete(batch.file_storage_key)
-            except FileNotFoundError:
-                pass
+        stage_cleanup(db, intent)
 
         db.add(
             UserImportBatchLog(

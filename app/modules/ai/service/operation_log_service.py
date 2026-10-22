@@ -36,9 +36,14 @@ from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
+from app.modules.ai.service.reconciliation_annotation import (
+    has_annotation,
+    require_unannotated,
+)
 
 _TARGET_TYPE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _TARGET_ID_RE = re.compile(r"^[1-9][0-9]*$")
+_BATCH_ID_RE = re.compile(r"^[A-Za-z0-9_-]{32}$")
 
 
 def _now_not_before(*timestamps: datetime | None) -> datetime:
@@ -61,7 +66,8 @@ def build_target_summary(subject_refs: Any) -> str | None:
             subject_type
         ):
             return None
-        if not isinstance(subject_id, str) or not _TARGET_ID_RE.fullmatch(subject_id):
+        pattern = _BATCH_ID_RE if subject_type == "user_import_batch" else _TARGET_ID_RE
+        if not isinstance(subject_id, str) or not pattern.fullmatch(subject_id):
             return None
         normalized.add((subject_type, subject_id))
     if not normalized:
@@ -70,7 +76,11 @@ def build_target_summary(subject_refs: Any) -> str | None:
         {"id": subject_id, "type": subject_type}
         for subject_type, subject_id in sorted(
             normalized,
-            key=lambda item: (int(item[1]), item[0]),
+            key=lambda item: (
+                (1, item[0], item[1])
+                if item[0] == "user_import_batch"
+                else (0, int(item[1]), item[0])
+            ),
         )
     ]
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -374,9 +384,22 @@ class OperationLogService:
         接到唤醒后调用 ``mark_running``。
         """
         log = await self._get(db, log_id, tenant=tenant)
+        require_unannotated(log.result_summary)
         log.approved_by = approved_by
         await db.flush()
         return log
+
+    async def has_reconciliation_annotation(self, db, tool_call_id, *, user_id, tenant):
+        summary = (
+            await db.execute(
+                select(AiOperationLog.result_summary).where(
+                    AiOperationLog.tenant_id == tenant.tenant_id,
+                    AiOperationLog.user_id == user_id,
+                    AiOperationLog.tool_call_id == tool_call_id,
+                )
+            )
+        ).scalar_one_or_none()
+        return has_annotation(summary)
 
     async def get_by_tool_call_id(
         self,
@@ -482,6 +505,8 @@ class OperationLogService:
         self, db: AsyncSession, log: AiOperationLog, *, tenant: TenantContext
     ) -> None:
         """Prepared writes complete only through the bound atomic transaction."""
+
+        require_unannotated(log.result_summary)
         if log.readonly_snapshot:
             return
         action_id = await db.scalar(
@@ -506,6 +531,7 @@ class OperationLogService:
     ) -> AiOperationLog | None:
         """CAS pending transition so wake/cleanup races cannot overwrite each other."""
         log = await self._get(db, log_id, tenant=tenant)
+        require_unannotated(log.result_summary)
         if log.status != AiOperationStatus.PENDING_CONFIRMATION.value:
             return None
         finished_at = values.get("finished_at")
@@ -540,6 +566,8 @@ class OperationLogService:
           - 已终态（success/failed/rejected/expired）不可再迁移
           - 其它状态可迁到任意非终态（pending_confirmation ↔ running 允许双向？不允许：只能向前）
         """
+
+        require_unannotated(log.result_summary)
         current = AiOperationStatus(log.status)
         if current.is_terminal:
             raise BusinessRuleException(

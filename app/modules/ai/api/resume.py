@@ -879,6 +879,23 @@ async def resume_chat(
     ):
         raise AuthorizationException(error_code="AI_RESUME_FORBIDDEN")
 
+    if durable_action is not None:
+        annotated = await operation_log_service.has_reconciliation_annotation(
+            db,
+            durable_action.execute_tool_call_id,
+            user_id=current_user.user_id,
+            tenant=tenant,
+        )
+        if annotated:
+
+            async def reconciliation_stream():
+                for event in _unknown_resume_events(durable_action.trace_id):
+                    yield _format_sse_chunk(event)
+
+            return StreamingResponse(
+                reconciliation_stream(), media_type="text/event-stream"
+            )
+
     if _requires_completion_proof(durable_action):
         # A transport cache cannot grant, expire or erase durable execution.
         from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415

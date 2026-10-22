@@ -251,7 +251,9 @@ def _completion_response(action):  # noqa: ANN001
 def _make_db():
     """Request-session IO stays awaitable when entry guards issue real SQL."""
     db = MagicMock()
-    db.execute = AsyncMock()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = None
+    db.execute = AsyncMock(return_value=result)
     db.commit = AsyncMock()
     db.rollback = AsyncMock()
     db.invalidate = AsyncMock()
@@ -336,7 +338,7 @@ class TestConfirmSuccess:
     async def test_legacy_approve_without_permission_expires_and_cleans_pending(
         self,
     ) -> None:
-        log = SimpleNamespace(log_id=77)
+        log = SimpleNamespace(log_id=77, result_summary=None)
         with (
             patch(
                 "app.modules.ai.api.confirm.hitl_manager.get_pending",
@@ -396,6 +398,120 @@ class TestConfirmSuccess:
 
 
 class TestPreparedConfirmation:
+    async def test_readonly_commit_timeout_quarantines_before_dependency_teardown(
+        self, monkeypatch
+    ):
+        import asyncio
+
+        from app.db import session as session_module
+        from app.modules.ai.agents.gateway import atomic_execution
+
+        pending = _make_prepared_action(interaction_flow="direct")
+        approved = _make_prepared_action(status="approved", interaction_flow="direct")
+        running = _make_prepared_action(status="running", interaction_flow="direct")
+        for action in (pending, approved, running):
+            action.execute_tool_name = "user.count"
+            action.execution_owner = None
+        registered = RegisteredTool(
+            meta=AiToolMeta(
+                name="user.count",
+                agent="user_mgmt",
+                summary="Readonly confirmation",
+                required_perms=("system:user:list",),
+                risk="low",
+                readonly=True,
+            ),
+            fn=AsyncMock(),
+        )
+        db = _make_db()
+        db.info = {}
+        cancelled, release = asyncio.Event(), asyncio.Event()
+
+        async def delayed_commit():
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                await release.wait()
+
+        db.commit = delayed_commit
+        monkeypatch.setattr(atomic_execution, "_COMMIT_TIMEOUT_SEC", 0.01)
+        monkeypatch.setattr(session_module, "AsyncSessionLocal", lambda: db)
+        dependency = session_module.get_db(SimpleNamespace(state=SimpleNamespace()))
+        assert await anext(dependency) is db
+        try:
+            with (
+                patch(
+                    "app.modules.ai.agents.tools.registry.ToolRegistry.get",
+                    return_value=SimpleNamespace(find=lambda _name: registered),
+                ),
+                patch(
+                    "app.modules.ai.api.confirm.prepared_action_service.get_by_confirmation_id",
+                    AsyncMock(return_value=pending),
+                ),
+                patch(
+                    "app.modules.ai.api.confirm.prepared_action_service.lock_confirmation_context",
+                    AsyncMock(return_value=_make_prepared_context(pending)),
+                ),
+                patch(
+                    "app.modules.ai.api.confirm.prepared_action_service.validate_snapshot",
+                    AsyncMock(),
+                ),
+                patch(
+                    "app.modules.ai.api.confirm.prepared_action_service.validate_data_scope_snapshot"
+                ),
+                patch(
+                    "app.modules.ai.api.confirm.prepared_action_service.transition_status",
+                    AsyncMock(side_effect=[approved, running]),
+                ),
+                patch(
+                    "app.modules.ai.api.confirm.operation_log_service.get_by_tool_call_id",
+                    AsyncMock(return_value=None),
+                ),
+                patch(
+                    "app.modules.ai.api.confirm.chat_service.build_chat_deps",
+                    AsyncMock(return_value=SimpleNamespace(data_scope_hash=None)),
+                ),
+                patch(
+                    "app.modules.ai.api.confirm.check_user_disabled",
+                    AsyncMock(return_value=False),
+                ),
+                patch(
+                    "app.modules.ai.api.confirm.validate_prepared_execution",
+                    return_value=registered,
+                ),
+                patch(
+                    "app.modules.ai.api.confirm.execute_approved_prepared_action",
+                    AsyncMock(),
+                ) as execute,
+            ):
+                with pytest.raises(TimeoutError) as error:
+                    await confirm_tool(
+                        ConfirmRequest(
+                            confirmationId=pending.confirmation_id, action="approve"
+                        ),
+                        db=db,
+                        current_user=_make_user(),
+                    )
+            await asyncio.wait_for(cancelled.wait(), 1)
+            assert session_module.is_session_quarantined(db)
+            db.invalidate.assert_not_awaited()
+            with pytest.raises(TimeoutError):
+                await dependency.athrow(error.value)
+            db.rollback.assert_not_awaited()
+            db.close.assert_not_awaited()
+            execute.assert_not_awaited()
+        finally:
+            release.set()
+            commit = db.info.get(atomic_execution._COMMIT_TASK_KEY)
+            if commit is not None:
+                await asyncio.gather(commit, return_exceptions=True)
+            entry = atomic_execution._QUARANTINED_SESSIONS.get(id(db))
+            if entry is not None:
+                await entry[1]
+            await dependency.aclose()
+        db.invalidate.assert_awaited_once()
+
     @pytest.mark.parametrize("state", ["succeeded", "failed", "rejected", "expired"])
     async def test_readonly_injection_confirmation_preserves_terminal_state(
         self, state

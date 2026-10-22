@@ -33,6 +33,7 @@ from app.db.session import AsyncSessionLocal, get_db
 from app.modules.ai.agents.gateway.atomic_execution import (
     OUTCOME_UNKNOWN_MESSAGE,
     PreparedExecutionOutcomeUnknown,
+    _commit_with_budget,
     _discard_uncertain_session,
     _owned_session,
     reconcile_prepared_completion,
@@ -67,6 +68,7 @@ from app.modules.ai.service.chat_run_service import (
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.ai.service.prepared_action_service import prepared_action_service
+from app.modules.ai.service.reconciliation_annotation import has_annotation
 from app.modules.ai.service.result_projection_service import (
     result_projection_service,
 )
@@ -418,6 +420,11 @@ async def _confirm_prepared(
             "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
         )
     readonly = is_registered_readonly_action(action_ref)
+    annotated = await operation_log_service.has_reconciliation_annotation(
+        db, action_ref.execute_tool_call_id, user_id=current_user_id, tenant=tenant
+    )
+    if annotated:
+        return _unknown_response(action_ref)
     if not readonly and action_ref.status in {"rejected", "expired"}:
         db.expunge_all()
         await db.rollback()
@@ -548,6 +555,8 @@ async def _confirm_prepared(
         and context.source_message.role == "user"
         and context.source_message.is_active
     )
+    if log is not None and has_annotation(getattr(log, "result_summary", None)):
+        return _unknown_response(action)
     if _is_expired(action.expires_at) or not source_active:
         error_code = (
             "AI_HITL_EXPIRED"
@@ -706,11 +715,11 @@ async def _confirm_prepared(
         await operation_log_service.mark_running(db, log.log_id, tenant=tenant)
     claim = ClaimBinding.from_action(running, log_id=log.log_id) if atomic else None
     try:
-        await db.commit()
+        await _commit_with_budget(db)
     except (Exception, asyncio.CancelledError):
+        await _discard_uncertain_session(db)
         if claim is None:
             raise
-        await _discard_uncertain_session(db)
         outcome = await reconcile_prepared_completion(
             req.confirmation_id,
             tenant=tenant,

@@ -388,8 +388,41 @@ class UserDeleteDependencyService:
             # specified protocol. Raw status or parser failure cannot unlock it.
             if "__v0162_reconciliation_v1" in (log.result_summary or ""):
                 raise _unresolved()
-            if not log.readonly_snapshot and log.log_id not in proven_logs:
-                raise _unresolved()
+            from app.modules.ai.service.preflight_completion_service import (  # noqa: PLC0415
+                has_preflight_marker,
+            )
+
+            if (
+                not log.readonly_snapshot or has_preflight_marker(log.result_summary)
+            ) and log.log_id not in proven_logs:
+                from app.modules.ai.service.preflight_completion_service import (  # noqa: PLC0415
+                    is_verified_preflight,
+                )
+
+                if await is_verified_preflight(
+                    db,
+                    log,
+                    await db.get(AiConversation, log.conversation_id),
+                    await db.get(AiMessage, log.source_user_message_id),
+                    tenant_id=tenant.tenant_id,
+                    user_id=log.user_id,
+                ):
+                    continue
+                from app.modules.ai.service.preview_completion_service import (  # noqa: PLC0415
+                    verify_historical_preview,
+                )
+
+                try:
+                    await verify_historical_preview(
+                        db,
+                        log,
+                        await db.get(AiConversation, log.conversation_id),
+                        await db.get(AiMessage, log.source_user_message_id),
+                        tenant_id=tenant.tenant_id,
+                        user_id=log.user_id,
+                    )
+                except (BusinessRuleException, TypeError, ValueError) as exc:
+                    raise _unresolved() from exc
 
     @staticmethod
     def _validate_readonly_terminal(

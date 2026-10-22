@@ -10,6 +10,7 @@ from typing import Any
 
 from app.core import redis as redis_module
 from app.core.exceptions import BusinessException, BusinessRuleException
+from app.core.file_storage import ArtifactExecution
 from app.core.tenant import TenantContext
 from app.db.session import SESSION_QUARANTINED_KEY, AsyncSessionLocal
 from app.modules.ai.agents.gateway.failures import clear_failures, record_failure
@@ -40,6 +41,8 @@ logger = logging.getLogger(__name__)
 
 OUTCOME_UNKNOWN_MESSAGE = "操作结果尚待核对，请勿重新办理；请刷新会话或联系管理员核对。"
 _SESSION_CLEANUP_TIMEOUT_SEC = 0.25
+_COMMIT_TIMEOUT_SEC = 8
+_COMMIT_TASK_KEY = "prepared_completion_commit_task"
 _DISCARDED_SESSION_KEY = SESSION_QUARANTINED_KEY
 # Retain uncertain sessions until the public invalidate operation completes.
 # They must not be returned to the pool by an ordinary close after a timeout.
@@ -58,6 +61,28 @@ class PreparedExecutionOutcomeUnknown(BusinessRuleException):
 class _RejectedResult(Exception):
     def __init__(self, result: ToolResult) -> None:
         self.result = result
+
+
+async def _commit_with_budget(db: Any) -> None:
+    """A silent transport must not hold a completion request indefinitely.
+
+    Timeout still means unknown: callers quarantine the connection and reconcile
+    the original action. It is never proof that PostgreSQL rolled back.
+    """
+    task = asyncio.create_task(db.commit())
+    db.info[_COMMIT_TASK_KEY] = task
+    try:
+        done, _ = await asyncio.wait({task}, timeout=_COMMIT_TIMEOUT_SEC)
+        if task not in done:
+            raise TimeoutError("Prepared completion COMMIT acknowledgement timed out")
+        task.result()
+    except BaseException:
+        if not task.done():
+            task.cancel()
+        raise
+    finally:
+        if task.done():
+            db.info.pop(_COMMIT_TASK_KEY, None)
 
 
 def _persisted_result(action: Any) -> ToolResult:
@@ -179,7 +204,7 @@ async def _reconcile_prepared_completion(
                 await _discard_uncertain_session(db)
                 return RecoveryOutcome(None)
             try:
-                await db.commit()
+                await _commit_with_budget(db)
                 return outcome
             except asyncio.CancelledError:
                 await _discard_uncertain_session(db)
@@ -201,7 +226,18 @@ async def _discard_uncertain_session(db: Any) -> None:
     if db.info.get(_DISCARDED_SESSION_KEY):
         return
     db.info[_DISCARDED_SESSION_KEY] = True
-    task = asyncio.create_task(db.invalidate())
+    pending_commit = db.info.get(_COMMIT_TASK_KEY)
+
+    async def invalidate_when_idle() -> None:
+        # Driver cancellation may itself wait for network teardown. Keep that
+        # task and session quarantined; never invalidate concurrently with it or
+        # let its teardown extend the response budget.
+        if pending_commit is not None:
+            await asyncio.gather(pending_commit, return_exceptions=True)
+            db.info.pop(_COMMIT_TASK_KEY, None)
+        await db.invalidate()
+
+    task = asyncio.create_task(invalidate_when_idle())
     key = id(db)
     _QUARANTINED_SESSIONS[key] = (db, task)
 
@@ -269,7 +305,7 @@ async def _finish_rolled_back(
             await _discard_uncertain_session(db)
             raise PreparedExecutionOutcomeUnknown() from exc
         try:
-            await db.commit()
+            await _commit_with_budget(db)
         except (Exception, asyncio.CancelledError):
             await _discard_uncertain_session(db)
             return await _read_committed_result(claim, deps)
@@ -379,6 +415,9 @@ async def _execute_claim_attempt(
                 else None,
             )
             handler_started = True
+            ctx.artifact_execution = ArtifactExecution(
+                claim.tenant_id, str(claim.action_id), claim.execution_owner
+            )
             raw = await with_l3_timeout(
                 registered.fn(ctx, **deepcopy(action.frozen_args)), tenant=deps.tenant
             )
@@ -392,6 +431,18 @@ async def _execute_claim_attempt(
                 )
             await db.flush()
             await ensure_current_write_authority(db, deps=deps, meta=meta)
+            if claim.execute_tool_name in {
+                "user.import_preview",
+                "user.import_execute",
+                "user.export",
+            }:
+                from app.modules.system.service.user_transfer_artifact_service import (  # noqa: PLC0415
+                    validate_file_completion,
+                )
+
+                await validate_file_completion(
+                    db, action=action, result=result, execution=ctx.artifact_execution
+                )
             await atomic_completion_service.complete_success(
                 db,
                 locked,
@@ -428,7 +479,7 @@ async def _execute_claim_attempt(
                 )
         if not rolled_back:
             try:
-                await db.commit()
+                await _commit_with_budget(db)
             except (Exception, asyncio.CancelledError):
                 await _discard_uncertain_session(db)
                 return await _read_committed_result(claim, deps)

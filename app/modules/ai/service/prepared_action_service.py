@@ -739,6 +739,15 @@ class PreparedActionService:
 
         conditions = [
             AiPreparedAction.action_id == action_id,
+            ~select(AiOperationLog.log_id)
+            .where(
+                AiOperationLog.tenant_id == AiPreparedAction.tenant_id,
+                AiOperationLog.tool_call_id == AiPreparedAction.execute_tool_call_id,
+                AiOperationLog.result_summary.contains(
+                    "__v0162_reconciliation_v1", autoescape=True
+                ),
+            )
+            .exists(),
             AiPreparedAction.tenant_id == tenant.tenant_id,
             AiPreparedAction.status == expected_status.value,
             AiPreparedAction.row_version == expected_version,
@@ -804,6 +813,20 @@ class PreparedActionService:
         tenant: TenantContext,
     ) -> list[AiPreparedAction]:
         """Return only live actions whose conversation and source remain owned/active."""
+        unresolved_log = (
+            select(AiOperationLog.log_id)
+            .where(
+                AiOperationLog.tenant_id == AiPreparedAction.tenant_id,
+                AiOperationLog.tool_call_id == AiPreparedAction.execute_tool_call_id,
+                or_(
+                    AiOperationLog.status != "pending_confirmation",
+                    AiOperationLog.result_summary.contains(
+                        "__v0162_reconciliation_v1", autoescape=True
+                    ),
+                ),
+            )
+            .exists()
+        )
         stmt = (
             select(AiPreparedAction)
             .join(
@@ -823,6 +846,7 @@ class PreparedActionService:
                 AiPreparedAction.status
                 == PreparedActionStatus.PENDING_CONFIRMATION.value,
                 AiPreparedAction.expires_at > datetime.now(UTC),
+                ~unresolved_log,
                 AiConversation.user_id == user_id,
                 AiConversation.deleted_at.is_(None),
                 AiMessage.conversation_id == conversation_id,
@@ -964,10 +988,42 @@ class PreparedActionService:
         }
         conversation = await db.get(AiConversation, conversation_id)
         bound_calls = {action.execute_tool_call_id for action in actions}
-        unresolved = any(
-            not log.readonly_snapshot and log.tool_call_id not in bound_calls
-            for log in logs.values()
-        )
+        unresolved = False
+        for log in logs.values():
+            from app.modules.ai.service.preflight_completion_service import (  # noqa: PLC0415
+                has_preflight_marker,
+                is_verified_preflight,
+            )
+
+            if (
+                log.readonly_snapshot and not has_preflight_marker(log.result_summary)
+            ) or log.tool_call_id in bound_calls:
+                continue
+
+            if await is_verified_preflight(
+                db,
+                log,
+                conversation,
+                sources.get(log.source_user_message_id),
+                tenant_id=tenant.tenant_id,
+                user_id=user_id,
+            ):
+                continue
+            from app.modules.ai.service.preview_completion_service import (  # noqa: PLC0415
+                verify_historical_preview,
+            )
+
+            try:
+                await verify_historical_preview(
+                    db,
+                    log,
+                    conversation,
+                    sources.get(log.source_user_message_id),
+                    tenant_id=tenant.tenant_id,
+                    user_id=log.user_id,
+                )
+            except (BusinessRuleException, TypeError, ValueError):
+                unresolved = True
         for action in actions:
             if action.status in {"running", "approved"}:
                 unresolved = True

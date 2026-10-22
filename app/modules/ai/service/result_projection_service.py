@@ -930,6 +930,34 @@ class ResultProjectionService:
         ).scalar_one_or_none()
         if action is not None:
             return self.lineage_from_record(action)
+        if log.tool_name == "user.import_preview":
+            from app.modules.ai.service.preview_completion_service import (  # noqa: PLC0415
+                preview_lineage,
+                verify_historical_preview,
+            )
+
+            try:
+                audit = await verify_historical_preview(
+                    db,
+                    log,
+                    await db.get(AiConversation, log.conversation_id),
+                    await db.get(AiMessage, log.source_user_message_id),
+                    tenant_id=log.tenant_id,
+                    user_id=log.user_id,
+                )
+                return preview_lineage(
+                    log,
+                    audit,
+                    TenantContext(
+                        tenant_id=log.tenant_id,
+                        tenant_code="projection",
+                        actor_user_id=log.user_id,
+                        tenant_version=1,
+                        source="access_token",
+                    ),
+                )
+            except (BusinessException, TypeError, ValueError):
+                return None
         messages = (
             await db.execute(
                 select(AiMessage).where(

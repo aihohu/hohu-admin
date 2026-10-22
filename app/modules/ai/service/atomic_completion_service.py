@@ -28,6 +28,7 @@ from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.operation_log_service import build_target_summary
 from app.modules.ai.service.prepared_action_service import prepared_action_service
+from app.modules.ai.service.reconciliation_annotation import require_unannotated
 from app.modules.ai.service.result_projection_service import result_projection_service
 from app.modules.auth.service import load_live_user_authority
 
@@ -276,6 +277,7 @@ def _check_action(
 def _check_log(
     action: AiPreparedAction, log: AiOperationLog, expected_status: str
 ) -> None:
+    require_unannotated(log.result_summary)
     expected = {
         "tenant_id": action.tenant_id,
         "user_id": action.user_id,

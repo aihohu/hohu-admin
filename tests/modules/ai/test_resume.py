@@ -125,6 +125,9 @@ def _make_request(last_event_id: str | None = None):
 
 def _request_db():
     db = MagicMock()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = None
+    db.execute = AsyncMock(return_value=result)
     db.rollback = AsyncMock()
     return db
 

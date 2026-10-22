@@ -15,10 +15,12 @@ from app.db.session import AsyncSessionLocal, engine
 from app.modules.ai.agents.gateway import atomic_execution
 from app.modules.ai.agents.gateway.atomic_execution import OUTCOME_UNKNOWN_MESSAGE
 from app.modules.ai.agents.hitl.constants import PreparedActionStatus
+from app.modules.ai.api.confirm import confirm_tool
 from app.modules.ai.api.operation_log import get_operation_log
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
+from app.modules.ai.schemas.confirm import ConfirmRequest
 from app.modules.ai.schemas.operation_log import TraceListQuery
 from app.modules.ai.service import completion_read_state_service as read_module
 from app.modules.ai.service.atomic_completion_service import new_execution_owner
@@ -60,6 +62,61 @@ async def stored_facts(case):
             message.content if message else None,
             deepcopy(message.tool_calls) if message else None,
         )
+
+
+@pytest.mark.parametrize("log_code", [None, "USER_REJECTED", "AI_INTERNAL_ERROR"])
+async def test_verified_rejection_keeps_cancel_reason_on_all_read_surfaces(
+    completion_case, monkeypatch, log_code
+):
+    case = completion_case
+    count_real_handler(case, monkeypatch)
+    async with AsyncSessionLocal() as db:
+        actor = await load_live_user_authority(db, tenant=case.tenant)
+        response = await confirm_tool(
+            ConfirmRequest(confirmation_id=case.confirmation_id, action="reject"),
+            db=db,
+            current_user=actor,
+        )
+        assert response.data.status == "rejected"
+    async with AsyncSessionLocal() as db, db.begin():
+        log = await db.get(AiOperationLog, case.log_id)
+        log.error_code = log_code
+        trace_id = log.trace_id
+    before = await stored_facts(case)
+    expected_code = (
+        "AI_EXECUTION_OUTCOME_UNKNOWN"
+        if log_code == "AI_INTERNAL_ERROR"
+        else "USER_REJECTED"
+    )
+    async with AsyncSessionLocal() as db:
+        actor = await load_live_user_authority(db, tenant=case.tenant)
+        poll = await get_operation_log(
+            tool_call_id=case.tool_call_id,
+            db=db,
+            current_user=actor,
+            tenant=case.tenant,
+        )
+        detail = await trace_service.get_trace(
+            db, tenant=case.tenant, trace_id=trace_id
+        )
+        history = await conversation_service.project_messages(
+            db, conversation_id=case.conversation_id, current_user=actor
+        )
+        await db.commit()
+    assert poll.data.error_code == detail.operations[0].error_code == expected_code
+    assistant = next(message for message in history if message.role == "assistant")
+    call = next(
+        row for row in assistant.tool_calls if row["tool_call_id"] == case.tool_call_id
+    )
+    if log_code == "AI_INTERNAL_ERROR":
+        assert poll.data.status == "running"
+        assert "ok" not in call and "error_code" not in call
+        assert OUTCOME_UNKNOWN_MESSAGE in assistant.content
+    else:
+        assert poll.data.status == "rejected"
+        assert call["ok"] is False and call["error_code"] == "USER_REJECTED"
+    assert case.calls == []
+    assert await stored_facts(case) == before
 
 
 @pytest.mark.parametrize(
@@ -430,7 +487,10 @@ async def test_unknown_history_denied_projection_is_minimal_and_idempotent(
                 db, conversation_id=case.conversation_id, current_user=actor
             )
             assistant = next(item for item in messages if item.role == "assistant")
-            assert assistant.content == OUTCOME_UNKNOWN_MESSAGE
+            assert (
+                assistant.content
+                == f"{OUTCOME_UNKNOWN_MESSAGE}\n[AI_EXECUTION_OUTCOME_UNKNOWN] toolCallId={case.tool_call_id}"
+            )
             assert assistant.parts is None
             assert assistant.completed_tool_call_ids == []
             assert "private result" not in assistant.model_dump_json()
@@ -458,7 +518,10 @@ async def test_batch_proof_is_one_read_only_statement_without_row_locks(
         event.remove(engine.sync_engine, "before_cursor_execute", capture)
     assert states[case.tool_call_id].verified
     assert len([sql for sql in statements if sql.lstrip().startswith("SELECT")]) == 1
-    assert any("SET TRANSACTION READ ONLY" in sql for sql in statements)
+    assert any(
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY" in sql
+        for sql in statements
+    )
     assert all("FOR UPDATE" not in sql for sql in statements)
     assert all(
         not sql.lstrip().startswith(("UPDATE", "INSERT", "DELETE"))

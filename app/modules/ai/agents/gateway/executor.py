@@ -106,6 +106,8 @@ class _PreparedExecutionContext:
     proposal: PreparedActionProposal
     prepare_tool_call_id: str
     prepare_tool_name: str
+    execute_tool_call_id: str | None = None
+    confirmation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -467,7 +469,11 @@ async def _execute_tool(
         risk_appetite=agent_risk_appetite,
     )
     metric_mode = mode.value
-    tool_call_id = hitl_manager.generate_tool_call_id()
+    tool_call_id = (
+        _prepared_action_context.execute_tool_call_id
+        if _prepared_action_context and _prepared_action_context.execute_tool_call_id
+        else hitl_manager.generate_tool_call_id()
+    )
     summary = build_args_summary(
         meta.name,
         risk_level=meta.risk,
@@ -478,7 +484,13 @@ async def _execute_tool(
     )
     try:
         log_id = await _start_log(
-            deps, registered, tool_call_id, args_hash, summary, mode
+            deps,
+            registered,
+            tool_call_id,
+            args_hash,
+            summary,
+            mode,
+            preflight_failure=dry_run_outcome.failure,
         )
     except LogWriteError as e:
         # _start_log 重试 3 次仍失败 → 业务还没执行，必须终止避免漏审计行
@@ -535,7 +547,7 @@ async def _execute_tool(
             await record_failure(
                 redis_client, user_id, meta.name, args_hash, tenant=deps.tenant
             )
-        await _finish_log_final(log_id, failure, started_at, tenant=deps.tenant)
+        # The failure and its nonexecution proof were persisted with log creation.
         duration_ms = int((time.monotonic() - started_at) * 1000)
         await _emit(
             deps,
@@ -710,20 +722,42 @@ async def _execute_tool(
         return action_result
 
     # 8. 业务执行；授权失败时按已写入的成员精确回滚各层配额。
-    result = await _invoke_tool_fn(
-        registered,
-        business_args,
-        deps,
-        args_hash,
-        agent_code_for_rollback=agent_code_for_rollback,
-        l1_member=l1_member,
-        l1_global_member=l1_global_member,
-        l4_conv_key_for_rollback=l4_conv_key_for_rollback,
-    )
+    atomic_preview = meta.name == "user.import_preview"
+    if atomic_preview:
+        from app.modules.ai.agents.gateway.preview_execution import (  # noqa: PLC0415
+            execute_preview,
+        )
+
+        result = await execute_preview(
+            registered,
+            business_args,
+            deps,
+            log_id=log_id,
+            tool_call_id=tool_call_id,
+            args_hash=args_hash,
+        )
+    else:
+        result = await _invoke_tool_fn(
+            registered,
+            business_args,
+            deps,
+            args_hash,
+            agent_code_for_rollback=agent_code_for_rollback,
+            l1_member=l1_member,
+            l1_global_member=l1_global_member,
+            l4_conv_key_for_rollback=l4_conv_key_for_rollback,
+        )
 
     # 9. emit tool_call_result + 写 log 终态
     if result.ok and meta.interaction_flow == "prepared":
-        if not isinstance(result.prepared_action, PreparedActionProposal):
+        if result.meta.get("preview_replay"):
+            from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+                PreparedExecutionOutcomeUnknown,
+            )
+
+            if requested_outcome == "execute_if_approved":
+                raise PreparedExecutionOutcomeUnknown()
+        elif not isinstance(result.prepared_action, PreparedActionProposal):
             result = ToolResult.failure(
                 error_code="AI_PREPARED_ACTION_INVALID",
                 error_msg=USER_FACING_MSG["AI_PREPARED_ACTION_INVALID"],
@@ -747,22 +781,32 @@ async def _execute_tool(
         if not meta.readonly
         else None
     )
-    await _emit(
-        deps,
-        ToolCallResultEvent(
-            tool=meta.name,
-            tool_call_id=tool_call_id,
-            ok=result.ok,
-            duration_ms=duration_ms,
-            result=result.data if result.ok else None,
-            ui=result.ui if result.ok else None,
-            projection=result.projection,
-            affected_rows=inferred_affected_rows,
-            error_code=result.error_code if not result.ok else None,
-            error_msg=result.error_msg if not result.ok else None,
-        ),
-    )
-    await _finish_log_final(log_id, result, started_at, tenant=deps.tenant)
+    try:
+        await _emit(
+            deps,
+            ToolCallResultEvent(
+                tool=meta.name,
+                tool_call_id=tool_call_id,
+                ok=result.ok,
+                duration_ms=duration_ms,
+                result=result.data if result.ok else None,
+                ui=result.ui if result.ok else None,
+                projection=result.projection,
+                affected_rows=inferred_affected_rows,
+                error_code=result.error_code if not result.ok else None,
+                error_msg=result.error_msg if not result.ok else None,
+            ),
+        )
+    except (Exception, asyncio.CancelledError) as exc:
+        if atomic_preview and result.ok:
+            from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+                PreparedExecutionOutcomeUnknown,
+            )
+
+            raise PreparedExecutionOutcomeUnknown() from exc
+        raise
+    if not (atomic_preview and result.ok):
+        await _finish_log_final(log_id, result, started_at, tenant=deps.tenant)
 
     metric_status = "success" if result.ok else "failed"
     _rec(metric_status)
@@ -786,16 +830,38 @@ async def _execute_tool(
                 error_code="AI_PREPARED_ACTION_INVALID",
                 error_msg=USER_FACING_MSG["AI_PREPARED_ACTION_INVALID"],
             )
-        return await _execute_tool(
-            execute_name,
-            proposal.frozen_args,
-            deps,
-            _prepared_action_context=_PreparedExecutionContext(
-                proposal=proposal,
-                prepare_tool_call_id=tool_call_id,
-                prepare_tool_name=meta.name,
-            ),
-        )
+        try:
+            continuation = await _execute_tool(
+                execute_name,
+                proposal.frozen_args,
+                deps,
+                _prepared_action_context=_PreparedExecutionContext(
+                    proposal=proposal,
+                    prepare_tool_call_id=tool_call_id,
+                    prepare_tool_name=meta.name,
+                    execute_tool_call_id=result.meta.get("execute_tool_call_id"),
+                    confirmation_id=result.meta.get("confirmation_id"),
+                ),
+            )
+        except (Exception, asyncio.CancelledError) as exc:
+            if atomic_preview:
+                from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+                    PreparedExecutionOutcomeUnknown,
+                )
+
+                raise PreparedExecutionOutcomeUnknown() from exc
+            raise
+        if (
+            atomic_preview
+            and not continuation.ok
+            and continuation.error_code not in {"USER_REJECTED", "AI_HITL_EXPIRED"}
+        ):
+            from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+                PreparedExecutionOutcomeUnknown,
+            )
+
+            raise PreparedExecutionOutcomeUnknown()
+        return continuation
     return result
 
 
@@ -1088,6 +1154,8 @@ async def _start_log(
     args_hash: str,
     args_summary: str,
     mode: AiExecutionMode,
+    *,
+    preflight_failure: ToolResult | None = None,
 ) -> int:
     """写入 ai_operation_log 起始行；失败必须向上传播。
 
@@ -1100,7 +1168,7 @@ async def _start_log(
     """
     initial_status = (
         AiOperationStatus.RUNNING
-        if mode == AiExecutionMode.AUTONOMOUS
+        if mode == AiExecutionMode.AUTONOMOUS and preflight_failure is None
         else AiOperationStatus.PENDING_CONFIRMATION
     )
 
@@ -1134,7 +1202,7 @@ async def _start_log(
             )
         ):
             raise LogWriteError("operation log source is missing or no longer active")
-        return await operation_log_service.start_operation(
+        log_id = await operation_log_service.start_operation(
             log_db,
             trace_id=deps.trace_id,
             conversation_id=deps.conversation_id or 0,
@@ -1153,6 +1221,22 @@ async def _start_log(
             is_security_event=deps.injection_hit,
             event_type="injection_pattern_matched" if deps.injection_hit else None,
         )
+        if preflight_failure is not None:
+            from app.modules.ai.service.preflight_completion_service import (  # noqa: PLC0415
+                runtime_preflight_summary,
+            )
+
+            log = await operation_log_service.mark_failed(
+                log_db,
+                log_id,
+                tenant=deps.tenant,
+                error_code=preflight_failure.error_code or "AI_INTERNAL_ERROR",
+                duration_ms=0,
+            )
+            if not registered.meta.readonly:
+                log.result_summary = runtime_preflight_summary(log)
+                await log_db.flush()
+        return log_id
 
     return await _with_log_retry("start_operation", log_id=None, op=_op)
 
@@ -1455,7 +1539,15 @@ async def _hang_for_confirmation(
         and dry_run_summary.execution_args is not None
     ):
         execution_args = dry_run_summary.execution_args
-    confirmation_id = hitl_manager.generate_confirmation_id()
+    preview_handoff = bool(
+        prepared_action_context
+        and prepared_action_context.prepare_tool_name == "user.import_preview"
+    )
+    confirmation_id = (
+        prepared_action_context.confirmation_id
+        if preview_handoff
+        else hitl_manager.generate_confirmation_id()
+    )
     payload = await hitl_manager.create_pending(
         redis_client,
         confirmation_id=confirmation_id,
@@ -1505,9 +1597,25 @@ async def _hang_for_confirmation(
 
     # 回填 confirmation_id 到 log 行，并让所有新 HITL 共用 PostgreSQL action。
     durable_action: AiPreparedAction | None = None
+    from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+        PreparedExecutionOutcomeUnknown,
+        _owned_session,
+    )
+    from app.modules.ai.agents.gateway.preview_handoff import (  # noqa: PLC0415
+        handoff_transaction,
+        read_handoff,
+    )
+    from app.modules.ai.service.preview_completion_service import (  # noqa: PLC0415
+        lock_handoff,
+    )
+
+    session_factory = _owned_session if preview_handoff else AsyncSessionLocal
     try:
-        async with AsyncSessionLocal() as log_db:
-            async with log_db.begin():
+        async with session_factory() as log_db:
+            transaction = (
+                handoff_transaction(log_db) if preview_handoff else log_db.begin()
+            )
+            async with transaction:
                 from app.modules.ai.models.message import AiMessage  # noqa: PLC0415
 
                 bound_log_query = select(AiOperationLog.log_id).where(
@@ -1553,6 +1661,16 @@ async def _hang_for_confirmation(
                     payload.expires_at.replace("Z", "+00:00")
                 )
                 if prepared_action_context is not None:
+                    if preview_handoff:
+                        await lock_handoff(
+                            log_db,
+                            context=prepared_action_context,
+                            deps=deps,
+                            log_id=log_id,
+                        )
+                        await ensure_current_write_authority(
+                            log_db, deps=deps, meta=meta
+                        )
                     proposal = prepared_action_context.proposal
                     proposal_expires_at = proposal.expires_at
                     if proposal_expires_at.tzinfo is None:
@@ -1695,41 +1813,55 @@ async def _hang_for_confirmation(
                         tenant=deps.tenant,
                     )
     except BaseException:
-        await _rollback_failed_confirmation_setup(
-            deps,
-            registered,
-            confirmation_id,
-            log_id,
-            agent_code_for_rollback=agent_code_for_rollback,
-            l1_member=l1_member,
-            l1_global_member=l1_global_member,
-            l4_conv_key_for_rollback=l4_conv_key_for_rollback,
-        )
-        raise
+        if preview_handoff:
+            durable_action = await read_handoff(
+                context=prepared_action_context,
+                deps=deps,
+                log_id=log_id,
+                payload=payload,
+            )
+        else:
+            await _rollback_failed_confirmation_setup(
+                deps,
+                registered,
+                confirmation_id,
+                log_id,
+                agent_code_for_rollback=agent_code_for_rollback,
+                l1_member=l1_member,
+                l1_global_member=l1_global_member,
+                l4_conv_key_for_rollback=l4_conv_key_for_rollback,
+            )
+            raise
 
     if durable_action is None:  # pragma: no cover - fail-closed invariant
         raise RuntimeError("durable HITL action was not created")
 
-    # 通知客户端展示确认界面。
-    await _emit(
-        deps,
-        ConfirmationRequiredEvent(
-            confirmation_id=confirmation_id,
-            tool=meta.name,
-            tool_call_id=tool_call_id,
-            summary=summary,
-            expires_at=payload.expires_at,
-            action_id=durable_action.action_id,
-            source_tool_call_id=(
-                prepared_action_context.prepare_tool_call_id
-                if prepared_action_context
-                else None
+    # A durable PA survives a failed receipt. The turn must not ask the model
+    # to generate another action after this delivery boundary.
+    try:
+        await _emit(
+            deps,
+            ConfirmationRequiredEvent(
+                confirmation_id=confirmation_id,
+                tool=meta.name,
+                tool_call_id=tool_call_id,
+                summary=summary,
+                expires_at=payload.expires_at,
+                action_id=durable_action.action_id,
+                source_tool_call_id=(
+                    prepared_action_context.prepare_tool_call_id
+                    if prepared_action_context
+                    else None
+                ),
+                interaction_flow=durable_action.interaction_flow,
+                presentation=durable_action.presentation,
+                dry_run=dry_run_summary,
             ),
-            interaction_flow=durable_action.interaction_flow,
-            presentation=durable_action.presentation,
-            dry_run=dry_run_summary,
-        ),
-    )
+        )
+    except (Exception, asyncio.CancelledError) as exc:
+        if preview_handoff:
+            raise PreparedExecutionOutcomeUnknown() from exc
+        raise
 
     # 阻塞等待批准、拒绝或超时唤醒。
     try:

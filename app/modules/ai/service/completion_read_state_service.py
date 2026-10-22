@@ -1,7 +1,8 @@
 """Immutable read projections from one committed PA/log/context snapshot.
 
 Unlike recovery, this reader acquires no execution locks and never infers a
-rollback or fences an owner. One joined statement supplies every proof field.
+rollback or fences an owner. PA proofs use one joined statement; preview proofs
+also check their batch in the same REPEATABLE READ, READ ONLY snapshot.
 """
 
 import asyncio
@@ -10,7 +11,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 
-from sqlalchemy import and_, or_, select, text
+from sqlalchemy import and_, func, or_, select, text
 
 from app.core.exceptions import BusinessRuleException
 from app.core.tenant import TenantContext
@@ -24,6 +25,7 @@ from app.modules.ai.service.atomic_completion_service import (
     atomic_completion_service,
     has_protocol_marker,
 )
+from app.modules.ai.service.reconciliation_annotation import NOTICE, has_annotation
 
 logger = logging.getLogger(__name__)
 UNKNOWN_CODE = "AI_EXECUTION_OUTCOME_UNKNOWN"
@@ -41,10 +43,13 @@ class EffectiveCompletion:
 
     @property
     def unknown(self) -> bool:
-        return self.error_code == UNKNOWN_CODE
+        return self.error_code in {UNKNOWN_CODE, "AI_EXECUTION_RECONCILIATION_REQUIRED"}
 
 
 UNKNOWN_COMPLETION = EffectiveCompletion("running", UNKNOWN_CODE, None, None)
+RECONCILIATION_COMPLETION = EffectiveCompletion(
+    "running", "AI_EXECUTION_RECONCILIATION_REQUIRED", None, None
+)
 
 
 def effective_log_state(
@@ -89,6 +94,32 @@ def project_verified_call(
     return output
 
 
+def project_verified_content(content, calls, states):
+    """Hide only resolved, exactly bound UI hints without editing history."""
+    output = content or ""
+    for call in calls or ():
+        state = effective_call_state(call, states)
+        call_id = call.get("tool_call_id")
+        if state is not None and state.verified and not state.unknown and call_id:
+            reference = f"[{UNKNOWN_CODE}] toolCallId={call_id}"
+            # Whole-line matching prevents one call ID being a prefix of another.
+            output = "".join(
+                line
+                for line in output.splitlines(keepends=True)
+                if line.strip() != reference
+            )
+    if (
+        f"[{UNKNOWN_CODE}] toolCallId=" not in output
+        and not any(
+            (state := effective_call_state(call, states)) and state.unknown
+            for call in calls or ()
+        )
+        and output != (content or "")
+    ):
+        output = output.replace(NOTICE, "")
+    return output.strip() if output != (content or "") else content
+
+
 class CompletionReadStateService:
     async def read(
         self,
@@ -129,15 +160,28 @@ class CompletionReadStateService:
             .outerjoin(
                 AiConversation,
                 and_(
-                    AiConversation.tenant_id == AiPreparedAction.tenant_id,
-                    AiConversation.conversation_id == AiPreparedAction.conversation_id,
+                    AiConversation.tenant_id
+                    == func.coalesce(
+                        AiPreparedAction.tenant_id, AiOperationLog.tenant_id
+                    ),
+                    AiConversation.conversation_id
+                    == func.coalesce(
+                        AiPreparedAction.conversation_id, AiOperationLog.conversation_id
+                    ),
                 ),
             )
             .outerjoin(
                 AiMessage,
                 and_(
-                    AiMessage.tenant_id == AiPreparedAction.tenant_id,
-                    AiMessage.message_id == AiPreparedAction.source_user_message_id,
+                    AiMessage.tenant_id
+                    == func.coalesce(
+                        AiPreparedAction.tenant_id, AiOperationLog.tenant_id
+                    ),
+                    AiMessage.message_id
+                    == func.coalesce(
+                        AiPreparedAction.source_user_message_id,
+                        AiOperationLog.source_user_message_id,
+                    ),
                 ),
             )
             .where(or_(and_(*log_scope), and_(*action_scope)))
@@ -152,18 +196,70 @@ class CompletionReadStateService:
             async with asyncio.timeout(_READ_TIMEOUT_SEC), _owned_session() as db:
                 try:
                     await db.begin()
-                    await db.execute(text("SET TRANSACTION READ ONLY"))
+                    await db.execute(
+                        text(
+                            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+                        )
+                    )
                     rows = (await db.execute(statement)).all()
                     projected = {}
                     for action, log, conversation, source in rows:
+                        if log is not None and has_annotation(log.result_summary):
+                            projected[log.tool_call_id] = RECONCILIATION_COMPLETION
+                            continue
                         if not self._protected(action, log):
                             continue
                         call_id = (
                             action.execute_tool_call_id if action else log.tool_call_id
                         )
-                        projected[call_id] = self._project(
-                            action, log, conversation, source, tenant=tenant
-                        )
+                        if action is None:
+                            from app.modules.ai.service.preflight_completion_service import (  # noqa: PLC0415
+                                is_verified_preflight,
+                            )
+
+                            if await is_verified_preflight(
+                                db,
+                                log,
+                                conversation,
+                                source,
+                                tenant_id=tenant.tenant_id,
+                                user_id=log.user_id,
+                            ):
+                                projected[call_id] = EffectiveCompletion(
+                                    log.status,
+                                    log.error_code,
+                                    log.finished_at,
+                                    log.duration_ms,
+                                    verified=True,
+                                )
+                                continue
+                        if action is None and log.tool_name == "user.import_preview":
+                            from app.modules.ai.service.preview_completion_service import (  # noqa: PLC0415
+                                verify_historical_preview,
+                            )
+
+                            try:
+                                await verify_historical_preview(
+                                    db,
+                                    log,
+                                    conversation,
+                                    source,
+                                    tenant_id=tenant.tenant_id,
+                                    user_id=log.user_id,
+                                )
+                                projected[call_id] = EffectiveCompletion(
+                                    log.status,
+                                    log.error_code,
+                                    log.finished_at,
+                                    log.duration_ms,
+                                    verified=True,
+                                )
+                            except (BusinessRuleException, TypeError, ValueError):
+                                projected[call_id] = UNKNOWN_COMPLETION
+                        else:
+                            projected[call_id] = self._project(
+                                action, log, conversation, source, tenant=tenant
+                            )
                     return projected
                 except (Exception, asyncio.CancelledError):
                     await _discard_uncertain_session(db)
@@ -177,6 +273,16 @@ class CompletionReadStateService:
 
     @staticmethod
     def _protected(action, log) -> bool:
+        from app.modules.ai.service.preflight_completion_service import (  # noqa: PLC0415
+            has_preflight_marker,
+        )
+
+        if log is not None and has_preflight_marker(
+            getattr(log, "result_summary", None)
+        ):
+            return True
+        if log is not None and has_annotation(getattr(log, "result_summary", None)):
+            return True
         if action is not None and (
             has_protocol_marker(action.execution_owner)
             or (
@@ -194,6 +300,8 @@ class CompletionReadStateService:
 
     @staticmethod
     def _project(action, log, conversation, source, *, tenant) -> EffectiveCompletion:
+        if log is not None and has_annotation(log.result_summary):
+            return RECONCILIATION_COMPLETION
         if action is None or log is None:
             return UNKNOWN_COMPLETION
         if action.status == "failed" and (
@@ -216,8 +324,13 @@ class CompletionReadStateService:
             )
         except (BusinessRuleException, TypeError, ValueError):
             return UNKNOWN_COMPLETION
+        # A proven rejection may have a legacy NULL audit error code. Preserve
+        # the validated PA decision instead of erasing USER_REJECTED on replay.
+        error_code = (
+            action.error_code if action.status == "rejected" else log.error_code
+        )
         return EffectiveCompletion(
-            log.status, log.error_code, log.finished_at, log.duration_ms, verified=True
+            log.status, error_code, log.finished_at, log.duration_ms, verified=True
         )
 
 

@@ -35,6 +35,11 @@ from app.modules.ai.service.atomic_completion_service import (
     atomic_completion_service,
     has_protocol_marker,
 )
+from app.modules.ai.service.preflight_completion_service import has_preflight_marker
+from app.modules.ai.service.reconciliation_annotation import (
+    has_annotation,
+    reconciliation_notice,
+)
 from app.modules.ai.service.result_projection_service import (
     ProjectionLineage,
     result_projection_service,
@@ -367,8 +372,10 @@ class ChatRunFinalizer:
         lineages = []
         actor = None
         for action in actions:
+            bound_log = logs.get(action.execute_tool_call_id)
             if not (
                 has_protocol_marker(action.execution_owner)
+                or (bound_log is not None and has_annotation(bound_log.result_summary))
                 or (
                     action.status
                     in {
@@ -439,12 +446,67 @@ class ChatRunFinalizer:
                 lineages.append(lineage)
         bound_tool_calls = {action.execute_tool_call_id for action in actions}
         for tool_call_id, log in logs.items():
-            if tool_call_id not in bound_tool_calls and not log.readonly_snapshot:
+            if tool_call_id not in bound_tool_calls and (
+                not log.readonly_snapshot or has_preflight_marker(log.result_summary)
+            ):
                 protected[tool_call_id] = {
                     "tool": log.tool_name,
                     "tool_call_id": tool_call_id,
                 }
-                unknown = True
+                from app.modules.ai.service.preflight_completion_service import (  # noqa: PLC0415
+                    is_verified_preflight,
+                )
+
+                if await is_verified_preflight(
+                    db,
+                    log,
+                    conversation,
+                    source,
+                    tenant_id=tenant.tenant_id,
+                    user_id=tenant.actor_user_id,
+                ):
+                    protected[tool_call_id].update(
+                        ok=False,
+                        error_code=log.error_code,
+                        duration_ms=log.duration_ms,
+                    )
+                    continue
+                from app.modules.ai.service.preview_completion_service import (  # noqa: PLC0415
+                    preview_lineage,
+                    verify_historical_preview,
+                )
+
+                try:
+                    audit = await verify_historical_preview(
+                        db,
+                        log,
+                        conversation,
+                        source,
+                        tenant_id=tenant.tenant_id,
+                        user_id=tenant.actor_user_id,
+                    )
+                except (BusinessRuleException, TypeError, ValueError):
+                    unknown = True
+                    continue
+                if actor is None:
+                    actor = await load_live_user_authority(db, tenant=tenant)
+                lineage = preview_lineage(log, audit, tenant)
+                if not await result_projection_service.authorize_result_projection(
+                    db,
+                    actor,
+                    owner_user_id=log.user_id,
+                    lineage=lineage,
+                ):
+                    protected[tool_call_id] = None
+                    continue
+                protected[tool_call_id].update(
+                    ok=True,
+                    error_code=None,
+                    duration_ms=log.duration_ms,
+                    result=stringify_large_ints(audit["preview_data"]),
+                    ui=stringify_large_ints(audit["preview_ui"]),
+                )
+                lineages.append(lineage)
         return protected, unknown, lineages
 
     @staticmethod
@@ -529,8 +591,15 @@ class ChatRunFinalizer:
             OUTCOME_UNKNOWN_MESSAGE,
         )
 
-        if unknown and OUTCOME_UNKNOWN_MESSAGE not in content:
-            content = (content + "\n\n" + OUTCOME_UNKNOWN_MESSAGE).strip()
+        if unknown:
+            content = reconciliation_notice(
+                content,
+                [
+                    key
+                    for key, card in protected.items()
+                    if card is not None and "ok" not in card
+                ],
+            )
         elif protected and not unknown and OUTCOME_UNKNOWN_MESSAGE in content:
             content = (
                 content.replace(OUTCOME_UNKNOWN_MESSAGE, "")
@@ -659,11 +728,15 @@ class ChatRunFinalizer:
             )
         if not message.content and content:
             message.content = content
-        elif (
-            OUTCOME_UNKNOWN_MESSAGE in content
-            and OUTCOME_UNKNOWN_MESSAGE not in message.content
-        ):
-            message.content += "\n\n" + OUTCOME_UNKNOWN_MESSAGE
+        elif unknown:
+            message.content = reconciliation_notice(
+                message.content,
+                [
+                    key
+                    for key, card in protected.items()
+                    if card is not None and "ok" not in card
+                ],
+            )
         message.tool_calls = self._merge_tool_calls(
             self._replace_protected_cards(message.tool_calls, protected),
             tool_calls,

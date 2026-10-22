@@ -1026,7 +1026,14 @@ async def cancel_import_batch(
         reason=body.reason,
         tenant=tenant,
     )
+    from app.modules.system.service.transfer_cleanup_service import (  # noqa: PLC0415
+        finish_committed_cleanup,
+        take_cleanup_intentions,
+    )
+
+    intentions = take_cleanup_intentions(db)
     await db.commit()
+    await finish_committed_cleanup(intentions)
     return ResponseModel.success(
         data=UserImportBatchCancelResponse(
             batch_id=batch.batch_id,
