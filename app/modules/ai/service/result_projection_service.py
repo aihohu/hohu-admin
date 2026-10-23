@@ -454,6 +454,7 @@ class ResultProjectionService:
         *,
         owner_user_id: int,
         message: AiMessage | Any,
+        completion_states: dict | None = None,
     ) -> DeletionReceipt | None:
         """Expose only an actor's audited success, never deleted business data."""
         if message.role != "assistant" or not message.trace_id:
@@ -498,7 +499,23 @@ class ResultProjectionService:
                 AiOperationLog.status == "success",
             )
         )
-        completed = tuple(sorted(set(successes.all())))
+        from app.modules.ai.service.completion_read_state_service import (  # noqa: PLC0415
+            completion_read_state_service,
+        )
+
+        if completion_states is None:
+            completion_states = await completion_read_state_service.read(
+                tenant=get_bound_tenant_context(user), tool_call_ids=call_ids
+            )
+        completed = tuple(
+            sorted(
+                call_id
+                for call_id in set(successes.all())
+                if (state := completion_states.get(call_id))
+                and state.verified
+                and state.status == "success"
+            )
+        )
         if not completed:
             return None
         return DeletionReceipt(
@@ -913,6 +930,34 @@ class ResultProjectionService:
         ).scalar_one_or_none()
         if action is not None:
             return self.lineage_from_record(action)
+        if log.tool_name == "user.import_preview":
+            from app.modules.ai.service.preview_completion_service import (  # noqa: PLC0415
+                preview_lineage,
+                verify_historical_preview,
+            )
+
+            try:
+                audit = await verify_historical_preview(
+                    db,
+                    log,
+                    await db.get(AiConversation, log.conversation_id),
+                    await db.get(AiMessage, log.source_user_message_id),
+                    tenant_id=log.tenant_id,
+                    user_id=log.user_id,
+                )
+                return preview_lineage(
+                    log,
+                    audit,
+                    TenantContext(
+                        tenant_id=log.tenant_id,
+                        tenant_code="projection",
+                        actor_user_id=log.user_id,
+                        tenant_version=1,
+                        source="access_token",
+                    ),
+                )
+            except (BusinessException, TypeError, ValueError):
+                return None
         messages = (
             await db.execute(
                 select(AiMessage).where(

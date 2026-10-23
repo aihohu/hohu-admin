@@ -2,7 +2,7 @@
 
 覆盖网关工具查找、权限、数据范围和错误映射。
 
-execute_tool 测试用 db_session fixture（ai/conftest.py），不用 mock AsyncSessionLocal。
+execute_tool 测试用 db_session fixture；无真实会话的工具单元测试 mock 审计边界。
 ensure_targets_in_scope 使用 SQL count 路径，用户维度 mock ctx.db.execute。
 """
 
@@ -43,6 +43,15 @@ def reset_registry():
     ToolRegistry.reset()
     yield
     ToolRegistry.reset()
+
+
+@pytest.fixture(autouse=True)
+def isolate_unit_tool_audit(monkeypatch):
+    """These tool units have no persisted chat context; log contracts have DB tests."""
+    from app.modules.ai.agents.gateway import executor
+
+    monkeypatch.setattr(executor, "_start_log", AsyncMock(return_value=1))
+    monkeypatch.setattr(executor, "_finish_log_final", AsyncMock())
 
 
 # ============ ToolResult ============

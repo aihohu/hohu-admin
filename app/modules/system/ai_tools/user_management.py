@@ -236,14 +236,8 @@ async def user_create(
     role_assignment: AiUserRoleAssignment = AiUserRoleAssignment.DEFAULT,
 ) -> ToolResult:
     """创建单个用户；密码后端生成，角色只允许默认或明确为空。"""
-    from app.modules.system.service.user_department_assignment_service import (  # noqa: PLC0415
-        user_department_assignment_service,
-    )
-    from app.modules.system.service.user_role_assignment_service import (  # noqa: PLC0415
-        user_role_assignment_service,
-    )
-    from app.modules.system.service.user_service import (  # noqa: PLC0415
-        user_service,
+    from app.modules.system.service.user_operations_service import (  # noqa: PLC0415
+        user_operations_service,
     )
 
     if primary_dept_id is not None:
@@ -263,35 +257,12 @@ async def user_create(
         primary_dept_id=primary_dept_id,
         default_password=default_password,
     )
-    await user_department_assignment_service.ensure_create_permissions(
+    if _normalize_user_role_assignment(role_assignment) is AiUserRoleAssignment.NONE:
+        user_in.role_ids = []
+    new_user = await user_operations_service.create_user(
         ctx.db,
+        user_in,
         actor_user_id=ctx.user.user_id,
-        has_departments=primary_dept_id is not None,
-        tenant=ctx.tenant,
-    )
-
-    new_user = await user_service.create_user(ctx.db, user_in, tenant=ctx.tenant)
-    await ctx.db.flush()
-    await user_role_assignment_service.assign_created_user_roles(
-        ctx.db,
-        actor_user_id=ctx.user.user_id,
-        target_user_id=new_user.user_id,
-        role_ids=(
-            None
-            if _normalize_user_role_assignment(role_assignment)
-            is AiUserRoleAssignment.DEFAULT
-            else []
-        ),
-        dept_ids=[primary_dept_id] if primary_dept_id is not None else [],
-        tenant=ctx.tenant,
-    )
-    await user_department_assignment_service.assign_created_user_departments(
-        ctx.db,
-        actor_user_id=ctx.user.user_id,
-        target_user_id=new_user.user_id,
-        dept_assignments=[(primary_dept_id, True)]
-        if primary_dept_id is not None
-        else [],
         tenant=ctx.tenant,
     )
     await ctx.db.flush()
@@ -403,7 +374,10 @@ async def _dry_run_user_create(
         else []
     )
     exists = await ctx.db.scalar(
-        select(func.count(User.user_id)).where(User.user_name == user_name)
+        select(func.count(User.user_id)).where(
+            User.tenant_id == ctx.tenant_id,
+            User.user_name == user_name,
+        )
     )
     if exists:
         return DryRunResult(

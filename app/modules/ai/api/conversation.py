@@ -1,8 +1,13 @@
+import asyncio
+
 from fastapi import APIRouter, Depends
+from sqlalchemy import func, select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_ai_chat_use
 from app.core.base_response import PageResult, ResponseModel
+from app.core.exceptions import BusinessRuleException
 from app.core.tenant import get_bound_tenant_context
 from app.db.session import get_db
 from app.modules.ai.schemas.conversation import (
@@ -117,18 +122,32 @@ async def delete_conversation(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(require_ai_chat_use),
 ):
+    from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
+        _discard_uncertain_session,
+    )
+
     tenant = get_bound_tenant_context(_current_user)
-    await conversation_service.lock_for_delete(
-        db, conversation_id, _current_user.user_id, tenant=tenant
-    )
-    await prepared_action_service.expire_for_conversation_delete(
-        db,
-        conversation_id=conversation_id,
-        user_id=_current_user.user_id,
-        tenant=tenant,
-    )
-    await conversation_service.delete(
-        db, conversation_id, _current_user.user_id, tenant=tenant
-    )
-    await db.commit()
+    try:
+        async with asyncio.timeout(8):
+            await db.execute(select(func.set_config("lock_timeout", "2s", True)))
+            await conversation_service.lock_for_delete(
+                db, conversation_id, _current_user.user_id, tenant=tenant
+            )
+            await prepared_action_service.expire_for_conversation_delete(
+                db,
+                conversation_id=conversation_id,
+                user_id=_current_user.user_id,
+                tenant=tenant,
+            )
+            await conversation_service.delete(
+                db, conversation_id, _current_user.user_id, tenant=tenant
+            )
+            await db.commit()
+    except (TimeoutError, DBAPIError) as exc:
+        await _discard_uncertain_session(db)
+        error = BusinessRuleException(
+            "会话操作正在核对，请稍后刷新确认状态", error_code="AI_ACTION_RUNNING"
+        )
+        error.code = 409
+        raise error from exc
     return ResponseModel.success(msg="删除成功")

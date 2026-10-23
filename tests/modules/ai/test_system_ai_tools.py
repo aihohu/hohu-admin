@@ -133,6 +133,35 @@ def _make_ctx(
 
 
 class TestUserCount:
+    async def test_count_enforces_tenant_and_supplied_row_scope(
+        self, db_session: AsyncSession
+    ) -> None:
+        own_visible_id, own_hidden_id, foreign_id = next_id(), next_id(), next_id()
+        await _add_user(
+            db_session, user_id=own_visible_id, user_name="countown", status="1"
+        )
+        await _add_user(
+            db_session, user_id=own_hidden_id, user_name="counthidden", status="1"
+        )
+        other = await create_test_tenant(db_session, prefix="s0count")
+        db_session.add(
+            User(
+                tenant_id=other.tenant_id,
+                user_id=foreign_id,
+                user_name="countforeign",
+                hashed_password="$2b$12$dummy",
+                status="1",
+            )
+        )
+        await db_session.flush()
+        # The tenant restriction must not depend on an upstream scope predicate.
+        ctx = _make_ctx(db_session, visible_user_ids={own_visible_id, foreign_id})
+
+        result = await user_count(ctx, filters={"status": "1"})
+
+        assert result.data == {"count": 1}
+        assert result.projection.scope_bound is True
+
     async def test_count_returns_total(self, db_session: AsyncSession) -> None:
         """3 个用户 → count=3"""
         await _add_user(db_session, user_id=1001, user_name="u1", user_gender="1")

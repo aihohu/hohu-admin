@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.6]
+
+### Compatibility and Security Fixes
+
+- Scope AI username uniqueness and user counts to the current tenant and permitted rows. HTTP and AI user creation share the same transaction-neutral business orchestration and retain role, department, and default-password checks.
+- Commit supported AI database writes, prepared-action success, and required success audit facts in one transaction. Reconcile lost commit acknowledgements and interrupted result delivery from durable facts without repeating the business operation or reporting a committed write as failed.
+- Preserve unknown legacy outcomes for evidence-based reconciliation. Guard cleanup, cancellation, deletion, read-only calls, and history projections so they cannot erase unresolved outcomes or expose results outside current permissions.
+- Keep file preparation and preview handoff consistent with database completion, with rollback cleanup and post-commit deletion handled at their respective transaction boundaries.
+- Render cancellation and preflight rejection accurately. Proven preflight rejection releases the conversation for a new request without retrying the rejected action; ambiguous historical records still require evidence-backed reconciliation.
+
+### Release and Maintenance
+
+- Apply CI to version branches and require same-version Backend/Web product combinations. Preserve existing fixes to footer link attribution.
+- Protect complete-version container references against overwrites. Recover delivery only from the first successful build in the same workflow run, and preserve the existing series and `latest` aliases.
+- Add the `release.json` v1 contract, strict offline and online provenance validation, and immutable attachment publication with acknowledgement-loss recovery. Component announcements alone do not establish product qualification; use the validated product manifest and its evidence.
+
+### Compatibility and Upgrade Notes
+
+- Pair Backend 0.1.6 with Web 0.1.6. CLI 0.1.16 supports the documented manual digest-pinning procedure; it does not validate `release.json`, terminate old writers, or pause scheduled jobs automatically. Mobile and desktop clients are not released as part of this product version.
+- The candidate installation, original 0.1.5 upgrade, and recovery path has been exercised on `linux/amd64`. Final published artifacts require their own combination evidence before deployment; a built `linux/arm64` image is not a claim of verified product support.
+- This patch adds no database migration; the current migration head remains `d01010100101`. Preserve database, public/private files, configuration, encryption keys, and current Redis revocation facts. Follow the [fixed deployment and recovery guide](https://github.com/aihohu/hohu-admin-docs/blob/86691fb578ed17768796d8a7c6b95957e226043c/docs/guide/operations/upgrade.md).
+- Before migration, terminate all old writers, fence stale database credentials, and keep the target scheduler paused until acceptance. Unknown AI outcomes must not be replayed. AI user creation requires an explicitly configured valid default password.
+- Restoring an old Redis snapshot or incrementing a restored authorization version can revive revoked tokens. Preserve complete current revocation facts or apply the guide's proven complete-watermark invalidation procedure while access remains closed; keep the original shared encryption key. Recovery to 0.1.5 must keep affected AI operations disabled (`AI_MODULE_ENABLED=false`).
+- Production installation must use the verified manifest's complete image digests. Series and `latest` tags are not promoted by this release, and source creation from `main` is not a reproducible fixed-product installation.
+
 ## [v0.1.5]
 
 ### Features

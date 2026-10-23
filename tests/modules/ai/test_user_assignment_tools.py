@@ -18,6 +18,7 @@ from app.constants import (
 from app.core.exceptions import AuthorizationException, BusinessRuleException
 from app.core.id_generator import next_id
 from app.db.base import user_depts
+from app.modules.ai.agents.gateway import atomic_execution
 from app.modules.ai.agents.gateway import executor as gateway_executor
 from app.modules.ai.agents.gateway.executor import _build_direct_confirmation_fields
 from app.modules.ai.agents.gateway.result import ToolResult
@@ -26,6 +27,7 @@ from app.modules.ai.agents.tools.pydantic_ai_wrapper import wrap_tool_for_pydant
 from app.modules.ai.agents.tools.registry import RegisteredTool
 from app.modules.ai.core.context import AiToolContext, DataScopeContext
 from app.modules.ai.seed_prompts import DEFAULT_PROMPTS
+from app.modules.ai.service.atomic_completion_service import ClaimBinding
 from app.modules.ai.service.prepared_action_service import (
     canonical_payload_hash,
     prepared_action_service,
@@ -558,15 +560,45 @@ def test_update_dept_confirmation_binds_complete_collection() -> None:
 
 
 async def test_approved_execution_injects_server_business_snapshot() -> None:
-    registered = MagicMock()
-    deps = MagicMock()
+    expected = ToolResult.success(data={"updated": 1})
+    registered = RegisteredTool(
+        meta=user_assignment_tools.user_update_dept.__ai_tool_meta__,
+        fn=AsyncMock(return_value=expected),
+    )
+    deps = SimpleNamespace(
+        tenant=tenant_context(actor_user_id=6001),
+        user=SimpleNamespace(user_id=6001),
+        data_scope_hash=None,
+    )
+    frozen_args = {"user_id": 7001, "dept_assignments": []}
+    snapshot = {"business": {"version": "approved"}}
     action = SimpleNamespace(
         tenant_id=0,
-        snapshot={"business": {"version": "approved"}},
-        frozen_args={"user_id": 7001, "dept_assignments": []},
-        args_hash="task12-args-hash",
+        action_id=9001,
+        confirmation_id="assignment-snapshot-claim",
+        execute_tool_call_id="assignment-snapshot-tool-call",
+        execute_tool_name="user.update_dept",
+        user_id=6001,
+        conversation_id=9002,
+        source_user_message_id=9003,
+        trace_id="tr_assignment_claim",
+        agent_code="user_mgmt",
+        status="running",
+        row_version=3,
+        execution_owner="v0162-db:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        snapshot=snapshot,
+        frozen_args=frozen_args,
+        args_hash=canonical_payload_hash(frozen_args),
+        snapshot_hash=canonical_payload_hash(snapshot),
     )
-    expected = ToolResult.success(data={"updated": 1})
+    claim = ClaimBinding.from_action(action, log_id=9004)
+    tool_db = AsyncMock(spec=AsyncSession)
+    tool_db.begin = AsyncMock()
+    tool_context = SimpleNamespace(db=tool_db)
+
+    async def immediate_timeout(awaitable, *, tenant):
+        assert tenant == deps.tenant
+        return await awaitable
 
     with (
         patch.object(
@@ -574,25 +606,66 @@ async def test_approved_execution_injects_server_business_snapshot() -> None:
             "validate_prepared_execution",
             return_value=registered,
         ),
+        patch.object(atomic_execution, "AsyncSessionLocal", return_value=tool_db),
         patch.object(
-            gateway_executor,
-            "_invoke_tool_fn",
-            AsyncMock(return_value=expected),
-        ) as invoke,
+            atomic_execution.atomic_completion_service,
+            "lock_claim",
+            AsyncMock(return_value=SimpleNamespace(action=action)),
+        ),
+        patch.object(
+            atomic_execution.prepared_action_service, "validate_snapshot", AsyncMock()
+        ),
+        patch.object(
+            atomic_execution.prepared_action_service, "validate_data_scope_snapshot"
+        ),
+        patch.object(atomic_execution, "ensure_current_write_authority", AsyncMock()),
+        patch.object(atomic_execution, "with_l3_timeout", immediate_timeout),
+        patch.object(
+            atomic_execution, "build_tool_context", return_value=tool_context
+        ) as build_context,
+        patch.object(
+            atomic_execution.atomic_completion_service, "complete_success", AsyncMock()
+        ) as complete,
+        patch.object(atomic_execution, "clear_failures", AsyncMock()),
+        patch.object(gateway_executor, "_invoke_tool_fn", AsyncMock()) as legacy_invoke,
     ):
         result = await gateway_executor.execute_approved_prepared_action(
-            action,
+            claim,
             deps,
         )
 
     assert result is expected
-    invoke.assert_awaited_once_with(
-        registered,
-        action.frozen_args,
+    build_context.assert_called_once_with(
         deps,
-        action.args_hash,
+        tool_db,
+        registered.meta,
         approved_business_snapshot={"version": "approved"},
     )
+    registered.fn.assert_awaited_once_with(tool_context, **frozen_args)
+    complete.assert_awaited_once()
+    assert complete.await_args.args[0] is tool_db
+    assert complete.await_args.kwargs["result"] is expected
+    legacy_invoke.assert_not_awaited()
+
+
+async def test_write_execution_without_server_claim_is_rejected() -> None:
+    registered = RegisteredTool(
+        meta=user_assignment_tools.user_update_dept.__ai_tool_meta__,
+        fn=AsyncMock(),
+    )
+    with (
+        patch.object(
+            gateway_executor, "validate_prepared_execution", return_value=registered
+        ),
+        patch.object(gateway_executor, "_invoke_tool_fn", AsyncMock()) as legacy_invoke,
+    ):
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await gateway_executor.execute_approved_prepared_action(
+                SimpleNamespace(tenant_id=0), MagicMock()
+            )
+    assert exc_info.value.error_code == "AI_PREPARED_ACTION_BINDING_INVALID"
+    registered.fn.assert_not_awaited()
+    legacy_invoke.assert_not_awaited()
 
 
 async def test_update_dept_prepared_snapshot_rejects_business_drift(

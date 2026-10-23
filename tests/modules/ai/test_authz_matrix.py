@@ -24,6 +24,7 @@
 
 # ruff: noqa: ARG001, PLC0415
 
+import sys
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -50,11 +51,14 @@ from app.modules.ai.agents.tools.decorator import ai_tool
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.agents.tools.registry import ToolRegistry, compute_available_tools
 from app.modules.ai.core.context import ChatDeps, DataScopeContext
+from tests.modules.ai.test_completion_log_context import context_case as context_case
 
 
 @pytest.fixture(autouse=True)
-async def clean_env(monkeypatch):
-    """每测试清 Redis + reset hitl_manager + 清本轮测试日志。"""
+async def clean_env(monkeypatch, context_case):
+    """Isolate transport state and bind synthetic authority to a real chat source."""
+    monkeypatch.setattr(ToolRegistry, "_instance", ToolRegistry())
+    monkeypatch.setattr(sys.modules[__name__], "_TOOLS_REGISTERED", False)
     original_pool = redis_module.redis_pool
     original_client = redis_module.redis_client
 
@@ -84,24 +88,19 @@ async def clean_env(monkeypatch):
 
     hitl_manager._reset_for_test()
 
-    from app.modules.ai.service.prepared_action_service import prepared_action_service
+    original_build_deps = _build_deps
 
-    monkeypatch.setattr(
-        prepared_action_service,
-        "lock_source_binding",
-        AsyncMock(return_value=True),
-    )
+    def bound_deps(**kwargs):
+        deps = original_build_deps(**kwargs)
+        deps.user.user_id = context_case.tenant.actor_user_id
+        deps.tenant = context_case.tenant
+        deps.data_scope.tenant = context_case.tenant
+        deps.conversation_id = context_case.conversation_id
+        deps.source_user_message_id = context_case.source_id
+        deps.trace_id = context_case.trace_id
+        return deps
 
-    from app.db.session import AsyncSessionLocal
-
-    async with AsyncSessionLocal() as db:
-        async with db.begin():
-            await db.execute(
-                text("DELETE FROM ai_prepared_action WHERE trace_id = 'tr_authz_test'")
-            )
-            await db.execute(
-                text("DELETE FROM ai_operation_log WHERE trace_id = 'tr_authz_test'")
-            )
+    monkeypatch.setattr(sys.modules[__name__], "_build_deps", bound_deps)
 
     yield
 
@@ -117,15 +116,6 @@ async def clean_env(monkeypatch):
         if keys:
             await redis_module.redis_client.delete(*keys)
     hitl_manager._reset_for_test()
-
-    async with AsyncSessionLocal() as db:
-        async with db.begin():
-            await db.execute(
-                text("DELETE FROM ai_prepared_action WHERE trace_id = 'tr_authz_test'")
-            )
-            await db.execute(
-                text("DELETE FROM ai_operation_log WHERE trace_id = 'tr_authz_test'")
-            )
 
     from app.db.session import engine
 
@@ -602,10 +592,11 @@ class TestCase9DailyQuotaExhausted:
         # 预填 Redis 配额到 limit（执行前 INCR 即超限）
         # 修订 S-8：L2 date key 用 UTC compact 格式 YYYYMMDD（不再是 ISO YYYY-MM-DD）
         today = datetime.now(UTC).strftime("%Y%m%d")
-        key = _KEY_L2.format(tenant_id=0, user_id=9001, date=today)
-        await redis_module.redis_client.set(key, DEFAULT_L2_DAILY_QUOTA)
-
         deps = _build_deps()
+        key = _KEY_L2.format(
+            tenant_id=deps.tenant.tenant_id, user_id=deps.user.user_id, date=today
+        )
+        await redis_module.redis_client.set(key, DEFAULT_L2_DAILY_QUOTA)
         result, events = await _execute_and_collect(_T_QUOTA_TEST, {}, deps)
 
         # short-circuit：无事件
@@ -655,9 +646,10 @@ class TestCase10InjectionDetector:
             res = await db.execute(
                 text(
                     "SELECT is_security_event, event_type FROM ai_operation_log "
-                    "WHERE trace_id = 'tr_authz_test' "
-                    "ORDER BY started_at DESC LIMIT 1"
-                )
+                    "WHERE tenant_id = :tenant_id AND trace_id = :trace_id "
+                    "ORDER BY log_id DESC LIMIT 1"
+                ),
+                {"tenant_id": deps.tenant.tenant_id, "trace_id": deps.trace_id},
             )
             row = res.first()
         assert row is not None, "ai_operation_log 行必须写入"

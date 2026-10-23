@@ -6,7 +6,7 @@
 
 后端版本维护在 [pyproject.toml](../pyproject.toml)，变更说明维护在 [CHANGELOG.md](../CHANGELOG.md)。`Unreleased` 是待发布内容，不等于发布记录。遵循 [版本与兼容规范](VERSIONING.md)：Backend/Web 完整同号，App/Desktop 同兼容系列并独立递增补丁，CLI 独立版本，Docs 按产品系列维护。版本分支完成验收后合入默认分支，再使用本文的正式发布入口。
 
-本文描述后端现有发布工具；两仓分别成功不代表产品组合已经验收。正式产品发布还需最终 Backend/Web 组合验证和主规范要求的 `release.json` 配套附件。现有流水线尚未自动生成或校验该清单，维护者需补齐；两仓 `latest` 独立更新，生产升级以已验收清单的固定版本和摘要为准。
+本文描述两仓当前发布保护与后端发布工具；两仓分别成功不代表产品组合已经验收。正式产品发布还需最终 Backend/Web 组合验证和主规范要求的 `release.json` 配套附件。现有流水线尚未自动生成或校验该清单。组件构建只写完整版本，保留系列标签与 `latest` 的原值；不得把旧别名宣称为新产品版本，生产升级以已验收清单的固定版本和摘要为准。
 
 当前 [release.yml](../.github/workflows/release.yml) 通过官方仓库的 Actions → Release → Run workflow 启动，可选择测试镜像或正式发布。正式发布依次校验元数据、运行完整 CI 与 hosted 发布验证、创建 Tag、推送 GHCR 的 linux/amd64、linux/arm64 镜像；启用 ACR 后复制并核验，最后创建 GitHub Release。后端正式产物是容器镜像，此流程不发布 PyPI 包。
 
@@ -28,16 +28,22 @@
 
 发布使用仓库自带的 `GITHUB_TOKEN`，无需新增 PAT。默认仅授予 `contents: read`，镜像任务授予 `packages: write`，创建 Tag 和公告的任务授予 `contents: write`。沿用 `docker` Environment 的保护规则，需允许默认分支使用该环境，并允许发布任务创建版本 Tag。各阶段在同一工作流内衔接，不依赖创建 Tag 或 Release 后再次触发 Actions。
 
-失败或取消后，先按 [版本规范中的恢复规则](VERSIONING.md#4-从候选版本到产品发布) 核对远端状态，不能直接选择 **Re-run failed jobs**。Git Tag 的提交与运行编号校验不保护镜像 digest；当前构建任务重跑会重新 build/push 同号标签，没有自动恢复原镜像的逻辑。
+正式构建仅允许原运行的第一次尝试。`run_attempt > 1` 会在构建准备前失败，包括 **Re-run all jobs** 和失败构建的 **Re-run failed jobs**；即便确认尚未上传，也不重新构建同号版本。测试模式仍使用每次尝试唯一的测试标签。
 
-- 确认推送任务已终止且未发布完整版本镜像引用时，可以在**原运行**重试失败任务。查询失败或任务仍可能写入，不属于确认未发布。
-- 构建任务成功、仅 ACR 同步或公告失败时，核对原 digest、正式版本引用及任务输出一致，再在原运行重试下游失败任务；不得选择 **Re-run all jobs** 重建已发布镜像。ACR 复制同一个 digest，不需要重建。
-- 构建任务失败但镜像已存在时，不得直接重跑构建。只有经过验证、无需重建的原 digest 恢复路径才可继续交付；当前工作流不提供这个失败构建恢复入口，无可用路径则 Backend/Web 共同换新产品版本。
-- 远端结果未知、原 digest 无法确认或必须修改代码/重建时，保留原版本与失败证据，Backend/Web 共同换新版本。不能删除已有标签再重试以规避不可变约束。
+首次构建前，[release_registry.py](../tools/ops/release_registry.py) 建立认证上下文并读取仓库，检查 GHCR 与启用的 ACR 完整版本引用；仅明确的 `404 / MANIFEST_UNKNOWN` 允许继续。匿名成功、401/403、普通404、超时、限流和响应损坏都不能解释为不存在。已存在的任何完整版本都拒绝新构建。仓库必须预先可认证查询；HTTP认证只接受同源HTTPS入口；北京ACR另允许其已核实的精确认证入口 `https://dockerauth.cn-hangzhou.aliyuncs.com/auth`，该例外仅绑定 `registry.cn-beijing.aliyuncs.com`。其他外部入口、带查询参数或凭据的地址均拒绝，不带凭据跟随重定向。
 
-同一运行可复用自身创建且仍指向原提交的 Git Tag；重新点击 Run workflow 会生成不同运行编号，已有 Tag 将被拒绝，即使提交 SHA 相同。这只是 Git Tag 的恢复规则，不替代上面的镜像状态判定。ACR 未启用时允许跳过同步并创建公告；重试下游保留已有正式 Release 正文，同名草稿在发布链路成功后使用 CHANGELOG 正文发布。
+维护者还须核实正式写权限仅供受控工作流使用、历史任务已终止、外部写者无写能力，然后配置仓库变量 `RELEASE_EXCLUSIVE_WRITER_CONFIRMED=true`。未配置或撤回后正式构建与下游恢复均停止。这是已核实操作前置的声明，不能代替权限审计；共享并发组只能协调纳入组的任务。
 
-Tag、镜像仓库和 GitHub Release 之间没有原子事务，失败不会自动删除 Tag 或回滚镜像及 `latest`。Tag 已创建后，如需修改代码，应准备新的版本重新发版；原运行的重试始终使用原提交。使用 `GITHUB_TOKEN` 创建 Tag 不会触发其他 `push` 工作流，Gitee 标签镜像可通过既有定时或手动同步补齐。
+- 构建成功时，[release_build.py](../tools/ops/release_build.py) 核验源index和平台子manifest，保存 `component-build.json` 到唯一的 `component-build-<run_id>-1` Actions artifact。记录绑定仓库、源码SHA、完整版本、原run/attempt、源index digest、两种平台子digest、镜像目标及构建前不存在证明。上传失败使build job失败，不能恢复。
+- 仅当第一次build job成功，才可在**同一原运行**重试失败的 ACR/公告任务。恢复从固定artifact读取，验证原job结果、工作流来源、artifact归属/时间/保留状态及压缩包SHA256，严格验证记录后重新核对源tag和digest。不能手输digest、使用其他run的记录或从当前标签猜测来源。
+- 完整目标版本已是同一digest时只核验，不再次上传；不同digest、来源完整tag漂移或查询未知时硬失败。复制ACK丢失后，重试先读回目标；只有原digest才能幂等继续，不能覆盖冲突。
+- 构建失败/取消且远端可能已有镜像、原成功记录缺失或过期、来源被改变、必须改代码或重建时，保留原版本和失败证据，确认写者停止，Backend/Web共同换新产品号。不得删除tag或artifact来重新使用旧版本。
+
+原记录在Actions保留90天。公告阶段重新验证产物与匿名完整OCI拉取，先创建或保留draft，按字节核对并上传原 `component-build.json` 和确定性的 `component-delivery.json`，然后发布并读回。两个附件是组件构建/交付证据，不是最终产品 `release.json`。同名同字节可继续，不同字节或查询未知则拒绝，永不clobber；已有正式公告正文保持。上传或公告回执丢失时，在同一原run重试读取既有事实，不重新构建。去密记录随Release长期保留，不能只依赖短期Actions artifact。
+
+同一运行可复用自身创建且仍指向原提交的 Git Tag；重新点击 Run workflow 会生成不同运行编号，已有 Tag 将被拒绝，即使提交 SHA 相同。这只是 Git Tag 的恢复规则，不替代上面的镜像状态判定。ACR未启用时可只交付GHCR；恢复时当前镜像配置必须与原记录一致，不能通过关闭镜像跳过已绑定的交付义务。
+
+Tag、镜像仓库和GitHub Release之间没有原子事务，失败不会自动删除Tag或回滚镜像；本流程不更新系列/latest。Tag已创建后，如需修改代码，应准备新版本；原运行的重试始终使用原提交。使用 `GITHUB_TOKEN` 创建 Tag 不会触发其他 `push` 工作流，Gitee 标签镜像可通过既有定时或手动同步补齐。
 
 ## v0.1.5 发布核对
 
@@ -55,23 +61,26 @@ Tag、镜像仓库和 GitHub Release 之间没有原子事务，失败不会自�
 
 GHCR 与 ACR 使用同一次构建的运行镜像。为兼容 ACR，构建显式关闭附加的 provenance/SBOM 证明清单，保留 `linux/amd64`、`linux/arm64` 两种运行架构及跨仓库摘要一致性。若旧镜像同步报 `unknown manifest class for application/vnd.oci.empty.v1+json`，需发布修复后的工作流并重新构建；重试旧 digest 无法消除不兼容的清单。
 
-在两个 GitHub 仓库的 Settings → Secrets and variables → Actions 分别配置：
+在两个GitHub仓库分别配置以下镜像设置。ACR凭据仅放在受保护的 `docker` Environment，环境限定默认分支；不能在仓库级保留供普通PR引用的同名副本。
 
 | 类型 | 名称 | 内容 |
 | --- | --- | --- |
-| Secret | `ACR_USERNAME` | 有目标仓库推送权限的 ACR 登录用户名 |
-| Secret | `ACR_PASSWORD` | ACR 镜像仓库登录密码 |
+| docker Environment secret | `ACR_USERNAME` | 有目标仓库推送权限的 ACR 登录用户名 |
+| docker Environment secret | `ACR_PASSWORD` | ACR 镜像仓库登录密码 |
 | Variable | `ACR_REGISTRY` | 控制台给出的公网域名，不含协议和路径 |
 | Variable | `ACR_REPOSITORY` | `命名空间/hohu-admin`；Web 为 `命名空间/hohu-admin-web` |
 | Repository variable | `ACR_MIRROR_ENABLED` | 配置完成后设为 `true`；未启用时正式发布仍只推 GHCR；任务启动前判断，不能只配置为 Environment variable |
+| Repository variable | `RELEASE_EXCLUSIVE_WRITER_CONFIRMED` | 核实正式写者隔离后设为 `true`；正式构建与恢复都要求保持，测试镜像不据此取得正式发布资格 |
 
 将工作流和工具提交到默认分支后，在 Actions → Release → Run workflow 选择默认分支；后端保留默认的 `mode=test`，`version` 留空。测试镜像模式会在构建前检查 ACR 配置，沿用现有 `docker` Environment 的访问规则。发布资格验证在测试镜像模式中跳过，GHCR 构建成功后仍执行启用的 ACR 同步；构建失败、跳过或运行取消时不执行同步。同步失败可重跑失败任务，不必重新构建应用；修改工作流后应重新 Run workflow，旧运行的 Re-run 不使用新工作流。
 
-[sync_image_mirror.py](../tools/ops/sync_image_mirror.py) 按构建 digest 完整复制多架构镜像，检查两种架构、目标标签 digest，并使用无凭据的完整 OCI 拉取验证镜像层公开可读。已移动到其他 digest 的来源标签跳过，避免延迟任务覆盖新别名；不降级单架构或转换 digest。成功报告显示 `verified_tags`、`skipped_tags`、`platforms` 和 `anonymous_pull`，保存在工作流摘要及 `acr-mirror-*` Artifact 中。隔离回归无需应用服务：`python -B -m unittest discover -s tests/tools -p test_sync_image_mirror.py -v`。
+[sync_image_mirror.py](../tools/ops/sync_image_mirror.py) 按构建digest完整复制多架构镜像，并使用无凭据的完整OCI拉取验证镜像层公开可读。完整版本的源漂移和目标冲突硬失败；同digest目标只校验。工具保留可变别名“源已移动则跳过”的独立语义，但当前工作流不会向它传入系列/latest。无单架构降级或digest转换。报告含 `verified_tags`、`skipped_tags`、`platforms`、`anonymous_pull`，保存在摘要和 `acr-mirror-*` Artifact。隔离回归无需应用服务：`uv run python -B -m unittest discover -s tests/tools -p 'test_*release*.py' -v`，镜像复制另运行 `test_sync_image_mirror.py`。
 
 配置公开仓库后，使用报告中的测试标签执行 `docker pull <ACR_REGISTRY>/<ACR_REPOSITORY>:<test-tag>`，再在隔离环境验收应用启动。镜像复制与公开拉取通过不表示业务部署验收完成。本节应用镜像同步覆盖后端和 Web；基础设施镜像同步与部署来源选择由 [hohu-cli](https://github.com/aihohu/hohu-cli) 维护，按所用 CLI 版本的说明配置。
 
 ## 发布前验证
+
+配套清单格式、离线/在线来源核验和不可覆盖上传见[配套发布清单](PRODUCT-RELEASE.md)。最终文件只有在 Backend/Web 实际产物及全部支持平台的安装、升级、恢复和 AI 写一致性证据齐备后才能公开；合成测试样本和未完成草稿不提供发布资格。
 
 1. 明确待发布提交、同号 Backend/Web 版本、Release 说明和配套 CLI/客户端，按 [版本与兼容规范](VERSIONING.md) 准备配套清单；记录实际支持范围，不从版本号推断兼容。
 2. 通过 [CI](../.github/workflows/ci.yml)：Ruff、测试、至少 70% 覆盖率、hosted 隔离验证；通过文档检查。

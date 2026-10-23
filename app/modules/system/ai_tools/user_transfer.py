@@ -219,12 +219,18 @@ async def user_import_preview(
 
     storage = get_file_storage()
     storage_suffix = _user_import_suffix_for_mime(mime_type)
-    storage_key = await storage.save(
-        file_bytes,
-        mime_type=mime_type,
-        namespace=f"tenant-{ctx.tenant.tenant_id}-import-preview",
-        suffix=storage_suffix,
-    )
+    if ctx.artifact_execution is not None:
+        storage_key = await storage.save_artifact(
+            file_bytes,
+            identity=ctx.artifact_execution.identity("preview_source", batch.batch_id),
+        )
+    else:
+        storage_key = await storage.save(
+            file_bytes,
+            mime_type=mime_type,
+            namespace=f"tenant-{ctx.tenant.tenant_id}-import-preview",
+            suffix=storage_suffix,
+        )
     batch.file_storage_key = storage_key
     await ctx.db.flush()
 
@@ -434,7 +440,21 @@ async def user_import_execute(
 
     storage = get_file_storage()
     try:
-        file_bytes = await storage.read(batch.file_storage_key)
+        from app.core.file_storage import is_owned_artifact  # noqa: PLC0415
+
+        if is_owned_artifact(batch.file_storage_key):
+            from app.modules.system.service.user_transfer_artifact_service import (  # noqa: PLC0415
+                verify_file,
+            )
+
+            file_bytes = await verify_file(
+                batch.file_storage_key,
+                tenant_id=ctx.tenant_id,
+                resource_id=batch.batch_id,
+                role="preview_source",
+            )
+        else:
+            file_bytes = await storage.read(batch.file_storage_key)
     except FileNotFoundError:
         from app.core.exceptions import BusinessRuleException  # noqa: PLC0415
 
@@ -472,6 +492,7 @@ async def user_import_execute(
         current_user=ctx.user,
         on_conflict=on_conflict,
         sync_mode=EmployeeNoSyncMode(sync_mode),
+        artifact_execution=ctx.artifact_execution,
         has_role_column=has_role_column,
         tenant=ctx.tenant,
     )
@@ -557,7 +578,6 @@ async def user_export(
     from app.modules.system.service.user_export_service import (  # noqa: PLC0415
         export_users_to_excel,
         get_export_task,
-        get_file_storage,
     )
 
     canonical_status = None if status is None else _validate_enable_status(status)
@@ -592,6 +612,7 @@ async def user_export(
         filter_,
         ctx.user,
         reason=reason,
+        artifact_execution=ctx.artifact_execution,
         tenant=ctx.tenant,
     )
 
@@ -623,8 +644,8 @@ async def user_export(
         lineage=lineage,
     )
     if download_token is None:
-        if task is not None and task.file_storage_key:
-            await get_file_storage().delete(task.file_storage_key)
+        # A projection refusal is not evidence that a file is an unreferenced
+        # orphan. Retention owns physical cleanup after a confirmed DB outcome.
         raise AuthorizationException(error_code="AI_RESULT_PROJECTION_FORBIDDEN")
     download_url = f"/ai/download/user-export/{export_id}?token={download_token}"
 

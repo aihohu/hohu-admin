@@ -15,6 +15,10 @@ from uuid import uuid4
 from app.core.tenant import PlatformContext
 from app.db.session import AsyncSessionLocal
 from app.modules.job.task_registry import TaskScope, register_task
+from app.modules.system.service.transfer_cleanup_service import (
+    finish_committed_cleanup,
+    take_cleanup_intentions,
+)
 from app.modules.system.service.user_export_service import cleanup_expired_export_tasks
 from app.modules.system.service.user_import_service import (
     cleanup_expired_batches,
@@ -47,7 +51,9 @@ async def clean_expired_import_batches(_args: dict | None = None) -> int:
             db,
             platform=_retention_context("scheduled import retention"),
         )
+        intentions = take_cleanup_intentions(db)
         await db.commit()
+        await finish_committed_cleanup(intentions)
     logger.info("clean_expired_import_batches: cleaned %d batches", count)
     return count
 
@@ -63,7 +69,9 @@ async def clean_expired_import_previews(_args: dict | None = None) -> int:
             db,
             platform=_retention_context("scheduled preview expiration"),
         )
+        intentions = take_cleanup_intentions(db)
         await db.commit()
+        await finish_committed_cleanup(intentions)
     logger.info("clean_expired_import_previews: expired %d previews", count)
     return count
 
@@ -79,6 +87,8 @@ async def clean_expired_export_tasks(_args: dict | None = None) -> int:
             db,
             platform=_retention_context("scheduled export retention"),
         )
+        intentions = take_cleanup_intentions(db)
         await db.commit()
+        await finish_committed_cleanup(intentions)
     logger.info("clean_expired_export_tasks: cleaned %d tasks", count)
     return count

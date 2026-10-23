@@ -264,7 +264,7 @@ async def test_create_pending_freezes_policy_and_trusted_identity(db_session) ->
         PreparedActionStatus.APPROVED,
     ],
 )
-async def test_conversation_delete_expires_non_running_actions_and_logs(
+async def test_conversation_delete_only_expires_unclaimed_actions_and_logs(
     db_session,
     status: PreparedActionStatus,
 ) -> None:
@@ -292,6 +292,27 @@ async def test_conversation_delete_expires_non_running_actions_and_logs(
         status=AiOperationStatus.PENDING_CONFIRMATION,
         confirmation_id=action.confirmation_id,
     )
+
+    if status == PreparedActionStatus.APPROVED:
+        with pytest.raises(BusinessRuleException) as exc_info:
+            await prepared_action_service.expire_for_conversation_delete(
+                db_session,
+                conversation_id=action.conversation_id,
+                user_id=action.user_id,
+                tenant=_tenant(
+                    tenant_id=action.tenant_id, actor_user_id=action.user_id
+                ),
+            )
+        assert exc_info.value.error_code == "AI_ACTION_RUNNING"
+        assert exc_info.value.code == 409
+        assert action.status == status.value
+        assert action.finished_at is None
+        assert action.execution_owner == "worker-1"
+        assert action.execution_lease_expires_at is not None
+        log = await db_session.get(AiOperationLog, log_id)
+        assert log.status == AiOperationStatus.PENDING_CONFIRMATION.value
+        assert log.finished_at is None
+        return
 
     expired = await prepared_action_service.expire_for_conversation_delete(
         db_session,
@@ -345,7 +366,7 @@ async def test_conversation_delete_rejects_running_action_without_partial_expiry
     assert running.status == PreparedActionStatus.RUNNING.value
 
 
-async def test_conversation_delete_recovers_expired_running_lease(
+async def test_conversation_delete_preserves_unknown_legacy_running_lease(
     db_session,
 ) -> None:
     kwargs = _create_kwargs()
@@ -373,26 +394,26 @@ async def test_conversation_delete_recovers_expired_running_lease(
         confirmation_id=action.confirmation_id,
     )
 
-    recovered = await prepared_action_service.expire_for_conversation_delete(
-        db_session,
-        conversation_id=action.conversation_id,
-        user_id=action.user_id,
-        tenant=_tenant(tenant_id=action.tenant_id, actor_user_id=action.user_id),
-    )
+    with pytest.raises(BusinessRuleException) as exc_info:
+        await prepared_action_service.expire_for_conversation_delete(
+            db_session,
+            conversation_id=action.conversation_id,
+            user_id=action.user_id,
+            tenant=_tenant(tenant_id=action.tenant_id, actor_user_id=action.user_id),
+        )
     await db_session.flush()
     log = await db_session.get(AiOperationLog, log_id)
 
-    assert [item.action_id for item in recovered] == [action.action_id]
-    assert action.status == PreparedActionStatus.FAILED.value
-    assert action.error_code == "AI_PREPARED_ACTION_EXECUTION_INTERRUPTED"
-    assert action.finished_at is not None
-    assert action.execution_owner is None
-    assert action.execution_lease_expires_at is None
-    assert action.guard_owner_token is None
+    assert exc_info.value.error_code == "AI_ACTION_RUNNING"
+    assert action.status == PreparedActionStatus.RUNNING.value
+    assert action.error_code is None
+    assert action.finished_at is None
+    assert action.execution_owner == "stale-worker"
+    assert action.execution_lease_expires_at is not None
     assert log is not None
-    assert log.status == AiOperationStatus.FAILED.value
-    assert log.error_code == "AI_PREPARED_ACTION_EXECUTION_INTERRUPTED"
-    assert log.finished_at is not None
+    assert log.status == AiOperationStatus.RUNNING.value
+    assert log.error_code is None
+    assert log.finished_at is None
 
 
 async def test_create_pending_rejects_missing_frozen_model(db_session) -> None:

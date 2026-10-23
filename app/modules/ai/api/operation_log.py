@@ -28,7 +28,13 @@ from app.modules.ai.schemas.operation_log import (
     TraceListQuery,
     TraceSummaryOut,
 )
+from app.modules.ai.service.completion_read_state_service import (
+    UNKNOWN_CODE,
+    completion_read_state_service,
+    effective_log_state,
+)
 from app.modules.ai.service.operation_log_service import operation_log_service
+from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.ai.service.result_projection_service import (
     result_projection_service,
 )
@@ -113,7 +119,29 @@ async def get_operation_log(
         tenant=tenant,
     )
     if log is None:
-        raise NotFoundException("AI 操作日志", error_code="AI_OPERATION_LOG_NOT_FOUND")
+        action = await prepared_action_service.get_by_execute_tool_call_id(
+            db, tool_call_id, tenant=tenant
+        )
+        if action is None:
+            raise NotFoundException(
+                "AI 操作日志", error_code="AI_OPERATION_LOG_NOT_FOUND"
+            )
+        if not (
+            action.user_id == current_user.user_id
+            or is_super_admin(current_user)
+            or has_explicit_permission(current_user, AI_TRACE_VIEW_PERM)
+        ):
+            raise AuthorizationException(error_code="AI_OPERATION_LOG_FORBIDDEN")
+        # A missing required audit is uncertainty, never a reason to retry the
+        # business action. Expose no PA result, owner marker, or synthetic log.
+        return ResponseModel.success(
+            data=OperationLogStatusOut(
+                toolCallId=tool_call_id,
+                status="running",
+                errorCode=UNKNOWN_CODE,
+                finishedAt=None,
+            )
+        )
 
     # 权限：本人 / 超管 / ai:trace:view
     is_owner = log.user_id == current_user.user_id
@@ -128,8 +156,20 @@ async def get_operation_log(
         )
         raise AuthorizationException(error_code="AI_OPERATION_LOG_FORBIDDEN")
 
+    states = await completion_read_state_service.read(
+        tenant=tenant, tool_call_ids=[log.tool_call_id]
+    )
+    effective = effective_log_state(log, states)
+    output = OperationLogOut.model_validate(log).model_copy(
+        update={
+            "status": effective.status,
+            "error_code": effective.error_code,
+            "finished_at": effective.finished_at,
+            "duration_ms": effective.duration_ms,
+        }
+    )
     if is_auditor:
-        return ResponseModel.success(data=OperationLogOut.model_validate(log))
+        return ResponseModel.success(data=output)
 
     allowed = False
     if has_explicit_permission(current_user, AI_CHAT_USE_PERMISSION):
@@ -141,13 +181,15 @@ async def get_operation_log(
             lineage=lineage,
         )
     if allowed:
-        return ResponseModel.success(data=OperationLogOut.model_validate(log))
+        return ResponseModel.success(data=output)
 
     return ResponseModel.success(
         data=OperationLogStatusOut(
             toolCallId=log.tool_call_id,
-            status=log.status,
-            errorCode="AI_RESULT_PROJECTION_FORBIDDEN",
-            finishedAt=log.finished_at,
+            status=effective.status,
+            errorCode=effective.error_code
+            if effective.unknown
+            else "AI_RESULT_PROJECTION_FORBIDDEN",
+            finishedAt=effective.finished_at,
         )
     )

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hohu-admin"
-version = "0.1.5"
+version = "0.1.6"
 description = "A front-end and back-end separated permission management system based on FastAPI, JWT, Vue 3, and Naive UI."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -160,4 +160,5 @@ dev = [
     "pre-commit>=4.6.0",
     "fakeredis>=2.36.0",
     "pytest-cov>=7.1.0",
+    "jsonschema>=4.26.0",
 ]

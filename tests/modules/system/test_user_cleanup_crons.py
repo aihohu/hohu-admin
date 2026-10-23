@@ -144,8 +144,10 @@ def mock_fs():
 class TestCleanupExpiredBatches:
     """删除 90 天前的终态批次。"""
 
-    async def test_deletes_old_terminal_batch_with_files(self, db_session, mock_fs):
-        """90 天前 SUCCESS batch → 删 DB 行 + failed_rows_file + preview 文件。"""
+    async def test_retires_old_batch_but_retains_unowned_files(
+        self, db_session, mock_fs
+    ):
+        """旧随机 key 无执行归属证明，批次和文件一并留待核对。"""
         old = datetime.now() - timedelta(days=BATCH_RETENTION_DAYS + 5)
         # 预放文件到 MockFileStorage
         await mock_fs.save(b"failed-rows", mime_type="...", namespace="import-error")
@@ -168,12 +170,12 @@ class TestCleanupExpiredBatches:
 
         count = await cleanup_expired_batches(db_session, platform=PLATFORM)
 
-        assert count == 1
+        assert count == 0
         # DB 行已删（CASCADE 自动删 batch_log，这里没 log 直接查 batch）
-        assert await db_session.get(UserImportBatch, "b-old-1") is None
-        # 文件也被删
-        assert not await mock_fs.exists(failed_key)
-        assert not await mock_fs.exists(preview_key)
+        assert await db_session.get(UserImportBatch, "b-old-1") is not None
+        # 未提交数据库前不能删除私有文件
+        assert await mock_fs.exists(failed_key)
+        assert await mock_fs.exists(preview_key)
 
     async def test_preserves_recent_batch_under_90_days(self, db_session):
         """89 天前的批次不删除。"""
@@ -266,7 +268,7 @@ class TestCleanupExpiredBatches:
         assert await db_session.get(UserImportBatch, "b-no-files") is None
 
     async def test_missing_file_does_not_break_cleanup(self, db_session):
-        """failed_rows_file 指向不存在的文件（被外部删了）→ 不抛错，DB 行照删。"""
+        """failed_rows_file 指向不存在的文件（被外部删了）→ 不抛错，保留 DB 关联供核对。"""
         old = datetime.now() - timedelta(days=BATCH_RETENTION_DAYS + 1)
         batch = _make_batch(
             batch_id="b-dangling-file",
@@ -280,8 +282,8 @@ class TestCleanupExpiredBatches:
         # 不抛错（FileStorage.delete 返 False 而非 raise；MockFileStorage 同款）
         count = await cleanup_expired_batches(db_session, platform=PLATFORM)
 
-        assert count == 1
-        assert await db_session.get(UserImportBatch, "b-dangling-file") is None
+        assert count == 0
+        assert await db_session.get(UserImportBatch, "b-dangling-file") is not None
 
     async def test_cascades_batch_log_on_delete(self, db_session):
         """删除批次后 batch_log 通过外键级联删除。"""
@@ -363,8 +365,8 @@ class TestCleanupExpiredPreviews:
         await db_session.refresh(batch)
         assert batch.status == ImportBatchStatus.PREVIEW_DONE
 
-    async def test_deletes_orphan_preview_file(self, db_session, mock_fs):
-        """批次过期时同时删除 preview 文件，避免垃圾文件残留。"""
+    async def test_expiration_retains_unowned_preview_file(self, db_session, mock_fs):
+        """过期事务未提交时保留文件，旧随机 key 不作无归属 GC。"""
         old = datetime.now() - timedelta(minutes=PREVIEW_TTL_MINUTES + 5)
         preview_key = await mock_fs.save(
             b"preview-data", mime_type="...", namespace="import-preview"
@@ -380,7 +382,7 @@ class TestCleanupExpiredPreviews:
 
         await cleanup_expired_previews(db_session, platform=PLATFORM)
 
-        assert not await mock_fs.exists(preview_key)
+        assert await mock_fs.exists(preview_key)
 
     async def test_writes_batch_log_expired_event(self, db_session):
         """写入 batch_log EXPIRED 事件进入审计链路。"""
@@ -457,8 +459,8 @@ class TestCleanupExpiredPreviews:
 class TestCleanupExpiredExportTasks:
     """删除 30 天前的导出任务。"""
 
-    async def test_deletes_old_export_task_with_file(self, db_session, mock_fs):
-        """30 天前 ExportTask → 删 DB 行 + export 文件。"""
+    async def test_retires_export_but_retains_unowned_file(self, db_session, mock_fs):
+        """旧任务缺少文件执行归属证明，任务与字节保留。"""
         old = datetime.now() - timedelta(days=EXPORT_RETENTION_DAYS + 5)
         export_key = await mock_fs.save(
             b"export-data", mime_type="...", namespace="export"
@@ -473,9 +475,9 @@ class TestCleanupExpiredExportTasks:
 
         count = await cleanup_expired_export_tasks(db_session, platform=PLATFORM)
 
-        assert count == 1
-        assert await db_session.get(UserExportTask, "exp-old-1") is None
-        assert not await mock_fs.exists(export_key)
+        assert count == 0
+        assert await db_session.get(UserExportTask, "exp-old-1") is not None
+        assert await mock_fs.exists(export_key)
 
     async def test_preserves_recent_export_task(self, db_session):
         """29 天前的导出任务不删除。"""
@@ -510,7 +512,7 @@ class TestCleanupExpiredExportTasks:
         assert await db_session.get(UserExportTask, "exp-no-file") is None
 
     async def test_missing_file_does_not_break_cleanup(self, db_session):
-        """file_storage_key 指向不存在的文件 → 不抛错，DB 行照删。"""
+        """file_storage_key 指向不存在的文件 → 不抛错，保留 DB 关联供核对。"""
         old = datetime.now() - timedelta(days=EXPORT_RETENTION_DAYS + 1)
         task = _make_export_task(
             export_id="exp-dangling",
@@ -522,5 +524,5 @@ class TestCleanupExpiredExportTasks:
 
         count = await cleanup_expired_export_tasks(db_session, platform=PLATFORM)
 
-        assert count == 1
-        assert await db_session.get(UserExportTask, "exp-dangling") is None
+        assert count == 0
+        assert await db_session.get(UserExportTask, "exp-dangling") is not None

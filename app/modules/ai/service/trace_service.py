@@ -19,6 +19,10 @@ from app.modules.ai.schemas.operation_log import (
     TraceSummaryOut,
     TraceTargetOut,
 )
+from app.modules.ai.service.completion_read_state_service import (
+    completion_read_state_service,
+    effective_log_state,
+)
 from app.modules.system.service.user_service import user_service
 
 
@@ -49,8 +53,6 @@ class TraceService:
             filters.append(AiOperationLog.agent_code == query.agent_code)
         if query.tool_name is not None:
             filters.append(AiOperationLog.tool_name == query.tool_name)
-        if query.status is not None:
-            filters.append(AiOperationLog.status == query.status)
         if query.queued_from is not None:
             filters.append(
                 AiOperationLog.queued_at >= query.queued_from.replace(tzinfo=None)
@@ -78,22 +80,70 @@ class TraceService:
             .where(*filters)
             .group_by(AiOperationLog.trace_id)
         )
-        total = int(
-            (
-                await db.execute(select(func.count()).select_from(grouped.subquery()))
-            ).scalar_one()
-        )
-        page_rows = (
-            await db.execute(
-                grouped.order_by(
-                    func.max(AiOperationLog.queued_at).desc(),
-                    func.max(AiOperationLog.log_id).desc(),
-                )
-                .offset((query.current - 1) * query.size)
-                .limit(query.size)
+        projected_states = None
+        filtered_rows = None
+        if query.status is None:
+            total = int(
+                (
+                    await db.execute(
+                        select(func.count()).select_from(grouped.subquery())
+                    )
+                ).scalar_one()
             )
-        ).all()
-        trace_ids = [str(row.trace_id) for row in page_rows]
+            page_rows = (
+                await db.execute(
+                    grouped.order_by(
+                        func.max(AiOperationLog.queued_at).desc(),
+                        func.max(AiOperationLog.log_id).desc(),
+                    )
+                    .offset((query.current - 1) * query.size)
+                    .limit(query.size)
+                )
+            ).all()
+            trace_ids = [str(row.trace_id) for row in page_rows]
+        else:
+            # The full proof cannot be represented by raw status SQL. Select
+            # candidate traces using the other filters, then classify all their
+            # operations in one batch before counting and paginating matches.
+            matching_ids = set(
+                await db.scalars(select(AiOperationLog.log_id).where(*filters))
+            )
+            candidate_traces = select(AiOperationLog.trace_id).where(*filters)
+            candidate_rows = list(
+                await db.scalars(
+                    select(AiOperationLog)
+                    .where(
+                        AiOperationLog.tenant_id == tenant.tenant_id,
+                        AiOperationLog.trace_id.in_(candidate_traces),
+                    )
+                    .order_by(AiOperationLog.queued_at, AiOperationLog.log_id)
+                )
+            )
+            projected_states = await completion_read_state_service.read(
+                tenant=tenant,
+                tool_call_ids=[row.tool_call_id for row in candidate_rows],
+            )
+            latest_matches = {}
+            for operation in candidate_rows:
+                if (
+                    operation.log_id in matching_ids
+                    and effective_log_state(operation, projected_states).status
+                    == query.status
+                ):
+                    latest_matches[operation.trace_id] = (
+                        operation.queued_at,
+                        operation.log_id,
+                    )
+            ordered = sorted(
+                latest_matches, key=latest_matches.__getitem__, reverse=True
+            )
+            total = len(ordered)
+            start = (query.current - 1) * query.size
+            trace_ids = ordered[start : start + query.size]
+            page_trace_ids = set(trace_ids)
+            filtered_rows = [
+                row for row in candidate_rows if row.trace_id in page_trace_ids
+            ]
         if not trace_ids:
             return PageResult(
                 records=[],
@@ -102,20 +152,28 @@ class TraceService:
                 size=query.size,
             )
 
-        rows = list(
-            (
-                await db.execute(
-                    select(AiOperationLog)
-                    .where(
-                        AiOperationLog.tenant_id == tenant.tenant_id,
-                        AiOperationLog.trace_id.in_(trace_ids),
+        rows = (
+            filtered_rows
+            if filtered_rows is not None
+            else list(
+                (
+                    await db.execute(
+                        select(AiOperationLog)
+                        .where(
+                            AiOperationLog.tenant_id == tenant.tenant_id,
+                            AiOperationLog.trace_id.in_(trace_ids),
+                        )
+                        .order_by(AiOperationLog.queued_at, AiOperationLog.log_id)
                     )
-                    .order_by(AiOperationLog.queued_at, AiOperationLog.log_id)
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
         )
+        if projected_states is None:
+            projected_states = await completion_read_state_service.read(
+                tenant=tenant, tool_call_ids=[row.tool_call_id for row in rows]
+            )
         actor_names = await user_service.get_user_names_by_ids(
             db,
             {operation.user_id for operation in rows},
@@ -129,10 +187,14 @@ class TraceService:
         for trace_id in trace_ids:
             operations = by_trace[trace_id]
             latest = operations[-1]
-            finished_values = [
-                operation.finished_at
+            effective = [
+                effective_log_state(operation, projected_states)
                 for operation in operations
-                if operation.finished_at is not None
+            ]
+            finished_values = [
+                state.finished_at
+                for state in effective
+                if state.finished_at is not None
             ]
             records.append(
                 TraceSummaryOut(
@@ -143,10 +205,12 @@ class TraceService:
                         {operation.agent_code or "unknown" for operation in operations}
                     ),
                     toolNames=sorted({operation.tool_name for operation in operations}),
-                    statuses=sorted({operation.status for operation in operations}),
+                    statuses=sorted({state.status for state in effective}),
                     operationCount=len(operations),
                     queuedAt=operations[0].queued_at,
-                    finishedAt=max(finished_values) if finished_values else None,
+                    finishedAt=max(finished_values)
+                    if finished_values and not any(state.unknown for state in effective)
+                    else None,
                 )
             )
         return PageResult(
@@ -192,6 +256,14 @@ class TraceService:
             {operation.user_id for operation, _source_role, _source_at in rows},
             tenant=tenant,
         )
+        states = await completion_read_state_service.read(
+            tenant=tenant,
+            tool_call_ids=[operation.tool_call_id for operation, _, _ in rows],
+        )
+        effective = {
+            operation.log_id: effective_log_state(operation, states)
+            for operation, _, _ in rows
+        }
 
         operations = [
             TraceOperationOut(
@@ -207,14 +279,14 @@ class TraceService:
                 targetSummary=_parse_target_summary(operation.target_summary),
                 executionMode=operation.execution_mode,
                 riskLevel=operation.risk_level,
-                status=operation.status,
-                errorCode=operation.error_code,
+                status=effective[operation.log_id].status,
+                errorCode=effective[operation.log_id].error_code,
                 confirmationId=operation.confirmation_id,
                 approvedBy=operation.approved_by,
                 queuedAt=operation.queued_at,
                 startedAt=operation.started_at,
-                finishedAt=operation.finished_at,
-                durationMs=operation.duration_ms,
+                finishedAt=effective[operation.log_id].finished_at,
+                durationMs=effective[operation.log_id].duration_ms,
                 hitlWaitMs=operation.hitl_wait_ms,
             )
             for operation, source_role, source_created_at in rows

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import ColumnElement, Select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.file_storage import ArtifactExecution
 from app.core.tenant import TenantContext
 from app.modules.ai.agents.hitl.events import AiStreamEvent
 from app.modules.ai.agents.tools.meta import AiToolMeta
@@ -180,6 +181,9 @@ class AiToolContext:
 
     approved_business_snapshot: dict[str, Any] | None = None
     """Server-owned business snapshot attached only to an approved action."""
+
+    artifact_execution: ArtifactExecution | None = None
+    """Server execution identity for private files; never part of tool arguments."""
 
     def __post_init__(self) -> None:
         if self.tenant.actor_user_id != self.user.user_id:

@@ -1,5 +1,6 @@
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import Response
@@ -18,7 +19,10 @@ from app.core.rbac import is_super_admin
 from app.core.tenant import TenantContext
 from app.db.base import user_depts
 from app.db.session import get_db
-from app.modules.auth.service import get_current_tenant_context
+from app.modules.auth.service import (
+    get_current_tenant_context,
+    load_live_user_authority,
+)
 from app.modules.system.constants import EmployeeNoSyncMode
 from app.modules.system.models.user import User
 from app.modules.system.schemas.user import (
@@ -72,6 +76,7 @@ from app.modules.system.service.user_import_service import (
 from app.modules.system.service.user_import_template_service import (
     generate_import_template,
 )
+from app.modules.system.service.user_operations_service import user_operations_service
 from app.modules.system.service.user_role_assignment_service import (
     user_role_assignment_service,
 )
@@ -194,38 +199,10 @@ async def add_user(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """Create a user with optional explicit role IDs and department bindings."""
-    explicit_roles = user_in.role_ids is not None
-    await user_role_assignment_service.ensure_create_permissions(
+    await user_operations_service.create_user(
         db,
+        user_in,
         actor_user_id=current_user.user_id,
-        explicit_roles=explicit_roles,
-        tenant=tenant,
-    )
-    await user_department_assignment_service.ensure_create_permissions(
-        db,
-        actor_user_id=current_user.user_id,
-        has_departments=bool(user_in.dept_ids),
-        tenant=tenant,
-    )
-
-    new_user = await user_service.create_user(db, user_in, tenant=tenant)
-    await db.flush()
-    await user_role_assignment_service.assign_created_user_roles(
-        db,
-        actor_user_id=current_user.user_id,
-        target_user_id=new_user.user_id,
-        role_ids=user_in.role_ids,
-        dept_ids=[int(item.dept_id) for item in user_in.dept_ids],
-        tenant=tenant,
-    )
-
-    await user_department_assignment_service.assign_created_user_departments(
-        db,
-        actor_user_id=current_user.user_id,
-        target_user_id=new_user.user_id,
-        dept_assignments=[
-            (int(item.dept_id), item.is_primary) for item in user_in.dept_ids
-        ],
         tenant=tenant,
     )
 
@@ -460,7 +437,12 @@ async def delete_user(
         - 此操作不可逆，请谨慎操作
         - 用户删除后，关联的角色关系也会被清除
     """
-    await user_service.delete_user(db, user_id, tenant=tenant)
+    await _delete_with_dependency_retry(
+        db,
+        lambda: user_service.delete_user(db, user_id, tenant=tenant),
+        tenant=tenant,
+        permission="system:user:delete",
+    )
     await db.commit()
     return ResponseModel.success(msg="删除成功")
 
@@ -501,11 +483,41 @@ async def batch_delete_users(
         - 不允许删除当前登录用户
         - 用户删除后，关联的角色关系也会被清除
     """
-    deleted_count = await user_service.batch_delete_users(
-        db, ids, current_user.user_id, tenant=tenant
+    current_user_id = int(current_user.user_id)
+    deleted_count = await _delete_with_dependency_retry(
+        db,
+        lambda: user_service.batch_delete_users(
+            db, ids, current_user_id, tenant=tenant
+        ),
+        tenant=tenant,
+        permission="system:user:batch-delete",
     )
     await db.commit()
     return ResponseModel.success(msg=f"成功删除 {deleted_count} 个用户")
+
+
+async def _delete_with_dependency_retry(
+    db: AsyncSession,
+    operation: Callable[[], Awaitable[Any]],
+    *,
+    tenant: TenantContext,
+    permission: str,
+) -> Any:
+    """Rebuild only a changed pre-delete plan after full rollback and reauth."""
+    from app.modules.ai.service.user_delete_dependency_service import (  # noqa: PLC0415
+        UserDeleteDependencyChanged,
+    )
+
+    for attempt in range(2):
+        try:
+            return await operation()
+        except UserDeleteDependencyChanged:
+            await db.rollback()
+            if attempt:
+                raise
+            actor = await load_live_user_authority(db, tenant=tenant)
+            await require_permissions(permission)(actor)
+    raise UserDeleteDependencyChanged()
 
 
 # ========== 用户导入 ==========
@@ -1014,7 +1026,14 @@ async def cancel_import_batch(
         reason=body.reason,
         tenant=tenant,
     )
+    from app.modules.system.service.transfer_cleanup_service import (  # noqa: PLC0415
+        finish_committed_cleanup,
+        take_cleanup_intentions,
+    )
+
+    intentions = take_cleanup_intentions(db)
     await db.commit()
+    await finish_committed_cleanup(intentions)
     return ResponseModel.success(
         data=UserImportBatchCancelResponse(
             batch_id=batch.batch_id,
