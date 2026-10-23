@@ -1,0 +1,521 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hohu:product-release:v1",
+  "title": "HoHu product release manifest v1",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "released"
+      ]
+    },
+    "product_version": {
+      "$ref": "#/$defs/Version"
+    },
+    "published_at": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "\\S",
+      "format": "utc-rfc3339"
+    },
+    "components": {
+      "type": "object",
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/Component"
+        },
+        "web": {
+          "$ref": "#/$defs/Component"
+        }
+      },
+      "required": [
+        "backend",
+        "web"
+      ],
+      "additionalProperties": false
+    },
+    "upgrade": {
+      "type": "object",
+      "properties": {
+        "from_versions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Version"
+          },
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "database_revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
+        "deployment_mode": {
+          "type": "string",
+          "enum": [
+            "maintenance"
+          ]
+        },
+        "procedure_url": {
+          "$ref": "#/$defs/URL"
+        },
+        "recovery_url": {
+          "$ref": "#/$defs/URL"
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "\\S"
+          },
+          "minItems": 0,
+          "maxItems": 256,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "from_versions",
+        "database_revision",
+        "deployment_mode",
+        "procedure_url",
+        "recovery_url",
+        "limitations"
+      ],
+      "additionalProperties": false
+    },
+    "cli": {
+      "type": "object",
+      "properties": {
+        "minimum_version": {
+          "$ref": "#/$defs/Version"
+        },
+        "tested_versions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Version"
+          },
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "method": {
+          "type": "string",
+          "enum": [
+            "manual_digest_override"
+          ]
+        },
+        "procedure_url": {
+          "$ref": "#/$defs/URL"
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "pattern": "\\S"
+          },
+          "minItems": 0,
+          "maxItems": 256,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "minimum_version",
+        "tested_versions",
+        "method",
+        "procedure_url",
+        "limitations"
+      ],
+      "additionalProperties": false
+    },
+    "clients": {
+      "type": "object",
+      "properties": {
+        "app": {
+          "$ref": "#/$defs/Client"
+        },
+        "desktop": {
+          "$ref": "#/$defs/Client"
+        }
+      },
+      "required": [
+        "app",
+        "desktop"
+      ],
+      "additionalProperties": false
+    },
+    "docs": {
+      "type": "object",
+      "properties": {
+        "series": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?![\\s\\S])"
+        },
+        "repository": {
+          "$ref": "#/$defs/Repository"
+        },
+        "commit": {
+          "$ref": "#/$defs/SHA"
+        },
+        "url": {
+          "$ref": "#/$defs/URL"
+        },
+        "snapshot_url": {
+          "$ref": "#/$defs/URL"
+        }
+      },
+      "required": [
+        "series",
+        "repository",
+        "commit",
+        "url",
+        "snapshot_url"
+      ],
+      "additionalProperties": false
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Evidence"
+      },
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "pattern": "\\S"
+      },
+      "minItems": 0,
+      "maxItems": 256,
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "schema_version",
+    "status",
+    "product_version",
+    "published_at",
+    "components",
+    "upgrade",
+    "cli",
+    "clients",
+    "docs",
+    "evidence",
+    "limitations"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "Version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?![\\s\\S])"
+    },
+    "SHA": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[0-9a-f]{40}(?![\\s\\S])"
+    },
+    "Digest": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
+    },
+    "URL": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "\\S",
+      "format": "https-url"
+    },
+    "Platform": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[a-z0-9]+/[a-z0-9_]+(?:/[a-z0-9]+)?(?![\\s\\S])"
+    },
+    "Repository": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+(?![\\s\\S])"
+    },
+    "PlatformDigest": {
+      "type": "object",
+      "properties": {
+        "platform": {
+          "$ref": "#/$defs/Platform"
+        },
+        "manifest_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "qualification": {
+          "type": "string",
+          "enum": [
+            "verified",
+            "unverified"
+          ]
+        }
+      },
+      "required": [
+        "platform",
+        "manifest_digest",
+        "qualification"
+      ],
+      "additionalProperties": false
+    },
+    "Image": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": [
+            "primary",
+            "mirror"
+          ]
+        },
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^[a-z0-9.-]+/[a-z0-9._-]+/[a-z0-9._-]+(?![\\s\\S])"
+        },
+        "index_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "platforms": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlatformDigest"
+          },
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "role",
+        "repository",
+        "index_digest",
+        "platforms"
+      ],
+      "additionalProperties": false
+    },
+    "Component": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "$ref": "#/$defs/Version"
+        },
+        "repository": {
+          "$ref": "#/$defs/Repository"
+        },
+        "tag": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?![\\s\\S])"
+        },
+        "commit": {
+          "$ref": "#/$defs/SHA"
+        },
+        "images": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Image"
+          },
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "build_run_url": {
+          "$ref": "#/$defs/URL"
+        }
+      },
+      "required": [
+        "version",
+        "repository",
+        "tag",
+        "commit",
+        "images",
+        "build_run_url"
+      ],
+      "additionalProperties": false
+    },
+    "ClientProof": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "$ref": "#/$defs/Version"
+        },
+        "platform": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
+        "build_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "\\S"
+        },
+        "server_versions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Version"
+          },
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "proof_url": {
+          "$ref": "#/$defs/URL"
+        },
+        "proof_sha256": {
+          "$ref": "#/$defs/Digest"
+        }
+      },
+      "required": [
+        "version",
+        "platform",
+        "build_id",
+        "server_versions",
+        "proof_url",
+        "proof_sha256"
+      ],
+      "additionalProperties": false
+    },
+    "Client": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "not_released",
+            "verified",
+            "unsupported"
+          ]
+        },
+        "verified": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClientProof"
+          },
+          "minItems": 0,
+          "maxItems": 256,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "status",
+        "verified"
+      ],
+      "additionalProperties": false
+    },
+    "Evidence": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "component_ci",
+            "pair_install",
+            "upgrade",
+            "recovery",
+            "ai_write_consistency"
+          ]
+        },
+        "subject": {
+          "type": "string",
+          "enum": [
+            "backend",
+            "web",
+            "pair"
+          ]
+        },
+        "backend_commit": {
+          "$ref": "#/$defs/SHA"
+        },
+        "web_commit": {
+          "$ref": "#/$defs/SHA"
+        },
+        "backend_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "web_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "platform": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Platform"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "url": {
+          "$ref": "#/$defs/URL"
+        },
+        "sha256": {
+          "$ref": "#/$defs/Digest"
+        },
+        "result": {
+          "type": "string",
+          "enum": [
+            "passed"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "subject",
+        "backend_commit",
+        "web_commit",
+        "backend_digest",
+        "web_digest",
+        "platform",
+        "url",
+        "sha256",
+        "result"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,173 @@
+{
+  "schema_version": 1,
+  "status": "released",
+  "product_version": "0.1.7",
+  "published_at": "2026-10-22T08:00:00Z",
+  "components": {
+    "backend": {
+      "version": "0.1.6",
+      "repository": "aihohu/hohu-admin",
+      "tag": "v0.1.6",
+      "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "build_run_url": "https://github.com/aihohu/hohu-admin/actions/runs/1",
+      "images": [
+        {
+          "role": "primary",
+          "repository": "ghcr.io/aihohu/hohu-admin",
+          "index_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "platforms": [
+            {
+              "platform": "linux/amd64",
+              "manifest_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              "qualification": "verified"
+            },
+            {
+              "platform": "linux/arm64",
+              "manifest_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+              "qualification": "unverified"
+            }
+          ]
+        }
+      ]
+    },
+    "web": {
+      "version": "0.1.6",
+      "repository": "aihohu/hohu-admin-web",
+      "tag": "v0.1.6",
+      "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "build_run_url": "https://github.com/aihohu/hohu-admin-web/actions/runs/2",
+      "images": [
+        {
+          "role": "primary",
+          "repository": "ghcr.io/aihohu/hohu-admin-web",
+          "index_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "platforms": [
+            {
+              "platform": "linux/amd64",
+              "manifest_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+              "qualification": "verified"
+            },
+            {
+              "platform": "linux/arm64",
+              "manifest_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "qualification": "unverified"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "upgrade": {
+    "from_versions": [
+      "0.1.5"
+    ],
+    "database_revision": "rev2",
+    "deployment_mode": "maintenance",
+    "procedure_url": "https://github.com/aihohu/hohu-admin-docs/blob/cccccccccccccccccccccccccccccccccccccccc/docs/guide/reference/versions.md",
+    "recovery_url": "https://github.com/aihohu/hohu-admin-docs/blob/cccccccccccccccccccccccccccccccccccccccc/docs/guide/reference/versions.md",
+    "limitations": []
+  },
+  "cli": {
+    "minimum_version": "0.1.16",
+    "tested_versions": [
+      "0.1.16"
+    ],
+    "method": "manual_digest_override",
+    "procedure_url": "https://github.com/aihohu/hohu-admin-docs/blob/cccccccccccccccccccccccccccccccccccccccc/docs/guide/reference/versions.md",
+    "limitations": []
+  },
+  "clients": {
+    "app": {
+      "status": "not_released",
+      "verified": []
+    },
+    "desktop": {
+      "status": "not_released",
+      "verified": []
+    }
+  },
+  "docs": {
+    "series": "0.1",
+    "repository": "aihohu/hohu-admin-docs",
+    "commit": "cccccccccccccccccccccccccccccccccccccccc",
+    "url": "https://github.com/aihohu/hohu-admin-docs/blob/cccccccccccccccccccccccccccccccccccccccc/docs/guide/reference/versions.md",
+    "snapshot_url": "https://github.com/aihohu/hohu-admin-docs/blob/cccccccccccccccccccccccccccccccccccccccc/docs/guide/reference/versions.md"
+  },
+  "evidence": [
+    {
+      "kind": "component_ci",
+      "subject": "backend",
+      "backend_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "web_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "backend_digest": null,
+      "web_digest": null,
+      "platform": null,
+      "url": "https://github.com/aihohu/hohu-admin/releases/download/v0.1.6/component_ci-backend.json",
+      "sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "result": "passed"
+    },
+    {
+      "kind": "component_ci",
+      "subject": "web",
+      "backend_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "web_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "backend_digest": null,
+      "web_digest": null,
+      "platform": null,
+      "url": "https://github.com/aihohu/hohu-admin/releases/download/v0.1.6/component_ci-web.json",
+      "sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "result": "passed"
+    },
+    {
+      "kind": "pair_install",
+      "subject": "pair",
+      "backend_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "web_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "backend_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "web_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "platform": "linux/amd64",
+      "url": "https://github.com/aihohu/hohu-admin/releases/download/v0.1.6/pair_install-pair.json",
+      "sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "result": "passed"
+    },
+    {
+      "kind": "upgrade",
+      "subject": "pair",
+      "backend_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "web_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "backend_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "web_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "platform": "linux/amd64",
+      "url": "https://github.com/aihohu/hohu-admin/releases/download/v0.1.6/upgrade-pair.json",
+      "sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "result": "passed"
+    },
+    {
+      "kind": "recovery",
+      "subject": "pair",
+      "backend_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "web_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "backend_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "web_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "platform": "linux/amd64",
+      "url": "https://github.com/aihohu/hohu-admin/releases/download/v0.1.6/recovery-pair.json",
+      "sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "result": "passed"
+    },
+    {
+      "kind": "ai_write_consistency",
+      "subject": "pair",
+      "backend_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "web_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "backend_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "web_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "platform": "linux/amd64",
+      "url": "https://github.com/aihohu/hohu-admin/releases/download/v0.1.6/ai_write_consistency-pair.json",
+      "sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "result": "passed"
+    }
+  ],
+  "limitations": [
+    "Synthetic test fixture; not release evidence."
+  ]
+}
