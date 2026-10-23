@@ -23,3 +23,4 @@ docs/data-scope-guide.md
 docs/monitoring/alerts.yml
 docs/pagination-guide.md
 docs/public-docs.txt
+docs/PRODUCT-RELEASE.md
