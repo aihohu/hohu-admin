@@ -31,8 +31,10 @@ Python 版本及依赖以 [pyproject.toml](../pyproject.toml) 为准。测试必
 
 ## 提交规范与授权
 
+本文“提交规范与授权”一节是跨仓库提交规则的唯一维护来源；各仓库 AGENTS 和贡献指南引用此处，不另设相反规则。
+
 使用一句英文 `type(scope): description`，例如 `fix(settings): preserve custom upload limits`。逐文件暂存、检查 diff，不附加版权消息或 `Co-Authored-By`，不跳过提交钩子。
 
-外部贡献使用 `git commit -s` 添加 DCO `Signed-off-by`，声明有权提交该贡献；维护者提交自己拥有版权的代码可不加该尾注。DCO 不转让版权。新贡献默认遵循仓库许可证，具体规则见 [许可证政策](LICENSE-POLICY.md) 和 [LICENSE](../LICENSE)。
+外部贡献使用 `git commit -s` 添加 DCO `Signed-off-by`，声明有权提交该贡献；维护者提交自己拥有版权的贡献，默认不添加 `Signed-off-by`、`Co-Authored-By` 或版权尾注；不得代外部贡献者声明授权。DCO 不转让版权。新贡献默认遵循仓库许可证，具体规则见 [许可证政策](LICENSE-POLICY.md) 和 [LICENSE](../LICENSE)。
 
 不要修改第三方代码的原有许可声明。许可证、凭据、生产配置和用户数据不应因文档整理而被随意替换或上传。

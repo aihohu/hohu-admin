@@ -173,7 +173,7 @@ app/modules/<module>/
 只有用户明确要求时才提交。提交时：
 
 - 按文件名精确 stage，不使用 `git add -A`。
-- commit message 使用一句英文。
-- 使用 `git commit -s` 添加 DCO `Signed-off-by`。
+- commit message 使用一句英文 `type(scope): description`，不附加版权消息。
+- 署名规则统一见 [贡献指南](https://github.com/aihohu/hohu-admin/blob/main/docs/CONTRIBUTING.md)：维护者提交自己拥有版权的贡献，默认不添加 `Signed-off-by`；外部贡献仍用 `git commit -s`，不得代他人声明授权。
 - 不添加 `Co-Authored-By`，不使用 `--no-verify`。
 - 不 amend 已 push 的 commit。
