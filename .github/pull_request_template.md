@@ -25,3 +25,9 @@ Follow the [versioning policy](https://github.com/aihohu/hohu-admin/blob/main/do
 - [ ] My changes generate no new warnings / 我的修改没有产生新的警告
 - [ ] I have added tests that prove my fix is effective or that my feature works / 我已添加相关测试
 - [ ] New and existing unit tests pass locally with my changes / 本地所有测试均已通过
+
+## User journeys and release readiness / 用户旅程与发布前提
+
+- Applicable user journeys, first runnable candidate results, and skipped scope / 适用完整用户旅程、首个可运行候选结果与未测范围（纯文档填不适用）：
+- Credential, exclusive-writer and network readiness evidence / 凭据、唯一写者及网络前置检查记录（仅填脱敏证据位置；无发布影响填不适用）：
+- Version status entry / 版本状态入口：[Docs release notes](https://github.com/aihohu/hohu-admin-docs/blob/main/docs/zh/guide/reference/versions.md)；内部进度仅在受控空间维护，不在公开 PR 粘贴敏感记录。
