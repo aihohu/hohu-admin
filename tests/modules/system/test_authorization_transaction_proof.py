@@ -372,7 +372,8 @@ async def test_new_row_held_only_after_successful_reserved_insert(proof_sessions
             await tx.lock(LockPlan(existing=(USER,), new=(NewResource(key),)))
             with rejected():
                 tx.assert_held(key)
-            await tx.insert_reserved(key, user_values("created"))
+            async with tx.aggregate(0):
+                await tx.insert_reserved(key, user_values("created"))
             tx.assert_held(key)
         await db.commit()
     async with ordinary() as db:
@@ -390,13 +391,14 @@ async def test_row_release_then_chunk_rollback_revokes_only_new_row_proofs(
     async with managed() as db:
         async with scope(db, exclusive=True) as tx:
             await tx.lock(LockPlan(existing=(USER,), new=(NewResource(key),)))
-            with pytest.raises(ValueError, match="rollback chunk"):
-                async with tx.savepoint():
+            async with tx.aggregate(0):
+                with pytest.raises(ValueError, match="rollback chunk"):
                     async with tx.savepoint():
-                        await tx.insert_reserved(key, user_values("rolled-back"))
+                        async with tx.savepoint():
+                            await tx.insert_reserved(key, user_values("rolled-back"))
+                            tx.assert_held(key)
                         tx.assert_held(key)
-                    tx.assert_held(key)
-                    raise ValueError("rollback chunk")
+                        raise ValueError("rollback chunk")
             tx.assert_held(USER)
             with rejected():
                 tx.assert_held(key)
@@ -413,14 +415,15 @@ async def test_unique_violation_in_savepoint_does_not_poison_outer(proof_session
             await tx.lock(
                 LockPlan(existing=(USER,), new=(NewResource(bad), NewResource(good)))
             )
-            with pytest.raises(IntegrityError):
+            async with tx.aggregate(0):
+                with pytest.raises(IntegrityError):
+                    async with tx.savepoint():
+                        await tx.insert_reserved(bad, user_values("existing"))
+                tx.assert_held(USER)
+                with rejected():
+                    tx.assert_held(bad)
                 async with tx.savepoint():
-                    await tx.insert_reserved(bad, user_values("existing"))
-            tx.assert_held(USER)
-            with rejected():
-                tx.assert_held(bad)
-            async with tx.savepoint():
-                await tx.insert_reserved(good, user_values("unique"))
+                    await tx.insert_reserved(good, user_values("unique"))
             tx.assert_held(good)
         await db.commit()
     async with ordinary() as db:
@@ -439,7 +442,8 @@ async def test_reserved_insert_cannot_override_identity(proof_sessions, override
         with rejected():
             async with scope(db, exclusive=True) as tx:
                 await tx.lock(LockPlan(new=(NewResource(key),)))
-                await tx.insert_reserved(key, {**user_values("forged"), **override})
+                async with tx.aggregate(0):
+                    await tx.insert_reserved(key, {**user_values("forged"), **override})
         await db.rollback()
 
 
@@ -474,7 +478,8 @@ async def test_failed_owner_commit_never_revives_exited_scope(proof_sessions):
     async with managed() as db:
         async with scope(db, exclusive=True) as old:
             await old.lock(LockPlan(new=(NewResource(key),)))
-            await old.insert_reserved(key, user_values("never-committed"))
+            async with old.aggregate(0):
+                await old.insert_reserved(key, user_values("never-committed"))
 
         def fail_before_commit(_session):
             raise RuntimeError("injected owner commit failure")
@@ -505,7 +510,8 @@ async def test_caught_owner_commit_failure_requires_rollback(proof_sessions, ret
         connection = await db.connection()
         async with scope(db, exclusive=True) as tx:
             await tx.lock(LockPlan(new=(NewResource(key),)))
-            await tx.insert_reserved(key, user_values("must-rollback"))
+            async with tx.aggregate(0):
+                await tx.insert_reserved(key, user_values("must-rollback"))
 
         def fail_before_commit(_session):
             raise RuntimeError("commit interrupted before driver")
@@ -544,10 +550,14 @@ async def test_reserved_insert_accepts_data_not_executable_sql(
         with rejected():
             async with scope(db, exclusive=True) as tx:
                 await tx.lock(LockPlan(new=(NewResource(key),)))
-                await tx.insert_reserved(
-                    key,
-                    {**user_values("expression"), "nickname": expressions[expression]},
-                )
+                async with tx.aggregate(0):
+                    await tx.insert_reserved(
+                        key,
+                        {
+                            **user_values("expression"),
+                            "nickname": expressions[expression],
+                        },
+                    )
         with rejected():
             await db.commit()
         await db.rollback()
@@ -562,15 +572,16 @@ async def test_reserved_json_values_recursively_reject_sql_expressions(proof_ses
         with rejected():
             async with scope(db, exclusive=True) as tx:
                 await tx.lock(LockPlan(new=(NewResource(key),)))
-                await tx.insert_reserved(
-                    key,
-                    {
-                        "role_name": "new",
-                        "role_code": "NEW",
-                        "status": "1",
-                        "i18n_keys": {"en": [func.current_database()]},
-                    },
-                )
+                async with tx.aggregate(0):
+                    await tx.insert_reserved(
+                        key,
+                        {
+                            "role_name": "new",
+                            "role_code": "NEW",
+                            "status": "1",
+                            "i18n_keys": {"en": [func.current_database()]},
+                        },
+                    )
         await db.rollback()
 
 
@@ -706,7 +717,8 @@ async def test_public_transaction_proxy_commit_failure_cannot_be_retried(
     async with managed() as db:
         async with scope(db, exclusive=True) as tx:
             await tx.lock(LockPlan(new=(NewResource(key),)))
-            await tx.insert_reserved(key, user_values("proxy-must-rollback"))
+            async with tx.aggregate(0):
+                await tx.insert_reserved(key, user_values("proxy-must-rollback"))
         proxy = db.get_transaction()
 
         def fail_before_commit(_session):

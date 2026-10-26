@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +14,110 @@ from app.core.tenant_isolation_audit import (
     scan_source_boundaries,
 )
 from tools.ops import audit_tenant_isolation as cli
+
+_CANDIDATE_NAMESPACES = (
+    ("db/authorization_system_owner.py", "tenant_cache_key", "storage"),
+    (
+        "modules/system/service/authorization_import_candidate.py",
+        "tenant_id",
+        "cache",
+    ),
+)
+
+
+def _copy_candidate_namespace(tmp_path, source_path: str) -> tuple[Path, Path]:
+    app_root = tmp_path / "app"
+    target = app_root / source_path
+    target.parent.mkdir(parents=True)
+    source = Path(__file__).resolve().parents[2] / "app" / source_path
+    target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    return app_root, target
+
+
+@pytest.mark.parametrize("namespace_case", _CANDIDATE_NAMESPACES)
+def test_candidate_namespace_real_sources_are_precisely_registered(
+    tmp_path, namespace_case
+) -> None:
+    source_path, _identifier, _extra_kind = namespace_case
+    app_root, _ = _copy_candidate_namespace(tmp_path, source_path)
+
+    result = scan_source_boundaries(app_root)
+
+    assert result.issues == ()
+    assert result.namespace_checks["registeredCount"] == 1
+    assert result.namespace_checks["validCount"] == 1
+
+
+@pytest.mark.parametrize("namespace_case", _CANDIDATE_NAMESPACES)
+def test_candidate_namespace_real_source_missing_scope_is_detected(
+    tmp_path, namespace_case
+) -> None:
+    source_path, identifier, _extra_kind = namespace_case
+    app_root, target = _copy_candidate_namespace(tmp_path, source_path)
+    tree = ast.parse(target.read_text(encoding="utf-8"))
+    changed = 0
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == identifier:
+            node.id = "broken_namespace_scope"
+            changed += 1
+        elif isinstance(node, ast.Attribute) and node.attr == identifier:
+            node.attr = "broken_namespace_scope"
+            changed += 1
+    assert changed > 0
+    target.write_text(ast.unparse(tree), encoding="utf-8")
+
+    result = scan_source_boundaries(app_root)
+
+    assert (
+        IsolationAuditIssue("TENANT_NAMESPACE_REGISTRY_MISMATCH", source_path, 1)
+        in result.issues
+    )
+    assert result.namespace_checks["validCount"] == 0
+
+
+@pytest.mark.parametrize("namespace_case", _CANDIDATE_NAMESPACES)
+def test_candidate_namespace_real_source_new_dependency_is_detected(
+    tmp_path, namespace_case
+) -> None:
+    source_path, _identifier, extra_kind = namespace_case
+    app_root, target = _copy_candidate_namespace(tmp_path, source_path)
+    added_import = (
+        "from app.core.file_storage import FileStorage\n"
+        if extra_kind == "storage"
+        else "from app.core.redis import redis_client\n"
+    )
+    target.write_text(
+        target.read_text(encoding="utf-8") + "\n" + added_import,
+        encoding="utf-8",
+    )
+
+    result = scan_source_boundaries(app_root)
+
+    assert (
+        IsolationAuditIssue("TENANT_NAMESPACE_REGISTRY_MISMATCH", source_path, 1)
+        in result.issues
+    )
+
+
+@pytest.mark.parametrize("namespace_case", _CANDIDATE_NAMESPACES)
+def test_candidate_namespace_registration_does_not_cover_other_paths(
+    tmp_path, namespace_case
+) -> None:
+    source_path, _identifier, _extra_kind = namespace_case
+    app_root, target = _copy_candidate_namespace(tmp_path, source_path)
+    unregistered = target.with_name("unregistered_candidate.py")
+    target.rename(unregistered)
+
+    result = scan_source_boundaries(app_root)
+
+    assert (
+        IsolationAuditIssue(
+            "TENANT_NAMESPACE_SOURCE_UNREGISTERED",
+            unregistered.relative_to(app_root).as_posix(),
+            1,
+        )
+        in result.issues
+    )
 
 
 def test_source_scan_detects_hardcoded_tenant_and_unscoped_storage(tmp_path) -> None:

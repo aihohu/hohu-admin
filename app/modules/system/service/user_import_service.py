@@ -90,6 +90,44 @@ _PREVIEW_REDIS_TTL_SECONDS = 600
 _BATCH_ID_LENGTH = 32
 _PREVIEW_TOKEN_LENGTH = 32
 
+# The opt-in candidate never converts protocol failures or unknown failures
+# into a successful batch containing row errors. Legacy callers retain their
+# historical classification until the complete owner migration is enabled.
+_IMPORT_REFERENCE_ERRORS = frozenset(
+    {
+        "AI_IMPORT_DEPT_NOT_FOUND",
+        "AI_IMPORT_DEPT_PATH_NOT_FOUND",
+        "AI_IMPORT_DEPT_DUPLICATE",
+        "AI_IMPORT_ROLE_NOT_FOUND",
+    }
+)
+_IMPORT_POLICY_ROW_ERRORS = frozenset(
+    {
+        "USER_ROLE_NOT_AVAILABLE",
+        "USER_ROLE_SET_REQUIRED",
+        "USER_ROLE_SET_DUPLICATE",
+        "USER_ROLE_SELF_ASSIGNMENT_FORBIDDEN",
+        "USER_DEFAULT_ROLE_NOT_AVAILABLE",
+        "USER_DEPT_NOT_AVAILABLE",
+        "USER_DEPT_SET_DUPLICATE",
+        "USER_PRIMARY_DEPT_REQUIRED",
+        "USER_PRIMARY_DEPT_MULTIPLE",
+        "USER_PRIMARY_DEPT_REASSIGN_REQUIRED",
+    }
+)
+_IMPORT_POLICY_DENIALS = frozenset(
+    {
+        "MISSING_PERMISSION",
+        "AI_DATA_SCOPE_VIOLATION",
+        "AI_SUPER_ADMIN_REQUIRED",
+        "AI_USER_DEPT_AUTHZ_IMPACT_OUT_OF_SCOPE",
+        "DEPT_MEMBERSHIP_GLOBAL_IMPACT_OUT_OF_SCOPE",
+        "USER_ROLE_AUTHORITY_EXCEEDED",
+        "USER_ROLE_SUPER_ADMIN_REQUIRED",
+        "USER_ROLE_TARGET_OUT_OF_SCOPE",
+    }
+)
+
 
 @dataclass(frozen=True)
 class ImportAuthorizationResolution:
@@ -174,6 +212,7 @@ async def _resolve_import_authorization_targets(
     *,
     has_role_column: bool,
     prospective_user_ids: dict[int, int] | None = None,
+    strict_authorization: bool = False,
     tenant: TenantContext,
 ) -> list[ImportAuthorizationResolution]:
     """Resolve every authorization reference into one comparable batch snapshot."""
@@ -192,6 +231,8 @@ async def _resolve_import_authorization_targets(
         try:
             dept_id = int(await resolve_dept(db, record.dept_input, tenant=tenant))
         except BusinessRuleException as exc:
+            if strict_authorization and exc.error_code not in _IMPORT_REFERENCE_ERRORS:
+                raise
             dept_error = (exc.error_code, str(exc))
 
         existing, matched_by_employee_no = await resolve_existing_user(
@@ -212,6 +253,11 @@ async def _resolve_import_authorization_targets(
                     )
                 )
             except BusinessRuleException as exc:
+                if (
+                    strict_authorization
+                    and exc.error_code not in _IMPORT_REFERENCE_ERRORS
+                ):
+                    raise
                 role_error = (exc.error_code, str(exc))
         elif existing is None:
             if default_role_id is None:
@@ -284,6 +330,7 @@ async def _classify_records(
     *,
     has_role_column: bool,
     resolutions: list[ImportAuthorizationResolution] | None = None,
+    strict_authorization: bool = False,
     tenant: TenantContext,
 ) -> tuple[
     list[UserImportRecord],
@@ -297,6 +344,7 @@ async def _classify_records(
             db,
             records,
             has_role_column=has_role_column,
+            strict_authorization=strict_authorization,
             tenant=tenant,
         )
     by_row = {resolution.row_num: resolution for resolution in resolutions}
@@ -384,6 +432,11 @@ async def _classify_records(
                     tenant=tenant,
                 )
             except AuthorizationException as exc:
+                if (
+                    strict_authorization
+                    and exc.error_code not in _IMPORT_POLICY_DENIALS
+                ):
+                    raise
                 out_of_scope_records.append(
                     FailedRow(
                         row_num=record.row_num,
@@ -395,6 +448,11 @@ async def _classify_records(
                 )
                 continue
             except BusinessRuleException as exc:
+                if (
+                    strict_authorization
+                    and exc.error_code not in _IMPORT_POLICY_ROW_ERRORS
+                ):
+                    raise
                 if exc.error_code in {
                     "USER_ROLE_SELF_ASSIGNMENT_FORBIDDEN",
                     "AUTHORIZATION_SNAPSHOT_STALE",
@@ -435,6 +493,8 @@ async def _classify_records(
                 tenant=tenant,
             )
         except AuthorizationException as exc:
+            if strict_authorization and exc.error_code not in _IMPORT_POLICY_DENIALS:
+                raise
             out_of_scope_records.append(
                 FailedRow(
                     row_num=record.row_num,
@@ -446,6 +506,8 @@ async def _classify_records(
             )
             continue
         except BusinessRuleException as exc:
+            if strict_authorization and exc.error_code not in _IMPORT_POLICY_ROW_ERRORS:
+                raise
             conflict_records.append(
                 FailedRow(
                     row_num=record.row_num,

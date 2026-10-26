@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import delete, func, insert, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.constants import (
     ADMIN_USERNAME,
@@ -721,7 +722,7 @@ class UserDepartmentAssignmentService:
             prospective_roles=final_roles,
         )
         if require_primary is None:
-            require_primary = await settings_service.get_bool_for_update(
+            require_primary = await settings_service.get_bool(
                 db,
                 "user_require_primary_dept",
                 tenant=tenant,
@@ -790,7 +791,7 @@ class UserDepartmentAssignmentService:
         requested_depts = await self._load_requested_depts(
             db, normalized, tenant=tenant
         )
-        require_primary = await settings_service.get_bool_for_update(
+        require_primary = await settings_service.get_bool(
             db,
             "user_require_primary_dept",
             tenant=tenant,
@@ -1070,9 +1071,11 @@ class UserDepartmentAssignmentService:
                 nickname=target_user_name,
                 hashed_password="",
                 status=target_status,
-                roles=prospective_roles,
                 depts=[],
             )
+            # A validation-only prospective view must not fire relationship
+            # backrefs and mark persistent Role objects dirty.
+            set_committed_value(target, "roles", prospective_roles)
             old_assignments: tuple[tuple[int, bool], ...] = ()
         else:
             target = await self._load_user(db, target_user_id, tenant=tenant)

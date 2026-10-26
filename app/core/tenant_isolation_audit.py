@@ -44,6 +44,11 @@ _NAMESPACE_REGISTRY: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "core/redis.py": ("cache", "infrastructure", ()),
     "core/scheduler.py": ("cache", "infrastructure", ()),
     "core/tenant_scope.py": ("cache", "tenant", ("tenant_id",)),
+    "db/authorization_system_owner.py": (
+        "cache",
+        "tenant",
+        ("tenant_cache_key",),
+    ),
     "middleware/audit_middleware.py": ("cache", "tenant", ("tenant_id",)),
     "middleware/rate_limit_middleware.py": ("cache", "global", ()),
     "modules/system/api/settings.py": ("cache", "tenant", ("tenant_id",)),
@@ -147,6 +152,11 @@ _NAMESPACE_REGISTRY: dict[str, tuple[str, str, tuple[str, ...]]] = {
         "cache_storage",
         "tenant",
         ("tenant_id",),
+    ),
+    "modules/system/service/authorization_import_candidate.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "identity", "storage_key"),
     ),
     "modules/system/service/transfer_cleanup_service.py": (
         "cache_storage",

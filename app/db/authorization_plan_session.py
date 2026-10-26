@@ -8,7 +8,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import event
+from sqlalchemy import String, event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.sql import Select, visitors
@@ -20,7 +20,7 @@ from sqlalchemy.sql.elements import (
     SavepointClause,
     TextClause,
 )
-from sqlalchemy.sql.functions import FunctionElement
+from sqlalchemy.sql.functions import Function, FunctionElement
 from sqlalchemy.sql.selectable import CompoundSelect
 
 from app.core.exceptions import BusinessException
@@ -42,7 +42,19 @@ def _known_read(statement: Any) -> bool:
     if not isinstance(statement, (Select, CompoundSelect)):
         return False
     for node in visitors.iterate(statement):
-        if isinstance(node, (TextClause, UpdateBase, FunctionElement)):
+        if isinstance(node, (TextClause, UpdateBase)):
+            return False
+        if isinstance(node, FunctionElement) and not (
+            type(node) is Function
+            and node.packagenames == ("pg_catalog",)
+            and node.name in {"lower", "concat"}
+            and (
+                len(node.clauses) == 1
+                if node.name == "lower"
+                else 1 <= len(node.clauses) <= 8
+            )
+            and all(isinstance(argument.type, String) for argument in node.clauses)
+        ):
             return False
         if isinstance(node, ColumnClause) and node.is_literal:
             return False
@@ -283,6 +295,8 @@ class AuthorizationPlanSession(AsyncSession):
             event.listen(self.sync_session, name, listener)
 
     async def _observed_io(self, method, *args, **kwargs):
+        if self.info.get("authorization_owner_quarantined") is True:
+            self._authorization_journal.reject()
         try:
             return await method(*args, **kwargs)
         except BaseException as exc:
@@ -358,6 +372,8 @@ class AuthorizationPlanSession(AsyncSession):
             self._authorization_journal.committing = False
 
     async def rollback(self):
+        if self.info.get("authorization_owner_quarantined") is True:
+            return
         journal = self._authorization_journal
         journal.cleaning = True
         try:
@@ -368,6 +384,8 @@ class AuthorizationPlanSession(AsyncSession):
             journal.cleaning = False
 
     async def close(self):
+        if self.info.get("authorization_owner_quarantined") is True:
+            return
         journal = self._authorization_journal
         journal.cleaning = True
         try:
