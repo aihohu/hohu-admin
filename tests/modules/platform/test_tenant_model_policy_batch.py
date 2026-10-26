@@ -10,7 +10,7 @@ from sqlalchemy import delete, select
 from tenant_helpers import create_test_tenant
 
 from app.core.exceptions import AuthorizationException, BusinessRuleException
-from app.db.session import AsyncSessionLocal, engine, get_db
+from app.db.session import AsyncSessionLocal, get_db
 from app.main import app
 from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.model_policy import TenantAiModelPolicy
@@ -28,7 +28,7 @@ from app.modules.platform.schemas import (
     PlatformTenantModelPoliciesPut,
 )
 from app.modules.platform.system_agent_auth import require_system_agent_context
-from app.modules.system.models.tenant import Tenant
+from tests.committed_database import committed_test_database  # noqa: F401
 from tests.modules.platform.test_platform_ai_control import (
     _platform,
     _provider_with_models,
@@ -234,6 +234,7 @@ async def test_catalog_serializes_ids_and_invalidates_when_model_changes(db_sess
     assert error.value.error_code == "PLATFORM_TENANT_MODEL_POLICIES_STALE"
 
 
+@pytest.mark.usefixtures("committed_test_database")
 async def test_concurrent_batch_saves_allow_only_one_snapshot_writer():
     tid = provider_id = None
     try:
@@ -268,7 +269,6 @@ async def test_concurrent_batch_saves_allow_only_one_snapshot_writer():
                         TenantAiModelPolicy.tenant_id == tid
                     )
                 )
-                await cleanup.execute(delete(Tenant).where(Tenant.tenant_id == tid))
             if provider_id is not None:
                 await cleanup.execute(
                     delete(AiModel).where(AiModel.provider_id == provider_id)
@@ -277,7 +277,6 @@ async def test_concurrent_batch_saves_allow_only_one_snapshot_writer():
                     delete(AiProvider).where(AiProvider.provider_id == provider_id)
                 )
             await cleanup.commit()
-        await engine.dispose()
 
 
 async def test_batch_http_uses_transaction_and_string_id_response(client, monkeypatch):

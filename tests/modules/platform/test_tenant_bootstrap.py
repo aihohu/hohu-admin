@@ -10,7 +10,7 @@ from app.core.id_generator import next_id
 from app.core.security import verify_password
 from app.core.tenant import PlatformContext
 from app.db.base import role_menus, user_roles
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import AsyncSessionLocal
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.model_policy import TenantAiModelPolicy
@@ -29,6 +29,7 @@ from app.modules.system.models.role import Role
 from app.modules.system.models.setting import SystemSetting
 from app.modules.system.models.tenant import Tenant
 from app.modules.system.models.user import User
+from tests.committed_database import committed_test_database  # noqa: F401
 
 
 def _platform(permission: str, tenant_id: int) -> PlatformContext:
@@ -430,6 +431,7 @@ def test_bootstrap_request_is_strict_and_keeps_password_write_only():
         )
 
 
+@pytest.mark.usefixtures("committed_test_database")
 async def test_concurrent_same_key_bootstrap_converges_to_one_seed():
     tenant_id = next_id()
     provider_id: int | None = None
@@ -507,7 +509,6 @@ async def test_concurrent_same_key_bootstrap_converges_to_one_seed():
             await cleanup.execute(
                 delete(SystemSetting).where(SystemSetting.tenant_id == tenant_id)
             )
-            await cleanup.execute(delete(Tenant).where(Tenant.tenant_id == tenant_id))
             if model_id is not None:
                 await cleanup.execute(
                     delete(AiModel).where(AiModel.model_id == model_id)
@@ -517,8 +518,3 @@ async def test_concurrent_same_key_bootstrap_converges_to_one_seed():
                     delete(AiProvider).where(AiProvider.provider_id == provider_id)
                 )
             await cleanup.commit()
-        try:
-            await engine.dispose()
-        except RuntimeError as exc:
-            if "Event loop is closed" not in str(exc):
-                raise

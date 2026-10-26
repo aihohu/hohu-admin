@@ -36,6 +36,13 @@ from app.modules.system.models.operation_log import SysOperationLog  # noqa: F40
 from app.modules.system.models.role import Role  # noqa: F401
 from app.modules.system.models.tenant import Tenant  # noqa: F401
 from app.modules.system.models.user import User  # noqa: F401
+from app.modules.system.models.user_field_policy import (  # noqa: F401
+    UserFieldPolicyAudit,
+    UserFieldPolicyBinding,
+    UserFieldPolicyGlobalGuard,
+    UserFieldPolicyRevision,
+    UserFieldPolicyState,
+)
 from app.modules.system.models.user_transfer import (  # noqa: F401
     UserExportTask,
     UserImportBatch,

@@ -10,6 +10,13 @@ from .operation_log import SysOperationLog
 from .role import Role
 from .tenant import Tenant
 from .user import User
+from .user_field_policy import (
+    UserFieldPolicyAudit,
+    UserFieldPolicyBinding,
+    UserFieldPolicyGlobalGuard,
+    UserFieldPolicyRevision,
+    UserFieldPolicyState,
+)
 
 __all__ = [
     "User",
@@ -24,4 +31,9 @@ __all__ = [
     "SysLoginLog",
     "DataScopeDemo",
     "Tenant",
+    "UserFieldPolicyGlobalGuard",
+    "UserFieldPolicyState",
+    "UserFieldPolicyRevision",
+    "UserFieldPolicyBinding",
+    "UserFieldPolicyAudit",
 ]

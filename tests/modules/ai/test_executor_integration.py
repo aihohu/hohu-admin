@@ -45,12 +45,12 @@ from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.system.models.tenant import Tenant
 from app.modules.system.models.user import User
+from tests.committed_database import committed_test_database  # noqa: F401
 
 
 @pytest.fixture
-async def executor_contexts(db_session):
+async def executor_contexts(committed_test_database):  # noqa: F811
     """Give the integration's fixed protocol identities real owned FK rows."""
-    assert db_session.bind is not None
     contexts = (
         (9001, 77, 100, 101, "tr_test_001"),
         (9004, 0, 400, 401, "tr_test_agent_pass"),
@@ -121,12 +121,6 @@ async def executor_contexts(db_session):
                         User.user_name == f"executor_fixture_{user_id}",
                     )
                 )
-            await db.execute(
-                delete(Tenant).where(
-                    Tenant.tenant_id == 77,
-                    Tenant.tenant_code == "executor-fixture-77",
-                )
-            )
 
 
 @pytest.fixture(autouse=True)
@@ -202,15 +196,6 @@ async def clean_env(monkeypatch, executor_contexts):
             await db.execute(
                 text("DELETE FROM ai_operation_log WHERE trace_id LIKE 'tr_test_%'")
             )
-
-    # 释放连接池避免跨测试 event loop 干扰
-    from app.db.session import engine
-
-    try:
-        await engine.dispose()
-    except RuntimeError as e:
-        if "Event loop is closed" not in str(e):
-            raise
 
     redis_module.redis_pool = original_pool
     redis_module.redis_client = original_client

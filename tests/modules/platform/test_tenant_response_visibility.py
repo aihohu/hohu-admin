@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, select
@@ -10,15 +11,17 @@ from app.core.config import settings
 from app.core.exceptions import AuthenticationException, setup_exception_handlers
 from app.core.id_generator import next_id
 from app.core.security import get_password_hash
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import AsyncSessionLocal
 from app.modules.auth.schemas.auth import LoginCredentials
 from app.modules.auth.service import auth_service, get_current_user
 from app.modules.platform.api import control_router
 from app.modules.system.models.operation_log import SysOperationLog
 from app.modules.system.models.tenant import Tenant
 from app.modules.system.models.user import User
+from tests.committed_database import committed_test_database  # noqa: F401
 
 
+@pytest.mark.usefixtures("committed_test_database")
 async def test_activation_and_disable_are_visible_when_response_starts(monkeypatch):
     tenant_id, user_id, actor_id = next_id(), next_id(), next_id()
     tenant_code = f"boundary-{tenant_id}"
@@ -118,6 +121,4 @@ async def test_activation_and_disable_are_visible_when_response_starts(monkeypat
                 delete(SysOperationLog).where(SysOperationLog.user_id == actor_id)
             )
             await cleanup.execute(delete(User).where(User.tenant_id == tenant_id))
-            await cleanup.execute(delete(Tenant).where(Tenant.tenant_id == tenant_id))
             await cleanup.commit()
-        await engine.dispose()

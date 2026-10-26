@@ -8,10 +8,11 @@ from uuid import uuid4
 
 import pytest
 from fastapi.routing import APIRoute
-from sqlalchemy import text
+from sqlalchemy import text, update
 from tenant_helpers import create_test_tenant
 
 from app.core.exceptions import AuthorizationException, BusinessRuleException
+from app.core.id_generator import next_id
 from app.core.security import encrypt_value
 from app.core.tenant import PlatformContext
 from app.core.tenant_isolation_audit import (
@@ -35,6 +36,13 @@ from app.modules.platform.constants import (
     platform_permission_for_request,
 )
 from app.modules.platform.schemas import PlatformTenantModelPolicyPut
+from app.modules.system.models.role import Role
+from app.modules.system.models.user_field_policy import (
+    UserFieldPolicyAudit,
+    UserFieldPolicyBinding,
+    UserFieldPolicyRevision,
+    UserFieldPolicyState,
+)
 
 
 def _platform(*permissions: str, tenant_id: int | None = None) -> PlatformContext:
@@ -348,6 +356,119 @@ async def test_audit_report_rejects_any_unclassified_database_table(db_session) 
         and issue["resource"] == "plan5_unclassified_resource"
         for issue in report.payload["risks"]
     )
+
+
+async def test_audit_report_accepts_ready_policy_audit_without_role_or_revision(
+    db_session,
+) -> None:
+    tenant = await create_test_tenant(db_session, prefix="ufp-ready")
+    await db_session.execute(
+        update(UserFieldPolicyState)
+        .where(UserFieldPolicyState.tenant_id == tenant.tenant_id)
+        .values(mode="ready", epoch=2, candidate_manifest_digest="a" * 64)
+    )
+    db_session.add(
+        UserFieldPolicyAudit(
+            tenant_id=tenant.tenant_id,
+            actor_user_id=next_id(),
+            action="ready",
+            reason="Verify candidate audit remains tenant scoped",
+            correlation_id="policy-ready-audit",
+            after_digest="a" * 64,
+            role_id=None,
+            revision_id=None,
+            before_version=1,
+            after_version=2,
+            epoch=2,
+        )
+    )
+    await db_session.flush()
+
+    report = await build_tenant_isolation_report(
+        db_session, build_sha="abcdef1234567890"
+    )
+
+    assert report.risk_count == 0, report.payload["risks"]
+    resource = next(
+        item
+        for item in report.payload["databaseChecks"]["resources"]
+        if item["table"] == "sys_user_field_policy_audit"
+    )
+    assert resource["crossLinkCount"] == 0
+    assert resource["relationshipOrphanCount"] == 0
+    assert resource["legacyCount"] == resource["scopedCount"] == 1
+
+
+async def test_audit_report_detects_cross_tenant_policy_binding_after_fk_damage(
+    db_session,
+) -> None:
+    tenant_a = await create_test_tenant(db_session, prefix="ufp-a")
+    tenant_b = await create_test_tenant(db_session, prefix="ufp-b")
+    role = Role(
+        tenant_id=tenant_b.tenant_id,
+        role_code="POLICY_AUDIT_ROLE",
+        role_name="Policy audit role",
+        status="1",
+    )
+    db_session.add(role)
+    await db_session.flush()
+    revision = UserFieldPolicyRevision(
+        tenant_id=tenant_b.tenant_id,
+        role_id=role.role_id,
+        revision_no=1,
+        catalog_revision="user-fields/1",
+        catalog_digest="a" * 64,
+        rules=[],
+        rules_digest="b" * 64,
+        created_by_user_id=next_id(),
+    )
+    db_session.add(revision)
+    await db_session.flush()
+    # Deliberate catalog damage is rolled back with the fixture's outer transaction.
+    await db_session.execute(
+        text(
+            "ALTER TABLE sys_user_field_policy_binding "
+            "DROP CONSTRAINT fk_ufp_binding_role, "
+            "DROP CONSTRAINT fk_ufp_binding_revision"
+        )
+    )
+    db_session.add(
+        UserFieldPolicyBinding(
+            tenant_id=tenant_a.tenant_id,
+            role_id=role.role_id,
+            revision_id=revision.revision_id,
+            version=1,
+        )
+    )
+    await db_session.flush()
+
+    report = await build_tenant_isolation_report(
+        db_session, build_sha="abcdef1234567890"
+    )
+
+    assert {
+        (item["code"], item["resource"], item["count"])
+        for item in report.payload["risks"]
+    } >= {
+        ("TENANT_CROSS_LINK", "sys_user_field_policy_binding", 2),
+        (
+            "TENANT_SCHEMA_FOREIGN_KEY_MISSING",
+            "sys_user_field_policy_binding.tenant_id_role_id",
+            1,
+        ),
+        (
+            "TENANT_SCHEMA_FOREIGN_KEY_MISSING",
+            "sys_user_field_policy_binding.tenant_id_role_id_revision_id",
+            1,
+        ),
+    }
+    resource = next(
+        item
+        for item in report.payload["databaseChecks"]["resources"]
+        if item["table"] == "sys_user_field_policy_binding"
+    )
+    assert resource["crossLinkCount"] == 2
+    assert resource["relationshipOrphanCount"] == 0
 
 
 async def test_audit_report_rejects_missing_security_trigger(db_session) -> None:

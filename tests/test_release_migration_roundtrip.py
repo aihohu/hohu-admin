@@ -22,13 +22,14 @@ def release_chain():
     assert [item.revision for item in revisions] == [
         "bf244f9a8b76",
         "d01010100101",
+        "e0202a000001",
     ]
     return [item.module for item in revisions]
 
 
 def release_steps():
-    """Expose internal boundaries for data fixtures without adding revisions."""
-    baseline, consolidated = release_chain()
+    """Expose only the six historical boundaries inside the original two revisions."""
+    baseline, consolidated = release_chain()[:2]
     return [baseline] + [
         SimpleNamespace(
             upgrade=getattr(consolidated, f"_upgrade_{step}"),
@@ -85,6 +86,12 @@ async def test_fresh_install_preserves_security_triggers(migration_connection):
         "trg_platform_principal_security_version",
         "trg_sys_tenant_security_version",
         "trg_user_email_trust",
+        "trg_ufp_revision_immutable",
+        "trg_ufp_audit_immutable",
+        "trg_ufp_guard_protection",
+        "trg_ufp_state_protection",
+        "trg_ufp_binding_protection",
+        "trg_ufp_initialize_tenant",
     } <= triggers
     await connection.execute(
         sa.text(
@@ -110,7 +117,21 @@ async def test_empty_release_upgrade_downgrade_roundtrip(migration_connection):
     connection = migration_connection
     chain = release_chain()
     await connection.run_sync(apply_steps, chain, "upgrade")
+    initial_policy = sa.text(
+        "SELECT g.guard_id, g.epoch, s.tenant_id, s.mode, s.ever_enforced, s.epoch, "
+        "s.candidate_manifest_digest, s.active_manifest_digest "
+        "FROM sys_user_field_policy_global_guard g "
+        "CROSS JOIN sys_user_field_policy_state s"
+    )
+    expected_policy = [(1, 1, 0, "legacy", False, 1, None, None)]
+    assert (await connection.execute(initial_policy)).all() == expected_policy
     await connection.run_sync(apply_steps, list(reversed(chain[1:])), "downgrade")
+    assert (
+        await connection.scalar(
+            sa.text("SELECT to_regclass('sys_user_field_policy_state')")
+        )
+        is None
+    )
     await connection.run_sync(apply_steps, chain[1:], "upgrade")
     assert (
         await connection.scalar(
@@ -118,6 +139,16 @@ async def test_empty_release_upgrade_downgrade_roundtrip(migration_connection):
         )
         == "default"
     )
+    assert (await connection.execute(initial_policy)).all() == expected_policy
+    assert (
+        await connection.execute(
+            sa.text(
+                "SELECT (SELECT count(*) FROM sys_user_field_policy_revision), "
+                "(SELECT count(*) FROM sys_user_field_policy_binding), "
+                "(SELECT count(*) FROM sys_user_field_policy_audit)"
+            )
+        )
+    ).one() == (0, 0, 0)
 
 
 async def test_setting_split_preserves_tenant_values_and_custom_parameters(
