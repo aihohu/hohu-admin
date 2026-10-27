@@ -138,6 +138,8 @@ def check_candidates(*, root=ROOT, entries=None, module_sources=None):
     paths.update((root / "app/db").glob("authorization_*_owner.py"))
     paths.update((root / "app/modules/ai/service").glob("authorization_catalog_*.py"))
     paths.add(root / "app/modules/system/service/authorization_configuration_input.py")
+    paths.add(root / "app/modules/system/service/authorization_ai_tool_adapter.py")
+    paths.add(root / "app/modules/ai/agents/gateway/authorization_execution.py")
     paths.add(root / "app/modules/system/service/planned_user_field_policy_service.py")
     modules = {".".join(path.relative_to(root).with_suffix("").parts) for path in paths}
     modules.update(module_sources)

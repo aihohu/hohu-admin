@@ -871,6 +871,80 @@ CANDIDATES += tuple(
     for entry, qualified, phase, profile in _COMPOSITION_PHASES
 )
 
+_GATEWAY = "app.modules.ai.agents.gateway.authorization_execution.PlannedGatewayOwner.execute_claim"
+_EXECUTION = _A + "authorization_execution_candidate.AIExecutionCandidate"
+_TOOL_ADAPTER = _S + "authorization_ai_tool_adapter.SystemAIToolAdapter"
+_GATEWAY_TOOLS = (
+    "dept.create",
+    "dept.update",
+    "dept.move",
+    "role.create",
+    "role.update",
+    "role.update_menus",
+    "user.update_dept",
+    "user.update_roles",
+)
+OPERATION_FAMILIES = MappingProxyType(
+    dict(OPERATION_FAMILIES)
+    | {
+        "gateway": (
+            _GATEWAY_TOOLS,
+            _S + "authorization_ai_tool_adapter",
+            "TOOL_OPERATIONS",
+        ),
+    }
+)
+CANDIDATES += tuple(
+    Candidate(
+        "gateway." + tool,
+        _GATEWAY,
+        (),
+        _GATEWAY,
+        "owner",
+        "S",
+        "trusted TenantContext; exact single tenant; lock-free preflight then fresh proof",
+        ("X",),
+        _TOOL_ADAPTER + ".plan",
+        _EXECUTION + ".execute",
+        "import-write",
+        _TX + ".aggregate",
+        False,
+        operation=tool,
+    )
+    for tool in _GATEWAY_TOOLS
+)
+CANDIDATES += tuple(
+    Candidate(
+        "ai.execution." + entry,
+        qualified,
+        (),
+        _GATEWAY,
+        phase,
+        guard,
+        "trusted TenantContext; fixed DB tool mapping",
+        () if guard == "none" else ("X",),
+        qualified,
+        qualified,
+        profile,
+        _TX + ".aggregate" if phase == "proof_writer" else "none",
+        phase == "proof_writer",
+    )
+    for entry, qualified, phase, guard, profile in (
+        ("reference", _EXECUTION + ".reference", "read", "none", "bounded-read"),
+        ("authorize", _EXECUTION + ".authorize", "read", "S", "import-write"),
+        ("execute", _EXECUTION + ".execute", "proof_writer", "S", "import-write"),
+        (
+            "prepare_input",
+            _TOOL_ADAPTER + ".prepare_input",
+            "external",
+            "none",
+            "external-password",
+        ),
+        ("plan", _TOOL_ADAPTER + ".plan", "plan", "S", "import-write"),
+        ("apply", _TOOL_ADAPTER + ".apply", "proof_writer", "S", "import-write"),
+    )
+)
+
 PENDING_SURFACES = MappingProxyType(
     {
         "2B4": (

@@ -117,19 +117,25 @@ class AgentAuthorizationService:
         self,
         db: AsyncSession,
         user: User,
+        *,
+        force_refresh: bool = False,
     ) -> list[AiAgent]:
         """列出通过完整 Agent Policy 的候选 Agent。"""
         tenant = get_bound_tenant_context(user)
         perms = self.tool_permissions(user)
+        agents = await self._bound_enabled_agents(db, user)
+        if not agents:
+            return []
         enabled_extra = await get_ai_config_str_list(
             db,
             "ai:enabled_tools",
             default=[],
             tenant=tenant,
+            force_refresh=force_refresh,
         )
         return [
             agent
-            for agent in await self._bound_enabled_agents(db, user)
+            for agent in agents
             if compute_available_tools(
                 perms,
                 agent.code,

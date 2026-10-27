@@ -48,6 +48,9 @@ FACT_COLUMNS = MappingProxyType(
                 "result_data",
                 "result_ui",
                 "subject_refs",
+                "subject_refs_hash",
+                "tool_codes",
+                "resolver_version",
                 "data_scope_hash",
             }
         ),
