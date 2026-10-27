@@ -6,6 +6,7 @@ from app.core.authorization_plan import ResourceKind as K
 
 FACT_COLUMNS = MappingProxyType(
     {
+        K.JOB: frozenset({"cron_expression", "update_by"}),
         K.CONVERSATION: frozenset(
             {
                 "title",

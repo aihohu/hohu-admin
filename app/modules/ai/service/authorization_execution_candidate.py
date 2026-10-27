@@ -12,6 +12,7 @@ from app.core.authorization_plan import LockPlan, ResourceKey
 from app.core.authorization_plan import ResourceKind as K
 from app.core.config import settings
 from app.core.exceptions import AuthorizationException
+from app.core.file_storage import ArtifactExecution
 from app.core.rbac import is_super_admin
 from app.modules.ai.agents.gateway.sensitive import serialize_for_llm
 from app.modules.ai.agents.hitl.events import _ui_to_dict
@@ -27,6 +28,7 @@ from app.modules.ai.service.atomic_completion_service import (
     _check_log,
     _invalid,
 )
+from app.modules.ai.service.authorization_chat_model import select_model
 from app.modules.ai.service.authorization_context_candidate import ai_context_candidate
 from app.modules.ai.service.operation_log_service import build_target_summary
 from app.modules.ai.service.result_projection_service import result_projection_service
@@ -62,7 +64,9 @@ class AIExecutionCandidate:
         _check_action(action, claim, tenant, require_running=False)
         return action
 
-    async def authorize(self, db, tx, action, *, tenant, actor_user_version):
+    async def authorize(
+        self, db, tx, action, *, tenant, actor_user_version, _preview=False
+    ):
         tx.assert_session(db)
         current = await load_live_user_authority(db, tenant=tenant)
         if (
@@ -75,17 +79,35 @@ class AIExecutionCandidate:
                 "当前身份已经失效", error_code="AI_TOOL_PERM_DENIED"
             )
         ensure_ai_chat_use(current)
+        if getattr(action, "resolved_model_id", None) is not None:
+            selected = await select_model(db, tenant, str(action.resolved_model_id))
+            if selected.provider_id != action.resolved_provider_id:
+                raise _invalid("冻结模型的提供商绑定已变化")
         registered = ToolRegistry.get().find(action.execute_tool_name)
+        preview = _preview is True and action.execute_tool_name == "user.import_preview"
         if (
-            action.execute_tool_name not in TOOL_OPERATIONS
+            (action.execute_tool_name not in TOOL_OPERATIONS and not preview)
             or registered is None
             or registered.meta.readonly
-            or not registered.meta.llm_visible
-            or registered.meta.interaction_flow != "direct"
-            or action.interaction_flow != "direct"
+            or (
+                not registered.meta.llm_visible
+                and action.execute_tool_name != "user.import_execute"
+            )
+            or registered.meta.interaction_flow != ("prepared" if preview else "direct")
+            or action.interaction_flow
+            != (
+                "prepared"
+                if action.execute_tool_name == "user.import_execute" or preview
+                else "direct"
+            )
             or action.approval_mode != "required"
             or action.dispatch_mode != "execute_after_approval"
-            or action.requested_outcome != "direct"
+            or action.requested_outcome
+            != (
+                "execute_if_approved"
+                if action.execute_tool_name == "user.import_execute" or preview
+                else "direct"
+            )
             or registered.meta.agent != action.agent_code
         ):
             raise _invalid("工具尚未接入计划执行协议")
@@ -136,6 +158,21 @@ class AIExecutionCandidate:
             raise AuthorizationException(
                 "数据权限已变化", error_code="AI_DATA_SCOPE_VIOLATION"
             )
+        dependencies = result_projection_service.projection_dependency_message_ids(
+            action
+        )
+        if (
+            dependencies is None
+            or not await result_projection_service._authorize_projection_dependencies(
+                db,
+                current,
+                owner_user_id=tenant.actor_user_id,
+                dependency_message_ids=dependencies,
+            )
+        ):
+            raise AuthorizationException(
+                "历史上下文权限已变化", error_code="AI_RESULT_PROJECTION_FORBIDDEN"
+            )
         return meta, scope_hash
 
     async def execute(self, db, tx, command, claim, *, tenant, actor_user_version):
@@ -147,10 +184,21 @@ class AIExecutionCandidate:
             command,
             tool=action.execute_tool_name,
             args=action.frozen_args,
-            snapshot=action.snapshot.get("business"),
+            snapshot=(
+                {k: v for k, v in action.snapshot.items() if k != "_authorization"}
+                if action.execute_tool_name == "user.import_execute"
+                else action.snapshot.get("business")
+            ),
             tenant=tenant,
             actor_user_version=actor_user_version,
         )
+        if action.execute_tool_name in {
+            "user.export",
+            "user.import_execute",
+        } and command.command.execution != ArtifactExecution(
+            claim.tenant_id, str(claim.action_id), claim.execution_owner
+        ):
+            raise _invalid("FILE 执行归属已变化")
         await self.authorize(
             db, tx, action, tenant=tenant, actor_user_version=actor_user_version
         )

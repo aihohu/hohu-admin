@@ -115,6 +115,7 @@ async def _query_users_with_data_scope(
     current_user: User,
     *,
     tenant: TenantContext,
+    max_rows: int | None = None,
 ) -> list[User]:
     """按筛选条件和数据权限查询用户列表。
 
@@ -156,6 +157,8 @@ async def _query_users_with_data_scope(
         stmt = stmt.where(f)
 
     stmt = stmt.order_by(User.user_id)
+    if max_rows is not None:
+        stmt = stmt.limit(max_rows)
     result = await db.execute(stmt)
     rows = list(result.scalars().all())
     if filter_.user_names is not None and {row.user_name for row in rows} != set(

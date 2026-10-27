@@ -113,6 +113,13 @@ class UserUpdate(UserBase):
     """用户更新请求"""
 
 
+class UserToolUpdate(UserUpdate):
+    """Internal planned AI PATCH; the fixed adapter excludes user_name."""
+
+    user_name: str | None = None
+    status: str | None = None
+
+
 class UserRoleUpdate(BaseModel):
     """Complete role replacement request for one user."""
 

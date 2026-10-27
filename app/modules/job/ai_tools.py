@@ -60,6 +60,10 @@ async def job_update_cron(
     )
     new_cron = job.cron_expression or ""
     job_id_str = str(job.job_id)
+    return _planned_cron_result(job_id_str, old_cron, new_cron)
+
+
+def _planned_cron_result(job_id_str, old_cron, new_cron):
     return ToolResult.success(
         data={"ok": True, "job_id": job_id_str, "new_cron": new_cron},
         projection=ResultProjection(subject_refs=({"type": "job", "id": job_id_str},)),

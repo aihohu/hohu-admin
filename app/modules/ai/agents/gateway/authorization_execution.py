@@ -5,6 +5,7 @@ import logging
 from copy import deepcopy
 
 from app.core.authorization_plan import LockMode, TenantLock, TransactionBudget
+from app.core.file_storage import ArtifactExecution
 from app.core.tenant import TenantContext
 from app.db.authorization_ai_owner import AIAuthorizationOwner
 from app.db.authorization_owner import (
@@ -72,9 +73,16 @@ class PlannedGatewayOwner:
                         db,
                         tool=tool,
                         args=args,
-                        snapshot=snapshot.get("business"),
+                        snapshot=(
+                            {k: v for k, v in snapshot.items() if k != "_authorization"}
+                            if tool == "user.import_execute"
+                            else snapshot.get("business")
+                        ),
                         tenant=tenant,
                         actor_user_version=actor_user_version,
+                        execution=ArtifactExecution(
+                            claim.tenant_id, str(claim.action_id), claim.execution_owner
+                        ),
                     )
                     with bounded_authorization_reads(db):
                         async with authorization_transactions.scope(

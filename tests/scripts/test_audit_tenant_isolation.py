@@ -16,6 +16,18 @@ from app.core.tenant_isolation_audit import (
 from tools.ops import audit_tenant_isolation as cli
 
 _CANDIDATE_NAMESPACES = (
+    ("db/authorization_lifecycle_owner.py", "tenant_id", "cache"),
+    ("db/authorization_preview_owner.py", "tenant_id", "cache"),
+    ("db/authorization_transfer_cache.py", "tenant_id", "storage"),
+    ("modules/ai/agents/gateway/authorization_execution.py", "tenant_id", "cache"),
+    ("modules/ai/service/authorization_execution_candidate.py", "tenant_id", "cache"),
+    ("modules/ai/service/authorization_lifecycle_candidate.py", "tenant_id", "cache"),
+    ("modules/system/service/authorization_ai_file_adapter.py", "tenant_id", "cache"),
+    (
+        "modules/system/service/authorization_transfer_candidate.py",
+        "tenant_id",
+        "cache",
+    ),
     ("db/authorization_control_owner.py", "cache_keys", "storage"),
     ("db/authorization_system_owner.py", "tenant_cache_key", "storage"),
     (

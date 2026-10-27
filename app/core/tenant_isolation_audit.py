@@ -54,6 +54,21 @@ _NAMESPACE_REGISTRY: dict[str, tuple[str, str, tuple[str, ...]]] = {
         "tenant",
         ("cache_keys", "configuration_authorization_candidate", "tenant"),
     ),
+    "db/authorization_lifecycle_owner.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "ArtifactExecution"),
+    ),
+    "db/authorization_preview_owner.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "ArtifactExecution"),
+    ),
+    "db/authorization_transfer_cache.py": (
+        "cache",
+        "tenant",
+        ("tenant_id",),
+    ),
     "middleware/audit_middleware.py": ("cache", "tenant", ("tenant_id",)),
     "middleware/rate_limit_middleware.py": ("cache", "global", ()),
     "modules/system/api/settings.py": ("cache", "tenant", ("tenant_id",)),
@@ -71,6 +86,21 @@ _NAMESPACE_REGISTRY: dict[str, tuple[str, str, tuple[str, ...]]] = {
         "cache_storage",
         "tenant",
         ("tenant_id",),
+    ),
+    "modules/ai/agents/gateway/authorization_execution.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "ArtifactExecution"),
+    ),
+    "modules/ai/service/authorization_execution_candidate.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "ArtifactExecution"),
+    ),
+    "modules/ai/service/authorization_lifecycle_candidate.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "ArtifactExecution"),
     ),
     "modules/ai/agents/gateway/preview_execution.py": (
         "storage",
@@ -162,6 +192,16 @@ _NAMESPACE_REGISTRY: dict[str, tuple[str, str, tuple[str, ...]]] = {
         "storage",
         "tenant",
         ("tenant_id", "identity", "storage_key"),
+    ),
+    "modules/system/service/authorization_ai_file_adapter.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "ArtifactExecution"),
+    ),
+    "modules/system/service/authorization_transfer_candidate.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "ArtifactExecution"),
     ),
     "modules/system/service/transfer_cleanup_service.py": (
         "cache_storage",

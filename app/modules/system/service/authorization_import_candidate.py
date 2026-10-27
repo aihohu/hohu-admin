@@ -137,6 +137,7 @@ def _recoverable(exc):
 @dataclass(frozen=True, slots=True, repr=False)
 class _ImportInput:
     values: tuple
+    source_proof: tuple | None = None
 
 
 @dataclass(slots=True, repr=False)
@@ -520,6 +521,7 @@ class ImportAuthorizationCandidate:
             tenant=tenant,
         )
         tx.assert_held(batch_key)
+        source_proof = work.command.source_proof
         work, failed, skipped = self._work(
             records, resolutions, classified, on_conflict, sync_mode
         )
@@ -547,6 +549,7 @@ class ImportAuthorizationCandidate:
                 reason,
                 file_storage,
                 artifact_execution,
+                source_proof,
             )
 
     async def execute(self, db, **request):
@@ -745,6 +748,7 @@ class ImportAuthorizationCandidate:
         reason,
         storage,
         execution,
+        source_proof=None,
     ):
         started = datetime.now(UTC)
         await tx.update_held(
@@ -823,20 +827,38 @@ class ImportAuthorizationCandidate:
             end.value,
         )
         file_key = None
-        if failed:
+        if failed or source_proof is not None:
             tx.assert_held(batch_key)
-            data = _failed_rows_to_xlsx_bytes(failed)
+            data = _failed_rows_to_xlsx_bytes(failed) if failed else b""
             if len(data) > _MAX_BYTES:
                 raise _limit()
             tx.assert_held(batch_key)
             identity = execution.identity("import_errors", batch["batch_id"])
             tx.seal_insertions()
-            with tx.file_io(max_reads=2, max_total_bytes=20 * 1024 * 1024):
-                file_key = await storage.save_artifact(data, identity=identity)
-                if type(file_key) is not str or file_key != identity.storage_key:
-                    raise BusinessRuleException(
-                        "文件归属或完整性待核对", error_code="AI_ARTIFACT_UNVERIFIED"
+            with tx.file_io(max_reads=4, max_total_bytes=40 * 1024 * 1024):
+                if source_proof is not None:
+                    source_key, source_identity, source_hash = source_proof
+                    source = await storage.read_artifact(
+                        source_key, identity=source_identity
                     )
+                    if (
+                        _compute_file_sha256(source) != source_hash
+                        or source_key != batch["file_storage_key"]
+                    ):
+                        raise _stale()
+                if failed:
+                    file_key = await storage.save_artifact(data, identity=identity)
+                    if type(file_key) is not str or file_key != identity.storage_key:
+                        raise BusinessRuleException(
+                            "文件归属或完整性待核对",
+                            error_code="AI_ARTIFACT_UNVERIFIED",
+                        )
+                    if (
+                        source_proof is not None
+                        and await storage.read_artifact(file_key, identity=identity)
+                        != data
+                    ):
+                        raise _stale()
             tx.assert_held(batch_key)
         await tx.update_factual(
             batch_key,

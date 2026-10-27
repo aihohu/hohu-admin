@@ -65,6 +65,8 @@ class ResourceKind(StrEnum):
     SYSTEM_OPERATION_LOG = "system_operation_log"
     PLATFORM_AUDIT = "platform_audit"
     LOGIN_LOG = "login_log"
+    JOB = "job"
+    FILE = "file"
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +94,7 @@ _SYSTEM = "app.modules.system.models."
 _AI = "app.modules.ai.models."
 _RESOURCE_DEFINITIONS = MappingProxyType(
     {
+        ResourceKind.FILE: _definition("sys_file", ("file_id",), 740, _SYSTEM + "file"),
         ResourceKind.CONVERSATION: _definition(
             "ai_conversation", ("conversation_id",), 10, _AI + "conversation"
         ),
@@ -187,6 +190,9 @@ _RESOURCE_DEFINITIONS = MappingProxyType(
         ),
         ResourceKind.ASSISTANT_MESSAGE: _definition(
             "ai_message", ("message_id",), 800, _AI + "message"
+        ),
+        ResourceKind.JOB: _definition(
+            "sys_job", ("job_id",), 730, "app.modules.job.models.job"
         ),
         ResourceKind.ROUTING_LOG: _definition(
             "ai_routing_log", ("log_id",), 810, _AI + "routing_log"

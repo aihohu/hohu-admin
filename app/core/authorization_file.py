@@ -130,6 +130,15 @@ def read_local(path, *, manifest=False):
     return budget.read(path, manifest=manifest) if budget else path.read_bytes()
 
 
+def read_local_bounded(path, maximum):
+    """Retain legacy bounded reads while charging planned upload reads."""
+    budget = _CURRENT.get()
+    if budget:
+        return budget.read(path)
+    with path.open("rb") as source:
+        return source.read(maximum + 1)
+
+
 def require_unbudgeted_legacy_write():
     budget = _CURRENT.get()
     if budget is not None:

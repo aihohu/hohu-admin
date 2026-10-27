@@ -9,6 +9,17 @@ from sqlalchemy import select
 from app.core.exceptions import BusinessRuleException
 from app.modules.ai.agents.gateway.failures import compute_args_hash
 from app.modules.ai.agents.gateway.result import ResultProjection, ToolResult, UIResult
+from app.modules.ai.schemas.role_agent import RoleAgentBindReq
+from app.modules.ai.service.authorization_catalog_candidate import (
+    catalog_authorization_candidate as catalog,
+)
+from app.modules.ai.service.authorization_catalog_inputs import (
+    CatalogRequest,
+    freeze_request,
+)
+from app.modules.job.service.authorization_job_candidate import (
+    job_authorization_candidate as job,
+)
 from app.modules.system.ai_tools.common import (
     _model_validate_for_ai,
     _validate_enable_status,
@@ -26,6 +37,18 @@ from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.schemas.dept import DeptCreate, DeptMove, DeptUpdate
 from app.modules.system.schemas.role import RoleCreate, RoleUpdate
+from app.modules.system.service.authorization_ai_delete_candidate import (
+    ai_delete_candidate,
+)
+from app.modules.system.service.authorization_ai_file_adapter import (
+    FILE_EXECUTIONS,
+    ai_file_adapter,
+)
+from app.modules.system.service.authorization_ai_user_input import (
+    USER_TOOLS,
+    prepare_user,
+    recheck_user,
+)
 from app.modules.system.service.authorization_system_candidate import (
     system_authorization_candidate as system,
 )
@@ -38,8 +61,16 @@ TOOL_OPERATIONS = MappingProxyType(
         "role.create": "role.create",
         "role.update": "role.update",
         "role.update_menus": "role.menus",
+        "role.update_agents": "role.agents",
         "user.update_dept": "user.departments",
         "user.update_roles": "user.roles",
+        "user.create": "user.create",
+        "user.reset_password": "user.password",
+        "user.update": "user.update",
+        "job.update_cron": "job.cron",
+        "user.batch_delete": "user.batch_delete",
+        "user.export": "user.export",
+        "user.import_execute": "user.import_execute",
     }
 )
 
@@ -61,8 +92,9 @@ class _ToolInput:
     tool: str
     tenant: object
     command: object
-    snapshot: dict
+    snapshot: dict | None
     args_hash: str
+    policy: object = None
 
 
 class SystemAIToolAdapter:
@@ -73,22 +105,104 @@ class SystemAIToolAdapter:
             type(command) is not _ToolInput
             or command.tool != tool
             or command.tenant != tenant
-            or command.command.values[:2] != (tenant, actor_user_version)
+            or (
+                (command.command.tenant, command.command.actor_user_version)
+                if type(command.command) is CatalogRequest
+                else command.command.values[:2]
+            )
+            != (tenant, actor_user_version)
             or command.args_hash != compute_args_hash(args)
             or command.snapshot != snapshot
         ):
             raise _invalid()
 
     async def prepare_input(
-        self, db, *, tool, args, snapshot, tenant, actor_user_version
+        self, db, *, tool, args, snapshot, tenant, actor_user_version, execution=None
     ):
         if (
             tool not in TOOL_OPERATIONS
             or type(args) is not dict
-            or type(snapshot) is not dict
+            or (
+                type(snapshot) is not dict
+                and not (
+                    tool in USER_TOOLS | {"job.update_cron", "user.export"}
+                    and snapshot is None
+                )
+            )
         ):
             raise _invalid()
         values, snapshot = deepcopy(args), deepcopy(snapshot)
+        if tool in FILE_EXECUTIONS:
+            command = await ai_file_adapter.prepare_input(
+                db,
+                tool=tool,
+                args=values,
+                snapshot=snapshot,
+                tenant=tenant,
+                actor_user_version=actor_user_version,
+                execution=execution,
+            )
+            return _ToolInput(tool, tenant, command, snapshot, compute_args_hash(args))
+        if tool == "user.batch_delete":
+            if (
+                set(values) != {"user_ids"}
+                or type(values["user_ids"]) is not list
+                or not 1 <= len(values["user_ids"]) <= 256
+            ):
+                raise _invalid()
+            ids = [_id(n) for n in values["user_ids"]]
+            if len(set(ids)) != len(ids):
+                raise _invalid()
+            command = await system.prepare_input(
+                db,
+                tenant=tenant,
+                actor_user_version=actor_user_version,
+                operation=tool,
+                payload=ids,
+                expected_snapshot=snapshot,
+            )
+            return _ToolInput(tool, tenant, command, snapshot, compute_args_hash(args))
+        if tool == "job.update_cron":
+            command = job.prepare_input(
+                tenant=tenant, actor_user_version=actor_user_version, args=values
+            )
+            return _ToolInput(tool, tenant, command, snapshot, compute_args_hash(args))
+        if tool == "role.update_agents":
+            if (
+                set(values) != {"role_id", "agent_ids"}
+                or type(values["agent_ids"]) is not list
+                or len(values["agent_ids"]) > 256
+            ):
+                raise _invalid()
+            target = _id(values["role_id"])
+            ids = [_id(n) for n in values["agent_ids"]]
+            if len(ids) != len(set(ids)):
+                raise _invalid()
+            command = freeze_request(
+                tenant=tenant,
+                actor_user_version=actor_user_version,
+                operation="role.agents",
+                target_id=target,
+                payload=RoleAgentBindReq(agent_ids=[str(n) for n in ids]),
+                expected_snapshot=snapshot,
+            )
+            return _ToolInput(tool, tenant, command, snapshot, compute_args_hash(args))
+        if tool in USER_TOOLS:
+            target, payload, policy = await prepare_user(
+                db, tool=tool, args=values, tenant=tenant
+            )
+            command = await system.prepare_input(
+                db,
+                tenant=tenant,
+                actor_user_version=actor_user_version,
+                operation=TOOL_OPERATIONS[tool],
+                target_id=target,
+                payload=payload,
+                expected_snapshot=snapshot,
+            )
+            return _ToolInput(
+                tool, tenant, command, snapshot, compute_args_hash(args), policy
+            )
         target = None
         model = None
         if tool.startswith("dept."):
@@ -182,17 +296,73 @@ class SystemAIToolAdapter:
     async def plan(self, db, tx, command):
         if type(command) is not _ToolInput:
             raise _invalid()
+        if command.tool in FILE_EXECUTIONS:
+            return await ai_file_adapter.plan(db, tx, command.command)
+        if command.tool == "job.update_cron":
+            return await job.plan(db, tx, command.command)
+        if command.tool == "user.batch_delete":
+            return await ai_delete_candidate.plan(db, tx, command.command)
+        if command.tool == "role.update_agents":
+            return await catalog.plan_role_agents(db, tx, command.command)
+        if command.tool in USER_TOOLS:
+            await recheck_user(db, command)
         return await system.plan(db, tx, command.command)
 
     async def apply(self, db, tx, command, work):
+        if type(command) is _ToolInput and command.tool in FILE_EXECUTIONS:
+            return await ai_file_adapter.apply(db, tx, command.command, work)
+        if type(command) is _ToolInput and command.tool == "user.batch_delete":
+            return await ai_delete_candidate.apply(db, tx, command.command, work)
+        if type(command) is _ToolInput and command.tool == "job.update_cron":
+            return await job.apply(db, tx, command.command, work)
+        if type(command) is _ToolInput and command.tool == "role.update_agents":
+            if getattr(work, "request", None) != command.command:
+                raise _invalid()
+            await catalog.apply_role_agents(db, tx, work)
+            role = await db.scalar(
+                select(Role)
+                .where(
+                    Role.tenant_id == command.tenant.tenant_id,
+                    Role.role_id == command.command.target_id,
+                )
+                .execution_options(populate_existing=True)
+            )
+            return _role_result(action="update_agents", role=role)
         if (
             type(command) is not _ToolInput
             or work.command.values != command.command.values
         ):
             raise _invalid()
+        if command.tool in USER_TOOLS:
+            dept, role = await recheck_user(db, command)
         changed = await system.apply(db, tx, work)
         tool, tenant = command.tool, command.tenant
         identifier = changed["id"]
+        if tool in USER_TOOLS:
+            from app.modules.system.ai_tools.user_management import (  # noqa: PLC0415
+                _planned_create_result,
+                _planned_reset_result,
+                _planned_update_result,
+            )
+
+            user = await db.scalar(
+                select(User)
+                .where(User.tenant_id == tenant.tenant_id, User.user_id == identifier)
+                .execution_options(populate_existing=True)
+            )
+            if tool == "user.create":
+                return _planned_create_result(
+                    user,
+                    str(identifier),
+                    str(dept.dept_id) if dept else None,
+                    dept,
+                    role,
+                )
+            if tool == "user.reset_password":
+                return _planned_reset_result(user, str(identifier))
+            return _planned_update_result(
+                user, command.command.values[3].model_dump(exclude_unset=True)
+            )
         if tool.startswith("dept."):
             row = await db.scalar(
                 select(Dept)
@@ -279,6 +449,59 @@ class SystemAIToolAdapter:
                 label_params={"userName": user.user_name},
             ),
         )
+
+    async def validate_planned(self, db, tx, command, work):
+        """Confirmation rechecks a composed plan without consuming its writes."""
+        tx.assert_session(db)
+        tx.assert_planned(work.locks)
+        if command.tool == "role.update_agents":
+            from app.modules.ai.service.authorization_catalog_candidate import (  # noqa: PLC0415
+                _facts_bytes,
+            )
+            from app.modules.system.service.authorization_control_identity import (  # noqa: PLC0415
+                assert_identity,
+            )
+
+            await assert_identity(db, work.identity)
+            if (
+                _facts_bytes(await catalog._facts(db, work.request))
+                != _facts_bytes(work.facts)
+                or await catalog._delegation(db, work.request) != work.evaluation
+            ):
+                raise _invalid()
+        elif command.tool == "job.update_cron":
+            if await job._facts(db, command.command) != work.facts:
+                raise _invalid()
+        elif command.tool == "user.export":
+            from app.modules.system.service.authorization_control_identity import (  # noqa: PLC0415
+                assert_identity,
+            )
+
+            await assert_identity(db, work.identity)
+        elif command.tool == "user.import_execute":
+            from app.modules.system.service.authorization_import_candidate import (  # noqa: PLC0415
+                import_authorization_candidate as importer,
+            )
+
+            batch, _, facts, *_ = work.values
+            if facts != await system._facts(
+                db, command.tenant.tenant_id
+            ) or batch != await importer._batch(
+                db, command.tenant, command.command.command.values[3]
+            ):
+                raise _invalid()
+        else:
+            domain = work.domain if command.tool == "user.batch_delete" else work
+            if domain.facts != await system._facts(db, command.tenant.tenant_id):
+                raise _invalid()
+            if command.tool in USER_TOOLS:
+                await recheck_user(db, command)
+            if command.tool == "user.batch_delete":
+                await ai_delete_candidate._check_targets(db, command.command)
+                if work.facts != await ai_delete_candidate._facts(
+                    db, command.tenant, command.command.values[3]
+                ):
+                    raise _invalid()
 
 
 system_ai_tool_adapter = SystemAIToolAdapter()

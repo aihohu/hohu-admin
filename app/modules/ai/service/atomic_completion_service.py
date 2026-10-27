@@ -499,8 +499,8 @@ class AtomicCompletionService:
             or action.user_id != tenant.actor_user_id
             or action.status not in {"rejected", "expired"}
             or action.row_version != 2
-            or action.approval_mode != "hitl"
-            or action.dispatch_mode != "inline"
+            or (action.approval_mode, action.dispatch_mode)
+            not in {("hitl", "inline"), ("required", "execute_after_approval")}
             or action.finished_at is None
             or action.execution_owner is not None
             or action.execution_lease_expires_at is not None

@@ -269,6 +269,10 @@ async def user_create(
 
     user_id = str(new_user.user_id)
     dept_id = str(primary_dept_id) if primary_dept_id is not None else None
+    return _planned_create_result(new_user, user_id, dept_id, dept, role)
+
+
+def _planned_create_result(new_user, user_id, dept_id, dept, role):
     return ToolResult.success(
         data={
             "created": 1,
@@ -430,7 +434,7 @@ async def _load_ai_reset_target(ctx: AiToolContext, *, user_id: int) -> User:
         )
     target_has_super_role = bool(
         await ctx.db.scalar(
-            select(func.count())
+            select(Role.role_id)
             .select_from(user_roles.join(Role, user_roles.c.role_id == Role.role_id))
             .where(
                 user_roles.c.tenant_id == ctx.tenant_id,
@@ -439,12 +443,13 @@ async def _load_ai_reset_target(ctx: AiToolContext, *, user_id: int) -> User:
                 Role.role_code == SUPER_ADMIN_ROLE_CODE,
                 Role.status == STATUS_ENABLED,
             )
+            .limit(1)
         )
     )
     if target.user_name == ADMIN_USERNAME or target_has_super_role:
         actor_is_super_admin = bool(
             await ctx.db.scalar(
-                select(func.count())
+                select(Role.role_id)
                 .select_from(
                     user_roles.join(Role, user_roles.c.role_id == Role.role_id)
                 )
@@ -455,6 +460,7 @@ async def _load_ai_reset_target(ctx: AiToolContext, *, user_id: int) -> User:
                     Role.role_code == SUPER_ADMIN_ROLE_CODE,
                     Role.status == STATUS_ENABLED,
                 )
+                .limit(1)
             )
         )
         if not actor_is_super_admin:
@@ -500,6 +506,10 @@ async def user_reset_password(ctx: AiToolContext, *, user_id: int) -> ToolResult
     )
 
     str_user_id = str(user_id)
+    return _planned_reset_result(target, str_user_id)
+
+
+def _planned_reset_result(target, str_user_id):
     return ToolResult.success(
         data={
             "updated": 1,
@@ -1178,6 +1188,10 @@ async def user_update(
             )
         setattr(user, field, value)
 
+    return _planned_update_result(user, provided)
+
+
+def _planned_update_result(user, provided):
     return ToolResult.success(
         data={"updated": 1, "userName": user.user_name},
         projection=_result_projection("user", [user.user_id]),

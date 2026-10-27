@@ -82,6 +82,17 @@ class CatalogPreparation:
     _session: object = field(repr=False)
 
 
+@dataclass(slots=True, repr=False)
+class _RoleAgentWork:
+    transaction: object
+    request: CatalogRequest
+    identity: object
+    facts: dict
+    evaluation: object
+    locks: LockPlan
+    used: bool = False
+
+
 def _fresh(db):
     if (
         not isinstance(db, AuthorizationPlanSession)
@@ -146,6 +157,54 @@ def _audit(audit, request):
 
 
 class CatalogAuthorizationCandidate:
+    async def plan_role_agents(self, db, tx, request):
+        tx.assert_session(db)
+        if type(request) is not CatalogRequest or request.operation != "role.agents":
+            raise _order_error()
+        tid = request.tenant.tenant_id
+        tx.assert_planning(tid, exclusive=True)
+        identity = await self._identity(db, request)
+        facts = await self._facts(db, request)
+        evaluation = await self._delegation(db, request)
+        expected = json.loads(request.expected_bytes)
+        if expected is not None and evaluation.snapshot != expected:
+            raise BusinessRuleException(
+                "角色 Agent 审批快照已变化",
+                error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
+            )
+        keys = set(identity.keys)
+        for kind, rows in facts.items():
+            keys.update(
+                _key(kind, row, tid if kind is ResourceKind.ROLE_AGENT else None)
+                for row in rows
+            )
+        for kind, ids in (
+            (ResourceKind.ROLE, evaluation.role_ids),
+            (ResourceKind.DEPT, evaluation.dept_ids),
+            (ResourceKind.USER, evaluation.user_ids),
+        ):
+            keys.update(ResourceKey(kind, tid, value) for value in ids)
+        locks = LockPlan(existing=tuple(keys), new=self._new_keys(request, facts, None))
+        return _RoleAgentWork(tx, request, identity, facts, evaluation, locks)
+
+    async def apply_role_agents(self, db, tx, work):
+        tx.assert_session(db)
+        if type(work) is not _RoleAgentWork or work.transaction is not tx or work.used:
+            raise _order_error()
+        work.used = True
+        tx.assert_planned(work.locks)
+        request = work.request
+        await assert_identity(db, work.identity)
+        if (
+            _facts_bytes(await self._facts(db, request)) != _facts_bytes(work.facts)
+            or await self._delegation(db, request) != work.evaluation
+        ):
+            raise stale()
+        async with tx.aggregate(request.tenant.tenant_id):
+            return await self._apply(
+                db, tx, request, work.facts, None, work.identity.user_name
+            )
+
     async def _facts(self, db, request):
         result = {}
         for kind in (ResourceKind.PROVIDER, ResourceKind.MODEL, ResourceKind.AGENT):
@@ -358,6 +417,15 @@ class CatalogAuthorizationCandidate:
         request = freeze_request(**kwargs)
         _audit(audit, request)
         _fresh(db)
+        if request.operation == "role.agents" and audit is None and preparation is None:
+            with bounded_authorization_reads(db):
+                async with authorization_transactions.scope(
+                    db,
+                    tenants=(TenantLock(request.tenant.tenant_id, LockMode.EXCLUSIVE),),
+                ) as tx:
+                    work = await self.plan_role_agents(db, tx, request)
+                    await tx.lock(work.locks)
+                    return await self.apply_role_agents(db, tx, work)
         if request.operation in DNS_OPERATIONS:
             _external(preparation, "validated")
             if preparation.request != request:

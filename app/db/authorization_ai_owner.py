@@ -49,6 +49,91 @@ class AIAuthorizationOwner:
     def __init__(self, factory):
         self.factory = factory
 
+    async def expire_page(self, *, after=None, limit=256, startup=False):
+        # Delayed import keeps factual recovery independent from execution.
+        from app.modules.ai.service.authorization_lifecycle_candidate import (  # noqa: PLC0415
+            lifecycle_candidate,
+        )
+
+        if (
+            type(startup) is not bool
+            or type(limit) is not int
+            or not 1 <= limit <= 256
+            or (
+                after is not None
+                and (
+                    type(after) is not tuple
+                    or len(after) != 2
+                    or any(type(n) is not int or not 0 <= n < 2**63 for n in after)
+                )
+            )
+        ):
+            raise _order_error()
+        async with self.factory() as db:
+            try:
+                with bounded_authorization_reads(db):
+                    async with asyncio.timeout(5):
+                        query = (
+                            select(
+                                AiPreparedAction.tenant_id,
+                                AiPreparedAction.action_id,
+                                AiPreparedAction.user_id,
+                                AiPreparedAction.confirmation_id,
+                            )
+                            .where(AiPreparedAction.status == "pending_confirmation")
+                            .order_by(
+                                AiPreparedAction.tenant_id, AiPreparedAction.action_id
+                            )
+                            .limit(limit)
+                        )
+                        if after is not None:
+                            query = query.where(
+                                tuple_(
+                                    AiPreparedAction.tenant_id,
+                                    AiPreparedAction.action_id,
+                                )
+                                > after
+                            )
+                        rows = (await db.execute(query)).all()
+            finally:
+                await rollback_authorization_session(db)
+        items = []
+        deadline = asyncio.get_running_loop().time() + 30
+        for row in rows:
+            if items and asyncio.get_running_loop().time() >= deadline:
+                break
+            status = "unknown"
+            async with self.factory() as db:
+                try:
+                    with bounded_authorization_reads(db):
+                        async with authorization_transactions.scope(
+                            db,
+                            tenants=(TenantLock(row.tenant_id),),
+                            budget=TransactionBudget(timeout_ms=8000),
+                        ) as tx:
+                            result = await lifecycle_candidate.expire(
+                                db,
+                                tx,
+                                row.confirmation_id,
+                                locator=_FactLocator(row.tenant_id, row.user_id),
+                                startup=startup,
+                            )
+                except BaseException as exc:
+                    await rollback_authorization_session(db)
+                    if not isinstance(exc, Exception):
+                        raise
+                else:
+                    try:
+                        await commit_authorization_session(db)
+                    except Exception:
+                        pass
+                    else:
+                        status = result
+            items.append(RecoveryItem(row.tenant_id, row.action_id, status))
+        return RecoveryPage(
+            tuple(items), (items[-1].tenant_id, items[-1].action_id) if items else None
+        )
+
     async def recover_page(self, *, after=None, limit=256):
         """Discover only, release that snapshot, then protect each tenant afresh."""
         if (

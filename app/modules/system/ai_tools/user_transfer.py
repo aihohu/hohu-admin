@@ -234,6 +234,19 @@ async def user_import_preview(
     batch.file_storage_key = storage_key
     await ctx.db.flush()
 
+    return _planned_preview_result(
+        dry_run_result,
+        batch,
+        reason,
+        on_conflict,
+        sync_mode,
+        operator_id=ctx.user.user_id,
+    )
+
+
+def _planned_preview_result(
+    dry_run_result, batch, reason, on_conflict, sync_mode, *, operator_id
+):
     summary = {
         "new": dry_run_result.new_count,
         "exists": dry_run_result.exists_count,
@@ -332,7 +345,7 @@ async def user_import_preview(
                 "batch_id": str(batch.batch_id),
                 "file_sha256": getattr(batch, "file_sha256", ""),
                 "records_hash": getattr(batch, "records_hash", ""),
-                "operator_id": getattr(batch, "operator_id", ctx.user.user_id),
+                "operator_id": getattr(batch, "operator_id", operator_id),
                 "total": dry_run_result.total,
                 "summary": summary,
             },
@@ -497,6 +510,10 @@ async def user_import_execute(
         tenant=ctx.tenant,
     )
 
+    return _planned_import_result(result)
+
+
+def _planned_import_result(result):
     return ToolResult.success(
         data={
             "successCount": result.success_count,
@@ -577,7 +594,6 @@ async def user_export(
     )
     from app.modules.system.service.user_export_service import (  # noqa: PLC0415
         export_users_to_excel,
-        get_export_task,
     )
 
     canonical_status = None if status is None else _validate_enable_status(status)
@@ -616,6 +632,24 @@ async def user_export(
         tenant=ctx.tenant,
     )
 
+    return await _planned_export_result(ctx, filter_, row_count, export_id)
+
+
+async def _planned_export_result(ctx, filter_, row_count, export_id):
+    from app.modules.ai.service.result_projection_service import (  # noqa: PLC0415
+        result_projection_service,
+    )
+    from app.modules.system.service.user_export_service import (  # noqa: PLC0415
+        get_export_task,
+    )
+
+    user_name, nickname, user_email, user_phone, canonical_status = (
+        filter_.user_name,
+        filter_.nickname,
+        filter_.user_email,
+        filter_.user_phone,
+        filter_.status,
+    )
     # 从持久化任务读取文件元数据和到期时间，避免前端自行推断。
     task = await get_export_task(
         ctx.db,

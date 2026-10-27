@@ -255,6 +255,15 @@ _MARKETPLACE_USER_DEPENDENCIES = (
     (table("mk_app_rating", column("user_id")), "user_id"),
 )
 _CASCADE_DEPENDENCIES = {
+    ResourceKind.CONVERSATION: (
+        (ResourceKind.SOURCE_MESSAGE, "conversation_id"),
+        (ResourceKind.PREPARED_ACTION, "conversation_id"),
+        (ResourceKind.OPERATION_LOG, "conversation_id"),
+    ),
+    ResourceKind.SOURCE_MESSAGE: (
+        (ResourceKind.PREPARED_ACTION, "source_user_message_id"),
+        (ResourceKind.OPERATION_LOG, "source_user_message_id"),
+    ),
     ResourceKind.USER: (
         (ResourceKind.USER_ROLES, "user_id"),
         (ResourceKind.USER_DEPTS, "user_id"),
@@ -809,6 +818,44 @@ class _Transaction:
                 raise _stale()
             self._deleted.add(key)
             self._record_mutation(key)
+            return True
+        except BaseException:
+            self._journal.fail()
+            raise
+
+    async def delete_context_fact(self, key: ResourceKey, *, expected: dict) -> bool:
+        """Explicit child-first deletion; callers prove historical disposition."""
+        try:
+            self.assert_held(key)
+            self._require_exclusive_tenant(key.tenant_id)
+            if (
+                key.kind
+                not in CONTEXT_CHILDREN
+                | {
+                    ResourceKind.CONVERSATION,
+                    ResourceKind.ROUTING_LOG,
+                    ResourceKind.ROUTING_FEEDBACK,
+                }
+                or getattr(self, "_file_phase", False)
+                or type(expected) is not dict
+                or not expected
+            ):
+                raise _order_error()
+            spec, predicates, current = await self._mutation_snapshot(key, {}, expected)
+            if key.kind in CONTEXT_CHILDREN:
+                self._assert_factual_parents(key, current)
+            await self._reject_implicit_deletes(key)
+            await self._timeouts()
+            row = (
+                await self._execute(
+                    delete(spec.table)
+                    .where(*predicates)
+                    .returning(*(spec.table.c[n] for n in spec.key_columns))
+                )
+            ).one_or_none()
+            if row is None or tuple(row) != key_values(key):
+                raise _stale()
+            self._deleted.add(key)
             return True
         except BaseException:
             self._journal.fail()

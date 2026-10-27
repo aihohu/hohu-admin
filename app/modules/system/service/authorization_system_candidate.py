@@ -44,6 +44,7 @@ from app.modules.system.schemas.user import (
     ResetPassword,
     UpdateProfile,
     UserCreate,
+    UserToolUpdate,
     UserUpdate,
 )
 from app.modules.system.service.authorization_read_budget import (
@@ -269,7 +270,15 @@ class SystemAuthorizationCandidate:
             "dept.update": DeptUpdate,
             "dept.move": DeptMove,
         }.get(operation)
-        if expected and type(payload) is not expected:
+        if (
+            expected
+            and type(payload) is not expected
+            and not (
+                operation == "user.update"
+                and type(payload) is UserToolUpdate
+                and "user_name" not in payload.model_fields_set
+            )
+        ):
             raise _order_error()
         if target_id is not None:
             _ids([target_id])
