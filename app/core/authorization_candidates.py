@@ -113,8 +113,8 @@ _system = tuple(
         "S",
         "argument:TenantContext",
         ("X",),
-        _SYSTEM + "._prepare",
-        _SYSTEM + "._apply",
+        _SYSTEM + ".plan",
+        _SYSTEM + ".apply",
         "system-write",
         _TX + ".aggregate",
         False,
@@ -784,6 +784,91 @@ CANDIDATES += tuple(
         else "none",
     )
     for entry, qualified, phase, guard, profile in _CONTROL_PHASES
+)
+
+_AI_FACT_PHASES = (
+    ("ai.seal_insertions", _TX + ".seal_insertions", "proof_writer"),
+    ("ai.assert_planning", _TX + ".assert_planning", "read"),
+    ("ai.assert_planned", _TX + ".assert_planned", "read"),
+    ("ai.file_phase", _TX + ".begin_file_phase", "proof_writer"),
+    ("ai.file_budget", _TX + ".file_io", "proof_writer"),
+    (
+        "ai.context_discover",
+        _A + "authorization_context_candidate.AIContextCandidate.discover",
+        "plan",
+    ),
+    (
+        "ai.context_recheck",
+        _A + "authorization_context_candidate.AIContextCandidate.recheck",
+        "read",
+    ),
+    (
+        "ai.recovery",
+        _A + "authorization_recovery_candidate.AIRecoveryCandidate.reconcile",
+        "proof_writer",
+    ),
+    (
+        "ai.recovery_owner",
+        "app.db.authorization_ai_owner.AIAuthorizationOwner.reconcile",
+        "owner",
+    ),
+    (
+        "ai.recovery_page",
+        "app.db.authorization_ai_owner.AIAuthorizationOwner.recover_page",
+        "owner",
+    ),
+    ("ai.factual_update", _TX + ".update_factual", "proof_writer"),
+    ("ai.database_clock", _TX + ".database_now", "read"),
+)
+CANDIDATES += tuple(
+    Candidate(
+        entry,
+        qualified,
+        (),
+        qualified if phase == "owner" else "caller_owned",
+        phase,
+        "S",
+        "exact-tenant; recovery_page discovers without barriers then each item uses a fresh single-tenant proof",
+        ("S",),
+        _A + "authorization_context_candidate.AIContextCandidate.discover",
+        qualified,
+        "auth-read",
+        "none",
+        phase == "proof_writer",
+    )
+    for entry, qualified, phase in _AI_FACT_PHASES
+)
+
+_COMPOSITION_PHASES = (
+    (
+        "system.prepare_input",
+        _SYSTEM + ".prepare_input",
+        "external",
+        "external-password",
+    ),
+    ("system.plan", _SYSTEM + ".plan", "plan", "system-write"),
+    ("system.apply", _SYSTEM + ".apply", "proof_writer", "system-write"),
+    ("import.prepare_input", _IMPORT + ".prepare_input", "external", "external-import"),
+    ("import.plan", _IMPORT + ".plan", "plan", "import-write"),
+    ("import.apply", _IMPORT + ".apply", "proof_writer", "import-write"),
+)
+CANDIDATES += tuple(
+    Candidate(
+        entry,
+        qualified,
+        (),
+        "caller_owned",
+        phase,
+        "none" if phase == "external" else "S",
+        "argument:TenantContext",
+        () if phase == "external" else ("X",),
+        qualified,
+        qualified,
+        profile,
+        _TX + ".aggregate" if phase == "proof_writer" else "none",
+        phase == "proof_writer",
+    )
+    for entry, qualified, phase, profile in _COMPOSITION_PHASES
 )
 
 PENDING_SURFACES = MappingProxyType(

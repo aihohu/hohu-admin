@@ -294,9 +294,23 @@ def _resource_order(key: ResourceKey) -> tuple[int, int, tuple[int | str, ...]]:
 @dataclass(frozen=True, slots=True)
 class NewResource:
     key: ResourceKey
+    parent: ResourceKey | None = None
 
     def __post_init__(self) -> None:
         if type(self.key) is not ResourceKey:
+            raise _invalid()
+        if self.parent is not None and (
+            type(self.parent) is not ResourceKey
+            or self.parent.kind is not ResourceKind.CONVERSATION
+            or self.parent.tenant_id != self.key.tenant_id
+            or self.key.kind
+            not in {
+                ResourceKind.SOURCE_MESSAGE,
+                ResourceKind.PREPARED_ACTION,
+                ResourceKind.OPERATION_LOG,
+                ResourceKind.ASSISTANT_MESSAGE,
+            }
+        ):
             raise _invalid()
 
 
@@ -331,6 +345,11 @@ class LockPlan:
         ):
             raise _invalid()
         physical = set()
+        if any(
+            item.parent is not None and item.parent not in self.existing
+            for item in self.new
+        ):
+            raise _invalid()
         counts: dict[ResourceKind, int] = {}
         bindings: dict[int, int] = {}
         contexts = 0

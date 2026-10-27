@@ -7,7 +7,7 @@ existing writer is implicitly migrated by importing this service.
 import asyncio
 import math
 import re
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import date, datetime
 from decimal import Decimal
 from itertools import groupby
@@ -18,6 +18,12 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.dml import Insert, Update
 
+from app.core.authorization_facts import (
+    CONTEXT_CHILDREN,
+    FACT_COLUMNS,
+    FILE_COMPLETIONS,
+)
+from app.core.authorization_file import FileBudget
 from app.core.authorization_plan import (
     LockMode,
     LockPlan,
@@ -489,7 +495,7 @@ class _Transaction:
                         raise _unavailable()
                 self._tenants.update((i, mode) for i in batch)
 
-    def _scope_key(self, key, *, new=False):
+    def _scope_key(self, key, *, new=False, parent=None):
         if not isinstance(key, ResourceKey):
             raise _order_error()
         structural_source = (
@@ -519,6 +525,7 @@ class _Transaction:
             self._global_mode != LockMode.EXCLUSIVE
             and self._tenants.get(key.tenant_id) != LockMode.EXCLUSIVE
             and key.kind not in _AUDIT_KINDS
+            and parent is None
         ):
             raise _order_error()
         if new and key.kind is ResourceKind.TENANT:
@@ -536,7 +543,7 @@ class _Transaction:
             for key in plan.existing:
                 self._scope_key(key)
             for reserved in plan.new:
-                self._scope_key(reserved.key, new=True)
+                self._scope_key(reserved.key, new=True, parent=reserved.parent)
             for (kind, tenant_id), group in groupby(
                 plan.existing, key=lambda key: (key.kind, key.tenant_id)
             ):
@@ -581,6 +588,27 @@ class _Transaction:
         self._check()
         if db is not self._db:
             raise _order_error()
+
+    def assert_planning(self, tenant_id, *, exclusive=False):
+        try:
+            self._check()
+            if self._plan is not None or tenant_id not in self._tenants:
+                raise _order_error()
+            if exclusive:
+                self._require_exclusive_tenant(tenant_id)
+        except BaseException:
+            self._journal.fail()
+            raise
+
+    def assert_planned(self, plan):
+        try:
+            self._check(locked=True)
+            if type(plan) is not LockPlan or not set(plan.new) <= set(self._plan.new):
+                raise _order_error()
+            self.assert_held(*plan.existing)
+        except BaseException:
+            self._journal.fail()
+            raise
 
     def _require_exclusive_tenant(self, tenant_id):
         if (
@@ -629,6 +657,8 @@ class _Transaction:
 
     def _mutation_context(self, key):
         self.assert_held(key)
+        if getattr(self, "_file_phase", False):
+            raise _order_error()
         if self._policy is not None:
             self._require_exclusive_tenant(key.tenant_id)
             if (
@@ -1078,6 +1108,8 @@ class _Transaction:
     ) -> bool:
         try:
             self.assert_held(key)
+            if getattr(self, "_file_phase", False):
+                raise _order_error()
             if (
                 self._policy is not None
                 or self._aggregate_tenant is not None
@@ -1133,6 +1165,8 @@ class _Transaction:
     async def delete_retained(self, key: ResourceKey, expected=None) -> bool:
         try:
             self.assert_held(key)
+            if getattr(self, "_file_phase", False):
+                raise _order_error()
             self._require_exclusive_tenant(key.tenant_id)
             if (
                 key.kind
@@ -1271,6 +1305,10 @@ class _Transaction:
     async def insert_reserved(self, key: ResourceKey, values: dict) -> None:
         self._check(locked=True)
         try:
+            if getattr(self, "_file_phase", False) or getattr(
+                self, "_insertions_closed", False
+            ):
+                raise _order_error()
             if (
                 type(key) is not ResourceKey
                 or key.kind in _AUDIT_KINDS
@@ -1319,6 +1357,13 @@ class _Transaction:
             if any(name not in spec.table.c for name in values):
                 raise _order_error()
             self._require_mutation_parents(key, values)
+            if key.kind in CONTEXT_CHILDREN or key.kind is ResourceKind.CONVERSATION:
+                self._assert_factual_parents(key, values)
+            reservation = next(item for item in self._plan.new if item.key == key)
+            if reservation.parent is not None:
+                self.assert_held(reservation.parent)
+                if values.get("conversation_id") != key_values(reservation.parent)[0]:
+                    raise _order_error()
             if any(not _plain_value(value) for value in values.values()) or any(
                 column.name in values and column.name not in fixed
                 for column in spec.table.primary_key
@@ -1347,9 +1392,136 @@ class _Transaction:
             self._journal.fail()
             raise
 
+    def _assert_factual_parents(self, key, values):
+        if key.kind is ResourceKind.CONVERSATION:
+            self.assert_held(
+                ResourceKey(ResourceKind.USER, key.tenant_id, values["user_id"])
+            )
+        elif key.kind in CONTEXT_CHILDREN:
+            if key.kind in {
+                ResourceKind.SOURCE_MESSAGE,
+                ResourceKind.ASSISTANT_MESSAGE,
+            } and values.get("role") != (
+                "user" if key.kind is ResourceKind.SOURCE_MESSAGE else "assistant"
+            ):
+                raise _order_error()
+            self.assert_held(
+                ResourceKey(
+                    ResourceKind.CONVERSATION, key.tenant_id, values["conversation_id"]
+                )
+            )
+            if key.kind in {ResourceKind.PREPARED_ACTION, ResourceKind.OPERATION_LOG}:
+                self.assert_held(
+                    ResourceKey(
+                        ResourceKind.SOURCE_MESSAGE,
+                        key.tenant_id,
+                        values["source_user_message_id"],
+                    )
+                )
+
+    async def update_factual(
+        self, key: ResourceKey, changes: dict, *, expected: dict
+    ) -> bool:
+        """CAS only held lifecycle facts; never policy, identity, or ownership."""
+        try:
+            self.assert_held(key)
+            if (
+                key.kind not in FACT_COLUMNS
+                or type(changes) is not dict
+                or not changes
+                or type(expected) is not dict
+                or not expected
+                or not set(changes) <= FACT_COLUMNS[key.kind]
+                or (
+                    getattr(self, "_file_phase", False)
+                    and key.kind not in FILE_COMPLETIONS
+                )
+            ):
+                raise _order_error()
+            spec, predicates = self._key_predicates(key)
+            # Include immutable parents in the same locked snapshot. No new lock.
+            row = (
+                (await self._execute(select(spec.table).where(*predicates)))
+                .mappings()
+                .one_or_none()
+            )
+            if row is None:
+                raise _stale()
+            if key.kind in CONTEXT_CHILDREN:
+                self._assert_factual_parents(key, row)
+            spec, predicates, current = await self._mutation_snapshot(
+                key, changes, expected
+            )
+            if all(current[name] == value for name, value in changes.items()):
+                return False
+            await self._timeouts()
+            result = (
+                await self._execute(
+                    update(spec.table)
+                    .where(*predicates)
+                    .values(**changes)
+                    .returning(*[spec.table.c[n] for n in spec.key_columns])
+                )
+            ).one_or_none()
+            if result is None or tuple(result) != key_values(key):
+                raise _stale()
+            return True
+        except BaseException:
+            self._journal.fail()
+            raise
+
+    async def database_now(self):
+        self._check(locked=True)
+        await self._timeouts()
+        return (await self._execute(select(func.clock_timestamp()))).scalar_one()
+
+    def seal_insertions(self):
+        """Abandon unused reservations permanently; no row proof is fabricated."""
+        try:
+            self._check(locked=True)
+            if self._frames or getattr(self, "_file_phase", False):
+                raise _order_error()
+            self._insertions_closed = True
+        except BaseException:
+            self._journal.fail()
+            raise
+
+    def begin_file_phase(self):
+        """All possible INSERT/unique waits must precede local FILE operations."""
+        try:
+            self._check(locked=True)
+            if (
+                getattr(self, "_file_phase", False)
+                or self._frames
+                or (
+                    not getattr(self, "_insertions_closed", False)
+                    and any(item.key not in self._owned for item in self._plan.new)
+                )
+            ):
+                raise _order_error()
+            self._file_phase = True
+            return self._deadline
+        except BaseException:
+            self._journal.fail()
+            raise
+
+    @contextmanager
+    def file_io(self, **limits):
+        """Final local IO phase; caught FILE errors invalidate the owner proof."""
+        try:
+            deadline = self.begin_file_phase()
+            with FileBudget(deadline=deadline, **limits).activate() as budget:
+                yield budget
+            self._check(locked=True)
+        except BaseException:
+            self._journal.fail()
+            raise
+
     @asynccontextmanager
     async def savepoint(self):
         self._check(locked=True)
+        if getattr(self, "_file_phase", False):
+            self._journal.reject()
         if self._db.new or self._db.dirty or self._db.deleted:
             self._journal.reject()
         checkpoint = set(self._owned)

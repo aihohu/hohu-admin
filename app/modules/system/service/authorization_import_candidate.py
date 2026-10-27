@@ -5,6 +5,7 @@ never attaches the candidate protocol to legacy HTTP or AI execution owners.
 """
 
 import asyncio
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
 
@@ -131,6 +132,20 @@ def _recoverable(exc):
     return isinstance(exc, BusinessRuleException) and exc.error_code in (
         RECOVERABLE_ERROR_CODES - {"BusinessRuleException"}
     ) | {"AI_IMPORT_ADMIN_RENAME_FORBIDDEN"}
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _ImportInput:
+    values: tuple
+
+
+@dataclass(slots=True, repr=False)
+class _ImportWork:
+    transaction: object
+    command: _ImportInput
+    locks: LockPlan
+    values: tuple
+    used: bool = False
 
 
 class ImportAuthorizationCandidate:
@@ -281,7 +296,7 @@ class ImportAuthorizationCandidate:
                     raise failure
                 raise
 
-    async def execute(
+    async def prepare_input(
         self,
         db,
         *,
@@ -324,7 +339,6 @@ class ImportAuthorizationCandidate:
                 )
             canonical.append(parsed)
         records = canonical
-        tid = tenant.tenant_id
         with bounded_authorization_reads(db):
             password, password_error, setting = await self._prepare_password(
                 db, tenant, preview_token
@@ -332,143 +346,221 @@ class ImportAuthorizationCandidate:
             password_hash = (
                 await hash_password(password) if password is not None else None
             )
+        return _ImportInput(
+            (
+                tenant,
+                actor_user_version,
+                records,
+                preview_token,
+                filename,
+                reason,
+                on_conflict,
+                sync_mode,
+                has_role_column,
+                file_storage,
+                artifact_execution,
+                file_hash,
+                record_hash,
+                password_error,
+                setting,
+                password_hash,
+            )
+        )
+
+    async def plan(self, db, tx, command):
+        tx.assert_session(db)
+        if type(command) is not _ImportInput:
+            raise _order_error()
+        (
+            tenant,
+            actor_user_version,
+            records,
+            preview_token,
+            filename,
+            reason,
+            on_conflict,
+            sync_mode,
+            has_role_column,
+            file_storage,
+            artifact_execution,
+            file_hash,
+            record_hash,
+            password_error,
+            setting,
+            password_hash,
+        ) = command.values
+        tid = tenant.tenant_id
+        tx.assert_planning(tid, exclusive=True)
+        await system._identity(db, tenant, actor_user_version)
+        authority = await grant_authority_service.build(
+            db, tenant.actor_user_id, tenant=tenant
+        )
+        required = {"system:user:import", "system:dept:list"}
+        if has_role_column or any(row.role_input for row in records):
+            required.add("system:user:role-auth")
+        if not required <= authority.permission_codes:
+            raise AuthorizationException(
+                "缺少导入权限", error_code="MISSING_PERMISSION"
+            )
+        batch = await self._batch(db, tenant, preview_token)
+        validate_reason_consistency(batch["reason"], reason)
+        if (
+            batch["operator_id"] != tenant.actor_user_id
+            or batch["file_sha256"] != file_hash
+            or batch["records_hash"] != record_hash
+            or batch["total_rows"] != len(records)
+        ):
+            raise BusinessRuleException(
+                "preview_token 校验失败", error_code="AI_IMPORT_PREVIEW_INVALID"
+            )
+        batch_key = _key(ResourceKind.IMPORT_BATCH, tid, batch["batch_id"])
+        facts = await system._facts(db, tid)
+        stable_ids = {}
+        resolutions = (
+            await _resolve_import_authorization_targets(
+                db,
+                records,
+                has_role_column=has_role_column,
+                prospective_user_ids=stable_ids,
+                strict_authorization=True,
+                tenant=tenant,
+            )
+            if batch["status"] == ImportBatchStatus.PREVIEW_DONE
+            else []
+        )
+        existing = {
+            _key(
+                kind,
+                tid,
+                *(row[name] for name in resource_spec(kind).key_columns),
+            )
+            for kind, rows in facts.items()
+            for row in rows
+        } | {batch_key}
+        new = set()
+        for resolution in resolutions:
+            uid = resolution.target_user_id or resolution.prospective_user_id
+            if resolution.prospective_user_id is not None:
+                new.add(_key(ResourceKind.USER, tid, uid))
+            if resolution.dept_id is not None:
+                new.add(_key(ResourceKind.USER_DEPTS, tid, uid, resolution.dept_id))
+            for rid in resolution.role_ids or ():
+                new.add(_key(ResourceKind.USER_ROLES, tid, uid, rid))
+        # Worst-case logs are reserved before the RUNNING transition.
+        logs = [
+            _key(ResourceKind.IMPORT_BATCH_LOG, tid, str(next_id()))
+            for _ in range(
+                2
+                + (len(records) + USER_IMPORT_CHUNK_SIZE - 1) // USER_IMPORT_CHUNK_SIZE
+            )
+        ]
+        new.update(logs)
+        return _ImportWork(
+            tx,
+            command,
+            LockPlan(
+                existing=tuple(existing),
+                new=tuple(NewResource(key) for key in new - existing),
+            ),
+            (batch, batch_key, facts, stable_ids, resolutions, logs),
+        )
+
+    async def apply(self, db, tx, work):
+        tx.assert_session(db)
+        if type(work) is not _ImportWork or work.transaction is not tx or work.used:
+            raise _order_error()
+        work.used = True
+        tx.assert_planned(work.locks)
+        (
+            tenant,
+            actor_user_version,
+            records,
+            preview_token,
+            filename,
+            reason,
+            on_conflict,
+            sync_mode,
+            has_role_column,
+            file_storage,
+            artifact_execution,
+            file_hash,
+            record_hash,
+            password_error,
+            setting,
+            password_hash,
+        ) = work.command.values
+        tid = tenant.tenant_id
+        batch, batch_key, facts, stable_ids, resolutions, logs = work.values
+        actor = await system._identity(db, tenant, actor_user_version)
+        if facts != await system._facts(db, tid) or batch != await self._batch(
+            db, tenant, preview_token
+        ):
+            raise _stale()
+        if batch["status"] != ImportBatchStatus.PREVIEW_DONE:
+            return await _handle_idempotent_replay(db, batch["batch_id"], tenant=tenant)
+        if setting != await self._setting(db, tenant):
+            raise _stale()
+        current = await _resolve_import_authorization_targets(
+            db,
+            records,
+            has_role_column=has_role_column,
+            prospective_user_ids=stable_ids,
+            strict_authorization=True,
+            tenant=tenant,
+        )
+        if resolutions != current:
+            raise _stale()
+        classified = await _classify_records(
+            db,
+            records,
+            actor,
+            has_role_column=has_role_column,
+            resolutions=resolutions,
+            strict_authorization=True,
+            tenant=tenant,
+        )
+        tx.assert_held(batch_key)
+        work, failed, skipped = self._work(
+            records, resolutions, classified, on_conflict, sync_mode
+        )
+        if any(kind == "create" for kind, _, _ in work):
+            if password_error is not None:
+                raise password_error
+            if password_hash is None:
+                raise _stale()
+        async with tx.aggregate(tid):
+            return await self._apply(
+                tx,
+                tenant,
+                batch,
+                batch_key,
+                records,
+                work,
+                failed,
+                skipped,
+                facts,
+                password_hash,
+                logs,
+                on_conflict,
+                sync_mode,
+                filename,
+                reason,
+                file_storage,
+                artifact_execution,
+            )
+
+    async def execute(self, db, **request):
+        command = await self.prepare_input(db, **request)
+        tenant = command.values[0]
+        with bounded_authorization_reads(db):
             async with authorization_transactions.scope(
                 db,
-                tenants=(TenantLock(tid, LockMode.EXCLUSIVE),),
+                tenants=(TenantLock(tenant.tenant_id, LockMode.EXCLUSIVE),),
                 budget=TransactionBudget(timeout_ms=60000),
             ) as tx:
-                actor = await system._identity(db, tenant, actor_user_version)
-                authority = await grant_authority_service.build(
-                    db, tenant.actor_user_id, tenant=tenant
-                )
-                required = {"system:user:import", "system:dept:list"}
-                if has_role_column or any(row.role_input for row in records):
-                    required.add("system:user:role-auth")
-                if not required <= authority.permission_codes:
-                    raise AuthorizationException(
-                        "缺少导入权限", error_code="MISSING_PERMISSION"
-                    )
-                batch = await self._batch(db, tenant, preview_token)
-                validate_reason_consistency(batch["reason"], reason)
-                if (
-                    batch["operator_id"] != tenant.actor_user_id
-                    or batch["file_sha256"] != file_hash
-                    or batch["records_hash"] != record_hash
-                    or batch["total_rows"] != len(records)
-                ):
-                    raise BusinessRuleException(
-                        "preview_token 校验失败", error_code="AI_IMPORT_PREVIEW_INVALID"
-                    )
-                batch_key = _key(ResourceKind.IMPORT_BATCH, tid, batch["batch_id"])
-                facts = await system._facts(db, tid)
-                stable_ids = {}
-                resolutions = (
-                    await _resolve_import_authorization_targets(
-                        db,
-                        records,
-                        has_role_column=has_role_column,
-                        prospective_user_ids=stable_ids,
-                        strict_authorization=True,
-                        tenant=tenant,
-                    )
-                    if batch["status"] == ImportBatchStatus.PREVIEW_DONE
-                    else []
-                )
-                existing = {
-                    _key(
-                        kind,
-                        tid,
-                        *(row[name] for name in resource_spec(kind).key_columns),
-                    )
-                    for kind, rows in facts.items()
-                    for row in rows
-                } | {batch_key}
-                new = set()
-                for resolution in resolutions:
-                    uid = resolution.target_user_id or resolution.prospective_user_id
-                    if resolution.prospective_user_id is not None:
-                        new.add(_key(ResourceKind.USER, tid, uid))
-                    if resolution.dept_id is not None:
-                        new.add(
-                            _key(ResourceKind.USER_DEPTS, tid, uid, resolution.dept_id)
-                        )
-                    for rid in resolution.role_ids or ():
-                        new.add(_key(ResourceKind.USER_ROLES, tid, uid, rid))
-                # Worst-case logs are reserved before the RUNNING transition.
-                logs = [
-                    _key(ResourceKind.IMPORT_BATCH_LOG, tid, str(next_id()))
-                    for _ in range(
-                        2
-                        + (len(records) + USER_IMPORT_CHUNK_SIZE - 1)
-                        // USER_IMPORT_CHUNK_SIZE
-                    )
-                ]
-                new.update(logs)
-                await tx.lock(
-                    LockPlan(
-                        existing=tuple(existing),
-                        new=tuple(NewResource(key) for key in new - existing),
-                    )
-                )
-                actor = await system._identity(db, tenant, actor_user_version)
-                if facts != await system._facts(db, tid) or batch != await self._batch(
-                    db, tenant, preview_token
-                ):
-                    raise _stale()
-                if batch["status"] != ImportBatchStatus.PREVIEW_DONE:
-                    return await _handle_idempotent_replay(
-                        db, batch["batch_id"], tenant=tenant
-                    )
-                if setting != await self._setting(db, tenant):
-                    raise _stale()
-                current = await _resolve_import_authorization_targets(
-                    db,
-                    records,
-                    has_role_column=has_role_column,
-                    prospective_user_ids=stable_ids,
-                    strict_authorization=True,
-                    tenant=tenant,
-                )
-                if resolutions != current:
-                    raise _stale()
-                classified = await _classify_records(
-                    db,
-                    records,
-                    actor,
-                    has_role_column=has_role_column,
-                    resolutions=resolutions,
-                    strict_authorization=True,
-                    tenant=tenant,
-                )
-                tx.assert_held(batch_key)
-                work, failed, skipped = self._work(
-                    records, resolutions, classified, on_conflict, sync_mode
-                )
-                if any(kind == "create" for kind, _, _ in work):
-                    if password_error is not None:
-                        raise password_error
-                    if password_hash is None:
-                        raise _stale()
-                async with tx.aggregate(tid):
-                    return await self._apply(
-                        tx,
-                        tenant,
-                        batch,
-                        batch_key,
-                        records,
-                        work,
-                        failed,
-                        skipped,
-                        facts,
-                        password_hash,
-                        logs,
-                        on_conflict,
-                        sync_mode,
-                        filename,
-                        reason,
-                        file_storage,
-                        artifact_execution,
-                    )
+                work = await self.plan(db, tx, command)
+                await tx.lock(work.locks)
+                return await self.apply(db, tx, work)
 
     @staticmethod
     def _work(records, resolutions, classified, on_conflict, sync_mode):
@@ -738,13 +830,15 @@ class ImportAuthorizationCandidate:
                 raise _limit()
             tx.assert_held(batch_key)
             identity = execution.identity("import_errors", batch["batch_id"])
-            file_key = await storage.save_artifact(data, identity=identity)
+            tx.seal_insertions()
+            with tx.file_io(max_reads=2, max_total_bytes=20 * 1024 * 1024):
+                file_key = await storage.save_artifact(data, identity=identity)
+                if type(file_key) is not str or file_key != identity.storage_key:
+                    raise BusinessRuleException(
+                        "文件归属或完整性待核对", error_code="AI_ARTIFACT_UNVERIFIED"
+                    )
             tx.assert_held(batch_key)
-            if type(file_key) is not str or file_key != identity.storage_key:
-                raise BusinessRuleException(
-                    "文件归属或完整性待核对", error_code="AI_ARTIFACT_UNVERIFIED"
-                )
-        await tx.update_held(
+        await tx.update_factual(
             batch_key,
             {
                 "status": end.value,

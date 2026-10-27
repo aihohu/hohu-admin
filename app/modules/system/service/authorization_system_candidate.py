@@ -6,6 +6,7 @@ the complete writer migration is qualified.
 """
 
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -186,6 +187,22 @@ def _expect(actual, expected):
         )
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class _SystemInput:
+    values: tuple
+
+
+@dataclass(slots=True, repr=False)
+class _SystemWork:
+    transaction: object
+    command: _SystemInput
+    locks: LockPlan
+    facts: dict
+    prepared: dict
+    authority: object
+    used: bool = False
+
+
 class SystemAuthorizationCandidate:
     async def _facts(self, db, tenant_id):
         facts = {}
@@ -273,7 +290,7 @@ class SystemAuthorizationCandidate:
             if values is not None and len(values) > 256:
                 raise _limit()
 
-    async def execute(
+    async def prepare_input(
         self,
         db,
         *,
@@ -290,6 +307,7 @@ class SystemAuthorizationCandidate:
             or operation not in SYSTEM_CANDIDATE_ENTRIES
         ):
             raise _order_error()
+        expected_snapshot = deepcopy(expected_snapshot)
         self._check_input(operation, payload, target_id)
         if (
             db.in_transaction()
@@ -355,73 +373,145 @@ class SystemAuthorizationCandidate:
         if operation == "user.profile":
             target_id = tenant.actor_user_id
         new_id = next_id() if operation.endswith(".create") else None
+        return _SystemInput(
+            (
+                tenant,
+                actor_user_version,
+                operation,
+                payload,
+                target_id,
+                expected_snapshot,
+                password_hash,
+                old_password_facts,
+                new_id,
+            )
+        )
+
+    async def plan(self, db, tx, command):
+        tx.assert_session(db)
+        if type(command) is not _SystemInput:
+            raise _order_error()
+        (
+            tenant,
+            actor_user_version,
+            operation,
+            payload,
+            target_id,
+            expected_snapshot,
+            password_hash,
+            old_password_facts,
+            new_id,
+        ) = deepcopy(command.values)
+        tx.assert_planning(tenant.tenant_id, exclusive=True)
+        await self._identity(db, tenant, actor_user_version)
+        facts = await self._facts(db, tenant.tenant_id)
+        authority = await grant_authority_service.build(
+            db, tenant.actor_user_id, tenant=tenant
+        )
+        entry = SYSTEM_CANDIDATE_ENTRIES[operation]
+        if not set(entry.permissions) <= authority.permission_codes:
+            raise AuthorizationException(
+                "缺少操作权限", error_code="MISSING_PERMISSION"
+            )
+        prepared = await self._prepare(
+            db,
+            tenant,
+            operation,
+            payload,
+            target_id,
+            new_id,
+            facts,
+            authority,
+            expected_snapshot,
+        )
+        existing = tuple(
+            _key(
+                kind,
+                tenant.tenant_id,
+                *(row[name] for name in resource_spec(kind).key_columns),
+            )
+            for kind, rows in facts.items()
+            for row in rows
+        )
+        new = tuple(NewResource(key) for key in prepared["new"] if key not in existing)
+        return _SystemWork(
+            tx,
+            _SystemInput(
+                (
+                    tenant,
+                    actor_user_version,
+                    operation,
+                    payload,
+                    target_id,
+                    expected_snapshot,
+                    password_hash,
+                    old_password_facts,
+                    new_id,
+                )
+            ),
+            LockPlan(existing=existing, new=new),
+            facts,
+            prepared,
+            authority,
+        )
+
+    async def apply(self, db, tx, work):
+        tx.assert_session(db)
+        if type(work) is not _SystemWork or work.transaction is not tx or work.used:
+            raise _order_error()
+        work.used = True
+        tx.assert_planned(work.locks)
+        (
+            tenant,
+            actor_user_version,
+            operation,
+            payload,
+            target_id,
+            expected_snapshot,
+            password_hash,
+            old_password_facts,
+            new_id,
+        ) = work.command.values
+        facts, prepared, authority = work.facts, work.prepared, work.authority
+        await self._identity(db, tenant, actor_user_version)
+        current = await self._facts(db, tenant.tenant_id)
+        if current != facts:
+            raise BusinessRuleException(
+                "授权事实已变化", error_code="AUTHORIZATION_SNAPSHOT_STALE"
+            )
+        async with tx.aggregate(tenant.tenant_id):
+            result = await self._apply(
+                db,
+                tx,
+                tenant,
+                operation,
+                payload,
+                target_id,
+                new_id,
+                prepared,
+                facts,
+                authority,
+                password_hash,
+                old_password_facts,
+            )
+        return {"id": new_id or target_id, "result": result}
+
+    async def execute(self, db, **request):
+        command = await self.prepare_input(db, **request)
+        tenant = command.values[0]
         with bounded_authorization_reads(db) as io:
             async with authorization_transactions.scope(
                 db, tenants=(TenantLock(tenant.tenant_id, LockMode.EXCLUSIVE),)
             ) as tx:
-                await self._identity(db, tenant, actor_user_version)
-                facts = await self._facts(db, tenant.tenant_id)
-                authority = await grant_authority_service.build(
-                    db, tenant.actor_user_id, tenant=tenant
-                )
-                entry = SYSTEM_CANDIDATE_ENTRIES[operation]
-                if not set(entry.permissions) <= authority.permission_codes:
-                    raise AuthorizationException(
-                        "缺少操作权限", error_code="MISSING_PERMISSION"
-                    )
-                prepared = await self._prepare(
-                    db,
-                    tenant,
-                    operation,
-                    payload,
-                    target_id,
-                    new_id,
-                    facts,
-                    authority,
-                    expected_snapshot,
-                )
-                existing = tuple(
-                    _key(
-                        kind,
-                        tenant.tenant_id,
-                        *(row[name] for name in resource_spec(kind).key_columns),
-                    )
-                    for kind, rows in facts.items()
-                    for row in rows
-                )
-                new = tuple(
-                    NewResource(key) for key in prepared["new"] if key not in existing
-                )
-                await tx.lock(LockPlan(existing=existing, new=new))
-                await self._identity(db, tenant, actor_user_version)
-                current = await self._facts(db, tenant.tenant_id)
-                if current != facts:
-                    raise BusinessRuleException(
-                        "授权事实已变化", error_code="AUTHORIZATION_SNAPSHOT_STALE"
-                    )
-                async with tx.aggregate(tenant.tenant_id):
-                    result = await self._apply(
-                        db,
-                        tx,
-                        tenant,
-                        operation,
-                        payload,
-                        target_id,
-                        new_id,
-                        prepared,
-                        facts,
-                        authority,
-                        password_hash,
-                        old_password_facts,
-                    )
-        return {
-            "id": new_id or target_id,
-            "result": result,
+                work = await self.plan(db, tx, command)
+                await tx.lock(work.locks)
+                result = await self.apply(db, tx, work)
+        return result | {
             "io": {
                 "statements": io.statements,
                 "rows": io.rows,
                 "decoded_bytes": io.decoded_bytes,
-            },
+            }
         }
 
     async def _prepare(

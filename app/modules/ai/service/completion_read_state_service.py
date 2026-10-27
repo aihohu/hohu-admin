@@ -131,7 +131,15 @@ class CompletionReadStateService:
     ) -> dict[str, EffectiveCompletion]:
         if tool_call_ids is None and (conversation_id is None or user_id is None):
             raise ValueError("completion reads require IDs or an owned conversation")
-        identifiers = tuple(sorted({value for value in tool_call_ids or () if value}))
+        identifiers_set = set()
+        if isinstance(tool_call_ids, (str, bytes)):
+            return {"": UNKNOWN_COMPLETION}
+        for count, value in enumerate(tool_call_ids or (), 1):
+            if count > 256 or not isinstance(value, str) or len(value) > 256:
+                return {"": UNKNOWN_COMPLETION}
+            if value:
+                identifiers_set.add(value)
+        identifiers = tuple(sorted(identifiers_set))
         if tool_call_ids is not None and not identifiers:
             return {}
         log_scope = [AiOperationLog.tenant_id == tenant.tenant_id]
@@ -201,7 +209,15 @@ class CompletionReadStateService:
                             "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
                         )
                     )
-                    rows = (await db.execute(statement)).all()
+                    rows = (await db.execute(statement.limit(16385))).all()
+                    if len(rows) > 16384:
+                        return {"": UNKNOWN_COMPLETION}
+                    from app.modules.system.service.authorization_read_budget import (  # noqa: PLC0415
+                        _size,
+                    )
+
+                    if sum(_size(row) for row in rows) > 64 * 1024 * 1024:
+                        return {"": UNKNOWN_COMPLETION}
                     projected = {}
                     for action, log, conversation, source in rows:
                         if log is not None and has_annotation(log.result_summary):
