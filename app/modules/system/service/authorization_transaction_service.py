@@ -12,7 +12,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from itertools import groupby
 
-from sqlalchemy import column, delete, insert, select, table, text, tuple_, update
+from sqlalchemy import column, delete, func, insert, select, table, text, tuple_, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.dml import Insert, Update
@@ -42,6 +43,7 @@ from app.modules.system.service.authorization_resource_catalog import (
     key_values,
     resource_spec,
 )
+from app.modules.system.settings_catalog import SETTINGS
 
 _MUTABLE_COLUMNS = {
     ResourceKind.USER: frozenset(
@@ -102,20 +104,137 @@ _MUTABLE_COLUMNS = {
         }
     ),
     ResourceKind.POLICY_BINDING: frozenset({"revision_id", "version", "archived_at"}),
+    ResourceKind.TENANT: frozenset(
+        {
+            "tenant_name",
+            "status",
+            "lifecycle_state",
+            "bootstrap_version",
+            "bootstrap_key_hash",
+            "bootstrap_fingerprint",
+        }
+    ),
+    ResourceKind.PLATFORM_PRINCIPAL: frozenset(
+        {"hashed_password", "status", "permissions"}
+    ),
+    ResourceKind.PROVIDER: frozenset(
+        {"provider_code", "name", "api_key", "base_url", "is_enabled", "config"}
+    ),
+    ResourceKind.MODEL: frozenset(
+        {
+            "provider_id",
+            "name",
+            "capabilities",
+            "base_url",
+            "is_enabled",
+            "sort_order",
+            "config",
+        }
+    ),
+    ResourceKind.AGENT: frozenset(
+        {
+            "name",
+            "description",
+            "i18n_keys",
+            "enabled",
+            "display_order",
+            "system_prompt",
+            "model_preference",
+            "daily_quota_per_user",
+            "risk_appetite",
+        }
+    ),
+    ResourceKind.TENANT_MODEL_POLICY: frozenset(
+        {"enabled", "is_default", "daily_quota_per_user"}
+    ),
+    ResourceKind.ROLE_AGENT: frozenset({"enabled"}),
+    ResourceKind.MENU: frozenset(
+        {
+            "parent_id",
+            "menu_name",
+            "menu_type",
+            "icon",
+            "icon_type",
+            "path",
+            "component",
+            "route_name",
+            "route_path",
+            "order",
+            "status",
+            "update_by",
+            "path_param",
+            "page",
+            "layout",
+            "i18n_key",
+            "keep_alive",
+            "constant",
+            "href",
+            "hide_in_menu",
+            "active_menu",
+            "multi_tab",
+            "fixed_index_in_tab",
+            "permission",
+            "query",
+        }
+    ),
+    ResourceKind.SETTING: frozenset({"setting_value", "status"}),
+    ResourceKind.CONFIG: frozenset(
+        {
+            "config_name",
+            "config_key",
+            "config_value",
+            "config_type",
+            "config_group",
+            "status",
+            "is_public",
+            "remark",
+            "update_by",
+        }
+    ),
+    ResourceKind.MAIL_CONFIG: frozenset(
+        {"values", "password_ciphertext", "version", "last_test_at", "last_test_status"}
+    ),
 }
-_AUTHORIZATION_KINDS = frozenset(
+_GLOBAL_KINDS = frozenset(
     {
-        ResourceKind.USER,
-        ResourceKind.ROLE,
-        ResourceKind.DEPT,
-        ResourceKind.USER_ROLES,
-        ResourceKind.USER_DEPTS,
-        ResourceKind.ROLE_DEPTS,
-        ResourceKind.ROLE_MENUS,
-        ResourceKind.ROLE_AGENT,
+        ResourceKind.PROVIDER,
+        ResourceKind.MODEL,
+        ResourceKind.AGENT,
+        ResourceKind.PLATFORM_PRINCIPAL,
+        ResourceKind.MAIL_CONFIG,
     }
 )
-_DELETABLE_KINDS = _AUTHORIZATION_KINDS
+_AUDIT_KINDS = frozenset(
+    {ResourceKind.SYSTEM_OPERATION_LOG, ResourceKind.PLATFORM_AUDIT}
+)
+_SECURITY_KEYS = frozenset(
+    key for key, item in SETTINGS.items() if item.group == "security"
+)
+_AUTHORIZATION_KINDS = (
+    frozenset(
+        {
+            ResourceKind.USER,
+            ResourceKind.ROLE,
+            ResourceKind.DEPT,
+            ResourceKind.USER_ROLES,
+            ResourceKind.USER_DEPTS,
+            ResourceKind.ROLE_DEPTS,
+            ResourceKind.ROLE_MENUS,
+            ResourceKind.ROLE_AGENT,
+            ResourceKind.TENANT,
+            ResourceKind.MENU,
+            ResourceKind.SETTING,
+            ResourceKind.CONFIG,
+            ResourceKind.TENANT_MODEL_POLICY,
+        }
+    )
+    | _GLOBAL_KINDS
+)
+_DELETABLE_KINDS = _AUTHORIZATION_KINDS - {
+    ResourceKind.TENANT,
+    ResourceKind.PLATFORM_PRINCIPAL,
+    ResourceKind.MAIL_CONFIG,
+}
 _POLICY_KINDS = frozenset(
     {
         ResourceKind.POLICY_BINDING,
@@ -144,6 +263,13 @@ _CASCADE_DEPENDENCIES = {
     ResourceKind.DEPT: (
         (ResourceKind.USER_DEPTS, "dept_id"),
         (ResourceKind.ROLE_DEPTS, "dept_id"),
+    ),
+    ResourceKind.PROVIDER: ((ResourceKind.MODEL, "provider_id"),),
+    ResourceKind.MODEL: ((ResourceKind.TENANT_MODEL_POLICY, "model_id"),),
+    ResourceKind.AGENT: ((ResourceKind.ROLE_AGENT, "agent_id"),),
+    ResourceKind.MENU: (
+        (ResourceKind.ROLE_MENUS, "menu_id"),
+        (ResourceKind.MENU, "parent_id"),
     ),
 }
 
@@ -212,6 +338,10 @@ class _Transaction:
         self._deleted = set()
         self._mutations = {}
         self._aggregate_tenant = None
+        self._aggregate_global = False
+        self._global_mutations = 0
+        self._creation = None
+        self._retained_count = 0
         self._policy = None
 
     def _check(self, *, locked=False):
@@ -362,14 +492,33 @@ class _Transaction:
     def _scope_key(self, key, *, new=False):
         if not isinstance(key, ResourceKey):
             raise _order_error()
-        if key.tenant_id is None:
-            if self._global_mode != LockMode.EXCLUSIVE or not self._all_tenants:
+        structural_source = (
+            self._creation is not None
+            and self._creation.get("created") is not None
+            and key.kind is ResourceKind.SYSTEM_OPERATION_LOG
+            and key.tenant_id == 0
+        )
+        if key.kind is ResourceKind.TENANT:
+            target = key_values(key)[0]
+            if target not in self._tenants and not (
+                self._creation is not None
+                and self._creation.get("created") is not None
+                and target == 0
+            ):
                 raise _order_error()
-        elif key.tenant_id not in self._tenants:
+        elif key.tenant_id is None:
+            if (
+                new
+                and key.kind not in _AUDIT_KINDS
+                and (self._global_mode != LockMode.EXCLUSIVE or not self._all_tenants)
+            ):
+                raise _order_error()
+        elif key.tenant_id not in self._tenants and not structural_source:
             raise _order_error()
         if new and (
             self._global_mode != LockMode.EXCLUSIVE
             and self._tenants.get(key.tenant_id) != LockMode.EXCLUSIVE
+            and key.kind not in _AUDIT_KINDS
         ):
             raise _order_error()
         if new and key.kind is ResourceKind.TENANT:
@@ -381,6 +530,8 @@ class _Transaction:
         try:
             self._check()
             if self._plan is not None or not isinstance(plan, LockPlan) or self._frames:
+                raise _order_error()
+            if self._creation is not None and not self._creation["selected"]:
                 raise _order_error()
             for key in plan.existing:
                 self._scope_key(key)
@@ -438,10 +589,48 @@ class _Transaction:
         ):
             raise _order_error()
 
+    def _fact_tenant(self, key):
+        return key_values(key)[0] if key.kind is ResourceKind.TENANT else key.tenant_id
+
+    def _global_fact(self, key):
+        return key.kind in _GLOBAL_KINDS or (
+            key.kind is ResourceKind.SETTING and key_values(key)[0] in _SECURITY_KEYS
+        )
+
+    def _fact_context(self, key):
+        if self._global_fact(key):
+            if not self._aggregate_global or not self._all_tenants:
+                raise _order_error()
+            if key.kind is ResourceKind.SETTING and key.tenant_id != 0:
+                raise _order_error()
+        else:
+            tenant_id = self._fact_tenant(key)
+            self._require_exclusive_tenant(tenant_id)
+            if not self._aggregate_global and tenant_id != self._aggregate_tenant:
+                raise _order_error()
+
+    def _require_mutation_parents(self, key, values):
+        if key.kind is ResourceKind.ROLE_AGENT:
+            role_id, agent_id = key_values(key)
+            self.assert_held(
+                ResourceKey(ResourceKind.ROLE, key.tenant_id, role_id),
+                ResourceKey(ResourceKind.AGENT, None, agent_id),
+            )
+        elif key.kind is ResourceKind.TENANT_MODEL_POLICY:
+            self.assert_held(ResourceKey(ResourceKind.MODEL, None, key_values(key)[0]))
+        elif key.kind is ResourceKind.MODEL and "provider_id" in values:
+            self.assert_held(
+                ResourceKey(ResourceKind.PROVIDER, None, values["provider_id"])
+            )
+        elif key.kind is ResourceKind.MENU and values.get("parent_id") is not None:
+            self.assert_held(
+                ResourceKey(ResourceKind.MENU, key.tenant_id, values["parent_id"])
+            )
+
     def _mutation_context(self, key):
         self.assert_held(key)
-        self._require_exclusive_tenant(key.tenant_id)
         if self._policy is not None:
+            self._require_exclusive_tenant(key.tenant_id)
             if (
                 key.tenant_id != self._policy["tenant_id"]
                 or key.kind is not ResourceKind.POLICY_BINDING
@@ -449,12 +638,18 @@ class _Transaction:
                 or self._policy["action"] == "ready"
             ):
                 raise _order_error()
-        elif key.tenant_id != self._aggregate_tenant or key.kind in _POLICY_KINDS:
-            raise _order_error()
+        else:
+            if key.kind in _POLICY_KINDS:
+                raise _order_error()
+            self._fact_context(key)
 
     def _record_mutation(self, key):
-        if key.kind in _AUTHORIZATION_KINDS and self._aggregate_tenant == key.tenant_id:
-            self._mutations[key.tenant_id] = self._mutations.get(key.tenant_id, 0) + 1
+        if key.kind in _AUTHORIZATION_KINDS:
+            if self._global_fact(key):
+                self._global_mutations += 1
+            else:
+                tenant_id = self._fact_tenant(key)
+                self._mutations[tenant_id] = self._mutations.get(tenant_id, 0) + 1
         if (
             self._policy is not None
             and key.kind is ResourceKind.POLICY_BINDING
@@ -511,6 +706,7 @@ class _Transaction:
                 raise _order_error()
             if any(name not in _MUTABLE_COLUMNS[key.kind] for name in changes):
                 raise _order_error()
+            self._require_mutation_parents(key, changes)
             spec, predicates, current = await self._mutation_snapshot(
                 key, changes, expected
             )
@@ -540,15 +736,13 @@ class _Transaction:
     async def _reject_implicit_deletes(self, key):
         for kind, foreign_key in _CASCADE_DEPENDENCIES.get(key.kind, ()):
             child = resource_spec(kind).table
+            predicates = [child.c[foreign_key] == key.identity[0]]
+            if key.tenant_id is not None:
+                predicates.append(child.c.tenant_id == key.tenant_id)
             await self._timeouts()
             found = (
                 await self._execute(
-                    select(child.c[foreign_key])
-                    .where(
-                        child.c.tenant_id == key.tenant_id,
-                        child.c[foreign_key] == key.identity[0],
-                    )
-                    .limit(1)
+                    select(child.c[foreign_key]).where(*predicates).limit(1)
                 )
             ).first()
             if found is not None:
@@ -595,30 +789,93 @@ class _Transaction:
         try:
             self._check(locked=True)
             self._require_exclusive_tenant(tenant_id)
-            if self._aggregate_tenant is not None or self._policy is not None:
+            if (
+                self._aggregate_tenant is not None
+                or self._policy is not None
+                or self._aggregate_global
+            ):
                 raise _order_error()
             self._aggregate_tenant = tenant_id
             before = self._mutations.get(tenant_id, 0)
             yield
             self._check(locked=True)
-            if self._mutations.get(tenant_id, 0) != before:
-                state = UserFieldPolicyState.__table__
-                await self._timeouts()
-                epoch = (
-                    await self._execute(
-                        update(state)
-                        .where(state.c.tenant_id == tenant_id)
-                        .values(epoch=state.c.epoch + 1, mode="legacy")
-                        .returning(state.c.epoch)
-                    )
-                ).scalar_one_or_none()
-                if epoch is None:
-                    raise _unavailable()
+            if self._mutations.get(tenant_id, 0) != before and not (
+                self._creation is not None
+                and self._creation.get("created") == tenant_id
+            ):
+                await self._bump_tenants((tenant_id,))
         except BaseException:
             self._journal.fail()
             raise
         finally:
             self._aggregate_tenant = None
+
+    async def _bump_tenants(self, tenant_ids):
+        state = UserFieldPolicyState.__table__
+        tenant_ids = sorted(tenant_ids)
+        for offset in range(0, len(tenant_ids), 256):
+            batch = tenant_ids[offset : offset + 256]
+            await self._timeouts()
+            rows = (
+                (
+                    await self._execute(
+                        update(state)
+                        .where(state.c.tenant_id.in_(batch))
+                        .values(epoch=state.c.epoch + 1, mode="legacy")
+                        .returning(state.c.tenant_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if sorted(rows) != batch:
+                raise _unavailable()
+
+    async def _bump_global(self):
+        guard = UserFieldPolicyGlobalGuard.__table__
+        await self._timeouts()
+        value = (
+            await self._execute(
+                update(guard)
+                .where(guard.c.guard_id == 1)
+                .values(epoch=guard.c.epoch + 1)
+                .returning(guard.c.epoch)
+            )
+        ).scalar_one_or_none()
+        if value is None:
+            raise _unavailable()
+
+    @asynccontextmanager
+    async def aggregate_global(self):
+        try:
+            self._check(locked=True)
+            if (
+                not self._all_tenants
+                or self._global_mode != LockMode.EXCLUSIVE
+                or self._aggregate_global
+                or self._aggregate_tenant is not None
+                or self._policy is not None
+            ):
+                raise _order_error()
+            self._aggregate_global = True
+            before_global = self._global_mutations
+            before = dict(self._mutations)
+            yield
+            self._check(locked=True)
+            if self._global_mutations != before_global:
+                await self._bump_global()
+                await self._bump_tenants(self._tenants)
+            else:
+                await self._bump_tenants(
+                    tenant_id
+                    for tenant_id, count in self._mutations.items()
+                    if count != before.get(tenant_id, 0)
+                )
+        except BaseException:
+            self._journal.fail()
+            raise
+        finally:
+            self._aggregate_global = False
 
     @asynccontextmanager
     async def policy_change(self, tenant_id, *, action):
@@ -628,6 +885,7 @@ class _Transaction:
             if (
                 self._policy is not None
                 or self._aggregate_tenant is not None
+                or self._aggregate_global
                 or type(action) is not str
                 or action not in {"publish", "archive", "ready"}
             ):
@@ -708,16 +966,319 @@ class _Transaction:
             self._journal.fail()
             raise
 
+    def _creation_context(self):
+        self._check()
+        if (
+            self._creation is None
+            or self._creation["selected"]
+            or self._plan is not None
+            or self._tenants
+            or self._frames
+            or self._global_mode != LockMode.EXCLUSIVE
+        ):
+            raise _order_error()
+
+    async def create_tenant(self, key: ResourceKey, values: dict) -> None:
+        try:
+            self._creation_context()
+            if (
+                type(key) is not ResourceKey
+                or key.kind is not ResourceKind.TENANT
+                or key_values(key)[0] == 0
+                or type(values) is not dict
+            ):
+                raise _order_error()
+            fixed = {
+                "tenant_id": key_values(key)[0],
+                "status": "2",
+                "lifecycle_state": "prepared",
+                "row_version": 1,
+                "bootstrap_version": 0,
+            }
+            allowed = {
+                "tenant_code",
+                "tenant_name",
+                "provisioning_key_hash",
+                "provisioning_fingerprint",
+            } | fixed.keys()
+            if (
+                set(values) - allowed
+                or not {"tenant_code", "tenant_name"} <= values.keys()
+                or any(
+                    name in values
+                    and (values[name] != value or type(values[name]) is not type(value))
+                    for name, value in fixed.items()
+                )
+                or any(not _plain_value(value) for value in values.values())
+            ):
+                raise _order_error()
+            async with asyncio.timeout_at(self._barrier_deadline):
+                tenants = await self._enumerate()
+                if len(tenants) >= 1024:
+                    raise _limit_error()
+                await self._timeouts(barrier=True)
+                identity = (
+                    await self._execute(
+                        insert(Tenant.__table__)
+                        .values(**(values | fixed))
+                        .returning(Tenant.tenant_id)
+                    )
+                ).scalar_one()
+                if identity != key_values(key)[0]:
+                    raise _stale()
+                await self._barriers((TenantLock(identity, LockMode.EXCLUSIVE),))
+                state = UserFieldPolicyState.__table__
+                row = (
+                    await self._execute(
+                        select(
+                            state.c.epoch,
+                            state.c.mode,
+                            state.c.candidate_manifest_digest,
+                        ).where(state.c.tenant_id == identity)
+                    )
+                ).one()
+                if tuple(row) != (1, "legacy", None):
+                    raise _unavailable()
+            self._owned.add(key)
+            self._creation.update(selected=True, created=identity)
+            await self._timeouts()
+        except TimeoutError:
+            self._journal.fail()
+            raise _timeout_error() from None
+        except BaseException:
+            self._journal.fail()
+            raise
+
+    async def replay_tenants(self, tenants: tuple[TenantLock, ...]) -> None:
+        try:
+            self._creation_context()
+            if (
+                type(tenants) is not tuple
+                or not tenants
+                or len(tenants) > 32
+                or any(type(item) is not TenantLock for item in tenants)
+                or len({item.tenant_id for item in tenants}) != len(tenants)
+            ):
+                raise _order_error()
+            async with asyncio.timeout_at(self._barrier_deadline):
+                await self._barriers(
+                    tuple(sorted(tenants, key=lambda item: item.tenant_id))
+                )
+            self._creation["selected"] = True
+            await self._timeouts()
+        except TimeoutError:
+            self._journal.fail()
+            raise _timeout_error() from None
+        except BaseException:
+            self._journal.fail()
+            raise
+
+    async def update_metadata(
+        self, key: ResourceKey, changes: dict, expected=None
+    ) -> bool:
+        try:
+            self.assert_held(key)
+            if (
+                self._policy is not None
+                or self._aggregate_tenant is not None
+                or self._aggregate_global
+            ):
+                raise _order_error()
+            allowed = {
+                ResourceKind.PLATFORM_PRINCIPAL: {"last_login_at"},
+                ResourceKind.MAIL_CONFIG: {
+                    "last_test_at",
+                    "last_test_status",
+                    "version",
+                },
+            }.get(key.kind)
+            if allowed is None or type(changes) is not dict or set(changes) - allowed:
+                raise _order_error()
+            if type(expected) is not dict:
+                raise _order_error()
+            version_name = (
+                "version" if key.kind is ResourceKind.MAIL_CONFIG else "row_version"
+            )
+            if (
+                type(expected.get(version_name)) is not int
+                or expected[version_name] < 1
+            ):
+                raise _order_error()
+            if "version" in changes and (
+                type(changes["version"]) is not int
+                or changes["version"] != expected["version"] + 1
+            ):
+                raise _order_error()
+            spec, predicates, current = await self._mutation_snapshot(
+                key, changes, expected
+            )
+            if all(current[name] == value for name, value in changes.items()):
+                return False
+            await self._timeouts()
+            row = (
+                await self._execute(
+                    update(spec.table)
+                    .where(*predicates)
+                    .values(**changes)
+                    .returning(*(spec.table.c[name] for name in spec.key_columns))
+                )
+            ).one_or_none()
+            if row is None or tuple(row) != key_values(key):
+                raise _stale()
+            return True
+        except BaseException:
+            self._journal.fail()
+            raise
+
+    async def delete_retained(self, key: ResourceKey, expected=None) -> bool:
+        try:
+            self.assert_held(key)
+            self._require_exclusive_tenant(key.tenant_id)
+            if (
+                key.kind
+                not in {ResourceKind.SYSTEM_OPERATION_LOG, ResourceKind.LOGIN_LOG}
+                or self._policy is not None
+                or self._aggregate_tenant is not None
+                or self._aggregate_global
+                or self._retained_count >= 10000
+                or (expected is not None and type(expected) is not dict)
+            ):
+                raise _order_error()
+            expected = expected or {}
+            if expected.get("audit_scope", "tenant") != "tenant":
+                raise _order_error()
+            spec, predicates, _ = await self._mutation_snapshot(
+                key, {}, expected | {"audit_scope": "tenant"}
+            )
+            await self._timeouts()
+            row = (
+                await self._execute(
+                    delete(spec.table)
+                    .where(*predicates)
+                    .returning(*(spec.table.c[name] for name in spec.key_columns))
+                )
+            ).one_or_none()
+            if row is None or tuple(row) != key_values(key):
+                raise _stale()
+            self._deleted.add(key)
+            self._retained_count += 1
+            return True
+        except BaseException:
+            self._journal.fail()
+            raise
+
+    async def append_audit(self, key: ResourceKey, values: dict) -> int:
+        try:
+            self._check(locked=True)
+            if (
+                type(key) is not ResourceKey
+                or key.kind not in _AUDIT_KINDS
+                or key not in {item.key for item in self._plan.new}
+                or key in self._attempted
+                or type(values) is not dict
+                or self._policy is not None
+            ):
+                raise _order_error()
+            spec = resource_spec(key.kind)
+            fixed = dict(zip(spec.key_columns, key_values(key), strict=True))
+            if spec.tenant_column:
+                fixed[spec.tenant_column] = key.tenant_id
+            time_column = (
+                "create_time"
+                if key.kind is ResourceKind.SYSTEM_OPERATION_LOG
+                else "created_at"
+            )
+            if (
+                any(name not in spec.table.c or name == time_column for name in values)
+                or any(not _plain_value(value) for value in values.values())
+                or any(
+                    name in values
+                    and (values[name] != value or type(values[name]) is not type(value))
+                    for name, value in fixed.items()
+                )
+            ):
+                raise _order_error()
+            if key.kind is ResourceKind.SYSTEM_OPERATION_LOG:
+                self.assert_held(ResourceKey(ResourceKind.TENANT, None, key.tenant_id))
+                if (
+                    self._creation is not None
+                    and self._creation.get("created") is not None
+                    and key.tenant_id == 0
+                    and values.get("audit_scope") != "platform"
+                ):
+                    raise _order_error()
+            else:
+                principal = values.get("actor_principal_id")
+                self.assert_held(
+                    ResourceKey(ResourceKind.PLATFORM_PRINCIPAL, None, principal)
+                )
+                if values.get("event_type") == "completed":
+                    authorization = values.get("authorization_audit_id")
+                    self.assert_held(
+                        ResourceKey(ResourceKind.PLATFORM_AUDIT, None, authorization)
+                    )
+                    if type(values.get("result_summary")) is not dict or values[
+                        "result_summary"
+                    ].get("statusCode") != values.get("status_code"):
+                        raise _order_error()
+            self._attempted.add(key)
+            payload = values | fixed | {time_column: func.clock_timestamp()}
+            statement = pg_insert(spec.table).values(**payload)
+            completion = (
+                key.kind is ResourceKind.PLATFORM_AUDIT
+                and values.get("event_type") == "completed"
+            )
+            if completion:
+                statement = statement.on_conflict_do_nothing(
+                    index_elements=[spec.table.c.authorization_audit_id],
+                    index_where=spec.table.c.authorization_audit_id.is_not(None),
+                )
+            await self._timeouts()
+            actual = (
+                await self._execute(
+                    statement.returning(spec.table.c[spec.key_columns[0]])
+                )
+            ).scalar_one_or_none()
+            if actual is not None:
+                if actual != key_values(key)[0]:
+                    raise _stale()
+                self._owned.add(key)
+                return actual
+            if not completion:
+                raise _stale()
+            await self._timeouts()
+            prior = (
+                await self._execute(
+                    select(spec.table.c.audit_id, spec.table.c.status_code).where(
+                        spec.table.c.authorization_audit_id
+                        == values["authorization_audit_id"]
+                    )
+                )
+            ).one_or_none()
+            if prior is None:
+                raise _unavailable()
+            if prior.status_code != values["status_code"]:
+                raise BusinessException(
+                    409,
+                    "平台完成审计状态冲突",
+                    error_code="PLATFORM_AUDIT_COMPLETION_CONFLICT",
+                )
+            return prior.audit_id
+        except BaseException:
+            self._journal.fail()
+            raise
+
     async def insert_reserved(self, key: ResourceKey, values: dict) -> None:
         self._check(locked=True)
         try:
-            if type(key) is not ResourceKey or key.kind is ResourceKind.ROLE_AGENT:
-                raise _order_error()
             if (
-                key.kind in _AUTHORIZATION_KINDS
-                and self._aggregate_tenant != key.tenant_id
+                type(key) is not ResourceKey
+                or key.kind in _AUDIT_KINDS
+                or key.kind is ResourceKind.TENANT
             ):
                 raise _order_error()
+            if key.kind in _AUTHORIZATION_KINDS:
+                self._fact_context(key)
             if key.kind in _POLICY_KINDS and self._policy is None:
                 raise _order_error()
             if self._aggregate_tenant is not None and (
@@ -757,6 +1318,7 @@ class _Transaction:
                 raise _order_error()
             if any(name not in spec.table.c for name in values):
                 raise _order_error()
+            self._require_mutation_parents(key, values)
             if any(not _plain_value(value) for value in values.values()) or any(
                 column.name in values and column.name not in fixed
                 for column in spec.table.primary_key
@@ -793,6 +1355,8 @@ class _Transaction:
         checkpoint = set(self._owned)
         deleted_checkpoint = set(self._deleted)
         mutation_checkpoint = dict(self._mutations)
+        global_checkpoint = self._global_mutations
+        retained_checkpoint = self._retained_count
         policy_checkpoint = dict(self._policy) if self._policy is not None else None
         self._journal.control += 1
         try:
@@ -819,6 +1383,8 @@ class _Transaction:
             self._owned.intersection_update(checkpoint)
             self._deleted = deleted_checkpoint
             self._mutations = mutation_checkpoint
+            self._global_mutations = global_checkpoint
+            self._retained_count = retained_checkpoint
             if self._policy is not None and policy_checkpoint is not None:
                 self._policy.clear()
                 self._policy.update(policy_checkpoint)
@@ -857,7 +1423,16 @@ class AuthorizationTransactionService:
             yield tx
 
     @asynccontextmanager
-    async def _scope(self, db, tenants, global_mode, budget, enumerate_all):
+    async def scope_creation(self, db, *, budget=TransactionBudget(timeout_ms=60000)):
+        async with self._scope(
+            db, (), LockMode.EXCLUSIVE, budget, False, creation=True
+        ) as tx:
+            yield tx
+
+    @asynccontextmanager
+    async def _scope(
+        self, db, tenants, global_mode, budget, enumerate_all, *, creation=False
+    ):
         if not isinstance(db, AuthorizationPlanSession):
             raise _order_error()
         journal = db._authorization_journal
@@ -889,6 +1464,8 @@ class AuthorizationTransactionService:
         for kind in ResourceKind:
             resource_spec(kind)
         tx = _Transaction(db, budget, global_mode, deadline)
+        if creation:
+            tx._creation = {"selected": False, "created": None}
         journal.handle = tx
         journal.phase = "preparing"
         journal.deadline = deadline
@@ -911,12 +1488,16 @@ class AuthorizationTransactionService:
                 if (
                     tx._frames
                     or tx._aggregate_tenant is not None
+                    or tx._aggregate_global
                     or tx._policy is not None
+                    or (creation and (not tx._creation["selected"] or tx._plan is None))
                     or db.new
                     or db.dirty
                     or db.deleted
                 ):
                     raise _order_error()
+                if creation and tx._creation["created"] is not None:
+                    await tx._bump_global()
                 journal.phase = "closed"
         except TimeoutError:
             journal.fail()

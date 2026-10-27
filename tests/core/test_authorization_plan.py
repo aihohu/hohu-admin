@@ -244,6 +244,7 @@ def test_fixed_catalog_is_real_complete_and_preserves_insert_defaults():
         "ROLE_MENUS",
         "SYSTEM_OPERATION_LOG",
         "PLATFORM_AUDIT",
+        "LOGIN_LOG",
     }
     for kind in ResourceKind:
         spec = resource_spec(kind)

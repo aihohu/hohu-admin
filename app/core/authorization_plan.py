@@ -64,6 +64,7 @@ class ResourceKind(StrEnum):
     ROLE_MENUS = "role_menus"
     SYSTEM_OPERATION_LOG = "system_operation_log"
     PLATFORM_AUDIT = "platform_audit"
+    LOGIN_LOG = "login_log"
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,6 +215,9 @@ _RESOURCE_DEFINITIONS = MappingProxyType(
             950,
             "app.modules.platform.models",
             global_scope=True,
+        ),
+        ResourceKind.LOGIN_LOG: _definition(
+            "sys_login_log", ("login_log_id",), 960, _SYSTEM + "login_log"
         ),
     }
 )

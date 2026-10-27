@@ -223,9 +223,10 @@ async def test_reserved_setting_rejects_unreserved_actual_primary_key(
                 db, tenants=(TenantLock(0, LockMode.EXCLUSIVE),)
             ) as tx:
                 await tx.lock(LockPlan(new=(NewResource(key),)))
-                await tx.insert_reserved(
-                    key, {"setting_id": 801, "setting_value": "enabled"}
-                )
+                async with tx.aggregate(0):
+                    await tx.insert_reserved(
+                        key, {"setting_id": 801, "setting_value": "enabled"}
+                    )
         assert error.value.error_code == "FIELD_POLICY_LOCK_ORDER"
         with pytest.raises(BusinessException):
             await db.commit()
@@ -253,7 +254,8 @@ async def test_reserved_setting_owns_unique_key_with_generated_primary_key(
                 db, tenants=(TenantLock(0, LockMode.EXCLUSIVE),)
             ) as tx:
                 await tx.lock(LockPlan(new=(NewResource(key),)))
-                await tx.insert_reserved(key, {"setting_value": "enabled"})
+                async with tx.aggregate(0):
+                    await tx.insert_reserved(key, {"setting_value": "enabled"})
                 tx.assert_held(key)
                 generated_id = await db.scalar(
                     select(setting.c.setting_id).where(
@@ -279,3 +281,11 @@ async def test_reserved_setting_owns_unique_key_with_generated_primary_key(
             )
         ).all()
         assert rows == [(0, "planned-setting", generated_id, "enabled")]
+        assert (
+            await db.scalar(
+                select(UserFieldPolicyState.epoch).where(
+                    UserFieldPolicyState.tenant_id == 0
+                )
+            )
+            == 2
+        )

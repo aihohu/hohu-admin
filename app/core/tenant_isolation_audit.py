@@ -49,6 +49,11 @@ _NAMESPACE_REGISTRY: dict[str, tuple[str, str, tuple[str, ...]]] = {
         "tenant",
         ("tenant_cache_key",),
     ),
+    "db/authorization_control_owner.py": (
+        "cache",
+        "tenant",
+        ("cache_keys", "configuration_authorization_candidate", "tenant"),
+    ),
     "middleware/audit_middleware.py": ("cache", "tenant", ("tenant_id",)),
     "middleware/rate_limit_middleware.py": ("cache", "global", ()),
     "modules/system/api/settings.py": ("cache", "tenant", ("tenant_id",)),

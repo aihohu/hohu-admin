@@ -14,7 +14,7 @@ class Candidate:
     source: tuple[str, ...]
     owner: str
     phase: str
-    G_mode: str
+    G_mode: str  # Strongest mode used by this entry; conditional scope is below.
     tenant_resolver: str
     B_modes: tuple[str, ...]
     plan_builder: str
@@ -37,6 +37,14 @@ IO_PROFILES = MappingProxyType(
         "import-write": (60000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "bounded-plan": (15000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "bounded-read": (5000, 0, 5000, 4104, 64 * 1024 * 1024),
+        "global-write": (60000, 2000, 5000, 100000, 64 * 1024 * 1024),
+        "metadata": (8000, 2000, 5000, 100000, 64 * 1024 * 1024),
+        "audit-intent": (3000, 2000, 3000, 100000, 64 * 1024 * 1024),
+        "external-dns": (0, 0, 0, 0, 64 * 1024),
+        "external-probe": (0, 0, 0, 0, 64 * 1024),
+        "external-mail": (0, 0, 0, 0, 64 * 1024),
+        "external-password": (0, 0, 0, 0, 1024),
+        "external-import": (0, 0, 0, 1000, 10 * 1024 * 1024),
     }
 )
 # (protected ms, cumulative G/B ms, statement ms, read rows, decoded bytes).
@@ -316,15 +324,470 @@ CANDIDATES = (
     )
 )
 
+_A = "app.modules.ai.service."
+_P = "app.modules.platform."
+_CONTROL_OWNER = "app.db.authorization_control_owner.ControlCandidateOwner"
+_CATALOG = _A + "authorization_catalog_candidate.CatalogAuthorizationCandidate"
+_CONFIG = (
+    _S + "authorization_configuration_candidate.ConfigurationAuthorizationCandidate"
+)
+_TENANT = _S + "authorization_tenant_candidate.TenantControlCandidate"
+_PRINCIPAL = _P + "authorization_principal_candidate.PrincipalAuthorizationCandidate"
+_PRINCIPAL_OWNER = _P + "authorization_principal_owner.PrincipalCandidateOwner"
+_RETENTION_OWNER = _P + "authorization_retention_owner.RetentionCandidateOwner"
+_SEED_OWNER = "app.db.authorization_seed_owner.SeedCandidateOwner.execute"
+
+CATALOG_OPERATIONS = MappingProxyType(
+    {
+        "agent.update": _A + "agent_admin.AgentAdminService.update_agent",
+        **{
+            f"{kind}.{action}": _A + f"{kind}_service.{kind.title()}Service.{action}"
+            for kind in ("provider", "model")
+            for action in ("create", "update", "delete")
+        },
+        **{
+            f"model_policy.{action}": _A
+            + f"tenant_model_policy_admin_service.TenantModelPolicyAdminService.{action}"
+            for action in ("put_many", "put", "delete")
+        },
+        "role.agents": _A + "role_agent.RoleAgentService.put_binding",
+    }
+)
+CONFIGURATION_OPERATIONS = MappingProxyType(
+    {
+        "menu.create": _S + "menu_service.MenuService.create_menu",
+        "menu.update": _S + "menu_service.MenuService.update_menu",
+        "menu.delete": _S + "menu_service.MenuService.delete_menu",
+        "menu.batch_delete": _S + "menu_service.MenuService.batch_delete_menus",
+        "settings.save": _S + "settings_service.SettingsService.save_group",
+        "mail.save": _S + "mail_service.MailService.save",
+        **{
+            f"config.{action}": _S + f"config_service.ConfigService.{action}"
+            for action in ("create", "update", "delete", "batch_delete")
+        },
+        "config.import": _S + "config_service.ConfigService.import_configs",
+    }
+)
+TENANT_OPERATIONS = MappingProxyType(
+    {
+        f"tenant.{action}": _S
+        + f"tenant_lifecycle_service.TenantLifecycleService.{action}_tenant"
+        for action in ("prepare", "activate", "disable")
+    }
+)
+OPERATION_FAMILIES = MappingProxyType(
+    {
+        "system": (
+            SYSTEM_OPERATIONS,
+            _S + "authorization_system_candidate",
+            "SYSTEM_CANDIDATE_ENTRIES",
+        ),
+        "catalog": (
+            CATALOG_OPERATIONS,
+            _A + "authorization_catalog_inputs",
+            "CATALOG_CANDIDATE_ENTRIES",
+        ),
+        "configuration": (
+            CONFIGURATION_OPERATIONS,
+            _S + "authorization_configuration_candidate",
+            "CONFIGURATION_PERMISSIONS",
+        ),
+        "tenant": (
+            TENANT_OPERATIONS,
+            _S + "authorization_tenant_candidate",
+            "TENANT_OPERATIONS",
+        ),
+    }
+)
+
+
+def _control_entry(
+    entry_id,
+    qualified,
+    *,
+    source=(),
+    owner="caller_owned",
+    phase="proof_writer",
+    guard="S",
+    barriers=("S", "X"),
+    plan="none",
+    apply="none",
+    profile="global-write",
+    epoch="none",
+    operation="",
+    maintenance=False,
+):
+    return Candidate(
+        entry_id,
+        qualified,
+        source,
+        owner,
+        phase,
+        guard,
+        _control_tenants(entry_id, operation),
+        barriers,
+        plan,
+        apply,
+        profile,
+        epoch,
+        phase != "owner",
+        operation,
+        maintenance,
+    )
+
+
+def _control_tenants(entry_id, operation):
+    if operation == "tenant.prepare":
+        return "structure:new-B-only;replay:source-S+target-X"
+    if entry_id.startswith("bootstrap."):
+        return "source-S+target-X;G-X-does-not-imply-all-B"
+    if operation.startswith("model_policy."):
+        return "verified-system-source-S+target-X"
+    if operation == "settings.save":
+        return "security:G-X/all-B-X;other:G-S/current-B-X"
+    if operation == "mail.save" or operation.startswith(
+        ("agent.", "provider.", "model.")
+    ):
+        return "database:all-registered-tenants<=1024;all-B-X"
+    if operation:
+        return "verified-current-or-lifecycle-target-B-X;source-S-if-distinct"
+    if entry_id in {"principal.create", "principal.permissions"} or entry_id.startswith(
+        "seed."
+    ):
+        return "database:all-registered-tenants<=1024;all-B-X"
+    if entry_id.startswith("principal."):
+        return "principal-only:no-tenant-barrier"
+    if entry_id.startswith("retention."):
+        return "verified-target-B;purge-X/preview-S"
+    return "caller:explicit-complete-scope;external-phase:no-barriers"
+
+
+CANDIDATES += tuple(
+    _control_entry(
+        f"{family}.{operation}",
+        target + ".execute",
+        source=(source,),
+        owner=_CONTROL_OWNER + ".execute",
+        guard="X"
+        if operation
+        in {
+            "agent.update",
+            "provider.create",
+            "provider.update",
+            "provider.delete",
+            "model.create",
+            "model.update",
+            "model.delete",
+        }
+        or operation in {"mail.save", "settings.save", "tenant.prepare"}
+        else "S",
+        plan=target + ".execute",
+        apply=target + ".execute",
+        epoch=_S
+        + "authorization_transaction_service.AuthorizationTransactionService.scope_creation"
+        if operation == "tenant.prepare"
+        else _TX + ".aggregate_global"
+        if operation
+        in {
+            "agent.update",
+            "provider.create",
+            "provider.update",
+            "provider.delete",
+            "model.create",
+            "model.update",
+            "model.delete",
+        }
+        or operation in {"mail.save", "settings.save"}
+        else _TX + ".aggregate",
+        operation=operation,
+    )
+    for family, operations, target in (
+        ("catalog", CATALOG_OPERATIONS, _CATALOG),
+        ("configuration", CONFIGURATION_OPERATIONS, _CONFIG),
+        ("tenant", TENANT_OPERATIONS, _TENANT),
+    )
+    for operation, source in operations.items()
+)
+
+# Explicit phase inventory. No filesystem-generated entries: adding a public
+# async phase must be reviewed here and in the AST coverage gate.
+_CONTROL_PHASES = (
+    (
+        "catalog.probe_transport",
+        _A + "authorization_catalog_probe.probe",
+        "external",
+        "none",
+        "external-probe",
+    ),
+    (
+        "configuration.import_parser",
+        _S + "authorization_configuration_input.parse_import",
+        "external",
+        "none",
+        "external-import",
+    ),
+    ("control.authorize", _CONTROL_OWNER + ".authorize", "owner", "S", "audit-intent"),
+    ("catalog.prepare", _CATALOG + ".prepare", "read", "none", "bounded-read"),
+    (
+        "catalog.validate",
+        _CATALOG + ".validate_preparation",
+        "external",
+        "none",
+        "external-dns",
+    ),
+    (
+        "catalog.prepare_probe",
+        _CATALOG + ".prepare_probe",
+        "read",
+        "none",
+        "bounded-read",
+    ),
+    (
+        "catalog.run_probe",
+        _CATALOG + ".run_probe",
+        "external",
+        "none",
+        "external-probe",
+    ),
+    (
+        "catalog.complete_probe",
+        _CATALOG + ".complete_probe",
+        "proof_writer",
+        "S",
+        "metadata",
+    ),
+    (
+        "configuration.parse_import",
+        _CONFIG + ".parse_import",
+        "external",
+        "none",
+        "external-import",
+    ),
+    (
+        "configuration.prepare_mail",
+        _CONFIG + ".prepare_mail_test",
+        "read",
+        "S",
+        "metadata",
+    ),
+    (
+        "configuration.run_mail",
+        _CONFIG + ".run_mail_test",
+        "external",
+        "none",
+        "external-mail",
+    ),
+    (
+        "configuration.complete_mail",
+        _CONFIG + ".complete_mail_test",
+        "proof_writer",
+        "S",
+        "metadata",
+    ),
+    (
+        "control.identity",
+        _S + "authorization_control_identity.read_identity",
+        "read",
+        "S",
+        "bounded-plan",
+    ),
+    (
+        "control.revalidate",
+        _S + "authorization_control_identity.assert_identity",
+        "read",
+        "S",
+        "bounded-plan",
+    ),
+    (
+        "control.target",
+        _S + "authorization_control_identity.read_policy_target",
+        "read",
+        "X",
+        "bounded-plan",
+    ),
+    (
+        "control.append_audit",
+        _S + "authorization_control_audit.ControlAudit.append",
+        "proof_writer",
+        "S",
+        "audit-intent",
+    ),
+    (
+        "bootstrap.execute",
+        _P + "authorization_bootstrap_candidate.TenantBootstrapCandidate.execute",
+        "proof_writer",
+        "X",
+        "global-write",
+    ),
+    (
+        "bootstrap.system_plan",
+        _S + "authorization_bootstrap_candidate.SystemBootstrapCandidate.prepare",
+        "plan",
+        "X",
+        "global-write",
+    ),
+    (
+        "bootstrap.system_apply",
+        _S + "authorization_bootstrap_candidate.SystemBootstrapCandidate.apply",
+        "proof_writer",
+        "X",
+        "global-write",
+    ),
+    (
+        "bootstrap.ai_plan",
+        _A + "authorization_bootstrap_candidate.AiBootstrapCandidate.prepare",
+        "plan",
+        "X",
+        "global-write",
+    ),
+    (
+        "bootstrap.ai_apply",
+        _A + "authorization_bootstrap_candidate.AiBootstrapCandidate.apply",
+        "proof_writer",
+        "X",
+        "global-write",
+    ),
+    (
+        "principal.read",
+        _P + "authorization_principal_candidate.read_principal",
+        "read",
+        "S",
+        "bounded-plan",
+    ),
+    (
+        "principal.revalidate",
+        _P + "authorization_principal_candidate.assert_principal",
+        "read",
+        "S",
+        "bounded-plan",
+    ),
+    (
+        "principal.password_prepare",
+        _P + "authorization_principal_candidate.prepare_password",
+        "read",
+        "none",
+        "bounded-read",
+    ),
+    (
+        "principal.password_verify",
+        _P + "authorization_principal_candidate.verify_preparation",
+        "external",
+        "none",
+        "external-password",
+    ),
+    (
+        "principal.password_revalidate",
+        _P + "authorization_principal_candidate.check_password_preparation",
+        "read",
+        "S",
+        "bounded-plan",
+    ),
+    ("principal.login_apply", _PRINCIPAL + ".login", "proof_writer", "S", "metadata"),
+    ("principal.current_read", _PRINCIPAL + ".current", "read", "S", "metadata"),
+    ("principal.login", _PRINCIPAL_OWNER + ".login", "owner", "S", "metadata"),
+    ("principal.current", _PRINCIPAL_OWNER + ".current", "owner", "S", "metadata"),
+    (
+        "principal.authorize",
+        _PRINCIPAL_OWNER + ".authorize",
+        "owner",
+        "S",
+        "audit-intent",
+    ),
+    (
+        "principal.append_audit",
+        _P + "authorization_principal_audit.PrincipalAudit.append",
+        "proof_writer",
+        "S",
+        "audit-intent",
+    ),
+    (
+        "principal.create",
+        _PRINCIPAL_OWNER + ".create_first",
+        "owner",
+        "X",
+        "global-write",
+    ),
+    (
+        "principal.permissions",
+        _PRINCIPAL_OWNER + ".replace_permissions",
+        "owner",
+        "X",
+        "global-write",
+    ),
+    ("retention.purge", _RETENTION_OWNER + ".purge", "owner", "S", "global-write"),
+    ("retention.preview", _RETENTION_OWNER + ".preview", "owner", "S", "global-write"),
+    (
+        "retention.apply",
+        _S
+        + "authorization_retention_candidate.RetentionAuthorizationCandidate.execute",
+        "proof_writer",
+        "S",
+        "global-write",
+    ),
+    ("seed.execute", _SEED_OWNER, "owner", "X", "global-write"),
+    (
+        "seed.system_plan",
+        _S + "authorization_seed_candidate.SystemSeedCandidate.plan",
+        "plan",
+        "X",
+        "global-write",
+    ),
+    (
+        "seed.system_apply",
+        _S + "authorization_seed_candidate.SystemSeedCandidate.apply",
+        "proof_writer",
+        "X",
+        "global-write",
+    ),
+    (
+        "seed.ai_plan",
+        _A + "authorization_seed_candidate.AiSeedCandidate.plan",
+        "plan",
+        "X",
+        "global-write",
+    ),
+    (
+        "seed.ai_apply",
+        _A + "authorization_seed_candidate.AiSeedCandidate.apply",
+        "proof_writer",
+        "X",
+        "global-write",
+    ),
+)
+MAINTENANCE_ENTRIES = frozenset(
+    {
+        "principal.create",
+        "principal.permissions",
+        "seed.execute",
+        "seed.system_plan",
+        "seed.system_apply",
+        "seed.ai_plan",
+        "seed.ai_apply",
+    }
+)
+CANDIDATES += tuple(
+    _control_entry(
+        entry,
+        qualified,
+        phase=phase,
+        guard=guard,
+        barriers=()
+        if guard == "none" or entry.startswith("principal.") and guard == "S"
+        else ("S", "X"),
+        owner=qualified if phase == "owner" else "caller_owned",
+        profile=profile,
+        maintenance=entry in MAINTENANCE_ENTRIES,
+        epoch=_TX + ".aggregate_global"
+        if entry in {"principal.create", "principal.permissions", "seed.execute"}
+        else _TX + ".aggregate"
+        if entry == "bootstrap.execute"
+        else "none",
+    )
+    for entry, qualified, phase, guard, profile in _CONTROL_PHASES
+)
+
 PENDING_SURFACES = MappingProxyType(
     {
-        "2B3": (
-            "global menu/buttons",
-            "role-agent",
-            "Agent/Provider/Model/security policy",
-            "Platform tenant/Principal",
-            "settings/mail/seed/maintenance",
-        ),
         "2B4": (
             "AI context/gateway owners",
             "delete context dependencies",

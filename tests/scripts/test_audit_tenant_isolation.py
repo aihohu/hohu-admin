@@ -16,6 +16,7 @@ from app.core.tenant_isolation_audit import (
 from tools.ops import audit_tenant_isolation as cli
 
 _CANDIDATE_NAMESPACES = (
+    ("db/authorization_control_owner.py", "cache_keys", "storage"),
     ("db/authorization_system_owner.py", "tenant_cache_key", "storage"),
     (
         "modules/system/service/authorization_import_candidate.py",
@@ -23,6 +24,10 @@ _CANDIDATE_NAMESPACES = (
         "cache",
     ),
 )
+
+
+def test_complete_source_namespace_inventory_is_clean():
+    assert scan_source_boundaries().issues == ()
 
 
 def _copy_candidate_namespace(tmp_path, source_path: str) -> tuple[Path, Path]:
