@@ -8,6 +8,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager, suppress
 
+from anyio import CancelScope
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessException
@@ -127,6 +128,11 @@ async def commit_authorization_session(db, effects=None):
 
 
 async def rollback_authorization_session(db, effects=None):
+    with CancelScope(shield=True):
+        await _rollback_authorization_session(db, effects)
+
+
+async def _rollback_authorization_session(db, effects=None):
     """Bound cleanup; retain a failed/cancellation-resistant operation in quarantine."""
     if effects is not None:
         effects.discard()
@@ -157,25 +163,26 @@ async def authorization_session(factory):
     try:
         yield db
     finally:
-        pending = asyncio.create_task(db.close())
-        try:
-            completed, _ = await asyncio.wait({pending}, timeout=_CLEANUP_SECONDS)
-            if pending not in completed:
-                raise TimeoutError("Session disposal timed out")
-            pending.result()
-        except BaseException as exc:
-            # A failed close is not evidence of rollback. Retain the session
-            # until trusted invalidation, using the same quarantine mechanism.
-            if not pending.done():
-                pending.cancel()
-            await _quarantine(db, pending)
-            if (
-                isinstance(exc, asyncio.CancelledError)
-                and asyncio.current_task().cancelling()
-            ):
-                raise
-            if not isinstance(exc, (Exception, asyncio.CancelledError)):
-                raise
-            logging.getLogger(__name__).warning(
-                "Authorization session disposal quarantined"
-            )
+        with CancelScope(shield=True):
+            pending = asyncio.create_task(db.close())
+            try:
+                completed, _ = await asyncio.wait({pending}, timeout=_CLEANUP_SECONDS)
+                if pending not in completed:
+                    raise TimeoutError("Session disposal timed out")
+                pending.result()
+            except BaseException as exc:
+                # A failed close is not evidence of rollback. Retain the session
+                # until trusted invalidation, using the same quarantine mechanism.
+                if not pending.done():
+                    pending.cancel()
+                await _quarantine(db, pending)
+                if (
+                    isinstance(exc, asyncio.CancelledError)
+                    and asyncio.current_task().cancelling()
+                ):
+                    raise
+                if not isinstance(exc, (Exception, asyncio.CancelledError)):
+                    raise
+                logging.getLogger(__name__).warning(
+                    "Authorization session disposal quarantined"
+                )

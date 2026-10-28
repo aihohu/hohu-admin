@@ -140,7 +140,8 @@ class PendingCandidate:
         if (
             values["agent_code"] != meta.agent
             or values["risk_level"] != meta.risk
-            or values["projection_kind"] != meta.projection_kind
+            or values["projection_kind"]
+            != (meta.projection_kind or ("scope_bound" if meta.readonly else None))
         ):
             raise _order_error()
         selection = await select_model(db, tenant, str(values["resolved_model_id"]))

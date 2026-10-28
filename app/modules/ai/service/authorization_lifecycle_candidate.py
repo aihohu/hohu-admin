@@ -663,11 +663,49 @@ class LifecycleCandidate:
         )
         return action
 
+    async def poll(
+        self, db, tx, confirmation_id, *, tenant, actor_user_version, resume_binding
+    ):
+        """Return transport state only; result readers independently prove terminal facts."""
+        if type(resume_binding) is not ResumeBinding:
+            raise _order_error()
+        identity = await read_identity(
+            db, tenant=tenant, actor_user_version=actor_user_version
+        )
+        reference = await self.reference(db, confirmation_id, tenant=tenant)
+        if reference is None:
+            raise _order_error()
+        resume_binding.require(reference)
+        action, _conversation, _source, _log = await self._locked(
+            db, tx, reference, tenant, identity
+        )
+        resume_binding.require(action)
+        return action.status, action.expires_at
+
     async def resume_read(
         self, db, tx, confirmation_id, *, tenant, actor_user_version, resume_binding
     ):
+        from app.modules.ai.service.authorization_gateway_read_candidate import (  # noqa: PLC0415
+            READ_HANDLERS,
+        )
+        from app.modules.ai.service.authorization_read_confirmation import (  # noqa: PLC0415
+            read_confirmation_candidate,
+        )
+
         if type(resume_binding) is not ResumeBinding:
             raise _order_error()
+        if resume_binding.tool_name in READ_HANDLERS:
+            result = await read_confirmation_candidate.project(
+                db,
+                tx,
+                confirmation_id,
+                tenant=tenant,
+                actor_user_version=actor_user_version,
+                binding=resume_binding,
+            )
+            if result is None:
+                raise _order_error()
+            return result
         identity = await read_identity(
             db, tenant=tenant, actor_user_version=actor_user_version
         )
@@ -697,8 +735,26 @@ class LifecycleCandidate:
     async def gateway_timeout(
         self, db, tx, confirmation_id, *, tenant, actor_user_version, resume_binding
     ):
+        from app.modules.ai.service.authorization_gateway_read_candidate import (  # noqa: PLC0415
+            READ_HANDLERS,
+        )
+        from app.modules.ai.service.authorization_read_confirmation import (  # noqa: PLC0415
+            read_confirmation_candidate,
+        )
+
         if type(resume_binding) is not ResumeBinding:
             raise _order_error()
+        if resume_binding.tool_name in READ_HANDLERS:
+            action = await read_confirmation_candidate.execute(
+                db,
+                tx,
+                confirmation_id,
+                tenant=tenant,
+                actor_user_version=actor_user_version,
+                decision="timeout",
+                binding=resume_binding,
+            )
+            return action.status
         identity = await read_identity(
             db, tenant=tenant, actor_user_version=actor_user_version
         )

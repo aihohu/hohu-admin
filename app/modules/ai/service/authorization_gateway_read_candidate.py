@@ -22,6 +22,7 @@ from app.modules.ai.service.agent_authorization_service import (
 )
 from app.modules.ai.service.authorization_chat_candidate import chat_candidate
 from app.modules.ai.service.result_projection_service import result_projection_service
+from app.modules.auth.service import load_live_user_authority
 from app.modules.system.ai_tools import (
     analytics,
     dept,
@@ -29,6 +30,10 @@ from app.modules.system.ai_tools import (
     user_assignment,
     user_management,
     user_transfer,
+)
+from app.modules.system.service.authorization_control_identity import (
+    assert_identity,
+    read_identity,
 )
 
 READ_HANDLERS = MappingProxyType(
@@ -93,6 +98,7 @@ class GatewayReadCandidate:
         scope_hash,
         tool,
         args,
+        _locked=False,
     ):
         handler = (PREFLIGHT_HANDLERS if preflight else READ_HANDLERS).get(tool)
         registered = ToolRegistry.get().find(tool)
@@ -117,14 +123,31 @@ class GatewayReadCandidate:
         )
         if agent_id is None:
             raise AuthorizationException(error_code="AI_AGENT_FORBIDDEN")
-        _, actor = await chat_candidate._lock(
-            db,
-            tx,
-            tenant=tenant,
-            actor_user_version=actor_user_version,
-            conversation_id=conversation_id,
-            extra=(ResourceKey(K.AGENT, None, agent_id),),
-        )
+        if _locked:
+            tx.assert_session(db)
+            identity = await read_identity(
+                db,
+                tenant=tenant,
+                actor_user_version=actor_user_version,
+                permissions=("ai:chat:use",),
+            )
+            tx.assert_held(
+                *identity.keys,
+                ResourceKey(K.CONVERSATION, tenant.tenant_id, conversation_id),
+                ResourceKey(K.SOURCE_MESSAGE, tenant.tenant_id, source_id),
+                ResourceKey(K.AGENT, None, agent_id),
+            )
+            await assert_identity(db, identity)
+            actor = await load_live_user_authority(db, tenant=tenant)
+        else:
+            _, actor = await chat_candidate._lock(
+                db,
+                tx,
+                tenant=tenant,
+                actor_user_version=actor_user_version,
+                conversation_id=conversation_id,
+                extra=(ResourceKey(K.AGENT, None, agent_id),),
+            )
         source = await db.get(AiMessage, source_id, populate_existing=True)
         if (
             source is None

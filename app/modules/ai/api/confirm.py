@@ -502,6 +502,58 @@ async def _confirm_planned(req, *, db, current_user, action_ref):
     )
 
 
+async def _confirm_read_planned(req, *, db, current_user, action_ref):
+    identity = access_identity(current_user)
+    if isinstance(db, RequestSession):
+        await release_request_reads(db)
+    else:
+        if db.new or db.dirty or db.deleted:
+            raise BusinessRuleException(
+                "Confirmation session has pending writes",
+                error_code="AUTHORIZATION_LOCK_ORDER_INVALID",
+            )
+        db.expunge_all()
+        await db.rollback()
+    disabled = False
+    if req.action == "approve" and action_ref.status == "pending_confirmation":
+        async with asyncio.timeout(2):
+            disabled = await check_user_disabled(
+                redis_client, identity.tenant.actor_user_id, tenant=identity.tenant
+            )
+    runtime = get_authorization_runtime()
+    try:
+        terminal = await runtime.read_confirmation.confirm(
+            req.confirmation_id,
+            tenant=identity.tenant,
+            actor_user_version=identity.user_version,
+            decision=req.action,
+            disabled=disabled,
+        )
+    except BusinessException as exc:
+        if exc.error_code in {
+            "AUTHORIZATION_COMMIT_UNKNOWN",
+            "AUTHORIZATION_TRANSACTION_TIMEOUT",
+            "FIELD_POLICY_UNAVAILABLE",
+        }:
+            return _unknown_response(action_ref)
+        raise
+    with suppress(Exception):
+        async with asyncio.timeout(1):
+            await runtime.chat.recover(
+                tenant=identity.tenant, confirmation_id=req.confirmation_id
+            )
+    with suppress(Exception):
+        async with asyncio.timeout(0.25):
+            await _notify_prepared_terminal(
+                terminal,
+                ConfirmAction.APPROVED
+                if req.action == "approve"
+                else ConfirmAction.REJECTED,
+                tenant=identity.tenant,
+            )
+    return ResponseModel.success(data=_prepared_response(terminal))
+
+
 async def _confirm_prepared(
     req: ConfirmRequest,
     *,
@@ -978,6 +1030,14 @@ async def confirm_tool(
         db, req.confirmation_id, tenant=tenant
     )
     if prepared_action is not None:
+        from app.modules.ai.service.authorization_gateway_read_candidate import (  # noqa: PLC0415
+            READ_HANDLERS,
+        )
+
+        if prepared_action.execute_tool_name in READ_HANDLERS:
+            return await _confirm_read_planned(
+                req, db=db, current_user=current_user, action_ref=prepared_action
+            )
         if prepared_action.execute_tool_name in DB_TOOLS | FILE_TOOLS:
             return await _confirm_planned(
                 req, db=db, current_user=current_user, action_ref=prepared_action

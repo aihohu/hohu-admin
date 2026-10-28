@@ -61,6 +61,7 @@ from app.modules.ai.agents.gateway import (
 from app.modules.ai.agents.tools import AiToolMeta
 
 TENANT = tenant_context()
+pytestmark = pytest.mark.usefixtures("db_session")
 
 
 async def _tenant_call(function, *args, **kwargs):

@@ -33,6 +33,7 @@ from app.modules.ai.agents.hitl.constants import ConfirmAction
 from app.modules.ai.agents.hitl.manager import PendingPayload
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.agents.tools.registry import RegisteredTool
+from app.modules.ai.api.confirm import _confirm_prepared as legacy_confirm_prepared
 from app.modules.ai.api.confirm import _notify_prepared_terminal, confirm_tool
 from app.modules.ai.schemas.confirm import ConfirmRequest, ConfirmResponse
 from tests.modules.ai.test_atomic_prepared_completion import (
@@ -404,7 +405,7 @@ class TestConfirmSuccess:
 
 
 class TestPreparedConfirmation:
-    async def test_readonly_commit_timeout_quarantines_before_dependency_teardown(
+    async def test_legacy_readonly_commit_timeout_quarantines_before_dependency_teardown(
         self, monkeypatch
     ):
         import asyncio
@@ -492,12 +493,14 @@ class TestPreparedConfirmation:
                 ) as execute,
             ):
                 with pytest.raises(TimeoutError) as error:
-                    await confirm_tool(
+                    await legacy_confirm_prepared(
                         ConfirmRequest(
                             confirmationId=pending.confirmation_id, action="approve"
                         ),
                         db=db,
                         current_user=_make_user(),
+                        tenant=_make_user()._tenant_context,
+                        action_ref=pending,
                     )
             await asyncio.wait_for(cancelled.wait(), 1)
             assert session_module.is_session_quarantined(db)
@@ -519,7 +522,7 @@ class TestPreparedConfirmation:
         db.invalidate.assert_awaited_once()
 
     @pytest.mark.parametrize("state", ["succeeded", "failed", "rejected", "expired"])
-    async def test_readonly_injection_confirmation_preserves_terminal_state(
+    async def test_legacy_readonly_injection_confirmation_preserves_terminal_state(
         self, state
     ) -> None:
         """An injection-triggered HITL read never acquires a write protocol marker."""
@@ -549,10 +552,12 @@ class TestPreparedConfirmation:
                 AsyncMock(),
             ) as execute,
         ):
-            response = await confirm_tool(
+            response = await legacy_confirm_prepared(
                 ConfirmRequest(confirmationId=action.confirmation_id, action="approve"),
                 db=_make_db(),
                 current_user=_make_user(),
+                tenant=_make_user()._tenant_context,
+                action_ref=action,
             )
         assert response.data.status == state
         execute.assert_not_awaited()

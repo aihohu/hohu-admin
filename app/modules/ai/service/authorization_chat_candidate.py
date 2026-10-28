@@ -915,11 +915,12 @@ class ChatCandidate:
         return key.identity[0]
 
     async def _readonly_recovery_card(self, db, tenant, actor, action, logs):
-        if action.status == "succeeded":
-            # Legacy readonly summaries are not reconstructible result payloads.
-            raise _order_error()
+        from app.modules.ai.service.authorization_read_confirmation import (  # noqa: PLC0415
+            verify_read_terminal,
+        )
+
         log = logs.get(action.execute_tool_call_id)
-        lifecycle_candidate.verify_readonly_terminal(action, log)
+        verify_read_terminal(action, log)
         lineage = result_projection_service.lineage_from_record(action)
         if (
             lineage is None
@@ -932,13 +933,15 @@ class ChatCandidate:
         return lineage, {
             "tool": action.execute_tool_name,
             "tool_call_id": action.execute_tool_call_id,
-            "ok": False,
+            "ok": action.status == "succeeded",
             "error_code": action.error_code,
-            "error_msg": "确认已过期，请重新发起"
+            "error_msg": None
+            if action.status == "succeeded"
+            else "确认已过期，请重新发起"
             if action.status == "expired"
             else "执行已中断，请重新发起",
-            "result": None,
-            "ui": None,
+            "result": action.result_data if action.status == "succeeded" else None,
+            "ui": action.result_ui if action.status == "succeeded" else None,
             "duration_ms": action.duration_ms or 0,
             "trace_id": action.trace_id,
             "args": {},

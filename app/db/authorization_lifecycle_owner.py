@@ -172,6 +172,21 @@ class LifecycleOwner:
             finally:
                 await rollback_authorization_session(db)
 
+    async def poll(self, confirmation_id, **request):
+        async with authorization_session(self.factory) as db:
+            try:
+                with bounded_authorization_reads(db):
+                    async with authorization_transactions.scope(
+                        db,
+                        tenants=(TenantLock(request["tenant"].tenant_id),),
+                        budget=TransactionBudget(timeout_ms=8000),
+                    ) as tx:
+                        return await lifecycle_candidate.poll(
+                            db, tx, confirmation_id, **request
+                        )
+            finally:
+                await rollback_authorization_session(db)
+
     async def gateway_timeout(self, confirmation_id, **request):
         async with authorization_session(self.factory) as db:
             try:

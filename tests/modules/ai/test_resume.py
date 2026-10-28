@@ -44,6 +44,7 @@ def _make_pending(
     wake_action: str | None = None,
     expires_at: str = "2099-01-01T00:00:00Z",
     action_id: int | None = None,
+    tool_name: str = "user.update",
 ) -> PendingPayload:
     return PendingPayload(
         user_id=user_id,
@@ -51,7 +52,7 @@ def _make_pending(
         conversation_id=1,
         tool_call_id="tc_test",
         trace_id="tr_test",
-        tool_name="user.update",
+        tool_name=tool_name,
         args={"user_id": 42},
         dry_run_result=None,
         expires_at=expires_at,
@@ -202,6 +203,19 @@ async def test_memory_resume_after_original_waiter_disconnects(
                 ]
             ),
         ),
+        patch(
+            "app.modules.ai.api.resume.get_authorization_runtime",
+            return_value=SimpleNamespace(
+                lifecycle=SimpleNamespace(
+                    poll=AsyncMock(
+                        side_effect=[
+                            ("running", terminal.expires_at),
+                            (terminal_status, terminal.expires_at),
+                        ]
+                    )
+                )
+            ),
+        ),
         patch("app.modules.ai.api.resume._load_durable_resume_terminal", load_terminal),
         patch("app.modules.ai.api.resume._cleanup_durable_resume", AsyncMock()),
         patch(
@@ -233,7 +247,7 @@ async def test_memory_resume_after_original_waiter_disconnects(
 
 
 @pytest.mark.parametrize("terminal", [False, True])
-async def test_durable_poll_disconnect_returns_postgres_connection(
+async def test_legacy_durable_poll_disconnect_returns_postgres_connection(
     monkeypatch, terminal
 ):
     import anyio
@@ -256,7 +270,8 @@ async def test_durable_poll_disconnect_returns_postgres_connection(
                     await anyio.lowlevel.checkpoint()
                     completed_reads.append(True)
                     return _make_durable_action(
-                        status="succeeded" if terminal else "pending_confirmation"
+                        status="succeeded" if terminal else "pending_confirmation",
+                        execute_tool_name="legacy.test",
                     )
 
                 with (
@@ -269,7 +284,7 @@ async def test_durable_poll_disconnect_returns_postgres_connection(
                 ):
                     await resume_module._wait_durable_resume_terminal(
                         confirmation_id="cid",
-                        pending=_make_pending(action_id=9001),
+                        pending=_make_pending(action_id=9001, tool_name="legacy.test"),
                         user_id=100,
                         tenant=TENANT,
                         timeout_sec=240,
@@ -283,7 +298,7 @@ async def test_durable_poll_disconnect_returns_postgres_connection(
 @pytest.mark.parametrize(
     "boundary", ["tenant", "owner", "binding", "expired", "cancel"]
 )
-async def test_memory_durable_wait_respects_boundaries(boundary):
+async def test_legacy_memory_durable_wait_respects_boundaries(boundary):
     from app.modules.ai.api.resume import _wait_durable_resume_terminal
 
     changes = {
@@ -302,7 +317,11 @@ async def test_memory_durable_wait_respects_boundaries(boundary):
         patch("app.modules.ai.api.resume.AsyncSessionLocal") as sessions,
         patch(
             "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
-            AsyncMock(return_value=_make_durable_action(**changes[boundary])),
+            AsyncMock(
+                return_value=_make_durable_action(
+                    execute_tool_name="legacy.test", **changes[boundary]
+                )
+            ),
         ),
         patch(
             "app.modules.ai.api.resume.asyncio.sleep",
@@ -313,7 +332,7 @@ async def test_memory_durable_wait_respects_boundaries(boundary):
         with pytest.raises(expected):
             await _wait_durable_resume_terminal(
                 confirmation_id="cid",
-                pending=_make_pending(action_id=9001),
+                pending=_make_pending(action_id=9001, tool_name="legacy.test"),
                 user_id=100,
                 tenant=TENANT,
                 timeout_sec=240,

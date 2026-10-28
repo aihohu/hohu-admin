@@ -131,6 +131,11 @@ _NAMESPACE_REGISTRY: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "modules/ai/core/context.py": ("storage", "tenant", ("tenant_id",)),
     "modules/ai/agents/gateway/executor.py": ("cache", "tenant", ("tenant",)),
     "modules/ai/agents/gateway/failures.py": ("cache", "tenant", ("tenant_id",)),
+    "modules/ai/agents/gateway/auxiliary_budget.py": (
+        "cache",
+        "infrastructure",
+        ("RedisError",),
+    ),
     "modules/ai/agents/gateway/quota.py": ("cache", "tenant", ("tenant_id",)),
     "modules/ai/agents/hitl/manager.py": ("cache", "tenant", ("tenant_id",)),
     "modules/ai/agents/hitl/query_cache.py": ("cache", "tenant", ("tenant_id",)),

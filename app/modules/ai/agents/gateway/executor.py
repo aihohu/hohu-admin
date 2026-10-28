@@ -1065,10 +1065,14 @@ async def _load_prepared_terminal_result(
         has_protocol_marker,
         is_registered_readonly_action,
     )
+    from app.modules.ai.service.authorization_gateway_read_candidate import (  # noqa: PLC0415
+        READ_HANDLERS,
+    )
 
     if (
         binding is not None
-        and getattr(binding, "tool_name", None) in DB_TOOLS | FILE_TOOLS
+        and getattr(binding, "tool_name", None)
+        in DB_TOOLS | FILE_TOOLS | READ_HANDLERS.keys()
     ):
         return await _load_bound_terminal(
             confirmation_id, tenant=tenant, deps=deps, binding=binding
@@ -1438,6 +1442,7 @@ def _direct_pending_values(
     confirmation_id,
 ):
     meta = registered.meta
+    projection_kind = meta.projection_kind or ("scope_bound" if meta.readonly else None)
     pending_expires_at = datetime.fromisoformat(
         payload.expires_at.replace("Z", "+00:00")
     )
@@ -1494,9 +1499,9 @@ def _direct_pending_values(
         "resolved_model_id": deps.resolved_model_id,
         "resolved_provider_id": deps.resolved_provider_id,
         "data_scope_hash": (
-            deps.data_scope_hash if meta.projection_kind == "scope_bound" else None
+            deps.data_scope_hash if projection_kind == "scope_bound" else None
         ),
-        "projection_kind": meta.projection_kind,
+        "projection_kind": projection_kind,
         "guard_owner_token": deps.guard_owner_token,
         "command_action": deps.command_action,
         "risk_level": meta.risk,
@@ -2420,13 +2425,20 @@ async def _record_perm_denied_for_ip(deps: ChatDeps, tool_name: str) -> None:
     if not ip:
         return  # deps 未注入 client_ip（单元测试 / 旧路径），跳过
     try:
-        from app.db.session import AsyncSessionLocal  # noqa: PLC0415
+        from app.db.authorization_http import get_authorization_runtime  # noqa: PLC0415
         from app.modules.ai.agents.safety.ip_blacklist import (  # noqa: PLC0415
-            record_perm_denied,
+            record_perm_denied_values,
         )
 
-        async with AsyncSessionLocal() as db:
-            await record_perm_denied(redis_client, db, ip, tenant=deps.tenant)
+        values = await get_authorization_runtime().auxiliary.options(tenant=deps.tenant)
+        async with asyncio.timeout(2):
+            await record_perm_denied_values(
+                redis_client,
+                ip,
+                tenant=deps.tenant,
+                threshold=values["ai:auto_disable:perm_denied_per_hour"],
+                allowlist=values["ai:ip_allowlist"],
+            )
     except Exception:
         logger.exception(
             "ip_blacklist record_perm_denied failed (ignored)",

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.core.file_storage import get_file_storage
 from app.db.authorization_ai_owner import AIAuthorizationOwner
+from app.db.authorization_auxiliary_owner import AuxiliaryOwner
 from app.db.authorization_catalog_read_owner import CatalogReadOwner
 from app.db.authorization_chat_owner import ChatOwner
 from app.db.authorization_control_owner import control_candidate_owner
@@ -18,6 +19,7 @@ from app.db.authorization_lifecycle_owner import LifecycleOwner
 from app.db.authorization_pending_owner import PendingOwner
 from app.db.authorization_plan_session import AuthorizationPlanSession, _order_error
 from app.db.authorization_preview_owner import PreviewOwner
+from app.db.authorization_read_confirmation_owner import ReadConfirmationOwner
 from app.db.authorization_seed_owner import seed_candidate_owner
 from app.db.authorization_system_owner import system_candidate_owner
 from app.db.authorization_trace_owner import TraceOwner
@@ -49,11 +51,13 @@ class AuthorizationRuntime:
         if not isinstance(engine, AsyncEngine):
             raise _order_error()
         self.sessions = _SessionFactory(engine)
+        self.auxiliary = AuxiliaryOwner(self.sessions)
         self.gateway = PlannedGatewayOwner(self.sessions)
         self.lifecycle = LifecycleOwner(self.sessions)
         self.chat = ChatOwner(self.sessions)
         self.preview = PreviewOwner(self.sessions)
         self.pending = PendingOwner(self.sessions)
+        self.read_confirmation = ReadConfirmationOwner(self.sessions)
         self.transfer = TransferOwner(self.sessions, get_file_storage())
         self.upload = UploadOwner(self.sessions)
         self.trace = TraceOwner(self.sessions)
