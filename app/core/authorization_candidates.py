@@ -1119,7 +1119,15 @@ _COMPLETION_ENTRIES = (
     (_CLEANUP, ("execute",), "proof_writer", "S", ("S",), "auth-read", "none"),
     (_CLEANUP, ("cancel",), "proof_writer", "S", ("X",), "transfer-write", "none"),
     (_LIFECYCLE, ("reference",), "read", "none", (), "bounded-read", "none"),
-    (_LIFECYCLE, ("unexecuted",), "read", "S", ("S",), "auth-read", "none"),
+    (
+        _LIFECYCLE,
+        ("unexecuted", "resume_read"),
+        "read",
+        "S",
+        ("S",),
+        "auth-read",
+        "none",
+    ),
     (
         _A + "authorization_orphan_candidate.OrphanCandidate",
         ("settle",),
@@ -1239,7 +1247,7 @@ _COMPLETION_ENTRIES = (
     ),
     (
         "app.db.authorization_lifecycle_owner.LifecycleOwner",
-        ("decide", "unexecuted", "admit"),
+        ("decide", "unexecuted", "admit", "resume_read"),
         "owner",
         "S",
         ("S",),

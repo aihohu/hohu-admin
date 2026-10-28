@@ -5,6 +5,7 @@ import asyncio
 from app.core.authorization_plan import LockMode, TenantLock, TransactionBudget
 from app.core.exceptions import BusinessRuleException
 from app.db.authorization_owner import (
+    authorization_session,
     commit_authorization_session,
     rollback_authorization_session,
 )
@@ -62,7 +63,7 @@ class ChatOwner:
             raise _order_error()
         selection = None
         if conversation_id is None or "model_name" in values:
-            async with self.factory() as db:
+            async with authorization_session(self.factory) as db:
                 try:
                     with bounded_authorization_reads(db):
                         async with asyncio.timeout(5):
@@ -117,7 +118,7 @@ class ChatOwner:
         return await self._run("invalidate", request)
 
     async def _run(self, operation, request, *, http_result=False):
-        async with self.factory() as db:
+        async with authorization_session(self.factory) as db:
             try:
                 with bounded_authorization_reads(db):
                     async with authorization_transactions.scope(

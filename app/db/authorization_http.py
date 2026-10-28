@@ -47,6 +47,23 @@ async def release_request_reads(db):
         await db.rollback()
 
 
+def release_completed_request(db):
+    """Seal a completed stream prefix without accepting any active old writer."""
+    if (
+        not isinstance(db, RequestSession)
+        or db._request_released
+        or is_session_quarantined(db)
+        or db.in_transaction()
+        or db.new
+        or db.dirty
+        or db.deleted
+    ):
+        raise _order_error()
+    db.expunge_all()
+    # Keep the historical write marker. No session may resume SQL after sealing.
+    db._request_released = True
+
+
 async def system_write(
     db, actor, *, operation, payload=None, target_id=None, tenant=None
 ):

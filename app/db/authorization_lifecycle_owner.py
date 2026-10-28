@@ -9,6 +9,7 @@ from app.core.file_storage import ArtifactExecution
 from app.core.id_generator import next_id
 from app.db.authorization_ai_owner import AIAuthorizationOwner
 from app.db.authorization_owner import (
+    authorization_session,
     commit_authorization_session,
     rollback_authorization_session,
 )
@@ -108,6 +109,7 @@ class LifecycleOwner:
         decision,
         disabled=False,
         denial=None,
+        resume_binding=None,
     ):
         async with self.factory() as db:
             try:
@@ -126,6 +128,7 @@ class LifecycleOwner:
                             decision=decision,
                             disabled=disabled,
                             denial=denial,
+                            resume_binding=resume_binding,
                         )
                 db.expunge(result.action)
             except BaseException:
@@ -151,6 +154,21 @@ class LifecycleOwner:
                         )
                         db.expunge(action)
                         return action
+            finally:
+                await rollback_authorization_session(db)
+
+    async def resume_read(self, confirmation_id, **request):
+        async with authorization_session(self.factory) as db:
+            try:
+                with bounded_authorization_reads(db):
+                    async with authorization_transactions.scope(
+                        db,
+                        tenants=(TenantLock(request["tenant"].tenant_id),),
+                        budget=TransactionBudget(timeout_ms=8000),
+                    ) as tx:
+                        return await lifecycle_candidate.resume_read(
+                            db, tx, confirmation_id, **request
+                        )
             finally:
                 await rollback_authorization_session(db)
 

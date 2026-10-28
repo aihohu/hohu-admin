@@ -26,6 +26,8 @@ from app.modules.ai.api.resume import _load_durable_resume_terminal, resume_chat
 from app.modules.ai.service.result_projection_service import (
     result_projection_service,
 )
+from app.modules.ai.service.resume_terminal_projection import project_resume_terminal
+from app.modules.auth.service import AccessIdentity
 
 TENANT = TenantContext(
     tenant_id=0,
@@ -61,17 +63,20 @@ def _make_pending(
 def _make_user(user_id: int = 100, *, can_chat: bool = True):
     menus = [SimpleNamespace(permission="ai:chat:use")] if can_chat else []
     role = SimpleNamespace(role_code="R_USER", status="1", menus=menus)
+    tenant = TenantContext(
+        tenant_id=0,
+        tenant_code="default",
+        actor_user_id=user_id,
+        tenant_version=1,
+        source="access_token",
+    )
     return SimpleNamespace(
         user_id=user_id,
+        tenant_id=0,
         user_name="alice",
         roles=[role],
-        _tenant_context=TenantContext(
-            tenant_id=0,
-            tenant_code="default",
-            actor_user_id=user_id,
-            tenant_version=1,
-            source="access_token",
-        ),
+        _tenant_context=tenant,
+        _verified_access_identity=AccessIdentity(tenant, 1),
     )
 
 
@@ -385,7 +390,36 @@ def _mock_verified_completion_boundary():
             else "unknown",
         )
 
+    async def read(confirmation_id, *, tenant, **_kwargs):
+        async with resume.AsyncSessionLocal() as db:
+            completed = await locked(db, confirmation_id, tenant=tenant)
+            if completed.action.status not in {
+                "succeeded",
+                "failed",
+                "expired",
+                "rejected",
+            }:
+                raise BusinessRuleException("No terminal fact")
+            return await project_resume_terminal(
+                db, completed.action, _make_user(), tenant
+            )
+
+    async def release(db):
+        db.expunge_all()
+        await db.rollback()
+
+    async def unexecuted(confirmation_id, *, tenant):
+        return (await locked(None, confirmation_id, tenant=tenant)).action
+
     with (
+        patch.object(resume, "release_request_reads", release),
+        patch.object(
+            resume,
+            "get_authorization_runtime",
+            lambda: SimpleNamespace(
+                lifecycle=SimpleNamespace(resume_read=read, unexecuted=unexecuted)
+            ),
+        ),
         patch(
             "app.modules.ai.agents.gateway.atomic_execution.reconcile_prepared_completion",
             reconcile,

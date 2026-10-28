@@ -36,6 +36,12 @@ from app.core.config import settings
 from app.core.exceptions import AuthorizationException, BusinessRuleException
 from app.core.redis import redis_client
 from app.core.tenant import TenantContext, get_bound_tenant_context
+from app.db.authorization_http import (
+    get_authorization_runtime,
+    release_completed_request,
+    release_request_reads,
+)
+from app.db.request_session import RequestSession
 from app.db.session import AsyncSessionLocal, get_db
 from app.modules.ai.agents.hitl.events import (
     AiErrorEvent,
@@ -69,7 +75,6 @@ from app.modules.ai.schemas.chat import resolve_chat_trace_id
 from app.modules.ai.schemas.model import ModelOption
 from app.modules.ai.service.chat_run_service import (
     ToolCallCollector,
-    chat_run_finalizer,
     chat_run_guard,
     enforce_grounded_management_write_claim,
     enforce_import_error_output_redaction,
@@ -83,6 +88,7 @@ from app.modules.ai.service.result_projection_service import (
     ProjectionLineage,
     result_projection_service,
 )
+from app.modules.auth.service import access_identity
 from app.modules.system.models.user import User
 from app.modules.system.service.file_service import file_service
 from app.utils.attachment_filename import attachment_display_name
@@ -306,6 +312,7 @@ async def _finalize_stream_turn(
     lineage: ProjectionLineage | None = None,
     projection_dependency_message_ids: list[int] | tuple[int, ...] = (),
     tenant: TenantContext,
+    actor_user_version: int,
 ) -> list[AiStreamEvent]:
     """建立 durability barrier：assistant/terminal commit 完成后才构造 done。"""
     if stream_error_code is not None:
@@ -346,21 +353,32 @@ async def _finalize_stream_turn(
         tool_calls=tool_calls,
     )
     try:
-        message = await chat_run_finalizer.finalize_assistant_turn(
-            db,
+        if isinstance(db, RequestSession):
+            if db._request_wrote:
+                release_completed_request(db)
+            else:
+                await release_request_reads(db)
+        else:
+            if db.new or db.dirty or db.deleted:
+                raise BusinessRuleException(
+                    "Stream session has pending writes",
+                    error_code="AUTHORIZATION_LOCK_ORDER_INVALID",
+                )
+            db.expunge_all()
+            await db.rollback()
+        message_id = await get_authorization_runtime().chat.finalize(
             conversation_id=conversation_id,
             trace_id=trace_id,
-            source_user_message_id=source_user_message_id,
+            source_id=source_user_message_id,
             content=content,
-            tool_calls=tool_calls,
+            tool_calls=tool_calls or [],
             agent_code=agent_code,
             lineage=lineage,
             projection_dependency_message_ids=projection_dependency_message_ids,
             tenant=tenant,
+            actor_user_version=actor_user_version,
         )
-        await db.commit()
     except Exception:
-        await db.rollback()
         logger.exception(
             "finalize_assistant_turn failed",
             extra={"conversation_id": conversation_id, "trace_id": trace_id},
@@ -387,7 +405,7 @@ async def _finalize_stream_turn(
     events.append(
         DoneEvent(
             trace_id=trace_id,
-            message_id=message.message_id if message else None,
+            message_id=message_id,
             persistence="committed",
             projection="updated",
         )
@@ -484,7 +502,8 @@ async def chat(
     """
     # 读取原始 body（只能读一次）
     raw_body = await request.body()
-    tenant = get_bound_tenant_context(_current_user)
+    identity = access_identity(_current_user)
+    tenant = identity.tenant
 
     # 解析 JSON
     body = json.loads(raw_body) if raw_body else {}
@@ -1506,6 +1525,7 @@ async def chat(
                                 agent_code=deps.agent.code if deps.agent else None,
                                 stream_error_code="AI_CHAT_STOPPED",
                                 tenant=deps.tenant,
+                                actor_user_version=identity.user_version,
                             )
 
                     with CancelScope(shield=True):
@@ -1555,6 +1575,7 @@ async def chat(
                         projection_dependency_message_ids
                     ),
                     tenant=deps.tenant,
+                    actor_user_version=identity.user_version,
                 )
             else:
                 terminal_events = [

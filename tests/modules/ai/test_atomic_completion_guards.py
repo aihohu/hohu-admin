@@ -297,8 +297,14 @@ async def test_resume_unavailable_primary_does_not_report_failed_execution(monke
 
 async def test_stream_persists_unknown_message_without_retry_advice(monkeypatch):
     db = AsyncMock()
-    finalize = AsyncMock(return_value=SimpleNamespace(message_id=105))
-    monkeypatch.setattr(chat.chat_run_finalizer, "finalize_assistant_turn", finalize)
+    db.new = db.dirty = db.deleted = ()
+    db.expunge_all = MagicMock()
+    finalize = AsyncMock(return_value=105)
+    monkeypatch.setattr(
+        chat,
+        "get_authorization_runtime",
+        lambda: SimpleNamespace(chat=SimpleNamespace(finalize=finalize)),
+    )
     await chat._finalize_stream_turn(
         db,
         conversation_id=100,
@@ -309,11 +315,13 @@ async def test_stream_persists_unknown_message_without_retry_advice(monkeypatch)
         agent_code=None,
         stream_error_code="AI_EXECUTION_OUTCOME_UNKNOWN",
         tenant=TENANT,
+        actor_user_version=1,
     )
     content = finalize.await_args.kwargs["content"]
     assert "请勿重新办理" in content
     assert "可以重新提问" not in content
-    db.commit.assert_awaited_once()
+    db.commit.assert_not_awaited()
+    db.rollback.assert_awaited_once()
 
 
 @pytest.mark.parametrize("status", ["running", "succeeded"])

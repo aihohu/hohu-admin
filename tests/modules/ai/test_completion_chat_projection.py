@@ -134,6 +134,7 @@ async def test_unknown_notice_appends_to_nonempty_message_once(
                 agent_code=action.agent_code,
                 stream_error_code="AI_EXECUTION_OUTCOME_UNKNOWN",
                 tenant=case.tenant,
+                actor_user_version=1,
             )
     async with AsyncSessionLocal() as db:
         message = await _message(db, case)

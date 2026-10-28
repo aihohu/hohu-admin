@@ -38,6 +38,7 @@ from app.modules.ai.service.authorization_recovery_candidate import (
 from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.ai.service.reconciliation_annotation import has_annotation
 from app.modules.ai.service.result_projection_service import result_projection_service
+from app.modules.ai.service.resume_terminal_projection import project_resume_terminal
 from app.modules.auth.service import load_live_user_authority
 from app.modules.system.service.authorization_ai_tool_adapter import (
     system_ai_tool_adapter,
@@ -63,6 +64,31 @@ class ConfirmationAdmission:
     disposition: str
     changed: bool = False
     error: BusinessException | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeBinding:
+    action_id: int | None
+    conversation_id: int
+    source_id: int | None
+    trace_id: str
+    tool_call_id: str
+    tool_name: str
+    agent_code: str | None
+    args_hash: str
+
+    def require(self, action):
+        if (
+            (self.action_id is not None and self.action_id != action.action_id)
+            or self.conversation_id != action.conversation_id
+            or self.source_id != action.source_user_message_id
+            or self.trace_id != action.trace_id
+            or self.tool_call_id != action.execute_tool_call_id
+            or self.tool_name != action.execute_tool_name
+            or self.agent_code != action.agent_code
+            or self.args_hash != action.args_hash
+        ):
+            raise _order_error()
 
 
 class LifecycleCandidate:
@@ -548,9 +574,13 @@ class LifecycleCandidate:
         decision,
         disabled,
         denial=None,
+        resume_binding=None,
     ):
         if (
             decision not in {"approve", "reject"}
+            or (
+                resume_binding is not None and type(resume_binding) is not ResumeBinding
+            )
             or type(disabled) is not bool
             or (
                 denial is not None
@@ -569,6 +599,8 @@ class LifecycleCandidate:
         reference = await self.reference(db, confirmation_id, tenant=tenant)
         if reference is None:
             raise _order_error()
+        if resume_binding is not None:
+            resume_binding.require(reference)
         # Admission only decides pending work. A terminal or running reference
         # must pass the separate completion proof, which also handles missing
         # historical context conservatively without attempting another claim.
@@ -577,6 +609,8 @@ class LifecycleCandidate:
         action, conversation, source, log = await self._locked(
             db, tx, reference, tenant, identity
         )
+        if resume_binding is not None:
+            resume_binding.require(action)
         if has_annotation(log.result_summary):
             return ConfirmationAdmission(action, "unknown")
         if action.status != "pending_confirmation":
@@ -628,6 +662,37 @@ class LifecycleCandidate:
             action, log, tenant=tenant, conversation=conversation, source=source
         )
         return action
+
+    async def resume_read(
+        self, db, tx, confirmation_id, *, tenant, actor_user_version, resume_binding
+    ):
+        if type(resume_binding) is not ResumeBinding:
+            raise _order_error()
+        identity = await read_identity(
+            db, tenant=tenant, actor_user_version=actor_user_version
+        )
+        reference = await self.reference(db, confirmation_id, tenant=tenant)
+        if reference is None:
+            raise _order_error()
+        resume_binding.require(reference)
+        action, conversation, source, log = await self._locked(
+            db, tx, reference, tenant, identity
+        )
+        resume_binding.require(action)
+        if (
+            action.execute_tool_name not in DB_TOOLS | FILE_TOOLS
+            or action.status not in {"succeeded", "failed", "expired", "rejected"}
+            or (action.execute_tool_name in FILE_TOOLS and action.status == "failed")
+        ):
+            raise _order_error()
+        validator = (
+            atomic_completion_service.validate_locked_unexecuted_terminal
+            if action.status in {"expired", "rejected"}
+            else atomic_completion_service.validate_locked_terminal
+        )
+        validator(action, log, tenant=tenant, conversation=conversation, source=source)
+        actor = await load_live_user_authority(db, tenant=tenant)
+        return await project_resume_terminal(db, action, actor, tenant)
 
     async def confirm(
         self, db, tx, *, tenant, actor_user_version, confirmation_id, command, owner

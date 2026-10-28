@@ -12,6 +12,7 @@ from app.core.base_response import PageResult
 from app.core.exceptions import BusinessException, NotFoundException
 from app.core.id_generator import next_id
 from app.db.authorization_plan_session import _order_error
+from app.modules.ai.agents.gateway.atomic_execution import OUTCOME_UNKNOWN_MESSAGE
 from app.modules.ai.agents.gateway.failures import compute_args_hash
 from app.modules.ai.agents.gateway.redact import redact_secrets
 from app.modules.ai.agents.tools.registry import ToolRegistry
@@ -43,7 +44,10 @@ from app.modules.ai.service.reconciliation_annotation import (
     has_annotation,
     reconciliation_notice,
 )
-from app.modules.ai.service.result_projection_service import result_projection_service
+from app.modules.ai.service.result_projection_service import (
+    ProjectionLineage,
+    result_projection_service,
+)
 from app.modules.auth.service import (
     load_background_projection_authority,
     load_live_user_authority,
@@ -528,6 +532,8 @@ class ChatCandidate:
         content,
         tool_calls,
         agent_code,
+        lineage=None,
+        projection_dependency_message_ids=(),
         recovery_confirmation_id=None,
         recovery_log=None,
     ):
@@ -536,6 +542,20 @@ class ChatCandidate:
             or len(content.encode()) > 256 * 1024
             or type(tool_calls) is not list
             or len(tool_calls) > 256
+        ):
+            raise _order_error()
+        supplied_lineage = lineage
+        if (
+            type(projection_dependency_message_ids) not in {tuple, list}
+            or len(projection_dependency_message_ids) > 16384
+            or any(
+                type(value) is not int or not 0 < value < 2**63
+                for value in projection_dependency_message_ids
+            )
+            or (
+                supplied_lineage is not None
+                and type(supplied_lineage) is not ProjectionLineage
+            )
         ):
             raise _order_error()
         # Discover the unique assistant before reserving its ID. C serializes inserts.
@@ -692,6 +712,19 @@ class ChatCandidate:
                     if card is not None and "ok" not in card
                 ],
             )
+        if supplied_lineage is not None:
+            if (
+                supplied_lineage.tenant_id != tenant.tenant_id
+                or supplied_lineage.agent_code != agent_code
+                or not await result_projection_service.authorize_result_projection(
+                    db,
+                    actor,
+                    owner_user_id=tenant.actor_user_id,
+                    lineage=supplied_lineage,
+                )
+            ):
+                raise _order_error()
+            lineages.append(supplied_lineage)
         lineage = None
         for value in lineages:
             if lineage is not None and (
@@ -719,6 +752,10 @@ class ChatCandidate:
         dependencies = result_projection_service.projection_dependency_message_ids(
             source
         )
+        if dependencies is not None:
+            dependencies = tuple(
+                sorted(set(dependencies) | set(projection_dependency_message_ids))
+            )
         if (
             dependencies is None
             or not await result_projection_service._authorize_projection_dependencies(
@@ -801,11 +838,38 @@ class ChatCandidate:
                         *lineage.projection_dependency_message_ids,
                     ),
                 )
+        if (
+            lineage is not None
+            and not await result_projection_service.authorize_result_projection(
+                db, actor, owner_user_id=tenant.actor_user_id, lineage=lineage
+            )
+        ):
+            raise _order_error()
+        prior_content = message.content if message is not None else ""
+        if (
+            protected
+            and not unknown
+            and OUTCOME_UNKNOWN_MESSAGE in (prior_content or "")
+        ):
+            prior_content = (
+                prior_content.replace(OUTCOME_UNKNOWN_MESSAGE, "")
+                .replace("（AI_EXECUTION_OUTCOME_UNKNOWN）", "")
+                .strip()
+            )
+        if unknown and prior_content and not hidden:
+            content = reconciliation_notice(
+                prior_content,
+                [
+                    key
+                    for key, card in protected.items()
+                    if card is not None and "ok" not in card
+                ],
+            )
         changes = {
             "projection_dependency_message_ids": [str(v) for v in dependencies],
             "content": content
-            if unknown or hidden or message is None or not message.content
-            else message.content,
+            if unknown or hidden or message is None or not prior_content
+            else prior_content,
             "tool_calls": chat_run_finalizer._merge_tool_calls(
                 chat_run_finalizer._replace_protected_cards(
                     message.tool_calls, protected
