@@ -32,7 +32,18 @@ async def read_chat_image(
 ):
     if not settings.AI_MODULE_ENABLED:
         raise BusinessRuleException("AI 助手已关闭", error_code="AI_MODULE_DISABLED")
-    content, mime = await file_service.read_chat_image(db, file_url, tenant=tenant)
+    identity = access_identity(_current_user)
+    if identity.tenant != tenant:
+        raise authorization_http._order_error()
+    await authorization_http.release_request_reads(db)
+    (
+        content,
+        mime,
+    ) = await authorization_http.get_authorization_runtime().upload.read_chat_image(
+        tenant=tenant,
+        actor_user_version=identity.user_version,
+        file_url=file_url,
+    )
     return Response(
         content=content,
         media_type=mime,

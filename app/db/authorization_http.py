@@ -13,6 +13,7 @@ from app.core.exceptions import (
     BusinessRuleException,
 )
 from app.core.security import decode_access_token
+from app.db.authorization_owner import _quarantine
 from app.db.authorization_plan_session import _order_error
 from app.db.request_session import RequestSession
 from app.db.session import engine, is_session_quarantined
@@ -45,6 +46,39 @@ async def release_request_reads(db):
     db._request_released = True
     with CancelScope(shield=True):
         await db.rollback()
+
+
+async def finish_request_read_phase(db):
+    """End a read phase before an independent writer, keeping no old SQL locks."""
+    if (
+        not isinstance(db, RequestSession)
+        or db._request_released
+        or db._request_wrote
+        or is_session_quarantined(db)
+        or db.new
+        or db.dirty
+        or db.deleted
+    ):
+        raise _order_error()
+    db.expunge_all()
+    pending = asyncio.create_task(db.rollback())
+    try:
+        with CancelScope(shield=True):
+            done, _ = await asyncio.wait({pending}, timeout=0.25)
+            if pending not in done:
+                raise TimeoutError()
+            pending.result()
+    except BaseException as exc:
+        db._request_released = True
+        if not pending.done():
+            pending.cancel()
+        await _quarantine(db, pending)
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        raise BusinessRuleException(
+            "Request read rollback acknowledgement unavailable",
+            error_code="AUTHORIZATION_ROLLBACK_UNKNOWN",
+        ) from None
 
 
 def release_completed_request(db):

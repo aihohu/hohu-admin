@@ -85,6 +85,11 @@ _NAMESPACE_REGISTRY: dict[str, tuple[str, str, tuple[str, ...]]] = {
         "tenant",
         ("tenant_id", "validate_private_storage_roots", "PublishedUpload"),
     ),
+    "modules/system/service/authorization_chat_image_candidate.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "validate_private_storage_roots", "ChatImage"),
+    ),
     "db/authorization_runtime.py": (
         "storage",
         "infrastructure",

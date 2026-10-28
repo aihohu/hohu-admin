@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -13,6 +14,12 @@ from app.core.id_generator import next_id
 from app.db.authorization_plan_session import _order_error
 from app.modules.ai.agents.gateway.failures import compute_args_hash
 from app.modules.ai.agents.hitl.events import _ui_to_dict
+from app.modules.ai.agents.tools.file_access import (
+    IMPORT_MIME_TYPES_BY_EXTENSION,
+    FileAccessPolicy,
+    _not_found,
+    read_protected_file,
+)
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.service.authorization_chat_model import recheck_model, select_model
@@ -25,10 +32,49 @@ from app.modules.ai.service.result_projection_service import result_projection_s
 from app.modules.system.ai_tools.user_transfer import _planned_preview_result
 from app.modules.system.models.file import File
 from app.modules.system.service.authorization_ai_user_input import context
-from app.modules.system.service.authorization_control_identity import assert_identity
+from app.modules.system.service.authorization_control_identity import (
+    assert_identity,
+    read_identity,
+)
 from app.modules.system.service.authorization_transfer_candidate import (
     transfer_candidate,
 )
+from app.modules.system.service.file_policy_service import (
+    UploadPolicy,
+    file_policy_service,
+)
+from app.utils.attachment_filename import attachment_display_name
+
+
+@dataclass(frozen=True, slots=True)
+class PreviewInput:
+    facts: tuple
+    policy: UploadPolicy
+
+
+def read_preview_input(snapshot, private_root):
+    """Worker receives immutable metadata only, never a live ORM/session."""
+    if type(snapshot) is not PreviewInput:
+        raise _order_error()
+    record = SimpleNamespace(**dict(snapshot.facts))
+    protected = read_protected_file(
+        record,
+        policy=FileAccessPolicy(
+            allowed_business_types=frozenset({"user-import"}),
+            mime_types_by_extension=IMPORT_MIME_TYPES_BY_EXTENSION,
+            max_bytes=10 * 1024 * 1024,
+            storage_root_resolver=lambda _: Path(private_root),
+        ),
+        tenant_policy=snapshot.policy,
+    )
+    original = attachment_display_name(record.original_name)
+    filename = (
+        original
+        if original
+        and PurePosixPath(original).suffix.lower() == protected.path.suffix.lower()
+        else protected.path.name
+    )
+    return protected.data, filename
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +85,53 @@ class PreviewReference:
 
 
 class PreviewCandidate:
+    async def input_file(
+        self, db, tx, *, tenant, actor_user_version, file_id, expected=None
+    ):
+        try:
+            identifier = int(file_id)
+        except (TypeError, ValueError):
+            raise _not_found() from None
+        if isinstance(file_id, bool) or not 0 < identifier < 2**63:
+            raise _not_found()
+        identity = await read_identity(
+            db,
+            tenant=tenant,
+            actor_user_version=actor_user_version,
+            permissions=("ai:chat:use", "system:user:import"),
+        )
+        statement = select(File.__table__).where(
+            File.tenant_id == tenant.tenant_id, File.file_id == identifier
+        )
+        row = (await db.execute(statement)).mappings().one_or_none()
+        if (
+            row is None
+            or row["del_flag"] != "0"
+            or row["owner_user_id"] != tenant.actor_user_id
+        ):
+            raise _not_found()
+        await tx.lock(
+            LockPlan(
+                existing=(
+                    *identity.keys,
+                    ResourceKey(K.FILE, tenant.tenant_id, identifier),
+                )
+            )
+        )
+        await assert_identity(db, identity)
+        current = (await db.execute(statement)).mappings().one_or_none()
+        if current is None or dict(row) != dict(current):
+            raise _order_error()
+        snapshot = PreviewInput(
+            tuple(sorted(current.items())),
+            await file_policy_service.resolve(db, "ai_file", tenant=tenant),
+        )
+        if expected is not None and (
+            type(expected) is not PreviewInput or expected != snapshot
+        ):
+            raise _order_error()
+        return snapshot
+
     async def execute(
         self,
         db,
@@ -46,6 +139,7 @@ class PreviewCandidate:
         command,
         *,
         file_snapshot,
+        file_policy,
         file_id,
         requested_outcome,
         sync_mode,
@@ -110,6 +204,11 @@ class PreviewCandidate:
             .one_or_none()
         )
         if record is None or dict(record) != file_snapshot:
+            raise _order_error()
+        if (
+            await file_policy_service.resolve(db, "ai_file", tenant=tenant)
+            != file_policy
+        ):
             raise _order_error()
         conversation = await db.get(
             AiConversation, conversation_id, populate_existing=True

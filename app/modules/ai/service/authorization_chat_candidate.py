@@ -205,6 +205,7 @@ class ChatCandidate:
         conversation_id,
         new=(),
         background=False,
+        extra=(),
     ):
         identity = await read_identity(
             db,
@@ -215,7 +216,9 @@ class ChatCandidate:
         inventory = await ai_context_candidate.discover(
             db, tx, tenant_id=tenant.tenant_id, conversation_ids=(conversation_id,)
         )
-        await tx.lock(LockPlan(existing=(*identity.keys, *inventory.keys), new=new))
+        await tx.lock(
+            LockPlan(existing=tuple({*identity.keys, *inventory.keys, *extra}), new=new)
+        )
         await ai_context_candidate.recheck(db, tx, inventory)
         await assert_identity(db, identity)
         actor = (

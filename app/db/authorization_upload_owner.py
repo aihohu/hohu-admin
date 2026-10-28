@@ -7,8 +7,13 @@ from app.core.authorization_io import file_transform_worker
 from app.core.authorization_plan import LockMode, TenantLock, TransactionBudget
 from app.core.config import settings
 from app.db.authorization_owner import (
+    authorization_session,
     commit_authorization_session,
     rollback_authorization_session,
+)
+from app.modules.system.service.authorization_chat_image_candidate import (
+    chat_image_candidate,
+    read_image,
 )
 from app.modules.system.service.authorization_read_budget import (
     bounded_authorization_reads,
@@ -37,7 +42,7 @@ class UploadOwner:
         self.factory = factory
 
     async def _run(self, operation, **request):
-        async with self.factory() as db:
+        async with authorization_session(self.factory) as db:
             try:
                 with bounded_authorization_reads(db):
                     async with authorization_transactions.scope(
@@ -52,17 +57,36 @@ class UploadOwner:
                         ),
                         budget=TransactionBudget(timeout_ms=8000),
                     ) as tx:
-                        result = await getattr(upload_candidate, operation)(
-                            db, tx, **request
+                        candidate = (
+                            chat_image_candidate
+                            if operation == "image"
+                            else upload_candidate
                         )
+                        result = await getattr(candidate, operation)(db, tx, **request)
             except BaseException:
                 await rollback_authorization_session(db)
                 raise
-            if operation == "policies":
+            if operation in {"policies", "image"}:
                 await rollback_authorization_session(db)
             else:
                 await commit_authorization_session(db)
             return result
+
+    async def read_chat_image(self, *, tenant, actor_user_version, file_url):
+        request = {
+            "tenant": tenant,
+            "actor_user_version": actor_user_version,
+            "file_url": file_url,
+        }
+        snapshot = await self._run("image", **request)
+        result = await file_transform_worker.run(
+            read_image,
+            snapshot,
+            str(settings.UPLOAD_DIR),
+            str(settings.PRIVATE_UPLOAD_DIR),
+        )
+        await self._run("image", expected=snapshot, **request)
+        return result
 
     async def upload(
         self, *, tenant, actor_user_version, files, business_type=None, business_id=None

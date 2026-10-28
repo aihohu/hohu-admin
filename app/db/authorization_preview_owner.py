@@ -1,24 +1,23 @@
 """Upload preparation is lock-free; preview publication owns one complete plan."""
 
-import asyncio
 from uuid import uuid4
 
-from sqlalchemy import select
-
 from app.core import file_storage
-from app.core.authorization_file import FileBudget
+from app.core.authorization_io import file_transform_worker
 from app.core.authorization_plan import LockMode, TenantLock, TransactionBudget
+from app.core.config import settings
 from app.core.file_storage import ArtifactExecution
 from app.db.authorization_owner import (
+    authorization_session,
     commit_authorization_session,
     rollback_authorization_session,
 )
 from app.db.authorization_transfer_cache import cache_preview
 from app.modules.ai.service.atomic_completion_service import new_execution_owner
-from app.modules.ai.service.authorization_preview_candidate import preview_candidate
-from app.modules.system.ai_tools.user_transfer import _load_file_bytes
-from app.modules.system.models.file import File
-from app.modules.system.service.authorization_ai_user_input import context
+from app.modules.ai.service.authorization_preview_candidate import (
+    preview_candidate,
+    read_preview_input,
+)
 from app.modules.system.service.authorization_read_budget import (
     bounded_authorization_reads,
 )
@@ -33,6 +32,21 @@ from app.modules.system.service.authorization_transfer_candidate import (
 class PreviewOwner:
     def __init__(self, factory):
         self.factory = factory
+
+    async def _input(self, **request):
+        async with authorization_session(self.factory) as db:
+            try:
+                with bounded_authorization_reads(db):
+                    async with authorization_transactions.scope(
+                        db,
+                        tenants=(
+                            TenantLock(request["tenant"].tenant_id, LockMode.SHARED),
+                        ),
+                        budget=TransactionBudget(timeout_ms=8000),
+                    ) as tx:
+                        return await preview_candidate.input_file(db, tx, **request)
+            finally:
+                await rollback_authorization_session(db)
 
     async def preview(
         self,
@@ -49,44 +63,31 @@ class PreviewOwner:
         sync_mode="CREATE_ONLY",
     ):
         storage = file_storage.get_file_storage()
-        async with self.factory() as db:
-            try:
-                with (
-                    bounded_authorization_reads(db),
-                    FileBudget(
-                        max_reads=1, max_total_bytes=10 * 1024 * 1024
-                    ).activate(),
-                ):
-                    async with asyncio.timeout(5):
-                        ctx = await context(db, tenant, "user.import_preview")
-                        data, filename, _ = await _load_file_bytes(ctx, file_id)
-                        snapshot = dict(
-                            (
-                                await db.execute(
-                                    select(File.__table__).where(
-                                        File.tenant_id == tenant.tenant_id,
-                                        File.file_id == int(file_id),
-                                    )
-                                )
-                            )
-                            .mappings()
-                            .one()
-                        )
-            finally:
-                await rollback_authorization_session(db)
-            command = transfer_candidate.prepare_preview(
-                tenant=tenant,
-                actor_user_version=actor_user_version,
-                file_bytes=data,
-                filename=filename,
-                reason=reason,
-                on_conflict=on_conflict,
-                execution=ArtifactExecution(
-                    tenant.tenant_id,
-                    "tc_" + uuid4().hex,
-                    new_execution_owner("user.import_preview"),
-                ),
-            )
+        request = {
+            "tenant": tenant,
+            "actor_user_version": actor_user_version,
+            "file_id": file_id,
+        }
+        snapshot = await self._input(**request)
+        data, filename = await file_transform_worker.run(
+            read_preview_input, snapshot, str(settings.PRIVATE_UPLOAD_DIR)
+        )
+        await self._input(expected=snapshot, **request)
+        command = await file_transform_worker.run(
+            transfer_candidate.prepare_preview,
+            tenant=tenant,
+            actor_user_version=actor_user_version,
+            file_bytes=data,
+            filename=filename,
+            reason=reason,
+            on_conflict=on_conflict,
+            execution=ArtifactExecution(
+                tenant.tenant_id,
+                "tc_" + uuid4().hex,
+                new_execution_owner("user.import_preview"),
+            ),
+        )
+        async with authorization_session(self.factory) as db:
             try:
                 with bounded_authorization_reads(db):
                     async with authorization_transactions.scope(
@@ -98,7 +99,8 @@ class PreviewOwner:
                             db,
                             tx,
                             command,
-                            file_snapshot=snapshot,
+                            file_snapshot=dict(snapshot.facts),
+                            file_policy=snapshot.policy,
                             file_id=file_id,
                             requested_outcome=requested_outcome,
                             sync_mode=sync_mode,

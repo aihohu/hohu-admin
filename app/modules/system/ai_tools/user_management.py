@@ -378,7 +378,7 @@ async def _dry_run_user_create(
         else []
     )
     exists = await ctx.db.scalar(
-        select(func.count(User.user_id)).where(
+        select(func.pg_catalog.count(User.user_id)).where(
             User.tenant_id == ctx.tenant_id,
             User.user_name == user_name,
         )
@@ -809,8 +809,9 @@ async def user_list(
     # 读取工具同样受调用者数据权限约束。
     base = base.where(*ctx.data_scope.filters)
 
+    count_source = base.subquery()
     total = int(
-        await ctx.db.scalar(select(func.count()).select_from(base.subquery())) or 0
+        await ctx.db.scalar(select(func.pg_catalog.count(count_source.c.user_id))) or 0
     )
 
     rows = (

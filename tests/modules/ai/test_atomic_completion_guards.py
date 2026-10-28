@@ -11,6 +11,7 @@ from tenant_helpers import tenant_context
 from app.core import redis as redis_module
 from app.core.exceptions import BusinessRuleException
 from app.core.tenant import PlatformContext
+from app.db import authorization_http
 from app.db.authorization_ai_owner import AIAuthorizationOwner
 from app.modules.ai import lifecycle
 from app.modules.ai.agents.gateway import executor
@@ -324,59 +325,21 @@ async def test_stream_persists_unknown_message_without_retry_advice(monkeypatch)
     db.rollback.assert_awaited_once()
 
 
-@pytest.mark.parametrize("status", ["running", "succeeded"])
-async def test_fallback_log_finalizer_defers_to_durable_context(monkeypatch, status):
-    action = _action()
-    action.status = status
-    if status == "succeeded":
-        action.execution_owner = None
-    calls = []
-    db = MagicMock()
-
-    async def scalar(statement):
-        sql = str(statement.compile())
-        if "FOR UPDATE" in sql:
-            calls.append("log-lock")
-            return SimpleNamespace(
-                status="success" if status == "succeeded" else "running"
-            )
-        calls.append("discover")
-        return action
-
-    async def lock_context(*_args, **_kwargs):
-        calls.append("context-lock")
-        return SimpleNamespace(action=action)
-
-    async def retry(_operation, *, log_id, op, raise_on_failure):
-        assert log_id == 901
-        assert not raise_on_failure
-        await op(db)
-
-    db.scalar = AsyncMock(side_effect=scalar)
+@pytest.mark.parametrize("changed", [False, True])
+async def test_fallback_log_finalizer_delegates_to_fixed_owner(monkeypatch, changed):
+    finish = AsyncMock(return_value=changed)
     monkeypatch.setattr(
-        executor.prepared_action_service,
-        "lock_confirmation_context",
-        AsyncMock(side_effect=lock_context),
+        authorization_http,
+        "get_authorization_runtime",
+        lambda: SimpleNamespace(chat=SimpleNamespace(finish_operation=finish)),
     )
-    monkeypatch.setattr(executor, "_with_log_retry", retry)
-    mark_failed = AsyncMock()
-    monkeypatch.setattr(executor.operation_log_service, "mark_failed", mark_failed)
-
     await executor._finish_log_final(
         901, executor.ToolResult.failure("TEST_FAILURE", "failure"), 0, tenant=TENANT
     )
-
-    assert calls == ["discover", "context-lock", "log-lock"]
-    mark_failed.assert_not_awaited()
-
-
-async def test_fallback_log_writer_reloads_terminal_state_after_lock():
-    db = MagicMock()
-    db.scalar = AsyncMock(side_effect=[None, SimpleNamespace(status="success")])
-    assert await executor._log_has_durable_owner(db, 901, tenant=TENANT)
-    statement = db.scalar.await_args_list[1].args[0]
-    assert "FOR UPDATE" in str(statement.compile())
-    assert statement.get_execution_options()["populate_existing"] is True
+    finish.assert_awaited_once()
+    assert finish.await_args.kwargs["tenant"] == TENANT
+    assert finish.await_args.kwargs["log_id"] == 901
+    assert finish.await_args.kwargs["succeeded"] is False
 
 
 async def test_durable_resume_cannot_fall_back_to_legacy_handler():

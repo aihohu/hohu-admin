@@ -7,11 +7,11 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, event, func, select, update
 from tenant_helpers import tenant_context
 
 from app.core.exceptions import BusinessRuleException
-from app.db.session import AsyncSessionLocal
+from app.db.session import AsyncSessionLocal, engine
 from app.modules.ai.agents.gateway import executor
 from app.modules.ai.agents.hitl.constants import AiExecutionMode, ConfirmAction
 from app.modules.ai.agents.tools.meta import AiToolMeta
@@ -20,8 +20,8 @@ from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.operation_log_service import operation_log_service
-from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.system.models.user import User
+from tests.modules.ai.test_atomic_prepared_completion import authenticated_actor
 
 
 @pytest.fixture
@@ -71,6 +71,9 @@ async def context_case(db_session):
         trace_id=marker,
         tenant=tenant,
     )
+    async with AsyncSessionLocal() as db:
+        deps.user = await authenticated_actor(case, db)
+        db.expunge_all()
     try:
         yield case
     finally:
@@ -303,20 +306,19 @@ async def test_pending_rejects_foreign_log_context_before_creating_action(
 
 
 async def test_start_log_waits_for_delete_lock_then_rejects_without_orphan(
-    context_case, monkeypatch
+    context_case,
 ):
     case = context_case
     writer_entered = asyncio.Event()
     writer_pid = None
-    original_lock = prepared_action_service.lock_source_binding
 
-    async def track_lock(db, **kwargs):
+    def track_lock(connection, _cursor, sql, _params, _context, _many):
         nonlocal writer_pid
-        writer_pid = await db.scalar(select(func.pg_backend_pid()))
-        writer_entered.set()
-        return await original_lock(db, **kwargs)
+        if "ai_conversation" in sql and "FOR UPDATE" in sql:
+            writer_pid = connection.connection.driver_connection.get_server_pid()
+            writer_entered.set()
 
-    monkeypatch.setattr(prepared_action_service, "lock_source_binding", track_lock)
+    event.listen(engine.sync_engine, "before_cursor_execute", track_lock)
     task = None
     async with AsyncSessionLocal() as deleter:
         await deleter.begin()
@@ -350,6 +352,7 @@ async def test_start_log_waits_for_delete_lock_then_rejects_without_orphan(
                 await asyncio.wait_for(task, timeout=2)
             assert await count_logs(case) == 0
         finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", track_lock)
             await deleter.rollback()
             if task is not None and not task.done():
                 task.cancel()

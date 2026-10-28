@@ -6,20 +6,20 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import delete, event, select
-from sqlalchemy.orm import Session, make_transient
+from sqlalchemy import delete, select
+from sqlalchemy.orm import make_transient
 
 from app.core import redis as redis_module
+from app.core.exceptions import BusinessException
+from app.db import authorization_chat_owner
 from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.gateway import executor
-from app.modules.ai.agents.hitl.constants import DryRunResult
 from app.modules.ai.agents.tools.registry import ToolRegistry
-from app.modules.ai.core.context import ChatDeps, DataScopeContext
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
-from app.modules.ai.service import preflight_completion_service as preflight_module
 from app.modules.ai.service.chat_run_service import chat_run_finalizer
+from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.completion_read_state_service import (
     UNKNOWN_COMPLETION,
     EffectiveCompletion,
@@ -27,7 +27,6 @@ from app.modules.ai.service.completion_read_state_service import (
     project_verified_content,
 )
 from app.modules.ai.service.conversation_service import conversation_service
-from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.ai.service.operation_status_projection import (
     project_operation as get_operation_log,
 )
@@ -42,13 +41,18 @@ from app.modules.ai.service.user_delete_dependency_service import (
     user_delete_dependency_service,
 )
 from app.modules.auth.service import load_live_user_authority
+from tests.modules.ai.test_atomic_prepared_completion import authenticated_actor
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )
 
 
 async def reject_preflight(
-    case, monkeypatch, expected_code="AI_PREVIEW_REJECTED", *, real_dry_run=False
+    case,
+    monkeypatch,
+    expected_code="AI_PREVIEW_REJECTED",
+    *,
+    missing_log=False,
 ):
     async with AsyncSessionLocal() as db, db.begin():
         source = await db.scalar(
@@ -67,16 +71,8 @@ async def reject_preflight(
     registered = ToolRegistry.get().find("user.create")
     handler = AsyncMock(side_effect=AssertionError("Business handler must not run"))
     monkeypatch.setattr(registered, "fn", handler)
-    if not real_dry_run:
-        monkeypatch.setattr(
-            registered,
-            "dry_run_fn",
-            AsyncMock(
-                return_value=DryRunResult(
-                    ok=False, count=0, reason="Username already exists"
-                )
-            ),
-        )
+    # Use the real duplicate-name preflight through the fixed adapter.
+    case.args = {**case.args, "user_name": "admin"}
     # Quota behavior has its own integration suite; don't spend a shared
     # actor's rolling budget across these protocol-corruption cases.
     monkeypatch.setattr(
@@ -88,25 +84,18 @@ async def reject_preflight(
     monkeypatch.setattr(executor, "check_l2_daily_quota", AsyncMock())
     monkeypatch.setattr(executor, "redis_client", redis_module.redis_client)
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
-        deps = ChatDeps(
-            user=actor,
-            perms=set(registered.meta.required_perms),
-            db=db,
-            data_scope=DataScopeContext(
-                tenant=case.tenant, accessible_dept_ids=None, accessible_user_scope=None
-            ),
-            agent=SimpleNamespace(
-                code="user_mgmt",
-                enabled=True,
-                risk_appetite="conservative",
-                daily_quota_per_user=None,
-            ),
+        actor = await authenticated_actor(case, db)
+        deps = await chat_service.build_chat_deps(
+            db,
+            actor,
+            agent_code="user_mgmt",
             trace_id=trace_id,
-            tenant=case.tenant,
             conversation_id=case.conversation_id,
-            source_user_message_id=source_id,
         )
+        deps.conversation_id = case.conversation_id
+        deps.source_user_message_id = source_id
+        db.expunge_all()
+        await db.rollback()
         result = await executor.execute_tool("user.create", case.args, deps)
     assert result.error_code == expected_code
     handler.assert_not_awaited()
@@ -116,6 +105,9 @@ async def reject_preflight(
                 AiOperationLog.conversation_id == case.conversation_id
             )
         )
+        if missing_log:
+            assert log is None
+            return None
         case.log_id, case.tool_call_id = log.log_id, log.tool_call_id
         assert (
             await db.scalar(
@@ -355,7 +347,7 @@ async def test_real_duplicate_username_preflight_never_executes(
 ):
     case = completion_case
     case.args = {**case.args, "user_name": "admin"}
-    log = await reject_preflight(case, monkeypatch, real_dry_run=True)
+    log = await reject_preflight(case, monkeypatch)
     state = (
         await completion_read_state_service.read(
             tenant=case.tenant, tool_call_ids=[log.tool_call_id]
@@ -409,43 +401,32 @@ async def test_preflight_proof_and_failure_share_transaction(
 ):
     case = completion_case
     attempts = []
-    original_summary = preflight_module.runtime_preflight_summary
-    original_failed = operation_log_service.mark_failed
+    original_commit = authorization_chat_owner.commit_authorization_session
 
-    def summary(log):
-        attempts.append(log.log_id)
-        if boundary == "before_commit" and len(attempts) == 1:
-            raise TimeoutError("rollback before proof persistence")
-        return original_summary(log)
-
-    async def mark_failed(db, *args, **kwargs):
-        row = await original_failed(db, *args, **kwargs)
-        db.sync_session.info["preflight_test_commit"] = True
-        return row
-
-    def after_commit(session):
-        if boundary == "after_commit" and session.info.pop(
-            "preflight_test_commit", False
-        ):
-            raise TimeoutError("server committed but acknowledgement unavailable")
-
-    monkeypatch.setattr(preflight_module, "runtime_preflight_summary", summary)
-    monkeypatch.setattr(operation_log_service, "mark_failed", mark_failed)
-    event.listen(Session, "after_commit", after_commit)
-    try:
-        log = await reject_preflight(
-            case,
-            monkeypatch,
-            "AI_INTERNAL_ERROR"
-            if boundary == "after_commit"
-            else "AI_PREVIEW_REJECTED",
+    async def unknown(db):
+        attempts.append(True)
+        if boundary == "after_commit":
+            await original_commit(db)
+        raise BusinessException(
+            503, "lost ACK", error_code="AUTHORIZATION_COMMIT_UNKNOWN"
         )
-    finally:
-        event.remove(Session, "after_commit", after_commit)
-    states = await completion_read_state_service.read(
-        tenant=case.tenant, tool_call_ids=[log.tool_call_id]
+
+    monkeypatch.setattr(
+        authorization_chat_owner, "commit_authorization_session", unknown
     )
-    assert states[log.tool_call_id].verified and not states[log.tool_call_id].unknown
+    log = await reject_preflight(
+        case, monkeypatch, "AI_INTERNAL_ERROR", missing_log=boundary == "before_commit"
+    )
+    assert attempts == [True]
+    if boundary == "before_commit":
+        assert log is None
+    else:
+        states = await completion_read_state_service.read(
+            tenant=case.tenant, tool_call_ids=[log.tool_call_id]
+        )
+        assert (
+            states[log.tool_call_id].verified and not states[log.tool_call_id].unknown
+        )
 
 
 @pytest.mark.parametrize("corrupt", [False, True])

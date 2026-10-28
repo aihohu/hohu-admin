@@ -18,7 +18,16 @@ from app.modules.ai.schemas.conversation import (
     ConversationUpdate,
 )
 from app.modules.ai.service.authorization_chat_candidate import chat_candidate
+from app.modules.ai.service.authorization_chat_ingress_candidate import (
+    chat_ingress_candidate,
+)
 from app.modules.ai.service.authorization_chat_model import select_model
+from app.modules.ai.service.authorization_gateway_audit_candidate import (
+    gateway_audit_candidate,
+)
+from app.modules.ai.service.authorization_gateway_read_candidate import (
+    gateway_read_candidate,
+)
 from app.modules.system.service.authorization_read_budget import (
     bounded_authorization_reads,
 )
@@ -95,6 +104,46 @@ class ChatOwner:
     async def source(self, **request):
         return await self._run("source", request)
 
+    async def start_operation(self, **request):
+        return await self._run("start_operation", request)
+
+    async def finish_operation(self, **request):
+        return await self._run("finish_operation", request)
+
+    async def read_tool(self, **request):
+        return await self._run("read_tool", request)
+
+    async def preflight(self, **request):
+        return await self._run("preflight", request)
+
+    async def start_run(self, **request):
+        return await self._run("start_run", request)
+
+    async def routing_audit(self, **request):
+        return await self._run("routing_audit", request)
+
+    async def select_model(self, **request):
+        choices = await self._run("model_candidates", request)
+        semaphore = asyncio.Semaphore(10)
+
+        async def allowed(choice):
+            async with semaphore:
+                egress = dict(choice.selection.egress)
+                return await provider_egress.is_model_allowed(
+                    egress.pop("provider_code"),
+                    egress.pop("base_url"),
+                    **egress,
+                )
+
+        async with asyncio.timeout(5):
+            checks = await asyncio.gather(*(allowed(choice) for choice in choices))
+        for choice, permitted in zip(choices, checks, strict=True):
+            if permitted:
+                return choice
+        raise BusinessRuleException(
+            "所选 AI 模型当前不可用", error_code="AI_MODEL_NOT_AVAILABLE"
+        )
+
     async def finalize(self, **request):
         return await self._run("finalize", request)
 
@@ -127,7 +176,8 @@ class ChatOwner:
                             TenantLock(
                                 request["tenant"].tenant_id,
                                 LockMode.EXCLUSIVE
-                                if operation == "conversation"
+                                if operation
+                                in {"conversation", "start_run", "routing_audit"}
                                 else LockMode.SHARED,
                             ),
                         ),
@@ -143,6 +193,34 @@ class ChatOwner:
                                         AiConversation, result, populate_existing=True
                                     )
                                 )
+                        elif operation == "model_candidates":
+                            result = await chat_ingress_candidate.model_candidates(
+                                db, tx, **request
+                            )
+                        elif operation == "start_run":
+                            result = await chat_ingress_candidate.start_run(
+                                db, tx, **request
+                            )
+                        elif operation == "routing_audit":
+                            result = await chat_ingress_candidate.routing_audit(
+                                db, tx, **request
+                            )
+                        elif operation == "start_operation":
+                            result = await gateway_audit_candidate.start_operation(
+                                db, tx, **request
+                            )
+                        elif operation == "finish_operation":
+                            result = await gateway_audit_candidate.finish_operation(
+                                db, tx, **request
+                            )
+                        elif operation == "read_tool":
+                            result = await gateway_read_candidate.read_tool(
+                                db, tx, **request
+                            )
+                        elif operation == "preflight":
+                            result = await gateway_read_candidate.preflight(
+                                db, tx, **request
+                            )
                         elif operation == "source":
                             result = await chat_candidate.source(db, tx, **request)
                         elif operation == "finalize":
@@ -164,7 +242,13 @@ class ChatOwner:
             except BaseException:
                 await rollback_authorization_session(db)
                 raise
-            if operation in {"messages", "list_conversations"}:
+            if operation in {
+                "messages",
+                "list_conversations",
+                "model_candidates",
+                "read_tool",
+                "preflight",
+            } or (operation == "finish_operation" and not result):
                 await rollback_authorization_session(db)
             else:
                 await commit_authorization_session(db)

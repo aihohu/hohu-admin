@@ -4,9 +4,10 @@ from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import insert, select, update
+from sqlalchemy import event, insert, select, update
 
 from app.core import file_storage
+from app.core.authorization_io import file_transform_worker
 from app.core.authorization_plan import LockMode, TenantLock
 from app.core.config import settings
 from app.core.exceptions import BusinessException
@@ -16,6 +17,7 @@ from app.db.authorization_preview_owner import PreviewOwner
 from app.db.authorization_transfer_owner import TransferOwner
 from app.db.base import role_menus
 from app.modules.ai.agents.gateway.failures import compute_args_hash
+from app.modules.ai.agents.tools import file_access
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
@@ -55,6 +57,67 @@ from tests.modules.system.test_authorization_system_candidate import (
 from tests.modules.system.test_authorization_system_candidate import (
     system_sessions as system_sessions,
 )
+
+
+@pytest.mark.parametrize("mutation", ["owner", "path", "version", "policy"])
+async def test_preview_rechecks_authority_and_file_after_worker(
+    chat_model_case, tmp_path, monkeypatch, mutation
+):
+    factory, plain, _case = chat_model_case
+    original = file_transform_worker.run
+    work = []
+
+    async def mutate_after_read(function, *args, **kwargs):
+        result = await original(function, *args, **kwargs)
+        work.append(function.__name__)
+        if function.__name__ == "read_preview_input":
+            async with plain() as db:
+                if mutation in {"owner", "path"}:
+                    if mutation == "owner":
+                        await db.execute(
+                            insert(User).values(
+                                tenant_id=0,
+                                user_id=999,
+                                user_name="file-new-owner",
+                                hashed_password="unusable",
+                                status="1",
+                            )
+                        )
+                    await db.execute(
+                        update(File)
+                        .where(File.file_id == 501)
+                        .values(
+                            **(
+                                {"owner_user_id": 999}
+                                if mutation == "owner"
+                                else {"file_path": str(tmp_path / "changed.csv")}
+                            )
+                        )
+                    )
+                elif mutation == "version":
+                    await db.execute(
+                        update(User).where(User.user_id == 101).values(auth_version=2)
+                    )
+                else:
+                    await db.execute(
+                        insert(SystemSetting).values(
+                            tenant_id=0,
+                            setting_key="upload:import_max_bytes",
+                            setting_value="1",
+                            status="1",
+                        )
+                    )
+                await db.commit()
+        return result
+
+    monkeypatch.setattr(file_transform_worker, "run", mutate_after_read)
+    with pytest.raises(BusinessException):
+        await test_preview_creates_bound_handoff_and_verified_history(
+            chat_model_case, tmp_path, monkeypatch, "preview_only"
+        )
+    assert work == ["read_preview_input"]
+    async with plain() as db:
+        assert await db.scalar(select(UserImportBatch.batch_id)) is None
 
 
 @pytest.mark.parametrize("outcome", ["execute_if_approved", "preview_only"])
@@ -130,6 +193,31 @@ async def test_preview_creates_bound_handoff_and_verified_history(
                     insert(role_menus).values(tenant_id=0, role_id=201, menu_id=index)
                 )
         await db.commit()
+    engine = plain.kw["bind"].sync_engine
+    active = set()
+
+    def begin(connection):
+        active.add(id(connection))
+
+    def end(connection):
+        active.discard(id(connection))
+
+    original_read = file_access.read_local_bounded
+    reads = []
+
+    def checked_read(*args, **kwargs):
+        reads.append(bool(active))
+        if len(reads) == 1:
+            assert not active, (
+                "preview preparation must run outside database transactions"
+            )
+        return original_read(*args, **kwargs)
+
+    event.listen(engine, "begin", begin)
+    event.listen(engine, "rollback", end)
+    event.listen(engine, "commit", end)
+    monkeypatch.setattr(file_access, "read_local_bounded", checked_read)
+    # The fixture disposes the isolated engine after this test.
     result = await PreviewOwner(factory).preview(
         file_id="501",
         reason="onboarding",
@@ -140,6 +228,10 @@ async def test_preview_creates_bound_handoff_and_verified_history(
         tenant=case.tenant,
         actor_user_version=1,
     )
+    assert reads == [False, True]  # Final FILE phase verifies the source digest.
+    event.remove(engine, "begin", begin)
+    event.remove(engine, "rollback", end)
+    event.remove(engine, "commit", end)
     assert (
         bool(result.confirmation_id) == (outcome == "execute_if_approved")
         and result.batch_id

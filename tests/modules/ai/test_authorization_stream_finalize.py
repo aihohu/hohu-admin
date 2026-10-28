@@ -39,6 +39,12 @@ from tests.modules.ai.test_completion_read_projection import stored_facts
 async def test_actual_chat_stream_persists_after_source_and_routing_commits(
     completion_case, monkeypatch
 ):
+    await run_chat(completion_case, monkeypatch)
+
+
+async def run_chat(
+    completion_case, monkeypatch, *, egress_check=None, agent_code="user_mgmt"
+):
     case = completion_case
     assert (await approve(case, decision="reject")).data.status == "rejected"
     trace_id = "tr_" + uuid4().hex
@@ -47,7 +53,7 @@ async def test_actual_chat_stream_persists_after_source_and_routing_commits(
         "id": "stream-owner-test",
         "conversationId": str(case.conversation_id),
         "traceId": trace_id,
-        "agentCode": "user_mgmt",
+        "agentCode": agent_code,
         "messages": [
             {
                 "id": "new-source",
@@ -81,7 +87,9 @@ async def test_actual_chat_stream_persists_after_source_and_routing_commits(
         chat_module.chat_service, "create_agent", AsyncMock(return_value=object())
     )
     monkeypatch.setattr(
-        provider_egress, "is_model_allowed", AsyncMock(return_value=True)
+        provider_egress,
+        "is_model_allowed",
+        egress_check or AsyncMock(return_value=True),
     )
     try:
         async with AsyncSessionLocal() as db:
@@ -108,7 +116,7 @@ async def test_actual_chat_stream_persists_after_source_and_routing_commits(
                 _current_user=actor,
             )
             chunks = [chunk async for chunk in response.body_iterator]
-            assert db._request_released and db._request_wrote
+            assert db._request_released and not db._request_wrote
             with pytest.raises(BusinessException):
                 await db.execute(select(AiMessage.message_id).limit(1))
         frames = [

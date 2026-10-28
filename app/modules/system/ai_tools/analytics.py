@@ -125,10 +125,10 @@ async def user_stats(
 
     col = getattr(User, group_by)
     stmt = (
-        select(col, func.count(User.user_id))
+        select(col, func.pg_catalog.count(User.user_id))
         .where(*ctx.data_scope.filters)
         .group_by(col)
-        .order_by(func.count(User.user_id).desc())
+        .order_by(func.pg_catalog.count(User.user_id).desc())
         .limit(ctx.tool_meta.max_groups)
     )
     for key, value in filters.items():
@@ -241,7 +241,7 @@ async def role_count(
         validate_filters_in_whitelist(ctx.tool_meta, filters)
     )
 
-    stmt = select(func.count(Role.role_id)).where(
+    stmt = select(func.pg_catalog.count(Role.role_id)).where(
         Role.tenant_id == ctx.tenant.tenant_id
     )
     for key, value in filters.items():

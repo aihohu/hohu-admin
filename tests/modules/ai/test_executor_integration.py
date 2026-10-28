@@ -46,6 +46,7 @@ from app.modules.ai.models.message import AiMessage
 from app.modules.system.models.tenant import Tenant
 from app.modules.system.models.user import User
 from tests.committed_database import committed_test_database  # noqa: F401
+from tests.modules.ai.gateway_protocol_boundary import install_protocol_boundaries
 
 
 @pytest.fixture
@@ -131,6 +132,7 @@ async def clean_env(monkeypatch, executor_contexts):
     通过 _build_deps 写入的行 trace_id 都以 'tr_test_' 前缀开头（如 tr_test_001 /
     tr_test_agent_pass / tr_test_agent_full），用 LIKE 精准清理，生产数据保持不动。
     """
+    install_protocol_boundaries(monkeypatch)
     original_pool = redis_module.redis_pool
     original_client = redis_module.redis_client
     monkeypatch.setattr(ToolRegistry, "_instance", ToolRegistry())

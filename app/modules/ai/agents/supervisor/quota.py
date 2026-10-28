@@ -44,12 +44,17 @@ async def increment_daily_count(r, user_id: int, *, tenant: TenantContext) -> in
 
 
 async def check_supervisor_quota(
-    db: AsyncSession, *, user_id: int, tenant: TenantContext
+    db: AsyncSession,
+    *,
+    user_id: int,
+    tenant: TenantContext,
+    daily_limit: int | None = None,
 ) -> QuotaResult:
     """检查 Supervisor 日配额是否超限。"""
-    daily_limit = await get_ai_config_int(
-        db, "ai:supervisor_daily_limit", default=100, tenant=tenant
-    )
+    if daily_limit is None:
+        daily_limit = await get_ai_config_int(
+            db, "ai:supervisor_daily_limit", default=100, tenant=tenant
+        )
     current = await get_daily_count(redis_client, user_id, tenant=tenant)
     if current >= daily_limit:
         return QuotaResult(

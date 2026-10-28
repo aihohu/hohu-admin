@@ -24,7 +24,14 @@ class ChatModelSelection:
     egress: dict = field(repr=False)
 
 
-async def select_model(db, tenant, model_ref):
+@dataclass(frozen=True, slots=True, repr=False)
+class PlannedChatModel:
+    model: AiModel
+    provider: AiProvider
+    selection: ChatModelSelection
+
+
+async def model_candidates(db, tenant, model_ref):
     rows = (
         await db.execute(
             select(AiModel, AiProvider, TenantAiModelPolicy)
@@ -44,6 +51,7 @@ async def select_model(db, tenant, model_ref):
             .execution_options(populate_existing=True)
         )
     ).all()
+    choices = []
     for model, provider, policy in rows:
         if "text" not in (model.capabilities or []) or (
             model_ref is not None
@@ -57,7 +65,7 @@ async def select_model(db, tenant, model_ref):
                 for row in (model, provider, policy)
             ]
         )
-        return ChatModelSelection(
+        selection = ChatModelSelection(
             tenant.tenant_id,
             model.model_id,
             provider.provider_id,
@@ -77,9 +85,21 @@ async def select_model(db, tenant, model_ref):
                 "model_id": model.model_id,
             },
         )
+        choices.append(PlannedChatModel(model, provider, selection))
+    if choices:
+        if len(choices) > 512:
+            raise BusinessRuleException(
+                "Too many model candidates",
+                error_code="AUTHORIZATION_PLAN_LIMIT_EXCEEDED",
+            )
+        return tuple(choices)
     raise BusinessRuleException(
         "所选 AI 模型当前不可用", error_code="AI_MODEL_NOT_AVAILABLE"
     )
+
+
+async def select_model(db, tenant, model_ref):
+    return (await model_candidates(db, tenant, model_ref))[0].selection
 
 
 async def recheck_model(db, tx, tenant, selection):

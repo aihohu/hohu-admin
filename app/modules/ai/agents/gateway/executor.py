@@ -20,7 +20,6 @@ ChatDeps.signal_event 注入 SSE 事件回调。
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -28,7 +27,6 @@ from typing import TYPE_CHECKING, Any
 
 from redis.exceptions import RedisError
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.exceptions import (
@@ -496,7 +494,7 @@ async def _execute_tool(
             preflight_failure=dry_run_outcome.failure,
         )
     except LogWriteError as e:
-        # _start_log 重试 3 次仍失败 → 业务还没执行，必须终止避免漏审计行
+        # 起始日志未获得已知 ACK → 业务还没执行，必须终止。
         # 不抛给 LLM，转 ToolResult.failure
         logger.critical(
             "execute_tool aborted: _start_log failed, business NOT executed",
@@ -1136,12 +1134,7 @@ async def _run_dry_run(
         return _DryRunOutcome()
 
     try:
-        async with AsyncSessionLocal() as dry_db:
-            async with dry_db.begin():
-                dry_ctx = build_tool_context(deps, dry_db, registered.meta)
-                dr: DryRunResult = await with_l3_timeout(
-                    registered.dry_run_fn(dry_ctx, **args), tenant=deps.tenant
-                )
+        dr: DryRunResult = await _preflight_tool(registered, args, deps)
         if not dr.ok:
             return _DryRunOutcome(
                 failure=ToolResult.failure(
@@ -1199,112 +1192,41 @@ async def _start_log(
     *,
     preflight_failure: ToolResult | None = None,
 ) -> int:
-    """写入 ai_operation_log 起始行；失败必须向上传播。
+    """Persist a bound start once; execution requires a known commit ACK."""
+    from app.db import authorization_http  # noqa: PLC0415
+    from app.db.authorization_plan_session import _order_error  # noqa: PLC0415
+    from app.modules.auth.service import access_identity  # noqa: PLC0415
 
-    initial status：autonomous → RUNNING；HITL → PENDING_CONFIRMATION
-
-    与 `_finish_log_final` 不同，`_start_log` 失败时业务**还没执行**，
-    必须抛异常终止 execute_tool —— 否则业务执行了但无审计行，audit gap 比
-    业务失败更严重。`_with_log_retry` 在 3 次重试后仍失败时抛
-    `LogWriteError`，execute_tool 内部捕获并返回 ToolResult.failure。
-    """
-    initial_status = (
-        AiOperationStatus.RUNNING
-        if mode == AiExecutionMode.AUTONOMOUS and preflight_failure is None
-        else AiOperationStatus.PENDING_CONFIRMATION
-    )
-
-    async def _op(log_db: AsyncSession) -> int:
-        from app.modules.ai.models.message import AiMessage  # noqa: PLC0415
-
-        if (
-            any(
-                isinstance(value, bool) or not isinstance(value, int) or value <= 0
-                for value in (
-                    deps.conversation_id,
-                    deps.source_user_message_id,
-                    deps.user.user_id,
-                )
+    try:
+        identity = access_identity(deps.user)
+        if identity.tenant != deps.tenant:
+            raise _order_error()
+        return (
+            await authorization_http.get_authorization_runtime().chat.start_operation(
+                tenant=identity.tenant,
+                actor_user_version=identity.user_version,
+                conversation_id=deps.conversation_id,
+                source_id=deps.source_user_message_id,
+                trace_id=deps.trace_id,
+                tool_name=registered.meta.name,
+                agent_code=deps.agent.code if deps.agent else registered.meta.agent,
+                tool_call_id=tool_call_id,
+                args_hash=args_hash,
+                args_summary=args_summary,
+                readonly=registered.meta.readonly,
+                risk=registered.meta.risk,
+                mode=mode.value,
+                injection_hit=deps.injection_hit,
+                preflight_error=(
+                    preflight_failure.error_code or "AI_INTERNAL_ERROR"
+                    if preflight_failure is not None
+                    else None
+                ),
             )
-            or deps.user.user_id != deps.tenant.actor_user_id
-            or not deps.trace_id
-        ):
-            raise LogWriteError("operation log requires a bound live conversation")
-        await log_db.execute(select(func.set_config("lock_timeout", "2s", True)))
-        if not await prepared_action_service.lock_source_binding(
-            log_db,
-            conversation_id=deps.conversation_id,
-            source_user_message_id=deps.source_user_message_id,
-            user_id=deps.user.user_id,
-            tenant=deps.tenant,
-        ) or deps.trace_id != await log_db.scalar(
-            select(AiMessage.trace_id).where(
-                AiMessage.tenant_id == deps.tenant.tenant_id,
-                AiMessage.message_id == deps.source_user_message_id,
-            )
-        ):
-            raise LogWriteError("operation log source is missing or no longer active")
-        log_id = await operation_log_service.start_operation(
-            log_db,
-            trace_id=deps.trace_id,
-            conversation_id=deps.conversation_id or 0,
-            tenant=deps.tenant,
-            source_user_message_id=deps.source_user_message_id,
-            readonly_snapshot=registered.meta.readonly,
-            agent_code=deps.agent.code if deps.agent else registered.meta.agent,
-            user_id=deps.user.user_id,
-            tool_name=registered.meta.name,
-            tool_call_id=tool_call_id,
-            args_hash=args_hash,
-            args_summary=args_summary,
-            risk_level=registered.meta.risk,
-            execution_mode=mode.value,
-            status=initial_status,
-            is_security_event=deps.injection_hit,
-            event_type="injection_pattern_matched" if deps.injection_hit else None,
         )
-        if preflight_failure is not None:
-            from app.modules.ai.service.preflight_completion_service import (  # noqa: PLC0415
-                runtime_preflight_summary,
-            )
-
-            log = await operation_log_service.mark_failed(
-                log_db,
-                log_id,
-                tenant=deps.tenant,
-                error_code=preflight_failure.error_code or "AI_INTERNAL_ERROR",
-                duration_ms=0,
-            )
-            if not registered.meta.readonly:
-                log.result_summary = runtime_preflight_summary(log)
-                await log_db.flush()
-        return log_id
-
-    return await _with_log_retry("start_operation", log_id=None, op=_op)
-
-
-async def _finish_log_running(log_id: int, *, tenant: TenantContext) -> None:
-    """HITL approved → status pending_confirmation → running，失败最多重试三次。"""
-
-    async def _op(log_db: AsyncSession) -> None:
-        await operation_log_service.mark_running(log_db, log_id, tenant=tenant)
-
-    await _with_log_retry("mark_running", log_id=log_id, op=_op, raise_on_failure=False)
-
-
-async def _finish_log_rejected(
-    log_id: int, user_id: int, *, tenant: TenantContext
-) -> None:
-    """HITL rejected → status pending_confirmation → rejected，失败最多重试三次。"""
-
-    async def _op(log_db: AsyncSession) -> None:
-        await operation_log_service.mark_rejected(
-            log_db, log_id, approved_by=user_id, tenant=tenant
-        )
-
-    await _with_log_retry(
-        "mark_rejected", log_id=log_id, op=_op, raise_on_failure=False
-    )
+    except Exception as exc:
+        # A lost ACK may have persisted the audit. Never retry or run the handler.
+        raise LogWriteError("operation audit admission failed") from exc
 
 
 async def _finish_log_final(
@@ -1314,174 +1236,38 @@ async def _finish_log_final(
     *,
     tenant: TenantContext,
 ) -> None:
-    """业务执行结束后写入日志终态，失败最多重试三次且不向业务传播。
+    """Attempt fixed factual completion once; never overwrite a durable owner."""
+    from app.db import authorization_http  # noqa: PLC0415
 
-    业务事务已先于本函数提交或回滚，因此终态日志失败不能反向回滚业务；
-      - 3 次重试（0.5s / 1s / 1.5s backoff）后仍失败 → logger.critical
-        （未来 Prometheus 接入时挂 `ai_log_write_failure_total{status}` counter）
-      - 不抛异常：业务已成功 = 用户感知成功，审计 gap 走告警追查
-    """
-    duration_ms = int((time.monotonic() - started_at) * 1000)
-
-    async def _op(log_db: AsyncSession) -> None:
-        if await _log_has_durable_owner(log_db, log_id, tenant=tenant):
-            return
-        if result.ok:
-            summary = (
-                f"ok, keys={sorted(result.data.keys())}"
-                if isinstance(result.data, dict)
-                else "ok"
-            )
-            await operation_log_service.mark_success(
-                log_db,
-                log_id,
-                result_summary=summary,
-                duration_ms=duration_ms,
-                target_summary=build_target_summary(
-                    result.projection.subject_refs if result.projection else None
-                ),
-                tenant=tenant,
-            )
-        else:
-            await operation_log_service.mark_failed(
-                log_db,
-                log_id,
-                error_code=result.error_code or "AI_INTERNAL_ERROR",
-                duration_ms=duration_ms,
-                tenant=tenant,
-            )
-
-    status_label = "success" if result.ok else "failed"
-    await _with_log_retry(
-        f"mark_{status_label}",
-        log_id=log_id,
-        op=_op,
-        raise_on_failure=False,
+    duration_ms = max(0, min(2**31 - 1, int((time.monotonic() - started_at) * 1000)))
+    summary = (
+        f"ok, keys={sorted(result.data.keys())}"
+        if isinstance(result.data, dict)
+        else "ok"
     )
-
-
-async def _log_has_durable_owner(
-    db: AsyncSession, log_id: int, *, tenant: TenantContext
-) -> bool:
-    """Serialize fallback writes behind confirmation ownership and log state.
-
-    Confirm owns every PA-bound log, including success after its execution
-    owner is cleared. Never lock a log before its C/source/PA context.
-    """
-    lookup = (
-        select(AiPreparedAction)
-        .join(
-            AiOperationLog,
-            (AiOperationLog.tenant_id == AiPreparedAction.tenant_id)
-            & (AiOperationLog.tool_call_id == AiPreparedAction.execute_tool_call_id),
+    try:
+        await authorization_http.get_authorization_runtime().chat.finish_operation(
+            tenant=tenant,
+            log_id=log_id,
+            succeeded=result.ok,
+            duration_ms=duration_ms,
+            result_summary=summary if result.ok else None,
+            target_summary=build_target_summary(
+                result.projection.subject_refs if result.projection else None
+            )
+            if result.ok
+            else None,
+            error_code=None if result.ok else result.error_code or "AI_INTERNAL_ERROR",
         )
-        .where(
-            AiOperationLog.tenant_id == tenant.tenant_id,
-            AiOperationLog.log_id == log_id,
+    except Exception:
+        logger.exception(
+            "Operation audit completion unavailable; no replay",
+            extra={"log_id": log_id},
         )
-    )
-    action = await db.scalar(lookup)
-    if action is not None:
-        context = await prepared_action_service.lock_confirmation_context(
-            db, confirmation_id=action.confirmation_id, tenant=tenant
-        )
-        if context is None:
-            return True
-    log = await db.scalar(
-        select(AiOperationLog)
-        .where(
-            AiOperationLog.tenant_id == tenant.tenant_id,
-            AiOperationLog.log_id == log_id,
-        )
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
-    if action is not None or (
-        log is not None and AiOperationStatus(log.status).is_terminal
-    ):
-        return True
-    # If PA creation raced the initial discovery, fail closed without taking
-    # context locks after the log lock. Its owning confirm will finalize it.
-    return await db.scalar(lookup) is not None
-
-
-# ============ 日志写入重试 ============
 
 
 class LogWriteError(RuntimeError):
-    """log 写入 3 次重试后仍失败。_start_log 路径必须抛此异常让 execute_tool 终止。"""
-
-
-_LOG_RETRY_ATTEMPTS = 3
-_LOG_RETRY_DELAYS_SEC = (0.5, 1.0, 1.5)  # 第 N 次失败后 sleep 的秒数
-
-
-async def _with_log_retry(
-    operation: str,
-    *,
-    log_id: int | None,
-    op: Callable[[AsyncSession], Awaitable[Any]],
-    raise_on_failure: bool = True,
-) -> Any:
-    """带退避的日志写入重试。
-
-    Args:
-        operation: 操作名（start_operation / mark_success / mark_failed / 等），
-                   仅用于 log message
-        log_id: 已知的 log_id（start_operation 路径还没 log_id 传 None）
-        op: async 函数，接收 log_db session 执行业务
-        raise_on_failure: True = 3 次失败后抛 LogWriteError（_start_log 用）；
-                          False = 3 次失败后 logger.critical + 返回 None
-                          （_finish_log_* 用，避免业务已成功后被审计拖垮）
-
-    重试策略：
-      - attempt 1: 立即执行
-      - attempt 2: sleep 0.5s 后重试
-      - attempt 3: sleep 1.0s 后重试
-      - 仍失败: sleep 1.5s 不再重试，按 raise_on_failure 决定
-
-    捕获的异常：DBAPIError / OperationalError / TimeoutError。其它异常（如
-    ProgrammingError = SQL bug）直接抛，不浪费重试预算。
-    """
-    from sqlalchemy.exc import DBAPIError, OperationalError  # noqa: PLC0415
-
-    last_exc: Exception | None = None
-    for attempt in range(1, _LOG_RETRY_ATTEMPTS + 1):
-        try:
-            async with AsyncSessionLocal() as log_db:
-                async with log_db.begin():
-                    return await op(log_db)
-        except (DBAPIError, OperationalError, TimeoutError) as e:
-            last_exc = e
-            if attempt < _LOG_RETRY_ATTEMPTS:
-                delay = _LOG_RETRY_DELAYS_SEC[attempt - 1]
-                logger.warning(
-                    "ai_operation_log write failed, retrying",
-                    extra={
-                        "operation": operation,
-                        "log_id": log_id,
-                        "attempt": attempt,
-                        "delay_sec": delay,
-                        "error": str(e),
-                    },
-                )
-                await asyncio.sleep(delay)
-
-    # 3 次都失败
-    logger.critical(
-        "ai_operation_log 最终态写入失败 3 次（audit gap，业务结果以 tool 返回值为准）",
-        extra={
-            "operation": operation,
-            "log_id": log_id,
-            "error": str(last_exc),
-            # Prometheus 接入后改为: counter ai_log_write_failure_total{operation}
-        },
-    )
-    if raise_on_failure:
-        raise LogWriteError(
-            f"{operation} failed after {_LOG_RETRY_ATTEMPTS} attempts"
-        ) from last_exc
-    return None
+    """Audit admission failed or its commit is unknown; execution must stop."""
 
 
 # ============ 人工确认挂起 / 唤醒 ============
@@ -2067,6 +1853,50 @@ def _summary_to_dict(s: DryRunSummary | None) -> dict[str, Any] | None:
 # ============ 业务执行（独立 session + L3 超时 + 脱敏） ============
 
 
+async def _read_tool(registered, args, deps):
+    """Fixed production read boundary; callers cannot supply a handler/session."""
+    from app.db import authorization_http  # noqa: PLC0415
+    from app.db.authorization_plan_session import _order_error  # noqa: PLC0415
+    from app.modules.auth.service import access_identity  # noqa: PLC0415
+
+    identity = access_identity(deps.user)
+    if identity.tenant != deps.tenant:
+        raise _order_error()
+    return await authorization_http.get_authorization_runtime().chat.read_tool(
+        tenant=identity.tenant,
+        actor_user_version=identity.user_version,
+        conversation_id=deps.conversation_id,
+        source_id=deps.source_user_message_id,
+        trace_id=deps.trace_id,
+        agent_code=deps.agent.code if deps.agent else None,
+        scope_hash=deps.data_scope_hash,
+        tool=registered.meta.name,
+        args=args,
+    )
+
+
+async def _preflight_tool(registered, args, deps):
+    """Fixed production dry-run boundary; callers cannot supply a handler/session."""
+    from app.db import authorization_http  # noqa: PLC0415
+    from app.db.authorization_plan_session import _order_error  # noqa: PLC0415
+    from app.modules.auth.service import access_identity  # noqa: PLC0415
+
+    identity = access_identity(deps.user)
+    if identity.tenant != deps.tenant:
+        raise _order_error()
+    return await authorization_http.get_authorization_runtime().chat.preflight(
+        tenant=identity.tenant,
+        actor_user_version=identity.user_version,
+        conversation_id=deps.conversation_id,
+        source_id=deps.source_user_message_id,
+        trace_id=deps.trace_id,
+        agent_code=deps.agent.code if deps.agent else None,
+        scope_hash=deps.data_scope_hash,
+        tool=registered.meta.name,
+        args=args,
+    )
+
+
 async def _invoke_tool_fn(
     registered: RegisteredTool,
     args: dict[str, Any],
@@ -2089,6 +1919,27 @@ async def _invoke_tool_fn(
     user_id = deps.user.user_id
 
     try:
+        if meta.readonly:
+            result = await _read_tool(registered, args, deps)
+            result.data = serialize_for_llm(meta.sensitive_output, result.data)
+            try:
+                async with asyncio.timeout(2):
+                    await clear_failures(
+                        redis_client, user_id, meta.name, args_hash, tenant=deps.tenant
+                    )
+            except (RedisError, TimeoutError):
+                logger.warning("Read tool failure-cache cleanup unavailable")
+            cache_module = meta.chip_target or meta.query_cache_module
+            if cache_module and deps.trace_id:
+                _safe_write_query_cache(
+                    meta,
+                    args,
+                    deps,
+                    user_id,
+                    projection=result.projection,
+                    module=cache_module,
+                )
+            return result
         async with AsyncSessionLocal() as tool_db:
             async with tool_db.begin():
                 tool_ctx = build_tool_context(
@@ -2232,21 +2083,22 @@ def _safe_write_query_cache(
 
     async def _write() -> None:
         try:
-            await set_query_cache(
-                redis_client,
-                trace_id=deps.trace_id,
-                tool_name=meta.name,
-                module=cache_module,
-                filters=safe_filters,
-                user_id=user_id,
-                tenant=deps.tenant,
-                agent_code=deps.agent.code if deps.agent else meta.agent,
-                projection=projection,
-                data_scope_hash=deps.data_scope_hash,
-                projection_dependency_message_ids=(
-                    deps.projection_dependency_message_ids
-                ),
-            )
+            async with asyncio.timeout(2):
+                await set_query_cache(
+                    redis_client,
+                    trace_id=deps.trace_id,
+                    tool_name=meta.name,
+                    module=cache_module,
+                    filters=safe_filters,
+                    user_id=user_id,
+                    tenant=deps.tenant,
+                    agent_code=deps.agent.code if deps.agent else meta.agent,
+                    projection=projection,
+                    data_scope_hash=deps.data_scope_hash,
+                    projection_dependency_message_ids=(
+                        deps.projection_dependency_message_ids
+                    ),
+                )
         except Exception:
             logger.exception(
                 "query_cache write failed (ignored)",

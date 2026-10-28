@@ -380,6 +380,14 @@ async def load_protected_file(
     ):
         raise _not_found()
 
+    tenant_policy = await file_policy_service.resolve(
+        ctx.db, "ai_file", tenant=ctx.tenant
+    )
+    return read_protected_file(record, policy=policy, tenant_policy=tenant_policy)
+
+
+def read_protected_file(record, *, policy, tenant_policy) -> ProtectedFile:
+    """Read validated metadata using an already resolved upload policy; no DB IO."""
     if record.business_type not in policy.allowed_business_types:
         raise _type_not_allowed()
 
@@ -390,9 +398,6 @@ async def load_protected_file(
         raise _type_not_allowed()
 
     # Deployment settings may lower the tool limit but can never raise it.
-    tenant_policy = await file_policy_service.resolve(
-        ctx.db, "ai_file", tenant=ctx.tenant
-    )
     if extension not in tenant_policy.extensions:
         raise _type_not_allowed()
     max_bytes = min(policy.max_bytes, tenant_policy.max_bytes)
