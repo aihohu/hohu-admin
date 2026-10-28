@@ -11,8 +11,10 @@ from app.core.exceptions import BusinessException
 from app.db.authorization_ai_owner import AIAuthorizationOwner
 from app.db.authorization_lease_owner import LeaseOwner
 from app.db.authorization_lifecycle_owner import LifecycleOwner
+from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
+from app.modules.ai.service.authorization_lifecycle_candidate import lifecycle_candidate
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.user import User
 from tests.modules.ai.test_authorization_gateway_execution import (
@@ -51,6 +53,71 @@ async def pending_case(execution_case):
         )
         await db.commit()
     return factory, plain, case
+
+
+@pytest.mark.parametrize("active_source", [True, False])
+async def test_startup_preserves_unexpired_pending_with_active_source(
+    pending_case, active_source
+):
+    factory, plain, case = pending_case
+    async with plain() as db:
+        await db.execute(
+            update(AiPreparedAction).values(
+                expires_at=datetime.now(UTC) + timedelta(minutes=5)
+            )
+        )
+        await db.execute(update(AiMessage).values(is_active=active_source))
+        await db.commit()
+    page = await AIAuthorizationOwner(factory).expire_page(startup=True)
+    assert page.items[0].disposition == (
+        "pending_confirmation" if active_source else "expired"
+    )
+    async with plain() as db:
+        action = await db.scalar(select(AiPreparedAction))
+        if active_source:
+            assert action.status == "pending_confirmation" and action.row_version == 1
+        else:
+            assert (
+                action.status == "expired"
+                and action.error_code == "AI_PREPARED_ACTION_SOURCE_STALE"
+            )
+        assert await epoch(db) == 1
+
+
+async def test_startup_does_not_rebuild_guard_after_concurrent_claim(
+    pending_case, monkeypatch
+):
+    factory, plain, case = pending_case
+    original = lifecycle_candidate._locked
+
+    async def claimed(*args, **kwargs):
+        async with plain() as db:
+            await db.execute(
+                update(AiPreparedAction).values(
+                    status="running",
+                    row_version=3,
+                    execution_owner=case.claim.execution_owner,
+                    approved_by=case.tenant.actor_user_id,
+                    approved_at=datetime.now(UTC),
+                    execution_lease_expires_at=datetime.now(UTC)
+                    + timedelta(seconds=90),
+                )
+            )
+            await db.execute(
+                update(AiOperationLog).values(
+                    status="running",
+                    approved_by=case.tenant.actor_user_id,
+                    started_at=datetime.now(UTC).replace(tzinfo=None),
+                )
+            )
+            await db.commit()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(lifecycle_candidate, "_locked", claimed)
+    page = await AIAuthorizationOwner(factory).expire_page(startup=True)
+    assert page.items[0].disposition == "unknown"
+    async with plain() as db:
+        assert await db.scalar(select(AiPreparedAction.status)) == "running"
 
 
 async def test_confirm_executes_once(pending_case):

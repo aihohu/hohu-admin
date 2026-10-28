@@ -1,241 +1,176 @@
-"""Durable prepared-action startup recovery tests."""
+"""Production startup recovery through real complete transaction plans."""
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
-from tenant_helpers import tenant_context
+from sqlalchemy import select, update
 
 from app.core.tenant import PlatformContext
-from app.modules.ai.lifecycle import cleanup_prepared_actions_on_startup
+from app.db.authorization_ai_owner import AIAuthorizationOwner
+from app.modules.ai import lifecycle
+from app.modules.ai.models.message import AiMessage
+from app.modules.ai.models.operation_log import AiOperationLog
+from app.modules.ai.models.prepared_action import AiPreparedAction
+from app.modules.ai.service.authorization_lifecycle_candidate import lifecycle_candidate
+from tests.modules.ai.test_authorization_background_recovery import (
+    execution_case as execution_case,
+)
+from tests.modules.ai.test_authorization_background_recovery import (
+    pending_case as pending_case,
+)
+from tests.modules.ai.test_authorization_background_recovery import (
+    plan_sessions as plan_sessions,
+)
+from tests.modules.ai.test_authorization_background_recovery import (
+    recovery_case as recovery_case,
+)
+from tests.modules.ai.test_authorization_background_recovery import (
+    system_sessions as system_sessions,
+)
 
 PLATFORM = PlatformContext(
-    actor_principal_id=0,
-    actor_name="test-ai-lifecycle",
-    principal_type="service",
-    permissions=frozenset({"platform:ai:lifecycle"}),
-    reason="startup recovery test",
-    ticket_id="TEST-LIFECYCLE",
-    correlation_id="plan3",
+    0,
+    "ai-lifecycle",
+    "service",
+    frozenset({"platform:ai:lifecycle"}),
+    "startup recovery",
+    "TEST",
+    "startup",
 )
-TENANT = tenant_context(actor_user_id=103)
+
+
+@pytest.fixture
+async def entry(pending_case, monkeypatch):
+    factory, plain, case = pending_case
+    runtime = SimpleNamespace(recovery=AIAuthorizationOwner(factory))
+    monkeypatch.setattr(lifecycle, "get_authorization_runtime", lambda: runtime)
+    monkeypatch.setattr(lifecycle, "_recovery_after", None)
+    monkeypatch.setattr(lifecycle, "_recovery_startup_before", None)
+    return plain, case
 
 
 @pytest.mark.parametrize(
     "current_status", ["pending_confirmation", "approved", "running"]
 )
-async def test_periodic_expiry_rechecks_status_before_finalizing(current_status):
-    candidate = SimpleNamespace(
-        action_id=9100,
-        confirmation_id="cid_expiry",
-        status="pending_confirmation",
-        expires_at=datetime.now(UTC) - timedelta(seconds=1),
-        guard_owner_token=None,
-        conversation_id=100,
-        tenant_id=0,
-        user_id=103,
-        execute_tool_call_id="tc_expiry",
-        row_version=1,
-    )
-    current = SimpleNamespace(**vars(candidate))
-    current.status = current_status
-    scan_db, cleanup_db = MagicMock(), MagicMock()
-    scan_result = MagicMock()
-    scan_result.scalars.return_value.all.return_value = [candidate]
-    scan_db.execute = AsyncMock(return_value=scan_result)
-    cleanup_db.begin.return_value.__aenter__ = AsyncMock()
-    cleanup_db.begin.return_value.__aexit__ = AsyncMock()
-    cleanup_db.execute = AsyncMock()
-    factory = MagicMock()
-    factory.return_value.__aenter__ = AsyncMock(side_effect=[scan_db, cleanup_db])
-    factory.return_value.__aexit__ = AsyncMock()
-    with (
-        patch("app.modules.ai.lifecycle.AsyncSessionLocal", factory),
-        patch(
-            "app.modules.ai.lifecycle._tenant_context", AsyncMock(return_value=TENANT)
-        ),
-        patch(
-            "app.modules.ai.lifecycle.prepared_action_service.lock_confirmation_context",
-            AsyncMock(return_value=SimpleNamespace(action=current)),
-        ),
-        patch(
-            "app.modules.ai.lifecycle.prepared_action_service.transition_status",
-            AsyncMock(return_value=current),
-        ) as transition,
-        patch(
-            "app.modules.ai.lifecycle.operation_log_service.get_by_tool_call_id",
-            AsyncMock(return_value=None),
-        ),
-        patch(
-            "app.modules.ai.lifecycle.chat_run_finalizer.finalize_prepared_action",
-            AsyncMock(),
-        ) as finalize,
-        patch("app.modules.ai.lifecycle.hitl_manager.delete_pending", AsyncMock()),
-    ):
-        cleaned = await cleanup_prepared_actions_on_startup(
-            MagicMock(), platform=PLATFORM, expired_only=True
+async def test_periodic_expiry_rechecks_status_before_finalizing(
+    entry, monkeypatch, current_status
+):
+    plain, _ = entry
+    async with plain() as db:
+        await db.execute(
+            update(AiPreparedAction).values(
+                expires_at=datetime.now(UTC) - timedelta(seconds=1)
+            )
         )
-    compiled = scan_db.execute.await_args.args[0].compile()
-    assert "expires_at <=" in str(compiled)
-    assert "approved" not in compiled.params.values()
+        await db.commit()
+    original = lifecycle_candidate._locked
+
+    async def claimed(*args, **kwargs):
+        if current_status != "pending_confirmation":
+            async with plain() as db:
+                await db.execute(
+                    update(AiPreparedAction).values(
+                        status=current_status,
+                        row_version=2 if current_status == "approved" else 3,
+                    )
+                )
+                await db.commit()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(lifecycle_candidate, "_locked", claimed)
+    cleaned = await lifecycle.cleanup_prepared_actions_on_startup(
+        AsyncMock(), platform=PLATFORM, expired_only=True
+    )
     assert cleaned == (1 if current_status == "pending_confirmation" else 0)
-    if cleaned:
-        assert transition.await_args.kwargs["target_status"].value == "expired"
-        finalize.assert_awaited_once()
-    else:
-        transition.assert_not_awaited()
-        finalize.assert_not_awaited()
-
-
-async def test_startup_keeps_unexpired_pending_when_redis_was_flushed() -> None:
-    action = SimpleNamespace(
-        action_id=9001,
-        confirmation_id="cid_durable_9001",
-        status="pending_confirmation",
-        expires_at=datetime.now(UTC) + timedelta(minutes=5),
-        guard_owner_token=None,
-        conversation_id=100,
-        tenant_id=0,
-        user_id=103,
-    )
-    db = MagicMock()
-    result = MagicMock()
-    result.scalars.return_value.all.return_value = [action]
-    db.execute = AsyncMock(return_value=result)
-    session_factory = MagicMock()
-    session_factory.return_value.__aenter__ = AsyncMock(return_value=db)
-    session_factory.return_value.__aexit__ = AsyncMock(return_value=None)
-
-    with (
-        patch("app.modules.ai.lifecycle.AsyncSessionLocal", session_factory),
-        patch(
-            "app.modules.ai.lifecycle.prepared_action_service.transition_status",
-            AsyncMock(),
-        ) as transition,
-        patch(
-            "app.modules.ai.lifecycle.prepared_action_service.pending_source_is_valid",
-            AsyncMock(return_value=True),
-        ),
-        patch(
-            "app.modules.ai.lifecycle._tenant_context", AsyncMock(return_value=TENANT)
-        ),
-    ):
-        cleaned = await cleanup_prepared_actions_on_startup(
-            MagicMock(), platform=PLATFORM
+    async with plain() as db:
+        assert await db.scalar(select(AiPreparedAction.status)) == (
+            "expired" if cleaned else current_status
+        )
+        assert await db.scalar(select(AiOperationLog.status)) == (
+            "expired" if cleaned else "pending_confirmation"
         )
 
-    assert cleaned == 0
-    transition.assert_not_awaited()
 
-
-async def test_startup_keeps_running_action_with_live_execution_lease() -> None:
-    """滚动发布时不能把仍由其它 Pod 执行的 action 标为失败。"""
-    action = SimpleNamespace(
-        action_id=9003,
-        confirmation_id="cid_running_9003",
-        status="running",
-        expires_at=datetime.now(UTC) + timedelta(minutes=5),
-        execution_lease_expires_at=datetime.now(UTC) + timedelta(seconds=45),
-        guard_owner_token="guard-live",
-        conversation_id=102,
-        tenant_id=0,
-        user_id=103,
-    )
-    db = MagicMock()
-    result = MagicMock()
-    result.scalars.return_value.all.return_value = [action]
-    db.execute = AsyncMock(return_value=result)
-    session_factory = MagicMock()
-    session_factory.return_value.__aenter__ = AsyncMock(return_value=db)
-    session_factory.return_value.__aexit__ = AsyncMock(return_value=None)
-
-    with (
-        patch("app.modules.ai.lifecycle.AsyncSessionLocal", session_factory),
-        patch(
-            "app.modules.ai.lifecycle.prepared_action_service.transition_status",
-            AsyncMock(),
-        ) as transition,
-        patch(
-            "app.modules.ai.lifecycle._tenant_context", AsyncMock(return_value=TENANT)
-        ),
-    ):
-        cleaned = await cleanup_prepared_actions_on_startup(
-            MagicMock(), platform=PLATFORM
+async def test_startup_keeps_unexpired_pending_when_redis_was_flushed(entry):
+    plain, _ = entry
+    async with plain() as db:
+        await db.execute(
+            update(AiPreparedAction).values(
+                expires_at=datetime.now(UTC) + timedelta(minutes=5)
+            )
         )
-
-    assert cleaned == 0
-    transition.assert_not_awaited()
-
-
-async def test_startup_expires_unexpired_pending_when_source_is_orphaned() -> None:
-    action = SimpleNamespace(
-        action_id=9002,
-        confirmation_id="cid_orphaned_9002",
-        status="pending_confirmation",
-        expires_at=datetime.now(UTC) + timedelta(minutes=5),
-        guard_owner_token=None,
-        conversation_id=101,
-        source_user_message_id=102,
-        user_id=103,
-        tenant_id=0,
-        execute_tool_call_id="tc_orphaned_9002",
-        row_version=1,
-    )
-    scan_db = MagicMock()
-    scan_result = MagicMock()
-    scan_result.scalars.return_value.all.return_value = [action]
-    scan_db.execute = AsyncMock(return_value=scan_result)
-
-    cleanup_db = MagicMock()
-    cleanup_db.execute = AsyncMock()
-    cleanup_db.begin = MagicMock()
-    cleanup_db.begin.return_value.__aenter__ = AsyncMock(return_value=None)
-    cleanup_db.begin.return_value.__aexit__ = AsyncMock(return_value=None)
-
-    session_factory = MagicMock()
-    session_factory.return_value.__aenter__ = AsyncMock(
-        side_effect=[scan_db, cleanup_db]
-    )
-    session_factory.return_value.__aexit__ = AsyncMock(return_value=None)
-    transition = AsyncMock(return_value=action)
-
-    with (
-        patch("app.modules.ai.lifecycle.AsyncSessionLocal", session_factory),
-        patch(
-            "app.modules.ai.lifecycle.prepared_action_service.pending_source_is_valid",
-            AsyncMock(return_value=False),
-        ),
-        patch(
-            "app.modules.ai.lifecycle.prepared_action_service.lock_confirmation_context",
-            AsyncMock(return_value=SimpleNamespace(action=action)),
-        ),
-        patch(
-            "app.modules.ai.lifecycle.prepared_action_service.transition_status",
-            transition,
-        ),
-        patch(
-            "app.modules.ai.lifecycle.operation_log_service.get_by_tool_call_id",
-            AsyncMock(return_value=None),
-        ),
-        patch(
-            "app.modules.ai.lifecycle.chat_run_finalizer.finalize_prepared_action",
-            AsyncMock(return_value=None),
-        ),
-        patch(
-            "app.modules.ai.lifecycle.hitl_manager.delete_pending",
-            AsyncMock(return_value=None),
-        ),
-        patch(
-            "app.modules.ai.lifecycle._tenant_context", AsyncMock(return_value=TENANT)
-        ),
-    ):
-        cleaned = await cleanup_prepared_actions_on_startup(
-            MagicMock(), platform=PLATFORM
-        )
-
-    assert cleaned == 1
-    assert transition.await_args.kwargs["target_status"].value == "expired"
+        await db.commit()
+    redis = AsyncMock()
     assert (
-        transition.await_args.kwargs["error_code"] == "AI_PREPARED_ACTION_SOURCE_STALE"
+        await lifecycle.cleanup_prepared_actions_on_startup(redis, platform=PLATFORM)
+        == 0
     )
+    async with plain() as db:
+        assert (
+            await db.scalar(select(AiPreparedAction.status)) == "pending_confirmation"
+        )
+    redis.delete.assert_not_awaited()
+
+
+async def test_startup_keeps_running_action_with_live_execution_lease(entry):
+    plain, case = entry
+    async with plain() as db:
+        await db.execute(
+            update(AiPreparedAction).values(
+                status="running",
+                row_version=3,
+                approved_by=101,
+                approved_at=datetime.now(UTC),
+                execution_owner=case.claim.execution_owner,
+                execution_lease_expires_at=datetime.now(UTC) + timedelta(seconds=45),
+            )
+        )
+        await db.execute(
+            update(AiOperationLog).values(
+                status="running",
+                approved_by=101,
+                started_at=datetime.now(UTC).replace(tzinfo=None),
+            )
+        )
+        await db.commit()
+    assert (
+        await lifecycle.cleanup_prepared_actions_on_startup(
+            AsyncMock(), platform=PLATFORM
+        )
+        == 0
+    )
+    async with plain() as db:
+        assert await db.scalar(select(AiPreparedAction.status)) == "running"
+        assert await db.scalar(select(AiOperationLog.status)) == "running"
+
+
+async def test_startup_expires_unexpired_pending_when_source_is_orphaned(entry):
+    plain, _ = entry
+    async with plain() as db:
+        await db.execute(
+            update(AiPreparedAction).values(
+                expires_at=datetime.now(UTC) + timedelta(minutes=5)
+            )
+        )
+        await db.execute(update(AiMessage).values(is_active=False))
+        await db.commit()
+    assert (
+        await lifecycle.cleanup_prepared_actions_on_startup(
+            AsyncMock(), platform=PLATFORM
+        )
+        == 1
+    )
+    async with plain() as db:
+        action = await db.scalar(select(AiPreparedAction))
+        assert (
+            action.status == "expired"
+            and action.error_code == "AI_PREPARED_ACTION_SOURCE_STALE"
+        )
+        assert (
+            await db.scalar(
+                select(AiMessage.message_id).where(AiMessage.role == "assistant")
+            )
+            is None
+        )

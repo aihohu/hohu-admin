@@ -1,5 +1,6 @@
 """Explicit pending decision/claim state transitions under complete proofs."""
 
+from dataclasses import dataclass
 from datetime import timedelta
 from uuid import uuid4
 
@@ -17,16 +18,24 @@ from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.atomic_completion_service import (
+    DB_TOOLS,
+    FILE_TOOLS,
     ClaimBinding,
     _check_log,
+    atomic_completion_service,
     is_protocol_owner,
+    is_registered_readonly_action,
 )
 from app.modules.ai.service.authorization_chat_model import recheck_model, select_model
 from app.modules.ai.service.authorization_context_candidate import ai_context_candidate
 from app.modules.ai.service.authorization_execution_candidate import (
     ai_execution_candidate,
 )
+from app.modules.ai.service.authorization_recovery_candidate import (
+    ai_recovery_candidate,
+)
 from app.modules.ai.service.prepared_action_service import prepared_action_service
+from app.modules.ai.service.reconciliation_annotation import has_annotation
 from app.modules.ai.service.result_projection_service import result_projection_service
 from app.modules.auth.service import load_live_user_authority
 from app.modules.system.service.authorization_ai_tool_adapter import (
@@ -38,7 +47,206 @@ from app.modules.system.service.authorization_control_identity import (
 )
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class SweepResult:
+    action: object = None
+    disposition: str = "unknown"
+    changed: bool = False
+
+
 class LifecycleCandidate:
+    async def sweep(
+        self, db, tx, confirmation_id, *, locator, startup, startup_before=None
+    ):
+        tx.assert_session(db)
+        if type(startup) is not bool:
+            raise _order_error()
+        reference = await self.reference(db, confirmation_id, tenant=locator)
+        if reference is None:
+            return SweepResult()
+        if (
+            reference.status in {"running", "succeeded", "failed"}
+            and reference.execute_tool_name in DB_TOOLS | FILE_TOOLS
+        ):
+            return await ai_recovery_candidate.reconcile(
+                db, tx, confirmation_id, tenant=locator, allow_fence=True
+            )
+        readonly = is_registered_readonly_action(reference)
+        if (
+            reference.status not in {"pending_confirmation", "expired", "rejected"}
+            and not readonly
+        ):
+            return SweepResult()
+        action, conversation, source, log = await self._locked(
+            db, tx, reference, locator, None
+        )
+        readonly = is_registered_readonly_action(action)
+        if action.status in {"expired", "rejected", "failed", "succeeded"}:
+            if readonly:
+                self.verify_readonly_terminal(action, log)
+            elif (
+                action.status in {"expired", "rejected"}
+                and action.execute_tool_name in DB_TOOLS | FILE_TOOLS
+            ):
+                atomic_completion_service.validate_locked_unexecuted_terminal(
+                    action,
+                    log,
+                    tenant=locator,
+                    conversation=conversation,
+                    source=source,
+                )
+            else:
+                return SweepResult()
+            return SweepResult(action, action.status)
+        if action.status not in {"pending_confirmation", "approved", "running"}:
+            return SweepResult()
+        if (
+            action.error_code is not None
+            or action.finished_at is not None
+            or log.finished_at is not None
+        ):
+            return SweepResult()
+        if readonly:
+            expected = {
+                "tenant_id": action.tenant_id,
+                "user_id": action.user_id,
+                "conversation_id": action.conversation_id,
+                "source_user_message_id": action.source_user_message_id,
+                "trace_id": action.trace_id,
+                "agent_code": action.agent_code,
+                "tool_name": action.execute_tool_name,
+                "tool_call_id": action.execute_tool_call_id,
+                "confirmation_id": action.confirmation_id,
+                "args_hash": action.args_hash,
+                "readonly_snapshot": True,
+                "execution_mode": "hitl",
+                "error_code": None,
+            }
+            if any(getattr(log, key) != value for key, value in expected.items()):
+                return SweepResult()
+        elif action.status == "pending_confirmation":
+            _check_log(action, log, "pending_confirmation")
+        else:
+            return SweepResult()
+        now = await tx.database_now()
+        if action.status == "pending_confirmation":
+            if (
+                action.row_version != 1
+                or action.execution_owner is not None
+                or log.status != "pending_confirmation"
+                or log.started_at is not None
+            ):
+                return SweepResult()
+            if action.expires_at > now:
+                if not startup or (
+                    source.is_active and conversation.deleted_at is None
+                ):
+                    return SweepResult(action, "pending_confirmation")
+                code = "AI_PREPARED_ACTION_SOURCE_STALE"
+            else:
+                code = "AI_HITL_EXPIRED"
+            status = "expired"
+        elif readonly and action.status == "approved" and startup:
+            if startup_before is not None and (
+                action.approved_at is None or action.approved_at > startup_before
+            ):
+                return SweepResult()
+            if log.status not in {"pending_confirmation", "running"}:
+                return SweepResult()
+            status, code = "failed", "AI_PREPARED_ACTION_EXECUTION_INTERRUPTED"
+        elif readonly and action.status == "running":
+            if (
+                log.status != "running"
+                or log.started_at is None
+                or (
+                    action.execution_lease_expires_at is not None
+                    and action.execution_lease_expires_at > now
+                )
+            ):
+                return SweepResult()
+            status, code = "failed", "AI_PREPARED_ACTION_EXECUTION_INTERRUPTED"
+        else:
+            return SweepResult()
+        await tx.update_factual(
+            ResourceKey(K.PREPARED_ACTION, locator.tenant_id, action.action_id),
+            {
+                "status": status,
+                "row_version": action.row_version + 1,
+                "finished_at": now,
+                "error_code": code,
+                "execution_owner": None,
+                "execution_lease_expires_at": None,
+                "duration_ms": 0,
+            },
+            expected={
+                "status": action.status,
+                "row_version": action.row_version,
+                "execution_owner": action.execution_owner,
+            },
+        )
+        await tx.update_factual(
+            ResourceKey(K.OPERATION_LOG, locator.tenant_id, log.log_id),
+            {
+                "status": "expired"
+                if log.status == "pending_confirmation"
+                else "failed",
+                "finished_at": max(
+                    now.replace(tzinfo=None),
+                    log.queued_at,
+                    log.started_at or log.queued_at,
+                ),
+                "error_code": code,
+                "duration_ms": log.duration_ms or 0,
+            },
+            expected={"status": log.status, "finished_at": None},
+        )
+        action = await self.reference(db, confirmation_id, tenant=locator)
+        return SweepResult(action, status, True)
+
+    @staticmethod
+    def verify_readonly_terminal(action, log):
+        statuses = {
+            "expired": {"expired"},
+            "failed": {"expired", "failed"},
+            "succeeded": {"success"},
+            "rejected": {"rejected"},
+        }
+        if (
+            log is None
+            or action.status not in statuses
+            or not is_registered_readonly_action(action)
+            or action.finished_at is None
+            or action.row_version < 2
+            or (action.status == "succeeded" and action.error_code is not None)
+            or (action.status in {"expired", "failed"} and not action.error_code)
+            or action.execution_owner is not None
+            or action.execution_lease_expires_at is not None
+            or compute_args_hash(action.frozen_args) != action.args_hash
+            or compute_args_hash(action.snapshot) != action.snapshot_hash
+            or log.status not in statuses[action.status]
+            or log.finished_at is None
+            or log.finished_at < log.queued_at
+            or (log.started_at is not None and log.finished_at < log.started_at)
+            or has_annotation(log.result_summary)
+        ):
+            raise _order_error()
+        expected = {
+            "tenant_id": action.tenant_id,
+            "user_id": action.user_id,
+            "conversation_id": action.conversation_id,
+            "source_user_message_id": action.source_user_message_id,
+            "trace_id": action.trace_id,
+            "agent_code": action.agent_code,
+            "tool_name": action.execute_tool_name,
+            "confirmation_id": action.confirmation_id,
+            "args_hash": action.args_hash,
+            "readonly_snapshot": True,
+            "execution_mode": "hitl",
+            "error_code": action.error_code,
+        }
+        if any(getattr(log, key) != value for key, value in expected.items()):
+            raise _order_error()
+
     async def prepare(
         self,
         db,
@@ -452,9 +660,23 @@ class LifecycleCandidate:
         if reference is None:
             raise _order_error()
         action, _, _, log = await self._locked(db, tx, reference, locator, None)
-        return await self._finish_decision(
-            tx, locator, action, log, "startup" if startup else "expire"
-        )
+        if (
+            action.status != "pending_confirmation"
+            or action.row_version != 1
+            or action.execution_owner is not None
+        ):
+            raise _order_error()
+        _check_log(action, log, "pending_confirmation")
+        now = await tx.database_now()
+        if action.expires_at > now:
+            if not startup or await prepared_action_service.pending_source_is_valid(
+                db, action, tenant=locator
+            ):
+                return "pending_confirmation"
+            decision = "source_stale"
+        else:
+            decision = "sweep_expire"
+        return await self._finish_decision(tx, locator, action, log, decision)
 
     async def _finish_decision(self, tx, tenant, action, log, decision):
         now = await tx.database_now()
@@ -468,15 +690,13 @@ class LifecycleCandidate:
         _check_log(action, log, "pending_confirmation")
         rejected = decision == "reject"
         status = "rejected" if rejected else "expired"
-        code = (
-            "USER_REJECTED"
-            if rejected
-            else "AI_PREPARED_ACTION_EXPIRED"
-            if decision == "expire"
-            else "AI_PREPARED_ACTION_INTERRUPTED"
-            if decision == "startup"
-            else "AI_PREPARED_ACTION_CANCELLED"
-        )
+        code = {
+            "reject": "USER_REJECTED",
+            "expire": "AI_PREPARED_ACTION_EXPIRED",
+            "startup": "AI_PREPARED_ACTION_INTERRUPTED",
+            "source_stale": "AI_PREPARED_ACTION_SOURCE_STALE",
+            "sweep_expire": "AI_HITL_EXPIRED",
+        }.get(decision, "AI_PREPARED_ACTION_CANCELLED")
         approved_by = tenant.actor_user_id if rejected else None
         await tx.update_factual(
             ResourceKey(K.PREPARED_ACTION, tenant.tenant_id, action.action_id),

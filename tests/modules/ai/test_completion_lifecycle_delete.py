@@ -42,14 +42,32 @@ async def test_registered_readonly_cache_terminal_compatibility(
     completion_case, tool, owner, status, expected
 ):
     case = completion_case
-    async with AsyncSessionLocal() as db:
+    now = datetime.now(UTC)
+    async with AsyncSessionLocal() as db, db.begin():
         action = await db.get(AiPreparedAction, case.action_id)
+        log = await db.get(AiOperationLog, case.log_id)
         action.execute_tool_name = tool
         action.status = status
         action.execution_owner = owner
-        assert (
-            await lifecycle._cache_terminal_is_verified(db, action, tenant=case.tenant)
-        ) is expected
+        action.execution_lease_expires_at = None
+        action.row_version = 4
+        action.finished_at = now
+        action.error_code = (
+            "AI_PREPARED_ACTION_EXECUTION_INTERRUPTED" if status == "failed" else None
+        )
+        log.tool_name = tool
+        log.readonly_snapshot = tool == "user.list"
+        log.status = "failed" if status == "failed" else "success"
+        log.finished_at = now.replace(tzinfo=None)
+        log.started_at = now.replace(tzinfo=None)
+        log.error_code = action.error_code
+    result = await lifecycle.get_authorization_runtime().recovery.observe_cached(
+        tenant_id=case.tenant.tenant_id,
+        user_id=case.tenant.actor_user_id,
+        confirmation_id=case.confirmation_id,
+        redis=AsyncMock(),
+    )
+    assert (result.disposition != "unknown") is expected
 
 
 @pytest.mark.parametrize(
@@ -102,7 +120,7 @@ async def test_legacy_write_orphan_never_synthesizes_completion(monkeypatch, sta
     db = AsyncMock()
     db.scalar.return_value = None
     finalize, delete = AsyncMock(), AsyncMock()
-    monkeypatch.setattr(lifecycle.chat_run_finalizer, "finalize_pending_turn", finalize)
+    monkeypatch.setattr(chat_run_finalizer, "finalize_pending_turn", finalize)
     monkeypatch.setattr(lifecycle.hitl_manager, "delete_pending", delete)
     await lifecycle.finalize_orphaned_pending(
         db,

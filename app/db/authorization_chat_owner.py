@@ -78,8 +78,18 @@ class ChatOwner:
     async def finalize(self, **request):
         return await self._run("finalize", request)
 
+    async def recover(self, *, tenant, confirmation_id):
+        return await self._run(
+            "recover", {"tenant": tenant, "confirmation_id": confirmation_id}
+        )
+
     async def messages(self, **request):
         return await self._run("messages", request)
+
+    async def recover_orphan(self, *, tenant, confirmation_id):
+        return await self._run(
+            "recover_orphan", {"tenant": tenant, "confirmation_id": confirmation_id}
+        )
 
     async def invalidate(self, **request):
         return await self._run("invalidate", request)
@@ -108,6 +118,12 @@ class ChatOwner:
                             result = await chat_candidate.source(db, tx, **request)
                         elif operation == "finalize":
                             result = await chat_candidate.finalize(db, tx, **request)
+                        elif operation == "recover":
+                            result = await chat_candidate.recover(db, tx, **request)
+                        elif operation == "recover_orphan":
+                            result = await chat_candidate.recover_orphan(
+                                db, tx, **request
+                            )
                         elif operation == "invalidate":
                             result = await chat_candidate.invalidate(db, tx, **request)
                         else:

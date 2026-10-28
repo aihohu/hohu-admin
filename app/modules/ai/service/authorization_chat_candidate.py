@@ -12,10 +12,16 @@ from app.core.id_generator import next_id
 from app.db.authorization_plan_session import _order_error
 from app.modules.ai.agents.gateway.failures import compute_args_hash
 from app.modules.ai.agents.gateway.redact import redact_secrets
+from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
+from app.modules.ai.service.atomic_completion_service import (
+    DB_TOOLS,
+    FILE_TOOLS,
+    is_registered_readonly_action,
+)
 from app.modules.ai.service.authorization_chat_model import recheck_model
 from app.modules.ai.service.authorization_completion_projection import (
     project_completions,
@@ -28,9 +34,17 @@ from app.modules.ai.service.chat_run_service import (
     enforce_import_error_output_redaction,
 )
 from app.modules.ai.service.conversation_service import conversation_service
-from app.modules.ai.service.reconciliation_annotation import reconciliation_notice
+from app.modules.ai.service.preflight_completion_service import has_preflight_marker
+from app.modules.ai.service.reconciliation_annotation import (
+    has_annotation,
+    reconciliation_notice,
+)
 from app.modules.ai.service.result_projection_service import result_projection_service
-from app.modules.auth.service import load_live_user_authority
+from app.modules.auth.service import (
+    load_background_projection_authority,
+    load_live_user_authority,
+)
+from app.modules.system.models.user import User
 from app.modules.system.service.authorization_control_identity import (
     assert_identity,
     read_identity,
@@ -107,7 +121,15 @@ class ChatCandidate:
         return key.identity[0]
 
     async def _lock(
-        self, db, tx, *, tenant, actor_user_version, conversation_id, new=()
+        self,
+        db,
+        tx,
+        *,
+        tenant,
+        actor_user_version,
+        conversation_id,
+        new=(),
+        background=False,
     ):
         identity = await read_identity(
             db,
@@ -121,7 +143,11 @@ class ChatCandidate:
         await tx.lock(LockPlan(existing=(*identity.keys, *inventory.keys), new=new))
         await ai_context_candidate.recheck(db, tx, inventory)
         await assert_identity(db, identity)
-        actor = await load_live_user_authority(db, tenant=tenant)
+        actor = (
+            await load_background_projection_authority(db, tenant=tenant, tx=tx)
+            if background and tenant.source == "platform_control"
+            else await load_live_user_authority(db, tenant=tenant)
+        )
         ensure_ai_chat_use(actor)
         conversation = await db.get(
             AiConversation, conversation_id, populate_existing=True
@@ -309,6 +335,62 @@ class ChatCandidate:
                 expected={"deleted_at": None},
             )
 
+    async def recover(self, db, tx, *, tenant, confirmation_id):
+        reference = await lifecycle_candidate.reference(
+            db, confirmation_id, tenant=tenant
+        )
+        if reference is None:
+            raise _order_error()
+        version = await db.scalar(
+            select(User.auth_version).where(
+                User.tenant_id == tenant.tenant_id, User.user_id == tenant.actor_user_id
+            )
+        )
+        return await self.finalize(
+            db,
+            tx,
+            tenant=tenant,
+            actor_user_version=version,
+            conversation_id=reference.conversation_id,
+            source_id=reference.source_user_message_id,
+            trace_id=reference.trace_id,
+            content="",
+            tool_calls=[],
+            agent_code=reference.agent_code,
+            recovery_confirmation_id=confirmation_id,
+        )
+
+    async def recover_orphan(self, db, tx, *, tenant, confirmation_id):
+        reference = (
+            await db.execute(
+                select(AiOperationLog).where(
+                    AiOperationLog.tenant_id == tenant.tenant_id,
+                    AiOperationLog.user_id == tenant.actor_user_id,
+                    AiOperationLog.confirmation_id == confirmation_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if reference is None:
+            raise _order_error()
+        version = await db.scalar(
+            select(User.auth_version).where(
+                User.tenant_id == tenant.tenant_id, User.user_id == tenant.actor_user_id
+            )
+        )
+        return await self.finalize(
+            db,
+            tx,
+            tenant=tenant,
+            actor_user_version=version,
+            conversation_id=reference.conversation_id,
+            source_id=reference.source_user_message_id,
+            trace_id=reference.trace_id,
+            content="",
+            tool_calls=[],
+            agent_code=reference.agent_code,
+            recovery_log=(reference.log_id, confirmation_id),
+        )
+
     async def finalize(
         self,
         db,
@@ -322,6 +404,8 @@ class ChatCandidate:
         content,
         tool_calls,
         agent_code,
+        recovery_confirmation_id=None,
+        recovery_log=None,
     ):
         if (
             type(content) is not str
@@ -348,6 +432,7 @@ class ChatCandidate:
             actor_user_version=actor_user_version,
             conversation_id=conversation_id,
             new=() if existing else (NewResource(key, parent),),
+            background=recovery_confirmation_id is not None or recovery_log is not None,
         )
         source = await db.get(AiMessage, source_id, populate_existing=True)
         if (
@@ -362,6 +447,21 @@ class ChatCandidate:
         actions, logs = await self._facts(
             db, tenant, conversation_id, source_id=source_id, trace_id=trace_id
         )
+        if recovery_confirmation_id is not None:
+            action = next(
+                (a for a in actions if a.confirmation_id == recovery_confirmation_id),
+                None,
+            )
+            if action is None or action.status not in {
+                "expired",
+                "failed",
+                "succeeded",
+                "rejected",
+            }:
+                raise _order_error()
+            if content or tool_calls or action.agent_code != agent_code:
+                raise _order_error()
+            tool_calls = [{"tool_call_id": action.execute_tool_call_id}]
         protected, unknown, lineages = await chat_run_finalizer._protected_cards(
             db,
             conversation=conversation,
@@ -369,7 +469,84 @@ class ChatCandidate:
             actions=actions,
             logs=logs,
             tenant=tenant,
+            actor=actor,
         )
+        if recovery_confirmation_id is not None and is_registered_readonly_action(
+            action
+        ):
+            lineage, card = await self._readonly_recovery_card(
+                db, tenant, actor, action, logs
+            )
+            protected[action.execute_tool_call_id] = card
+            if lineage is not None:
+                lineages.append(lineage)
+        if recovery_log is not None:
+            log = next((v for v in logs.values() if v.log_id == recovery_log[0]), None)
+            if (
+                content
+                or tool_calls
+                or recovery_confirmation_id is not None
+                or log is None
+                or log.confirmation_id != recovery_log[1]
+                or log.agent_code != agent_code
+            ):
+                raise _order_error()
+            if (
+                await db.scalar(
+                    select(AiPreparedAction.action_id).where(
+                        AiPreparedAction.tenant_id == tenant.tenant_id,
+                        AiPreparedAction.confirmation_id == recovery_log[1],
+                    )
+                )
+                is not None
+            ):
+                raise _order_error()
+            registered = ToolRegistry.get().find(log.tool_name)
+            if (
+                registered is None
+                or registered.meta.readonly is not True
+                or registered.meta.agent != log.agent_code
+                or log.tool_name in DB_TOOLS | FILE_TOOLS
+                or log.readonly_snapshot is not True
+                or log.execution_mode != "hitl"
+                or log.status not in {"expired", "failed", "rejected"}
+                or log.finished_at is None
+                or log.user_id != tenant.actor_user_id
+                or has_annotation(log.result_summary)
+                or has_preflight_marker(log.result_summary)
+            ):
+                raise _order_error()
+            lineage = result_projection_service.freeze_lineage(
+                tenant=tenant,
+                agent_code=log.agent_code,
+                tool_codes=[log.tool_name],
+                subject_refs=[],
+                data_scope_hash=await result_projection_service.compute_data_scope_hash(
+                    db, actor
+                ),
+            )
+            if not await result_projection_service.authorize_result_projection(
+                db, actor, owner_user_id=tenant.actor_user_id, lineage=lineage
+            ):
+                raise _order_error()
+            protected[log.tool_call_id] = {
+                "tool": log.tool_name,
+                "tool_call_id": log.tool_call_id,
+                "ok": False,
+                "error_code": log.error_code
+                or (
+                    "USER_REJECTED" if log.status == "rejected" else "AI_INTERNAL_ERROR"
+                ),
+                "error_msg": "确认已过期，请重新发起"
+                if log.status == "expired"
+                else "操作未完成，请重新发起",
+                "result": None,
+                "ui": None,
+                "args": {},
+                "duration_ms": log.duration_ms or 0,
+            }
+            tool_calls = [{"tool_call_id": log.tool_call_id}]
+            lineages.append(lineage)
         # Unknown user-supplied write cards are never accepted as a result source.
         known = set(logs)
         if any(
@@ -545,6 +722,36 @@ class ChatCandidate:
                 expected={"content": message.content, "tool_calls": message.tool_calls},
             )
         return key.identity[0]
+
+    async def _readonly_recovery_card(self, db, tenant, actor, action, logs):
+        if action.status == "succeeded":
+            # Legacy readonly summaries are not reconstructible result payloads.
+            raise _order_error()
+        log = logs.get(action.execute_tool_call_id)
+        lifecycle_candidate.verify_readonly_terminal(action, log)
+        lineage = result_projection_service.lineage_from_record(action)
+        if (
+            lineage is None
+            or action.execute_tool_name not in lineage.tool_codes
+            or not await result_projection_service.authorize_result_projection(
+                db, actor, owner_user_id=tenant.actor_user_id, lineage=lineage
+            )
+        ):
+            return None, None
+        return lineage, {
+            "tool": action.execute_tool_name,
+            "tool_call_id": action.execute_tool_call_id,
+            "ok": False,
+            "error_code": action.error_code,
+            "error_msg": "确认已过期，请重新发起"
+            if action.status == "expired"
+            else "执行已中断，请重新发起",
+            "result": None,
+            "ui": None,
+            "duration_ms": action.duration_ms or 0,
+            "trace_id": action.trace_id,
+            "args": {},
+        }
 
     async def _facts(
         self, db, tenant, conversation_id, *, source_id=None, trace_id=None

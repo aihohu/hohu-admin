@@ -22,6 +22,7 @@ from app.constants import (
     REDIS_BLACKLIST_TTL,
     STATUS_ENABLED,
 )
+from app.core.authorization_plan import ResourceKey, ResourceKind
 from app.core.base_response import ResponseModel
 from app.core.config import settings
 from app.core.exceptions import (
@@ -442,6 +443,29 @@ async def refresh_access_token(refresh_token: str) -> tuple[str, str]:
 
 async def load_live_user_authority(db: AsyncSession, *, tenant: TenantContext) -> User:
     """Reload authorization facts at a long-running operation's commit boundary."""
+    user = await _load_user_authority(db, tenant=tenant)
+    bind_tenant_context(user, tenant)
+    return user
+
+
+async def load_background_projection_authority(db, *, tenant, tx):
+    """A locked current projection identity is never a verified JWT identity."""
+    tx.assert_session(db)
+    tx.assert_held(
+        ResourceKey(ResourceKind.TENANT, None, tenant.tenant_id),
+        ResourceKey(ResourceKind.USER, tenant.tenant_id, tenant.actor_user_id),
+    )
+    if type(tenant) is not TenantContext or tenant.source != "platform_control":
+        raise AuthenticationException(
+            "后台展示身份无效", error_code="TENANT_CONTEXT_INVALID"
+        )
+    user = await _load_user_authority(db, tenant=tenant)
+    user.__dict__.pop("_verified_access_identity", None)
+    user._tenant_context = tenant
+    return user
+
+
+async def _load_user_authority(db: AsyncSession, *, tenant: TenantContext) -> User:
     user = await db.scalar(
         select(User)
         .where(User.user_id == tenant.actor_user_id, User.tenant_id == tenant.tenant_id)
@@ -463,7 +487,6 @@ async def load_live_user_authority(db: AsyncSession, *, tenant: TenantContext) -
         raise AuthorizationException(
             "当前账号或租户已不可用", error_code="AI_TOOL_PERM_DENIED"
         )
-    bind_tenant_context(user, tenant)
     return user
 
 

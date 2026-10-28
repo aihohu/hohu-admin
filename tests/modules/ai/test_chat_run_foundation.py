@@ -715,7 +715,9 @@ class TestConversationRunGuard:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("readonly", [False, True])
-async def test_startup_cleanup_commits_before_owned_guard_release(readonly) -> None:
+async def test_startup_cache_readonly_flag_cannot_reclassify_database_tool(
+    readonly,
+) -> None:
     order: list[str] = []
     db = AsyncMock()
     redis = AsyncMock()
@@ -774,9 +776,8 @@ async def test_startup_cleanup_commits_before_owned_guard_release(readonly) -> N
             tenant=tenant_context(),
         )
 
-    assert order == (
-        ["operation", "finalizer", "commit", "release", "delete"] if readonly else []
-    )
+    assert order == []
+    db.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -835,7 +836,8 @@ async def test_startup_cleanup_does_not_overwrite_committed_terminal_message(
         )
 
     finalize.assert_not_awaited()
-    assert order == (["commit", "release", "delete"] if readonly else [])
+    assert order == []
+    db.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
