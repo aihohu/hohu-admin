@@ -128,11 +128,6 @@ _NAMESPACE_REGISTRY: dict[str, tuple[str, str, tuple[str, ...]]] = {
         "tenant",
         ("tenant_id", "ArtifactExecution"),
     ),
-    "modules/ai/agents/gateway/preview_execution.py": (
-        "storage",
-        "tenant",
-        ("tenant_id",),
-    ),
     "modules/ai/core/context.py": ("storage", "tenant", ("tenant_id",)),
     "modules/ai/agents/gateway/executor.py": ("cache", "tenant", ("tenant",)),
     "modules/ai/agents/gateway/failures.py": ("cache", "tenant", ("tenant_id",)),

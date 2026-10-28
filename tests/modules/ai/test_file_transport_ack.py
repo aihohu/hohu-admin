@@ -25,7 +25,11 @@ from app.modules.system.service.authorization_ai_tool_adapter import (
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )
-from tests.modules.ai.test_preview_atomic_completion import authenticated_actor, observe
+from tests.modules.ai.test_preview_atomic_completion import (
+    authenticated_actor,
+    observe,
+    replace_source,
+)
 from tests.modules.ai.test_preview_atomic_completion import preview_case as preview_case
 from tests.modules.ai.test_real_commit_ack import (
     acceptance_context,
@@ -69,20 +73,13 @@ async def test_real_preview_and_handoff_ack(
     preview.deps.signal_event = stop_after_confirmation
 
     def match(session):
-        return any(
-            (
-                boundary == "preview"
-                and isinstance(row, AiOperationLog)
-                and row.tool_name == "user.import_preview"
-                and row.status == "success"
-            )
-            or (
-                boundary == "handoff"
-                and isinstance(row, AiPreparedAction)
-                and row.execute_tool_name == "user.import_execute"
-                and row.status == "pending_confirmation"
-            )
-            for row in session.identity_map.values()
+        if boundary == "preview":
+            # Fixed DML need not retain an ORM object in the weak identity map.
+            return session.connection().info.get("test_log_commit_status") == "success"
+        info = session.connection().info
+        return (
+            info.get("test_action_commit_tool") == "user.import_execute"
+            and info.get("test_action_commit_status") == "pending_confirmation"
         )
 
     async with fault_sessions(
@@ -159,10 +156,7 @@ async def test_real_file_completion_ack(
         f"{case.username},Atomic {case.username.removeprefix('atx')}\n"
         f"{case.username}b,missing-department-for-file-test\n"
     ).encode()
-    monkeypatch.setattr(
-        "app.modules.system.ai_tools.user_transfer._load_file_bytes",
-        AsyncMock(return_value=(csv, "users.csv", "text/csv")),
-    )
+    await replace_source(preview, csv)
     handler = system_ai_tool_adapter.apply
     calls, confirmations, export_ids = [], [], []
 

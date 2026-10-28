@@ -142,6 +142,7 @@ class PreparedActionService:
         chip_target: str | None = None,
         projection_dependency_message_ids: list[int] | tuple[int, ...] = (),
         require_live_source: bool = False,
+        _planned=None,
     ) -> AiPreparedAction:
         """Persist one immutable authorization proposal without committing."""
         if conversation_id <= 0 or source_user_message_id <= 0 or not trace_id:
@@ -172,7 +173,36 @@ class PreparedActionService:
         business_snapshot_hash = canonical_payload_hash(snapshot)
         if snapshot_hash and snapshot_hash != business_snapshot_hash:
             raise _binding_invalid("业务方提供的 snapshot hash 与快照不一致")
-        if _as_utc(expires_at) <= datetime.now(UTC):
+        if _planned is not None:
+            tx, key = _planned
+            from app.core.authorization_plan import (  # noqa: PLC0415
+                LockPlan,
+                NewResource,
+                ResourceKey,
+                ResourceKind,
+            )
+
+            tx.assert_session(db)
+            parent = ResourceKey(
+                ResourceKind.CONVERSATION, tenant.tenant_id, conversation_id
+            )
+            tx.assert_planned(
+                LockPlan(
+                    existing=(
+                        parent,
+                        ResourceKey(
+                            ResourceKind.SOURCE_MESSAGE,
+                            tenant.tenant_id,
+                            source_user_message_id,
+                        ),
+                    ),
+                    new=(NewResource(key, parent),),
+                )
+            )
+            now = await tx.database_now()
+        else:
+            now = datetime.now(UTC)
+        if _as_utc(expires_at) <= now:
             raise _snapshot_stale("prepared action 在创建确认前已过期")
 
         tool_codes = [execute_tool_name]
@@ -254,8 +284,20 @@ class PreparedActionService:
             chip_target=chip_target,
             expires_at=_as_utc(expires_at),
         )
-        db.add(action)
-        await db.flush()
+        if _planned is None:
+            db.add(action)
+            await db.flush()
+        else:
+            values = {
+                column.name: action.__dict__[column.name]
+                for column in AiPreparedAction.__table__.c
+                if column.name in action.__dict__
+                and column.name not in {"action_id", "tenant_id"}
+            }
+            await tx.insert_reserved(key, values)
+            action = await db.get(
+                AiPreparedAction, key.identity[0], populate_existing=True
+            )
         return action
 
     @staticmethod

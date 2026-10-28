@@ -815,7 +815,7 @@ class TestPreparedPreviewOnlyFlow:
         async def fake_hang(confirmation_id, *, tenant, timeout_sec=None):
             return ConfirmAction.REJECTED
 
-        async def fake_terminal_result(confirmation_id, *, tenant):
+        async def fake_terminal_result(confirmation_id, *, tenant, **_binding):
             return ToolResult.failure("USER_REJECTED", "cancelled"), 0
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
@@ -995,7 +995,7 @@ class TestHitlFlow:
         async def fake_hang(confirmation_id, *, tenant, timeout_sec=None):
             return ConfirmAction.APPROVED
 
-        async def fake_terminal_result(confirmation_id, *, tenant):
+        async def fake_terminal_result(confirmation_id, *, tenant, **_binding):
             return ToolResult.success({"successCount": 2}), 1
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
@@ -1090,7 +1090,7 @@ class TestHitlFlow:
         async def fake_hang(confirmation_id, *, tenant, timeout_sec=None):
             return ConfirmAction.APPROVED
 
-        async def fake_terminal_result(confirmation_id, *, tenant):
+        async def fake_terminal_result(confirmation_id, *, tenant, **_binding):
             return ToolResult.success({"echo": {"x": 1}}), 1
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
@@ -1252,7 +1252,7 @@ class TestHitlFlow:
         async def fake_hang(confirmation_id, *, tenant, timeout_sec=None):
             return ConfirmAction.REJECTED
 
-        async def fake_terminal_result(confirmation_id, *, tenant):
+        async def fake_terminal_result(confirmation_id, *, tenant, **_binding):
             return ToolResult.failure("USER_REJECTED", "cancelled"), 0
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)

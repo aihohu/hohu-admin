@@ -12,7 +12,11 @@ from sqlalchemy import select
 from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.gateway import executor
 from app.modules.ai.agents.gateway.result import ToolResult
-from app.modules.ai.agents.hitl.constants import AiExecutionMode, AiOperationStatus
+from app.modules.ai.agents.hitl.constants import (
+    AiExecutionMode,
+    AiOperationStatus,
+    PreparedActionStatus,
+)
 from app.modules.ai.core.context import build_tool_context
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
@@ -20,6 +24,7 @@ from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.ai.service.preflight_completion_service import (
     runtime_preflight_summary,
 )
+from app.modules.ai.service.prepared_action_service import prepared_action_service
 
 
 def install_protocol_boundaries(monkeypatch):
@@ -32,7 +37,9 @@ def install_protocol_boundaries(monkeypatch):
         mode,
         *,
         preflight_failure=None,
+        confirmation_id=None,
     ):
+        assert confirmation_id is None, "Production handoffs require real owner tests"
         async with AsyncSessionLocal() as db, db.begin():
             log_id = await operation_log_service.start_operation(
                 db,
@@ -111,6 +118,68 @@ def install_protocol_boundaries(monkeypatch):
                 build_tool_context(deps, db, registered.meta), **args
             )
 
+    async def confirmation_id(_deps, _registered, _log_id, _tool_call_id, _args):
+        return executor.hitl_manager.generate_confirmation_id()
+
+    async def pending(
+        deps,
+        registered,
+        log_id,
+        tool_call_id,
+        _original_args,
+        execution_args,
+        dry_run_summary,
+        payload,
+        confirmation_id,
+    ):
+        values = executor._direct_pending_values(
+            deps,
+            registered,
+            tool_call_id,
+            execution_args,
+            dry_run_summary,
+            payload,
+            confirmation_id,
+        )
+        values["require_live_source"] = True
+        async with AsyncSessionLocal() as db, db.begin():
+            action = await prepared_action_service.create_pending(db, **values)
+            await operation_log_service.attach_confirmation(
+                db, log_id, confirmation_id, tenant=deps.tenant
+            )
+            await operation_log_service.attach_target_summary(
+                db, log_id, action.subject_refs, tenant=deps.tenant
+            )
+            return action
+
+    async def timeout(deps, action):
+        async with AsyncSessionLocal() as db, db.begin():
+            current = await db.get(AiPreparedAction, action.action_id)
+            if PreparedActionStatus(current.status).is_terminal:
+                return current.status
+            terminal = await prepared_action_service.transition_status(
+                db,
+                action_id=current.action_id,
+                expected_status=PreparedActionStatus.PENDING_CONFIRMATION,
+                expected_version=current.row_version,
+                target_status=PreparedActionStatus.EXPIRED,
+                error_code="AI_HITL_EXPIRED",
+                tenant=deps.tenant,
+            )
+            assert terminal is not None
+            log = await db.scalar(
+                select(AiOperationLog).where(
+                    AiOperationLog.tool_call_id == current.execute_tool_call_id
+                )
+            )
+            await operation_log_service.mark_expired_if_pending(
+                db, log.log_id, tenant=deps.tenant
+            )
+            return "expired"
+
+    monkeypatch.setattr(executor, "_timeout_confirmation", timeout)
+    monkeypatch.setattr(executor, "_direct_confirmation_id", confirmation_id)
+    monkeypatch.setattr(executor, "_prepare_direct_pending", pending)
     monkeypatch.setattr(executor, "_preflight_tool", preflight)
     monkeypatch.setattr(executor, "_start_log", start)
     monkeypatch.setattr(executor, "_finish_log_final", finish)

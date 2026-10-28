@@ -2,7 +2,7 @@
 
 from sqlalchemy import select
 
-from app.modules.ai.agents.gateway.result import UIResult
+from app.modules.ai.agents.gateway.result import ResultProjection, UIResult
 from app.modules.ai.agents.hitl.constants import PreparedActionStatus
 from app.modules.ai.agents.hitl.events import (
     AiErrorEvent,
@@ -107,6 +107,12 @@ async def project_resume_terminal(db, action, current_user, tenant):
             }.get(status, "操作执行失败")
         ),
         ui=ui_result(result_ui) if ok else None,
+        projection=ResultProjection(
+            subject_refs=tuple(action.subject_refs or ()),
+            scope_bound=action.data_scope_hash is not None,
+        )
+        if ok
+        else None,
     )
     done_event = DoneEvent(
         trace_id=action.trace_id,

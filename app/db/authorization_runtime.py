@@ -15,6 +15,7 @@ from app.db.authorization_chat_owner import ChatOwner
 from app.db.authorization_control_owner import control_candidate_owner
 from app.db.authorization_lease_owner import LeaseOwner
 from app.db.authorization_lifecycle_owner import LifecycleOwner
+from app.db.authorization_pending_owner import PendingOwner
 from app.db.authorization_plan_session import AuthorizationPlanSession, _order_error
 from app.db.authorization_preview_owner import PreviewOwner
 from app.db.authorization_seed_owner import seed_candidate_owner
@@ -52,6 +53,7 @@ class AuthorizationRuntime:
         self.lifecycle = LifecycleOwner(self.sessions)
         self.chat = ChatOwner(self.sessions)
         self.preview = PreviewOwner(self.sessions)
+        self.pending = PendingOwner(self.sessions)
         self.transfer = TransferOwner(self.sessions, get_file_storage())
         self.upload = UploadOwner(self.sessions)
         self.trace = TraceOwner(self.sessions)

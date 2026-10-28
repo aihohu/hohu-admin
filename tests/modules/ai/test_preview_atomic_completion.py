@@ -7,13 +7,15 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, event, insert, select, update
 
 from app.core import redis as redis_module
+from app.core.config import settings
 from app.core.file_storage import LocalFileStorage
+from app.core.id_generator import next_id
 from app.core.security import create_access_token
 from app.core.tenant import PlatformContext
-from app.db.session import AsyncSessionLocal
+from app.db.session import AsyncSessionLocal, engine
 from app.modules.ai.agents.gateway import executor
 from app.modules.ai.agents.gateway.atomic_execution import (
     PreparedExecutionOutcomeUnknown,
@@ -24,8 +26,12 @@ from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.auth.service import get_current_user
+from app.modules.system.models.file import File
 from app.modules.system.models.user import User
 from app.modules.system.models.user_transfer import UserImportBatch
+from app.modules.system.service.authorization_transfer_candidate import (
+    transfer_candidate,
+)
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case,  # noqa: F401
 )
@@ -87,23 +93,40 @@ async def preview_case(completion_case, monkeypatch, tmp_path):  # noqa: F811
         "user_name,dept_input\n"
         f"{case.username},Atomic {case.username.removeprefix('atx')}\n"
     ).encode()
-    monkeypatch.setattr(
-        "app.modules.system.ai_tools.user_transfer._load_file_bytes",
-        AsyncMock(return_value=(csv, "users.csv", "text/csv")),
-    )
+    upload = tmp_path / "private-uploads"
+    upload.mkdir()
+    (upload / "users.csv").write_bytes(csv)
+    monkeypatch.setattr(settings, "PRIVATE_UPLOAD_DIR", str(upload))
+    file_id = next_id()
+    async with AsyncSessionLocal() as setup, setup.begin():
+        await setup.execute(
+            insert(File).values(
+                tenant_id=case.tenant.tenant_id,
+                file_id=file_id,
+                owner_user_id=case.tenant.actor_user_id,
+                original_name="users.csv",
+                file_name="users.csv",
+                file_path=str(upload / "users.csv"),
+                file_url="",
+                file_size=len(csv),
+                file_ext=".csv",
+                mime_type="text/csv",
+                business_type="user-import",
+                del_flag="0",
+            )
+        )
     registered = ToolRegistry.get().find("user.import_preview")
-    real_handler = registered.fn
+    real_handler = transfer_candidate.materialize_preview
     calls = []
     batch_ids = []
 
-    async def counted(ctx, **args):
+    async def counted(db, tx, command, user):
         calls.append(True)
-        result = await real_handler(ctx, **args)
-        assert result.ok, result.error_msg
-        batch_ids.append(result.data["batchId"])
-        return result
+        batch, detail = await real_handler(db, tx, command, user)
+        batch_ids.append(batch["batch_id"])
+        return batch, detail
 
-    monkeypatch.setattr(registered, "fn", counted)
+    monkeypatch.setattr(transfer_candidate, "materialize_preview", counted)
     async with AsyncSessionLocal() as db:
         actor = await authenticated_actor(db, tenant=case.tenant)
         action = await db.get(AiPreparedAction, case.action_id)
@@ -127,14 +150,17 @@ async def preview_case(completion_case, monkeypatch, tmp_path):  # noqa: F811
                 calls=calls,
                 batch_ids=batch_ids,
                 registered=registered,
+                source_path=upload / "users.csv",
+                file_id=file_id,
                 args={
-                    "file_id": "9001",
+                    "file_id": str(file_id),
                     "reason": "atomic preview",
                     "requested_outcome": "preview_only",
                 },
             )
         finally:
             async with AsyncSessionLocal() as cleanup, cleanup.begin():
+                await cleanup.execute(delete(File).where(File.file_id == file_id))
                 await cleanup.execute(
                     delete(AiPreparedAction).where(
                         AiPreparedAction.conversation_id == case.conversation_id,
@@ -175,16 +201,150 @@ async def observe(preview):
         return batches, logs
 
 
-async def test_invalid_proposal_rolls_back_preview_batch(preview_case, monkeypatch):
-    preview = preview_case
-    handler = preview.registered.fn
+async def replace_source(preview, content):
+    preview.source_path.write_bytes(content)
+    async with AsyncSessionLocal() as db, db.begin():
+        await db.execute(
+            update(File)
+            .where(File.file_id == preview.file_id)
+            .values(file_size=len(content))
+        )
 
-    async def invalid(ctx, **args):
-        result = await handler(ctx, **args)
+
+async def test_actual_gateway_preview_uses_complete_plan(preview_case):
+    writes = []
+
+    def capture(_connection, _cursor, sql, _params, context, _many):
+        statement = context.compiled.statement if context.compiled else None
+        if (
+            sql.startswith("INSERT")
+            and getattr(getattr(statement, "table", None), "name", "")
+            == "sys_user_import_batch"
+        ):
+            writes.append(
+                context.execution_options.get("_authorization_plan_permit") is not None
+            )
+
+    event.listen(engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        result = await executor.execute_tool(
+            "user.import_preview", preview_case.args, preview_case.deps
+        )
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", capture)
+    assert result.ok
+    assert writes == [True]
+
+
+async def test_completed_preview_reentry_never_reads_or_parses_file(
+    preview_case, monkeypatch
+):
+    from app.core.authorization_io import file_transform_worker
+    from app.modules.ai.agents.gateway.preview_execution import execute_preview
+
+    preview = preview_case
+    assert (
+        await executor.execute_tool("user.import_preview", preview.args, preview.deps)
+    ).ok
+    batches, logs = await observe(preview)
+    forbidden = AsyncMock(
+        side_effect=AssertionError("completed preview must not perform file work")
+    )
+    monkeypatch.setattr(file_transform_worker, "run", forbidden)
+    args = {k: v for k, v in preview.args.items() if k != "requested_outcome"}
+    result = await execute_preview(
+        preview.registered,
+        args,
+        preview.deps,
+        log_id=logs[0].log_id,
+        tool_call_id=logs[0].tool_call_id,
+        args_hash=logs[0].args_hash,
+    )
+    assert (
+        result.ok and result.prepared_action is None and result.meta["preview_replay"]
+    )
+    assert result.data["batchId"] == batches[0].batch_id
+    forbidden.assert_not_awaited()
+    assert len(preview.calls) == 1
+
+
+@pytest.mark.parametrize("fault", ["version", "scope", "model", "provider"])
+async def test_preview_original_authority_is_checked_before_file_work(
+    preview_case, monkeypatch, fault
+):
+    from app.core.authorization_io import file_transform_worker
+    from app.modules.ai.agents.gateway.failures import compute_args_hash
+    from app.modules.ai.agents.gateway.preview_execution import execute_preview
+    from app.modules.ai.agents.hitl.constants import AiExecutionMode
+
+    preview = preview_case
+    args = {k: v for k, v in preview.args.items() if k != "requested_outcome"}
+    call_id = "tc_" + uuid4().hex
+    digest = compute_args_hash(args)
+    log_id = await executor._start_log(
+        preview.deps,
+        preview.registered,
+        call_id,
+        digest,
+        "tool=user.import_preview",
+        AiExecutionMode.AUTONOMOUS,
+    )
+    forbidden = AsyncMock(
+        side_effect=AssertionError("stale authority must not perform file work")
+    )
+    monkeypatch.setattr(file_transform_worker, "run", forbidden)
+    version = None
+    if fault == "version":
+        async with AsyncSessionLocal() as db, db.begin():
+            actor = await db.get(User, preview.case.tenant.actor_user_id)
+            version = actor.auth_version
+            actor.auth_version += 1
+    else:
+        setattr(
+            preview.deps,
+            {
+                "scope": "data_scope_hash",
+                "model": "resolved_model_id",
+                "provider": "resolved_provider_id",
+            }[fault],
+            "0" * 64 if fault == "scope" else 1,
+        )
+    try:
+        with pytest.raises(PreparedExecutionOutcomeUnknown):
+            await execute_preview(
+                preview.registered,
+                args,
+                preview.deps,
+                log_id=log_id,
+                tool_call_id=call_id,
+                args_hash=digest,
+            )
+        forbidden.assert_not_awaited()
+        assert preview.calls == []
+    finally:
+        if version is not None:
+            async with AsyncSessionLocal() as db, db.begin():
+                await db.execute(
+                    update(User)
+                    .where(User.user_id == preview.case.tenant.actor_user_id)
+                    .values(auth_version=version)
+                )
+
+
+async def test_invalid_proposal_rolls_back_preview_batch(preview_case, monkeypatch):
+    from app.modules.ai.service import authorization_preview_candidate
+
+    preview = preview_case
+    handler = authorization_preview_candidate._planned_preview_result
+
+    def invalid(*args, **kwargs):
+        result = handler(*args, **kwargs)
         result.prepared_action = None
         return result
 
-    monkeypatch.setattr(preview.registered, "fn", invalid)
+    monkeypatch.setattr(
+        authorization_preview_candidate, "_planned_preview_result", invalid
+    )
     try:
         await executor.execute_tool("user.import_preview", preview.args, preview.deps)
     except Exception:
@@ -193,7 +353,7 @@ async def test_invalid_proposal_rolls_back_preview_batch(preview_case, monkeypat
     assert len(preview.calls) == 1
     assert batches == []
     assert len(logs) == 1 and logs[0].status != "success"
-    assert preview.storage._store  # Private orphan is not a committed result.
+    assert not preview.storage._store  # Invalid proposals fail before publication.
 
 
 @pytest.mark.parametrize(
@@ -557,27 +717,21 @@ async def test_handoff_readback_rejects_changed_original_binding(
 async def test_preview_commit_uncertainty_never_reexecutes(
     preview_case, monkeypatch, committed
 ):
-    from sqlalchemy.ext.asyncio import AsyncSession
-
-    from app.modules.ai.agents.gateway import preview_execution
+    from app.db import authorization_preview_owner
 
     preview = preview_case
-    real_complete = preview_execution.complete_preview
-    real_commit = AsyncSession.commit
-
-    async def tagged(db, **kwargs):
-        await real_complete(db, **kwargs)
-        db.info["test_preview_commit"] = True
+    real_commit = authorization_preview_owner.commit_authorization_session
+    attempts = []
 
     async def fault(db):
-        if db.info.pop("test_preview_commit", False):
-            if committed:
-                await real_commit(db)
-            raise RuntimeError("injected preview COMMIT acknowledgement failure")
-        return await real_commit(db)
+        attempts.append(True)
+        if committed:
+            await real_commit(db)
+        raise RuntimeError("injected preview COMMIT acknowledgement failure")
 
-    monkeypatch.setattr(preview_execution, "complete_preview", tagged)
-    monkeypatch.setattr(AsyncSession, "commit", fault)
+    monkeypatch.setattr(
+        authorization_preview_owner, "commit_authorization_session", fault
+    )
     if committed:
         result = await executor.execute_tool(
             "user.import_preview", preview.args, preview.deps
@@ -590,6 +744,7 @@ async def test_preview_commit_uncertainty_never_reexecutes(
             )
     batches, logs = await observe(preview)
     assert len(preview.calls) == 1
+    assert attempts == [True]
     assert len(batches) == int(committed)
     assert logs[0].status == ("success" if committed else "running")
     assert preview.storage._store
@@ -747,10 +902,7 @@ async def test_real_import_partial_and_fail_fast_are_atomic(
         f"{case.username},Atomic {case.username.removeprefix('atx')}\n"
         f"{case.username}b,missing-department-for-file-test\n"
     ).encode()
-    monkeypatch.setattr(
-        "app.modules.system.ai_tools.user_transfer._load_file_bytes",
-        AsyncMock(return_value=(csv, "users.csv", "text/csv")),
-    )
+    await replace_source(preview, csv)
     monkeypatch.setattr(
         "app.modules.system.service.user_import_service.get_file_storage",
         lambda: preview.storage,
@@ -853,10 +1005,7 @@ async def test_real_import_file_failure_preserves_one_execution(
         f"{case.username},Atomic {case.username.removeprefix('atx')}\n"
         f"{case.username}b,missing-department-for-file-test\n"
     ).encode()
-    monkeypatch.setattr(
-        "app.modules.system.ai_tools.user_transfer._load_file_bytes",
-        AsyncMock(return_value=(csv, "users.csv", "text/csv")),
-    )
+    await replace_source(preview, csv)
     monkeypatch.setattr(
         "app.modules.system.service.user_import_service.get_file_storage",
         lambda: preview.storage,

@@ -1,6 +1,7 @@
 """Fixed audit admission; a recorded start never authorizes tool execution."""
 
 import re
+import secrets
 from types import SimpleNamespace
 
 from sqlalchemy import select
@@ -9,6 +10,7 @@ from app.core.authorization_plan import LockPlan, NewResource, ResourceKey
 from app.core.authorization_plan import ResourceKind as K
 from app.core.id_generator import next_id
 from app.db.authorization_plan_session import _order_error
+from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
@@ -142,6 +144,7 @@ class GatewayAuditCandidate:
         mode,
         injection_hit,
         preflight_error=None,
+        confirmation_id=None,
     ):
         if (
             any(type(v) is not int or v <= 0 for v in (conversation_id, source_id))
@@ -171,6 +174,13 @@ class GatewayAuditCandidate:
             )
         ):
             raise _order_error()
+        if confirmation_id is not None and (
+            tool_name != "user.import_execute"
+            or mode != "hitl"
+            or type(confirmation_id) is not str
+            or not re.fullmatch(r"cid_[0-9a-f]{32}", confirmation_id)
+        ):
+            raise _order_error()
         key = ResourceKey(K.OPERATION_LOG, tenant.tenant_id, next_id())
         parent = ResourceKey(K.CONVERSATION, tenant.tenant_id, conversation_id)
         await chat_candidate._lock(
@@ -193,6 +203,17 @@ class GatewayAuditCandidate:
             raise _order_error()
         now = (await tx.database_now()).replace(tzinfo=None)
         running = mode == "autonomous" and preflight_error is None
+        registered = ToolRegistry.get().find(tool_name)
+        confirmation_id = confirmation_id if preflight_error is None else None
+        confirmation_id = confirmation_id or (
+            secrets.token_urlsafe(32)
+            if mode == "hitl"
+            and preflight_error is None
+            and registered is not None
+            and registered.meta.interaction_flow == "direct"
+            and tool_name != "user.import_execute"
+            else None
+        )
         values = {
             "user_id": tenant.actor_user_id,
             "conversation_id": conversation_id,
@@ -217,7 +238,7 @@ class GatewayAuditCandidate:
             "duration_ms": 0 if preflight_error is not None else None,
             "hitl_wait_ms": 0 if running else None,
             "error_code": preflight_error,
-            "confirmation_id": None,
+            "confirmation_id": confirmation_id,
             "approved_by": None,
             "target_summary": None,
             "is_security_event": injection_hit,

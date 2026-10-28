@@ -329,7 +329,7 @@ def _build_deps(
 
 
 def _mock_durable_success(monkeypatch) -> None:  # noqa: ANN001
-    async def fake_terminal_result(confirmation_id, *, tenant):  # noqa: ARG001
+    async def fake_terminal_result(confirmation_id, *, tenant, **_binding):  # noqa: ARG001
         return ToolResult.success({"approved": True}), 1
 
     monkeypatch.setattr(

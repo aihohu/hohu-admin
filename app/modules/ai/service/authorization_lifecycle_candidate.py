@@ -694,6 +694,37 @@ class LifecycleCandidate:
         actor = await load_live_user_authority(db, tenant=tenant)
         return await project_resume_terminal(db, action, actor, tenant)
 
+    async def gateway_timeout(
+        self, db, tx, confirmation_id, *, tenant, actor_user_version, resume_binding
+    ):
+        if type(resume_binding) is not ResumeBinding:
+            raise _order_error()
+        identity = await read_identity(
+            db, tenant=tenant, actor_user_version=actor_user_version
+        )
+        reference = await self.reference(db, confirmation_id, tenant=tenant)
+        if reference is None:
+            raise _order_error()
+        resume_binding.require(reference)
+        action, conversation, source, log = await self._locked(
+            db, tx, reference, tenant, identity
+        )
+        resume_binding.require(action)
+        if action.status in {"expired", "rejected"}:
+            atomic_completion_service.validate_locked_unexecuted_terminal(
+                action, log, tenant=tenant, conversation=conversation, source=source
+            )
+            return action.status
+        if action.status in {"succeeded", "failed"}:
+            # The caller still needs a separate currently authorized projection.
+            return action.status
+        if (
+            action.status != "pending_confirmation"
+            or action.expires_at > await tx.database_now()
+        ):
+            raise _order_error()
+        return await self._finish_decision(tx, tenant, action, log, "sweep_expire")
+
     async def confirm(
         self, db, tx, *, tenant, actor_user_version, confirmation_id, command, owner
     ):

@@ -10,7 +10,9 @@ import pytest
 from sqlalchemy import delete, event, func, select, update
 from tenant_helpers import tenant_context
 
-from app.core.exceptions import BusinessRuleException
+from app.core.authorization_plan import ResourceKey
+from app.core.authorization_plan import ResourceKind as K
+from app.core.exceptions import BusinessException, BusinessRuleException
 from app.db.session import AsyncSessionLocal, engine
 from app.modules.ai.agents.gateway import executor
 from app.modules.ai.agents.hitl.constants import AiExecutionMode, ConfirmAction
@@ -21,7 +23,13 @@ from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.system.models.user import User
+from app.modules.system.service.authorization_transaction_service import _Transaction
 from tests.modules.ai.test_atomic_prepared_completion import authenticated_actor
+from tests.modules.ai.test_atomic_prepared_completion import (
+    completion_case as completion_case,
+)
+from tests.modules.ai.test_authorization_gateway_pending import pending_start
+from tests.modules.ai.test_preview_atomic_completion import preview_case as preview_case
 
 
 @pytest.fixture
@@ -179,54 +187,38 @@ async def test_start_log_accepts_bound_live_context(context_case, readonly):
         assert log.readonly_snapshot is readonly
 
 
-async def test_pending_inserts_pa_before_taking_log_lock(context_case, monkeypatch):
-    case = context_case
-    log_id = await start(case)
-    confirmation_id = f"cid_{uuid4().hex}"
-    payload = SimpleNamespace(
-        expires_at=(datetime.now(UTC) + timedelta(minutes=5)).isoformat()
-    )
-    monkeypatch.setattr(
-        executor.hitl_manager, "generate_confirmation_id", lambda: confirmation_id
-    )
-    monkeypatch.setattr(
-        executor.hitl_manager, "create_pending", AsyncMock(return_value=payload)
-    )
-    monkeypatch.setattr(
-        executor.hitl_manager, "bind_durable_action", AsyncMock(return_value=payload)
-    )
+async def test_pending_reserves_pa_before_taking_log_lock(preview_case, monkeypatch):
+    tool, args, call_id, log_id = await pending_start(preview_case)
+    lock, insert = _Transaction.lock, _Transaction.insert_reserved
+    plans, inserted = [], []
+
+    async def planned(self, plan):
+        reservations = [item for item in plan.new if item.key.kind == K.PREPARED_ACTION]
+        if reservations:
+            assert ResourceKey(K.OPERATION_LOG, 0, log_id) in plan.existing
+            assert len(reservations) == 1
+            assert reservations[0].parent == ResourceKey(
+                K.CONVERSATION, 0, preview_case.deps.conversation_id
+            )
+            plans.append(reservations[0].key)
+        return await lock(self, plan)
+
+    async def reserved_insert(self, key, values):
+        if key.kind == K.PREPARED_ACTION:
+            assert plans == [key]
+            self.assert_held(ResourceKey(K.OPERATION_LOG, 0, log_id))
+            inserted.append(key)
+        return await insert(self, key, values)
+
+    monkeypatch.setattr(_Transaction, "lock", planned)
+    monkeypatch.setattr(_Transaction, "insert_reserved", reserved_insert)
     monkeypatch.setattr(
         executor.hitl_manager, "hang", AsyncMock(return_value=ConfirmAction.APPROVED)
     )
-    monkeypatch.setattr(executor, "_rollback_failed_confirmation_setup", AsyncMock())
-    original_attach = operation_log_service.attach_confirmation
-    observed_actions = []
-
-    async def attach(db, *args, **kwargs):
-        observed_actions.append(
-            await db.scalar(
-                select(AiPreparedAction.action_id).where(
-                    AiPreparedAction.tenant_id == case.tenant.tenant_id,
-                    AiPreparedAction.confirmation_id == confirmation_id,
-                )
-            )
-        )
-        return await original_attach(db, *args, **kwargs)
-
-    monkeypatch.setattr(operation_log_service, "attach_confirmation", attach)
-    async with AsyncSessionLocal() as db:
-        log = await db.get(AiOperationLog, log_id)
-        tool_call_id = log.tool_call_id
     await executor._hang_for_confirmation(
-        case.deps,
-        registered(),
-        log_id,
-        tool_call_id,
-        {"user_name": "new-user"},
-        "Create user",
-        None,
+        preview_case.deps, tool, log_id, call_id, args, "tool=user.export", None
     )
-    assert len(observed_actions) == 1 and observed_actions[0] is not None
+    assert len(plans) == 1 and inserted == plans
 
 
 async def test_log_reference_change_after_plan_is_rejected(context_case, monkeypatch):
@@ -280,8 +272,9 @@ async def test_pending_rejects_foreign_log_context_before_creating_action(
     async with AsyncSessionLocal() as db, db.begin():
         log = await db.get(AiOperationLog, log_id)
         tool_call_id = log.tool_call_id
+        confirmation_id = log.confirmation_id
         log.source_user_message_id = case.source_id + 1
-    with pytest.raises(BusinessRuleException, match="绑定"):
+    with pytest.raises(BusinessException) as failure:
         await executor._hang_for_confirmation(
             case.deps,
             registered(),
@@ -291,6 +284,8 @@ async def test_pending_rejects_foreign_log_context_before_creating_action(
             "Create user",
             None,
         )
+    assert failure.value.error_code == "FIELD_POLICY_LOCK_ORDER"
+    executor.hitl_manager.create_pending.assert_not_awaited()
     async with AsyncSessionLocal() as db:
         assert (
             await db.scalar(
@@ -302,7 +297,7 @@ async def test_pending_rejects_foreign_log_context_before_creating_action(
             is None
         )
         log = await db.get(AiOperationLog, log_id)
-        assert log.confirmation_id is None
+        assert log.confirmation_id == confirmation_id
 
 
 async def test_start_log_waits_for_delete_lock_then_rejects_without_orphan(

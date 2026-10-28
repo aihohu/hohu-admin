@@ -40,17 +40,28 @@ from tests.modules.ai.test_preview_atomic_completion import authenticated_actor
 
 def observe_action_write(connection, _cursor, _sql, _parameters, context, _many):
     statement = context.compiled.statement if context.compiled else None
-    if getattr(getattr(statement, "table", None), "name", None) != "ai_prepared_action":
+    table = getattr(getattr(statement, "table", None), "name", None)
+    if table not in {"ai_prepared_action", "ai_operation_log"}:
         return
-    if not getattr(statement, "is_update", False):
+    if not (
+        getattr(statement, "is_update", False) or getattr(statement, "is_insert", False)
+    ):
         return
     for parameters in context.compiled_parameters:
         if "status" in parameters:
-            connection.info["test_action_commit_status"] = parameters["status"]
+            connection.info[
+                "test_action_commit_status"
+                if table == "ai_prepared_action"
+                else "test_log_commit_status"
+            ] = parameters["status"]
+        if table == "ai_prepared_action" and "execute_tool_name" in parameters:
+            connection.info["test_action_commit_tool"] = parameters["execute_tool_name"]
 
 
 def clear_action_write(connection):
     connection.info.pop("test_action_commit_status", None)
+    connection.info.pop("test_log_commit_status", None)
+    connection.info.pop("test_action_commit_tool", None)
 
 
 def commit_status(session, action):
@@ -58,7 +69,12 @@ def commit_status(session, action):
     # Observe successful wire statements without issuing SQL in a closed proof.
     if action in session.dirty or action in session.new:
         return action.status
-    return session.connection().info.get("test_action_commit_status", action.status)
+    key = (
+        "test_action_commit_status"
+        if isinstance(action, AiPreparedAction)
+        else "test_log_commit_status"
+    )
+    return session.connection().info.get(key, action.status)
 
 
 @asynccontextmanager

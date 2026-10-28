@@ -12,9 +12,11 @@ from app.db.authorization_owner import (
     commit_authorization_session,
     rollback_authorization_session,
 )
+from app.db.authorization_plan_session import _order_error
 from app.db.authorization_transfer_cache import cache_preview
 from app.modules.ai.service.atomic_completion_service import new_execution_owner
 from app.modules.ai.service.authorization_preview_candidate import (
+    GatewayPreviewBinding,
     preview_candidate,
     read_preview_input,
 )
@@ -33,7 +35,7 @@ class PreviewOwner:
     def __init__(self, factory):
         self.factory = factory
 
-    async def _input(self, **request):
+    async def _read(self, operation, **request):
         async with authorization_session(self.factory) as db:
             try:
                 with bounded_authorization_reads(db):
@@ -44,9 +46,31 @@ class PreviewOwner:
                         ),
                         budget=TransactionBudget(timeout_ms=8000),
                     ) as tx:
-                        return await preview_candidate.input_file(db, tx, **request)
+                        candidate = {
+                            "receipt": preview_candidate.receipt,
+                            "input": preview_candidate.input_file,
+                            "admit": preview_candidate.admit_gateway,
+                        }[operation]
+                        return await candidate(db, tx, **request)
             finally:
                 await rollback_authorization_session(db)
+
+    async def receipt(self, **request):
+        return await self._read("receipt", **request)
+
+    async def gateway_preview(self, *, gateway, **request):
+        if type(gateway) is not GatewayPreviewBinding:
+            raise _order_error()
+        args = gateway.arguments()
+        if args is None:
+            raise _order_error()
+        await self._read("admit", gateway=gateway, **request)
+        return await self.preview(
+            **request,
+            **args,
+            requested_outcome="preview_only",
+            gateway=gateway,
+        )
 
     async def preview(
         self,
@@ -61,6 +85,7 @@ class PreviewOwner:
         trace_id,
         on_conflict="skip",
         sync_mode="CREATE_ONLY",
+        gateway=None,
     ):
         storage = file_storage.get_file_storage()
         request = {
@@ -68,11 +93,11 @@ class PreviewOwner:
             "actor_user_version": actor_user_version,
             "file_id": file_id,
         }
-        snapshot = await self._input(**request)
+        snapshot = await self._read("input", **request)
         data, filename = await file_transform_worker.run(
             read_preview_input, snapshot, str(settings.PRIVATE_UPLOAD_DIR)
         )
-        await self._input(expected=snapshot, **request)
+        await self._read("input", expected=snapshot, **request)
         command = await file_transform_worker.run(
             transfer_candidate.prepare_preview,
             tenant=tenant,
@@ -83,8 +108,10 @@ class PreviewOwner:
             on_conflict=on_conflict,
             execution=ArtifactExecution(
                 tenant.tenant_id,
-                "tc_" + uuid4().hex,
-                new_execution_owner("user.import_preview"),
+                gateway.tool_call_id if gateway else "tc_" + uuid4().hex,
+                f"preview:{gateway.log_id}"
+                if gateway
+                else new_execution_owner("user.import_preview"),
             ),
         )
         async with authorization_session(self.factory) as db:
@@ -108,6 +135,7 @@ class PreviewOwner:
                             source_id=source_id,
                             trace_id=trace_id,
                             storage=storage,
+                            gateway=gateway,
                         )
             except BaseException:
                 await rollback_authorization_session(db)
