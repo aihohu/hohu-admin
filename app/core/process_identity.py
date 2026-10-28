@@ -2,11 +2,53 @@
 
 import ctypes
 import os
+import signal
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.authorization_maintenance import _required
+
+
+def _libc_pidfd(name, arguments):
+    # Some standalone CPython builds omit the wrappers despite a supporting
+    # host kernel/libc. Use the same pidfd ABI; never fall back to kill(pid).
+    try:
+        function = getattr(ctypes.CDLL(None, use_errno=True), name)
+    except (AttributeError, OSError):
+        raise _required() from None
+    function.argtypes = arguments
+    function.restype = ctypes.c_int
+    return function
+
+
+@contextmanager
+def linux_process(pid):
+    if hasattr(os, "pidfd_open"):
+        descriptor = os.pidfd_open(pid)
+    else:
+        descriptor = _libc_pidfd("pidfd_open", [ctypes.c_int, ctypes.c_uint])(pid, 0)
+        if descriptor < 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def linux_signal(descriptor, sig):
+    if hasattr(signal, "pidfd_send_signal"):
+        signal.pidfd_send_signal(descriptor, sig)
+    elif (
+        _libc_pidfd(
+            "pidfd_send_signal",
+            [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint],
+        )(descriptor, sig, None, 0)
+        < 0
+    ):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
 
 
 @contextmanager

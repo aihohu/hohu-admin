@@ -27,7 +27,13 @@ from app.core.authorization_maintenance import (
 )
 from app.core.config import settings
 from app.core.exceptions import BusinessException
-from app.core.process_identity import ProcessIdentity, windows_birth, windows_process
+from app.core.process_identity import (
+    ProcessIdentity,
+    linux_process,
+    linux_signal,
+    windows_birth,
+    windows_process,
+)
 from app.db.authorization_runtime import AuthorizationRuntime
 
 
@@ -116,23 +122,16 @@ class DirectProcesses:
                         raise _required()
             else:
                 # pidfd binds the signal to this process generation, even after PID reuse.
-                if not hasattr(os, "pidfd_open") or not hasattr(
-                    signal, "pidfd_send_signal"
-                ):
-                    raise _required()
                 try:
-                    descriptor = os.pidfd_open(expected.pid)
+                    with linux_process(expected.pid) as descriptor:
+                        current = ProcessIdentity.read(expected.pid)
+                        if current is None:
+                            continue
+                        if current != expected:
+                            raise _required()
+                        linux_signal(descriptor, signal.SIGTERM)
                 except ProcessLookupError:
                     continue
-                try:
-                    current = ProcessIdentity.read(expected.pid)
-                    if current is None:
-                        continue
-                    if current != expected:
-                        raise _required()
-                    signal.pidfd_send_signal(descriptor, signal.SIGTERM)
-                finally:
-                    os.close(descriptor)
         async with asyncio.timeout(70):
             while not await self.stopped():  # noqa: ASYNC110 - observe OS process exit
                 await asyncio.sleep(0.05)
