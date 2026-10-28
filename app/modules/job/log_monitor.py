@@ -20,6 +20,7 @@ from sqlalchemy import select, update
 
 from app.constants import STATUS_ENABLED
 from app.core.tenant import PlatformContext
+from app.core.write_admission import admitted, is_closed, require_open
 from app.db.session import AsyncSessionLocal
 from app.modules.job.job_runner import (
     LOG_STATUS_FAILED,
@@ -57,6 +58,7 @@ class JobLogMonitor:
 
         启动扫描吞异常，避免 DB 抖动让 lifespan 失败；后续 _loop 兜底。
         """
+        require_open()
         if self._task is not None:
             return
         try:
@@ -81,7 +83,7 @@ class JobLogMonitor:
     async def _loop(self) -> None:
         """周期扫描循环。单次异常触发退避（上限 MAX_BACKOFF）。"""
         backoff = self.SCAN_INTERVAL
-        while True:
+        while not is_closed():
             try:
                 reclaimed = await self._scan_once()
                 if reclaimed:
@@ -94,6 +96,7 @@ class JobLogMonitor:
                 backoff = min(backoff * 2, self.MAX_BACKOFF)
             await asyncio.sleep(backoff)
 
+    @admitted
     async def _scan_once(self) -> int:
         """扫描一次，返回清理条数。
 

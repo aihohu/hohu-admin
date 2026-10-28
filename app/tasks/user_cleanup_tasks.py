@@ -13,6 +13,7 @@ import logging
 from uuid import uuid4
 
 from app.core.tenant import PlatformContext
+from app.core.write_admission import admitted
 from app.db.session import AsyncSessionLocal
 from app.modules.job.task_registry import TaskScope, register_task
 from app.modules.system.service.transfer_cleanup_service import (
@@ -41,6 +42,7 @@ def _retention_context(reason: str) -> PlatformContext:
 
 
 @register_task("clean_expired_import_batches", scope=TaskScope.PLATFORM)
+@admitted
 async def clean_expired_import_batches(_args: dict | None = None) -> int:
     """清理 90 天前导入批次 + 关联文件（每日 02:00）。
 
@@ -59,6 +61,7 @@ async def clean_expired_import_batches(_args: dict | None = None) -> int:
 
 
 @register_task("clean_expired_import_previews", scope=TaskScope.PLATFORM)
+@admitted
 async def clean_expired_import_previews(_args: dict | None = None) -> int:
     """PREVIEW_DONE > 10min → EXPIRED + 删孤儿 preview 文件（每小时）。
 
@@ -77,6 +80,7 @@ async def clean_expired_import_previews(_args: dict | None = None) -> int:
 
 
 @register_task("clean_expired_export_tasks", scope=TaskScope.PLATFORM)
+@admitted
 async def clean_expired_export_tasks(_args: dict | None = None) -> int:
     """清理 30 天前导出任务 + 关联文件（每日 02:30）。
 

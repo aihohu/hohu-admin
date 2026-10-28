@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from contextlib import suppress
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -11,6 +12,7 @@ from sqlalchemy import select
 from app.constants import STATUS_ENABLED
 from app.core.redis import redis_client
 from app.core.tenant import PlatformContext, TenantContext
+from app.core.write_admission import admitted, is_closed, require_open
 from app.db.session import AsyncSessionLocal
 from app.modules.job.job_runner import execute_job, run_job_manual
 from app.modules.job.models.job import SysJob
@@ -106,6 +108,7 @@ class SchedulerManager:
 
     def start(self) -> None:
         """启动调度器。"""
+        require_open()
         if not self._scheduler.running:
             self._scheduler.start()
             logger.info("APScheduler 已启动")
@@ -127,6 +130,16 @@ class SchedulerManager:
             self._scheduler.shutdown(wait=wait)
             logger.info("APScheduler 已关闭")
 
+    async def stop(self) -> None:
+        """Pause dispatch and await the listener; shutdown alone does not drain."""
+        listener = self._pubsub_task
+        if self._scheduler.running:
+            self._scheduler.pause()
+        self.shutdown(wait=False)
+        if listener is not None:
+            with suppress(asyncio.CancelledError):
+                await listener
+
     async def _listen_events(self, platform: PlatformContext) -> None:
         """订阅 Redis 频道，处理任务变更和手动触发事件。
 
@@ -135,7 +148,7 @@ class SchedulerManager:
         - scheduler:manual_trigger — 收到后立即执行一次指定 job_id
         """
         backoff = 1.0
-        while True:
+        while not is_closed():
             pubsub = None
             try:
                 pubsub = redis_client.pubsub()
@@ -211,6 +224,7 @@ class SchedulerManager:
             self._scheduler.remove_job(existing.id)
             logger.info("已移除调度任务: job_id=%s", job_id)
 
+    @admitted
     async def reload_jobs(self, db, *, platform: PlatformContext) -> None:
         """与 DB 当前状态对齐：移除已删除/停用的任务，新增或更新启用任务。
 
@@ -295,6 +309,7 @@ class SchedulerManager:
 
     def run_now(self, tenant_id: int, job_id: int) -> None:
         """立即执行一次指定任务（不等待调度）。"""
+        require_open()
         self._scheduler.add_job(
             run_job_manual,
             args=[tenant_id, job_id],

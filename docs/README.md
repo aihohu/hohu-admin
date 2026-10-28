@@ -14,6 +14,7 @@
 | [数据库迁移](DATABASE-MIGRATIONS.md) | 受支持升级路径、结构与数据保护 |
 | [初始化内部职责](SCRIPTS-DEPLOYMENT.md) | CLI 所调用脚本的事务、幂等与权限约束 |
 | [发布维护](RELEASE.md) / [AI 运维](AI-OPERATIONS.md) | 发布证据、恢复和审计工具 |
+| [授权维护](AUTHORIZATION-MAINTENANCE.md) | 直接启动与 Compose 的停写、数据库在途核验和显式恢复 |
 | [监控规则](monitoring/alerts.yml) | 供部署方接入的规则示例 |
 | [需求与范围](PRODUCT-GUIDELINES.md) / [应用市场状态](APP-MARKETPLACE.md) | 贡献提案及当前未开放能力 |
 | [许可证政策](LICENSE-POLICY.md) / [文档维护](DOCUMENTATION.md) | 授权与文档收录规则 |

@@ -1,0 +1,69 @@
+"""Kernel process generation checks; PID numbers alone are not identities."""
+
+import ctypes
+import os
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+
+from app.core.authorization_maintenance import _required
+
+
+@contextmanager
+def windows_process(pid, *, terminate=False):
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    kernel.OpenProcess.restype = ctypes.c_void_p
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel.GetProcessTimes.argtypes = [ctypes.c_void_p] + [ctypes.c_void_p] * 4
+    kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    kernel.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    handle = kernel.OpenProcess(0x100000 | 0x1000 | (1 if terminate else 0), False, pid)
+    if not handle:
+        if ctypes.get_last_error() == 87:  # No such process; access denied is unknown.
+            yield None, kernel
+            return
+        raise _required()
+    try:
+        yield handle, kernel
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def windows_birth(handle, kernel):
+    if handle is None or kernel.WaitForSingleObject(handle, 0) == 0:
+        return None
+    times = [ctypes.c_ulonglong() for _ in range(4)]
+    if not kernel.GetProcessTimes(handle, *(ctypes.byref(value) for value in times)):
+        raise _required()
+    return "windows:" + str(times[0].value)
+
+
+@dataclass(frozen=True)
+class ProcessIdentity:
+    pid: int
+    birth: str
+
+    @classmethod
+    def read(cls, pid):
+        if type(pid) is not int or pid <= 0:
+            raise _required()
+        if os.name == "nt":
+            with windows_process(pid) as (handle, kernel):
+                birth = windows_birth(handle, kernel)
+            return cls(pid, birth) if birth else None
+        if os.name != "posix" or not Path("/proc/sys/kernel/random/boot_id").is_file():
+            raise _required()
+        try:
+            fields = (
+                Path("/proc", str(pid), "stat").read_text().rpartition(")")[2].split()
+            )
+            if fields[0] == "Z":
+                return None
+            boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            namespace = Path("/proc", str(pid), "ns/pid").stat().st_ino
+            return cls(pid, "linux:" + boot + ":" + fields[19] + ":" + str(namespace))
+        except FileNotFoundError:
+            return None
+        except (OSError, IndexError):
+            raise _required() from None

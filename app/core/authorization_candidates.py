@@ -102,6 +102,9 @@ SYSTEM_OPERATIONS = MappingProxyType(
         "dept.create": ("dept_service.DeptService.create",),
         "dept.update": ("dept_service.DeptService.update",),
         "dept.move": ("dept_service.DeptService.move",),
+        "dept.members": (
+            "user_department_assignment_service.UserDepartmentAssignmentService.replace_department_members",
+        ),
         "dept.delete": ("dept_service.DeptService.delete",),
         "dept.batch_delete": ("dept_service.DeptService.batch_delete",),
     }

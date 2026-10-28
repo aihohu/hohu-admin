@@ -6,6 +6,7 @@ the complete writer migration is qualified.
 """
 
 import asyncio
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -62,6 +63,9 @@ from app.modules.system.service.planned_user_field_policy_service import (
     assert_role_history_deletable,
 )
 from app.modules.system.service.role_management_service import role_management_service
+from app.modules.system.service.user_department_assignment_service import (
+    DepartmentMembershipResult,
+)
 from app.modules.system.service.user_department_assignment_service import (
     user_department_assignment_service as departments,
 )
@@ -130,6 +134,10 @@ SYSTEM_CANDIDATE_ENTRIES = MappingProxyType(
         ),
         "dept.move": CandidateEntry(
             ("system:dept:move", "system:dept:list"), "DeptService.move"
+        ),
+        "dept.members": CandidateEntry(
+            ("system:dept:list", "system:dept:edit", "system:user:edit"),
+            "UserDepartmentAssignmentService.replace_department_members",
         ),
         "dept.delete": CandidateEntry(("system:dept:delete",), "DeptService.delete"),
         "dept.batch_delete": CandidateEntry(
@@ -294,6 +302,8 @@ class SystemAuthorizationCandidate:
             if not isinstance(payload, (list, tuple)) or len(payload) > 256:
                 raise _limit()
             departments._normalize_assignments(payload)
+        if operation == "dept.members":
+            self._member_ids(payload)
         for name in ("role_ids", "dept_ids"):
             values = getattr(payload, name, None)
             if values is not None and len(values) > 256:
@@ -588,6 +598,16 @@ class SystemAuthorizationCandidate:
             _expect(preview.snapshot, expected)
             if new_id:
                 result["new"].add(_key(ResourceKind.DEPT, tid, new_id))
+        elif operation == "dept.members":
+            if expected is not None:
+                raise _order_error()
+            added, removed = await self._prepare_members(
+                db, tenant, target_id, payload, authority, facts
+            )
+            result.update(added=added, removed=removed)
+            result["new"].update(
+                _key(ResourceKind.USER_DEPTS, tid, uid, target_id) for uid in added
+            )
         elif operation == "user.create":
             if any(
                 row["user_name"] == payload.user_name
@@ -711,6 +731,91 @@ class SystemAuthorizationCandidate:
         return result
 
     @staticmethod
+    def _member_ids(payload):
+        if not isinstance(payload, (list, tuple)) or len(payload) > 256:
+            raise _limit()
+        if any(
+            type(value) not in (int, str)
+            or re.fullmatch(r"[1-9][0-9]*", str(value)) is None
+            or not 0 < int(value) < 2**63
+            for value in payload
+        ) or len({int(value) for value in payload}) != len(payload):
+            raise BusinessRuleException(
+                "用户集合无效", error_code="USER_DEPT_MEMBER_NOT_AVAILABLE"
+            )
+        return set(map(int, payload))
+
+    async def _prepare_members(self, db, tenant, dept_id, payload, authority, facts):
+        """Evaluate the whole set before reserving or changing any membership."""
+        requested_ids = self._member_ids(payload)
+        dept = await departments._load_department(db, dept_id, tenant=tenant)
+        departments._ensure_department_scope(authority, dept_id)
+        current = await departments._load_member_map(db, dept_id, tenant=tenant)
+        if len(current) > 256:
+            raise _limit()
+        departments._ensure_member_scope(authority, set(current) | requested_ids)
+        added, removed = requested_ids - current.keys(), current.keys() - requested_ids
+        if any(current[uid] for uid in removed):
+            raise BusinessRuleException(
+                "主部门成员必须通过用户部门接口重新指定主部门",
+                error_code="USER_PRIMARY_DEPT_REASSIGN_REQUIRED",
+            )
+        affected = added | removed
+        users = await departments._load_users(db, affected, tenant=tenant)
+        if set(users) != affected or any(users[uid].status != "1" for uid in added):
+            raise BusinessRuleException(
+                "用户不存在或不可分配", error_code="USER_DEPT_MEMBER_NOT_AVAILABLE"
+            )
+        if added and dept.status != "1":
+            raise BusinessRuleException(
+                "部门不存在或已禁用", error_code="USER_DEPT_NOT_AVAILABLE"
+            )
+        old = await departments._load_assignments_by_user(db, affected, tenant=tenant)
+        new = {
+            uid: tuple(sorted((*old[uid], (dept_id, False))))
+            if uid in added
+            else tuple(pair for pair in old[uid] if pair[0] != dept_id)
+            for uid in sorted(affected)
+        }
+        dept_map = await departments._load_requested_dept_map(
+            db, list(new.values()), tenant=tenant
+        )
+        requested = {
+            uid: departments._depts_for_assignments(assignments, dept_map)
+            for uid, assignments in new.items()
+        }
+        materialized = await roles.materialize_role_set_authorities(
+            db,
+            candidates=[
+                candidate
+                for uid in sorted(affected)
+                for candidate in (
+                    (
+                        users[uid],
+                        list(users[uid].roles or []),
+                        list(users[uid].depts or []),
+                    ),
+                    (users[uid], list(users[uid].roles or []), requested[uid]),
+                )
+            ],
+            tenant=tenant,
+        )
+        for index, uid in enumerate(sorted(affected)):
+            await departments._authorize_assignment_change(
+                db,
+                authority=authority,
+                target=users[uid],
+                old_assignments=old[uid],
+                new_assignments=new[uid],
+                requested_depts=requested[uid],
+                require_primary=self._primary(facts),
+                old_authority=materialized[index * 2],
+                new_authority=materialized[index * 2 + 1],
+                tenant=tenant,
+            )
+        return tuple(sorted(added)), tuple(sorted(removed))
+
+    @staticmethod
     def _primary(facts):
         return any(
             row["setting_key"] == "user_require_primary_dept"
@@ -762,6 +867,17 @@ class SystemAuthorizationCandidate:
         old_password_facts,
     ):
         tid = tenant.tenant_id
+        if operation == "dept.members":
+            for uid in prepared["removed"]:
+                await tx.delete_held(_key(ResourceKind.USER_DEPTS, tid, uid, target_id))
+            for uid in prepared["added"]:
+                await tx.insert_reserved(
+                    _key(ResourceKind.USER_DEPTS, tid, uid, target_id),
+                    {"is_primary": "N"},
+                )
+            return DepartmentMembershipResult(
+                added=len(prepared["added"]), removed=len(prepared["removed"])
+            )
         if operation == "user.create":
             values = payload.model_dump(
                 exclude={"password", "role_ids", "dept_ids"}
@@ -880,10 +996,23 @@ class SystemAuthorizationCandidate:
                 )
             return True
         if operation in {"dept.create", "dept.update", "dept.move"}:
+            actor_name = next(
+                row["user_name"]
+                for row in facts[ResourceKind.USER]
+                if row["user_id"] == tenant.actor_user_id
+            )
             if operation == "dept.update":
+                values = payload.model_dump(exclude_unset=True)
+                current = next(
+                    row
+                    for row in facts[ResourceKind.DEPT]
+                    if row["dept_id"] == target_id
+                )
+                if all(current[name] == value for name, value in values.items()):
+                    return False
                 return await tx.update_held(
                     _key(ResourceKind.DEPT, tid, target_id),
-                    payload.model_dump(exclude_unset=True),
+                    values | {"update_by": actor_name},
                 )
             parent_id = payload.parent_id if new_id else payload.new_parent_id
             parent = next(
@@ -898,6 +1027,7 @@ class SystemAuthorizationCandidate:
                         "parent_id": parent_id or None,
                         "ancestors": prefix,
                         "email": payload.email or None,
+                        "create_by": actor_name,
                     },
                 )
             else:
@@ -905,6 +1035,8 @@ class SystemAuthorizationCandidate:
                     r for r in facts[ResourceKind.DEPT] if r["dept_id"] == target_id
                 )
                 old = f"{target['ancestors']},{target_id}"
+                if target["parent_id"] == parent_id and target["ancestors"] == prefix:
+                    return False
                 for row in facts[ResourceKind.DEPT]:
                     ancestors = row["ancestors"] or ""
                     if ancestors == old or ancestors.startswith(old + ","):
@@ -917,7 +1049,11 @@ class SystemAuthorizationCandidate:
                         )
                 await tx.update_held(
                     _key(ResourceKind.DEPT, tid, target_id),
-                    {"parent_id": parent_id, "ancestors": prefix},
+                    {
+                        "parent_id": parent_id,
+                        "ancestors": prefix,
+                        "update_by": actor_name,
+                    },
                 )
             return True
         return await self._delete(

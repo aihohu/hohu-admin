@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import STATUS_ENABLED
+from app.core.write_admission import admitted
 from app.db.session import AsyncSessionLocal
 from app.modules.job.models.job import SysJob, SysJobLog
 from app.modules.job.task_registry import get_task_function, is_tenant_task
@@ -37,6 +38,7 @@ async def run_job_manual(tenant_id: int, job_id: int) -> None:
     await _do_execute(tenant_id, job_id, skip_status_check=True)
 
 
+@admitted
 async def _do_execute(
     tenant_id: int, job_id: int, *, skip_status_check: bool = False
 ) -> None:

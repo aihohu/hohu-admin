@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessException
 from app.core.tenant import PlatformContext, TenantContext
+from app.core.write_admission import admitted, is_closed
 from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.hitl.constants import (
     AI_CONFIRM_REDIS_PREFIX,
@@ -66,6 +67,7 @@ async def _tenant_context(
     )
 
 
+@admitted
 async def cleanup_prepared_actions_on_startup(
     redis: Redis, *, platform: PlatformContext, expired_only: bool = False
 ) -> int:
@@ -363,7 +365,7 @@ async def run_pending_expiry_loop(*, platform: PlatformContext) -> None:
     from app.core.redis import redis_client  # noqa: PLC0415
 
     _require_platform(platform)
-    while True:
+    while not is_closed():
         await asyncio.sleep(30)
         try:
             await cleanup_prepared_actions_on_startup(
@@ -497,6 +499,7 @@ async def _cache_terminal_is_verified(
         return False
 
 
+@admitted
 async def cleanup_orphaned_pending_on_startup(*, platform: PlatformContext) -> int:
     """收口 memory-mode 重启遗留；失败项保留到 Redis TTL，不伪装已清理。"""
     from app.core.redis import redis_client  # noqa: PLC0415
@@ -587,6 +590,7 @@ async def cleanup_orphaned_pending_on_startup(*, platform: PlatformContext) -> i
     return cleaned
 
 
+@admitted
 async def cleanup_durable_prepared_actions_on_startup(
     *, platform: PlatformContext
 ) -> int:

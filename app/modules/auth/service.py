@@ -2,6 +2,7 @@ import hashlib
 import logging
 import re
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import Depends, Request
@@ -466,6 +467,25 @@ async def load_live_user_authority(db: AsyncSession, *, tenant: TenantContext) -
     return user
 
 
+@dataclass(frozen=True, slots=True)
+class AccessIdentity:
+    tenant: TenantContext
+    user_version: int
+
+
+def access_identity(user: User) -> AccessIdentity:
+    """Retain the signed uver; mutable ORM refreshes cannot upgrade a request."""
+    identity = user.__dict__.get("_verified_access_identity")
+    if (
+        type(identity) is not AccessIdentity
+        or identity.tenant != get_bound_tenant_context(user)
+        or identity.tenant.actor_user_id != user.user_id
+        or identity.tenant.tenant_id != user.tenant_id
+    ):
+        raise AuthenticationException(error_code="TOKEN_EXPIRED")
+    return identity
+
+
 async def get_current_user(
     token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)
 ) -> User:
@@ -528,7 +548,9 @@ async def get_current_user(
             source="access_token",
         ),
     )
-
+    user.__dict__["_verified_access_identity"] = AccessIdentity(
+        get_bound_tenant_context(user), user_version
+    )
     return user
 
 

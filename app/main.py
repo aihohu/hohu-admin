@@ -1,8 +1,9 @@
 import asyncio
 import logging
 import os
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 
+from anyio import CancelScope
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, PlainTextResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -11,15 +12,18 @@ import app.tasks  # noqa: F401  # pyright: ignore[reportUnusedImport]
 from app.core.config import settings
 from app.core.exceptions import setup_exception_handlers
 from app.core.file_storage import validate_private_storage_roots
+from app.core.process_admission import ProcessAdmission
 from app.core.public_uploads import PublicUploadStaticFiles
 from app.core.redis import close_redis
 from app.core.scheduler import scheduler_manager
 from app.core.tenant import PlatformContext
+from app.core.write_admission import require_open, write_admission
 from app.db.session import AsyncSessionLocal
 from app.middleware.audit_middleware import AuditLogMiddleware
 from app.middleware.body_size_middleware import BodySizeLimitMiddleware
 from app.middleware.platform_audit_middleware import PlatformAuditMiddleware
 from app.middleware.rate_limit_middleware import RateLimitMiddleware
+from app.middleware.write_admission import WriteAdmissionMiddleware
 from app.modules.auth.api import router as auth_router
 from app.modules.job.api.job import router as job_router
 from app.modules.job.api.job_log import router as job_log_router
@@ -68,102 +72,118 @@ if settings.AI_MODULE_ENABLED:
     from app.modules.platform.ai_api import router as platform_ai_router
 
 
+async def _stop_task(task):
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """应用生命周期管理"""
-    # 保留实例引用供 shutdown 清理；启动中途失败时也不能遗失已创建的监控器。
-    job_log_monitor: JobLogMonitor | None = None
-
+    """Own all startup resources, including failures before the serving yield."""
+    require_open()
+    cleanup = AsyncExitStack()
+    cleanup.push_async_callback(close_redis)
+    process = ProcessAdmission(
+        write_admission, role=settings.APP_ROLE, build_sha=settings.RELEASE_BUILD_SHA
+    )
+    cleanup.push_async_callback(process.stop)
     if settings.AI_MODULE_ENABLED:
-        # memory 模式必须实测单 worker；uvicorn --workers 启动时环境变量并不可靠，
-        # 必须用 Redis SADD 实测活跃 worker 数。
+        cleanup.push_async_callback(close_provider_http_clients)
         if settings.AI_HITL_MODE == "memory" and settings.AI_REQUIRE_SINGLE_WORKER:
-            worker_count = await _detect_actual_worker_count()
-            if worker_count > 1:
-                raise RuntimeError(
-                    "AI HITL memory mode requires single worker, "
-                    f"detected {worker_count}. Set AI_HITL_MODE=redis_pubsub or "
-                    "scale workers down to 1. See docs/AI-DEPLOYMENT.md."
+            cleanup.push_async_callback(_unregister_active_worker)
+    try:
+        await process.start()
+        # 保留实例引用供 shutdown 清理；启动中途失败时也不能遗失已创建的监控器。
+        job_log_monitor: JobLogMonitor | None = None
+
+        if settings.AI_MODULE_ENABLED:
+            # memory 模式必须实测单 worker；uvicorn --workers 启动时环境变量并不可靠，
+            # 必须用 Redis SADD 实测活跃 worker 数。
+            if settings.AI_HITL_MODE == "memory" and settings.AI_REQUIRE_SINGLE_WORKER:
+                worker_count = await _detect_actual_worker_count()
+                if worker_count > 1:
+                    raise RuntimeError(
+                        "AI HITL memory mode requires single worker, "
+                        f"detected {worker_count}. Set AI_HITL_MODE=redis_pubsub or "
+                        "scale workers down to 1. See docs/AI-DEPLOYMENT.md."
+                    )
+
+            # 导入内置工具以触发装饰器注册，并校验 Agent 与权限引用存在。
+            load_builtin_tools()
+            try:
+                async with AsyncSessionLocal() as db:
+                    await ToolRegistry.get().validate_on_startup(db)
+            except ToolRegistryError as e:
+                # 业务迭代中的引用漂移仅告警，不阻断非安全相关启动。
+                logging.getLogger("app.ai").error(
+                    "AI Tool Registry 启动校验失败: %s", e
                 )
 
-        # 导入内置工具以触发装饰器注册，并校验 Agent 与权限引用存在。
-        load_builtin_tools()
-        try:
-            async with AsyncSessionLocal() as db:
-                await ToolRegistry.get().validate_on_startup(db)
-        except ToolRegistryError as e:
-            # 业务迭代中的引用漂移仅告警，不阻断非安全相关启动。
-            logging.getLogger("app.ai").error("AI Tool Registry 启动校验失败: %s", e)
-
-        # 重启后进程内事件已丢失；清理或恢复持久化确认。
-        ai_lifecycle_platform = PlatformContext(
-            actor_principal_id=0,
-            actor_name="ai-lifecycle",
-            principal_type="service",
-            permissions=frozenset({"platform:ai:lifecycle"}),
-            reason="AI HITL tenant lifecycle recovery",
-            ticket_id="SYSTEM-LIFECYCLE",
-            correlation_id=f"ai-lifecycle:{RUNNER_ID}",
-        )
-        if settings.AI_HITL_MODE == "memory":
-            await cleanup_orphaned_pending_on_startup(platform=ai_lifecycle_platform)
-        else:
-            await cleanup_durable_prepared_actions_on_startup(
-                platform=ai_lifecycle_platform
+            # 重启后进程内事件已丢失；清理或恢复持久化确认。
+            ai_lifecycle_platform = PlatformContext(
+                actor_principal_id=0,
+                actor_name="ai-lifecycle",
+                principal_type="service",
+                permissions=frozenset({"platform:ai:lifecycle"}),
+                reason="AI HITL tenant lifecycle recovery",
+                ticket_id="SYSTEM-LIFECYCLE",
+                correlation_id=f"ai-lifecycle:{RUNNER_ID}",
             )
+            if settings.AI_HITL_MODE == "memory":
+                await cleanup_orphaned_pending_on_startup(
+                    platform=ai_lifecycle_platform
+                )
+            else:
+                await cleanup_durable_prepared_actions_on_startup(
+                    platform=ai_lifecycle_platform
+                )
 
-    # 仅在嵌入式（开发）模式下随 API 启停调度器。
-    # 生产模式下调度器由独立的 `app.scheduler_worker` 进程承担，
-    # 通过 Redis pub/sub 与本进程通信。
-    if settings.APP_ROLE == "all":
-        scheduler_platform = PlatformContext(
-            actor_principal_id=0,
-            actor_name="scheduler",
-            principal_type="service",
-            permissions=frozenset({"platform:job:operate"}),
-            reason="embedded scheduler tenant enumeration",
-            ticket_id="SYSTEM-SCHEDULER",
-            correlation_id=f"scheduler:{RUNNER_ID}",
-        )
-        async with AsyncSessionLocal() as db:
-            await scheduler_manager.reload_jobs(db, platform=scheduler_platform)
-        await scheduler_manager.start_with_pubsub(platform=scheduler_platform)
+        # 仅在嵌入式（开发）模式下随 API 启停调度器。
+        # 生产模式下调度器由独立的 `app.scheduler_worker` 进程承担，
+        # 通过 Redis pub/sub 与本进程通信。
+        if settings.APP_ROLE == "all":
+            scheduler_platform = PlatformContext(
+                actor_principal_id=0,
+                actor_name="scheduler",
+                principal_type="service",
+                permissions=frozenset({"platform:job:operate"}),
+                reason="embedded scheduler tenant enumeration",
+                ticket_id="SYSTEM-SCHEDULER",
+                correlation_id=f"scheduler:{RUNNER_ID}",
+            )
+            async with AsyncSessionLocal() as db:
+                await scheduler_manager.reload_jobs(db, platform=scheduler_platform)
+            cleanup.push_async_callback(scheduler_manager.stop)
+            process.stop_callbacks.append(scheduler_manager.stop)
+            await scheduler_manager.start_with_pubsub(platform=scheduler_platform)
 
-        # 启动时扫描一次孤儿任务日志，随后进入周期监控。
-        job_log_monitor = JobLogMonitor(
-            platform=scheduler_platform,
-            runner_id=RUNNER_ID,
-        )
-        await job_log_monitor.start()
+            # 启动时扫描一次孤儿任务日志，随后进入周期监控。
+            job_log_monitor = JobLogMonitor(
+                platform=scheduler_platform,
+                runner_id=RUNNER_ID,
+            )
+            cleanup.push_async_callback(job_log_monitor.stop)
+            process.stop_callbacks.append(job_log_monitor.stop)
+            await job_log_monitor.start()
 
-    expiry_task = (
-        asyncio.create_task(run_pending_expiry_loop(platform=ai_lifecycle_platform))
-        if settings.AI_MODULE_ENABLED
-        else None
-    )
-    try:
+        if settings.AI_MODULE_ENABLED:
+            require_open()
+            expiry = asyncio.create_task(
+                run_pending_expiry_loop(platform=ai_lifecycle_platform)
+            )
+            cleanup.push_async_callback(_stop_task, expiry)
+
+            async def stop_expiry():
+                await _stop_task(expiry)
+
+            process.stop_callbacks.append(stop_expiry)
+        require_open()
         yield
     finally:
-        if expiry_task is not None:
-            expiry_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await expiry_task
-
-    if job_log_monitor is not None:
-        await job_log_monitor.stop()
-    if settings.APP_ROLE == "all":
-        scheduler_manager.shutdown()
-    # 修订 S-6：lifespan 结束时从 Redis active worker 集合移除自己，让下次启动
-    # 拿到准确计数（不依赖 30s EXPIRE 自然过期）
-    if (
-        settings.AI_MODULE_ENABLED
-        and settings.AI_HITL_MODE == "memory"
-        and settings.AI_REQUIRE_SINGLE_WORKER
-    ):
-        await _unregister_active_worker()
-    if settings.AI_MODULE_ENABLED:
-        await close_provider_http_clients()
-    await close_redis()
+        with CancelScope(shield=True):
+            async with asyncio.timeout(75):
+                await cleanup.aclose()
 
 
 # ============ 修订 S-6: Redis-based worker count 实测 ============
@@ -230,6 +250,7 @@ app.add_middleware(RateLimitMiddleware)
 app.add_middleware(AuditLogMiddleware)
 app.add_middleware(PlatformAuditMiddleware)
 app.add_middleware(BodySizeLimitMiddleware)
+app.add_middleware(WriteAdmissionMiddleware)
 
 # 注册异常处理器
 setup_exception_handlers(app)
