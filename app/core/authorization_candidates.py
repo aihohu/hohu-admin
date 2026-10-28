@@ -3,7 +3,7 @@
 This is a review/static-check manifest, never a runtime dispatch or rollout flag.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 
@@ -1250,6 +1250,50 @@ CANDIDATES += tuple(
     for qualified, methods, phase, guard, barriers, profile, epoch in _COMPLETION_ENTRIES
     for method in methods
 )
+
+# Composition is checked separately from ingress activation. These fixed methods
+# keep the delegated lock/IO contract; none implies an HTTP route is connected.
+_RUNTIME = "app.db.authorization_runtime.AuthorizationRuntime"
+_RUNTIME_DELEGATES = {
+    "system": _SYSTEM_OWNER,
+    "import_users": _IMPORT_OWNER,
+    "control": "app.db.authorization_control_owner.ControlCandidateOwner.execute",
+    "authorize_control": "app.db.authorization_control_owner.ControlCandidateOwner.authorize",
+    "seed": _SEED_OWNER,
+    "login": _AUTH + ".login",
+    "current": _AUTH + ".current",
+    "refresh": _AUTH + ".refresh",
+    "register": _AUTH + ".register",
+    "reset_password": _AUTH + ".reset",
+    "bind_email": _AUTH + ".bind",
+    "prepare_email": _AUTH + ".prepare_email",
+    "principal_login": _PRINCIPAL_OWNER + ".login",
+    "principal_current": _PRINCIPAL_OWNER + ".current",
+    "authorize_principal": _PRINCIPAL_OWNER + ".authorize",
+    "create_principal": _PRINCIPAL_OWNER + ".create_first",
+    "replace_principal_permissions": _PRINCIPAL_OWNER + ".replace_permissions",
+}
+_composition = tuple(
+    replace(
+        next(
+            entry
+            for entry in CANDIDATES
+            if delegate in {entry.qualified_name, entry.owner}
+        ),
+        entry_id="composition." + method,
+        qualified_name=_RUNTIME + "." + method,
+        source=(delegate,),
+        owner=_RUNTIME + "." + method,
+        operation="",
+        phase="owner",
+        proof_only=False,
+    )
+    for method, delegate in _RUNTIME_DELEGATES.items()
+)
+MAINTENANCE_ENTRIES = MAINTENANCE_ENTRIES | frozenset(
+    entry.entry_id for entry in _composition if entry.maintenance
+)
+CANDIDATES += _composition
 
 PENDING_SURFACES = MappingProxyType(
     {

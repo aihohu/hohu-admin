@@ -84,7 +84,11 @@ async def acquire_maintenance_fence(observer, *, action, expected_build_sha, db=
     ):
         raise _required()
     fence = MaintenanceFence(action, evidence)
-    _FENCES[fence] = (asyncio.current_task(), asyncio.get_running_loop().time() + 30)
+    remaining = 30 - (now - evidence.observed_at).total_seconds()
+    _FENCES[fence] = (
+        asyncio.current_task(),
+        asyncio.get_running_loop().time() + remaining,
+    )
     return fence
 
 
@@ -100,7 +104,10 @@ def require_maintenance(fence, action):
     if (
         issued is None
         or issued[0] is not asyncio.current_task()
-        or asyncio.get_running_loop().time() > issued[1]
+        or asyncio.get_running_loop().time() >= issued[1]
+        or not 0
+        <= (datetime.now(UTC) - fence.evidence.observed_at).total_seconds()
+        < 30
     ):
         raise _required()
     return fence.evidence

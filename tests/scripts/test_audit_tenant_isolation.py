@@ -16,6 +16,7 @@ from app.core.tenant_isolation_audit import (
 from tools.ops import audit_tenant_isolation as cli
 
 _CANDIDATE_NAMESPACES = (
+    ("db/authorization_runtime.py", "TransferOwner", "cache"),
     ("db/authorization_lifecycle_owner.py", "tenant_id", "cache"),
     ("db/authorization_preview_owner.py", "tenant_id", "cache"),
     ("db/authorization_transfer_cache.py", "tenant_id", "storage"),

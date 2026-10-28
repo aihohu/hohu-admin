@@ -67,6 +67,7 @@ def _known_read(statement: Any) -> bool:
 class _Journal:
     session: Any
     valid_bind: bool
+    require_plan: bool = False
     outer: Any = None
     connection: Any = None
     unsafe: bool = False
@@ -86,7 +87,7 @@ class _Journal:
         self.fail()
 
     def fail(self) -> None:
-        if self.phase != "idle":
+        if self.require_plan or self.phase != "idle":
             self.phase = "failed"
 
     def reject(self) -> None:
@@ -121,6 +122,8 @@ class _Journal:
         safe = _known_read(statement)
         if self.phase == "idle":
             self.unsafe |= not safe
+            if self.require_plan and not safe:
+                self.reject()
             return
         if self.phase != "active" or not safe:
             self.reject()
@@ -162,7 +165,7 @@ class _Journal:
 
     def before_flush(self, _session, _flush_context, _instances):
         self.unsafe = True
-        if self.phase != "idle":
+        if self.require_plan or self.phase != "idle":
             self.reject()
 
     def before_commit(self, session):
@@ -278,11 +281,14 @@ class _ObservedTransaction:
 class AuthorizationPlanSession(AsyncSession):
     """Create this session before *any* SQL; late upgrading is unsupported."""
 
-    def __init__(self, bind=None, **kwargs):
+    def __init__(self, bind=None, *, require_plan=False, **kwargs):
+        if type(require_plan) is not bool:
+            raise _order_error()
         super().__init__(bind=bind, **kwargs)
         journal = _Journal(
             self.sync_session,
             isinstance(bind, AsyncEngine) and not kwargs.get("binds"),
+            require_plan=require_plan,
         )
         self._authorization_journal = journal
         for name, listener in (

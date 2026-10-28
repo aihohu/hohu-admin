@@ -1,6 +1,7 @@
 """Maintenance gates require current, independently observed stopped writers."""
 
-from datetime import UTC, datetime
+import asyncio
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -83,3 +84,34 @@ async def test_only_issued_matching_action_is_a_fence():
         require_maintenance(
             MaintenanceFence("principal.create", fence.evidence), "principal.create"
         )
+
+
+async def test_old_observation_does_not_receive_a_fresh_thirty_seconds(monkeypatch):
+    async def observe():
+        return evidence(observed_at=datetime.now(UTC) - timedelta(seconds=29))
+
+    fence = await acquire_maintenance_fence(
+        observe, action="principal.create", expected_build_sha="a" * 40
+    )
+    loop = asyncio.get_running_loop()
+    later = loop.time() + 2
+    with monkeypatch.context() as patch:
+        patch.setattr(loop, "time", lambda: later)
+        with pytest.raises(BusinessException) as caught:
+            require_maintenance(fence, "principal.create")
+    assert caught.value.error_code == "AUTHORIZATION_MAINTENANCE_FENCE_REQUIRED"
+
+
+async def test_fence_cannot_be_transferred_to_another_task():
+    async def observe():
+        return evidence()
+
+    fence = await acquire_maintenance_fence(
+        observe, action="principal.create", expected_build_sha="a" * 40
+    )
+
+    async def use():
+        with pytest.raises(BusinessException):
+            require_maintenance(fence, "principal.create")
+
+    await asyncio.create_task(use())

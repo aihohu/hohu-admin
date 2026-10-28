@@ -144,6 +144,7 @@ def check_candidates(*, root=ROOT, entries=None, module_sources=None):
     paths.add(root / "app/modules/ai/service/authorization_chat_model.py")
     paths.add(root / "app/modules/ai/service/authorization_completion_projection.py")
     paths.add(root / "app/db/authorization_transfer_cache.py")
+    paths.add(root / "app/db/authorization_runtime.py")
     paths.add(root / "app/modules/ai/agents/gateway/authorization_execution.py")
     paths.add(root / "app/modules/system/service/planned_user_field_policy_service.py")
     modules = {".".join(path.relative_to(root).with_suffix("").parts) for path in paths}

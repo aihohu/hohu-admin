@@ -6,6 +6,18 @@ from app.core.authorization_candidates import CANDIDATES
 from tools.checks.check_authorization_candidates import check_candidates
 
 
+def test_new_runtime_facade_requires_an_inventory_entry():
+    module = "app.db.authorization_runtime"
+    source = "class AuthorizationRuntime:\n    async def unchecked_write(self):\n        pass\n"
+    assert any(
+        "unregistered public async candidate: "
+        + module
+        + ".AuthorizationRuntime.unchecked_write"
+        in error
+        for error in check_candidates(module_sources={module: source})
+    )
+
+
 def test_candidate_inventory_is_complete_and_dormant():
     assert check_candidates() == []
     assert all(not entry.production_connected for entry in CANDIDATES)
