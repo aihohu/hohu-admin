@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.core.file_storage import get_file_storage
 from app.db.authorization_ai_owner import AIAuthorizationOwner
+from app.db.authorization_catalog_read_owner import CatalogReadOwner
 from app.db.authorization_chat_owner import ChatOwner
 from app.db.authorization_control_owner import control_candidate_owner
 from app.db.authorization_lease_owner import LeaseOwner
@@ -20,6 +21,7 @@ from app.db.authorization_seed_owner import seed_candidate_owner
 from app.db.authorization_system_owner import system_candidate_owner
 from app.db.authorization_trace_owner import TraceOwner
 from app.db.authorization_transfer_owner import TransferOwner
+from app.db.authorization_upload_owner import UploadOwner
 from app.modules.ai.agents.gateway.authorization_execution import PlannedGatewayOwner
 from app.modules.auth.candidate_owner import auth_candidate_owner
 from app.modules.platform.authorization_principal_audit import consume_principal_audit
@@ -51,6 +53,7 @@ class AuthorizationRuntime:
         self.chat = ChatOwner(self.sessions)
         self.preview = PreviewOwner(self.sessions)
         self.transfer = TransferOwner(self.sessions, get_file_storage())
+        self.upload = UploadOwner(self.sessions)
         self.trace = TraceOwner(self.sessions)
         self.recovery = AIAuthorizationOwner(self.sessions)
         self.lease = LeaseOwner(self.sessions)
@@ -72,6 +75,9 @@ class AuthorizationRuntime:
     async def authorize_control(self, **request):
         async with self.sessions() as db:
             return await control_candidate_owner.authorize(db, **request)
+
+    async def control_read(self, **request):
+        return await CatalogReadOwner(self.sessions).execute(**request)
 
     async def fail_control(self, audit, error):
         consume_control_audit(audit)

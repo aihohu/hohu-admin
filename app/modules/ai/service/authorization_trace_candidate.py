@@ -4,9 +4,10 @@ from collections import defaultdict
 
 from sqlalchemy import select
 
-from app.core.authorization_plan import LockPlan
+from app.core.authorization_plan import LockPlan, ResourceKey, ResourceKind
 from app.core.base_response import PageResult
 from app.core.exceptions import NotFoundException
+from app.db.authorization_plan_session import _order_error
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
@@ -21,7 +22,9 @@ from app.modules.ai.service.authorization_completion_projection import (
 )
 from app.modules.ai.service.authorization_context_candidate import ai_context_candidate
 from app.modules.ai.service.completion_read_state_service import effective_log_state
+from app.modules.ai.service.operation_status_projection import project_operation
 from app.modules.ai.service.trace_service import _parse_target_summary, trace_service
+from app.modules.auth.service import load_live_user_authority
 from app.modules.system.service.authorization_control_identity import (
     assert_identity,
     read_identity,
@@ -30,6 +33,112 @@ from app.modules.system.service.user_service import user_service
 
 
 class TraceCandidate:
+    async def operation(self, db, tx, *, tenant, actor_user_version, tool_call_id):
+        identity = await read_identity(
+            db, tenant=tenant, actor_user_version=actor_user_version
+        )
+        log_query = (
+            select(AiOperationLog)
+            .where(
+                AiOperationLog.tenant_id == tenant.tenant_id,
+                AiOperationLog.tool_call_id == tool_call_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+        action_query = (
+            select(AiPreparedAction)
+            .where(
+                AiPreparedAction.tenant_id == tenant.tenant_id,
+                AiPreparedAction.execute_tool_call_id == tool_call_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+        log, action = await db.scalar(log_query), await db.scalar(action_query)
+        references = tuple(row for row in (log, action) if row is not None)
+        cids = tuple(
+            sorted(
+                {
+                    row.conversation_id
+                    for row in references
+                    if row.conversation_id is not None
+                }
+            )
+        )
+        inventory = await ai_context_candidate.discover(
+            db, tx, tenant_id=tenant.tenant_id, conversation_ids=cids
+        )
+        direct = tuple(
+            [ResourceKey(ResourceKind.OPERATION_LOG, tenant.tenant_id, log.log_id)]
+            if log
+            else []
+        ) + tuple(
+            [
+                ResourceKey(
+                    ResourceKind.PREPARED_ACTION, tenant.tenant_id, action.action_id
+                )
+            ]
+            if action
+            else []
+        )
+        ids = (log.log_id if log else None, action.action_id if action else None)
+        await tx.lock(
+            LockPlan(
+                existing=tuple(set(identity.keys) | set(inventory.keys) | set(direct))
+            )
+        )
+        await ai_context_candidate.recheck(db, tx, inventory)
+        await assert_identity(db, identity)
+        log, action = await db.scalar(log_query), await db.scalar(action_query)
+        if ids != (log.log_id if log else None, action.action_id if action else None):
+            raise _order_error()
+        actions = list(
+            await db.scalars(
+                select(AiPreparedAction).where(
+                    AiPreparedAction.tenant_id == tenant.tenant_id,
+                    AiPreparedAction.conversation_id.in_(cids),
+                )
+            )
+        )
+        logs = list(
+            await db.scalars(
+                select(AiOperationLog).where(
+                    AiOperationLog.tenant_id == tenant.tenant_id,
+                    AiOperationLog.conversation_id.in_(cids),
+                )
+            )
+        )
+        if log is not None and log.conversation_id is None:
+            logs.append(log)
+        conversations = {
+            row.conversation_id: row
+            for row in await db.scalars(
+                select(AiConversation).where(
+                    AiConversation.tenant_id == tenant.tenant_id,
+                    AiConversation.conversation_id.in_(cids),
+                )
+            )
+        }
+        sources = {
+            row.message_id: row
+            for row in await db.scalars(
+                select(AiMessage).where(
+                    AiMessage.tenant_id == tenant.tenant_id,
+                    AiMessage.conversation_id.in_(cids),
+                    AiMessage.role == "user",
+                )
+            )
+        }
+        states = await project_completions(
+            db,
+            tenant=tenant,
+            actions=actions,
+            logs=logs,
+            conversations=conversations,
+            sources=sources,
+        )
+        actor = await load_live_user_authority(db, tenant=tenant)
+        return await project_operation(tool_call_id, db, actor, tenant, states=states)
+
     async def _snapshot(self, db, tx, tenant, version, filters):
         identity = await read_identity(
             db,

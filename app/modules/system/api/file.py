@@ -9,8 +9,13 @@ from app.core.base_response import PageResult, ResponseModel
 from app.core.config import settings
 from app.core.exceptions import BusinessRuleException
 from app.core.tenant import TenantContext
+from app.db import authorization_http
 from app.db.session import get_db
-from app.modules.auth.service import get_current_tenant_context, get_current_user
+from app.modules.auth.service import (
+    access_identity,
+    get_current_tenant_context,
+    get_current_user,
+)
 from app.modules.system.models.user import User
 from app.modules.system.schemas.file import FileOut, FileQuery
 from app.modules.system.service.file_service import file_service
@@ -51,18 +56,18 @@ async def upload(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """上传单个文件"""
-    file_record = await file_service.upload(
-        db,
-        file,
-        current_user_name=_current_user.user_name,
+    identity = access_identity(_current_user)
+    if identity.tenant != tenant:
+        raise authorization_http._order_error()
+    await authorization_http.release_request_reads(db)
+    records = await authorization_http.get_authorization_runtime().upload.upload(
+        files=(file,),
         business_type=business_type,
         business_id=business_id,
-        owner_user_id=_current_user.user_id,
         tenant=tenant,
+        actor_user_version=identity.user_version,
     )
-    await db.commit()
-    await db.refresh(file_record)
-    return ResponseModel.success(data=file_record, msg="文件上传成功")
+    return ResponseModel.success(data=records[0], msg="文件上传成功")
 
 
 @router.post(
@@ -81,18 +86,17 @@ async def batch_upload(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """批量上传文件"""
-    file_records = await file_service.batch_upload(
-        db,
-        files,
-        current_user_name=_current_user.user_name,
+    identity = access_identity(_current_user)
+    if identity.tenant != tenant:
+        raise authorization_http._order_error()
+    await authorization_http.release_request_reads(db)
+    file_records = await authorization_http.get_authorization_runtime().upload.upload(
+        files=files,
         business_type=business_type,
         business_id=business_id,
-        owner_user_id=_current_user.user_id,
         tenant=tenant,
+        actor_user_version=identity.user_version,
     )
-    await db.commit()
-    for record in file_records:
-        await db.refresh(record)
     return ResponseModel.success(
         data=file_records, msg=f"成功上传 {len(file_records)} 个文件"
     )
@@ -156,14 +160,15 @@ async def delete(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """删除文件（ownership 检查在 service）"""
-    await file_service.delete(
-        db,
-        file_id,
-        current_user=current_user,
-        is_admin=is_super_admin(current_user),
+    identity = access_identity(current_user)
+    if identity.tenant != tenant:
+        raise authorization_http._order_error()
+    await authorization_http.release_request_reads(db)
+    await authorization_http.get_authorization_runtime().upload.delete(
+        identifiers=(file_id,),
         tenant=tenant,
+        actor_user_version=identity.user_version,
     )
-    await db.commit()
     return ResponseModel.success(msg="文件删除成功")
 
 
@@ -180,12 +185,14 @@ async def batch_delete(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """批量删除文件"""
-    count = await file_service.batch_delete(
-        db,
-        ids,
-        current_user=_current_user,
-        is_admin=True,
+    identity = access_identity(_current_user)
+    if identity.tenant != tenant:
+        raise authorization_http._order_error()
+    await authorization_http.release_request_reads(db)
+    count = await authorization_http.get_authorization_runtime().upload.delete(
+        identifiers=ids,
+        batch=True,
         tenant=tenant,
+        actor_user_version=identity.user_version,
     )
-    await db.commit()
     return ResponseModel.success(msg=f"成功删除 {count} 个文件")

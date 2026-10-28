@@ -4,12 +4,15 @@
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import delete, select
 
 from app.core import redis as redis_module
 from app.core.file_storage import LocalFileStorage
+from app.core.security import create_access_token
+from app.core.tenant import PlatformContext
 from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.gateway import executor
 from app.modules.ai.agents.gateway.atomic_execution import (
@@ -20,11 +23,42 @@ from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.chat_service import chat_service
-from app.modules.auth.service import load_live_user_authority
+from app.modules.auth.service import get_current_user
+from app.modules.system.models.user import User
 from app.modules.system.models.user_transfer import UserImportBatch
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case,  # noqa: F401
 )
+
+
+def _retention_context(reason):
+    return PlatformContext(
+        actor_principal_id=0,
+        actor_name="retention-worker",
+        principal_type="service",
+        permissions=frozenset({"platform:data:retention"}),
+        reason=reason,
+        ticket_id="SYSTEM-RETENTION",
+        correlation_id=uuid4().hex,
+    )
+
+
+async def authenticated_actor(db, *, tenant):
+    version = await db.scalar(
+        select(User.auth_version).where(
+            User.tenant_id == tenant.tenant_id,
+            User.user_id == tenant.actor_user_id,
+        )
+    )
+    return await get_current_user(
+        create_access_token(
+            subject=str(tenant.actor_user_id),
+            tenant_id=tenant.tenant_id,
+            tenant_version=1,
+            user_version=version,
+        ),
+        db,
+    )
 
 
 class InspectableLocalStorage(LocalFileStorage):
@@ -71,7 +105,7 @@ async def preview_case(completion_case, monkeypatch, tmp_path):  # noqa: F811
 
     monkeypatch.setattr(registered, "fn", counted)
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(db, tenant=case.tenant)
         action = await db.get(AiPreparedAction, case.action_id)
         deps = await chat_service.build_chat_deps(
             db,
@@ -176,17 +210,19 @@ async def test_invalid_proposal_rolls_back_preview_batch(preview_case, monkeypat
 async def test_real_export_file_and_database_completion_faults(
     preview_case, monkeypatch, failure
 ):
-    from sqlalchemy.ext.asyncio import AsyncSession
 
     from app.core.exceptions import AuthorizationException
-    from app.modules.ai.agents.gateway import atomic_execution
+    from app.modules.ai.agents.gateway import authorization_execution
     from app.modules.ai.agents.hitl.events import ConfirmationRequiredEvent
     from app.modules.ai.api import confirm as confirm_module
     from app.modules.ai.schemas.confirm import ConfirmRequest
-    from app.modules.ai.service.atomic_completion_service import (
-        atomic_completion_service,
+    from app.modules.ai.service.authorization_execution_candidate import (
+        ai_execution_candidate,
     )
     from app.modules.system.models.user_transfer import UserExportTask
+    from app.modules.system.service.authorization_ai_tool_adapter import (
+        system_ai_tool_adapter,
+    )
 
     preview = preview_case
     case = preview.case
@@ -197,48 +233,45 @@ async def test_real_export_file_and_database_completion_faults(
         "app.modules.system.service.user_export_service.get_file_storage",
         lambda: preview.storage,
     )
-    registered = ToolRegistry.get().find("user.export")
-    real_handler = registered.fn
+    real_handler = system_ai_tool_adapter.apply
     calls = []
     export_ids = []
     confirmations = []
-    real_complete = atomic_completion_service.complete_success
-    real_commit = AsyncSession.commit
-    real_authority = atomic_execution.ensure_current_write_authority
+    real_complete = ai_execution_candidate._complete
+    real_commit = authorization_execution.commit_authorization_session
+    real_authority = ai_execution_candidate.authorize
 
-    async def counted(ctx, **args):
+    async def counted(db, tx, command, plan):
         calls.append(True)
-        result = await real_handler(ctx, **args)
+        result = await real_handler(db, tx, command, plan)
         assert result.ok
         export_ids.append(result.data["exportId"])
         return result
 
-    async def complete(db, locked, **kwargs):
-        await real_complete(db, locked, **kwargs)
-        if locked.action.execute_tool_name == "user.export":
-            if failure == "audit":
-                raise RuntimeError("injected required file audit rollback")
-            db.info["test_export_commit"] = True
+    async def complete(*args, **kwargs):
+        await real_complete(*args, **kwargs)
+        if failure == "audit":
+            raise RuntimeError("injected required file audit rollback")
 
     async def commit(db):
-        if db.info.pop("test_export_commit", False) and failure.startswith("commit_"):
+        if failure.startswith("commit_"):
             if failure == "commit_after":
                 await real_commit(db)
             raise RuntimeError("injected export COMMIT acknowledgement failure")
         return await real_commit(db)
 
-    async def authorize(db, **kwargs):
+    async def authorize(*args, **kwargs):
         if calls and failure == "late_authority":
             raise AuthorizationException(
                 "injected late revoke", error_code="AI_TOOL_PERM_DENIED"
             )
-        return await real_authority(db, **kwargs)
+        return await real_authority(*args, **kwargs)
 
     async def approve(event):
         if isinstance(event, ConfirmationRequiredEvent):
             confirmations.append(event.confirmation_id)
             async with AsyncSessionLocal() as db:
-                actor = await load_live_user_authority(db, tenant=case.tenant)
+                actor = await authenticated_actor(db, tenant=case.tenant)
                 await confirm_module.confirm_tool(
                     ConfirmRequest(
                         confirmation_id=event.confirmation_id, action="approve"
@@ -247,10 +280,10 @@ async def test_real_export_file_and_database_completion_faults(
                     current_user=actor,
                 )
 
-    monkeypatch.setattr(registered, "fn", counted)
-    monkeypatch.setattr(atomic_completion_service, "complete_success", complete)
-    monkeypatch.setattr(AsyncSession, "commit", commit)
-    monkeypatch.setattr(atomic_execution, "ensure_current_write_authority", authorize)
+    monkeypatch.setattr(system_ai_tool_adapter, "apply", counted)
+    monkeypatch.setattr(ai_execution_candidate, "_complete", complete)
+    monkeypatch.setattr(authorization_execution, "commit_authorization_session", commit)
+    monkeypatch.setattr(ai_execution_candidate, "authorize", authorize)
     preview.deps.signal_event = approve
     committed = failure in {"none", "commit_after", "missing_after"}
     try:
@@ -309,7 +342,7 @@ async def test_real_export_file_and_database_completion_faults(
                     )
         for _ in range(2):
             async with AsyncSessionLocal() as db:
-                actor = await load_live_user_authority(db, tenant=case.tenant)
+                actor = await authenticated_actor(db, tenant=case.tenant)
                 response = await confirm_module.confirm_tool(
                     ConfirmRequest(confirmation_id=confirmations[0], action="approve"),
                     db=db,
@@ -327,7 +360,6 @@ async def test_real_export_file_and_database_completion_faults(
             from app.modules.system.service.user_export_service import (
                 cleanup_expired_export_tasks,
             )
-            from app.tasks.user_cleanup_tasks import _retention_context
 
             async with AsyncSessionLocal() as db, db.begin():
                 task = await db.get(UserExportTask, export_ids[0])
@@ -638,7 +670,7 @@ async def test_injection_preview_preserves_current_denial_without_file_side_effe
     async def approve_injection(event):
         if isinstance(event, ConfirmationRequiredEvent):
             async with AsyncSessionLocal() as db:
-                actor = await load_live_user_authority(db, tenant=preview.case.tenant)
+                actor = await authenticated_actor(db, tenant=preview.case.tenant)
                 try:
                     await confirm_module.confirm_tool(
                         ConfirmRequest(
@@ -665,7 +697,6 @@ async def test_preview_cleanup_keeps_file_until_database_commit(preview_case, ca
     from datetime import UTC, datetime, timedelta
 
     from app.modules.system.service import user_import_service
-    from app.tasks.user_cleanup_tasks import _retention_context
 
     preview = preview_case
     await executor.execute_tool("user.import_preview", preview.args, preview.deps)
@@ -676,7 +707,7 @@ async def test_preview_cleanup_keeps_file_until_database_commit(preview_case, ca
         batch.created_at = datetime.now(UTC) - timedelta(minutes=11)
     async with AsyncSessionLocal() as db:
         if cancel:
-            actor = await load_live_user_authority(db, tenant=preview.case.tenant)
+            actor = await authenticated_actor(db, tenant=preview.case.tenant)
             await user_import_service.cancel_batch(
                 db,
                 batches[0].batch_id,
@@ -732,7 +763,7 @@ async def test_real_import_partial_and_fail_fast_are_atomic(
         if isinstance(event, ConfirmationRequiredEvent):
             confirmations.append(event.confirmation_id)
             async with AsyncSessionLocal() as db:
-                actor = await load_live_user_authority(db, tenant=case.tenant)
+                actor = await authenticated_actor(db, tenant=case.tenant)
                 responses.append(
                     await confirm_module.confirm_tool(
                         ConfirmRequest(
@@ -778,7 +809,6 @@ async def test_real_import_partial_and_fail_fast_are_atomic(
         take_cleanup_intentions,
     )
     from app.modules.system.service.user_import_service import cleanup_expired_batches
-    from app.tasks.user_cleanup_tasks import _retention_context
 
     async with AsyncSessionLocal() as db, db.begin():
         batch = await db.get(UserImportBatch, preview.batch_ids[0])
@@ -803,16 +833,18 @@ async def test_real_import_partial_and_fail_fast_are_atomic(
 async def test_real_import_file_failure_preserves_one_execution(
     preview_case, monkeypatch, failure
 ):
-    from sqlalchemy.ext.asyncio import AsyncSession
-
     from app.core.exceptions import BusinessRuleException
+    from app.modules.ai.agents.gateway import authorization_execution
     from app.modules.ai.agents.hitl.events import ConfirmationRequiredEvent
     from app.modules.ai.api import confirm as confirm_module
     from app.modules.ai.schemas.confirm import ConfirmRequest
-    from app.modules.ai.service.atomic_completion_service import (
-        atomic_completion_service,
+    from app.modules.ai.service.authorization_execution_candidate import (
+        ai_execution_candidate,
     )
     from app.modules.system.models.user import User
+    from app.modules.system.service.authorization_ai_tool_adapter import (
+        system_ai_tool_adapter,
+    )
 
     preview = preview_case
     case = preview.case
@@ -833,27 +865,24 @@ async def test_real_import_file_failure_preserves_one_execution(
         executor.hitl_manager, "hang", AsyncMock(side_effect=TimeoutError)
     )
     preview.args.update(requested_outcome="execute_if_approved", on_conflict="skip")
-    registered = ToolRegistry.get().find("user.import_execute")
-    handler = registered.fn
-    complete = atomic_completion_service.complete_success
-    commit = AsyncSession.commit
+    handler = system_ai_tool_adapter.apply
+    complete = ai_execution_candidate._complete
+    commit = authorization_execution.commit_authorization_session
     calls, confirmations = [], []
 
-    async def counted(ctx, **args):
+    async def counted(db, tx, command, plan):
         calls.append(True)
-        result = await handler(ctx, **args)
+        result = await handler(db, tx, command, plan)
         assert result.ok, result.error_code
         return result
 
-    async def fault_complete(db, locked, **kwargs):
-        await complete(db, locked, **kwargs)
-        if locked.action.execute_tool_name == "user.import_execute":
-            if failure == "audit":
-                raise RuntimeError("injected import audit rollback")
-            db.info["test_import_commit"] = True
+    async def fault_complete(*args, **kwargs):
+        await complete(*args, **kwargs)
+        if failure == "audit":
+            raise RuntimeError("injected import audit rollback")
 
     async def fault_commit(db):
-        if db.info.pop("test_import_commit", False) and failure.startswith("commit_"):
+        if failure.startswith("commit_"):
             if failure == "commit_after":
                 await commit(db)
             raise RuntimeError("injected import COMMIT acknowledgement failure")
@@ -863,7 +892,7 @@ async def test_real_import_file_failure_preserves_one_execution(
         if isinstance(event, ConfirmationRequiredEvent):
             confirmations.append(event.confirmation_id)
             async with AsyncSessionLocal() as db:
-                actor = await load_live_user_authority(db, tenant=case.tenant)
+                actor = await authenticated_actor(db, tenant=case.tenant)
                 await confirm_module.confirm_tool(
                     ConfirmRequest(
                         confirmation_id=event.confirmation_id, action="approve"
@@ -872,9 +901,11 @@ async def test_real_import_file_failure_preserves_one_execution(
                     current_user=actor,
                 )
 
-    monkeypatch.setattr(registered, "fn", counted)
-    monkeypatch.setattr(atomic_completion_service, "complete_success", fault_complete)
-    monkeypatch.setattr(AsyncSession, "commit", fault_commit)
+    monkeypatch.setattr(system_ai_tool_adapter, "apply", counted)
+    monkeypatch.setattr(ai_execution_candidate, "_complete", fault_complete)
+    monkeypatch.setattr(
+        authorization_execution, "commit_authorization_session", fault_commit
+    )
     preview.deps.signal_event = approve
     committed = failure in {"commit_after", "missing_after"}
     if committed:
@@ -921,7 +952,7 @@ async def test_real_import_file_failure_preserves_one_execution(
             await preview.storage.read_artifact(key, identity=owner)
     for _ in range(2):
         async with AsyncSessionLocal() as db:
-            actor = await load_live_user_authority(db, tenant=case.tenant)
+            actor = await authenticated_actor(db, tenant=case.tenant)
             response = await confirm_module.confirm_tool(
                 ConfirmRequest(confirmation_id=confirmations[0], action="approve"),
                 db=db,
@@ -943,7 +974,6 @@ async def test_owned_preview_retention_commits_before_delete_and_preserves_unkno
         take_cleanup_intentions,
     )
     from app.modules.system.service.user_import_service import cleanup_expired_previews
-    from app.tasks.user_cleanup_tasks import _retention_context
 
     preview = preview_case
     await executor.execute_tool("user.import_preview", preview.args, preview.deps)
@@ -991,7 +1021,6 @@ async def test_expiration_winning_handoff_gap_cannot_revive_import(preview_case)
         take_cleanup_intentions,
     )
     from app.modules.system.service.user_import_service import cleanup_expired_previews
-    from app.tasks.user_cleanup_tasks import _retention_context
 
     preview = preview_case
     preview.args["requested_outcome"] = "execute_if_approved"
@@ -1057,7 +1086,6 @@ async def test_cleanup_waits_for_preview_context_lock_then_observes_success(
 
     from app.modules.ai.models.conversation import AiConversation
     from app.modules.system.service.user_import_service import cleanup_expired_previews
-    from app.tasks.user_cleanup_tasks import _retention_context
 
     preview = preview_case
     await executor.execute_tool("user.import_preview", preview.args, preview.deps)

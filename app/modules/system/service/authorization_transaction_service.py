@@ -1209,6 +1209,39 @@ class _Transaction:
             self._journal.fail()
             raise
 
+    async def delete_file_fact(self, key: ResourceKey, *, expected: dict) -> bool:
+        """Retire one held upload row; disk removal belongs after a known ACK."""
+        try:
+            self.assert_held(key)
+            self._require_exclusive_tenant(key.tenant_id)
+            if (
+                key.kind is not ResourceKind.FILE
+                or getattr(self, "_file_phase", False)
+                or self._policy is not None
+                or self._aggregate_tenant is not None
+                or self._aggregate_global
+                or type(expected) is not dict
+                or set(expected) != {"owner_user_id", "file_path", "del_flag"}
+                or expected["del_flag"] != "0"
+            ):
+                raise _order_error()
+            spec, predicates, _ = await self._mutation_snapshot(key, {}, expected)
+            await self._timeouts()
+            row = (
+                await self._execute(
+                    delete(spec.table)
+                    .where(*predicates)
+                    .returning(*(spec.table.c[name] for name in spec.key_columns))
+                )
+            ).one_or_none()
+            if row is None or tuple(row) != key_values(key):
+                raise _stale()
+            self._deleted.add(key)
+            return True
+        except BaseException:
+            self._journal.fail()
+            raise
+
     async def delete_retained(self, key: ResourceKey, expected=None) -> bool:
         try:
             self.assert_held(key)

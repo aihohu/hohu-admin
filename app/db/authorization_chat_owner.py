@@ -3,13 +3,19 @@
 import asyncio
 
 from app.core.authorization_plan import LockMode, TenantLock, TransactionBudget
+from app.core.exceptions import BusinessRuleException
 from app.db.authorization_owner import (
     commit_authorization_session,
     rollback_authorization_session,
 )
 from app.db.authorization_plan_session import _order_error
 from app.modules.ai.core.provider_egress import provider_egress
-from app.modules.ai.schemas.conversation import ConversationCreate, ConversationUpdate
+from app.modules.ai.models.conversation import AiConversation
+from app.modules.ai.schemas.conversation import (
+    ConversationCreate,
+    ConversationOut,
+    ConversationUpdate,
+)
 from app.modules.ai.service.authorization_chat_candidate import chat_candidate
 from app.modules.ai.service.authorization_chat_model import select_model
 from app.modules.system.service.authorization_read_budget import (
@@ -25,7 +31,13 @@ class ChatOwner:
         self.factory = factory
 
     async def conversation(
-        self, *, tenant, actor_user_version, data, conversation_id=None
+        self,
+        *,
+        tenant,
+        actor_user_version,
+        data,
+        conversation_id=None,
+        http_result=False,
     ):
         if type(data) is not dict or set(data) - {
             "title",
@@ -38,6 +50,10 @@ class ChatOwner:
             ConversationCreate if conversation_id is None else ConversationUpdate
         ).model_validate(data)
         values = schema.model_dump(exclude_unset=conversation_id is not None)
+        if conversation_id is None:
+            values["title"] = values.get("title") or "新对话"
+        if type(http_result) is not bool:
+            raise _order_error()
         if (
             values.get("title", "") is None
             or values.get("status", 0) not in {0, 1}
@@ -60,7 +76,9 @@ class ChatOwner:
                 if not await provider_egress.is_model_allowed(
                     egress.pop("provider_code"), egress.pop("base_url"), **egress
                 ):
-                    raise _order_error()
+                    raise BusinessRuleException(
+                        "所选 AI 模型当前不可用", error_code="AI_MODEL_NOT_AVAILABLE"
+                    )
         return await self._run(
             "conversation",
             {
@@ -70,6 +88,7 @@ class ChatOwner:
                 "selection": selection,
                 "conversation_id": conversation_id,
             },
+            http_result=http_result,
         )
 
     async def source(self, **request):
@@ -86,6 +105,9 @@ class ChatOwner:
     async def messages(self, **request):
         return await self._run("messages", request)
 
+    async def list_conversations(self, **request):
+        return await self._run("list_conversations", request)
+
     async def recover_orphan(self, *, tenant, confirmation_id):
         return await self._run(
             "recover_orphan", {"tenant": tenant, "confirmation_id": confirmation_id}
@@ -94,7 +116,7 @@ class ChatOwner:
     async def invalidate(self, **request):
         return await self._run("invalidate", request)
 
-    async def _run(self, operation, request):
+    async def _run(self, operation, request, *, http_result=False):
         async with self.factory() as db:
             try:
                 with bounded_authorization_reads(db):
@@ -114,6 +136,12 @@ class ChatOwner:
                             result = await chat_candidate.conversation(
                                 db, tx, **request
                             )
+                            if http_result:
+                                result = ConversationOut.model_validate(
+                                    await db.get(
+                                        AiConversation, result, populate_existing=True
+                                    )
+                                )
                         elif operation == "source":
                             result = await chat_candidate.source(db, tx, **request)
                         elif operation == "finalize":
@@ -126,12 +154,16 @@ class ChatOwner:
                             )
                         elif operation == "invalidate":
                             result = await chat_candidate.invalidate(db, tx, **request)
+                        elif operation == "list_conversations":
+                            result = await chat_candidate.list_conversations(
+                                db, tx, **request
+                            )
                         else:
                             result = await chat_candidate.messages(db, tx, **request)
             except BaseException:
                 await rollback_authorization_session(db)
                 raise
-            if operation == "messages":
+            if operation in {"messages", "list_conversations"}:
                 await rollback_authorization_session(db)
             else:
                 await commit_authorization_session(db)

@@ -80,6 +80,11 @@ _NAMESPACE_REGISTRY: dict[str, tuple[str, str, tuple[str, ...]]] = {
         "tenant",
         ("tenant_id", "ArtifactExecution"),
     ),
+    "modules/system/service/authorization_upload_candidate.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "validate_private_storage_roots", "PublishedUpload"),
+    ),
     "db/authorization_runtime.py": (
         "storage",
         "infrastructure",

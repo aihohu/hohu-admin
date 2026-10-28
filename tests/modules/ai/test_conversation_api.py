@@ -2,14 +2,33 @@
 
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, patch
+from unittest.mock import AsyncMock, patch
 
-import pytest
+from sqlalchemy import select, update
 
-from app.core.exceptions import BusinessRuleException
 from app.core.tenant import TenantContext
-from app.modules.ai.api.conversation import delete_conversation
+from app.modules.ai.models.conversation import AiConversation
+from app.modules.ai.models.operation_log import AiOperationLog
+from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.conversation_service import conversation_service
+from tests.modules.ai.test_authorization_conversation_http import (
+    chat_model_case as chat_model_case,
+)
+from tests.modules.ai.test_authorization_conversation_http import (
+    conversation_http as conversation_http,
+)
+from tests.modules.ai.test_authorization_conversation_http import (
+    execution_case as execution_case,
+)
+from tests.modules.ai.test_authorization_conversation_http import (
+    plan_sessions as plan_sessions,
+)
+from tests.modules.ai.test_authorization_conversation_http import (
+    recovery_case as recovery_case,
+)
+from tests.modules.ai.test_authorization_conversation_http import (
+    system_sessions as system_sessions,
+)
 
 
 def _user(user_id: int = 7001):
@@ -126,66 +145,46 @@ async def test_authorized_history_refreshes_short_lived_download_url() -> None:
     refresh.assert_awaited_once()
 
 
-async def test_delete_conversation_terminalizes_actions_before_delete() -> None:
-    db = AsyncMock()
-    current_user = _user()
-    expired = [SimpleNamespace(confirmation_id="cid-1")]
-
-    with (
-        patch(
-            "app.modules.ai.api.conversation.conversation_service.lock_for_delete",
-            AsyncMock(),
-        ) as lock_for_delete,
-        patch(
-            "app.modules.ai.api.conversation.prepared_action_service.expire_for_conversation_delete",
-            AsyncMock(return_value=expired),
-        ) as expire,
-        patch(
-            "app.modules.ai.api.conversation.conversation_service.delete",
-            AsyncMock(),
-        ) as delete,
-    ):
-        response = await delete_conversation(8001, db, current_user)
-
-    assert response.code == 200
-    lock_for_delete.assert_awaited_once_with(db, 8001, 7001, tenant=ANY)
-    expire.assert_awaited_once_with(
-        db,
-        conversation_id=8001,
-        user_id=7001,
-        tenant=ANY,
-    )
-    delete.assert_awaited_once_with(db, 8001, 7001, tenant=ANY)
-    db.commit.assert_awaited_once()
+async def test_delete_conversation_terminalizes_actions_before_delete(
+    conversation_http,
+):
+    client, plain, case = conversation_http
+    async with plain() as db:
+        await db.execute(
+            update(AiPreparedAction).values(
+                status="pending_confirmation",
+                row_version=1,
+                approved_by=None,
+                approved_at=None,
+                execution_owner=None,
+                execution_lease_expires_at=None,
+            )
+        )
+        await db.execute(
+            update(AiOperationLog).values(
+                status="pending_confirmation", approved_by=None, started_at=None
+            )
+        )
+        await db.commit()
+    response = await client.delete(f"/ai/conversation/{case.claim.conversation_id}")
+    assert response.status_code == 200, response.text
+    async with plain() as db:
+        action = await db.scalar(select(AiPreparedAction))
+        log = await db.scalar(select(AiOperationLog))
+        conversation = await db.get(AiConversation, case.claim.conversation_id)
+        assert action.status == "expired" and log.status == "expired"
+        assert action.finished_at is not None and conversation.deleted_at is not None
 
 
-async def test_delete_conversation_does_not_commit_when_action_is_running() -> None:
-    db = AsyncMock()
-    current_user = _user()
-    error = BusinessRuleException(
-        "action is running",
-        error_code="AI_ACTION_RUNNING",
-    )
-    error.code = 409
-
-    with (
-        patch(
-            "app.modules.ai.api.conversation.conversation_service.lock_for_delete",
-            AsyncMock(),
-        ),
-        patch(
-            "app.modules.ai.api.conversation.prepared_action_service.expire_for_conversation_delete",
-            AsyncMock(side_effect=error),
-        ),
-        patch(
-            "app.modules.ai.api.conversation.conversation_service.delete",
-            AsyncMock(),
-        ) as delete,
-    ):
-        with pytest.raises(BusinessRuleException) as exc_info:
-            await delete_conversation(8001, db, current_user)
-
-    assert exc_info.value.error_code == "AI_ACTION_RUNNING"
-    assert exc_info.value.code == 409
-    delete.assert_not_awaited()
-    db.commit.assert_not_awaited()
+async def test_delete_conversation_does_not_commit_when_action_is_running(
+    conversation_http,
+):
+    client, plain, case = conversation_http
+    response = await client.delete(f"/ai/conversation/{case.claim.conversation_id}")
+    assert response.status_code == 409, response.text
+    assert response.json()["errorCode"] == "AI_ACTION_RUNNING"
+    async with plain() as db:
+        assert (
+            await db.get(AiConversation, case.claim.conversation_id)
+        ).deleted_at is None
+        assert (await db.scalar(select(AiPreparedAction))).status == "running"

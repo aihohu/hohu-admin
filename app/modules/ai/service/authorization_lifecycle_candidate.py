@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from app.core.authorization_plan import LockPlan, NewResource, ResourceKey
 from app.core.authorization_plan import ResourceKind as K
+from app.core.exceptions import AuthorizationException, BusinessException
 from app.core.file_storage import ArtifactExecution
 from app.core.id_generator import next_id
 from app.db.authorization_plan_session import _order_error
@@ -46,12 +47,22 @@ from app.modules.system.service.authorization_control_identity import (
     read_identity,
 )
 
+_EXECUTION_LEASE_TTL = timedelta(seconds=90)
+
 
 @dataclass(frozen=True, slots=True, repr=False)
 class SweepResult:
     action: object = None
     disposition: str = "unknown"
     changed: bool = False
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class ConfirmationAdmission:
+    action: object
+    disposition: str
+    changed: bool = False
+    error: BusinessException | None = None
 
 
 class LifecycleCandidate:
@@ -526,6 +537,98 @@ class LifecycleCandidate:
         )
         return action, conversation, source, log
 
+    async def admit(
+        self,
+        db,
+        tx,
+        confirmation_id,
+        *,
+        tenant,
+        actor_user_version,
+        decision,
+        disabled,
+        denial=None,
+    ):
+        if (
+            decision not in {"approve", "reject"}
+            or type(disabled) is not bool
+            or (
+                denial is not None
+                and (
+                    not isinstance(denial, BusinessException)
+                    or not 400 <= denial.code < 500
+                    or decision != "approve"
+                    or denial.error_code.startswith("AUTHORIZATION_")
+                )
+            )
+        ):
+            raise _order_error()
+        identity = await read_identity(
+            db, tenant=tenant, actor_user_version=actor_user_version
+        )
+        reference = await self.reference(db, confirmation_id, tenant=tenant)
+        if reference is None:
+            raise _order_error()
+        # Admission only decides pending work. A terminal or running reference
+        # must pass the separate completion proof, which also handles missing
+        # historical context conservatively without attempting another claim.
+        if reference.status != "pending_confirmation":
+            return ConfirmationAdmission(reference, reference.status)
+        action, conversation, source, log = await self._locked(
+            db, tx, reference, tenant, identity
+        )
+        if has_annotation(log.result_summary):
+            return ConfirmationAdmission(action, "unknown")
+        if action.status != "pending_confirmation":
+            return ConfirmationAdmission(action, action.status)
+        _check_log(action, log, "pending_confirmation")
+        now = await tx.database_now()
+        error = None
+        if action.expires_at <= now:
+            finish = "sweep_expire"
+        elif conversation.deleted_at is not None or not source.is_active:
+            finish = "source_stale"
+        elif decision == "reject":
+            finish = "reject"
+        elif denial is not None:
+            error, finish = denial, "denied"
+        else:
+            finish = None
+            try:
+                if disabled:
+                    raise AuthorizationException(
+                        "AI 已被禁用，无法确认操作", error_code="AI_USER_DISABLED"
+                    )
+                await ai_execution_candidate.authorize(
+                    db, tx, action, tenant=tenant, actor_user_version=actor_user_version
+                )
+            except BusinessException as exc:
+                if not 400 <= exc.code < 500 or exc.error_code.startswith(
+                    "AUTHORIZATION_"
+                ):
+                    raise
+                error, finish = exc, "denied"
+        if finish is None:
+            return ConfirmationAdmission(action, "pending_confirmation")
+        status = await self._finish_decision(
+            tx, tenant, action, log, finish, error=error
+        )
+        action = await self.reference(db, confirmation_id, tenant=tenant)
+        return ConfirmationAdmission(action, status, True, error)
+
+    async def unexecuted(self, db, tx, confirmation_id, *, tenant):
+        tx.assert_session(db)
+        reference = await self.reference(db, confirmation_id, tenant=tenant)
+        if reference is None:
+            raise _order_error()
+        action, conversation, source, log = await self._locked(
+            db, tx, reference, tenant, None
+        )
+        atomic_completion_service.validate_locked_unexecuted_terminal(
+            action, log, tenant=tenant, conversation=conversation, source=source
+        )
+        return action
+
     async def confirm(
         self, db, tx, *, tenant, actor_user_version, confirmation_id, command, owner
     ):
@@ -614,7 +717,7 @@ class LifecycleCandidate:
                 "status": "running",
                 "row_version": 3,
                 "execution_owner": owner,
-                "execution_lease_expires_at": now + timedelta(seconds=90),
+                "execution_lease_expires_at": now + _EXECUTION_LEASE_TTL,
             },
             expected={
                 "status": "approved",
@@ -678,7 +781,7 @@ class LifecycleCandidate:
             decision = "sweep_expire"
         return await self._finish_decision(tx, locator, action, log, decision)
 
-    async def _finish_decision(self, tx, tenant, action, log, decision):
+    async def _finish_decision(self, tx, tenant, action, log, decision, *, error=None):
         now = await tx.database_now()
         if (
             action.status != "pending_confirmation"
@@ -697,6 +800,10 @@ class LifecycleCandidate:
             "source_stale": "AI_PREPARED_ACTION_SOURCE_STALE",
             "sweep_expire": "AI_HITL_EXPIRED",
         }.get(decision, "AI_PREPARED_ACTION_CANCELLED")
+        if error is not None:
+            if decision != "denied" or not isinstance(error, BusinessException):
+                raise _order_error()
+            code = error.error_code or "AI_PREPARED_ACTION_REVALIDATION_FAILED"
         approved_by = tenant.actor_user_id if rejected else None
         await tx.update_factual(
             ResourceKey(K.PREPARED_ACTION, tenant.tenant_id, action.action_id),

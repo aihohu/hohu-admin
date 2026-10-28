@@ -16,7 +16,6 @@ from app.modules.ai.agents.gateway import atomic_execution
 from app.modules.ai.agents.gateway.atomic_execution import OUTCOME_UNKNOWN_MESSAGE
 from app.modules.ai.agents.hitl.constants import PreparedActionStatus
 from app.modules.ai.api.confirm import confirm_tool
-from app.modules.ai.api.operation_log import get_operation_log
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
@@ -31,11 +30,18 @@ from app.modules.ai.service.completion_read_state_service import (
 )
 from app.modules.ai.service.conversation_service import conversation_service
 from app.modules.ai.service.operation_log_service import operation_log_service
+from app.modules.ai.service.operation_status_projection import (
+    project_operation as get_operation_log,
+)
 from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.ai.service.result_projection_service import result_projection_service
 from app.modules.ai.service.trace_service import trace_service
 from app.modules.auth.service import load_live_user_authority
-from tests.modules.ai.test_atomic_prepared_completion import approve, count_real_handler
+from tests.modules.ai.test_atomic_prepared_completion import (
+    approve,
+    authenticated_actor,
+    count_real_handler,
+)
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )
@@ -71,7 +77,7 @@ async def test_verified_rejection_keeps_cancel_reason_on_all_read_surfaces(
     case = completion_case
     count_real_handler(case, monkeypatch)
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         response = await confirm_tool(
             ConfirmRequest(confirmation_id=case.confirmation_id, action="reject"),
             db=db,
@@ -89,7 +95,7 @@ async def test_verified_rejection_keeps_cancel_reason_on_all_read_surfaces(
         else "USER_REJECTED"
     )
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         poll = await get_operation_log(
             tool_call_id=case.tool_call_id,
             db=db,
@@ -151,7 +157,7 @@ async def test_poll_trace_history_mask_unproven_terminal_without_writing(
             await db.delete(action)
     before = await stored_facts(case)
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         poll = await get_operation_log(
             tool_call_id=case.tool_call_id,
             db=db,
@@ -244,7 +250,7 @@ async def test_valid_db_completion_retains_terminal_poll_and_trace(
     await approve(case)
     before = await stored_facts(case)
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         action = await db.get(AiPreparedAction, case.action_id)
         poll = await get_operation_log(
             tool_call_id=case.tool_call_id,
@@ -307,7 +313,7 @@ async def test_missing_log_remains_unknown_without_creating_a_receipt(
     )
     assert states[case.tool_call_id].unknown
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         messages = await conversation_service.project_messages(
             db, conversation_id=case.conversation_id, current_user=actor
         )
@@ -333,7 +339,7 @@ async def test_missing_audit_poll_keeps_owner_unknown_and_tenant_isolation(
             delete(AiOperationLog).where(AiOperationLog.log_id == case.log_id)
         )
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         # Exercise the owner branch with no audit or chat permission; the
         # authenticated ID is real, and this transport principal grants nothing.
         owner = SimpleNamespace(
@@ -410,7 +416,7 @@ async def test_cancelled_write_requires_never_started_proof_for_reads_and_admiss
             )
         trace_id = action.trace_id
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         poll = await get_operation_log(
             tool_call_id=case.tool_call_id,
             db=db,
@@ -433,7 +439,7 @@ async def test_cancelled_write_requires_never_started_proof_for_reads_and_admiss
             async with AsyncSessionLocal() as db, db.begin():
                 await db.delete(await db.get(AiPreparedAction, case.action_id))
         async with AsyncSessionLocal() as db:
-            actor = await load_live_user_authority(db, tenant=case.tenant)
+            actor = await authenticated_actor(case, db)
             poll = await get_operation_log(
                 tool_call_id=case.tool_call_id,
                 db=db,
@@ -481,7 +487,7 @@ async def test_unknown_history_denied_projection_is_minimal_and_idempotent(
     )
     before = await stored_facts(case)
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         for _ in range(2):
             messages = await conversation_service.project_messages(
                 db, conversation_id=case.conversation_id, current_user=actor
@@ -555,14 +561,16 @@ async def test_history_uses_verified_state_instead_of_stale_tool_card(
         ]
     before = await stored_facts(case)
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         messages = await conversation_service.project_messages(
             db, conversation_id=case.conversation_id, current_user=actor
         )
         assistant = next(item for item in messages if item.role == "assistant")
         call = assistant.tool_calls[0]
         assert call["ok"] is not failure
-        assert call.get("error_code") == ("TEST_HANDLER_FAILURE" if failure else None)
+        assert call.get("error_code") == (
+            "AI_PREPARED_ACTION_EXECUTION_INTERRUPTED" if failure else None
+        )
         assert "result" not in call and "ui" not in call
         await db.commit()
     assert await stored_facts(case) == before

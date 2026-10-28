@@ -9,6 +9,7 @@ from app.core.file_storage import ArtifactExecution
 from app.core.tenant import TenantContext
 from app.db.authorization_ai_owner import AIAuthorizationOwner
 from app.db.authorization_owner import (
+    authorization_session,
     commit_authorization_session,
     rollback_authorization_session,
 )
@@ -54,7 +55,7 @@ class PlannedGatewayOwner:
             raise _order_error()
         terminal = False
         failed = False
-        async with self.factory() as db:
+        async with authorization_session(self.factory) as db:
             try:
                 with bounded_authorization_reads(db):
                     async with asyncio.timeout(5):

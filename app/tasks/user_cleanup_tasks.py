@@ -1,98 +1,53 @@
-"""用户导入导出定时清理任务。
+"""Bounded scheduled FILE retention with fresh authorization proofs per item.
 
-3 个 ``@register_task`` 入口，对应 ``sys_job.job_key``：
-- ``clean_expired_import_batches``：每日 02:00，删 90 天前终态 batch + 文件
-- ``clean_expired_import_previews``：每小时，PREVIEW_DONE > 10min → EXPIRED
-- ``clean_expired_export_tasks``：每日 02:30，删 30 天前 ExportTask + 文件
-
-service 层函数（``cleanup_expired_*``）只接 ``db`` 参数不 commit，
-本模块负责 ``AsyncSessionLocal()`` 上下文 + commit。
+Historical rows remain available for completion verification. Returned counts
+refer to artifacts retired during this page, not deleted database rows.
 """
 
+import asyncio
 import logging
-from uuid import uuid4
 
-from app.core.tenant import PlatformContext
 from app.core.write_admission import admitted
-from app.db.session import AsyncSessionLocal
+from app.db import authorization_http
 from app.modules.job.task_registry import TaskScope, register_task
-from app.modules.system.service.transfer_cleanup_service import (
-    finish_committed_cleanup,
-    take_cleanup_intentions,
-)
-from app.modules.system.service.user_export_service import cleanup_expired_export_tasks
-from app.modules.system.service.user_import_service import (
-    cleanup_expired_batches,
-    cleanup_expired_previews,
-)
 
 logger = logging.getLogger(__name__)
+_cursors: dict[str, tuple[int, str] | None] = {}
+_scan_locks = {name: asyncio.Lock() for name in ("import", "preview", "export")}
 
 
-def _retention_context(reason: str) -> PlatformContext:
-    return PlatformContext(
-        actor_principal_id=0,
-        actor_name="retention-worker",
-        principal_type="service",
-        permissions=frozenset({"platform:data:retention"}),
-        reason=reason,
-        ticket_id="SYSTEM-RETENTION",
-        correlation_id=uuid4().hex,
-    )
+async def _advance(name):
+    async with _scan_locks[name]:
+        page = (
+            await authorization_http.get_authorization_runtime().transfer.cleanup_page(
+                kind="export" if name == "export" else "import",
+                category="preview" if name == "preview" else "terminal",
+                after=_cursors.get(name),
+                limit=256,
+            )
+        )
+        _cursors[name] = page.next_cursor
+        count = sum(status == "retired" for _, _, status in page.items)
+        logger.info("Scheduled %s retention: retired %d artifacts", name, count)
+        return count
 
 
 @register_task("clean_expired_import_batches", scope=TaskScope.PLATFORM)
 @admitted
 async def clean_expired_import_batches(_args: dict | None = None) -> int:
-    """清理 90 天前导入批次 + 关联文件（每日 02:00）。
-
-    清理过期预检批次和对应临时文件。
-    """
-    async with AsyncSessionLocal() as db:
-        count = await cleanup_expired_batches(
-            db,
-            platform=_retention_context("scheduled import retention"),
-        )
-        intentions = take_cleanup_intentions(db)
-        await db.commit()
-        await finish_committed_cleanup(intentions)
-    logger.info("clean_expired_import_batches: cleaned %d batches", count)
-    return count
+    """Advance one page of terminal imports retained for at least 90 days."""
+    return await _advance("import")
 
 
 @register_task("clean_expired_import_previews", scope=TaskScope.PLATFORM)
 @admitted
 async def clean_expired_import_previews(_args: dict | None = None) -> int:
-    """PREVIEW_DONE > 10min → EXPIRED + 删孤儿 preview 文件（每小时）。
-
-    清理已完成批次的过期失败行文件。
-    """
-    async with AsyncSessionLocal() as db:
-        count = await cleanup_expired_previews(
-            db,
-            platform=_retention_context("scheduled preview expiration"),
-        )
-        intentions = take_cleanup_intentions(db)
-        await db.commit()
-        await finish_committed_cleanup(intentions)
-    logger.info("clean_expired_import_previews: expired %d previews", count)
-    return count
+    """Expire ten-minute previews and independently prove their FILE retirement."""
+    return await _advance("preview")
 
 
 @register_task("clean_expired_export_tasks", scope=TaskScope.PLATFORM)
 @admitted
 async def clean_expired_export_tasks(_args: dict | None = None) -> int:
-    """清理 30 天前导出任务 + 关联文件（每日 02:30）。
-
-    清理过期导出任务和对应文件。
-    """
-    async with AsyncSessionLocal() as db:
-        count = await cleanup_expired_export_tasks(
-            db,
-            platform=_retention_context("scheduled export retention"),
-        )
-        intentions = take_cleanup_intentions(db)
-        await db.commit()
-        await finish_committed_cleanup(intentions)
-    logger.info("clean_expired_export_tasks: cleaned %d tasks", count)
-    return count
+    """Advance one page of terminal exports retained for at least 30 days."""
+    return await _advance("export")

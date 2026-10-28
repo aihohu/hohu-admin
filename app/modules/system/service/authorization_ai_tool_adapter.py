@@ -144,6 +144,11 @@ class SystemAIToolAdapter:
             )
             return _ToolInput(tool, tenant, command, snapshot, compute_args_hash(args))
         if tool == "user.batch_delete":
+            # Production dry-run freezes resolved IDs alongside explicit null
+            # selectors. Never resolve non-null names/phones after approval.
+            for selector in ("user_names", "phones"):
+                if selector in values and values[selector] is None:
+                    values.pop(selector)
             if (
                 set(values) != {"user_ids"}
                 or type(values["user_ids"]) is not list

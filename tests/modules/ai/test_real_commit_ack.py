@@ -17,13 +17,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
 
+from app.db import authorization_http
+from app.db.authorization_owner import _QUARANTINED
 from app.db.session import AsyncSessionLocal, engine, is_session_quarantined
 from app.modules.ai.agents.gateway import atomic_execution
 from app.modules.ai.api import confirm as confirm_module
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.schemas.confirm import ConfirmRequest
-from app.modules.auth.service import load_live_user_authority
 from tests.modules.ai.pg_fault_proxy import CommitFault, PgFaultProxy
 from tests.modules.ai.test_atomic_prepared_completion import (
     assert_success,
@@ -34,6 +35,30 @@ from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )
 from tests.modules.ai.test_completion_recovery_transaction import running_claim
+from tests.modules.ai.test_preview_atomic_completion import authenticated_actor
+
+
+def observe_action_write(connection, _cursor, _sql, _parameters, context, _many):
+    statement = context.compiled.statement if context.compiled else None
+    if getattr(getattr(statement, "table", None), "name", None) != "ai_prepared_action":
+        return
+    if not getattr(statement, "is_update", False):
+        return
+    for parameters in context.compiled_parameters:
+        if "status" in parameters:
+            connection.info["test_action_commit_status"] = parameters["status"]
+
+
+def clear_action_write(connection):
+    connection.info.pop("test_action_commit_status", None)
+
+
+def commit_status(session, action):
+    # Legacy claims flush at commit; fixed owners already issued typed DML.
+    # Observe successful wire statements without issuing SQL in a closed proof.
+    if action in session.dirty or action in session.new:
+        return action.status
+    return session.connection().info.get("test_action_commit_status", action.status)
 
 
 @asynccontextmanager
@@ -46,15 +71,26 @@ async def fault_sessions(case, monkeypatch, plan, *, match=None):
         )
         factory = async_sessionmaker(proxied, expire_on_commit=False, autoflush=False)
         monkeypatch.setattr(atomic_execution, "AsyncSessionLocal", factory)
+        monkeypatch.setattr(authorization_http, "engine", proxied)
+        previous_quarantine = set(_QUARANTINED)
         faults = [CommitFault(stage, mode) for stage, mode in plan]
         remaining = list(faults)
+        drivers = set()
 
         def locate_commit(session):
             if session.bind is not proxied.sync_engine or not remaining:
                 return
+            drivers.add(session.connection().connection.driver_connection)
+            observed = session.connection().info.get("test_action_commit_status")
+            if observed == remaining[0].stage:
+                proxy.arm(
+                    session.connection().connection.driver_connection.get_server_pid(),
+                    remaining.pop(0),
+                )
+                return
             if match is not None:
                 if match(session):
-                    pid = session.scalar(select(func.pg_backend_pid()))
+                    pid = session.connection().connection.driver_connection.get_server_pid()
                     proxy.arm(pid, remaining.pop(0))
                 return
             action = next(
@@ -66,22 +102,65 @@ async def fault_sessions(case, monkeypatch, plan, *, match=None):
                 ),
                 None,
             )
-            if action is not None and action.status == remaining[0].stage:
-                pid = session.scalar(select(func.pg_backend_pid()))
+            if (
+                action is not None
+                and commit_status(session, action) == remaining[0].stage
+            ):
+                pid = session.connection().connection.driver_connection.get_server_pid()
                 proxy.arm(pid, remaining.pop(0))
 
+        event.listen(proxied.sync_engine, "begin", clear_action_write)
+        event.listen(proxied.sync_engine, "after_cursor_execute", observe_action_write)
         event.listen(Session, "before_commit", locate_commit)
         try:
             yield proxy, factory, faults
         finally:
+            for fault in faults:
+                fault.release.set()
+            await proxy.disconnect_all()
+            # Test teardown closes only this proxy's owned sockets. Production
+            # keeps cancellation-resistant sessions quarantined until idle;
+            # cleanup completion is not part of the response-time assertion.
+            for driver in drivers:
+                if not driver.is_closed():
+                    driver.terminate()
+            for key, entry in tuple(_QUARANTINED.items()):
+                if key not in previous_quarantine and not entry[1].done():
+                    # The owned sockets are now closed; release a driver waiting
+                    # for cancellation acknowledgement before ending this loop.
+                    entry[1].cancel()
+            cleanups = [
+                entry[2]
+                for key, entry in tuple(_QUARANTINED.items())
+                if key not in previous_quarantine
+            ]
+            if cleanups:
+                _, pending = await asyncio.wait(cleanups, timeout=5)
+                assert not pending, "Transport cleanup outlived released fault"
             event.remove(Session, "before_commit", locate_commit)
+            event.remove(proxied.sync_engine, "begin", clear_action_write)
+            event.remove(
+                proxied.sync_engine, "after_cursor_execute", observe_action_write
+            )
             await proxied.dispose()
+
+
+async def expire_claim(case):
+    async with AsyncSessionLocal() as db, db.begin():
+        await db.execute(
+            update(AiPreparedAction)
+            .where(
+                AiPreparedAction.action_id == case.action_id,
+                AiPreparedAction.status == "running",
+            )
+            .values(execution_lease_expires_at=func.now() - text("interval '1 second'"))
+        )
 
 
 async def approve_via(case, factory):
     db = factory()
     try:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(db, tenant=case.tenant)
         return await confirm_module.confirm_tool(
             ConfirmRequest(confirmation_id=case.confirmation_id, action="approve"),
             db=db,
@@ -97,6 +176,9 @@ def source_fingerprint():
     root = Path(__file__).resolve().parents[3]
     paths = [
         "app/modules/ai/api/confirm.py",
+        "app/modules/ai/agents/gateway/authorization_execution.py",
+        "app/modules/ai/service/authorization_execution_candidate.py",
+        "app/modules/system/service/authorization_ai_tool_adapter.py",
         "app/modules/ai/agents/gateway/atomic_execution.py",
         "app/modules/ai/agents/gateway/preview_execution.py",
         "app/modules/ai/agents/gateway/preview_handoff.py",
@@ -195,10 +277,10 @@ async def record(tmp_path, case, faults, state, calls, elapsed):
     ("plan", "reject_result", "expected", "calls"),
     [
         ([("running", "drop_before")], False, "pending_confirmation", 0),
-        ([("running", "drop_after")], False, "failed", 0),
-        ([("succeeded", "drop_before")], False, "failed", 1),
+        ([("running", "drop_after")], False, "running", 0),
+        ([("succeeded", "drop_before")], False, "running", 1),
         ([("succeeded", "drop_after")], False, "succeeded", 1),
-        ([("failed", "drop_before")], True, "failed", 1),
+        ([("failed", "drop_before")], True, "running", 1),
         ([("failed", "drop_after")], True, "failed", 1),
         (
             [("succeeded", "drop_before"), ("failed", "drop_after")],
@@ -223,6 +305,15 @@ async def test_real_commit_loss_branches(
         started = time.monotonic()
         response = await asyncio.wait_for(approve_via(case, factory), 24)
         elapsed = time.monotonic() - started
+        if len(plan) > 1:
+            assert response.data.status == "running"
+            assert not faults[1].reached.is_set()
+            # The first unknown ACK cannot authorize immediate fencing. After
+            # expiry, a separate fact-only transaction may attempt the fence.
+            await expire_claim(case)
+            await authorization_http.get_authorization_runtime().recovery.reconcile(
+                case.confirmation_id, tenant=case.tenant
+            )
         assert all(f.reached.is_set() for f in faults)
         state = await observe(case)
         await record(tmp_path, case, faults, state, case.calls, elapsed)
@@ -235,7 +326,9 @@ async def test_real_commit_loss_branches(
             assert state["role_ids"] == []
             assert state["department_rows"] == []
         if expected in {"succeeded", "failed"}:
-            assert response.data.status == expected
+            assert response.data.status == (
+                "running" if plan[0][0] in {"succeeded", "failed"} else expected
+            )
             assert (await approve_via(case, factory)).data.status == expected
             assert len(case.calls) == calls
         else:
@@ -267,9 +360,8 @@ async def test_silent_commit_ack_loss_has_bounded_response(
                 assert state["user_ids"] == []
             done, _ = await asyncio.wait({request}, timeout=12)
             assert request in done, "COMMIT has no bounded response on silent ACK loss"
-            assert request.result().data.status == (
-                "succeeded" if stage == "succeeded" else "failed"
-            )
+            assert request.result().data.status == "running"
+            assert len(case.calls) == (0 if stage == "running" else 1)
             await record(
                 tmp_path,
                 case,
@@ -454,7 +546,16 @@ async def test_live_uncommitted_transaction_keeps_recovery_unknown(
         finally:
             faults[0].release.set()
             await asyncio.wait_for(request, 12)
+        assert (await observe(case))["action_status"] == "running"
+        await expire_claim(case)
+        outcome = (
+            await authorization_http.get_authorization_runtime().recovery.reconcile(
+                case.confirmation_id, tenant=case.tenant
+            )
+        )
+        assert outcome.disposition == "failed"
         assert (await observe(case))["action_status"] == "failed"
+        assert len(case.calls) == 1
 
 
 async def test_server_processing_commit_keeps_recovery_unknown(
@@ -497,7 +598,7 @@ async def test_server_processing_commit_keeps_recovery_unknown(
                 request = asyncio.create_task(approve_via(case, factory))
                 try:
                     await asyncio.wait_for(faults[0].sent.wait(), 5)
-                    pid = case.calls[0][0]
+                    pid = faults[0].backend_pid
                     async with asyncio.timeout(3):
                         while True:
                             waiting = await gate.scalar(
@@ -531,10 +632,9 @@ async def test_server_processing_commit_keeps_recovery_unknown(
                     await gate.commit()
                     await asyncio.wait_for(faults[0].reached.wait(), 3)
                     faults[0].release.set()
-                    assert (
-                        await asyncio.wait_for(request, 8)
-                    ).data.status == "succeeded"
+                    assert (await asyncio.wait_for(request, 8)).data.status == "running"
                     state = await observe(case)
+                    assert (await approve_via(case, factory)).data.status == "succeeded"
                     assert_success(case, state)
                     assert len(case.calls) == 1
                     await record(

@@ -5,7 +5,8 @@ session and pending operation remain strongly referenced until invalidation.
 """
 
 import asyncio
-from contextlib import suppress
+import logging
+from contextlib import asynccontextmanager, suppress
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -147,3 +148,34 @@ async def rollback_authorization_session(db, effects=None):
             "Rollback acknowledgement unavailable; session quarantined",
             error_code="AUTHORIZATION_ROLLBACK_UNKNOWN",
         ) from None
+
+
+@asynccontextmanager
+async def authorization_session(factory):
+    """Bound disposal without replacing the owner's result or body exception."""
+    db = factory()
+    try:
+        yield db
+    finally:
+        pending = asyncio.create_task(db.close())
+        try:
+            completed, _ = await asyncio.wait({pending}, timeout=_CLEANUP_SECONDS)
+            if pending not in completed:
+                raise TimeoutError("Session disposal timed out")
+            pending.result()
+        except BaseException as exc:
+            # A failed close is not evidence of rollback. Retain the session
+            # until trusted invalidation, using the same quarantine mechanism.
+            if not pending.done():
+                pending.cancel()
+            await _quarantine(db, pending)
+            if (
+                isinstance(exc, asyncio.CancelledError)
+                and asyncio.current_task().cancelling()
+            ):
+                raise
+            if not isinstance(exc, (Exception, asyncio.CancelledError)):
+                raise
+            logging.getLogger(__name__).warning(
+                "Authorization session disposal quarantined"
+            )

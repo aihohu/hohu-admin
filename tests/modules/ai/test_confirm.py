@@ -29,18 +29,21 @@ from app.core.exceptions import (
     NotFoundException,
 )
 from app.core.tenant import TenantContext
-from app.modules.ai.agents.gateway.atomic_execution import (
-    PreparedExecutionOutcomeUnknown,
-)
-from app.modules.ai.agents.gateway.result import ToolResult
 from app.modules.ai.agents.hitl.constants import ConfirmAction
 from app.modules.ai.agents.hitl.manager import PendingPayload
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.agents.tools.registry import RegisteredTool
 from app.modules.ai.api.confirm import _notify_prepared_terminal, confirm_tool
 from app.modules.ai.schemas.confirm import ConfirmRequest, ConfirmResponse
-from app.modules.ai.service.atomic_completion_service import ClaimBinding
-from app.modules.ai.service.completion_recovery_service import RecoveryOutcome
+from tests.modules.ai.test_atomic_prepared_completion import (
+    approve,
+    assert_success,
+    count_real_handler,
+    observe,
+)
+from tests.modules.ai.test_atomic_prepared_completion import (
+    completion_case as completion_case,
+)
 
 
 def _make_pending(
@@ -274,7 +277,10 @@ def test_confirm_request_rejects_policy_override_fields() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _mock_external():
+def _mock_external(request):
+    if "completion_case" in request.fixturenames:
+        yield
+        return
     """统一 mock redis_client + AsyncSessionLocal，避免污染真实 Redis / DB"""
     with (
         patch("app.modules.ai.api.confirm.redis_client") as mock_redis,
@@ -580,543 +586,166 @@ class TestPreparedConfirmation:
         assert result.error_code == "AI_TOOL_TIMEOUT"
 
     async def test_reject_bypasses_revoked_chat_permission_and_disabled_state(
-        self,
-    ) -> None:
-        action = _make_prepared_action()
-        terminal = _make_prepared_action(status="rejected")
-        disabled_check = AsyncMock(return_value=True)
-        with (
-            patch(
-                "app.modules.ai.api.confirm.check_user_disabled",
-                disabled_check,
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.get_by_confirmation_id",
-                AsyncMock(return_value=action),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.lock_confirmation_context",
-                AsyncMock(return_value=_make_prepared_context(action)),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.operation_log_service.get_by_tool_call_id",
-                AsyncMock(return_value=None),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.transition_status",
-                AsyncMock(return_value=terminal),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.chat_run_finalizer.finalize_prepared_action",
-                AsyncMock(),
-            ),
-            patch(
-                "app.modules.ai.api.confirm._notify_prepared_terminal",
-                AsyncMock(),
-            ),
-        ):
-            db = _make_db()
-            db.commit = AsyncMock()
-            result = await confirm_tool(
-                ConfirmRequest(
-                    confirmationId="cid_test_0123",
-                    action="reject",
-                ),
-                db=db,
-                current_user=_make_user(can_chat=False),
-            )
+        self, completion_case, monkeypatch
+    ):
+        from app.modules.ai.api import confirm
+        from app.modules.ai.service import (
+            authorization_execution_candidate as candidate,
+        )
 
+        denied = MagicMock(
+            side_effect=AuthorizationException(error_code="AI_CHAT_PERMISSION_DENIED")
+        )
+        disabled = AsyncMock(return_value=True)
+        monkeypatch.setattr(candidate, "ensure_ai_chat_use", denied)
+        monkeypatch.setattr(confirm, "check_user_disabled", disabled)
+        result = await approve(completion_case, decision="reject")
         assert result.data.status == "rejected"
-        disabled_check.assert_not_awaited()
+        denied.assert_not_called()
+        disabled.assert_not_awaited()
+        assert completion_case.calls == []
 
     async def test_approve_without_chat_permission_terminalizes_before_execution(
-        self,
-    ) -> None:
-        action = _make_prepared_action()
-        terminal = _make_prepared_action(status="expired")
-        log = SimpleNamespace(log_id=77)
-        transition = AsyncMock(return_value=terminal)
-        expire = AsyncMock(return_value=log)
-        notify = AsyncMock()
-        with (
-            patch(
-                "app.modules.ai.api.confirm.check_user_disabled",
-                AsyncMock(return_value=False),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.get_by_confirmation_id",
-                AsyncMock(return_value=action),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.lock_confirmation_context",
-                AsyncMock(return_value=_make_prepared_context(action)),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.operation_log_service.get_by_tool_call_id",
-                AsyncMock(return_value=log),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.operation_log_service.mark_expired_if_pending",
-                expire,
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.transition_status",
-                transition,
-            ),
-            patch(
-                "app.modules.ai.api.confirm.chat_run_finalizer.finalize_prepared_action",
-                AsyncMock(),
-            ),
-            patch(
-                "app.modules.ai.api.confirm._notify_prepared_terminal",
-                notify,
-            ),
-            patch(
-                "app.modules.ai.api.confirm.execute_approved_prepared_action",
-                AsyncMock(),
-            ) as execute,
-        ):
-            db = _make_db()
-            db.commit = AsyncMock()
-            with pytest.raises(AuthorizationException) as exc_info:
-                await confirm_tool(
-                    ConfirmRequest(
-                        confirmationId="cid_test_0123",
-                        action="approve",
-                    ),
-                    db=db,
-                    current_user=_make_user(can_chat=False),
+        self, completion_case, monkeypatch
+    ):
+        from app.modules.ai.api import confirm
+        from app.modules.ai.service import (
+            authorization_execution_candidate as candidate,
+        )
+
+        monkeypatch.setattr(
+            candidate,
+            "ensure_ai_chat_use",
+            MagicMock(
+                side_effect=AuthorizationException(
+                    error_code="AI_CHAT_PERMISSION_DENIED"
                 )
-
-        assert exc_info.value.error_code == "AI_CHAT_PERMISSION_DENIED"
-        assert transition.await_args.kwargs["target_status"].value == "expired"
-        assert transition.await_args.kwargs["error_code"] == (
-            "AI_CHAT_PERMISSION_DENIED"
+            ),
         )
-        expire.assert_awaited_once_with(
-            db,
-            log.log_id,
-            error_code="AI_CHAT_PERMISSION_DENIED",
-            tenant=ANY,
-        )
-        db.commit.assert_awaited_once()
-        notify.assert_awaited_once()
-        execute.assert_not_awaited()
+        observations = []
 
-    async def test_stale_snapshot_is_rejected_before_wake(self) -> None:
-        action = _make_prepared_action()
-        terminal = _make_prepared_action(status="expired")
+        async def notify(*_args, **_kwargs):
+            observations.append(await observe(completion_case))
+
+        monkeypatch.setattr(confirm, "_notify_prepared_terminal", notify)
+        with pytest.raises(AuthorizationException) as error:
+            await approve(completion_case)
+        assert error.value.error_code == "AI_CHAT_PERMISSION_DENIED"
+        assert len(observations) == 1
+        assert (
+            observations[0]["action_status"]
+            == observations[0]["operation_status"]
+            == "expired"
+        )
+        assert completion_case.calls == []
+
+    async def test_stale_snapshot_is_rejected_before_wake(
+        self, completion_case, monkeypatch
+    ):
+        from app.modules.ai.api import confirm
+        from app.modules.system.service.authorization_ai_tool_adapter import (
+            system_ai_tool_adapter,
+        )
+
         stale = BusinessRuleException(
-            "preview snapshot changed",
-            error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE",
+            "preview snapshot changed", error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE"
         )
-        with (
-            patch(
-                "app.modules.ai.api.confirm.hitl_manager.get_pending",
-                AsyncMock(return_value=_make_pending()),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.check_user_disabled",
-                AsyncMock(return_value=False),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.get_by_confirmation_id",
-                AsyncMock(return_value=action),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.lock_confirmation_context",
-                AsyncMock(return_value=_make_prepared_context(action)),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.validate_snapshot",
-                AsyncMock(side_effect=stale),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.hitl_manager.wake",
-                AsyncMock(return_value=False),
-            ) as wake,
-            patch(
-                "app.modules.ai.api.confirm.operation_log_service.get_by_tool_call_id",
-                AsyncMock(return_value=None),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.transition_status",
-                AsyncMock(return_value=terminal),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.chat_run_finalizer.finalize_prepared_action",
-                AsyncMock(),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.hitl_manager.delete_pending",
-                AsyncMock(),
-            ),
-        ):
-            req = ConfirmRequest(confirmationId="cid_test_0123", action="approve")
-            db = _make_db()
-            db.commit = AsyncMock()
-            with pytest.raises(BusinessRuleException) as exc_info:
-                await confirm_tool(
-                    req,
-                    db=db,
-                    current_user=_make_user(100),
-                )
+        monkeypatch.setattr(
+            system_ai_tool_adapter, "validate_planned", AsyncMock(side_effect=stale)
+        )
+        observations = []
 
-        assert exc_info.value.error_code == "AI_PREPARED_ACTION_SNAPSHOT_STALE"
-        wake.assert_awaited_once()
+        async def notify(*_args, **_kwargs):
+            observations.append(await observe(completion_case))
+
+        monkeypatch.setattr(confirm, "_notify_prepared_terminal", notify)
+        with pytest.raises(BusinessRuleException) as error:
+            await approve(completion_case)
+        assert error.value.error_code == stale.error_code
+        state = await observe(completion_case)
+        assert state["action_status"] == state["operation_status"] == "expired"
+        assert len(observations) == 1 and observations[0]["action_status"] == "expired"
+        assert completion_case.calls == [] and state["user_ids"] == []
 
     async def test_reject_does_not_require_business_snapshot_to_stay_fresh(
-        self,
-    ) -> None:
-        action = _make_prepared_action()
-        terminal = _make_prepared_action(status="rejected")
-        with (
-            patch(
-                "app.modules.ai.api.confirm.hitl_manager.get_pending",
-                AsyncMock(return_value=_make_pending()),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.check_user_disabled",
-                AsyncMock(return_value=False),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.get_by_confirmation_id",
-                AsyncMock(return_value=action),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.lock_confirmation_context",
-                AsyncMock(return_value=_make_prepared_context(action)),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.validate_snapshot",
-                AsyncMock(),
-            ) as validate_snapshot,
-            patch(
-                "app.modules.ai.api.confirm.operation_log_service.get_by_tool_call_id",
-                AsyncMock(return_value=None),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.hitl_manager.wake",
-                AsyncMock(return_value=True),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.transition_status",
-                AsyncMock(return_value=terminal),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.chat_run_finalizer.finalize_prepared_action",
-                AsyncMock(),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.hitl_manager.delete_pending",
-                AsyncMock(),
-            ),
-        ):
-            db = _make_db()
-            db.commit = AsyncMock()
-            result = await confirm_tool(
-                ConfirmRequest(
-                    confirmationId="cid_test_0123",
-                    action="reject",
-                ),
-                db=db,
-                current_user=_make_user(100),
+        self, completion_case, monkeypatch
+    ):
+        from app.modules.system.service.authorization_ai_tool_adapter import (
+            system_ai_tool_adapter,
+        )
+
+        validate = AsyncMock(
+            side_effect=BusinessRuleException(
+                "stale", error_code="AI_PREPARED_ACTION_SNAPSHOT_STALE"
             )
+        )
+        monkeypatch.setattr(system_ai_tool_adapter, "validate_planned", validate)
+        assert (
+            await approve(completion_case, decision="reject")
+        ).data.status == "rejected"
+        validate.assert_not_awaited()
+        assert completion_case.calls == []
 
-        assert result.data.status == "rejected"
-        validate_snapshot.assert_not_awaited()
-
-    @pytest.mark.parametrize("interaction_flow", ["prepared", "direct"])
+    @pytest.mark.parametrize(
+        ("approval", "dispatch"),
+        [("hitl", "inline"), ("required", "execute_after_approval")],
+    )
     async def test_approve_executes_inline_without_redis_pending(
-        self, interaction_flow: str
-    ) -> None:
-        pending = _make_prepared_action(interaction_flow=interaction_flow)
-        approved = _make_prepared_action(
-            status="approved", interaction_flow=interaction_flow
+        self, completion_case, monkeypatch, approval, dispatch
+    ):
+        from app.db.session import AsyncSessionLocal
+        from app.modules.ai.api import confirm
+        from app.modules.ai.models.prepared_action import AiPreparedAction
+        from app.modules.system.service.authorization_ai_tool_adapter import (
+            system_ai_tool_adapter,
         )
-        running = _make_prepared_action(
-            status="running", interaction_flow=interaction_flow
-        )
-        terminal = _make_prepared_action(
-            status="succeeded", interaction_flow=interaction_flow
-        )
-        db = _make_db()
-        lifecycle: list[str] = []
-        db.commit = AsyncMock(side_effect=lambda: lifecycle.append("claim_committed"))
-        db.expunge_all = MagicMock(side_effect=lambda: lifecycle.append("detached"))
-        db.rollback = AsyncMock()
-        deps = SimpleNamespace(data_scope_hash="current-scope")
-        validate_scope = MagicMock()
-        with (
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.get_by_confirmation_id",
-                AsyncMock(side_effect=[pending, running]),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.lock_confirmation_context",
-                AsyncMock(return_value=_make_prepared_context(pending)),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.validate_snapshot",
-                AsyncMock(),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.validate_data_scope_snapshot",
-                validate_scope,
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.transition_status",
-                AsyncMock(side_effect=[approved, running]),
-            ) as transition,
-            patch(
-                "app.modules.ai.api.confirm.operation_log_service.get_by_tool_call_id",
-                AsyncMock(return_value=None),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.chat_service.build_chat_deps",
-                AsyncMock(return_value=deps),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.validate_prepared_execution",
-                return_value=_make_registered_write_tool(pending),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.atomic_completion_service.lock_action_log",
-                AsyncMock(return_value=SimpleNamespace(log_id=77)),
-            ) as lock_log,
-            patch(
-                "app.modules.ai.api.confirm.operation_log_service.mark_approved",
-                AsyncMock(),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.operation_log_service.mark_running",
-                AsyncMock(),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.execute_approved_prepared_action",
-                AsyncMock(
-                    side_effect=lambda *_args: (
-                        lifecycle.append("execute")
-                        or ToolResult.success({"successCount": 2})
-                    )
-                ),
-            ) as execute,
-            patch(
-                "app.modules.ai.api.confirm._project_prepared_completion",
-                AsyncMock(
-                    side_effect=lambda *_args, **_kwargs: (
-                        lifecycle.append("project_committed_result")
-                        or _completion_response(terminal)
-                    )
-                ),
-            ) as project,
-            patch(
-                "app.modules.ai.api.confirm.hitl_manager.get_pending",
-                AsyncMock(),
-            ) as get_pending,
-            patch(
-                "app.modules.ai.api.confirm.hitl_manager.wake",
-                AsyncMock(
-                    side_effect=lambda *_args, **_kwargs: (
-                        lifecycle.append("wake") or False
-                    )
-                ),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.hitl_manager.delete_pending",
-                AsyncMock(),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.check_user_disabled",
-                AsyncMock(return_value=False),
-            ),
-        ):
-            result = await confirm_tool(
-                ConfirmRequest(
-                    confirmationId="cid_test_0123",
-                    action="approve",
-                ),
-                db=db,
-                current_user=_make_user(),
-            )
 
-        assert result.data.status == "succeeded"
-        assert result.data.action_id == 9001
-        assert lifecycle == [
-            "claim_committed",
-            "detached",
-            "execute",
-            "project_committed_result",
-        ]
-        assert [
-            call.kwargs["target_status"].value for call in transition.await_args_list
-        ] == ["approved", "running"]
-        lock_log.assert_awaited_once_with(
-            db, pending, tenant=ANY, expected_status="pending_confirmation"
+        case = completion_case
+        async with AsyncSessionLocal() as db, db.begin():
+            action = await db.get(AiPreparedAction, case.action_id)
+            action.approval_mode, action.dispatch_mode = approval, dispatch
+        count_real_handler(case, monkeypatch)
+        real = system_ai_tool_adapter.apply
+        claims = []
+
+        async def apply(*args, **kwargs):
+            claims.append(await observe(case))
+            return await real(*args, **kwargs)
+
+        monkeypatch.setattr(system_ai_tool_adapter, "apply", apply)
+        pending = AsyncMock(
+            side_effect=AssertionError("Durable confirm cannot depend on Redis pending")
         )
-        validate_scope.assert_called_once_with(
-            pending,
-            current_data_scope_hash="current-scope",
-        )
-        execute.assert_awaited_once_with(
-            ClaimBinding.from_action(running, log_id=77), deps
-        )
-        project.assert_awaited_once_with(
-            pending.confirmation_id,
-            current_user_id=100,
-            tenant=ANY,
-            action_ref=ClaimBinding.from_action(running, log_id=77),
-        )
-        get_pending.assert_not_awaited()
+        monkeypatch.setattr(confirm.hitl_manager, "get_pending", pending)
+        response = await approve(case)
+        assert response.data.status == "succeeded"
+        assert len(claims) == 1 and claims[0]["action_status"] == "running"
+        assert len(case.calls) == 1
+        assert_success(case, await observe(case))
+        pending.assert_not_awaited()
 
     async def test_unknown_inline_execution_does_not_publish_failure(
-        self,
-    ) -> None:
-        pending = _make_prepared_action()
-        approved = _make_prepared_action(status="approved")
-        running = _make_prepared_action(status="running")
-        db = _make_db()
-        db.commit = AsyncMock()
-        db.rollback = AsyncMock()
-        deps = SimpleNamespace()
-        with (
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.get_by_confirmation_id",
-                AsyncMock(side_effect=[pending, running]),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.lock_confirmation_context",
-                AsyncMock(return_value=_make_prepared_context(pending)),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.validate_snapshot",
-                AsyncMock(),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.transition_status",
-                AsyncMock(side_effect=[approved, running]),
-            ) as transition,
-            patch(
-                "app.modules.ai.api.confirm.operation_log_service.get_by_tool_call_id",
-                AsyncMock(return_value=None),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.chat_service.build_chat_deps",
-                AsyncMock(return_value=deps),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.validate_prepared_execution",
-                return_value=_make_registered_write_tool(pending),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.atomic_completion_service.lock_action_log",
-                AsyncMock(return_value=SimpleNamespace(log_id=77)),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.operation_log_service.mark_approved",
-                AsyncMock(),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.operation_log_service.mark_running",
-                AsyncMock(),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.execute_approved_prepared_action",
-                AsyncMock(side_effect=PreparedExecutionOutcomeUnknown()),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.chat_run_finalizer.finalize_prepared_action",
-                AsyncMock(),
-            ) as finalize,
-            patch(
-                "app.modules.ai.api.confirm._project_prepared_completion", AsyncMock()
-            ) as project,
-            patch(
-                "app.modules.ai.api.confirm.hitl_manager.wake",
-                AsyncMock(return_value=False),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.hitl_manager.delete_pending",
-                AsyncMock(),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.check_user_disabled",
-                AsyncMock(return_value=False),
-            ),
-        ):
-            result = await confirm_tool(
-                ConfirmRequest(
-                    confirmationId="cid_test_0123",
-                    action="approve",
-                ),
-                db=db,
-                current_user=_make_user(),
-            )
+        self, completion_case, monkeypatch
+    ):
+        from app.modules.ai.api import confirm
+        from tests.modules.ai.test_completion_resume_guards import leave_claim_running
 
-        assert result.data.status == "running"
-        finalize.assert_not_awaited()
-        project.assert_not_awaited()
-        assert [
-            call.kwargs["target_status"].value for call in transition.await_args_list
-        ] == ["approved", "running"]
+        notify = AsyncMock()
+        monkeypatch.setattr(confirm, "_notify_prepared_terminal", notify)
+        await leave_claim_running(completion_case, monkeypatch)
+        state = await observe(completion_case)
+        assert state["action_status"] == state["operation_status"] == "running"
+        assert completion_case.calls == [] and state["user_ids"] == []
+        notify.assert_not_awaited()
 
-    async def test_duplicate_approve_returns_terminal_without_execution(self) -> None:
-        terminal = _make_prepared_action(status="succeeded")
-        with (
-            patch(
-                "app.modules.ai.api.confirm.reconcile_prepared_completion",
-                AsyncMock(
-                    return_value=RecoveryOutcome(terminal, disposition="succeeded")
-                ),
-            ) as reconcile,
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.get_by_confirmation_id",
-                AsyncMock(return_value=terminal),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.prepared_action_service.lock_confirmation_context",
-                AsyncMock(return_value=_make_prepared_context(terminal)),
-            ),
-            patch(
-                "app.modules.ai.api.confirm.execute_approved_prepared_action",
-                AsyncMock(),
-            ) as execute,
-            patch(
-                "app.modules.ai.api.confirm.hitl_manager.get_pending",
-                AsyncMock(),
-            ) as get_pending,
-            patch(
-                "app.modules.ai.api.confirm._project_prepared_completion",
-                AsyncMock(return_value=_completion_response(terminal)),
-            ) as project,
-            patch(
-                "app.modules.ai.api.confirm.check_user_disabled",
-                AsyncMock(return_value=False),
-            ),
-        ):
-            db = _make_db()
-            db.rollback = AsyncMock()
-            result = await confirm_tool(
-                ConfirmRequest(
-                    confirmationId="cid_test_0123",
-                    action="approve",
-                ),
-                db=db,
-                current_user=_make_user(),
-            )
-
-        assert result.data.status == "succeeded"
-        reconcile.assert_awaited_once_with(terminal.confirmation_id, tenant=ANY)
-        execute.assert_not_awaited()
-        get_pending.assert_not_awaited()
-        db.expunge_all.assert_called_once()
-        db.rollback.assert_awaited_once()
-        project.assert_awaited_once_with(
-            terminal.confirmation_id,
-            current_user_id=100,
-            tenant=ANY,
-            action_ref=terminal,
-        )
+    async def test_duplicate_approve_returns_terminal_without_execution(
+        self, completion_case, monkeypatch
+    ):
+        count_real_handler(completion_case, monkeypatch)
+        assert (await approve(completion_case)).data.status == "succeeded"
+        assert (await approve(completion_case)).data.status == "succeeded"
+        assert len(completion_case.calls) == 1
+        assert_success(completion_case, await observe(completion_case))
 
     async def test_reject_wakes_stream_returns_queued(self) -> None:
         """reject + wake 成功 → status=queued（reject 也是 wake 成功）"""

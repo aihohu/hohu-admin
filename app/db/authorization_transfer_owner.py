@@ -174,8 +174,14 @@ class TransferOwner:
         identifier,
         token=None,
         administrative=False,
+        signed=False,
     ):
-        if type(administrative) is not bool or (administrative and kind != "export"):
+        if (
+            type(administrative) is not bool
+            or type(signed) is not bool
+            or ((administrative or signed) and kind != "export")
+            or (administrative and signed)
+        ):
             raise _order_error()
         async with self.factory() as db:
             try:
@@ -187,10 +193,16 @@ class TransferOwner:
                     ) as tx:
                         execute = (
                             transfer_candidate.rest_download
-                            if administrative
+                            if administrative or signed
                             else transfer_candidate.download
                         )
-                        extra = {} if administrative else {"kind": kind, "token": token}
+                        extra = (
+                            {"signed": True, "token": token}
+                            if signed
+                            else {}
+                            if administrative
+                            else {"kind": kind, "token": token}
+                        )
                         result = await execute(
                             db,
                             tx,
@@ -230,7 +242,14 @@ class TransferOwner:
                 with bounded_authorization_reads(db):
                     async with authorization_transactions.scope(
                         db,
-                        tenants=(TenantLock(tenant_id),),
+                        tenants=(
+                            TenantLock(
+                                tenant_id,
+                                LockMode.EXCLUSIVE
+                                if kind == "import" and not retire
+                                else LockMode.SHARED,
+                            ),
+                        ),
                         budget=TransactionBudget(timeout_ms=8000),
                     ) as tx:
                         result = await transfer_cleanup_candidate.execute(
@@ -244,9 +263,11 @@ class TransferOwner:
                 await retire_preview_hint(tenant_id, command.snapshot["preview_token"])
             return result
 
-    async def cleanup_page(self, *, kind, after=None, limit=256):
+    async def cleanup_page(self, *, kind, after=None, limit=256, category=None):
         if (
             kind not in {"export", "import"}
+            or category not in {None, "preview", "terminal"}
+            or (kind == "export" and category == "preview")
             or type(limit) is not int
             or not 1 <= limit <= 256
             or (
@@ -270,7 +291,28 @@ class TransferOwner:
         query = (
             select(table.c.tenant_id, identifier)
             .where(
-                table.c.status != "RUNNING",
+                table.c.status.in_(
+                    ("SUCCESS", "FAILED", "EXPIRED")
+                    if kind == "export"
+                    else ("PREVIEW_DONE", "EXPIRED")
+                    if category == "preview"
+                    else (
+                        "SUCCESS",
+                        "PARTIAL_SUCCESS",
+                        "FAILED",
+                        "CANCELLED",
+                        "EXPIRED",
+                    )
+                    if category == "terminal"
+                    else (
+                        "PREVIEW_DONE",
+                        "SUCCESS",
+                        "PARTIAL_SUCCESS",
+                        "FAILED",
+                        "CANCELLED",
+                        "EXPIRED",
+                    )
+                ),
                 or_(
                     table.c.file_storage_key.is_not(None),
                     table.c.failed_rows_file.is_not(None),

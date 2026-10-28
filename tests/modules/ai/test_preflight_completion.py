@@ -14,7 +14,6 @@ from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.gateway import executor
 from app.modules.ai.agents.hitl.constants import DryRunResult
 from app.modules.ai.agents.tools.registry import ToolRegistry
-from app.modules.ai.api.operation_log import get_operation_log
 from app.modules.ai.core.context import ChatDeps, DataScopeContext
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
@@ -29,6 +28,9 @@ from app.modules.ai.service.completion_read_state_service import (
 )
 from app.modules.ai.service.conversation_service import conversation_service
 from app.modules.ai.service.operation_log_service import operation_log_service
+from app.modules.ai.service.operation_status_projection import (
+    project_operation as get_operation_log,
+)
 from app.modules.ai.service.preflight_completion_service import (
     MARKER,
     preflight_fingerprint,

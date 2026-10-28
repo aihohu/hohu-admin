@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from app.core.authorization_plan import ResourceKey
 from app.core.authorization_plan import ResourceKind as K
+from app.core.exceptions import BusinessRuleException
 from app.db.authorization_plan_session import _order_error
 from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.model_policy import TenantAiModelPolicy
@@ -76,7 +77,9 @@ async def select_model(db, tenant, model_ref):
                 "model_id": model.model_id,
             },
         )
-    raise _order_error()
+    raise BusinessRuleException(
+        "所选 AI 模型当前不可用", error_code="AI_MODEL_NOT_AVAILABLE"
+    )
 
 
 async def recheck_model(db, tx, tenant, selection):

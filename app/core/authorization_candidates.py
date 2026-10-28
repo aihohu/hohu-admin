@@ -1009,6 +1009,51 @@ CANDIDATES += (
 _JOB = "app.modules.job.service.authorization_job_candidate.JobAuthorizationCandidate"
 _FILE_ADAPTER = _S + "authorization_ai_file_adapter.AIFileAdapter"
 _COMPLETION_ENTRIES = (
+    (
+        "app.db.authorization_upload_owner.UploadOwner",
+        ("upload", "delete"),
+        "owner",
+        "S",
+        ("S", "X"),
+        "transfer-write",
+        "none",
+    ),
+    (
+        "app.modules.system.service.authorization_upload_candidate.UploadCandidate",
+        ("policies",),
+        "read",
+        "S",
+        ("S",),
+        "auth-read",
+        "none",
+    ),
+    (
+        "app.modules.system.service.authorization_upload_candidate.UploadCandidate",
+        ("insert", "delete"),
+        "proof_writer",
+        "S",
+        ("X",),
+        "transfer-write",
+        "none",
+    ),
+    (
+        "app.db.authorization_catalog_read_owner.CatalogReadOwner",
+        ("execute",),
+        "owner",
+        "S",
+        ("S",),
+        "auth-read",
+        "none",
+    ),
+    (
+        "app.modules.platform.authorization_catalog_read.CatalogReadCandidate",
+        ("project",),
+        "read",
+        "S",
+        ("S",),
+        "auth-read",
+        "none",
+    ),
     (_CATALOG, ("plan_role_agents",), "plan", "S", ("X",), "system-write", "none"),
     (
         _CATALOG,
@@ -1074,6 +1119,7 @@ _COMPLETION_ENTRIES = (
     (_CLEANUP, ("execute",), "proof_writer", "S", ("S",), "auth-read", "none"),
     (_CLEANUP, ("cancel",), "proof_writer", "S", ("X",), "transfer-write", "none"),
     (_LIFECYCLE, ("reference",), "read", "none", (), "bounded-read", "none"),
+    (_LIFECYCLE, ("unexecuted",), "read", "S", ("S",), "auth-read", "none"),
     (
         _A + "authorization_orphan_candidate.OrphanCandidate",
         ("settle",),
@@ -1094,7 +1140,7 @@ _COMPLETION_ENTRIES = (
     ),
     (
         _LIFECYCLE,
-        ("decide", "expire", "sweep"),
+        ("decide", "expire", "sweep", "admit"),
         "proof_writer",
         "S",
         ("S",),
@@ -1111,7 +1157,15 @@ _COMPLETION_ENTRIES = (
         "auth-read",
         "none",
     ),
-    (_CHAT, ("messages",), "read", "S", ("S",), "auth-read", "none"),
+    (
+        _CHAT,
+        ("messages", "list_conversations"),
+        "read",
+        "S",
+        ("S",),
+        "auth-read",
+        "none",
+    ),
     (
         "app.modules.auth.service",
         ("load_background_projection_authority",),
@@ -1132,7 +1186,7 @@ _COMPLETION_ENTRIES = (
     ),
     (
         _A + "authorization_trace_candidate.TraceCandidate",
-        ("list", "detail"),
+        ("list", "detail", "operation"),
         "read",
         "S",
         ("S",),
@@ -1150,7 +1204,15 @@ _COMPLETION_ENTRIES = (
     ),
     (
         "app.db.authorization_chat_owner.ChatOwner",
-        ("source", "finalize", "invalidate", "messages", "recover", "recover_orphan"),
+        (
+            "source",
+            "finalize",
+            "invalidate",
+            "messages",
+            "list_conversations",
+            "recover",
+            "recover_orphan",
+        ),
         "owner",
         "S",
         ("S",),
@@ -1177,7 +1239,7 @@ _COMPLETION_ENTRIES = (
     ),
     (
         "app.db.authorization_lifecycle_owner.LifecycleOwner",
-        ("decide",),
+        ("decide", "unexecuted", "admit"),
         "owner",
         "S",
         ("S",),
@@ -1195,10 +1257,19 @@ _COMPLETION_ENTRIES = (
     ),
     (
         "app.db.authorization_transfer_owner.TransferOwner",
-        ("download", "cleanup_page"),
+        ("download",),
         "owner",
         "S",
         ("S",),
+        "auth-read",
+        "none",
+    ),
+    (
+        "app.db.authorization_transfer_owner.TransferOwner",
+        ("cleanup_page",),
+        "owner",
+        "S",
+        ("S", "X"),
         "auth-read",
         "none",
     ),
@@ -1240,7 +1311,7 @@ _COMPLETION_ENTRIES = (
     ),
     (
         "app.db.authorization_trace_owner.TraceOwner",
-        ("list", "detail"),
+        ("list", "detail", "operation"),
         "owner",
         "S",
         ("S",),
@@ -1335,6 +1406,7 @@ CANDIDATES += tuple(
 # keep the delegated lock/IO contract; none implies an HTTP route is connected.
 _RUNTIME = "app.db.authorization_runtime.AuthorizationRuntime"
 _RUNTIME_DELEGATES = {
+    "control_read": "app.db.authorization_catalog_read_owner.CatalogReadOwner.execute",
     "system": _SYSTEM_OWNER,
     "import_users": _IMPORT_OWNER,
     "control": "app.db.authorization_control_owner.ControlCandidateOwner.execute",

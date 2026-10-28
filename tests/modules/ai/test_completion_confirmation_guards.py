@@ -3,13 +3,15 @@
 import asyncio
 import time
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, event
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.session import AsyncSessionLocal
-from app.modules.ai.agents.gateway import atomic_execution, executor
+from app.db.authorization_owner import _QUARANTINED
+from app.db.authorization_plan_session import AuthorizationPlanSession
+from app.db.session import AsyncSessionLocal, engine
+from app.modules.ai.agents.gateway import executor
 from app.modules.ai.agents.gateway.atomic_execution import (
     PreparedExecutionOutcomeUnknown,
 )
@@ -23,11 +25,17 @@ from app.modules.ai.service.atomic_completion_service import (
     atomic_completion_service,
     new_execution_owner,
 )
-from app.modules.auth.service import load_live_user_authority
-from tests.modules.ai.test_atomic_prepared_completion import approve, count_real_handler
+from app.modules.ai.service.authorization_chat_candidate import chat_candidate
+from tests.modules.ai.test_atomic_prepared_completion import (
+    approve,
+    authenticated_actor,
+    count_real_handler,
+    observe,
+)
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )
+from tests.modules.ai.test_completion_resume_guards import leave_claim_running
 
 
 @pytest.mark.parametrize("state", ["running", "succeeded"])
@@ -37,11 +45,7 @@ async def test_owned_started_confirmation_survives_context_loss(
 ):
     case = completion_case
     if state == "running":
-        monkeypatch.setattr(
-            confirm,
-            "execute_approved_prepared_action",
-            AsyncMock(side_effect=PreparedExecutionOutcomeUnknown()),
-        )
+        await leave_claim_running(case, monkeypatch)
     else:
         count_real_handler(case, monkeypatch)
     assert (await approve(case)).data.status == state
@@ -122,9 +126,7 @@ async def test_optional_display_work_is_bounded_without_losing_success(
         await never.wait()
 
     if blocked_stage == "projection":
-        monkeypatch.setattr(
-            confirm.chat_run_finalizer, "finalize_prepared_action", blocked
-        )
+        monkeypatch.setattr(chat_candidate, "recover", blocked)
     else:
         monkeypatch.setattr(confirm, "_notify_prepared_terminal", blocked)
     async with AsyncSessionLocal() as db:
@@ -156,7 +158,7 @@ async def test_duplicate_cancellation_requires_never_started_proof(
         response = await approve(case)
     else:
         async with AsyncSessionLocal() as db:
-            actor = await load_live_user_authority(db, tenant=case.tenant)
+            actor = await authenticated_actor(case, db)
             response = await confirm.confirm_tool(
                 ConfirmRequest(confirmation_id=case.confirmation_id, action="reject"),
                 db=db,
@@ -197,41 +199,109 @@ async def test_duplicate_cancellation_requires_never_started_proof(
 async def test_claim_commit_uncertainty_does_not_wait_for_invalidation(
     completion_case, monkeypatch
 ):
+
     case = completion_case
     release = asyncio.Event()
-    db = AsyncSessionLocal()
-    original_commit, original_invalidate = db.commit, db.invalidate
-    actor = await load_live_user_authority(db, tenant=case.tenant)
+    owners = []
+    original_commit = AuthorizationPlanSession.commit
+    original_invalidate = AsyncSession.invalidate
 
-    async def committed_but_unacknowledged():
-        await original_commit()
+    async def committed_but_unacknowledged(db):
+        await original_commit(db)
+        owners.append(db)
         raise ConnectionError("Injected claim-stage acknowledgement error")
 
-    async def stalled_invalidation():
-        await release.wait()
-        await original_invalidate()
+    async def stalled_invalidation(db):
+        if db in owners:
+            await release.wait()
+        await original_invalidate(db)
 
-    monkeypatch.setattr(db, "commit", committed_but_unacknowledged)
-    monkeypatch.setattr(db, "invalidate", stalled_invalidation)
+    monkeypatch.setattr(
+        AuthorizationPlanSession, "commit", committed_but_unacknowledged
+    )
+    monkeypatch.setattr(AsyncSession, "invalidate", stalled_invalidation)
     try:
         started = time.monotonic()
-        response = await asyncio.wait_for(
-            confirm.confirm_tool(
-                ConfirmRequest(confirmation_id=case.confirmation_id, action="approve"),
-                db=db,
-                current_user=actor,
-            ),
-            timeout=2,
-        )
+        response = await asyncio.wait_for(approve(case), timeout=2)
         assert time.monotonic() - started < 1.5
-        assert response.data.status == "failed"
+        assert response.data.status == "running"
+        assert len(owners) == 1
+        assert (await observe(case))["action_status"] == "running"
         assert case.calls == []
+        assert any(row[0] is owners[0] for row in _QUARANTINED.values())
     finally:
         release.set()
-        tasks = [
-            task
-            for session, task in atomic_execution._QUARANTINED_SESSIONS.values()
-            if session is db
-        ]
-        await asyncio.gather(*tasks, return_exceptions=True)
-        await db.close()
+        tasks = [row[2] for row in _QUARANTINED.values() if row[0] in owners]
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 3)
+
+
+async def test_confirmation_projection_uses_global_guard_before_context(
+    completion_case, monkeypatch
+):
+    case = completion_case
+    count_real_handler(case, monkeypatch)
+    assert (await approve(case)).data.status == "succeeded"
+    locks = []
+
+    def observe(_conn, _cursor, sql, _params, _context, _many):
+        if "FOR UPDATE" in sql or "FOR SHARE" in sql:
+            locks.append(sql)
+
+    async with AsyncSessionLocal() as db:
+        reference = await db.get(AiPreparedAction, case.action_id)
+        event.listen(engine.sync_engine, "before_cursor_execute", observe)
+        try:
+            response = await confirm._project_prepared_completion(
+                case.confirmation_id,
+                current_user_id=case.tenant.actor_user_id,
+                tenant=case.tenant,
+                action_ref=reference,
+            )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", observe)
+    assert response.data.status == "succeeded"
+    assert locks and "sys_user_field_policy_global_guard" in locks[0]
+
+
+async def test_duplicate_confirmation_recovery_uses_global_guard(
+    completion_case, monkeypatch
+):
+    case = completion_case
+    count_real_handler(case, monkeypatch)
+    assert (await approve(case)).data.status == "succeeded"
+    locks = []
+
+    def observe(_conn, _cursor, sql, _params, _context, _many):
+        if "FOR UPDATE" in sql or "FOR SHARE" in sql:
+            locks.append(sql)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", observe)
+    try:
+        assert (await approve(case)).data.status == "succeeded"
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", observe)
+    assert locks and "sys_user_field_policy_global_guard" in locks[0]
+    assert len(case.calls) == 1
+
+
+async def test_duplicate_rejected_confirmation_uses_global_guard(completion_case):
+    case = completion_case
+    async with AsyncSessionLocal() as db:
+        actor = await authenticated_actor(case, db)
+        await confirm.confirm_tool(
+            ConfirmRequest(confirmation_id=case.confirmation_id, action="reject"),
+            db=db,
+            current_user=actor,
+        )
+    locks = []
+
+    def observe(_conn, _cursor, sql, _params, _context, _many):
+        if "FOR UPDATE" in sql or "FOR SHARE" in sql:
+            locks.append(sql)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", observe)
+    try:
+        assert (await approve(case)).data.status == "rejected"
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", observe)
+    assert locks and "sys_user_field_policy_global_guard" in locks[0]

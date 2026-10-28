@@ -13,9 +13,7 @@ from app.core import redis as redis_module
 from app.db.session import AsyncSessionLocal, engine
 from app.modules.ai import lifecycle
 from app.modules.ai.agents.gateway import atomic_execution
-from app.modules.ai.agents.gateway.atomic_execution import (
-    PreparedExecutionOutcomeUnknown,
-)
+from app.modules.ai.agents.gateway.authorization_execution import PlannedGatewayOwner
 from app.modules.ai.agents.hitl.events import (
     AiErrorEvent,
     DoneEvent,
@@ -25,9 +23,15 @@ from app.modules.ai.api import confirm, resume
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
-from app.modules.auth.service import load_live_user_authority
+from app.modules.ai.service.authorization_execution_candidate import (
+    ExecutionDisposition,
+)
 from tests.modules.ai.test_atomic_completion_guards import PLATFORM
-from tests.modules.ai.test_atomic_prepared_completion import approve, count_real_handler
+from tests.modules.ai.test_atomic_prepared_completion import (
+    approve,
+    authenticated_actor,
+    count_real_handler,
+)
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )
@@ -43,7 +47,7 @@ async def test_minimal_cancelled_resume_requires_never_started_proof(
     case = completion_case
     if status == "rejected":
         async with AsyncSessionLocal() as db:
-            actor = await load_live_user_authority(db, tenant=case.tenant)
+            actor = await authenticated_actor(case, db)
             await confirm.confirm_tool(
                 confirm.ConfirmRequest(
                     confirmation_id=case.confirmation_id, action="reject"
@@ -75,7 +79,7 @@ async def test_minimal_cancelled_resume_requires_never_started_proof(
         AsyncMock(return_value=False),
     )
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         response = await resume.resume_chat(
             request=_make_request(case.confirmation_id),
             confirmation_id_query=case.confirmation_id,
@@ -123,7 +127,7 @@ async def test_known_terminal_projection_timeout_preserves_facts(
         pending = resume._pending_from_durable_action(
             await db.get(AiPreparedAction, case.action_id)
         )
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
     release = asyncio.Event()
 
     async def stalled_proof(*_args, **_kwargs):
@@ -158,9 +162,9 @@ async def test_known_terminal_projection_timeout_preserves_facts(
 
 async def leave_claim_running(case, monkeypatch):
     monkeypatch.setattr(
-        confirm,
-        "execute_approved_prepared_action",
-        AsyncMock(side_effect=PreparedExecutionOutcomeUnknown()),
+        PlannedGatewayOwner,
+        "execute_claim",
+        AsyncMock(return_value=ExecutionDisposition("unknown")),
     )
     assert (await approve(case)).data.status == "running"
 
@@ -185,7 +189,7 @@ async def test_running_resume_ignores_hot_cache_admission(
         )
         monkeypatch.setattr(resume.hitl_manager, "get_pending", get_pending)
         monkeypatch.setattr(resume.hitl_manager, "ttl", AsyncMock(return_value=1))
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         response = await resume.resume_chat(
             request=_make_request(case.confirmation_id),
             confirmation_id_query=case.confirmation_id,
@@ -243,7 +247,7 @@ async def test_resume_does_not_project_unproven_terminal(
         else:
             log.args_hash = "f" * 64
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         events = await resume._load_durable_resume_terminal(
             confirmation_id=case.confirmation_id,
             pending=pending,

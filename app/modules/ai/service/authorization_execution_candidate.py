@@ -24,6 +24,7 @@ from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
 from app.modules.ai.service.atomic_completion_service import (
+    ClaimBinding,
     _check_action,
     _check_log,
     _invalid,
@@ -46,6 +47,7 @@ class ExecutionDisposition:
     """No persisted result body: visibility requires a separate current projection."""
 
     disposition: str
+    claim: ClaimBinding | None = None
 
 
 class AIExecutionCandidate:
@@ -100,8 +102,8 @@ class AIExecutionCandidate:
                 if action.execute_tool_name == "user.import_execute" or preview
                 else "direct"
             )
-            or action.approval_mode != "required"
-            or action.dispatch_mode != "execute_after_approval"
+            or (action.approval_mode, action.dispatch_mode)
+            not in {("required", "execute_after_approval"), ("hitl", "inline")}
             or action.requested_outcome
             != (
                 "execute_if_approved"

@@ -12,10 +12,8 @@ from sqlalchemy import update
 from app.core.exceptions import BusinessException
 from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.hitl.constants import PreparedActionStatus
-from app.modules.ai.api.confirm import confirm_tool
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
-from app.modules.ai.schemas.confirm import ConfirmRequest
 from app.modules.ai.service.completion_read_state_service import (
     completion_read_state_service,
 )
@@ -26,8 +24,9 @@ from app.modules.ai.service.legacy_reconciliation_service import (
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.ai.service.reconciliation_annotation import MARKER, read_annotation
-from app.modules.auth.service import load_live_user_authority
 from tests.modules.ai.test_atomic_prepared_completion import (
+    approve,
+    authenticated_actor,
     completion_case,  # noqa: F401
 )
 
@@ -45,15 +44,10 @@ async def test_damaged_annotation_blocks_approve_reject_and_terminal_cas(
         log = await db.get(AiOperationLog, case.log_id)
         action.status = status
         log.result_summary = '{"__v0162_reconciliation_v1": damaged'
+    for decision in ("approve", "reject"):
+        response = await approve(case, decision=decision)
+        assert response.data.status == "running"
     async with AsyncSessionLocal() as db:
-        user = await load_live_user_authority(db, tenant=case.tenant)
-        for decision in ("approve", "reject"):
-            response = await confirm_tool(
-                ConfirmRequest(confirmation_id=case.confirmation_id, action=decision),
-                db=db,
-                current_user=user,
-            )
-            assert response.data.status == "running"
         if status == "pending_confirmation":
             assert (
                 await prepared_action_service.transition_status(
@@ -146,7 +140,7 @@ async def test_annotation_hides_failure_and_pending_without_changing_facts(
             maintenance_sha256="b" * 64,
         )
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         messages = await conversation_service.project_messages(
             db, conversation_id=case.conversation_id, current_user=actor
         )

@@ -2,20 +2,15 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Path, Request
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Depends, Path
 
 from app.core.base_response import PageResult, ResponseModel
-from app.core.tenant import PlatformContext
 from app.db.authorization_control_http import ControlHttp, require_control_write
-from app.db.session import get_platform_db
-from app.modules.ai.core.provider_egress import provider_egress
 from app.modules.ai.schemas.agent_admin import (
     AgentAdminDetailItem,
     AgentAdminListItem,
     AgentAdminUpdateReq,
 )
-from app.modules.ai.schemas.config_projection import redact_url
 from app.modules.ai.schemas.model import ModelCreate, ModelOption, ModelOut, ModelUpdate
 from app.modules.ai.schemas.provider import (
     ProviderCreate,
@@ -27,27 +22,16 @@ from app.modules.ai.schemas.provider import (
     ProviderTestResult,
     ProviderUpdate,
 )
-from app.modules.ai.service.agent_admin import agent_admin_service
-from app.modules.ai.service.model_service import model_service
-from app.modules.ai.service.provider_service import provider_service
-from app.modules.ai.service.tenant_model_policy_admin_service import (
-    tenant_model_policy_admin_service,
-)
 from app.modules.platform.schemas import (
     PlatformTenantModelCatalogOut,
     PlatformTenantModelPoliciesPut,
     PlatformTenantModelPolicyOut,
     PlatformTenantModelPolicyPut,
 )
-from app.modules.platform.system_agent_auth import require_system_agent_context
 
 router = APIRouter()
 PositiveId = Annotated[int, Path(gt=0, le=9_223_372_036_854_775_807)]
 TenantId = Annotated[int, Path(ge=0, le=9_223_372_036_854_775_807)]
-
-
-def _record_count(request: Request, count: int) -> None:
-    request.state.platform_result_summary = {"recordCount": count}
 
 
 @router.get(
@@ -56,13 +40,9 @@ def _record_count(request: Request, count: int) -> None:
     summary="平台：列出全局 AI Agent",
 )
 async def list_agents(
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    items = await agent_admin_service.list_agents(db, platform=platform)
-    _record_count(request, len(items))
-    return ResponseModel.success(data=items)
+    return ResponseModel.success(data=await control.execute())
 
 
 @router.get(
@@ -71,13 +51,9 @@ async def list_agents(
     summary="平台：列出 Agent 可选模型",
 )
 async def list_agent_model_options(
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    items = await model_service.list_options(db, platform=platform)
-    _record_count(request, len(items))
-    return ResponseModel.success(data=items)
+    return ResponseModel.success(data=await control.execute())
 
 
 @router.get(
@@ -87,13 +63,9 @@ async def list_agent_model_options(
 )
 async def get_agent(
     agent_id: PositiveId,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    item = await agent_admin_service.get_agent(db, agent_id, platform=platform)
-    _record_count(request, 1)
-    return ResponseModel.success(data=item)
+    return ResponseModel.success(data=await control.execute(target_id=agent_id))
 
 
 @router.put(
@@ -116,36 +88,10 @@ async def update_agent(
     summary="平台：列出启用的 Provider 模型目录",
 )
 async def list_available_models(
-    request: Request,
     capability: str | None = None,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    rows = await model_service.list_available_with_provider(
-        db, capability, platform=platform
-    )
-    items = []
-    for model, provider in rows:
-        allowed = await provider_egress.is_configuration_allowed(
-            provider.provider_code,
-            provider.base_url,
-            model_base_url=model.base_url,
-            configs=(provider.config, model.config),
-        )
-        items.append(
-            {
-                "modelId": str(model.model_id),
-                "providerId": str(provider.provider_id),
-                "providerCode": provider.provider_code,
-                "providerName": provider.name,
-                "model": model.name,
-                "capabilities": list(model.capabilities or []),
-                "baseUrl": redact_url(model.base_url or provider.base_url),
-                "egressStatus": None if allowed else "EGRESS_POLICY_BLOCKED",
-            }
-        )
-    _record_count(request, len(items))
-    return ResponseModel.success(data=items)
+    return ResponseModel.success(data=await control.execute({"capability": capability}))
 
 
 @router.get(
@@ -154,14 +100,10 @@ async def list_available_models(
     summary="平台：分页读取 AI Provider",
 )
 async def list_providers(
-    request: Request,
     query: ProviderQuery = Depends(),
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    page = await provider_service.get_list(db, query, platform=platform)
-    _record_count(request, len(page.records))
-    return ResponseModel.success(data=page)
+    return ResponseModel.success(data=await control.execute(query))
 
 
 @router.post(
@@ -207,27 +149,9 @@ async def delete_provider(
 )
 async def list_provider_models(
     provider_id: PositiveId,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    provider = await provider_service.get_by_id(db, provider_id, platform=platform)
-    models = await model_service.get_by_provider(db, provider_id, platform=platform)
-    items: list[ModelOut] = []
-    for model in models:
-        allowed = await provider_egress.is_configuration_allowed(
-            provider.provider_code,
-            provider.base_url,
-            model_base_url=model.base_url,
-            configs=(provider.config, model.config),
-        )
-        items.append(
-            ModelOut.model_validate(model).model_copy(
-                update={"egress_status": None if allowed else "EGRESS_POLICY_BLOCKED"}
-            )
-        )
-    _record_count(request, len(items))
-    return ResponseModel.success(data=items)
+    return ResponseModel.success(data=await control.execute(provider_id=provider_id))
 
 
 @router.post(
@@ -309,16 +233,9 @@ async def test_provider_model(
 )
 async def list_tenant_model_policies(
     tenant_id: TenantId,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    rows = await tenant_model_policy_admin_service.list(
-        db, tenant_id=tenant_id, platform=platform
-    )
-    data = [PlatformTenantModelPolicyOut.from_projection(row) for row in rows]
-    _record_count(request, len(data))
-    return ResponseModel.success(data=data)
+    return ResponseModel.success(data=await control.execute(target_tenant_id=tenant_id))
 
 
 @router.get(
@@ -328,17 +245,9 @@ async def list_tenant_model_policies(
 )
 async def tenant_model_catalog(
     tenant_id: TenantId,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    result = await tenant_model_policy_admin_service.catalog(
-        db, tenant_id=tenant_id, platform=platform
-    )
-    _record_count(request, len(result.models))
-    return ResponseModel.success(
-        data=PlatformTenantModelCatalogOut.from_projection(result)
-    )
+    return ResponseModel.success(data=await control.execute(target_tenant_id=tenant_id))
 
 
 @router.put(

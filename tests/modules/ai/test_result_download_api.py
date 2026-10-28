@@ -1,94 +1,60 @@
-"""AI result downloads re-authorize the signed lineage on every read."""
+"""AI download compatibility: revoked grants and legacy owner files."""
 
-from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, patch
+from unittest.mock import AsyncMock
 
-import pytest
-from tenant_helpers import tenant_context
+from sqlalchemy import update
 
-from app.core.exceptions import NotFoundException
-from app.modules.ai.api.download import download_ai_user_export
-from app.modules.ai.service.result_projection_service import result_projection_service
-
-
-def _user():
-    return SimpleNamespace(
-        user_id=101,
-        user_name="alice",
-        _tenant_context=tenant_context(actor_user_id=101),
-    )
-
-
-def _lineage():
-    return result_projection_service.freeze_lineage(
-        tenant=tenant_context(tenant_id=0, actor_user_id=101),
-        agent_code="user_mgmt",
-        tool_codes=["user.export"],
-        subject_refs=[{"type": "user_export_task", "id": "exp-1"}],
-        data_scope_hash="scope-1",
-    )
+from app.core.file_storage import LocalFileStorage
+from app.modules.ai.models.agent import AiAgent
+from app.modules.system.models.user_transfer import UserExportTask
+from tests.modules.ai.test_authorization_download_http import (
+    signed_export as signed_export,
+)
+from tests.modules.system.test_authorization_import_candidate import (
+    import_sessions as import_sessions,
+)
+from tests.modules.system.test_authorization_transfer_http import (
+    transfer_http as transfer_http,
+)
 
 
-async def test_revoked_projection_uses_not_found_surface_without_reading_file() -> None:
-    with (
-        patch.object(
-            result_projection_service,
-            "read_download_token",
-            return_value=_lineage(),
-        ),
-        patch.object(
-            result_projection_service,
-            "authorize_result_projection",
-            AsyncMock(return_value=False),
-        ),
-        patch(
-            "app.modules.ai.api.download.download_export_file",
-            AsyncMock(),
-        ) as download,
-    ):
-        with pytest.raises(NotFoundException) as exc_info:
-            await download_ai_user_export(
-                export_id="exp-1",
-                token="signed",
-                db=AsyncMock(),
-                current_user=_user(),
-                tenant=tenant_context(tenant_id=0, actor_user_id=101),
-            )
-
-    assert exc_info.value.error_code == "AI_RESULT_DOWNLOAD_NOT_FOUND"
-    download.assert_not_awaited()
-
-
-async def test_authorized_projection_reads_owner_file() -> None:
-    with (
-        patch.object(
-            result_projection_service,
-            "read_download_token",
-            return_value=_lineage(),
-        ),
-        patch.object(
-            result_projection_service,
-            "authorize_result_projection",
-            AsyncMock(return_value=True),
-        ),
-        patch(
-            "app.modules.ai.api.download.download_export_file",
-            AsyncMock(return_value=(b"xlsx", "users.xlsx")),
-        ) as download,
-    ):
-        response = await download_ai_user_export(
-            export_id="exp-1",
-            token="signed",
-            db=AsyncMock(),
-            current_user=_user(),
-            tenant=tenant_context(tenant_id=0, actor_user_id=101),
+async def test_revoked_projection_uses_not_found_surface_without_reading_file(
+    signed_export, monkeypatch
+):
+    client, plain, identifier, token, _ = signed_export
+    async with plain() as db:
+        await db.execute(
+            update(AiAgent).where(AiAgent.agent_id == 901).values(enabled=False)
         )
-
-    assert response.body == b"xlsx"
-    download.assert_awaited_once_with(
-        ANY,
-        "exp-1",
-        operator_id=101,
-        allow_cross_owner=False,
-        tenant=tenant_context(tenant_id=0, actor_user_id=101),
+        await db.commit()
+    read = AsyncMock(side_effect=AssertionError("Denied projection must not read FILE"))
+    monkeypatch.setattr(LocalFileStorage, "read_artifact", read)
+    response = await client.get(
+        f"/ai/download/user-export/{identifier}", params={"token": token}
     )
+    assert response.status_code == 404
+    assert response.json()["errorCode"] == "AI_RESULT_DOWNLOAD_NOT_FOUND"
+    read.assert_not_awaited()
+
+
+async def test_authorized_projection_reads_owner_file(signed_export, tmp_path):
+    client, plain, identifier, token, data = signed_export
+    storage = LocalFileStorage(tmp_path)
+    path = await storage.save(
+        data,
+        namespace="exports",
+        mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        suffix=".xlsx",
+    )
+    async with plain() as db:
+        await db.execute(
+            update(UserExportTask)
+            .where(UserExportTask.export_id == identifier)
+            .values(file_storage_key=path)
+        )
+        await db.commit()
+    response = await client.get(
+        f"/ai/download/user-export/{identifier}", params={"token": token}
+    )
+    assert response.status_code == 200, response.text
+    assert response.content == data

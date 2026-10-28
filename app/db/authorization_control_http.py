@@ -68,7 +68,24 @@ TENANT_HTTP = MappingProxyType(
         ),
     }
 )
-CONTROL_HTTP = MappingProxyType(dict(CATALOG_HTTP) | dict(TENANT_HTTP))
+READ_HTTP = MappingProxyType(
+    {
+        ("GET", "/platform/ai/agents"): ("agent.list", None, None),
+        ("GET", "/platform/ai/agents/{agent_id}"): ("agent.get", "agent_id", None),
+        ("GET", "/platform/ai/agents/model-options"): ("model.options", None, None),
+        ("GET", _P): ("provider.list", None, None),
+        ("GET", _P + "/models"): ("model.available", None, None),
+        ("GET", _P + "/{provider_id}/models"): ("model.list", None, "provider_id"),
+        ("GET", _M): ("model_policy.list", None, None),
+        ("GET", _M + "/catalog"): ("model_policy.catalog", None, None),
+        ("GET", "/platform/tenants"): ("tenant.list", None, None),
+        ("GET", "/platform/tenants/{tenant_id}"): ("tenant.get", None, None),
+    }
+)
+CONTROL_HTTP = MappingProxyType(
+    dict(CATALOG_HTTP) | dict(TENANT_HTTP) | dict(READ_HTTP)
+)
+READ_OPERATIONS = frozenset(entry[0] for entry in READ_HTTP.values())
 _TENANT_PERMISSIONS = {
     "tenant.prepare": "platform:tenant:write",
     "tenant.disable": "platform:tenant:write",
@@ -134,6 +151,19 @@ class ControlHttp:
         if model_id is not None and self.operation != "provider.probe":
             raise _order_error()
         self.attempted = True
+        if self.operation in READ_OPERATIONS:
+            return await self.runtime.control_read(
+                tenant=self.identity.tenant,
+                actor_user_version=self.identity.user_version,
+                operation=self.operation,
+                target_id=self.target_id,
+                provider_id=self.provider_id,
+                target_tenant_id=self.target_tenant_id,
+                payload=payload.model_dump()
+                if hasattr(payload, "model_dump")
+                else payload,
+                issued_audit=self.audit,
+            )
         return await self.runtime.control(
             tenant=self.identity.tenant,
             actor_user_version=self.identity.user_version,
@@ -162,6 +192,12 @@ async def require_control_write(
         raise _order_error()
     operation, target_name, provider_name = entry
     permission = _TENANT_PERMISSIONS.get(operation, PLATFORM_AI_WRITE)
+    if operation in READ_OPERATIONS:
+        permission = (
+            "platform:tenant:read"
+            if operation.startswith("tenant.")
+            else "platform:ai:read"
+        )
     identity = access_identity(user)
     target = _identifier(request, target_name)
     provider = _identifier(request, provider_name)

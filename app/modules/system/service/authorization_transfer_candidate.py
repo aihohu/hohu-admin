@@ -91,10 +91,21 @@ class TransferResult:
 
 class TransferCandidate:
     async def rest_download(
-        self, db, tx, *, tenant, actor_user_version, identifier, storage
+        self,
+        db,
+        tx,
+        *,
+        tenant,
+        actor_user_version,
+        identifier,
+        storage,
+        signed=False,
+        token=None,
     ):
         """Administrative download, including existing private legacy exports."""
         tx.assert_session(db)
+        if type(signed) is not bool:
+            raise _order_error()
         if type(identifier) is not str or not 1 <= len(identifier) <= 64:
             raise exports.NotFoundException(
                 "用户导出任务", error_code="AI_EXPORT_TASK_NOT_FOUND"
@@ -106,7 +117,7 @@ class TransferCandidate:
             permissions=("system:user:export",),
         )
         user = await load_live_user_authority(db, tenant=tenant)
-        cross_owner = is_super_admin(user)
+        cross_owner = not signed and is_super_admin(user)
         task = await exports.get_export_task(
             db,
             identifier,
@@ -135,6 +146,32 @@ class TransferCandidate:
         )
         await assert_identity(db, identity)
         await ai_context_candidate.recheck(db, tx, inventory)
+        user = await load_live_user_authority(db, tenant=tenant)
+        await db.refresh(task)
+        if task.tenant_id != tenant.tenant_id or (
+            not cross_owner and task.operator_id != tenant.actor_user_id
+        ):
+            raise exports.NotFoundException(
+                "用户导出任务", error_code="AI_EXPORT_TASK_NOT_FOUND"
+            )
+        if signed:
+            lineage = (
+                result_projection_service.read_download_token(
+                    token,
+                    user,
+                    tenant=tenant,
+                    resource_type="user_export",
+                    resource_id=identifier,
+                )
+                if type(token) is str and 1 <= len(token) <= 16384
+                else None
+            )
+            if not await result_projection_service.authorize_result_projection(
+                db, user, owner_user_id=task.operator_id, lineage=lineage
+            ):
+                raise AuthorizationException(
+                    error_code="AI_RESULT_PROJECTION_FORBIDDEN"
+                )
         if task.status != ExportTaskStatus.SUCCESS:
             raise BusinessRuleException(
                 "导出任务未成功，无法下载", error_code="AI_EXPORT_TASK_NOT_READY"

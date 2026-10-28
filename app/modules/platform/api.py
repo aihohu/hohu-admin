@@ -1,16 +1,13 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, Path, Request
+from fastapi import APIRouter, Depends, Header, Path
 from fastapi.security import HTTPAuthorizationCredentials
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_response import ResponseModel
 from app.core.exceptions import AuthenticationException
-from app.core.tenant import PlatformContext
 from app.db.authorization_control_http import ControlHttp, require_control_write
 from app.db.authorization_http import get_authorization_runtime
 from app.db.authorization_principal_http import PrincipalHttp, require_principal_control
-from app.db.session import get_platform_db
 from app.modules.auth.service import platform_bearer_scheme
 from app.modules.platform.schemas import (
     PlatformIdentityOut,
@@ -28,10 +25,6 @@ from app.modules.platform.schemas import (
     PlatformTenantPage,
     PlatformTenantQuery,
     PlatformTokenResponse,
-)
-from app.modules.platform.system_agent_auth import require_system_agent_context
-from app.modules.system.service.tenant_lifecycle_service import (
-    tenant_lifecycle_service,
 )
 
 router = APIRouter()
@@ -105,25 +98,10 @@ async def prepare_tenant(
     summary="分页读取平台租户注册表",
 )
 async def list_tenants(
-    request: Request,
     query: PlatformTenantQuery = Depends(),
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    page = await tenant_lifecycle_service.list_tenants(
-        db,
-        current=query.current,
-        size=query.size,
-        platform=platform,
-    )
-    data = PlatformTenantPage(
-        records=[PlatformTenantOut.from_record(record) for record in page.records],
-        total=page.total,
-        current=page.current,
-        size=page.size,
-    )
-    request.state.platform_result_summary = {"recordCount": len(data.records)}
-    return ResponseModel.success(data=data)
+    return ResponseModel.success(data=await control.execute(query))
 
 
 @control_router.get(
@@ -133,15 +111,9 @@ async def list_tenants(
 )
 async def get_tenant(
     tenant_id: TenantId,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    tenant = await tenant_lifecycle_service.get_tenant(
-        db, tenant_id=tenant_id, platform=platform
-    )
-    request.state.platform_result_summary = {"recordCount": 1}
-    return ResponseModel.success(data=PlatformTenantOut.from_record(tenant))
+    return ResponseModel.success(data=await control.execute(target_tenant_id=tenant_id))
 
 
 @control_router.post(

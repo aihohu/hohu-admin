@@ -21,7 +21,10 @@ class TraceOwner:
     async def detail(self, **request):
         return await self._read(request, detail=True)
 
-    async def _read(self, request, *, detail):
+    async def operation(self, **request):
+        return await self._read(request, detail=False, operation=True)
+
+    async def _read(self, request, *, detail, operation=False):
         async with self.factory() as db:
             try:
                 with bounded_authorization_reads(db):
@@ -30,6 +33,8 @@ class TraceOwner:
                         tenants=(TenantLock(request["tenant"].tenant_id),),
                         budget=TransactionBudget(timeout_ms=8000),
                     ) as tx:
+                        if operation:
+                            return await trace_candidate.operation(db, tx, **request)
                         if detail:
                             return await trace_candidate.detail(db, tx, **request)
                         return await trace_candidate.list(db, tx, **request)

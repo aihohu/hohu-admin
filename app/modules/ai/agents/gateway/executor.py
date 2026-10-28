@@ -99,6 +99,9 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from app.modules.ai.service.atomic_completion_service import ClaimBinding
+    from app.modules.ai.service.authorization_execution_candidate import (
+        ExecutionDisposition,
+    )
 
 
 @dataclass(frozen=True)
@@ -926,22 +929,61 @@ def validate_prepared_execution(
     return registered
 
 
+async def record_prepared_execution_outcome(action, outcome, *, tenant):
+    """Bounded optional bookkeeping after a known, original-claim outcome."""
+    if outcome.disposition not in {"succeeded", "failed"}:
+        return
+    try:
+        async with asyncio.timeout(2):
+            effect = (
+                clear_failures if outcome.disposition == "succeeded" else record_failure
+            )
+            await effect(
+                redis_client,
+                tenant.actor_user_id,
+                action.execute_tool_name,
+                action.args_hash,
+                tenant=tenant,
+            )
+    except Exception:
+        logger.warning("Planned completion auxiliary bookkeeping unavailable")
+
+
 async def execute_approved_prepared_action(
     action: "AiPreparedAction | ClaimBinding",
     deps: ChatDeps,
-) -> ToolResult:
+) -> "ToolResult | ExecutionDisposition":
     """Execute any CAS-claimed durable action without a second log/HITL cycle."""
     from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
-        execute_claim,
+        PreparedExecutionOutcomeUnknown,
     )
     from app.modules.ai.service.atomic_completion_service import (  # noqa: PLC0415
         ClaimBinding,
     )
 
     if isinstance(action, ClaimBinding):
-        return await execute_claim(
-            action, deps, validate_execution=validate_prepared_execution
+        from app.db import authorization_http  # noqa: PLC0415
+        from app.db.authorization_plan_session import _order_error  # noqa: PLC0415
+        from app.modules.auth.service import access_identity  # noqa: PLC0415
+
+        identity = access_identity(deps.user)
+        if (
+            identity.tenant != deps.tenant
+            or deps.db.in_transaction()
+            or deps.db.new
+            or deps.db.dirty
+            or deps.db.deleted
+        ):
+            raise _order_error()
+        outcome = (
+            await authorization_http.get_authorization_runtime().gateway.execute_claim(
+                action, tenant=identity.tenant, actor_user_version=identity.user_version
+            )
         )
+        if outcome.disposition == "unknown":
+            raise PreparedExecutionOutcomeUnknown()
+        await record_prepared_execution_outcome(action, outcome, tenant=identity.tenant)
+        return outcome
     registered = validate_prepared_execution(action, deps)
     if not registered.meta.readonly:
         raise BusinessRuleException(

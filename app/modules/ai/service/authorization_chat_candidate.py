@@ -3,11 +3,13 @@
 from dataclasses import dataclass
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.auth import ensure_ai_chat_use
 from app.core.authorization_plan import LockPlan, NewResource, ResourceKey
 from app.core.authorization_plan import ResourceKind as K
+from app.core.base_response import PageResult
+from app.core.exceptions import BusinessException, NotFoundException
 from app.core.id_generator import next_id
 from app.db.authorization_plan_session import _order_error
 from app.modules.ai.agents.gateway.failures import compute_args_hash
@@ -17,6 +19,7 @@ from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
+from app.modules.ai.schemas.conversation import ConversationOut
 from app.modules.ai.service.atomic_completion_service import (
     DB_TOOLS,
     FILE_TOOLS,
@@ -35,6 +38,7 @@ from app.modules.ai.service.chat_run_service import (
 )
 from app.modules.ai.service.conversation_service import conversation_service
 from app.modules.ai.service.preflight_completion_service import has_preflight_marker
+from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.ai.service.reconciliation_annotation import (
     has_annotation,
     reconciliation_notice,
@@ -49,6 +53,7 @@ from app.modules.system.service.authorization_control_identity import (
     assert_identity,
     read_identity,
 )
+from app.utils.pagination import build_filters
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +63,70 @@ class SourceReference:
 
 
 class ChatCandidate:
+    async def list_conversations(self, db, tx, *, tenant, actor_user_version, query):
+        identity = await read_identity(
+            db,
+            tenant=tenant,
+            actor_user_version=actor_user_version,
+            permissions=("ai:chat:use",),
+        )
+        owned = (
+            select(AiConversation.conversation_id)
+            .where(
+                AiConversation.tenant_id == tenant.tenant_id,
+                AiConversation.user_id == tenant.actor_user_id,
+                AiConversation.deleted_at.is_(None),
+            )
+            .order_by(AiConversation.conversation_id)
+        )
+        ids = tuple(await db.scalars(owned))
+        await tx.lock(
+            LockPlan(
+                existing=(
+                    *identity.keys,
+                    *(
+                        ResourceKey(K.CONVERSATION, tenant.tenant_id, cid)
+                        for cid in ids
+                    ),
+                )
+            )
+        )
+        await assert_identity(db, identity)
+        if tuple(await db.scalars(owned)) != ids:
+            raise _order_error()
+        filters = build_filters(
+            AiConversation,
+            {"title": ("title", "contains"), "status": "status"},
+            **query.model_dump(exclude_unset=True),
+        )
+        filters.extend(
+            (
+                AiConversation.tenant_id == tenant.tenant_id,
+                AiConversation.conversation_id.in_(ids),
+            )
+        )
+        total = await db.scalar(
+            select(func.pg_catalog.count(AiConversation.conversation_id)).where(
+                *filters
+            )
+        )
+        rows = await db.scalars(
+            select(AiConversation)
+            .where(*filters)
+            .order_by(
+                AiConversation.update_time.desc(), AiConversation.conversation_id.desc()
+            )
+            .offset((query.current - 1) * query.size)
+            .limit(query.size)
+            .execution_options(populate_existing=True)
+        )
+        return PageResult(
+            records=[ConversationOut.model_validate(row) for row in rows],
+            total=total,
+            current=query.current,
+            size=query.size,
+        )
+
     async def conversation(
         self,
         db,
@@ -113,7 +182,9 @@ class ChatCandidate:
                 or row.user_id != tenant.actor_user_id
                 or row.deleted_at is not None
             ):
-                raise _order_error()
+                raise NotFoundException(
+                    "AI会话", error_code="AI_CONVERSATION_NOT_FOUND"
+                )
             if data:
                 await tx.update_factual(
                     key, data, expected={name: getattr(row, name) for name in data}
@@ -158,7 +229,7 @@ class ChatCandidate:
             or conversation.user_id != tenant.actor_user_id
             or conversation.deleted_at is not None
         ):
-            raise _order_error()
+            raise NotFoundException("AI会话", error_code="AI_CONVERSATION_NOT_FOUND")
         return conversation, actor
 
     async def source(
@@ -227,6 +298,13 @@ class ChatCandidate:
         return reference
 
     async def _settle_context(self, db, tx, tenant, conversation, *, cancel_pending):
+        def unresolved():
+            return BusinessException(
+                409,
+                "会话操作正在核对，请稍后刷新确认状态",
+                error_code="AI_ACTION_RUNNING",
+            )
+
         actions, logs = await self._facts(db, tenant, conversation.conversation_id)
         sources = {
             row.message_id: row
@@ -246,30 +324,76 @@ class ChatCandidate:
             conversations={conversation.conversation_id: conversation},
             sources=sources,
         )
+
+        def readonly_terminal(log):
+            if log is None or log.tool_name in DB_TOOLS | FILE_TOOLS:
+                return False
+            tool = ToolRegistry.get().find(log.tool_name)
+            source = sources.get(log.source_user_message_id)
+            return bool(
+                tool is not None
+                and tool.meta.readonly
+                and tool.meta.agent == log.agent_code
+                and log.readonly_snapshot is True
+                and log.tenant_id == tenant.tenant_id
+                and log.user_id == conversation.user_id
+                and log.conversation_id == conversation.conversation_id
+                and source is not None
+                and source.trace_id == log.trace_id
+                and source.conversation_id == log.conversation_id
+                and log.status in {"success", "failed", "expired", "rejected"}
+                and log.finished_at is not None
+                and log.queued_at is not None
+                and log.finished_at >= log.queued_at
+                and (
+                    log.started_at is None
+                    or log.queued_at <= log.started_at <= log.finished_at
+                )
+                and (
+                    log.status != "success"
+                    or (log.started_at is not None and log.error_code is None)
+                )
+                and (log.status != "failed" or bool(log.error_code))
+                and type(log.args_hash) is str
+                and len(log.args_hash) == 64
+                and all(char in "0123456789abcdef" for char in log.args_hash)
+                and not has_annotation(log.result_summary)
+            )
+
         for action in actions:
             if cancel_pending and action.status == "pending_confirmation":
                 if (
                     compute_args_hash(action.frozen_args) != action.args_hash
                     or compute_args_hash(action.snapshot) != action.snapshot_hash
                 ):
-                    raise _order_error()
+                    raise unresolved()
                 log = logs.get(action.execute_tool_call_id)
                 if log is None:
-                    raise _order_error()
+                    raise unresolved()
                 await lifecycle_candidate._finish_decision(
                     tx, tenant, action, log, "cancel"
                 )
+            elif readonly_terminal(logs.get(action.execute_tool_call_id)):
+                try:
+                    lifecycle_candidate.verify_readonly_terminal(
+                        action, logs.get(action.execute_tool_call_id)
+                    )
+                except BusinessException as exc:
+                    raise unresolved() from exc
+                continue
             elif (
                 action.execute_tool_call_id not in states
                 or not states[action.execute_tool_call_id].verified
             ):
-                raise _order_error()
+                raise unresolved()
         bound = {row.execute_tool_call_id for row in actions}
         if any(
-            call not in bound and (call not in states or not states[call].verified)
+            call not in bound
+            and not readonly_terminal(logs[call])
+            and (call not in states or not states[call].verified)
             for call in logs
         ):
-            raise _order_error()
+            raise unresolved()
 
     async def _invalidate_source(self, db, tx, tenant, conversation_id, source_id):
         rows = list(
@@ -786,7 +910,9 @@ class ChatCandidate:
         }
         return actions, logs
 
-    async def messages(self, db, tx, *, tenant, actor_user_version, conversation_id):
+    async def messages(
+        self, db, tx, *, tenant, actor_user_version, conversation_id, detail=False
+    ):
         conversation, actor = await self._lock(
             db,
             tx,
@@ -823,6 +949,23 @@ class ChatCandidate:
         for output in projected:
             if getattr(output, "content", None):
                 output.content = redact_secrets(output.content)
+        if detail:
+            pending = await prepared_action_service.list_pending_for_conversation(
+                db,
+                conversation_id=conversation_id,
+                user_id=tenant.actor_user_id,
+                tenant=tenant,
+            )
+            return {
+                "conversation": ConversationOut.model_validate(conversation),
+                "messages": projected,
+                "pendingActions": [
+                    await prepared_action_service.project_pending_out(
+                        db, action=action, current_user=actor
+                    )
+                    for action in pending
+                ],
+            }
         return projected
 
 

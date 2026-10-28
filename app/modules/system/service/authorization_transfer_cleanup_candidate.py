@@ -211,7 +211,19 @@ class TransferCleanupCandidate:
                 sorted({r.conversation_id for r in [*actions, *logs]})
             ),
         )
-        await tx.lock(LockPlan(existing=(*inventory.keys, command.key)))
+        expiry_log = (
+            ResourceKey(K.IMPORT_BATCH_LOG, resource.tenant_id, str(next_id()))
+            if not retire
+            and command.key.kind is K.IMPORT_BATCH
+            and command.snapshot["status"] == "PREVIEW_DONE"
+            else None
+        )
+        await tx.lock(
+            LockPlan(
+                existing=(*inventory.keys, command.key),
+                new=(NewResource(expiry_log),) if expiry_log is not None else (),
+            )
+        )
         await ai_context_candidate.recheck(db, tx, inventory)
         actions, logs = await scan_transfer_dependencies(db, (resource,))
         if (
@@ -230,20 +242,39 @@ class TransferCleanupCandidate:
         ttl = (
             timedelta(minutes=10)
             if command.key.kind is K.IMPORT_BATCH
-            and current["status"] in {"CREATED", "PREVIEW_DONE"}
+            and current["status"] == "PREVIEW_DONE"
+            else timedelta(days=90)
+            if command.key.kind is K.IMPORT_BATCH
             else timedelta(days=30)
         )
         cancelled_retirement = retire and current["status"] == "CANCELLED"
-        if current["status"] == "RUNNING" or (
+        if current["status"] in {"CREATED", "RUNNING"} or (
             not cancelled_retirement
             and current["status"] != "EXPIRED"
             and now - created < ttl
         ):
             return "retained"
         if not retire:
-            await tx.update_factual(
-                command.key, {"status": "EXPIRED"}, expected=current
-            )
+            if current["status"] == "EXPIRED":
+                return "expired"
+            changes = {"status": "EXPIRED"}
+            if expiry_log is not None:
+                changes["finished_at"] = now
+            await tx.update_factual(command.key, changes, expected=current)
+            if expiry_log is not None:
+                await tx.insert_reserved(
+                    expiry_log,
+                    {
+                        "batch_id": resource.resource_id,
+                        "operator_id": resource.operator_id,
+                        "event": "EXPIRED",
+                        "from_status": "PREVIEW_DONE",
+                        "to_status": "EXPIRED",
+                        "detail": {
+                            "reason": "preview TTL 10min expired (cleanup cron)"
+                        },
+                    },
+                )
             return "expired"
         if current["status"] not in {"EXPIRED", "CANCELLED"}:
             raise _order_error()
