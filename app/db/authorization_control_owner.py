@@ -1,6 +1,7 @@
-"""Explicit control-plane owners; ordinary production entry points stay unchanged."""
+"""Fixed control-plane owners for planned HTTP and internal entry points."""
 
 import asyncio
+import json
 from copy import deepcopy
 from functools import partial
 
@@ -39,7 +40,11 @@ from app.modules.system.service.authorization_configuration_candidate import (
     ConfigurationExecution,
     configuration_authorization_candidate,
 )
-from app.modules.system.service.authorization_control_audit import issue_control_audit
+from app.modules.system.service.authorization_control_audit import (
+    ControlAudit,
+    consume_control_audit,
+    issue_control_audit,
+)
 from app.modules.system.service.authorization_control_identity import (
     assert_identity,
     read_identity,
@@ -66,7 +71,7 @@ async def _rollback_preserving(db, error):
 
 
 class ControlCandidateOwner:
-    async def _failure(self, factory, audit, error):
+    async def complete_failure(self, factory, audit, error):
         async with asyncio.timeout(3):
             async with factory() as db:
                 require_candidate_session(db)
@@ -107,10 +112,16 @@ class ControlCandidateOwner:
         expected_snapshot=None,
         audit_context=None,
         audit_factory=None,
+        audit_path=None,
+        audit_method=None,
+        issued_audit=None,
+        http_result=False,
     ):
         """Own all phases; external DNS/SMTP/probes never borrow business locks."""
 
         require_candidate_session(db)
+        if type(http_result) is not bool:
+            raise _order_error()
         payload, expected_snapshot, audit_context = deepcopy(
             (payload, expected_snapshot, audit_context)
         )
@@ -144,15 +155,11 @@ class ControlCandidateOwner:
             if operation == "mail.test"
             else CONFIGURATION_PERMISSIONS[operation]
         )
-        audit = None
+        if (audit_path is None) != (audit_method is None):
+            raise _order_error()
+        audit = issued_audit
         factory = audit_factory
         if audited:
-            if type(audit_context) is not dict or set(audit_context) != {
-                "reason",
-                "ticket_id",
-                "correlation_id",
-            }:
-                raise _order_error()
             if factory is None:
                 if not isinstance(db.bind, AsyncEngine):
                     raise _order_error()
@@ -162,20 +169,42 @@ class ControlCandidateOwner:
                     expire_on_commit=False,
                     autoflush=False,
                 )
-            async with factory() as intent_db:
-                if intent_db is db:
+            if audit is not None:
+                if type(audit) is not ControlAudit or audit_context is not None:
                     raise _order_error()
-                audit = await self.authorize(
-                    intent_db,
+                audit.assert_request(
                     tenant=tenant,
                     actor_user_version=actor_user_version,
                     operation=operation,
                     permission=permission,
                     target_tenant_id=target_tenant_id,
-                    path="/authorization-candidates/" + operation,
-                    method="POST",
-                    **audit_context,
                 )
+            else:
+                if type(audit_context) is not dict or set(audit_context) != {
+                    "reason",
+                    "ticket_id",
+                    "correlation_id",
+                }:
+                    raise _order_error()
+                async with factory() as intent_db:
+                    if intent_db is db:
+                        raise _order_error()
+                    audit = await self.authorize(
+                        intent_db,
+                        tenant=tenant,
+                        actor_user_version=actor_user_version,
+                        operation=operation,
+                        permission=permission,
+                        target_tenant_id=target_tenant_id,
+                        path=audit_path
+                        if audit_path is not None
+                        else "/authorization-candidates/" + operation,
+                        method=audit_method if audit_method is not None else "POST",
+                        **audit_context,
+                    )
+            consume_control_audit(audit)
+        elif audit is not None:
+            raise _order_error()
         effects = PostCommitEffects()
         try:
             request = {
@@ -209,7 +238,11 @@ class ControlCandidateOwner:
                             prepared
                         )
                     result = await catalog_authorization_candidate.execute(
-                        db, **request, audit=audit, preparation=prepared
+                        db,
+                        **request,
+                        audit=audit,
+                        preparation=prepared,
+                        http_result=http_result,
                     )
             elif operation == "mail.test":
                 prepared = (
@@ -274,13 +307,14 @@ class ControlCandidateOwner:
                     target_tenant_id=target_tenant_id,
                     payload=payload,
                     audit=audit,
+                    http_result=http_result,
                 )
         except BaseException as error:
             effects.discard()
             await _rollback_preserving(db, error)
             if audit is not None:
                 try:
-                    await self._failure(factory, audit, error)
+                    await self.complete_failure(factory, audit, error)
                 except BaseException:
                     if isinstance(error, asyncio.CancelledError):
                         raise error
@@ -308,9 +342,25 @@ class ControlCandidateOwner:
         target_tenant_id,
         path,
         method,
+        event_type="authorized",
+        denial_code=None,
+        status_code=None,
     ):
         """Own an independent, required intent transaction before business locks."""
         require_candidate_session(db)
+        if event_type not in {"authorized", "denied"} or (
+            event_type == "denied"
+            and (
+                status_code not in {400, 403}
+                or denial_code
+                not in {
+                    "PLATFORM_AUDIT_CONTEXT_SENSITIVE",
+                    "PLATFORM_AUDIT_CONTEXT_REQUIRED",
+                    "PLATFORM_PERMISSION_DENIED",
+                }
+            )
+        ):
+            raise _order_error()
         async with asyncio.timeout(3):
             try:
                 with bounded_authorization_reads(db):
@@ -332,25 +382,44 @@ class ControlCandidateOwner:
                             actor_name=identity.user_name,
                             operation=operation,
                             permission=permission,
-                            reason=reason,
-                            ticket_id=ticket_id,
-                            correlation_id=correlation_id,
+                            reason=reason
+                            if event_type == "authorized"
+                            else reason or "[not supplied]",
+                            ticket_id=ticket_id
+                            if event_type == "authorized"
+                            else ticket_id or "[not supplied]",
+                            correlation_id=correlation_id
+                            if event_type == "authorized"
+                            else correlation_id or "[not supplied]",
                             target_tenant_id=target_tenant_id,
                             path=path,
                             method=method,
                         )
+                        values = audit.values(
+                            event_type=event_type, status_code=status_code
+                        )
+                        if event_type == "denied":
+                            metadata = json.loads(values["request_params"])
+                            metadata.update(
+                                reason=reason,
+                                ticket_id=ticket_id,
+                                correlation_id=correlation_id,
+                                denial_code=denial_code,
+                                authorization_audit_id=None,
+                            )
+                            values["request_params"] = json.dumps(
+                                metadata, ensure_ascii=False
+                            )
                         key = ResourceKey(
                             ResourceKind.SYSTEM_OPERATION_LOG,
                             tenant.tenant_id,
-                            (audit.authorization_audit_id,),
+                            (values["operation_log_id"],),
                         )
                         await tx.lock(
                             LockPlan(existing=identity.keys, new=(NewResource(key),))
                         )
                         await assert_identity(db, identity)
-                        await tx.append_audit(
-                            key, audit.values(event_type="authorized")
-                        )
+                        await tx.append_audit(key, values)
             except BaseException as error:
                 await _rollback_preserving(db, error)
                 raise

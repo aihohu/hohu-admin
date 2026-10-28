@@ -13,6 +13,7 @@ from app.core.exceptions import (
     AuthenticationException,
 )
 from app.core.rbac import is_system_admin
+from app.db.authorization_http import get_authorization_runtime, login_http
 from app.db.session import get_db
 from app.modules.auth.permission_collect import (
     collect_user_buttons,
@@ -21,10 +22,8 @@ from app.modules.auth.permission_collect import (
 from app.modules.auth.schemas.auth import LoginCredentials, RouteMeta, UserRoute
 from app.modules.auth.self_service_api import router as self_service_router
 from app.modules.auth.service import (
-    auth_service,
     build_menu_tree,
     get_current_user,
-    refresh_access_token,
 )
 from app.modules.auth.service import logout as do_logout
 from app.modules.system.constants import PLATFORM_ONLY_TENANT_ROUTE_NAMES
@@ -72,13 +71,14 @@ async def login(
     """
     ip = get_client_ip(request)
     user_agent = request.headers.get("User-Agent")
-    return await auth_service.authenticate(
-        credentials,
+    data = await login_http(
         db,
+        credentials,
         ip=ip,
         user_agent=user_agent,
         host=request.headers.get("Host"),
     )
+    return ResponseModel.success(data=data)
 
 
 @router.post(
@@ -132,7 +132,7 @@ async def refresh_token(
     refresh = body.get("refreshToken", "")
     if not refresh:
         raise AuthenticationException("缺少 refreshToken", error_code="TOKEN_EXPIRED")
-    new_access, new_refresh = await refresh_access_token(refresh)
+    new_access, new_refresh = await get_authorization_runtime().refresh(refresh)
     return ResponseModel.success(
         data={"token": new_access, "refreshToken": new_refresh}
     )
@@ -153,12 +153,12 @@ async def login_for_docs(
         user_name=form.username,
         password=form.password,
     )
-    result = await auth_service.authenticate(
-        credentials,
+    result = await login_http(
         db,
+        credentials,
         host=request.headers.get("Host"),
     )
-    token = result.data["token"]
+    token = result["token"]
     return {"access_token": token, "token_type": "bearer"}
 
 

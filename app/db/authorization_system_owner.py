@@ -1,4 +1,4 @@
-"""Explicit System candidate owners; production routes are wired in a later slice."""
+"""System transaction owners used by the fixed HTTP and tool adapters."""
 
 import asyncio
 from functools import partial
@@ -13,6 +13,9 @@ from app.db.authorization_owner import (
     rollback_authorization_session,
 )
 from app.db.authorization_plan_session import AuthorizationPlanSession, _order_error
+from app.modules.system.service.authorization_ai_delete_candidate import (
+    ai_delete_candidate,
+)
 from app.modules.system.service.authorization_import_candidate import (
     import_authorization_candidate,
 )
@@ -78,7 +81,12 @@ class SystemCandidateOwner:
             payload, "model_fields_set", ()
         )
         try:
-            result = await system_authorization_candidate.execute(
+            execute = (
+                ai_delete_candidate.execute_http
+                if operation in {"user.delete", "user.batch_delete"}
+                else system_authorization_candidate.execute
+            )
+            result = await execute(
                 db,
                 tenant=tenant,
                 actor_user_version=actor_user_version,

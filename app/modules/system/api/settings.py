@@ -1,15 +1,15 @@
 """Fixed setting groups, separate from custom parameter CRUD."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import is_super_admin, require_permissions
 from app.core.base_response import ResponseModel
-from app.core.cache import cache_delete
 from app.core.exceptions import AuthorizationException
 from app.core.rbac import is_system_admin
 from app.core.tenant import TenantContext, TenantLocatorContext
+from app.db.authorization_http import control_write
 from app.db.session import get_db
 from app.modules.auth.service import (
     get_current_tenant_context,
@@ -47,24 +47,28 @@ async def read_mail(
 @router.put("/mail")
 async def write_mail(
     payload: MailWrite,
+    request: Request,
     db=Depends(get_db),
     user=Depends(require_permissions("system:setting:edit")),
 ):
     _mail_admin(user)
-    result = await mail_service.save(db, payload)
-    await db.commit()
+    result = await control_write(
+        db, user, operation="mail.save", payload=payload, request=request
+    )
     return ResponseModel.success(data=result)
 
 
 @router.post("/mail/test")
 async def test_mail(
     payload: MailTest,
+    request: Request,
     db=Depends(get_db),
     user=Depends(require_permissions("system:setting:edit")),
 ):
     _mail_admin(user)
-    result = await mail_service.test(db, str(payload.recipient))
-    await db.commit()
+    result = await control_write(
+        db, user, operation="mail.test", payload=payload.model_dump(), request=request
+    )
     return ResponseModel.success(data=result)
 
 
@@ -154,14 +158,22 @@ async def get_group(
 async def save_group(
     group: str,
     payload: SettingsWrite,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_permissions("system:setting:edit")),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     _ensure_group_access(group, user, tenant)
-    result = await settings_service.save_group(
-        db, group, payload.values, revision=payload.revision, tenant=tenant
+    result = await control_write(
+        db,
+        user,
+        operation="settings.save",
+        payload={
+            "group": group,
+            "values": payload.values,
+            "revision": payload.revision,
+        },
+        tenant=tenant,
+        request=request,
     )
-    await db.commit()
-    await cache_delete(pattern=f"tenant:{tenant.tenant_id}:setting:*")
     return ResponseModel.success(data=_response(result))

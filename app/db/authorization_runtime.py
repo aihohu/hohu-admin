@@ -22,7 +22,11 @@ from app.db.authorization_trace_owner import TraceOwner
 from app.db.authorization_transfer_owner import TransferOwner
 from app.modules.ai.agents.gateway.authorization_execution import PlannedGatewayOwner
 from app.modules.auth.candidate_owner import auth_candidate_owner
+from app.modules.platform.authorization_principal_audit import consume_principal_audit
 from app.modules.platform.authorization_principal_owner import principal_candidate_owner
+from app.modules.platform.authorization_retention_owner import retention_candidate_owner
+from app.modules.platform.authorization_support_owner import support_candidate_owner
+from app.modules.system.service.authorization_control_audit import consume_control_audit
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +73,12 @@ class AuthorizationRuntime:
         async with self.sessions() as db:
             return await control_candidate_owner.authorize(db, **request)
 
+    async def fail_control(self, audit, error):
+        consume_control_audit(audit)
+        return await control_candidate_owner.complete_failure(
+            self.sessions, audit, error
+        )
+
     async def seed(self, **request):
         async with self.sessions() as db:
             return await seed_candidate_owner.execute(db, **request)
@@ -114,6 +124,27 @@ class AuthorizationRuntime:
     async def authorize_principal(self, **request):
         async with self.sessions() as db:
             return await principal_candidate_owner.authorize(db, **request)
+
+    async def fail_principal(self, audit, error):
+        consume_principal_audit(audit)
+        return await principal_candidate_owner.complete_failure(
+            self.sessions, audit, error
+        )
+
+    async def principal_control(self, *, operation, **request):
+        async with self.sessions() as db:
+            if operation in {"support.operation_logs", "support.login_logs"}:
+                return await support_candidate_owner.execute(
+                    db, operation=operation, audit_factory=self.sessions, **request
+                )
+            if operation in {"retention.preview", "retention.purge"}:
+                method = (
+                    retention_candidate_owner.preview
+                    if operation == "retention.preview"
+                    else retention_candidate_owner.purge
+                )
+                return await method(db, audit_factory=self.sessions, **request)
+            raise _order_error()
 
     async def create_principal(self, **request):
         async with self.sessions() as db:

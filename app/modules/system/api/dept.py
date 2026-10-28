@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.core.tenant import TenantContext
+from app.db.authorization_http import system_write
 from app.db.session import get_db
 from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.dept import Dept
@@ -20,7 +21,6 @@ from app.modules.system.schemas.dept import (
     DeptUsersUpdate,
 )
 from app.modules.system.service.dept_selector import department_selector
-from app.modules.system.service.dept_service import dept_service
 from app.modules.system.service.user_department_assignment_service import (
     user_department_assignment_service,
 )
@@ -232,14 +232,9 @@ async def add_dept(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """创建部门"""
-    new_dept = await dept_service.create(
-        db,
-        dept_in,
-        actor_user_id=current_user.user_id,
-        tenant=tenant,
+    await system_write(
+        db, current_user, operation="dept.create", payload=dept_in, tenant=tenant
     )
-    new_dept.create_by = current_user.user_name
-    await db.commit()
     return ResponseModel.success(msg="部门创建成功")
 
 
@@ -260,15 +255,14 @@ async def update_dept(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """更新部门"""
-    dept = await dept_service.update(
+    await system_write(
         db,
-        dept_id,
-        dept_in,
-        actor_user_id=current_user.user_id,
+        current_user,
+        operation="dept.update",
+        payload=dept_in,
+        target_id=dept_id,
         tenant=tenant,
     )
-    dept.update_by = current_user.user_name
-    await db.commit()
     return ResponseModel.success(msg="部门更新成功")
 
 
@@ -289,15 +283,14 @@ async def move_dept(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """Move one department subtree through the shared write policy."""
-    dept = await dept_service.move(
+    await system_write(
         db,
-        dept_id=dept_id,
-        new_parent_id=move_in.new_parent_id,
-        actor_user_id=current_user.user_id,
+        current_user,
+        operation="dept.move",
+        payload=move_in,
+        target_id=dept_id,
         tenant=tenant,
     )
-    dept.update_by = current_user.user_name
-    await db.commit()
     return ResponseModel.success(msg="部门移动成功")
 
 
@@ -314,13 +307,9 @@ async def delete_dept(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """删除部门"""
-    await dept_service.delete(
-        db,
-        dept_id,
-        actor_user_id=current_user.user_id,
-        tenant=tenant,
+    await system_write(
+        db, current_user, operation="dept.delete", target_id=dept_id, tenant=tenant
     )
-    await db.commit()
     return ResponseModel.success(msg="部门删除成功")
 
 
@@ -337,13 +326,14 @@ async def batch_delete_depts(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """批量删除部门"""
-    deleted_count = await dept_service.batch_delete(
+    outcome = await system_write(
         db,
-        ids,
-        actor_user_id=current_user.user_id,
+        current_user,
+        operation="dept.batch_delete",
+        payload=ids,
         tenant=tenant,
     )
-    await db.commit()
+    deleted_count = outcome["result"]
     return ResponseModel.success(msg=f"成功删除 {deleted_count} 个部门")
 
 
@@ -398,14 +388,15 @@ async def update_dept_users(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """Replace the complete department member set atomically."""
-    result = await user_department_assignment_service.replace_department_members(
+    outcome = await system_write(
         db,
-        actor_user_id=current_user.user_id,
-        dept_id=dept_id,
-        user_ids=body.user_ids,
+        current_user,
+        operation="dept.members",
+        payload=body.user_ids,
+        target_id=dept_id,
         tenant=tenant,
     )
-    await db.commit()
+    result = outcome["result"]
     return ResponseModel.success(
         msg=f"新增 {result.added} 人，移除 {result.removed} 人"
     )

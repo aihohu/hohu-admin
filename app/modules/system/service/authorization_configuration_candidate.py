@@ -1,4 +1,4 @@
-"""Opt-in configuration writers with complete plans; no production wiring.
+"""Configuration writers with complete plans and fixed production owners.
 
 The caller owns commit/rollback and all cache effects. SMTP preparation and
 completion are short transactions separated by a DB-free bounded worker.
@@ -7,7 +7,7 @@ completion are short transactions separated by a DB-free bounded worker.
 import hashlib
 import hmac
 import smtplib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from types import MappingProxyType
 from weakref import WeakKeyDictionary, ref
@@ -331,6 +331,21 @@ class ConfigurationAuthorizationCandidate:
                 changes, result_id, immediate = await self._prepare(
                     db, tenant, operation, payload, target_id, facts
                 )
+                if operation in {"menu.create", "menu.update"}:
+                    audit_field = (
+                        "create_by" if operation == "menu.create" else "update_by"
+                    )
+                    changes = [
+                        replace(
+                            change,
+                            values={**change.values, audit_field: identity.user_name},
+                        )
+                        if change.key.kind == ResourceKind.MENU
+                        and change.key.identity == (result_id,)
+                        and change.action in {"insert", "update"}
+                        else change
+                        for change in changes
+                    ]
                 existing = set(identity.keys)
                 kind = (
                     ResourceKind.MENU

@@ -1,18 +1,22 @@
 """Explicit owners for transfer candidates; no publication retry after ACK loss."""
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 
 from sqlalchemy import or_, select, tuple_
 
+from app.core import redis as redis_module
 from app.core.authorization_file import FileBudget
+from app.core.authorization_io import file_transform_worker
 from app.core.authorization_plan import (
     LockMode,
     ResourceKind,
     TenantLock,
     TransactionBudget,
 )
+from app.core.exceptions import BusinessRuleException, NotFoundException
 from app.db.authorization_owner import (
     commit_authorization_session,
     rollback_authorization_session,
@@ -33,6 +37,9 @@ from app.modules.system.service.authorization_transfer_cleanup_candidate import 
     transfer_cleanup_candidate,
 )
 
+transfer_parser = file_transform_worker
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True, slots=True)
 class CleanupPage:
@@ -44,6 +51,80 @@ class TransferOwner:
     def __init__(self, factory, storage):
         self.factory, self.storage = factory, storage
 
+    async def cancel(self, *, tenant, actor_user_version, identifier, reason):
+        async with self.factory() as db:
+            try:
+                with (
+                    bounded_authorization_reads(db),
+                    FileBudget(
+                        max_reads=2,
+                        max_total_bytes=20 * 1024 * 1024,
+                        deadline=time.monotonic() + 5,
+                    ).activate(),
+                ):
+                    async with asyncio.timeout(5):
+                        spec = resource_spec(ResourceKind.IMPORT_BATCH)
+                        present = await db.scalar(
+                            select(spec.table.c.batch_id).where(
+                                spec.table.c.tenant_id == tenant.tenant_id,
+                                spec.table.c.batch_id == identifier,
+                            )
+                        )
+                        if present is None:
+                            raise NotFoundException(
+                                "用户导入批次", error_code="AI_IMPORT_BATCH_NOT_FOUND"
+                            )
+                        try:
+                            command = await transfer_cleanup_candidate.prepare(
+                                db,
+                                tenant_id=tenant.tenant_id,
+                                kind="import",
+                                identifier=identifier,
+                                storage=self.storage,
+                            )
+                        except (BusinessRuleException, FileNotFoundError) as exc:
+                            raise BusinessRuleException(
+                                "批次关联操作或文件归属待核对，暂不能取消",
+                                error_code="AI_EXECUTION_OUTCOME_UNKNOWN",
+                            ) from exc
+            finally:
+                await rollback_authorization_session(db)
+            try:
+                with bounded_authorization_reads(db):
+                    async with authorization_transactions.scope(
+                        db,
+                        tenants=(TenantLock(tenant.tenant_id, LockMode.EXCLUSIVE),),
+                        budget=TransactionBudget(timeout_ms=15000),
+                    ) as tx:
+                        result = await transfer_cleanup_candidate.cancel(
+                            db,
+                            tx,
+                            command,
+                            tenant=tenant,
+                            actor_user_version=actor_user_version,
+                            reason=reason,
+                        )
+            except BaseException:
+                await rollback_authorization_session(db)
+                raise
+            await commit_authorization_session(db)
+        if result.status == "RUNNING":
+            async with asyncio.timeout(2):
+                await redis_module.redis_client.setex(
+                    f"user_import:cancel:{identifier}", 3600, "1"
+                )
+        else:
+            try:
+                await self._cleanup_phase(
+                    tenant_id=tenant.tenant_id,
+                    kind="import",
+                    identifier=identifier,
+                    retire=True,
+                )
+            except Exception:
+                logger.warning("Committed cancellation retained its private artifact")
+        return result
+
     async def export(self, *, tenant, actor_user_version, args):
         command = transfer_candidate.prepare_export(
             tenant=tenant, actor_user_version=actor_user_version, args=args
@@ -51,8 +132,11 @@ class TransferOwner:
         return await self._publish(command)
 
     async def preview(self, *, tenant, actor_user_version, **request):
-        command = transfer_candidate.prepare_preview(
-            tenant=tenant, actor_user_version=actor_user_version, **request
+        command = await transfer_parser.run(
+            transfer_candidate.prepare_preview,
+            tenant=tenant,
+            actor_user_version=actor_user_version,
+            **request,
         )
         return await self._publish(command)
 
@@ -82,8 +166,17 @@ class TransferOwner:
             return result
 
     async def download(
-        self, *, tenant, actor_user_version, kind, identifier, token=None
+        self,
+        *,
+        tenant,
+        actor_user_version,
+        kind,
+        identifier,
+        token=None,
+        administrative=False,
     ):
+        if type(administrative) is not bool or (administrative and kind != "export"):
+            raise _order_error()
         async with self.factory() as db:
             try:
                 with bounded_authorization_reads(db):
@@ -92,15 +185,20 @@ class TransferOwner:
                         tenants=(TenantLock(tenant.tenant_id),),
                         budget=TransactionBudget(timeout_ms=8000),
                     ) as tx:
-                        result = await transfer_candidate.download(
+                        execute = (
+                            transfer_candidate.rest_download
+                            if administrative
+                            else transfer_candidate.download
+                        )
+                        extra = {} if administrative else {"kind": kind, "token": token}
+                        result = await execute(
                             db,
                             tx,
                             tenant=tenant,
                             actor_user_version=actor_user_version,
-                            kind=kind,
                             identifier=identifier,
                             storage=self.storage,
-                            token=token,
+                            **extra,
                         )
             finally:
                 await rollback_authorization_session(db)

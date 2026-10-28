@@ -7,9 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.base_response import ResponseModel
 from app.core.exceptions import AuthenticationException
 from app.core.tenant import PlatformContext
+from app.db.authorization_control_http import ControlHttp, require_control_write
+from app.db.authorization_http import get_authorization_runtime
+from app.db.authorization_principal_http import PrincipalHttp, require_principal_control
 from app.db.session import get_platform_db
-from app.modules.auth.service import platform_bearer_scheme, require_platform_context
-from app.modules.platform.auth import authenticate_platform_token
+from app.modules.auth.service import platform_bearer_scheme
 from app.modules.platform.schemas import (
     PlatformIdentityOut,
     PlatformLoginCredentials,
@@ -27,13 +29,10 @@ from app.modules.platform.schemas import (
     PlatformTenantQuery,
     PlatformTokenResponse,
 )
-from app.modules.platform.service import platform_auth_service
 from app.modules.platform.system_agent_auth import require_system_agent_context
-from app.modules.platform.tenant_bootstrap_service import tenant_bootstrap_service
 from app.modules.system.service.tenant_lifecycle_service import (
     tenant_lifecycle_service,
 )
-from app.modules.system.service.tenant_support_service import tenant_support_service
 
 router = APIRouter()
 control_router = APIRouter()
@@ -52,25 +51,27 @@ IdempotencyKey = Annotated[
 @router.post("/login", summary="平台控制面登录")
 async def platform_login(
     credentials: PlatformLoginCredentials,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
 ) -> ResponseModel[PlatformTokenResponse]:
-    token = await platform_auth_service.authenticate(db, credentials)
+    token = await get_authorization_runtime().principal_login(
+        principal_name=credentials.principal_name, password=credentials.password
+    )
     return ResponseModel.success(data=PlatformTokenResponse(token=token))
 
 
 @router.get("/me", summary="读取当前平台身份与实时权限")
 async def platform_identity(
     credentials: HTTPAuthorizationCredentials | None = Depends(platform_bearer_scheme),
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
 ) -> ResponseModel[PlatformIdentityOut]:
     if credentials is None:
         raise AuthenticationException(
             "缺少平台 Token", error_code="PLATFORM_TOKEN_REQUIRED"
         )
-    principal = await authenticate_platform_token(credentials.credentials, db)
+    principal = await get_authorization_runtime().principal_current(
+        token=credentials.credentials
+    )
     return ResponseModel.success(
         data=PlatformIdentityOut(
-            principal_id=str(principal.principal_id),
+            principal_id=str(principal.identity.principal_id),
             principal_name=principal.principal_name,
             permissions=sorted(principal.permissions),
         )
@@ -85,23 +86,17 @@ async def platform_identity(
 async def prepare_tenant(
     payload: PlatformTenantCreate,
     idempotency_key: IdempotencyKey,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    tenant_id = platform.target_tenant_id
-    if tenant_id is None:  # defensive: dependency always preallocates this target
-        raise RuntimeError("platform tenant target was not allocated")
-    tenant = await tenant_lifecycle_service.prepare_tenant(
-        db,
-        tenant_id=tenant_id,
-        tenant_code=payload.tenant_code,
-        tenant_name=payload.tenant_name,
-        idempotency_key=idempotency_key,
-        platform=platform,
+    return ResponseModel.success(
+        data=await control.execute(
+            {
+                "tenant_code": payload.tenant_code,
+                "tenant_name": payload.tenant_name,
+                "idempotency_key": idempotency_key,
+            }
+        )
     )
-    request.state.platform_result_summary = {"recordCount": 1}
-    return ResponseModel.success(data=PlatformTenantOut.from_record(tenant))
 
 
 @control_router.get(
@@ -156,15 +151,9 @@ async def get_tenant(
 )
 async def activate_tenant(
     tenant_id: TenantId,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    tenant = await tenant_lifecycle_service.activate_tenant(
-        db, tenant_id=tenant_id, platform=platform
-    )
-    request.state.platform_result_summary = {"recordCount": 1}
-    return ResponseModel.success(data=PlatformTenantOut.from_record(tenant))
+    return ResponseModel.success(data=await control.execute(target_tenant_id=tenant_id))
 
 
 @control_router.post(
@@ -174,15 +163,9 @@ async def activate_tenant(
 )
 async def disable_tenant(
     tenant_id: TenantId,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    tenant = await tenant_lifecycle_service.disable_tenant(
-        db, tenant_id=tenant_id, platform=platform
-    )
-    request.state.platform_result_summary = {"recordCount": 1}
-    return ResponseModel.success(data=PlatformTenantOut.from_record(tenant))
+    return ResponseModel.success(data=await control.execute(target_tenant_id=tenant_id))
 
 
 @control_router.post(
@@ -194,19 +177,16 @@ async def bootstrap_tenant(
     tenant_id: TenantId,
     payload: PlatformTenantBootstrapRequest,
     idempotency_key: IdempotencyKey,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    result = await tenant_bootstrap_service.bootstrap(
-        db,
-        tenant_id=tenant_id,
-        default_model_id=int(payload.default_model_id),
-        admin_password=payload.admin_password.get_secret_value(),
-        idempotency_key=idempotency_key,
-        platform=platform,
+    result = await control.execute(
+        {
+            "default_model_id": int(payload.default_model_id),
+            "admin_password": payload.admin_password.get_secret_value(),
+            "idempotency_key": idempotency_key,
+        },
+        target_tenant_id=tenant_id,
     )
-    request.state.platform_result_summary = {"recordCount": 1}
     return ResponseModel.success(data=PlatformTenantBootstrapOut.from_result(result))
 
 
@@ -228,21 +208,13 @@ def _support_page(page) -> PlatformSupportAuditPage:
 )
 async def list_tenant_operation_logs(
     tenant_id: TenantId,
-    request: Request,
     query: PlatformSupportAuditQuery = Depends(),
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_platform_context),
+    control: PrincipalHttp = Depends(require_principal_control, scope="function"),
 ):
-    page = await tenant_support_service.list_operation_logs(
-        db,
-        tenant_id=tenant_id,
-        current=query.current,
-        size=query.size,
-        platform=platform,
+    page = await control.execute(
+        target_tenant_id=tenant_id, current=query.current, size=query.size
     )
-    data = _support_page(page)
-    request.state.platform_result_summary = {"recordCount": len(data.records)}
-    return ResponseModel.success(data=data)
+    return ResponseModel.success(data=_support_page(page))
 
 
 @control_router.get(
@@ -252,21 +224,13 @@ async def list_tenant_operation_logs(
 )
 async def list_tenant_login_logs(
     tenant_id: TenantId,
-    request: Request,
     query: PlatformSupportAuditQuery = Depends(),
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_platform_context),
+    control: PrincipalHttp = Depends(require_principal_control, scope="function"),
 ):
-    page = await tenant_support_service.list_login_logs(
-        db,
-        tenant_id=tenant_id,
-        current=query.current,
-        size=query.size,
-        platform=platform,
+    page = await control.execute(
+        target_tenant_id=tenant_id, current=query.current, size=query.size
     )
-    data = _support_page(page)
-    request.state.platform_result_summary = {"recordCount": len(data.records)}
-    return ResponseModel.success(data=data)
+    return ResponseModel.success(data=_support_page(page))
 
 
 @control_router.post(
@@ -277,17 +241,9 @@ async def list_tenant_login_logs(
 async def preview_tenant_audit_retention(
     tenant_id: TenantId,
     payload: PlatformRetentionPreviewRequest,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_platform_context),
+    control: PrincipalHttp = Depends(require_principal_control, scope="function"),
 ):
-    result = await tenant_support_service.preview_retention(
-        db,
-        tenant_id=tenant_id,
-        cutoff=payload.cutoff,
-        platform=platform,
-    )
-    request.state.platform_result_summary = {"recordCount": result.affected_count}
+    result = await control.execute(target_tenant_id=tenant_id, cutoff=payload.cutoff)
     return ResponseModel.success(data=PlatformRetentionOut.from_result(result))
 
 
@@ -299,17 +255,12 @@ async def preview_tenant_audit_retention(
 async def purge_tenant_audit_retention(
     tenant_id: TenantId,
     payload: PlatformRetentionPurgeRequest,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_platform_context),
+    control: PrincipalHttp = Depends(require_principal_control, scope="function"),
 ):
-    result = await tenant_support_service.purge_retention(
-        db,
-        tenant_id=tenant_id,
+    result = await control.execute(
+        target_tenant_id=tenant_id,
         cutoff=payload.cutoff,
         expected_operation_count=payload.expected_operation_count,
         expected_login_count=payload.expected_login_count,
-        platform=platform,
     )
-    request.state.platform_result_summary = {"affectedCount": result.affected_count}
     return ResponseModel.success(data=PlatformRetentionOut.from_result(result))

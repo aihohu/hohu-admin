@@ -183,13 +183,12 @@ def _build_excel(rows: list[User], dept_lookup: dict[int, Dept]) -> bytes:
     - ``user_gender``：翻译为未知、男或女
     - create_time：YYYY-MM-DD HH:MM:SS 格式（防 Excel 时区漂移）
     """
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "users"
+    return _build_excel_values(_excel_values(rows, dept_lookup))
 
-    # 表头（中文，便于管理员直接读；导入模板表头是英文，导出可读性优先）
-    ws.append([header for _, header in _EXPORT_COLUMN_ORDER])
 
+def _excel_values(rows, dept_lookup) -> tuple[tuple[str, ...], ...]:
+    """Freeze only the public export whitelist before crossing a worker boundary."""
+    values = []
     for user in rows:
         role_codes = ",".join(
             r.role_code for r in (user.roles or []) if r.status == "1"
@@ -222,7 +221,17 @@ def _build_excel(rows: list[User], dept_lookup: dict[int, Dept]) -> bytes:
             else:
                 value = getattr(user, field, "")
                 row_values.append("" if value is None else str(value))
-        ws.append(row_values)
+        values.append(tuple(row_values))
+    return tuple(values)
+
+
+def _build_excel_values(values: tuple[tuple[str, ...], ...]) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "users"
+    ws.append([header for _, header in _EXPORT_COLUMN_ORDER])
+    for row in values:
+        ws.append(row)
 
     buffer = io.BytesIO()
     wb.save(buffer)

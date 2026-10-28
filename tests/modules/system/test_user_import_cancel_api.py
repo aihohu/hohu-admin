@@ -1,4 +1,4 @@
-"""``POST /system/user/import/{batch_id}/cancel`` HTTP 契约测试。
+"""``POST /user/import/{batch_id}/cancel`` HTTP 契约测试。
 
 验证导入批次取消行为。
 
@@ -23,8 +23,6 @@ from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
 
 from app.core.exceptions import (
     AuthorizationException,
@@ -32,10 +30,14 @@ from app.core.exceptions import (
     UnprocessableEntityException,
 )
 from app.core.security import create_access_token
-from app.main import app
 from app.modules.system.constants import ImportBatchStatus
-from app.modules.system.models.user import User
-from app.modules.system.models.user_transfer import UserImportBatch
+from app.modules.system.schemas.user_transfer import UserImportBatchCancelResponse
+from tests.modules.system.test_authorization_import_candidate import (
+    import_sessions as import_sessions,
+)
+from tests.modules.system.test_authorization_transfer_http import (
+    transfer_http as transfer_http,
+)
 
 #: service 模块路径（patch target）
 _API_MODULE = "app.modules.system.api.user"
@@ -45,59 +47,27 @@ _API_MODULE = "app.modules.system.api.user"
 
 
 @pytest.fixture
-async def client(db_session):  # noqa: ARG001 (db_session resets redis)
-    """ASGI test client（对齐 test_user_import_batch_logs_api.py 模式）。"""
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        yield ac
+async def client(transfer_http):
+    client, _ = transfer_http
+    client.headers.pop("Authorization")
+    return client
 
 
 @pytest.fixture
-async def admin_token(db_session) -> str:
-    """admin 用户 JWT（admin 绕过 system:user:import 检查 + is_super_admin）。"""
-    user = (
-        await db_session.execute(
-            select(User).where(User.tenant_id == 0, User.user_name == "admin")
-        )
-    ).scalar_one()
+async def admin_token():
     return create_access_token(
-        subject=str(user.user_id),
-        tenant_id=user.tenant_id,
-        tenant_version=1,
-        user_version=user.auth_version,
+        subject="101", tenant_id=0, tenant_version=1, user_version=1
     )
 
 
 # ========== Helpers ==========
 
 
-def _make_batch_row(
-    *,
-    batch_id: str = "batch-abc-001",
-    status: ImportBatchStatus = ImportBatchStatus.PREVIEW_DONE,
-    operator_id: int = 1,
-    preview_token: str = "preview-token-abc",
-    file_storage_key: str = "import-preview/batch-abc-001.xlsx",
-    reason: str = "2026年8月 HR 入职名单同步",
-    created_at: datetime | None = None,
-    finished_at: datetime | None = None,
-) -> UserImportBatch:
-    """构造 UserImportBatch ORM 替身（patch 返回值）。"""
-    return UserImportBatch(
-        batch_id=batch_id,
-        operator_id=operator_id,
-        preview_token=preview_token,
-        file_storage_key=file_storage_key,
-        filename="users.xlsx",
-        file_sha256="sha256-placeholder",
-        records_hash="records-hash-placeholder",
-        total_rows=100,
-        on_conflict="skip",
-        reason=reason,
-        status=status,
-        created_at=created_at or datetime(2026, 8, 1, 14, 0, 0),
-        finished_at=finished_at,
+def _make_batch_row(*, status=ImportBatchStatus.PREVIEW_DONE, finished_at=None):
+    return UserImportBatchCancelResponse(
+        batch_id="batch-abc-001",
+        status=status.value,
+        cancelled_at=finished_at or datetime(2026, 8, 1, 14, 0, 0),
     )
 
 
@@ -109,14 +79,14 @@ class TestCancelBatchAuth:
 
     async def test_no_token_returns_401(self, client):
         response = await client.post(
-            "/system/user/import/batch-abc-001/cancel",
+            "/user/import/batch-abc-001/cancel",
             json={"reason": "用户主动取消"},
         )
         assert response.status_code == 401
 
     async def test_invalid_token_returns_401(self, client):
         response = await client.post(
-            "/system/user/import/batch-abc-001/cancel",
+            "/user/import/batch-abc-001/cancel",
             json={"reason": "用户主动取消"},
             headers={"Authorization": "Bearer invalid.jwt.token"},
         )
@@ -135,7 +105,7 @@ class TestCancelReasonValidation:
     async def test_reason_required_422(self, client, admin_token):
         """缺 reason 字段 → 422。"""
         response = await client.post(
-            "/system/user/import/batch-abc-001/cancel",
+            "/user/import/batch-abc-001/cancel",
             json={},
             headers={"Authorization": f"Bearer {admin_token}"},
         )
@@ -144,7 +114,7 @@ class TestCancelReasonValidation:
     async def test_reason_empty_string_422(self, client, admin_token):
         """reason="" → 422（min_length=1）。"""
         response = await client.post(
-            "/system/user/import/batch-abc-001/cancel",
+            "/user/import/batch-abc-001/cancel",
             json={"reason": ""},
             headers={"Authorization": f"Bearer {admin_token}"},
         )
@@ -153,7 +123,7 @@ class TestCancelReasonValidation:
     async def test_reason_whitespace_only_422(self, client, admin_token):
         """reason 全空白时 validator 返回 422。"""
         response = await client.post(
-            "/system/user/import/batch-abc-001/cancel",
+            "/user/import/batch-abc-001/cancel",
             json={"reason": "   "},
             headers={"Authorization": f"Bearer {admin_token}"},
         )
@@ -162,7 +132,7 @@ class TestCancelReasonValidation:
     async def test_reason_too_long_422(self, client, admin_token):
         """reason > 256 字符 → 422（max_length=256）。"""
         response = await client.post(
-            "/system/user/import/batch-abc-001/cancel",
+            "/user/import/batch-abc-001/cancel",
             json={"reason": "x" * 257},
             headers={"Authorization": f"Bearer {admin_token}"},
         )
@@ -186,11 +156,11 @@ class TestCancelPreviewDoneBatch:
             finished_at=cancelled_at,
         )
         with patch(
-            f"{_API_MODULE}.cancel_batch",
+            "app.db.authorization_transfer_owner.TransferOwner.cancel",
             new=AsyncMock(return_value=batch),
         ) as mock_cancel:
             response = await client.post(
-                "/system/user/import/batch-abc-001/cancel",
+                "/user/import/batch-abc-001/cancel",
                 json={"reason": "用户主动取消"},
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
@@ -205,18 +175,18 @@ class TestCancelPreviewDoneBatch:
         # service 调用契约：传 batch_id / operator / reason
         mock_cancel.assert_awaited_once()
         call = mock_cancel.call_args
-        assert call.args[1] == "batch-abc-001"  # batch_id 位置参数
+        assert call.kwargs["identifier"] == "batch-abc-001"
         assert call.kwargs.get("reason") == "用户主动取消"
 
     async def test_cancel_passes_reason_to_service(self, client, admin_token):
         """reason 应透传到 service 进入审计链路。"""
         batch = _make_batch_row(status=ImportBatchStatus.CANCELLED)
         with patch(
-            f"{_API_MODULE}.cancel_batch",
+            "app.db.authorization_transfer_owner.TransferOwner.cancel",
             new=AsyncMock(return_value=batch),
         ) as mock_cancel:
             response = await client.post(
-                "/system/user/import/batch-abc-001/cancel",
+                "/user/import/batch-abc-001/cancel",
                 json={"reason": "上传错文件了"},
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
@@ -247,11 +217,11 @@ class TestCancelRunningBatch:
             finished_at=datetime(2026, 8, 1, 14, 1, 30),
         )
         with patch(
-            f"{_API_MODULE}.cancel_batch",
+            "app.db.authorization_transfer_owner.TransferOwner.cancel",
             new=AsyncMock(return_value=running_batch),
         ):
             response = await client.post(
-                "/system/user/import/batch-abc-001/cancel",
+                "/user/import/batch-abc-001/cancel",
                 json={"reason": "发现数据有问题，停止后续导入"},
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
@@ -295,7 +265,7 @@ class TestCancelTerminalBatchRejected:
     ):
         """CREATED + 5 个终态 → 422 AI_IMPORT_BATCH_NOT_CANCELLABLE。"""
         with patch(
-            f"{_API_MODULE}.cancel_batch",
+            "app.db.authorization_transfer_owner.TransferOwner.cancel",
             new=AsyncMock(
                 side_effect=UnprocessableEntityException(
                     "批次状态不可取消",
@@ -304,7 +274,7 @@ class TestCancelTerminalBatchRejected:
             ),
         ):
             response = await client.post(
-                "/system/user/import/batch-abc-001/cancel",
+                "/user/import/batch-abc-001/cancel",
                 json={"reason": "用户主动取消"},
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
@@ -326,7 +296,7 @@ class TestCancelBatchNotFound:
 
     async def test_cancel_nonexistent_batch_returns_404(self, client, admin_token):
         with patch(
-            f"{_API_MODULE}.cancel_batch",
+            "app.db.authorization_transfer_owner.TransferOwner.cancel",
             new=AsyncMock(
                 side_effect=NotFoundException(
                     "用户导入批次",
@@ -335,7 +305,7 @@ class TestCancelBatchNotFound:
             ),
         ):
             response = await client.post(
-                "/system/user/import/nonexistent-batch/cancel",
+                "/user/import/nonexistent-batch/cancel",
                 json={"reason": "用户主动取消"},
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
@@ -359,11 +329,11 @@ class TestCancelByNonOperatorForbidden:
     async def test_cancel_by_non_operator_returns_403(self, client, admin_token):
         """非 operator 非超管 → 403。"""
         with patch(
-            f"{_API_MODULE}.cancel_batch",
+            "app.db.authorization_transfer_owner.TransferOwner.cancel",
             new=AsyncMock(side_effect=AuthorizationException("无权取消此批次")),
         ):
             response = await client.post(
-                "/system/user/import/batch-abc-001/cancel",
+                "/user/import/batch-abc-001/cancel",
                 json={"reason": "用户主动取消"},
                 headers={"Authorization": f"Bearer {admin_token}"},
             )

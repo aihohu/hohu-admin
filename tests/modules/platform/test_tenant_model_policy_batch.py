@@ -10,14 +10,12 @@ from sqlalchemy import delete, select
 from tenant_helpers import create_test_tenant
 
 from app.core.exceptions import AuthorizationException, BusinessRuleException
+from app.db.authorization_control_http import require_control_write
 from app.db.session import AsyncSessionLocal, get_db
 from app.main import app
 from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.model_policy import TenantAiModelPolicy
 from app.modules.ai.models.provider import AiProvider
-from app.modules.ai.service.tenant_model_policy_admin_service import (
-    TenantModelCatalog,
-)
 from app.modules.ai.service.tenant_model_policy_admin_service import (
     tenant_model_policy_admin_service as service,
 )
@@ -27,7 +25,6 @@ from app.modules.platform.schemas import (
     PlatformTenantModelCatalogOut,
     PlatformTenantModelPoliciesPut,
 )
-from app.modules.platform.system_agent_auth import require_system_agent_context
 from tests.committed_database import committed_test_database  # noqa: F401
 from tests.modules.platform.test_platform_ai_control import (
     _platform,
@@ -279,13 +276,14 @@ async def test_concurrent_batch_saves_allow_only_one_snapshot_writer():
             await cleanup.commit()
 
 
-async def test_batch_http_uses_transaction_and_string_id_response(client, monkeypatch):
+async def test_batch_http_delegates_completion_to_control_owner(client):
     db = AsyncMock()
-    ctx = _platform(PLATFORM_AI_WRITE, tenant_id=0)
-    business = AsyncMock(return_value=TenantModelCatalog([], "a" * 64))
-    monkeypatch.setattr(service, "put_many", business)
+    business = AsyncMock(
+        return_value=PlatformTenantModelCatalogOut(models=[], revision="a" * 64)
+    )
+    control = SimpleNamespace(execute=business)
     app.dependency_overrides[get_db] = lambda: db
-    app.dependency_overrides[require_system_agent_context] = lambda: ctx
+    app.dependency_overrides[require_control_write] = lambda: control
     try:
         response = await client.put(
             "/platform/tenants/0/ai/model-policies",
@@ -293,11 +291,11 @@ async def test_batch_http_uses_transaction_and_string_id_response(client, monkey
         )
     finally:
         app.dependency_overrides.pop(get_db, None)
-        app.dependency_overrides.pop(require_system_agent_context, None)
+        app.dependency_overrides.pop(require_control_write, None)
     assert response.status_code == 200
     assert response.json()["data"] == {"models": [], "revision": "a" * 64}
-    db.commit.assert_awaited_once()
-    assert business.await_args.kwargs["tenant_id"] == 0
+    db.commit.assert_not_awaited()
+    assert business.await_args.kwargs["target_tenant_id"] == 0
 
 
 @pytest.mark.parametrize("method,path", [("GET", "/catalog"), ("PUT", "")])

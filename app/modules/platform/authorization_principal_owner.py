@@ -23,7 +23,10 @@ from app.db.authorization_owner import (
 )
 from app.db.authorization_plan_session import AuthorizationPlanSession, _order_error
 from app.db.authorization_system_owner import require_candidate_session
-from app.modules.platform.authorization_principal_audit import issue_principal_audit
+from app.modules.platform.authorization_principal_audit import (
+    consume_principal_audit,
+    issue_principal_audit,
+)
 from app.modules.platform.authorization_principal_candidate import (
     PrincipalIdentity,
     assert_principal,
@@ -115,8 +118,32 @@ class PrincipalCandidateOwner:
         method,
         operation,
         preparation=None,
+        event_type="authorized",
+        denial_code=None,
+        status_code=None,
     ):
         require_candidate_session(db)
+        if (
+            event_type not in {"authorized", "denied"}
+            or (
+                event_type == "authorized"
+                and (denial_code is not None or status_code is not None)
+            )
+            or (
+                event_type == "denied"
+                and (
+                    preparation is not None
+                    or status_code not in {400, 403}
+                    or denial_code
+                    not in {
+                        "PLATFORM_AUDIT_CONTEXT_SENSITIVE",
+                        "PLATFORM_AUDIT_CONTEXT_REQUIRED",
+                        "PLATFORM_PERMISSION_DENIED",
+                    }
+                )
+            )
+        ):
+            raise _order_error()
         async with asyncio.timeout(3):
             try:
                 with bounded_authorization_reads(db):
@@ -136,16 +163,26 @@ class PrincipalCandidateOwner:
                                 ),
                             )
                         else:
-                            snapshot = await read_principal(db, identity, permission)
+                            snapshot = await read_principal(
+                                db,
+                                identity,
+                                permission if event_type == "authorized" else None,
+                            )
                             name, keys = snapshot.principal_name, snapshot.keys
                         audit = issue_principal_audit(
                             identity=identity,
                             principal_name=name,
                             operation=operation,
                             permission=permission,
-                            reason=reason,
-                            ticket_id=ticket_id,
-                            correlation_id=correlation_id,
+                            reason=reason
+                            if event_type == "authorized"
+                            else reason or "[not supplied]",
+                            ticket_id=ticket_id
+                            if event_type == "authorized"
+                            else ticket_id or "[not supplied]",
+                            correlation_id=correlation_id
+                            if event_type == "authorized"
+                            else correlation_id or "[not supplied]",
                             target_tenant_id=target_tenant_id,
                             path=path,
                             method=method,
@@ -162,14 +199,24 @@ class PrincipalCandidateOwner:
                             await check_password_preparation(db, preparation)
                         else:
                             await assert_principal(db, snapshot)
-                        await tx.append_audit(intent_key, audit.values())
+                        values = audit.values()
+                        if event_type == "denied":
+                            values.update(
+                                event_type="denied",
+                                status_code=status_code,
+                                denial_code=denial_code,
+                                reason=reason,
+                                ticket_id=ticket_id,
+                                correlation_id=correlation_id,
+                            )
+                        await tx.append_audit(intent_key, values)
             except BaseException as error:
                 await _rollback_preserving(db, error)
                 raise
             await commit_authorization_session(db)
         return audit
 
-    async def _failure(self, factory, audit, error):
+    async def complete_failure(self, factory, audit, error):
         async with asyncio.timeout(3):
             async with factory() as db:
                 try:
@@ -232,6 +279,7 @@ class PrincipalCandidateOwner:
                 operation="principal.permissions",
                 preparation=preparation,
             )
+        consume_principal_audit(audit)
         try:
             require_maintenance(fence, "principal.permissions")
             with bounded_authorization_reads(db):
@@ -268,7 +316,7 @@ class PrincipalCandidateOwner:
         except BaseException as error:
             await _rollback_preserving(db, error)
             try:
-                await self._failure(factory, audit, error)
+                await self.complete_failure(factory, audit, error)
             except BaseException:
                 if isinstance(error, asyncio.CancelledError):
                     raise error

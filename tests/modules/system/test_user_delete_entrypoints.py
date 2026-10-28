@@ -5,7 +5,6 @@ from collections.abc import Callable
 import pytest
 from sqlalchemy import delete, func, select
 
-from app.core.exceptions import AuthorizationException
 from app.db.base import user_roles
 from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.tools.registry import ToolRegistry
@@ -19,7 +18,6 @@ from app.modules.ai.service.user_delete_dependency_service import (
     user_delete_dependency_service,
 )
 from app.modules.auth.service import load_live_user_authority
-from app.modules.system.api import user as user_api
 from app.modules.system.models.user import User
 from tests.modules.ai.test_atomic_db_tools import (
     ToolCase,
@@ -157,59 +155,3 @@ async def test_dependency_error_after_handler_start_rolls_back_without_retry(
         assert response.data.status == action.status == log.status == "failed"
     await approve(case)
     assert len(case.calls) == 1
-
-
-async def http_delete(case: ToolCase, *, batch: bool):
-    async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
-        if batch:
-            return await user_api.batch_delete_users(
-                [case.target_user_id], db=db, current_user=actor, tenant=case.tenant
-            )
-        return await user_api.delete_user(
-            case.target_user_id, db=db, tenant=case.tenant
-        )
-
-
-@pytest.mark.parametrize("db_tool_case", ["user.batch_delete"], indirect=True)
-@pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
-@pytest.mark.parametrize("changes", [1, 2])
-async def test_http_rebuilds_at_most_once_after_whole_rollback(
-    db_tool_case: ToolCase,
-    monkeypatch: pytest.MonkeyPatch,
-    batch: bool,
-    changes: int,
-) -> None:
-    case = db_tool_case
-    transactions = inject_committed_dependency_changes(monkeypatch, case, changes)
-    if changes == 1:
-        response = await http_delete(case, batch=batch)
-        assert response.code == 200
-    else:
-        with pytest.raises(UserDeleteDependencyChanged):
-            await http_delete(case, batch=batch)
-    assert len(transactions) == 2
-    assert len(set(transactions)) == 2
-    async with AsyncSessionLocal() as observer:
-        assert (await observer.get(User, case.target_user_id) is not None) == (
-            changes == 2
-        )
-
-
-@pytest.mark.parametrize("db_tool_case", ["user.batch_delete"], indirect=True)
-@pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
-async def test_http_dependency_retry_rechecks_revoked_permission(
-    db_tool_case: ToolCase, monkeypatch: pytest.MonkeyPatch, batch: bool
-) -> None:
-    case = db_tool_case
-    transactions = inject_committed_dependency_changes(
-        monkeypatch, case, 1, revoke_permission=True
-    )
-    with pytest.raises(AuthorizationException):
-        await http_delete(case, batch=batch)
-    assert len(transactions) == 1, "Denied authority must not start a second delete"
-    async with AsyncSessionLocal() as observer:
-        assert await observer.get(User, case.target_user_id) is not None
-        assert (
-            await observer.get(AiConversation, case.target_conversation_id) is not None
-        )

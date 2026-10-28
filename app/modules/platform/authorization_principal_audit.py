@@ -2,6 +2,7 @@
 
 import time
 from dataclasses import dataclass, field
+from weakref import WeakKeyDictionary
 
 from app.core.authorization_plan import NewResource, ResourceKey, ResourceKind
 from app.core.id_generator import next_id
@@ -9,9 +10,10 @@ from app.db.authorization_plan_session import _order_error
 from app.modules.platform.authorization_principal_candidate import PrincipalIdentity
 
 _ISSUED = object()
+_CLAIMS = WeakKeyDictionary()
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True, eq=False)
 class PrincipalAudit:
     identity: PrincipalIdentity
     principal_name: str
@@ -31,6 +33,7 @@ class PrincipalAudit:
     def __post_init__(self):
         if self._issued is not _ISSUED or type(self.identity) is not PrincipalIdentity:
             raise _order_error()
+        _CLAIMS[self] = False
 
     @property
     def existing(self):
@@ -101,6 +104,18 @@ class PrincipalAudit:
                 completed=True, status_code=status_code, result_summary=result_summary
             ),
         )
+
+
+def consume_principal_audit(audit):
+    if type(audit) is not PrincipalAudit or _CLAIMS.get(audit) is not False:
+        raise _order_error()
+    _CLAIMS[audit] = True
+
+
+def principal_audit_consumed(audit):
+    if type(audit) is not PrincipalAudit or audit not in _CLAIMS:
+        raise _order_error()
+    return _CLAIMS[audit]
 
 
 def issue_principal_audit(

@@ -12,6 +12,7 @@ from app.core.auth import (
     require_ai_chat_use,
 )
 from app.core.exceptions import AuthorizationException
+from app.db.authorization_control_http import require_control_write
 from app.modules.ai.api.agent import router as agent_router
 from app.modules.ai.api.chat import router as chat_router
 from app.modules.ai.api.confirm import router as confirm_router
@@ -127,9 +128,9 @@ def test_provider_model_management_endpoint_requires_system_role_context() -> No
 
 def test_saved_provider_test_endpoint_requires_system_role_context() -> None:
     route = _route(platform_ai_router, "/ai/providers/{provider_id}/test", "POST")
-    assert require_system_agent_context in _dependency_calls(route)
+    assert require_control_write in _dependency_calls(route)
     draft_route = _route(platform_ai_router, "/ai/providers/test", "POST")
-    assert require_system_agent_context in _dependency_calls(draft_route)
+    assert require_control_write in _dependency_calls(draft_route)
     assert not any(
         isinstance(candidate, APIRoute)
         and candidate.path == "/test-model"

@@ -25,6 +25,7 @@ async def test_exact_builtin_functions_are_safe_reads(plan_sessions):
             await tx.lock(LockPlan())
             assert await db.scalar(select(func.pg_catalog.lower("HELLO"))) == "hello"
             assert await db.scalar(select(func.pg_catalog.concat("a", "b"))) == "ab"
+            assert await db.scalar(select(func.pg_catalog.count(User.user_id))) == 2
 
 
 @pytest.mark.parametrize(
@@ -33,6 +34,10 @@ async def test_exact_builtin_functions_are_safe_reads(plan_sessions):
         select(func.lower("HELLO")),
         select(func.pg_catalog.pg_advisory_xact_lock(1)),
         select(func.public.lower("HELLO")),
+        select(func.count(User.user_id)),
+        select(func.public.count(User.user_id)),
+        select(func.pg_catalog.count(func.pg_catalog.pg_advisory_xact_lock(1))),
+        select(func.pg_catalog.count()),
     ],
 )
 async def test_unknown_or_search_path_functions_still_rejected(

@@ -8,7 +8,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import String, event
+from sqlalchemy import Integer, String, event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.sql import Select, visitors
@@ -47,13 +47,26 @@ def _known_read(statement: Any) -> bool:
         if isinstance(node, FunctionElement) and not (
             type(node) is Function
             and node.packagenames == ("pg_catalog",)
-            and node.name in {"lower", "concat"}
             and (
-                len(node.clauses) == 1
-                if node.name == "lower"
-                else 1 <= len(node.clauses) <= 8
+                (
+                    node.name in {"lower", "concat"}
+                    and (
+                        len(node.clauses) == 1
+                        if node.name == "lower"
+                        else 1 <= len(node.clauses) <= 8
+                    )
+                    and all(
+                        isinstance(argument.type, String) for argument in node.clauses
+                    )
+                )
+                or (
+                    node.name == "count"
+                    and len(node.clauses) == 1
+                    and all(
+                        isinstance(argument.type, Integer) for argument in node.clauses
+                    )
+                )
             )
-            and all(isinstance(argument.type, String) for argument in node.clauses)
         ):
             return False
         if isinstance(node, ColumnClause) and node.is_literal:

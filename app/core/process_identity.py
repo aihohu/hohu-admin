@@ -2,6 +2,7 @@
 
 import ctypes
 import os
+import select
 import signal
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -49,6 +50,21 @@ def linux_signal(descriptor, sig):
     ):
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error))
+
+
+def linux_exited(pid):
+    try:
+        with linux_process(pid) as descriptor:
+            poll = select.poll()
+            poll.register(descriptor, select.POLLIN)
+            events = poll.poll(0)
+            if not events:
+                return False
+            if events[0][1] & (select.POLLIN | select.POLLHUP):
+                return True
+            raise _required()
+    except ProcessLookupError:
+        return True
 
 
 @contextmanager
@@ -100,12 +116,16 @@ class ProcessIdentity:
             fields = (
                 Path("/proc", str(pid), "stat").read_text().rpartition(")")[2].split()
             )
-            if fields[0] == "Z":
+            # A zombie leader can still have running threads. Only a readable
+            # process pidfd proves the entire thread group has terminated.
+            if fields[0] == "Z" and linux_exited(pid):
                 return None
             boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
             namespace = Path("/proc", str(pid), "ns/pid").stat().st_ino
             return cls(pid, "linux:" + boot + ":" + fields[19] + ":" + str(namespace))
         except FileNotFoundError:
-            return None
+            if linux_exited(pid):
+                return None
+            raise _required() from None
         except (OSError, IndexError):
             raise _required() from None

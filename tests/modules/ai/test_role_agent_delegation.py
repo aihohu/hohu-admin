@@ -4,8 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from httpx import AsyncClient
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import set_committed_value
@@ -20,16 +19,14 @@ from app.constants import (
 )
 from app.core.exceptions import AuthorizationException, BusinessRuleException
 from app.core.id_generator import next_id
-from app.db.session import AsyncSessionLocal, get_db
-from app.main import app
+from app.core.security import create_access_token
+from app.modules.ai.api import role_agent as role_agent_api
 from app.modules.ai.api.role_agent import put_role_agent_binding
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
 from app.modules.ai.schemas.role_agent import RoleAgentBindReq
 from app.modules.ai.service.role_agent import role_agent_service
-from app.modules.auth.service import get_current_tenant_context, get_current_user
 from app.modules.system.models.menu import Menu
-from app.modules.system.models.operation_log import SysOperationLog
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from app.modules.system.service.authorization_lock import authorization_lock_service
@@ -40,6 +37,15 @@ from app.modules.system.service.role_management_service import role_management_s
 from app.modules.system.service.tenant_association_writer import (
     replace_role_menus,
     replace_user_roles,
+)
+from tests.modules.system.test_authorization_system_candidate import (
+    system_sessions as system_sessions,
+)
+from tests.modules.system.test_authorization_system_http import (
+    http_system as http_system,
+)
+from tests.modules.system.test_authorization_transaction_barriers import (
+    plan_sessions as plan_sessions,
 )
 
 ROLE_AGENT_PERMISSION = "system:role:ai-agent-auth"
@@ -838,8 +844,8 @@ async def test_role_agent_api_passes_authenticated_actor_to_policy() -> None:
     request = RoleAgentBindReq(agent_ids=[])
 
     with patch.object(
-        role_agent_service,
-        "put_binding",
+        role_agent_api,
+        "control_write",
         AsyncMock(return_value=None),
     ) as put_binding:
         response = await put_role_agent_binding(
@@ -853,60 +859,38 @@ async def test_role_agent_api_passes_authenticated_actor_to_policy() -> None:
     assert response.code == 200
     put_binding.assert_awaited_once_with(
         db,
-        852,
-        request,
-        actor_user_id=741,
+        current_user,
+        operation="role.agents",
+        payload=request,
+        target_id=852,
         tenant=_tenant(741),
     )
-    db.commit.assert_awaited_once_with()
+    db.commit.assert_not_awaited()
 
 
 async def test_put_endpoint_applies_ordinary_admin_delegation_policy(
-    client: AsyncClient,
-    db_session: AsyncSession,
+    http_system,
 ) -> None:
-    actor, _actor_role, target_role, delegated, blocked = await _seed_role_agent_case(
-        db_session
+    client, plain = http_system
+    client._transport.app.include_router(role_agent_api.router, prefix="/ai/role-agent")
+    async with plain() as setup:
+        (
+            actor,
+            _actor_role,
+            target_role,
+            delegated,
+            blocked,
+        ) = await _seed_role_agent_case(setup)
+        await setup.commit()
+    token = create_access_token(
+        subject=str(actor.user_id), tenant_id=0, tenant_version=1, user_version=1
     )
-    audit_path = f"/ai/role-agent/{target_role.role_id}"
-
-    async def _override_db():
-        yield db_session
-
-    async def _override_current_user():
-        return actor
-
-    async def _override_tenant():
-        return _tenant(actor.user_id)
-
-    app.dependency_overrides[get_db] = _override_db
-    app.dependency_overrides[get_current_user] = _override_current_user
-    app.dependency_overrides[get_current_tenant_context] = _override_tenant
-    try:
-        allowed = await client.put(
-            audit_path,
-            json={"agentIds": [str(delegated.agent_id)]},
-        )
-        assert allowed.status_code == 200
-
-        denied = await client.put(
-            audit_path,
-            json={"agentIds": [str(blocked.agent_id)]},
-        )
-        assert denied.status_code == 403
-        assert denied.json()["errorCode"] == "AI_ROLE_AGENT_AUTHORITY_EXCEEDED"
-        assert await _active_agent_ids(db_session, target_role.role_id) == [
-            delegated.agent_id
-        ]
-    finally:
-        app.dependency_overrides.pop(get_db, None)
-        app.dependency_overrides.pop(get_current_user, None)
-        app.dependency_overrides.pop(get_current_tenant_context, None)
-        async with AsyncSessionLocal() as cleanup:
-            await cleanup.execute(
-                delete(SysOperationLog).where(
-                    SysOperationLog.tenant_id == 0,
-                    SysOperationLog.path == audit_path,
-                )
-            )
-            await cleanup.commit()
+    client.headers["Authorization"] = f"Bearer {token}"
+    path = f"/ai/role-agent/{target_role.role_id}"
+    allowed = await client.put(path, json={"agentIds": [str(delegated.agent_id)]})
+    assert allowed.status_code == 200, allowed.text
+    denied = await client.put(path, json={"agentIds": [str(blocked.agent_id)]})
+    assert denied.status_code == 403, denied.text
+    assert denied.json()["errorCode"] == "AI_ROLE_AGENT_AUTHORITY_EXCEEDED"
+    async with plain() as db:
+        assert await _active_agent_ids(db, target_role.role_id) == [delegated.agent_id]

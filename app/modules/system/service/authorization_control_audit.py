@@ -4,6 +4,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
+from weakref import WeakKeyDictionary
 
 from app.core.authorization_plan import NewResource, ResourceKey, ResourceKind
 from app.core.id_generator import next_id
@@ -11,9 +12,10 @@ from app.core.tenant import TenantContext
 from app.db.authorization_plan_session import _order_error
 
 _ISSUED = object()
+_CLAIMS = WeakKeyDictionary()
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True, eq=False)
 class ControlAudit:
     tenant: TenantContext
     actor_user_version: int
@@ -34,6 +36,7 @@ class ControlAudit:
     def __post_init__(self):
         if self._issued is not _ISSUED:
             raise _order_error()
+        _CLAIMS[self] = False
 
     @property
     def existing(self):
@@ -166,6 +169,18 @@ class ControlAudit:
                 changes=changes,
             ),
         )
+
+
+def consume_control_audit(audit):
+    if type(audit) is not ControlAudit or _CLAIMS.get(audit) is not False:
+        raise _order_error()
+    _CLAIMS[audit] = True
+
+
+def control_audit_consumed(audit):
+    if type(audit) is not ControlAudit or audit not in _CLAIMS:
+        raise _order_error()
+    return _CLAIMS[audit]
 
 
 def issue_control_audit(

@@ -1,7 +1,7 @@
 """Explicit candidate composition: external proof, protected DB, ACK, effects.
 
-These Python entries are not routed by the running application. A caller must
-provide a fresh AuthorizationPlanSession and may not retry an unknown commit.
+HTTP adapters call these through the fixed runtime. A caller must provide a
+fresh AuthorizationPlanSession and may not retry an unknown commit.
 """
 
 import asyncio
@@ -11,7 +11,11 @@ from jose import JWTError
 from app.core.authorization_io import hash_password, smtp_worker, verify_password
 from app.core.authorization_plan import LockMode, TenantLock, TransactionBudget
 from app.core.config import settings
-from app.core.exceptions import AuthenticationException, BusinessException
+from app.core.exceptions import (
+    AuthenticationException,
+    AuthorizationException,
+    BusinessException,
+)
 from app.core.id_generator import next_id
 from app.core.security import (
     create_access_token,
@@ -197,6 +201,8 @@ class AuthCandidateOwner:
         )
         if not matched or state.account is None:
             raise AuthenticationException(error_code="INVALID_CREDENTIALS")
+        if state.account.status != "1":
+            raise AuthorizationException("账号已被禁用", error_code="ACCOUNT_DISABLED")
         state.identity()
         current = await self._protected(db, state, "login")
         return self._tokens(current.identity())

@@ -63,6 +63,7 @@ from app.modules.system.service.authorization_system_candidate import (
 from app.modules.system.service.authorization_transaction_service import (
     authorization_transactions,
 )
+from app.modules.system.service.file_policy_service import file_policy_service
 from app.modules.system.service.grant_authority import grant_authority_service
 from app.modules.system.service.user_import_parser import _validate_row
 from app.modules.system.service.user_import_service import (
@@ -138,6 +139,7 @@ def _recoverable(exc):
 class _ImportInput:
     values: tuple
     source_proof: tuple | None = None
+    upload_size: int = 0
 
 
 @dataclass(slots=True, repr=False)
@@ -365,7 +367,8 @@ class ImportAuthorizationCandidate:
                 password_error,
                 setting,
                 password_hash,
-            )
+            ),
+            upload_size=len(file_bytes),
         )
 
     async def plan(self, db, tx, command):
@@ -393,6 +396,8 @@ class ImportAuthorizationCandidate:
         tid = tenant.tenant_id
         tx.assert_planning(tid, exclusive=True)
         await system._identity(db, tenant, actor_user_version)
+        policy = await file_policy_service.resolve(db, "import", tenant=tenant)
+        file_policy_service.validate_import(policy, filename, command.upload_size)
         authority = await grant_authority_service.build(
             db, tenant.actor_user_id, tenant=tenant
         )
@@ -530,6 +535,12 @@ class ImportAuthorizationCandidate:
                 raise password_error
             if password_hash is None:
                 raise _stale()
+        if artifact_execution.operation_id == "rest-import":
+            artifact_execution = ArtifactExecution(
+                tid,
+                "rest-import:" + batch["batch_id"],
+                artifact_execution.execution_owner,
+            )
         async with tx.aggregate(tid):
             return await self._apply(
                 tx,

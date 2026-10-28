@@ -69,6 +69,16 @@ _NAMESPACE_REGISTRY: dict[str, tuple[str, str, tuple[str, ...]]] = {
         "tenant",
         ("tenant_id",),
     ),
+    "db/authorization_transfer_owner.py": (
+        "cache",
+        "tenant",
+        ("tenant_id",),
+    ),
+    "db/authorization_transfer_http.py": (
+        "storage",
+        "tenant",
+        ("tenant_id", "ArtifactExecution"),
+    ),
     "db/authorization_runtime.py": (
         "storage",
         "infrastructure",
@@ -179,11 +189,6 @@ _NAMESPACE_REGISTRY: dict[str, tuple[str, str, tuple[str, ...]]] = {
         ("require_marketplace_capability",),
     ),
     "modules/system/service/config_service.py": (
-        "cache",
-        "tenant",
-        ("tenant_id",),
-    ),
-    "modules/system/api/config.py": (
         "cache",
         "tenant",
         ("tenant_id",),

@@ -1,17 +1,19 @@
 """Fixed transfer plans; local publication follows every unique/row wait."""
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, timedelta
 from hashlib import sha256
 from uuid import uuid4
 
 from sqlalchemy import select
 
+from app.core.authorization_io import file_transform_worker
 from app.core.authorization_plan import LockPlan, NewResource, ResourceKey
 from app.core.authorization_plan import ResourceKind as K
 from app.core.exceptions import AuthorizationException, BusinessRuleException
-from app.core.file_storage import ArtifactExecution
+from app.core.file_storage import ArtifactExecution, is_owned_artifact
 from app.core.id_generator import next_id
+from app.core.rbac import is_super_admin
 from app.db.authorization_plan_session import _order_error
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.service.authorization_context_candidate import ai_context_candidate
@@ -40,6 +42,7 @@ from app.modules.system.service.authorization_control_identity import (
     read_identity,
 )
 from app.modules.system.service.authorization_resource_catalog import resource_spec
+from app.modules.system.service.file_policy_service import file_policy_service
 from app.modules.system.service.user_import_parser import (
     import_file_has_column,
     parse_import_excel,
@@ -74,16 +77,117 @@ class _TransferWork:
     used: bool = False
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
 class TransferResult:
     resource_id: str
     count: int
     storage_key: str
     preview_token: str | None = None
     summary: object = None
+    preview_data: dict | None = None
+    data: bytes | None = None
+    filename: str | None = None
 
 
 class TransferCandidate:
+    async def rest_download(
+        self, db, tx, *, tenant, actor_user_version, identifier, storage
+    ):
+        """Administrative download, including existing private legacy exports."""
+        tx.assert_session(db)
+        if type(identifier) is not str or not 1 <= len(identifier) <= 64:
+            raise exports.NotFoundException(
+                "用户导出任务", error_code="AI_EXPORT_TASK_NOT_FOUND"
+            )
+        identity = await read_identity(
+            db,
+            tenant=tenant,
+            actor_user_version=actor_user_version,
+            permissions=("system:user:export",),
+        )
+        user = await load_live_user_authority(db, tenant=tenant)
+        cross_owner = is_super_admin(user)
+        task = await exports.get_export_task(
+            db,
+            identifier,
+            operator_id=tenant.actor_user_id,
+            allow_cross_owner=cross_owner,
+            tenant=tenant,
+        )
+        if task is None:
+            raise exports.NotFoundException(
+                "用户导出任务", error_code="AI_EXPORT_TASK_NOT_FOUND"
+            )
+        key = ResourceKey(K.EXPORT_TASK, tenant.tenant_id, identifier)
+        cids = tuple(
+            await db.scalars(
+                select(AiConversation.conversation_id).where(
+                    AiConversation.tenant_id == tenant.tenant_id,
+                    AiConversation.user_id == task.operator_id,
+                )
+            )
+        )
+        inventory = await ai_context_candidate.discover(
+            db, tx, tenant_id=tenant.tenant_id, conversation_ids=cids
+        )
+        await tx.lock(
+            LockPlan(existing=tuple(set(identity.keys) | set(inventory.keys) | {key}))
+        )
+        await assert_identity(db, identity)
+        await ai_context_candidate.recheck(db, tx, inventory)
+        if task.status != ExportTaskStatus.SUCCESS:
+            raise BusinessRuleException(
+                "导出任务未成功，无法下载", error_code="AI_EXPORT_TASK_NOT_READY"
+            )
+        if not task.file_storage_key:
+            raise BusinessRuleException(
+                "导出文件缺失", error_code="AI_EXPORT_FILE_MISSING"
+            )
+        tx.seal_insertions()
+        with tx.file_io(max_reads=2, max_total_bytes=20 * 1024 * 1024):
+            operations = ()
+            owner = None
+            if task.file_storage_key and is_owned_artifact(task.file_storage_key):
+                try:
+                    owner = await storage.artifact_identity(task.file_storage_key)
+                except FileNotFoundError as exc:
+                    raise BusinessRuleException(
+                        "导出文件已过期", error_code="AI_EXPORT_FILE_EXPIRED"
+                    ) from exc
+                if (owner.tenant_id, owner.resource_id, owner.role) != (
+                    tenant.tenant_id,
+                    identifier,
+                    "export",
+                ):
+                    raise _order_error()
+                if owner.operation_id != "rest-export:" + identifier:
+                    operations = (owner.operation_id,)
+            resource = TransferResource(
+                tenant.tenant_id,
+                task.operator_id,
+                "user_export_task",
+                identifier,
+                operations,
+            )
+            actions, logs = await scan_transfer_dependencies(db, (resource,))
+            if not (
+                await validate_transfer_dependencies(db, (resource,), actions, logs)
+            )[resource]:
+                raise BusinessRuleException(
+                    "导出文件关联执行待核对", error_code="AI_EXECUTION_OUTCOME_UNKNOWN"
+                )
+            try:
+                data = (
+                    await storage.read_artifact(task.file_storage_key, identity=owner)
+                    if owner is not None
+                    else await storage.read(task.file_storage_key)
+                )
+            except FileNotFoundError as exc:
+                raise BusinessRuleException(
+                    "导出文件已过期", error_code="AI_EXPORT_FILE_EXPIRED"
+                ) from exc
+            return data, f"hohu_users_{task.created_at.strftime('%Y%m%d_%H%M%S')}.xlsx"
+
     def prepare_preview(
         self,
         *,
@@ -94,6 +198,7 @@ class TransferCandidate:
         reason,
         on_conflict="skip",
         execution=None,
+        mime_type=None,
     ):
         if (
             type(file_bytes) is not bytes
@@ -103,7 +208,9 @@ class TransferCandidate:
             or on_conflict not in {"skip", "overwrite", "fail_fast"}
         ):
             raise _order_error()
-        mime = _user_import_mime_for_filename(filename)
+        mime = (
+            _user_import_mime_for_filename(filename) if mime_type is None else mime_type
+        )
         records = parse_import_excel(file_bytes, mime)
         if not 1 <= len(records) <= 2000:
             raise _limit()
@@ -190,6 +297,13 @@ class TransferCandidate:
             actor_user_version=command.version,
             permissions=permissions,
         )
+        if command.kind == "preview":
+            policy = await file_policy_service.resolve(
+                db, "import", tenant=command.tenant
+            )
+            file_policy_service.validate_import(
+                policy, command.values[2], len(command.values[1])
+            )
         key = ResourceKey(
             K.EXPORT_TASK if command.kind == "export" else K.IMPORT_BATCH,
             command.tenant.tenant_id,
@@ -213,16 +327,32 @@ class TransferCandidate:
         tenant = command.tenant
         user = await load_live_user_authority(db, tenant=tenant)
         if command.kind == "preview":
-            batch_view, _ = await self.materialize_preview(db, tx, command, user)
-            return await self.publish_preview(db, tx, command, storage, batch_view)
+            batch_view, detail = await self.materialize_preview(db, tx, command, user)
+            result = await self.publish_preview(db, tx, command, storage, batch_view)
+            data = detail.model_dump(mode="json", by_alias=True)
+            data.update(
+                newCount=batch_view["summary_new"],
+                existsCount=batch_view["summary_exists"],
+                conflictCount=batch_view["summary_conflict"],
+                outOfScopeCount=batch_view["summary_out_of_scope"],
+                previewToken=result.preview_token,
+                expiresAt=(
+                    batch_view["created_at"] + timedelta(minutes=10)
+                ).isoformat(),
+            )
+            return replace(result, preview_data=data)
         filters = UserExportFilter.model_validate_json(command.values[0])
         rows = await exports._query_users_with_data_scope(
             db, filters, user, tenant=tenant, max_rows=5001
         )
         if len(rows) > 5000:
-            raise _limit()
+            raise exports.UnprocessableEntityException(
+                "超过同步导出行数上限，请缩小筛选范围",
+                error_code="AI_EXPORT_ASYNC_REQUIRED",
+            )
         lookup = await exports._build_dept_lookup_for_rows(db, rows, tenant=tenant)
-        data = exports._build_excel(rows, lookup)
+        values = exports._excel_values(rows, lookup)
+        data = await file_transform_worker.run(exports._build_excel_values, values)
         if len(data) > 10 * 1024 * 1024:
             raise _limit()
         departments = await _compute_accessible_dept_ids(db, user, tenant=tenant)
@@ -270,7 +400,20 @@ class TransferCandidate:
             },
             expected={"status": "RUNNING", "operator_id": tenant.actor_user_id},
         )
-        return TransferResult(command.resource_id, len(rows), storage_key)
+        table = resource_spec(K.EXPORT_TASK).table
+        created = await db.scalar(
+            select(table.c.created_at).where(
+                table.c.tenant_id == tenant.tenant_id,
+                table.c.export_id == command.resource_id,
+            )
+        )
+        return TransferResult(
+            command.resource_id,
+            len(rows),
+            storage_key,
+            data=data,
+            filename=f"hohu_users_{created.strftime('%Y%m%d_%H%M%S')}.xlsx",
+        )
 
     async def materialize_preview(self, db, tx, command, user):
         tx.assert_session(db)
@@ -481,6 +624,7 @@ class TransferCandidate:
             if owner.operation_id not in {
                 "rest-export:" + identifier,
                 "rest-preview:" + identifier,
+                "rest-import:" + identifier,
             }:
                 resource = TransferResource(
                     tenant.tenant_id,

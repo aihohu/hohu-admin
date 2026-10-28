@@ -84,18 +84,14 @@ async def test_department_member_api_delegates_to_shared_policy(
     )
     list_mock = AsyncMock(return_value=page)
     replace_mock = AsyncMock(
-        return_value=DepartmentMembershipResult(added=1, removed=2)
+        return_value={"result": DepartmentMembershipResult(added=1, removed=2)}
     )
     monkeypatch.setattr(
         user_department_assignment_service,
         "list_department_members",
         list_mock,
     )
-    monkeypatch.setattr(
-        user_department_assignment_service,
-        "replace_department_members",
-        replace_mock,
-    )
+    monkeypatch.setattr("app.modules.system.api.dept.system_write", replace_mock)
     db = AsyncMock()
     actor = SimpleNamespace(user_id=7)
     tenant = tenant_context(tenant_id=0, actor_user_id=7)
@@ -129,9 +125,10 @@ async def test_department_member_api_delegates_to_shared_policy(
     )
     replace_mock.assert_awaited_once_with(
         db,
-        actor_user_id=7,
-        dept_id=5,
-        user_ids=["11"],
+        actor,
+        operation="dept.members",
+        target_id=5,
+        payload=["11"],
         tenant=tenant,
     )
-    db.commit.assert_awaited_once()
+    db.commit.assert_not_awaited()

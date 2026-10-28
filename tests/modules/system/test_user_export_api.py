@@ -1,4 +1,4 @@
-"""``/system/user/export`` 导出接口契约测试。
+"""``/user/export`` 导出接口契约测试。
 
 只验证 HTTP 契约层（路由 / JSON body / streaming 响应 / 错误码），
 service 层（export_users_to_excel / get_export_task / list_export_tasks）
@@ -19,11 +19,10 @@ service 层（export_users_to_excel / get_export_task / list_export_tasks）
 
 import re
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
 
 from app.core.base_response import PageResult
 from app.core.exceptions import (
@@ -32,11 +31,15 @@ from app.core.exceptions import (
     UnprocessableEntityException,
 )
 from app.core.security import create_access_token
-from app.main import app
 from app.modules.system.constants import ExportTaskStatus
-from app.modules.system.models.user import User
 from app.modules.system.models.user_transfer import UserExportTask
 from app.modules.system.schemas.user_transfer import UserExportTaskResponse
+from tests.modules.system.test_authorization_import_candidate import (
+    import_sessions as import_sessions,
+)
+from tests.modules.system.test_authorization_transfer_http import (
+    transfer_http as transfer_http,
+)
 
 # ========== Constants ==========
 
@@ -54,32 +57,16 @@ _API_MODULE = "app.modules.system.api.user"
 
 
 @pytest.fixture
-async def client(db_session):  # noqa: ARG001 (db_session resets redis)
-    """ASGI test client。
-
-    依赖 ``db_session`` 触发 ``tests/modules/system/conftest.py`` 的
-    ``_reset_redis_client()``，刷新 audit_middleware / auth.service 的 redis_client
-    绑定到当前 loop（与 test_user_import_api.py 同款）。
-    """
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        yield ac
+async def client(transfer_http):
+    client, _ = transfer_http
+    client.headers.pop("Authorization")
+    return client
 
 
 @pytest.fixture
-async def admin_token(db_session) -> str:
-    """admin 用户 JWT（admin 绕过 system:user:export 检查）。"""
-    user = (
-        await db_session.execute(
-            select(User).where(User.tenant_id == 0, User.user_name == "admin")
-        )
-    ).scalar_one()
+async def admin_token():
     return create_access_token(
-        subject=str(user.user_id),
-        tenant_id=user.tenant_id,
-        tenant_version=1,
-        user_version=user.auth_version,
+        subject="101", tenant_id=0, tenant_version=1, user_version=1
     )
 
 
@@ -119,14 +106,14 @@ class TestPostExportAuth:
 
     async def test_no_token_returns_401(self, client):
         response = await client.post(
-            "/system/user/export",
+            "/user/export",
             json={"reason": "QA"},
         )
         assert response.status_code == 401
 
     async def test_invalid_token_returns_401(self, client):
         response = await client.post(
-            "/system/user/export",
+            "/user/export",
             headers={"Authorization": "Bearer invalid.jwt.token"},
             json={"reason": "QA"},
         )
@@ -148,11 +135,15 @@ class TestPostExportSync:
         （hohu_ 前缀 + 时间戳避免同日多次导出冲突）。
         """
         with patch(
-            f"{_API_MODULE}.export_users_to_excel",
-            new=AsyncMock(return_value=(_fake_xlsx_bytes(), 10, "exp-xxx")),
+            "app.db.authorization_transfer_owner.TransferOwner.export",
+            new=AsyncMock(
+                return_value=SimpleNamespace(
+                    data=_fake_xlsx_bytes(), filename="hohu_users_20261028_120000.xlsx"
+                )
+            ),
         ) as mock_service:
             response = await client.post(
-                "/system/user/export",
+                "/user/export",
                 headers={"Authorization": f"Bearer {admin_token}"},
                 json={
                     "userName": "alice",
@@ -178,11 +169,15 @@ class TestPostExportSync:
     async def test_passes_filter_and_reason_to_service(self, client, admin_token):
         """filter 和 reason 应透传到 export_users_to_excel。"""
         with patch(
-            f"{_API_MODULE}.export_users_to_excel",
-            new=AsyncMock(return_value=(_fake_xlsx_bytes(), 5, "exp-xxx")),
+            "app.db.authorization_transfer_owner.TransferOwner.export",
+            new=AsyncMock(
+                return_value=SimpleNamespace(
+                    data=_fake_xlsx_bytes(), filename="hohu_users_20261028_120000.xlsx"
+                )
+            ),
         ) as mock_service:
             await client.post(
-                "/system/user/export",
+                "/user/export",
                 headers={"Authorization": f"Bearer {admin_token}"},
                 json={
                     "userName": "bob",
@@ -191,12 +186,10 @@ class TestPostExportSync:
                 },
             )
 
-        # export_users_to_excel(db, filter_, current_user, *, reason)
-        # filter_ 是位置参数 args[1]，reason 是 kwargs
-        filter_arg = mock_service.call_args.args[1]
-        assert filter_arg.user_name == "bob"
-        assert filter_arg.status == "1"
-        assert mock_service.call_args.kwargs["reason"] == "月度归档"
+        payload = mock_service.call_args.kwargs["args"]
+        assert payload["user_name"] == "bob"
+        assert payload["status"] == "1"
+        assert payload["reason"] == "月度归档"
 
 
 # ========== POST /export 校验 ==========
@@ -208,7 +201,7 @@ class TestPostExportValidation:
     async def test_missing_reason_returns_422(self, client, admin_token):
         """reason 必填。"""
         response = await client.post(
-            "/system/user/export",
+            "/user/export",
             headers={"Authorization": f"Bearer {admin_token}"},
             json={"userName": "alice"},
         )
@@ -217,7 +210,7 @@ class TestPostExportValidation:
     async def test_empty_reason_returns_422(self, client, admin_token):
         """ReasonSchema 拒绝全空白 reason。"""
         response = await client.post(
-            "/system/user/export",
+            "/user/export",
             headers={"Authorization": f"Bearer {admin_token}"},
             json={"userName": "alice", "reason": "   "},
         )
@@ -235,7 +228,7 @@ class TestPostExportAsyncRequired:
         → API 层透传给全局 handler，HTTP 422。
         """
         with patch(
-            f"{_API_MODULE}.export_users_to_excel",
+            "app.db.authorization_transfer_owner.TransferOwner.export",
             new=AsyncMock(
                 side_effect=UnprocessableEntityException(
                     "导出行数 6000 超过同步阈值 5000，请等待异步通道开放",
@@ -244,7 +237,7 @@ class TestPostExportAsyncRequired:
             ),
         ):
             response = await client.post(
-                "/system/user/export",
+                "/user/export",
                 headers={"Authorization": f"Bearer {admin_token}"},
                 json={"reason": "QA"},
             )
@@ -261,7 +254,7 @@ class TestGetExportDetail:
     """验证 GET /export/{export_id} 任务详情。"""
 
     async def test_no_token_returns_401(self, client):
-        response = await client.get("/system/user/export/exp-xxx")
+        response = await client.get("/user/export/exp-xxx")
         assert response.status_code == 401
 
     async def test_returns_task_details(self, client, admin_token):
@@ -271,7 +264,7 @@ class TestGetExportDetail:
             new=AsyncMock(return_value=fake_task),
         ) as mock_get:
             response = await client.get(
-                "/system/user/export/exp-xxx",
+                "/user/export/exp-xxx",
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
 
@@ -295,7 +288,7 @@ class TestGetExportDetail:
             new=AsyncMock(return_value=None),
         ):
             response = await client.get(
-                "/system/user/export/nonexistent",
+                "/user/export/nonexistent",
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
 
@@ -311,7 +304,7 @@ class TestGetExportList:
     """验证 GET /export 分页列表。"""
 
     async def test_no_token_returns_401(self, client):
-        response = await client.get("/system/user/export")
+        response = await client.get("/user/export")
         assert response.status_code == 401
 
     async def test_returns_paginated_list(self, client, admin_token):
@@ -325,7 +318,7 @@ class TestGetExportList:
             new=AsyncMock(return_value=fake_page),
         ) as mock_list:
             response = await client.get(
-                "/system/user/export?current=1&size=10",
+                "/user/export?current=1&size=10",
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
 
@@ -358,7 +351,7 @@ class TestGetExportList:
             new=AsyncMock(return_value=fake_page),
         ):
             response = await client.get(
-                "/system/user/export?current=1&size=1",
+                "/user/export?current=1&size=1",
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
 
@@ -376,7 +369,7 @@ class TestGetExportList:
             patch(f"{_API_MODULE}.is_super_admin", return_value=False) as mock_super,
         ):
             await client.get(
-                "/system/user/export?current=2&size=20&status=SUCCESS&operatorId=999",
+                "/user/export?current=2&size=20&status=SUCCESS&operatorId=999",
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
 
@@ -397,14 +390,14 @@ class TestGetExportList:
 class TestGetExportDownload:
     """验证 AI 对话内点击下载的 HTTP 契约。
 
-    端点：GET /system/user/export/{export_id}/download
+    端点：GET /user/export/{export_id}/download
     - 从 sys_user_export_task.file_storage_key 读 bytes → 流式返回
     - Content-Disposition 文件名沿用决策 30.6 规范（hohu_users_*）
     - 任务不存在 / 状态非 SUCCESS / 文件被删 → 各自 errorCode
     """
 
     async def test_no_token_returns_401(self, client):
-        response = await client.get("/system/user/export/exp-xxx/download")
+        response = await client.get("/user/export/exp-xxx/download")
         assert response.status_code == 401
 
     async def test_success_returns_xlsx_stream(self, client, admin_token):
@@ -414,7 +407,7 @@ class TestGetExportDownload:
         （从 task.created_at 派生，与同步导出一致，不重新生成当前时间）。
         """
         with patch(
-            f"{_API_MODULE}.download_export_file",
+            "app.db.authorization_transfer_owner.TransferOwner.download",
             new=AsyncMock(
                 return_value=(
                     _fake_xlsx_bytes(),
@@ -423,7 +416,7 @@ class TestGetExportDownload:
             ),
         ) as mock_download:
             response = await client.get(
-                "/system/user/export/exp-xxx/download",
+                "/user/export/exp-xxx/download",
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
 
@@ -434,14 +427,14 @@ class TestGetExportDownload:
         assert "hohu_users_20260805_103525.xlsx" in cd
         assert response.content.startswith(_XLSX_MAGIC)
         # service 收到 export_id
-        assert mock_download.call_args.args[1] == "exp-xxx"
-        assert mock_download.call_args.kwargs["operator_id"] > 0
-        assert mock_download.call_args.kwargs["allow_cross_owner"] is True
+        assert mock_download.call_args.kwargs["identifier"] == "exp-xxx"
+        assert mock_download.call_args.kwargs["tenant"].actor_user_id == 101
+        assert mock_download.call_args.kwargs["administrative"] is True
 
     async def test_task_not_found_returns_404(self, client, admin_token):
         """任务不存在 → 404 AI_EXPORT_TASK_NOT_FOUND。"""
         with patch(
-            f"{_API_MODULE}.download_export_file",
+            "app.db.authorization_transfer_owner.TransferOwner.download",
             new=AsyncMock(
                 side_effect=NotFoundException(
                     "用户导出任务",
@@ -450,7 +443,7 @@ class TestGetExportDownload:
             ),
         ):
             response = await client.get(
-                "/system/user/export/nonexistent/download",
+                "/user/export/nonexistent/download",
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
 
@@ -460,7 +453,7 @@ class TestGetExportDownload:
     async def test_not_success_status_returns_400(self, client, admin_token):
         """任务 status != SUCCESS（FAILED/CREATED）→ 400 AI_EXPORT_TASK_NOT_READY。"""
         with patch(
-            f"{_API_MODULE}.download_export_file",
+            "app.db.authorization_transfer_owner.TransferOwner.download",
             new=AsyncMock(
                 side_effect=BusinessRuleException(
                     "导出任务未成功，无法下载",
@@ -469,7 +462,7 @@ class TestGetExportDownload:
             ),
         ):
             response = await client.get(
-                "/system/user/export/exp-failed/download",
+                "/user/export/exp-failed/download",
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
 
@@ -479,7 +472,7 @@ class TestGetExportDownload:
     async def test_file_missing_returns_400(self, client, admin_token):
         """file_storage_key 为 None（FAILED task 或异常路径）→ 400 AI_EXPORT_FILE_MISSING。"""
         with patch(
-            f"{_API_MODULE}.download_export_file",
+            "app.db.authorization_transfer_owner.TransferOwner.download",
             new=AsyncMock(
                 side_effect=BusinessRuleException(
                     "导出文件缺失",
@@ -488,7 +481,7 @@ class TestGetExportDownload:
             ),
         ):
             response = await client.get(
-                "/system/user/export/exp-no-file/download",
+                "/user/export/exp-no-file/download",
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
 
@@ -498,7 +491,7 @@ class TestGetExportDownload:
     async def test_file_expired_returns_400(self, client, admin_token):
         """文件被 30 天 TTL 清理 / 外部删除 → 400 AI_EXPORT_FILE_EXPIRED。"""
         with patch(
-            f"{_API_MODULE}.download_export_file",
+            "app.db.authorization_transfer_owner.TransferOwner.download",
             new=AsyncMock(
                 side_effect=BusinessRuleException(
                     "导出文件已过期（30 天 TTL）",
@@ -507,7 +500,7 @@ class TestGetExportDownload:
             ),
         ):
             response = await client.get(
-                "/system/user/export/exp-expired/download",
+                "/user/export/exp-expired/download",
                 headers={"Authorization": f"Bearer {admin_token}"},
             )
 

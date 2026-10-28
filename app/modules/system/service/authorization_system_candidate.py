@@ -1,8 +1,7 @@
 """Explicit candidate composition for System mutations; no production fallback.
 
 The owner passes a token's separate user security version and commits after this
-service returns. Existing route and AI owner composition stays unchanged until
-the complete writer migration is qualified.
+service returns. HTTP and tool adapters share this plan and mutation contract.
 """
 
 import asyncio

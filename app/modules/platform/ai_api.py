@@ -1,14 +1,13 @@
 """Dedicated platform control-plane APIs for global AI configuration."""
 
-import hashlib
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_response import PageResult, ResponseModel
-from app.core.exceptions import BusinessRuleException
 from app.core.tenant import PlatformContext
+from app.db.authorization_control_http import ControlHttp, require_control_write
 from app.db.session import get_platform_db
 from app.modules.ai.core.provider_egress import provider_egress
 from app.modules.ai.schemas.agent_admin import (
@@ -25,6 +24,7 @@ from app.modules.ai.schemas.provider import (
     ProviderOut,
     ProviderQuery,
     ProviderTestRequest,
+    ProviderTestResult,
     ProviderUpdate,
 )
 from app.modules.ai.service.agent_admin import agent_admin_service
@@ -104,32 +104,11 @@ async def get_agent(
 async def update_agent(
     agent_id: PositiveId,
     payload: AgentAdminUpdateReq,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    before = await agent_admin_service.get_agent(db, agent_id, platform=platform)
-    item = await agent_admin_service.update_agent(
-        db, agent_id, payload, platform=platform
+    return ResponseModel.success(
+        data=await control.execute(payload, target_id=agent_id)
     )
-
-    def audit_value(value):
-        # Keep scalar switches/quota; fingerprint free text, which may contain secrets.
-        return (
-            {"sha256": hashlib.sha256(value.encode()).hexdigest()}
-            if isinstance(value, str)
-            else value
-        )
-
-    request.state.system_agent_changes = {
-        key: {
-            "before": audit_value(getattr(before, key)),
-            "after": audit_value(getattr(item, key)),
-        }
-        for key in payload.model_fields_set
-    }
-    _record_count(request, 1)
-    return ResponseModel.success(data=item)
 
 
 @router.get(
@@ -192,16 +171,9 @@ async def list_providers(
 )
 async def create_provider(
     payload: ProviderCreate,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    provider = await provider_service.create(db, payload, platform=platform)
-    await db.flush()
-    await db.refresh(provider)
-    data = ProviderOut.from_record(provider)
-    _record_count(request, 1)
-    return ResponseModel.success(data=data)
+    return ResponseModel.success(data=await control.execute(payload))
 
 
 @router.put(
@@ -212,29 +184,19 @@ async def create_provider(
 async def update_provider(
     provider_id: PositiveId,
     payload: ProviderUpdate,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    provider = await provider_service.update(
-        db, provider_id, payload, platform=platform
+    return ResponseModel.success(
+        data=await control.execute(payload, target_id=provider_id)
     )
-    await db.flush()
-    await db.refresh(provider)
-    data = ProviderOut.from_record(provider)
-    _record_count(request, 1)
-    return ResponseModel.success(data=data)
 
 
 @router.delete("/ai/providers/{provider_id}", summary="平台：删除 AI Provider")
 async def delete_provider(
     provider_id: PositiveId,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    await provider_service.delete(db, provider_id, platform=platform)
-    _record_count(request, 1)
+    await control.execute(target_id=provider_id)
     return ResponseModel.success()
 
 
@@ -276,38 +238,11 @@ async def list_provider_models(
 async def create_model(
     provider_id: PositiveId,
     payload: ModelCreate,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    model = await model_service.create(
-        db,
-        provider_id,
-        payload,
-        create_by=platform.actor_name,
-        platform=platform,
+    return ResponseModel.success(
+        data=await control.execute(payload, provider_id=provider_id)
     )
-    await db.flush()
-    await db.refresh(model)
-    data = ModelOut.model_validate(model)
-    _record_count(request, 1)
-    return ResponseModel.success(data=data)
-
-
-async def _require_provider_model(
-    db: AsyncSession,
-    *,
-    provider_id: int,
-    model_id: int,
-    platform: PlatformContext,
-):
-    model = await model_service.get_by_id_for_write(db, model_id, platform=platform)
-    if model.provider_id != provider_id:
-        raise BusinessRuleException(
-            "模型不属于指定 Provider",
-            error_code="AI_PROVIDER_MODEL_MISMATCH",
-        )
-    return model
 
 
 @router.put(
@@ -319,19 +254,11 @@ async def update_model(
     provider_id: PositiveId,
     model_id: PositiveId,
     payload: ModelUpdate,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    await _require_provider_model(
-        db, provider_id=provider_id, model_id=model_id, platform=platform
+    return ResponseModel.success(
+        data=await control.execute(payload, target_id=model_id, provider_id=provider_id)
     )
-    model = await model_service.update(db, model_id, payload, platform=platform)
-    await db.flush()
-    await db.refresh(model)
-    data = ModelOut.model_validate(model)
-    _record_count(request, 1)
-    return ResponseModel.success(data=data)
 
 
 @router.delete(
@@ -341,15 +268,9 @@ async def update_model(
 async def delete_model(
     provider_id: PositiveId,
     model_id: PositiveId,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    await _require_provider_model(
-        db, provider_id=provider_id, model_id=model_id, platform=platform
-    )
-    await model_service.delete(db, model_id, platform=platform)
-    _record_count(request, 1)
+    await control.execute(target_id=model_id, provider_id=provider_id)
     return ResponseModel.success()
 
 
@@ -360,15 +281,10 @@ async def delete_model(
 )
 async def test_provider_model_draft(
     payload: ProviderModelTestDraftRequest,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    result = await provider_service.test_draft_connection(
-        db, payload, platform=platform
-    )
-    _record_count(request, 1)
-    return ResponseModel.success(data=result)
+    await control.execute(payload)
+    return ResponseModel.success(data=ProviderModelTestDraftResult())
 
 
 @router.post(
@@ -378,15 +294,12 @@ async def test_provider_model_draft(
 async def test_provider_model(
     provider_id: PositiveId,
     payload: ProviderTestRequest,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    result = await provider_service.test_connection(
-        db, provider_id, int(payload.model_id), platform=platform
+    await control.execute(model_id=int(payload.model_id), provider_id=provider_id)
+    return ResponseModel.success(
+        data=ProviderTestResult(provider_id=provider_id, model_id=int(payload.model_id))
     )
-    _record_count(request, 1)
-    return ResponseModel.success(data=result)
 
 
 @router.get(
@@ -436,16 +349,10 @@ async def tenant_model_catalog(
 async def put_tenant_model_policies(
     tenant_id: TenantId,
     payload: PlatformTenantModelPoliciesPut,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    result = await tenant_model_policy_admin_service.put_many(
-        db, tenant_id=tenant_id, data=payload, platform=platform
-    )
-    _record_count(request, len(payload.policies))
     return ResponseModel.success(
-        data=PlatformTenantModelCatalogOut.from_projection(result)
+        data=await control.execute(payload, target_tenant_id=tenant_id)
     )
 
 
@@ -458,20 +365,13 @@ async def put_tenant_model_policy(
     tenant_id: TenantId,
     model_id: PositiveId,
     payload: PlatformTenantModelPolicyPut,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    row = await tenant_model_policy_admin_service.put(
-        db,
-        tenant_id=tenant_id,
-        model_id=model_id,
-        data=payload,
-        platform=platform,
+    return ResponseModel.success(
+        data=await control.execute(
+            payload, target_id=model_id, target_tenant_id=tenant_id
+        )
     )
-    data = PlatformTenantModelPolicyOut.from_projection(row)
-    _record_count(request, 1)
-    return ResponseModel.success(data=data)
 
 
 @router.delete(
@@ -481,12 +381,7 @@ async def put_tenant_model_policy(
 async def delete_tenant_model_policy(
     tenant_id: TenantId,
     model_id: PositiveId,
-    request: Request,
-    db: AsyncSession = Depends(get_platform_db, scope="function"),
-    platform: PlatformContext = Depends(require_system_agent_context, scope="function"),
+    control: ControlHttp = Depends(require_control_write, scope="function"),
 ):
-    await tenant_model_policy_admin_service.delete(
-        db, tenant_id=tenant_id, model_id=model_id, platform=platform
-    )
-    _record_count(request, 1)
+    await control.execute(target_id=model_id, target_tenant_id=tenant_id)
     return ResponseModel.success()

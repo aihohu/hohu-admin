@@ -1,10 +1,10 @@
 """Model administration uses the normal system role and user audit identity."""
 
-from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from sqlalchemy import select
 
 from app.core.base_response import PageResult
 from app.core.security import create_platform_access_token
@@ -14,6 +14,22 @@ from app.modules.ai.service.provider_service import provider_service
 from app.modules.auth.api import get_user_routes, is_route_exist
 from app.modules.auth.service import get_current_user
 from app.modules.platform import system_agent_auth
+from app.modules.system.models.operation_log import SysOperationLog
+from tests.modules.platform.test_authorization_catalog_http import (
+    catalog_http as catalog_http,
+)
+from tests.modules.platform.test_authorization_catalog_http import (
+    catalog_sessions as catalog_sessions,
+)
+from tests.modules.platform.test_authorization_catalog_http import (
+    http_system as http_system,
+)
+from tests.modules.platform.test_authorization_catalog_http import (
+    plan_sessions as plan_sessions,
+)
+from tests.modules.platform.test_authorization_catalog_http import (
+    system_sessions as system_sessions,
+)
 
 
 def _actor(tenant=0, role=True, status="1"):
@@ -143,42 +159,24 @@ async def test_provider_missing_audit_context_never_calls_business(client, monke
 
 
 async def test_provider_create_returns_only_credential_state_and_audits_user(
-    client, monkeypatch
+    catalog_http,
 ):
-    record = SimpleNamespace(
-        provider_id=101,
-        provider_code="test",
-        name="Test",
-        api_key="encrypted-secret",
-        base_url=None,
-        is_enabled=True,
-        config=None,
-        create_time=datetime.now(UTC),
+    client, plain = catalog_http
+    response = await client.post(
+        "/platform/ai/providers",
+        json={"providerCode": "deepseek", "name": "Test", "apiKey": "input-secret"},
+        headers=_headers(),
     )
-    business = AsyncMock(return_value=record)
-    db = AsyncMock()
-    db.add = Mock()
-    monkeypatch.setattr(provider_service, "create", business)
-    monkeypatch.setattr(
-        system_agent_auth, "persist_system_agent_audit", AsyncMock(return_value=101)
-    )
-    app.dependency_overrides[get_current_user] = _actor
-    app.dependency_overrides[get_db] = lambda: db
-    try:
-        response = await client.post(
-            "/platform/ai/providers",
-            json={"providerCode": "test", "name": "Test", "apiKey": "input-secret"},
-            headers=_headers(),
-        )
-    finally:
-        app.dependency_overrides.pop(get_current_user, None)
-        app.dependency_overrides.pop(get_db, None)
-    assert response.status_code == 200
-    assert response.json()["data"]["providerId"] == "101"
+    assert response.status_code == 200, response.text
+    assert isinstance(response.json()["data"]["providerId"], str)
     assert response.json()["data"]["credentialConfigured"] is True
     assert "apiKey" not in response.json()["data"]
     assert "secret" not in response.text
-    assert "secret" not in db.add.call_args.args[0].request_params
+    async with plain() as db:
+        audit = (await db.execute(select(SysOperationLog))).scalars().all()
+        assert len(audit) == 2
+        assert all(row.user_id == 101 for row in audit)
+        assert all("input-secret" not in row.request_params for row in audit)
 
 
 @pytest.mark.parametrize(

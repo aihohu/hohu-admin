@@ -1,6 +1,7 @@
 """Planned tenant registry writers; no legacy lock or transaction fallback."""
 
 from copy import deepcopy
+from types import SimpleNamespace
 
 from sqlalchemy import select
 
@@ -18,9 +19,11 @@ from app.core.exceptions import (
     BusinessRuleException,
     NotFoundException,
 )
+from app.core.id_generator import next_id
 from app.core.tenant import normalize_tenant_code
 from app.db.authorization_plan_session import _order_error
 from app.db.authorization_system_owner import require_candidate_session
+from app.modules.platform.schemas import PlatformTenantOut
 from app.modules.system.models.tenant import Tenant
 from app.modules.system.service.authorization_control_identity import (
     ControlAudit,
@@ -111,13 +114,19 @@ class TenantControlCandidate:
         target_tenant_id,
         payload=None,
         audit=None,
+        http_result=False,
     ):
         require_candidate_session(db)
         if (
             operation not in TENANT_OPERATIONS
             or type(audit) is not ControlAudit
-            or type(target_tenant_id) is not int
-            or not 0 <= target_tenant_id < 2**63
+            or type(http_result) is not bool
+            or not (
+                operation == "tenant.prepare"
+                and target_tenant_id is None
+                or type(target_tenant_id) is int
+                and 0 <= target_tenant_id < 2**63
+            )
         ):
             raise _order_error()
         permission = TENANT_OPERATIONS[operation]
@@ -138,7 +147,13 @@ class TenantControlCandidate:
             values = _prepare_payload(payload)
             with bounded_authorization_reads(db):
                 return await self._prepare(
-                    db, tenant, actor_user_version, target_tenant_id, values, audit
+                    db,
+                    tenant,
+                    actor_user_version,
+                    target_tenant_id,
+                    values,
+                    audit,
+                    http_result=http_result,
                 )
         if payload is not None:
             raise _order_error()
@@ -205,9 +220,11 @@ class TenantControlCandidate:
                     )
                 await audit.append(tx, {"tenantId": str(target_tenant_id)})
                 result = await _tenant_row(db, target_tenant_id)
-        return self._result(result, replayed=False)
+        return self._result(result, replayed=False, http_result=http_result)
 
-    async def _prepare(self, db, tenant, user_version, target, values, audit):
+    async def _prepare(
+        self, db, tenant, user_version, target, values, audit, *, http_result
+    ):
         async with authorization_transactions.scope_creation(db) as tx:
             identity = await read_identity(
                 db,
@@ -238,14 +255,17 @@ class TenantControlCandidate:
                         "租户开户幂等键已被不同请求使用",
                         error_code="PLATFORM_TENANT_IDEMPOTENCY_CONFLICT",
                     )
-                if replay["tenant_id"] != target:
+                if target is not None and replay["tenant_id"] != target:
                     raise AuthorizationException(
                         "平台目标租户不匹配",
                         error_code="PLATFORM_TARGET_TENANT_MISMATCH",
                     )
+                target = replay["tenant_id"]
                 await tx.replay_tenants(_barriers(tenant.tenant_id, target))
                 existing = identity.keys + audit.existing + (_target_key(target),)
             else:
+                if target is None:
+                    target = next_id()
                 duplicate = await db.scalar(
                     select(Tenant.tenant_id)
                     .where(
@@ -279,10 +299,14 @@ class TenantControlCandidate:
                 tx, {"tenantId": str(target), "replayed": replay is not None}
             )
             result = await _tenant_row(db, target)
-        return self._result(result, replayed=replay is not None)
+        return self._result(
+            result, replayed=replay is not None, http_result=http_result
+        )
 
     @staticmethod
-    def _result(row, *, replayed):
+    def _result(row, *, replayed, http_result=False):
+        if http_result:
+            return PlatformTenantOut.from_record(SimpleNamespace(**row))
         return {
             name: row[name]
             for name in (

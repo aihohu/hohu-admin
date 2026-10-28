@@ -534,6 +534,13 @@ _CONTROL_PHASES = (
         "external-import",
     ),
     ("control.authorize", _CONTROL_OWNER + ".authorize", "owner", "S", "audit-intent"),
+    (
+        "control.complete_failure",
+        _CONTROL_OWNER + ".complete_failure",
+        "owner",
+        "S",
+        "audit-intent",
+    ),
     ("catalog.prepare", _CATALOG + ".prepare", "read", "none", "bounded-read"),
     (
         "catalog.validate",
@@ -720,6 +727,20 @@ _CONTROL_PHASES = (
         "owner",
         "X",
         "global-write",
+    ),
+    (
+        "principal.complete_failure",
+        _PRINCIPAL_OWNER + ".complete_failure",
+        "owner",
+        "S",
+        "audit-intent",
+    ),
+    (
+        "support.execute",
+        _P + "authorization_support_owner.SupportCandidateOwner.execute",
+        "owner",
+        "S",
+        "metadata",
     ),
     ("retention.purge", _RETENTION_OWNER + ".purge", "owner", "S", "global-write"),
     ("retention.preview", _RETENTION_OWNER + ".preview", "owner", "S", "global-write"),
@@ -965,6 +986,26 @@ _CHAT = _A + "authorization_chat_candidate.ChatCandidate"
 _TRANSFER = _S + "authorization_transfer_candidate.TransferCandidate"
 _CLEANUP = _S + "authorization_transfer_cleanup_candidate.TransferCleanupCandidate"
 _DELETE = _S + "authorization_ai_delete_candidate.AIDeleteCandidate"
+CANDIDATES += (
+    Candidate(
+        "http_delete.execute",
+        _DELETE + ".execute_http",
+        (
+            _S + "user_service.UserService.delete_user",
+            _S + "user_service.UserService.batch_delete_users",
+        ),
+        _SYSTEM_OWNER,
+        "proof_writer",
+        "S",
+        "argument:TenantContext",
+        ("X",),
+        _DELETE + ".plan",
+        _DELETE + ".apply",
+        "system-write",
+        _TX + ".aggregate",
+        True,
+    ),
+)
 _JOB = "app.modules.job.service.authorization_job_candidate.JobAuthorizationCandidate"
 _FILE_ADAPTER = _S + "authorization_ai_file_adapter.AIFileAdapter"
 _COMPLETION_ENTRIES = (
@@ -1020,9 +1061,18 @@ _COMPLETION_ENTRIES = (
         "transfer-write",
         "none",
     ),
-    (_TRANSFER, ("download",), "read", "S", ("S",), "auth-read", "none"),
+    (
+        _TRANSFER,
+        ("download", "rest_download"),
+        "read",
+        "S",
+        ("S",),
+        "auth-read",
+        "none",
+    ),
     (_CLEANUP, ("prepare",), "external", "none", (), "transfer-prepare", "none"),
     (_CLEANUP, ("execute",), "proof_writer", "S", ("S",), "auth-read", "none"),
+    (_CLEANUP, ("cancel",), "proof_writer", "S", ("X",), "transfer-write", "none"),
     (_LIFECYCLE, ("reference",), "read", "none", (), "bounded-read", "none"),
     (
         _LIFECYCLE,
@@ -1118,7 +1168,7 @@ _COMPLETION_ENTRIES = (
     ),
     (
         "app.db.authorization_transfer_owner.TransferOwner",
-        ("export", "preview"),
+        ("export", "preview", "cancel"),
         "owner",
         "S",
         ("X",),
@@ -1262,6 +1312,7 @@ _RUNTIME_DELEGATES = {
     "import_users": _IMPORT_OWNER,
     "control": "app.db.authorization_control_owner.ControlCandidateOwner.execute",
     "authorize_control": "app.db.authorization_control_owner.ControlCandidateOwner.authorize",
+    "fail_control": "app.db.authorization_control_owner.ControlCandidateOwner.complete_failure",
     "seed": _SEED_OWNER,
     "login": _AUTH + ".login",
     "current": _AUTH + ".current",
@@ -1273,6 +1324,8 @@ _RUNTIME_DELEGATES = {
     "principal_login": _PRINCIPAL_OWNER + ".login",
     "principal_current": _PRINCIPAL_OWNER + ".current",
     "authorize_principal": _PRINCIPAL_OWNER + ".authorize",
+    "fail_principal": _PRINCIPAL_OWNER + ".complete_failure",
+    "principal_control": _RETENTION_OWNER + ".purge",
     "create_principal": _PRINCIPAL_OWNER + ".create_first",
     "replace_principal_permissions": _PRINCIPAL_OWNER + ".replace_permissions",
 }

@@ -20,6 +20,8 @@ _CANDIDATE_NAMESPACES = (
     ("db/authorization_lifecycle_owner.py", "tenant_id", "cache"),
     ("db/authorization_preview_owner.py", "tenant_id", "cache"),
     ("db/authorization_transfer_cache.py", "tenant_id", "storage"),
+    ("db/authorization_transfer_owner.py", "tenant_id", "storage"),
+    ("db/authorization_transfer_http.py", "tenant_id", "cache"),
     ("modules/ai/agents/gateway/authorization_execution.py", "tenant_id", "cache"),
     ("modules/ai/service/authorization_execution_candidate.py", "tenant_id", "cache"),
     ("modules/ai/service/authorization_lifecycle_candidate.py", "tenant_id", "cache"),

@@ -32,6 +32,9 @@ from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.model_policy import TenantAiModelPolicy
 from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
+from app.modules.ai.schemas.agent_admin import AgentAdminDetailItem
+from app.modules.ai.schemas.model import ModelOut
+from app.modules.ai.schemas.provider import ProviderOut
 from app.modules.ai.service.authorization_catalog_inputs import (
     CATALOG_CANDIDATE_ENTRIES,
     DNS_OPERATIONS,
@@ -46,6 +49,10 @@ from app.modules.ai.service.tenant_model_policy_admin_service import (
     tenant_model_policy_admin_service,
 )
 from app.modules.platform.constants import PLATFORM_AI_WRITE
+from app.modules.platform.schemas import (
+    PlatformTenantModelCatalogOut,
+    PlatformTenantModelPolicyOut,
+)
 from app.modules.system.service.authorization_control_identity import (
     assert_identity,
     read_identity,
@@ -413,7 +420,11 @@ class CatalogAuthorizationCandidate:
             )
         return ()
 
-    async def execute(self, db, *, audit=None, preparation=None, **kwargs):
+    async def execute(
+        self, db, *, audit=None, preparation=None, http_result=False, **kwargs
+    ):
+        if type(http_result) is not bool:
+            raise _order_error()
         request = freeze_request(**kwargs)
         _audit(audit, request)
         _fresh(db)
@@ -551,7 +562,34 @@ class CatalogAuthorizationCandidate:
                     await audit.append(
                         tx, result_summary={"recordCount": 1}, changes=changes
                     )
-                return result
+                return (
+                    await self._http_result(db, request, result)
+                    if http_result
+                    else result
+                )
+
+    async def _http_result(self, db, request, result):
+        """Freeze the existing public DTO while the complete plan is still held."""
+        op = request.operation
+        if op == "agent.update":
+            row = await db.get(AiAgent, result["agent_id"], populate_existing=True)
+            return AgentAdminDetailItem.model_validate(row)
+        if op in {"provider.create", "provider.update"}:
+            row = await db.get(
+                AiProvider, result["provider_id"], populate_existing=True
+            )
+            return ProviderOut.from_record(row)
+        if op in {"model.create", "model.update"}:
+            row = await db.get(AiModel, result["model_id"], populate_existing=True)
+            return ModelOut.model_validate(row)
+        if op == "model_policy.put_many":
+            return PlatformTenantModelCatalogOut.from_projection(result)
+        if op == "model_policy.put":
+            row = next(
+                row for row in result.models if row.model_id == request.target_id
+            )
+            return PlatformTenantModelPolicyOut.from_projection(row)
+        return result
 
     async def _apply(self, db, tx, request, facts, new_id, actor_name):
         op, data = request.operation, request.payload()

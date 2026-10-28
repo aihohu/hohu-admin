@@ -13,13 +13,13 @@ from sqlalchemy import select, text
 
 from app.core.config import settings
 from app.core.exceptions import AuthorizationException, BusinessRuleException
-from app.core.security import get_password_hash, verify_password
-from app.db.session import get_db
-from app.main import app
+from app.core.security import create_access_token, get_password_hash, verify_password
+from app.db import authorization_http
+from app.db.session import AsyncSessionLocal
+from app.modules.auth.candidate_owner import auth_candidate_owner
 from app.modules.auth.email_verification import EmailVerification
 from app.modules.auth.schemas.self_service import Registration
 from app.modules.auth.self_service_api import policy
-from app.modules.auth.service import get_current_user
 from app.modules.system.api.settings import _mail_admin
 from app.modules.system.models.mail_config import MailConfig
 from app.modules.system.models.role import Role
@@ -31,6 +31,7 @@ from app.modules.system.service.mail_service import (
     mail_service,
 )
 from app.modules.system.service.settings_service import settings_service
+from tests.committed_database import committed_test_database as committed_test_database
 from tests.tenant_helpers import create_test_tenant, tenant_context
 
 
@@ -307,17 +308,21 @@ async def test_email_sending_throttle_cannot_be_bypassed_by_changing_purpose(cod
         await service.throttle(tenant_id, "target@example.com", "127.0.0.2")
 
 
-async def test_http_registration_reset_and_disabled_policy(
-    client, db_session, codes, monkeypatch
-):
-    # The fixture rolls back every HTTP commit into its outer transaction.
-    async def database():
-        yield db_session
+@pytest.fixture
+async def http_account_database(committed_test_database, monkeypatch):
+    monkeypatch.setattr(authorization_http, "engine", committed_test_database)
+    async with AsyncSessionLocal() as db:
+        yield db
 
-    app.dependency_overrides[get_db] = database
+
+async def test_http_registration_reset_and_disabled_policy(
+    client, http_account_database, codes, monkeypatch
+):
+    db_session = http_account_database
     sent = AsyncMock()
-    monkeypatch.setattr(mail_service, "send", sent)
-    monkeypatch.setattr(settings, "TENANT_MODE", "single")
+    monkeypatch.setattr(auth_candidate_owner, "_notify", sent)
+    monkeypatch.setattr(settings, "TENANT_MODE", "hosted")
+    monkeypatch.setattr(settings, "TENANT_HOSTED_LOGIN_ENABLED", True)
     current = await mail_service.describe(db_session)
     await mail_service.save(
         db_session,
@@ -330,10 +335,6 @@ async def test_http_registration_reset_and_disabled_policy(
     )
     created_tenant = await create_test_tenant(db_session, prefix="httpemail")
     tenant_id = created_tenant.tenant_id
-    monkeypatch.setattr(
-        "app.modules.auth.self_service_api.resolve_tenant",
-        AsyncMock(return_value=created_tenant),
-    )
     tenant = tenant_context(tenant_id=tenant_id, actor_user_id=1)
     current = await settings_service.get_group(db_session, "account", tenant=tenant)
     await settings_service.save_group(
@@ -347,9 +348,16 @@ async def test_http_registration_reset_and_disabled_policy(
         revision=current["revision"],
         tenant=tenant,
     )
-    identity = {"userName": "httpaccount", "email": "http@example.com"}
+    await db_session.commit()
+    identity = {
+        "userName": "httpaccount",
+        "email": "http@example.com",
+        "tenantCode": created_tenant.tenant_code,
+    }
     try:
-        response = await client.get("/auth/capabilities")
+        response = await client.get(
+            "/auth/capabilities", params={"tenantCode": created_tenant.tenant_code}
+        )
         assert response.json()["data"]["registrationEnabled"]
         response = await client.post(
             "/auth/email-code", json={**identity, "purpose": "register"}
@@ -380,7 +388,12 @@ async def test_http_registration_reset_and_disabled_policy(
             json={**identity, "code": reset_code, "password": "ChangedAgain123"},
         )
         assert response.json()["errorCode"] == "EMAIL_CODE_INVALID"
-        app.dependency_overrides[get_current_user] = lambda: user
+        client.headers["Authorization"] = "Bearer " + create_access_token(
+            subject=str(user.user_id),
+            tenant_id=tenant_id,
+            tenant_version=created_tenant.row_version,
+            user_version=user.auth_version,
+        )
         binding = {"email": "replacement@example.com", "password": "ChangedPassword123"}
         response = await client.post(
             "/auth/email/code", json={**binding, "password": "WrongPassword123"}
@@ -393,6 +406,13 @@ async def test_http_registration_reset_and_disabled_policy(
             "/auth/email", json={**binding, "code": binding_code}
         )
         assert response.json()["code"] == 200
+        await db_session.refresh(user)
+        client.headers["Authorization"] = "Bearer " + create_access_token(
+            subject=str(user.user_id),
+            tenant_id=tenant_id,
+            tenant_version=created_tenant.row_version,
+            user_version=user.auth_version,
+        )
         response = await client.get("/auth/email")
         assert response.json()["data"]["verified"] is True
         assert response.json()["data"]["email"] == "replacement@example.com"
@@ -404,13 +424,13 @@ async def test_http_registration_reset_and_disabled_policy(
             revision=current["revision"],
             tenant=tenant,
         )
+        await db_session.commit()
         response = await client.post(
             "/auth/register", json={**identity, "code": code, "password": "Password123"}
         )
         assert response.json()["errorCode"] == "ACCOUNT_SERVICE_DISABLED"
     finally:
-        app.dependency_overrides.pop(get_db, None)
-        app.dependency_overrides.pop(get_current_user, None)
+        client.headers.pop("Authorization", None)
         _, connection, _ = codes
         # Only this test's explicitly scoped identities; never flush shared Redis.
         keys = [

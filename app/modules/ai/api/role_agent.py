@@ -3,7 +3,7 @@
 URL 走 /ai/role-agent 而非 /system/role（决策 #17）：
 表归 ai 模块，service 也归 ai 模块，避免 system → ai 跨模块依赖.
 
-Service 不 commit，PUT 端点显式 `await db.commit()`（分层铁律 #9）.
+PUT 使用固定授权 owner 完成一次事务；请求读取会话在交接时关闭。
 GET 端点返回 typed ``ResponseModel[RoleAgentBinding]``，
 （response_model=ResponseModel[dict] 是反例，会让 FastAPI schema 不精确）.
 """
@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import require_permissions
 from app.core.base_response import ResponseModel
 from app.core.tenant import TenantContext
+from app.db.authorization_http import control_write
 from app.db.session import get_db
 from app.modules.ai.schemas.role_agent import RoleAgentBinding, RoleAgentBindReq
 from app.modules.ai.service.role_agent import role_agent_service
@@ -66,12 +67,12 @@ async def put_role_agent_binding(
 
     PUT 端点复用 service 层规范化和边界校验，避免 API 与 service 漂移。
     """
-    await role_agent_service.put_binding(
+    await control_write(
         db,
-        role_id,
-        req,
-        actor_user_id=current_user.user_id,
+        current_user,
+        operation="role.agents",
+        payload=req,
+        target_id=role_id,
         tenant=tenant,
     )
-    await db.commit()
     return ResponseModel.success(data=None)

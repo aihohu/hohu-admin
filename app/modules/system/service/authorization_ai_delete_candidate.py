@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from sqlalchemy import or_, select
 
-from app.core.authorization_plan import LockPlan, ResourceKey
+from app.core.authorization_plan import LockMode, LockPlan, ResourceKey, TenantLock
 from app.core.authorization_plan import ResourceKind as K
 from app.db.authorization_plan_session import _order_error
 from app.modules.ai.agents.gateway.result import ResultProjection, ToolResult, UIResult
@@ -20,9 +20,19 @@ from app.modules.system.service.authorization_ai_user_input import (
     context,
     ensure_targets_in_scope,
 )
+from app.modules.system.service.authorization_read_budget import (
+    bounded_authorization_reads,
+)
 from app.modules.system.service.authorization_resource_catalog import resource_spec
 from app.modules.system.service.authorization_system_candidate import (
+    _ids,
+    _limit,
+)
+from app.modules.system.service.authorization_system_candidate import (
     system_authorization_candidate as system,
+)
+from app.modules.system.service.authorization_transaction_service import (
+    authorization_transactions,
 )
 from app.modules.system.service.user_service import user_service
 
@@ -35,10 +45,18 @@ class _DeleteWork:
     contexts: object
     facts: dict
     locks: LockPlan
+    http: bool = False
     used: bool = False
 
 
 class AIDeleteCandidate:
+    @staticmethod
+    def _ids(command):
+        _, _, operation, payload, target, *_ = command.values
+        if operation not in {"user.delete", "user.batch_delete"}:
+            raise _order_error()
+        return _ids(payload if operation == "user.batch_delete" else [target])
+
     async def _facts(self, db, tenant, ids):
         tid = tenant.tenant_id
         table = resource_spec(K.CONVERSATION).table
@@ -46,13 +64,15 @@ class AIDeleteCandidate:
             dict(r)
             for r in (
                 await db.execute(
-                    select(table).where(
-                        table.c.tenant_id == tid, table.c.user_id.in_(ids)
-                    )
+                    select(table)
+                    .where(table.c.tenant_id == tid, table.c.user_id.in_(ids))
+                    .limit(10001)
                 )
             ).mappings()
         ]
         cids = tuple(r["conversation_id"] for r in conversations)
+        if len(conversations) > 10000:
+            raise _limit()
         facts = {K.CONVERSATION: conversations}
         for kind in (
             K.SOURCE_MESSAGE,
@@ -82,9 +102,12 @@ class AIDeleteCandidate:
                         .order_by(
                             *[table.c[n] for n in resource_spec(kind).key_columns]
                         )
+                        .limit(10001)
                     )
                 ).mappings()
             ]
+            if len(facts[kind]) > 10000:
+                raise _limit()
             if any(
                 "conversation_id" in r
                 and r["conversation_id"] is not None
@@ -128,10 +151,15 @@ class AIDeleteCandidate:
         ) or user_service.build_batch_delete_identity_snapshot(users) != snapshot:
             raise _order_error()
 
-    async def plan(self, db, tx, command):
-        tenant, _, _, ids, *_ = command.values
+    async def plan(self, db, tx, command, *, http=False):
+        tenant = command.values[0]
+        ids = self._ids(command)
         tx.assert_planning(tenant.tenant_id, exclusive=True)
-        await self._check_targets(db, command)
+        if http:
+            if command.values[5] is not None:
+                raise _order_error()
+        else:
+            await self._check_targets(db, command)
         domain = await system.plan(db, tx, command)
         facts = await self._facts(db, tenant, ids)
         contexts = await ai_context_candidate.discover(
@@ -162,6 +190,7 @@ class AIDeleteCandidate:
             contexts,
             facts,
             LockPlan(existing=tuple(keys), new=domain.locks.new),
+            http=http,
         )
 
     async def apply(self, db, tx, command, work):
@@ -175,8 +204,10 @@ class AIDeleteCandidate:
             raise _order_error()
         work.used = True
         tx.assert_planned(work.locks)
-        tenant, _, _, ids, *_ = command.values
-        await self._check_targets(db, command)
+        tenant = command.values[0]
+        ids = self._ids(command)
+        if not work.http:
+            await self._check_targets(db, command)
         await ai_context_candidate.recheck(db, tx, work.contexts)
         if await self._facts(db, tenant, ids) != work.facts:
             raise _unresolved()
@@ -213,6 +244,8 @@ class AIDeleteCandidate:
                     expected=row,
                 )
         changed = await system.apply(db, tx, work.domain)
+        if work.http:
+            return changed
         count = changed["result"]
         str_ids = [str(n) for n in sorted(ids)]
         return ToolResult.success(
@@ -228,6 +261,17 @@ class AIDeleteCandidate:
                 label_params={"count": count},
             ),
         )
+
+    async def execute_http(self, db, **request):
+        command = await system.prepare_input(db, **request)
+        tenant = command.values[0]
+        with bounded_authorization_reads(db):
+            async with authorization_transactions.scope(
+                db, tenants=(TenantLock(tenant.tenant_id, LockMode.EXCLUSIVE),)
+            ) as tx:
+                work = await self.plan(db, tx, command, http=True)
+                await tx.lock(work.locks)
+                return await self.apply(db, tx, command, work)
 
 
 ai_delete_candidate = AIDeleteCandidate()

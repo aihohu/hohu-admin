@@ -60,6 +60,7 @@ class BoundedWorker:
 
 _password_worker = BoundedWorker()
 smtp_worker = BoundedWorker(timeout=15.0)
+file_transform_worker = BoundedWorker(workers=2, queue=8, timeout=3.0)
 
 
 async def hash_password(password: str) -> str:
