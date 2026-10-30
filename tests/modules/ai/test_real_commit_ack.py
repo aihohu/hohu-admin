@@ -19,12 +19,12 @@ from sqlalchemy.pool import NullPool
 
 from app.db import authorization_http
 from app.db.authorization_owner import _QUARANTINED
-from app.db.session import AsyncSessionLocal, engine, is_session_quarantined
-from app.modules.ai.agents.gateway import atomic_execution
+from app.db.session import engine, is_session_quarantined
 from app.modules.ai.api import confirm as confirm_module
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.schemas.confirm import ConfirmRequest
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.pg_fault_proxy import CommitFault, PgFaultProxy
 from tests.modules.ai.test_atomic_prepared_completion import (
     assert_success,
@@ -86,7 +86,6 @@ async def fault_sessions(case, monkeypatch, plan, *, match=None):
             connect_args={"ssl": False},
         )
         factory = async_sessionmaker(proxied, expire_on_commit=False, autoflush=False)
-        monkeypatch.setattr(atomic_execution, "AsyncSessionLocal", factory)
         monkeypatch.setattr(authorization_http, "engine", proxied)
         previous_quarantine = set(_QUARANTINED)
         faults = [CommitFault(stage, mode) for stage, mode in plan]
@@ -192,6 +191,8 @@ def source_fingerprint():
     root = Path(__file__).resolve().parents[3]
     paths = [
         "app/modules/ai/api/confirm.py",
+        "app/db/authorization_ai_owner.py",
+        "app/db/authorization_lifecycle_owner.py",
         "app/modules/ai/agents/gateway/authorization_execution.py",
         "app/modules/ai/service/authorization_execution_candidate.py",
         "app/modules/system/service/authorization_ai_tool_adapter.py",
@@ -548,7 +549,7 @@ async def test_live_uncommitted_transaction_keeps_recovery_unknown(
         try:
             await asyncio.wait_for(faults[0].reached.wait(), 8)
             started = time.monotonic()
-            outcome = await atomic_execution.reconcile_prepared_completion(
+            outcome = await confirm_module.reconcile_prepared_completion(
                 case.confirmation_id, tenant=case.tenant
             )
             assert outcome.disposition == "unknown"
@@ -632,7 +633,7 @@ async def test_server_processing_commit_keeps_recovery_unknown(
                     )
                     assert not faults[0].reached.is_set()
                     started = time.monotonic()
-                    outcome = await atomic_execution.reconcile_prepared_completion(
+                    outcome = await confirm_module.reconcile_prepared_completion(
                         case.confirmation_id, tenant=case.tenant
                     )
                     assert outcome.disposition == "unknown"
@@ -713,12 +714,12 @@ async def test_readonly_recovery_endpoint_cannot_prove_rollback(
         connect_args={"server_settings": {"default_transaction_read_only": "on"}},
     )
     monkeypatch.setattr(
-        atomic_execution,
-        "AsyncSessionLocal",
-        async_sessionmaker(readonly, expire_on_commit=False),
+        authorization_http,
+        "engine",
+        readonly,
     )
     try:
-        outcome = await atomic_execution.reconcile_prepared_completion(
+        outcome = await confirm_module.reconcile_prepared_completion(
             case.confirmation_id,
             tenant=case.tenant,
             expected_claim=claim,

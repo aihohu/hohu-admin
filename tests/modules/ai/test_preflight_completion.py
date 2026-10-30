@@ -12,7 +12,6 @@ from sqlalchemy.orm import make_transient
 from app.core import redis as redis_module
 from app.core.exceptions import BusinessException
 from app.db import authorization_chat_owner
-from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.gateway import executor
 from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.ai.models.message import AiMessage
@@ -41,6 +40,7 @@ from app.modules.ai.service.user_delete_dependency_service import (
     user_delete_dependency_service,
 )
 from app.modules.auth.service import load_live_user_authority
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import authenticated_actor
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,

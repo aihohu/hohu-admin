@@ -39,14 +39,16 @@ async def test_handoff_refuses_any_prior_write_even_after_flush(
     _, plain = system_sessions
     async with RequestSession(bind=plain.kw["bind"], expire_on_commit=False) as db:
         if mutation == "core":
-            await db.execute(
-                update(User).where(User.user_id == 101).values(nickname="x")
-            )
+            with pytest.raises(BusinessException):
+                await db.execute(
+                    update(User).where(User.user_id == 101).values(nickname="x")
+                )
         else:
             user = await db.get(User, 101)
             user.nickname = "x"
             if mutation == "flushed":
-                await db.flush()
+                with pytest.raises(BusinessException):
+                    await db.flush()
         with pytest.raises(BusinessException):
             await release_request_reads(db)
         await db.rollback()

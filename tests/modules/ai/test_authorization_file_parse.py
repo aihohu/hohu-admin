@@ -6,7 +6,7 @@ from sqlalchemy import event, select, update
 from app.core.authorization_io import file_transform_worker
 from app.core.exceptions import BusinessException
 from app.db import authorization_read_confirmation_owner as owner_module
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai.agents.gateway import executor
 from app.modules.ai.agents.gateway.atomic_execution import (
     PreparedExecutionOutcomeUnknown,
@@ -22,6 +22,7 @@ from app.modules.ai.schemas.confirm import ConfirmRequest
 from app.modules.system.models.file import File
 from app.modules.system.models.setting import SystemSetting
 from app.modules.system.models.user import User
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )

@@ -11,7 +11,7 @@ from tenant_helpers import create_test_tenant
 
 from app.core.exceptions import AuthorizationException, BusinessRuleException
 from app.db.authorization_control_http import require_control_write
-from app.db.session import AsyncSessionLocal, get_db
+from app.db.session import get_db
 from app.main import app
 from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.model_policy import TenantAiModelPolicy
@@ -26,6 +26,7 @@ from app.modules.platform.schemas import (
     PlatformTenantModelPoliciesPut,
 )
 from tests.committed_database import committed_test_database  # noqa: F401
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.platform.test_platform_ai_control import (
     _platform,
     _provider_with_models,

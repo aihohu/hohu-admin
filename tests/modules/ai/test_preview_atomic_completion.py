@@ -15,7 +15,7 @@ from app.core.file_storage import LocalFileStorage
 from app.core.id_generator import next_id
 from app.core.security import create_access_token
 from app.core.tenant import PlatformContext
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai.agents.gateway import executor
 from app.modules.ai.agents.gateway.atomic_execution import (
     PreparedExecutionOutcomeUnknown,
@@ -32,9 +32,24 @@ from app.modules.system.models.user_transfer import UserImportBatch
 from app.modules.system.service.authorization_transfer_candidate import (
     transfer_candidate,
 )
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case,  # noqa: F401
 )
+
+
+async def finish_legacy_cleanup(intentions):
+    """Exercise dormant retention compatibility without replacing runtime owners."""
+    from app.modules.ai.agents.gateway import atomic_execution
+    from app.modules.system.service.transfer_cleanup_service import (
+        finish_committed_cleanup,
+    )
+
+    # Only this old helper's private session uses the fixture factory. Scheduled
+    # retention and HTTP cancellation keep the production TransferOwner.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(atomic_execution, "AsyncSessionLocal", AsyncSessionLocal)
+        await finish_committed_cleanup(intentions)
 
 
 def _retention_context(reason):
@@ -514,7 +529,6 @@ async def test_real_export_file_and_database_completion_faults(
             from datetime import datetime, timedelta
 
             from app.modules.system.service.transfer_cleanup_service import (
-                finish_committed_cleanup,
                 take_cleanup_intentions,
             )
             from app.modules.system.service.user_export_service import (
@@ -534,7 +548,7 @@ async def test_real_export_file_and_database_completion_faults(
                 intentions = take_cleanup_intentions(db)
                 assert preview.storage._store
                 await db.commit()
-            await finish_committed_cleanup(intentions)
+            await finish_legacy_cleanup(intentions)
             assert preview.storage._store == {}
     finally:
         async with AsyncSessionLocal() as db, db.begin():
@@ -963,7 +977,6 @@ async def test_real_import_partial_and_fail_fast_are_atomic(
     from datetime import UTC, datetime, timedelta
 
     from app.modules.system.service.transfer_cleanup_service import (
-        finish_committed_cleanup,
         take_cleanup_intentions,
     )
     from app.modules.system.service.user_import_service import cleanup_expired_batches
@@ -981,7 +994,7 @@ async def test_real_import_partial_and_fail_fast_are_atomic(
         intentions = take_cleanup_intentions(db)
         assert len(preview.storage._store) == 2
         await db.commit()
-    await finish_committed_cleanup(intentions)
+    await finish_legacy_cleanup(intentions)
     assert preview.storage._store == {}
 
 
@@ -1125,7 +1138,6 @@ async def test_owned_preview_retention_commits_before_delete_and_preserves_unkno
 
     from app.core.exceptions import BusinessRuleException
     from app.modules.system.service.transfer_cleanup_service import (
-        finish_committed_cleanup,
         take_cleanup_intentions,
     )
     from app.modules.system.service.user_import_service import cleanup_expired_previews
@@ -1154,7 +1166,7 @@ async def test_owned_preview_retention_commits_before_delete_and_preserves_unkno
         intents = take_cleanup_intentions(db)
         assert key in preview.storage._store
         await db.commit()
-    await finish_committed_cleanup(intents)
+    await finish_legacy_cleanup(intents)
     assert (key in preview.storage._store) == bool(unknown)
     if not unknown:
         with pytest.raises(BusinessRuleException):
@@ -1172,7 +1184,6 @@ async def test_expiration_winning_handoff_gap_cannot_revive_import(preview_case)
     from datetime import UTC, datetime, timedelta
 
     from app.modules.system.service.transfer_cleanup_service import (
-        finish_committed_cleanup,
         take_cleanup_intentions,
     )
     from app.modules.system.service.user_import_service import cleanup_expired_previews
@@ -1208,7 +1219,7 @@ async def test_expiration_winning_handoff_gap_cannot_revive_import(preview_case)
             )
             intentions = take_cleanup_intentions(db)
             await db.commit()
-        await finish_committed_cleanup(intentions)
+        await finish_legacy_cleanup(intentions)
         release.set()
         with pytest.raises(PreparedExecutionOutcomeUnknown):
             await asyncio.wait_for(original, timeout=5)

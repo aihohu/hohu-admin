@@ -609,7 +609,7 @@ async def _resolve_users(
             "Delete users by IDs / names / phones → {'deleted': N}. "
             "HITL confirms; ambiguous deletes all."
         ),
-        required_perms=("system:user:delete",),
+        required_perms=("system:user:batch-delete",),
         risk="destructive",
         readonly=False,
         idempotent=False,

@@ -24,7 +24,7 @@ from app.core.exceptions import BusinessException
 from app.core.security import create_access_token
 from app.core.tenant import TenantContext
 from app.db.base import user_depts, user_roles
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai.agents.gateway import executor as gateway_executor
 from app.modules.ai.agents.gateway.failures import compute_args_hash
 from app.modules.ai.agents.gateway.result import ToolResult
@@ -54,6 +54,7 @@ from app.modules.system.models.user import User
 from app.modules.system.service.authorization_ai_tool_adapter import (
     system_ai_tool_adapter,
 )
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
 
 class InjectedCompletionFailure(RuntimeError):

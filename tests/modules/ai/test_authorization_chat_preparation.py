@@ -9,11 +9,12 @@ from sqlalchemy import event
 
 from app.core.exceptions import BusinessException
 from app.db.authorization_runtime import AuthorizationRuntime
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai.agents.supervisor import quota, router
 from app.modules.ai.api import chat as chat_module
 from app.modules.ai.core.provider_egress import provider_egress
 from app.modules.ai.models.model import AiModel
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )

@@ -1268,7 +1268,10 @@ class UserDepartmentAssignmentService:
                 or_(User.user_name.ilike(pattern), User.nickname.ilike(pattern))
             )
         total = int(
-            await db.scalar(select(func.count()).select_from(User).where(*filters)) or 0
+            await db.scalar(
+                select(func.pg_catalog.count(1)).select_from(User).where(*filters)
+            )
+            or 0
         )
         users = list(
             (

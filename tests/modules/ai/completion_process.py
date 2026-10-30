@@ -11,8 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core import redis as redis_module
 from app.core.tenant import TenantContext
-from app.db.session import AsyncSessionLocal, engine
-from app.modules.ai.agents.gateway import atomic_execution
+from app.db.session import engine
 from app.modules.ai.agents.gateway.result import ToolResult
 from app.modules.ai.agents.tools import load_builtin_tools
 from app.modules.ai.agents.tools.registry import ToolRegistry
@@ -23,6 +22,7 @@ from app.modules.system.models.user import User
 from app.modules.system.service.authorization_ai_tool_adapter import (
     system_ai_tool_adapter,
 )
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_preview_atomic_completion import authenticated_actor
 from tests.modules.ai.test_real_commit_ack import (
     clear_action_write,
@@ -110,7 +110,7 @@ async def main(request):
             await db.rollback()
         if request["mode"] == "recover":
             # No prior owner, row version, result or in-memory claim supplied.
-            result = await atomic_execution.reconcile_prepared_completion(
+            result = await confirm_module.reconcile_prepared_completion(
                 request["confirmation_id"], tenant=tenant
             )
             emit({"event": "result", "disposition": result.disposition})

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from app.db.authorization_owner import _QUARANTINED
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai.agents.gateway import authorization_execution
 from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.ai.api import confirm as confirm_module
@@ -21,6 +21,7 @@ from app.modules.ai.service.authorization_chat_candidate import chat_candidate
 from app.modules.system.service.authorization_ai_tool_adapter import (
     system_ai_tool_adapter,
 )
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     approve,
     assert_success,

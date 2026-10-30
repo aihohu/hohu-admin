@@ -9,10 +9,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import delete, event, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AuthorizationException, NotFoundException
-from app.db.session import AsyncSessionLocal, engine
-from app.modules.ai.agents.gateway import atomic_execution
+from app.db import authorization_completion_facts_owner as read_module
+from app.db import authorization_owner
+from app.db.authorization_completion_facts_owner import CompletionFactsOwner
+from app.db.authorization_runtime import AuthorizationRuntime
+from app.db.session import engine
 from app.modules.ai.agents.gateway.atomic_execution import OUTCOME_UNKNOWN_MESSAGE
 from app.modules.ai.agents.hitl.constants import PreparedActionStatus
 from app.modules.ai.api.confirm import confirm_tool
@@ -21,7 +25,6 @@ from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.schemas.confirm import ConfirmRequest
 from app.modules.ai.schemas.operation_log import TraceListQuery
-from app.modules.ai.service import completion_read_state_service as read_module
 from app.modules.ai.service.atomic_completion_service import new_execution_owner
 from app.modules.ai.service.completion_read_state_service import (
     completion_read_state_service,
@@ -37,6 +40,7 @@ from app.modules.ai.service.prepared_action_service import prepared_action_servi
 from app.modules.ai.service.result_projection_service import result_projection_service
 from app.modules.ai.service.trace_service import trace_service
 from app.modules.auth.service import load_live_user_authority
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     approve,
     authenticated_actor,
@@ -582,16 +586,24 @@ async def test_snapshot_timeout_quarantines_session_and_preserves_readonly(monke
     async def hangs(*_args, **_kwargs):
         await gate.wait()
 
-    db = SimpleNamespace(
-        info={},
-        begin=AsyncMock(),
-        execute=AsyncMock(side_effect=hangs),
-        invalidate=AsyncMock(side_effect=hangs),
-        close=AsyncMock(side_effect=hangs),
+    db = AuthorizationRuntime(engine).sessions()
+
+    async def resistant_rollback():
+        while not gate.is_set():
+            try:
+                await gate.wait()
+            except asyncio.CancelledError:
+                continue
+
+    monkeypatch.setattr(db, "execute", AsyncMock(side_effect=hangs))
+    monkeypatch.setattr(db, "rollback", resistant_rollback)
+    monkeypatch.setattr(AsyncSession, "invalidate", AsyncMock(side_effect=hangs))
+    monkeypatch.setattr(
+        "app.db.authorization_http.get_authorization_runtime",
+        lambda: SimpleNamespace(completion_facts=CompletionFactsOwner(lambda: db)),
     )
-    monkeypatch.setattr(atomic_execution, "AsyncSessionLocal", lambda: db)
     monkeypatch.setattr(read_module, "_READ_TIMEOUT_SEC", 0.02)
-    monkeypatch.setattr(atomic_execution, "_SESSION_CLEANUP_TIMEOUT_SEC", 0.02)
+    monkeypatch.setattr(authorization_owner, "_CLEANUP_SECONDS", 0.02)
     try:
         async with asyncio.timeout(1):
             states = await completion_read_state_service.read(
@@ -626,14 +638,13 @@ async def test_snapshot_timeout_quarantines_session_and_preserves_readonly(monke
         assert effective_call_state(
             {"tool": "user.create", "tool_call_id": "write"}, states
         ).unknown
-        db.close.assert_not_awaited()
-        db.invalidate.assert_awaited_once()
-        assert id(db) in atomic_execution._QUARANTINED_SESSIONS
+        assert db.info[authorization_owner.QUARANTINE_KEY]
+        assert id(db) in authorization_owner._QUARANTINED
     finally:
         gate.set()
-        entry = atomic_execution._QUARANTINED_SESSIONS.get(id(db))
+        entry = authorization_owner._QUARANTINED.get(id(db))
         if entry is not None:
-            await entry[1]
+            await entry[2]
 
 
 async def test_effective_trace_filter_counts_before_paginating(

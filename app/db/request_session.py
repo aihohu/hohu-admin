@@ -1,18 +1,23 @@
 """Track request reads and permanently close their SQL boundary on handoff."""
 
 from sqlalchemy import event
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Select, visitors
 from sqlalchemy.sql.dml import UpdateBase
 from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.sql.selectable import CompoundSelect
 
-from app.db.authorization_plan_session import _order_error
+from app.core.exceptions import BusinessException
+from app.db.authorization_plan_session import AuthorizationPlanSession, _order_error
 
 
-class RequestSession(AsyncSession):
+class RequestSession(AuthorizationPlanSession):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        if "require_plan" in kwargs:
+            raise _order_error()
+        super().__init__(*args, require_plan=True, **kwargs)
+        self._install_request_tracking()
+
+    def _install_request_tracking(self):
         self._request_released = False
         self._request_wrote = False
         event.listen(self.sync_session, "after_begin", self._observe_connection)
@@ -24,6 +29,14 @@ class RequestSession(AsyncSession):
     def _check_open(self, *_args):
         if self._request_released:
             raise _order_error()
+
+    async def _observed_io(self, method, *args, **kwargs):
+        try:
+            return await super()._observed_io(method, *args, **kwargs)
+        except BusinessException as error:
+            if error.error_code == "FIELD_POLICY_LOCK_ORDER":
+                self._request_wrote = True
+            raise
 
     def begin(self):
         self._check_open()

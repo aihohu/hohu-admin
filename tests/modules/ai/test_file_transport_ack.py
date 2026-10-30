@@ -7,7 +7,6 @@ import pytest
 from sqlalchemy import delete, select
 
 from app.core import redis as redis_module
-from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.gateway import executor
 from app.modules.ai.agents.gateway.atomic_execution import (
     PreparedExecutionOutcomeUnknown,
@@ -22,6 +21,7 @@ from app.modules.system.models.user_transfer import UserExportTask, UserImportBa
 from app.modules.system.service.authorization_ai_tool_adapter import (
     system_ai_tool_adapter,
 )
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )

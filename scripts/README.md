@@ -45,4 +45,6 @@
 
 详细行为与验证记录见 [SCRIPTS-DEPLOYMENT.md](../docs/SCRIPTS-DEPLOYMENT.md)。
 
+`python -m scripts.reconcile_ai_legacy --help` 提供历史 AI 核对：`inspect` 只读，`annotate` 通过固定维护控制器核验直接启动或 Compose 的真实停写状态。必须提供部署清单，不能只凭摘要或 Ctrl+C 执行标注。完整用法见 [授权维护](../docs/AUTHORIZATION-MAINTENANCE.md#历史-ai-核对标注)。
+
 系统设置与自定义参数分别使用 `sys_setting` 和 `sys_config`。拆表由 Alembic 自动搬迁旧值，再由初始化补齐两个菜单；见 [SYSTEM-SETTINGS.md](../docs/SYSTEM-SETTINGS.md)。

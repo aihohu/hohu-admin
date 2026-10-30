@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema, DropSchema
 
-from app.db.session import AsyncSessionLocal
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
 _MIGRATIONS = Path(__file__).resolve().parents[1] / "alembic"
 

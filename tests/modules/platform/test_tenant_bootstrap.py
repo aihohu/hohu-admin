@@ -10,7 +10,6 @@ from app.core.id_generator import next_id
 from app.core.security import verify_password
 from app.core.tenant import PlatformContext
 from app.db.base import role_menus, user_roles
-from app.db.session import AsyncSessionLocal
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.model_policy import TenantAiModelPolicy
@@ -30,6 +29,7 @@ from app.modules.system.models.setting import SystemSetting
 from app.modules.system.models.tenant import Tenant
 from app.modules.system.models.user import User
 from tests.committed_database import committed_test_database  # noqa: F401
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
 
 def _platform(permission: str, tenant_id: int) -> PlatformContext:

@@ -11,7 +11,6 @@ from datetime import datetime
 
 from sqlalchemy import select
 
-from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.gateway import executor, preview_handoff
 from app.modules.ai.agents.gateway.result import ToolResult
 from app.modules.ai.agents.hitl.constants import (
@@ -27,9 +26,11 @@ from app.modules.ai.service.preflight_completion_service import (
     runtime_preflight_summary,
 )
 from app.modules.ai.service.prepared_action_service import prepared_action_service
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
 
 def install_protocol_boundaries(monkeypatch):
+    monkeypatch.setattr(executor, "AsyncSessionLocal", AsyncSessionLocal)
     original_hang = executor._hang_for_confirmation
     synthetic_prepares = {}
 

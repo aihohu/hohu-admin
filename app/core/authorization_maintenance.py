@@ -20,6 +20,7 @@ _ACTIONS = frozenset(
         "seed.agents",
         "seed.settings",
         "seed.menus",
+        "ai.reconcile",
         "migration",
     }
 )

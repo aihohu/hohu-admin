@@ -23,7 +23,6 @@ from tenant_helpers import tenant_context
 from app.core import redis as redis_module
 from app.core.config import settings
 from app.core.exceptions import AuthorizationException
-from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.gateway.executor import execute_tool
 from app.modules.ai.agents.gateway.result import (
     PreparedActionProposal,
@@ -46,6 +45,7 @@ from app.modules.ai.models.message import AiMessage
 from app.modules.system.models.tenant import Tenant
 from app.modules.system.models.user import User
 from tests.committed_database import committed_test_database  # noqa: F401
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.gateway_protocol_boundary import install_protocol_boundaries
 
 
@@ -164,7 +164,7 @@ async def clean_env(monkeypatch, executor_contexts):
 
     hitl_manager._reset_for_test()
 
-    from app.db.session import AsyncSessionLocal
+    from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
     async with AsyncSessionLocal() as db:
         async with db.begin():
@@ -718,7 +718,7 @@ class TestAutonomousFlow:
         result = await execute_tool(_TEST_TOOL_LOW, {}, deps)
         assert result.ok
 
-        from app.db.session import AsyncSessionLocal
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             res = await db.execute(
@@ -768,8 +768,8 @@ class TestPreparedPreviewOnlyFlow:
         ]
         assert not await redis_module.redis_client.keys("ai:confirm:*")
 
-        from app.db.session import AsyncSessionLocal
         from app.modules.ai.models.prepared_action import AiPreparedAction
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             action = (
@@ -846,8 +846,8 @@ class TestPreparedPreviewOnlyFlow:
             event for event in events if isinstance(event, ConfirmationRequiredEvent)
         )
 
-        from app.db.session import AsyncSessionLocal
         from app.modules.ai.models.prepared_action import AiPreparedAction
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             action = (
@@ -949,8 +949,8 @@ class TestHitlFlow:
         assert deps.guard_handoff is False
         rollback_quota.assert_awaited_once()
 
-        from app.db.session import AsyncSessionLocal
         from app.modules.ai.models.operation_log import AiOperationLog
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             log = (
@@ -1034,8 +1034,8 @@ class TestHitlFlow:
         }
         assert "server-only-token" not in repr(events)
 
-        from app.db.session import AsyncSessionLocal
         from app.modules.ai.models.prepared_action import AiPreparedAction
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             action = (
@@ -1144,7 +1144,7 @@ class TestHitlFlow:
         ]
         assert events[-1].projection == ResultProjection()
 
-        from app.db.session import AsyncSessionLocal
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             row = (
@@ -1180,8 +1180,8 @@ class TestHitlFlow:
 
         assert not result.ok
 
-        from app.db.session import AsyncSessionLocal
         from app.modules.ai.models.prepared_action import AiPreparedAction
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             action = (
@@ -1229,8 +1229,8 @@ class TestHitlFlow:
             {"label": "affectedCount", "value": 1, "tone": "warning"},
         ]
 
-        from app.db.session import AsyncSessionLocal
         from app.modules.ai.models.prepared_action import AiPreparedAction
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             action = (
@@ -1286,7 +1286,7 @@ class TestHitlFlow:
         assert not result.ok
         assert result.error_code == "AI_HITL_EXPIRED"
 
-        from app.db.session import AsyncSessionLocal
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             res = await db.execute(

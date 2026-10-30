@@ -18,7 +18,8 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import redis as redis_module
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
 
 def _reset_redis_client() -> None:
@@ -243,11 +244,11 @@ async def seed_test_message(auth_token) -> int:
     from sqlalchemy import delete, select
 
     from app.core.id_generator import next_id
-    from app.db.session import AsyncSessionLocal
     from app.modules.ai.models.agent import AiAgent
     from app.modules.ai.models.conversation import AiConversation
     from app.modules.ai.models.message import AiMessage
     from app.modules.system.models.user import User
+    from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
     async with AsyncSessionLocal() as s:
         user = (
@@ -312,11 +313,11 @@ async def seed_test_message_other_user(auth_token) -> int:
     from sqlalchemy import delete, select
 
     from app.core.id_generator import next_id
-    from app.db.session import AsyncSessionLocal
     from app.modules.ai.models.agent import AiAgent
     from app.modules.ai.models.conversation import AiConversation
     from app.modules.ai.models.message import AiMessage
     from app.modules.system.models.user import User
+    from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
     async with AsyncSessionLocal() as s:
         other = (

@@ -280,11 +280,11 @@ async def test_auto_uses_persisted_user_history_instead_of_client_history(
 ):
     from sqlalchemy import delete, select
 
-    from app.db.session import AsyncSessionLocal
     from app.modules.ai.models.conversation import AiConversation
     from app.modules.ai.models.message import AiMessage
     from app.modules.ai.models.routing_log import AiRoutingLog
     from app.modules.system.models.user import User
+    from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
     actor = await db_session.scalar(
         select(User).where(User.tenant_id == 0, User.user_name == "admin")

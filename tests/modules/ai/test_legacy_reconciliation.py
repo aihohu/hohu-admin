@@ -10,7 +10,6 @@ import pytest
 from sqlalchemy import update
 
 from app.core.exceptions import BusinessException
-from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.hitl.constants import PreparedActionStatus
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
@@ -24,6 +23,7 @@ from app.modules.ai.service.legacy_reconciliation_service import (
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.ai.service.reconciliation_annotation import MARKER, read_annotation
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     approve,
     authenticated_actor,

@@ -15,7 +15,7 @@ from app.core.config import settings
 from app.core.exceptions import AuthorizationException, BusinessRuleException
 from app.core.security import create_access_token, get_password_hash, verify_password
 from app.db import authorization_http
-from app.db.session import AsyncSessionLocal
+from app.db.session import AsyncSessionLocal as ProductionSessionLocal
 from app.modules.auth.candidate_owner import auth_candidate_owner
 from app.modules.auth.email_verification import EmailVerification
 from app.modules.auth.schemas.self_service import Registration
@@ -32,6 +32,7 @@ from app.modules.system.service.mail_service import (
 )
 from app.modules.system.service.settings_service import settings_service
 from tests.committed_database import committed_test_database as committed_test_database
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.tenant_helpers import create_test_tenant, tenant_context
 
 
@@ -311,8 +312,15 @@ async def test_email_sending_throttle_cannot_be_bypassed_by_changing_purpose(cod
 @pytest.fixture
 async def http_account_database(committed_test_database, monkeypatch):
     monkeypatch.setattr(authorization_http, "engine", committed_test_database)
-    async with AsyncSessionLocal() as db:
-        yield db
+    original_bind = ProductionSessionLocal.kw["bind"]
+    # HTTP reads and fixed owners must see the same disposable schema. Keep the
+    # real RequestSession class and its strict plan requirement unchanged.
+    ProductionSessionLocal.configure(bind=committed_test_database)
+    try:
+        async with AsyncSessionLocal() as db:
+            yield db
+    finally:
+        ProductionSessionLocal.configure(bind=original_bind)
 
 
 async def test_http_registration_reset_and_disabled_policy(

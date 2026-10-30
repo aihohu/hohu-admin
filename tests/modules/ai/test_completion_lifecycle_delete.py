@@ -13,7 +13,7 @@ from app.core.exceptions import BusinessException
 from app.core.security import create_access_token
 from app.db.authorization_owner import _QUARANTINED
 from app.db.request_session import RequestSession
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai import lifecycle
 from app.modules.ai.api import confirm, resume
 from app.modules.ai.api import conversation as conversation_api
@@ -28,6 +28,7 @@ from app.modules.auth.service import get_current_user
 from app.modules.system.service.authorization_ai_tool_adapter import (
     system_ai_tool_adapter,
 )
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_completion_guards import PLATFORM, TENANT
 from tests.modules.ai.test_atomic_prepared_completion import (
     approve,

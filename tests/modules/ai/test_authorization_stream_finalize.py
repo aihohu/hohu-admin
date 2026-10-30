@@ -11,7 +11,7 @@ from starlette.requests import Request
 
 from app.core.exceptions import BusinessException
 from app.db import authorization_chat_owner
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai.api import chat as chat_module
 from app.modules.ai.api.chat import _finalize_stream_turn
 from app.modules.ai.core.provider_egress import provider_egress
@@ -23,6 +23,7 @@ from app.modules.ai.models.routing_log import AiRoutingLog
 from app.modules.ai.service.result_projection_service import result_projection_service
 from app.modules.auth.service import access_identity
 from app.modules.system.models.user import User
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     approve,
     assert_success,

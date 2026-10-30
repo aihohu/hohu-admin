@@ -1,6 +1,7 @@
 """``/ai/chat/resume`` 端点单元测试。
 
-直接调端点函数，mock 掉 redis_client + hitl_manager + settings。
+显式测试历史协议 helper，mock redis_client + hitl_manager + settings。
+实际注册入口的持久动作屏障另有真实JWT/数据库测试。
 """
 
 # ruff: noqa: ARG001, PLC0415
@@ -22,7 +23,8 @@ from app.core.exceptions import (
 from app.core.tenant import TenantContext
 from app.modules.ai.agents.hitl.events import ToolCallResultEvent
 from app.modules.ai.agents.hitl.manager import PendingPayload
-from app.modules.ai.api.resume import _load_durable_resume_terminal, resume_chat
+from app.modules.ai.api.resume import _legacy_resume_chat as resume_chat
+from app.modules.ai.api.resume import _load_durable_resume_terminal
 from app.modules.ai.service.result_projection_service import (
     result_projection_service,
 )

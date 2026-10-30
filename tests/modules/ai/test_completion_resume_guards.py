@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import redis as redis_module
 from app.db import authorization_chat_owner
 from app.db.authorization_owner import _QUARANTINED
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai import lifecycle
 from app.modules.ai.agents.gateway.authorization_execution import PlannedGatewayOwner
 from app.modules.ai.agents.hitl.events import (
@@ -30,6 +30,7 @@ from app.modules.ai.service.authorization_execution_candidate import (
 )
 from app.modules.ai.service.authorization_lifecycle_candidate import lifecycle_candidate
 from app.modules.auth.service import access_identity
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_completion_guards import PLATFORM
 from tests.modules.ai.test_atomic_prepared_completion import (
     approve,

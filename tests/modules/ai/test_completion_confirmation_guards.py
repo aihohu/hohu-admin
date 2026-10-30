@@ -10,8 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.authorization_owner import _QUARANTINED
 from app.db.authorization_plan_session import AuthorizationPlanSession
-from app.db.session import AsyncSessionLocal, engine
-from app.modules.ai.agents.gateway import executor
+from app.db.session import engine
 from app.modules.ai.agents.gateway.atomic_execution import (
     PreparedExecutionOutcomeUnknown,
 )
@@ -26,6 +25,7 @@ from app.modules.ai.service.atomic_completion_service import (
     new_execution_owner,
 )
 from app.modules.ai.service.authorization_chat_candidate import chat_candidate
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     approve,
     authenticated_actor,
@@ -35,6 +35,7 @@ from tests.modules.ai.test_atomic_prepared_completion import (
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )
+from tests.modules.ai.test_atomic_terminal_loader import load_terminal
 from tests.modules.ai.test_completion_resume_guards import leave_claim_running
 
 
@@ -91,9 +92,7 @@ async def test_file_failure_without_side_effect_proof_remains_unknown(
         assert (await approve(case)).data.status == "running"
     else:
         with pytest.raises(PreparedExecutionOutcomeUnknown):
-            await executor._load_prepared_terminal_result(
-                case.confirmation_id, tenant=case.tenant
-            )
+            await load_terminal(case)
     assert len(case.calls) == 1
 
 
@@ -107,9 +106,7 @@ async def test_legacy_write_waiter_cannot_infer_rollback(completion_case, state)
         action.execution_owner = "legacy-owner"
         log.status = "failed" if state == "failed" else "running"
     with pytest.raises(PreparedExecutionOutcomeUnknown):
-        await executor._load_prepared_terminal_result(
-            case.confirmation_id, tenant=case.tenant
-        )
+        await load_terminal(case)
     assert case.calls == []
 
 
@@ -182,13 +179,9 @@ async def test_duplicate_cancellation_requires_never_started_proof(
         assert response.data.status == ("running" if corruption else state)
     elif corruption:
         with pytest.raises(PreparedExecutionOutcomeUnknown):
-            await executor._load_prepared_terminal_result(
-                case.confirmation_id, tenant=case.tenant
-            )
+            await load_terminal(case)
     else:
-        result, _ = await executor._load_prepared_terminal_result(
-            case.confirmation_id, tenant=case.tenant
-        )
+        result, _ = await load_terminal(case)
         assert result.ok is False
         assert result.error_code == (
             "USER_REJECTED" if state == "rejected" else "AI_HITL_EXPIRED"

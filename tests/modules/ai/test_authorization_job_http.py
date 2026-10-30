@@ -7,12 +7,13 @@ from uuid import uuid4
 from sqlalchemy import delete, event, select
 
 from app.core.tenant import PlatformContext
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.job import job_runner, task_registry
 from app.modules.job.api import job as job_api
 from app.modules.job.log_monitor import JobLogMonitor
 from app.modules.job.models.job import SysJob, SysJobLog
 from app.modules.job.schemas.job import JobCreate, JobUpdate
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )

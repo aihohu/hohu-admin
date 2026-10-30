@@ -1,4 +1,4 @@
-"""Pure inventory of dormant authorization candidates and unfinished surfaces.
+"""Pure inventory of authorization lock and IO contracts.
 
 This is a review/static-check manifest, never a runtime dispatch or rollout flag.
 """
@@ -24,7 +24,7 @@ class Candidate:
     proof_only: bool
     operation: str = ""
     maintenance: bool = False
-    production_connected: bool = False
+    production_connected: bool = False  # This manifest cannot certify ingress wiring.
 
 
 IO_PROFILES = MappingProxyType(
@@ -1010,6 +1010,33 @@ _JOB = "app.modules.job.service.authorization_job_candidate.JobAuthorizationCand
 _FILE_ADAPTER = _S + "authorization_ai_file_adapter.AIFileAdapter"
 _COMPLETION_ENTRIES = (
     (
+        "app.db.authorization_reconciliation_owner.ReconciliationOwner",
+        ("inspect", "annotate"),
+        "owner",
+        "S",
+        ("S", "X"),
+        "auth-read",
+        "none",
+    ),
+    (
+        _A + "authorization_reconciliation_candidate.ReconciliationCandidate",
+        ("execute",),
+        "proof_writer",
+        "S",
+        ("S", "X"),
+        "auth-read",
+        "none",
+    ),
+    (
+        "app.db.authorization_completion_facts_owner.CompletionFactsOwner",
+        ("read",),
+        "owner",
+        "none",
+        (),
+        "auth-read",
+        "none",
+    ),
+    (
         "app.db.authorization_business_owner.BusinessOwner",
         ("execute",),
         "owner",
@@ -1739,10 +1766,6 @@ CANDIDATES += _composition
 
 PENDING_SURFACES = MappingProxyType(
     {
-        "2B5": (
-            "production routers/session factory",
-            "full writer barrier wiring",
-            "combination concurrency verification",
-        ),
+        "2B5": ("final frozen full-suite and exact-commit CI verification",),
     }
 )

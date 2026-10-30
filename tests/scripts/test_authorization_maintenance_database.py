@@ -256,3 +256,17 @@ async def test_canceled_controller_keeps_database_closed_and_releases_control_lo
         assert guard.original_allow is False
         await guard.require_quiescent()
     assert (tmp_path / "stop.json").exists()
+
+
+async def test_invalidated_control_connection_never_reconnects_or_masks_cleanup(
+    deployment_database, tmp_path
+):
+    admin, _, role, _ = deployment_database
+    manifest = StopManifest("unit", "a" * 40, "direct", ("api", "scheduler"))
+    async with PostgresStop(admin, tmp_path, manifest, (role,)) as guard:
+        await guard.prepare()
+        await guard.connection.invalidate()
+        with pytest.raises(BusinessException) as error:
+            await guard.require_quiescent()
+        assert error.value.error_code == "AUTHORIZATION_MAINTENANCE_FENCE_REQUIRED"
+    assert (tmp_path / "stop.json").exists()

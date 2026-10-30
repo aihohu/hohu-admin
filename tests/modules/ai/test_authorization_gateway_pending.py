@@ -12,7 +12,7 @@ from sqlalchemy import delete, event, insert, select, update
 from app.core.exceptions import BusinessException
 from app.db import authorization_lifecycle_owner, authorization_pending_owner
 from app.db.base import role_menus, user_roles
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai.agents.gateway import executor
 from app.modules.ai.agents.gateway.atomic_execution import (
     PreparedExecutionOutcomeUnknown,
@@ -30,6 +30,7 @@ from app.modules.ai.service.prepared_action_service import prepared_action_servi
 from app.modules.ai.service.result_projection_service import result_projection_service
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.user import User
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )
@@ -59,8 +60,8 @@ async def test_direct_canonical_arguments_bind_original_log(
     username = "canonical" + uuid4().hex[:16]
     async with AsyncSessionLocal() as db, db.begin():
         target = User(tenant_id=0, user_name=username, hashed_password="fixture-unused")
-        # This exact-confirmation test explicitly grants the system writer's
-        # batch-delete permission as well as the tool's existing delete grant.
+        # This exact-confirmation test explicitly grants the shared batch-delete
+        # permission required by both the tool and its fixed system writer.
         permission = Menu(
             tenant_id=0,
             menu_name=username,
@@ -88,6 +89,13 @@ async def test_direct_canonical_arguments_bind_original_log(
         )
         db.expunge_all()
         preview_case.deps.user = actor
+        preview_case.deps.perms = {
+            menu.permission
+            for role in actor.roles
+            if role.status == "1"
+            for menu in role.menus
+            if menu.status == "1" and menu.permission
+        }
 
     async def stop(event):
         if isinstance(event, ConfirmationRequiredEvent):

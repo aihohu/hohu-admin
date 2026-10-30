@@ -15,7 +15,7 @@ from app.core.exceptions import setup_exception_handlers
 from app.core.security import create_access_token
 from app.db import session
 from app.db.request_session import RequestSession
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai.api import confirm
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.model_policy import TenantAiModelPolicy
@@ -23,6 +23,7 @@ from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.auth import service
 from app.modules.system.models.user import User
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )

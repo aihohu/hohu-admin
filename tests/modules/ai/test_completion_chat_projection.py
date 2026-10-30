@@ -4,7 +4,6 @@ import pytest
 from sqlalchemy import select
 
 from app.core.exceptions import BusinessRuleException
-from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.gateway.atomic_execution import OUTCOME_UNKNOWN_MESSAGE
 from app.modules.ai.api.chat import _finalize_stream_turn
 from app.modules.ai.models.message import AiMessage
@@ -12,6 +11,7 @@ from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.chat_run_service import chat_run_finalizer
 from app.modules.auth.service import access_identity
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     approve,
     authenticated_actor,

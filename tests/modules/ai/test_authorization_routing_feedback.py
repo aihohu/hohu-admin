@@ -7,12 +7,13 @@ from sqlalchemy import delete, event, select, update
 
 from app.core.security import decode_access_token
 from app.db import authorization_http
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.routing_feedback import AiRoutingFeedback
 from app.modules.system.models.operation_log import SysOperationLog
 from app.modules.system.models.user import User
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
 
 @pytest.mark.parametrize("role", ["user", "assistant", "tool", "system"])

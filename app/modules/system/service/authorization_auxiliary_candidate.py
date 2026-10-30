@@ -23,6 +23,8 @@ DEFAULTS = MappingProxyType(
         "ai:failures:ttl_sec": 600,
         "ai:auto_disable:perm_denied_per_hour": 50,
         "ai:ip_allowlist": (),
+        "ai:auto_disable:injection_per_hour": 5,
+        "ai:auto_disable:duration_sec": 86400,
     }
 )
 
@@ -39,10 +41,12 @@ class AuxiliaryCandidate:
                     SystemSetting.tenant_id == tenant.tenant_id,
                     SystemSetting.setting_key.in_(DEFAULTS),
                 )
-                .limit(10)
+                .limit(len(DEFAULTS) + 1)
             )
         )
-        if len(rows) > 9 or any(len(row.setting_value.encode()) > 2048 for row in rows):
+        if len(rows) > len(DEFAULTS) or any(
+            len(row.setting_value.encode()) > 2048 for row in rows
+        ):
             raise _order_error()
         before = {row.setting_key: (row.setting_value, row.status) for row in rows}
         await tx.lock(

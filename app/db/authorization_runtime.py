@@ -14,6 +14,7 @@ from app.db.authorization_auxiliary_owner import AuxiliaryOwner
 from app.db.authorization_business_owner import BusinessOwner
 from app.db.authorization_catalog_read_owner import CatalogReadOwner
 from app.db.authorization_chat_owner import ChatOwner
+from app.db.authorization_completion_facts_owner import CompletionFactsOwner
 from app.db.authorization_control_owner import control_candidate_owner
 from app.db.authorization_http_audit_owner import HttpAuditOwner
 from app.db.authorization_job_owner import JobOwner
@@ -23,6 +24,7 @@ from app.db.authorization_pending_owner import PendingOwner
 from app.db.authorization_plan_session import AuthorizationPlanSession, _order_error
 from app.db.authorization_preview_owner import PreviewOwner
 from app.db.authorization_read_confirmation_owner import ReadConfirmationOwner
+from app.db.authorization_reconciliation_owner import ReconciliationOwner
 from app.db.authorization_seed_owner import seed_candidate_owner
 from app.db.authorization_system_owner import system_candidate_owner
 from app.db.authorization_trace_owner import TraceOwner
@@ -58,6 +60,8 @@ class AuthorizationRuntime:
         self.http_audit = HttpAuditOwner(self.sessions)
         self.job = JobOwner(self.sessions)
         self.business = BusinessOwner(self.sessions)
+        self.completion_facts = CompletionFactsOwner(self.sessions)
+        self.reconciliation = ReconciliationOwner(self.sessions)
         self.gateway = PlannedGatewayOwner(self.sessions)
         self.lifecycle = LifecycleOwner(self.sessions)
         self.chat = ChatOwner(self.sessions)

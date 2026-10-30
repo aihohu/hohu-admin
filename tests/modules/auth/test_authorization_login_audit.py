@@ -5,9 +5,10 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import delete, event, select
 
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.auth.service import auth_service
 from app.modules.system.models.login_log import SysLoginLog
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
 
 @pytest.fixture(autouse=True)

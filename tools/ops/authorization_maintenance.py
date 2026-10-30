@@ -25,6 +25,7 @@ from app.core.authorization_maintenance import (
     StoppedWritersEvidence,
     _required,
     acquire_maintenance_fence,
+    require_maintenance,
 )
 from app.core.config import settings
 from app.core.exceptions import BusinessException
@@ -362,12 +363,13 @@ class PostgresStop:
                     try:
                         if self.connection is not None:
                             try:
-                                await self.connection.execute(
-                                    text(
-                                        "SELECT pg_advisory_unlock(CAST(:key AS bigint))"
-                                    ),
-                                    {"key": (0x484F4855 << 32) | self.database_oid},
-                                )
+                                if not self.connection.invalidated:
+                                    await self.connection.execute(
+                                        text(
+                                            "SELECT pg_advisory_unlock(CAST(:key AS bigint))"
+                                        ),
+                                        {"key": (0x484F4855 << 32) | self.database_oid},
+                                    )
                             finally:
                                 await self.connection.close()
                                 self.connection = None
@@ -502,14 +504,20 @@ class PostgresStop:
 
     async def require_quiescent(self):
         self._record()
-        if self.connection is None:
+        if self.connection is None or getattr(self.connection, "invalidated", False):
             raise _required()
         try:
+            # Leave time for the last normal observation to finish. An actual
+            # hung query still exhausts the outer deadline and invalidates this
+            # controller; it must never silently reconnect and lose its lock.
+            observe_until = asyncio.get_running_loop().time() + 2.9
             async with asyncio.timeout(3):
                 while not await self._observe_quiescent():  # noqa: ASYNC110 - external PostgreSQL state
                     # ReadyForQuery can reach the client before pg_stat_activity
                     # exposes idle. Only wait for our exact owned generations.
                     await asyncio.sleep(0.025)
+                    if asyncio.get_running_loop().time() >= observe_until:
+                        raise _required()
         except TimeoutError:
             raise _required() from None
 
@@ -720,6 +728,7 @@ async def wait_registered_drain(directory, processes):
 
 
 _EXECUTE_ACTIONS = (
+    "ai.reconcile",
     "seed.system",
     "seed.agents",
     "seed.settings",
@@ -795,6 +804,16 @@ def action_payload(action, path):
     if path is None:
         raise _required()
     value = read_object(path)
+    if action == "ai.reconcile":
+        if set(value) - {"maintenance_sha256"} != {
+            "tenant_id",
+            "operator_id",
+            "manifest",
+            "reason",
+            "evidence_sha256",
+        }:
+            raise _required()
+        return value
     fields = {"principal_name", "permissions", "reason", "ticket_id", "correlation_id"}
     if action == "principal.create":
         fields.add("display_name")
@@ -815,6 +834,14 @@ async def execute_action(guard, processes, action, payload):
         observe, action=action, expected_build_sha=guard.manifest.build_sha
     )
     runtime = AuthorizationRuntime(guard.runtime_engine)
+    if action == "ai.reconcile":
+        digest = require_maintenance(fence, action).manifest_digest
+        expected = payload.get("maintenance_sha256")
+        if expected is not None and expected != digest:
+            raise _required()
+        return await runtime.reconciliation.annotate(
+            **{**payload, "maintenance_sha256": digest}, fence=fence
+        )
     if action.startswith("seed."):
         return await runtime.seed(
             action=action,
@@ -831,10 +858,19 @@ async def execute_action(guard, processes, action, payload):
     raise _required()
 
 
-async def run_command(args):
+async def run_command(args, *, reconciliation=None):
     bootstrap = args.command in {"bootstrap", "bootstrap-resume"}
     manifest, processes, roles = read_inventory(args.inventory, bootstrap=bootstrap)
-    payload = action_payload(args.action, args.payload)
+    if reconciliation is not None:
+        if (
+            args.command != "execute"
+            or args.action != "ai.reconcile"
+            or args.payload is not None
+        ):
+            raise _required()
+        payload = reconciliation
+    else:
+        payload = action_payload(args.action, args.payload)
     if settings.RELEASE_BUILD_SHA != manifest.build_sha:
         raise _required()
     url = os.environ.get("AUTHORIZATION_MAINTENANCE_DATABASE_URL")

@@ -7,10 +7,11 @@ from sqlalchemy import delete, event, update
 from starlette.requests import Request
 
 from app.core.exceptions import BusinessException
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai.api import confirm, resume
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.schemas.confirm import ConfirmRequest
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )
@@ -74,16 +75,24 @@ async def test_confirm_rejects_missing_or_unadapted_action(
     )
 
 
+@pytest.mark.parametrize("durable", [False, True])
 async def test_resume_rejects_unadapted_before_cache_or_projection(
-    completion_case, monkeypatch
+    completion_case, monkeypatch, durable
 ):
     case = completion_case
     async with AsyncSessionLocal() as db, db.begin():
-        await db.execute(
-            update(AiPreparedAction)
-            .where(AiPreparedAction.action_id == case.action_id)
-            .values(execute_tool_name="custom.unadapted")
-        )
+        if durable:
+            await db.execute(
+                update(AiPreparedAction)
+                .where(AiPreparedAction.action_id == case.action_id)
+                .values(execute_tool_name="custom.unadapted")
+            )
+        else:
+            await db.execute(
+                delete(AiPreparedAction).where(
+                    AiPreparedAction.action_id == case.action_id
+                )
+            )
     cache = AsyncMock(side_effect=AssertionError("unadapted resume read cache"))
     projection = AsyncMock(side_effect=AssertionError("unadapted result projected"))
     monkeypatch.setattr(resume.settings, "AI_SSE_RESUME_ENABLED", True)
@@ -100,6 +109,8 @@ async def test_resume_rejects_unadapted_before_cache_or_projection(
                 db=db,
                 current_user=actor,
             )
-    assert error.value.error_code == "AI_PREPARED_ACTION_REQUIRED"
+    assert error.value.error_code == (
+        "AI_PREPARED_ACTION_REQUIRED" if durable else "AI_RESUME_NOT_FOUND"
+    )
     cache.assert_not_awaited()
     projection.assert_not_awaited()

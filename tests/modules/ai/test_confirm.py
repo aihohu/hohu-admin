@@ -699,12 +699,12 @@ class TestPreparedConfirmation:
     async def test_approve_executes_inline_without_redis_pending(
         self, completion_case, monkeypatch, approval, dispatch
     ):
-        from app.db.session import AsyncSessionLocal
         from app.modules.ai.api import confirm
         from app.modules.ai.models.prepared_action import AiPreparedAction
         from app.modules.system.service.authorization_ai_tool_adapter import (
             system_ai_tool_adapter,
         )
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         case = completion_case
         async with AsyncSessionLocal() as db, db.begin():

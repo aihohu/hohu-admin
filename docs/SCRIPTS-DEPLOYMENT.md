@@ -25,6 +25,8 @@
 
 授权维护的直接启动与 Compose 停写控制、数据库在途核验及显式恢复，见 [授权维护](AUTHORIZATION-MAINTENANCE.md)。四个种子脚本均使用该固定入口，维护证明不能作为全业务授权迁移已经完成的证明。
 
+历史 AI 核对使用 `python -m scripts.reconcile_ai_legacy`：`inspect` 读取明确日志 ID，`annotate` 必须提供部署清单并由同一维护控制器完成停写与核验。标注只追加未验证说明，不改变执行终态；维护摘要自动绑定实际证据，结果不确定时不得重放。参数、预算及显式恢复见 [历史核对操作](AUTHORIZATION-MAINTENANCE.md#历史-ai-核对标注)。
+
 平台运维在 `tools/ops`，静态检查在 `tools/checks`，可选演示在 `tools/demo`，测试与发布验收在 `tests/`。部署不会自动执行演示或测试数据脚本。
 
 修改初始化时验证首次安装、幂等重跑、失败回滚、密码保护、自定义内容保留以及租户隔离。回归入口：[tests/scripts](../tests/scripts)。CLI 与后端需同步升级，不维护多份旧初始化逻辑。

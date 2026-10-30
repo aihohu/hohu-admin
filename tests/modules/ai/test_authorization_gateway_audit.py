@@ -8,12 +8,13 @@ from sqlalchemy import event, select
 
 from app.core.exceptions import BusinessException
 from app.db import authorization_chat_owner
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai.agents.gateway import executor
 from app.modules.ai.agents.gateway.result import ToolResult
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.auth.service import access_identity
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import authenticated_actor
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,

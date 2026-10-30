@@ -12,7 +12,7 @@ from app.core.exceptions import BusinessException
 from app.db import authorization_chat_owner
 from app.db.authorization_owner import _QUARANTINED
 from app.db.authorization_runtime import AuthorizationRuntime
-from app.db.session import AsyncSessionLocal, engine, is_session_quarantined
+from app.db.session import engine, is_session_quarantined
 from app.modules.ai.api import chat as chat_module
 from app.modules.ai.api.chat import _finish_chat_read_phase
 from app.modules.ai.models.message import AiMessage
@@ -23,6 +23,7 @@ from app.modules.ai.service.authorization_chat_ingress_candidate import (
 )
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.auth.service import access_identity
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     approve,
     authenticated_actor,

@@ -16,7 +16,7 @@ from app.core.tenant_isolation_audit import (
 from tools.ops import audit_tenant_isolation as cli
 
 _CANDIDATE_NAMESPACES = (
-    ("modules/ai/agents/gateway/auxiliary_budget.py", "RedisError", "storage"),
+    ("core/auxiliary_budget.py", "RedisError", "storage"),
     (
         "modules/system/service/authorization_chat_image_candidate.py",
         "tenant_id",

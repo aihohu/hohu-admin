@@ -1,4 +1,4 @@
-"""Pure AST coverage gate for dormant authorization candidates; no DB imports."""
+"""Pure AST coverage gate for authorization contracts; no ingress certification."""
 
 import ast
 from pathlib import Path
@@ -176,7 +176,7 @@ def main():
             print(error)
         return 1
     print(
-        f"Authorization candidates: {len(CANDIDATES)} entries checked; production wiring remains pending"
+        f"Authorization candidates: {len(CANDIDATES)} contracts checked; ingress evidence is verified separately"
     )
     return 0
 

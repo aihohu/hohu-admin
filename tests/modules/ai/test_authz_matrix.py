@@ -642,7 +642,7 @@ class TestCase10InjectionDetector:
         assert result.ok is True
 
         # injection_hit=True 时操作日志标记为安全事件。
-        from app.db.session import AsyncSessionLocal
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             res = await db.execute(

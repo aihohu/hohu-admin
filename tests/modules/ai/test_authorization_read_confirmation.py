@@ -13,7 +13,7 @@ from app.core.exceptions import BusinessException
 from app.db import authorization_read_confirmation_owner as owner_module
 from app.db.authorization_http import get_authorization_runtime
 from app.db.authorization_runtime import AuthorizationRuntime
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai.agents.gateway import executor
 from app.modules.ai.agents.gateway.atomic_execution import (
     PreparedExecutionOutcomeUnknown,
@@ -30,6 +30,7 @@ from app.modules.ai.service import (
 from app.modules.ai.service.authorization_lifecycle_candidate import lifecycle_candidate
 from app.modules.auth.service import access_identity
 from app.modules.system.models.user_field_policy import UserFieldPolicyState
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )

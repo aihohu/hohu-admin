@@ -13,7 +13,7 @@ from tenant_helpers import tenant_context
 from app.core.authorization_plan import ResourceKey
 from app.core.authorization_plan import ResourceKind as K
 from app.core.exceptions import BusinessException, BusinessRuleException
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai.agents.gateway import executor
 from app.modules.ai.agents.hitl.constants import AiExecutionMode, ConfirmAction
 from app.modules.ai.agents.tools.meta import AiToolMeta
@@ -24,6 +24,7 @@ from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.system.models.user import User
 from app.modules.system.service.authorization_transaction_service import _Transaction
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import authenticated_actor
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,

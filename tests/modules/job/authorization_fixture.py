@@ -3,8 +3,9 @@
 import pytest
 from sqlalchemy import delete
 
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.job.models.job import SysJob
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
 
 @pytest.fixture(name="db_session")

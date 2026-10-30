@@ -6,16 +6,19 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import delete, event, insert, select
 
 from app.db.authorization_runtime import AuthorizationRuntime
-from app.db.session import AsyncSessionLocal, engine
+from app.db.base import role_menus, user_roles
+from app.db.session import engine
 from app.modules.ai.agents.gateway import executor
 from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.auth.service import access_identity
+from app.modules.system.models.menu import Menu
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import authenticated_actor
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
@@ -25,6 +28,28 @@ from tests.modules.ai.test_atomic_prepared_completion import (
 @pytest.fixture
 async def read_case(completion_case):
     case = completion_case
+    # Grant the exact batch permission explicitly; single-delete authority does
+    # not authorize the batch adapter after their production contracts align.
+    async with AsyncSessionLocal() as db, db.begin():
+        permission = Menu(
+            tenant_id=0,
+            menu_name="Read adapter batch fixture",
+            menu_type="F",
+            status="1",
+            permission="system:user:batch-delete",
+        )
+        db.add(permission)
+        await db.flush()
+        menu_id = permission.menu_id
+        role_id = await db.scalar(
+            select(user_roles.c.role_id).where(
+                user_roles.c.tenant_id == 0,
+                user_roles.c.user_id == case.tenant.actor_user_id,
+            )
+        )
+        await db.execute(
+            insert(role_menus).values(tenant_id=0, role_id=role_id, menu_id=menu_id)
+        )
     async with AsyncSessionLocal() as db:
         actor = await authenticated_actor(case, db)
         action = await db.get(AiPreparedAction, case.action_id)
@@ -38,7 +63,18 @@ async def read_case(completion_case):
         deps.conversation_id = case.conversation_id
         deps.source_user_message_id = action.source_user_message_id
         db.expunge_all()
-    return deps
+    try:
+        yield deps
+    finally:
+        async with AsyncSessionLocal() as db, db.begin():
+            await db.execute(
+                delete(role_menus).where(
+                    role_menus.c.tenant_id == 0, role_menus.c.menu_id == menu_id
+                )
+            )
+            await db.execute(
+                delete(Menu).where(Menu.tenant_id == 0, Menu.menu_id == menu_id)
+            )
 
 
 async def invoke(deps, monkeypatch):

@@ -11,13 +11,14 @@ from app.core.config import settings
 from app.core.exceptions import BusinessException
 from app.core.security import create_access_token
 from app.db.authorization_runtime import AuthorizationRuntime
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.main import app
 from app.modules.auth.service import access_identity
 from app.modules.system.api.file import read_chat_image
 from app.modules.system.models.file import File
 from app.modules.system.models.user import User
 from app.modules.system.service.file_service import file_service
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import authenticated_actor
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,

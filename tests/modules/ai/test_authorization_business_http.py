@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import delete, event, insert
 
 from app.db.base import user_depts
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.system.api import data_scope_demo as demo_api
 from app.modules.system.api import dict_data as data_api
 from app.modules.system.api import dict_type as type_api
@@ -16,6 +16,7 @@ from app.modules.system.models.dict_type import DictType
 from app.modules.system.schemas.data_scope_demo import DataScopeDemoCreate
 from app.modules.system.schemas.dict_data import DictDataCreate
 from app.modules.system.schemas.dict_type import DictTypeCreate
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )

@@ -1617,7 +1617,9 @@ async def list_batch_logs(
     if event:
         filters.append(UserImportBatchLog.event == event)
 
-    count_stmt = select(func.count()).select_from(UserImportBatchLog).where(*filters)
+    count_stmt = (
+        select(func.pg_catalog.count(1)).select_from(UserImportBatchLog).where(*filters)
+    )
     total = (await db.execute(count_stmt)).scalar() or 0
 
     stmt = (
@@ -1686,7 +1688,9 @@ async def list_batches(
     if query.end_time is not None:
         filters.append(UserImportBatch.created_at <= query.end_time)
 
-    count_stmt = select(func.count()).select_from(UserImportBatch).where(*filters)
+    count_stmt = (
+        select(func.pg_catalog.count(1)).select_from(UserImportBatch).where(*filters)
+    )
     total = (await db.execute(count_stmt)).scalar() or 0
 
     stmt = (

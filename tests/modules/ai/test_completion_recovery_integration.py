@@ -7,11 +7,11 @@ from sqlalchemy import event, update
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import BusinessRuleException
-from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.gateway import authorization_execution
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.operation_log_service import operation_log_service
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     approve,
     assert_success,

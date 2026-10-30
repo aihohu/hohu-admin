@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.exceptions import BusinessException
 from app.core.tenant import TenantContext
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
@@ -30,6 +30,7 @@ from app.modules.ai.service.user_delete_dependency_service import (
 )
 from app.modules.system.models.user import User
 from app.modules.system.service.user_service import user_service
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
 
 @dataclass

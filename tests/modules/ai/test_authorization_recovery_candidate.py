@@ -10,7 +10,7 @@ from sqlalchemy import event, select, update
 from app.core.authorization_plan import LockMode, LockPlan, TenantLock
 from app.core.tenant import TenantContext
 from app.db.authorization_ai_owner import AIAuthorizationOwner
-from app.modules.ai.agents.gateway import atomic_execution
+from app.db.authorization_runtime import AuthorizationRuntime
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.completion_read_state_service import (
@@ -209,7 +209,10 @@ async def test_rr_fact_read_does_not_wait_for_outer_exclusive_barrier(
 ):
 
     factory, plain, case = recovery_case
-    monkeypatch.setattr(atomic_execution, "AsyncSessionLocal", plain)
+    monkeypatch.setattr(
+        "app.db.authorization_http.get_authorization_runtime",
+        lambda: AuthorizationRuntime(plain.kw["bind"]),
+    )
     async with factory() as db:
         async with authorization_transactions.scope(
             db, tenants=(TenantLock(0, LockMode.EXCLUSIVE),)

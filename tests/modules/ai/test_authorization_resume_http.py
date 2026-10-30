@@ -8,12 +8,13 @@ from sqlalchemy import event
 
 from app.core.exceptions import BusinessException
 from app.db import authorization_lifecycle_owner
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai.api import resume
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.auth.service import access_identity
 from app.modules.system.models.user import User
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     approve,
     authenticated_actor,

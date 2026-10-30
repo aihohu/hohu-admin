@@ -903,6 +903,32 @@ async def _mark_legacy_resume_expired(
 @router.get("/resume", summary="SSE 流断流续传（HITL 期热接管）")
 async def resume_chat(
     request: Request,
+    confirmation_id_query: str | None = Query(default=None, alias="confirmation_id"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if not settings.AI_SSE_RESUME_ENABLED:
+        raise _set_exc_code(
+            BusinessRuleException(
+                "SSE 续传功能未启用", error_code="AI_RESUME_DISABLED"
+            ),
+            410,
+        )
+    confirmation_id = request.headers.get("last-event-id") or confirmation_id_query
+    if not confirmation_id:
+        raise BusinessRuleException(
+            "缺少 confirmation_id", error_code="AI_RESUME_MISSING_ID"
+        )
+    action = await prepared_action_service.get_by_confirmation_id(
+        db, confirmation_id, tenant=get_bound_tenant_context(current_user)
+    )
+    if action is None:
+        raise NotFoundException("HITL confirmation", error_code="AI_RESUME_NOT_FOUND")
+    return await _legacy_resume_chat(request, confirmation_id_query, db, current_user)
+
+
+async def _legacy_resume_chat(
+    request: Request,
     confirmation_id_query: str | None = Query(
         default=None,
         alias="confirmation_id",

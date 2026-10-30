@@ -7,7 +7,6 @@ from sqlalchemy import delete
 
 from app.core.exceptions import BusinessRuleException
 from app.db.base import user_roles
-from app.db.session import AsyncSessionLocal
 from app.modules.ai.api import confirm as confirm_module
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.operation_log import AiOperationLog
@@ -20,6 +19,7 @@ from app.modules.system.models.user import User
 from app.modules.system.service.authorization_ai_delete_candidate import (
     ai_delete_candidate,
 )
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_db_tools import (
     ToolCase,
     authenticated_actor,

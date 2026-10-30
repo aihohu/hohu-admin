@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import select
 
 from app.db import session as session_module
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai.agents.gateway import atomic_execution
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
@@ -22,6 +22,7 @@ from app.modules.ai.service.atomic_completion_service import (
     atomic_completion_service,
     new_execution_owner,
 )
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )

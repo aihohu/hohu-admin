@@ -45,7 +45,7 @@ python -m tools.ops.authorization_maintenance resume --inventory deployment.json
 
 `stop` 和 `execute` 都从尚未关闭的部署开始，独占创建控制记录；不能在 `stop` 之后再运行 `execute`。需要维护动作时直接使用 `execute`，它在一次控制会话内完成关闭、停止、独立观察、固定 owner 执行和最终空闲核验。控制器退出后不会自动开放数据库或入口。
 
-当前固定动作是 `seed.system`、`seed.agents`、`seed.settings`、`seed.menus`、`principal.create` 和 `principal.permissions`；不接收任意 SQL、脚本、回调或 session factory。种子管理员密码或平台主体密码由 `AUTHORIZATION_MAINTENANCE_PASSWORD` 传入。平台主体动作另需 `--payload` JSON，包含 `principal_name`、`permissions`、`reason`、`ticket_id`、`correlation_id`，创建时另含 `display_name`。密码不能放入 payload。既有业务校验、权限清单、审计和唯一事务完成规则仍然生效。
+当前固定动作是 `seed.system`、`seed.agents`、`seed.settings`、`seed.menus`、`principal.create`、`principal.permissions` 和 `ai.reconcile`；不接收任意 SQL、脚本、回调或 session factory。种子管理员密码或平台主体密码由 `AUTHORIZATION_MAINTENANCE_PASSWORD` 传入。平台主体动作另需 `--payload` JSON，包含 `principal_name`、`permissions`、`reason`、`ticket_id`、`correlation_id`，创建时另含 `display_name`。密码不能放入 payload。既有业务校验、权限清单、审计和唯一事务完成规则仍然生效。
 
 `scripts/init_db.py`、`scripts/seed_ai_agents.py`、`scripts/seed_settings.py` 和 `scripts/sync_menus.py` 分别调用上述固定种子动作，必须提供 `--inventory`，可指定 `--control-dir`。脚本不会直接创建普通写会话。`seed.menus` 只同步默认租户的菜单和相应角色菜单关系，不创建用户、Agent 或设置。
 
@@ -68,7 +68,7 @@ python -m tools.ops.authorization_maintenance bootstrap-resume --inventory boots
 
 `resume` 重新核对清单、实际进程停止及数据库空闲；最近签发的 30 秒证明尚有效时拒绝恢复。成功后恢复原数据库连接开关并移除停止标记，不启动应用，也不恢复 Docker 重启策略。部署管理员应先确认维护结果和待启动构建，再按记录恢复所需重启策略并启动已核对的实例。原进程不能靠删除文件重新进入。
 
-当前维护入口和停写机制已经接入实际启动路径；完整业务授权 owner 的生产迁移仍有未接入入口。这些控制能力不能作为全业务授权屏障已经开放、字段策略已启用或版本已经发布的证明。
+维护入口和停写机制接入实际启动路径。停写证据只证明本次维护条件满足，不表示字段策略已启用或版本已发布；字段策略的启用仍需独立验收。
 
 `file.parse` 使用固定只读入口。完整计划先验证原 JWT、Agent、工具开关、会话来源、数据范围及文件归属，随后释放数据库事务，在 3 秒有界 worker 中读取并解析最多 10 MiB 的文件；返回前以新计划复验当前权限、完整文件元数据与上传策略。每个数据库阶段预算 8 秒。返回结构化摘要及文件来源引用，不向模型返回原始字节。
 
@@ -92,7 +92,7 @@ AI 签名下载也使用独立授权事务：锁内重验签名的用户、租�
 
 写入重新核对已验证 JWT 中的用户和租户安全版本、当前权限及完整锁计划。请求开始后的撤权不会被旧 ORM 对象或客户端版本声明绕过。用户删除同时检查并锁定 AI 历史依赖；未决、未知或尚未清理的文件引用保持拒绝，不自动重试删除。
 
-登录审计保持独立追加事务，密码哈希、验证码及通知工作使用既有累计预算。`AUTHORIZATION_COMMIT_UNKNOWN` 表示未得到确定的提交结果，不能按普通业务失败自动重放。上述入口接入不表示其余业务写者已经全部迁移，也不启用字段策略。
+登录审计保持独立追加事务，密码哈希、验证码及通知工作使用既有累计预算。`AUTHORIZATION_COMMIT_UNKNOWN` 表示未得到确定的提交结果，不能按普通业务失败自动重放。授权事务接入不启用字段策略。
 
 菜单、配置导入与管理、设置、邮件测试和角色 Agent 绑定也使用固定 owner。全局 Agent、Provider、Model 和租户模型策略写入保留原有审计头要求；模型探测先释放准备事务，再执行有时限的外部请求，返回后重新核对身份与配置。验证失败会追加一次失败完成，未知提交结果不会追加相反的完成记录。
 
@@ -166,6 +166,8 @@ Gateway 的导入预览使用固定发布入口，复用已提交的原审计日
 
 配额、连续失败和IP拒绝计数先通过固定只读事务读取内部白名单配置。配置阶段最多1秒、每字段最多2KiB，不提供业务授权；随后Redis步骤最多2秒。容量保护超时拒绝继续，提交后的辅助计数或清理失败不会覆盖已经确认的业务结果。IP黑名单计数不会在数据库事务中等待Redis。
 
+注入命中阈值、禁用时长及 Redis 禁用检查采用相同的配置和辅助 IO 预算。配置读取失败保留既有安全默认值，不授予额外业务权限。
+
 路由反馈在同一授权计划内核验当前身份、消息与会话状态、消息所有者或超管身份，以及纠正 Agent 的实时可见性。当前反馈与追加历史原子保存，重复反馈仍追加历史，授权 epoch 不变。反馈不会修改原消息身份、来源或正文。数据库工作与提交确认各最多8秒。
 
 HTTP 操作审计通过固定入口读取当前用户名并追加日志。用户名读取最多1秒，审计数据库工作最多2秒，提交确认最多8秒；不再从用户名缓存取得归属信息。该记录只说明请求与响应，不授予业务权限；审计失败或提交未知不重试，也不改变主请求已经产生的结果。
@@ -174,6 +176,27 @@ HTTP 操作审计通过固定入口读取当前用户名并追加日志。用户
 
 AI 确认仅接受有固定授权事务适配的持久化动作。仅有 Redis 待确认信息时返回 `CONFIRMATION_EXPIRED_OR_NOT_FOUND`；未适配工具的确认和续传返回 `AI_PREPARED_ACTION_REQUIRED`。这些拒绝不会唤醒执行或改写动作终态。
 
+续传没有对应持久动作时返回 `AI_RESUME_NOT_FOUND`，不读取 Redis 或回退到旧执行协议。AI 用户批量删除与系统批量删除统一要求 `system:user:batch-delete`；单条删除权限不能替代批量删除权限，原有角色需要明确授予相应权限。
+
 任务配置和日志写入通过固定事务入口完成：同租户配置变更、日志认领和收尾与授权屏障串行，任务函数、Redis 通知和重试等待在数据库事务外执行。批量任务最多 256 项、日志最多 10000 条、任务参数最多 256 KiB，超限拒绝整次操作。任务配置与运行日志不推进授权 epoch。任务认领提交结果未知时不派发任务；完成日志提交结果未知时不重跑任务。孤儿日志扫描保留当前 runner 和宽限期保护，使用当前锁定事实更新，不能把进程退出请求当作停写证明。
 
 字典类型、字典数据及数据权限演示的写入也经过租户屏障和当前身份复验。字典类型有子数据时整批删除被拒绝；缺失或跨租户 ID 不允许部分删除。演示数据的创建部门来自当前主部门，创建者和部门不可通过编辑重写，更新与删除继续受当前数据范围限制。这些业务事实不推进授权 epoch。数据库预算 15 秒、提交确认预算 8 秒；批量最多 256 个 ID，字典发现每表最多 10000 条，演示正文最多 256 KiB，超限整次拒绝。
+
+## 默认会话与完成事实
+
+生产默认数据库会话只允许已识别的安全读取。普通 DML、隐式 ORM 写入、行锁、原始 SQL、未知 SQL 函数及原始连接出口在发送 SQL 前拒绝；写入必须由固定授权事务入口完成。请求读取移交后，原会话不能再次访问数据库。测试数据准备使用独立测试工厂，不改变生产配置。
+
+已完成动作的纯事实分类使用固定的 `REPEATABLE READ, READ ONLY` 快照，预算 8 秒、最多 256 个工具引用、16384 行及 64 MiB，不提交业务事务。该快照不授予执行或结果查看权限；可见性仍需当前授权计划。读取不确定时返回未知，取消清理不成功时隔离连接。
+
+## 历史 AI 核对标注
+
+`scripts.reconcile_ai_legacy` 只读取明确日志 ID 或追加“尚未验证”的核对标注，不执行工具、不把历史状态改成成功。先在服务开放时生成受保护的清单，再由标注命令一次完成停写与核验；不能先执行 `stop` 再调用 `annotate`。
+
+```bash
+python -m scripts.reconcile_ai_legacy --tenant-id TENANT_ID --operator-id USER_ID --output INSPECTION.json inspect --log-id LOG_ID
+python -m scripts.reconcile_ai_legacy --tenant-id TENANT_ID --operator-id USER_ID --output ANNOTATION.json annotate --manifest INSPECTION.json --inventory DEPLOYMENT.json --control-dir CONTROL_DIRECTORY --reason LEGACY_RUNNING --evidence-sha256 EVIDENCE_SHA256
+```
+
+部署清单沿用直接启动或 Compose 的真实进程与数据库核验。维护摘要由控制器在签发证明后自动绑定；可选 `--maintenance-sha256` 只是预期值，提供时必须与本次证据一致，不能替代证明。业务证据摘要和清单由操作者提供。输出必须是受保护目录中的新文件，不覆盖原清单。
+
+每次最多 100 条明确日志、清单最多 1 MiB。检查和标注均核验当前操作人、租户、权限及完整上下文，标注还验证清单基线；数据库工作和提交确认各最多 8 秒。只追加核对 envelope 与最小提示，保留原动作及日志的执行状态、时间和错误；相同证据重复标注不新增记录。未知提交不得重放。命令结束后仍保持停写，核对结果后按上述显式恢复流程恢复服务。
