@@ -103,6 +103,8 @@ class PlannedGatewayOwner:
                 try:
                     await rollback_authorization_session(db)
                 except Exception:
+                    if not isinstance(exc, Exception):
+                        raise exc from None
                     return ExecutionDisposition("unknown")
                 if not isinstance(exc, Exception):
                     raise

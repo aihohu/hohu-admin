@@ -8,6 +8,7 @@ from sqlalchemy import event
 
 from app.core.exceptions import BusinessException
 from app.db import authorization_lifecycle_owner
+from app.db.request_session import RequestSession
 from app.db.session import engine
 from app.modules.ai.api import resume
 from app.modules.ai.models.operation_log import AiOperationLog
@@ -25,6 +26,39 @@ from tests.modules.ai.test_atomic_prepared_completion import (
 )
 from tests.modules.ai.test_completion_resume_guards import leave_claim_running
 from tests.modules.ai.test_resume import _make_request
+
+
+async def test_actual_resume_replays_completed_action_with_strict_request_session(
+    completion_case, monkeypatch
+):
+    case = completion_case
+    count_real_handler(case, monkeypatch)
+    assert (await approve(case)).data.status == "succeeded"
+    monkeypatch.setattr(resume.settings, "AI_SSE_RESUME_ENABLED", True)
+    locks = []
+
+    def capture(_conn, _cursor, sql, _params, _context, _many):
+        if "FOR SHARE" in sql or "FOR UPDATE" in sql:
+            locks.append(sql)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", capture)
+    try:
+        async with RequestSession(bind=engine, expire_on_commit=False) as db:
+            actor = await authenticated_actor(case, db)
+            response = await resume.resume_chat(
+                request=_make_request(case.confirmation_id),
+                confirmation_id_query=case.confirmation_id,
+                db=db,
+                current_user=actor,
+            )
+            chunks = [chunk async for chunk in response.body_iterator]
+            assert any('"type": "tool_call_result"' in chunk for chunk in chunks)
+            assert any('"ok": true' in chunk for chunk in chunks)
+            assert db._request_released and not db.in_transaction()
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", capture)
+    assert locks and "sys_user_field_policy_global_guard" in locks[0]
+    assert len(case.calls) == 1
 
 
 async def test_pending_resume_releases_request_before_transport_wait(

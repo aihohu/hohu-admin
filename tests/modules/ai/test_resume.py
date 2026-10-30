@@ -438,7 +438,8 @@ def _mock_verified_completion_boundary():
             resume,
             "get_authorization_runtime",
             lambda: SimpleNamespace(
-                lifecycle=SimpleNamespace(resume_read=read, unexecuted=unexecuted)
+                lifecycle=SimpleNamespace(resume_read=read, unexecuted=unexecuted),
+                recovery=SimpleNamespace(reconcile=reconcile),
             ),
         ),
         patch(

@@ -6,6 +6,7 @@ session and pending operation remain strongly referenced until invalidation.
 
 import asyncio
 import logging
+import sys
 from contextlib import asynccontextmanager, suppress
 
 from anyio import CancelScope
@@ -128,8 +129,18 @@ async def commit_authorization_session(db, effects=None):
 
 
 async def rollback_authorization_session(db, effects=None):
-    with CancelScope(shield=True):
-        await _rollback_authorization_session(db, effects)
+    # Owners invoke cleanup in both except and finally blocks. Preserve an
+    # external cancellation even if the cleanup acknowledgement itself is lost.
+    # sys.exception() is task-local across awaits; cancellation is never inferred
+    # from a stale Task.cancelling() count after a caller has handled it.
+    original = sys.exception()
+    try:
+        with CancelScope(shield=True):
+            await _rollback_authorization_session(db, effects)
+    except Exception:
+        if isinstance(original, asyncio.CancelledError):
+            raise original from None
+        raise
 
 
 async def _rollback_authorization_session(db, effects=None):

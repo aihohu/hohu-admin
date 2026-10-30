@@ -1004,10 +1004,6 @@ async def _legacy_resume_chat(
 
     if _requires_completion_proof(durable_action):
         # A transport cache cannot grant, expire or erase durable execution.
-        from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
-            reconcile_prepared_completion,
-        )
-
         replay_pending = _pending_from_durable_action(durable_action)
         can_chat = has_explicit_permission(current_user, AI_CHAT_USE_PERMISSION)
         can_project = (
@@ -1020,7 +1016,7 @@ async def _legacy_resume_chat(
             )
         )
         await release_request_reads(db)
-        outcome = await reconcile_prepared_completion(
+        outcome = await get_authorization_runtime().recovery.reconcile(
             confirmation_id, tenant=tenant, allow_fence=True
         )
         if not can_project:

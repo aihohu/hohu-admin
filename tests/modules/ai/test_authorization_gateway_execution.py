@@ -4,6 +4,7 @@ import asyncio
 import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import delete, event, insert, select, update
@@ -16,6 +17,7 @@ from app.core.authorization_plan import (
     TenantLock,
 )
 from app.db.base import role_menus, user_roles
+from app.modules.ai.agents.gateway import authorization_execution
 from app.modules.ai.agents.gateway.authorization_execution import PlannedGatewayOwner
 from app.modules.ai.agents.gateway.failures import compute_args_hash
 from app.modules.ai.agents.safety import ai_config
@@ -139,6 +141,32 @@ async def execute(factory, case):
         tenant=case.tenant,
         actor_user_version=1,
     )
+
+
+async def test_cancelled_execution_survives_unknown_rollback(
+    execution_case, monkeypatch
+):
+    factory, _, case = execution_case
+    cancelled = asyncio.CancelledError("external cancellation")
+    monkeypatch.setattr(
+        authorization_execution.ai_execution_candidate,
+        "reference",
+        AsyncMock(side_effect=cancelled),
+    )
+    monkeypatch.setattr(
+        authorization_execution,
+        "rollback_authorization_session",
+        AsyncMock(side_effect=RuntimeError("rollback acknowledgement unavailable")),
+    )
+    facts = AsyncMock()
+    commit = AsyncMock()
+    monkeypatch.setattr(PlannedGatewayOwner, "_facts", facts)
+    monkeypatch.setattr(authorization_execution, "commit_authorization_session", commit)
+    with pytest.raises(asyncio.CancelledError) as error:
+        await execute(factory, case)
+    assert error.value is cancelled
+    facts.assert_not_called()
+    commit.assert_not_called()
 
 
 async def test_business_epoch_action_and_required_log_commit_together(execution_case):

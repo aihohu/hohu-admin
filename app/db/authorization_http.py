@@ -44,8 +44,7 @@ async def release_request_reads(db):
     # expired ORM refresh after the independent owner's completion.
     db.expunge_all()
     db._request_released = True
-    with CancelScope(shield=True):
-        await db.rollback()
+    await _rollback_request_reads(db)
 
 
 async def finish_request_read_phase(db):
@@ -61,6 +60,11 @@ async def finish_request_read_phase(db):
     ):
         raise _order_error()
     db.expunge_all()
+    await _rollback_request_reads(db)
+
+
+async def _rollback_request_reads(db):
+    """Share the bounded ACK/quarantine boundary for both read handoffs."""
     pending = asyncio.create_task(db.rollback())
     try:
         with CancelScope(shield=True):
