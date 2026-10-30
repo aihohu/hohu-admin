@@ -1764,8 +1764,4 @@ MAINTENANCE_ENTRIES = MAINTENANCE_ENTRIES | frozenset(
 )
 CANDIDATES += _composition
 
-PENDING_SURFACES = MappingProxyType(
-    {
-        "2B5": ("final frozen full-suite and exact-commit CI verification",),
-    }
-)
+PENDING_SURFACES = MappingProxyType({})
