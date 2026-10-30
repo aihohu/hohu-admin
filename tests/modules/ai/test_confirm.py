@@ -1,4 +1,4 @@
-"""HITL ``/ai/confirm`` 端点单元测试。
+"""Historical HITL helper protocol tests; production boundary has real DB tests.
 
 直接调端点函数，mock 掉 deps（不用 TestClient，避免 FastAPI lifespan + DB
 + auth 中间件的全套启动开销）。
@@ -34,7 +34,8 @@ from app.modules.ai.agents.hitl.manager import PendingPayload
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.agents.tools.registry import RegisteredTool
 from app.modules.ai.api.confirm import _confirm_prepared as legacy_confirm_prepared
-from app.modules.ai.api.confirm import _notify_prepared_terminal, confirm_tool
+from app.modules.ai.api.confirm import _legacy_confirm_tool as confirm_tool
+from app.modules.ai.api.confirm import _notify_prepared_terminal
 from app.modules.ai.schemas.confirm import ConfirmRequest, ConfirmResponse
 from tests.modules.ai.test_atomic_prepared_completion import (
     approve,

@@ -14,10 +14,8 @@ Usage:
 import asyncio
 
 from sqlalchemy import delete, select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
 from app.core.id_generator import next_id
 from app.core.tenant import DEFAULT_TENANT_ID
 from app.db.base import role_menus
@@ -320,13 +318,9 @@ async def sync_menus_in_session(
 
 
 async def sync_menus():
-    engine = create_async_engine(settings.DATABASE_URL)
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    try:
-        async with factory() as db, db.begin():
-            await sync_menus_in_session(db)
-    finally:
-        await engine.dispose()
+    from tools.ops.authorization_maintenance import run_seed_entry  # noqa: PLC0415
+
+    return await run_seed_entry("seed.menus")
 
 
 if __name__ == "__main__":

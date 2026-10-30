@@ -245,7 +245,12 @@ def test_fixed_catalog_is_real_complete_and_preserves_insert_defaults():
         "SYSTEM_OPERATION_LOG",
         "PLATFORM_AUDIT",
         "LOGIN_LOG",
+        "UNRESOLVED_LOGIN_LOG",
         "JOB",
+        "JOB_LOG",
+        "DICT_TYPE",
+        "DICT_DATA",
+        "DATA_SCOPE_DEMO",
         "FILE",
     }
     for kind in ResourceKind:

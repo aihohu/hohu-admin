@@ -2,7 +2,9 @@
 
 import asyncio
 
+from app.core.authorization_io import file_transform_worker
 from app.core.authorization_plan import LockMode, TenantLock, TransactionBudget
+from app.core.config import settings
 from app.core.exceptions import BusinessRuleException
 from app.db.authorization_owner import (
     authorization_session,
@@ -22,6 +24,8 @@ from app.modules.ai.service.authorization_chat_ingress_candidate import (
     chat_ingress_candidate,
 )
 from app.modules.ai.service.authorization_chat_model import select_model
+from app.modules.ai.service.authorization_feedback_candidate import feedback_candidate
+from app.modules.ai.service.authorization_file_parse import parse_uploaded_file
 from app.modules.ai.service.authorization_gateway_audit_candidate import (
     gateway_audit_candidate,
 )
@@ -111,7 +115,18 @@ class ChatOwner:
         return await self._run("finish_operation", request)
 
     async def read_tool(self, **request):
-        return await self._run("read_tool", request)
+        snapshot = await self._run("read_tool", request)
+        if request.get("tool") != "file.parse":
+            return snapshot
+        result = await file_transform_worker.run(
+            parse_uploaded_file,
+            snapshot,
+            str(settings.UPLOAD_DIR),
+            str(settings.PRIVATE_UPLOAD_DIR),
+        )
+        if await self._run("read_tool", request) != snapshot:
+            raise _order_error()
+        return result
 
     async def preflight(self, **request):
         return await self._run("preflight", request)
@@ -121,6 +136,9 @@ class ChatOwner:
 
     async def routing_audit(self, **request):
         return await self._run("routing_audit", request)
+
+    async def routing_feedback(self, **request):
+        return await self._run("routing_feedback", request)
 
     async def select_model(self, **request):
         choices = await self._run("model_candidates", request)
@@ -177,7 +195,12 @@ class ChatOwner:
                                 request["tenant"].tenant_id,
                                 LockMode.EXCLUSIVE
                                 if operation
-                                in {"conversation", "start_run", "routing_audit"}
+                                in {
+                                    "conversation",
+                                    "start_run",
+                                    "routing_audit",
+                                    "routing_feedback",
+                                }
                                 else LockMode.SHARED,
                             ),
                         ),
@@ -205,6 +228,8 @@ class ChatOwner:
                             result = await chat_ingress_candidate.routing_audit(
                                 db, tx, **request
                             )
+                        elif operation == "routing_feedback":
+                            result = await feedback_candidate.submit(db, tx, **request)
                         elif operation == "start_operation":
                             result = await gateway_audit_candidate.start_operation(
                                 db, tx, **request

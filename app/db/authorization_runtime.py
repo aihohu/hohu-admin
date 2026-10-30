@@ -11,9 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.core.file_storage import get_file_storage
 from app.db.authorization_ai_owner import AIAuthorizationOwner
 from app.db.authorization_auxiliary_owner import AuxiliaryOwner
+from app.db.authorization_business_owner import BusinessOwner
 from app.db.authorization_catalog_read_owner import CatalogReadOwner
 from app.db.authorization_chat_owner import ChatOwner
 from app.db.authorization_control_owner import control_candidate_owner
+from app.db.authorization_http_audit_owner import HttpAuditOwner
+from app.db.authorization_job_owner import JobOwner
 from app.db.authorization_lease_owner import LeaseOwner
 from app.db.authorization_lifecycle_owner import LifecycleOwner
 from app.db.authorization_pending_owner import PendingOwner
@@ -52,6 +55,9 @@ class AuthorizationRuntime:
             raise _order_error()
         self.sessions = _SessionFactory(engine)
         self.auxiliary = AuxiliaryOwner(self.sessions)
+        self.http_audit = HttpAuditOwner(self.sessions)
+        self.job = JobOwner(self.sessions)
+        self.business = BusinessOwner(self.sessions)
         self.gateway = PlannedGatewayOwner(self.sessions)
         self.lifecycle = LifecycleOwner(self.sessions)
         self.chat = ChatOwner(self.sessions)

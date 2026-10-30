@@ -45,7 +45,22 @@ python -m tools.ops.authorization_maintenance resume --inventory deployment.json
 
 `stop` 和 `execute` 都从尚未关闭的部署开始，独占创建控制记录；不能在 `stop` 之后再运行 `execute`。需要维护动作时直接使用 `execute`，它在一次控制会话内完成关闭、停止、独立观察、固定 owner 执行和最终空闲核验。控制器退出后不会自动开放数据库或入口。
 
-当前固定动作是 `seed.system`、`seed.agents`、`seed.settings`、`principal.create` 和 `principal.permissions`；不接收任意 SQL、脚本、回调或 session factory。种子管理员密码或平台主体密码由 `AUTHORIZATION_MAINTENANCE_PASSWORD` 传入。平台主体动作另需 `--payload` JSON，包含 `principal_name`、`permissions`、`reason`、`ticket_id`、`correlation_id`，创建时另含 `display_name`。密码不能放入 payload。既有业务校验、权限清单、审计和唯一事务完成规则仍然生效。
+当前固定动作是 `seed.system`、`seed.agents`、`seed.settings`、`seed.menus`、`principal.create` 和 `principal.permissions`；不接收任意 SQL、脚本、回调或 session factory。种子管理员密码或平台主体密码由 `AUTHORIZATION_MAINTENANCE_PASSWORD` 传入。平台主体动作另需 `--payload` JSON，包含 `principal_name`、`permissions`、`reason`、`ticket_id`、`correlation_id`，创建时另含 `display_name`。密码不能放入 payload。既有业务校验、权限清单、审计和唯一事务完成规则仍然生效。
+
+`scripts/init_db.py`、`scripts/seed_ai_agents.py`、`scripts/seed_settings.py` 和 `scripts/sync_menus.py` 分别调用上述固定种子动作，必须提供 `--inventory`，可指定 `--control-dir`。脚本不会直接创建普通写会话。`seed.menus` 只同步默认租户的菜单和相应角色菜单关系，不创建用户、Agent 或设置。
+
+## 首次安装
+
+先完成数据库迁移。尚无业务身份和历史数据的新库使用单独的初始化清单：保留相同的 `manifest` 和 `application_roles`，将 `processes` 替换为 `"bootstrap": true`。直接启动和 Compose 均支持此清单；它不证明任何进程已经停止，不能用于既有部署维护。
+
+```bash
+python scripts/init_db.py --bootstrap --inventory bootstrap.json --control-dir CONTROL_DIRECTORY
+python -m tools.ops.authorization_maintenance bootstrap-resume --inventory bootstrap.json --control-dir CONTROL_DIRECTORY
+```
+
+首次安装同样需要 `RELEASE_BUILD_SHA`、`AUTHORIZATION_MAINTENANCE_DATABASE_URL` 和 `AUTHORIZATION_MAINTENANCE_PASSWORD`。控制目录不得已有进程登记。控制器持久关闭数据库新连接并核验全部在途连接和准备事务，再检查迁移版本、默认租户、初始授权 epoch 及所有业务表为空；仅允许有界的迁移配置数据。外部业务 schema、视图或外部表均拒绝。检查预算 8 秒，每条语句 2 秒，最多 256 张表。
+
+初始化许可仅适用于同一控制任务和数据库引擎的一次 `seed.system`，不能作为普通停写许可使用，也不能重放未知提交。初始化继续使用完整全局授权计划。完成或失败后数据库保持关闭；`bootstrap-resume` 在已签发证明过期后重新核验数据库空闲并显式恢复连接。它不重放初始化、不启动进程。已经存在用户、业务历史或变化的授权状态时，应使用正常部署清单与维护流程。
 
 ## 失败与显式恢复
 
@@ -54,6 +69,10 @@ python -m tools.ops.authorization_maintenance resume --inventory deployment.json
 `resume` 重新核对清单、实际进程停止及数据库空闲；最近签发的 30 秒证明尚有效时拒绝恢复。成功后恢复原数据库连接开关并移除停止标记，不启动应用，也不恢复 Docker 重启策略。部署管理员应先确认维护结果和待启动构建，再按记录恢复所需重启策略并启动已核对的实例。原进程不能靠删除文件重新进入。
 
 当前维护入口和停写机制已经接入实际启动路径；完整业务授权 owner 的生产迁移仍有未接入入口。这些控制能力不能作为全业务授权屏障已经开放、字段策略已启用或版本已经发布的证明。
+
+`file.parse` 使用固定只读入口。完整计划先验证原 JWT、Agent、工具开关、会话来源、数据范围及文件归属，随后释放数据库事务，在 3 秒有界 worker 中读取并解析最多 10 MiB 的文件；返回前以新计划复验当前权限、完整文件元数据与上传策略。每个数据库阶段预算 8 秒。返回结构化摘要及文件来源引用，不向模型返回原始字节。
+
+强制人工确认的文件解析也在数据库事务外完成。最终动作和日志在同一完整计划内保存，并重验解析前后的文件快照；重复批准只读已保存终态，提交未知时不自动重新解析。已存在的格式、MIME、内容、路径和文件所有者限制继续生效。
 
 ## 用户导入与导出
 
@@ -132,6 +151,8 @@ Gateway 起始审计先核验原 JWT 身份及会话来源，以固定锁计划�
 
 工具 dry-run 通过固定只读适配器重新核验身份、Agent、当前权限范围和消息来源，最多 8 秒且不提交事务。预检结果仅用于风险分类与确认展示，后续认领和执行仍需重新授权。部门查找最多读取 8192 个完整匹配项，超限拒绝；显示条数限制不截断用于投影授权的贡献记录集合。
 
+没有固定执行适配器的写工具会在创建业务会话或调用 handler 前拒绝，不回退到通用工具函数。导入预览被安全规则强制转为人工确认时，继续返回原有的确认准备失败结果；非执行审计由固定事务保存。正常预览后的执行确认仍走持久交接流程。
+
 ## 导入预览的文件准备
 
 导入预览先在固定只读授权事务中取得文件元数据与上传策略，再退出事务读取和解析文件。后台文件工作使用 2 个线程、8 个排队槽位和 3 秒等待预算；只接收不可变元数据或字节，不接收数据库会话。读取后重新核验原始身份、文件所有者、路径与上传策略，发布前再次验证元数据和策略。最终 FILE 阶段保留受事务预算约束的源文件摘要校验。
@@ -144,3 +165,15 @@ Gateway 的导入预览使用固定发布入口，复用已提交的原审计日
 持久确认的续传轮询只在短事务内读取原动作绑定的状态；返回连接后才等待下一轮。取消时回滚和关闭各保留0.25秒清理预算，清理不成功则隔离连接；这不会延长业务执行或提交确认的预算。
 
 配额、连续失败和IP拒绝计数先通过固定只读事务读取内部白名单配置。配置阶段最多1秒、每字段最多2KiB，不提供业务授权；随后Redis步骤最多2秒。容量保护超时拒绝继续，提交后的辅助计数或清理失败不会覆盖已经确认的业务结果。IP黑名单计数不会在数据库事务中等待Redis。
+
+路由反馈在同一授权计划内核验当前身份、消息与会话状态、消息所有者或超管身份，以及纠正 Agent 的实时可见性。当前反馈与追加历史原子保存，重复反馈仍追加历史，授权 epoch 不变。反馈不会修改原消息身份、来源或正文。数据库工作与提交确认各最多8秒。
+
+HTTP 操作审计通过固定入口读取当前用户名并追加日志。用户名读取最多1秒，审计数据库工作最多2秒，提交确认最多8秒；不再从用户名缓存取得归属信息。该记录只说明请求与响应，不授予业务权限；审计失败或提交未知不重试，也不改变主请求已经产生的结果。
+
+登录审计使用固定追加入口。已定位租户的日志保留租户归属；无法定位租户的失败或登出审计保持 `tenant_id=NULL`、`user_id=NULL`，不能用默认租户替代。审计失败或提交结果未知不重试，也不覆盖主认证响应。
+
+AI 确认仅接受有固定授权事务适配的持久化动作。仅有 Redis 待确认信息时返回 `CONFIRMATION_EXPIRED_OR_NOT_FOUND`；未适配工具的确认和续传返回 `AI_PREPARED_ACTION_REQUIRED`。这些拒绝不会唤醒执行或改写动作终态。
+
+任务配置和日志写入通过固定事务入口完成：同租户配置变更、日志认领和收尾与授权屏障串行，任务函数、Redis 通知和重试等待在数据库事务外执行。批量任务最多 256 项、日志最多 10000 条、任务参数最多 256 KiB，超限拒绝整次操作。任务配置与运行日志不推进授权 epoch。任务认领提交结果未知时不派发任务；完成日志提交结果未知时不重跑任务。孤儿日志扫描保留当前 runner 和宽限期保护，使用当前锁定事实更新，不能把进程退出请求当作停写证明。
+
+字典类型、字典数据及数据权限演示的写入也经过租户屏障和当前身份复验。字典类型有子数据时整批删除被拒绝；缺失或跨租户 ID 不允许部分删除。演示数据的创建部门来自当前主部门，创建者和部门不可通过编辑重写，更新与删除继续受当前数据范围限制。这些业务事实不推进授权 epoch。数据库预算 15 秒、提交确认预算 8 秒；批量最多 256 个 ID，字典发现每表最多 10000 条，演示正文最多 256 KiB，超限整次拒绝。

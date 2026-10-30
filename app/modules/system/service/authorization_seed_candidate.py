@@ -173,9 +173,11 @@ class SystemSeedCandidate:
             for kind, rows in facts.items():
                 existing.extend(_key(kind, tid, row) for row in rows)
             menus = facts[ResourceKind.MENU]
-            if action == "seed.system":
+            if action in {"seed.system", "seed.menus"}:
                 menu_changes, menus = _menus(tid, menus, facts[ResourceKind.ROLE_MENUS])
                 changes.extend(menu_changes)
+                if action == "seed.menus":
+                    continue
                 for role in facts[ResourceKind.ROLE]:
                     if (
                         role["role_code"] not in {SUPER_ADMIN_ROLE_CODE, USER_ROLE_CODE}

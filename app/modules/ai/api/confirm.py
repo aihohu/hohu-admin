@@ -3,8 +3,8 @@
 POST /ai/confirm authenticates the owner and current authority before claiming
 the action and required audit. The Gateway owns the business transaction;
 subsequent chat projection reads validated completion facts in a fresh session.
-Uncertain commits remain running and never authorize replay. The Redis-only
-legacy confirmation path retains its separate compatibility behavior.
+Uncertain commits remain running and never authorize replay. Only fixed durable
+adapters are reachable from the registered route.
 """
 
 import asyncio
@@ -1012,6 +1012,37 @@ async def _confirm_prepared(
 
 @router.post("", summary="HITL 工具调用确认")
 async def confirm_tool(
+    req: ConfirmRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ResponseModel[ConfirmResponse]:
+    """Dispatch only durable actions with a fixed authorization owner."""
+    from app.modules.ai.service.authorization_gateway_read_candidate import (  # noqa: PLC0415
+        READ_HANDLERS,
+    )
+
+    tenant = get_bound_tenant_context(current_user)
+    action = await prepared_action_service.get_by_confirmation_id(
+        db, req.confirmation_id, tenant=tenant
+    )
+    if action is None:
+        raise NotFoundException(
+            "HITL 确认", error_code="CONFIRMATION_EXPIRED_OR_NOT_FOUND"
+        )
+    if action.execute_tool_name in READ_HANDLERS:
+        return await _confirm_read_planned(
+            req, db=db, current_user=current_user, action_ref=action
+        )
+    if action.execute_tool_name in DB_TOOLS | FILE_TOOLS:
+        return await _confirm_planned(
+            req, db=db, current_user=current_user, action_ref=action
+        )
+    raise BusinessRuleException(
+        "该操作缺少可用的授权事务适配", error_code="AI_PREPARED_ACTION_REQUIRED"
+    )
+
+
+async def _legacy_confirm_tool(
     req: ConfirmRequest,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),

@@ -211,7 +211,12 @@ _GLOBAL_KINDS = frozenset(
     }
 )
 _AUDIT_KINDS = frozenset(
-    {ResourceKind.SYSTEM_OPERATION_LOG, ResourceKind.PLATFORM_AUDIT}
+    {
+        ResourceKind.SYSTEM_OPERATION_LOG,
+        ResourceKind.PLATFORM_AUDIT,
+        ResourceKind.LOGIN_LOG,
+        ResourceKind.UNRESOLVED_LOGIN_LOG,
+    }
 )
 _SECURITY_KEYS = frozenset(
     key for key, item in SETTINGS.items() if item.group == "security"
@@ -255,6 +260,7 @@ _MARKETPLACE_USER_DEPENDENCIES = (
     (table("mk_app_rating", column("user_id")), "user_id"),
 )
 _CASCADE_DEPENDENCIES = {
+    ResourceKind.JOB: ((ResourceKind.JOB_LOG, "job_id"),),
     ResourceKind.CONVERSATION: (
         (ResourceKind.SOURCE_MESSAGE, "conversation_id"),
         (ResourceKind.PREPARED_ACTION, "conversation_id"),
@@ -507,6 +513,8 @@ class _Transaction:
     def _scope_key(self, key, *, new=False, parent=None):
         if not isinstance(key, ResourceKey):
             raise _order_error()
+        if key.kind is ResourceKind.UNRESOLVED_LOGIN_LOG and not new:
+            raise _order_error()
         structural_source = (
             self._creation is not None
             and self._creation.get("created") is not None
@@ -647,6 +655,10 @@ class _Transaction:
                 raise _order_error()
 
     def _require_mutation_parents(self, key, values):
+        if key.kind is ResourceKind.JOB_LOG:
+            self.assert_held(
+                ResourceKey(ResourceKind.JOB, key.tenant_id, values["job_id"])
+            )
         if key.kind is ResourceKind.ROLE_AGENT:
             role_id, agent_id = key_values(key)
             self.assert_held(
@@ -845,6 +857,114 @@ class _Transaction:
             if key.kind in CONTEXT_CHILDREN:
                 self._assert_factual_parents(key, current)
             await self._reject_implicit_deletes(key)
+            await self._timeouts()
+            row = (
+                await self._execute(
+                    delete(spec.table)
+                    .where(*predicates)
+                    .returning(*(spec.table.c[n] for n in spec.key_columns))
+                )
+            ).one_or_none()
+            if row is None or tuple(row) != key_values(key):
+                raise _stale()
+            self._deleted.add(key)
+            return True
+        except BaseException:
+            self._journal.fail()
+            raise
+
+    async def delete_job_fact(self, key: ResourceKey, *, expected: dict) -> bool:
+        """Delete explicit job/log snapshots without an implicit child cascade."""
+        try:
+            self.assert_held(key)
+            self._require_exclusive_tenant(key.tenant_id)
+            if (
+                key.kind not in {ResourceKind.JOB, ResourceKind.JOB_LOG}
+                or getattr(self, "_file_phase", False)
+                or type(expected) is not dict
+                or not expected
+            ):
+                raise _order_error()
+            spec, predicates, current = await self._mutation_snapshot(key, {}, expected)
+            if key.kind is ResourceKind.JOB_LOG:
+                self._require_mutation_parents(key, current)
+            await self._reject_implicit_deletes(key)
+            await self._timeouts()
+            row = (
+                await self._execute(
+                    delete(spec.table)
+                    .where(*predicates)
+                    .returning(*(spec.table.c[n] for n in spec.key_columns))
+                )
+            ).one_or_none()
+            if row is None or tuple(row) != key_values(key):
+                raise _stale()
+            self._deleted.add(key)
+            return True
+        except BaseException:
+            self._journal.fail()
+            raise
+
+    async def _business_parents(self, key, values):
+        if key.kind not in {
+            ResourceKind.DICT_TYPE,
+            ResourceKind.DICT_DATA,
+            ResourceKind.DATA_SCOPE_DEMO,
+        }:
+            return
+        self._require_exclusive_tenant(key.tenant_id)
+        if key.kind is ResourceKind.DATA_SCOPE_DEMO:
+            self.assert_held(
+                ResourceKey(ResourceKind.DEPT, key.tenant_id, values["dept_id"]),
+                ResourceKey(ResourceKind.USER, key.tenant_id, values["create_by"]),
+            )
+        elif key.kind is ResourceKind.DICT_DATA:
+            table = resource_spec(ResourceKind.DICT_TYPE).table
+            identifier = (
+                await self._execute(
+                    select(table.c.dict_type_id).where(
+                        table.c.tenant_id == key.tenant_id,
+                        table.c.dict_type == values["dict_type"],
+                    )
+                )
+            ).scalar_one_or_none()
+            if identifier is None:
+                raise _order_error()
+            self.assert_held(
+                ResourceKey(ResourceKind.DICT_TYPE, key.tenant_id, identifier)
+            )
+
+    async def delete_business_fact(self, key: ResourceKey, *, expected: dict) -> bool:
+        """Only fixed non-authority business tables; parent facts remain immutable."""
+        try:
+            self.assert_held(key)
+            if (
+                key.kind
+                not in {
+                    ResourceKind.DICT_TYPE,
+                    ResourceKind.DICT_DATA,
+                    ResourceKind.DATA_SCOPE_DEMO,
+                }
+                or getattr(self, "_file_phase", False)
+                or type(expected) is not dict
+                or not expected
+            ):
+                raise _order_error()
+            spec, predicates, current = await self._mutation_snapshot(key, {}, expected)
+            await self._business_parents(key, current)
+            if key.kind is ResourceKind.DICT_TYPE:
+                child = resource_spec(ResourceKind.DICT_DATA).table
+                if (
+                    await self._execute(
+                        select(child.c.dict_code)
+                        .where(
+                            child.c.tenant_id == key.tenant_id,
+                            child.c.dict_type == current["dict_type"],
+                        )
+                        .limit(1)
+                    )
+                ).first() is not None:
+                    raise _order_error()
             await self._timeouts()
             row = (
                 await self._execute(
@@ -1300,6 +1420,9 @@ class _Transaction:
             time_column = (
                 "create_time"
                 if key.kind is ResourceKind.SYSTEM_OPERATION_LOG
+                else "login_time"
+                if key.kind
+                in {ResourceKind.UNRESOLVED_LOGIN_LOG, ResourceKind.LOGIN_LOG}
                 else "created_at"
             )
             if (
@@ -1312,8 +1435,24 @@ class _Transaction:
                 )
             ):
                 raise _order_error()
-            if key.kind is ResourceKind.SYSTEM_OPERATION_LOG:
+            if key.kind is ResourceKind.UNRESOLVED_LOGIN_LOG:
+                if (
+                    values.get("tenant_id") is not None
+                    or values.get("user_id") is not None
+                    or values.get("audit_scope") != "unresolved"
+                    or values.get("status") not in {"2", "3"}
+                ):
+                    raise _order_error()
+            elif key.kind in {
+                ResourceKind.SYSTEM_OPERATION_LOG,
+                ResourceKind.LOGIN_LOG,
+            }:
                 self.assert_held(ResourceKey(ResourceKind.TENANT, None, key.tenant_id))
+                if (
+                    key.kind is ResourceKind.LOGIN_LOG
+                    and values.get("audit_scope") != "tenant"
+                ):
+                    raise _order_error()
                 if (
                     self._creation is not None
                     and self._creation.get("created") is not None
@@ -1437,6 +1576,7 @@ class _Transaction:
             if any(name not in spec.table.c for name in values):
                 raise _order_error()
             self._require_mutation_parents(key, values)
+            await self._business_parents(key, values)
             if key.kind in CONTEXT_CHILDREN or key.kind is ResourceKind.CONVERSATION:
                 self._assert_factual_parents(key, values)
             reservation = next(item for item in self._plan.new if item.key == key)
@@ -1472,17 +1612,25 @@ class _Transaction:
             self._journal.fail()
             raise
 
-    def _assert_factual_parents(self, key, values):
+    def _assert_factual_parents(self, key, values, *, feedback_only=False):
         if key.kind is ResourceKind.CONVERSATION:
             self.assert_held(
                 ResourceKey(ResourceKind.USER, key.tenant_id, values["user_id"])
             )
         elif key.kind in CONTEXT_CHILDREN:
-            if key.kind in {
-                ResourceKind.SOURCE_MESSAGE,
-                ResourceKind.ASSISTANT_MESSAGE,
-            } and values.get("role") != (
-                "user" if key.kind is ResourceKind.SOURCE_MESSAGE else "assistant"
+            if (
+                key.kind
+                in {
+                    ResourceKind.SOURCE_MESSAGE,
+                    ResourceKind.ASSISTANT_MESSAGE,
+                }
+                and values.get("role")
+                != ("user" if key.kind is ResourceKind.SOURCE_MESSAGE else "assistant")
+                and not (
+                    feedback_only
+                    and key.kind is ResourceKind.ASSISTANT_MESSAGE
+                    and values.get("role") in {"tool", "system"}
+                )
             ):
                 raise _order_error()
             self.assert_held(
@@ -1527,8 +1675,18 @@ class _Transaction:
             )
             if row is None:
                 raise _stale()
+            if key.kind is ResourceKind.JOB_LOG:
+                self._require_mutation_parents(key, row)
+            await self._business_parents(key, row)
+            await self._business_parents(key, dict(row) | changes)
             if key.kind in CONTEXT_CHILDREN:
-                self._assert_factual_parents(key, row)
+                feedback_only = set(changes) == {"routing_feedback"}
+                if "routing_feedback" in changes and (
+                    not feedback_only
+                    or changes["routing_feedback"] not in {"correct", "wrong"}
+                ):
+                    raise _order_error()
+                self._assert_factual_parents(key, row, feedback_only=feedback_only)
             spec, predicates, current = await self._mutation_snapshot(
                 key, changes, expected
             )

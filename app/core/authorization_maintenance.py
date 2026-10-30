@@ -19,6 +19,7 @@ _ACTIONS = frozenset(
         "seed.system",
         "seed.agents",
         "seed.settings",
+        "seed.menus",
         "migration",
     }
 )

@@ -813,6 +813,7 @@ async def test_handoff_commit_uncertainty_keeps_one_original_identity(
 
 async def test_injection_preview_preserves_current_denial_without_file_side_effects(
     preview_case,
+    monkeypatch,
 ):
     from app.modules.ai.agents.hitl.events import ConfirmationRequiredEvent
     from app.modules.ai.api import confirm as confirm_module
@@ -821,6 +822,11 @@ async def test_injection_preview_preserves_current_denial_without_file_side_effe
     preview = preview_case
     preview.deps.injection_hit = True
     approvals = []
+
+    def forbidden_session():
+        pytest.fail("unsupported preview confirmation opened an ordinary session")
+
+    monkeypatch.setattr(executor, "AsyncSessionLocal", forbidden_session)
 
     async def approve_injection(event):
         if isinstance(event, ConfirmationRequiredEvent):

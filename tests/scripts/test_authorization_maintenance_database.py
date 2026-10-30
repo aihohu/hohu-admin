@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -20,6 +21,46 @@ from tools.ops.authorization_maintenance import (
     ProcessIdentity,
     StopManifest,
 )
+
+
+async def test_quiescence_waits_for_owned_backend_to_be_observably_idle(
+    deployment_database, tmp_path
+):
+    admin, _, role, _ = deployment_database
+    manifest = StopManifest("unit", "a" * 40, "direct", ("api", "scheduler"))
+    async with PostgresStop(admin, tmp_path, manifest, (role,)) as guard:
+        await guard.prepare()
+        connection = guard.connection
+        observations = []
+
+        class ObservedConnection:
+            async def scalar(self, *args, **kwargs):
+                return await connection.scalar(*args, **kwargs)
+
+            async def execute(self, statement, *args, **kwargs):
+                result = await connection.execute(statement, *args, **kwargs)
+                if "SELECT pid, backend_start, state" not in str(statement):
+                    return result
+                rows = result.all()
+                observations.append(rows)
+                if len(observations) == 1:
+                    rows = [
+                        SimpleNamespace(
+                            pid=row.pid,
+                            backend_start=row.backend_start,
+                            state="active",
+                            xact_start=datetime.now(UTC),
+                        )
+                        for row in rows
+                    ]
+                return SimpleNamespace(all=lambda: rows)
+
+        guard.connection = ObservedConnection()
+        try:
+            await guard.require_quiescent()
+        finally:
+            guard.connection = connection
+        assert len(observations) >= 2
 
 
 @pytest.fixture

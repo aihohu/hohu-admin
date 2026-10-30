@@ -946,6 +946,20 @@ async def resume_chat(
         raise AuthorizationException(error_code="AI_RESUME_FORBIDDEN")
 
     if durable_action is not None:
+        from app.modules.ai.service.authorization_gateway_read_candidate import (  # noqa: PLC0415
+            READ_HANDLERS,
+        )
+
+        if (
+            durable_action.execute_tool_name
+            not in DB_TOOLS | FILE_TOOLS | READ_HANDLERS.keys()
+        ):
+            raise BusinessRuleException(
+                "该操作缺少可用的授权事务适配",
+                error_code="AI_PREPARED_ACTION_REQUIRED",
+            )
+
+    if durable_action is not None:
         annotated = await operation_log_service.has_reconciliation_annotation(
             db,
             durable_action.execute_tool_call_id,

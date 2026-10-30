@@ -114,6 +114,20 @@ async def system_write(
     )
 
 
+async def business_write(db, actor, *, operation, tenant, payload=None, ids=()):
+    identity = access_identity(actor)
+    if identity.tenant != tenant:
+        raise _order_error()
+    await release_request_reads(db)
+    return await get_authorization_runtime().business.execute(
+        tenant=tenant,
+        actor_user_version=identity.user_version,
+        operation=operation,
+        payload=payload,
+        ids=ids,
+    )
+
+
 async def _login_audit(*, tenant_id, user_id, credentials, ip, user_agent, success):
     try:
         async with asyncio.timeout(2):

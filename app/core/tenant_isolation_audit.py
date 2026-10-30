@@ -95,7 +95,6 @@ _NAMESPACE_REGISTRY: dict[str, tuple[str, str, tuple[str, ...]]] = {
         "infrastructure",
         ("AuthorizationPlanSession", "TransferOwner", "get_file_storage"),
     ),
-    "middleware/audit_middleware.py": ("cache", "tenant", ("tenant_id",)),
     "middleware/rate_limit_middleware.py": ("cache", "global", ()),
     "modules/system/api/settings.py": ("cache", "tenant", ("tenant_id",)),
     "modules/auth/service.py": ("cache", "global", ()),

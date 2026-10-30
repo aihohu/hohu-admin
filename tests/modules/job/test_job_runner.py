@@ -6,8 +6,7 @@
     时钟基准对齐——守护协程按 Python now 算 grace，与 log.start_time 同基准。
 
 mock 策略：
-  - 把 job_runner 模块内的 AsyncSessionLocal 替换为返回 db_session 的 fake
-    context manager，让 _do_execute 跑在 fixture session 内（数据回滚隔离）
+  - 固定 JobOwner 使用真实新会话；只提交并清理本测试拥有的任务
   - 临时注册一个立即成功的 fake task function（通过 _task_functions 直接写入，
     避免装饰器名字冲突）
 """
@@ -21,22 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.modules.job.job_runner import RUNNER_ID, _do_execute
 from app.modules.job.models.job import SysJob, SysJobLog
 from app.modules.job.task_registry import _task_functions
-
-
-class _FakeSessionFactory:
-    """让 job_runner._do_execute 内的 AsyncSessionLocal() 返回 db_session。"""
-
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-
-    def __call__(self) -> "_FakeSessionFactory":
-        return self
-
-    async def __aenter__(self) -> AsyncSession:
-        return self._session
-
-    async def __aexit__(self, *exc_info: object) -> None:
-        return None
+from tests.modules.job.authorization_fixture import (
+    committed_job_session,  # noqa: F401
+)
 
 
 async def _seed_enabled_job(
@@ -59,6 +45,8 @@ async def _seed_enabled_job(
     )
     db.add(job)
     await db.flush()
+    db.info["owned_jobs"].append((0, job.job_id, job.job_key))
+    await db.commit()
     return job
 
 
@@ -82,14 +70,8 @@ def fake_task_function():
 class TestDoExecuteWritesRunnerIdAndPythonNow:
     """验证任务运行器的超时与失败边界。"""
 
-    async def test_log_written_with_runner_id(
-        self, db_session, monkeypatch, fake_task_function
-    ):
+    async def test_log_written_with_runner_id(self, db_session, fake_task_function):
         """#9 新建的 log.runner_id == RUNNER_ID（决策 1/2）。"""
-        monkeypatch.setattr(
-            "app.modules.job.job_runner.AsyncSessionLocal",
-            _FakeSessionFactory(db_session),
-        )
 
         job_key = fake_task_function
         job_id = 90001
@@ -108,17 +90,13 @@ class TestDoExecuteWritesRunnerIdAndPythonNow:
         assert log.status == "1"  # SUCCESS（fake task 立即成功）
 
     async def test_start_time_uses_python_now_not_db_now(
-        self, db_session, monkeypatch, fake_task_function
+        self, db_session, fake_task_function
     ):
         """#10 log.start_time 与 datetime.now() 偏差 < 2s（决策 9 回归保护）。
 
         如果有人把 `start_time=datetime.now()` 改成 `func.now()`（DB 时钟），
         在 DB 与 Python 时钟漂移大的环境（容器 / 跨时区部署）就会出现 > 1s 偏差。
         """
-        monkeypatch.setattr(
-            "app.modules.job.job_runner.AsyncSessionLocal",
-            _FakeSessionFactory(db_session),
-        )
 
         job_key = fake_task_function
         job_id = 90002

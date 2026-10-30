@@ -65,7 +65,12 @@ class ResourceKind(StrEnum):
     SYSTEM_OPERATION_LOG = "system_operation_log"
     PLATFORM_AUDIT = "platform_audit"
     LOGIN_LOG = "login_log"
+    UNRESOLVED_LOGIN_LOG = "unresolved_login_log"
     JOB = "job"
+    JOB_LOG = "job_log"
+    DICT_TYPE = "dict_type"
+    DICT_DATA = "dict_data"
+    DATA_SCOPE_DEMO = "data_scope_demo"
     FILE = "file"
 
 
@@ -194,6 +199,18 @@ _RESOURCE_DEFINITIONS = MappingProxyType(
         ResourceKind.JOB: _definition(
             "sys_job", ("job_id",), 730, "app.modules.job.models.job"
         ),
+        ResourceKind.JOB_LOG: _definition(
+            "sys_job_log", ("job_log_id",), 735, "app.modules.job.models.job"
+        ),
+        ResourceKind.DICT_TYPE: _definition(
+            "sys_dict_type", ("dict_type_id",), 740, _SYSTEM + "dict_type"
+        ),
+        ResourceKind.DICT_DATA: _definition(
+            "sys_dict_data", ("dict_code",), 750, _SYSTEM + "dict_data"
+        ),
+        ResourceKind.DATA_SCOPE_DEMO: _definition(
+            "sys_data_scope_demo", ("demo_id",), 760, _SYSTEM + "data_scope_demo"
+        ),
         ResourceKind.ROUTING_LOG: _definition(
             "ai_routing_log", ("log_id",), 810, _AI + "routing_log"
         ),
@@ -224,6 +241,13 @@ _RESOURCE_DEFINITIONS = MappingProxyType(
         ),
         ResourceKind.LOGIN_LOG: _definition(
             "sys_login_log", ("login_log_id",), 960, _SYSTEM + "login_log"
+        ),
+        ResourceKind.UNRESOLVED_LOGIN_LOG: _definition(
+            "sys_login_log",
+            ("login_log_id",),
+            961,
+            _SYSTEM + "login_log",
+            global_scope=True,
         ),
     }
 )

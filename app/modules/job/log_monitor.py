@@ -14,21 +14,13 @@ runner_id != RUNNER_ID 且超 grace 阈值的 log，标 FAILED 并写明守护�
 
 import asyncio
 import logging
-from datetime import datetime
 
-from sqlalchemy import select, update
-
-from app.constants import STATUS_ENABLED
 from app.core.tenant import PlatformContext
 from app.core.write_admission import admitted, is_closed, require_open
-from app.db.session import AsyncSessionLocal
+from app.db.authorization_http import get_authorization_runtime
 from app.modules.job.job_runner import (
-    LOG_STATUS_FAILED,
-    LOG_STATUS_RUNNING,
     RUNNER_ID,
 )
-from app.modules.job.models.job import SysJob, SysJobLog
-from app.modules.system.models.tenant import Tenant
 
 logger = logging.getLogger(__name__)
 
@@ -98,97 +90,6 @@ class JobLogMonitor:
 
     @admitted
     async def _scan_once(self) -> int:
-        """扫描一次，返回清理条数。
-
-        粗筛：SQL 拿所有 status=RUNNING log（status 索引前缀命中）
-        细筛：Python 按 job 实际 timeout * 2 二次过滤
-
-        注：粗筛不在 SQL 用 start_time 过滤——任务 timeout 配置各异，grace 可能短
-        至秒级（如 timeout=30s，grace=60s），统一粗筛阈值会漏。RUNNING log 通常
-        很少（< 100），无性能问题。
-        """
-        now = datetime.now()
-
-        async with AsyncSessionLocal() as db:
-            to_reclaim: list[SysJobLog] = []
-            tenant_ids = (
-                await db.execute(
-                    select(Tenant.tenant_id).where(Tenant.status == STATUS_ENABLED)
-                )
-            ).scalars()
-            for tenant_id in tenant_ids:
-                candidates = (
-                    (
-                        await db.execute(
-                            select(SysJobLog).where(
-                                SysJobLog.tenant_id == tenant_id,
-                                SysJobLog.status == LOG_STATUS_RUNNING,
-                            )
-                        )
-                    )
-                    .scalars()
-                    .all()
-                )
-                if not candidates:
-                    continue
-
-                job_ids = {candidate.job_id for candidate in candidates}
-                jobs = {
-                    job.job_id: job
-                    for job in (
-                        await db.execute(
-                            select(SysJob).where(
-                                SysJob.tenant_id == tenant_id,
-                                SysJob.job_id.in_(job_ids),
-                            )
-                        )
-                    )
-                    .scalars()
-                    .all()
-                }
-
-                for log in candidates:
-                    # 不动本进程的 log（长任务保护，决策 1）
-                    if log.runner_id == self._runner_id:
-                        continue
-
-                    # 按 job 实际 timeout 二次过滤（决策 3）
-                    job = jobs.get(log.job_id)
-                    timeout_sec = (
-                        job.timeout_seconds
-                        if job and job.timeout_seconds
-                        else self.DEFAULT_TIMEOUT
-                    )
-                    grace = timeout_sec * 2
-                    if (now - log.start_time).total_seconds() < grace:
-                        continue
-
-                    to_reclaim.append(log)
-
-            for log in to_reclaim:
-                runner_desc = (
-                    "历史数据（迁移前遗留）"
-                    if log.runner_id is None
-                    else f"上一进程 runner_id={log.runner_id}"
-                )
-                # WHERE status=RUNNING 守卫（决策 8）：多实例并发时第二个 monitor
-                # 影响 0 行，不覆盖 audit 字段
-                await db.execute(
-                    update(SysJobLog)
-                    .where(SysJobLog.tenant_id == log.tenant_id)
-                    .where(SysJobLog.job_log_id == log.job_log_id)
-                    .where(SysJobLog.status == LOG_STATUS_RUNNING)
-                    .values(
-                        status=LOG_STATUS_FAILED,
-                        error_msg=(
-                            f"执行进程未确认结果（{runner_desc}），"
-                            f"疑似进程崩溃或重启，被守护协程标记失败"
-                        ),
-                        end_time=now,
-                        duration=0,  # 实际执行时长未知；用 error_msg 文案澄清
-                    )
-                )
-
-            if to_reclaim:
-                await db.commit()
-            return len(to_reclaim)
+        return await get_authorization_runtime().job.scan(
+            platform=self._platform, runner_id=self._runner_id
+        )

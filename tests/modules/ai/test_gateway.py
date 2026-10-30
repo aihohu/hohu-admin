@@ -52,6 +52,9 @@ def isolate_unit_tool_audit(monkeypatch):
 
     monkeypatch.setattr(executor, "_start_log", AsyncMock(return_value=1))
     monkeypatch.setattr(executor, "_finish_log_final", AsyncMock())
+    # Synthetic callbacks exercise exception/result mapping, not production
+    # dispatch. Unadapted production writers are denied in the real boundary test.
+    monkeypatch.setattr(executor, "_invoke_tool_fn", executor._invoke_legacy_tool_fn)
 
 
 # ============ ToolResult ============

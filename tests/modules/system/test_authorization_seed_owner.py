@@ -62,6 +62,37 @@ async def test_settings_seed_preserves_existing_values(system_sessions):
         assert await db.scalar(select(UserFieldPolicyGlobalGuard.epoch)) == 2
 
 
+async def test_menu_seed_does_not_create_other_seed_resources(system_sessions):
+    factory, plain = system_sessions
+    async with plain() as db:
+        before = [
+            set(await db.scalars(select(model.__mapper__.primary_key[0])))
+            for model in (User, AiAgent, SystemSetting)
+        ]
+    for _ in range(2):
+        permit = await fence("seed.menus")
+        async with factory() as db:
+            result = await seed_candidate_owner.execute(
+                db, action="seed.menus", fence=permit
+            )
+        assert result["fresh"] is False
+    assert result["planned_changes"] == 0
+    async with plain() as db:
+        after = [
+            set(await db.scalars(select(model.__mapper__.primary_key[0])))
+            for model in (User, AiAgent, SystemSetting)
+        ]
+        assert after == before
+        assert (
+            await db.scalar(
+                select(Menu.menu_id).where(
+                    Menu.tenant_id == 0, Menu.route_name == "ai_chat"
+                )
+            )
+            is not None
+        )
+
+
 @pytest.mark.parametrize("fresh", [False, True])
 async def test_system_seed_converges_and_initializes_admin_only_when_fresh(
     system_sessions, fresh

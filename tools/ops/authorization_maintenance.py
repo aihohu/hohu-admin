@@ -20,6 +20,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.core.authorization_bootstrap import FreshDatabaseEvidence, issue_bootstrap
 from app.core.authorization_maintenance import (
     StoppedWritersEvidence,
     _required,
@@ -35,6 +36,7 @@ from app.core.process_identity import (
     windows_process,
 )
 from app.db.authorization_runtime import AuthorizationRuntime
+from tools.ops.authorization_bootstrap import require_fresh_database
 
 
 @dataclass(frozen=True)
@@ -443,6 +445,46 @@ class PostgresStop:
         )
         await self._allow(False)
 
+    def _require_unregistered(self):
+        if next(self.directory.glob("process-*.json"), None) is not None:
+            raise _required()
+
+    async def prepare_bootstrap(self):
+        self._require_unregistered()
+        await self.prepare()
+
+    async def bootstrap_fence(self):
+        self._require_unregistered()
+        if self._record().get("processes") is not None:
+            raise _required()
+        await self.require_quiescent()
+        async with asyncio.timeout(8):
+            async with self.runtime_engine.connect() as db:
+                await db.execute(text("SET LOCAL statement_timeout = '2s'"))
+                await require_fresh_database(db)
+        await self.require_quiescent()
+        now = datetime.now(UTC)
+        self._save_observation(now, bootstrap=True)
+        return issue_bootstrap(
+            FreshDatabaseEvidence(
+                self.database_oid, self.manifest.build_sha, self.manifest.digest, now
+            ),
+            self.runtime_engine,
+        )
+
+    def _save_observation(self, now, *, bootstrap=False):
+        record = self._record()
+        record["observed_at"] = now.isoformat()
+        if bootstrap:
+            record["bootstrap"] = True
+        temporary = self.directory / "observation.tmp"
+        with temporary.open("x", encoding="utf-8") as output:
+            json.dump(record, output)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, self.directory / "stop.json")
+        return record
+
     def _record(self):
         try:
             value = read_object(self.directory / "stop.json")
@@ -462,37 +504,44 @@ class PostgresStop:
         self._record()
         if self.connection is None:
             raise _required()
-        async with asyncio.timeout(3):
-            allowed = await self.connection.scalar(
-                text("SELECT datallowconn FROM pg_database WHERE oid=:oid"),
+        try:
+            async with asyncio.timeout(3):
+                while not await self._observe_quiescent():  # noqa: ASYNC110 - external PostgreSQL state
+                    # ReadyForQuery can reach the client before pg_stat_activity
+                    # exposes idle. Only wait for our exact owned generations.
+                    await asyncio.sleep(0.025)
+        except TimeoutError:
+            raise _required() from None
+
+    async def _observe_quiescent(self):
+        allowed = await self.connection.scalar(
+            text("SELECT datallowconn FROM pg_database WHERE oid=:oid"),
+            {"oid": self.database_oid},
+        )
+        # Count idle connections too: their next statement can still write.
+        sessions = (
+            await self.connection.execute(
+                text(
+                    "SELECT pid, backend_start, state, xact_start FROM pg_stat_activity "
+                    "WHERE datid=:oid ORDER BY pid LIMIT 1025"
+                ),
                 {"oid": self.database_oid},
             )
-            # Count idle connections too: their next statement can still write.
-            sessions = (
-                await self.connection.execute(
-                    text(
-                        "SELECT pid, backend_start, state, xact_start FROM pg_stat_activity "
-                        "WHERE datid=:oid ORDER BY pid LIMIT 1025"
-                    ),
-                    {"oid": self.database_oid},
-                )
-            ).all()
-            prepared = await self.connection.scalar(
-                text("SELECT count(*) FROM pg_prepared_xacts WHERE database=:database"),
-                {"database": self.database},
+        ).all()
+        prepared = await self.connection.scalar(
+            text("SELECT count(*) FROM pg_prepared_xacts WHERE database=:database"),
+            {"database": self.database},
+        )
+        if (
+            allowed is not False
+            or prepared != 0
+            or {row.pid for row in sessions} != set(self._owned_backends)
+            or any(
+                row.backend_start != self._owned_backends[row.pid] for row in sessions
             )
-            if (
-                allowed is not False
-                or prepared != 0
-                or {row.pid for row in sessions} != set(self._owned_backends)
-                or any(
-                    row.backend_start != self._owned_backends[row.pid]
-                    or row.state != "idle"
-                    or row.xact_start is not None
-                    for row in sessions
-                )
-            ):
-                raise _required()
+        ):
+            raise _required()
+        return all(row.state == "idle" and row.xact_start is None for row in sessions)
 
     async def observe(self, processes):
         if type(processes) not in {DirectProcesses, ComposeProcesses}:
@@ -505,14 +554,7 @@ class PostgresStop:
             raise _required()
         await self.require_quiescent()
         now = datetime.now(UTC)
-        record = self._record()
-        record["observed_at"] = now.isoformat()
-        temporary = self.directory / "observation.tmp"
-        with temporary.open("x", encoding="utf-8") as output:
-            json.dump(record, output)
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary, self.directory / "stop.json")
+        record = self._save_observation(now)
         inventory = {
             key: value for key, value in record.items() if key != "observed_at"
         }
@@ -539,6 +581,16 @@ class PostgresStop:
             raise _required()
         if not await processes.stopped():
             raise _required()
+        await self._resume_admission(record)
+
+    async def resume_bootstrap(self):
+        self._require_unregistered()
+        record = self._record()
+        if record.get("processes") is not None:
+            raise _required()
+        await self._resume_admission(record)
+
+    async def _resume_admission(self, record):
         await self.require_quiescent()
         observed = record.get("observed_at")
         if observed is not None:
@@ -574,10 +626,15 @@ def read_object(path):
         raise _required() from None
 
 
-def read_inventory(path):
+def read_inventory(path, *, bootstrap=False):
     value = read_object(path)
     try:
-        if set(value) != {"manifest", "application_roles", "processes"}:
+        expected = {
+            "manifest",
+            "application_roles",
+            "bootstrap" if bootstrap else "processes",
+        }
+        if set(value) != expected:
             raise _required()
         manifest = StopManifest(**value["manifest"])
         roles = value["application_roles"]
@@ -592,6 +649,10 @@ def read_inventory(path):
             )
         ):
             raise _required()
+        if bootstrap:
+            if value["bootstrap"] is not True:
+                raise _required()
+            return manifest, None, tuple(roles)
         description = value["processes"]
         if description["mode"] != manifest.mode:
             raise _required()
@@ -662,6 +723,7 @@ _EXECUTE_ACTIONS = (
     "seed.system",
     "seed.agents",
     "seed.settings",
+    "seed.menus",
     "principal.create",
     "principal.permissions",
 )
@@ -671,7 +733,17 @@ def arguments(argv=None):
     parser = argparse.ArgumentParser(
         description="Fence and verify this deployment before fixed maintenance actions"
     )
-    parser.add_argument("command", choices=("stop", "execute", "observe", "resume"))
+    parser.add_argument(
+        "command",
+        choices=(
+            "stop",
+            "execute",
+            "observe",
+            "resume",
+            "bootstrap",
+            "bootstrap-resume",
+        ),
+    )
     parser.add_argument("--inventory", required=True, type=Path)
     parser.add_argument(
         "--control-dir", type=Path, default=Path(settings.AUTHORIZATION_CONTROL_DIR)
@@ -679,11 +751,40 @@ def arguments(argv=None):
     parser.add_argument("--action", choices=_EXECUTE_ACTIONS)
     parser.add_argument("--payload", type=Path)
     args = parser.parse_args(argv)
+    if args.command == "bootstrap":
+        if args.action is not None or args.payload is not None:
+            parser.error(
+                "bootstrap only initializes seed.system and accepts no payload"
+            )
+        args.action = "seed.system"
+        return args
     if (args.command == "execute") != (args.action is not None):
         parser.error("execute requires --action; other commands forbid it")
     if args.payload is not None and (args.action or "").startswith("seed."):
         parser.error("seed actions do not accept payload files")
     return args
+
+
+def seed_arguments(action, argv=None):
+    if action not in {"seed.system", "seed.settings", "seed.agents", "seed.menus"}:
+        raise _required()
+    parser = argparse.ArgumentParser(
+        description="Run this seed only after verified process and database fencing"
+    )
+    parser.add_argument("--inventory", required=True, type=Path)
+    if action == "seed.system":
+        parser.add_argument("--bootstrap", action="store_true")
+    parser.add_argument(
+        "--control-dir", type=Path, default=Path(settings.AUTHORIZATION_CONTROL_DIR)
+    )
+    args = parser.parse_args(argv)
+    args.command = "bootstrap" if getattr(args, "bootstrap", False) else "execute"
+    args.action, args.payload = action, None
+    return args
+
+
+async def run_seed_entry(action, argv=None):
+    return await run_command(seed_arguments(action, argv))
 
 
 def action_payload(action, path):
@@ -731,18 +832,36 @@ async def execute_action(guard, processes, action, payload):
 
 
 async def run_command(args):
-    manifest, processes, roles = read_inventory(args.inventory)
+    bootstrap = args.command in {"bootstrap", "bootstrap-resume"}
+    manifest, processes, roles = read_inventory(args.inventory, bootstrap=bootstrap)
     payload = action_payload(args.action, args.payload)
     if settings.RELEASE_BUILD_SHA != manifest.build_sha:
         raise _required()
     url = os.environ.get("AUTHORIZATION_MAINTENANCE_DATABASE_URL")
     if not url:
         raise _required()
+    if args.command == "bootstrap" and not os.environ.get(
+        "AUTHORIZATION_MAINTENANCE_PASSWORD"
+    ):
+        raise _required()
     if type(processes) is DirectProcesses:
         require_registered_inventory(args.control_dir, processes)
     engine = create_async_engine(url, poolclass=NullPool)
     try:
         async with PostgresStop(engine, args.control_dir, manifest, roles) as guard:
+            if args.command == "bootstrap-resume":
+                await guard.resume_bootstrap()
+                return {"state": "admission-restored", "processes_restarted": False}
+            if args.command == "bootstrap":
+                await guard.prepare_bootstrap()
+                fence = await guard.bootstrap_fence()
+                result = await AuthorizationRuntime(guard.runtime_engine).seed(
+                    action="seed.system",
+                    fence=fence,
+                    admin_password=os.environ["AUTHORIZATION_MAINTENANCE_PASSWORD"],
+                )
+                await guard.require_quiescent()
+                return {"state": "initialized-admission-closed", "result": result}
             if args.command in {"stop", "execute"}:
                 await guard.prepare(processes)
                 if type(processes) is DirectProcesses:

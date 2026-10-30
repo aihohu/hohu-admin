@@ -11,7 +11,12 @@ from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.chat_run_service import chat_run_finalizer
-from tests.modules.ai.test_atomic_prepared_completion import approve, count_real_handler
+from app.modules.auth.service import access_identity
+from tests.modules.ai.test_atomic_prepared_completion import (
+    approve,
+    authenticated_actor,
+    count_real_handler,
+)
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )
@@ -119,6 +124,9 @@ async def test_unknown_notice_appends_to_nonempty_message_once(
     completion_case, monkeypatch
 ):
     case = completion_case
+    async with AsyncSessionLocal() as db:
+        actor = await authenticated_actor(case, db)
+        original_version = access_identity(actor).user_version
     await _seed_partial_message(case)
     await leave_claim_running(case, monkeypatch)
     for _ in range(2):
@@ -134,7 +142,7 @@ async def test_unknown_notice_appends_to_nonempty_message_once(
                 agent_code=action.agent_code,
                 stream_error_code="AI_EXECUTION_OUTCOME_UNKNOWN",
                 tenant=case.tenant,
-                actor_user_version=1,
+                actor_user_version=original_version,
             )
     async with AsyncSessionLocal() as db:
         message = await _message(db, case)

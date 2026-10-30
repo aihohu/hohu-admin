@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import require_ai_chat_use, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.core.tenant import get_bound_tenant_context
+from app.db import authorization_http
 from app.db.session import get_db
 from app.modules.ai.schemas.routing_feedback import (
     FeedbackListItem,
@@ -23,9 +24,7 @@ from app.modules.ai.schemas.routing_feedback import (
 from app.modules.ai.service.routing_feedback_query import (
     routing_feedback_query_service,
 )
-from app.modules.ai.service.routing_feedback_service import (
-    routing_feedback_service,
-)
+from app.modules.auth.service import access_identity
 from app.modules.system.models.user import User
 
 router = APIRouter()  # prefix 由 main.py 的 include_router 提供，避免双重叠加
@@ -43,14 +42,15 @@ async def submit_routing_feedback(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_ai_chat_use),
 ):
-    await routing_feedback_service.submit(
-        db,
+    identity = access_identity(current_user)
+    await authorization_http.release_request_reads(db)
+    await authorization_http.get_authorization_runtime().chat.routing_feedback(
         message_id=message_id,
-        request=request,
-        user=current_user,
-        tenant=get_bound_tenant_context(current_user),
+        feedback=request.feedback,
+        corrected_agent_code=request.corrected_agent_code,
+        tenant=identity.tenant,
+        actor_user_version=identity.user_version,
     )
-    await db.commit()
     return ResponseModel.success(data=None)
 
 

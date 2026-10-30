@@ -6,7 +6,40 @@ from app.core.authorization_plan import ResourceKind as K
 
 FACT_COLUMNS = MappingProxyType(
     {
-        K.JOB: frozenset({"cron_expression", "update_by"}),
+        K.DICT_TYPE: frozenset({"dict_name", "dict_type", "status", "remark"}),
+        K.DICT_DATA: frozenset(
+            {
+                "dict_sort",
+                "dict_label",
+                "dict_value",
+                "dict_type",
+                "css_class",
+                "list_class",
+                "is_default",
+                "status",
+            }
+        ),
+        K.DATA_SCOPE_DEMO: frozenset({"title", "content", "status"}),
+        K.JOB: frozenset(
+            {
+                "job_name",
+                "cron_expression",
+                "trigger_type",
+                "interval_value",
+                "interval_unit",
+                "job_args",
+                "status",
+                "concurrent",
+                "timeout_seconds",
+                "max_retries",
+                "run_on_enable",
+                "remark",
+                "update_by",
+            }
+        ),
+        K.JOB_LOG: frozenset(
+            {"status", "error_msg", "end_time", "duration", "attempt_count"}
+        ),
         K.CONVERSATION: frozenset(
             {
                 "title",
@@ -21,6 +54,7 @@ FACT_COLUMNS = MappingProxyType(
         K.SOURCE_MESSAGE: frozenset({"is_active", "routing_feedback"}),
         K.ASSISTANT_MESSAGE: frozenset(
             {
+                "routing_feedback",
                 "content",
                 "parts",
                 "tool_calls",

@@ -2,7 +2,7 @@
 
 import json
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from types import SimpleNamespace
 
 from sqlalchemy import select
@@ -14,11 +14,18 @@ from app.db.authorization_plan_session import _order_error
 from app.modules.ai.agents.gateway.failures import compute_args_hash
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.service.authorization_chat_model import recheck_model, select_model
+from app.modules.ai.service.authorization_file_parse import (
+    FileParseInput,
+    file_parse_key,
+)
 from app.modules.ai.service.authorization_gateway_read_candidate import (
     READ_HANDLERS,
     gateway_read_candidate,
 )
-from app.modules.ai.service.authorization_lifecycle_candidate import lifecycle_candidate
+from app.modules.ai.service.authorization_lifecycle_candidate import (
+    ResumeBinding,
+    lifecycle_candidate,
+)
 from app.modules.ai.service.reconciliation_annotation import has_annotation
 from app.modules.ai.service.result_projection_service import result_projection_service
 from app.modules.ai.service.resume_terminal_projection import project_resume_terminal
@@ -62,6 +69,12 @@ def verify_read_terminal(action, log):
         raise _order_error()
 
 
+@dataclass(frozen=True, slots=True)
+class FileReadPreparation:
+    snapshot: FileParseInput
+    binding: ResumeBinding
+
+
 class ReadConfirmationCandidate:
     async def execute(
         self,
@@ -74,10 +87,12 @@ class ReadConfirmationCandidate:
         decision,
         disabled=False,
         binding=None,
+        file_preparation=None,
+        file_result=None,
     ):
         tx.assert_session(db)
         if (
-            decision not in {"approve", "reject", "read", "timeout", "abort"}
+            decision not in {"approve", "reject", "read", "timeout", "abort", "prepare"}
             or type(disabled) is not bool
         ):
             raise _order_error()
@@ -89,9 +104,14 @@ class ReadConfirmationCandidate:
         )
         if reference is None or reference.execute_tool_name not in READ_HANDLERS:
             raise _order_error()
+        if decision == "prepare" and reference.execute_tool_name != "file.parse":
+            return None
         selection = None
         keys = ()
-        if decision == "approve" and reference.status == "pending_confirmation":
+        if (
+            decision in {"approve", "prepare"}
+            and reference.status == "pending_confirmation"
+        ):
             selection = await select_model(db, tenant, str(reference.resolved_model_id))
             agent_id = await db.scalar(
                 select(AiAgent.agent_id).where(AiAgent.code == reference.agent_code)
@@ -102,6 +122,8 @@ class ReadConfirmationCandidate:
             ):
                 raise _order_error()
             keys = (*selection.keys, ResourceKey(K.AGENT, None, agent_id))
+            if reference.execute_tool_name == "file.parse":
+                keys = (*keys, file_parse_key(tenant, reference.frozen_args))
         action, conversation, source, log = await lifecycle_candidate._locked(
             db,
             tx,
@@ -168,6 +190,8 @@ class ReadConfirmationCandidate:
         else:
             status = "execute"
         if status != "execute":
+            if decision == "prepare":
+                return None
             await tx.update_factual(
                 pa_key,
                 {
@@ -226,6 +250,31 @@ class ReadConfirmationCandidate:
             tool=action.execute_tool_name,
             args=action.frozen_args,
         )
+        if action.execute_tool_name == "file.parse":
+            if type(result) is not FileParseInput:
+                raise _order_error()
+            if decision == "prepare":
+                return FileReadPreparation(
+                    result,
+                    ResumeBinding(
+                        action.action_id,
+                        action.conversation_id,
+                        action.source_user_message_id,
+                        action.trace_id,
+                        action.execute_tool_call_id,
+                        action.execute_tool_name,
+                        action.agent_code,
+                        action.args_hash,
+                    ),
+                )
+            if (
+                type(file_preparation) is not FileReadPreparation
+                or file_preparation.snapshot != result
+                or file_result is None
+            ):
+                raise _order_error()
+            file_preparation.binding.require(action)
+            result = file_result
         duration = int((time.monotonic() - started) * 1000)
         lineage = None
         if result.ok:

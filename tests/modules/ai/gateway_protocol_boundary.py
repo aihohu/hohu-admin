@@ -6,11 +6,13 @@ The real fixed owners are covered by test_authorization_gateway_* with JWTs.
 """
 
 import time
+from dataclasses import replace
+from datetime import datetime
 
 from sqlalchemy import select
 
 from app.db.session import AsyncSessionLocal
-from app.modules.ai.agents.gateway import executor
+from app.modules.ai.agents.gateway import executor, preview_handoff
 from app.modules.ai.agents.gateway.result import ToolResult
 from app.modules.ai.agents.hitl.constants import (
     AiExecutionMode,
@@ -28,6 +30,60 @@ from app.modules.ai.service.prepared_action_service import prepared_action_servi
 
 
 def install_protocol_boundaries(monkeypatch):
+    original_hang = executor._hang_for_confirmation
+    synthetic_prepares = {}
+
+    async def hang(*args, prepared_action_context=None, **kwargs):
+        context = prepared_action_context
+        if context is not None and context.prepare_tool_name != "user.import_preview":
+            synthetic_prepares[context.prepare_tool_call_id] = context
+            context = replace(
+                context,
+                prepare_tool_name="user.import_preview",
+                confirmation_id=executor.hitl_manager.generate_confirmation_id(),
+            )
+        return await original_hang(*args, prepared_action_context=context, **kwargs)
+
+    async def prepared_handoff(*, context, deps, log_id, payload):
+        original = synthetic_prepares[context.prepare_tool_call_id]
+        proposal = original.proposal
+        async with AsyncSessionLocal() as db, db.begin():
+            action = await prepared_action_service.create_pending(
+                db,
+                confirmation_id=context.confirmation_id,
+                prepare_tool_call_id=context.prepare_tool_call_id,
+                prepare_tool_name=original.prepare_tool_name,
+                execute_tool_call_id=payload.tool_call_id,
+                execute_tool_name=payload.tool_name,
+                frozen_args=proposal.frozen_args,
+                snapshot=proposal.snapshot,
+                snapshot_hash=proposal.snapshot_hash,
+                subject_ref=proposal.subject_ref,
+                presentation=proposal.presentation,
+                user_id=deps.user.user_id,
+                tenant=deps.tenant,
+                conversation_id=deps.conversation_id,
+                source_user_message_id=deps.source_user_message_id,
+                trace_id=deps.trace_id,
+                agent_code=deps.agent.code,
+                expires_at=min(
+                    proposal.expires_at,
+                    datetime.fromisoformat(payload.expires_at.replace("Z", "+00:00")),
+                ),
+                resolved_model_id=deps.resolved_model_id,
+                resolved_provider_id=deps.resolved_provider_id,
+                data_scope_hash=deps.data_scope_hash,
+                projection_kind="resource",
+                require_live_source=True,
+            )
+            await operation_log_service.attach_confirmation(
+                db, log_id, context.confirmation_id, tenant=deps.tenant
+            )
+            await operation_log_service.attach_target_summary(
+                db, log_id, action.subject_refs, tenant=deps.tenant
+            )
+            return action
+
     async def start(
         deps,
         registered,
@@ -184,3 +240,7 @@ def install_protocol_boundaries(monkeypatch):
     monkeypatch.setattr(executor, "_start_log", start)
     monkeypatch.setattr(executor, "_finish_log_final", finish)
     monkeypatch.setattr(executor, "_read_tool", read)
+    monkeypatch.setattr(executor, "_invoke_tool_fn", executor._invoke_legacy_tool_fn)
+    monkeypatch.setattr(executor, "_hang_for_confirmation", hang)
+    monkeypatch.setattr(preview_handoff, "prepare_handoff", prepared_handoff)
+    monkeypatch.setattr(preview_handoff, "read_handoff", prepared_handoff)

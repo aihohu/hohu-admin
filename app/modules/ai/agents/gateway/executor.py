@@ -21,12 +21,11 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from redis.exceptions import RedisError
-from sqlalchemy import func, select
 
 from app.core.config import settings
 from app.core.exceptions import (
@@ -63,7 +62,6 @@ from app.modules.ai.agents.gateway.result import (
 from app.modules.ai.agents.gateway.sensitive import serialize_for_llm
 from app.modules.ai.agents.hitl.constants import (
     AiExecutionMode,
-    AiOperationStatus,
     ConfirmAction,
     DryRunResult,
     PreparedActionStatus,
@@ -82,14 +80,12 @@ from app.modules.ai.agents.safety.auto_disable import record_injection
 from app.modules.ai.agents.tools.meta import AiToolMeta
 from app.modules.ai.agents.tools.registry import RegisteredTool, ToolRegistry
 from app.modules.ai.core.context import ChatDeps, build_tool_context
-from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.execution_authorization_service import (
     ensure_current_write_authority,
 )
 from app.modules.ai.service.operation_log_service import (
     build_target_summary,
-    operation_log_service,
 )
 from app.modules.ai.service.prepared_action_service import prepared_action_service
 
@@ -475,6 +471,20 @@ async def _execute_tool(
         injection_hit=deps.injection_hit,
         risk_appetite=agent_risk_appetite,
     )
+    if (
+        mode == AiExecutionMode.HITL
+        and meta.interaction_flow == "prepared"
+        and _prepared_action_context is None
+        and dry_run_outcome.failure is None
+    ):
+        # Preserve the existing unsupported pre-preview confirmation outcome,
+        # but record nonexecution before any ordinary source/log/PA transaction.
+        dry_run_outcome = _DryRunOutcome(
+            failure=ToolResult.failure(
+                error_code="AI_CONFIRMATION_SETUP_FAILED",
+                error_msg="确认准备失败，请重新发起操作。",
+            )
+        )
     metric_mode = mode.value
     tool_call_id = (
         _prepared_action_context.execute_tool_call_id
@@ -1656,6 +1666,10 @@ async def _hang_for_confirmation(
     direct_pending = (
         prepared_action_context is None and meta.interaction_flow == "direct"
     )
+    if not (direct_pending or preview_handoff):
+        raise BusinessRuleException(
+            "确认准备失败，请重新发起操作。", error_code="AI_CONFIRMATION_SETUP_FAILED"
+        )
     confirmation_id = (
         prepared_action_context.confirmation_id
         if preview_handoff
@@ -1718,18 +1732,12 @@ async def _hang_for_confirmation(
     durable_action: AiPreparedAction | None = None
     from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
         PreparedExecutionOutcomeUnknown,
-        _owned_session,
     )
     from app.modules.ai.agents.gateway.preview_handoff import (  # noqa: PLC0415
-        handoff_transaction,
         prepare_handoff,
         read_handoff,
     )
-    from app.modules.ai.service.preview_completion_service import (  # noqa: PLC0415
-        lock_handoff,
-    )
 
-    session_factory = _owned_session if preview_handoff else AsyncSessionLocal
     try:
         if direct_pending:
             durable_action = await _prepare_direct_pending(
@@ -1778,215 +1786,6 @@ async def _hang_for_confirmation(
                     )
             except (Exception, asyncio.CancelledError) as exc:
                 raise PreparedExecutionOutcomeUnknown() from exc
-        else:
-            async with session_factory() as log_db:
-                transaction = (
-                    handoff_transaction(log_db) if preview_handoff else log_db.begin()
-                )
-                async with transaction:
-                    from app.modules.ai.models.message import AiMessage  # noqa: PLC0415
-
-                    bound_log_query = select(AiOperationLog.log_id).where(
-                        AiOperationLog.tenant_id == deps.tenant.tenant_id,
-                        AiOperationLog.log_id == log_id,
-                        AiOperationLog.user_id == deps.user.user_id,
-                        AiOperationLog.conversation_id == deps.conversation_id,
-                        AiOperationLog.source_user_message_id
-                        == deps.source_user_message_id,
-                        AiOperationLog.trace_id == deps.trace_id,
-                        AiOperationLog.tool_call_id == tool_call_id,
-                        AiOperationLog.tool_name == meta.name,
-                        AiOperationLog.readonly_snapshot.is_(meta.readonly),
-                        AiOperationLog.status
-                        == AiOperationStatus.PENDING_CONFIRMATION.value,
-                        AiOperationLog.confirmation_id.is_(None),
-                    )
-                    if await log_db.scalar(bound_log_query) is None:
-                        raise BusinessRuleException(
-                            "确认日志与当前操作的上下文绑定无效",
-                            error_code="AI_PREPARED_ACTION_BINDING_INVALID",
-                        )
-                    await log_db.execute(
-                        select(func.set_config("lock_timeout", "2s", True))
-                    )
-                    if not await prepared_action_service.lock_source_binding(
-                        log_db,
-                        conversation_id=deps.conversation_id or 0,
-                        source_user_message_id=deps.source_user_message_id or 0,
-                        user_id=deps.user.user_id,
-                        tenant=deps.tenant,
-                    ) or deps.trace_id != await log_db.scalar(
-                        select(AiMessage.trace_id).where(
-                            AiMessage.tenant_id == deps.tenant.tenant_id,
-                            AiMessage.message_id == deps.source_user_message_id,
-                        )
-                    ):
-                        raise BusinessRuleException(
-                            "确认操作的会话或源消息已失效",
-                            error_code="AI_PREPARED_ACTION_BINDING_INVALID",
-                        )
-                    pending_expires_at = datetime.fromisoformat(
-                        payload.expires_at.replace("Z", "+00:00")
-                    )
-                    if prepared_action_context is not None:
-                        if preview_handoff:
-                            await lock_handoff(
-                                log_db,
-                                context=prepared_action_context,
-                                deps=deps,
-                                log_id=log_id,
-                            )
-                            await ensure_current_write_authority(
-                                log_db, deps=deps, meta=meta
-                            )
-                        proposal = prepared_action_context.proposal
-                        proposal_expires_at = proposal.expires_at
-                        if proposal_expires_at.tzinfo is None:
-                            proposal_expires_at = proposal_expires_at.replace(
-                                tzinfo=UTC
-                            )
-                        durable_action = await prepared_action_service.create_pending(
-                            log_db,
-                            confirmation_id=confirmation_id,
-                            prepare_tool_call_id=(
-                                prepared_action_context.prepare_tool_call_id
-                            ),
-                            prepare_tool_name=prepared_action_context.prepare_tool_name,
-                            execute_tool_call_id=tool_call_id,
-                            execute_tool_name=meta.name,
-                            frozen_args=proposal.frozen_args,
-                            snapshot=proposal.snapshot,
-                            snapshot_hash=proposal.snapshot_hash,
-                            subject_ref=proposal.subject_ref,
-                            presentation=proposal.presentation,
-                            user_id=deps.user.user_id,
-                            tenant=deps.tenant,
-                            conversation_id=deps.conversation_id or 0,
-                            source_user_message_id=deps.source_user_message_id or 0,
-                            trace_id=deps.trace_id,
-                            agent_code=deps.agent.code if deps.agent else meta.agent,
-                            expires_at=min(proposal_expires_at, pending_expires_at),
-                            resolved_model_id=deps.resolved_model_id,
-                            resolved_provider_id=deps.resolved_provider_id,
-                            data_scope_hash=deps.data_scope_hash,
-                            projection_kind=meta.projection_kind,
-                            guard_owner_token=deps.guard_owner_token,
-                            command_action=deps.command_action,
-                            risk_level=meta.risk,
-                            chip_target=meta.chip_target,
-                            projection_dependency_message_ids=(
-                                deps.projection_dependency_message_ids
-                            ),
-                            require_live_source=True,
-                        )
-                    else:
-                        direct_snapshot = {
-                            "tool": meta.name,
-                            "argsHash": compute_args_hash(execution_args),
-                            "dryRun": _summary_to_dict(dry_run_summary),
-                        }
-                        if (
-                            dry_run_summary is not None
-                            and dry_run_summary.business_snapshot is not None
-                        ):
-                            direct_snapshot["business"] = (
-                                dry_run_summary.business_snapshot
-                            )
-                        fields = _build_direct_confirmation_fields(
-                            meta, execution_args, dry_run_summary
-                        )
-                        durable_action = await prepared_action_service.create_pending(
-                            log_db,
-                            confirmation_id=confirmation_id,
-                            prepare_tool_call_id=None,
-                            prepare_tool_name=None,
-                            execute_tool_call_id=tool_call_id,
-                            execute_tool_name=meta.name,
-                            frozen_args=execution_args,
-                            snapshot=direct_snapshot,
-                            snapshot_hash="",
-                            subject_ref=None,
-                            presentation={
-                                "title": meta.name,
-                                "summary": (
-                                    dry_run_summary.summary
-                                    if dry_run_summary is not None
-                                    else meta.summary
-                                ),
-                                "summaryKey": (
-                                    dry_run_summary.summary_key
-                                    if dry_run_summary is not None
-                                    else None
-                                ),
-                                "summaryParams": (
-                                    dry_run_summary.summary_params or {}
-                                    if dry_run_summary is not None
-                                    else {}
-                                ),
-                                "fields": fields,
-                                "warnings": (
-                                    ["此操作不可逆，请确认影响范围。"]
-                                    if meta.risk == "destructive"
-                                    else []
-                                ),
-                                "warningKeys": (
-                                    ["page.ai.chat.destructiveWarning"]
-                                    if meta.risk == "destructive"
-                                    else []
-                                ),
-                            },
-                            interaction_flow="direct",
-                            requested_outcome="direct",
-                            user_id=deps.user.user_id,
-                            tenant=deps.tenant,
-                            conversation_id=deps.conversation_id or 0,
-                            source_user_message_id=deps.source_user_message_id or 0,
-                            trace_id=deps.trace_id,
-                            agent_code=deps.agent.code if deps.agent else meta.agent,
-                            expires_at=pending_expires_at,
-                            resolved_model_id=deps.resolved_model_id,
-                            resolved_provider_id=deps.resolved_provider_id,
-                            data_scope_hash=(
-                                deps.data_scope_hash
-                                if meta.projection_kind == "scope_bound"
-                                else None
-                            ),
-                            projection_kind=meta.projection_kind,
-                            guard_owner_token=deps.guard_owner_token,
-                            command_action=deps.command_action,
-                            risk_level=meta.risk,
-                            chip_target=meta.chip_target,
-                            projection_dependency_message_ids=(
-                                deps.projection_dependency_message_ids
-                            ),
-                            require_live_source=True,
-                        )
-                    if durable_action is not None:
-                        # The new PA is created under C/source locks before any log
-                        # lock; deletion cannot race a no-FK action/log insertion.
-                        if (
-                            await log_db.scalar(bound_log_query.with_for_update())
-                            is None
-                        ):
-                            raise BusinessRuleException(
-                                "确认日志的上下文绑定在锁定期间发生变化",
-                                error_code="AI_PREPARED_ACTION_BINDING_INVALID",
-                            )
-                        await operation_log_service.attach_confirmation(
-                            log_db, log_id, confirmation_id, tenant=deps.tenant
-                        )
-                        await operation_log_service.attach_target_summary(
-                            log_db,
-                            log_id,
-                            durable_action.subject_refs,
-                            tenant=deps.tenant,
-                        )
-                        payload = await hitl_manager.bind_durable_action(
-                            redis_client,
-                            confirmation_id,
-                            durable_action.action_id,
-                            tenant=deps.tenant,
-                        )
     except PreparedExecutionOutcomeUnknown:
         raise
     except BaseException:
@@ -2195,7 +1994,17 @@ async def _preflight_tool(registered, args, deps):
     )
 
 
-async def _invoke_tool_fn(
+async def _invoke_tool_fn(registered, args, deps, args_hash, **options):
+    """Production writes require a fixed owner; registry callbacks grant no plan."""
+    if not registered.meta.readonly:
+        return ToolResult.failure(
+            error_code="AI_PREPARED_ACTION_REQUIRED",
+            error_msg=USER_FACING_MSG["AI_PREPARED_ACTION_REQUIRED"],
+        )
+    return await _invoke_legacy_tool_fn(registered, args, deps, args_hash, **options)
+
+
+async def _invoke_legacy_tool_fn(
     registered: RegisteredTool,
     args: dict[str, Any],
     deps: ChatDeps,

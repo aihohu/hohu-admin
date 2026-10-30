@@ -1,5 +1,6 @@
 """Explicit offline seed owner; legacy scripts are never run inside a proof."""
 
+from app.core.authorization_bootstrap import BootstrapFence, require_bootstrap
 from app.core.authorization_io import hash_password
 from app.core.authorization_maintenance import require_maintenance
 from app.core.authorization_plan import LockPlan, TransactionBudget
@@ -24,22 +25,30 @@ from app.utils.validators import validate_password
 class SeedCandidateOwner:
     async def execute(self, db, *, action, fence, admin_password=None):
         require_candidate_session(db)
-        if action not in {"seed.system", "seed.agents", "seed.settings"}:
+        if action not in {"seed.system", "seed.agents", "seed.settings", "seed.menus"}:
             raise _order_error()
-        evidence = require_maintenance(fence, action)
+        bootstrap = type(fence) is BootstrapFence
+        evidence = (
+            require_bootstrap(fence, action, engine=db.bind)
+            if bootstrap
+            else require_maintenance(fence, action)
+        )
         password_hash = None
         if admin_password is not None:
             validate_password(admin_password)
             password_hash = await hash_password(admin_password)
         try:
-            require_maintenance(fence, action)
+            if bootstrap:
+                require_bootstrap(fence, action, engine=db.bind, consume=True)
+            else:
+                require_maintenance(fence, action)
             with bounded_authorization_reads(db):
                 async with authorization_transactions.scope_global(
                     db, budget=TransactionBudget(timeout_ms=60000)
                 ) as tx:
                     ai, published = (
                         await ai_seed_candidate.plan(db)
-                        if action != "seed.settings"
+                        if action in {"seed.system", "seed.agents"}
                         else (SeedPlan((), ()), ())
                     )
                     system, fresh = (
@@ -52,6 +61,8 @@ class SeedCandidateOwner:
                         if action != "seed.agents"
                         else (SeedPlan((), ()), False)
                     )
+                    if bootstrap and not fresh:
+                        raise _order_error()
                     await tx.lock(
                         LockPlan(
                             existing=tuple(set(ai.existing + system.existing)),

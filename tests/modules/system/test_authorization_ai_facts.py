@@ -75,6 +75,36 @@ async def test_shared_factual_update_leaves_epoch_unchanged(ai_sessions):
         )
 
 
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"content": "changed"},
+        {"routing_feedback": "correct", "content": "changed"},
+        {"routing_feedback": "invalid"},
+    ],
+)
+async def test_tool_feedback_exception_does_not_allow_other_facts(ai_sessions, changes):
+    factory, plain = ai_sessions
+    key = ResourceKey(ResourceKind.ASSISTANT_MESSAGE, 0, 405)
+    async with plain() as db, db.begin():
+        await db.execute(
+            insert(AiMessage).values(
+                tenant_id=0,
+                message_id=405,
+                conversation_id=301,
+                role="tool",
+                content="original",
+            )
+        )
+    async with factory() as db:
+        with pytest.raises(BusinessException):
+            async with authorization_transactions.scope(
+                db, tenants=(TenantLock(0),)
+            ) as tx:
+                await tx.lock(LockPlan(existing=(C, key)))
+                await tx.update_factual(key, changes, expected={"content": "original"})
+
+
 @pytest.mark.parametrize("file_phase", [False, True])
 async def test_sealed_unused_reservation_allows_file_but_never_later_insert(
     ai_sessions, file_phase

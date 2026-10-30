@@ -1017,7 +1017,7 @@ class TestAuthorizationExceptionRollback:
         )
 
         # 调 _invoke_tool_fn
-        result = await exec_mod._invoke_tool_fn(
+        result = await exec_mod._invoke_legacy_tool_fn(
             registered,  # type: ignore[arg-type]
             {},
             deps,
@@ -1100,7 +1100,7 @@ class TestAuthorizationExceptionRollback:
             tenant=tenant,
         )
 
-        await exec_mod._invoke_tool_fn(
+        await exec_mod._invoke_legacy_tool_fn(
             registered,  # type: ignore[arg-type]
             {},
             deps,

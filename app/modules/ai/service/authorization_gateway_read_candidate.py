@@ -21,8 +21,13 @@ from app.modules.ai.service.agent_authorization_service import (
     agent_authorization_service,
 )
 from app.modules.ai.service.authorization_chat_candidate import chat_candidate
+from app.modules.ai.service.authorization_file_parse import (
+    file_parse_input,
+    file_parse_key,
+)
 from app.modules.ai.service.result_projection_service import result_projection_service
 from app.modules.auth.service import load_live_user_authority
+from app.modules.job.ai_tools import _dry_run_job_update_cron
 from app.modules.system.ai_tools import (
     analytics,
     dept,
@@ -53,6 +58,7 @@ READ_HANDLERS = MappingProxyType(
         "dept.list": dept.dept_list,
         "dept.lookup": dept.dept_lookup,
         "dept.count": analytics.dept_count,
+        "file.parse": file_parse_input,
     }
 )
 
@@ -72,6 +78,7 @@ PREFLIGHT_HANDLERS = MappingProxyType(
         "dept.update": dept._dry_run_dept_update,
         "dept.move": dept._dry_run_dept_move,
         "user.export": user_transfer._dry_run_user_export,
+        "job.update_cron": _dry_run_job_update_cron,
     }
 )
 
@@ -146,7 +153,10 @@ class GatewayReadCandidate:
                 tenant=tenant,
                 actor_user_version=actor_user_version,
                 conversation_id=conversation_id,
-                extra=(ResourceKey(K.AGENT, None, agent_id),),
+                extra=(
+                    ResourceKey(K.AGENT, None, agent_id),
+                    *((file_parse_key(tenant, args),) if tool == "file.parse" else ()),
+                ),
             )
         source = await db.get(AiMessage, source_id, populate_existing=True)
         if (
@@ -203,6 +213,8 @@ class GatewayReadCandidate:
             data_scope_hash=scope_hash,
             projection_dependency_message_ids=dependencies,
         )
+        if tool == "file.parse":
+            tx.assert_held(file_parse_key(tenant, args))
         return await handler(ctx, **args)
 
 

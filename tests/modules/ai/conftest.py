@@ -209,7 +209,7 @@ def mock_visible_agents(monkeypatch):
         _make_agent("job_mgmt", "定时任务助手", "cron job", 7),
     ]
 
-    async def _fake_list(db, user):
+    async def _fake_list(db, user, *, force_refresh=False):
         return candidates
 
     async def _fake_authorize(db, user, agent_code, *, error_code="AI_AGENT_FORBIDDEN"):

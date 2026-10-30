@@ -17,21 +17,10 @@ from app.modules.job.task_registry import (
     get_task_scope,
     register_task,
 )
+from tests.modules.job.authorization_fixture import (
+    committed_job_session,  # noqa: F401
+)
 from tests.tenant_helpers import tenant_context
-
-
-class _SessionFactory:
-    def __init__(self, session):
-        self._session = session
-
-    def __call__(self):
-        return self
-
-    async def __aenter__(self):
-        return self._session
-
-    async def __aexit__(self, *_exc_info):
-        return None
 
 
 @pytest.fixture
@@ -67,7 +56,7 @@ async def test_tenant_job_create_cannot_select_platform_task(
 
 
 async def test_tenant_job_runner_fails_closed_for_platform_task(
-    db_session, monkeypatch, platform_task_key
+    db_session, platform_task_key
 ):
     key, was_called = platform_task_key
     job = SysJob(
@@ -81,10 +70,8 @@ async def test_tenant_job_runner_fails_closed_for_platform_task(
     )
     db_session.add(job)
     await db_session.flush()
-    monkeypatch.setattr(
-        "app.modules.job.job_runner.AsyncSessionLocal",
-        _SessionFactory(db_session),
-    )
+    db_session.info["owned_jobs"].append((0, job.job_id, job.job_key))
+    await db_session.commit()
 
     await _do_execute(0, job.job_id)
 

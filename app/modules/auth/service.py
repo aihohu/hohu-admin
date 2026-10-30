@@ -60,7 +60,6 @@ from app.modules.platform.audit import (
 )
 from app.modules.platform.auth import authenticate_platform_token
 from app.modules.platform.constants import platform_permission_for_request
-from app.modules.system.models.login_log import SysLoginLog
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.tenant import Tenant
@@ -251,19 +250,20 @@ class AuthService:
     ):
         """写入登录日志（使用独立 session，不受主事务回滚影响）"""
         try:
-            async with AsyncSessionLocal() as session:
-                log = SysLoginLog(
-                    tenant_id=tenant_id,
-                    audit_scope=audit_scope,
-                    user_id=user_id,
-                    username=username,
-                    ip=ip,
-                    user_agent=user_agent,
-                    status=status,
-                    message=message,
-                )
-                session.add(log)
-                await session.commit()
+            from app.db.authorization_http import (  # noqa: PLC0415
+                get_authorization_runtime,
+            )
+
+            await get_authorization_runtime().http_audit.login(
+                tenant_id=tenant_id,
+                audit_scope=audit_scope,
+                user_id=user_id,
+                username=username,
+                ip=ip,
+                user_agent=user_agent,
+                status=status,
+                message=message,
+            )
         except Exception:
             logger.exception("Failed to write login log")
 

@@ -4,15 +4,17 @@
 
 ## 执行顺序
 
-本地初始化入口为 `scripts/init.py`；部署先运行 `alembic upgrade head`，成功后调用 `python -m scripts.init_db`，再启动应用。任一步失败即停止，不能通过清库或 `stamp head` 跳过错误。
+本地初始化入口为 `scripts/init.py`。先按[授权维护手册](AUTHORIZATION-MAINTENANCE.md)准备清单、数据库控制账号与构建标识，在环境中配置 `AUTHORIZATION_MAINTENANCE_INVENTORY`、`AUTHORIZATION_CONTROL_DIR`；新安装另设 `AUTHORIZATION_BOOTSTRAP=true`。缺少清单时不会运行迁移或种子子进程。
 
-统一种子在一个事务内补齐默认租户、菜单、设置、内置 Agent/Prompt 以及首次管理员。首次默认租户安装需要 `HOHU_ADMIN_PASSWORD`，由 CLI 生成并写入部署配置；初始化不交互、不清库、不打印密码。
+编排先运行 `alembic upgrade head`，成功后把清单传给固定种子入口。种子完成后数据库保持停写，需显式恢复后再启动应用。任一步失败即停止，不能通过清库或 `stamp head` 跳过错误。已有部署的结构迁移仍须按升级手册安排停机；种子许可不授权任意迁移 SQL。
+
+统一种子在一个完整授权事务内补齐默认租户、菜单、设置、内置 Agent/Prompt 以及首次管理员。维护密码使用 `AUTHORIZATION_MAINTENANCE_PASSWORD`；本地编排保留 CLI 生成的 `HOHU_ADMIN_PASSWORD` 作为后备输入。初始化不交互、不清库、不打印密码。
 
 ## 重复执行与职责
 
 - 重跑保留已有密码、改名的管理员、自定义设置和 Prompt、角色授权及禁用状态，只按规则补缺。
 - 菜单定义唯一来源为 [menu_seed.py](../app/modules/system/menu_seed.py)，由 `sync_menus.py` 同步；不从默认租户可编辑的数据复制到新租户。
-- hosted 菜单按显式能力集合同步，只处理已 bootstrap 的租户，不自动开通 prepared 租户。
+- 完整种子中的 hosted 菜单按显式能力集合同步，只处理已 bootstrap 的租户，不自动开通 prepared 租户。独立 `sync_menus.py` 仅同步默认租户。
 - `seed_settings.py` 补齐 `sys_setting` 的内置设置；`sys_config` 自定义参数不由种子生成。
 - `seed_ai_agents.py` 同步内置 Agent 与默认 Prompt，保留部署方自定义内容。工具启用的 fresh/upgrade 默认值有区别，不覆盖显式禁用状态。
 - 数据库结构由 Alembic 负责，迁移和数据初始化不能互相代替。
@@ -21,7 +23,7 @@
 
 ## 维护与验证
 
-授权维护的直接启动与 Compose 停写控制、数据库在途核验及显式恢复，见 [授权维护](AUTHORIZATION-MAINTENANCE.md)。这项控制不会自动替换所有既有初始化入口，也不能作为全业务授权迁移已经完成的证明。
+授权维护的直接启动与 Compose 停写控制、数据库在途核验及显式恢复，见 [授权维护](AUTHORIZATION-MAINTENANCE.md)。四个种子脚本均使用该固定入口，维护证明不能作为全业务授权迁移已经完成的证明。
 
 平台运维在 `tools/ops`，静态检查在 `tools/checks`，可选演示在 `tools/demo`，测试与发布验收在 `tests/`。部署不会自动执行演示或测试数据脚本。
 

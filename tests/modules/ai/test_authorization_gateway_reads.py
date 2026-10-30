@@ -222,6 +222,7 @@ async def test_preflight_original_version_is_not_upgraded(read_case):
         ("dept.update", {"dept_id": 1, "dept_name": "Preview"}),
         ("dept.move", {"dept_id": 1, "new_parent_id": None}),
         ("user.export", {"reason": "Preview", "user_name": "admin"}),
+        ("job.update_cron", {"job_id": 1, "cron_expression": "*/5 * * * *"}),
     ],
 )
 async def test_fixed_preflight_adapters(read_case, completion_case, tool, args):
@@ -239,6 +240,11 @@ async def test_fixed_preflight_adapters(read_case, completion_case, tool, args):
     registered = ToolRegistry.get().find(tool)
     deps.agent = SimpleNamespace(code=registered.meta.agent)
     outcome = await executor._run_dry_run(registered, args, deps)
+    if tool == "job.update_cron":
+        # Unpublished job Agent stays disabled; the fixed adapter must reach
+        # current authorization instead of failing for a missing dispatch entry.
+        assert outcome.failure.error_code == "AI_TOOL_PERM_DENIED"
+        return
     if outcome.failure:
         assert outcome.failure.error_code not in {
             "AI_INTERNAL_ERROR",

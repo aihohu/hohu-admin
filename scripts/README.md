@@ -6,12 +6,16 @@
 | --- | --- |
 | init.py | `hohu init` 的本地环境准备、迁移和种子编排 |
 | init_db.py | 部署统一种子入口：单个事务、安全补齐、首次管理员 |
-| sync_menus.py | 默认租户与已初始化 hosted 租户的菜单同步 |
+| sync_menus.py | 默认租户菜单及相应角色菜单关系同步 |
 | seed_settings.py | 独立 sys_setting 表的租户设置补缺，自定义参数不播种 |
 | seed_ai_agents.py | 内置 Agent 与默认 Prompt 同步，保留部署方自定义 |
 
-数据库结构由 Alembic 管理。统一数据入口为 `python -m scripts.init_db`，
-首次安装从 `HOHU_ADMIN_PASSWORD` 读取密码；已有部署不需要重新输入，也不会重置密码。
+数据库结构由 Alembic 管理。统一数据入口为 `python -m scripts.init_db --inventory INVENTORY`，
+首次安装增加 `--bootstrap`；密码由 `AUTHORIZATION_MAINTENANCE_PASSWORD` 提供。
+`scripts/init.py` 从环境读取 `AUTHORIZATION_MAINTENANCE_INVENTORY`、
+`AUTHORIZATION_CONTROL_DIR` 和 `AUTHORIZATION_BOOTSTRAP`，并保留
+`HOHU_ADMIN_PASSWORD` 作为维护密码后备。缺少清单时不执行迁移或种子。
+成功后数据库仍停写，需要[显式恢复](../docs/AUTHORIZATION-MAINTENANCE.md)。
 首次安装和更新共用 `app/modules/system/menu_seed.py` 的菜单定义。
 
 新初始化的“系统管理”按以下顺序展示：
