@@ -6,6 +6,7 @@ from app.core.base_response import PageResult, ResponseModel
 from app.core.tenant import TenantContext
 from app.db.session import get_db
 from app.modules.auth.service import get_current_tenant_context
+from app.modules.job.api.job import _planned
 from app.modules.job.schemas.job import JobLogOut, JobLogQuery
 from app.modules.job.service.job_log_service import job_log_service
 from app.modules.system.models.user import User
@@ -40,8 +41,7 @@ async def clean(
     _current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    count = await job_log_service.clean(db, days, tenant=tenant)
-    await db.commit()
+    count = await _planned(db, _current_user, tenant, "log-clean", days=days)
     return ResponseModel.success(msg=f"已清理 {count} 条日志")
 
 
@@ -56,6 +56,5 @@ async def batch_delete(
     _current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    count = await job_log_service.batch_delete(db, ids, tenant=tenant)
-    await db.commit()
+    count = await _planned(db, _current_user, tenant, "log-delete", ids=ids)
     return ResponseModel.success(msg=f"已删除 {count} 条日志")

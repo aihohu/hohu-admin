@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.gateway import executor
 from app.modules.ai.agents.gateway.atomic_execution import (
     PreparedExecutionOutcomeUnknown,
@@ -13,10 +12,38 @@ from app.modules.ai.agents.gateway.atomic_execution import (
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.atomic_completion_service import atomic_completion_service
-from tests.modules.ai.test_atomic_prepared_completion import approve, count_real_handler
+from app.modules.ai.service.authorization_lifecycle_candidate import ResumeBinding
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
+from tests.modules.ai.test_atomic_prepared_completion import (
+    approve,
+    authenticated_actor,
+    count_real_handler,
+)
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )
+
+
+async def load_terminal(case):
+    async with AsyncSessionLocal() as db:
+        actor = await authenticated_actor(case, db)
+        action = await db.get(AiPreparedAction, case.action_id)
+        binding = ResumeBinding(
+            action.action_id,
+            action.conversation_id,
+            action.source_user_message_id,
+            action.trace_id,
+            action.execute_tool_call_id,
+            action.execute_tool_name,
+            action.agent_code,
+            action.args_hash,
+        )
+    return await executor._load_prepared_terminal_result(
+        case.confirmation_id,
+        tenant=case.tenant,
+        binding=binding,
+        deps=SimpleNamespace(user=actor, tenant=case.tenant),
+    )
 
 
 @pytest.mark.parametrize("corruption", ["success_log", "failed_owner", "failed_error"])
@@ -39,9 +66,7 @@ async def test_waiter_rejects_corrupted_completion_proof(
             action.error_code = log.error_code = None
 
     with pytest.raises(PreparedExecutionOutcomeUnknown):
-        await executor._load_prepared_terminal_result(
-            case.confirmation_id, tenant=case.tenant
-        )
+        await load_terminal(case)
     assert len(case.calls) == 1
 
 
@@ -52,9 +77,7 @@ async def test_waiter_reads_valid_terminal_without_reexecution(
     case = completion_case
     count_real_handler(case, monkeypatch, return_failure=failed)
     await approve(case)
-    result, duration = await executor._load_prepared_terminal_result(
-        case.confirmation_id, tenant=case.tenant
-    )
+    result, duration = await load_terminal(case)
     assert result.ok is not failed
     assert duration >= 0
     assert len(case.calls) == 1

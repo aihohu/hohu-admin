@@ -61,6 +61,7 @@ from app.modules.ai.agents.gateway import (
 from app.modules.ai.agents.tools import AiToolMeta
 
 TENANT = tenant_context()
+pytestmark = pytest.mark.usefixtures("db_session")
 
 
 async def _tenant_call(function, *args, **kwargs):
@@ -944,6 +945,17 @@ class TestComputeArgsHash:
 
 
 class TestAuthorizationExceptionRollback:
+    @pytest.fixture(autouse=True)
+    def legacy_quota_session(self, monkeypatch):
+        # Synthetic legacy handlers test quota bookkeeping only. Production
+        # rejects these tools before opening a session (no-fallback tests).
+        from tests.fixture_session import FixtureSessionLocal
+
+        monkeypatch.setattr(
+            "app.modules.ai.agents.gateway.executor.AsyncSessionLocal",
+            FixtureSessionLocal,
+        )
+
     """修订 S-11：业务函数抛 AuthorizationException 时 decr_quota 回滚 L1/L2
 
     通过直接调 _invoke_tool_fn 验证（不调 execute_tool 全链路，避免
@@ -1016,7 +1028,7 @@ class TestAuthorizationExceptionRollback:
         )
 
         # 调 _invoke_tool_fn
-        result = await exec_mod._invoke_tool_fn(
+        result = await exec_mod._invoke_legacy_tool_fn(
             registered,  # type: ignore[arg-type]
             {},
             deps,
@@ -1099,13 +1111,14 @@ class TestAuthorizationExceptionRollback:
             tenant=tenant,
         )
 
-        await exec_mod._invoke_tool_fn(
+        result = await exec_mod._invoke_legacy_tool_fn(
             registered,  # type: ignore[arg-type]
             {},
             deps,
             "hash_biz",
             l1_member=member,
         )
+        assert result.error_code == "AI_SOMETHING_FAILED"
 
         # 业务异常不回滚 L2，保留本次计数。
         l2_after = int(

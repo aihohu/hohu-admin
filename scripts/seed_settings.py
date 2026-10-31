@@ -13,12 +13,10 @@ Usage:
 import asyncio
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.id_generator import next_id
-from app.core.tenant import DEFAULT_TENANT_ID
 from app.modules.system.models.setting import SystemSetting
 from app.modules.system.settings_catalog import SETTINGS
 
@@ -68,13 +66,9 @@ async def seed_settings_in_session(
 
 
 async def seed_settings():
-    engine = create_async_engine(settings.DATABASE_URL)
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    try:
-        async with factory() as db, db.begin():
-            await seed_settings_in_session(db, tenant_id=DEFAULT_TENANT_ID)
-    finally:
-        await engine.dispose()
+    from tools.ops.authorization_maintenance import run_seed_entry  # noqa: PLC0415
+
+    return await run_seed_entry("seed.settings")
 
 
 if __name__ == "__main__":

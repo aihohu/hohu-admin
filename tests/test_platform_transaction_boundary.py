@@ -1,21 +1,38 @@
 """Atomic platform business/audit transaction boundary."""
 
-from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select, update
 from starlette.requests import Request
 
-from app.core.exceptions import BusinessException, setup_exception_handlers
+from app.core.exceptions import BusinessException
 from app.db import session as session_module
-from app.modules.auth.service import get_current_user
+from app.db.authorization_plan_session import AuthorizationPlanSession
 from app.modules.platform import audit as platform_audit
-from app.modules.platform import system_agent_auth
-from app.modules.platform.api import control_router
-from app.modules.system.service.tenant_lifecycle_service import tenant_lifecycle_service
+from app.modules.system.models.operation_log import SysOperationLog
+from app.modules.system.models.tenant import Tenant
+from app.modules.system.service.authorization_transaction_service import _Transaction
+from tests.modules.platform.test_authorization_tenant_http import (
+    catalog_http as catalog_http,
+)
+from tests.modules.platform.test_authorization_tenant_http import (
+    catalog_sessions as catalog_sessions,
+)
+from tests.modules.platform.test_authorization_tenant_http import (
+    http_system as http_system,
+)
+from tests.modules.platform.test_authorization_tenant_http import (
+    plan_sessions as plan_sessions,
+)
+from tests.modules.platform.test_authorization_tenant_http import (
+    system_sessions as system_sessions,
+)
+from tests.modules.platform.test_authorization_tenant_http import (
+    tenant_http as tenant_http,
+)
 
 
 def _request() -> Request:
@@ -73,84 +90,102 @@ async def test_get_db_rolls_back_when_platform_completion_cannot_stage(
 
 
 @pytest.mark.parametrize("action", ["activate", "disable"])
-@pytest.mark.parametrize("failure", [None, "audit", "commit"])
+@pytest.mark.parametrize("failure", [None, "audit", "before_ack", "after_ack"])
 async def test_platform_response_waits_for_business_and_audit_commit(
-    monkeypatch, action, failure
+    tenant_http, monkeypatch, action, failure
 ):
-    """Observe response.start: ASGITransport alone waits for late cleanup too."""
-    events = []
-    db = AsyncMock()
-    db.add = Mock(side_effect=lambda _record: events.append("audit"))
+    """Actual independent connections observe known success versus unknown ACK."""
+    original, plain = tenant_http
+    before = "2" if action == "activate" else "1"
+    after = "1" if action == "activate" else "2"
+    async with plain() as db:
+        await db.execute(
+            update(Tenant)
+            .where(Tenant.tenant_id == 1)
+            .values(
+                status=before,
+                lifecycle_state="prepared" if action == "activate" else "active",
+            )
+        )
+        await db.commit()
+    actual_commit = AuthorizationPlanSession.commit
+    actual_append = _Transaction.append_audit
+    commits = []
 
-    async def commit():
-        if failure == "commit":
-            raise RuntimeError("database commit unavailable")
-        events.append("commit")
+    async def commit(db):
+        commits.append(db)
+        if len(commits) == 2 and failure == "before_ack":
+            raise ConnectionError("Commit connection lost")
+        await actual_commit(db)
+        if len(commits) == 2 and failure == "after_ack":
+            raise ConnectionError("Commit response lost")
 
-    db.commit.side_effect = commit
-    if failure == "audit":
-        db.flush.side_effect = RuntimeError("audit storage unavailable")
-    monkeypatch.setattr(session_module, "AsyncSessionLocal", lambda: db)
-    monkeypatch.setattr(
-        system_agent_auth, "persist_system_agent_audit", AsyncMock(return_value=100)
-    )
-    monkeypatch.setattr(
-        system_agent_auth, "resolve_platform_target", AsyncMock(return_value=7001)
-    )
-    tenant = SimpleNamespace(
-        tenant_id=7001,
-        tenant_code="qualification-b",
-        tenant_name="Control",
-        status="1" if action == "activate" else "2",
-        lifecycle_state="active",
-        bootstrap_version=1,
-        row_version=2,
-        created_at=datetime.now(UTC),
-        updated_at=datetime.now(UTC),
-    )
+    async def append(tx, key, values):
+        if (
+            failure == "audit"
+            and values.get("action") == "completed"
+            and values.get("status_code") == 200
+        ):
+            raise BusinessException(
+                503,
+                "Audit storage unavailable",
+                error_code="PLATFORM_AUDIT_UNAVAILABLE",
+            )
+        return await actual_append(tx, key, values)
 
-    async def change_tenant(session, **_kwargs):
-        assert session is db
-        events.append("business")
-        return tenant
-
-    monkeypatch.setattr(tenant_lifecycle_service, action + "_tenant", change_tenant)
-    test_app = FastAPI()
-    setup_exception_handlers(test_app)
-    test_app.include_router(control_router, prefix="/platform")
-    test_app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
-        tenant_id=0,
-        user_id=123,
-        user_name="system-owner",
-        status="1",
-        roles=[SimpleNamespace(tenant_id=0, role_code="R_SUPER", status="1")],
-    )
-    at_response = []
+    monkeypatch.setattr(AuthorizationPlanSession, "commit", commit)
+    monkeypatch.setattr(_Transaction, "append_audit", append)
+    observed = []
 
     async def observed_app(scope, receive, send):
         async def observe(message):
             if message["type"] == "http.response.start":
-                at_response.append((message["status"], list(events)))
+                async with plain() as reader:
+                    status = await reader.scalar(
+                        select(Tenant.status).where(Tenant.tenant_id == 1)
+                    )
+                    logs = (
+                        (
+                            await reader.execute(
+                                select(SysOperationLog).order_by(
+                                    SysOperationLog.operation_log_id
+                                )
+                            )
+                        )
+                        .scalars()
+                        .all()
+                    )
+                    observed.append(
+                        (
+                            message["status"],
+                            status,
+                            [(row.action, row.status_code) for row in logs],
+                        )
+                    )
             await send(message)
 
-        await test_app(scope, receive, observe)
+        await original._transport.app(scope, receive, observe)
 
     async with AsyncClient(
-        transport=ASGITransport(app=observed_app, raise_app_exceptions=False),
+        transport=ASGITransport(app=observed_app),
         base_url="http://test",
+        headers=original.headers,
     ) as client:
-        response = await client.post(
-            f"/platform/tenants/7001/{action}",
-            headers={
-                "X-Platform-Reason": "qualification",
-                "X-Platform-Ticket": "CI-1",
-                "X-Correlation-ID": "ci-1",
-            },
-        )
+        response = await client.post(f"/platform/tenants/1/{action}")
+    assert len(commits) == 2, "No second completion or retry after an unknown ACK"
     if failure is None:
-        assert at_response == [(200, ["business", "audit", "commit"])]
-        db.commit.assert_awaited_once()
+        assert observed == [(200, after, [("authorized", None), ("completed", 200)])]
+    elif failure == "audit":
+        assert response.status_code == 503, response.text
+        assert observed == [(503, before, [("authorized", None), ("completed", 503)])]
     else:
-        assert response.status_code == (503 if failure == "audit" else 500)
-        assert "commit" not in events
-        assert db.rollback.await_count >= 1
+        assert response.status_code == 503, response.text
+        assert response.json()["errorCode"] == "AUTHORIZATION_COMMIT_UNKNOWN"
+        assert observed == [
+            (
+                503,
+                after if failure == "after_ack" else before,
+                [("authorized", None)]
+                + ([("completed", 200)] if failure == "after_ack" else []),
+            )
+        ]

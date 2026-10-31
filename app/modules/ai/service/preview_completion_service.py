@@ -7,6 +7,8 @@ from hashlib import sha256
 
 from sqlalchemy import select, text
 
+from app.core.authorization_plan import ResourceKey
+from app.core.authorization_plan import ResourceKind as K
 from app.core.exceptions import BusinessRuleException
 from app.modules.ai.agents.gateway.failures import compute_args_hash
 from app.modules.ai.agents.gateway.result import PreparedActionProposal
@@ -98,14 +100,30 @@ async def lock_preview(db, *, log_id, tool_call_id, args_hash, deps):
     return log
 
 
-async def validate_proposal(db, *, proposal, tenant_id, user_id, execution=None):
+async def validate_proposal(
+    db,
+    *,
+    proposal,
+    tenant_id,
+    user_id,
+    execution=None,
+    verify_artifact=True,
+    _planned=None,
+):
     if (
         not isinstance(proposal, PreparedActionProposal)
         or build_target_summary([proposal.subject_ref]) is None
         or proposal.subject_ref.get("type") != "user_import_batch"
     ):
         raise invalid_preview()
-    batch = await read_batch(db, proposal.subject_ref["id"], tenant_id, lock=True)
+    if _planned is not None:
+        _planned.assert_session(db)
+        _planned.assert_held(
+            ResourceKey(K.IMPORT_BATCH, tenant_id, proposal.subject_ref["id"])
+        )
+    batch = await read_batch(
+        db, proposal.subject_ref["id"], tenant_id, lock=_planned is None
+    )
     frozen = proposal.frozen_args
     if (
         batch is None
@@ -125,6 +143,8 @@ async def validate_proposal(db, *, proposal, tenant_id, user_id, execution=None)
     if expires != batch.created_at + timedelta(minutes=10):
         raise invalid_preview()
     prepared_action_service.validate_presentation(proposal.presentation)
+    if not verify_artifact:
+        return batch
     data = await verify_file(
         batch.file_storage_key,
         tenant_id=tenant_id,
@@ -291,58 +311,81 @@ def preview_lineage(log, audit, tenant):
     )
 
 
-async def lock_handoff(db, *, context, deps, log_id, read_existing=False):
+async def lock_handoff(
+    db, *, context, deps, log_id, read_existing=False, _planned=None
+):
     """C/source serialization covers both the first continuation and readback."""
     from app.modules.ai.service.result_projection_service import (  # noqa: PLC0415
         result_projection_service,
     )
 
-    await db.execute(text("SELECT set_config('lock_timeout', '2s', true)"))
+    if _planned is None:
+        await db.execute(text("SELECT set_config('lock_timeout', '2s', true)"))
+    else:
+        _planned.assert_session(db)
     if (
         not context.execute_tool_call_id
         or not context.confirmation_id
-        or not await prepared_action_service.lock_source_binding(
-            db,
-            conversation_id=deps.conversation_id or 0,
-            source_user_message_id=deps.source_user_message_id or 0,
-            user_id=deps.user.user_id,
-            tenant=deps.tenant,
+        or (
+            _planned is None
+            and not await prepared_action_service.lock_source_binding(
+                db,
+                conversation_id=deps.conversation_id or 0,
+                source_user_message_id=deps.source_user_message_id or 0,
+                user_id=deps.user.user_id,
+                tenant=deps.tenant,
+            )
         )
     ):
         raise invalid_preview()
+    action_query = (
+        select(AiPreparedAction)
+        .where(
+            AiPreparedAction.tenant_id == deps.tenant_id,
+            AiPreparedAction.prepare_tool_call_id == context.prepare_tool_call_id,
+        )
+        .order_by(AiPreparedAction.action_id)
+        .execution_options(populate_existing=True)
+    )
     actions = list(
         await db.scalars(
-            select(AiPreparedAction)
-            .where(
-                AiPreparedAction.tenant_id == deps.tenant_id,
-                AiPreparedAction.prepare_tool_call_id == context.prepare_tool_call_id,
-            )
-            .order_by(AiPreparedAction.action_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
+            action_query.with_for_update() if _planned is None else action_query
         )
     )
     if (not read_existing and actions) or (read_existing and len(actions) != 1):
         raise invalid_preview()
-    logs = list(
-        await db.scalars(
-            select(AiOperationLog)
-            .where(
-                AiOperationLog.tenant_id == deps.tenant_id,
-                AiOperationLog.tool_call_id.in_(
-                    [
-                        context.prepare_tool_call_id,
-                        context.execute_tool_call_id,
-                    ]
-                ),
-            )
-            .order_by(AiOperationLog.log_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
+    log_query = (
+        select(AiOperationLog)
+        .where(
+            AiOperationLog.tenant_id == deps.tenant_id,
+            AiOperationLog.tool_call_id.in_(
+                [
+                    context.prepare_tool_call_id,
+                    context.execute_tool_call_id,
+                ]
+            ),
         )
+        .order_by(AiOperationLog.log_id)
+        .execution_options(populate_existing=True)
+    )
+    logs = list(
+        await db.scalars(log_query.with_for_update() if _planned is None else log_query)
     )
     if len(logs) != 2:
         raise invalid_preview()
+    if _planned is not None:
+        _planned.assert_held(
+            ResourceKey(K.CONVERSATION, deps.tenant_id, deps.conversation_id),
+            ResourceKey(K.SOURCE_MESSAGE, deps.tenant_id, deps.source_user_message_id),
+            ResourceKey(
+                K.IMPORT_BATCH, deps.tenant_id, context.proposal.snapshot["batch_id"]
+            ),
+            *(ResourceKey(K.OPERATION_LOG, deps.tenant_id, row.log_id) for row in logs),
+            *(
+                ResourceKey(K.PREPARED_ACTION, deps.tenant_id, row.action_id)
+                for row in actions
+            ),
+        )
     parent = next(
         (v for v in logs if v.tool_call_id == context.prepare_tool_call_id), None
     )
@@ -370,7 +413,8 @@ async def lock_handoff(db, *, context, deps, log_id, read_existing=False):
         or child.readonly_snapshot
         or child.status != "pending_confirmation"
         or child.args_hash != compute_args_hash(proposal.frozen_args)
-        or child.confirmation_id != (context.confirmation_id if read_existing else None)
+        or child.confirmation_id
+        != (context.confirmation_id if read_existing or _planned is not None else None)
         or audit["proposal_hash"]
         != compute_args_hash(
             {
@@ -382,7 +426,12 @@ async def lock_handoff(db, *, context, deps, log_id, read_existing=False):
     ):
         raise invalid_preview()
     await validate_proposal(
-        db, proposal=proposal, tenant_id=deps.tenant_id, user_id=deps.user.user_id
+        db,
+        proposal=proposal,
+        tenant_id=deps.tenant_id,
+        user_id=deps.user.user_id,
+        verify_artifact=_planned is None,
+        _planned=_planned,
     )
     if not read_existing:
         return None

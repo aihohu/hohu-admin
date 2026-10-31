@@ -5,7 +5,8 @@ import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import redis as redis_module
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
 
 def _reset_redis_client() -> None:

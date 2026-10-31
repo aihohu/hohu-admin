@@ -16,6 +16,7 @@ import ipaddress
 import json
 import logging
 import re
+from contextlib import suppress
 from copy import deepcopy
 from http import HTTPStatus
 from urllib.parse import urlparse
@@ -36,6 +37,14 @@ from app.core.config import settings
 from app.core.exceptions import AuthorizationException, BusinessRuleException
 from app.core.redis import redis_client
 from app.core.tenant import TenantContext, get_bound_tenant_context
+from app.db.authorization_http import (
+    finish_request_read_phase,
+    get_authorization_runtime,
+    release_completed_request,
+    release_request_reads,
+)
+from app.db.authorization_plan_session import _order_error
+from app.db.request_session import RequestSession
 from app.db.session import AsyncSessionLocal, get_db
 from app.modules.ai.agents.hitl.events import (
     AiErrorEvent,
@@ -67,9 +76,11 @@ from app.modules.ai.agents.safety.keyword_blocklist import (
 from app.modules.ai.core.provider_egress import is_provider_failure
 from app.modules.ai.schemas.chat import resolve_chat_trace_id
 from app.modules.ai.schemas.model import ModelOption
+from app.modules.ai.service.authorization_chat_ingress_candidate import (
+    freeze_run_authority,
+)
 from app.modules.ai.service.chat_run_service import (
     ToolCallCollector,
-    chat_run_finalizer,
     chat_run_guard,
     enforce_grounded_management_write_claim,
     enforce_import_error_output_redaction,
@@ -83,8 +94,8 @@ from app.modules.ai.service.result_projection_service import (
     ProjectionLineage,
     result_projection_service,
 )
+from app.modules.auth.service import access_identity
 from app.modules.system.models.user import User
-from app.modules.system.service.file_service import file_service
 from app.utils.attachment_filename import attachment_display_name
 
 logger = logging.getLogger(__name__)
@@ -176,11 +187,12 @@ def _is_private_url(url: str) -> bool:
 
 
 async def _convert_local_images_to_data_uri(
-    body: dict, *, db: AsyncSession, tenant: TenantContext
+    body: dict, *, db: AsyncSession, tenant: TenantContext, actor_user_version: int
 ) -> dict:
     """Inline authorized local uploads in a model-only copy, including history."""
     prepared = deepcopy(body)
     images: dict[str, str] = {}
+    total_bytes = 0
     for msg in prepared.get("messages", []):
         parts = msg.get("parts", [])
         for part in parts:
@@ -207,9 +219,26 @@ async def _convert_local_images_to_data_uri(
                     error_code="AI_IMAGE_NOT_AVAILABLE",
                 )
             if path not in images:
-                content, media_type = await file_service.read_chat_image(
-                    db, path, tenant=tenant
+                if len(images) >= 32:
+                    raise BusinessRuleException(
+                        "图片数量超过预算",
+                        error_code="AUTHORIZATION_FILE_LIMIT_EXCEEDED",
+                    )
+                await _finish_chat_read_phase(db)
+                (
+                    content,
+                    media_type,
+                ) = await get_authorization_runtime().upload.read_chat_image(
+                    file_url=path,
+                    tenant=tenant,
+                    actor_user_version=actor_user_version,
                 )
+                total_bytes += len(content)
+                if total_bytes > 100 * 1024 * 1024:
+                    raise BusinessRuleException(
+                        "图片总大小超过预算",
+                        error_code="AUTHORIZATION_FILE_LIMIT_EXCEEDED",
+                    )
                 images[path] = (
                     f"data:{media_type};base64,{base64.b64encode(content).decode()}"
                 )
@@ -306,6 +335,7 @@ async def _finalize_stream_turn(
     lineage: ProjectionLineage | None = None,
     projection_dependency_message_ids: list[int] | tuple[int, ...] = (),
     tenant: TenantContext,
+    actor_user_version: int,
 ) -> list[AiStreamEvent]:
     """建立 durability barrier：assistant/terminal commit 完成后才构造 done。"""
     if stream_error_code is not None:
@@ -346,21 +376,32 @@ async def _finalize_stream_turn(
         tool_calls=tool_calls,
     )
     try:
-        message = await chat_run_finalizer.finalize_assistant_turn(
-            db,
+        if isinstance(db, RequestSession):
+            if db._request_wrote:
+                release_completed_request(db)
+            else:
+                await release_request_reads(db)
+        else:
+            if db.new or db.dirty or db.deleted:
+                raise BusinessRuleException(
+                    "Stream session has pending writes",
+                    error_code="AUTHORIZATION_LOCK_ORDER_INVALID",
+                )
+            db.expunge_all()
+            await db.rollback()
+        message_id = await get_authorization_runtime().chat.finalize(
             conversation_id=conversation_id,
             trace_id=trace_id,
-            source_user_message_id=source_user_message_id,
+            source_id=source_user_message_id,
             content=content,
-            tool_calls=tool_calls,
+            tool_calls=tool_calls or [],
             agent_code=agent_code,
             lineage=lineage,
             projection_dependency_message_ids=projection_dependency_message_ids,
             tenant=tenant,
+            actor_user_version=actor_user_version,
         )
-        await db.commit()
     except Exception:
-        await db.rollback()
         logger.exception(
             "finalize_assistant_turn failed",
             extra={"conversation_id": conversation_id, "trace_id": trace_id},
@@ -387,12 +428,47 @@ async def _finalize_stream_turn(
     events.append(
         DoneEvent(
             trace_id=trace_id,
-            message_id=message.message_id if message else None,
+            message_id=message_id,
             persistence="committed",
             projection="updated",
         )
     )
     return events
+
+
+async def _finish_chat_read_phase(db):
+    """End only a clean read phase; never erase a historical write marker."""
+    await finish_request_read_phase(db)
+
+
+async def _write_chat_routing(db, *, identity, conversation_id, trace_id, audit):
+    await _finish_chat_read_phase(db)
+    return await get_authorization_runtime().chat.routing_audit(
+        tenant=identity.tenant,
+        actor_user_version=identity.user_version,
+        conversation_id=conversation_id,
+        trace_id=trace_id,
+        audit=audit,
+    )
+
+
+async def _select_chat_model(db, *, identity, model_ref):
+    await _finish_chat_read_phase(db)
+    return await get_authorization_runtime().chat.select_model(
+        tenant=identity.tenant,
+        actor_user_version=identity.user_version,
+        model_ref=model_ref,
+    )
+
+
+async def _prepare_io(operation, *, seconds=2):
+    try:
+        async with asyncio.timeout(seconds):
+            return await operation
+    except TimeoutError:
+        raise BusinessRuleException(
+            "AI 准备超时，请稍后重新发起", error_code="AI_PREPARATION_TIMEOUT"
+        ) from None
 
 
 async def _emit_safety_blocked(
@@ -406,30 +482,30 @@ async def _emit_safety_blocked(
     error_msg: str,
     accept: str = SSE_CONTENT_TYPE,
     tenant: TenantContext,
+    actor_user_version: int,
 ) -> StreamingResponse:
     """安全检查短路时统一写路由日志并发送 ``AiErrorEvent``。
 
     用于 keyword / topic / url 三个硬短路（injection 不是短路，单独处理）.
     所有安全短路都必须经过此 helper，保证审计日志连续。
     """
-    from app.modules.ai.service.routing_log_service import (  # noqa: PLC0415
-        routing_log_service,
-    )
-
-    await routing_log_service.write_log(
-        db,
+    if user_id != tenant.actor_user_id:
+        raise _order_error()
+    await _finish_chat_read_phase(db)
+    await get_authorization_runtime().chat.routing_audit(
         trace_id=trace_id,
-        user_id=user_id,
         conversation_id=conversation_id,
-        input_message=user_message or "",  # 防 None
-        candidates=[],
-        llm_choice=None,
-        final_agent=None,
-        reason="safety_blocked",
-        latency_ms=0,
+        audit={
+            "input_message": user_message or "",
+            "candidates": [],
+            "llm_choice": None,
+            "final_agent": None,
+            "reason": "safety_blocked",
+            "latency_ms": 0,
+        },
         tenant=tenant,
+        actor_user_version=actor_user_version,
     )
-    await db.commit()
 
     async def _stream():
         yield _format_sse_chunk(AiErrorEvent(error_code=error_code, message=error_msg))
@@ -484,7 +560,8 @@ async def chat(
     """
     # 读取原始 body（只能读一次）
     raw_body = await request.body()
-    tenant = get_bound_tenant_context(_current_user)
+    identity = access_identity(_current_user)
+    tenant = identity.tenant
 
     # 解析 JSON
     body = json.loads(raw_body) if raw_body else {}
@@ -538,14 +615,23 @@ async def chat(
     # and their authorization dependencies must come from the server together.
     projection_dependency_message_ids: list[int] = []
     if conversation_id is not None:
+        await _finish_chat_read_phase(db)
+        projected = await get_authorization_runtime().chat.messages(
+            tenant=identity.tenant,
+            actor_user_version=identity.user_version,
+            conversation_id=conversation_id,
+        )
         (
             history,
             projection_dependency_message_ids,
-        ) = await chat_service.load_model_history(db, conversation_id, _current_user)
+        ) = chat_service.model_history(projected)
         body["messages"] = [*history, messages[-1]]
 
     # 将内网图片 URL 转为 base64 data URI（LLM 提供商无法访问内网）
-    body = await _convert_local_images_to_data_uri(body, db=db, tenant=tenant)
+    async with asyncio.timeout(15):
+        body = await _convert_local_images_to_data_uri(
+            body, db=db, tenant=tenant, actor_user_version=identity.user_version
+        )
 
     # 给 PydanticAI 的请求体移除非 image 文件 part + 剥 fileSize（PydanticAI FileUIPart.url
     # 必须合法 http(s) URL 且不允许 extra 字段；Excel/CSV 等业务文件无预览 URL，通过 file_id
@@ -624,10 +710,10 @@ async def chat(
     # 授权完成，再使用其 model_preference，不能提前固化成全局第一项。
     selected_model = None
     if model_name is not None:
-        selected_model = await model_authorization_service.authorize_chat_model(
+        selected_model = await _select_chat_model(
             db,
-            model_name,
-            tenant=tenant,
+            identity=identity,
+            model_ref=model_name,
         )
         model_name = str(selected_model.model.model_id)
         model_authorization_service.ensure_image_support(
@@ -646,30 +732,26 @@ async def chat(
             conversation_id=conversation_id,
         )
     except ValueError as exc:
-        from app.modules.ai.service.routing_log_service import (  # noqa: PLC0415
-            routing_log_service,
-        )
-
         # 捕获异常消息到本地变量，避免 generator 函数体内 e 退出 except 后被 deref.
         err_msg = str(exc)
         logger.warning(
             "agent load failed",
             extra={"error": err_msg, "trace_id": trace_id},
         )
-        await routing_log_service.write_log(
+        await _write_chat_routing(
             db,
+            identity=identity,
             trace_id=trace_id,
-            user_id=_current_user.user_id,
             conversation_id=conversation_id,
-            input_message=user_message or "",
-            candidates=[],
-            llm_choice=None,
-            final_agent=None,
-            reason="agent_load_failed",
-            latency_ms=0,
-            tenant=tenant,
+            audit={
+                "input_message": user_message or "",
+                "candidates": [],
+                "llm_choice": None,
+                "final_agent": None,
+                "reason": "agent_load_failed",
+                "latency_ms": 0,
+            },
         )
-        await db.commit()
 
         accept = request.headers.get("accept", SSE_CONTENT_TYPE)
 
@@ -699,10 +781,13 @@ async def chat(
     deps.projection_dependency_message_ids = tuple(projection_dependency_message_ids)
     # 注入 client_ip，供执行器统计鉴权拒绝并实施 IP 级封禁。
     deps.client_ip = request.client.host if request.client else None
+    await _finish_chat_read_phase(db)
 
     # 单个 IP 一小时内鉴权拒绝达到阈值后封禁两小时。
     if deps.client_ip:
-        if await is_ip_blacklisted(redis_client, deps.client_ip, tenant=deps.tenant):
+        if await _prepare_io(
+            is_ip_blacklisted(redis_client, deps.client_ip, tenant=deps.tenant)
+        ):
             logger.warning(
                 "ip blacklisted blocked chat",
                 extra={"ip": deps.client_ip, "user_id": _current_user.user_id},
@@ -730,8 +815,8 @@ async def chat(
             )
 
     # 用户被自动禁用时发送 ai_error 和 done，并结束流。
-    if await check_user_disabled(
-        redis_client, _current_user.user_id, tenant=deps.tenant
+    if await _prepare_io(
+        check_user_disabled(redis_client, _current_user.user_id, tenant=deps.tenant)
     ):
         logger.warning(
             "user auto-disabled blocked chat",
@@ -788,6 +873,7 @@ async def chat(
                 conversation_id=conversation_id,
                 user_message=user_message,
                 error_code="AI_KEYWORD_BLOCKED",
+                actor_user_version=identity.user_version,
                 error_msg="消息含敏感词，已被管理员配置拦截，请修改后再试",
                 tenant=deps.tenant,
             )
@@ -815,6 +901,7 @@ async def chat(
                 conversation_id=conversation_id,
                 user_message=user_message,
                 error_code="AI_FORBIDDEN_TOPIC",
+                actor_user_version=identity.user_version,
                 error_msg="消息涉及禁讨论主题，请修改后再试",
                 tenant=deps.tenant,
             )
@@ -842,6 +929,7 @@ async def chat(
                 conversation_id=conversation_id,
                 user_message=user_message,
                 error_code="AI_FORBIDDEN_URL",
+                actor_user_version=identity.user_version,
                 error_msg="消息含禁访问的链接，请删除后重试",
                 tenant=deps.tenant,
             )
@@ -854,12 +942,15 @@ async def chat(
     # 这样攻击者拆分注入到多轮（每轮只触发 1 个 pattern）也会被 conversation
     # 级 flag 兜住，后续轮次 tool 调用强制 HITL。
     current_hit = detect_injection(user_message)
+    await _finish_chat_read_phase(db)
     if current_hit and conversation_id is not None:
-        await record_injection_hit_conversation(
-            redis_client, conversation_id, tenant=deps.tenant
+        await _prepare_io(
+            record_injection_hit_conversation(
+                redis_client, conversation_id, tenant=deps.tenant
+            )
         )
-    history_hit = await is_injection_hit_conversation(
-        redis_client, conversation_id, tenant=deps.tenant
+    history_hit = await _prepare_io(
+        is_injection_hit_conversation(redis_client, conversation_id, tenant=deps.tenant)
     )
     deps.injection_hit = current_hit or history_hit
 
@@ -888,6 +979,7 @@ async def chat(
     )
     from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
         get_ai_config_bool,
+        get_ai_config_int,
     )
     from app.modules.ai.agents.supervisor.quota import (  # noqa: PLC0415
         check_supervisor_quota,
@@ -897,9 +989,6 @@ async def chat(
     from app.modules.ai.constants import DEFAULT_AGENT_CODE  # noqa: PLC0415
     from app.modules.ai.service.agent_visibility import (  # noqa: PLC0415
         list_visible_agents,
-    )
-    from app.modules.ai.service.routing_log_service import (  # noqa: PLC0415
-        routing_log_service,
     )
 
     accept = request.headers.get("accept", SSE_CONTENT_TYPE)
@@ -940,8 +1029,21 @@ async def chat(
                 route_reason = "no_candidates"
                 routing_error_code = "AI_AGENT_NOT_AVAILABLE"
             else:
-                quota = await check_supervisor_quota(
-                    db, user_id=_current_user.user_id, tenant=deps.tenant
+                daily_limit = await get_ai_config_int(
+                    db,
+                    "ai:supervisor_daily_limit",
+                    default=100,
+                    tenant=deps.tenant,
+                    force_refresh=True,
+                )
+                await _finish_chat_read_phase(db)
+                quota = await _prepare_io(
+                    check_supervisor_quota(
+                        db,
+                        user_id=_current_user.user_id,
+                        tenant=deps.tenant,
+                        daily_limit=daily_limit,
+                    )
                 )
                 if not quota.allowed:
                     route_reason = "quota_exceeded"
@@ -963,8 +1065,10 @@ async def chat(
                     # 因为 refund 会引入 race（攻击者故意触发 timeout 反复退额），
                     # 选择"宁错杀不放过"。运维监控 routing_log.reason='llm_call_failed'
                     # 比例异常时调高 sys_config.ai:supervisor_daily_limit.
-                    await increment_daily_count(
-                        redis_client, _current_user.user_id, tenant=deps.tenant
+                    await _prepare_io(
+                        increment_daily_count(
+                            redis_client, _current_user.user_id, tenant=deps.tenant
+                        )
                     )
                     # Client history is not authoritative. Only bounded user
                     # questions from this actor's persisted conversation inform
@@ -980,12 +1084,24 @@ async def chat(
                         else []
                     )
                     start = time.monotonic()
-                    result = await agent_router.route(
+                    router_choice = await _select_chat_model(
                         db,
-                        user_message or ("请描述这张图片" if has_images else ""),
-                        candidates,
-                        tenant=deps.tenant,
-                        history=routing_history,
+                        identity=identity,
+                        model_ref=None,
+                    )
+                    router_model = model_authorization_service.create_model_instance(
+                        router_choice
+                    )
+                    result = await _prepare_io(
+                        agent_router.route(
+                            db,
+                            user_message or ("请描述这张图片" if has_images else ""),
+                            candidates,
+                            tenant=deps.tenant,
+                            history=routing_history,
+                            model=router_model,
+                        ),
+                        seconds=15,
                     )
                     routing_latency_ms = int((time.monotonic() - start) * 1000)
 
@@ -1043,14 +1159,12 @@ async def chat(
     if not routing_failed and clarification_payload is None and deps.agent is not None:
         if selected_model is None:
             model_ref = getattr(deps.agent, "model_preference", None)
-            selected_model = await model_authorization_service.authorize_chat_model(
+            selected_model = await _select_chat_model(
                 db,
-                model_ref,
-                tenant=deps.tenant,
+                identity=identity,
+                model_ref=model_ref,
             )
         model_name = str(selected_model.model.model_id)
-        if conv is not None and conv.model_name != model_name:
-            conv.model_name = model_name
         deps.resolved_model_id = selected_model.model.model_id
         model_authorization_service.ensure_image_support(
             selected_model, has_images=has_images
@@ -1058,29 +1172,27 @@ async def chat(
         deps.has_image_input = has_images
         deps.resolved_provider_id = selected_model.provider.provider_id
 
-    # 所有路由路径都写入审计日志。
-    # input_message 用 `or ""` 兜底：边界防御统一为空串写入 HMAC hash.
-    # 注：success path 在此处立即 commit；clarification / failed 路径在 emit stream 前 commit.
-    await routing_log_service.write_log(
-        db,
-        trace_id=trace_id,
-        user_id=_current_user.user_id,
-        conversation_id=conversation_id,
-        input_message=user_message or "",
-        candidates=candidates,
-        llm_choice=llm_choice,
-        final_agent=final_agent_code,
-        reason=route_reason,
-        latency_ms=routing_latency_ms,
-        tenant=deps.tenant,
-    )
-    # success path 立即提交，避免后续 attach_trace_to_conversation 失败时丢日志
-    if not routing_failed and clarification_payload is None:
-        await db.commit()
+    routing_audit = {
+        "input_message": user_message or "",
+        "candidates": [item.code for item in candidates],
+        "llm_choice": llm_choice,
+        "final_agent": final_agent_code,
+        "reason": route_reason,
+        "latency_ms": routing_latency_ms,
+    }
+    # Failed/clarification requests have an audit but no source. Successful
+    # requests persist the audit and source atomically after preparing the Agent.
+    if routing_failed or clarification_payload is not None:
+        await _write_chat_routing(
+            db,
+            identity=identity,
+            conversation_id=conversation_id,
+            trace_id=trace_id,
+            audit=routing_audit,
+        )
 
     # AI_ROUTING_FAILED → emit error + 结束（user 消息不落库）
     if routing_failed:
-        await db.commit()
 
         async def _routing_failed_stream():
             yield _format_sse_chunk(
@@ -1109,7 +1221,6 @@ async def chat(
 
     # 需要澄清时发送事件并结束，用户消息不落库。
     if clarification_payload is not None:
-        await db.commit()
 
         async def _clarification_stream():
             yield _format_sse_chunk(ClarificationRequiredEvent(**clarification_payload))
@@ -1127,6 +1238,15 @@ async def chat(
             headers={"X-AI-Trace-ID": trace_id},
         )
 
+    run_authority = None
+    if conversation_id is not None:
+        async with asyncio.timeout(5):
+            run_authority = await freeze_run_authority(
+                db,
+                deps=deps,
+                model_name=model_name,
+                model_selection=selected_model.selection,
+            )
     # 创建 Agent，并按用户权限和 agent_code 过滤工具。
     agent = await chat_service.create_agent(
         db,
@@ -1135,6 +1255,7 @@ async def chat(
         agent_code=deps.agent.code,
         tenant=deps.tenant,
         agent_config=deps.agent,
+        selected_model=selected_model,
     )
 
     # 所有持久化变更前先获取会话级 owner lease。
@@ -1161,11 +1282,14 @@ async def chat(
             exc.code = 409
             raise exc
         guard_owner_token = chat_run_guard.generate_owner_token()
-        acquired = await chat_run_guard.acquire(
-            redis_client,
-            conversation_id=conversation_id,
-            owner_token=guard_owner_token,
-            tenant=deps.tenant,
+        await _finish_chat_read_phase(db)
+        acquired = await _prepare_io(
+            chat_run_guard.acquire(
+                redis_client,
+                conversation_id=conversation_id,
+                owner_token=guard_owner_token,
+                tenant=deps.tenant,
+            )
         )
         if not acquired:
             exc = BusinessRuleException(
@@ -1184,11 +1308,14 @@ async def chat(
             )
         )
         if action_in_progress:
-            await chat_run_guard.release(
-                redis_client,
-                conversation_id=conversation_id,
-                owner_token=guard_owner_token,
-                tenant=deps.tenant,
+            await _finish_chat_read_phase(db)
+            await _prepare_io(
+                chat_run_guard.release(
+                    redis_client,
+                    conversation_id=conversation_id,
+                    owner_token=guard_owner_token,
+                    tenant=deps.tenant,
+                )
             )
             exc = BusinessRuleException(
                 "该会话仍有待确认或正在执行的操作",
@@ -1198,43 +1325,43 @@ async def chat(
             raise exc
 
     try:
-        # 现在才持久化 user 消息（避免 safety / clarification 孤儿消息）。flush 后
-        # message_id 立即成为本 run 的 source 因果键，供 Gateway operation 使用。
-        if conversation_id and (user_message or user_parts):
+        await _finish_chat_read_phase(db)
+        if conversation_id is not None:
             persist_content = (
                 display_content if display_content is not None else user_message
             )
             persist_parts = display_parts if display_parts is not None else user_parts
-            source_message = await chat_service.save_user_message(
-                db,
-                conversation_id,
-                _current_user.user_id,
-                persist_content,
-                parts=persist_parts,
-                agent_code=deps.agent.code,
-                trace_id=deps.trace_id,
-                tenant=deps.tenant,
+            deps.source_user_message_id = (
+                await get_authorization_runtime().chat.start_run(
+                    conversation_id=conversation_id,
+                    actor_user_version=identity.user_version,
+                    content=persist_content,
+                    parts=persist_parts,
+                    trace_id=deps.trace_id,
+                    tenant=deps.tenant,
+                    authority=run_authority,
+                    audit=routing_audit,
+                )
             )
-            deps.source_user_message_id = source_message.message_id
-
-        # 将 trace_id 和 agent_code 写入会话，供追踪和粘滞路由使用。
-        await chat_service.attach_trace_to_conversation(
-            db,
-            conversation_id,
-            deps.agent.code,
-            deps.trace_id,
-            tenant=deps.tenant,
-        )
-        await db.commit()
+        else:
+            await get_authorization_runtime().chat.routing_audit(
+                tenant=identity.tenant,
+                actor_user_version=identity.user_version,
+                conversation_id=None,
+                trace_id=trace_id,
+                audit=routing_audit,
+            )
     except Exception:
-        await db.rollback()
         if conversation_id is not None and guard_owner_token is not None:
-            await chat_run_guard.release(
-                redis_client,
-                conversation_id=conversation_id,
-                owner_token=guard_owner_token,
-                tenant=deps.tenant,
-            )
+            with suppress(Exception):
+                await _prepare_io(
+                    chat_run_guard.release(
+                        redis_client,
+                        conversation_id=conversation_id,
+                        owner_token=guard_owner_token,
+                        tenant=deps.tenant,
+                    )
+                )
         raise
 
     # 并发合并自定义事件队列和 PydanticAI 流。
@@ -1506,6 +1633,7 @@ async def chat(
                                 agent_code=deps.agent.code if deps.agent else None,
                                 stream_error_code="AI_CHAT_STOPPED",
                                 tenant=deps.tenant,
+                                actor_user_version=identity.user_version,
                             )
 
                     with CancelScope(shield=True):
@@ -1555,6 +1683,7 @@ async def chat(
                         projection_dependency_message_ids
                     ),
                     tenant=deps.tenant,
+                    actor_user_version=identity.user_version,
                 )
             else:
                 terminal_events = [

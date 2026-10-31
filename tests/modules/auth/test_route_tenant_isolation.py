@@ -6,11 +6,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import SUPER_ADMIN_ROLE_CODE
 from app.core.id_generator import next_id
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.auth.api import get_user_routes, is_route_exist
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.tenant import Tenant
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
 
 @pytest.fixture

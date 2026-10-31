@@ -46,6 +46,17 @@ class UploadPolicy:
 
 
 class FilePolicyService:
+    @staticmethod
+    def validate_import(policy: UploadPolicy, filename: str, size: int) -> None:
+        if size > policy.max_bytes:
+            raise BusinessRuleException(
+                "File exceeds the import limit", error_code="AI_IMPORT_FILE_TOO_LARGE"
+            )
+        if "." + filename.rsplit(".", 1)[-1].lower() not in policy.extensions:
+            raise BusinessRuleException(
+                "File type is not allowed", error_code="AI_IMPORT_INVALID_MIME"
+            )
+
     async def resolve(
         self, db: AsyncSession, scenario: str, *, tenant: TenantContext
     ) -> UploadPolicy:

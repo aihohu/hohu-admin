@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.core.tenant import TenantContext
+from app.db.authorization_http import business_write
 from app.db.session import get_db
 from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.user import User
@@ -138,8 +139,9 @@ async def add(
         - is_default: 是否默认（必填，Y-是，N-否）
         - status: 字典数据状态（必填，1-启用，2-禁用）
     """
-    await dict_data_service.create(db, data_in, tenant=tenant)
-    await db.commit()
+    await business_write(
+        db, _current_user, tenant=tenant, operation="dict-data.create", payload=data_in
+    )
     return ResponseModel.success(msg="字典数据创建成功")
 
 
@@ -188,8 +190,14 @@ async def update(
         - is_default: 是否默认
         - status: 字典数据状态
     """
-    await dict_data_service.update(db, data_id, data_in, tenant=tenant)
-    await db.commit()
+    await business_write(
+        db,
+        _current_user,
+        tenant=tenant,
+        operation="dict-data.update",
+        payload=data_in,
+        ids=(data_id,),
+    )
     return ResponseModel.success(msg="字典数据更新成功")
 
 
@@ -228,8 +236,9 @@ async def delete(
     Note:
         - 此操作不可逆，请谨慎操作
     """
-    await dict_data_service.delete(db, data_id, tenant=tenant)
-    await db.commit()
+    await business_write(
+        db, _current_user, tenant=tenant, operation="dict-data.delete", ids=(data_id,)
+    )
     return ResponseModel.success(msg="字典数据删除成功")
 
 
@@ -267,6 +276,7 @@ async def batch_delete(
     Note:
         - 此操作不可逆，请谨慎操作
     """
-    deleted_count = await dict_data_service.batch_delete(db, ids, tenant=tenant)
-    await db.commit()
+    deleted_count = await business_write(
+        db, _current_user, tenant=tenant, operation="dict-data.batch-delete", ids=ids
+    )
     return ResponseModel.success(msg=f"成功删除 {deleted_count} 条数据")

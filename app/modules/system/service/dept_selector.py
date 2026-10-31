@@ -10,7 +10,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from app.constants import STATUS_ENABLED
 from app.core.base_response import PageResult
-from app.core.exceptions import NotFoundException
+from app.core.exceptions import BusinessRuleException, NotFoundException
 from app.modules.system.models.dept import Dept
 
 
@@ -87,7 +87,9 @@ class DepartmentSelector:
         """Return a stable page and total from the same visible row set."""
         scoped_filters = self._filters(scope, filters)
         total = int(
-            await db.scalar(select(func.count(Dept.dept_id)).where(*scoped_filters))
+            await db.scalar(
+                select(func.pg_catalog.count(Dept.dept_id)).where(*scoped_filters)
+            )
             or 0
         )
         stmt = (
@@ -115,7 +117,9 @@ class DepartmentSelector:
         """Count only rows in the materialized visible set."""
         return int(
             await db.scalar(
-                select(func.count(Dept.dept_id)).where(*self._filters(scope, filters))
+                select(func.pg_catalog.count(Dept.dept_id)).where(
+                    *self._filters(scope, filters)
+                )
             )
             or 0
         )
@@ -216,7 +220,7 @@ class DepartmentSelector:
                 "visited"
             ),
         ).where(
-            func.lower(visible.c.dept_name).contains(
+            func.pg_catalog.lower(visible.c.dept_name).contains(
                 leaf_query,
                 autoescape=True,
             )
@@ -243,16 +247,14 @@ class DepartmentSelector:
                 paths.c.dept_id,
                 paths.c.dept_name,
                 paths.c.path,
-                func.count().over().label("match_count"),
-                func.array_agg(paths.c.dept_id).over().label("matched_dept_ids"),
             )
             .where(
                 ~exists(
-                    select(1)
+                    select(literal(1))
                     .select_from(next_parent)
                     .where(next_parent.c.dept_id == paths.c.next_parent_id)
                 ),
-                func.lower(paths.c.path).contains(
+                func.pg_catalog.lower(paths.c.path).contains(
                     folded_query,
                     autoescape=True,
                 ),
@@ -264,10 +266,8 @@ class DepartmentSelector:
                 matched.c.dept_id,
                 matched.c.dept_name,
                 matched.c.path,
-                matched.c.match_count,
-                matched.c.matched_dept_ids,
             )
-            .order_by(func.lower(matched.c.path), matched.c.dept_id)
+            .order_by(func.pg_catalog.lower(matched.c.path), matched.c.dept_id)
             .limit(limit)
         )
 
@@ -288,7 +288,7 @@ class DepartmentSelector:
                         tenant_id=scope.tenant_id,
                         accessible_dept_ids=scope.accessible_dept_ids,
                         normalized_query=normalized_query,
-                        limit=limit,
+                        limit=8193,
                         enabled_only=enabled_only,
                     )
                 )
@@ -296,20 +296,21 @@ class DepartmentSelector:
             .mappings()
             .all()
         )
+        if len(rows) > 8192:
+            raise BusinessRuleException(
+                "部门查询结果超过授权预算",
+                error_code="AUTHORIZATION_PLAN_LIMIT_EXCEEDED",
+            )
         matches = tuple(
             DepartmentLookupMatch(
                 dept_id=int(row["dept_id"]),
                 dept_name=str(row["dept_name"]),
                 path=str(row["path"]),
             )
-            for row in rows
+            for row in rows[:limit]
         )
-        match_count = int(rows[0]["match_count"]) if rows else 0
-        matched_dept_ids = (
-            tuple(sorted(int(value) for value in rows[0]["matched_dept_ids"]))
-            if rows
-            else ()
-        )
+        match_count = len(rows)
+        matched_dept_ids = tuple(sorted(int(row["dept_id"]) for row in rows))
         return DepartmentLookupResult(
             matches=matches,
             match_count=match_count,

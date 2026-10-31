@@ -21,10 +21,11 @@ from app.constants import IS_PRIMARY_YES
 from app.core import redis as redis_module
 from app.core.config import settings
 from app.core.exceptions import BusinessException
+from app.core.security import create_access_token
 from app.core.tenant import TenantContext
 from app.db.base import user_depts, user_roles
-from app.db.session import AsyncSessionLocal, engine
-from app.modules.ai.agents.gateway import atomic_execution
+from app.db.session import engine
+from app.modules.ai.agents.gateway import executor as gateway_executor
 from app.modules.ai.agents.gateway.failures import compute_args_hash
 from app.modules.ai.agents.gateway.result import ToolResult
 from app.modules.ai.agents.hitl.constants import AiOperationStatus
@@ -34,21 +35,26 @@ from app.modules.ai.api import confirm as confirm_module
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.model import AiModel
+from app.modules.ai.models.model_policy import TenantAiModelPolicy
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.schemas.confirm import ConfirmRequest
-from app.modules.ai.service.chat_run_service import chat_run_finalizer
+from app.modules.ai.service.authorization_chat_candidate import chat_candidate
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.ai.service.prepared_action_service import (
     canonical_payload_hash,
     prepared_action_service,
 )
 from app.modules.ai.service.result_projection_service import result_projection_service
-from app.modules.auth.service import load_live_user_authority
+from app.modules.auth.service import get_current_user, load_live_user_authority
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
+from app.modules.system.service.authorization_ai_tool_adapter import (
+    system_ai_tool_adapter,
+)
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
 
 class InjectedCompletionFailure(RuntimeError):
@@ -142,6 +148,11 @@ async def completion_case(
         )
         db.add_all([model, message])
         await db.flush()
+        db.add(
+            TenantAiModelPolicy(
+                tenant_id=0, model_id=model.model_id, enabled=True, is_default=False
+            )
+        )
         args = {
             "user_name": username,
             "primary_dept_id": department.dept_id,
@@ -246,24 +257,24 @@ def count_real_handler(
 ) -> None:
     registered = ToolRegistry.get().find("user.create")
     assert registered is not None
-    real_tool = registered.fn
+    real_apply = system_ai_tool_adapter.apply
 
-    async def counted(ctx, **args):
+    async def counted(db, tx, command, plan):
         case.calls.append(
             (
-                await ctx.db.scalar(select(func.pg_backend_pid())),
-                await ctx.db.scalar(select(func.txid_current())),
+                id(db),
+                id(db.sync_session.get_transaction()),
             )
         )
         try:
-            result = await real_tool(ctx, **args)
+            result = await real_apply(db, tx, command, plan)
         except Exception as exc:
             case.handler_errors.append(
                 f"{type(exc).__name__}: {getattr(exc, 'error_code', None)}"
             )
             raise
         assert result.ok, result.error_code
-        user_id = await ctx.db.scalar(
+        user_id = await db.scalar(
             select(User.user_id).where(
                 User.tenant_id == 0, User.user_name == case.username
             )
@@ -281,15 +292,30 @@ def count_real_handler(
             result.projection = replace(result.projection, scope_bound=True)
         return result
 
-    monkeypatch.setattr(registered, "fn", counted)
+    monkeypatch.setattr(system_ai_tool_adapter, "apply", counted)
 
 
-async def approve(case: CompletionCase):
+async def authenticated_actor(case, db):
+    version = await db.scalar(
+        select(User.auth_version).where(User.user_id == case.tenant.actor_user_id)
+    )
+    return await get_current_user(
+        create_access_token(
+            subject=str(case.tenant.actor_user_id),
+            tenant_id=case.tenant.tenant_id,
+            tenant_version=case.tenant.tenant_version,
+            user_version=version,
+        ),
+        db,
+    )
+
+
+async def approve(case: CompletionCase, *, decision="approve"):
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         try:
             return await confirm_module.confirm_tool(
-                ConfirmRequest(confirmation_id=case.confirmation_id, action="approve"),
+                ConfirmRequest(confirmation_id=case.confirmation_id, action=decision),
                 db=db,
                 current_user=actor,
             )
@@ -369,7 +395,7 @@ async def test_projection_failure_keeps_committed_business_action_and_audit(
 ):
     case = completion_case
     count_real_handler(case, monkeypatch)
-    real_finalize = chat_run_finalizer.finalize_prepared_action
+    real_finalize = chat_candidate.recover
     projection_hits = []
 
     async def fail_projection(*args, **kwargs):
@@ -377,14 +403,14 @@ async def test_projection_failure_keeps_committed_business_action_and_audit(
         projection_hits.append(True)
         raise InjectedCompletionFailure("chat projection failed after actual flush")
 
-    monkeypatch.setattr(chat_run_finalizer, "finalize_prepared_action", fail_projection)
+    monkeypatch.setattr(chat_candidate, "recover", fail_projection)
     await approve(case)
     assert projection_hits == [True]
     state = await observe(case)
     assert_success(case, state)
     assert state["history"] == []
 
-    monkeypatch.setattr(chat_run_finalizer, "finalize_prepared_action", real_finalize)
+    monkeypatch.setattr(chat_candidate, "recover", real_finalize)
     response = await approve(case)
     assert response.data.status == "succeeded"
     assert (await approve(case)).data.status == "succeeded"
@@ -604,7 +630,7 @@ async def test_redis_success_counter_failure_cannot_undo_business(
         raise RedisConnectionError("synthetic counter cleanup connection failure")
 
     with monkeypatch.context() as redis_patch:
-        redis_patch.setattr(atomic_execution, "clear_failures", fail_counter_clear)
+        redis_patch.setattr(gateway_executor, "clear_failures", fail_counter_clear)
         response = await approve(case)
     assert len(redis_observations) == 1
     # The outcome must already be visible through another session when this
@@ -625,7 +651,7 @@ async def test_scope_bound_result_freezes_hash_in_post_write_transaction(
 
     async def observed_hash(db, user, **kwargs):
         value = await real_hash(db, user, **kwargs)
-        transaction_id = await db.scalar(select(func.txid_current()))
+        transaction_id = id(db.sync_session.get_transaction())
         user_id = await db.scalar(
             select(User.user_id).where(
                 User.tenant_id == 0, User.user_name == case.username

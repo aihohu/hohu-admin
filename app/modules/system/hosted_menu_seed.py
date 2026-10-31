@@ -85,6 +85,7 @@ HOSTED_BUTTON_PERMISSIONS = frozenset(
         "system:user:add",
         "system:user:edit",
         "system:user:delete",
+        "system:user:batch-delete",
         "system:user:reset-password",
         "system:user:import",
         "system:user:export",

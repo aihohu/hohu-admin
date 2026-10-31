@@ -99,6 +99,34 @@ TENANT_MODEL_INVENTORY: dict[str, TenantResource] = {
         "app.modules.system.models.user:User",
         unique_keys=(("tenant_id", "user_name"), ("tenant_id", "employee_no")),
     ),
+    "sys_user_field_policy_state": _resource(
+        "sys_user_field_policy_state",
+        "app.modules.system.models.user_field_policy:UserFieldPolicyState",
+        unique_keys=(("tenant_id",),),
+    ),
+    "sys_user_field_policy_revision": _resource(
+        "sys_user_field_policy_revision",
+        "app.modules.system.models.user_field_policy:UserFieldPolicyRevision",
+        unique_keys=(
+            ("tenant_id", "role_id", "revision_no"),
+            ("tenant_id", "role_id", "revision_id"),
+        ),
+        relationship_keys=(("tenant_id", "role_id"),),
+    ),
+    "sys_user_field_policy_binding": _resource(
+        "sys_user_field_policy_binding",
+        "app.modules.system.models.user_field_policy:UserFieldPolicyBinding",
+        unique_keys=(("tenant_id", "role_id"),),
+        relationship_keys=(
+            ("tenant_id", "role_id"),
+            ("tenant_id", "role_id", "revision_id"),
+        ),
+    ),
+    "sys_user_field_policy_audit": _resource(
+        "sys_user_field_policy_audit",
+        "app.modules.system.models.user_field_policy:UserFieldPolicyAudit",
+        relationship_keys=(("tenant_id", "role_id", "revision_id"),),
+    ),
     "sys_role": _resource(
         "sys_role",
         "app.modules.system.models.role:Role",
@@ -207,6 +235,11 @@ TENANT_MODEL_INVENTORY: dict[str, TenantResource] = {
 
 
 PLATFORM_GLOBAL_TABLES: dict[str, PlatformGlobalResource] = {
+    "sys_user_field_policy_global_guard": PlatformGlobalResource(
+        "sys_user_field_policy_global_guard",
+        "app.modules.system.models.user_field_policy:UserFieldPolicyGlobalGuard",
+        "guard_id",
+    ),
     "sys_mail_config": PlatformGlobalResource(
         "sys_mail_config",
         "app.modules.system.models.mail_config:MailConfig",

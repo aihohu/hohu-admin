@@ -4,15 +4,10 @@ import logging
 import time
 
 from jose import JWTError
-from sqlalchemy import select
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app.constants import REDIS_USER_NAME_PREFIX, REDIS_USER_NAME_TTL
-from app.core.redis import redis_client
 from app.core.security import decode_access_token
-from app.db.session import AsyncSessionLocal
-from app.modules.system.models.operation_log import SysOperationLog
-from app.modules.system.models.user import User
+from app.db.authorization_http import get_authorization_runtime
 from app.utils.ip_util import get_client_ip
 
 logger = logging.getLogger(__name__)
@@ -87,29 +82,14 @@ def _parse_identity_from_token(request) -> tuple[int, int] | None:
 
 
 async def _resolve_username(tenant_id: int, user_id: int) -> str | None:
-    """user_id → username 反查，先读 Redis 缓存，未命中读 DB 后回写。
-
-    改名时 user_service.update_user 主动失效缓存，保证审计日志记录的是当前用户名，
-    避免 token 里携带 username 在改名后产生陈旧日志的问题。
-    """
-    cache_key = f"tenant:{tenant_id}:{REDIS_USER_NAME_PREFIX}{user_id}"
-    cached = await redis_client.get(cache_key)
-    if cached:
-        return cached
-
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(User.user_name).where(
-                User.tenant_id == tenant_id,
-                User.user_id == user_id,
-            )
+    """Read current audit attribution in a fixed, bounded transaction."""
+    try:
+        return await get_authorization_runtime().http_audit.username(
+            tenant_id=tenant_id, user_id=user_id
         )
-        user_name = result.scalars().first()
-
-    if not user_name:
+    except Exception:
+        logger.warning("Audit attribution unavailable")
         return None
-    await redis_client.set(cache_key, user_name, ex=REDIS_USER_NAME_TTL)
-    return user_name
 
 
 async def _get_user_info(request) -> tuple[int, int, str] | None:
@@ -214,23 +194,19 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
 
         # 异步写入操作日志（使用独立 session）
         try:
-            async with AsyncSessionLocal() as session:
-                log = SysOperationLog(
-                    tenant_id=tenant_id,
-                    audit_scope="tenant",
-                    user_id=user_id,
-                    username=username,
-                    module=_extract_module(path),
-                    action=METHOD_ACTION_MAP[request.method],
-                    method=request.method,
-                    path=path,
-                    request_params=request_params,
-                    status_code=response.status_code,
-                    ip=get_client_ip(request),
-                    duration=duration,
-                )
-                session.add(log)
-                await session.commit()
+            await get_authorization_runtime().http_audit.operation(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                username=username,
+                module=_extract_module(path),
+                action=METHOD_ACTION_MAP[request.method],
+                method=request.method,
+                path=path,
+                request_params=request_params,
+                status_code=response.status_code,
+                ip=get_client_ip(request),
+                duration=duration,
+            )
         except Exception:
             logger.exception("Failed to write operation log")
 

@@ -15,9 +15,9 @@ from app.constants import (
     STATUS_ENABLED,
     SUPER_ADMIN_ROLE_CODE,
 )
-from app.modules.auth.api import get_user_info
 from app.modules.auth.permission_collect import (
     collect_user_buttons,
+    collect_user_identity,
     collect_user_menus,
     collect_user_permission_codes,
 )
@@ -203,9 +203,9 @@ async def test_super_user_info_preserves_explicit_buttons_alongside_wildcard():
         [super_role],
     )
 
-    response = await get_user_info(user)
+    response = collect_user_identity(user)
 
-    assert set(response.data["buttons"]) == {"*", "system:role:delete"}
+    assert set(response["buttons"]) == {"*", "system:role:delete"}
 
 
 async def test_user_info_omits_disabled_super_role_code() -> None:
@@ -224,7 +224,7 @@ async def test_user_info_omits_disabled_super_role_code() -> None:
         [disabled_super, enabled_role],
     )
 
-    response = await get_user_info(user)
+    response = collect_user_identity(user)
 
-    assert response.data["roles"] == ["R_ENABLED"]
-    assert response.data["buttons"] == ["system:role:delete"]
+    assert response["roles"] == ["R_ENABLED"]
+    assert response["buttons"] == ["system:role:delete"]

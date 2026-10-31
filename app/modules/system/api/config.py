@@ -1,3 +1,4 @@
+import asyncio
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, UploadFile
@@ -6,11 +7,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
-from app.core.cache import cache_delete
 from app.core.exceptions import BusinessRuleException
 from app.core.tenant import TenantContext, TenantLocatorContext
+from app.db.authorization_http import (
+    control_write,
+    get_authorization_runtime,
+    release_request_reads,
+)
 from app.db.session import get_db
 from app.modules.auth.service import (
+    access_identity,
     get_current_tenant_context,
     get_public_tenant_context,
 )
@@ -88,16 +94,24 @@ async def import_configs(
 ):
     """从 Excel 文件导入系统配置"""
     policy = await file_policy_service.resolve(db, "import", tenant=tenant)
-    file_bytes = await file.read(policy.max_bytes + 1)
-    if len(file_bytes) > policy.max_bytes:
+    identity = access_identity(_current_user)
+    await release_request_reads(db)
+    maximum = min(policy.max_bytes, CONFIG_IMPORT_MAX_SIZE_BYTES)
+    async with asyncio.timeout(5):
+        file_bytes = await file.read(maximum + 1)
+    if len(file_bytes) > maximum:
         raise BusinessRuleException(
             "File exceeds the configured import limit",
             error_code="CONFIG_IMPORT_FILE_TOO_LARGE",
         )
     policy.validate_extension(file.filename or "")
-    result = await config_service.import_configs(db, file_bytes, tenant=tenant)
-    await db.commit()
-    await cache_delete(pattern=f"tenant:{tenant.tenant_id}:config:*")
+    outcome = await get_authorization_runtime().control(
+        tenant=identity.tenant,
+        actor_user_version=identity.user_version,
+        operation="config.import",
+        payload=file_bytes,
+    )
+    result = outcome["result"] if "cache_refresh" in outcome else outcome
     return ResponseModel.success(
         data=result,
         msg=f"导入成功 {result['success']} 条，跳过 {result['skipped']} 条",
@@ -116,9 +130,9 @@ async def add(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """创建新的系统配置"""
-    await config_service.create(db, config_in, tenant=tenant)
-    await db.commit()
-    await cache_delete(pattern=f"tenant:{tenant.tenant_id}:config:*")
+    await control_write(
+        db, _current_user, operation="config.create", payload=config_in, tenant=tenant
+    )
     return ResponseModel.success(msg="系统配置创建成功")
 
 
@@ -135,9 +149,14 @@ async def update(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """更新系统配置信息"""
-    await config_service.update(db, config_id, config_in, tenant=tenant)
-    await db.commit()
-    await cache_delete(pattern=f"tenant:{tenant.tenant_id}:config:*")
+    await control_write(
+        db,
+        _current_user,
+        operation="config.update",
+        payload=config_in,
+        target_id=config_id,
+        tenant=tenant,
+    )
     return ResponseModel.success(msg="系统配置更新成功")
 
 
@@ -153,9 +172,9 @@ async def delete(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """删除指定系统配置"""
-    await config_service.delete(db, config_id, tenant=tenant)
-    await db.commit()
-    await cache_delete(pattern=f"tenant:{tenant.tenant_id}:config:*")
+    await control_write(
+        db, _current_user, operation="config.delete", target_id=config_id, tenant=tenant
+    )
     return ResponseModel.success(msg="系统配置删除成功")
 
 
@@ -172,7 +191,12 @@ async def batch_delete(
 ):
     """批量删除多个系统配置"""
     int_ids = [int(i) for i in ids]
-    count = await config_service.batch_delete(db, int_ids, tenant=tenant)
-    await db.commit()
-    await cache_delete(pattern=f"tenant:{tenant.tenant_id}:config:*")
+    outcome = await control_write(
+        db,
+        _current_user,
+        operation="config.batch_delete",
+        payload=int_ids,
+        tenant=tenant,
+    )
+    count = outcome["result"] if isinstance(outcome, dict) else outcome
     return ResponseModel.success(msg=f"成功删除 {count} 个系统配置")

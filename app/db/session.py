@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase
 
 from app.core.config import settings
+from app.db.request_session import RequestSession, request_reads_released
 
 # The caller setting this marker owns invalidation and retains the session until
 # it completes. Request teardown must never reuse or ordinarily close it.
@@ -35,7 +36,7 @@ engine = create_async_engine(
 # 2. 创建异步 Session 工厂
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
-    class_=AsyncSession,
+    class_=RequestSession,
     autocommit=False,
     autoflush=False,
     expire_on_commit=False,  # 异步环境下通常设为 False 避免属性过期错误
@@ -56,14 +57,14 @@ async def get_db(request: Request) -> AsyncGenerator[AsyncSession, None]:
     session = AsyncSessionLocal()
     try:
         yield session
-        if not getattr(
-            request.state, "platform_transaction_managed", False
-        ) and not is_session_quarantined(session):
+        if not getattr(request.state, "platform_transaction_managed", False) and not (
+            is_session_quarantined(session) or request_reads_released(session)
+        ):
             await _commit_request_session(session, request)
     except BaseException:
-        if not getattr(
-            request.state, "platform_transaction_managed", False
-        ) and not is_session_quarantined(session):
+        if not getattr(request.state, "platform_transaction_managed", False) and not (
+            is_session_quarantined(session) or request_reads_released(session)
+        ):
             # A disconnected ASGI request remains in a cancelled AnyIO scope.
             # Protect cleanup checkpoints, never the request or its commit.
             with CancelScope(shield=True):
@@ -76,7 +77,7 @@ async def get_db(request: Request) -> AsyncGenerator[AsyncSession, None]:
 
 
 async def _commit_request_session(session: AsyncSession, request: Request) -> None:
-    if is_session_quarantined(session):
+    if is_session_quarantined(session) or request_reads_released(session):
         return
     is_platform_request = (
         getattr(request.state, "platform_authorization", None) is not None

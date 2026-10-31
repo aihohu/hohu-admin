@@ -3,8 +3,7 @@
 import asyncio
 
 from sqlalchemy import insert, select, text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.constants import (
     ADMIN_ROLE_CODE,
@@ -14,7 +13,6 @@ from app.constants.constants import (
     USER_ROLE_CODE,
 )
 from app.core.builtin_i18n import initialize_translations
-from app.core.config import settings
 from app.core.security import get_password_hash
 from app.core.tenant import DEFAULT_TENANT_CODE, DEFAULT_TENANT_ID
 from app.db.base import role_menus, user_roles
@@ -214,17 +212,9 @@ async def seed_database(db: AsyncSession, *, admin_password: str | None = None) 
 
 
 async def init_db():
-    engine = create_async_engine(settings.DATABASE_URL)
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    try:
-        async with factory() as db, db.begin():
-            secret = settings.HOHU_ADMIN_PASSWORD
-            fresh = await seed_database(
-                db, admin_password=secret.get_secret_value() if secret else None
-            )
-        print("Initial data created." if fresh else "Deployment data synchronized.")
-    finally:
-        await engine.dispose()
+    from tools.ops.authorization_maintenance import run_seed_entry  # noqa: PLC0415
+
+    return await run_seed_entry("seed.system")
 
 
 if __name__ == "__main__":

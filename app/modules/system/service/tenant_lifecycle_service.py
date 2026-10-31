@@ -109,7 +109,9 @@ class TenantLifecycleService:
         platform: PlatformContext,
     ) -> PageResult:
         require_platform_permission(platform, PLATFORM_TENANT_READ)
-        total = await db.scalar(select(func.count()).select_from(Tenant)) or 0
+        total = (
+            await db.scalar(select(func.pg_catalog.count(1)).select_from(Tenant)) or 0
+        )
         records = (
             (
                 await db.execute(

@@ -1,6 +1,7 @@
 """``/ai/chat/resume`` 端点单元测试。
 
-直接调端点函数，mock 掉 redis_client + hitl_manager + settings。
+显式测试历史协议 helper，mock redis_client + hitl_manager + settings。
+实际注册入口的持久动作屏障另有真实JWT/数据库测试。
 """
 
 # ruff: noqa: ARG001, PLC0415
@@ -22,10 +23,13 @@ from app.core.exceptions import (
 from app.core.tenant import TenantContext
 from app.modules.ai.agents.hitl.events import ToolCallResultEvent
 from app.modules.ai.agents.hitl.manager import PendingPayload
-from app.modules.ai.api.resume import _load_durable_resume_terminal, resume_chat
+from app.modules.ai.api.resume import _legacy_resume_chat as resume_chat
+from app.modules.ai.api.resume import _load_durable_resume_terminal
 from app.modules.ai.service.result_projection_service import (
     result_projection_service,
 )
+from app.modules.ai.service.resume_terminal_projection import project_resume_terminal
+from app.modules.auth.service import AccessIdentity
 
 TENANT = TenantContext(
     tenant_id=0,
@@ -42,6 +46,7 @@ def _make_pending(
     wake_action: str | None = None,
     expires_at: str = "2099-01-01T00:00:00Z",
     action_id: int | None = None,
+    tool_name: str = "user.update",
 ) -> PendingPayload:
     return PendingPayload(
         user_id=user_id,
@@ -49,7 +54,7 @@ def _make_pending(
         conversation_id=1,
         tool_call_id="tc_test",
         trace_id="tr_test",
-        tool_name="user.update",
+        tool_name=tool_name,
         args={"user_id": 42},
         dry_run_result=None,
         expires_at=expires_at,
@@ -61,17 +66,20 @@ def _make_pending(
 def _make_user(user_id: int = 100, *, can_chat: bool = True):
     menus = [SimpleNamespace(permission="ai:chat:use")] if can_chat else []
     role = SimpleNamespace(role_code="R_USER", status="1", menus=menus)
+    tenant = TenantContext(
+        tenant_id=0,
+        tenant_code="default",
+        actor_user_id=user_id,
+        tenant_version=1,
+        source="access_token",
+    )
     return SimpleNamespace(
         user_id=user_id,
+        tenant_id=0,
         user_name="alice",
         roles=[role],
-        _tenant_context=TenantContext(
-            tenant_id=0,
-            tenant_code="default",
-            actor_user_id=user_id,
-            tenant_version=1,
-            source="access_token",
-        ),
+        _tenant_context=tenant,
+        _verified_access_identity=AccessIdentity(tenant, 1),
     )
 
 
@@ -197,6 +205,19 @@ async def test_memory_resume_after_original_waiter_disconnects(
                 ]
             ),
         ),
+        patch(
+            "app.modules.ai.api.resume.get_authorization_runtime",
+            return_value=SimpleNamespace(
+                lifecycle=SimpleNamespace(
+                    poll=AsyncMock(
+                        side_effect=[
+                            ("running", terminal.expires_at),
+                            (terminal_status, terminal.expires_at),
+                        ]
+                    )
+                )
+            ),
+        ),
         patch("app.modules.ai.api.resume._load_durable_resume_terminal", load_terminal),
         patch("app.modules.ai.api.resume._cleanup_durable_resume", AsyncMock()),
         patch(
@@ -228,7 +249,7 @@ async def test_memory_resume_after_original_waiter_disconnects(
 
 
 @pytest.mark.parametrize("terminal", [False, True])
-async def test_durable_poll_disconnect_returns_postgres_connection(
+async def test_legacy_durable_poll_disconnect_returns_postgres_connection(
     monkeypatch, terminal
 ):
     import anyio
@@ -251,7 +272,8 @@ async def test_durable_poll_disconnect_returns_postgres_connection(
                     await anyio.lowlevel.checkpoint()
                     completed_reads.append(True)
                     return _make_durable_action(
-                        status="succeeded" if terminal else "pending_confirmation"
+                        status="succeeded" if terminal else "pending_confirmation",
+                        execute_tool_name="legacy.test",
                     )
 
                 with (
@@ -264,7 +286,7 @@ async def test_durable_poll_disconnect_returns_postgres_connection(
                 ):
                     await resume_module._wait_durable_resume_terminal(
                         confirmation_id="cid",
-                        pending=_make_pending(action_id=9001),
+                        pending=_make_pending(action_id=9001, tool_name="legacy.test"),
                         user_id=100,
                         tenant=TENANT,
                         timeout_sec=240,
@@ -278,7 +300,7 @@ async def test_durable_poll_disconnect_returns_postgres_connection(
 @pytest.mark.parametrize(
     "boundary", ["tenant", "owner", "binding", "expired", "cancel"]
 )
-async def test_memory_durable_wait_respects_boundaries(boundary):
+async def test_legacy_memory_durable_wait_respects_boundaries(boundary):
     from app.modules.ai.api.resume import _wait_durable_resume_terminal
 
     changes = {
@@ -297,7 +319,11 @@ async def test_memory_durable_wait_respects_boundaries(boundary):
         patch("app.modules.ai.api.resume.AsyncSessionLocal") as sessions,
         patch(
             "app.modules.ai.api.resume.prepared_action_service.get_by_confirmation_id",
-            AsyncMock(return_value=_make_durable_action(**changes[boundary])),
+            AsyncMock(
+                return_value=_make_durable_action(
+                    execute_tool_name="legacy.test", **changes[boundary]
+                )
+            ),
         ),
         patch(
             "app.modules.ai.api.resume.asyncio.sleep",
@@ -308,7 +334,7 @@ async def test_memory_durable_wait_respects_boundaries(boundary):
         with pytest.raises(expected):
             await _wait_durable_resume_terminal(
                 confirmation_id="cid",
-                pending=_make_pending(action_id=9001),
+                pending=_make_pending(action_id=9001, tool_name="legacy.test"),
                 user_id=100,
                 tenant=TENANT,
                 timeout_sec=240,
@@ -385,7 +411,37 @@ def _mock_verified_completion_boundary():
             else "unknown",
         )
 
+    async def read(confirmation_id, *, tenant, **_kwargs):
+        async with resume.AsyncSessionLocal() as db:
+            completed = await locked(db, confirmation_id, tenant=tenant)
+            if completed.action.status not in {
+                "succeeded",
+                "failed",
+                "expired",
+                "rejected",
+            }:
+                raise BusinessRuleException("No terminal fact")
+            return await project_resume_terminal(
+                db, completed.action, _make_user(), tenant
+            )
+
+    async def release(db):
+        db.expunge_all()
+        await db.rollback()
+
+    async def unexecuted(confirmation_id, *, tenant):
+        return (await locked(None, confirmation_id, tenant=tenant)).action
+
     with (
+        patch.object(resume, "release_request_reads", release),
+        patch.object(
+            resume,
+            "get_authorization_runtime",
+            lambda: SimpleNamespace(
+                lifecycle=SimpleNamespace(resume_read=read, unexecuted=unexecuted),
+                recovery=SimpleNamespace(reconcile=reconcile),
+            ),
+        ),
         patch(
             "app.modules.ai.agents.gateway.atomic_execution.reconcile_prepared_completion",
             reconcile,

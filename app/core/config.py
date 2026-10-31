@@ -9,6 +9,8 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     ENV: Literal["dev", "test", "prod"] = "dev"
+    # Shared by API/scheduler and the maintenance operator; mount it in Compose.
+    AUTHORIZATION_CONTROL_DIR: str = ".local/runtime/authorization"
 
     # 进程角色（不显式设置时按 ENV 推导）：
     # - "api": 仅承担 FastAPI，不启动调度器

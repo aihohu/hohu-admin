@@ -19,14 +19,12 @@ Usage:
 import asyncio
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # AI 模型的复合外键指向 sys_user/sys_role/sys_tenant，mapper 配置期强制解析
 # 目标表；独立运行脚本必须先注册这些模型，否则 NoReferencedTableError。
 import app.modules.system.models  # noqa: E402, F401
 from app.core.builtin_i18n import initialize_translations
-from app.core.config import settings
 from app.core.id_generator import next_id
 from app.modules.ai.constants import PUBLISHED_AGENT_CODES
 from app.modules.ai.models.agent import AiAgent
@@ -154,16 +152,10 @@ async def seed_ai_agents_in_session(db: AsyncSession) -> tuple[int, int]:
     return inserted, updated
 
 
-async def seed_ai_agents() -> None:
-    engine = create_async_engine(settings.DATABASE_URL)
-    async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+async def seed_ai_agents():
+    from tools.ops.authorization_maintenance import run_seed_entry  # noqa: PLC0415
 
-    async with async_session() as db:
-        inserted, updated = await seed_ai_agents_in_session(db)
-        await db.commit()
-        print(f"\nDone: {inserted} inserted, {updated} updated.")
-
-    await engine.dispose()
+    return await run_seed_entry("seed.agents")
 
 
 if __name__ == "__main__":

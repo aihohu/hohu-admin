@@ -38,8 +38,8 @@ COPY --from=builder --chown=appuser:appuser /app/scripts /app/scripts
 COPY --from=builder --chown=appuser:appuser /app/tools/__init__.py /app/tools/__init__.py
 COPY --from=builder --chown=appuser:appuser /app/tools/ops /app/tools/ops
 
-RUN mkdir -p /app/uploads /app/private_uploads && \
-    chown appuser:appuser /app/uploads /app/private_uploads
+RUN mkdir -p /app/uploads /app/private_uploads /app/.local/runtime/authorization && \
+    chown -R appuser:appuser /app/uploads /app/private_uploads /app/.local
 
 VOLUME ["/app/uploads", "/app/private_uploads"]
 

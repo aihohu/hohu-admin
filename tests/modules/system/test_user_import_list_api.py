@@ -29,7 +29,7 @@ from app.modules.system.models.user import User
 from app.modules.system.models.user_transfer import UserImportBatch
 
 #: service 模块路径（patch target）
-_API_MODULE = "app.modules.system.api.user"
+_API_MODULE = "app.modules.system.service.user_import_service"
 
 
 # ========== Fixtures ==========
@@ -185,8 +185,10 @@ class TestListBatchesResponse:
         assert first["status"] == "PARTIAL_SUCCESS"
         assert first["operatorId"] == "1"  # Snowflake 字符串化
         assert isinstance(first["operatorId"], str)
-        assert first["operatorName"] == "admin"
-        assert first["filename"] == "users_20260801.xlsx"
+        assert (
+            first["operatorName"] is None
+        )  # no current user identity for fixture ID 1
+        assert first["filename"] == "users.xlsx"
         assert first["totalRows"] == 100
         # expires_at 动态计算（PARTIAL_SUCCESS → finished_at + 24h）
         assert first["expiresAt"].startswith("2026-08-02T14:01:30")

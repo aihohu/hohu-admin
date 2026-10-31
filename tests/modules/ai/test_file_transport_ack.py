@@ -7,26 +7,35 @@ import pytest
 from sqlalchemy import delete, select
 
 from app.core import redis as redis_module
-from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.gateway import executor
 from app.modules.ai.agents.gateway.atomic_execution import (
     PreparedExecutionOutcomeUnknown,
 )
 from app.modules.ai.agents.hitl.events import ConfirmationRequiredEvent
-from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.ai.api import confirm as confirm_module
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.schemas.confirm import ConfirmRequest
-from app.modules.auth.service import load_live_user_authority
 from app.modules.system.models.user import User
 from app.modules.system.models.user_transfer import UserExportTask, UserImportBatch
+from app.modules.system.service.authorization_ai_tool_adapter import (
+    system_ai_tool_adapter,
+)
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )
-from tests.modules.ai.test_preview_atomic_completion import observe
+from tests.modules.ai.test_preview_atomic_completion import (
+    authenticated_actor,
+    observe,
+    replace_source,
+)
 from tests.modules.ai.test_preview_atomic_completion import preview_case as preview_case
-from tests.modules.ai.test_real_commit_ack import acceptance_context, fault_sessions
+from tests.modules.ai.test_real_commit_ack import (
+    acceptance_context,
+    commit_status,
+    fault_sessions,
+)
 
 
 async def evidence(tmp_path, case, fault, **facts):
@@ -64,20 +73,13 @@ async def test_real_preview_and_handoff_ack(
     preview.deps.signal_event = stop_after_confirmation
 
     def match(session):
-        return any(
-            (
-                boundary == "preview"
-                and isinstance(row, AiOperationLog)
-                and row.tool_name == "user.import_preview"
-                and row.status == "success"
-            )
-            or (
-                boundary == "handoff"
-                and isinstance(row, AiPreparedAction)
-                and row.execute_tool_name == "user.import_execute"
-                and row.status == "pending_confirmation"
-            )
-            for row in session.identity_map.values()
+        if boundary == "preview":
+            # Fixed DML need not retain an ORM object in the weak identity map.
+            return session.connection().info.get("test_log_commit_status") == "success"
+        info = session.connection().info
+        return (
+            info.get("test_action_commit_tool") == "user.import_execute"
+            and info.get("test_action_commit_status") == "pending_confirmation"
         )
 
     async with fault_sessions(
@@ -154,17 +156,13 @@ async def test_real_file_completion_ack(
         f"{case.username},Atomic {case.username.removeprefix('atx')}\n"
         f"{case.username}b,missing-department-for-file-test\n"
     ).encode()
-    monkeypatch.setattr(
-        "app.modules.system.ai_tools.user_transfer._load_file_bytes",
-        AsyncMock(return_value=(csv, "users.csv", "text/csv")),
-    )
-    registered = ToolRegistry.get().find(tool)
-    handler = registered.fn
+    await replace_source(preview, csv)
+    handler = system_ai_tool_adapter.apply
     calls, confirmations, export_ids = [], [], []
 
-    async def counted(ctx, **args):
+    async def counted(db, tx, command, work):
         calls.append(True)
-        result = await handler(ctx, **args)
+        result = await handler(db, tx, command, work)
         assert result.ok
         if tool == "user.export":
             export_ids.append(result.data["exportId"])
@@ -174,7 +172,7 @@ async def test_real_file_completion_ack(
         if isinstance(event, ConfirmationRequiredEvent):
             confirmations.append(event.confirmation_id)
             async with AsyncSessionLocal() as db:
-                actor = await load_live_user_authority(db, tenant=case.tenant)
+                actor = await authenticated_actor(db, tenant=case.tenant)
                 await confirm_module.confirm_tool(
                     ConfirmRequest(
                         confirmation_id=event.confirmation_id, action="approve"
@@ -183,14 +181,14 @@ async def test_real_file_completion_ack(
                     current_user=actor,
                 )
 
-    monkeypatch.setattr(registered, "fn", counted)
+    monkeypatch.setattr(system_ai_tool_adapter, "apply", counted)
     preview.deps.signal_event = approve
 
     def match(session):
         return any(
             isinstance(row, AiPreparedAction)
             and row.execute_tool_name == tool
-            and row.status == "succeeded"
+            and commit_status(session, row) == "succeeded"
             for row in session.identity_map.values()
         )
 
@@ -252,7 +250,7 @@ async def test_real_file_completion_ack(
             assert len(calls) == 1 and preview.storage._store
             # A second explicit approval only observes the original PA.
             async with AsyncSessionLocal() as db:
-                actor = await load_live_user_authority(db, tenant=case.tenant)
+                actor = await authenticated_actor(db, tenant=case.tenant)
                 response = await confirm_module.confirm_tool(
                     ConfirmRequest(confirmation_id=confirmations[0], action="approve"),
                     db=db,

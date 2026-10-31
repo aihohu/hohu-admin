@@ -1,7 +1,7 @@
 """ChatCommand 因果、收口和 conversation guard 基础测试。"""
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic.experimental.missing_sentinel import MISSING
@@ -38,6 +38,13 @@ from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.ai.service.result_projection_service import result_projection_service
 from app.modules.system.models.user import User
+
+
+def _stream_read_session():
+    db = AsyncMock()
+    db.new = db.dirty = db.deleted = ()
+    db.expunge_all = MagicMock()
+    return db
 
 
 async def _create_conversation(db_session, *, suffix: str) -> AiConversation:
@@ -446,12 +453,12 @@ def test_tool_calls_are_collected_in_started_order() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_failure_persists_a_safe_terminal_answer() -> None:
-    db = AsyncMock()
-    with patch.object(
-        chat_run_finalizer,
-        "finalize_assistant_turn",
-        AsyncMock(return_value=SimpleNamespace(message_id=99)),
-    ) as finalize:
+    db = _stream_read_session()
+    finalize = AsyncMock(return_value=99)
+    with patch(
+        "app.modules.ai.api.chat.get_authorization_runtime",
+        return_value=SimpleNamespace(chat=SimpleNamespace(finalize=finalize)),
+    ):
         events = await _finalize_stream_turn(
             db,
             conversation_id=123,
@@ -462,8 +469,10 @@ async def test_stream_failure_persists_a_safe_terminal_answer() -> None:
             agent_code="user_mgmt",
             stream_error_code="AI_PROVIDER_UPSTREAM_ERROR",
             tenant=tenant_context(),
+            actor_user_version=1,
         )
-    db.commit.assert_awaited_once()
+    db.commit.assert_not_awaited()
+    db.rollback.assert_awaited_once()
     assert "unsafe partial" not in finalize.await_args.kwargs["content"]
     assert "AI_PROVIDER_UPSTREAM_ERROR" in finalize.await_args.kwargs["content"]
     assert finalize.await_args.kwargs["lineage"] is not None
@@ -473,17 +482,16 @@ async def test_stream_failure_persists_a_safe_terminal_answer() -> None:
 @pytest.mark.asyncio
 async def test_stream_finalizer_commits_before_building_done_ack() -> None:
     order: list[str] = []
-    db = AsyncMock()
-    db.commit.side_effect = lambda: order.append("commit")
+    db = _stream_read_session()
+    db.rollback.side_effect = lambda: order.append("handoff")
 
     async def _finalize(*_args, **_kwargs):
-        order.append("finalize")
-        return SimpleNamespace(message_id=9007199254740993)
+        order.append("owner_confirmed")
+        return 9007199254740993
 
-    with patch.object(
-        chat_run_finalizer,
-        "finalize_assistant_turn",
-        side_effect=_finalize,
+    with patch(
+        "app.modules.ai.api.chat.get_authorization_runtime",
+        return_value=SimpleNamespace(chat=SimpleNamespace(finalize=_finalize)),
     ):
         terminal_events = await _finalize_stream_turn(
             db,
@@ -495,9 +503,11 @@ async def test_stream_finalizer_commits_before_building_done_ack() -> None:
             agent_code="user_mgmt",
             stream_error_code=None,
             tenant=tenant_context(),
+            actor_user_version=1,
         )
 
-    assert order == ["finalize", "commit"]
+    assert order == ["handoff", "owner_confirmed"]
+    db.commit.assert_not_awaited()
     assert terminal_events == [
         DoneEvent(
             trace_id="tr_55555555555555555555555555555555",
@@ -510,17 +520,16 @@ async def test_stream_finalizer_commits_before_building_done_ack() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_finalizer_replaces_ungrounded_management_write_claim() -> None:
-    db = AsyncMock()
+    db = _stream_read_session()
     captured: dict[str, object] = {}
 
     async def _finalize(*_args, **kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(message_id=9007199254740993)
+        return 9007199254740993
 
-    with patch.object(
-        chat_run_finalizer,
-        "finalize_assistant_turn",
-        side_effect=_finalize,
+    with patch(
+        "app.modules.ai.api.chat.get_authorization_runtime",
+        return_value=SimpleNamespace(chat=SimpleNamespace(finalize=_finalize)),
     ):
         terminal_events = await _finalize_stream_turn(
             db,
@@ -532,6 +541,7 @@ async def test_stream_finalizer_replaces_ungrounded_management_write_claim() -> 
             agent_code="dept_mgmt",
             stream_error_code=None,
             tenant=tenant_context(),
+            actor_user_version=1,
         )
 
     assert captured["content"] == (
@@ -548,19 +558,18 @@ async def test_stream_finalizer_replaces_ungrounded_management_write_claim() -> 
 async def test_stream_finalizer_redacts_provider_text_after_import_field_errors() -> (
     None
 ):
-    db = AsyncMock()
+    db = _stream_read_session()
     captured: dict[str, object] = {}
     secret_value = "private-invalid@example"
     raw_row = "x, 华东-销售组, 1"
 
     async def _finalize(*_args, **kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(message_id=9007199254740993)
+        return 9007199254740993
 
-    with patch.object(
-        chat_run_finalizer,
-        "finalize_assistant_turn",
-        side_effect=_finalize,
+    with patch(
+        "app.modules.ai.api.chat.get_authorization_runtime",
+        return_value=SimpleNamespace(chat=SimpleNamespace(finalize=_finalize)),
     ):
         await _finalize_stream_turn(
             db,
@@ -583,6 +592,7 @@ async def test_stream_finalizer_redacts_provider_text_after_import_field_errors(
             agent_code="user_mgmt",
             stream_error_code=None,
             tenant=tenant_context(),
+            actor_user_version=1,
         )
 
     persisted = str(captured["content"])
@@ -715,7 +725,9 @@ class TestConversationRunGuard:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("readonly", [False, True])
-async def test_startup_cleanup_commits_before_owned_guard_release(readonly) -> None:
+async def test_startup_cache_readonly_flag_cannot_reclassify_database_tool(
+    readonly,
+) -> None:
     order: list[str] = []
     db = AsyncMock()
     redis = AsyncMock()
@@ -774,9 +786,8 @@ async def test_startup_cleanup_commits_before_owned_guard_release(readonly) -> N
             tenant=tenant_context(),
         )
 
-    assert order == (
-        ["operation", "finalizer", "commit", "release", "delete"] if readonly else []
-    )
+    assert order == []
+    db.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -835,7 +846,8 @@ async def test_startup_cleanup_does_not_overwrite_committed_terminal_message(
         )
 
     finalize.assert_not_awaited()
-    assert order == (["commit", "release", "delete"] if readonly else [])
+    assert order == []
+    db.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

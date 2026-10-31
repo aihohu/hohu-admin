@@ -21,22 +21,26 @@ def _scripts() -> ScriptDirectory:
 
 def test_history_preserves_release_boundary_and_current_head() -> None:
     scripts = _scripts()
-    assert scripts.get_heads() == ["d01010100101"]
+    assert scripts.get_heads() == ["e0203b000001"]
     assert scripts.get_bases() == ["bf244f9a8b76"]
     assert [
         (item.revision, item.down_revision) for item in scripts.walk_revisions()
     ] == [
+        ("e0203b000001", "e0202a000001"),
+        ("e0202a000001", "d01010100101"),
         ("d01010100101", "bf244f9a8b76"),
         ("bf244f9a8b76", None),
     ]
     assert {path.name for path in (PROJECT_ROOT / "alembic/versions").glob("*.py")} == {
         "bf244f9a8b76_baseline.py",
         "d01010100101_squash_to_head.py",
+        "e0202a000001_user_field_policy_storage.py",
+        "e0203b000001_transfer_field_lineage.py",
     }
 
 
 def test_upgrade_preserves_original_step_order(monkeypatch) -> None:
-    module = _scripts().get_revision("head").module
+    module = _scripts().get_revision("d01010100101").module
     called = []
     for step in STEPS:
         monkeypatch.setattr(
@@ -47,7 +51,7 @@ def test_upgrade_preserves_original_step_order(monkeypatch) -> None:
 
 
 def test_downgrade_reverses_original_step_order(monkeypatch) -> None:
-    module = _scripts().get_revision("head").module
+    module = _scripts().get_revision("d01010100101").module
     called = []
     for step in STEPS:
         monkeypatch.setattr(

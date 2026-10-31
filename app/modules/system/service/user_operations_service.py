@@ -31,7 +31,7 @@ class UserOperationsService:
         user_gender: str | None = None,
     ) -> int:
         """Count within both the trusted tenant and server-resolved row scope."""
-        stmt = select(func.count(User.user_id)).where(
+        stmt = select(func.pg_catalog.count(User.user_id)).where(
             tenant_filter(User, tenant=tenant), *scope_filters
         )
         if status is not None:

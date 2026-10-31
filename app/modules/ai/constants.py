@@ -36,7 +36,7 @@ PUBLISHED_AGENT_TOOL_PERMISSIONS = frozenset(
         "system:role:list",
         "system:role:menu-auth",
         "system:user:add",
-        "system:user:delete",
+        "system:user:batch-delete",
         "system:user:edit",
         "system:user:export",
         "system:user:import",

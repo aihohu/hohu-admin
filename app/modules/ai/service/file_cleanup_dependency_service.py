@@ -53,74 +53,10 @@ async def lock_transfer_dependencies(db, resources):
         return {}
     resources = tuple(resources)
     tenant_ids = {r.tenant_id for r in resources}
-    actor_ids = {r.operator_id for r in resources}
 
-    async def scan():
-        actions = list(
-            await db.scalars(
-                select(AiPreparedAction)
-                .where(
-                    AiPreparedAction.tenant_id.in_(tenant_ids),
-                    AiPreparedAction.user_id.in_(actor_ids),
-                    AiPreparedAction.execute_tool_name.in_(FILE_TOOLS),
-                )
-                .execution_options(populate_existing=True)
-            )
-        )
-        logs = list(
-            await db.scalars(
-                select(AiOperationLog)
-                .where(
-                    AiOperationLog.tenant_id.in_(tenant_ids),
-                    AiOperationLog.user_id.in_(actor_ids),
-                    AiOperationLog.tool_name.in_(FILE_TOOLS),
-                )
-                .execution_options(populate_existing=True)
-            )
-        )
-        actions = [a for a in actions if any(_related(r, a) for r in resources)]
-        calls = {(a.tenant_id, a.execute_tool_call_id) for a in actions}
-        logs = [
-            log
-            for log in logs
-            if (log.tenant_id, log.tool_call_id) in calls
-            or any(_related(r, log) for r in resources)
-        ]
-        return actions, logs
+    actions, logs = await scan_transfer_dependencies(db, resources)
 
-    actions, logs = await scan()
-
-    def bindings(actions, logs):
-        return tuple(
-            sorted(
-                [
-                    (
-                        "pa",
-                        a.tenant_id,
-                        a.action_id,
-                        a.conversation_id,
-                        a.source_user_message_id,
-                        a.execute_tool_call_id,
-                        a.confirmation_id,
-                    )
-                    for a in actions
-                ]
-                + [
-                    (
-                        "log",
-                        log.tenant_id,
-                        log.log_id,
-                        log.conversation_id,
-                        log.source_user_message_id,
-                        log.tool_call_id,
-                        log.confirmation_id,
-                    )
-                    for log in logs
-                ]
-            )
-        )
-
-    before = bindings(actions, logs)
+    before = transfer_bindings(actions, logs)
     await db.execute(select(func.set_config("lock_timeout", "2s", True)))
     for model, column, ids in (
         (
@@ -147,9 +83,80 @@ async def lock_transfer_dependencies(db, resources):
                 .with_for_update()
                 .execution_options(populate_existing=True)
             )
-    actions, logs = await scan()
-    if bindings(actions, logs) != before:
+    actions, logs = await scan_transfer_dependencies(db, resources)
+    if transfer_bindings(actions, logs) != before:
         return dict.fromkeys(resources, False)
+    return await validate_transfer_dependencies(db, resources, actions, logs)
+
+
+async def scan_transfer_dependencies(db, resources):
+    tenant_ids = {r.tenant_id for r in resources}
+    actor_ids = {r.operator_id for r in resources}
+    actions = list(
+        await db.scalars(
+            select(AiPreparedAction)
+            .where(
+                AiPreparedAction.tenant_id.in_(tenant_ids),
+                AiPreparedAction.user_id.in_(actor_ids),
+                AiPreparedAction.execute_tool_name.in_(FILE_TOOLS),
+            )
+            .execution_options(populate_existing=True)
+        )
+    )
+    logs = list(
+        await db.scalars(
+            select(AiOperationLog)
+            .where(
+                AiOperationLog.tenant_id.in_(tenant_ids),
+                AiOperationLog.user_id.in_(actor_ids),
+                AiOperationLog.tool_name.in_(FILE_TOOLS),
+            )
+            .execution_options(populate_existing=True)
+        )
+    )
+    actions = [a for a in actions if any(_related(r, a) for r in resources)]
+    calls = {(a.tenant_id, a.execute_tool_call_id) for a in actions}
+    logs = [
+        log
+        for log in logs
+        if (log.tenant_id, log.tool_call_id) in calls
+        or any(_related(r, log) for r in resources)
+    ]
+    return actions, logs
+
+
+def transfer_bindings(actions, logs):
+    return tuple(
+        sorted(
+            [
+                (
+                    "pa",
+                    a.tenant_id,
+                    a.action_id,
+                    a.conversation_id,
+                    a.source_user_message_id,
+                    a.execute_tool_call_id,
+                    a.confirmation_id,
+                )
+                for a in actions
+            ]
+            + [
+                (
+                    "log",
+                    log.tenant_id,
+                    log.log_id,
+                    log.conversation_id,
+                    log.source_user_message_id,
+                    log.tool_call_id,
+                    log.confirmation_id,
+                )
+                for log in logs
+            ]
+        )
+    )
+
+
+async def validate_transfer_dependencies(db, resources, actions, logs):
     by_call = {(log.tenant_id, log.tool_call_id): log for log in logs}
     proven = set()
     resolved_rows = []

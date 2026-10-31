@@ -107,7 +107,12 @@ jobs:
 
       - name: Seed test data
         run: |
-          HOHU_ADMIN_PASSWORD=CiSeed123456 uv run python -m scripts.init_db
+          RELEASE_BUILD_SHA="$(git rev-parse HEAD)" \
+          HOHU_TEST_DATABASE_EPHEMERAL=true \
+          AUTHORIZATION_MAINTENANCE_PASSWORD=CiSeed123456 \
+          uv run python -m tests.release.bootstrap_database \
+            --build-sha "$(git rev-parse HEAD)" \
+            --control-dir "${RUNNER_TEMP}/pytest-bootstrap"
 
       - name: Run Tests
         run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=70

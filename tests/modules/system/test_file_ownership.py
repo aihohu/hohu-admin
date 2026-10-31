@@ -20,6 +20,7 @@ from starlette.datastructures import Headers
 
 from app.core.config import settings
 from app.core.exceptions import (
+    AuthenticationException,
     AuthorizationException,
     BusinessRuleException,
     NotFoundException,
@@ -418,53 +419,31 @@ class TestFileUploadOwnership:
             assert call.kwargs["tenant"].tenant_id == 0
             assert call.kwargs["business_type"] == "user-import"
 
-    async def test_api_derives_tenant_from_authenticated_principal_only(self) -> None:
+    @pytest.mark.parametrize("batch", [False, True])
+    async def test_upload_api_rejects_unverified_principal(self, batch) -> None:
         db = MagicMock(spec=AsyncSession)
-        db.commit = AsyncMock()
-        db.refresh = AsyncMock()
         current_user = MagicMock(user_id=1001, user_name="alice")
-        record = MagicMock(spec=File)
-
         tenant = tenant_context(tenant_id=0, actor_user_id=1001)
-        with patch.object(
-            file_api.file_service, "upload", new_callable=AsyncMock
-        ) as save:
-            save.return_value = record
-            await file_api.upload(
-                file=_upload_file("users.xlsx", b"xlsx-content"),
-                business_type="user-import",
-                business_id=None,
-                db=db,
-                _current_user=current_user,
-                tenant=tenant,
-            )
-
-        assert save.await_args.kwargs["owner_user_id"] == 1001
-        assert save.await_args.kwargs["tenant"] is tenant
-        assert save.await_args.kwargs["business_type"] == "user-import"
-
-    async def test_batch_api_derives_tenant_for_all_files(self) -> None:
-        db = MagicMock(spec=AsyncSession)
-        db.commit = AsyncMock()
-        current_user = MagicMock(user_id=1001, user_name="alice")
-
-        tenant = tenant_context(tenant_id=0, actor_user_id=1001)
-        with patch.object(
-            file_api.file_service, "batch_upload", new_callable=AsyncMock
-        ) as save:
-            save.return_value = []
-            await file_api.batch_upload(
-                files=[_upload_file("users.xlsx", b"xlsx-content")],
-                business_type="user-import",
-                business_id=None,
-                db=db,
-                _current_user=current_user,
-                tenant=tenant,
-            )
-
-        assert save.await_args.kwargs["owner_user_id"] == 1001
-        assert save.await_args.kwargs["tenant"] is tenant
-        assert save.await_args.kwargs["business_type"] == "user-import"
+        with pytest.raises(AuthenticationException):
+            if batch:
+                await file_api.batch_upload(
+                    files=[_upload_file("users.xlsx", b"xlsx-content")],
+                    business_type="user-import",
+                    business_id=None,
+                    db=db,
+                    _current_user=current_user,
+                    tenant=tenant,
+                )
+            else:
+                await file_api.upload(
+                    file=_upload_file("users.xlsx", b"xlsx-content"),
+                    business_type="user-import",
+                    business_id=None,
+                    db=db,
+                    _current_user=current_user,
+                    tenant=tenant,
+                )
+        db.commit.assert_not_called()
 
 
 class TestFileDeleteOwnership:
@@ -637,9 +616,11 @@ class TestFileTenantScope:
         ):
             await file_api.get_list(FileQuery(), db, current_user, tenant)
             await file_api.get_by_id(99, db, current_user, tenant)
-            await file_api.delete(99, db, current_user, tenant)
+            with pytest.raises(AuthenticationException):
+                await file_api.delete(99, db, current_user, tenant)
             batch_delete.return_value = 0
-            await file_api.batch_delete([99], db, current_user, tenant)
+            with pytest.raises(AuthenticationException):
+                await file_api.batch_delete([99], db, current_user, tenant)
 
         assert get_list.await_args.kwargs["tenant"] is tenant
         assert get_by_id.await_args.kwargs == {
@@ -647,8 +628,8 @@ class TestFileTenantScope:
             "owner_user_id": 1001,
             "is_admin": False,
         }
-        assert delete.await_args.kwargs["tenant"] is tenant
-        assert batch_delete.await_args.kwargs["tenant"] is tenant
+        delete.assert_not_awaited()
+        batch_delete.assert_not_awaited()
 
 
 @pytest.fixture(autouse=True)

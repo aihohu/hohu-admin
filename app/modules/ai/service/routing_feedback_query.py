@@ -203,7 +203,9 @@ class RoutingFeedbackQueryService:
 
         # total count
         count_stmt = (
-            select(func.count()).select_from(AiRoutingFeedback).where(*conditions)
+            select(func.pg_catalog.count(1))
+            .select_from(AiRoutingFeedback)
+            .where(*conditions)
         )
         total = (await db.execute(count_stmt)).scalar() or 0
         return items, total

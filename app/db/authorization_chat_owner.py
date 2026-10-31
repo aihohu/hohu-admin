@@ -1,0 +1,280 @@
+"""Owned transactions for chat facts. No LLM/network call runs under G/B."""
+
+import asyncio
+
+from app.core.authorization_io import file_transform_worker
+from app.core.authorization_plan import LockMode, TenantLock, TransactionBudget
+from app.core.config import settings
+from app.core.exceptions import BusinessRuleException
+from app.db.authorization_owner import (
+    authorization_session,
+    commit_authorization_session,
+    rollback_authorization_session,
+)
+from app.db.authorization_plan_session import _order_error
+from app.modules.ai.core.provider_egress import provider_egress
+from app.modules.ai.models.conversation import AiConversation
+from app.modules.ai.schemas.conversation import (
+    ConversationCreate,
+    ConversationOut,
+    ConversationUpdate,
+)
+from app.modules.ai.service.authorization_chat_candidate import chat_candidate
+from app.modules.ai.service.authorization_chat_ingress_candidate import (
+    chat_ingress_candidate,
+)
+from app.modules.ai.service.authorization_chat_model import select_model
+from app.modules.ai.service.authorization_feedback_candidate import feedback_candidate
+from app.modules.ai.service.authorization_file_parse import parse_uploaded_file
+from app.modules.ai.service.authorization_gateway_audit_candidate import (
+    gateway_audit_candidate,
+)
+from app.modules.ai.service.authorization_gateway_read_candidate import (
+    gateway_read_candidate,
+)
+from app.modules.system.service.authorization_read_budget import (
+    bounded_authorization_reads,
+)
+from app.modules.system.service.authorization_transaction_service import (
+    authorization_transactions,
+)
+
+
+class ChatOwner:
+    def __init__(self, factory):
+        self.factory = factory
+
+    async def conversation(
+        self,
+        *,
+        tenant,
+        actor_user_version,
+        data,
+        conversation_id=None,
+        http_result=False,
+    ):
+        if type(data) is not dict or set(data) - {
+            "title",
+            "model_name",
+            "system_prompt",
+            "status",
+        }:
+            raise _order_error()
+        schema = (
+            ConversationCreate if conversation_id is None else ConversationUpdate
+        ).model_validate(data)
+        values = schema.model_dump(exclude_unset=conversation_id is not None)
+        if conversation_id is None:
+            values["title"] = values.get("title") or "新对话"
+        if type(http_result) is not bool:
+            raise _order_error()
+        if (
+            values.get("title", "") is None
+            or values.get("status", 0) not in {0, 1}
+            or len(str(values.get("system_prompt") or "").encode()) > 256 * 1024
+        ):
+            raise _order_error()
+        selection = None
+        if conversation_id is None or "model_name" in values:
+            async with authorization_session(self.factory) as db:
+                try:
+                    with bounded_authorization_reads(db):
+                        async with asyncio.timeout(5):
+                            selection = await select_model(
+                                db, tenant, values.get("model_name")
+                            )
+                finally:
+                    await rollback_authorization_session(db)
+            async with asyncio.timeout(5):
+                egress = dict(selection.egress)
+                if not await provider_egress.is_model_allowed(
+                    egress.pop("provider_code"), egress.pop("base_url"), **egress
+                ):
+                    raise BusinessRuleException(
+                        "所选 AI 模型当前不可用", error_code="AI_MODEL_NOT_AVAILABLE"
+                    )
+        return await self._run(
+            "conversation",
+            {
+                "tenant": tenant,
+                "actor_user_version": actor_user_version,
+                "data": values,
+                "selection": selection,
+                "conversation_id": conversation_id,
+            },
+            http_result=http_result,
+        )
+
+    async def source(self, **request):
+        return await self._run("source", request)
+
+    async def start_operation(self, **request):
+        return await self._run("start_operation", request)
+
+    async def finish_operation(self, **request):
+        return await self._run("finish_operation", request)
+
+    async def read_tool(self, **request):
+        snapshot = await self._run("read_tool", request)
+        if request.get("tool") != "file.parse":
+            return snapshot
+        result = await file_transform_worker.run(
+            parse_uploaded_file,
+            snapshot,
+            str(settings.UPLOAD_DIR),
+            str(settings.PRIVATE_UPLOAD_DIR),
+        )
+        if await self._run("read_tool", request) != snapshot:
+            raise _order_error()
+        return result
+
+    async def preflight(self, **request):
+        return await self._run("preflight", request)
+
+    async def start_run(self, **request):
+        return await self._run("start_run", request)
+
+    async def routing_audit(self, **request):
+        return await self._run("routing_audit", request)
+
+    async def routing_feedback(self, **request):
+        return await self._run("routing_feedback", request)
+
+    async def select_model(self, **request):
+        choices = await self._run("model_candidates", request)
+        semaphore = asyncio.Semaphore(10)
+
+        async def allowed(choice):
+            async with semaphore:
+                egress = dict(choice.selection.egress)
+                return await provider_egress.is_model_allowed(
+                    egress.pop("provider_code"),
+                    egress.pop("base_url"),
+                    **egress,
+                )
+
+        async with asyncio.timeout(5):
+            checks = await asyncio.gather(*(allowed(choice) for choice in choices))
+        for choice, permitted in zip(choices, checks, strict=True):
+            if permitted:
+                return choice
+        raise BusinessRuleException(
+            "所选 AI 模型当前不可用", error_code="AI_MODEL_NOT_AVAILABLE"
+        )
+
+    async def finalize(self, **request):
+        return await self._run("finalize", request)
+
+    async def recover(self, *, tenant, confirmation_id):
+        return await self._run(
+            "recover", {"tenant": tenant, "confirmation_id": confirmation_id}
+        )
+
+    async def messages(self, **request):
+        return await self._run("messages", request)
+
+    async def list_conversations(self, **request):
+        return await self._run("list_conversations", request)
+
+    async def recover_orphan(self, *, tenant, confirmation_id):
+        return await self._run(
+            "recover_orphan", {"tenant": tenant, "confirmation_id": confirmation_id}
+        )
+
+    async def invalidate(self, **request):
+        return await self._run("invalidate", request)
+
+    async def _run(self, operation, request, *, http_result=False):
+        async with authorization_session(self.factory) as db:
+            try:
+                with bounded_authorization_reads(db):
+                    async with authorization_transactions.scope(
+                        db,
+                        tenants=(
+                            TenantLock(
+                                request["tenant"].tenant_id,
+                                LockMode.EXCLUSIVE
+                                if operation
+                                in {
+                                    "conversation",
+                                    "start_run",
+                                    "routing_audit",
+                                    "routing_feedback",
+                                }
+                                else LockMode.SHARED,
+                            ),
+                        ),
+                        budget=TransactionBudget(timeout_ms=8000),
+                    ) as tx:
+                        if operation == "conversation":
+                            result = await chat_candidate.conversation(
+                                db, tx, **request
+                            )
+                            if http_result:
+                                result = ConversationOut.model_validate(
+                                    await db.get(
+                                        AiConversation, result, populate_existing=True
+                                    )
+                                )
+                        elif operation == "model_candidates":
+                            result = await chat_ingress_candidate.model_candidates(
+                                db, tx, **request
+                            )
+                        elif operation == "start_run":
+                            result = await chat_ingress_candidate.start_run(
+                                db, tx, **request
+                            )
+                        elif operation == "routing_audit":
+                            result = await chat_ingress_candidate.routing_audit(
+                                db, tx, **request
+                            )
+                        elif operation == "routing_feedback":
+                            result = await feedback_candidate.submit(db, tx, **request)
+                        elif operation == "start_operation":
+                            result = await gateway_audit_candidate.start_operation(
+                                db, tx, **request
+                            )
+                        elif operation == "finish_operation":
+                            result = await gateway_audit_candidate.finish_operation(
+                                db, tx, **request
+                            )
+                        elif operation == "read_tool":
+                            result = await gateway_read_candidate.read_tool(
+                                db, tx, **request
+                            )
+                        elif operation == "preflight":
+                            result = await gateway_read_candidate.preflight(
+                                db, tx, **request
+                            )
+                        elif operation == "source":
+                            result = await chat_candidate.source(db, tx, **request)
+                        elif operation == "finalize":
+                            result = await chat_candidate.finalize(db, tx, **request)
+                        elif operation == "recover":
+                            result = await chat_candidate.recover(db, tx, **request)
+                        elif operation == "recover_orphan":
+                            result = await chat_candidate.recover_orphan(
+                                db, tx, **request
+                            )
+                        elif operation == "invalidate":
+                            result = await chat_candidate.invalidate(db, tx, **request)
+                        elif operation == "list_conversations":
+                            result = await chat_candidate.list_conversations(
+                                db, tx, **request
+                            )
+                        else:
+                            result = await chat_candidate.messages(db, tx, **request)
+            except BaseException:
+                await rollback_authorization_session(db)
+                raise
+            if operation in {
+                "messages",
+                "list_conversations",
+                "model_candidates",
+                "read_tool",
+                "preflight",
+            } or (operation == "finish_operation" and not result):
+                await rollback_authorization_session(db)
+            else:
+                await commit_authorization_session(db)
+            return result
