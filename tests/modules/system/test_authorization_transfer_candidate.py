@@ -12,11 +12,11 @@ from app.core.exceptions import BusinessException
 from app.core.file_storage import LocalFileStorage
 from app.db import authorization_transfer_owner as owner_module
 from app.db.authorization_transfer_owner import TransferOwner
+from app.modules.system.field_policy.transfer import ExportProjection
 from app.modules.system.models.user_transfer import UserExportTask, UserImportBatch
 from app.modules.system.service import (
     authorization_transfer_candidate as transfer_module,
 )
-from app.modules.system.service import user_export_service
 from tests.modules.system.test_authorization_import_candidate import (
     import_sessions as import_sessions,
 )
@@ -64,11 +64,9 @@ async def test_late_file_transform_never_publishes(
     entered, release, done = Event(), Event(), Event()
     worker = BoundedWorker(workers=1, queue=0, timeout=0.05)
     target = (
-        owner_module.transfer_candidate
-        if operation == "preview"
-        else user_export_service
+        owner_module.transfer_candidate if operation == "preview" else transfer_module
     )
-    name = "prepare_preview" if operation == "preview" else "_build_excel_values"
+    name = "prepare_preview" if operation == "preview" else "build_export_workbook"
     original = getattr(target, name)
 
     def blocked(*args, **kwargs):
@@ -204,21 +202,21 @@ async def test_export_excel_worker_receives_only_values(
 ):
     factory, _ = system_sessions
     loop_thread = get_ident()
-    original = getattr(user_export_service, "_build_excel_values", None)
+    original = getattr(transfer_module, "build_export_workbook", None)
     calls = []
 
     def build(values):
         calls.append(values)
         assert get_ident() != loop_thread
-        assert type(values) is tuple
+
+        assert type(values) is ExportProjection
         assert all(
-            type(row) is tuple and all(type(v) is str for v in row) for row in values
+            type(row) is tuple and all(type(v) is str for v in row)
+            for row in values.rows
         )
         return original(values)
 
-    monkeypatch.setattr(
-        user_export_service, "_build_excel_values", build, raising=False
-    )
+    monkeypatch.setattr(transfer_module, "build_export_workbook", build, raising=False)
     await TransferOwner(factory, LocalFileStorage(tmp_path)).export(
         tenant=TENANT, actor_user_version=1, args={"reason": "worker audit"}
     )
@@ -280,8 +278,8 @@ async def test_export_oversize_never_publishes(system_sessions, tmp_path, monkey
 
     factory, plain = system_sessions
     monkeypatch.setattr(
-        user_export_service,
-        "_build_excel_values",
+        transfer_module,
+        "build_export_workbook",
         lambda *_: b"x" * (10 * 1024 * 1024 + 1),
     )
     with pytest.raises(BusinessException):

@@ -106,6 +106,7 @@ class PreviewOwner:
             filename=filename,
             reason=reason,
             on_conflict=on_conflict,
+            sync_mode=sync_mode,
             execution=ArtifactExecution(
                 tenant.tenant_id,
                 gateway.tool_call_id if gateway else "tc_" + uuid4().hex,

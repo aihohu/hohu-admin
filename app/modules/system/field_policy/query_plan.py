@@ -27,14 +27,17 @@ class QueryDependency:
     field_id: str
     operation: str
     use: str
+    purpose: str = "management.query"
 
     def __post_init__(self):
         field = USER_FIELDS.get(self.field_id)
         if (
             field is None
+            or self.purpose not in {"management.query", "import"}
+            or (self.purpose == "import" and self.operation != "exact")
             or (
                 field.query_purposes is not None
-                and "management.query" not in field.query_purposes
+                and self.purpose not in field.query_purposes
             )
             or self.use not in {"filter", "join", "group", "distinct", "fixed_order"}
             or (
@@ -128,7 +131,7 @@ def query_permission_predicate(
     if dependency.field_id == "user_id" and dependency.operation == "read":
         return true()
     purpose = (
-        "management.read" if dependency.operation == "read" else "management.query"
+        "management.read" if dependency.operation == "read" else dependency.purpose
     )
     allows, denies = [], []
     for rule in grants:

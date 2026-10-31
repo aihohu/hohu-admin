@@ -3,13 +3,14 @@
 import asyncio
 from uuid import uuid4
 
+from app.core.authorization_io import file_transform_worker as transfer_parser
 from app.core.exceptions import BusinessRuleException, UnprocessableEntityException
 from app.core.file_storage import ArtifactExecution
 from app.db.authorization_http import get_authorization_runtime, release_request_reads
 from app.db.authorization_plan_session import _order_error
-from app.db.authorization_transfer_owner import transfer_parser
 from app.modules.auth.service import access_identity
 from app.modules.system.constants import EmployeeNoSyncMode
+from app.modules.system.field_policy.transfer import safe_failed_rows
 from app.modules.system.service.file_policy_service import file_policy_service
 from app.modules.system.service.user_import_parser import (
     ImportErrorCollection,
@@ -21,6 +22,26 @@ from app.modules.system.service.user_import_parser import (
 def _parse(data, mime):
     return parse_import_excel(data, mime), import_file_has_column(
         data, mime, "role_input"
+    )
+
+
+async def transfer_read_http(
+    db, actor, *, tenant, operation, query=None, identifier=None
+):
+    from app.db.authorization_transfer_read_owner import (  # noqa: PLC0415
+        TransferReadOwner,
+    )
+
+    identity = access_identity(actor)
+    if identity.tenant != tenant:
+        raise _order_error()
+    await release_request_reads(db)
+    return await TransferReadOwner(get_authorization_runtime().sessions).execute(
+        tenant=tenant,
+        actor_user_version=identity.user_version,
+        operation=operation,
+        query=query,
+        identifier=identifier,
     )
 
 
@@ -93,6 +114,7 @@ async def import_http(
                 mime_type=file.content_type or "",
                 reason=reason,
                 on_conflict=on_conflict,
+                sync_mode=sync_mode,
             )
             return result.preview_data
         records, has_role_column = await transfer_parser.run(
@@ -104,7 +126,8 @@ async def import_http(
         )
         wrapped.data = {
             "errors": [
-                error.model_dump(mode="json", by_alias=True) for error in exc.errors
+                error.model_dump(mode="json", by_alias=True)
+                for error in safe_failed_rows(exc.errors)
             ]
         }
         raise wrapped from exc
@@ -124,4 +147,7 @@ async def import_http(
             tenant.tenant_id, "rest-import", uuid4().hex
         ),
     )
-    return result.model_dump(mode="json", by_alias=True)
+    payload = result.model_dump(mode="json", by_alias=True)
+    if result.failed_rows_file:
+        payload["failedRowsFile"] = f"/system/file/import-error/{result.batch_id}.xlsx"
+    return payload

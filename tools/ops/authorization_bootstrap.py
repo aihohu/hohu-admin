@@ -60,7 +60,7 @@ async def require_fresh_database(db):
             raise _required()
     if (
         await db.execute(text("SELECT version_num FROM public.alembic_version LIMIT 2"))
-    ).all() != [("e0202a000001",)]:
+    ).all() != [("e0203b000001",)]:
         raise _required()
     if (
         await db.execute(

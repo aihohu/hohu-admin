@@ -135,9 +135,9 @@ async def preview_case(completion_case, monkeypatch, tmp_path):  # noqa: F811
     calls = []
     batch_ids = []
 
-    async def counted(db, tx, command, user):
+    async def counted(db, tx, command, user, *, field_plan):
         calls.append(True)
-        batch, detail = await real_handler(db, tx, command, user)
+        batch, detail = await real_handler(db, tx, command, user, field_plan=field_plan)
         batch_ids.append(batch["batch_id"])
         return batch, detail
 

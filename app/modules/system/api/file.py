@@ -23,6 +23,38 @@ from app.modules.system.service.file_service import file_service
 router = APIRouter()
 
 
+@router.get(
+    "/import-error/{batch_id}.xlsx",
+    summary="下载当前授权的导入错误清单",
+    dependencies=[Depends(require_permissions("system:user:import"))],
+)
+async def download_import_errors(
+    batch_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
+):
+    identity = access_identity(current_user)
+    if identity.tenant != tenant:
+        raise authorization_http._order_error()
+    await authorization_http.release_request_reads(db)
+    data, _ = await authorization_http.get_authorization_runtime().transfer.download(
+        tenant=tenant,
+        actor_user_version=identity.user_version,
+        kind="import_errors",
+        identifier=batch_id,
+    )
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": 'attachment; filename="import-errors.xlsx"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 @router.get("/chat-image", summary="读取当前上传者的 AI 聊天图片")
 async def read_chat_image(
     file_url: str = Query(alias="fileUrl", max_length=2048),

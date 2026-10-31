@@ -147,6 +147,8 @@ def check_candidates(*, root=ROOT, entries=None, module_sources=None):
     paths.add(root / "app/db/authorization_runtime.py")
     paths.add(root / "app/modules/ai/agents/gateway/authorization_execution.py")
     paths.add(root / "app/modules/system/service/planned_user_field_policy_service.py")
+    paths.add(root / "app/modules/system/service/user_transfer_read_service.py")
+    paths.add(root / "app/modules/system/service/user_transfer_fields.py")
     modules = {".".join(path.relative_to(root).with_suffix("").parts) for path in paths}
     modules.update(module_sources)
     for module in sorted(modules):

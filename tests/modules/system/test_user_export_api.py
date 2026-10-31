@@ -50,7 +50,7 @@ XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 _XLSX_MAGIC = b"\x50\x4b\x03\x04"
 
 #: service 模块路径（patch target）
-_API_MODULE = "app.modules.system.api.user"
+_API_MODULE = "app.modules.system.service.user_export_service"
 
 
 # ========== Fixtures ==========
@@ -275,7 +275,8 @@ class TestGetExportDetail:
         assert data["exportId"] == "exp-xxx"
         assert data["status"] == "SUCCESS"
         assert data["rowCount"] == 10
-        assert data["reason"] == "QA export reason"
+        assert data["reason"] == ""
+        assert data["filterSnapshot"] == {}
         # operator_id 字符串化（防 JS BigInt 精度丢失）
         assert data["operatorId"] == "1"
         assert isinstance(data["operatorId"], str)
@@ -361,12 +362,16 @@ class TestGetExportList:
     async def test_passes_filters_to_service(self, client, admin_token):
         """请求过滤参数与 trusted 当前用户 ID 分开传给 service。"""
         fake_page = PageResult(records=[], total=0, current=1, size=10)
+        trusted_ids = []
         with (
             patch(
                 f"{_API_MODULE}.list_export_tasks",
                 new=AsyncMock(return_value=fake_page),
             ) as mock_list,
-            patch(f"{_API_MODULE}.is_super_admin", return_value=False) as mock_super,
+            patch(
+                "app.modules.system.service.user_transfer_read_service.is_super_admin",
+                side_effect=lambda actor: trusted_ids.append(actor.user_id) or False,
+            ),
         ):
             await client.get(
                 "/user/export?current=2&size=20&status=SUCCESS&operatorId=999",
@@ -378,8 +383,7 @@ class TestGetExportList:
         assert query_arg.size == 20
         assert query_arg.status == "SUCCESS"
         assert query_arg.operator_id == 999
-        trusted_user = mock_super.call_args.args[0]
-        assert mock_list.call_args.kwargs["operator_id"] == trusted_user.user_id
+        assert mock_list.call_args.kwargs["operator_id"] == trusted_ids[0]
         assert mock_list.call_args.kwargs["operator_id"] != query_arg.operator_id
         assert mock_list.call_args.kwargs["allow_cross_owner"] is False
 

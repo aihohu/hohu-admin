@@ -31,13 +31,14 @@ async def fresh_database(deployment_database):
                 "bf244f9a8b76_baseline.py",
                 "d01010100101_squash_to_head.py",
                 "e0202a000001_user_field_policy_storage.py",
+                "e0203b000001_transfer_field_lineage.py",
             ):
                 runpy.run_path(str(root / filename))["upgrade"]()
 
     async with admin.begin() as db:
         await db.run_sync(migrate)
         await db.execute(text("CREATE TABLE alembic_version (version_num varchar(32))"))
-        await db.execute(text("INSERT INTO alembic_version VALUES ('e0202a000001')"))
+        await db.execute(text("INSERT INTO alembic_version VALUES ('e0203b000001')"))
     return admin, writer, role, name
 
 

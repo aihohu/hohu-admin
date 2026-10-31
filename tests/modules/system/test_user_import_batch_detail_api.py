@@ -30,7 +30,7 @@ from app.modules.system.models.user import User
 from app.modules.system.models.user_transfer import UserImportBatch
 
 #: service 模块路径（patch target）
-_API_MODULE = "app.modules.system.api.user"
+_API_MODULE = "app.modules.system.service.user_import_service"
 
 
 # ========== Fixtures ==========
@@ -166,12 +166,12 @@ class TestGetBatchDetailResponse:
         # 核心标识符 + 状态
         assert data["batchId"] == "batch-abc-001"
         assert data["status"] == "PARTIAL_SUCCESS"
-        assert data["filename"] == "users_20260801.xlsx"
+        assert data["filename"] == "users.xlsx"
         assert data["onConflict"] == "skip"
 
         # 操作人。
         assert data["operatorId"] == "1"  # Snowflake 字符串化
-        assert data["operatorName"] == "admin"
+        assert data["operatorName"] is None  # fixture ID has no current field source
 
         # 导入计数。
         assert data["totalRows"] == 2000
@@ -185,7 +185,7 @@ class TestGetBatchDetailResponse:
         assert data["failedCount"] == 100
 
         # 失败行文件。
-        assert data["failedRowsFile"] == "/file/import-error/batch-abc-001.xlsx"
+        assert data["failedRowsFile"] == "/system/file/import-error/batch-abc-001.xlsx"
 
         # ISO 8601 时间字段。
         assert data["createdAt"].startswith("2026-08-01T14:00:00")
@@ -241,7 +241,9 @@ class TestGetBatchDetailResponse:
         assert response.status_code == 200
         data = response.json()["data"]
         assert data["operatorId"] == "999"
-        assert data["operatorName"] == "hr_zhang"
+        assert (
+            data["operatorName"] is None
+        )  # a joined label alone cannot grant read access
         # service 调用：传 batch_id 字符串
         mock_service.assert_awaited_once()
         assert mock_service.call_args.args[1] == "batch-abc-001"

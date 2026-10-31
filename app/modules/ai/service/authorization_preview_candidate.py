@@ -545,7 +545,7 @@ class PreviewCandidate:
             _preview=True,
         )
         batch, detail = await transfer_candidate.materialize_preview(
-            db, tx, command, ctx.user
+            db, tx, command, ctx.user, field_plan=work.field_plan
         )
         result = _planned_preview_result(
             detail,

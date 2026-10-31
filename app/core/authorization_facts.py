@@ -104,6 +104,7 @@ FACT_COLUMNS = MappingProxyType(
         ),
         K.IMPORT_BATCH: frozenset(
             {
+                "field_lineage",
                 "status",
                 "started_at",
                 "finished_at",

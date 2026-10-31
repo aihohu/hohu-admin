@@ -42,6 +42,12 @@ from app.modules.system.constants import (
     EmployeeNoSyncMode,
     ImportBatchStatus,
 )
+from app.modules.system.field_policy.transfer import (
+    make_lineage,
+    safe_failed_rows,
+    transfer_denied,
+    validate_lineage,
+)
 from app.modules.system.models.setting import SystemSetting
 from app.modules.system.models.user_transfer import UserImportBatch
 from app.modules.system.schemas.user_transfer import (
@@ -87,6 +93,7 @@ from app.modules.system.service.user_service import (
     DEFAULT_PASSWORD_CONFIG_KEY,
     get_default_password,
 )
+from app.modules.system.service.user_transfer_fields import user_transfer_fields
 
 IMPORT_CANDIDATE_ENTRIES = MappingProxyType(
     {
@@ -204,7 +211,8 @@ class ImportAuthorizationCandidate:
         # Freeze caller-owned mutable models before the first await.
         try:
             records = [
-                UserImportRecord.model_validate(row.model_dump()) for row in records
+                UserImportRecord.model_validate(row.model_dump(exclude_unset=True))
+                for row in records
             ]
         except ValidationError as exc:
             raise UnprocessableEntityException(
@@ -335,7 +343,9 @@ class ImportAuthorizationCandidate:
         )
         canonical = []
         for row in records:
-            parsed, errors = _validate_row(row.row_num, row.model_dump())
+            parsed, errors = _validate_row(
+                row.row_num, row.model_dump(exclude_unset=True)
+            )
             if errors:
                 raise UnprocessableEntityException(
                     errors[0].reason, error_code=errors[0].error_code
@@ -420,6 +430,30 @@ class ImportAuthorizationCandidate:
                 "preview_token 校验失败", error_code="AI_IMPORT_PREVIEW_INVALID"
             )
         batch_key = _key(ResourceKind.IMPORT_BATCH, tid, batch["batch_id"])
+        context = await user_transfer_fields.import_context(
+            db, tx, tenant=tenant, version=actor_user_version, records=records
+        )
+        if (
+            batch["status"] == ImportBatchStatus.PREVIEW_DONE
+            and batch["field_lineage"] is not None
+        ):
+            document = batch["field_lineage"].get("preview_source")
+            validate_lineage(
+                document,
+                tenant_id=tid,
+                owner_id=tenant.actor_user_id,
+                resource_id=batch["batch_id"],
+                kind="preview_source",
+                stamp=await user_transfer_fields.stamp(db, tx, tenant_id=tid),
+            )
+            if (
+                document["mode"] != sync_mode.value
+                or document["sha256"] != file_hash
+                or document["presence"]
+                != [sorted(r.model_fields_set - {"row_num"}) for r in records]
+                or batch["on_conflict"] != on_conflict
+            ):
+                raise transfer_denied()
         facts = await system._facts(db, tid)
         stable_ids = {}
         resolutions = (
@@ -434,6 +468,17 @@ class ImportAuthorizationCandidate:
             if batch["status"] == ImportBatchStatus.PREVIEW_DONE
             else []
         )
+        if resolutions:
+            await user_transfer_fields.import_rows(
+                db,
+                tx,
+                tenant=tenant,
+                version=actor_user_version,
+                context=context,
+                records=records,
+                resolutions=resolutions,
+                sync_mode=sync_mode.value,
+            )
         existing = {
             _key(
                 kind,
@@ -542,7 +587,7 @@ class ImportAuthorizationCandidate:
                 artifact_execution.execution_owner,
             )
         async with tx.aggregate(tid):
-            return await self._apply(
+            result, error_data = await self._apply(
                 tx,
                 tenant,
                 batch,
@@ -562,6 +607,25 @@ class ImportAuthorizationCandidate:
                 artifact_execution,
                 source_proof,
             )
+        # The aggregate may advance B. Bind evidence only after its final epoch.
+        if error_data:
+            stamp = await user_transfer_fields.stamp(db, tx, tenant_id=tid)
+            lineage = dict(batch["field_lineage"] or {})
+            lineage["import_errors"] = make_lineage(
+                tenant_id=tid,
+                owner_id=tenant.actor_user_id,
+                resource_id=batch["batch_id"],
+                kind="import_errors",
+                stamp=stamp,
+                data=error_data,
+                mode=sync_mode.value,
+            )
+            await tx.update_factual(
+                batch_key,
+                {"field_lineage": lineage},
+                expected={"status": result.status},
+            )
+        return result
 
     async def execute(self, db, **request):
         command = await self.prepare_input(db, **request)
@@ -838,6 +902,8 @@ class ImportAuthorizationCandidate:
             end.value,
         )
         file_key = None
+        failed = safe_failed_rows(failed)
+        data = b""
         if failed or source_proof is not None:
             tx.assert_held(batch_key)
             data = _failed_rows_to_xlsx_bytes(failed) if failed else b""
@@ -893,7 +959,7 @@ class ImportAuthorizationCandidate:
             failed_count=len(failed),
             failed_rows_file=file_key,
             failed_rows_preview=failed[:FAILED_ROWS_PREVIEW_LIMIT],
-        )
+        ), data
 
 
 import_authorization_candidate = ImportAuthorizationCandidate()

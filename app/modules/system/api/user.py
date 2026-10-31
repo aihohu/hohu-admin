@@ -8,12 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.core.exceptions import (
-    NotFoundException,
     UnprocessableEntityException,
 )
-from app.core.rbac import is_super_admin
 from app.core.tenant import TenantContext
 from app.db.authorization_http import system_write, user_read
+from app.db.authorization_transfer_http import transfer_read_http
 from app.db.session import get_db
 from app.modules.auth.service import (
     get_current_tenant_context,
@@ -41,18 +40,6 @@ from app.modules.system.schemas.user_transfer import (
     UserImportBatchLogItem,
     UserImportBatchQuery,
     UserImportBatchResponse,
-)
-from app.modules.system.service.user_export_service import (
-    get_export_task,
-    list_export_tasks,
-)
-from app.modules.system.service.user_import_service import (
-    get_batch_detail,
-    list_batch_logs,
-    list_batches,
-)
-from app.modules.system.service.user_import_template_service import (
-    generate_import_template,
 )
 from app.modules.system.service.user_role_assignment_service import (
     user_role_assignment_service,
@@ -580,7 +567,9 @@ async def download_import_template(
     2. ``Response(content=bytes, media_type=xlsx)`` + Content-Disposition
        使用 Response，避免 StreamingResponse 与审计中间件的时序冲突
     """
-    xlsx_bytes = await generate_import_template(db, tenant=tenant)
+    xlsx_bytes = await transfer_read_http(
+        db, _current_user, tenant=tenant, operation="template"
+    )
     return Response(
         content=xlsx_bytes,
         media_type=_EXPORT_MIME_TYPE,
@@ -686,25 +675,10 @@ async def list_import_batches(
     _current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """分页查询导入批次列表。
-
-    流程：
-    1. ``list_batches(db, query)`` outerjoin sys_user + 按 created_at DESC 排序
-    2. 每个 batch 复用 ``_build_batch_response``（剥离敏感字段 + 动态算 expires_at）
-    → PageResult[UserImportBatchResponse]
-    """
-    rows, total = await list_batches(db, query, tenant=tenant)
-    records = [
-        _build_batch_response(batch, operator_name) for batch, operator_name in rows
-    ]
-    return ResponseModel.success(
-        data=PageResult(
-            records=records,
-            total=total,
-            current=query.current,
-            size=query.size,
-        )
+    result = await transfer_read_http(
+        db, _current_user, tenant=tenant, operation="batches", query=query
     )
+    return ResponseModel.success(data=result)
 
 
 @router.get(
@@ -729,20 +703,10 @@ async def get_import_batch_detail(
     _current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """按 ``batch_id`` 查询批次详情。
-
-    流程：
-    1. ``get_batch_detail(db, batch_id)`` → ``(batch, operator_name)``（outerjoin sys_user）
-    2. batch 为 None → 抛 ``AI_IMPORT_BATCH_NOT_FOUND``
-    3. 构造响应（含 expires_at 动态计算，剥离敏感字段）
-    """
-    batch, operator_name = await get_batch_detail(db, batch_id, tenant=tenant)
-    if batch is None:
-        raise NotFoundException(
-            "用户导入批次",
-            error_code="AI_IMPORT_BATCH_NOT_FOUND",
-        )
-    return ResponseModel.success(data=_build_batch_response(batch, operator_name))
+    result = await transfer_read_http(
+        db, _current_user, tenant=tenant, operation="batch", identifier=batch_id
+    )
+    return ResponseModel.success(data=result)
 
 
 @router.get(
@@ -775,44 +739,15 @@ async def get_import_batch_logs(
     _current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """查询批次操作日志。
-
-    流程：
-    1. 先 ``get_batch_detail`` 校验 batch 存在（404 一致性，与 GET /import/{batch_id} 对齐）
-    2. ``list_batch_logs`` outerjoin sys_user + 按 created_at ASC 排序返回 [(log, operator_name), ...]
-    3. 构造 UserImportBatchLogItem 列表 → PageResult
-    """
-    batch, _ = await get_batch_detail(db, batch_id, tenant=tenant)
-    if batch is None:
-        raise NotFoundException(
-            "用户导入批次",
-            error_code="AI_IMPORT_BATCH_NOT_FOUND",
-        )
-
-    rows, total = await list_batch_logs(
+    result = await transfer_read_http(
         db,
-        batch_id,
-        event=event,
-        current=current,
-        size=size,
+        _current_user,
         tenant=tenant,
+        operation="logs",
+        identifier=batch_id,
+        query={"event": event, "current": current, "size": size},
     )
-    records = [
-        UserImportBatchLogItem(
-            log_id=log.log_id,
-            event=log.event,
-            from_status=log.from_status.value if log.from_status else None,
-            to_status=log.to_status.value if log.to_status else None,
-            detail=log.detail,
-            operator_id=log.operator_id,
-            operator_name=operator_name,
-            created_at=log.created_at,
-        )
-        for log, operator_name in rows
-    ]
-    return ResponseModel.success(
-        data=PageResult(records=records, total=total, current=current, size=size)
-    )
+    return ResponseModel.success(data=result)
 
 
 @router.post(
@@ -915,26 +850,10 @@ async def list_export_tasks_endpoint(
     current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """查询当前用户自己的导出列表；仅超管可跨 operator 查询。
-
-    返回 PageResult，records 是 UserExportTaskResponse（operator_id 字符串化）。
-    """
-    page = await list_export_tasks(
-        db,
-        query,
-        operator_id=current_user.user_id,
-        allow_cross_owner=is_super_admin(current_user),
-        tenant=tenant,
+    result = await transfer_read_http(
+        db, current_user, tenant=tenant, operation="exports", query=query
     )
-    records = [UserExportTaskResponse.model_validate(t) for t in page.records]
-    return ResponseModel.success(
-        data=PageResult(
-            records=records,
-            total=page.total,
-            current=page.current,
-            size=page.size,
-        )
-    )
+    return ResponseModel.success(data=result)
 
 
 @router.get(
@@ -956,23 +875,10 @@ async def get_export_task_detail(
     current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """查询导出任务详情。
-
-    找不到抛 NotFoundException(AI_EXPORT_TASK_NOT_FOUND)。
-    """
-    task = await get_export_task(
-        db,
-        export_id,
-        operator_id=current_user.user_id,
-        allow_cross_owner=is_super_admin(current_user),
-        tenant=tenant,
+    result = await transfer_read_http(
+        db, current_user, tenant=tenant, operation="export", identifier=export_id
     )
-    if task is None:
-        raise NotFoundException(
-            "用户导出任务",
-            error_code="AI_EXPORT_TASK_NOT_FOUND",
-        )
-    return ResponseModel.success(data=UserExportTaskResponse.model_validate(task))
+    return ResponseModel.success(data=result)
 
 
 @router.get(
