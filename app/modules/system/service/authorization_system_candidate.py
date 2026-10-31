@@ -35,6 +35,7 @@ from app.core.id_generator import next_id
 from app.core.tenant import TenantContext
 from app.db.authorization_owner import rollback_authorization_session
 from app.db.authorization_plan_session import AuthorizationPlanSession, _order_error
+from app.modules.system.field_policy.write_plan import validate_legacy_user_payload
 from app.modules.system.models.tenant import Tenant
 from app.modules.system.models.user import User
 from app.modules.system.schemas.dept import DeptCreate, DeptMove, DeptUpdate
@@ -44,6 +45,7 @@ from app.modules.system.schemas.user import (
     ResetPassword,
     UpdateProfile,
     UserCreate,
+    UserPatch,
     UserToolUpdate,
     UserUpdate,
 )
@@ -67,6 +69,9 @@ from app.modules.system.service.user_department_assignment_service import (
 )
 from app.modules.system.service.user_department_assignment_service import (
     user_department_assignment_service as departments,
+)
+from app.modules.system.service.user_field_compatibility import (
+    require_legacy_field_policy,
 )
 from app.modules.system.service.user_role_assignment_service import (
     user_role_assignment_service as roles,
@@ -282,8 +287,13 @@ class SystemAuthorizationCandidate:
             and type(payload) is not expected
             and not (
                 operation == "user.update"
-                and type(payload) is UserToolUpdate
-                and "user_name" not in payload.model_fields_set
+                and (
+                    type(payload) is UserPatch
+                    or (
+                        type(payload) is UserToolUpdate
+                        and "user_name" not in payload.model_fields_set
+                    )
+                )
             )
         ):
             raise _order_error()
@@ -431,6 +441,9 @@ class SystemAuthorizationCandidate:
             raise AuthorizationException(
                 "缺少操作权限", error_code="MISSING_PERMISSION"
             )
+        if operation in {"user.create", "user.update", "user.profile"}:
+            await require_legacy_field_policy(db, tx, tenant_id=tenant.tenant_id)
+            validate_legacy_user_payload(payload)
         prepared = await self._prepare(
             db,
             tenant,

@@ -3,10 +3,8 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import Response
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants import IS_PRIMARY_YES
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.core.exceptions import (
@@ -15,8 +13,7 @@ from app.core.exceptions import (
 )
 from app.core.rbac import is_super_admin
 from app.core.tenant import TenantContext
-from app.db.authorization_http import system_write
-from app.db.base import user_depts
+from app.db.authorization_http import system_write, user_read
 from app.db.session import get_db
 from app.modules.auth.service import (
     get_current_tenant_context,
@@ -25,17 +22,16 @@ from app.modules.system.models.user import User
 from app.modules.system.schemas.user import (
     AssignableRoleOut,
     ChangePassword,
-    ProfileOut,
     ResetPassword,
     UpdateProfile,
     UserCreate,
     UserDepartmentUpdate,
-    UserDeptItem,
-    UserItemOut,
+    UserPatch,
     UserQuery,
     UserRoleUpdate,
     UserUpdate,
 )
+from app.modules.system.schemas.user_projection import ProjectedUserOut
 from app.modules.system.schemas.user_transfer import (
     ReasonSchema,
     UserExportRequest,
@@ -61,14 +57,13 @@ from app.modules.system.service.user_import_template_service import (
 from app.modules.system.service.user_role_assignment_service import (
     user_role_assignment_service,
 )
-from app.modules.system.service.user_service import user_service
 
 router = APIRouter()
 
 
 @router.get(
     "/list",
-    response_model=ResponseModel[PageResult[UserItemOut]],
+    response_model=ResponseModel[PageResult[ProjectedUserOut]],
     summary="获取用户列表分页",
     description="根据查询条件获取用户分页列表，支持按用户名、昵称、手机号、邮箱等条件筛选",
     responses={
@@ -105,60 +100,10 @@ async def get_user_list(
         - user_gender: 用户性别（0-未知，1-男，2-女）
         - status: 用户状态（1-启用，2-禁用）
     """
-    # 调用 Service 层获取分页数据（含数据权限过滤）
-    page_data = await user_service.get_user_list(
-        db, query, current_user=_current_user, tenant=tenant
+    data = await user_read(
+        db, _current_user, operation="list", query=query, tenant=tenant
     )
-
-    # 批量查询当前页用户的部门关联（含 is_primary 标记）
-    user_ids = [u.user_id for u in page_data.records]
-    user_depts_map: dict[int, list[tuple[int, bool]]] = {}
-    if user_ids:
-        stmt = select(
-            user_depts.c.user_id,
-            user_depts.c.dept_id,
-            user_depts.c.is_primary,
-        ).where(
-            user_depts.c.tenant_id == tenant.tenant_id,
-            user_depts.c.user_id.in_(user_ids),
-        )
-        result = await db.execute(stmt)
-        for uid, did, is_primary in result.all():
-            user_depts_map.setdefault(uid, []).append(
-                (did, is_primary == IS_PRIMARY_YES)
-            )
-
-    # 转换为 Schema 对象 (处理角色和部门简化)
-    user_list = []
-    for u in page_data.records:
-        item = UserItemOut.model_validate(u)
-        item.roles = [r.role_code for r in u.roles]
-        item.role_names = [r.role_name for r in u.roles]
-        item.role_name_keys = [(r.i18n_keys or {}).get("roleName") for r in u.roles]
-        # 部门信息解析
-        if u.depts:
-            item.dept_ids = [str(d.dept_id) for d in u.depts]
-            item.dept_names = ", ".join(d.dept_name for d in u.depts)
-        # 部门关联（含主部门标记）
-        dept_pairs = user_depts_map.get(u.user_id, [])
-        if dept_pairs:
-            item.user_depts = [
-                UserDeptItem(dept_id=str(did), is_primary=is_primary)
-                for did, is_primary in dept_pairs
-            ]
-            primary = next((str(did) for did, p in dept_pairs if p), None)
-            item.primary_dept = primary
-        user_list.append(item)
-
-    # 返回分页包装结果
-    return ResponseModel.success(
-        data=PageResult(
-            records=user_list,
-            total=page_data.total,
-            current=page_data.current,
-            size=page_data.size,
-        )
-    )
+    return ResponseModel.success(data=data)
 
 
 @router.post(
@@ -213,13 +158,24 @@ async def get_assignable_roles(
 
 @router.get(
     "/profile",
-    response_model=ResponseModel[ProfileOut],
+    response_model=ResponseModel[ProjectedUserOut],
     summary="获取个人信息",
     description="获取当前登录用户的详细信息",
 )
-async def get_profile(current_user: User = Depends(get_current_user)):
-    data = user_service.get_profile(current_user)
+async def get_profile(
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    data = await user_read(db, current_user, operation="profile")
     return ResponseModel.success(data=data)
+
+
+@router.get("/field-capabilities", summary="获取本人资料字段能力")
+async def get_field_capabilities(
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
+    return ResponseModel.success(
+        data=await user_read(db, current_user, operation="capabilities")
+    )
 
 
 @router.put("/profile", summary="更新个人信息", description="用户更新自己的基本信息")
@@ -275,6 +231,30 @@ async def update_user(
         current_user,
         operation="user.update",
         payload=user_in,
+        target_id=user_id,
+        tenant=tenant,
+    )
+    return ResponseModel.success(msg="更新成功")
+
+
+@router.patch(
+    "/{user_id}",
+    summary="部分更新用户资料",
+    description="未携带字段保持原值；可空字段显式 null 清空；密码和关系使用专用接口。",
+    dependencies=[Depends(require_permissions("system:user:edit"))],
+)
+async def patch_user(
+    user_id: int,
+    body: UserPatch,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    tenant: TenantContext = Depends(get_current_tenant_context),
+):
+    await system_write(
+        db,
+        current_user,
+        operation="user.update",
+        payload=body,
         target_id=user_id,
         tenant=tenant,
     )

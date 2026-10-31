@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.core.tenant import TenantContext
-from app.db.authorization_http import system_write
+from app.db.authorization_http import system_write, user_read
 from app.db.session import get_db
 from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.dept import Dept
@@ -17,13 +17,10 @@ from app.modules.system.schemas.dept import (
     DeptTreeOptionOut,
     DeptTreeOut,
     DeptUpdate,
-    DeptUsersOut,
     DeptUsersUpdate,
 )
+from app.modules.system.schemas.user_projection import ProjectedUserOut, UserMemberQuery
 from app.modules.system.service.dept_selector import department_selector
-from app.modules.system.service.user_department_assignment_service import (
-    user_department_assignment_service,
-)
 from app.utils.data_scope import resolve_data_scope
 from app.utils.pagination import build_filters
 
@@ -339,7 +336,7 @@ async def batch_delete_depts(
 
 @router.get(
     "/{dept_id}/users",
-    response_model=ResponseModel[DeptUsersOut],
+    response_model=ResponseModel[PageResult[ProjectedUserOut]],
     summary="获取部门用户管理数据",
     description="返回当前用户数据范围内的部门成员候选分页",
     dependencies=[
@@ -358,16 +355,14 @@ async def get_dept_users(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """Return one user-scoped page of membership candidates."""
-    page = await user_department_assignment_service.list_department_members(
+    page = await user_read(
         db,
-        actor_user_id=current_user.user_id,
-        dept_id=dept_id,
-        query=query,
-        current=current,
-        size=size,
+        current_user,
+        operation="members",
         tenant=tenant,
+        query=UserMemberQuery(dept_id=dept_id, query=query, current=current, size=size),
     )
-    return ResponseModel.success(data=DeptUsersOut.model_validate(page))
+    return ResponseModel.success(data=page)
 
 
 @router.put(

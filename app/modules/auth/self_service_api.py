@@ -7,7 +7,11 @@ from fastapi import APIRouter, Depends, Query, Request
 from app.core.base_response import ResponseModel
 from app.core.config import settings
 from app.core.exceptions import BusinessRuleException
-from app.db.authorization_http import get_authorization_runtime, release_request_reads
+from app.db.authorization_http import (
+    get_authorization_runtime,
+    release_request_reads,
+    user_read,
+)
 from app.db.session import get_db
 from app.modules.auth.schemas.auth import LoginCredentials
 from app.modules.auth.schemas.self_service import (
@@ -114,15 +118,7 @@ async def reset_password(payload: Registration, request: Request, db=Depends(get
 
 @router.get("/email")
 async def email_status(user=Depends(get_current_user), db=Depends(get_db)):
-    values = await settings_service.values(db, tenant_id=user.tenant_id)
-    return ResponseModel.success(
-        data={
-            "email": user.user_email or "",
-            "verified": bool(user.email_verified_at),
-            "enabled": ready(await mail_service.config(db)),
-            "codeMinutes": values["email_code_minutes"],
-        }
-    )
+    return ResponseModel.success(data=await user_read(db, user, operation="email"))
 
 
 @router.post("/email/code")

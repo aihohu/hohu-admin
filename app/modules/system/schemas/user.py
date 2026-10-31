@@ -9,10 +9,12 @@ from pydantic import (
     StrictBool,
     field_serializer,
     field_validator,
+    model_validator,
 )
 from pydantic.alias_generators import to_camel
 
 from app.core.config import settings
+from app.core.exceptions import InvalidParameterException
 from app.utils.mask_util import MaskUtil
 from app.utils.validators import (
     empty_to_none,
@@ -44,7 +46,32 @@ class UserDeptItem(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
-class UserBase(BaseModel):
+class UserInput(BaseModel):
+    """Closed, canonical input keys shared by management and own-account forms."""
+
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid"
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_input_keys(cls, value):
+        if isinstance(value, dict):
+            for name, field in cls.model_fields.items():
+                alias = field.alias
+                if alias and alias != name and name in value and alias in value:
+                    raise ValueError("Duplicate field aliases are not accepted")
+            for name in ("user_phone", "user_email"):
+                supplied = value.get(name, value.get(to_camel(name)))
+                if isinstance(supplied, str) and "*" in supplied:
+                    raise InvalidParameterException(
+                        "请填写新的字段值，不能提交掩码占位符",
+                        error_code="FIELD_MASKED_INPUT_INVALID",
+                    )
+        return value
+
+
+class UserBase(UserInput):
     """用户基础字段"""
 
     user_name: str = Field(..., min_length=2, max_length=16, description="账号")
@@ -111,6 +138,26 @@ class UserCreate(UserBase):
 
 class UserUpdate(UserBase):
     """用户更新请求"""
+
+
+class UserPatch(UserBase):
+    """Partial profile update: absence retains, explicit nullable null clears."""
+
+    user_name: str | None = Field(None, min_length=2, max_length=16)
+    status: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_patch_presence(cls, value):
+        if isinstance(value, dict):
+            if not value:
+                raise ValueError("PATCH must contain at least one field")
+            if any(
+                key in value and value[key] is None
+                for key in ("user_name", "userName", "status")
+            ):
+                raise ValueError("Identity and status cannot be null")
+        return value
 
 
 class UserToolUpdate(UserUpdate):
@@ -237,7 +284,7 @@ class ChangePassword(BaseModel):
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
 
-class UpdateProfile(BaseModel):
+class UpdateProfile(UserInput):
     """用户更新个人信息"""
 
     nickname: str | None = Field(None, min_length=2, max_length=16, description="昵称")

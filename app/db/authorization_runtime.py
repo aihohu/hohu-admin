@@ -20,6 +20,7 @@ from app.db.authorization_http_audit_owner import HttpAuditOwner
 from app.db.authorization_job_owner import JobOwner
 from app.db.authorization_lease_owner import LeaseOwner
 from app.db.authorization_lifecycle_owner import LifecycleOwner
+from app.db.authorization_owner import authorization_session
 from app.db.authorization_pending_owner import PendingOwner
 from app.db.authorization_plan_session import AuthorizationPlanSession, _order_error
 from app.db.authorization_preview_owner import PreviewOwner
@@ -30,6 +31,7 @@ from app.db.authorization_system_owner import system_candidate_owner
 from app.db.authorization_trace_owner import TraceOwner
 from app.db.authorization_transfer_owner import TransferOwner
 from app.db.authorization_upload_owner import UploadOwner
+from app.db.authorization_user_read_owner import user_read_owner
 from app.modules.ai.agents.gateway.authorization_execution import PlannedGatewayOwner
 from app.modules.auth.candidate_owner import auth_candidate_owner
 from app.modules.platform.authorization_principal_audit import consume_principal_audit
@@ -77,6 +79,10 @@ class AuthorizationRuntime:
     async def system(self, **request):
         async with self.sessions() as db:
             return await system_candidate_owner.execute(db, **request)
+
+    async def user_read(self, **request):
+        async with authorization_session(self.sessions) as db:
+            return await user_read_owner.execute(db, **request)
 
     async def import_users(self, **request):
         async with self.sessions() as db:

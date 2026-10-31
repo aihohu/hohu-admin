@@ -13,10 +13,9 @@ from app.core.exceptions import (
     AuthenticationException,
 )
 from app.core.rbac import is_system_admin
-from app.db.authorization_http import get_authorization_runtime, login_http
+from app.db.authorization_http import get_authorization_runtime, login_http, user_read
 from app.db.session import get_db
 from app.modules.auth.permission_collect import (
-    collect_user_buttons,
     collect_user_menus,
 )
 from app.modules.auth.schemas.auth import LoginCredentials, RouteMeta, UserRoute
@@ -171,7 +170,9 @@ async def login_for_docs(
         401: {"description": "未登录或令牌已过期"},
     },
 )
-async def get_user_info(current_user: User = Depends(get_current_user)):
+async def get_user_info(
+    current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
     """
     获取当前登录用户信息
 
@@ -194,35 +195,8 @@ async def get_user_info(current_user: User = Depends(get_current_user)):
             }
         }
     """
-    # 提取角色编码列表 (如: ['R_ADMIN', 'R_USER'])
-    roles = [
-        role.role_code for role in current_user.roles if role.status == STATUS_ENABLED
-    ]
-
-    permissions = collect_user_buttons(current_user)
-
-    # Keep '*' for ordinary UI gates and exact codes for destructive composition.
-    if is_super_admin(current_user):
-        return ResponseModel.success(
-            data={
-                "userId": str(current_user.user_id),
-                "userName": current_user.user_name,
-                "userAvatar": current_user.user_avatar or "",
-                "isSystemAdmin": is_system_admin(current_user),
-                "roles": roles,
-                "buttons": ["*", *permissions],
-            }
-        )
-
     return ResponseModel.success(
-        data={
-            "userId": str(current_user.user_id),
-            "userName": current_user.user_name,
-            "userAvatar": current_user.user_avatar or "",
-            "isSystemAdmin": is_system_admin(current_user),
-            "roles": roles,
-            "buttons": permissions,
-        }
+        data=await user_read(db, current_user, operation="auth")
     )
 
 
