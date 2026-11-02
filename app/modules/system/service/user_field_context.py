@@ -55,11 +55,13 @@ class UserFieldContext:
     role_scopes: object
     _applicable: dict = field(default_factory=dict, repr=False, compare=False)
 
-    async def decisions(self, db, tx, *, user_ids, operation, purpose, entrypoint):
+    async def decisions(
+        self, db, tx, *, user_ids, operation, purpose, entrypoint, _after_plan=False
+    ):
         if tx is not self.transaction:
             raise _order_error()
         tx.assert_session(db)
-        tx.assert_planning(self.tenant_id)
+        (tx.assert_barrier if _after_plan else tx.assert_planning)(self.tenant_id)
         if (
             type(user_ids) is not tuple
             or len(user_ids) > 100
@@ -114,9 +116,11 @@ class UserFieldContext:
 
 
 class UserFieldContextService:
-    async def load(self, db, tx, *, tenant, actor_user_version, grants):
+    async def load(
+        self, db, tx, *, tenant, actor_user_version, grants, _after_plan=False
+    ):
         tx.assert_session(db)
-        tx.assert_planning(tenant.tenant_id)
+        (tx.assert_barrier if _after_plan else tx.assert_planning)(tenant.tenant_id)
         if type(grants) is not tuple or any(
             type(rule) is not FieldGrant for rule in grants
         ):

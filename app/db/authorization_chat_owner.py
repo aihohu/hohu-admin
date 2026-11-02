@@ -5,7 +5,7 @@ import asyncio
 from app.core.authorization_io import file_transform_worker
 from app.core.authorization_plan import LockMode, TenantLock, TransactionBudget
 from app.core.config import settings
-from app.core.exceptions import BusinessRuleException
+from app.core.exceptions import BusinessException, BusinessRuleException
 from app.db.authorization_owner import (
     authorization_session,
     commit_authorization_session,
@@ -134,6 +134,23 @@ class ChatOwner:
     async def start_run(self, **request):
         return await self._run("start_run", request)
 
+    async def check_run(self, **request):
+        return await self._run("check_run", request)
+
+    async def query_cache(self, **request):
+        return await self._run("query_cache", request)
+
+    async def model_authority(self, **request):
+        return await self._run("model_authority", request)
+
+    async def action_projection(self, **request):
+        try:
+            return await self._run("action_projection", request)
+        except BusinessException as exc:
+            if 400 <= exc.code < 500:
+                return False
+            raise
+
     async def routing_audit(self, **request):
         return await self._run("routing_audit", request)
 
@@ -246,6 +263,18 @@ class ChatOwner:
                             result = await gateway_read_candidate.preflight(
                                 db, tx, **request
                             )
+                        elif operation == "check_run":
+                            result = await chat_candidate.check_run(db, tx, **request)
+                        elif operation == "query_cache":
+                            result = await chat_candidate.query_cache(db, tx, **request)
+                        elif operation == "model_authority":
+                            result = await chat_candidate.model_authority(
+                                db, tx, **request
+                            )
+                        elif operation == "action_projection":
+                            result = await chat_candidate.action_projection(
+                                db, tx, **request
+                            )
                         elif operation == "source":
                             result = await chat_candidate.source(db, tx, **request)
                         elif operation == "finalize":
@@ -268,6 +297,10 @@ class ChatOwner:
                 await rollback_authorization_session(db)
                 raise
             if operation in {
+                "check_run",
+                "query_cache",
+                "model_authority",
+                "action_projection",
                 "messages",
                 "list_conversations",
                 "model_candidates",

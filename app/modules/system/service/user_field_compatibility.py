@@ -6,9 +6,9 @@ from app.core.exceptions import BusinessRuleException
 from app.modules.system.models.user_field_policy import UserFieldPolicyState
 
 
-async def require_legacy_field_policy(db, tx, *, tenant_id):
+async def require_legacy_field_policy(db, tx, *, tenant_id, _after_plan=False):
     tx.assert_session(db)
-    tx.assert_planning(tenant_id)
+    (tx.assert_barrier if _after_plan else tx.assert_planning)(tenant_id)
     state = (
         await db.execute(
             select(

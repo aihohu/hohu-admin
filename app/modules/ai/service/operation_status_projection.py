@@ -88,11 +88,18 @@ async def project_operation(tool_call_id, db, current_user, tenant, *, states=No
             "duration_ms": effective.duration_ms,
         }
     )
-    if is_auditor:
+    from app.modules.ai.service.field_authority_runtime import (  # noqa: PLC0415
+        ai_field_authority,
+    )
+
+    fields_visible = await ai_field_authority.visible(
+        db, tenant=tenant, frozen=getattr(log, "field_authority", None)
+    )
+    if is_auditor and fields_visible:
         return ResponseModel.success(data=output)
 
     allowed = False
-    if has_explicit_permission(current_user, AI_CHAT_USE_PERMISSION):
+    if fields_visible and has_explicit_permission(current_user, AI_CHAT_USE_PERMISSION):
         lineage = await result_projection_service.lineage_for_operation_log(db, log)
         allowed = await result_projection_service.authorize_result_projection(
             db,

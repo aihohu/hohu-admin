@@ -76,6 +76,7 @@ class ResultProjection:
 
     subject_refs: tuple[dict[str, str], ...] = field(default_factory=tuple)
     scope_bound: bool = False
+    field_authority: dict | None = None
 
 
 @dataclass

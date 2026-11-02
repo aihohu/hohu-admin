@@ -183,6 +183,7 @@ def _gateway_authority(binding, source):
         resolved_model_id=binding.model_id,
         resolved_provider_id=binding.provider_id,
         projection_dependency_message_ids=source.projection_dependency_message_ids,
+        field_authority=source.field_authority,
     )
 
 
@@ -533,6 +534,7 @@ class PreviewCandidate:
             agent_code="user_mgmt",
             data_scope_hash=scope_hash,
             projection_dependency_message_ids=source.projection_dependency_message_ids,
+            field_authority=source.field_authority,
         )
         if gateway is not None:
             authority = _gateway_authority(gateway, source)
@@ -582,6 +584,7 @@ class PreviewCandidate:
             "readonly_snapshot": False,
             "queued_at": now.replace(tzinfo=None),
             "execution_mode": "hitl",
+            "field_authority": source.field_authority,
         }
         args = {
             "file_id": file_id,
@@ -635,6 +638,7 @@ class PreviewCandidate:
                     "status": "pending_confirmation",
                     "row_version": 1,
                     "frozen_args": proposal.frozen_args,
+                    "field_authority": source.field_authority,
                     "args_hash": compute_args_hash(proposal.frozen_args),
                     "snapshot": proposal.snapshot,
                     "snapshot_hash": compute_args_hash(proposal.snapshot),

@@ -108,6 +108,11 @@ _RELEASE_LOCK_LUA = (
 )
 
 
+async def _authorize_resume_projection(**request):
+    """A fresh protected snapshot for both reconnect and terminal delivery."""
+    return await get_authorization_runtime().chat.action_projection(**request)
+
+
 def _protocol_running(action) -> bool:  # noqa: ANN001
     return action.status == PreparedActionStatus.RUNNING.value and has_protocol_marker(
         getattr(action, "execution_owner", None)
@@ -555,11 +560,10 @@ async def _load_durable_resume_terminal(
             if ok:
                 allowed = bool(
                     current_user is not None
-                    and await result_projection_service.authorize_result_projection(
-                        terminal_db,
-                        current_user,
-                        owner_user_id=action.user_id,
-                        lineage=lineage,
+                    and await _authorize_resume_projection(
+                        tenant=tenant,
+                        actor_user_version=current_user.auth_version,
+                        confirmation_id=action.confirmation_id,
                     )
                 )
                 if not allowed:
@@ -1006,14 +1010,10 @@ async def _legacy_resume_chat(
         # A transport cache cannot grant, expire or erase durable execution.
         replay_pending = _pending_from_durable_action(durable_action)
         can_chat = has_explicit_permission(current_user, AI_CHAT_USE_PERMISSION)
-        can_project = (
-            can_chat
-            and await result_projection_service.authorize_result_projection(
-                db,
-                current_user,
-                owner_user_id=durable_action.user_id,
-                lineage=result_projection_service.lineage_from_record(durable_action),
-            )
+        can_project = can_chat and await _authorize_resume_projection(
+            tenant=tenant,
+            actor_user_version=access_identity(current_user).user_version,
+            confirmation_id=durable_action.confirmation_id,
         )
         await release_request_reads(db)
         outcome = await get_authorization_runtime().recovery.reconcile(
@@ -1121,13 +1121,10 @@ async def _legacy_resume_chat(
 
     projection_allowed = False
     if durable_action is not None:
-        projection_allowed = (
-            await result_projection_service.authorize_result_projection(
-                db,
-                current_user,
-                owner_user_id=durable_action.user_id,
-                lineage=result_projection_service.lineage_from_record(durable_action),
-            )
+        projection_allowed = await _authorize_resume_projection(
+            tenant=tenant,
+            actor_user_version=access_identity(current_user).user_version,
+            confirmation_id=durable_action.confirmation_id,
         )
     if not projection_allowed:
         return await _verified_minimal_resume_status(

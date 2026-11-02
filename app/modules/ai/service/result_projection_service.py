@@ -80,6 +80,7 @@ class ProjectionLineage:
     data_scope_hash: str | None
     resolver_version: str
     projection_dependency_message_ids: tuple[int, ...] = ()
+    field_authority: dict | None = None
 
 
 class ResultProjectionService:
@@ -116,6 +117,8 @@ class ResultProjectionService:
     def normalize_projection_dependency_message_ids(
         values: list[int | str] | tuple[int | str, ...],
     ) -> tuple[int, ...]:
+        if len(values) > 4096:
+            raise ValueError("projection dependency budget exceeded")
         normalized = {int(value) for value in values}
         if any(value <= 0 for value in normalized):
             raise ValueError("projection dependency message IDs must be positive")
@@ -135,10 +138,12 @@ class ResultProjectionService:
         data_scope_hash: str | None = None,
         resolver_version: str = DATA_SCOPE_RESOLVER_VERSION,
         projection_dependency_message_ids: list[int | str] | tuple[int | str, ...] = (),
+        field_authority: dict | None = None,
     ) -> ProjectionLineage:
         normalized_refs = self.normalize_subject_refs(subject_refs)
         return ProjectionLineage(
             tenant_id=tenant.tenant_id,
+            field_authority=field_authority,
             agent_code=str(agent_code),
             tool_codes=self._normalize_tool_codes(tool_codes),
             subject_refs=normalized_refs,
@@ -182,6 +187,7 @@ class ResultProjectionService:
             return None
         return ProjectionLineage(
             tenant_id=int(values[0]),
+            field_authority=getattr(record, "field_authority", None),
             agent_code=str(values[1]),
             tool_codes=self._normalize_tool_codes(values[2]),
             subject_refs=normalized_refs,
@@ -253,6 +259,11 @@ class ResultProjectionService:
                 "resolverVersion": lineage.resolver_version,
                 "projectionDependencyMessageIds": list(
                     lineage.projection_dependency_message_ids
+                ),
+                **(
+                    {"fieldAuthority": lineage.field_authority}
+                    if lineage.field_authority is not None
+                    else {}
                 ),
             }
         )
@@ -426,6 +437,14 @@ class ResultProjectionService:
             return False
         if lineage.tenant_id != get_bound_tenant_context(user).tenant_id:
             return False
+        from app.modules.ai.service.field_authority_runtime import (  # noqa: PLC0415
+            ai_field_authority,
+        )
+
+        if not await ai_field_authority.visible(
+            db, tenant=get_bound_tenant_context(user), frozen=lineage.field_authority
+        ):
+            return False
         if not has_explicit_permission(user, AI_CHAT_USE_PERMISSION):
             return False
         if self.subject_refs_hash(lineage.subject_refs) != lineage.subject_refs_hash:
@@ -554,7 +573,11 @@ class ResultProjectionService:
 
         visited: set[int] = set()
         pending = set(dependencies)
+        rounds = 0
         while pending:
+            rounds += 1
+            if rounds > 32 or len(pending | visited) > 4096:
+                return False
             batch = pending - visited
             if not batch:
                 break
@@ -635,7 +658,11 @@ class ResultProjectionService:
         visited: set[int] = set()
         pending = set(dependency_message_ids)
         tenant = get_bound_tenant_context(user)
+        rounds = 0
         while pending:
+            rounds += 1
+            if rounds > 32 or len(pending | visited) > 4096:
+                return False
             batch = pending - visited
             if not batch:
                 break

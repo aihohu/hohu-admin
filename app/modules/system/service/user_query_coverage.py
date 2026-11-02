@@ -11,7 +11,7 @@ from app.modules.system.models.user import User
 
 
 async def assert_user_query_coverage(
-    db, tx, *, tenant_id, base_predicates, plan, grants, role_scopes
+    db, tx, *, tenant_id, base_predicates, plan, grants, role_scopes, _after_plan=False
 ):
     """Find one unauthorized base record per dependency; never return its ID.
 
@@ -20,7 +20,7 @@ async def assert_user_query_coverage(
     transaction. Its caller owns G/B and the cumulative read/time budgets.
     """
     tx.assert_session(db)
-    tx.assert_planning(tenant_id)
+    (tx.assert_barrier if _after_plan else tx.assert_planning)(tenant_id)
     if type(plan) is not UserQueryPlan or type(base_predicates) is not tuple:
         raise query_denied()
     for dependency in plan.all_dependencies:

@@ -25,6 +25,7 @@ from app.modules.ai.service.atomic_completion_service import DB_TOOLS, FILE_TOOL
 from app.modules.ai.service.authorization_chat_candidate import chat_candidate
 from app.modules.ai.service.authorization_chat_model import recheck_model, select_model
 from app.modules.ai.service.authorization_gateway_read_candidate import READ_HANDLERS
+from app.modules.ai.service.field_authority_runtime import ai_field_authority
 from app.modules.ai.service.operation_log_service import build_target_summary
 from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.ai.service.preview_completion_service import (
@@ -33,6 +34,7 @@ from app.modules.ai.service.preview_completion_service import (
 )
 from app.modules.ai.service.reconciliation_annotation import has_annotation
 from app.modules.ai.service.result_projection_service import result_projection_service
+from app.modules.system.service.user_ai_fields import user_ai_fields
 
 
 class PendingCandidate:
@@ -243,6 +245,19 @@ class PendingCandidate:
             != await result_projection_service.compute_data_scope_hash(db, actor)
         ):
             raise _order_error()
+        await ai_field_authority.require(
+            db, tx, tenant=tenant, frozen=source.field_authority, legacy=True
+        )
+        values["field_authority"] = source.field_authority
+        await user_ai_fields.before(
+            db,
+            tx,
+            tenant=tenant,
+            version=actor_user_version,
+            tool=tool,
+            args=values["frozen_args"],
+            preflight=not meta.readonly,
+        )
         dependencies = result_projection_service.projection_dependency_message_ids(
             source
         )

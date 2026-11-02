@@ -26,6 +26,7 @@ from app.modules.ai.service.authorization_lifecycle_candidate import (
     ResumeBinding,
     lifecycle_candidate,
 )
+from app.modules.ai.service.field_authority_runtime import ai_field_authority
 from app.modules.ai.service.reconciliation_annotation import has_annotation
 from app.modules.ai.service.result_projection_service import result_projection_service
 from app.modules.ai.service.resume_terminal_projection import project_resume_terminal
@@ -218,6 +219,14 @@ class ReadConfirmationCandidate:
             )
         if selection is None:
             raise _order_error()
+        await ai_field_authority.require(
+            db,
+            tx,
+            tenant=tenant,
+            frozen=action.field_authority,
+            confirmation=True,
+            legacy=True,
+        )
         await recheck_model(db, tx, tenant, selection)
         original = action.snapshot.get("_authorization") or {}
         actor = await load_live_user_authority(db, tenant=tenant)

@@ -617,6 +617,15 @@ class _Transaction:
             self._journal.fail()
             raise
 
+    def assert_barrier(self, tenant_id):
+        """Prove this live transaction holds G/B, including after domain locks.
+
+        This permits bounded authority reads, never extending a completed plan.
+        """
+        self._check()
+        if type(tenant_id) is not int or tenant_id not in self._tenants:
+            raise _order_error()
+
     def assert_planned(self, plan):
         try:
             self._check(locked=True)

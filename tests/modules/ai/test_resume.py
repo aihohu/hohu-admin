@@ -77,6 +77,7 @@ def _make_user(user_id: int = 100, *, can_chat: bool = True):
         user_id=user_id,
         tenant_id=0,
         user_name="alice",
+        auth_version=1,
         roles=[role],
         _tenant_context=tenant,
         _verified_access_identity=AccessIdentity(tenant, 1),
@@ -432,8 +433,20 @@ def _mock_verified_completion_boundary():
     async def unexecuted(confirmation_id, *, tenant):
         return (await locked(None, confirmation_id, tenant=tenant)).action
 
+    async def projected(*, tenant, actor_user_version, confirmation_id):
+        # Transport mechanics are isolated here; real owner/epoch rejection has
+        # separate authorization resume and field-run integration coverage.
+        action = (await locked(None, confirmation_id, tenant=tenant)).action
+        return await result_projection_service.authorize_result_projection(
+            None,
+            _make_user(),
+            owner_user_id=tenant.actor_user_id,
+            lineage=result_projection_service.lineage_from_record(action),
+        )
+
     with (
         patch.object(resume, "release_request_reads", release),
+        patch.object(resume, "_authorize_resume_projection", projected),
         patch.object(
             resume,
             "get_authorization_runtime",

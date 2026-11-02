@@ -17,6 +17,7 @@ from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.authorization_chat_candidate import chat_candidate
 from app.modules.ai.service.authorization_context_candidate import ai_context_candidate
+from app.modules.ai.service.field_authority_runtime import ai_field_authority
 from app.modules.ai.service.preflight_completion_service import (
     runtime_preflight_summary,
 )
@@ -203,6 +204,9 @@ class GatewayAuditCandidate:
             raise _order_error()
         now = (await tx.database_now()).replace(tzinfo=None)
         running = mode == "autonomous" and preflight_error is None
+        await ai_field_authority.require(
+            db, tx, tenant=tenant, frozen=source.field_authority, legacy=True
+        )
         registered = ToolRegistry.get().find(tool_name)
         confirmation_id = confirmation_id if preflight_error is None else None
         confirmation_id = confirmation_id or (
@@ -224,6 +228,7 @@ class GatewayAuditCandidate:
             "tool_call_id": tool_call_id,
             "args_hash": args_hash,
             "args_summary": args_summary,
+            "field_authority": source.field_authority,
             "readonly_snapshot": readonly,
             "risk_level": risk,
             "execution_mode": mode,

@@ -23,6 +23,7 @@ from app.modules.ai.service.authorization_chat_model import (
     select_model,
 )
 from app.modules.ai.service.chat_service import chat_service
+from app.modules.ai.service.field_authority_runtime import ai_field_authority
 from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.ai.service.result_projection_service import result_projection_service
 from app.modules.ai.service.routing_log_service import _hash_message
@@ -282,6 +283,9 @@ class ChatIngressCandidate:
             {
                 "conversation_id": conversation_id,
                 "role": "user",
+                "field_authority": await ai_field_authority.current(
+                    db, tx, tenant=tenant
+                ),
                 "content": redact_secrets(content),
                 "parts": parts,
                 "trace_id": trace_id,

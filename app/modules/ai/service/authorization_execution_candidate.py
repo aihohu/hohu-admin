@@ -31,6 +31,7 @@ from app.modules.ai.service.atomic_completion_service import (
 )
 from app.modules.ai.service.authorization_chat_model import select_model
 from app.modules.ai.service.authorization_context_candidate import ai_context_candidate
+from app.modules.ai.service.field_authority_runtime import ai_field_authority
 from app.modules.ai.service.operation_log_service import build_target_summary
 from app.modules.ai.service.result_projection_service import result_projection_service
 from app.modules.auth.permission_collect import collect_user_permission_codes
@@ -40,6 +41,7 @@ from app.modules.system.service.authorization_ai_tool_adapter import (
     system_ai_tool_adapter,
 )
 from app.modules.system.service.settings_service import settings_service
+from app.modules.system.service.user_ai_fields import user_ai_fields
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +72,14 @@ class AIExecutionCandidate:
         self, db, tx, action, *, tenant, actor_user_version, _preview=False
     ):
         tx.assert_session(db)
+        await ai_field_authority.require(
+            db,
+            tx,
+            tenant=tenant,
+            frozen=getattr(action, "field_authority", None),
+            confirmation=True,
+            legacy=True,
+        )
         current = await load_live_user_authority(db, tenant=tenant)
         if (
             not settings.AI_MODULE_ENABLED
@@ -81,6 +91,16 @@ class AIExecutionCandidate:
                 "当前身份已经失效", error_code="AI_TOOL_PERM_DENIED"
             )
         ensure_ai_chat_use(current)
+        if getattr(action, "frozen_args", None) is not None:
+            await user_ai_fields.before(
+                db,
+                tx,
+                tenant=tenant,
+                version=actor_user_version,
+                tool=action.execute_tool_name,
+                args=action.frozen_args,
+                preflight=True,
+            )
         if getattr(action, "resolved_model_id", None) is not None:
             selected = await select_model(db, tenant, str(action.resolved_model_id))
             if selected.provider_id != action.resolved_provider_id:

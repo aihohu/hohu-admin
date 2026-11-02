@@ -2,6 +2,7 @@
 
 import json
 from copy import deepcopy
+from dataclasses import replace
 from types import MappingProxyType
 
 from sqlalchemy import select
@@ -25,6 +26,7 @@ from app.modules.ai.service.authorization_file_parse import (
     file_parse_input,
     file_parse_key,
 )
+from app.modules.ai.service.field_authority_runtime import ai_field_authority
 from app.modules.ai.service.result_projection_service import result_projection_service
 from app.modules.auth.service import load_live_user_authority
 from app.modules.job.ai_tools import _dry_run_job_update_cron
@@ -40,6 +42,7 @@ from app.modules.system.service.authorization_control_identity import (
     assert_identity,
     read_identity,
 )
+from app.modules.system.service.user_ai_fields import user_ai_fields
 
 READ_HANDLERS = MappingProxyType(
     {
@@ -168,6 +171,9 @@ class GatewayReadCandidate:
             or not source.is_active
         ):
             raise _order_error()
+        await ai_field_authority.require(
+            db, tx, tenant=tenant, frozen=source.field_authority, legacy=True
+        )
         permissions = agent_authorization_service.tool_permissions(actor)
         allowed = await agent_authorization_service.list_agents(
             db, actor, force_refresh=True
@@ -215,7 +221,31 @@ class GatewayReadCandidate:
         )
         if tool == "file.parse":
             tx.assert_held(file_parse_key(tenant, args))
-        return await handler(ctx, **args)
+        fields = await user_ai_fields.before(
+            db,
+            tx,
+            tenant=tenant,
+            version=actor_user_version,
+            tool=tool,
+            args=args,
+            preflight=preflight,
+        )
+        result = await handler(ctx, **args)
+        if not preflight and tool != "file.parse":
+            result = await user_ai_fields.project(
+                db, tx, fields, tool=tool, result=result
+            )
+            if result.projection is not None:
+                result = replace(
+                    result,
+                    projection=replace(
+                        result.projection,
+                        field_authority=await ai_field_authority.current(
+                            db, tx, tenant=tenant
+                        ),
+                    ),
+                )
+        return result
 
 
 gateway_read_candidate = GatewayReadCandidate()

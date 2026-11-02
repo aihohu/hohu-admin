@@ -38,6 +38,7 @@ from app.modules.ai.service.chat_run_service import (
     enforce_import_error_output_redaction,
 )
 from app.modules.ai.service.conversation_service import conversation_service
+from app.modules.ai.service.field_authority_runtime import ai_field_authority
 from app.modules.ai.service.preflight_completion_service import has_preflight_marker
 from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.ai.service.reconciliation_annotation import (
@@ -67,6 +68,90 @@ class SourceReference:
 
 
 class ChatCandidate:
+    async def action_projection(
+        self, db, tx, *, tenant, actor_user_version, confirmation_id
+    ):
+        action = await lifecycle_candidate.reference(db, confirmation_id, tenant=tenant)
+        if action is None:
+            return False
+        _, actor = await self._lock(
+            db,
+            tx,
+            tenant=tenant,
+            actor_user_version=actor_user_version,
+            conversation_id=action.conversation_id,
+        )
+        action = await lifecycle_candidate.reference(db, confirmation_id, tenant=tenant)
+        return await result_projection_service.authorize_result_projection(
+            db,
+            actor,
+            owner_user_id=tenant.actor_user_id,
+            lineage=result_projection_service.lineage_from_record(action),
+        )
+
+    async def model_authority(self, db, tx, *, tenant, actor_user_version, frozen=None):
+        identity = await read_identity(
+            db,
+            tenant=tenant,
+            actor_user_version=actor_user_version,
+            permissions=("ai:chat:use",),
+        )
+        await tx.lock(LockPlan(existing=identity.keys))
+        await assert_identity(db, identity)
+        if frozen is None:
+            return await ai_field_authority.current(db, tx, tenant=tenant)
+        return await ai_field_authority.require(db, tx, tenant=tenant, frozen=frozen)
+
+    async def query_cache(self, db, tx, *, tenant, actor_user_version, entry):
+        identity = await read_identity(
+            db,
+            tenant=tenant,
+            actor_user_version=actor_user_version,
+            permissions=("ai:chat:use",),
+        )
+        await tx.lock(LockPlan(existing=identity.keys))
+        await assert_identity(db, identity)
+        actor = await load_live_user_authority(db, tenant=tenant)
+        await ai_field_authority.current(db, tx, tenant=tenant)
+        return await result_projection_service.authorize_result_projection(
+            db,
+            actor,
+            owner_user_id=entry.user_id,
+            lineage=result_projection_service.lineage_from_record(entry),
+        )
+
+    async def check_run(
+        self,
+        db,
+        tx,
+        *,
+        tenant,
+        actor_user_version,
+        conversation_id,
+        source_id,
+        trace_id,
+    ):
+        await self._lock(
+            db,
+            tx,
+            tenant=tenant,
+            actor_user_version=actor_user_version,
+            conversation_id=conversation_id,
+        )
+        source = await db.get(AiMessage, source_id, populate_existing=True)
+        if (
+            source is None
+            or source.tenant_id != tenant.tenant_id
+            or source.conversation_id != conversation_id
+            or source.trace_id != trace_id
+            or source.role != "user"
+            or not source.is_active
+        ):
+            raise _order_error()
+        await ai_field_authority.require(
+            db, tx, tenant=tenant, frozen=source.field_authority, legacy=True
+        )
+
     async def list_conversations(self, db, tx, *, tenant, actor_user_version, query):
         identity = await read_identity(
             db,
@@ -295,6 +380,9 @@ class ChatCandidate:
             {
                 "conversation_id": conversation_id,
                 "role": "user",
+                "field_authority": await ai_field_authority.current(
+                    db, tx, tenant=tenant
+                ),
                 "content": content,
                 "trace_id": reference.trace_id,
                 "is_active": True,
@@ -900,6 +988,7 @@ class ChatCandidate:
                     conversation_id=conversation_id,
                     parent_message_id=source_id,
                     role="assistant",
+                    field_authority=source.field_authority,
                     trace_id=trace_id,
                     agent_code=agent_code,
                     is_active=True,

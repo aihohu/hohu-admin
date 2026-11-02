@@ -3,6 +3,7 @@
 from app.core.authorization_plan import TenantLock, TransactionBudget
 from app.db.authorization_owner import rollback_authorization_session
 from app.modules.ai.service.authorization_trace_candidate import trace_candidate
+from app.modules.ai.service.field_authority_runtime import ai_field_authority
 from app.modules.system.service.authorization_read_budget import (
     bounded_authorization_reads,
 )
@@ -33,6 +34,9 @@ class TraceOwner:
                         tenants=(TenantLock(request["tenant"].tenant_id),),
                         budget=TransactionBudget(timeout_ms=8000),
                     ) as tx:
+                        await ai_field_authority.current(
+                            db, tx, tenant=request["tenant"]
+                        )
                         if operation:
                             return await trace_candidate.operation(db, tx, **request)
                         if detail:

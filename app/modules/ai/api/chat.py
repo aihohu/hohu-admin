@@ -34,7 +34,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import require_ai_chat_use
 from app.core.base_response import ResponseModel
 from app.core.config import settings
-from app.core.exceptions import AuthorizationException, BusinessRuleException
+from app.core.exceptions import (
+    AuthorizationException,
+    BusinessException,
+    BusinessRuleException,
+)
 from app.core.redis import redis_client
 from app.core.tenant import TenantContext, get_bound_tenant_context
 from app.db.authorization_http import (
@@ -1367,6 +1371,27 @@ async def chat(
     # 并发合并自定义事件队列和 PydanticAI 流。
     # usage_limits 防止 Agent 无限循环（tool_calls_limit=5 / request_limit=10）。
     # accept 在路由前定义，供安全检查和路由短路复用。
+    ephemeral_field_authority = None
+
+    async def authorize_model_context():
+        nonlocal ephemeral_field_authority
+        owner = get_authorization_runtime().chat
+        if conversation_id is not None and deps.source_user_message_id:
+            await owner.check_run(
+                tenant=deps.tenant,
+                actor_user_version=identity.user_version,
+                conversation_id=conversation_id,
+                source_id=deps.source_user_message_id,
+                trace_id=deps.trace_id,
+            )
+        else:
+            ephemeral_field_authority = await owner.model_authority(
+                tenant=deps.tenant,
+                actor_user_version=identity.user_version,
+                frozen=ephemeral_field_authority,
+            )
+
+    deps.authorize_model_context = authorize_model_context
     adapter = VercelAIAdapter(agent=agent, run_input=run_input, accept=accept)
     event_stream = adapter.run_stream(
         deps=deps,
@@ -1585,6 +1610,18 @@ async def chat(
             while True:
                 chunk = await unified_queue.get()
                 if chunk is None:  # sentinel: PydanticAI stream 结束
+                    break
+                try:
+                    await authorize_model_context()
+                except BusinessException:
+                    stream_error_code = "FIELD_AUTHORIZATION_CHANGED"
+                    pydantic_task.cancel()
+                    yield _format_sse_chunk(
+                        AiErrorEvent(
+                            error_code=stream_error_code,
+                            message="字段授权已变化，请重新发起对话",
+                        )
+                    )
                     break
                 yield chunk
             stream_consumed = True

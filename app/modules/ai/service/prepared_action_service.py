@@ -143,6 +143,7 @@ class PreparedActionService:
         projection_dependency_message_ids: list[int] | tuple[int, ...] = (),
         require_live_source: bool = False,
         _planned=None,
+        field_authority=None,
     ) -> AiPreparedAction:
         """Persist one immutable authorization proposal without committing."""
         if conversation_id <= 0 or source_user_message_id <= 0 or not trace_id:
@@ -270,6 +271,7 @@ class PreparedActionService:
                 str(value) for value in lineage.projection_dependency_message_ids
             ],
             presentation=normalized_presentation,
+            field_authority=field_authority,
             user_id=user_id,
             tenant_id=tenant.tenant_id,
             conversation_id=conversation_id,
