@@ -306,6 +306,11 @@ class ResultProjectionService:
                 "projectionDependencyMessageIds": list(
                     lineage.projection_dependency_message_ids
                 ),
+                **(
+                    {"fieldAuthority": lineage.field_authority}
+                    if lineage.field_authority is not None
+                    else {}
+                ),
             },
             "projectionHash": self.projection_hash(lineage),
             "iat": now,
@@ -348,6 +353,7 @@ class ResultProjectionService:
                 tool_codes=projection["toolCodes"],
                 subject_refs=projection["subjectRefs"],
                 data_scope_hash=projection.get("dataScopeHash"),
+                field_authority=projection.get("fieldAuthority"),
                 resolver_version=projection["resolverVersion"],
                 projection_dependency_message_ids=projection.get(
                     "projectionDependencyMessageIds", []
@@ -388,6 +394,7 @@ class ResultProjectionService:
             token_lineage = self.freeze_lineage(
                 tenant=tenant,
                 agent_code=lineage.agent_code,
+                field_authority=lineage.field_authority,
                 tool_codes=lineage.tool_codes,
                 subject_refs=[
                     *lineage.subject_refs,

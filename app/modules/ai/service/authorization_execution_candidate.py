@@ -80,6 +80,35 @@ class AIExecutionCandidate:
             confirmation=True,
             legacy=True,
         )
+        meta, scope_hash, current = await self._authorize_live(
+            db,
+            tx,
+            action,
+            tenant=tenant,
+            actor_user_version=actor_user_version,
+            _preview=_preview,
+        )
+        dependencies = result_projection_service.projection_dependency_message_ids(
+            action
+        )
+        if (
+            dependencies is None
+            or not await result_projection_service._authorize_projection_dependencies(
+                db,
+                current,
+                owner_user_id=tenant.actor_user_id,
+                dependency_message_ids=dependencies,
+            )
+        ):
+            raise AuthorizationException(
+                "历史上下文权限已变化", error_code="AI_RESULT_PROJECTION_FORBIDDEN"
+            )
+        return meta, scope_hash
+
+    async def _authorize_live(
+        self, db, tx, action, *, tenant, actor_user_version, _preview=False
+    ):
+        tx.assert_session(db)
         current = await load_live_user_authority(db, tenant=tenant)
         if (
             not settings.AI_MODULE_ENABLED
@@ -180,22 +209,7 @@ class AIExecutionCandidate:
             raise AuthorizationException(
                 "数据权限已变化", error_code="AI_DATA_SCOPE_VIOLATION"
             )
-        dependencies = result_projection_service.projection_dependency_message_ids(
-            action
-        )
-        if (
-            dependencies is None
-            or not await result_projection_service._authorize_projection_dependencies(
-                db,
-                current,
-                owner_user_id=tenant.actor_user_id,
-                dependency_message_ids=dependencies,
-            )
-        ):
-            raise AuthorizationException(
-                "历史上下文权限已变化", error_code="AI_RESULT_PROJECTION_FORBIDDEN"
-            )
-        return meta, scope_hash
+        return meta, scope_hash, current
 
     async def execute(self, db, tx, command, claim, *, tenant, actor_user_version):
         tx.assert_planning(tenant.tenant_id, exclusive=True)
@@ -300,7 +314,10 @@ class AIExecutionCandidate:
                 raise _invalid("执行认领租约预算不足")
             async with asyncio.timeout((lease - now).total_seconds() - 10):
                 result = await system_ai_tool_adapter.apply(db, tx, command, work)
-                meta, scope_hash = await self.authorize(
+                # B remains exclusive. Source/dependencies were checked after
+                # locking, before this mutation advanced its own aggregate epoch.
+                # Recheck live privileges without reattesting immutable history.
+                meta, scope_hash, _ = await self._authorize_live(
                     db, tx, action, tenant=tenant, actor_user_version=actor_user_version
                 )
                 result.data = serialize_for_llm(meta.sensitive_output, result.data)

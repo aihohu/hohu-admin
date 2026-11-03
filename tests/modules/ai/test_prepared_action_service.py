@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import select
 from tenant_helpers import tenant_context
 
+from app.constants import EnableStatus
 from app.core.exceptions import BusinessRuleException
 from app.core.file_storage import MockFileStorage, reset_file_storage_for_test
 from app.modules.ai.agents.hitl.constants import (
@@ -25,6 +26,7 @@ from app.modules.ai.service.prepared_action_service import (
 from app.modules.ai.service.result_projection_service import (
     result_projection_service,
 )
+from app.modules.system.ai_tools.user_management import AiUserRoleAssignment
 from app.modules.system.constants import ImportBatchStatus
 from app.modules.system.models.user import User
 from app.modules.system.models.user_transfer import UserImportBatch
@@ -95,6 +97,23 @@ def test_canonical_hash_is_key_order_independent_and_type_aware() -> None:
     assert canonical_payload_hash({"value": 1}) != canonical_payload_hash(
         {"value": "1"}
     )
+
+
+async def test_pending_freezes_json_enums_without_changing_hash_or_presence(db_session):
+    values = _create_kwargs()
+    args = {
+        "status": EnableStatus.ENABLED,
+        "roles": [AiUserRoleAssignment.DEFAULT],
+        "phone": None,
+    }
+    values["frozen_args"] = args
+    action = await prepared_action_service.create_pending(db_session, **values)
+    assert action.args_hash == canonical_payload_hash(args)
+    assert type(action.frozen_args["status"]) is str
+    assert type(action.frozen_args["roles"][0]) is str
+    assert "phone" in action.frozen_args and "email" not in action.frozen_args
+    args["roles"].clear()
+    assert action.frozen_args["roles"] == ["DEFAULT"]
 
 
 def test_scope_bound_action_rejects_data_scope_drift() -> None:

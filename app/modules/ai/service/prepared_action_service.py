@@ -1,5 +1,6 @@
 """Prepared-action freezing and confirmation-time verification."""
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -146,6 +147,12 @@ class PreparedActionService:
         field_authority=None,
     ) -> AiPreparedAction:
         """Persist one immutable authorization proposal without committing."""
+        # Validated model arguments may contain str/int enums. Persist the same
+        # JSON values and hash, without retaining typed or mutable input objects.
+        try:
+            frozen_args = json.loads(json.dumps(frozen_args, allow_nan=False))
+        except (TypeError, ValueError):
+            raise _binding_invalid("prepared action 参数必须为 JSON 数据") from None
         if conversation_id <= 0 or source_user_message_id <= 0 or not trace_id:
             raise _binding_invalid("prepared action 缺少可信会话或 source message 绑定")
         if resolved_model_id is None or resolved_provider_id is None:

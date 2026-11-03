@@ -414,7 +414,7 @@ async def test_real_export_file_and_database_completion_faults(
     confirmations = []
     real_complete = ai_execution_candidate._complete
     real_commit = authorization_execution.commit_authorization_session
-    real_authority = ai_execution_candidate.authorize
+    real_authority = ai_execution_candidate._authorize_live
 
     async def counted(db, tx, command, plan):
         calls.append(True)
@@ -458,7 +458,9 @@ async def test_real_export_file_and_database_completion_faults(
     monkeypatch.setattr(system_ai_tool_adapter, "apply", counted)
     monkeypatch.setattr(ai_execution_candidate, "_complete", complete)
     monkeypatch.setattr(authorization_execution, "commit_authorization_session", commit)
-    monkeypatch.setattr(ai_execution_candidate, "authorize", authorize)
+    # Inject at the live permission check, shared by pre- and post-apply checks.
+    # Historical source epochs are deliberately checked only before apply.
+    monkeypatch.setattr(ai_execution_candidate, "_authorize_live", authorize)
     preview.deps.signal_event = approve
     committed = failure in {"none", "commit_after", "missing_after"}
     try:

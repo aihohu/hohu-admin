@@ -20,6 +20,7 @@ from app.modules.system.service.role_management_service import role_management_s
 from app.modules.system.service.user_role_assignment_service import (
     user_role_assignment_service,
 )
+from tests.modules.ai.test_field_authority import evidence
 
 TENANT = tenant_context(actor_user_id=101)
 
@@ -542,7 +543,10 @@ async def test_data_scope_hash_tracks_every_enabled_scope_kind() -> None:
     assert union_hash != dept_only_hash
 
 
-async def test_download_token_is_owner_resource_and_projection_bound() -> None:
+@pytest.mark.parametrize("with_fields", [False, True])
+async def test_download_token_is_owner_resource_and_projection_bound(
+    with_fields,
+) -> None:
     user = _user("ai:chat:use")
     other_user = _user("ai:chat:use", user_id=999)
     lineage = result_projection_service.freeze_lineage(
@@ -552,6 +556,9 @@ async def test_download_token_is_owner_resource_and_projection_bound() -> None:
         subject_refs=[{"type": "user_export_task", "id": "exp-1"}],
         data_scope_hash="scope-1",
         projection_dependency_message_ids=[123],
+        field_authority=evidence(tenant_id=TENANT.tenant_id, actor_id=user.user_id)
+        if with_fields
+        else None,
     )
 
     with patch.object(
@@ -615,12 +622,13 @@ async def test_refresh_download_urls_replaces_persisted_token() -> None:
         tool_codes=["user.export"],
         subject_refs=[{"type": "user_export_task", "id": "exp-1"}],
         data_scope_hash="scope-1",
+        field_authority=evidence(tenant_id=TENANT.tenant_id, actor_id=user.user_id),
     )
     with patch.object(
         result_projection_service,
         "issue_download_token",
         AsyncMock(return_value="fresh-token"),
-    ):
+    ) as issue:
         refreshed = await result_projection_service.refresh_download_urls(
             AsyncMock(),
             user,
@@ -632,3 +640,4 @@ async def test_refresh_download_urls_replaces_persisted_token() -> None:
         )
 
     assert refreshed["downloadUrl"].endswith("token=fresh-token")
+    assert issue.call_args.kwargs["lineage"].field_authority == lineage.field_authority

@@ -340,6 +340,7 @@ async def _finalize_stream_turn(
     projection_dependency_message_ids: list[int] | tuple[int, ...] = (),
     tenant: TenantContext,
     actor_user_version: int,
+    field_authority: dict | None = None,
 ) -> list[AiStreamEvent]:
     """建立 durability barrier：assistant/terminal commit 完成后才构造 done。"""
     if stream_error_code is not None:
@@ -367,6 +368,7 @@ async def _finalize_stream_turn(
             lineage = result_projection_service.freeze_lineage(
                 tenant=tenant,
                 agent_code=agent_code,
+                field_authority=field_authority,
                 tool_codes=[],
                 subject_refs=[],
             )
@@ -1377,7 +1379,7 @@ async def chat(
         nonlocal ephemeral_field_authority
         owner = get_authorization_runtime().chat
         if conversation_id is not None and deps.source_user_message_id:
-            await owner.check_run(
+            ephemeral_field_authority = await owner.check_run(
                 tenant=deps.tenant,
                 actor_user_version=identity.user_version,
                 conversation_id=conversation_id,
@@ -1671,6 +1673,7 @@ async def chat(
                                 stream_error_code="AI_CHAT_STOPPED",
                                 tenant=deps.tenant,
                                 actor_user_version=identity.user_version,
+                                field_authority=ephemeral_field_authority,
                             )
 
                     with CancelScope(shield=True):
@@ -1704,6 +1707,7 @@ async def chat(
                         result_projection_service.freeze_lineage(
                             tenant=deps.tenant,
                             agent_code=deps.agent.code,
+                            field_authority=ephemeral_field_authority,
                             tool_codes=projection_snapshot[0],
                             subject_refs=projection_snapshot[1],
                             data_scope_hash=(
@@ -1721,6 +1725,7 @@ async def chat(
                     ),
                     tenant=deps.tenant,
                     actor_user_version=identity.user_version,
+                    field_authority=ephemeral_field_authority,
                 )
             else:
                 terminal_events = [

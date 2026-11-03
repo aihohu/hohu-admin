@@ -151,6 +151,7 @@ class ChatCandidate:
         await ai_field_authority.require(
             db, tx, tenant=tenant, frozen=source.field_authority, legacy=True
         )
+        return source.field_authority
 
     async def list_conversations(self, db, tx, *, tenant, actor_user_version, query):
         identity = await read_identity(
@@ -682,6 +683,9 @@ class ChatCandidate:
         actions, logs = await self._facts(
             db, tenant, conversation_id, source_id=source_id, trace_id=trace_id
         )
+        await ai_field_authority.require(
+            db, tx, tenant=tenant, frozen=source.field_authority, legacy=True
+        )
         if recovery_confirmation_id is not None:
             action = next(
                 (a for a in actions if a.confirmation_id == recovery_confirmation_id),
@@ -754,6 +758,7 @@ class ChatCandidate:
             lineage = result_projection_service.freeze_lineage(
                 tenant=tenant,
                 agent_code=log.agent_code,
+                field_authority=log.field_authority,
                 tool_codes=[log.tool_name],
                 subject_refs=[],
                 data_scope_hash=await result_projection_service.compute_data_scope_hash(
@@ -826,6 +831,7 @@ class ChatCandidate:
             lineage = result_projection_service.freeze_lineage(
                 tenant=tenant,
                 agent_code=value.agent_code,
+                field_authority=value.field_authority,
                 tool_codes=(
                     *(lineage.tool_codes if lineage else ()),
                     *value.tool_codes,
@@ -864,6 +870,7 @@ class ChatCandidate:
             lineage = result_projection_service.freeze_lineage(
                 tenant=tenant,
                 agent_code=agent_code,
+                field_authority=source.field_authority,
                 tool_codes=[],
                 subject_refs=[],
                 data_scope_hash=await result_projection_service.compute_data_scope_hash(
@@ -879,6 +886,7 @@ class ChatCandidate:
             lineage = result_projection_service.freeze_lineage(
                 tenant=tenant,
                 agent_code=lineage.agent_code,
+                field_authority=lineage.field_authority,
                 tool_codes=lineage.tool_codes,
                 subject_refs=lineage.subject_refs,
                 data_scope_hash=lineage.data_scope_hash,
@@ -916,11 +924,15 @@ class ChatCandidate:
                     lineage is None
                     or prior.agent_code != lineage.agent_code
                     or prior.data_scope_hash != lineage.data_scope_hash
+                    or not await result_projection_service.authorize_result_projection(
+                        db, actor, owner_user_id=tenant.actor_user_id, lineage=prior
+                    )
                 ):
                     raise _order_error()
                 lineage = result_projection_service.freeze_lineage(
                     tenant=tenant,
                     agent_code=lineage.agent_code,
+                    field_authority=lineage.field_authority,
                     tool_codes=(*prior.tool_codes, *lineage.tool_codes),
                     subject_refs=(*prior.subject_refs, *lineage.subject_refs),
                     data_scope_hash=lineage.data_scope_hash,

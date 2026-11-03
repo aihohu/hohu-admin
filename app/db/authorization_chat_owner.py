@@ -135,7 +135,15 @@ class ChatOwner:
         return await self._run("start_run", request)
 
     async def check_run(self, **request):
-        return await self._run("check_run", request)
+        # Only this read can restart after discovery races with a new tool log.
+        # Each attempt exits _run (including rollback) before rebuilding its plan.
+        async with asyncio.timeout(8):
+            for attempt in range(3):
+                try:
+                    return await self._run("check_run", request)
+                except BusinessException as exc:
+                    if exc.error_code != "AUTHORIZATION_SNAPSHOT_STALE" or attempt == 2:
+                        raise
 
     async def query_cache(self, **request):
         return await self._run("query_cache", request)
