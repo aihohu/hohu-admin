@@ -26,6 +26,7 @@ from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
 from app.modules.system.constants import (
     PHASE3_DESTRUCTIVE_PERMISSIONS,
+    USER_FIELD_POLICY_PERMISSIONS,
 )
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
@@ -95,6 +96,7 @@ def fresh_role_permission_menus(menus: list[Menu]) -> list[Menu]:
         AI_FILE_PARSE_PERMISSION,
         *PUBLISHED_AGENT_TOOL_PERMISSIONS,
         *PHASE3_DESTRUCTIVE_PERMISSIONS,
+        *USER_FIELD_POLICY_PERMISSIONS,
     }
     return [menu for menu in menus if menu.permission in permissions]
 

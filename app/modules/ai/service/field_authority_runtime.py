@@ -10,6 +10,7 @@ from app.modules.ai.service.field_authority import (
 )
 from app.modules.system.field_policy.documents import catalog_digest
 from app.modules.system.field_policy.user_fields import CATALOG_REVISION, USER_FIELDS
+from app.modules.system.service.user_field_active import active_policy_grants
 from app.modules.system.service.user_field_watermark import read_field_watermark
 
 
@@ -31,13 +32,20 @@ class AIFieldAuthority:
     async def current(self, db, tx, *, tenant):
         tx.assert_session(db)
         tx.assert_barrier(tenant.tenant_id)
+        await active_policy_grants(db, tx, tenant_id=tenant.tenant_id)
         state, epoch = await read_field_watermark(db, tx, tenant_id=tenant.tenant_id)
         if (
             state is None
             or epoch is None
-            or state.mode not in {"legacy", "ready"}
-            or state.ever_enforced
-            or state.active_manifest_digest is not None
+            or state.mode not in {"legacy", "ready", "enforcing"}
+            or (
+                state.mode == "enforcing"
+                and (not state.ever_enforced or state.active_manifest_digest is None)
+            )
+            or (
+                state.mode in {"legacy", "ready"}
+                and (state.ever_enforced or state.active_manifest_digest is not None)
+            )
             or state.catalog_revision != CATALOG_REVISION
             or state.catalog_digest != catalog_digest()
         ):
@@ -60,7 +68,7 @@ class AIFieldAuthority:
         self, db, tx, *, tenant, frozen, confirmation=False, legacy=False
     ):
         current = await self.current(db, tx, tenant=tenant)
-        if frozen is None and legacy:
+        if frozen is None and legacy and current["mode"] in {"legacy", "ready"}:
             # Only the explicit never-enforced legacy gate above permits this.
             return None
         require_current_field_authority(frozen, current, confirmation=confirmation)

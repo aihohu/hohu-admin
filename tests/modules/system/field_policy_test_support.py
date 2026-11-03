@@ -24,17 +24,23 @@ _MIGRATION = (
 )
 
 
-def _install(connection) -> None:
+def _install(connection, *, active=False) -> None:
     Base.metadata.create_all(
         connection, tables=[Tenant.__table__, Role.__table__, User.__table__]
     )
     migration = runpy.run_path(str(_MIGRATION))
     with Operations.context(MigrationContext.configure(connection)):
         migration["upgrade"]()
+        if active:
+            runpy.run_path(
+                str(
+                    _MIGRATION.with_name("e0204a000001_user_field_policy_activation.py")
+                )
+            )["upgrade"]()
 
 
 @asynccontextmanager
-async def isolated_field_policy_schema(base_engine: AsyncEngine):
+async def isolated_field_policy_schema(base_engine: AsyncEngine, *, active=False):
     """Allow real commits without deleting append-only facts from shared tables.
 
     The caller owns the dedicated test database. Every new connection receives
@@ -51,7 +57,7 @@ async def isolated_field_policy_schema(base_engine: AsyncEngine):
                 text("SELECT set_config('search_path', :schema, true)"),
                 {"schema": schema},
             )
-            await connection.run_sync(_install)
+            await connection.run_sync(_install, active=active)
         scoped_engine = create_async_engine(
             base_engine.url,
             poolclass=NullPool,

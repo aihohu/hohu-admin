@@ -12,7 +12,18 @@ from datetime import date, datetime
 from decimal import Decimal
 from itertools import groupby
 
-from sqlalchemy import column, delete, func, insert, select, table, text, tuple_, update
+from sqlalchemy import (
+    case,
+    column,
+    delete,
+    func,
+    insert,
+    select,
+    table,
+    text,
+    tuple_,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -39,6 +50,7 @@ from app.db.authorization_plan_session import (
     _timeout_error,
 )
 from app.modules.system.field_policy.documents import catalog_digest
+from app.modules.system.field_policy.state import valid_policy_state
 from app.modules.system.field_policy.user_fields import CATALOG_REVISION
 from app.modules.system.models.tenant import Tenant
 from app.modules.system.models.user_field_policy import (
@@ -496,9 +508,12 @@ class _Transaction:
                 for row in rows:
                     if (
                         row["object_type"] != "user"
-                        or row["mode"] not in {"legacy", "ready"}
-                        or row["ever_enforced"]
-                        or row["active_manifest_digest"] is not None
+                        or not valid_policy_state(
+                            row["mode"],
+                            row["ever_enforced"],
+                            row["candidate_manifest_digest"],
+                            row["active_manifest_digest"],
+                        )
                         or row["epoch"] < 1
                         or row["catalog_revision"] != CATALOG_REVISION
                         or row["catalog_digest"] != expected_digest
@@ -695,7 +710,7 @@ class _Transaction:
                 key.tenant_id != self._policy["tenant_id"]
                 or key.kind is not ResourceKind.POLICY_BINDING
                 or self._policy["completed"]
-                or self._policy["action"] == "ready"
+                or self._policy["action"] in {"ready", "activate", "freeze"}
             ):
                 raise _order_error()
         else:
@@ -1027,7 +1042,12 @@ class _Transaction:
                     await self._execute(
                         update(state)
                         .where(state.c.tenant_id.in_(batch))
-                        .values(epoch=state.c.epoch + 1, mode="legacy")
+                        .values(
+                            epoch=state.c.epoch + 1,
+                            mode=case(
+                                (state.c.ever_enforced, state.c.mode), else_="legacy"
+                            ),
+                        )
                         .returning(state.c.tenant_id)
                     )
                 )
@@ -1093,7 +1113,7 @@ class _Transaction:
                 or self._aggregate_tenant is not None
                 or self._aggregate_global
                 or type(action) is not str
-                or action not in {"publish", "archive", "ready"}
+                or action not in {"publish", "archive", "ready", "activate", "freeze"}
             ):
                 raise _order_error()
             self._policy = {
@@ -1136,15 +1156,50 @@ class _Transaction:
                     )
                 )
                 or (
-                    frame["action"] == "ready"
+                    frame["action"] in {"ready", "activate", "freeze"}
                     and (
                         frame["binding_changes"] or expected_manifest != manifest_digest
                     )
                 )
-                or (frame["action"] != "ready" and not frame["binding_changes"])
+                or (
+                    frame["action"] not in {"ready", "activate", "freeze"}
+                    and not frame["binding_changes"]
+                )
             ):
                 raise _order_error()
             state = UserFieldPolicyState.__table__
+            current = (
+                (
+                    await self._execute(
+                        select(state).where(state.c.tenant_id == frame["tenant_id"])
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            action, mode = frame["action"], current["mode"]
+            if action == "activate" and mode not in {"ready", "frozen"}:
+                raise _stale()
+            if action == "freeze" and mode != "enforcing":
+                raise _stale()
+            if action == "ready" and (
+                current["ever_enforced"] or mode not in {"legacy", "ready"}
+            ):
+                raise _stale()
+            new_mode = {
+                "activate": "enforcing",
+                "freeze": "frozen",
+                "ready": "ready",
+            }.get(action, mode if current["ever_enforced"] else "legacy")
+            values = {
+                "epoch": state.c.epoch + 1,
+                "mode": new_mode,
+                "candidate_manifest_digest": manifest_digest,
+            }
+            if new_mode == "enforcing":
+                values.update(
+                    ever_enforced=True, active_manifest_digest=manifest_digest
+                )
             await self._timeouts()
             epoch = (
                 await self._execute(
@@ -1156,11 +1211,7 @@ class _Transaction:
                             expected_manifest
                         ),
                     )
-                    .values(
-                        epoch=state.c.epoch + 1,
-                        mode="ready" if frame["action"] == "ready" else "legacy",
-                        candidate_manifest_digest=manifest_digest,
-                    )
+                    .values(**values)
                     .returning(state.c.epoch)
                 )
             ).scalar_one_or_none()
@@ -1565,7 +1616,11 @@ class _Transaction:
                         or values.get("after_digest") != frame["manifest"]
                     ):
                         raise _order_error()
-                elif frame["completed"] or frame["action"] == "ready":
+                elif frame["completed"] or frame["action"] in {
+                    "ready",
+                    "activate",
+                    "freeze",
+                }:
                     raise _order_error()
             if (
                 key not in {item.key for item in self._plan.new}

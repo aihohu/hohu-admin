@@ -1,7 +1,7 @@
-"""Trusted transfer field adapter; production remains explicitly legacy/ready.
+"""Trusted transfer field adapter for compatibility and verified active policies.
 
 All planning runs before domain locks, under the owner's G/B barrier. A policy
-adapter may replace context construction internally; no request supplies rules.
+provider selects current rules internally; no request supplies rules.
 """
 
 from dataclasses import replace
@@ -31,6 +31,7 @@ from app.modules.system.models.user_field_policy import (
     UserFieldPolicyState,
 )
 from app.modules.system.service import user_export_service as exports
+from app.modules.system.service.user_field_active import active_policy_grants
 from app.modules.system.service.user_field_compatibility import (
     require_legacy_field_policy,
 )
@@ -72,16 +73,17 @@ class UserTransferFields:
         self.legacy_assets = legacy_assets
 
     async def context(self, db, tx, *, tenant, version):
-        await require_legacy_field_policy(db, tx, tenant_id=tenant.tenant_id)
         actor = await load_current_user(db, tenant=tenant, actor_user_version=version)
+        role_ids = tuple(str(r.role_id) for r in actor.roles if r.status == "1")
+        active = await active_policy_grants(
+            db, tx, tenant_id=tenant.tenant_id, role_ids=role_ids
+        )
         return await user_field_context.load(
             db,
             tx,
             tenant=tenant,
             actor_user_version=version,
-            grants=_rules(
-                tuple(str(r.role_id) for r in actor.roles if r.status == "1")
-            ),
+            grants=_rules(role_ids) if active is None else active,
         )
 
     async def stamp(self, db, tx, *, tenant_id):

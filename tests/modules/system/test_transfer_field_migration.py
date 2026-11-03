@@ -14,7 +14,13 @@ async def test_lineage_upgrade_keeps_historical_null_and_enforces_budget(
     migration_connection,
 ):
     connection = migration_connection
-    chain = release_chain()
+    revisions = release_chain()
+    lineage_index = next(
+        index
+        for index, migration in enumerate(revisions)
+        if migration.revision == "e0203b000001"
+    )
+    chain = revisions[: lineage_index + 1]
 
     def migrate(sync, modules, method):
         with Operations.context(MigrationContext.configure(sync)):
@@ -22,6 +28,12 @@ async def test_lineage_upgrade_keeps_historical_null_and_enforces_budget(
                 getattr(module, method)()
 
     await connection.run_sync(migrate, chain[:-1], "upgrade")
+    lineage_exists = text(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+        "WHERE table_schema=current_schema() AND table_name='sys_user_export_task' "
+        "AND column_name='field_lineage')"
+    )
+    assert not await connection.scalar(lineage_exists)
     await connection.execute(
         text(
             "INSERT INTO sys_user (tenant_id,user_id,user_name,hashed_password,status) VALUES (0,101,'historic','unused','1')"
@@ -48,6 +60,7 @@ async def test_lineage_upgrade_keeps_historical_null_and_enforces_budget(
                     {"value": value},
                 )
     await connection.run_sync(migrate, chain[-1:], "downgrade")
+    assert not await connection.scalar(lineage_exists)
     assert (
         await connection.scalar(
             text("SELECT reason FROM sys_user_export_task WHERE export_id='old'")

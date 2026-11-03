@@ -170,7 +170,11 @@ _policy = tuple(
     Candidate(
         "policy." + method,
         _POLICY + "." + method,
-        (_S + "user_field_policy_service.UserFieldPolicyService." + method,),
+        (
+            (_POLICY + ".transition",)
+            if method == "transition"
+            else (_S + "user_field_policy_service.UserFieldPolicyService." + method,)
+        ),
         "caller_owned",
         "proof_writer",
         "S",
@@ -182,7 +186,7 @@ _policy = tuple(
         _TX + ".complete_policy_change",
         True,
     )
-    for method in ("publish", "archive", "mark_ready")
+    for method in ("publish", "archive", "mark_ready", "transition")
 )
 
 CANDIDATES = (
@@ -1835,7 +1839,26 @@ CANDIDATES += tuple(
 # Composition is checked separately from ingress activation. These fixed methods
 # keep the delegated lock/IO contract; none implies an HTTP route is connected.
 _RUNTIME = "app.db.authorization_runtime.AuthorizationRuntime"
+CANDIDATES += (
+    Candidate(
+        "policy.public_owner",
+        "app.db.authorization_policy_owner.UserFieldPolicyOwner.execute",
+        (_POLICY + ".publish", _POLICY + ".mark_ready", _POLICY + ".transition"),
+        "app.db.authorization_policy_owner.UserFieldPolicyOwner.execute",
+        "owner",
+        "S",
+        "argument:TenantContext",
+        ("S", "X"),
+        _POLICY + ".plan",
+        "app.db.authorization_policy_owner.UserFieldPolicyOwner.execute",
+        "policy-proof",
+        _TX + ".complete_policy_change",
+        False,
+    ),
+)
+
 _RUNTIME_DELEGATES = {
+    "field_policy": "app.db.authorization_policy_owner.UserFieldPolicyOwner.execute",
     "user_read": "app.db.authorization_user_read_owner.UserReadOwner.execute",
     "control_read": "app.db.authorization_catalog_read_owner.CatalogReadOwner.execute",
     "system": _SYSTEM_OWNER,

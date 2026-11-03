@@ -19,15 +19,16 @@ from app.modules.system.schemas.login_log import LoginLogOut
 from app.modules.system.schemas.operation_log import OperationLogOut
 from app.modules.system.service.login_log_service import login_log_service
 from app.modules.system.service.operation_log_service import operation_log_service
-from app.modules.system.service.user_field_compatibility import (
-    require_legacy_field_policy,
-)
+from app.modules.system.service.user_field_active import active_policy_grants
 
 
 class UserCopyReadService:
     async def audit_page(self, db, tx, *, tenant, context, operation, query):
-        """Preserve legacy/ready audit facts; no candidate policy changes delivery."""
-        await require_legacy_field_policy(db, tx, tenant_id=tenant.tenant_id)
+        """Project active audit sources; preserve never-enforced compatibility."""
+        if await active_policy_grants(db, tx, tenant_id=tenant.tenant_id) is not None:
+            return await self.projected_audit_page(
+                db, tx, tenant=tenant, context=context, operation=operation, query=query
+            )
         if context.transaction is not tx or context.tenant_id != tenant.tenant_id:
             raise _order_error()
         if operation not in {"operation-logs", "login-logs"}:

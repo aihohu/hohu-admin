@@ -47,8 +47,16 @@ class UserFieldPolicyState(Base):
     __tablename__ = "sys_user_field_policy_state"
     __table_args__ = (
         CheckConstraint("object_type = 'user'", name="ck_ufp_state_object"),
-        CheckConstraint("mode IN ('legacy', 'ready')", name="ck_ufp_state_mode"),
-        CheckConstraint("ever_enforced = false", name="ck_ufp_state_not_enforced"),
+        CheckConstraint(
+            "mode IN ('legacy', 'ready', 'enforcing', 'frozen')",
+            name="ck_ufp_state_mode",
+        ),
+        CheckConstraint(
+            "(mode IN ('legacy', 'ready') AND ever_enforced = false AND active_manifest_digest IS NULL) OR "
+            "(mode IN ('enforcing', 'frozen') AND ever_enforced = true AND active_manifest_digest IS NOT NULL "
+            "AND active_manifest_digest ~ '^[0-9a-f]{64}$')",
+            name="ck_ufp_state_enforcement",
+        ),
         CheckConstraint("epoch >= 1", name="ck_ufp_state_epoch"),
         CheckConstraint(
             "btrim(catalog_revision) <> ''", name="ck_ufp_state_catalog_revision"
@@ -62,7 +70,8 @@ class UserFieldPolicyState(Base):
             name="ck_ufp_state_candidate_digest",
         ),
         CheckConstraint(
-            "active_manifest_digest IS NULL", name="ck_ufp_state_no_active_manifest"
+            "mode <> 'enforcing' OR (candidate_manifest_digest IS NOT NULL AND active_manifest_digest = candidate_manifest_digest)",
+            name="ck_ufp_state_active_manifest",
         ),
         CheckConstraint(
             "mode <> 'ready' OR candidate_manifest_digest IS NOT NULL",
@@ -206,7 +215,8 @@ class UserFieldPolicyAudit(Base):
             ondelete="RESTRICT",
         ),
         CheckConstraint(
-            "action IN ('publish', 'archive', 'ready')", name="ck_ufp_audit_action"
+            "action IN ('publish', 'archive', 'ready', 'activate', 'freeze')",
+            name="ck_ufp_audit_action",
         ),
         CheckConstraint("actor_user_id > 0", name="ck_ufp_audit_actor"),
         CheckConstraint("btrim(reason) <> ''", name="ck_ufp_audit_reason"),
@@ -223,7 +233,7 @@ class UserFieldPolicyAudit(Base):
             name="ck_ufp_audit_revision_role",
         ),
         CheckConstraint(
-            "(action = 'ready' AND role_id IS NULL AND revision_id IS NULL) OR "
+            "(action IN ('ready', 'activate', 'freeze') AND role_id IS NULL AND revision_id IS NULL) OR "
             "(action IN ('publish', 'archive') AND role_id IS NOT NULL "
             "AND revision_id IS NOT NULL)",
             name="ck_ufp_audit_action_target",

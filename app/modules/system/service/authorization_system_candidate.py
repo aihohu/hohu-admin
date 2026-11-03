@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from sqlalchemy import select
-from sqlalchemy.orm import noload
 
 from app.constants import ADMIN_USERNAME, SUPER_ADMIN_ROLE_CODE
 from app.core.authorization_io import hash_password, verify_password
@@ -35,8 +34,6 @@ from app.core.id_generator import next_id
 from app.core.tenant import TenantContext
 from app.db.authorization_owner import rollback_authorization_session
 from app.db.authorization_plan_session import AuthorizationPlanSession, _order_error
-from app.modules.system.field_policy.write_plan import validate_legacy_user_payload
-from app.modules.system.models.tenant import Tenant
 from app.modules.system.models.user import User
 from app.modules.system.schemas.dept import DeptCreate, DeptMove, DeptUpdate
 from app.modules.system.schemas.role import RoleCreate, RoleUpdate
@@ -70,9 +67,8 @@ from app.modules.system.service.user_department_assignment_service import (
 from app.modules.system.service.user_department_assignment_service import (
     user_department_assignment_service as departments,
 )
-from app.modules.system.service.user_field_compatibility import (
-    require_legacy_field_policy,
-)
+from app.modules.system.service.user_field_write_guard import validate_system_fields
+from app.modules.system.service.user_identity import require_current_identity
 from app.modules.system.service.user_role_assignment_service import (
     user_role_assignment_service as roles,
 )
@@ -240,34 +236,7 @@ class SystemAuthorizationCandidate:
         return facts
 
     async def _identity(self, db, tenant, user_version):
-        if type(user_version) is not int or user_version < 1:
-            raise _order_error()
-        live_tenant = await db.scalar(
-            select(Tenant)
-            .where(Tenant.tenant_id == tenant.tenant_id)
-            .execution_options(populate_existing=True)
-        )
-        actor = await db.scalar(
-            select(User)
-            .where(
-                User.tenant_id == tenant.tenant_id, User.user_id == tenant.actor_user_id
-            )
-            .options(noload("*"))
-            .execution_options(populate_existing=True)
-        )
-        if (
-            live_tenant is None
-            or live_tenant.status != "1"
-            or live_tenant.row_version != tenant.tenant_version
-            or live_tenant.tenant_code != tenant.tenant_code
-            or actor is None
-            or actor.status != "1"
-            or actor.auth_version != user_version
-        ):
-            raise AuthenticationException(
-                "当前身份已经失效", error_code="INVALID_CREDENTIALS"
-            )
-        return actor
+        return await require_current_identity(db, tenant, user_version)
 
     def _check_input(self, operation, payload, target_id):
         expected = {
@@ -441,9 +410,16 @@ class SystemAuthorizationCandidate:
             raise AuthorizationException(
                 "缺少操作权限", error_code="MISSING_PERMISSION"
             )
-        if operation in {"user.create", "user.update", "user.profile"}:
-            await require_legacy_field_policy(db, tx, tenant_id=tenant.tenant_id)
-            validate_legacy_user_payload(payload)
+        await validate_system_fields(
+            db,
+            tx,
+            tenant=tenant,
+            actor_user_version=actor_user_version,
+            operation=operation,
+            payload=payload,
+            target_id=target_id,
+            facts=facts,
+        )
         prepared = await self._prepare(
             db,
             tenant,

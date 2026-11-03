@@ -13,9 +13,7 @@ from app.modules.system.field_policy.evaluator import (
 )
 from app.modules.system.field_policy.user_fields import USER_FIELDS
 from app.modules.system.models.user import User
-from app.modules.system.service.user_field_compatibility import (
-    require_legacy_field_policy,
-)
+from app.modules.system.service.user_field_active import active_policy_grants
 from app.modules.system.service.user_field_context import (
     load_current_user,
     user_field_context,
@@ -55,20 +53,17 @@ def _denied(code="FIELD_WRITE_DENIED"):
 
 class UserAIFields:
     async def context(self, db, tx, *, tenant, version):
-        # The AI owner first proves the never-enforced legacy/ready gate. This
-        # compatibility provider is not an active-policy loader.
-        await require_legacy_field_policy(
-            db, tx, tenant_id=tenant.tenant_id, _after_plan=True
-        )
         actor = await load_current_user(db, tenant=tenant, actor_user_version=version)
+        role_ids = tuple(str(r.role_id) for r in actor.roles if r.status == "1")
+        active = await active_policy_grants(
+            db, tx, tenant_id=tenant.tenant_id, role_ids=role_ids
+        )
         return await user_field_context.load(
             db,
             tx,
             tenant=tenant,
             actor_user_version=version,
-            grants=_legacy_rules(
-                tuple(str(r.role_id) for r in actor.roles if r.status == "1")
-            ),
+            grants=_legacy_rules(role_ids) if active is None else active,
             _after_plan=True,
         )
 

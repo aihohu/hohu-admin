@@ -11,6 +11,16 @@ from app.modules.system.field_policy.documents import catalog_digest
 from app.modules.system.field_policy.user_fields import CATALOG_REVISION
 
 
+@pytest.fixture(autouse=True)
+def verified_provider(monkeypatch):
+    # Unit tests of watermark comparison; the real active provider is covered
+    # with committed PostgreSQL barriers in test_user_field_active.py.
+    monkeypatch.setattr(
+        "app.modules.ai.service.field_authority_runtime.active_policy_grants",
+        AsyncMock(return_value=None),
+    )
+
+
 def session(*, mode="legacy", epoch=3):
     state = SimpleNamespace(
         mode=mode,

@@ -229,9 +229,9 @@ class PlannedUserFieldPolicyService:
     async def plan(self, db, tx, *, tenant, action, role_id=None):
         """Declare the entire candidate operation before the owner's one lock()."""
         _session(db, tx, tenant)
-        if action not in {"publish", "archive", "ready"}:
+        if action not in {"publish", "archive", "ready", "activate", "freeze"}:
             raise _invalid()
-        if (action == "ready") != (role_id is None):
+        if (action in {"ready", "activate", "freeze"}) != (role_id is None):
             raise _invalid()
         if role_id is not None:
             _version(role_id, zero=False)
@@ -241,7 +241,7 @@ class PlannedUserFieldPolicyService:
             keys.add(_key(ResourceKind.POLICY_BINDING, tenant, binding["role_id"]))
         if role_id is not None:
             keys.add(_key(ResourceKind.ROLE, tenant, role_id))
-        if action == "ready":
+        if action in {"ready", "activate"}:
             source_budget = AuthorizationReadBudget(
                 max_rows=_SOURCE_MAX_ROWS, max_bytes=_SOURCE_MAX_BYTES
             )
@@ -431,7 +431,7 @@ class PlannedUserFieldPolicyService:
             plan.actor_user_id,
         ) != (action, tenant.tenant_id, tenant.actor_user_id):
             raise _error()
-        if (action == "ready") != (plan.role_id is None):
+        if (action in {"ready", "activate", "freeze"}) != (plan.role_id is None):
             raise _error()
         # A declaration can be rebuilt by callers. Only actual executor-held
         # keys establish proof, including mandatory keys omitted from a plan.
@@ -646,6 +646,35 @@ class PlannedUserFieldPolicyService:
         manifest = state["candidate_manifest_digest"]
         if manifest is None or manifest != expected_manifest_digest:
             raise _error("FIELD_POLICY_STALE")
+        await self._verify_sources(db, tx, tenant)
+        if state["ever_enforced"]:
+            raise _error("FIELD_POLICY_STATE_CONFLICT")
+        if state["mode"] == "ready":
+            return self._state_snapshot(state)
+        async with tx.savepoint():
+            async with tx.policy_change(tenant.tenant_id, action="ready"):
+                epoch = await tx.complete_policy_change(
+                    expected_epoch=expected_epoch,
+                    expected_manifest=manifest,
+                    manifest_digest=manifest,
+                )
+                await self._audit(
+                    tx,
+                    plan,
+                    tenant,
+                    action="ready",
+                    state=state,
+                    manifest=manifest,
+                    epoch=epoch,
+                    revision_id=None,
+                    before_version=expected_epoch,
+                    after_version=epoch,
+                    reason=reason,
+                    correlation_id=correlation_id,
+                )
+        return self._state_snapshot(await self._state(db, tenant))
+
+    async def _verify_sources(self, db, tx, tenant):
         source_budget = AuthorizationReadBudget(
             max_rows=_SOURCE_MAX_ROWS, max_bytes=_SOURCE_MAX_BYTES
         )
@@ -670,10 +699,37 @@ class PlannedUserFieldPolicyService:
                 raise _error("FIELD_POLICY_STALE") from None
             if actual != revision["source_digest"]:
                 raise _error("FIELD_POLICY_STALE")
-        if state["mode"] == "ready":
-            return self._state_snapshot(state)
+
+    async def transition(
+        self,
+        db,
+        tx,
+        plan,
+        *,
+        tenant,
+        expected_epoch,
+        expected_manifest_digest,
+        reason,
+        correlation_id,
+    ):
+        if plan.action not in {"activate", "freeze"}:
+            raise _invalid()
+        _version(expected_epoch, zero=False)
+        state, count, reason, correlation_id = await self._prepare(
+            db, tx, plan, tenant, plan.action, reason, correlation_id
+        )
+        manifest = state["candidate_manifest_digest"]
+        if (
+            not count
+            or manifest is None
+            or state["epoch"] != expected_epoch
+            or manifest != expected_manifest_digest
+        ):
+            raise _error("FIELD_POLICY_VERSION_CONFLICT")
+        if plan.action == "activate":
+            await self._verify_sources(db, tx, tenant)
         async with tx.savepoint():
-            async with tx.policy_change(tenant.tenant_id, action="ready"):
+            async with tx.policy_change(tenant.tenant_id, action=plan.action):
                 epoch = await tx.complete_policy_change(
                     expected_epoch=expected_epoch,
                     expected_manifest=manifest,
@@ -683,7 +739,7 @@ class PlannedUserFieldPolicyService:
                     tx,
                     plan,
                     tenant,
-                    action="ready",
+                    action=plan.action,
                     state=state,
                     manifest=manifest,
                     epoch=epoch,

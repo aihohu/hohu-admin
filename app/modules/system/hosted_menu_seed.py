@@ -6,6 +6,7 @@ that would let a tenant-local menu editor influence a future tenant's routes.
 
 from dataclasses import dataclass
 
+from app.modules.system.constants import USER_FIELD_POLICY_PERMISSIONS
 from app.modules.system.menu_seed import (
     MENU_DEFINITIONS,
     build_initial_menus,
@@ -62,48 +63,51 @@ HOSTED_ROUTE_NAMES = frozenset(
         "system_login-log",
     )
 )
-HOSTED_BUTTON_PERMISSIONS = frozenset(
-    (
-        "system:setting:list",
-        "system:setting:edit",
-        "system:config:list",
-        "system:config:add",
-        "system:config:edit",
-        "system:config:delete",
-        "system:config:batch-delete",
-        "system:config:export",
-        "system:config:import",
-        "ai:chat:use",
-        "ai:file:parse",
-        "system:dept:list",
-        "system:dept:add",
-        "system:dept:edit",
-        "system:dept:move",
-        "system:dept:delete",
-        "system:dept:batch-delete",
-        "system:user:list",
-        "system:user:add",
-        "system:user:edit",
-        "system:user:delete",
-        "system:user:batch-delete",
-        "system:user:reset-password",
-        "system:user:import",
-        "system:user:export",
-        "system:user:role-auth",
-        "system:role:list",
-        "system:role:add",
-        "system:role:edit",
-        "system:role:menu-auth",
-        "system:role:ai-agent-auth",
-        "system:role:delete",
-        "system:role:batch-delete",
-        "system:file:list",
-        "system:file:upload",
-        "system:file:delete",
-        "system:job:edit",
-        "monitor:operation-log:list",
-        "monitor:login-log:list",
+HOSTED_BUTTON_PERMISSIONS = (
+    frozenset(
+        (
+            "system:setting:list",
+            "system:setting:edit",
+            "system:config:list",
+            "system:config:add",
+            "system:config:edit",
+            "system:config:delete",
+            "system:config:batch-delete",
+            "system:config:export",
+            "system:config:import",
+            "ai:chat:use",
+            "ai:file:parse",
+            "system:dept:list",
+            "system:dept:add",
+            "system:dept:edit",
+            "system:dept:move",
+            "system:dept:delete",
+            "system:dept:batch-delete",
+            "system:user:list",
+            "system:user:add",
+            "system:user:edit",
+            "system:user:delete",
+            "system:user:batch-delete",
+            "system:user:reset-password",
+            "system:user:import",
+            "system:user:export",
+            "system:user:role-auth",
+            "system:role:list",
+            "system:role:add",
+            "system:role:edit",
+            "system:role:menu-auth",
+            "system:role:ai-agent-auth",
+            "system:role:delete",
+            "system:role:batch-delete",
+            "system:file:list",
+            "system:file:upload",
+            "system:file:delete",
+            "system:job:edit",
+            "monitor:operation-log:list",
+            "monitor:login-log:list",
+        )
     )
+    | USER_FIELD_POLICY_PERMISSIONS
 )
 
 HOSTED_MENU_DEFINITIONS = tuple(

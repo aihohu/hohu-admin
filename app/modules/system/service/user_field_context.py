@@ -16,9 +16,7 @@ from app.modules.system.field_policy.evaluator import FieldGrant, resolve_record
 from app.modules.system.field_policy.user_fields import USER_FIELDS
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
-from app.modules.system.service.authorization_system_candidate import (
-    system_authorization_candidate,
-)
+from app.modules.system.service.user_identity import require_current_identity
 from app.utils.data_scope import (
     get_user_filters_from_resolution,
     resolve_data_scope_for_roles,
@@ -32,7 +30,7 @@ def _limit():
 
 
 async def load_current_user(db, *, tenant, actor_user_version):
-    await system_authorization_candidate._identity(db, tenant, actor_user_version)
+    await require_current_identity(db, tenant, actor_user_version)
     return await db.scalar(
         select(User)
         .where(
@@ -130,6 +128,14 @@ class UserFieldContextService:
         actor = await load_current_user(
             db, tenant=tenant, actor_user_version=actor_user_version
         )
+        return await self.for_actor(db, tx, tenant=tenant, actor=actor, grants=grants)
+
+    async def for_actor(self, db, tx, *, tenant, actor, grants):
+        """Internal management preview; caller authorizes the actor sample first."""
+        tx.assert_session(db)
+        tx.assert_barrier(tenant.tenant_id)
+        if int(actor.tenant_id) != tenant.tenant_id:
+            raise _order_error()
         enabled = tuple(role for role in actor.roles if role.status == "1")
         if len(enabled) > 1024:
             raise _limit()

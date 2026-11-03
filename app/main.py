@@ -43,6 +43,7 @@ from app.modules.system.api.operation_log import router as operation_log_router
 from app.modules.system.api.role import router as role_router
 from app.modules.system.api.settings import router as settings_router
 from app.modules.system.api.user import router as user_router
+from app.modules.system.api.user_field_policy import router as user_field_policy_router
 from app.modules.system.service.file_service import file_service
 
 if settings.AI_MODULE_ENABLED:
@@ -261,6 +262,9 @@ app.include_router(
 )
 app.include_router(platform_control_router, prefix="/platform", tags=["平台租户控制面"])
 app.include_router(user_router, prefix="/system/user", tags=["用户管理"])
+app.include_router(
+    user_field_policy_router, prefix="/system/user-field-policy", tags=["用户字段策略"]
+)
 app.include_router(
     data_scope_demo_router,
     prefix="/system/data-scope-demo",

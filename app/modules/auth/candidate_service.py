@@ -6,6 +6,7 @@ from app.modules.system.service.auth_candidate_account_service import (
     auth_candidate_accounts,
 )
 from app.modules.system.service.authorization_transaction_service import _Transaction
+from app.modules.system.service.user_field_account_guard import require_own_email_write
 
 
 class AuthCandidateService:
@@ -44,6 +45,12 @@ class AuthCandidateService:
                 "Account authorization changed",
                 error_code="AUTHORIZATION_SNAPSHOT_STALE",
             )
+        if operation == "bind" or (
+            operation == "email"
+            and payload is not None
+            and not hasattr(payload, "purpose")
+        ):
+            await require_own_email_write(db, tx, current)
         if operation in {"login", "refresh", "current", "email"}:
             return current
         return await auth_candidate_accounts.apply(

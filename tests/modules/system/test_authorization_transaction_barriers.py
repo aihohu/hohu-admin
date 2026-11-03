@@ -31,7 +31,7 @@ from tests.modules.system.field_policy_test_support import isolated_field_policy
 async def plan_sessions():
     base = create_async_engine(engine.url, poolclass=NullPool)
     try:
-        async with isolated_field_policy_schema(base) as scoped:
+        async with isolated_field_policy_schema(base, active=True) as scoped:
             plain = async_sessionmaker(scoped, expire_on_commit=False, autoflush=False)
             async with plain() as db:
                 for tenant_id in (0, 1):

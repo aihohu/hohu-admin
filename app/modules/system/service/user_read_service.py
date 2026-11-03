@@ -1,8 +1,8 @@
 """Bounded user reads and explicit DTOs under the authorization barriers.
 
-The current database schema supports legacy/ready only. Compatibility grants
-below preserve that behavior; they are never active field-policy rules. There
-is no mode, purpose or rule parameter on the production read owner.
+Only never-enforced legacy/ready states use compatibility grants. Active reads
+load verified immutable policy rules; unavailable policies fail closed. The
+production read owner accepts no client-selected mode, purpose or rules.
 """
 
 from sqlalchemy import func, select
@@ -37,9 +37,7 @@ from app.modules.system.service.user_copy_read_service import user_copy_read_ser
 from app.modules.system.service.user_department_assignment_service import (
     user_department_assignment_service,
 )
-from app.modules.system.service.user_field_compatibility import (
-    require_legacy_field_policy,
-)
+from app.modules.system.service.user_field_active import active_policy_grants
 from app.modules.system.service.user_field_context import (
     load_current_user,
     user_field_context,
@@ -125,12 +123,15 @@ class UserReadService:
                 "字段上下文超出预算",
                 error_code="AUTHORIZATION_PLAN_LIMIT_EXCEEDED",
             )
+        active = await active_policy_grants(
+            db, tx, tenant_id=tenant.tenant_id, role_ids=role_ids
+        )
         return await user_field_context.load(
             db,
             tx,
             tenant=tenant,
             actor_user_version=actor_user_version,
-            grants=_legacy_rules(role_ids),
+            grants=_legacy_rules(role_ids) if active is None else active,
         )
 
     async def execute(
@@ -138,7 +139,6 @@ class UserReadService:
     ):
         tx.assert_session(db)
         tx.assert_planning(tenant.tenant_id)
-        await require_legacy_field_policy(db, tx, tenant_id=tenant.tenant_id)
         if operation not in {
             "list",
             "profile",
@@ -164,6 +164,17 @@ class UserReadService:
         actor = await self.actor(
             db, tenant=tenant, actor_user_version=actor_user_version
         )
+        if operation == "auth":
+            # Frozen/unavailable policies retain only the minimal authenticated
+            # identity and control-plane function codes needed for repair.
+            try:
+                await active_policy_grants(db, tx, tenant_id=tenant.tenant_id)
+            except BusinessException as exc:
+                if exc.error_code != "FIELD_POLICY_UNAVAILABLE":
+                    raise
+                return collect_user_identity(actor)
+        else:
+            await active_policy_grants(db, tx, tenant_id=tenant.tenant_id)
         permissions = frozenset(collect_user_buttons(actor)) | (
             frozenset({"*"}) if is_super_admin(actor) else frozenset()
         )
@@ -279,18 +290,22 @@ class UserReadService:
                 query=query,
                 permissions=permissions,
             )
+        own_roles = tuple(str(r.role_id) for r in actor.roles if r.status == "1")
+        own_grants = await active_policy_grants(
+            db, tx, tenant_id=tenant.tenant_id, role_ids=own_roles
+        )
         decisions = resolve_own_account_fields(
             actor=(tenant.tenant_id, tenant.actor_user_id),
             target=(int(actor.tenant_id), int(actor.user_id)),
-            grants=(),
-            applicable_role_ids=frozenset(),
+            grants=own_grants or (),
+            applicable_role_ids=frozenset(own_roles),
             operation="read",
         )
         writes = resolve_own_account_fields(
             actor=(tenant.tenant_id, tenant.actor_user_id),
             target=(int(actor.tenant_id), int(actor.user_id)),
-            grants=(),
-            applicable_role_ids=frozenset(),
+            grants=own_grants or (),
+            applicable_role_ids=frozenset(own_roles),
             operation="update",
         )
         if operation == "profile":
