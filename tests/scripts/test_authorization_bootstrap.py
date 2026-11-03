@@ -1,9 +1,7 @@
 """Fresh installation is a database proof, never an empty process inventory."""
 
 import json
-import runpy
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
 from alembic.migration import MigrationContext
@@ -17,29 +15,27 @@ from app.db.authorization_runtime import AuthorizationRuntime
 from tests.scripts.test_authorization_maintenance_database import (
     deployment_database as deployment_database,
 )
+from tests.test_release_migration_roundtrip import release_chain
 from tools.ops import authorization_maintenance as ops
 
 
 @pytest.fixture
 async def fresh_database(deployment_database):
     admin, writer, role, name = deployment_database
+    chain = release_chain()
 
     def migrate(connection):
-        root = Path(__file__).resolve().parents[2] / "alembic/versions"
         with Operations.context(MigrationContext.configure(connection)):
-            for filename in (
-                "bf244f9a8b76_baseline.py",
-                "d01010100101_squash_to_head.py",
-                "e0202a000001_user_field_policy_storage.py",
-                "e0203b000001_transfer_field_lineage.py",
-                "e0203c000001_ai_field_authority.py",
-            ):
-                runpy.run_path(str(root / filename))["upgrade"]()
+            for migration in chain:
+                migration.upgrade()
 
     async with admin.begin() as db:
         await db.run_sync(migrate)
         await db.execute(text("CREATE TABLE alembic_version (version_num varchar(32))"))
-        await db.execute(text("INSERT INTO alembic_version VALUES ('e0203c000001')"))
+        await db.execute(
+            text("INSERT INTO alembic_version VALUES (:revision)"),
+            {"revision": chain[-1].revision},
+        )
     return admin, writer, role, name
 
 
@@ -86,7 +82,9 @@ async def test_fresh_bootstrap_has_separate_proof_and_cannot_replay(
         assert await db.scalar(text("SELECT 1")) == 1
 
 
-@pytest.mark.parametrize("dirty", ["history", "epoch", "registered", "inflight"])
+@pytest.mark.parametrize(
+    "dirty", ["history", "epoch", "registered", "inflight", "revision"]
+)
 async def test_bootstrap_refuses_existing_deployment(fresh_database, tmp_path, dirty):
     admin, writer, role, _ = fresh_database
     manifest = ops.StopManifest("fresh", "a" * 40, "direct", ("api", "scheduler"))
@@ -99,6 +97,11 @@ async def test_bootstrap_refuses_existing_deployment(fresh_database, tmp_path, d
         async with admin.begin() as db:
             await db.execute(
                 text("UPDATE sys_user_field_policy_global_guard SET epoch=2")
+            )
+    if dirty == "revision":
+        async with admin.begin() as db:
+            await db.execute(
+                text("UPDATE alembic_version SET version_num='e0203c000001'")
             )
     if dirty == "registered":
         (tmp_path / "process-123.json").write_text(json.dumps({"state": "exited"}))
