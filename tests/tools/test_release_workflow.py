@@ -97,9 +97,9 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("default: test", WORKFLOW)
         self.assertIn("needs: prepare", job("ci"))
         self.assertIn("uses: ./.github/workflows/ci.yml", job("ci"))
-        self.assertIn("needs: ci", job("qualification"))
+        self.assertIn("needs: [prepare, ci]", job("qualification"))
         self.assertIn("--profile release", job("qualification"))
-        self.assertIn("needs: qualification", job("tag"))
+        self.assertIn("needs: [prepare, qualification]", job("tag"))
         self.assertIn("needs: [prepare, qualification, tag]", job("docker"))
         self.assertIn("needs: [prepare, docker, acr]", job("github-release"))
         for status in ("failure", "cancelled", "skipped"):

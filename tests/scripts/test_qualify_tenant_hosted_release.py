@@ -816,7 +816,8 @@ def test_workflows_gate_ci_and_release_image_on_qualification() -> None:
     assert "--profile ci" in ci
     assert "python -m tests.release.qualify_tenant_hosted_release" in release
     assert "--profile release" in release
-    assert "needs: qualification" in release
+    tag_job = release.split("  tag:\n", 1)[1].split("\n  docker:", 1)[0]
+    assert "needs: [prepare, qualification]" in tag_job
     assert "actions/upload-artifact" in release
     assert "uv sync --locked --all-extras --dev" in ci
     assert "uv sync --locked --all-extras --dev" in release

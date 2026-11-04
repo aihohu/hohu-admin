@@ -2,6 +2,12 @@ name: CI
 
 on:
   workflow_call:
+    inputs:
+      source_sha:
+        description: Pinned application commit selected by the trusted release controller
+        type: string
+        required: false
+        default: ''
   push:
     branches: [main, master, 'release/*']
   pull_request:
@@ -17,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.source_sha || github.sha }}
           persist-credentials: false
 
       - name: Install uv
@@ -81,7 +87,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.source_sha || github.sha }}
           persist-credentials: false
 
       - name: Install uv
@@ -102,17 +108,20 @@ jobs:
         # no real secrets, so we copy it to .env for the CI run.
         run: cp .env.test .env
 
-      - name: Run migrations
-        run: uv run alembic upgrade head
-
-      - name: Seed test data
+      - name: Initialize the selected source in the ephemeral test database
         run: |
-          RELEASE_BUILD_SHA="$(git rev-parse HEAD)" \
-          HOHU_TEST_DATABASE_EPHEMERAL=true \
-          AUTHORIZATION_MAINTENANCE_PASSWORD=CiSeed123456 \
-          uv run python -m tests.release.bootstrap_database \
-            --build-sha "$(git rev-parse HEAD)" \
-            --control-dir "${RUNNER_TEMP}/pytest-bootstrap"
+          set -euo pipefail
+          if [[ -f tests/release/bootstrap_database.py ]]; then
+            RELEASE_BUILD_SHA="$(git rev-parse HEAD)" \
+            HOHU_TEST_DATABASE_EPHEMERAL=true \
+            AUTHORIZATION_MAINTENANCE_PASSWORD=CiSeed123456 \
+            uv run python -m tests.release.bootstrap_database \
+              --build-sha "$(git rev-parse HEAD)" \
+              --control-dir "${RUNNER_TEMP}/pytest-bootstrap"
+          else
+            uv run alembic upgrade head
+            HOHU_ADMIN_PASSWORD=CiSeed123456 uv run python -m scripts.init_db
+          fi
 
       - name: Run Tests
         run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=70
@@ -159,7 +168,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.source_sha || github.sha }}
           persist-credentials: false
 
       - name: Install uv
