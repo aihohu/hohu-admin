@@ -29,7 +29,7 @@
 
 ## 网页正式发布
 
-发布入口仅监听 `workflow_dispatch`，本地推送 Tag 或直接在 Releases 页面发布公告均不会启动工作流。两种模式都只接受官方仓库默认分支，运行使用点击 Run workflow 时绑定的提交 SHA，后续默认分支的新提交不会混入本次构建。
+发布入口仅监听 `workflow_dispatch`，本地推送 Tag 或直接在 Releases 页面发布公告均不会启动工作流。两种模式都只接受官方仓库默认分支；发布工具固定到点击 Run workflow 时的控制提交。`channel=default` 时应用源码也是该提交，`source_sha` / `peer_sha` 必须留空；独立稳定补丁使用下节的固定来源。后续默认分支的新提交不会混入本次运行。
 
 1. 先完成上文前置检查；更新 `pyproject.toml` 中的版本，执行 `uv lock` 同步根包版本，并完成 `CHANGELOG.md` 对应条目；工作流不会自动修改版本号或编写升级说明。
 2. CHANGELOG 使用唯一的 `## [vMAJOR.MINOR.PATCH]` 标题，也可附加 `(YYYY-MM-DD)` 或 `- YYYY-MM-DD` 日期；必须是文件中首个版本条目，正文不能为空，标题不能保留 `Unreleased`。配套客户端、CLI 版本和升级注意事项应写入该条目。
@@ -61,6 +61,26 @@
 同一运行可复用自身创建且仍指向原提交的 Git Tag；重新点击 Run workflow 会生成不同运行编号，已有 Tag 将被拒绝，即使提交 SHA 相同。这只是 Git Tag 的恢复规则，不替代上面的镜像状态判定。ACR未启用时可只交付GHCR；恢复时当前镜像配置必须与原记录一致，不能通过关闭镜像跳过已绑定的交付义务。
 
 Tag、镜像仓库和GitHub Release之间没有原子事务，失败不会自动删除Tag或回滚镜像；本流程不更新系列/latest。Tag已创建后，如需修改代码，应准备新版本；原运行的重试始终使用原提交。使用 `GITHUB_TOKEN` 创建 Tag 不会触发其他 `push` 工作流，Gitee 标签镜像可通过既有定时或手动同步补齐。
+
+## 独立 0.1 热修复通道
+
+本节适用于已经集成 [release.yml](../.github/workflows/release.yml)、[stable-verify.yml](../.github/workflows/stable-verify.yml) 及配套工具的默认分支。合并代码、演练成功和正式发布是不同的操作，均保留既有保护与授权要求。通道不会将旧系列业务合入 `main`，也不会改变已发布的 0.1.6 产物。
+
+1. Backend/Web 分别从正式 `v0.1.6` 基线建立新的 `release/0.1.N`，通过修复 PR 完成两仓同号补丁，`N` 必须大于 6。业务修复与版本号调整分开提交，修复回灌开发系列时保留该系列版本号。
+2. 保留 `release/*` 分支保护与适用检查。冻结两个完整 40 位 SHA；两仓版本、Backend 锁文件和首个 CHANGELOG 条目必须匹配同一补丁号。只需修复一端时，另一端仍完成同号配套。
+3. 在两仓默认分支各自选择 **Release**，`mode=release`、`channel=stable-0.1`、`version=v0.1.N`；`source_sha` 填本仓冻结 SHA，`peer_sha` 填另一仓冻结 SHA。不能在版本分支触发，也不能把稳定来源用于 `mode=test`。
+4. 来源检查核对官方仓库、受保护补丁分支当前指向、发布基线及祖先关系、双方元数据；未知或不一致即停止。完整 CI、覆盖率、后端 hosted CI/release profile 检查固定应用 SHA。带发布权限的工具仍使用控制 SHA，沿用只允许默认分支的 `docker` 环境，不复制凭据或扩大环境分支范围。
+5. 构建只读取独立应用 checkout；凭据和控制工具不在 Docker 上下文内。Tag 与 OCI revision 指向应用 SHA；Actions run/job/artifact 对应控制 SHA。两端分别成功后仍须完成最终组合和产品清单核验。
+
+稳定通道的 `component-build.json` 使用 schema 2，额外绑定 `channel`、`controller_sha`、`source_ref`、正式基线 Tag/SHA 和配套仓库/SHA。原 schema 1 保持原规则，不改历史附件；产品 `release.json` 仍为 v1。schema 2 不允许缺字段或退回 schema 1 校验。
+
+恢复仍只允许同一原运行的成功首次构建：使用原 `prepare` 输出和原 artifact，禁止重跑构建。分支正常推进不会重新选择源码；控制身份、来源 Tag、摘要、记录或目标不一致则停止。不可重建同号、移动 Tag、覆写镜像、删除证据或推进系列/latest。
+
+### 无发布写入的验收
+
+两仓 **Verify stable release channel** 入口从默认分支运行完整源码检查，并构建不推送的双架构 OCI 候选。它没有发布环境、镜像写权限或凭据，只上传 `stable-candidate-*` artifact（保留 14 天），记录控制与应用 SHA、构建摘要和归档散列。此记录不是正式 build 证明，不能用于正式恢复或产品公告。
+
+默认输入是两仓正式 `v0.1.6` 的精确 SHA；这是仅供只读演练的基线例外，不允许改成同号新源码。验收新的 `v0.1.N` 时，仍须通过完整受保护分支和同号来源检查。演练验证固定旧源码与新控制工具的组合；不能替代正式构建前的真实客户端认证、唯一写者复核和最终产品组合验收。默认分支尚未集成入口时，不把本地测试或功能分支 CI 记录为远端通道已就绪。
 
 ## v0.1.5 历史兼容边界
 
