@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from tools.ops import check_product_release as check
 from tools.ops import release_build as build
 from tools.ops import release_registry as registry
+from tools.ops import stable_release as stable
 from tools.ops import sync_image_mirror as mirror
 from tools.ops.prepare_release import release_notes
 
@@ -37,7 +38,10 @@ class Sources:
         require(
             repo in check.OFFICIAL
             and not path.startswith(("/", "-"))
-            and ".." not in path,
+            and (
+                ".." not in path
+                or re.fullmatch(r"compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}", path)
+            ),
             "Unapproved GitHub request",
         )
         try:
@@ -165,8 +169,19 @@ class Sources:
         )
         work_dir.mkdir(parents=True, exist_ok=True)
         try:
+            records = []
             for key, component in doc["components"].items():
-                self.verify_component(key, component, published, work_dir)
+                peer = doc["components"]["web" if key == "backend" else "backend"]
+                records.append(
+                    self.verify_component(
+                        key, component, published, work_dir, peer=peer
+                    )
+                )
+            if any(record["schema_version"] == 2 for record in records):
+                require(
+                    all(record["schema_version"] == 2 for record in records),
+                    "A stable hotfix requires the paired stable channel",
+                )
             self.verify_migrations(
                 doc["components"]["backend"]["commit"],
                 doc["upgrade"]["database_revision"],
@@ -196,7 +211,7 @@ class Sources:
         except (KeyError, TypeError, IndexError, UnicodeError, SyntaxError):
             raise ValueError("Release source response is malformed") from None
 
-    def verify_component(self, key, component, published, work_dir):
+    def verify_component(self, key, component, published, work_dir, *, peer=None):
         repo, sha, tag = component["repository"], component["commit"], component["tag"]
         run_id = component["build_run_url"].rsplit("/", 1)[1]
         ref = self.request(repo, f"git/ref/tags/{tag}")
@@ -217,11 +232,34 @@ class Sources:
             annotation["message"].strip() == message,
             "Release tag does not belong to the declared build run",
         )
+        release = self.release(repo, tag)
+        record_raw = self.asset(repo, release, "component-build.json")
+        record = check.decode(record_raw)
+        require(isinstance(record, dict), "Invalid component build record")
+        target = record.get("mirror_image")
+        require(
+            target is None or target in self.allowed_mirrors,
+            "Build mirror is not approved",
+        )
+        expected = build.identity(
+            repo, sha, tag, run_id, target, provenance=record.get("provenance")
+        )
+        record = build.validate_record(record_raw, expected)
+        controller_sha = build.controller_commit(expected)
+        if record["schema_version"] == 2:
+            provenance = record["provenance"]
+            require(
+                peer is not None
+                and provenance["peer_repository"] == peer["repository"]
+                and provenance["peer_sha"] == peer["commit"],
+                "Stable counterpart does not match the product combination",
+            )
+            stable.verify_history(self.request, repo, sha)
         run = self.request(repo, f"actions/runs/{run_id}/attempts/1")
         require(
             str(run["id"]) == run_id
             and run["run_attempt"] == 1
-            and run["head_sha"] == sha
+            and run["head_sha"] == controller_sha
             and run["head_branch"] == "main"
             and run["event"] == "workflow_dispatch"
             and run["path"] == ".github/workflows/release.yml"
@@ -241,6 +279,19 @@ class Sources:
             if key == "backend"
             else "Verify release source / Check and build frontend",
         ]
+        if record["schema_version"] == 2:
+            needed.append("Validate web release request")
+            if key == "backend":
+                needed.extend(
+                    [
+                        "Verify release source / Ruff",
+                        "Verify release source / Hosted release qualification (CI profile)",
+                        *[
+                            f"Verify release source / Pytest (Python {v})"
+                            for v in ("3.12", "3.13", "3.14")
+                        ],
+                    ]
+                )
         for name in needed:
             matches = [job for job in jobs if job["name"] == name]
             require(
@@ -248,22 +299,12 @@ class Sources:
             )
             job = matches[0]
             require(
-                job["head_sha"] == sha
+                job["head_sha"] == controller_sha
                 and job["status"] == "completed"
                 and job["conclusion"] == "success"
                 and datetime.fromisoformat(job["completed_at"]) <= published,
                 "Required original release job did not qualify before publication",
             )
-        release = self.release(repo, tag)
-        record_raw = self.asset(repo, release, "component-build.json")
-        record = check.decode(record_raw)
-        target = record.get("mirror_image")
-        require(
-            target is None or target in self.allowed_mirrors,
-            "Build mirror is not approved",
-        )
-        expected = build.identity(repo, sha, tag, run_id, target)
-        record = build.validate_record(record_raw, expected)
         primary = check.primary(component)
         mapping = {
             name: digest for name, (digest, _) in check.platforms(primary).items()
@@ -322,6 +363,7 @@ class Sources:
             and readback["object"]["sha"] == ref["object"]["sha"],
             "Release tag changed during verification",
         )
+        return record
 
     def verify_metadata(self, key, component, release):
         repo, sha, version = (

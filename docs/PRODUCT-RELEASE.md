@@ -45,6 +45,8 @@ uv run --locked python -m tools.ops.check_product_release .local/artifacts/relea
 
 在线成功输出 `online: passed`；失败返回非零。工具只核对来源和字节，不执行报告中的命令，也不自动判断报告正文的测试质量。发布负责人须保留工具版本、实际命令、来源版本/产物、观察结果和范围，另一位复核者在正式发布前检查报告内容、支持承诺及脱敏。散列与同处一份 Release 的附件不是独立密码学签名。
 
+独立 0.1 热修复的组件 build 记录使用 schema 2，产品清单仍为 v1。来源核验先验证严格记录身份，再分别将 run/job 绑定控制 SHA，将附注 Tag、版本元数据和镜像绑定应用 SHA；额外检查正式 0.1.6 基线祖先关系、完整源码 CI 和两端互相绑定的配套 SHA。只要一端使用 schema 2，两端都必须使用该格式且配对一致。原 schema 1 的已发布附件按原规则核验，不补字段或重写。只读 `stable-verify.yml` 的候选记录不能用作正式组件证据。
+
 ## 不可覆盖上传与恢复
 
 [上传工具](../tools/ops/upload_product_release.py) 只接受命名为 `release.json` 的完整清单，每次都先进行上述在线核验，再上传至 Backend 对应的已公开正式组件 Release：

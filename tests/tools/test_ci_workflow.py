@@ -122,7 +122,12 @@ class CIWorkflowTests(unittest.TestCase):
             )
             self.assertTrue(checkouts)
             for checkout in checkouts:
-                self.assertIn("ref: " + "$" + "{{ github.sha }}", checkout)
+                source = (
+                    "inputs.source_sha || github.sha"
+                    if filename == "ci.yml"
+                    else "github.sha"
+                )
+                self.assertIn("ref: " + "$" + "{{ " + source + " }}", checkout)
                 self.assertIn("persist-credentials: false", checkout)
 
     def test_required_jobs_cannot_skip_release_branches_or_ignore_failures(self):

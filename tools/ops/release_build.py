@@ -15,6 +15,7 @@ from pathlib import Path
 from tools.ops import release_registry as registry
 from tools.ops import sync_image_mirror as mirror
 from tools.ops.release_tag import GitHub, manage_tag
+from tools.ops.stable_release import validate_provenance
 
 REPOSITORIES = {"aihohu/hohu-admin", "aihohu/hohu-admin-web"}
 STABLE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
@@ -25,7 +26,7 @@ BUILD_JOB = "Build and Push Docker Image"
 PLATFORMS = {"linux/amd64", "linux/arm64"}
 
 
-def identity(repository, sha, tag, run_id, target):
+def identity(repository, sha, tag, run_id, target, *, provenance=None):
     if (
         repository not in REPOSITORIES
         or not SHA.fullmatch(sha)
@@ -37,7 +38,7 @@ def identity(repository, sha, tag, run_id, target):
     if target is not None:
         host, path = target.split("/", 1)
         mirror.validate_target(source, host, path)
-    return {
+    result = {
         "schema_version": 1,
         "repository": repository,
         "source_sha": sha,
@@ -47,6 +48,10 @@ def identity(repository, sha, tag, run_id, target):
         "source_image": source,
         "mirror_image": target,
     }
+    if provenance is not None:
+        result["provenance"] = validate_provenance(provenance, repository, tag)
+        result["schema_version"] = 2
+    return result
 
 
 def environment_identity():
@@ -65,13 +70,33 @@ def environment_identity():
         target = mirror.validate_target(
             source, env.get("ACR_REGISTRY", ""), env.get("ACR_REPOSITORY", "")
         )
+    provenance = None
+    source_sha = env.get("RELEASE_SOURCE_SHA") or env["GITHUB_SHA"]
+    if env.get("RELEASE_PROVENANCE"):
+        provenance = json.loads(env["RELEASE_PROVENANCE"])
+        if (
+            not isinstance(provenance, dict)
+            or provenance.get("controller_sha") != env["GITHUB_SHA"]
+            or env.get("DEFAULT_BRANCH") != "main"
+            or not env.get("RELEASE_SOURCE_SHA")
+        ):
+            raise ValueError("Stable provenance does not match this controller")
+    elif source_sha != env["GITHUB_SHA"]:
+        raise ValueError("An alternate application source requires stable provenance")
     return identity(
         env["GITHUB_REPOSITORY"],
-        env["GITHUB_SHA"],
+        source_sha,
         env["RELEASE_TAG"],
         env["GITHUB_RUN_ID"],
         target,
+        provenance=provenance,
     )
+
+
+def controller_commit(expected):
+    if expected["schema_version"] == 2:
+        return expected["provenance"]["controller_sha"]
+    return expected["source_sha"]
 
 
 def guard(mode, attempt):
@@ -218,6 +243,7 @@ def verify_source(record, *, inspect=mirror._inspect):
             record["tag"],
             record["run_id"],
             record["mirror_image"],
+            provenance=record.get("provenance"),
         )
     }
     actual = freeze_build(
@@ -279,7 +305,8 @@ def restore(api, expected):
     if (
         str(run.get("id")) != run_id
         or run.get("run_attempt") != 1
-        or run.get("head_sha") != expected["source_sha"]
+        or run.get("head_sha") != controller_commit(expected)
+        or (expected["schema_version"] == 2 and run.get("head_branch") != "main")
         or run.get("event") != "workflow_dispatch"
         or run.get("path") != ".github/workflows/release.yml"
         or run.get("repository", {}).get("full_name") != expected["repository"]
@@ -294,7 +321,7 @@ def restore(api, expected):
         len(builds) != 1
         or builds[0].get("status") != "completed"
         or builds[0].get("conclusion") != "success"
-        or builds[0].get("head_sha") != expected["source_sha"]
+        or builds[0].get("head_sha") != controller_commit(expected)
     ):
         raise ValueError("Original first-attempt build did not succeed")
     response = api.request("GET", f"actions/runs/{run_id}/artifacts?per_page=100")
@@ -309,7 +336,7 @@ def restore(api, expected):
     if (
         artifact.get("expired") is not False
         or str(origin.get("id")) != run_id
-        or origin.get("head_sha") != expected["source_sha"]
+        or origin.get("head_sha") != controller_commit(expected)
         or not isinstance(artifact.get("digest"), str)
         or not DIGEST.fullmatch(artifact["digest"])
     ):

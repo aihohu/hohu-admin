@@ -17,6 +17,25 @@ on:
         required: false
         default: ''
 
+      channel:
+        description: '应用来源：default 当前默认提交 / stable-0.1 独立稳定补丁'
+        type: choice
+        required: true
+        default: default
+        options:
+          - default
+          - stable-0.1
+      source_sha:
+        description: 'stable-0.1 本仓受保护补丁分支的完整提交 SHA；default 留空'
+        type: string
+        required: false
+        default: ''
+      peer_sha:
+        description: 'stable-0.1 配套 Backend/Web 同号补丁的完整提交 SHA；default 留空'
+        type: string
+        required: false
+        default: ''
+
 permissions:
   contents: read
 
@@ -43,6 +62,8 @@ jobs:
     outputs:
       mode: ${{ steps.request.outputs.mode }}
       tag: ${{ steps.request.outputs.tag }}
+      source_sha: ${{ steps.selection.outputs.source_sha }}
+      provenance: ${{ steps.selection.outputs.provenance }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -64,13 +85,30 @@ jobs:
             exit 1
           fi
 
+      - name: Validate and freeze the application source pair
+        id: selection
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_MODE: ${{ inputs.mode }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_PEER_SHA: ${{ inputs.peer_sha }}
+        run: python3 -B -m tools.ops.stable_release --github-output "$GITHUB_OUTPUT"
+
+      - name: Checkout the selected application for metadata
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.selection.outputs.source_sha }}
+          path: .local/release-source
+          persist-credentials: false
+
       - name: Validate versions and reviewed release notes
         id: request
         env:
           RELEASE_MODE: ${{ inputs.mode }}
           RELEASE_TAG: ${{ inputs.version }}
         run: |
-          python3 -B tools/ops/prepare_release.py --mode "$RELEASE_MODE" --tag "$RELEASE_TAG" \
+          python3 -B tools/ops/prepare_release.py --root .local/release-source --mode "$RELEASE_MODE" --tag "$RELEASE_TAG" \
             --notes-file .local/artifacts/release-notes.md --github-output "$GITHUB_OUTPUT"
 
       - name: Reject an existing version from another run
@@ -78,7 +116,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.request.outputs.tag }}
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ steps.selection.outputs.source_sha }}
         run: python3 -B -m tools.ops.release_tag check
 
       - name: Run standalone release tooling tests
@@ -91,10 +129,12 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.mode == 'release'
     uses: ./.github/workflows/ci.yml
+    with:
+      source_sha: ${{ needs.prepare.outputs.source_sha }}
 
   qualification:
     name: Hosted release qualification (release profile)
-    needs: ci
+    needs: [prepare, ci]
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -137,7 +177,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
           persist-credentials: false
 
       - name: Install uv
@@ -164,14 +204,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tenant-release-qualification-release-${{ github.sha }}
+          name: tenant-release-qualification-release-${{ needs.prepare.outputs.source_sha }}-${{ github.run_id }}
           path: ${{ runner.temp }}/tenant-release-qualification/
           if-no-files-found: error
           retention-days: 90
 
   tag:
     name: Create release tag after qualification
-    needs: qualification
+    needs: [prepare, qualification]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: docker
@@ -191,7 +231,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.version }}
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: python3 -B -m tools.ops.release_tag create
 
   docker:
@@ -209,6 +249,8 @@ jobs:
     timeout-minutes: 90
     environment: docker
     env:
+      RELEASE_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      RELEASE_PROVENANCE: ${{ needs.prepare.outputs.provenance }}
       REGISTRY_AUTH_FILE: ${{ github.workspace }}/.local/private/release-auth.json
     outputs:
       digest: ${{ steps.build.outputs.digest }}
@@ -229,10 +271,17 @@ jobs:
           RELEASE_MODE: ${{ needs.prepare.outputs.mode }}
         run: python3 -B -m tools.ops.release_build guard --mode "$RELEASE_MODE"
 
+      - name: Checkout the pinned application source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          path: .local/release-source
+          persist-credentials: false
+
       - name: Record source commit
         id: source
         shell: bash
-        run: printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: printf 'sha=%s\n' "$(git -C .local/release-source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Verify standalone image mirror tooling
         run: python3 -B -m unittest discover -s tests/tools -p test_sync_image_mirror.py -v
@@ -307,12 +356,15 @@ jobs:
             type=semver,pattern={{version}},value=${{ needs.prepare.outputs.tag }}
           flavor: |
             latest=false
+          labels: |
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.source_sha }}
 
       - name: Build and push Docker image
         id: build
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: .local/release-source
+          file: .local/release-source/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           # ACR rejects OCI attestation artifacts with empty config descriptors.
@@ -353,7 +405,7 @@ jobs:
 
   acr:
     name: Sync and anonymously verify ACR image
-    needs: docker
+    needs: [prepare, docker]
     # Manual builds skip qualification; only the direct build must succeed.
     if: >-
       ${{ !cancelled() && needs.docker.result == 'success' &&
@@ -366,6 +418,8 @@ jobs:
       actions: read
       packages: read
     env:
+      RELEASE_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      RELEASE_PROVENANCE: ${{ needs.prepare.outputs.provenance }}
       SOURCE_IMAGE: ghcr.io/${{ github.repository }}
       IMAGE_DIGEST: ${{ needs.docker.outputs.digest }}
       IMAGE_TAGS: ${{ needs.docker.outputs.tags }}
@@ -375,10 +429,10 @@ jobs:
       MIRROR_WORK_DIR: ${{ github.workspace }}/.local/tmp/acr-mirror
       MIRROR_REPORT: ${{ github.workspace }}/.local/reports/acr-mirror.json
     steps:
-      - name: Check out the built source's mirror tooling
+      - name: Check out the original controller tooling
         uses: actions/checkout@v6
         with:
-          ref: ${{ needs.docker.outputs.commit }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Install Skopeo
@@ -453,6 +507,8 @@ jobs:
     timeout-minutes: 60
     environment: docker
     env:
+      RELEASE_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      RELEASE_PROVENANCE: ${{ needs.prepare.outputs.provenance }}
       REGISTRY_AUTH_FILE: ${{ github.workspace }}/.local/private/release-auth.json
     permissions:
       contents: write
@@ -461,12 +517,19 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ needs.docker.outputs.commit }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+
+      - name: Checkout the pinned application source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          path: .local/release-source
+          persist-credentials: false
 
       - name: Install delivery verification tooling
         run: |
@@ -492,7 +555,7 @@ jobs:
       - name: Extract release notes from the built source
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
-        run: python3 -B tools/ops/prepare_release.py --tag "$RELEASE_TAG" --notes-file .local/artifacts/release-notes.md
+        run: python3 -B tools/ops/prepare_release.py --root .local/release-source --tag "$RELEASE_TAG" --notes-file .local/artifacts/release-notes.md
 
       - name: Publish release without overwriting an existing announcement
         env:
