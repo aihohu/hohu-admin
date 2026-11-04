@@ -4,7 +4,12 @@ These checks intentionally cover the workflow's simple filter shape. GitHub's
 actual PR scheduling and required-check enforcement need separate acceptance.
 """
 
+import os
 import re
+import shutil
+import subprocess
+import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -60,6 +65,84 @@ def matches_branch(branch, patterns):
 
 
 class CIWorkflowTests(unittest.TestCase):
+    def test_database_initialization_requires_successful_migration(self):
+        ci = (ROOT / ".github/workflows/ci.yml").read_text("utf-8")
+        step = ci.split(
+            "      - name: Initialize the selected source in the ephemeral test database\n",
+            1,
+        )[1].split("\n      - name:", 1)[0]
+        script = textwrap.dedent(step.split("run: |\n", 1)[1])
+        bash = (
+            str(
+                Path(os.environ.get("ProgramFiles", "C:/Program Files"))
+                / "Git/bin/bash.exe"
+            )
+            if os.name == "nt"
+            else shutil.which("bash")
+        )
+        if not bash or not Path(bash).is_file():
+            self.skipTest("Workflow shell requires Bash")
+        for maintenance, migration_failure, seed_failure in (
+            (False, False, False),
+            (True, False, False),
+            (False, True, False),
+            (True, True, False),
+            (True, False, True),
+        ):
+            with (
+                self.subTest(
+                    maintenance=maintenance,
+                    migration_failure=migration_failure,
+                    seed_failure=seed_failure,
+                ),
+                tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory,
+            ):
+                cwd = Path(directory)
+                if maintenance:
+                    (cwd / "tests/release").mkdir(parents=True)
+                    (cwd / "tests/release/bootstrap_database.py").touch()
+                harness = """
+                uv() {
+                  printf '%s\\n' "$*" >> calls
+                  if [[ "$*" == 'run alembic upgrade head' ]]; then
+                    [[ "$MIGRATION_FAILURE" == 0 ]] || return 19
+                    touch migrated
+                  else
+                    [[ -f migrated ]] || return 23
+                    [[ "$SEED_FAILURE" == 0 ]] || return 29
+                  fi
+                }
+                git() { printf '%040d\\n' 1; }
+                """
+                outcome = subprocess.run(
+                    [bash, "-c", textwrap.dedent(harness) + script],
+                    cwd=cwd,
+                    env=os.environ
+                    | {
+                        "RUNNER_TEMP": directory,
+                        "MIGRATION_FAILURE": str(int(migration_failure)),
+                        "SEED_FAILURE": str(int(seed_failure)),
+                    },
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                self.assertEqual(
+                    outcome.returncode,
+                    19 if migration_failure else 29 if seed_failure else 0,
+                    outcome.stderr,
+                )
+                calls = (cwd / "calls").read_text("utf-8").splitlines()
+                self.assertEqual(calls[0], "run alembic upgrade head")
+                self.assertEqual(len(calls), 1 if migration_failure else 2)
+                if not migration_failure:
+                    seed = (
+                        "run python -m tests.release.bootstrap_database "
+                        if maintenance
+                        else "run python -m scripts.init_db"
+                    )
+                    self.assertTrue(calls[1].startswith(seed), calls)
+
     def test_ai_static_check_uses_test_settings_on_a_clean_runner(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text("utf-8")
         step = ci.split("      - name: Check AI tools\n", 1)[1].split("\n      - ", 1)[
