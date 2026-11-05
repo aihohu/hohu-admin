@@ -63,6 +63,64 @@ async def test_quiescence_waits_for_owned_backend_to_be_observably_idle(
         assert len(observations) >= 2
 
 
+@pytest.mark.parametrize(
+    "backend_type,transient",
+    [
+        ("autovacuum worker", True),
+        ("client backend", True),
+        ("logical replication worker", True),
+        ("autovacuum worker", False),
+    ],
+)
+async def test_quiescence_waits_only_for_autovacuum_to_exit(
+    deployment_database, tmp_path, backend_type, transient
+):
+    admin, _, role, _ = deployment_database
+    manifest = StopManifest("unit", "a" * 40, "direct", ("api", "scheduler"))
+    async with PostgresStop(admin, tmp_path, manifest, (role,)) as guard:
+        await guard.prepare()
+        connection = guard.connection
+        observations = []
+
+        class ObservedConnection:
+            async def scalar(self, *args, **kwargs):
+                return await connection.scalar(*args, **kwargs)
+
+            async def execute(self, statement, *args, **kwargs):
+                result = await connection.execute(statement, *args, **kwargs)
+                if "SELECT pid, backend_start, state" not in str(statement):
+                    return result
+                rows = result.all()
+                observations.append(rows)
+                if len(observations) == 1 or not transient:
+                    rows = [
+                        *rows,
+                        SimpleNamespace(
+                            pid=-1,
+                            backend_start=datetime.now(UTC),
+                            state="active",
+                            xact_start=datetime.now(UTC),
+                            backend_type=backend_type,
+                        ),
+                    ]
+                return SimpleNamespace(all=lambda: rows)
+
+        guard.connection = ObservedConnection()
+        try:
+            if backend_type == "autovacuum worker" and transient:
+                await guard.require_quiescent()
+                assert len(observations) >= 2
+            else:
+                with pytest.raises(BusinessException):
+                    await guard.require_quiescent()
+                if backend_type != "autovacuum worker":
+                    assert len(observations) == 1
+                else:
+                    assert len(observations) >= 2
+        finally:
+            guard.connection = connection
+
+
 @pytest.fixture
 async def deployment_database():
     name = "stop_test_" + uuid4().hex

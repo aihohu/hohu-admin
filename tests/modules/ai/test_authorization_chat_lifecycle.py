@@ -18,7 +18,10 @@ from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
 from app.modules.ai.schemas.operation_log import TraceListQuery
+from app.modules.ai.service.result_projection_service import result_projection_service
+from app.modules.auth.service import load_live_user_authority
 from app.modules.system.models.menu import Menu
+from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
 from tests.modules.ai.test_authorization_gateway_execution import execute
 from tests.modules.ai.test_authorization_gateway_execution import (
@@ -34,6 +37,52 @@ from tests.modules.system.test_authorization_system_candidate import (
 from tests.modules.system.test_authorization_system_candidate import (
     system_sessions as system_sessions,
 )
+
+
+@pytest.mark.parametrize("stale", [False, True])
+async def test_terminal_and_read_lineage_keep_scope_constraint(execution_case, stale):
+    factory, plain, case = execution_case
+    assert (await execute(factory, case)).disposition == "succeeded"
+    async with plain() as db:
+        action = await db.get(AiPreparedAction, case.claim.action_id)
+        actor = await load_live_user_authority(db, tenant=case.tenant)
+        scope = await result_projection_service.compute_data_scope_hash(db, actor)
+        assert action.data_scope_hash == scope
+        lineage = result_projection_service.freeze_lineage(
+            tenant=case.tenant,
+            agent_code="dept_mgmt",
+            tool_codes=[],
+            subject_refs=[],
+            field_authority=action.field_authority,
+            data_scope_hash="f" * 64 if stale else None,
+        )
+    owner = ChatOwner(factory)
+    request = {
+        "conversation_id": case.claim.conversation_id,
+        "source_id": case.claim.source_user_message_id,
+        "trace_id": case.claim.trace_id,
+        "content": "Verified terminal and scoped read",
+        "tool_calls": [],
+        "agent_code": "dept_mgmt",
+        "tenant": case.tenant,
+        "actor_user_version": 1,
+        "lineage": lineage,
+    }
+    if stale:
+        with pytest.raises(BusinessException):
+            await owner.finalize(**request)
+        return
+    identifier = await owner.finalize(**request)
+    async with plain() as db:
+        assert (await db.get(AiMessage, identifier)).data_scope_hash == scope
+        await db.execute(update(Role).where(Role.role_id == 201).values(data_scope="5"))
+        await db.commit()
+    rows = await owner.messages(
+        conversation_id=case.claim.conversation_id,
+        tenant=case.tenant,
+        actor_user_version=1,
+    )
+    assert all(getattr(row, "content", None) != request["content"] for row in rows)
 
 
 @pytest.fixture

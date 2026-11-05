@@ -825,7 +825,11 @@ class ChatCandidate:
         for value in lineages:
             if lineage is not None and (
                 lineage.agent_code != value.agent_code
-                or lineage.data_scope_hash != value.data_scope_hash
+                or (
+                    lineage.data_scope_hash is not None
+                    and value.data_scope_hash is not None
+                    and lineage.data_scope_hash != value.data_scope_hash
+                )
             ):
                 raise _order_error()
             lineage = result_projection_service.freeze_lineage(
@@ -840,7 +844,15 @@ class ChatCandidate:
                     *(lineage.subject_refs if lineage else ()),
                     *value.subject_refs,
                 ),
-                data_scope_hash=value.data_scope_hash,
+                # Unscoped sources add no range dependency, but must never erase
+                # one already verified for another source in this same reply.
+                data_scope_hash=(
+                    value.data_scope_hash
+                    if value.data_scope_hash is not None
+                    else lineage.data_scope_hash
+                    if lineage
+                    else None
+                ),
                 projection_dependency_message_ids=(
                     *(lineage.projection_dependency_message_ids if lineage else ()),
                     *value.projection_dependency_message_ids,
