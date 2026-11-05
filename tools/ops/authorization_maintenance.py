@@ -530,7 +530,8 @@ class PostgresStop:
         sessions = (
             await self.connection.execute(
                 text(
-                    "SELECT pid, backend_start, state, xact_start FROM pg_stat_activity "
+                    "SELECT pid, backend_start, state, xact_start, backend_type "
+                    "FROM pg_stat_activity "
                     "WHERE datid=:oid ORDER BY pid LIMIT 1025"
                 ),
                 {"oid": self.database_oid},
@@ -540,16 +541,22 @@ class PostgresStop:
             text("SELECT count(*) FROM pg_prepared_xacts WHERE database=:database"),
             {"database": self.database},
         )
+        owned = [row for row in sessions if row.pid in self._owned_backends]
+        background = [row for row in sessions if row.pid not in self._owned_backends]
         if (
             allowed is not False
             or prepared != 0
-            or {row.pid for row in sessions} != set(self._owned_backends)
-            or any(
-                row.backend_start != self._owned_backends[row.pid] for row in sessions
-            )
+            or {row.pid for row in owned} != set(self._owned_backends)
+            or any(row.backend_start != self._owned_backends[row.pid] for row in owned)
+            or any(row.backend_type != "autovacuum worker" for row in background)
         ):
             raise _required()
-        return all(row.state == "idle" and row.xact_start is None for row in sessions)
+        # PostgreSQL may start autovacuum during seed despite application
+        # admission fencing. Wait within the existing deadline for it to exit;
+        # never omit its transaction from a successful quiescence observation.
+        return not background and all(
+            row.state == "idle" and row.xact_start is None for row in owned
+        )
 
     async def observe(self, processes):
         if type(processes) not in {DirectProcesses, ComposeProcesses}:
