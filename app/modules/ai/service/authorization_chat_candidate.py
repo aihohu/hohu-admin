@@ -935,7 +935,11 @@ class ChatCandidate:
                 if (
                     lineage is None
                     or prior.agent_code != lineage.agent_code
-                    or prior.data_scope_hash != lineage.data_scope_hash
+                    or (
+                        prior.data_scope_hash is not None
+                        and lineage.data_scope_hash is not None
+                        and prior.data_scope_hash != lineage.data_scope_hash
+                    )
                     or not await result_projection_service.authorize_result_projection(
                         db, actor, owner_user_id=tenant.actor_user_id, lineage=prior
                     )
@@ -947,7 +951,11 @@ class ChatCandidate:
                     field_authority=lineage.field_authority,
                     tool_codes=(*prior.tool_codes, *lineage.tool_codes),
                     subject_refs=(*prior.subject_refs, *lineage.subject_refs),
-                    data_scope_hash=lineage.data_scope_hash,
+                    data_scope_hash=(
+                        lineage.data_scope_hash
+                        if lineage.data_scope_hash is not None
+                        else prior.data_scope_hash
+                    ),
                     projection_dependency_message_ids=(
                         *prior.projection_dependency_message_ids,
                         *lineage.projection_dependency_message_ids,
