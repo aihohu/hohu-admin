@@ -85,6 +85,71 @@ async def test_terminal_and_read_lineage_keep_scope_constraint(execution_case, s
     assert all(getattr(row, "content", None) != request["content"] for row in rows)
 
 
+@pytest.mark.parametrize("prior_scoped", [False, True])
+@pytest.mark.parametrize("stale", [False, True])
+async def test_existing_reply_keeps_verified_scope_constraint(
+    execution_case, prior_scoped, stale
+):
+    factory, plain, case = execution_case
+    assert (await execute(factory, case)).disposition == "succeeded"
+    owner = ChatOwner(factory)
+    source = await owner.source(
+        conversation_id=case.claim.conversation_id,
+        content="reply saved before stream finalization",
+        tenant=case.tenant,
+        actor_user_version=1,
+    )
+    async with plain() as db:
+        action = await db.get(AiPreparedAction, case.claim.action_id)
+        actor = await load_live_user_authority(db, tenant=case.tenant)
+        scope = await result_projection_service.compute_data_scope_hash(db, actor)
+        authority = action.field_authority
+
+    def lineage(scope_hash):
+        return result_projection_service.freeze_lineage(
+            tenant=case.tenant,
+            agent_code="dept_mgmt",
+            tool_codes=[],
+            subject_refs=[],
+            field_authority=authority,
+            data_scope_hash=scope_hash,
+        )
+
+    request = {
+        "conversation_id": case.claim.conversation_id,
+        "source_id": source.message_id,
+        "trace_id": source.trace_id,
+        "content": "Verified persisted reply",
+        "tool_calls": [],
+        "agent_code": "dept_mgmt",
+        "tenant": case.tenant,
+        "actor_user_version": 1,
+    }
+    identifier = await owner.finalize(
+        **request, lineage=lineage(scope if prior_scoped else None)
+    )
+    current_scope = None if prior_scoped else scope
+    if stale:
+        with pytest.raises(BusinessException):
+            await owner.finalize(**request, lineage=lineage("f" * 64))
+        async with plain() as db:
+            assert (await db.get(AiMessage, identifier)).data_scope_hash == (
+                scope if prior_scoped else None
+            )
+        return
+    assert await owner.finalize(**request, lineage=lineage(current_scope)) == identifier
+    async with plain() as db:
+        assert (await db.get(AiMessage, identifier)).data_scope_hash == scope
+        await db.execute(update(Role).where(Role.role_id == 201).values(data_scope="5"))
+        await db.commit()
+    rows = await owner.messages(
+        conversation_id=case.claim.conversation_id,
+        tenant=case.tenant,
+        actor_user_version=1,
+    )
+    assert all(getattr(row, "content", None) != request["content"] for row in rows)
+
+
 @pytest.fixture
 async def chat_model_case(execution_case):
     factory, plain, case = execution_case
