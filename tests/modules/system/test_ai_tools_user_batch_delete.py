@@ -55,7 +55,7 @@ def _make_ctx(
             name="user.batch_delete",
             agent="user_mgmt",
             summary="test",
-            required_perms=("system:user:delete",),
+            required_perms=("system:user:batch-delete",),
             risk="destructive",
         ),
         tenant=tenant,

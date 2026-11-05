@@ -3,8 +3,7 @@
 import asyncio
 
 from sqlalchemy import insert, select, text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.constants import (
     ADMIN_ROLE_CODE,
@@ -14,7 +13,6 @@ from app.constants.constants import (
     USER_ROLE_CODE,
 )
 from app.core.builtin_i18n import initialize_translations
-from app.core.config import settings
 from app.core.security import get_password_hash
 from app.core.tenant import DEFAULT_TENANT_CODE, DEFAULT_TENANT_ID
 from app.db.base import role_menus, user_roles
@@ -28,6 +26,7 @@ from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
 from app.modules.system.constants import (
     PHASE3_DESTRUCTIVE_PERMISSIONS,
+    USER_FIELD_POLICY_PERMISSIONS,
 )
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
@@ -97,6 +96,7 @@ def fresh_role_permission_menus(menus: list[Menu]) -> list[Menu]:
         AI_FILE_PARSE_PERMISSION,
         *PUBLISHED_AGENT_TOOL_PERMISSIONS,
         *PHASE3_DESTRUCTIVE_PERMISSIONS,
+        *USER_FIELD_POLICY_PERMISSIONS,
     }
     return [menu for menu in menus if menu.permission in permissions]
 
@@ -214,17 +214,9 @@ async def seed_database(db: AsyncSession, *, admin_password: str | None = None) 
 
 
 async def init_db():
-    engine = create_async_engine(settings.DATABASE_URL)
-    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    try:
-        async with factory() as db, db.begin():
-            secret = settings.HOHU_ADMIN_PASSWORD
-            fresh = await seed_database(
-                db, admin_password=secret.get_secret_value() if secret else None
-            )
-        print("Initial data created." if fresh else "Deployment data synchronized.")
-    finally:
-        await engine.dispose()
+    from tools.ops.authorization_maintenance import run_seed_entry  # noqa: PLC0415
+
+    return await run_seed_entry("seed.system")
 
 
 if __name__ == "__main__":

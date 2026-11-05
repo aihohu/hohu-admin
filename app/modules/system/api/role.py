@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.core.tenant import TenantContext
+from app.db.authorization_http import system_write
 from app.db.session import get_db
 from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.user import User
@@ -179,13 +180,9 @@ async def add_role(
         - role_desc: 角色描述（可选，最大200字符）
         - status: 角色状态（必填，1-启用，2-禁用）
     """
-    await role_management_service.create(
-        db,
-        role_in,
-        actor_user_id=current_user.user_id,
-        tenant=tenant,
+    await system_write(
+        db, current_user, operation="role.create", payload=role_in, tenant=tenant
     )
-    await db.commit()
     return ResponseModel.success(msg="角色创建成功")
 
 
@@ -202,14 +199,14 @@ async def update_role(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """更新角色基本信息"""
-    await role_management_service.update(
+    await system_write(
         db,
-        role_id,
-        role_in,
-        actor_user_id=current_user.user_id,
+        current_user,
+        operation="role.update",
+        payload=role_in,
+        target_id=role_id,
         tenant=tenant,
     )
-    await db.commit()
     return ResponseModel.success(msg="角色更新成功")
 
 
@@ -226,14 +223,14 @@ async def update_role_menu(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """更新角色的菜单权限"""
-    await role_management_service.update_menus(
+    await system_write(
         db,
-        role_id,
-        ids,
-        actor_user_id=current_user.user_id,
+        current_user,
+        operation="role.menus",
+        payload=ids,
+        target_id=role_id,
         tenant=tenant,
     )
-    await db.commit()
     return ResponseModel.success(msg="角色更新成功")
 
 
@@ -269,13 +266,9 @@ async def delete_role(
         - 此操作不可逆，请谨慎操作
         - 角色删除后，关联的用户和菜单关系也会被清除
     """
-    await role_service.delete_role(
-        db,
-        role_id,
-        actor_user_id=current_user.user_id,
-        tenant=tenant,
+    await system_write(
+        db, current_user, operation="role.delete", target_id=role_id, tenant=tenant
     )
-    await db.commit()
     return ResponseModel.success(msg="角色删除成功")
 
 
@@ -291,13 +284,10 @@ async def batch_delete_roles(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """批量删除角色"""
-    deleted_count = await role_service.batch_delete_roles(
-        db,
-        ids,
-        actor_user_id=current_user.user_id,
-        tenant=tenant,
+    outcome = await system_write(
+        db, current_user, operation="role.batch_delete", payload=ids, tenant=tenant
     )
-    await db.commit()
+    deleted_count = outcome["result"]
     return ResponseModel.success(msg=f"成功删除 {deleted_count} 条数据")
 
 

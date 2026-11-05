@@ -302,14 +302,22 @@ def _load_xlsx_value_rows(file_bytes: bytes) -> list[dict[str, str]]:
         except StopIteration:
             return []
         header_idx = _resolve_header_indices(header_row)
+        labelled = {index for index in header_idx.values() if index is not None}
 
         result: list[dict[str, str]] = []
         for raw in rows_iter:
             if raw is None or all(c is None or str(c).strip() == "" for c in raw):
                 continue
+            if any(
+                index not in labelled and value is not None and str(value).strip()
+                for index, value in enumerate(raw)
+            ):
+                _raise_unknown_header()
             row_dict: dict[str, str] = {}
             for fname, i in header_idx.items():
-                if i is None or i >= len(raw) or raw[i] is None:
+                if i is None:
+                    continue
+                if i >= len(raw) or raw[i] is None:
                     row_dict[fname] = ""
                 else:
                     row_dict[fname] = str(raw[i]).strip()
@@ -353,10 +361,24 @@ def _parse_csv_rows(file_bytes: bytes) -> list[dict[str, str]]:
 
     result: list[dict[str, str]] = []
     for raw in reader:
-        if all((v or "").strip() == "" for v in raw.values()):
+        if any(str(value).strip() for value in (raw.get(None) or [])) or any(
+            key is not None
+            and _normalize_header(key) not in EXCEL_HEADERS
+            and value is not None
+            and str(value).strip()
+            for key, value in raw.items()
+        ):
+            _raise_unknown_header()
+        if all(
+            not str(value or "").strip()
+            for key, value in raw.items()
+            if key is not None
+        ):
             continue
         row_dict: dict[str, str] = {}
-        for fname, _ in header_idx.items():
+        for fname, index in header_idx.items():
+            if index is None:
+                continue
             # DictReader 用原始 fieldnames 索引，需要回查
             csv_key = _find_csv_key_for_field(fieldnames, fname)
             cell = raw.get(csv_key) if csv_key else None
@@ -512,6 +534,13 @@ def _validate_xlsx_archive(file_bytes: bytes) -> None:
         _raise_invalid_xlsx()
 
 
+def _raise_unknown_header():
+    raise BusinessRuleException(
+        "表头包含不支持的字段，请使用当前导入模板。",
+        error_code="AI_IMPORT_UNKNOWN_HEADER",
+    )
+
+
 def _resolve_header_indices(header_row) -> dict[str, int | None]:
     """表头行 → {field_name: col_index | None}。
 
@@ -522,6 +551,10 @@ def _resolve_header_indices(header_row) -> dict[str, int | None]:
         if c is None:
             continue
         canonical = _normalize_header(c)
+        if not canonical:
+            continue
+        if canonical not in EXCEL_HEADERS:
+            _raise_unknown_header()
         if canonical in EXCEL_HEADERS and canonical in lowered:
             raise BusinessRuleException(
                 "表头重复：同一字段只能保留一列，请删除重复列后重试。",
@@ -712,17 +745,20 @@ def _validate_row(
     if errors:
         return None, errors
 
-    record = UserImportRecord(
-        row_num=row_num,
-        user_name=user_name,
-        employee_no=employee_no,
-        nickname=nickname,
-        user_email=email,
-        user_phone=phone,
-        dept_input=dept_input,
-        role_input=role_input,
-        user_gender=gender,
-        status=status,
+    values = {
+        "row_num": row_num,
+        "user_name": user_name,
+        "employee_no": employee_no,
+        "nickname": nickname,
+        "user_email": email,
+        "user_phone": phone,
+        "dept_input": dept_input,
+        "role_input": role_input,
+        "user_gender": gender,
+        "status": status,
+    }
+    record = UserImportRecord.model_validate(
+        {key: value for key, value in values.items() if key == "row_num" or key in raw}
     )
     return record, []
 

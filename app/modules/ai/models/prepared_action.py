@@ -15,6 +15,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.id_generator import next_id
@@ -80,6 +81,9 @@ class AiPreparedAction(Base):
     execute_tool_name: Mapped[str] = mapped_column(String(128), nullable=False)
 
     frozen_args: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    field_authority: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     args_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)

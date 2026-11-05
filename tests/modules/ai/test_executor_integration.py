@@ -23,7 +23,6 @@ from tenant_helpers import tenant_context
 from app.core import redis as redis_module
 from app.core.config import settings
 from app.core.exceptions import AuthorizationException
-from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.gateway.executor import execute_tool
 from app.modules.ai.agents.gateway.result import (
     PreparedActionProposal,
@@ -45,12 +44,14 @@ from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.system.models.tenant import Tenant
 from app.modules.system.models.user import User
+from tests.committed_database import committed_test_database  # noqa: F401
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
+from tests.modules.ai.gateway_protocol_boundary import install_protocol_boundaries
 
 
 @pytest.fixture
-async def executor_contexts(db_session):
+async def executor_contexts(committed_test_database):  # noqa: F811
     """Give the integration's fixed protocol identities real owned FK rows."""
-    assert db_session.bind is not None
     contexts = (
         (9001, 77, 100, 101, "tr_test_001"),
         (9004, 0, 400, 401, "tr_test_agent_pass"),
@@ -121,12 +122,6 @@ async def executor_contexts(db_session):
                         User.user_name == f"executor_fixture_{user_id}",
                     )
                 )
-            await db.execute(
-                delete(Tenant).where(
-                    Tenant.tenant_id == 77,
-                    Tenant.tenant_code == "executor-fixture-77",
-                )
-            )
 
 
 @pytest.fixture(autouse=True)
@@ -137,6 +132,7 @@ async def clean_env(monkeypatch, executor_contexts):
     通过 _build_deps 写入的行 trace_id 都以 'tr_test_' 前缀开头（如 tr_test_001 /
     tr_test_agent_pass / tr_test_agent_full），用 LIKE 精准清理，生产数据保持不动。
     """
+    install_protocol_boundaries(monkeypatch)
     original_pool = redis_module.redis_pool
     original_client = redis_module.redis_client
     monkeypatch.setattr(ToolRegistry, "_instance", ToolRegistry())
@@ -168,7 +164,7 @@ async def clean_env(monkeypatch, executor_contexts):
 
     hitl_manager._reset_for_test()
 
-    from app.db.session import AsyncSessionLocal
+    from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
     async with AsyncSessionLocal() as db:
         async with db.begin():
@@ -202,15 +198,6 @@ async def clean_env(monkeypatch, executor_contexts):
             await db.execute(
                 text("DELETE FROM ai_operation_log WHERE trace_id LIKE 'tr_test_%'")
             )
-
-    # 释放连接池避免跨测试 event loop 干扰
-    from app.db.session import engine
-
-    try:
-        await engine.dispose()
-    except RuntimeError as e:
-        if "Event loop is closed" not in str(e):
-            raise
 
     redis_module.redis_pool = original_pool
     redis_module.redis_client = original_client
@@ -731,7 +718,7 @@ class TestAutonomousFlow:
         result = await execute_tool(_TEST_TOOL_LOW, {}, deps)
         assert result.ok
 
-        from app.db.session import AsyncSessionLocal
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             res = await db.execute(
@@ -781,8 +768,8 @@ class TestPreparedPreviewOnlyFlow:
         ]
         assert not await redis_module.redis_client.keys("ai:confirm:*")
 
-        from app.db.session import AsyncSessionLocal
         from app.modules.ai.models.prepared_action import AiPreparedAction
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             action = (
@@ -828,7 +815,7 @@ class TestPreparedPreviewOnlyFlow:
         async def fake_hang(confirmation_id, *, tenant, timeout_sec=None):
             return ConfirmAction.REJECTED
 
-        async def fake_terminal_result(confirmation_id, *, tenant):
+        async def fake_terminal_result(confirmation_id, *, tenant, **_binding):
             return ToolResult.failure("USER_REJECTED", "cancelled"), 0
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
@@ -859,8 +846,8 @@ class TestPreparedPreviewOnlyFlow:
             event for event in events if isinstance(event, ConfirmationRequiredEvent)
         )
 
-        from app.db.session import AsyncSessionLocal
         from app.modules.ai.models.prepared_action import AiPreparedAction
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             action = (
@@ -962,8 +949,8 @@ class TestHitlFlow:
         assert deps.guard_handoff is False
         rollback_quota.assert_awaited_once()
 
-        from app.db.session import AsyncSessionLocal
         from app.modules.ai.models.operation_log import AiOperationLog
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             log = (
@@ -1008,7 +995,7 @@ class TestHitlFlow:
         async def fake_hang(confirmation_id, *, tenant, timeout_sec=None):
             return ConfirmAction.APPROVED
 
-        async def fake_terminal_result(confirmation_id, *, tenant):
+        async def fake_terminal_result(confirmation_id, *, tenant, **_binding):
             return ToolResult.success({"successCount": 2}), 1
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
@@ -1047,8 +1034,8 @@ class TestHitlFlow:
         }
         assert "server-only-token" not in repr(events)
 
-        from app.db.session import AsyncSessionLocal
         from app.modules.ai.models.prepared_action import AiPreparedAction
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             action = (
@@ -1103,7 +1090,7 @@ class TestHitlFlow:
         async def fake_hang(confirmation_id, *, tenant, timeout_sec=None):
             return ConfirmAction.APPROVED
 
-        async def fake_terminal_result(confirmation_id, *, tenant):
+        async def fake_terminal_result(confirmation_id, *, tenant, **_binding):
             return ToolResult.success({"echo": {"x": 1}}), 1
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
@@ -1157,7 +1144,7 @@ class TestHitlFlow:
         ]
         assert events[-1].projection == ResultProjection()
 
-        from app.db.session import AsyncSessionLocal
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             row = (
@@ -1193,8 +1180,8 @@ class TestHitlFlow:
 
         assert not result.ok
 
-        from app.db.session import AsyncSessionLocal
         from app.modules.ai.models.prepared_action import AiPreparedAction
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             action = (
@@ -1242,8 +1229,8 @@ class TestHitlFlow:
             {"label": "affectedCount", "value": 1, "tone": "warning"},
         ]
 
-        from app.db.session import AsyncSessionLocal
         from app.modules.ai.models.prepared_action import AiPreparedAction
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             action = (
@@ -1265,7 +1252,7 @@ class TestHitlFlow:
         async def fake_hang(confirmation_id, *, tenant, timeout_sec=None):
             return ConfirmAction.REJECTED
 
-        async def fake_terminal_result(confirmation_id, *, tenant):
+        async def fake_terminal_result(confirmation_id, *, tenant, **_binding):
             return ToolResult.failure("USER_REJECTED", "cancelled"), 0
 
         monkeypatch.setattr(hitl_manager, "hang", fake_hang)
@@ -1299,7 +1286,7 @@ class TestHitlFlow:
         assert not result.ok
         assert result.error_code == "AI_HITL_EXPIRED"
 
-        from app.db.session import AsyncSessionLocal
+        from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
         async with AsyncSessionLocal() as db:
             res = await db.execute(

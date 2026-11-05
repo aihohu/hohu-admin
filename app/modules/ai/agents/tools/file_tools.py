@@ -93,6 +93,10 @@ async def file_parse(
         protected.data,
         protected.mime_type,
     )
+    return parsed_file_result(file_id, result)
+
+
+def parsed_file_result(file_id, result):
     parsed = asdict(result)
     rows_count = int(parsed.get("rows", 0))
     columns = parsed.get("columns", [])

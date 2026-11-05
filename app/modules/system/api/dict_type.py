@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.core.tenant import TenantContext
+from app.db.authorization_http import business_write
 from app.db.session import get_db
 from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.user import User
@@ -129,8 +130,9 @@ async def add(
         - remark: 字典描述（可选，最大500字符）
         - status: 字典类型状态（必填，1-启用，2-禁用）
     """
-    await dict_type_service.create(db, type_in, tenant=tenant)
-    await db.commit()
+    await business_write(
+        db, _current_user, tenant=tenant, operation="dict-type.create", payload=type_in
+    )
     return ResponseModel.success(msg="字典类型创建成功")
 
 
@@ -175,8 +177,14 @@ async def update(
         - remark: 字典描述
         - status: 字典类型状态
     """
-    await dict_type_service.update(db, type_id, type_in, tenant=tenant)
-    await db.commit()
+    await business_write(
+        db,
+        _current_user,
+        tenant=tenant,
+        operation="dict-type.update",
+        payload=type_in,
+        ids=(type_id,),
+    )
     return ResponseModel.success(msg="字典类型更新成功")
 
 
@@ -217,8 +225,9 @@ async def delete(
         - 此操作不可逆，请谨慎操作
         - 如果字典类型下存在数据，则无法删除
     """
-    await dict_type_service.delete(db, type_id, tenant=tenant)
-    await db.commit()
+    await business_write(
+        db, _current_user, tenant=tenant, operation="dict-type.delete", ids=(type_id,)
+    )
     return ResponseModel.success(msg="字典类型删除成功")
 
 
@@ -257,6 +266,7 @@ async def batch_delete(
     Note:
         - 如果任一字典类型下存在数据，则全部删除失败
     """
-    count = await dict_type_service.batch_delete(db, ids, tenant=tenant)
-    await db.commit()
+    count = await business_write(
+        db, _current_user, tenant=tenant, operation="dict-type.batch-delete", ids=ids
+    )
     return ResponseModel.success(msg=f"成功删除 {count} 个字典类型")

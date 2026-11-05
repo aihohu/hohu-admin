@@ -100,6 +100,22 @@ class SettingsService:
         value = result.scalar_one_or_none()
         return value if value is not None else default
 
+    async def get_bool(
+        self,
+        db: AsyncSession,
+        key: str,
+        default: bool = False,
+        *,
+        tenant: TenantContext,
+    ) -> bool:
+        """Read a preview fact without acquiring a writer's Setting lock."""
+        value = await self.get_value(db, key, tenant=tenant)
+        return (
+            default
+            if value is None
+            else value.strip().lower() in {"true", "1", "yes", "on"}
+        )
+
     async def get_bool_for_update(
         self,
         db: AsyncSession,

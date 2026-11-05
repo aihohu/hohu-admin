@@ -305,9 +305,6 @@ class ConversationService:
         # Completion services depend on conversation/result projection services.
         from app.modules.ai.service.completion_read_state_service import (  # noqa: PLC0415
             completion_read_state_service,
-            effective_call_state,
-            project_verified_call,
-            project_verified_content,
         )
 
         completion_states = await completion_read_state_service.read(
@@ -319,6 +316,24 @@ class ConversationService:
                 if isinstance(call, dict) and isinstance(call.get("tool_call_id"), str)
             ),
         )
+        return await self.project_locked_messages(
+            db,
+            current_user=current_user,
+            messages=messages,
+            completion_states=completion_states,
+        )
+
+    async def project_locked_messages(
+        self, db, *, current_user, messages, completion_states
+    ):
+        """Shared DTO projection; the caller supplies its coherent completion snapshot."""
+        tenant = get_bound_tenant_context(current_user)
+        from app.modules.ai.service.completion_read_state_service import (  # noqa: PLC0415
+            effective_call_state,
+            project_verified_call,
+            project_verified_content,
+        )
+
         projected: list[MessageOut | MessageTombstoneOut] = []
         for message in messages:
             if message.role == "user":

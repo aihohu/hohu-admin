@@ -64,6 +64,7 @@ class QueryCacheEntry:
     projection_dependency_message_ids: list[str]
     schema_version: int
     created_at: str  # ISO 8601 UTC
+    field_authority: dict | None = None
 
     def to_json_bytes(self) -> bytes:
         return json.dumps(self.__dict__, ensure_ascii=False, default=str).encode(
@@ -116,6 +117,7 @@ async def set_query_cache(
             str(value) for value in lineage.projection_dependency_message_ids
         ],
         schema_version=AI_QUERY_CACHE_SCHEMA_VERSION,
+        field_authority=projection.field_authority,
         created_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
     if tool_name == AI_QUERY_CACHE_LATEST_FIELD:

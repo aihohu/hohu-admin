@@ -32,6 +32,7 @@ from redis.asyncio import Redis
 
 from app.core.exceptions import BusinessRuleException
 from app.core.tenant import TenantContext
+from app.modules.ai.agents.gateway.auxiliary_budget import bounded_auxiliary
 
 logger = logging.getLogger(__name__)
 
@@ -44,29 +45,21 @@ _CFG_TTL = "ai:failures:ttl_sec"
 
 
 async def _resolve_threshold(tenant: TenantContext) -> int:
-    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
-    from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
-        get_ai_config_int,
-    )
+    from app.db.authorization_http import get_authorization_runtime  # noqa: PLC0415
 
     try:
-        async with AsyncSessionLocal() as db:
-            return await get_ai_config_int(
-                db, _CFG_THRESHOLD, FAILURE_THRESHOLD, tenant=tenant
-            )
+        values = await get_authorization_runtime().auxiliary.options(tenant=tenant)
+        return values[_CFG_THRESHOLD]
     except Exception:
         return FAILURE_THRESHOLD
 
 
 async def _resolve_ttl(tenant: TenantContext) -> int:
-    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
-    from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
-        get_ai_config_int,
-    )
+    from app.db.authorization_http import get_authorization_runtime  # noqa: PLC0415
 
     try:
-        async with AsyncSessionLocal() as db:
-            return await get_ai_config_int(db, _CFG_TTL, FAILURE_TTL_SEC, tenant=tenant)
+        values = await get_authorization_runtime().auxiliary.options(tenant=tenant)
+        return values[_CFG_TTL]
     except Exception:
         return FAILURE_TTL_SEC
 
@@ -98,6 +91,7 @@ def compute_args_hash(args: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+@bounded_auxiliary()
 async def check_repeated_failure(
     redis: Redis,
     user_id: int,
@@ -137,6 +131,7 @@ async def check_repeated_failure(
         )
 
 
+@bounded_auxiliary(best_effort=True)
 async def record_failure(
     redis: Redis,
     user_id: int,
@@ -173,6 +168,7 @@ async def record_failure(
     )
 
 
+@bounded_auxiliary(best_effort=True)
 async def clear_failures(
     redis: Redis,
     user_id: int,

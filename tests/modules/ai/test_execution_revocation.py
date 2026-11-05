@@ -127,7 +127,7 @@ async def test_revocation_rolls_back_flushed_business_write(db_session, monkeypa
     monkeypatch.setattr(executor, "ensure_current_write_authority", revoked)
     for name in ("clear_failures", "decr_quota", "_record_perm_denied_for_ip"):
         monkeypatch.setattr(executor, name, AsyncMock())
-    result = await executor._invoke_tool_fn(
+    result = await executor._invoke_legacy_tool_fn(
         SimpleNamespace(meta=meta, fn=write_user), {}, deps, "test-revocation"
     )
     assert result.ok is False

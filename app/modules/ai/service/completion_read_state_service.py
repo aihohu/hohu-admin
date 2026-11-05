@@ -5,20 +5,13 @@ rollback or fences an owner. PA proofs use one joined statement; preview proofs
 also check their batch in the same REPEATABLE READ, READ ONLY snapshot.
 """
 
-import asyncio
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 
-from sqlalchemy import and_, func, or_, select, text
-
 from app.core.exceptions import BusinessRuleException
-from app.core.tenant import TenantContext
-from app.modules.ai.models.conversation import AiConversation
-from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
-from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.atomic_completion_service import (
     DB_TOOLS,
     FILE_TOOLS,
@@ -122,154 +115,16 @@ def project_verified_content(content, calls, states):
 
 class CompletionReadStateService:
     async def read(
-        self,
-        *,
-        tenant: TenantContext,
-        tool_call_ids: Iterable[str] | None = None,
-        conversation_id: int | None = None,
-        user_id: int | None = None,
-    ) -> dict[str, EffectiveCompletion]:
-        if tool_call_ids is None and (conversation_id is None or user_id is None):
-            raise ValueError("completion reads require IDs or an owned conversation")
-        identifiers = tuple(sorted({value for value in tool_call_ids or () if value}))
-        if tool_call_ids is not None and not identifiers:
-            return {}
-        log_scope = [AiOperationLog.tenant_id == tenant.tenant_id]
-        action_scope = [AiPreparedAction.tenant_id == tenant.tenant_id]
-        if tool_call_ids is not None:
-            log_scope.append(AiOperationLog.tool_call_id.in_(identifiers))
-            action_scope.append(AiPreparedAction.execute_tool_call_id.in_(identifiers))
-        if conversation_id is not None:
-            log_scope.append(AiOperationLog.conversation_id == conversation_id)
-            action_scope.append(AiPreparedAction.conversation_id == conversation_id)
-        if user_id is not None:
-            log_scope.append(AiOperationLog.user_id == user_id)
-            action_scope.append(AiPreparedAction.user_id == user_id)
-        statement = (
-            select(AiPreparedAction, AiOperationLog, AiConversation, AiMessage)
-            .select_from(AiOperationLog)
-            .join(
-                AiPreparedAction,
-                and_(
-                    AiPreparedAction.tenant_id == AiOperationLog.tenant_id,
-                    AiPreparedAction.execute_tool_call_id
-                    == AiOperationLog.tool_call_id,
-                ),
-                full=True,
-            )
-            .outerjoin(
-                AiConversation,
-                and_(
-                    AiConversation.tenant_id
-                    == func.coalesce(
-                        AiPreparedAction.tenant_id, AiOperationLog.tenant_id
-                    ),
-                    AiConversation.conversation_id
-                    == func.coalesce(
-                        AiPreparedAction.conversation_id, AiOperationLog.conversation_id
-                    ),
-                ),
-            )
-            .outerjoin(
-                AiMessage,
-                and_(
-                    AiMessage.tenant_id
-                    == func.coalesce(
-                        AiPreparedAction.tenant_id, AiOperationLog.tenant_id
-                    ),
-                    AiMessage.message_id
-                    == func.coalesce(
-                        AiPreparedAction.source_user_message_id,
-                        AiOperationLog.source_user_message_id,
-                    ),
-                ),
-            )
-            .where(or_(and_(*log_scope), and_(*action_scope)))
-            .execution_options(populate_existing=True)
+        self, *, tenant, tool_call_ids=None, conversation_id=None, user_id=None
+    ):
+        from app.db.authorization_http import get_authorization_runtime  # noqa: PLC0415
+
+        return await get_authorization_runtime().completion_facts.read(
+            tenant=tenant,
+            tool_call_ids=tool_call_ids,
+            conversation_id=conversation_id,
+            user_id=user_id,
         )
-        from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
-            _discard_uncertain_session,
-            _owned_session,
-        )
-
-        try:
-            async with asyncio.timeout(_READ_TIMEOUT_SEC), _owned_session() as db:
-                try:
-                    await db.begin()
-                    await db.execute(
-                        text(
-                            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
-                        )
-                    )
-                    rows = (await db.execute(statement)).all()
-                    projected = {}
-                    for action, log, conversation, source in rows:
-                        if log is not None and has_annotation(log.result_summary):
-                            projected[log.tool_call_id] = RECONCILIATION_COMPLETION
-                            continue
-                        if not self._protected(action, log):
-                            continue
-                        call_id = (
-                            action.execute_tool_call_id if action else log.tool_call_id
-                        )
-                        if action is None:
-                            from app.modules.ai.service.preflight_completion_service import (  # noqa: PLC0415
-                                is_verified_preflight,
-                            )
-
-                            if await is_verified_preflight(
-                                db,
-                                log,
-                                conversation,
-                                source,
-                                tenant_id=tenant.tenant_id,
-                                user_id=log.user_id,
-                            ):
-                                projected[call_id] = EffectiveCompletion(
-                                    log.status,
-                                    log.error_code,
-                                    log.finished_at,
-                                    log.duration_ms,
-                                    verified=True,
-                                )
-                                continue
-                        if action is None and log.tool_name == "user.import_preview":
-                            from app.modules.ai.service.preview_completion_service import (  # noqa: PLC0415
-                                verify_historical_preview,
-                            )
-
-                            try:
-                                await verify_historical_preview(
-                                    db,
-                                    log,
-                                    conversation,
-                                    source,
-                                    tenant_id=tenant.tenant_id,
-                                    user_id=log.user_id,
-                                )
-                                projected[call_id] = EffectiveCompletion(
-                                    log.status,
-                                    log.error_code,
-                                    log.finished_at,
-                                    log.duration_ms,
-                                    verified=True,
-                                )
-                            except (BusinessRuleException, TypeError, ValueError):
-                                projected[call_id] = UNKNOWN_COMPLETION
-                        else:
-                            projected[call_id] = self._project(
-                                action, log, conversation, source, tenant=tenant
-                            )
-                    return projected
-                except (Exception, asyncio.CancelledError):
-                    await _discard_uncertain_session(db)
-                    raise
-        except (Exception, asyncio.CancelledError):
-            logger.warning("completion read snapshot unavailable", exc_info=True)
-            # Do not expose an unverified raw terminal after a read failure.
-            # A scope-only reader uses the values to block admission; the empty
-            # internal key never becomes a public tool-call identifier.
-            return {"": UNKNOWN_COMPLETION}
 
     @staticmethod
     def _protected(action, log) -> bool:

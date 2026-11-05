@@ -7,6 +7,7 @@ Every remaining tool executes its real dry run, confirm and domain handler here.
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -17,9 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import redis as redis_module
 from app.core.config import settings
+from app.core.exceptions import BusinessRuleException
+from app.core.security import create_access_token
 from app.core.tenant import TenantContext
 from app.db.base import role_depts, role_menus, user_depts, user_roles
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai.agents.gateway.executor import _build_direct_confirmation_fields
 from app.modules.ai.agents.gateway.failures import compute_args_hash
 from app.modules.ai.agents.hitl.constants import AiOperationStatus
@@ -32,6 +35,7 @@ from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.model import AiModel
+from app.modules.ai.models.model_policy import TenantAiModelPolicy
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.models.provider import AiProvider
@@ -39,18 +43,24 @@ from app.modules.ai.models.role_ai_agent import RoleAiAgent
 from app.modules.ai.schemas.confirm import ConfirmRequest
 from app.modules.ai.service.atomic_completion_service import (
     DB_TOOLS,
-    atomic_completion_service,
+)
+from app.modules.ai.service.authorization_execution_candidate import (
+    ai_execution_candidate,
 )
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.ai.service.prepared_action_service import prepared_action_service
-from app.modules.auth.service import load_live_user_authority
+from app.modules.auth.service import get_current_user, load_live_user_authority
 from app.modules.job import task_registry
 from app.modules.job.models.job import SysJob
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
+from app.modules.system.service.authorization_ai_tool_adapter import (
+    system_ai_tool_adapter,
+)
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
 TOOLS = (
     "job.update_cron",
@@ -98,7 +108,7 @@ async def _business_state(db: AsyncSession, case: ToolCase) -> dict[str, Any]:
             User.user_id,
             User.nickname,
             User.status,
-            func.md5(User.hashed_password),
+            User.hashed_password,
             User.auth_version,
         ).where(User.tenant_id == 0, User.user_id == case.target_user_id),
         "departments": select(
@@ -142,10 +152,33 @@ async def _business_state(db: AsyncSession, case: ToolCase) -> dict[str, Any]:
         )
         .order_by(AiMessage.message_id),
     }
-    return {
+    result = {
         name: [tuple(row) for row in (await db.execute(query)).all()]
         for name, query in queries.items()
     }
+
+    result["users"] = [
+        (*row[:3], sha256(row[3].encode()).hexdigest(), *row[4:])
+        for row in result["users"]
+    ]
+    return result
+
+
+async def authenticated_actor(db, tenant):
+    version = await db.scalar(
+        select(User.auth_version).where(
+            User.tenant_id == tenant.tenant_id, User.user_id == tenant.actor_user_id
+        )
+    )
+    return await get_current_user(
+        create_access_token(
+            subject=str(tenant.actor_user_id),
+            tenant_id=tenant.tenant_id,
+            tenant_version=tenant.tenant_version,
+            user_version=version,
+        ),
+        db,
+    )
 
 
 def _arguments(
@@ -382,6 +415,11 @@ async def db_tool_case(request, db_session, monkeypatch) -> AsyncIterator[ToolCa
         )
         db.add_all([conversation, target_conversation, model])
         await db.flush()
+        db.add(
+            TenantAiModelPolicy(
+                tenant_id=0, model_id=model.model_id, enabled=True, is_default=False
+            )
+        )
         source = AiMessage(
             tenant_id=0,
             conversation_id=conversation.conversation_id,
@@ -558,6 +596,22 @@ def test_real_handler_matrix_covers_the_db_tool_inventory():
     assert set(TOOLS) | {"user.create"} == DB_TOOLS
 
 
+@pytest.mark.parametrize(
+    "selector", [{"user_names": ["alice"]}, {"phones": ["123"]}, {"unknown": None}]
+)
+async def test_planned_delete_does_not_reresolve_or_ignore_unknown_selectors(selector):
+    with pytest.raises(BusinessRuleException) as caught:
+        await system_ai_tool_adapter.prepare_input(
+            None,
+            tool="user.batch_delete",
+            args={"user_ids": [101], **selector},
+            snapshot={},
+            tenant=TenantContext(0, "default", 101, 1, "access_token"),
+            actor_user_version=1,
+        )
+    assert caught.value.error_code == "AI_PREPARED_ACTION_BINDING_INVALID"
+
+
 @pytest.mark.parametrize("db_tool_case", TOOLS, indirect=True)
 @pytest.mark.parametrize(
     "reject_audit", [False, True], ids=["commit", "audit-rollback"]
@@ -566,40 +620,37 @@ async def test_real_db_tool_and_required_completion_share_one_transaction(
     db_tool_case, monkeypatch, reject_audit
 ):
     case = db_tool_case
-    registered = ToolRegistry.get().find(case.tool)
-    original = registered.fn
+    original = system_ai_tool_adapter.apply
     async with AsyncSessionLocal() as db:
         before = await _business_state(db, case)
 
-    async def counted(ctx, **args):
+    async def counted(db, tx, command, work):
         case.calls.append(
             (
-                await ctx.db.scalar(select(func.pg_backend_pid())),
-                await ctx.db.scalar(select(func.txid_current())),
+                id(db),
+                id(db.sync_session.get_transaction()),
             )
         )
-        result = await original(ctx, **args)
+        result = await original(db, tx, command, work)
         assert result.ok, result.error_code
         return result
 
-    monkeypatch.setattr(registered, "fn", counted)
-    original_complete = atomic_completion_service.complete_success
+    monkeypatch.setattr(system_ai_tool_adapter, "apply", counted)
+    original_complete = ai_execution_candidate._complete
 
-    async def observed_complete(db, locked, **kwargs):
+    async def observed_complete(db, *args, **kwargs):
         # Observe after the real Gateway's flush, without adding a test-only
         # flush that could hide missing business persistence in the adapter.
         case.completion_transactions.append(
             (
-                await db.scalar(select(func.pg_backend_pid())),
-                await db.scalar(select(func.txid_current())),
+                id(db),
+                id(db.sync_session.get_transaction()),
             )
         )
         case.handler_states.append(await _business_state(db, case))
-        return await original_complete(db, locked, **kwargs)
+        return await original_complete(db, *args, **kwargs)
 
-    monkeypatch.setattr(
-        atomic_completion_service, "complete_success", observed_complete
-    )
+    monkeypatch.setattr(ai_execution_candidate, "_complete", observed_complete)
     hits = []
 
     def reject_success_audit(_conn, _cursor, _sql, _params, context, _executemany):
@@ -621,7 +672,7 @@ async def test_real_db_tool_and_required_completion_share_one_transaction(
         event.listen(engine.sync_engine, "before_cursor_execute", reject_success_audit)
     try:
         async with AsyncSessionLocal() as db:
-            actor = await load_live_user_authority(db, tenant=case.tenant)
+            actor = await authenticated_actor(db, case.tenant)
             response = await confirm_module.confirm_tool(
                 ConfirmRequest(confirmation_id=case.confirmation_id, action="approve"),
                 db=db,

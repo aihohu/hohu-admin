@@ -6,6 +6,7 @@ from app.constants import MENU_TYPE_BUTTON
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.core.tenant import TenantContext
+from app.db.authorization_http import control_write
 from app.db.session import get_db
 from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.menu import Menu
@@ -260,9 +261,9 @@ async def add_menu(
         - status: 菜单状态（必填，1-启用，2-禁用）
         - buttons: 按钮列表（可选，最多20个）
     """
-    new_menu = await menu_service.create_menu(db, menu_in, tenant=tenant)
-    new_menu.create_by = current_user.user_name
-    await db.commit()
+    await control_write(
+        db, current_user, operation="menu.create", payload=menu_in, tenant=tenant
+    )
     return ResponseModel.success(msg="菜单创建成功")
 
 
@@ -309,9 +310,14 @@ async def update_menu(
         - status: 菜单状态
         - buttons: 按钮列表
     """
-    menu = await menu_service.update_menu(db, menu_id, menu_in, tenant=tenant)
-    menu.update_by = current_user.user_name
-    await db.commit()
+    await control_write(
+        db,
+        current_user,
+        operation="menu.update",
+        payload=menu_in,
+        target_id=menu_id,
+        tenant=tenant,
+    )
     return ResponseModel.success(msg="菜单更新成功")
 
 
@@ -331,6 +337,7 @@ async def delete_menu(
     menu_id: int,
     db: AsyncSession = Depends(get_db),
     tenant: TenantContext = Depends(get_current_tenant_context),
+    current_user: User = Depends(get_current_user),
 ):
     """
     删除单个菜单
@@ -350,8 +357,9 @@ async def delete_menu(
         - 如果删除的是目录，其子菜单也会被删除
         - 菜单删除后，关联的角色关系也会被清除
     """
-    await menu_service.delete_menu(db, menu_id, tenant=tenant)
-    await db.commit()
+    await control_write(
+        db, current_user, operation="menu.delete", target_id=menu_id, tenant=tenant
+    )
     return ResponseModel.success(msg="菜单删除成功")
 
 
@@ -370,6 +378,7 @@ async def batch_delete_menus(
     ids: list[int] = Body(...),
     db: AsyncSession = Depends(get_db),
     tenant: TenantContext = Depends(get_current_tenant_context),
+    current_user: User = Depends(get_current_user),
 ):
     """
     批量删除菜单
@@ -389,6 +398,7 @@ async def batch_delete_menus(
         - 如果删除的菜单是目录，其子菜单也会被删除
         - 菜单删除后，关联的角色关系也会被清除
     """
-    deleted_count = await menu_service.batch_delete_menus(db, ids, tenant=tenant)
-    await db.commit()
+    deleted_count = await control_write(
+        db, current_user, operation="menu.batch_delete", payload=ids, tenant=tenant
+    )
     return ResponseModel.success(msg=f"成功删除 {deleted_count} 个菜单")

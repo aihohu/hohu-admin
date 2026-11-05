@@ -12,6 +12,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.id_generator import next_id
@@ -29,6 +30,9 @@ class AiOperationLog(Base):
     """
 
     __tablename__ = "ai_operation_log"
+    field_authority: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     __table_args__ = (
         UniqueConstraint(
             "tenant_id",

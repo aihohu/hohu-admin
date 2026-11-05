@@ -62,6 +62,10 @@ class ChatService:
         revoked result stays hidden without poisoning unrelated future turns.
         """
         projected = await self.load_history(db, conversation_id, current_user)
+        return self.model_history(projected)
+
+    def model_history(self, projected) -> tuple[list[dict], list[int]]:
+        """Build model history only from already authorized projections."""
         messages: list[dict] = []
         dependencies: list[int] = []
         for message in projected:
@@ -229,6 +233,7 @@ class ChatService:
         agent_code: str = "user_mgmt",
         tenant: TenantContext,
         agent_config: AiAgent | None = None,
+        selected_model=None,
     ):
         """创建配置好的 Agent
 
@@ -244,13 +249,17 @@ class ChatService:
             if model_name is not None
             else (agent_config.model_preference if agent_config is not None else None)
         )
-        model = await model_authorization_service.resolve_model_instance(
-            db,
-            model_ref,
-            tenant=tenant,
+        model = (
+            model_authorization_service.create_model_instance(selected_model)
+            if selected_model is not None
+            else await model_authorization_service.resolve_model_instance(
+                db,
+                model_ref,
+                tenant=tenant,
+            )
         )
         enabled_extra = await get_ai_config_str_list(
-            db, "ai:enabled_tools", default=[], tenant=tenant
+            db, "ai:enabled_tools", default=[], tenant=tenant, force_refresh=True
         )
         return create_chat_agent(
             model,
@@ -344,8 +353,6 @@ class ChatService:
                     )
                 except AuthorizationException:
                     if decision.reason == "session_sticky":
-                        if conv is not None:
-                            conv.agent_code = None
                         decision = StickyDecision(
                             run_supervisor=True,
                             reason="auto_fallback_forbidden",

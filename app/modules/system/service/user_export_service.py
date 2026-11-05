@@ -115,6 +115,7 @@ async def _query_users_with_data_scope(
     current_user: User,
     *,
     tenant: TenantContext,
+    max_rows: int | None = None,
 ) -> list[User]:
     """按筛选条件和数据权限查询用户列表。
 
@@ -156,6 +157,8 @@ async def _query_users_with_data_scope(
         stmt = stmt.where(f)
 
     stmt = stmt.order_by(User.user_id)
+    if max_rows is not None:
+        stmt = stmt.limit(max_rows)
     result = await db.execute(stmt)
     rows = list(result.scalars().all())
     if filter_.user_names is not None and {row.user_name for row in rows} != set(
@@ -180,13 +183,12 @@ def _build_excel(rows: list[User], dept_lookup: dict[int, Dept]) -> bytes:
     - ``user_gender``：翻译为未知、男或女
     - create_time：YYYY-MM-DD HH:MM:SS 格式（防 Excel 时区漂移）
     """
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "users"
+    return _build_excel_values(_excel_values(rows, dept_lookup))
 
-    # 表头（中文，便于管理员直接读；导入模板表头是英文，导出可读性优先）
-    ws.append([header for _, header in _EXPORT_COLUMN_ORDER])
 
+def _excel_values(rows, dept_lookup) -> tuple[tuple[str, ...], ...]:
+    """Freeze only the public export whitelist before crossing a worker boundary."""
+    values = []
     for user in rows:
         role_codes = ",".join(
             r.role_code for r in (user.roles or []) if r.status == "1"
@@ -219,7 +221,17 @@ def _build_excel(rows: list[User], dept_lookup: dict[int, Dept]) -> bytes:
             else:
                 value = getattr(user, field, "")
                 row_values.append("" if value is None else str(value))
-        ws.append(row_values)
+        values.append(tuple(row_values))
+    return tuple(values)
+
+
+def _build_excel_values(values: tuple[tuple[str, ...], ...]) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "users"
+    ws.append([header for _, header in _EXPORT_COLUMN_ORDER])
+    for row in values:
+        ws.append(row)
 
     buffer = io.BytesIO()
     wb.save(buffer)

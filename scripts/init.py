@@ -58,19 +58,33 @@ def init_project():
             stream.write(f"\nHOHU_ADMIN_PASSWORD={password}\n")
         values["HOHU_ADMIN_PASSWORD"] = password
     environment = {**{k: v for k, v in values.items() if v is not None}, **os.environ}
+    inventory = environment.get("AUTHORIZATION_MAINTENANCE_INVENTORY")
+    if not inventory:
+        print(
+            "初始化需要 AUTHORIZATION_MAINTENANCE_INVENTORY，参见 docs/AUTHORIZATION-MAINTENANCE.md。",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    seed_command = [sys.executable, "-m", "scripts.init_db", "--inventory", inventory]
+    if directory := environment.get("AUTHORIZATION_CONTROL_DIR"):
+        seed_command.extend(("--control-dir", directory))
+    if environment.get("AUTHORIZATION_BOOTSTRAP", "false").lower() == "true":
+        seed_command.append("--bootstrap")
+    if environment.get("HOHU_ADMIN_PASSWORD"):
+        environment.setdefault(
+            "AUTHORIZATION_MAINTENANCE_PASSWORD", environment["HOHU_ADMIN_PASSWORD"]
+        )
     try:
         subprocess.run(
             [sys.executable, "-m", "alembic", "upgrade", "head"],
             check=True,
             env=environment,
         )
-        subprocess.run(
-            [sys.executable, "-m", "scripts.init_db"], check=True, env=environment
-        )
+        subprocess.run(seed_command, check=True, env=environment)
     except (subprocess.CalledProcessError, FileNotFoundError):
         print("初始化失败，请修复错误后重新运行 hohu init。", file=sys.stderr)
         raise SystemExit(1) from None
-    print("初始化完成。管理员凭据位于 .env 的 HOHU_ADMIN_PASSWORD。")
+    print("种子已完成，数据库仍停写；请按授权维护手册显式恢复后启动应用。")
 
 
 if __name__ == "__main__":

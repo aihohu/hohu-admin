@@ -18,6 +18,7 @@ class CommitFault:
     sent: asyncio.Event = field(default_factory=asyncio.Event)
     release: asyncio.Event = field(default_factory=asyncio.Event)
     events: list[str] = field(default_factory=list)
+    backend_pid: int | None = None
 
 
 class PgFaultProxy:
@@ -39,11 +40,16 @@ class PgFaultProxy:
         await self.server.wait_closed()
         for fault in self.faults:
             fault.release.set()
-        for task in tuple(self.tasks):
+        await self.disconnect_all()
+
+    async def disconnect_all(self):
+        tasks = tuple(self.tasks)
+        for task in tasks:
             task.cancel()
-        await asyncio.gather(*self.tasks, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def arm(self, pid, fault):
+        fault.backend_pid = pid
         connection = self.connections[pid]
         assert connection["fault"] is None
         connection["fault"] = fault

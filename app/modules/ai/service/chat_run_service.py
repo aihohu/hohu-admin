@@ -366,11 +366,11 @@ class ChatRunFinalizer:
         actions: list[AiPreparedAction],
         logs: dict,
         tenant: TenantContext,
+        actor: Any | None = None,
     ) -> tuple[dict[str, dict | None], bool, list[ProjectionLineage]]:
         protected: dict[str, dict | None] = {}
         unknown = False
         lineages = []
-        actor = None
         for action in actions:
             bound_log = logs.get(action.execute_tool_call_id)
             if not (

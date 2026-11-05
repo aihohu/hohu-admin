@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import select
 
 from app.core.exceptions import AuthorizationException, BusinessRuleException
+from app.modules.system.api import user as user_api
 from app.modules.system.api.user import add_user
 from app.modules.system.models.user import User
 from app.modules.system.schemas.user import UserCreate, UserDeptItem
@@ -151,38 +152,29 @@ async def test_shared_create_propagates_assignment_failure_for_outer_rollback(
     db.rollback.assert_not_awaited()
 
 
-async def test_http_create_delegates_full_input_and_commits_only_after_domain(
-    monkeypatch,
-) -> None:
-    module = _operations()
+async def test_http_create_delegates_full_input_to_fixed_owner(monkeypatch) -> None:
     db = AsyncMock()
     tenant = tenant_context(actor_user_id=42)
+    actor = SimpleNamespace(user_id=42)
     user_in = _input(explicit_roles=True)
-    create = AsyncMock(return_value=SimpleNamespace(user_id=123))
-    monkeypatch.setattr(module.user_operations_service, "create_user", create)
-
-    response = await add_user(
-        user_in=user_in,
-        db=db,
-        current_user=SimpleNamespace(user_id=42),
-        tenant=tenant,
+    owner = AsyncMock()
+    monkeypatch.setattr(user_api, "system_write", owner)
+    response = await add_user(user_in=user_in, db=db, current_user=actor, tenant=tenant)
+    owner.assert_awaited_once_with(
+        db, actor, operation="user.create", payload=user_in, tenant=tenant
     )
-
-    create.assert_awaited_once_with(db, user_in, actor_user_id=42, tenant=tenant)
-    db.commit.assert_awaited_once()
+    db.commit.assert_not_awaited()
     assert response.code == 200
 
 
 async def test_http_create_does_not_commit_failed_domain_operation(monkeypatch) -> None:
-    module = _operations()
     db = AsyncMock()
-    create = AsyncMock(
+    owner = AsyncMock(
         side_effect=BusinessRuleException(
             "赋权失败", error_code="TEST_ASSIGNMENT_DENIED"
         )
     )
-    monkeypatch.setattr(module.user_operations_service, "create_user", create)
-
+    monkeypatch.setattr(user_api, "system_write", owner)
     with pytest.raises(BusinessRuleException):
         await add_user(
             user_in=_input(),
@@ -190,8 +182,9 @@ async def test_http_create_does_not_commit_failed_domain_operation(monkeypatch) 
             current_user=SimpleNamespace(user_id=42),
             tenant=tenant_context(actor_user_id=42),
         )
-
     db.commit.assert_not_awaited()
+    db.rollback.assert_not_awaited()
+    owner.assert_awaited_once()
 
 
 @pytest.mark.parametrize("role_assignment", ["DEFAULT", "NONE"])
