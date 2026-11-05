@@ -123,7 +123,9 @@ class ProcessIdentity:
             boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
             namespace = Path("/proc", str(pid), "ns/pid").stat().st_ino
             return cls(pid, "linux:" + boot + ":" + fields[19] + ":" + str(namespace))
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
+            # An already-open /proc file can return ESRCH if its process exits
+            # before read. Disappearance still needs kernel exit confirmation.
             if linux_exited(pid):
                 return None
             raise _required() from None
