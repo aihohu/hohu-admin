@@ -22,8 +22,6 @@ from app.modules.platform.models import (  # noqa: F401
     PlatformAuditLog,
     PlatformPrincipal,
 )
-from app.modules.system.models.setting import SystemSetting  # noqa: F401
-from app.modules.system.models.mail_config import MailConfig  # noqa: F401
 from app.modules.system.models.config import Config  # noqa: F401
 from app.modules.system.models.data_scope_demo import DataScopeDemo  # noqa: F401
 from app.modules.system.models.dept import Dept  # noqa: F401
@@ -31,9 +29,11 @@ from app.modules.system.models.dict_data import DictData  # noqa: F401
 from app.modules.system.models.dict_type import DictType  # noqa: F401
 from app.modules.system.models.file import File  # noqa: F401
 from app.modules.system.models.login_log import SysLoginLog  # noqa: F401
+from app.modules.system.models.mail_config import MailConfig  # noqa: F401
 from app.modules.system.models.menu import Menu  # noqa: F401
 from app.modules.system.models.operation_log import SysOperationLog  # noqa: F401
 from app.modules.system.models.role import Role  # noqa: F401
+from app.modules.system.models.setting import SystemSetting  # noqa: F401
 from app.modules.system.models.tenant import Tenant  # noqa: F401
 from app.modules.system.models.user import User  # noqa: F401
 from app.modules.system.models.user_field_policy import (  # noqa: F401
@@ -104,5 +104,7 @@ async def run_migrations_online() -> None:
 
 if context.is_offline_mode():
     run_migrations_offline()
+elif isinstance(config.attributes.get("connection"), Connection):
+    do_run_migrations(config.attributes["connection"])
 else:
     asyncio.run(run_migrations_online())
