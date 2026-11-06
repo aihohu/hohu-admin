@@ -6,7 +6,6 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from app.core.exceptions import BusinessRuleException
-from app.db.session import AsyncSessionLocal
 from app.modules.ai.agents.hitl.constants import AiOperationStatus, PreparedActionStatus
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
@@ -19,6 +18,7 @@ from app.modules.ai.service.atomic_completion_service import (
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.system.models.user import User
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.system.test_user_delete_ai_dependencies import (
     delete_case as delete_case,
 )

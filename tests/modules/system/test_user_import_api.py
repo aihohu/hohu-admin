@@ -1,7 +1,7 @@
-"""``POST /system/user/import`` HTTP 契约测试。
+"""``POST /user/import`` HTTP 契约测试。
 
 只验证 HTTP 契约层（路由 / multipart / Form 解析 / 响应 envelope / 错误码），
-service 层（dry_run_import_users / batch_create_users_from_records）用 patch 替身。
+固定 owner 的响应/异常可用 patch 替身；真实事务接线见 test_authorization_transfer_http。
 完整业务流程在 test_user_import_dry_run.py / test_user_import_execute.py 已覆盖。
 
 覆盖：
@@ -22,24 +22,21 @@ service 层（dry_run_import_users / batch_create_users_from_records）用 patch
 """
 
 import io
-from datetime import datetime
+from contextlib import ExitStack, contextmanager
+from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from httpx import ASGITransport, AsyncClient
 from openpyxl import Workbook
-from sqlalchemy import select
+from starlette.datastructures import UploadFile
 
 from app.core.exceptions import (
-    BusinessRuleException,
     UnprocessableEntityException,
 )
 from app.core.security import create_access_token
-from app.main import app
-from app.modules.system.api.user import import_users
 from app.modules.system.constants import ImportBatchStatus
-from app.modules.system.models.user import User
 from app.modules.system.models.user_transfer import UserImportBatch
 from app.modules.system.schemas.user_transfer import (
     FailedRow,
@@ -50,7 +47,12 @@ from app.modules.system.service.user_import_parser import (
     MAX_FILE_SIZE_BYTES,
     ImportErrorCollection,
 )
-from tests.tenant_helpers import tenant_context
+from tests.modules.system.test_authorization_import_candidate import (
+    import_sessions as import_sessions,
+)
+from tests.modules.system.test_authorization_transfer_http import (
+    transfer_http as transfer_http,
+)
 
 # ========== Constants ==========
 
@@ -71,37 +73,32 @@ _DEFAULT_FILENAME = "users.xlsx"
 
 
 @pytest.fixture
-async def client(db_session):  # noqa: ARG001 (db_session resets redis)
-    """ASGI test client。
-
-    依赖 ``db_session`` 触发 ``tests/modules/system/conftest.py`` 的
-    ``_reset_redis_client()``，把 audit_middleware / auth.service 的 module-load
-    redis_client 引用刷新到当前 loop。否则跨测试 loop 关闭后会抛
-    ``RuntimeError: Event loop is closed``。
-    """
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
-        yield ac
+async def client(transfer_http):
+    client, _ = transfer_http
+    client.headers.pop("Authorization")
+    return client
 
 
 @pytest.fixture
-async def admin_token(db_session) -> str:
-    """构造 admin 用户的 JWT（admin 是超管，绕过 system:user:import 检查）。
-
-    使用 db_session 读取 admin user_id（init_db.py 已 seed）。
-    """
-    user = (
-        await db_session.execute(
-            select(User).where(User.tenant_id == 0, User.user_name == "admin")
-        )
-    ).scalar_one()
+async def admin_token():
     return create_access_token(
-        subject=str(user.user_id),
-        tenant_id=user.tenant_id,
-        tenant_version=1,
-        user_version=user.auth_version,
+        subject="101", tenant_id=0, tenant_version=1, user_version=1
     )
+
+
+@contextmanager
+def parse_stub(**kwargs):
+    with ExitStack() as stack:
+        mock = stack.enter_context(
+            patch("app.db.authorization_transfer_http.parse_import_excel", **kwargs)
+        )
+        stack.enter_context(
+            patch(
+                "app.modules.system.service.authorization_transfer_candidate.parse_import_excel",
+                new=mock,
+            )
+        )
+        yield mock
 
 
 # ========== Helpers ==========
@@ -193,6 +190,20 @@ def _fake_preview_batch() -> UserImportBatch:
     )
 
 
+def _fake_preview_response():
+    batch = _fake_preview_batch()
+    data = _fake_dry_run_result().model_dump(mode="json", by_alias=True)
+    data.update(
+        newCount=batch.summary_new,
+        existsCount=0,
+        conflictCount=0,
+        outOfScopeCount=0,
+        previewToken=batch.preview_token,
+        expiresAt=(batch.created_at + timedelta(minutes=10)).isoformat(),
+    )
+    return SimpleNamespace(preview_data=data)
+
+
 def _fake_import_result(
     status: str = ImportBatchStatus.SUCCESS.value,
     failed_count: int = 0,
@@ -245,23 +256,25 @@ def _make_field_errors_xlsx() -> bytes:
 # ========== Auth ==========
 
 
-async def test_endpoint_reads_upload_with_hard_size_bound(db_session) -> None:
-    upload = MagicMock()
-    upload.read = AsyncMock(return_value=b"x" * (MAX_FILE_SIZE_BYTES + 1))
-    upload.content_type = MIME_XLSX
-    upload.filename = _DEFAULT_FILENAME
+async def test_endpoint_reads_upload_with_hard_size_bound(
+    client, admin_token, monkeypatch
+):
+    sizes = []
+    original = UploadFile.read
 
-    with pytest.raises(BusinessRuleException) as exc_info:
-        await import_users(
-            file=upload,
-            reason="QA bounded upload",
-            db=db_session,
-            current_user=MagicMock(),
-            tenant=tenant_context(tenant_id=0, actor_user_id=1),
-        )
+    async def read(upload, size=-1):
+        sizes.append(size)
+        return await original(upload, size)
 
-    assert exc_info.value.error_code == "AI_IMPORT_FILE_TOO_LARGE"
-    upload.read.assert_awaited_once_with(MAX_FILE_SIZE_BYTES + 1)
+    monkeypatch.setattr(UploadFile, "read", read)
+    response = await client.post(
+        "/user/import",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        data={"reason": "QA bounded upload", "dry_run": "true"},
+        files={"file": (_DEFAULT_FILENAME, LARGE_FILE_BYTES, MIME_XLSX)},
+    )
+    assert response.json()["errorCode"] == "AI_IMPORT_FILE_TOO_LARGE"
+    assert sizes == [MAX_FILE_SIZE_BYTES + 1]
 
 
 class TestPostImportAuth:
@@ -270,7 +283,7 @@ class TestPostImportAuth:
     async def test_no_token_returns_401(self, client):
         """未带 Authorization → OAuth2PasswordBearer 抛 401。"""
         response = await client.post(
-            "/system/user/import",
+            "/user/import",
             data={"reason": "QA"},
             files={
                 "file": (
@@ -285,7 +298,7 @@ class TestPostImportAuth:
     async def test_invalid_token_returns_401(self, client):
         """JWT 解码失败 → 401。"""
         response = await client.post(
-            "/system/user/import",
+            "/user/import",
             headers={"Authorization": "Bearer invalid.jwt.token"},
             data={"reason": "QA"},
             files={
@@ -308,22 +321,16 @@ class TestPostImportDryRun:
     async def test_returns_preview_token_and_expires_at(self, client, admin_token):
         """dry_run=true → 200 + data.previewToken + data.expiresAt。"""
         with (
-            patch(
-                f"{_API_MODULE}.parse_import_excel",
+            parse_stub(
                 return_value=[],
-            ) as mock_parse,
+            ),
             patch(
-                f"{_API_MODULE}.dry_run_import_users",
-                new=AsyncMock(
-                    return_value=(
-                        _fake_dry_run_result(),
-                        _fake_preview_batch(),
-                    )
-                ),
+                "app.db.authorization_transfer_owner.TransferOwner.preview",
+                new=AsyncMock(return_value=_fake_preview_response()),
             ) as mock_dry_run,
         ):
             response = await client.post(
-                "/system/user/import",
+                "/user/import",
                 headers={"Authorization": f"Bearer {admin_token}"},
                 data={
                     "reason": "QA dry-run reason",
@@ -352,28 +359,21 @@ class TestPostImportDryRun:
         assert data["existsCount"] == 0
         assert data["conflictCount"] == 0
         assert data["outOfScopeCount"] == 0
-        mock_parse.assert_called_once()
         mock_dry_run.assert_awaited_once()
 
     async def test_dry_run_passes_on_conflict_to_service(self, client, admin_token):
         """on_conflict 表单字段透传到 dry_run_import_users。"""
         with (
-            patch(
-                f"{_API_MODULE}.parse_import_excel",
+            parse_stub(
                 return_value=[],
             ),
             patch(
-                f"{_API_MODULE}.dry_run_import_users",
-                new=AsyncMock(
-                    return_value=(
-                        _fake_dry_run_result(),
-                        _fake_preview_batch(),
-                    )
-                ),
+                "app.db.authorization_transfer_owner.TransferOwner.preview",
+                new=AsyncMock(return_value=_fake_preview_response()),
             ) as mock_dry_run,
         ):
             await client.post(
-                "/system/user/import",
+                "/user/import",
                 headers={"Authorization": f"Bearer {admin_token}"},
                 data={
                     "reason": "QA",
@@ -404,17 +404,16 @@ class TestPostImportExecute:
     ):
         """dry_run=false + preview_token → 200 + batchId + status + counts。"""
         with (
-            patch(
-                f"{_API_MODULE}.parse_import_excel",
+            parse_stub(
                 return_value=[],
             ),
             patch(
-                f"{_API_MODULE}.batch_create_users_from_records",
+                "app.db.authorization_runtime.AuthorizationRuntime.import_users",
                 new=AsyncMock(return_value=_fake_import_result()),
             ) as mock_execute,
         ):
             response = await client.post(
-                "/system/user/import",
+                "/user/import",
                 headers={"Authorization": f"Bearer {admin_token}"},
                 data={
                     "reason": "QA execute reason",
@@ -445,17 +444,16 @@ class TestPostImportExecute:
     async def test_execute_passes_sync_mode_to_service(self, client, admin_token):
         """sync_mode 应透传到 batch_create_users_from_records。"""
         with (
-            patch(
-                f"{_API_MODULE}.parse_import_excel",
+            parse_stub(
                 return_value=[],
             ),
             patch(
-                f"{_API_MODULE}.batch_create_users_from_records",
+                "app.db.authorization_runtime.AuthorizationRuntime.import_users",
                 new=AsyncMock(return_value=_fake_import_result()),
             ) as mock_execute,
         ):
             await client.post(
-                "/system/user/import",
+                "/user/import",
                 headers={"Authorization": f"Bearer {admin_token}"},
                 data={
                     "reason": "QA",
@@ -489,17 +487,16 @@ class TestPostImportExecute:
             idempotent_replay=True,
         )
         with (
-            patch(
-                f"{_API_MODULE}.parse_import_excel",
+            parse_stub(
                 return_value=[],
             ),
             patch(
-                f"{_API_MODULE}.batch_create_users_from_records",
+                "app.db.authorization_runtime.AuthorizationRuntime.import_users",
                 new=AsyncMock(return_value=replay_result),
             ),
         ):
             response = await client.post(
-                "/system/user/import",
+                "/user/import",
                 headers={"Authorization": f"Bearer {admin_token}"},
                 data={
                     "reason": "QA replay",
@@ -521,7 +518,7 @@ class TestPostImportExecute:
     async def test_missing_preview_token_returns_422(self, client, admin_token):
         """dry_run=false 且缺少 preview_token 时返回 422。"""
         response = await client.post(
-            "/system/user/import",
+            "/user/import",
             headers={"Authorization": f"Bearer {admin_token}"},
             data={"reason": "QA"},
             files={
@@ -545,7 +542,7 @@ class TestPostImportValidation:
     async def test_missing_file_returns_422(self, client, admin_token):
         """multipart 缺 file 字段 → FastAPI 422。"""
         response = await client.post(
-            "/system/user/import",
+            "/user/import",
             headers={"Authorization": f"Bearer {admin_token}"},
             data={"reason": "QA"},
         )
@@ -554,7 +551,7 @@ class TestPostImportValidation:
     async def test_missing_reason_returns_422(self, client, admin_token):
         """reason 必填。"""
         response = await client.post(
-            "/system/user/import",
+            "/user/import",
             headers={"Authorization": f"Bearer {admin_token}"},
             files={
                 "file": (
@@ -569,7 +566,7 @@ class TestPostImportValidation:
     async def test_invalid_mime_returns_400(self, client, admin_token):
         """MIME 不在白名单时返回 400 AI_IMPORT_INVALID_MIME。"""
         response = await client.post(
-            "/system/user/import",
+            "/user/import",
             headers={"Authorization": f"Bearer {admin_token}"},
             data={"reason": "QA"},
             files={
@@ -587,7 +584,7 @@ class TestPostImportValidation:
     async def test_file_too_large_returns_400(self, client, admin_token):
         """文件超过 10MB 时返回 400 AI_IMPORT_FILE_TOO_LARGE。"""
         response = await client.post(
-            "/system/user/import",
+            "/user/import",
             headers={"Authorization": f"Bearer {admin_token}"},
             data={"reason": "QA"},
             files={
@@ -614,12 +611,11 @@ class TestPostImportValidation:
                 error_code="AI_IMPORT_USERNAME_INVALID",
             )
         ]
-        with patch(
-            f"{_API_MODULE}.parse_import_excel",
+        with parse_stub(
             side_effect=ImportErrorCollection(fake_errors),
         ):
             response = await client.post(
-                "/system/user/import",
+                "/user/import",
                 headers={"Authorization": f"Bearer {admin_token}"},
                 data={"reason": "QA", "dry_run": "true"},
                 files={
@@ -647,12 +643,11 @@ class TestPostImportServiceExceptionPropagation:
     async def test_preview_invalid_returns_422(self, client, admin_token):
         """preview_token 校验失败时返回 422 AI_IMPORT_PREVIEW_INVALID。"""
         with (
-            patch(
-                f"{_API_MODULE}.parse_import_excel",
+            parse_stub(
                 return_value=[],
             ),
             patch(
-                f"{_API_MODULE}.batch_create_users_from_records",
+                "app.db.authorization_runtime.AuthorizationRuntime.import_users",
                 new=AsyncMock(
                     side_effect=UnprocessableEntityException(
                         "preview_token 无效",
@@ -662,7 +657,7 @@ class TestPostImportServiceExceptionPropagation:
             ),
         ):
             response = await client.post(
-                "/system/user/import",
+                "/user/import",
                 headers={"Authorization": f"Bearer {admin_token}"},
                 data={
                     "reason": "QA",
@@ -684,12 +679,11 @@ class TestPostImportServiceExceptionPropagation:
     async def test_batch_running_returns_422(self, client, admin_token):
         """批次处于 RUNNING 时返回 422 AI_IMPORT_BATCH_RUNNING。"""
         with (
-            patch(
-                f"{_API_MODULE}.parse_import_excel",
+            parse_stub(
                 return_value=[],
             ),
             patch(
-                f"{_API_MODULE}.batch_create_users_from_records",
+                "app.db.authorization_runtime.AuthorizationRuntime.import_users",
                 new=AsyncMock(
                     side_effect=UnprocessableEntityException(
                         "批次正在执行中",
@@ -699,7 +693,7 @@ class TestPostImportServiceExceptionPropagation:
             ),
         ):
             response = await client.post(
-                "/system/user/import",
+                "/user/import",
                 headers={"Authorization": f"Bearer {admin_token}"},
                 data={
                     "reason": "QA",

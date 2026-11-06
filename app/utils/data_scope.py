@@ -488,7 +488,7 @@ async def get_dept_and_sub_ids(
     if not dept_ids:
         return []
     conditions = [
-        func.concat(",", Dept.ancestors, ",").like(f"%,{int(did)},%")
+        func.pg_catalog.concat(",", Dept.ancestors, ",").like(f"%,{int(did)},%")
         for did in dept_ids
     ]
     stmt = select(Dept.dept_id).where(

@@ -6,26 +6,57 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, func, select
 
 from app.core import redis as redis_module
-from app.db.session import AsyncSessionLocal, engine
+from app.core.exceptions import BusinessException
+from app.core.security import create_access_token
+from app.db.authorization_owner import _QUARANTINED
+from app.db.request_session import RequestSession
+from app.db.session import engine
 from app.modules.ai import lifecycle
-from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.ai.api import confirm, resume
 from app.modules.ai.api import conversation as conversation_api
+from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
+from app.modules.ai.service import authorization_lifecycle_candidate
+from app.modules.ai.service.authorization_chat_candidate import chat_candidate
 from app.modules.ai.service.chat_run_service import chat_run_finalizer
 from app.modules.ai.service.conversation_service import conversation_service
-from app.modules.auth.service import load_live_user_authority
+from app.modules.auth.service import get_current_user
+from app.modules.system.service.authorization_ai_tool_adapter import (
+    system_ai_tool_adapter,
+)
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_completion_guards import PLATFORM, TENANT
-from tests.modules.ai.test_atomic_prepared_completion import approve, count_real_handler
+from tests.modules.ai.test_atomic_prepared_completion import (
+    approve,
+    authenticated_actor,
+    count_real_handler,
+)
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )
 from tests.modules.ai.test_completion_resume_guards import leave_claim_running
 from tests.modules.ai.test_resume import _make_pending
+
+
+async def _delete(conversation_id, db, actor):
+    # Exercise the actual handoff with a cryptographically verified identity.
+    tenant = actor._tenant_context
+    token = create_access_token(
+        subject=str(actor.user_id),
+        tenant_id=tenant.tenant_id,
+        tenant_version=tenant.tenant_version,
+        user_version=actor.auth_version,
+    )
+    await db.rollback()
+    async with RequestSession(bind=engine, expire_on_commit=False) as request_db:
+        verified = await get_current_user(token=token, db=request_db)
+        return await conversation_api.delete_conversation(
+            conversation_id, request_db, verified
+        )
 
 
 @pytest.mark.parametrize(
@@ -42,14 +73,32 @@ async def test_registered_readonly_cache_terminal_compatibility(
     completion_case, tool, owner, status, expected
 ):
     case = completion_case
-    async with AsyncSessionLocal() as db:
+    now = datetime.now(UTC)
+    async with AsyncSessionLocal() as db, db.begin():
         action = await db.get(AiPreparedAction, case.action_id)
+        log = await db.get(AiOperationLog, case.log_id)
         action.execute_tool_name = tool
         action.status = status
         action.execution_owner = owner
-        assert (
-            await lifecycle._cache_terminal_is_verified(db, action, tenant=case.tenant)
-        ) is expected
+        action.execution_lease_expires_at = None
+        action.row_version = 4
+        action.finished_at = now
+        action.error_code = (
+            "AI_PREPARED_ACTION_EXECUTION_INTERRUPTED" if status == "failed" else None
+        )
+        log.tool_name = tool
+        log.readonly_snapshot = tool == "user.list"
+        log.status = "failed" if status == "failed" else "success"
+        log.finished_at = now.replace(tzinfo=None)
+        log.started_at = now.replace(tzinfo=None)
+        log.error_code = action.error_code
+    result = await lifecycle.get_authorization_runtime().recovery.observe_cached(
+        tenant_id=case.tenant.tenant_id,
+        user_id=case.tenant.actor_user_id,
+        confirmation_id=case.confirmation_id,
+        redis=AsyncMock(),
+    )
+    assert (result.disposition != "unknown") is expected
 
 
 @pytest.mark.parametrize(
@@ -102,7 +151,7 @@ async def test_legacy_write_orphan_never_synthesizes_completion(monkeypatch, sta
     db = AsyncMock()
     db.scalar.return_value = None
     finalize, delete = AsyncMock(), AsyncMock()
-    monkeypatch.setattr(lifecycle.chat_run_finalizer, "finalize_pending_turn", finalize)
+    monkeypatch.setattr(chat_run_finalizer, "finalize_pending_turn", finalize)
     monkeypatch.setattr(lifecycle.hitl_manager, "delete_pending", delete)
     await lifecycle.finalize_orphaned_pending(
         db,
@@ -123,27 +172,49 @@ async def test_legacy_write_orphan_never_synthesizes_completion(monkeypatch, sta
     db.commit.assert_not_awaited()
 
 
-async def test_delete_timeout_never_waits_for_stalled_cleanup(monkeypatch):
+async def test_delete_timeout_never_waits_for_stalled_cleanup(
+    completion_case, monkeypatch
+):
+    case = completion_case
     release = asyncio.Event()
-    db = MagicMock(info={})
-    db.execute = AsyncMock(side_effect=TimeoutError("Injected lock timeout"))
-    db.invalidate = AsyncMock(side_effect=release.wait)
-    db.rollback = AsyncMock(side_effect=release.wait)
-    monkeypatch.setattr(conversation_api, "get_bound_tenant_context", lambda _: TENANT)
-    task = asyncio.create_task(
-        conversation_api.delete_conversation(
-            123, db, SimpleNamespace(user_id=TENANT.actor_user_id)
-        )
-    )
-    try:
-        done, _ = await asyncio.wait({task}, timeout=1.5)
-        assert task in done, "Connection cleanup must not extend the request deadline"
-        assert task.exception().error_code == "AI_ACTION_RUNNING"
-        db.rollback.assert_not_awaited()
-    finally:
-        release.set()
-        await asyncio.gather(task, return_exceptions=True)
-        await asyncio.sleep(0)
+    cleanups = []
+
+    async def fail(db, _tx, **_request):
+        rollback = db.rollback
+
+        async def stalled():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                await release.wait()
+            await rollback()
+
+        monkeypatch.setattr(db, "rollback", stalled)
+        cleanups.append(db)
+        raise TimeoutError("Injected context timeout")
+
+    monkeypatch.setattr(chat_candidate, "invalidate", fail)
+    async with AsyncSessionLocal() as db:
+        actor = await authenticated_actor(case, db)
+        task = asyncio.create_task(_delete(case.conversation_id, db, actor))
+        try:
+            done, _ = await asyncio.wait({task}, timeout=1.5)
+            assert task in done, (
+                "Connection cleanup must not extend the request deadline"
+            )
+            assert task.exception().error_code == "AUTHORIZATION_ROLLBACK_UNKNOWN"
+            assert cleanups[0].info.get("authorization_owner_quarantined")
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            await asyncio.gather(
+                *(
+                    entry[2]
+                    for entry in tuple(_QUARANTINED.values())
+                    if entry[0] in cleanups
+                ),
+                return_exceptions=True,
+            )
 
 
 @pytest.mark.parametrize(
@@ -166,7 +237,7 @@ async def test_cache_sweep_clears_only_verified_completion(
     case = completion_case
     if state.startswith("rejected"):
         async with AsyncSessionLocal() as db:
-            actor = await load_live_user_authority(db, tenant=case.tenant)
+            actor = await authenticated_actor(case, db)
             await confirm.confirm_tool(
                 confirm.ConfirmRequest(
                     confirmation_id=case.confirmation_id, action="reject"
@@ -258,9 +329,9 @@ async def test_startup_preserves_unproven_approved_fact(completion_case):
         ).status == "pending_confirmation"
     assert case.calls == []
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         with pytest.raises(Exception, match="核对"):
-            await conversation_api.delete_conversation(case.conversation_id, db, actor)
+            await _delete(case.conversation_id, db, actor)
 
 
 async def test_soft_delete_locks_sources_before_actions(completion_case):
@@ -272,10 +343,10 @@ async def test_soft_delete_locks_sources_before_actions(completion_case):
             statements.append(statement)
 
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         event.listen(engine.sync_engine, "before_cursor_execute", capture)
         try:
-            await conversation_api.delete_conversation(case.conversation_id, db, actor)
+            await _delete(case.conversation_id, db, actor)
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", capture)
     tables = [
@@ -332,9 +403,9 @@ async def test_soft_delete_rejects_corrupted_success_proof(
     async with AsyncSessionLocal() as db, db.begin():
         (await db.get(AiOperationLog, case.log_id)).args_hash = "f" * 64
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         with pytest.raises(Exception, match="核对|执行|完成"):
-            await conversation_api.delete_conversation(case.conversation_id, db, actor)
+            await _delete(case.conversation_id, db, actor)
 
 
 @pytest.mark.parametrize(
@@ -358,34 +429,47 @@ async def test_soft_delete_rejects_unproven_write_orphan(
         log = await db.get(AiOperationLog, case.log_id)
         log.status, log.readonly_snapshot = status, readonly
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
-        if readonly:
-            await conversation_api.delete_conversation(case.conversation_id, db, actor)
-        else:
-            with pytest.raises(Exception, match="核对"):
-                await conversation_api.delete_conversation(
-                    case.conversation_id, db, actor
-                )
+        actor = await authenticated_actor(case, db)
+        # A readonly flag cannot turn the registered user.create writer into a read.
+        with pytest.raises(Exception, match="核对"):
+            await _delete(case.conversation_id, db, actor)
+
+
+async def test_insufficient_execution_lease_refuses_business(
+    completion_case, monkeypatch
+):
+    case = completion_case
+    count_real_handler(case, monkeypatch)
+
+    monkeypatch.setattr(
+        authorization_lifecycle_candidate,
+        "_EXECUTION_LEASE_TTL",
+        timedelta(milliseconds=500),
+    )
+    assert (await approve(case)).data.status == "failed"
+    assert not case.calls
+    async with AsyncSessionLocal() as db:
+        action = await db.get(AiPreparedAction, case.action_id)
+        assert action.status == "failed"
+        assert action.error_code == "AI_PREPARED_ACTION_EXECUTION_INTERRUPTED"
 
 
 @pytest.mark.parametrize("contender", ["cleanup", "delete", "stream"])
-async def test_business_lock_outlives_lease_and_serializes_bypass(
+async def test_business_lock_serializes_lifecycle_contenders(
     completion_case, monkeypatch, contender
 ):
     case = completion_case
     count_real_handler(case, monkeypatch)
-    registered = ToolRegistry.get().find("user.create")
-    actual = registered.fn
+    actual = system_ai_tool_adapter.apply
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def held_handler(ctx, **args):
-        result = await actual(ctx, **args)
+    async def held_handler(db, tx, command, work):
+        result = await actual(db, tx, command, work)
         entered.set()
         await release.wait()
         return result
 
-    monkeypatch.setattr(registered, "fn", held_handler)
-    monkeypatch.setattr(confirm, "_EXECUTION_LEASE_TTL", timedelta(milliseconds=500))
+    monkeypatch.setattr(system_ai_tool_adapter, "apply", held_handler)
 
     async def contend():
         if contender == "cleanup":
@@ -394,10 +478,8 @@ async def test_business_lock_outlives_lease_and_serializes_bypass(
             )
         async with AsyncSessionLocal() as db:
             if contender == "delete":
-                actor = await load_live_user_authority(db, tenant=case.tenant)
-                return await conversation_api.delete_conversation(
-                    case.conversation_id, db, actor
-                )
+                actor = await authenticated_actor(case, db)
+                return await _delete(case.conversation_id, db, actor)
             action = await db.get(AiPreparedAction, case.action_id)
             await chat_run_finalizer.finalize_assistant_turn(
                 db,
@@ -419,20 +501,50 @@ async def test_business_lock_outlives_lease_and_serializes_bypass(
             )
             await db.commit()
 
-    approval = asyncio.create_task(approve(case))
+    pids = {}
+
+    def observe_connection(connection, _cursor, _sql, _params, _context, _many):
+        name = asyncio.current_task().get_name()
+        if name in {"business-owner", "lifecycle-contender"}:
+            pids[name] = connection.connection.driver_connection.get_server_pid()
+
+    event.listen(engine.sync_engine, "before_cursor_execute", observe_connection)
+    approval = asyncio.create_task(approve(case), name="business-owner")
     bypass = None
     try:
         await asyncio.wait_for(entered.wait(), 4)
-        await asyncio.sleep(0.6)
-        bypass = asyncio.create_task(contend())
-        await asyncio.sleep(0.1)
-        assert not bypass.done(), (
-            "The competing path must wait for the business context lock"
-        )
+        bypass = asyncio.create_task(contend(), name="lifecycle-contender")
+        async with AsyncSessionLocal() as observer, asyncio.timeout(1.5):
+            while True:
+                if "lifecycle-contender" in pids:
+                    blockers = await observer.scalar(
+                        select(func.pg_blocking_pids(pids["lifecycle-contender"]))
+                    )
+                    if pids["business-owner"] in blockers:
+                        break
+                assert not bypass.done(), "Contender bypassed the business lock"
+                await asyncio.sleep(0)
         release.set()
         assert (await asyncio.wait_for(approval, 4)).data.status == "succeeded"
-        await asyncio.wait_for(bypass, 4)
+        if contender == "delete":
+            # A separate display owner may reserve an assistant after business.
+            # Either deletion precedes it or the frozen inventory must reject it.
+            try:
+                response = await asyncio.wait_for(bypass, 4)
+            except BusinessException as changed:
+                assert changed.error_code == "AUTHORIZATION_SNAPSHOT_STALE"
+                async with AsyncSessionLocal() as db:
+                    actor = await authenticated_actor(case, db)
+                    response = await _delete(case.conversation_id, db, actor)
+            assert response.code == 200
+            async with AsyncSessionLocal() as db:
+                assert (
+                    await db.get(AiConversation, case.conversation_id)
+                ).deleted_at is not None
+        else:
+            await asyncio.wait_for(bypass, 4)
     finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", observe_connection)
         release.set()
         await asyncio.gather(
             approval, *([bypass] if bypass is not None else []), return_exceptions=True
@@ -469,11 +581,9 @@ async def test_soft_delete_checks_all_actions_before_expiring_any(
             await db.flush()
             duplicate_id = pending.action_id
         async with AsyncSessionLocal() as db:
-            actor = await load_live_user_authority(db, tenant=case.tenant)
+            actor = await authenticated_actor(case, db)
             with pytest.raises(Exception, match="核对"):
-                await conversation_api.delete_conversation(
-                    case.conversation_id, db, actor
-                )
+                await _delete(case.conversation_id, db, actor)
         async with AsyncSessionLocal() as db:
             assert (
                 await db.get(AiPreparedAction, duplicate_id)
@@ -483,3 +593,34 @@ async def test_soft_delete_checks_all_actions_before_expiring_any(
         if duplicate_id is not None:
             async with AsyncSessionLocal() as db, db.begin():
                 await db.delete(await db.get(AiPreparedAction, duplicate_id))
+
+
+@pytest.mark.parametrize("durable", [True, False])
+async def test_soft_delete_accepts_verified_registered_readonly_history(
+    completion_case, durable
+):
+    case = completion_case
+    now = datetime.now(UTC)
+    async with AsyncSessionLocal() as db, db.begin():
+        action = await db.get(AiPreparedAction, case.action_id)
+        action.execute_tool_name = "user.list"
+        action.status = "succeeded"
+        action.row_version = 4
+        action.execution_owner = None
+        action.execution_lease_expires_at = None
+        action.finished_at = now
+        action.error_code = None
+        log = await db.get(AiOperationLog, case.log_id)
+        log.tool_name = "user.list"
+        log.readonly_snapshot = True
+        log.status = "success"
+        log.started_at = now.replace(tzinfo=None)
+        log.finished_at = now.replace(tzinfo=None)
+        log.error_code = None
+        if not durable:
+            await db.delete(action)
+    async with AsyncSessionLocal() as db:
+        actor = await authenticated_actor(case, db)
+        response = await _delete(case.conversation_id, db, actor)
+    assert response.code == 200
+    assert case.calls == []

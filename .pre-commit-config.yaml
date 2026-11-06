@@ -28,3 +28,10 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+
+      - id: authorization-candidates-check
+        name: Authorization candidate inventory and AST coverage
+        entry: uv run python -m tools.checks.check_authorization_candidates
+        language: system
+        pass_filenames: false
+        always_run: true

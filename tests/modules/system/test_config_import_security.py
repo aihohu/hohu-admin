@@ -9,6 +9,7 @@ from fastapi import UploadFile
 from openpyxl import Workbook
 
 from app.core.exceptions import BusinessRuleException
+from app.modules.system.api import config as config_api
 from app.modules.system.api.config import (
     CONFIG_IMPORT_MAX_SIZE_BYTES,
 )
@@ -60,17 +61,25 @@ async def test_config_import_rejects_dtd_and_external_entity_before_database() -
     database.execute.assert_not_awaited()
 
 
-async def test_config_import_upload_uses_bounded_read_before_service() -> None:
+async def test_config_import_upload_uses_bounded_read_before_service(
+    monkeypatch,
+) -> None:
     upload = MagicMock(spec=UploadFile)
     upload.read = AsyncMock(return_value=b"x" * (CONFIG_IMPORT_MAX_SIZE_BYTES + 1))
     database = AsyncMock()
     tenant = MagicMock(tenant_id=0)
+    monkeypatch.setattr(
+        config_api, "access_identity", lambda _: MagicMock(tenant=tenant)
+    )
+    release = AsyncMock()
+    monkeypatch.setattr(config_api, "release_request_reads", release)
 
     with pytest.raises(BusinessRuleException) as exc_info:
         await import_configs_api(file=upload, db=database, tenant=tenant)
 
     assert exc_info.value.error_code == "CONFIG_IMPORT_FILE_TOO_LARGE"
     upload.read.assert_awaited_once_with(CONFIG_IMPORT_MAX_SIZE_BYTES + 1)
+    release.assert_awaited_once_with(database)
     database.commit.assert_not_awaited()
 
 

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.core.tenant import TenantContext
+from app.db.authorization_http import business_write
 from app.db.session import get_db
 from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.user import User
@@ -60,11 +61,14 @@ async def add_data_scope_demo(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """创建演示数据"""
-    demo = await data_scope_demo_service.create(
-        db, data_in, current_user, tenant=tenant
+    result = await business_write(
+        db,
+        current_user,
+        tenant=tenant,
+        operation="data-scope-demo.create",
+        payload=data_in,
     )
-    await db.commit()
-    await db.refresh(demo)
+    demo = DataScopeDemoOut.model_validate(result)
     return ResponseModel.success(data=demo, msg="创建成功")
 
 
@@ -82,11 +86,15 @@ async def update_data_scope_demo(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """更新演示数据（不允许改 dept_id/create_by）"""
-    demo = await data_scope_demo_service.update(
-        db, demo_id, data_in, current_user, tenant=tenant
+    result = await business_write(
+        db,
+        current_user,
+        tenant=tenant,
+        operation="data-scope-demo.update",
+        payload=data_in,
+        ids=(demo_id,),
     )
-    await db.commit()
-    await db.refresh(demo)
+    demo = DataScopeDemoOut.model_validate(result)
     return ResponseModel.success(data=demo, msg="更新成功")
 
 
@@ -103,6 +111,11 @@ async def delete_data_scope_demo(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """删除演示数据"""
-    await data_scope_demo_service.delete(db, demo_id, current_user, tenant=tenant)
-    await db.commit()
+    await business_write(
+        db,
+        current_user,
+        tenant=tenant,
+        operation="data-scope-demo.delete",
+        ids=(demo_id,),
+    )
     return ResponseModel.success(msg="删除成功")

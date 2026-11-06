@@ -1,14 +1,9 @@
-import asyncio
-
 from fastapi import APIRouter, Depends
-from sqlalchemy import func, select
-from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_ai_chat_use
 from app.core.base_response import PageResult, ResponseModel
-from app.core.exceptions import BusinessRuleException
-from app.core.tenant import get_bound_tenant_context
+from app.db import authorization_http
 from app.db.session import get_db
 from app.modules.ai.schemas.conversation import (
     ConversationCreate,
@@ -16,8 +11,7 @@ from app.modules.ai.schemas.conversation import (
     ConversationQuery,
     ConversationUpdate,
 )
-from app.modules.ai.service.conversation_service import conversation_service
-from app.modules.ai.service.prepared_action_service import prepared_action_service
+from app.modules.auth.service import access_identity
 from app.modules.system.models.user import User
 
 router = APIRouter()
@@ -33,11 +27,12 @@ async def get_conversation_list(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(require_ai_chat_use),
 ):
-    tenant = get_bound_tenant_context(_current_user)
-    page_data = await conversation_service.get_list(
-        db, query, _current_user.user_id, tenant=tenant
+    identity = access_identity(_current_user)
+    await authorization_http.release_request_reads(db)
+    page = await authorization_http.get_authorization_runtime().chat.list_conversations(
+        tenant=identity.tenant, actor_user_version=identity.user_version, query=query
     )
-    return ResponseModel.success(data=page_data)
+    return ResponseModel.success(data=page)
 
 
 @router.get("/{conversation_id}", summary="获取会话详情 + 历史消息")
@@ -46,37 +41,15 @@ async def get_conversation_detail(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(require_ai_chat_use),
 ):
-    tenant = get_bound_tenant_context(_current_user)
-    conversation = await conversation_service.get_by_id(
-        db, conversation_id, _current_user.user_id, tenant=tenant
-    )
-    messages = await conversation_service.project_messages(
-        db,
+    identity = access_identity(_current_user)
+    await authorization_http.release_request_reads(db)
+    result = await authorization_http.get_authorization_runtime().chat.messages(
+        tenant=identity.tenant,
+        actor_user_version=identity.user_version,
         conversation_id=conversation_id,
-        current_user=_current_user,
+        detail=True,
     )
-    conv_out = ConversationOut.model_validate(conversation)
-    actions = await prepared_action_service.list_pending_for_conversation(
-        db,
-        conversation_id=conversation_id,
-        user_id=_current_user.user_id,
-        tenant=tenant,
-    )
-    pending_actions = [
-        await prepared_action_service.project_pending_out(
-            db,
-            action=action,
-            current_user=_current_user,
-        )
-        for action in actions
-    ]
-    return ResponseModel.success(
-        data={
-            "conversation": conv_out,
-            "messages": messages,
-            "pendingActions": pending_actions,
-        }
-    )
+    return ResponseModel.success(data=result)
 
 
 @router.post("", summary="创建会话")
@@ -85,16 +58,15 @@ async def create_conversation(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(require_ai_chat_use),
 ):
-    tenant = get_bound_tenant_context(_current_user)
-    conversation = await conversation_service.create(
-        db,
-        data,
-        _current_user.user_id,
-        tenant=tenant,
+    identity = access_identity(_current_user)
+    await authorization_http.release_request_reads(db)
+    result = await authorization_http.get_authorization_runtime().chat.conversation(
+        tenant=identity.tenant,
+        actor_user_version=identity.user_version,
+        data=data.model_dump(),
+        http_result=True,
     )
-    await db.commit()
-    await db.refresh(conversation)
-    return ResponseModel.success(data=ConversationOut.model_validate(conversation))
+    return ResponseModel.success(data=result)
 
 
 @router.put("/{conversation_id}", summary="更新会话")
@@ -104,15 +76,14 @@ async def update_conversation(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(require_ai_chat_use),
 ):
-    tenant = get_bound_tenant_context(_current_user)
-    await conversation_service.update(
-        db,
-        conversation_id,
-        data,
-        _current_user.user_id,
-        tenant=tenant,
+    identity = access_identity(_current_user)
+    await authorization_http.release_request_reads(db)
+    await authorization_http.get_authorization_runtime().chat.conversation(
+        tenant=identity.tenant,
+        actor_user_version=identity.user_version,
+        data=data.model_dump(exclude_unset=True),
+        conversation_id=conversation_id,
     )
-    await db.commit()
     return ResponseModel.success(msg="更新成功")
 
 
@@ -122,32 +93,11 @@ async def delete_conversation(
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(require_ai_chat_use),
 ):
-    from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
-        _discard_uncertain_session,
+    identity = access_identity(_current_user)
+    await authorization_http.release_request_reads(db)
+    await authorization_http.get_authorization_runtime().chat.invalidate(
+        tenant=identity.tenant,
+        actor_user_version=identity.user_version,
+        conversation_id=conversation_id,
     )
-
-    tenant = get_bound_tenant_context(_current_user)
-    try:
-        async with asyncio.timeout(8):
-            await db.execute(select(func.set_config("lock_timeout", "2s", True)))
-            await conversation_service.lock_for_delete(
-                db, conversation_id, _current_user.user_id, tenant=tenant
-            )
-            await prepared_action_service.expire_for_conversation_delete(
-                db,
-                conversation_id=conversation_id,
-                user_id=_current_user.user_id,
-                tenant=tenant,
-            )
-            await conversation_service.delete(
-                db, conversation_id, _current_user.user_id, tenant=tenant
-            )
-            await db.commit()
-    except (TimeoutError, DBAPIError) as exc:
-        await _discard_uncertain_session(db)
-        error = BusinessRuleException(
-            "会话操作正在核对，请稍后刷新确认状态", error_code="AI_ACTION_RUNNING"
-        )
-        error.code = 409
-        raise error from exc
     return ResponseModel.success(msg="删除成功")

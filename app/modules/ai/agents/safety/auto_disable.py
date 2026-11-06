@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 
 from redis.asyncio import Redis
 
+from app.core.auxiliary_budget import bounded_auxiliary
 from app.core.rbac import is_super_admin
 from app.core.tenant import TenantContext
 from app.modules.system.models.user import User
@@ -37,31 +38,21 @@ _CFG_DURATION = "ai:auto_disable:duration_sec"
 
 
 async def _resolve_threshold(tenant: TenantContext) -> int:
-    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
-    from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
-        get_ai_config_int,
-    )
+    from app.db.authorization_http import get_authorization_runtime  # noqa: PLC0415
 
     try:
-        async with AsyncSessionLocal() as db:
-            return await get_ai_config_int(
-                db, _CFG_THRESHOLD, INJECTION_THRESHOLD_PER_HOUR, tenant=tenant
-            )
+        values = await get_authorization_runtime().auxiliary.options(tenant=tenant)
+        return values[_CFG_THRESHOLD]
     except Exception:
         return INJECTION_THRESHOLD_PER_HOUR
 
 
 async def _resolve_duration(tenant: TenantContext) -> int:
-    from app.db.session import AsyncSessionLocal  # noqa: PLC0415
-    from app.modules.ai.agents.safety.ai_config import (  # noqa: PLC0415
-        get_ai_config_int,
-    )
+    from app.db.authorization_http import get_authorization_runtime  # noqa: PLC0415
 
     try:
-        async with AsyncSessionLocal() as db:
-            return await get_ai_config_int(
-                db, _CFG_DURATION, DISABLE_DURATION_SEC, tenant=tenant
-            )
+        values = await get_authorization_runtime().auxiliary.options(tenant=tenant)
+        return values[_CFG_DURATION]
     except Exception:
         return DISABLE_DURATION_SEC
 
@@ -80,6 +71,7 @@ def _disabled_key(user_id: int, *, tenant_id: int) -> str:
     return f"ai:tenant:{tenant_id}:user_disabled:{user_id}"
 
 
+@bounded_auxiliary()
 async def record_injection(redis: Redis, user: User, *, tenant: TenantContext) -> int:
     """记录一次 injection 命中，返回当前小时桶计数；超阈值且非超管 → 自动禁用 24h
 
@@ -134,6 +126,7 @@ async def record_injection(redis: Redis, user: User, *, tenant: TenantContext) -
     return current
 
 
+@bounded_auxiliary()
 async def check_user_disabled(
     redis: Redis, user_id: int, *, tenant: TenantContext
 ) -> bool:

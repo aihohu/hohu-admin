@@ -43,10 +43,11 @@ async def seed_feedback():
 
     from app.core.id_generator import next_id
     from app.core.security import get_password_hash
-    from app.db.session import AsyncSessionLocal, engine
+    from app.db.session import engine
     from app.modules.ai.models.agent import AiAgent
     from app.modules.ai.models.routing_feedback import AiRoutingFeedback
     from app.modules.system.models.user import User
+    from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
     # 唯一组 ID（一组测试内共享），所有 sentinel code / user_name 都带上
     group_id = next_id()
@@ -325,8 +326,9 @@ async def test_top_corrected_tie_breaker(
     from sqlalchemy import delete
 
     from app.core.id_generator import next_id
-    from app.db.session import AsyncSessionLocal, engine
+    from app.db.session import engine
     from app.modules.ai.models.routing_feedback import AiRoutingFeedback
+    from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
     prefix = seed_feedback["prefix"]
     user_id = seed_feedback["user_id"]
@@ -660,8 +662,9 @@ async def test_list_user_deleted_returns_empty_username(
     from sqlalchemy import delete
 
     from app.core.id_generator import next_id
-    from app.db.session import AsyncSessionLocal, engine
+    from app.db.session import engine
     from app.modules.ai.models.routing_feedback import AiRoutingFeedback
+    from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
     client, _ = authed_client
     prefix = seed_feedback["prefix"]

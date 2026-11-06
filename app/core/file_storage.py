@@ -20,6 +20,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from app.core.authorization_file import (
+    local_publication,
+    read_local,
+    require_unbudgeted_legacy_write,
+)
 from app.core.config import settings
 from app.core.exceptions import BusinessRuleException
 
@@ -209,6 +214,7 @@ class LocalFileStorage:
         suffix: str = "",
         ttl_seconds: int | None = None,
     ) -> str:
+        require_unbudgeted_legacy_write()
         ns_dir = self._resolve_path(namespace)
         ns_dir.mkdir(parents=True, exist_ok=True)
 
@@ -223,10 +229,11 @@ class LocalFileStorage:
             return await self.read_artifact(storage_key, identity=identity)
         for file_path in self._candidate_paths(storage_key):
             if file_path.is_file():
-                return file_path.read_bytes()
+                return read_local(file_path)
         raise FileNotFoundError(f"文件不存在: {storage_key}")
 
     async def delete(self, storage_key: str) -> bool:
+        require_unbudgeted_legacy_write()
         if is_owned_artifact(storage_key):
             raise _artifact_error()
         for file_path in self._candidate_paths(storage_key):
@@ -288,8 +295,8 @@ class LocalFileStorage:
         ):
             raise _artifact_error()
         try:
-            facts = json.loads((path.parent / "manifest.json").read_bytes())
-            data = path.read_bytes()
+            facts = json.loads(read_local(path.parent / "manifest.json", manifest=True))
+            data = read_local(path)
             _verify_manifest(facts, storage_key, data)
             if facts["retired"]:
                 raise _artifact_error()
@@ -304,7 +311,7 @@ class LocalFileStorage:
         held. Process death leaves a lock requiring operational reconciliation.
         """
         key = identity.storage_key
-        with self._artifact_writer(key) as directory:
+        with local_publication(data), self._artifact_writer(key) as directory:
             manifest = directory / "manifest.json"
             payload = directory / "payload"
             expected = _manifest(data, identity)
@@ -318,28 +325,34 @@ class LocalFileStorage:
         return key
 
     async def artifact_identity(self, storage_key: str) -> ArtifactIdentity:
-        facts, _ = self._inspect_artifact(storage_key)
-        return ArtifactIdentity(**facts["identity"])
+        with local_publication():
+            facts, _ = self._inspect_artifact(storage_key)
+            return ArtifactIdentity(**facts["identity"])
 
     async def read_artifact(
         self, storage_key: str, *, identity: ArtifactIdentity
     ) -> bytes:
-        if storage_key != identity.storage_key:
-            raise _artifact_error()
-        facts, data = self._inspect_artifact(storage_key)
-        if facts["identity"] != asdict(identity):
-            raise _artifact_error()
-        return data
+        with local_publication():
+            if storage_key != identity.storage_key:
+                raise _artifact_error()
+            facts, data = self._inspect_artifact(storage_key)
+            if facts["identity"] != asdict(identity):
+                raise _artifact_error()
+            return data
 
     async def delete_artifact(
         self, storage_key: str, *, identity: ArtifactIdentity
     ) -> bool:
-        if storage_key != identity.storage_key:
-            raise _artifact_error()
+        with local_publication():
+            if storage_key != identity.storage_key:
+                raise _artifact_error()
+            return self._delete_artifact(storage_key)
+
+    def _delete_artifact(self, storage_key: str) -> bool:
         with self._artifact_writer(storage_key) as directory:
             manifest = directory / "manifest.json"
             try:
-                facts = json.loads(manifest.read_bytes())
+                facts = json.loads(read_local(manifest, manifest=True))
                 _verify_manifest(facts, storage_key, None)
             except (OSError, ValueError, TypeError) as exc:
                 raise _artifact_error() from exc

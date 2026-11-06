@@ -6,6 +6,22 @@ from app.modules.system.constants import DEPT_MOVE_PERMISSION, USER_ROLE_AUTH_PE
 from app.modules.system.models.menu import Menu
 
 MENU_DEFINITIONS = [
+    *[
+        {
+            "key": "system_user_field_policy_" + action,
+            "parent_route": "system_role",
+            "menu_name": title,
+            "menu_type": "F",
+            "permission": "system:user:field-policy-" + action,
+            "route_path": "",
+            "status": "1",
+        }
+        for action, title in (
+            ("view", "查看用户字段策略"),
+            ("edit", "发布用户字段策略"),
+            ("activate", "激活用户字段策略"),
+        )
+    ],
     # ============ AI 助手 ============
     {
         "route_name": "ai_chat",

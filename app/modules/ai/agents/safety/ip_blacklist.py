@@ -114,20 +114,34 @@ async def record_perm_denied(
     if not ip:
         return False
 
+    threshold = await get_ai_config_int(
+        db, _CFG_THRESHOLD, DEFAULT_THRESHOLD_PER_HOUR, tenant=tenant
+    )
+    allowlist = await _load_allowlist(db, tenant=tenant)
+    return await record_perm_denied_values(
+        redis,
+        ip,
+        tenant=tenant,
+        threshold=threshold,
+        allowlist=allowlist,
+        duration_sec=duration_sec,
+    )
+
+
+async def record_perm_denied_values(
+    redis, ip, *, tenant, threshold, allowlist, duration_sec=DEFAULT_TTL_SEC
+):
+    """Pure Redis phase with configuration already frozen by the caller."""
     bucket = _hour_bucket()
     key = _count_key(ip, bucket, tenant=tenant)
     current = await redis.incr(key)
     if current == 1:
         await redis.expire(key, DEFAULT_TTL_SEC)
 
-    threshold = await get_ai_config_int(
-        db, _CFG_THRESHOLD, DEFAULT_THRESHOLD_PER_HOUR, tenant=tenant
-    )
     if current < threshold:
         return False
 
     # 到阈值：检查白名单
-    allowlist = await _load_allowlist(db, tenant=tenant)
     if ip in allowlist:
         logger.warning(
             "ip hit perm_denied threshold but in NAT allowlist, NOT blacklisted",

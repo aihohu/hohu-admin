@@ -14,6 +14,7 @@ from pathlib import Path, PurePosixPath
 
 from sqlalchemy import select
 
+from app.core.authorization_file import read_local_bounded
 from app.core.config import settings
 from app.core.exceptions import BusinessRuleException
 from app.modules.ai.core.context import AiToolContext
@@ -360,10 +361,16 @@ async def load_protected_file(
             error_code="AI_FILE_ID_INVALID",
         ) from exc
 
-    result = await ctx.db.execute(select(File).where(File.file_id == file_id_int))
+    trusted_tenant_id = getattr(ctx, "tenant_id", None)
+    if trusted_tenant_id is None:
+        raise _not_found()
+    result = await ctx.db.execute(
+        select(File)
+        .where(File.file_id == file_id_int, File.tenant_id == trusted_tenant_id)
+        .execution_options(populate_existing=True)
+    )
     record = result.scalars().first()
 
-    trusted_tenant_id = getattr(ctx, "tenant_id", None)
     if (
         record is None
         or record.del_flag != "0"
@@ -373,6 +380,14 @@ async def load_protected_file(
     ):
         raise _not_found()
 
+    tenant_policy = await file_policy_service.resolve(
+        ctx.db, "ai_file", tenant=ctx.tenant
+    )
+    return read_protected_file(record, policy=policy, tenant_policy=tenant_policy)
+
+
+def read_protected_file(record, *, policy, tenant_policy) -> ProtectedFile:
+    """Read validated metadata using an already resolved upload policy; no DB IO."""
     if record.business_type not in policy.allowed_business_types:
         raise _type_not_allowed()
 
@@ -383,9 +398,6 @@ async def load_protected_file(
         raise _type_not_allowed()
 
     # Deployment settings may lower the tool limit but can never raise it.
-    tenant_policy = await file_policy_service.resolve(
-        ctx.db, "ai_file", tenant=ctx.tenant
-    )
     if extension not in tenant_policy.extensions:
         raise _type_not_allowed()
     max_bytes = min(policy.max_bytes, tenant_policy.max_bytes)
@@ -413,8 +425,7 @@ async def load_protected_file(
     try:
         # Bounded read closes the stat/read TOCTOU window without allocating an
         # attacker-controlled file larger than the configured cap.
-        with resolved_path.open("rb") as stream:  # noqa: ASYNC240
-            data = stream.read(max_bytes + 1)
+        data = read_local_bounded(resolved_path, max_bytes)
     except (FileNotFoundError, NotADirectoryError):
         raise _not_found() from None
     except OSError:

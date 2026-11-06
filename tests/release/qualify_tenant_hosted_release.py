@@ -1060,8 +1060,20 @@ def run(arguments: argparse.Namespace) -> int:
             if fresh.get("fresh") is not True:
                 raise QualificationFailure("DATABASE_NOT_FRESH")
             _run_checked(
-                [sys.executable, str(_PROJECT_ROOT / "scripts" / "init_db.py")],
-                environment=environment | {"HOHU_ADMIN_PASSWORD": tenant_password},
+                [
+                    sys.executable,
+                    "-m",
+                    "tests.release.bootstrap_database",
+                    "--build-sha",
+                    build_sha,
+                    "--control-dir",
+                    str(temporary_root / "bootstrap"),
+                ],
+                environment=environment
+                | {
+                    "AUTHORIZATION_MAINTENANCE_PASSWORD": tenant_password,
+                    "HOHU_TEST_DATABASE_EPHEMERAL": "true",
+                },
                 failure_code="DEFAULT_SEED_FAILED",
             )
             fixture = _worker_json(

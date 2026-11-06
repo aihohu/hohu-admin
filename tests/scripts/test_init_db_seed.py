@@ -268,6 +268,9 @@ class TestRoleSeed:
         admin_role.menus = fresh_role_permission_menus(init_menus)
 
         assert {menu.permission for menu in admin_role.menus} == {
+            "system:user:field-policy-view",
+            "system:user:field-policy-edit",
+            "system:user:field-policy-activate",
             "ai:chat:use",
             "ai:file:parse",
             "system:dept:add",
@@ -284,7 +287,7 @@ class TestRoleSeed:
             "system:role:list",
             "system:role:menu-auth",
             "system:user:add",
-            "system:user:delete",
+            "system:user:batch-delete",
             "system:user:edit",
             "system:user:export",
             "system:user:import",
@@ -302,6 +305,8 @@ class TestRoleSeed:
         for menu in admin_role.menus:
             prefix = ":".join(menu.permission.split(":")[:2])
             route_name = parent_routes.get(prefix)
+            if menu.permission.startswith("system:user:field-policy-"):
+                route_name = "system_role"
             if route_name is None:
                 continue
             parent = menus_by_id[menu.parent_id]

@@ -31,7 +31,7 @@ from app.modules.system.models.user import User
 from app.modules.system.models.user_transfer import UserImportBatchLog
 
 #: service 模块路径（patch target）
-_API_MODULE = "app.modules.system.api.user"
+_API_MODULE = "app.modules.system.service.user_import_service"
 
 
 # ========== Fixtures ==========
@@ -167,11 +167,11 @@ class TestGetBatchLogsResponse:
         assert rec0["event"] == "CREATED"
         assert rec0["fromStatus"] is None
         assert rec0["toStatus"] == "CREATED"
-        assert rec0["detail"] == {"filename": "users.xlsx", "total_rows": 100}
+        assert rec0["detail"] == {"total_rows": 100}
         assert rec0["createdAt"].startswith("2026-08-01T14:00:00")
         # 审计补充字段（logId/operatorId/operatorName）
         assert rec0["operatorId"] == "1"  # Snowflake 字符串化
-        assert rec0["operatorName"] == "admin"
+        assert rec0["operatorName"] is None
 
         rec1 = data["records"][1]
         assert rec1["event"] == "EXECUTE_FINISH"

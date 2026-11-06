@@ -231,7 +231,8 @@ class TestBuildPydanticAiTools:
             user_perms={"system:user:add"} if permitted else set(),
         )
         await agent.run(
-            "创建普通用户 hohu，不分配部门", deps=SimpleNamespace(agent=None)
+            "创建普通用户 hohu，不分配部门",
+            deps=SimpleNamespace(agent=None, authorize_model_context=None),
         )
         assert ("[单个用户创建约定]" in captured[0]) is permitted
         if permitted:
@@ -260,7 +261,10 @@ class TestBuildPydanticAiTools:
             FunctionModel(respond),
             user_perms={"system:user:list"} if permitted else set(),
         )
-        await agent.run("你能做什么？", deps=SimpleNamespace(agent=None))
+        await agent.run(
+            "你能做什么？",
+            deps=SimpleNamespace(agent=None, authorize_model_context=None),
+        )
         instructions = captured[0]
         assert "[当前助手实际工具]" in instructions
         assert ("sample_read" in instructions) is permitted
@@ -302,7 +306,8 @@ class TestBuildPydanticAiTools:
             FunctionModel(lambda *_: next(replies)), user_perms={"system:user:list"}
         )
         result = await agent.run(
-            "请修改这个测试对象。", deps=SimpleNamespace(agent=None)
+            "请修改这个测试对象。",
+            deps=SimpleNamespace(agent=None, authorize_model_context=None),
         )
         assert calls == ["sample.read", "sample.write"]
         assert result.output == "修改已完成。"

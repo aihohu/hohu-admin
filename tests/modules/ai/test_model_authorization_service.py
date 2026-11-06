@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessRuleException
 from app.core.tenant import TenantContext
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import engine
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.model_policy import TenantAiModelPolicy
@@ -19,6 +19,7 @@ from app.modules.ai.service.model_authorization_service import (
     model_authorization_service,
 )
 from app.modules.system.models.user import User
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
 
 def _tenant(actor_user_id: int = 1) -> TenantContext:

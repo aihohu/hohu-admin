@@ -9,20 +9,22 @@ from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import delete, event, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AuthorizationException, NotFoundException
-from app.db.session import AsyncSessionLocal, engine
-from app.modules.ai.agents.gateway import atomic_execution
+from app.db import authorization_completion_facts_owner as read_module
+from app.db import authorization_owner
+from app.db.authorization_completion_facts_owner import CompletionFactsOwner
+from app.db.authorization_runtime import AuthorizationRuntime
+from app.db.session import engine
 from app.modules.ai.agents.gateway.atomic_execution import OUTCOME_UNKNOWN_MESSAGE
 from app.modules.ai.agents.hitl.constants import PreparedActionStatus
 from app.modules.ai.api.confirm import confirm_tool
-from app.modules.ai.api.operation_log import get_operation_log
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.schemas.confirm import ConfirmRequest
 from app.modules.ai.schemas.operation_log import TraceListQuery
-from app.modules.ai.service import completion_read_state_service as read_module
 from app.modules.ai.service.atomic_completion_service import new_execution_owner
 from app.modules.ai.service.completion_read_state_service import (
     completion_read_state_service,
@@ -31,11 +33,19 @@ from app.modules.ai.service.completion_read_state_service import (
 )
 from app.modules.ai.service.conversation_service import conversation_service
 from app.modules.ai.service.operation_log_service import operation_log_service
+from app.modules.ai.service.operation_status_projection import (
+    project_operation as get_operation_log,
+)
 from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.ai.service.result_projection_service import result_projection_service
 from app.modules.ai.service.trace_service import trace_service
 from app.modules.auth.service import load_live_user_authority
-from tests.modules.ai.test_atomic_prepared_completion import approve, count_real_handler
+from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
+from tests.modules.ai.test_atomic_prepared_completion import (
+    approve,
+    authenticated_actor,
+    count_real_handler,
+)
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
 )
@@ -71,7 +81,7 @@ async def test_verified_rejection_keeps_cancel_reason_on_all_read_surfaces(
     case = completion_case
     count_real_handler(case, monkeypatch)
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         response = await confirm_tool(
             ConfirmRequest(confirmation_id=case.confirmation_id, action="reject"),
             db=db,
@@ -89,7 +99,7 @@ async def test_verified_rejection_keeps_cancel_reason_on_all_read_surfaces(
         else "USER_REJECTED"
     )
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         poll = await get_operation_log(
             tool_call_id=case.tool_call_id,
             db=db,
@@ -151,7 +161,7 @@ async def test_poll_trace_history_mask_unproven_terminal_without_writing(
             await db.delete(action)
     before = await stored_facts(case)
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         poll = await get_operation_log(
             tool_call_id=case.tool_call_id,
             db=db,
@@ -244,7 +254,7 @@ async def test_valid_db_completion_retains_terminal_poll_and_trace(
     await approve(case)
     before = await stored_facts(case)
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         action = await db.get(AiPreparedAction, case.action_id)
         poll = await get_operation_log(
             tool_call_id=case.tool_call_id,
@@ -307,7 +317,7 @@ async def test_missing_log_remains_unknown_without_creating_a_receipt(
     )
     assert states[case.tool_call_id].unknown
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         messages = await conversation_service.project_messages(
             db, conversation_id=case.conversation_id, current_user=actor
         )
@@ -333,7 +343,7 @@ async def test_missing_audit_poll_keeps_owner_unknown_and_tenant_isolation(
             delete(AiOperationLog).where(AiOperationLog.log_id == case.log_id)
         )
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         # Exercise the owner branch with no audit or chat permission; the
         # authenticated ID is real, and this transport principal grants nothing.
         owner = SimpleNamespace(
@@ -410,7 +420,7 @@ async def test_cancelled_write_requires_never_started_proof_for_reads_and_admiss
             )
         trace_id = action.trace_id
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         poll = await get_operation_log(
             tool_call_id=case.tool_call_id,
             db=db,
@@ -433,7 +443,7 @@ async def test_cancelled_write_requires_never_started_proof_for_reads_and_admiss
             async with AsyncSessionLocal() as db, db.begin():
                 await db.delete(await db.get(AiPreparedAction, case.action_id))
         async with AsyncSessionLocal() as db:
-            actor = await load_live_user_authority(db, tenant=case.tenant)
+            actor = await authenticated_actor(case, db)
             poll = await get_operation_log(
                 tool_call_id=case.tool_call_id,
                 db=db,
@@ -481,7 +491,7 @@ async def test_unknown_history_denied_projection_is_minimal_and_idempotent(
     )
     before = await stored_facts(case)
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         for _ in range(2):
             messages = await conversation_service.project_messages(
                 db, conversation_id=case.conversation_id, current_user=actor
@@ -555,14 +565,16 @@ async def test_history_uses_verified_state_instead_of_stale_tool_card(
         ]
     before = await stored_facts(case)
     async with AsyncSessionLocal() as db:
-        actor = await load_live_user_authority(db, tenant=case.tenant)
+        actor = await authenticated_actor(case, db)
         messages = await conversation_service.project_messages(
             db, conversation_id=case.conversation_id, current_user=actor
         )
         assistant = next(item for item in messages if item.role == "assistant")
         call = assistant.tool_calls[0]
         assert call["ok"] is not failure
-        assert call.get("error_code") == ("TEST_HANDLER_FAILURE" if failure else None)
+        assert call.get("error_code") == (
+            "AI_PREPARED_ACTION_EXECUTION_INTERRUPTED" if failure else None
+        )
         assert "result" not in call and "ui" not in call
         await db.commit()
     assert await stored_facts(case) == before
@@ -574,16 +586,24 @@ async def test_snapshot_timeout_quarantines_session_and_preserves_readonly(monke
     async def hangs(*_args, **_kwargs):
         await gate.wait()
 
-    db = SimpleNamespace(
-        info={},
-        begin=AsyncMock(),
-        execute=AsyncMock(side_effect=hangs),
-        invalidate=AsyncMock(side_effect=hangs),
-        close=AsyncMock(side_effect=hangs),
+    db = AuthorizationRuntime(engine).sessions()
+
+    async def resistant_rollback():
+        while not gate.is_set():
+            try:
+                await gate.wait()
+            except asyncio.CancelledError:
+                continue
+
+    monkeypatch.setattr(db, "execute", AsyncMock(side_effect=hangs))
+    monkeypatch.setattr(db, "rollback", resistant_rollback)
+    monkeypatch.setattr(AsyncSession, "invalidate", AsyncMock(side_effect=hangs))
+    monkeypatch.setattr(
+        "app.db.authorization_http.get_authorization_runtime",
+        lambda: SimpleNamespace(completion_facts=CompletionFactsOwner(lambda: db)),
     )
-    monkeypatch.setattr(atomic_execution, "AsyncSessionLocal", lambda: db)
     monkeypatch.setattr(read_module, "_READ_TIMEOUT_SEC", 0.02)
-    monkeypatch.setattr(atomic_execution, "_SESSION_CLEANUP_TIMEOUT_SEC", 0.02)
+    monkeypatch.setattr(authorization_owner, "_CLEANUP_SECONDS", 0.02)
     try:
         async with asyncio.timeout(1):
             states = await completion_read_state_service.read(
@@ -618,14 +638,13 @@ async def test_snapshot_timeout_quarantines_session_and_preserves_readonly(monke
         assert effective_call_state(
             {"tool": "user.create", "tool_call_id": "write"}, states
         ).unknown
-        db.close.assert_not_awaited()
-        db.invalidate.assert_awaited_once()
-        assert id(db) in atomic_execution._QUARANTINED_SESSIONS
+        assert db.info[authorization_owner.QUARANTINE_KEY]
+        assert id(db) in authorization_owner._QUARANTINED
     finally:
         gate.set()
-        entry = atomic_execution._QUARANTINED_SESSIONS.get(id(db))
+        entry = authorization_owner._QUARANTINED.get(id(db))
         if entry is not None:
-            await entry[1]
+            await entry[2]
 
 
 async def test_effective_trace_filter_counts_before_paginating(

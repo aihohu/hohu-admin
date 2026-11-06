@@ -593,16 +593,18 @@ class HitlManager:
         """Read one tenant envelope only for platform lifecycle recovery."""
         if not isinstance(platform, PlatformContext):
             raise TypeError("platform context is required")
-        body = await redis.get(
-            HitlManager._redis_key_for_id(confirmation_id, tenant_id=tenant_id)
+        body = await redis.getrange(
+            HitlManager._redis_key_for_id(confirmation_id, tenant_id=tenant_id),
+            0,
+            65536,
         )
-        if body is None:
+        if not body or len(body) > 65536:
             return None
-        if isinstance(body, bytes):
-            body = body.decode("utf-8")
         try:
+            if isinstance(body, bytes):
+                body = body.decode("utf-8")
             pending = PendingPayload(**json.loads(body))
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
             logger.warning(
                 "invalid platform HITL pending payload confirmation_id=%s",
                 confirmation_id,

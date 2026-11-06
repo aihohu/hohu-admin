@@ -9,13 +9,50 @@ from app.core.base_response import PageResult, ResponseModel
 from app.core.config import settings
 from app.core.exceptions import BusinessRuleException
 from app.core.tenant import TenantContext
+from app.db import authorization_http
 from app.db.session import get_db
-from app.modules.auth.service import get_current_tenant_context, get_current_user
+from app.modules.auth.service import (
+    access_identity,
+    get_current_tenant_context,
+    get_current_user,
+)
 from app.modules.system.models.user import User
 from app.modules.system.schemas.file import FileOut, FileQuery
 from app.modules.system.service.file_service import file_service
 
 router = APIRouter()
+
+
+@router.get(
+    "/import-error/{batch_id}.xlsx",
+    summary="下载当前授权的导入错误清单",
+    dependencies=[Depends(require_permissions("system:user:import"))],
+)
+async def download_import_errors(
+    batch_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
+):
+    identity = access_identity(current_user)
+    if identity.tenant != tenant:
+        raise authorization_http._order_error()
+    await authorization_http.release_request_reads(db)
+    data, _ = await authorization_http.get_authorization_runtime().transfer.download(
+        tenant=tenant,
+        actor_user_version=identity.user_version,
+        kind="import_errors",
+        identifier=batch_id,
+    )
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": 'attachment; filename="import-errors.xlsx"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.get("/chat-image", summary="读取当前上传者的 AI 聊天图片")
@@ -27,7 +64,18 @@ async def read_chat_image(
 ):
     if not settings.AI_MODULE_ENABLED:
         raise BusinessRuleException("AI 助手已关闭", error_code="AI_MODULE_DISABLED")
-    content, mime = await file_service.read_chat_image(db, file_url, tenant=tenant)
+    identity = access_identity(_current_user)
+    if identity.tenant != tenant:
+        raise authorization_http._order_error()
+    await authorization_http.release_request_reads(db)
+    (
+        content,
+        mime,
+    ) = await authorization_http.get_authorization_runtime().upload.read_chat_image(
+        tenant=tenant,
+        actor_user_version=identity.user_version,
+        file_url=file_url,
+    )
     return Response(
         content=content,
         media_type=mime,
@@ -51,18 +99,18 @@ async def upload(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """上传单个文件"""
-    file_record = await file_service.upload(
-        db,
-        file,
-        current_user_name=_current_user.user_name,
+    identity = access_identity(_current_user)
+    if identity.tenant != tenant:
+        raise authorization_http._order_error()
+    await authorization_http.release_request_reads(db)
+    records = await authorization_http.get_authorization_runtime().upload.upload(
+        files=(file,),
         business_type=business_type,
         business_id=business_id,
-        owner_user_id=_current_user.user_id,
         tenant=tenant,
+        actor_user_version=identity.user_version,
     )
-    await db.commit()
-    await db.refresh(file_record)
-    return ResponseModel.success(data=file_record, msg="文件上传成功")
+    return ResponseModel.success(data=records[0], msg="文件上传成功")
 
 
 @router.post(
@@ -81,18 +129,17 @@ async def batch_upload(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """批量上传文件"""
-    file_records = await file_service.batch_upload(
-        db,
-        files,
-        current_user_name=_current_user.user_name,
+    identity = access_identity(_current_user)
+    if identity.tenant != tenant:
+        raise authorization_http._order_error()
+    await authorization_http.release_request_reads(db)
+    file_records = await authorization_http.get_authorization_runtime().upload.upload(
+        files=files,
         business_type=business_type,
         business_id=business_id,
-        owner_user_id=_current_user.user_id,
         tenant=tenant,
+        actor_user_version=identity.user_version,
     )
-    await db.commit()
-    for record in file_records:
-        await db.refresh(record)
     return ResponseModel.success(
         data=file_records, msg=f"成功上传 {len(file_records)} 个文件"
     )
@@ -156,14 +203,15 @@ async def delete(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """删除文件（ownership 检查在 service）"""
-    await file_service.delete(
-        db,
-        file_id,
-        current_user=current_user,
-        is_admin=is_super_admin(current_user),
+    identity = access_identity(current_user)
+    if identity.tenant != tenant:
+        raise authorization_http._order_error()
+    await authorization_http.release_request_reads(db)
+    await authorization_http.get_authorization_runtime().upload.delete(
+        identifiers=(file_id,),
         tenant=tenant,
+        actor_user_version=identity.user_version,
     )
-    await db.commit()
     return ResponseModel.success(msg="文件删除成功")
 
 
@@ -180,12 +228,14 @@ async def batch_delete(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """批量删除文件"""
-    count = await file_service.batch_delete(
-        db,
-        ids,
-        current_user=_current_user,
-        is_admin=True,
+    identity = access_identity(_current_user)
+    if identity.tenant != tenant:
+        raise authorization_http._order_error()
+    await authorization_http.release_request_reads(db)
+    count = await authorization_http.get_authorization_runtime().upload.delete(
+        identifiers=ids,
+        batch=True,
         tenant=tenant,
+        actor_user_version=identity.user_version,
     )
-    await db.commit()
     return ResponseModel.success(msg=f"成功删除 {count} 个文件")

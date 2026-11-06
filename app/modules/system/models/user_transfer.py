@@ -14,6 +14,7 @@ from datetime import datetime
 from sqlalchemy import (
     JSON,
     BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -26,6 +27,7 @@ from sqlalchemy import (
 from sqlalchemy import (
     Enum as SAEnum,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.id_generator import next_id
@@ -60,6 +62,11 @@ class UserImportBatch(Base):
             ondelete="RESTRICT",
         ),
         Index("ix_sys_user_import_batch_tenant_status", "tenant_id", "status"),
+        CheckConstraint(
+            "field_lineage IS NULL OR (jsonb_typeof(field_lineage) = 'object' "
+            "AND octet_length(field_lineage::text) <= 2097152)",
+            name="ck_import_field_lineage_object_size",
+        ),
     )
 
     batch_id: Mapped[str] = mapped_column(String(64), primary_key=True, comment="UUID")
@@ -78,6 +85,9 @@ class UserImportBatch(Base):
         comment="records 序列化后的 sha256，执行时比对以防预览后字段被修改",
     )
     total_rows: Mapped[int] = mapped_column(Integer)
+    field_lineage: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
 
     preview_token: Mapped[str] = mapped_column(
         String(64),
@@ -234,6 +244,11 @@ class UserExportTask(Base):
             ondelete="RESTRICT",
         ),
         Index("ix_sys_user_export_tenant_status", "tenant_id", "status"),
+        CheckConstraint(
+            "field_lineage IS NULL OR (jsonb_typeof(field_lineage) = 'object' "
+            "AND octet_length(field_lineage::text) <= 2097152)",
+            name="ck_export_field_lineage_object_size",
+        ),
     )
 
     export_id: Mapped[str] = mapped_column(
@@ -260,6 +275,9 @@ class UserExportTask(Base):
     )
 
     row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    field_lineage: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     file_storage_key: Mapped[str | None] = mapped_column(
         String(512),
         nullable=True,

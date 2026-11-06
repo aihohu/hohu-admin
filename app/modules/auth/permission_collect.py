@@ -9,6 +9,7 @@ from app.constants import (
     MENU_TYPE_MENU,
     STATUS_ENABLED,
 )
+from app.core.rbac import is_super_admin, is_system_admin
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.user import User
 
@@ -32,6 +33,20 @@ def collect_user_permission_codes(user: User) -> set[str]:
 def collect_user_buttons(user: User) -> list[str]:
     """返回前端 buttons 需要的去重权限码列表。"""
     return list(collect_user_permission_codes(user))
+
+
+def collect_user_identity(user: User) -> dict:
+    """Minimal authentication envelope; personal fields require separate projection."""
+    permissions = sorted(collect_user_buttons(user))
+    return {
+        "userId": str(user.user_id),
+        "userName": user.user_name,
+        "isSystemAdmin": is_system_admin(user),
+        "roles": [
+            role.role_code for role in user.roles if role.status == STATUS_ENABLED
+        ],
+        "buttons": ["*", *permissions] if is_super_admin(user) else permissions,
+    }
 
 
 def collect_user_menus(user: User) -> list[Menu]:

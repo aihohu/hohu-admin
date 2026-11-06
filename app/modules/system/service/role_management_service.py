@@ -1122,20 +1122,24 @@ class RoleManagementService:
             normalized = query.strip().casefold()
             filters.append(
                 or_(
-                    func.lower(Role.role_code).contains(normalized, autoescape=True),
-                    func.lower(Role.role_name).contains(normalized, autoescape=True),
+                    func.pg_catalog.lower(Role.role_code).contains(
+                        normalized, autoescape=True
+                    ),
+                    func.pg_catalog.lower(Role.role_name).contains(
+                        normalized, autoescape=True
+                    ),
                 )
             )
         if role_name:
             filters.append(
-                func.lower(Role.role_name).contains(
+                func.pg_catalog.lower(Role.role_name).contains(
                     role_name.strip().casefold(),
                     autoescape=True,
                 )
             )
         if role_code:
             filters.append(
-                func.lower(Role.role_code).contains(
+                func.pg_catalog.lower(Role.role_code).contains(
                     role_code.strip().casefold(),
                     autoescape=True,
                 )

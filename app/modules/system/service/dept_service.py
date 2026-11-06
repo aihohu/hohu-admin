@@ -277,8 +277,8 @@ class DeptService:
         filters = [
             User.tenant_id == authority.tenant_id,
             or_(
-                func.lower(User.user_name) == normalized,
-                func.lower(User.nickname) == normalized,
+                func.pg_catalog.lower(User.user_name) == normalized,
+                func.pg_catalog.lower(User.nickname) == normalized,
             ),
         ]
         if authority.accessible_user_scope is not None:

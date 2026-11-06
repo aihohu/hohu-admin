@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from sqlalchemy import select, update
 
 from app.core.exceptions import AuthorizationException
 from app.core.rbac import is_super_admin, is_system_admin
@@ -11,6 +12,23 @@ from app.modules.ai.service.agent_admin import agent_admin_service
 from app.modules.auth.service import get_current_user
 from app.modules.platform import system_agent_auth as module
 from app.modules.platform.system_agent_auth import require_system_agent_context
+from app.modules.system.models.operation_log import SysOperationLog
+from app.modules.system.models.user import User
+from tests.modules.platform.test_authorization_catalog_http import (
+    catalog_http as catalog_http,
+)
+from tests.modules.platform.test_authorization_catalog_http import (
+    catalog_sessions as catalog_sessions,
+)
+from tests.modules.platform.test_authorization_catalog_http import (
+    http_system as http_system,
+)
+from tests.modules.platform.test_authorization_catalog_http import (
+    plan_sessions as plan_sessions,
+)
+from tests.modules.platform.test_authorization_catalog_http import (
+    system_sessions as system_sessions,
+)
 
 
 @pytest.mark.parametrize(
@@ -95,7 +113,7 @@ async def test_system_admin_uses_existing_user_and_audits_without_second_identit
 
 @pytest.mark.parametrize(
     "tenant,name,role_status,expected",
-    [(0, "renamed-admin", "1", 200), (0, "admin", "2", 403), (12, "admin", "1", 403)],
+    [(0, "admin", "2", 403), (12, "admin", "1", 403)],
 )
 async def test_agent_http_authorizes_roles_not_names(
     client, monkeypatch, tenant, name, role_status, expected
@@ -136,3 +154,24 @@ async def test_agent_http_authorizes_roles_not_names(
     else:
         business.assert_not_awaited()
         assert response.json()["errorCode"] == "SYSTEM_ADMIN_ONLY"
+
+
+async def test_real_agent_http_renamed_system_admin(catalog_http):
+    client, plain = catalog_http
+    async with plain() as db:
+        await db.execute(
+            update(User).where(User.user_id == 101).values(user_name="renamed-admin")
+        )
+        await db.commit()
+    response = await client.get("/platform/ai/agents")
+    assert response.status_code == 200, response.text
+    async with plain() as db:
+        rows = (
+            await db.scalars(
+                select(SysOperationLog).where(SysOperationLog.audit_scope == "platform")
+            )
+        ).all()
+        assert len(rows) == 2
+        assert all(
+            row.user_id == 101 and row.username == "renamed-admin" for row in rows
+        )

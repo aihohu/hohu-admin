@@ -49,9 +49,14 @@ def reset_registry():
 def isolate_unit_tool_audit(monkeypatch):
     """These tool units have no persisted chat context; log contracts have DB tests."""
     from app.modules.ai.agents.gateway import executor
+    from tests.fixture_session import FixtureSessionLocal
 
     monkeypatch.setattr(executor, "_start_log", AsyncMock(return_value=1))
     monkeypatch.setattr(executor, "_finish_log_final", AsyncMock())
+    # Synthetic callbacks exercise exception/result mapping, not production
+    # dispatch. Unadapted production writers are denied in the real boundary test.
+    monkeypatch.setattr(executor, "_invoke_tool_fn", executor._invoke_legacy_tool_fn)
+    monkeypatch.setattr(executor, "AsyncSessionLocal", FixtureSessionLocal)
 
 
 # ============ ToolResult ============
