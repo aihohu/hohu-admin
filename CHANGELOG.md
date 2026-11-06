@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 
 ### Installation and Recovery
 
+- Handle Linux process disappearance during `/proc` reads by confirming kernel exit before accepting stopped-writer evidence. Permission, I/O and unknown process-state failures remain closed.
 - Pair Backend and Web 0.2.0. This entry prepares the candidate; only a validated product `release.json` establishes the released image combination, supported platforms and upgrade sources.
 - Add a host-controlled installation command that fences the database and old processes before migrating and seeding on retained connections. Successful preparation leaves admission closed; a separate, receipt-bound resume is required. CLI 0.1.16 can then start the manually pinned combination with `--no-migrate` only after those required steps have succeeded; its default seed command is not compatible with this maintenance protocol.
 - The candidate targets empty installation and original 0.1.6 upgrades to Alembic `e0204a000001`. Back up matching databases, public/private files, keys and current revocation evidence. Never use `stamp head` or destructive downgrade as a substitute for recovery.
