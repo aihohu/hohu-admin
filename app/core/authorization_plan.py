@@ -99,7 +99,7 @@ _SYSTEM = "app.modules.system.models."
 _AI = "app.modules.ai.models."
 _RESOURCE_DEFINITIONS = MappingProxyType(
     {
-        ResourceKind.FILE: _definition("sys_file", ("file_id",), 740, _SYSTEM + "file"),
+        ResourceKind.FILE: _definition("sys_file", ("file_id",), 745, _SYSTEM + "file"),
         ResourceKind.CONVERSATION: _definition(
             "ai_conversation", ("conversation_id",), 10, _AI + "conversation"
         ),

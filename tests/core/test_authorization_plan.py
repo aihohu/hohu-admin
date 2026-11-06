@@ -313,3 +313,12 @@ def test_pure_plan_import_does_not_import_business_services_or_models():
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_file_and_dictionary_same_id_have_caller_independent_lock_order():
+    file = ResourceKey(ResourceKind.FILE, 0, 501)
+    dictionary = ResourceKey(ResourceKind.DICT_TYPE, 0, 501)
+    assert LockPlan((file, dictionary)).existing == (dictionary, file)
+    assert LockPlan((dictionary, file)).existing == (dictionary, file)
+    orders = [resource_spec(kind).order for kind in ResourceKind]
+    assert len(orders) == len(set(orders))
