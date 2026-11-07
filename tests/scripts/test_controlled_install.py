@@ -110,6 +110,28 @@ async def test_stop_failure_prevents_migration(installation):
     assert not (guard.directory / "install.json").exists()
 
 
+async def test_policy_upgrade_identity_preflight_precedes_any_migration(
+    installation, monkeypatch
+):
+    guard, processes, events = installation
+
+    async def missing(_):
+        events.append("identity")
+        raise BusinessException(
+            409, "missing", error_code="FIELD_POLICY_ADMIN_PREFLIGHT_REQUIRED"
+        )
+
+    monkeypatch.setattr(
+        "tools.ops.policy_preparation_identity.require_preparation_administrators",
+        missing,
+    )
+    with pytest.raises(BusinessException):
+        await install.prepare(guard, processes, False, policy_port=8765)
+    assert "identity" in events
+    assert "migrate" not in events
+    assert not (guard.directory / "install.json").exists()
+
+
 @pytest.mark.parametrize("change", ["stop", "build", "bootstrap", "extra", "missing"])
 async def test_receipt_cannot_authorize_another_or_failed_operation(
     installation, change

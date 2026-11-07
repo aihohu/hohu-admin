@@ -70,7 +70,7 @@ hohu deploy --source official --no-migrate
 
 ## 失败与恢复
 
-通用策略需要受控编辑时，使用 `policy-prepare` 替代上述 `prepare`，可加 `--policy-port 8765`。其余 inventory、bootstrap、build、角色和控制目录要求相同。入口仅监听本机并使用原有管理 JWT，不启动普通业务任务；详见[通用字段策略存储](FIELD-POLICY-STORAGE.md)。普通 `prepare` 只安装结构和种子，不自动迁入通用授权状态。
+通用策略需要受控编辑时，使用 `policy-prepare` 替代上述 `prepare`，可加 `--policy-port 8765`。其余 inventory、bootstrap、build、角色和控制目录要求相同。加入 `--policy-web-directory` 与完整 `--policy-web-commit` 可提供已验收的真实Web构建，页面使用受控密码登录和内存短期会话，原命令入口仍使用已有管理JWT。升级在DDL之前预检每个启用租户的专用管理权限，缺失则保持停写并拒绝迁入；新装在种子后预检。入口仅监听本机，不启动普通业务任务；详见[候选管理与身份交接](FIELD-POLICY-MANAGEMENT.md)及[通用字段策略存储](FIELD-POLICY-STORAGE.md)。普通 `prepare` 只安装结构和种子，不自动迁入通用授权状态。
 
 安装回执 schema 为 2，额外绑定准备记录的摘要；旧 schema 回执不能用于当前恢复。一旦建立 `policy-prepare.json`，当前版本的正常恢复入口将拒绝开放 admission，即使准备 HTTP 会话已成功结束。全系统对象接线和完整资格尚未完成，不能据此恢复生产流量；禁止删标记或回用旧回执绕过。
 

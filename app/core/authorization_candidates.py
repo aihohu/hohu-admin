@@ -1863,6 +1863,26 @@ _GENERIC_OWNER = (
 )
 _GENERIC_POLICY = _S + "generic_field_policy_service.GenericFieldPolicyService"
 _GENERIC_TX = _S + "authorization_generic_policy.GenericPolicyTransaction"
+_MANAGEMENT_OWNER = (
+    "app.db.authorization_field_management_owner.FieldManagementOwner.execute"
+)
+CANDIDATES += (
+    Candidate(
+        "field_management.owner",
+        _MANAGEMENT_OWNER,
+        (_S + "field_management.prepare_management",),
+        _MANAGEMENT_OWNER,
+        "owner",
+        "S",
+        "current tenant; current R_SUPER and dedicated operation permission",
+        ("S", "X"),
+        _GENERIC_POLICY + ".plan",
+        _GENERIC_POLICY + ".apply",
+        "policy-proof",  # Write maximum; read/preview use the stricter 8s limit.
+        _GENERIC_TX + ".generic_epoch",
+        False,
+    ),
+)
 CANDIDATES += tuple(
     Candidate(
         "generic_policy." + name,
@@ -1914,6 +1934,14 @@ _GENERIC_MAINTENANCE = (
         (),
     ),
     ("prepare_finish", "tools.ops.policy_prepare.PolicyPreparation.finish", "none", ()),
+    ("prepare_login", "tools.ops.policy_prepare.PolicyPreparation.login", "none", ()),
+    ("prepare_logout", "tools.ops.policy_prepare.PolicyPreparation.logout", "none", ()),
+    (
+        "prepare_management",
+        "tools.ops.policy_prepare.PolicyPreparation.management",
+        "none",
+        (),
+    ),
 )
 CANDIDATES += tuple(
     Candidate(
@@ -1939,6 +1967,7 @@ MAINTENANCE_ENTRIES |= frozenset(
 )
 
 _RUNTIME_DELEGATES = {
+    "field_management": _MANAGEMENT_OWNER,
     "generic_field_policy": _GENERIC_OWNER,
     "field_policy": "app.db.authorization_policy_owner.UserFieldPolicyOwner.execute",
     "user_read": "app.db.authorization_user_read_owner.UserReadOwner.execute",

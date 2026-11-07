@@ -12,7 +12,7 @@ from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from anyio import CancelScope
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from alembic import command
@@ -138,7 +138,15 @@ def require_receipt(guard, bootstrap):
         raise ops._required() from None
 
 
-async def prepare(guard, processes, bootstrap, *, policy_port=None):
+async def prepare(
+    guard,
+    processes,
+    bootstrap,
+    *,
+    policy_port=None,
+    policy_web_directory=None,
+    policy_web_commit=None,
+):
     if (guard.directory / "install.json").exists():
         raise ops._required()
     if bootstrap:
@@ -152,6 +160,14 @@ async def prepare(guard, processes, bootstrap, *, policy_port=None):
         if type(processes) is ops.DirectProcesses:
             ops.require_registered_inventory(guard.directory, processes)
         await guard.observe(processes)
+        if policy_port is not None:
+            from tools.ops.policy_preparation_identity import (  # noqa: PLC0415
+                require_preparation_administrators,
+            )
+
+            await require_preparation_administrators(
+                async_sessionmaker(guard.runtime_engine, expire_on_commit=False)
+            )
     await migrate(guard, bootstrap)
     await guard.require_quiescent()
     async with asyncio.timeout(180):
@@ -170,7 +186,12 @@ async def prepare(guard, processes, bootstrap, *, policy_port=None):
             serve,
         )
 
-        await serve(guard, processes, bootstrap=bootstrap, port=policy_port)
+        web = (
+            {"web_directory": policy_web_directory, "web_commit": policy_web_commit}
+            if policy_web_directory or policy_web_commit
+            else {}
+        )
+        await serve(guard, processes, bootstrap=bootstrap, port=policy_port, **web)
         await guard.require_quiescent()
     write_receipt(guard, bootstrap)
     return {"state": "prepared-admission-closed", "revision": REVISION}
@@ -183,6 +204,8 @@ def arguments(argv=None):
     parser.add_argument("--control-dir", type=Path, required=True)
     parser.add_argument("--bootstrap", action="store_true")
     parser.add_argument("--policy-port", type=int, default=8765)
+    parser.add_argument("--policy-web-directory", type=Path)
+    parser.add_argument("--policy-web-commit")
     return parser.parse_args(argv)
 
 
@@ -218,6 +241,8 @@ async def run(args):
                     policy_port=args.policy_port
                     if args.command == "policy-prepare"
                     else None,
+                    policy_web_directory=getattr(args, "policy_web_directory", None),
+                    policy_web_commit=getattr(args, "policy_web_commit", None),
                 )
             require_receipt(guard, args.bootstrap)
             if args.bootstrap:

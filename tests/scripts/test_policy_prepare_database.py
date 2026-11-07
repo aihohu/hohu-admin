@@ -195,6 +195,74 @@ async def test_live_preparation_keeps_normal_admission_closed(
                     },
                 )
                 assert result.json()["errorCode"] == "FIELD_POLICY_ACTIVATION_BLOCKED"
+                for bad in ("wrong-password", "does-not-exist"):
+                    rejected = await client.post(
+                        "/policy-prepare/login",
+                        json={
+                            "tenantCode": "default",
+                            "userName": "admin" if bad == "wrong-password" else bad,
+                            "password": "wrong-password",
+                        },
+                    )
+                    assert rejected.status_code == 401
+                    assert rejected.json()["errorCode"] == "INVALID_CREDENTIALS"
+                assert (
+                    await client.get("/system/field-policy/catalog")
+                ).status_code == 401
+                login = await client.post(
+                    "/policy-prepare/login",
+                    json={
+                        "tenantCode": "default",
+                        "userName": "admin",
+                        "password": "Install-Test-123!",
+                    },
+                )
+                assert login.status_code == 200, login.text
+                local = {"Authorization": "Bearer " + login.json()["data"]["token"]}
+                assert "." not in login.json()["data"]["token"]
+                policy_path = f"/system/field-policy/roles/{rid}/objects/system.user"
+                document = (await client.get(policy_path, headers=local)).json()["data"]
+                assert document["headVersion"] == "4"
+                draft = {
+                    "expectedVersion": document["headVersion"],
+                    "expectedBindingVersion": document["bindingVersion"],
+                    "catalogDigest": document["catalogDigest"],
+                    "rules": document["rules"],
+                }
+                preview = await client.post(
+                    policy_path + "/preview", headers=local, json=draft
+                )
+                assert preview.status_code == 200, preview.text
+                request_id = str(uuid4())
+                saved = await client.post(
+                    policy_path + "/revisions",
+                    headers=local,
+                    json=draft
+                    | {
+                        "previewDigest": preview.json()["data"]["previewDigest"],
+                        "requestId": request_id,
+                        "reason": "real password session",
+                    },
+                )
+                assert saved.status_code == 200, saved.text
+                assert saved.json()["data"]["headVersion"] == "5"
+                receipt = await client.get(
+                    "/system/field-policy/requests/" + request_id, headers=local
+                )
+                assert receipt.json()["data"] == saved.json()["data"]
+                assert saved.json()["data"]["activeManifestDigest"] is None
+                await assert_closed(admin, writer, tmp_path)
+                assert (
+                    await client.post("/policy-prepare/logout", headers=local)
+                ).status_code == 200
+                assert (await client.get(policy_path, headers=local)).status_code == 401
+                events = (guard.directory / "policy-events.jsonl").read_text()
+                assert "INVALID_CREDENTIALS" in events
+                assert "accepted" in events
+                assert login.json()["data"]["token"] not in events
+                assert "Install-Test-123!" not in events
+                assert "wrong-password" not in events
+                assert "real password session" not in events
                 assert (await client.post("/policy-prepare/finish")).status_code == 200
 
         async with asyncio.timeout(60):

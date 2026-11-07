@@ -1,6 +1,6 @@
 # 通用字段策略存储与准备入口
 
-本文描述 Backend 0.2.0 开发版本的内部持久化契约。目录与规则语义见[通用字段内核](FIELD-POLICY-CORE.md)。存储和候选管理已经提供；全系统业务对象、Web 页面与发布资格仍须各自接入和验收。当前准备目录只包含兼容对象 `system.user`，不能据此宣称全系统字段权限已生效。
+本文描述 Backend 0.2.0 开发版本的内部持久化契约。目录与规则语义见[通用字段内核](FIELD-POLICY-CORE.md)。存储、管理API和[真实Web候选页面](FIELD-POLICY-MANAGEMENT.md)已经提供；全系统业务对象与发布资格仍须接入和验收。当前准备目录只包含兼容对象 `system.user`，不能据此宣称全系统字段权限已生效。
 
 ## 事实与生效边界
 
@@ -26,7 +26,7 @@ publish/archive 回执返回 `revisionId`，请求事实以完整 tenant/role/ob
 | publish、archive、build、ready | `system:role:field-policy-edit` |
 | activate、freeze | `system:role:field-policy-activate` |
 
-这些按钮位于现有角色管理菜单。新装种子为初始管理角色明确分配；升级不会默默扩大已有角色的菜单授权。部署方须在停写前完成必要权限配置并取得有效管理 token。自定义功能按钮不会自动获得字段许可。
+这些按钮位于现有角色管理菜单。新装种子为初始管理角色明确分配；升级不会默默扩大已有角色的菜单授权。部署方须在停写前完成必要权限配置；原命令入口需要已有管理token，真实Web使用受控密码登录。自定义功能按钮不会自动获得字段许可。
 
 写命令具有 `action`、`requestId`、`expectedVersion`、`reason`。publish/archive 另需 `roleId`、`objectId`、`bindingVersion`，publish 携带闭集 `rules`；ready/activate 另需 `expectedEpoch`；freeze 同时指定 `objectId`。ID 使用十进制字符串，版本/epoch 使用整数。规则文档是版本化协议，不能提交任意数据库列或 SQL。空规则明确表示未授予。
 
@@ -42,7 +42,7 @@ publish/archive 回执返回 `revisionId`，请求事实以完整 tenant/role/ob
 | `POST /policy-prepare/command` | 固定策略命令或本人回执查询 |
 | `POST /policy-prepare/finish` | 验证当前读取权限，结束准备会话 |
 
-全部入口要求已有 JWT Bearer。控制器串行处理命令，每次核验直接进程或 Compose 实例身份、停写记录、禁止新连接及数据库在途事务；结束后排队请求也不能重新进入。Ctrl+C、进程退出码或前端隐藏都不能代替证据。直接启动与 Compose 共用该协议，不引入新的部署平台。
+原catalog/command要求已有JWT Bearer；finish也接受新准备会话。新管理API与Web通过 `POST /policy-prepare/login` 获取仅本进程有效的随机短期凭据，另有logout入口，详见[身份交接与构建协议](FIELD-POLICY-MANAGEMENT.md)。控制器串行处理命令，每次核验直接进程或 Compose 实例身份、停写记录、禁止新连接及数据库在途事务；结束后排队请求也不能重新进入。Ctrl+C、进程退出码或前端隐藏都不能代替证据。直接启动与 Compose 共用该协议，不引入新的部署平台。
 
 迁移在当前维护 permit 内锁定原 G 和有序 B，单事务转换旧规则，保留旧 revision/audit、原 actor/时间、来源摘要及映射批次。自动生成的迁移 manifest 标记为 `creation_kind=migration`，不伪造 actor。旧 enforcing/frozen 的对象状态和 ever/active 历史保留，整体 head 仍为 preparing。相同迁移只允许对全部源/目标事实作精确只读核对；编辑后或摘要漂移时拒绝重放。
 
