@@ -232,6 +232,14 @@ def test_fixed_catalog_is_real_complete_and_preserves_insert_defaults():
         "POLICY_BINDING",
         "POLICY_REVISION",
         "POLICY_AUDIT",
+        "FIELD_POLICY_HEAD",
+        "FIELD_POLICY_OBJECT",
+        "FIELD_POLICY_REVISION",
+        "FIELD_POLICY_BINDING",
+        "FIELD_POLICY_MANIFEST",
+        "FIELD_POLICY_ITEM",
+        "FIELD_POLICY_AUDIT",
+        "FIELD_POLICY_REQUEST",
         "IMPORT_BATCH",
         "EXPORT_TASK",
         "IMPORT_BATCH_LOG",
@@ -259,7 +267,12 @@ def test_fixed_catalog_is_real_complete_and_preserves_insert_defaults():
         assert all(name in spec.table.c for name in spec.key_columns)
         if spec.tenant_column:
             assert spec.tenant_column in spec.table.c
-            assert spec.tenant_column not in spec.key_columns
+            if kind is ResourceKind.FIELD_POLICY_HEAD:
+                assert spec.key_columns == ("tenant_id",)
+                with pytest.raises(BusinessException):
+                    ResourceKey(kind, 0, 1)
+            else:
+                assert spec.tenant_column not in spec.key_columns
         scoped_key = (
             (spec.tenant_column, *spec.key_columns)
             if spec.tenant_column

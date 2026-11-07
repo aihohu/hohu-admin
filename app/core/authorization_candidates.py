@@ -35,6 +35,7 @@ IO_PROFILES = MappingProxyType(
         "auth-write": (15000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "auth-email": (8000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "policy-proof": (15000, 2000, 5000, 100000, 128 * 1024 * 1024),
+        "policy-migration": (25000, 2000, 5000, 100000, 128 * 1024 * 1024),
         "import-write": (60000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "bounded-plan": (15000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "bounded-read": (5000, 0, 5000, 4104, 64 * 1024 * 1024),
@@ -1857,7 +1858,88 @@ CANDIDATES += (
     ),
 )
 
+_GENERIC_OWNER = (
+    "app.db.authorization_generic_policy_owner.GenericFieldPolicyOwner.execute"
+)
+_GENERIC_POLICY = _S + "generic_field_policy_service.GenericFieldPolicyService"
+_GENERIC_TX = _S + "authorization_generic_policy.GenericPolicyTransaction"
+CANDIDATES += tuple(
+    Candidate(
+        "generic_policy." + name,
+        qualified,
+        (),
+        _GENERIC_OWNER,
+        phase,
+        "S",
+        "current tenant under the original physical B",
+        barriers,
+        _GENERIC_POLICY + ".plan",
+        _GENERIC_POLICY + ".apply",
+        "policy-proof",
+        _GENERIC_TX + ".generic_epoch",
+        phase == "proof_writer",
+    )
+    for name, qualified, phase, barriers in (
+        ("owner", _GENERIC_OWNER, "owner", ("S", "X")),
+        ("plan", _GENERIC_POLICY + ".plan", "plan", ("X",)),
+        ("apply", _GENERIC_POLICY + ".apply", "proof_writer", ("X",)),
+        ("receipt", _GENERIC_POLICY + ".receipt", "read", ("S", "X")),
+        ("active", _GENERIC_POLICY + ".load_active", "read", ("S", "X")),
+        ("frame", _GENERIC_TX + ".generic_policy_change", "proof_writer", ("X",)),
+        ("epoch", _GENERIC_TX + ".generic_epoch", "proof_writer", ("X",)),
+        ("sealed", _S + "generic_field_policy_state.read_manifest", "read", ("S", "X")),
+        (
+            "transition",
+            _S + "generic_field_policy_state.transition",
+            "proof_writer",
+            ("X",),
+        ),
+        (
+            "old_client",
+            _S + "generic_field_policy_admission.require_user_policy_compatibility",
+            "read",
+            ("S", "X"),
+        ),
+    )
+)
+
+_GENERIC_MAINTENANCE = (
+    ("migration", _S + "generic_field_policy_migration.migrate_legacy", "X", ("X",)),
+    ("catalog", _S + "generic_field_policy_migration.register_catalog", "X", ("X",)),
+    ("prepare", "tools.ops.policy_prepare.serve", "none", ()),
+    (
+        "prepare_command",
+        "tools.ops.policy_prepare.PolicyPreparation.execute",
+        "none",
+        (),
+    ),
+    ("prepare_finish", "tools.ops.policy_prepare.PolicyPreparation.finish", "none", ()),
+)
+CANDIDATES += tuple(
+    Candidate(
+        "generic_maintenance." + name,
+        qualified,
+        (),
+        "tools.ops.policy_prepare.serve",
+        "owner",
+        guard,
+        "stopped deployment; exact inventory and current-task migration permit; per-command tenant owner",
+        barriers,
+        "none",
+        "none",
+        "policy-migration",
+        "none",
+        False,
+        maintenance=True,
+    )
+    for name, qualified, guard, barriers in _GENERIC_MAINTENANCE
+)
+MAINTENANCE_ENTRIES |= frozenset(
+    "generic_maintenance." + item[0] for item in _GENERIC_MAINTENANCE
+)
+
 _RUNTIME_DELEGATES = {
+    "generic_field_policy": _GENERIC_OWNER,
     "field_policy": "app.db.authorization_policy_owner.UserFieldPolicyOwner.execute",
     "user_read": "app.db.authorization_user_read_owner.UserReadOwner.execute",
     "control_read": "app.db.authorization_catalog_read_owner.CatalogReadOwner.execute",

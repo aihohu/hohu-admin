@@ -1,6 +1,6 @@
 # 通用字段授权内部契约
 
-本文面向后端维护者，说明 [field_policy](../app/core/field_policy/__init__.py) 的当前内部接口。它是无数据库访问的目录、授权求值、查询表达式和来源证据内核；没有注册业务路由、创建策略表或启用新的业务对象。现有用户入口继续遵循[用户字段契约](USER-FIELD-PROJECTION.md)。
+本文面向后端维护者，说明 [field_policy](../app/core/field_policy/__init__.py) 的当前内部接口。纯内核负责目录、授权求值、查询表达式和来源证据；其持久化与候选管理见[通用字段策略存储](FIELD-POLICY-STORAGE.md)，全系统业务入口仍需接入。未迁入通用准备状态的用户入口继续遵循[用户字段契约](USER-FIELD-PROJECTION.md)。
 
 ## 调用前提与边界
 
