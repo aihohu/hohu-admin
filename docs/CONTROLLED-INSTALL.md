@@ -10,7 +10,7 @@ CLI 使用独立 Python 虚拟环境，安装固定版本 `python -m pip install
 
 - 使用与目标 Backend 相同完整 SHA 的只读源码和锁定依赖，设置准确的 `RELEASE_BUILD_SHA`。控制器需要 Python >=3.12；Compose 控制器在宿主使用 Docker CLI，不在普通 API 容器内挂 Docker socket。
 - 管理员先建立目标数据库与一个独立、非 superuser 的应用角色，赋予该角色目标数据库及 `public` schema 的迁移权限。API/scheduler 使用这个应用角色；宿主 `AUTHORIZATION_MAINTENANCE_DATABASE_URL` 使用独立管理身份，连接同一目标数据库。不要把维护 URL、维护密码放进应用的共享 `.env`。
-- 新装准备空数据库，禁止先启动应用；设置受控的 `AUTHORIZATION_MAINTENANCE_PASSWORD` 作为初始管理员密码。升级只接受 `d01010100101` 或当前 `e0204a000001`；其他起点先走单独验证的升级路径。此入口只支持单应用数据库角色。
+- 新装准备空数据库，禁止先启动应用；设置受控的 `AUTHORIZATION_MAINTENANCE_PASSWORD` 作为初始管理员密码。升级只接受 `d01010100101`、`e0204a000001` 或当前 `e020f1200001`；其他起点先走单独验证的升级路径。此入口只支持单应用数据库角色。
 - 备份配套数据库、公开/私有文件、原密钥、配置和撤权事实。旧 API、scheduler、API 内 AI 恢复/过期任务、维护脚本及外部写者全部纳入清点；用户入口保持维护状态。
 - 控制目录由维护人员保护，直接启动实例与宿主控制器共享正确的运行登记目录。每次新操作保留之前证据，不能通过删除 `stop.json` 或失败回执来绕过恢复检查。
 
@@ -69,6 +69,10 @@ hohu deploy --source official --no-migrate
 此路径实际迁移执行者是宿主控制器，不会再运行CLI模板的db-migrator容器。该服务配置仍固定到同一Backend引用以防误用，但不能将其声明为已运行的迁移镜像。最终产物验收还须核对宿主源码、迁移、种子与锁定依赖的来源，证明与目标Backend镜像对应，并分别记录控制器运行环境和应用镜像身份。
 
 ## 失败与恢复
+
+通用策略需要受控编辑时，使用 `policy-prepare` 替代上述 `prepare`，可加 `--policy-port 8765`。其余 inventory、bootstrap、build、角色和控制目录要求相同。入口仅监听本机并使用原有管理 JWT，不启动普通业务任务；详见[通用字段策略存储](FIELD-POLICY-STORAGE.md)。普通 `prepare` 只安装结构和种子，不自动迁入通用授权状态。
+
+安装回执 schema 为 2，额外绑定准备记录的摘要；旧 schema 回执不能用于当前恢复。一旦建立 `policy-prepare.json`，当前版本的正常恢复入口将拒绝开放 admission，即使准备 HTTP 会话已成功结束。全系统对象接线和完整资格尚未完成，不能据此恢复生产流量；禁止删标记或回用旧回执绕过。
 
 异常、取消、迁移/seed或回执写入失败均不自动恢复 admission，也不自动重试业务或启动服务。`stop.json` 表示维护尚未解除；失败时保持入口隔离，先核对已提交的迁移/seed事实及备份。已迁移但seed未知不能重新当作空库bootstrap；通过现有维护修复协议处理，不能删记录或`stamp head`伪装成功。成功回执只记录这一阶段，不是正式发布资格或镜像正确性的证明。
 
