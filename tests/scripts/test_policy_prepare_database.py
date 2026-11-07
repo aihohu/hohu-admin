@@ -135,7 +135,37 @@ async def test_live_preparation_keeps_normal_admission_closed(
                         "roleId": str(rid),
                         "objectId": "system.user",
                         "bindingVersion": 0,
-                        "rules": [],
+                        "rules": [
+                            {
+                                "fieldId": "nickname",
+                                "access": {
+                                    "operation": "read",
+                                    "purpose": "management.read",
+                                    "use": "",
+                                },
+                                "effect": "allow",
+                                "level": "plain",
+                                "maskId": None,
+                            }
+                        ],
+                    },
+                )
+                assert result.status_code == 200, result.text
+                displayed = (await client.get("/policy-prepare/catalog")).json()[
+                    "data"
+                ]["bindings"][0]
+                assert displayed["rules"][0]["fieldId"] == "nickname"
+                result = await client.post(
+                    "/policy-prepare/command",
+                    json={
+                        "action": "publish",
+                        "requestId": str(uuid4()),
+                        "expectedVersion": 2,
+                        "reason": "round-trip displayed rules",
+                        "roleId": displayed["roleId"],
+                        "objectId": displayed["objectId"],
+                        "bindingVersion": displayed["bindingVersion"],
+                        "rules": displayed["rules"],
                     },
                 )
                 assert result.status_code == 200, result.text
@@ -144,7 +174,7 @@ async def test_live_preparation_keeps_normal_admission_closed(
                     json={
                         "action": "build",
                         "requestId": str(uuid4()),
-                        "expectedVersion": 2,
+                        "expectedVersion": 3,
                         "reason": "seal test candidate",
                     },
                 )
@@ -159,7 +189,7 @@ async def test_live_preparation_keeps_normal_admission_closed(
                     json={
                         "action": "ready",
                         "requestId": str(uuid4()),
-                        "expectedVersion": 3,
+                        "expectedVersion": 4,
                         "expectedEpoch": value["epoch"],
                         "reason": "must stay closed",
                     },

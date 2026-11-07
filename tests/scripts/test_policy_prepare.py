@@ -7,11 +7,56 @@ import httpx
 import pytest
 
 from app.core.exceptions import BusinessException
+from app.core.field_policy import Catalog
+from app.core.field_policy.documents import load_rules
+from app.modules.system.field_policy.generic_compat import user_compat_object
 from tools.ops.policy_prepare import (
     PolicyPreparation,
+    PreparationCommand,
     create_app,
     require_normal_resume,
 )
+
+
+def test_duplicate_rule_alias_is_rejected():
+    with pytest.raises(ValueError):
+        PreparationCommand.normalize_keys(
+            {"fieldId": "nickname", "field_id": "nickname"}, ("field_id", "mask_id")
+        )
+
+
+def test_displayed_rule_document_round_trips_through_command():
+    payload = {
+        "action": "publish",
+        "requestId": "11111111-1111-1111-1111-111111111111",
+        "expectedVersion": 1,
+        "reason": "reviewed",
+        "roleId": "201",
+        "objectId": "system.user",
+        "bindingVersion": 0,
+        "rules": [
+            {
+                "fieldId": "nickname",
+                "access": {
+                    "operation": "read",
+                    "purpose": "management.read",
+                    "use": "",
+                },
+                "effect": "allow",
+                "level": "plain",
+                "maskId": None,
+            }
+        ],
+    }
+    command = PreparationCommand.model_validate(payload).root
+    grants = load_rules(
+        Catalog((user_compat_object(),), ()),
+        command["rules"],
+        tenant_id=0,
+        role_id=201,
+        object_id="system.user",
+    )
+    assert grants[0].ref.field_id == "nickname"
 
 
 async def test_queued_request_cannot_reenter_finished_preparation():

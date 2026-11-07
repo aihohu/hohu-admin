@@ -40,28 +40,42 @@ from app.modules.system.service.generic_field_policy_service import (
 
 
 class PreparationCommand(RootModel[dict]):
-    @model_validator(mode="before")
-    @classmethod
-    def closed_command(cls, value):
+    @staticmethod
+    def normalize_keys(value, keys):
         if type(value) is not dict:
-            raise ValueError("Expected a command")
-        aliases = {
-            to_camel(key): key
-            for key in (
-                "request_id",
-                "expected_version",
-                "expected_epoch",
-                "role_id",
-                "object_id",
-                "binding_version",
-            )
-        }
+            raise ValueError("Expected an object")
+        aliases = {to_camel(key): key for key in keys}
         converted = {}
         for key, item in value.items():
             name = aliases.get(key, key)
             if name in converted:
                 raise ValueError("Ambiguous command")
             converted[name] = item
+        return converted
+
+    @model_validator(mode="before")
+    @classmethod
+    def closed_command(cls, value):
+        if type(value) is not dict:
+            raise ValueError("Expected a command")
+        converted = cls.normalize_keys(
+            value,
+            (
+                "request_id",
+                "expected_version",
+                "expected_epoch",
+                "role_id",
+                "object_id",
+                "binding_version",
+            ),
+        )
+        if "rules" in converted:
+            if type(converted["rules"]) is not list or len(converted["rules"]) > 2048:
+                raise ValueError("Invalid rule array")
+            converted["rules"] = [
+                cls.normalize_keys(rule, ("field_id", "mask_id"))
+                for rule in converted["rules"]
+            ]
         if "role_id" in converted and type(converted["role_id"]) is str:
             role = converted["role_id"]
             if (
