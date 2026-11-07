@@ -21,11 +21,12 @@ def _scripts() -> ScriptDirectory:
 
 def test_history_preserves_release_boundary_and_current_head() -> None:
     scripts = _scripts()
-    assert scripts.get_heads() == ["e0204a000001"]
+    assert scripts.get_heads() == ["e020f1200001"]
     assert scripts.get_bases() == ["bf244f9a8b76"]
     assert [
         (item.revision, item.down_revision) for item in scripts.walk_revisions()
     ] == [
+        ("e020f1200001", "e0204a000001"),
         ("e0204a000001", "e0203c000001"),
         ("e0203c000001", "e0203b000001"),
         ("e0203b000001", "e0202a000001"),
@@ -40,6 +41,7 @@ def test_history_preserves_release_boundary_and_current_head() -> None:
         "e0203b000001_transfer_field_lineage.py",
         "e0203c000001_ai_field_authority.py",
         "e0204a000001_user_field_policy_activation.py",
+        "e020f1200001_generic_field_policy.py",
     }
 
 
