@@ -6,7 +6,7 @@ from time import perf_counter
 
 import pytest
 from rich.console import Console
-from sqlalchemy import text
+from sqlalchemy import event
 
 from app.core.exceptions import BusinessException
 from app.db import authorization_relation_read_owner as reader_module
@@ -36,12 +36,20 @@ async def test_relation_reader_and_revocation_use_real_barriers(
     runtime = AuthorizationRuntime(plain.kw["bind"])
     entered, release = asyncio.Event(), asyncio.Event()
     pids = []
+    connection_pids = {}
+
+    def observed(connection, *_args):
+        connection_pids[asyncio.current_task()] = (
+            connection.connection.dbapi_connection.driver_connection.get_server_pid()
+        )
+
+    event.listen(plain.kw["bind"].sync_engine, "before_cursor_execute", observed)
     if writer_first:
         original = system_authorization_candidate.apply
 
         async def paused(db, tx, work):
             result = await original(db, tx, work)
-            pids.append(await db.scalar(text("SELECT pg_backend_pid()")))
+            pids.append(connection_pids[asyncio.current_task()])
             entered.set()
             await release.wait()
             return result
@@ -52,7 +60,7 @@ async def test_relation_reader_and_revocation_use_real_barriers(
 
         async def paused(db, tx, **kwargs):
             result = await original(db, tx, **kwargs)
-            pids.append(await db.scalar(text("SELECT pg_backend_pid()")))
+            pids.append(connection_pids[asyncio.current_task()])
             entered.set()
             await release.wait()
             return result
@@ -99,6 +107,7 @@ async def test_relation_reader_and_revocation_use_real_barriers(
             )
         )
     finally:
+        event.remove(plain.kw["bind"].sync_engine, "before_cursor_execute", observed)
         release.set()
         for task in (first, second):
             if task is not None and not task.done():

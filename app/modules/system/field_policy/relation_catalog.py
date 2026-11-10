@@ -75,6 +75,44 @@ def object_spec(name, anchor, fields):
     )
 
 
+def read_use(action, obj, field, access):
+    if action == "user.own-read":
+        return (
+            access.purpose == "own-account"
+            if obj == "system.user"
+            else access == READ and field in {"role_id", "role_name", "i18n_keys"}
+        )
+    if action in {"role.menus-read", "role.agents-read"}:
+        return access == READ and field in {
+            "role_id",
+            "menu_ids" if action == "role.menus-read" else "agent_ids",
+        }
+    if action == "role.management-read":
+        return access == READ and field in {
+            "role_id",
+            "role_name",
+            "role_code",
+            "status",
+            "data_scope",
+        }
+    if action == "role.assignable-read":
+        return (
+            (
+                access == READ
+                and field in {"role_id", "role_name", "role_code", "i18n_keys"}
+            )
+            or (access in {CONTAINS, SORT} and field in {"role_name", "role_code"})
+            or (access == EQ and field == "status")
+        )
+    return access.operation in {
+        "read",
+        "contains",
+        "eq",
+        "exact",
+        "sort",
+    } and access.purpose in {"management.read", "management.query"}
+
+
 def build_relation_catalog(base):
     role = object_spec(
         "role",
@@ -286,11 +324,7 @@ def build_relation_catalog(base):
                     if obj.object_id in object_ids
                     for f in obj.fields
                     for a in f.accesses
-                    if (
-                        a.operation in {"read", "contains", "eq", "exact", "sort"}
-                        and a.purpose in {"management.read", "management.query"}
-                    )
-                    or (action_id == "user.own-read" and a.purpose == "own-account")
+                    if read_use(action_id, obj.object_id, f.field_id, a)
                 ),
                 permissions,
                 read_caps=tuple(

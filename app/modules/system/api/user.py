@@ -18,8 +18,8 @@ from app.modules.auth.service import (
     get_current_tenant_context,
 )
 from app.modules.system.models.user import User
+from app.modules.system.schemas.relation_projection import ProjectedAssignableRoleOut
 from app.modules.system.schemas.user import (
-    AssignableRoleOut,
     ChangePassword,
     ResetPassword,
     UpdateProfile,
@@ -117,7 +117,7 @@ async def add_user(
 
 @router.get(
     "/assignable-roles",
-    response_model=ResponseModel[list[AssignableRoleOut]],
+    response_model=ResponseModel[list[ProjectedAssignableRoleOut]],
     summary="获取可委派角色",
     dependencies=[Depends(require_permissions("system:user:role-auth"))],
 )

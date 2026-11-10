@@ -8,7 +8,10 @@ from app.db.authorization_http import relation_read, system_write
 from app.db.session import get_db
 from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.user import User
-from app.modules.system.schemas.relation_projection import ProjectedRoleOut
+from app.modules.system.schemas.relation_projection import (
+    ProjectedRoleOut,
+    ProjectedRoleSummaryOut,
+)
 from app.modules.system.schemas.role import (
     RoleCreate,
     RoleQuery,
@@ -20,7 +23,7 @@ router = APIRouter()
 
 @router.get(
     "/list",
-    response_model=ResponseModel[PageResult[ProjectedRoleOut]],
+    response_model=ResponseModel[PageResult[ProjectedRoleSummaryOut]],
     summary="获取角色列表分页",
     description="根据查询条件获取角色分页列表，支持按角色名称、角色编码、数据权限和状态筛选",
     responses={
@@ -45,7 +48,7 @@ async def list_roles(
 
 @router.get(
     "/all",
-    response_model=ResponseModel[list[ProjectedRoleOut]],
+    response_model=ResponseModel[list[ProjectedRoleSummaryOut]],
     summary="获取全部角色列表(不分页)",
     description="获取系统中所有已启用的角色列表，不分页，用于下拉选择等场景",
     responses={

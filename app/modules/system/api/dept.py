@@ -7,14 +7,11 @@ from app.core.tenant import TenantContext
 from app.db.authorization_http import relation_read, system_write, user_read
 from app.db.session import get_db
 from app.modules.auth.service import get_current_tenant_context
-from app.modules.system.models.dept import Dept
 from app.modules.system.models.user import User
 from app.modules.system.schemas.dept import (
     DeptCreate,
     DeptMove,
     DeptQuery,
-    DeptTreeOptionOut,
-    DeptTreeOut,
     DeptUpdate,
     DeptUsersUpdate,
 )
@@ -23,88 +20,8 @@ from app.modules.system.schemas.relation_projection import (
     ProjectedTreeOptionOut,
 )
 from app.modules.system.schemas.user_projection import ProjectedUserOut, UserMemberQuery
-from app.utils.pagination import build_filters
 
 router = APIRouter()
-
-
-def _dept_filters(query: DeptQuery) -> list:
-    """Build the shared department metadata filters."""
-    return build_filters(
-        Dept,
-        {
-            "dept_name": ("dept_name", "contains"),
-            "status": ("status", "=="),
-            "leader": ("leader", "contains"),
-        },
-        **query.model_dump(),
-    )
-
-
-def _build_dept_tree(depts: list[Dept]) -> list[dict]:
-    """Project visible rows as a local-root tree."""
-    dept_by_id = {int(dept.dept_id): dept for dept in depts}
-    visible_ids = set(dept_by_id)
-    local_ancestors: dict[int, str] = {}
-
-    def ancestors_for(dept: Dept, visiting: frozenset[int] = frozenset()) -> str:
-        dept_id = int(dept.dept_id)
-        if dept_id in local_ancestors:
-            return local_ancestors[dept_id]
-        parent_id = int(dept.parent_id) if dept.parent_id is not None else None
-        if parent_id not in visible_ids or dept_id in visiting:
-            local_ancestors[dept_id] = "0"
-            return "0"
-        parent = dept_by_id[parent_id]
-        value = f"{ancestors_for(parent, visiting | {dept_id})},{parent_id}"
-        local_ancestors[dept_id] = value
-        return value
-
-    dept_map: dict[int, dict] = {}
-    for dept in depts:
-        item = DeptTreeOut.model_validate(dept).model_dump()
-        parent_id = int(dept.parent_id) if dept.parent_id is not None else None
-        item["parent_id"] = str(parent_id) if parent_id in visible_ids else None
-        item["ancestors"] = ancestors_for(dept)
-        item["children"] = []
-        dept_map[int(dept.dept_id)] = item
-
-    tree: list[dict] = []
-    for dept in depts:
-        item = dept_map[int(dept.dept_id)]
-        parent_id = int(dept.parent_id) if dept.parent_id is not None else None
-        if parent_id in dept_map:
-            dept_map[parent_id]["children"].append(item)
-        else:
-            tree.append(item)
-    return tree
-
-
-def _build_dept_options(depts: list[Dept]) -> list[DeptTreeOptionOut]:
-    """Project visible enabled rows as local-root options."""
-    visible_ids = {int(dept.dept_id) for dept in depts}
-    dept_map = {
-        int(dept.dept_id): DeptTreeOptionOut(
-            id=dept.dept_id,
-            label=dept.dept_name,
-            p_id=(
-                str(dept.parent_id)
-                if dept.parent_id is not None and int(dept.parent_id) in visible_ids
-                else ""
-            ),
-            children=[],
-        )
-        for dept in depts
-    }
-    tree: list[DeptTreeOptionOut] = []
-    for dept in depts:
-        option = dept_map[int(dept.dept_id)]
-        parent_id = int(dept.parent_id) if dept.parent_id is not None else None
-        if parent_id in dept_map:
-            dept_map[parent_id].children.append(option)
-        else:
-            tree.append(option)
-    return tree
 
 
 @router.get(

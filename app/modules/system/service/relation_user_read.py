@@ -4,9 +4,13 @@ from pydantic.alias_generators import to_camel
 from sqlalchemy import and_, func, or_, select
 
 from app.core.config import settings
-from app.core.exceptions import NotFoundException
+from app.core.exceptions import (
+    AuthorizationException,
+    BusinessException,
+    NotFoundException,
+)
 from app.core.field_policy import Access, resolve_fields
-from app.core.field_policy.contracts import denied, limit
+from app.core.field_policy.contracts import limit
 from app.db.base import user_depts, user_roles
 from app.modules.auth.permission_collect import collect_user_identity
 from app.modules.system.field_policy.dto import (
@@ -15,6 +19,7 @@ from app.modules.system.field_policy.dto import (
     resolve_own_account_fields,
 )
 from app.modules.system.field_policy.evaluator import FieldGrant
+from app.modules.system.field_policy.query_plan import query_denied
 from app.modules.system.field_policy.relation_catalog import (
     CONTAINS,
     EQ,
@@ -200,7 +205,7 @@ async def query_coverage(db, context, field, access):
     table = User.__table__
     return not await db.scalar(
         select(
-            select(1)
+            select(table.c.user_id)
             .select_from(table)
             .where(
                 context.base("system.user", table),
@@ -213,7 +218,7 @@ async def query_coverage(db, context, field, access):
 
 async def role_query_coverage(db, context):
     table, source = User.__table__, Role.__table__
-    links = user_roles.join(
+    links = user_roles.outerjoin(
         source,
         and_(
             source.c.tenant_id == user_roles.c.tenant_id,
@@ -221,14 +226,17 @@ async def role_query_coverage(db, context):
         ),
     )
     invalid = (
-        select(1)
+        select(source.c.role_id)
         .select_from(links)
         .where(
             user_roles.c.tenant_id == context.tenant.tenant_id,
             user_roles.c.user_id == table.c.user_id,
-            ~and_(
-                context.base("system.role", source),
-                context.coverage("system.role", source, "role_code", EXACT),
+            or_(
+                source.c.role_id.is_(None),
+                ~and_(
+                    context.base("system.role", source),
+                    context.coverage("system.role", source, "role_code", EXACT),
+                ),
             ),
         )
         .correlate(table)
@@ -236,7 +244,7 @@ async def role_query_coverage(db, context):
     )
     return not await db.scalar(
         select(
-            select(1)
+            select(table.c.user_id)
             .select_from(table)
             .where(
                 context.base("system.user", table),
@@ -275,13 +283,26 @@ async def read_users(db, tx, *, tenant, actor_user_version, operation, query=Non
                 continue
             if name == "role_code":
                 if not await role_query_coverage(db, context):
-                    raise denied()
+                    raise query_denied()
                 predicates.append(
-                    User.roles.any(
-                        and_(
-                            Role.tenant_id == tenant.tenant_id, Role.role_code == value
+                    select(Role.role_id)
+                    .select_from(
+                        user_roles.join(
+                            Role.__table__,
+                            and_(
+                                Role.tenant_id == user_roles.c.tenant_id,
+                                Role.role_id == user_roles.c.role_id,
+                            ),
                         )
                     )
+                    .where(
+                        user_roles.c.tenant_id == tenant.tenant_id,
+                        user_roles.c.user_id == User.user_id,
+                        Role.tenant_id == tenant.tenant_id,
+                        Role.role_code == value,
+                    )
+                    .correlate(User.__table__)
+                    .exists()
                 )
             else:
                 access = EQ if name in {"user_gender", "status"} else CONTAINS
@@ -293,7 +314,7 @@ async def read_users(db, tx, *, tenant, actor_user_version, operation, query=Non
                 )
         # Existing fixed create_time ordering has a declared read dependency.
         if not await query_coverage(db, context, "create_time", READ):
-            raise denied()
+            raise query_denied()
         order = (User.create_time.desc(), User.user_id.desc())
     else:
         if not await db.scalar(
@@ -304,6 +325,22 @@ async def read_users(db, tx, *, tenant, actor_user_version, operation, query=Non
         ):
             raise NotFoundException("部门")
         dependencies = [("departments", JOIN), ("status", EQ)]
+        if (query.query or "").strip():
+            dependencies += [("user_name", CONTAINS), ("nickname", CONTAINS)]
+            predicates.append(
+                or_(
+                    User.user_name.icontains(query.query.strip(), autoescape=True),
+                    User.nickname.icontains(query.query.strip(), autoescape=True),
+                )
+            )
+        order = (User.user_id,)
+    try:
+        await context.prove(db, "system.user", table, tuple(dependencies))
+    except BusinessException as exc:
+        if exc.error_code == "FIELD_POLICY_DENIED":
+            raise query_denied() from None
+        raise
+    if operation == "members":
         member_map = {
             uid: primary == "Y"
             for uid, primary in await db.execute(
@@ -326,20 +363,13 @@ async def read_users(db, tx, *, tenant, actor_user_version, operation, query=Non
                 ).scalars()
             )
             if visible != set(batch):
-                raise denied()
-        predicates.append(or_(User.status == "1", User.user_id.in_(member_ids)))
-        if (query.query or "").strip():
-            dependencies += [("user_name", CONTAINS), ("nickname", CONTAINS)]
-            predicates.append(
-                or_(
-                    User.user_name.icontains(query.query.strip(), autoescape=True),
-                    User.nickname.icontains(query.query.strip(), autoescape=True),
+                raise AuthorizationException(
+                    "部门成员集合包含不可管理用户",
+                    error_code="DEPT_MEMBERSHIP_GLOBAL_IMPACT_OUT_OF_SCOPE",
                 )
-            )
-        order = (User.user_id,)
-    await context.prove(db, "system.user", table, tuple(dependencies))
+        predicates.append(or_(User.status == "1", User.user_id.in_(member_ids)))
     total = await db.scalar(
-        select(func.count())
+        select(func.pg_catalog.count(1))
         .select_from(table)
         .where(context.base("system.user", table), *predicates)
     )

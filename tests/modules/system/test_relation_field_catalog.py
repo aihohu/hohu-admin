@@ -72,6 +72,24 @@ def test_source_actions_do_not_require_unrelated_list_button():
     assert "system.role" in catalog.actions["user.relations"].object_ids
 
 
+def test_fixed_own_account_and_binding_read_uses_are_minimal():
+    catalog = candidate()
+    own = catalog.actions["user.own-read"]
+    assert all(
+        u.access.purpose == "own-account"
+        for u in own.uses
+        if u.ref.object_id == "system.user"
+    )
+    for action, field in (
+        ("role.menus-read", "menu_ids"),
+        ("role.agents-read", "agent_ids"),
+    ):
+        assert {u.ref.field_id for u in catalog.actions[action].uses} == {
+            "role_id",
+            field,
+        }
+
+
 def test_candidate_roundtrip_and_non_grantable_derivation():
     catalog = candidate()
     assert (

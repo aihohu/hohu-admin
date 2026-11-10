@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy import and_, case, false, or_, select, true
 
+from app.core.exceptions import AuthorizationException
 from app.core.field_policy import (
     FieldRef,
     FieldUse,
@@ -96,12 +97,24 @@ class RelationReadContext:
         ref = FieldRef(obj, name)
         if self.catalog.fields[ref].structural and access.operation == "read":
             return true()
+        if FieldUse(ref, access) not in self.catalog.actions[self.action].uses:
+            return false()
         allow, deny = [], []
         for rid, scope in self.scope_sql(obj, table).items():
             grant = self.rules.index.get((self.tenant.tenant_id, rid, ref, access))
             if grant:
                 (allow if grant.effect == "allow" else deny).append(scope.is_(True))
-        return and_(or_(false(), *allow), ~or_(false(), *deny))
+        result = and_(or_(false(), *allow), ~or_(false(), *deny))
+        if access == READ:
+            result = and_(
+                result,
+                *(
+                    self.coverage(obj, table, source.field_id, READ)
+                    for source in self.catalog.fields[ref].sources
+                    if source.object_id == obj
+                ),
+            )
+        return result
 
     def decisions(self, record, access=READ):
         return resolve_fields(self.catalog, self.rules, record, self.action, access)
@@ -123,13 +136,18 @@ class RelationReadContext:
                 scopes,
             )
             if await db.scalar(
-                select(select(1).select_from(table).where(counter).exists())
+                select(
+                    select(next(iter(table.primary_key.columns)))
+                    .select_from(table)
+                    .where(counter)
+                    .exists()
+                )
             ):
                 raise denied()
         if readable:
             if await db.scalar(
                 select(
-                    select(1)
+                    select(next(iter(table.primary_key.columns)))
                     .select_from(table)
                     .where(
                         base, ~and_(*(self.coverage(obj, table, f) for f in readable))
@@ -163,7 +181,12 @@ class RelationReadContext:
         scopes = self.scope_sql(obj, table)
         columns = [
             case(
-                (self.coverage(obj, table, f.field_id, access), table.c[f.field_id]),
+                (
+                    self.coverage(obj, table, f.field_id, access),
+                    case((table.c.leader.is_(None), None), else_="")
+                    if obj == "system.dept" and f.field_id == "leader"
+                    else table.c[f.field_id],
+                ),
                 else_=None,
             ).label(f.field_id)
             for f in fields
@@ -172,7 +195,24 @@ class RelationReadContext:
             case((scope, True), else_=False).label(f"_role_{i}")
             for i, scope in enumerate(scopes.values())
         ]
-        columns += [table.c[n].label("_" + n) for n in internals]
+        columns += [
+            (
+                case(
+                    (
+                        and_(
+                            self.coverage(obj, table, "leader"),
+                            table.c.leader.is_not(None),
+                            table.c.leader != "",
+                        ),
+                        True,
+                    ),
+                    else_=False,
+                )
+                if n == "leader_has_text" and obj == "system.dept"
+                else table.c[n]
+            ).label("_" + n)
+            for n in internals
+        ]
         rows = (
             (
                 await db.execute(
@@ -203,6 +243,14 @@ class RelationReadContext:
                 project(self.catalog, self.rules, record, self.action, access, values)
             )
             if "i18n_keys" in output and output["i18n_keys"] is not None:
+                require(type(output["i18n_keys"]) is dict)
+                require(
+                    all(
+                        type(value) is str
+                        for key, value in output["i18n_keys"].items()
+                        if key in {"roleName", "roleDesc"}
+                    )
+                )
                 output["i18n_keys"] = {
                     key: value
                     for key, value in output["i18n_keys"].items()
@@ -271,7 +319,7 @@ async def load_relation_read_context(
             p for a in catalog.actions.values() for p in a.permission_codes
         )
     if not set(catalog.actions[action].permission_codes) <= permissions:
-        raise denied()
+        raise AuthorizationException("缺少操作权限", error_code="MISSING_PERMISSION")
     ids = tuple(str(r.role_id) for r in roles)
     head = await db.scalar(
         select(FieldPolicyHead.tenant_id).where(

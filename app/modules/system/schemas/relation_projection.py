@@ -34,7 +34,17 @@ class SparseRelationOut(BaseModel):
         return {key: value for key, value in result.items() if key in allowed}
 
 
-def projection(name, obj, anchor, **extras):
+ROLE_SUMMARY_FIELDS = frozenset(
+    {"role_id", "role_code", "role_name", "status", "data_scope", "i18n_keys"}
+)
+ROLE_DETAIL_FIELDS = ROLE_SUMMARY_FIELDS | {"role_desc", "create_time", "dept_ids"}
+MENU_DETAIL_FIELDS = frozenset(
+    "parent_id menu_name menu_type icon icon_type path component route_name route_path i18n_key order status active_menu fixed_index_in_tab hide_in_menu href keep_alive constant layout multi_tab page path_param menu_id create_time".split()
+)
+MENU_SIMPLE_FIELDS = frozenset({"menu_id", "menu_name", "create_time"})
+
+
+def projection(name, obj, anchor, *, only=None, **extras):
     kinds = {
         "id": StrictStr,
         "string": str,
@@ -46,6 +56,7 @@ def projection(name, obj, anchor, **extras):
     fields = {
         f.field_id: (kinds[f.value_type] | None, None)
         for f in relation_catalog().objects[obj].fields
+        if only is None or f.field_id in only
     }
     fields[anchor] = (StrictStr, ...)
     fields.update(extras)
@@ -56,8 +67,21 @@ ProjectedRoleOut = projection(
     "ProjectedRoleOut",
     "system.role",
     "role_id",
-    delegable=(bool | None, None),
+    only=ROLE_DETAIL_FIELDS,
+)
+ProjectedRoleSummaryOut = projection(
+    "ProjectedRoleSummaryOut",
+    "system.role",
+    "role_id",
+    only=ROLE_SUMMARY_FIELDS,
+    delegable=(bool, ...),
     blocked_reason_code=(str | None, None),
+)
+ProjectedAssignableRoleOut = projection(
+    "ProjectedAssignableRoleOut",
+    "system.role",
+    "role_id",
+    only={"role_id", "role_code", "role_name", "i18n_keys"},
 )
 ProjectedDeptOut = projection(
     "ProjectedDeptOut",
@@ -69,8 +93,12 @@ ProjectedMenuOut = projection(
     "ProjectedMenuOut",
     "system.menu",
     "menu_id",
+    only=MENU_DETAIL_FIELDS,
     children=(list["ProjectedMenuOut"] | None, None),
     buttons=(list[dict[str, str | None]] | None, None),
+)
+ProjectedMenuSimpleOut = projection(
+    "ProjectedMenuSimpleOut", "system.menu", "menu_id", only=MENU_SIMPLE_FIELDS
 )
 ProjectedDeptOut.model_rebuild()
 ProjectedMenuOut.model_rebuild()
@@ -96,6 +124,12 @@ def serialize_relation(operation, result):
         "dept": ProjectedDeptOut,
         "menu": ProjectedMenuOut,
     }[surface]
+    if surface == "role" and kind in {"list", "all"}:
+        model = ProjectedRoleSummaryOut
+    if kind == "assignable":
+        model = ProjectedAssignableRoleOut
+    if surface == "menu" and kind == "all":
+        model = ProjectedMenuSimpleOut
     if kind == "options":
         model = ProjectedTreeOptionOut
     if kind in {"list", "tree-list"}:

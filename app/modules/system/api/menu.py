@@ -15,6 +15,7 @@ from app.modules.system.schemas.menu import (
 )
 from app.modules.system.schemas.relation_projection import (
     ProjectedMenuOut,
+    ProjectedMenuSimpleOut,
     ProjectedTreeOptionOut,
 )
 
@@ -99,7 +100,7 @@ async def list_menus(
 
 @router.get(
     "/all",
-    response_model=ResponseModel[list[ProjectedMenuOut]],
+    response_model=ResponseModel[list[ProjectedMenuSimpleOut]],
     summary="获取全部菜单列表(不分页)",
 )
 async def get_all_menu(
