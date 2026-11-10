@@ -24,7 +24,15 @@ def facts():
     result[K.USER] = [{"user_id": 101, "status": "1"}]
     result[K.USER_ROLES] = [{"user_id": 101, "role_id": 201}]
     result[K.MENU] = [
-        {"menu_id": 501, "parent_id": None, "menu_type": "M", "status": "1"},
+        {
+            "menu_id": 501,
+            "parent_id": None,
+            "menu_type": "M",
+            "status": "1",
+            "component": "layout.base",
+            "route_name": "auth",
+            "route_path": "/auth",
+        },
         {
             "menu_id": 502,
             "parent_id": 501,
@@ -63,6 +71,10 @@ def facts():
         "hidden",
         "cycle",
         "unbound_button",
+        "ancestor_component",
+        "ancestor_path",
+        "ancestor_href",
+        "ancestor_route_name",
     ],
 )
 def test_last_repair_path_cannot_be_lost(change):
@@ -86,6 +98,14 @@ def test_last_repair_path_cannot_be_lost(change):
         after[K.MENU][0]["parent_id"] = 502
     if change == "unbound_button":
         after[K.ROLE_MENUS] = [r for r in after[K.ROLE_MENUS] if r["menu_id"] != 503]
+    if change == "ancestor_component":
+        after[K.MENU][0]["component"] = "view.other"
+    if change == "ancestor_path":
+        after[K.MENU][0]["route_path"] = None
+    if change == "ancestor_href":
+        after[K.MENU][0]["href"] = "https://example.invalid"
+    if change == "ancestor_route_name":
+        after[K.MENU][0]["route_name"] = None
     with pytest.raises(BusinessException) as error:
         require_manager_preserved(before, after)
     assert (

@@ -103,6 +103,13 @@ def repair_accounts(facts):
                     or node["status"] != "1"
                     or node.get("hide_in_menu")
                     or node["menu_type"] not in {"M", "C"}
+                    or not node.get("route_name")
+                    or not node.get("route_path")
+                    or node.get("href")
+                    or (
+                        current != key
+                        and node.get("component") not in {"layout.base", "layout.blank"}
+                    )
                 ):
                     break
                 seen.add(current)
