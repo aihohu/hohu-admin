@@ -9,6 +9,7 @@ from app.core.field_policy import (
     Access,
     FieldRef,
     FieldUse,
+    Grant,
     RecordContext,
     compile_rules,
     query_counterexample,
@@ -17,6 +18,7 @@ from app.core.field_policy import (
 )
 from app.core.field_policy.contracts import denied
 from app.modules.auth.permission_collect import collect_user_buttons
+from app.modules.system.field_policy.generic_compat import convert_legacy_grants
 from app.modules.system.field_policy.ordinary_catalog import relation_catalog
 from app.modules.system.field_policy.relation_catalog import CREATE, EXACT, READ, UPDATE
 from app.modules.system.field_policy.write_plan import user_write_footprint
@@ -27,6 +29,7 @@ from app.modules.system.service.generic_field_policy_service import (
     failure,
     generic_field_policy_service,
 )
+from app.modules.system.service.user_field_active import active_policy_grants
 from app.modules.system.service.user_field_context import load_current_user
 from app.utils.data_scope import (
     get_user_filters_from_resolution,
@@ -110,28 +113,50 @@ async def load_relation_write_context(
                 ).where(UserFieldPolicyState.tenant_id == tenant.tenant_id)
             )
         ).one_or_none()
-        if (
-            state is None
-            or state.ever_enforced
-            or state.mode not in {"legacy", "ready"}
-        ):
+        if state is None or state.mode not in {
+            "legacy",
+            "ready",
+            "enforcing",
+            "frozen",
+        }:
             raise failure()
-        return None
+        # The old state governs users, not relation objects. Preserve their
+        # existing function/delegation protocols until a generic head exists.
+        # A leader lookup still has to authorize its user sources below.
+        if "system.user" not in objects or not state.ever_enforced:
+            return None
     actor = await load_current_user(
         db, tenant=tenant, actor_user_version=actor_user_version
     )
     roles = tuple(r for r in actor.roles if r.status == "1")
     catalog = relation_catalog()
     grants = ()
-    for obj in sorted(objects):
-        grants += await generic_field_policy_service.load_active(
+    if head is None:
+        legacy = await active_policy_grants(
             db,
             tx,
             tenant_id=tenant.tenant_id,
-            catalog=catalog,
-            object_id=obj,
             role_ids=tuple(str(r.role_id) for r in roles),
         )
+        if legacy is None:
+            return None
+        grants = convert_legacy_grants(tenant.tenant_id, legacy) + tuple(
+            Grant(tenant.tenant_id, str(r.role_id), ref, a)
+            for r in roles
+            for ref, field in catalog.fields.items()
+            if ref.object_id in objects - {"system.user"}
+            for a in field.accesses
+        )
+    else:
+        for obj in sorted(objects):
+            grants += await generic_field_policy_service.load_active(
+                db,
+                tx,
+                tenant_id=tenant.tenant_id,
+                catalog=catalog,
+                object_id=obj,
+                role_ids=tuple(str(r.role_id) for r in roles),
+            )
     permissions = frozenset(collect_user_buttons(actor))
     if any(r.role_code == "R_SUPER" for r in roles):
         permissions |= frozenset(

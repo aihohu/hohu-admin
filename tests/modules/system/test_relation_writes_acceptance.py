@@ -5,9 +5,11 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import event, insert
 
+from app.core.config import settings
 from app.core.exceptions import BusinessException
 from app.core.field_policy import FieldRef, Grant
 from app.db.base import user_roles
+from app.modules.system.field_policy.evaluator import FieldGrant
 from app.modules.system.field_policy.relation_catalog import READ
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.menu import Menu
@@ -19,6 +21,7 @@ from app.modules.system.schemas.user import UserPatch
 from app.modules.system.service.authorization_configuration_candidate import (
     configuration_authorization_candidate,
 )
+from tests.modules.system.test_active_transfer_delivery import enable
 from tests.modules.system.test_authorization_system_candidate import TENANT, epoch, run
 from tests.modules.system.test_authorization_system_http import (
     http_system as _http_system,
@@ -38,6 +41,50 @@ from tests.test_release_migration_roundtrip import apply_steps
 http_system = _http_system
 plan_sessions = _plan_sessions
 system_sessions = _system_sessions
+
+
+@pytest.mark.parametrize(
+    "leader,source_granted", [(None, False), ("planner", False), ("planner", True)]
+)
+async def test_old_user_policy_preserves_relation_protocol_and_checks_sources(
+    system_sessions, monkeypatch, leader, source_granted
+):
+    factory, plain = system_sessions
+    monkeypatch.setattr(settings, "USER_FIELD_POLICY_AVAILABLE", True)
+    rules = (
+        tuple(
+            FieldGrant("201", name, operation, purpose)
+            for name in ("user_name", "nickname")
+            for operation, purpose in (
+                ("read", "management.read"),
+                ("exact", "management.query"),
+            )
+        )
+        if source_granted
+        else ()
+    )
+    await enable(factory, TENANT, rules)
+    async with factory() as db:
+        if leader and not source_granted:
+            with pytest.raises(BusinessException) as error:
+                await run(
+                    db,
+                    "dept.create",
+                    DeptCreate(dept_name="legacy source", status="1", leader=leader),
+                )
+            assert error.value.error_code == "FIELD_POLICY_DENIED"
+            await db.rollback()
+        else:
+            created = await run(
+                db,
+                "dept.create",
+                DeptCreate(dept_name="legacy source", status="1", leader=leader),
+            )
+            await db.commit()
+            async with plain() as observer:
+                assert (await observer.get(Dept, created["id"])).leader_user_id == (
+                    101 if leader else None
+                )
 
 
 async def test_only_the_matched_leaders_source_read_scope_is_required(
