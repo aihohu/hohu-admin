@@ -195,7 +195,7 @@ def build_relation_catalog(base):
                 ActionSpec(
                     f"{name}.{operation}",
                     (obj.object_id, "system.user")
-                    if name == "dept" and operation != "list"
+                    if name == "dept"
                     else (obj.object_id,),
                     tuple(
                         FieldUse(FieldRef(obj.object_id, f.field_id), a)
@@ -207,9 +207,13 @@ def build_relation_catalog(base):
                         tuple(
                             FieldUse(FieldRef("system.user", f), a)
                             for f in ("user_name", "nickname")
-                            for a in (EXACT, READ)
+                            for a in (
+                                (EXACT, READ)
+                                if operation != "list"
+                                else (CONTAINS, READ)
+                            )
                         )
-                        if name == "dept" and operation != "list"
+                        if name == "dept"
                         else ()
                     ),
                     (f"system:{name}:{permission}",)
@@ -255,6 +259,48 @@ def build_relation_catalog(base):
             ActionSpec(action_id, object_ids, (), permissions, kind="special")
         )
     user = next(o for o in objects if o.object_id == "system.user")
+    for action_id, object_ids, permissions in (
+        ("role.assignable-read", ("system.role",), ("system:user:role-auth",)),
+        ("role.menus-read", ("system.role",), ("system:role:menu-auth",)),
+        ("role.agents-read", ("system.role",), ("system:role:ai-agent-auth",)),
+        ("role.management-read", ("system.role",), ("system:role:field-policy-view",)),
+        (
+            "user.list-read",
+            ("system.user", "system.role", "system.dept"),
+            ("system:user:list",),
+        ),
+        (
+            "user.members-read",
+            ("system.user", "system.dept", "system.role"),
+            ("system:user:list", "system:dept:list", "system:dept:edit"),
+        ),
+        ("user.own-read", ("system.user", "system.role"), ("auth:own-account:read",)),
+    ):
+        actions.append(
+            ActionSpec(
+                action_id,
+                object_ids,
+                tuple(
+                    FieldUse(FieldRef(obj.object_id, f.field_id), a)
+                    for obj in objects
+                    if obj.object_id in object_ids
+                    for f in obj.fields
+                    for a in f.accesses
+                    if (
+                        a.operation in {"read", "contains", "eq", "exact", "sort"}
+                        and a.purpose in {"management.read", "management.query"}
+                    )
+                    or (action_id == "user.own-read" and a.purpose == "own-account")
+                ),
+                permissions,
+                read_caps=tuple(
+                    (FieldRef("system.user", f), "masked")
+                    for f in ("user_phone", "user_email")
+                )
+                if action_id in {"user.list-read", "user.members-read"}
+                else (),
+            )
+        )
     for action, permissions in {
         "user.create": ("system:user:add",),
         "user.update": ("system:user:edit",),

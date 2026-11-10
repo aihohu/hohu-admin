@@ -109,18 +109,26 @@ async def snapshot(db, tx, tenant, catalog):
     return head, objects, bindings, g_epoch, b_epoch
 
 
-async def managed_role(db, tenant, role_id):
+async def managed_role(db, tenant, role_id, context=None):
     if type(role_id) is not int or not 0 < role_id < 2**63:
         raise forbidden()
+    if context is not None:
+        rows = await context.fetch(
+            db,
+            Role,
+            "role_id",
+            predicates=(Role.role_id == role_id,),
+            maximum=1,
+            names={"role_name", "role_code", "data_scope", "status"},
+        )
+        if not rows:
+            raise forbidden()
+        return rows[0][1]
     row = (
         (
             await db.execute(
                 select(
                     Role.role_id,
-                    Role.role_name,
-                    Role.role_code,
-                    Role.data_scope,
-                    Role.status,
                 ).where(Role.tenant_id == tenant.tenant_id, Role.role_id == role_id)
             )
         )
@@ -211,13 +219,33 @@ async def prepare_management(
     """Return a detached DTO or a command for the existing complete lock planner."""
     payload = parse_management(operation, payload)
     canonical(payload, 524288)
+    context = None
+    if operation in {"roles", "object", "preview", "publish"}:
+        from app.modules.system.service.relation_read_context import (  # noqa: PLC0415
+            load_relation_read_context,
+        )
+
+        try:
+            context = await load_relation_read_context(
+                db,
+                tx,
+                tenant=tenant,
+                actor_user_version=actor.auth_version,
+                action="role.management-read",
+                objects={"system.role"},
+            )
+        except BusinessException as exc:
+            if exc.error_code != "FIELD_POLICY_UNAVAILABLE":
+                raise
+            # Control-plane repair/controlled preparation may identify records
+            # with fixed anchors while their business titles are unavailable.
     if operation == "receipt":
         return wire(
             await policies.receipt(db, tenant=tenant, request_id=payload["request_id"])
         ), None
     role = None
     if operation in {"object", "preview", "publish"}:
-        role = await managed_role(db, tenant, role_id)
+        role = await managed_role(db, tenant, role_id, context)
         if (
             object_id not in catalog.objects
             or catalog.objects[object_id].domain_kind != "tenant"
@@ -278,15 +306,31 @@ async def prepare_management(
             }
         ), None
     if operation == "roles":
+        if context is not None:
+            entries = await context.fetch(
+                db,
+                Role,
+                "role_id",
+                predicates=(Role.role_id > int(payload["cursor"]),),
+                order=(Role.role_id,),
+                maximum=payload["limit"] + 1,
+                names={"role_name", "role_code", "data_scope", "status"},
+            )
+            more = len(entries) > payload["limit"]
+            return wire(
+                common
+                | {
+                    "records": [values for _, values, _ in entries[: payload["limit"]]],
+                    "next_cursor": entries[payload["limit"] - 1][0].record_key
+                    if more
+                    else None,
+                }
+            ), None
         rows = (
             (
                 await db.execute(
                     select(
                         Role.role_id,
-                        Role.role_name,
-                        Role.role_code,
-                        Role.data_scope,
-                        Role.status,
                     )
                     .where(
                         Role.tenant_id == tenant.tenant_id,

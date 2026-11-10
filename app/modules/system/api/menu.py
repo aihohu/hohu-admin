@@ -1,33 +1,29 @@
 from fastapi import APIRouter, Body, Depends
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants import MENU_TYPE_BUTTON
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.core.tenant import TenantContext
-from app.db.authorization_http import control_write
+from app.db.authorization_http import control_write, relation_read
 from app.db.session import get_db
 from app.modules.auth.service import get_current_tenant_context
-from app.modules.system.models.menu import Menu
 from app.modules.system.models.user import User
 from app.modules.system.schemas.menu import (
     MenuCreate,
-    MenuOut,
     MenuQuery,
-    MenuSimpleOut,
-    MenuTreeOptionOut,
-    MenuTreeOut,
     MenuUpdate,
 )
-from app.modules.system.service.menu_service import menu_service
+from app.modules.system.schemas.relation_projection import (
+    ProjectedMenuOut,
+    ProjectedTreeOptionOut,
+)
 
 router = APIRouter()
 
 
 @router.get(
     "/tree",
-    response_model=ResponseModel[list[MenuTreeOut]],
+    response_model=ResponseModel[list[ProjectedMenuOut]],
     summary="获取菜单树形列表",
     description="获取所有菜单的树形结构，用于前端菜单管理页面",
     responses={
@@ -38,163 +34,72 @@ router = APIRouter()
     dependencies=[Depends(require_permissions("system:menu:list"))],
 )
 async def get_menu_tree(
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """
-    获取菜单树形列表
-
-    Args:
-        db: 异步数据库会话
-
-    Returns:
-        ResponseModel: 包含菜单树形结构的数据
-
-    Note:
-        - 包含所有类型的菜单（目录、菜单、按钮）
-        - 自动构建树形结构供前端使用
-        - 用于菜单管理页面的展示和编辑
-    """
-    stmt = (
-        select(Menu)
-        .where(Menu.tenant_id == tenant.tenant_id)
-        .order_by(Menu.order.asc())
+    return ResponseModel.success(
+        data=await relation_read(db, current_user, operation="menu.tree", tenant=tenant)
     )
-    result = await db.execute(stmt)
-    menus = result.scalars().all()
-
-    # 递归组装树形结构
-    menu_map = {m.menu_id: MenuTreeOut.model_validate(m).model_dump() for m in menus}
-    tree = []
-    for _m_id, m_dict in menu_map.items():
-        p_id = int(m_dict["parent_id"]) if m_dict["parent_id"] else None
-        if p_id in menu_map:
-            if "children" not in menu_map[p_id]:
-                menu_map[p_id]["children"] = []
-            menu_map[p_id]["children"].append(m_dict)
-        else:
-            tree.append(m_dict)
-
-    return ResponseModel.success(data=tree)
 
 
 @router.get(
     "/tree-option",
-    response_model=ResponseModel[list[MenuTreeOptionOut]],
+    response_model=ResponseModel[list[ProjectedTreeOptionOut]],
     summary="获取菜单树形列表(前端option结构)",
 )
 async def get_menu_tree_option(
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """获取菜单树形列表（用于前端下拉选择）"""
-    stmt = (
-        select(Menu)
-        .where(Menu.tenant_id == tenant.tenant_id, Menu.status == "1")
-        .order_by(Menu.order.asc())
-    )
-    result = await db.execute(stmt)
-    menus = result.scalars().all()
-
-    # 递归组装树形结构
-    menu_map = {}
-    for m in menus:
-        menu_out = MenuTreeOptionOut(
-            id=m.menu_id,
-            label=m.menu_name,
-            i18n_key=m.i18n_key,
-            p_id=str(m.parent_id) if m.parent_id else "",
-            children=[],
+    return ResponseModel.success(
+        data=await relation_read(
+            db, current_user, operation="menu.options", tenant=tenant
         )
-        menu_map[m.menu_id] = menu_out
-
-    # 构建树形结构
-    tree = []
-    for _menu_id, menu_out in menu_map.items():
-        p_id = int(menu_out.p_id) if menu_out.p_id else None
-        if p_id in menu_map:
-            menu_map[p_id].children.append(menu_out)
-        else:
-            tree.append(menu_out)
-
-    return ResponseModel.success(data=tree)
+    )
 
 
 @router.get(
     "/tree-list",
-    response_model=ResponseModel[PageResult[MenuTreeOut]],
+    response_model=ResponseModel[PageResult[ProjectedMenuOut]],
     summary="获取菜单树形列表(带伪分页数据-适配前端)",
     dependencies=[Depends(require_permissions("system:menu:list"))],
 )
 async def get_menu_tree_list(
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """获取菜单树形列表（带伪分页数据）"""
-    stmt = (
-        select(Menu)
-        .where(Menu.tenant_id == tenant.tenant_id)
-        .order_by(Menu.order.asc())
+    return ResponseModel.success(
+        data=await relation_read(
+            db, current_user, operation="menu.tree-list", tenant=tenant
+        )
     )
-    result = await db.execute(stmt)
-    menus = result.scalars().all()
-
-    # 预处理：将所有数据转为字典，并初始化 children 和 buttons
-    menu_map = {}
-    for m in menus:
-        m_dict = MenuTreeOut.model_validate(m).model_dump()
-        m_dict["children"] = []
-        m_dict["buttons"] = []
-        menu_map[m.menu_id] = m_dict
-
-    tree = []
-
-    # 第二次遍历：组装树形结构
-    for m in menus:
-        m_id = m.menu_id
-        m_dict = menu_map[m_id]
-        p_id = int(m.parent_id) if m.parent_id else None
-
-        if p_id in menu_map:
-            # 如果当前节点是按钮 (menu_type == 'F')
-            if m.menu_type == MENU_TYPE_BUTTON:
-                # 将按钮信息放入父节点的 buttons 中
-                button_data = {
-                    "desc": m.menu_name,
-                    "code": m.permission,
-                }
-                menu_map[p_id]["buttons"].append(button_data)
-            else:
-                # 非按钮节点，放入父节点的 children 中
-                menu_map[p_id]["children"].append(m_dict)
-        else:
-            # 没有父节点且不是按钮的作为根节点（通常 F 类不会是根节点）
-            if m.menu_type != MENU_TYPE_BUTTON:
-                tree.append(m_dict)
-
-    page_data = PageResult(records=tree, total=len(tree), current=1, size=len(tree))
-    return ResponseModel.success(data=page_data)
 
 
 @router.get(
     "/list",
-    response_model=ResponseModel[PageResult[MenuOut]],
+    response_model=ResponseModel[PageResult[ProjectedMenuOut]],
     summary="获取菜单分页列表",
     dependencies=[Depends(require_permissions("system:menu:list"))],
 )
 async def list_menus(
     query: MenuQuery = Depends(),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """获取菜单分页列表"""
-    page_data = await menu_service.get_menu_list(db, query, tenant=tenant)
-    return ResponseModel.success(data=page_data)
+    return ResponseModel.success(
+        data=await relation_read(
+            db, current_user, operation="menu.list", tenant=tenant, query=query
+        )
+    )
 
 
 @router.get(
     "/all",
-    response_model=ResponseModel[list[MenuSimpleOut]],
+    response_model=ResponseModel[list[ProjectedMenuOut]],
     summary="获取全部菜单列表(不分页)",
 )
 async def get_all_menu(
@@ -202,9 +107,9 @@ async def get_all_menu(
     _current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """获取所有已启用的菜单列表"""
-    menus = await menu_service.get_all_menus(db, tenant=tenant)
-    return ResponseModel.success(data=menus)
+    return ResponseModel.success(
+        data=await relation_read(db, _current_user, operation="menu.all", tenant=tenant)
+    )
 
 
 @router.get(
@@ -217,9 +122,11 @@ async def get_all_pages(
     _current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """获取所有页面路由名称"""
-    pages = await menu_service.get_all_pages(db, tenant=tenant)
-    return ResponseModel.success(data=pages)
+    return ResponseModel.success(
+        data=await relation_read(
+            db, _current_user, operation="menu.pages", tenant=tenant
+        )
+    )
 
 
 @router.post(

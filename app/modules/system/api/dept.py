@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.core.tenant import TenantContext
-from app.db.authorization_http import system_write, user_read
+from app.db.authorization_http import relation_read, system_write, user_read
 from app.db.session import get_db
 from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.dept import Dept
@@ -12,16 +12,17 @@ from app.modules.system.models.user import User
 from app.modules.system.schemas.dept import (
     DeptCreate,
     DeptMove,
-    DeptOut,
     DeptQuery,
     DeptTreeOptionOut,
     DeptTreeOut,
     DeptUpdate,
     DeptUsersUpdate,
 )
+from app.modules.system.schemas.relation_projection import (
+    ProjectedDeptOut,
+    ProjectedTreeOptionOut,
+)
 from app.modules.system.schemas.user_projection import ProjectedUserOut, UserMemberQuery
-from app.modules.system.service.dept_selector import department_selector
-from app.utils.data_scope import resolve_data_scope
 from app.utils.pagination import build_filters
 
 router = APIRouter()
@@ -108,7 +109,7 @@ def _build_dept_options(depts: list[Dept]) -> list[DeptTreeOptionOut]:
 
 @router.get(
     "/tree",
-    response_model=ResponseModel[list[DeptTreeOut]],
+    response_model=ResponseModel[list[ProjectedDeptOut]],
     summary="获取部门树形结构",
     description="获取所有部门的树形结构，用于部门管理页面",
     dependencies=[Depends(require_permissions("system:dept:list"))],
@@ -119,19 +120,16 @@ async def get_dept_tree(
     current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """获取部门树形结构（支持筛选）"""
-    scope = await resolve_data_scope(db, current_user, tenant=tenant)
-    depts = await department_selector.rows(
-        db,
-        scope=scope,
-        filters=_dept_filters(query),
+    return ResponseModel.success(
+        data=await relation_read(
+            db, current_user, operation="dept.tree", tenant=tenant, query=query
+        )
     )
-    return ResponseModel.success(data=_build_dept_tree(depts))
 
 
 @router.get(
     "/tree-option",
-    response_model=ResponseModel[list[DeptTreeOptionOut]],
+    response_model=ResponseModel[list[ProjectedTreeOptionOut]],
     summary="获取部门下拉选项",
     description="获取启用状态的部门树形选项，用于下拉选择",
     dependencies=[Depends(require_permissions("system:dept:list"))],
@@ -141,19 +139,16 @@ async def get_dept_tree_option(
     current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """获取部门下拉选项（仅启用状态）"""
-    scope = await resolve_data_scope(db, current_user, tenant=tenant)
-    depts = await department_selector.rows(
-        db,
-        scope=scope,
-        filters=[Dept.status == "1"],
+    return ResponseModel.success(
+        data=await relation_read(
+            db, current_user, operation="dept.options", tenant=tenant
+        )
     )
-    return ResponseModel.success(data=_build_dept_options(depts))
 
 
 @router.get(
     "/tree-list",
-    response_model=ResponseModel[PageResult[DeptTreeOut]],
+    response_model=ResponseModel[PageResult[ProjectedDeptOut]],
     summary="获取部门树形列表(带伪分页)",
     description="获取部门树形结构，包装为 PageResult 适配前端",
     dependencies=[Depends(require_permissions("system:dept:list"))],
@@ -163,17 +158,16 @@ async def get_dept_tree_list(
     current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """获取部门树形列表（带伪分页）"""
-    scope = await resolve_data_scope(db, current_user, tenant=tenant)
-    depts = await department_selector.rows(db, scope=scope)
-    tree = _build_dept_tree(depts)
-    page_data = PageResult(records=tree, total=len(tree), current=1, size=len(tree))
-    return ResponseModel.success(data=page_data)
+    return ResponseModel.success(
+        data=await relation_read(
+            db, current_user, operation="dept.tree-list", tenant=tenant
+        )
+    )
 
 
 @router.get(
     "/list",
-    response_model=ResponseModel[PageResult[DeptOut]],
+    response_model=ResponseModel[PageResult[ProjectedDeptOut]],
     summary="获取部门分页列表",
     dependencies=[Depends(require_permissions("system:dept:list"))],
 )
@@ -183,21 +177,16 @@ async def get_dept_list(
     current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """获取部门分页列表"""
-    scope = await resolve_data_scope(db, current_user, tenant=tenant)
-    page_data = await department_selector.page(
-        db,
-        scope=scope,
-        current=query.current,
-        size=query.size,
-        filters=_dept_filters(query),
+    return ResponseModel.success(
+        data=await relation_read(
+            db, current_user, operation="dept.list", tenant=tenant, query=query
+        )
     )
-    return ResponseModel.success(data=page_data)
 
 
 @router.get(
     "/{dept_id}",
-    response_model=ResponseModel[DeptOut],
+    response_model=ResponseModel[ProjectedDeptOut],
     summary="获取部门详情",
     dependencies=[Depends(require_permissions("system:dept:list"))],
 )
@@ -207,10 +196,11 @@ async def get_dept_detail(
     current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """获取部门详情"""
-    scope = await resolve_data_scope(db, current_user, tenant=tenant)
-    dept = await department_selector.get_by_id(db, scope=scope, dept_id=dept_id)
-    return ResponseModel.success(data=dept)
+    return ResponseModel.success(
+        data=await relation_read(
+            db, current_user, operation="dept.detail", tenant=tenant, target_id=dept_id
+        )
+    )
 
 
 @router.post(

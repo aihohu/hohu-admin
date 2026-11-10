@@ -29,6 +29,7 @@ from app.db.authorization_policy_owner import UserFieldPolicyOwner
 from app.db.authorization_preview_owner import PreviewOwner
 from app.db.authorization_read_confirmation_owner import ReadConfirmationOwner
 from app.db.authorization_reconciliation_owner import ReconciliationOwner
+from app.db.authorization_relation_read_owner import relation_read_owner
 from app.db.authorization_seed_owner import seed_candidate_owner
 from app.db.authorization_system_owner import system_candidate_owner
 from app.db.authorization_trace_owner import TraceOwner
@@ -98,6 +99,10 @@ class AuthorizationRuntime:
     async def field_management(self, **request):
         async with authorization_session(self.sessions) as db:
             return await FieldManagementOwner().execute(db, **request)
+
+    async def relation_read(self, **request):
+        async with authorization_session(self.sessions) as db:
+            return await relation_read_owner.execute(db, **request)
 
     async def import_users(self, **request):
         async with self.sessions() as db:

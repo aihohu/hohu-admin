@@ -4,26 +4,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import PageResult, ResponseModel
 from app.core.tenant import TenantContext
-from app.db.authorization_http import system_write
+from app.db.authorization_http import relation_read, system_write
 from app.db.session import get_db
 from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.user import User
+from app.modules.system.schemas.relation_projection import ProjectedRoleOut
 from app.modules.system.schemas.role import (
     RoleCreate,
-    RoleOut,
     RoleQuery,
-    RoleSummaryOut,
     RoleUpdate,
 )
-from app.modules.system.service.role_management_service import role_management_service
-from app.modules.system.service.role_service import role_service
 
 router = APIRouter()
 
 
 @router.get(
     "/list",
-    response_model=ResponseModel[PageResult[RoleSummaryOut]],
+    response_model=ResponseModel[PageResult[ProjectedRoleOut]],
     summary="获取角色列表分页",
     description="根据查询条件获取角色分页列表，支持按角色名称、角色编码、数据权限和状态筛选",
     responses={
@@ -39,48 +36,16 @@ async def list_roles(
     _current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """
-    获取角色分页列表
-
-    Args:
-        query: 查询参数，包含分页信息和筛选条件
-        db: 异步数据库会话
-        _current_user: 当前登录用户对象（用于权限验证）
-
-    Returns:
-        ResponseModel: 包含角色分页列表的数据
-
-    Query Parameters:
-        - current: 当前页码（默认1）
-        - size: 每页数量（默认10，最大100）
-        - role_name: 角色名称（支持模糊查询）
-        - role_code: 角色编码（支持模糊查询）
-        - data_scope: 数据权限范围（1-全部，2-自定义，3-本部门，4-本部门及以下，5-仅本人）
-        - status: 角色状态（1-启用，2-禁用）
-    """
-    summaries, total, _contributors = await role_management_service.summarize_roles(
-        db,
-        actor_user_id=_current_user.user_id,
-        tenant=tenant,
-        role_name=query.role_name,
-        role_code=query.role_code,
-        data_scope=query.data_scope,
-        status=query.status,
-        limit=query.size,
-        offset=(query.current - 1) * query.size,
+    return ResponseModel.success(
+        data=await relation_read(
+            db, _current_user, operation="role.list", tenant=tenant, query=query
+        )
     )
-    page_data = PageResult[RoleSummaryOut](
-        records=[RoleSummaryOut.model_validate(value) for value in summaries],
-        total=total,
-        current=query.current,
-        size=query.size,
-    )
-    return ResponseModel.success(data=page_data)
 
 
 @router.get(
     "/all",
-    response_model=ResponseModel[list[RoleSummaryOut]],
+    response_model=ResponseModel[list[ProjectedRoleOut]],
     summary="获取全部角色列表(不分页)",
     description="获取系统中所有已启用的角色列表，不分页，用于下拉选择等场景",
     responses={
@@ -95,30 +60,8 @@ async def get_all_roles(
     _current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """
-    获取所有已启用的角色列表
-
-    Args:
-        db: 异步数据库会话
-        _current_user: 当前登录用户对象（用于权限验证）
-
-    Returns:
-        ResponseModel: 包含所有已启用角色的列表
-
-    Note:
-        - 仅返回状态为启用的角色
-        - 不分页，返回所有符合条件的角色
-        - 适合用于前端下拉选择框
-    """
-    roles, _total, _contributors = await role_management_service.summarize_roles(
-        db,
-        actor_user_id=_current_user.user_id,
-        tenant=tenant,
-        status="1",
-        limit=10_000,
-    )
     return ResponseModel.success(
-        data=[RoleSummaryOut.model_validate(value) for value in roles]
+        data=await relation_read(db, _current_user, operation="role.all", tenant=tenant)
     )
 
 
@@ -134,15 +77,11 @@ async def get_menus(
     _current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """获取角色的菜单ID列表"""
-    await role_management_service.authorize_role_projection(
-        db,
-        actor_user_id=_current_user.user_id,
-        role_id=role_id,
-        tenant=tenant,
+    return ResponseModel.success(
+        data=await relation_read(
+            db, _current_user, operation="role.menus", tenant=tenant, target_id=role_id
+        )
     )
-    menu_ids = await role_service.get_role_menus(db, role_id, tenant=tenant)
-    return ResponseModel.success(data=menu_ids)
 
 
 @router.post(
@@ -293,7 +232,7 @@ async def batch_delete_roles(
 
 @router.get(
     "/{role_id}",
-    response_model=ResponseModel[RoleOut],
+    response_model=ResponseModel[ProjectedRoleOut],
     summary="获取角色详情",
     dependencies=[Depends(require_permissions("system:role:list"))],
 )
@@ -303,11 +242,8 @@ async def get_role_detail(
     current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """获取角色详情"""
-    role = await role_management_service.authorize_role_projection(
-        db,
-        actor_user_id=current_user.user_id,
-        role_id=role_id,
-        tenant=tenant,
+    return ResponseModel.success(
+        data=await relation_read(
+            db, current_user, operation="role.detail", tenant=tenant, target_id=role_id
+        )
     )
-    return ResponseModel.success(data=role)

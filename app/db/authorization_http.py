@@ -131,6 +131,22 @@ async def user_read(db, actor, *, operation, query=None, tenant=None):
     )
 
 
+async def relation_read(
+    db, actor, *, operation, query=None, target_id=None, tenant=None
+):
+    identity = access_identity(actor)
+    if tenant is not None and identity.tenant != tenant:
+        raise _order_error()
+    await release_request_reads(db)
+    return await get_authorization_runtime().relation_read(
+        tenant=identity.tenant,
+        actor_user_version=identity.user_version,
+        operation=operation,
+        query=query,
+        target_id=target_id,
+    )
+
+
 async def business_write(db, actor, *, operation, tenant, payload=None, ids=()):
     identity = access_identity(actor)
     if identity.tenant != tenant:

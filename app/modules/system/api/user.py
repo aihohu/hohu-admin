@@ -11,7 +11,7 @@ from app.core.exceptions import (
     UnprocessableEntityException,
 )
 from app.core.tenant import TenantContext
-from app.db.authorization_http import system_write, user_read
+from app.db.authorization_http import relation_read, system_write, user_read
 from app.db.authorization_transfer_http import transfer_read_http
 from app.db.session import get_db
 from app.modules.auth.service import (
@@ -40,9 +40,6 @@ from app.modules.system.schemas.user_transfer import (
     UserImportBatchLogItem,
     UserImportBatchQuery,
     UserImportBatchResponse,
-)
-from app.modules.system.service.user_role_assignment_service import (
-    user_role_assignment_service,
 )
 
 router = APIRouter()
@@ -131,15 +128,14 @@ async def get_assignable_roles(
     current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    roles = await user_role_assignment_service.list_assignable_roles(
-        db,
-        actor_user_id=current_user.user_id,
-        query=query,
-        limit=limit,
-        tenant=tenant,
-    )
     return ResponseModel.success(
-        data=[AssignableRoleOut.model_validate(role) for role in roles]
+        data=await relation_read(
+            db,
+            current_user,
+            operation="role.assignable",
+            tenant=tenant,
+            query={"query": query, "limit": limit},
+        )
     )
 
 

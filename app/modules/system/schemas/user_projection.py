@@ -43,8 +43,8 @@ class ProjectedUserOut(BaseModel):
     user_avatar: str | None = None
     status: str | None = None
     create_time: str | None = None
-    roles: list[str] | None = None
-    role_names: list[str] | None = None
+    roles: list[str | None] | None = None
+    role_names: list[str | None] | None = None
     role_name_keys: list[str | None] | None = None
     dept_ids: list[str] | None = None
     dept_names: str | None = None
