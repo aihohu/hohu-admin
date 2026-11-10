@@ -1052,6 +1052,15 @@ _COMPLETION_ENTRIES = (
         "none",
     ),
     (
+        "app.db.authorization_business_owner.BusinessOwner",
+        ("read",),
+        "owner",
+        "S",
+        ("S",),
+        "auth-read",
+        "none",
+    ),
+    (
         _S + "authorization_business_candidate.BusinessCandidate",
         ("discover",),
         "read",
@@ -1809,7 +1818,12 @@ _COMPLETION_ENTRIES = (
     ),
     (
         _TX,
-        ("delete_context_fact", "delete_job_fact", "delete_business_fact"),
+        (
+            "delete_context_fact",
+            "delete_job_fact",
+            "delete_business_fact",
+            "rename_dictionary_type",
+        ),
         "proof_writer",
         "S",
         ("X",),

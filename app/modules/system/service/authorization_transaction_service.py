@@ -1809,6 +1809,12 @@ class _Transaction(GenericPolicyTransaction):
             )
             if row is None:
                 raise _stale()
+            if (
+                key.kind is ResourceKind.DICT_TYPE
+                and changes.get("dict_type", row["dict_type"]) != row["dict_type"]
+            ):
+                # FK cascade is legal only after proving the complete child set.
+                raise _order_error()
             if key.kind is ResourceKind.JOB_LOG:
                 self._require_mutation_parents(key, row)
             await self._business_parents(key, row)
@@ -1838,6 +1844,66 @@ class _Transaction(GenericPolicyTransaction):
             if result is None or tuple(result) != key_values(key):
                 raise _stale()
             return True
+        except BaseException:
+            self._journal.fail()
+            raise
+
+    async def rename_dictionary_type(self, key, changes, *, expected, children):
+        """Prove every cascaded dictionary row before the one parent-key update."""
+        try:
+            self.assert_held(key)
+            self._require_exclusive_tenant(key.tenant_id)
+            if (
+                key.kind is not ResourceKind.DICT_TYPE
+                or type(children) is not tuple
+                or not set(changes) <= FACT_COLUMNS[key.kind]
+            ):
+                raise _order_error()
+            spec, predicates, current = await self._mutation_snapshot(
+                key, changes, expected
+            )
+            child = resource_spec(ResourceKind.DICT_DATA).table
+            found = tuple(
+                dict(row)
+                for row in (
+                    await self._execute(
+                        select(child)
+                        .where(
+                            child.c.tenant_id == key.tenant_id,
+                            child.c.dict_type == current["dict_type"],
+                        )
+                        .order_by(child.c.dict_code)
+                        .limit(10001)
+                    )
+                ).mappings()
+            )
+            if len(found) > 10000 or found != children:
+                raise _stale()
+            for row in found:
+                self.assert_held(
+                    ResourceKey(ResourceKind.DICT_DATA, key.tenant_id, row["dict_code"])
+                )
+            if type(changes.get("dict_type")) is not str:
+                raise _order_error()
+            await self._timeouts()
+            await self._execute(update(spec.table).where(*predicates).values(**changes))
+            actual = tuple(
+                dict(row)
+                for row in (
+                    await self._execute(
+                        select(child)
+                        .where(
+                            child.c.tenant_id == key.tenant_id,
+                            child.c.dict_code.in_(tuple(r["dict_code"] for r in found)),
+                        )
+                        .order_by(child.c.dict_code)
+                    )
+                ).mappings()
+            )
+            if actual != tuple(
+                row | {"dict_type": changes["dict_type"]} for row in found
+            ):
+                raise _stale()
         except BaseException:
             self._journal.fail()
             raise

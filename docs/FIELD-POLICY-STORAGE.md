@@ -1,6 +1,6 @@
 # 通用字段策略存储与准备入口
 
-本文描述 Backend 0.2.0 开发版本的内部持久化契约。目录与规则语义见[通用字段内核](FIELD-POLICY-CORE.md)。存储、管理API和[真实Web候选页面](FIELD-POLICY-MANAGEMENT.md)已经提供；全系统业务对象与发布资格仍须接入和验收。当前准备目录只包含兼容对象 `system.user`，不能据此宣称全系统字段权限已生效。
+本文描述 Backend 0.2.0 开发版本的内部持久化契约。目录与规则语义见[通用字段内核](FIELD-POLICY-CORE.md)。存储、管理API和[真实Web候选页面](FIELD-POLICY-MANAGEMENT.md)已经提供；全系统业务对象与发布资格仍须接入和验收。当前目录包含兼容对象 `system.user` 及普通对象 `system.dict_type`、`system.dict_data`、`system.data_scope_demo`。普通对象查询和事实写入已接入，生产激活仍需完整对象与交付资格，不能据此宣称全系统字段权限已生效。
 
 ## 事实与生效边界
 
@@ -45,6 +45,8 @@ publish/archive 回执返回 `revisionId`，请求事实以完整 tenant/role/ob
 原catalog/command要求已有JWT Bearer；finish也接受新准备会话。新管理API与Web通过 `POST /policy-prepare/login` 获取仅本进程有效的随机短期凭据，另有logout入口，详见[身份交接与构建协议](FIELD-POLICY-MANAGEMENT.md)。控制器串行处理命令，每次核验直接进程或 Compose 实例身份、停写记录、禁止新连接及数据库在途事务；结束后排队请求也不能重新进入。Ctrl+C、进程退出码或前端隐藏都不能代替证据。直接启动与 Compose 共用该协议，不引入新的部署平台。
 
 迁移在当前维护 permit 内锁定原 G 和有序 B，单事务转换旧规则，保留旧 revision/audit、原 actor/时间、来源摘要及映射批次。自动生成的迁移 manifest 标记为 `creation_kind=migration`，不伪造 actor。旧 enforcing/frozen 的对象状态和 ever/active 历史保留，整体 head 仍为 preparing。相同迁移只允许对全部源/目标事实作精确只读核对；编辑后或摘要漂移时拒绝重放。
+
+旧 user-only 准备目录通过受控停写入口原子扩展：保留不可变旧目录、修订、manifest 和请求回执，以当前绑定的最新规则创建新目录修订；新对象不自动授权。head、对象版本、绑定版本和 B epoch 推进，旧候选和 ready 水位清除，旧 CAS/预览失效。相同新目录再次准备只核验、不重复推进。已激活或冻结的通用 head 不允许使用此准备扩展路径。
 
 出现 generic head 后，旧用户策略 owner、旧业务字段路径以及旧策略表写者均在服务端拒绝，错误为 `FIELD_POLICY_CLIENT_UPGRADE_REQUIRED`（数据库直接写入由约束拒绝）。不能回退到旧 binding 继续运行。
 

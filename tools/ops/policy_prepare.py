@@ -23,7 +23,6 @@ from app.core.authorization_maintenance import (
     acquire_maintenance_fence,
 )
 from app.core.exceptions import BusinessException
-from app.core.field_policy import Catalog
 from app.core.field_policy.documents import catalog_parts, read_json
 from app.core.field_policy.maintenance import (
     require_normal_resume,  # noqa: F401 - shared protocol export
@@ -35,12 +34,12 @@ from app.modules.system.api.field_management import (
     bounded_body,
     create_management_router,
 )
-from app.modules.system.field_policy.generic_compat import user_compat_object
-from app.modules.system.service.generic_field_policy_migration import migrate_legacy
+from app.modules.system.field_policy.ordinary_catalog import production_catalog
 from app.modules.system.service.generic_field_policy_service import (
     command_bytes,
     request_identity,
 )
+from app.modules.system.service.ordinary_catalog_upgrade import prepare_catalog
 from tools.ops.policy_preparation_identity import (
     PreparationSessions,
     credential_identity,
@@ -250,7 +249,7 @@ class PolicyPreparation:
 
     async def _execute_locked(self, token, command):
         self._require_open()
-        # Preparation catalog only contains the compatibility object. It cannot qualify full rollout.
+        # Preparation of ordinary objects cannot qualify full-system rollout.
         if command.get("action") in {"ready", "activate"}:
             raise BusinessException(
                 409,
@@ -422,7 +421,7 @@ async def serve(
             "Preparation Web directory and exact commit are required together"
         )
     assets = PreparationAssets(web_directory, web_commit) if web_directory else None
-    catalog = Catalog((user_compat_object(),), ())
+    catalog = production_catalog()
     sessions = async_sessionmaker(guard.runtime_engine, expire_on_commit=False)
     await _evidence(guard, processes, bootstrap)
     await require_preparation_administrators(sessions)
@@ -458,11 +457,9 @@ async def serve(
             async with asyncio.timeout(25):
                 await db.execute(text("SET LOCAL lock_timeout = '2s'"))
                 await db.execute(text("SET LOCAL statement_timeout = '5s'"))
-                result = await migrate_legacy(
+                result = await prepare_catalog(
                     db,
                     fence=permit,
-                    catalog=catalog,
-                    catalog_revision="system-fields/2-prepare",
                     source_build=guard.manifest.build_sha,
                 )
                 await db.commit()

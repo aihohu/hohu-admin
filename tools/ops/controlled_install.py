@@ -19,7 +19,7 @@ from alembic import command
 from app.utils.validators import validate_password
 from tools.ops import authorization_maintenance as ops
 
-REVISION = "e020f1200001"
+REVISION = "e020f2a00001"
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -68,7 +68,12 @@ async def migrate(guard, bootstrap):
                         connection
                     ).get_current_heads()
                 )
-                if heads not in {("d01010100101",), ("e0204a000001",), (REVISION,)}:
+                if heads not in {
+                    ("d01010100101",),
+                    ("e0204a000001",),
+                    ("e020f1200001",),
+                    (REVISION,),
+                }:
                     raise ops._required()
             # Parameterized role selection preserves application table ownership.
             await db.execute(

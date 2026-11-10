@@ -5,12 +5,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.base_response import ResponseModel
 from app.core.exceptions import BusinessException
-from app.core.field_policy import Catalog
 from app.core.field_policy.documents import read_json
 from app.db.authorization_http import get_authorization_runtime, release_request_reads
 from app.db.session import get_db
 from app.modules.auth.service import access_identity, get_current_user
-from app.modules.system.field_policy.generic_compat import user_compat_object
+from app.modules.system.field_policy.ordinary_catalog import production_catalog
 from app.modules.system.models.user import User
 from app.modules.system.schemas.field_management import (
     Build,
@@ -69,7 +68,7 @@ async def regular_context(
         return await get_authorization_runtime().field_management(
             tenant=identity.tenant,
             actor_user_version=identity.user_version,
-            catalog=Catalog((user_compat_object(),), ()),
+            catalog=production_catalog(),
             operation=operation,
             payload=payload,
             **target,
