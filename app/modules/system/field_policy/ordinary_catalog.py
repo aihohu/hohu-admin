@@ -12,6 +12,7 @@ from app.core.field_policy import (
     ObjectSpec,
 )
 from app.modules.system.field_policy.generic_compat import user_compat_object
+from app.modules.system.field_policy.relation_catalog import build_relation_catalog
 
 READ = Access("read", "management.read")
 CREATE = Access("create", "management.create")
@@ -142,3 +143,9 @@ def production_catalog():
                 )
             )
     return Catalog(objects, tuple(actions))
+
+
+@lru_cache(maxsize=1)
+def relation_catalog():
+    """Explicit candidate only; production preparation still uses four objects."""
+    return build_relation_catalog(production_catalog())

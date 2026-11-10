@@ -56,6 +56,10 @@ publish/archive 回执返回 `revisionId`，请求事实以完整 tenant/role/ob
 
 ## 预算与错误
 
+内部 `load_active` 在同一真实授权事务内共享已完整验证的不可变目录/manifest 事实，按租户、目录和 active manifest 身份隔离；每个事务只保留最近一份，切换租户后再次访问旧租户会重新验证。返回规则仍按每次请求的对象与角色筛选。每次加载重新读取 head 和对象状态，冻结、目录漂移或对象摘要不一致即拒绝。候选发布不改变 active 规则；事务结束后旧证明不能复用。缓存不包含身份、角色范围、功能权限或求值结果。
+
+读取预算可显式设置 `max_statements` 限制 SQLAlchemy SELECT 次数，超限在下一条查询发送前拒绝；嵌套预算仍累计外层计数。默认不新增语句数限制。该计数不等于全部数据库往返，不含连接、事务控制及非 SELECT 语句；行数、解码字节和事务期限仍独立生效。
+
 目录规范编码限 1 MiB，单规则组限 256 KiB，旧用户原文先按 256 条/64 KiB 验证再转换；JSONB 物理大小另有保守上限。在线管理保护期 15 秒（读 8 秒）、锁 2 秒、statement 5 秒，累计读取最多 100000 行/128 MiB。迁移保护期 25 秒，permit 30 秒，最多 1024 租户；源记录分 16 条读取，累计 100000 行/128 MiB。超限整笔失败，不分批提交或开放部分结果。
 
 输入不合法为 `FIELD_POLICY_INVALID`；身份/管理权限不足为 `FIELD_POLICY_MANAGEMENT_FORBIDDEN`；CAS 冲突为 `FIELD_POLICY_VERSION_CONFLICT`；未获资格为 `FIELD_POLICY_ACTIVATION_BLOCKED`；状态缺失或摘要漂移为 `FIELD_POLICY_UNAVAILABLE`；预算超限为 `AUTHORIZATION_PLAN_LIMIT_EXCEEDED`。所有成功响应保持 `{code: 200, msg, data}`，不返回业务字段值或秘密。

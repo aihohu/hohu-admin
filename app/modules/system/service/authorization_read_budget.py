@@ -50,10 +50,17 @@ class AuthorizationReadBudget:
     rows: int = 0
     decoded_bytes: int = 0
     statements: int = 0
+    max_statements: int | None = None
 
     def observe(self, state):
         if not isinstance(state.statement, Select):
             return state.invoke_statement()
+        if self.max_statements is not None and (
+            type(self.max_statements) is not int
+            or self.max_statements < 0
+            or self.statements >= self.max_statements
+        ):
+            raise _limit()
         remaining = self.max_rows - self.rows
         if remaining < 0:
             raise _limit()

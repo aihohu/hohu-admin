@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
+from weakref import WeakKeyDictionary
 
 from sqlalchemy import select, tuple_
 
@@ -140,6 +141,11 @@ class GenericPolicyPlan:
 
 
 class GenericFieldPolicyService:
+    def __init__(self):
+        # Keys are live authorization transactions, never sessions or actor IDs.
+        # Values contain no ORM rows, transaction references or mutable admission.
+        self._active_facts = WeakKeyDictionary()
+
     async def load_active(self, db, tx, *, tenant_id, catalog, object_id, role_ids):
         """Explicit caller catalog and role set; unknown/preparing/frozen never fall back."""
         tx.assert_session(db)
@@ -147,10 +153,10 @@ class GenericFieldPolicyService:
         require(type(role_ids) is tuple and len(role_ids) <= 4096)
         for role_id in role_ids:
             identity(role_id)
+        selected_roles = frozenset(role_ids)
         with bounded_authorization_reads(
             db, AuthorizationReadBudget(max_bytes=128 * 1024 * 1024)
         ):
-            await self._catalog(db, catalog)
             head = await self._head(db, tenant_id)
             objects = await self._objects(db, tenant_id, catalog)
             state = next((r for r in objects if r["object_id"] == object_id), None)
@@ -162,27 +168,47 @@ class GenericFieldPolicyService:
                 or state["mode"] != "enforcing"
             ):
                 raise failure()
-            _, items, grants = await read_manifest(
-                db,
-                tenant_id=tenant_id,
-                manifest_id=head["active_manifest_id"],
-                expected_digest=head["active_manifest_digest"],
-                catalog=catalog,
+            cache_key = (
+                tenant_id,
+                catalog.digest,
+                head["active_manifest_id"],
+                head["active_manifest_digest"],
             )
-            expected = digest(
-                {
-                    "catalog": catalog.digest,
-                    "object": object_id,
-                    "items": [item for item in items if item["object_id"] == object_id],
-                },
-                4 * 1024 * 1024,
-            )
+            cached = self._active_facts.get(tx)
+            if cached is None or cached[0] != cache_key:
+                await self._catalog(db, catalog)
+                _, items, grants = await read_manifest(
+                    db,
+                    tenant_id=tenant_id,
+                    manifest_id=head["active_manifest_id"],
+                    expected_digest=head["active_manifest_digest"],
+                    catalog=catalog,
+                )
+                object_digests = tuple(
+                    (
+                        name,
+                        digest(
+                            {
+                                "catalog": catalog.digest,
+                                "object": name,
+                                "items": [i for i in items if i["object_id"] == name],
+                            },
+                            4 * 1024 * 1024,
+                        ),
+                    )
+                    for name in catalog.objects
+                )
+                cached = (cache_key, tuple(grants), object_digests)
+                # Keep only the latest tenant/manifest to bound retained payloads.
+                self._active_facts[tx] = cached
+            _, grants, object_digests = cached
+            expected = dict(object_digests)[object_id]
             if state["active_object_digest"] != expected:
                 raise failure()
             return tuple(
                 g
                 for g in grants
-                if g.role_id in role_ids and g.ref.object_id == object_id
+                if g.role_id in selected_roles and g.ref.object_id == object_id
             )
 
     async def _head(self, db, tenant_id):
