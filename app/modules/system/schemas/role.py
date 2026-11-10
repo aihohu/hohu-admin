@@ -33,7 +33,9 @@ VALID_DATA_SCOPES = [
 class RoleBase(BaseModel):
     """角色基础字段"""
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid"
+    )
 
     role_name: str = Field(..., min_length=2, max_length=50, description="角色名称")
     role_code: str = Field(

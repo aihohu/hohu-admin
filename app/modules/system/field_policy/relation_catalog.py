@@ -104,7 +104,16 @@ def build_relation_catalog(base):
             field("order_num", "integer", ordinary=True, queries=(SORT,)),
             field("phone", ordinary=True, nullable=True, mask="phone/v1"),
             field("email", ordinary=True, nullable=True, mask="email/v1"),
-            field("leader", ordinary=True, nullable=True, queries=(CONTAINS,)),
+            field(
+                "leader",
+                ordinary=True,
+                nullable=True,
+                queries=(CONTAINS,),
+                sources=(
+                    FieldRef("system.user", "user_name"),
+                    FieldRef("system.user", "nickname"),
+                ),
+            ),
             field("status", ordinary=True, queries=(EQ,)),
             field("parent_id", "id", nullable=True),
             field("ancestors", nullable=True),
@@ -185,12 +194,23 @@ def build_relation_catalog(base):
             actions.append(
                 ActionSpec(
                     f"{name}.{operation}",
-                    (obj.object_id,),
+                    (obj.object_id, "system.user")
+                    if name == "dept" and operation != "list"
+                    else (obj.object_id,),
                     tuple(
                         FieldUse(FieldRef(obj.object_id, f.field_id), a)
                         for f in obj.fields
                         for a in f.accesses
                         if a in accesses
+                    )
+                    + (
+                        tuple(
+                            FieldUse(FieldRef("system.user", f), a)
+                            for f in ("user_name", "nickname")
+                            for a in (EXACT, READ)
+                        )
+                        if name == "dept" and operation != "list"
+                        else ()
                     ),
                     (f"system:{name}:{permission}",)
                     + (
@@ -222,6 +242,7 @@ def build_relation_catalog(base):
     for action_id, object_ids, permissions in (
         ("role.definition", ("system.role", "system.dept"), ("system:role:edit",)),
         ("role.menus", ("system.role", "system.menu"), ("system:role:menu-auth",)),
+        ("role.agents", ("system.role",), ("system:role:ai-agent-auth",)),
         ("dept.move", ("system.dept",), ("system:dept:move", "system:dept:list")),
         (
             "dept.members",
@@ -232,6 +253,44 @@ def build_relation_catalog(base):
     ):
         actions.append(
             ActionSpec(action_id, object_ids, (), permissions, kind="special")
+        )
+    user = next(o for o in objects if o.object_id == "system.user")
+    for action, permissions in {
+        "user.create": ("system:user:add",),
+        "user.update": ("system:user:edit",),
+        "user.password": ("system:user:reset-password",),
+        "user.roles": ("system:user:edit", "system:user:role-auth"),
+        "user.departments": ("system:user:edit", "system:dept:list"),
+        "dept.members-write": (
+            "system:dept:list",
+            "system:dept:edit",
+            "system:user:edit",
+        ),
+    }.items():
+        accesses = {
+            "user.create": {CREATE, Access("replace", "management.relations")},
+            "user.update": {UPDATE},
+            "user.password": {UPDATE},
+        }.get(action, {Access("replace", "management.relations")})
+        restricted = {
+            "user.password": {"password"},
+            "user.roles": {"roles"},
+            "user.departments": {"departments"},
+            "dept.members-write": {"departments"},
+        }.get(action)
+        actions.append(
+            ActionSpec(
+                action,
+                ("system.user",),
+                tuple(
+                    FieldUse(FieldRef(user.object_id, f.field_id), a)
+                    for f in user.fields
+                    for a in f.accesses
+                    if a in accesses
+                    and (restricted is None or f.field_id in restricted)
+                ),
+                permissions,
+            )
         )
     return Catalog(objects, tuple(actions))
 

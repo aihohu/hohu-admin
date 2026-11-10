@@ -209,6 +209,8 @@ def freeze_input(operation, payload, target_id):
         if buttons is not None:
             if len(buttons) > 128:
                 raise limit()
+            if len({b["code"] for b in buttons}) != len(buttons):
+                raise invalid("MENU_BUTTON_DUPLICATE")
             for button in buttons:
                 columns_fit(
                     Menu.__table__,

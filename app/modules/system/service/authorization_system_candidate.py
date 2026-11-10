@@ -47,6 +47,7 @@ from app.modules.system.schemas.user import (
     UserUpdate,
 )
 from app.modules.system.service.authorization_read_budget import (
+    AuthorizationReadBudget,
     bounded_authorization_reads,
 )
 from app.modules.system.service.authorization_resource_catalog import (
@@ -59,6 +60,14 @@ from app.modules.system.service.dept_service import dept_service
 from app.modules.system.service.grant_authority import grant_authority_service
 from app.modules.system.service.planned_user_field_policy_service import (
     assert_role_history_deletable,
+)
+from app.modules.system.service.relation_authorization_safety import (
+    require_manager_preserved,
+    system_after,
+)
+from app.modules.system.service.relation_field_write_guard import (
+    validate_leader_source,
+    validate_relation_system_fields,
 )
 from app.modules.system.service.role_management_service import role_management_service
 from app.modules.system.service.user_department_assignment_service import (
@@ -209,6 +218,7 @@ class _SystemWork:
     facts: dict
     prepared: dict
     authority: object
+    read_budget: object
     used: bool = False
 
 
@@ -385,6 +395,13 @@ class SystemAuthorizationCandidate:
         )
 
     async def plan(self, db, tx, command):
+        budget = AuthorizationReadBudget(max_statements=8192)
+        with bounded_authorization_reads(db, budget):
+            work = await self._plan(db, tx, command)
+        work.read_budget = budget
+        return work
+
+    async def _plan(self, db, tx, command):
         tx.assert_session(db)
         if type(command) is not _SystemInput:
             raise _order_error()
@@ -402,6 +419,16 @@ class SystemAuthorizationCandidate:
         tx.assert_planning(tenant.tenant_id, exclusive=True)
         await self._identity(db, tenant, actor_user_version)
         facts = await self._facts(db, tenant.tenant_id)
+        if operation in {"user.delete", "user.batch_delete"}:
+            deleted_ids = _ids(
+                payload if operation.endswith("batch_delete") else [target_id]
+            )
+            if any(
+                r.get("leader_user_id") in deleted_ids for r in facts[ResourceKind.DEPT]
+            ):
+                raise BusinessRuleException(
+                    "用户仍被部门负责人引用", error_code="USER_DELETE_REFERENCED"
+                )
         authority = await grant_authority_service.build(
             db, tenant.actor_user_id, tenant=tenant
         )
@@ -410,7 +437,7 @@ class SystemAuthorizationCandidate:
             raise AuthorizationException(
                 "缺少操作权限", error_code="MISSING_PERMISSION"
             )
-        await validate_system_fields(
+        generic = await validate_relation_system_fields(
             db,
             tx,
             tenant=tenant,
@@ -418,8 +445,20 @@ class SystemAuthorizationCandidate:
             operation=operation,
             payload=payload,
             target_id=target_id,
+            new_id=new_id,
             facts=facts,
         )
+        if generic is None:
+            await validate_system_fields(
+                db,
+                tx,
+                tenant=tenant,
+                actor_user_version=actor_user_version,
+                operation=operation,
+                payload=payload,
+                target_id=target_id,
+                facts=facts,
+            )
         prepared = await self._prepare(
             db,
             tenant,
@@ -430,6 +469,10 @@ class SystemAuthorizationCandidate:
             facts,
             authority,
             expected_snapshot,
+        )
+        validate_leader_source(generic, operation, prepared)
+        require_manager_preserved(
+            facts, system_after(facts, operation, payload, target_id, new_id, prepared)
         )
         existing = tuple(
             _key(
@@ -460,9 +503,16 @@ class SystemAuthorizationCandidate:
             facts,
             prepared,
             authority,
+            None,
         )
 
     async def apply(self, db, tx, work):
+        if type(work) is not _SystemWork:
+            raise _order_error()
+        with bounded_authorization_reads(db, work.read_budget):
+            return await self._apply_work(db, tx, work)
+
+    async def _apply_work(self, db, tx, work):
         tx.assert_session(db)
         if type(work) is not _SystemWork or work.transaction is not tx or work.used:
             raise _order_error()
@@ -506,7 +556,9 @@ class SystemAuthorizationCandidate:
     async def execute(self, db, **request):
         command = await self.prepare_input(db, **request)
         tenant = command.values[0]
-        with bounded_authorization_reads(db) as io:
+        with bounded_authorization_reads(
+            db, AuthorizationReadBudget(max_statements=8192)
+        ) as io:
             async with authorization_transactions.scope(
                 db, tenants=(TenantLock(tenant.tenant_id, LockMode.EXCLUSIVE),)
             ) as tx:
@@ -584,6 +636,7 @@ class SystemAuthorizationCandidate:
                 else None,
             )
             _expect(preview.snapshot, expected)
+            result["leader"] = preview.snapshot["facts"].get("leader")
             if new_id:
                 result["new"].add(_key(ResourceKind.DEPT, tid, new_id))
         elif operation == "dept.members":
@@ -991,6 +1044,12 @@ class SystemAuthorizationCandidate:
             )
             if operation == "dept.update":
                 values = payload.model_dump(exclude_unset=True)
+                if "leader" in values:
+                    values["leader_user_id"] = (
+                        int(prepared["leader"]["userId"])
+                        if prepared.get("leader")
+                        else None
+                    )
                 current = next(
                     row
                     for row in facts[ResourceKind.DEPT]
@@ -1016,6 +1075,9 @@ class SystemAuthorizationCandidate:
                         "ancestors": prefix,
                         "email": payload.email or None,
                         "create_by": actor_name,
+                        "leader_user_id": int(prepared["leader"]["userId"])
+                        if prepared.get("leader")
+                        else None,
                     },
                 )
             else:
@@ -1094,6 +1156,10 @@ class SystemAuthorizationCandidate:
                 )
             child_kinds = ()
         else:
+            if any(r.get("leader_user_id") in ids for r in facts[ResourceKind.DEPT]):
+                raise BusinessRuleException(
+                    "用户仍被部门负责人引用", error_code="USER_DELETE_REFERENCED"
+                )
             for user_id in ids:
                 roles._ensure_target_visible(authority, user_id)
             if tenant.actor_user_id in ids or any(

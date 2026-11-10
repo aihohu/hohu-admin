@@ -63,7 +63,7 @@ async def test_prepare_keeps_admission_closed_and_records_success(
     if not bootstrap:
         assert events.index("stop") < events.index("migrate")
     assert (guard.directory / "stop.json").exists()
-    assert install.require_receipt(guard, bootstrap)["revision"] == "e020f2a00001"
+    assert install.require_receipt(guard, bootstrap)["revision"] == "e020f2b00001"
 
 
 @pytest.mark.parametrize("bootstrap", [True, False])

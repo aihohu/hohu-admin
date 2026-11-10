@@ -102,6 +102,7 @@ _MUTABLE_COLUMNS = {
             "dept_name",
             "order_num",
             "leader",
+            "leader_user_id",
             "phone",
             "email",
             "status",
@@ -686,6 +687,10 @@ class _Transaction(GenericPolicyTransaction):
                 raise _order_error()
 
     def _require_mutation_parents(self, key, values):
+        if key.kind is ResourceKind.DEPT and values.get("leader_user_id") is not None:
+            self.assert_held(
+                ResourceKey(ResourceKind.USER, key.tenant_id, values["leader_user_id"])
+            )
         if key.kind in GENERIC_POLICY_KINDS:
             self.assert_held(
                 ResourceKey(
@@ -845,6 +850,8 @@ class _Transaction(GenericPolicyTransaction):
             spec, predicates, current = await self._mutation_snapshot(
                 key, changes, expected
             )
+            if key.kind is ResourceKind.DEPT and "leader_user_id" in changes:
+                self._require_mutation_parents(key, current)
             if all(current[name] == value for name, value in changes.items()):
                 return False
             await self._timeouts()

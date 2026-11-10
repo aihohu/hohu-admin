@@ -14,6 +14,10 @@ async def test_default_conflict_blocks_migration_without_rewriting_data(
 ):
     connection = migration_connection
     chain = release_chain()
+    boundary = next(
+        i for i, step in enumerate(chain) if step.revision == "e020f2a00001"
+    )
+    chain = chain[: boundary + 1]
     await connection.run_sync(apply_steps, chain[:-1], "upgrade")
     await connection.execute(
         text(

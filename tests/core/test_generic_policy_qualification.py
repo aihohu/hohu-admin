@@ -32,7 +32,7 @@ def test_exact_qualification_contract(tmp_path, fault):
     doc = {
         "schema_version": 2,
         "build_sha": "b" * 40,
-        "database_revision": "e020f2a00001",
+        "database_revision": "e020f2b00001",
         "catalog_digest": catalog.digest,
         "action_digest": action,
         "adapter_digest": adapter,
