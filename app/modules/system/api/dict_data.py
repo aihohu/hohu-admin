@@ -2,26 +2,29 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_permissions
-from app.core.base_response import PageResult, ResponseModel
+from app.core.base_response import ResponseModel
 from app.core.tenant import TenantContext
-from app.db.authorization_http import business_write
+from app.db.authorization_http import business_read, business_write
 from app.db.session import get_db
 from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.user import User
 from app.modules.system.schemas.dict_data import (
     DictDataCreate,
-    DictDataOut,
     DictDataQuery,
     DictDataUpdate,
 )
-from app.modules.system.service.dict_data_service import dict_data_service
+from app.modules.system.schemas.ordinary_projection import (
+    DictDataProjection,
+    OrdinaryPage,
+)
 
 router = APIRouter()
 
 
 @router.get(
     "/list",
-    response_model=ResponseModel[PageResult[DictDataOut]],
+    response_model=ResponseModel[OrdinaryPage[DictDataProjection]],
+    response_model_exclude_unset=True,
     summary="获取字典数据列表分页",
     description="根据查询条件获取字典数据分页列表，支持按字典标签、字典键值和字典类型筛选",
     responses={
@@ -56,13 +59,16 @@ async def get_list(
         - dict_type: 字典类型（支持模糊查询）
         - status: 字典数据状态（1-启用，2-禁用）
     """
-    page_data = await dict_data_service.get_list(db, query, tenant=tenant)
+    page_data = await business_read(
+        db, _current_user, tenant=tenant, operation="dict-data.list", query=query
+    )
     return ResponseModel.success(data=page_data)
 
 
 @router.get(
     "/type/{dict_type}",
-    response_model=ResponseModel[list[DictDataOut]],
+    response_model=ResponseModel[list[DictDataProjection]],
+    response_model_exclude_unset=True,
     summary="根据字典类型获取字典数据",
     description="根据字典类型获取所有已启用的字典数据，按排序字段排序",
     responses={
@@ -96,12 +102,15 @@ async def get_by_type(
         - 仅返回状态为启用的字典数据
         - 按 dict_sort 字段排序
     """
-    dict_data_list = await dict_data_service.get_by_type(db, dict_type, tenant=tenant)
+    dict_data_list = await business_read(
+        db, _current_user, tenant=tenant, operation="dict-data.options", query=dict_type
+    )
     return ResponseModel.success(data=dict_data_list)
 
 
 @router.post(
     "/add",
+    response_model_exclude_unset=True,
     summary="创建字典数据",
     description="创建新的字典数据，包括字典标签、键值、排序等信息",
     responses={
@@ -147,6 +156,7 @@ async def add(
 
 @router.put(
     "/{data_id}",
+    response_model_exclude_unset=True,
     summary="编辑字典数据信息",
     description="更新指定字典数据的基本信息",
     responses={
@@ -203,6 +213,7 @@ async def update(
 
 @router.delete(
     "/{data_id}",
+    response_model_exclude_unset=True,
     summary="删除指定字典数据",
     description="删除指定的单个字典数据",
     responses={
@@ -244,6 +255,7 @@ async def delete(
 
 @router.post(
     "/batch-delete",
+    response_model_exclude_unset=True,
     summary="批量删除字典数据",
     description="批量删除多个字典数据，支持传入字典数据ID列表",
     responses={

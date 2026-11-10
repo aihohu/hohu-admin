@@ -15,6 +15,11 @@ from app.core.exceptions import (
 from app.core.id_generator import next_id
 from app.db.authorization_plan_session import _order_error
 from app.modules.auth.service import load_live_user_authority
+from app.modules.system.field_policy.ordinary_catalog import (
+    CREATE,
+    UPDATE,
+    production_catalog,
+)
 from app.modules.system.schemas.data_scope_demo import (
     DataScopeDemoCreate,
     DataScopeDemoUpdate,
@@ -27,6 +32,10 @@ from app.modules.system.service.authorization_control_identity import (
 )
 from app.modules.system.service.authorization_resource_catalog import resource_spec
 from app.modules.system.service.data_scope_demo_service import data_scope_demo_service
+from app.modules.system.service.ordinary_field_context import (
+    load_ordinary_context,
+    prove_parent_lookup,
+)
 
 _SURFACES = {
     "dict-type": (K.DICT_TYPE, DictTypeCreate, DictTypeUpdate),
@@ -153,6 +162,14 @@ class BusinessCandidate:
             command.ids
         ):
             raise NotFoundException("业务数据")
+        context = await load_ordinary_context(
+            db,
+            tx,
+            tenant=tenant,
+            actor_user_version=actor_user_version,
+            surface=command.surface,
+            operation=command.action,
+        )
         if kind is K.DATA_SCOPE_DEMO:
             actor = await load_live_user_authority(db, tenant=tenant)
             if action == "create":
@@ -170,27 +187,96 @@ class BusinessCandidate:
                     db, command.ids[0], actor, tenant=tenant
                 )
         elif kind is K.DICT_TYPE:
-            if action == "create":
-                for column in ("dict_type", "dict_name"):
-                    if any(row[column] == values[column] for row in facts[kind]):
-                        raise DuplicateException("字典类型", values[column])
             if action in {"delete", "batch-delete"} and any(
                 row["dict_type"] in {target["dict_type"] for target in targets}
                 for row in facts[K.DICT_DATA]
             ):
                 raise BusinessRuleException("该字典类型下存在数据，请先删除数据")
-        elif kind is K.DICT_DATA and (
-            action == "create" or values.get("dict_type") is not None
-        ):
-            code = values["dict_type"]
-            if not any(row["dict_type"] == code for row in facts[K.DICT_TYPE]):
-                raise BusinessRuleException(f"字典类型 {code} 不存在")
+        if action in {"create", "update"}:
+            fields = {
+                f.field_id: f
+                for f in production_catalog().objects[context.object_id].fields
+            }
+            footprint = tuple(command.values)
+            if any(
+                values[name] is None and not fields[name].nullable for name in footprint
+            ):
+                raise InvalidParameterException("不可空字段不能设置为 null")
+            record_values = (targets[0] if targets else {}) | values
+            context.write(
+                record_values, footprint, CREATE if action == "create" else UPDATE
+            )
+            if kind is K.DICT_TYPE:
+                for column in ("dict_type", "dict_name"):
+                    if column in values and any(
+                        row[column] == values[column]
+                        and row[key_name] not in command.ids
+                        for row in facts[kind]
+                    ):
+                        raise DuplicateException("字典类型", values[column])
+            elif kind is K.DICT_DATA and "dict_type" in values:
+                parent_context = await load_ordinary_context(
+                    db,
+                    tx,
+                    tenant=tenant,
+                    actor_user_version=actor_user_version,
+                    surface="dict-type",
+                    operation="options",
+                )
+                # The parent lookup is a query dependency, proved across the
+                # original tenant scope before testing the submitted code.
+                await prove_parent_lookup(db, parent_context)
+                if not any(
+                    row["dict_type"] == values["dict_type"]
+                    for row in facts[K.DICT_TYPE]
+                ):
+                    raise BusinessRuleException("字典类型不存在")
+            if (
+                kind is K.DICT_DATA
+                and record_values["is_default"] == "Y"
+                and any(
+                    row["dict_type"] == record_values["dict_type"]
+                    and row["is_default"] == "Y"
+                    and row["dict_code"] not in command.ids
+                    for row in facts[K.DICT_DATA]
+                )
+            ):
+                raise BusinessRuleException(
+                    "该字典类型已有默认项", error_code="DICT_DEFAULT_CONFLICT"
+                )
         if action == "create":
             await tx.insert_reserved(new, values)
             identifier = command.new_id
         elif action == "update":
             identifier = command.ids[0]
-            if values:
+            if (
+                kind is K.DICT_TYPE
+                and values.get("dict_type", targets[0]["dict_type"])
+                != targets[0]["dict_type"]
+            ):
+                children = tuple(
+                    row
+                    for row in facts[K.DICT_DATA]
+                    if row["dict_type"] == targets[0]["dict_type"]
+                )
+                if children:
+                    child_context = await load_ordinary_context(
+                        db,
+                        tx,
+                        tenant=tenant,
+                        actor_user_version=actor_user_version,
+                        surface="dict-data",
+                        operation="update",
+                    )
+                    for row in children:
+                        child_context.write(row, ("dict_type",), UPDATE)
+                await tx.rename_dictionary_type(
+                    ResourceKey(kind, tenant.tenant_id, identifier),
+                    values,
+                    expected=targets[0],
+                    children=children,
+                )
+            elif values:
                 await tx.update_factual(
                     ResourceKey(kind, tenant.tenant_id, identifier),
                     values,
@@ -202,7 +288,7 @@ class BusinessCandidate:
                     ResourceKey(kind, tenant.tenant_id, row[key_name]), expected=row
                 )
             return len(targets)
-        return dict(
+        result = dict(
             (
                 await db.execute(
                     select(spec.table).where(
@@ -214,6 +300,17 @@ class BusinessCandidate:
             .mappings()
             .one()
         )
+        projected = context.output(context.record(result, identifier), result)
+        # Internal owners retain numeric identities; the closed HTTP DTO owns
+        # their string serialization. No unprojected business value escapes.
+        for name in (key_name, "dept_id", "create_by"):
+            if (
+                name in projected
+                and isinstance(projected[name], str)
+                and projected[name].isdigit()
+            ):
+                projected[name] = int(projected[name])
+        return projected
 
 
 business_candidate = BusinessCandidate()

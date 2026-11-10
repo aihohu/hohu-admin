@@ -32,6 +32,10 @@ from app.modules.system.field_policy.documents import (
     rules_digest,
 )
 from app.modules.system.field_policy.user_fields import CATALOG_REVISION
+from app.modules.system.models.field_policy import (
+    FieldPolicyBinding,
+    FieldPolicyRevision,
+)
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
@@ -118,7 +122,7 @@ async def assert_role_history_deletable(db, tx, *, tenant, role_ids):
     keys = tuple(_key(ResourceKind.ROLE, tenant, value) for value in role_ids)
     tx.assert_held(*keys)
     ids = tuple(sorted({key.identity[0] for key in keys}))
-    for model in (Revision, Binding):
+    for model in (Revision, Binding, FieldPolicyRevision, FieldPolicyBinding):
         if (
             await db.scalar(
                 select(model.role_id)

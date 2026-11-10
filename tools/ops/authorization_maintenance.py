@@ -606,6 +606,11 @@ class PostgresStop:
         await self._resume_admission(record)
 
     async def _resume_admission(self, record):
+        from app.core.field_policy.maintenance import (  # noqa: PLC0415 - optional preparation protocol
+            require_normal_resume,
+        )
+
+        require_normal_resume(self)
         await self.require_quiescent()
         observed = record.get("observed_at")
         if observed is not None:

@@ -8,6 +8,22 @@ from app.modules.system.models.menu import Menu
 MENU_DEFINITIONS = [
     *[
         {
+            "key": "system_role_field_policy_" + action,
+            "parent_route": "system_role",
+            "menu_name": title,
+            "menu_type": "F",
+            "permission": "system:role:field-policy-" + action,
+            "route_path": "",
+            "status": "1",
+        }
+        for action, title in (
+            ("view", "查看字段策略"),
+            ("edit", "配置字段策略"),
+            ("activate", "激活字段策略"),
+        )
+    ],
+    *[
+        {
             "key": "system_user_field_policy_" + action,
             "parent_route": "system_role",
             "menu_name": title,

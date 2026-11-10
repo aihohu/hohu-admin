@@ -571,7 +571,9 @@ async def test_creation_and_replay_do_not_repair_missing_states(
                 text("DROP TRIGGER trg_ufp_initialize_tenant ON sys_tenant")
             )
         else:
-            await db.execute(text("TRUNCATE sys_user_field_policy_state"))
+            # Deliberate corruption inside this fixture's disposable schema,
+            # including the new generic-policy foreign-key dependencies.
+            await db.execute(text("TRUNCATE sys_user_field_policy_state CASCADE"))
         await db.commit()
     async with managed() as db:
         with pytest.raises(BusinessException) as caught:

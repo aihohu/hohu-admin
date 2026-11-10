@@ -57,6 +57,11 @@ from app.modules.system.models.user_field_policy import (
     UserFieldPolicyGlobalGuard,
     UserFieldPolicyState,
 )
+from app.modules.system.service.authorization_generic_policy import (
+    GENERIC_MUTABLE,
+    GENERIC_POLICY_KINDS,
+    GenericPolicyTransaction,
+)
 from app.modules.system.service.authorization_resource_catalog import (
     key_values,
     resource_spec,
@@ -213,6 +218,7 @@ _MUTABLE_COLUMNS = {
         {"values", "password_ciphertext", "version", "last_test_at", "last_test_status"}
     ),
 }
+_MUTABLE_COLUMNS.update(GENERIC_MUTABLE)
 _GLOBAL_KINDS = frozenset(
     {
         ResourceKind.PROVIDER,
@@ -349,7 +355,7 @@ def _plain_value(value, *, depth=0):
     return False
 
 
-class _Transaction:
+class _Transaction(GenericPolicyTransaction):
     def __init__(self, db, budget, global_mode, deadline):
         self._db = db
         self._journal = db._authorization_journal
@@ -376,6 +382,7 @@ class _Transaction:
         self._creation = None
         self._retained_count = 0
         self._policy = None
+        self._generic = None
 
     def _check(self, *, locked=False):
         journal = getattr(self, "_journal", None)
@@ -679,6 +686,56 @@ class _Transaction:
                 raise _order_error()
 
     def _require_mutation_parents(self, key, values):
+        if key.kind in GENERIC_POLICY_KINDS:
+            self.assert_held(
+                ResourceKey(
+                    ResourceKind.FIELD_POLICY_HEAD, key.tenant_id, key.tenant_id
+                )
+            )
+            role_id = values.get("role_id")
+            object_id = values.get("object_id")
+            if key.kind is ResourceKind.FIELD_POLICY_BINDING:
+                role_id, object_id = key.identity
+            elif key.kind is ResourceKind.FIELD_POLICY_ITEM:
+                manifest_id, role_id, object_id = key.identity
+                self.assert_held(
+                    ResourceKey(
+                        ResourceKind.FIELD_POLICY_MANIFEST, key.tenant_id, manifest_id
+                    )
+                )
+            if (
+                key.kind is ResourceKind.FIELD_POLICY_REQUEST
+                and values.get("manifest_id") is not None
+            ):
+                self.assert_held(
+                    ResourceKey(
+                        ResourceKind.FIELD_POLICY_MANIFEST,
+                        key.tenant_id,
+                        values["manifest_id"],
+                    )
+                )
+            if key.kind in {
+                ResourceKind.FIELD_POLICY_REVISION,
+                ResourceKind.FIELD_POLICY_BINDING,
+                ResourceKind.FIELD_POLICY_ITEM,
+            } or (
+                key.kind is ResourceKind.FIELD_POLICY_REQUEST
+                and values.get("revision_id") is not None
+            ):
+                self.assert_held(
+                    ResourceKey(ResourceKind.ROLE, key.tenant_id, role_id),
+                    ResourceKey(
+                        ResourceKind.FIELD_POLICY_OBJECT, key.tenant_id, object_id
+                    ),
+                )
+                if "revision_id" in values:
+                    self.assert_held(
+                        ResourceKey(
+                            ResourceKind.FIELD_POLICY_REVISION,
+                            key.tenant_id,
+                            values["revision_id"],
+                        )
+                    )
         if key.kind is ResourceKind.JOB_LOG:
             self.assert_held(
                 ResourceKey(ResourceKind.JOB, key.tenant_id, values["job_id"])
@@ -704,6 +761,9 @@ class _Transaction:
         self.assert_held(key)
         if getattr(self, "_file_phase", False):
             raise _order_error()
+        if self._generic is not None or key.kind in GENERIC_POLICY_KINDS:
+            self._generic_context(key)
+            return
         if self._policy is not None:
             self._require_exclusive_tenant(key.tenant_id)
             if (
@@ -1012,6 +1072,7 @@ class _Transaction:
             self._require_exclusive_tenant(tenant_id)
             if (
                 self._aggregate_tenant is not None
+                or self._generic is not None
                 or self._policy is not None
                 or self._aggregate_global
             ):
@@ -1077,6 +1138,7 @@ class _Transaction:
             self._check(locked=True)
             if (
                 not self._all_tenants
+                or self._generic is not None
                 or self._global_mode != LockMode.EXCLUSIVE
                 or self._aggregate_global
                 or self._aggregate_tenant is not None
@@ -1110,6 +1172,7 @@ class _Transaction:
             self._require_exclusive_tenant(tenant_id)
             if (
                 self._policy is not None
+                or self._generic is not None
                 or self._aggregate_tenant is not None
                 or self._aggregate_global
                 or type(action) is not str
@@ -1596,6 +1659,8 @@ class _Transaction:
                 raise _order_error()
             if key.kind in _AUTHORIZATION_KINDS:
                 self._fact_context(key)
+            if self._generic is not None or key.kind in GENERIC_POLICY_KINDS:
+                self._generic_context(key, values)
             if key.kind in _POLICY_KINDS and self._policy is None:
                 raise _order_error()
             if self._aggregate_tenant is not None and (
@@ -1666,6 +1731,11 @@ class _Transaction:
                 raise _stale()
             self._owned.add(key)
             self._record_mutation(key)
+            if self._generic is not None:
+                if key.kind is ResourceKind.FIELD_POLICY_AUDIT:
+                    self._generic["audit"] += 1
+                elif key.kind is ResourceKind.FIELD_POLICY_REQUEST:
+                    self._generic["receipt"] += 1
             if self._policy is not None and key.kind is ResourceKind.POLICY_AUDIT:
                 self._policy["audit_count"] += 1
         except IntegrityError:
@@ -1739,6 +1809,12 @@ class _Transaction:
             )
             if row is None:
                 raise _stale()
+            if (
+                key.kind is ResourceKind.DICT_TYPE
+                and changes.get("dict_type", row["dict_type"]) != row["dict_type"]
+            ):
+                # FK cascade is legal only after proving the complete child set.
+                raise _order_error()
             if key.kind is ResourceKind.JOB_LOG:
                 self._require_mutation_parents(key, row)
             await self._business_parents(key, row)
@@ -1768,6 +1844,66 @@ class _Transaction:
             if result is None or tuple(result) != key_values(key):
                 raise _stale()
             return True
+        except BaseException:
+            self._journal.fail()
+            raise
+
+    async def rename_dictionary_type(self, key, changes, *, expected, children):
+        """Prove every cascaded dictionary row before the one parent-key update."""
+        try:
+            self.assert_held(key)
+            self._require_exclusive_tenant(key.tenant_id)
+            if (
+                key.kind is not ResourceKind.DICT_TYPE
+                or type(children) is not tuple
+                or not set(changes) <= FACT_COLUMNS[key.kind]
+            ):
+                raise _order_error()
+            spec, predicates, current = await self._mutation_snapshot(
+                key, changes, expected
+            )
+            child = resource_spec(ResourceKind.DICT_DATA).table
+            found = tuple(
+                dict(row)
+                for row in (
+                    await self._execute(
+                        select(child)
+                        .where(
+                            child.c.tenant_id == key.tenant_id,
+                            child.c.dict_type == current["dict_type"],
+                        )
+                        .order_by(child.c.dict_code)
+                        .limit(10001)
+                    )
+                ).mappings()
+            )
+            if len(found) > 10000 or found != children:
+                raise _stale()
+            for row in found:
+                self.assert_held(
+                    ResourceKey(ResourceKind.DICT_DATA, key.tenant_id, row["dict_code"])
+                )
+            if type(changes.get("dict_type")) is not str:
+                raise _order_error()
+            await self._timeouts()
+            await self._execute(update(spec.table).where(*predicates).values(**changes))
+            actual = tuple(
+                dict(row)
+                for row in (
+                    await self._execute(
+                        select(child)
+                        .where(
+                            child.c.tenant_id == key.tenant_id,
+                            child.c.dict_code.in_(tuple(r["dict_code"] for r in found)),
+                        )
+                        .order_by(child.c.dict_code)
+                    )
+                ).mappings()
+            )
+            if actual != tuple(
+                row | {"dict_type": changes["dict_type"]} for row in found
+            ):
+                raise _stale()
         except BaseException:
             self._journal.fail()
             raise
@@ -1822,7 +1958,7 @@ class _Transaction:
     @asynccontextmanager
     async def savepoint(self):
         self._check(locked=True)
-        if getattr(self, "_file_phase", False):
+        if getattr(self, "_file_phase", False) or self._generic is not None:
             self._journal.reject()
         if self._db.new or self._db.dirty or self._db.deleted:
             self._journal.reject()
@@ -1964,6 +2100,7 @@ class AuthorizationTransactionService:
                     or tx._aggregate_tenant is not None
                     or tx._aggregate_global
                     or tx._policy is not None
+                    or tx._generic is not None
                     or (creation and (not tx._creation["selected"] or tx._plan is None))
                     or db.new
                     or db.dirty
