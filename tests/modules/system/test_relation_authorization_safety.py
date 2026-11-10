@@ -8,11 +8,14 @@ import pytest
 from app.core.authorization_plan import ResourceKey
 from app.core.authorization_plan import ResourceKind as K
 from app.core.exceptions import BusinessException
+from app.modules.system.menu_seed import build_initial_menus
 from app.modules.system.service.relation_authorization_safety import (
     REPAIR_CODES,
+    repair_accounts,
     require_manager_preserved,
     validate_menu_delegation,
 )
+from scripts.init_db import fresh_role_permission_menus
 
 
 def facts():
@@ -59,7 +62,7 @@ def facts():
         "button",
         "hidden",
         "cycle",
-        "unbound",
+        "unbound_button",
     ],
 )
 def test_last_repair_path_cannot_be_lost(change):
@@ -81,8 +84,8 @@ def test_last_repair_path_cannot_be_lost(change):
         after[K.MENU][1]["hide_in_menu"] = True
     if change == "cycle":
         after[K.MENU][0]["parent_id"] = 502
-    if change == "unbound":
-        after[K.ROLE_MENUS] = [r for r in after[K.ROLE_MENUS] if r["menu_id"] != 501]
+    if change == "unbound_button":
+        after[K.ROLE_MENUS] = [r for r in after[K.ROLE_MENUS] if r["menu_id"] != 503]
     with pytest.raises(BusinessException) as error:
         require_manager_preserved(before, after)
     assert (
@@ -97,6 +100,38 @@ def test_damaged_registered_navigation_requires_actual_repair():
     with pytest.raises(BusinessException):
         require_manager_preserved(damaged, deepcopy(damaged))
     require_manager_preserved(damaged, facts())
+
+
+def test_super_navigation_does_not_require_explicit_route_bindings():
+    before = facts()
+    # /getUserRoutes includes all enabled tenant M/C routes for R_SUPER;
+    # field management still requires its explicitly bound permission codes.
+    before[K.ROLE_MENUS] = [r for r in before[K.ROLE_MENUS] if r["menu_id"] >= 503]
+    assert repair_accounts(before) == {101}
+    require_manager_preserved(before, deepcopy(before))
+
+
+def test_button_status_does_not_revoke_explicit_function_permissions():
+    before = facts()
+    for menu in before[K.MENU][2:]:
+        menu["status"] = "2"
+    assert repair_accounts(before) == {101}
+    require_manager_preserved(before, deepcopy(before))
+
+
+def test_canonical_fresh_install_has_a_usable_repair_path():
+    before = facts()
+    menus = build_initial_menus(tenant_id=0)
+    before[K.MENU] = [
+        {key: value for key, value in vars(menu).items() if not key.startswith("_")}
+        for menu in menus
+    ]
+    before[K.ROLE_MENUS] = [
+        {"role_id": 201, "menu_id": m.menu_id}
+        for m in fresh_role_permission_menus(menus)
+    ]
+    assert repair_accounts(before) == {101}
+    require_manager_preserved(before, deepcopy(before))
 
 
 def test_another_enabled_repair_account_can_preserve_access():

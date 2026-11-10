@@ -61,19 +61,19 @@ def repair_accounts(facts):
                 eligible.add(uid)
             continue
         cache[roles] = False
-        available = set().union(*(role_menus[r] for r in roles))
-        visits += len(available)
+        bound = set().union(*(role_menus[r] for r in roles))
+        # R_SUPER navigation uses all enabled tenant routes; field management
+        # independently requires explicit bound codes. F-menu status does not
+        # revoke those codes (collect_user_permission_codes owns that contract).
+        available = set(menus)
+        visits += len(available) + len(bound)
         if visits > 100000:
             raise BusinessException(
                 422,
                 "修复入口检查超过预算",
                 error_code="AUTHORIZATION_PLAN_LIMIT_EXCEEDED",
             )
-        codes = {
-            m.get("permission")
-            for key, m in menus.items()
-            if key in available and m["status"] == "1"
-        }
+        codes = {m.get("permission") for key, m in menus.items() if key in bound}
         if not REPAIR_CODES <= codes:
             continue
         for key in available:

@@ -471,6 +471,25 @@ class SystemAuthorizationCandidate:
             expected_snapshot,
         )
         validate_leader_source(generic, operation, prepared)
+        if operation.endswith("delete"):
+            ids = set(payload) if operation.endswith("batch_delete") else {target_id}
+            if operation.startswith("role.") and any(
+                row["role_id"] in ids and row["role_code"] == SUPER_ADMIN_ROLE_CODE
+                for row in facts[ResourceKind.ROLE]
+            ):
+                raise BusinessRuleException(
+                    "不能删除系统管理员角色", error_code="ROLE_DELETE_PROTECTED"
+                )
+            if operation.startswith("user.") and (
+                tenant.actor_user_id in ids
+                or any(
+                    row["user_id"] in ids and row["user_name"] == ADMIN_USERNAME
+                    for row in facts[ResourceKind.USER]
+                )
+            ):
+                raise BusinessRuleException(
+                    "不能删除受保护账户", error_code="USER_DELETE_PROTECTED"
+                )
         require_manager_preserved(
             facts, system_after(facts, operation, payload, target_id, new_id, prepared)
         )
