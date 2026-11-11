@@ -10,6 +10,7 @@ from app.core.exceptions import BusinessException
 from app.core.field_policy import FieldRef, Grant
 from app.db.base import user_roles
 from app.modules.system.field_policy.evaluator import FieldGrant
+from app.modules.system.field_policy.ordinary_catalog import ordinary_catalog
 from app.modules.system.field_policy.relation_catalog import READ
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.menu import Menu
@@ -21,6 +22,7 @@ from app.modules.system.schemas.user import UserPatch
 from app.modules.system.service.authorization_configuration_candidate import (
     configuration_authorization_candidate,
 )
+from tests.modules.system import test_ordinary_field_active as ordinary_fixture
 from tests.modules.system.test_active_transfer_delivery import enable
 from tests.modules.system.test_authorization_system_candidate import TENANT, epoch, run
 from tests.modules.system.test_authorization_system_http import (
@@ -341,7 +343,9 @@ async def test_four_object_active_head_cannot_fall_back_to_legacy_writes(
     system_sessions, monkeypatch, operation, payload
 ):
     factory, _ = system_sessions
-    await activate_ordinary(system_sessions, monkeypatch)
+    with monkeypatch.context() as source:
+        source.setattr(ordinary_fixture, "production_catalog", ordinary_catalog)
+        await activate_ordinary(system_sessions, monkeypatch)
     async with factory() as db:
         with pytest.raises(BusinessException) as error:
             await run(
