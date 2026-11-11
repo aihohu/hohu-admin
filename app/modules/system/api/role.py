@@ -1,13 +1,15 @@
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Body, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_permissions
-from app.core.base_response import PageResult, ResponseModel
+from app.core.base_response import ResponseModel
 from app.core.tenant import TenantContext
 from app.db.authorization_http import relation_read, system_write
 from app.db.session import get_db
 from app.modules.auth.service import get_current_tenant_context
 from app.modules.system.models.user import User
+from app.modules.system.schemas.relation_form import RelationFormOut, RelationFormQuery
+from app.modules.system.schemas.relation_policy import RelationPage
 from app.modules.system.schemas.relation_projection import (
     ProjectedRoleOut,
     ProjectedRoleSummaryOut,
@@ -22,8 +24,26 @@ router = APIRouter()
 
 
 @router.get(
+    "/form-context",
+    response_model=ResponseModel[RelationFormOut[ProjectedRoleOut]],
+    summary="获取当前表单与字段能力",
+)
+async def get_form_context(
+    query: RelationFormQuery = Query(),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
+):
+    return ResponseModel.success(
+        data=await relation_read(
+            db, current_user, operation="role.form", query=query, tenant=tenant
+        )
+    )
+
+
+@router.get(
     "/list",
-    response_model=ResponseModel[PageResult[ProjectedRoleSummaryOut]],
+    response_model=ResponseModel[RelationPage[ProjectedRoleSummaryOut]],
     summary="获取角色列表分页",
     description="根据查询条件获取角色分页列表，支持按角色名称、角色编码、数据权限和状态筛选",
     responses={

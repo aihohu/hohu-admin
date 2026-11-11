@@ -21,7 +21,7 @@ SORT = Access("sort", "management.query", "sort")
 EQ = Access("eq", "management.query", "filter")
 CONTAINS = Access("contains", "management.query", "filter")
 EXACT = Access("exact", "management.query", "filter")
-CATALOG_REVISION = "system-fields/2-ordinary"
+CATALOG_REVISION = "system-fields/3-relations"
 
 SURFACES = {
     "dict-type": ("system.dict_type", "dict_type_id"),
@@ -53,7 +53,8 @@ def _field(name, kind="string", *, writable=True, nullable=False, queries=()):
 
 
 @lru_cache(maxsize=1)
-def production_catalog():
+def ordinary_catalog():
+    """Immutable four-object upgrade source; never append current objects here."""
     objects = (
         user_compat_object(),
         _object(
@@ -147,5 +148,11 @@ def production_catalog():
 
 @lru_cache(maxsize=1)
 def relation_catalog():
-    """Explicit candidate only; production preparation still uses four objects."""
-    return build_relation_catalog(production_catalog())
+    """Complete relation declarations, built from the fixed ordinary source."""
+    return build_relation_catalog(ordinary_catalog())
+
+
+@lru_cache(maxsize=1)
+def production_catalog():
+    """Current preparation catalog; activation still requires qualification."""
+    return relation_catalog()

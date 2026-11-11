@@ -2,7 +2,7 @@ from fastapi import APIRouter, Body, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_permissions
-from app.core.base_response import PageResult, ResponseModel
+from app.core.base_response import ResponseModel
 from app.core.tenant import TenantContext
 from app.db.authorization_http import relation_read, system_write, user_read
 from app.db.session import get_db
@@ -15,13 +15,36 @@ from app.modules.system.schemas.dept import (
     DeptUpdate,
     DeptUsersUpdate,
 )
+from app.modules.system.schemas.relation_form import RelationFormOut, RelationFormQuery
+from app.modules.system.schemas.relation_policy import RelationPage
 from app.modules.system.schemas.relation_projection import (
     ProjectedDeptOut,
     ProjectedTreeOptionOut,
 )
-from app.modules.system.schemas.user_projection import ProjectedUserOut, UserMemberQuery
+from app.modules.system.schemas.user_projection import (
+    ProjectedMemberPage,
+    UserMemberQuery,
+)
 
 router = APIRouter()
+
+
+@router.get(
+    "/form-context",
+    response_model=ResponseModel[RelationFormOut[ProjectedDeptOut]],
+    summary="获取当前表单与字段能力",
+)
+async def get_form_context(
+    query: RelationFormQuery = Query(),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
+):
+    return ResponseModel.success(
+        data=await relation_read(
+            db, current_user, operation="dept.form", query=query, tenant=tenant
+        )
+    )
 
 
 @router.get(
@@ -65,26 +88,27 @@ async def get_dept_tree_option(
 
 @router.get(
     "/tree-list",
-    response_model=ResponseModel[PageResult[ProjectedDeptOut]],
+    response_model=ResponseModel[RelationPage[ProjectedDeptOut]],
     summary="获取部门树形列表(带伪分页)",
     description="获取部门树形结构，包装为 PageResult 适配前端",
     dependencies=[Depends(require_permissions("system:dept:list"))],
 )
 async def get_dept_tree_list(
+    query: DeptQuery = Depends(),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     return ResponseModel.success(
         data=await relation_read(
-            db, current_user, operation="dept.tree-list", tenant=tenant
+            db, current_user, operation="dept.tree-list", tenant=tenant, query=query
         )
     )
 
 
 @router.get(
     "/list",
-    response_model=ResponseModel[PageResult[ProjectedDeptOut]],
+    response_model=ResponseModel[RelationPage[ProjectedDeptOut]],
     summary="获取部门分页列表",
     dependencies=[Depends(require_permissions("system:dept:list"))],
 )
@@ -243,7 +267,7 @@ async def batch_delete_depts(
 
 @router.get(
     "/{dept_id}/users",
-    response_model=ResponseModel[PageResult[ProjectedUserOut]],
+    response_model=ResponseModel[ProjectedMemberPage],
     summary="获取部门用户管理数据",
     description="返回当前用户数据范围内的部门成员候选分页",
     dependencies=[

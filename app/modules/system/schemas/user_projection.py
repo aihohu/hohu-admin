@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_serializer
 from pydantic.alias_generators import to_camel
 
+from app.core.base_response import PageResult
 from app.modules.system.schemas.user import UserDeptItem
 
 
@@ -70,3 +71,7 @@ class UserMemberQuery(BaseModel):
     query: str | None = Field(None, max_length=100)
     current: int = Field(1, ge=1)
     size: int = Field(20, ge=1, le=100)
+
+
+class ProjectedMemberPage(PageResult[ProjectedUserOut]):
+    authorization_epoch: StrictStr = Field(serialization_alias="authorizationEpoch")

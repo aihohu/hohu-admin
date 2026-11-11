@@ -30,7 +30,9 @@ from app.modules.system.field_policy.relation_catalog import (
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.role import Role
 from app.modules.system.models.user import User
+from app.modules.system.models.user_field_policy import UserFieldPolicyState
 from app.modules.system.schemas.user_projection import ProjectedUserOut
+from app.modules.system.service.authorization_read_budget import read_phase
 from app.modules.system.service.mail_service import mail_service, ready
 from app.modules.system.service.relation_read_context import load_relation_read_context
 from app.modules.system.service.settings_service import settings_service
@@ -38,6 +40,7 @@ from app.modules.system.service.settings_service import settings_service
 OWN = Access("read", "own-account")
 
 
+@read_phase("source")
 async def relation_sources(db, context, entries, *, own=False):
     """One relationship batch then bounded source batches, never per-cell SQL."""
     ids = [int(record.record_key) for record, _, _ in entries]
@@ -435,6 +438,19 @@ async def read_users(db, tx, *, tenant, actor_user_version, operation, query=Non
         "total": total,
         "current": query.current,
         "size": query.size,
+        **(
+            {
+                "authorization_epoch": str(
+                    await db.scalar(
+                        select(UserFieldPolicyState.epoch).where(
+                            UserFieldPolicyState.tenant_id == tenant.tenant_id
+                        )
+                    )
+                )
+            }
+            if operation == "members"
+            else {}
+        ),
     }
 
 

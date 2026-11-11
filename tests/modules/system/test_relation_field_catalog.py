@@ -20,13 +20,13 @@ def candidate():
     return ordinary_catalog.relation_catalog()
 
 
-def test_relation_candidate_keeps_production_frozen():
+def test_relation_catalog_keeps_its_historical_ordinary_source_frozen():
     assert (
-        ordinary_catalog.production_catalog().digest
+        ordinary_catalog.ordinary_catalog().digest
         == "1bba4c34c8f8e6edd636ed8b2447f8fbd0053e7082670846aa11ab25db32cb62"
     )
     assert set(candidate().objects) == set(
-        ordinary_catalog.production_catalog().objects
+        ordinary_catalog.ordinary_catalog().objects
     ) | {"system.role", "system.dept", "system.menu"}
 
 

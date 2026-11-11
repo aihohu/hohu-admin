@@ -1,4 +1,4 @@
-"""Stopped, atomic expansion of the user-only preparation catalog.
+"""Stopped, atomic expansion of exact historical preparation catalogs.
 
 History is immutable. Current bindings receive new revisions with identical
 rules, and all old previews/manifests become stale. No new grant is invented.
@@ -13,6 +13,7 @@ from app.core.id_generator import next_id
 from app.modules.system.field_policy.generic_compat import user_compat_object
 from app.modules.system.field_policy.ordinary_catalog import (
     CATALOG_REVISION,
+    ordinary_catalog,
     production_catalog,
 )
 from app.modules.system.models.field_policy import FieldPolicyBinding as Binding
@@ -38,6 +39,7 @@ async def prepare_catalog(db, *, fence, source_build):
     evidence = require_maintenance(fence, "migration")
     require(evidence.build_sha == source_build)
     catalog, old = production_catalog(), Catalog((user_compat_object(),), ())
+    sources = {c.digest: c for c in (old, ordinary_catalog(), catalog)}
     await db.scalar(select(Guard.epoch).where(Guard.guard_id == 1).with_for_update())
     barriers = (
         (
@@ -66,9 +68,11 @@ async def prepare_catalog(db, *, fence, source_build):
             source_build=source_build,
         )
     require({r["tenant_id"] for r in heads} == {r["tenant_id"] for r in barriers})
+    source_digests = {r["catalog_digest"] for r in heads}
+    require(len(source_digests) == 1)
     require(
         all(
-            r["catalog_digest"] in {old.digest, catalog.digest}
+            r["catalog_digest"] in sources
             and not r["ever_enforced"]
             and r["rollout_state"] == "preparing"
             and r["active_manifest_id"] is None
@@ -82,9 +86,17 @@ async def prepare_catalog(db, *, fence, source_build):
     for head in heads:
         require_maintenance(fence, "migration")
         tid = head["tenant_id"]
-        source = catalog if head["catalog_digest"] == catalog.digest else old
+        source = sources[head["catalog_digest"]]
         await service._catalog(db, source)
         objects = await service._objects(db, tid, source)
+        require(
+            all(
+                obj["mode"] in {"legacy", "ready"}
+                and not obj["ever_enforced"]
+                and obj["active_object_digest"] is None
+                for obj in objects
+            )
+        )
         bindings = await service._bindings(db, tid, source)
         decoded += sum(len(canonical(r["rules"], 512 * 1024)) for r in bindings)
         require(decoded <= 64 * 1024 * 1024)
@@ -186,7 +198,7 @@ async def prepare_catalog(db, *, fence, source_build):
         changed.append(str(tid))
     return {
         "catalogDigest": catalog.digest,
-        "sourceCatalogDigest": old.digest,
+        "sourceCatalogDigest": next(iter(source_digests)),
         "changedTenants": changed,
         "revisions": mappings,
     }

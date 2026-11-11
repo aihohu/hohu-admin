@@ -8,6 +8,7 @@ from pydantic.alias_generators import to_camel
 
 from app.core.config import settings
 from app.modules.system.field_policy.ordinary_catalog import relation_catalog
+from app.modules.system.schemas.relation_policy import RelationFieldPolicy
 
 
 class SparseRelationOut(BaseModel):
@@ -59,6 +60,7 @@ def projection(name, obj, anchor, *, only=None, **extras):
         if only is None or f.field_id in only
     }
     fields[anchor] = (StrictStr, ...)
+    fields["field_policy"] = (RelationFieldPolicy | None, None)
     fields.update(extras)
     return create_model(name, __base__=SparseRelationOut, **fields)
 
@@ -134,7 +136,10 @@ def serialize_relation(operation, result):
         model = ProjectedTreeOptionOut
     if kind in {"list", "tree-list"}:
         return {
-            **result,
+            **{key: value for key, value in result.items() if key != "field_policy"},
+            "fieldPolicy": RelationFieldPolicy.model_validate(
+                result["field_policy"]
+            ).model_dump(mode="json", by_alias=True),
             "records": [
                 model.model_validate(row).model_dump(mode="json", by_alias=True)
                 for row in result["records"]

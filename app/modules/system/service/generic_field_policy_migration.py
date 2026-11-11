@@ -1,5 +1,6 @@
 """Offline, atomic legacy import. Never commits or grants maintenance authority."""
 
+from dataclasses import replace
 from datetime import datetime
 from uuid import uuid4
 
@@ -159,10 +160,25 @@ async def _pages(db, model, tenant_id, column, budget):
 
 async def migrate_legacy(db, *, fence, catalog, catalog_revision, source_build):
     evidence = require_maintenance(fence, "migration")
+    require(source_build == evidence.build_sha and type(catalog) is Catalog)
+    base = Catalog((user_compat_object(),), ()).objects["system.user"]
+    user = catalog.objects.get("system.user")
+    require(user is not None)
+    original_ids = {field.field_id for field in base.fields}
+    # New virtual source cells cannot grant access. Original fields and every
+    # other User contract property must retain their exact legacy meaning.
     require(
-        source_build == evidence.build_sha
-        and catalog.objects.get("system.user")
-        == Catalog((user_compat_object(),), ()).objects["system.user"]
+        replace(user, fields=base.fields) == base
+        and tuple(field for field in user.fields if field.field_id in original_ids)
+        == base.fields
+        and all(
+            not field.accesses
+            and not field.structural
+            and not field.aliases
+            and field.sources
+            for field in user.fields
+            if field.field_id not in original_ids
+        )
     )
     # One physical G, followed by all physical B rows. Stop evidence precedes this transaction.
     guard = await db.scalar(

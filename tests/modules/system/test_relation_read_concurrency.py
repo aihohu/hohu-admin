@@ -12,6 +12,7 @@ from app.core.exceptions import BusinessException
 from app.db import authorization_relation_read_owner as reader_module
 from app.db import authorization_user_read_owner as user_reader_module
 from app.db.authorization_runtime import AuthorizationRuntime
+from app.modules.system.schemas.relation_form import RelationFormQuery
 from app.modules.system.schemas.role import RoleQuery
 from app.modules.system.schemas.user import UserQuery
 from app.modules.system.service.authorization_system_candidate import (
@@ -29,8 +30,9 @@ from tests.modules.system.test_relation_source_concurrency import blocked_by
 
 
 @pytest.mark.parametrize("writer_first", [False, True])
+@pytest.mark.parametrize("form", [False, True])
 async def test_relation_reader_and_revocation_use_real_barriers(
-    system_sessions, monkeypatch, writer_first
+    system_sessions, monkeypatch, writer_first, form
 ):
     _, plain = system_sessions
     runtime = AuthorizationRuntime(plain.kw["bind"])
@@ -71,8 +73,10 @@ async def test_relation_reader_and_revocation_use_real_barriers(
         return runtime.relation_read(
             tenant=TENANT,
             actor_user_version=1,
-            operation="role.list",
-            query=RoleQuery(),
+            operation="role.form" if form else "role.list",
+            query=RelationFormQuery(mode="update", record_id="201")
+            if form
+            else RoleQuery(),
         )
 
     def write():
@@ -94,7 +98,9 @@ async def test_relation_reader_and_revocation_use_real_barriers(
                 await asyncio.wait_for(second, 3)
             assert error.value.error_code == "INVALID_CREDENTIALS"
         else:
-            assert result["records"][0]["roleId"] == "201"
+            assert (result["record"] if form else result["records"][0])[
+                "roleId"
+            ] == "201"
             await asyncio.wait_for(second, 3)
         Console(soft_wrap=True, markup=False, highlight=False).print(
             json.dumps(
@@ -103,6 +109,7 @@ async def test_relation_reader_and_revocation_use_real_barriers(
                     if writer_first
                     else "reader-first",
                     "actual_pg_blocker_observed": True,
+                    "operation": "role.form" if form else "role.list",
                 }
             )
         )

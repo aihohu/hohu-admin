@@ -4,13 +4,13 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.field_policy import Access, FieldRef
-from app.modules.system.field_policy.ordinary_catalog import production_catalog
+from app.modules.system.field_policy.ordinary_catalog import ordinary_catalog
 from app.modules.system.schemas.data_scope_demo import DataScopeDemoUpdate
 
 
 def test_catalog_has_ordinary_objects_and_closed_write_footprints():
 
-    catalog = production_catalog()
+    catalog = ordinary_catalog()
     assert set(catalog.objects) == {
         "system.user",
         "system.dict_type",

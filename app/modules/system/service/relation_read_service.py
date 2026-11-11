@@ -19,6 +19,11 @@ from app.modules.system.schemas.relation_projection import (
     ROLE_SUMMARY_FIELDS,
 )
 from app.modules.system.schemas.role import RoleQuery
+from app.modules.system.service.authorization_read_budget import (
+    authorization_read_phase,
+    read_phase,
+)
+from app.modules.system.service.relation_capabilities import relation_capabilities
 from app.modules.system.service.relation_read_context import load_relation_read_context
 from app.modules.system.service.role_management_service import role_management_service
 from app.modules.system.service.user_role_assignment_service import (
@@ -86,6 +91,7 @@ def local_tree(records, *, anchor, options=False, buttons=False):
     return roots
 
 
+@read_phase("source")
 async def project_leaders(db, context, entries):
     ids = sorted(
         {
@@ -125,6 +131,7 @@ async def project_leaders(db, context, entries):
         context.source(source_record, ("user_name", "nickname"))
 
 
+@read_phase("source")
 async def local_parent_links(db, context, entries):
     table = Dept.__table__
     ids = {
@@ -151,7 +158,8 @@ async def local_parent_links(db, context, entries):
             values["parent_id"] = None
 
 
-async def prove_leader_query(db, context):
+@read_phase("proof")
+async def leader_query_complete(db, context):
     table, source = Dept.__table__, User.__table__
     valid = (
         select(source.c.user_id)
@@ -173,14 +181,18 @@ async def prove_leader_query(db, context):
         table.c.leader != "",
         ~valid,
     )
-    if await db.scalar(
+    return not await db.scalar(
         select(
             select(next(iter(table.primary_key.columns)))
             .select_from(table)
             .where(incomplete)
             .exists()
         )
-    ):
+    )
+
+
+async def prove_leader_query(db, context):
+    if not await leader_query_complete(db, context):
         raise denied()
 
 
@@ -190,6 +202,21 @@ async def read_relation(
     if type(operation) is not str or operation.count(".") != 1:
         raise _order_error()
     surface, kind = operation.split(".")
+    if kind == "form":
+        from app.modules.system.service.relation_form_context import (  # noqa: PLC0415
+            read_relation_form,
+        )
+
+        if target_id is not None:
+            raise _order_error()
+        return await read_relation_form(
+            db,
+            tx,
+            tenant=tenant,
+            actor_user_version=actor_user_version,
+            surface=surface,
+            query=query,
+        )
     allowed = {
         "role": {"list", "all", "detail", "assignable", "menus", "agents"},
         "dept": {"list", "detail", "tree", "tree-list", "options"},
@@ -200,7 +227,11 @@ async def read_relation(
     model, schema, anchor, sort, cap = MODELS[surface]
     if kind == "list" and type(query) is not schema:
         raise _order_error()
-    if kind == "tree" and surface == "dept" and type(query) is not DeptQuery:
+    if (
+        surface == "dept"
+        and (kind == "tree" or kind == "tree-list" and query is not None)
+        and type(query) is not DeptQuery
+    ):
         raise _order_error()
     if kind == "assignable" and not (
         type(query) is dict
@@ -341,12 +372,13 @@ async def read_relation(
         predicates.append(table.c[anchor] == target_id)
         if surface == "role":
             try:
-                role = await role_management_service.authorize_role_projection(
-                    db,
-                    actor_user_id=tenant.actor_user_id,
-                    role_id=target_id,
-                    tenant=tenant,
-                )
+                with authorization_read_phase(db, "delegation"):
+                    role = await role_management_service.authorize_role_projection(
+                        db,
+                        actor_user_id=tenant.actor_user_id,
+                        role_id=target_id,
+                        tenant=tenant,
+                    )
             except NotFoundException:
                 if kind == "agents":
                     raise NotFoundException(
@@ -433,20 +465,55 @@ async def read_relation(
         internals=("leader_user_id", "leader_has_text") if surface == "dept" else (),
     )
     records = [values for _, values, _ in entries]
+    page_policy = None
+    if kind in {"list", "tree-list", "tree"}:
+        for record, values, _ in entries:
+            values["field_policy"] = relation_capabilities(context, record, surface)
+        roles = context.scopes.keys()
+        if surface == "dept":
+            roles = [rid for rid, scope in context.scopes.items() if scope.unbounded]
+        page_policy = relation_capabilities(
+            context, context.record(obj, "new", roles), surface
+        )
+        known = {f.field_id for f in context.catalog.objects[obj].fields}
+        page_policy["read"] = sorted(
+            {name for row in records for name in row if name in known}
+        )
+        query_fields = []
+        for name in schema.model_fields:
+            if name in {"current", "size"}:
+                continue
+            if name == "leader" and not await leader_query_complete(db, context):
+                continue
+            access = EQ if name in {"status", "data_scope", "menu_type"} else CONTAINS
+            # A query hint covers every eligible row before the requested filter.
+            if not await db.scalar(
+                select(
+                    select(table.c[anchor])
+                    .where(
+                        context.base(obj, table),
+                        ~context.coverage(obj, table, name, access),
+                    )
+                    .exists()
+                )
+            ):
+                query_fields.append(name)
+        page_policy["query"] = query_fields
     if surface == "role":
         # Existing current delegation assessment remains authoritative.
-        summaries, _, _ = await role_management_service.summarize_roles(
-            db,
-            actor_user_id=tenant.actor_user_id,
-            tenant=tenant,
-            **{
-                k: v
-                for k, v in filters.items()
-                if k in {"role_name", "role_code", "status", "data_scope"}
-            },
-            limit=size if kind == "list" else cap + 1,
-            offset=(current - 1) * size if kind == "list" else 0,
-        )
+        with authorization_read_phase(db, "delegation"):
+            summaries, _, _ = await role_management_service.summarize_roles(
+                db,
+                actor_user_id=tenant.actor_user_id,
+                tenant=tenant,
+                **{
+                    k: v
+                    for k, v in filters.items()
+                    if k in {"role_name", "role_code", "status", "data_scope"}
+                },
+                limit=size if kind == "list" else cap + 1,
+                offset=(current - 1) * size if kind == "list" else 0,
+            )
         assessment = {str(r.role_id): r for r in summaries}
         for row in records:
             summary = assessment[row[anchor]]
@@ -475,6 +542,7 @@ async def read_relation(
     if kind in {"list", "tree-list"}:
         return {
             "records": records,
+            "field_policy": page_policy,
             "total": len(records) if kind == "tree-list" else total,
             "current": current,
             "size": size if kind == "list" else len(records),

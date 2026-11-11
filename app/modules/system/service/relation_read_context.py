@@ -31,10 +31,15 @@ from app.modules.system.field_policy.ordinary_catalog import relation_catalog
 from app.modules.system.field_policy.relation_catalog import READ
 from app.modules.system.models.field_policy import FieldPolicyHead
 from app.modules.system.models.user_field_policy import UserFieldPolicyState
+from app.modules.system.service.authorization_read_budget import (
+    authorization_read_phase,
+    read_phase,
+)
 from app.modules.system.service.generic_field_policy_service import (
     failure,
     generic_field_policy_service,
 )
+from app.modules.system.service.relation_capabilities import relation_write_permissions
 from app.modules.system.service.user_field_active import active_policy_grants
 from app.modules.system.service.user_field_context import load_current_user
 from app.utils.data_scope import (
@@ -119,6 +124,7 @@ class RelationReadContext:
     def decisions(self, record, access=READ):
         return resolve_fields(self.catalog, self.rules, record, self.action, access)
 
+    @read_phase("proof", session_arg=1)
     async def prove(self, db, obj, table, dependencies=(), *, readable=()):
         scopes = self.scope_sql(obj, table)
         base = self.base(obj, table)
@@ -157,6 +163,7 @@ class RelationReadContext:
             ):
                 raise denied()
 
+    @read_phase("projection", session_arg=1, preserve=("source",))
     async def fetch(
         self,
         db,
@@ -299,13 +306,14 @@ class RelationReadContext:
 
 
 async def load_relation_read_context(
-    db, tx, *, tenant, actor_user_version, action, objects
+    db, tx, *, tenant, actor_user_version, action, objects, write_form=False
 ):
     tx.assert_session(db)
     tx.assert_barrier(tenant.tenant_id)
-    actor = await load_current_user(
-        db, tenant=tenant, actor_user_version=actor_user_version
-    )
+    with authorization_read_phase(db, "identity"):
+        actor = await load_current_user(
+            db, tenant=tenant, actor_user_version=actor_user_version
+        )
     roles = tuple(r for r in actor.roles if r.status == "1")
     limit(len(roles) <= 1024)
     catalog = relation_catalog()
@@ -318,63 +326,70 @@ async def load_relation_read_context(
         permissions |= frozenset(
             p for a in catalog.actions.values() for p in a.permission_codes
         )
-    if not set(catalog.actions[action].permission_codes) <= permissions:
+    functional = (
+        relation_write_permissions(actor, catalog, action.split(".")[0])
+        if write_form
+        else permissions
+    )
+    if not set(catalog.actions[action].permission_codes) <= functional:
         raise AuthorizationException("缺少操作权限", error_code="MISSING_PERMISSION")
     ids = tuple(str(r.role_id) for r in roles)
-    head = await db.scalar(
-        select(FieldPolicyHead.tenant_id).where(
-            FieldPolicyHead.tenant_id == tenant.tenant_id
+    with authorization_read_phase(db, "manifest"):
+        head = await db.scalar(
+            select(FieldPolicyHead.tenant_id).where(
+                FieldPolicyHead.tenant_id == tenant.tenant_id
+            )
         )
-    )
-    grants = ()
-    if head is None:
-        state = (
-            await db.execute(
-                select(UserFieldPolicyState.mode).where(
-                    UserFieldPolicyState.tenant_id == tenant.tenant_id
+        grants = ()
+        if head is None:
+            state = (
+                await db.execute(
+                    select(UserFieldPolicyState.mode).where(
+                        UserFieldPolicyState.tenant_id == tenant.tenant_id
+                    )
                 )
+            ).scalar_one_or_none()
+            if state not in {"legacy", "ready", "enforcing", "frozen"}:
+                raise failure()
+            grants = tuple(
+                Grant(tenant.tenant_id, rid, ref, a)
+                for rid in ids
+                for ref, f in catalog.fields.items()
+                if ref.object_id in objects - {"system.user"}
+                for a in f.accesses
             )
-        ).scalar_one_or_none()
-        if state not in {"legacy", "ready", "enforcing", "frozen"}:
-            raise failure()
-        grants = tuple(
-            Grant(tenant.tenant_id, rid, ref, a)
-            for rid in ids
-            for ref, f in catalog.fields.items()
-            if ref.object_id in objects - {"system.user"}
-            for a in f.accesses
-        )
-        if "system.user" in objects:
-            legacy = await active_policy_grants(
-                db, tx, tenant_id=tenant.tenant_id, role_ids=ids
-            )
-            grants += (
-                convert_legacy_grants(tenant.tenant_id, legacy)
-                if legacy is not None
-                else tuple(
-                    Grant(tenant.tenant_id, rid, ref, a)
-                    for rid in ids
-                    for ref, f in catalog.fields.items()
-                    if ref.object_id == "system.user"
-                    for a in f.accesses
+            if "system.user" in objects:
+                legacy = await active_policy_grants(
+                    db, tx, tenant_id=tenant.tenant_id, role_ids=ids
                 )
+                grants += (
+                    convert_legacy_grants(tenant.tenant_id, legacy)
+                    if legacy is not None
+                    else tuple(
+                        Grant(tenant.tenant_id, rid, ref, a)
+                        for rid in ids
+                        for ref, f in catalog.fields.items()
+                        if ref.object_id == "system.user"
+                        for a in f.accesses
+                    )
+                )
+        else:
+            for obj in sorted(objects):
+                grants += await generic_field_policy_service.load_active(
+                    db,
+                    tx,
+                    tenant_id=tenant.tenant_id,
+                    catalog=catalog,
+                    object_id=obj,
+                    role_ids=ids,
+                )
+    with authorization_read_phase(db, "scope"):
+        scopes = {
+            str(r.role_id): await resolve_data_scope_for_roles(
+                db, user=actor, roles=[r], tenant=tenant
             )
-    else:
-        for obj in sorted(objects):
-            grants += await generic_field_policy_service.load_active(
-                db,
-                tx,
-                tenant_id=tenant.tenant_id,
-                catalog=catalog,
-                object_id=obj,
-                role_ids=ids,
-            )
-    scopes = {
-        str(r.role_id): await resolve_data_scope_for_roles(
-            db, user=actor, roles=[r], tenant=tenant
-        )
-        for r in roles
-    }
+            for r in roles
+        }
     return RelationReadContext(
         tenant, actor, compile_rules(catalog, grants), scopes, permissions, action
     )

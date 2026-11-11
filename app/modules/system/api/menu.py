@@ -1,8 +1,8 @@
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Body, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_permissions
-from app.core.base_response import PageResult, ResponseModel
+from app.core.base_response import ResponseModel
 from app.core.tenant import TenantContext
 from app.db.authorization_http import control_write, relation_read
 from app.db.session import get_db
@@ -13,6 +13,12 @@ from app.modules.system.schemas.menu import (
     MenuQuery,
     MenuUpdate,
 )
+from app.modules.system.schemas.relation_form import (
+    ProjectedMenuFormOut,
+    RelationFormOut,
+    RelationFormQuery,
+)
+from app.modules.system.schemas.relation_policy import RelationPage
 from app.modules.system.schemas.relation_projection import (
     ProjectedMenuOut,
     ProjectedMenuSimpleOut,
@@ -20,6 +26,24 @@ from app.modules.system.schemas.relation_projection import (
 )
 
 router = APIRouter()
+
+
+@router.get(
+    "/form-context",
+    response_model=ResponseModel[RelationFormOut[ProjectedMenuFormOut]],
+    summary="获取当前表单与字段能力",
+)
+async def get_form_context(
+    query: RelationFormQuery = Query(),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
+):
+    return ResponseModel.success(
+        data=await relation_read(
+            db, current_user, operation="menu.form", query=query, tenant=tenant
+        )
+    )
 
 
 @router.get(
@@ -63,7 +87,7 @@ async def get_menu_tree_option(
 
 @router.get(
     "/tree-list",
-    response_model=ResponseModel[PageResult[ProjectedMenuOut]],
+    response_model=ResponseModel[RelationPage[ProjectedMenuOut]],
     summary="获取菜单树形列表(带伪分页数据-适配前端)",
     dependencies=[Depends(require_permissions("system:menu:list"))],
 )
@@ -81,7 +105,7 @@ async def get_menu_tree_list(
 
 @router.get(
     "/list",
-    response_model=ResponseModel[PageResult[ProjectedMenuOut]],
+    response_model=ResponseModel[RelationPage[ProjectedMenuOut]],
     summary="获取菜单分页列表",
     dependencies=[Depends(require_permissions("system:menu:list"))],
 )
