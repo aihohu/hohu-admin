@@ -107,13 +107,22 @@ def test_parse_user_id_missing_auth_header(fake_request_factory):
 
 
 @pytest.mark.parametrize(
-    "content_type",
-    ["multipart/form-data; boundary=test", "application/octet-stream"],
+    "path,content_type",
+    [
+        ("/system/file/upload", "multipart/form-data; boundary=test"),
+        ("/system/file/upload", "application/octet-stream"),
+        (
+            "/system/field-policy/roles/201/objects/system.user/revisions",
+            "application/json",
+        ),
+    ],
 )
-async def test_non_json_request_body_is_never_read_for_audit(content_type: str) -> None:
+async def test_sensitive_or_streaming_body_is_never_read_for_audit(
+    path, content_type: str
+) -> None:
     request = MagicMock()
     request.method = "POST"
-    request.url.path = "/system/file/upload"
+    request.url.path = path
     request.headers = {"content-type": content_type}
     request.body = AsyncMock(side_effect=AssertionError("body must stay streaming"))
     response = MagicMock(status_code=200)

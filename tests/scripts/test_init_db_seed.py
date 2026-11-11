@@ -268,6 +268,9 @@ class TestRoleSeed:
         admin_role.menus = fresh_role_permission_menus(init_menus)
 
         assert {menu.permission for menu in admin_role.menus} == {
+            "system:role:field-policy-view",
+            "system:role:field-policy-edit",
+            "system:role:field-policy-activate",
             "system:user:field-policy-view",
             "system:user:field-policy-edit",
             "system:user:field-policy-activate",

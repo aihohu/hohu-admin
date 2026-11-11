@@ -32,9 +32,11 @@ IO_PROFILES = MappingProxyType(
         "system-write": (15000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "auth-read": (8000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "user-read": (15000, 2000, 5000, 100000, 64 * 1024 * 1024),
+        "relation-read": (8000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "auth-write": (15000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "auth-email": (8000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "policy-proof": (15000, 2000, 5000, 100000, 128 * 1024 * 1024),
+        "policy-migration": (25000, 2000, 5000, 100000, 128 * 1024 * 1024),
         "import-write": (60000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "bounded-plan": (15000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "bounded-read": (5000, 0, 5000, 4104, 64 * 1024 * 1024),
@@ -1051,6 +1053,15 @@ _COMPLETION_ENTRIES = (
         "none",
     ),
     (
+        "app.db.authorization_business_owner.BusinessOwner",
+        ("read",),
+        "owner",
+        "S",
+        ("S",),
+        "auth-read",
+        "none",
+    ),
+    (
         _S + "authorization_business_candidate.BusinessCandidate",
         ("discover",),
         "read",
@@ -1237,6 +1248,66 @@ _COMPLETION_ENTRIES = (
         "S",
         ("S",),
         "user-read",
+        "none",
+    ),
+    (
+        "app.db.authorization_relation_read_owner.RelationReadOwner",
+        ("execute",),
+        "owner",
+        "S",
+        ("S",),
+        "relation-read",
+        "none",
+    ),
+    (
+        _S + "relation_read_context",
+        ("load_relation_read_context",),
+        "read",
+        "S",
+        ("S",),
+        "relation-read",
+        "none",
+    ),
+    (
+        _S + "relation_read_context.RelationReadContext",
+        ("fetch", "prove", "source"),
+        "read",
+        "S",
+        ("S",),
+        "relation-read",
+        "none",
+    ),
+    (
+        _S + "relation_read_service",
+        ("read_relation", "project_leaders", "prove_leader_query"),
+        "read",
+        "S",
+        ("S",),
+        "relation-read",
+        "none",
+    ),
+    (
+        _S + "relation_user_read",
+        (
+            "read_users",
+            "read_own",
+            "relation_sources",
+            "query_coverage",
+            "role_query_coverage",
+        ),
+        "read",
+        "S",
+        ("S",),
+        "relation-read",
+        "none",
+    ),
+    (
+        _S + "runtime_navigation",
+        ("runtime_routes",),
+        "read",
+        "S",
+        ("S",),
+        "relation-read",
         "none",
     ),
     (
@@ -1808,7 +1879,12 @@ _COMPLETION_ENTRIES = (
     ),
     (
         _TX,
-        ("delete_context_fact", "delete_job_fact", "delete_business_fact"),
+        (
+            "delete_context_fact",
+            "delete_job_fact",
+            "delete_business_fact",
+            "rename_dictionary_type",
+        ),
         "proof_writer",
         "S",
         ("X",),
@@ -1857,9 +1933,120 @@ CANDIDATES += (
     ),
 )
 
+_GENERIC_OWNER = (
+    "app.db.authorization_generic_policy_owner.GenericFieldPolicyOwner.execute"
+)
+_GENERIC_POLICY = _S + "generic_field_policy_service.GenericFieldPolicyService"
+_GENERIC_TX = _S + "authorization_generic_policy.GenericPolicyTransaction"
+_MANAGEMENT_OWNER = (
+    "app.db.authorization_field_management_owner.FieldManagementOwner.execute"
+)
+CANDIDATES += (
+    Candidate(
+        "field_management.owner",
+        _MANAGEMENT_OWNER,
+        (_S + "field_management.prepare_management",),
+        _MANAGEMENT_OWNER,
+        "owner",
+        "S",
+        "current tenant; current R_SUPER and dedicated operation permission",
+        ("S", "X"),
+        _GENERIC_POLICY + ".plan",
+        _GENERIC_POLICY + ".apply",
+        "policy-proof",  # Write maximum; read/preview use the stricter 8s limit.
+        _GENERIC_TX + ".generic_epoch",
+        False,
+    ),
+)
+CANDIDATES += tuple(
+    Candidate(
+        "generic_policy." + name,
+        qualified,
+        (),
+        _GENERIC_OWNER,
+        phase,
+        "S",
+        "current tenant under the original physical B",
+        barriers,
+        _GENERIC_POLICY + ".plan",
+        _GENERIC_POLICY + ".apply",
+        "policy-proof",
+        _GENERIC_TX + ".generic_epoch",
+        phase == "proof_writer",
+    )
+    for name, qualified, phase, barriers in (
+        ("owner", _GENERIC_OWNER, "owner", ("S", "X")),
+        ("plan", _GENERIC_POLICY + ".plan", "plan", ("X",)),
+        ("apply", _GENERIC_POLICY + ".apply", "proof_writer", ("X",)),
+        ("receipt", _GENERIC_POLICY + ".receipt", "read", ("S", "X")),
+        ("active", _GENERIC_POLICY + ".load_active", "read", ("S", "X")),
+        ("frame", _GENERIC_TX + ".generic_policy_change", "proof_writer", ("X",)),
+        ("epoch", _GENERIC_TX + ".generic_epoch", "proof_writer", ("X",)),
+        ("sealed", _S + "generic_field_policy_state.read_manifest", "read", ("S", "X")),
+        (
+            "transition",
+            _S + "generic_field_policy_state.transition",
+            "proof_writer",
+            ("X",),
+        ),
+        (
+            "old_client",
+            _S + "generic_field_policy_admission.require_user_policy_compatibility",
+            "read",
+            ("S", "X"),
+        ),
+    )
+)
+
+_GENERIC_MAINTENANCE = (
+    ("migration", _S + "generic_field_policy_migration.migrate_legacy", "X", ("X",)),
+    ("catalog", _S + "generic_field_policy_migration.register_catalog", "X", ("X",)),
+    ("prepare", "tools.ops.policy_prepare.serve", "none", ()),
+    (
+        "prepare_command",
+        "tools.ops.policy_prepare.PolicyPreparation.execute",
+        "none",
+        (),
+    ),
+    ("prepare_finish", "tools.ops.policy_prepare.PolicyPreparation.finish", "none", ()),
+    ("prepare_login", "tools.ops.policy_prepare.PolicyPreparation.login", "none", ()),
+    ("prepare_logout", "tools.ops.policy_prepare.PolicyPreparation.logout", "none", ()),
+    (
+        "prepare_management",
+        "tools.ops.policy_prepare.PolicyPreparation.management",
+        "none",
+        (),
+    ),
+)
+CANDIDATES += tuple(
+    Candidate(
+        "generic_maintenance." + name,
+        qualified,
+        (),
+        "tools.ops.policy_prepare.serve",
+        "owner",
+        guard,
+        "stopped deployment; exact inventory and current-task migration permit; per-command tenant owner",
+        barriers,
+        "none",
+        "none",
+        "policy-migration",
+        "none",
+        False,
+        maintenance=True,
+    )
+    for name, qualified, guard, barriers in _GENERIC_MAINTENANCE
+)
+MAINTENANCE_ENTRIES |= frozenset(
+    "generic_maintenance." + item[0] for item in _GENERIC_MAINTENANCE
+)
+
 _RUNTIME_DELEGATES = {
+    "field_management": _MANAGEMENT_OWNER,
+    "generic_field_policy": _GENERIC_OWNER,
     "field_policy": "app.db.authorization_policy_owner.UserFieldPolicyOwner.execute",
     "user_read": "app.db.authorization_user_read_owner.UserReadOwner.execute",
+    "relation_read": "app.db.authorization_relation_read_owner.RelationReadOwner.execute",
     "control_read": "app.db.authorization_catalog_read_owner.CatalogReadOwner.execute",
     "system": _SYSTEM_OWNER,
     "import_users": _IMPORT_OWNER,

@@ -59,10 +59,14 @@ from app.modules.system.service.authorization_control_identity import (
     read_policy_target,
 )
 from app.modules.system.service.authorization_read_budget import (
+    AuthorizationReadBudget,
     bounded_authorization_reads,
 )
 from app.modules.system.service.authorization_transaction_service import (
     authorization_transactions,
+)
+from app.modules.system.service.relation_field_write_guard import (
+    load_relation_write_context,
 )
 from app.modules.system.service.role_delegation_service import role_delegation_service
 
@@ -97,6 +101,7 @@ class _RoleAgentWork:
     facts: dict
     evaluation: object
     locks: LockPlan
+    read_budget: object = None
     used: bool = False
 
 
@@ -165,12 +170,30 @@ def _audit(audit, request):
 
 class CatalogAuthorizationCandidate:
     async def plan_role_agents(self, db, tx, request):
+        budget = AuthorizationReadBudget(max_statements=8192)
+        with bounded_authorization_reads(db, budget):
+            work = await self._plan_role_agents(db, tx, request)
+        work.read_budget = budget
+        return work
+
+    async def _plan_role_agents(self, db, tx, request):
         tx.assert_session(db)
         if type(request) is not CatalogRequest or request.operation != "role.agents":
             raise _order_error()
         tid = request.tenant.tenant_id
         tx.assert_planning(tid, exclusive=True)
         identity = await self._identity(db, request)
+        await load_relation_write_context(
+            db,
+            tx,
+            tenant=request.tenant,
+            actor_user_version=request.actor_user_version,
+            facts={
+                ResourceKind(kind): [dict(row) for row in rows]
+                for kind, rows in identity._facts
+            },
+            objects={"system.role"},
+        )
         facts = await self._facts(db, request)
         evaluation = await self._delegation(db, request)
         expected = json.loads(request.expected_bytes)
@@ -195,6 +218,12 @@ class CatalogAuthorizationCandidate:
         return _RoleAgentWork(tx, request, identity, facts, evaluation, locks)
 
     async def apply_role_agents(self, db, tx, work):
+        if type(work) is not _RoleAgentWork:
+            raise _order_error()
+        with bounded_authorization_reads(db, work.read_budget):
+            return await self._apply_role_agents(db, tx, work)
+
+    async def _apply_role_agents(self, db, tx, work):
         tx.assert_session(db)
         if type(work) is not _RoleAgentWork or work.transaction is not tx or work.used:
             raise _order_error()
@@ -429,7 +458,9 @@ class CatalogAuthorizationCandidate:
         _audit(audit, request)
         _fresh(db)
         if request.operation == "role.agents" and audit is None and preparation is None:
-            with bounded_authorization_reads(db):
+            with bounded_authorization_reads(
+                db, AuthorizationReadBudget(max_statements=8192)
+            ):
                 async with authorization_transactions.scope(
                     db,
                     tenants=(TenantLock(request.tenant.tenant_id, LockMode.EXCLUSIVE),),

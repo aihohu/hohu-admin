@@ -2,7 +2,14 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 from pydantic.alias_generators import to_camel
 
 from app.constants import (
@@ -18,7 +25,9 @@ from app.core.config import settings
 class ButtonCreate(BaseModel):
     """按钮创建请求"""
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid"
+    )
 
     desc: str = Field(..., min_length=1, max_length=50, description="按钮描述")
     code: str = Field(..., min_length=1, max_length=100, description="权限代码")
@@ -104,11 +113,13 @@ class MenuBase(BaseModel):
     @classmethod
     def validate_order(cls, v: int) -> int:
         """验证排序值"""
-        if v < 0:
+        if v is None or v < 0:
             raise ValueError("排序值必须大于或等于0")
         return v
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid"
+    )
 
 
 class MenuCreate(MenuBase):
@@ -123,6 +134,24 @@ class MenuUpdate(MenuBase):
 
     buttons: list[ButtonCreate] | None = Field(None, description="按钮列表")
     query: list | None = Field(None, description="查询参数")
+
+    menu_name: str | None = Field(None, min_length=1, max_length=50)
+    menu_type: str | None = None
+    order: int | None = Field(None, ge=0)
+    status: str | None = None
+
+    @field_validator("menu_name", "menu_type", "order", "status")
+    @classmethod
+    def reject_required_null(cls, value):
+        if value is None:
+            raise ValueError("字段不能为 NULL")
+        return value
+
+    @model_validator(mode="after")
+    def require_update(self):
+        if not self.model_fields_set:
+            raise ValueError("至少需要提供一个更新字段")
+        return self
 
 
 class MenuQuery(BaseModel):

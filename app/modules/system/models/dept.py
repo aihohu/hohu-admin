@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -33,6 +34,17 @@ class Dept(Base):
         ),
         Index("ix_sys_dept_tenant_parent", "tenant_id", "parent_id"),
         Index("ix_sys_dept_tenant_status", "tenant_id", "status"),
+        ForeignKeyConstraint(
+            ("tenant_id", "leader_user_id"),
+            ("sys_user.tenant_id", "sys_user.user_id"),
+            name="fk_sys_dept_tenant_leader",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "leader_user_id IS NULL OR NULLIF(btrim(leader), '') IS NOT NULL",
+            name="ck_sys_dept_leader_source",
+        ),
+        Index("ix_sys_dept_tenant_leader", "tenant_id", "leader_user_id"),
     )
 
     dept_id: Mapped[int] = mapped_column(
@@ -58,6 +70,9 @@ class Dept(Base):
     )
     leader: Mapped[str | None] = mapped_column(
         String(50), nullable=True, comment="负责人"
+    )
+    leader_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, comment="受控匹配的负责人来源；历史文本不自动回填"
     )
     phone: Mapped[str | None] = mapped_column(
         String(20), nullable=True, comment="联系电话"

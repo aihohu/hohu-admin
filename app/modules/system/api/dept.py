@@ -2,113 +2,54 @@ from fastapi import APIRouter, Body, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_permissions
-from app.core.base_response import PageResult, ResponseModel
+from app.core.base_response import ResponseModel
 from app.core.tenant import TenantContext
-from app.db.authorization_http import system_write, user_read
+from app.db.authorization_http import relation_read, system_write, user_read
 from app.db.session import get_db
 from app.modules.auth.service import get_current_tenant_context
-from app.modules.system.models.dept import Dept
 from app.modules.system.models.user import User
 from app.modules.system.schemas.dept import (
     DeptCreate,
     DeptMove,
-    DeptOut,
     DeptQuery,
-    DeptTreeOptionOut,
-    DeptTreeOut,
     DeptUpdate,
     DeptUsersUpdate,
 )
-from app.modules.system.schemas.user_projection import ProjectedUserOut, UserMemberQuery
-from app.modules.system.service.dept_selector import department_selector
-from app.utils.data_scope import resolve_data_scope
-from app.utils.pagination import build_filters
+from app.modules.system.schemas.relation_form import RelationFormOut, RelationFormQuery
+from app.modules.system.schemas.relation_policy import RelationPage
+from app.modules.system.schemas.relation_projection import (
+    ProjectedDeptOut,
+    ProjectedTreeOptionOut,
+)
+from app.modules.system.schemas.user_projection import (
+    ProjectedMemberPage,
+    UserMemberQuery,
+)
 
 router = APIRouter()
 
 
-def _dept_filters(query: DeptQuery) -> list:
-    """Build the shared department metadata filters."""
-    return build_filters(
-        Dept,
-        {
-            "dept_name": ("dept_name", "contains"),
-            "status": ("status", "=="),
-            "leader": ("leader", "contains"),
-        },
-        **query.model_dump(),
-    )
-
-
-def _build_dept_tree(depts: list[Dept]) -> list[dict]:
-    """Project visible rows as a local-root tree."""
-    dept_by_id = {int(dept.dept_id): dept for dept in depts}
-    visible_ids = set(dept_by_id)
-    local_ancestors: dict[int, str] = {}
-
-    def ancestors_for(dept: Dept, visiting: frozenset[int] = frozenset()) -> str:
-        dept_id = int(dept.dept_id)
-        if dept_id in local_ancestors:
-            return local_ancestors[dept_id]
-        parent_id = int(dept.parent_id) if dept.parent_id is not None else None
-        if parent_id not in visible_ids or dept_id in visiting:
-            local_ancestors[dept_id] = "0"
-            return "0"
-        parent = dept_by_id[parent_id]
-        value = f"{ancestors_for(parent, visiting | {dept_id})},{parent_id}"
-        local_ancestors[dept_id] = value
-        return value
-
-    dept_map: dict[int, dict] = {}
-    for dept in depts:
-        item = DeptTreeOut.model_validate(dept).model_dump()
-        parent_id = int(dept.parent_id) if dept.parent_id is not None else None
-        item["parent_id"] = str(parent_id) if parent_id in visible_ids else None
-        item["ancestors"] = ancestors_for(dept)
-        item["children"] = []
-        dept_map[int(dept.dept_id)] = item
-
-    tree: list[dict] = []
-    for dept in depts:
-        item = dept_map[int(dept.dept_id)]
-        parent_id = int(dept.parent_id) if dept.parent_id is not None else None
-        if parent_id in dept_map:
-            dept_map[parent_id]["children"].append(item)
-        else:
-            tree.append(item)
-    return tree
-
-
-def _build_dept_options(depts: list[Dept]) -> list[DeptTreeOptionOut]:
-    """Project visible enabled rows as local-root options."""
-    visible_ids = {int(dept.dept_id) for dept in depts}
-    dept_map = {
-        int(dept.dept_id): DeptTreeOptionOut(
-            id=dept.dept_id,
-            label=dept.dept_name,
-            p_id=(
-                str(dept.parent_id)
-                if dept.parent_id is not None and int(dept.parent_id) in visible_ids
-                else ""
-            ),
-            children=[],
+@router.get(
+    "/form-context",
+    response_model=ResponseModel[RelationFormOut[ProjectedDeptOut]],
+    summary="获取当前表单与字段能力",
+)
+async def get_form_context(
+    query: RelationFormQuery = Query(),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
+):
+    return ResponseModel.success(
+        data=await relation_read(
+            db, current_user, operation="dept.form", query=query, tenant=tenant
         )
-        for dept in depts
-    }
-    tree: list[DeptTreeOptionOut] = []
-    for dept in depts:
-        option = dept_map[int(dept.dept_id)]
-        parent_id = int(dept.parent_id) if dept.parent_id is not None else None
-        if parent_id in dept_map:
-            dept_map[parent_id].children.append(option)
-        else:
-            tree.append(option)
-    return tree
+    )
 
 
 @router.get(
     "/tree",
-    response_model=ResponseModel[list[DeptTreeOut]],
+    response_model=ResponseModel[list[ProjectedDeptOut]],
     summary="获取部门树形结构",
     description="获取所有部门的树形结构，用于部门管理页面",
     dependencies=[Depends(require_permissions("system:dept:list"))],
@@ -119,19 +60,16 @@ async def get_dept_tree(
     current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """获取部门树形结构（支持筛选）"""
-    scope = await resolve_data_scope(db, current_user, tenant=tenant)
-    depts = await department_selector.rows(
-        db,
-        scope=scope,
-        filters=_dept_filters(query),
+    return ResponseModel.success(
+        data=await relation_read(
+            db, current_user, operation="dept.tree", tenant=tenant, query=query
+        )
     )
-    return ResponseModel.success(data=_build_dept_tree(depts))
 
 
 @router.get(
     "/tree-option",
-    response_model=ResponseModel[list[DeptTreeOptionOut]],
+    response_model=ResponseModel[list[ProjectedTreeOptionOut]],
     summary="获取部门下拉选项",
     description="获取启用状态的部门树形选项，用于下拉选择",
     dependencies=[Depends(require_permissions("system:dept:list"))],
@@ -141,39 +79,36 @@ async def get_dept_tree_option(
     current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """获取部门下拉选项（仅启用状态）"""
-    scope = await resolve_data_scope(db, current_user, tenant=tenant)
-    depts = await department_selector.rows(
-        db,
-        scope=scope,
-        filters=[Dept.status == "1"],
+    return ResponseModel.success(
+        data=await relation_read(
+            db, current_user, operation="dept.options", tenant=tenant
+        )
     )
-    return ResponseModel.success(data=_build_dept_options(depts))
 
 
 @router.get(
     "/tree-list",
-    response_model=ResponseModel[PageResult[DeptTreeOut]],
+    response_model=ResponseModel[RelationPage[ProjectedDeptOut]],
     summary="获取部门树形列表(带伪分页)",
     description="获取部门树形结构，包装为 PageResult 适配前端",
     dependencies=[Depends(require_permissions("system:dept:list"))],
 )
 async def get_dept_tree_list(
+    query: DeptQuery = Depends(),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """获取部门树形列表（带伪分页）"""
-    scope = await resolve_data_scope(db, current_user, tenant=tenant)
-    depts = await department_selector.rows(db, scope=scope)
-    tree = _build_dept_tree(depts)
-    page_data = PageResult(records=tree, total=len(tree), current=1, size=len(tree))
-    return ResponseModel.success(data=page_data)
+    return ResponseModel.success(
+        data=await relation_read(
+            db, current_user, operation="dept.tree-list", tenant=tenant, query=query
+        )
+    )
 
 
 @router.get(
     "/list",
-    response_model=ResponseModel[PageResult[DeptOut]],
+    response_model=ResponseModel[RelationPage[ProjectedDeptOut]],
     summary="获取部门分页列表",
     dependencies=[Depends(require_permissions("system:dept:list"))],
 )
@@ -183,21 +118,16 @@ async def get_dept_list(
     current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """获取部门分页列表"""
-    scope = await resolve_data_scope(db, current_user, tenant=tenant)
-    page_data = await department_selector.page(
-        db,
-        scope=scope,
-        current=query.current,
-        size=query.size,
-        filters=_dept_filters(query),
+    return ResponseModel.success(
+        data=await relation_read(
+            db, current_user, operation="dept.list", tenant=tenant, query=query
+        )
     )
-    return ResponseModel.success(data=page_data)
 
 
 @router.get(
     "/{dept_id}",
-    response_model=ResponseModel[DeptOut],
+    response_model=ResponseModel[ProjectedDeptOut],
     summary="获取部门详情",
     dependencies=[Depends(require_permissions("system:dept:list"))],
 )
@@ -207,10 +137,11 @@ async def get_dept_detail(
     current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    """获取部门详情"""
-    scope = await resolve_data_scope(db, current_user, tenant=tenant)
-    dept = await department_selector.get_by_id(db, scope=scope, dept_id=dept_id)
-    return ResponseModel.success(data=dept)
+    return ResponseModel.success(
+        data=await relation_read(
+            db, current_user, operation="dept.detail", tenant=tenant, target_id=dept_id
+        )
+    )
 
 
 @router.post(
@@ -336,7 +267,7 @@ async def batch_delete_depts(
 
 @router.get(
     "/{dept_id}/users",
-    response_model=ResponseModel[PageResult[ProjectedUserOut]],
+    response_model=ResponseModel[ProjectedMemberPage],
     summary="获取部门用户管理数据",
     description="返回当前用户数据范围内的部门成员候选分页",
     dependencies=[

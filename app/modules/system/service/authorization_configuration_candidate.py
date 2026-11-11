@@ -36,6 +36,7 @@ from app.db.authorization_plan_session import _order_error
 from app.db.authorization_system_owner import require_candidate_session
 from app.db.base import role_menus
 from app.modules.system.models.config import Config
+from app.modules.system.models.field_policy import FieldPolicyHead
 from app.modules.system.models.mail_config import MailConfig
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.setting import SystemSetting
@@ -55,6 +56,7 @@ from app.modules.system.service.authorization_control_identity import (
     read_identity,
 )
 from app.modules.system.service.authorization_read_budget import (
+    AuthorizationReadBudget,
     bounded_authorization_reads,
 )
 from app.modules.system.service.authorization_transaction_service import (
@@ -65,7 +67,14 @@ from app.modules.system.service.config_service import (
     _is_sensitive_config_key,
     _require_custom_key,
 )
+from app.modules.system.service.grant_authority import grant_authority_service
 from app.modules.system.service.mail_service import MailSettings, ready
+from app.modules.system.service.relation_authorization_safety import (
+    menu_after,
+    require_manager_preserved,
+    validate_menu_delegation,
+)
+from app.modules.system.service.relation_field_write_guard import validate_menu_fields
 from app.modules.system.service.settings_service import _decode, settings_service
 from app.modules.system.settings_catalog import SETTINGS, is_builtin_key
 
@@ -312,7 +321,9 @@ class ConfigurationAuthorizationCandidate:
                 budget=TransactionBudget(timeout_ms=timeout),
             )
         )
-        with bounded_authorization_reads(db):
+        with bounded_authorization_reads(
+            db, AuthorizationReadBudget(max_statements=8192)
+        ):
             async with scope as tx:
                 identity = await read_identity(
                     db,
@@ -331,6 +342,25 @@ class ConfigurationAuthorizationCandidate:
                 changes, result_id, immediate = await self._prepare(
                     db, tenant, operation, payload, target_id, facts
                 )
+                if operation.startswith("menu."):
+                    all_facts = {
+                        ResourceKind(kind): [dict(row) for row in rows]
+                        for kind, rows in identity._facts
+                    }
+                    after = menu_after(all_facts, changes)
+                    require_manager_preserved(all_facts, after)
+                    authority = await grant_authority_service.build(
+                        db, tenant.actor_user_id, tenant=tenant
+                    )
+                    validate_menu_delegation(all_facts, after, changes, authority)
+                    await validate_menu_fields(
+                        db,
+                        tx,
+                        tenant=tenant,
+                        actor_user_version=actor_user_version,
+                        facts=all_facts,
+                        changes=changes,
+                    )
                 if operation in {"menu.create", "menu.update"}:
                     audit_field = (
                         "create_by" if operation == "menu.create" else "update_by"
@@ -502,6 +532,11 @@ class ConfigurationAuthorizationCandidate:
                     for row in rows
                     if row["parent_id"] == target_id and row["menu_type"] == "F"
                 }
+                if len(children) != sum(
+                    row["parent_id"] == target_id and row["menu_type"] == "F"
+                    for row in rows
+                ):
+                    raise invalid("MENU_BUTTONS_AMBIGUOUS")
                 codes = {button["code"] for button in payload["buttons"]}
                 deleted = {
                     row["menu_id"]
@@ -591,6 +626,7 @@ class ConfigurationAuthorizationCandidate:
                 "permission": button["code"],
                 "menu_type": "F",
                 "order": 0,
+                "multi_tab": False,
                 "status": "1",
             },
         )
@@ -753,6 +789,16 @@ class ConfigurationAuthorizationCandidate:
             if operation.startswith("menu.")
             else (Config, "config_id")
         )
+        if operation.startswith("menu."):
+            if (
+                await db.scalar(
+                    select(FieldPolicyHead.tenant_id).where(
+                        FieldPolicyHead.tenant_id == tenant.tenant_id
+                    )
+                )
+                is not None
+            ):
+                return {"menu_id": str(result_id)}
         row = (
             (
                 await db.execute(

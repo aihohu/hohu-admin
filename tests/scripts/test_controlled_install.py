@@ -63,7 +63,7 @@ async def test_prepare_keeps_admission_closed_and_records_success(
     if not bootstrap:
         assert events.index("stop") < events.index("migrate")
     assert (guard.directory / "stop.json").exists()
-    assert install.require_receipt(guard, bootstrap)["revision"] == "e0204a000001"
+    assert install.require_receipt(guard, bootstrap)["revision"] == "e020f2b00001"
 
 
 @pytest.mark.parametrize("bootstrap", [True, False])
@@ -107,6 +107,28 @@ async def test_stop_failure_prevents_migration(installation):
     with pytest.raises(RuntimeError):
         await install.prepare(guard, processes, False)
     assert "migrate" not in events and "seed" not in events
+    assert not (guard.directory / "install.json").exists()
+
+
+async def test_policy_upgrade_identity_preflight_precedes_any_migration(
+    installation, monkeypatch
+):
+    guard, processes, events = installation
+
+    async def missing(_):
+        events.append("identity")
+        raise BusinessException(
+            409, "missing", error_code="FIELD_POLICY_ADMIN_PREFLIGHT_REQUIRED"
+        )
+
+    monkeypatch.setattr(
+        "tools.ops.policy_preparation_identity.require_preparation_administrators",
+        missing,
+    )
+    with pytest.raises(BusinessException):
+        await install.prepare(guard, processes, False, policy_port=8765)
+    assert "identity" in events
+    assert "migrate" not in events
     assert not (guard.directory / "install.json").exists()
 
 
