@@ -1,8 +1,10 @@
 """Dormant import preparation validates full records before any owner or SQL."""
 
+import re
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import Mock
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 from openpyxl import Workbook
@@ -36,6 +38,41 @@ def workbook(rows, *, headers=HEADERS):
     book.save(output)
     book.close()
     return output.getvalue()
+
+
+def false_dimensions(payload):
+    output = BytesIO()
+    with (
+        ZipFile(BytesIO(payload)) as source,
+        ZipFile(output, "w", ZIP_DEFLATED) as target,
+    ):
+        for entry in source.infolist():
+            value = source.read(entry)
+            if entry.filename == "xl/worksheets/sheet1.xml":
+                value = re.sub(
+                    rb"<dimension[^>]*/>", b'<dimension ref="A1:H2"/>', value
+                )
+            target.writestr(entry, value)
+    return output.getvalue()
+
+
+@pytest.mark.parametrize("case", ["extra-header", "extra-data", "extra-row"])
+def test_forged_dimensions_cannot_hide_unknown_columns_or_truncate_rows(case):
+    row = ("N", "ordinary", "V", "text", "group", "1", False, None)
+    if case == "extra-header":
+        payload = workbook([row], headers=(*HEADERS, "value_sensitivity"))
+    elif case == "extra-data":
+        payload = workbook([(*row, None, "private")])
+    else:
+        payload = workbook([row] * 1001)
+    with pytest.raises(BusinessException) as error:
+        inputs.parse_control_import(false_dimensions(payload))
+    expected = (
+        "AUTHORIZATION_PLAN_LIMIT_EXCEEDED"
+        if case == "extra-row"
+        else "CONFIG_IMPORT_INVALID_XLSX"
+    )
+    assert error.value.error_code == expected
 
 
 @pytest.mark.parametrize(

@@ -22,7 +22,7 @@
 
 `prepare_control_import()` 仅准备调用方提供的 XLSX bytes，不读取数据库、不提交事务。表头固定为 `config_name, config_key, config_value, config_type, config_group, status, is_public, remark`；额外列、重复或错序表头、公式、非法类型和公开请求拒绝。布尔值只接受 bool、整数 0/1、字符串 true/false/0/1，空值为 false，不使用字符串真值转换。类型和状态仅在空单元格时补默认值。
 
-文件最多 10 MiB，并通过 ZIP/XML 预检；最多 1000 个物理数据行、单值 8 KiB、规范记录合计 1 MiB。解析使用四个 worker、队列 32、3 秒等待；超时仍占有执行中的 worker，工作簿在 finally 关闭。冻结的准备结果仅是输入，不具有授权或可信持久来源。
+文件最多 10 MiB，并通过 ZIP/XML 预检；最多 1000 个物理数据行、单值 8 KiB、规范记录合计 1 MiB。解析不信任工作表声明尺寸，按真实单元格检查列数和行数，避免静默截断。解析使用四个 worker、队列 32、3 秒等待；超时仍占有执行中的 worker，工作簿在 finally 关闭。冻结的准备结果仅是输入，不具有授权或可信持久来源。
 
 ## TaskSpec 和固定域配置
 

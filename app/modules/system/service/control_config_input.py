@@ -67,9 +67,12 @@ def parse_control_import(payload):
             BytesIO(payload), read_only=True, data_only=False, keep_links=False
         )
         sheet = book.active
-        if sheet is None or sheet.max_column != len(CONTROL_IMPORT_HEADERS):
+        if sheet is None:
             raise _invalid()
-        rows = iter(sheet.iter_rows(max_col=8))
+        # Read-only iteration otherwise trusts attacker-controlled dimensions
+        # and can silently truncate extra columns or physical data rows.
+        sheet.reset_dimensions()
+        rows = iter(sheet.iter_rows())
         header = next(rows)
         if tuple(cell.value for cell in header) != CONTROL_IMPORT_HEADERS or any(
             cell.data_type == "f" for cell in header
@@ -79,9 +82,12 @@ def parse_control_import(payload):
         for index, cells in enumerate(rows, 1):
             if index > 1000:
                 raise _limit()
+            if len(cells) > len(CONTROL_IMPORT_HEADERS):
+                raise _invalid()
             if any(cell.data_type == "f" for cell in cells):
                 raise _invalid()
             raw = [cell.value for cell in cells]
+            raw.extend([None] * (len(CONTROL_IMPORT_HEADERS) - len(raw)))
             if all(value is None for value in raw):
                 continue
             values = dict(zip(CONTROL_IMPORT_HEADERS, raw, strict=True))
