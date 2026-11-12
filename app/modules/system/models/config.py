@@ -2,6 +2,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -28,6 +29,10 @@ class Config(Base):
             "tenant_id", "config_key", name="uq_sys_config_tenant_config_key"
         ),
         Index("ix_sys_config_tenant_group", "tenant_id", "config_group"),
+        CheckConstraint(
+            "value_sensitivity IN ('unknown','private','secret')",
+            name="ck_sys_config_value_sensitivity",
+        ),
     )
 
     config_id: Mapped[int] = mapped_column(
@@ -46,6 +51,13 @@ class Config(Base):
         String(100), nullable=False, comment="配置键"
     )
     config_value: Mapped[str] = mapped_column(Text, nullable=False, comment="配置值")
+    value_sensitivity: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="unknown",
+        server_default="unknown",
+        comment="Internal sticky classification; never inferred safe from legacy names",
+    )
     config_type: Mapped[str] = mapped_column(
         String(20), default="text", comment="配置类型：text/richtext/file"
     )

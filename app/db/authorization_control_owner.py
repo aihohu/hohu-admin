@@ -116,11 +116,13 @@ class ControlCandidateOwner:
         audit_method=None,
         issued_audit=None,
         http_result=False,
+        http_protocol=False,
+        protocol_receipt=None,
     ):
         """Own all phases; external DNS/SMTP/probes never borrow business locks."""
 
         require_candidate_session(db)
-        if type(http_result) is not bool:
+        if type(http_result) is not bool or type(http_protocol) is not bool:
             raise _order_error()
         payload, expected_snapshot, audit_context = deepcopy(
             (payload, expected_snapshot, audit_context)
@@ -274,7 +276,11 @@ class ControlCandidateOwner:
                         payload
                     )
                 execution = await configuration_authorization_candidate.execute(
-                    db, **request, audit=audit
+                    db,
+                    **request,
+                    audit=audit,
+                    http_protocol=http_protocol,
+                    protocol_receipt=protocol_receipt,
                 )
                 if type(execution) is not ConfigurationExecution:
                     raise _order_error()

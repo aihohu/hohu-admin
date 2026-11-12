@@ -33,6 +33,7 @@ from app.modules.ai.models.model_policy import TenantAiModelPolicy
 from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
 from app.modules.ai.schemas.agent_admin import AgentAdminDetailItem
+from app.modules.ai.schemas.control_config import validate_control_config
 from app.modules.ai.schemas.model import ModelOut
 from app.modules.ai.schemas.provider import ProviderOut
 from app.modules.ai.service.authorization_catalog_inputs import (
@@ -45,6 +46,7 @@ from app.modules.ai.service.authorization_catalog_inputs import (
     stale,
     wire,
 )
+from app.modules.ai.service.control_catalog_projection import model_pairs, providers
 from app.modules.ai.service.tenant_model_policy_admin_service import (
     tenant_model_policy_admin_service,
 )
@@ -361,13 +363,14 @@ class CatalogAuthorizationCandidate:
                 await self._identity(db, request)
                 facts = await self._facts(db, request)
                 effective = self._effective(request, facts)
-                bounded_json(effective["config"])
-                provider_egress.validate_adapter_config(effective["config"])
-                if "model" in effective:
+                if request.operation in PROBE_OPERATIONS:
+                    validate_control_config(effective["config"], kind="provider")
+                if "model" in effective and request.operation in PROBE_OPERATIONS:
                     model_config = effective["model"].get("config")
                     bounded_json(model_config)
                     provider_egress.validate_adapter_config(model_config)
                     generation_settings(model_config)
+                    validate_control_config(model_config, kind="model")
         prep = CatalogPreparation(
             request, _facts_bytes(facts), wire(effective), weakref.ref(db)
         )
@@ -606,12 +609,20 @@ class CatalogAuthorizationCandidate:
             row = await db.get(AiAgent, result["agent_id"], populate_existing=True)
             return AgentAdminDetailItem.model_validate(row)
         if op in {"provider.create", "provider.update"}:
-            row = await db.get(
-                AiProvider, result["provider_id"], populate_existing=True
-            )
+            row = (
+                await providers(
+                    db,
+                    predicates=(AiProvider.provider_id == result["provider_id"],),
+                    maximum=1,
+                )
+            )[0]
             return ProviderOut.from_record(row)
         if op in {"model.create", "model.update"}:
-            row = await db.get(AiModel, result["model_id"], populate_existing=True)
+            row, _ = (
+                await model_pairs(
+                    db, predicates=(AiModel.model_id == result["model_id"],)
+                )
+            )[0]
             return ModelOut.model_validate(row)
         if op == "model_policy.put_many":
             return PlatformTenantModelCatalogOut.from_projection(result)

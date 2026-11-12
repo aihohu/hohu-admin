@@ -74,6 +74,7 @@ HOSTED_BUTTON_PERMISSIONS = (
             "system:config:list",
             "system:config:add",
             "system:config:edit",
+            "system:config:publish",
             "system:config:delete",
             "system:config:batch-delete",
             "system:config:export",

@@ -154,8 +154,7 @@ async def lifespan(_app: FastAPI):
                 ticket_id="SYSTEM-SCHEDULER",
                 correlation_id=f"scheduler:{RUNNER_ID}",
             )
-            async with AsyncSessionLocal() as db:
-                await scheduler_manager.reload_jobs(db, platform=scheduler_platform)
+            await scheduler_manager.reload_jobs(platform=scheduler_platform)
             cleanup.push_async_callback(scheduler_manager.stop)
             process.stop_callbacks.append(scheduler_manager.stop)
             await scheduler_manager.start_with_pubsub(platform=scheduler_platform)

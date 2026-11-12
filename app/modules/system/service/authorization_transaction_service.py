@@ -8,7 +8,7 @@ import asyncio
 import math
 import re
 from contextlib import asynccontextmanager, contextmanager
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from itertools import groupby
 
@@ -207,6 +207,7 @@ _MUTABLE_COLUMNS = {
             "config_name",
             "config_key",
             "config_value",
+            "value_sensitivity",
             "config_type",
             "config_group",
             "status",
@@ -217,6 +218,15 @@ _MUTABLE_COLUMNS = {
     ),
     ResourceKind.MAIL_CONFIG: frozenset(
         {"values", "password_ciphertext", "version", "last_test_at", "last_test_status"}
+    ),
+    ResourceKind.CONFIG_PUBLICATION: frozenset(
+        {
+            "schema_revision",
+            "content_digest",
+            "publication_version",
+            "published_by_user_id",
+            "published_at",
+        }
     ),
 }
 _MUTABLE_COLUMNS.update(GENERIC_MUTABLE)
@@ -255,6 +265,7 @@ _AUTHORIZATION_KINDS = (
             ResourceKind.MENU,
             ResourceKind.SETTING,
             ResourceKind.CONFIG,
+            ResourceKind.CONFIG_PUBLICATION,
             ResourceKind.TENANT_MODEL_POLICY,
         }
     )
@@ -279,6 +290,7 @@ _MARKETPLACE_USER_DEPENDENCIES = (
     (table("mk_app_rating", column("user_id")), "user_id"),
 )
 _CASCADE_DEPENDENCIES = {
+    ResourceKind.CONFIG: ((ResourceKind.CONFIG_PUBLICATION, "config_id"),),
     ResourceKind.JOB: ((ResourceKind.JOB_LOG, "job_id"),),
     ResourceKind.CONVERSATION: (
         (ResourceKind.SOURCE_MESSAGE, "conversation_id"),
@@ -687,6 +699,16 @@ class _Transaction(GenericPolicyTransaction):
                 raise _order_error()
 
     def _require_mutation_parents(self, key, values):
+        if key.kind is ResourceKind.CONFIG_PUBLICATION:
+            self.assert_held(
+                ResourceKey(ResourceKind.CONFIG, key.tenant_id, key.identity)
+            )
+            if "published_by_user_id" in values:
+                self.assert_held(
+                    ResourceKey(
+                        ResourceKind.USER, key.tenant_id, values["published_by_user_id"]
+                    )
+                )
         if key.kind is ResourceKind.DEPT and values.get("leader_user_id") is not None:
             self.assert_held(
                 ResourceKey(ResourceKind.USER, key.tenant_id, values["leader_user_id"])
@@ -764,6 +786,8 @@ class _Transaction(GenericPolicyTransaction):
 
     def _mutation_context(self, key):
         self.assert_held(key)
+        if key.kind is ResourceKind.CONFIG_PUBLICATION:
+            self._require_mutation_parents(key, {})
         if getattr(self, "_file_phase", False):
             raise _order_error()
         if self._generic is not None or key.kind in GENERIC_POLICY_KINDS:
@@ -821,6 +845,10 @@ class _Transaction(GenericPolicyTransaction):
         ):
             raise _order_error()
         names = sorted(set(changes) | set(expected) | set(spec.key_columns))
+        if key.kind is ResourceKind.JOB_LOG:
+            names = sorted(
+                set(names) | {"job_id", "status", "dispatch_id", "dispatch_expires_at"}
+            )
         await self._timeouts()
         current = (
             (
@@ -852,6 +880,17 @@ class _Transaction(GenericPolicyTransaction):
             )
             if key.kind is ResourceKind.DEPT and "leader_user_id" in changes:
                 self._require_mutation_parents(key, current)
+            if (
+                key.kind is ResourceKind.CONFIG
+                and "value_sensitivity" in changes
+                and current["value_sensitivity"] == "secret"
+                and changes["value_sensitivity"] != "secret"
+            ):
+                raise BusinessException(
+                    409,
+                    "Secret classification cannot be lowered",
+                    error_code="CONFIG_CLASSIFICATION_STICKY",
+                )
             if all(current[name] == value for name, value in changes.items()):
                 return False
             await self._timeouts()
@@ -979,6 +1018,16 @@ class _Transaction(GenericPolicyTransaction):
             spec, predicates, current = await self._mutation_snapshot(key, {}, expected)
             if key.kind is ResourceKind.JOB_LOG:
                 self._require_mutation_parents(key, current)
+                if (
+                    current["status"] not in {"1", "2"}
+                    or current["dispatch_expires_at"] is not None
+                    and current["dispatch_expires_at"] > datetime.now(UTC)
+                ):
+                    raise BusinessException(
+                        409,
+                        "Dispatch lineage is still protected",
+                        error_code="JOB_DISPATCH_PROTECTED",
+                    )
             await self._reject_implicit_deletes(key)
             await self._timeouts()
             row = (

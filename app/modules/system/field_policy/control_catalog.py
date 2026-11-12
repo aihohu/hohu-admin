@@ -214,7 +214,7 @@ def control_catalog():
         ("create", "add", {READ, CREATE}),
         ("update", "edit", {READ, UPDATE}),
         ("export", "export", {READ, EXPORT, CONTAINS, EQ}),
-        ("import", "import", {IMPORT_CREATE, IMPORT_MATCH}),
+        ("import", "import", {READ, IMPORT_CREATE, IMPORT_MATCH}),
     ):
         add(
             config,

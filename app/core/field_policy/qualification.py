@@ -73,7 +73,7 @@ def read_qualification(path, *, catalog, build_sha):
     require(
         type(doc["schema_version"]) is int
         and doc["schema_version"] == 2
-        and doc["database_revision"] == "e020f2b00001"
+        and doc["database_revision"] == "e020f2c00001"
     )
     require(type(doc["objects"]) is list and doc["objects"] == sorted(catalog.objects))
     require(

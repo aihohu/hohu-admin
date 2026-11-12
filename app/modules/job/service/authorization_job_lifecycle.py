@@ -1,19 +1,29 @@
 """Scheduler log facts are separate from task execution and never retry its IO."""
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from types import MappingProxyType
 
 from sqlalchemy import select
 
 from app.core.authorization_plan import LockPlan, NewResource, ResourceKey
 from app.core.authorization_plan import ResourceKind as K
-from app.core.exceptions import BusinessRuleException
+from app.core.exceptions import BusinessException
 from app.core.id_generator import next_id
+from app.core.tenant import TenantContext
 from app.db.authorization_plan_session import _order_error
+from app.modules.job.dispatch import job_config_digest, verify_dispatch
+from app.modules.job.execution_contract import prepare_job_execution
 from app.modules.job.models.job import SysJob, SysJobLog
-from app.modules.job.task_registry import is_tenant_task
+from app.modules.job.service.control_job_guard import require_job_run
 from app.modules.system.models.tenant import Tenant
+from app.modules.system.service.authorization_control_identity import (
+    assert_identity,
+    read_identity,
+)
+from app.modules.system.service.parameter_context import load_parameter_context
+from app.modules.system.service.parameter_facts import parameter_rows
+from app.modules.system.service.parameter_receipt import observed_form_facts
 
 _SEAL = object()
 
@@ -31,30 +41,18 @@ class JobRun:
 
 class JobLifecycleCandidate:
     async def _orphans(self, db, tenant_id):
-        logs = [
-            dict(row)
-            for row in (
-                await db.execute(
-                    select(SysJobLog.__table__)
-                    .where(SysJobLog.tenant_id == tenant_id, SysJobLog.status == "3")
-                    .limit(10001)
-                )
-            ).mappings()
-        ]
-        if len(logs) > 10000:
-            raise BusinessRuleException(
-                "运行日志超过事务预算", error_code="JOB_BATCH_TOO_LARGE"
-            )
+        logs = await parameter_rows(
+            db, SysJobLog.__table__, tenant_id, predicates=(SysJobLog.status == "3",)
+        )
         jobs = {
             row["job_id"]: dict(row)
-            for row in (
-                await db.execute(
-                    select(SysJob.__table__).where(
-                        SysJob.tenant_id == tenant_id,
-                        SysJob.job_id.in_({row["job_id"] for row in logs}),
-                    )
-                )
-            ).mappings()
+            for row in await parameter_rows(
+                db,
+                SysJob.__table__,
+                tenant_id,
+                predicates=(SysJob.job_id.in_({row["job_id"] for row in logs}),),
+                names=("job_id", "timeout_seconds"),
+            )
         }
         return sorted(logs, key=lambda row: row["job_log_id"]), jobs
 
@@ -84,7 +82,7 @@ class JobLifecycleCandidate:
             job = jobs.get(row["job_id"])
             if job is None:
                 raise _order_error()
-            grace = (job["timeout_seconds"] or 1800) * 2
+            grace = min(max(job["timeout_seconds"] or 1800, 1), 1800) * 2
             if (
                 row["runner_id"] == runner_id
                 or (now - row["start_time"]).total_seconds() < grace
@@ -120,33 +118,18 @@ class JobLifecycleCandidate:
             .mappings()
             .one_or_none()
         )
-        logs = list(
-            (
-                await db.execute(
-                    select(SysJobLog.__table__)
-                    .where(
-                        SysJobLog.tenant_id == tenant_id,
-                        SysJobLog.job_id == job_id,
-                        SysJobLog.status == "3",
-                    )
-                    .limit(10001)
-                )
-            ).mappings()
+        logs = await parameter_rows(
+            db,
+            SysJobLog.__table__,
+            tenant_id,
+            predicates=(SysJobLog.job_id == job_id, SysJobLog.status == "3"),
         )
-        if len(logs) > 10000:
-            raise BusinessRuleException(
-                "运行日志超过事务预算", error_code="JOB_BATCH_TOO_LARGE"
-            )
         return dict(job) if job else None, sorted(
             (dict(row) for row in logs), key=lambda row: row["job_log_id"]
         )
 
-    async def claim(self, db, tx, *, tenant_id, job_id, runner_id, manual):
-        if (
-            type(manual) is not bool
-            or type(runner_id) is not str
-            or not 1 <= len(runner_id) <= 64
-        ):
+    async def claim(self, db, tx, *, tenant_id, job_id, runner_id, dispatch=None):
+        if type(runner_id) is not str or not 1 <= len(runner_id) <= 64:
             raise _order_error()
         tenant = await db.get(Tenant, tenant_id)
         if tenant is None:
@@ -154,27 +137,99 @@ class JobLifecycleCandidate:
         job, logs = await self._rows(db, tenant_id, job_id)
         if job is None:
             return None
+        claims = verify_dispatch(dispatch) if dispatch is not None else None
+        identity = None
+        if claims is not None:
+            if (claims.tenant_id, claims.job_id) != (tenant_id, job_id):
+                raise _order_error()
+            subject = TenantContext(
+                tenant_id,
+                tenant.tenant_code,
+                claims.actor_id,
+                tenant.row_version,
+                "worker_envelope",
+            )
+            identity = await read_identity(
+                db,
+                tenant=subject,
+                actor_user_version=claims.actor_version,
+                permissions=("system:job:run",),
+            )
+            context = await load_parameter_context(
+                db,
+                tx,
+                tenant=subject,
+                actor_user_version=claims.actor_version,
+                action="job.run",
+            )
+            facts = await observed_form_facts(
+                db, tx, context, mode="update", target_id=job_id
+            )
+            if (
+                claims.g_epoch,
+                claims.b_epoch,
+                claims.catalog_digest,
+                claims.job_digest,
+            ) != (
+                facts.g_epoch,
+                facts.b_epoch,
+                facts.catalog_digest,
+                job_config_digest(job),
+            ):
+                raise BusinessException(
+                    409, "Dispatch facts have changed", error_code="JOB_DISPATCH_STALE"
+                )
+            require_job_run(context, job)
+            if (
+                await db.scalar(
+                    select(SysJobLog.job_log_id)
+                    .where(
+                        SysJobLog.tenant_id == tenant_id,
+                        SysJobLog.dispatch_id == claims.dispatch_id,
+                    )
+                    .limit(1)
+                )
+                is not None
+            ):
+                return None
+        else:
+            if (
+                tenant.status != "1"
+                or tenant.lifecycle_state != "active"
+                or job["status"] != "1"
+            ):
+                return None
+            try:
+                prepare_job_execution(job)
+            except BusinessException:
+                return None
         new = ResourceKey(K.JOB_LOG, tenant_id, next_id())
         await tx.lock(
             LockPlan(
-                existing=(
-                    ResourceKey(K.TENANT, None, tenant_id),
-                    ResourceKey(K.JOB, tenant_id, job_id),
-                    *(
-                        ResourceKey(K.JOB_LOG, tenant_id, row["job_log_id"])
-                        for row in logs
-                    ),
+                existing=tuple(
+                    {
+                        *(identity.keys if identity is not None else ()),
+                        ResourceKey(K.TENANT, None, tenant_id),
+                        ResourceKey(K.JOB, tenant_id, job_id),
+                        *(
+                            ResourceKey(K.JOB_LOG, tenant_id, row["job_log_id"])
+                            for row in logs
+                        ),
+                    }
                 ),
                 new=(NewResource(new),),
             )
         )
         tenant = await db.get(Tenant, tenant_id, populate_existing=True)
+        if identity is not None:
+            await assert_identity(db, identity)
+            verify_dispatch(dispatch)
         if (job, logs) != await self._rows(db, tenant_id, job_id):
             raise _order_error()
         if (
             tenant.status != "1"
-            or not is_tenant_task(job["job_key"])
-            or (not manual and job["status"] != "1")
+            or tenant.lifecycle_state != "active"
+            or (claims is None and job["status"] != "1")
             or (job["concurrent"] == "2" and logs)
         ):
             return None
@@ -187,6 +242,11 @@ class JobLifecycleCandidate:
             "status": "3",
             "attempt_count": 1,
         }
+        if claims is not None:
+            values.update(
+                dispatch_id=claims.dispatch_id,
+                dispatch_expires_at=datetime.fromtimestamp(claims.expires_at, UTC),
+            )
         await tx.insert_reserved(new, values)
         return JobRun(
             MappingProxyType(job),

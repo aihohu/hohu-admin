@@ -27,7 +27,9 @@ from app.core.field_policy.contracts import (
 from app.core.field_policy.sources import SourceRef
 from app.modules.auth.permission_collect import collect_user_buttons
 from app.modules.system.field_policy.generic_compat import convert_legacy_grants
-from app.modules.system.field_policy.ordinary_catalog import relation_catalog
+from app.modules.system.field_policy.ordinary_catalog import (
+    production_catalog as relation_catalog,
+)
 from app.modules.system.field_policy.relation_catalog import READ
 from app.modules.system.models.field_policy import FieldPolicyHead
 from app.modules.system.models.user_field_policy import UserFieldPolicyState
@@ -58,6 +60,7 @@ def detached(value):
 
 @dataclass
 class RelationReadContext:
+    source_version = "relation-read/v1"
     tenant: object
     actor: object
     rules: object
@@ -296,7 +299,7 @@ class RelationReadContext:
                 FieldRef(record.object_id, name),
                 access,
                 self.catalog.digest,
-                "relation-read/v1",
+                self.source_version,
             )
             encoded = canonical(primitive(ref), 4 * 1024 * 1024)
             self.source_count += 1

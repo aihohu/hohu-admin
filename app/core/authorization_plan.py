@@ -48,6 +48,7 @@ class ResourceKind(StrEnum):
     ROLE_AGENT = "role_agent"
     SETTING = "setting"
     CONFIG = "config"
+    CONFIG_PUBLICATION = "config_publication"
     MAIL_CONFIG = "mail_config"
     POLICY_BINDING = "policy_binding"
     POLICY_REVISION = "policy_revision"
@@ -165,6 +166,12 @@ _RESOURCE_DEFINITIONS = MappingProxyType(
         ),
         ResourceKind.CONFIG: _definition(
             "sys_config", ("config_id",), 510, _SYSTEM + "config"
+        ),
+        ResourceKind.CONFIG_PUBLICATION: _definition(
+            "sys_config_publication",
+            ("config_id",),
+            515,
+            _SYSTEM + "config_publication",
         ),
         ResourceKind.MAIL_CONFIG: _definition(
             "sys_mail_config",

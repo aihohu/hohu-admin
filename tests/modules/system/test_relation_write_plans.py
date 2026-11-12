@@ -16,7 +16,9 @@ from app.core.authorization_plan import (
 )
 from app.core.exceptions import BusinessException
 from app.core.field_policy import FieldRef, Grant, compile_rules
-from app.modules.system.field_policy.ordinary_catalog import relation_catalog
+from app.modules.system.field_policy.ordinary_catalog import (
+    production_catalog as relation_catalog,
+)
 from app.modules.system.field_policy.relation_catalog import UPDATE
 from app.modules.system.models.dept import Dept
 from app.modules.system.schemas.dept import DeptCreate

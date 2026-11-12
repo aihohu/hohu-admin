@@ -155,4 +155,8 @@ def relation_catalog():
 @lru_cache(maxsize=1)
 def production_catalog():
     """Current preparation catalog; activation still requires qualification."""
-    return relation_catalog()
+    from app.modules.system.field_policy.control_catalog import (  # noqa: PLC0415
+        control_catalog,
+    )
+
+    return control_catalog()

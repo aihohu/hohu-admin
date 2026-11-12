@@ -4,26 +4,33 @@ History is immutable. Current bindings receive new revisions with identical
 rules, and all old previews/manifests become stale. No new grant is invented.
 """
 
+import asyncio
+
 from sqlalchemy import func, insert, select, update
 
 from app.core.authorization_maintenance import require_maintenance
 from app.core.field_policy import Catalog
 from app.core.field_policy.contracts import canonical, require
 from app.core.id_generator import next_id
+from app.modules.system.field_policy.control_catalog import CONTROL_CATALOG_REVISION
 from app.modules.system.field_policy.generic_compat import user_compat_object
 from app.modules.system.field_policy.ordinary_catalog import (
-    CATALOG_REVISION,
     ordinary_catalog,
     production_catalog,
+    relation_catalog,
 )
 from app.modules.system.models.field_policy import FieldPolicyBinding as Binding
 from app.modules.system.models.field_policy import FieldPolicyHead as Head
 from app.modules.system.models.field_policy import FieldPolicyObjectState as ObjectState
 from app.modules.system.models.field_policy import FieldPolicyRevision as Revision
+from app.modules.system.models.tenant import Tenant
 from app.modules.system.models.user_field_policy import (
     UserFieldPolicyGlobalGuard as Guard,
 )
 from app.modules.system.models.user_field_policy import UserFieldPolicyState as Barrier
+from app.modules.system.service.authorization_read_budget import (
+    bounded_maintenance_reads,
+)
 from app.modules.system.service.generic_field_policy_migration import (
     migrate_legacy,
     register_catalog,
@@ -36,10 +43,19 @@ from app.modules.system.service.generic_field_policy_state import read_manifest
 
 
 async def prepare_catalog(db, *, fence, source_build):
+    require_maintenance(fence, "migration")
+    with bounded_maintenance_reads(db, fence):
+        async with asyncio.timeout(25), db.begin_nested():
+            return await _prepare_catalog(db, fence=fence, source_build=source_build)
+
+
+async def _prepare_catalog(db, *, fence, source_build):
     evidence = require_maintenance(fence, "migration")
     require(evidence.build_sha == source_build)
     catalog, old = production_catalog(), Catalog((user_compat_object(),), ())
-    sources = {c.digest: c for c in (old, ordinary_catalog(), catalog)}
+    sources = {
+        c.digest: c for c in (old, ordinary_catalog(), relation_catalog(), catalog)
+    }
     await db.scalar(select(Guard.epoch).where(Guard.guard_id == 1).with_for_update())
     barriers = (
         (
@@ -54,6 +70,20 @@ async def prepare_catalog(db, *, fence, source_build):
         .all()
     )
     require(1 <= len(barriers) <= 1024)
+    tenants = set(
+        await db.scalars(
+            select(Tenant.tenant_id).order_by(Tenant.tenant_id).limit(1025)
+        )
+    )
+    require(tenants == {r["tenant_id"] for r in barriers})
+    require(
+        all(
+            r["mode"] in {"legacy", "ready"}
+            and not r["ever_enforced"]
+            and r["active_manifest_digest"] is None
+            for r in barriers
+        )
+    )
     heads = (
         (await db.execute(select(Head.__table__).order_by(Head.tenant_id).limit(1025)))
         .mappings()
@@ -64,7 +94,7 @@ async def prepare_catalog(db, *, fence, source_build):
             db,
             fence=fence,
             catalog=catalog,
-            catalog_revision=CATALOG_REVISION,
+            catalog_revision=CONTROL_CATALOG_REVISION,
             source_build=source_build,
         )
     require({r["tenant_id"] for r in heads} == {r["tenant_id"] for r in barriers})
@@ -79,10 +109,8 @@ async def prepare_catalog(db, *, fence, source_build):
             for r in heads
         )
     )
-    await register_catalog(
-        db, fence=fence, catalog=catalog, catalog_revision=CATALOG_REVISION
-    )
     changed, mappings, decoded = [], [], 0
+    work = []
     for head in heads:
         require_maintenance(fence, "migration")
         tid = head["tenant_id"]
@@ -110,6 +138,13 @@ async def prepare_catalog(db, *, fence, source_build):
             )
         if source.digest == catalog.digest:
             continue
+        work.append((head, source, objects, bindings))
+    await register_catalog(
+        db, fence=fence, catalog=catalog, catalog_revision=CONTROL_CATALOG_REVISION
+    )
+    for head, source, objects, bindings in work:
+        require_maintenance(fence, "migration")
+        tid = head["tenant_id"]
         # Existing revisions/items retain their old catalog FK and content.
         for obj in objects:
             await db.execute(

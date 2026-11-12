@@ -17,7 +17,9 @@ from app.core.field_policy.documents import (
     rules_document,
 )
 from app.core.field_policy.qualification import Qualification
-from app.modules.system.field_policy.ordinary_catalog import relation_catalog
+from app.modules.system.field_policy.ordinary_catalog import (
+    production_catalog as relation_catalog,
+)
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.field_policy import (
     FieldCatalogObject,
@@ -47,9 +49,11 @@ system_sessions = _system_sessions
 plan_sessions = _plan_sessions
 
 
-async def activate_relations(sessions, monkeypatch, *, missing=(), extra_grants=()):
+async def activate_relations(
+    sessions, monkeypatch, *, missing=(), extra_grants=(), catalog=None
+):
     factory, plain = sessions
-    catalog = relation_catalog()
+    catalog = catalog or relation_catalog()
     monkeypatch.setattr(settings, "RELEASE_BUILD_SHA", "b" * 40)
     async with plain() as db:
         action, adapter = catalog_parts(catalog)

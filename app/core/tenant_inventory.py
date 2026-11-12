@@ -236,6 +236,11 @@ TENANT_MODEL_INVENTORY: dict[str, TenantResource] = {
         "app.modules.system.models.config:Config",
         unique_keys=(("tenant_id", "config_key"),),
     ),
+    "sys_config_publication": _resource(
+        "sys_config_publication",
+        "app.modules.system.models.config_publication:ConfigPublication",
+        relationship_keys=(("tenant_id", "config_id"),),
+    ),
     "sys_dict_type": _resource(
         "sys_dict_type",
         "app.modules.system.models.dict_type:DictType",

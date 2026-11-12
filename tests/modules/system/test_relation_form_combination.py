@@ -233,7 +233,7 @@ async def test_both_tenants_use_their_own_form_rules_and_epoch(
         )
     await run(
         policies,
-        command("freeze", 11, expected_epoch=epoch, object_id="system.role"),
+        command("freeze", version + 3, expected_epoch=epoch, object_id="system.role"),
         tenant_id=1,
     )
     blocked = await client.get(

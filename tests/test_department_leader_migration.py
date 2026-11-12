@@ -12,7 +12,12 @@ from tests.test_release_migration_roundtrip import (
 
 async def test_leader_source_upgrade_fk_and_roundtrip(migration_connection):
     db = migration_connection
+    # Exercise the leader migration boundary, not whichever migration is newest.
     chain = release_chain()
+    leader_index = next(
+        i for i, item in enumerate(chain) if item.revision == "e020f2b00001"
+    )
+    chain = chain[: leader_index + 1]
     await db.run_sync(apply_steps, chain[:-1], "upgrade")
     await db.execute(
         text(

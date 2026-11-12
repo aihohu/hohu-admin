@@ -18,6 +18,7 @@ from app.modules.system.field_policy.generic_compat import user_compat_object
         None,
         "build",
         "schema",
+        "revision",
         "object",
         "check",
         "evidence",
@@ -32,7 +33,7 @@ def test_exact_qualification_contract(tmp_path, fault):
     doc = {
         "schema_version": 2,
         "build_sha": "b" * 40,
-        "database_revision": "e020f2b00001",
+        "database_revision": "e020f2c00001",
         "catalog_digest": catalog.digest,
         "action_digest": action,
         "adapter_digest": adapter,
@@ -45,6 +46,8 @@ def test_exact_qualification_contract(tmp_path, fault):
         doc["build_sha"] = "c" * 40
     if fault == "schema":
         doc["schema_version"] = True
+    if fault == "revision":
+        doc["database_revision"] = "e020f2b00001"
     if fault == "object":
         doc["objects"] = []
     if fault == "check":

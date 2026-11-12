@@ -30,12 +30,28 @@ from app.core.exceptions import (
     DuplicateException,
     NotFoundException,
 )
+from app.core.field_policy import resolve_fields
+from app.core.field_policy.contracts import denied
 from app.core.id_generator import next_id
 from app.core.security import decrypt_value, encrypt_value
 from app.db.authorization_plan_session import _order_error
 from app.db.authorization_system_owner import require_candidate_session
 from app.db.base import role_menus
+from app.modules.system.field_policy.control_catalog import (
+    CREATE,
+    IMPORT_CREATE,
+    IMPORT_MATCH,
+    READ,
+    UPDATE,
+)
+from app.modules.system.field_policy.control_values import (
+    PUBLIC_TEXT_SCHEMA,
+    ConfigContent,
+    prepare_value,
+    publication_digest,
+)
 from app.modules.system.models.config import Config
+from app.modules.system.models.config_publication import ConfigPublication
 from app.modules.system.models.field_policy import FieldPolicyHead
 from app.modules.system.models.mail_config import MailConfig
 from app.modules.system.models.menu import Menu
@@ -69,13 +85,29 @@ from app.modules.system.service.config_service import (
 )
 from app.modules.system.service.grant_authority import grant_authority_service
 from app.modules.system.service.mail_service import MailSettings, ready
+from app.modules.system.service.parameter_context import load_parameter_context
+from app.modules.system.service.parameter_facts import parameter_rows
+from app.modules.system.service.parameter_receipt import (
+    observed_form_facts,
+    require_publication_revision,
+    require_receipt,
+)
+from app.modules.system.service.parameter_registration import (
+    require_registration_choice,
+)
+from app.modules.system.service.parameter_setting_facts import setting_snapshot
+from app.modules.system.service.parameter_settings import (
+    describe_mail,
+    read_group,
+    setting_action,
+)
 from app.modules.system.service.relation_authorization_safety import (
     menu_after,
     require_manager_preserved,
     validate_menu_delegation,
 )
 from app.modules.system.service.relation_field_write_guard import validate_menu_fields
-from app.modules.system.service.settings_service import _decode, settings_service
+from app.modules.system.service.settings_service import _decode
 from app.modules.system.settings_catalog import SETTINGS, is_builtin_key
 
 CONFIGURATION_PERMISSIONS = MappingProxyType(
@@ -91,6 +123,8 @@ CONFIGURATION_PERMISSIONS = MappingProxyType(
         "config.delete": "system:config:delete",
         "config.batch_delete": "system:config:batch-delete",
         "config.import": "system:config:import",
+        "config.publish": "system:config:publish",
+        "config.revoke": "system:config:publish",
     }
 )
 _MAIL_ISSUED = object()
@@ -149,18 +183,6 @@ def _mail_config(row):
     )
 
 
-def _mail_result(row):
-    config = _mail_config(row)
-    return {
-        "values": {**config.model_dump(by_alias=True), "password": ""},
-        "revision": str(row["version"]),
-        "configuredPassword": bool(row["password_ciphertext"]),
-        "ready": ready(config),
-        "lastTestAt": row["last_test_at"].isoformat() if row["last_test_at"] else None,
-        "lastTestStatus": row["last_test_status"],
-    }
-
-
 @dataclass(frozen=True, slots=True)
 class ConfigurationExecution:
     value: object
@@ -210,18 +232,22 @@ class ConfigurationAuthorizationCandidate:
         else:
             table = None
         rows = (
-            []
-            if table is None
-            else [
-                dict(row)
-                for row in (
-                    await db.execute(
-                        select(table)
-                        .where(table.c.tenant_id == tenant_id)
-                        .order_by(*table.primary_key.columns)
-                    )
-                ).mappings()
-            ]
+            await parameter_rows(db, table, tenant_id)
+            if operation.startswith("config.") or operation == "settings.save"
+            else (
+                []
+                if table is None
+                else [
+                    dict(row)
+                    for row in (
+                        await db.execute(
+                            select(table)
+                            .where(table.c.tenant_id == tenant_id)
+                            .order_by(*table.primary_key.columns)
+                        )
+                    ).mappings()
+                ]
+            )
         )
         links = []
         if operation.startswith("menu."):
@@ -249,7 +275,12 @@ class ConfigurationAuthorizationCandidate:
                 .one_or_none()
             )
             mail = dict(result) if result else None
-        return rows, links, mail
+        publications = (
+            await parameter_rows(db, ConfigPublication.__table__, tenant_id)
+            if operation.startswith("config.")
+            else []
+        )
+        return rows, links, mail, publications
 
     def _audit(
         self,
@@ -287,8 +318,12 @@ class ConfigurationAuthorizationCandidate:
         target_tenant_id=None,
         expected_snapshot=None,
         audit=None,
+        http_protocol=False,
+        protocol_receipt=None,
     ):
         require_candidate_session(db)
+        if type(http_protocol) is not bool:
+            raise _order_error()
         if type(operation) is not str or operation not in CONFIGURATION_PERMISSIONS:
             raise _order_error()
         payload, target_id = freeze_input(operation, payload, target_id)
@@ -333,15 +368,176 @@ class ConfigurationAuthorizationCandidate:
                     system=global_write,
                 )
                 facts = await self._rows(db, tenant.tenant_id, operation, payload)
+                settings_context = None
+                if operation == "settings.save" and payload["group"] != "security":
+                    settings_context = await load_parameter_context(
+                        db,
+                        tx,
+                        tenant=tenant,
+                        actor_user_version=actor_user_version,
+                        action="settings.save",
+                    )
+                    if http_protocol:
+                        observed = await observed_form_facts(
+                            db,
+                            tx,
+                            settings_context,
+                            mode="group",
+                            group=payload["group"],
+                        )
+                        require_receipt(protocol_receipt, observed)
+                    for name in payload["values"]:
+                        settings_context.write(
+                            "system.setting",
+                            "settings",
+                            setting_action(name),
+                            UPDATE,
+                            (name,),
+                        )
+                    if "registration_role_id" in payload["values"]:
+                        await require_registration_choice(
+                            db,
+                            tx,
+                            settings_context,
+                            actor_user_version,
+                            payload["values"]["registration_role_id"],
+                        )
                 if expected_snapshot is not None:
                     digest = hashlib.sha256(repr(_freeze(facts)).encode()).hexdigest()
                     if type(expected_snapshot) is not str or not hmac.compare_digest(
                         expected_snapshot, digest
                     ):
                         raise _stale()
-                changes, result_id, immediate = await self._prepare(
-                    db, tenant, operation, payload, target_id, facts
-                )
+                if operation in {"config.publish", "config.revoke"}:
+                    changes, result_id, immediate = await self._publication(
+                        db,
+                        tx,
+                        tenant,
+                        actor_user_version,
+                        operation,
+                        payload,
+                        target_id,
+                        facts,
+                    )
+                else:
+                    changes, result_id, immediate = await self._prepare(
+                        db, tenant, operation, payload, target_id, facts
+                    )
+                if operation.startswith("config."):
+                    action = (
+                        "config.unpublish"
+                        if operation == "config.revoke"
+                        else operation.replace("_", "-")
+                    )
+                    context = await load_parameter_context(
+                        db,
+                        tx,
+                        tenant=tenant,
+                        actor_user_version=actor_user_version,
+                        action=action,
+                    )
+                    if http_protocol and operation in {
+                        "config.create",
+                        "config.update",
+                    }:
+                        observed = await observed_form_facts(
+                            db,
+                            tx,
+                            context,
+                            mode=operation.split(".")[1],
+                            target_id=target_id,
+                        )
+                        require_receipt(protocol_receipt, observed)
+                    if operation == "config.import":
+                        await context.prove(
+                            db,
+                            "system.config",
+                            Config.__table__,
+                            (("config_key", IMPORT_MATCH),),
+                            readable=("config_key",),
+                        )
+                    for change in changes:
+                        if operation in {"config.publish", "config.revoke"}:
+                            continue
+                        if change.action not in {"insert", "update"}:
+                            continue
+                        access = (
+                            IMPORT_CREATE
+                            if operation == "config.import"
+                            else CREATE
+                            if change.action == "insert"
+                            else UPDATE
+                        )
+                        fields = tuple(
+                            n
+                            for n in change.values
+                            if n
+                            not in {
+                                "tenant_id",
+                                "config_id",
+                                "value_sensitivity",
+                                "create_by",
+                                "update_by",
+                            }
+                            and not (n == "is_public" and change.action == "insert")
+                        )
+                        context.write(
+                            "system.config",
+                            change.key.identity[0],
+                            action,
+                            access,
+                            fields,
+                        )
+                    if operation == "config.update":
+                        old = next(
+                            row for row in facts[0] if row["config_id"] == target_id
+                        )
+                        changed = any(
+                            name
+                            in {
+                                "config_key",
+                                "config_value",
+                                "config_type",
+                                "status",
+                                "value_sensitivity",
+                            }
+                            and value != old[name]
+                            for change in changes
+                            for name, value in change.values.items()
+                        )
+                        if changed:
+                            changes = [
+                                replace(
+                                    change, values={**change.values, "is_public": False}
+                                )
+                                for change in changes
+                            ]
+                            if any(row["config_id"] == target_id for row in facts[3]):
+                                changes.insert(
+                                    0,
+                                    _Change(
+                                        "delete",
+                                        _key(
+                                            ResourceKind.CONFIG_PUBLICATION,
+                                            tenant.tenant_id,
+                                            target_id,
+                                        ),
+                                    ),
+                                )
+                    if operation in {"config.delete", "config.batch_delete"}:
+                        targets = {change.key.identity[0] for change in changes}
+                        changes = [
+                            _Change(
+                                "delete",
+                                _key(
+                                    ResourceKind.CONFIG_PUBLICATION,
+                                    tenant.tenant_id,
+                                    row["config_id"],
+                                ),
+                            )
+                            for row in facts[3]
+                            if row["config_id"] in targets
+                        ] + changes
                 if operation.startswith("menu."):
                     all_facts = {
                         ResourceKind(kind): [dict(row) for row in rows]
@@ -391,6 +587,14 @@ class ConfigurationAuthorizationCandidate:
                 }[kind]
                 existing.update(
                     _key(kind, tenant.tenant_id, (row[id_column],)) for row in facts[0]
+                )
+                existing.update(
+                    _key(
+                        ResourceKind.CONFIG_PUBLICATION,
+                        tenant.tenant_id,
+                        row["config_id"],
+                    )
+                    for row in facts[3]
                 )
                 existing.update(
                     _key(
@@ -447,13 +651,23 @@ class ConfigurationAuthorizationCandidate:
                     await audit.append(
                         tx, {"operation": operation, "changed_rows": len(changes)}
                     )
-                result = await self._result(
-                    db, tenant, operation, payload, result_id, immediate
-                )
+                if operation == "settings.save":
+                    result = await read_group(
+                        db,
+                        tx,
+                        tenant,
+                        actor_user_version,
+                        payload["group"],
+                        context=settings_context,
+                    )
+                else:
+                    result = await self._result(
+                        db, tenant, operation, payload, result_id, immediate
+                    )
                 return ConfigurationExecution(result, cache_keys, cache_complete)
 
     async def _prepare(self, db, tenant, operation, payload, target_id, facts):
-        rows, links, mail = facts
+        rows, links, mail, _publications = facts
         if operation.startswith("menu."):
             return self._menu(
                 tenant.tenant_id, operation, payload, target_id, rows, links
@@ -486,6 +700,74 @@ class ConfigurationAuthorizationCandidate:
             else "",
         )
         return [_Change("update", _MAIL_KEY, values)], 1, None
+
+    async def _publication(
+        self, db, tx, tenant, actor_version, operation, payload, target_id, facts
+    ):
+        action = (
+            "config.unpublish" if operation == "config.revoke" else "config.publish"
+        )
+        context = await load_parameter_context(
+            db,
+            tx,
+            tenant=tenant,
+            actor_user_version=actor_version,
+            action=action,
+        )
+        current = next((row for row in facts[0] if row["config_id"] == target_id), None)
+        if current is None:
+            raise NotFoundException("配置", target_id)
+        _require_custom_key(current["config_key"])
+        old = next((row for row in facts[3] if row["config_id"] == target_id), None)
+        observed = await observed_form_facts(
+            db, tx, context, mode="update", target_id=target_id
+        )
+        record = context.record("system.config", target_id, context.scopes)
+        for access in (READ,) if operation == "config.revoke" else (READ, UPDATE):
+            decisions = resolve_fields(
+                context.catalog, context.rules, record, action, access
+            )
+            required = {
+                use.ref.field_id
+                for use in context.catalog.actions[action].uses
+                if use.access == access
+            }
+            if any(not decisions[name].allowed for name in required):
+                raise denied()
+        require_publication_revision(
+            payload["expected_revision"],
+            observed,
+            current,
+            old,
+            kind="revoke" if operation == "config.revoke" else "publish",
+        )
+        key = _key(ResourceKind.CONFIG_PUBLICATION, tenant.tenant_id, target_id)
+        config_key = _key(ResourceKind.CONFIG, tenant.tenant_id, target_id)
+        if operation == "config.revoke":
+            changes = [_Change("delete", key)] if old else []
+            if current["is_public"]:
+                changes.append(_Change("update", config_key, {"is_public": False}))
+            return changes, target_id, {"published": False}
+        if current["value_sensitivity"] != "private" or current["config_value"] is None:
+            raise invalid("CONFIG_PUBLICATION_UNSAFE")
+        content = ConfigContent(
+            **{name: current[name] for name in ConfigContent.model_fields}
+        )
+        values = {
+            "schema_revision": PUBLIC_TEXT_SCHEMA,
+            "content_digest": publication_digest(content),
+            "publication_version": old["publication_version"] + 1 if old else 1,
+            "published_by_user_id": tenant.actor_user_id,
+            "published_at": datetime.now(UTC),
+        }
+        return (
+            [
+                _Change("update" if old else "insert", key, values),
+                _Change("update", config_key, {"is_public": True}),
+            ],
+            target_id,
+            {"published": True},
+        )
 
     def _menu(self, tenant_id, operation, payload, target_id, rows, links):
         by_id = {row["menu_id"]: row for row in rows}
@@ -638,6 +920,12 @@ class ConfigurationAuthorizationCandidate:
             changes, skipped = [], 0
             for record in payload.records:
                 values = dict(record)
+                classified = prepare_value(
+                    key=values["config_key"],
+                    config_type=values["config_type"],
+                    replacement=values["config_value"],
+                )
+                values["value_sensitivity"] = classified.sensitivity.value
                 if values["config_key"] in by_key or is_builtin_key(
                     values["config_key"]
                 ):
@@ -654,6 +942,12 @@ class ConfigurationAuthorizationCandidate:
                 by_key[values["config_key"]] = values
             return changes, None, {"success": len(changes), "skipped": skipped}
         if operation == "config.create":
+            classified = prepare_value(
+                key=payload["config_key"],
+                config_type=payload["config_type"],
+                replacement=payload["config_value"],
+            )
+            payload = {**payload, "value_sensitivity": classified.sensitivity.value}
             _require_custom_key(payload["config_key"])
             if payload["config_key"] in by_key:
                 raise DuplicateException("配置键", payload["config_key"])
@@ -676,6 +970,19 @@ class ConfigurationAuthorizationCandidate:
             _require_custom_key(by_id[row_id]["config_key"])
         if operation == "config.update":
             values = dict(payload)
+            old = by_id[target_id]
+            options = {
+                "key": values.get("config_key", old["config_key"]),
+                "config_type": values.get("config_type", old["config_type"]),
+                "previous": old["value_sensitivity"],
+            }
+            if "config_value" in values:
+                options["replacement"] = values["config_value"]
+            classified = prepare_value(**options)
+            if not classified.write_value:
+                values.pop("config_value", None)
+            if classified.sensitivity.value != old["value_sensitivity"]:
+                values["value_sensitivity"] = classified.sensitivity.value
             if "config_key" in values:
                 _require_custom_key(values["config_key"])
                 existing = by_key.get(values["config_key"])
@@ -703,14 +1010,30 @@ class ConfigurationAuthorizationCandidate:
             len(ids) if operation.endswith("batch_delete") else True,
         )
 
-    async def _settings(self, db, tenant, payload, rows, mail):
+    async def _settings(self, db, tenant, payload, rows, _mail):
         group = payload["group"]
-        current = await settings_service.get_group(db, group, tenant=tenant)
-        if not hmac.compare_digest(payload["revision"], current["revision"]):
+        definitions = {key: d for key, d in SETTINGS.items() if d.group == group}
+        snapshot, revision = await setting_snapshot(
+            db,
+            tenant.tenant_id,
+            group,
+            readable=tuple(key for key, d in definitions.items() if d.kind != "secret"),
+        )
+        stored = {row["setting_key"]: row for row in snapshot}
+        current_values = {
+            key: _decode(d, stored[key]["setting_value"])
+            if key in stored
+            and stored[key]["status"] == "1"
+            and stored[key]["setting_value"] is not None
+            else _decode(d, d.default)
+            for key, d in definitions.items()
+            if d.kind != "secret"
+        }
+        if not hmac.compare_digest(payload["revision"], revision):
             raise _conflict()
         if group == "account":
             merged = {
-                **current["values"],
+                **current_values,
                 **{
                     key: _decode(SETTINGS[key], value)
                     for key, value in payload["values"].items()
@@ -718,7 +1041,7 @@ class ConfigurationAuthorizationCandidate:
             }
             if (
                 merged["register_enabled"] or merged["password_reset_enabled"]
-            ) and not ready(_mail_config(mail)):
+            ) and not (await describe_mail(db))["ready"]:
                 raise invalid("MAIL_NOT_CONFIGURED")
             await account_service.registration_role(
                 db, tenant.tenant_id, merged["registration_role_id"]
@@ -752,6 +1075,8 @@ class ConfigurationAuthorizationCandidate:
         by_id = {row["config_id"]: row for row in rows}
         keys = {f"cache:tenant:{tenant_id}:config:custom:public"}
         for change in changes:
+            if change.key.kind is not ResourceKind.CONFIG:
+                continue
             old = by_id.get(change.key.identity[0])
             new = (
                 {**(old or {}), **change.values} if change.action != "delete" else None
@@ -768,22 +1093,15 @@ class ConfigurationAuthorizationCandidate:
                 return (), False
         return tuple(sorted(keys)), True
 
-    async def _result(self, db, tenant, operation, payload, result_id, immediate):
+    async def _result(self, db, tenant, operation, _payload, result_id, immediate):
         if immediate is not None:
             return immediate
+        if operation.startswith("config."):
+            return {"config_id": str(result_id)}
         if operation == "settings.save":
-            return await settings_service.get_group(db, payload["group"], tenant=tenant)
+            raise _order_error()
         if operation == "mail.save":
-            row = (
-                (
-                    await db.execute(
-                        select(MailConfig.__table__).where(MailConfig.config_id == 1)
-                    )
-                )
-                .mappings()
-                .one()
-            )
-            return _mail_result(dict(row))
+            return await describe_mail(db)
         model, name = (
             (Menu, "menu_id")
             if operation.startswith("menu.")
@@ -831,7 +1149,9 @@ class ConfigurationAuthorizationCandidate:
             operation="mail.test",
             target_tenant_id=None,
         )
-        with bounded_authorization_reads(db):
+        with bounded_authorization_reads(
+            db, AuthorizationReadBudget(max_statements=4096)
+        ):
             async with authorization_transactions.scope(
                 db,
                 tenants=(TenantLock(tenant.tenant_id),),
@@ -931,7 +1251,9 @@ class ConfigurationAuthorizationCandidate:
             operation="mail.test",
             target_tenant_id=None,
         )
-        with bounded_authorization_reads(db):
+        with bounded_authorization_reads(
+            db, AuthorizationReadBudget(max_statements=4096)
+        ):
             async with authorization_transactions.scope(
                 db,
                 tenants=(TenantLock(tenant.tenant_id),),
@@ -969,7 +1291,7 @@ class ConfigurationAuthorizationCandidate:
                 await audit.append(
                     tx, {"operation": "mail.test", "accepted": outcome.accepted}
                 )
-                return _mail_result({**current, **values})
+                return await describe_mail(db)
 
 
 configuration_authorization_candidate = ConfigurationAuthorizationCandidate()

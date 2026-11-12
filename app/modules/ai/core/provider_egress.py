@@ -16,6 +16,7 @@ import httpx
 
 from app.core.config import settings
 from app.core.exceptions import BusinessException, BusinessRuleException
+from app.modules.ai.schemas.control_config import validate_control_config
 from app.utils.safe_http import resolve_and_validate_addresses
 
 logger = logging.getLogger(__name__)
@@ -292,7 +293,12 @@ class ProviderEgressPolicy:
         configs: Iterable[Any] = (),
     ) -> bool:
         try:
-            for config in configs:
+            for index, config in enumerate(configs):
+                if index > 1:
+                    return False
+                validate_control_config(
+                    config, kind="provider" if index == 0 else "model"
+                )
                 self.validate_adapter_config(config)
         except BusinessException:
             return False

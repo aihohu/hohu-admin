@@ -1,6 +1,6 @@
-# 配置与任务字段内部候选契约
+# 配置、设置与任务字段控制
 
-本文面向后端维护者，说明配置、设置和任务的纯 Python 候选接口。`control_catalog()`、值分类、导入准备、TaskSpec 及固定域投影均未接入当前 HTTP、事务所有者或 scheduler；当前受控准备目录仍是七对象。使用这些函数不代表新增对象已取得生产激活资格，也不能改变旧 TaskRegistry 的执行行为。通用授权前提见[内核契约](FIELD-POLICY-CORE.md)，当前关系入口见[关系字段读取](RELATION-FIELD-PROJECTION.md)。
+本文说明 Backend 0.2.0 开发版本的配置、设置与任务接口。HTTP 请求释放原读取事务后，交由独立所有者重新验证身份、字段策略和租户范围。受控准备目录现为十对象、144 字段、69 动作；历史四对象、七对象目录保留原摘要。准备目录不等于生产激活资格，完整交付与独立验收门仍然关闭。通用授权前提见[内核契约](FIELD-POLICY-CORE.md)，关系入口见[关系字段读取](RELATION-FIELD-PROJECTION.md)。
 
 ## 目录与动作
 
@@ -18,7 +18,7 @@
 
 ## 严格输入与导入准备
 
-独立的 `ControlConfigCreate` / `ControlConfigUpdate` 拒绝未知字段、内部分类/发布字段、空修改及非法 null，不替换旧 HTTP Schema。`is_public=true` 要求走发布动作，内置设置 key 不走普通配置协议；修改时最终 key、类型、旧分类及实际字段足迹仍须按数据库当前行复验。
+HTTP 使用 `ControlConfigCreate` / `ControlConfigUpdate` 的闭集契约，拒绝未知字段、内部分类/发布字段、空修改及非法 null。`is_public=true` 要求走发布动作，内置设置 key 不走普通配置协议；修改时最终 key、类型、旧分类及实际字段足迹仍按数据库当前行复验。
 
 `prepare_control_import()` 仅准备调用方提供的 XLSX bytes，不读取数据库、不提交事务。表头固定为 `config_name, config_key, config_value, config_type, config_group, status, is_public, remark`；额外列、重复或错序表头、公式、非法类型和公开请求拒绝。布尔值只接受 bool、整数 0/1、字符串 true/false/0/1，空值为 false，不使用字符串真值转换。类型和状态仅在空单元格时补默认值。
 
@@ -30,12 +30,42 @@
 
 `prepare_task_args()` 同时限制原始输入和默认值展开后的 JSON：8192 字节、深度 8、节点 1024。重复键、NaN、非有限数字及非法 Unicode 拒绝。`call_arguments()` 重新校验绑定到同一 TaskSpec 的准备数据，仅返回一个独立的位置 dict；None、空字符串和空对象统一为该调用形态，不依赖 args/_args 关键字。公开 schema 去除默认值和描述，不使用函数 docstring；登记后模型漂移拒绝。这些对象不创建身份上下文，不保存创建者角色，不提供执行授权或 execute 方法。
 
-`builtin_task_contracts()` 精确绑定当前测试任务及三个导入/导出过期清理函数；租户候选仅有无业务能力的 `test_task`，其余固定为平台保留任务。新注册旧任务不会自动进入该候选。
+`builtin_task_contracts()` 精确绑定当前测试任务及三个导入/导出过期清理函数；租户任务仅有无业务能力的 `test_task`，其余固定为平台保留任务。普通 TaskRegistry 注册不会取得排程或执行资格。历史未知任务保留原参数，允许修改名称、备注和停用、删除，不能启用、运行或修改调度。定时执行按固定服务能力验证当前租户与任务，不继承创建者角色。
 
-`ai.schemas.control_config` 的候选 Provider 扩展配置为空闭集，Model 仅允许 generation 下的 max_tokens、temperature。新输入未知键拒绝，旧异常配置整值隐藏；固定配置上限 64 KiB、深度 8、节点 1024。候选函数不替换当前 `redact_config` 或已有输出 Schema。
+`ai.schemas.control_config` 已接入平台写入、探测和实际出站检查。Provider 扩展配置为空闭集，Model 仅允许 generation 下的 max_tokens、temperature。新输入未知键拒绝，历史未知配置整值隐藏；仅修改元数据不会重写原配置，未知扩展不能取得执行能力。读取使用 SQL 闭集投影，api_key 只有 configured 布尔，未知 JSON 与密钥不进入管理响应。固定配置上限 64 KiB、深度 8、节点 1024。邮件与平台保留各自真实身份、功能权限和审计协议，不进入租户字段目录。
+
+## HTTP 与旧客户端
+
+Config、Job 列表保留 `records/total/current/size`，附页级和行级 `fieldPolicy`；无权字段缺键，合法可见 null 保留。查询用途在原租户范围上证明，先于过滤、计数与分页。Job 不返回旧 create_by/update_by 自由文本。
+
+`GET /system/config/form` 与 `GET /system/job/form` 接受 `mode=create|update`；update 必须有字符串 `recordId`，create 禁止目标。响应包含稀疏 record、fieldPolicy 和最长五分钟的 formReceipt。Config/Job 新增、普通修改及 Settings 分组保存必须携带当前 receipt，缺失、过期或上下文变化由服务端拒绝；伪造版本请求头不能代替。receipt 只证明表单协议，所有者仍按实际提交字段重新授权。普通修改只发送 dirty 字段，写而不可读的字段仅在明确替换时提交。
+
+Settings values 的 key 保持原拼写，不递归 camelCase。保存只接受当前分组的 dirty 键，revision 绑定完整原事实及默认定义，采用数据库侧指纹与 HMAC，不向响应暴露秘密。注册角色选择器必须证明完整候选集合和角色名称来源；不完整时关闭选择器，保存另验注册资格与委派上界。默认密码不读取，空输入保持原值；秘密元数据也按命令能力过滤。
+
+Config 的 `PUT /system/config/{config_id}/publication` 接受 confirmed=true 与 expectedRevision，后者来自有完整发布权限及读取、修改足迹的表单 publicationRevision。`DELETE` 同路径只需 expectedRevision，使用表单独立的 revocationRevision，按 unpublish 锚点动作撤回，无需读取隐藏内容。两种证明绑定当前身份、G/B、目录、目标与登记，最长五分钟，不能互换。值、key、类型、状态或分类改变会在同一事务撤销旧登记；恢复旧值不会自动恢复公开资格。
+
+公开自定义配置每次新鲜验证租户、分类、发布登记和精确摘要，不复用旧 public 缓存。历史 is_public=true 不构成新发布资格；历史未知分类值继续保存但不读取、导出或公开。只有显式合法完整替换才能按新协议分类，secret 不因改名降级。
+
+Job 普通 update 只收名称、备注；`PUT /system/job/schedule` 使用专用调度命令，status/run 保留专用入口。registered 只返回真实 TaskSpec 的安全标签和闭集参数 schema。AI cron 修改也验证调度字段写权限，预览与结果中的旧 cron、名称须有当前读取来源。
+
+Job 的 `specialUpdate` 汇总当前可用的调度、状态字段，普通 `update` 仍仅表示名称、备注；这些提示不替代实际命令校验。表单查询拒绝未知参数，任务 ID 接受规范的十进制字符串，拒绝布尔值、空白及前导零。
+
+SMTP 测试采用准备、锁外发送、完成三个阶段。两个数据库阶段各限八秒和 4096 次 SELECT；发送最多十五秒。完成段重新验证当前身份和配置，在 G-S/B-S 与 Mail 行锁下按配置版本写测试时间、状态和审计，不推进授权 epoch。
+
+## Dispatch 与维护
+
+手动运行的 Redis 消息为服务端签名封套，最多 2048 字节、最长 30 秒，绑定租户、任务、当前用户安全版本、G/B、目录、配置摘要及单次 dispatch_id。监听端拒绝旧 tenant/job 裸消息；验签只用于定位，claim 在新事务内重新验证当前身份、功能和字段许可，再持久化 nonce 与原过期时间。明确收到 claim 提交 ACK 后才调用任务，任务函数运行时不持数据库会话或 G/B。
+
+同一 nonce 至多一次认领，日志在原期限内或运行状态下不能删除。claim、完成或通知 ACK 未知不会自动重做任务。完成与孤儿回收仅收口原运行事实。直接合并运行与独立 scheduler 共用这些所有者；reload 按租户获取有界快照，释放事务后才修改 APScheduler。
+
+运行入口的 `notificationStatus=notified` 只表示 Redis 确认存在订阅者，不能证明任务已执行；零订阅者、连接失败或超时返回 `unconfirmed`。响应不暴露封套，也不自动重发数据库命令或任务。
+
+数据库迁移增加值分类、发布登记和 dispatch 防重放事实，不推断旧数据来源。一般 downgrade 固定拒绝，恢复须停写并还原整套一致性备份。受控目录迁入只接受精确历史来源、完整租户集合、从未生效且无 active 的准备状态；旧规则以新修订保留，新增对象不自动授予，重复执行不推进版本。直接启动与 Docker Compose 均须沿[受控安装](CONTROLLED-INSTALL.md)验证实际进程、后台任务、防重入和数据库在途事务；Ctrl+C 不能代替维护证据。
+
+受控安装接受本系列已知的 `e020f2a00001`、`e020f2b00001` 前置 head 升级到 `e020f2c00001`；未知或分叉 head 继续拒绝，不能用 `stamp` 代替迁移。
 
 ## 错误与兼容边界
 
 非法值使用 `CONFIG_VALUE_SCHEMA_UNREGISTERED`，不安全公开内容使用 `CONFIG_PUBLICATION_UNSAFE`；普通输入公开请求使用 `CONFIG_PUBLICATION_REQUIRED`，内置 key 使用 `BUILTIN_SETTING_PROTECTED`。导入格式使用 `CONFIG_IMPORT_INVALID_XLSX`，容量超限使用 `AUTHORIZATION_PLAN_LIMIT_EXCEEDED`；任务声明不合格或漂移使用 `JOB_ARGUMENT_SCHEMA_REQUIRED`，参数不合格使用 `JOB_ARGUMENT_INVALID`。错误不带原始值。
 
-候选没有数据库读写、迁移或运行接线，也没有新增 HTTP 路径。现有策略摘要、激活屏障、七对象准备目录及旧输入/输出路径保持原有契约；不能仅凭这些纯函数将目录切换为十对象或重新开放生产激活。
+普通表单升级使用 `FIELD_POLICY_PROTOCOL_REQUIRED`，发布证明变化或过期使用 `CONFIG_PUBLICATION_CONFLICT`；dispatch 的签名、期限或当前事实不匹配分别拒绝，错误不带原参数。新客户端须与 Backend 同组合安装，旧整对象表单不作为写兼容客户端。日志与 AI 全文、文件来源及 Web 完整交付另有验收要求，不能据此文档重新开放生产激活。

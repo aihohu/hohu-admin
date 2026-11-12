@@ -19,7 +19,9 @@ from app.core.field_policy import (
 from app.core.field_policy.contracts import denied
 from app.modules.auth.permission_collect import collect_user_buttons
 from app.modules.system.field_policy.generic_compat import convert_legacy_grants
-from app.modules.system.field_policy.ordinary_catalog import relation_catalog
+from app.modules.system.field_policy.ordinary_catalog import (
+    production_catalog as relation_catalog,
+)
 from app.modules.system.field_policy.relation_catalog import CREATE, EXACT, READ, UPDATE
 from app.modules.system.field_policy.write_plan import user_write_footprint
 from app.modules.system.models.field_policy import FieldPolicyHead

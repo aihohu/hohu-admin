@@ -23,6 +23,7 @@ from app.db.authorization_job_owner import JobOwner
 from app.db.authorization_lease_owner import LeaseOwner
 from app.db.authorization_lifecycle_owner import LifecycleOwner
 from app.db.authorization_owner import authorization_session
+from app.db.authorization_parameter_read_owner import parameter_read_owner
 from app.db.authorization_pending_owner import PendingOwner
 from app.db.authorization_plan_session import AuthorizationPlanSession, _order_error
 from app.db.authorization_policy_owner import UserFieldPolicyOwner
@@ -87,6 +88,10 @@ class AuthorizationRuntime:
     async def user_read(self, **request):
         async with authorization_session(self.sessions) as db:
             return await user_read_owner.execute(db, **request)
+
+    async def parameter_read(self, **request):
+        async with authorization_session(self.sessions) as db:
+            return await parameter_read_owner.execute(db, **request)
 
     async def field_policy(self, **request):
         async with authorization_session(self.sessions) as db:

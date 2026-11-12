@@ -57,7 +57,7 @@ def test_candidate_keeps_all_historical_and_production_facts():
         relation_catalog().digest
         == "0cc4f21cfd52b83d1ee018a2009034cf546d437d93074716bfdb80c82e3d0ec6"
     )
-    assert production_catalog().digest == relation_catalog().digest
+    assert production_catalog().digest == candidate.digest
     assert (len(candidate.objects), len(candidate.fields)) == (10, 144)
     for key, value in relation_catalog().objects.items():
         assert candidate.objects[key] == value

@@ -29,6 +29,7 @@ def release_chain():
         "e020f1200001",
         "e020f2a00001",
         "e020f2b00001",
+        "e020f2c00001",
     ]
     return [item.module for item in revisions]
 
@@ -119,9 +120,45 @@ async def test_fresh_install_preserves_security_triggers(migration_connection):
     )
 
 
-async def test_empty_release_upgrade_downgrade_roundtrip(migration_connection):
+async def test_control_upgrade_preserves_old_public_bytes_as_unknown(
+    migration_connection,
+):
     connection = migration_connection
     chain = release_chain()
+    await connection.run_sync(apply_steps, chain[:-1], "upgrade")
+    await connection.execute(
+        sa.text(
+            "INSERT INTO sys_config (config_id,tenant_id,config_name,config_key,config_value,config_type,config_group,status,is_public) VALUES (99001,0,'Historical','business.historical','keep-private-bytes','text','business','1',true)"
+        )
+    )
+    await connection.run_sync(apply_steps, chain[-1:], "upgrade")
+    assert (
+        await connection.execute(
+            sa.text(
+                "SELECT config_value,is_public,value_sensitivity FROM sys_config WHERE config_id=99001"
+            )
+        )
+    ).one() == ("keep-private-bytes", True, "unknown")
+    assert (
+        await connection.scalar(sa.text("SELECT count(*) FROM sys_config_publication"))
+        == 0
+    )
+    with pytest.raises(RuntimeError, match="FIELD_POLICY_DOWNGRADE_BLOCKED"):
+        await connection.run_sync(apply_steps, chain[-1:], "downgrade")
+    assert (
+        await connection.execute(
+            sa.text(
+                "SELECT config_value,is_public,value_sensitivity FROM sys_config WHERE config_id=99001"
+            )
+        )
+    ).one() == ("keep-private-bytes", True, "unknown")
+
+
+async def test_historical_empty_release_upgrade_downgrade_roundtrip(
+    migration_connection,
+):
+    connection = migration_connection
+    chain = release_chain()[:-1]  # Current privacy/nonce boundary cannot downgrade.
     await connection.run_sync(apply_steps, chain, "upgrade")
     initial_policy = sa.text(
         "SELECT g.guard_id, g.epoch, s.tenant_id, s.mode, s.ever_enforced, s.epoch, "

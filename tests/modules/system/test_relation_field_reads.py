@@ -14,7 +14,9 @@ from app.db.base import role_depts, role_menus, user_depts, user_roles
 from app.modules.ai.api import role_agent as role_agent_api
 from app.modules.auth import api as auth_api
 from app.modules.system.api import menu as menu_api
-from app.modules.system.field_policy.ordinary_catalog import relation_catalog
+from app.modules.system.field_policy.ordinary_catalog import (
+    production_catalog as relation_catalog,
+)
 from app.modules.system.field_policy.relation_catalog import READ, SORT
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.menu import Menu

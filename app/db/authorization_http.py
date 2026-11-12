@@ -242,7 +242,15 @@ async def login_http(db, credentials, *, host=None, ip=None, user_agent=None):
 
 
 async def control_write(
-    db, actor, *, operation, payload=None, target_id=None, tenant=None, request=None
+    db,
+    actor,
+    *,
+    operation,
+    payload=None,
+    target_id=None,
+    tenant=None,
+    request=None,
+    protocol_receipt=None,
 ):
     identity = access_identity(actor)
     if tenant is not None and identity.tenant != tenant:
@@ -270,5 +278,7 @@ async def control_write(
         operation=operation,
         payload=payload,
         target_id=target_id,
+        http_protocol=True,
+        protocol_receipt=protocol_receipt,
         **audit,
     )

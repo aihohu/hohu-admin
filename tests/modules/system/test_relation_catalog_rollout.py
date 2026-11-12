@@ -50,8 +50,8 @@ def test_four_object_history_keeps_its_original_identity():
     assert len(catalog.actions) == 16
 
 
-def test_current_preparation_uses_the_complete_relation_catalog():
-    catalog = catalogs.production_catalog()
+def test_historical_relation_catalog_keeps_its_original_identity():
+    catalog = catalogs.relation_catalog()
     assert len(catalog.objects) == 7
     assert catalog.digest == catalogs.relation_catalog().digest
     assert len(catalog.fields) == 97
@@ -91,7 +91,7 @@ async def snapshot(db):
     }
 
 
-async def test_four_to_seven_preserves_latest_rules_and_history_for_both_tenants(
+async def test_four_to_current_preserves_latest_rules_and_history_for_both_tenants(
     system_sessions,
 ):
     factory, plain = system_sessions
@@ -153,7 +153,7 @@ async def test_four_to_seven_preserves_latest_rules_and_history_for_both_tenants
         assert result["sourceCatalogDigest"] == old.digest
         assert result["changedTenants"] == ["0", "1"]
         assert (
-            len((await db.scalars(select(models.FieldPolicyObjectState))).all()) == 14
+            len((await db.scalars(select(models.FieldPolicyObjectState))).all()) == 20
         )
         binding = (
             (await db.execute(select(models.FieldPolicyBinding.__table__)))
@@ -270,7 +270,7 @@ async def test_previously_active_four_object_heads_cannot_be_upgraded(
         assert await snapshot(db) == before
 
 
-async def test_new_install_can_prepare_seven_objects_without_a_staging_head(
+async def test_new_install_can_prepare_current_objects_without_a_staging_head(
     system_sessions,
 ):
     _, plain = system_sessions
@@ -284,7 +284,7 @@ async def test_new_install_can_prepare_seven_objects_without_a_staging_head(
             h.head_version == 1 and h.rollout_state == "preparing" for h in heads
         )
         assert (
-            len((await db.scalars(select(models.FieldPolicyObjectState))).all()) == 14
+            len((await db.scalars(select(models.FieldPolicyObjectState))).all()) == 20
         )
 
 

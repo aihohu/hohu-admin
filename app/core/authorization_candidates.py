@@ -380,6 +380,8 @@ CONFIGURATION_OPERATIONS = MappingProxyType(
             for action in ("create", "update", "delete", "batch_delete")
         },
         "config.import": _S + "config_service.ConfigService.import_configs",
+        "config.publish": "app.modules.system.api.config.publish",
+        "config.revoke": "app.modules.system.api.config.revoke_publication",
     }
 )
 TENANT_OPERATIONS = MappingProxyType(
@@ -1086,6 +1088,42 @@ _COMPLETION_ENTRIES = (
         "S",
         ("X",),
         "system-write",
+        "none",
+    ),
+    (
+        "app.db.authorization_job_owner.JobOwner",
+        ("scheduled",),
+        "owner",
+        "S",
+        ("S",),
+        "relation-read",
+        "none",
+    ),
+    (
+        "app.db.authorization_parameter_read_owner.ParameterReadOwner",
+        ("execute",),
+        "owner",
+        "S",
+        ("S",),
+        "relation-read",
+        "none",
+    ),
+    (
+        "app.db.authorization_parameter_read_owner.ParameterReadOwner",
+        ("form", "export"),
+        "read",
+        "S",
+        ("S",),
+        "relation-read",
+        "none",
+    ),
+    (
+        "app.modules.job.service.authorization_job_candidate",
+        ("read_cron_sources",),
+        "read",
+        "S",
+        ("S",),
+        "relation-read",
         "none",
     ),
     (
@@ -2047,6 +2085,7 @@ _RUNTIME_DELEGATES = {
     "field_policy": "app.db.authorization_policy_owner.UserFieldPolicyOwner.execute",
     "user_read": "app.db.authorization_user_read_owner.UserReadOwner.execute",
     "relation_read": "app.db.authorization_relation_read_owner.RelationReadOwner.execute",
+    "parameter_read": "app.db.authorization_parameter_read_owner.ParameterReadOwner.execute",
     "control_read": "app.db.authorization_catalog_read_owner.CatalogReadOwner.execute",
     "system": _SYSTEM_OWNER,
     "import_users": _IMPORT_OWNER,

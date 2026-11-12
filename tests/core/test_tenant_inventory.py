@@ -39,6 +39,7 @@ EXPECTED_TENANT_TABLES = {
     "sys_role_dept",
     "role_ai_agent",
     "sys_config",
+    "sys_config_publication",
     "sys_setting",
     "sys_dict_type",
     "sys_dict_data",

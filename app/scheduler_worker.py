@@ -26,7 +26,6 @@ from app.core.redis import close_redis
 from app.core.scheduler import scheduler_manager
 from app.core.tenant import PlatformContext
 from app.core.write_admission import require_open, write_admission
-from app.db.session import AsyncSessionLocal
 from app.modules.job.job_runner import RUNNER_ID
 
 logging.basicConfig(
@@ -47,8 +46,7 @@ async def _run() -> None:
         ticket_id="SYSTEM-SCHEDULER",
         correlation_id=f"scheduler:{RUNNER_ID}",
     )
-    async with AsyncSessionLocal() as db:
-        await scheduler_manager.reload_jobs(db, platform=platform)
+    await scheduler_manager.reload_jobs(platform=platform)
     await scheduler_manager.start_with_pubsub(platform=platform)
     logger.info("Scheduler worker 已就绪")
 

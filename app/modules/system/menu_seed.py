@@ -715,6 +715,15 @@ MENU_DEFINITIONS = [
     },
     # ---- 系统设置按钮权限 ----
     {
+        "key": "system_config_publish",
+        "parent_route": "system_config",
+        "menu_name": "发布",
+        "menu_type": "F",
+        "permission": "system:config:publish",
+        "route_path": "",
+        "status": "1",
+    },
+    {
         "key": "system_config_list",
         "parent_route": "system_config",
         "menu_name": "查询",

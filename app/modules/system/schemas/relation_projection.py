@@ -7,7 +7,9 @@ from pydantic import BaseModel, ConfigDict, StrictStr, create_model, model_seria
 from pydantic.alias_generators import to_camel
 
 from app.core.config import settings
-from app.modules.system.field_policy.ordinary_catalog import relation_catalog
+from app.modules.system.field_policy.ordinary_catalog import (
+    production_catalog as relation_catalog,
+)
 from app.modules.system.schemas.relation_policy import RelationFieldPolicy
 
 

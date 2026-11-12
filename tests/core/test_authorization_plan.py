@@ -228,6 +228,7 @@ def test_fixed_catalog_is_real_complete_and_preserves_insert_defaults():
         "ROLE_AGENT",
         "SETTING",
         "CONFIG",
+        "CONFIG_PUBLICATION",
         "MAIL_CONFIG",
         "POLICY_BINDING",
         "POLICY_REVISION",

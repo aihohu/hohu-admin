@@ -11,6 +11,7 @@ from sqlalchemy import event, inspect
 from sqlalchemy.sql import Select
 from sqlalchemy.sql.elements import BindParameter
 
+from app.core.authorization_maintenance import require_maintenance
 from app.core.exceptions import BusinessException
 from app.db.authorization_plan_session import AuthorizationPlanSession, _order_error
 
@@ -126,6 +127,20 @@ def bounded_authorization_reads(db, budget=None):
     previous = _read_phase.get()
     phase = previous[2] if previous and previous[0] is db else "barrier"
     token = _read_phase.set((db, budget, phase))
+    event.listen(db.sync_session, "do_orm_execute", budget.observe, retval=True)
+    try:
+        yield budget
+    finally:
+        event.remove(db.sync_session, "do_orm_execute", budget.observe)
+        _read_phase.reset(token)
+
+
+@contextmanager
+def bounded_maintenance_reads(db, fence):
+    """A verified stopped-writer migration can bound its ordinary SQL session."""
+    require_maintenance(fence, "migration")
+    budget = AuthorizationReadBudget(max_statements=8192)
+    token = _read_phase.set((db, budget, "barrier"))
     event.listen(db.sync_session, "do_orm_execute", budget.observe, retval=True)
     try:
         yield budget
