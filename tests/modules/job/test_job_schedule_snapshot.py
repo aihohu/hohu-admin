@@ -1,8 +1,12 @@
 """Schedule inventory is bounded, fresh and only exposes real TaskSpecs."""
 
+import asyncio
+
+import pytest
 from sqlalchemy import insert, update
 
 from app.core.tenant import PlatformContext
+from app.db import authorization_job_owner as module
 from app.db.authorization_runtime import AuthorizationRuntime
 from app.modules.job.models.job import SysJob
 from app.modules.system.models.tenant import Tenant
@@ -24,6 +28,31 @@ PLATFORM = PlatformContext(
     "test",
     "test",
 )
+
+
+async def test_recovery_scan_has_an_overall_cross_tenant_deadline(monkeypatch):
+    owner = module.JobOwner(None)
+    entered = asyncio.Event()
+    seen = []
+    original = asyncio.timeout
+
+    def deadline(seconds):
+        seen.append(seconds)
+        return original(0.02)
+
+    async def tenants(_platform):
+        return (0, 1)
+
+    async def reclaim(*_args, **_kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(owner, "_tenants", tenants)
+    monkeypatch.setattr(owner, "_lifecycle", reclaim)
+    monkeypatch.setattr(module.asyncio, "timeout", deadline)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(owner.scan(platform=PLATFORM, runner_id="current"), 0.2)
+    assert entered.is_set() and seen == [60]
 
 
 async def test_schedule_snapshot_excludes_unknown_invalid_and_inactive(system_sessions):

@@ -27,6 +27,7 @@ from app.core.scheduler import scheduler_manager
 from app.core.tenant import PlatformContext
 from app.core.write_admission import require_open, write_admission
 from app.modules.job.job_runner import RUNNER_ID
+from app.modules.job.log_monitor import JobLogMonitor
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,7 +36,7 @@ logging.basicConfig(
 logger = logging.getLogger("scheduler_worker")
 
 
-async def _run() -> None:
+async def _run() -> PlatformContext:
     require_open()
     platform = PlatformContext(
         actor_principal_id=0,
@@ -48,7 +49,7 @@ async def _run() -> None:
     )
     await scheduler_manager.reload_jobs(platform=platform)
     await scheduler_manager.start_with_pubsub(platform=platform)
-    logger.info("Scheduler worker 已就绪")
+    return platform
 
 
 async def main() -> None:
@@ -79,7 +80,12 @@ async def main() -> None:
     cleanup.push_async_callback(scheduler_manager.stop)
     try:
         await process.start()
-        await _run()
+        platform = await _run()
+        monitor = JobLogMonitor(platform=platform, runner_id=RUNNER_ID)
+        cleanup.push_async_callback(monitor.stop)
+        process.stop_callbacks.append(monitor.stop)
+        await monitor.start()
+        logger.info("Scheduler worker 已就绪")
         await stop_event.wait()
     finally:
         logger.info("Scheduler worker 收到退出信号，正在关闭")

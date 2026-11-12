@@ -45,7 +45,9 @@ class JobOwner:
             raise _order_error()
         async with authorization_session(self.factory) as db:
             try:
-                with bounded_authorization_reads(db):
+                with bounded_authorization_reads(
+                    db, AuthorizationReadBudget(max_statements=4096)
+                ):
                     async with authorization_transactions.scope(
                         db, budget=TransactionBudget(timeout_ms=8000)
                     ):
@@ -150,11 +152,14 @@ class JobOwner:
         return tuple(results)
 
     async def scan(self, *, platform, runner_id):
-        identifiers = await self._tenants(platform)
-        count = 0
-        for tenant_id in identifiers:
-            count += await self._lifecycle("reclaim", tenant_id, runner_id=runner_id)
-        return count
+        async with asyncio.timeout(60):
+            identifiers = await self._tenants(platform)
+            count = 0
+            for tenant_id in identifiers:
+                count += await self._lifecycle(
+                    "reclaim", tenant_id, runner_id=runner_id
+                )
+            return count
 
     async def claim(self, *, tenant_id=None, job_id=None, runner_id, dispatch=None):
         for value, minimum in ((tenant_id, 0), (job_id, 1)):
