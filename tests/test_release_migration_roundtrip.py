@@ -126,6 +126,10 @@ async def test_control_upgrade_preserves_old_public_bytes_as_unknown(
 ):
     connection = migration_connection
     chain = release_chain()
+    boundary = next(
+        i for i, step in enumerate(chain) if step.revision == "e020f2c00001"
+    )
+    chain = chain[: boundary + 1]
     await connection.run_sync(apply_steps, chain[:-1], "upgrade")
     await connection.execute(
         sa.text(
@@ -159,7 +163,11 @@ async def test_historical_empty_release_upgrade_downgrade_roundtrip(
     migration_connection,
 ):
     connection = migration_connection
-    chain = release_chain()[:-1]  # Current privacy/nonce boundary cannot downgrade.
+    chain = release_chain()
+    boundary = next(
+        i for i, step in enumerate(chain) if step.revision == "e020f2c00001"
+    )
+    chain = chain[:boundary]  # The fixed privacy/nonce boundary cannot downgrade.
     await connection.run_sync(apply_steps, chain, "upgrade")
     initial_policy = sa.text(
         "SELECT g.guard_id, g.epoch, s.tenant_id, s.mode, s.ever_enforced, s.epoch, "

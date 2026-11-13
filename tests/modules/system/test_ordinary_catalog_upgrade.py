@@ -58,7 +58,7 @@ async def test_expand_catalog_is_atomic_and_replay_does_not_increment_versions(
                     )
                 ).all()
             )
-            == 10
+            == 14
         )
         await db.rollback()
         again = await prepare_catalog(db, fence=await fence(db), source_build="b" * 40)

@@ -8,7 +8,9 @@ from sqlalchemy import event
 
 from app.core.authorization_plan import TenantLock
 from app.core.field_policy import Grant, compile_rules
-from app.modules.system.field_policy.control_catalog import control_catalog
+from app.modules.system.field_policy.ordinary_catalog import (
+    production_catalog as control_catalog,
+)
 from app.modules.system.schemas.parameter_projection import ParameterActions
 from app.modules.system.service.authorization_read_budget import (
     bounded_authorization_reads,
