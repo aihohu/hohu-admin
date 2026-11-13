@@ -6,7 +6,9 @@ from sqlalchemy import insert, update
 from app.db.authorization_runtime import AuthorizationRuntime
 from app.modules.job.models.job import SysJob
 from app.modules.job.schemas.job import JobQuery
-from app.modules.system.field_policy.control_catalog import control_catalog
+from app.modules.system.field_policy.ordinary_catalog import (
+    production_catalog as control_catalog,
+)
 from tests.modules.system.test_authorization_system_candidate import (
     TENANT,
 )

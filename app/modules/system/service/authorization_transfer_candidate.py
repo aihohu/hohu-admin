@@ -32,6 +32,7 @@ from app.modules.system.constants import ExportTaskStatus, ImportBatchStatus
 from app.modules.system.field_policy.transfer import (
     build_export_workbook,
     make_lineage,
+    require_lineage_storage,
     safe_failed_rows,
     transfer_denied,
     verify_bytes,
@@ -447,6 +448,7 @@ class TransferCandidate:
             result = await self.publish_preview(db, tx, command, storage, batch_view)
             data = detail.model_dump(mode="json", by_alias=True)
             data.update(
+                batchId=result.resource_id,
                 newCount=batch_view["summary_new"],
                 existsCount=batch_view["summary_exists"],
                 conflictCount=batch_view["summary_conflict"],
@@ -470,20 +472,23 @@ class TransferCandidate:
             key,
             {
                 "operator_id": tenant.actor_user_id,
-                "field_lineage": {
-                    "export": make_lineage(
-                        tenant_id=tenant.tenant_id,
-                        owner_id=tenant.actor_user_id,
-                        resource_id=command.resource_id,
-                        kind="export",
-                        stamp=stamp,
-                        data=data,
-                        columns=projection.columns,
-                        sources=tuple(
-                            zip(map(str, ids), projection.levels, strict=True)
-                        ),
-                    )
-                },
+                "field_lineage": require_lineage_storage(
+                    {
+                        "export": make_lineage(
+                            tenant_id=tenant.tenant_id,
+                            owner_id=tenant.actor_user_id,
+                            resource_id=command.resource_id,
+                            kind="export",
+                            stamp=stamp,
+                            data=data,
+                            columns=projection.columns,
+                            related_sources=projection.related_sources,
+                            sources=tuple(
+                                zip(map(str, ids), projection.levels, strict=True)
+                            ),
+                        )
+                    }
+                ),
                 "filter_snapshot": {
                     "filter": filters.model_dump(mode="json"),
                     "accessible_dept_ids": None
@@ -563,22 +568,24 @@ class TransferCandidate:
             key,
             {
                 "operator_id": command.tenant.actor_user_id,
-                "field_lineage": {
-                    "preview_source": make_lineage(
-                        tenant_id=command.tenant.tenant_id,
-                        owner_id=command.tenant.actor_user_id,
-                        resource_id=command.resource_id,
-                        kind="preview_source",
-                        stamp=field_plan[1],
-                        data=data,
-                        presence=tuple(
-                            tuple(sorted(r.model_fields_set - {"row_num"}))
-                            for r in records
-                        ),
-                        mode=command.sync_mode,
-                        requirements=field_plan[2],
-                    )
-                },
+                "field_lineage": require_lineage_storage(
+                    {
+                        "preview_source": make_lineage(
+                            tenant_id=command.tenant.tenant_id,
+                            owner_id=command.tenant.actor_user_id,
+                            resource_id=command.resource_id,
+                            kind="preview_source",
+                            stamp=field_plan[1],
+                            data=data,
+                            presence=tuple(
+                                tuple(sorted(r.model_fields_set - {"row_num"}))
+                                for r in records
+                            ),
+                            mode=command.sync_mode,
+                            requirements=field_plan[2],
+                        )
+                    }
+                ),
                 "filename": filename,
                 "file_sha256": sha256(data).hexdigest(),
                 "records_hash": imports._compute_records_hash(records),

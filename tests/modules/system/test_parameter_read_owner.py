@@ -7,7 +7,9 @@ from app.core.authorization_plan import TenantLock
 from app.core.exceptions import BusinessException
 from app.db import authorization_parameter_read_owner as owner
 from app.db.authorization_parameter_read_owner import parameter_read_owner
-from app.modules.system.field_policy.control_catalog import control_catalog
+from app.modules.system.field_policy.ordinary_catalog import (
+    production_catalog as control_catalog,
+)
 from app.modules.system.models.config import Config
 from app.modules.system.schemas.config import ConfigQuery
 from app.modules.system.service.authorization_read_budget import (

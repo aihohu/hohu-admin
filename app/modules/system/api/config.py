@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user, require_permissions
 from app.core.base_response import ResponseModel
 from app.core.exceptions import BusinessRuleException
+from app.core.file_delivery import private_file_headers
 from app.core.tenant import TenantContext, TenantLocatorContext
 from app.db.authorization_http import (
     control_write,
@@ -122,7 +123,7 @@ async def export_configs(
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=config_export.xlsx"},
+        headers=private_file_headers("config_export.xlsx"),
     )
 
 

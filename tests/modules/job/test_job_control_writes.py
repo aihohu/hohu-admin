@@ -10,7 +10,9 @@ from app.modules.job.builtin_task_specs import builtin_task_contracts
 from app.modules.job.models.job import SysJob
 from app.modules.job.schemas.job import JobCreate, JobUpdate
 from app.modules.job.service.authorization_job_http import prepare
-from app.modules.system.field_policy.control_catalog import control_catalog
+from app.modules.system.field_policy.ordinary_catalog import (
+    production_catalog as control_catalog,
+)
 from tests.modules.system.test_authorization_system_candidate import (
     TENANT,
 )

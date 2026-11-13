@@ -31,9 +31,9 @@ from tests.modules.system.test_generic_policy_persistence import run
 from tests.modules.system.test_generic_policy_transitions import command
 
 
-def test_production_catalog_uses_all_ten_objects_with_immutable_history():
-    assert production_catalog().digest == control_catalog().digest
-    assert len(production_catalog().objects) == 10
+def test_production_catalog_keeps_the_immutable_ten_object_source():
+    assert set(control_catalog().objects) <= production_catalog().objects.keys()
+    assert len(control_catalog().objects) == 10
     assert (
         ordinary_catalog().digest
         == "1bba4c34c8f8e6edd636ed8b2447f8fbd0053e7082670846aa11ab25db32cb62"
@@ -71,7 +71,7 @@ async def test_historical_catalog_expands_both_tenants_and_replays_without_epoch
         assert first["changedTenants"] == ["0", "1"]
         for head in await db.scalars(select(FieldPolicyHead)):
             assert (
-                head.catalog_digest == control_catalog().digest
+                head.catalog_digest == production_catalog().digest
                 and head.head_version == 2
             )
         for state in await db.scalars(select(UserFieldPolicyState)):
@@ -83,7 +83,7 @@ async def test_historical_catalog_expands_both_tenants_and_replays_without_epoch
                 )
             )
         ).all()
-        assert len(rows) == 20
+        assert len(rows) == 2 * len(production_catalog().objects)
         await db.rollback()
         replay = await prepare_catalog(db, fence=await fence(db), source_build="b" * 40)
         await db.commit()
@@ -120,7 +120,7 @@ async def test_invalid_later_tenant_leaves_no_partial_migration_even_if_caught(
             await prepare_catalog(db, fence=await fence(db), source_build="b" * 40)
         await db.commit()
         assert (await db.get(FieldPolicyHead, 0)).catalog_digest == source.digest
-        assert await db.get(FieldCatalogSnapshot, control_catalog().digest) is None
+        assert await db.get(FieldCatalogSnapshot, production_catalog().digest) is None
 
 
 async def test_fault_after_clone_rolls_back_even_if_caller_commits(
@@ -178,4 +178,4 @@ async def test_fault_after_clone_rolls_back_even_if_caller_commits(
             == count
         )
         assert (await db.get(FieldPolicyHead, 0)).catalog_digest == source.digest
-        assert await db.get(FieldCatalogSnapshot, control_catalog().digest) is None
+        assert await db.get(FieldCatalogSnapshot, production_catalog().digest) is None

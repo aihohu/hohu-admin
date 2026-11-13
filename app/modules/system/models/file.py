@@ -1,7 +1,9 @@
 from datetime import datetime
 
 from sqlalchemy import (
+    CHAR,
     BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -10,6 +12,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.id_generator import next_id
@@ -30,10 +33,26 @@ class File(Base):
         ),
         Index("ix_sys_file_tenant_owner", "tenant_id", "owner_user_id"),
         Index("ix_sys_file_tenant_deleted", "tenant_id", "del_flag"),
+        Index("ix_sys_file_delivery", "tenant_id", "delivery_class", "del_flag"),
+        Index("ix_sys_file_public_url", "file_url", "delivery_class"),
+        CheckConstraint(
+            "(delivery_class = 'legacy-unknown' AND content_sha256 IS NULL AND source_manifest IS NULL) OR "
+            "(delivery_class IN ('owned-private','public-image','ai-chat-private','ai-chat-image','user-import') "
+            "AND content_sha256 IS NOT NULL AND content_sha256 ~ '^[0-9a-f]{64}$' "
+            "AND source_manifest IS NOT NULL AND jsonb_typeof(source_manifest) = 'object')",
+            name="ck_sys_file_delivery_proof",
+        ),
     )
 
     file_id: Mapped[int] = mapped_column(
         BigInteger, primary_key=True, default=next_id, comment="文件ID"
+    )
+    delivery_class: Mapped[str] = mapped_column(
+        String(24), nullable=False, server_default="legacy-unknown"
+    )
+    content_sha256: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
+    source_manifest: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
     )
     original_name: Mapped[str] = mapped_column(
         String(255), nullable=False, comment="原始文件名"

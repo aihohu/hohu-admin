@@ -12,13 +12,14 @@ from app.core.authorization_maintenance import require_maintenance
 from app.core.field_policy import Catalog
 from app.core.field_policy.contracts import canonical, require
 from app.core.id_generator import next_id
-from app.modules.system.field_policy.control_catalog import CONTROL_CATALOG_REVISION
+from app.modules.system.field_policy.control_catalog import control_catalog
 from app.modules.system.field_policy.generic_compat import user_compat_object
 from app.modules.system.field_policy.ordinary_catalog import (
     ordinary_catalog,
     production_catalog,
     relation_catalog,
 )
+from app.modules.system.field_policy.transfer_catalog import TRANSFER_CATALOG_REVISION
 from app.modules.system.models.field_policy import FieldPolicyBinding as Binding
 from app.modules.system.models.field_policy import FieldPolicyHead as Head
 from app.modules.system.models.field_policy import FieldPolicyObjectState as ObjectState
@@ -54,7 +55,14 @@ async def _prepare_catalog(db, *, fence, source_build):
     require(evidence.build_sha == source_build)
     catalog, old = production_catalog(), Catalog((user_compat_object(),), ())
     sources = {
-        c.digest: c for c in (old, ordinary_catalog(), relation_catalog(), catalog)
+        c.digest: c
+        for c in (
+            old,
+            ordinary_catalog(),
+            relation_catalog(),
+            control_catalog(),
+            catalog,
+        )
     }
     await db.scalar(select(Guard.epoch).where(Guard.guard_id == 1).with_for_update())
     barriers = (
@@ -94,7 +102,7 @@ async def _prepare_catalog(db, *, fence, source_build):
             db,
             fence=fence,
             catalog=catalog,
-            catalog_revision=CONTROL_CATALOG_REVISION,
+            catalog_revision=TRANSFER_CATALOG_REVISION,
             source_build=source_build,
         )
     require({r["tenant_id"] for r in heads} == {r["tenant_id"] for r in barriers})
@@ -140,7 +148,7 @@ async def _prepare_catalog(db, *, fence, source_build):
             continue
         work.append((head, source, objects, bindings))
     await register_catalog(
-        db, fence=fence, catalog=catalog, catalog_revision=CONTROL_CATALOG_REVISION
+        db, fence=fence, catalog=catalog, catalog_revision=TRANSFER_CATALOG_REVISION
     )
     for head, source, objects, bindings in work:
         require_maintenance(fence, "migration")

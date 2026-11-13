@@ -24,10 +24,10 @@ from app.modules.system.field_policy.control_catalog import (
     NEXT_RUN_SOURCES,
     READ,
     UPDATE,
-    control_catalog,
     project_next_run,
 )
 from app.modules.system.field_policy.control_values import _SECRET_PARTS
+from app.modules.system.field_policy.ordinary_catalog import production_catalog
 from app.modules.system.models.field_policy import FieldPolicyHead
 from app.modules.system.models.user_field_policy import UserFieldPolicyState
 from app.modules.system.service.authorization_read_budget import (
@@ -83,7 +83,7 @@ class ParameterContext(RelationReadContext):
 
     @property
     def catalog(self):
-        return control_catalog()
+        return production_catalog()
 
     def scope_sql(self, obj, _table):
         if obj not in {"system.config", "system.setting", "job.definition"} and not (
@@ -332,7 +332,7 @@ class ParameterContext(RelationReadContext):
 async def load_parameter_context(db, tx, *, tenant, actor_user_version, action):
     tx.assert_session(db)
     tx.assert_barrier(tenant.tenant_id)
-    catalog = control_catalog()
+    catalog = production_catalog()
     if action not in catalog.actions:
         raise failure()
     objects = set(catalog.actions[action].object_ids)

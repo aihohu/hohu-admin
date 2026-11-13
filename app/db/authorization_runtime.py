@@ -17,6 +17,7 @@ from app.db.authorization_chat_owner import ChatOwner
 from app.db.authorization_completion_facts_owner import CompletionFactsOwner
 from app.db.authorization_control_owner import control_candidate_owner
 from app.db.authorization_field_management_owner import FieldManagementOwner
+from app.db.authorization_file_read_owner import FileReadOwner
 from app.db.authorization_generic_policy_owner import GenericFieldPolicyOwner
 from app.db.authorization_http_audit_owner import HttpAuditOwner
 from app.db.authorization_job_owner import JobOwner
@@ -77,6 +78,7 @@ class AuthorizationRuntime:
         self.read_confirmation = ReadConfirmationOwner(self.sessions)
         self.transfer = TransferOwner(self.sessions, get_file_storage())
         self.upload = UploadOwner(self.sessions)
+        self.files = FileReadOwner(self.sessions)
         self.trace = TraceOwner(self.sessions)
         self.recovery = AIAuthorizationOwner(self.sessions)
         self.lease = LeaseOwner(self.sessions)

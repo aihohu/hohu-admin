@@ -39,6 +39,8 @@ async def test_error_download_uses_final_epoch_and_only_safe_cells(transfer_http
     download = await client.get(body["failedRowsFile"])
     assert download.status_code == 200, download.text
     assert download.headers["cache-control"] == "no-store"
+    assert download.headers["pragma"] == "no-cache"
+    assert download.headers["referrer-policy"] == "no-referrer"
     wb = load_workbook(BytesIO(download.content))
     assert "secret" not in str([cell.value for ws in wb for row in ws for cell in row])
     wb.close()

@@ -6,7 +6,9 @@ from sqlalchemy import insert, update
 from app.core.exceptions import BusinessException
 from app.db.authorization_parameter_read_owner import parameter_read_owner
 from app.db.base import role_menus
-from app.modules.system.field_policy.control_catalog import control_catalog
+from app.modules.system.field_policy.ordinary_catalog import (
+    production_catalog as control_catalog,
+)
 from app.modules.system.models.mail_config import MailConfig
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role

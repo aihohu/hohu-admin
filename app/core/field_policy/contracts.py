@@ -109,6 +109,7 @@ class Access:
         uses = {
             "exact": {"filter", "join"},
             "contains": {"filter"},
+            "range": {"filter"},
             "eq": {"filter", "join"},
             "sort": {"sort"},
             "group": {"group"},
@@ -214,6 +215,7 @@ class Catalog:
                     in {
                         "string",
                         "id",
+                        "opaque_id",
                         "integer",
                         "number",
                         "boolean",
@@ -242,7 +244,7 @@ class Catalog:
                 )
                 if field.structural:
                     require(
-                        field.value_type == "id"
+                        field.value_type in {"id", "opaque_id"}
                         and all(a.operation in READS for a in field.accesses)
                         and field.read_cap == "plain"
                         and not field.nullable

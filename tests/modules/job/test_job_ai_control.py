@@ -8,7 +8,9 @@ from app.db.authorization_runtime import AuthorizationRuntime
 from app.modules.job.service.authorization_job_candidate import (
     job_authorization_candidate,
 )
-from app.modules.system.field_policy.control_catalog import control_catalog
+from app.modules.system.field_policy.ordinary_catalog import (
+    production_catalog as control_catalog,
+)
 from app.modules.system.service.authorization_read_budget import (
     bounded_authorization_reads,
 )

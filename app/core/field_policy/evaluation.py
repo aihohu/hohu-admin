@@ -2,6 +2,7 @@
 
 import json
 import math
+import re
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -254,6 +255,11 @@ def _typed(field, value):
         if type(value) is int:
             value = str(value)
         identity(value)
+    elif kind == "opaque_id":
+        require(
+            type(value) is str
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", value) is not None
+        )
     elif kind == "string":
         require(type(value) is str)
     elif kind == "integer":

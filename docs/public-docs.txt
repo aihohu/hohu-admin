@@ -25,6 +25,7 @@ docs/TESTING-GUIDELINES.md
 docs/USER-FIELD-PROJECTION.md
 docs/RELATION-FIELD-PROJECTION.md
 docs/CONTROL-FIELD-CONTRACTS.md
+docs/TRANSFER-FILE-CONTRACTS.md
 docs/VERSIONING.md
 docs/button-permission-guide.md
 docs/data-scope-guide.md

@@ -44,6 +44,7 @@ from app.modules.system.service.authorization_control_identity import (
     assert_identity,
     read_identity,
 )
+from app.modules.system.service.file_read_service import require_file_content
 from app.modules.system.service.user_ai_fields import user_ai_fields
 
 READ_HANDLERS = MappingProxyType(
@@ -223,6 +224,14 @@ class GatewayReadCandidate:
         )
         if tool == "file.parse":
             tx.assert_held(file_parse_key(tenant, args))
+            await require_file_content(
+                db,
+                tx,
+                tenant=tenant,
+                version=actor_user_version,
+                identifier=file_parse_key(tenant, args).identity[0],
+                action="file.parse",
+            )
         fields = await user_ai_fields.before(
             db,
             tx,

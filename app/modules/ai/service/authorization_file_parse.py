@@ -1,6 +1,7 @@
 """File parser metadata and worker inputs; no database handle crosses into IO."""
 
 from dataclasses import dataclass, replace
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,11 +15,13 @@ from app.modules.ai.agents.tools.file_tools import (
     _FILE_PARSE_ACCESS_POLICY,
     parsed_file_result,
 )
+from app.modules.system.field_policy.file_sources import require_file_manifest
 from app.modules.system.models.file import File
 from app.modules.system.service.file_policy_service import (
     UploadPolicy,
     file_policy_service,
 )
+from app.modules.system.service.file_read_service import content_snapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +85,10 @@ def parse_uploaded_file(snapshot, public_root, private_root):
         ),
         tenant_policy=snapshot.policy,
     )
+    if getattr(record, "delivery_class", "legacy-unknown") != "legacy-unknown":
+        require_file_manifest(content_snapshot(record))
+        if sha256(protected.data).hexdigest() != record.content_sha256:
+            raise _not_found()
     parser = PARSERS.get(protected.mime_type)
     if parser is None:
         raise _order_error()

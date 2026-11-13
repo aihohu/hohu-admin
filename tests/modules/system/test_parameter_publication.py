@@ -7,7 +7,9 @@ from app.core.exceptions import BusinessException
 from app.core.tenant import TenantLocatorContext
 from app.db.authorization_parameter_read_owner import parameter_read_owner
 from app.db.base import role_menus
-from app.modules.system.field_policy.control_catalog import control_catalog
+from app.modules.system.field_policy.ordinary_catalog import (
+    production_catalog as control_catalog,
+)
 from app.modules.system.hosted_menu_seed import HOSTED_BUTTON_PERMISSIONS
 from app.modules.system.menu_seed import MENU_DEFINITIONS
 from app.modules.system.models.config import Config

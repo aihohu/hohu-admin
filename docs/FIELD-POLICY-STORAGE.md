@@ -1,6 +1,6 @@
 # 通用字段策略存储与准备入口
 
-本文描述 Backend 0.2.0 开发版本的内部持久化契约。目录与规则语义见[通用字段内核](FIELD-POLICY-CORE.md)。存储、管理API和[真实Web候选页面](FIELD-POLICY-MANAGEMENT.md)已经提供；全系统交付与发布资格仍须验收。受控准备目录在原用户、字典类型、字典项、数据范围演示、角色、部门和菜单七对象上增加 `system.config`、`system.setting`、`job.definition`，共十对象、144字段、69动作。四对象、七对象的历史快照及摘要不变。生产激活仍需完整交付资格，不能据此宣称全系统字段权限已生效。
+本文描述 Backend 0.2.0 开发版本的内部持久化契约。目录与规则语义见[通用字段内核](FIELD-POLICY-CORE.md)。存储、管理API和[真实Web候选页面](FIELD-POLICY-MANAGEMENT.md)已经提供；全系统交付与发布资格仍须验收。受控准备目录在原用户、字典类型、字典项、数据范围演示、角色、部门和菜单七对象上增加 `system.config`、`system.setting`、`job.definition`，历史十对象为144字段、69动作；当前准备目录再增加system.file及三个transfer对象，见[传输与文件契约](TRANSFER-FILE-CONTRACTS.md)。四对象、七对象的历史快照及摘要不变。生产激活仍需完整交付资格，不能据此宣称全系统字段权限已生效。
 
 ## 事实与生效边界
 

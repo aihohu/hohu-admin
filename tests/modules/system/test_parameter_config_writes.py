@@ -7,7 +7,9 @@ from openpyxl import Workbook
 from sqlalchemy import select
 
 from app.core.exceptions import BusinessException
-from app.modules.system.field_policy.control_catalog import control_catalog
+from app.modules.system.field_policy.ordinary_catalog import (
+    production_catalog as control_catalog,
+)
 from app.modules.system.models.config import Config
 from app.modules.system.service.authorization_configuration_candidate import (
     configuration_authorization_candidate as candidate,
