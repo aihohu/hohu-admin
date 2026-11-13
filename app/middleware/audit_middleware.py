@@ -156,7 +156,11 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
 
         # 读取并缓存 request body
         request_params = None
-        if request.method in ("POST", "PUT", "PATCH"):
+        # Policy bodies contain administrator-authored rules and preview credentials.
+        # Keep minimal operation/status attribution, never cache or log their body.
+        if request.method in ("POST", "PUT", "PATCH") and not path.startswith(
+            "/system/field-policy/"
+        ):
             content_type = request.headers.get("content-type", "")
             is_json = "application/json" in content_type
             if is_json:

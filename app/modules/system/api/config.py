@@ -1,12 +1,12 @@
 import asyncio
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_permissions
-from app.core.base_response import PageResult, ResponseModel
+from app.core.base_response import ResponseModel
 from app.core.exceptions import BusinessRuleException
 from app.core.tenant import TenantContext, TenantLocatorContext
 from app.db.authorization_http import (
@@ -22,13 +22,21 @@ from app.modules.auth.service import (
 )
 from app.modules.system.models.user import User
 from app.modules.system.schemas.config import (
-    ConfigCreate,
-    ConfigOut,
     ConfigQuery,
-    ConfigUpdate,
 )
-from app.modules.system.service.config_service import config_service
+from app.modules.system.schemas.parameter_form import (
+    ParameterConfigCreate,
+    ParameterConfigUpdate,
+    ParameterFormQuery,
+    ParameterPublicationWrite,
+    ParameterRevocationWrite,
+)
+from app.modules.system.schemas.parameter_projection import (
+    ParameterPage,
+    ProjectedConfigOut,
+)
 from app.modules.system.service.file_policy_service import file_policy_service
+from app.modules.system.service.parameter_export import encode_parameter_export
 
 router = APIRouter()
 CONFIG_IMPORT_MAX_SIZE_BYTES = 10 * 1024 * 1024
@@ -40,13 +48,16 @@ async def get_public_configs(
     tenant: TenantLocatorContext = Depends(get_public_tenant_context),
 ):
     """获取公开访问的配置项，用于登录页、移动端等场景"""
-    data = await config_service.get_public_configs(db, tenant=tenant)
+    await release_request_reads(db)
+    data = await get_authorization_runtime().parameter_read(
+        tenant=tenant, actor_user_version=None, operation="config.public"
+    )
     return ResponseModel.success(data=data)
 
 
 @router.get(
     "/list",
-    response_model=ResponseModel[PageResult[ConfigOut]],
+    response_model=ResponseModel[ParameterPage[ProjectedConfigOut]],
     summary="获取系统配置列表分页",
     dependencies=[Depends(require_permissions("system:config:list"))],
 )
@@ -57,8 +68,34 @@ async def get_list(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """获取系统配置分页列表"""
-    page_data = await config_service.get_list(db, query, tenant=tenant)
+    identity = access_identity(_current_user)
+    await release_request_reads(db)
+    page_data = await get_authorization_runtime().parameter_read(
+        tenant=tenant,
+        actor_user_version=identity.user_version,
+        operation="config.list",
+        query=query,
+    )
     return ResponseModel.success(data=page_data)
+
+
+@router.get("/form")
+async def get_form(
+    query: Annotated[ParameterFormQuery, Query()],
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
+):
+    identity = access_identity(actor)
+    await release_request_reads(db)
+    return ResponseModel.success(
+        data=await get_authorization_runtime().parameter_read(
+            tenant=tenant,
+            actor_user_version=identity.user_version,
+            operation="config.form",
+            query=query,
+        )
+    )
 
 
 @router.get(
@@ -73,7 +110,15 @@ async def export_configs(
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """导出系统配置为 Excel 文件"""
-    buf = await config_service.export_configs(db, query, tenant=tenant)
+    identity = access_identity(_current_user)
+    await release_request_reads(db)
+    snapshot = await get_authorization_runtime().parameter_read(
+        tenant=tenant,
+        actor_user_version=identity.user_version,
+        operation="config.export",
+        query=query,
+    )
+    buf = await encode_parameter_export(snapshot)
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -124,14 +169,19 @@ async def import_configs(
     dependencies=[Depends(require_permissions("system:config:add"))],
 )
 async def add(
-    config_in: ConfigCreate,
+    config_in: ParameterConfigCreate,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
     """创建新的系统配置"""
     await control_write(
-        db, _current_user, operation="config.create", payload=config_in, tenant=tenant
+        db,
+        _current_user,
+        operation="config.create",
+        payload=config_in.model_dump(exclude={"form_receipt"}),
+        tenant=tenant,
+        protocol_receipt=config_in.form_receipt,
     )
     return ResponseModel.success(msg="系统配置创建成功")
 
@@ -143,7 +193,7 @@ async def add(
 )
 async def update(
     config_id: int,
-    config_in: ConfigUpdate,
+    config_in: ParameterConfigUpdate,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
@@ -153,11 +203,58 @@ async def update(
         db,
         _current_user,
         operation="config.update",
-        payload=config_in,
+        payload=config_in.model_dump(exclude={"form_receipt"}, exclude_unset=True),
         target_id=config_id,
         tenant=tenant,
+        protocol_receipt=config_in.form_receipt,
     )
     return ResponseModel.success(msg="系统配置更新成功")
+
+
+@router.put(
+    "/{config_id}/publication",
+    dependencies=[Depends(require_permissions("system:config:publish"))],
+)
+async def publish(
+    config_id: int,
+    payload: ParameterPublicationWrite,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
+):
+    return ResponseModel.success(
+        data=await control_write(
+            db,
+            actor,
+            operation="config.publish",
+            payload=payload,
+            target_id=config_id,
+            tenant=tenant,
+        )
+    )
+
+
+@router.delete(
+    "/{config_id}/publication",
+    dependencies=[Depends(require_permissions("system:config:publish"))],
+)
+async def revoke_publication(
+    config_id: int,
+    payload: ParameterRevocationWrite,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
+):
+    return ResponseModel.success(
+        data=await control_write(
+            db,
+            actor,
+            operation="config.revoke",
+            payload=payload,
+            target_id=config_id,
+            tenant=tenant,
+        )
+    )
 
 
 @router.delete(

@@ -195,6 +195,8 @@ async def test_claim_commit_uncertainty_does_not_wait_for_invalidation(
 
     case = completion_case
     release = asyncio.Event()
+    invalidation_entered = asyncio.Event()
+    phase_started = None
     owners = []
     original_commit = AuthorizationPlanSession.commit
     original_invalidate = AsyncSession.invalidate
@@ -205,7 +207,10 @@ async def test_claim_commit_uncertainty_does_not_wait_for_invalidation(
         raise ConnectionError("Injected claim-stage acknowledgement error")
 
     async def stalled_invalidation(db):
+        nonlocal phase_started
         if db in owners:
+            phase_started = time.monotonic()
+            invalidation_entered.set()
             await release.wait()
         await original_invalidate(db)
 
@@ -213,10 +218,20 @@ async def test_claim_commit_uncertainty_does_not_wait_for_invalidation(
         AuthorizationPlanSession, "commit", committed_but_unacknowledged
     )
     monkeypatch.setattr(AsyncSession, "invalidate", stalled_invalidation)
+    request = asyncio.create_task(approve(case))
+    invalidation_started = asyncio.create_task(invalidation_entered.wait())
     try:
-        started = time.monotonic()
-        response = await asyncio.wait_for(approve(case), timeout=2)
-        assert time.monotonic() - started < 1.5
+        # The bound concerns waiting for invalidation, not the database work
+        # before the injected lost ACK. Keep the original bound on this phase.
+        completed, _ = await asyncio.wait(
+            {request, invalidation_started},
+            timeout=70,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        assert completed and invalidation_entered.is_set()
+        response = await asyncio.wait_for(asyncio.shield(request), timeout=2)
+        assert time.monotonic() - phase_started < 1.5
+        assert not release.is_set()
         assert response.data.status == "running"
         assert len(owners) == 1
         assert (await observe(case))["action_status"] == "running"
@@ -224,6 +239,10 @@ async def test_claim_commit_uncertainty_does_not_wait_for_invalidation(
         assert any(row[0] is owners[0] for row in _QUARANTINED.values())
     finally:
         release.set()
+        if not request.done():
+            request.cancel()
+        invalidation_started.cancel()
+        await asyncio.gather(request, invalidation_started, return_exceptions=True)
         tasks = [row[2] for row in _QUARANTINED.values() if row[0] in owners]
         await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 3)
 

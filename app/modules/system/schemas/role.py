@@ -80,6 +80,8 @@ class RoleBase(BaseModel):
 class RoleCreate(RoleBase):
     """角色创建请求"""
 
+    model_config = ConfigDict(extra="forbid")
+
     dept_ids: list[int] | None = Field(
         None, description="自定义数据权限时的部门ID列表（data_scope=2时生效）"
     )

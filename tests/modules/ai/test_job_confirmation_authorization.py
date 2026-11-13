@@ -38,6 +38,7 @@ async def job_context(db_session, monkeypatch):
         menus=[
             SimpleNamespace(permission="ai:chat:use"),
             SimpleNamespace(permission="system:job:edit"),
+            SimpleNamespace(permission="system:job:list"),
         ],
     )
     user = SimpleNamespace(

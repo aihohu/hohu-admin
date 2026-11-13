@@ -16,17 +16,21 @@ from app.db.authorization_catalog_read_owner import CatalogReadOwner
 from app.db.authorization_chat_owner import ChatOwner
 from app.db.authorization_completion_facts_owner import CompletionFactsOwner
 from app.db.authorization_control_owner import control_candidate_owner
+from app.db.authorization_field_management_owner import FieldManagementOwner
+from app.db.authorization_generic_policy_owner import GenericFieldPolicyOwner
 from app.db.authorization_http_audit_owner import HttpAuditOwner
 from app.db.authorization_job_owner import JobOwner
 from app.db.authorization_lease_owner import LeaseOwner
 from app.db.authorization_lifecycle_owner import LifecycleOwner
 from app.db.authorization_owner import authorization_session
+from app.db.authorization_parameter_read_owner import parameter_read_owner
 from app.db.authorization_pending_owner import PendingOwner
 from app.db.authorization_plan_session import AuthorizationPlanSession, _order_error
 from app.db.authorization_policy_owner import UserFieldPolicyOwner
 from app.db.authorization_preview_owner import PreviewOwner
 from app.db.authorization_read_confirmation_owner import ReadConfirmationOwner
 from app.db.authorization_reconciliation_owner import ReconciliationOwner
+from app.db.authorization_relation_read_owner import relation_read_owner
 from app.db.authorization_seed_owner import seed_candidate_owner
 from app.db.authorization_system_owner import system_candidate_owner
 from app.db.authorization_trace_owner import TraceOwner
@@ -85,9 +89,25 @@ class AuthorizationRuntime:
         async with authorization_session(self.sessions) as db:
             return await user_read_owner.execute(db, **request)
 
+    async def parameter_read(self, **request):
+        async with authorization_session(self.sessions) as db:
+            return await parameter_read_owner.execute(db, **request)
+
     async def field_policy(self, **request):
         async with authorization_session(self.sessions) as db:
             return await UserFieldPolicyOwner().execute(db, **request)
+
+    async def generic_field_policy(self, **request):
+        async with authorization_session(self.sessions) as db:
+            return await GenericFieldPolicyOwner().execute(db, **request)
+
+    async def field_management(self, **request):
+        async with authorization_session(self.sessions) as db:
+            return await FieldManagementOwner().execute(db, **request)
+
+    async def relation_read(self, **request):
+        async with authorization_session(self.sessions) as db:
+            return await relation_read_owner.execute(db, **request)
 
     async def import_users(self, **request):
         async with self.sessions() as db:

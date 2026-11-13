@@ -1,20 +1,23 @@
 """Model administration uses the normal system role and user audit identity."""
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import insert, select, update
 
 from app.core.security import create_platform_access_token
+from app.core.tenant import TenantContext
+from app.db.authorization_runtime import AuthorizationRuntime
+from app.db.base import user_roles
 from app.db.session import get_db
 from app.main import app
 from app.modules.ai.core.provider_egress import provider_egress
 from app.modules.ai.service.provider_service import provider_service
-from app.modules.auth.api import get_user_routes, is_route_exist
 from app.modules.auth.service import get_current_user
 from app.modules.platform.authorization_catalog_read import catalog_read_candidate
 from app.modules.system.models.operation_log import SysOperationLog
+from app.modules.system.models.role import Role
 from tests.modules.platform.test_authorization_catalog_http import (
     catalog_http as catalog_http,
 )
@@ -175,21 +178,43 @@ async def test_provider_create_returns_only_credential_state_and_audits_user(
 
 
 @pytest.mark.parametrize(
-    "tenant,role,expected", [(0, True, True), (12, True, False), (0, False, False)]
+    "tenant,role,expected", [(0, True, True), (1, True, False), (0, False, False)]
 )
 async def test_provider_menu_and_route_existence_follow_system_role(
-    tenant, role, expected
+    system_sessions, tenant, role, expected
 ):
-    db = AsyncMock()
-    db.execute.return_value.scalars = Mock(return_value=SimpleNamespace(all=lambda: []))
-    actor = _actor(tenant, role)
-    response = await get_user_routes(current_user=actor, db=db)
-    ai = next((r for r in response.data["routes"] if r.name == "ai"), None)
-    providers = [r for r in (ai.children if ai else []) if r.name == "ai_provider"]
+    _, plain = system_sessions
+    uid, rid = 101 + tenant, 201 + tenant
+    async with plain() as db:
+        await db.execute(
+            update(Role)
+            .where(Role.tenant_id == tenant, Role.role_id == rid)
+            .values(role_code="R_SUPER" if role else "R_USER")
+        )
+        if tenant:
+            await db.execute(
+                insert(user_roles).values(tenant_id=tenant, user_id=uid, role_id=rid)
+            )
+        await db.commit()
+    runtime = AuthorizationRuntime(plain.kw["bind"])
+    identity = {
+        "tenant": TenantContext(tenant, "plan-" + str(tenant), uid, 1, "access_token"),
+        "actor_user_version": 1,
+    }
+    response = await runtime.relation_read(**identity, operation="runtime.routes")
+    ai = next((r for r in response["routes"] if r["name"] == "ai"), None)
+    providers = [
+        r for r in (ai.get("children", []) if ai else []) if r["name"] == "ai_provider"
+    ]
     assert bool(providers) is expected
     if expected:
-        assert providers[0].path == "/ai/provider"
-        assert providers[0].meta.title == "模型管理"
+        assert (
+            providers[0]["path"] == "/ai/provider"
+            and providers[0]["meta"]["title"] == "模型管理"
+        )
     assert (
-        await is_route_exist(route_name="ai_provider", current_user=actor, db=db)
-    ).data is expected
+        await runtime.relation_read(
+            **identity, operation="runtime.exists", query="ai_provider"
+        )
+        is expected
+    )

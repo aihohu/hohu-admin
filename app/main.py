@@ -36,6 +36,7 @@ from app.modules.system.api.data_scope_demo import router as data_scope_demo_rou
 from app.modules.system.api.dept import router as dept_router
 from app.modules.system.api.dict_data import router as dict_data_router
 from app.modules.system.api.dict_type import router as dict_type_router
+from app.modules.system.api.field_management import router as field_management_router
 from app.modules.system.api.file import router as file_router
 from app.modules.system.api.login_log import router as login_log_router
 from app.modules.system.api.menu import router as menu_router
@@ -153,8 +154,7 @@ async def lifespan(_app: FastAPI):
                 ticket_id="SYSTEM-SCHEDULER",
                 correlation_id=f"scheduler:{RUNNER_ID}",
             )
-            async with AsyncSessionLocal() as db:
-                await scheduler_manager.reload_jobs(db, platform=scheduler_platform)
+            await scheduler_manager.reload_jobs(platform=scheduler_platform)
             cleanup.push_async_callback(scheduler_manager.stop)
             process.stop_callbacks.append(scheduler_manager.stop)
             await scheduler_manager.start_with_pubsub(platform=scheduler_platform)
@@ -262,6 +262,9 @@ app.include_router(
 )
 app.include_router(platform_control_router, prefix="/platform", tags=["平台租户控制面"])
 app.include_router(user_router, prefix="/system/user", tags=["用户管理"])
+app.include_router(
+    field_management_router, prefix="/system/field-policy", tags=["字段权限管理"]
+)
 app.include_router(
     user_field_policy_router, prefix="/system/user-field-policy", tags=["用户字段策略"]
 )

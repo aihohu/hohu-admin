@@ -33,6 +33,7 @@ from app.modules.ai.models.model_policy import TenantAiModelPolicy
 from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
 from app.modules.ai.schemas.agent_admin import AgentAdminDetailItem
+from app.modules.ai.schemas.control_config import validate_control_config
 from app.modules.ai.schemas.model import ModelOut
 from app.modules.ai.schemas.provider import ProviderOut
 from app.modules.ai.service.authorization_catalog_inputs import (
@@ -45,6 +46,7 @@ from app.modules.ai.service.authorization_catalog_inputs import (
     stale,
     wire,
 )
+from app.modules.ai.service.control_catalog_projection import model_pairs, providers
 from app.modules.ai.service.tenant_model_policy_admin_service import (
     tenant_model_policy_admin_service,
 )
@@ -59,10 +61,14 @@ from app.modules.system.service.authorization_control_identity import (
     read_policy_target,
 )
 from app.modules.system.service.authorization_read_budget import (
+    AuthorizationReadBudget,
     bounded_authorization_reads,
 )
 from app.modules.system.service.authorization_transaction_service import (
     authorization_transactions,
+)
+from app.modules.system.service.relation_field_write_guard import (
+    load_relation_write_context,
 )
 from app.modules.system.service.role_delegation_service import role_delegation_service
 
@@ -97,6 +103,7 @@ class _RoleAgentWork:
     facts: dict
     evaluation: object
     locks: LockPlan
+    read_budget: object = None
     used: bool = False
 
 
@@ -165,12 +172,30 @@ def _audit(audit, request):
 
 class CatalogAuthorizationCandidate:
     async def plan_role_agents(self, db, tx, request):
+        budget = AuthorizationReadBudget(max_statements=8192)
+        with bounded_authorization_reads(db, budget):
+            work = await self._plan_role_agents(db, tx, request)
+        work.read_budget = budget
+        return work
+
+    async def _plan_role_agents(self, db, tx, request):
         tx.assert_session(db)
         if type(request) is not CatalogRequest or request.operation != "role.agents":
             raise _order_error()
         tid = request.tenant.tenant_id
         tx.assert_planning(tid, exclusive=True)
         identity = await self._identity(db, request)
+        await load_relation_write_context(
+            db,
+            tx,
+            tenant=request.tenant,
+            actor_user_version=request.actor_user_version,
+            facts={
+                ResourceKind(kind): [dict(row) for row in rows]
+                for kind, rows in identity._facts
+            },
+            objects={"system.role"},
+        )
         facts = await self._facts(db, request)
         evaluation = await self._delegation(db, request)
         expected = json.loads(request.expected_bytes)
@@ -195,6 +220,12 @@ class CatalogAuthorizationCandidate:
         return _RoleAgentWork(tx, request, identity, facts, evaluation, locks)
 
     async def apply_role_agents(self, db, tx, work):
+        if type(work) is not _RoleAgentWork:
+            raise _order_error()
+        with bounded_authorization_reads(db, work.read_budget):
+            return await self._apply_role_agents(db, tx, work)
+
+    async def _apply_role_agents(self, db, tx, work):
         tx.assert_session(db)
         if type(work) is not _RoleAgentWork or work.transaction is not tx or work.used:
             raise _order_error()
@@ -332,13 +363,14 @@ class CatalogAuthorizationCandidate:
                 await self._identity(db, request)
                 facts = await self._facts(db, request)
                 effective = self._effective(request, facts)
-                bounded_json(effective["config"])
-                provider_egress.validate_adapter_config(effective["config"])
-                if "model" in effective:
+                if request.operation in PROBE_OPERATIONS:
+                    validate_control_config(effective["config"], kind="provider")
+                if "model" in effective and request.operation in PROBE_OPERATIONS:
                     model_config = effective["model"].get("config")
                     bounded_json(model_config)
                     provider_egress.validate_adapter_config(model_config)
                     generation_settings(model_config)
+                    validate_control_config(model_config, kind="model")
         prep = CatalogPreparation(
             request, _facts_bytes(facts), wire(effective), weakref.ref(db)
         )
@@ -429,7 +461,9 @@ class CatalogAuthorizationCandidate:
         _audit(audit, request)
         _fresh(db)
         if request.operation == "role.agents" and audit is None and preparation is None:
-            with bounded_authorization_reads(db):
+            with bounded_authorization_reads(
+                db, AuthorizationReadBudget(max_statements=8192)
+            ):
                 async with authorization_transactions.scope(
                     db,
                     tenants=(TenantLock(request.tenant.tenant_id, LockMode.EXCLUSIVE),),
@@ -575,12 +609,20 @@ class CatalogAuthorizationCandidate:
             row = await db.get(AiAgent, result["agent_id"], populate_existing=True)
             return AgentAdminDetailItem.model_validate(row)
         if op in {"provider.create", "provider.update"}:
-            row = await db.get(
-                AiProvider, result["provider_id"], populate_existing=True
-            )
+            row = (
+                await providers(
+                    db,
+                    predicates=(AiProvider.provider_id == result["provider_id"],),
+                    maximum=1,
+                )
+            )[0]
             return ProviderOut.from_record(row)
         if op in {"model.create", "model.update"}:
-            row = await db.get(AiModel, result["model_id"], populate_existing=True)
+            row, _ = (
+                await model_pairs(
+                    db, predicates=(AiModel.model_id == result["model_id"],)
+                )
+            )[0]
             return ModelOut.model_validate(row)
         if op == "model_policy.put_many":
             return PlatformTenantModelCatalogOut.from_projection(result)

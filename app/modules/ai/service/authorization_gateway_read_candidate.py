@@ -12,6 +12,7 @@ from app.core.authorization_plan import ResourceKind as K
 from app.core.exceptions import AuthorizationException
 from app.core.rbac import is_super_admin
 from app.db.authorization_plan_session import _order_error
+from app.modules.ai.agents.hitl.constants import DryRunResult
 from app.modules.ai.agents.safety.ai_config import get_ai_config_str_list
 from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.ai.core.context import AiToolContext
@@ -29,7 +30,8 @@ from app.modules.ai.service.authorization_file_parse import (
 from app.modules.ai.service.field_authority_runtime import ai_field_authority
 from app.modules.ai.service.result_projection_service import result_projection_service
 from app.modules.auth.service import load_live_user_authority
-from app.modules.job.ai_tools import _dry_run_job_update_cron
+from app.modules.job.schemas.job import JobAiUpdate
+from app.modules.job.service.authorization_job_candidate import read_cron_sources
 from app.modules.system.ai_tools import (
     analytics,
     dept,
@@ -81,7 +83,7 @@ PREFLIGHT_HANDLERS = MappingProxyType(
         "dept.update": dept._dry_run_dept_update,
         "dept.move": dept._dry_run_dept_move,
         "user.export": user_transfer._dry_run_user_export,
-        "job.update_cron": _dry_run_job_update_cron,
+        "job.update_cron": read_cron_sources,
     }
 )
 
@@ -230,7 +232,37 @@ class GatewayReadCandidate:
             args=args,
             preflight=preflight,
         )
-        result = await handler(ctx, **args)
+        if tool == "job.update_cron":
+            payload = JobAiUpdate.model_validate(args)
+            values = await read_cron_sources(
+                db,
+                tx,
+                tenant=tenant,
+                version=actor_user_version,
+                identifier=payload.job_id,
+            )
+            old = values["cron_expression"] or "(none)"
+            result = DryRunResult(
+                ok=True,
+                count=1,
+                reason="将修改任务调度",
+                summary_key="page.ai.chat.confirmUpdateCronSummary",
+                summary_params={"oldCron": old, "newCron": payload.cron_expression},
+                execution_args={
+                    "job_id": payload.job_id,
+                    "cron_expression": payload.cron_expression,
+                },
+                confirmation_fields=[
+                    {
+                        "label": "job_id",
+                        "value": payload.job_id,
+                        "display_value": values["job_name"],
+                    },
+                    {"label": "cron_expression", "value": payload.cron_expression},
+                ],
+            )
+        else:
+            result = await handler(ctx, **args)
         if not preflight and tool != "file.parse":
             result = await user_ai_fields.project(
                 db, tx, fields, tool=tool, result=result
