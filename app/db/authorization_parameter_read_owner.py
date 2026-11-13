@@ -22,8 +22,10 @@ from app.modules.system.models.config import Config
 from app.modules.system.models.config_publication import ConfigPublication
 from app.modules.system.schemas.config import ConfigQuery
 from app.modules.system.schemas.parameter_form import ParameterFormQuery
-from app.modules.system.schemas.parameter_projection import serialize_parameter
-from app.modules.system.schemas.relation_policy import RelationFieldPolicy
+from app.modules.system.schemas.parameter_projection import (
+    ParameterFieldPolicy,
+    serialize_parameter,
+)
 from app.modules.system.service.authorization_read_budget import (
     RELATION_READ_PHASE_LIMITS,
     AuthorizationReadBudget,
@@ -219,7 +221,7 @@ class ParameterReadOwner:
                         maximum=query.size,
                     )
                     return {
-                        "fieldPolicy": RelationFieldPolicy.model_validate(
+                        "fieldPolicy": ParameterFieldPolicy.model_validate(
                             context.capabilities(
                                 context.record(obj, "page", context.scopes)
                             )
@@ -308,7 +310,7 @@ class ParameterReadOwner:
         )
         result = {
             "record": record,
-            "fieldPolicy": RelationFieldPolicy.model_validate(policy).model_dump(
+            "fieldPolicy": ParameterFieldPolicy.model_validate(policy).model_dump(
                 by_alias=True
             ),
             "formReceipt": issue_receipt(facts),

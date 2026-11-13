@@ -46,6 +46,15 @@ async def test_old_web_configuration_write_requires_current_form_receipt(
     listed = await client.get("/config/list")
     assert listed.status_code == 200, listed.text
     row = listed.json()["data"]["records"][0]
+    assert listed.json()["data"]["fieldPolicy"]["controlActions"] == {
+        "canImport": True,
+        "canExport": True,
+        "canRun": False,
+    }
+    assert (
+        row["fieldPolicy"]["controlActions"]
+        == listed.json()["data"]["fieldPolicy"]["controlActions"]
+    )
     assert row["configValue"] == "value" and row["configId"].isdigit()
     identifier = row["configId"]
     denied = await client.put("/config/" + identifier, json={"remark": "old full form"})

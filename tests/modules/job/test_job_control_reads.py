@@ -44,6 +44,8 @@ async def test_known_null_is_distinct_from_unknown_or_oversize_args(system_sessi
     rows = {row["jobId"]: row for row in result["records"]}
     assert "jobArgs" in rows["301"] and rows["301"]["jobArgs"] is None
     assert "jobArgs" not in rows["302"]
+    assert rows["301"]["fieldPolicy"]["controlActions"]["canRun"] is True
+    assert rows["302"]["fieldPolicy"]["controlActions"]["canRun"] is False
     async with plain() as db:
         await db.execute(
             update(SysJob)

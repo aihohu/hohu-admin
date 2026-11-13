@@ -2,11 +2,29 @@
 
 from datetime import datetime
 
-from pydantic import StrictStr, create_model
+from pydantic import BaseModel, ConfigDict, StrictStr, create_model
+from pydantic.alias_generators import to_camel
 
 from app.modules.system.field_policy.control_catalog import control_catalog
-from app.modules.system.schemas.relation_policy import RelationFieldPolicy
+from app.modules.system.schemas.relation_policy import RelationFieldPolicy, RelationPage
 from app.modules.system.schemas.relation_projection import SparseRelationOut
+
+
+class ParameterActions(BaseModel):
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid", strict=True
+    )
+    can_import: bool
+    can_export: bool
+    can_run: bool
+
+
+class ParameterFieldPolicy(RelationFieldPolicy):
+    control_actions: ParameterActions
+
+
+class ParameterPage[T](RelationPage[T]):
+    field_policy: ParameterFieldPolicy
 
 
 def _projection(name, obj, anchor):
@@ -22,7 +40,7 @@ def _projection(name, obj, anchor):
         for f in control_catalog().objects[obj].fields
     }
     fields[anchor] = (StrictStr, ...)
-    fields["field_policy"] = (RelationFieldPolicy | None, None)
+    fields["field_policy"] = (ParameterFieldPolicy | None, None)
     return create_model(name, __base__=SparseRelationOut, **fields)
 
 

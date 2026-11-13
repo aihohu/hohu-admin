@@ -19,6 +19,8 @@ from app.modules.auth.permission_collect import collect_user_buttons
 from app.modules.system.field_policy.control_catalog import (
     CREATE,
     EXPORT,
+    IMPORT_CREATE,
+    IMPORT_MATCH,
     NEXT_RUN_SOURCES,
     READ,
     UPDATE,
@@ -183,7 +185,42 @@ class ParameterContext(RelationReadContext):
             }
             <= set(self.allowed(record, surface + ".create", CREATE)),
             "complete": {},
+            "control_actions": self.control_actions(
+                record,
+                visible={
+                    name
+                    for name, decision in decisions.items()
+                    if decision.allowed and name not in hidden
+                },
+            ),
         }
+
+    def control_actions(self, record, *, visible):
+        """Pure hints from this protected context; no IO or authority transfer."""
+        config = record.object_id == "system.config"
+        can_import = config and all(
+            bool(
+                required := {
+                    use.ref.field_id
+                    for use in self.catalog.actions["config.import"].uses
+                    if use.access == access
+                }
+            )
+            and required <= set(self.allowed(record, "config.import", access))
+            for access in (IMPORT_CREATE, IMPORT_MATCH)
+        )
+        can_export = config and bool(
+            visible
+            & set(self.allowed(record, "config.export", READ))
+            & set(self.allowed(record, "config.export", EXPORT))
+        )
+        can_run = record.object_id == "job.definition" and {
+            "job_id",
+            "job_key",
+            "job_args",
+            "status",
+        } <= visible & set(self.allowed(record, "job.run", READ))
+        return {"can_import": can_import, "can_export": can_export, "can_run": can_run}
 
     def write(self, obj, key, action, access, fields):
         validate_write(

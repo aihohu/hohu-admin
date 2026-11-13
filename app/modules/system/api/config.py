@@ -31,8 +31,10 @@ from app.modules.system.schemas.parameter_form import (
     ParameterPublicationWrite,
     ParameterRevocationWrite,
 )
-from app.modules.system.schemas.parameter_projection import ProjectedConfigOut
-from app.modules.system.schemas.relation_policy import RelationPage
+from app.modules.system.schemas.parameter_projection import (
+    ParameterPage,
+    ProjectedConfigOut,
+)
 from app.modules.system.service.file_policy_service import file_policy_service
 from app.modules.system.service.parameter_export import encode_parameter_export
 
@@ -55,7 +57,7 @@ async def get_public_configs(
 
 @router.get(
     "/list",
-    response_model=ResponseModel[RelationPage[ProjectedConfigOut]],
+    response_model=ResponseModel[ParameterPage[ProjectedConfigOut]],
     summary="获取系统配置列表分页",
     dependencies=[Depends(require_permissions("system:config:list"))],
 )

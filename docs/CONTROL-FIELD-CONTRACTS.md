@@ -38,6 +38,8 @@ HTTP 使用 `ControlConfigCreate` / `ControlConfigUpdate` 的闭集契约，拒�
 
 Config、Job 列表保留 `records/total/current/size`，附页级和行级 `fieldPolicy`；无权字段缺键，合法可见 null 保留。查询用途在原租户范围上证明，先于过滤、计数与分页。Job 不返回旧 create_by/update_by 自由文本。
 
+Config/Job 的 `fieldPolicy.controlActions` 是闭集按钮提示，含 `canImport`、`canExport`、`canRun`。导入要求独立的导入新增和精确匹配足迹，不能从普通新增推导；导出要求至少一个当前可读且可导出的字段；运行要求专用动作四项读取来源及真实投影上限。提示由当前已保护的规则、范围和功能权限纯计算，不额外查询数据库，也不保证下一次请求或任意文件成功。客户端缺提示时关闭对应入口；服务器始终重新校验实际文件、查询原范围、任务及当前授权。
+
 `GET /system/config/form` 与 `GET /system/job/form` 接受 `mode=create|update`；update 必须有字符串 `recordId`，create 禁止目标。响应包含稀疏 record、fieldPolicy 和最长五分钟的 formReceipt。Config/Job 新增、普通修改及 Settings 分组保存必须携带当前 receipt，缺失、过期或上下文变化由服务端拒绝；伪造版本请求头不能代替。receipt 只证明表单协议，所有者仍按实际提交字段重新授权。普通修改只发送 dirty 字段，写而不可读的字段仅在明确替换时提交。
 
 Settings values 的 key 保持原拼写，不递归 camelCase。保存只接受当前分组的 dirty 键，revision 绑定完整原事实及默认定义，采用数据库侧指纹与 HMAC，不向响应暴露秘密。注册角色选择器必须证明完整候选集合和角色名称来源；不完整时关闭选择器，保存另验注册资格与委派上界。默认密码不读取，空输入保持原值；秘密元数据也按命令能力过滤。
@@ -45,6 +47,8 @@ Settings values 的 key 保持原拼写，不递归 camelCase。保存只接受�
 Config 的 `PUT /system/config/{config_id}/publication` 接受 confirmed=true 与 expectedRevision，后者来自有完整发布权限及读取、修改足迹的表单 publicationRevision。`DELETE` 同路径只需 expectedRevision，使用表单独立的 revocationRevision，按 unpublish 锚点动作撤回，无需读取隐藏内容。两种证明绑定当前身份、G/B、目录、目标与登记，最长五分钟，不能互换。值、key、类型、状态或分类改变会在同一事务撤销旧登记；恢复旧值不会自动恢复公开资格。
 
 公开自定义配置每次新鲜验证租户、分类、发布登记和精确摘要，不复用旧 public 缓存。历史 is_public=true 不构成新发布资格；历史未知分类值继续保存但不读取、导出或公开。只有显式合法完整替换才能按新协议分类，secret 不因改名降级。
+
+当前匿名 `/system/config/public` 和 `/system/setting/public` 入口固定定位 Default Tenant，不接受调用者指定租户。其他租户的发布登记不构成该匿名入口的租户切换能力；托管登录的租户定位与公开内容入口不是同一协议。
 
 Job 普通 update 只收名称、备注；`PUT /system/job/schedule` 使用专用调度命令，status/run 保留专用入口。registered 只返回真实 TaskSpec 的安全标签和闭集参数 schema。AI cron 修改也验证调度字段写权限，预览与结果中的旧 cron、名称须有当前读取来源。
 

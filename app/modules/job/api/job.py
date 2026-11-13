@@ -20,8 +20,10 @@ from app.modules.job.schemas.control_job import (
 from app.modules.job.schemas.job import JobQuery
 from app.modules.system.models.user import User
 from app.modules.system.schemas.parameter_form import ParameterFormQuery
-from app.modules.system.schemas.parameter_projection import ProjectedJobOut
-from app.modules.system.schemas.relation_policy import RelationPage
+from app.modules.system.schemas.parameter_projection import (
+    ParameterPage,
+    ProjectedJobOut,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -74,7 +76,7 @@ async def get_form(
 
 @router.get(
     "/list",
-    response_model=ResponseModel[RelationPage[ProjectedJobOut]],
+    response_model=ResponseModel[ParameterPage[ProjectedJobOut]],
     summary="获取定时任务列表",
     dependencies=[Depends(require_permissions("system:job:list"))],
 )
