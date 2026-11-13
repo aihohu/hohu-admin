@@ -11,6 +11,7 @@ from app.db.authorization_owner import (
     commit_authorization_session,
     rollback_authorization_session,
 )
+from app.modules.system.field_policy.file_sources import upload_delivery
 from app.modules.system.service.authorization_chat_image_candidate import (
     chat_image_candidate,
     read_image,
@@ -100,6 +101,10 @@ class UploadOwner:
         names = tuple((item.filename, business_type) for item in files)
         if any(not name or len(name) > 255 for name, _ in names):
             raise limit()
+        from pathlib import Path  # noqa: PLC0415
+
+        for name, kind in names:
+            upload_delivery(Path(name).suffix.lower(), kind, business_id)
         policies = await self._run(
             "policies",
             tenant=tenant,

@@ -16,6 +16,12 @@
 | [发布维护](RELEASE.md) / [AI 运维](AI-OPERATIONS.md) | 发布证据、恢复和审计工具 |
 | [授权维护](AUTHORIZATION-MAINTENANCE.md) | 直接启动与 Compose 的停写、数据库在途核验和显式恢复 |
 | [用户字段契约](USER-FIELD-PROJECTION.md) | 查询范围证明、显式 DTO、部分更新与字段策略开放边界 |
+| [关系字段读取](RELATION-FIELD-PROJECTION.md) | 稀疏 DTO、树与选择器、真实关系来源及运行导航边界 |
+| [通用字段内核](FIELD-POLICY-CORE.md) | 内部目录、逐记录求值、查询反例与来源闭包的接口和限制 |
+| [配置与任务字段候选契约](CONTROL-FIELD-CONTRACTS.md) | 动态值分类、严格输入、TaskSpec 与运行接线 |
+| [传输与文件字段契约](TRANSFER-FILE-CONTRACTS.md) | 十四对象目录、导入导出来源、稀疏元数据、受控下载与文件恢复 |
+| [通用字段策略存储](FIELD-POLICY-STORAGE.md) | 不可变修订、候选与活动 manifest、迁移及受控准备入口 |
+| [字段策略候选管理](FIELD-POLICY-MANAGEMENT.md) | 角色管理交互、闭集管理 API、受控密码登录与配套 Web 构建 |
 | [监控规则](monitoring/alerts.yml) | 供部署方接入的规则示例 |
 | [需求与范围](PRODUCT-GUIDELINES.md) / [应用市场状态](APP-MARKETPLACE.md) | 贡献提案及当前未开放能力 |
 | [许可证政策](LICENSE-POLICY.md) / [文档维护](DOCUMENTATION.md) | 授权与文档收录规则 |

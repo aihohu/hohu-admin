@@ -4,7 +4,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from pydantic.alias_generators import to_camel
 
 from app.core.config import settings
-from app.modules.ai.schemas.config_projection import redact_config, redact_url
+from app.modules.ai.schemas.config_projection import redact_url
+from app.modules.ai.schemas.control_config import project_control_config
 
 
 class ModelCreate(BaseModel):
@@ -68,7 +69,7 @@ class ModelOut(BaseModel):
 
     @field_serializer("config")
     def serialize_config(self, value: dict | None) -> dict | None:
-        return redact_config(value)
+        return project_control_config(value, kind="model")
 
     model_config = ConfigDict(
         from_attributes=True, populate_by_name=True, alias_generator=to_camel

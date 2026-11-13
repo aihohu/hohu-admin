@@ -317,6 +317,7 @@ async def test_cancellation_resistant_close_keeps_known_ack_and_quarantine(
     original_close = AsyncSession.close
     committed, stalled = [], []
     release = asyncio.Event()
+    close_entered = asyncio.Event()
 
     async def capture_commit(db):
         await original_commit(db)
@@ -326,6 +327,7 @@ async def test_cancellation_resistant_close_keeps_known_ack_and_quarantine(
         await original_close(db)
         if db in committed and not stalled:
             stalled.append(db)
+            close_entered.set()
             try:
                 await release.wait()
             except asyncio.CancelledError:
@@ -335,14 +337,29 @@ async def test_cancellation_resistant_close_keeps_known_ack_and_quarantine(
         authorization_execution, "commit_authorization_session", capture_commit
     )
     monkeypatch.setattr(AsyncSession, "close", resistant_close)
+    request = asyncio.create_task(approve(case))
+    close_started = asyncio.create_task(close_entered.wait())
     try:
-        response = await asyncio.wait_for(approve(case), 3)
+        # Measure the disposal phase after reaching the injected stall. The
+        # authorization/DB work has its own production budgets; timing that
+        # entire workflow at three seconds makes coverage/Windows load fail
+        # before the cleanup behavior under test has even started.
+        completed, _ = await asyncio.wait(
+            {request, close_started}, timeout=70, return_when=asyncio.FIRST_COMPLETED
+        )
+        assert completed, "Approval did not reach a terminal result or cleanup"
+        response = await asyncio.wait_for(asyncio.shield(request), 3)
         assert response.data.status == "succeeded"
+        assert not release.is_set()
         assert len(stalled) == 1
         assert any(row[0] is stalled[0] for row in _QUARANTINED.values())
         assert_success(case, await observe(case))
     finally:
         release.set()
+        if not request.done():
+            request.cancel()
+        close_started.cancel()
+        await asyncio.gather(request, close_started, return_exceptions=True)
         tasks = [row[2] for row in _QUARANTINED.values() if row[0] in stalled]
         await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 3)
 

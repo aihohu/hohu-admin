@@ -1,6 +1,8 @@
 """Immutable chat image metadata, revalidated around bounded disk work."""
 
+import json
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 
 from sqlalchemy import select
@@ -9,12 +11,17 @@ from app.core.authorization_plan import LockPlan, ResourceKey
 from app.core.authorization_plan import ResourceKind as K
 from app.core.exceptions import BusinessRuleException
 from app.core.file_storage import validate_private_storage_roots
+from app.modules.system.field_policy.file_sources import (
+    FileContentSnapshot,
+    require_file_manifest,
+)
 from app.modules.system.models.file import File
 from app.modules.system.service.authorization_control_identity import (
     assert_identity,
     read_identity,
 )
 from app.modules.system.service.file_policy_service import SCENARIO_CAPS
+from app.modules.system.service.file_read_service import require_file_content
 from app.modules.system.service.file_service import (
     PRIVATE_BUSINESS_TYPES,
     PUBLIC_IMAGE_TYPES,
@@ -40,12 +47,19 @@ class ChatImage:
     business_type: str | None
     del_flag: str
     file_size: int
+    delivery_class: str = "legacy-unknown"
+    content_sha256: str | None = None
+    source_manifest: str | None = None
 
 
 def image_snapshot(row):
-    return ChatImage(
-        **{name: getattr(row, name) for name in ChatImage.__dataclass_fields__}
+    values = {name: getattr(row, name) for name in ChatImage.__dataclass_fields__}
+    values["source_manifest"] = (
+        json.dumps(values["source_manifest"], sort_keys=True)
+        if values["source_manifest"] is not None
+        else None
     )
+    return ChatImage(**values)
 
 
 def read_image(snapshot, public_root, private_root):
@@ -68,6 +82,23 @@ def read_image(snapshot, public_root, private_root):
             content = stream.read(SCENARIO_CAPS["image"] + 1)
         if len(content) > SCENARIO_CAPS["image"]:
             raise ValueError("oversized uploaded image")
+        if snapshot.delivery_class != "legacy-unknown":
+            require_file_manifest(
+                FileContentSnapshot(
+                    snapshot.tenant_id,
+                    snapshot.file_id,
+                    snapshot.owner_user_id,
+                    snapshot.file_path,
+                    snapshot.file_ext,
+                    snapshot.mime_type,
+                    snapshot.file_size,
+                    snapshot.delivery_class,
+                    snapshot.content_sha256,
+                    json.loads(snapshot.source_manifest or "null"),
+                )
+            )
+            if sha256(content).hexdigest() != snapshot.content_sha256:
+                raise ValueError("changed image bytes")
         mime = file_service._validate_public_image(
             content, ext=snapshot.file_ext, declared_mime=snapshot.mime_type
         )
@@ -102,6 +133,14 @@ class ChatImageCandidate:
         if len(rows) != 1:
             raise unavailable()
         snapshot = image_snapshot(rows[0])
+        await require_file_content(
+            db,
+            tx,
+            tenant=tenant,
+            version=actor_user_version,
+            identifier=snapshot.file_id,
+            action="file.chat-read",
+        )
         if (
             snapshot.owner_user_id != tenant.actor_user_id
             or snapshot.del_flag != "0"

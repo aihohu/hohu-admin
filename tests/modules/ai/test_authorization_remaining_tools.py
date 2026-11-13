@@ -16,7 +16,6 @@ from app.modules.ai.models.role_ai_agent import RoleAiAgent
 from app.modules.ai.service.authorization_execution_candidate import (
     ai_execution_candidate,
 )
-from app.modules.job import task_registry
 from app.modules.job.models.job import SysJob
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
@@ -364,12 +363,9 @@ async def test_role_agent_replacement_composes_with_gateway(remaining_case, stal
     ],
 )
 async def test_job_cron_uses_fixed_resource_and_atomic_facts(
-    remaining_case, monkeypatch, cron, extra, success
+    remaining_case, cron, extra, success
 ):
     factory, plain, case = remaining_case
-    monkeypatch.setitem(
-        task_registry._task_functions, "planned_cron_test", lambda: None
-    )
     async with plain() as db:
         await db.execute(
             update(AiAgent).where(AiAgent.agent_id == 8001).values(code="job_mgmt")
@@ -388,10 +384,23 @@ async def test_job_cron_uses_fixed_resource_and_atomic_facts(
             insert(role_menus).values(tenant_id=0, role_id=201, menu_id=9002)
         )
         await db.execute(
+            insert(Menu).values(
+                tenant_id=0,
+                menu_id=9003,
+                menu_name="Job read",
+                menu_type="F",
+                permission="system:job:list",
+                status="1",
+            )
+        )
+        await db.execute(
+            insert(role_menus).values(tenant_id=0, role_id=201, menu_id=9003)
+        )
+        await db.execute(
             insert(SysJob).values(
                 tenant_id=0,
                 job_id=701,
-                job_key="planned_cron_test",
+                job_key="test_task",
                 job_name="Planned job",
                 trigger_type="cron",
                 cron_expression="0 * * * *",

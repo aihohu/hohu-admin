@@ -26,7 +26,7 @@ from app.modules.job.service.job_service import job_service
         name="job.update_cron",
         agent="job_mgmt",
         summary="Update job cron expression → {'ok': true}. HITL required.",
-        required_perms=("system:job:edit",),
+        required_perms=("system:job:edit", "system:job:list"),
         risk="high",
         readonly=False,
         idempotent=False,

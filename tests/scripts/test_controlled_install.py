@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -9,6 +10,46 @@ import pytest
 
 from app.core.exceptions import BusinessException
 from tools.ops import controlled_install as install
+
+
+@pytest.mark.parametrize("revision", ["e020f2a00001", "e020f2b00001"])
+async def test_upgrade_accepts_each_immediately_preceding_field_slice(
+    monkeypatch, revision
+):
+    state = {"revision": revision, "migrated": False}
+
+    class Connection:
+        async def execute(self, *_args, **_kwargs):
+            return None
+
+        async def scalar(self, *_args, **_kwargs):
+            return False  # the dedicated application owner is not a superuser
+
+        async def run_sync(self, function):
+            return function(self)
+
+    @asynccontextmanager
+    async def begin():
+        yield Connection()
+
+    def migrate(_connection):
+        state.update(revision=install.REVISION, migrated=True)
+
+    monkeypatch.setattr(
+        install.MigrationContext,
+        "configure",
+        lambda _connection: SimpleNamespace(
+            get_current_heads=lambda: (state["revision"],)
+        ),
+    )
+    monkeypatch.setattr(install, "_alembic", migrate)
+    guard = SimpleNamespace(
+        roles=("application",),
+        engine=SimpleNamespace(url=SimpleNamespace(username="operator")),
+        runtime_engine=SimpleNamespace(begin=begin),
+    )
+    await install.migrate(guard, False)
+    assert state == {"revision": install.REVISION, "migrated": True}
 
 
 @pytest.fixture
@@ -63,7 +104,7 @@ async def test_prepare_keeps_admission_closed_and_records_success(
     if not bootstrap:
         assert events.index("stop") < events.index("migrate")
     assert (guard.directory / "stop.json").exists()
-    assert install.require_receipt(guard, bootstrap)["revision"] == "e0204a000001"
+    assert install.require_receipt(guard, bootstrap)["revision"] == "e020f3a00001"
 
 
 @pytest.mark.parametrize("bootstrap", [True, False])
@@ -107,6 +148,28 @@ async def test_stop_failure_prevents_migration(installation):
     with pytest.raises(RuntimeError):
         await install.prepare(guard, processes, False)
     assert "migrate" not in events and "seed" not in events
+    assert not (guard.directory / "install.json").exists()
+
+
+async def test_policy_upgrade_identity_preflight_precedes_any_migration(
+    installation, monkeypatch
+):
+    guard, processes, events = installation
+
+    async def missing(_):
+        events.append("identity")
+        raise BusinessException(
+            409, "missing", error_code="FIELD_POLICY_ADMIN_PREFLIGHT_REQUIRED"
+        )
+
+    monkeypatch.setattr(
+        "tools.ops.policy_preparation_identity.require_preparation_administrators",
+        missing,
+    )
+    with pytest.raises(BusinessException):
+        await install.prepare(guard, processes, False, policy_port=8765)
+    assert "identity" in events
+    assert "migrate" not in events
     assert not (guard.directory / "install.json").exists()
 
 

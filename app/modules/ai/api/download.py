@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
 from app.core.exceptions import AuthorizationException, NotFoundException
+from app.core.file_delivery import private_file_headers
 from app.core.tenant import TenantContext
 from app.db import authorization_http
 from app.db.authorization_plan_session import _order_error
@@ -55,5 +56,5 @@ async def download_ai_user_export(
     return Response(
         content=xlsx_bytes,
         media_type=_EXPORT_MIME_TYPE,
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
+        headers=private_file_headers(filename),
     )
