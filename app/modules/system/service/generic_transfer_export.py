@@ -28,8 +28,8 @@ READ = Access("read", "management.read")
 EXPORT = Access("export", "export")
 
 
-async def prove_query(db, tx, context, plan, *, full_match):
-    tx.assert_planning(context.tenant_id)
+async def prove_query(db, tx, context, plan, *, full_match, _after_plan=False):
+    (tx.assert_barrier if _after_plan else tx.assert_planning)(context.tenant_id)
     catalog = production_catalog()
     importing = any(d.purpose == "import" for d in plan.dependencies)
     action = "transfer.user-import" if importing else "transfer.user-export"

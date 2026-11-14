@@ -1,6 +1,6 @@
 # 字段策略候选管理
 
-Backend/Web 0.2.0 开发版本提供通用策略候选管理。Backend 准备目录覆盖用户、字典类型、字典项、数据范围演示、角色、部门、菜单、配置、设置、任务、文件及三个传输元数据对象，共十四对象；保存候选与封存租户清单可用，激活和正常恢复仍被服务端阻断。当前 Web 已验收的关系界面覆盖原七对象，配置、设置与任务已经提供配套字段页面；传输和文件协议见[传输契约](TRANSFER-FILE-CONTRACTS.md)；旧整对象表单由 Backend 拒写。这些能力不代表全系统字段权限或生产发布已经完成。存储及迁移约束见[通用字段策略存储](FIELD-POLICY-STORAGE.md)和[配置任务契约](CONTROL-FIELD-CONTRACTS.md)。
+Backend/Web 0.2.0 开发版本提供通用策略候选管理。Backend 当前准备目录为23对象，在原十四对象上增加九个AI、审计与日志交付对象；保存候选与封存租户清单可用，生产激活和正常恢复仍需完整资格。关系、配置、设置、任务及传输沿用现有Web页面；旧整对象表单由Backend拒写。这些能力不代表全系统字段权限或生产发布已经完成。契约见[通用字段策略存储](FIELD-POLICY-STORAGE.md)、[配置任务](CONTROL-FIELD-CONTRACTS.md)、[传输与文件](TRANSFER-FILE-CONTRACTS.md)和[AI与审计交付](AI-DELIVERY-FIELDS.md)。
 
 ## 角色管理入口
 

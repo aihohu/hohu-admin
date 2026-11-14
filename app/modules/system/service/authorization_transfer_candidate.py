@@ -147,9 +147,10 @@ class TransferCandidate:
             tx,
             tenant=tenant,
             version=actor_user_version,
-            row={"operator_id": task.operator_id, "field_lineage": stored_lineage},
+            row={c.name: getattr(task, c.name) for c in type(task).__table__.c},
             identifier=identifier,
             kind="export",
+            _reprove=signed,
         )
         key = ResourceKey(K.EXPORT_TASK, tenant.tenant_id, identifier)
         cids = tuple(

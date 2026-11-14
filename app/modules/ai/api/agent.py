@@ -14,8 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_ai_chat_use
 from app.core.base_response import ResponseModel
+from app.db import authorization_http
 from app.db.session import get_db
-from app.modules.ai.service.agent_visibility import list_visible_agents
+from app.modules.auth.service import access_identity
 from app.modules.system.models.user import User
 
 router = APIRouter()
@@ -32,17 +33,9 @@ async def list_agents(
         agents: [{code, name, description, modelPreference, displayOrder}, ...]
         按 displayOrder 升序
     """
-    agents = await list_visible_agents(db, current_user)
-    return ResponseModel.success(
-        data=[
-            {
-                "code": a.code,
-                "name": a.name,
-                "i18nKeys": a.i18n_keys,
-                "description": a.description,
-                "modelPreference": a.model_preference,
-                "displayOrder": a.display_order,
-            }
-            for a in agents
-        ]
+    identity = access_identity(current_user)
+    await authorization_http.release_request_reads(db)
+    agents = await authorization_http.get_authorization_runtime().delivery.agents(
+        tenant=identity.tenant, actor_user_version=identity.user_version
     )
+    return ResponseModel.success(data=agents)

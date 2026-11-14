@@ -10,7 +10,7 @@ CLI 使用独立 Python 虚拟环境，安装固定版本 `python -m pip install
 
 - 使用与目标 Backend 相同完整 SHA 的只读源码和锁定依赖，设置准确的 `RELEASE_BUILD_SHA`。控制器需要 Python >=3.12；Compose 控制器在宿主使用 Docker CLI，不在普通 API 容器内挂 Docker socket。
 - 管理员先建立目标数据库与一个独立、非 superuser 的应用角色，赋予该角色目标数据库及 `public` schema 的迁移权限。API/scheduler 使用这个应用角色；宿主 `AUTHORIZATION_MAINTENANCE_DATABASE_URL` 使用独立管理身份，连接同一目标数据库。不要把维护 URL、维护密码放进应用的共享 `.env`。
-- 新装准备空数据库，禁止先启动应用；设置受控的 `AUTHORIZATION_MAINTENANCE_PASSWORD` 作为初始管理员密码。升级只接受 `d01010100101`、`e0204a000001`、`e020f1200001` 或当前 `e020f2a00001`；其他起点先走单独验证的升级路径。此入口只支持单应用数据库角色。
+- 新装准备空数据库，禁止先启动应用；设置受控的 `AUTHORIZATION_MAINTENANCE_PASSWORD` 作为初始管理员密码。升级接受 `d01010100101`、`e0204a000001`、`e020f1200001`、`e020f2a00001`、`e020f2b00001`、`e020f2c00001`、`e020f3a00001` 或当前 `e020f3b00001`；其他起点先走单独验证的升级路径。此入口只支持单应用数据库角色。
 - 备份配套数据库、公开/私有文件、原密钥、配置和撤权事实。旧 API、scheduler、API 内 AI 恢复/过期任务、维护脚本及外部写者全部纳入清点；用户入口保持维护状态。
 - 控制目录由维护人员保护，直接启动实例与宿主控制器共享正确的运行登记目录。每次新操作保留之前证据，不能通过删除 `stop.json` 或失败回执来绕过恢复检查。
 

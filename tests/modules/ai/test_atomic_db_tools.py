@@ -66,6 +66,7 @@ from app.modules.system.models.user import User
 from app.modules.system.service.authorization_ai_tool_adapter import (
     system_ai_tool_adapter,
 )
+from tests.ai_source_fixtures import authored_source
 from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
 TOOLS = (
@@ -462,6 +463,9 @@ async def db_tool_case(request, db_session, monkeypatch) -> AsyncIterator[ToolCa
         )
         db.add_all([source, target_message])
         await db.flush()
+        source.field_authority = await authored_source(
+            db, tenant=tenant, message_id=source.message_id
+        )
         deps = await chat_service.build_chat_deps(
             db,
             actor,
@@ -532,6 +536,7 @@ async def db_tool_case(request, db_session, monkeypatch) -> AsyncIterator[ToolCa
             projection_kind=registered.meta.projection_kind,
             data_scope_hash=deps.data_scope_hash,
             require_live_source=True,
+            field_authority=source.field_authority,
         )
         log_id = await operation_log_service.start_operation(
             db,

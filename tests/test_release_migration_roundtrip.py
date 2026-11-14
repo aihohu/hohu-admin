@@ -31,6 +31,7 @@ def release_chain():
         "e020f2b00001",
         "e020f2c00001",
         "e020f3a00001",
+        "e020f3b00001",
     ]
     return [item.module for item in revisions]
 

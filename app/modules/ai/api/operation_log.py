@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import has_explicit_permission
-from app.core.base_response import PageResult, ResponseModel
+from app.core.base_response import ResponseModel
 from app.core.exceptions import (
     AuthorizationException,
 )
@@ -33,6 +33,7 @@ from app.modules.auth.service import (
     get_current_user,
 )
 from app.modules.system.models.user import User
+from app.modules.system.schemas.delivery_projection import DeliveryPage
 
 AI_TRACE_VIEW_PERM = "ai:trace:view"
 
@@ -53,7 +54,7 @@ def _ensure_trace_view(user: User) -> None:
 
 @router.get(
     "/traces",
-    response_model=ResponseModel[PageResult[TraceSummaryOut]],
+    response_model=ResponseModel[DeliveryPage[TraceSummaryOut]],
     summary="List tenant-scoped AI Traces",
 )
 async def list_traces(
@@ -61,7 +62,7 @@ async def list_traces(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
-) -> ResponseModel[PageResult[TraceSummaryOut]]:
+) -> ResponseModel[DeliveryPage[TraceSummaryOut]]:
     _ensure_trace_view(current_user)
     identity = access_identity(current_user)
     if identity.tenant != tenant:

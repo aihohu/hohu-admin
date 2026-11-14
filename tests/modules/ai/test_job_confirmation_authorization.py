@@ -71,9 +71,14 @@ async def job_context(db_session, monkeypatch):
 
 
 async def _allowed(ctx, lineage):
-    return await result_projection_service.authorize_result_projection(
+    # These unit fixtures test the task boundary and tool permission layers.
+    # They have no execution source receipt, so cannot license a result body.
+    assert not await result_projection_service.authorize_result_projection(
         ctx.db, ctx.user, owner_user_id=ctx.user.user_id, lineage=lineage
     )
+    return await result_projection_service._authorize_agent_and_tools(
+        ctx.db, ctx.user, lineage
+    ) and await result_projection_service._authorize_subjects(ctx.db, ctx.user, lineage)
 
 
 def _lineage(ctx, job):

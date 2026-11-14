@@ -3,7 +3,7 @@
 import pytest
 from sqlalchemy import select, update
 
-from app.core.exceptions import AuthorizationException
+from app.core.exceptions import BusinessException
 from app.db.authorization_chat_owner import ChatOwner
 from app.db.authorization_lifecycle_owner import LifecycleOwner
 from app.modules.ai.models.message import AiMessage
@@ -81,6 +81,14 @@ async def test_pending_confirmation_epoch_change_denies_before_claim(chat_model_
         actor_user_version=1,
     )
     async with plain() as db:
+        approved_sources = (
+            await db.scalar(
+                select(AiPreparedAction).where(
+                    AiPreparedAction.confirmation_id == confirmation
+                )
+            )
+        ).field_authority
+        assert approved_sources != frozen  # Preflight adds its real field sources.
         await db.execute(
             update(UserFieldPolicyState)
             .where(UserFieldPolicyState.tenant_id == case.tenant.tenant_id)
@@ -99,10 +107,13 @@ async def test_pending_confirmation_epoch_change_denies_before_claim(chat_model_
             )
         )
         assert action.execution_owner is None
-        assert action.field_authority == frozen
+        assert action.field_authority == approved_sources
+        assert (
+            await db.get(AiMessage, case.claim.source_user_message_id)
+        ).field_authority == frozen
 
 
-async def test_epoch_change_stops_run_and_hides_prior_answer_without_mutation(
+async def test_benign_epoch_reproves_but_inactive_input_hides_prior_answer_without_mutation(
     execution_case,
 ):
     factory, plain, case = execution_case
@@ -133,9 +144,21 @@ async def test_epoch_change_stops_run_and_hides_prior_answer_without_mutation(
             .values(epoch=UserFieldPolicyState.epoch + 1)
         )
         await db.commit()
-    with pytest.raises(AuthorizationException) as caught:
+    renewed = await owner.check_run(**request)
+    assert (
+        renewed["authority"]["tenant_epoch"] == frozen["authority"]["tenant_epoch"] + 1
+    )
+    assert renewed["source_domains"] == frozen["source_domains"]
+    async with plain() as db:
+        await db.execute(
+            update(AiMessage)
+            .where(AiMessage.message_id == source.message_id)
+            .values(is_active=False)
+        )
+        await db.commit()
+    with pytest.raises(BusinessException) as caught:
         await owner.check_run(**request)
-    assert caught.value.error_code == "FIELD_AUTHORIZATION_CHANGED"
+    assert caught.value.error_code == "FIELD_POLICY_LOCK_ORDER"
     projected = await owner.messages(
         conversation_id=case.claim.conversation_id,
         tenant=case.tenant,

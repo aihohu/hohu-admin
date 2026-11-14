@@ -33,6 +33,9 @@ IO_PROFILES = MappingProxyType(
         "auth-read": (8000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "user-read": (15000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "relation-read": (8000, 2000, 5000, 100000, 64 * 1024 * 1024),
+        "chat-read": (8000, 2000, 5000, 100000, 128 * 1024 * 1024),
+        "delivery-read": (8000, 2000, 5000, 10000, 16 * 1024 * 1024),
+        "delivery-probe": (8000, 2000, 5000, 1024, 2 * 1024 * 1024),
         "file-read": (8000, 2000, 5000, 10000, 16 * 1024 * 1024),
         "transfer-read": (15000, 2000, 5000, 100000, 128 * 1024 * 1024),
         "auth-write": (15000, 2000, 5000, 100000, 64 * 1024 * 1024),
@@ -2151,3 +2154,83 @@ MAINTENANCE_ENTRIES = MAINTENANCE_ENTRIES | frozenset(
 CANDIDATES += _composition
 
 PENDING_SURFACES = MappingProxyType({})
+
+_DELIVERY_CHAT = "app.db.authorization_chat_owner.ChatOwner"
+_DELIVERY_CANDIDATE = _A + "authorization_chat_candidate.ChatCandidate"
+CANDIDATES += tuple(
+    Candidate(
+        "delivery_chat." + method,
+        _DELIVERY_CHAT + "." + method,
+        (source,),
+        _DELIVERY_CHAT + "." + method,
+        "owner",
+        "S",
+        "trusted current tenant and actor version",
+        ("S",),
+        source,
+        "none",
+        "delivery-probe" if method == "delivery_probe" else "chat-read",
+        "none",
+        False,
+    )
+    for method, source in (
+        ("input_parts", _DELIVERY_CANDIDATE + ".input_parts"),
+        ("routing_context", _DELIVERY_CANDIDATE + ".routing_context"),
+        ("delivery_check", _DELIVERY_CANDIDATE + ".check_run"),
+        ("delivery_probe", _A + "delivery_probe.delivery_probe"),
+    )
+)
+CANDIDATES += tuple(
+    Candidate(
+        "delivery_candidate." + method,
+        _DELIVERY_CANDIDATE + "." + method,
+        (),
+        _DELIVERY_CHAT + "." + method,
+        "read",
+        "S",
+        "trusted current tenant and actor version",
+        ("S",),
+        _DELIVERY_CANDIDATE + "." + method,
+        "none",
+        "chat-read",
+        "none",
+        False,
+    )
+    for method in ("input_parts", "routing_context")
+)
+CANDIDATES += tuple(
+    Candidate(
+        "delivery_owner." + method,
+        "app.db.authorization_delivery_read_owner.DeliveryReadOwner." + method,
+        (source,),
+        "app.db.authorization_delivery_read_owner.DeliveryReadOwner." + method,
+        "owner",
+        "S",
+        "trusted current tenant and actor version",
+        ("X",),
+        "none",
+        "none",
+        "delivery-read",
+        "none",
+        False,
+    )
+    for method, source in (
+        ("logs", _S + "delivery_log_read.log_page"),
+        ("feedback", _A + "feedback_delivery.feedback_page"),
+        ("agents", _S + "delivery_read_context.load_delivery_context"),
+    )
+)
+# The manifest describes the actual strongest fence and bounded decoding; it
+# cannot certify wiring or replace the owners' runtime guards and SQL counters.
+CANDIDATES = tuple(
+    replace(entry, B_modes=("X",), io_profile="chat-read")
+    if "authorization_trace_owner." in entry.qualified_name
+    or "authorization_trace_candidate." in entry.qualified_name
+    else replace(entry, io_profile="chat-read")
+    if entry.qualified_name.startswith(
+        (_DELIVERY_CHAT + ".", _DELIVERY_CANDIDATE + ".")
+    )
+    and entry.io_profile == "auth-read"
+    else entry
+    for entry in CANDIDATES
+)

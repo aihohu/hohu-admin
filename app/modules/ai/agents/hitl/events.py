@@ -48,6 +48,8 @@ class ToolCallStartedEvent:
     trace_id: str
     chip_target: str | None = None
     type: Literal["tool_call_started"] = "tool_call_started"
+    # Internal source proof for preflight counts/labels; absent from wire data.
+    field_authority: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -91,6 +93,7 @@ class DryRunSummary:
     # fields so exact execution bindings and snapshots never become client input.
     execution_args: dict[str, Any] | None = None
     business_snapshot: dict[str, Any] | None = None
+    field_authority: dict | None = None
 
 
 @dataclass(frozen=True)

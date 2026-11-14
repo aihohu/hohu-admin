@@ -84,7 +84,7 @@ class UserTransferFields:
     def __init__(self, *, legacy_assets=False):
         self.legacy_assets = legacy_assets
 
-    async def context(self, db, tx, *, tenant, version):
+    async def context(self, db, tx, *, tenant, version, _after_plan=False):
         tx.assert_session(db)
         tx.assert_barrier(tenant.tenant_id)
         actor = await load_current_user(db, tenant=tenant, actor_user_version=version)
@@ -114,6 +114,7 @@ class UserTransferFields:
             tenant=tenant,
             actor_user_version=version,
             grants=_rules(role_ids) if active is None else active,
+            _after_plan=_after_plan,
         )
         return replace(result, generic_grants=grants) if generic is not None else result
 
@@ -184,9 +185,13 @@ class UserTransferFields:
             "build": settings.RELEASE_BUILD_SHA or "development",
         }
 
-    async def coverage(self, db, tx, context, plan, *, full_match=False):
+    async def coverage(
+        self, db, tx, context, plan, *, full_match=False, _after_plan=False
+    ):
         if context.generic_grants is not None:
-            await prove_query(db, tx, context, plan, full_match=full_match)
+            await prove_query(
+                db, tx, context, plan, full_match=full_match, _after_plan=_after_plan
+            )
             return
         await assert_user_query_coverage(
             db,
@@ -196,9 +201,12 @@ class UserTransferFields:
             plan=plan,
             grants=context.grants,
             role_scopes=context.role_scopes,
+            _after_plan=_after_plan,
         )
 
-    async def decisions(self, db, tx, context, ids, *, operation, purpose):
+    async def decisions(
+        self, db, tx, context, ids, *, operation, purpose, _after_plan=False
+    ):
         result = {}
         for offset in range(0, len(ids), 100):
             window = replace(context, _applicable={})
@@ -210,6 +218,7 @@ class UserTransferFields:
                     operation=operation,
                     purpose=purpose,
                     entrypoint="export" if purpose == "export" else "import",
+                    _after_plan=_after_plan,
                 )
             )
         return result
@@ -312,7 +321,7 @@ class UserTransferFields:
         return requirements
 
     async def import_requirements(
-        self, db, tx, *, tenant, version, context, requirements
+        self, db, tx, *, tenant, version, context, requirements, _after_plan=False
     ):
         ids = tuple(
             sorted(
@@ -321,7 +330,13 @@ class UserTransferFields:
         )
         existing = {
             operation: await self.decisions(
-                db, tx, context, ids, operation=operation, purpose="import"
+                db,
+                tx,
+                context,
+                ids,
+                operation=operation,
+                purpose="import",
+                _after_plan=_after_plan,
             )
             for operation in ("update", "replace")
         }
@@ -363,8 +378,22 @@ class UserTransferFields:
                     supplied_paths=fields, decisions=decision, operation=operation
                 )
 
-    async def download(self, db, tx, *, tenant, version, row, identifier, kind):
-        context = await self.context(db, tx, tenant=tenant, version=version)
+    async def download(
+        self,
+        db,
+        tx,
+        *,
+        tenant,
+        version,
+        row,
+        identifier,
+        kind,
+        _after_plan=False,
+        _reprove=False,
+    ):
+        context = await self.context(
+            db, tx, tenant=tenant, version=version, _after_plan=_after_plan
+        )
         lineage = row.get("field_lineage")
         if lineage is None:
             # Only this explicitly guarded production compatibility path admits
@@ -375,15 +404,36 @@ class UserTransferFields:
             raise transfer_denied()
         document = lineage.get(kind) if type(lineage) is dict else None
         stamp = await self.stamp(db, tx, tenant_id=tenant.tenant_id)
+        original_stamp = document.get("stamp") if type(document) is dict else None
+        if _reprove and (
+            type(original_stamp) is not dict
+            or any(
+                original_stamp.get(k) != stamp.get(k)
+                for k in ("policy_kind", "catalog_digest", "catalog_revision", "build")
+            )
+        ):
+            raise transfer_denied()
         validate_lineage(
             document,
             tenant_id=tenant.tenant_id,
             owner_id=row["operator_id"],
             resource_id=identifier,
             kind=kind,
-            stamp=stamp,
+            stamp=original_stamp if _reprove else stamp,
         )
         if kind == "export":
+            if _reprove:
+                await self.coverage(
+                    db,
+                    tx,
+                    context,
+                    export_query_plan(
+                        exports.UserExportFilter.model_validate(
+                            row["filter_snapshot"]["filter"]
+                        )
+                    ),
+                    _after_plan=_after_plan,
+                )
             if stamp.get("policy_kind") == "generic":
                 await recheck_sources(
                     db,
@@ -394,7 +444,13 @@ class UserTransferFields:
                 )
             ids = tuple(int(uid) for uid, _ in document["sources"])
             current = await self.decisions(
-                db, tx, context, ids, operation="export", purpose="export"
+                db,
+                tx,
+                context,
+                ids,
+                operation="export",
+                purpose="export",
+                _after_plan=_after_plan,
             )
             ranks = {"hidden": 0, "masked": 1, "plain": 2}
             for uid, levels in document["sources"]:
@@ -404,6 +460,19 @@ class UserTransferFields:
                     if ranks[current[int(uid)].fields[field].read] < ranks[level]:
                         raise transfer_denied()
         elif kind == "preview_source":
+            if _reprove:
+                await self.coverage(
+                    db,
+                    tx,
+                    context,
+                    import_query_plan(
+                        employee_no=any(
+                            "employee_no" in fields for fields in document["presence"]
+                        )
+                    ),
+                    full_match=stamp.get("policy_kind") == "generic",
+                    _after_plan=_after_plan,
+                )
             await self.import_requirements(
                 db,
                 tx,
@@ -411,6 +480,7 @@ class UserTransferFields:
                 version=version,
                 context=context,
                 requirements=document["requirements"],
+                _after_plan=_after_plan,
             )
         return document
 

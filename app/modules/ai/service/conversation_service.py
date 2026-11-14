@@ -10,6 +10,7 @@ from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.schemas.conversation import ConversationCreate, ConversationUpdate
 from app.modules.ai.schemas.message import MessageOut, MessageTombstoneOut
+from app.modules.ai.service.message_delivery import message_delivery
 from app.modules.ai.service.model_authorization_service import (
     model_authorization_service,
 )
@@ -335,15 +336,27 @@ class ConversationService:
         )
 
         projected: list[MessageOut | MessageTombstoneOut] = []
+        delivery = await message_delivery(db, actor=current_user, tenant=tenant)
         for message in messages:
             if message.role == "user":
-                projected.append(MessageOut.model_validate(message))
+                projected.append(
+                    await delivery.project(message)
+                    if delivery is not None and await delivery.body_visible(message)
+                    else MessageTombstoneOut(
+                        message_id=message.message_id, role=message.role
+                    )
+                )
                 continue
             allowed = await result_projection_service.authorize_message_projection(
                 db,
                 current_user,
                 owner_user_id=current_user.user_id,
                 message=message,
+            )
+            allowed = (
+                allowed
+                and delivery is not None
+                and await delivery.body_visible(message)
             )
             unknown_ids = {
                 call["tool_call_id"]
@@ -354,35 +367,25 @@ class ConversationService:
                 and state.unknown
             }
             if unknown_ids:
-                output = MessageOut.model_validate(message)
-                # Work on DTO copies: reading history never repairs persisted cards.
-                output.tool_calls = [
-                    {key: call[key] for key in ("tool", "tool_call_id") if key in call}
-                    if call.get("tool_call_id") in unknown_ids or not allowed
-                    else project_verified_call(call, completion_states)
-                    for call in output.tool_calls or ()
-                ]
-                output.parts = None
-                output.completed_tool_call_ids = []
-                content = (output.content or "") if allowed else ""
-                if any(
-                    completion_states[key].error_code
-                    == "AI_EXECUTION_RECONCILIATION_REQUIRED"
-                    for key in unknown_ids
-                    if key in completion_states
-                ):
-                    # Historic success/failure prose is not an authoritative outcome.
-                    content = ""
-                output.content = reconciliation_notice(
-                    project_verified_content(
-                        content, output.tool_calls, completion_states
-                    ),
-                    unknown_ids,
+                # Completion states came from the locked composite, while old
+                # tool names, usage and prose have no trustworthy field source.
+                output = MessageOut(
+                    message_id=message.message_id,
+                    conversation_id=message.conversation_id,
+                    parent_message_id=None,
+                    trace_id=message.trace_id,
+                    supersedes_message_id=None,
+                    role="assistant",
+                    message_type="text",
+                    tool_calls=[{"tool_call_id": key} for key in sorted(unknown_ids)],
+                    completed_tool_call_ids=[],
+                    content=reconciliation_notice("", unknown_ids),
+                    is_active=message.is_active,
                 )
                 projected.append(output)
                 continue
             if allowed:
-                output = MessageOut.model_validate(message)
+                output = await delivery.project(message)
                 output.content = project_verified_content(
                     output.content, output.tool_calls, completion_states
                 )

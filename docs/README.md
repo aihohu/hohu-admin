@@ -16,6 +16,7 @@
 | [发布维护](RELEASE.md) / [AI 运维](AI-OPERATIONS.md) | 发布证据、恢复和审计工具 |
 | [授权维护](AUTHORIZATION-MAINTENANCE.md) | 直接启动与 Compose 的停写、数据库在途核验和显式恢复 |
 | [用户字段契约](USER-FIELD-PROJECTION.md) | 查询范围证明、显式 DTO、部分更新与字段策略开放边界 |
+| [AI与审计交付](AI-DELIVERY-FIELDS.md) | 字段来源、当前授权、稀疏交付、后台恢复与限制 |
 | [关系字段读取](RELATION-FIELD-PROJECTION.md) | 稀疏 DTO、树与选择器、真实关系来源及运行导航边界 |
 | [通用字段内核](FIELD-POLICY-CORE.md) | 内部目录、逐记录求值、查询反例与来源闭包的接口和限制 |
 | [配置与任务字段候选契约](CONTROL-FIELD-CONTRACTS.md) | 动态值分类、严格输入、TaskSpec 与运行接线 |

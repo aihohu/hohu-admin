@@ -8,7 +8,7 @@
   - enum 强约束并映射到数据库的 String(32) 列
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
@@ -130,6 +130,7 @@ class DryRunResult:
     # both fields; the Gateway separately persists only their trusted bindings.
     execution_args: dict[str, Any] | None = None
     business_snapshot: dict[str, Any] | None = None
+    field_authority: dict | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if not self.ok and self.count > 0:

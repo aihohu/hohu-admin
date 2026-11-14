@@ -9,9 +9,17 @@ from tests.test_release_migration_roundtrip import (
 )
 
 
+def file_chain():
+    chain = release_chain()
+    boundary = next(
+        i for i, step in enumerate(chain) if step.revision == "e020f3a00001"
+    )
+    return chain[: boundary + 1]
+
+
 async def test_file_upgrade_preserves_history_and_empty_roundtrip(migration_connection):
     db = migration_connection
-    chain = release_chain()
+    chain = file_chain()
     await db.run_sync(apply_steps, chain[:-1], "upgrade")
     await db.execute(
         text(
@@ -41,7 +49,7 @@ async def test_file_upgrade_preserves_history_and_empty_roundtrip(migration_conn
 
 async def test_downgrade_refuses_to_discard_delivered_file_proof(migration_connection):
     db = migration_connection
-    chain = release_chain()
+    chain = file_chain()
     await db.run_sync(apply_steps, chain, "upgrade")
     await db.execute(
         text(

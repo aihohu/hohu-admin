@@ -19,7 +19,7 @@ from alembic import command
 from app.utils.validators import validate_password
 from tools.ops import authorization_maintenance as ops
 
-REVISION = "e020f3a00001"
+REVISION = "e020f3b00001"
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -75,6 +75,7 @@ async def migrate(guard, bootstrap):
                     ("e020f2a00001",),
                     ("e020f2b00001",),
                     ("e020f2c00001",),
+                    ("e020f3a00001",),
                     (REVISION,),
                 }:
                     raise ops._required()

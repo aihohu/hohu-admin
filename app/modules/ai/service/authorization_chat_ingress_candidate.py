@@ -23,6 +23,10 @@ from app.modules.ai.service.authorization_chat_model import (
     select_model,
 )
 from app.modules.ai.service.chat_service import chat_service
+from app.modules.ai.service.conversation_delivery import validate_message_create
+from app.modules.ai.service.delivery_file_parts import normalize_parts, part_keys
+from app.modules.ai.service.delivery_source_domains import with_sources
+from app.modules.ai.service.delivery_source_roots import mint_source
 from app.modules.ai.service.field_authority_runtime import ai_field_authority
 from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.ai.service.result_projection_service import result_projection_service
@@ -201,6 +205,7 @@ class ChatIngressCandidate:
         parts,
         authority,
         audit,
+        context_authority=None,
     ):
         if (
             type(authority) is not RunAuthority
@@ -233,7 +238,12 @@ class ChatIngressCandidate:
             actor_user_version=actor_user_version,
             conversation_id=conversation_id,
             new=(NewResource(source, parent), NewResource(route)),
-            extra=(*authority.model.keys, agent_key, *authority.setting_keys),
+            extra=(
+                *authority.model.keys,
+                agent_key,
+                *authority.setting_keys,
+                *part_keys(parts, tenant),
+            ),
         )
         await recheck_model(db, tx, tenant, authority.model)
         agent = await db.get(AiAgent, authority.agent_id, populate_existing=True)
@@ -278,13 +288,43 @@ class ChatIngressCandidate:
             raise BusinessRuleException(
                 "该会话仍有待确认或正在执行的操作", error_code="AI_CHAT_RUN_IN_PROGRESS"
             )
+        await validate_message_create(
+            db,
+            tx,
+            tenant=tenant,
+            version=actor_user_version,
+            identifier=source.identity[0],
+            parts=bool(parts),
+        )
+        parts, file_groups = await normalize_parts(
+            db, tx, tenant=tenant, version=actor_user_version, parts=parts
+        )
+        if context_authority is not None:
+            context_authority = await ai_field_authority.renew(
+                db,
+                tx,
+                tenant=tenant,
+                actor_user_version=actor_user_version,
+                frozen=context_authority,
+            )
+            file_groups.extend(context_authority["source_domains"])
         await tx.insert_reserved(
             source,
             {
                 "conversation_id": conversation_id,
                 "role": "user",
-                "field_authority": await ai_field_authority.current(
-                    db, tx, tenant=tenant
+                "field_authority": with_sources(
+                    await mint_source(
+                        db,
+                        tx,
+                        tenant=tenant,
+                        version=actor_user_version,
+                        identifier=source.identity[0],
+                        conversation_id=conversation_id,
+                        dependencies=authority.dependencies,
+                        parts=bool(parts),
+                    ),
+                    tuple(file_groups),
                 ),
                 "content": redact_secrets(content),
                 "parts": parts,

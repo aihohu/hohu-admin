@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_valid
 from pydantic.alias_generators import to_camel
 
 from app.modules.ai.schemas.time import AiUtcDatetime
+from app.modules.system.schemas.transfer_projection import SparseTransferOut
 
 
 class RoutingFeedbackRequest(BaseModel):
@@ -71,7 +72,7 @@ class TopWrongAgent(BaseModel):
     top_corrected: TopCorrected | None = None
 
 
-class FeedbackSummary(BaseModel):
+class FeedbackSummary(SparseTransferOut):
     """路由反馈汇总统计。"""
 
     model_config = ConfigDict(
@@ -83,7 +84,7 @@ class FeedbackSummary(BaseModel):
     correct: int
     wrong: int
     wrong_rate: float
-    top_wrong_agents: list[TopWrongAgent]
+    top_wrong_agents: list[TopWrongAgent] = Field(default_factory=list)
 
 
 class FeedbackListItem(BaseModel):

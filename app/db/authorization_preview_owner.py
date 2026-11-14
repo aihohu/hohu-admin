@@ -6,6 +6,7 @@ from app.core import file_storage
 from app.core.authorization_io import file_transform_worker
 from app.core.authorization_plan import LockMode, TenantLock, TransactionBudget
 from app.core.config import settings
+from app.core.exceptions import BusinessException
 from app.core.file_storage import ArtifactExecution
 from app.db.authorization_owner import (
     authorization_session,
@@ -58,6 +59,14 @@ class PreviewOwner:
     async def receipt(self, **request):
         return await self._read("receipt", **request)
 
+    async def _worker(self, snapshot, request, function, *args, **kwargs):
+        try:
+            return await file_transform_worker.run(function, *args, **kwargs)
+        except BusinessException as exc:
+            current = await self._read("input", expected=snapshot, **request)
+            exc._ai_delivery_authority = current.field_authority
+            raise
+
     async def gateway_preview(self, *, gateway, **request):
         if type(gateway) is not GatewayPreviewBinding:
             raise _order_error()
@@ -94,11 +103,17 @@ class PreviewOwner:
             "file_id": file_id,
         }
         snapshot = await self._read("input", **request)
-        data, filename = await file_transform_worker.run(
-            read_preview_input, snapshot, str(settings.PRIVATE_UPLOAD_DIR)
+        data, filename = await self._worker(
+            snapshot,
+            request,
+            read_preview_input,
+            snapshot,
+            str(settings.PRIVATE_UPLOAD_DIR),
         )
         await self._read("input", expected=snapshot, **request)
-        command = await file_transform_worker.run(
+        command = await self._worker(
+            snapshot,
+            request,
             transfer_candidate.prepare_preview,
             tenant=tenant,
             actor_user_version=actor_user_version,

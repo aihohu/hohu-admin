@@ -126,6 +126,35 @@ async def test_file_parse_worker_has_no_active_database_transaction(
     assert observed == [0]
 
 
+@pytest.mark.parametrize("retired", [False, True])
+async def test_parser_business_failure_is_revalidated_before_delivery(
+    parse_case, monkeypatch, retired
+):
+    async def reject(*_args, **_kwargs):
+        if retired:
+            async with AsyncSessionLocal() as db, db.begin():
+                await db.execute(
+                    update(File)
+                    .where(File.file_id == parse_case.file_id)
+                    .values(del_flag="2")
+                )
+        raise BusinessException(400, "source-derived-error", error_code="PARSE_FAILED")
+
+    monkeypatch.setattr(file_transform_worker, "run", reject)
+    if retired:
+        with pytest.raises(BusinessException) as caught:
+            await invoke(parse_case)
+        assert caught.value.error_code != "PARSE_FAILED"
+    else:
+        result = await invoke(parse_case)
+        assert not result.ok and result.error_code == "PARSE_FAILED"
+        assert result.projection.field_authority["source_complete"] is True
+        assert any(
+            group.get("kind") == "file" and group["file_id"] == str(parse_case.file_id)
+            for group in result.projection.field_authority["source_domains"]
+        )
+
+
 @pytest.mark.parametrize("mutation", ["path", "deleted", "version", "source"])
 async def test_file_parse_rechecks_after_worker(parse_case, monkeypatch, mutation):
     original = file_transform_worker.run

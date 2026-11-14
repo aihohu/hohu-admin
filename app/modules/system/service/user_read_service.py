@@ -5,11 +5,9 @@ load verified immutable policy rules; unavailable policies fail closed. The
 production read owner accepts no client-selected mode, purpose or rules.
 """
 
-from app.core.exceptions import AuthorizationException, BusinessException
-from app.core.rbac import is_super_admin
+from app.core.exceptions import BusinessException
 from app.db.authorization_plan_session import _order_error
 from app.modules.auth.permission_collect import (
-    collect_user_buttons,
     collect_user_identity,
 )
 from app.modules.system.field_policy.evaluator import FieldGrant
@@ -19,7 +17,6 @@ from app.modules.system.schemas.operation_log import OperationLogQuery
 from app.modules.system.schemas.user import UserQuery
 from app.modules.system.schemas.user_projection import UserMemberQuery
 from app.modules.system.service.relation_user_read import read_users
-from app.modules.system.service.user_copy_read_service import user_copy_read_service
 from app.modules.system.service.user_field_active import active_policy_grants
 from app.modules.system.service.user_field_context import (
     load_current_user,
@@ -121,29 +118,17 @@ class UserReadService:
                 query=query,
             )
         if operation in {"operation-logs", "login-logs"}:
-            actor = await self.actor(
-                db, tenant=tenant, actor_user_version=actor_user_version
+            from app.modules.system.service.delivery_log_read import (  # noqa: PLC0415
+                log_page,  # noqa: PLC0415
             )
-            permission = (
-                "monitor:operation-log:list"
-                if operation == "operation-logs"
-                else "monitor:login-log:list"
-            )
-            if not is_super_admin(actor) and permission not in collect_user_buttons(
-                actor
-            ):
-                raise AuthorizationException(
-                    "缺少操作权限", error_code="MISSING_PERMISSION"
-                )
-            context = await self.legacy_context(
+
+            return await log_page(
                 db,
                 tx,
                 tenant=tenant,
-                actor_user_version=actor_user_version,
-                actor=actor,
-            )
-            return await user_copy_read_service.audit_page(
-                db, tx, tenant=tenant, context=context, operation=operation, query=query
+                version=actor_user_version,
+                kind="operation" if operation == "operation-logs" else "login",
+                query=query,
             )
         try:
             return await read_users(

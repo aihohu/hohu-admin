@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKeyConstraint,
     Index,
@@ -24,6 +25,10 @@ if TYPE_CHECKING:
 class AiConversation(Base):
     __tablename__ = "ai_conversation"
     __table_args__ = (
+        CheckConstraint(
+            "title_origin IN ('legacy_unknown', 'authored', 'fixed')",
+            name="ck_ai_conversation_title_origin",
+        ),
         UniqueConstraint(
             "tenant_id",
             "conversation_id",
@@ -59,6 +64,12 @@ class AiConversation(Base):
     )
     title: Mapped[str] = mapped_column(
         String(200), nullable=False, default="新对话", comment="会话标题"
+    )
+    title_origin: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        server_default="legacy_unknown",
+        default="legacy_unknown",
     )
     model_name: Mapped[str] = mapped_column(
         String(100), nullable=False, default="openai:gpt-4o", comment="使用的模型标识"

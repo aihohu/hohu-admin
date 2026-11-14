@@ -16,6 +16,7 @@ from app.db.authorization_catalog_read_owner import CatalogReadOwner
 from app.db.authorization_chat_owner import ChatOwner
 from app.db.authorization_completion_facts_owner import CompletionFactsOwner
 from app.db.authorization_control_owner import control_candidate_owner
+from app.db.authorization_delivery_read_owner import DeliveryReadOwner
 from app.db.authorization_field_management_owner import FieldManagementOwner
 from app.db.authorization_file_read_owner import FileReadOwner
 from app.db.authorization_generic_policy_owner import GenericFieldPolicyOwner
@@ -64,6 +65,7 @@ class AuthorizationRuntime:
         if not isinstance(engine, AsyncEngine):
             raise _order_error()
         self.sessions = _SessionFactory(engine)
+        self.delivery = DeliveryReadOwner(self.sessions)
         self.auxiliary = AuxiliaryOwner(self.sessions)
         self.http_audit = HttpAuditOwner(self.sessions)
         self.job = JobOwner(self.sessions)

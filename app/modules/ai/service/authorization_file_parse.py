@@ -8,7 +8,9 @@ from types import SimpleNamespace
 from sqlalchemy import select
 
 from app.core.authorization_plan import ResourceKey, ResourceKind
+from app.core.exceptions import BusinessException
 from app.db.authorization_plan_session import _order_error
+from app.modules.ai.agents.gateway.result import ResultProjection, ToolResult
 from app.modules.ai.agents.tools.file_access import _not_found, read_protected_file
 from app.modules.ai.agents.tools.file_parser import PARSERS
 from app.modules.ai.agents.tools.file_tools import (
@@ -28,6 +30,19 @@ from app.modules.system.service.file_read_service import content_snapshot
 class FileParseInput:
     facts: tuple
     policy: UploadPolicy
+    field_authority: dict | None = None
+
+
+def file_parse_failure(snapshot, error):
+    """Called only after the owner has revalidated the detached worker snapshot."""
+    if type(snapshot) is not FileParseInput or not isinstance(error, BusinessException):
+        raise _order_error()
+    result = ToolResult.failure(error.error_code or "AI_INTERNAL_ERROR", error.message)
+    result.projection = ResultProjection(
+        subject_refs=({"type": "file", "id": str(dict(snapshot.facts)["file_id"])},),
+        field_authority=snapshot.field_authority,
+    )
+    return result
 
 
 def file_parse_key(tenant, args):
@@ -93,4 +108,13 @@ def parse_uploaded_file(snapshot, public_root, private_root):
     if parser is None:
         raise _order_error()
     parsed = parser._check_and_parse_bytes(protected.data)
-    return parsed_file_result(record.file_id, parsed)
+    result = parsed_file_result(record.file_id, parsed)
+    proof = snapshot.field_authority
+    if proof is not None:
+        if not any(
+            g.get("kind") == "file" and "file_size" in g["read"]
+            for g in proof["source_domains"]
+        ):
+            result.data.pop("file_size", None)
+        result.projection = replace(result.projection, field_authority=proof)
+    return result
