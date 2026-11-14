@@ -14,7 +14,6 @@ from app.core.field_policy import (
     resolve_fields,
 )
 from app.modules.system.field_policy.control_catalog import control_catalog
-from app.modules.system.field_policy.ordinary_catalog import production_catalog
 from app.modules.system.field_policy.transfer_catalog import (
     transfer_catalog,
     transfer_user_grants,
@@ -23,10 +22,12 @@ from app.modules.system.field_policy.transfer_catalog import (
 READ = Access("read", "management.read")
 
 
-def test_transfer_candidate_preserves_ten_object_source_and_production():
+def test_transfer_catalog_preserves_ten_object_source_and_original_digest():
     old, new = control_catalog(), transfer_catalog()
     assert len(old.objects) == 10 and len(new.objects) == 14
-    assert production_catalog().digest == new.digest
+    assert (
+        new.digest == "6e8b05d78ef00aba652db283a3529fc0ccf58c0bd5bb93743d2c7d094cc61184"
+    )
     for key, value in old.objects.items():
         current = new.objects[key]
         assert len(current.fields) == len(value.fields)

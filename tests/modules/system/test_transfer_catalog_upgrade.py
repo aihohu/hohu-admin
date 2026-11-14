@@ -1,8 +1,10 @@
-"""Ten-object preparation expands atomically without granting file fields."""
+"""Historical preparation expands atomically without granting new fields."""
 
+import pytest
 from sqlalchemy import select
 
 from app.modules.system.field_policy.control_catalog import control_catalog
+from app.modules.system.field_policy.delivery_catalog import delivery_catalog
 from app.modules.system.field_policy.ordinary_catalog import production_catalog
 from app.modules.system.field_policy.transfer_catalog import transfer_catalog
 from app.modules.system.models.field_policy import (
@@ -21,20 +23,25 @@ from tests.modules.system.test_authorization_transaction_barriers import (
 from tests.modules.system.test_generic_policy_migration import fence
 
 
-def test_current_preparation_catalog_is_the_complete_transfer_catalog():
-    assert production_catalog().digest == transfer_catalog().digest
+def test_current_preparation_catalog_is_the_complete_delivery_catalog():
+    assert production_catalog().digest == delivery_catalog().digest
 
 
-async def test_ten_to_fourteen_upgrade_has_empty_new_bindings_and_safe_replay(
+@pytest.mark.parametrize(
+    "source", [control_catalog, transfer_catalog], ids=["ten", "fourteen"]
+)
+async def test_historical_to_current_upgrade_has_empty_new_bindings_and_safe_replay(
     system_sessions,
+    source,
 ):
     _, plain = system_sessions
+    old, current = source(), delivery_catalog()
     async with plain() as db:
         await migrate_legacy(
             db,
             fence=await fence(db),
-            catalog=control_catalog(),
-            catalog_revision="test/controls",
+            catalog=old,
+            catalog_revision="test/historical-preparation",
             source_build="b" * 40,
         )
         await db.commit()
@@ -42,10 +49,13 @@ async def test_ten_to_fourteen_upgrade_has_empty_new_bindings_and_safe_replay(
         await db.commit()
         assert result["changedTenants"] == ["0", "1"]
         heads = list(await db.scalars(select(FieldPolicyHead)))
-        assert all(h.catalog_digest == transfer_catalog().digest for h in heads)
+        assert all(h.catalog_digest == current.digest for h in heads)
         states = list(await db.scalars(select(FieldPolicyObjectState)))
-        assert len(states) == 28
-        new = set(transfer_catalog().objects) - set(control_catalog().objects)
+        assert {(s.tenant_id, s.object_id) for s in states} == {
+            (tid, object_id) for tid in (0, 1) for object_id in current.objects
+        }
+        new = set(current.objects) - set(old.objects)
+        assert new
         assert all(
             s.mode == "legacy" and not s.ever_enforced
             for s in states

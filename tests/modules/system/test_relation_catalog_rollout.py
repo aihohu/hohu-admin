@@ -152,9 +152,9 @@ async def test_four_to_current_preserves_latest_rules_and_history_for_both_tenan
         await db.commit()
         assert result["sourceCatalogDigest"] == old.digest
         assert result["changedTenants"] == ["0", "1"]
-        assert (
-            len((await db.scalars(select(models.FieldPolicyObjectState))).all()) == 28
-        )
+        assert len(
+            (await db.scalars(select(models.FieldPolicyObjectState))).all()
+        ) == 2 * len(catalogs.production_catalog().objects)
         binding = (
             (await db.execute(select(models.FieldPolicyBinding.__table__)))
             .mappings()
@@ -283,9 +283,9 @@ async def test_new_install_can_prepare_current_objects_without_a_staging_head(
         assert all(
             h.head_version == 1 and h.rollout_state == "preparing" for h in heads
         )
-        assert (
-            len((await db.scalars(select(models.FieldPolicyObjectState))).all()) == 28
-        )
+        assert len(
+            (await db.scalars(select(models.FieldPolicyObjectState))).all()
+        ) == 2 * len(catalogs.production_catalog().objects)
 
 
 @pytest.mark.parametrize("change", ["original", "new_read", "unsourced"])

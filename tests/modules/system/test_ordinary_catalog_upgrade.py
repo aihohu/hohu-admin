@@ -48,18 +48,15 @@ async def test_expand_catalog_is_atomic_and_replay_does_not_increment_versions(
         assert head.catalog_digest == production_catalog().digest
         assert head.rollout_state == "preparing" and head.active_manifest_id is None
         assert head.candidate_manifest_id is None and head.head_version == 2
-        assert (
-            len(
-                (
-                    await db.scalars(
-                        select(FieldPolicyObjectState).where(
-                            FieldPolicyObjectState.tenant_id == 0
-                        )
+        assert len(
+            (
+                await db.scalars(
+                    select(FieldPolicyObjectState).where(
+                        FieldPolicyObjectState.tenant_id == 0
                     )
-                ).all()
-            )
-            == 14
-        )
+                )
+            ).all()
+        ) == len(production_catalog().objects)
         await db.rollback()
         again = await prepare_catalog(db, fence=await fence(db), source_build="b" * 40)
         await db.commit()

@@ -228,7 +228,7 @@ async def test_preview_source_rechecks_write_fields_even_with_same_epoch(
         reason="audit",
     )
 
-    async def denied_context(db, tx, *, tenant, version):
+    async def denied_context(db, tx, *, tenant, version, _after_plan=False):
         return await user_field_context.load(
             db, tx, tenant=tenant, actor_user_version=version, grants=()
         )
