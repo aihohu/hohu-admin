@@ -1,6 +1,6 @@
 # 传输与文件字段契约
 
-Backend/Web 0.2.0 开发版本的准备目录包含十四个对象：历史十对象及 `system.file`、`transfer.import`、`transfer.export`、`transfer.audit`。历史目录和摘要独立保留。该目录与运行适配器不代表生产激活资格；完整交付、恢复和独立复核仍是发布前置条件。
+Backend/Web 0.2.0 开发版本的准备目录包含23个对象；其中历史十四对象包括十个基础对象及 `system.file`、`transfer.import`、`transfer.export`、`transfer.audit`。历史目录和摘要独立保留，新增 AI 与审计对象见 [AI 交付字段契约](AI-DELIVERY-FIELDS.md)。该目录与运行适配器不代表生产激活资格；完整交付、恢复和独立复核仍是发布前置条件。
 
 ## 授权与来源
 
@@ -15,6 +15,8 @@ Backend/Web 0.2.0 开发版本的准备目录包含十四个对象：历史十�
 内存中的单份通用来源证明最多 4 MiB、16384 项来源；落库前，包含预检源和错误证明的整个谱系包仍受原 JSONB 文本 2 MiB 上限约束，按包含空格的 UTF-8 字节核验，超限整体拒绝并回滚。较大的来源集合需要缩小导出范围，不能通过扩大表约束绕过既有预算。
 
 ## 接口与稀疏元数据
+
+传输任务 ID 是逐字保留的不透明 URL-safe 字符串，字段契约允许1–64个 ASCII 字母、数字、`-`、`_`，首字符可以为 `-` 或 `_`。不重新生成或改写已有 ID，不将其当作数字、文件路径或 SQL 标识符。Snowflake ID 继续使用正十进制整数字符串；租户、所有者、功能权限与字段用途校验保持有效。
 
 用户传输沿用 `/system/user/import`、`/import/template`、`/import/{batch_id}`、`/import/{batch_id}/logs`、`/import/{batch_id}/cancel`、`/export`、`/export/{export_id}`、`/export/{export_id}/download`；错误文件通过 `/system/file/import-error/{batch_id}.xlsx` 认证下载。预检回执包含 `batchId`、`previewToken` 和过期时间；预检不是正式写入授权。执行前重新校验输入、模式和完整写入足迹。
 

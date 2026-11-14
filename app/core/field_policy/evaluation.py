@@ -258,7 +258,7 @@ def _typed(field, value):
     elif kind == "opaque_id":
         require(
             type(value) is str
-            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", value) is not None
+            and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value) is not None
         )
     elif kind == "string":
         require(type(value) is str)

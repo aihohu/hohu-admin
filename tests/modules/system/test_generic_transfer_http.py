@@ -2,10 +2,12 @@
 
 import sys
 
+import pytest
 from sqlalchemy import select
 
 from app.core.field_policy import contracts
 from app.modules.system.models.user_transfer import UserExportTask
+from app.modules.system.service import user_import_service
 from tests.modules.system.test_authorization_import_candidate import (
     import_sessions as import_sessions,
 )
@@ -54,11 +56,16 @@ async def test_generic_export_http_and_history_keep_missing_cells_missing(
         )
 
 
+@pytest.mark.parametrize("batch_prefix", [None, "-", "_"])
 async def test_generic_import_http_metadata_retains_zero_without_default_leaks(
-    transfer_http, import_sessions, monkeypatch
+    transfer_http, import_sessions, monkeypatch, batch_prefix
 ):
     client, _ = transfer_http
     factory, plain, _ = import_sessions
+    if batch_prefix is not None:
+        monkeypatch.setattr(
+            user_import_service, "_generate_batch_id", lambda: batch_prefix + "a" * 31
+        )
     await activate_relations(
         (factory, plain),
         monkeypatch,

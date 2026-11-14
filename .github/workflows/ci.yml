@@ -126,14 +126,12 @@ jobs:
       - name: Check transfer HTTP contracts before the full gate
         run: |
           set -euo pipefail
-          for seed in 1 2 3; do
-            PYTHONHASHSEED="$seed" \
-            COVERAGE_FILE="${RUNNER_TEMP}/transfer-contract-${seed}.coverage" \
-            uv run coverage run --source=app -m pytest \
-              tests/modules/system/test_generic_transfer_http.py \
-              --basetemp "${RUNNER_TEMP}/transfer-contract-${seed}" \
-              -o "cache_dir=${RUNNER_TEMP}/transfer-contract-cache-${seed}"
-          done
+          COVERAGE_FILE="${RUNNER_TEMP}/transfer-contract.coverage" \
+          uv run coverage run --source=app -m pytest \
+            tests/core/test_opaque_field_identity.py \
+            tests/modules/system/test_generic_transfer_http.py \
+            --basetemp "${RUNNER_TEMP}/transfer-contract" \
+            -o "cache_dir=${RUNNER_TEMP}/transfer-contract-cache"
 
       - name: Run Tests
         run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=70

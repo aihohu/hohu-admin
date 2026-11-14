@@ -40,7 +40,16 @@ def opaque_catalog(kind="opaque_id"):
 
 
 @pytest.mark.parametrize(
-    "value", ["6b9b5688-ec01-42fd-bd77-148ca89f8503", "batch-legacy-1", "a" * 64]
+    "value",
+    [
+        "6b9b5688-ec01-42fd-bd77-148ca89f8503",
+        "batch-legacy-1",
+        "a" * 64,
+        "_" + "a" * 31,
+        "-" + "a" * 31,
+        "_",
+        "-" * 64,
+    ],
 )
 def test_opaque_structural_identity_is_a_bounded_literal_string(value):
     catalog = opaque_catalog()
@@ -66,7 +75,17 @@ def test_opaque_structural_identity_is_a_bounded_literal_string(value):
         ("opaque_id", "../secret"),
         ("opaque_id", "a" * 65),
         ("opaque_id", 101),
+        ("opaque_id", ""),
+        ("opaque_id", "a/b"),
+        ("opaque_id", "a\\b"),
+        ("opaque_id", "."),
+        ("opaque_id", "a\n"),
+        ("opaque_id", "非ascii"),
+        ("opaque_id", "_" * 65),
+        ("opaque_id", True),
         ("id", "batch-legacy-1"),
+        ("id", "_1"),
+        ("id", "-1"),
     ],
 )
 def test_opaque_ids_do_not_accept_paths_numbers_or_change_snowflake(kind, value):
