@@ -1,7 +1,10 @@
 """Actual response-model serialization must preserve sparse task values."""
 
+import sys
+
 from sqlalchemy import select
 
+from app.core.field_policy import contracts
 from app.modules.system.models.user_transfer import UserExportTask
 from tests.modules.system.test_authorization_import_candidate import (
     import_sessions as import_sessions,
@@ -64,8 +67,35 @@ async def test_generic_import_http_metadata_retains_zero_without_default_leaks(
     response = await send_import(client, dry_run="true")
     assert response.status_code == 200, response.text
     identifier = response.json()["data"]["batchId"]
+    # Keep failed contract locations and type names, never payloads or values.
+    # The HTTP exception handler intentionally omits its private traceback.
+    invalid_sites = []
+    original_invalid = contracts.invalid
+
+    def located_invalid():
+        frame = sys._getframe(1)
+        site = []
+        try:
+            for _ in range(12):
+                if frame is None:
+                    break
+                site.append(
+                    {
+                        "file": frame.f_code.co_filename.rsplit("/", 1)[-1],
+                        "line": frame.f_lineno,
+                        "function": frame.f_code.co_name,
+                        "value_type": type(frame.f_locals.get("value")).__name__,
+                    }
+                )
+                frame = frame.f_back
+        finally:
+            del frame
+        invalid_sites.append(site)
+        return original_invalid()
+
+    monkeypatch.setattr(contracts, "invalid", located_invalid)
     response = await client.get(f"/user/import/{identifier}")
-    assert response.status_code == 200, response.text
+    assert response.status_code == 200, (response.text, invalid_sites)
     row = response.json()["data"]
     assert row["batchId"] == identifier and row["successCount"] == 0
     assert "summaryNew" not in row and "operatorId" not in row
