@@ -27,8 +27,8 @@ from tests.modules.ai.test_atomic_prepared_completion import (
 )
 from tests.modules.ai.test_preview_atomic_completion import (
     authenticated_actor,
+    configure_uploaded_fixture,
     observe,
-    replace_source,
 )
 from tests.modules.ai.test_preview_atomic_completion import preview_case as preview_case
 from tests.modules.ai.test_real_commit_ack import (
@@ -156,7 +156,7 @@ async def test_real_file_completion_ack(
         f"{case.username},Atomic {case.username.removeprefix('atx')}\n"
         f"{case.username}b,missing-department-for-file-test\n"
     ).encode()
-    await replace_source(preview, csv)
+    await configure_uploaded_fixture(preview, csv)
     handler = system_ai_tool_adapter.apply
     calls, confirmations, export_ids = [], [], []
 
