@@ -11,8 +11,14 @@ from app.modules.system.field_policy.evaluator import (
     resolve_record_fields,
     validate_write_fields,
 )
+from app.modules.system.field_policy.ordinary_catalog import production_catalog
+from app.modules.system.field_policy.transfer_catalog import transfer_user_grants
 from app.modules.system.field_policy.user_fields import USER_FIELDS
+from app.modules.system.models.field_policy import FieldPolicyHead
 from app.modules.system.models.user import User
+from app.modules.system.service.generic_field_policy_service import (
+    generic_field_policy_service,
+)
 from app.modules.system.service.user_field_active import active_policy_grants
 from app.modules.system.service.user_field_context import (
     load_current_user,
@@ -55,9 +61,27 @@ class UserAIFields:
     async def context(self, db, tx, *, tenant, version):
         actor = await load_current_user(db, tenant=tenant, actor_user_version=version)
         role_ids = tuple(str(r.role_id) for r in actor.roles if r.status == "1")
-        active = await active_policy_grants(
-            db, tx, tenant_id=tenant.tenant_id, role_ids=role_ids
-        )
+        if (
+            await db.scalar(
+                select(FieldPolicyHead.tenant_id).where(
+                    FieldPolicyHead.tenant_id == tenant.tenant_id
+                )
+            )
+            is None
+        ):
+            active = await active_policy_grants(
+                db, tx, tenant_id=tenant.tenant_id, role_ids=role_ids
+            )
+        else:
+            grants = await generic_field_policy_service.load_active(
+                db,
+                tx,
+                tenant_id=tenant.tenant_id,
+                catalog=production_catalog(),
+                object_id="system.user",
+                role_ids=role_ids,
+            )
+            active = transfer_user_grants(tenant.tenant_id, grants)
         return await user_field_context.load(
             db,
             tx,

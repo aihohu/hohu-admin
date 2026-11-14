@@ -1,9 +1,10 @@
 """Read completion boundary: no ORM or live transaction escapes to HTTP."""
 
-from app.core.authorization_plan import LockMode, TenantLock
+from app.core.authorization_plan import LockMode, TenantLock, TransactionBudget
 from app.db.authorization_owner import rollback_authorization_session
 from app.db.authorization_system_owner import require_candidate_session
 from app.modules.system.service.authorization_read_budget import (
+    AuthorizationReadBudget,
     bounded_authorization_reads,
 )
 from app.modules.system.service.authorization_transaction_service import (
@@ -16,7 +17,9 @@ class UserReadOwner:
     async def execute(self, db, *, tenant, actor_user_version, operation, query=None):
         require_candidate_session(db)
         try:
-            with bounded_authorization_reads(db):
+            with bounded_authorization_reads(
+                db, AuthorizationReadBudget(max_statements=4096)
+            ):
                 async with authorization_transactions.scope(
                     db,
                     tenants=(
@@ -27,6 +30,7 @@ class UserReadOwner:
                             else LockMode.SHARED,
                         ),
                     ),
+                    budget=TransactionBudget(timeout_ms=8000),
                 ) as tx:
                     result = await user_read_service.execute(
                         db,

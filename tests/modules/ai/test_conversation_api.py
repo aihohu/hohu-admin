@@ -10,6 +10,7 @@ from app.core.tenant import TenantContext
 from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
+from app.modules.ai.schemas.message import MessageOut
 from app.modules.ai.service.conversation_service import conversation_service
 from tests.modules.ai.test_authorization_conversation_http import (
     chat_model_case as chat_model_case,
@@ -41,6 +42,15 @@ def _user(user_id: int = 7001):
             tenant_version=1,
             source="access_token",
         ),
+    )
+
+
+def _allowed_field_projection():
+    # DTO ordering/URL units isolate the current field owner. Committed owner
+    # tests cover real source receipts, current field decisions and rollback.
+    return SimpleNamespace(
+        body_visible=AsyncMock(return_value=True),
+        project=AsyncMock(side_effect=MessageOut.model_validate),
     )
 
 
@@ -83,6 +93,10 @@ async def test_history_keeps_user_order_and_tombstones_denied_assistant() -> Non
         _message(message_id=2, role="assistant", content="secret result"),
     ]
     with (
+        patch(
+            "app.modules.ai.service.conversation_service.message_delivery",
+            AsyncMock(return_value=_allowed_field_projection()),
+        ),
         patch.object(
             conversation_service,
             "get_messages",
@@ -117,6 +131,10 @@ async def test_authorized_history_refreshes_short_lived_download_url() -> None:
     lineage = SimpleNamespace(agent_code="user_mgmt")
     refreshed = [{"ui": {"downloadUrl": "fresh"}}]
     with (
+        patch(
+            "app.modules.ai.service.conversation_service.message_delivery",
+            AsyncMock(return_value=_allowed_field_projection()),
+        ),
         patch.object(
             conversation_service,
             "get_messages",

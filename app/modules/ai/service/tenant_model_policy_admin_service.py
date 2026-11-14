@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 
 from sqlalchemy import and_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from app.core.exceptions import (
     AuthorizationException,
@@ -84,6 +85,18 @@ class TenantModelPolicyAdminService:
         rows = (
             await db.execute(
                 select(AiModel, AiProvider, TenantAiModelPolicy)
+                .options(
+                    load_only(
+                        AiModel.model_id,
+                        AiModel.provider_id,
+                        AiModel.name,
+                        AiModel.capabilities,
+                        AiModel.is_enabled,
+                    ),
+                    load_only(
+                        AiProvider.provider_id, AiProvider.name, AiProvider.is_enabled
+                    ),
+                )
                 .join(AiProvider, AiModel.provider_id == AiProvider.provider_id)
                 .outerjoin(
                     TenantAiModelPolicy,
@@ -219,6 +232,18 @@ class TenantModelPolicyAdminService:
         rows = (
             await db.execute(
                 select(TenantAiModelPolicy, AiModel, AiProvider)
+                .options(
+                    load_only(
+                        AiModel.model_id,
+                        AiModel.provider_id,
+                        AiModel.name,
+                        AiModel.capabilities,
+                        AiModel.is_enabled,
+                    ),
+                    load_only(
+                        AiProvider.provider_id, AiProvider.name, AiProvider.is_enabled
+                    ),
+                )
                 .join(AiModel, TenantAiModelPolicy.model_id == AiModel.model_id)
                 .join(AiProvider, AiModel.provider_id == AiProvider.provider_id)
                 .where(TenantAiModelPolicy.tenant_id == tenant_id)

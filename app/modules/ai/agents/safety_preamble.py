@@ -104,13 +104,12 @@ def build_dynamic_block(deps: ChatDeps) -> str:
     """构造运行时动态上下文。
 
     注入：
-      - 当前用户身份（user_id / user_name）
+      - 已认证主体的固定状态，不复制业务身份字段
       - 权限码摘要（让 LLM 知道能调用哪些类 tool，但不暴露完整 perms 列表）
       - data_scope 边界描述（"全部可见" / "限定部门" / "仅自己"）
       - 当前时间（用于"今天 / 本周"类时间敏感查询）
       - trace_id（便于审计反查）
     """
-    user = deps.user
     data_scope = deps.data_scope
 
     # data_scope 边界描述（不暴露具体 ID 集合，避免 LLM 上下文泄漏）
@@ -122,16 +121,14 @@ def build_dynamic_block(deps: ChatDeps) -> str:
     elif data_scope.scope_kinds == frozenset({DATA_SCOPE_SELF}):
         scope_desc = "仅本人（DATA_SCOPE_SELF）"
     else:
-        scope_desc = (
-            f"限定部门（可见 {len(data_scope.accessible_dept_ids or set())} 个部门）"
-        )
+        scope_desc = "限定部门"
 
     # 权限码摘要（按 prefix 分组，如 system:user:*）
     perms_summary = ", ".join(sorted(deps.perms)) if deps.perms else "(无)"
 
     return f"""[DYNAMIC CONTEXT — runtime, do not memorize across sessions]
 
-- Current user: {getattr(user, "user_name", "<unknown>")} (id={getattr(user, "user_id", "?")})
+- Current actor: authenticated tenant actor
 - Permission scope: {perms_summary}
 - Data scope: {scope_desc}
 - Current time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} (server local)

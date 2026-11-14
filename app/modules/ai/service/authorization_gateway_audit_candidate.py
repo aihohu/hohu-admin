@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from app.core.authorization_plan import LockPlan, NewResource, ResourceKey
 from app.core.authorization_plan import ResourceKind as K
+from app.core.exceptions import AuthorizationException, BusinessException
 from app.core.id_generator import next_id
 from app.db.authorization_plan_session import _order_error
 from app.modules.ai.agents.tools.registry import ToolRegistry
@@ -17,11 +18,14 @@ from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.authorization_chat_candidate import chat_candidate
 from app.modules.ai.service.authorization_context_candidate import ai_context_candidate
+from app.modules.ai.service.delivery_external_sources import existing_external_keys
+from app.modules.ai.service.delivery_source_roots import renew_source
 from app.modules.ai.service.field_authority_runtime import ai_field_authority
 from app.modules.ai.service.preflight_completion_service import (
     runtime_preflight_summary,
 )
 from app.modules.ai.service.reconciliation_annotation import has_annotation
+from app.modules.auth.service import load_live_user_authority
 
 
 class GatewayAuditCandidate:
@@ -37,6 +41,7 @@ class GatewayAuditCandidate:
         result_summary=None,
         target_summary=None,
         error_code=None,
+        result_field_authority=None,
     ):
         if (
             type(log_id) is not int
@@ -67,7 +72,10 @@ class GatewayAuditCandidate:
         inventory = await ai_context_candidate.discover(
             db, tx, tenant_id=tenant.tenant_id, conversation_ids=(conversation_id,)
         )
-        await tx.lock(LockPlan(existing=inventory.keys))
+        extra = await existing_external_keys(
+            db, tenant=tenant, proof=result_field_authority
+        )
+        await tx.lock(LockPlan(existing=tuple(set(inventory.keys) | set(extra))))
         await ai_context_candidate.recheck(db, tx, inventory)
         log = await db.get(AiOperationLog, log_id, populate_existing=True)
         if (
@@ -113,6 +121,27 @@ class GatewayAuditCandidate:
             "finished_at": max(now, log.queued_at, log.started_at or log.queued_at),
         }
         if succeeded:
+            try:
+                actor = await load_live_user_authority(db, tenant=tenant)
+                if result_field_authority is not None:
+                    values["result_field_authority"] = await ai_field_authority.renew(
+                        db,
+                        tx,
+                        tenant=tenant,
+                        actor_user_version=actor.auth_version,
+                        frozen=result_field_authority,
+                    )
+            except BusinessException as exc:
+                if not isinstance(
+                    exc, AuthorizationException
+                ) and exc.error_code not in {
+                    "FILE_SOURCE_UNAVAILABLE",
+                    "FIELD_TRANSFER_REGENERATE_REQUIRED",
+                }:
+                    raise
+                # Revocation changes delivery, never the result of a completed
+                # readonly operation. No body grant is persisted on this path.
+                values["result_field_authority"] = None
             values["result_summary"] = result_summary
             if target_summary is not None:
                 values["target_summary"] = target_summary
@@ -204,8 +233,8 @@ class GatewayAuditCandidate:
             raise _order_error()
         now = (await tx.database_now()).replace(tzinfo=None)
         running = mode == "autonomous" and preflight_error is None
-        await ai_field_authority.require(
-            db, tx, tenant=tenant, frozen=source.field_authority, legacy=True
+        proof = await renew_source(
+            db, tx, tenant=tenant, version=actor_user_version, source=source
         )
         registered = ToolRegistry.get().find(tool_name)
         confirmation_id = confirmation_id if preflight_error is None else None
@@ -228,7 +257,7 @@ class GatewayAuditCandidate:
             "tool_call_id": tool_call_id,
             "args_hash": args_hash,
             "args_summary": args_summary,
-            "field_authority": source.field_authority,
+            "field_authority": proof,
             "readonly_snapshot": readonly,
             "risk_level": risk,
             "execution_mode": mode,

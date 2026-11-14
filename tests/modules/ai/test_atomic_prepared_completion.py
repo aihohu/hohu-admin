@@ -54,6 +54,7 @@ from app.modules.system.models.user import User
 from app.modules.system.service.authorization_ai_tool_adapter import (
     system_ai_tool_adapter,
 )
+from tests.ai_source_fixtures import authored_source
 from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
 
@@ -158,6 +159,9 @@ async def completion_case(
             "primary_dept_id": department.dept_id,
             "role_assignment": "DEFAULT",
         }
+        message.field_authority = await authored_source(
+            db, tenant=tenant, message_id=message.message_id
+        )
         action = await prepared_action_service.create_pending(
             db,
             confirmation_id=confirmation_id,
@@ -189,6 +193,7 @@ async def completion_case(
             resolved_model_id=model.model_id,
             resolved_provider_id=provider.provider_id,
             require_live_source=True,
+            field_authority=message.field_authority,
         )
         log_id = await operation_log_service.start_operation(
             db,

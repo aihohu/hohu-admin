@@ -1,5 +1,6 @@
 """FILE tools bind publication to the original claim and completion owner."""
 
+from hashlib import sha256
 from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
@@ -26,6 +27,7 @@ from app.modules.ai.service.authorization_execution_candidate import (
     ai_execution_candidate,
 )
 from app.modules.ai.service.preview_completion_service import verify_historical_preview
+from app.modules.system.field_policy.file_sources import make_file_manifest
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.file import File
 from app.modules.system.models.menu import Menu
@@ -169,6 +171,15 @@ async def test_preview_creates_bound_handoff_and_verified_history(
                 file_ext=".csv",
                 mime_type="text/csv",
                 business_type="user-import",
+                delivery_class="user-import",
+                content_sha256=sha256(data).hexdigest(),
+                source_manifest=make_file_manifest(
+                    tenant_id=0,
+                    owner_id=101,
+                    file_id=501,
+                    delivery_class="user-import",
+                    digest=sha256(data).hexdigest(),
+                ),
                 del_flag="0",
             )
         )

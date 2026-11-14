@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import event, select, update
 
 from app.core.authorization_io import file_transform_worker
-from app.core.exceptions import BusinessException
+from app.core.exceptions import AuthorizationException, BusinessException
 from app.db import authorization_read_confirmation_owner as owner_module
 from app.db.session import engine
 from app.modules.ai.agents.gateway import executor
@@ -19,6 +19,9 @@ from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.schemas.confirm import ConfirmRequest
+from app.modules.ai.service import (
+    authorization_gateway_read_candidate as gateway_candidate,
+)
 from app.modules.system.models.file import File
 from app.modules.system.models.setting import SystemSetting
 from app.modules.system.models.user import User
@@ -67,6 +70,30 @@ async def invoke(case):
     )
 
 
+async def test_file_parse_checks_content_authority_before_any_worker(
+    parse_case, monkeypatch
+):
+    calls = []
+
+    async def reject(_db, tx, *, tenant, version, identifier, action):
+        assert tenant == parse_case.deps.tenant and version >= 1
+        assert identifier == parse_case.file_id and action == "file.parse"
+        tx.assert_held(
+            gateway_candidate.file_parse_key(tenant, {"file_id": str(identifier)})
+        )
+        calls.append(action)
+        raise AuthorizationException("字段拒绝", error_code="FIELD_READ_DENIED")
+
+    async def unexpected_worker(*_args, **_kwargs):
+        pytest.fail("content authority was checked after reading file bytes")
+
+    monkeypatch.setattr(gateway_candidate, "require_file_content", reject)
+    monkeypatch.setattr(file_transform_worker, "run", unexpected_worker)
+    with pytest.raises(BusinessException) as caught:
+        await invoke(parse_case)
+    assert caught.value.error_code == "FIELD_READ_DENIED" and calls == ["file.parse"]
+
+
 async def test_file_parse_worker_has_no_active_database_transaction(
     parse_case, monkeypatch
 ):
@@ -97,6 +124,35 @@ async def test_file_parse_worker_has_no_active_database_transaction(
         {"type": "file", "id": str(parse_case.file_id)},
     )
     assert observed == [0]
+
+
+@pytest.mark.parametrize("retired", [False, True])
+async def test_parser_business_failure_is_revalidated_before_delivery(
+    parse_case, monkeypatch, retired
+):
+    async def reject(*_args, **_kwargs):
+        if retired:
+            async with AsyncSessionLocal() as db, db.begin():
+                await db.execute(
+                    update(File)
+                    .where(File.file_id == parse_case.file_id)
+                    .values(del_flag="2")
+                )
+        raise BusinessException(400, "source-derived-error", error_code="PARSE_FAILED")
+
+    monkeypatch.setattr(file_transform_worker, "run", reject)
+    if retired:
+        with pytest.raises(BusinessException) as caught:
+            await invoke(parse_case)
+        assert caught.value.error_code != "PARSE_FAILED"
+    else:
+        result = await invoke(parse_case)
+        assert not result.ok and result.error_code == "PARSE_FAILED"
+        assert result.projection.field_authority["source_complete"] is True
+        assert any(
+            group.get("kind") == "file" and group["file_id"] == str(parse_case.file_id)
+            for group in result.projection.field_authority["source_domains"]
+        )
 
 
 @pytest.mark.parametrize("mutation", ["path", "deleted", "version", "source"])

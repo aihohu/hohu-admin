@@ -83,7 +83,8 @@ async def test_fresh_bootstrap_has_separate_proof_and_cannot_replay(
 
 
 @pytest.mark.parametrize(
-    "dirty", ["history", "epoch", "registered", "inflight", "revision"]
+    "dirty",
+    ["history", "epoch", "registered", "inflight", "revision", "previous_revision"],
 )
 async def test_bootstrap_refuses_existing_deployment(fresh_database, tmp_path, dirty):
     admin, writer, role, _ = fresh_database
@@ -102,6 +103,11 @@ async def test_bootstrap_refuses_existing_deployment(fresh_database, tmp_path, d
         async with admin.begin() as db:
             await db.execute(
                 text("UPDATE alembic_version SET version_num='e0203c000001'")
+            )
+    if dirty == "previous_revision":
+        async with admin.begin() as db:
+            await db.execute(
+                text("UPDATE alembic_version SET version_num='e020f3a00001'")
             )
     if dirty == "registered":
         (tmp_path / "process-123.json").write_text(json.dumps({"state": "exited"}))

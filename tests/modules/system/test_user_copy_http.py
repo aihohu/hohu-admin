@@ -73,10 +73,14 @@ async def test_audit_copy_never_guesses_an_identity_from_historical_text(http_sy
     response = await client.get("/operation-log/list")
     assert response.status_code == 200, response.text
     rows = {row["operationLogId"]: row for row in response.json()["data"]["records"]}
-    # Unactivated legacy/ready retains the original audit facts and display.
-    assert rows["901"]["username"] == "historical raw name"
-    assert rows["902"]["username"] == "planner"
-    assert rows["901"]["requestParams"] == "private historical payload"
+    # HTTP delivery uses the current canonical ID source; history stays intact.
+    assert rows["901"]["username"] == "planner"
+    assert "username" not in rows["902"]
+    assert all("requestParams" not in row for row in rows.values())
+    async with plain() as observer:
+        original = await observer.get(SysOperationLog, 901)
+        assert original.username == "historical raw name"
+        assert original.request_params == "private historical payload"
     runtime = AuthorizationRuntime(plain.kw["bind"])
 
     async def projected(query, mode=LockMode.EXCLUSIVE):
@@ -133,7 +137,12 @@ async def test_login_input_does_not_prove_a_canonical_username_source(http_syste
         await setup.commit()
     response = await client.get("/login-log/list")
     assert response.status_code == 200, response.text
-    assert response.json()["data"]["records"][0]["username"] == "historical@example.com"
+    row = response.json()["data"]["records"][0]
+    assert row["username"] == "planner" and "message" not in row
+    async with plain() as observer:
+        original = await observer.get(SysLoginLog, 903)
+        assert original.username == "historical@example.com"
+        assert original.message == "unstructured private input"
     runtime = AuthorizationRuntime(plain.kw["bind"])
 
     async def projected(query):

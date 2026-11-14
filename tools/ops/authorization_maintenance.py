@@ -119,9 +119,15 @@ class DirectProcesses:
                     birth = windows_birth(handle, kernel)
                     if birth is None:
                         continue
-                    if birth != expected.birth or not kernel.TerminateProcess(
-                        handle, 1
+                    if birth != expected.birth:
+                        raise _required()
+                    if (
+                        not kernel.TerminateProcess(handle, 1)
+                        and kernel.WaitForSingleObject(handle, 0) != 0
                     ):
+                        # The inventoried generation can exit after the birth
+                        # check. Only this same kernel handle can prove that
+                        # race completed; an error code or a PID is not proof.
                         raise _required()
             else:
                 # pidfd binds the signal to this process generation, even after PID reuse.
@@ -606,6 +612,11 @@ class PostgresStop:
         await self._resume_admission(record)
 
     async def _resume_admission(self, record):
+        from app.core.field_policy.maintenance import (  # noqa: PLC0415 - optional preparation protocol
+            require_normal_resume,
+        )
+
+        require_normal_resume(self)
         await self.require_quiescent()
         observed = record.get("observed_at")
         if observed is not None:

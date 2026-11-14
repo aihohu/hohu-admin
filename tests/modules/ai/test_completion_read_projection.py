@@ -31,7 +31,6 @@ from app.modules.ai.service.completion_read_state_service import (
     effective_call_state,
     effective_log_state,
 )
-from app.modules.ai.service.conversation_service import conversation_service
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.ai.service.operation_status_projection import (
     project_operation as get_operation_log,
@@ -109,8 +108,10 @@ async def test_verified_rejection_keeps_cancel_reason_on_all_read_surfaces(
         detail = await trace_service.get_trace(
             db, tenant=case.tenant, trace_id=trace_id
         )
-        history = await conversation_service.project_messages(
-            db, conversation_id=case.conversation_id, current_user=actor
+        history = await AuthorizationRuntime(engine).chat.messages(
+            conversation_id=case.conversation_id,
+            tenant=case.tenant,
+            actor_user_version=actor.auth_version,
         )
         await db.commit()
     assert poll.data.error_code == detail.operations[0].error_code == expected_code
@@ -181,13 +182,18 @@ async def test_poll_trace_history_mask_unproven_terminal_without_writing(
             tenant=case.tenant,
             query=TraceListQuery(trace_id=trace_id, status=before[4]),
         )
-        history = await conversation_service.project_messages(
-            db, conversation_id=case.conversation_id, current_user=actor
+        history = await AuthorizationRuntime(engine).chat.messages(
+            conversation_id=case.conversation_id,
+            tenant=case.tenant,
+            actor_user_version=actor.auth_version,
         )
         await db.commit()
     assert poll.data.status == "running"
     assert poll.data.error_code == "AI_EXECUTION_OUTCOME_UNKNOWN"
-    assert poll.data.finished_at is None and poll.data.duration_ms is None
+    assert (
+        poll.data.finished_at is None
+        and getattr(poll.data, "duration_ms", None) is None
+    )
     operation = detail.operations[0]
     assert operation.status == "running"
     assert operation.error_code == "AI_EXECUTION_OUTCOME_UNKNOWN"
@@ -197,7 +203,7 @@ async def test_poll_trace_history_mask_unproven_terminal_without_writing(
     assert listing.records[0].finished_at is None
     assert hidden_terminal.total == 0
     assistant = next(message for message in history if message.role == "assistant")
-    assert "已有可见说明。" in assistant.content
+    assert "已有可见说明。" not in assistant.content
     assert assistant.content.count(OUTCOME_UNKNOWN_MESSAGE) == 1
     assert assistant.completed_tool_call_ids == []
     for call in assistant.tool_calls or []:
@@ -267,7 +273,10 @@ async def test_valid_db_completion_retains_terminal_poll_and_trace(
         )
     expected = "failed" if failure else "success"
     assert poll.data.status == detail.operations[0].status == expected
-    assert poll.data.finished_at is not None
+    # This compatibility reader has no field-owner transaction, so only its
+    # completion status is available. The actual trace carries allowed times.
+    assert poll.data.finished_at is None
+    assert detail.operations[0].finished_at is not None
     async with AsyncSessionLocal() as db:
         assert not await prepared_action_service.has_in_progress_for_conversation(
             db,
@@ -318,8 +327,10 @@ async def test_missing_log_remains_unknown_without_creating_a_receipt(
     assert states[case.tool_call_id].unknown
     async with AsyncSessionLocal() as db:
         actor = await authenticated_actor(case, db)
-        messages = await conversation_service.project_messages(
-            db, conversation_id=case.conversation_id, current_user=actor
+        messages = await AuthorizationRuntime(engine).chat.messages(
+            conversation_id=case.conversation_id,
+            tenant=case.tenant,
+            actor_user_version=actor.auth_version,
         )
         assistant = next(item for item in messages if item.role == "assistant")
         assert OUTCOME_UNKNOWN_MESSAGE in assistant.content
@@ -493,8 +504,10 @@ async def test_unknown_history_denied_projection_is_minimal_and_idempotent(
     async with AsyncSessionLocal() as db:
         actor = await authenticated_actor(case, db)
         for _ in range(2):
-            messages = await conversation_service.project_messages(
-                db, conversation_id=case.conversation_id, current_user=actor
+            messages = await AuthorizationRuntime(engine).chat.messages(
+                conversation_id=case.conversation_id,
+                tenant=case.tenant,
+                actor_user_version=actor.auth_version,
             )
             assistant = next(item for item in messages if item.role == "assistant")
             assert (
@@ -566,8 +579,10 @@ async def test_history_uses_verified_state_instead_of_stale_tool_card(
     before = await stored_facts(case)
     async with AsyncSessionLocal() as db:
         actor = await authenticated_actor(case, db)
-        messages = await conversation_service.project_messages(
-            db, conversation_id=case.conversation_id, current_user=actor
+        messages = await AuthorizationRuntime(engine).chat.messages(
+            conversation_id=case.conversation_id,
+            tenant=case.tenant,
+            actor_user_version=actor.auth_version,
         )
         assistant = next(item for item in messages if item.role == "assistant")
         call = assistant.tool_calls[0]

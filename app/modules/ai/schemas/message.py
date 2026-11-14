@@ -5,9 +5,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from pydantic.alias_generators import to_camel
 
 from app.core.config import settings
+from app.modules.system.schemas.transfer_projection import SparseTransferOut
 
 
-class MessageOut(BaseModel):
+class MessageOut(SparseTransferOut):
     """消息输出"""
 
     message_id: int
@@ -15,11 +16,11 @@ class MessageOut(BaseModel):
     parent_message_id: int | None
     role: str
     message_type: str
-    content: str | None
-    parts: list[dict] | None
-    tokens_input: int | None
-    tokens_output: int | None
-    tool_calls: list[dict] | None
+    content: str | None = None
+    parts: list[dict] | None = None
+    tokens_input: int | None = None
+    tokens_output: int | None = None
+    tool_calls: list[dict] | None = None
     completed_tool_call_ids: list[str] = Field(
         default_factory=list,
         description="Audited completion IDs for safe receipts without target details",
@@ -27,7 +28,7 @@ class MessageOut(BaseModel):
     trace_id: str | None
     is_active: bool
     supersedes_message_id: int | None
-    create_time: datetime
+    create_time: datetime | None = None
 
     @field_serializer(
         "message_id",
@@ -38,7 +39,7 @@ class MessageOut(BaseModel):
     def serialize_id(self, v: int | None, _info):
         return str(v) if v is not None else None
 
-    @field_serializer("create_time")
+    @field_serializer("create_time", when_used="unless-none")
     def serialize_time(self, dt: datetime, _info) -> str:
         return dt.strftime(settings.DATETIME_FORMAT)
 

@@ -86,12 +86,12 @@ async def test_owner_without_chat_permission_receives_minimal_status_only() -> N
     assert result.data.model_dump(by_alias=True) == {
         "toolCallId": "tc_status",
         "status": "success",
-        "errorCode": "AI_RESULT_PROJECTION_FORBIDDEN",
-        "finishedAt": datetime(2026, 8, 14, 8, 0, 1, tzinfo=UTC),
+        "errorCode": None,
+        "finishedAt": None,
     }
 
 
-async def test_trace_auditor_without_chat_permission_keeps_audit_dto() -> None:
+async def test_auditor_without_a_field_owner_receives_only_completion_status() -> None:
     user = _user("ai:trace:view")
     with patch(
         "app.modules.ai.service.operation_status_projection.operation_log_service.get_by_tool_call_id",
@@ -104,20 +104,17 @@ async def test_trace_auditor_without_chat_permission_keeps_audit_dto() -> None:
             tenant=user._tenant_context,
         )
 
-    assert result.data.tool_name == "user.update"
-    assert result.data.duration_ms == 1000
+    assert result.data.status == "success"
+    assert not hasattr(result.data, "tool_name")
+    assert not hasattr(result.data, "duration_ms")
 
 
-async def test_owner_with_chat_permission_still_needs_projection_lineage() -> None:
+async def test_chat_permission_alone_cannot_unlock_audit_metadata() -> None:
     user = _user("ai:chat:use")
     with (
         patch(
             "app.modules.ai.service.operation_status_projection.operation_log_service.get_by_tool_call_id",
             AsyncMock(return_value=_log()),
-        ),
-        patch(
-            "app.modules.ai.service.operation_status_projection.result_projection_service.lineage_for_operation_log",
-            AsyncMock(return_value=None),
         ),
     ):
         result = await get_operation_log(
@@ -127,7 +124,8 @@ async def test_owner_with_chat_permission_still_needs_projection_lineage() -> No
             tenant=user._tenant_context,
         )
 
-    assert result.data.error_code == "AI_RESULT_PROJECTION_FORBIDDEN"
+    assert result.data.status == "success"
+    assert not hasattr(result.data, "tool_name")
 
 
 async def test_operation_log_lookup_is_scoped_to_authenticated_tenant() -> None:

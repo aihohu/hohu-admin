@@ -227,7 +227,9 @@ async def test_recovered_display_rechecks_current_authority(
         assert await result_projection_service._authorize_agent_and_tools(
             db, actor, lineage
         )
-        assert await result_projection_service.authorize_result_projection(
+        # Ordinary sessions cannot authorize a new source-less body. The actual
+        # current recipient check below goes through ChatOwner's G/B and plan.
+        assert not await result_projection_service.authorize_result_projection(
             db, actor, owner_user_id=101, lineage=lineage
         )
         await db.execute(

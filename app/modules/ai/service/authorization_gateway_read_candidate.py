@@ -9,9 +9,11 @@ from sqlalchemy import select
 
 from app.core.authorization_plan import ResourceKey
 from app.core.authorization_plan import ResourceKind as K
-from app.core.exceptions import AuthorizationException
+from app.core.exceptions import AuthorizationException, BusinessException
 from app.core.rbac import is_super_admin
 from app.db.authorization_plan_session import _order_error
+from app.modules.ai.agents.gateway.result import ToolResult
+from app.modules.ai.agents.hitl.constants import DryRunResult
 from app.modules.ai.agents.safety.ai_config import get_ai_config_str_list
 from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.ai.core.context import AiToolContext
@@ -26,10 +28,19 @@ from app.modules.ai.service.authorization_file_parse import (
     file_parse_input,
     file_parse_key,
 )
+from app.modules.ai.service.delivery_external_sources import file_source
+from app.modules.ai.service.delivery_source_capture import (
+    capture_domain,
+    capture_members,
+    capture_user_result,
+)
+from app.modules.ai.service.delivery_source_guard import require_tool_sources
+from app.modules.ai.service.delivery_source_roots import extend_source, renew_source
 from app.modules.ai.service.field_authority_runtime import ai_field_authority
 from app.modules.ai.service.result_projection_service import result_projection_service
 from app.modules.auth.service import load_live_user_authority
-from app.modules.job.ai_tools import _dry_run_job_update_cron
+from app.modules.job.schemas.job import JobAiUpdate
+from app.modules.job.service.authorization_job_candidate import read_cron_sources
 from app.modules.system.ai_tools import (
     analytics,
     dept,
@@ -42,6 +53,7 @@ from app.modules.system.service.authorization_control_identity import (
     assert_identity,
     read_identity,
 )
+from app.modules.system.service.file_read_service import require_file_content
 from app.modules.system.service.user_ai_fields import user_ai_fields
 
 READ_HANDLERS = MappingProxyType(
@@ -81,7 +93,7 @@ PREFLIGHT_HANDLERS = MappingProxyType(
         "dept.update": dept._dry_run_dept_update,
         "dept.move": dept._dry_run_dept_move,
         "user.export": user_transfer._dry_run_user_export,
-        "job.update_cron": _dry_run_job_update_cron,
+        "job.update_cron": read_cron_sources,
     }
 )
 
@@ -171,8 +183,8 @@ class GatewayReadCandidate:
             or not source.is_active
         ):
             raise _order_error()
-        await ai_field_authority.require(
-            db, tx, tenant=tenant, frozen=source.field_authority, legacy=True
+        source_proof = await renew_source(
+            db, tx, tenant=tenant, version=actor_user_version, source=source
         )
         permissions = agent_authorization_service.tool_permissions(actor)
         allowed = await agent_authorization_service.list_agents(
@@ -221,6 +233,14 @@ class GatewayReadCandidate:
         )
         if tool == "file.parse":
             tx.assert_held(file_parse_key(tenant, args))
+            await require_file_content(
+                db,
+                tx,
+                tenant=tenant,
+                version=actor_user_version,
+                identifier=file_parse_key(tenant, args).identity[0],
+                action="file.parse",
+            )
         fields = await user_ai_fields.before(
             db,
             tx,
@@ -230,20 +250,128 @@ class GatewayReadCandidate:
             args=args,
             preflight=preflight,
         )
-        result = await handler(ctx, **args)
+        sources = await require_tool_sources(
+            db,
+            tx,
+            tenant=tenant,
+            version=actor_user_version,
+            tool=tool,
+            args=args,
+            preflight=preflight,
+            user_context=fields,
+        )
+        if tool == "job.update_cron":
+            payload = JobAiUpdate.model_validate(args)
+            values = await read_cron_sources(
+                db,
+                tx,
+                tenant=tenant,
+                version=actor_user_version,
+                identifier=payload.job_id,
+            )
+            sources.delivery_domains.append(
+                await capture_domain(
+                    db,
+                    sources,
+                    "job.definition",
+                    records=(payload.job_id,),
+                    readable=("job_name", "cron_expression"),
+                )
+            )
+            old = values["cron_expression"] or "(none)"
+            result = DryRunResult(
+                ok=True,
+                count=1,
+                reason="将修改任务调度",
+                summary_key="page.ai.chat.confirmUpdateCronSummary",
+                summary_params={"oldCron": old, "newCron": payload.cron_expression},
+                execution_args={
+                    "job_id": payload.job_id,
+                    "cron_expression": payload.cron_expression,
+                },
+                confirmation_fields=[
+                    {
+                        "label": "job_id",
+                        "value": payload.job_id,
+                        "display_value": values["job_name"],
+                    },
+                    {"label": "cron_expression", "value": payload.cron_expression},
+                ],
+            )
+        else:
+            try:
+                result = await handler(ctx, **args)
+            except BusinessException as exc:
+                if (
+                    exc.error_code.startswith(("AUTHORIZATION_", "FIELD_POLICY_LOCK"))
+                    or tool == "file.parse"
+                ):
+                    raise
+                proof = await ai_field_authority.renew(
+                    db,
+                    tx,
+                    tenant=tenant,
+                    actor_user_version=actor_user_version,
+                    frozen=extend_source(source_proof, *sources.delivery_domains),
+                )
+                if preflight:
+                    exc._ai_delivery_authority = proof
+                    raise
+                result = ToolResult.failure(
+                    exc.error_code or "AI_INTERNAL_ERROR", exc.message
+                )
+        if tool == "file.parse":
+            group, _, decisions = await file_source(
+                db,
+                tx,
+                tenant=tenant,
+                version=actor_user_version,
+                identifier=file_parse_key(tenant, args).identity[0],
+                action="file.parse",
+            )
+            if decisions["file_size"].allowed:
+                group["read"] = ["content", "file_size"]
+            result = replace(
+                result,
+                field_authority=extend_source(
+                    source_proof, *sources.delivery_domains, group
+                ),
+            )
         if not preflight and tool != "file.parse":
             result = await user_ai_fields.project(
                 db, tx, fields, tool=tool, result=result
             )
+            result, extra_sources = await capture_user_result(
+                db, sources, fields, tool=tool, result=result, tx=tx
+            )
+            sources.delivery_domains.extend(extra_sources)
             if result.projection is not None:
                 result = replace(
                     result,
                     projection=replace(
                         result.projection,
-                        field_authority=await ai_field_authority.current(
-                            db, tx, tenant=tenant
+                        field_authority=extend_source(
+                            source_proof, *sources.delivery_domains
                         ),
                     ),
+                )
+        if preflight:
+            sources.delivery_domains.extend(
+                await capture_members(
+                    db, sources, tool=tool, snapshot=result.business_snapshot
+                )
+            )
+            result = replace(
+                result,
+                field_authority=extend_source(source_proof, *sources.delivery_domains),
+            )
+            if result.ok:
+                await ai_field_authority.renew(
+                    db,
+                    tx,
+                    tenant=tenant,
+                    actor_user_version=actor_user_version,
+                    frozen=result.field_authority,
                 )
         return result
 

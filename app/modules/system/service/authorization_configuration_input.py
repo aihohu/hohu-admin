@@ -2,26 +2,27 @@
 
 import json
 from dataclasses import dataclass, field
-from io import BytesIO
-from zipfile import BadZipFile
 
-from openpyxl import load_workbook
-from openpyxl.utils.exceptions import InvalidFileException
 from pydantic import BaseModel, ValidationError
 
-from app.core.authorization_io import BoundedWorker
 from app.core.exceptions import BusinessException, BusinessRuleException
 from app.modules.system.models.config import Config
 from app.modules.system.models.menu import Menu
-from app.modules.system.schemas.config import ConfigCreate, ConfigUpdate
+from app.modules.system.schemas.control_config import (
+    ControlConfigCreate,
+    ControlConfigUpdate,
+)
 from app.modules.system.schemas.menu import MenuCreate, MenuUpdate
+from app.modules.system.schemas.parameter_form import (
+    ParameterPublicationWrite,
+    ParameterRevocationWrite,
+)
+from app.modules.system.service.control_config_input import prepare_control_import
 from app.modules.system.service.mail_service import MailWrite
 from app.modules.system.service.settings_service import _validate
 from app.modules.system.settings_catalog import SETTING_GROUPS, SETTINGS
-from app.utils.safe_xlsx import UnsafeXlsxError, validate_untrusted_xlsx_xml
 
 _IMPORT_ISSUED = object()
-_import_worker = BoundedWorker(workers=4, queue=32, timeout=3.0)
 
 
 def invalid(code="CONFIGURATION_INPUT_INVALID"):
@@ -94,58 +95,26 @@ class ConfigImportPreparation:
     _issued: object = field(repr=False, compare=False)
 
 
-def _parse_import(payload):
-    try:
-        validate_untrusted_xlsx_xml(payload)
-        book = load_workbook(
-            BytesIO(payload), read_only=True, data_only=True, keep_links=False
-        )
-    except (UnsafeXlsxError, InvalidFileException, BadZipFile, ValueError, OSError):
-        raise invalid("CONFIG_IMPORT_INVALID_XLSX") from None
-    records = []
-    size = 0
-    try:
-        sheet = book.active
-        if sheet is None:
-            raise invalid("CONFIG_IMPORT_INVALID_XLSX")
-        for index, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), 1):
-            if index > 1000:
-                raise limit()
-            if not row or len(row) < 2 or not row[1]:
-                continue
-            if len(row) < 7:
-                raise invalid("CONFIG_IMPORT_INVALID_XLSX")
-            values = {
-                "config_name": str(row[0] or ""),
-                "config_key": str(row[1]).strip(),
-                "config_value": str(row[2] or ""),
-                "config_type": str(row[3] or "text"),
-                "config_group": str(row[4] or ""),
-                "status": str(row[5] or "1"),
-                "is_public": bool(row[6]) if row[6] is not None else False,
-                "remark": str(row[7] or "") if len(row) > 7 and row[7] else None,
-            }
-            columns_fit(Config.__table__, values)
-            if len(values["config_value"].encode("utf-8")) > 8192:
-                raise limit()
-            size += len(json.dumps(values, ensure_ascii=False).encode("utf-8"))
-            if size > 1024 * 1024:
-                raise limit()
-            records.append(tuple(values.items()))
-    finally:
-        book.close()
-    return ConfigImportPreparation(tuple(records), _IMPORT_ISSUED)
-
-
 async def parse_import(payload: bytes) -> ConfigImportPreparation:
-    if type(payload) is not bytes:
-        raise invalid("CONFIG_IMPORT_INVALID_XLSX")
-    if len(payload) > 10 * 1024 * 1024:
-        raise limit()
-    return await _import_worker.run(_parse_import, payload)
+
+    prepared = await prepare_control_import(payload)
+    return ConfigImportPreparation(prepared.records, _IMPORT_ISSUED)
 
 
 def freeze_input(operation, payload, target_id):
+    if operation in {"config.publish", "config.revoke"}:
+        try:
+            schema = (
+                ParameterPublicationWrite
+                if operation == "config.publish"
+                else ParameterRevocationWrite
+            )
+            model = schema.model_validate(
+                payload.model_dump() if isinstance(payload, BaseModel) else payload
+            )
+        except (ValidationError, ValueError):
+            raise invalid() from None
+        return model.model_dump(), identifier(target_id)
     if operation == "config.import":
         if (
             type(payload) is not ConfigImportPreparation
@@ -193,8 +162,8 @@ def freeze_input(operation, payload, target_id):
     schema = {
         "menu.create": MenuCreate,
         "menu.update": MenuUpdate,
-        "config.create": ConfigCreate,
-        "config.update": ConfigUpdate,
+        "config.create": ControlConfigCreate,
+        "config.update": ControlConfigUpdate,
         "mail.save": MailWrite,
     }.get(operation)
     if schema is None:
@@ -209,6 +178,8 @@ def freeze_input(operation, payload, target_id):
         if buttons is not None:
             if len(buttons) > 128:
                 raise limit()
+            if len({b["code"] for b in buttons}) != len(buttons):
+                raise invalid("MENU_BUTTON_DUPLICATE")
             for button in buttons:
                 columns_fit(
                     Menu.__table__,

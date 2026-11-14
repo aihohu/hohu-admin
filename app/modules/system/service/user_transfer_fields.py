@@ -16,6 +16,7 @@ from app.modules.system.field_policy.evaluator import (
     resolve_record_fields,
     validate_write_fields,
 )
+from app.modules.system.field_policy.ordinary_catalog import production_catalog
 from app.modules.system.field_policy.transfer import (
     EXPORT_COLUMNS,
     export_query_plan,
@@ -25,12 +26,23 @@ from app.modules.system.field_policy.transfer import (
     transfer_denied,
     validate_lineage,
 )
+from app.modules.system.field_policy.transfer_catalog import transfer_user_grants
 from app.modules.system.field_policy.user_fields import CATALOG_REVISION, USER_FIELDS
+from app.modules.system.models.field_policy import FieldPolicyHead
 from app.modules.system.models.user_field_policy import (
     UserFieldPolicyGlobalGuard,
     UserFieldPolicyState,
 )
 from app.modules.system.service import user_export_service as exports
+from app.modules.system.service.generic_field_policy_service import (
+    generic_field_policy_service,
+)
+from app.modules.system.service.generic_transfer_export import project_rows, prove_query
+from app.modules.system.service.transfer_relation_sources import (
+    export_sources,
+    recheck_sources,
+    require_import_sources,
+)
 from app.modules.system.service.user_field_active import active_policy_grants
 from app.modules.system.service.user_field_compatibility import (
     require_legacy_field_policy,
@@ -72,22 +84,80 @@ class UserTransferFields:
     def __init__(self, *, legacy_assets=False):
         self.legacy_assets = legacy_assets
 
-    async def context(self, db, tx, *, tenant, version):
+    async def context(self, db, tx, *, tenant, version, _after_plan=False):
+        tx.assert_session(db)
+        tx.assert_barrier(tenant.tenant_id)
         actor = await load_current_user(db, tenant=tenant, actor_user_version=version)
         role_ids = tuple(str(r.role_id) for r in actor.roles if r.status == "1")
-        active = await active_policy_grants(
-            db, tx, tenant_id=tenant.tenant_id, role_ids=role_ids
+        generic = await db.scalar(
+            select(FieldPolicyHead.tenant_id).where(
+                FieldPolicyHead.tenant_id == tenant.tenant_id
+            )
         )
-        return await user_field_context.load(
+        if generic is None:
+            active = await active_policy_grants(
+                db, tx, tenant_id=tenant.tenant_id, role_ids=role_ids
+            )
+        else:
+            grants = await generic_field_policy_service.load_active(
+                db,
+                tx,
+                tenant_id=tenant.tenant_id,
+                catalog=production_catalog(),
+                object_id="system.user",
+                role_ids=role_ids,
+            )
+            active = transfer_user_grants(tenant.tenant_id, grants)
+        result = await user_field_context.load(
             db,
             tx,
             tenant=tenant,
             actor_user_version=version,
             grants=_rules(role_ids) if active is None else active,
+            _after_plan=_after_plan,
         )
+        return replace(result, generic_grants=grants) if generic is not None else result
 
     async def stamp(self, db, tx, *, tenant_id):
         tx.assert_session(db)
+        tx.assert_barrier(tenant_id)
+        head = await db.scalar(
+            select(FieldPolicyHead)
+            .where(FieldPolicyHead.tenant_id == tenant_id)
+            .execution_options(populate_existing=True)
+        )
+        if head is not None:
+            catalog = production_catalog()
+            await generic_field_policy_service.load_active(
+                db,
+                tx,
+                tenant_id=tenant_id,
+                catalog=catalog,
+                object_id="system.user",
+                role_ids=(),
+            )
+            state = await db.scalar(
+                select(UserFieldPolicyState.epoch).where(
+                    UserFieldPolicyState.tenant_id == tenant_id
+                )
+            )
+            global_epoch = await db.scalar(
+                select(UserFieldPolicyGlobalGuard.epoch).where(
+                    UserFieldPolicyGlobalGuard.guard_id == 1
+                )
+            )
+            if state is None or global_epoch is None:
+                raise transfer_denied()
+            return {
+                "policy_kind": "generic",
+                "global_epoch": global_epoch,
+                "tenant_epoch": state,
+                "mode": "enforcing",
+                "active_digest": head.active_manifest_digest,
+                "catalog_revision": "generic/2",
+                "catalog_digest": catalog.digest,
+                "build": settings.RELEASE_BUILD_SHA or "development",
+            }
         state = await db.scalar(
             select(UserFieldPolicyState)
             .where(UserFieldPolicyState.tenant_id == tenant_id)
@@ -115,18 +185,28 @@ class UserTransferFields:
             "build": settings.RELEASE_BUILD_SHA or "development",
         }
 
-    async def coverage(self, db, tx, context, plan):
+    async def coverage(
+        self, db, tx, context, plan, *, full_match=False, _after_plan=False
+    ):
+        if context.generic_grants is not None:
+            await prove_query(
+                db, tx, context, plan, full_match=full_match, _after_plan=_after_plan
+            )
+            return
         await assert_user_query_coverage(
             db,
             tx,
             tenant_id=context.tenant_id,
-            base_predicates=context.base_predicates,
+            base_predicates=() if full_match else context.base_predicates,
             plan=plan,
             grants=context.grants,
             role_scopes=context.role_scopes,
+            _after_plan=_after_plan,
         )
 
-    async def decisions(self, db, tx, context, ids, *, operation, purpose):
+    async def decisions(
+        self, db, tx, context, ids, *, operation, purpose, _after_plan=False
+    ):
         result = {}
         for offset in range(0, len(ids), 100):
             window = replace(context, _applicable={})
@@ -138,6 +218,7 @@ class UserTransferFields:
                     operation=operation,
                     purpose=purpose,
                     entrypoint="export" if purpose == "export" else "import",
+                    _after_plan=_after_plan,
                 )
             )
         return result
@@ -145,6 +226,17 @@ class UserTransferFields:
     async def export(self, db, tx, *, tenant, version, filters):
         context = await self.context(db, tx, tenant=tenant, version=version)
         await self.coverage(db, tx, context, export_query_plan(filters))
+        if context.generic_grants is not None:
+            projection, ids = await project_rows(
+                db,
+                tx,
+                tenant=tenant,
+                version=version,
+                filters=filters,
+                context=context,
+                fields=self,
+            )
+            return projection, ids, await self.stamp(db, tx, tenant_id=tenant.tenant_id)
         actor = await load_current_user(db, tenant=tenant, actor_user_version=version)
         rows = await exports._query_users_with_data_scope(
             db, filters, actor, tenant=tenant, max_rows=5001
@@ -166,6 +258,15 @@ class UserTransferFields:
             for values in exports._excel_values(rows, lookup)
         )
         projection = project_export(raw, tuple(decisions[uid] for uid in ids))
+        projection = await export_sources(
+            db,
+            tx,
+            tenant=tenant,
+            version=version,
+            rows=rows,
+            lookup=lookup,
+            projection=projection,
+        )
         stamp = await self.stamp(db, tx, tenant_id=tenant.tenant_id)
         return projection, ids, stamp
 
@@ -176,6 +277,15 @@ class UserTransferFields:
             tx,
             context,
             import_query_plan(employee_no=any(r.employee_no for r in records)),
+            full_match=await db.scalar(
+                select(FieldPolicyHead.tenant_id).where(
+                    FieldPolicyHead.tenant_id == tenant.tenant_id
+                )
+            )
+            is not None,
+        )
+        await require_import_sources(
+            db, tx, tenant=tenant, version=version, records=records
         )
         return context
 
@@ -211,7 +321,7 @@ class UserTransferFields:
         return requirements
 
     async def import_requirements(
-        self, db, tx, *, tenant, version, context, requirements
+        self, db, tx, *, tenant, version, context, requirements, _after_plan=False
     ):
         ids = tuple(
             sorted(
@@ -220,7 +330,13 @@ class UserTransferFields:
         )
         existing = {
             operation: await self.decisions(
-                db, tx, context, ids, operation=operation, purpose="import"
+                db,
+                tx,
+                context,
+                ids,
+                operation=operation,
+                purpose="import",
+                _after_plan=_after_plan,
             )
             for operation in ("update", "replace")
         }
@@ -262,8 +378,22 @@ class UserTransferFields:
                     supplied_paths=fields, decisions=decision, operation=operation
                 )
 
-    async def download(self, db, tx, *, tenant, version, row, identifier, kind):
-        context = await self.context(db, tx, tenant=tenant, version=version)
+    async def download(
+        self,
+        db,
+        tx,
+        *,
+        tenant,
+        version,
+        row,
+        identifier,
+        kind,
+        _after_plan=False,
+        _reprove=False,
+    ):
+        context = await self.context(
+            db, tx, tenant=tenant, version=version, _after_plan=_after_plan
+        )
         lineage = row.get("field_lineage")
         if lineage is None:
             # Only this explicitly guarded production compatibility path admits
@@ -274,18 +404,53 @@ class UserTransferFields:
             raise transfer_denied()
         document = lineage.get(kind) if type(lineage) is dict else None
         stamp = await self.stamp(db, tx, tenant_id=tenant.tenant_id)
+        original_stamp = document.get("stamp") if type(document) is dict else None
+        if _reprove and (
+            type(original_stamp) is not dict
+            or any(
+                original_stamp.get(k) != stamp.get(k)
+                for k in ("policy_kind", "catalog_digest", "catalog_revision", "build")
+            )
+        ):
+            raise transfer_denied()
         validate_lineage(
             document,
             tenant_id=tenant.tenant_id,
             owner_id=row["operator_id"],
             resource_id=identifier,
             kind=kind,
-            stamp=stamp,
+            stamp=original_stamp if _reprove else stamp,
         )
         if kind == "export":
+            if _reprove:
+                await self.coverage(
+                    db,
+                    tx,
+                    context,
+                    export_query_plan(
+                        exports.UserExportFilter.model_validate(
+                            row["filter_snapshot"]["filter"]
+                        )
+                    ),
+                    _after_plan=_after_plan,
+                )
+            if stamp.get("policy_kind") == "generic":
+                await recheck_sources(
+                    db,
+                    tx,
+                    tenant=tenant,
+                    version=version,
+                    references=document["related_sources"],
+                )
             ids = tuple(int(uid) for uid, _ in document["sources"])
             current = await self.decisions(
-                db, tx, context, ids, operation="export", purpose="export"
+                db,
+                tx,
+                context,
+                ids,
+                operation="export",
+                purpose="export",
+                _after_plan=_after_plan,
             )
             ranks = {"hidden": 0, "masked": 1, "plain": 2}
             for uid, levels in document["sources"]:
@@ -295,6 +460,19 @@ class UserTransferFields:
                     if ranks[current[int(uid)].fields[field].read] < ranks[level]:
                         raise transfer_denied()
         elif kind == "preview_source":
+            if _reprove:
+                await self.coverage(
+                    db,
+                    tx,
+                    context,
+                    import_query_plan(
+                        employee_no=any(
+                            "employee_no" in fields for fields in document["presence"]
+                        )
+                    ),
+                    full_match=stamp.get("policy_kind") == "generic",
+                    _after_plan=_after_plan,
+                )
             await self.import_requirements(
                 db,
                 tx,
@@ -302,6 +480,7 @@ class UserTransferFields:
                 version=version,
                 context=context,
                 requirements=document["requirements"],
+                _after_plan=_after_plan,
             )
         return document
 

@@ -110,6 +110,13 @@ async def test_unknown_notice_never_waits_for_stalled_close(
     committed, stalled = [], []
     original_commit = authorization_chat_owner.commit_authorization_session
     original_close = AsyncSession.close
+    # This test must reach the real commit and cancellation-resistant close.
+    # Independent cold projection SQL can exhaust the optional one-second budget
+    # first; the separate timeout case below covers that valid refusal path.
+    projection = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        resume.result_projection_service, "authorize_result_projection", projection
+    )
 
     async def commit(db):
         await original_commit(db)
@@ -137,6 +144,7 @@ async def test_unknown_notice_never_waits_for_stalled_close(
         done, _ = await asyncio.wait({task}, timeout=1.5)
         assert task in done, "Session disposal must not exceed the display budget"
         assert task.result()[-1].persistence == "committed"
+        projection.assert_awaited()
         assert len(stalled) == 1
         assert any(row[0] is stalled[0] for row in _QUARANTINED.values())
     finally:
@@ -144,6 +152,57 @@ async def test_unknown_notice_never_waits_for_stalled_close(
         await task
         tasks = [row[2] for row in _QUARANTINED.values() if row[0] in stalled]
         await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 3)
+
+
+async def test_unknown_notice_projection_timeout_preserves_running_facts(
+    completion_case, monkeypatch
+):
+    case = completion_case
+    await leave_claim_running(case, monkeypatch)
+    async with AsyncSessionLocal() as db:
+        identity = access_identity(await authenticated_actor(case, db))
+        pending = resume._pending_from_durable_action(
+            await db.get(AiPreparedAction, case.action_id)
+        )
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def stalled_projection(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(
+        resume.result_projection_service,
+        "authorize_result_projection",
+        stalled_projection,
+    )
+    task = asyncio.create_task(
+        resume._persist_unknown_resume_notice(
+            pending, tenant=case.tenant, actor_user_version=identity.user_version
+        )
+    )
+    try:
+        done, _ = await asyncio.wait({task}, timeout=1.5)
+        assert task in done, "Optional projection must retain its one-second budget"
+        assert entered.is_set()
+        events = task.result()
+        assert events[-1].persistence == "not_applicable"
+        assert not any(isinstance(item, ToolCallResultEvent) for item in events)
+    finally:
+        release.set()
+        await task
+    async with AsyncSessionLocal() as db:
+        assert (await db.get(AiPreparedAction, case.action_id)).status == "running"
+        assert (await db.get(AiOperationLog, case.log_id)).status == "running"
+        assert (
+            await db.scalar(
+                select(AiMessage.message_id).where(
+                    AiMessage.conversation_id == case.conversation_id,
+                    AiMessage.role == "assistant",
+                )
+            )
+            is None
+        )
+    assert case.calls == []
 
 
 async def test_known_terminal_projection_timeout_preserves_facts(

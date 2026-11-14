@@ -9,11 +9,14 @@ import pytest
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.service.completion_read_state_service import EffectiveCompletion
 from app.modules.ai.service.conversation_service import conversation_service
+from app.modules.ai.service.delivery_source_domains import with_sources
+from app.modules.ai.service.field_authority_runtime import ai_field_authority
 from app.modules.ai.service.result_projection_service import (
     DeletionReceipt,
     result_projection_service,
 )
 from tests.modules.ai.test_conversation_api import _message
+from tests.modules.ai.test_field_authority import evidence
 from tests.modules.ai.test_result_projection_service import TENANT, _user
 
 
@@ -72,7 +75,7 @@ async def test_projected_receipt_excludes_original_sensitive_payload():
 )
 @pytest.mark.parametrize("verified", [False, True])
 async def test_receipt_requires_matching_success_audit_and_proof(
-    db_session, change, allowed, verified
+    db_session, change, allowed, verified, monkeypatch
 ):
     user = _user("ai:chat:use", "system:user:delete")
     lineage = result_projection_service.freeze_lineage(
@@ -81,7 +84,13 @@ async def test_receipt_requires_matching_success_audit_and_proof(
         tool_codes=["user.batch_delete"],
         subject_refs=[{"type": "user", "id": "9"}],
         projection_dependency_message_ids=[8],
+        field_authority=with_sources(
+            evidence(tenant_id=0, actor_id=101),
+            ({"kind": "input", "read": ["content"]},),
+        ),
     )
+    # This unit isolates audit binding from the independently tested field owner.
+    monkeypatch.setattr(ai_field_authority, "visible", AsyncMock(return_value=True))
     message = SimpleNamespace(
         role="assistant",
         conversation_id=8001,

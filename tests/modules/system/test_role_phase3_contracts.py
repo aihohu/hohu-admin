@@ -1,17 +1,28 @@
 """Phase 3 strict Role Agent and page-writer contracts."""
 
 import inspect
-from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, patch
 
 import pytest
 from fastapi.routing import APIRoute
 from pydantic import ValidationError
+from sqlalchemy import select
 
-from app.modules.system.api.role import get_menus, list_roles, router
-from app.modules.system.schemas.role import RoleQuery, RoleUpdate
+from app.db.authorization_plan_session import AuthorizationPlanSession
+from app.db.base import role_menus
+from app.modules.system.api.role import router
+from app.modules.system.schemas.role import RoleUpdate
 from app.modules.system.service import role_management_service as role_policy_module
-from tests.tenant_helpers import tenant_context
+from tests.modules.system.test_authorization_system_candidate import TENANT
+from tests.modules.system.test_authorization_system_candidate import (
+    system_sessions as system_sessions,
+)
+from tests.modules.system.test_authorization_system_http import (
+    http_system as http_system,
+)
+from tests.modules.system.test_authorization_transaction_barriers import (
+    plan_sessions as plan_sessions,
+)
 
 
 def _route(path: str, method: str) -> APIRoute:
@@ -97,56 +108,42 @@ def test_role_list_response_is_the_minimal_delegation_summary() -> None:
     assert "deptIds" not in serialized
 
 
-async def test_role_list_uses_shared_delegation_summary_service() -> None:
-    summary = SimpleNamespace(
-        role_id=101,
-        role_code="R_SCOPED",
-        role_name="Scoped",
-        status="1",
-        data_scope="5",
-        delegable=True,
-        blocked_reason_code=None,
-    )
-    current_user = SimpleNamespace(user_id=202)
+async def test_role_list_uses_shared_delegation_summary_service(http_system):
+    client, _ = http_system
+    service = role_policy_module.role_management_service
     with patch.object(
-        role_policy_module.role_management_service,
-        "summarize_roles",
-        AsyncMock(return_value=([summary], 1, (101,))),
+        service, "summarize_roles", AsyncMock(wraps=service.summarize_roles)
     ) as summarize:
-        response = await list_roles(
-            query=RoleQuery(current=1, size=10),
-            db=AsyncMock(),
-            _current_user=current_user,
-        )
-
+        response = await client.get("/role/list")
+    assert response.status_code == 200, response.text
     summarize.assert_awaited_once()
-    assert response.data.records[0].delegable is True
+    assert isinstance(summarize.await_args.args[0], AuthorizationPlanSession)
+    assert response.json()["data"]["records"][0]["delegable"] is True
 
 
-async def test_role_menu_read_rechecks_current_delegation_policy() -> None:
-    current_user = SimpleNamespace(user_id=303)
-    with (
-        patch.object(
-            role_policy_module.role_management_service,
-            "authorize_role_projection",
-            AsyncMock(),
-            create=True,
-        ) as authorize,
-        patch(
-            "app.modules.system.api.role.role_service.get_role_menus",
-            AsyncMock(return_value=["1"]),
-        ),
-    ):
-        await get_menus(
-            role_id=101,
-            db=AsyncMock(),
-            _current_user=current_user,
-            tenant=tenant_context(actor_user_id=current_user.user_id),
-        )
-
+async def test_role_menu_read_rechecks_current_delegation_policy(http_system):
+    client, plain = http_system
+    async with plain() as db:
+        expected = {
+            str(mid)
+            for mid in (
+                await db.execute(
+                    select(role_menus.c.menu_id).where(
+                        role_menus.c.tenant_id == 0, role_menus.c.role_id == 201
+                    )
+                )
+            ).scalars()
+        }
+    service = role_policy_module.role_management_service
+    with patch.object(
+        service,
+        "authorize_role_projection",
+        AsyncMock(wraps=service.authorize_role_projection),
+    ) as authorize:
+        response = await client.get("/role/menus/201")
+    assert response.status_code == 200, response.text
+    assert set(response.json()["data"]) == expected
     authorize.assert_awaited_once_with(
-        ANY,
-        actor_user_id=current_user.user_id,
-        role_id=101,
-        tenant=tenant_context(actor_user_id=current_user.user_id),
+        ANY, actor_user_id=101, role_id=201, tenant=TENANT
     )
+    assert isinstance(authorize.await_args.args[0], AuthorizationPlanSession)

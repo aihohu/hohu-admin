@@ -5,16 +5,18 @@ from dataclasses import dataclass
 from sqlalchemy import select
 
 from app.core.authorization_plan import LockPlan, ResourceKey, ResourceKind
-from app.core.scheduler import validate_trigger_config
+from app.core.field_policy.contracts import denied
 from app.db.authorization_plan_session import _order_error
 from app.modules.job.ai_tools import _planned_cron_result
 from app.modules.job.models.job import SysJob
 from app.modules.job.schemas.job import JobAiUpdate
-from app.modules.job.task_registry import is_tenant_task
+from app.modules.job.service.control_job_input import normalize_definition
+from app.modules.system.field_policy.control_catalog import UPDATE
 from app.modules.system.service.authorization_control_identity import (
     assert_identity,
     read_identity,
 )
+from app.modules.system.service.parameter_context import load_parameter_context
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -62,11 +64,9 @@ class JobAuthorizationCandidate:
             .mappings()
             .one_or_none()
         )
-        if row is None or not is_tenant_task(row["job_key"]):
+        if row is None:
             raise _order_error()
-        validate_trigger_config(
-            row["trigger_type"], cron, row["interval_value"], row["interval_unit"]
-        )
+        normalize_definition(dict(row) | {"cron_expression": cron})
         return dict(row)
 
     async def plan(self, db, tx, command):
@@ -82,6 +82,15 @@ class JobAuthorizationCandidate:
             permissions=("system:job:edit",),
         )
         facts = await self._facts(db, command)
+        context = await load_parameter_context(
+            db, tx, tenant=tenant, actor_user_version=version, action="job.schedule"
+        )
+        context.write(
+            "job.definition", identifier, "job.schedule", UPDATE, ("cron_expression",)
+        )
+        await read_cron_sources(
+            db, tx, tenant=tenant, version=version, identifier=identifier
+        )
         key = ResourceKey(ResourceKind.JOB, tenant.tenant_id, identifier)
         return _JobWork(
             tx, command, identity, facts, LockPlan(existing=(*identity.keys, key))
@@ -113,3 +122,25 @@ class JobAuthorizationCandidate:
 
 
 job_authorization_candidate = JobAuthorizationCandidate()
+
+
+async def read_cron_sources(db, tx, *, tenant, version, identifier):
+    context = await load_parameter_context(
+        db, tx, tenant=tenant, actor_user_version=version, action="job.list"
+    )
+    fields = ("job_id", "job_name", "cron_expression")
+    entries = await context.fetch(
+        db,
+        SysJob,
+        "job_id",
+        predicates=(SysJob.job_id == identifier,),
+        maximum=1,
+        names=fields,
+    )
+    if not entries:
+        raise _order_error()
+    record, values, _ = entries[0]
+    if not set(fields) <= values.keys():
+        raise denied()
+    context.source(record, fields)
+    return values

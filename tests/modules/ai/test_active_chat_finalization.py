@@ -93,13 +93,18 @@ async def test_active_finalization_preserves_source_evidence(active_turn, suppli
         assert (await db.get(AiMessage, message_id)).field_authority == frozen
         await db.execute(update(State).values(epoch=State.epoch + 1))
         await db.commit()
-    with pytest.raises(BusinessException):
-        await owner.finalize(
-            **request, content="stale", tool_calls=[], agent_code="dept_mgmt"
-        )
+    await owner.finalize(
+        **request, content="Reproved answer", tool_calls=[], agent_code="dept_mgmt"
+    )
     async with plain() as db:
         assert (await db.get(AiMessage, message_id)).content == "Active answer"
-        assert (await db.get(AiMessage, message_id)).field_authority == frozen
+        renewed = (await db.get(AiMessage, message_id)).field_authority
+        assert renewed["source_domains"] == frozen["source_domains"]
+        assert (
+            renewed["authority"]["tenant_epoch"]
+            == frozen["authority"]["tenant_epoch"] + 1
+        )
+        assert (await db.get(AiMessage, request["source_id"])).field_authority == frozen
 
 
 async def test_check_run_rebuilds_after_context_changes(active_turn, monkeypatch):
@@ -160,7 +165,11 @@ async def test_active_missing_or_revoked_source_is_not_reattested(active_turn, m
                 .values(field_authority=None)
             )
         else:
-            await db.execute(update(State).values(epoch=State.epoch + 1))
+            await db.execute(
+                update(AiMessage)
+                .where(AiMessage.message_id == request["source_id"])
+                .values(is_active=False)
+            )
         await db.commit()
     with pytest.raises(BusinessException):
         await owner.finalize(
@@ -205,7 +214,11 @@ async def test_retry_rechecks_revocation_in_new_transaction(active_turn, monkeyp
         except BusinessException as exc:
             if exc.error_code == "AUTHORIZATION_SNAPSHOT_STALE":
                 async with plain() as db:
-                    await db.execute(update(State).values(epoch=State.epoch + 1))
+                    await db.execute(
+                        update(AiMessage)
+                        .where(AiMessage.message_id == request["source_id"])
+                        .values(is_active=False)
+                    )
                     await db.commit()
             raise
 
@@ -213,7 +226,7 @@ async def test_retry_rechecks_revocation_in_new_transaction(active_turn, monkeyp
     monkeypatch.setattr(owner, "_run", run)
     with pytest.raises(BusinessException) as caught:
         await owner.check_run(**request)
-    assert caught.value.error_code == "FIELD_AUTHORIZATION_CHANGED"
+    assert caught.value.error_code == "FIELD_POLICY_LOCK_ORDER"
     assert len(attempts) == 2
 
 
@@ -285,4 +298,4 @@ async def test_active_write_does_not_revoke_itself(
         assert len(departments) == (0 if revoke_first else 1)
         action = await db.get(AiPreparedAction, case.claim.action_id)
         assert action.field_authority == frozen
-        assert (await db.get(State, 0)).epoch == frozen["tenant_epoch"] + 1
+        assert (await db.get(State, 0)).epoch == frozen["authority"]["tenant_epoch"] + 1

@@ -2,21 +2,23 @@ from fastapi import APIRouter, Body, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_permissions
-from app.core.base_response import PageResult, ResponseModel
+from app.core.base_response import ResponseModel
 from app.core.tenant import TenantContext
+from app.db import authorization_http
 from app.db.session import get_db
-from app.modules.auth.service import get_current_tenant_context
+from app.modules.auth.service import access_identity, get_current_tenant_context
 from app.modules.job.api.job import _planned
-from app.modules.job.schemas.job import JobLogOut, JobLogQuery
-from app.modules.job.service.job_log_service import job_log_service
+from app.modules.job.schemas.job import JobLogQuery
 from app.modules.system.models.user import User
+from app.modules.system.schemas.delivery_projection import DeliveryPage, ProjectedJobLog
 
 router = APIRouter()
 
 
 @router.get(
     "/list",
-    response_model=ResponseModel[PageResult[JobLogOut]],
+    response_model=ResponseModel[DeliveryPage[ProjectedJobLog]],
+    response_model_exclude_unset=True,
     summary="获取任务日志列表",
     dependencies=[Depends(require_permissions("system:job-log:list"))],
 )
@@ -26,7 +28,18 @@ async def get_list(
     _current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    page_data = await job_log_service.get_list(db, query, tenant=tenant)
+    identity = access_identity(_current_user)
+    if identity.tenant != tenant:
+        from app.db.authorization_plan_session import _order_error  # noqa: PLC0415
+
+        raise _order_error()
+    await authorization_http.release_request_reads(db)
+    page_data = await authorization_http.get_authorization_runtime().delivery.logs(
+        tenant=identity.tenant,
+        actor_user_version=identity.user_version,
+        kind="job",
+        query=query,
+    )
     return ResponseModel.success(data=page_data)
 
 

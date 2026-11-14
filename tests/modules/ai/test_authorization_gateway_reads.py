@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import delete, event, insert, select
 
+from app.core.exceptions import BusinessRuleException
 from app.db.authorization_runtime import AuthorizationRuntime
 from app.db.base import role_menus, user_roles
 from app.db.session import engine
@@ -15,6 +16,9 @@ from app.modules.ai.agents.gateway import executor
 from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.prepared_action import AiPreparedAction
+from app.modules.ai.service import (
+    authorization_gateway_read_candidate as read_candidate,
+)
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.auth.service import access_identity
 from app.modules.system.models.menu import Menu
@@ -132,6 +136,39 @@ async def test_readonly_original_version_is_not_upgraded(read_case, monkeypatch)
     monkeypatch.setattr(executor, "clear_failures", AsyncMock())
     result = await invoke(read_case, monkeypatch)
     assert not result.ok
+
+
+async def test_failed_read_retains_its_actual_source_closure(read_case, monkeypatch):
+    async def failed(_ctx, **_args):
+        raise BusinessRuleException(
+            "Known role lookup outcome", error_code="ROLE_LOOKUP_FAILED"
+        )
+
+    monkeypatch.setattr(
+        read_candidate,
+        "READ_HANDLERS",
+        {**read_candidate.READ_HANDLERS, "role.lookup": failed},
+    )
+    deps = read_case
+    identity = access_identity(deps.user)
+    result = await AuthorizationRuntime(engine).chat.read_tool(
+        tenant=identity.tenant,
+        actor_user_version=identity.user_version,
+        conversation_id=deps.conversation_id,
+        source_id=deps.source_user_message_id,
+        trace_id=deps.trace_id,
+        agent_code="role_mgmt",
+        scope_hash=deps.data_scope_hash,
+        tool="role.lookup",
+        args={"query": "admin"},
+    )
+    assert not result.ok
+    assert result.projection is not None
+    assert any(
+        group.get("object_id") == "system.role"
+        and ["role_name", "plain"] in group["read"]
+        for group in result.projection.field_authority["source_domains"]
+    )
 
 
 async def test_readonly_redis_runs_after_rollback_without_commit(

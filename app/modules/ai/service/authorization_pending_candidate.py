@@ -25,6 +25,9 @@ from app.modules.ai.service.atomic_completion_service import DB_TOOLS, FILE_TOOL
 from app.modules.ai.service.authorization_chat_candidate import chat_candidate
 from app.modules.ai.service.authorization_chat_model import recheck_model, select_model
 from app.modules.ai.service.authorization_gateway_read_candidate import READ_HANDLERS
+from app.modules.ai.service.delivery_source_capture import capture_members
+from app.modules.ai.service.delivery_source_guard import require_tool_sources
+from app.modules.ai.service.delivery_source_roots import extend_source, renew_source
 from app.modules.ai.service.field_authority_runtime import ai_field_authority
 from app.modules.ai.service.operation_log_service import build_target_summary
 from app.modules.ai.service.prepared_action_service import prepared_action_service
@@ -245,11 +248,10 @@ class PendingCandidate:
             != await result_projection_service.compute_data_scope_hash(db, actor)
         ):
             raise _order_error()
-        await ai_field_authority.require(
-            db, tx, tenant=tenant, frozen=source.field_authority, legacy=True
+        proof = await renew_source(
+            db, tx, tenant=tenant, version=actor_user_version, source=source
         )
-        values["field_authority"] = source.field_authority
-        await user_ai_fields.before(
+        fields = await user_ai_fields.before(
             db,
             tx,
             tenant=tenant,
@@ -257,6 +259,33 @@ class PendingCandidate:
             tool=tool,
             args=values["frozen_args"],
             preflight=not meta.readonly,
+        )
+        sources = await require_tool_sources(
+            db,
+            tx,
+            tenant=tenant,
+            version=actor_user_version,
+            tool=tool,
+            args=values["frozen_args"],
+            preflight=not meta.readonly,
+            user_context=fields,
+        )
+        values["field_authority"] = extend_source(proof, *sources.delivery_domains)
+        values["field_authority"] = extend_source(
+            values["field_authority"],
+            *await capture_members(
+                db,
+                sources,
+                tool=tool,
+                snapshot=values["snapshot"].get("business", values["snapshot"]),
+            ),
+        )
+        await ai_field_authority.renew(
+            db,
+            tx,
+            tenant=tenant,
+            actor_user_version=actor_user_version,
+            frozen=values["field_authority"],
         )
         dependencies = result_projection_service.projection_dependency_message_ids(
             source

@@ -134,8 +134,8 @@ async def test_direct_canonical_arguments_bind_original_log(
             )
             # Deleting the targets removes their current readable projection.
             # The durable success remains intact; no stale target details leak.
-            assert result.error_code == "AI_RESULT_PROJECTION_FORBIDDEN"
-            assert result.data is None and result.ui is None
+            assert result.ok and result.error_code == ""
+            assert result.data == {"status": "succeeded"} and result.ui is None
             assert legacy_reads == []
         else:
             with pytest.raises(PreparedExecutionOutcomeUnknown):

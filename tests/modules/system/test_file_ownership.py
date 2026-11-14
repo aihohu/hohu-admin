@@ -9,6 +9,7 @@ import io
 from base64 import b64decode
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -25,13 +26,15 @@ from app.core.exceptions import (
     BusinessRuleException,
     NotFoundException,
 )
+from app.modules.auth.service import AccessIdentity
 from app.modules.system.api import file as file_api
 from app.modules.system.models.file import File
+from app.modules.system.models.user import User
 from app.modules.system.schemas.file import FileOut, FileQuery
 from app.modules.system.service.file_service import FileService
 from app.modules.system.service.settings_service import _decode, settings_service
 from app.modules.system.settings_catalog import SETTINGS
-from tests.tenant_helpers import tenant_context
+from tests.tenant_helpers import bind_test_user, tenant_context
 
 _ONE_PIXEL_PNG = b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
@@ -596,40 +599,55 @@ class TestFileTenantScope:
     async def test_file_apis_forward_trusted_tenant_scope(self) -> None:
         db = MagicMock(spec=AsyncSession)
         db.commit = AsyncMock()
-        current_user = MagicMock(user_id=1001, user_name="alice")
-
-        tenant = tenant_context(tenant_id=7, actor_user_id=1001)
+        current_user = User(
+            tenant_id=7, user_id=1001, user_name="alice", auth_version=99
+        )
+        tenant = bind_test_user(current_user)
+        current_user._verified_access_identity = AccessIdentity(tenant, 3)
+        metadata = AsyncMock(return_value={})
+        delete = AsyncMock(return_value=0)
+        runtime = SimpleNamespace(
+            files=SimpleNamespace(metadata=metadata),
+            upload=SimpleNamespace(delete=delete),
+        )
+        query = FileQuery()
         with (
             patch.object(
-                file_api.file_service, "get_list", new_callable=AsyncMock
-            ) as get_list,
+                file_api.authorization_http,
+                "get_authorization_runtime",
+                return_value=runtime,
+            ),
             patch.object(
-                file_api.file_service, "get_by_id", new_callable=AsyncMock
-            ) as get_by_id,
-            patch.object(
-                file_api.file_service, "delete", new_callable=AsyncMock
-            ) as delete,
-            patch.object(
-                file_api.file_service, "batch_delete", new_callable=AsyncMock
-            ) as batch_delete,
-            patch.object(file_api, "is_super_admin", return_value=False),
+                file_api.authorization_http,
+                "release_request_reads",
+                new_callable=AsyncMock,
+            ) as release,
         ):
-            await file_api.get_list(FileQuery(), db, current_user, tenant)
+            await file_api.get_list(query, db, current_user, tenant)
             await file_api.get_by_id(99, db, current_user, tenant)
+            await file_api.delete(99, db, current_user, tenant)
+            await file_api.batch_delete([99], db, current_user, tenant)
+            unsigned = MagicMock(user_id=1001, user_name="alice")
             with pytest.raises(AuthenticationException):
-                await file_api.delete(99, db, current_user, tenant)
-            batch_delete.return_value = 0
+                await file_api.delete(99, db, unsigned, tenant)
             with pytest.raises(AuthenticationException):
-                await file_api.batch_delete([99], db, current_user, tenant)
+                await file_api.batch_delete([99], db, unsigned, tenant)
 
-        assert get_list.await_args.kwargs["tenant"] is tenant
-        assert get_by_id.await_args.kwargs == {
-            "tenant": tenant,
-            "owner_user_id": 1001,
-            "is_admin": False,
-        }
-        delete.assert_not_awaited()
-        batch_delete.assert_not_awaited()
+        assert [call.kwargs for call in metadata.await_args_list] == [
+            {"tenant": tenant, "version": 3, "query": query},
+            {"tenant": tenant, "version": 3, "identifier": 99},
+        ]
+        assert [call.kwargs for call in delete.await_args_list] == [
+            {"tenant": tenant, "actor_user_version": 3, "identifiers": (99,)},
+            {
+                "tenant": tenant,
+                "actor_user_version": 3,
+                "identifiers": [99],
+                "batch": True,
+            },
+        ]
+        assert release.await_count == 4
+        db.commit.assert_not_awaited()
 
 
 @pytest.fixture(autouse=True)

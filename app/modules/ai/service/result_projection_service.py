@@ -27,6 +27,7 @@ from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.agent_authorization_service import (
     agent_authorization_service,
 )
+from app.modules.ai.service.delivery_source_domains import validate_receipt
 from app.modules.job.service.job_service import job_service
 from app.modules.system.service.dept_service import dept_service
 from app.modules.system.service.file_service import file_service
@@ -187,7 +188,12 @@ class ResultProjectionService:
             return None
         return ProjectionLineage(
             tenant_id=int(values[0]),
-            field_authority=getattr(record, "field_authority", None),
+            field_authority=(
+                getattr(record, "result_field_authority", None)
+                if getattr(record, "status", None) in {"succeeded", "success"}
+                and hasattr(record, "result_field_authority")
+                else getattr(record, "field_authority", None)
+            ),
             agent_code=str(values[1]),
             tool_codes=self._normalize_tool_codes(values[2]),
             subject_refs=normalized_refs,
@@ -281,6 +287,42 @@ class ResultProjectionService:
         """Issue a short-lived owner-bound token only after live authorization."""
         if lineage.tenant_id != tenant.tenant_id:
             return None
+        # A download is an independent copy of this artifact, not of the whole
+        # conversation. Re-prove the original transfer sources under the caller's
+        # already complete plan; never embed potentially MiB of chat history.
+        from app.db.authorization_plan_session import _Journal  # noqa: PLC0415
+        from app.modules.ai.service.delivery_external_sources import (  # noqa: PLC0415
+            artifact_source,  # noqa: PLC0415
+        )
+        from app.modules.ai.service.field_authority_runtime import (  # noqa: PLC0415
+            ai_field_authority,  # noqa: PLC0415
+        )
+
+        journal = getattr(db, "_authorization_journal", None)
+        if not isinstance(journal, _Journal) or resource_type != "user_export":
+            return None
+        if lineage.subject_refs != (
+            {"type": "user_export_task", "id": str(resource_id)},
+        ):
+            return None
+        try:
+            group = await artifact_source(
+                db,
+                journal.handle,
+                tenant=tenant,
+                version=user.auth_version,
+                resource_kind="export",
+                identifier=str(resource_id),
+                source_kind="export",
+            )
+            proof = await ai_field_authority.mint(
+                db, journal.handle, tenant=tenant, domains=(group,)
+            )
+        except BusinessException:
+            return None
+        lineage = replace(
+            lineage, field_authority=proof, projection_dependency_message_ids=()
+        )
         allowed = await self.authorize_result_projection(
             db,
             user,
@@ -316,9 +358,10 @@ class ResultProjectionService:
             "iat": now,
             "exp": now + timedelta(seconds=RESULT_DOWNLOAD_TOKEN_TTL_SECONDS),
         }
-        return jwt.encode(
+        token = jwt.encode(
             payload, _download_signing_key(), algorithm=settings.ALGORITHM
         )
+        return token if len(token) <= 16384 else None
 
     def read_download_token(
         self,
@@ -444,12 +487,17 @@ class ResultProjectionService:
             return False
         if lineage.tenant_id != get_bound_tenant_context(user).tenant_id:
             return False
+        if validate_receipt(lineage.field_authority) is None:
+            return False
         from app.modules.ai.service.field_authority_runtime import (  # noqa: PLC0415
             ai_field_authority,
         )
 
         if not await ai_field_authority.visible(
-            db, tenant=get_bound_tenant_context(user), frozen=lineage.field_authority
+            db,
+            tenant=get_bound_tenant_context(user),
+            frozen=lineage.field_authority,
+            actor_user_version=user.auth_version,
         ):
             return False
         if not has_explicit_permission(user, AI_CHAT_USE_PERMISSION):

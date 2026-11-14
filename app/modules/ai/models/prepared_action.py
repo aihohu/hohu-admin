@@ -28,6 +28,10 @@ class AiPreparedAction(Base):
     __tablename__ = "ai_prepared_action"
     __table_args__ = (
         CheckConstraint(
+            "result_field_authority IS NULL OR (jsonb_typeof(result_field_authority) = 'object' AND pg_column_size(result_field_authority) <= 4194304)",
+            name="ck_ai_prepared_action_result_authority",
+        ),
+        CheckConstraint(
             "status IN ('prepared', 'pending_confirmation', 'approved', "
             "'running', 'succeeded', 'failed', 'rejected', 'expired')",
             name="ck_ai_prepared_action_status",
@@ -82,6 +86,9 @@ class AiPreparedAction(Base):
 
     frozen_args: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     field_authority: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    result_field_authority: Mapped[dict | None] = mapped_column(
         JSONB(none_as_null=True), nullable=True
     )
     args_hash: Mapped[str] = mapped_column(String(64), nullable=False)

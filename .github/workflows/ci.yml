@@ -123,6 +123,16 @@ jobs:
             HOHU_ADMIN_PASSWORD=CiSeed123456 uv run python -m scripts.init_db
           fi
 
+      - name: Check transfer HTTP contracts before the full gate
+        run: |
+          set -euo pipefail
+          COVERAGE_FILE="${RUNNER_TEMP}/transfer-contract.coverage" \
+          uv run coverage run --source=app -m pytest \
+            tests/core/test_opaque_field_identity.py \
+            tests/modules/system/test_generic_transfer_http.py \
+            --basetemp "${RUNNER_TEMP}/transfer-contract" \
+            -o "cache_dir=${RUNNER_TEMP}/transfer-contract-cache"
+
       - name: Run Tests
         run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=70
 
