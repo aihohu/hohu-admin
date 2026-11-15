@@ -54,6 +54,16 @@ async def test_live_preparation_keeps_normal_admission_closed(
         args = options(tmp_path, role, monkeypatch, admin, bootstrap=False)
     args.command, args.policy_port = "policy-prepare", port
     original = policy_prepare.serve
+    validated_surfaces = []
+    original_ingress = policy_prepare.validate_preparation_ingress
+
+    def validate_ingress(application):
+        original_ingress(application)
+        validated_surfaces.append(len(application.routes))
+
+    monkeypatch.setattr(
+        policy_prepare, "validate_preparation_ingress", validate_ingress
+    )
     failures = []
     original_execute = policy_prepare.PolicyPreparation._execute_locked
 
@@ -273,6 +283,7 @@ async def test_live_preparation_keeps_normal_admission_closed(
             try:
                 await client
                 result = await server
+                assert validated_surfaces == [17]
             finally:
                 for task in (client, server):
                     if not task.done():

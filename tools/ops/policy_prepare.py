@@ -7,6 +7,7 @@ The warmed, closed-admission database connections belong to the stop controller.
 import asyncio
 import json
 import os
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
 
@@ -27,6 +28,7 @@ from app.core.field_policy.documents import catalog_parts, read_json
 from app.core.field_policy.maintenance import (
     require_normal_resume,  # noqa: F401 - shared protocol export
 )
+from app.core.field_preparation_ingress import validate_preparation_ingress
 from app.core.process_identity import ProcessIdentity
 from app.db.authorization_runtime import AuthorizationRuntime
 from app.modules.auth.service import access_identity, get_current_user
@@ -314,8 +316,16 @@ def _wire(value, name=""):
     return value
 
 
+@asynccontextmanager
+async def _ingress_lifespan(app):
+    validate_preparation_ingress(app)
+    yield
+
+
 def create_app(controller, assets=None):
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(
+        docs_url=None, redoc_url=None, openapi_url=None, lifespan=_ingress_lifespan
+    )
 
     def token(request):
         header = request.headers.get("authorization", "")
@@ -477,7 +487,7 @@ async def serve(
             port=port,
             access_log=False,
             log_level="critical",
-            lifespan="off",
+            lifespan="on",
             limit_concurrency=16,
             timeout_keep_alive=2,
         )
