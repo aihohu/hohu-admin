@@ -301,6 +301,23 @@ async def fixed_setting_values(db, tenant_id, keys):
 
 @read_phase("projection")
 async def read_fixed_settings(db, tx, tenant, version, operation):
+    if operation == "auth.capabilities":
+        if version is not None:
+            raise AuthorizationException("Invalid public account identity")
+        await require_public_locator(db, tx, tenant)
+        values = await fixed_setting_values(
+            db,
+            tenant.tenant_id,
+            ("register_enabled", "password_reset_enabled", "email_code_minutes"),
+        )
+        available = (await describe_mail(db))["ready"]
+        return {
+            "registrationEnabled": available and bool(values["register_enabled"]),
+            "passwordResetEnabled": available
+            and bool(values["password_reset_enabled"]),
+            "emailEnabled": available,
+            "codeMinutes": values["email_code_minutes"],
+        }
     if operation == "settings.public":
         if version is not None:
             raise AuthorizationException("Invalid public settings identity")

@@ -47,6 +47,8 @@ from app.modules.system.api.user import router as user_router
 from app.modules.system.api.user_field_policy import router as user_field_policy_router
 from app.modules.system.service.file_service import file_service
 
+_FIELD_INGRESS_AI_ENABLED = settings.AI_MODULE_ENABLED
+
 if settings.AI_MODULE_ENABLED:
     from app.modules.ai.agents.tools import load_builtin_tools
     from app.modules.ai.agents.tools.registry import ToolRegistry, ToolRegistryError
@@ -83,6 +85,9 @@ async def _stop_task(task):
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Own all startup resources, including failures before the serving yield."""
+    from app.core.field_ingress import validate_field_ingress  # noqa: PLC0415
+
+    validate_field_ingress(_app, ai_enabled=_FIELD_INGRESS_AI_ENABLED)
     require_open()
     cleanup = AsyncExitStack()
     cleanup.push_async_callback(close_redis)
@@ -396,7 +401,14 @@ async def health_check():
 # 不进 ResponseModel 包装；生产用 nginx/ingress 限制 /metrics 只允许内网 / Prometheus scrape IP。
 @app.get("/metrics", include_in_schema=False)
 async def metrics():
+    payload = generate_latest()
+    headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+    if len(payload) > 8 * 1024 * 1024:
+        return PlainTextResponse(
+            "metrics unavailable", status_code=503, headers=headers
+        )
     return PlainTextResponse(
-        generate_latest(),
+        payload,
         media_type=CONTENT_TYPE_LATEST,
+        headers=headers,
     )

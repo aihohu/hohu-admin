@@ -1,10 +1,11 @@
 """Runtime navigation and management existence keep the current tenant scope."""
 
+import pytest
 from sqlalchemy import insert, select, update
 
 from app.core.tenant import TenantContext
 from app.db.authorization_runtime import AuthorizationRuntime
-from app.db.base import user_roles
+from app.db.base import Base, role_menus, user_roles
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
 from tests.modules.system.test_authorization_system_candidate import (
@@ -80,3 +81,71 @@ async def test_super_admin_routes_and_existence_are_tenant_scoped(system_session
             select(Menu).where(Menu.tenant_id == 1, Menu.route_name == "tenant_only")
         )
         assert persisted.menu_id == 902 and persisted.tenant_id == 1
+
+
+@pytest.mark.parametrize("tenant_id", [0, 1])
+async def test_runtime_exists_matches_visible_tree_without_management_grants(
+    plan_sessions, tenant_id
+):
+    _, plain = plan_sessions
+    user_id, role_id = 101 + tenant_id, 201 + tenant_id
+    async with plain.kw["bind"].begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    async with plain() as db:
+        await db.execute(
+            insert(user_roles).values(
+                tenant_id=tenant_id, user_id=user_id, role_id=role_id
+            )
+        )
+        for mid, owner, name, status, parent in (
+            (901, tenant_id, "visible", "1", None),
+            (902, tenant_id, "not_granted", "1", None),
+            (903, tenant_id, "disabled", "2", None),
+            (904, tenant_id, "orphan", "1", 902),
+            (905, 1 - tenant_id, "other_tenant", "1", None),
+        ):
+            await db.execute(
+                insert(Menu).values(
+                    tenant_id=owner,
+                    menu_id=mid,
+                    menu_name=name,
+                    menu_type="C",
+                    component="layout.base$view.home",
+                    route_name=name,
+                    route_path="/" + name,
+                    status=status,
+                    parent_id=parent,
+                )
+            )
+            if owner == tenant_id and name != "not_granted":
+                await db.execute(
+                    insert(role_menus).values(
+                        tenant_id=tenant_id, role_id=role_id, menu_id=mid
+                    )
+                )
+        await db.commit()
+    runtime = AuthorizationRuntime(plain.kw["bind"])
+    identity = {
+        "tenant": TenantContext(
+            tenant_id, f"plan-{tenant_id}", user_id, 1, "access_token"
+        ),
+        "actor_user_version": 1,
+    }
+    visible = route_names(
+        (await runtime.relation_read(**identity, operation="runtime.routes"))["routes"]
+    )
+    assert visible == {"visible"}
+    for name in (
+        "visible",
+        "not_granted",
+        "disabled",
+        "orphan",
+        "other_tenant",
+        "absent",
+        "ai_provider",
+        "ai_agent",
+        "tenant",
+    ):
+        assert await runtime.relation_read(
+            **identity, operation="runtime.exists", query=name
+        ) is (name in visible)

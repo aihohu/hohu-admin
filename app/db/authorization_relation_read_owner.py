@@ -1,11 +1,9 @@
 """A strict, rollback-only completion boundary for relation reads."""
 
 from app.core.authorization_plan import LockMode, TenantLock, TransactionBudget
-from app.core.rbac import is_system_admin
 from app.db.authorization_owner import rollback_authorization_session
 from app.db.authorization_plan_session import _order_error
 from app.db.authorization_system_owner import require_candidate_session
-from app.modules.system.constants import PLATFORM_ONLY_TENANT_ROUTE_NAMES
 from app.modules.system.schemas.relation_form import serialize_form
 from app.modules.system.schemas.relation_projection import serialize_relation
 from app.modules.system.service.authorization_read_budget import (
@@ -19,7 +17,6 @@ from app.modules.system.service.authorization_transaction_service import (
 )
 from app.modules.system.service.relation_read_service import read_relation
 from app.modules.system.service.runtime_navigation import runtime_routes
-from app.modules.system.service.user_field_context import load_current_user
 
 
 class RelationReadOwner:
@@ -50,22 +47,22 @@ class RelationReadOwner:
                     budget=TransactionBudget(timeout_ms=8000),
                 ) as tx:
                     with authorization_read_phase(db, "projection"):
-                        if operation == "runtime.routes":
-                            return await runtime_routes(
+                        if operation in {"runtime.routes", "runtime.exists"}:
+                            navigation = await runtime_routes(
                                 db,
                                 tx,
                                 tenant=tenant,
                                 actor_user_version=actor_user_version,
                             )
-                        if operation == "runtime.exists":
-                            actor = await load_current_user(
-                                db, tenant=tenant, actor_user_version=actor_user_version
-                            )
-                            if query in {"ai_provider", "ai_agent", "tenant"}:
-                                return is_system_admin(actor)
-                            if query in PLATFORM_ONLY_TENANT_ROUTE_NAMES:
-                                return False
-                            operation = "menu.exists"
+                            if operation == "runtime.routes":
+                                return navigation
+                            pending = list(navigation["routes"])
+                            while pending:
+                                route = pending.pop()
+                                if route["name"] == query:
+                                    return True
+                                pending.extend(route.get("children", ()))
+                            return False
                         result = await read_relation(
                             db,
                             tx,

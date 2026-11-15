@@ -315,7 +315,7 @@ async def test_leader_query_rejects_historical_rows_before_unmatched_filter(
     )
 
 
-async def test_runtime_navigation_ignores_management_field_grants_but_existence_does_not(
+async def test_runtime_navigation_and_existence_keep_management_grants_separate(
     http_system, system_sessions, monkeypatch
 ):
     client, _ = http_system
@@ -331,11 +331,8 @@ async def test_runtime_navigation_ignores_management_field_grants_but_existence_
     )
     nav = await client.get("/auth/getUserRoutes")
     assert nav.status_code == 200, nav.text
-    denied = await client.get("/auth/isRouteExist", params={"route_name": "not-found"})
-    assert (
-        denied.status_code == 403
-        and denied.json()["errorCode"] == "FIELD_POLICY_DENIED"
-    )
+    exists = await client.get("/auth/isRouteExist", params={"route_name": "not-found"})
+    assert exists.status_code == 200 and exists.json()["data"] is False
     selector = await client.get("/menu/tree-option")
     assert selector.status_code == 403
 

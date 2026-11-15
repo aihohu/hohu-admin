@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from app.core.base_response import ResponseModel
 from app.core.config import settings
 from app.core.exceptions import BusinessRuleException
+from app.core.tenant import TenantLocatorContext
 from app.db.authorization_http import (
     get_authorization_runtime,
     release_request_reads,
@@ -70,16 +71,14 @@ async def capabilities(
     db=Depends(get_db),
 ):
     tenant = await resolve_tenant(request, db, tenant_code)
-    values = await settings_service.values(db, tenant_id=tenant.tenant_id)
-    available = ready(await mail_service.config(db))
+    locator = TenantLocatorContext(
+        tenant.tenant_id, tenant.tenant_code, tenant.row_version
+    )
+    await release_request_reads(db)
     return ResponseModel.success(
-        data={
-            "registrationEnabled": available and bool(values["register_enabled"]),
-            "passwordResetEnabled": available
-            and bool(values["password_reset_enabled"]),
-            "emailEnabled": available,
-            "codeMinutes": values["email_code_minutes"],
-        }
+        data=await get_authorization_runtime().parameter_read(
+            tenant=locator, actor_user_version=None, operation="auth.capabilities"
+        )
     )
 
 

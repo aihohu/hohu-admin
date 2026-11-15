@@ -73,6 +73,7 @@ class ParameterReadOwner:
                 "settings.public",
                 "settings.runtime",
                 "settings.groups",
+                "auth.capabilities",
             }
             or target_id is not None
         ):
@@ -94,6 +95,7 @@ class ParameterReadOwner:
                 "settings.public",
                 "settings.runtime",
                 "settings.groups",
+                "auth.capabilities",
             }
             and type(query) is not schema
         ):
@@ -140,6 +142,7 @@ class ParameterReadOwner:
                         "settings.public",
                         "settings.runtime",
                         "settings.groups",
+                        "auth.capabilities",
                     }:
                         if query is not None:
                             raise _order_error()

@@ -88,14 +88,14 @@ class TestRecordHelpers:
     def test_record_tool_call_increments_counter(self) -> None:
         from app.modules.ai.metrics import record_tool_call
 
-        labels = ("user.list", "success_test", "low", "autonomous")
+        labels = ("user.list", "success", "low", "autonomous")
         before = (
             TOOL_CALLS_TOTAL.labels(*labels)._value.get()  # type: ignore[attr-defined]
             if labels in TOOL_CALLS_TOTAL._metrics  # type: ignore[attr-defined]
             else 0
         )
 
-        record_tool_call("user.list", "success_test", "low", "autonomous", 0.123)
+        record_tool_call("user.list", "success", "low", "autonomous", 0.123)
 
         after = TOOL_CALLS_TOTAL.labels(*labels)._value.get()  # type: ignore[attr-defined]
         assert after == before + 1
@@ -104,28 +104,28 @@ class TestRecordHelpers:
         from app.modules.ai.metrics import record_security_event
 
         before = (
-            SECURITY_EVENTS_TOTAL.labels("injection_test")._value.get()  # type: ignore[attr-defined]
-            if ("injection_test",) in SECURITY_EVENTS_TOTAL._metrics  # type: ignore[attr-defined]
+            SECURITY_EVENTS_TOTAL.labels("injection")._value.get()  # type: ignore[attr-defined]
+            if ("injection",) in SECURITY_EVENTS_TOTAL._metrics  # type: ignore[attr-defined]
             else 0
         )
 
-        record_security_event("injection_test")
+        record_security_event("injection")
 
-        after = SECURITY_EVENTS_TOTAL.labels("injection_test")._value.get()  # type: ignore[attr-defined]
+        after = SECURITY_EVENTS_TOTAL.labels("injection")._value.get()  # type: ignore[attr-defined]
         assert after == before + 1
 
     def test_record_quota_rejected_increments_counter(self) -> None:
         from app.modules.ai.metrics import record_quota_rejected
 
         before = (
-            QUOTA_REJECTED_TOTAL.labels("l1_test")._value.get()  # type: ignore[attr-defined]
-            if ("l1_test",) in QUOTA_REJECTED_TOTAL._metrics  # type: ignore[attr-defined]
+            QUOTA_REJECTED_TOTAL.labels("l1_rate")._value.get()  # type: ignore[attr-defined]
+            if ("l1_rate",) in QUOTA_REJECTED_TOTAL._metrics  # type: ignore[attr-defined]
             else 0
         )
 
-        record_quota_rejected("l1_test")
+        record_quota_rejected("l1_rate")
 
-        after = QUOTA_REJECTED_TOTAL.labels("l1_test")._value.get()  # type: ignore[attr-defined]
+        after = QUOTA_REJECTED_TOTAL.labels("l1_rate")._value.get()  # type: ignore[attr-defined]
         assert after == before + 1
 
     def test_record_hitl_pubsub_lost_increments(self) -> None:
@@ -141,14 +141,14 @@ class TestRecordHelpers:
     def test_record_hitl_wake_increments(self) -> None:
         from app.modules.ai.metrics import record_hitl_wake
 
-        labels = ("memory_test", "success")
+        labels = ("memory", "success")
         before = (
             HITL_WAKE_TOTAL.labels(*labels)._value.get()  # type: ignore[attr-defined]
             if labels in HITL_WAKE_TOTAL._metrics  # type: ignore[attr-defined]
             else 0
         )
 
-        record_hitl_wake("memory_test", "success")
+        record_hitl_wake("memory", "success")
 
         after = HITL_WAKE_TOTAL.labels(*labels)._value.get()  # type: ignore[attr-defined]
         assert after == before + 1
@@ -157,29 +157,29 @@ class TestRecordHelpers:
         from app.modules.ai.metrics import record_hitl_timeout
 
         before = (
-            HITL_TIMEOUT_TOTAL.labels("memory_test")._value.get()  # type: ignore[attr-defined]
-            if ("memory_test",) in HITL_TIMEOUT_TOTAL._metrics  # type: ignore[attr-defined]
+            HITL_TIMEOUT_TOTAL.labels("memory")._value.get()  # type: ignore[attr-defined]
+            if ("memory",) in HITL_TIMEOUT_TOTAL._metrics  # type: ignore[attr-defined]
             else 0
         )
 
-        record_hitl_timeout("memory_test")
+        record_hitl_timeout("memory")
 
-        after = HITL_TIMEOUT_TOTAL.labels("memory_test")._value.get()  # type: ignore[attr-defined]
+        after = HITL_TIMEOUT_TOTAL.labels("memory")._value.get()  # type: ignore[attr-defined]
         assert after == before + 1
 
     def test_record_hitl_gauge_inc_dec_pairs(self) -> None:
         """HITL_PENDING_COUNT Gauge 的 inc 和 dec 必须配对。"""
         from app.modules.ai.metrics import record_hitl_created, record_hitl_resolved
 
-        labels = ("memory_test",)
+        labels = ("memory",)
         before = (
             HITL_PENDING_COUNT.labels(*labels)._value.get()  # type: ignore[attr-defined]
             if labels in HITL_PENDING_COUNT._metrics  # type: ignore[attr-defined]
             else 0
         )
 
-        record_hitl_created("memory_test")
-        record_hitl_resolved("memory_test")
+        record_hitl_created("memory")
+        record_hitl_resolved("memory")
 
         after = HITL_PENDING_COUNT.labels(*labels)._value.get()  # type: ignore[attr-defined]
         assert after == before  # inc + dec = 净 0
