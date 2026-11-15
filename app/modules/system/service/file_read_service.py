@@ -24,6 +24,9 @@ from app.modules.system.service.authorization_control_identity import (
     assert_identity,
     read_identity,
 )
+from app.modules.system.service.generic_field_policy_admission import (
+    require_legacy_field_policy,
+)
 from app.modules.system.service.relation_read_context import (
     RelationReadContext,
     load_relation_read_context,
@@ -153,6 +156,7 @@ async def require_file_content(db, tx, *, tenant, version, identifier, action):
         )
     )
     if generic is None:
+        await require_legacy_field_policy(db)
         return  # The original fixed owner/function protocol remains responsible.
     context = await load_file_context(
         db, tx, tenant=tenant, version=version, action=action

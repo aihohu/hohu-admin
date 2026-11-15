@@ -34,6 +34,9 @@ from app.modules.system.models.field_policy import (
     FieldPolicyHead as Head,
 )
 from app.modules.system.models.field_policy import (
+    FieldPolicyManifest as Manifest,
+)
+from app.modules.system.models.field_policy import (
     FieldPolicyObjectState as ObjectState,
 )
 from app.modules.system.models.field_policy import (
@@ -354,7 +357,9 @@ class GenericFieldPolicyService:
             if row["archived_at"] is None
         ]
 
-    async def receipt(self, db, *, tenant, request_id, command_digest=None):
+    async def receipt(
+        self, db, *, tenant, request_id, command_digest=None, manifest_target=None
+    ):
         require_tenant_context(tenant)
         request_identity(request_id)
         row = (
@@ -374,6 +379,20 @@ class GenericFieldPolicyService:
             return None
         if command_digest is not None and row["command_digest"] != command_digest:
             raise failure("FIELD_POLICY_REQUEST_CONFLICT", 409)
+        if manifest_target is not None:
+            manifest_id, manifest_digest, catalog_digest = manifest_target
+            if (row["manifest_id"], row["manifest_digest"]) != (
+                manifest_id,
+                manifest_digest,
+            ) or await db.scalar(
+                select(Manifest.catalog_digest).where(
+                    Manifest.tenant_id == tenant.tenant_id,
+                    Manifest.manifest_id == manifest_id,
+                    Manifest.digest == manifest_digest,
+                    Manifest.status == "sealed",
+                )
+            ) != catalog_digest:
+                raise failure("FIELD_POLICY_REQUEST_CONFLICT", 409)
         if digest(row["receipt"]) != row["receipt_digest"]:
             raise failure()
         return row["receipt"]

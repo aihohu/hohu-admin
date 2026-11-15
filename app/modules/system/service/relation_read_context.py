@@ -35,6 +35,7 @@ from app.modules.system.models.field_policy import FieldPolicyHead
 from app.modules.system.models.user_field_policy import UserFieldPolicyState
 from app.modules.system.service.authorization_read_budget import (
     authorization_read_phase,
+    charge_source,
     read_phase,
 )
 from app.modules.system.service.generic_field_policy_admission import (
@@ -308,6 +309,7 @@ class RelationReadContext:
             self.source_count += 1
             self.source_bytes += len(encoded) + 1
             limit(self.source_count <= 16384 and self.source_bytes <= 4 * 1024 * 1024)
+            charge_source(encoded)
             self.source_refs.append(ref)
 
 

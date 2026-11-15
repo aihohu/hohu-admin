@@ -303,6 +303,11 @@ async def prepare_management(
             tenant=tenant,
             request_id=payload["request_id"],
             command_digest=digest(command),
+            manifest_target=(
+                manifest_id,
+                payload["candidate_manifest_digest"],
+                payload["catalog_digest"],
+            ),
         )
         return (wire(prior), None) if prior is not None else (None, command)
     codes = collect_user_permission_codes(actor)

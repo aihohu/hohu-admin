@@ -98,6 +98,9 @@ class AuthorizationRuntime:
         async with authorization_session(self.sessions) as db:
             return await parameter_read_owner.execute(db, **request)
 
+    async def parameter_export(self, **request):
+        return await parameter_read_owner.export_file(self.sessions, **request)
+
     async def field_policy(self, **request):
         async with authorization_session(self.sessions) as db:
             return await UserFieldPolicyOwner().execute(db, **request)

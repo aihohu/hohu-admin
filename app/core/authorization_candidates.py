@@ -1107,7 +1107,7 @@ _COMPLETION_ENTRIES = (
     ),
     (
         "app.db.authorization_parameter_read_owner.ParameterReadOwner",
-        ("execute",),
+        ("execute", "export_file", "_export_snapshot"),
         "owner",
         "S",
         ("S",),
@@ -1356,11 +1356,20 @@ _COMPLETION_ENTRIES = (
     ),
     (
         "app.db.authorization_transfer_read_owner.TransferReadOwner",
-        ("execute",),
+        ("execute", "_snapshot"),
         "owner",
         "S",
         ("S",),
         "transfer-read",
+        "none",
+    ),
+    (
+        _S + "transfer_delivery_snapshot",
+        ("capture_delivery_watermark",),
+        "read",
+        "S",
+        ("S",),
+        "relation-read",
         "none",
     ),
     (
@@ -2177,6 +2186,7 @@ _RUNTIME_DELEGATES = {
     "user_read": "app.db.authorization_user_read_owner.UserReadOwner.execute",
     "relation_read": "app.db.authorization_relation_read_owner.RelationReadOwner.execute",
     "parameter_read": "app.db.authorization_parameter_read_owner.ParameterReadOwner.execute",
+    "parameter_export": "app.db.authorization_parameter_read_owner.ParameterReadOwner.export_file",
     "control_read": "app.db.authorization_catalog_read_owner.CatalogReadOwner.execute",
     "system": _SYSTEM_OWNER,
     "import_users": _IMPORT_OWNER,

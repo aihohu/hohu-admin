@@ -26,6 +26,9 @@ from app.modules.system.service import user_import_service as imports
 from app.modules.system.service import user_import_template_service as templates
 from app.modules.system.service.authorization_control_identity import read_identity
 from app.modules.system.service.grant_authority import grant_authority_service
+from app.modules.system.service.transfer_delivery_snapshot import (
+    capture_delivery_watermark,
+)
 from app.modules.system.service.transfer_metadata import transfer_metadata
 from app.modules.system.service.transfer_relation_sources import template_sources
 from app.modules.system.service.user_field_context import load_current_user
@@ -90,6 +93,9 @@ def _build_template(depts, roles):
 class TemplateSnapshot:
     departments: tuple
     roles: tuple
+    source_ids: tuple
+    authority: tuple
+    sources: tuple
 
 
 def _page(records, total, query):
@@ -327,7 +333,7 @@ class UserTransferReadService:
                 limit=1024,
                 tenant=tenant,
             )
-        departments, roles = await template_sources(
+        departments, roles, sources = await template_sources(
             db, tx, tenant=tenant, version=version, departments=departments, roles=roles
         )
         lookup = {d.dept_id: d for d in departments}
@@ -341,7 +347,16 @@ class UserTransferReadService:
             for d in departments
         )
         role_values = tuple((r.role_code, r.role_name, r.status) for r in roles)
-        return TemplateSnapshot(values, role_values)
+        return TemplateSnapshot(
+            values,
+            role_values,
+            (
+                tuple((d.dept_id, d.parent_id, d.ancestors) for d in departments),
+                tuple(r.role_id for r in roles),
+            ),
+            await capture_delivery_watermark(db, tx, tenant=tenant, actor=actor),
+            sources,
+        )
 
 
 user_transfer_read_service = UserTransferReadService()

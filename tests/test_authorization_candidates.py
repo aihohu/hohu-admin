@@ -18,6 +18,17 @@ def test_new_runtime_facade_requires_an_inventory_entry():
     )
 
 
+def test_transfer_delivery_snapshot_module_cannot_escape_inventory():
+    module = "app.modules.system.service.transfer_delivery_snapshot"
+    assert any(
+        "unregistered public async candidate: " + module + ".unregistered_capture"
+        in error
+        for error in check_candidates(
+            module_sources={module: "async def unregistered_capture(): pass\n"}
+        )
+    )
+
+
 def test_candidate_inventory_is_complete_and_dormant():
     assert check_candidates() == []
     assert all(not entry.production_connected for entry in CANDIDATES)

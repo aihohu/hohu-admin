@@ -248,7 +248,7 @@ async def template_sources(db, tx, *, tenant, version, departments, roles):
         db, tx, tenant=tenant, version=version, action="transfer.template"
     )
     if source is None:
-        return departments, roles
+        return departments, roles, ()
     lookup = {dept.dept_id: dept for dept in departments}
     projected = (
         await source.fetch(
@@ -297,4 +297,8 @@ async def template_sources(db, tx, *, tenant, version, departments, roles):
     if role_complete:
         for record in safe_roles.values():
             source.source(record, ("role_code", "role_name", "status"))
-    return (departments if complete else []), (roles if role_complete else [])
+    return (
+        departments if complete else [],
+        roles if role_complete else [],
+        tuple(source.source_refs),
+    )

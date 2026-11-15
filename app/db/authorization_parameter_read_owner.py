@@ -1,12 +1,21 @@
 """New owner sessions release G/B and acknowledge rollback before returning."""
 
+import asyncio
+
 from sqlalchemy import func, select
 
 from app.core.authorization_plan import LockMode, TenantLock, TransactionBudget
-from app.core.exceptions import AuthorizationException, NotFoundException
+from app.core.exceptions import (
+    AuthorizationException,
+    BusinessRuleException,
+    NotFoundException,
+)
 from app.core.field_policy.contracts import limit
-from app.db.authorization_owner import rollback_authorization_session
-from app.db.authorization_plan_session import _order_error
+from app.db.authorization_owner import (
+    authorization_session,
+    rollback_authorization_session,
+)
+from app.db.authorization_plan_session import _order_error, _timeout_error
 from app.db.authorization_system_owner import require_candidate_session
 from app.modules.job.builtin_task_specs import builtin_task_contracts
 from app.modules.job.models.job import SysJob
@@ -36,6 +45,7 @@ from app.modules.system.service.authorization_transaction_service import (
     authorization_transactions,
 )
 from app.modules.system.service.parameter_context import load_parameter_context
+from app.modules.system.service.parameter_export import encode_parameter_export
 from app.modules.system.service.parameter_facts import parameter_rows
 from app.modules.system.service.parameter_public_read import public_parameters
 from app.modules.system.service.parameter_receipt import (
@@ -49,12 +59,63 @@ from app.modules.system.service.parameter_settings import (
     read_fixed_settings,
     read_group,
 )
+from app.modules.system.service.transfer_delivery_snapshot import (
+    DeliveryReadBudget,
+    capture_delivery_watermark,
+    remaining_budget,
+)
 from app.utils.closed_json import closed_object
 
 
 class ParameterReadOwner:
+    async def export_file(self, factory, *, tenant, actor_user_version, query):
+        deadline = asyncio.get_running_loop().time() + 8
+        budget = DeliveryReadBudget(
+            max_statements=4096, phase_limits=RELATION_READ_PHASE_LIMITS
+        )
+        request = {
+            "tenant": tenant,
+            "actor_user_version": actor_user_version,
+            "operation": "config.export",
+            "query": query,
+        }
+        try:
+            async with asyncio.timeout_at(deadline):
+                snapshot = await self._export_snapshot(
+                    factory, request, budget, deadline
+                )
+                payload = await encode_parameter_export(snapshot)
+                if payload.getbuffer().nbytes > 10 * 1024 * 1024:
+                    raise BusinessRuleException(
+                        "导出超过同步预算",
+                        error_code="AUTHORIZATION_FILE_LIMIT_EXCEEDED",
+                    )
+                current = await self._export_snapshot(
+                    factory, request, budget, deadline
+                )
+                if current != snapshot:
+                    raise AuthorizationException(
+                        "导出授权或来源已变化", error_code="FIELD_AUTHORIZATION_CHANGED"
+                    )
+                return payload
+        except TimeoutError:
+            raise _timeout_error() from None
+
+    async def _export_snapshot(self, factory, request, budget, deadline):
+        async with authorization_session(factory) as db:
+            return await self.execute(db, **request, _budget=budget, _deadline=deadline)
+
     async def execute(
-        self, db, *, tenant, actor_user_version, operation, query=None, target_id=None
+        self,
+        db,
+        *,
+        tenant,
+        actor_user_version,
+        operation,
+        query=None,
+        target_id=None,
+        _budget=None,
+        _deadline=None,
     ):
         require_candidate_session(db)
         surface = operation.split(".")[0] if type(operation) is str else ""
@@ -118,14 +179,17 @@ class ParameterReadOwner:
         try:
             with bounded_authorization_reads(
                 db,
-                AuthorizationReadBudget(
+                _budget
+                or AuthorizationReadBudget(
                     max_statements=4096, phase_limits=RELATION_READ_PHASE_LIMITS
                 ),
             ):
                 async with authorization_transactions.scope(
                     db,
                     tenants=(TenantLock(tenant.tenant_id, LockMode.SHARED),),
-                    budget=TransactionBudget(timeout_ms=8000),
+                    budget=TransactionBudget(timeout_ms=8000)
+                    if _deadline is None
+                    else remaining_budget(_deadline, 8000),
                 ) as tx:
                     if operation == "job.registered":
                         await load_parameter_context(
@@ -208,7 +272,11 @@ class ParameterReadOwner:
                         )
                     await context.prove(db, obj, table, dependencies)
                     if operation == "config.export":
-                        return await self.export(db, context, predicates)
+                        result = await self.export(db, context, predicates)
+                        result["authority"] = await capture_delivery_watermark(
+                            db, tx, tenant=tenant, actor=context.actor
+                        )
+                        return result
                     with authorization_read_phase(db, "projection"):
                         total = await db.scalar(
                             select(func.pg_catalog.count(1))
@@ -252,6 +320,7 @@ class ParameterReadOwner:
         )
         last = 0
         records = []
+        record_ids = []
         while True:
             entries = await context.fetch(
                 db,
@@ -263,6 +332,7 @@ class ParameterReadOwner:
             )
             limit(len(records) + len(entries) <= 10000)
             for record, values, _ in entries:
+                record_ids.append(record.record_key)
                 records.append(
                     {key: value for key, value in values.items() if key in headers}
                 )
@@ -272,6 +342,7 @@ class ParameterReadOwner:
                     "headers": headers,
                     "records": records,
                     "sources": tuple(context.source_refs),
+                    "record_ids": tuple(record_ids),
                 }
             last = int(entries[-1][0].record_key)
 

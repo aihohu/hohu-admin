@@ -59,6 +59,24 @@ def _size(value):
 
 
 @dataclass
+class SourceReadBudget:
+    references: int = 0
+    encoded_bytes: int = 2
+
+    def consume(self, encoded):
+        count, size = self.references + 1, self.encoded_bytes + len(encoded) + 1
+        if count > 16384 or size > 4 * 1024 * 1024:
+            raise _limit()
+        self.references, self.encoded_bytes = count, size
+
+
+def charge_source(encoded):
+    current = _read_phase.get()
+    if current is not None and current[1].source_budget is not None:
+        current[1].source_budget.consume(encoded)
+
+
+@dataclass
 class AuthorizationReadBudget:
     max_rows: int = 100000
     max_bytes: int = 64 * 1024 * 1024
@@ -70,6 +88,7 @@ class AuthorizationReadBudget:
     phase_statements: dict[str, int] = field(default_factory=dict)
     phase_rows: dict[str, int] = field(default_factory=dict)
     phase_bytes: dict[str, int] = field(default_factory=dict)
+    source_budget: SourceReadBudget | None = None
 
     def observe(self, state):
         if not isinstance(state.statement, Select):
@@ -125,14 +144,31 @@ def bounded_authorization_reads(db, budget=None):
         raise _order_error()
     budget = budget or AuthorizationReadBudget()
     previous = _read_phase.get()
+    original_source_budget = budget.source_budget
+    if (
+        budget.source_budget is not None
+        and type(budget.source_budget) is not SourceReadBudget
+    ):
+        raise _order_error()
+    if previous and previous[0] is db and previous[1].source_budget is not None:
+        inherited = previous[1].source_budget
+        if budget.source_budget is not None and budget.source_budget is not inherited:
+            raise _order_error()
+        budget.source_budget = inherited
     phase = previous[2] if previous and previous[0] is db else "barrier"
     token = _read_phase.set((db, budget, phase))
-    event.listen(db.sync_session, "do_orm_execute", budget.observe, retval=True)
+    attached = False
     try:
+        event.listen(db.sync_session, "do_orm_execute", budget.observe, retval=True)
+        attached = True
         yield budget
     finally:
-        event.remove(db.sync_session, "do_orm_execute", budget.observe)
-        _read_phase.reset(token)
+        try:
+            if attached:
+                event.remove(db.sync_session, "do_orm_execute", budget.observe)
+        finally:
+            _read_phase.reset(token)
+            budget.source_budget = original_source_budget
 
 
 @contextmanager

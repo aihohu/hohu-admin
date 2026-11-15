@@ -155,6 +155,7 @@ def check_candidates(*, root=ROOT, entries=None, module_sources=None):
     paths.add(root / "app/modules/system/service/policy_rollout_completion.py")
     paths.add(root / "tools/ops/policy_prepare.py")
     paths.add(root / "app/modules/system/service/user_transfer_read_service.py")
+    paths.add(root / "app/modules/system/service/transfer_delivery_snapshot.py")
     paths.add(root / "app/modules/system/service/user_transfer_fields.py")
     modules = {".".join(path.relative_to(root).with_suffix("").parts) for path in paths}
     modules.update(module_sources)

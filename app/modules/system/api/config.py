@@ -37,7 +37,6 @@ from app.modules.system.schemas.parameter_projection import (
     ProjectedConfigOut,
 )
 from app.modules.system.service.file_policy_service import file_policy_service
-from app.modules.system.service.parameter_export import encode_parameter_export
 
 router = APIRouter()
 CONFIG_IMPORT_MAX_SIZE_BYTES = 10 * 1024 * 1024
@@ -113,13 +112,11 @@ async def export_configs(
     """导出系统配置为 Excel 文件"""
     identity = access_identity(_current_user)
     await release_request_reads(db)
-    snapshot = await get_authorization_runtime().parameter_read(
+    buf = await get_authorization_runtime().parameter_export(
         tenant=tenant,
         actor_user_version=identity.user_version,
-        operation="config.export",
         query=query,
     )
-    buf = await encode_parameter_export(snapshot)
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

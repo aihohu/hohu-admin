@@ -5,12 +5,14 @@ rules, and all old previews/manifests become stale. No new grant is invented.
 """
 
 import asyncio
+from datetime import datetime
 
 from sqlalchemy import func, insert, select, update
 
 from app.core.authorization_maintenance import require_maintenance
 from app.core.field_policy import Catalog
 from app.core.field_policy.contracts import canonical, require
+from app.core.field_policy.documents import digest
 from app.core.id_generator import next_id
 from app.modules.system.field_policy.control_catalog import control_catalog
 from app.modules.system.field_policy.delivery_catalog import DELIVERY_CATALOG_REVISION
@@ -51,6 +53,110 @@ async def prepare_catalog(db, *, fence, source_build):
             return await _prepare_catalog(db, fence=fence, source_build=source_build)
 
 
+async def _verify_current_catalog(db, *, fence, catalog, heads, barriers):
+    # Existing immutable facts must be present before the registration helper:
+    # its new-catalog branch is deliberately unavailable during re-preparation.
+    await service._catalog(db, catalog)
+    await register_catalog(
+        db, fence=fence, catalog=catalog, catalog_revision=DELIVERY_CATALOG_REVISION
+    )
+    for head, barrier in zip(heads, barriers, strict=True):
+        require_maintenance(fence, "migration")
+        tid = head["tenant_id"]
+        require(tid == barrier["tenant_id"])
+        objects = await service._objects(db, tid, catalog)
+        await service._bindings(db, tid, catalog)
+        active_id, candidate_id = (
+            head["active_manifest_id"],
+            head["candidate_manifest_id"],
+        )
+        items = ()
+        if active_id is None:
+            require(
+                head["rollout_state"] == "preparing"
+                and not head["ever_enforced"]
+                and head["active_manifest_digest"] is None
+                and barrier["mode"] in {"legacy", "ready"}
+                and not barrier["ever_enforced"]
+                and barrier["active_manifest_digest"] is None
+            )
+        else:
+            require(
+                head["rollout_state"] in {"enforcing", "frozen"}
+                and head["ever_enforced"]
+            )
+            _, items, _ = await read_manifest(
+                db,
+                tenant_id=tid,
+                manifest_id=active_id,
+                expected_digest=head["active_manifest_digest"],
+                catalog=catalog,
+            )
+        if candidate_id is None:
+            require(head["candidate_manifest_digest"] is None)
+        elif candidate_id == active_id:
+            require(head["candidate_manifest_digest"] == head["active_manifest_digest"])
+        else:
+            await read_manifest(
+                db,
+                tenant_id=tid,
+                manifest_id=candidate_id,
+                expected_digest=head["candidate_manifest_digest"],
+                catalog=catalog,
+            )
+        ready = tuple(head[name] for name in READY_FIELDS)
+        require(all(v is None for v in ready) or all(v is not None for v in ready))
+        if head["ready_manifest_digest"] is not None:
+            require(
+                candidate_id is not None
+                and head["ready_manifest_digest"] == head["candidate_manifest_digest"]
+                and type(head["ready_g_epoch"]) is int
+                and head["ready_g_epoch"] >= 1
+                and type(head["ready_b_epoch"]) is int
+                and head["ready_b_epoch"] >= 1
+                and isinstance(head["ready_until"], datetime)
+                and head["ready_until"].utcoffset() is not None
+            )
+        for obj in objects:
+            if active_id is None:
+                require(
+                    obj["mode"] in {"legacy", "ready"}
+                    and not obj["ever_enforced"]
+                    and obj["active_object_digest"] is None
+                )
+                continue
+            expected = digest(
+                {
+                    "catalog": catalog.digest,
+                    "object": obj["object_id"],
+                    "items": [
+                        item for item in items if item["object_id"] == obj["object_id"]
+                    ],
+                },
+                4 * 1024 * 1024,
+            )
+            require(
+                obj["mode"] in {"enforcing", "frozen"}
+                and obj["ever_enforced"]
+                and obj["active_object_digest"] == expected
+            )
+            if obj["object_id"] == "system.user":
+                require(
+                    (
+                        barrier["mode"],
+                        barrier["ever_enforced"],
+                        barrier["active_manifest_digest"],
+                        barrier["candidate_manifest_digest"],
+                    )
+                    == (obj["mode"], True, expected, expected)
+                )
+        if active_id is not None:
+            require(
+                (head["rollout_state"] == "frozen")
+                == any(obj["mode"] == "frozen" for obj in objects)
+            )
+
+
 async def _prepare_catalog(db, *, fence, source_build):
     evidence = require_maintenance(fence, "migration")
     require(evidence.build_sha == source_build)
@@ -86,6 +192,22 @@ async def _prepare_catalog(db, *, fence, source_build):
         )
     )
     require(tenants == {r["tenant_id"] for r in barriers})
+    heads = (
+        (await db.execute(select(Head.__table__).order_by(Head.tenant_id).limit(1025)))
+        .mappings()
+        .all()
+    )
+    if heads and {r["catalog_digest"] for r in heads} == {catalog.digest}:
+        require({r["tenant_id"] for r in heads} == tenants)
+        await _verify_current_catalog(
+            db, fence=fence, catalog=catalog, heads=heads, barriers=barriers
+        )
+        return {
+            "catalogDigest": catalog.digest,
+            "sourceCatalogDigest": catalog.digest,
+            "changedTenants": [],
+            "revisions": [],
+        }
     require(
         all(
             r["mode"] in {"legacy", "ready"}
@@ -93,11 +215,6 @@ async def _prepare_catalog(db, *, fence, source_build):
             and r["active_manifest_digest"] is None
             for r in barriers
         )
-    )
-    heads = (
-        (await db.execute(select(Head.__table__).order_by(Head.tenant_id).limit(1025)))
-        .mappings()
-        .all()
     )
     if not heads:
         return await migrate_legacy(
