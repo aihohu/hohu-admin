@@ -2,6 +2,7 @@
 
 from app.core.authorization_plan import LockMode, TenantLock, TransactionBudget
 from app.core.exceptions import BusinessException
+from app.core.field_policy.qualification import read_server_qualification
 from app.core.rbac import is_super_admin
 from app.db.authorization_owner import (
     commit_authorization_session,
@@ -56,10 +57,12 @@ class FieldManagementOwner:
         payload,
         role_id=None,
         object_id=None,
+        manifest_id=None,
     ):
         require_candidate_session(db)
         writing = operation in {"publish", "build", "freeze", "ready", "activate"}
         try:
+            qualification = read_server_qualification(catalog=catalog)
             with bounded_authorization_reads(
                 db, AuthorizationReadBudget(max_bytes=128 * 1024 * 1024)
             ):
@@ -84,10 +87,10 @@ class FieldManagementOwner:
                         not in collect_user_permission_codes(actor)
                     ):
                         raise forbidden()
-                    if operation in {"ready", "activate"}:
+                    if operation in {"ready", "activate"} and qualification is None:
                         raise BusinessException(
                             409,
-                            "全系统入口验收尚未完成",
+                            "需要当前全系统字段资格",
                             error_code="FIELD_POLICY_ACTIVATION_BLOCKED",
                         )
                     result, command = await prepare_management(
@@ -100,10 +103,17 @@ class FieldManagementOwner:
                         payload=payload,
                         role_id=role_id,
                         object_id=object_id,
+                        manifest_id=manifest_id,
+                        qualification=qualification,
                     )
                     if command is not None:
                         plan = await policies.plan(
-                            db, tx, tenant=tenant, catalog=catalog, command=command
+                            db,
+                            tx,
+                            tenant=tenant,
+                            catalog=catalog,
+                            command=command,
+                            qualification=qualification,
                         )
                         await tx.lock(plan.lock_plan)
                         await load_current_user(

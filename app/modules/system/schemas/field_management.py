@@ -110,6 +110,16 @@ class Receipt(Closed):
         return Mutation.canonical_request(value)
 
 
+class Activation(ManifestDraft, Mutation):
+    expected_epoch: Decimal
+    candidate_manifest_digest: Digest
+
+    @field_validator("expected_epoch")
+    @classmethod
+    def bounded_epoch(cls, value):
+        return ManifestDraft.bounded_version(value)
+
+
 class Page(Closed):
     cursor: Decimal = "0"
     limit: int = Field(default=100, ge=1, le=100)
@@ -132,6 +142,8 @@ def parse_management(operation, value):
         "publish": Publish,
         "manifest-preview": ManifestDraft,
         "build": Build,
+        "ready": Activation,
+        "activate": Activation,
         "freeze": Freeze,
         "receipt": Receipt,
     }.get(operation)

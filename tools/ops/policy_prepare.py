@@ -28,6 +28,7 @@ from app.core.field_policy.documents import catalog_parts, read_json
 from app.core.field_policy.maintenance import (
     require_normal_resume,  # noqa: F401 - shared protocol export
 )
+from app.core.field_policy.qualification import read_server_qualification
 from app.core.field_preparation_ingress import validate_preparation_ingress
 from app.core.process_identity import ProcessIdentity
 from app.db.authorization_runtime import AuthorizationRuntime
@@ -157,6 +158,7 @@ class PolicyPreparation:
         self.sessions = async_sessionmaker(guard.runtime_engine, expire_on_commit=False)
         self.finished = asyncio.Event()
         self.identities = PreparationSessions()
+        self.completion = None
 
     def _event(self, operation, code, identity=None):
         from tools.ops.policy_preparation_events import record_event  # noqa: PLC0415
@@ -164,6 +166,7 @@ class PolicyPreparation:
         try:
             record_event(self.guard.directory, operation, code, identity)
         except BaseException:
+            self.completion = None
             self.identities.clear()
             self.finished.set()
             raise
@@ -174,6 +177,7 @@ class PolicyPreparation:
             "AUTHORIZATION_ROLLBACK_UNKNOWN",
             "AUTHORIZATION_MAINTENANCE_FENCE_REQUIRED",
         }:
+            self.completion = None
             self.identities.clear()
             self.finished.set()
         self._event(operation, getattr(error, "error_code", None), identity)
@@ -251,21 +255,22 @@ class PolicyPreparation:
 
     async def _execute_locked(self, token, command):
         self._require_open()
-        # Preparation of ordinary objects cannot qualify full-system rollout.
-        if command.get("action") in {"ready", "activate"}:
-            raise BusinessException(
-                409,
-                "全对象入口验收尚未完成",
-                error_code="FIELD_POLICY_ACTIVATION_BLOCKED",
-            )
         try:
             await _evidence(self.guard, self.processes, self.bootstrap)
             identity = await self._authenticate(token)
+            qualification = read_server_qualification(catalog=self.catalog)
+            if command.get("action") in {"ready", "activate"} and qualification is None:
+                raise BusinessException(
+                    409,
+                    "需要当前全系统字段资格",
+                    error_code="FIELD_POLICY_ACTIVATION_BLOCKED",
+                )
             result = await self.runtime.generic_field_policy(
                 tenant=identity.tenant,
                 actor_user_version=identity.user_version,
                 catalog=self.catalog,
                 command=command,
+                qualification=qualification,
             )
             await self.guard.require_quiescent()
             return result
@@ -283,6 +288,7 @@ class PolicyPreparation:
             try:
                 if "." in token:
                     await self._execute_locked(token, {"action": "read"})
+                    identity = await self._authenticate(token)
                 else:
                     self._require_open()
                     identity = self.identities.resolve(token)
@@ -295,13 +301,27 @@ class PolicyPreparation:
                         payload={},
                     )
                     await self.guard.require_quiescent()
+                completion = None
+                if read_server_qualification(catalog=self.catalog) is not None:
+                    completion = await self.runtime.rollout_completion(
+                        tenant=identity.tenant,
+                        actor_user_version=identity.user_version,
+                        catalog=self.catalog,
+                    )
+                    await self.guard.require_quiescent()
+                self._event("finish", "accepted")
             except BaseException as error:
+                self.completion = None
                 self._rejected("finish", error)
                 raise
             self.identities.clear()
+            self.completion = completion
             self.finished.set()
-            self._event("finish", "accepted")
-        return {"state": "preparing-admission-closed"}
+        return {
+            "state": "qualified-admission-closed"
+            if completion
+            else "preparing-admission-closed"
+        }
 
 
 def _wire(value, name=""):
@@ -438,8 +458,9 @@ async def serve(
     await guard.require_quiescent()
     action, adapter = catalog_parts(catalog)
     identity = ProcessIdentity.read(os.getpid())
+    guard._save_observation(datetime.now(UTC), bootstrap=bootstrap, policy_prepare=True)
     record = {
-        "schema_version": 2,
+        "schema_version": 3,
         "state": "preparing",
         "build_sha": guard.manifest.build_sha,
         "database_oid": guard.database_oid,
@@ -504,6 +525,10 @@ async def serve(
         watcher.cancel()
         await asyncio.gather(watcher, return_exceptions=True)
     await guard.require_quiescent()
-    record["state"] = "preparing-stopped"
+    record["state"] = (
+        "qualified-stopped" if controller.completion else "preparing-stopped"
+    )
+    if controller.completion is not None:
+        record["completion"] = controller.completion
     _record(guard, record)
     return record

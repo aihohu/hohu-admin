@@ -151,6 +151,8 @@ def check_candidates(*, root=ROOT, entries=None, module_sources=None):
         (root / "app/modules/system/service").glob("generic_field_policy_*.py")
     )
     paths.add(root / "app/modules/system/service/authorization_generic_policy.py")
+    paths.add(root / "app/modules/system/service/generic_tenant_policy.py")
+    paths.add(root / "app/modules/system/service/policy_rollout_completion.py")
     paths.add(root / "tools/ops/policy_prepare.py")
     paths.add(root / "app/modules/system/service/user_transfer_read_service.py")
     paths.add(root / "app/modules/system/service/user_transfer_fields.py")

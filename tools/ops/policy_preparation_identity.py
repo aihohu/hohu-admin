@@ -185,7 +185,7 @@ async def require_preparation_administrators(sessions):
             rows = (
                 await db.execute(
                     select(Tenant.tenant_id, manageable.label("manageable"))
-                    .where(Tenant.status == "1")
+                    .where((Tenant.status == "1") | (Tenant.bootstrap_version >= 1))
                     .order_by(Tenant.tenant_id)
                     .limit(1025)
                 )
@@ -194,6 +194,6 @@ async def require_preparation_administrators(sessions):
     if not rows or len(rows) > 1024 or any(not row.manageable for row in rows):
         raise BusinessException(
             409,
-            "升级前须为每个启用租户配置字段策略专用管理权限",
+            "升级前须为每个已初始化或启用租户配置字段策略专用管理权限",
             error_code="FIELD_POLICY_ADMIN_PREFLIGHT_REQUIRED",
         )

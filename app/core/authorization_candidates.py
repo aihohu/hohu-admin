@@ -41,6 +41,7 @@ IO_PROFILES = MappingProxyType(
         "auth-write": (15000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "auth-email": (8000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "policy-proof": (15000, 2000, 5000, 100000, 128 * 1024 * 1024),
+        "rollout-completion": (60000, 2000, 5000, 100000, 128 * 1024 * 1024),
         "policy-migration": (25000, 2000, 5000, 100000, 128 * 1024 * 1024),
         "import-write": (60000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "bounded-plan": (15000, 2000, 5000, 100000, 64 * 1024 * 1024),
@@ -2056,6 +2057,72 @@ CANDIDATES += tuple(
             "read",
             ("S", "X"),
         ),
+        (
+            "deployment_presence",
+            _S + "generic_field_policy_admission.generic_deployment_started",
+            "read",
+            ("S", "X"),
+        ),
+        (
+            "legacy_admission",
+            _S + "generic_field_policy_admission.require_legacy_field_policy",
+            "read",
+            ("S", "X"),
+        ),
+    )
+)
+
+_ROLLOUT_OWNER = (
+    "app.db.authorization_rollout_completion_owner.RolloutCompletionOwner.execute"
+)
+_ROLLOUT_SNAPSHOT = _S + "policy_rollout_completion.capture_completion"
+CANDIDATES += tuple(
+    Candidate(
+        "rollout_completion." + name,
+        qualified,
+        (
+            _ROLLOUT_SNAPSHOT,
+            _TX + ".assert_global_barriers",
+            "app.core.field_policy.qualification.read_server_qualification",
+        ),
+        _ROLLOUT_OWNER,
+        phase,
+        "X",
+        "complete registered tenant set<=1024; every B-X; current R_SUPER and dedicated activate permission",
+        ("X",),
+        "none",
+        "none",
+        "rollout-completion",
+        "none",
+        False,
+    )
+    for name, qualified, phase in (
+        ("owner", _ROLLOUT_OWNER, "owner"),
+        ("snapshot", _ROLLOUT_SNAPSHOT, "read"),
+    )
+)
+CANDIDATES += tuple(
+    Candidate(
+        "generic_tenant." + name,
+        qualified,
+        (
+            _S + "generic_tenant_policy.prepare_new_tenant_policy",
+            _TX + ".initialize_tenant_policy",
+        ),
+        _CONTROL_OWNER + ".execute",
+        phase,
+        "X",
+        "creation-only:new tenant with B-X; reserved empty head and every object; no grants or activation",
+        ("X",),
+        _S + "generic_tenant_policy.prepare_new_tenant_policy",
+        _TX + ".initialize_tenant_policy",
+        "global-write",
+        _TX + "._bump_global",
+        phase == "proof_writer",
+    )
+    for name, qualified, phase in (
+        ("plan", _S + "generic_tenant_policy.prepare_new_tenant_policy", "plan"),
+        ("initialize", _TX + ".initialize_tenant_policy", "proof_writer"),
     )
 )
 
@@ -2103,6 +2170,7 @@ MAINTENANCE_ENTRIES |= frozenset(
 )
 
 _RUNTIME_DELEGATES = {
+    "rollout_completion": _ROLLOUT_OWNER,
     "field_management": _MANAGEMENT_OWNER,
     "generic_field_policy": _GENERIC_OWNER,
     "field_policy": "app.db.authorization_policy_owner.UserFieldPolicyOwner.execute",

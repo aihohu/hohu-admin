@@ -52,7 +52,9 @@ publish/archive 回执返回 `revisionId`，请求事实以完整 tenant/role/ob
 
 出现 generic head 后，旧用户策略 owner、旧业务字段路径以及旧策略表写者均在服务端拒绝，错误为 `FIELD_POLICY_CLIENT_UPGRADE_REQUIRED`（数据库直接写入由约束拒绝）。不能回退到旧 binding 继续运行。
 
-当前准备入口拒绝 ready/activate，持久 `policy-prepare.json` 使所有 normal resume 入口保持关闭。完整对象与交付入口尚未接入，这一限制不能靠删除标记、替换旧回执或自行构造资格文件解除。资格协议绑定 build、schema、catalog、action、adapter、对象覆盖和全部验收证据，但测试中的模拟资格不代表部署资格。
+ready/activate 仅接受服务端 `FIELD_POLICY_QUALIFICATION_FILE` 的当前完整资格，绑定 build、schema、catalog、action、adapter、对象覆盖和全部验收证据；测试中的模拟资格不代表部署资格。管理API还绑定路径manifestId、候选摘要、head与epoch。候选保存不生效，激活原子切换本租户全部对象。缺失资格可以编辑修复，不能激活。
+
+准备记录 schema 3 在全租户生命周期与manifest/对象/兼容状态真实核验后，才可进入 `qualified-stopped`；全局核验使用G独占/全部有序B独占，总60s、锁2s、statement5s、累计100000行/128MiB，摘要输入4MiB。准备进程退出、安装回执和stop字节绑定、当前资格/数据库OID/构建/部署一致及数据库静止均成立后，才允许显式恢复。原stop记录的 `policy_prepare_required` 保留该要求，删除准备marker或替换旧回执不能恢复admission。未显式完成、取消或ACK未知继续停写，不自动重新执行。
 
 控制器会话失败或连接丢失后保持停写；当前不提供自动重连恢复准备会话。恢复须使用已验证的数据库、文件、密钥和执行事实一致性备份。存在通用目录或策略事实时，DDL downgrade 会拒绝；不可用删表回退替代恢复。
 
@@ -67,3 +69,9 @@ System 和角色 Agent 绑定的 plan/apply 共用累计读取预算，直接 ow
 目录规范编码限 1 MiB，单规则组限 256 KiB，旧用户原文先按 256 条/64 KiB 验证再转换；JSONB 物理大小另有保守上限。在线管理保护期 15 秒（读 8 秒）、锁 2 秒、statement 5 秒，累计读取最多 100000 行/128 MiB。迁移保护期 25 秒，permit 30 秒，最多 1024 租户；源记录分 16 条读取，累计 100000 行/128 MiB。超限整笔失败，不分批提交或开放部分结果。
 
 输入不合法为 `FIELD_POLICY_INVALID`；身份/管理权限不足为 `FIELD_POLICY_MANAGEMENT_FORBIDDEN`；CAS 冲突为 `FIELD_POLICY_VERSION_CONFLICT`；未获资格为 `FIELD_POLICY_ACTIVATION_BLOCKED`；状态缺失或摘要漂移为 `FIELD_POLICY_UNAVAILABLE`；预算超限为 `AUTHORIZATION_PLAN_LIMIT_EXCEEDED`。所有成功响应保持 `{code: 200, msg, data}`，不返回业务字段值或秘密。
+
+## 新开户与后续维护
+
+已进入通用部署时，新tenant.prepare的首次完整plan预留HEAD和全部tenant域对象资源；G独占、目标B独占及新Tenant所有权下只插入安全默认状态，不插规则或活动清单。失败同事务回滚，replay不重复创建。普通/关系/参数和旧用户兼容路径均验证部署级head事实，缺少本租户head不会转为全允许。
+
+完成摘要包含全部Tenant生命周期/row_version、B/head/object版本及活动摘要。活跃租户须全部enforcing；禁用/prepared租户可保持完整、未授予的preparing隔离状态，记录quarantined_count，不能因后续启用回退legacy。恢复成功会保留本轮原始记录于completed/<stopSHA>后消费当前记录，禁止后续维护误用旧资格；归档/删除失败重新关DB并恢复原始文件。

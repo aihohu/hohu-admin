@@ -36,6 +36,7 @@ from app.modules.system.service.authorization_read_budget import (
 from app.modules.system.service.authorization_transaction_service import (
     authorization_transactions,
 )
+from app.modules.system.service.generic_tenant_policy import prepare_new_tenant_policy
 from app.modules.system.service.tenant_lifecycle_service import (
     _tenant_fingerprint,
     hash_tenant_idempotency_key,
@@ -226,6 +227,7 @@ class TenantControlCandidate:
         self, db, tenant, user_version, target, values, audit, *, http_result
     ):
         async with authorization_transactions.scope_creation(db) as tx:
+            policy = None
             identity = await read_identity(
                 db,
                 tenant=tenant,
@@ -293,8 +295,18 @@ class TenantControlCandidate:
                 )
                 # G-X excludes protocol writers; source User has no audit FK.
                 existing = audit.existing + (_target_key(target),)
-            await tx.lock(LockPlan(existing=tuple(set(existing)), new=audit.new))
+                policy = await prepare_new_tenant_policy(db, tx, target)
+            await tx.lock(
+                LockPlan(
+                    existing=tuple(set(existing)),
+                    new=audit.new + (policy.new if policy else ()),
+                )
+            )
             await assert_identity(db, identity)
+            if policy is not None:
+                await tx.initialize_tenant_policy(
+                    target, catalog_digest=policy.catalog_digest, objects=policy.objects
+                )
             await audit.append(
                 tx, {"tenantId": str(target), "replayed": replay is not None}
             )

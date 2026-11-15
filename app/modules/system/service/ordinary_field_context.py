@@ -27,6 +27,9 @@ from app.modules.system.field_policy.ordinary_catalog import (
 from app.modules.system.models.dict_type import DictType
 from app.modules.system.models.field_policy import FieldPolicyHead
 from app.modules.system.models.user_field_policy import UserFieldPolicyState
+from app.modules.system.service.generic_field_policy_admission import (
+    require_legacy_field_policy,
+)
 from app.modules.system.service.generic_field_policy_service import (
     failure,
     generic_field_policy_service,
@@ -152,6 +155,7 @@ async def load_ordinary_context(
         )
     )
     if head is None:
+        await require_legacy_field_policy(db)
         state = (
             await db.execute(
                 select(

@@ -54,6 +54,19 @@ async def test_stream_limit_does_not_call_owner():
     executor.assert_not_called()
 
 
+@pytest.mark.parametrize("operation", ["ready", "activate"])
+async def test_activation_path_manifest_is_passed_to_the_owner(operation):
+    executor = AsyncMock(return_value={"safe": True})
+    app = FastAPI()
+    app.include_router(create_management_router(lambda: executor))
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(f"/manifests/123/{operation}", json={})
+    assert response.status_code == 200
+    assert executor.call_args.kwargs["manifest_id"] == 123
+
+
 def test_openapi_documents_closed_camel_case_body_and_string_cas():
     app = FastAPI()
     app.include_router(create_management_router(lambda: AsyncMock()))

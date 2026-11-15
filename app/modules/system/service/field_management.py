@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
+from app.core.config import settings
 from app.core.exceptions import BusinessException
 from app.core.field_policy.contracts import canonical, primitive
 from app.core.field_policy.documents import (
@@ -181,11 +182,12 @@ def mutation_command(operation, payload, role_id, object_id):
             binding_version=int(payload["expected_binding_version"]),
             rules=payload["rules"],
         )
-    if operation == "freeze":
+    if operation in {"freeze", "ready", "activate"}:
         command.update(
-            object_id=payload["object_id"],
             expected_epoch=int(payload["expected_epoch"]),
         )
+    if operation == "freeze":
+        command["object_id"] = payload["object_id"]
     return command
 
 
@@ -214,7 +216,18 @@ def differences(before, after):
 
 
 async def prepare_management(
-    db, tx, *, tenant, actor, catalog, operation, payload, role_id=None, object_id=None
+    db,
+    tx,
+    *,
+    tenant,
+    actor,
+    catalog,
+    operation,
+    payload,
+    role_id=None,
+    object_id=None,
+    manifest_id=None,
+    qualification=None,
 ):
     """Return a detached DTO or a command for the existing complete lock planner."""
     payload = parse_management(operation, payload)
@@ -270,11 +283,39 @@ async def prepare_management(
         if prior is not None:
             return wire(prior), None
     head, objects, bindings, g_epoch, b_epoch = await snapshot(db, tx, tenant, catalog)
+    if operation in {"ready", "activate"}:
+        if (
+            type(manifest_id) is not int
+            or not 0 < manifest_id < 2**63
+            or manifest_id != head["candidate_manifest_id"]
+            or payload["candidate_manifest_digest"] != head["candidate_manifest_digest"]
+        ):
+            raise BusinessException(
+                409, "候选manifest已变化", error_code="FIELD_POLICY_VERSION_CONFLICT"
+            )
+        if payload["catalog_digest"] != catalog.digest:
+            raise BusinessException(
+                409, "目录已变化，请重载", error_code="FIELD_POLICY_CATALOG_CONFLICT"
+            )
+        command = mutation_command(operation, payload, None, None)
+        prior = await policies.receipt(
+            db,
+            tenant=tenant,
+            request_id=payload["request_id"],
+            command_digest=digest(command),
+        )
+        return (wire(prior), None) if prior is not None else (None, command)
     codes = collect_user_permission_codes(actor)
+    qualified = qualification is not None
+    if qualified:
+        try:
+            qualification.verify(catalog, settings.RELEASE_BUILD_SHA)
+        except BusinessException:
+            qualified = False
     capabilities = {
         "view": "system:role:field-policy-view" in codes,
         "edit": "system:role:field-policy-edit" in codes,
-        "activate": False,
+        "activate": qualified and "system:role:field-policy-activate" in codes,
         "freeze": "system:role:field-policy-activate" in codes,
     }
     common = {
@@ -283,6 +324,8 @@ async def prepare_management(
         "epoch": b_epoch,
         "active_manifest_digest": head["active_manifest_digest"],
         "candidate_manifest_digest": head["candidate_manifest_digest"],
+        "candidate_manifest_id": head["candidate_manifest_id"],
+        "ready_until": head["ready_until"],
         "tenant_id": tenant.tenant_id,
         "capabilities": capabilities,
     }
@@ -369,13 +412,38 @@ async def prepare_management(
         ), None
     items = policies._item_rows(bindings)
     if operation == "manifest":
+        can_ready = (
+            qualified
+            and capabilities["edit"]
+            and head["candidate_manifest_id"] is not None
+        )
+        can_activate = bool(
+            capabilities["activate"]
+            and head["candidate_manifest_id"] is not None
+            and head["ready_manifest_digest"] == head["candidate_manifest_digest"]
+            and head["qualification_digest"] == qualification.evidence_digest
+            and head["ready_g_epoch"] == g_epoch
+            and head["ready_b_epoch"] == b_epoch
+            and head["ready_until"] is not None
+            and head["ready_until"] > datetime.now(UTC)
+        )
+        blockers = []
+        if not qualified:
+            blockers.append("QUALIFICATION_REQUIRED")
+        if head["candidate_manifest_id"] is None:
+            blockers.append("CANDIDATE_REQUIRED")
+        if not capabilities["activate"]:
+            blockers.append("ACTIVATION_AUTHORITY_REQUIRED")
+        if not can_activate:
+            blockers.append("MANIFEST_NOT_READY")
         return wire(
             common
             | {
                 "objects": objects,
                 "items": items,
-                "can_activate": False,
-                "activation_blockers": ["FULL_SYSTEM_ACCEPTANCE_REQUIRED"],
+                "can_ready": bool(can_ready),
+                "can_activate": can_activate,
+                "activation_blockers": blockers,
                 "rollout_state": head["rollout_state"],
             }
         ), None

@@ -70,9 +70,11 @@ hohu deploy --source official --no-migrate
 
 ## 失败与恢复
 
-通用策略需要受控编辑时，使用 `policy-prepare` 替代上述 `prepare`，可加 `--policy-port 8765`。其余 inventory、bootstrap、build、角色和控制目录要求相同。加入 `--policy-web-directory` 与完整 `--policy-web-commit` 可提供已验收的真实Web构建，页面使用受控密码登录和内存短期会话，原命令入口仍使用已有管理JWT。升级在DDL之前预检每个启用租户的专用管理权限，缺失则保持停写并拒绝迁入；新装在种子后预检。入口仅监听本机，不启动普通业务任务；详见[候选管理与身份交接](FIELD-POLICY-MANAGEMENT.md)及[通用字段策略存储](FIELD-POLICY-STORAGE.md)。普通 `prepare` 只安装结构和种子，不自动迁入通用授权状态。
+通用策略需要受控编辑时，使用 `policy-prepare` 替代上述 `prepare`，可加 `--policy-port 8765`。其余 inventory、bootstrap、build、角色和控制目录要求相同。加入 `--policy-web-directory` 与完整 `--policy-web-commit` 可提供已验收的真实Web构建，页面使用受控密码登录和内存短期会话，原命令入口仍使用已有管理JWT。升级在DDL之前预检每个已初始化或启用租户的专用管理权限，缺失则保持停写并拒绝迁入；新装在种子后预检。入口仅监听本机，不启动普通业务任务；详见[候选管理与身份交接](FIELD-POLICY-MANAGEMENT.md)及[通用字段策略存储](FIELD-POLICY-STORAGE.md)。普通 `prepare` 只安装结构和种子，不自动迁入通用授权状态。
 
-安装回执 schema 为 2，额外绑定准备记录的摘要；旧 schema 回执不能用于当前恢复。一旦建立 `policy-prepare.json`，当前版本的正常恢复入口将拒绝开放 admission，即使准备 HTTP 会话已成功结束。全系统对象接线和完整资格尚未完成，不能据此恢复生产流量；禁止删标记或回用旧回执绕过。
+安装回执 schema 为2，绑定准备记录的原始字节摘要；旧schema回执不能用于当前恢复。通用字段策略启用需选择 `policy-prepare`，部署方配置 `FIELD_POLICY_QUALIFICATION_FILE`（schema 2、≤1MiB、最长24h、精确Backend构建/当前目录/迁移与全部验收证据）；普通 `prepare` 不自动激活字段策略。准备页逐租户保存候选、封存完整清单、ready再显式activate，最后执行finish。finish须核验完整租户集合及全部活动清单/对象；只有监听退出、无在途事务后才生成schema 3的 `qualified-stopped` 记录。无资格时finish只关闭候选编辑，normal resume继续拒绝。
+
+恢复要求当前资格未过期/未变，准备进程确已退出，build、databaseOID、部署manifest、stop/install/准备记录字节绑定一致，再满足原数据库会话/prepared核验和等待窗口。两个维护入口均执行这些检查；stop中的 `policy_prepare_required: true` 不因删除准备文件而消失。失败保持停写，不能删除标记、替换旧回执或手造资格绕过。恢复只开放admission，进程和流量仍由部署方显式启动；首次全系统激活需要该完整流程的新验收证据。
 
 异常、取消、迁移/seed或回执写入失败均不自动恢复 admission，也不自动重试业务或启动服务。`stop.json` 表示维护尚未解除；失败时保持入口隔离，先核对已提交的迁移/seed事实及备份。已迁移但seed未知不能重新当作空库bootstrap；通过现有维护修复协议处理，不能删记录或`stamp head`伪装成功。成功回执只记录这一阶段，不是正式发布资格或镜像正确性的证明。
 

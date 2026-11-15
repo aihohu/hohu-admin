@@ -661,6 +661,17 @@ class _Transaction(GenericPolicyTransaction):
         if type(tenant_id) is not int or tenant_id not in self._tenants:
             raise _order_error()
 
+    def assert_global_barriers(self):
+        """Prove a fixed complete tenant set under G-X and every B-X."""
+        self._check()
+        if (
+            self._global_mode != LockMode.EXCLUSIVE
+            or not self._all_tenants
+            or any(mode != LockMode.EXCLUSIVE for mode in self._tenants.values())
+        ):
+            raise _order_error()
+        return tuple(sorted(self._tenants))
+
     def assert_planned(self, plan):
         try:
             self._check(locked=True)
@@ -1421,6 +1432,49 @@ class _Transaction(GenericPolicyTransaction):
         except TimeoutError:
             self._journal.fail()
             raise _timeout_error() from None
+        except BaseException:
+            self._journal.fail()
+            raise
+
+    async def initialize_tenant_policy(self, tenant_id, *, catalog_digest, objects):
+        """Only initialize reserved empty anchors in this new tenant's creation."""
+        try:
+            self._check(locked=True)
+            if (
+                self._creation is None
+                or self._creation.get("created") != tenant_id
+                or self._global_mode != LockMode.EXCLUSIVE
+                or self._generic is not None
+                or self._policy is not None
+                or self._frames
+                or type(catalog_digest) is not str
+                or re.fullmatch(r"[0-9a-f]{64}", catalog_digest) is None
+                or type(objects) is not tuple
+                or not 1 <= len(objects) <= 64
+                or objects != tuple(sorted(set(objects)))
+            ):
+                raise _order_error()
+            self._require_exclusive_tenant(tenant_id)
+            self.assert_held(ResourceKey(ResourceKind.TENANT, None, tenant_id))
+            head = ResourceKey(ResourceKind.FIELD_POLICY_HEAD, tenant_id, tenant_id)
+            keys = (head,) + tuple(
+                ResourceKey(ResourceKind.FIELD_POLICY_OBJECT, tenant_id, name)
+                for name in objects
+            )
+            reserved = {item.key for item in self._plan.new}
+            if not set(keys) <= reserved or set(keys) & (self._attempted | self._owned):
+                raise _order_error()
+            for key in keys:
+                values = {"tenant_id": tenant_id, "catalog_digest": catalog_digest}
+                if key.kind is ResourceKind.FIELD_POLICY_OBJECT:
+                    self.assert_held(head)
+                    values["object_id"] = key.identity[0]
+                self._attempted.add(key)
+                await self._timeouts()
+                await self._execute(
+                    insert(resource_spec(key.kind).table).values(**values)
+                )
+                self._owned.add(key)
         except BaseException:
             self._journal.fail()
             raise

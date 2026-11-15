@@ -37,6 +37,9 @@ from app.modules.system.service.authorization_read_budget import (
     authorization_read_phase,
     read_phase,
 )
+from app.modules.system.service.generic_field_policy_admission import (
+    require_legacy_field_policy,
+)
 from app.modules.system.service.generic_field_policy_service import (
     failure,
     generic_field_policy_service,
@@ -345,6 +348,7 @@ async def load_relation_read_context(
         )
         grants = ()
         if head is None:
+            await require_legacy_field_policy(db)
             state = (
                 await db.execute(
                     select(UserFieldPolicyState.mode).where(

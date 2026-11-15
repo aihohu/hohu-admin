@@ -3,7 +3,10 @@
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
+from app.core.config import settings
+from app.core.exceptions import BusinessException
 from app.core.field_policy.contracts import require
 from app.core.field_policy.documents import catalog_parts, digest, read_json
 
@@ -108,3 +111,20 @@ def read_qualification(path, *, catalog, build_sha):
     )
     proof.verify(catalog, build_sha)
     return proof
+
+
+def read_server_qualification(*, catalog, required=False):
+    """Read before G/B acquisition; a missing proof does not prevent repairs."""
+    try:
+        path = settings.FIELD_POLICY_QUALIFICATION_FILE
+        if path:
+            return read_qualification(
+                Path(path), catalog=catalog, build_sha=settings.RELEASE_BUILD_SHA
+            )
+    except (OSError, ValueError, TypeError, BusinessException):
+        pass
+    if required:
+        raise BusinessException(
+            409, "需要当前全系统字段资格", error_code="FIELD_POLICY_ACTIVATION_BLOCKED"
+        )
+    return None

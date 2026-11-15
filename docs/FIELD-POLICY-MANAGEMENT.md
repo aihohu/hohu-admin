@@ -4,7 +4,7 @@ Backend/Web 0.2.0 开发版本提供通用策略候选管理。Backend 当前准
 
 ## 角色管理入口
 
-入口位于「系统管理 → 角色管理」的行操作，字段权限紧邻菜单权限右侧，两者采用相同按钮样式。管理者必须具有启用的 `R_SUPER` 和显式 `system:role:field-policy-view`，通配按钮权限不能代替专用权限。编辑候选另需 `system:role:field-policy-edit`；冻结另需 `system:role:field-policy-activate`。每次请求重新检查当前身份、角色和功能码，按钮隐藏不是服务端鉴权。
+入口位于「系统管理 → 角色管理」的行操作，字段权限紧邻菜单权限右侧，两者采用相同按钮样式。管理者必须具有启用的 `R_SUPER` 和显式 `system:role:field-policy-view`，通配按钮权限不能代替专用权限。编辑候选和标记待激活另需 `system:role:field-policy-edit`；激活及冻结另需 `system:role:field-policy-activate`。每次请求重新检查当前身份、角色和功能码，按钮隐藏不是服务端鉴权。
 
 抽屉显示当前租户、角色、数据范围、对象和候选版本。菜单权限决定能否调用功能，数据范围决定可访问记录，字段规则决定对应用途下的字段许可；三者同时成立才允许业务操作。平台固定边界、结构字段和不支持的用途不能由角色规则扩大。自定义按钮不会自动取得字段许可，需要服务端注册的动作与字段用途映射。
 
@@ -23,14 +23,14 @@ Backend/Web 0.2.0 开发版本提供通用策略候选管理。Backend 当前准
 | 方法与相对路径 | 内容 | 专用权限后缀 |
 | --- | --- | --- |
 | GET `catalog` | 对象/字段/Access/硬上限/脱敏/推荐元数据 | view |
-| GET `roles` | 当前租户角色的名称、代码、数据范围与状态 | view |
+| GET `roles` | 当前租户角色ID锚点及当前允许读取的角色字段 | view |
 | GET `roles/{roleId}/objects/{objectId}` | 角色对象候选规则、绑定版本与能力 | view |
 | POST `roles/{roleId}/objects/{objectId}/preview` | 绑定当前事实的签名预览 | view |
 | POST `roles/{roleId}/objects/{objectId}/revisions` | 保存不可变候选修订 | edit |
 | GET `manifests/current` | 全部候选引用、对象状态、active/candidate摘要 | view |
 | POST `manifests/preview` | 完整租户候选预览 | view |
 | POST `manifests` | 封存完整租户候选 | edit |
-| POST `manifests/{manifestId}/ready`、`activate` | 当前均返回资格阻断 | edit、activate |
+| POST `manifests/{manifestId}/ready`、`activate` | 当前资格下标记待激活、原子激活完整租户候选 | edit、activate |
 | POST `freeze` | 冻结对象及其依赖闭包 | activate |
 | GET `requests/{requestId}` | 当前 actor 的持久回执或 null | view |
 
@@ -41,6 +41,22 @@ Backend/Web 0.2.0 开发版本提供通用策略候选管理。Backend 当前准
 请求体上限512KiB，重复JSON键、未知属性、越界版本和任意动作均拒绝。普通API的OpenAPI公布相同闭集请求 schema。预览签名有效5分钟，绑定当前用户/租户安全版本、G/B epoch、head、active、目录/动作摘要及完整目标规则或清单；保存时在同一事务重新校验。签名上下文上限4MiB，签名不包含业务值。原 `/policy-prepare/command` 的版本整数协议保持不变，不与新协议混用。
 
 `FIELD_POLICY_PREVIEW_STALE` 表示预览过期或事实已变化；`FIELD_POLICY_VERSION_CONFLICT`、`FIELD_POLICY_CATALOG_CONFLICT` 要求重载；`FIELD_POLICY_MANAGEMENT_FORBIDDEN` 表示当前授权不足；`FIELD_POLICY_ACTIVATION_BLOCKED` 表示完整接线资格尚未满足。提交/回滚 ACK 未知按原持久回执协议处理。
+
+## 激活与完整准备
+
+部署方设置 `FIELD_POLICY_QUALIFICATION_FILE`，提供受保护的 schema 2 验收资格（最大1MiB）。记录绑定当前40位 `RELEASE_BUILD_SHA`、迁移 `e020f3b00001`、目录/动作/适配器摘要、完整对象集合、十项验收证据和最长24小时有效期。旧用户单对象资格文件不能代替。文件在数据库锁外读取，锁内再次校验绑定与有效期；浏览器不能上传资格、路径或身份声明。缺失、过期或漂移时可以修复候选，不能 ready/activate。
+
+ready/activate 使用闭集请求：`requestId`、`reason`、`expectedVersion`、`expectedEpoch`、`catalogDigest`、`candidateManifestDigest`。路径中的 `manifestId` 必须匹配当前候选，不能指向其他清单。服务端返回 `candidateManifestId`、`readyUntil`、`canReady`、`canActivate` 和稳定阻断码。两步分别确认本租户完整候选，ready最长15分钟，不能自动继续activate。修改候选、epoch或资格使原ready失效；同一事务更新全部对象与用户兼容镜像、审计、回执及epoch。新用途和未配置规则不自动获得许可。
+
+准备服务的显式finish在有效资格下还核验全部租户、全部对象及活动封存清单。活跃租户尚在准备、被冻结或摘要不匹配时不能生成完成记录；无有效资格时finish只结束候选编辑并继续停写。监听真正结束、数据库无在途事务后生成 `qualified-stopped` 记录，安装回执绑定其原始字节。恢复须由独立操作进程检查准备进程已退出、资格与构建仍有效、stop/install/准备记录一致和数据库静止，再显式开放admission；不会自动启动API或scheduler。停写记录保留 `policy_prepare_required`，删除准备文件不能改走普通恢复。完整流程见[受控安装](CONTROLLED-INSTALL.md)。资格文件和本机模拟测试均不等于正式发布或生产已经激活。
+
+## 新租户、隔离与修复
+
+通用部署中的新租户开户在同一完整事务计划中建立空的head与对象状态，业务保持关闭；引导不会隐式授予字段或激活。管理员完成引导并启用租户后，可通过专用管理权限配置候选，再显式激活。部署已经存在通用head时，本租户缺失head也不能回退旧授权。角色业务字段未就绪或被冻结时，清空业务筛选后，角色页可通过现有管理API显示仅含ID的修复行；原行内字段权限按钮可用，其他业务写入口关闭，角色名称、编码和范围不靠猜测补齐。
+
+完成核验覆盖全部租户。禁用或prepared且未激活的租户可保留完整preparing状态，按quarantined计入摘要；不对其自动授予或激活，启用后仍须字段激活。已初始化的禁用租户也必须在升级前显式配置三个管理码。
+
+正常resume将本次policy/install/stop原始字节归档到控制目录的 `completed/<stop文件SHA256>/`，再消费当前记录，stop最后移除。任何失败重新请求关闭DB并恢复原记录；归档冲突不覆盖。后续维护必须建立新停写记录，不能重用已消费资格。
 
 ## 受控 Web 与身份交接
 
@@ -62,7 +78,7 @@ python -m tools.ops.controlled_install policy-prepare \
 
 新装另加 `--bootstrap`，其余配置遵循[受控安装](CONTROLLED-INSTALL.md)。目录和commit参数必须同时提供。控制器验证协议、0.2.0版本、源码SHA和每个文件摘要，只服务已验证的内存字节；未登记路径404，无普通业务路由fallback。清单≤256KiB、文件≤8MiB、合计≤64MiB，不提供任意文件读取。
 
-打开本机 `http://127.0.0.1:8765/`，输入租户代码、已有用户名和密码。升级前必须在每个启用租户通过现有菜单/角色管理显式配置上述三个专用码，绑定给一个启用的 `R_SUPER` 管理身份；旧用户字段权限码不能代替。可先创建对应权限按钮再授权，升级种子按权限码复用，禁止直接改SQL授权。非新装在停写成立后、DDL前预检；新装在种子后预检。失败返回 `FIELD_POLICY_ADMIN_PREFLIGHT_REQUIRED`，不创建通用策略head或准备标记，且保持admission关闭，按维护恢复协议处理。
+打开本机 `http://127.0.0.1:8765/`，输入租户代码、已有用户名和密码。升级前必须在每个已初始化或启用租户通过现有菜单/角色管理显式配置上述三个专用码，绑定给一个启用的 `R_SUPER` 管理身份；旧用户字段权限码不能代替。可先创建对应权限按钮再授权，升级种子按权限码复用，禁止直接改SQL授权。非新装在停写成立后、DDL前预检；新装在种子后预检。失败返回 `FIELD_POLICY_ADMIN_PREFLIGHT_REQUIRED`，不创建通用策略head或准备标记，且保持admission关闭，按维护恢复协议处理。
 
 `POST /policy-prepare/login` 接受 `tenantCode`、`userName`、`password`，返回15分钟随机会话及tenant/actor字符串ID。密码校验在SQL事务和G/B锁之外；校验后重新检查当前身份和专用读取权限。不签发普通access/refresh token，服务端只存token摘要，客户端仅内存持有，不放URL/localStorage/sessionStorage。登录体≤8KiB，10次/分钟、最多16会话；同源与loopback Host校验阻断跨站请求和域名重绑定。登录沿用部署已有的租户登录模式及运行资格限制。
 

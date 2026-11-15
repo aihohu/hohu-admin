@@ -12,6 +12,7 @@ from app.modules.auth.service import access_identity, get_current_user
 from app.modules.system.field_policy.ordinary_catalog import production_catalog
 from app.modules.system.models.user import User
 from app.modules.system.schemas.field_management import (
+    Activation,
     Build,
     Freeze,
     ManifestDraft,
@@ -157,21 +158,29 @@ def create_management_router(context=regular_context):
     async def build(request: Request, execute=Depends(context)):
         return await response(execute, "build", await bounded_body(request))
 
-    @router.post("/manifests/{manifest_id}/ready")
+    @router.post(
+        "/manifests/{manifest_id}/ready", openapi_extra=request_contract(Activation)
+    )
     async def ready(
         request: Request,
-        _manifest_id: int = Path(alias="manifest_id", gt=0, lt=2**63),
+        manifest_id: int = Path(gt=0, lt=2**63),
         execute=Depends(context),
     ):
-        return await response(execute, "ready", await bounded_body(request))
+        return await response(
+            execute, "ready", await bounded_body(request), manifest_id=manifest_id
+        )
 
-    @router.post("/manifests/{manifest_id}/activate")
+    @router.post(
+        "/manifests/{manifest_id}/activate", openapi_extra=request_contract(Activation)
+    )
     async def activate(
         request: Request,
-        _manifest_id: int = Path(alias="manifest_id", gt=0, lt=2**63),
+        manifest_id: int = Path(gt=0, lt=2**63),
         execute=Depends(context),
     ):
-        return await response(execute, "activate", await bounded_body(request))
+        return await response(
+            execute, "activate", await bounded_body(request), manifest_id=manifest_id
+        )
 
     @router.post("/freeze", openapi_extra=request_contract(Freeze))
     async def freeze(request: Request, execute=Depends(context)):
