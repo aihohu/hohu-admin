@@ -1,9 +1,52 @@
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
 
 from app.core.exceptions import BusinessException
+from app.db.authorization_chat_owner import ChatOwner
 from app.modules.ai.service.stream_delivery import StreamDelivery
+
+
+async def test_delivery_owner_total_deadline_is_a_controlled_domain_error(monkeypatch):
+    owner = ChatOwner(None)
+    attempts = []
+    closed = []
+
+    async def stalled(*_args, **_kwargs):
+        attempts.append(1)
+        try:
+            await asyncio.sleep(30)
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr(owner, "_run", stalled)
+    async with asyncio.timeout(12):
+        with pytest.raises(BusinessException) as caught:
+            await owner.delivery_check()
+    assert caught.value.error_code == "AUTHORIZATION_TRANSACTION_TIMEOUT"
+    assert attempts == [1] and closed == [True]
+
+
+async def test_delivery_owner_cancellation_is_not_retried_or_converted(monkeypatch):
+    owner = ChatOwner(None)
+    entered = asyncio.Event()
+    closed = []
+
+    async def stalled(*_args, **_kwargs):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr(owner, "_run", stalled)
+    task = asyncio.create_task(owner.delivery_check())
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert closed == [True]
 
 
 async def test_stream_probes_every_batch_and_bounds_epoch_renewals():

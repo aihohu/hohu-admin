@@ -11,7 +11,7 @@ from app.db.authorization_owner import (
     commit_authorization_session,
     rollback_authorization_session,
 )
-from app.db.authorization_plan_session import _order_error
+from app.db.authorization_plan_session import _order_error, _timeout_error
 from app.modules.ai.core.provider_egress import provider_egress
 from app.modules.ai.schemas.conversation import (
     ConversationCreate,
@@ -125,18 +125,24 @@ class ChatOwner:
             max_statements=4096, max_rows=100000, max_bytes=128 * 1024 * 1024
         )
         deadline = asyncio.get_running_loop().time() + 8
-        async with asyncio.timeout_at(deadline):
-            for attempt in range(3):
-                try:
-                    return await self._run(
-                        "delivery_check",
-                        request,
-                        _read_budget=budget,
-                        _deadline=deadline,
-                    )
-                except BusinessException as exc:
-                    if exc.error_code != "AUTHORIZATION_SNAPSHOT_STALE" or attempt == 2:
-                        raise
+        try:
+            async with asyncio.timeout_at(deadline):
+                for attempt in range(3):
+                    try:
+                        return await self._run(
+                            "delivery_check",
+                            request,
+                            _read_budget=budget,
+                            _deadline=deadline,
+                        )
+                    except BusinessException as exc:
+                        if (
+                            exc.error_code != "AUTHORIZATION_SNAPSHOT_STALE"
+                            or attempt == 2
+                        ):
+                            raise
+        except TimeoutError:
+            raise _timeout_error() from None
 
     async def delivery_probe(self, **request):
         return await self._run("delivery_probe", request)
