@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import AuthorizationException, NotFoundException
 from app.db import authorization_completion_facts_owner as read_module
 from app.db import authorization_owner
+from app.db.authorization_chat_owner import ChatOwner
 from app.db.authorization_completion_facts_owner import CompletionFactsOwner
 from app.db.authorization_runtime import AuthorizationRuntime
 from app.db.session import engine
@@ -138,7 +139,27 @@ async def test_poll_trace_history_mask_unproven_terminal_without_writing(
 ):
     case = completion_case
     count_real_handler(case, monkeypatch, return_failure=corruption != "success_log")
+    if corruption == "missing_action":
+        original_recover = ChatOwner.recover
+        first_projection = True
+
+        async def optional_projection_stalls(self, **request):
+            nonlocal first_projection
+            if first_projection:
+                first_projection = False
+                await asyncio.Event().wait()
+            return await original_recover(self, **request)
+
+        monkeypatch.setattr(ChatOwner, "recover", optional_projection_stalls)
     await approve(case)
+    # The endpoint's 1s display attempt is optional. Establish this read fixture
+    # through the real bounded owner, preserving its authority and ACK checks.
+    assert (
+        await AuthorizationRuntime(engine).chat.recover(
+            tenant=case.tenant, confirmation_id=case.confirmation_id
+        )
+        is not None
+    )
     async with AsyncSessionLocal() as db, db.begin():
         action = await db.get(AiPreparedAction, case.action_id)
         log = await db.get(AiOperationLog, case.log_id)
