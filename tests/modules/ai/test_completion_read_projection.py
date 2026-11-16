@@ -74,7 +74,34 @@ async def stored_facts(case):
         )
 
 
+async def recover_display(case):
+    """Establish a real display before corrupting facts or taking a read snapshot."""
+    assert (
+        await AuthorizationRuntime(engine).chat.recover(
+            tenant=case.tenant, confirmation_id=case.confirmation_id
+        )
+        is not None
+    )
+
+
+@pytest.fixture
+def delayed_optional_display(monkeypatch):
+    """Make the optional endpoint display miss its original one-second window."""
+    original_recover = ChatOwner.recover
+    first_projection = True
+
+    async def optional_projection_stalls(self, **request):
+        nonlocal first_projection
+        if first_projection:
+            first_projection = False
+            await asyncio.Event().wait()
+        return await original_recover(self, **request)
+
+    monkeypatch.setattr(ChatOwner, "recover", optional_projection_stalls)
+
+
 @pytest.mark.parametrize("log_code", [None, "USER_REJECTED", "AI_INTERNAL_ERROR"])
+@pytest.mark.usefixtures("delayed_optional_display")
 async def test_verified_rejection_keeps_cancel_reason_on_all_read_surfaces(
     completion_case, monkeypatch, log_code
 ):
@@ -88,6 +115,7 @@ async def test_verified_rejection_keeps_cancel_reason_on_all_read_surfaces(
             current_user=actor,
         )
         assert response.data.status == "rejected"
+    await recover_display(case)
     async with AsyncSessionLocal() as db, db.begin():
         log = await db.get(AiOperationLog, case.log_id)
         log.error_code = log_code
@@ -134,32 +162,14 @@ async def test_verified_rejection_keeps_cancel_reason_on_all_read_surfaces(
 @pytest.mark.parametrize(
     "corruption", ["success_log", "failed_owner", "file_failed", "missing_action"]
 )
+@pytest.mark.usefixtures("delayed_optional_display")
 async def test_poll_trace_history_mask_unproven_terminal_without_writing(
     completion_case, monkeypatch, corruption
 ):
     case = completion_case
     count_real_handler(case, monkeypatch, return_failure=corruption != "success_log")
-    if corruption == "missing_action":
-        original_recover = ChatOwner.recover
-        first_projection = True
-
-        async def optional_projection_stalls(self, **request):
-            nonlocal first_projection
-            if first_projection:
-                first_projection = False
-                await asyncio.Event().wait()
-            return await original_recover(self, **request)
-
-        monkeypatch.setattr(ChatOwner, "recover", optional_projection_stalls)
     await approve(case)
-    # The endpoint's 1s display attempt is optional. Establish this read fixture
-    # through the real bounded owner, preserving its authority and ACK checks.
-    assert (
-        await AuthorizationRuntime(engine).chat.recover(
-            tenant=case.tenant, confirmation_id=case.confirmation_id
-        )
-        is not None
-    )
+    await recover_display(case)
     async with AsyncSessionLocal() as db, db.begin():
         action = await db.get(AiPreparedAction, case.action_id)
         log = await db.get(AiOperationLog, case.log_id)
@@ -332,12 +342,14 @@ async def test_committed_proof_refresh_ignores_stale_request_identity_map(
         assert result.data.status == "running"
 
 
+@pytest.mark.usefixtures("delayed_optional_display")
 async def test_missing_log_remains_unknown_without_creating_a_receipt(
     completion_case, monkeypatch
 ):
     case = completion_case
     count_real_handler(case, monkeypatch)
     await approve(case)
+    await recover_display(case)
     async with AsyncSessionLocal() as db, db.begin():
         await db.execute(
             delete(AiOperationLog).where(AiOperationLog.log_id == case.log_id)
@@ -500,12 +512,14 @@ async def test_cancelled_write_requires_never_started_proof_for_reads_and_admiss
             assert (await observer.get(AiOperationLog, case.log_id)).status == status
 
 
+@pytest.mark.usefixtures("delayed_optional_display")
 async def test_unknown_history_denied_projection_is_minimal_and_idempotent(
     completion_case, monkeypatch
 ):
     case = completion_case
     count_real_handler(case, monkeypatch)
     await approve(case)
+    await recover_display(case)
     async with AsyncSessionLocal() as db, db.begin():
         action = await db.get(AiPreparedAction, case.action_id)
         action.snapshot_hash = "f" * 64
@@ -574,12 +588,14 @@ async def test_batch_proof_is_one_read_only_statement_without_row_locks(
 
 
 @pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.usefixtures("delayed_optional_display")
 async def test_history_uses_verified_state_instead_of_stale_tool_card(
     completion_case, monkeypatch, failure
 ):
     case = completion_case
     count_real_handler(case, monkeypatch, return_failure=failure)
     await approve(case)
+    await recover_display(case)
     async with AsyncSessionLocal() as db, db.begin():
         message = await db.scalar(
             select(AiMessage).where(
