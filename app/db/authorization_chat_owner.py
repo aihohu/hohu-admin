@@ -119,7 +119,24 @@ class ChatOwner:
         return await self._run("routing_context", request)
 
     async def delivery_check(self, **request):
-        return await self._run("delivery_check", request)
+        # Audit completion may add source bindings between discovery and locks.
+        # Retry only this read, after the old scope has fully rolled back/closed.
+        budget = AuthorizationReadBudget(
+            max_statements=4096, max_rows=100000, max_bytes=128 * 1024 * 1024
+        )
+        deadline = asyncio.get_running_loop().time() + 8
+        async with asyncio.timeout_at(deadline):
+            for attempt in range(3):
+                try:
+                    return await self._run(
+                        "delivery_check",
+                        request,
+                        _read_budget=budget,
+                        _deadline=deadline,
+                    )
+                except BusinessException as exc:
+                    if exc.error_code != "AUTHORIZATION_SNAPSHOT_STALE" or attempt == 2:
+                        raise
 
     async def delivery_probe(self, **request):
         return await self._run("delivery_probe", request)
@@ -231,10 +248,18 @@ class ChatOwner:
     async def invalidate(self, **request):
         return await self._run("invalidate", request)
 
-    async def _run(self, operation, request, *, http_result=False):
+    async def _run(
+        self,
+        operation,
+        request,
+        *,
+        http_result=False,
+        _read_budget=None,
+        _deadline=None,
+    ):
         async with authorization_session(self.factory) as db:
             try:
-                read_budget = AuthorizationReadBudget(
+                read_budget = _read_budget or AuthorizationReadBudget(
                     max_statements=16 if operation == "delivery_probe" else 4096,
                     max_rows=1024 if operation == "delivery_probe" else 100000,
                     max_bytes=2 * 1024 * 1024
@@ -242,6 +267,13 @@ class ChatOwner:
                     else 128 * 1024 * 1024,
                 )
                 with bounded_authorization_reads(db, read_budget):
+                    timeout_ms = (
+                        int((_deadline - asyncio.get_running_loop().time()) * 1000)
+                        if _deadline is not None
+                        else 8000
+                    )
+                    if timeout_ms <= 0:
+                        raise TimeoutError()
                     async with authorization_transactions.scope(
                         db,
                         tenants=(
@@ -258,7 +290,7 @@ class ChatOwner:
                                 else LockMode.SHARED,
                             ),
                         ),
-                        budget=TransactionBudget(timeout_ms=8000),
+                        budget=TransactionBudget(timeout_ms=timeout_ms),
                     ) as tx:
                         if operation == "conversation":
                             result = await chat_candidate.conversation(
