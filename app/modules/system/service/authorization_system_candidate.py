@@ -687,7 +687,13 @@ class SystemAuthorizationCandidate:
                 tenant=tenant,
             )
             requested = (
-                await roles._load_requested_roles(db, payload.role_ids, tenant=tenant)
+                (
+                    await roles._load_requested_roles(
+                        db, payload.role_ids, tenant=tenant
+                    )
+                    if payload.role_ids
+                    else []
+                )
                 if payload.role_ids is not None
                 else [await roles._default_role(db, tenant=tenant)]
             )

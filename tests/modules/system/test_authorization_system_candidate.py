@@ -1,7 +1,7 @@
 """Candidate System owners use complete plans before any business mutation."""
 
 import pytest
-from sqlalchemy import event, insert, select, update
+from sqlalchemy import delete, event, insert, select, update
 
 from app.core.authorization_plan import ResourceKind
 from app.core.exceptions import BusinessException
@@ -136,8 +136,10 @@ async def test_stale_token_and_plain_session_cannot_write(system_sessions):
         assert await epoch(db) == 1
 
 
+@pytest.mark.parametrize("role_ids", [["301"], [], None])
 async def test_create_locks_roles_depts_and_settings_before_user_insert(
     system_sessions,
+    role_ids,
 ):
     factory, plain = system_sessions
     async with plain() as setup:
@@ -148,7 +150,7 @@ async def test_create_locks_roles_depts_and_settings_before_user_insert(
                 role_name="Member",
                 role_code="R_USER",
                 data_scope="5",
-                status="1",
+                status="2" if role_ids == [] else "1",
             )
         )
         await setup.execute(
@@ -173,8 +175,8 @@ async def test_create_locks_roles_depts_and_settings_before_user_insert(
                     password="TestStrong123!",
                     nickname="Candidate",
                     status="1",
-                    role_ids=["301"],
                     dept_ids=[{"deptId": "401", "isPrimary": True}],
+                    **({"role_ids": role_ids} if role_ids is not None else {}),
                 ),
             )
             await db.commit()
@@ -193,6 +195,15 @@ async def test_create_locks_roles_depts_and_settings_before_user_insert(
             assert any(table in s and "FOR " in s for s in sql[:first_insert]), table
         async with plain() as db:
             assert await epoch(db) == 2
+            assigned = list(
+                await db.scalars(
+                    select(user_roles.c.role_id).where(
+                        user_roles.c.tenant_id == 0,
+                        user_roles.c.user_id == result["id"],
+                    )
+                )
+            )
+            assert assigned == ([] if role_ids == [] else [301])
             assert (
                 await db.scalar(
                     select(User.user_name).where(User.user_id == result["id"])
@@ -201,6 +212,64 @@ async def test_create_locks_roles_depts_and_settings_before_user_insert(
             )
     finally:
         event.remove(plain.kw["bind"].sync_engine, "before_cursor_execute", record)
+
+
+async def test_create_without_roles_still_requires_explicit_assignment_permission(
+    system_sessions,
+):
+    factory, plain = system_sessions
+    async with plain() as db:
+        await db.execute(
+            update(Role).where(Role.role_id == 201).values(role_code="R_MANAGER")
+        )
+        menu_id = await db.scalar(
+            select(Menu.menu_id).where(Menu.permission == "system:user:role-auth")
+        )
+        assert menu_id is not None
+        await db.execute(
+            delete(role_menus).where(
+                role_menus.c.role_id == 201, role_menus.c.menu_id == menu_id
+            )
+        )
+        await db.commit()
+    async with factory() as db:
+        with pytest.raises(BusinessException) as failure:
+            await run(
+                db,
+                "user.create",
+                UserCreate(
+                    user_name="norolecandidate",
+                    password="TestStrong123!",
+                    status="1",
+                    role_ids=[],
+                ),
+            )
+        assert failure.value.error_code == "MISSING_PERMISSION"
+        await db.rollback()
+    async with plain() as db:
+        assert (
+            await db.scalar(
+                select(User.user_id).where(User.user_name == "norolecandidate")
+            )
+            is None
+        )
+        assert await epoch(db) == 1
+
+
+async def test_existing_user_cannot_clear_role_set(system_sessions):
+    factory, plain = system_sessions
+    async with factory() as db:
+        with pytest.raises(BusinessException) as failure:
+            await run(db, "user.roles", [], 101)
+        assert failure.value.error_code == "USER_ROLE_SET_REQUIRED"
+        await db.rollback()
+    async with plain() as db:
+        assert list(
+            await db.scalars(
+                select(user_roles.c.role_id).where(user_roles.c.user_id == 101)
+            )
+        ) == [201]
+        assert await epoch(db) == 1
 
 
 @pytest.mark.parametrize(
