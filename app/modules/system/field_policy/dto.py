@@ -138,7 +138,9 @@ def _validate_relations(values):
                         raise _invalid()
             elif any(
                 not isinstance(item, str)
-                and not (name == "role_name_keys" and item is None)
+                and not (
+                    name in {"roles", "role_names", "role_name_keys"} and item is None
+                )
                 for item in items
             ):
                 raise _invalid()
@@ -163,7 +165,7 @@ def project_user_dto(
     if view == "profile" and "roles" in values:
         roles = values["roles"]
         if not isinstance(roles, (list, tuple)) or any(
-            not isinstance(role, str) for role in roles
+            role is not None and not isinstance(role, str) for role in roles
         ):
             raise _invalid()
     if view == "members" and "departments" in values:

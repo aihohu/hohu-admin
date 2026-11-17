@@ -16,11 +16,32 @@ from app.modules.system.service.authorization_read_budget import (
 from app.modules.system.service.authorization_transaction_service import (
     authorization_transactions,
 )
+from app.modules.system.service.ordinary_read_service import read_ordinary
 
 
 class BusinessOwner:
     def __init__(self, factory):
         self.factory = factory
+
+    async def read(self, *, tenant, actor_user_version, operation, query=None):
+        async with authorization_session(self.factory) as db:
+            try:
+                with bounded_authorization_reads(db):
+                    async with authorization_transactions.scope(
+                        db,
+                        tenants=(TenantLock(tenant.tenant_id, LockMode.SHARED),),
+                        budget=TransactionBudget(timeout_ms=8000),
+                    ) as tx:
+                        return await read_ordinary(
+                            db,
+                            tx,
+                            tenant=tenant,
+                            actor_user_version=actor_user_version,
+                            operation=operation,
+                            query=query,
+                        )
+            finally:
+                await rollback_authorization_session(db)
 
     async def execute(
         self, *, tenant, actor_user_version, operation, payload=None, ids=()

@@ -32,9 +32,17 @@ IO_PROFILES = MappingProxyType(
         "system-write": (15000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "auth-read": (8000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "user-read": (15000, 2000, 5000, 100000, 64 * 1024 * 1024),
+        "relation-read": (8000, 2000, 5000, 100000, 64 * 1024 * 1024),
+        "chat-read": (8000, 2000, 5000, 100000, 128 * 1024 * 1024),
+        "delivery-read": (8000, 2000, 5000, 10000, 16 * 1024 * 1024),
+        "delivery-probe": (8000, 2000, 5000, 1024, 2 * 1024 * 1024),
+        "file-read": (8000, 2000, 5000, 10000, 16 * 1024 * 1024),
+        "transfer-read": (15000, 2000, 5000, 100000, 128 * 1024 * 1024),
         "auth-write": (15000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "auth-email": (8000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "policy-proof": (15000, 2000, 5000, 100000, 128 * 1024 * 1024),
+        "rollout-completion": (60000, 2000, 5000, 100000, 128 * 1024 * 1024),
+        "policy-migration": (25000, 2000, 5000, 100000, 128 * 1024 * 1024),
         "import-write": (60000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "bounded-plan": (15000, 2000, 5000, 100000, 64 * 1024 * 1024),
         "bounded-read": (5000, 0, 5000, 4104, 64 * 1024 * 1024),
@@ -378,6 +386,8 @@ CONFIGURATION_OPERATIONS = MappingProxyType(
             for action in ("create", "update", "delete", "batch_delete")
         },
         "config.import": _S + "config_service.ConfigService.import_configs",
+        "config.publish": "app.modules.system.api.config.publish",
+        "config.revoke": "app.modules.system.api.config.revoke_publication",
     }
 )
 TENANT_OPERATIONS = MappingProxyType(
@@ -1051,6 +1061,15 @@ _COMPLETION_ENTRIES = (
         "none",
     ),
     (
+        "app.db.authorization_business_owner.BusinessOwner",
+        ("read",),
+        "owner",
+        "S",
+        ("S",),
+        "auth-read",
+        "none",
+    ),
+    (
         _S + "authorization_business_candidate.BusinessCandidate",
         ("discover",),
         "read",
@@ -1075,6 +1094,42 @@ _COMPLETION_ENTRIES = (
         "S",
         ("X",),
         "system-write",
+        "none",
+    ),
+    (
+        "app.db.authorization_job_owner.JobOwner",
+        ("scheduled",),
+        "owner",
+        "S",
+        ("S",),
+        "relation-read",
+        "none",
+    ),
+    (
+        "app.db.authorization_parameter_read_owner.ParameterReadOwner",
+        ("execute", "export_file", "_export_snapshot"),
+        "owner",
+        "S",
+        ("S",),
+        "relation-read",
+        "none",
+    ),
+    (
+        "app.db.authorization_parameter_read_owner.ParameterReadOwner",
+        ("form", "export"),
+        "read",
+        "S",
+        ("S",),
+        "relation-read",
+        "none",
+    ),
+    (
+        "app.modules.job.service.authorization_job_candidate",
+        ("read_cron_sources",),
+        "read",
+        "S",
+        ("S",),
+        "relation-read",
         "none",
     ),
     (
@@ -1240,12 +1295,99 @@ _COMPLETION_ENTRIES = (
         "none",
     ),
     (
-        "app.db.authorization_transfer_read_owner.TransferReadOwner",
+        "app.db.authorization_relation_read_owner.RelationReadOwner",
         ("execute",),
         "owner",
         "S",
         ("S",),
-        "user-read",
+        "relation-read",
+        "none",
+    ),
+    (
+        _S + "relation_read_context",
+        ("load_relation_read_context",),
+        "read",
+        "S",
+        ("S",),
+        "relation-read",
+        "none",
+    ),
+    (
+        _S + "relation_read_context.RelationReadContext",
+        ("fetch", "prove", "source"),
+        "read",
+        "S",
+        ("S",),
+        "relation-read",
+        "none",
+    ),
+    (
+        _S + "relation_read_service",
+        ("read_relation", "project_leaders", "prove_leader_query"),
+        "read",
+        "S",
+        ("S",),
+        "relation-read",
+        "none",
+    ),
+    (
+        _S + "relation_user_read",
+        (
+            "read_users",
+            "read_own",
+            "relation_sources",
+            "query_coverage",
+            "role_query_coverage",
+        ),
+        "read",
+        "S",
+        ("S",),
+        "relation-read",
+        "none",
+    ),
+    (
+        _S + "runtime_navigation",
+        ("runtime_routes",),
+        "read",
+        "S",
+        ("S",),
+        "relation-read",
+        "none",
+    ),
+    (
+        "app.db.authorization_transfer_read_owner.TransferReadOwner",
+        ("execute", "_snapshot"),
+        "owner",
+        "S",
+        ("S",),
+        "transfer-read",
+        "none",
+    ),
+    (
+        _S + "transfer_delivery_snapshot",
+        ("capture_delivery_watermark",),
+        "read",
+        "S",
+        ("S",),
+        "relation-read",
+        "none",
+    ),
+    (
+        "app.db.authorization_file_read_owner.FileReadOwner",
+        ("metadata", "download"),
+        "owner",
+        "S",
+        ("S",),
+        "file-read",
+        "none",
+    ),
+    (
+        _S + "file_read_service.FileReadService",
+        ("metadata", "download"),
+        "read",
+        "S",
+        ("S",),
+        "file-read",
         "none",
     ),
     (
@@ -1808,7 +1950,12 @@ _COMPLETION_ENTRIES = (
     ),
     (
         _TX,
-        ("delete_context_fact", "delete_job_fact", "delete_business_fact"),
+        (
+            "delete_context_fact",
+            "delete_job_fact",
+            "delete_business_fact",
+            "rename_dictionary_type",
+        ),
         "proof_writer",
         "S",
         ("X",),
@@ -1857,9 +2004,189 @@ CANDIDATES += (
     ),
 )
 
+_GENERIC_OWNER = (
+    "app.db.authorization_generic_policy_owner.GenericFieldPolicyOwner.execute"
+)
+_GENERIC_POLICY = _S + "generic_field_policy_service.GenericFieldPolicyService"
+_GENERIC_TX = _S + "authorization_generic_policy.GenericPolicyTransaction"
+_MANAGEMENT_OWNER = (
+    "app.db.authorization_field_management_owner.FieldManagementOwner.execute"
+)
+CANDIDATES += (
+    Candidate(
+        "field_management.owner",
+        _MANAGEMENT_OWNER,
+        (_S + "field_management.prepare_management",),
+        _MANAGEMENT_OWNER,
+        "owner",
+        "S",
+        "current tenant; current R_SUPER and dedicated operation permission",
+        ("S", "X"),
+        _GENERIC_POLICY + ".plan",
+        _GENERIC_POLICY + ".apply",
+        "policy-proof",  # Write maximum; read/preview use the stricter 8s limit.
+        _GENERIC_TX + ".generic_epoch",
+        False,
+    ),
+)
+CANDIDATES += tuple(
+    Candidate(
+        "generic_policy." + name,
+        qualified,
+        (),
+        _GENERIC_OWNER,
+        phase,
+        "S",
+        "current tenant under the original physical B",
+        barriers,
+        _GENERIC_POLICY + ".plan",
+        _GENERIC_POLICY + ".apply",
+        "policy-proof",
+        _GENERIC_TX + ".generic_epoch",
+        phase == "proof_writer",
+    )
+    for name, qualified, phase, barriers in (
+        ("owner", _GENERIC_OWNER, "owner", ("S", "X")),
+        ("plan", _GENERIC_POLICY + ".plan", "plan", ("X",)),
+        ("apply", _GENERIC_POLICY + ".apply", "proof_writer", ("X",)),
+        ("receipt", _GENERIC_POLICY + ".receipt", "read", ("S", "X")),
+        ("active", _GENERIC_POLICY + ".load_active", "read", ("S", "X")),
+        ("frame", _GENERIC_TX + ".generic_policy_change", "proof_writer", ("X",)),
+        ("epoch", _GENERIC_TX + ".generic_epoch", "proof_writer", ("X",)),
+        ("sealed", _S + "generic_field_policy_state.read_manifest", "read", ("S", "X")),
+        (
+            "transition",
+            _S + "generic_field_policy_state.transition",
+            "proof_writer",
+            ("X",),
+        ),
+        (
+            "old_client",
+            _S + "generic_field_policy_admission.require_user_policy_compatibility",
+            "read",
+            ("S", "X"),
+        ),
+        (
+            "deployment_presence",
+            _S + "generic_field_policy_admission.generic_deployment_started",
+            "read",
+            ("S", "X"),
+        ),
+        (
+            "legacy_admission",
+            _S + "generic_field_policy_admission.require_legacy_field_policy",
+            "read",
+            ("S", "X"),
+        ),
+    )
+)
+
+_ROLLOUT_OWNER = (
+    "app.db.authorization_rollout_completion_owner.RolloutCompletionOwner.execute"
+)
+_ROLLOUT_SNAPSHOT = _S + "policy_rollout_completion.capture_completion"
+CANDIDATES += tuple(
+    Candidate(
+        "rollout_completion." + name,
+        qualified,
+        (
+            _ROLLOUT_SNAPSHOT,
+            _TX + ".assert_global_barriers",
+            "app.core.field_policy.qualification.read_server_qualification",
+        ),
+        _ROLLOUT_OWNER,
+        phase,
+        "X",
+        "complete registered tenant set<=1024; every B-X; current R_SUPER and dedicated activate permission",
+        ("X",),
+        "none",
+        "none",
+        "rollout-completion",
+        "none",
+        False,
+    )
+    for name, qualified, phase in (
+        ("owner", _ROLLOUT_OWNER, "owner"),
+        ("snapshot", _ROLLOUT_SNAPSHOT, "read"),
+    )
+)
+CANDIDATES += tuple(
+    Candidate(
+        "generic_tenant." + name,
+        qualified,
+        (
+            _S + "generic_tenant_policy.prepare_new_tenant_policy",
+            _TX + ".initialize_tenant_policy",
+        ),
+        _CONTROL_OWNER + ".execute",
+        phase,
+        "X",
+        "creation-only:new tenant with B-X; reserved empty head and every object; no grants or activation",
+        ("X",),
+        _S + "generic_tenant_policy.prepare_new_tenant_policy",
+        _TX + ".initialize_tenant_policy",
+        "global-write",
+        _TX + "._bump_global",
+        phase == "proof_writer",
+    )
+    for name, qualified, phase in (
+        ("plan", _S + "generic_tenant_policy.prepare_new_tenant_policy", "plan"),
+        ("initialize", _TX + ".initialize_tenant_policy", "proof_writer"),
+    )
+)
+
+_GENERIC_MAINTENANCE = (
+    ("migration", _S + "generic_field_policy_migration.migrate_legacy", "X", ("X",)),
+    ("catalog", _S + "generic_field_policy_migration.register_catalog", "X", ("X",)),
+    ("prepare", "tools.ops.policy_prepare.serve", "none", ()),
+    (
+        "prepare_command",
+        "tools.ops.policy_prepare.PolicyPreparation.execute",
+        "none",
+        (),
+    ),
+    ("prepare_finish", "tools.ops.policy_prepare.PolicyPreparation.finish", "none", ()),
+    ("prepare_login", "tools.ops.policy_prepare.PolicyPreparation.login", "none", ()),
+    ("prepare_logout", "tools.ops.policy_prepare.PolicyPreparation.logout", "none", ()),
+    (
+        "prepare_management",
+        "tools.ops.policy_prepare.PolicyPreparation.management",
+        "none",
+        (),
+    ),
+)
+CANDIDATES += tuple(
+    Candidate(
+        "generic_maintenance." + name,
+        qualified,
+        (),
+        "tools.ops.policy_prepare.serve",
+        "owner",
+        guard,
+        "stopped deployment; exact inventory and current-task migration permit; per-command tenant owner",
+        barriers,
+        "none",
+        "none",
+        "policy-migration",
+        "none",
+        False,
+        maintenance=True,
+    )
+    for name, qualified, guard, barriers in _GENERIC_MAINTENANCE
+)
+MAINTENANCE_ENTRIES |= frozenset(
+    "generic_maintenance." + item[0] for item in _GENERIC_MAINTENANCE
+)
+
 _RUNTIME_DELEGATES = {
+    "rollout_completion": _ROLLOUT_OWNER,
+    "field_management": _MANAGEMENT_OWNER,
+    "generic_field_policy": _GENERIC_OWNER,
     "field_policy": "app.db.authorization_policy_owner.UserFieldPolicyOwner.execute",
     "user_read": "app.db.authorization_user_read_owner.UserReadOwner.execute",
+    "relation_read": "app.db.authorization_relation_read_owner.RelationReadOwner.execute",
+    "parameter_read": "app.db.authorization_parameter_read_owner.ParameterReadOwner.execute",
+    "parameter_export": "app.db.authorization_parameter_read_owner.ParameterReadOwner.export_file",
     "control_read": "app.db.authorization_catalog_read_owner.CatalogReadOwner.execute",
     "system": _SYSTEM_OWNER,
     "import_users": _IMPORT_OWNER,
@@ -1905,3 +2232,83 @@ MAINTENANCE_ENTRIES = MAINTENANCE_ENTRIES | frozenset(
 CANDIDATES += _composition
 
 PENDING_SURFACES = MappingProxyType({})
+
+_DELIVERY_CHAT = "app.db.authorization_chat_owner.ChatOwner"
+_DELIVERY_CANDIDATE = _A + "authorization_chat_candidate.ChatCandidate"
+CANDIDATES += tuple(
+    Candidate(
+        "delivery_chat." + method,
+        _DELIVERY_CHAT + "." + method,
+        (source,),
+        _DELIVERY_CHAT + "." + method,
+        "owner",
+        "S",
+        "trusted current tenant and actor version",
+        ("S",),
+        source,
+        "none",
+        "delivery-probe" if method == "delivery_probe" else "chat-read",
+        "none",
+        False,
+    )
+    for method, source in (
+        ("input_parts", _DELIVERY_CANDIDATE + ".input_parts"),
+        ("routing_context", _DELIVERY_CANDIDATE + ".routing_context"),
+        ("delivery_check", _DELIVERY_CANDIDATE + ".check_run"),
+        ("delivery_probe", _A + "delivery_probe.delivery_probe"),
+    )
+)
+CANDIDATES += tuple(
+    Candidate(
+        "delivery_candidate." + method,
+        _DELIVERY_CANDIDATE + "." + method,
+        (),
+        _DELIVERY_CHAT + "." + method,
+        "read",
+        "S",
+        "trusted current tenant and actor version",
+        ("S",),
+        _DELIVERY_CANDIDATE + "." + method,
+        "none",
+        "chat-read",
+        "none",
+        False,
+    )
+    for method in ("input_parts", "routing_context")
+)
+CANDIDATES += tuple(
+    Candidate(
+        "delivery_owner." + method,
+        "app.db.authorization_delivery_read_owner.DeliveryReadOwner." + method,
+        (source,),
+        "app.db.authorization_delivery_read_owner.DeliveryReadOwner." + method,
+        "owner",
+        "S",
+        "trusted current tenant and actor version",
+        ("X",),
+        "none",
+        "none",
+        "delivery-read",
+        "none",
+        False,
+    )
+    for method, source in (
+        ("logs", _S + "delivery_log_read.log_page"),
+        ("feedback", _A + "feedback_delivery.feedback_page"),
+        ("agents", _S + "delivery_read_context.load_delivery_context"),
+    )
+)
+# The manifest describes the actual strongest fence and bounded decoding; it
+# cannot certify wiring or replace the owners' runtime guards and SQL counters.
+CANDIDATES = tuple(
+    replace(entry, B_modes=("X",), io_profile="chat-read")
+    if "authorization_trace_owner." in entry.qualified_name
+    or "authorization_trace_candidate." in entry.qualified_name
+    else replace(entry, io_profile="chat-read")
+    if entry.qualified_name.startswith(
+        (_DELIVERY_CHAT + ".", _DELIVERY_CANDIDATE + ".")
+    )
+    and entry.io_profile == "auth-read"
+    else entry
+    for entry in CANDIDATES
+)

@@ -12,6 +12,8 @@ from sqlalchemy.orm import make_transient
 from app.core import redis as redis_module
 from app.core.exceptions import BusinessException
 from app.db import authorization_chat_owner
+from app.db.authorization_runtime import AuthorizationRuntime
+from app.db.session import engine
 from app.modules.ai.agents.gateway import executor
 from app.modules.ai.agents.tools.registry import ToolRegistry
 from app.modules.ai.models.message import AiMessage
@@ -152,27 +154,31 @@ async def test_gateway_preflight_rejection_allows_next_message(
             == trace.operations[0].error_code
             == "AI_PREVIEW_REJECTED"
         )
-        await chat_run_finalizer.finalize_assistant_turn(
-            db,
+
+        await AuthorizationRuntime(engine).chat.finalize(
             conversation_id=case.conversation_id,
             trace_id=log.trace_id,
-            source_user_message_id=log.source_user_message_id,
+            source_id=log.source_user_message_id,
             content=f"Preflight refused.\n[AI_EXECUTION_OUTCOME_UNKNOWN] toolCallId={log.tool_call_id}",
             tool_calls=[
                 {"tool": "user.create", "tool_call_id": log.tool_call_id, "ok": True}
             ],
             agent_code="user_mgmt",
             tenant=case.tenant,
+            actor_user_version=actor.auth_version,
             lineage=result_projection_service.freeze_lineage(
                 tenant=case.tenant,
                 agent_code="user_mgmt",
                 tool_codes=["user.create"],
                 subject_refs=[],
+                field_authority=log.field_authority,
             ),
         )
         await db.commit()
-        history = await conversation_service.project_messages(
-            db, conversation_id=case.conversation_id, current_user=actor
+        history = await AuthorizationRuntime(engine).chat.messages(
+            conversation_id=case.conversation_id,
+            tenant=case.tenant,
+            actor_user_version=actor.auth_version,
         )
         assistant = next(row for row in history if row.role == "assistant")
         assert assistant.tool_calls[0]["ok"] is False

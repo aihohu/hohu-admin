@@ -1,6 +1,7 @@
 """Independent job transactions cover concurrent claims and unknown commit ACKs."""
 
 import asyncio
+from dataclasses import replace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -9,9 +10,12 @@ from sqlalchemy import select, update
 from app.core.exceptions import BusinessException
 from app.db import authorization_job_owner as owner_module
 from app.db.authorization_runtime import AuthorizationRuntime
-from app.modules.job import job_runner, task_registry
+from app.modules.job import execution_contract, job_runner
+from app.modules.job.builtin_task_specs import builtin_task_contracts
 from app.modules.job.models.job import SysJob, SysJobLog
 from app.modules.job.schemas.job import JobCreate
+from app.modules.job.task_contracts import TaskContractRegistry
+from app.modules.job.task_registry import TaskScope
 from app.modules.system.models.role import Role
 from app.modules.system.models.user_field_policy import UserFieldPolicyState
 from tests.modules.system.test_authorization_system_candidate import TENANT
@@ -27,9 +31,22 @@ from tests.modules.system.test_authorization_transaction_barriers import (
 async def jobs(system_sessions, monkeypatch):
     _, plain = system_sessions
     runtime = AuthorizationRuntime(plain.kw["bind"])
-    key = "planned_job_test"
+    key = "test_task"
     task = AsyncMock()
-    monkeypatch.setitem(task_registry._task_functions, key, task)
+
+    async def contracted(args):
+        await task(args)
+
+    spec = replace(
+        builtin_task_contracts().resolve(key, scope=TaskScope.TENANT),
+        function=contracted,
+        max_retries=2,
+    )
+    monkeypatch.setattr(
+        execution_contract,
+        "builtin_task_contracts",
+        lambda: TaskContractRegistry((spec,)),
+    )
     monkeypatch.setattr(job_runner, "get_authorization_runtime", lambda: runtime)
     await runtime.job.execute(
         tenant=TENANT,
@@ -113,7 +130,7 @@ async def test_completion_ack_unknown_does_not_enter_task_retry_loop(jobs, monke
 
     monkeypatch.setattr(owner_module, "commit_authorization_session", unknown)
     await job_runner._do_execute(0, identifier)
-    task.assert_awaited_once()
+    task.assert_awaited_once_with({})
     async with plain() as db:
         assert (
             await db.scalar(

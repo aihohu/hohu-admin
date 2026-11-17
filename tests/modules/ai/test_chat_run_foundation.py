@@ -475,7 +475,9 @@ async def test_stream_failure_persists_a_safe_terminal_answer() -> None:
     db.rollback.assert_awaited_once()
     assert "unsafe partial" not in finalize.await_args.kwargs["content"]
     assert "AI_PROVIDER_UPSTREAM_ERROR" in finalize.await_args.kwargs["content"]
-    assert finalize.await_args.kwargs["lineage"] is not None
+    # No caller receipt is invented. The actual owner derives it from the
+    # original stored input before persisting this closed diagnostic.
+    assert finalize.await_args.kwargs["lineage"] is None
     assert events[-1].persistence == "committed"
 
 

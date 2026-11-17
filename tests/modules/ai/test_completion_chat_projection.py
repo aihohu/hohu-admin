@@ -10,6 +10,7 @@ from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.chat_run_service import chat_run_finalizer
+from app.modules.ai.service.result_projection_service import result_projection_service
 from app.modules.auth.service import access_identity
 from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
@@ -36,6 +37,9 @@ async def _message(db, case):
 async def _seed_partial_message(case):
     async with AsyncSessionLocal() as db, db.begin():
         action = await db.get(AiPreparedAction, case.action_id)
+        # This is newly authored partial output in the fixture, with the exact
+        # input provenance. Existing unknown historical rows stay source-less.
+        source = await db.get(AiMessage, action.source_user_message_id)
         message = AiMessage(
             tenant_id=case.tenant.tenant_id,
             conversation_id=case.conversation_id,
@@ -45,6 +49,18 @@ async def _seed_partial_message(case):
             trace_id=action.trace_id,
             agent_code=action.agent_code,
             is_active=True,
+            field_authority=source.field_authority,
+            tool_codes=[],
+            subject_refs=[],
+            subject_refs_hash=result_projection_service.subject_refs_hash(()),
+            data_scope_hash=None,
+            resolver_version=result_projection_service.freeze_lineage(
+                tenant=case.tenant,
+                agent_code=action.agent_code,
+                tool_codes=[],
+                subject_refs=[],
+            ).resolver_version,
+            projection_dependency_message_ids=[],
             tool_calls=[
                 {
                     "tool": action.execute_tool_name,
@@ -83,11 +99,14 @@ async def test_late_stream_preserves_current_success_with_stale_orm(
     await _seed_partial_message(case)
     count_real_handler(case, monkeypatch)
     async with AsyncSessionLocal() as stale_db:
+        original_version = access_identity(
+            await authenticated_actor(case, stale_db)
+        ).user_version
         stale_message = await _message(stale_db, case)
         assert "ok" not in stale_message.tool_calls[0]
         action = await stale_db.get(AiPreparedAction, case.action_id)
         assert (await approve(case)).data.status == "succeeded"
-        await chat_run_finalizer.finalize_assistant_turn(
+        events = await _finalize_stream_turn(
             stale_db,
             conversation_id=case.conversation_id,
             trace_id=action.trace_id,
@@ -107,8 +126,10 @@ async def test_late_stream_preserves_current_success_with_stale_orm(
             ],
             agent_code=action.agent_code,
             tenant=case.tenant,
+            actor_user_version=original_version,
+            stream_error_code=None,
         )
-        await stale_db.commit()
+        assert events[-1].persistence == "committed"
     async with AsyncSessionLocal() as db:
         message = await _message(db, case)
         card = next(

@@ -4,6 +4,7 @@ Manifests are evidence, never grants. The service rechecks current authority
 under G/B before validating them or opening a stored file.
 """
 
+import json
 import re
 from dataclasses import dataclass
 from hashlib import sha256
@@ -63,6 +64,19 @@ def transfer_denied():
         "文件的当前字段授权无法确认，请重新生成",
         error_code="FIELD_TRANSFER_REGENERATE_REQUIRED",
     )
+
+
+def require_lineage_storage(envelope):
+    """Bound the complete JSONB envelope before its insert/update, including spaces."""
+    try:
+        stored_size = len(
+            json.dumps(envelope, ensure_ascii=False, allow_nan=False).encode()
+        )
+    except (TypeError, ValueError, OverflowError):
+        raise transfer_denied() from None
+    if stored_size > 2 * 1024 * 1024:
+        raise transfer_denied()
+    return envelope
 
 
 def export_query_plan(filters):
@@ -130,6 +144,7 @@ class ExportProjection:
     columns: tuple
     rows: tuple
     levels: tuple
+    related_sources: tuple = ()
 
 
 def project_export(raw_rows, decisions):
@@ -232,6 +247,7 @@ def make_lineage(
     presence=(),
     requirements=(),
     mode=None,
+    related_sources=(),
 ):
     result = {
         "schema": "user-transfer-fields/1",
@@ -247,6 +263,10 @@ def make_lineage(
         "requirements": list(requirements),
         "mode": mode,
     }
+    if stamp.get("policy_kind") == "generic":
+        result.update(
+            schema="user-transfer-fields/2", related_sources=list(related_sources)
+        )
     validate_lineage(
         result,
         tenant_id=tenant_id,
@@ -273,6 +293,9 @@ def validate_lineage(document, *, tenant_id, owner_id, resource_id, kind, stamp)
         "requirements",
         "mode",
     }
+    generic = stamp.get("policy_kind") == "generic"
+    if generic:
+        keys.add("related_sources")
     try:
         document_size = len(canonical_json(document).encode())
     except (TypeError, ValueError, OverflowError):
@@ -280,8 +303,9 @@ def validate_lineage(document, *, tenant_id, owner_id, resource_id, kind, stamp)
     if (
         type(document) is not dict
         or document.keys() != keys
-        or document_size > 2 * 1024 * 1024
-        or document["schema"] != "user-transfer-fields/1"
+        or document_size > (4 if generic else 2) * 1024 * 1024
+        or document["schema"]
+        != ("user-transfer-fields/2" if generic else "user-transfer-fields/1")
         or document["tenant_id"] != str(tenant_id)
         or document["owner_id"] != str(owner_id)
         or document["resource_id"] != resource_id
@@ -299,6 +323,51 @@ def validate_lineage(document, *, tenant_id, owner_id, resource_id, kind, stamp)
         or len(document["sources"]) > 5000
     ):
         raise transfer_denied()
+    if generic:
+        refs = document["related_sources"]
+        if type(refs) is not list or len(refs) > 16384:
+            raise transfer_denied()
+        seen_refs = set()
+        for source in refs:
+            if type(source) is not dict or source.keys() != {
+                "domain_kind",
+                "tenant_id",
+                "record_key",
+                "ref",
+                "access",
+                "catalog_digest",
+                "projection_version",
+            }:
+                raise transfer_denied()
+            ref = source["ref"]
+            if (
+                source["domain_kind"] != "tenant"
+                or type(source["tenant_id"]) is not int
+                or source["tenant_id"] != tenant_id
+                or type(source["record_key"]) is not str
+                or re.fullmatch(r"[1-9][0-9]{0,18}", source["record_key"]) is None
+                or int(source["record_key"]) >= 2**63
+                or source["catalog_digest"] != stamp["catalog_digest"]
+                or source["projection_version"] != "transfer-relations/v1"
+                or source["access"]
+                != {"operation": "read", "purpose": "management.read", "use": ""}
+                or type(ref) is not dict
+                or ref.keys() != {"object_id", "field_id"}
+                or type(ref["object_id"]) is not str
+                or type(ref["field_id"]) is not str
+                or (ref["object_id"], ref["field_id"])
+                not in {
+                    ("system.dept", "dept_name"),
+                    ("system.dept", "parent_id"),
+                    ("system.role", "role_code"),
+                    ("system.role", "status"),
+                }
+            ):
+                raise transfer_denied()
+            key = (source["record_key"], ref["object_id"], ref["field_id"])
+            if key in seen_refs:
+                raise transfer_denied()
+            seen_refs.add(key)
     columns = document["columns"]
     if any(
         type(f) is not str or f not in {root for _, root in EXPORT_COLUMNS}

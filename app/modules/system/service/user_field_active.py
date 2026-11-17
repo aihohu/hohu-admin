@@ -27,6 +27,9 @@ from app.modules.system.service.authorization_read_budget import (
     AuthorizationReadBudget,
     bounded_authorization_reads,
 )
+from app.modules.system.service.generic_field_policy_admission import (
+    require_user_policy_compatibility,
+)
 
 
 def unavailable():
@@ -38,6 +41,7 @@ def unavailable():
 async def active_policy_grants(db, tx, *, tenant_id, role_ids=()):
     tx.assert_session(db)
     tx.assert_barrier(tenant_id)
+    await require_user_policy_compatibility(db, tenant_id=tenant_id)
     if (
         type(role_ids) is not tuple
         or len(role_ids) > 1024

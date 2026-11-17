@@ -43,6 +43,7 @@ FACT_COLUMNS = MappingProxyType(
         K.CONVERSATION: frozenset(
             {
                 "title",
+                "title_origin",
                 "status",
                 "deleted_at",
                 "agent_code",
@@ -67,6 +68,7 @@ FACT_COLUMNS = MappingProxyType(
                 "data_scope_hash",
                 "resolver_version",
                 "projection_dependency_message_ids",
+                "field_authority",
             }
         ),
         K.PREPARED_ACTION: frozenset(
@@ -82,6 +84,7 @@ FACT_COLUMNS = MappingProxyType(
                 "error_code",
                 "result_data",
                 "result_ui",
+                "result_field_authority",
                 "subject_refs",
                 "subject_refs_hash",
                 "tool_codes",
@@ -100,6 +103,7 @@ FACT_COLUMNS = MappingProxyType(
                 "target_summary",
                 "approved_by",
                 "hitl_wait_ms",
+                "result_field_authority",
             }
         ),
         K.IMPORT_BATCH: frozenset(

@@ -32,6 +32,7 @@ def test_audit_responses_preserve_utc_instants(aware):
         statuses=[],
         operation_count=1,
         queued_at=stamp,
+        finished_at=None,
     )
     operation = TraceOperationOut(
         log_id=1,

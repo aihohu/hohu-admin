@@ -18,6 +18,9 @@ from app.modules.system.service.authorization_read_budget import (
 from app.modules.system.service.authorization_transaction_service import (
     authorization_transactions,
 )
+from app.modules.system.service.generic_field_policy_admission import (
+    require_user_policy_compatibility,
+)
 from app.modules.system.service.planned_user_field_policy_service import (
     planned_user_field_policy_service as policies,
 )
@@ -63,6 +66,9 @@ class UserFieldPolicyOwner:
                         tenant=tenant,
                         actor_user_version=actor_user_version,
                         operation=operation,
+                    )
+                    await require_user_policy_compatibility(
+                        db, tenant_id=tenant.tenant_id
                     )
                     state, snapshot = await admin.read(
                         db, tx, tenant=tenant, role_id=role_id

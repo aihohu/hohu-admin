@@ -189,7 +189,8 @@ async def test_global_scope_refuses_missing_barrier_without_repair(plan_sessions
     async with plain() as db:
         # This disposable schema deliberately simulates damaged storage. DELETE
         # is protected by the product trigger and is not a repair mechanism.
-        await db.execute(text("TRUNCATE TABLE sys_user_field_policy_state"))
+        # Include dependent generic-policy tables only in this owned schema.
+        await db.execute(text("TRUNCATE TABLE sys_user_field_policy_state CASCADE"))
         await db.commit()
     async with factory() as db:
         with pytest.raises(BusinessException) as error:

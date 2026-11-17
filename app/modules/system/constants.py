@@ -17,6 +17,15 @@ USER_FIELD_POLICY_PERMISSIONS = frozenset(
 )
 """Explicit policy control-plane permissions; never business field grants."""
 
+FIELD_POLICY_PERMISSIONS = frozenset(
+    {
+        "system:role:field-policy-view",
+        "system:role:field-policy-edit",
+        "system:role:field-policy-activate",
+    }
+)
+"""Whole-system policy administration; requires current tenant R_SUPER as well."""
+
 PLATFORM_ONLY_TENANT_ROUTE_NAMES = frozenset({"ai_provider", "ai_agent", "tenant"})
 """Legacy tenant routes whose management APIs now live on the platform plane."""
 

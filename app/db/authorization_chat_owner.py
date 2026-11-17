@@ -11,12 +11,10 @@ from app.db.authorization_owner import (
     commit_authorization_session,
     rollback_authorization_session,
 )
-from app.db.authorization_plan_session import _order_error
+from app.db.authorization_plan_session import _order_error, _timeout_error
 from app.modules.ai.core.provider_egress import provider_egress
-from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.schemas.conversation import (
     ConversationCreate,
-    ConversationOut,
     ConversationUpdate,
 )
 from app.modules.ai.service.authorization_chat_candidate import chat_candidate
@@ -25,14 +23,20 @@ from app.modules.ai.service.authorization_chat_ingress_candidate import (
 )
 from app.modules.ai.service.authorization_chat_model import select_model
 from app.modules.ai.service.authorization_feedback_candidate import feedback_candidate
-from app.modules.ai.service.authorization_file_parse import parse_uploaded_file
+from app.modules.ai.service.authorization_file_parse import (
+    file_parse_failure,
+    parse_uploaded_file,
+)
 from app.modules.ai.service.authorization_gateway_audit_candidate import (
     gateway_audit_candidate,
 )
 from app.modules.ai.service.authorization_gateway_read_candidate import (
     gateway_read_candidate,
 )
+from app.modules.ai.service.conversation_delivery import project_conversation
+from app.modules.ai.service.delivery_probe import delivery_probe
 from app.modules.system.service.authorization_read_budget import (
+    AuthorizationReadBudget,
     bounded_authorization_reads,
 )
 from app.modules.system.service.authorization_transaction_service import (
@@ -108,6 +112,41 @@ class ChatOwner:
     async def source(self, **request):
         return await self._run("source", request)
 
+    async def input_parts(self, **request):
+        return await self._run("input_parts", request)
+
+    async def routing_context(self, **request):
+        return await self._run("routing_context", request)
+
+    async def delivery_check(self, **request):
+        # Audit completion may add source bindings between discovery and locks.
+        # Retry only this read, after the old scope has fully rolled back/closed.
+        budget = AuthorizationReadBudget(
+            max_statements=4096, max_rows=100000, max_bytes=128 * 1024 * 1024
+        )
+        deadline = asyncio.get_running_loop().time() + 8
+        try:
+            async with asyncio.timeout_at(deadline):
+                for attempt in range(3):
+                    try:
+                        return await self._run(
+                            "delivery_check",
+                            request,
+                            _read_budget=budget,
+                            _deadline=deadline,
+                        )
+                    except BusinessException as exc:
+                        if (
+                            exc.error_code != "AUTHORIZATION_SNAPSHOT_STALE"
+                            or attempt == 2
+                        ):
+                            raise
+        except TimeoutError:
+            raise _timeout_error() from None
+
+    async def delivery_probe(self, **request):
+        return await self._run("delivery_probe", request)
+
     async def start_operation(self, **request):
         return await self._run("start_operation", request)
 
@@ -118,14 +157,20 @@ class ChatOwner:
         snapshot = await self._run("read_tool", request)
         if request.get("tool") != "file.parse":
             return snapshot
-        result = await file_transform_worker.run(
-            parse_uploaded_file,
-            snapshot,
-            str(settings.UPLOAD_DIR),
-            str(settings.PRIVATE_UPLOAD_DIR),
-        )
+        error = None
+        try:
+            result = await file_transform_worker.run(
+                parse_uploaded_file,
+                snapshot,
+                str(settings.UPLOAD_DIR),
+                str(settings.PRIVATE_UPLOAD_DIR),
+            )
+        except BusinessException as exc:
+            error = exc
         if await self._run("read_tool", request) != snapshot:
             raise _order_error()
+        if error is not None:
+            return file_parse_failure(snapshot, error)
         return result
 
     async def preflight(self, **request):
@@ -209,10 +254,32 @@ class ChatOwner:
     async def invalidate(self, **request):
         return await self._run("invalidate", request)
 
-    async def _run(self, operation, request, *, http_result=False):
+    async def _run(
+        self,
+        operation,
+        request,
+        *,
+        http_result=False,
+        _read_budget=None,
+        _deadline=None,
+    ):
         async with authorization_session(self.factory) as db:
             try:
-                with bounded_authorization_reads(db):
+                read_budget = _read_budget or AuthorizationReadBudget(
+                    max_statements=16 if operation == "delivery_probe" else 4096,
+                    max_rows=1024 if operation == "delivery_probe" else 100000,
+                    max_bytes=2 * 1024 * 1024
+                    if operation == "delivery_probe"
+                    else 128 * 1024 * 1024,
+                )
+                with bounded_authorization_reads(db, read_budget):
+                    timeout_ms = (
+                        int((_deadline - asyncio.get_running_loop().time()) * 1000)
+                        if _deadline is not None
+                        else 8000
+                    )
+                    if timeout_ms <= 0:
+                        raise TimeoutError()
                     async with authorization_transactions.scope(
                         db,
                         tenants=(
@@ -229,17 +296,19 @@ class ChatOwner:
                                 else LockMode.SHARED,
                             ),
                         ),
-                        budget=TransactionBudget(timeout_ms=8000),
+                        budget=TransactionBudget(timeout_ms=timeout_ms),
                     ) as tx:
                         if operation == "conversation":
                             result = await chat_candidate.conversation(
                                 db, tx, **request
                             )
                             if http_result:
-                                result = ConversationOut.model_validate(
-                                    await db.get(
-                                        AiConversation, result, populate_existing=True
-                                    )
+                                result = await project_conversation(
+                                    db,
+                                    tx,
+                                    tenant=request["tenant"],
+                                    version=request["actor_user_version"],
+                                    identifier=result,
                                 )
                         elif operation == "model_candidates":
                             result = await chat_ingress_candidate.model_candidates(
@@ -285,6 +354,20 @@ class ChatOwner:
                             )
                         elif operation == "source":
                             result = await chat_candidate.source(db, tx, **request)
+                        elif operation == "input_parts":
+                            result = await chat_candidate.input_parts(db, tx, **request)
+                        elif operation == "routing_context":
+                            result = await chat_candidate.routing_context(
+                                db, tx, **request
+                            )
+                        elif operation == "delivery_probe":
+                            result = await delivery_probe(db, tx, **request)
+                        elif operation == "delivery_check":
+                            result = await (
+                                chat_candidate.check_run(db, tx, **request)
+                                if request.get("source_id")
+                                else chat_candidate.model_authority(db, tx, **request)
+                            )
                         elif operation == "finalize":
                             result = await chat_candidate.finalize(db, tx, **request)
                         elif operation == "recover":
@@ -314,8 +397,20 @@ class ChatOwner:
                 "model_candidates",
                 "read_tool",
                 "preflight",
+                "input_parts",
+                "routing_context",
+                "delivery_check",
+                "delivery_probe",
             } or (operation == "finish_operation" and not result):
                 await rollback_authorization_session(db)
             else:
                 await commit_authorization_session(db)
+            if operation in {"delivery_check", "delivery_probe"}:
+                return {
+                    "authority"
+                    if operation == "delivery_check"
+                    else "unchanged": result,
+                    "statements": read_budget.statements,
+                    "decoded_bytes": read_budget.decoded_bytes,
+                }
             return result

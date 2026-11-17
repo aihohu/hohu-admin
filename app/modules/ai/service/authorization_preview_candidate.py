@@ -2,7 +2,8 @@
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from uuid import uuid4
@@ -37,6 +38,9 @@ from app.modules.ai.service.authorization_context_candidate import ai_context_ca
 from app.modules.ai.service.authorization_execution_candidate import (
     ai_execution_candidate,
 )
+from app.modules.ai.service.delivery_external_sources import file_source
+from app.modules.ai.service.delivery_preview_sources import preview_sources
+from app.modules.ai.service.field_authority_runtime import ai_field_authority
 from app.modules.ai.service.operation_log_service import build_target_summary
 from app.modules.ai.service.preview_completion_service import (
     preview_lineage,
@@ -66,6 +70,8 @@ from app.utils.attachment_filename import attachment_display_name
 class PreviewInput:
     facts: tuple
     policy: UploadPolicy
+    readable_name: bool
+    field_authority: dict | None = None
 
 
 def read_preview_input(snapshot, private_root):
@@ -83,12 +89,16 @@ def read_preview_input(snapshot, private_root):
         ),
         tenant_policy=snapshot.policy,
     )
-    original = attachment_display_name(record.original_name)
+    if sha256(protected.data).hexdigest() != getattr(record, "content_sha256", None):
+        raise _not_found()
+    original = (
+        attachment_display_name(record.original_name) if snapshot.readable_name else ""
+    )
     filename = (
         original
         if original
         and PurePosixPath(original).suffix.lower() == protected.path.suffix.lower()
-        else protected.path.name
+        else "import" + protected.path.suffix.lower()
     )
     return protected.data, filename
 
@@ -337,6 +347,7 @@ class PreviewCandidate:
             projection=ResultProjection(
                 subject_refs=({"type": "user_import_batch", "id": audit["batch_id"]},),
                 scope_bound=True,
+                field_authority=log.result_field_authority if visible else None,
             ),
             preview_replay=True,
         )
@@ -378,9 +389,21 @@ class PreviewCandidate:
         current = (await db.execute(statement)).mappings().one_or_none()
         if current is None or dict(row) != dict(current):
             raise _order_error()
+        group, _, decisions = await file_source(
+            db,
+            tx,
+            tenant=tenant,
+            version=actor_user_version,
+            identifier=identifier,
+            action="file.chat-read",
+        )
+        if decisions["original_name"].allowed:
+            group["read"] = ["content", "original_name"]
         snapshot = PreviewInput(
             tuple(sorted(current.items())),
             await file_policy_service.resolve(db, "ai_file", tenant=tenant),
+            decisions["original_name"].allowed,
+            await ai_field_authority.mint(db, tx, tenant=tenant, domains=(group,)),
         )
         if expected is not None and (
             type(expected) is not PreviewInput or expected != snapshot
@@ -549,6 +572,16 @@ class PreviewCandidate:
         batch, detail = await transfer_candidate.materialize_preview(
             db, tx, command, ctx.user, field_plan=work.field_plan
         )
+        proof = await preview_sources(
+            db,
+            tx,
+            tenant=tenant,
+            version=command.version,
+            source=source,
+            file_id=file_id,
+            batch_id=command.resource_id,
+            presence=batch["field_lineage"]["preview_source"]["presence"],
+        )
         result = _planned_preview_result(
             detail,
             SimpleNamespace(**batch),
@@ -558,6 +591,9 @@ class PreviewCandidate:
             operator_id=tenant.actor_user_id,
         )
         proposal = result.prepared_action
+        result = replace(
+            result, projection=replace(result.projection, field_authority=proof)
+        )
         if (
             not result.ok
             or not isinstance(proposal, PreparedActionProposal)
@@ -584,7 +620,7 @@ class PreviewCandidate:
             "readonly_snapshot": False,
             "queued_at": now.replace(tzinfo=None),
             "execution_mode": "hitl",
-            "field_authority": source.field_authority,
+            "field_authority": proof,
         }
         args = {
             "file_id": file_id,
@@ -638,7 +674,7 @@ class PreviewCandidate:
                     "status": "pending_confirmation",
                     "row_version": 1,
                     "frozen_args": proposal.frozen_args,
-                    "field_authority": source.field_authority,
+                    "field_authority": proof,
                     "args_hash": compute_args_hash(proposal.frozen_args),
                     "snapshot": proposal.snapshot,
                     "snapshot_hash": compute_args_hash(proposal.snapshot),
@@ -699,6 +735,7 @@ class PreviewCandidate:
                     separators=(",", ":"),
                 ),
                 "target_summary": build_target_summary([proposal.subject_ref]),
+                "result_field_authority": proof,
             },
             expected={
                 "status": "running",

@@ -7,14 +7,14 @@ from sqlalchemy import func, select
 
 from app.core.exceptions import BusinessException
 from app.db.authorization_plan_session import _order_error
+from app.modules.ai.models.model import AiModel
 from app.modules.ai.models.provider import AiProvider
 from app.modules.ai.schemas.config_projection import redact_url
-from app.modules.ai.schemas.model import ModelOut
+from app.modules.ai.schemas.model import ModelOption, ModelOut
 from app.modules.ai.schemas.provider import ProviderOut, ProviderQuery
 from app.modules.ai.service.agent_admin import agent_admin_service
 from app.modules.ai.service.authorization_catalog_inputs import wire
-from app.modules.ai.service.model_service import model_service
-from app.modules.ai.service.provider_service import provider_service
+from app.modules.ai.service.control_catalog_projection import model_pairs, providers
 from app.modules.ai.service.tenant_model_policy_admin_service import (
     tenant_model_policy_admin_service,
 )
@@ -95,9 +95,26 @@ class CatalogReadCandidate:
                         "provider_code": provider.provider_code,
                         "provider_base_url": provider.base_url,
                         "model_base_url": model.base_url if model else None,
-                        "configs": (provider.config, model.config)
+                        "configs": (
+                            (
+                                {"proxy": True}
+                                if not provider.configuration_supported
+                                else provider.config
+                            ),
+                            (
+                                {"proxy": True}
+                                if not model.configuration_supported
+                                else model.config
+                            ),
+                        )
                         if model
-                        else (provider.config,),
+                        else (
+                            (
+                                {"proxy": True}
+                                if not provider.configuration_supported
+                                else provider.config
+                            ),
+                        ),
                     }
                 )
             )
@@ -121,7 +138,21 @@ class CatalogReadCandidate:
         elif operation == "model.options":
             data = [
                 _json(row)
-                for row in await model_service.list_options(db, platform=platform)
+                for row in [
+                    ModelOption(
+                        model_id=m.model_id,
+                        label=f"{p.name} / {m.name}",
+                        provider_code=p.provider_code,
+                        capabilities=list(m.capabilities or []),
+                    )
+                    for m, p in await model_pairs(
+                        db,
+                        predicates=(
+                            AiModel.is_enabled.is_(True),
+                            AiProvider.is_enabled.is_(True),
+                        ),
+                    )
+                ]
             ]
         elif operation == "provider.list":
             query = ProviderQuery.model_validate(payload)
@@ -137,15 +168,12 @@ class CatalogReadCandidate:
             total = await db.scalar(
                 select(func.pg_catalog.count(AiProvider.provider_id)).where(*filters)
             )
-            rows = (
-                await db.scalars(
-                    select(AiProvider)
-                    .where(*filters)
-                    .order_by(AiProvider.provider_id)
-                    .offset((query.current - 1) * query.size)
-                    .limit(query.size)
-                )
-            ).all()
+            rows = await providers(
+                db,
+                predicates=filters,
+                offset=(query.current - 1) * query.size,
+                maximum=query.size,
+            )
             data = {
                 "records": [_json(ProviderOut.from_record(row)) for row in rows],
                 "total": total,
@@ -156,19 +184,23 @@ class CatalogReadCandidate:
                 probe(row, None, ("records", index))
         elif operation in {"model.available", "model.list"}:
             if operation == "model.list":
-                provider = await provider_service.get_by_id(
-                    db, provider_id, platform=platform
+                pairs = await model_pairs(
+                    db, predicates=(AiProvider.provider_id == provider_id,)
+                )
+            else:
+                pairs = await model_pairs(
+                    db,
+                    predicates=(
+                        AiModel.is_enabled.is_(True),
+                        AiProvider.is_enabled.is_(True),
+                    ),
                 )
                 pairs = [
-                    (model, provider)
-                    for model in await model_service.get_by_provider(
-                        db, provider_id, platform=platform
-                    )
+                    (m, p)
+                    for m, p in pairs
+                    if payload.get("capability") is None
+                    or payload["capability"] in (m.capabilities or [])
                 ]
-            else:
-                pairs = await model_service.list_available_with_provider(
-                    db, payload.get("capability"), platform=platform
-                )
             data = []
             for model, provider in pairs:
                 data.append(

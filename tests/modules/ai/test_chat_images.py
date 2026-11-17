@@ -76,6 +76,10 @@ async def test_legacy_chat_image_is_never_classified_public(db_session, uploaded
     assert not await file_service.is_public_upload(db_session, record.file_url)
     record.business_type = "avatar"
     await db_session.flush()
+    assert not await file_service.is_public_upload(db_session, record.file_url)
+    owner = await db_session.get(User, record.owner_user_id)
+    owner.user_avatar = record.file_url
+    await db_session.flush()
     assert await file_service.is_public_upload(db_session, record.file_url)
     record.del_flag = "1"
     await db_session.flush()

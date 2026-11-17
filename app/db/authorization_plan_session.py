@@ -8,7 +8,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import Integer, String, event
+from sqlalchemy import JSON, Integer, LargeBinary, String, event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.sql import Select, visitors
@@ -49,14 +49,41 @@ def _known_read(statement: Any) -> bool:
             and node.packagenames == ("pg_catalog",)
             and (
                 (
-                    node.name in {"lower", "concat"}
+                    node.name
+                    in {"lower", "concat", "octet_length", "ltrim", "regexp_replace"}
                     and (
                         len(node.clauses) == 1
-                        if node.name == "lower"
+                        if node.name in {"lower", "octet_length"}
+                        else len(node.clauses) == 2
+                        if node.name == "ltrim"
+                        else len(node.clauses) == 4
+                        if node.name == "regexp_replace"
                         else 1 <= len(node.clauses) <= 8
                     )
                     and all(
                         isinstance(argument.type, String) for argument in node.clauses
+                    )
+                )
+                or (
+                    node.name == "convert_to"
+                    and len(node.clauses) == 2
+                    and all(
+                        isinstance(argument.type, String) for argument in node.clauses
+                    )
+                )
+                or (
+                    node.name == "sha256"
+                    and len(node.clauses) == 1
+                    and all(
+                        isinstance(argument.type, LargeBinary)
+                        for argument in node.clauses
+                    )
+                )
+                or (
+                    node.name == "jsonb_typeof"
+                    and len(node.clauses) == 1
+                    and all(
+                        isinstance(argument.type, JSON) for argument in node.clauses
                     )
                 )
                 or (

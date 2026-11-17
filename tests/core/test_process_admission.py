@@ -2,14 +2,50 @@
 
 import asyncio
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from app.core import process_admission
 from app.core.exceptions import BusinessException
 from app.core.process_admission import ProcessAdmission
 from app.core.process_identity import ProcessIdentity
 from app.core.write_admission import WriteAdmission
+
+
+def test_record_retries_transient_shared_volume_reader(monkeypatch, tmp_path):
+    admission = ProcessAdmission(
+        WriteAdmission(tmp_path), role="api", build_sha="a" * 40
+    )
+    admission._record("draining")
+    original = process_admission.os.replace
+    calls = []
+
+    def blocked_reader(source, target):
+        calls.append(1)
+        assert json.loads(target.read_text())["state"] == "draining"
+        if len(calls) < 3:
+            raise PermissionError("shared reader is still closing")
+        original(source, target)
+
+    monkeypatch.setattr(process_admission.os, "replace", blocked_reader)
+    admission._record("quiesced")
+    assert len(calls) == 3
+    assert json.loads(admission.path.read_text())["state"] == "quiesced"
+
+
+@pytest.mark.parametrize("error,attempts", [(PermissionError, 5), (OSError, 1)])
+def test_failed_record_never_claims_quiescence(monkeypatch, tmp_path, error, attempts):
+    admission = ProcessAdmission(
+        WriteAdmission(tmp_path), role="api", build_sha="a" * 40
+    )
+    admission._record("draining")
+    replace = Mock(side_effect=error("persistent volume failure"))
+    monkeypatch.setattr(process_admission.os, "replace", replace)
+    with pytest.raises(error):
+        admission._record("quiesced")
+    assert replace.call_count == attempts
+    assert json.loads(admission.path.read_text())["state"] == "draining"
 
 
 async def test_stop_marker_drains_active_work_and_latches_closed(tmp_path):

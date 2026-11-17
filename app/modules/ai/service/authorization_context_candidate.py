@@ -1,6 +1,7 @@
 """Discover a complete context set before any context row lock is acquired."""
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 from sqlalchemy import select
 
@@ -12,6 +13,11 @@ from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
+from app.modules.ai.service.delivery_external_sources import digest
+from app.modules.ai.service.delivery_file_parts import part_keys
+from app.modules.ai.service.delivery_source_domains import validate_receipt
+from app.modules.system.models.file import File
+from app.modules.system.models.user_transfer import UserExportTask, UserImportBatch
 
 _TABLES = (
     (K.CONVERSATION, AiConversation, "conversation_id"),
@@ -49,7 +55,7 @@ class AIContextCandidate:
                 "AI context 超出预算",
                 error_code="AUTHORIZATION_PLAN_LIMIT_EXCEEDED",
             )
-        keys, bindings = [], []
+        keys, bindings, related = [], [], set()
         for kind, model, key_name in _TABLES:
             # Explicit paging bounds SQL parameters; the overall set is never truncated.
             for offset in range(0, len(ids), 256):
@@ -68,6 +74,43 @@ class AIContextCandidate:
                     .all()
                 )
                 for row in rows:
+                    for name in ("field_authority", "result_field_authority"):
+                        proof = row.get(name)
+                        if validate_receipt(proof) is not None:
+                            bindings.append(
+                                (
+                                    "source-digest",
+                                    model.__tablename__,
+                                    row[key_name],
+                                    name,
+                                    proof["digest"],
+                                )
+                            )
+                            for group in proof["source_domains"]:
+                                if group.get("kind") == "file":
+                                    related.add((K.FILE, int(group["file_id"])))
+                                elif group.get("kind") == "artifact":
+                                    related.add(
+                                        (
+                                            K.EXPORT_TASK
+                                            if group["resource_kind"] == "export"
+                                            else K.IMPORT_BATCH,
+                                            group["resource_id"],
+                                        )
+                                    )
+                    if model is AiMessage and row.get("parts"):
+                        bindings.append(
+                            ("parts-digest", row[key_name], digest(row["parts"]))
+                        )
+                        try:
+                            related.update(
+                                (K.FILE, key.identity[0])
+                                for key in part_keys(
+                                    row["parts"], SimpleNamespace(tenant_id=tenant_id)
+                                )
+                            )
+                        except BusinessException:
+                            pass  # Unknown historical parts are never delivered.
                     actual_kind = (
                         K.ASSISTANT_MESSAGE
                         if model is AiMessage and row["role"] != "user"
@@ -96,6 +139,24 @@ class AIContextCandidate:
                             "AI context 超出预算",
                             error_code="AUTHORIZATION_PLAN_LIMIT_EXCEEDED",
                         )
+        for kind, model, anchor in (
+            (K.FILE, File, "file_id"),
+            (K.IMPORT_BATCH, UserImportBatch, "batch_id"),
+            (K.EXPORT_TASK, UserExportTask, "export_id"),
+        ):
+            values = sorted(v for k, v in related if k == kind)
+            for start in range(0, len(values), 256):
+                actual = await db.scalars(
+                    select(getattr(model, anchor))
+                    .where(
+                        model.tenant_id == tenant_id,
+                        getattr(model, anchor).in_(values[start : start + 256]),
+                    )
+                    .order_by(getattr(model, anchor))
+                )
+                keys.extend(ResourceKey(kind, tenant_id, value) for value in actual)
+        if len(keys) > 16384:
+            raise _order_error()
         return ContextInventory(tenant_id, ids, tuple(keys), tuple(bindings))
 
     async def recheck(self, db, tx, inventory):

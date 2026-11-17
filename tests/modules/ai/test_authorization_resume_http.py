@@ -1,5 +1,7 @@
 """Resume failure transitions are fixed-owner writes, never tool executions."""
 
+import asyncio
+import json
 from dataclasses import replace
 from unittest.mock import AsyncMock
 
@@ -8,11 +10,13 @@ from sqlalchemy import event
 
 from app.core.exceptions import BusinessException
 from app.db import authorization_lifecycle_owner
+from app.db.authorization_http import get_authorization_runtime
 from app.db.request_session import RequestSession
 from app.db.session import engine
 from app.modules.ai.api import resume
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
+from app.modules.ai.service.authorization_lifecycle_candidate import lifecycle_candidate
 from app.modules.auth.service import access_identity
 from app.modules.system.models.user import User
 from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
@@ -28,14 +32,44 @@ from tests.modules.ai.test_completion_resume_guards import leave_claim_running
 from tests.modules.ai.test_resume import _make_request
 
 
+def _assert_optional_sse_result(chunks, *, error_code=None):
+    events = [
+        json.loads(line[6:])
+        for chunk in chunks
+        for line in chunk.splitlines()
+        if line.startswith("data: ")
+    ]
+    results = [item for item in events if item["type"] == "tool_call_result"]
+    assert events[-1]["type"] == "done"
+    if results:
+        assert len(results) == 1
+        assert results[0]["ok"] is (error_code is None)
+        assert results[0].get("errorCode") == error_code
+    else:
+        assert any(
+            item.get("errorCode") == "AI_EXECUTION_OUTCOME_UNKNOWN" for item in events
+        )
+        assert events[-1]["persistence"] == "not_applicable"
+        assert events[-1]["projection"] == "unchanged"
+
+
+@pytest.mark.parametrize("stall_projection", [False, True])
 async def test_actual_resume_replays_completed_action_with_strict_request_session(
-    completion_case, monkeypatch
+    completion_case, monkeypatch, stall_projection
 ):
     case = completion_case
     count_real_handler(case, monkeypatch)
     assert (await approve(case)).data.status == "succeeded"
     monkeypatch.setattr(resume.settings, "AI_SSE_RESUME_ENABLED", True)
     locks = []
+    projection_entered = asyncio.Event()
+
+    async def stalled_read(*_args, **_kwargs):
+        projection_entered.set()
+        await asyncio.Event().wait()
+
+    if stall_projection:
+        monkeypatch.setattr(lifecycle_candidate, "resume_read", stalled_read)
 
     def capture(_conn, _cursor, sql, _params, _context, _many):
         if "FOR SHARE" in sql or "FOR UPDATE" in sql:
@@ -52,13 +86,18 @@ async def test_actual_resume_replays_completed_action_with_strict_request_sessio
                 current_user=actor,
             )
             chunks = [chunk async for chunk in response.body_iterator]
-            assert any('"type": "tool_call_result"' in chunk for chunk in chunks)
-            assert any('"ok": true' in chunk for chunk in chunks)
+            _assert_optional_sse_result(chunks)
+            if stall_projection:
+                assert projection_entered.is_set()
+                assert any("AI_EXECUTION_OUTCOME_UNKNOWN" in chunk for chunk in chunks)
             assert db._request_released and not db.in_transaction()
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", capture)
     assert locks and "sys_user_field_policy_global_guard" in locks[0]
     assert len(case.calls) == 1
+    async with AsyncSessionLocal() as db:
+        assert (await db.get(AiPreparedAction, case.action_id)).status == "succeeded"
+        assert (await db.get(AiOperationLog, case.log_id)).status == "success"
 
 
 async def test_pending_resume_releases_request_before_transport_wait(
@@ -120,12 +159,13 @@ async def test_resume_terminal_read_uses_global_guard_without_commit(
     event.listen(engine.sync_engine, "before_cursor_execute", capture)
     event.listen(engine.sync_engine, "commit", commit)
     try:
-        events = await resume._load_durable_resume_terminal(
-            confirmation_id=case.confirmation_id,
-            pending=pending,
-            user_id=case.tenant.actor_user_id,
+        # Exercise the real owner under its eight-second authorization budget.
+        # The separate optional-display deadline can legitimately return unknown.
+        events = await get_authorization_runtime().lifecycle.resume_read(
+            case.confirmation_id,
             tenant=case.tenant,
-            current_user=actor,
+            actor_user_version=access_identity(actor).user_version,
+            resume_binding=resume._resume_binding(pending),
         )
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", capture)
@@ -137,14 +177,31 @@ async def test_resume_terminal_read_uses_global_guard_without_commit(
     assert len(case.calls) == 1
 
 
-async def test_resume_pending_failure_enters_global_guard_first(completion_case):
+@pytest.mark.parametrize("stall_projection", [False, True])
+async def test_resume_pending_failure_enters_global_guard_first(
+    completion_case, monkeypatch, stall_projection
+):
     case = completion_case
+    count_real_handler(case, monkeypatch)
     async with AsyncSessionLocal() as db:
         actor = await authenticated_actor(case, db)
         pending = resume._pending_from_durable_action(
             await db.get(AiPreparedAction, case.action_id)
         )
     locks = []
+    projection_entered = asyncio.Event()
+    projection_cancelled = asyncio.Event()
+    real_read = lifecycle_candidate.resume_read
+
+    async def stalled_read(*_args, **_kwargs):
+        projection_entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            projection_cancelled.set()
+
+    if stall_projection:
+        monkeypatch.setattr(lifecycle_candidate, "resume_read", stalled_read)
 
     def capture(_conn, _cursor, sql, _params, _context, _many):
         if "FOR UPDATE" in sql or "FOR SHARE" in sql:
@@ -165,13 +222,37 @@ async def test_resume_pending_failure_enters_global_guard_first(completion_case)
         event.remove(engine.sync_engine, "before_cursor_execute", capture)
     async with AsyncSessionLocal() as db:
         action = await db.get(AiPreparedAction, case.action_id)
+        log = await db.get(AiOperationLog, case.log_id)
         assert action.status == "expired"
+        assert log.status == "expired"
+        assert action.error_code == log.error_code == "AI_HITL_TIMEOUT"
         assert action.execution_owner is None
     assert locks and "sys_user_field_policy_global_guard" in locks[0]
-    assert any(
-        getattr(item, "error_code", None) == "AI_HITL_TIMEOUT" for item in events
+    if stall_projection:
+        assert projection_entered.is_set() and projection_cancelled.is_set()
+        monkeypatch.setattr(lifecycle_candidate, "resume_read", real_read)
+        assert events[0].type == "ai_error"
+        assert events[0].error_code == "AI_EXECUTION_OUTCOME_UNKNOWN"
+    if events[0].type == "ai_error":
+        assert len(events) == 2
+        assert events[0].error_code == "AI_EXECUTION_OUTCOME_UNKNOWN"
+        assert events[-1].persistence == "not_applicable"
+        assert events[-1].projection == "unchanged"
+    else:
+        assert events[0].type == "tool_call_result"
+        assert events[0].ok is False
+        assert events[0].error_code == "AI_HITL_TIMEOUT"
+    # Always prove the actual terminal projection succeeds through the real
+    # authorization owner, including after the optional one-second read failed.
+    terminal = await get_authorization_runtime().lifecycle.resume_read(
+        case.confirmation_id,
+        tenant=case.tenant,
+        actor_user_version=access_identity(actor).user_version,
+        resume_binding=resume._resume_binding(pending),
     )
-    assert events[-1].persistence == "committed"
+    assert terminal[0].type == "tool_call_result"
+    assert terminal[0].ok is False
+    assert terminal[0].error_code == "AI_HITL_TIMEOUT"
     assert case.calls == []
 
 

@@ -6,7 +6,10 @@ that would let a tenant-local menu editor influence a future tenant's routes.
 
 from dataclasses import dataclass
 
-from app.modules.system.constants import USER_FIELD_POLICY_PERMISSIONS
+from app.modules.system.constants import (
+    FIELD_POLICY_PERMISSIONS,
+    USER_FIELD_POLICY_PERMISSIONS,
+)
 from app.modules.system.menu_seed import (
     MENU_DEFINITIONS,
     build_initial_menus,
@@ -71,6 +74,7 @@ HOSTED_BUTTON_PERMISSIONS = (
             "system:config:list",
             "system:config:add",
             "system:config:edit",
+            "system:config:publish",
             "system:config:delete",
             "system:config:batch-delete",
             "system:config:export",
@@ -108,6 +112,7 @@ HOSTED_BUTTON_PERMISSIONS = (
         )
     )
     | USER_FIELD_POLICY_PERMISSIONS
+    | FIELD_POLICY_PERMISSIONS
 )
 
 HOSTED_MENU_DEFINITIONS = tuple(

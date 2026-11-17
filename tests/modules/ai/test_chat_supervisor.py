@@ -106,7 +106,10 @@ async def test_image_only_input_still_uses_authorized_supervisor_candidates(
     assert response.status_code == 200
     route.assert_awaited_once()
     assert route.await_args.args[1] == "请描述这张图片"
-    assert route.await_args.args[2] == mock_visible_agents
+    assert [vars(row) for row in route.await_args.args[2]] == [
+        {"code": row.code, "name": row.name, "description": row.description}
+        for row in mock_visible_agents
+    ]
 
 
 async def test_native_image_uses_authorized_candidate_when_business_route_is_unclear(
@@ -316,6 +319,29 @@ async def test_auto_uses_persisted_user_history_instead_of_client_history(
                 ),
             ]
         )
+        await setup.flush()
+        from app.core.tenant import TenantContext
+        from tests.ai_source_fixtures import authored_source
+
+        for row in list(
+            await setup.scalars(
+                select(AiMessage).where(
+                    AiMessage.conversation_id == conversation_id,
+                    AiMessage.role == "user",
+                )
+            )
+        ):
+            row.field_authority = await authored_source(
+                setup,
+                tenant=TenantContext(
+                    tenant_id=0,
+                    tenant_code="default",
+                    tenant_version=1,
+                    actor_user_id=actor.user_id,
+                    source="access_token",
+                ),
+                message_id=row.message_id,
+            )
     body = _chat_body(
         "都是哪些", agentCode="auto", conversationId=str(conversation.conversation_id)
     )
@@ -558,12 +584,19 @@ async def test_auto_without_authorized_candidates_returns_agent_not_available(
     auth_token,
     monkeypatch,
 ):
-    from app.modules.ai.service import agent_visibility as visibility_module
+    from app.db.authorization_delivery_read_owner import DeliveryReadOwner
+    from app.db.authorization_runtime import AuthorizationRuntime
+    from app.db.session import engine
 
-    async def no_agents(_db, _user):
+    async def no_agents(_owner, *, tenant, actor_user_version, with_sources=False):
+        if with_sources:
+            proof = await AuthorizationRuntime(engine).chat.model_authority(
+                tenant=tenant, actor_user_version=actor_user_version
+            )
+            return {"agents": [], "field_authority": proof}
         return []
 
-    monkeypatch.setattr(visibility_module, "list_visible_agents", no_agents)
+    monkeypatch.setattr(DeliveryReadOwner, "agents", no_agents)
     response = await client.post(
         "/ai/chat",
         json=_chat_body("hi", agentCode="auto"),

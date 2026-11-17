@@ -2,19 +2,23 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_permissions
-from app.core.base_response import PageResult, ResponseModel
+from app.core.base_response import ResponseModel
 from app.core.tenant import TenantContext
 from app.db.authorization_http import user_read
 from app.db.session import get_db
 from app.modules.auth.service import get_current_tenant_context
-from app.modules.system.schemas.operation_log import OperationLogOut, OperationLogQuery
+from app.modules.system.schemas.delivery_projection import (
+    DeliveryPage,
+    ProjectedOperationLog,
+)
+from app.modules.system.schemas.operation_log import OperationLogQuery
 
 router = APIRouter()
 
 
 @router.get(
     "/list",
-    response_model=ResponseModel[PageResult[OperationLogOut]],
+    response_model=ResponseModel[DeliveryPage[ProjectedOperationLog]],
     response_model_exclude_unset=True,
     summary="获取操作日志列表",
     dependencies=[Depends(require_permissions("monitor:operation-log:list"))],

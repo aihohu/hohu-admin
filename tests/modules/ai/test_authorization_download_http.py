@@ -5,18 +5,27 @@ import asyncio
 import pytest
 from sqlalchemy import event, func, insert, select, update
 
+from app.core.authorization_plan import LockPlan, ResourceKey, ResourceKind, TenantLock
 from app.core.file_storage import LocalFileStorage
 from app.db import authorization_http, authorization_system_owner
 from app.db.base import role_menus
 from app.modules.ai.api import download
 from app.modules.ai.models.agent import AiAgent
 from app.modules.ai.models.role_ai_agent import RoleAiAgent
+from app.modules.ai.service.delivery_external_sources import artifact_source
 from app.modules.ai.service.result_projection_service import result_projection_service
 from app.modules.auth.service import load_live_user_authority
 from app.modules.system.ai_tools import user_transfer  # noqa: F401
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.user import User
 from app.modules.system.models.user_transfer import UserExportTask
+from app.modules.system.service.authorization_control_identity import read_identity
+from app.modules.system.service.authorization_read_budget import (
+    bounded_authorization_reads,
+)
+from app.modules.system.service.authorization_transaction_service import (
+    authorization_transactions,
+)
 from tests.modules.system.test_authorization_import_candidate import (
     import_sessions as import_sessions,
 )
@@ -66,27 +75,58 @@ async def signed_export(transfer_http, import_sessions):
         "/user/export", json={"reason": "signed download test"}
     )
     assert exported.status_code == 200, exported.text
-    async with plain() as db:
-        identifier = await db.scalar(select(UserExportTask.export_id))
-        actor = await load_live_user_authority(db, tenant=tenant)
-        lineage = result_projection_service.freeze_lineage(
-            tenant=tenant,
-            agent_code="user_mgmt",
-            tool_codes=["user.export"],
-            subject_refs=[{"type": "user_export_task", "id": identifier}],
-            data_scope_hash=await result_projection_service.compute_data_scope_hash(
-                db, actor
-            ),
-        )
-        token = await result_projection_service.issue_download_token(
-            db,
-            actor,
-            tenant=tenant,
-            resource_type="user_export",
-            resource_id=identifier,
-            lineage=lineage,
-        )
-        assert token
+    async with import_sessions[0]() as db:
+        with bounded_authorization_reads(db):
+            async with authorization_transactions.scope(
+                db, tenants=(TenantLock(0),)
+            ) as tx:
+                identity = await read_identity(
+                    db,
+                    tenant=tenant,
+                    actor_user_version=1,
+                    permissions=("system:user:export",),
+                )
+                identifier = await db.scalar(select(UserExportTask.export_id))
+                await tx.lock(
+                    LockPlan(
+                        existing=(
+                            *identity.keys,
+                            ResourceKey(ResourceKind.EXPORT_TASK, 0, identifier),
+                        )
+                    )
+                )
+                actor = await load_live_user_authority(db, tenant=tenant)
+                # This fixture is a newly generated REST export with original F3A
+                # provenance. Exercise its real current-source adapter before signing.
+                group = await artifact_source(
+                    db,
+                    tx,
+                    tenant=tenant,
+                    version=actor.auth_version,
+                    resource_kind="export",
+                    identifier=identifier,
+                    source_kind="export",
+                )
+                assert group["resource_id"] == identifier
+                lineage = result_projection_service.freeze_lineage(
+                    tenant=tenant,
+                    agent_code="user_mgmt",
+                    tool_codes=["user.export"],
+                    subject_refs=[{"type": "user_export_task", "id": identifier}],
+                    data_scope_hash=await result_projection_service.compute_data_scope_hash(
+                        db, actor
+                    ),
+                )
+                token = await result_projection_service.issue_download_token(
+                    db,
+                    actor,
+                    tenant=tenant,
+                    resource_type="user_export",
+                    resource_id=identifier,
+                    lineage=lineage,
+                )
+                assert token
+                assert len(token) <= 16384
     return client, plain, identifier, token, exported.content
 
 

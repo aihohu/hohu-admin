@@ -119,9 +119,15 @@ class DirectProcesses:
                     birth = windows_birth(handle, kernel)
                     if birth is None:
                         continue
-                    if birth != expected.birth or not kernel.TerminateProcess(
-                        handle, 1
+                    if birth != expected.birth:
+                        raise _required()
+                    if (
+                        not kernel.TerminateProcess(handle, 1)
+                        and kernel.WaitForSingleObject(handle, 0) != 0
                     ):
+                        # The inventoried generation can exit after the birth
+                        # check. Only this same kernel handle can prove that
+                        # race completed; an error code or a PID is not proof.
                         raise _required()
             else:
                 # pidfd binds the signal to this process generation, even after PID reuse.
@@ -474,11 +480,13 @@ class PostgresStop:
             self.runtime_engine,
         )
 
-    def _save_observation(self, now, *, bootstrap=False):
+    def _save_observation(self, now, *, bootstrap=False, policy_prepare=False):
         record = self._record()
         record["observed_at"] = now.isoformat()
         if bootstrap:
             record["bootstrap"] = True
+        if policy_prepare:
+            record["policy_prepare_required"] = True
         temporary = self.directory / "observation.tmp"
         with temporary.open("x", encoding="utf-8") as output:
             json.dump(record, output)
@@ -606,6 +614,22 @@ class PostgresStop:
         await self._resume_admission(record)
 
     async def _resume_admission(self, record):
+        from app.core.field_policy.maintenance import (  # noqa: PLC0415 - optional preparation protocol
+            require_normal_resume,
+        )
+
+        policy_required = record.get("policy_prepare_required") is True
+        if "policy_prepare_required" in record and not policy_required:
+            raise _required()
+        require_normal_resume(self, required=policy_required)
+        if (
+            policy_required
+            or (self.directory / "policy-prepare.json").exists()
+            or (self.directory / "install.json").exists()
+        ):
+            from tools.ops.controlled_install import require_receipt  # noqa: PLC0415
+
+            require_receipt(self, record.get("bootstrap") is True)
         await self.require_quiescent()
         observed = record.get("observed_at")
         if observed is not None:
@@ -618,11 +642,21 @@ class PostgresStop:
         await self.runtime_engine.dispose()
         self._owned_backends.clear()
         await self.require_quiescent()
-        await self._allow(record["original_allow"])
+        from tools.ops.control_record_archive import (  # noqa: PLC0415
+            archive_control_records,
+        )
+
+        archive = archive_control_records(self.directory)
         try:
-            (self.directory / "stop.json").unlink()
+            await self._allow(record["original_allow"])
+            archive.consume()
         except BaseException:
-            await self._allow(False)
+            with CancelScope(shield=True):
+                try:
+                    async with asyncio.timeout(3):
+                        await self._allow(False)
+                finally:
+                    archive.restore()
             raise
 
 

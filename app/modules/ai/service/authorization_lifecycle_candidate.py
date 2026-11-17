@@ -35,6 +35,10 @@ from app.modules.ai.service.authorization_execution_candidate import (
 from app.modules.ai.service.authorization_recovery_candidate import (
     ai_recovery_candidate,
 )
+from app.modules.ai.service.delivery_source_capture import capture_members
+from app.modules.ai.service.delivery_source_guard import require_tool_sources
+from app.modules.ai.service.delivery_source_roots import extend_source, renew_source
+from app.modules.ai.service.field_authority_runtime import ai_field_authority
 from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.ai.service.reconciliation_annotation import has_annotation
 from app.modules.ai.service.result_projection_service import result_projection_service
@@ -47,6 +51,7 @@ from app.modules.system.service.authorization_control_identity import (
     assert_identity,
     read_identity,
 )
+from app.modules.system.service.user_ai_fields import user_ai_fields
 
 _EXECUTION_LEASE_TTL = timedelta(seconds=90)
 
@@ -342,6 +347,18 @@ class LifecycleCandidate:
             data_scope_hash=scope_hash,
             projection_dependency_message_ids=[],
         )
+        original_source = await db.get(AiMessage, source_id, populate_existing=True)
+        if (
+            original_source is None
+            or original_source.tenant_id != tenant.tenant_id
+            or original_source.conversation_id != conversation_id
+            or original_source.role != "user"
+            or not original_source.is_active
+        ):
+            raise _order_error()
+        action.field_authority = await renew_source(
+            db, tx, tenant=tenant, version=actor_user_version, source=original_source
+        )
         await ai_execution_candidate.authorize(
             db, tx, action, tenant=tenant, actor_user_version=actor_user_version
         )
@@ -407,6 +424,32 @@ class LifecycleCandidate:
         )
         if dry_run:
             return None
+        fields = await user_ai_fields.before(
+            db,
+            tx,
+            tenant=tenant,
+            version=actor_user_version,
+            tool=tool,
+            args=args,
+            preflight=True,
+        )
+        sources = await require_tool_sources(
+            db,
+            tx,
+            tenant=tenant,
+            version=actor_user_version,
+            tool=tool,
+            args=args,
+            preflight=True,
+            user_context=fields,
+        )
+        proof = extend_source(action.field_authority, *sources.delivery_domains)
+        proof = extend_source(
+            proof, *await capture_members(db, sources, tool=tool, snapshot=snapshot)
+        )
+        await ai_field_authority.renew(
+            db, tx, tenant=tenant, actor_user_version=actor_user_version, frozen=proof
+        )
         refs = prepared_action_service._build_subject_refs(
             execute_tool_name=tool,
             frozen_args=args,
@@ -454,7 +497,7 @@ class LifecycleCandidate:
             "status": "pending_confirmation",
             "row_version": 1,
             "frozen_args": args,
-            "field_authority": source.field_authority,
+            "field_authority": proof,
             "args_hash": args_hash,
             "snapshot": authorization_snapshot,
             "snapshot_hash": compute_args_hash(authorization_snapshot),
@@ -486,7 +529,7 @@ class LifecycleCandidate:
                 "tool_call_id": action.execute_tool_call_id,
                 "args_hash": args_hash,
                 "args_summary": "tool=" + tool,
-                "field_authority": source.field_authority,
+                "field_authority": proof,
                 "risk_level": registered.meta.risk,
                 "execution_mode": "hitl",
                 "status": "pending_confirmation",

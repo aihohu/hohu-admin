@@ -8,8 +8,11 @@ from sqlalchemy import func, select
 from app.core.auth import ensure_ai_chat_use
 from app.core.authorization_plan import LockPlan, NewResource, ResourceKey
 from app.core.authorization_plan import ResourceKind as K
-from app.core.base_response import PageResult
-from app.core.exceptions import BusinessException, NotFoundException
+from app.core.exceptions import (
+    AuthorizationException,
+    BusinessException,
+    NotFoundException,
+)
 from app.core.id_generator import next_id
 from app.db.authorization_plan_session import _order_error
 from app.modules.ai.agents.gateway.atomic_execution import OUTCOME_UNKNOWN_MESSAGE
@@ -20,7 +23,6 @@ from app.modules.ai.models.conversation import AiConversation
 from app.modules.ai.models.message import AiMessage
 from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
-from app.modules.ai.schemas.conversation import ConversationOut
 from app.modules.ai.service.atomic_completion_service import (
     DB_TOOLS,
     FILE_TOOLS,
@@ -37,7 +39,21 @@ from app.modules.ai.service.chat_run_service import (
     enforce_grounded_management_write_claim,
     enforce_import_error_output_redaction,
 )
+from app.modules.ai.service.conversation_delivery import (
+    project_conversation,
+    require_known_title_query,
+    require_message_read,
+    validate_conversation_write,
+    validate_message_create,
+)
 from app.modules.ai.service.conversation_service import conversation_service
+from app.modules.ai.service.delivery_file_parts import normalize_parts, part_keys
+from app.modules.ai.service.delivery_source_roots import (
+    extend_source,
+    mint_source,
+    renew_source,
+)
+from app.modules.ai.service.field_authority import denied
 from app.modules.ai.service.field_authority_runtime import ai_field_authority
 from app.modules.ai.service.preflight_completion_service import has_preflight_marker
 from app.modules.ai.service.prepared_action_service import prepared_action_service
@@ -53,11 +69,17 @@ from app.modules.auth.service import (
     load_background_projection_authority,
     load_live_user_authority,
 )
+from app.modules.system.field_policy.delivery_catalog import CONTAINS, EQ, SORT
 from app.modules.system.models.user import User
+from app.modules.system.schemas.delivery_projection import (
+    DeliveryPage,
+    ProjectedConversation,
+)
 from app.modules.system.service.authorization_control_identity import (
     assert_identity,
     read_identity,
 )
+from app.modules.system.service.delivery_read_context import load_delivery_context
 from app.utils.pagination import build_filters
 
 
@@ -68,6 +90,92 @@ class SourceReference:
 
 
 class ChatCandidate:
+    async def routing_context(
+        self, db, tx, *, tenant, actor_user_version, conversation_id
+    ):
+        _, actor = await self._lock(
+            db,
+            tx,
+            tenant=tenant,
+            actor_user_version=actor_user_version,
+            conversation_id=conversation_id,
+        )
+        rows = list(
+            await db.scalars(
+                select(AiMessage)
+                .where(
+                    AiMessage.tenant_id == tenant.tenant_id,
+                    AiMessage.conversation_id == conversation_id,
+                    AiMessage.role == "user",
+                    AiMessage.is_active.is_(True),
+                )
+                .order_by(AiMessage.message_id.desc())
+                .limit(4097)
+            )
+        )
+        if len(rows) > 4096:
+            raise denied("FIELD_RESOURCE_LIMIT")
+        context = await load_delivery_context(
+            db,
+            tx,
+            tenant=tenant,
+            version=actor.auth_version,
+            action="delivery.message-read",
+        )
+        history, groups = [], []
+        for row in rows:
+            if not context.decisions(
+                context.record("ai.message", str(row.message_id), context.scopes)
+            )["content"].allowed:
+                continue
+            try:
+                proof = await renew_source(
+                    db, tx, tenant=tenant, version=actor.auth_version, source=row
+                )
+            except AuthorizationException:
+                continue
+            if row.content:
+                history.append(row.content[:1000])
+                groups.extend(proof["source_domains"])
+            if len(history) == 6:
+                break
+        return {"history": list(reversed(history)), "source_domains": groups}
+
+    async def input_parts(self, db, tx, *, tenant, actor_user_version, parts=None):
+        identity = await read_identity(
+            db,
+            tenant=tenant,
+            actor_user_version=actor_user_version,
+            permissions=("ai:chat:use",),
+        )
+        keys = part_keys(parts, tenant)
+        await tx.lock(LockPlan(existing=(*identity.keys, *keys)))
+        await assert_identity(db, identity)
+        await validate_message_create(
+            db,
+            tx,
+            tenant=tenant,
+            version=actor_user_version,
+            identifier=tenant.actor_user_id,
+            parts=bool(parts),
+        )
+        normalized, groups = await normalize_parts(
+            db, tx, tenant=tenant, version=actor_user_version, parts=parts
+        )
+        proof = await ai_field_authority.mint(
+            db,
+            tx,
+            tenant=tenant,
+            domains=(
+                {
+                    "kind": "input",
+                    "read": ["content", "parts"] if parts else ["content"],
+                },
+                *groups,
+            ),
+        )
+        return {"parts": normalized, "field_authority": proof}
+
     async def action_projection(
         self, db, tx, *, tenant, actor_user_version, confirmation_id
     ):
@@ -99,8 +207,19 @@ class ChatCandidate:
         await tx.lock(LockPlan(existing=identity.keys))
         await assert_identity(db, identity)
         if frozen is None:
-            return await ai_field_authority.current(db, tx, tenant=tenant)
-        return await ai_field_authority.require(db, tx, tenant=tenant, frozen=frozen)
+            await require_message_read(
+                db,
+                tx,
+                tenant=tenant,
+                version=actor_user_version,
+                identifier=tenant.actor_user_id,
+            )
+            return await ai_field_authority.mint(
+                db, tx, tenant=tenant, domains=({"kind": "input", "read": ["content"]},)
+            )
+        return await ai_field_authority.renew(
+            db, tx, tenant=tenant, actor_user_version=actor_user_version, frozen=frozen
+        )
 
     async def query_cache(self, db, tx, *, tenant, actor_user_version, entry):
         identity = await read_identity(
@@ -130,13 +249,40 @@ class ChatCandidate:
         conversation_id,
         source_id,
         trace_id,
+        extra_receipts=(),
     ):
+        if type(extra_receipts) is not tuple or len(extra_receipts) > 64:
+            raise _order_error()
+        external_keys = set()
+        for receipt in extra_receipts:
+            from app.modules.ai.service.delivery_source_domains import (  # noqa: PLC0415
+                validate_receipt,  # noqa: PLC0415
+            )
+
+            if validate_receipt(receipt) is None:
+                raise _order_error()
+            for group in receipt["source_domains"]:
+                if group.get("kind") == "file":
+                    external_keys.add(
+                        ResourceKey(K.FILE, tenant.tenant_id, int(group["file_id"]))
+                    )
+                elif group.get("kind") == "artifact":
+                    external_keys.add(
+                        ResourceKey(
+                            K.EXPORT_TASK
+                            if group["resource_kind"] == "export"
+                            else K.IMPORT_BATCH,
+                            tenant.tenant_id,
+                            group["resource_id"],
+                        )
+                    )
         await self._lock(
             db,
             tx,
             tenant=tenant,
             actor_user_version=actor_user_version,
             conversation_id=conversation_id,
+            extra=tuple(external_keys),
         )
         source = await db.get(AiMessage, source_id, populate_existing=True)
         if (
@@ -148,10 +294,40 @@ class ChatCandidate:
             or not source.is_active
         ):
             raise _order_error()
-        await ai_field_authority.require(
-            db, tx, tenant=tenant, frozen=source.field_authority, legacy=True
+        proof = await renew_source(
+            db, tx, tenant=tenant, version=actor_user_version, source=source
         )
-        return source.field_authority
+        await require_message_read(
+            db,
+            tx,
+            tenant=tenant,
+            version=actor_user_version,
+            identifier=source_id,
+            names=("content", "parts") if source.parts else ("content",),
+        )
+        _, logs = await self._facts(
+            db, tenant, conversation_id, source_id=source_id, trace_id=trace_id
+        )
+        for log in logs.values():
+            if log.status == "success":
+                result_proof = await ai_field_authority.renew(
+                    db,
+                    tx,
+                    tenant=tenant,
+                    actor_user_version=actor_user_version,
+                    frozen=log.result_field_authority,
+                )
+                proof = extend_source(proof, *result_proof["source_domains"])
+        for receipt in extra_receipts:
+            current = await ai_field_authority.renew(
+                db,
+                tx,
+                tenant=tenant,
+                actor_user_version=actor_user_version,
+                frozen=receipt,
+            )
+            proof = extend_source(proof, *current["source_domains"])
+        return proof
 
     async def list_conversations(self, db, tx, *, tenant, actor_user_version, query):
         identity = await read_identity(
@@ -184,6 +360,22 @@ class ChatCandidate:
         await assert_identity(db, identity)
         if tuple(await db.scalars(owned)) != ids:
             raise _order_error()
+        context = await load_delivery_context(
+            db,
+            tx,
+            tenant=tenant,
+            version=actor_user_version,
+            action="delivery.conversation-list",
+        )
+        dependencies = [("update_time", SORT)]
+        if query.title:
+            await require_known_title_query(db, context)
+            dependencies.append(("title", CONTAINS))
+        if query.status is not None:
+            dependencies.append(("status", EQ))
+        await context.prove(
+            db, "ai.conversation", AiConversation.__table__, tuple(dependencies)
+        )
         filters = build_filters(
             AiConversation,
             {"title": ("title", "contains"), "status": "status"},
@@ -200,21 +392,37 @@ class ChatCandidate:
                 *filters
             )
         )
-        rows = await db.scalars(
-            select(AiConversation)
-            .where(*filters)
-            .order_by(
-                AiConversation.update_time.desc(), AiConversation.conversation_id.desc()
-            )
-            .offset((query.current - 1) * query.size)
-            .limit(query.size)
-            .execution_options(populate_existing=True)
+        rows = await context.rows(
+            db,
+            "ai.conversation",
+            AiConversation,
+            "conversation_id",
+            predicates=tuple(filters),
+            order=(
+                AiConversation.update_time.desc(),
+                AiConversation.conversation_id.desc(),
+            ),
+            offset=(query.current - 1) * query.size,
+            maximum=query.size,
         )
-        return PageResult(
-            records=[ConversationOut.model_validate(row) for row in rows],
+        records = []
+        for record, values, _ in rows:
+            values["conversation_id"] = str(values["conversation_id"])
+            values["field_policy"] = context.policy(record)
+            records.append(ProjectedConversation.model_validate(values))
+        policy = context.policy(
+            context.record("ai.conversation", "query", context.scopes)
+        )
+        try:
+            await require_known_title_query(db, context)
+        except AuthorizationException:
+            policy["query"] = [name for name in policy["query"] if name != "title"]
+        return DeliveryPage(
+            records=records,
             total=total,
             current=query.current,
             size=query.size,
+            field_policy=policy,
         )
 
     async def conversation(
@@ -260,6 +468,19 @@ class ChatCandidate:
         if selection is not None:
             await recheck_model(db, tx, tenant, selection)
             data = dict(data, model_name=str(selection.model_id))
+        await validate_conversation_write(
+            db,
+            tx,
+            tenant=tenant,
+            version=actor_user_version,
+            identifier=key.identity[0],
+            data=data,
+            create=conversation_id is None,
+        )
+        if "title" in data:
+            data = dict(
+                data, title_origin="fixed" if data["title"] == "新对话" else "authored"
+            )
         if conversation_id is None:
             if selection is None:
                 raise _order_error()
@@ -376,13 +597,26 @@ class ChatCandidate:
             dependency_message_ids=tuple(dependencies),
         ):
             raise _order_error()
+        await validate_message_create(
+            db,
+            tx,
+            tenant=tenant,
+            version=actor_user_version,
+            identifier=reference.message_id,
+        )
         await tx.insert_reserved(
             key,
             {
                 "conversation_id": conversation_id,
                 "role": "user",
-                "field_authority": await ai_field_authority.current(
-                    db, tx, tenant=tenant
+                "field_authority": await mint_source(
+                    db,
+                    tx,
+                    tenant=tenant,
+                    version=actor_user_version,
+                    identifier=reference.message_id,
+                    conversation_id=conversation_id,
+                    dependencies=tuple(dependencies),
                 ),
                 "content": content,
                 "trace_id": reference.trace_id,
@@ -683,8 +917,8 @@ class ChatCandidate:
         actions, logs = await self._facts(
             db, tenant, conversation_id, source_id=source_id, trace_id=trace_id
         )
-        await ai_field_authority.require(
-            db, tx, tenant=tenant, frozen=source.field_authority, legacy=True
+        source_proof = await renew_source(
+            db, tx, tenant=tenant, version=actor_user_version, source=source
         )
         if recovery_confirmation_id is not None:
             action = next(
@@ -835,7 +1069,11 @@ class ChatCandidate:
             lineage = result_projection_service.freeze_lineage(
                 tenant=tenant,
                 agent_code=value.agent_code,
-                field_authority=value.field_authority,
+                field_authority=extend_source(
+                    source_proof,
+                    *(lineage.field_authority["source_domains"] if lineage else ()),
+                    *value.field_authority["source_domains"],
+                ),
                 tool_codes=(
                     *(lineage.tool_codes if lineage else ()),
                     *value.tool_codes,
@@ -882,7 +1120,7 @@ class ChatCandidate:
             lineage = result_projection_service.freeze_lineage(
                 tenant=tenant,
                 agent_code=agent_code,
-                field_authority=source.field_authority,
+                field_authority=source_proof,
                 tool_codes=[],
                 subject_refs=[],
                 data_scope_hash=await result_projection_service.compute_data_scope_hash(
@@ -948,7 +1186,10 @@ class ChatCandidate:
                 lineage = result_projection_service.freeze_lineage(
                     tenant=tenant,
                     agent_code=lineage.agent_code,
-                    field_authority=lineage.field_authority,
+                    field_authority=extend_source(
+                        lineage.field_authority,
+                        *prior.field_authority["source_domains"],
+                    ),
                     tool_codes=(*prior.tool_codes, *lineage.tool_codes),
                     subject_refs=(*prior.subject_refs, *lineage.subject_refs),
                     data_scope_hash=(
@@ -989,6 +1230,9 @@ class ChatCandidate:
                 ],
             )
         changes = {
+            "field_authority": lineage.field_authority
+            if lineage is not None
+            else source_proof,
             "projection_dependency_message_ids": [str(v) for v in dependencies],
             "content": content
             if unknown or hidden or message is None or not prior_content
@@ -1002,6 +1246,13 @@ class ChatCandidate:
                 cards,
             ),
         }
+        if any(
+            group.get("kind") == "completion"
+            for group in changes["field_authority"]["source_domains"]
+        ):
+            # A factual receipt licenses exactly this closed text, never prose
+            # emitted by a model that may have seen a subsequently hidden value.
+            changes["content"] = "操作状态已记录，请查看操作状态。"
         if lineage is not None:
             changes.update(
                 tool_codes=list(lineage.tool_codes),
@@ -1020,7 +1271,6 @@ class ChatCandidate:
                     conversation_id=conversation_id,
                     parent_message_id=source_id,
                     role="assistant",
-                    field_authority=source.field_authority,
                     trace_id=trace_id,
                     agent_code=agent_code,
                     is_active=True,
@@ -1148,7 +1398,13 @@ class ChatCandidate:
                 tenant=tenant,
             )
             return {
-                "conversation": ConversationOut.model_validate(conversation),
+                "conversation": await project_conversation(
+                    db,
+                    tx,
+                    tenant=tenant,
+                    version=actor_user_version,
+                    identifier=conversation_id,
+                ),
                 "messages": projected,
                 "pendingActions": [
                     await prepared_action_service.project_pending_out(

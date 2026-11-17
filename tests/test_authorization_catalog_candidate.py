@@ -744,7 +744,7 @@ async def test_input_budget_rejected_before_session(kind):
     assert error.value.error_code == "AUTHORIZATION_PLAN_LIMIT_EXCEEDED"
 
 
-async def test_stored_provider_config_budget_precedes_dns(catalog_sessions):
+async def test_stored_provider_config_budget_precedes_probe_dns(catalog_sessions):
     factory, plain = catalog_sessions
     async with plain() as setup:
         await setup.execute(
@@ -758,10 +758,9 @@ async def test_stored_provider_config_budget_precedes_dns(catalog_sessions):
             await catalog.prepare(
                 db,
                 **request(
-                    "model.update",
+                    "provider.probe",
                     provider_id=501,
                     target_id=601,
-                    payload=ModelUpdate(name="new"),
                 ),
             )
         assert error.value.error_code == "AUTHORIZATION_PLAN_LIMIT_EXCEEDED"

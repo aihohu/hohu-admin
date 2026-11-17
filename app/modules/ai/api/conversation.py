@@ -2,17 +2,20 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import require_ai_chat_use
-from app.core.base_response import PageResult, ResponseModel
+from app.core.base_response import ResponseModel
 from app.db import authorization_http
 from app.db.session import get_db
 from app.modules.ai.schemas.conversation import (
     ConversationCreate,
-    ConversationOut,
     ConversationQuery,
     ConversationUpdate,
 )
 from app.modules.auth.service import access_identity
 from app.modules.system.models.user import User
+from app.modules.system.schemas.delivery_projection import (
+    DeliveryPage,
+    ProjectedConversation,
+)
 
 router = APIRouter()
 
@@ -20,7 +23,8 @@ router = APIRouter()
 @router.get(
     "/list",
     summary="获取会话列表",
-    response_model=ResponseModel[PageResult[ConversationOut]],
+    response_model=ResponseModel[DeliveryPage[ProjectedConversation]],
+    response_model_exclude_unset=True,
 )
 async def get_conversation_list(
     query: ConversationQuery = Depends(),

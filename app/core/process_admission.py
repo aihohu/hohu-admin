@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import time
 from contextlib import AsyncExitStack
 from dataclasses import asdict
 
@@ -37,7 +38,16 @@ class ProcessAdmission:
             )
             output.flush()
             os.fsync(output.fileno())
-        os.replace(temporary, self.path)
+        # Windows shared volumes can briefly refuse replacement while a reader
+        # closes its handle. Failure remains fatal; never attest an unwritten state.
+        for attempt in range(5):
+            try:
+                os.replace(temporary, self.path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.01)
 
     async def start(self):
         self.gate.require_open()

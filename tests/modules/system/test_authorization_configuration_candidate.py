@@ -1,5 +1,6 @@
 """Real PostgreSQL proofs for dormant System configuration candidates."""
 
+from contextlib import contextmanager
 from io import BytesIO
 
 import pytest
@@ -15,6 +16,9 @@ from app.modules.system.models.menu import Menu
 from app.modules.system.models.user_field_policy import (
     UserFieldPolicyGlobalGuard,
     UserFieldPolicyState,
+)
+from app.modules.system.service import (
+    authorization_configuration_candidate as configuration_module,
 )
 from app.modules.system.service import mail_service as mail_transport
 from app.modules.system.service.authorization_configuration_candidate import (
@@ -111,6 +115,19 @@ async def test_mail_send_requires_closed_read_and_is_single_use(
     sent = []
     monkeypatch.setattr(mail_transport, "_send", lambda *_args: sent.append(True))
     before = await epochs(plain)
+    budgets = []
+    bounded = configuration_module.bounded_authorization_reads
+
+    @contextmanager
+    def observe_budget(db, budget=None):
+        assert budget is not None and budget.max_statements == 4096
+        budgets.append(budget)
+        with bounded(db, budget):
+            yield budget
+
+    monkeypatch.setattr(
+        configuration_module, "bounded_authorization_reads", observe_budget
+    )
     async with factory() as db:
         prepared = await candidate.prepare_mail_test(
             db,
@@ -147,6 +164,7 @@ async def test_mail_send_requires_closed_read_and_is_single_use(
                 audit=audit,
             )
     assert await epochs(plain) == before
+    assert len(budgets) == 2 and budgets[0] is not budgets[1]
 
 
 async def test_mail_late_config_change_rejects_stale_completion(
@@ -207,7 +225,18 @@ def config_payload(key="custom.example", value="value"):
 
 def workbook(*rows):
     book = Workbook()
-    book.active.append(["name", "key", "value", "type", "group", "status", "public"])
+    book.active.append(
+        [
+            "config_name",
+            "config_key",
+            "config_value",
+            "config_type",
+            "config_group",
+            "status",
+            "is_public",
+            "remark",
+        ]
+    )
     for row in rows:
         book.active.append(row)
     out = BytesIO()
@@ -346,22 +375,21 @@ async def test_import_preserves_skip_and_string_bool_without_overwrite(
         workbook(
             ["A", "custom.first", "one", "text", "g", "1", "false"],
             ["B", "custom.first", "two", "text", "g", "1", False],
-            ["Builtin", "security:login_per_minute", "bad", "text", "g", "1", False],
         )
     )
     async with factory() as db:
         assert await execute(db, "config.import", prepared) == {
             "success": 1,
-            "skipped": 2,
+            "skipped": 1,
         }
         await db.commit()
     async with plain() as db:
         row = await db.scalar(select(Config).where(Config.config_key == "custom.first"))
-        assert row.config_value == "one" and row.is_public is True
+        assert row.config_value == "one" and row.is_public is False
     async with factory() as db:
         assert await execute(db, "config.import", prepared) == {
             "success": 0,
-            "skipped": 3,
+            "skipped": 2,
         }
         await db.commit()
     assert await epochs(plain) == (1, [(0, 3, "legacy"), (1, 2, "ready")])

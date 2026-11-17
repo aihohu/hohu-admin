@@ -10,7 +10,7 @@ CLI 使用独立 Python 虚拟环境，安装固定版本 `python -m pip install
 
 - 使用与目标 Backend 相同完整 SHA 的只读源码和锁定依赖，设置准确的 `RELEASE_BUILD_SHA`。控制器需要 Python >=3.12；Compose 控制器在宿主使用 Docker CLI，不在普通 API 容器内挂 Docker socket。
 - 管理员先建立目标数据库与一个独立、非 superuser 的应用角色，赋予该角色目标数据库及 `public` schema 的迁移权限。API/scheduler 使用这个应用角色；宿主 `AUTHORIZATION_MAINTENANCE_DATABASE_URL` 使用独立管理身份，连接同一目标数据库。不要把维护 URL、维护密码放进应用的共享 `.env`。
-- 新装准备空数据库，禁止先启动应用；设置受控的 `AUTHORIZATION_MAINTENANCE_PASSWORD` 作为初始管理员密码。升级只接受 `d01010100101` 或当前 `e0204a000001`；其他起点先走单独验证的升级路径。此入口只支持单应用数据库角色。
+- 新装准备空数据库，禁止先启动应用；设置受控的 `AUTHORIZATION_MAINTENANCE_PASSWORD` 作为初始管理员密码。升级接受 `d01010100101`、`e0204a000001`、`e020f1200001`、`e020f2a00001`、`e020f2b00001`、`e020f2c00001`、`e020f3a00001` 或当前 `e020f3b00001`；其他起点先走单独验证的升级路径。此入口只支持单应用数据库角色。
 - 备份配套数据库、公开/私有文件、原密钥、配置和撤权事实。旧 API、scheduler、API 内 AI 恢复/过期任务、维护脚本及外部写者全部纳入清点；用户入口保持维护状态。
 - 控制目录由维护人员保护，直接启动实例与宿主控制器共享正确的运行登记目录。每次新操作保留之前证据，不能通过删除 `stop.json` 或失败回执来绕过恢复检查。
 
@@ -64,12 +64,24 @@ python -m tools.ops.controlled_install resume \
 hohu deploy --source official --no-migrate
 ```
 
-这里的 `--no-migrate` 是在必需迁移与 seed 已完成后的交接，不是跳过它们。CLI 本身不校验回执，操作者必须保留关联证据；不能用这个选项绕过失败步骤。保持入口仅供验收，scheduler 暂用同一 Backend 镜像的等待命令，确认受控任务后才恢复原命令与重启策略。直接启动采用同样的 prepare/resume 协议，再用部署方原有启动方式运行配套进程。
+这里的 `--no-migrate` 是在必需迁移与 seed 已完成后的交接，不是跳过它们。CLI 本身不校验回执，操作者必须保留关联证据；不能用这个选项绕过失败步骤。保持入口仅供验收；scheduler 使用同一 Backend 镜像的实际 `python -m app.scheduler_worker` 入口，API 内 AI 恢复/过期任务同样纳入维护清点。等待命令不能作为 scheduler 运行或停写证明。直接启动采用同样的 prepare/resume 协议，再用部署方原有启动方式运行配套进程。
 
 此路径实际迁移执行者是宿主控制器，不会再运行CLI模板的db-migrator容器。该服务配置仍固定到同一Backend引用以防误用，但不能将其声明为已运行的迁移镜像。最终产物验收还须核对宿主源码、迁移、种子与锁定依赖的来源，证明与目标Backend镜像对应，并分别记录控制器运行环境和应用镜像身份。
 
 ## 失败与恢复
 
+通用策略需要受控编辑时，使用 `policy-prepare` 替代上述 `prepare`，可加 `--policy-port 8765`。其余 inventory、bootstrap、build、角色和控制目录要求相同。加入 `--policy-web-directory` 与完整 `--policy-web-commit` 可提供已验收的真实Web构建，页面使用受控密码登录和内存短期会话，原命令入口仍使用已有管理JWT。升级在DDL之前预检每个已初始化或启用租户的专用管理权限，缺失则保持停写并拒绝迁入；新装在种子后预检。入口仅监听本机，不启动普通业务任务；详见[候选管理与身份交接](FIELD-POLICY-MANAGEMENT.md)及[通用字段策略存储](FIELD-POLICY-STORAGE.md)。普通 `prepare` 只安装结构和种子，不自动迁入通用授权状态。
+
+安装回执 schema 为2，绑定准备记录的原始字节摘要；旧schema回执不能用于当前恢复。通用字段策略启用需选择 `policy-prepare`，部署方配置 `FIELD_POLICY_QUALIFICATION_FILE`（schema 2、≤1MiB、最长24h、精确Backend构建/当前目录/迁移与全部验收证据）；普通 `prepare` 不自动激活字段策略。准备页逐租户保存候选、封存完整清单、ready再显式activate，最后执行finish。finish须核验完整租户集合及全部活动清单/对象；只有监听退出、无在途事务后才生成schema 3的 `qualified-stopped` 记录。无资格时finish只关闭候选编辑，normal resume继续拒绝。
+
+恢复要求当前资格未过期/未变，准备进程确已退出，build、databaseOID、部署manifest、stop/install/准备记录字节绑定一致，再满足原数据库会话/prepared核验和等待窗口。两个维护入口均执行这些检查；stop中的 `policy_prepare_required: true` 不因删除准备文件而消失。失败保持停写，不能删除标记、替换旧回执或手造资格绕过。恢复只开放admission，进程和流量仍由部署方显式启动；首次全系统激活需要该完整流程的新验收证据。
+
 异常、取消、迁移/seed或回执写入失败均不自动恢复 admission，也不自动重试业务或启动服务。`stop.json` 表示维护尚未解除；失败时保持入口隔离，先核对已提交的迁移/seed事实及备份。已迁移但seed未知不能重新当作空库bootstrap；通过现有维护修复协议处理，不能删记录或`stamp head`伪装成功。成功回执只记录这一阶段，不是正式发布资格或镜像正确性的证明。
 
 激活前恢复要求原版本、数据库、文件与密钥配套。激活后不得回接0.1.6后端或直接开放旧备份，须证明撤权/字段策略连续性和故障后的副作用，再向前恢复；详见[数据库迁移与恢复](DATABASE-MIGRATIONS.md)。最终产品仍需实际镜像组合的新装、升级、恢复、旧客户端拒绝与AI写一致性验收。
+
+### 普通对象目录扩展
+
+受控准备使用当前完整的23对象目录。受支持的历史目录仅在全部租户尚未激活时、完整停写围栏内扩展：保留原修订/manifest历史，当前绑定复制为新目录修订，递增绑定/head/object版本与授权epoch，旧预览和候选清单失效。新增对象不自动授予任何字段。维护回执包含目录摘要、受影响租户与修订对应关系。重复准备同一当前目录会完整核验当前绑定、候选和活动封存清单、各对象摘要与用户兼容镜像，不推进版本、epoch 或改写历史。合法 enforcing 或 frozen 状态可以进入同目录准备修复，且可与新租户空的 preparing 状态并存；过期 ready 不自动刷新，finish 仍拒绝活跃租户的冻结或未完成状态。已经激活的历史目录不接受目录扩展路径，须另行验证升级方案。
+
+`e020f2a00001` 为字典关联外键增加更新级联，并建立每租户每类型唯一默认项索引。若历史数据存在多个默认项，升级会中止；须先按已授权的数据修复流程处理冲突，再重跑。安装不会自动修改业务默认项，也不会因 DDL 或候选准备成功而恢复服务。

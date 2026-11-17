@@ -1,17 +1,4 @@
-"""Routing feedback 查询与 API 测试。
-
-污染说明：
-本地/CI 数据库里存在其它测试文件（tests/modules/ai/agents/supervisor/
-test_routing_feedback.py）真实 commit 但不 teardown 的 AiRoutingFeedback 残留
-（478 行 user_mgmt），summary 端点是全局聚合，无法靠
-user/tenant 隔离. 本文件用「sentinel original_agent code」策略：
-- fixture seed 的 feedback 行用唯一前缀 code（如 `test_rf_<snowflake>_role_mgmt`）
-  避开预置 agent code，summary 聚合时这些 sentinel 自成一组，断言时按前缀过滤
-  找到自己 seed 的部分.
-- 同时 seed 对应的 AiAgent 行（sentinel code → name 映射）让 service 的
-  agent name 查询能命中.
-- teardown 精准 DELETE 所有 sentinel code 开头的 agent + feedback.
-"""
+"""Feedback SQL and real API tests with fresh tenant-scoped facts and registered Agents."""
 
 # ruff: noqa: ARG001, PLC0415  test fixture 占位参数 + 函数内 import（沿用 ai conftest 约定）
 
@@ -25,165 +12,162 @@ _SENTINEL_PREFIX = "test_rf_"
 
 
 @pytest.fixture
-async def seed_feedback():
-    """插 5 行 sentinel feedback：3 wrong（其中 2 行 role_mgmt→user_mgmt）+ 2 correct.
-
-    Plan 原始版本用 db_session.flush() + 硬编码 ID，但：
-    1. agent codes shared/user_mgmt 是 seed_ai_agents.py 预置 unique，硬塞会撞 constraint.
-    2. db_session fixture outer transaction + rollback，API endpoint 看不到.
-    3. 全局 summary 聚合会被其它测试残留污染.
-
-    本 fixture 策略：
-    - 用 `test_rf_<snowflake>_<role>` 形式的 sentinel code 作为 original_agent /
-      corrected_agent，避开预置 code，summary 聚合时这些行自成一组.
-    - 同时 seed 对应 AiAgent 行（4 个 sentinel code），让 service 的 name 查询命中.
-    - 用独立 AsyncSessionLocal() 真实 commit；teardown 按 sentinel 前缀精准 DELETE.
-    """
-    from sqlalchemy import delete
+async def seed_feedback(authed_client, monkeypatch):
+    """Fresh owned tenant, real Agent bindings, original dataset and exact cleanup."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
 
     from app.core.id_generator import next_id
-    from app.core.security import get_password_hash
+    from app.core.security import create_access_token
+    from app.db import authorization_http, session
+    from app.db.base import role_menus, user_roles
+    from app.db.request_session import RequestSession
     from app.db.session import engine
+    from app.modules.ai.agents.tools import load_builtin_tools
     from app.modules.ai.models.agent import AiAgent
+    from app.modules.ai.models.role_ai_agent import RoleAiAgent
     from app.modules.ai.models.routing_feedback import AiRoutingFeedback
+    from app.modules.system.models.menu import Menu
+    from app.modules.system.models.role import Role
+    from app.modules.system.models.setting import SystemSetting
     from app.modules.system.models.user import User
-    from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
+    from app.modules.system.models.user_field_policy import UserFieldPolicyState
+    from tests.committed_database import isolated_migrated_schema
 
-    # 唯一组 ID（一组测试内共享），所有 sentinel code / user_name 都带上
-    group_id = next_id()
-    g = f"{_SENTINEL_PREFIX}{group_id}_"
-
-    # 4 个 sentinel agent code（含 config_mgmt，tie_breaker 测试需要）
-    agent_specs = {
-        f"{g}shared": "Shared",
-        f"{g}user_mgmt": "User Mgmt",
-        f"{g}role_mgmt": "Role Mgmt",
-        f"{g}config_mgmt": "Config Mgmt",
+    load_builtin_tools()
+    client, _ = authed_client
+    previous = client.headers.get("Authorization")
+    user_id, role_id = next_id(), next_id()
+    codes = {
+        "shared": "shared",
+        "user_mgmt": "user_mgmt",
+        "role_mgmt": "role_mgmt",
+        "config_mgmt": "dept_mgmt",
     }
-
-    async with AsyncSessionLocal() as s:
-        # 1. 创建 sentinel agent 行（永远是新增，因为 code 带唯一组 ID）
-        for code, name in agent_specs.items():
-            s.add(
+    async with isolated_migrated_schema(engine.url) as scoped:
+        AsyncSessionLocal = async_sessionmaker(scoped, expire_on_commit=False)
+        monkeypatch.setattr(authorization_http, "engine", scoped)
+        monkeypatch.setattr(
+            session,
+            "AsyncSessionLocal",
+            async_sessionmaker(scoped, class_=RequestSession, expire_on_commit=False),
+        )
+        async with AsyncSessionLocal() as db, db.begin():
+            tid = 0
+            assert await db.get(UserFieldPolicyState, tid) is not None
+            db.add(
+                Role(
+                    tenant_id=tid,
+                    role_id=role_id,
+                    role_name="Feedback test",
+                    role_code="R_SUPER",
+                    data_scope="1",
+                    status="1",
+                )
+            )
+            db.add(
+                User(
+                    tenant_id=tid,
+                    user_id=user_id,
+                    user_name="user",
+                    hashed_password="unusable",
+                    status="1",
+                )
+            )
+            db.add(
+                SystemSetting(
+                    tenant_id=tid,
+                    setting_key="ai:enabled_tools",
+                    setting_value='["file.parse"]',
+                    status="1",
+                )
+            )
+            await db.flush()
+            await db.execute(
+                user_roles.insert().values(
+                    tenant_id=tid, user_id=user_id, role_id=role_id
+                )
+            )
+            for permission in (
+                "ai:chat:use",
+                "ai:routing-feedback:list",
+                "system:user:list",
+                "system:role:list",
+                "system:dept:list",
+                "ai:file:parse",
+            ):
+                menu = Menu(
+                    tenant_id=tid,
+                    menu_id=next_id(),
+                    menu_name=permission,
+                    menu_type="F",
+                    status="1",
+                    permission=permission,
+                )
+                db.add(menu)
+                await db.flush()
+                await db.execute(
+                    role_menus.insert().values(
+                        tenant_id=tid, role_id=role_id, menu_id=menu.menu_id
+                    )
+                )
+            agents = [
                 AiAgent(
                     agent_id=next_id(),
                     code=code,
-                    name=name,
-                    description=f"desc {code}",
+                    name=code,
+                    description="Fixture published Agent",
                     enabled=True,
-                    is_builtin=False,
-                    display_order=0,
-                    risk_appetite="balanced",
                 )
-            )
-
-        # 2. 新建测试 user
-        user_id = next_id()
-        s.add(
-            User(
-                tenant_id=0,
-                user_id=user_id,
-                user_name=f"{g}user",
-                nickname=f"{g}user",
-                hashed_password=get_password_hash("x"),
-                status="1",
-            )
+                for code in codes.values()
+            ]
+            db.add_all(agents)
+            await db.flush()
+            for agent in agents:
+                db.add(
+                    RoleAiAgent(
+                        tenant_id=tid,
+                        role_id=role_id,
+                        agent_id=agent.agent_id,
+                        enabled=True,
+                    )
+                )
+            now = datetime.now()
+            for number, original, corrected, feedback, days in (
+                (1, "role_mgmt", "user_mgmt", "wrong", 1),
+                (2, "role_mgmt", "user_mgmt", "wrong", 2),
+                (3, "config_mgmt", "shared", "wrong", 3),
+                (4, "user_mgmt", None, "correct", 1),
+                (5, "shared", None, "correct", 1),
+            ):
+                db.add(
+                    AiRoutingFeedback(
+                        feedback_id=next_id(),
+                        tenant_id=tid,
+                        message_id=next_id(),
+                        user_id=user_id,
+                        original_agent=codes[original],
+                        corrected_agent=codes[corrected] if corrected else None,
+                        feedback=feedback,
+                        trace_id=f"rf-{tid}-{number}",
+                        create_time=now - timedelta(days=days),
+                    )
+                )
+        client.headers["Authorization"] = "Bearer " + create_access_token(
+            subject=str(user_id), tenant_id=tid, tenant_version=1, user_version=1
         )
-
-        # 3. 5 行 feedback（trace_id 也带 sentinel 前缀，便于二次确认归属）
-        now = datetime.now()
-        feedback_rows = [
-            AiRoutingFeedback(
-                feedback_id=next_id(),
-                tenant_id=0,
-                message_id=next_id(),
-                user_id=user_id,
-                original_agent=f"{g}role_mgmt",
-                feedback="wrong",
-                corrected_agent=f"{g}user_mgmt",
-                trace_id=f"{g}t1",
-                create_time=now - timedelta(days=1),
-            ),
-            AiRoutingFeedback(
-                feedback_id=next_id(),
-                tenant_id=0,
-                message_id=next_id(),
-                user_id=user_id,
-                original_agent=f"{g}role_mgmt",
-                feedback="wrong",
-                corrected_agent=f"{g}user_mgmt",
-                trace_id=f"{g}t2",
-                create_time=now - timedelta(days=2),
-            ),
-            AiRoutingFeedback(
-                feedback_id=next_id(),
-                tenant_id=0,
-                message_id=next_id(),
-                user_id=user_id,
-                original_agent=f"{g}config_mgmt",
-                feedback="wrong",
-                corrected_agent=f"{g}shared",
-                trace_id=f"{g}t3",
-                create_time=now - timedelta(days=3),
-            ),
-            AiRoutingFeedback(
-                feedback_id=next_id(),
-                tenant_id=0,
-                message_id=next_id(),
-                user_id=user_id,
-                original_agent=f"{g}user_mgmt",
-                feedback="correct",
-                corrected_agent=None,
-                trace_id=f"{g}t4",
-                create_time=now - timedelta(days=1),
-            ),
-            AiRoutingFeedback(
-                feedback_id=next_id(),
-                tenant_id=0,
-                message_id=next_id(),
-                user_id=user_id,
-                original_agent=f"{g}shared",
-                feedback="correct",
-                corrected_agent=None,
-                trace_id=f"{g}t5",
-                create_time=now - timedelta(days=1),
-            ),
-        ]
-        s.add_all(feedback_rows)
-
-        await s.commit()
-
-    yield {
-        "group_id": group_id,
-        "prefix": g,
-        "user_id": user_id,
-        "agent_codes": {
-            "shared": f"{g}shared",
-            "user_mgmt": f"{g}user_mgmt",
-            "role_mgmt": f"{g}role_mgmt",
-            "config_mgmt": f"{g}config_mgmt",
-        },
-    }
-
-    # teardown：按 sentinel 前缀精准清理（不依赖 user_id / agent_id 列表）
-    async with AsyncSessionLocal() as s:
-        # feedback：按 original_agent LIKE prefix% OR corrected_agent LIKE prefix%
-        # 用 trace_id LIKE prefix% 更精准（trace_id 也带组 ID 前缀）
-        await s.execute(
-            delete(AiRoutingFeedback).where(AiRoutingFeedback.trace_id.like(f"{g}%"))
-        )
-        # Agent：按 code LIKE prefix%
-        await s.execute(delete(AiAgent).where(AiAgent.code.like(f"{g}%")))
-        # User：按 user_name LIKE prefix%
-        await s.execute(delete(User).where(User.user_name.like(f"{g}%")))
-        await s.commit()
-
-    # 释放连接池（mirror seed_role_agents / seed_test_message）
-    try:
-        await engine.dispose()
-    except RuntimeError as e:
-        if "Event loop is closed" not in str(e):
-            raise
+        try:
+            yield {
+                "group_id": role_id,
+                "tenant_id": tid,
+                "prefix": "",
+                "user_id": user_id,
+                "agent_codes": codes,
+                "sessions": AsyncSessionLocal,
+                "engine": scoped,
+            }
+        finally:
+            if previous:
+                client.headers["Authorization"] = previous
 
 
 def _filter_sentinel(items: list, key: str, prefix: str) -> list:
@@ -326,9 +310,10 @@ async def test_top_corrected_tie_breaker(
     from sqlalchemy import delete
 
     from app.core.id_generator import next_id
-    from app.db.session import engine
     from app.modules.ai.models.routing_feedback import AiRoutingFeedback
-    from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
+
+    AsyncSessionLocal = seed_feedback["sessions"]
+    engine = seed_feedback["engine"]
 
     prefix = seed_feedback["prefix"]
     user_id = seed_feedback["user_id"]
@@ -340,7 +325,7 @@ async def test_top_corrected_tie_breaker(
         s.add(
             AiRoutingFeedback(
                 feedback_id=extra_id,
-                tenant_id=0,
+                tenant_id=seed_feedback["tenant_id"],
                 message_id=next_id(),
                 user_id=user_id,
                 original_agent=config_code,
@@ -638,23 +623,22 @@ async def test_list_joins_username(
     """
     client, _ = authed_client
     prefix = seed_feedback["prefix"]
-    user_id = seed_feedback["user_id"]
     user_name = f"{prefix}user"
 
     resp = await client.get("/ai/routing-feedback/list?days=7&size=100&feedback=all")
     assert resp.status_code == 200, resp.text
     records = resp.json()["data"]["records"]
     # 找到所有指向 fixture sentinel user 的行
-    sentinel_user_rows = [r for r in records if r["userId"] == str(user_id)]
+    sentinel_user_rows = [r for r in records if r.get("userName") == user_name]
     assert sentinel_user_rows, "no rows joined to fixture sentinel user"
     for r in sentinel_user_rows:
         assert r["userName"] == user_name
 
 
-async def test_list_user_deleted_returns_empty_username(
+async def test_list_user_deleted_omits_unknown_username(
     authed_client: tuple[AsyncClient, str], db_session, seed_feedback
 ):
-    """LEFT JOIN User 缺失（user 被删除）→ userName 返回空串.
+    """没有可信用户来源时省略userName，不能伪造合法空值.
 
     用 ghost-user 模式：插一行 feedback 指向不存在的 user_id，避免实际删 user
     带来的 teardown 复杂度。trace_id 带 `<prefix>ghost_` 前缀方便定位 + 清理.
@@ -662,13 +646,15 @@ async def test_list_user_deleted_returns_empty_username(
     from sqlalchemy import delete
 
     from app.core.id_generator import next_id
-    from app.db.session import engine
     from app.modules.ai.models.routing_feedback import AiRoutingFeedback
-    from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
+
+    AsyncSessionLocal = seed_feedback["sessions"]
+    engine = seed_feedback["engine"]
 
     client, _ = authed_client
     prefix = seed_feedback["prefix"]
     ghost_user_id = next_id()
+    ghost_feedback_id = next_id()
     role_code = seed_feedback["agent_codes"]["role_mgmt"]
     ghost_trace = f"{prefix}ghost_"
 
@@ -676,8 +662,8 @@ async def test_list_user_deleted_returns_empty_username(
     async with AsyncSessionLocal() as s:
         s.add(
             AiRoutingFeedback(
-                feedback_id=next_id(),
-                tenant_id=0,
+                feedback_id=ghost_feedback_id,
+                tenant_id=seed_feedback["tenant_id"],
                 message_id=next_id(),
                 user_id=ghost_user_id,
                 original_agent=role_code,
@@ -695,13 +681,13 @@ async def test_list_user_deleted_returns_empty_username(
         )
         assert resp.status_code == 200, resp.text
         records = resp.json()["data"]["records"]
-        ghost_rows = [r for r in records if r["userId"] == str(ghost_user_id)]
+        ghost_rows = [r for r in records if r["feedbackId"] == str(ghost_feedback_id)]
         assert ghost_rows, "ghost feedback row missing from list"
         assert len(ghost_rows) >= 1
         for r in ghost_rows:
             # LEFT JOIN 缺失 user → service 用 `username or ""` 填空串
-            assert r["userName"] == ""
-            assert r["traceId"] == ghost_trace
+            assert "userName" not in r
+            assert "userId" not in r and "traceId" not in r
     finally:
         async with AsyncSessionLocal() as s:
             await s.execute(

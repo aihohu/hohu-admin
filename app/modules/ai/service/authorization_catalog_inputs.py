@@ -13,6 +13,7 @@ from app.db.authorization_plan_session import _order_error
 from app.modules.ai.core.generation_settings import generation_settings
 from app.modules.ai.core.provider_egress import provider_egress
 from app.modules.ai.schemas.agent_admin import AgentAdminUpdateReq
+from app.modules.ai.schemas.control_config import validate_control_config
 from app.modules.ai.schemas.model import ModelCreate, ModelUpdate
 from app.modules.ai.schemas.provider import (
     ProviderCreate,
@@ -220,9 +221,15 @@ def freeze_request(
             raise limit_error()
         role_agent_service._normalize_agent_ids(data["agent_ids"])
     if "config" in data:
+        validate_control_config(
+            data["config"],
+            kind="model" if operation.startswith("model.") else "provider",
+        )
         provider_egress.validate_adapter_config(data["config"])
         if operation.startswith("model."):
             generation_settings(data["config"])
+    if operation == "provider.probe_draft":
+        validate_control_config(data["model"].get("config"), kind="model")
     capabilities = data.get("capabilities")
     if capabilities is not None and (
         len(capabilities) > 32 or any(len(value) > 64 for value in capabilities)

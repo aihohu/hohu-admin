@@ -51,8 +51,14 @@ from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.ai.service.prepared_action_service import prepared_action_service
 from app.modules.auth.service import get_current_user, load_live_user_authority
-from app.modules.job import task_registry
+from app.modules.job import execution_contract, task_registry
+from app.modules.job.builtin_task_specs import builtin_task_contracts
 from app.modules.job.models.job import SysJob
+from app.modules.job.task_contracts import (
+    ClosedTaskArgs,
+    TaskContractRegistry,
+    TaskSpec,
+)
 from app.modules.system.models.dept import Dept
 from app.modules.system.models.menu import Menu
 from app.modules.system.models.role import Role
@@ -60,6 +66,7 @@ from app.modules.system.models.user import User
 from app.modules.system.service.authorization_ai_tool_adapter import (
     system_ai_tool_adapter,
 )
+from tests.ai_source_fixtures import authored_source
 from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 
 TOOLS = (
@@ -232,6 +239,24 @@ async def db_tool_case(request, db_session, monkeypatch) -> AsyncIterator[ToolCa
     )
     monkeypatch.setattr(confirm_module, "redis_client", redis_module.redis_client)
     task = AsyncMock()
+
+    async def contracted(args):
+        await task(args)
+
+    declared = builtin_task_contracts()
+    spec = TaskSpec(
+        prefix,
+        "page.system.job.tasks.testTask",
+        task_registry.TaskScope.TENANT,
+        ClosedTaskArgs,
+        contracted,
+        "tenant.no-data/v1",
+    )
+    monkeypatch.setattr(
+        execution_contract,
+        "builtin_task_contracts",
+        lambda: TaskContractRegistry((*declared.specs, spec)),
+    )
     monkeypatch.setitem(task_registry._task_functions, prefix, task)
     monkeypatch.setitem(
         task_registry._task_scopes, prefix, task_registry.TaskScope.TENANT
@@ -438,6 +463,9 @@ async def db_tool_case(request, db_session, monkeypatch) -> AsyncIterator[ToolCa
         )
         db.add_all([source, target_message])
         await db.flush()
+        source.field_authority = await authored_source(
+            db, tenant=tenant, message_id=source.message_id
+        )
         deps = await chat_service.build_chat_deps(
             db,
             actor,
@@ -508,6 +536,7 @@ async def db_tool_case(request, db_session, monkeypatch) -> AsyncIterator[ToolCa
             projection_kind=registered.meta.projection_kind,
             data_scope_hash=deps.data_scope_hash,
             require_live_source=True,
+            field_authority=source.field_authority,
         )
         log_id = await operation_log_service.start_operation(
             db,

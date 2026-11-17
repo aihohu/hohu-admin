@@ -5,7 +5,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_valid
 from pydantic.alias_generators import to_camel
 
 from app.core.config import settings
-from app.modules.ai.schemas.config_projection import redact_config, redact_url
+from app.modules.ai.schemas.config_projection import redact_url
+from app.modules.ai.schemas.control_config import project_control_config
 from app.modules.ai.schemas.model import ModelCreate
 
 
@@ -70,10 +71,12 @@ class ProviderOut(BaseModel):
             provider_id=provider.provider_id,
             provider_code=provider.provider_code,
             name=provider.name,
-            credential_configured=bool(provider.api_key),
+            credential_configured=provider.credential_configured
+            if hasattr(provider, "credential_configured")
+            else bool(provider.api_key),
             base_url=redact_url(provider.base_url),
             is_enabled=provider.is_enabled,
-            config=redact_config(provider.config),
+            config=project_control_config(provider.config, kind="provider"),
             create_time=provider.create_time,
         )
 

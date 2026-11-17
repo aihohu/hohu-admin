@@ -305,7 +305,7 @@ def preview_lineage(log, audit, tenant):
         tool_codes=[log.tool_name],
         subject_refs=[{"type": "user_import_batch", "id": audit["batch_id"]}],
         data_scope_hash=audit.get("data_scope_hash"),
-        field_authority=getattr(log, "field_authority", None),
+        field_authority=getattr(log, "result_field_authority", None),
         projection_dependency_message_ids=audit.get(
             "projection_dependency_message_ids", ()
         ),

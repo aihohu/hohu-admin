@@ -126,7 +126,7 @@ async def test_actual_background_entries_refuse_reentry(tmp_path, monkeypatch):
     monkeypatch.setattr(admission_module, "write_admission", gate)
     for operation in (
         lambda: execute_job(0, 1),
-        lambda: run_job_manual(0, 1),
+        lambda: run_job_manual("rejected-before-verification"),
         clean_expired_import_previews,
         lambda: cleanup_orphaned_pending_on_startup(platform=None),
     ):

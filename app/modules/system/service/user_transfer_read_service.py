@@ -1,17 +1,18 @@
 """Explicit transfer metadata DTOs and scoped template dictionary sources."""
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 
 from openpyxl import Workbook
 from sqlalchemy import func, select
 
-from app.core.authorization_io import file_transform_worker
 from app.core.exceptions import BusinessException, NotFoundException
 from app.core.rbac import is_super_admin
 from app.db.authorization_plan_session import _order_error
 from app.modules.system.field_policy.evaluator import project_user_values
 from app.modules.system.models.dept import Dept
+from app.modules.system.models.field_policy import FieldPolicyHead
 from app.modules.system.models.role import Role
 from app.modules.system.schemas.user_transfer import (
     UserExportTaskQuery,
@@ -25,6 +26,11 @@ from app.modules.system.service import user_import_service as imports
 from app.modules.system.service import user_import_template_service as templates
 from app.modules.system.service.authorization_control_identity import read_identity
 from app.modules.system.service.grant_authority import grant_authority_service
+from app.modules.system.service.transfer_delivery_snapshot import (
+    capture_delivery_watermark,
+)
+from app.modules.system.service.transfer_metadata import transfer_metadata
+from app.modules.system.service.transfer_relation_sources import template_sources
 from app.modules.system.service.user_field_context import load_current_user
 from app.modules.system.service.user_import_validator import (
     _compute_accessible_dept_ids,
@@ -83,6 +89,15 @@ def _build_template(depts, roles):
     return output.getvalue()
 
 
+@dataclass(frozen=True, slots=True)
+class TemplateSnapshot:
+    departments: tuple
+    roles: tuple
+    source_ids: tuple
+    authority: tuple
+    sources: tuple
+
+
 def _page(records, total, query):
     return {
         "records": records,
@@ -115,13 +130,33 @@ class UserTransferReadService:
             if operation == "template"
             else ("system:user:list",),
         )
+        if (
+            operation != "template"
+            and await db.scalar(
+                select(FieldPolicyHead.tenant_id).where(
+                    FieldPolicyHead.tenant_id == tenant.tenant_id
+                )
+            )
+            is not None
+        ):
+            return await transfer_metadata(
+                db,
+                tx,
+                tenant=tenant,
+                version=version,
+                operation=operation,
+                query=query,
+                identifier=identifier,
+            )
         context = await user_transfer_fields.context(
             db, tx, tenant=tenant, version=version
         )
         actor = await load_current_user(db, tenant=tenant, actor_user_version=version)
         cross_owner = is_super_admin(actor)
         if operation == "template":
-            return await self.template(db, tx, tenant=tenant, actor=actor)
+            return await self.template(
+                db, tx, tenant=tenant, actor=actor, version=version
+            )
         if operation in {"exports", "batches"}:
             expected = (
                 UserExportTaskQuery if operation == "exports" else UserImportBatchQuery
@@ -258,7 +293,7 @@ class UserTransferReadService:
         result.update(filterSnapshot={}, reason="", errorMessage=None)
         return result
 
-    async def template(self, db, tx, *, tenant, actor):
+    async def template(self, db, tx, *, tenant, actor, version):
         tx.assert_planning(tenant.tenant_id)
         authority = await grant_authority_service.build(
             db, tenant.actor_user_id, tenant=tenant
@@ -298,6 +333,9 @@ class UserTransferReadService:
                 limit=1024,
                 tenant=tenant,
             )
+        departments, roles, sources = await template_sources(
+            db, tx, tenant=tenant, version=version, departments=departments, roles=roles
+        )
         lookup = {d.dept_id: d for d in departments}
         values = tuple(
             (
@@ -309,7 +347,16 @@ class UserTransferReadService:
             for d in departments
         )
         role_values = tuple((r.role_code, r.role_name, r.status) for r in roles)
-        return await file_transform_worker.run(_build_template, values, role_values)
+        return TemplateSnapshot(
+            values,
+            role_values,
+            (
+                tuple((d.dept_id, d.parent_id, d.ancestors) for d in departments),
+                tuple(r.role_id for r in roles),
+            ),
+            await capture_delivery_watermark(db, tx, tenant=tenant, actor=actor),
+            sources,
+        )
 
 
 user_transfer_read_service = UserTransferReadService()

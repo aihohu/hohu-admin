@@ -228,10 +228,19 @@ def test_fixed_catalog_is_real_complete_and_preserves_insert_defaults():
         "ROLE_AGENT",
         "SETTING",
         "CONFIG",
+        "CONFIG_PUBLICATION",
         "MAIL_CONFIG",
         "POLICY_BINDING",
         "POLICY_REVISION",
         "POLICY_AUDIT",
+        "FIELD_POLICY_HEAD",
+        "FIELD_POLICY_OBJECT",
+        "FIELD_POLICY_REVISION",
+        "FIELD_POLICY_BINDING",
+        "FIELD_POLICY_MANIFEST",
+        "FIELD_POLICY_ITEM",
+        "FIELD_POLICY_AUDIT",
+        "FIELD_POLICY_REQUEST",
         "IMPORT_BATCH",
         "EXPORT_TASK",
         "IMPORT_BATCH_LOG",
@@ -259,7 +268,12 @@ def test_fixed_catalog_is_real_complete_and_preserves_insert_defaults():
         assert all(name in spec.table.c for name in spec.key_columns)
         if spec.tenant_column:
             assert spec.tenant_column in spec.table.c
-            assert spec.tenant_column not in spec.key_columns
+            if kind is ResourceKind.FIELD_POLICY_HEAD:
+                assert spec.key_columns == ("tenant_id",)
+                with pytest.raises(BusinessException):
+                    ResourceKey(kind, 0, 1)
+            else:
+                assert spec.tenant_column not in spec.key_columns
         scoped_key = (
             (spec.tenant_column, *spec.key_columns)
             if spec.tenant_column
@@ -313,3 +327,12 @@ def test_pure_plan_import_does_not_import_business_services_or_models():
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_file_and_dictionary_same_id_have_caller_independent_lock_order():
+    file = ResourceKey(ResourceKind.FILE, 0, 501)
+    dictionary = ResourceKey(ResourceKind.DICT_TYPE, 0, 501)
+    assert LockPlan((file, dictionary)).existing == (dictionary, file)
+    assert LockPlan((dictionary, file)).existing == (dictionary, file)
+    orders = [resource_spec(kind).order for kind in ResourceKind]
+    assert len(orders) == len(set(orders))

@@ -542,6 +542,11 @@ async def _execute_tool(
             risk=meta.risk,
             trace_id=deps.trace_id,
             chip_target=meta.chip_target,
+            field_authority=dry_run_summary.field_authority
+            if dry_run_summary
+            else dry_run_outcome.failure.projection.field_authority
+            if dry_run_outcome.failure and dry_run_outcome.failure.projection
+            else None,
         ),
     )
 
@@ -1215,12 +1220,11 @@ async def _run_dry_run(
     try:
         dr: DryRunResult = await _preflight_tool(registered, args, deps)
         if not dr.ok:
-            return _DryRunOutcome(
-                failure=ToolResult.failure(
-                    "AI_PREVIEW_REJECTED",
-                    dr.reason or "预检未通过，操作未执行。",
-                )
+            failure = ToolResult.failure(
+                "AI_PREVIEW_REJECTED", dr.reason or "预检未通过，操作未执行。"
             )
+            failure.projection = ResultProjection(field_authority=dr.field_authority)
+            return _DryRunOutcome(failure=failure)
         return _DryRunOutcome(
             count=dr.count,
             summary=DryRunSummary(
@@ -1232,6 +1236,7 @@ async def _run_dry_run(
                 confirmation_fields=dr.confirmation_fields,
                 execution_args=dr.execution_args,
                 business_snapshot=dr.business_snapshot,
+                field_authority=dr.field_authority,
             ),
         )
     except BusinessException as e:
@@ -1239,11 +1244,12 @@ async def _run_dry_run(
             "dry_run business exception",
             extra={"tool": registered.meta.name, "error_code": e.error_code},
         )
+        failure = ToolResult.failure(e.error_code or "AI_INTERNAL_ERROR", e.message)
+        failure.projection = ResultProjection(
+            field_authority=getattr(e, "_ai_delivery_authority", None)
+        )
         return _DryRunOutcome(
-            failure=ToolResult.failure(
-                error_code=e.error_code or "AI_INTERNAL_ERROR",
-                error_msg=e.message,
-            ),
+            failure=failure,
             authorization_denied=isinstance(e, AuthorizationException),
         )
     except Exception:
@@ -1339,6 +1345,9 @@ async def _finish_log_final(
             if result.ok
             else None,
             error_code=None if result.ok else result.error_code or "AI_INTERNAL_ERROR",
+            result_field_authority=result.projection.field_authority
+            if result.projection
+            else None,
         )
     except Exception:
         logger.exception(

@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_serializer
 from pydantic.alias_generators import to_camel
 
+from app.core.base_response import PageResult
 from app.modules.system.schemas.user import UserDeptItem
 
 
@@ -43,8 +44,8 @@ class ProjectedUserOut(BaseModel):
     user_avatar: str | None = None
     status: str | None = None
     create_time: str | None = None
-    roles: list[str] | None = None
-    role_names: list[str] | None = None
+    roles: list[str | None] | None = None
+    role_names: list[str | None] | None = None
     role_name_keys: list[str | None] | None = None
     dept_ids: list[str] | None = None
     dept_names: str | None = None
@@ -70,3 +71,7 @@ class UserMemberQuery(BaseModel):
     query: str | None = Field(None, max_length=100)
     current: int = Field(1, ge=1)
     size: int = Field(20, ge=1, le=100)
+
+
+class ProjectedMemberPage(PageResult[ProjectedUserOut]):
+    authorization_epoch: StrictStr = Field(serialization_alias="authorizationEpoch")

@@ -11,7 +11,7 @@ from app.core.auth import ensure_ai_chat_use
 from app.core.authorization_plan import LockPlan, ResourceKey
 from app.core.authorization_plan import ResourceKind as K
 from app.core.config import settings
-from app.core.exceptions import AuthorizationException
+from app.core.exceptions import AuthorizationException, BusinessException
 from app.core.file_storage import ArtifactExecution
 from app.core.rbac import is_super_admin
 from app.modules.ai.agents.gateway.sensitive import serialize_for_llm
@@ -31,6 +31,9 @@ from app.modules.ai.service.atomic_completion_service import (
 )
 from app.modules.ai.service.authorization_chat_model import select_model
 from app.modules.ai.service.authorization_context_candidate import ai_context_candidate
+from app.modules.ai.service.delivery_result_sources import result_sources
+from app.modules.ai.service.delivery_source_domains import validate_receipt
+from app.modules.ai.service.field_authority import denied
 from app.modules.ai.service.field_authority_runtime import ai_field_authority
 from app.modules.ai.service.operation_log_service import build_target_summary
 from app.modules.ai.service.result_projection_service import result_projection_service
@@ -72,14 +75,17 @@ class AIExecutionCandidate:
         self, db, tx, action, *, tenant, actor_user_version, _preview=False
     ):
         tx.assert_session(db)
-        await ai_field_authority.require(
-            db,
-            tx,
-            tenant=tenant,
-            frozen=getattr(action, "field_authority", None),
-            confirmation=True,
-            legacy=True,
-        )
+        if validate_receipt(getattr(action, "field_authority", None)) is None:
+            raise denied("FIELD_CONFIRMATION_LINEAGE_REQUIRED")
+        if not _preview:
+            await ai_field_authority.require(
+                db,
+                tx,
+                tenant=tenant,
+                frozen=action.field_authority,
+                confirmation=True,
+                legacy=True,
+            )
         meta, scope_hash, current = await self._authorize_live(
             db,
             tx,
@@ -87,6 +93,13 @@ class AIExecutionCandidate:
             tenant=tenant,
             actor_user_version=actor_user_version,
             _preview=_preview,
+        )
+        await ai_field_authority.renew(
+            db,
+            tx,
+            tenant=tenant,
+            actor_user_version=actor_user_version,
+            frozen=action.field_authority,
         )
         dependencies = result_projection_service.projection_dependency_message_ids(
             action
@@ -260,7 +273,8 @@ class AIExecutionCandidate:
             work = await system_ai_tool_adapter.plan(db, tx, command)
             await tx.lock(
                 LockPlan(
-                    existing=(*inventory.keys, *work.locks.existing), new=work.locks.new
+                    existing=tuple(set(inventory.keys) | set(work.locks.existing)),
+                    new=work.locks.new,
                 )
             )
             await ai_context_candidate.recheck(db, tx, inventory)
@@ -345,12 +359,43 @@ class AIExecutionCandidate:
         ):
             raise _invalid("执行结果缺少来源证明")
         ui = _ui_to_dict(result.ui)
+        try:
+            proof = await result_sources(
+                db,
+                tx,
+                tenant=tenant,
+                version=(
+                    await load_live_user_authority(db, tenant=tenant)
+                ).auth_version,
+                action=action,
+                result=result,
+            )
+        except BusinessException:
+            # The mutation is already a known success in this transaction. Loss
+            # of result sources suppresses rich data, never that business fact.
+            proof = await ai_field_authority.mint(
+                db,
+                tx,
+                tenant=tenant,
+                domains=(
+                    {
+                        "kind": "completion",
+                        "log_id": str(claim.log_id),
+                        "tool_call_id": claim.execute_tool_call_id,
+                        "status": "success",
+                    },
+                ),
+            )
+            result.data, ui = {"status": "succeeded"}, None
         json.dumps({"data": result.data, "ui": ui}, allow_nan=False)
         lineage = result_projection_service.freeze_lineage(
             tenant=tenant,
             agent_code=claim.agent_code,
+            field_authority=proof,
             tool_codes=action.tool_codes or [claim.execute_tool_name],
-            subject_refs=result.projection.subject_refs,
+            subject_refs=()
+            if any(g.get("kind") == "completion" for g in proof["source_domains"])
+            else result.projection.subject_refs,
             data_scope_hash=scope_hash if result.projection.scope_bound else None,
             projection_dependency_message_ids=action.projection_dependency_message_ids
             or (),
@@ -371,6 +416,7 @@ class AIExecutionCandidate:
                 "duration_ms": duration,
                 "result_data": result.data,
                 "result_ui": ui,
+                "result_field_authority": proof,
                 "subject_refs": list(lineage.subject_refs),
                 "subject_refs_hash": lineage.subject_refs_hash,
                 "tool_codes": list(lineage.tool_codes),
@@ -393,6 +439,7 @@ class AIExecutionCandidate:
                 "duration_ms": duration,
                 "error_code": None,
                 "result_summary": "prepared action succeeded",
+                "result_field_authority": proof,
                 "target_summary": summary,
             },
             expected={"status": "running", "finished_at": None},

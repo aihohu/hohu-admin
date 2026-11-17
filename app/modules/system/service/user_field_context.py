@@ -51,6 +51,7 @@ class UserFieldContext:
     grants: tuple
     base_predicates: tuple
     role_scopes: object
+    generic_grants: tuple | None = field(default=None, repr=False, compare=False)
     _applicable: dict = field(default_factory=dict, repr=False, compare=False)
 
     async def decisions(

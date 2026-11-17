@@ -220,7 +220,7 @@ class TransferCleanupCandidate:
         )
         await tx.lock(
             LockPlan(
-                existing=(*inventory.keys, command.key),
+                existing=tuple(set(inventory.keys) | {command.key}),
                 new=(NewResource(expiry_log),) if expiry_log is not None else (),
             )
         )

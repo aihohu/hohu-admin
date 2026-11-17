@@ -15,12 +15,15 @@ from app.modules.ai.core.provider_egress import (
     provider_egress,
     provider_upstream_error,
 )
+from app.modules.ai.schemas.control_config import validate_control_config
 
 
 async def probe(effective):
     """No Session is accepted; callers must release their preparation transaction."""
     provider_code = effective["provider_code"]
     model = effective["model"]
+    validate_control_config(effective["config"], kind="provider")
+    validate_control_config(model.get("config"), kind="model")
     provider_egress.validate_adapter_config(effective["config"])
     provider_egress.validate_adapter_config(model.get("config"))
     generation_settings(model.get("config"))

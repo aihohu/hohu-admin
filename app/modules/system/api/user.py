@@ -10,16 +10,23 @@ from app.core.base_response import PageResult, ResponseModel
 from app.core.exceptions import (
     UnprocessableEntityException,
 )
+from app.core.file_delivery import private_file_headers
 from app.core.tenant import TenantContext
-from app.db.authorization_http import system_write, user_read
+from app.db.authorization_http import relation_read, system_write, user_read
 from app.db.authorization_transfer_http import transfer_read_http
 from app.db.session import get_db
 from app.modules.auth.service import (
     get_current_tenant_context,
 )
 from app.modules.system.models.user import User
+from app.modules.system.schemas.relation_projection import ProjectedAssignableRoleOut
+from app.modules.system.schemas.transfer_projection import (
+    ProjectedExportTask,
+    ProjectedImportBatch,
+    ProjectedTransferAudit,
+    TransferPage,
+)
 from app.modules.system.schemas.user import (
-    AssignableRoleOut,
     ChangePassword,
     ResetPassword,
     UpdateProfile,
@@ -40,9 +47,6 @@ from app.modules.system.schemas.user_transfer import (
     UserImportBatchLogItem,
     UserImportBatchQuery,
     UserImportBatchResponse,
-)
-from app.modules.system.service.user_role_assignment_service import (
-    user_role_assignment_service,
 )
 
 router = APIRouter()
@@ -120,7 +124,7 @@ async def add_user(
 
 @router.get(
     "/assignable-roles",
-    response_model=ResponseModel[list[AssignableRoleOut]],
+    response_model=ResponseModel[list[ProjectedAssignableRoleOut]],
     summary="获取可委派角色",
     dependencies=[Depends(require_permissions("system:user:role-auth"))],
 )
@@ -131,15 +135,14 @@ async def get_assignable_roles(
     current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    roles = await user_role_assignment_service.list_assignable_roles(
-        db,
-        actor_user_id=current_user.user_id,
-        query=query,
-        limit=limit,
-        tenant=tenant,
-    )
     return ResponseModel.success(
-        data=[AssignableRoleOut.model_validate(role) for role in roles]
+        data=await relation_read(
+            db,
+            current_user,
+            operation="role.assignable",
+            tenant=tenant,
+            query={"query": query, "limit": limit},
+        )
     )
 
 
@@ -573,9 +576,7 @@ async def download_import_template(
     return Response(
         content=xlsx_bytes,
         media_type=_EXPORT_MIME_TYPE,
-        headers={
-            "Content-Disposition": f"attachment; filename={_TEMPLATE_FILENAME}",
-        },
+        headers=private_file_headers(_TEMPLATE_FILENAME),
     )
 
 
@@ -654,7 +655,9 @@ def _build_batch_response(batch, operator_name: str | None) -> dict:
 
 @router.get(
     "/import",
-    response_model=ResponseModel[PageResult[UserImportBatchResponse]],
+    response_model=ResponseModel[
+        TransferPage[ProjectedImportBatch] | PageResult[UserImportBatchResponse]
+    ],
     summary="分页查询导入批次列表",
     description=(
         "查询当前用户或团队执行过的导入批次。"
@@ -683,7 +686,7 @@ async def list_import_batches(
 
 @router.get(
     "/import/{batch_id}",
-    response_model=ResponseModel[UserImportBatchResponse],
+    response_model=ResponseModel[ProjectedImportBatch | UserImportBatchResponse],
     summary="按 batch_id 查询导入批次详情",
     description=(
         "查询导入批次状态，供导入历史、异步轮询和审计反查使用。"
@@ -711,7 +714,9 @@ async def get_import_batch_detail(
 
 @router.get(
     "/import/{batch_id}/logs",
-    response_model=ResponseModel[PageResult[UserImportBatchLogItem]],
+    response_model=ResponseModel[
+        TransferPage[ProjectedTransferAudit] | PageResult[UserImportBatchLogItem]
+    ],
     summary="按 batch_id 查询导入批次操作日志",
     description=(
         "查询批次操作日志，支持按 event 过滤和分页。需要 system:user:list 权限。"
@@ -826,13 +831,15 @@ async def export_users(
     return Response(
         content=xlsx_bytes,
         media_type=_EXPORT_MIME_TYPE,
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
+        headers=private_file_headers(filename),
     )
 
 
 @router.get(
     "/export",
-    response_model=ResponseModel[PageResult[UserExportTaskResponse]],
+    response_model=ResponseModel[
+        TransferPage[ProjectedExportTask] | PageResult[UserExportTaskResponse]
+    ],
     summary="分页查询导出任务列表",
     description=(
         "默认只查询当前用户创建的导出任务；超管可按 operator_id / status 过滤。"
@@ -858,7 +865,7 @@ async def list_export_tasks_endpoint(
 
 @router.get(
     "/export/{export_id}",
-    response_model=ResponseModel[UserExportTaskResponse],
+    response_model=ResponseModel[ProjectedExportTask | UserExportTaskResponse],
     summary="按 export_id 查询导出任务详情",
     description="默认仅任务创建人可见；超管可跨 operator 审计反查。",
     responses={
@@ -920,5 +927,5 @@ async def download_export_file_endpoint(
     return Response(
         content=xlsx_bytes,
         media_type=_EXPORT_MIME_TYPE,
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
+        headers=private_file_headers(filename),
     )

@@ -46,6 +46,7 @@ def read_terminal_marker(action):
             "version": action.row_version,
             "result": action.result_data,
             "ui": action.result_ui,
+            "resultAuthority": getattr(action, "result_field_authority", None),
             "tools": action.tool_codes,
             "subjects": action.subject_refs,
             "subjectsHash": action.subject_refs_hash,
@@ -292,6 +293,7 @@ class ReadConfirmationCandidate:
             lineage = result_projection_service.freeze_lineage(
                 tenant=tenant,
                 agent_code=action.agent_code,
+                field_authority=result.projection.field_authority,
                 tool_codes=[action.execute_tool_name],
                 subject_refs=result.projection.subject_refs,
                 data_scope_hash=scope_hash if result.projection.scope_bound else None,
@@ -330,6 +332,9 @@ class ReadConfirmationCandidate:
             else result.error_code or "AI_INTERNAL_ERROR",
             "result_data": data,
             "result_ui": ui,
+            "result_field_authority": lineage.field_authority
+            if lineage is not None
+            else None,
         }
         if lineage is not None:
             changes.update(
@@ -353,6 +358,7 @@ class ReadConfirmationCandidate:
                 "duration_ms": duration,
                 "error_code": action.error_code,
                 "result_summary": read_terminal_marker(action),
+                "result_field_authority": action.result_field_authority,
             },
             expected={"status": "pending_confirmation", "finished_at": None},
         )

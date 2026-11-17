@@ -44,6 +44,7 @@ from app.modules.system.constants import (
 )
 from app.modules.system.field_policy.transfer import (
     make_lineage,
+    require_lineage_storage,
     safe_failed_rows,
     transfer_denied,
     validate_lineage,
@@ -622,7 +623,7 @@ class ImportAuthorizationCandidate:
             )
             await tx.update_factual(
                 batch_key,
-                {"field_lineage": lineage},
+                {"field_lineage": require_lineage_storage(lineage)},
                 expected={"status": result.status},
             )
         return result

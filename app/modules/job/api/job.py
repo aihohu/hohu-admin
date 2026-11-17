@@ -1,32 +1,35 @@
 import asyncio
 import logging
+from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Body, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants import STATUS_ENABLED
 from app.core.auth import get_current_user, require_permissions
-from app.core.base_response import PageResult, ResponseModel
+from app.core.base_response import ResponseModel
 from app.core.scheduler import notify_job_changed, notify_manual_trigger
 from app.core.tenant import TenantContext
 from app.db.authorization_http import get_authorization_runtime, release_request_reads
 from app.db.session import get_db
 from app.modules.auth.service import access_identity, get_current_tenant_context
-from app.modules.job.schemas.job import (
-    JobCreate,
-    JobOut,
-    JobQuery,
-    JobUpdate,
+from app.modules.job.schemas.control_job import (
+    JobCreateForm,
+    JobMetadataForm,
+    JobScheduleWrite,
 )
-from app.modules.job.service.job_service import job_service
-from app.modules.job.task_registry import TaskScope, list_registered_tasks
+from app.modules.job.schemas.job import JobQuery
 from app.modules.system.models.user import User
+from app.modules.system.schemas.parameter_form import ParameterFormQuery
+from app.modules.system.schemas.parameter_projection import (
+    ParameterPage,
+    ProjectedJobOut,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-async def _safe_publish(coro, label: str) -> None:
+async def _safe_publish(coro, label: str) -> bool:
     """发布调度器事件；Redis 抽风时只记日志，不影响 HTTP 响应。
 
     commit 已经发生，业务数据已落库；如果因为 Redis 抖动让接口 500，
@@ -34,23 +37,46 @@ async def _safe_publish(coro, label: str) -> None:
     调度器进程下次启动 / 下次成功的 notify 会重新对齐状态。
     """
     try:
-        async with asyncio.timeout(2):
-            await coro
+        async with asyncio.timeout(1):
+            return await coro is True
     except Exception:
         logger.warning("调度器事件发布失败（%s）", label, exc_info=True)
+        return False
 
 
 async def _planned(db, actor, tenant, operation, **request):
     version = access_identity(actor).user_version
     await release_request_reads(db)
     return await get_authorization_runtime().job.execute(
-        tenant=tenant, actor_user_version=version, operation=operation, **request
+        tenant=tenant,
+        actor_user_version=version,
+        operation=operation,
+        http_protocol=True,
+        **request,
     )
+
+
+async def _read(db, actor, tenant, operation, query=None):
+    version = access_identity(actor).user_version
+    await release_request_reads(db)
+    return await get_authorization_runtime().parameter_read(
+        tenant=tenant, actor_user_version=version, operation=operation, query=query
+    )
+
+
+@router.get("/form")
+async def get_form(
+    query: Annotated[ParameterFormQuery, Query()],
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
+):
+    return ResponseModel.success(data=await _read(db, actor, tenant, "job.form", query))
 
 
 @router.get(
     "/list",
-    response_model=ResponseModel[PageResult[JobOut]],
+    response_model=ResponseModel[ParameterPage[ProjectedJobOut]],
     summary="获取定时任务列表",
     dependencies=[Depends(require_permissions("system:job:list"))],
 )
@@ -60,7 +86,7 @@ async def get_list(
     _current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    page_data = await job_service.get_list(db, query, tenant=tenant)
+    page_data = await _read(db, _current_user, tenant, "job.list", query)
     return ResponseModel.success(data=page_data)
 
 
@@ -71,9 +97,11 @@ async def get_list(
     dependencies=[Depends(require_permissions("system:job:list"))],
 )
 async def get_registered(
+    db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    tasks = list_registered_tasks(scope=TaskScope.TENANT)
+    tasks = await _read(db, _current_user, tenant, "job.registered")
     return ResponseModel.success(data=tasks)
 
 
@@ -83,19 +111,28 @@ async def get_registered(
     dependencies=[Depends(require_permissions("system:job:add"))],
 )
 async def add(
-    data: JobCreate,
+    data: JobCreateForm,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    job = await _planned(db, _current_user, tenant, "create", payload=data)
+    job = await _planned(
+        db,
+        _current_user,
+        tenant,
+        "create",
+        payload=data.model_dump(exclude={"form_receipt"}),
+        protocol_receipt=data.form_receipt,
+    )
     await _safe_publish(notify_job_changed(), "job_changed")
     # 创建即启用且要求立即执行：额外发一条 manual_trigger
-    if data.status == STATUS_ENABLED and data.run_on_enable:
-        await _safe_publish(
-            notify_manual_trigger(tenant, job["job_id"]), "manual_trigger"
+    delivery = None
+    if "dispatch" in job:
+        confirmed = await _safe_publish(
+            notify_manual_trigger(job["dispatch"]), "manual_trigger"
         )
-    return ResponseModel.success(msg="创建成功")
+        delivery = {"notificationStatus": "notified" if confirmed else "unconfirmed"}
+    return ResponseModel.success(msg="创建成功", data=delivery)
 
 
 @router.put(
@@ -104,14 +141,33 @@ async def add(
     dependencies=[Depends(require_permissions("system:job:edit"))],
 )
 async def update(
-    data: JobUpdate,
+    data: JobMetadataForm,
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    await _planned(db, _current_user, tenant, "update", payload=data)
+    await _planned(
+        db,
+        _current_user,
+        tenant,
+        "update",
+        payload=data.model_dump(exclude_unset=True, exclude={"form_receipt"}),
+        protocol_receipt=data.form_receipt,
+    )
     await _safe_publish(notify_job_changed(), "job_changed")
     return ResponseModel.success(msg="更新成功")
+
+
+@router.put("/schedule", dependencies=[Depends(require_permissions("system:job:edit"))])
+async def update_schedule(
+    data: JobScheduleWrite,
+    db: AsyncSession = Depends(get_db),
+    actor: User = Depends(get_current_user),
+    tenant: TenantContext = Depends(get_current_tenant_context),
+):
+    await _planned(db, actor, tenant, "schedule", payload=data)
+    await _safe_publish(notify_job_changed(), "job_changed")
+    return ResponseModel.success(msg="调度配置更新成功")
 
 
 @router.put(
@@ -131,11 +187,13 @@ async def update_status(
     )
     await _safe_publish(notify_job_changed(), "job_changed")
     # 启用动作 + run_on_enable：额外触发一次立即执行
-    if status == STATUS_ENABLED and job["run_on_enable"]:
-        await _safe_publish(
-            notify_manual_trigger(tenant, job["job_id"]), "manual_trigger"
+    delivery = None
+    if "dispatch" in job:
+        confirmed = await _safe_publish(
+            notify_manual_trigger(job["dispatch"]), "manual_trigger"
         )
-    return ResponseModel.success(msg="状态更新成功")
+        delivery = {"notificationStatus": "notified" if confirmed else "unconfirmed"}
+    return ResponseModel.success(msg="状态更新成功", data=delivery)
 
 
 @router.delete(
@@ -181,6 +239,11 @@ async def run_now(
     _current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ):
-    await _planned(db, _current_user, tenant, "run", ids=(jobId,))
-    await _safe_publish(notify_manual_trigger(tenant, jobId), "manual_trigger")
-    return ResponseModel.success(msg="已触发执行")
+    notice = await _planned(db, _current_user, tenant, "run", ids=(jobId,))
+    confirmed = await _safe_publish(
+        notify_manual_trigger(notice["dispatch"]), "manual_trigger"
+    )
+    return ResponseModel.success(
+        msg="已发送运行通知" if confirmed else "运行通知未确认",
+        data={"notificationStatus": "notified" if confirmed else "unconfirmed"},
+    )

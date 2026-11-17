@@ -19,6 +19,10 @@ def verified_provider(monkeypatch):
         "app.modules.ai.service.field_authority_runtime.active_policy_grants",
         AsyncMock(return_value=None),
     )
+    monkeypatch.setattr(
+        "app.modules.ai.service.field_authority_runtime.generic_stamp",
+        AsyncMock(return_value=None),
+    )
 
 
 def session(*, mode="legacy", epoch=3):

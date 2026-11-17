@@ -5,7 +5,6 @@ from collections import defaultdict
 from sqlalchemy import select
 
 from app.core.authorization_plan import LockPlan, ResourceKey, ResourceKind
-from app.core.base_response import PageResult
 from app.core.exceptions import NotFoundException
 from app.db.authorization_plan_session import _order_error
 from app.modules.ai.models.conversation import AiConversation
@@ -25,11 +24,28 @@ from app.modules.ai.service.completion_read_state_service import effective_log_s
 from app.modules.ai.service.operation_status_projection import project_operation
 from app.modules.ai.service.trace_service import _parse_target_summary, trace_service
 from app.modules.auth.service import load_live_user_authority
+from app.modules.system.field_policy.delivery_catalog import (
+    EQ,
+    GROUP,
+    RANGE,
+    READ,
+    SORT,
+)
+from app.modules.system.schemas.delivery_projection import DeliveryPage
 from app.modules.system.service.authorization_control_identity import (
     assert_identity,
     read_identity,
 )
-from app.modules.system.service.user_service import user_service
+from app.modules.system.service.delivery_read_context import load_delivery_context
+
+
+def fields_allowed(context, rows, name, access=READ):
+    return all(
+        context.decisions(
+            context.record("ai.operation_log", str(row.log_id), context.scopes), access
+        )[name].allowed
+        for row in rows
+    )
 
 
 class TraceCandidate:
@@ -139,12 +155,32 @@ class TraceCandidate:
         actor = await load_live_user_authority(db, tenant=tenant)
         return await project_operation(tool_call_id, db, actor, tenant, states=states)
 
-    async def _snapshot(self, db, tx, tenant, version, filters):
+    async def _snapshot(self, db, tx, tenant, version, filters, query=None):
         identity = await read_identity(
             db,
             tenant=tenant,
             actor_user_version=version,
             permissions=("ai:trace:view",),
+        )
+        context = await load_delivery_context(
+            db,
+            tx,
+            tenant=tenant,
+            version=version,
+            action="delivery.trace-list",
+            agents=True,
+        )
+        dependencies = [("queued_at", SORT)]
+        if query is not None:
+            dependencies += [
+                (name, EQ)
+                for name in ("tool_name", "agent_code", "status")
+                if getattr(query, name) is not None
+            ]
+            if query.queued_from is not None or query.queued_to is not None:
+                dependencies.append(("queued_at", RANGE))
+        await context.prove(
+            db, "ai.operation_log", AiOperationLog.__table__, tuple(dependencies)
         )
         matching = select(AiOperationLog.trace_id).where(*filters)
         statement = (
@@ -210,15 +246,13 @@ class TraceCandidate:
             conversations=conversations,
             sources=sources,
         )
-        names = await user_service.get_user_names_by_ids(
-            db, {r.user_id for r in rows}, tenant=tenant
-        )
-        return rows, states, names, sources
+        names = await context.user_names(db, {r.user_id for r in rows})
+        return rows, states, names, sources, context
 
     async def list(self, db, tx, *, tenant, actor_user_version, query):
         filters = trace_service._filters(query, tenant)
-        rows, states, names, _ = await self._snapshot(
-            db, tx, tenant, actor_user_version, filters
+        rows, states, names, _, context = await self._snapshot(
+            db, tx, tenant, actor_user_version, filters, query=query
         )
         matching = set(await db.scalars(select(AiOperationLog.log_id).where(*filters)))
         latest = {}
@@ -237,27 +271,49 @@ class TraceCandidate:
             group = grouped[trace_id]
             effective = [effective_log_state(r, states) for r in group]
             finished = [s.finished_at for s in effective if s.finished_at is not None]
-            records.append(
-                TraceSummaryOut(
-                    traceId=trace_id,
-                    actorId=group[-1].user_id,
-                    actorName=names.get(group[-1].user_id, "unknown"),
-                    agentCodes=sorted({r.agent_code or "unknown" for r in group}),
-                    toolNames=sorted({r.tool_name for r in group}),
-                    statuses=sorted({s.status for s in effective}),
-                    operationCount=len(group),
-                    queuedAt=group[0].queued_at,
-                    finishedAt=max(finished)
-                    if finished and not any(s.unknown for s in effective)
-                    else None,
+            values = {"traceId": trace_id, "operationCount": len(group)}
+            if (
+                fields_allowed(context, group, "actor_name")
+                and group[-1].user_id in names
+            ):
+                values.update(
+                    actorId=group[-1].user_id, actorName=names[group[-1].user_id]
                 )
-            )
-        return PageResult(
-            records=records, total=len(ordered), current=query.current, size=query.size
+            if (
+                fields_allowed(context, group, "agent_code")
+                and fields_allowed(context, group, "agent_code", GROUP)
+                and all(row.agent_code in context.visible_agent_codes for row in group)
+            ):
+                values["agentCodes"] = sorted({row.agent_code for row in group})
+            if fields_allowed(context, group, "tool_name") and fields_allowed(
+                context, group, "tool_name", GROUP
+            ):
+                values["toolNames"] = sorted({row.tool_name for row in group})
+            if fields_allowed(context, group, "status") and fields_allowed(
+                context, group, "status", GROUP
+            ):
+                values["statuses"] = sorted({state.status for state in effective})
+            if fields_allowed(context, group, "queued_at"):
+                values["queuedAt"] = group[0].queued_at
+            if fields_allowed(context, group, "finished_at"):
+                values["finishedAt"] = (
+                    max(finished)
+                    if finished and not any(state.unknown for state in effective)
+                    else None
+                )
+            records.append(TraceSummaryOut.model_validate(values))
+        return DeliveryPage(
+            records=records,
+            total=len(ordered),
+            current=query.current,
+            size=query.size,
+            field_policy=context.policy(
+                context.record("ai.operation_log", "query", context.scopes)
+            ),
         )
 
     async def detail(self, db, tx, *, tenant, actor_user_version, trace_id):
-        rows, states, names, sources = await self._snapshot(
+        rows, states, names, sources, context = await self._snapshot(
             db,
             tx,
             tenant,
@@ -272,32 +328,46 @@ class TraceCandidate:
         operations = []
         for row in rows:
             state = effective_log_state(row, states)
-            source = sources.get(row.source_user_message_id)
-            operations.append(
-                TraceOperationOut(
-                    logId=row.log_id,
-                    toolCallId=row.tool_call_id,
-                    toolName=row.tool_name,
-                    agentCode=row.agent_code or "unknown",
-                    actorId=row.user_id,
-                    actorName=names.get(row.user_id, "unknown"),
-                    sourceMessageId=row.source_user_message_id,
-                    sourceMessageRole=source.role if source else None,
-                    sourceMessageAt=source.create_time if source else None,
-                    targetSummary=_parse_target_summary(row.target_summary),
-                    executionMode=row.execution_mode,
-                    riskLevel=row.risk_level,
-                    status=state.status,
-                    errorCode=state.error_code,
-                    confirmationId=row.confirmation_id,
-                    approvedBy=row.approved_by,
-                    queuedAt=row.queued_at,
-                    startedAt=row.started_at,
-                    finishedAt=state.finished_at,
-                    durationMs=state.duration_ms,
-                    hitlWaitMs=row.hitl_wait_ms,
+            record = context.record("ai.operation_log", str(row.log_id), context.scopes)
+            decisions = context.decisions(record)
+            values = {"log_id": row.log_id, "tool_call_id": row.tool_call_id}
+            for name in (
+                "tool_name",
+                "execution_mode",
+                "risk_level",
+                "queued_at",
+                "started_at",
+                "hitl_wait_ms",
+            ):
+                if decisions[name].allowed:
+                    values[name] = getattr(row, name)
+            for name in ("status", "error_code", "finished_at", "duration_ms"):
+                if decisions[name].allowed:
+                    values[name] = getattr(state, name)
+            if (
+                decisions["agent_code"].allowed
+                and row.agent_code in context.visible_agent_codes
+            ):
+                values["agent_code"] = row.agent_code
+            if decisions["actor_name"].allowed and row.user_id in names:
+                values.update(actor_id=row.user_id, actor_name=names[row.user_id])
+            if (
+                row.user_id == tenant.actor_user_id
+                and decisions["target_summary"].allowed
+            ):
+                from app.modules.ai.service.result_projection_service import (  # noqa: PLC0415
+                    result_projection_service,
                 )
-            )
+
+                actor = await load_live_user_authority(db, tenant=tenant)
+                lineage = await result_projection_service.lineage_for_operation_log(
+                    db, row
+                )
+                if await result_projection_service.authorize_result_projection(
+                    db, actor, owner_user_id=row.user_id, lineage=lineage
+                ):
+                    values["target_summary"] = _parse_target_summary(row.target_summary)
+            operations.append(TraceOperationOut.model_validate(values))
         return TraceDetailOut(
             traceId=trace_id,
             conversationId=rows[0].conversation_id,

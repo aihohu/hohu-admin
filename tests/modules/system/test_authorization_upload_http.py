@@ -189,9 +189,12 @@ async def test_file_unknown_ack_preserves_disk(
         )
     assert response.status_code == 503, response.text
     paths = await asyncio.to_thread(
-        lambda: list(Path(settings.UPLOAD_DIR).rglob("*.png"))
+        lambda: list(Path(settings.PRIVATE_UPLOAD_DIR).rglob("*.png"))
     )
     assert len(paths) == 1
+    assert not await asyncio.to_thread(
+        lambda: list(Path(settings.UPLOAD_DIR).rglob("*.png"))
+    )
     assert await asyncio.to_thread(paths[0].read_bytes) == content
     async with plain() as db:
         rows = (await db.scalars(select(File.file_id))).all()

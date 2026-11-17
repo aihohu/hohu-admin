@@ -6,9 +6,11 @@ from app.core.auth import has_explicit_permission
 from app.core.base_response import ResponseModel
 from app.core.exceptions import (
     AuthorizationException,
+    BusinessException,
     NotFoundException,
 )
 from app.core.rbac import is_super_admin
+from app.db.authorization_plan_session import _Journal
 from app.modules.ai.constants import AI_CHAT_USE_PERMISSION
 from app.modules.ai.schemas.operation_log import (
     OperationLogOut,
@@ -21,9 +23,7 @@ from app.modules.ai.service.completion_read_state_service import (
 )
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.ai.service.prepared_action_service import prepared_action_service
-from app.modules.ai.service.result_projection_service import (
-    result_projection_service,
-)
+from app.modules.system.service.delivery_read_context import load_delivery_context
 
 AI_TRACE_VIEW_PERM = "ai:trace:view"
 
@@ -69,9 +69,7 @@ async def project_operation(tool_call_id, db, current_user, tenant, *, states=No
     is_auditor = is_super or has_perm
     if not (is_owner or is_auditor):
         logger.info(
-            "AI operation log query denied: user=%s log_user=%s",
-            current_user.user_name,
-            log.user_id,
+            "AI operation log query denied",
         )
         raise AuthorizationException(error_code="AI_OPERATION_LOG_FORBIDDEN")
 
@@ -80,35 +78,45 @@ async def project_operation(tool_call_id, db, current_user, tenant, *, states=No
             tenant=tenant, tool_call_ids=[log.tool_call_id]
         )
     effective = effective_log_state(log, states)
-    output = OperationLogOut.model_validate(log).model_copy(
-        update={
-            "status": effective.status,
-            "error_code": effective.error_code,
-            "finished_at": effective.finished_at,
-            "duration_ms": effective.duration_ms,
-        }
-    )
-    from app.modules.ai.service.field_authority_runtime import (  # noqa: PLC0415
-        ai_field_authority,
-    )
-
-    fields_visible = await ai_field_authority.visible(
-        db, tenant=tenant, frozen=getattr(log, "field_authority", None)
-    )
-    if is_auditor and fields_visible:
-        return ResponseModel.success(data=output)
-
-    allowed = False
-    if fields_visible and has_explicit_permission(current_user, AI_CHAT_USE_PERMISSION):
-        lineage = await result_projection_service.lineage_for_operation_log(db, log)
-        allowed = await result_projection_service.authorize_result_projection(
-            db,
-            current_user,
-            owner_user_id=log.user_id,
-            lineage=lineage,
+    journal = getattr(db, "_authorization_journal", None)
+    if (
+        isinstance(journal, _Journal)
+        and journal.handle is not None
+        and (
+            is_auditor or has_explicit_permission(current_user, AI_CHAT_USE_PERMISSION)
         )
-    if allowed:
-        return ResponseModel.success(data=output)
+    ):
+        try:
+            context = await load_delivery_context(
+                db,
+                journal.handle,
+                tenant=tenant,
+                version=current_user.auth_version,
+                action="delivery.trace-list"
+                if is_auditor
+                else "delivery.operation-read",
+                agents=True,
+            )
+            decisions = context.decisions(
+                context.record("ai.operation_log", str(log.log_id), context.scopes)
+            )
+            # Polling status is a fixed completion protocol. Optional audit
+            # metadata is governed independently of the business result body.
+            values = {"tool_call_id": log.tool_call_id, "status": effective.status}
+            for name in (
+                "tool_name",
+                "started_at",
+                "finished_at",
+                "duration_ms",
+                "error_code",
+            ):
+                if decisions[name].allowed:
+                    values[name] = getattr(
+                        log if name in {"tool_name", "started_at"} else effective, name
+                    )
+            return ResponseModel.success(data=OperationLogOut.model_validate(values))
+        except BusinessException:
+            pass  # Fixed owner/auditor status remains available after revocation.
 
     return ResponseModel.success(
         data=OperationLogStatusOut(
@@ -116,7 +124,16 @@ async def project_operation(tool_call_id, db, current_user, tenant, *, states=No
             status=effective.status,
             errorCode=effective.error_code
             if effective.unknown
-            else "AI_RESULT_PROJECTION_FORBIDDEN",
-            finishedAt=effective.finished_at,
+            or effective.error_code
+            in {
+                "USER_REJECTED",
+                "AI_HITL_EXPIRED",
+                "AI_PREPARED_ACTION_CANCELLED",
+                "AI_PREVIEW_REJECTED",
+                "AI_PREPARED_ACTION_SOURCE_STALE",
+                "AI_PREPARED_ACTION_REVALIDATION_FAILED",
+            }
+            else None,
+            finishedAt=None,
         )
     )

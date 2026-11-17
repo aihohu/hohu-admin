@@ -1,22 +1,22 @@
 import asyncio
-import json
 import logging
 from contextlib import suppress
+from types import SimpleNamespace
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from redis.asyncio import Redis
-from sqlalchemy import select
 
 from app.constants import STATUS_ENABLED
 from app.core.redis import redis_client
-from app.core.tenant import PlatformContext, TenantContext
+from app.core.tenant import PlatformContext
 from app.core.write_admission import admitted, is_closed, require_open
-from app.db.session import AsyncSessionLocal
+from app.db.authorization_http import get_authorization_runtime
+from app.modules.job.dispatch import verify_dispatch
+from app.modules.job.execution_contract import prepare_job_execution
 from app.modules.job.job_runner import execute_job, run_job_manual
 from app.modules.job.models.job import SysJob
-from app.modules.job.task_registry import is_tenant_task
 
 logger = logging.getLogger(__name__)
 
@@ -162,25 +162,12 @@ class SchedulerManager:
                     data = message.get("data", "")
                     try:
                         if channel == CHANNEL_JOB_CHANGED:
-                            async with AsyncSessionLocal() as db:
-                                await self.reload_jobs(db, platform=platform)
+                            await self.reload_jobs(platform=platform)
                         elif channel == CHANNEL_MANUAL_TRIGGER:
                             try:
-                                envelope = json.loads(data)
-                                tenant_id = int(envelope["tenantId"])
-                                job_id = int(envelope["jobId"])
-                            except (
-                                KeyError,
-                                TypeError,
-                                ValueError,
-                                json.JSONDecodeError,
-                            ):
-                                logger.warning(
-                                    "manual_trigger 收到非法 tenant/job envelope: %s",
-                                    data,
-                                )
-                                continue
-                            self.run_now(tenant_id, job_id)
+                                self.run_now(data)
+                            except Exception:
+                                logger.warning("manual_trigger rejected")
                     except Exception:
                         logger.exception("处理调度器事件失败 channel=%s", channel)
             except asyncio.CancelledError:
@@ -203,6 +190,12 @@ class SchedulerManager:
         """将一个 SysJob 添加到调度器。"""
         if job.status != STATUS_ENABLED:
             return
+        prepare_job_execution(
+            {
+                name: getattr(job, name)
+                for name in ("job_key", "job_args", "timeout_seconds", "max_retries")
+            }
+        )
         trigger = build_trigger(job)
         self._scheduler.add_job(
             execute_job,
@@ -225,7 +218,7 @@ class SchedulerManager:
             logger.info("已移除调度任务: job_id=%s", job_id)
 
     @admitted
-    async def reload_jobs(self, db, *, platform: PlatformContext) -> None:
+    async def reload_jobs(self, *, platform: PlatformContext) -> None:
         """与 DB 当前状态对齐：移除已删除/停用的任务，新增或更新启用任务。
 
         用于两种场景：
@@ -237,11 +230,8 @@ class SchedulerManager:
         """
         if not isinstance(platform, PlatformContext):
             raise TypeError("platform context is required")
-        stmt = select(SysJob).where(SysJob.status == STATUS_ENABLED)
-        result = await db.execute(stmt)
-        enabled_jobs = [
-            job for job in result.scalars().all() if is_tenant_task(job.job_key)
-        ]
+        snapshot = await get_authorization_runtime().job.scheduled(platform=platform)
+        enabled_jobs = [SimpleNamespace(**values) for values in snapshot]
         enabled_ids = {(j.tenant_id, j.job_id) for j in enabled_jobs}
 
         # 快照当前调度器中的 job_* 任务，用于差异比对
@@ -307,16 +297,17 @@ class SchedulerManager:
             skipped,
         )
 
-    def run_now(self, tenant_id: int, job_id: int) -> None:
+    def run_now(self, dispatch: str) -> None:
         """立即执行一次指定任务（不等待调度）。"""
         require_open()
+        claims = verify_dispatch(dispatch)
         self._scheduler.add_job(
             run_job_manual,
-            args=[tenant_id, job_id],
-            id=f"manual_{tenant_id}_{job_id}",
+            args=[dispatch],
+            id=f"manual_{claims.tenant_id}_{claims.dispatch_id}",
             replace_existing=True,
         )
-        logger.info("手动触发任务: job_id=%s", job_id)
+        logger.info("手动触发任务: job_id=%s", claims.job_id)
 
 
 # 全局单例
@@ -332,13 +323,10 @@ async def notify_job_changed(redis: Redis | None = None) -> None:
     await client.publish(CHANNEL_JOB_CHANGED, "")
 
 
-async def notify_manual_trigger(
-    tenant: TenantContext, job_id: int, redis: Redis | None = None
-) -> None:
+async def notify_manual_trigger(dispatch: str, redis: Redis | None = None) -> bool:
     """通知调度器立即执行一次指定任务。"""
     client = redis or redis_client
-    payload = json.dumps(
-        {"tenantId": tenant.tenant_id, "jobId": job_id},
-        separators=(",", ":"),
-    )
-    await client.publish(CHANNEL_MANUAL_TRIGGER, payload)
+    verify_dispatch(dispatch)
+    async with asyncio.timeout(1):
+        subscribers = await client.publish(CHANNEL_MANUAL_TRIGGER, dispatch)
+    return type(subscribers) is int and subscribers > 0

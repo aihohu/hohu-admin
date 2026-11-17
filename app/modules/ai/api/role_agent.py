@@ -14,10 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import require_permissions
 from app.core.base_response import ResponseModel
 from app.core.tenant import TenantContext
-from app.db.authorization_http import control_write
+from app.db.authorization_http import control_write, relation_read
 from app.db.session import get_db
 from app.modules.ai.schemas.role_agent import RoleAgentBinding, RoleAgentBindReq
-from app.modules.ai.service.role_agent import role_agent_service
 from app.modules.auth.service import get_current_tenant_context, get_current_user
 from app.modules.system.models.user import User
 
@@ -36,18 +35,11 @@ async def get_role_agent_binding(
     current_user: User = Depends(get_current_user),
     tenant: TenantContext = Depends(get_current_tenant_context),
 ) -> ResponseModel[RoleAgentBinding]:
-    """返回 allAgents（全量）和 boundAgentIds（绑定列表）。
-
-    决策 #19: 不返回 softDisabledAgentIds 段；决策 #18: role 不存在返
-    AI_ROLE_NOT_FOUND（跨模块 AI 前缀）.
-    """
-    binding = await role_agent_service.get_binding(
-        db,
-        role_id,
-        actor_user_id=current_user.user_id,
-        tenant=tenant,
+    return ResponseModel.success(
+        data=await relation_read(
+            db, current_user, operation="role.agents", target_id=role_id, tenant=tenant
+        )
     )
-    return ResponseModel.success(data=binding)
 
 
 @router.put(

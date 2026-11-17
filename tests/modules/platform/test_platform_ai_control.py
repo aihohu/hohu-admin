@@ -127,7 +127,7 @@ def test_provider_projection_never_returns_api_key_fragments() -> None:
     assert "legacy-secret" not in str(projection)
     assert "config-secret" not in str(projection)
     assert projection["baseUrl"] == "https://example.test/v1"
-    assert projection["config"]["nested"]["apiToken"] == "***"
+    assert projection["config"] == {}
 
 
 async def _provider_with_models(db_session) -> tuple[AiProvider, AiModel, AiModel]:

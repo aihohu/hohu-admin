@@ -8,11 +8,13 @@ from sqlalchemy import delete, event, select
 
 from app.core.tenant import PlatformContext
 from app.db.session import engine
-from app.modules.job import job_runner, task_registry
+from app.modules.auth.service import access_identity
+from app.modules.job import builtin_task_specs, job_runner
 from app.modules.job.api import job as job_api
 from app.modules.job.log_monitor import JobLogMonitor
 from app.modules.job.models.job import SysJob, SysJobLog
-from app.modules.job.schemas.job import JobCreate, JobUpdate
+from app.modules.job.schemas.control_job import JobCreateForm, JobScheduleWrite
+from app.modules.system.schemas.parameter_form import ParameterFormQuery
 from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import (
     completion_case as completion_case,
@@ -24,8 +26,7 @@ async def test_job_route_mutations_are_planned_and_publish_after_release(
     completion_case, monkeypatch
 ):
     case = completion_case
-    key = "planned_job_" + uuid4().hex[:12]
-    monkeypatch.setitem(task_registry._task_functions, key, lambda: None)
+    key = "test_task"
     writes, publications = [], []
     request_db = None
 
@@ -53,16 +54,29 @@ async def test_job_route_mutations_are_planned_and_publish_after_release(
                 try:
                     request = {"db": db, "_current_user": actor, "tenant": case.tenant}
                     if operation == "create":
+                        form = await job_api.get_authorization_runtime().parameter_read(
+                            tenant=case.tenant,
+                            actor_user_version=access_identity(actor).user_version,
+                            operation="job.form",
+                            query=ParameterFormQuery(mode="create"),
+                        )
                         await job_api.add(
-                            JobCreate(
-                                job_name=key, job_key=key, cron_expression="0 * * * *"
+                            JobCreateForm(
+                                job_name=key,
+                                job_key=key,
+                                cron_expression="0 * * * *",
+                                form_receipt=form["formReceipt"],
                             ),
                             **request,
                         )
                     elif operation == "update":
-                        await job_api.update(
-                            JobUpdate(job_id=identifier, cron_expression="5 * * * *"),
-                            **request,
+                        await job_api.update_schedule(
+                            JobScheduleWrite(
+                                job_id=identifier, cron_expression="5 * * * *"
+                            ),
+                            db=db,
+                            actor=actor,
+                            tenant=case.tenant,
                         )
                     elif operation == "status":
                         await job_api.update_status(identifier, "2", **request)
@@ -83,17 +97,17 @@ async def test_runner_claim_is_atomic_and_task_has_no_live_transaction(
     completion_case, monkeypatch
 ):
     assert completion_case.tenant.tenant_id == 0
-    key = "planned_runner_" + uuid4().hex[:12]
+    key = "test_task"
     started, finish = asyncio.Event(), asyncio.Event()
     calls, active, writes = [], set(), []
 
-    async def task():
+    async def task(_args):
         calls.append(True)
         started.set()
         await finish.wait()
         assert not active, "task callback retained a database transaction"
 
-    monkeypatch.setitem(task_registry._task_functions, key, task)
+    monkeypatch.setattr(builtin_task_specs, "test_task", task)
     async with AsyncSessionLocal() as db, db.begin():
         job = SysJob(
             tenant_id=0,

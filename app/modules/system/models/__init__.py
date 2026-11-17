@@ -1,4 +1,5 @@
 from .config import Config
+from .config_publication import ConfigPublication
 from .data_scope_demo import DataScopeDemo
 from .dept import Dept
 from .dict_data import DictData
@@ -27,6 +28,7 @@ __all__ = [
     "DictData",
     "File",
     "Config",
+    "ConfigPublication",
     "SysOperationLog",
     "SysLoginLog",
     "DataScopeDemo",

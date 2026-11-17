@@ -18,7 +18,6 @@ from app.modules.ai import lifecycle
 from app.modules.ai.agents.gateway.authorization_execution import PlannedGatewayOwner
 from app.modules.ai.agents.hitl.events import (
     AiErrorEvent,
-    DoneEvent,
     ToolCallResultEvent,
 )
 from app.modules.ai.api import confirm, resume
@@ -96,7 +95,7 @@ async def test_minimal_cancelled_resume_requires_never_started_proof(
     assert case.calls == []
 
 
-async def test_unknown_notice_never_waits_for_stalled_close(
+async def test_unknown_notice_owner_bounds_close_after_confirmed_commit(
     completion_case, monkeypatch
 ):
     case = completion_case
@@ -106,10 +105,16 @@ async def test_unknown_notice_never_waits_for_stalled_close(
         pending = resume._pending_from_durable_action(
             await db.get(AiPreparedAction, case.action_id)
         )
-    release = asyncio.Event()
+    release, close_entered = asyncio.Event(), asyncio.Event()
     committed, stalled = [], []
     original_commit = authorization_chat_owner.commit_authorization_session
     original_close = AsyncSession.close
+    # Measure cleanup only after the real commit reaches the close injection.
+    # The separate projection stall tests the optional wrapper's one-second cap.
+    projection = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        resume.result_projection_service, "authorize_result_projection", projection
+    )
 
     async def commit(db):
         await original_commit(db)
@@ -119,6 +124,7 @@ async def test_unknown_notice_never_waits_for_stalled_close(
         await original_close(db)
         if db in committed and not stalled:
             stalled.append(db)
+            close_entered.set()
             try:
                 await release.wait()
             except asyncio.CancelledError:
@@ -130,13 +136,24 @@ async def test_unknown_notice_never_waits_for_stalled_close(
     monkeypatch.setattr(AsyncSession, "close", resistant_close)
     try:
         task = asyncio.create_task(
-            resume._persist_unknown_resume_notice(
-                pending, tenant=case.tenant, actor_user_version=identity.user_version
+            resume.get_authorization_runtime().chat.finalize(
+                conversation_id=pending.conversation_id,
+                trace_id=pending.trace_id,
+                source_id=pending.source_user_message_id,
+                content="",
+                tool_calls=[],
+                agent_code=pending.agent_code,
+                tenant=case.tenant,
+                actor_user_version=identity.user_version,
             )
         )
+        # Arrival includes the original 8s transaction and independent 8s ACK.
+        # The cleanup assertion starts only after this injection point.
+        await asyncio.wait_for(close_entered.wait(), 17)
         done, _ = await asyncio.wait({task}, timeout=1.5)
-        assert task in done, "Session disposal must not exceed the display budget"
-        assert task.result()[-1].persistence == "committed"
+        assert task in done, "Session disposal must retain its bounded cleanup"
+        assert task.result() is not None
+        projection.assert_awaited()
         assert len(stalled) == 1
         assert any(row[0] is stalled[0] for row in _QUARANTINED.values())
     finally:
@@ -144,6 +161,57 @@ async def test_unknown_notice_never_waits_for_stalled_close(
         await task
         tasks = [row[2] for row in _QUARANTINED.values() if row[0] in stalled]
         await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 3)
+
+
+async def test_unknown_notice_projection_timeout_preserves_running_facts(
+    completion_case, monkeypatch
+):
+    case = completion_case
+    await leave_claim_running(case, monkeypatch)
+    async with AsyncSessionLocal() as db:
+        identity = access_identity(await authenticated_actor(case, db))
+        pending = resume._pending_from_durable_action(
+            await db.get(AiPreparedAction, case.action_id)
+        )
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def stalled_projection(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(
+        resume.result_projection_service,
+        "authorize_result_projection",
+        stalled_projection,
+    )
+    task = asyncio.create_task(
+        resume._persist_unknown_resume_notice(
+            pending, tenant=case.tenant, actor_user_version=identity.user_version
+        )
+    )
+    try:
+        done, _ = await asyncio.wait({task}, timeout=1.5)
+        assert task in done, "Optional projection must retain its one-second budget"
+        assert entered.is_set()
+        events = task.result()
+        assert events[-1].persistence == "not_applicable"
+        assert not any(isinstance(item, ToolCallResultEvent) for item in events)
+    finally:
+        release.set()
+        await task
+    async with AsyncSessionLocal() as db:
+        assert (await db.get(AiPreparedAction, case.action_id)).status == "running"
+        assert (await db.get(AiOperationLog, case.log_id)).status == "running"
+        assert (
+            await db.scalar(
+                select(AiMessage.message_id).where(
+                    AiMessage.conversation_id == case.conversation_id,
+                    AiMessage.role == "assistant",
+                )
+            )
+            is None
+        )
+    assert case.calls == []
 
 
 async def test_known_terminal_projection_timeout_preserves_facts(
@@ -292,7 +360,7 @@ async def test_resume_does_not_project_unproven_terminal(
 
 
 @pytest.mark.parametrize("write_fails", [False, True])
-async def test_unknown_notice_only_acknowledges_confirmed_message_commit(
+async def test_unknown_notice_owner_commits_only_confirmed_messages(
     completion_case, monkeypatch, write_fails
 ):
     case = completion_case
@@ -303,25 +371,45 @@ async def test_unknown_notice_only_acknowledges_confirmed_message_commit(
             await db.get(AiPreparedAction, case.action_id)
         )
 
-    locks = []
+    locks, injected = [], []
 
     def fail_notice(_conn, _cursor, statement, _params, _context, _many):
         if "FOR SHARE" in statement or "FOR UPDATE" in statement:
             locks.append(statement)
         if write_fails and statement.startswith("INSERT INTO ai_message"):
+            injected.append(True)
             raise RuntimeError("Injected unknown-notice SQL failure")
 
     event.listen(engine.sync_engine, "before_cursor_execute", fail_notice)
     try:
-        events = await resume._persist_unknown_resume_notice(
-            pending, tenant=case.tenant, actor_user_version=identity.user_version
-        )
+
+        async def finalize():
+            # The real owner proves G/B, lineage and commit within its original
+            # budget. The optional wrapper's one-second display is tested below.
+            return await resume.get_authorization_runtime().chat.finalize(
+                conversation_id=pending.conversation_id,
+                trace_id=pending.trace_id,
+                source_id=pending.source_user_message_id,
+                content="",
+                tool_calls=[],
+                agent_code=pending.agent_code,
+                tenant=case.tenant,
+                actor_user_version=identity.user_version,
+            )
+
+        if write_fails:
+            with pytest.raises(
+                RuntimeError, match="Injected unknown-notice SQL failure"
+            ):
+                await finalize()
+            message_id = None
+        else:
+            message_id = await finalize()
+            assert message_id is not None
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", fail_notice)
-    done = next(event for event in events if isinstance(event, DoneEvent))
     assert locks and "sys_user_field_policy_global_guard" in locks[0]
-    assert done.persistence == ("not_applicable" if write_fails else "committed")
-    assert not any(isinstance(event, ToolCallResultEvent) for event in events)
+    assert bool(injected) is write_fails
     async with AsyncSessionLocal() as db:
         message = await db.scalar(
             select(AiMessage).where(
@@ -331,6 +419,9 @@ async def test_unknown_notice_only_acknowledges_confirmed_message_commit(
         )
         assert (message is None) is write_fails
         assert (await db.get(AiPreparedAction, case.action_id)).status == "running"
+        assert (await db.get(AiOperationLog, case.log_id)).status == "running"
+        assert case.calls == []
         if message is not None:
+            assert message.message_id == message_id
             assert message.resolver_version is not None
             assert message.tool_codes == []

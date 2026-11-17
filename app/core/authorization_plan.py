@@ -48,10 +48,19 @@ class ResourceKind(StrEnum):
     ROLE_AGENT = "role_agent"
     SETTING = "setting"
     CONFIG = "config"
+    CONFIG_PUBLICATION = "config_publication"
     MAIL_CONFIG = "mail_config"
     POLICY_BINDING = "policy_binding"
     POLICY_REVISION = "policy_revision"
     POLICY_AUDIT = "policy_audit"
+    FIELD_POLICY_HEAD = "field_policy_head"
+    FIELD_POLICY_OBJECT = "field_policy_object"
+    FIELD_POLICY_REVISION = "field_policy_revision"
+    FIELD_POLICY_BINDING = "field_policy_binding"
+    FIELD_POLICY_MANIFEST = "field_policy_manifest"
+    FIELD_POLICY_ITEM = "field_policy_item"
+    FIELD_POLICY_AUDIT = "field_policy_audit"
+    FIELD_POLICY_REQUEST = "field_policy_request"
     IMPORT_BATCH = "import_batch"
     EXPORT_TASK = "export_task"
     IMPORT_BATCH_LOG = "import_batch_log"
@@ -82,9 +91,19 @@ class _ResourceDefinition:
     order: int
     module: str
     string_length: int = 0
+    key_string_lengths: tuple[int, ...] = ()
 
 
-def _definition(table, keys, order, module, *, global_scope=False, string_length=0):
+def _definition(
+    table,
+    keys,
+    order,
+    module,
+    *,
+    global_scope=False,
+    string_length=0,
+    key_string_lengths=(),
+):
     return _ResourceDefinition(
         table,
         keys,
@@ -92,6 +111,7 @@ def _definition(table, keys, order, module, *, global_scope=False, string_length
         order,
         module,
         string_length,
+        key_string_lengths,
     )
 
 
@@ -99,7 +119,7 @@ _SYSTEM = "app.modules.system.models."
 _AI = "app.modules.ai.models."
 _RESOURCE_DEFINITIONS = MappingProxyType(
     {
-        ResourceKind.FILE: _definition("sys_file", ("file_id",), 740, _SYSTEM + "file"),
+        ResourceKind.FILE: _definition("sys_file", ("file_id",), 745, _SYSTEM + "file"),
         ResourceKind.CONVERSATION: _definition(
             "ai_conversation", ("conversation_id",), 10, _AI + "conversation"
         ),
@@ -147,6 +167,12 @@ _RESOURCE_DEFINITIONS = MappingProxyType(
         ResourceKind.CONFIG: _definition(
             "sys_config", ("config_id",), 510, _SYSTEM + "config"
         ),
+        ResourceKind.CONFIG_PUBLICATION: _definition(
+            "sys_config_publication",
+            ("config_id",),
+            515,
+            _SYSTEM + "config_publication",
+        ),
         ResourceKind.MAIL_CONFIG: _definition(
             "sys_mail_config",
             ("config_id",),
@@ -159,6 +185,46 @@ _RESOURCE_DEFINITIONS = MappingProxyType(
             ("role_id",),
             600,
             _SYSTEM + "user_field_policy",
+        ),
+        ResourceKind.FIELD_POLICY_HEAD: _definition(
+            "sys_field_policy_head", ("tenant_id",), 550, _SYSTEM + "field_policy"
+        ),
+        ResourceKind.FIELD_POLICY_OBJECT: _definition(
+            "sys_field_policy_object_state",
+            ("object_id",),
+            560,
+            _SYSTEM + "field_policy",
+            string_length=96,
+        ),
+        ResourceKind.FIELD_POLICY_REVISION: _definition(
+            "sys_field_policy_revision", ("revision_id",), 570, _SYSTEM + "field_policy"
+        ),
+        ResourceKind.FIELD_POLICY_BINDING: _definition(
+            "sys_field_policy_binding",
+            ("role_id", "object_id"),
+            575,
+            _SYSTEM + "field_policy",
+            key_string_lengths=(0, 96),
+        ),
+        ResourceKind.FIELD_POLICY_MANIFEST: _definition(
+            "sys_field_policy_manifest", ("manifest_id",), 580, _SYSTEM + "field_policy"
+        ),
+        ResourceKind.FIELD_POLICY_ITEM: _definition(
+            "sys_field_policy_manifest_item",
+            ("manifest_id", "role_id", "object_id"),
+            585,
+            _SYSTEM + "field_policy",
+            key_string_lengths=(0, 0, 96),
+        ),
+        ResourceKind.FIELD_POLICY_AUDIT: _definition(
+            "sys_field_policy_audit", ("audit_id",), 590, _SYSTEM + "field_policy"
+        ),
+        ResourceKind.FIELD_POLICY_REQUEST: _definition(
+            "sys_field_policy_request",
+            ("actor_user_id", "request_id"),
+            595,
+            _SYSTEM + "field_policy",
+            key_string_lengths=(0, 36),
         ),
         ResourceKind.POLICY_REVISION: _definition(
             "sys_user_field_policy_revision",
@@ -289,16 +355,26 @@ class ResourceKey:
         values = self.identity if type(self.identity) is tuple else (self.identity,)
         if len(values) != len(definition.key_columns):
             raise _invalid()
-        for value in values:
-            if definition.string_length:
+        for index, value in enumerate(values):
+            string_length = (
+                definition.key_string_lengths[index]
+                if definition.key_string_lengths
+                else definition.string_length
+            )
+            if string_length:
                 if (
                     type(value) is not str
-                    or not 1 <= len(value) <= definition.string_length
+                    or not 1 <= len(value) <= string_length
                     or any(not 33 <= ord(char) <= 126 for char in value)
                 ):
                     raise _invalid()
-            elif not _valid_id(value, zero=self.kind is ResourceKind.TENANT):
+            elif not _valid_id(
+                value,
+                zero=self.kind in {ResourceKind.TENANT, ResourceKind.FIELD_POLICY_HEAD},
+            ):
                 raise _invalid()
+        if self.kind is ResourceKind.FIELD_POLICY_HEAD and values != (self.tenant_id,):
+            raise _invalid()
         if self.kind is ResourceKind.MAIL_CONFIG and values != (1,):
             raise _invalid()
         object.__setattr__(self, "identity", values)

@@ -19,6 +19,7 @@ import re
 from contextlib import suppress
 from copy import deepcopy
 from http import HTTPStatus
+from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from anyio import CancelScope
@@ -56,6 +57,7 @@ from app.modules.ai.agents.hitl.events import (
     ConfirmationRequiredEvent,
     DoneEvent,
     ToolCallResultEvent,
+    ToolCallStartedEvent,
     event_to_sse_data,
 )
 from app.modules.ai.agents.safety.auto_disable import check_user_disabled
@@ -91,6 +93,7 @@ from app.modules.ai.service.chat_run_service import (
 )
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.ai.service.conversation_service import conversation_service
+from app.modules.ai.service.delivery_source_roots import extend_source
 from app.modules.ai.service.model_authorization_service import (
     model_authorization_service,
 )
@@ -98,6 +101,7 @@ from app.modules.ai.service.result_projection_service import (
     ProjectionLineage,
     result_projection_service,
 )
+from app.modules.ai.service.stream_delivery import StreamDelivery
 from app.modules.auth.service import access_identity
 from app.modules.system.models.user import User
 from app.utils.attachment_filename import attachment_display_name
@@ -361,7 +365,7 @@ async def _finalize_stream_turn(
             )
             + f"（{stream_error_code}）"
         )
-        if lineage is None and agent_code is not None:
+        if lineage is None and agent_code is not None and field_authority is not None:
             # This deterministic diagnostic contains no business facts. Do not
             # expose incomplete tool events with unknown authorization lineage.
             tool_calls = None
@@ -620,6 +624,26 @@ async def chat(
     # The browser owns only the newly submitted question. Past prose, receipts
     # and their authorization dependencies must come from the server together.
     projection_dependency_message_ids: list[int] = []
+    projected = []
+    await _finish_chat_read_phase(db)
+    input_snapshot = await get_authorization_runtime().chat.input_parts(
+        tenant=identity.tenant,
+        actor_user_version=identity.user_version,
+        parts=display_parts if display_parts is not None else user_parts,
+    )
+    user_parts = input_snapshot["parts"]
+    display_parts = user_parts
+    if display_content is not None:
+        user_message = display_content
+    if body.get("messages"):
+        body["messages"][-1] = {
+            key: value
+            for key, value in body["messages"][-1].items()
+            if key != "content"
+        }
+        body["messages"][-1]["parts"] = user_parts or [
+            {"type": "text", "text": user_message}
+        ]
     if conversation_id is not None:
         await _finish_chat_read_phase(db)
         projected = await get_authorization_runtime().chat.messages(
@@ -993,9 +1017,6 @@ async def chat(
     )
     from app.modules.ai.agents.supervisor.router import agent_router  # noqa: PLC0415
     from app.modules.ai.constants import DEFAULT_AGENT_CODE  # noqa: PLC0415
-    from app.modules.ai.service.agent_visibility import (  # noqa: PLC0415
-        list_visible_agents,
-    )
 
     accept = request.headers.get("accept", SSE_CONTENT_TYPE)
 
@@ -1029,7 +1050,26 @@ async def chat(
             route_reason = "empty_message"
             final_agent_code = DEFAULT_AGENT_CODE
         else:
-            candidates = await list_visible_agents(db, _current_user)
+            await _finish_chat_read_phase(db)
+            candidate_snapshot = await get_authorization_runtime().delivery.agents(
+                tenant=identity.tenant,
+                actor_user_version=identity.user_version,
+                with_sources=True,
+            )
+            candidate_rows = candidate_snapshot["agents"]
+
+            input_snapshot["field_authority"] = extend_source(
+                input_snapshot["field_authority"],
+                *candidate_snapshot["field_authority"]["source_domains"],
+            )
+            candidates = [
+                SimpleNamespace(
+                    code=row["code"],
+                    name=row.get("name") or "AI 助手",
+                    description=row.get("description") or "",
+                )
+                for row in candidate_rows
+            ]
             if not candidates:
                 routing_failed = True
                 route_reason = "no_candidates"
@@ -1079,16 +1119,20 @@ async def chat(
                     # Client history is not authoritative. Only bounded user
                     # questions from this actor's persisted conversation inform
                     # ellipsis; assistant/tool results never enter the router.
-                    routing_history = (
-                        await conversation_service.get_routing_history(
-                            db,
-                            conversation_id,
-                            _current_user.user_id,
-                            tenant=deps.tenant,
+                    routing_history = []
+                    if conversation_id is not None:
+                        routing_snapshot = (
+                            await get_authorization_runtime().chat.routing_context(
+                                tenant=identity.tenant,
+                                actor_user_version=identity.user_version,
+                                conversation_id=conversation_id,
+                            )
                         )
-                        if conversation_id is not None
-                        else []
-                    )
+                        routing_history = routing_snapshot["history"]
+                        input_snapshot["field_authority"] = extend_source(
+                            input_snapshot["field_authority"],
+                            *routing_snapshot["source_domains"],
+                        )
                     start = time.monotonic()
                     router_choice = await _select_chat_model(
                         db,
@@ -1097,6 +1141,11 @@ async def chat(
                     )
                     router_model = model_authorization_service.create_model_instance(
                         router_choice
+                    )
+                    await get_authorization_runtime().chat.model_authority(
+                        tenant=identity.tenant,
+                        actor_user_version=identity.user_version,
+                        frozen=input_snapshot["field_authority"],
                     )
                     result = await _prepare_io(
                         agent_router.route(
@@ -1229,6 +1278,19 @@ async def chat(
     if clarification_payload is not None:
 
         async def _clarification_stream():
+            rows = await get_authorization_runtime().delivery.agents(
+                tenant=identity.tenant, actor_user_version=identity.user_version
+            )
+            clarification_payload["candidates"] = tuple(
+                {
+                    "code": row["code"],
+                    "name": row.get("name") or "AI 助手",
+                    "description": row.get("description") or "",
+                }
+                for row in rows
+                if row["code"]
+                in {c["code"] for c in clarification_payload["candidates"]}
+            )
             yield _format_sse_chunk(ClarificationRequiredEvent(**clarification_payload))
             yield _format_sse_chunk(
                 DoneEvent(
@@ -1347,6 +1409,7 @@ async def chat(
                     tenant=deps.tenant,
                     authority=run_authority,
                     audit=routing_audit,
+                    context_authority=input_snapshot["field_authority"],
                 )
             )
         else:
@@ -1373,25 +1436,51 @@ async def chat(
     # 并发合并自定义事件队列和 PydanticAI 流。
     # usage_limits 防止 Agent 无限循环（tool_calls_limit=5 / request_limit=10）。
     # accept 在路由前定义，供安全检查和路由短路复用。
-    ephemeral_field_authority = None
+    ephemeral_field_authority = input_snapshot["field_authority"]
+    event_receipts = []
 
-    async def authorize_model_context():
+    async def collect_model_context():
         nonlocal ephemeral_field_authority
         owner = get_authorization_runtime().chat
         if conversation_id is not None and deps.source_user_message_id:
-            ephemeral_field_authority = await owner.check_run(
+            checked = await owner.delivery_check(
                 tenant=deps.tenant,
                 actor_user_version=identity.user_version,
                 conversation_id=conversation_id,
                 source_id=deps.source_user_message_id,
                 trace_id=deps.trace_id,
+                extra_receipts=tuple(event_receipts),
             )
         else:
-            ephemeral_field_authority = await owner.model_authority(
+            checked = await owner.delivery_check(
                 tenant=deps.tenant,
                 actor_user_version=identity.user_version,
                 frozen=ephemeral_field_authority,
             )
+        ephemeral_field_authority = checked["authority"]
+        return checked
+
+    async def probe_model_context(proof):
+        return await get_authorization_runtime().chat.delivery_probe(
+            tenant=deps.tenant,
+            actor_user_version=identity.user_version,
+            header=proof.get("authority", proof),
+            receipt=proof,
+            **(
+                {
+                    "conversation_id": conversation_id,
+                    "source_id": deps.source_user_message_id,
+                    "trace_id": deps.trace_id,
+                }
+                if conversation_id is not None and deps.source_user_message_id
+                else {}
+            ),
+        )
+
+    sender = StreamDelivery(collect_model_context, probe_model_context)
+
+    async def authorize_model_context():
+        await sender.model()
 
     deps.authorize_model_context = authorize_model_context
     adapter = VercelAIAdapter(agent=agent, run_input=run_input, accept=accept)
@@ -1404,11 +1493,24 @@ async def chat(
     )
 
     # 注入 signal_event：execute_tool emit 事件 → push 到 queue
-    custom_event_queue: asyncio.Queue[AiStreamEvent] = asyncio.Queue()
+    custom_event_queue: asyncio.Queue[AiStreamEvent] = asyncio.Queue(maxsize=64)
     suppress_provider_output = asyncio.Event()
     execution_outcome_unknown = asyncio.Event()
 
     async def _signal_event(event: AiStreamEvent) -> None:
+        proof = (
+            event.projection.field_authority
+            if isinstance(event, ToolCallResultEvent) and event.projection
+            else event.dry_run.field_authority
+            if isinstance(event, ConfirmationRequiredEvent) and event.dry_run
+            else event.field_authority
+            if isinstance(event, ToolCallStartedEvent)
+            else None
+        )
+        if proof is not None:
+            if len(event_receipts) >= 64:
+                raise AuthorizationException(error_code="FIELD_AUTHORIZATION_CHANGED")
+            event_receipts.append(proof)
         if (
             isinstance(event, AiErrorEvent)
             and event.error_code == "AI_EXECUTION_OUTCOME_UNKNOWN"
@@ -1440,7 +1542,16 @@ async def chat(
         # 之后，stream hang 时不 drain → confirmation_required 事件卡 queue 没到
         # 前端。修法：独立 drain_task 异步消费 custom_event_queue，不依赖 vercel
         # chunk 流转。
-        unified_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        unified_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=64)
+        closing = asyncio.Event()
+        produced_bytes = 0
+
+        async def enqueue(chunk):
+            nonlocal produced_bytes
+            produced_bytes += len(chunk.encode("utf-8"))
+            if produced_bytes > 256 * 1024:
+                raise AuthorizationException(error_code="FIELD_AUTHORIZATION_CHANGED")
+            await unified_queue.put(chunk)
 
         async def drain_custom_events() -> None:
             """独立任务：消费 custom_event_queue（tool_call_started /
@@ -1449,12 +1560,26 @@ async def chat(
             与 produce_pydantic 并行运行，事件到达立即转发到 unified_queue。
             收到 None sentinel 退出。
             """
-            while True:
-                ev = await custom_event_queue.get()
-                if ev is None:  # sentinel
-                    break
-                tool_collector.record(ev)
-                await unified_queue.put(_format_sse_chunk(ev))
+            nonlocal stream_error_code
+            try:
+                while True:
+                    ev = await custom_event_queue.get()
+                    if ev is None:  # sentinel
+                        break
+                    tool_collector.record(ev)
+                    await enqueue(_format_sse_chunk(ev))
+            except BusinessException:
+                stream_error_code = "FIELD_AUTHORIZATION_CHANGED"
+                suppress_provider_output.set()
+                pydantic_task.cancel()
+                await unified_queue.put(
+                    _format_sse_chunk(
+                        AiErrorEvent(
+                            error_code=stream_error_code,
+                            message="交付预算已用尽，请重新查询",
+                        )
+                    )
+                )
 
         async def produce_pydantic():
             from app.modules.ai.agents.gateway.atomic_execution import (  # noqa: PLC0415
@@ -1497,10 +1622,14 @@ async def chat(
                     )
                     if chunk is None:
                         continue
+                    if len(chunk.encode("utf-8")) + produced_bytes > 256 * 1024:
+                        raise AuthorizationException(
+                            error_code="FIELD_AUTHORIZATION_CHANGED"
+                        )
                     # 提取并收集 Vercel UI Protocol 的 text-delta。
                     # `data: {"type":"text-delta","delta":"..."}\n\n`）
                     _collect_text_delta(chunk, collected)
-                    await unified_queue.put(chunk)
+                    await enqueue(chunk)
             except PreparedExecutionOutcomeUnknown as exc:
                 execution_outcome_unknown.set()
                 suppress_provider_output.set()
@@ -1559,11 +1688,13 @@ async def chat(
                 # Close and fully drain that queue before publishing the terminal
                 # sentinel; otherwise the consumer can stop before the final
                 # started/result/confirmation card reaches the browser.
-                await custom_event_queue.put(None)
-                try:
-                    await drain_task
-                finally:
-                    await unified_queue.put(None)
+                if not closing.is_set():
+                    await custom_event_queue.put(None)
+                    try:
+                        await drain_task
+                    finally:
+                        if not closing.is_set():
+                            await unified_queue.put(None)
 
         drain_task = asyncio.create_task(drain_custom_events())
         pydantic_task = asyncio.create_task(produce_pydantic())
@@ -1614,7 +1745,17 @@ async def chat(
                 if chunk is None:  # sentinel: PydanticAI stream 结束
                     break
                 try:
-                    await authorize_model_context()
+                    await sender.send(
+                        chunk,
+                        force_full=any(
+                            name in chunk
+                            for name in (
+                                "tool_call_started",
+                                "tool_call_result",
+                                "confirmation_required",
+                            )
+                        ),
+                    )
                 except BusinessException:
                     stream_error_code = "FIELD_AUTHORIZATION_CHANGED"
                     pydantic_task.cancel()
@@ -1625,9 +1766,17 @@ async def chat(
                         )
                     )
                     break
+                if sender.fixed_receipt and any(
+                    name in chunk
+                    for name in ("text-delta", "reasoning-delta", "tool_call_started")
+                ):
+                    continue
                 yield chunk
             stream_consumed = True
         finally:
+            closing.set()
+            if not drain_task.done():
+                drain_task.cancel()
             if not pydantic_task.done():
                 pydantic_task.cancel()
                 try:
@@ -1636,8 +1785,6 @@ async def chat(
                     pass
             # produce_pydantic normally owns the drain barrier. Client disconnect
             # may cancel it before startup, so keep this idempotent fallback.
-            if not drain_task.done():
-                await custom_event_queue.put(None)
             try:
                 await drain_task
             except (asyncio.CancelledError, Exception):

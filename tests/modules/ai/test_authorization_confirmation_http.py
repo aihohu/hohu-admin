@@ -235,33 +235,175 @@ async def test_late_preclaim_denial_cannot_overwrite_another_success(
         await asyncio.gather(first, return_exceptions=True)
 
 
+@pytest.mark.parametrize("reference_delay", [0, 2])
 async def test_confirmation_input_preparation_has_total_deadline(
-    completion_case, monkeypatch
+    completion_case, monkeypatch, reference_delay
 ):
     import asyncio
-    import time
 
+    from app.db.authorization_lifecycle_owner import LifecycleOwner
+    from app.modules.ai.service.authorization_lifecycle_candidate import (
+        lifecycle_candidate,
+    )
     from app.modules.system.service.authorization_ai_tool_adapter import (
         system_ai_tool_adapter,
     )
     from tests.modules.ai.test_atomic_prepared_completion import approve, observe
 
-    entered = []
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+    started = None
+    original_confirm = LifecycleOwner.confirm
+    original_reference = lifecycle_candidate.reference
+
+    async def observed_confirm(self, *args, **kwargs):
+        nonlocal started
+        started = asyncio.get_running_loop().time()
+        return await original_confirm(self, *args, **kwargs)
+
+    async def delayed_reference(*args, **kwargs):
+        if started is not None:
+            await asyncio.sleep(reference_delay)
+        return await original_reference(*args, **kwargs)
 
     async def stalled(db, **_kwargs):
-        entered.append(True)
         assert not db.in_transaction()
-        await asyncio.Event().wait()
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
 
+    monkeypatch.setattr(LifecycleOwner, "confirm", observed_confirm)
+    monkeypatch.setattr(lifecycle_candidate, "reference", delayed_reference)
     monkeypatch.setattr(system_ai_tool_adapter, "prepare_input", stalled)
-    started = time.monotonic()
-    with pytest.raises(TimeoutError):
-        await asyncio.wait_for(approve(completion_case), 6)
-    assert entered == [True]
-    assert time.monotonic() - started < 5.8
+    task = asyncio.create_task(approve(completion_case))
+    try:
+        # Authentication/admission precede the actual preparation budget.
+        await asyncio.wait_for(entered.wait(), 20)
+        assert started is not None
+        remaining = max(0, 5.8 - (asyncio.get_running_loop().time() - started))
+        await asyncio.wait_for(cancelled.wait(), remaining)
+        # Rollback/close retain their independent cleanup budgets.
+        done, _ = await asyncio.wait({task}, timeout=10)
+        assert task in done, "Preparation cleanup did not finish"
+        with pytest.raises(TimeoutError):
+            task.result()
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
     state = await observe(completion_case)
     assert state["action_status"] == "pending_confirmation"
     assert completion_case.calls == [] and state["user_ids"] == []
+
+
+@pytest.mark.parametrize("overrun_stage", ["reference", "prepare"])
+async def test_confirmation_sync_overrun_cannot_start_next_phase(
+    completion_case, monkeypatch, overrun_stage
+):
+    import time
+
+    from app.db.authorization_lifecycle_owner import LifecycleOwner
+    from app.modules.ai.service.authorization_lifecycle_candidate import (
+        lifecycle_candidate,
+    )
+    from app.modules.system.service.authorization_ai_tool_adapter import (
+        system_ai_tool_adapter,
+    )
+    from tests.modules.ai.test_atomic_prepared_completion import approve, observe
+
+    count_real_handler(completion_case, monkeypatch)
+    original_confirm = LifecycleOwner.confirm
+    original_reference = lifecycle_candidate.reference
+    original_prepare = system_ai_tool_adapter.prepare_input
+    in_confirmation = False
+    prepare_calls = []
+
+    async def observed_confirm(self, *args, **kwargs):
+        nonlocal in_confirmation
+        in_confirmation = True
+        return await original_confirm(self, *args, **kwargs)
+
+    async def late_reference(*args, **kwargs):
+        value = await original_reference(*args, **kwargs)
+        if in_confirmation and overrun_stage == "reference":
+            # A synchronous tail cannot be preempted by an asyncio timer.
+            time.sleep(5.05)  # noqa: ASYNC251 - Exercise an unpreemptible tail.
+        return value
+
+    async def late_prepare(*args, **kwargs):
+        prepare_calls.append(True)
+        value = await original_prepare(*args, **kwargs)
+        if overrun_stage == "prepare":
+            time.sleep(5.05)  # noqa: ASYNC251 - Exercise an unpreemptible tail.
+        return value
+
+    monkeypatch.setattr(LifecycleOwner, "confirm", observed_confirm)
+    monkeypatch.setattr(lifecycle_candidate, "reference", late_reference)
+    monkeypatch.setattr(system_ai_tool_adapter, "prepare_input", late_prepare)
+    with pytest.raises(TimeoutError):
+        await approve(completion_case)
+    assert prepare_calls == ([] if overrun_stage == "reference" else [True])
+    state = await observe(completion_case)
+    assert state["action_status"] == "pending_confirmation"
+    assert completion_case.calls == [] and state["user_ids"] == []
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+async def test_confirmation_rollback_time_only_consumes_pending_preparation(
+    completion_case, monkeypatch, terminal
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.db import authorization_lifecycle_owner as owner_module
+    from app.db.authorization_runtime import AuthorizationRuntime
+    from tests.modules.ai.test_atomic_prepared_completion import approve, observe
+
+    count_real_handler(completion_case, monkeypatch)
+    if terminal:
+        assert (await approve(completion_case)).data.status == "succeeded"
+    loop = asyncio.get_running_loop()
+    elapsed = 0
+    original_rollback = owner_module.rollback_authorization_session
+
+    async def acknowledged_rollback(db):
+        nonlocal elapsed
+        await original_rollback(db)
+        # Advance only this owner's clock after a real acknowledged rollback;
+        # the runtime's actual transaction/ACK timers are not replaced.
+        elapsed = 6
+
+    monkeypatch.setattr(
+        owner_module,
+        "asyncio",
+        SimpleNamespace(
+            get_running_loop=lambda: SimpleNamespace(
+                time=lambda: loop.time() + elapsed
+            ),
+            timeout_at=asyncio.timeout_at,
+        ),
+    )
+    monkeypatch.setattr(
+        owner_module, "rollback_authorization_session", acknowledged_rollback
+    )
+    owner = AuthorizationRuntime(engine).lifecycle
+    request = {
+        "confirmation_id": completion_case.confirmation_id,
+        "tenant": completion_case.tenant,
+        "actor_user_version": 1,
+    }
+    if terminal:
+        assert (await owner.confirm(**request)).disposition == "succeeded"
+    else:
+        with pytest.raises(TimeoutError):
+            await owner.confirm(**request)
+    state = await observe(completion_case)
+    assert state["action_status"] == (
+        "succeeded" if terminal else "pending_confirmation"
+    )
+    assert len(completion_case.calls) == len(state["user_ids"]) == int(terminal)
 
 
 async def test_confirmed_status_does_not_depend_on_redis_disable_lookup(

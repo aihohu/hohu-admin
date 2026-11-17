@@ -24,6 +24,7 @@ from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.operation_log_service import operation_log_service
 from app.modules.system.models.user import User
 from app.modules.system.service.authorization_transaction_service import _Transaction
+from tests.ai_source_fixtures import authored_source
 from tests.fixture_session import FixtureSessionLocal as AsyncSessionLocal
 from tests.modules.ai.test_atomic_prepared_completion import authenticated_actor
 from tests.modules.ai.test_atomic_prepared_completion import (
@@ -56,6 +57,9 @@ async def context_case(db_session):
         db.add(source)
         await db.flush()
         tenant = tenant_context(tenant_id=0, actor_user_id=user_id)
+        source.field_authority = await authored_source(
+            db, tenant=tenant, message_id=source.message_id
+        )
         deps = SimpleNamespace(
             trace_id=marker,
             conversation_id=conversation.conversation_id,

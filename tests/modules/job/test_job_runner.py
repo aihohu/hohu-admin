@@ -17,9 +17,9 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.modules.job import builtin_task_specs
 from app.modules.job.job_runner import RUNNER_ID, _do_execute
 from app.modules.job.models.job import SysJob, SysJobLog
-from app.modules.job.task_registry import _task_functions
 from tests.modules.job.authorization_fixture import (
     committed_job_session,  # noqa: F401
 )
@@ -51,20 +51,19 @@ async def _seed_enabled_job(
 
 
 @pytest.fixture
-def fake_task_function():
+def fake_task_function(monkeypatch):
     """注册一个立即成功的 fake task function。
 
     Yields:
         job_key（_do_execute 通过此 key 找到 fake task）
     """
-    key = f"TEST_RUNNER_TASK_{datetime.now().strftime('%H%M%S%f')}"
+    key = "test_task"
 
-    async def _noop(*_args, **_kwargs):
+    async def _noop(_args):
         return None
 
-    _task_functions[key] = _noop
+    monkeypatch.setattr(builtin_task_specs, "test_task", _noop)
     yield key
-    _task_functions.pop(key, None)
 
 
 class TestDoExecuteWritesRunnerIdAndPythonNow:

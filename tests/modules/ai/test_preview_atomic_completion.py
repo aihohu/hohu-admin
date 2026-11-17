@@ -2,6 +2,7 @@
 
 # ruff: noqa: PLC0415
 
+from hashlib import sha256
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -26,6 +27,7 @@ from app.modules.ai.models.operation_log import AiOperationLog
 from app.modules.ai.models.prepared_action import AiPreparedAction
 from app.modules.ai.service.chat_service import chat_service
 from app.modules.auth.service import get_current_user
+from app.modules.system.field_policy.file_sources import make_file_manifest
 from app.modules.system.models.file import File
 from app.modules.system.models.user import User
 from app.modules.system.models.user_transfer import UserImportBatch
@@ -128,6 +130,15 @@ async def preview_case(completion_case, monkeypatch, tmp_path):  # noqa: F811
                 mime_type="text/csv",
                 business_type="user-import",
                 del_flag="0",
+                delivery_class="user-import",
+                content_sha256=sha256(csv).hexdigest(),
+                source_manifest=make_file_manifest(
+                    tenant_id=case.tenant.tenant_id,
+                    owner_id=case.tenant.actor_user_id,
+                    file_id=file_id,
+                    delivery_class="user-import",
+                    digest=sha256(csv).hexdigest(),
+                ),
             )
         )
     registered = ToolRegistry.get().find("user.import_preview")
@@ -216,13 +227,25 @@ async def observe(preview):
         return batches, logs
 
 
-async def replace_source(preview, content):
+async def configure_uploaded_fixture(preview, content):
+    """Select the new uploaded fixture before admission, never rebind old evidence."""
+    assert not preview.batch_ids
     preview.source_path.write_bytes(content)
     async with AsyncSessionLocal() as db, db.begin():
         await db.execute(
             update(File)
             .where(File.file_id == preview.file_id)
-            .values(file_size=len(content))
+            .values(
+                file_size=len(content),
+                content_sha256=sha256(content).hexdigest(),
+                source_manifest=make_file_manifest(
+                    tenant_id=preview.case.tenant.tenant_id,
+                    owner_id=preview.case.tenant.actor_user_id,
+                    file_id=preview.file_id,
+                    delivery_class="user-import",
+                    digest=sha256(content).hexdigest(),
+                ),
+            )
         )
 
 
@@ -924,7 +947,7 @@ async def test_real_import_partial_and_fail_fast_are_atomic(
         f"{case.username},Atomic {case.username.removeprefix('atx')}\n"
         f"{case.username}b,missing-department-for-file-test\n"
     ).encode()
-    await replace_source(preview, csv)
+    await configure_uploaded_fixture(preview, csv)
     monkeypatch.setattr(
         "app.modules.system.service.user_import_service.get_file_storage",
         lambda: preview.storage,
@@ -1026,7 +1049,7 @@ async def test_real_import_file_failure_preserves_one_execution(
         f"{case.username},Atomic {case.username.removeprefix('atx')}\n"
         f"{case.username}b,missing-department-for-file-test\n"
     ).encode()
-    await replace_source(preview, csv)
+    await configure_uploaded_fixture(preview, csv)
     monkeypatch.setattr(
         "app.modules.system.service.user_import_service.get_file_storage",
         lambda: preview.storage,

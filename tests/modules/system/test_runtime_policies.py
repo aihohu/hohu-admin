@@ -65,7 +65,7 @@ async def test_model_factory_receives_generation_settings():
             name="example", base_url=None, config={"generation": {"max_tokens": 128}}
         ),
         provider=SimpleNamespace(
-            provider_code="openai", api_key="encrypted", base_url=None
+            provider_code="openai", api_key="encrypted", base_url=None, config={}
         ),
     )
     with (

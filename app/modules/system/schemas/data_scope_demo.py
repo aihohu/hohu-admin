@@ -31,7 +31,9 @@ class DataScopeDemoCreate(BaseModel):
             raise ValueError("状态必须是 1(启用) 或 2(禁用)")
         return v
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid"
+    )
 
 
 class DataScopeDemoUpdate(BaseModel):
@@ -48,7 +50,9 @@ class DataScopeDemoUpdate(BaseModel):
             raise ValueError("状态必须是 1(启用) 或 2(禁用)")
         return v
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid"
+    )
 
 
 class DataScopeDemoQuery(BaseModel):
@@ -59,7 +63,9 @@ class DataScopeDemoQuery(BaseModel):
     title: str | None = Field(None, description="标题（模糊查询）")
     status: str | None = Field(None, description="状态")
 
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid"
+    )
 
 
 class DataScopeDemoOut(BaseModel):

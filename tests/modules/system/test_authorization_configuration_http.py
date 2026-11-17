@@ -100,6 +100,15 @@ async def test_configuration_http_one_commit_and_barrier(
 ):
     client, plain = configuration_http
     commits, locks = [], []
+    if path in {"/config/add", "/config/901"} and method in {"POST", "PUT"}:
+        query = (
+            {"mode": "create"}
+            if method == "POST"
+            else {"mode": "update", "recordId": "901"}
+        )
+        form = await client.get("/config/form", params=query)
+        assert form.status_code == 200, form.text
+        payload = dict(payload) | {"formReceipt": form.json()["data"]["formReceipt"]}
     engine = plain.kw["bind"].sync_engine
 
     def committed(connection):
@@ -146,9 +155,20 @@ async def test_configuration_http_one_commit_and_barrier(
 async def test_configuration_import_preserves_counts(configuration_http):
     client, plain = configuration_http
     book = Workbook()
-    book.active.append(["name", "key", "value", "type", "group", "status", "public"])
     book.active.append(
-        ["Imported", "http.imported", "value", "text", "custom", "1", False]
+        [
+            "config_name",
+            "config_key",
+            "config_value",
+            "config_type",
+            "config_group",
+            "status",
+            "is_public",
+            "remark",
+        ]
+    )
+    book.active.append(
+        ["Imported", "http.imported", "value", "text", "custom", "1", False, None]
     )
     stream = BytesIO()
     book.save(stream)
@@ -192,7 +212,11 @@ async def test_settings_http_contract_and_audit(configuration_http, group, key, 
         pytest.fail(f"Fixture key missing: {group}/{key}; actual keys {list(values)}")
     response = await client.put(
         "/settings/" + group,
-        json={"values": {key: value}, "revision": current.json()["data"]["revision"]},
+        json={
+            "values": {key: value},
+            "revision": current.json()["data"]["revision"],
+            "formReceipt": current.json()["data"].get("formReceipt"),
+        },
     )
     assert response.status_code == 200, response.text
     assert response.json()["data"]["values"][key] == value

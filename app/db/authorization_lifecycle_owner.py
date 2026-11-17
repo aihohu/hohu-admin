@@ -206,10 +206,12 @@ class LifecycleOwner:
             return result
 
     async def confirm(self, confirmation_id, *, tenant, actor_user_version):
+        loop = asyncio.get_running_loop()
+        preparation_deadline = loop.time() + 5
         async with self.factory() as db:
             try:
                 with bounded_authorization_reads(db):
-                    async with asyncio.timeout(5):
+                    async with asyncio.timeout_at(preparation_deadline):
                         action = await lifecycle_candidate.reference(
                             db, confirmation_id, tenant=tenant
                         )
@@ -222,6 +224,8 @@ class LifecycleOwner:
                             deepcopy(action.frozen_args),
                             deepcopy(action.snapshot),
                         )
+                        if loop.time() >= preparation_deadline:
+                            raise TimeoutError
             finally:
                 await rollback_authorization_session(db)
             if status != "pending_confirmation":
@@ -231,7 +235,9 @@ class LifecycleOwner:
                 return ExecutionDisposition(fact.disposition)
             owner = new_execution_owner(tool)
             try:
-                async with asyncio.timeout(5):
+                if loop.time() >= preparation_deadline:
+                    raise TimeoutError
+                async with asyncio.timeout_at(preparation_deadline):
                     command = await system_ai_tool_adapter.prepare_input(
                         db,
                         tool=tool,
@@ -247,6 +253,8 @@ class LifecycleOwner:
                             tenant.tenant_id, str(identifier), owner
                         ),
                     )
+                if loop.time() >= preparation_deadline:
+                    raise TimeoutError
                 with bounded_authorization_reads(db):
                     async with authorization_transactions.scope(
                         db,

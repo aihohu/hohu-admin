@@ -8,6 +8,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 import app.modules.marketplace.models  # noqa: F401
+import app.modules.system.models.field_policy  # noqa: F401
 from alembic import context
 
 # Import your model

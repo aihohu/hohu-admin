@@ -51,6 +51,8 @@ async def test_normal_public_upload_is_still_served(tmp_path) -> None:
     )
 
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
 
 
 @pytest.mark.parametrize("suffix", [".csv", ".txt", ".xls", ".xlsx"])

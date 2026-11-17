@@ -36,6 +36,7 @@ from app.modules.system.api.data_scope_demo import router as data_scope_demo_rou
 from app.modules.system.api.dept import router as dept_router
 from app.modules.system.api.dict_data import router as dict_data_router
 from app.modules.system.api.dict_type import router as dict_type_router
+from app.modules.system.api.field_management import router as field_management_router
 from app.modules.system.api.file import router as file_router
 from app.modules.system.api.login_log import router as login_log_router
 from app.modules.system.api.menu import router as menu_router
@@ -45,6 +46,8 @@ from app.modules.system.api.settings import router as settings_router
 from app.modules.system.api.user import router as user_router
 from app.modules.system.api.user_field_policy import router as user_field_policy_router
 from app.modules.system.service.file_service import file_service
+
+_FIELD_INGRESS_AI_ENABLED = settings.AI_MODULE_ENABLED
 
 if settings.AI_MODULE_ENABLED:
     from app.modules.ai.agents.tools import load_builtin_tools
@@ -82,6 +85,9 @@ async def _stop_task(task):
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Own all startup resources, including failures before the serving yield."""
+    from app.core.field_ingress import validate_field_ingress  # noqa: PLC0415
+
+    validate_field_ingress(_app, ai_enabled=_FIELD_INGRESS_AI_ENABLED)
     require_open()
     cleanup = AsyncExitStack()
     cleanup.push_async_callback(close_redis)
@@ -153,8 +159,7 @@ async def lifespan(_app: FastAPI):
                 ticket_id="SYSTEM-SCHEDULER",
                 correlation_id=f"scheduler:{RUNNER_ID}",
             )
-            async with AsyncSessionLocal() as db:
-                await scheduler_manager.reload_jobs(db, platform=scheduler_platform)
+            await scheduler_manager.reload_jobs(platform=scheduler_platform)
             cleanup.push_async_callback(scheduler_manager.stop)
             process.stop_callbacks.append(scheduler_manager.stop)
             await scheduler_manager.start_with_pubsub(platform=scheduler_platform)
@@ -262,6 +267,9 @@ app.include_router(
 )
 app.include_router(platform_control_router, prefix="/platform", tags=["平台租户控制面"])
 app.include_router(user_router, prefix="/system/user", tags=["用户管理"])
+app.include_router(
+    field_management_router, prefix="/system/field-policy", tags=["字段权限管理"]
+)
 app.include_router(
     user_field_policy_router, prefix="/system/user-field-policy", tags=["用户字段策略"]
 )
@@ -393,7 +401,14 @@ async def health_check():
 # 不进 ResponseModel 包装；生产用 nginx/ingress 限制 /metrics 只允许内网 / Prometheus scrape IP。
 @app.get("/metrics", include_in_schema=False)
 async def metrics():
+    payload = generate_latest()
+    headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+    if len(payload) > 8 * 1024 * 1024:
+        return PlainTextResponse(
+            "metrics unavailable", status_code=503, headers=headers
+        )
     return PlainTextResponse(
-        generate_latest(),
+        payload,
         media_type=CONTENT_TYPE_LATEST,
+        headers=headers,
     )
