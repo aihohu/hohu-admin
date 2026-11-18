@@ -2,7 +2,10 @@
 
 from contextlib import asynccontextmanager
 
-from sqlalchemy import insert, select, text
+import pytest
+from sqlalchemy import event, insert, select, text
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.core.field_policy import (
     Access,
@@ -74,6 +77,19 @@ async def test_consumer_preparation_runs_only_real_activation_commands(
         }
 
 
+@pytest.fixture
+def no_shared_pool_checkout():
+    def reject(*_args):
+        raise AssertionError("Schema observers must not populate the shared pool")
+
+    event.listen(engine.sync_engine, "checkout", reject)
+    try:
+        yield
+    finally:
+        event.remove(engine.sync_engine, "checkout", reject)
+
+
+@pytest.mark.usefixtures("no_shared_pool_checkout")
 async def test_prepared_candidates_match_real_publication(monkeypatch):
     """Separate real schemas compare all rules, including omission and extra role.
 
@@ -129,12 +145,18 @@ async def test_prepared_candidates_match_real_publication(monkeypatch):
     assert snapshots[0] == snapshots[1]
     assert (501, "system.role") in snapshots[0]
     assert len(set(schemas)) == 2
-    async with engine.connect() as db:
-        for schema in schemas:
-            assert not await db.scalar(
-                text("SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname=:name)"),
-                {"name": schema},
-            )
+    observer = create_async_engine(engine.url, poolclass=NullPool)
+    try:
+        async with observer.connect() as db:
+            for schema in schemas:
+                assert not await db.scalar(
+                    text(
+                        "SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname=:name)"
+                    ),
+                    {"name": schema},
+                )
+    finally:
+        await observer.dispose()
 
 
 async def test_preparation_keeps_custom_catalog_and_rule_transform(
