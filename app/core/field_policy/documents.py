@@ -138,9 +138,16 @@ def load_catalog(document, *, expected_digest):
 
 def catalog_parts(catalog):
     """Separate action/adapter identities also belong to a sealed manifest."""
-    document = catalog_document(catalog)
+    require(type(catalog) is Catalog)
+    if catalog._identity_parts is None:
+        object.__setattr__(catalog, "_identity_parts", _catalog_parts(catalog))
+    return catalog._identity_parts
+
+
+def _catalog_parts(catalog):
+    """Compute only the inputs of the two identities for an immutable instance."""
     return (
-        digest(document["actions"]),
+        digest([primitive(catalog.actions[name]) for name in sorted(catalog.actions)]),
         digest(
             [
                 {

@@ -14,9 +14,11 @@ from app.core.field_policy.documents import (
     catalog_document,
     catalog_parts,
     digest,
+    load_rules,
     rules_document,
 )
 from app.core.field_policy.qualification import Qualification
+from app.core.id_generator import next_id
 from app.modules.system.field_policy.ordinary_catalog import (
     production_catalog as relation_catalog,
 )
@@ -24,8 +26,10 @@ from app.modules.system.models.dept import Dept
 from app.modules.system.models.field_policy import (
     FieldCatalogObject,
     FieldCatalogSnapshot,
+    FieldPolicyBinding,
     FieldPolicyHead,
     FieldPolicyObjectState,
+    FieldPolicyRevision,
 )
 from app.modules.system.models.role import Role
 from app.modules.system.schemas.dept import DeptCreate
@@ -50,8 +54,19 @@ plan_sessions = _plan_sessions
 
 
 async def activate_relations(
-    sessions, monkeypatch, *, missing=(), extra_grants=(), catalog=None
+    sessions,
+    monkeypatch,
+    *,
+    missing=(),
+    extra_grants=(),
+    catalog=None,
+    publish_candidates=False,
 ):
+    """Prepare isolated consumer facts, then run the actual activation protocol.
+
+    Publication regressions use the complete command path. Consumer tests seed
+    only candidates; neither active state nor authorization outcomes are faked.
+    """
     factory, plain = sessions
     catalog = catalog or relation_catalog()
     monkeypatch.setattr(settings, "RELEASE_BUILD_SHA", "b" * 40)
@@ -87,7 +102,7 @@ async def activate_relations(
             )
         await db.commit()
     policies = factory, plain, catalog
-    version = 1
+    candidates = []
     for object_id in catalog.objects:
         grants = tuple(
             Grant(0, "201", ref, a)
@@ -96,41 +111,48 @@ async def activate_relations(
             for a in field.accesses
             if (object_id, ref.field_id, a.operation) not in missing
         )
-        await policy_command(
-            policies,
-            command(
-                "publish",
-                version,
-                role_id=201,
-                object_id=object_id,
-                binding_version=0,
-                rules=rules_document(
+        candidates.append(
+            (
+                201,
+                object_id,
+                rules_document(
                     catalog, grants, tenant_id=0, role_id=201, object_id=object_id
                 ),
-            ),
+            )
         )
-        version += 1
     if extra_grants:
         ref = extra_grants[0].ref
         role_id = int(extra_grants[0].role_id)
-        await policy_command(
-            policies,
-            command(
-                "publish",
-                version,
-                role_id=role_id,
-                object_id=ref.object_id,
-                binding_version=0,
-                rules=rules_document(
+        candidates.append(
+            (
+                role_id,
+                ref.object_id,
+                rules_document(
                     catalog,
                     extra_grants,
                     tenant_id=0,
                     role_id=role_id,
                     object_id=ref.object_id,
                 ),
-            ),
+            )
         )
-        version += 1
+    version = 1
+    if publish_candidates:
+        for role_id, object_id, rules in candidates:
+            await policy_command(
+                policies,
+                command(
+                    "publish",
+                    version,
+                    role_id=role_id,
+                    object_id=object_id,
+                    binding_version=0,
+                    rules=rules,
+                ),
+            )
+            version += 1
+    else:
+        await _seed_candidates(plain, catalog, candidates)
     proof = Qualification(
         "b" * 40,
         catalog.digest,
@@ -149,6 +171,41 @@ async def activate_relations(
         command("activate", version + 2, expected_epoch=marked["epoch"]),
         qualification=proof,
     )
+
+
+async def _seed_candidates(plain, catalog, candidates):
+    """Each consumer owns its schema; this is not a publication/audit receipt."""
+    revisions, bindings = [], []
+    for role_id, object_id, rules in candidates:
+        load_rules(catalog, rules, tenant_id=0, role_id=role_id, object_id=object_id)
+        revision_id = next_id()
+        revisions.append(
+            {
+                "tenant_id": 0,
+                "role_id": role_id,
+                "object_id": object_id,
+                "revision_id": revision_id,
+                "revision_no": 1,
+                "catalog_digest": catalog.digest,
+                "rules": rules,
+                "rules_digest": digest(rules),
+                "actor_user_id": 101,
+            }
+        )
+        bindings.append(
+            {
+                "tenant_id": 0,
+                "role_id": role_id,
+                "object_id": object_id,
+                "revision_id": revision_id,
+                "binding_version": 1,
+            }
+        )
+    async with plain() as db:
+        if revisions:
+            await db.execute(insert(FieldPolicyRevision), revisions)
+            await db.execute(insert(FieldPolicyBinding), bindings)
+        await db.commit()
 
 
 def test_menu_patch_is_sparse_and_closed():

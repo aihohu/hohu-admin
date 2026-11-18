@@ -135,7 +135,7 @@ jobs:
             -o "cache_dir=${RUNNER_TEMP}/transfer-contract-cache"
 
       - name: Run Tests
-        run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=70
+        run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=70 --durations=30
 
   qualification:
     name: Hosted release qualification (CI profile)
