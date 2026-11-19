@@ -31,6 +31,10 @@ class ShardedWorkflowTests(unittest.TestCase):
         self.assertIn("if-no-files-found: error", aggregate)
         hosted = section(self.jobs, "qualification", 2)
         self.assertIn("needs: [ruff, pytest]", hosted)
+        self.assertIn(
+            "if: ${{ !cancelled() && needs.ruff.result == 'success' && needs.pytest.result == 'success' }}",
+            hosted.split("    steps:", 1)[0],
+        )
         self.assertNotIn("if: always()", hosted.split("    steps:", 1)[0])
 
     def test_groups_have_independent_resources_and_precheck_only_in_plan(self):

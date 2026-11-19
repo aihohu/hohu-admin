@@ -473,6 +473,7 @@ jobs:
   qualification:
     name: ${{ github.event_name == 'workflow_dispatch' && github.workflow == 'CI' && 'Selected source / ' || '' }}Hosted release qualification (CI profile)
     needs: [ruff, pytest]
+    if: ${{ !cancelled() && needs.ruff.result == 'success' && needs.pytest.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     services:

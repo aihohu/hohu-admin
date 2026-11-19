@@ -228,8 +228,13 @@ class CIWorkflowTests(unittest.TestCase):
             self.assertIn("if: inputs.source_sha == ''", section(jobs, name, 2))
         self.assertIn("if: inputs.source_sha != ''", section(jobs, "pinned-tests", 2))
         self.assertIn("if: always()", section(jobs, "pytest", 2))
-        for name in ("ruff", "qualification"):
-            self.assertNotRegex(section(jobs, name, 2), r"(?m)^    if:")
+        self.assertNotRegex(section(jobs, "ruff", 2), r"(?m)^    if:")
+        self.assertEqual(
+            re.findall(r"(?m)^    if: (.+)$", section(jobs, "qualification", 2)),
+            [
+                "${{ !cancelled() && needs.ruff.result == 'success' && needs.pytest.result == 'success' }}"
+            ],
+        )
         for name, label in JOBS.items():
             self.assertIn(f"    name: {label}\n", section(jobs, name, 2))
         for command in REQUIRED_COMMANDS:
