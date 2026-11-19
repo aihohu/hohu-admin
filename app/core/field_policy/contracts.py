@@ -374,6 +374,9 @@ class Catalog:
         ):
             object.__setattr__(self, key, MappingProxyType(value))
         object.__setattr__(self, "digest", hashlib.sha256(encoded).hexdigest())
+        # Non-field memo: excluded from declaration serialization and equality.
+        # The codec may fill this once with two immutable derived strings.
+        object.__setattr__(self, "_identity_parts", None)
 
 
 @dataclass(frozen=True)

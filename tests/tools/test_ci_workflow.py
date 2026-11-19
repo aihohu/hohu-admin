@@ -18,10 +18,14 @@ ROOT = Path(__file__).resolve().parents[2]
 
 DEFAULT_BRANCHES = ("main", "master")
 WORKFLOWS = ("ci.yml", "docs.yml")
+MANUAL_CHECK_PREFIX = "${{ github.event_name == 'workflow_dispatch' && github.workflow == 'CI' && 'Selected source / ' || '' }}"
 JOBS = {
-    "ruff": "Ruff",
-    "pytest": "Pytest (Python ${{ matrix.python-version }})",
-    "qualification": "Hosted release qualification (CI profile)",
+    "ruff": MANUAL_CHECK_PREFIX + "Ruff",
+    "test-plan": "Test inventory (Python ${{ matrix.python-version }})",
+    "test-shards": "Test group (Python ${{ matrix.python-version }}, ${{ matrix.group }})",
+    "pinned-tests": "Pinned source tests (Python ${{ matrix.python-version }})",
+    "pytest": MANUAL_CHECK_PREFIX + "Pytest (Python ${{ matrix.python-version }})",
+    "qualification": MANUAL_CHECK_PREFIX + "Hosted release qualification (CI profile)",
 }
 REQUIRED_COMMANDS = (
     "uv run ruff check .",
@@ -165,7 +169,7 @@ class CIWorkflowTests(unittest.TestCase):
             triggers = section(workflow, "on")
             expected_events = {"push", "pull_request"}
             if filename == "ci.yml":
-                expected_events.add("workflow_call")
+                expected_events.update(("workflow_call", "workflow_dispatch"))
                 self.assertRegex(triggers, r"(?m)^  workflow_call:\s*$")
             self.assertEqual(
                 set(re.findall(r"^  ([\w_]+):", triggers, re.M)), expected_events
@@ -218,8 +222,19 @@ class CIWorkflowTests(unittest.TestCase):
         jobs = section(ci, "jobs")
         self.assertEqual(set(re.findall(r"^  ([\w-]+):", jobs, re.M)), set(JOBS))
         self.assertNotIn("continue-on-error", ci)
-        self.assertNotRegex(ci, r"(?m)^    if:")
-        self.assertNotRegex(ci, r"(?m)^ *if: (?!always\(\)$)")
+        # Source routing may skip the unused execution mode; the required
+        # aggregate always runs and rejects failed/skipped required dependencies.
+        for name in ("test-plan", "test-shards"):
+            self.assertIn("if: inputs.source_sha == ''", section(jobs, name, 2))
+        self.assertIn("if: inputs.source_sha != ''", section(jobs, "pinned-tests", 2))
+        self.assertIn("if: always()", section(jobs, "pytest", 2))
+        self.assertNotRegex(section(jobs, "ruff", 2), r"(?m)^    if:")
+        self.assertEqual(
+            re.findall(r"(?m)^    if: (.+)$", section(jobs, "qualification", 2)),
+            [
+                "${{ !cancelled() && needs.ruff.result == 'success' && needs.pytest.result == 'success' }}"
+            ],
+        )
         for name, label in JOBS.items():
             self.assertIn(f"    name: {label}\n", section(jobs, name, 2))
         for command in REQUIRED_COMMANDS:

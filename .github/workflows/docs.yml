@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: docs-${{ github.repository }}-${{ github.event_name == 'pull_request' && !(startsWith(github.event.pull_request.head.ref, 'release/') && contains(fromJSON('["main","master"]'), github.event.pull_request.base.ref)) && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && !(startsWith(github.event.pull_request.head.ref, 'release/') && contains(fromJSON('["main","master"]'), github.event.pull_request.base.ref)) }}
+
 jobs:
   public-docs:
     runs-on: ubuntu-latest
