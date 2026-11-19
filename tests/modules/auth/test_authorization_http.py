@@ -15,6 +15,7 @@ from app.core import authorization_io
 from app.core.exceptions import BusinessException, setup_exception_handlers
 from app.core.security import get_password_hash
 from app.db import authorization_http, session
+from app.db.authorization_http_audit_owner import HttpAuditOwner
 from app.db.authorization_runtime import AuthorizationRuntime
 from app.db.request_session import RequestSession
 from app.modules.auth import api, candidate_owner, service
@@ -80,6 +81,45 @@ async def auth_http(accounts, auth_http_engine, monkeypatch):
         headers={"Authorization": f"Bearer {token(accounts)}"},
     ) as client:
         yield client, accounts
+
+
+@pytest.fixture
+def confirm_login_audits(accounts, monkeypatch):
+    """Separate HTTP handoff from real commits, without replaying any write.
+
+    Login returns its authentication result even if optional audit admission
+    times out. Capture that handoff first; then exercise the original owner
+    exactly once per request, with its unchanged database and ACK budgets.
+    """
+    original = HttpAuditOwner.login
+    requests = []
+    consumed = False
+
+    async def capture(owner, **values):
+        requests.append((owner, values))
+
+    async def confirm():
+        nonlocal consumed
+        assert not consumed
+        consumed = True
+        assert [
+            (
+                values["tenant_id"],
+                values["audit_scope"],
+                values["user_id"],
+                values["username"],
+                values["status"],
+            )
+            for _, values in requests
+        ] == [(0, "tenant", 101, "alice", "1"), (0, "tenant", None, "alice", "2")]
+        async with accounts.plain() as db:
+            assert list(await db.scalars(select(SysLoginLog))) == []
+        for owner, values in requests:
+            assert owner.factory.engine is accounts.http_engine
+            await original(owner, **values)
+
+    monkeypatch.setattr(HttpAuditOwner, "login", capture)
+    return confirm
 
 
 @pytest.mark.parametrize(
@@ -154,7 +194,7 @@ async def test_auth_http_uses_global_barrier_and_preserves_response(
         assert body["data"] == {"expiresIn": 300, "retryAfter": 60}
 
 
-async def test_login_audit_and_swagger_contract(auth_http):
+async def test_login_audit_and_swagger_contract(auth_http, confirm_login_audits):
     client, accounts = auth_http
     response = await client.post(
         "/auth/token", data={"username": "alice", "password": "OldStrong42!"}
@@ -166,6 +206,7 @@ async def test_login_audit_and_swagger_contract(auth_http):
         "/auth/login", json={"userName": "alice", "password": "WrongPassword!"}
     )
     assert denied.status_code == 401
+    await confirm_login_audits()
     async with accounts.plain() as db:
         logs = list(
             await db.scalars(select(SysLoginLog).order_by(SysLoginLog.login_log_id))
@@ -177,7 +218,7 @@ async def test_login_audit_and_swagger_contract(auth_http):
 
 
 async def test_login_audit_reuses_http_pool_after_rejected_password(
-    auth_http, monkeypatch
+    auth_http, monkeypatch, confirm_login_audits
 ):
     client, accounts = auth_http
     engine = accounts.http_engine
@@ -208,6 +249,8 @@ async def test_login_audit_reuses_http_pool_after_rejected_password(
             "/auth/login", json={"userName": "alice", "password": "WrongPassword!"}
         )
         assert denied.status_code == 401
+        # Keep the cold-connection fault active through both real audit commits.
+        await confirm_login_audits()
     finally:
         event.remove(engine.sync_engine, "do_connect", unavailable_new_connection)
         release.set()
