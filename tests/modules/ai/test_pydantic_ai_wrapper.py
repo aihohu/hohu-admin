@@ -30,10 +30,9 @@ from app.modules.ai.agents.tools.pydantic_ai_wrapper import (
 
 
 @pytest.fixture(autouse=True)
-def reset_registry():
-    ToolRegistry.reset()
+def reset_registry(monkeypatch):
+    monkeypatch.setattr(ToolRegistry, "_instance", ToolRegistry())
     yield
-    ToolRegistry.reset()
 
 
 def _register_sample_tool(

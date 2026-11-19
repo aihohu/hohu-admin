@@ -39,10 +39,9 @@ from app.modules.ai.core.context import (
 
 
 @pytest.fixture(autouse=True)
-def reset_registry():
-    ToolRegistry.reset()
+def reset_registry(monkeypatch):
+    monkeypatch.setattr(ToolRegistry, "_instance", ToolRegistry())
     yield
-    ToolRegistry.reset()
 
 
 @pytest.fixture(autouse=True)
