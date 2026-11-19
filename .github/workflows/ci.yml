@@ -85,6 +85,7 @@ jobs:
           --health-retries 10
     env:
       ENV: test
+      UV_PYTHON: ${{ matrix.python-version }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -135,7 +136,30 @@ jobs:
             -o "cache_dir=${RUNNER_TEMP}/transfer-contract-cache"
 
       - name: Run Tests
-        run: uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=70 --durations=30
+        run: |
+          set -euo pipefail
+          if [[ -f tools/ci/sharding.py ]]; then
+            uv run python -m tools.ci.sharding run --output "${RUNNER_TEMP}/serial"
+            COVERAGE_FILE="${RUNNER_TEMP}/serial/coverage.data" \
+              uv run coverage report --rcfile "${RUNNER_TEMP}/serial/coverage.toml" --fail-under=70
+          else
+            uv run pytest --cov=app --cov-report=term-missing --cov-fail-under=70 --durations=30 \
+              --basetemp "${RUNNER_TEMP}/pytest-full" -o "cache_dir=${RUNNER_TEMP}/pytest-cache"
+          fi
+
+      - name: Save serial test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serial-${{ matrix.python-version }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/serial/report.json
+            ${{ runner.temp }}/serial/junit.xml
+            ${{ runner.temp }}/serial/coverage.data
+            ${{ runner.temp }}/serial/coverage.toml
+            ${{ runner.temp }}/serial/pytest.log
+          if-no-files-found: warn
+          retention-days: 14
 
   qualification:
     name: Hosted release qualification (CI profile)
