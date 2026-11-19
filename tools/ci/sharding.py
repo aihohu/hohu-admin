@@ -213,6 +213,11 @@ def aggregate(plan_path, inputs, output, dependency):
     data_paths = []
     for path, report in zip(paths, reports, strict=True):
         require(report["process_exitcode"] == 0, "Subprocess failure")
+        raw = report["raw_nodeids"]
+        require(
+            set(raw) == set(report["inventory"]) and len(set(raw.values())) == len(raw),
+            "Incomplete original nodeid mapping",
+        )
         for name in ("junit.xml", "coverage.data", "pytest.log"):
             artifact = path.parent / name
             require(

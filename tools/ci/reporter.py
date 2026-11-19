@@ -10,6 +10,23 @@ import pytest
 from tools.ci.sharding import identity, read_json, require, write_json
 
 
+def case_key(item):
+    """Binary payload reprs can contain ZIP timestamps; bind their source slots.
+
+    Keep pytest's execution and original nodeid untouched. Every parameter index
+    is included, so separate binary cases of one function remain distinct.
+    """
+    callspec = getattr(item, "callspec", None)
+    if callspec and any(
+        isinstance(value, (bytes, bytearray)) for value in callspec.params.values()
+    ):
+        slots = ",".join(
+            f"{name}:{index}" for name, index in sorted(callspec.indices.items())
+        )
+        return f"{item.parent.nodeid}::{item.originalname}[@ci-binary:{slots}]"
+    return item.nodeid
+
+
 def pytest_configure(config):
     config._ci_report = {
         "identity": identity(),
@@ -25,31 +42,37 @@ def pytest_configure(config):
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
     report = config._ci_report
-    report["inventory"] = [item.nodeid for item in items]
+    config._ci_keys = {item.nodeid: case_key(item) for item in items}
+    report["inventory"] = [config._ci_keys[item.nodeid] for item in items]
+    require(len(set(report["inventory"])) == len(items), "Duplicate case identity")
+    report["raw_nodeids"] = {key: raw for raw, key in config._ci_keys.items()}
     if path := os.environ.get("HOHU_CI_PLAN"):
         plan = read_json(Path(path))
         require(plan["identity"] == report["identity"], "Worker identity mismatch")
         require(plan["inventory"] == report["inventory"], "Worker collection mismatch")
         selected = set(plan["groups"][report["group"]])
-        removed = [item for item in items if item.nodeid not in selected]
-        items[:] = [item for item in items if item.nodeid in selected]
+        removed = [
+            item for item in items if config._ci_keys[item.nodeid] not in selected
+        ]
+        items[:] = [item for item in items if config._ci_keys[item.nodeid] in selected]
         config.hook.pytest_deselected(items=removed)
-    report["selected"] = [item.nodeid for item in items]
+    report["selected"] = [config._ci_keys[item.nodeid] for item in items]
     for item in items:
-        item.user_properties.append(("ci_nodeid", item.nodeid))
+        item.user_properties.append(("ci_nodeid", config._ci_keys[item.nodeid]))
 
 
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_protocol(item):
     # Store only this invocation's config; do not import or modify app fixtures.
-    global _active
+    global _active, _keys
     _active = item.config._ci_report
+    _keys = item.config._ci_keys
     return (yield)
 
 
 def pytest_runtest_logreport(report):
     record = {
-        "nodeid": report.nodeid,
+        "nodeid": _keys[report.nodeid],
         "when": report.when,
         "outcome": report.outcome,
         "seconds": report.duration,
