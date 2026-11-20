@@ -5,9 +5,11 @@ from datetime import datetime
 
 import pytest
 from sqlalchemy import event, func, insert, select
+from sqlalchemy.util.concurrency import await_only
 
 from app.core.authorization_plan import LockMode, TenantLock
 from app.core.exceptions import BusinessException
+from app.db.authorization_http_audit_owner import HttpAuditOwner
 from app.db.authorization_owner import rollback_authorization_session
 from app.db.authorization_runtime import AuthorizationRuntime
 from app.modules.system.api import login_log, operation_log
@@ -182,9 +184,50 @@ async def test_login_input_does_not_prove_a_canonical_username_source(http_syste
     assert error.value.error_code == "FIELD_QUERY_DENIED"
 
 
+@pytest.fixture(params=["none", "probe-connection", "writer-dispatch"])
+async def audit_observer_startup(request, monkeypatch):
+    """Delay setup, without replacing real owner execution or PostgreSQL locks."""
+    phase = request.param
+    parent = asyncio.current_task()
+    delayed = []
+    engines = []
+    original = HttpAuditOwner.operation
+
+    def connect(*_args):
+        if (
+            phase == "probe-connection"
+            and asyncio.current_task() is parent
+            and not delayed
+        ):
+            delayed.append(phase)
+            await_only(asyncio.sleep(0.6))
+
+    async def operation(owner, **values):
+        if phase == "writer-dispatch":
+            assert not delayed
+            delayed.append(phase)
+            await asyncio.sleep(0.6)
+        return await original(owner, **values)
+
+    def install(engine):
+        nonlocal parent
+        parent = asyncio.current_task()
+        engines.append(engine)
+        event.listen(engine.sync_engine, "do_connect", connect)
+
+    monkeypatch.setattr(HttpAuditOwner, "operation", operation)
+    try:
+        yield install
+        assert delayed == ([] if phase == "none" else [phase])
+    finally:
+        for engine in engines:
+            event.remove(engine.sync_engine, "do_connect", connect)
+
+
 async def test_audit_append_cannot_enter_between_coverage_and_filtered_page(
     system_sessions,
     monkeypatch,
+    audit_observer_startup,
 ):
     _, plain = system_sessions
     async with plain() as setup:
@@ -205,12 +248,16 @@ async def test_audit_append_cannot_enter_between_coverage_and_filtered_page(
     covered, release = asyncio.Event(), asyncio.Event()
     original = operation_log_service.get_list
     pids = {}
+    writer_started = asyncio.Event()
     engine = plain.kw["bind"]
+    audit_observer_startup(engine)
 
     def observe(conn, _cursor, _sql, _params, _context, _many):
         name = asyncio.current_task().get_name()
         if name in {"strict-audit-reader", "strict-audit-writer"}:
             pids[name] = conn.connection.driver_connection.get_server_pid()
+        if name == "strict-audit-writer":
+            writer_started.set()
 
     event.listen(engine.sync_engine, "before_cursor_execute", observe)
 
@@ -250,10 +297,17 @@ async def test_audit_append_cannot_enter_between_coverage_and_filtered_page(
             finally:
                 await rollback_authorization_session(db)
 
-    reader = asyncio.create_task(projected(), name="strict-audit-reader")
-    writer = None
+    reader = writer = None
+    probe = plain()
+    phase = "probe connection"
     try:
+        # Setup must finish before any short-lived owner admission budget starts.
+        async with asyncio.timeout(3):
+            await probe.connection()
+        phase = "reader coverage"
+        reader = asyncio.create_task(projected(), name="strict-audit-reader")
         await asyncio.wait_for(covered.wait(), 3)
+        phase = "writer dispatch"
         writer = asyncio.create_task(
             runtime.http_audit.operation(
                 tenant_id=0,
@@ -270,16 +324,21 @@ async def test_audit_append_cannot_enter_between_coverage_and_filtered_page(
             ),
             name="strict-audit-writer",
         )
-        async with asyncio.timeout(0.4), plain() as probe:
+        await asyncio.wait_for(writer_started.wait(), 3)
+        phase = "PostgreSQL blocker observation"
+        async with asyncio.timeout(0.4):
             while True:
-                if "strict-audit-writer" in pids:
-                    blockers = await probe.scalar(
-                        select(func.pg_blocking_pids(pids["strict-audit-writer"]))
-                    )
-                    if pids["strict-audit-reader"] in blockers:
-                        break
-                await asyncio.sleep(0)
+                if writer.done():
+                    await writer  # Surface real owner failures, never retry them.
+                    pytest.fail("audit writer finished before blocker observation")
+                blockers = await probe.scalar(
+                    select(func.pg_blocking_pids(pids["strict-audit-writer"]))
+                )
+                if pids["strict-audit-reader"] in blockers:
+                    break
+                await asyncio.sleep(0.01)
         assert not writer.done()
+        phase = "page and audit commit"
         release.set()
         page = await asyncio.wait_for(reader, 3)
         await asyncio.wait_for(writer, 3)
@@ -288,6 +347,12 @@ async def test_audit_append_cannot_enter_between_coverage_and_filtered_page(
         with pytest.raises(BusinessException) as error:
             await projected()
         assert error.value.error_code == "FIELD_QUERY_DENIED"
+    except BaseException as error:
+        error.add_note(
+            f"audit observation phase={phase}, pids={pids}, "
+            f"writer_done={writer.done() if writer is not None else None}"
+        )
+        raise
     finally:
         release.set()
         for task in (reader, writer):
@@ -298,3 +363,4 @@ async def test_audit_append_cannot_enter_between_coverage_and_filtered_page(
             return_exceptions=True,
         )
         event.remove(engine.sync_engine, "before_cursor_execute", observe)
+        await probe.close()
